@@ -4525,3 +4525,77 @@ CI/review нового SHA проверяются отдельно после pu
   WP1_NATIVE_PASS, exit 0 (.tmp/wp0-rotation-electron-verified.log,
   .tmp/wp0-rotation-csp-verified.log). Scope прежний, новый native rotation
   oracle не заявляется.
+
+
+### PR #72 — rotation gate
+
+- Commit f70904220eed6ae6dc734daa36ca522298098aa1 запушен в
+  codex/wp0-rotation-operations; PR #72 создан и прикреплён к задаче.
+  Qodo 1543476 started на этом SHA, findings пока пусты — это не approval.
+  CI 39189259371 queued на том же SHA. Ручного запроса ревью не было.
+  До completed Qodo без существенных findings и terminal CI success
+  следующий участок не начинается; цель WP-0 затем WP-2 остаётся active.
+
+
+### PR #72 — Qodo: повтор таймера, selection после подготовки и canonical audit ID
+
+- Qodo 1543476 completed на f709042: 054b2432 (timer), 97ddb925
+  (selection до cancellable fingerprint), a5cd8b28 (masked raw operationId),
+  65ff32c2 (preflight exception/state). Все проверены; attribution вручную
+  не менялся. Новые npm.cmd test -- src/main/rotationOperations.test.ts src/main/rotationLifecycle.test.ts -t 'preflight exception|candidate before|reversible operationId|re-arms the enabled'
+  — 6 failed / 29 skipped, 1.37 s (.tmp/wp0-rotation-qodo72-before.log).
+- Timer имеет generation: после cancelled/timeout/conflict следующий tick
+  планируется по свежему config с отдельной lifecycle correlation; явные
+  stop/config reload/disable/shutdown либо уже запланированный success tick
+  инвалидируют старый retry. Это новая работа владельца timer, а не запись
+  позднего callback отменённой rotation. Проверены rearm и отсутствие rearm
+  после stop/disable; physical drain по-прежнему блокирует новый native swap.
+- Selection/announce на живом туннеле выполняются после всех отменяемых
+  preflight awaits, перед beginRestart, без await между ними. При idle selection
+  входит в terminal commit. Отмена fingerprint сохраняет прежние selected
+  profile/runtime/UI. Preflight exception больше не объявляется отключённой
+  защитой в уведомлении; его FSM сохраняет connected лишь при свежем evidence.
+  Неуспешный native swap/возврат старого сервера остаётся WP-10 F-124.
+- В actual JSONL operationId теперь содержит тот же обратимый op_ key,
+  что operationKey, вместо raw UUID, который redactor превращал в маску.
+  IPC/list/cancel сохраняют UUIDv4; ни одного бита identity не потеряно.
+  Проверены actual logger и повторная redaction при diagnostic read-back.
+- Exception path тоже проверяет retained runtime. Дополнительная регрессия
+  меняет PID во время physical drain после preflight throw: до fix 1 failed /
+  17 skipped (.tmp/wp0-rotation-retained-recheck-before.log). FSM повторяет
+  сравнение original runtime evidence при terminal publication и не сообщает
+  connected для другого PID.
+- npm.cmd test -- src/main/rotationOperations.test.ts src/main/rotationLifecycle.test.ts src/main/rotationProbeDrain.test.ts src/main/profileRotation.test.ts src/main/actionCorrelation.test.ts src/main/operationRegistry.test.ts src/main/tunnelStateMachine.test.ts
+  — 140 passed / 7 files, 3.95 s (.tmp/wp0-rotation-qodo72-regression-final.log).
+  Новый full/build/native и remote gate для нового head ещё требуются.
+- Initial CI 39189259371 success на f709042: Windows unit/traceability/
+  production IPC/CSP/WFP/native, Rust и сайт зелёные. Watcher terminal exit 0.
+  Это проверка первого head; Qodo findings требуют нового commit/push и gate.
+
+- Первый full после Qodo fixes: 4441 passed / 1 failed / 5 skipped,
+  209.41 s, exit 1 (.tmp/wp0-rotation-qodo72-full.log). Speed-test fixture
+  сравнивал raw IPC UUID с теперь canonical diagnostic operationId. Проверка
+  уточнена: progress UUID равен registry UUID, оба log ID равны его обратимому
+  op_ ключу; production cancellation API не менялся. Адресный повтор
+  npm.cmd test -- src/main/speedTestOperations.test.ts src/main/rotationOperations.test.ts src/main/rotationLifecycle.test.ts
+  — 54 passed / 3 files, 4.10 s, exit 0
+  (.tmp/wp0-rotation-qodo72-id-regression.log).
+- npm.cmd run build — exit 0 (.tmp/wp0-rotation-qodo72-build.log), включая
+  typecheck. Первый build выявил TS2571 новой test assertion; исправлена
+  только TS-аннотация Error. Отдельный npm.cmd run typecheck после уточнения
+  speed-test fixture — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-rotation-qodo72-typecheck.log).
+- python docs/04-приёмочные-тесты/traceability/check-coverage.py — exit 0,
+  AC 927/927 / F 210/210; git diff --check — exit 0. На пересобранном out
+  node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS, exit 0,
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-rotation-qodo72-electron.log, .tmp/wp0-rotation-qodo72-csp.log).
+  Это existing generic runtime/IPC/CSP subsets, не новый native rotation oracle.
+  Окончательный полный набор выполняется отдельно; его результат пока не PASS.
+
+- Окончательный npm.cmd test после всех code/test edits — **4442 passed /
+  5 skipped / 0 failed**, 275 files passed / 2 skipped, **205.57 s**, exit 0
+  (.tmp/wp0-rotation-qodo72-full-verified.log). Код во время прогона не менялся;
+  build/typecheck/traceability/native results выше относятся к этим fixes.
+  Следующий шаг — commit/push и новый exact-head Qodo/CI gate; до него
+  следующий участок не начинается. WP-0, затем WP-2 остаются active.

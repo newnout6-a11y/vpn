@@ -45,13 +45,16 @@ export class TunnelStateMachine {
       : this.canConfirmStart() && (this.rotationMode === 'tun' ? e?.running === true : e?.softApplied === true)
   }
   confirmRetainedRotation(operationId: string) {
-    const e = this.evidence(), previous = this.rotationEvidence
     if (this.current.operation?.operationId !== operationId || this.current.operation.status !== 'running'
-      || this.current.operation.kind !== 'rotation' || this.faultDuringOperation || !e || !previous
-      || e.running !== previous.running || e.pid !== previous.pid || e.softApplied !== previous.softApplied
-      || e.startedAt !== previous.startedAt || !this.canConfirmRotation()) return invalid()
+      || this.current.operation.kind !== 'rotation' || !this.canRetainRotation()) return invalid()
     this.retainedRotationOperation = operationId
     return { success: true } as const
+  }
+  private canRetainRotation(): boolean {
+    const e = this.evidence(), previous = this.rotationEvidence
+    return !this.faultDuringOperation && !!e && !!previous && e.running === previous.running
+      && e.pid === previous.pid && e.softApplied === previous.softApplied && e.startedAt === previous.startedAt
+      && this.canConfirmRotation()
   }
   private canRetainSoft(): boolean {
     const e = this.evidence()
@@ -98,7 +101,7 @@ export class TunnelStateMachine {
       : operation.kind === 'connect'
       ? this.canConfirmStart() ? 'connected' : 'unknown'
       : this.canConfirmStop() ? 'disconnected' : 'unknown'
-    else if (operation.kind === 'rotation' && this.retainedRotationOperation === operation.operationId && this.canConfirmRotation()) state = this.rotationMode === null ? 'disconnected' : 'connected'
+    else if (operation.kind === 'rotation' && this.retainedRotationOperation === operation.operationId && this.canRetainRotation()) state = this.rotationMode === null ? 'disconnected' : 'connected'
     else if (operation.status === 'error' && !operation.category && this.retainedSoftOperation === operation.operationId && this.canRetainSoft()) state = 'connected'
     else if (state !== 'blocked' && state !== 'unknown') state = 'error'
     this.retainedSoftOperation = null

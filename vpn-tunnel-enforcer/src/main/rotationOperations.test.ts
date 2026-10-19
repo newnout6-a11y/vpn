@@ -177,6 +177,53 @@ describe('production rotation operation lifetime', () => {
     expect(state.restart).toHaveBeenCalledWith(expect.any(String), expect.any(Object), { signal: expect.any(AbortSignal) })
   })
 
+  it('does not persist or announce the candidate before cancellable fingerprint preparation', async () => {
+    const { gate, result } = await pauseAt('fingerprint')
+    expect(state.active).toBe('a')
+    expect(state.select).not.toHaveBeenCalled(); expect(state.send).not.toHaveBeenCalled(); expect(state.notify).not.toHaveBeenCalled()
+    registry.cancel(running().operationId)
+    expect(await result).toMatchObject({ ok: false, error: { category: 'cancelled' } })
+    gate.release(); await registry.close()
+    expect(state.active).toBe('a'); expect(state.restart).not.toHaveBeenCalled()
+  })
+
+  it('keeps the confirmed old tunnel after selection persistence throws before native restart', async () => {
+    await live()
+    state.select.mockImplementationOnce(() => { throw new Error('private write failure C:\\secret\\profile.json') })
+    expect(await invoke('rotation:rotate-now')).toMatchObject({ ok: true, result: { success: false } })
+    expect(fsm.snapshot).toMatchObject({ state: 'connected', transition: null, pid: 10, operation: { status: 'error' } })
+    expect(state.active).toBe('a'); expect(state.restart).not.toHaveBeenCalled(); expect(state.send).not.toHaveBeenCalled()
+    expect(JSON.stringify(state.notify.mock.calls)).not.toContain('private write failure')
+    expect(JSON.stringify(state.notify.mock.calls)).not.toContain('Защита выключена')
+  })
+
+  it('serializes a reversible operationId in actual event rows instead of a masked UUID', async () => {
+    await invoke('rotation:rotate-now')
+    const operation = registry.list()[0], key = 'op_' + operation.operationId.replaceAll('-', '')
+    const { rows } = await logRows()
+    const events = rows.filter(row => row.message === 'feature operation')
+    expect(events).toHaveLength(2)
+    expect(events.every(row => row.details.operationId === key && row.details.operationKey === key)).toBe(true)
+    const logger = await import('./appLogger')
+    const readBack = (await logger.getFullLogs()).find(file => file.path === logger.getAppLogPath())!
+    expect(readBack.content.trim().split('\n').map(row => JSON.parse(row)).filter(row => row.message === 'feature operation')).toEqual(events)
+  })
+
+  it.each(['cancel', 'timeout', 'conflict'] as const)('re-arms the enabled timer after a rotation %s with fresh current configuration', async outcome => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    rotation.initProfileRotation()
+    const gate = held(10)
+    if (outcome === 'conflict') void lane.start(async owner => { await owner.wait(gate.promise); return { success: false } }, { timeoutMs: 600_000 })
+    else state.ping.mockReturnValueOnce(gate.promise)
+    await vi.advanceTimersByTimeAsync(300_001)
+    if (outcome === 'cancel') { registry.cancel(running().operationId); await vi.advanceTimersByTimeAsync(0) }
+    if (outcome === 'timeout') await vi.advanceTimersByTimeAsync(120_001)
+    expect(rotation.getConfig().nextRotationAt).toBeGreaterThan(Date.now())
+    gate.release()
+    if (outcome !== 'conflict') await vi.waitFor(() => expect(registry.isBusy('rotation')).toBe(false))
+    rotation.stopTimer()
+  })
+
   it('an unavailable offline rotation keeps the confirmed idle state and permits the next attempt', async () => {
     state.ping.mockResolvedValue(null)
     expect(await invoke('rotation:rotate-now')).toMatchObject({ ok: true, result: { success: false, newProfile: '' } })
@@ -208,5 +255,19 @@ describe('production rotation operation lifetime', () => {
     expect(running()).toMatchObject({ owner: 'rotation', source: 'lifecycle', correlationId: expect.stringMatching(/^op_/) })
     rotation.stopTimer(); gate.release(); await registry.close()
     expect(state.select).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('does not re-arm an expired timer after config disables rotation during its held probe', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    rotation.initProfileRotation()
+    const gate = held(10); state.ping.mockReturnValueOnce(gate.promise)
+    await vi.advanceTimersByTimeAsync(300_001)
+    await invoke('rotation:set-config', { enabled: false })
+    const saved = await rotationBytes()
+    gate.release(); await registry.close()
+    expect(await rotationBytes()).toBe(saved)
+    expect(rotation.getConfig()).toMatchObject({ enabled: false, nextRotationAt: null })
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

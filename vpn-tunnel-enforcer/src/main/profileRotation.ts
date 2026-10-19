@@ -12,7 +12,7 @@
  * Exports pure functions `clampInterval` and `getNextAvailableProfile` for testing.
  */
 
-import { ipcMain, type IpcMainInvokeEvent } from 'electron'
+import { ipcMain, BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import Store from './versionedStore'
 import { logEvent } from './appLogger'
 import { compactForIpcLog } from './ipcLogging'
@@ -121,6 +121,7 @@ const store = new Store<RotationStore>({
 // ─── Timer State ─────────────────────────────────────────────────────────────
 
 let rotationTimer: ReturnType<typeof setTimeout> | null = null
+let timerGeneration = 0
 let connectionLane: ConnectionLifecycle | null = null
 const activeRotations = new Set<string>()
 
@@ -260,24 +261,22 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
   // Switch the active profile using serverPicker
   const rotatedProfile = serverPicker.getProfiles().find(p => p.id === nextProfileId)
   const profileName = rotatedProfile?.name || nextProfileId
-  serverPicker.selectProfile(nextProfileId)
-  owner.assertActive()
-
-  logEvent('info', 'profile-rotation', 'rotated to new profile', {
-    profileId: nextProfileId,
-    index: updatedConfig.currentIndex
-  })
-  notify('info', 'Ротация', `Переключение на профиль ${profileName}`, 'profileRotation').catch(() => undefined)
-
-  // Notify renderer so the Dashboard updates the active profile display
-  try {
-    const { BrowserWindow } = await owner.wait(import('electron'))
+  let selectedLive = false
+  const selectAndAnnounce = () => {
     owner.assertActive()
-    BrowserWindow.getAllWindows().forEach(win => {
-      owner.assertActive()
-      try { win.webContents.send('server-active-changed', { profileId: nextProfileId, profileName }) } catch {}
+    serverPicker.selectProfile(nextProfileId)
+    owner.assertActive()
+    logEvent('info', 'profile-rotation', 'rotated to new profile', {
+      profileId: nextProfileId, index: updatedConfig.currentIndex
     })
-  } catch { owner.assertActive() /* non-critical only while still active */ }
+    notify('info', 'Ротация', `Переключение на профиль ${profileName}`, 'profileRotation').catch(() => undefined)
+    try {
+      BrowserWindow.getAllWindows().forEach(win => {
+        owner.assertActive()
+        try { win.webContents.send('server-active-changed', { profileId: nextProfileId, profileName }) } catch {}
+      })
+    } catch { owner.assertActive() /* a missing window is non-critical */ }
+  }
 
   // If the tunnel is currently UP, selecting a new profile is not enough —
   // sing-box keeps using the old server until it restarts, so the egress IP
@@ -320,6 +319,10 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
         // then left the user with no tunnel, no kill-switch and no indication
         // anything had gone wrong — a silent leak that persisted until the next
         // rotation tick.
+        // No await between selection and beginRestart: cancellable preparation
+        // must leave the old selection and its confirmed live tunnel together.
+        selectAndAnnounce()
+        selectedLive = true
         owner.beginRestart()
         const restarted = await owner.wait(tunController.restartProtected(
           `profile rotation to ${profileName}`,
@@ -361,7 +364,7 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
     // Loud, because the user's traffic is no longer tunnelled. restartProtected
     // has already rolled the protection back, so connectivity is restored — but
     // it is *unprotected* connectivity, and only the user can decide what to do.
-    logEvent('error', 'profile-rotation', 'rotation left the tunnel down', {
+    logEvent('error', 'profile-rotation', 'rotation did not complete', {
       profileId: nextProfileId,
       profileName,
       error: reconnectError
@@ -369,13 +372,15 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
     notify(
       'error',
       'Ротация не удалась',
-      `Не удалось подключиться к профилю ${profileName}: ${reconnectError}. Защита выключена — трафик идёт по обычному маршруту.`,
+      `Не удалось подключиться к профилю ${profileName}: ${reconnectError}. Проверьте состояние защиты.`,
       'connectionError'
     ).catch(() => undefined)
     return { success: false, newProfile: nextProfileId }
   }
 
   return owner.complete(() => {
+    // Idle selection has no native restart; commit it with the final result.
+    if (!selectedLive) selectAndAnnounce()
     scheduleNextRotation(updatedConfig)
     return { success: true, newProfile: nextProfileId }
   })
@@ -389,6 +394,7 @@ function stopTimer(): void {
 }
 
 function clearTimer(): void {
+  timerGeneration++
   if (rotationTimer !== null) {
     clearTimeout(rotationTimer)
     rotationTimer = null
@@ -410,10 +416,23 @@ function scheduleNextRotation(config: RotationConfig): void {
   const updatedConfig = { ...config, nextRotationAt }
   saveConfig(updatedConfig)
 
+  const scheduledGeneration = timerGeneration
   rotationTimer = setTimeout(() => {
-    void withCorrelation('op_' + randomUUID().replaceAll('-', ''), () => performRotation().catch(err => {
-      logEvent('warn', 'profile-rotation', 'scheduled rotation did not complete', { category: classifyIpcError(err) })
-    }), { source: 'lifecycle', owner: 'rotation' })
+    rotationTimer = null
+    void withCorrelation('op_' + randomUUID().replaceAll('-', ''), async () => {
+      try { await performRotation() }
+      catch (err) { logEvent('warn', 'profile-rotation', 'scheduled rotation did not complete', { category: classifyIpcError(err) }) }
+      finally {
+        // The timer owns retries independently from the cancelled operation.
+        // Config replacement, stop/shutdown or a successful next tick invalidate it.
+        if (timerGeneration === scheduledGeneration) {
+          withCorrelation('op_' + randomUUID().replaceAll('-', ''), () => {
+            try { scheduleNextRotation(getConfig()) }
+            catch (err) { logEvent('error', 'profile-rotation', 'rotation timer rearm failed', { category: classifyIpcError(err) }) }
+          }, { source: 'lifecycle', owner: 'rotation' })
+        }
+      }
+    }, { source: 'lifecycle', owner: 'rotation' })
   }, intervalMs)
 
   logEvent('debug', 'profile-rotation', 'next rotation scheduled', {

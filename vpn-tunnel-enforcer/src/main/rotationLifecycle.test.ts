@@ -162,4 +162,22 @@ describe('rotation in the main connection lane', () => {
     expect(h.registry.list()[0].status).toBe('error')
     expect(h.fsm.snapshot.state).not.toBe('connected')
   })
+
+  it('retains a proven live tunnel when a preflight exception occurs before beginRestart', async () => {
+    const h = harness()
+    await h.lane.start(async () => { h.evidence.running = true; h.evidence.pid = 10; return { success: true } })
+    await expect(h.run(async () => { throw new Error('preflight write failed') })).rejects.toThrow('preflight write failed')
+    expect(h.fsm.snapshot).toMatchObject({ state: 'connected', transition: null, pid: 10, operation: { status: 'error' } })
+    expect(h.cleanup).not.toHaveBeenCalled()
+  })
+
+  it('rechecks original runtime evidence after a failed preflight has drained its retained effects', async () => {
+    const h = harness(), retained = held<void>()
+    await h.lane.start(async () => { h.evidence.running = true; h.evidence.pid = 10; return { success: true } })
+    const pending = h.run(async owner => { owner.retain(retained.promise); throw new Error('preflight failed') }).catch(error => error)
+    await Promise.resolve()
+    h.evidence.pid = 20; retained.resolve()
+    expect(((await pending) as Error).message).toBe('preflight failed')
+    expect(h.fsm.snapshot.state).not.toBe('connected')
+  })
 })

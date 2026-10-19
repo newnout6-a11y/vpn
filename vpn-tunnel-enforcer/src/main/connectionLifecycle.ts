@@ -145,6 +145,7 @@ export class ConnectionLifecycle {
       return result
     } catch (error) {
       if (completed) throw error // registry retains its committed result and diagnoses the throw
+      if (!nativeTouched && !startup.terminalPublished) this.stateMachine?.confirmRetainedRotation(startup.operation.operationId)
       if (!startup.terminalPublished) startup.operation = { ...startup.operation, status: lease.signal.aborted ? 'cancelled' : 'error',
         category: lease.signal.aborted ? 'cancelled' : 'internal' }
       throw error

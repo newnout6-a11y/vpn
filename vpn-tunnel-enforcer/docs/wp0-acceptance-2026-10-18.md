@@ -1103,3 +1103,14 @@ OS/DNS boundaries. Это не новая native Windows/TUN приёмка. Ф�
 PASS: selection/первичное уведомление по-прежнему предшествуют проверке нового
 сервера. UI cancel/unmount, прочие background/native entrypoints, durable audit,
 migration/semantic matrices и полная ресурсная приёмка сохраняются в WP-0.
+
+Qodo #72 подтвердил четыре дополнительные границы: timer независимо
+восстанавливает следующий tick после отмены/timeout/conflict, но generation
+запрещает retry после stop/disable/config replacement/shutdown. Для живого
+туннеля выбор и announce кандидата перенесены после отменяемой подготовки;
+при idle входят в terminal commit. Исключение preflight сохраняет прежний
+confirmed state только после повторного сравнения original runtime evidence
+после drain. Log operationId использует обратимый op_ key без маски UUID;
+IPC DTO и cancel API по-прежнему используют исходный UUIDv4. Actual JSONL и
+diagnostic read-back проверяют оба одинаковых ID поля и correlation. Это
+не отменяет перечисленные остатки WP-0/WP-10; финальные checks/review — progress.md.
