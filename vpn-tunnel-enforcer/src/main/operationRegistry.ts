@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto'
+import { types } from 'node:util'
 import { OPERATION_DEADLINES, OPERATION_PRIORITY, type ManagedOperation, type ManagedOperationKind, type OperationOwner } from '../shared/operation'
 import { IpcFault, classifyIpcError, type IpcErrorCategory } from '../shared/ipc-result'
 import { currentActionMetadata, currentCorrelationId, withCorrelation } from './actionCorrelation'
 
+export type SynchronousCommitResult<T> = T & ({ then?: never } | null | undefined)
 export interface OperationLease {
   readonly signal: AbortSignal
   readonly operation: ManagedOperation
@@ -15,7 +17,7 @@ export interface OperationLease {
   waitForUser<T>(task: Promise<T>): Promise<T>
   /** Final synchronous persistence and its result become terminal together.
    * All tracked I/O must have settled; no more effects may follow this call. */
-  commit<T>(effect: () => T): T
+  commit<T>(effect: () => SynchronousCommitResult<T>): T
 }
 interface RunOptions { owner?: OperationOwner; resource?: string; timeoutMs?: number; signal?: AbortSignal }
 interface Entry {
@@ -90,7 +92,7 @@ export class OperationRegistry {
     const aborted = new Promise<never>((_, reject) => { rejectAbort = reject })
     void aborted.catch(() => {})
     const effects: Promise<unknown>[] = []
-    let pendingEffects = 0, committing = false, committed: { result: unknown } | undefined
+    let pendingEffects = 0, committing = false, invalidCommit = false, committed: { result: unknown } | undefined
     let userWaits = 0, workRemainingMs = remainingMs, workClock = performance.now()
     const entry: Entry = { controller, drained, operation: {
       version: 1, operationId, correlationId: currentCorrelationId() ?? 'op_' + operationId.replaceAll('-', ''),
@@ -156,15 +158,19 @@ export class OperationRegistry {
           }
         }
       },
-      commit<R>(effect: () => R): R {
+      commit<R>(effect: () => SynchronousCommitResult<R>): R {
         assertActive()
         if (pendingEffects) throw new IpcFault('conflict')
+        // Bound async functions inherit AsyncFunction's tag but lose V8's flag.
+        if (types.isAsyncFunction(effect) || Object.prototype.toString.call(effect) === '[object AsyncFunction]') throw new IpcFault('validation')
         let result: R
         committing = true
         try { result = effect() } finally { committing = false }
         if (result && (typeof result === 'object' || typeof result === 'function') && typeof (result as { then?: unknown }).then === 'function') {
-          pendingEffects++
-          effects.push(Promise.resolve(result).then(() => { pendingEffects-- }, () => { pendingEffects-- }))
+          // Untyped JavaScript may bypass the signature; never publish success
+          // or release work it already started, nor publish an error before it drains.
+          invalidCommit = true
+          retain(Promise.resolve(result))
           throw new IpcFault('validation')
         }
         committed = { result }
@@ -194,6 +200,7 @@ export class OperationRegistry {
           try { this.committedFailure({ ...entry.operation }, classifyIpcError(error)) } catch { /* telemetry cannot reverse persistence */ }
           return committed.result as T
         }
+        if (invalidCommit) { controller.abort(); await Promise.all(effects) }
         finish('error', classifyIpcError(error))
         controller.abort() // Abort sibling network effects on a terminal failure too.
         throw error

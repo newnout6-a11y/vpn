@@ -12,9 +12,9 @@ function sameFile(a: BigIntStats | undefined, b: BigIntStats | undefined): boole
   return !a || !b ? a === b : (['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const).every(key => a[key] === b[key])
 }
 
-/** Protect an empty staging file before plaintext. Preserve existing owner/group/DACL,
- * and refuse a destination changed since that snapshot instead of replacing its policy. */
-export async function prepareConfigExport(temporary: string, destination: string): Promise<() => void> {
+/** Protect staging before plaintext. Secret exports always use private access;
+ * redacted replacements preserve the chosen file's owner/group/DACL. */
+export async function prepareConfigExport(temporary: string, destination: string, mode: 'redacted' | 'secrets' = 'redacted'): Promise<() => void> {
   const before = await lstat(destination, { bigint: true }).catch(error => { if (!missing(error)) throw error; return undefined })
   if (before && !before.isFile()) throw new IpcFault('validation')
   if (process.platform === 'win32') {
@@ -22,7 +22,7 @@ export async function prepareConfigExport(temporary: string, destination: string
     const script = `$ErrorActionPreference='Stop';
 $temporary=${pathData(temporary)}
 $sections=[Security.AccessControl.AccessControlSections]'Access,Owner,Group'
-${before ? `$acl=[IO.File]::GetAccessControl(${pathData(destination)},$sections)` : `$acl=New-Object Security.AccessControl.FileSecurity
+${before && mode !== 'secrets' ? `$acl=[IO.File]::GetAccessControl(${pathData(destination)},$sections)` : `$acl=New-Object Security.AccessControl.FileSecurity
 $acl.SetAccessRuleProtection($true,$false)
 $user=[Security.Principal.WindowsIdentity]::GetCurrent().User
 $acl.SetOwner($user)
@@ -50,6 +50,10 @@ if((Normalize-Acl $actual) -cne (Normalize-Acl $expected)) {throw 'ConfigExportA
         Buffer.from(script, 'utf16le').toString('base64')], { windowsHide: true, timeout: 15_000, maxBuffer: 16_384 })
       if (stdout.trim() !== 'CONFIG_EXPORT_ACL_VERIFIED') throw new IpcFault('permission')
     } catch { throw new IpcFault('permission') }
+  } else if (mode === 'secrets') {
+    await chmod(temporary, 0o600)
+    const protectedFile = await lstat(temporary, { bigint: true })
+    if (protectedFile.uid !== BigInt(process.getuid!()) || (protectedFile.mode & 0o777n) !== 0o600n) throw new IpcFault('permission')
   } else if (before) {
     if (process.getuid?.() !== Number(before.uid)) throw new IpcFault('permission')
     // chown may clear mode bits: preserve owner/group first, then permissions.

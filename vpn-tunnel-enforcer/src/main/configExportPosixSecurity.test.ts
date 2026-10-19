@@ -27,6 +27,21 @@ afterEach(() => {
   else Reflect.deleteProperty(process, 'getuid')
 })
 describe('POSIX export destination policy', () => {
+  it('keeps secret staging private instead of copying the destination group and mode', async () => {
+    const verify = await prepareConfigExport('empty-staging', 'destination', 'secrets')
+    expect(state.changeGroup).not.toHaveBeenCalled()
+    expect(state.uid).toBe(1000n); expect(state.gid).toBe(10n); expect(state.mode).toBe(0o600n)
+    expect(verify).not.toThrow()
+  })
+  it('rejects secret staging owned by another user', async () => {
+    state.uid = 2000n
+    await expect(prepareConfigExport('empty-staging', 'destination', 'secrets')).rejects.toMatchObject({ category: 'permission' })
+  })
+  it('rejects a secret staging mode that was not applied', async () => {
+    state.mode = 0o644n
+    state.changeMode.mockImplementationOnce(() => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) })
+    await expect(prepareConfigExport('empty-staging', 'destination', 'secrets')).rejects.toMatchObject({ code: 'EPERM' })
+  })
   it('copies and verifies the existing group before admitting plaintext', async () => {
     const verify = await prepareConfigExport('empty-staging', 'destination')
     expect(state.changeGroup).toHaveBeenCalledWith(1000, 20)

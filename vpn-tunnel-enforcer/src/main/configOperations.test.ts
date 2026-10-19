@@ -136,14 +136,16 @@ afterEach(async () => {
 
 describe('configuration operation lifetime', () => {
   it.each(['import', 'export'])('cancels %s during a native dialog with one original IPC correlation', async kind => {
+    vi.useFakeTimers()
     const gate = held(kind === 'import' ? { canceled: false, filePaths: [selected] } : { canceled: false, filePath: destination })
     ;(kind === 'import' ? state.openDialog : state.saveDialog).mockReturnValue(gate.promise)
     const run = kind === 'import' ? invoke('config:browse-import') : invoke('config:export', 'redacted')
     const operation = registry.list().find(op => op.status === 'running')!
-    const start = performance.now()
+    const finished = vi.fn()
+    void run.then(finished)
     expect(await invoke('operations:cancel', operation.operationId)).toMatchObject({ ok: true, result: true })
-    expect(await run).toMatchObject({ ok: false, correlationId: operation.correlationId, error: { code: 'IPC_CANCELLED' } })
-    expect(performance.now() - start).toBeLessThan(900)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, correlationId: operation.correlationId, error: expect.objectContaining({ code: 'IPC_CANCELLED' }) }))
     let drained = false
     const closing = registry.close().then(() => { drained = true })
     await Promise.resolve(); expect(drained).toBe(false)

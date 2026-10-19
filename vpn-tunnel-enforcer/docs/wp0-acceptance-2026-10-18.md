@@ -3,13 +3,19 @@
 Статус: **в работе**. Основание: том 3 §1.1–1.2, ТЗ-06 WP-0
 и решения владельца §10, AT-00-001…010. WP-3 завершён в PR #46;
 его L3 `SKIPPED_BY_OWNER` не распространяется на WP-0.
-Главный ревьюер — Qodo по решению владельца от 18.10. CodeRabbit исключён
-из ожидания; окончание trial Greptile не блокирует работу. CI и review обязательны.
+Qodo и Revix работают совместно по уточнению владельца 19.10: пока у Revix
+есть квота, учитывать оба ревью на окончательном SHA. Qodo ранее назначен
+главным; завершённый Qodo не заменяет разбор Needs changes от Revix.
+CodeRabbit исключён из ожидания; окончание trial Greptile не блокирует работу.
+CI и review обязательны.
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
-#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65/#66/#67/#68/#69/#70/#71/#72 слиты в main после exact-head CI success и completed Qodo,
-без открытых findings; прежний запрет слияния отменён.
+#54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65/#66/#67/#68/#69/#70/#71/#72/#73 слиты в main после exact-head CI success и completed Qodo,
+без открытых Qodo findings; прежний запрет слияния отменён. Revix #70 сохранил
+Needs changes: владелец отдельно указал это 19.10, выполняется follow-up
+проверка commit callbacks и политики секретного staging/экспорта. Эти замечания
+не считаются закрытыми по одному прежнему merge или Qodo.
 
 ## Полная область и первоначальная инвентаризация
 
@@ -1171,3 +1177,20 @@ Fallback correlationId равен этому ID. Это уточняет пре�
 operationLogDetails идемпотентен для canonical op_ ID. Реальный JSONL двух stop
 операций и diagnostic read-back сохраняют исходные receipt ID и различают их,
 маскируя credential и посторонний UUID. Финальные проверки — в progress.md.
+
+## Follow-up Revix #70 — synchronous commit и secret export
+
+Needs changes уже слитого #70 проверяется отдельным follow-up. commit теперь
+отвергает Promise/thenable callback на уровне TypeScript, native/bound async
+callback до выполнения; malformed untyped JS thenable сохраняет physical drain
+до validation terminal. Cancel test на native dialog использует fake timers,
+сохраняя отказ поздних эффектов и ожидание drain.
+
+Secrets mode проходит от config:export до файлового writer и ACL helper:
+перед plaintext назначается protected user/SYSTEM DACL, включая replacement
+существующего широкодоступного файла. Redacted export сохраняет прежнюю
+destination policy. POSIX branch секретов требует текущего owner/mode 0600.
+Реальный killed writer fixture доказывает private DACL crash residue и
+неизменность прежнего destination. Plaintext staging после аварии может остаться;
+автоматическая очистка произвольных выбранных каталогов не заявляется.
+Финальные проверки и оба reviewer verdict записываются в progress.md.

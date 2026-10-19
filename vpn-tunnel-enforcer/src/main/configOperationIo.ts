@@ -2,7 +2,7 @@ import { open, rm } from 'fs/promises'
 import { renameSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { dirname, join } from 'path'
-import type { OperationLease } from './operationRegistry'
+import type { OperationLease, SynchronousCommitResult } from './operationRegistry'
 import { prepareConfigExport } from './configExportSecurity'
 import { logEvent } from './appLogger'
 import { classifyIpcError } from '../shared/ipc-result'
@@ -36,7 +36,7 @@ export async function readSelectedConfig(path: string, lease: OperationLease, re
 
 /** The chosen destination changes only at a synchronous, terminal rename.
  * On cancellation, wait for raw staging/close before removing our own temp file. */
-export async function writeConfigExport<T>(path: string, content: string, lease: OperationLease, result: T): Promise<T> {
+export async function writeConfigExport<T>(path: string, content: string, lease: OperationLease, result: SynchronousCommitResult<T>, mode: 'redacted' | 'secrets' = 'redacted'): Promise<T> {
   const temporary = join(dirname(path), `.vpnte-export-${randomUUID()}.tmp`)
   let created = false
   let verifyDestination!: () => void
@@ -45,7 +45,7 @@ export async function writeConfigExport<T>(path: string, content: string, lease:
     created = true
     try {
       lease.assertActive()
-      verifyDestination = await prepareConfigExport(temporary, path)
+      verifyDestination = await prepareConfigExport(temporary, path, mode)
       lease.assertActive()
       await file.writeFile(content, { encoding: 'utf8', signal: lease.signal })
       lease.assertActive()
