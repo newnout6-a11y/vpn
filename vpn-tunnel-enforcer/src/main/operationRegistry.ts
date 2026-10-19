@@ -179,7 +179,8 @@ export class OperationRegistry {
         if (committed) return committed.result as T
         assertActive()
         const failed = result && typeof result === 'object' && (('success' in result && result.success === false) || ('ok' in result && result.ok === false))
-        finish(failed ? 'error' : 'success')
+        const dismissed = failed && 'cancelled' in result && result.cancelled === true
+        finish(dismissed ? 'cancelled' : failed ? 'error' : 'success', dismissed ? 'cancelled' : undefined)
         return result
       } catch (error) {
         if (committed) {

@@ -4303,3 +4303,67 @@ CI/review нового SHA проверяются отдельно после pu
   5 skipped, typecheck/build/native PASS, traceability AC 927/927 / F 210/210.
   Экспорт VPN keys, rotation, UI cancel/unmount и прочий остаток WP-0 сохраняются.
   Полная WP-0 и следующая WP-2 остаются активной целью.
+
+
+### WP-0 — экспорт VPN-ключей: lifetime, atomic files и clipboard drain
+
+- Все пять handlers экспортов (renderer/clipboard/single file/bulk keys/proxy-list)
+  используют общий operation registry: UUIDv4, original IPC correlation, deadline,
+  prompt cancellation и physical drain. Native consent и save picker приостанавливают
+  рабочий budget; renderer destroyed отменяет запрос. Три file variants разделяют
+  resource keys:file; новые экспорты не обходят незавершённый native эффект.
+- Файлы используют проверенный в #70 writeConfigExport: собственный staging,
+  Windows security descriptor до plaintext, fsync/close, destination snapshot и
+  terminal rename. Прежний файл сохраняется при cancel/error; raw write errors
+  больше не возвращаются renderer и не передаются в handleLogged. Существующие
+  URI/JSON/mixed-array/proxy форматы, counts и native consent сохранены.
+- Буфер проверяет active внутри собственной очереди до native write. Уже выданный
+  Electron native write нельзя отозвать: caller получает cancel/timeout promptly,
+  physical lease остаётся до его завершения и compensating cleanup. Очистка
+  удаляет только неизменённое owned значение, сохраняет новый текст/форматы;
+  native failure диагностируется cleanupFailed с retry. Если владение форматами
+  не доказано, буфер не стирается и cleanupFailed явно фиксируется. Это не
+  утверждение об отсутствии кратковременной записи в уже вызванном native API
+  или удалении Windows clipboard history/cloud copies.
+- Тихий native dismiss {ok:false,cancelled:true} сохранён для существующего UI,
+  но terminal registry outcome теперь cancelled/category cancelled, не error.
+  Clipboard acknowledgement фиксируется синхронным lease.commit; поздний abort
+  не заменяет уже сохранённый успех. Bulk preparation уступает event loop по 64 профиля.
+- До исправления clipboard: npm.cmd test -- src/main/secretClipboard.test.ts -t AT-00-003
+  — 4 failed / 13 skipped (.tmp/wp0-key-clipboard-before.log). Все четыре
+  операции игнорировали lifetime и возвращали успех. Первые integration fixture
+  trials содержали повторно обёрнутый IPC mock и SOCKS outbound, который не
+  поддерживает VPN sharing; они исправлены в стенде и не считаются production
+  defects. Итоговый fixture использует настоящий naive exporter/Conf/guard/logger.
+- npm.cmd test -- src/main/serverKeyOperations.test.ts src/main/serverKeyExportSecurity.test.ts src/main/secretClipboard.test.ts src/main/operationRegistry.test.ts src/main/configExportAcl.test.ts
+  — 115 passed / 5 files, 8.66 s, exit 0 (.tmp/wp0-key-regression-final.log).
+  Покрыты consent всех пяти каналов, long decision, save picker/destroy,
+  open/write/fsync, shutdown/deadline native clipboard, file errors, terminal
+  rename, JSON/URI compatibility, queue cancellation, preservation чужих данных,
+  cleanup retry и actual JSONL/diagnostic correlation/redaction.
+- npm.cmd run typecheck — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-key-typecheck.log). python ../docs/04-приёмочные-тесты/traceability/check-coverage.py
+  — AC 927/927 / F 210/210, exit 0. git diff --check — exit 0.
+  Полный npm test выполняется отдельно; build/native, PR и exact-head Qodo/CI
+  пока не завершены. Полный AT-00-003 и весь WP-0 не объявляются PASS.
+
+- Первый полный npm.cmd test — 1 failed / 4378 passed / 5 skipped,
+  201.61 s (.tmp/wp0-key-full.log). Новый fixture удалял test directory до
+  завершения actual logger append queue; поздняя запись предыдущего instance
+  попадала в следующую mutable fixture dir (11 строк вместо 10). Добавлен
+  actual JSONL drain перед reuse/removal, по образцу configOperations fixture;
+  production assertion о correlation/redaction сохранён. Это исправление
+  изоляции теста, а не скрытое исключение failing case. Полный набор повторяется.
+
+- Адресный набор после исправления fixture drain — 115 passed / 5 files,
+  10.10 s, exit 0 (.tmp/wp0-key-regression-drain.log). Повторный полный
+  npm.cmd test — 4379 passed / 5 skipped / 0 failed, 271 files passed /
+  2 skipped, 199.90 s, exit 0 (.tmp/wp0-key-full-final.log).
+- npm.cmd run build — exit 0, включая typecheck (.tmp/wp0-key-build.log).
+  node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-key-electron.log); node scripts/test-wp1-native.mjs --ipc-only
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-key-csp.log). Это существующие общие
+  runtime/IPC/CSP subsets, не новая native clipboard приёмка. Повторные
+  traceability AC 927/927 / F 210/210 и git diff --check — exit 0.
+  После commit/push нужны completed Qodo и CI success на окончательном SHA;
+  следующий участок до этого не начинается.

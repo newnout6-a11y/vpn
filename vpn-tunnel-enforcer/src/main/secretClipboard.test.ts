@@ -9,10 +9,70 @@ vi.mock('electron', () => ({ clipboard: {
 } }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 import { clipboard } from 'electron'
+import { logEvent } from './appLogger'
 import { copySecretToClipboard, clearOwnedSecretClipboard, SECRET_CLIPBOARD_TTL_MS } from './secretClipboard'
 beforeEach(() => { vi.useFakeTimers(); vi.clearAllMocks(); state.text = ''; state.formats = ['text/plain'] })
 afterEach(async () => { await clearOwnedSecretClipboard(); vi.useRealTimers() })
 describe('main-owned secret clipboard', () => {
+  it('reports unverifiable cancellation cleanup without erasing unknown formats (AT-00-003/005)', async () => {
+    let active = true
+    vi.mocked(clipboard.read).mockImplementationOnce(async () => { active = false; throw new Error('private format error') })
+    await expect(copySecretToClipboard('FAKE-CANCELLED', {
+      assertActive: () => { if (!active) throw new Error('cancelled') }, complete: result => result
+    })).rejects.toThrow('cancelled')
+    expect(state.text).toBe('FAKE-CANCELLED'); expect(clipboard.clear).not.toHaveBeenCalled()
+    expect(logEvent).toHaveBeenCalledWith('warn', 'secret-clipboard', 'cancelled clipboard cleanup could not verify ownership', { cleanupFailed: true })
+  })
+  it('retains cancellation and retries a failed compensating cleanup (AT-00-003)', async () => {
+    vi.mocked(clipboard.readText).mockRejectedValueOnce(new Error('native busy'))
+    const cancelled = new Error('cancelled')
+    await expect(copySecretToClipboard('FAKE-CANCELLED', {
+      assertActive: () => {}, complete: () => { throw cancelled }
+    })).rejects.toBe(cancelled)
+    expect(logEvent).toHaveBeenCalledWith('warn', 'secret-clipboard', 'secret clipboard cleanup failed; retry scheduled', { cleanupFailed: true })
+    expect(state.text).toBe('FAKE-CANCELLED')
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(state.text).toBe('')
+  })
+  it('rejects a cancelled queued copy before issuing a native write (AT-00-003)', async () => {
+    let complete!: () => void
+    vi.mocked(clipboard.writeText).mockImplementationOnce(text => new Promise(resolve => {
+      complete = () => { state.text = text; resolve() }
+    }))
+    const first = copySecretToClipboard('FAKE-FIRST')
+    await Promise.resolve()
+    const cancelled = new Error('cancelled')
+    const second = copySecretToClipboard('FAKE-CANCELLED', {
+      assertActive: () => { throw cancelled }, complete: result => result
+    })
+    const rejection = expect(second).rejects.toBe(cancelled)
+    complete(); await first; await rejection
+    expect(clipboard.writeText).toHaveBeenCalledTimes(1)
+    expect(state.text).toBe('FAKE-FIRST')
+  })
+  it.each(['unchanged', 'new-text', 'new-formats'])('drains a cancelled native write and preserves %s data (AT-00-003)', async replacement => {
+    let active = true, complete!: () => void
+    const cancelled = new Error('cancelled')
+    vi.mocked(clipboard.writeText).mockImplementationOnce(text => new Promise(resolve => {
+      complete = () => { state.text = text; resolve() }
+    }))
+    const finished = vi.fn(result => result)
+    const copying = copySecretToClipboard('FAKE-CANCELLED', {
+      assertActive: () => { if (!active) throw cancelled }, complete: finished
+    })
+    const rejection = expect(copying).rejects.toBe(cancelled)
+    await Promise.resolve(); active = false; complete()
+    if (replacement !== 'unchanged') vi.mocked(clipboard.read).mockImplementationOnce(async () => {
+      if (replacement === 'new-text') state.text = 'user text'
+      else state.formats = ['text/plain', 'text/html']
+      return [{ types: ['text/plain'] }] as Electron.ClipboardItem[]
+    })
+    await rejection
+    expect(finished).not.toHaveBeenCalled()
+    if (replacement === 'unchanged') expect(state.text).toBe('')
+    else expect(clipboard.clear).not.toHaveBeenCalled()
+    if (replacement === 'new-text') expect(state.text).toBe('user text')
+  })
   it('writes in main, exposes only TTL metadata and clears after 60 seconds', async () => {
     const result = await copySecretToClipboard('FAKE-VPN-SECRET')
     expect(result).toEqual({ clearAfterMs: 60_000 })

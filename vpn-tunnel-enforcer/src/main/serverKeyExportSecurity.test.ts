@@ -26,8 +26,11 @@ const state = vi.hoisted(() => ({
 
 vi.mock('fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('fs/promises')>()
-  return { ...actual, writeFile: (...args: Parameters<typeof actual.writeFile>) => state.writeFailure
-    ? Promise.reject(state.writeFailure) : actual.writeFile(...args) }
+  return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
+    const file = await actual.open(...args), write = file.writeFile.bind(file)
+    file.writeFile = (...writeArgs) => state.writeFailure ? Promise.reject(state.writeFailure) : write(...writeArgs)
+    return file
+  } }
 })
 
 vi.mock('electron', () => ({
@@ -123,15 +126,16 @@ beforeEach(async () => {
 })
 afterEach(async () => {
   const { clearOwnedSecretClipboard } = await import('./secretClipboard')
+  await (await import('./operations')).operations.close()
   await clearOwnedSecretClipboard()
   rmSync(exportDirectory, { recursive: true, force: true })
 })
 
 describe('main-owned export approval (AT-01-008)', () => {
-  it.each(channels.filter(channel => channel.endsWith('-file')))('returns a string when a write exception has a non-string message (AT-00-001): %s', async channel => {
+  it.each(channels.filter(channel => channel.endsWith('-file')))('maps a malformed write exception to a bounded error (AT-00-001/004): %s', async channel => {
     state.nativePrompt.mockResolvedValue({ response: 1 })
     state.writeFailure = { message: { malformed: true } }
-    expect(await invoke(channel)).toMatchObject({ ok: false, reason: 'write-failed', error: '[object Object]' })
+    await expect(invoke(channel)).rejects.toMatchObject({ category: 'internal', message: 'Не удалось выполнить операцию' })
     expect(existsSync(exportPath)).toBe(false)
   })
   it('saves native JSON with a JSON file suggestion and preserves main-owned clipboard handling', async () => {
@@ -190,13 +194,13 @@ describe('main-owned export approval (AT-01-008)', () => {
   })
   it('a native dialog failure never proceeds to export', async () => {
     state.nativePrompt.mockRejectedValueOnce(new Error('native consent unavailable'))
-    await expect(invoke('servers:export-key-file')).rejects.toThrow('native consent unavailable')
+    await expect(invoke('servers:export-key-file')).rejects.toMatchObject({ category: 'internal' })
     expect(state.uri).not.toHaveBeenCalled()
     expect(existsSync(exportPath)).toBe(false)
   })
   it('a rejected native clipboard write never returns a success acknowledgement', async () => {
     state.nativePrompt.mockResolvedValue({ response: 1 })
     state.clipboardWrite.mockRejectedValueOnce(new Error('clipboard busy'))
-    await expect(invoke('servers:copy-key')).rejects.toThrow('clipboard busy')
+    await expect(invoke('servers:copy-key')).rejects.toMatchObject({ category: 'internal' })
   })
 })

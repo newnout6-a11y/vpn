@@ -14,7 +14,6 @@ import { app, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { networkInterfaces } from 'os'
 import { Socket, isIP } from 'net'
 import { promises as dns } from 'dns'
-import { writeFile } from 'fs/promises'
 import { join } from 'path'
 import { performance } from 'perf_hooks'
 import { execFile as execFileCb } from 'child_process'
@@ -26,7 +25,8 @@ import { nativePhysicalIpv4Sources } from './native/nativeNetworkReads'
 import { withProtectedIpTransition } from './protectedIpTransition'
 import { compactForIpcLog } from './ipcLogging'
 import { copySecretToClipboard } from './secretClipboard'
-import { withSecretExportConsent } from './secretExportConsent'
+import { withSecretExportConsent, type CancelledSecretExport } from './secretExportConsent'
+import { writeConfigExport } from './configOperationIo'
 import { optionalPlainObject, optionalString, requireEnum, requirePort, requireString } from './ipcValidation'
 import { buildBootstrapRouteAttempts, type BootstrapRouteAttempt } from './bootstrapRoute'
 import { normalizeServerPort } from '../shared/portValidation'
@@ -2609,6 +2609,22 @@ function handleLogged<T>(
   })
 }
 
+/** Native user waits remain cancellable, with the resource held until drain. */
+async function runKeyExport<T>(sender: IpcMainInvokeEvent['sender'], destination: 'renderer' | 'clipboard' | 'file', effect: (lease: OperationLease) => Promise<T>): Promise<T | CancelledSecretExport> {
+  if (sender.isDestroyed()) throw new IpcFault('cancelled')
+  const lifetime = new AbortController(), destroyed = () => lifetime.abort()
+  sender.once?.('destroyed', destroyed)
+  try {
+    return await operations.run('export', async lease => {
+      const consent = await lease.waitForUser(withSecretExportConsent(sender, destination, () => true as const))
+      if (consent !== true) return consent
+      lease.assertActive()
+      return effect(lease)
+    }, { resource: 'keys:' + destination, signal: lifetime.signal })
+  } catch (error) { throw new IpcFault(classifyIpcError(error)) }
+  finally { sender.removeListener?.('destroyed', destroyed) }
+}
+
 function sanitizeAddProfilesOptions(value: unknown): AddProfilesOptions | undefined {
   const raw = optionalPlainObject(value, 'options')
   if (!raw) return undefined
@@ -2769,15 +2785,21 @@ export function registerServerPickerHandlers(): void {
   }
   handleLogged('servers:export-key', async (event, id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
-    return withSecretExportConsent(event.sender, 'renderer', () => exportProfileKey(id))
+    return runKeyExport(event.sender, 'renderer', async lease => {
+      const result = exportProfileKey(id)
+      return result.ok ? lease.commit(() => result) : result
+    })
   })
   handleLogged('servers:copy-key', async (event, id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
-    return withSecretExportConsent(event.sender, 'clipboard', async () => {
+    return runKeyExport(event.sender, 'clipboard', async lease => {
       const result = exportProfileKey(id)
       if (!result.ok) return result
       // The renderer receives only acknowledgement, not the clipboard secret.
-      return { ok: true as const, ...await copySecretToClipboard(result.uri) }
+      return copySecretToClipboard(result.uri, {
+        assertActive: () => lease.assertActive(),
+        complete: copied => lease.commit(() => ({ ok: true as const, ...copied }))
+      })
     })
   })
 
@@ -2787,10 +2809,11 @@ export function registerServerPickerHandlers(): void {
   // a file is what people actually archive. Returns:
   //   {ok: true, path}            — file written
   //   {ok: false, cancelled: true} — user dismissed the dialog
-  //   {ok: false, reason}          — anything else (no profile, write failed, …)
+  //   {ok: false, reason}          — missing/unsupported profile
+  // Native I/O failures use the common typed IPC error envelope.
   handleLogged('servers:export-key-file', async (event, id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
-    return withSecretExportConsent(event.sender, 'file', async () => {
+    return runKeyExport(event.sender, 'file', async lease => {
       const profile = getProfiles().find(p => p.id === id)
       if (!profile) return { ok: false as const, reason: 'profile-not-found' }
       if (!profile.outbound || typeof profile.outbound !== 'object') {
@@ -2812,7 +2835,7 @@ export function registerServerPickerHandlers(): void {
       .slice(0, 60) || profile.protocol
     const defaultFileName = `${profile.protocol}-${safeName}.${exported.format === 'json' ? 'json' : 'txt'}`
 
-    const choice = await dialog.showSaveDialog({
+    const choice = await lease.waitForUser(dialog.showSaveDialog({
       title: 'Сохранить ключ VPN — файл содержит секрет доступа',
       defaultPath: join(app.getPath('desktop'), defaultFileName),
       filters: [
@@ -2820,23 +2843,15 @@ export function registerServerPickerHandlers(): void {
         { name: 'Текстовый файл', extensions: ['txt'] },
         { name: 'Все файлы', extensions: ['*'] }
       ]
-    })
+    }))
 
     if (choice.canceled || !choice.filePath) {
       return { ok: false as const, cancelled: true as const }
     }
 
-    try {
-      // Persist the complete URI or JSON, with only a trailing newline.
-      await writeFile(choice.filePath, exported.content + '\n', 'utf8')
-      return { ok: true as const, path: choice.filePath, name: profile.name, protocol: profile.protocol }
-    } catch (err: any) {
-      logEvent('warn', 'server-picker', 'export-key-file write failed', {
-        path: choice.filePath,
-        error: err?.message || String(err)
-      })
-      return { ok: false as const, reason: 'write-failed', error: String(err?.message || err) }
-    }
+    // Persist only at terminal commit, retaining the old destination on failure.
+    return writeConfigExport(choice.filePath, exported.content + '\n', lease,
+      { ok: true as const, path: choice.filePath, name: profile.name, protocol: profile.protocol })
     })
   })
 
@@ -2846,15 +2861,16 @@ export function registerServerPickerHandlers(): void {
   // Returns the same shape as the single-key handler, plus counts:
   //   {ok: true, path, total, exported, skipped}
   //   {ok: false, cancelled: true}
-  //   {ok: false, reason: 'no-profiles' | 'unsupported-all' | 'write-failed'}
+  //   {ok: false, reason: 'no-profiles' | 'unsupported-all'}
   handleLogged('servers:export-all-keys-file', async (event) => {
-    return withSecretExportConsent(event.sender, 'file', async () => {
+    return runKeyExport(event.sender, 'file', async lease => {
       const profiles = getProfiles()
       if (!profiles.length) return { ok: false as const, reason: 'no-profiles' }
 
       const lines: string[] = []
       let skipped = 0
-      for (const profile of profiles) {
+      for (const [index, profile] of profiles.entries()) {
+        if (index % 64 === 0) await lease.wait(new Promise<void>(done => setImmediate(done)))
         if (!profile.outbound || typeof profile.outbound !== 'object') { skipped++; continue }
         const exported = exportOutboundForSharing({
           name: profile.name,
@@ -2873,7 +2889,7 @@ export function registerServerPickerHandlers(): void {
       const hasJson = lines.some(line => line.startsWith('{'))
       const defaultFileName = `vpn-keys-${stamp}.${hasJson ? 'json' : 'txt'}`
 
-      const choice = await dialog.showSaveDialog({
+      const choice = await lease.waitForUser(dialog.showSaveDialog({
         title: 'Сохранить все ключи VPN — файл содержит пароли/ключи',
         defaultPath: join(app.getPath('desktop'), defaultFileName),
         filters: [
@@ -2881,7 +2897,7 @@ export function registerServerPickerHandlers(): void {
           { name: 'Текстовый файл', extensions: ['txt'] },
           { name: 'Все файлы', extensions: ['*'] }
         ]
-    })
+    }))
 
     if (choice.canceled || !choice.filePath) {
       return { ok: false as const, cancelled: true as const }
@@ -2896,41 +2912,23 @@ export function registerServerPickerHandlers(): void {
       ''
     ].join('\n')
 
-    try {
-      const content = hasJson ? JSON.stringify(lines.map(line => line.startsWith('{') ? JSON.parse(line) : line))
-        : header + lines.join('\n')
-      await writeFile(choice.filePath, content + '\n', 'utf8')
-      logEvent('info', 'server-picker', 'export-all-keys-file', {
-        path: choice.filePath,
-        total: profiles.length,
-        exported: lines.length,
-        skipped
-      })
-      return {
-        ok: true as const,
-        path: choice.filePath,
-        total: profiles.length,
-        exported: lines.length,
-        skipped
-      }
-    } catch (err: any) {
-      logEvent('warn', 'server-picker', 'export-all-keys-file write failed', {
-        path: choice.filePath,
-        error: err?.message || String(err)
-      })
-      return { ok: false as const, reason: 'write-failed', error: String(err?.message || err) }
-    }
+    const content = hasJson ? JSON.stringify(lines.map(line => line.startsWith('{') ? JSON.parse(line) : line))
+      : header + lines.join('\n')
+    return writeConfigExport(choice.filePath, content + '\n', lease, {
+      ok: true as const, path: choice.filePath, total: profiles.length, exported: lines.length, skipped
+    })
     })
   })
 
   handleLogged('servers:export-all-proxies-file', async (event) => {
-    return withSecretExportConsent(event.sender, 'file', async () => {
+    return runKeyExport(event.sender, 'file', async lease => {
       const profiles = getProfiles()
       if (!profiles.length) return { ok: false as const, reason: 'no-profiles' }
 
       const lines: string[] = []
       let skipped = 0
-      for (const profile of profiles) {
+      for (const [index, profile] of profiles.entries()) {
+        if (index % 64 === 0) await lease.wait(new Promise<void>(done => setImmediate(done)))
         if (!profile.outbound || typeof profile.outbound !== 'object') { skipped++; continue }
         const line = exportOutboundToProxyLine({
           protocol: profile.protocol,
@@ -2947,41 +2945,22 @@ export function registerServerPickerHandlers(): void {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
       const defaultFileName = `proxy-list-${stamp}.txt`
 
-      const choice = await dialog.showSaveDialog({
+      const choice = await lease.waitForUser(dialog.showSaveDialog({
         title: 'Сохранить proxy-list — файл может содержать пароли',
         defaultPath: join(app.getPath('desktop'), defaultFileName),
         filters: [
           { name: 'Text file', extensions: ['txt'] },
           { name: 'All files', extensions: ['*'] }
         ]
-    })
+    }))
 
     if (choice.canceled || !choice.filePath) {
       return { ok: false as const, cancelled: true as const }
     }
 
-    try {
-      await writeFile(choice.filePath, lines.join('\n') + '\n', 'utf8')
-      logEvent('info', 'server-picker', 'export-all-proxies-file', {
-        path: choice.filePath,
-        total: profiles.length,
-        exported: lines.length,
-        skipped
-      })
-      return {
-        ok: true as const,
-        path: choice.filePath,
-        total: profiles.length,
-        exported: lines.length,
-        skipped
-      }
-    } catch (err: any) {
-      logEvent('warn', 'server-picker', 'export-all-proxies-file write failed', {
-        path: choice.filePath,
-        error: err?.message || String(err)
-      })
-      return { ok: false as const, reason: 'write-failed', error: String(err?.message || err) }
-    }
+    return writeConfigExport(choice.filePath, lines.join('\n') + '\n', lease, {
+      ok: true as const, path: choice.filePath, total: profiles.length, exported: lines.length, skipped
+    })
     })
   })
 }

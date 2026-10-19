@@ -1013,3 +1013,35 @@ PR #70 слит: Qodo 1543096 completed на ceaa20b (все 4 findings implemen
 merge 2e61411. Это завершает текущий config участок; общий остаток AT и WP-0
 сохранён. Следующий участок — экспорт VPN-ключей. Полный локальный набор:
 4346 passed / 5 skipped, typecheck/build/native PASS; подробности — progress.md.
+
+
+## Экспорт ключей: общий lifetime и terminal persistence (19.10.2026)
+
+Пять production handlers (renderer URI/JSON, main clipboard, single key file,
+bulk key file и proxy-list) подключены к registry с отдельными ресурсами
+keys:renderer/clipboard/file. Native consent и save picker сохраняют quiet
+{ok:false,cancelled:true}; registry фиксирует это как cancelled. Ожидание
+пользователя не расходует work budget. Cancel/destroy/shutdown/deadline запрещают
+поздний выбор файла/раскрытие; physical resource удерживается до raw settlement.
+
+Три file exports переиспользуют staging/Windows ACL/fsync/terminal rename из
+config export #70. Ошибка записи возвращается через безопасную taxonomy,
+сохраняя предыдущий destination. URI/JSON/mixed batch и counts не изменены.
+
+Native clipboard write в Electron не поддерживает отзыв уже выданного вызова.
+Отмена caller prompt, но resource ждёт write и компенсирующую очистку только
+неизменённого owned значения. Новые пользовательские text/formats не стираются;
+ошибка native cleanup логируется cleanupFailed с retry. Если владение форматами
+не доказано, данные не стираются и невозможность очистки видна в журнале.
+Не заявляется отсутствие кратковременной native записи после abort или очистка
+Windows clipboard history/cloud. Это ограничение отдельно сохраняется для
+полной приёмки; новый clipboard L3 этим fixture не выполнен.
+
+L2 использует actual picker/registry/IPC guard, настоящие files/Conf/exporters и
+logger/redactor/JSONL/diagnostic read-back. Dialogs/clipboard/Electron DPAPI boundary
+заменены. Включены cancel до/после native boundaries, sender destroy/shutdown,
+рабочий deadline и long user wait, file-handle drain, queue cancellation,
+неизменность destination/temp cleanup, terminal abort и correlation/redaction.
+Общие actual Windows ACL tests shared writer повторно прошли. Полный AT и WP-0
+остаются открытыми: rotation, UI cancel/unmount, migration/audit/semantic matrices
+и полная native/state/resource приёмка ещё нужны. Проверки и remote PR gate — progress.md.
