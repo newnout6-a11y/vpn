@@ -70,14 +70,38 @@ export type ConfigSection = (typeof ALL_SECTIONS)[number]
 interface ConfigOperationOptions {
   signal?: AbortSignal
   sender?: WebContents
+  requestId?: string
   assertAuthorized?: () => void
+}
+
+interface ConfigRequest { controller: AbortController; operationId?: string }
+const configRequests = new WeakMap<WebContents, Map<string, ConfigRequest>>()
+function configRequestId(value: unknown): string | undefined {
+  if (value === undefined) return undefined
+  const id = requireString(value, 'requestId', { maxLength: 36 })
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new IpcFault('validation')
+  return id.toLowerCase()
 }
 
 /** Main-only lifetime; renderer arguments cannot supply these options. */
 async function runConfigOperation<T>(kind: 'import' | 'export', resource: string, effect: (lease: OperationLease) => Promise<T>, options: ConfigOperationOptions = {}): Promise<T> {
-  const lifetime = requestDocumentLifetime(options.sender, options.signal)
-  try { return await operations.run(kind, effect, { resource, signal: lifetime.signal }) }
-  finally { lifetime.dispose() }
+  const { sender, requestId } = options
+  if (requestId && !sender) throw new IpcFault('validation')
+  const requests = sender ? configRequests.get(sender) ?? new Map<string, ConfigRequest>() : undefined
+  if (requestId && requests?.has(requestId)) throw new IpcFault('conflict')
+  const request: ConfigRequest | undefined = requestId ? { controller: new AbortController() } : undefined
+  const signal = request ? options.signal ? AbortSignal.any([options.signal, request.controller.signal]) : request.controller.signal : options.signal
+  const lifetime = requestDocumentLifetime(sender, signal)
+  if (sender && requestId && request) { requests!.set(requestId, request); configRequests.set(sender, requests!) }
+  try { return await operations.run(kind, lease => {
+    if (request) request.operationId = lease.operation.operationId
+    return effect(lease)
+  }, { resource, signal: lifetime.signal }) }
+  finally {
+    lifetime.dispose()
+    if (requestId && requests && requests.get(requestId) === request) requests.delete(requestId)
+    if (sender && requests?.size === 0 && configRequests.get(sender) === requests) configRequests.delete(sender)
+  }
 }
 
 const yieldConfigOperation = (lease: OperationLease) => lease.wait(new Promise<void>(done => setImmediate(done)))
@@ -864,13 +888,13 @@ function handleLogged<T>(
  * Registers all config manager IPC handlers.
  * Should be called once during app initialization.
  */
-interface ApprovedConfigImport { path: string; raw: string; claimed: boolean; expiresAt: number; release: () => void }
+interface ApprovedConfigImport { path: string; raw: string; requestId?: string; claimed: boolean; expiresAt: number; release: () => void }
 const approvedConfigImports = new WeakMap<WebContents, ApprovedConfigImport>()
 const configImportDialogs = new WeakMap<WebContents, object>()
-function requireApprovedConfigImport(sender: WebContents, path: string, expected?: ApprovedConfigImport): ApprovedConfigImport {
+function requireApprovedConfigImport(sender: WebContents, path: string, expected?: ApprovedConfigImport, requestId?: string): ApprovedConfigImport {
   const approved = approvedConfigImports.get(sender)
   if (approved && (sender.isDestroyed?.() || Date.now() >= approved.expiresAt)) approved.release()
-  if (!approved || approvedConfigImports.get(sender) !== approved || approved.path !== path
+  if (!approved || approvedConfigImports.get(sender) !== approved || approved.path !== path || approved.requestId !== requestId
     || (expected && expected !== approved) || (approved.claimed && expected !== approved)) {
     throw new IpcFault('permission')
   }
@@ -878,38 +902,56 @@ function requireApprovedConfigImport(sender: WebContents, path: string, expected
 }
 
 export function registerConfigManagerIpcHandlers(): void {
+  handleLogged('config:cancel', (event, value: unknown) => {
+    const id = configRequestId(value)
+    if (!id) throw new IpcFault('validation')
+    const request = configRequests.get(event.sender)?.get(id)
+    let cancelled = false
+    if (request && !request.controller.signal.aborted) {
+      if (request.operationId) cancelled = operations.cancel(request.operationId)
+      else { request.controller.abort(); cancelled = true }
+    }
+    const approved = approvedConfigImports.get(event.sender)
+    if (approved?.requestId === id) { approved.release(); cancelled = true }
+    return cancelled
+  })
   // config:export — exports all settings and saves to file via dialog
-  handleLogged('config:export', async (event, mode: unknown = 'redacted') => {
-    return await configManager.exportConfig(event.sender, requireEnum(mode, 'mode', ['redacted', 'secrets']))
+  handleLogged('config:export', async (event, mode: unknown = 'redacted', requestId?: unknown) => {
+    return await configManager.exportConfig(event.sender, requireEnum(mode, 'mode', ['redacted', 'secrets']), { requestId: configRequestId(requestId) })
   })
 
   // config:import — validates a file and returns sections/conflicts
-  handleLogged('config:import', async (event, filePath: string) => {
+  handleLogged('config:import', async (event, filePath: string, value?: unknown) => {
     filePath = requireString(filePath, 'filePath', { maxLength: 4096 })
-    const approved = requireApprovedConfigImport(event.sender, filePath)
+    const requestId = configRequestId(value)
+    const approved = requireApprovedConfigImport(event.sender, filePath, undefined, requestId)
     return configManager.importValidate(filePath, approved.raw, {
-      sender: event.sender, assertAuthorized: () => { requireApprovedConfigImport(event.sender, filePath, approved) }
+      sender: event.sender, requestId, assertAuthorized: () => { requireApprovedConfigImport(event.sender, filePath, approved, requestId) }
     })
   })
 
   // config:import-apply — applies selected sections from import file
   handleLogged(
     'config:import-apply',
-    async (event, filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => {
+    async (event, filePath: string, sections: string[], conflictResolution: 'replace' | 'merge', value?: unknown) => {
       filePath = requireString(filePath, 'filePath', { maxLength: 4096 })
       sections = requireStringArray(sections, 'sections', { maxItems: 32, itemMaxLength: 80 })
       conflictResolution = requireEnum(conflictResolution, 'conflictResolution', ['replace', 'merge'])
-      const approved = requireApprovedConfigImport(event.sender, filePath)
+      const requestId = configRequestId(value)
+      if (requestId && configRequests.get(event.sender)?.has(requestId)) throw new IpcFault('conflict')
+      const approved = requireApprovedConfigImport(event.sender, filePath, undefined, requestId)
       approved.claimed = true
       try { return await configManager.importApply(filePath, sections, conflictResolution, approved.raw, {
-        sender: event.sender, assertAuthorized: () => { requireApprovedConfigImport(event.sender, filePath, approved) }
+        sender: event.sender, requestId, assertAuthorized: () => { requireApprovedConfigImport(event.sender, filePath, approved, requestId) }
       }) }
       finally { approved.release() }
     }
   )
 
   // config:browse-import — opens file dialog to select a JSON config file
-  ipcMain.handle('config:browse-import', async (event) => {
+  ipcMain.handle('config:browse-import', async (event, value?: unknown) => {
+    const requestId = configRequestId(value)
+    if (requestId && configRequests.get(event.sender)?.has(requestId)) throw new IpcFault('conflict')
     approvedConfigImports.get(event.sender)?.release()
     const request = {}
     configImportDialogs.set(event.sender, request)
@@ -934,7 +976,7 @@ export function registerConfigManagerIpcHandlers(): void {
         return lease.commit(() => {
           let timer: ReturnType<typeof setTimeout>
           const lifetime = requestDocumentLifetime(event.sender)
-          const approved: ApprovedConfigImport = { path, raw, claimed: false, expiresAt: Date.now() + 60_000, release: () => {
+          const approved: ApprovedConfigImport = { path, raw, requestId, claimed: false, expiresAt: Date.now() + 60_000, release: () => {
             clearTimeout(timer)
             lifetime.signal.removeEventListener('abort', approved.release)
             lifetime.dispose()
@@ -947,6 +989,6 @@ export function registerConfigManagerIpcHandlers(): void {
           return path
         })
       } finally { if (configImportDialogs.get(event.sender) === request) configImportDialogs.delete(event.sender) }
-    }, { sender: event.sender })
+    }, { sender: event.sender, requestId })
   })
 }

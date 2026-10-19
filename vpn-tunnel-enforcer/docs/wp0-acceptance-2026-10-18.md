@@ -27,17 +27,20 @@ Needs changes: владелец отдельно указал это 19.10. Foll
 #77 слит (`1752bda`): final head `84f0d87`, Qodo 1545221 completed без открытых
 findings, CI 39216740383 success (Windows/Rust/site). Revix full review недоступен
 из-за квоты; отсутствие ревью не approval. Fixes четырёх Qodo findings включены.
+#78 слит (`f35c1f8`): final head `72cd14c`, Qodo 1545611 completed без открытых
+findings, CI 39220632906 success (Windows/Rust/site). Старый CI 4ae7ab9 имел
+один test timeout; он сохранён в журнале. Revix full review по квоте отсутствует.
 
 ## Полная область и первоначальная инвентаризация
 
 | AT | Найденная реализация / доказательства | Остаток до приёмки |
 | --- | --- | --- |
-| 00-001 | AST-проверка 163 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 163 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result, feature list/cancel, speed-test request cancel, planned-feature admission | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
+| 00-001 | AST-проверка 164 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 164 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result, feature list/cancel, speed-test/config request cancel, planned-feature admission | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
 | 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
-| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue; config browse/validate/apply/export, async file I/O и terminal commit приняты в PR #70; key renderer/clipboard/file exports в PR #71; rotation IPC/timer с native drain и retained evidence в PR #72 | UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
+| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска и остановки (#73), priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue; config browse/validate/apply/export, async file I/O и terminal commit приняты в PR #70/#74; key renderer/clipboard/file exports в PR #71; rotation IPC/timer с native drain и retained evidence в PR #72; document loss #78, config unmount в текущем участке | Review/CI текущего участка; прочие UI/background entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
 | 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; ID исходного connect и source/owner/route/confidence в session history/JSON/CSV; JSONL clockId/monotonicMs отдельно от календарных дат и durationMs; реальные owned/legacy/tray/recovery Soft sessions | Все native/background entrypoints и полная матрица событий/истории автоматизаций, live-check и recovery |
-| 00-006 | Общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance до defaults/repair и при записи через открытый handle; центральный registry safeStorage трёх stores, real Conf historical fixtures, exact encrypted backups, checksums/history, actual Electron DPAPI/restart/JSONL | Review/CI текущего участка; startup миграции/классификация между stores, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
+| 00-006 | Общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance до defaults/repair и при записи через открытый handle; центральный registry safeStorage трёх stores, real Conf historical fixtures, exact encrypted backups, checksums/history, actual Electron DPAPI/restart/JSONL; #77 принят после Qodo/CI | Startup миграции/классификация между stores, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
 | 00-007 | Seed 0x5eed003: 200 commands/10 async workers с production lane/FSM, typed losers, парные terminal events, финальный disconnect и 0 fake PID/TUN | Натурный PID-реестр Windows и полная матрица фоновых entrypoints |
 | 00-008 | Dashboard component frames с production FSM/lane; revision fence; Soft через owned IPC; visual fixtures light/dark; native production contextBridge snapshots/disposer | Полная матрица всех операций, тем, размеров и entrypoints; browser fixtures не заменяют native resources |
 | 00-009 | Release registry четырёх функций off/null; production main/preload status/activation gate; schema reject fake evidence; production Sidebar/Settings DOM без planned controls в обычном/advanced режиме с forged flags; настоящий Electron проверяет четыре refusal и persisted JSONL audit/correlation; #76 принят после full/Qodo/CI | Адресная приёмка release admission завершена; реализация и собственная лабораторная приёмка WP-12 остаются отдельным пакетом |
@@ -45,6 +48,47 @@ findings, CI 39216740383 success (Windows/Rust/site). Revix full review недо
 
 Это перечень обнаруженного, а не PASS десяти AT. Ни один новый
 неиспользуемый модуль сам по себе не закрывает критерий интеграции.
+
+## Config workflow: отмена при unmount (19.10.2026)
+
+AT-00-001/003/008: ImportExportSettings создаёт UUID до IPC. Main принимает
+optional token для browse/validate/apply/export; config:cancel ограничен парой
+requester WebContents + token. Один import token связывает весь workflow,
+включая idle snapshot; cancellation отзывает capability. Main operationId и
+correlationId сохраняются отдельно. Duplicate/malformed/foreign/stale requests
+не повреждают законную операцию. Legacy вызовы без token сохраняются.
+
+Unmount отменяет active/idle workflows и очищает success timers. Поздние ответы
+не вызывают следующий этап или UI updates. Проверки включают удержанные
+browse/validate/apply/export, idle cancel/unmount, duplicate queued apply,
+отмену в write queue без поздней записи и нормальный новый import после cancel.
+
+`npm.cmd run build` и повторный `npm.cmd run typecheck` — exit 0, 164 канала,
+0 public any. `node scripts/test-electron-runtime.mjs` — четыре PASS, включая
+CONFIG_REQUEST_NATIVE_PASS: production handlers/stores/registry/guard/preload,
+настоящий sandbox/contextBridge, controlled dialogs/queue, cancel <900 ms,
+отдельный main UUID и исходная correlation, отказ чужому/stale token, отсутствие
+export-файла/поздней записи и успешный новый import. Это локальный Electron 44.4.3
+fixture, без настоящей маршрутизации/VPN. `node scripts/test-wp1-native.mjs
+--ipc-only` — WP1_NATIVE_PASS; traceability AC 927/927, F 210/210 и diff check —
+exit 0. Финальный `npm.cmd test` — **4639 passed /5 skipped /0 failed**,
+281 files passed /2 skipped, 418.05 s, exit 0. Предыдущий full имел один
+устаревший error-category assertion, следующий — 5000 ms timeout существующего
+Windows ACL test. Assertion разделён по новому token contract; budget только
+этого многопроцессного ACL test — 15000 ms. Production deadlines и проверки
+отмены/ACL не ослаблены. Все неудачные прогоны сохранены в progress.md.
+Qodo и CI текущего PR ещё ожидаются.
+
+Первое Qodo #79 (1546103, SHA 1577193) выявило overlap legacy/tokened registry
+cleanup и потерю видимых import choices после apply error. Оба замечания
+воспроизведены отдельными failing regressions. Cleanup сверяет identity Map;
+после ошибки choices остаются видимыми, apply consumed token disabled,
+новый native browse доступен и создаёт новый token. Main одноразовое разрешение
+не продлевается. Адресные три suites — 72 passed, 58.44 s; build/typecheck,
+четыре Electron fixtures, native IPC/CSP, traceability и diff check — exit 0.
+Полный `npm.cmd test` после Qodo fixes — **4641 passed /5 skipped /0 failed**,
+281 files passed /2 skipped, 420.88 s, exit 0. Initial CI 39225869946 success;
+он не заменяет CI/Qodo следующего SHA с исправлениями.
 
 ## Main connection lane — приоритеты, deadline и позднее расписание
 

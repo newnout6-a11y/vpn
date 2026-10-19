@@ -95,10 +95,11 @@ export interface ElectronAPI {
   getTrafficForensicsStatus: () => Promise<TrafficForensicsStatus>
   restartTrafficForensics: () => Promise<TrafficForensicsStatus>
   // Config Import/Export
-  configExport: (mode?: 'redacted' | 'secrets') => Promise<{ success: true; path: string }>
-  configBrowseImport: () => Promise<string | null>
-  configImport: (filePath: string) => Promise<{ success: true; sections: string[]; conflicts: string[] }>
-  configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') => Promise<{ success: true }>
+  configExport: (mode?: 'redacted' | 'secrets', requestId?: string) => Promise<{ success: true; path: string }>
+  configBrowseImport: (requestId?: string) => Promise<string | null>
+  configImport: (filePath: string, requestId?: string) => Promise<{ success: true; sections: string[]; conflicts: string[] }>
+  configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge', requestId?: string) => Promise<{ success: true }>
+  configCancel: (requestId: string) => Promise<boolean>
   // Split Tunneling
   splitTunnelGetApps: () => Promise<SplitTunnelApp[]>
   splitTunnelRefreshApps: () => Promise<{ apps: SplitTunnelApp[]; added: number }>

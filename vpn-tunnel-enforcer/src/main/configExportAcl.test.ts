@@ -125,7 +125,7 @@ $acl=[IO.File]::GetAccessControl(${quote(file)})
     expect(final.protected).toBe(true)
     expect(final.rules.sort()).toEqual([...new Set([final.user, 'S-1-5-18'])].sort())
     expect(await readFile(path, 'utf8')).toBe('secret')
-  })
+  }, 15_000) // Multiple real PowerShell processes; assertions and operation deadlines remain unchanged.
 
   it('keeps crash residue private and the destination unchanged after killing the actual staging writer', async () => {
     const path = join(directory, 'crash.json'), childFile = join(directory, 'crash-writer.cjs')

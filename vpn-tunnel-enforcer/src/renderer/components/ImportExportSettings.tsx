@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Download, Upload, CheckCircle2, AlertTriangle } from 'lucide-react'
 import { MacCard, MacButton, MacModal } from '../design-system'
@@ -7,8 +7,8 @@ import { ipcError, isIpcRemoteErrorData } from '../../shared/ipc-result'
 
 type ConflictResolution = 'replace' | 'merge'
 
-type ConfigApi = Pick<ElectronAPI, 'configExport' | 'configBrowseImport' | 'configImport' | 'configImportApply'>
-type ValidationResult = Awaited<ReturnType<ConfigApi['configImport']>> & { filePath: string }
+type ConfigApi = Pick<ElectronAPI, 'configExport' | 'configBrowseImport' | 'configImport' | 'configImportApply' | 'configCancel'>
+type ValidationResult = Awaited<ReturnType<ConfigApi['configImport']>> & { filePath: string; requestId: string }
 
 function getApi(): ConfigApi {
   return window.electronAPI
@@ -28,6 +28,37 @@ const SECTION_KEYS: Record<string, string> = {
 
 export function ImportExportSettings() {
   const { t, i18n } = useTranslation()
+  const mounted = useRef(false)
+  const requests = useRef(new Set<string>())
+  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
+  const current = (id: string) => mounted.current && requests.current.has(id)
+  const beginRequest = () => {
+    const id = crypto.randomUUID()
+    requests.current.add(id)
+    return id
+  }
+  const cancelRequest = (id: string) => {
+    requests.current.delete(id)
+    void getApi().configCancel(id).catch(() => {})
+  }
+  const flash = (kind: string, update: (value: boolean) => void) => {
+    clearTimeout(timers.current.get(kind))
+    update(true)
+    timers.current.set(kind, setTimeout(() => {
+      timers.current.delete(kind)
+      if (mounted.current) update(false)
+    }, 3000))
+  }
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      for (const id of requests.current) void getApi().configCancel(id).catch(() => {})
+      requests.current.clear()
+      for (const timer of timers.current.values()) clearTimeout(timer)
+      timers.current.clear()
+    }
+  }, [])
 
   const [exporting, setExporting] = useState(false)
   const [exportSuccess, setExportSuccess] = useState(false)
@@ -57,66 +88,83 @@ export function ImportExportSettings() {
   }
 
   const handleExport = async (mode: 'redacted' | 'secrets' = 'redacted') => {
+    if (exporting) return
+    const requestId = beginRequest()
     setExporting(true)
     setExportSuccess(false)
     try {
-      await getApi().configExport(mode)
-      setExportSuccess(true)
-      setTimeout(() => setExportSuccess(false), 3000)
+      await getApi().configExport(mode, requestId)
+      if (current(requestId)) flash('export', setExportSuccess)
     } catch (err: unknown) {
-      if (!isIpcRemoteErrorData(err) || err.category !== 'cancelled') showError(err)
+      if (current(requestId) && (!isIpcRemoteErrorData(err) || err.category !== 'cancelled')) showError(err)
     } finally {
-      setExporting(false)
+      if (current(requestId)) setExporting(false)
+      requests.current.delete(requestId)
     }
   }
 
   const handleImport = async () => {
+    if (importing || (validation && current(validation.requestId))) return
+    const requestId = beginRequest()
+    let retainSelection = false
     setImporting(true)
     setValidation(null)
     setImportSuccess(false)
     try {
-      const filePath = await getApi().configBrowseImport()
+      const filePath = await getApi().configBrowseImport(requestId)
+      if (!current(requestId)) return
       if (!filePath) {
         setImporting(false)
         return
       }
 
-      const result = await getApi().configImport(filePath)
+      const result = await getApi().configImport(filePath, requestId)
+      if (!current(requestId)) return
+      retainSelection = true
       // Show validation results with sections and conflicts
       setValidation({
         ...result,
-        filePath
+        filePath, requestId
       })
       setSelectedSections([...result.sections])
       setConflictResolution('replace')
     } catch (err: unknown) {
-      showError(err)
+      if (current(requestId) && (!isIpcRemoteErrorData(err) || err.category !== 'cancelled')) showError(err)
     } finally {
-      setImporting(false)
+      if (current(requestId)) {
+        setImporting(false)
+        if (!retainSelection) cancelRequest(requestId)
+      }
     }
   }
 
   const handleApplyImport = async () => {
-    if (!validation) return
+    if (!validation || applying || !current(validation.requestId)) return
+    const { requestId } = validation
 
     setApplying(true)
     try {
       await getApi().configImportApply(
         validation.filePath,
         selectedSections,
-        conflictResolution
+        conflictResolution,
+        requestId
       )
-      setImportSuccess(true)
+      if (!current(requestId)) return
+      flash('import', setImportSuccess)
       setValidation(null)
-      setTimeout(() => setImportSuccess(false), 3000)
     } catch (err: unknown) {
-      showError(err)
+      if (current(requestId) && (!isIpcRemoteErrorData(err) || err.category !== 'cancelled')) showError(err)
     } finally {
-      setApplying(false)
+      // Main consumes the snapshot even on failure. Keep choices for inspection;
+      // the user can select a fresh file, but cannot retry the consumed token.
+      if (current(requestId)) setApplying(false)
+      requests.current.delete(requestId)
     }
   }
 
   const handleCancelImport = () => {
+    if (validation) cancelRequest(validation.requestId)
     setValidation(null)
     setSelectedSections([])
   }
@@ -173,7 +221,7 @@ export function ImportExportSettings() {
               variant="secondary"
               onClick={handleImport}
               loading={importing}
-              disabled={importing || !!validation}
+              disabled={importing || (!!validation && current(validation.requestId))}
             >
               <Upload className="w-4 h-4 mr-2" />
               {importSuccess ? (
@@ -262,7 +310,7 @@ export function ImportExportSettings() {
                   variant="primary"
                   onClick={handleApplyImport}
                   loading={applying}
-                  disabled={applying || selectedSections.length === 0}
+                  disabled={applying || selectedSections.length === 0 || !current(validation.requestId)}
                 >
                   {t('settings.applyImport')}
                 </MacButton>

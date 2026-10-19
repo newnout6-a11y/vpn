@@ -353,11 +353,12 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
     return () => ipcRenderer.removeListener('traffic-history:enrichment-updated', listener)
   },
   // Config Import/Export
-  configExport: (mode = 'redacted') => invoke('config:export', assertEnum(mode, ['redacted', 'secrets'] as const, 'mode')),
-  configBrowseImport: () => invoke('config:browse-import'),
-  configImport: (filePath: string) => invoke('config:import', assertString(filePath, 'filePath')),
-  configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge') =>
-    invoke('config:import-apply', assertString(filePath, 'filePath'), assertStringArray(sections, 'sections'), assertEnum(conflictResolution, ['replace', 'merge'] as const, 'conflictResolution')),
+  configExport: (mode = 'redacted', requestId?: string) => invoke('config:export', assertEnum(mode, ['redacted', 'secrets'] as const, 'mode'), ...(requestId === undefined ? [] : [assertString(requestId, 'requestId')])),
+  configBrowseImport: (requestId?: string) => invoke('config:browse-import', ...(requestId === undefined ? [] : [assertString(requestId, 'requestId')])),
+  configImport: (filePath: string, requestId?: string) => invoke('config:import', assertString(filePath, 'filePath'), ...(requestId === undefined ? [] : [assertString(requestId, 'requestId')])),
+  configImportApply: (filePath: string, sections: string[], conflictResolution: 'replace' | 'merge', requestId?: string) =>
+    invoke('config:import-apply', assertString(filePath, 'filePath'), assertStringArray(sections, 'sections'), assertEnum(conflictResolution, ['replace', 'merge'] as const, 'conflictResolution'), ...(requestId === undefined ? [] : [assertString(requestId, 'requestId')])),
+  configCancel: (requestId: string) => invoke('config:cancel', assertString(requestId, 'requestId')),
   // Notification Preferences
   notificationsGetPrefs: () => invoke('notifications:get-prefs'),
   notificationsSetPrefs: prefs => invoke('notifications:set-prefs', assertPlainObject(prefs, 'prefs')),
