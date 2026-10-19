@@ -4599,3 +4599,38 @@ CI/review нового SHA проверяются отдельно после pu
   build/typecheck/traceability/native results выше относятся к этим fixes.
   Следующий шаг — commit/push и новый exact-head Qodo/CI gate; до него
   следующий участок не начинается. WP-0, затем WP-2 остаются active.
+
+### PR #72 — повторное Qodo: предупреждение после failed native restart
+
+- Commit 497decd3974b9509e4138691fa0099e0a39f1cad запушен. Qodo 1543567
+  completed на этом SHA, четыре прежних finding автоматически implemented.
+  Новый action_required 3522607d: нейтральное сообщение preflight было также
+  применено после native restart failure и не предупреждало о возможном
+  обычном маршруте при выключенном отдельном vpnDisconnect notification.
+- Замечание подтверждено: restartProtected после failed start пытается ordinary
+  teardown, но teardown может также не завершиться. Поэтому после попытки
+  native restart показывается явное «Защита после перезапуска не подтверждена —
+  трафик может идти по обычному маршруту» в connectionError; до native restart
+  сохраняется нейтральное сообщение без ложного утверждения о снятой защите.
+  Никакое состояние firewall этим текстом не объявляется доказанным.
+- Новые regression cases для false result и exception после native teardown:
+  npm.cmd test -- src/main/rotationOperations.test.ts -t 'warns about potentially'
+  — 2 failed / 20 skipped, 1.04 s, exit 1
+  (.tmp/wp0-rotation-qodo72-warning-before.log). После fix адресный набор
+  npm.cmd test -- src/main/rotationOperations.test.ts src/main/rotationLifecycle.test.ts src/main/profileRotation.test.ts
+  — 58 passed / 3 files, 4.31 s, exit 0
+  (.tmp/wp0-rotation-qodo72-warning-regression.log). Полный набор/build выполняются;
+  CI 39190787921 относится к прежнему 497decd и не заменяет следующий gate.
+- CI 39190787921 завершился success на 497decd: Windows unit/traceability/
+  production IPC/CSP/WFP/native reads, Rust, сайт; watcher exit 0.
+  npm.cmd run build для warning fix — exit 0, включая typecheck 160 channels /
+  0 public any (.tmp/wp0-rotation-qodo72-warning-build.log). Traceability
+  AC 927/927 / F 210/210, git diff --check — exit 0. После пересборки
+  node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS и
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS, оба exit 0
+  (.tmp/wp0-rotation-qodo72-warning-electron.log,
+  .tmp/wp0-rotation-qodo72-warning-csp.log); scope existing subsets unchanged.
+- Финальный npm.cmd test на неизменном code/test tree — **4444 passed /
+  5 skipped / 0 failed**, 275 files passed / 2 skipped, **205.37 s**, exit 0
+  (.tmp/wp0-rotation-qodo72-warning-full.log). Warning fix готов к commit/push;
+  новый completed Qodo и CI success обязательны до merge и следующего участка.

@@ -1114,3 +1114,11 @@ confirmed state только после повторного сравнения 
 IPC DTO и cancel API по-прежнему используют исходный UUIDv4. Actual JSONL и
 diagnostic read-back проверяют оба одинаковых ID поля и correlation. Это
 не отменяет перечисленные остатки WP-0/WP-10; финальные checks/review — progress.md.
+
+Повторный Qodo потребовал сохранить явное предупреждение после failed native
+restart: connectionError сообщает, что защита после перезапуска не подтверждена
+и трафик может идти по обычному маршруту. Preflight failure, не трогавший native
+туннель, сохраняет отдельный нейтральный текст. Ни успешная ordinary teardown,
+ни отключённый firewall не предполагаются только по факту ошибки restart.
+Production rotation regression проверяет оба исхода native failure — result
+и exception — и отсутствие предупреждения о снятой защите при preflight error.

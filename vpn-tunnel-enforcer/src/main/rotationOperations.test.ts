@@ -195,6 +195,21 @@ describe('production rotation operation lifetime', () => {
     expect(state.active).toBe('a'); expect(state.restart).not.toHaveBeenCalled(); expect(state.send).not.toHaveBeenCalled()
     expect(JSON.stringify(state.notify.mock.calls)).not.toContain('private write failure')
     expect(JSON.stringify(state.notify.mock.calls)).not.toContain('Защита выключена')
+    expect(JSON.stringify(state.notify.mock.calls)).not.toContain('трафик может идти по обычному маршруту')
+  })
+
+  it.each(['result', 'throw'] as const)('warns about potentially unprotected traffic after native restart fails by %s', async failure => {
+    await live()
+    state.restart.mockImplementationOnce(async () => {
+      state.evidence.running = false; state.evidence.pid = null
+      if (failure === 'throw') throw new Error('restart failed')
+      return { success: false, error: 'restart failed' }
+    })
+    expect(await invoke('rotation:rotate-now')).toMatchObject({ ok: true, result: { success: false } })
+    expect(fsm.snapshot.state).not.toBe('connected')
+    const warning = state.notify.mock.calls.find(call => call[0] === 'error')
+    expect(warning).toEqual(['error', 'Ротация не удалась', expect.stringContaining('трафик может идти по обычному маршруту'), 'connectionError'])
+    expect(warning![2]).toContain('Защита после перезапуска не подтверждена')
   })
 
   it('serializes a reversible operationId in actual event rows instead of a masked UUID', async () => {

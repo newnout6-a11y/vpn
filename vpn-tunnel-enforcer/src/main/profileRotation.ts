@@ -285,6 +285,7 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
   // next manual connect. Lazy import avoids any load-order coupling with
   // tunController.
   let reconnectError: string | null = null
+  let restartAttempted = false
   try {
     const { tunController } = await owner.wait(import('./tunController'))
     if (tunController.getStatus().running) {
@@ -324,6 +325,7 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
         selectAndAnnounce()
         selectedLive = true
         owner.beginRestart()
+        restartAttempted = true
         const restarted = await owner.wait(tunController.restartProtected(
           `profile rotation to ${profileName}`,
           {
@@ -361,9 +363,9 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
 
   if (reconnectError) {
     scheduleNextRotation(updatedConfig)
-    // Loud, because the user's traffic is no longer tunnelled. restartProtected
-    // has already rolled the protection back, so connectivity is restored — but
-    // it is *unprotected* connectivity, and only the user can decide what to do.
+    // A failed native restart may have restored ordinary connectivity. Warn
+    // explicitly without claiming that teardown or retained protection is proven.
+    // A preflight failure did not touch the old tunnel and needs a different message.
     logEvent('error', 'profile-rotation', 'rotation did not complete', {
       profileId: nextProfileId,
       profileName,
@@ -372,7 +374,9 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
     notify(
       'error',
       'Ротация не удалась',
-      `Не удалось подключиться к профилю ${profileName}: ${reconnectError}. Проверьте состояние защиты.`,
+      `Не удалось подключиться к профилю ${profileName}: ${reconnectError}. ${restartAttempted
+        ? 'Защита после перезапуска не подтверждена — трафик может идти по обычному маршруту.'
+        : 'Проверьте состояние защиты.'}`,
       'connectionError'
     ).catch(() => undefined)
     return { success: false, newProfile: nextProfileId }
