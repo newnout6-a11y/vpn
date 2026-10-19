@@ -166,7 +166,7 @@ afterEach(async () => {
 })
 
 describe('VPN key operation lifetime', () => {
-  it.each(channels.flatMap(channel => ['render-process-gone', 'did-start-navigation'].map(event => ({ channel, event }))))
+  it.each(channels.flatMap(channel => ['render-process-gone', 'did-navigate'].map(event => ({ channel, event }))))
   ('cancels $channel on requester $event before secret consent completes', async ({ channel, event }) => {
     const gate = held({ response: 1 }); state.nativePrompt.mockReturnValueOnce(gate.promise)
     const run = invokeExport(channel)

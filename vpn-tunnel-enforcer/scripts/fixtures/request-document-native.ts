@@ -4,6 +4,7 @@ import { app, BrowserWindow } from 'electron'
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { requestDocumentLifetime } from '../../src/main/requestDocumentLifetime'
 import { OperationRegistry } from '../../src/main/operationRegistry'
 
@@ -23,7 +24,7 @@ app.whenReady().then(async () => {
   for (const trigger of ['reload', 'destroy'] as const) {
     const view = window(), sender = view.webContents
     await view.loadFile(join(directory, 'renderer.html'))
-    const events = ['destroyed', 'render-process-gone', 'did-start-navigation']
+    const events = ['destroyed', 'render-process-gone', 'did-navigate']
     const baseline = events.map(event => sender.listenerCount(event))
     const lifetime = requestDocumentLifetime(sender)
     const observed: string[] = []
@@ -36,6 +37,13 @@ app.whenReady().then(async () => {
     }, { signal: lifetime.signal })
     const cancelled = assert.rejects(run, (error: any) => error.category === 'cancelled')
     if (trigger === 'reload') {
+      // Same preventDefault boundary as the main window's will-navigate guard.
+      const blocked = once(sender, 'will-navigate')
+      const block = (event: Electron.Event) => event.preventDefault()
+      sender.once('will-navigate', block)
+      await sender.executeJavaScript(`location.href = ${JSON.stringify(pathToFileURL(join(directory, 'other.html')).href)}; undefined`)
+      await blocked
+      assert.equal(lifetime.signal.aborted, false, 'a blocked navigation keeps the requesting document')
       const loaded = once(foreign.webContents, 'did-finish-load')
       foreign.webContents.reload(); await loaded
       assert.equal(lifetime.signal.aborted, false, 'another document must not cancel this request')
@@ -61,7 +69,7 @@ app.whenReady().then(async () => {
   }
   console.log('REQUEST_DOCUMENT_NATIVE_PASS', JSON.stringify({ electron: process.versions.electron,
     checks: ['real reload/destroy cancel within 900 ms; retained drain and no late commit',
-      'foreign reload and same-document navigation retain ownership', 'listeners disposed after terminal'] }))
+      'blocked navigation, foreign reload and same-document navigation retain ownership', 'listeners disposed after terminal'] }))
 }).then(() => { clearTimeout(watchdog); app.exit(0) }).catch(error => {
   console.error(error)
   for (const view of windows) if (!view.isDestroyed()) view.destroy()

@@ -9,7 +9,14 @@ function sender(destroyed = false) {
 }
 
 describe('requesting document lifetime', () => {
-  it.each(['destroyed', 'render-process-gone', 'did-start-navigation'])('aborts only its requester on %s and disposes listeners', event => {
+  it('keeps an attempted navigation that the will-navigate guard can block', () => {
+    const owner = sender(), lifetime = requestDocumentLifetime(owner)
+    owner.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false })
+    expect(lifetime.signal.aborted).toBe(false)
+    lifetime.dispose()
+  })
+
+  it.each(['destroyed', 'render-process-gone', 'did-navigate'])('aborts only its requester on %s and disposes listeners', event => {
     const first = sender(), second = sender()
     const own = requestDocumentLifetime(first), other = requestDocumentLifetime(second)
     first.emit(event, { isMainFrame: true, isSameDocument: false })
@@ -19,10 +26,10 @@ describe('requesting document lifetime', () => {
     expect(first.eventNames()).toEqual([]); expect(second.eventNames()).toEqual([])
   })
 
-  it.each([{ isMainFrame: false, isSameDocument: false }, { isMainFrame: true, isSameDocument: true }])
-  ('retains the document for navigation $isMainFrame / $isSameDocument', details => {
+  it.each(['did-frame-navigate', 'did-navigate-in-page'])
+  ('retains the document for subframe/in-page event %s', event => {
     const owner = sender(), lifetime = requestDocumentLifetime(owner)
-    owner.emit('did-start-navigation', details)
+    owner.emit(event, { isMainFrame: false })
     expect(lifetime.signal.aborted).toBe(false)
     lifetime.dispose()
     owner.emit('destroyed')

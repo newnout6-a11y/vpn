@@ -72,7 +72,7 @@ afterEach(async () => {
 
 describe('profile import operation ownership', () => {
   it.each(['servers:add', 'servers:add-to-group'].flatMap(channel =>
-    ['destroyed', 'render-process-gone', 'did-start-navigation'].map(event => ({ channel, event }))
+    ['destroyed', 'render-process-gone', 'did-navigate'].map(event => ({ channel, event }))
   ))('cancels $channel on requester $event without a late commit', async ({ channel, event }) => {
     const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false })
     const gate = held(), before = snapshot()

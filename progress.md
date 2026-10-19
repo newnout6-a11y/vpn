@@ -5502,3 +5502,43 @@ CI/review нового SHA проверяются отдельно после pu
   assertions, deadlines и состав не ослаблены. git diff --check — exit 0.
   Коммит/push выполняются в codex/wp0-requester-lifetime; следующий gate —
   automatic Qodo и default CI точного опубликованного SHA.
+- Создан/прикреплён PR #78: https://github.com/newnout6-a11y/vpn/pull/78,
+  первоначальный head 4ae7ab9c2e34deb05042de0c593844aa0726268d. Qodo 1545426
+  completed: 0948692f-17b5-44af-81e2-a364d1328435, remediation_recommended —
+  did-start-navigation срабатывает до will-navigate.preventDefault().
+  Подтверждено actual Electron: node scripts/test-electron-runtime.mjs —
+  exit 1, assertion 'a blocked navigation keeps the requesting document'
+  (.tmp/wp0-requester-qodo-before.log). Blocked local-file navigation не менял
+  документ, но отменял его запрос и отзывал selection. Сетевая попытка не нужна.
+- Lifetime перенесён на main-frame did-navigate: same-document навигация это
+  событие не испускает, prevented попытка его не достигает. Native regression
+  проверяет guard preventDefault до foreign/hash/reload/destroy; idle config
+  capability имеет отдельный handler regression. 6-suite targeted после switch —
+  175 passed, 50.21 s, exit 0 (.tmp/wp0-requester-qodo-targeted.log); позднее
+  добавленный отдельный idle blocked-selection case проверяется новым прогоном
+  boundaries и финальным full. npm.cmd run build — exit 0, включая typecheck
+  (.tmp/wp0-requester-qodo-build.log). node scripts/test-electron-runtime.mjs
+  после завершения build — три PASS, exit 0
+  (.tmp/wp0-requester-qodo-electron-final.log). Traceability AC 927/927,
+  F 210/210 и git diff --check — exit 0.
+- CI старого 4ae7ab9 / 39218961229 failed: Windows unit — 4618 passed /
+  4 skipped / 1 failed, 279.94 s. Единственный fail — существующий
+  serverKeyOperations 'retains bounded cause servers:export-all-proxies-file /
+  ENOSPC in persistent diagnostics': test timed out in 5000 ms, без падения
+  assertion (.tmp/wp0-requester-ci-failed.log). Site/Rust success; следующие
+  Windows steps не запускались. Причина тайминга этим одним логом не доказана;
+  production/assertion deadlines не изменены. Требуется полный default CI нового
+  SHA после Qodo fix, старый run не объявляется PASS. Revix review 5568464232
+  снова free-quota-reached до 20.10 03:00 МСК, full review отсутствует.
+- Финальный адресный npm.cmd test -- src/main/configOperations.test.ts
+  src/main/requestDocumentLifetime.test.ts — **40 passed**, 64.11 s, exit 0
+  (.tmp/wp0-requester-qodo-boundaries.log), включая idle blocked-selection case.
+  Final full запущен отдельно на неизменяемом production/unit tree.
+- Final после Qodo fix: npm.cmd test -- --maxWorkers=1 — **4620 passed /
+  5 skipped / 0 failed**, 281 files passed / 2 skipped, **393.66 s**, exit 0
+  (.tmp/wp0-requester-qodo-full.log). Во время прогона production/unit tree
+  неизменен, test/assertion/production deadlines не ослаблены. node
+  scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-requester-qodo-csp.log). Build/typecheck, native blocked-navigation
+  regression, traceability и diff check также exit 0, как записано выше.
+  Исправление идёт в тот же #78; требуются Qodo/CI нового SHA.

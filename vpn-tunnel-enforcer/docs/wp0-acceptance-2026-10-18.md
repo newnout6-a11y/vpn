@@ -1333,6 +1333,10 @@ upgrade/downgrade и межпроцессный CAS остаются откры�
 Main-only requestDocumentLifetime связывает вызов с текущим requesting document:
 destroyed, render-process-gone и полная main-frame navigation отменяют его сигнал.
 Same-document/subframe navigation и события чужого WebContents не отменяют вызов.
+После Qodo 1545426 используется main-frame did-navigate: попытка перехода,
+заблокированная will-navigate guard, сохраняет документ, запрос и idle approval.
+Real Electron регрессия сначала воспроизвела ошибку на did-start-navigation,
+затем прошла на committed navigation; настоящие reload/destroy остались зелёными.
 Внешняя main cancellation объединяется с lifetime без подмены operation UUID или
 correlation; renderer не передаёт AbortSignal. Слушатели снимаются при bounded
 terminal, а registry сохраняет физическую аренду до drain.

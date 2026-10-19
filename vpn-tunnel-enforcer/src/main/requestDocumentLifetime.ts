@@ -10,18 +10,18 @@ export function requestDocumentLifetime(sender?: WebContents, signal?: AbortSign
 } {
   if (sender?.isDestroyed?.() || signal?.aborted) throw new IpcFault('cancelled')
   const controller = new AbortController(), abort = () => controller.abort()
-  const navigating = (details: { isMainFrame: boolean; isSameDocument: boolean }) => {
-    if (details.isMainFrame && !details.isSameDocument) abort()
-  }
   sender?.once?.('destroyed', abort)
   sender?.once?.('render-process-gone', abort)
-  sender?.on?.('did-start-navigation', navigating)
+  // did-navigate is main-frame only, excludes in-page navigation and fires
+  // after the security guard can prevent navigation. An attempt alone must
+  // not revoke a document that remains in place.
+  sender?.on?.('did-navigate', abort)
   return {
     signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
     dispose() {
       sender?.removeListener?.('destroyed', abort)
       sender?.removeListener?.('render-process-gone', abort)
-      sender?.removeListener?.('did-start-navigation', navigating)
+      sender?.removeListener?.('did-navigate', abort)
     }
   }
 }

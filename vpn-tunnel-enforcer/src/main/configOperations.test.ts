@@ -136,7 +136,7 @@ afterEach(async () => {
 
 describe('configuration operation lifetime', () => {
   it.each(['import', 'export'].flatMap(kind =>
-    ['render-process-gone', 'did-start-navigation'].map(event => ({ kind, event }))
+    ['render-process-gone', 'did-navigate'].map(event => ({ kind, event }))
   ))('cancels config $kind on requester $event', async ({ kind, event }) => {
     const gate = held(kind === 'import' ? { canceled: false, filePaths: [selected] } : { canceled: false, filePath: destination })
     ;(kind === 'import' ? state.openDialog : state.saveDialog).mockReturnValue(gate.promise)
@@ -151,9 +151,18 @@ describe('configuration operation lifetime', () => {
     expect(sender.eventNames()).toEqual([])
   })
 
-  it.each(['render-process-gone', 'did-start-navigation'])('revokes an idle import selection on %s', async event => {
+  it.each(['render-process-gone', 'did-navigate'])('revokes an idle import selection on %s', async event => {
     expect(await invoke('config:browse-import')).toMatchObject({ ok: true, result: selected })
     sender.emit(event, { isMainFrame: true, isSameDocument: false })
+    expect(await invoke('config:import', selected)).toMatchObject({ ok: false, error: { category: 'permission' } })
+    expect(sender.eventNames()).toEqual([])
+  })
+
+  it('retains an idle selection when navigation is attempted but prevented', async () => {
+    expect(await invoke('config:browse-import')).toMatchObject({ ok: true, result: selected })
+    sender.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false })
+    expect(await invoke('config:import', selected)).toMatchObject({ ok: true })
+    sender.emit('did-navigate')
     expect(await invoke('config:import', selected)).toMatchObject({ ok: false, error: { category: 'permission' } })
     expect(sender.eventNames()).toEqual([])
   })

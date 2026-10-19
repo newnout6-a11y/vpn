@@ -154,7 +154,7 @@ describe('owned subscription refresh (AT-00-003/005/007; F-063/F-070)', () => {
     return group
   }
 
-  it.each(['destroyed', 'render-process-gone', 'did-start-navigation'])('cancels manual refresh on requester %s', async event => {
+  it.each(['destroyed', 'render-process-gone', 'did-navigate'])('cancels manual refresh on requester %s', async event => {
     const group = seed(), gate = heldRefresh()
     const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false })
     resolveVpnProfilesMock.mockReturnValue(gate.promise)
