@@ -65,5 +65,6 @@ describe.skipIf(process.platform !== 'win32')('native helper timing envelope', (
       expect(reply.executionMs).toBeGreaterThanOrEqual(0)
     }
     expect(replies[0].executionMs).toBeGreaterThanOrEqual(65)
-  })
+  // The child has a 15s native timeout; let it report before the outer harness expires.
+  }, 20_000)
 })

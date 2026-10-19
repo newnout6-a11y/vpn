@@ -239,7 +239,8 @@ describe('main-owned export approval (AT-01-008)', () => {
       expect(state.clipboardWrite).toHaveBeenCalledWith(secretUri)
       expect(result.clearAfterMs).toBe(60_000)
     } else if (channel.endsWith('-file')) expect(readFileSync(exportPath, 'utf8')).toContain('FAKE-PRIVATE-KEY')
-  })
+  // File cases run actual PowerShell ACL checks, as do the adjacent native fixtures.
+  }, 15_000)
   it('renderer closure while consent is pending prevents disclosure', async () => {
     let approve!: (value: { response: number }) => void
     state.nativePrompt.mockImplementationOnce(() => new Promise(resolve => { approve = resolve }))
