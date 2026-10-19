@@ -1,11 +1,14 @@
 // AT-00-010, F-143: bounded scan and exact JSONL record accounting.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtemp, open, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { inspectAuditLog } from './auditLogIntegrity'
 
 let directory: string
-beforeEach(async () => { directory = await mkdtemp(join(process.cwd(), '.tmp', 'audit-scan-')) })
+beforeEach(async () => {
+  await mkdir(join(process.cwd(), '.tmp'), { recursive: true })
+  directory = await mkdtemp(join(process.cwd(), '.tmp', 'audit-scan-'))
+})
 afterEach(async () => { await rm(directory, { recursive: true, force: true }) })
 describe('bounded audit log inspection', () => {
   it('distinguishes a missing file from retained corruption', async () => {

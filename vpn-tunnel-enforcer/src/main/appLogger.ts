@@ -53,6 +53,9 @@ export function repairMojibake(value: string): string {
 // and start a fresh file. We keep exactly one previous generation — enough for
 // support to see what happened before the roll, bounded at 2x the cap total.
 const MAX_LOG_BYTES = 5 * 1024 * 1024
+// Startup reports must not evict evidence earlier than ordinary events would.
+// The allowance is bounded even if a partially failed scan/write is retried.
+const MAX_INTEGRITY_MARKER_BYTES = 4096
 
 // 2 x 5 MiB app generations + 2 x 10 MiB for each engine = 50 MiB.
 let engineLogWatcher: ReturnType<typeof watchEngineLogs> | null = null
@@ -77,6 +80,7 @@ let queue = Promise.resolve()
 // growth from the byte length we append.
 let currentLogBytes = -1
 let integrityChecked = false
+let integrityMarkerBytes = 0
 
 export function getLogDir(): string {
   return join(app.getPath('userData'), 'logs')
@@ -114,13 +118,14 @@ async function rotateIfNeeded(incomingBytes: number): Promise<void> {
         currentLogBytes = 0
       }
     }
-    if (currentLogBytes + incomingBytes <= MAX_LOG_BYTES) return
+    if (currentLogBytes + incomingBytes <= MAX_LOG_BYTES + integrityMarkerBytes) return
     // Roll: app.log → app.prev.log (overwrite the older generation).
     const { rename, unlink, stat: fsStat } = await import('fs/promises')
     await unlink(getAppLogPrevPath()).catch(() => undefined)
     try {
       await rename(getAppLogPath(), getAppLogPrevPath())
       currentLogBytes = 0
+      integrityMarkerBytes = 0
     } catch {
       // If rename failed (e.g. file locked), do NOT reset counter to 0. Re-stat from disk.
       try {
@@ -201,8 +206,9 @@ function formatLine(event: PendingEvent): string {
   } satisfies AppEvent) + '\n'
 }
 
-async function appendLine(line: string): Promise<void> {
+async function appendLine(line: string, integrityMarker = false): Promise<void> {
   const lineBytes = Buffer.byteLength(line, 'utf8')
+  if (integrityMarker) integrityMarkerBytes = Math.min(MAX_INTEGRITY_MARKER_BYTES, integrityMarkerBytes + lineBytes)
   await rotateIfNeeded(lineBytes)
   try {
     await appendFile(getAppLogPath(), line, 'utf8')
@@ -227,12 +233,14 @@ async function checkHistory(): Promise<void> {
       await appendFile(getAppLogPath(), '\n', 'utf8')
       if (currentLogBytes >= 0) currentLogBytes++
     }
-    const message = result?.invalidRows ? 'history.corrupted' : !result?.complete ? 'history.unavailable' : undefined
-    if (message) {
+    const messages: string[] = []
+    if (result?.invalidRows) messages.push('history.corrupted')
+    if (!result?.complete) messages.push('history.unavailable')
+    for (const message of messages) {
       const details = { generation, ...(result ? { invalidRows: result.invalidRows, complete: result.complete } : { complete: false }) }
       console.error(`[logs] ${message}`, details)
       await appendLine(formatLine({ level: 'error', scope: 'logs', message, details,
-        source: 'lifecycle', owner: 'unknown', route: 'unconfirmed', confidence: 'indeterminate' }))
+        source: 'lifecycle', owner: 'unknown', route: 'unconfirmed', confidence: 'indeterminate' }), true)
     }
   }
   integrityChecked = true
@@ -398,6 +406,7 @@ export async function clearAppLog(): Promise<void> {
         ] : [])
       ])
       currentLogBytes = 0
+      integrityMarkerBytes = 0
     } finally {
       if (watcher) startEngineLogRetention()
     }

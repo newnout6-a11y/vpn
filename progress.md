@@ -6046,3 +6046,49 @@ CI/review нового SHA проверяются отдельно после pu
   315.36s,exit0 (.tmp/wp0-audit-integrity-full.log). Code/test tree не менялся
   с начала run. Full/build/typecheck/Electron/coverage/diff прошли; следующий
   участок допускается после собственного completed Qodo и CI на final SHA.
+- PR #84: initial head ab2ad5a299ede487761b4d5e3c7b11d8acc4926c,
+  automatic Qodo1555507 completed:2 findings. Revix quota до20.10 00:00UTC,
+  полноценного review нет. CI39311702631 — только initial head.
+- Оба Qodo cases воспроизведены: npm.cmd test --
+  src/main/appLoggerIntegrity.test.ts —15 passed/2 failed,2.53s,exit1
+  (.tmp/wp0-audit-review-before.log). complete=false ранее был в corruption
+  details, но отсутствовал независимый history.unavailable. Теперь оба маркера
+  независимы. Near-cap app.log + damaged app.prev.log прежде терял previous
+  при записи marker+event, хотя ordinary event помещался. Bounded4096-byte
+  allowance служебных startup reports откладывает преждевременную ротацию;
+  ordinary rotation продолжается, allowance сбрасывается при roll/clear.
+- Повтор того же8-suite targeted command —54/54 passed,3.12s,exit0
+  (.tmp/wp0-audit-review-targeted.log), включая последующую ordinary rotation.
+  Final full/build и remote review нового SHA необходимы; attribution Qodo
+  вручную не меняется.
+- Review build/typecheck —exit0 (.tmp/wp0-audit-review-build.log),165 channels/
+  0 public any; node scripts/test-electron-runtime.mjs —6 PASS,exit0
+  (.tmp/wp0-audit-review-electron.log). Coverage AC927/927,F210/210 и diff
+  —exit0. CI39311702631 completed/success на initial ab2ad5a; новый SHA
+  всё ещё требует собственного review/CI. Final full ещё выполняется.
+- Review full npm.cmd test —4784 passed/1 failed/5 skipped,359.81s,exit1
+  (.tmp/wp0-audit-review-full.log). Прежний elevatedPsHelperNative case
+  preserves command IDs… занял5516ms при default Vitest5000ms; assertions
+  production helper не показали отдельной ошибки. Адресный npm.cmd test --
+  src/main/elevatedPsHelperNative.test.ts —2/2 passed,5.71s,exit0
+  (.tmp/wp0-audit-review-native-recheck.log). Его код и budgets не менялись.
+  Повтор полного npm.cmd test на том же code/test tree —отдельный лог
+  .tmp/wp0-audit-review-full2.log; первый full не объявляется зелёным.
+- Full2 —4784 passed/1 failed/5 skipped,374.96s,exit1: прежний native
+  servers:export-all-proxies-file approval case занял7871ms при Vitest5000ms.
+  Ошибка именно outer harness timeout, не failure security assertions.
+  Для двух выявленных fixtures outer budgets согласованы с native boundaries:
+  helper20s при spawnSync15s, file approval15s как соседние ACL fixtures.
+  Production deadlines, <900ms responsiveness и все safety assertions сохранены.
+  Новые filesystem suites сами создают parent .tmp, без зависимости от порядка.
+  После этих test-only правок запускаются targeted/full/typecheck; прежние два
+  failures остаются записанными, не подменяются отдельным успешным прогоном.
+- Final targeted command: прежние8 suites + elevatedPsHelperNative.test.ts +
+  serverKeyExportSecurity.test.ts —78/78 passed,10 suites,27.98s,exit0
+  (.tmp/wp0-audit-review-harness-targeted.log). Final typecheck —exit0,
+  165 channels/0 public any (.tmp/wp0-audit-review-final-typecheck.log).
+- Full3 npm.cmd test —4785 passed/5 skipped/0 failed,292 files passed/2 skipped,
+  360.34s,exit0 (.tmp/wp0-audit-review-full3.log). Code/test tree не менялся
+  с начала run. Build и6 Electron fixtures пройдены на этом production tree
+  до test-only setup/budget правок. Coverage/diff —exit0. Новый published SHA
+  требует собственного completed Qodo и CI; initial-head success не переносится.

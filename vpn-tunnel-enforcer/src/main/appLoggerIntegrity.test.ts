@@ -1,6 +1,6 @@
 // AT-00-005/010, F-143: production logger, actual JSONL files and reloads.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 const state = vi.hoisted(() => ({ directory: '' }))
@@ -23,6 +23,7 @@ async function appended(message = 'new-event') {
   return raw
 }
 beforeEach(async () => {
+  await mkdir(join(process.cwd(), '.tmp'), { recursive: true })
   state.directory = await mkdtemp(join(process.cwd(), '.tmp', 'audit-integrity-'))
   await mkdir(join(state.directory, 'logs'))
   path = join(state.directory, 'logs', 'app.log'); previous = join(state.directory, 'logs', 'app.prev.log')
@@ -150,5 +151,33 @@ describe('durable application event history integrity', () => {
     await rm(path, { recursive: true })
     logger.logEvent('info', 'fixture', 'new-event')
     expect(rows(await appended()).some(row => row.message === 'failed-event')).toBe(false)
+  })
+
+  it('reports both known corruption and an incomplete scan of the retained generation', async () => {
+    const handle = await open(previous, 'w')
+    try {
+      await handle.truncate(34 * 1024 * 1024)
+      await handle.write(Buffer.from('{}\n'), 0, 3, 0)
+    } finally { await handle.close() }
+    logger.logEvent('info', 'fixture', 'new-event')
+    const parsed = rows(await appended())
+    expect(parsed.find(row => row.message === 'history.corrupted')).toMatchObject({ details: { generation: 'previous', invalidRows: 1, complete: false } })
+    expect(parsed.find(row => row.message === 'history.unavailable')).toMatchObject({ details: { generation: 'previous', complete: false } })
+  })
+
+  it('does not let startup markers rotate away retained damage before an ordinary event would', async () => {
+    const older = oldRows() + 'broken'; await writeFile(previous, older)
+    const line = JSON.stringify({ ts: '2026-10-19T12:00:00.000Z', level: 'info', scope: 'fixture', message: 'padding' }) + '\n'
+    const original = line.repeat(Math.floor((5 * 1024 * 1024 - 450) / Buffer.byteLength(line)))
+    await writeFile(path, original)
+    logger.logEvent('info', 'fixture', 'new-event')
+    const raw = await appended()
+    expect(raw.startsWith(original)).toBe(true)
+    expect(await readFile(previous, 'utf8')).toBe(older)
+    // Ordinary events must still eventually rotate: the exemption is bounded.
+    for (let i = 0; i < 12; i++) logger.logEvent('info', 'fixture', 'next-event')
+    await logger.flushAppLog()
+    expect(await readFile(previous, 'utf8')).toContain('history.corrupted')
+    expect(await readFile(previous, 'utf8')).not.toBe(older)
   })
 })

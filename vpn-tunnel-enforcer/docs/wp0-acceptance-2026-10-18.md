@@ -76,6 +76,21 @@ Typecheck165 channels/0 public any —exit0. Полный набор/build и re
 записываются в progress.md. Остальные producers/semantic errors/migrations
 остаются открытыми; этот участок не завершает весь WP-0.
 
+Qodo1555507 для initial PR #84 нашёл2 граничных случая. Оба воспроизведены
+отдельными production-logger tests до fix: incomplete scan теперь всегда
+получает собственный history.unavailable, независимо от найденной коррупции;
+startup markers имеют bounded4096-byte rotation allowance, поэтому не стирают
+damaged previous раньше обычных событий. Allowance сбрасывается при roll/clear;
+последующая обычная ротация тоже проверена. Targeted54/54 passed,3.12s.
+Final full/build и новая automatic Qodo/CI проверка требуются на final SHA.
+
+Review final full —4785 passed/5 skipped/0 failed,360.34s,exit0. До него
+два full имели по одному outer5000ms timeout в прежних native helper/export
+fixtures. Их outer budgets согласованы с native boundaries (20s/15s), safety
+assertions и production responsiveness не менялись. Targeted78/78 passed,
+typecheck/build/6 Electron fixtures/coverage/diff —exit0. Полная история failures
+и точные команды в progress.md; remote gate проверяется на новом SHA.
+
 ## Config workflow: отмена при unmount (19.10.2026)
 
 AT-00-001/003/008: ImportExportSettings создаёт UUID до IPC. Main принимает
