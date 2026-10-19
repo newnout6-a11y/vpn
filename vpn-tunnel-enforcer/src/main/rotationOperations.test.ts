@@ -285,4 +285,20 @@ describe('production rotation operation lifetime', () => {
     expect(rotation.getConfig()).toMatchObject({ enabled: false, nextRotationAt: null })
     expect(vi.getTimerCount()).toBe(0)
   })
+
+  it.each([{}, { enabled: true }, { intervalMinutes: 5 }, { profileIds: ['a', 'b'] }])('keeps an admitted restart and timer deadline for an unchanged config patch %j', async patch => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    rotation.initProfileRotation()
+    const nextRotationAt = rotation.getConfig().nextRotationAt
+    await vi.advanceTimersByTimeAsync(1000)
+    const { gate, result } = await pauseAt('restart')
+    const signal = state.restart.mock.calls[0][2].signal as AbortSignal
+    await invoke('rotation:set-config', patch)
+    expect(signal.aborted).toBe(false)
+    expect(running().kind).toBe('rotation')
+    expect(rotation.getConfig().nextRotationAt).toBe(nextRotationAt)
+    gate.release()
+    expect(await result).toMatchObject({ ok: true, result: { success: true } })
+    expect(cleanup).not.toHaveBeenCalled()
+  })
 })

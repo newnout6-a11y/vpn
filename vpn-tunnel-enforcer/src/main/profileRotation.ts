@@ -519,7 +519,6 @@ export function registerRotationHandlers(): void {
 
   handleLogged('rotation:set-config', async (_event, partial: Partial<RotationConfig>) => {
     partial = sanitizeRotationConfigPatch(partial)
-    stopTimer()
     const current = getConfig()
     let updated: RotationConfig = {
       ...current,
@@ -535,6 +534,15 @@ export function registerRotationHandlers(): void {
     }
     updated = clampCurrentIndex(updated)
 
+    if (updated.enabled === current.enabled && updated.intervalMinutes === current.intervalMinutes
+      && updated.order === current.order && updated.currentIndex === current.currentIndex
+      && updated.nextRotationAt === current.nextRotationAt
+      && updated.profileIds.length === current.profileIds.length
+      && updated.profileIds.every((id, index) => id === current.profileIds[index])) return current
+
+    // A real config replacement invalidates work prepared from the old values.
+    // Saving the same values must not interrupt an in-flight native restart.
+    stopTimer()
     saveConfig(updated)
 
     if (updated.enabled) {

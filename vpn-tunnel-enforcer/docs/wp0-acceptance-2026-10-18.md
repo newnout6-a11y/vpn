@@ -1122,3 +1122,9 @@ restart: connectionError сообщает, что защита после пер
 ни отключённый firewall не предполагаются только по факту ошибки restart.
 Production rotation regression проверяет оба исхода native failure — result
 и exception — и отсутствие предупреждения о снятой защите при preflight error.
+
+Сохранение эквивалентного config patch (включая новый массив прежних profileIds)
+не отменяет admitted rotation, не переписывает файл и не сбрасывает countdown.
+Реальная замена конфигурации по-прежнему отменяет работу со старыми значениями.
+L2 regression проверяет signal, прежний nextRotationAt и успешное завершение
+удержанного native restart без ordinary cleanup для четырёх no-op patch.

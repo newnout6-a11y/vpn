@@ -4634,3 +4634,35 @@ CI/review нового SHA проверяются отдельно после pu
   5 skipped / 0 failed**, 275 files passed / 2 skipped, **205.37 s**, exit 0
   (.tmp/wp0-rotation-qodo72-warning-full.log). Warning fix готов к commit/push;
   новый completed Qodo и CI success обязательны до merge и следующего участка.
+
+### PR #72 — сохранение без изменений не отменяет native restart
+
+- Commit 33d3dfc719e22da1d6aa78e12094a677d52d2d08 запушен. Qodo 1543596
+  completed на этом SHA: все пять findings автоматически implemented, новых
+  нет. CI 39191350545 ещё выполняется; это не gate для следующих локальных edits.
+- Revix 4309900214/4309900217 подтвердили дополнительную границу: безусловный
+  stopTimer при пустом или эквивалентном config patch отменял уже начатый restart
+  и сбрасывал countdown. Теперь сравниваются нормализованные значения всех
+  RotationConfig полей (profileIds по содержимому); no-op возвращает current
+  без записи/stop/reschedule. Реальное изменение сохраняет отмену и повторное
+  планирование, чтобы поздний callback не перезаписал новую конфигурацию.
+  Это не меняет решение о physical drain/ordinary cleanup после настоящей отмены.
+- До fix npm.cmd test -- src/main/rotationOperations.test.ts -t 'unchanged config patch'
+  — 4 failed / 22 skipped, 1.68 s, exit 1 (.tmp/wp0-rotation-noop-before.log).
+  Проверяются пустой patch и прежние enabled/interval/profileIds, signal,
+  admitted operation, прежний nextRotationAt и успешное завершение без cleanup.
+  После fix npm.cmd test -- src/main/rotationOperations.test.ts src/main/profileRotation.test.ts src/main/rotationLifecycle.test.ts
+  — 62 passed / 3 files, 5.08 s, exit 0 (.tmp/wp0-rotation-noop-regression.log).
+  Full/build выполняются. Traceability AC 927/927 / F 210/210 и diff check — exit 0.
+- npm.cmd run build — exit 0, включая typecheck 160 channels / 0 public any
+  (.tmp/wp0-rotation-noop-build.log). На пересобранном out
+  node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS и
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS, оба exit 0
+  (.tmp/wp0-rotation-noop-electron.log, .tmp/wp0-rotation-noop-csp.log).
+  Scope прежний: generic runtime/IPC/CSP subsets с fake OS, не native rotation L3.
+- Финальный npm.cmd test после no-op fix — **4448 passed / 5 skipped /
+  0 failed**, 275 files passed / 2 skipped, **207.90 s**, exit 0
+  (.tmp/wp0-rotation-noop-full.log). Во время full code/test tree не менялся.
+  CI 39191350545 success на прежнем 33d3dfc, watcher exit 0: Windows
+  unit/traceability/production IPC/CSP/WFP/native reads, Rust и сайт.
+  Для no-op fix требуется новый commit/push и exact-head Qodo/CI gate.
