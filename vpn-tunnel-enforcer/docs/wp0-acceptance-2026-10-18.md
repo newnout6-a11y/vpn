@@ -13,15 +13,17 @@ CI и review обязательны.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
 #54/#55/#56/#57/#58/#59/#60/#61/#62/#63/#64/#65/#66/#67/#68/#69/#70/#71/#72/#73 слиты в main после exact-head CI success и completed Qodo,
 без открытых Qodo findings; прежний запрет слияния отменён. Revix #70 сохранил
-Needs changes: владелец отдельно указал это 19.10, выполняется follow-up
-проверка commit callbacks и политики секретного staging/экспорта. Эти замечания
-не считаются закрытыми по одному прежнему merge или Qodo.
+Needs changes: владелец отдельно указал это 19.10. Follow-up #74 слит
+(`9761514`): synchronous commit и secret export исправлены; окончательный head
+`2728df1` получил CI success, completed Qodo 1544399 без открытых findings
+и Revix 117906370434 completed/neutral с suggestion и nitpick. Замечания #70
+закрыты отдельными исправлениями и проверками, а не прежним merge или Qodo.
 
 ## Полная область и первоначальная инвентаризация
 
 | AT | Найденная реализация / доказательства | Остаток до приёмки |
 | --- | --- | --- |
-| 00-001 | AST-проверка 160 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 160 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result, feature list/cancel | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
+| 00-001 | AST-проверка 161 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 161 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result, feature list/cancel, speed-test request cancel | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
 | 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
 | 00-003 | Main connection lane: UUIDv4, owner, deadline запуска, priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue; config browse/validate/apply/export, async file I/O и terminal commit приняты в PR #70; key renderer/clipboard/file exports в PR #71; rotation IPC/timer с native drain и retained evidence в PR #72 | UI cancel/unmount; deadline остановки, все entrypoints и полная матрица поздних эффектов |
 | 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
@@ -1236,3 +1238,33 @@ Native regression fixtures создаются отдельно под user profi
 Revix minors: перед commit проверяется identity без соседних избыточных snapshots;
 подтверждённый отказ до создания и CreateNew collision не помечаются cleanupFailed.
 Indeterminate creation по-прежнему предупреждает о возможном пустом private residue.
+
+## Speed test — lifetime страницы и явная отмена
+
+Страница создаёт отдельный requestId UUIDv4 до invoke, принимает progress только
+этого запроса и при unmount отменяет его, даже если первый progress ещё не пришёл.
+Main сохраняет собственный operationId/correlation: requestId не подменяет audit ID.
+Новый speed-test:cancel привязан к requesting WebContents; чужой/stale запрос
+возвращает false. Destroyed WebContents, render-process-gone и полная навигация
+main frame прерывают принадлежащий странице тест; same-document/subframe
+navigation не прерывают. Все lifetime listeners снимаются при bounded terminal.
+После bounded cancel/deadline native lease продолжает drain, поздняя история
+не коммитится. Legacy speedTestRun() без аргументов сохранён.
+
+Mounted/request/revision fences защищают result/error/progress/history после
+unmount и медленный initial history от перезаписи post-run history. У отмены
+есть loading и retry при IPC failure; typed cancelled не показывается как ошибка.
+Результат завершает running, не ожидая чтения истории. Узкие result/history cards
+переносят метрики и длинные имена вместо обрезания за пределами карточки.
+
+L2 использует production page/handlers/registry с управляемыми границами.
+Native Electron smoke использует настоящий production preload/contextBridge и
+WebContents; подменены только HTTP transport и VPN readiness. Проверены immediate
+run+cancel без progress/list, native UUID/correlation, cancel <900 ms, retained
+drain, foreign/stale cancellation, destroyed requester и настоящий reload без
+уничтожения WebContents/записи истории.
+Внешний трафик/VPN при этом не запускаются. Browser fixture проверяет actual page
+в light/dark, keyboard cancel, navigate/remount и завершение; на viewport
+280/320/414 px длинные server/profile не выходят за экран. Это адресный вклад в
+AT-00-003/008, не полная приёмка всех UI/native/background entrypoints. Команды,
+результаты и границы доступных design gates записываются в progress.md.

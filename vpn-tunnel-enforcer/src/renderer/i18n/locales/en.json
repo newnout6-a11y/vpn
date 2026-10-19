@@ -607,6 +607,7 @@
     "description": "Measure your VPN connection speed",
     "runTest": "Run Test",
     "running": "Testing...",
+    "cancelling": "Cancelling test...",
     "results": "Results",
     "egressMismatch": "The test saw a different external IP than the app reports, so these figures may not describe the VPN tunnel.",
     "download": "Download",

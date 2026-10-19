@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { createServer } from 'node:http'
+import { EventEmitter } from 'node:events'
 
 const state = vi.hoisted(() => ({ dir: '', send: vi.fn(), get: vi.fn(), post: vi.fn(), log: vi.fn(), handle: vi.fn(),
   currentIp: vi.fn(), handlers: new Map<string, (...args: any[]) => any>(), running: true }))
@@ -74,6 +75,85 @@ async function persistedHistory() {
 const operationEvents = () => state.log.mock.calls.filter(call => call[2] === 'feature operation').map(call => call[3])
 
 describe('owned speed test effects', () => {
+  it('cancels an owned IPC request before any progress receipt and retains native drain (AT-00-003)', async () => {
+    const gate = held<{ data: object }>(), sender = new EventEmitter()
+    const requestId = '11111111-1111-4111-8111-111111111111'
+    state.get.mockImplementationOnce(() => gate.promise)
+    const run = state.handlers.get('speed-test:run')!({ sender }, requestId)
+    const operation = registry.list().at(-1)!
+    expect(operation.operationId).not.toBe(requestId)
+    const cancel = await state.handlers.get('speed-test:cancel')!({ sender }, requestId)
+    expect(cancel).toMatchObject({ ok: true, result: true })
+    expect(await run).toMatchObject({ ok: false, error: { category: 'cancelled' } })
+    expect(speed.isRunning()).toBe(true)
+    expect(state.send.mock.calls[0][1]).toMatchObject({ requestId, operationId: operation.operationId })
+    gate.resolve({ data: {} })
+    await vi.waitFor(() => expect(speed.isRunning()).toBe(false))
+    expect(await persistedHistory()).toEqual([])
+    expect(sender.listenerCount('destroyed')).toBe(0)
+  })
+
+  it('binds request cancellation to its WebContents and aborts when it is destroyed (AT-00-003)', async () => {
+    const gate = held<{ data: object }>(), sender = new EventEmitter(), other = new EventEmitter()
+    const requestId = '22222222-2222-4222-8222-222222222222'
+    state.get.mockImplementationOnce(() => gate.promise)
+    const run = state.handlers.get('speed-test:run')!({ sender }, requestId)
+    expect(await state.handlers.get('speed-test:cancel')!({ sender: other }, requestId)).toMatchObject({ ok: true, result: false })
+    expect(registry.list().at(-1)?.status).toBe('running')
+    sender.emit('destroyed')
+    expect(await run).toMatchObject({ ok: false, error: { category: 'cancelled' } })
+    gate.resolve({ data: {} })
+    await vi.waitFor(() => expect(speed.isRunning()).toBe(false))
+    expect(await persistedHistory()).toEqual([])
+  })
+
+  it.each(['not-a-uuid', '', '11111111-1111-1111-8111-111111111111'])('rejects malformed UI request identity %j before network admission', async requestId => {
+    expect(await state.handlers.get('speed-test:run')!({}, requestId)).toMatchObject({ ok: false, error: { category: 'validation' } })
+    expect(state.get).not.toHaveBeenCalled()
+    expect(registry.list()).toEqual([])
+  })
+
+  it.each(['navigation', 'crash'])('aborts an orphaned request after renderer %s and removes lifetime listeners (AT-00-003)', async cause => {
+    const gate = held<{ data: object }>(), sender = new EventEmitter()
+    const requestId = '55555555-5555-4555-8555-555555555555'
+    state.get.mockImplementationOnce(() => gate.promise)
+    const run = state.handlers.get('speed-test:run')!({ sender }, requestId)
+    // Neither subframes nor same-document navigation abandon the owning page.
+    sender.emit('did-start-navigation', { isMainFrame: false, isSameDocument: false })
+    sender.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true })
+    expect(registry.list().at(-1)?.status).toBe('running')
+    if (cause === 'navigation') sender.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false })
+    else sender.emit('render-process-gone', {}, { reason: 'crashed' })
+    try {
+      await vi.waitFor(() => expect(registry.list().at(-1)?.status).toBe('cancelled'))
+      expect(await run).toMatchObject({ ok: false, error: { category: 'cancelled' } })
+      expect(speed.isRunning()).toBe(true)
+      for (const event of ['destroyed', 'did-start-navigation', 'render-process-gone']) expect(sender.listenerCount(event)).toBe(0)
+    } finally { gate.resolve({ data: {} }) }
+    await vi.waitFor(() => expect(speed.isRunning()).toBe(false))
+    expect(await persistedHistory()).toEqual([])
+  })
+
+  it('rejects duplicate request admission without losing ownership, and refuses a stale cancel (AT-00-003/007)', async () => {
+    const firstGate = held<{ data: object }>(), secondGate = held<{ data: object }>(), sender = new EventEmitter()
+    const firstId = '33333333-3333-4333-8333-333333333333', secondId = '44444444-4444-4444-8444-444444444444'
+    state.get.mockImplementationOnce(() => firstGate.promise)
+    const first = state.handlers.get('speed-test:run')!({ sender }, firstId)
+    expect(await state.handlers.get('speed-test:run')!({ sender }, firstId)).toMatchObject({ ok: false, error: { category: 'conflict' } })
+    expect(await state.handlers.get('speed-test:cancel')!({ sender }, firstId)).toMatchObject({ result: true })
+    expect(await first).toMatchObject({ error: { category: 'cancelled' } })
+    firstGate.resolve({ data: {} })
+    await vi.waitFor(() => expect(speed.isRunning()).toBe(false))
+    state.get.mockImplementationOnce(() => secondGate.promise)
+    const second = state.handlers.get('speed-test:run')!({ sender }, secondId)
+    expect(await state.handlers.get('speed-test:cancel')!({ sender }, firstId)).toMatchObject({ result: false })
+    expect(registry.list().at(-1)?.status).toBe('running')
+    expect(await state.handlers.get('speed-test:cancel')!({ sender }, secondId)).toMatchObject({ result: true })
+    expect(await second).toMatchObject({ error: { category: 'cancelled' } })
+    secondGate.resolve({ data: {} })
+    await vi.waitFor(() => expect(speed.isRunning()).toBe(false))
+    expect(sender.listenerCount('destroyed')).toBe(0)
+  })
   it('does not persist a result if cancelled while publishing the final completion frame', async () => {
     const controller = new AbortController()
     state.send.mockImplementation((_channel, progress) => {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Zap, AlertTriangle, Download, Upload, Clock, Server } from 'lucide-react'
 import { MacCard, MacButton, MacProgress } from '../design-system'
@@ -27,50 +27,83 @@ export function SpeedTest() {
   const [error, setError] = useState('')
   const [history, setHistory] = useState<SpeedTestResult[]>([])
   const [loadingHistory, setLoadingHistory] = useState(true)
+  const [cancelling, setCancelling] = useState(false)
+  const mounted = useRef(false)
+  const activeRequest = useRef<string | null>(null)
+  const historyRevision = useRef(0)
 
   // Load history on mount
   const fetchHistory = useCallback(async () => {
+    const revision = ++historyRevision.current
     try {
       const data = await window.electronAPI.speedTestHistory()
-      setHistory(data)
+      if (mounted.current && revision === historyRevision.current) setHistory(data)
     } catch (err) {
-      console.error('Failed to fetch speed test history:', err)
+      if (mounted.current && revision === historyRevision.current) console.error('Failed to fetch speed test history:', err)
     } finally {
-      setLoadingHistory(false)
+      if (mounted.current && revision === historyRevision.current) setLoadingHistory(false)
     }
   }, [])
 
   useEffect(() => {
-    fetchHistory()
-  }, [fetchHistory])
-
-  // Listen to progress events
-  useEffect(() => {
-    const unsub = window.electronAPI.onSpeedTestProgress(({ percent, phase: p }) => {
+    mounted.current = true
+    void fetchHistory()
+    const unsub = window.electronAPI.onSpeedTestProgress(({ percent, phase: p, requestId }) => {
+      if (!mounted.current || !activeRequest.current || requestId !== activeRequest.current) return
       setProgress(percent)
       setPhase(p)
     })
-    return unsub
-  }, [])
+    return () => {
+      mounted.current = false
+      historyRevision.current++
+      unsub()
+      const requestId = activeRequest.current
+      activeRequest.current = null
+      if (requestId) void window.electronAPI.speedTestCancel(requestId).catch(() => {})
+    }
+  }, [fetchHistory])
 
   const handleRunTest = async () => {
+    if (activeRequest.current) return
+    const requestId = crypto.randomUUID()
+    activeRequest.current = requestId
+    const current = () => mounted.current && activeRequest.current === requestId
     setRunning(true)
+    setCancelling(false)
     setError('')
     setResult(null)
     setProgress(0)
     setPhase('latency')
 
     try {
-      const testResult = await window.electronAPI.speedTestRun()
+      const testResult = await window.electronAPI.speedTestRun(requestId)
+      if (!current()) return
       setResult(testResult)
       // Refresh history after successful test
-      await fetchHistory()
+      void fetchHistory()
     } catch (err: any) {
-      setError(err?.message || String(err))
+      if (current() && err?.category !== 'cancelled') setError(err?.message || String(err))
     } finally {
-      setRunning(false)
-      setProgress(0)
-      setPhase('')
+      if (current()) {
+        activeRequest.current = null
+        setRunning(false)
+        setCancelling(false)
+        setProgress(0)
+        setPhase('')
+      }
+    }
+  }
+
+  const handleCancel = async () => {
+    const requestId = activeRequest.current
+    if (!requestId || cancelling) return
+    setCancelling(true)
+    try { await window.electronAPI.speedTestCancel(requestId) }
+    catch (err: any) {
+      if (mounted.current && activeRequest.current === requestId) {
+        setError(err?.message || String(err))
+        setCancelling(false)
+      }
     }
   }
 
@@ -129,6 +162,9 @@ export function SpeedTest() {
             <Zap className="w-5 h-5 mr-2" />
             {running ? t('speedTest.running') : t('speedTest.runTest')}
           </MacButton>
+          {running && <MacButton variant="secondary" onClick={handleCancel} loading={cancelling}>
+            {cancelling ? t('speedTest.cancelling') : t('common.cancel')}
+          </MacButton>}
 
           {/* Progress bar */}
           {running && (
@@ -153,7 +189,7 @@ export function SpeedTest() {
           <h2 className="text-lg font-medium text-[var(--color-text)] mb-4">
             {t('speedTest.results')}
           </h2>
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <ResultMetric
               icon={<Download className="w-5 h-5 text-[var(--color-accent)]" />}
               label={t('speedTest.download')}
@@ -174,8 +210,8 @@ export function SpeedTest() {
             />
           </div>
           <div className="flex items-center gap-2 mt-4 pt-3 border-t border-[var(--color-border)]">
-            <Server className="w-4 h-4 text-[var(--color-text-secondary)]" />
-            <span className="text-xs text-[var(--color-text-secondary)]">
+            <Server className="w-4 h-4 text-[var(--color-text-secondary)] shrink-0" />
+            <span className="min-w-0 break-words text-xs text-[var(--color-text-secondary)]">
               {result.serverName} • {result.profileUsed} • {formatTimestamp(result.timestamp)}
             </span>
           </div>
@@ -247,16 +283,16 @@ interface HistoryEntryProps {
 function HistoryEntry({ entry, t }: HistoryEntryProps) {
   return (
     <MacCard className="!p-3">
-      <div className="flex items-center gap-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
         {/* Timestamp */}
-        <div className="min-w-[120px]">
+        <div className="shrink-0">
           <span className="text-xs text-[var(--color-text-secondary)]">
             {formatTimestamp(entry.timestamp)}
           </span>
         </div>
 
         {/* Metrics */}
-        <div className="flex items-center gap-4 flex-1">
+        <div className="flex flex-wrap items-center gap-4 flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
             <Download className="w-3.5 h-3.5 text-[var(--color-accent)]" />
             <span className="text-sm font-medium text-[var(--color-text)] tabular-nums">
@@ -278,7 +314,7 @@ function HistoryEntry({ entry, t }: HistoryEntryProps) {
         </div>
 
         {/* Server info */}
-        <div className="text-right">
+        <div className="min-w-0 break-words sm:text-right">
           <span className="text-xs text-[var(--color-text-secondary)]">
             {entry.serverName} • {entry.profileUsed}
           </span>

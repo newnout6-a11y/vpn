@@ -241,11 +241,12 @@ export interface ElectronAPI {
   onKillSwitchTrafficBlocked: (callback: (data: { reason: string; steps?: string[] }) => void) => () => void
   onI18nLocaleChanged: (callback: (locale: string) => void) => () => void
   // Speed Test
-  speedTestRun: () => Promise<SpeedTestResult>
+  speedTestRun: (requestId?: string) => Promise<SpeedTestResult>
+  speedTestCancel: (requestId: string) => Promise<boolean>
   operationsList: () => Promise<ManagedOperation[]>
   operationsCancel: (operationId: string) => Promise<boolean>
   speedTestHistory: () => Promise<SpeedTestResult[]>
-  onSpeedTestProgress: (callback: (data: { percent: number; phase: string; operationId?: string }) => void) => () => void
+  onSpeedTestProgress: (callback: (data: { percent: number; phase: string; operationId?: string; requestId?: string }) => void) => () => void
   // External Proxy
   externalProxyStatus: (slot?: number) => Promise<ExternalProxyStatus>
   externalProxyStart: (options?: ExternalProxyStartOptions) => Promise<ExternalProxyStatus>

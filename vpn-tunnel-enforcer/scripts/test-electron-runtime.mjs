@@ -21,19 +21,32 @@ try {
     outfile: join(work, 'main.cjs'), bundle: true, platform: 'node',
     format: 'cjs', external: ['electron']
   })
+  await build({
+    entryPoints: [join(root, 'scripts/fixtures/speed-test-ui-native.ts')],
+    outfile: join(work, 'speed-ui.cjs'), bundle: true, platform: 'node', format: 'cjs', external: ['electron'],
+    plugins: [{ name: 'controlled-speed-boundaries', setup(builder) {
+      builder.onResolve({ filter: /^\.\/tunController$/ }, () => ({ path: 'vpn-ready', namespace: 'speed-native' }))
+      builder.onResolve({ filter: /^axios$/ }, () => ({ path: 'http', namespace: 'speed-native' }))
+      builder.onLoad({ filter: /.*/, namespace: 'speed-native' }, ({ path }) => ({ loader: 'js', contents: path === 'vpn-ready'
+        ? 'export const tunController={getStatus:()=>({running:true,vpnProfileName:"Native fixture"})}'
+        : 'export default {get:(...args)=>globalThis.vpnteSpeedBoundary(...args)}' }))
+    } }]
+  })
   const env = { ...process.env }
   delete env.ELECTRON_RUN_AS_NODE
   delete env.NODE_ENV // No unit-test escape or test cipher in this native smoke.
   env.VPNTE_SMOKE_DIR = work
   env.VPNTE_SMOKE_PRELOAD = join(root, 'out/preload/index.js')
   env.VPNTE_SMOKE_VERSION = require('../package.json').devDependencies.electron
-  const result = spawnSync(require('electron'), [join(work, 'main.cjs')], {
-    cwd: root, env, encoding: 'utf8', windowsHide: true, timeout: 60_000
-  })
-  if (result.stdout) process.stdout.write(result.stdout)
-  if (result.status !== 0 || !result.stdout?.includes('ELECTRON_SMOKE_PASS')) {
-    if (result.stderr) process.stderr.write(result.stderr)
-    throw result.error ?? new Error(`Electron smoke failed (exit ${result.status})`)
+  for (const [fixture, marker] of [['main.cjs', 'ELECTRON_SMOKE_PASS'], ['speed-ui.cjs', 'SPEED_UI_NATIVE_PASS']]) {
+    const result = spawnSync(require('electron'), [join(work, fixture)], {
+      cwd: root, env, encoding: 'utf8', windowsHide: true, timeout: 60_000
+    })
+    if (result.stdout) process.stdout.write(result.stdout)
+    if (result.status !== 0 || !result.stdout?.includes(marker)) {
+      if (result.stderr) process.stderr.write(result.stderr)
+      throw result.error ?? new Error(`Electron smoke failed (exit ${result.status})`)
+    }
   }
 } finally {
   // Only this run's newly created directory is removed.

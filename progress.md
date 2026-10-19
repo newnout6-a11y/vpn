@@ -5156,3 +5156,105 @@ CI/review нового SHA проверяются отдельно после pu
   node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS; оба exit 0
   (.tmp/wp0-config-namespace-electron.log, .tmp/wp0-config-namespace-csp.log).
   git diff --check — exit 0. После commit/push обязательны новые CI/Qodo/Revix.
+
+### WP-0 — #74 принят; speed test UI lifetime
+
+- PR #74 слит: final reviewed head 2728df13848a9baed8f0a7db4f7315204ce1f7fa,
+  merge/main 9761514c57428c8c09c8fab39ef9d0c38de2ccf1. REST GET подтвердил
+  merged=true; fetch/ff main не изменил проверенное code tree. Qodo 1544399
+  completed без открытых findings; Revix check 117906370434 completed/neutral,
+  только suggestion 4310637904 и nitpick 4310637908. При stat failure до
+  получения file ID пустой staging намеренно не удаляется наугад: cleanupFailed
+  сообщает об остатке, plaintext ещё не записан. Postfix getuid assertion — minor.
+  CI 39205182891 completed/success, watcher exit 0
+  (.tmp/wp0-config-namespace-ci-watch.log). Needs changes #70 закрыт этим follow-up.
+- Ветка codex/wp0-speed-test-ui-lifetime создана от main 9761514. AT-00-003/008:
+  production SpeedTest получает request identity до invoke, кнопку отмены и
+  unmount cleanup. Main сохраняет собственный operationId/correlation, привязывает
+  requestId к WebContents, отвергает duplicate admission и foreign/stale cancel,
+  aborts destroyed requester. Legacy no-arg run сохранён. Bounded cancellation
+  не освобождает physical lease до drain и не допускает late history commit.
+- Mounted/request/revision fences исключают late result/error/progress/history
+  и перезапись post-run history медленным initial read. Завершение run не ждёт
+  history refresh; cancel IPC failure допускает retry. UI использует существующие
+  Mac components и ru/en copy. При визуальной проверке найден прежний дефект:
+  на 414 px history row обрезал server/profile, хотя document scrollWidth был
+  равен clientWidth (родитель скрывает overflow). Добавлены перенос строки,
+  метрик и длинных имён; result metrics на узком окне идут вертикально.
+- До исправления: npm.cmd test -- src/main/speedTestOperations.test.ts
+  src/renderer/pages/SpeedTest.lifecycle.test.tsx — 5 failed / 19 passed,
+  2.81 s (.tmp/wp0-speed-ui-before.log). После первых исправлений — 24 passed,
+  3.10 s (.tmp/wp0-speed-ui-targeted.log); расширенный набор — 25 passed,
+  3.09 s (.tmp/wp0-speed-ui-targeted2.log). Первый standalone typecheck выявил
+  TS2352 в test translation cast; fixture теперь явно выбирает speedTest/common.
+- Первый полный npm.cmd test — 4529 passed / 5 skipped / 0 failed,
+  277 files passed / 2 skipped, 362.79 s, exit 0 (.tmp/wp0-speed-ui-full.log).
+  Во время этого прогона изменён responsive JSX: этот full не объявляется
+  финальным для нового tree. Затем добавлен late rejection после unmount case;
+  окончательный полный прогон запущен отдельно.
+- npm.cmd run build — exit 0 (.tmp/wp0-speed-ui-build-responsive.log), включает
+  typecheck и parity 161 channels / 0 public any. Python traceability — AC 927/927,
+  F 210/210, exit 0. node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS
+  и SPEED_UI_NATIVE_PASS, exit 0 (.tmp/wp0-speed-ui-electron-final.log): actual
+  handlers/registry/production preload/WebContents, immediate cancel <900 ms,
+  native UUID/correlation, retained drain, foreign/stale refusal, requester destroy
+  без history commit. Контролируются HTTP/VPN readiness, внешнего I/O нет.
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-speed-ui-csp.log); это IPC/CSP local subset.
+- Browser fixture (.tmp/wp0-speed-ui/) использует actual page/store/styles/i18n
+  с fake Electron API. Light/dark, keyboard focus+Enter cancel, unmount/remount,
+  complete/results/history проверены визуально. Viewport 280/320/414: running
+  без horizontal scroll; completed с длинными непрерывными server/profile:
+  clientWidth/scrollWidth 272/272, 312/312, 406/406 (8 px vertical scrollbar),
+  offscreen spans 0 на каждом размере. Screenshot проверен в обеих темах.
+  Применён design-doctrine; referenced .claude rules и accuracy_report.mjs /
+  verify_states.mjs / verify_responsive.mjs отсутствуют в установленном skill
+  и проекте. Эти gates не запускались и не объявляются PASS. Полный UI/AT
+  этим subset не закрывается. После final full/typecheck обязательны commit,
+  push и автоматические Qodo/Revix/CI на окончательном SHA.
+- Финальный npm.cmd test — **4530 passed / 5 skipped / 0 failed**,
+  277 files passed / 2 skipped, **380.87 s**, exit 0
+  (.tmp/wp0-speed-ui-full-final.log); production/test tree во время прогона
+  не менялся. Финальный npm.cmd run typecheck — exit 0, 161 channels /
+  0 public any (.tmp/wp0-speed-ui-typecheck-final.log). git diff --check — exit 0.
+  Все validation processes terminal. После browser QA temporary Vite watcher
+  завершился EBUSY на Cookies созданного native smoke; это произошло после
+  render/geometry assertions, production build и native smokes завершились exit 0.
+  Browser viewport сброшен, свой tab закрыт; server больше не работает.
+
+### WP-0 — Qodo #75: renderer reload/crash
+
+- PR #75 открыт на ced3ae6fb55b4a395a55435bc311f46987eac2b0. Qodo 1544593
+  completed с medium 804519c2-da30-4e49-9f2a-aec4eee27739 / 4310801749:
+  reload, full navigation или renderer crash не вызывают React cleanup и не
+  уничтожают WebContents, поэтому тест мог остаться без страницы-владельца.
+  Замечание подтверждено: две новые unit-регрессии до исправления — 2 failed /
+  22 skipped, 2.71 s, exit 1 (.tmp/wp0-speed-ui-reload-before.log).
+- Main теперь aborts render-process-gone и did-start-navigation только для
+  main frame и !isSameDocument, используя Electron 44 details object (deprecated
+  positional arguments не используются). Same-document и subframe навигация
+  не прерывают тест. Все три lifetime listeners снимаются в finally.
+  Адресный npm.cmd test -- src/main/speedTestOperations.test.ts
+  src/renderer/pages/SpeedTest.lifecycle.test.tsx — 29 passed, 3.34 s, exit 0
+  (.tmp/wp0-speed-ui-reload-targeted.log), включая listener cleanup и late history.
+- Actual Electron smoke дополнен настоящим reload: WebContents остаётся жив,
+  операция cancelled, busy lease сохраняется до drain, stale cancel false,
+  history пуста. node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS /
+  SPEED_UI_NATIVE_PASS, exit 0 (.tmp/wp0-speed-ui-reload-electron.log).
+  node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-speed-ui-reload-csp.log). npm.cmd run build — exit 0
+  (.tmp/wp0-speed-ui-reload-build.log); traceability AC 927/927, F 210/210, exit 0.
+  Полный новый npm.cmd test запущен; production и unit sources после его старта
+  не менялись (уточнён read-back snapshot только в native fixture).
+- CI 39207992467 на прежнем ced3ae6 завершён success, watcher exit 0
+  (.tmp/wp0-speed-ui-ci-watch.log). Это не CI нового исправления. Revix review
+  5567522570 на ced3ae6 сообщил free-quota-reached: полного ревью нет,
+  возобновление 20.10 в 00:00 UTC / 03:00 МСК. Это не approval; действует
+  указание владельца учитывать Revix пока есть квота. Qodo остаётся главным;
+  attribution findings не изменялась. Для нового head нужны automatic Qodo и CI.
+- Повторный npm.cmd test — **4532 passed / 5 skipped / 0 failed**,
+  277 files passed / 2 skipped, **323.86 s**, exit 0
+  (.tmp/wp0-speed-ui-reload-full.log). npm.cmd run typecheck — exit 0,
+  161 channels / 0 public any (.tmp/wp0-speed-ui-reload-typecheck.log).
+  git diff --check — exit 0. Все validation processes terminal; новый commit
+  включает только подтверждённый Qodo fix, regressions/native fixture и журнал.
