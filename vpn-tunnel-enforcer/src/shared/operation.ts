@@ -34,10 +34,13 @@ export function operationLogDetails<T extends { readonly operationId: string }>(
 
 /** Shared metadata for the other long-running feature operations. */
 export const OPERATION_DEADLINES = Object.freeze({
-  refresh: 120_000, 'speed-test': 600_000, import: 120_000, export: 120_000, rotation: 120_000
+  refresh: 120_000, 'speed-test': 600_000, import: 120_000, export: 120_000, rotation: 120_000,
+  'health-check': 600_000
 })
 export type ManagedOperationKind = keyof typeof OPERATION_DEADLINES
 export interface ManagedOperation extends Omit<ConnectionOperation, 'kind' | 'deadline' | 'category'> {
+  /** Non-secret receipt identity; UUID operationId remains the cancellation handle. */
+  readonly operationKey: string
   readonly kind: ManagedOperationKind
   /** No work clock runs while a native dialog awaits the user's decision. */
   readonly deadline: number | null

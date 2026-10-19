@@ -1,4 +1,5 @@
 import { app } from 'electron'
+import { IpcFault, classifyIpcError, ipcError } from '../shared/ipc-result'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import { access, copyFile, mkdir, rm, stat, writeFile } from 'fs/promises'
@@ -2047,8 +2048,14 @@ export async function handleControlRequest(req: IncomingMessage, res: ServerResp
       const groupId = param('groupId')?.trim()
       if (!groupId) throw new RangeError('groupId is required')
       const { checkGroupHealth } = await import('./keyHealthChecker')
-      const result = await checkGroupHealth(groupId)
-      if (!result.ok) throw new ExternalProxyApiError(result.error, 404)
+      const result = await checkGroupHealth(groupId).catch(error => {
+        if (error instanceof IpcFault && error.category === 'validation') throw new ExternalProxyApiError('Группа не найдена или пуста', 404)
+        // This consumer does not pass through the renderer's IPC guard.
+        // Preserve the category without exposing raw OS messages or paths.
+        const category = classifyIpcError(error)
+        const status = { validation: 400, conflict: 409, permission: 403, network: 502, internal: 500, cancelled: 409, timeout: 504 }[category]
+        throw new ExternalProxyApiError(ipcError(category).message, status)
+      })
       const alive = result.results.filter((item) => item.online).length
       return send(res, 200, wantsText ? `${alive}/${result.results.length}` : result, wantsText)
     }

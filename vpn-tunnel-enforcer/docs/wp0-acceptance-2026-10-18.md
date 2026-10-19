@@ -1570,3 +1570,46 @@ Qodo1555116 отметил5 findings implemented. Для оставшегося 
 namespace refusal и все3 UI проверены. Final full4747 passed /5 skipped,
 317.26s,exit0;build/typecheck и6 Electron fixtures —exit0. Новый head
 требует своего completed Qodo и CI success.
+
+## Групповая проверка ключей: requester lifetime (19.10.2026)
+
+Предыдущий audit/event участок принят в #84: final head7c716fe,
+Qodo1555833 completed,2/2 implemented, CI39315249433 success;
+merge/main5641f2b совпал по tree с reviewed head.
+
+AT-00-003/004/005/008: groups:check-health использует существующий
+requester token/document lifetime и registry kind health-check/deadline600s.
+Main отменяет caller promptly, удерживая raw workers, late SOCKS connections,
+закрытие sockets/child и cleanup. После отмены следующие stages, запись
+profiles и completion log запрещены. Перед terminal persistence общий
+import/refresh writer queue повторно проверяет исходные credentials.
+Servers использует свои page tokens и не показывает late success/error;
+canonical IPC fault заменяет raw error строку. Legacy preload arity сохранена.
+
+До fix13 main и3 UI regressions failed; targeted58/58 passed после fix.
+Полная приёмка этого участка, команды и remote gates записываются в progress.md.
+Это адресная часть WP-0; WP-2 и остальные producers остаются открытыми.
+
+Дополнительные negative cases: local config/pidfile I/O denial, sync/async
+spawn failure и TLS construction error теперь дают typed operational failure,
+сохраняя прежний verdict ключа. Remote SOCKS failure остаётся sanitized
+per-key observation. Targeted260/260 passed; final build/typecheck и6 native
+fixtures passed. Default full выявил два native fixture timeout; полный
+serial run выполняется, результаты/границы доказательств в progress.md.
+
+Финальный полный npm.cmd test -- --maxWorkers=1:4827 passed/5 skipped/0 failed,
+321.42s,exit0. Build/typecheck,6 native fixtures,coverage/diff —exit0.
+Default failures сохранены в progress.md; remote Qodo/CI требуются на head PR.
+
+PR #85 Qodo1556439 completed с4 findings на22e1348. Исправления дополняют
+receipts сохраняемым при UUID-redaction operationKey, допускают разные группы
+с исключением дублей одной группы до physical drain, и переводят HTTP errors
+в canonical message/соответствующий status без локальных путей. Token обязателен
+и404 для missing/empty сохранён. Конкурентные commits не теряют результаты;
+отмена одного group scope не отменяет другой. Targeted8 suites269/269 passed,
+5.26s;build/typecheck и6 native fixtures —exit0. Final full и automatic review
+нового SHA требуются до следующего участка; атрибуция Qodo вручную не менялась.
+
+Review final full npm.cmd test -- --maxWorkers=1:4835 passed/5 skipped/0 failed,
+271.89s,exit0. Build/typecheck,6 native fixtures,coverage/diff —exit0.
+Initial CI39322197254 success относится к22e1348; fixes требуют новых gates.

@@ -6092,3 +6092,140 @@ CI/review нового SHA проверяются отдельно после pu
   с начала run. Build и6 Electron fixtures пройдены на этом production tree
   до test-only setup/budget правок. Coverage/diff —exit0. Новый published SHA
   требует собственного completed Qodo и CI; initial-head success не переносится.
+
+### 19.10.2026 — WP-0: requester lifetime групповой проверки ключей
+
+- PR #84 принят: final head 7c716fe9c861346492c4c1c39c6f60a891097fa8,
+  Qodo1555833 completed, оба findings implemented; workflow39315249433
+  success (Windows/Rust/site). REST merged=true, merge/main5641f2b.
+  Tree reviewed/main совпал:0d26be396419f396bf6ab4a72ee2093b5f98f8dc.
+  Revix полноценного ревью по квоте не дал; это не approval.
+- Подтверждённый следующий остаток AT-00-003/004/008: groups:check-health
+  не имел owner/deadline/requester cancellation, поздние workers писали
+  profiles и success log; Servers обновлял UI после unmount. Старый catch
+  возвращал raw error текстом внутри ok:false.
+- До production fix: npm.cmd test -- src/main/groupHealthOperation.test.ts
+  —13 failed/13,10.37s,exit1 (.tmp/wp0-group-health-main-before.log).
+  Предыдущий совместный run имел3 UI failures/20 passed и ошибку mock setup
+  main suite (.tmp/wp0-group-health-before.log); недостающие xray boundary
+  mocks исправлены перед отдельным main запуском.
+- Реализация использует общий registry с kind health-check, work deadline600s,
+  requester token/document lifetime и существующий operations:cancel-request.
+  Probe signal проверяется после каждой async границы; raw SOCKS dial,
+  закрытие сокетов/процесса и cleanup удерживают lease до settlement.
+  Cleanup прежних orphan probes выполняется один раз до probes, чтобы не
+  убивать текущие sibling workers. Terminal commit идёт в общей очереди
+  import/refresh; изменённые/удалённые credentials дают conflict.
+- Первый targeted после fix:35 passed/1 failed,3.45s,exit1
+  (.tmp/wp0-group-health-targeted1.log): TLS test ошибочно ожидал retained
+  незавершённый handshake после фактического destroy. Добавлены реальные
+  close boundaries для sockets; поздний TLS callback ограждён от write.
+  Повтор npm.cmd test -- src/main/groupHealthOperation.test.ts
+  src/renderer/pages/Servers.requestLifetime.test.tsx src/main/keyHealthChecker.test.ts
+  —58/58 passed,3.44s,exit0 (.tmp/wp0-group-health-targeted2.log).
+- Typecheck1 выявил два места обновления контракта: shared electron-api
+  request token и control HTTP consumer error handling. Оба обновлены,
+  typecheck2 —exit0,165 channels/0 public any.
+  Проверки дополнительных границ, полный набор и remote gates ниже.
+- Расширенный targeted7 suites251/251 passed,5.70s,exit0
+  (.tmp/wp0-group-health-targeted4.log). Включены real requester wrapper
+  token/document loss, foreign/stale/malformed/duplicate cancellation,
+  physical socket-close drain, max5 workers, stale credentials и reentrant commit.
+- npm.cmd run typecheck —exit0,165 channels/0 public any
+  (.tmp/wp0-group-health-typecheck-final.log); npm.cmd run build —exit0
+  (.tmp/wp0-group-health-build.log). node scripts/test-electron-runtime.mjs
+  —6 PASS,exit0 (.tmp/wp0-group-health-electron.log); это regression native
+  fixtures общей границы/прежних workflows, health worker проверен на
+  controlled OS boundaries. Coverage AC927/927,F210/210 и diff —exit0.
+- Первый full npm.cmd test —4817 passed/1 failed/5 skipped,305.88s,exit1
+  (.tmp/wp0-group-health-full.log). Единственный failure: прежний native
+  serverKeyOperations persists nonsecret success counts для export-all-proxies
+  занял9333ms при outer Vitest5000ms. Отдельно оба success-count cases:
+  npm.cmd test -- src/main/serverKeyOperations.test.ts -t 'persists nonsecret success counts'
+  —2 passed/55 skipped,3.15s,exit0 (.tmp/wp0-group-health-export-recheck.log).
+  Их outer budget согласован с соседними native file/consent fixtures:15000ms,
+  поскольку реальная Windows ACL/file preparation имеет собственный native budget.
+  Assertions redaction/counts/correlation и production deadlines не менялись.
+  Запускается адресный набор и затем полный default npm.cmd test заново.
+- Дополнительный self-review нашёл concrete TLS construction failure:
+  tlsConnect мог бросить синхронно, оставляя исходный SOCKS socket открытым;
+  добавленный physical-close drain тогда удерживал lease. Full2 намеренно
+  остановлен (session35699, verified Vitest PID15872), не засчитывается как PASS.
+  Новая regression до fix:1 failed/21 skipped,1.04s,exit1
+  (.tmp/wp0-group-health-tls-before.log); её teardown дал также unhandled
+  cancelled rejection, harness теперь явно consumes task rejection.
+  TLS construction catch уничтожает исходный socket; already-aborted вызов
+  отказывает до TLS creation. Запущены повторные адресные/full/build проверки.
+- Full3 также намеренно остановлен (session11453, verified Vitest PID31332)
+  перед расширением operational-error regressions; PASS не заявляется.
+  До fix local I/O denial cases:2 failed/1 passed/22 skipped,0.373s,exit1
+  (.tmp/wp0-group-health-permission-before.log). mkdtemp уже отвергал ошибку,
+  но write config и pidfile раньше превращали её в offline либо подавляли.
+  Теперь failure local setup/spawn/pidfile/TLS construction не меняет verdict
+  ключа: сохраняется permission/internal категория, canonical renderer error.
+  Remote SOCKS failures остаются sanitized per-key observations.
+  Добавлены sync/async spawn EACCES/ENOENT cases и отдельный remote failure case.
+  Targeted complete результаты и новый full ниже.
+- Final production tree build/typecheck —exit0
+  (.tmp/wp0-group-health-build-verified.log),6 native Electron fixtures PASS
+  (.tmp/wp0-group-health-electron-verified.log). Targeted7 suites260/260
+  passed,4.20s,exit0 (.tmp/wp0-group-health-targeted-complete2.log).
+- Full4 default npm.cmd test —4825 passed/2 failed/5 skipped,300.10s,exit1
+  (.tmp/wp0-group-health-full4.log). Оба failures — default5000ms outer budgets:
+  serverKeyOperations bounded cause export-all-proxies/ENOENT7356ms и прежний
+  firewallStatus bulk queries5461ms. Assertions ошибок безопасности не отмечены
+  как failed. Чтобы проверить гипотезу конкуренции native Windows fixtures,
+  новые бюджеты не расширялись: запущен весь набор последовательно командой
+  npm.cmd test -- --maxWorkers=1, лог .tmp/wp0-group-health-full-serial.log.
+  Это ещё не PASS; результат будет записан после завершения.
+- Полный npm.cmd test -- --maxWorkers=1 —4827 passed/5 skipped/0 failed,
+  293 files passed/2 skipped,321.42s,exit0
+  (.tmp/wp0-group-health-full-serial.log). Code/test tree не менялся с начала
+  этого run. Это полный serial command; прежние default failures сохранены.
+  Build/typecheck и6 native Electron fixtures проверили тот же production tree.
+  Coverage AC927/927,F210/210 и diff check —exit0. Следующий участок требует
+  собственного completed Qodo и CI success на опубликованном final SHA.
+
+### PR #85: замечания Qodo (19.10.2026, поздний вечер)
+
+- Qodo1556439 completed на initial head22e1348 с4 findings. Сохранены
+  .tmp/qodo85-initial.json; attribution вручную не менялся. HTTP route
+  уже требует POST+control token (обратное утверждение в security finding
+  не подтверждается), но raw OS error действительно мог попасть в detail.
+- Регрессии до fix: npm.cmd test -- src/main/groupHealthOperation.test.ts
+  src/main/externalProxy.test.ts —6 failed/58 passed,0.455s, Vitest exit1
+  (.tmp/wp0-group-health-review-before.log). Проверены HTTP409/403 вместо500,
+  доступность другой группы и receipt key. Shell tail завершился0; это
+  не меняет сохранённый Vitest verdict.
+- HTTP consumer теперь переводит категории в соответствующий HTTP status
+  и canonical message без OS exception/path, сохраняет404 missing/empty
+  и обязательный token. Resource key-health:<groupId> допускает разные
+  группы, сохраняя исключение повторов одной группы до physical drain.
+  Сериализованные commits проверены на сохранение обоих результатов;
+  отмена одной группы не отменяет другую.
+- ManagedOperation receipts сохраняют UUIDv4 для cancellation и дополнены
+  operationKey. Production credential redactor проверен на2 receipt:
+  UUID скрыт, keys/correlation различимы, отмена исходным UUID работает.
+- Targeted3 suites121/121 passed,1.75s; расширенный targeted7 suites214/214
+  passed,4.57s (.tmp/wp0-group-health-review-targeted2.log). Указанный
+  src/main/preloadValidation.test.ts отсутствует и Vitest его не включил;
+  поэтому записаны фактические7 suites, а не8.
+- Первый npm.cmd run build завершился2: test mock writeFile имел tuple[]
+  без аргументов. Исправлена только TS-сигнатура mock; runtime поведения
+  не меняет. Повтор build/typecheck —exit0,165 channels/0 public any
+  (.tmp/wp0-group-health-review-build2.log). node scripts/test-electron-runtime.mjs
+  —6 PASS,exit0 (.tmp/wp0-group-health-review-electron.log).
+  Coverage AC927/927,F210/210 —exit0; full serial выполняется.
+- Финальный адресный run с верным src/preload/preloadValidation.test.ts:
+  npm.cmd test -- src/main/groupHealthOperation.test.ts src/main/externalProxy.test.ts
+  src/main/operationRegistry.test.ts src/main/serverGroupsRefresh.test.ts
+  src/main/keyHealthChecker.test.ts src/main/externalProxyHostIntegration.test.ts
+  src/renderer/pages/Servers.requestLifetime.test.tsx src/preload/preloadValidation.test.ts
+  —269/269 passed,8 suites,5.26s,exit0.
+- Полный npm.cmd test -- --maxWorkers=1 —4835 passed/5 skipped/0 failed,
+  293 files passed/2 skipped,271.89s,exit0 (.tmp/wp0-group-health-review-full.log).
+  Во время run исправлена только TS-сигнатура mock writeFile, затем этот
+  suite повторно вошёл в final targeted. Production tree не менялся.
+  Build/typecheck,6 native fixtures,coverage/diff —exit0. Новый head требует
+  automatic completed Qodo и CI success; initial CI39322197254 success
+  относится к22e1348 и не заменяет новый gate.

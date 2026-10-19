@@ -166,7 +166,7 @@ export const IPC_REQUESTS = {
   'groups:delete': request('groupsDelete', [string, boolean]),
   'groups:refresh': request('groupsRefresh', [string, optional(text(36))]),
   'groups:set-refresh-policy': request('groupsSetRefreshPolicy', [string, nullable(integer)]),
-  'groups:check-health': request('groupsCheckHealth', [string]),
+  'groups:check-health': request('groupsCheckHealth', [string, optional(text(36))]),
   'server:probe': request('serverProbe', [string, optional(port)]),
   'server:live-check': request('serverLiveCheck', [liveOptions]),
   'server:live-check-batch': request('serverLiveCheckBatch', [batchOptions]),

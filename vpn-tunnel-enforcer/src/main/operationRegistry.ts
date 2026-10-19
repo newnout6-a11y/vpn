@@ -96,7 +96,8 @@ export class OperationRegistry {
     let pendingEffects = 0, committing = false, invalidCommit = false, committed: { result: unknown } | undefined
     let userWaits = 0, workRemainingMs = remainingMs, workClock = performance.now()
     const entry: Entry = { controller, drained, operation: {
-      version: 1, operationId, correlationId: currentCorrelationId() ?? 'op_' + operationId.replaceAll('-', ''),
+      version: 1, operationId, operationKey: 'op_' + operationId.replaceAll('-', ''),
+      correlationId: currentCorrelationId() ?? 'op_' + operationId.replaceAll('-', ''),
       kind, owner, source: metadata.source, startedAt, deadline: startedAt + timeoutMs, status: 'running'
     }, cancel: category => {
       if (entry.operation.status !== 'running' || committing || invalidCommit) return false

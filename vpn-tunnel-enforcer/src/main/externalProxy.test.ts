@@ -8,6 +8,8 @@ import type { ServerProfile } from '../shared/ipc-types'
 const ensureKillSwitchProgramAllowedMock = vi.hoisted(() => vi.fn(async () => ({ success: true, message: 'ok' })))
 const spawnMock = vi.hoisted(() => vi.fn())
 const probeExternalProxyMock = vi.hoisted(() => vi.fn())
+const checkGroupHealthMock = vi.hoisted(() => vi.fn())
+vi.mock('./keyHealthChecker', () => ({ checkGroupHealth: checkGroupHealthMock }))
 const createHttpServerMock = vi.hoisted(() => vi.fn(() => ({
   once: vi.fn().mockReturnThis(),
   close: vi.fn((callback?: (error?: Error) => void) => callback?.()),
@@ -18,7 +20,7 @@ const fsPromisesMock = vi.hoisted(() => ({
   copyFile: vi.fn(async () => undefined),
   mkdir: vi.fn(async () => undefined),
   stat: vi.fn(async () => { throw new Error('not staged') }),
-  writeFile: vi.fn(async () => undefined)
+  writeFile: vi.fn(async (..._args: unknown[]) => undefined)
 }))
 
 vi.mock('child_process', () => ({
@@ -85,6 +87,8 @@ import {
   externalProxy,
   getExternalProxyAggregate,
   getExternalProxyStatus,
+  handleControlRequest,
+  registerExternalProxyControlServer,
   isExternalProxyMutationPath,
   isValidExternalProxyControlToken,
   listExternalProxyProfiles,
@@ -95,8 +99,54 @@ import {
   reserveExternalProxy
 } from './externalProxy'
 import { serverPicker } from './serverPicker'
+import { IpcFault, ipcError } from '../shared/ipc-result'
 
 const source = readFileSync(join(process.cwd(), 'src/main/externalProxy.ts'), 'utf8')
+
+// AT-00-004: production HTTP adapter with controlled transport/OS boundaries.
+describe('group health control errors', () => {
+  async function invoke(format: 'json' | 'text', authenticated = true) {
+    // Production admission creates the token before asynchronous ACL/file I/O.
+    registerExternalProxyControlServer()
+    await Promise.resolve(); await Promise.resolve()
+    const tokenWrite = fsPromisesMock.writeFile.mock.calls.find(args => String(args[0]).endsWith('external-proxy-control-token'))
+    const token = String(tokenWrite?.[1]).trim()
+    const req = Object.assign(new EventEmitter(), {
+      method: 'POST', url: `/profiles/healthcheck?groupId=g&format=${format}`,
+      socket: { localPort: 17873 }, headers: { host: '127.0.0.1:17873', ...(authenticated ? { 'x-vpnte-control-token': token } : {}) }
+    })
+    let status = 0, body = ''
+    const res = { writeHead: (code: number) => { status = code }, end: (value: string) => { body = value } }
+    const task = handleControlRequest(req as never, res as never)
+    req.emit('end')
+    await task
+    return { status, body }
+  }
+
+  it.each(['json', 'text'] as const)('returns HTTP 409 for an overlapping check (%s)', async format => {
+    checkGroupHealthMock.mockRejectedValueOnce(new IpcFault('conflict'))
+    const result = await invoke(format)
+    expect(result.status).toBe(409)
+    expect(result.body).toContain(ipcError('conflict').message)
+  })
+
+  it.each(['json', 'text'] as const)('sanitizes local permission errors (%s)', async format => {
+    checkGroupHealthMock.mockRejectedValueOnce(Object.assign(new Error('FAKE-SECRET at C:\\private\\probe.json'), { code: 'EACCES' }))
+    const result = await invoke(format)
+    expect(result.status).toBe(403)
+    expect(result.body).toContain(ipcError('permission').message)
+    expect(result.body).not.toContain('FAKE-SECRET')
+    expect(result.body).not.toContain('private')
+  })
+
+  it('keeps missing groups at 404 and requires the control token', async () => {
+    checkGroupHealthMock.mockRejectedValueOnce(new IpcFault('validation'))
+    expect((await invoke('json')).status).toBe(404)
+    const count = checkGroupHealthMock.mock.calls.length
+    expect((await invoke('json', false)).status).toBe(401)
+    expect(checkGroupHealthMock).toHaveBeenCalledTimes(count)
+  })
+})
 
 describe('external-proxy lease persistence across restarts', () => {
   it('does not restore persisted leases into the live map on module load', () => {

@@ -367,13 +367,39 @@ describe('owned subscription refresh (AT-00-003/005/007; F-063/F-070)', () => {
   })
 })
 
-describe('group health result contract (AT-00-001; F-138)', () => {
-  it.each([[new Error('expected message'), 'expected message'], [{ message: { malformed: true } }, '[object Object]']])(
-    'keeps the error field a string for every thrown message', async (error, message) => {
+describe('group health result contract (AT-00-001/004; F-138)', () => {
+  it.each(['destroyed', 'render-process-gone', 'did-navigate', 'token'])('cancels health through requester %s', async kind => {
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false })
+    const foreign = Object.assign(new EventEmitter(), { isDestroyed: () => false })
+    const token = 'd5abf17e-bf69-4f23-9e3c-b69ed0b32089', gate = heldRefresh()
+    healthMock.mockImplementation((_id, options) => operations.run('health-check', async lease => {
+      options.onOperation(lease)
+      return lease.wait(gate.promise)
+    }, { signal: options.signal }))
+    vi.mocked(ipcMain.handle).mockClear()
+    registerOperationHandlers(); registerServerGroupsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(([channel]) => channel === 'groups:check-health')![1]
+    const cancel = vi.mocked(ipcMain.handle).mock.calls.find(([channel]) => channel === 'operations:cancel-request')![1]
+    const result = handler({ sender } as never, 'g', token)
+    const failure = expect(result).rejects.toMatchObject({ category: 'cancelled' })
+    await vi.waitFor(() => expect(operations.list().at(-1)).toMatchObject({ kind: 'health-check', status: 'running' }))
+    expect(await cancel({ sender: foreign } as never, token)).toBe(false)
+    await expect(handler({ sender } as never, 'g', token)).rejects.toMatchObject({ category: 'conflict' })
+    await expect(handler({ sender } as never, 'g', 'malformed')).rejects.toMatchObject({ category: 'validation' })
+    if (kind === 'token') expect(await cancel({ sender } as never, token)).toBe(true)
+    else sender.emit(kind)
+    await failure
+    gate.release(); await operations.close()
+    expect(await cancel({ sender } as never, token)).toBe(false)
+    expect(sender.eventNames()).toEqual([])
+  })
+
+  it.each([new Error('private C:\\secret\\probe at fn'), { message: { malformed: true } }])(
+    'passes failures to the canonical IPC guard without a success-shaped error', async error => {
       healthMock.mockRejectedValue(error)
       registerServerGroupsHandlers()
       const handler = vi.mocked(ipcMain.handle).mock.calls.find(([channel]) => channel === 'groups:check-health')![1]
-      expect(await handler({} as never, 'id')).toEqual({ ok: false, error: message })
+      await expect(handler({} as never, 'id')).rejects.toBe(error)
     })
 })
 

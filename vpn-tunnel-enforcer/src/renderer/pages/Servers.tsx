@@ -1034,9 +1034,9 @@ export function Servers() {
   }
 
   const handleGroupHealth = async (group: ServerGroup) => {
-    if (group.id === VIRTUAL_ALL_GROUP_ID) return
+    if (group.id === VIRTUAL_ALL_GROUP_ID || healthCheckingGroups[group.id]) return
     const api = window.electronAPI as unknown as {
-      groupsCheckHealth?: (id: string) => Promise<
+      groupsCheckHealth?: (id: string, requestId?: string) => Promise<
         | {
             ok: true
             results: Array<{ profileId: string; online: boolean; latencyMs: number | null; reason?: string }>
@@ -1048,9 +1048,11 @@ export function Servers() {
       showToast('warning', t('servers.groups.fallbackHint', 'Группы по подпискам станут доступны после следующего обновления.'))
       return
     }
+    const requestId = beginRequest()
     setHealthCheckingGroups((prev) => ({ ...prev, [group.id]: true }))
     try {
-      const result = await api.groupsCheckHealth(group.id)
+      const result = await api.groupsCheckHealth(group.id, requestId)
+      if (!current(requestId)) return
       if (result.ok) {
         setHealthByProfile((prev) => {
           const next = { ...prev }
@@ -1065,6 +1067,7 @@ export function Servers() {
         })
         const alive = result.results.filter((r) => r.online).length
         await fetchProfiles(false)
+        if (!current(requestId)) return
         emitServerChanged()
         showToast(
           'info',
@@ -1075,13 +1078,15 @@ export function Servers() {
         showToast('error', group.name, result.error)
       }
     } catch (err: any) {
+      if (!current(requestId) || (isIpcRemoteErrorData(err) && err.category === 'cancelled')) return
       showToast('error', group.name, err?.message ?? String(err))
     } finally {
-      setHealthCheckingGroups((prev) => {
+      if (current(requestId)) setHealthCheckingGroups((prev) => {
         const next = { ...prev }
         delete next[group.id]
         return next
       })
+      requests.current.delete(requestId)
     }
   }
 
