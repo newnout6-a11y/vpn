@@ -1,5 +1,6 @@
 // AT-00-003/005/007: actual picker, refresh, registry and IPC guard; controlled resolver boundary.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { EventEmitter } from 'node:events'
 
 const state = vi.hoisted(() => ({ data: new Map<string, Record<string, any>>(), write: vi.fn(), resolve: vi.fn(), log: vi.fn(), handle: vi.fn(), handlers: new Map<string, (...args: any[]) => any>() }))
 vi.mock('electron', () => ({ app: { isPackaged: false, getPath: () => '/tmp/unused-import-fixture' }, dialog: {}, ipcMain: { handle: state.handle } }))
@@ -70,6 +71,24 @@ afterEach(async () => {
 })
 
 describe('profile import operation ownership', () => {
+  it.each(['servers:add', 'servers:add-to-group'].flatMap(channel =>
+    ['destroyed', 'render-process-gone', 'did-start-navigation'].map(event => ({ channel, event }))
+  ))('cancels $channel on requester $event without a late commit', async ({ channel, event }) => {
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false })
+    const gate = held(), before = snapshot()
+    state.resolve.mockReturnValue(gate.promise)
+    const run = state.handlers.get(channel)!({ sender }, 'https://sub.example.test/new', ...(channel.endsWith('to-group') ? [null] : []))
+    await vi.waitFor(() => expect(state.resolve).toHaveBeenCalledOnce())
+    const operation = registry.list()[0]
+    sender.emit(event, { isMainFrame: true, isSameDocument: false })
+    expect(registry.list()[0].status).toBe('cancelled')
+    expect(await run).toMatchObject({ ok: false, correlationId: operation.correlationId, error: { category: 'cancelled' } })
+    expect(state.resolve.mock.calls[0][1].signal.aborted).toBe(true)
+    gate.release(); await registry.close()
+    expect(snapshot()).toBe(before)
+    expect(sender.eventNames()).toEqual([])
+  })
+
   it.each(['https://sub.example.test/new', 'vless://fixture@uri.example.test:443'])('cancels %s during resolution without a late group or profile', async input => {
     const gate = held(), controller = new AbortController(), before = snapshot()
     state.resolve.mockReturnValue(gate.promise)

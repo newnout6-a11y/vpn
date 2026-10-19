@@ -24,6 +24,9 @@ Needs changes: владелец отдельно указал это 19.10. Foll
 #76 слит (`fa1bd9f`): final head `e232e8f`, Qodo 1544820 completed без
 открытых findings, CI 39211150906 success. Revix сообщил free-quota-reached;
 полного ревью #76 нет. Его отсутствие при квоте не называется approval.
+#77 слит (`1752bda`): final head `84f0d87`, Qodo 1545221 completed без открытых
+findings, CI 39216740383 success (Windows/Rust/site). Revix full review недоступен
+из-за квоты; отсутствие ревью не approval. Fixes четырёх Qodo findings включены.
 
 ## Полная область и первоначальная инвентаризация
 
@@ -1324,3 +1327,26 @@ legacy stores сохраняют совместимую версию, fresh read
 upgrade/downgrade и межпроцессный CAS остаются открыты. Pre-commit comparison
 не является OS-level CAS; native same-version smoke не заменяет OS/VM matrix.
 Точные команды, результаты и remote gate записываются в progress.md.
+
+## Lifetime документа для import/refresh/config/key IPC
+
+Main-only requestDocumentLifetime связывает вызов с текущим requesting document:
+destroyed, render-process-gone и полная main-frame navigation отменяют его сигнал.
+Same-document/subframe navigation и события чужого WebContents не отменяют вызов.
+Внешняя main cancellation объединяется с lifetime без подмены operation UUID или
+correlation; renderer не передаёт AbortSignal. Слушатели снимаются при bounded
+terminal, а registry сохраняет физическую аренду до drain.
+
+Actual servers:add/add-to-group, groups:refresh, config browse/validate/apply/export,
+все пять key exports и прежний speed-test wrapper используют общую границу.
+Scheduled refresh сохраняет собственное main-only владение. Выбранный через
+config:browse-import snapshot привязан к документу до consume/expiry: reload/crash
+отзывает разрешение и очищает raw, даже если активной операции уже нет.
+
+25 регрессий production handlers воспроизведены до fix; проверены typed cancelled,
+исходный IPC correlation, отсутствие поздней записи и снятие listeners. Real
+Electron fixture проверяет production registry/helper на настоящем reload/destroy,
+prompt result <900 ms, retained drain, отсутствие commit и допустимые foreign/
+same-document navigation. Физический I/O в fixture управляемый; это не VPN/L3 test.
+SPA unmount без native navigation остаётся отдельной задачей page request/cancel.
+Команды, результаты полного набора и remote gate — progress.md.

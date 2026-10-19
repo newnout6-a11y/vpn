@@ -166,6 +166,21 @@ afterEach(async () => {
 })
 
 describe('VPN key operation lifetime', () => {
+  it.each(channels.flatMap(channel => ['render-process-gone', 'did-start-navigation'].map(event => ({ channel, event }))))
+  ('cancels $channel on requester $event before secret consent completes', async ({ channel, event }) => {
+    const gate = held({ response: 1 }); state.nativePrompt.mockReturnValueOnce(gate.promise)
+    const run = invokeExport(channel)
+    await vi.waitFor(() => expect(state.nativePrompt).toHaveBeenCalledOnce())
+    const operation = running()
+    sender.emit(event, { isMainFrame: true, isSameDocument: false })
+    expect(registry.list().find(op => op.operationId === operation.operationId)?.status).toBe('cancelled')
+    expect(await run).toMatchObject({ ok: false, correlationId: operation.correlationId, error: { category: 'cancelled' } })
+    gate.release(); await registry.close()
+    expect(state.saveDialog).not.toHaveBeenCalled(); expect(state.clipboardWrite).not.toHaveBeenCalled()
+    expect(readFileSync(destination, 'utf8')).toBe('previous export')
+    expect(sender.eventNames()).toEqual([])
+  })
+
   it.each(channels)('cancels held consent promptly, drains it and prevents late effects: %s', async channel => {
     const gate = held({ response: 1 }); state.nativePrompt.mockReturnValueOnce(gate.promise)
     const run = invokeExport(channel)

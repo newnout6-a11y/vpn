@@ -5452,3 +5452,53 @@ CI/review нового SHA проверяются отдельно после pu
   AC 927/927, F 210/210, exit 0; git diff --check — exit 0.
   Local native subset остаётся same-version, не Electron 42→44/VM matrix.
   Следующий gate — automatic Qodo и default CI нового exact head #77.
+- PR #77 слит 19.10 после final head
+  84f0d878bf9c23d43ce4a6baa21cbd792defb07c: Qodo 1545221 completed,
+  открытых findings нет; CI 39216740383 completed/success, все Windows/Rust/site
+  checks success, watcher exit 0 (.tmp/wp0-migrations-qodo-ci-watch.log).
+  REST подтвердил merged=true, merge/main 1752bdacf18d42e4218fbc645780669e40e9ac8d.
+  Fetch/ff main и git diff reviewed head → main — exit 0, tree совпадает.
+  Revix остаётся без квоты до 20.10 03:00 МСК; отсутствие full review не approval.
+- Следующий участок AT-00-003/005: lifetime requesting document у import/refresh/
+  config/key exports. Config/key wrappers слушали только destroyed: reload и
+  render-process-gone сохраняют WebContents и позволяли поздний commit.
+  Manual profile import/group refresh не привязаны к requester. Общий main-only
+  lifetime будет отменять только операции этого вызова на full main-frame
+  navigation/crash/destroy; same-document/subframe navigation не отменяет,
+  timer/background refresh сохраняет независимое владение. SPA unmount сам по
+  себе этими native событиями не покрывается; page request/cancel остаётся отдельно.
+- До production fix: npm.cmd test -- src/main/configOperations.test.ts
+  src/main/serverKeyOperations.test.ts src/main/profileImportOperations.test.ts
+  src/main/serverGroupsRefresh.test.ts -t 'requester|idle import selection'
+  — **25 failed / 117 skipped**, 8.94 s, exit 1
+  (.tmp/wp0-requester-before.log): прежние wrappers оставляли running/authority.
+  requestDocumentLifetime объединяет main-only signal, уничтожение/crash/full
+  navigation; invalidation idle config capability теперь также снимает listeners
+  и очищает raw. Same-document/subframe и foreign WebContents независимы.
+- npm.cmd test -- src/main/configOperations.test.ts
+  src/main/serverKeyOperations.test.ts src/main/profileImportOperations.test.ts
+  src/main/serverGroupsRefresh.test.ts src/main/speedTestOperations.test.ts —
+  **166 passed**, 47.58 s, exit 0 (.tmp/wp0-requester-targeted.log).
+  npm.cmd test -- src/main/requestDocumentLifetime.test.ts — **8 passed**,
+  0.277 s, exit 0 (.tmp/wp0-requester-helper.log). Обе стороны cancellation,
+  уже закрытый/aborted requester, main-only работа и repeat disposal проверены.
+- npm.cmd run typecheck — exit 0, 163 channels / 0 public any
+  (.tmp/wp0-requester-typecheck.log); npm.cmd run build — exit 0
+  (.tmp/wp0-requester-build.log). node scripts/test-electron-runtime.mjs —
+  ELECTRON_SMOKE_PASS / SPEED_UI_NATIVE_PASS / REQUEST_DOCUMENT_NATIVE_PASS,
+  exit 0 (.tmp/wp0-requester-electron.log). Новая fixture использует настоящие
+  hidden BrowserWindow/WebContents с sandbox, реальные reload/destroy/hash и
+  production registry/helper; только длинный I/O управляемый. Abort <900 ms,
+  retained drain, no late commit, foreign/same-document non-cancel и listeners
+  сверяются. Реальный renderer crash покрыт здесь EventEmitter unit boundary,
+  отдельное OS crash injection этим smoke не заявляется.
+- node scripts/test-wp1-native.mjs --ipc-only — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-requester-csp.log); python -X utf8
+  docs/04-приёмочные-тесты/traceability/check-coverage.py — AC 927/927,
+  F 210/210, exit 0. Полный unit-набор и automatic PR review/CI ещё ожидаются.
+- Финальный npm.cmd test -- --maxWorkers=1 — **4618 passed / 5 skipped /
+  0 failed**, 281 files passed / 2 skipped, **320.37 s**, exit 0
+  (.tmp/wp0-requester-full.log). Production/unit tree не менялся во время прогона;
+  assertions, deadlines и состав не ослаблены. git diff --check — exit 0.
+  Коммит/push выполняются в codex/wp0-requester-lifetime; следующий gate —
+  automatic Qodo и default CI точного опубликованного SHA.

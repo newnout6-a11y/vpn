@@ -135,6 +135,29 @@ afterEach(async () => {
 })
 
 describe('configuration operation lifetime', () => {
+  it.each(['import', 'export'].flatMap(kind =>
+    ['render-process-gone', 'did-start-navigation'].map(event => ({ kind, event }))
+  ))('cancels config $kind on requester $event', async ({ kind, event }) => {
+    const gate = held(kind === 'import' ? { canceled: false, filePaths: [selected] } : { canceled: false, filePath: destination })
+    ;(kind === 'import' ? state.openDialog : state.saveDialog).mockReturnValue(gate.promise)
+    const run = kind === 'import' ? invoke('config:browse-import') : invoke('config:export', 'redacted')
+    const operation = registry.list().find(op => op.status === 'running')!
+    sender.emit(event, { isMainFrame: true, isSameDocument: false })
+    expect(registry.list().find(op => op.operationId === operation.operationId)?.status).toBe('cancelled')
+    expect(await run).toMatchObject({ ok: false, correlationId: operation.correlationId, error: { category: 'cancelled' } })
+    gate.release(); await registry.close()
+    expect(await readFile(destination, 'utf8')).toBe('previous export')
+    expect(await invoke('config:import', selected)).toMatchObject({ ok: false, error: { category: 'permission' } })
+    expect(sender.eventNames()).toEqual([])
+  })
+
+  it.each(['render-process-gone', 'did-start-navigation'])('revokes an idle import selection on %s', async event => {
+    expect(await invoke('config:browse-import')).toMatchObject({ ok: true, result: selected })
+    sender.emit(event, { isMainFrame: true, isSameDocument: false })
+    expect(await invoke('config:import', selected)).toMatchObject({ ok: false, error: { category: 'permission' } })
+    expect(sender.eventNames()).toEqual([])
+  })
+
   it.each(['import', 'export'])('cancels %s during a native dialog with one original IPC correlation', async kind => {
     vi.useFakeTimers()
     const gate = held(kind === 'import' ? { canceled: false, filePaths: [selected] } : { canceled: false, filePath: destination })
