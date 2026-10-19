@@ -3,6 +3,9 @@ import { renameSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { dirname, join } from 'path'
 import type { OperationLease } from './operationRegistry'
+import { prepareConfigExport } from './configExportSecurity'
+import { logEvent } from './appLogger'
+import { classifyIpcError } from '../shared/ipc-result'
 
 const MAX_CONFIG_IMPORT_BYTES = 16 * 1024 * 1024
 type RejectRead = (code: 'file-too-large' | 'file-not-regular' | 'file-changed', reason?: 'validation' | 'conflict') => never
@@ -36,10 +39,13 @@ export async function readSelectedConfig(path: string, lease: OperationLease, re
 export async function writeConfigExport<T>(path: string, content: string, lease: OperationLease, result: T): Promise<T> {
   const temporary = join(dirname(path), `.vpnte-export-${randomUUID()}.tmp`)
   let created = false
+  let verifyDestination!: () => void
   const staging = (async () => {
     const file = await open(temporary, 'wx', 0o600)
     created = true
     try {
+      lease.assertActive()
+      verifyDestination = await prepareConfigExport(temporary, path)
       lease.assertActive()
       await file.writeFile(content, { encoding: 'utf8', signal: lease.signal })
       lease.assertActive()
@@ -49,12 +55,18 @@ export async function writeConfigExport<T>(path: string, content: string, lease:
   try {
     await lease.wait(staging)
     return lease.commit(() => {
+      verifyDestination()
       renameSync(temporary, path)
       created = false
       return result
     })
   } finally {
     await staging.catch(() => {})
-    if (created) await rm(temporary, { force: true })
+    if (created) try { await rm(temporary, { force: true }) } catch (error) {
+      try { logEvent('error', 'config-manager', 'config export cleanup failed', {
+        operationKey: 'op_' + lease.operation.operationId.replaceAll('-', ''),
+        cleanupFailed: true, reason: classifyIpcError(error)
+      }) } catch { /* Diagnostics must not replace the original failure/cancellation. */ }
+    }
   }
 }

@@ -988,3 +988,16 @@ terminal abort и deadline. Electron/DPAPI boundary и native dialogs замен
 UI cancel/unmount и прочие операции остаются в общем остатке WP-0. Команды,
 фактические результаты и Qodo/CI gate фиксируются в progress.md; завершение
 всего AT-00-003 или WP-0 не заявлено.
+
+
+Qodo #70 уточнил этот участок: staging получает настоящий Windows security
+descriptor до plaintext; существующие owner/group/DACL сохраняются, новый
+файл получает protected user/SYSTEM DACL. Destination snapshot проверяется
+снова перед rename, включая metadata change при изменении ACL. Реальный
+Windows fixture проверяет ACL round-trip, новый protected файл и conflict
+после изменения ACL. Ошибка удаления temp фиксируется отдельно с cleanupFailed
+и исходной correlation, не подменяя первичный результат. Постоянный отказ
+удаления не заявляется успешной очисткой. Native consent/picker приостанавливают
+рабочий budget; ожидание решения пользователя допускает deadline=null, но
+остаётся отменяемым. После ответа deadline снова ограничивает настоящую работу.
+Initial Qodo/CI относятся к первому head; исправления требуют повторного gate.

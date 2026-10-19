@@ -13,6 +13,34 @@ afterEach(() => vi.useRealTimers())
 const kinds = Object.keys(OPERATION_DEADLINES) as ManagedOperationKind[]
 
 describe('long operation registry', () => {
+  it('pauses only user decision time, then enforces the remaining work budget and drains timeout', async () => {
+    vi.useFakeTimers()
+    const registry = new OperationRegistry(), dialog = held<void>(), work = held<void>()
+    const run = registry.run('export', async lease => { await lease.waitForUser(dialog.promise); await lease.wait(work.promise) }, { timeoutMs: 100 }).catch(error => error)
+    expect(registry.list()[0].deadline).toBeNull()
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(registry.list()[0].status).toBe('running')
+    dialog.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(registry.list()[0].deadline).toBe(Date.now() + 100)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(await run).toMatchObject({ category: 'timeout' })
+    expect(registry.isBusy('export')).toBe(true)
+    work.resolve(); await registry.close()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('cancels user waits promptly and never restarts the deadline after late dialog completion', async () => {
+    vi.useFakeTimers()
+    const registry = new OperationRegistry(), dialog = held<void>(), effect = vi.fn()
+    const run = registry.run('import', async lease => { await lease.waitForUser(dialog.promise); effect() }).catch(error => error)
+    expect(registry.cancel(registry.list()[0].operationId)).toBe(true)
+    expect(await run).toMatchObject({ category: 'cancelled' })
+    dialog.resolve(); await registry.close()
+    expect(effect).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('publishes a synchronous final commit before a late abort can relabel persisted success', async () => {
     const controller = new AbortController(), persist = vi.fn()
     const registry = new OperationRegistry(operation => { if (operation.status === 'success') controller.abort() })
@@ -144,7 +172,7 @@ describe('long operation registry', () => {
     await withCorrelation(id, () => registry.run('refresh', async lease => {
       expect(lease.operation).toMatchObject({ correlationId: id, source: 'ipc', owner: 'schedule', kind: 'refresh', status: 'running' })
       expect(lease.operation.operationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
-      expect(lease.operation.deadline - lease.operation.startedAt).toBe(2000)
+      expect(lease.operation.deadline! - lease.operation.startedAt).toBe(2000)
       expect(currentCorrelationId()).toBe(id)
       expect(currentActionMetadata()).toEqual({ source: 'ipc', owner: 'schedule' })
       expect(lease.operation).not.toHaveProperty('signal')

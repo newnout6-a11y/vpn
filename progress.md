@@ -4182,3 +4182,60 @@ CI/review нового SHA проверяются отдельно после pu
   новый config lifetime отдельно покрыт actual file/Conf/guard fixture.
   `git diff --check` — exit 0. После push нужны completed Qodo и зелёный
   CI на итоговом SHA; следующий участок до этого не начинается.
+
+
+### PR #70 — Qodo: Windows ACL, остаточный temp и время ожидания пользователя
+
+- PR #70 создан на **f11cadce878891a30ec2e00d2e3fec9693661cd3**.
+  Initial CI **39181351651 success**, все Windows/Rust/site jobs; watcher
+  завершился exit 0. Это проверка первого head, не последующих исправлений.
+- Qodo **1542946 completed** на f11cadc: 30661bb9 (action_required),
+  f3fab6a9 и 17a5978f (remediation_recommended). Все три проверены и учтены;
+  attribution вручную не менялся, ручного review request нет.
+- 30661bb9 подтверждён настоящими Windows ACL: `npm.cmd test -- src/main/configExportAcl.test.ts`
+  — **2 failed**, **1.30 s**, exit 1 (.tmp/wp0-config-qodo70-acl-before-fixed.log).
+  Rename действительно заменял protected owner/group/DACL наследуемыми правами.
+  Предыдущий fixture trial не смог autoload Get-Acl из-за унаследованного
+  PowerShell 7 PSModulePath; он не считается доказательством production defect.
+  Fixture и production helper используют .NET ACL APIs без autoload.
+- Empty staging теперь получает проверенный security descriptor до plaintext:
+  existing owner/group/DACL сохраняются, новый файл имеет protected user/SYSTEM
+  DACL. Учитываются ACL round-trip auto-inheritance flags; fresh FileSecurity
+  явно помечает секции modified перед SetAccessControl. Неверный/недоступный
+  descriptor блокирует export. PowerShell выполняется async, без elevation/FFI
+  в main. Destination dev/ino/size/mtime/ctime проверяются после ACL capture и
+  непосредственно перед sync rename; изменение ACL выявляется как conflict.
+  Это проверка snapshot, не заявление о блокировке внешних writers ОС.
+- f3fab6a9: отказ удаления staging больше не заменяет primary cancellation/
+  write/rename error. Отдельный error event `config export cleanup failed`
+  сохраняет cleanupFailed=true, bounded category, operationKey и original
+  correlation. Тесты намеренно оставляют temp при постоянном EBUSY, сверяют
+  прежний destination и JSONL diagnostic; fixture удаляет только свою папку.
+- 17a5978f: lease.waitForUser приостанавливает только work budget на native
+  consent/picker. Deadline в snapshot временно null, cancellation остаётся
+  prompt, physical lease держится до dialog settlement. После ответа остаётся
+  неиспользованный budget 120 s; реальные file I/O по-прежнему timeout-ятся.
+  Проверены выбор после 10 минут, cancel pending picker, поздний ответ без grant,
+  timeout actual held read, отсутствие лишнего таймера после drain.
+- `npm.cmd test -- src/main/configExportAcl.test.ts src/main/configOperations.test.ts src/main/configManager.test.ts src/main/configImportSecurity.test.ts src/main/configExportSecurity.test.ts src/main/configIpcErrors.test.ts src/main/operationRegistry.test.ts`
+  — **188 passed / 7 files**, **6.82 s**, exit 0
+  (.tmp/wp0-config-qodo70-regression.log). Три ACL tests используют реальные
+  Windows файлы/security descriptors, включая смену ACL после capture.
+- Первый typecheck нового helper выявил void вместо undefined в catch lstat;
+  исправлено явным return undefined, без cast. `npm.cmd run typecheck`
+  — exit 0, 160 channels / 0 public any (.tmp/wp0-config-qodo70-typecheck-final.log).
+  Traceability AC 927/927 / F 210/210 — exit 0. Полный npm test запущен после
+  typecheck, build/native и повторный exact-head Qodo/CI ещё необходимы.
+
+- Полный `npm.cmd test` после Qodo fixes — **4342 passed / 5 skipped /
+  0 failed**, **270 files passed / 2 skipped**, **194.31 s**, exit 0
+  (.tmp/wp0-config-qodo70-full.log). Build/native выполняются после него.
+
+- `npm.cmd run build` — exit 0, включая typecheck
+  (.tmp/wp0-config-qodo70-build.log). `node scripts/test-electron-runtime.mjs`
+  — ELECTRON_SMOKE_PASS, exit 0 (.tmp/wp0-config-qodo70-electron.log).
+  `node scripts/test-wp1-native.mjs --ipc-only` — WP1_NATIVE_PASS, exit 0
+  (.tmp/wp0-config-qodo70-csp.log). Scope этих smoke прежний; реальные Windows
+  ACL нового export отдельно проверены тремя configExportAcl cases.
+  `git diff --check` — exit 0. Следующий участок остаётся закрыт до completed
+  Qodo и CI success на окончательном SHA.

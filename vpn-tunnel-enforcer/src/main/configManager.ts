@@ -643,11 +643,11 @@ async function exportConfig(sender: WebContents, mode: 'redacted' | 'secrets' = 
 async function exportConfigUnlocked(sender: WebContents, mode: 'redacted' | 'secrets', lease: OperationLease): Promise<{ success: true; path: string }> {
   try {
     if (mode === 'secrets') {
-      const consent = await lease.wait(withSecretExportConsent(sender, 'file', () => true))
+      const consent = await lease.waitForUser(withSecretExportConsent(sender, 'file', () => true))
       if (consent !== true) throw new IpcFault('cancelled')
     }
     if (sender.isDestroyed()) throw new IpcFault('cancelled')
-    const result = await lease.wait(dialog.showSaveDialog({
+    const result = await lease.waitForUser(dialog.showSaveDialog({
       title: mode === 'secrets' ? 'Экспорт конфигурации с секретами' : 'Экспорт конфигурации без секретов',
       buttonLabel: mode === 'secrets' ? 'Сохранить файл с секретами' : 'Сохранить',
       defaultPath: `vpn-tunnel-enforcer-config-${Date.now()}.json`,
@@ -924,7 +924,7 @@ export function registerConfigManagerIpcHandlers(): void {
     configImportDialogs.set(event.sender, request)
     return runConfigOperation('import', 'config:browse:' + randomUUID(), async lease => {
       try {
-        const result = await lease.wait(dialog.showOpenDialog({
+        const result = await lease.waitForUser(dialog.showOpenDialog({
           properties: ['openFile'],
           filters: [
             { name: 'JSON Files', extensions: ['json'] },

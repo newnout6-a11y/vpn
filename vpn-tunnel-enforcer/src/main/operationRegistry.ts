@@ -8,6 +8,8 @@ export interface OperationLease {
   readonly operation: ManagedOperation
   assertActive(): void
   wait<T>(task: Promise<T>): Promise<T>
+  /** Native consent/picker time is not application work; cancellation still drains it. */
+  waitForUser<T>(task: Promise<T>): Promise<T>
   /** Final synchronous persistence and its result become terminal together.
    * All tracked I/O must have settled; no more effects may follow this call. */
   commit<T>(effect: () => T): T
@@ -86,6 +88,7 @@ export class OperationRegistry {
     void aborted.catch(() => {})
     const effects: Promise<unknown>[] = []
     let pendingEffects = 0, committing = false, committed: { result: unknown } | undefined
+    let userWaits = 0, workRemainingMs = remainingMs, workClock = performance.now()
     const entry: Entry = { controller, drained, operation: {
       version: 1, operationId, correlationId: currentCorrelationId() ?? 'op_' + operationId.replaceAll('-', ''),
       kind, owner, source: metadata.source, startedAt, deadline: startedAt + timeoutMs, status: 'running'
@@ -114,6 +117,10 @@ export class OperationRegistry {
     const assertActive = () => {
       if (controller.signal.aborted || entry.operation.status !== 'running' || this.active.get(resource) !== entry) throw abortFault ?? new IpcFault('cancelled')
     }
+    const updateDeadline = (deadline: number | null) => {
+      entry.operation = { ...entry.operation, deadline }
+      this.history.set(operationId, { ...entry.operation })
+    }
     const lease: OperationLease = { signal: controller.signal, get operation() { return { ...entry.operation } }, assertActive,
       async wait<R>(task: Promise<R>): Promise<R> {
         pendingEffects++
@@ -122,6 +129,25 @@ export class OperationRegistry {
         const value = await Promise.race([task, aborted])
         assertActive()
         return value
+      },
+      async waitForUser<R>(task: Promise<R>): Promise<R> {
+        const waiting = lease.wait(task)
+        if (entry.operation.status !== 'running') return waiting
+        if (userWaits++ === 0) {
+          workRemainingMs = Math.max(0, workRemainingMs - (performance.now() - workClock))
+          if (workRemainingMs <= 0) { userWaits--; entry.cancel('timeout'); return waiting }
+          clearTimeout(timer)
+          updateDeadline(null)
+        }
+        try { return await waiting }
+        finally {
+          if (--userWaits === 0 && entry.operation.status === 'running') {
+            workClock = performance.now()
+            updateDeadline(Date.now() + workRemainingMs)
+            timer = setTimeout(() => entry.cancel('timeout'), workRemainingMs)
+            timer.unref?.()
+          }
+        }
       },
       commit<R>(effect: () => R): R {
         assertActive()
@@ -139,7 +165,7 @@ export class OperationRegistry {
         return result
       }
     }
-    const timer = setTimeout(() => entry.cancel('timeout'), remainingMs)
+    let timer = setTimeout(() => entry.cancel('timeout'), remainingMs)
     timer.unref?.()
     const onAbort = () => entry.cancel('cancelled')
     options.signal?.addEventListener('abort', onAbort, { once: true })

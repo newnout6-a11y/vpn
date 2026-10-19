@@ -9,7 +9,7 @@ const state = vi.hoisted(() => ({
   dir: '', stores: {} as Record<string, any>, handles: [] as Array<{ closed: boolean }>,
   handlers: new Map<string, (...args: any[]) => any>(), handle: vi.fn(),
   openDialog: vi.fn(), saveDialog: vi.fn(), consent: vi.fn(), log: vi.fn(),
-  hold: '', reached: 0, gate: Promise.resolve(), writeFault: false, renameFault: false, afterRename: undefined as (() => void) | undefined
+  hold: '', reached: 0, gate: Promise.resolve(), writeFault: false, renameFault: false, removeFault: false, afterRename: undefined as (() => void) | undefined
 }))
 vi.mock('electron', () => ({
   app: { isPackaged: false, getPath: () => state.dir }, ipcMain: { handle: state.handle },
@@ -35,7 +35,10 @@ vi.mock('fs', async original => {
 })
 vi.mock('fs/promises', async original => {
   const actual = await original<typeof import('fs/promises')>()
-  return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
+  return { ...actual, rm: async (...args: Parameters<typeof actual.rm>) => {
+    if (state.removeFault && String(args[0]).includes('.vpnte-export-')) throw Object.assign(new Error('private-cleanup-path'), { code: 'EBUSY' })
+    return actual.rm(...args)
+  }, open: async (...args: Parameters<typeof actual.open>) => {
     const file = await actual.open(...args), tracked = { closed: false }
     state.handles.push(tracked)
     const close = file.close.bind(file)
@@ -86,7 +89,7 @@ async function logRows() {
 
 beforeEach(async () => {
   vi.resetModules(); vi.clearAllMocks()
-  state.hold = ''; state.reached = 0; state.writeFault = false; state.renameFault = false; state.handles = []; state.afterRename = undefined
+  state.hold = ''; state.reached = 0; state.writeFault = false; state.renameFault = false; state.removeFault = false; state.handles = []; state.afterRename = undefined
   await mkdir('.tmp', { recursive: true })
   state.dir = await mkdtemp(join(process.cwd(), '.tmp', 'config-operations-'))
   sender = new Sender()
@@ -251,16 +254,67 @@ describe('configuration operation lifetime', () => {
     expect(registry.list()).toMatchObject([{ status: 'success' }])
   })
 
-  it('times out a pending native dialog without a late selection grant or file write', async () => {
+  it('does not time out a user decision, and still cancels it without a late grant', async () => {
     const gate = held({ canceled: false, filePaths: [selected] })
     state.openDialog.mockReturnValue(gate.promise)
     vi.useFakeTimers()
     const run = invoke('config:browse-import')
-    await vi.advanceTimersByTimeAsync(120_000)
-    expect(await run).toMatchObject({ ok: false, error: { category: 'timeout' } })
+    await vi.advanceTimersByTimeAsync(600_000)
+    const operation = registry.list().find(op => op.status === 'running')!
+    expect(operation.deadline).toBeNull()
+    expect(registry.cancel(operation.operationId)).toBe(true)
+    expect(await run).toMatchObject({ ok: false, error: { category: 'cancelled' } })
     gate.release(); await registry.close()
     expect(state.handles).toEqual([])
     expect(await invoke('config:import', selected)).toMatchObject({ ok: false, error: { category: 'permission' } })
+  })
+
+  it('accepts the selected file after a long user decision and starts the work budget afterwards', async () => {
+    const gate = held({ canceled: false, filePaths: [selected] })
+    state.openDialog.mockReturnValue(gate.promise)
+    vi.useFakeTimers()
+    const run = invoke('config:browse-import')
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(registry.list()[0].status).toBe('running')
+    vi.useRealTimers(); gate.release()
+    expect(await run).toMatchObject({ ok: true, result: selected })
+    expect(await invoke('config:import', selected)).toMatchObject({ ok: true })
+  })
+
+  it('still times out actual file work after the picker while retaining the raw handle until drain', async () => {
+    const gate = held(undefined)
+    state.hold = 'read'; state.gate = gate.promise
+    vi.useFakeTimers()
+    const run = invoke('config:browse-import')
+    await vi.waitFor(() => expect(state.reached).toBe(1))
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(await run).toMatchObject({ ok: false, error: { category: 'timeout' } })
+    expect(state.handles.some(file => !file.closed)).toBe(true)
+    gate.release(); await registry.close()
+    expect(state.handles.every(file => file.closed)).toBe(true)
+    expect(await invoke('config:import', selected)).toMatchObject({ ok: false, error: { category: 'permission' } })
+  })
+
+  it.each(['cancel', 'rename'])('reports residual staging cleanup failure without replacing %s outcome', async reason => {
+    state.removeFault = true
+    const gate = held(undefined)
+    if (reason === 'cancel') { state.hold = 'sync'; state.gate = gate.promise }
+    else state.renameFault = true
+    const run = invoke('config:export', 'secrets')
+    const operation = registry.list().find(op => op.status === 'running')!
+    if (reason === 'cancel') {
+      await vi.waitFor(() => expect(state.reached).toBe(1))
+      registry.cancel(operation.operationId)
+    }
+    expect(await run).toMatchObject({ ok: false, correlationId: operation.correlationId, error: { category: reason === 'cancel' ? 'cancelled' : 'permission' } })
+    gate.release(); await registry.close()
+    expect(await readFile(destination, 'utf8')).toBe('previous export')
+    expect((await readdir(state.dir)).filter(name => name.startsWith('.vpnte-export-'))).toHaveLength(1)
+    const cleanup = (await logRows()).rows.find(row => row.message === 'config export cleanup failed')
+    expect(cleanup).toMatchObject({ correlationId: operation.correlationId, details: {
+      cleanupFailed: true, operationKey: 'op_' + operation.operationId.replaceAll('-', '')
+    } })
+    expect(JSON.stringify(cleanup)).not.toContain('private-cleanup-path')
   })
 
   it('preserves concurrent import/export identities and redaction through actual IPC/JSONL/diagnostics', async () => {
