@@ -1,5 +1,6 @@
 import type { PublicIpInfo } from '../shared/publicIp'
 import type { TunnelSnapshot } from '../shared/tunnel-state'
+import { PLANNED_FEATURE_IDS, type PlannedFeatureId } from '../shared/planned-features'
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC_REQUESTS, assertIpcRequest, type IpcChannel, type IpcRequest, type IpcResponse } from '../shared/ipc-contract'
 import { unwrapIpcResult, IpcRemoteError, IpcValidationError, ipcError, serializeIpcError, type IpcErrorLocale } from '../shared/ipc-result'
@@ -413,6 +414,8 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   speedTestRun: (requestId?: string) => invoke('speed-test:run', assertOptionalString(requestId, 'requestId')),
   speedTestCancel: (requestId: string) => invoke('speed-test:cancel', assertString(requestId, 'requestId')),
   operationsList: () => invoke('operations:list'),
+  plannedFeaturesStatus: () => invoke('planned-features:status'),
+  plannedFeatureActivate: (featureId: PlannedFeatureId) => invoke('planned-features:activate', assertEnum(featureId, PLANNED_FEATURE_IDS, 'featureId')),
   operationsCancel: (operationId: string) => invoke('operations:cancel', operationId),
   speedTestHistory: () => invoke('speed-test:history'),
   onSpeedTestProgress: (callback: (data: { percent: number; phase: string; operationId?: string; requestId?: string }) => void) => {

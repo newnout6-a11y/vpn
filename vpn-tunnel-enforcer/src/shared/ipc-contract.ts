@@ -1,6 +1,7 @@
 import type { ElectronAPI } from './electron-api'
 import type { AppSettings } from './settings'
 import { IpcValidationError } from './ipc-result'
+import { PLANNED_FEATURE_IDS } from './planned-features'
 
 export interface IpcArgumentSchema {
   type: 'string' | 'boolean' | 'number' | 'integer' | 'enum' | 'strings' | 'array' | 'object' | 'json-object'
@@ -232,6 +233,8 @@ export const IPC_REQUESTS = {
   'speed-test:run': request('speedTestRun', [optional(text(36))]),
   'speed-test:cancel': request('speedTestCancel', [text(36)]),
   'operations:list': request('operationsList', []),
+  'planned-features:status': request('plannedFeaturesStatus', []),
+  'planned-features:activate': request('plannedFeatureActivate', [oneOf(PLANNED_FEATURE_IDS)]),
   'operations:cancel': request('operationsCancel', [text(36)]),
   'speed-test:history': request('speedTestHistory', []),
   'external-proxy:status': request('externalProxyStatus', [optional(slot)]),

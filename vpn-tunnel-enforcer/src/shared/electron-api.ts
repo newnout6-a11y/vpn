@@ -1,6 +1,7 @@
 import type { AppSettings } from './settings'
 import type { ConnectionStartResult, ConnectionStopResult, ManagedOperation } from './operation'
 import type { TunnelSnapshot } from './tunnel-state'
+import type { PlannedFeatureId, PlannedFeatureStatus } from './planned-features'
 import type { PublicIpInfo } from './publicIp'
 import type { ProxyInfo, AdaptiveBypassStatus, LeakCheckResult, SystemDiagnosticResult, RoutingPlan, LogFileSnapshot, UrlAvailabilityResult, ServerProbeResult } from './diagnostics'
 import type { AutoconfigTarget, SmartRouteRuleSetState, BrowserHardeningResult, AutoPilotResult, SystemNetworkResult, FirewallKillSwitchResult, FirewallRepairHealth, LocationPrivacyStatus } from './network'
@@ -244,6 +245,8 @@ export interface ElectronAPI {
   speedTestRun: (requestId?: string) => Promise<SpeedTestResult>
   speedTestCancel: (requestId: string) => Promise<boolean>
   operationsList: () => Promise<ManagedOperation[]>
+  plannedFeaturesStatus: () => Promise<PlannedFeatureStatus[]>
+  plannedFeatureActivate: (featureId: PlannedFeatureId) => Promise<boolean>
   operationsCancel: (operationId: string) => Promise<boolean>
   speedTestHistory: () => Promise<SpeedTestResult[]>
   onSpeedTestProgress: (callback: (data: { percent: number; phase: string; operationId?: string; requestId?: string }) => void) => () => void
