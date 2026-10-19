@@ -1045,3 +1045,15 @@ logger/redactor/JSONL/diagnostic read-back. Dialogs/clipboard/Electron DPAPI bou
 Общие actual Windows ACL tests shared writer повторно прошли. Полный AT и WP-0
 остаются открытыми: rotation, UI cancel/unmount, migration/audit/semantic matrices
 и полная native/state/resource приёмка ещё нужны. Проверки и remote PR gate — progress.md.
+
+
+Qodo #71 выявил три границы наблюдаемости/сохранения policy. Key failures теперь
+сохраняют allowlisted errno вместе с category/destination в исходном correlation,
+без raw exception data; этот безопасный allowlist общий с config diagnostics.
+Bulk success снова пишет total/exported/skipped в actual JSONL, без path/content.
+POSIX branch сохраняет uid/gid/mode до plaintext и проверяет read-back, иначе
+экспорт отклоняется. Этот POSIX тест управляет filesystem/identity boundary;
+натурная Linux приёмка не заявляется, actual Windows ACL cases сохранены.
+Все 14 новых cases падали до исправления, адресный набор 167 passed после.
+Initial CI 39185510421 success относится к cdb1229; новый head требует
+повторных full tests, completed Qodo и CI success. Attribution не менялся вручную.

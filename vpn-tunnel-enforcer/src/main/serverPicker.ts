@@ -60,6 +60,7 @@ import { withProfileStoreWriteLock } from './profileStoreQueue'
 import { operations } from './operations'
 import type { OperationLease } from './operationRegistry'
 import { classifyIpcError, IpcFault } from '../shared/ipc-result'
+import { ioFailureDetails } from './ioFailureDiagnostics'
 
 export const RESOLVED_IP_TTL_MS = 5 * 60_000
 const DNS_RESOLUTION_TIMEOUT_MS = 2500
@@ -2621,7 +2622,13 @@ async function runKeyExport<T>(sender: IpcMainInvokeEvent['sender'], destination
       lease.assertActive()
       return effect(lease)
     }, { resource: 'keys:' + destination, signal: lifetime.signal })
-  } catch (error) { throw new IpcFault(classifyIpcError(error)) }
+  } catch (error) {
+    const details = ioFailureDetails(error)
+    if (!(error instanceof IpcFault)) try {
+      logEvent('warn', 'server-picker', 'key export failed', { destination, ...details })
+    } catch { /* Diagnostics cannot replace the bounded caller failure. */ }
+    throw new IpcFault(details.reason)
+  }
   finally { sender.removeListener?.('destroyed', destroyed) }
 }
 
@@ -2914,9 +2921,11 @@ export function registerServerPickerHandlers(): void {
 
     const content = hasJson ? JSON.stringify(lines.map(line => line.startsWith('{') ? JSON.parse(line) : line))
       : header + lines.join('\n')
-    return writeConfigExport(choice.filePath, content + '\n', lease, {
+    const result = await writeConfigExport(choice.filePath, content + '\n', lease, {
       ok: true as const, path: choice.filePath, total: profiles.length, exported: lines.length, skipped
     })
+    logEvent('info', 'server-picker', 'export-all-keys-file', { total: profiles.length, exported: lines.length, skipped })
+    return result
     })
   })
 
@@ -2958,9 +2967,11 @@ export function registerServerPickerHandlers(): void {
       return { ok: false as const, cancelled: true as const }
     }
 
-    return writeConfigExport(choice.filePath, lines.join('\n') + '\n', lease, {
+    const result = await writeConfigExport(choice.filePath, lines.join('\n') + '\n', lease, {
       ok: true as const, path: choice.filePath, total: profiles.length, exported: lines.length, skipped
     })
+    logEvent('info', 'server-picker', 'export-all-proxies-file', { total: profiles.length, exported: lines.length, skipped })
+    return result
     })
   })
 }

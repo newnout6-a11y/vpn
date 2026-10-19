@@ -4367,3 +4367,50 @@ CI/review нового SHA проверяются отдельно после pu
   traceability AC 927/927 / F 210/210 и git diff --check — exit 0.
   После commit/push нужны completed Qodo и CI success на окончательном SHA;
   следующий участок до этого не начинается.
+
+
+### PR #71 — Qodo: причины I/O, POSIX group и bulk audit
+
+- PR #71 создан на cdb1229e390236708930c165a4b972f1c5c7bd83. Qodo
+  1543248 completed: 11df09e6, 7d633b25, 0a6b5ed7 — remediation_recommended.
+  Все три проверены и подтверждены; attribution вручную не менялся.
+- Новые регрессии npm.cmd test -- src/main/serverKeyOperations.test.ts src/main/configExportPosixSecurity.test.ts -t 'bounded cause|nonsecret success counts|POSIX export'
+  — 14 failed / 26 skipped, 6.27 s, exit 1 (.tmp/wp0-key-qodo71-before.log).
+  Девять случаев потеряли errno, два — persistent counts, три — group policy.
+- Для config/key diagnostics выделен прежний bounded IO allowlist в общий
+  ioFailureDetails: category и allowlisted own data-property ioCode, без raw
+  message/stack/path. runKeyExport до bounded rethrow пишет destination и
+  эти details в исходном correlation context; cancellation не объявляется
+  файловой ошибкой. Config diagnostics сохраняют прежний формат.
+- После успешного bulk writer возвращены audit events export-all-keys-file /
+  export-all-proxies-file с total/exported/skipped и без path/content.
+  Actual JSONL проверяет counts и correlation при skipped profiles.
+- POSIX staging до plaintext копирует uid/gid, затем mode (chown может сбросить
+  mode bits), читает policy обратно и отказывает при mismatch/EPERM. Это
+  controlled POSIX branch test, не заявление о native Linux приёмке.
+  Actual Windows ACL helper и его семь native cases не изменены.
+- Дополнительный вопрос Revix 4309641449 проверен по всем шести renderer
+  call sites в Servers.tsx / ServerDetailModal.tsx: каждый имеет catch для
+  rejected IPC, bulk handlers сбрасывают busy в finally; ветвления именно по
+  write-failed нет. Quiet native dismiss по-прежнему возвращается без reject.
+- npm.cmd test -- src/main/serverKeyOperations.test.ts src/main/configExportPosixSecurity.test.ts src/main/configIpcErrors.test.ts src/main/configExportAcl.test.ts src/main/serverKeyExportSecurity.test.ts src/main/secretClipboard.test.ts src/main/operationRegistry.test.ts
+  — 167 passed / 7 files, 13.98 s, exit 0 (.tmp/wp0-key-qodo71-regression.log).
+  Typecheck/traceability и полный набор выполняются для нового состояния.
+- Initial CI 39185510421 success на cdb1229: Windows unit/traceability/
+  production IPC/CSP/WFP/native, Rust и сайт зелёные. Watcher terminal exit 0.
+  Это проверка первоначального head, не нового исправления; новый Qodo/CI gate
+  обязателен после push, следующий участок пока закрыт.
+
+- npm.cmd run typecheck — exit 0, 160 channels / 0 public any
+  (.tmp/wp0-key-qodo71-typecheck.log). Полный npm.cmd test — 4393 passed /
+  5 skipped / 0 failed, 272 files passed / 2 skipped, 204.47 s, exit 0
+  (.tmp/wp0-key-qodo71-full.log). npm.cmd run build — exit 0, включая
+  повторный typecheck (.tmp/wp0-key-qodo71-build.log).
+- node scripts/test-electron-runtime.mjs — ELECTRON_SMOKE_PASS, exit 0
+  (.tmp/wp0-key-qodo71-electron.log); node scripts/test-wp1-native.mjs --ipc-only
+  — WP1_NATIVE_PASS, exit 0 (.tmp/wp0-key-qodo71-csp.log). Scope smoke прежний.
+  Повторные traceability AC 927/927 / F 210/210 и git diff --check — exit 0.
+  Исправление требует нового completed Qodo/CI после push.
+- Попытка убрать собственный orphan fixture .tmp/key-operations-ADQ7rk
+  отклонена автоматической проверкой инструмента: blocked by policy. Повторных
+  попыток/обхода нет, папка оставлена ignored; проверкам и изменениям не мешает.

@@ -1,5 +1,5 @@
 import { execFile } from 'child_process'
-import { lstat, chmod } from 'fs/promises'
+import { lstat, chmod, chown } from 'fs/promises'
 import { lstatSync, type BigIntStats } from 'fs'
 import { join } from 'path'
 import { promisify } from 'util'
@@ -52,7 +52,11 @@ if((Normalize-Acl $actual) -cne (Normalize-Acl $expected)) {throw 'ConfigExportA
     } catch { throw new IpcFault('permission') }
   } else if (before) {
     if (process.getuid?.() !== Number(before.uid)) throw new IpcFault('permission')
+    // chown may clear mode bits: preserve owner/group first, then permissions.
+    await chown(temporary, Number(before.uid), Number(before.gid))
     await chmod(temporary, Number(before.mode & 0o777n))
+    const copied = await lstat(temporary, { bigint: true })
+    if (copied.uid !== before.uid || copied.gid !== before.gid || (copied.mode & 0o777n) !== (before.mode & 0o777n)) throw new IpcFault('permission')
   }
   const verify = () => {
     let current: BigIntStats | undefined
