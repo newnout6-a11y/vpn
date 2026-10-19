@@ -6326,3 +6326,61 @@ CI/review нового SHA проверяются отдельно после pu
   Production/test tree с начала этого прогона не менялся. Typecheck/build,
   7 native fixtures,coverage и diff check —exit0. Следующий участок только
   после automatic Qodo completed и CI success на опубликованном review SHA.
+
+### WP-0: routing self-test lifetime (20.10.2026)
+
+- #86 принят: final head150670b6d2702a343a9aaab09d10eefa52a0e5a7,
+  Qodo1556986 completed,6/6 implemented,новых findings нет;
+  CI39328685275 success. Merge/main288a998e11e8532a5f7a0af98bf80831261c25be;
+  tree947f1f9fc91dbe3d5653f0f831cdbfe1d1286ad4 совпал с reviewed head.
+  Revix до20.10 03:00 МСК по квоте недоступен; отсутствие review не approval.
+- Следующий участок AT-00-001/003/004/005/008,F-021/F-074/F-138/F-143:
+  runRoutingSelfTest и две реальные страницы Availability/Maintenance.
+  Общий registry теперь владеет routing-check,UUID/correlation/manual/deadline60s;
+  optional token сохраняет legacy zero-argument preload. Main handler связан
+  с документом; чужой sender не может отменить запрос, duplicate token —conflict.
+- HTTP получает signal; guards после raw replies/перед fallback/RU echo не дают
+  продолжить отменённую проверку. SOCKS negotiation bounded8s остаётся owned;
+  поздний socket закрывается без HTTP. Data/abort/error инициируют destroy,
+  physical lease удерживается до actual close. Success/completed log terminal.
+  Независимые проверки не блокируют друг друга. Измеренные отказы сохраняют
+  прежний structured verdict; отмена/deadline —typed errors.
+- Availability и protection action Maintenance отменяют routing при unmount,
+  ограждают поздние success/error/log/toast и не очищают новую running action.
+  Companion leak failure отменяет ещё pending routing. Сам leak self-test,
+  прочие maintenance actions и live/server probes этим участком не приняты.
+- Beforefix main1:10 failed,15.41s; UI1:3 failed/6 passed,1.85s.
+  В первых новых tests обнаружены неточный button selector и invalid correlation
+  fixture. После исправления selector повтор before2:13 failed/6 passed,15.50s
+  (.tmp/wp0-routing-before2.log); один correlation case ещё имел невалидный UUID
+  key и не засчитан как production failure. Maintenance before:4 failed,1.64s
+  (.tmp/wp0-routing-maintenance-before.log). Targeted1:85 passed/1 failed,1.92s
+  из-за этого correlation fixture; после canonical UUID key targeted2:178/178,
+  3.95s. Targeted3 с isolation/remount/companion error:184/184,8 suites,3.68s,
+  exit0 (.tmp/wp0-routing-targeted3.log).
+- Команда адресных проверок: npm.cmd test -- src/main/routingSelfTestOperation.test.ts
+  src/main/routingSelfTest.test.ts src/renderer/pages/Availability.requestLifetime.test.tsx
+  src/renderer/pages/Maintenance.requestLifetime.test.tsx src/renderer/MaintenanceSource.test.ts
+  src/preload/preloadValidation.test.ts src/main/requesterOperation.test.ts
+  src/main/operationRegistry.test.ts. npm.cmd run typecheck —exit0,165 channels/
+  0 public any. Coverage AC927/927,F210/210 и git diff --check —exit0.
+  Final full/build выполняются; code/test tree после начала full не менялся.
+- npm.cmd run build —exit0 (.tmp/wp0-routing-build.log), включает повторный
+  typecheck165 channels/0 public any. node scripts/test-electron-runtime.mjs
+  —7 PASS,exit0 (.tmp/wp0-routing-electron.log). Это native regression предыдущих
+  workflows/общей границы; новые routing boundaries проверены controlled OS.
+- Full1:4914 passed/5 skipped/1 failed,325.13s,exit1
+  (.tmp/wp0-routing-full.log). Прежний adaptiveNetworkIdentity native fixture
+  выполнился за8314ms при outer Vitest5000ms; единственный failure —timeout,
+  не несовпадение JSON. Изолированный npm.cmd test -- src/main/adaptiveNetworkIdentity.test.ts
+  —25/25 passed,3.26s. У этого native case outer budget35s согласован с30s
+  helper process timeout и cold-start overhead; все data assertions сохранены.
+  Routing production не менялся. Повторный targeted с этим native suite:
+  npm.cmd test -- src/main/adaptiveNetworkIdentity.test.ts плюс8 suites выше
+  —209/209 passed,9 suites,5.49s,exit0 (.tmp/wp0-routing-targeted-final.log).
+  Full2 запущен после последнего test-only изменения.
+- Final full2: npm.cmd test -- --maxWorkers=1 —4915 passed/5 skipped/0 failed,
+  297 files passed/2 skipped,312.84s,exit0 (.tmp/wp0-routing-full2.log).
+  Production/test tree с начала этого прогона не менялся. Повторный typecheck
+  exit0 (.tmp/wp0-routing-typecheck-final.log),build/7 native fixtures,
+  coverage/diff check —exit0. Remote Qodo/CI нужны на окончательном SHA.
