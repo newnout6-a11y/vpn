@@ -13,6 +13,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { SocksClient } from 'socks'
 import axios from 'axios'
 import { logEvent } from './appLogger'
+import { operations } from './operations'
+import { IpcFault } from '../shared/ipc-result'
 import { settingsStore } from './settings'
 import { serverPicker } from './serverPicker'
 import { tunController, getBundledResource, getDirectProxyPort, getTunnelProbePort, pickFreeLocalPort, isVpnOutboundUdpCapable, shouldBlockQuicUdp443 } from './tunController'
@@ -1976,6 +1978,20 @@ async function verifyMediaEndpoint(
  * whether QUIC blackhole risk (Twitch Error #2000) is mitigated.
  */
 export async function probeMediaStream(
+  profile?: ServerProfile | null, socksPort?: number, signal?: AbortSignal
+): Promise<LiveMediaStreamDiagnostics> {
+  const started = Date.now()
+  try {
+    return await operations.run('server-probe', lease => probeMediaStreamOwned(profile, socksPort, lease.signal), {
+      resource: `live-media:${crypto.randomUUID()}`, timeoutMs: 15_000, signal
+    })
+  } catch (error) {
+    if (!(error instanceof IpcFault) || !['cancelled', 'timeout'].includes(error.category)) throw error
+    return { status: error.category === 'cancelled' ? 'skipped' : 'error', durationMs: Date.now() - started, error: error.message }
+  }
+}
+
+async function probeMediaStreamOwned(
   profile?: ServerProfile | null,
   socksPort?: number,
   signal?: AbortSignal
@@ -2061,6 +2077,25 @@ export async function probeMediaStream(
  * and requests exit IPs from dual independent reflectors (including IPv6 reflector).
  */
 export async function probeTunnelHandshakeAndEgress(
+  profile?: ServerProfile | null, endpointIp?: string, signal?: AbortSignal, includeThroughput = false
+): Promise<{ handshake: TunnelHandshakeResult; egress: LiveEgressResult; mediaStream: LiveMediaStreamDiagnostics; throughput?: LiveThroughputDiagnostics }> {
+  const started = Date.now()
+  try {
+    return await operations.run('server-probe', lease => probeTunnelHandshakeAndEgressOwned(profile, endpointIp, lease.signal, includeThroughput), {
+      resource: `live-handshake:${crypto.randomUUID()}`, timeoutMs: 60_000, signal
+    })
+  } catch (error) {
+    if (!(error instanceof IpcFault) || !['cancelled', 'timeout'].includes(error.category)) throw error
+    const status = error.category === 'cancelled' ? 'skipped' : 'timeout'
+    return {
+      handshake: { status, durationMs: Date.now() - started, protocol: profile?.protocol, error: error.message },
+      egress: { status, durationMs: 0, reflectors: [], error: error.message },
+      mediaStream: { status: 'skipped', durationMs: 0, error: error.message }
+    }
+  }
+}
+
+async function probeTunnelHandshakeAndEgressOwned(
   profile?: ServerProfile | null,
   endpointIp?: string,
   signal?: AbortSignal,
@@ -2298,6 +2333,10 @@ export async function probeTunnelHandshakeAndEgress(
           })
           childClosed = new Promise<void>(resolve => child.once('close', () => resolve()))
           retain(childClosed)
+          // Exit can precede close indefinitely when a descendant inherited a
+          // pipe. Close our read handles after confirmed exit; never release a
+          // live process merely because a cleanup timer elapsed.
+          child.once('exit', () => { child.stdout?.destroy(); child.stderr?.destroy() })
 
           let childErrorReject: ((reason?: any) => void) | null = null
           const childError = new Promise<never>((_, reject) => { childErrorReject = reject })
@@ -2520,7 +2559,7 @@ export async function probeTunnelHandshakeAndEgress(
           durationMs: 0
         }
         try {
-          mediaStream = await probeMediaStream(profile, inboundPort, signal)
+          mediaStream = await probeMediaStreamOwned(profile, inboundPort, signal)
         } catch (mErr: any) {
           mediaStream = {
             status: 'error',

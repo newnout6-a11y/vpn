@@ -6718,3 +6718,70 @@ CI/review нового SHA проверяются отдельно после pu
 - npm.cmd run build final,включая typecheck165 channels/0 public any —exit0
   (.tmp/wp0-live-handshake-build-final.log). Перед commit повторяются
   typecheck/coverage/diff. Exact-head Qodo/CI pending.
+
+### PR #92 — Qodo/Revix remediation (20.10.2026)
+
+- Initial headfef2945dc8f2bcad223c4d8b363aadbe084043b4,Qodo1558277 completed:
+  2 remediation findings —stalled SOCKS dial и child close без верхней границы.
+  Attribution не менялся. Revix после сброса квоты выполнил review:2 minor
+  comments —itest suffix и swallowed expect внутри rm mock.
+- SOCKS finding подтверждён:openTcpViaSocks теперь сам создаёт TCP transport,
+  держит close и начинает SOCKS negotiation только после connect через
+  existing_socket. Abort/общий timeout уничтожают transport до negotiation
+  и во время неё. Поздний socket по-прежнему уничтожается/retained.
+- New transport tests до fix:3 failed/0 passed и1 unhandled rejection
+  (.tmp/wp0-live-handshake-qodo-dial-before.log);fixture старого helper получал
+  undefined вместо нового existing_socket. После fix3/3 passed,1.17s.
+  Related4 suites81/81 passed,1.56s (.tmp/wp0-live-handshake-qodo-dial-targeted.log).
+- Public media/handshake callers теперь идут через существующий registry kind
+  server-probe с отдельными resource IDs и deadlines15s/60s. Cancel/deadline
+  возвращается promptly,а registry.close и shared handshake worker ждут
+  actual close/settlement. Handshake вызывает owned media напрямую,чтобы
+  nested caller race не освободил handshake slot до media drain.
+- Child exit закрывает собственные stdout/stderr handles:наследованный pipe
+  больше не блокирует close после подтверждённого выхода. Таймер НЕ считается
+  доказательством смерти child. Если native kill вообще не завершил процесс,
+  caller получает terminal timeout/cancel,а слот и workDir сохраняются до
+  close;shutdown ждёт тот же ресурс. Это необходимый fail-closed предел,
+  освобождать slot/rm живого процесса по одному таймеру небезопасно.
+  Managed integration tests проверяют prompt caller,blocked queued successor,
+  pending shutdown и late close;raw boundary tests используют controlled
+  registry delegate,отдельные managed cases —настоящий registry.
+- Revix test concern исправлен:closedAtRemoval записывается внутри rm mock
+  и проверяется снаружи после task,так что production catch не проглотит assert.
+  Suite переименована в liveServerProbe.handshakeDrain.itest.ts;новые native
+  SOCKS tests —keyHealthChecker.transportDrain.itest.ts. CI получил отдельный
+  targeted integration step,поэтому rename не убирает проверки из CI.
+- Git mv сначала был вызван с неверным cwd-relative path и завершился fatal;
+  исправлен путь. Обычный npm test исключает itest:промежуточные63 passed
+  не были проверкой новых integration suites. Правильная команда:
+  npm.cmd test -- --mode integration src/main/liveServerProbe.handshakeDrain.itest.ts
+  src/main/keyHealthChecker.transportDrain.itest.ts —31/31 passed,1.94s,exit0
+  (.tmp/wp0-live-handshake-qodo-integration.log),включая3 real SOCKS fixtures.
+- Final targeted unit10 suites172/172 passed,6.28s,exit0
+  (.tmp/wp0-live-handshake-qodo-targeted-final.log);команда из preceding8 suites
+  без переименованного handshakeDrain,плюс keyHealthChecker.test.ts,
+  keyHealthChecker.transportDrain.test.ts,groupHealthOperation.test.ts.
+  npm.cmd run build,включая typecheck165 channels/0 public any —exit0
+  (.tmp/wp0-live-handshake-qodo-build.log). Coverage AC927/927,F210/210 и
+  git diff --check exit0. Новый полный прогон в .tmp/wp0-live-handshake-qodo-full.log.
+
+- Follow-up full (.tmp/wp0-live-handshake-qodo-full.log):5003 passed/5 skipped/
+  1 failed,317.30s,exit1. Failure residualReview2.test.ts ожидал Cancelled,
+  получил connect ECONNREFUSED127.0.0.1:1080:старый fixture мокал только
+  SocksClient,теперь требуется контролировать созданную приложением TCP
+  границу. В этом case замокан Socket.prototype.connect,остальные assertions
+  сохранены. Production source не менялся. npm.cmd test --
+  src/main/residualReview2.test.ts src/main/keyHealthChecker.transportDrain.test.ts
+  —17/17 passed,1.64s,exit0 (.tmp/wp0-live-handshake-qodo-residual-fixture.log).
+  Повтор полного набора: .tmp/wp0-live-handshake-qodo-full-final.log.
+
+- Final follow-up full: npm.cmd test -- --maxWorkers=1 —5004 passed/5 skipped/
+  0 failed,302 files passed/2 skipped,318.23s,exit0
+  (.tmp/wp0-live-handshake-qodo-full-final.log). Production/test tree не менялся
+  во время этого прогона. Integration отдельно31/31 passed (28 handshake/
+  media/throughput ownership +3 actual SOCKS fixtures);itest не входят в unit
+  count и явно запускаются новым CI step. Build/typecheck165 channels/0 public
+  any ранее прошёл на том же production source;после него менялся только
+  residual test fixture и journal. Coverage/diff повторяются перед commit.
+  Новые Qodo/Revix/CI обязательны на follow-up SHA.

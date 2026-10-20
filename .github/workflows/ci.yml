@@ -69,6 +69,8 @@ jobs:
         run: npm run typecheck
       - name: Unit-тесты
         run: npm test
+      - name: Live probe — закрытие SOCKS, TLS и дочерних процессов
+        run: npm test -- --mode integration src/main/liveServerProbe.handshakeDrain.itest.ts src/main/keyHealthChecker.transportDrain.itest.ts
       - name: Трассировка приёмочных тестов
         working-directory: .
         run: python docs/04-приёмочные-тесты/traceability/check-coverage.py

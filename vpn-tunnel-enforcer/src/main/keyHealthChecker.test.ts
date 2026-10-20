@@ -7,6 +7,12 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { EventEmitter } from 'node:events'
+
+vi.mock('net', async original => ({ ...await original<typeof import('net')>(), Socket: class extends EventEmitter {
+  connect() { queueMicrotask(() => this.emit('connect')); return this }
+  destroy() { queueMicrotask(() => this.emit('close')); return this }
+} }))
 
 vi.mock('electron-store', () => ({ default: class { get() { return [] } set() {} } }))
 vi.mock('socks', () => ({ SocksClient: { createConnection: vi.fn() } }))

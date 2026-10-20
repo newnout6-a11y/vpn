@@ -1,5 +1,6 @@
 import { it, expect, vi, describe } from 'vitest'
 import { EventEmitter } from 'node:events'
+import { Socket } from 'node:net'
 import { isPublicIp, isPublicIpv4, openTcpViaSocks } from './keyHealthChecker'
 import { withHandshakeWorkerLock, probePmtu, evaluateLiveCheckFindings, queryDoH } from './liveServerProbe'
 import { SocksClient } from 'socks'
@@ -64,6 +65,10 @@ describe('Residual Review 2 Audit Fixes', () => {
       const ctrl = new AbortController()
       const mockDestroy = vi.fn()
       const mockSocket: any = { destroy: mockDestroy }
+      vi.spyOn(Socket.prototype, 'connect').mockImplementation(function (this: Socket) {
+        queueMicrotask(() => this.emit('connect'))
+        return this
+      })
 
       vi.spyOn(SocksClient, 'createConnection').mockImplementation(() => {
         return new Promise((resolve) => {

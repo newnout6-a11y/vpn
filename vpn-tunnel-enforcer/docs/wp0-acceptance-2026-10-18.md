@@ -1802,3 +1802,19 @@ terminal-event assertions отдельно проверены в24/24 suite,1.24
 typecheck165 channels/0 public any exit0. Предыдущий superseded full имел
 1 native identity timeout;отдельно25/25 passed,причина не установлена.
 Exact-head Qodo/CI требуются до следующего участка.
+
+#92 initial Qodo1558277 нашёл2 reliability gaps. SOCKS transport теперь owned
+до TCP connect и уничтожается abort/deadline;native negotiation fixtures
+проверяют abort,timeout и успешный SOCKS. Public media/handshake используют
+registry:caller terminal prompt,shutdown/worker физически retained. Confirmed
+child exit закрывает собственные pipes;таймер не подменяет смерть процесса.
+Revix swallowed rm assertion исправлен внешней проверкой;integration suites
+перенесены в itest и явно добавлены в CI. Unit172/172 и integration31/31
+passed;build/typecheck/coverage/diff exit0. Новый full и exact-head gates pending.
+
+Final #92 follow-up:full unit5004 passed/5 skipped/0 failed,302 files passed/
+2 skipped,318.23s;integration отдельно31/31 passed. Последний полный прогон
+без изменений production/test tree. Build/typecheck165 channels/0 public any,
+coverage/diff прошли. Исправлен старый residual fixture (неучтённая новая TCP
+граница);все промежуточные результаты сохранены. Follow-up exact-head
+Qodo/Revix/CI pending.
