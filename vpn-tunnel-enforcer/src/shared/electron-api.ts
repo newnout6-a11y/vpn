@@ -71,9 +71,9 @@ export interface ElectronAPI {
   clearAppLog: () => Promise<DiagnosticClearReport>
   clearDiagnosticArtifacts: () => Promise<DiagnosticClearReport>
   rollbackTunNetworkBaseline: () => Promise<SystemNetworkResult & { blocked?: boolean }>
-  disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string; skipped?: boolean }>
+  disableFirewallKillSwitch: () => Promise<FirewallKillSwitchResult>
   getFirewallKillSwitchStatus: () => Promise<FirewallKillSwitchStatus>
-  firewallNuclearReset: (confirmationToken: string) => Promise<{ success: boolean; message: string }>
+  firewallNuclearReset: (confirmationToken: string) => Promise<FirewallKillSwitchResult & { backupPath?: string }>
   firewallRepairHealth: () => Promise<FirewallRepairHealth>
   firewallRepairVpnteRules: () => Promise<FirewallKillSwitchResult & { health: FirewallRepairHealth; blocked?: boolean }>
   detectForeignVpn: () => Promise<{ foreign: string | null }>

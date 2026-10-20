@@ -12,22 +12,25 @@ import { ipcMain } from 'electron'
 import { installTrustedIpcBoundary } from './ipcSecurity'
 
 const channels = ['rollback-tun-network-baseline', 'firewall:repair-vpnte-rules', 'network:rollback-adapter-lockdown', 'network:repair-orphaned-dns', 'tun:kill-stale-singbox'] as const
+const manualFirewallChannels = ['disable-firewall-kill-switch', 'firewall:nuclear-reset'] as const
+const allChannels = [...channels, ...manualFirewallChannels]
 const source = ts.createSourceFile('index.ts', readFileSync(join(process.cwd(), 'src/main/index.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
 const registrations: string[] = []
 function visit(node: ts.Node) {
   if (ts.isCallExpression(node) && node.expression.getText(source) === 'handleLogged'
-    && ts.isStringLiteral(node.arguments[0]) && channels.includes(node.arguments[0].text as typeof channels[number])) registrations.push(node.getText(source))
+    && ts.isStringLiteral(node.arguments[0]) && allChannels.includes(node.arguments[0].text as typeof allChannels[number])) registrations.push(node.getText(source))
   ts.forEachChild(node, visit)
 }
 visit(source)
-if (registrations.length !== channels.length) throw new Error('Production maintenance handlers missing')
+if (registrations.length !== allChannels.length) throw new Error('Production maintenance handlers missing')
 const handle = source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'handleLogged')!
 const js = ts.transpileModule(`${handle.getText(source)}\n${registrations.join('\n')}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
 const raw = 'FAKE-SECRET at C:\\private\\credentials.json\n at unsafe (C:\\private\\app.js:1:2)'
 function harness(active = false) {
   const health = { summary: 'ok', protectedTunnelActive: true, ourRuleCount: 3 }
   const deps = { ipcMain, ipcError, classifyIpcError, IpcFault, compactForLog: JSON.stringify,
-    logEvent: vi.fn(), tunController: { getStatus: () => ({ running: active }) },
+    logEvent: vi.fn(), tunController: { getStatus: () => ({ running: active }), disableFirewallKillSwitch: vi.fn(async (): Promise<any> => ({ success: true, message: 'disabled' })) },
+    nuclearFirewallReset: vi.fn(async (): Promise<any> => ({ success: true, message: 'reset' })),
     rollbackTunNetworkBaseline: vi.fn(async () => ({ success: true, message: 'baseline restored' })),
     getFirewallRepairHealth: vi.fn(async () => health),
     repairVpnteFirewallRules: vi.fn(async () => ({ success: true, message: 'firewall restored', health })),
@@ -35,10 +38,26 @@ function harness(active = false) {
     repairOrphanedPhysicalAdapterDns: vi.fn(async () => ({ success: true, repaired: true, adapters: ['fixture'] })),
     killOwnedTunRuntimeProcesses: vi.fn(async (): Promise<any> => ({ success: true, candidates: 1, killed: 1, names: ['vpnte-xray.exe'] })) }
   new Function(...Object.keys(deps), js)(...Object.values(deps))
-  return { ...deps, health, invoke: (channel: string) => s.handlers.get(channel)!({ sender: {} }) }
+  return { ...deps, health, invoke: (channel: string, token = 'RESET_WINDOWS_FIREWALL_CONFIRMED') => channel === 'firewall:nuclear-reset'
+    ? s.handlers.get(channel)!({ sender: {} }, token) : s.handlers.get(channel)!({ sender: {} }) }
 }
 beforeEach(() => { s.handlers.clear(); installTrustedIpcBoundary() })
 describe('runtime maintenance domain results', () => {
+  it('refuses an unconfirmed destructive reset before execution', async () => {
+    const h = harness()
+    expect(await h.invoke('firewall:nuclear-reset', 'wrong')).toMatchObject({ ok: false, error: ipcError('validation') })
+    expect(h.nuclearFirewallReset).not.toHaveBeenCalled()
+  })
+  for (const channel of [...manualFirewallChannels, 'firewall:repair-vpnte-rules'] as const) it.each([
+    'permission', 'network', 'validation', 'conflict', 'cancelled', 'timeout', 'internal'
+  ] as const)(`${channel} retains returned %s through the actual main boundary`, async category => {
+    const h = harness()
+    const receipt = { success: false, message: ipcError(category).message, error: ipcError(category), health: h.health }
+    const target = channel === 'disable-firewall-kill-switch' ? h.tunController.disableFirewallKillSwitch
+      : channel === 'firewall:nuclear-reset' ? h.nuclearFirewallReset : h.repairVpnteFirewallRules
+    target.mockResolvedValue(receipt)
+    expect(await h.invoke(channel)).toMatchObject({ ok: true, result: receipt })
+  })
   it.each(channels)('%s returns a typed refusal during active TUN without mutations', async channel => {
     const h = harness(true), response = await h.invoke(channel)
     expect(response).toMatchObject({ ok: true, result: { success: false, blocked: true, skipped: true, error: ipcError('conflict') } })

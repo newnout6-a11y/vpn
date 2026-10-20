@@ -112,7 +112,7 @@ import { registerThemeIpcHandlers } from './themeManager'
 import { externalProxy } from './externalProxy'
 import { requirePlainObject, requireStringArray } from './ipcValidation'
 import { installTrustedIpcBoundary, registerTrustedRenderer } from './ipcSecurity'
-import { ipcError } from '../shared/ipc-result'
+import { ipcError, IpcFault } from '../shared/ipc-result'
 import { pathToFileURL } from 'url'
 import {
   beginAdaptiveConnection,
@@ -2469,7 +2469,7 @@ app.whenReady().then(async () => {
   // accumulated other rules or DefaultOutboundAction got stuck on Block).
   handleLogged('firewall:nuclear-reset', async (_e, confirmationToken?: string) => {
     if (confirmationToken !== 'RESET_WINDOWS_FIREWALL_CONFIRMED') {
-      throw new Error('Full Windows Firewall reset requires explicit confirmation token')
+      throw new IpcFault('validation')
     }
     return nuclearFirewallReset()
   })
