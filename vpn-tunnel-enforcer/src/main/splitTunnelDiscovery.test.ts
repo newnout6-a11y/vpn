@@ -125,8 +125,15 @@ describe('discoverLocalProgramsApps (via discoverInstalledApps)', () => {
       [`${PROGRAMS}\\Vendor\\ProductB`]: [exe('productb.exe')]
     })
     const apps = await discoverInstalledApps()
-    expect(registryExec).toHaveBeenCalledTimes(3)
     expect(registryExec.mock.calls.every(([file]) => file === 'powershell.exe')).toBe(true)
+    expect(registryExec.mock.calls.map(([, args]) => {
+      const script = Buffer.from(args.at(-1)!, 'base64').toString('utf16le')
+      return /\$root='([^']+)'/.exec(script)?.[1]
+    })).toEqual([
+      'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+      'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+      'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
+    ])
     const paths = apps.map(a => a.path.toLowerCase())
     expect(paths).toContain(`${PROGRAMS}\\Vendor\\ProductA\\producta.exe`.toLowerCase())
     expect(paths).toContain(`${PROGRAMS}\\Vendor\\ProductB\\productb.exe`.toLowerCase())

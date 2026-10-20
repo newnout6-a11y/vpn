@@ -7565,3 +7565,9 @@ CI39409150654 на2fdc7b5a04907fe9e0aae953527775f86395211c завершился 
 
 
 Final full после изоляции registry boundary: npm.cmd test -- --maxWorkers=1 —5312 passed/5 skipped/0 failed,312 files passed/2 skipped,269.50s,exit0 (.tmp/wp0-maintenance-ci-fixture-full.log,EXIT_CODE=0). Source/unit-test tree не менялся во время прогона. Последнее изменение затрагивает только unit fixture; build/native9 PASS для production tree сохраняют силу, новый CI повторит их на окончательном SHA. Для перехода дальше по-прежнему нужны новый automatic Qodo и успешный exact-head CI.
+
+
+Qodo1563861 completed на851144cfc05920277bba0ab175c382b14c344f0e сохранил4 initial findings implemented и дал1 maintainability remediation_recommended: новый assertion числа registry calls не доказывал состав hives. Усиление проверяет decoded UTF16LE EncodedCommand и точное множество/порядок трёх Uninstall roots: HKLM native, HKLM WOW6432Node, HKCU. Изменение только в unit fixture; timeout и production discovery прежние. npm.cmd test -- src/main/splitTunnelDiscovery.test.ts src/main/splitTunnelProcess.test.ts src/main/splitTunnelPath.test.ts —36 passed,3 files,478ms,exit0 (.tmp/wp0-maintenance-hive-targeted.log). npm.cmd run typecheck —exit0,165 channels/0 public any (.tmp/wp0-maintenance-hive-typecheck.log). Attribution вручную не менялся. Full выполняется на неизменном source/unit-test tree; после push потребуется новый automatic Qodo и CI точного head.
+
+
+Окончательный full после hive assertion: npm.cmd test -- --maxWorkers=1 —5312 passed/5 skipped/0 failed,312 files passed/2 skipped,272.80s,exit0 (.tmp/wp0-maintenance-hive-full.log,EXIT_CODE=0). Unit/source tree во время full не менялся. Targeted36/36, typecheck165 channels/0 public any, traceability927/927 и210/210, diff check —exit0. Новые remote gates требуются после commit/push. WP-0 не завершён, WP-2 не начат.
