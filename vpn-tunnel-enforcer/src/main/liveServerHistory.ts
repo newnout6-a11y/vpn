@@ -1,6 +1,12 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, copyFileSync, renameSync, rmSync, openSync, closeSync, fsyncSync } from 'fs'
+import { randomUUID } from 'crypto'
+import { classifyIpcError, IpcFault } from '../shared/ipc-result'
+import { StoreSchemaError } from './storeSchema'
+import { logEvent } from './appLogger'
+import { ioFailureDetails } from './ioFailureDiagnostics'
+import { isStoredLiveCheck } from './liveServerHistorySchema'
 import type {
   LiveServerCheck,
   LiveServerCheckHistoryDiff
@@ -8,6 +14,15 @@ import type {
 
 export const MAX_HISTORY_PER_TARGET = 20
 const HISTORY_FILE_NAME = 'live-server-checks.json'
+// This is the existing target-map JSON format, not an electron-store migration.
+export const LIVE_HISTORY_SCHEMA_VERSION = 0
+
+function assertHistoryVersion(value: unknown): void {
+  if (!value || typeof value !== 'object' || !Object.hasOwn(value, 'schemaVersion')) return
+  const version = (value as Record<string, unknown>).schemaVersion
+  if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 0) throw new StoreSchemaError('STORE_SCHEMA_INVALID')
+  if (version > LIVE_HISTORY_SCHEMA_VERSION) throw new StoreSchemaError('STORE_SCHEMA_FUTURE')
+}
 
 /**
  * Strips any sensitive credentials, tokens, or private keys from a check result
@@ -111,49 +126,111 @@ class LiveServerHistoryManager {
     if (customPath) {
       this.storageFilePath = customPath
     }
-    this.history.clear()
-    this.loadFromDisk()
+    this.initialized = false
+    this.history = this.loadFromDisk()
     this.initialized = true
   }
 
-  private loadFromDisk(): void {
-    const filePath = this.getStoragePath()
-    if (!filePath || !existsSync(filePath)) return
-
-    try {
-      const raw = readFileSync(filePath, 'utf8')
-      const parsed = JSON.parse(raw) as Record<string, LiveServerCheck[]>
-      if (parsed && typeof parsed === 'object') {
-        for (const [key, items] of Object.entries(parsed)) {
-          if (Array.isArray(items)) {
-            this.history.set(
-              key,
-              items.slice(0, MAX_HISTORY_PER_TARGET).map(sanitizeLiveCheckForStorage)
-            )
-          }
-        }
-      }
-    } catch {
-      // Ignore corrupted history file
+  private read(filePath: string): string | undefined {
+    try { return readFileSync(filePath, 'utf8') }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
     }
   }
 
-  private saveToDisk(): void {
-    const filePath = this.getStoragePath()
-    if (!filePath) return
-
-    try {
-      const parentDir = join(filePath, '..')
-      if (!existsSync(parentDir)) {
-        mkdirSync(parentDir, { recursive: true })
+  private decode(raw: string): { history: Map<string, LiveServerCheck[]>; valid: boolean } {
+    let parsed: unknown
+    try { parsed = JSON.parse(raw) }
+    catch {
+      logEvent('error', 'live-server-history', 'history.corrupted', { reason: 'invalid-json' })
+      return { history: new Map(), valid: false }
+    }
+    // Admission precedes corruption repair or any write, including clear().
+    assertHistoryVersion(parsed)
+    const history = new Map<string, LiveServerCheck[]>()
+    let rejectedEntries = 0
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) rejectedEntries++
+    else for (const [key, items] of Object.entries(parsed)) {
+      if (key === 'schemaVersion') continue
+      if (!Array.isArray(items) || !(key === 'global' || /^(profile|host):.+/.test(key))) { rejectedEntries++; continue }
+      const valid: LiveServerCheck[] = []
+      for (const item of items) {
+        if (isStoredLiveCheck(item) && (key === 'global' || key === this.targetKey(item.profileId, item.host))) valid.push(sanitizeLiveCheckForStorage(item))
+        else rejectedEntries++
       }
-      const data: Record<string, LiveServerCheck[]> = {}
-      for (const [key, items] of this.history.entries()) {
+      history.set(key, valid.slice(0, MAX_HISTORY_PER_TARGET))
+    }
+    if (rejectedEntries) logEvent('error', 'live-server-history', 'history.corrupted', { reason: 'invalid-schema', rejectedEntries })
+    return { history, valid: rejectedEntries === 0 }
+  }
+
+  private loadFromDisk(): Map<string, LiveServerCheck[]> {
+    const filePath = this.getStoragePath()
+    if (!filePath) return new Map()
+    try {
+      const raw = this.read(filePath)
+      const loaded = raw === undefined ? { history: new Map<string, LiveServerCheck[]>(), valid: false } : this.decode(raw)
+      if (!loaded.valid && ![...loaded.history.values()].some(items => items.length)) {
+        const backup = this.read(filePath + '.bak')
+        if (backup !== undefined) {
+          const recovered = this.decode(backup)
+          if (recovered.valid) {
+            logEvent('warn', 'live-server-history', 'history.recovered', { source: 'backup' })
+            return recovered.history
+          }
+        }
+      }
+      return loaded.history
+    } catch (error) {
+      logEvent('error', 'live-server-history', 'history.unavailable', ioFailureDetails(error))
+      throw error instanceof StoreSchemaError ? error : new IpcFault(classifyIpcError(error))
+    }
+  }
+
+  private writeAtomic(filePath: string, content: string, copyFrom?: string): void {
+    const temporary = `${filePath}.${randomUUID()}.tmp`
+    let created = false
+    try {
+      const reserved = openSync(temporary, 'wx')
+      created = true
+      closeSync(reserved)
+      if (copyFrom) copyFileSync(copyFrom, temporary)
+      else writeFileSync(temporary, content, 'utf8')
+      const fd = openSync(temporary, 'r+')
+      try { fsyncSync(fd) } finally { closeSync(fd) }
+      renameSync(temporary, filePath)
+    } finally {
+      try { if (created) rmSync(temporary, { force: true }) }
+      catch (error) { logEvent('warn', 'live-server-history', 'history.cleanup-failed', ioFailureDetails(error)) }
+    }
+  }
+
+  private saveToDisk(next: Map<string, LiveServerCheck[]>, clearing = false): void {
+    const filePath = this.getStoragePath()
+    try {
+      if (!filePath) throw new IpcFault('internal')
+      // Recheck even after init: a newer app can replace the file while open.
+      const raw = this.read(filePath)
+      const existing = raw === undefined ? undefined : this.decode(raw)
+      // A newer reader may also have left a future-format backup.
+      const backup = this.read(filePath + '.bak')
+      if (backup !== undefined) this.decode(backup)
+      const parentDir = join(filePath, '..')
+      mkdirSync(parentDir, { recursive: true })
+      const data: Record<string, LiveServerCheck[] | number> = { schemaVersion: LIVE_HISTORY_SCHEMA_VERSION }
+      for (const [key, items] of next.entries()) {
         data[key] = items
       }
-      writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8')
-    } catch {
-      // Non-fatal if persistence fails
+      // Never replace a usable backup with the corrupt file we recovered from.
+      const content = JSON.stringify(data, null, 2)
+      // An explicit clear must not resurrect the deleted rows from backup.
+      if (clearing) this.writeAtomic(filePath + '.bak', content)
+      else if (existing?.valid) this.writeAtomic(filePath + '.bak', '', filePath)
+      this.writeAtomic(filePath, content)
+    } catch (error) {
+      logEvent('error', 'live-server-history', 'history.write-failed', ioFailureDetails(error))
+      throw error instanceof StoreSchemaError ? error : new IpcFault(classifyIpcError(error))
     }
   }
 
@@ -165,17 +242,14 @@ class LiveServerHistoryManager {
 
   public addCheck(check: LiveServerCheck): void {
     if (!this.initialized) this.init()
+    if (!isStoredLiveCheck(check)) throw new IpcFault('validation')
     const sanitized = sanitizeLiveCheckForStorage(check)
     const key = this.targetKey(sanitized.profileId, sanitized.host)
 
-    const list = this.history.get(key) || []
-    // Prepend newest first
-    list.unshift(sanitized)
-    if (list.length > MAX_HISTORY_PER_TARGET) {
-      list.length = MAX_HISTORY_PER_TARGET
-    }
-    this.history.set(key, list)
-    this.saveToDisk()
+    const next = new Map(this.history)
+    next.set(key, [sanitized, ...(this.history.get(key) || [])].slice(0, MAX_HISTORY_PER_TARGET))
+    this.saveToDisk(next)
+    this.history = next
   }
 
   public getHistory(filter?: { profileId?: string; host?: string }): LiveServerCheck[] {
@@ -189,10 +263,11 @@ class LiveServerHistoryManager {
       return all
         .sort((a, b) => new Date(b.finishedAt).getTime() - new Date(a.finishedAt).getTime())
         .slice(0, MAX_HISTORY_PER_TARGET)
+        .map(sanitizeLiveCheckForStorage)
     }
 
     const key = this.targetKey(filter.profileId, filter.host)
-    return this.history.get(key) || []
+    return (this.history.get(key) || []).map(sanitizeLiveCheckForStorage)
   }
 
   public getPreviousSuccessfulCheck(profileId?: string, host?: string, port?: number): LiveServerCheck | null {
@@ -207,13 +282,10 @@ class LiveServerHistoryManager {
   }
 
   public clearHistory(): void {
-    this.history.clear()
-    const filePath = this.getStoragePath()
-    if (filePath && existsSync(filePath)) {
-      try {
-        writeFileSync(filePath, JSON.stringify({}), 'utf8')
-      } catch {}
-    }
+    if (!this.initialized) this.init()
+    const next = new Map<string, LiveServerCheck[]>()
+    this.saveToDisk(next, true)
+    this.history = next
   }
 }
 

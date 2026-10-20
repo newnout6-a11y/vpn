@@ -203,12 +203,20 @@ describe('liveServerProbe', () => {
     })
 
     it('reports error status and 100% loss when server is not reachable', async () => {
-      // Pick an unused local port
-      const res = await probeReachabilityAndLatency('127.0.0.1', 65432, 'basic')
-
-      expect(res.reachability.status).toBe('error')
-      expect(res.reachability.tcpReachable).toBe(false)
-      expect(res.latency).toBeUndefined()
+      // A fixed "unused" port can be assigned to this fixture or another app.
+      // Inject refusal at connect; exercise the real Socket error/close drain.
+      const connect = vi.spyOn(net.Socket.prototype, 'connect').mockImplementation(function (this: net.Socket) {
+        queueMicrotask(() => this.destroy(Object.assign(new Error('Connection refused'), { code: 'ECONNREFUSED' })))
+        return this
+      })
+      try {
+        const res = await probeReachabilityAndLatency('127.0.0.1', serverPort, 'basic')
+        expect(connect).toHaveBeenCalledTimes(5)
+        expect(res.reachability.status).toBe('error')
+        expect(res.reachability.error).toBe('ECONNREFUSED')
+        expect(res.reachability.tcpReachable).toBe(false)
+        expect(res.latency).toBeUndefined()
+      } finally { connect.mockRestore() }
     })
   })
 
