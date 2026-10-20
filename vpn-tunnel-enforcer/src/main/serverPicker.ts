@@ -59,7 +59,7 @@ import { serverPickerStore as store } from './sharedStores'
 import { withProfileStoreWriteLock } from './profileStoreQueue'
 import { operations } from './operations'
 import type { OperationLease } from './operationRegistry'
-import { classifyIpcError, IpcFault } from '../shared/ipc-result'
+import { classifyIpcError, ipcError, IpcFault } from '../shared/ipc-result'
 import { ioFailureDetails } from './ioFailureDiagnostics'
 import { runRequesterOperation } from './requesterOperation'
 
@@ -2803,16 +2803,16 @@ export function registerServerPickerHandlers(): void {
   const exportProfileKey = (id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
     const profile = getProfiles().find(p => p.id === id)
-    if (!profile) return { ok: false as const, reason: 'profile-not-found' }
+    if (!profile) return { ok: false as const, reason: 'profile-not-found', error: ipcError('conflict') }
     if (!profile.outbound || typeof profile.outbound !== 'object') {
-      return { ok: false as const, reason: 'no-outbound' }
+      return { ok: false as const, reason: 'no-outbound', error: ipcError('conflict') }
     }
     const exported = exportOutboundForSharing({
       name: profile.name,
       protocol: profile.protocol,
       outbound: profile.outbound
     })
-    if (!exported) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
+    if (!exported) return { ok: false as const, reason: 'unsupported-protocol', error: ipcError('conflict'), protocol: profile.protocol }
     // Keep the legacy IPC field name; content can be a URI or complete JSON.
     return { ok: true as const, uri: exported.content, format: exported.format, name: profile.name, protocol: profile.protocol }
   }
@@ -2848,16 +2848,16 @@ export function registerServerPickerHandlers(): void {
     id = requireString(id, 'id', { maxLength: 200 })
     return runKeyExport(event.sender, 'file', requestId, async lease => {
       const profile = getProfiles().find(p => p.id === id)
-      if (!profile) return { ok: false as const, reason: 'profile-not-found' }
+      if (!profile) return { ok: false as const, reason: 'profile-not-found', error: ipcError('conflict') }
       if (!profile.outbound || typeof profile.outbound !== 'object') {
-        return { ok: false as const, reason: 'no-outbound' }
+        return { ok: false as const, reason: 'no-outbound', error: ipcError('conflict') }
       }
       const exported = exportOutboundForSharing({
         name: profile.name,
         protocol: profile.protocol,
         outbound: profile.outbound
     })
-    if (!exported) return { ok: false as const, reason: 'unsupported-protocol', protocol: profile.protocol }
+    if (!exported) return { ok: false as const, reason: 'unsupported-protocol', error: ipcError('conflict'), protocol: profile.protocol }
 
     // Pick "<protocol>-<sanitised-name>" with the matching format extension.
     // Stripping non-filename characters makes the dialog suggestion usable on
@@ -2898,7 +2898,7 @@ export function registerServerPickerHandlers(): void {
   handleLogged('servers:export-all-keys-file', async (event, requestId?: unknown) => {
     return runKeyExport(event.sender, 'file', requestId, async lease => {
       const profiles = getProfiles()
-      if (!profiles.length) return { ok: false as const, reason: 'no-profiles' }
+      if (!profiles.length) return { ok: false as const, reason: 'no-profiles', error: ipcError('conflict') }
 
       const lines: string[] = []
       let skipped = 0
@@ -2915,7 +2915,7 @@ export function registerServerPickerHandlers(): void {
       }
 
       if (!lines.length) {
-        return { ok: false as const, reason: 'unsupported-all' }
+        return { ok: false as const, reason: 'unsupported-all', error: ipcError('conflict') }
       }
 
       const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
@@ -2958,7 +2958,7 @@ export function registerServerPickerHandlers(): void {
   handleLogged('servers:export-all-proxies-file', async (event, requestId?: unknown) => {
     return runKeyExport(event.sender, 'file', requestId, async lease => {
       const profiles = getProfiles()
-      if (!profiles.length) return { ok: false as const, reason: 'no-profiles' }
+      if (!profiles.length) return { ok: false as const, reason: 'no-profiles', error: ipcError('conflict') }
 
       const lines: string[] = []
       let skipped = 0
@@ -2974,7 +2974,7 @@ export function registerServerPickerHandlers(): void {
       }
 
       if (!lines.length) {
-        return { ok: false as const, reason: 'unsupported-all', skipped, total: profiles.length }
+        return { ok: false as const, reason: 'unsupported-all', error: ipcError('conflict'), skipped, total: profiles.length }
       }
 
       const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)

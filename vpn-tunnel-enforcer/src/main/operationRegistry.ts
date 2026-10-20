@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { types } from 'node:util'
 import { OPERATION_DEADLINES, OPERATION_PRIORITY, type ManagedOperation, type ManagedOperationKind, type OperationOwner } from '../shared/operation'
-import { IpcFault, classifyIpcError, type IpcErrorCategory } from '../shared/ipc-result'
+import { IPC_ERRORS, IpcFault, classifyIpcError, type IpcErrorCategory } from '../shared/ipc-result'
 import { currentActionMetadata, currentCorrelationId, withCorrelation } from './actionCorrelation'
 
 export type SynchronousCommitResult<T> = T & ({ then?: never } | null | undefined)
@@ -125,6 +125,21 @@ export class OperationRegistry {
       entry.operation = { ...entry.operation, status, ...(category ? { category } : {}) }
       publish()
     }
+    const finishResult = (result: unknown) => {
+      let failed = false, category: IpcErrorCategory | undefined
+      try {
+        failed = !!result && typeof result === 'object' && (('success' in result && result.success === false) || ('ok' in result && result.ok === false))
+        if (failed && result && typeof result === 'object') {
+          category = 'internal'
+          const error = 'error' in result ? result.error : undefined
+          if (error && typeof error === 'object' && 'category' in error && typeof error.category === 'string'
+            && Object.hasOwn(IPC_ERRORS, error.category) && 'code' in error
+            && error.code === IPC_ERRORS[error.category as IpcErrorCategory].code) category = error.category as IpcErrorCategory
+          if ('cancelled' in result && result.cancelled === true) category = 'cancelled'
+        }
+      } catch { failed = true; category = 'internal' }
+      finish(!failed ? 'success' : category === 'cancelled' ? 'cancelled' : 'error', category)
+    }
     const assertActive = () => {
       if (controller.signal.aborted || entry.operation.status !== 'running' || this.active.get(resource) !== entry) throw abortFault ?? new IpcFault('cancelled')
     }
@@ -180,7 +195,7 @@ export class OperationRegistry {
           throw new IpcFault('validation')
         }
         committed = { result }
-        finish('success')
+        finishResult(result)
         return result
       }
     }
@@ -197,9 +212,7 @@ export class OperationRegistry {
         await Promise.all(effects)
         if (committed) return committed.result as T
         assertActive()
-        const failed = result && typeof result === 'object' && (('success' in result && result.success === false) || ('ok' in result && result.ok === false))
-        const dismissed = failed && 'cancelled' in result && result.cancelled === true
-        finish(dismissed ? 'cancelled' : failed ? 'error' : 'success', dismissed ? 'cancelled' : undefined)
+        finishResult(result)
         return result
       } catch (error) {
         if (committed) {
