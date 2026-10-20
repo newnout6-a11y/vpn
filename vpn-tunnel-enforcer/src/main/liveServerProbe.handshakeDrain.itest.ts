@@ -9,7 +9,8 @@ vi.mock('./operations', async original => {
   const actual = await original<typeof import('./operations')>()
   return { ...actual, operations: {
     run: (kind: any, effect: any, options: any) => state.managed ? actual.operations.run(kind, effect, options) : effect({ signal: options.signal, expire: () => false, retain: (task: Promise<unknown>) => task }),
-    close: () => actual.operations.close(), resumeAdmission: () => actual.operations.resumeAdmission()
+    close: () => actual.operations.close(), resumeAdmission: () => actual.operations.resumeAdmission(),
+    list: () => actual.operations.list()
   } }
 })
 vi.mock('./settings', () => ({ settingsStore: { get: () => ({ proxyEngine: 'sing-box' }) } }))
@@ -199,6 +200,22 @@ describe('isolated handshake process drain', () => {
 })
 
 describe('managed caller cancellation and physical ownership', () => {
+  it.each(['cancel', 'timeout'] as const)('records queued %s consistently with caller diagnostics (AT-00-003/005)', async boundary => {
+    state.managed = true
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve }); releases.add(() => release())
+    const worker = withHandshakeWorkerLock(() => gate); tasks.add(worker); await flush()
+    const before = new Set(operations.list().map(operation => operation.operationId))
+    const owner = controller(), { result, task } = observe(probeTunnelHandshakeAndEgress(profile, undefined, owner.signal))
+    await flush()
+    if (boundary === 'cancel') owner.abort(); else await vi.advanceTimersByTimeAsync(15000)
+    await task; expect(result.value?.handshake.status).toBe(boundary === 'cancel' ? 'skipped' : 'timeout')
+    const records = operations.list().filter(operation => !before.has(operation.operationId))
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({ status: boundary === 'cancel' ? 'cancelled' : 'error', category: boundary === 'cancel' ? 'cancelled' : 'timeout' })
+    expect(state.children).toHaveLength(0)
+    release(); releases.clear(); await worker
+  })
   it('rejects queued and new work explicitly when cleanup is blocked, then recovers after physical drain (AT-00-003/007)', async () => {
     state.managed = true; state.dial.mockRejectedValue(new Error('fixture unavailable'))
     const { result, task } = observe(probeTunnelHandshakeAndEgress(profile))

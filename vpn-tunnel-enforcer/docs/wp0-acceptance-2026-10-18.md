@@ -1854,3 +1854,13 @@ Final third follow-up:unit5005 passed/5 skipped/0 failed,325.89s,
 302 files passed/2 skipped;integration35/35,targeted127/127,build/typecheck,
 coverage/diff exit0. Source/test tree не менялся во время full.
 Новый exact-head Qodo/Revix/CI обязателен;WP-0 остаётся в работе.
+
+Qodo1558657 наba353ed автоматически принял оба reliability fixes,но нашёл
+новый observability gap:queue expiry записывалсяsuccess. Regression failed до fix;
+теперь typed timeout проходит через registry,публичная диагностика формируется
+после него. Queued cancel и expiry сверены с operation records. Integration37/37,
+targeted127/127 passed;новые full/build/exact-head gates pending.
+
+Final queue-taxonomy full5005 passed/5 skipped/0 failed,312.16s,
+302 files passed/2 skipped. Integration37/37,targeted127/127,build/typecheck,
+coverage/diff exit0. Exact-head Qodo/Revix/CI pending;весь WP-0 ещё в работе.

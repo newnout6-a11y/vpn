@@ -6908,3 +6908,38 @@ CI/review нового SHA проверяются отдельно после pu
   во время full. Integration35/35,targeted127/127,build/typecheck165/0any,
   coverage AC927/927,F210/210,diff exit0. Physical work сохранён в registry,
   execution queue больше не ждёт unconfirmed child без конечного решения.
+
+### PR #92 — typed worker queue expiry (20.10.2026)
+
+- Headba353ed,Qodo1558657 completed:оба прежних findings автоматически
+  implemented;новый aef026e8-23cf-4b97-b92d-909b1de144ca (Observability):
+  queued timeout возвращался как diagnostics object,registry писалsuccess.
+  Attribution не менялся. Revix118396191573 success/Low risk:новых
+  actionable замечаний нет;stale itest nit и прежний fail-closed question
+  проверены текущими filename и blocked-admission regressions.
+- Новая managed regression сравнивает caller result и operation record для
+  queued cancel и15s expiry. До fix1 failed/1 passed/32 skipped,1.52s,exit1
+  (.tmp/wp0-live-handshake-queue-taxonomy-before.log):registry status=success.
+- Внутренний queue catch больше не превращает expiry в fulfilled diagnostics:
+  known cancellation/queue timeout становятся IpcFault(cancelled/timeout),
+  уже typed conflict сохраняется,неожиданные exceptions не объявляютсяtimeout.
+  Fault проходит через operations.run;публичный wrapper после registry
+  переводит cancellation/timeout в прежний диагностический result.
+- npm.cmd test -- --mode integration src/main/liveServerProbe.handshakeDrain.itest.ts
+  src/main/keyHealthChecker.transportDrain.itest.ts —37/37 passed,1.88s,exit0
+  (.tmp/wp0-live-handshake-queue-taxonomy-after.log). Targeted те же5 suites:
+  127/127 passed,3.35s,exit0 (.tmp/wp0-live-handshake-queue-taxonomy-targeted.log).
+  Запущены build/typecheck (.tmp/wp0-live-handshake-queue-taxonomy-build.log)
+  и full (.tmp/wp0-live-handshake-queue-taxonomy-full.log). Coverage927/927,
+  210/210,diff exit0. Новый exact-head review/CI будет обязателен после push.
+
+- CI39351400924 наba353ed завершилсяsuccess (Windows/Rust/site,включая
+  explicit live itest step и native checks). Это предшествующий source;
+  queue-taxonomy fix требует нового exact-head gate. Новый taxonomy build
+  с typecheck165 channels/0 public any прошёл,exit0.
+
+- Final taxonomy full: npm.cmd test -- --maxWorkers=1 —5005 passed/5 skipped/
+  0 failed,302 files passed/2 skipped,312.16s,exit0
+  (.tmp/wp0-live-handshake-queue-taxonomy-full.log). Source/test tree во время
+  full не менялся. Integration37/37,targeted127/127,build/typecheck165/0any,
+  coverage927/927 и210/210,diff exit0. Новый exact-head Qodo/Revix/CI обязателен.

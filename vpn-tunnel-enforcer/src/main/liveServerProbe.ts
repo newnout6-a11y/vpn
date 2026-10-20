@@ -2745,28 +2745,11 @@ async function probeTunnelHandshakeAndEgressOwned(
         }
       }
     }), { signal, queueTimeoutMs: 15000, retain: retainWorker, onCleanupBlocked: block => { blockWorker = block } })
-  } catch (queueErr: any) {
+  } catch (queueErr: unknown) {
     if (queueErr instanceof IpcFault) throw queueErr
-    const isCancelled = signal?.aborted || queueErr?.message === 'Cancelled'
-    return {
-      handshake: {
-        status: isCancelled ? 'skipped' : 'timeout',
-        durationMs: Date.now() - started,
-        protocol: profile.protocol,
-        error: queueErr?.message || 'Очередь worker завершилась ошибкой'
-      },
-      egress: {
-        status: isCancelled ? 'skipped' : 'timeout',
-        durationMs: 0,
-        reflectors: [],
-        error: queueErr?.message || 'Очередь worker завершилась ошибкой'
-      },
-      mediaStream: {
-        status: isCancelled ? 'skipped' : 'error',
-        durationMs: 0,
-        error: queueErr?.message || 'Очередь worker завершилась ошибкой'
-      }
-    }
+    if (signal?.aborted || (queueErr instanceof Error && queueErr.message === 'Cancelled')) throw new IpcFault('cancelled')
+    if (queueErr instanceof Error && queueErr.message.startsWith('Handshake worker queue lease timeout (')) throw new IpcFault('timeout')
+    throw queueErr
   }
 }
 
