@@ -32,9 +32,11 @@ vi.mock('./settings', () => ({
   settingsStore: { get: () => ({ desktopNotifications: h.desktopNotifications }) }
 }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
+vi.mock('./notificationRegistry', () => ({ notificationRegistry: vi.fn(async () => ({ value: 1, cleared: false })) }))
 
 import {
   notify,
+  getWindowsNotificationState,
   setInAppFallbackCallback,
   setNotificationPrefsProvider
 } from './notifications'
@@ -44,13 +46,12 @@ setInAppFallbackCallback((level, title) => {
   inAppCalls.push({ level, title })
 })
 
-// Force the OS-state check to "enabled" deterministically by overriding the
-// getWindowsNotificationState path: it shells out to reg, which on a test box
-// returns default-enabled, so OS toasts go through. We keep prefs in a var.
+// Deterministic, already-verified allowed state; no real child processes.
 let currentPrefs: any = null
 setNotificationPrefsProvider(() => currentPrefs)
 
-beforeEach(() => {
+beforeEach(async () => {
+  await getWindowsNotificationState(true)
   h.desktopNotifications = true
   h.notificationShown = 0
   h.isSupported = true

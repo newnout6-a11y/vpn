@@ -14,7 +14,7 @@ import type {
   KillSwitchLevel, KillSwitchException,
   DnsProfile, DnsProfileInput, DomainRule,
   ConnectionLogEntry, ConnectionHistoryFilters, ConnectionHistoryStats,
-  NotificationPreferences, ThemeConfig, ThemeInput,
+  NotificationPreferences, NotificationResetReport, ThemeConfig, ThemeInput,
   FirewallKillSwitchStatus,
   ExternalProxyBatchStartResult,
   ExternalProxyStartOptions,
@@ -222,8 +222,8 @@ export interface ElectronAPI {
   notificationsGetPrefs: () => Promise<NotificationPreferences>
   notificationsSetPrefs: (prefs: Partial<NotificationPreferences>) => Promise<NotificationPreferences>
   checkOsNotificationState: () => Promise<{ osNotificationsEnabled: boolean; appUserModelId: string | null }>
-  notificationsResetOsBlock: () => Promise<{ ok: true; cleared: string[]; errors: string[] } | { ok: false; error: string }>
-  notificationsOpenWindowsSettings: () => Promise<{ ok: true } | { ok: false; error: string }>
+  notificationsResetOsBlock: () => Promise<NotificationResetReport>
+  notificationsOpenWindowsSettings: () => Promise<{ ok: true }>
   onInAppNotification: (callback: (data: { level: 'info' | 'warn' | 'error'; title: string; body: string; ts: number }) => void) => () => void
   // ip-monitor suspend/resume — leak detection guard during stop-tun rollback.
   ipMonitorSuspend: () => Promise<{ ok: true } | undefined>

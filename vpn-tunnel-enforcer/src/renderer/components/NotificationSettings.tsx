@@ -31,6 +31,7 @@ import { MacCard } from '../design-system/MacCard'
 import { MacSwitch } from '../design-system/MacSwitch'
 import { MacSegmentedControl } from '../design-system/MacSegmentedControl'
 import { MacButton } from '../design-system/MacButton'
+import { ipcError as canonicalIpcError, isIpcRemoteErrorData } from '../../shared/ipc-result'
 import type { NotificationPreferences } from '../../shared/ipc-types'
 
 // ─── Event type definitions ──────────────────────────────────────────────────
@@ -60,7 +61,7 @@ const EVENT_TOGGLES: EventToggleConfig[] = [
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const NotificationSettings: React.FC = () => {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const tRef = useRef(t)
   tRef.current = t
   const [prefs, setPrefs] = useState<NotificationPreferences | null>(null)
@@ -68,34 +69,52 @@ export const NotificationSettings: React.FC = () => {
   const [osCheckError, setOsCheckError] = useState<string | null>(null)
   const [ipcError, setIpcError] = useState<string | null>(null)
 
+  const lifetime = useRef(0)
+  const osRequest = useRef(0)
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const resetPending = useRef(false)
+  const [resetting, setResetting] = useState(false)
   const api = window.electronAPI
+  const visibleError = (error: unknown, fallback: string): string | null => {
+    if (isIpcRemoteErrorData(error)) return error.category === 'cancelled' ? null : error.message
+    return error instanceof Error ? error.message : fallback
+  }
 
   // ─── Fetch OS notification state ──────────────────────────────────────────
 
   const fetchOsState = useCallback(async () => {
+    const generation = lifetime.current
+    const request = ++osRequest.current
     try {
       setOsCheckError(null)
       const state = await api.checkOsNotificationState()
+      if (generation !== lifetime.current || request !== osRequest.current) return
       setOsBlocked(!state.osNotificationsEnabled)
-    } catch (err: any) {
-      setOsCheckError(err?.message || tRef.current('notifications.osCheckError'))
+    } catch (error) {
+      if (generation === lifetime.current && request === osRequest.current) {
+        setOsCheckError(visibleError(error, tRef.current('notifications.osCheckError')))
+      }
     }
   }, [api])
 
-  // ─── Fetch initial preferences ────────────────────────────────────────────
-
   const fetchPrefs = useCallback(async () => {
+    const generation = lifetime.current
     try {
-      const result: NotificationPreferences = await api.notificationsGetPrefs()
-      setPrefs(result)
-    } catch (err: any) {
-      setIpcError(err?.message || 'Не удалось загрузить настройки уведомлений')
+      const result = await api.notificationsGetPrefs()
+      if (generation === lifetime.current) setPrefs(result)
+    } catch (error) {
+      if (generation === lifetime.current) setIpcError(visibleError(error, tRef.current('notifications.loadError')))
     }
   }, [api])
 
   useEffect(() => {
+    ++lifetime.current
     fetchPrefs()
     fetchOsState()
+    return () => {
+      ++lifetime.current
+      if (resetTimer.current !== null) clearTimeout(resetTimer.current)
+    }
   }, [fetchPrefs, fetchOsState])
 
   // Re-check OS state when the window regains focus (user may have fixed it
@@ -110,16 +129,53 @@ export const NotificationSettings: React.FC = () => {
 
   const updatePrefs = useCallback(
     async (partial: Partial<NotificationPreferences>) => {
+      const generation = lifetime.current
       try {
         setIpcError(null)
-        const updated: NotificationPreferences = await api.notificationsSetPrefs(partial)
-        setPrefs(updated)
-      } catch (err: any) {
-        setIpcError(err?.message || 'Не удалось сохранить настройки уведомлений')
+        const updated = await api.notificationsSetPrefs(partial)
+        if (generation === lifetime.current) setPrefs(updated)
+      } catch (error) {
+        if (generation === lifetime.current) setIpcError(visibleError(error, tRef.current('notifications.saveError')))
       }
     },
     [api]
   )
+
+  const resetOsBlock = async () => {
+    if (resetPending.current) return
+    resetPending.current = true
+    setResetting(true)
+    const generation = lifetime.current
+    ++osRequest.current // Fence reads started before the reset.
+    if (resetTimer.current !== null) clearTimeout(resetTimer.current)
+    try {
+      setIpcError(null)
+      const report = await api.notificationsResetOsBlock()
+      if (generation !== lifetime.current) return
+      if (report.errors.length) {
+        const details = report.errors.map(item => canonicalIpcError(item.error.category, i18n.language.startsWith('en') ? 'en' : 'ru').message)
+        setIpcError(`${tRef.current('notifications.resetPartial', { cleared: report.cleared.length, failed: report.errors.length })}: ${[...new Set(details)].join('; ')}`)
+      }
+      await fetchOsState()
+      if (generation !== lifetime.current) return
+      resetTimer.current = setTimeout(() => { resetTimer.current = null; void fetchOsState() }, 1000)
+    } catch (error) {
+      if (generation === lifetime.current) setIpcError(visibleError(error, tRef.current('notifications.resetError')))
+    } finally {
+      resetPending.current = false
+      if (generation === lifetime.current) setResetting(false)
+    }
+  }
+
+  const openWindowsSettings = async () => {
+    const generation = lifetime.current
+    try {
+      setIpcError(null)
+      await api.notificationsOpenWindowsSettings()
+    } catch (error) {
+      if (generation === lifetime.current) setIpcError(visibleError(error, tRef.current('notifications.openSettingsError')))
+    }
+  }
 
   // ─── Handlers ─────────────────────────────────────────────────────────────
 
@@ -266,28 +322,15 @@ export const NotificationSettings: React.FC = () => {
             <div className="flex flex-wrap gap-2 pt-1">
               <button
                 type="button"
-                onClick={async () => {
-                  try {
-                    // Best-effort: the IPC may be missing on older preload
-                    // builds, in which case we simply skip the reset and
-                    // still re-poll OS state.
-                    await api.notificationsResetOsBlock?.()
-                  } catch {
-                    // Handler returns a structured shape, but be defensive.
-                  }
-                  // Re-check immediately, then again after a beat — Windows
-                  // can lag a moment in propagating registry changes back to
-                  // its in-process notification state.
-                  fetchOsState()
-                  setTimeout(fetchOsState, 1000)
-                }}
+                onClick={() => void resetOsBlock()}
+                disabled={resetting}
                 className="text-xs font-medium px-3 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-warning)]/20 hover:bg-[var(--color-warning)]/30 text-[var(--color-warning)] transition-colors"
               >
                 {t('notifications.resetWindowsBlock')}
               </button>
               <button
                 type="button"
-                onClick={() => api.notificationsOpenWindowsSettings?.()}
+                onClick={() => void openWindowsSettings()}
                 className="text-xs font-medium px-3 py-1.5 rounded-[var(--radius-sm)] border border-[var(--color-border)] hover:bg-[var(--color-card-elevated)] transition-colors"
               >
                 {t('notifications.openWindowsSettings')}
