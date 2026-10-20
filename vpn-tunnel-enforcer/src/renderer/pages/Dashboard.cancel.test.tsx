@@ -48,6 +48,35 @@ beforeEach(() => {
 afterEach(() => { cleanup() })
 
 describe('canonical FSM frames (AT-00-008)', () => {
+  it('can connect immediately after confirmed cancelled-switch cleanup without an extra disconnect', async () => {
+    const evidence = { running: false, pid: null as number | null, softApplied: false }
+    const model = new TunnelStateMachine(() => evidence, snapshot => useAppStore.getState().setTunnelSnapshot(snapshot))
+    const lane = new ConnectionLifecycle(vi.fn(), undefined, undefined, model)
+    useAppStore.setState({ connectionBusy: null })
+    await lane.start(async () => { evidence.running = true; evidence.pid = 123; return { success: true } })
+    model.nativeStartBegan(1)
+    Object.assign(window.electronAPI, { stopTun: vi.fn(),
+      startDirectVpn: vi.fn().mockImplementation(() => lane.start(async () => { evidence.running = true; evidence.pid = 456; return { success: true } })) })
+    render(<Dashboard />)
+    expect(screen.getByRole('button', { name: ru.dashboard.connected })).toBeEnabled()
+    await act(async () => {
+      useAppStore.getState().setServerSwitchingName('Estonia')
+      model.runtimeChanged('adapting')
+      evidence.running = false; evidence.pid = null
+      model.nativeStartBegan(2)
+      model.nativeStartFinished({ generation: 2, success: false })
+      model.runtimeChanged('stopped')
+      useAppStore.getState().setServerSwitchingName(null)
+    })
+    expect(screen.getByRole('button', { name: ru.dashboard.tunnelUnknown })).toBeEnabled()
+    await act(async () => { model.nativeStopFinished({ generation: 2, preserveNetworkProtection: false,
+      result: { success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } } }) })
+    fireEvent.click(screen.getByRole('button', { name: ru.dashboard.disconnected }))
+    await waitFor(() => expect(window.electronAPI.startDirectVpn).toHaveBeenCalledOnce())
+    expect(window.electronAPI.stopTun).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: ru.dashboard.connected })).toBeEnabled()
+  })
+
   it('renders progress until main confirms the connection, and ignores stale native/result setters', async () => {
     const evidence = { running: false, pid: null as number | null, softApplied: false }
     const model = new TunnelStateMachine(() => evidence, snapshot => useAppStore.getState().setTunnelSnapshot(snapshot))

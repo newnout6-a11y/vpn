@@ -12,7 +12,7 @@ import { isIP } from 'net'
 import { randomUUID } from 'node:crypto'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { happDetector } from './happDetector'
-import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart, onNativeStartup } from './tunController'
+import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart, onNativeStartup, onNativeStop } from './tunController'
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
 import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
@@ -75,7 +75,7 @@ import { notify, setInAppFallbackCallback } from './notifications'
 import { removeHijackingDevShortcut } from './taskbarIdentity'
 import { registerDiagnosticsExportHandler } from './diagnosticsExport'
 import { captureSnapshot, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
-import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, setLeakSelfTestCompletedCallback, setNetworkChangeCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
+import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, cancelLeakSelfTest, setBackgroundLeakTestGate, setLeakDetectedCallback, setLeakSelfTestCompletedCallback, setNetworkChangeCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
 import { leakSelfTestVerdict } from '../shared/leak-self-test'
 import { getTrafficForensicsStatus, restartTrafficForensicsSession, startTrafficForensicsSession, stopTrafficForensicsSession } from './trafficForensics'
 import { trafficMonitor, type TrafficStats } from './trafficMonitor'
@@ -1202,7 +1202,19 @@ const tunnelState = new TunnelStateMachine(() => ({ ...tunController.getStatus()
   refreshTrayState()
 })
 // Register before any tray, schedule or auto-start action can begin.
-tunController.onStatusChange(status => { tunnelState.runtimeChanged(status) })
+let backgroundTunnelActive = false
+setBackgroundLeakTestGate(() => {
+  const snapshot = tunnelState.snapshot
+  return backgroundTunnelActive && tunController.getStatus().running && snapshot.state === 'connected' && snapshot.transition === null
+})
+tunController.onStatusChange(status => {
+  if (status === 'running' || status === 'proxy-down') backgroundTunnelActive = true
+  else if (['stopping', 'stopped', 'adapting', 'error', 'killswitch-active'].includes(status) || status.startsWith('restarting:')) backgroundTunnelActive = false
+  tunnelState.runtimeChanged(status)
+  const snapshot = tunnelState.snapshot
+  if (!backgroundTunnelActive || snapshot.state !== 'connected' || snapshot.transition !== null) cancelLeakSelfTest()
+})
+onNativeStop(observation => { tunnelState.nativeStopFinished(observation) })
 onNativeStartup(observation => {
   if (observation.phase === 'begin') tunnelState.nativeStartBegan(observation.generation)
   else tunnelState.nativeStartFinished(observation)

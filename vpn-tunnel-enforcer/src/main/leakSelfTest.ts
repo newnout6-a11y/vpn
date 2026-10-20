@@ -356,6 +356,16 @@ let periodicLeakTimer: ReturnType<typeof setInterval> | null = null
 let onLeakDetectedCb: ((r: LeakSelfTestResult) => void) | null = null
 let onLeakSelfTestCompletedCb: ((r: LeakSelfTestResult) => void) | null = null
 let transitionSuppressUntil = 0
+let backgroundLeakTestGate: () => boolean = () => true
+
+/** Main supplies current protection evidence; manual diagnostics remain available while disconnected. */
+export function setBackgroundLeakTestGate(gate: () => boolean): void {
+  backgroundLeakTestGate = gate
+}
+
+function backgroundLeakTestAllowed(): boolean {
+  try { return backgroundLeakTestGate() } catch { return false }
+}
 
 export function setLeakDetectedCallback(cb: (r: LeakSelfTestResult) => void): void {
   onLeakDetectedCb = cb
@@ -410,6 +420,7 @@ function isTransitionSuppressed(now = Date.now()): boolean {
  */
 let lastTriggerAt = 0
 export function triggerLeakCheckNow(reason: string): void {
+  if (!backgroundLeakTestAllowed()) return
   const now = Date.now()
   if (isTransitionSuppressed(now)) {
     logEvent('debug', 'leak-test', 'event-triggered run suppressed during transition', {
@@ -425,7 +436,7 @@ export function triggerLeakCheckNow(reason: string): void {
   const runSession = inFlightSessionId
   run
     .then((r) => {
-      if (runSession !== activeSessionId) return
+      if (runSession !== activeSessionId || !backgroundLeakTestAllowed()) return
       if (r.physicalAdapterReached || r.publicIpMismatch || r.dnsLeakDetected) {
         onLeakDetectedCb?.(r)
       } else if (leakSelfTestVerdict(r) === 'ok') {
@@ -442,6 +453,7 @@ export function triggerLeakCheckNow(reason: string): void {
 // real network change always moves at least one IPv4 address.
 let lastNetSignature = ''
 let netWatchTimer: ReturnType<typeof setInterval> | null = null
+let netChangeGraceTimer: ReturnType<typeof setTimeout> | null = null
 let onNetworkChangeCb: ((info: { oldRowCount: number; newRowCount: number }) => void) | null = null
 
 /** Notified whenever the physical network signature changes while the watcher runs. */
@@ -479,12 +491,18 @@ export function startNetworkChangeWatcher(): void {
       // Tiny grace period so the new interface fully comes up before we
       // probe — otherwise the curl --interface call can fail with "no such
       // address" and falsely report "physical adapter unreachable".
-      setTimeout(() => triggerLeakCheckNow('network-change'), 1500)
+      if (netChangeGraceTimer) clearTimeout(netChangeGraceTimer)
+      netChangeGraceTimer = setTimeout(() => {
+        netChangeGraceTimer = null
+        triggerLeakCheckNow('network-change')
+      }, 1500)
     }
   }, 8_000)
 }
 
 export function stopNetworkChangeWatcher(): void {
+  if (netChangeGraceTimer) clearTimeout(netChangeGraceTimer)
+  netChangeGraceTimer = null
   if (netWatchTimer) {
     clearInterval(netWatchTimer)
     netWatchTimer = null
@@ -509,7 +527,7 @@ export function startPeriodicLeakTest(
 ): void {
   stopPeriodicLeakTest()
   periodicLeakTimer = setInterval(() => {
-    if (!shouldRun()) return
+    if (!backgroundLeakTestAllowed() || !shouldRun()) return
     if (isTransitionSuppressed()) return
     const run = runLeakSelfTest({ owner: 'adaptive-retry' })
     const runSession = inFlightSessionId
@@ -518,7 +536,7 @@ export function startPeriodicLeakTest(
         // Only fire the leak callback if the run we kicked off is still the
         // active one. A stop-tun that bumps activeSessionId between scheduling
         // and resolution must not trigger the renderer leak banner.
-        if (runSession !== activeSessionId) return
+        if (runSession !== activeSessionId || !backgroundLeakTestAllowed() || !shouldRun()) return
         if (r.physicalAdapterReached || r.publicIpMismatch || r.dnsLeakDetected) {
           onLeakDetectedCb?.(r)
         } else if (leakSelfTestVerdict(r) === 'ok') {

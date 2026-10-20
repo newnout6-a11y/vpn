@@ -326,6 +326,44 @@ describe('leak self-test lifetime', () => {
       expect(children[0].kill).toHaveBeenCalledOnce()
     } finally { stopPeriodicLeakTest(); vi.useRealTimers() }
   })
+  it('uses actual main status wiring to cancel probes before rollback and gate later ticks/events (AT-00-003/AT-07-002)', async () => {
+    const leak = await import('./leakSelfTest')
+    const { TunnelStateMachine } = await import('./tunnelStateMachine')
+    const { ConnectionLifecycle } = await import('./connectionLifecycle')
+    const evidence = { running: false, pid: null as number | null, softApplied: false }
+    const model = new TunnelStateMachine(() => evidence)
+    const lane = new ConnectionLifecycle(vi.fn(), undefined, undefined, model)
+    const source = readFileSync(join(process.cwd(), 'src/main/index.ts'), 'utf8')
+    const start = source.indexOf('let backgroundTunnelActive = false')
+    const end = source.indexOf('const connectionLifecycle =', start)
+    expect(start).toBeGreaterThan(-1); expect(end).toBeGreaterThan(start)
+    let status!: (value: string) => void
+    const deps = { tunnelState: model, tunController: { getStatus: () => evidence, onStatusChange: (cb: typeof status) => { status = cb } },
+      setBackgroundLeakTestGate: leak.setBackgroundLeakTestGate, cancelLeakSelfTest: leak.cancelLeakSelfTest, onNativeStop: vi.fn(), onNativeStartup: vi.fn() }
+    const js = ts.transpileModule(source.slice(start, end), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+    new Function(...Object.keys(deps), js)(...Object.values(deps))
+    const detected = vi.fn(), completed = vi.fn()
+    leak.setLeakDetectedCallback(detected); leak.setLeakSelfTestCompletedCallback(completed)
+    await lane.start(async () => { evidence.running = true; evidence.pid = 123; status('running'); return { success: true } })
+    status('competing-tun:fixture'); status('competing-tun-cleared')
+    leak.triggerLeakCheckNow('connected')
+    await vi.waitFor(() => expect(children).toHaveLength(1))
+    // Runtime remains alive at stop admission; even here the probe must be cancelled.
+    status('stopping')
+    expect(children[0].kill).toHaveBeenCalledOnce()
+    children[0].finish('198.51.100.1')
+    await (await import('./operations')).operations.close()
+    evidence.running = false; evidence.pid = null; status('stopped')
+    vi.useFakeTimers()
+    try {
+      leak.startPeriodicLeakTest(30_000)
+      await vi.advanceTimersByTimeAsync(30_000)
+      leak.triggerLeakCheckNow('after-cancel')
+      expect(children).toHaveLength(1)
+      expect(detected).not.toHaveBeenCalled(); expect(completed).not.toHaveBeenCalled()
+      expect(state.log.mock.calls.some(([level, , message]) => level === 'warn' && String(message).startsWith('УТЕЧКА'))).toBe(false)
+    } finally { leak.stopPeriodicLeakTest(); vi.useRealTimers() }
+  })
   it('rejects an already cancelled subscriber without spawning work', async () => {
     const { runLeakSelfTest } = await import('./leakSelfTest'), controller = new AbortController()
     controller.abort()

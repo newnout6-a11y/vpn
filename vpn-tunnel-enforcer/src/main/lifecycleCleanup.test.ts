@@ -148,6 +148,7 @@ function stopHarness(startupController: AbortController | null = null, startupCo
     startupController,
     startupCompletion,
     randomUUID,
+    nativeStopCallback: vi.fn(),
     isOwnedTunRuntimeRunning: vi.fn(async () => false),
     stopXray: vi.fn(async () => { state.upstream = false }), killOwnedRuntimeProcesses: done(),
     waitForOwnedRuntimeToExit: vi.fn(async () => { state.runtime = false; return true }),
@@ -163,13 +164,56 @@ function stopHarness(startupController: AbortController | null = null, startupCo
   const stop = compile<((options?: { preserveNetworkProtection?: boolean }) => Promise<any>) & { setRunning(running: boolean): void }>(`
 let startInProgress=false,stopRequested=false,stopInProgress=false,userInitiatedStop=false,activeStartAbortController=startupController;
 let activeStartCompletion=startupCompletion,activeStopCompletion=null,activeStopPreservesProtection=false;
-let recoveryCancelGeneration=0,lastStartOptions=null,restartAttempt=0,transitionCancelRequested=false;
+let recoveryCancelGeneration=0,lastStartOptions=null,restartAttempt=0,transitionCancelRequested=false,nativeStartupGeneration=7;
 let currentStatus={running:true,mode:'directVpn'},clashApiInfo=null,directProxyPort=null,tunnelProbePort=null;
 const controller = {${body('tunController.ts', 'stop')}};
 return Object.assign(controller.stop.bind(controller), { setRunning: (running) => { currentStatus.running = running } });
 `, os)
   return { stop, ...os, state }
 }
+
+it('publishes the actual native rollback receipt after cleanup and observer failures cannot strand stop (AT-00-002/003)', async () => {
+  const h = stopHarness()
+  const model = new TunnelStateMachine(() => ({ running: h.state.runtime, pid: h.state.runtime ? 123 : null, softApplied: false }))
+  const lane = new ConnectionLifecycle(vi.fn(), undefined, undefined, model)
+  await lane.start(async () => ({ success: true }))
+  model.nativeStartBegan(7)
+  h.notifyStatus.mockImplementation((status: string) => model.runtimeChanged(status))
+  h.nativeStopCallback.mockImplementation(receipt => model.nativeStopFinished(receipt))
+  let release!: () => void
+  h.rollbackPhysicalAdapterLockdownIfApplied.mockImplementationOnce(async () => {
+    await new Promise<void>(done => { release = done })
+    h.state.adapters = false
+    return { rolledBack: true }
+  })
+  const task = h.stop()
+  await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+  expect(h.nativeStopCallback).not.toHaveBeenCalled()
+  expect(model.snapshot.state).not.toBe('disconnected')
+  release()
+  const result = await task
+  expect(h.nativeStopCallback).toHaveBeenCalledExactlyOnceWith({ generation: 7, preserveNetworkProtection: false, result })
+  expect(model.snapshot).toMatchObject({ state: 'disconnected', cleanupRequired: false })
+  h.nativeStopCallback.mockImplementation(() => { throw new Error('observer failed') })
+  await expect(h.stop()).resolves.toMatchObject({ success: true })
+})
+
+it.each(['baseline', 'firewall', 'adapters', 'preserved'] as const)('cannot certify a native %s stop as disconnected (AT-00-002/003)', async step => {
+  const h = stopHarness()
+  const model = new TunnelStateMachine(() => ({ running: h.state.runtime, pid: h.state.runtime ? 123 : null, softApplied: false }))
+  const lane = new ConnectionLifecycle(vi.fn(), undefined, undefined, model)
+  await lane.start(async () => ({ success: true }))
+  model.nativeStartBegan(7)
+  h.notifyStatus.mockImplementation((status: string) => model.runtimeChanged(status))
+  h.nativeStopCallback.mockImplementation(receipt => model.nativeStopFinished(receipt))
+  if (step === 'baseline') h.rollbackTunNetworkBaselineIfApplied.mockRejectedValue(new Error('denied'))
+  if (step === 'firewall') h.disableKillSwitchIfActive.mockRejectedValue(new Error('denied'))
+  if (step === 'adapters') h.rollbackPhysicalAdapterLockdownIfApplied.mockRejectedValue(new Error('denied'))
+  await h.stop({ preserveNetworkProtection: step === 'preserved' })
+  expect(h.nativeStopCallback).toHaveBeenCalledOnce()
+  expect(model.snapshot.state).not.toBe('disconnected')
+  expect(model.snapshot.cleanupRequired).toBe(true)
+})
 function mainHarness(name: 'performShutdownCleanup' | 'stopProtection', session: object | null = null) {
   const os = {
     connectionLifecycle: new ConnectionLifecycle(() => {}),

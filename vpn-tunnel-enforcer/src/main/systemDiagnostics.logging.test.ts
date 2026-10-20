@@ -90,6 +90,23 @@ it('does not duplicate healthy items as findings', async () => {
   expect((await logged()).filter(row => row.message === 'system diagnostic finding')).toHaveLength(0)
 })
 
+it('excludes only the renderer health warning summary, preserving independent warnings and error summaries (AT-00-005)', async () => {
+  const { getLogSummary } = await harness(async () => [])
+  const message = 'Health-check завершён: есть пункты для внимания'
+  for (let i = 0; i < 2; i++) {
+    logger.logEvent('warn', 'renderer', message)
+    await logger.flushAppLog()
+    expect((await getLogSummary(logger.getAppLogPath(), { structuredApp: true })).errors).toEqual([])
+  }
+  logger.logEvent('warn', 'transport', message)
+  logger.logEvent('warn', 'renderer', 'independent UI fault')
+  logger.logEvent('error', 'renderer', message)
+  await logger.flushAppLog()
+  const errors = (await getLogSummary(logger.getAppLogPath(), { structuredApp: true })).errors
+  expect(errors).toHaveLength(3)
+  expect(errors).toEqual(expect.arrayContaining([expect.stringContaining('transport:'), expect.stringContaining('independent UI fault'), expect.stringContaining('error renderer:')]))
+})
+
 it.each(['socks', 'socks4', 'socks4a', 'socks5', 'socks5h'])('never persists %s proxy userinfo from diagnostic environment details', async scheme => {
   const { runSystemDiagnostics } = await harness(async () => [check('proxy-current', 'warn', 'not configured',
     `env:ALL_PROXY=${scheme}://private-user:PRIVATE-PROXY-PASSWORD@proxy.example.test:1080 | listener not selected`)])

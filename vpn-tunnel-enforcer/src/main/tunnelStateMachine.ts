@@ -1,6 +1,7 @@
 // WP-0, volume 3 §1.1: the coordinator confirms protection, never a process event.
 import type { ConnectionOperation } from '../shared/operation'
 import type { TunnelSnapshot, TunnelState } from '../shared/tunnel-state'
+import type { NativeStopObservation } from './tunController'
 
 export interface TunnelEvidence { running: boolean; pid: number | null; softApplied: boolean; startedAt?: number | null }
 const invalid = () => ({ success: false, code: 'FSM_INVALID_TRANSITION', category: 'conflict' } as const)
@@ -170,5 +171,16 @@ export class TunnelStateMachine {
     this.reconnectEligible = false
     return this.commit({ state: confirmed ? 'connected' : result.success ? 'unknown' : 'error',
       transition: null, mode: confirmed ? 'tun' : null, proxyStatus: confirmed ? 'running' : 'stopped' })
+  }
+
+  /** A process exit alone cannot certify rollback; require the current native cleanup receipt. */
+  nativeStopFinished({ generation, preserveNetworkProtection, result }: NativeStopObservation) {
+    if (generation !== this.nativeGeneration || preserveNetworkProtection || this.current.operation?.status === 'running'
+      || !this.canConfirmStop() || !result.success || result.networkCleanup?.baseline !== true
+      || result.networkCleanup.firewall !== true || result.networkCleanup.adapters !== true) return invalid()
+    this.reconnectEligible = false
+    this.expectedNativeGeneration = null
+    this.faultDuringOperation = false
+    return this.commit({ state: 'disconnected', transition: null, mode: null, proxyStatus: 'stopped', cleanupRequired: false })
   }
 }

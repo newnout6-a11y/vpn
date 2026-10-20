@@ -317,6 +317,12 @@ let protectedRestartCallback: ((reason: string) => void) | null = null
 type NativeStartupObservation = { phase: 'begin'; generation: number } | { phase: 'finished'; generation: number; success: boolean }
 let nativeStartupGeneration = 0
 let nativeStartupCallback: ((observation: NativeStartupObservation) => void) | null = null
+export interface NativeStopObservation { generation: number; preserveNetworkProtection: boolean; result: TunStopResult }
+let nativeStopCallback: ((observation: NativeStopObservation) => void) | null = null
+
+export function onNativeStop(callback: (observation: NativeStopObservation) => void): void {
+  nativeStopCallback = callback
+}
 
 export function onNativeStartup(callback: (observation: NativeStartupObservation) => void): void {
   nativeStartupCallback = callback
@@ -3878,6 +3884,7 @@ export const tunController = {
     stopInProgress = true
     activeStopPreservesProtection = options.preserveNetworkProtection === true
     const operationId = `stop_${randomUUID().replaceAll('-', '')}`
+    const nativeGeneration = nativeStartupGeneration
     const cleanup = async (): Promise<TunStopResult> => {
     const stopStarted = performance.now()
     const stopPhases: Record<string, number> = {}
@@ -4117,6 +4124,9 @@ export const tunController = {
     try {
       const result = await stopped
       logEvent(result.success ? 'info' : 'warn', 'tun', 'stop completed', result)
+      try {
+        nativeStopCallback?.({ generation: nativeGeneration, preserveNetworkProtection: options.preserveNetworkProtection === true, result })
+      } catch { /* observers cannot change cleanup ownership or its result */ }
       return result
     } catch (error) {
       logEvent('error', 'tun', 'stop failed', { operationId, error: String(error) })
