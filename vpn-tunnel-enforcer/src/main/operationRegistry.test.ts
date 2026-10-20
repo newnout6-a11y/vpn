@@ -4,6 +4,7 @@ import { OperationRegistry, type OperationLease } from './operationRegistry'
 import { OPERATION_DEADLINES, type ManagedOperation, type ManagedOperationKind } from '../shared/operation'
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
 import { redactSensitiveConfig } from './vpnProfiles'
+import { IPC_ERRORS, ipcError, type IpcErrorCategory } from '../shared/ipc-result'
 
 function held<T>() {
   let resolve!: (value: T) => void, reject!: (error: Error) => void
@@ -14,6 +15,34 @@ afterEach(() => vi.useRealTimers())
 const kinds = Object.keys(OPERATION_DEADLINES) as ManagedOperationKind[]
 
 describe('long operation registry', () => {
+  it.each((Object.keys(IPC_ERRORS) as IpcErrorCategory[]).flatMap(category =>
+    [false, true].map(commit => ({ category, commit }))))('records canonical $category returned failures, commit=$commit (AT-00-004/005)', async ({ category, commit }) => {
+    const abort = new AbortController()
+    const registry = new OperationRegistry(operation => { if (operation.status !== 'running') abort.abort() })
+    const result = { ok: false as const, reason: 'preserved-domain-reason', error: ipcError(category) }
+    expect(await registry.run('export', async lease => commit ? lease.commit(() => result) : result,
+      { signal: abort.signal })).toBe(result)
+    expect(registry.list()).toMatchObject([{ status: category === 'cancelled' ? 'cancelled' : 'error', category }])
+    expect(registry.cancel(registry.list()[0].operationId)).toBe(false)
+    await registry.close()
+  })
+  it.each([undefined, 'permission', { category: 'permission' },
+    { ...ipcError('permission'), code: IPC_ERRORS.network.code },
+    { category: '__proto__', code: 'IPC_PERMISSION_DENIED' },
+    { get category() { throw new Error('private diagnostic') } }])('does not infer returned categories from incomplete or malformed errors (AT-00-004)', async error => {
+    const registry = new OperationRegistry()
+    const result = { success: false, error }
+    expect(await registry.run('export', async () => result)).toBe(result)
+    expect(registry.list()).toMatchObject([{ status: 'error', category: 'internal' }])
+    await registry.close()
+  })
+  it('does not treat a successful payload containing error metadata as a failure (AT-00-005)', async () => {
+    const registry = new OperationRegistry()
+    await registry.run('export', async () => ({ ok: true, error: ipcError('network') }))
+    expect(registry.list()).toMatchObject([{ status: 'success' }])
+    expect(registry.list()[0]).not.toHaveProperty('category')
+    await registry.close()
+  })
   it('lets a coordinator expire failed cleanup promptly while retaining the physical resource', async () => {
     const registry = new OperationRegistry(), gate = held<void>()
     let owned!: OperationLease

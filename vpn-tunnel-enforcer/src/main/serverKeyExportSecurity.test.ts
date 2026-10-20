@@ -152,6 +152,46 @@ afterEach(async () => {
 })
 
 describe('main-owned export approval (AT-01-008)', () => {
+  it.each(channels)('preserves typed state failures through the actual IPC boundary: %s (AT-00-001/004/005)', async channel => {
+    const { ipcMain } = await import('electron')
+    const originalHandle = ipcMain.handle
+    const { installTrustedIpcBoundary } = await import('./ipcSecurity')
+    const { ipcError, unwrapIpcResult } = await import('../shared/ipc-result')
+    try {
+      installTrustedIpcBoundary()
+      ;(await import('./serverPicker')).registerServerPickerHandlers()
+      state.nativePrompt.mockResolvedValue({ response: 1 })
+      state.storeData.set('profiles', [])
+      const response = await invoke(channel)
+      const result = unwrapIpcResult(structuredClone(response))
+      expect(result).toEqual({ ok: false, reason: channel.startsWith('servers:export-all-') ? 'no-profiles' : 'profile-not-found', error: ipcError('conflict') })
+      const { operations } = await import('./operations')
+      expect(operations.list()).toMatchObject([{ status: 'error', category: 'conflict', correlationId: response.correlationId }])
+      expect(state.nativePrompt).toHaveBeenCalledOnce()
+      expect(state.saveDialog).not.toHaveBeenCalled()
+      expect(state.clipboardWrite).not.toHaveBeenCalled()
+      expect(state.writeAttempt).not.toHaveBeenCalled()
+      expect(JSON.stringify(response)).not.toMatch(/FAKE-PRIVATE-KEY|stack|vpnte-test/)
+    } finally {
+      ipcMain.handle = originalHandle
+      Reflect.deleteProperty(ipcMain, Symbol.for('vpnte.ipc.trusted-boundary.installed'))
+    }
+  })
+  it.each(channels)('classifies missing and unsupported saved outbounds without side effects: %s (AT-00-004)', async channel => {
+    state.nativePrompt.mockResolvedValue({ response: 1 })
+    const { ipcError } = await import('../shared/ipc-result')
+    const { operations } = await import('./operations')
+    const bulk = channel.startsWith('servers:export-all-')
+    for (const missing of [true, false]) {
+      state.storeData.set('profiles', [{ id: 'a', name: 'Private', protocol: 'custom', ...(missing ? {} : { outbound: { type: 'custom' } }) }])
+      state.uri.mockReturnValue(null); state.proxyLine.mockReturnValue(null)
+      expect(await invoke(channel)).toEqual({ ok: false, reason: bulk ? 'unsupported-all' : missing ? 'no-outbound' : 'unsupported-protocol',
+        error: ipcError('conflict'), ...(!bulk && !missing ? { protocol: 'custom' } : {}),
+        ...(channel === 'servers:export-all-proxies-file' ? { skipped: 1, total: 1 } : {}) })
+    }
+    expect(operations.list()).toMatchObject([{ status: 'error', category: 'conflict' }, { status: 'error', category: 'conflict' }])
+    expect(state.saveDialog).not.toHaveBeenCalled(); expect(state.clipboardWrite).not.toHaveBeenCalled(); expect(state.writeAttempt).not.toHaveBeenCalled()
+  })
   it.skipIf(process.platform !== 'win32')('rejects a substituted staging file before writing any secret through a retained reader', async () => {
     writeFileSync(exportPath, 'old destination')
     state.nativePrompt.mockResolvedValue({ response: 1 })
@@ -230,6 +270,7 @@ describe('main-owned export approval (AT-01-008)', () => {
   it.each(channels)('a direct IPC call cannot bypass native consent: %s', async channel => {
     const result = await invoke(channel)
     expect(result).toEqual({ ok: false, cancelled: true })
+    expect((await import('./operations')).operations.list()).toMatchObject([{ status: 'cancelled', category: 'cancelled' }])
     expect(state.uri).not.toHaveBeenCalled(); expect(state.proxyLine).not.toHaveBeenCalled()
     expect(state.clipboardWrite).not.toHaveBeenCalled()
     expect(state.saveDialog).not.toHaveBeenCalled()

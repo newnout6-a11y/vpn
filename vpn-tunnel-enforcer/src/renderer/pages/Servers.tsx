@@ -811,13 +811,7 @@ export function Servers() {
       message: t('servers.exportProxyListWorking', 'Собираем proxy-list в формате по одному proxy на строку...')
     })
     try {
-      const api = window.electronAPI as typeof window.electronAPI & {
-        serversExportAllProxiesToFile?: (requestId?: string) => Promise<
-          | { ok: true; path: string; total: number; exported: number; skipped: number }
-          | { ok: false; cancelled: true }
-          | { ok: false; reason: string; error?: string; total?: number; skipped?: number }
-        >
-      }
+      const api = window.electronAPI
       if (typeof api.serversExportAllProxiesToFile !== 'function') {
         setBulkNotice({
           tone: 'error',

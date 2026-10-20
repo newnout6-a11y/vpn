@@ -134,27 +134,27 @@ export interface ElectronAPI {
   serversCopyKey: (id: string, requestId?: string) => Promise<
     | { ok: true; clearAfterMs: number }
     | { ok: false; cancelled: true }
-    | { ok: false; reason: string; protocol?: string }
+    | { ok: false; reason: string; protocol?: string; error: IpcError }
   >
   serversExportKey: (id: string, requestId?: string) => Promise<
     | { ok: true; uri: string; name: string; protocol: string }
     | { ok: false; cancelled: true }
-    | { ok: false; reason: string; protocol?: string }
+    | { ok: false; reason: string; protocol?: string; error: IpcError }
   >
   serversExportKeyToFile: (id: string, requestId?: string) => Promise<
     | { ok: true; path: string; name: string; protocol: string }
     | { ok: false; cancelled: true }
-    | { ok: false; reason: string; protocol?: string; error?: string }
+    | { ok: false; reason: string; protocol?: string; error: IpcError }
   >
   serversExportAllKeysToFile: (requestId?: string) => Promise<
     | { ok: true; path: string; total: number; exported: number; skipped: number }
     | { ok: false; cancelled: true }
-    | { ok: false; reason: string; error?: string; total?: number; skipped?: number }
+    | { ok: false; reason: string; error: IpcError; total?: number; skipped?: number }
   >
   serversExportAllProxiesToFile: (requestId?: string) => Promise<
     | { ok: true; path: string; total: number; exported: number; skipped: number }
     | { ok: false; cancelled: true }
-    | { ok: false; reason: string; error?: string; total?: number; skipped?: number }
+    | { ok: false; reason: string; error: IpcError; total?: number; skipped?: number }
   >
   // Server Groups — origin tracking and post-trial-aware refresh.
   groupsList: () => Promise<ServerGroup[]>
