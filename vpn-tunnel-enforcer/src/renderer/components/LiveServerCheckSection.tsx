@@ -37,6 +37,7 @@ import type {
   LiveServerCheck
 } from '../../shared/ipc-types'
 import { sanitizeHopLine, formatInfrastructureError } from '../../shared/hopFormatting'
+import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 
 interface LiveServerCheckSectionProps {
   profileId?: string
@@ -139,7 +140,7 @@ export function LiveServerCheckSection({
   const handleStartCheck = async () => {
     if (running || (!host && !profileId)) return
 
-    const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+    const requestId = crypto.randomUUID()
     currentRequestIdRef.current = requestId
     const checkGen = ++generationRef.current
     lastSequenceRef.current = 0
@@ -166,7 +167,7 @@ export function LiveServerCheckSection({
         ].slice(0, 20))
       }
     } catch (err: any) {
-      if (generationRef.current === checkGen) {
+      if (generationRef.current === checkGen && (!isIpcRemoteErrorData(err) || err.category !== 'cancelled')) {
         const rawErr = err?.message || t('liveCheck.error', 'Ошибка при выполнении проверки')
         setError(formatInfrastructureError(rawErr))
       }

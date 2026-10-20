@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { AlertTriangle, Check, Gauge, Play, Square } from 'lucide-react'
 import { MacBadge, MacButton, MacInput, MacModal } from '../design-system'
 import { formatThroughputRouteLabel } from '../utils/liveServerPresentation'
+import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 import type {
   LiveServerBatchCheckProgress,
   LiveServerBatchCheckResult,
@@ -37,12 +39,16 @@ function routeLabel(route: LiveThroughputDiagnostics['route']): string {
 }
 
 export function LiveServerBatchComparison({ open, profiles, onClose }: LiveServerBatchComparisonProps) {
+  const { t } = useTranslation()
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState<string[]>([])
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState<LiveServerBatchCheckProgress | null>(null)
   const [result, setResult] = useState<LiveServerBatchCheckResult | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const requestIdRef = useRef<string | null>(null)
+  const generationRef = useRef(0)
+  const lastSequenceRef = useRef(0)
 
   useEffect(() => {
     if (!open) return
@@ -56,8 +62,20 @@ export function LiveServerBatchComparison({ open, profiles, onClose }: LiveServe
 
   useEffect(() => {
     if (!open) return
-    const unsubscribe = window.electronAPI?.onLiveBatchCheckProgress?.(setProgress)
-    return () => unsubscribe?.()
+    let active = true
+    const unsubscribe = window.electronAPI?.onLiveBatchCheckProgress?.(event => {
+      if (!active || !requestIdRef.current || event.requestId !== requestIdRef.current || event.sequence <= lastSequenceRef.current) return
+      lastSequenceRef.current = event.sequence
+      setProgress(event)
+    })
+    return () => {
+      active = false
+      unsubscribe?.()
+      ++generationRef.current
+      const requestId = requestIdRef.current
+      requestIdRef.current = null
+      if (requestId) void window.electronAPI.serverLiveCheckCancel(requestId).catch(() => {})
+    }
   }, [open])
 
   const visibleProfiles = useMemo(() => {
@@ -77,27 +95,44 @@ export function LiveServerBatchComparison({ open, profiles, onClose }: LiveServe
   }
 
   const handleStart = async () => {
-    if (running || selected.length === 0) return
+    if (!open || requestIdRef.current || selected.length === 0) return
+    const requestId = crypto.randomUUID()
+    requestIdRef.current = requestId
+    const generation = ++generationRef.current
+    lastSequenceRef.current = 0
+    const current = () => generationRef.current === generation && requestIdRef.current === requestId
     setRunning(true)
+    setProgress(null)
     setError(null)
     setResult(null)
     try {
       const batch = await window.electronAPI.serverLiveCheckBatch({
+        requestId,
         profileIds: selected,
         mode: 'extended'
       })
-      setResult(batch)
+      if (current()) setResult(batch)
     } catch (err: any) {
-      setError(err?.message || 'Не удалось запустить сравнение серверов')
+      if (current() && (!isIpcRemoteErrorData(err) || err.category !== 'cancelled')) {
+        setError(err?.message || 'Не удалось запустить сравнение серверов')
+      }
     } finally {
-      setRunning(false)
+      if (current()) {
+        requestIdRef.current = null
+        setRunning(false)
+      }
     }
   }
 
   const handleCancel = async () => {
-    if (!progress?.requestId) return
+    const requestId = requestIdRef.current
+    if (!requestId) return
+    ++generationRef.current
+    requestIdRef.current = null
+    setRunning(false)
+    setProgress(null)
     try {
-      await window.electronAPI.serverLiveCheckCancel(progress.requestId)
+      await window.electronAPI.serverLiveCheckCancel(requestId)
     } catch {}
   }
 
@@ -154,8 +189,9 @@ export function LiveServerBatchComparison({ open, profiles, onClose }: LiveServe
           </>
         )}
 
-        {running && progress && (
+        {running && (
           <div className="rounded-[var(--radius-sm)] border border-[var(--color-accent)]/35 bg-[var(--color-accent)]/8 p-3 text-xs">
+            {progress ? <>
             <div className="flex items-center justify-between gap-2">
               <span className="font-medium">Профиль {progress.index + 1} из {progress.total}: {profileById.get(progress.profileId)?.name || progress.profileId}</span>
               <span className="font-mono text-[var(--color-text-secondary)]">{progress.stage || progress.status}</span>
@@ -163,6 +199,7 @@ export function LiveServerBatchComparison({ open, profiles, onClose }: LiveServe
             <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--color-bg-tertiary)]">
               <div className="h-full bg-[var(--color-accent)] transition-all" style={{ width: `${Math.max(4, ((progress.index + (progress.status === 'completed' ? 1 : 0)) / Math.max(1, progress.total)) * 100)}%` }} />
             </div>
+            </> : <p role="status">{t('liveCheck.preparing')}</p>}
             <div className="mt-2 flex justify-end">
               <MacButton size="sm" variant="danger" onClick={handleCancel}><Square size={12} className="mr-1.5" />Отмена</MacButton>
             </div>

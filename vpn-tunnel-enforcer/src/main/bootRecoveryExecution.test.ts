@@ -117,7 +117,9 @@ $source=$source.Replace('[Microsoft.Win32.Registry]::Users.OpenSubKey($sid,$true
   } catch (error: any) { return { status: error.status, output: String(error.stdout) + String(error.stderr) } }
   finally { unlinkSync(harnessPath); rmdirSync(tempDir) }
 }
-describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs', () => {
+// Each fixture can spend up to 15s inside the synchronous PowerShell boundary.
+// Keep the runner budget outside that native deadline, including process cleanup.
+describe.skipIf(!pwsh)('actual boot recovery control flow on mocked system APIs', { timeout: 20_000 }, () => {
   it.each(['empty', 'complete'] as const)('handles a trusted %s physical adapter snapshot without losing recovery evidence (AT-03-003c/007)', kind => {
     const physical = { Name: 'Fixture Ethernet', InterfaceGuid: '33333333-3333-3333-3333-333333333333', ifIndex: 12,
       InterfaceDescription: 'Physical fixture', DriverDescription: 'Physical fixture driver', PnPDeviceID: 'PCI\\fixture', MacAddress: '02-00-00-00-00-01', Status: 'Up' }

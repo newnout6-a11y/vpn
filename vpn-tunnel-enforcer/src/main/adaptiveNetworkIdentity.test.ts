@@ -97,7 +97,7 @@ function Get-CimInstance {
 }
 ${dispatch}`
     expect(() => runNative(harness)).toThrow('fixture failure')
-  })
+  }, 35_000) // Outside runNative's 30s process deadline, including error cleanup.
   it.runIf(process.platform === 'win32').each(['profile-only', 'gateway-only', 'neither'])('keeps the previous %s identity behavior', fixture => {
     const harness = `
 function Get-CimInstance {
@@ -112,7 +112,7 @@ ${dispatch}`
     const stdout = runNative(harness)
     expect(JSON.parse(stdout.trim())).toEqual(fixture === 'neither' ? [] : [{ alias: 'Wi-Fi', guid: 'fixture-guid',
       profiles: fixture === 'profile-only' ? ['Домашняя сеть'] : [], gateways: fixture === 'gateway-only' ? ['fe80::1'] : [] }])
-  })
+  }, 35_000) // Same 30s native helper deadline as the other executable fixtures.
   it.runIf(process.platform === 'win32')('executes the production script with fake native cmdlets, retaining arrays and Unicode', () => {
     const harness = `
 function Get-CimInstance {

@@ -15,6 +15,7 @@ import axios from 'axios'
 import { logEvent } from './appLogger'
 import { operations } from './operations'
 import type { OperationLease } from './operationRegistry'
+import { requestDocumentLifetime } from './requestDocumentLifetime'
 import { IpcFault } from '../shared/ipc-result'
 import { settingsStore } from './settings'
 import { serverPicker } from './serverPicker'
@@ -3637,6 +3638,7 @@ export async function runLiveServerBatchCheck(
     const profile = orderedProfiles[index]
     if (signal?.aborted) break
     const emit = (patch: Omit<LiveServerBatchCheckProgress, 'requestId' | 'sequence' | 'profileId' | 'index' | 'total'>) => {
+      if (signal?.aborted) return
       onProgress?.({
         requestId,
         sequence: ++sequence,
@@ -3661,6 +3663,8 @@ export async function runLiveServerBatchCheck(
         },
         onAdmitted
       )
+      // A returned child has already committed its receipt. Keep that completed
+      // result even if cancellation won before this continuation; emit stays fenced.
       results.push(result)
       emit({
         status: 'completed',
@@ -3669,10 +3673,10 @@ export async function runLiveServerBatchCheck(
         detail: result.throughput?.detail
       })
     } catch (error: any) {
+      if (signal?.aborted) break
       const message = error?.message || String(error)
       errors.push({ profileId: profile.id, error: message })
-      emit({ status: signal?.aborted ? 'cancelled' : 'failed', detail: message })
-      if (signal?.aborted) break
+      emit({ status: 'failed', detail: message })
     }
   }
 
@@ -3709,16 +3713,15 @@ export function registerLiveServerProbeIpcHandlers(): void {
     if ([...activeControllers.keys()].filter(k => k.startsWith(`${owner}:`)).length >= 4) throw new IpcFault('conflict')
     const controller = new AbortController()
     const drains: Promise<void>[] = []
-    const onDestroyed = () => controller.abort()
-    _event.sender?.once('destroyed', onDestroyed)
+    const lifetime = requestDocumentLifetime(_event.sender, controller.signal)
     activeControllers.set(key, controller)
 
     try {
       const result = await runLiveServerCheck(
         { ...options, requestId },
-        controller.signal,
+        lifetime.signal,
         (progress) => {
-          if (_event.sender && !_event.sender.isDestroyed()) {
+          if (!lifetime.signal.aborted && _event.sender && !_event.sender.isDestroyed()) {
             _event.sender.send('server:live-check-progress', progress)
           }
         },
@@ -3728,7 +3731,7 @@ export function registerLiveServerProbeIpcHandlers(): void {
     } finally {
       // Caller timeout is prompt; admission and lifetime still cover native work.
       void Promise.all(drains).then(() => {
-        _event.sender?.removeListener('destroyed', onDestroyed)
+        lifetime.dispose()
         if (activeControllers.get(key) === controller) activeControllers.delete(key)
       })
     }
@@ -3748,15 +3751,14 @@ export function registerLiveServerProbeIpcHandlers(): void {
     if ([...activeControllers.keys()].filter(k => k.startsWith(`${owner}:`)).length >= 2) throw new IpcFault('conflict')
     const controller = new AbortController()
     const drains: Promise<void>[] = []
-    const onDestroyed = () => controller.abort()
-    _event.sender?.once('destroyed', onDestroyed)
+    const lifetime = requestDocumentLifetime(_event.sender, controller.signal)
     activeControllers.set(key, controller)
     try {
       return await runLiveServerBatchCheck(
         { ...options, requestId },
-        controller.signal,
+        lifetime.signal,
         progress => {
-          if (_event.sender && !_event.sender.isDestroyed()) {
+          if (!lifetime.signal.aborted && _event.sender && !_event.sender.isDestroyed()) {
             _event.sender.send('server:live-check-batch-progress', progress)
           }
         },
@@ -3764,7 +3766,7 @@ export function registerLiveServerProbeIpcHandlers(): void {
       )
     } finally {
       void Promise.all(drains).then(() => {
-        _event.sender?.removeListener('destroyed', onDestroyed)
+        lifetime.dispose()
         if (activeControllers.get(key) === controller) activeControllers.delete(key)
       })
     }

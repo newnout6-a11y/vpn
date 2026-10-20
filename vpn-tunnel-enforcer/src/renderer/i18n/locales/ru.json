@@ -61,6 +61,7 @@
     "speedTestLast": "Последний тест скорости"
   },
   "liveCheck": {
+    "preparing": "Подготовка проверки…",
     "handshakeProbeDurationLabel": "Время до первого TCP CONNECT:",
     "handshakeProbeDurationNote": "Замер live-зонда, не время запуска VPN.",
     "handshakeProbeDurationTitle": "От запуска handshake-зонда до первого успешного TCP CONNECT. Проба идёт через выбранный профиль; если он уже активен, используется работающий туннель — его запуск не измеряется."
