@@ -1856,7 +1856,14 @@ async function quitFromTray(): Promise<void> {
 }
 
 async function performCrashRecovery(): Promise<void> {
+  return withCorrelation('op_' + randomUUID().replaceAll('-', ''), performCrashRecoveryEffects, { source: 'lifecycle', owner: 'recovery' })
+}
+
+async function performCrashRecoveryEffects(): Promise<void> {
   if (process.platform !== 'win32') return
+  const correlationId = currentCorrelationId()!
+  const reportDialogFailure = (message: string, error: unknown) => withCorrelation(correlationId,
+    () => logEvent('warn', 'app', message, error), { source: 'lifecycle', owner: 'recovery' })
   try {
     if (await timePhase('recovery.runtime', () => isOwnedTunRuntimeRunning(true))) {
       logEvent('info', 'app', 'owned runtime is still running — preserving startup network state')
@@ -1878,7 +1885,7 @@ async function performCrashRecovery(): Promise<void> {
           tunnelState.fault('unknown')
           void dialog.showMessageBox({ type: 'warning', title: 'Восстановление адаптеров не завершено',
             message: 'Часть настроек адаптеров не восстановлена. Проверьте диагностику и повторите восстановление сети.',
-            detail: String(err), buttons: ['ОК'] }).catch(dialogErr => logEvent('warn', 'app', 'adapter recovery warning dialog failed', dialogErr))
+            detail: String(err), buttons: ['ОК'] }).catch(dialogErr => reportDialogFailure('adapter recovery warning dialog failed', dialogErr))
         }
       }
     }
@@ -1916,11 +1923,15 @@ async function performCrashRecovery(): Promise<void> {
     void dialog.showMessageBox({ type: 'warning', title: 'Восстановление сети не подтверждено',
       message: 'Не удалось подтвердить завершение сетевого восстановления. Проверьте диагностику перед повторным подключением.',
       detail: err?.message || String(err), buttons: ['ОК'] })
-      .catch(dialogErr => logEvent('warn', 'app', 'crash-recovery warning dialog failed', dialogErr))
+      .catch(dialogErr => reportDialogFailure('crash-recovery warning dialog failed', dialogErr))
   }
 }
 
 async function adoptRetainedSoftProtection(): Promise<void> {
+  return withCorrelation('op_' + randomUUID().replaceAll('-', ''), adoptRetainedSoftProtectionEffects, { source: 'lifecycle', owner: 'recovery' })
+}
+
+async function adoptRetainedSoftProtectionEffects(): Promise<void> {
   const settings = settingsStore.get()
   if (settings.routingMode !== 'soft' || settings.connectionMode === 'directVpn') return
   try {
@@ -2731,7 +2742,7 @@ app.whenReady().then(async () => {
   initProfileRotation()
   externalProxy.registerControlServer()
   schedulerService.init({
-    onConnect: (schedule) => {
+    onConnect: (schedule) => withCorrelation('op_' + randomUUID().replaceAll('-', ''), () => {
       logEvent('info', 'scheduler', `schedule "${schedule.name}" triggered connect`, { profileId: schedule.profileId, mode: schedule.mode })
       return runScheduledConnection(connectionLifecycle, schedule, {
         resolveProxy: resolveProxyForTrayStart,
@@ -2743,19 +2754,19 @@ app.whenReady().then(async () => {
         startProxy: (owner, proxy, mode) => mode === 'soft'
           ? startSoftProtectionEffects(owner, proxy.proxyAddr, proxy.proxyType)
           : startProtectionEffects(owner, proxy.proxyAddr, proxy.proxyType)
-      }).then(result => {
-        if (result.success) void notify('info', 'Расписание', `VPN включён по расписанию: ${schedule.name}`, 'scheduleTriggered').catch(() => undefined)
+      }).then(async result => {
+        if (result.success) await notify('info', 'Расписание', `VPN включён по расписанию: ${schedule.name}`, 'scheduleTriggered').catch(() => undefined)
         else logEvent('warn', 'scheduler', 'scheduled connection did not complete', { operation: connectionLifecycle.operation })
         if ('code' in result && result.code === 'SCHEDULE_PROFILE_UNAVAILABLE') return 'profile-unavailable' as const
       }).catch(err => logEvent('error', 'scheduler', 'scheduled connection failed', err))
-    },
-    onDisconnect: (schedule) => {
+    }, { source: 'lifecycle', owner: 'schedule' }),
+    onDisconnect: (schedule) => withCorrelation('op_' + randomUUID().replaceAll('-', ''), () => {
       logEvent('info', 'scheduler', `schedule "${schedule.name}" triggered disconnect`)
-      void stopProtection('schedule').then(result => {
-        if (result.success) void notify('info', 'Расписание', `VPN выключен по расписанию: ${schedule.name}`, 'scheduleTriggered').catch(() => undefined)
+      return stopProtection('schedule').then(async result => {
+        if (result.success) await notify('info', 'Расписание', `VPN выключен по расписанию: ${schedule.name}`, 'scheduleTriggered').catch(() => undefined)
         else logEvent('warn', 'scheduler', 'scheduled stop did not complete', { operation: connectionLifecycle.operation })
       }).catch(err => logEvent('error', 'scheduler', 'scheduled stop failed', err))
-    }
+    }, { source: 'lifecycle', owner: 'schedule' })
   })
 
   logEvent('info', 'app', 'V2 feature modules registered and initialized')
