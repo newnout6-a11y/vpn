@@ -3,10 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs'
 import { join } from 'path'
+import { ipcError } from '../shared/ipc-result'
+const unsafeDiagnostic = 'FAKE-SECRET at C:\\private\\credentials.json\n at unsafe (C:\\private\\app.js:1:2)'
 const state = vi.hoisted(() => ({
   manifest: null as any, failRead: false, failWrite: false, failApply: false,
   failNetsh: false, failNotify: false, failedSteps: [] as number[], scripts: [] as string[],
-  writes: [] as any[], operations: [] as string[], nativeFailure: false, reportPatch: null as any, logDirectory: ''
+  writes: [] as any[], operations: [] as string[], nativeFailure: false, reportPatch: null as any, logDirectory: '',
+  processError: null as unknown, removeError: null as unknown, stepCategory: 'internal'
 }))
 vi.mock('electron', () => ({ app: { getPath: () => state.logDirectory }, shell: { openPath: vi.fn() } }))
 const fixture = () => ({
@@ -24,6 +27,7 @@ function response(command: string) {
     return { stdout: '', stderr: '' }
   }
   const script = Buffer.from(command.split(' ').at(-1)!, 'base64').toString('utf16le')
+  if (state.processError) throw state.processError
   if (state.nativeFailure) throw Object.assign(new Error(`Command failed: ${command}`), {
     code: 1, stderr: 'Baseline user identity mismatch'
   })
@@ -38,8 +42,8 @@ function response(command: string) {
     const valuesPayload = /\$values = .*FromBase64String\('([^']+)'\)/.exec(script)?.[1]
     if (!valuesPayload) throw new Error('Baseline rollback fixture: missing encoded values payload')
     return {
-      stdout: JSON.stringify({ steps: JSON.parse(Buffer.from(valuesPayload, 'base64').toString('utf8')).map((s: any, i: number) => ({ name: `${s.target}/${s.name}`, success: !state.failedSteps.includes(i), error: state.failedSteps.includes(i) ? 'injected failure' : null })),
-        notification: { success: !state.failNotify, error: state.failNotify ? 'notification failed' : null }, timings: { registryMs: 1, notifyMs: 2 }, ...state.reportPatch }), stderr: ''
+      stdout: JSON.stringify({ steps: JSON.parse(Buffer.from(valuesPayload, 'base64').toString('utf8')).map((s: any, i: number) => ({ name: `${s.target}/${s.name}`, success: !state.failedSteps.includes(i), error: state.failedSteps.includes(i) ? unsafeDiagnostic : null, ...(state.failedSteps.includes(i) ? { category: state.stepCategory } : {}) })),
+        notification: { success: !state.failNotify, error: state.failNotify ? unsafeDiagnostic : null, ...(state.failNotify ? { category: 'internal' } : {}) }, timings: { registryMs: 1, notifyMs: 2 }, ...state.reportPatch }), stderr: ''
     }
   }
   if (script.includes('InternetSetOption') && state.failNotify) throw new Error('notification failed')
@@ -79,7 +83,7 @@ vi.mock('./recoveryManifest', () => ({
     if (state.failWrite) throw new Error('disk full')
     state.manifest = validate(value); state.writes.push(structuredClone(value)); state.operations.push('persist')
   },
-  removeRecoveryManifest: async () => { state.manifest = null; state.operations.push('clear') }
+  removeRecoveryManifest: async () => { if (state.removeError) throw state.removeError; state.manifest = null; state.operations.push('clear') }
 }))
 import { applyTunNetworkBaseline, getTunNetworkBaselineManifestPath, rollbackTunNetworkBaseline, rollbackTunNetworkBaselineIfApplied, rollbackTunNetworkBaselineOrThrow, validateNetworkBackupManifest } from './systemNetwork'
 import { logEvent } from './appLogger'
@@ -89,6 +93,7 @@ beforeEach(() => {
   state.manifest = null; state.failRead = false; state.failWrite = false; state.failApply = false
   state.failNetsh = false; state.failNotify = false; state.failedSteps = []; state.scripts = []; state.writes = []; state.operations = []
   state.nativeFailure = false; state.reportPatch = null
+  state.processError = null; state.removeError = null; state.stepCategory = 'internal'
   native.mode = 'unavailable'; native.calls = 0
   Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
 })
@@ -172,14 +177,15 @@ describe('trusted typed network baseline', () => {
     const failed = await rollbackTunNetworkBaselineOrThrow('failed start').catch(error => error as Error)
     expect(failed).toBeInstanceOf(Error)
     expect((failed as Error).message).toContain('Повторите восстановление сети')
-    expect((failed as Error).message).toContain(failure === 'step' ? 'injected' : failure === 'notification' ? 'notification failed' : 'Untrusted storage')
+    expect((failed as Error).message).toContain(ipcError('internal').message)
+    expect((failed as Error).message).not.toMatch(/FAKE-SECRET|Untrusted storage|private| at /)
     expect(state.manifest).not.toBeNull()
   })
   it('accepts trusted absence and successful retry without changing the result contract (AT-03-007)', async () => {
     expect(await rollbackTunNetworkBaselineOrThrow('no baseline')).toMatchObject({ success: true, skipped: true })
     state.manifest = fixture()
     state.failedSteps = [3]
-    await expect(rollbackTunNetworkBaselineOrThrow('failed recovery')).rejects.toThrow('injected failure')
+    await expect(rollbackTunNetworkBaselineOrThrow('failed recovery')).rejects.toThrow(ipcError('internal').message)
     state.failedSteps = []
     expect(await rollbackTunNetworkBaselineOrThrow('retry')).toMatchObject({ success: true })
     expect(state.manifest).toBeNull()
@@ -252,13 +258,13 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
       expect(steps.map((step: any) => step.success)).toEqual(fixture().values.map((_s, i) => i !== failedStep))
     }
   )
-  it('retains the snapshot and reports native stderr without a huge encoded command', async () => {
+  it('retains the snapshot and keeps native stderr in local diagnostics only', async () => {
     state.manifest = fixture(); state.nativeFailure = true
     const result = await rollbackTunNetworkBaseline()
     expect(result.success).toBe(false)
-    expect(result.warnings?.[0]).toContain('Baseline user identity mismatch')
-    expect(result.warnings?.[0]).not.toContain('-EncodedCommand')
-    expect(result.warnings?.[0].length).toBeLessThan(200)
+    expect(result.error).toEqual(ipcError('internal'))
+    expect(JSON.stringify(result)).not.toMatch(/Baseline user identity mismatch|-EncodedCommand/)
+    expect(logEvent).toHaveBeenCalledWith('error', 'system-network', 'PowerShell failed', expect.objectContaining({ diagnostic: 'Baseline user identity mismatch', code: 1 }))
     expect(state.manifest).not.toBeNull()
   })
   it.skipIf(process.platform !== 'win32')('native notification failure preserves the nine independent step results', async () => {
@@ -269,7 +275,7 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
     const result = JSON.parse(stdout.trim())
     expect(result.steps).toHaveLength(9)
     expect(result.steps.every((s: any) => s.success)).toBe(true)
-    expect(result.notification).toEqual({ success: false, error: 'injected notification failure' })
+    expect(result.notification).toEqual({ success: false, error: 'injected notification failure', category: 'internal' })
     expect(result.timings.registryMs).toBeGreaterThanOrEqual(0)
     expect(result.timings.notifyMs).toBeGreaterThanOrEqual(0)
   })
@@ -322,7 +328,9 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
     native.mode = 'false'
     const result = await applyTunNetworkBaseline()
     expect(result.success).toBe(false)
-    expect(result.details).toContain('WinINet refresh failed')
+    expect(result.error).toEqual(ipcError('internal'))
+    expect(result.details).toContain(ipcError('internal').message)
+    expect(JSON.stringify(result)).not.toContain('WinINet refresh failed')
     // Only the (separate) combined rollback script embeds InternetSetOption; no standalone notify script ran.
     expect(state.scripts.filter(script => script.includes('InternetSetOption') && !script.includes('steps=@($results)'))).toHaveLength(0)
     expect(state.manifest).toBeNull()
@@ -337,6 +345,10 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
     const result = await rollbackTunNetworkBaseline()
     expect(result.success).toBe(false)
     expect(result.warnings).toHaveLength(1)
+    expect(result.error).toEqual(ipcError('internal'))
+    expect(result.restoredSteps).toEqual(fixture().values.filter((_s, i) => i !== step).map(s => `${s.target}/${s.name}`))
+    expect(result.message).toContain('8 из 9')
+    expect(JSON.stringify(result)).not.toMatch(/FAKE-SECRET|private| at /)
     expect(state.manifest).not.toBeNull()
     expect(state.scripts[0]).toContain('foreach ($s in $values)')
     expect(state.scripts[0]).toContain('catch { $results +=')
@@ -347,6 +359,57 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
     for (const [index, event] of events.entries()) {
       expect(event[3]).toMatchObject({ operationId: result.operationId, success: index !== step })
     }
+  })
+  // AT-00-004/005: actual native producers preserve categories without serializing diagnostics.
+  it.each([
+    ['permission', { code: 'EACCES' }], ['permission', { code: 'EPERM' }], ['timeout', { code: 'ETIMEDOUT' }],
+    ['timeout', { code: null, killed: true, signal: 'SIGTERM' }],
+    ['internal', { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', killed: true, signal: 'SIGTERM' }],
+    ['network', { code: 'ENETUNREACH' }], ['cancelled', { name: 'AbortError' }], ['internal', {}]
+  ] as const)('returns safe %s after native failure %j', async (category, receipt) => {
+    state.manifest = fixture(); state.processError = Object.assign(new Error(unsafeDiagnostic), receipt)
+    const result = await rollbackTunNetworkBaseline()
+    expect(result).toMatchObject({ success: false, error: ipcError(category) })
+    expect(result).not.toHaveProperty('restoredSteps')
+    expect(JSON.stringify(result)).not.toMatch(/FAKE-SECRET|private| at /)
+    expect(state.manifest).not.toBeNull()
+  })
+  it('retains verified steps and classifies permission denial during manifest removal', async () => {
+    state.manifest = fixture(); state.removeError = Object.assign(new Error(unsafeDiagnostic), { code: 'EACCES' })
+    const result = await rollbackTunNetworkBaseline()
+    expect(result).toMatchObject({ success: false, error: ipcError('permission'), restoredSteps: fixture().values.map(s => `${s.target}/${s.name}`) })
+    expect(JSON.stringify(result)).not.toMatch(/FAKE-SECRET|private| at /)
+    expect(state.manifest).not.toBeNull()
+  })
+  it('classifies a native step permission failure and retains its healthy neighbors', async () => {
+    state.manifest = fixture(); state.failedSteps = [1]; state.stepCategory = 'permission'
+    const result = await rollbackTunNetworkBaseline()
+    expect(result.error).toEqual(ipcError('permission'))
+    expect(result.restoredSteps).toHaveLength(8)
+    expect(JSON.stringify(result)).not.toMatch(/FAKE-SECRET|private| at /)
+    expect(logEvent).toHaveBeenCalledWith('error', 'system-network', 'baseline rollback step', expect.objectContaining({ error: unsafeDiagnostic }))
+  })
+  it.skipIf(process.platform !== 'win32')('native producer reports permission category without parsing localized messages (AT-00-004)', async () => {
+    state.manifest = fixture(); await rollbackTunNetworkBaseline()
+    const report = state.scripts[0].slice(state.scripts[0].indexOf('$values ='))
+    const script = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';function Send-WinInetSettingsChanged {};function Restore-Snapshot($s) { if ($s.name -eq 'ProxyEnable') { Write-Error 'Произвольный текст отказа' -Category PermissionDenied -ErrorAction Stop } };${report}`
+    const stdout = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 10000 })
+    const nativeReport = JSON.parse(stdout.trim())
+    expect(nativeReport.steps[0]).toMatchObject({ success: false, category: 'permission' })
+    expect(nativeReport.steps.slice(1).every((s: any) => s.success)).toBe(true)
+  })
+  it('retains the compensation receipt after an apply failure (AT-00-004)', async () => {
+    state.failApply = true; state.failedSteps = [1]
+    const result = await applyTunNetworkBaseline()
+    expect(result.error).toEqual(ipcError('internal'))
+    expect(result.restoredSteps).toHaveLength(8)
+    expect(state.manifest).not.toBeNull()
+    expect(JSON.stringify(result)).not.toMatch(/FAKE-SECRET|private| at /)
+  })
+  it('does not expose backup paths after successful apply', async () => {
+    const result = await applyTunNetworkBaseline()
+    expect(result.success).toBe(true)
+    expect(JSON.stringify(result)).not.toContain('ProgramData')
   })
   it('inherits the Stop ID in all baseline rollback events (AT-03-007)', async () => {
     state.manifest = fixture()

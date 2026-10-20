@@ -5,6 +5,9 @@ import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, TRANSITI
 import { readPhysicalAdaptersNative } from './native/physicalAdapterNative'
 import { isIP } from 'net'
 import { networkInterfaces } from 'os'
+import { ipcError, type IpcError } from '../shared/ipc-result'
+import type { AdapterRollbackResult, AdapterDnsRepairResult } from '../shared/network'
+import { classifyRecoveryError } from './recoveryErrors'
 /**
  * Hard lockdown of the physical adapter while TUN is up.
  *
@@ -805,16 +808,16 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
  * empty list means "back to DHCP", which is what `Set-DnsClientServerAddress
  * -ResetServerAddresses` does.
  */
-export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, options: RollbackOptions = {}): Promise<{ rolledBack: boolean; skipped?: boolean; warnings?: string[] }> {
+export async function rollbackPhysicalAdapterLockdownIfApplied(reason: string, options: RollbackOptions = {}): Promise<AdapterRollbackResult> {
   const { operationId } = options
-  if (process.platform !== 'win32') return { rolledBack: false, skipped: true }
+  if (process.platform !== 'win32') return { success: true, rolledBack: false, skipped: true }
   const rejected: string[] = []
   const m = await readManifest(rejected)
   // Only a successful trusted read proving absence is a no-op. Trust errors
   // propagate; incomplete rollback still returns rolledBack:false without skip.
   if (!m) {
     logEvent('info', 'phys-lockdown', 'adapter rollback skipped: no owned baseline', { operationId, reason })
-    return { rolledBack: false, skipped: true }
+    return { success: true, rolledBack: false, skipped: true }
   }
 
   for (const error of rejected) logEvent('error', 'phys-lockdown', 'adapter rollback step rejected', { operationId, reason, error, success: false })
@@ -854,8 +857,12 @@ ${registryRestoreLine('DNS_PARALLEL', 'HKLM\\SYSTEM\\CurrentControlSet\\Services
 try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
 
   let rollbackSuccess = rejected.length === 0
+  let failure: IpcError | undefined = rejected.length ? ipcError('validation') : undefined
+  let restoredAdapters: string[] | undefined
+  const warnings = [...rejected]
   try {
     const out = await runPS(combinedScript, 30000)
+    restoredAdapters = []
     for (let i = 0; i < m.adapters.length; i++) {
       const a = m.adapters[i]
       const ipv6Ok = new RegExp(`A${i}_ipv6:on|A${i}_ipv6:noop`).test(out)
@@ -863,7 +870,9 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
       if (!ipv6Ok || !dnsOk) {
         logEvent('warn', 'phys-lockdown', `partial rollback failure for ${a.alias}`, { operationId, reason, ipv6Ok, dnsOk })
         rollbackSuccess = false
+        warnings.push(`Адаптер ${i + 1}: восстановление DNS/IPv6 не подтверждено`)
       } else {
+        restoredAdapters.push(a.alias)
         logEvent('info', 'phys-lockdown', `rolled back ${a.alias}`, { operationId, reason, ipv6Ok, dnsOk })
       }
     }
@@ -877,6 +886,7 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
       if (!teredoOk || !sixTo4Ok || !isatapOk) {
         logEvent('warn', 'phys-lockdown', 'partial transition adapter rollback', { operationId, reason, teredoOk, sixTo4Ok, isatapOk })
         rollbackSuccess = false
+        warnings.push('Восстановление переходных адаптеров не подтверждено')
       } else if (teredoUnknown || sixTo4Unknown || isatapUnknown) {
         logEvent('warn', 'phys-lockdown', 'transition adapter prior state unknown; left disabled instead of restoring default', { operationId, reason, teredoUnknown, sixTo4Unknown, isatapUnknown })
       } else {
@@ -889,32 +899,47 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
       dnsSmnrOk && dnsParallelOk ? 'DNS registry policy restored' : 'partial DNS registry policy rollback', { operationId, reason, dnsSmnrOk, dnsParallelOk })
     if (!dnsSmnrOk || !dnsParallelOk) {
       rollbackSuccess = false
+      warnings.push('Восстановление DNS policy не подтверждено')
     }
   } catch (err) {
     logEvent('warn', 'phys-lockdown', `batch rollback failed`, { operationId, reason, error: String(err) })
     rollbackSuccess = false
+    failure = ipcError(classifyRecoveryError(err))
+    warnings.push(failure.message)
   }
 
   if (rollbackSuccess) {
-    await deleteManifest()
+    try { await deleteManifest() }
+    catch (error) {
+      logEvent('warn', 'phys-lockdown', 'rollback manifest cleanup failed', { operationId, reason, error: String(error) })
+      rollbackSuccess = false
+      failure = ipcError(classifyRecoveryError(error))
+      warnings.push('Настройки восстановлены; удаление манифеста не подтверждено')
+    }
   } else {
     logEvent('warn', 'phys-lockdown', 'manifest kept for retry on next startup — rollback was incomplete', { operationId, reason })
   }
   clearPhysicalAdaptersSnapshotCache()
-  return { rolledBack: rollbackSuccess, ...(rejected.length ? { warnings: rejected } : {}) }
+  return { success: rollbackSuccess, rolledBack: rollbackSuccess,
+    ...(restoredAdapters ? { restoredAdapters } : {}),
+    ...(!rollbackSuccess ? { error: failure ?? ipcError('internal'),
+      message: `Откат адаптеров не завершён; манифест сохранён для повторной попытки.${restoredAdapters ? ` Подтверждён откат адаптеров: ${restoredAdapters.length} из ${m.adapters.length}.` : ''}` } : {}),
+    ...(warnings.length ? { warnings } : {}) }
 }
 
-export async function repairOrphanedPhysicalAdapterDns(reason: string, operationId?: string): Promise<{ repaired: boolean; adapters: string[] }> {
-  if (process.platform !== 'win32') return { repaired: false, adapters: [] }
+export async function repairOrphanedPhysicalAdapterDns(reason: string, operationId?: string): Promise<AdapterDnsRepairResult> {
+  if (process.platform !== 'win32') return { success: true, skipped: true, repaired: false, adapters: [] }
   // A private resolver address is not proof that VPNTE changed an adapter.
   // Automatic restoration needs the exact trusted ownership/baseline snapshot.
   const manifest = await readManifest([])
   if (manifest) {
     const result = await rollbackPhysicalAdapterLockdownIfApplied(reason, { operationId })
-    return { repaired: result.rolledBack, adapters: result.rolledBack ? manifest.adapters.map(a => a.alias) : [] }
+    return { success: result.success, repaired: result.rolledBack, adapters: result.restoredAdapters ?? [],
+      ...(result.error ? { error: result.error } : {}), ...(result.message ? { message: result.message } : {}),
+      ...(result.warnings ? { warnings: result.warnings } : {}), ...(result.skipped ? { skipped: true } : {}) }
   }
   logEvent('warn', 'phys-lockdown', 'DNS recovery not verified: no owned adapter baseline; foreign settings preserved', { operationId, reason })
-  return { repaired: false, adapters: [] }
+  return { success: true, skipped: true, repaired: false, adapters: [] }
 }
 
 export async function isPhysicalAdapterLockdownApplied(recovery = false): Promise<boolean> {

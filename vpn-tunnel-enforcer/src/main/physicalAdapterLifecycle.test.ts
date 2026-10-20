@@ -5,10 +5,13 @@ import { execFileSync } from 'node:child_process'
 import { isIP } from 'node:net'
 import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
+import { ipcError } from '../shared/ipc-result'
+import { classifyRecoveryError } from './recoveryErrors'
 
 const source = readFileSync(join(process.cwd(), 'src/main/physicalAdapterLockdown.ts'), 'utf8')
 const ast = ts.createSourceFile('physicalAdapterLockdown.ts', source, ts.ScriptTarget.Latest, true)
 function compile<T>(name: string, deps: Record<string, unknown>): T {
+  deps = { ipcError, classifyRecoveryError, ...deps }
   const declaration = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
   if (!declaration) throw new Error(`Missing production function ${name}`)
   const js = ts.transpileModule(declaration.getText(ast).replace(/^export /, '') + `\nreturn ${name};`, {
@@ -42,6 +45,62 @@ function deferred<T>() {
 }
 
 describe('adapter rollback correlation (AT-03-007)', () => {
+  // AT-00-004/008 + AT-03-003c: execute rollback and its DNS retry wrapper together.
+  it.each(['partial', 'native', 'cleanup', 'absent', 'success'] as const)('reports %s recovery without losing independently restored adapters', async outcome => {
+    const raw = 'FAKE-SECRET at C:\\private\\credentials.json\n at unsafe (C:\\private\\app.js:1:2)'
+    const deps = {
+      process: { platform: 'win32' }, logEvent: vi.fn(), psSingleQuote: quote,
+      readManifest: vi.fn(async () => outcome === 'absent' ? null : { adapters: [adapter(), { ...adapter(), alias: 'Ethernet' }], dnsRegistryPolicy: {} }),
+      registryRestoreLine: vi.fn(() => ''), clearPhysicalAdaptersSnapshotCache: vi.fn(),
+      deleteManifest: vi.fn(async () => { if (outcome === 'cleanup') throw Object.assign(new Error(raw), { code: 'EACCES' }) }),
+      runPS: vi.fn(async () => {
+        if (outcome === 'native') throw Object.assign(new Error(raw), { code: 'elevated-helper-timeout' })
+        return `A0_ipv6:${outcome === 'partial' ? 'error' : 'noop'}\nA0_dns:noop\nA1_ipv6:noop\nA1_dns:noop\nDNS_SMNR:delete\nDNS_PARALLEL:delete`
+      })
+    }
+    const rollback = compile<(reason: string, options?: unknown) => Promise<any>>('rollbackPhysicalAdapterLockdownIfApplied', deps)
+    const repair = compile<(reason: string) => Promise<any>>('repairOrphanedPhysicalAdapterDns', { ...deps, rollbackPhysicalAdapterLockdownIfApplied: rollback })
+    const result = await rollback('test')
+    const dns = await repair('retry')
+    expect(result.success).toBe(outcome === 'absent' || outcome === 'success')
+    expect(dns.success).toBe(result.success)
+    expect(dns.repaired).toBe(outcome === 'success')
+    expect(dns.adapters).toEqual(outcome === 'partial' ? ['Ethernet'] : ['success', 'cleanup'].includes(outcome) ? ['Wi-Fi', 'Ethernet'] : [])
+    expect(JSON.stringify([result, dns])).not.toMatch(/FAKE-SECRET|private| at /)
+    if (outcome === 'native') {
+      expect(result.error).toEqual(ipcError('timeout'))
+      expect(result).not.toHaveProperty('restoredAdapters')
+      expect(result.message).not.toContain('из 2')
+    } else if (outcome === 'partial' || outcome === 'cleanup') {
+      expect(result.error).toEqual(ipcError(outcome === 'partial' ? 'internal' : 'permission'))
+      expect(result.warnings.length).toBeGreaterThan(0)
+      expect(dns.error).toEqual(result.error)
+      expect(result.message).toContain(outcome === 'partial' ? '1 из 2' : '2 из 2')
+      expect(dns.message).toBe(result.message)
+    } else if (outcome === 'absent') {
+      expect(result).toMatchObject({ rolledBack: false, skipped: true })
+      expect(dns).toMatchObject({ repaired: false, skipped: true })
+      expect(deps.runPS).not.toHaveBeenCalled()
+    }
+    expect(deps.deleteManifest).toHaveBeenCalledTimes(outcome === 'cleanup' || outcome === 'success' ? 2 : 0)
+  })
+  it.each([
+    ['permission', { code: 'EPERM' }], ['timeout', { code: null, killed: true, signal: 'SIGTERM' }],
+    ['internal', { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', killed: true, signal: 'SIGTERM' }], ['internal', { code: 'elevated-helper-exited' }]
+  ] as const)('keeps manifest and classifies native %s receipt %j', async (category, receipt) => {
+    const deps = { process: { platform: 'win32' }, logEvent: vi.fn(), psSingleQuote: quote,
+      readManifest: async () => ({ adapters: [adapter()], dnsRegistryPolicy: {} }), registryRestoreLine: () => '',
+      runPS: vi.fn(async () => { throw Object.assign(new Error('C:\\private\\secret'), receipt) }),
+      deleteManifest: vi.fn(), clearPhysicalAdaptersSnapshotCache: vi.fn() }
+    const rollback = compile<(reason: string) => Promise<any>>('rollbackPhysicalAdapterLockdownIfApplied', deps)
+    const result = await rollback('test')
+    expect(result).toMatchObject({ success: false, rolledBack: false, error: ipcError(category) })
+    expect(result).not.toHaveProperty('skipped')
+    expect(result).not.toHaveProperty('restoredAdapters')
+    expect(deps.deleteManifest).not.toHaveBeenCalled()
+    expect(deps.runPS).toHaveBeenCalledOnce()
+    expect(JSON.stringify(result)).not.toContain('private')
+  })
   it.each(['adapter', 'duplicate', 'transition', 'policy', 'empty'] as const)('recovers valid neighbors of a bad %s record (AT-03-003c)', async failure => {
     const valid = { ...adapter(), ipv4DnsSource: 'static', forcedIpv6Off: true, ipv6Enabled: true }
     const disk: any = { schemaVersion: 1, owner: 'VPNTE', appliedAt: Date.now(), tunDnsIpv4: '192.168.250.254',
@@ -109,9 +168,9 @@ describe('adapter rollback correlation (AT-03-007)', () => {
   it('preserves Stop ID when DNS safety repair retries the trusted adapter rollback', async () => {
     const operationId = '00000000-0000-4000-8000-000000000007'
     const deps = { process: { platform: 'win32' }, readManifest: async () => ({ adapters: [adapter()] }),
-      rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async () => ({ rolledBack: true })) }
+      rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async () => ({ success: true, rolledBack: true, restoredAdapters: ['Wi-Fi'] })) }
     const repair = compile<(reason: string, id: string) => Promise<any>>('repairOrphanedPhysicalAdapterDns', deps)
-    expect(await repair('safety repair', operationId)).toEqual({ repaired: true, adapters: ['Wi-Fi'] })
+    expect(await repair('safety repair', operationId)).toEqual({ success: true, repaired: true, adapters: ['Wi-Fi'] })
     expect(deps.rollbackPhysicalAdapterLockdownIfApplied).toHaveBeenCalledWith('safety repair', { operationId })
   })
 })

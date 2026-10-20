@@ -139,19 +139,19 @@ it.each(['dns', 'leak', 'cancelled'])('retains %s evidence in Maintenance result
 })
 
 // AT-00-004/008: TUN may start after the page's initial preflight.
-it.each(['firewall', 'network-baseline', 'adapter-lockdown', 'runtime', 'partial-runtime', 'failure'])('shows honest auto-repair outcome for %s', async scenario => {
+it.each(['firewall', 'network-baseline', 'adapter-lockdown', 'orphaned-dns', 'runtime', 'partial-runtime', 'failure'])('shows honest auto-repair outcome for %s', async scenario => {
   vi.spyOn(window, 'confirm').mockReturnValue(true)
   api.getTunStatus.mockResolvedValue({ running: false })
   const refusal = { success: false, blocked: true, skipped: true, error: ipcError('conflict'), message: 'Отключите VPN перед починкой' }
   const partial = { success: false, error: ipcError('internal'), candidates: 2, killed: 1, names: ['vpnte-xray.exe'],
     message: 'Завершены процессы VPNTE runtime: 1 из 2. Не все процессы остановлены; повторите очистку.' }
   const results: Record<string, unknown> = { firewall: { success: true }, 'network-baseline': { success: true },
-    'adapter-lockdown': { rolledBack: true }, runtime: { success: true, candidates: 0, killed: 0, names: [] } }
+    'adapter-lockdown': { rolledBack: true }, 'orphaned-dns': { success: true, repaired: false, skipped: true, adapters: [] }, runtime: { success: true, candidates: 0, killed: 0, names: [] } }
   results[scenario === 'partial-runtime' || scenario === 'failure' ? 'runtime' : scenario] = scenario === 'partial-runtime' ? partial
     : scenario === 'failure' ? { success: false, error: ipcError('permission'), message: ipcError('permission').message } : refusal
   Object.assign(api, {
     firewallRepairVpnteRules: vi.fn(async () => results.firewall), rollbackTunNetworkBaseline: vi.fn(async () => results['network-baseline']),
-    rollbackAdapterLockdown: vi.fn(async () => results['adapter-lockdown']), repairOrphanedDns: vi.fn(async () => ({ repaired: false, adapters: [] })),
+    rollbackAdapterLockdown: vi.fn(async () => results['adapter-lockdown']), repairOrphanedDns: vi.fn(async () => results['orphaned-dns']),
     killStaleSingbox: vi.fn(async () => results.runtime), runSystemDiagnostics: vi.fn(async () => ({ items: [] })),
     firewallRepairHealth: vi.fn(async () => ({ summary: 'ok', services: [], profiles: [], recommendedActions: [], ourRuleCount: 0 }))
   })
@@ -167,5 +167,36 @@ it.each(['firewall', 'network-baseline', 'adapter-lockdown', 'runtime', 'partial
     expect(step?.detail).toContain('1 из 2')
     expect(screen.getByText(partial.message)).toBeTruthy()
     expect(state.logs.some(log => log.level === 'error' && log.message.includes('1 из 2'))).toBe(true)
+  }
+})
+
+// AT-00-004/008: returned domain failures must not become a green repair summary.
+it.each(['network-baseline', 'adapter-lockdown', 'orphaned-dns', 'absent'] as const)('shows %s rollback truthfully', async scenario => {
+  vi.spyOn(window, 'confirm').mockReturnValue(true)
+  api.getTunStatus.mockResolvedValue({ running: false })
+  const message = 'Откат выполнен частично; манифест сохранён для повторной попытки'
+  const failure = { success: false, error: ipcError('permission'), message }
+  Object.assign(api, {
+    firewallRepairVpnteRules: vi.fn(async () => ({ success: true })),
+    rollbackTunNetworkBaseline: vi.fn(async () => scenario === 'network-baseline' ? { ...failure, restoredSteps: ['internet/ProxyEnable'] } : { success: true, skipped: true }),
+    rollbackAdapterLockdown: vi.fn(async () => scenario === 'adapter-lockdown' ? { ...failure, rolledBack: false, restoredAdapters: ['Ethernet'] } : { success: true, rolledBack: false, skipped: true }),
+    repairOrphanedDns: vi.fn(async () => scenario === 'orphaned-dns' ? { ...failure, repaired: false, adapters: ['Ethernet'] } : { success: true, repaired: false, skipped: true, adapters: [] }),
+    killStaleSingbox: vi.fn(async () => ({ success: true, candidates: 0, killed: 0, names: [] })),
+    runSystemDiagnostics: vi.fn(async () => ({ items: [] })),
+    firewallRepairHealth: vi.fn(async () => ({ summary: 'ok', services: [], profiles: [], recommendedActions: [], ourRuleCount: 0 }))
+  })
+  render(<Maintenance />)
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Починить$/ })) })
+  const state = useAppStore.getState()
+  if (scenario === 'absent') {
+    expect(state.maintenanceRepairSteps?.every(step => step.status === 'ok')).toBe(true)
+    expect(state.maintenanceLastResult).toBe('Авто-починка завершена')
+    expect(state.globalToasts.at(-1)?.variant).toBe('success')
+  } else {
+    expect(state.maintenanceRepairSteps?.find(step => step.id === scenario)).toMatchObject({ status: 'fail', detail: message })
+    expect(screen.getByText(message)).toBeTruthy()
+    expect(state.maintenanceLastResult).toBe('Авто-починка завершена с ошибками')
+    expect(state.globalToasts.at(-1)?.variant).toBe('warning')
+    expect(state.logs.some(log => log.level === 'error' && log.message.includes(message))).toBe(true)
   }
 })
