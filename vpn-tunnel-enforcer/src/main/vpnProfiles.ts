@@ -6,7 +6,14 @@ import type { ClientDevice } from '../shared/ipc-types'
 import { normalizeServerPort } from '../shared/portValidation'
 import { buildBootstrapRouteAttempts, type BootstrapRouteMode } from './bootstrapRoute'
 import { NATIVE_XRAY_FIELD, getNativeXrayProfile, nativeXrayDocumentEntry, preserveNativeXrayProfile, exportNativeXrayDocument } from './nativeXrayProfile'
-import { IpcFault } from '../shared/ipc-result'
+import { IpcFault, classifyIpcError, type IpcErrorCategory } from '../shared/ipc-result'
+
+/** Local diagnostics retain a redacted reason; IPC still uses canonical text. */
+function subscriptionFault(category: IpcErrorCategory, message: string): IpcFault {
+  const error = new IpcFault(category)
+  error.message = redactSensitiveText(message)
+  return error
+}
 
 /**
  * Sends URL and sensitive headers through curl --config stdin. -q disables
@@ -19,11 +26,12 @@ function assertFetchActive(signal?: AbortSignal): void {
 function execSubscriptionCurl(args: string[], url: string, headerLines: string[], signal?: AbortSignal): Promise<Buffer> {
   assertFetchActive(signal)
   const quoteConfig = (value: string): string => {
-    if (/[\x00-\x1f\x7f]/.test(value)) throw new Error('Invalid control character in subscription request')
+    if (/[\x00-\x1f\x7f]/.test(value)) throw subscriptionFault('validation', 'Invalid control character in subscription request')
     return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
   }
-  const parsed = new URL(url)
-  if (!['http:','https:'].includes(parsed.protocol)) throw new Error('Invalid subscription transport')
+  let parsed: URL
+  try { parsed = new URL(url) } catch { throw subscriptionFault('validation', 'Invalid subscription URL') }
+  if (!['http:','https:'].includes(parsed.protocol)) throw subscriptionFault('validation', 'Invalid subscription transport')
   const config = [`url = ${quoteConfig(url)}`, ...headerLines.map(line => `header = ${quoteConfig(line)}`)].join('\n') + '\n'
 
   return new Promise((resolve, reject) => {
@@ -45,7 +53,7 @@ function execSubscriptionCurl(args: string[], url: string, headerLines: string[]
       try { child.kill() } catch { /* Keep waiting for actual close. */ }
     }
     const onAbort = () => stop(new IpcFault('cancelled'))
-    const timeout = setTimeout(() => stop(new Error('curl subscription request timed out')), 30_000)
+    const timeout = setTimeout(() => stop(subscriptionFault('timeout', 'curl subscription request timed out')), 30_000)
 
     const finish = (error?: Error) => {
       if (settled) return
@@ -81,7 +89,11 @@ function execSubscriptionCurl(args: string[], url: string, headerLines: string[]
     child.once('close', code => {
       if (stopped) finish(stopped)
       else if (code === 0) finish()
-      else finish(new Error(`curl subscription request failed with exit code ${code}`))
+      else {
+        const category = code === 3 ? 'validation' : code === 28 ? 'timeout'
+          : [5, 6, 7, 16, 18, 22, 35, 47, 52, 55, 56, 60, 77, 80, 83, 90, 91, 92, 95, 96, 97].includes(code ?? -1) ? 'network' : 'internal'
+        finish(subscriptionFault(category, `curl subscription request failed with exit code ${code}`))
+      }
     })
     child.stdin.once('error', () => stop(new Error('Subscription request input failed')))
     signal?.addEventListener('abort', onAbort, { once: true })
@@ -2193,7 +2205,7 @@ async function fetchSubscriptionHttpResponse(url: string, attempt: FetchAttempt,
 
   for (let hop = 0; hop < 6; hop++) {
     assertFetchActive(signal)
-    if (visited.has(currentUrl)) throw new Error('redirect loop while fetching subscription')
+    if (visited.has(currentUrl)) throw subscriptionFault('validation', 'redirect loop while fetching subscription')
     visited.add(currentUrl)
 
     const stdout = await execSubscriptionCurl([
@@ -2220,10 +2232,10 @@ async function fetchSubscriptionHttpResponse(url: string, attempt: FetchAttempt,
 
     if (statusCode !== null && statusCode >= 300 && statusCode < 400) {
       if (!headers.location) {
-        throw new Error(`subscription redirect returned HTTP ${statusCode} without a Location header`)
+        throw subscriptionFault('validation', `subscription redirect returned HTTP ${statusCode} without a Location header`)
       }
       const next = normalizeSubscriptionRedirectLocation(headers.location, currentUrl)
-      if (!next) throw new Error('redirect without a usable Location header')
+      if (!next) throw subscriptionFault('validation', 'redirect without a usable Location header')
 
       const unwrapped = unwrapClientDeepLink(next)
       const effectiveNext = unwrapped ?? next
@@ -2237,13 +2249,13 @@ async function fetchSubscriptionHttpResponse(url: string, attempt: FetchAttempt,
 
       const body = decodeSubscriptionBody(bodyBytes)
       if (body.trim()) return { headers, body }
-      throw new Error(`unsupported subscription redirect target: ${redactSensitiveText(effectiveNext).slice(0, 120)}`)
+      throw subscriptionFault('validation', `unsupported subscription redirect target: ${redactSensitiveText(effectiveNext).slice(0, 120)}`)
     }
 
     return { headers, body: decodeSubscriptionBody(bodyBytes) }
   }
 
-  throw new Error('too many redirects while fetching subscription')
+  throw subscriptionFault('validation', 'too many redirects while fetching subscription')
 }
 
 export function parseSubscriptionUserInfo(headers: Record<string, string>): SubscriptionUserInfo | undefined {
@@ -2388,12 +2400,15 @@ export function parseSubscriptionUserInfo(headers: Record<string, string>): Subs
 
 async function fetchAndParseSubscription(url: string, options?: SubscriptionFetchOptions): Promise<{ profiles: VpnProfile[]; source: string; userInfo?: SubscriptionUserInfo }> {
   const errors: string[] = []
+  const categories = new Set<IpcErrorCategory>()
   const runAttempts = async (attempts: FetchAttempt[]) => {
     for (const attempt of attempts) {
       assertFetchActive(options?.signal)
+      let received = false
       try {
         const response = await fetchSubscriptionHttpResponse(url, attempt, options?.signal)
         assertFetchActive(options?.signal)
+        received = true
         const userInfo = parseSubscriptionUserInfo(response.headers)
         const body = response.body
         const profiles = parseVpnProfiles(body)
@@ -2403,9 +2418,13 @@ async function fetchAndParseSubscription(url: string, options?: SubscriptionFetc
           }
         }
         if (profiles.length) return { profiles, source: attempt.label, userInfo }
+        categories.add('validation')
         errors.push(`${attempt.label}: скачано (${describeSubscriptionBody(body)}), но VLESS/Trojan/SS/VMess/Hysteria2 не найдены`)
       } catch (err: any) {
         assertFetchActive(options?.signal)
+        const category = classifyIpcError(err)
+        if (category === 'cancelled') throw err
+        categories.add(received && category === 'internal' ? 'validation' : category)
         errors.push(`${attempt.label}: ${curlErrorMessage(err)}`)
       }
     }
@@ -2425,7 +2444,11 @@ async function fetchAndParseSubscription(url: string, options?: SubscriptionFetc
     errors.push('DNS-over-HTTPS fallback: не удалось получить A-записи для домена подписки')
   }
 
-  throw new Error(`Не удалось скачать или распознать subscription. ${summarizeSubscriptionErrors(errors)}`)
+  // A received but unusable provider body is stronger evidence than a later
+  // fallback timeout. Local failures keep their category; all-timeout stays timeout.
+  const category = (['validation', 'permission', 'conflict', 'internal', 'network', 'timeout'] as const)
+    .find(item => categories.has(item)) ?? 'network'
+  throw subscriptionFault(category, `Не удалось скачать или распознать subscription. ${summarizeSubscriptionErrors(errors)}`)
 }
 /**
  * Unwraps a Happ deep-link to extract a usable subscription URL or VPN-link.

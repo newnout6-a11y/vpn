@@ -39,6 +39,17 @@ const exports = [
     ['serversExportAllKeysToFile', 'servers.exportAllKeys', false], ['serversExportAllProxiesToFile', 'servers.exportProxyList', false]
 ] as const
 describe('Servers requester lifetime', () => {
+  it.each([
+    ['Подписка вернула пустой список профилей', 'servers.groups.emptySubscription'],
+    [ipcError('validation').message, 'servers.groups.invalidSubscription']
+  ])('explains provider validation failure %s', async (lastFetchError, key) => {
+    api.groupsList.mockResolvedValueOnce([group]).mockResolvedValueOnce([{ ...group, status: 'expired', lastFetchError }])
+    api.groupsRefresh.mockRejectedValue({ name: 'IpcRemoteError', ...ipcError('validation') })
+    render(<Servers />)
+    fireEvent.click(await screen.findByRole('button', { name: 'servers.groups.refresh' }))
+    await waitFor(() => expect(useAppStore.getState().logs.some(log => log.message.includes(key))).toBe(true))
+    expect(useAppStore.getState().logs.some(log => log.message.includes(ipcError('validation').message))).toBe(false)
+  })
   it('refreshes saved group error metadata after a typed refresh failure', async () => {
     api.groupsRefresh.mockRejectedValue({ name: 'IpcRemoteError', ...ipcError('network') })
     render(<Servers />)

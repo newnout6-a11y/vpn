@@ -461,10 +461,14 @@ async function refreshGroupUnlocked(
   } catch (err) {
     assertCurrentGroup()
     const fault = new IpcFault(classifyIpcError(err))
+    // The logger's production redactor keeps the local cause/traceback safe.
+    // The IPC payload and persisted group metadata still use canonical text.
+    logEvent('warn', 'server-groups', 'refresh diagnostic', err)
     // Provider failures never publish exception text through group metadata.
     // A local/internal failure also cannot prove the subscription has expired.
     updateGroup(groupId, {
-      ...(fault.category === 'network' || fault.category === 'timeout' ? { status: 'unreachable' as const } : {}),
+      ...(fault.category === 'validation' ? { status: 'expired' as const }
+        : fault.category === 'network' || fault.category === 'timeout' ? { status: 'unreachable' as const } : {}),
       lastFetchAttemptAt: now,
       lastFetchError: fault.message
     })
@@ -766,6 +770,7 @@ export async function refreshDueServerGroups(now = Date.now(), signal?: AbortSig
       if (error instanceof IpcFault && error.category === 'cancelled') continue
       failed++
       logEvent('warn', 'server-groups', 'automatic refresh failed', { groupId: group.id, category: classifyIpcError(error) })
+      logEvent('warn', 'server-groups', 'automatic refresh diagnostic', error)
     }
   }
   return { refreshed, failed }
@@ -877,7 +882,7 @@ function handleLogged<T>(
       logEvent('debug', 'ipc', `${channel} finished`, { ms: Date.now() - started })
       return result
     } catch (err) {
-      logEvent('error', 'ipc', `${channel} failed`, { category: classifyIpcError(err) })
+      logEvent('error', 'ipc', `${channel} failed`, err)
       throw err
     }
   })

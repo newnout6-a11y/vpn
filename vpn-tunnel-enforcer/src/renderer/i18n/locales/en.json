@@ -252,6 +252,8 @@
       "removedFromSubLong": "This server is no longer in the source subscription",
       "refreshFailed": "Refresh failed",
       "refreshFailedDetail": "Couldn't refresh: {{error}}. Last attempt: {{when}}.",
+      "emptySubscription": "The subscription returned no profiles. Saved keys were kept; check the subscription expiry with your provider.",
+      "invalidSubscription": "The subscription response contains no supported profiles. Saved keys were kept; check the subscription with your provider.",
       "refreshOk": "Refreshed: +{{added}} added · {{updated}} updated · {{removed}} removed",
       "expiresOn": "Trial expires",
       "expired": "Trial expired",

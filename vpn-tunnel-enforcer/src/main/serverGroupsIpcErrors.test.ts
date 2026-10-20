@@ -1,13 +1,15 @@
 // AT-00-004/005, F-074/F-143: real subscription handler, guard and operation registry.
 import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { IPC_VERSION, IpcFault, ipcError, type IpcErrorCategory } from '../shared/ipc-result'
 
 const state = vi.hoisted(() => ({
   handlers: new Map<string, (...args: any[]) => Promise<any>>(),
   stores: new Map<string, Record<string, any>>(), resolve: vi.fn(),
-  storeFault: undefined as unknown
+  storeFault: undefined as unknown, curlCode: 0, curlBody: '', spawn: vi.fn()
 }))
+vi.mock('child_process', async importOriginal => ({ ...await importOriginal<typeof import('child_process')>(), spawn: state.spawn }))
 vi.mock('electron', () => ({ ipcMain: { handle: (channel: string, handler: (...args: any[]) => Promise<any>) => state.handlers.set(channel, handler) } }))
 vi.mock('electron-store', () => ({ default: class {
   name: string
@@ -64,6 +66,17 @@ function expectFailure(response: any, category: IpcErrorCategory) {
 }
 beforeEach(() => {
   state.storeFault = undefined; state.resolve.mockReset(); state.handlers.clear()
+  state.curlCode = 0; state.curlBody = ''
+  state.spawn.mockReset().mockImplementation(() => {
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn() })
+    child.stdin.resume()
+    queueMicrotask(() => {
+      child.stdout.end(Buffer.from(state.curlBody))
+      child.stderr.end(Buffer.from('curl transport failure token=PRIVATE-TOKEN https://sub.example.test/PRIVATE-URL'))
+      child.emit('close', state.curlCode)
+    })
+    return child
+  })
   state.stores.get('server-groups')!.groups = []
   state.stores.get('server-picker')!.profiles = []
   sender = new Sender()
@@ -79,12 +92,25 @@ afterEach(async () => {
   await operations.close(); operations.resumeAdmission()
 })
 describe('subscription domain taxonomy (AT-00-004/005)', () => {
+  it.each([[6, 'network'], [7, 'network'], [60, 'network'], [22, 'network'], [28, 'timeout'], [3, 'validation'], [0, 'validation']] as const)
+  ('preserves real resolver category from curl exit %i through the feature catch', async (code, category) => {
+    state.curlCode = code
+    state.curlBody = 'HTTP/1.1 200 OK\r\n\r\n<html>Subscription expired</html>'
+    const actual = await vi.importActual<typeof import('./vpnProfiles')>('./vpnProfiles')
+    state.resolve.mockImplementation(actual.resolveVpnProfiles)
+    expectFailure(await invoke('groups:refresh', groupId), category)
+    expect(serverGroups.getGroup(groupId)?.status).toBe(category === 'validation' ? 'expired' : 'unreachable')
+    const diagnostic = vi.mocked(logEvent).mock.calls.find(call => call[2] === 'refresh diagnostic')?.[3]
+    expect(diagnostic).toBeInstanceOf(Error)
+    expect((diagnostic as Error).message).toMatch(/subscription|подписк/i)
+    expect((diagnostic as Error).message).not.toMatch(/PRIVATE-TOKEN|PRIVATE-URL/)
+  })
   it.each(failures)('maps a caught resolver %s fault into an outer error and matching history', async (category, create) => {
     state.resolve.mockRejectedValue(create())
     const response = await invoke('groups:refresh', groupId)
     expectFailure(response, category)
     expect(serverGroups.getGroup(groupId)).toMatchObject({ lastFetchedAt: 1, lastFetchError: ipcError(category).message })
-    expect(serverGroups.getGroup(groupId)?.status).toBe(category === 'network' || category === 'timeout' ? 'unreachable' : 'active')
+    expect(serverGroups.getGroup(groupId)?.status).toBe(category === 'validation' ? 'expired' : category === 'network' || category === 'timeout' ? 'unreachable' : 'active')
     expect(await invoke('groups:list')).toMatchObject({ ok: true, result: [expect.objectContaining({ lastFetchError: ipcError(category).message })] })
   })
   it.each(failures)('maps a store %s fault without reflecting exception data', async (category, create) => {
