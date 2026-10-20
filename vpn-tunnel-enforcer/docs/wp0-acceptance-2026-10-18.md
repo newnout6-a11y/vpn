@@ -1818,3 +1818,23 @@ Final #92 follow-up:full unit5004 passed/5 skipped/0 failed,302 files passed/
 coverage/diff прошли. Исправлен старый residual fixture (неучтённая новая TCP
 граница);все промежуточные результаты сохранены. Follow-up exact-head
 Qodo/Revix/CI pending.
+
+#92 второй follow-up:Qodo1558452 автоматически принял SOCKS fix,child finding
+ещё pending;attribution не менялся. Добавлены captured-handle escalation
+SIGTERM->SIGKILL через1.5s и5s cleanup deadline. Registry выдаёт timeout и
+blocked event,продолжая удерживать physical resource/worker/workDir до close.
+Ни timer,ни ответ kill не подменяют подтверждённый exit/close. Regression
+registry87/87 и integration32/32 passed;новые full/build/exact-head gates pending.
+
+Stop escalation теперь начинается при первом abort/cleanup request,в том числе
+при pending readiness/PID persistence. Actual child close снимает budgets сразу;
+worker остаётся retained до readiness settlement. Новая regression failed до fix,
+final integration33/33 и targeted109/109 прошли;build/typecheck165/0any,coverage
+927/927 и210/210,diff exit0. CI0a42 упал на прежнем5s native JSON export fixture:
+его бюджет согласован с соседними PowerShell ACL cases (15s),assertions сохранены.
+Новый full и exact-head Qodo/Revix/CI остаются обязательными.
+
+Final второго follow-up: full5005 passed/5 skipped/0 failed,304.20s,
+302 files passed/2 skipped. Targeted109/109,integration33/33,build/typecheck,
+traceability/diff exit0. После начала final full код и тесты не менялись.
+Exact-head Qodo/Revix/CI pending;весь WP-0 ещё не завершён.

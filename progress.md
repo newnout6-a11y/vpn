@@ -6785,3 +6785,71 @@ CI/review нового SHA проверяются отдельно после pu
   any ранее прошёл на том же production source;после него менялся только
   residual test fixture и journal. Coverage/diff повторяются перед commit.
   Новые Qodo/Revix/CI обязательны на follow-up SHA.
+
+### PR #92 — bounded cleanup escalation (20.10.2026)
+
+- Follow-up head0a42d3240fdcf7592914ef0ce89aa8459a3538fd,Qodo1558452 completed:
+  SOCKS finding автоматически implemented,child drain finding остался pending.
+  Attribution не менялся. Revix Low risk;повторный itest nit ссылается на уже
+  переименованный .itest.ts,поэтому устарел;его suggestion о resource ID учтён
+  32hex suffix. Question об escalation потребовал явного shorter cleanup budget.
+- Выбран captured ChildProcess handle,а не PID lookup:на Windows это избегает
+  риска повторного kill чужого процесса после reuse PID. Вызов SIGTERM,через
+  1.5s SIGKILL,через5s без подтверждения close —structured warning state=blocked/
+  child-stop-unconfirmed и lease.expire() с terminal error/category=timeout.
+  Caller получает конечный результат;worker/resource/PID/workDir остаются
+  retained до actual close. Shutdown не выдаёт незавершённый kill за успех.
+  После late close release восстанавливается;таймеры снимаются.
+- Registry API expire делегирует существующий защищённый deadline transition,
+  не обходит commit fence и не освобождает physical lease. Regression до fix:
+  70 passed/1 failed,2.12s (.tmp/wp0-live-handshake-cleanup-deadline-before.log).
+  После fix registry/resource/handshake3 suites87/87 passed,2.27s
+  (.tmp/wp0-live-handshake-escalation-registry.log).
+- Первая integration после edit:31 passed/1 failed,1.65s:edit поменял kill в
+  abortHandler,но finally ещё посылал SIGKILL. Escalation regression это поймала;
+  finally исправлен на SIGTERM. Final integration32/32 passed,1.59s,exit0
+  (.tmp/wp0-live-handshake-escalation-integration-final.log). Проверяются
+  точные1.5s escalation,5s caller timeout,blocked successor/shutdown,late close.
+- Запущены новые build/typecheck и full: .tmp/wp0-live-handshake-escalation-
+  build.log/.tmp/wp0-live-handshake-escalation-full.log. Coverage AC927/927,
+  F210/210,diff exit0. Новый exact-head Qodo/Revix/CI нужен после push.
+
+- В продолжении выявлен timing gap: escalation создавался только в finally,
+  поэтому pending readiness/PID persistence откладывали SIGKILL после abort.
+  Новая regression до fix:1 failed/29 skipped,1.45s,exit1
+  (.tmp/wp0-live-handshake-readiness-stop-before.log). stopChild теперь
+  idempotent,запускает бюджеты непосредственно с первого stop request;
+  actual close снимает таймеры независимо от оставшихся retained promises.
+  Проверены held readiness,точные1.5s,запрет запуска successor и late drain.
+- Два промежуточных integration прогона дали32 passed/1 failed:assert считал
+  уже сработавший escalation timer ещё активным и не учитывал queue timer.
+  Исправлено только ожидание счётчика;final integration33/33 passed,1.72s,
+  exit0 (.tmp/wp0-live-handshake-readiness-stop-checked.log). Команда:
+  npm.cmd test -- --mode integration src/main/liveServerProbe.handshakeDrain.itest.ts
+  src/main/keyHealthChecker.transportDrain.itest.ts.
+- CI39348301027 на head0a42 завершился failure:5004 passed/4 skipped/1 failed,
+  native JSON export fixture превысил default5s при двух реальных PowerShell
+  ACL exports. Для этого fixture задан15s,как для соседних native file cases;
+  assertions и production export не менялись. Последующий targeted3 suites
+  99/99 passed,27.19s,exit0 (.tmp/wp0-live-handshake-cleanup-targeted-final.log).
+  В той команде лишний nonexistent operationRegistry.resources.test.ts не
+  добавил suite;следующий targeted явно содержит liveServerProbe.resourceDrain.
+- Build с typecheck165 channels/0 public any прошёл после stopChild fix
+  (.tmp/wp0-live-handshake-cleanup-build-final.log). Coverage AC927/927,F210/210,
+  diff exit0. Старый full escalation-full начат до stopChild fix и superseded;
+  его результат не будет использован для допуска окончательного дерева.
+
+- Targeted окончательного дерева: npm.cmd test -- src/main/operationRegistry.test.ts
+  src/main/liveServerProbe.resourceDrain.test.ts src/main/liveServerProbe.handshake.test.ts
+  src/main/serverKeyExportSecurity.test.ts —4 suites109/109 passed,23.81s,exit0
+  (.tmp/wp0-live-handshake-cleanup-targeted-checked.log). Full окончательного
+  дерева запущен без дальнейших source/test edits: npm.cmd test -- --maxWorkers=1
+  (.tmp/wp0-live-handshake-cleanup-full-final.log).
+
+- Final full: npm.cmd test -- --maxWorkers=1 —5005 passed/5 skipped/0 failed,
+  302 files passed/2 skipped,304.20s,exit0
+  (.tmp/wp0-live-handshake-cleanup-full-final.log). Source/test tree не менялся
+  во время прогона. Superseded escalation-full тоже завершился5005/5/0,
+  321.74s,но не используется как gate последнего fix. Final build/typecheck,
+  targeted109/109,integration33/33,coverage AC927/927,F210/210,diff exit0.
+  Новый exact-head Qodo/Revix/CI обязателен после push.

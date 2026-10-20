@@ -207,7 +207,8 @@ describe('main-owned export approval (AT-01-008)', () => {
     expect((await invoke('servers:export-key')).format).toBe('json')
     expect((await invoke('servers:export-all-keys-file')).exported).toBe(1)
     expect(readFileSync(exportPath, 'utf8')).toContain(secretJson)
-  })
+  // Both file exports perform actual PowerShell ACL checks on Windows.
+  }, 15_000)
   it('exports a mixed set as a complete JSON array instead of ambiguous JSON/URI lines', async () => {
     state.nativePrompt.mockResolvedValue({ response: 1 })
     const profiles = state.storeData.get('profiles')

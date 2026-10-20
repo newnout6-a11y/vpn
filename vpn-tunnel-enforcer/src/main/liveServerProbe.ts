@@ -1983,7 +1983,7 @@ export async function probeMediaStream(
   const started = Date.now()
   try {
     return await operations.run('server-probe', lease => probeMediaStreamOwned(profile, socksPort, lease.signal), {
-      resource: `live-media:${crypto.randomUUID()}`, timeoutMs: 15_000, signal
+      resource: `live-media:${crypto.randomUUID().replaceAll('-', '')}`, timeoutMs: 15_000, signal
     })
   } catch (error) {
     if (!(error instanceof IpcFault) || !['cancelled', 'timeout'].includes(error.category)) throw error
@@ -2081,8 +2081,8 @@ export async function probeTunnelHandshakeAndEgress(
 ): Promise<{ handshake: TunnelHandshakeResult; egress: LiveEgressResult; mediaStream: LiveMediaStreamDiagnostics; throughput?: LiveThroughputDiagnostics }> {
   const started = Date.now()
   try {
-    return await operations.run('server-probe', lease => probeTunnelHandshakeAndEgressOwned(profile, endpointIp, lease.signal, includeThroughput), {
-      resource: `live-handshake:${crypto.randomUUID()}`, timeoutMs: 60_000, signal
+    return await operations.run('server-probe', lease => probeTunnelHandshakeAndEgressOwned(profile, endpointIp, lease.signal, includeThroughput, () => lease.expire()), {
+      resource: `live-handshake:${crypto.randomUUID().replaceAll('-', '')}`, timeoutMs: 60_000, signal
     })
   } catch (error) {
     if (!(error instanceof IpcFault) || !['cancelled', 'timeout'].includes(error.category)) throw error
@@ -2099,7 +2099,8 @@ async function probeTunnelHandshakeAndEgressOwned(
   profile?: ServerProfile | null,
   endpointIp?: string,
   signal?: AbortSignal,
-  includeThroughput = false
+  includeThroughput = false,
+  cleanupExpired?: () => void
 ): Promise<{ handshake: TunnelHandshakeResult; egress: LiveEgressResult; mediaStream: LiveMediaStreamDiagnostics; throughput?: LiveThroughputDiagnostics }> {
   const started = Date.now()
   if (!profile || !profile.outbound || typeof profile.outbound !== 'object') {
@@ -2184,6 +2185,10 @@ async function probeTunnelHandshakeAndEgressOwned(
       let workDir: string | null = null
       let child: any = null
       let childClosed: Promise<void> | undefined
+      let childHasClosed = false
+      let stopStarted = false
+      let forceTimer: ReturnType<typeof setTimeout> | undefined
+      let cleanupTimer: ReturnType<typeof setTimeout> | undefined
       let logText = ''
       let cfSocket: net.Socket | null = null
       let ipifySocket: net.Socket | null = null
@@ -2196,10 +2201,22 @@ async function probeTunnelHandshakeAndEgressOwned(
       let completedMediaStream: LiveMediaStreamDiagnostics | null = null
       let completedThroughput: LiveThroughputDiagnostics | undefined
 
+      const stopChild = () => {
+        if (!child || childHasClosed || stopStarted) return
+        stopStarted = true
+        try { child.kill('SIGTERM') } catch {}
+        if (childHasClosed) return
+        // Escalate from the stop request, even while readiness or PID persistence
+        // is pending. Use the captured child handle rather than looking up a PID.
+        forceTimer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 1500)
+        cleanupTimer = setTimeout(() => {
+          try { logEvent('warn', 'live-server-probe', 'Handshake cleanup blocked: child exit remains unconfirmed', { state: 'blocked', reason: 'child-stop-unconfirmed' }) } catch { /* telemetry cannot block the terminal deadline */ }
+          cleanupExpired?.()
+        }, 5000)
+        forceTimer.unref?.(); cleanupTimer.unref?.()
+      }
       const abortHandler = () => {
-        if (child) {
-          try { child.kill('SIGKILL') } catch {}
-        }
+        stopChild()
         if (cfSocket) {
           try { cfSocket.destroy() } catch {}
         }
@@ -2331,7 +2348,11 @@ async function probeTunnelHandshakeAndEgressOwned(
             windowsHide: true,
             stdio: ['ignore', 'pipe', 'pipe']
           })
-          childClosed = new Promise<void>(resolve => child.once('close', () => resolve()))
+          childClosed = new Promise<void>(resolve => child.once('close', () => {
+            childHasClosed = true
+            clearTimeout(forceTimer); clearTimeout(cleanupTimer)
+            resolve()
+          }))
           retain(childClosed)
           // Exit can precede close indefinitely when a descendant inherited a
           // pipe. Close our read handles after confirmed exit; never release a
@@ -2664,9 +2685,7 @@ async function probeTunnelHandshakeAndEgressOwned(
         if (signal) {
           signal.removeEventListener('abort', abortHandler)
         }
-        if (child) {
-          try { child.kill('SIGKILL') } catch {}
-        }
+        stopChild()
         if (cfSocket) {
           try { cfSocket.destroy() } catch {}
         }
