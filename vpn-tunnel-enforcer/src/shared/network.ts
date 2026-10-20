@@ -42,6 +42,7 @@ export interface AutoPilotResult {
 
 export interface BrowserHardeningResult {
   success: boolean
+  error?: IpcError
   changed: boolean
   restartRequired: boolean
   message: string
