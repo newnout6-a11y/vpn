@@ -26,6 +26,16 @@ export const STORE_SCHEMA_VERSIONS = Object.freeze({
 })
 
 export type StoreId = keyof typeof STORE_SCHEMA_VERSIONS
+/** Plain application-owned JSON documents, separate from electron-store.
+ * Version 0 includes released documents without an explicit schemaVersion. */
+export const DOCUMENT_SCHEMA_VERSIONS = Object.freeze({
+  'git-proxy-backup': 0,
+  'env-proxy-backup': 0,
+  'browser-hardening': 0,
+  'location-backup': 0,
+  'traffic-forensics': 2
+})
+export type DocumentId = keyof typeof DOCUMENT_SCHEMA_VERSIONS
 type SchemaFailure = 'STORE_SCHEMA_FUTURE' | 'STORE_SCHEMA_INVALID' | 'STORE_SCHEMA_UNREGISTERED'
 
 export class StoreSchemaError extends IpcFault {
@@ -46,7 +56,14 @@ export function storeSchemaVersion(name: string): number {
 }
 
 export function assertStoreSchema(name: string, value: unknown): void {
-  const supported = storeSchemaVersion(name)
+  assertSchemaVersion(storeSchemaVersion(name), value)
+}
+
+export function assertDocumentSchema(name: DocumentId, value: unknown): void {
+  assertSchemaVersion(DOCUMENT_SCHEMA_VERSIONS[name], value)
+}
+
+function assertSchemaVersion(supported: number, value: unknown): void {
   // Preserve existing feature-specific validation/corruption handling.
   if (!value || typeof value !== 'object' || !Object.hasOwn(value, 'schemaVersion')) return
   const version = (value as Record<string, unknown>).schemaVersion

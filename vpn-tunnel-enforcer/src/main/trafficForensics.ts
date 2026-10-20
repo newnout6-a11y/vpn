@@ -11,6 +11,7 @@ import { logEvent } from './appLogger'
 import { settingsStore } from './settings'
 import { ensureElevatedRuntimeDirHardened, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
+import { assertDocumentSchema } from './storeSchema'
 import {
   createForensicsRedactor,
   redactJsonDocument,
@@ -248,6 +249,7 @@ export function createManifest(
 }
 
 function normalizeManifest(manifest: SessionManifest): SessionManifest {
+  assertDocumentSchema('traffic-forensics', manifest)
   return {
     ...manifest,
     schemaVersion: manifest.schemaVersion ?? MANIFEST_SCHEMA_VERSION,
@@ -309,6 +311,19 @@ async function readJson<T>(path: string): Promise<T | null> {
   }
 }
 
+async function readSessionManifest(path: string): Promise<SessionManifest | null> {
+  try {
+    const value = JSON.parse(await readFile(path, 'utf-8')) as SessionManifest
+    assertDocumentSchema('traffic-forensics', value)
+    return value
+  } catch (error) {
+    // Preserve the existing incomplete-JSON recovery during background writes;
+    // access failures and a parsed incompatible schema must remain explicit.
+    if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+}
+
 async function readSummaryForStatus(path: string | null | undefined): Promise<TrafficForensicsStatus['summary']> {
   if (!path) return null
   const summary = await readJson<any>(path)
@@ -323,6 +338,10 @@ async function readSummaryForStatus(path: string | null | undefined): Promise<Tr
 async function writeManifest(manifest: SessionManifest, assertActive: () => void = () => {}): Promise<void> {
   assertActive()
   const normalized = normalizeManifest(manifest)
+  await checkedForensics(readSessionManifest(getLatestManifestPath()), assertActive)
+  if (normalized.sessionDir) {
+    await checkedForensics(readSessionManifest(join(normalized.sessionDir, 'session-manifest.json')), assertActive)
+  }
   await checkedForensics(ensureLayout(assertActive), assertActive)
   if (normalized.sessionDir) {
     await checkedForensics(writeJson(join(normalized.sessionDir, 'session-manifest.json'), normalized, assertActive), assertActive)
@@ -371,9 +390,12 @@ function assertSessionPaths(manifest: SessionManifest): void {
 }
 
 async function readLatestManifest(): Promise<SessionManifest | null> {
-  const manifest = runtimeState ?? await readJson<SessionManifest>(getLatestManifestPath())
+  // Memory does not grant permission to overwrite a newer persisted document.
+  const persisted = await readSessionManifest(getLatestManifestPath())
+  const manifest = runtimeState ?? persisted
   if (!manifest) return null
   assertSessionPaths(manifest)
+  if (manifest.sessionDir) await readSessionManifest(join(manifest.sessionDir, 'session-manifest.json'))
   return normalizeManifest(manifest)
 }
 
@@ -1119,7 +1141,17 @@ export function stopTrafficForensicsSession(reason: string): Promise<TrafficFore
 }
 
 async function stopCapture(reason: string): Promise<TrafficForensicsStatus> {
-  const manifest = await readLatestManifest()
+  let manifest: SessionManifest | null
+  let inspectionFailure: { error: unknown } | undefined
+  try { manifest = await readLatestManifest() }
+  catch (error) {
+    // Only this process's successful native start grants path-free stop
+    // authority. A refused disk document never grants paths or ownership.
+    if (!runtimeState?.running || !ownedCapture || ownedCapture.sessionId !== runtimeState.sessionId
+      || ownedCapture.engine !== runtimeState.engine) throw error
+    manifest = normalizeManifest(runtimeState)
+    inspectionFailure = { error }
+  }
   if (!manifest?.running) {
     if (await legacyCaptureCleanupPending()) throw new Error(LEGACY_CAPTURE_WARNING)
     return getTrafficForensicsStatus()
@@ -1129,6 +1161,7 @@ async function stopCapture(reason: string): Promise<TrafficForensicsStatus> {
   let trusted = false
   let trustError: unknown
   try {
+    if (inspectionFailure) throw inspectionFailure.error
     await assertForensicsExecutionTrusted(manifest)
     trusted = true
   } catch (error) { trustError = error }
@@ -1183,7 +1216,7 @@ async function stopCapture(reason: string): Promise<TrafficForensicsStatus> {
   logEvent('info', 'traffic-forensics', 'stopped deep traffic capture', {
     sessionId: manifest.sessionId, engine: manifest.engine, reason
   })
-  return getTrafficForensicsStatus()
+  return statusForManifest(runtimeState ?? stopped, await legacyCaptureCleanupPending())
 }
 
 export function restartTrafficForensicsSession(reason = 'manual-restart'): Promise<TrafficForensicsStatus> {
@@ -1191,7 +1224,12 @@ export function restartTrafficForensicsSession(reason = 'manual-restart'): Promi
 }
 
 async function restartCapture(reason: string): Promise<TrafficForensicsStatus> {
-  const current = await readLatestManifest()
+  let current: SessionManifest | null
+  try { current = await readLatestManifest() }
+  catch (error) {
+    await stopCapture(reason)
+    throw error // Cleanup may succeed, but an incompatible document still forbids a new capture.
+  }
   const mode = current?.mode
   const target = current?.target
   await stopCapture(reason)
@@ -1202,9 +1240,13 @@ async function restartCapture(reason: string): Promise<TrafficForensicsStatus> {
 }
 
 export async function getTrafficForensicsStatus(): Promise<TrafficForensicsStatus> {
-  const settings = getSettings()
   const legacyPending = await legacyCaptureCleanupPending()
   const manifest = await reconcileStaleRunningManifest(await readLatestManifest())
+  return statusForManifest(manifest, legacyPending)
+}
+
+async function statusForManifest(manifest: SessionManifest | null, legacyPending: boolean): Promise<TrafficForensicsStatus> {
+  const settings = getSettings()
   const artifactFiles = await listTrafficForensicsArtifacts(manifest?.sessionDir ?? null)
   if (!settings.enabled && !manifest?.running && !legacyPending) {
     return {

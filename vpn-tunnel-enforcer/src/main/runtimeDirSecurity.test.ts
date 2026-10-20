@@ -171,7 +171,8 @@ describe('verified runtime tree and namespace', () => {
     expect(s).toContain('PropagationFlags]::InheritOnly'); expect(s).not.toMatch(/-Recurse|-ErrorAction\s+SilentlyContinue/)
   })
 })
-describe.skipIf(process.platform !== 'win32')('native read-only PowerShell policy subset (AT-01-009; no elevation)', () => {
+// A parser case invokes two native children, each already bounded to 15s.
+describe.skipIf(process.platform !== 'win32')('native read-only PowerShell policy subset (AT-01-009; no elevation)', { timeout: 35_000 }, () => {
   async function run(scriptText: string) {
     const { execFileSync } = await vi.importActual<typeof import('node:child_process')>('node:child_process')
     return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(scriptText, 'utf16le').toString('base64')], {

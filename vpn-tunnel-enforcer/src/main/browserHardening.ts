@@ -7,6 +7,7 @@ import { app } from 'electron'
 import { join } from 'path'
 import { promisify } from 'util'
 import { logEvent } from './appLogger'
+import { assertDocumentSchema } from './storeSchema'
 import { classifyIpcError, ipcError, type IpcError, type IpcErrorCategory } from '../shared/ipc-result'
 
 const execFile = promisify(execFileCb)
@@ -55,6 +56,7 @@ interface FileBackup {
 }
 
 interface BackupManifest {
+  schemaVersion?: number
   createdAt: number
   registryBackups: RegistryBackup[]
   fileBackups: FileBackup[]
@@ -173,6 +175,7 @@ async function queryValue(key: string, value: string, errors: unknown[], require
 async function readManifest(): Promise<BackupManifest | null> {
   try {
     const value = JSON.parse(await readFile(manifestPath(), 'utf8')) as Partial<BackupManifest>
+    assertDocumentSchema('browser-hardening', value)
     if (!value || !Number.isFinite(value.createdAt) || !Array.isArray(value.registryBackups) || !Array.isArray(value.fileBackups)) throw new Error('Malformed browser hardening manifest')
     return value as BackupManifest
   } catch (err: any) {
@@ -182,8 +185,10 @@ async function readManifest(): Promise<BackupManifest | null> {
 }
 
 async function writeManifest(manifest: BackupManifest): Promise<void> {
+  assertDocumentSchema('browser-hardening', manifest)
+  await readManifest() // Refuse a newer document placed on disk since the last read.
   await mkdir(backupDir(), { recursive: true })
-  await writeFile(manifestPath(), JSON.stringify(manifest, null, 2), 'utf8')
+  await writeFile(manifestPath(), JSON.stringify({ schemaVersion: 0, ...manifest }, null, 2), 'utf8')
 }
 
 async function ensureManifest(policyKeys: string[], backupErrors: Map<string, unknown[]>): Promise<BackupManifest> {
