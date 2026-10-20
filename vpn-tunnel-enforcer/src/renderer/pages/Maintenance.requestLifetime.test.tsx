@@ -75,3 +75,29 @@ it('does not let an old reply clear a new mounted action', async () => {
   expect(useAppStore.getState().maintenanceLastResult).toContain('FAKE-new')
   second.unmount()
 })
+it.each(['success', 'error'])('cancels independent leak and routing tokens on unmount with late leak %s', async outcome => {
+  let resolveLeak!: (value: unknown) => void, rejectLeak!: (error: unknown) => void
+  api.runLeakSelfTest.mockImplementation(() => new Promise((yes, no) => { resolveLeak = yes; rejectLeak = no }))
+  const view = await start(), leakToken = api.runLeakSelfTest.mock.calls[0][0], routeToken = api.runRoutingSelfTest.mock.calls[0][0]
+  expect(leakToken).toMatch(/^[0-9a-f-]{36}$/)
+  expect(leakToken).not.toBe(routeToken)
+  await act(async () => { resolveRoute({ verdict: 'ok', message: 'FAKE-route' }) })
+  const beforeLogs = useAppStore.getState().logs.length
+  view.unmount()
+  expect(api.operationsCancelRequest).toHaveBeenCalledWith(leakToken)
+  expect(api.operationsCancelRequest).toHaveBeenCalledWith(routeToken)
+  await act(async () => { if (outcome === 'success') resolveLeak({ summary: 'FAKE-late' }); else rejectLeak({ name: 'IpcRemoteError', ...ipcError('internal') }) })
+  expect(useAppStore.getState().maintenanceLastResult).toBe('')
+  expect(useAppStore.getState().logs).toHaveLength(beforeLogs)
+  expect(useAppStore.getState().globalToasts).toEqual([])
+})
+it('cancels a pending leak check when routing fails', async () => {
+  let release!: (value: unknown) => void
+  api.runLeakSelfTest.mockImplementation(() => new Promise(yes => { release = yes }))
+  const view = await start()
+  await act(async () => { rejectRoute({ name: 'IpcRemoteError', ...ipcError('network') }) })
+  expect(api.operationsCancelRequest).toHaveBeenCalledExactlyOnceWith(api.runLeakSelfTest.mock.calls[0][0])
+  await act(async () => { release({ summary: 'FAKE-late' }) })
+  expect(useAppStore.getState().maintenanceLastResult).toBe(ipcError('network').message)
+  view.unmount()
+})

@@ -130,7 +130,7 @@ export const IPC_REQUESTS = {
   'open-tun-log-folder': request('openTunLogFolder', []),
   'open-log-folder': request('openLogFolder', []),
   'export-diagnostics': request('exportDiagnostics', [optional(text(36))]),
-  'run-leak-self-test': request('runLeakSelfTest', []),
+  'run-leak-self-test': request('runLeakSelfTest', [optional(text(36))]),
   'run-routing-self-test': request('runRoutingSelfTest', [optional(text(36))]),
   'open-snapshots-folder': request('openSnapshotsFolder', []),
   'get-traffic-forensics-status': request('getTrafficForensicsStatus', []),

@@ -121,14 +121,15 @@ export function Maintenance() {
   })
   const runningAction = storedRunningAction ?? (exporting ? 'export-zip' : null)
   const setRunningAction = useAppStore(s => s.setMaintenanceRunningAction)
-  const protectionScope = useRef<{ active: boolean; request?: string }>({ active: true })
+  const protectionScope = useRef<{ active: boolean; request?: string; leakRequest?: string }>({ active: true })
   useEffect(() => {
-    const lifetime = { active: true, request: undefined as string | undefined }
+    const lifetime = { active: true, request: undefined as string | undefined, leakRequest: undefined as string | undefined }
     protectionScope.current = lifetime
     return () => {
       lifetime.active = false
       if (lifetime.request) {
         void window.electronAPI.operationsCancelRequest(lifetime.request).catch(() => {})
+        if (lifetime.leakRequest) void window.electronAPI.operationsCancelRequest(lifetime.leakRequest).catch(() => {})
         if (useAppStore.getState().maintenanceRunningAction === 'protection-test') setRunningAction(null)
       }
     }
@@ -234,10 +235,10 @@ export function Maintenance() {
   const runProtectionTest = async () => {
     const lifetime = protectionScope.current
     if (!lifetime.active || lifetime.request) return
-    const requestId = crypto.randomUUID()
+    const requestId = crypto.randomUUID(), leakRequestId = crypto.randomUUID()
     lifetime.request = requestId
     const owns = () => lifetime.active && protectionScope.current === lifetime && lifetime.request === requestId
-    let routingPending = false
+    let routingPending = false, leakPending = false
     setRunningAction('protection-test')
     addLog('info', 'Починка: проверка leak-switch и маршрутизации')
     try {
@@ -250,13 +251,16 @@ export function Maintenance() {
         return
       }
       routingPending = true
+      leakPending = true
+      lifetime.leakRequest = leakRequestId
       const routingTask = window.electronAPI.runRoutingSelfTest(requestId).then(
         result => { routingPending = false; return result },
         error => { routingPending = false; throw error })
-      const [leak, routing] = await Promise.all([
-        window.electronAPI.runLeakSelfTest(),
-        routingTask
-      ])
+      const leakTask = window.electronAPI.runLeakSelfTest(leakRequestId).finally(() => {
+        leakPending = false
+        if (lifetime.leakRequest === leakRequestId) lifetime.leakRequest = undefined
+      })
+      const [leak, routing] = await Promise.all([leakTask, routingTask])
       if (!owns()) return
       const failed = leak.physicalAdapterReached || leak.publicIpMismatch || leak.dnsLeakDetected === true || routing.verdict === 'leak'
       const inconclusive = !failed && (routing.verdict !== 'ok' || leak.summary.includes('отменён'))
@@ -275,9 +279,13 @@ export function Maintenance() {
       addLog('error', message)
       useAppStore.getState().addGlobalToast('error', 'Проверка защиты', message)
     } finally {
-      if (routingPending) void window.electronAPI.operationsCancelRequest(requestId).catch(() => {})
+      if (lifetime.active) {
+        if (routingPending) void window.electronAPI.operationsCancelRequest(requestId).catch(() => {})
+        if (leakPending) void window.electronAPI.operationsCancelRequest(leakRequestId).catch(() => {})
+      }
       if (owns()) setRunningAction(null)
       if (lifetime.request === requestId) lifetime.request = undefined
+      if (lifetime.leakRequest === leakRequestId) lifetime.leakRequest = undefined
     }
   }
 

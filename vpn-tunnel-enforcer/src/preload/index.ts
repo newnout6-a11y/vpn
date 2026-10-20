@@ -220,7 +220,7 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   openTunLogFolder: () => invoke('open-tun-log-folder'),
   openLogFolder: () => invoke('open-log-folder'),
   exportDiagnostics: (requestId?: string) => invoke('export-diagnostics', ...(requestId === undefined ? [] : [requestId])),
-  runLeakSelfTest: () => invoke('run-leak-self-test'),
+  runLeakSelfTest: (requestId?: string) => invoke('run-leak-self-test', ...(requestId === undefined ? [] : [assertString(requestId, 'requestId')])),
   runRoutingSelfTest: (requestId?: string) => invoke('run-routing-self-test', ...(requestId === undefined ? [] : [assertString(requestId, 'requestId')])),
   openSnapshotsFolder: () => invoke('open-snapshots-folder'),
   getTrafficForensicsStatus: () => invoke('get-traffic-forensics-status'),
