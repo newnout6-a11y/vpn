@@ -1,8 +1,11 @@
 // AT-00-003/005: subscriber cancellation and physical drain are separate.
 import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import ts from 'typescript'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const state = vi.hoisted(() => ({ exec: vi.fn(), execFile: vi.fn(), native: vi.fn(), forensic: vi.fn(), log: vi.fn() }))
+const state = vi.hoisted(() => ({ exec: vi.fn(), execFile: vi.fn(), native: vi.fn(), forensic: vi.fn(), log: vi.fn(), snapshot: vi.fn() }))
 vi.mock('child_process', () => ({ exec: state.exec, execFile: state.execFile }))
 vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }))
 vi.mock('./native/nativeNetworkReads', () => ({ nativePhysicalIpv4Sources: state.native }))
@@ -33,6 +36,7 @@ beforeEach(() => {
   vi.resetModules(); vi.clearAllMocks(); children = []; releaseImport = undefined
   state.native.mockResolvedValue([{ alias: 'Wi-Fi', ipv4: '192.0.2.10' }])
   state.forensic.mockResolvedValue(true)
+  state.snapshot.mockResolvedValue(null)
   state.execFile.mockImplementation((file: string, args: string[], _options: unknown, callback: Callback) => {
     const child = new Child(file, args, callback); children.push(child); return child
   })
@@ -45,6 +49,107 @@ beforeEach(() => {
     }) })
   }
   vi.doMock('./trafficForensics', () => ({ recordTrafficForensicsAppEvent: state.forensic }))
+})
+
+// Exercise the actual main handler with the production requester/operation registries.
+async function invokeRequester(owner: EventEmitter, token?: string) {
+  const source = readFileSync(join(process.cwd(), 'src/main/index.ts'), 'utf8')
+  const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true)
+  let listener: ts.Expression | undefined
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(ast) === 'handleLogged'
+      && ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text === 'run-leak-self-test') listener = node.arguments[1]
+    ts.forEachChild(node, visit)
+  }
+  visit(ast)
+  if (!listener) throw new Error('Missing production leak handler')
+  const compiled = ts.transpileModule(`return (${listener.getText(ast)})`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const deps = { runLeakSelfTest: (await import('./leakSelfTest')).runLeakSelfTest,
+    runRequesterOperation: (await import('./requesterOperation')).runRequesterOperation, captureSnapshot: state.snapshot }
+  const handler = new Function(...Object.keys(deps), compiled)(...Object.values(deps))
+  return handler({ sender: owner }, token)
+}
+const sender = () => Object.assign(new EventEmitter(), { isDestroyed: () => false })
+describe('leak requester main handler', () => {
+  it.each(['destroyed', 'did-navigate', 'render-process-gone'])('cancels legacy document work on %s', async event => {
+    const owner = sender(), task = invokeRequester(owner).catch(error => error)
+    await vi.waitFor(() => expect(children).toHaveLength(1))
+    owner.emit(event)
+    expect(children[0].kill).toHaveBeenCalledOnce()
+    expect(await task).toMatchObject({ category: 'cancelled' })
+    children[0].finish()
+    expect(state.snapshot).not.toHaveBeenCalled()
+    expect(owner.eventNames()).toEqual([])
+  })
+  it('holds requester cancellation and physical drain through the diagnostic snapshot', async () => {
+    let release!: () => void
+    state.snapshot.mockImplementationOnce(() => new Promise<void>(yes => { release = yes }))
+    const owner = sender()
+    let settled = false
+    const task = invokeRequester(owner, '11111111-1111-4111-8111-111111111111').catch(error => error).finally(() => { settled = true })
+    await finishCheck(true); await vi.waitFor(() => expect(state.snapshot).toHaveBeenCalledOnce())
+    expect(settled).toBe(false)
+    owner.emit('did-navigate')
+    expect(await task).toMatchObject({ category: 'cancelled' })
+    expect(state.snapshot.mock.calls[0][1].signal.aborted).toBe(true)
+    const { operations } = await import('./operations')
+    let drained = false
+    const closing = operations.close().then(() => { drained = true })
+    await Promise.resolve(); expect(drained).toBe(false)
+    release(); await closing
+    expect(owner.eventNames()).toEqual([])
+  })
+  it('rejects duplicate/malformed tokens and lets another sender keep the shared check alive', async () => {
+    const owner = sender(), peer = sender(), token = '11111111-1111-4111-8111-111111111111'
+    const first = invokeRequester(owner, token).catch(error => error), second = invokeRequester(peer, token)
+    await vi.waitFor(() => expect(children).toHaveLength(1))
+    await expect(invokeRequester(owner, token)).rejects.toMatchObject({ category: 'conflict' })
+    await expect(invokeRequester(owner, 'malformed')).rejects.toMatchObject({ category: 'validation' })
+    const { cancelRequesterOperation } = await import('./requesterOperation')
+    expect(cancelRequesterOperation(sender() as never, token)).toBe(false)
+    expect(cancelRequesterOperation(owner as never, token)).toBe(true)
+    expect(await first).toMatchObject({ category: 'cancelled' })
+    expect(children[0].kill).not.toHaveBeenCalled()
+    await finishCheck()
+    expect((await second).physicalAdapterInspectionComplete).toBe(true)
+    expect(cancelRequesterOperation(peer as never, token)).toBe(false)
+    expect(state.snapshot).not.toHaveBeenCalled()
+    expect(owner.eventNames()).toEqual([]); expect(peer.eventNames()).toEqual([])
+  })
+  it('preserves active legacy success while awaiting a best-effort diagnostic snapshot', async () => {
+    state.snapshot.mockRejectedValueOnce(new Error('snapshot unavailable'))
+    const owner = sender(), task = invokeRequester(owner)
+    await finishCheck(true)
+    expect((await task).physicalAdapterReached).toBe(true)
+    expect(state.snapshot.mock.calls[0]).toEqual(['leak-detected', { signal: expect.any(AbortSignal) }])
+    expect(owner.eventNames()).toEqual([])
+  })
+  it('globally cancels a subscriber even after shared probes finished and its snapshot started', async () => {
+    let release!: () => void
+    state.snapshot.mockImplementationOnce(() => new Promise<void>(yes => { release = yes }))
+    const owner = sender(), task = invokeRequester(owner)
+    await finishCheck(true); await vi.waitFor(() => expect(state.snapshot).toHaveBeenCalledOnce())
+    const { cancelLeakSelfTest } = await import('./leakSelfTest')
+    cancelLeakSelfTest()
+    expect((await task).summary).toContain('отменён')
+    expect(state.snapshot.mock.calls[0][1].signal.aborted).toBe(true)
+    release()
+    expect(owner.eventNames()).toEqual([])
+  })
+  it('keeps the same subscriber deadline and lease while retaining an in-progress result effect', async () => {
+    let release!: () => void, lease!: import('./operationRegistry').OperationLease, effectSignal!: AbortSignal
+    const effect = new Promise<void>(yes => { release = yes })
+    const { runLeakSelfTest } = await import('./leakSelfTest')
+    const task = runLeakSelfTest({ onOperation: admitted => { lease = admitted }, afterResult: async (_result, signal) => { effectSignal = signal; await effect } }).catch(error => error)
+    await finishCheck(); await vi.waitFor(() => expect(effectSignal).toBeDefined())
+    expect(lease.expire()).toBe(true)
+    expect(await task).toMatchObject({ category: 'timeout' })
+    expect(effectSignal.aborted).toBe(true)
+    let drained = false
+    void lease.drained.then(() => { drained = true })
+    await Promise.resolve(); expect(drained).toBe(false)
+    release(); await lease.drained
+  })
 })
 afterEach(async () => {
   releaseImport?.()

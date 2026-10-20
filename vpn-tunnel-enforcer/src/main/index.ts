@@ -19,6 +19,7 @@ import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLi
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
 import { monotonicTimeMs } from './eventClock'
 import { operations, registerOperationHandlers } from './operations'
+import { runRequesterOperation } from './requesterOperation'
 import { registerPlannedFeatureHandlers } from './plannedFeatures'
 import { registerRoutingSelfTestHandlers } from './routingSelfTest'
 import { TunnelStateMachine } from './tunnelStateMachine'
@@ -2593,15 +2594,16 @@ app.whenReady().then(async () => {
 
   registerDiagnosticsExportHandler()
 
-  handleLogged('run-leak-self-test', async () => {
-    const result = await runLeakSelfTest()
-    if (result.physicalAdapterReached || result.publicIpMismatch) {
-      // Always snapshot when we see a leak — that's exactly the moment we
-      // want frozen for support.
-      captureSnapshot('leak-detected').catch(() => undefined)
-    }
-    return result
-  })
+  handleLogged('run-leak-self-test', (event, requestId?: string) => runRequesterOperation(event.sender, requestId,
+    (signal, onOperation) => runLeakSelfTest({
+      signal, onOperation,
+      afterResult: async (result, snapshotSignal) => {
+        if (result.physicalAdapterReached || result.publicIpMismatch) {
+          // The subscriber retains the snapshot until its physical effects drain.
+          await captureSnapshot('leak-detected', { signal: snapshotSignal }).catch(() => undefined)
+        }
+      }
+    })))
 
   // Routing self-test: prove the VPN/direct split is real by comparing the
   // egress IP through proxy-out (VPN) vs direct-out, and — when smart RU split

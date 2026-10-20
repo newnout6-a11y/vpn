@@ -1,5 +1,6 @@
 import { useDiagnosticsExport } from '../hooks/useDiagnosticsExport'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 import { useTranslation } from 'react-i18next'
 import { useAppStore, type LeakSelfTestResultClient } from '../store'
 import { AlertTriangle, CheckCircle2, FileArchive, FolderOpen, Loader2, Radar, RefreshCw, Send, ShieldAlert } from 'lucide-react'
@@ -26,6 +27,16 @@ export function DiagnosticsCard() {
   const addLog = useAppStore((s) => s.addLog)
 
   const [testing, setTesting] = useState(false)
+  const selfTestScope = useRef<{ active: boolean; token?: string } | null>(null)
+  useEffect(() => {
+    const current = { active: true } as { active: boolean; token?: string }
+    selfTestScope.current = current
+    return () => {
+      current.active = false
+      if (current.token) void window.electronAPI.operationsCancelRequest(current.token).catch(() => {})
+      if (selfTestScope.current === current) selfTestScope.current = null
+    }
+  }, [])
   const [restartingForensics, setRestartingForensics] = useState(false)
   const [exportPath, setExportPath] = useState<string | null>(null)
   const { exporting, exportDiagnostics: handleExport } = useDiagnosticsExport(setExportPath)
@@ -73,17 +84,26 @@ export function DiagnosticsCard() {
   }, [])
 
   const handleSelfTest = async () => {
+    const current = selfTestScope.current
+    if (!current?.active || current.token) return
+    const token = crypto.randomUUID()
+    current.token = token
+    const owns = () => current.active && selfTestScope.current === current && current.token === token
     setTesting(true)
     addLog('info', 'Активная проверка утечки: пробую достучаться до интернета через физический адаптер…')
     try {
-      const result = await window.electronAPI.runLeakSelfTest()
+      const result = await window.electronAPI.runLeakSelfTest(token)
+      if (!owns()) return
       setLeakResult(result)
       const level = result.physicalAdapterReached || result.publicIpMismatch || result.dnsLeakDetected ? 'error' : 'info'
       addLog(level, `Результат проверки: ${result.summary}`)
     } catch (err: any) {
-      addLog('error', `Не удалось запустить проверку утечки: ${err.message ?? err}`)
+      if (owns() && !(isIpcRemoteErrorData(err) && err.category === 'cancelled')) {
+        addLog('error', `Не удалось запустить проверку утечки: ${err.message ?? err}`)
+      }
     } finally {
-      setTesting(false)
+      if (owns()) setTesting(false)
+      if (current.token === token) current.token = undefined
     }
   }
 

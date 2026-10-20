@@ -80,7 +80,7 @@ export interface ElectronAPI {
   openTunLogFolder: () => Promise<string>
   openLogFolder: () => Promise<string>
   exportDiagnostics: (requestId?: string) => Promise<{ success: boolean; path?: string; error?: string; cancelled?: boolean; warning?: 'cleanup-failed' }>
-  runLeakSelfTest: () => Promise<LeakSelfTestResult>
+  runLeakSelfTest: (requestId?: string) => Promise<LeakSelfTestResult>
   runRoutingSelfTest: (requestId?: string) => Promise<{
     ranAt: number
     tunnelActive: boolean
