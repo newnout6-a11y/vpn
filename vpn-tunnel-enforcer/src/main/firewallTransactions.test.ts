@@ -15,6 +15,7 @@ const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], sc
   wfpRemoveError: null as Error | null,
   manifestReads: 0,
   auditWfpPolicy: false,
+  wfpPriorityOutput: 'WFP_PRIORITY_VERIFIED',
   liveFailures: 0, liveMissingMarker: false, failCommit: false,
   artifacts: [] as string[], helperAvailable: true, helperFailure: null as any, helperExitCode: 0, longApps: false,
   nativeTimings: '', restoreOutput: null as string | null, cleanupError: null as Error | null,
@@ -90,7 +91,7 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
       // Reach real policy validation, but explicitly prohibit helper startup.
       await expect(helper.execElevatedPs(script, timeout, policy, { startIfUnavailable: false }))
         .rejects.toMatchObject({ code: 'elevated-helper-unavailable' })
-      return { stdout: 'WFP_PRIORITY_VERIFIED', stderr: '', exitCode: 0 }
+      return { stdout: state.wfpPriorityOutput, stderr: '', exitCode: 0 }
     }
     if (state.helperFailure) throw state.helperFailure
     if (script.length > 64 * 1024) {
@@ -149,6 +150,7 @@ beforeEach(() => {
   state.wfpFailPrepareExceptions = false
   state.manifestReads = 0
   state.auditWfpPolicy = false
+  state.wfpPriorityOutput = 'WFP_PRIORITY_VERIFIED'
   state.liveFailures = 0; state.liveMissingMarker = false; state.failCommit = false
   state.artifacts = []; state.helperAvailable = true; state.helperFailure = null; state.helperExitCode = 0
   state.longApps = false
@@ -168,6 +170,21 @@ describe('firewall error taxonomy (AT-00-004, AT-03-003/007; F-074)', () => {
     expect(state.artifacts).toEqual([])
     expect(state.fallback).not.toHaveBeenCalled()
     expect(state.scripts).toHaveLength(1)
+  })
+  it('retains actionable guidance and the category for a reservation conflict', async () => {
+    state.auditWfpPolicy = true
+    state.wfpPriorityOutput = 'VPNTE_FW_FAILURE:conflict'
+    await expect(reserveKillSwitchIpv6Priority(new AbortController().signal)).rejects.toMatchObject({
+      category: 'conflict', message: expect.stringContaining('остановите TUN/VPN другого приложения')
+    })
+  })
+  it('reports journal corruption as internal failure with explicit skipped records', async () => {
+    await enableKillSwitch(options)
+    state.manifest.savedProfiles[0].defaultOutbound = 'invalid'
+    const result = await disableKillSwitch('damaged journal fixture')
+    expect(result).toMatchObject({ success: false, error: ipcError('internal') })
+    expect(result.details).toContain('skipped')
+    expect(state.manifest).not.toBeNull()
   })
   it('preserves the actual post-repair health beside a typed failure', async () => {
     await enableKillSwitch(options)
@@ -192,7 +209,7 @@ describe('firewall error taxonomy (AT-00-004, AT-03-003/007; F-074)', () => {
     const output = executeNativeFixture(`
 function Get-NetFirewallProfile { throw [Reflection.TargetInvocationException]::new([InvalidOperationException]::new('IPv6 WFP priority conflict: fixture')) }
 ${snapshot}`)
-    expect(output).toMatch(/^VPNTE_FW_FAILURE:conflict\s*$/)
+    expect(output).toMatch(/^VPNTE_FW_FAILURE:conflict\r?$/m)
     state.restoreOutput = output
     expect(await disableKillSwitch('native conflict fixture')).toMatchObject({ success: false, error: ipcError('conflict') })
     expect(state.manifest).not.toBeNull()
@@ -313,11 +330,13 @@ Write-Output ('ATTEMPTS:'+($script:attempts -join ','))
       // Rollback deliberately reports the aggregate of independent steps;
       // non-authorization native failures remain internal.
       expect(output).toContain(`VPNTE_FW_FAILURE:${category}`)
+      expect(output).toContain('VPNTE_FW_DIAGNOSTIC:')
       expect(output).toContain('ATTEMPTS:Domain,Private,Public')
       expect(output).not.toMatch(/^RESTORED\r?$/m)
       await enableKillSwitch(options)
       state.restoreOutput = output
       expect(await disableKillSwitch('consume native report')).toMatchObject({ success: false, error: ipcError(category) })
+      expect(vi.mocked(logEvent).mock.calls).toContainEqual(['warn', 'firewall-killswitch', 'native failure diagnostic', expect.objectContaining({ step: 'profile/Private', category: mode === 'conflict' ? 'conflict' : category })])
       expect(state.manifest).not.toBeNull()
     }, 20000)
 })

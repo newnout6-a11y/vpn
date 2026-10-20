@@ -22,6 +22,7 @@ import { FIREWALL_STATUS_PS, parseFirewallStatusSnapshot, matchesFirewallPolicy 
 import { type WfpIpv6Policy, wfpPrelude, validateWfpIpv6Policy, prepareWfpIpv6Policy, prepareWfpIpv6Exceptions, applyWfpIpv6Policy, verifyWfpIpv6Policy, removeWfpIpv6Protection, hasWfpIpv6Protection, sameWfpCoreScopes, reserveWfpIpv6Priority } from './wfpIpv6'
 
 const execFile = promisify(execFileCb)
+class RejectedFirewallRecord extends IpcFault { constructor() { super('internal') } }
 
 function classifyFirewallError(error: unknown): IpcErrorCategory {
   if (error instanceof AggregateError) {
@@ -33,7 +34,7 @@ function classifyFirewallError(error: unknown): IpcErrorCategory {
 }
 function firewallFailure(error: unknown, message: string): FirewallKillSwitchResult {
   const failure = ipcError(classifyFirewallError(error))
-  const rejected = error instanceof AggregateError && error.errors.some(item => item instanceof IpcFault && item.category === 'validation')
+  const rejected = error instanceof AggregateError && error.errors.some(item => item instanceof RejectedFirewallRecord)
   return { success: false, error: failure, message, details: failure.message + (rejected ? '. Повреждённые записи пропущены (skipped); журнал сохранён.' : '') }
 }
 
@@ -47,8 +48,36 @@ function Get-VpnteFirewallErrorCategory($failure) {
     if ($exception.Message.StartsWith('IPv6 WFP priority conflict: ')) { return 'conflict' }
   }
   return 'internal'
+}
+function Write-VpnteFirewallFailureDiagnostic($failure, [string]$step = 'native') {
+  $inner = $failure.Exception
+  while ($null -ne $inner.InnerException) { $inner = $inner.InnerException }
+  $nativeCode = $null
+  if ($inner -is [ComponentModel.Win32Exception]) { $nativeCode = $inner.NativeErrorCode }
+  Write-Output ('VPNTE_FW_DIAGNOSTIC:' + ([pscustomobject]@{
+    step = $step; category = (Get-VpnteFirewallErrorCategory $failure)
+    exceptionType = $inner.GetType().FullName; hresult = $inner.HResult
+    nativeCode = $nativeCode; command = [string]$failure.InvocationInfo.MyCommand.Name
+  } | ConvertTo-Json -Compress))
 }`
+function logFirewallFailureDiagnostics(stdout: string): void {
+  let count = 0
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.startsWith('VPNTE_FW_DIAGNOSTIC:') || line.length > 1024 || count >= 8) continue
+    try {
+      const data = JSON.parse(line.slice('VPNTE_FW_DIAGNOSTIC:'.length))
+      if (!data || !/^(?:native|rules|profile\/(?:Domain|Private|Public))$/.test(data.step) || !['permission', 'internal', 'conflict'].includes(data.category)) continue
+      const diagnostic: Record<string, string | number> = { step: data.step, category: data.category }
+      if (typeof data.exceptionType === 'string' && /^[A-Za-z][A-Za-z0-9_.]{0,127}$/.test(data.exceptionType)) diagnostic.exceptionType = data.exceptionType
+      if (typeof data.command === 'string' && /^(?:(?:Set|Get)-NetFirewallProfile|(?:New|Remove|Get)-VpnteFirewall(?:Rules?|RuleNames))$/.test(data.command)) diagnostic.command = data.command
+      for (const field of ['hresult', 'nativeCode']) if (Number.isSafeInteger(data[field]) && data[field] >= -2147483648 && data[field] <= 4294967295) diagnostic[field] = data[field]
+      logEvent('warn', 'firewall-killswitch', 'native failure diagnostic', diagnostic)
+      count++
+    } catch { /* Diagnostics never establish or invalidate security proof. */ }
+  }
+}
 function checkFirewallFailureReport(stdout: string): void {
+  logFirewallFailureDiagnostics(stdout)
   const reports = stdout.split(/\r?\n/).map(line => line.trim()).filter(line => line.startsWith('VPNTE_FW_FAILURE:'))
   if (!reports.length) return
   const category = reports.length === 1 ? reports[0].slice('VPNTE_FW_FAILURE:'.length) : ''
@@ -230,7 +259,7 @@ async function ps(script: string, elevated = false, timeout = 30000, policy: Ele
   // Keep the loader first; wrap only the caller body, without relaxing policy.
   const trustedLoader = policy === 'wfp-ipv6' ? await wfpPrelude() : ''
   const loader = script.startsWith(trustedLoader) ? trustedLoader : ''
-  script = `${loader}${FIREWALL_ERROR_CATEGORY_PS}\ntry {\n${script.slice(loader.length)}\n} catch { Write-Output ('VPNTE_FW_FAILURE:' + (Get-VpnteFirewallErrorCategory $_)) }`
+  script = `${loader}${FIREWALL_ERROR_CATEGORY_PS}\ntry {\n${script.slice(loader.length)}\n} catch { Write-VpnteFirewallFailureDiagnostic $_; Write-Output ('VPNTE_FW_FAILURE:' + (Get-VpnteFirewallErrorCategory $_)) }`
   // The persistent helper executes source from its pipe. A protected .ps1 is
   // needed only by the fallback; writing it first adds two cold PS launches.
   if (isElevatedPsHelperRunning()) {
@@ -241,7 +270,10 @@ async function ps(script: string, elevated = false, timeout = 30000, policy: Ele
     } catch (err: any) {
       // Only a known rejection before execution permits a fallback. A timeout
       // or lost reply may follow effects; replaying would duplicate mutation.
-      if (!['elevated-helper-script-rejected', 'elevated-helper-script-too-large', 'elevated-helper-unavailable'].includes(err?.code)) throw new IpcFault(classifyRecoveryError(err))
+      if (!['elevated-helper-script-rejected', 'elevated-helper-script-too-large', 'elevated-helper-unavailable'].includes(err?.code)) {
+        logEvent('warn', 'firewall-killswitch', 'helper command rejected', { policy, category: classifyRecoveryError(err), code: err?.code })
+        throw new IpcFault(classifyRecoveryError(err))
+      }
       logEvent('debug', 'firewall-killswitch', 'helper fallback', {
         code: err?.code ?? 'unclassified', durationMs: Math.round(performance.now() - started)
       })
@@ -251,7 +283,10 @@ async function ps(script: string, elevated = false, timeout = 30000, policy: Ele
         transport: 'helper', ruleBackend, durationMs: Math.round(performance.now() - started)
       })
       checkFirewallFailureReport(result.stdout)
-      if (result.exitCode) throw new IpcFault('internal')
+      if (result.exitCode) {
+        logEvent('warn', 'firewall-killswitch', 'native helper command failed', { policy, exitCode: result.exitCode })
+        throw new IpcFault('internal')
+      }
       logNativeFirewallTimings(result.stdout)
       return { stdout: result.stdout, stderr: result.stderr }
     }
@@ -294,6 +329,7 @@ async function ps(script: string, elevated = false, timeout = 30000, policy: Ele
       stderr: String(result.stderr ?? '')
     }
   } catch (error) {
+    logEvent('warn', 'firewall-killswitch', 'native file command failed', { policy, category: classifyRecoveryError(error), error })
     throw new IpcFault(classifyRecoveryError(error))
   } finally {
     logEvent('debug', 'firewall-killswitch', 'command timing', {
@@ -1054,9 +1090,9 @@ async function restoreAndCleanup(snapshot?: FirewallManifest, operationId?: stri
 try {
   Set-NetFirewallProfile -Profile ${psSingleQuote(p.name)} -DefaultOutboundAction ${p.defaultOutbound} -ErrorAction Stop
   if ([string](Get-NetFirewallProfile -Profile ${psSingleQuote(p.name)} -ErrorAction Stop).DefaultOutboundAction -ne ${psSingleQuote(p.defaultOutbound)}) { throw 'Policy read-back mismatch' }
-} catch { $errors += $_ }
+} catch { Write-VpnteFirewallFailureDiagnostic $_ ${psSingleQuote('profile/' + p.name)}; $errors += $_ }
 `).join('\n')
-  const failures: unknown[] = recovery.rejected.map(() => new IpcFault('validation'))
+  const failures: unknown[] = recovery.rejected.map(() => new RejectedFirewallRecord())
   for (const error of recovery.rejected) logEvent('error', 'firewall-killswitch', 'firewall rollback step rejected', { operationId, success: false, error })
   if (recovery.rejected.length) reportRecoveryWarning('Часть записей отката firewall повреждена и пропущена. Исправные записи восстанавливаются; файл сохранён для повторной проверки.')
   try {
@@ -1069,7 +1105,7 @@ $nativePhaseWatch.Restart()
 try {
   Remove-VpnteFirewallRules -DisplayName '${RULE_PREFIX}*' -ErrorAction Stop
   if ((Get-VpnteFirewallRuleNames -DisplayName '${RULE_PREFIX}*' -ErrorAction Stop | Measure-Object).Count -ne 0) { throw 'VPNTE rules remain' }
-} catch { $errors += $_ }
+} catch { Write-VpnteFirewallFailureDiagnostic $_ 'rules'; $errors += $_ }
 Write-Output ('VPNTE_FW_TIMING:restore-remove-rules:' + $nativePhaseWatch.ElapsedMilliseconds)
 if ($errors.Count -gt 0) {
   if (@($errors | Where-Object { (Get-VpnteFirewallErrorCategory $_) -eq 'permission' }).Count) { throw [UnauthorizedAccessException]::new('Firewall rollback denied') }
@@ -1187,7 +1223,11 @@ export async function reserveKillSwitchIpv6Priority(signal: AbortSignal): Promis
     signal.throwIfAborted()
     try { await reserveWfpIpv6Priority(wfpRun) }
     catch (err: any) {
-      if (classifyFirewallError(err) === 'conflict') throw new IpcFault('conflict')
+      if (classifyFirewallError(err) === 'conflict') {
+        const fault = new IpcFault('conflict')
+        fault.message = 'Конфликт IPv6-фильтров WFP: остановите TUN/VPN другого приложения и повторите подключение'
+        throw fault
+      }
       throw err
     }
     signal.throwIfAborted()
