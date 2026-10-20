@@ -165,7 +165,9 @@ afterEach(async () => {
   await rm(state.dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 })
 })
 
-describe('VPN key operation lifetime', () => {
+// Real Windows creation/identity and ACL preparation have two 15s child budgets.
+// Responsiveness is asserted separately around cancellation, after preparation.
+describe('VPN key operation lifetime', { timeout: 45_000 }, () => {
   // AT-00-001/003: a SPA page knows its token before the native consent opens.
   it.each(channels)('cancels %s by requester token without disclosure or late effects', async channel => {
     const token = '11111111-1111-4111-8111-111111111111'
@@ -265,7 +267,7 @@ describe('VPN key operation lifetime', () => {
     gate.release(); await registry.close()
     expect(readFileSync(destination, 'utf8')).toBe('previous export'); expect(temporaries()).toEqual([])
     expect(state.handles.every(file => file.closed)).toBe(true)
-  }, 45_000)
+  })
   it.each(files)('maps native file errors without exposing paths/secrets: %s', async channel => {
     state.writeFailure = Object.assign(new Error('C:\\private\\' + secret + '\n at private stack'), { code: 'EACCES' })
     const result = await invokeExport(channel)
@@ -295,7 +297,7 @@ describe('VPN key operation lifetime', () => {
     expect(success).toMatchObject({ correlationId: result.correlationId, details: { total: 2, exported: 1, skipped: 1 } })
     expect(Object.keys(success.details).sort()).toEqual(['exported', 'skipped', 'total'])
     expect(raw).not.toContain(secret)
-  }, 15_000) // Includes real Windows ACL/file preparation, like the native consent fixtures.
+  })
   it('shutdown cancels held native clipboard write, then removes only the drained secret', async () => {
     const gate = held(undefined); state.clipboardWrite.mockReturnValueOnce(gate.promise)
     const run = invoke('servers:copy-key', 'a')
@@ -341,7 +343,7 @@ describe('VPN key operation lifetime', () => {
     vi.useRealTimers(); gate.release()
     expect(await run).toMatchObject({ ok: true, result: { ok: true } })
     expect(sender.listenerCount('destroyed')).toBe(0)
-  }, 15_000) // Native private-file preparation follows the simulated user wait.
+  })
   it('still times out actual native clipboard work and drains before cleanup', async () => {
     const gate = held(undefined); state.clipboardWrite.mockReturnValueOnce(gate.promise)
     vi.useFakeTimers()

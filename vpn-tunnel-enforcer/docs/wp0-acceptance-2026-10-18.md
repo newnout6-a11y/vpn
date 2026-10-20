@@ -1,13 +1,48 @@
-# WP-0: контракты и наблюдаемость — 18.10.2026
+# WP-0: контракты и наблюдаемость — итоговая приёмка 20.10.2026
 
-Статус: **в работе**. Основание: том 3 §1.1–1.2, ТЗ-06 WP-0
-и решения владельца §10, AT-00-001…010. WP-3 завершён в PR #46;
-его L3 `SKIPPED_BY_OWNER` не распространяется на WP-0.
-Qodo и Revix работают совместно по уточнению владельца 19.10: пока у Revix
-есть квота, учитывать оба ревью на окончательном SHA. Qodo ранее назначен
-главным; завершённый Qodo не заменяет разбор Needs changes от Revix.
-CodeRabbit исключён из ожидания; окончание trial Greptile не блокирует работу.
-CI и review обязательны.
+Статус: **завершён** по AT-00-001…010 (уровни L0–L2). Эта итоговая запись
+применяется при слиянии завершающего PR после автоматического completed Qodo
+и успешного CI его окончательного коммита. WP-2 — следующий пакет, не начат.
+Основание: том 3 §1.1–1.2, ТЗ-06 WP-0 и решения владельца §10.
+Находки: F-019, F-021, F-074, F-138, F-143.
+
+Qodo — главный ревьюер; Revix учитывается при доступной квоте. Отсутствие
+полного Revix по квоте не считается approval. CodeRabbit исключён владельцем.
+История первоначальных FAIL, повторных прогонов и исправлений сохранена ниже
+и в progress.md; старая промежуточная инвентаризация заменена итоговой матрицей.
+
+## Итоговая приёмка AT-00-001…010
+
+Матрица относится к проверенному production main/preload/renderer и уровням L0–L2, указанным в самих AT. Команды и исходные результаты приведены в журнале ниже. Трассировка AC927/F210 подтверждает только привязки требований.
+
+| AT | Уровень / итог | Проверяемое доказательство |
+| --- | --- | --- |
+| AT-00-001 | L0 / PASS | [check-ipc-contract.mjs](../scripts/check-ipc-contract.mjs) и [ipcChannelContract](../src/main/ipcChannelContract.test.ts)/[ipcContractAcceptance](../src/main/ipcContractAcceptance.test.ts): точный паритет 165 main/preload/shared каналов, runtime input schemas, versioned envelopes, TypeScript проверяет 165 listener results с 0 public any. Native production contextBridge подтверждает сериализацию и локализацию. |
+| AT-00-002 | L2 / PASS | [connectionModelTours](../src/main/connectionModelTours.test.ts) и [tunnelStateMachine](../src/main/tunnelStateMachine.test.ts): 117649 туров семи событий глубиной 6, seed 0x5eed002; rejected events не меняют snapshot, реальные lane/FSM согласованы с fake PID/TUN ledger и независимым счётчиком принятых операций. Sticky faults и generation fences проверены отдельно. |
+| AT-00-003 | L2 / PASS | [connectionOperations](../src/main/connectionOperations.test.ts)/[connectionStopDeadline](../src/main/connectionStopDeadline.test.ts), [speedTestOperations](../src/main/speedTestOperations.test.ts), [subscriptionOperations](../src/main/subscriptionOperations.test.ts)/[profileImportOperations](../src/main/profileImportOperations.test.ts), [configOperations](../src/main/configOperations.test.ts)/[serverKeyOperations](../src/main/serverKeyOperations.test.ts)/[diagnosticsExportOperations](../src/main/diagnosticsExportOperations.test.ts), [rotationOperations](../src/main/rotationOperations.test.ts) и requester-lifetime fixtures: cancel/deadline, поздние callbacks, retained physical drain, отсутствие поздних commits/history. Connect — 10/50/90%; speed — 10/50/90/100%; остальные — управляемые стадии реальных handlers. Native contextBridge подтверждает prompt cancellation <900ms. |
+| AT-00-004 | L2 / PASS | [ipcContractAcceptance](../src/main/ipcContractAcceptance.test.ts): каждый privileged канал × 7 категорий, стабильный canonical code/category и отсутствие raw stack/path. Реальные feature handlers имеют отдельные semantic error matrices (config, import/refresh/export, rotation/adaptive, privacy/maintenance и network probes). [shared/ipc-result](../src/shared/ipc-result.ts) документирует коды; native en/ru bridge сохраняет типы и correlation. |
+| AT-00-005 | L2 / PASS | [connectionHistoryStorage](../src/main/connectionHistoryStorage.test.ts), [appLoggerIntegrity](../src/main/appLoggerIntegrity.test.ts) и [appLoggerRedaction](../src/main/appLoggerRedaction.test.ts), [actionCorrelation](../src/main/actionCorrelation.test.ts), [backgroundActionCorrelation](../src/main/backgroundActionCorrelation.test.ts)/[schedulerActionCorrelation](../src/main/schedulerActionCorrelation.test.ts) и [startupStoreMigrations.logging](../src/main/startupStoreMigrations.logging.test.ts): actual Conf/JSONL, action ID через IPC/events/history/diagnostic redaction, монотонный порядок, source/owner/route/confidence, отсутствие секретов и различимость двух запусков. |
+| AT-00-006 | L1 / PASS | [storeSchemaStorage](../src/main/storeSchemaStorage.test.ts), [storeSchemaInventory](../src/main/storeSchemaInventory.test.ts), [storeSchemaElectron](../src/main/storeSchemaElectron.test.ts), [storeMigrations](../src/main/storeMigrations.test.ts)/[startupStoreMigrations](../src/main/startupStoreMigrations.test.ts), [liveServerHistory.integrity](../src/main/liveServerHistory.integrity.test.ts) и [documentSchemaStorage](../src/main/documentSchemaStorage.test.ts): 20 electron-store stores, live-history и 5 application-owned JSON formats. Real legacy fixtures, ordered registered migrations/repairs, encrypted exact backups/checksums/readback; future/invalid schema — typed refusal и неизменный SHA-256. Settings/picker 0/1→2; groups сохраняет released version0; форматы без изменения схемы не получают вымышленных миграций. |
+| AT-00-007 | L2 / PASS | [tunnelStateMachine](../src/main/tunnelStateMachine.test.ts): 200 seeded команд от 10 async workers, seed 0x5eed003, typed losers, парные started/terminal events, финальное состояние disconnected и 0 ресурсов в fake PID/TUN registry. Native bridge отдельно проверяет удержание admission до cleanup/drain. |
+| AT-00-008 | L2 / PASS | [Dashboard.cancel](../src/renderer/pages/Dashboard.cancel.test.tsx) и renderer store/App lifecycle: кадры настоящего status component с production FSM/lane, progress до подтверждения connected, blocked/error/unknown и stale revision fences. Native production snapshots проходят contextBridge и правильно освобождают listeners. |
+| AT-00-009 | L0/L2 / PASS | [plannedFeatures](../src/main/plannedFeatures.test.ts), [Sidebar.plannedFeatures](../src/renderer/components/Sidebar.plannedFeatures.test.tsx) и native Electron: четыре production flags off/null, DOM не содержит planned controls в normal/advanced, forged flags не дают доступа; activation без lab evidence отклоняется и сохраняет correlated audit. |
+| AT-00-010 | L2 / PASS | [connectionHistoryStorage](../src/main/connectionHistoryStorage.test.ts), [appLoggerIntegrity](../src/main/appLoggerIntegrity.test.ts) и [liveServerHistory.integrity](../src/main/liveServerHistory.integrity.test.ts): реальные файлы со 100 событиями, truncated/garbage/schema damage, restart, history.corrupted, сохранение доступных валидных записей/backup и последующая успешная запись. |
+
+PID/TUN в модельных сценариях — управляемые фикстуры. Эта приёмка не удостоверяет натурную изоляцию трафика, реальный cleanup Windows ресурсов, packet oracle или OS-матрицу WP-2/WP-3. L3 WP-3 имеет отдельный статус SKIPPED_BY_OWNER; его статус не переносится на WP-0. Плановые функции и их собственная лабораторная приёмка остаются в WP-12. Старые записи ниже — история выполнения, включая FAIL и interrupted.
+
+
+## Итоговые проверки
+
+PR #112: полный `npm.cmd test -- --maxWorkers=1` —5760 passed,5 skipped,0 failed (382.20s). `npm.cmd run typecheck` —165 channels/0 public any; `npm.cmd run build` —exit0; `node scripts/test-electron-runtime.mjs` —9 PASS; `python docs/04-приёмочные-тесты/traceability/check-coverage.py` —AC927/927,F210/210,exit0.
+
+PR #112 слит20.10.2026 в18:19:32UTC: reviewed head243ef56f8568f419f9ae9395d09373ac19320885,merge898db00499ee456d1ce623c750107e2d6aba53fc. Tree c31131d7877be2c359abe5bbac137efb3562a2a8 совпал у reviewed head/main. CI39472416208 success (Windows/Rust/site). Automatic Qodo1571090 completed на243ef56f8568f419f9ae9395d09373ac19320885: новых findings нет; env cleanup и owned capture stop автоматически implemented. Старое finding ed09166b-e008-4b59-971a-73f2527ac6d8 остаётся pending. Проверка кода/регрессий: git.isApplied уже читает фактический proxy после corrupt/unreadable backup. Второй пункт карточки — запрет apply с нечитаемым baseline — намеренная fail-closed политика, явно объяснённая в source/PR и проверенная actual file fixtures: файл сохранён, native changes отсутствуют. Подмена baseline уничтожила бы возможность безопасного отката; поэтому этот оставшийся пункт не принят как дефект. Attribution вручную не менялся; completed review не называется автоматическим одобрением этой карточки. Revix free-quota-reached до21.10 00:00UTC/03:00МСК, summary не full review/approval.
+
+Завершающий участок удаляет только8 tracked файлов старого diag/ по принятому решению §10.7. Ссылок из production src/scripts/resources/package/build/workflows нет (codebase search и rg). Скрипты diag не выполнялись; удаление исходников не подтверждает очистку старых Scheduled Tasks, diag-runtime или логов на компьютере.
+
+Завершающая ветка: `npm.cmd test -- --maxWorkers=1` —5760 passed,5 skipped,0 failed;316 passed/2 skipped suites,367.64s,exit0 (`.tmp/wp0-final-acceptance-full-final.log`,EXIT_CODE=0). `npm.cmd test -- src/main/serverKeyOperations.test.ts --maxWorkers=1` —57/57,53.25s,exit0. `npm.cmd run typecheck` —165 channels/0 public any,exit0 (`.tmp/wp0-final-acceptance-typecheck-final.log`). `python docs/04-приёмочные-тесты/traceability/check-coverage.py` —AC927/927,F210/210,exit0; `git diff --check` —exit0. Source/test tree во время final full не менялся. Runtime source/scripts/resources/package/workflows совпадают с reviewed #112; build и9 native Electron PASS от него остаются применимыми. 37 относительных ссылок итоговой матрицы проверены —missing0. Root normative docs/ неизменны. Удалена только карточка старого merged PR #14 для освобождения лимита100 (GitHub state MERGED,mergedAt02.10.2026); сам PR не менялся. После push обязательны completed automatic Qodo и success CI окончательного коммита; эта запись не утверждает их заранее.
+
+## История реализации и проверок
+
 18.10 владелец разрешил продолжать WP-0 при открытом PR #54, сохраняя запрет
 его слияния до отдельного решения. Полного Revix для #54 не было из-за квоты.
 Позднее 18.10 владелец разрешил сливать PR после пройденных проверок.
@@ -34,23 +69,6 @@ findings, CI 39220632906 success (Windows/Rust/site). Старый CI 4ae7ab9 и
 findings, CI 39227466851 success. Оба замечания первого Qodo воспроизведены и
 исправлены. Revix full review по квоте отсутствует; это не approval.
 
-## Полная область и первоначальная инвентаризация
-
-| AT | Найденная реализация / доказательства | Остаток до приёмки |
-| --- | --- | --- |
-| 00-001 | AST-проверка 164 main/preload/shared request channels, общий реестр входов и versioned transport envelope; object contracts проверяют поля/массивы, save-settings покрывает все 39 общих полей AppSettings; TypeScript checker проверяет results всех 164 listeners, public results с `any` больше нет; native contextBridge сохраняет JSON профиля и nullable active result, feature list/cancel, speed-test/config request cancel, planned-feature admission | Завершить проверку текущего PR; отдельная semantic matrix ошибок остаётся в 00-004 |
-| 00-002 | Production TunnelStateMachine интегрирована в main lane/IPC/Soft/tray/UI; 4096 stable tours и 117649 tours семи событий глубиной 6, включая timeout/cancel и native completion, с fake PID/TUN ledger и балансом operation events; sticky faults и generation fencing | Общая durable operation history/counters; все blocked/unknown/background paths; native Windows resources; общий admission фоновых restart |
-| 00-003 | Main connection lane: UUIDv4, owner, deadline запуска и остановки (#73), priority admission; ручные Hard/Direct и Soft из tray, scheduled startup вместе с proxy detection; общий feature registry с prompt cancellation/deadline и physical drain, speed test, refresh подписок и импорт профилей, включая curl/DoH и commit queue; config browse/validate/apply/export, async file I/O и terminal commit приняты в PR #70/#74; key renderer/clipboard/file exports в PR #71; rotation IPC/timer с native drain и retained evidence в PR #72; document loss #78, config unmount в текущем участке | Review/CI текущего участка; прочие UI/background entrypoints и полная матрица поздних эффектов |
-| 00-004 | Общая классификация transport; 157 каналов × 7 категорий через guard; native contextBridge сохраняет code/category/correlation в en/ru; typed local validation; 4 настоящих config handlers × 7 категорий, canonical domain failures | Миграция legacy domain-result `{success:false,error}` и semantic matrix настоящих feature handlers; transport fixtures не доказывают её |
-| 00-005 | Один action correlation id в guarded IPC response/error, lifecycle connect/stop и JSONL logger; async isolation, native wait/drain, diagnostic read-back с повторной redaction; ID исходного connect и source/owner/route/confidence в session history/JSON/CSV; JSONL clockId/monotonicMs отдельно от календарных дат и durationMs; реальные owned/legacy/tray/recovery Soft sessions | Все native/background entrypoints и полная матрица событий/истории автоматизаций, live-check и recovery |
-| 00-006 | Общий version admission для 20 electron-store файлов / 28 constructors; future-version SHA-256 invariance до defaults/repair и при записи через открытый handle; центральный registry safeStorage трёх stores, real Conf historical fixtures, exact encrypted backups, checksums/history, actual Electron DPAPI/restart/JSONL; #77 принят после Qodo/CI | Startup миграции/классификация между stores, остальные persisted JSON, полноценный upgrade/downgrade и межпроцессная координация |
-| 00-007 | Seed 0x5eed003: 200 commands/10 async workers с production lane/FSM, typed losers, парные terminal events, финальный disconnect и 0 fake PID/TUN | Натурный PID-реестр Windows и полная матрица фоновых entrypoints |
-| 00-008 | Dashboard component frames с production FSM/lane; revision fence; Soft через owned IPC; visual fixtures light/dark; native production contextBridge snapshots/disposer | Полная матрица всех операций, тем, размеров и entrypoints; browser fixtures не заменяют native resources |
-| 00-009 | Release registry четырёх функций off/null; production main/preload status/activation gate; schema reject fake evidence; production Sidebar/Settings DOM без planned controls в обычном/advanced режиме с forged flags; настоящий Electron проверяет четыре refusal и persisted JSONL audit/correlation; #76 принят после full/Qodo/CI | Адресная приёмка release admission завершена; реализация и собственная лабораторная приёмка WP-12 остаются отдельным пакетом |
-| 00-010 | История подключений: настоящий Conf backend, 100 записей, повторная загрузка, повреждённый JSON/схема, `history.corrupted`, сохранение валидных записей и последующая запись; текущий участок переносит проверку на существующие app.log/app.prev.log | Общий audit/event history: final full/build и собственный Qodo/CI текущего участка; это не полная матрица всех producers |
-
-Это перечень обнаруженного, а не PASS десяти AT. Ни один новый
-неиспользуемый модуль сам по себе не закрывает критерий интеграции.
 
 ## Общий audit/event history: целостность JSONL (19.10.2026)
 
@@ -2639,3 +2657,9 @@ Corrupt/unreadable Git backup по-прежнему блокирует apply и 
 
 
 Final после CI fixture budget: npm.cmd test -- --maxWorkers=1 —5760 passed/5 skipped/0 failed,316 passed/2 skipped suites,382.20s,exit0 (.tmp/wp0-document-schema-qodo-full-final.log,EXIT_CODE=0). Source/test tree неизменен во время прогона. npm.cmd run typecheck —165 channels/0 public any,exit0 (.tmp/wp0-document-schema-qodo-typecheck-final.log). python docs/04-приёмочные-тесты/traceability/check-coverage.py —AC927/927,F210/210,exit0; git diff --check —exit0. Build/native9 PASS выполнены на окончательном production source,после них менялись только test expectations/budgets и поясняющий comment. После push требуются новый automatic completed Qodo и success CI exact head.
+
+
+Первый full завершающей ветки npm.cmd test -- --maxWorkers=1 —1 failed/5759 passed/5 skipped,315 passed/1 failed/2 skipped suites,386.94s,exit1 (.tmp/wp0-final-acceptance-full.log). Единственный failure serverKeyOperations: EBUSY file export diagnostic case outer5000ms,фактически12180ms. До fault injection выполняются реальные createPrivateConfigExport/prepareConfigExport (два child calls по15s),поэтому5s не соответствует native fixture. Suite-only outer45s согласован для всех key operation fixtures; прежние локальные15s overrides убраны. Production budgets и отдельные <900ms cancellation assertions неизменны. Новых behavior tests не требуется: это согласование test runner budget существующих native fixtures. После patch обязательны focused/full/typecheck.
+
+
+После suite budget fix npm.cmd test -- src/main/serverKeyOperations.test.ts --maxWorkers=1 —57/57,53.25s,exit0 (.tmp/wp0-final-acceptance-key-focused.log). npm.cmd run typecheck —165 channels/0 public any,exit0 (.tmp/wp0-final-acceptance-typecheck-final.log). Coverage AC927/927,F210/210 и diff exit0. Final full запущен в .tmp/wp0-final-acceptance-full-final.log; source/test tree после старта неизменен.
