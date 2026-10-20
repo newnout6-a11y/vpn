@@ -3,12 +3,29 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, fireEvent, screen, waitFor, cleanup, act, within } from '@testing-library/react'
 import { LiveServerCheckSection } from './LiveServerCheckSection'
 import type { LiveServerCheck } from '../../shared/ipc-types'
+import { ipcError } from '../../shared/ipc-result'
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (_key: string, fallback?: string) => fallback || _key })
 }))
 
 afterEach(cleanup)
+
+it.each(['cancelled', 'timeout'] as const)('AT-00-003 / AT-00-004: single check handles typed %s and uses a UUID', async category => {
+  const api = {
+    serverLiveCheckHistory: vi.fn().mockResolvedValue([]),
+    serverLiveCheckCancel: vi.fn(),
+    serverLiveCheck: vi.fn().mockRejectedValue({ name: 'IpcRemoteError', ...ipcError(category) })
+  }
+  window.electronAPI = api as unknown as typeof window.electronAPI
+  render(<LiveServerCheckSection profileId="p1" host="audit.invalid" port={443} />)
+  await act(async () => {})
+  await act(async () => fireEvent.click(screen.getByText('Проверить')))
+  expect(api.serverLiveCheck.mock.calls[0][0].requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+  if (category === 'cancelled') expect(screen.queryByText(ipcError(category).message)).not.toBeInTheDocument()
+  else expect(screen.getAllByText(ipcError(category).message).length).toBeGreaterThan(0)
+  expect(screen.getByText('Проверить')).toBeEnabled()
+})
 
 const makeMockCheck = (id: string, ip: string, extras?: Partial<LiveServerCheck>): LiveServerCheck => ({
   id,

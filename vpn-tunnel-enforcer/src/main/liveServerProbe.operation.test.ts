@@ -189,6 +189,25 @@ it.each([
   await flush(); expect(replacement.error).toBeUndefined(); expect(state.a).toHaveBeenCalledTimes(count + 2)
   await cancel({ sender: owner }, 'legacy-0'); await drainFixtures()
 })
+it.each([false, true].flatMap(batch => ['destroyed', 'did-navigate', 'render-process-gone'].map(event => ({ batch, event }))))(
+  'cancels only the requesting document and fences late progress (batch=$batch, $event)', async ({ batch, event }) => {
+    registerLiveServerProbeIpcHandlers()
+    const gate = held<Array<{ address: string; ttl: number }>>([]); state.a.mockReturnValue(gate.promise)
+    state.profiles = [{ id: 'target', server: 'probe.example', port: 80 }]
+    const sender = Object.assign(new EventEmitter(), { id: 601, isDestroyed: () => false, send: vi.fn() })
+    const run = state.handlers.get(batch ? 'server:live-check-batch' : 'server:live-check')!
+    const result = observe(run({ sender }, { requestId: 'legacy-document', host: 'probe.example', port: 80, profileIds: ['target'], mode: 'basic' }))
+    await flush(); sender.emit(event); await flush()
+    expect(result.settled).toBe(true)
+    if (batch) expect(result.value).toMatchObject({ cancelled: true, errors: [] })
+    else expect(result.error).toMatchObject({ category: 'cancelled' })
+    const notifications = sender.send.mock.calls.length
+    gate.release([]); await drainFixtures()
+    expect(sender.send).toHaveBeenCalledTimes(notifications)
+    expect(state.sockets).toHaveLength(0); expect(state.save).not.toHaveBeenCalled()
+    for (const name of ['destroyed', 'did-navigate', 'render-process-gone']) expect(sender.listenerCount(name)).toBe(0)
+  }
+)
 it.each([false, true])('does not cache a late ASN response after cancellation (fallback=%s)', async fallback => {
   const gate = held({ data: { asn: 'AS123', country: 'late' } }), controller = new AbortController()
   if (fallback) state.geo.mockRejectedValueOnce(new Error('primary failed'))

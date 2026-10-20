@@ -7090,3 +7090,74 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-live-owner-qodo-full.log). Source/test tree не менялся во время full.
   Targeted145/145,integration37/37,coverage AC927/927,F210/210,diff0.
   Старый CI39356680659 на8e57b56 success;новый head требует своих CI/review.
+
+### PR #93 принят; document/batch lifetime (20.10.2026)
+
+- Final reviewed head28540de6d7dde19e4730d30163fa177d114173e8,
+  tree8f2d463a95861fe7da73e11e0fd20da7f44fdca4. Qodo1559138 completed на этом
+  SHA:оба findings автоматически implemented,новых/pending нет,attribution
+  не менялся. Final snapshot .tmp/qodo93-final.json.
+- Revix118417529584 completed/neutral,Low risk;единственное замечание —вопрос
+  о rejection handling. Production single renderer catch(L168) обрабатывает
+  rejected IPC;manual cancel меняет generation до cancel(L183),поздняя ошибка
+  игнорируется. Batch renderer catch(L90) и main catch(L3671) также есть.
+  Это подтверждено чтением кода;дополнительный существующий UI+IPC набор:
+  npm.cmd test -- src/renderer/components/LiveServerCheckSection.test.tsx
+  src/renderer/components/LiveServerUiRegression.test.tsx src/shared/ipc-result.test.ts
+  —37/37,2.82s,exit0 (.tmp/wp0-live-owner-renderer-review.log). Он не заявлен
+  как отдельный новый typed-rejection E2E сценарий. Подтверждённого issue нет.
+- CI39358091824 success на exact SHA:Windows full/live integration/traceability/
+  real contextBridge+CSP/native IPv6 WFP/Electron,Rust/site прошли.
+  Local final:build/typecheck165/0any,full5020 passed/5 skipped/0 failed,
+  440.20s,targeted145/145,integration37/37,coverage927/927,210/210,diff0.
+- #93 MERGED20.10.2026 02:24:56UTC;main d96af0a20e8d84869d5e067c222b2c41f15b1bd8.
+  git diff --exit-code28540de vpn/main exit0;reviewed/main tree совпал.
+- Следующий slice —codex/wp0-live-document-lifetime:reload/crash main document,
+  batch token до IPC и generation/sequence/unmount guards. OperationLease.drained
+  и admission observer уже доступны,повторно вводить их не требуется.
+  Live history provenance/corruption и прочие producers остаются в WP-0;
+  WP-2 не начат,нормативные docs/ не менялись.
+
+### WP-0 — lifetime документа и batch UI (20.10.2026)
+
+- Single/batch IPC используют requestDocumentLifetime: destroyed, main-frame
+  did-navigate и render-process-gone отменяют только запрос владельца. Admission
+  и listeners удерживаются до физического drain. Batch cancellation не становится
+  ошибкой профиля; поздний result/progress не добавляется после abort.
+- Batch UI создаёт UUID до IPC, показывает подготовку и отмену до первого progress,
+  проверяет requestId/sequence/generation, инвалидирует старые ответы/errors/finally
+  на cancel/hide/unmount. Reopen изолирован от прежней подписки. Single UI также
+  использует UUID; canonical IPC_CANCELLED обрабатывается тихо, timeout виден.
+- Baseline main: 5 failed/16 passed (.tmp/wp0-live-document-red.log); batch UI:
+  7 failed/1 passed (.tmp/wp0-live-batch-ui-red.log). Single UUID:2 failed/8 passed
+  (.tmp/wp0-live-single-ui-red.log). Первый объединённый прогон:62 passed/1 failed
+  из-за двукратного отображения timeout в существующем UI; исправлен matcher теста.
+- npm.cmd test -- src/renderer/components/LiveServerBatchComparison.test.tsx
+  src/renderer/components/LiveServerUiRegression.test.tsx
+  src/renderer/components/LiveServerCheckSection.test.tsx
+  src/main/liveServerProbe.operation.test.ts src/main/liveServerAuditRegression.test.ts
+  src/main/requestDocumentLifetime.test.ts —64/64,6 suites,8.60s,exit0
+  (.tmp/wp0-live-document-ui-targeted.log). Traceability:AT-00-003/004.
+- npm.cmd run build —exit0,typecheck165 channels/0 public any
+  (.tmp/wp0-live-document-build.log). npm.cmd test -- --mode integration
+  src/main/liveServerProbe.handshakeDrain.itest.ts
+  src/main/keyHealthChecker.transportDrain.itest.ts —37/37,2.08s,exit0
+  (.tmp/wp0-live-document-integration.log).
+- Playwright CLI/Chromium headed,реальный компонент и production CSS,изолированный
+  mock IPC стенд .tmp/wp0-live-ui:pending до progress,cancel,progress,result,timeout.
+  Light/dark screenshots в output/playwright/wp0-live-*.png просмотрены;отмена
+  возвращает старт без alert,timeout виден. Таблица результата сохраняет прежний
+  горизонтальный scroll. Это renderer fixture,не live network/Electron/L3.
+  Единственный console error —favicon404 стенда. Связанные scripts design-doctrine
+  отсутствуют в установленном skill;использованы реальные project gates/visual QA,
+  численная WCAG/contrast оценка не заявлена. Стенд и browser остановлены.
+- python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py —
+  AC927/927,F210/210,exit0 (проверка трассировки,не выполнения всех AT).
+  Полный npm.cmd test ещё выполняется;commit/push/exact-head review pending.
+  Нормативные docs/ не изменялись;WP-0 в работе,WP-2 не начат.
+
+- Final local: npm.cmd test —5037 passed/5 skipped/0 failed,304 files passed/2 skipped,
+  444.15s,exit0 (.tmp/wp0-live-document-full.log). Build/typecheck165/0any,
+  targeted64/64,integration37/37,coverage927/927,210/210,diff0.
+  Во время full изменены только AT labels в двух tests,без изменения поведения.
+  Commit/PR и exact-head Qodo/Revix/CI —следующий gate.
