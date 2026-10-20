@@ -4,6 +4,8 @@ import { ConnectionLifecycle } from './connectionLifecycle'
 import { OperationRegistry } from './operationRegistry'
 import { TunnelStateMachine } from './tunnelStateMachine'
 import { withCorrelation } from './actionCorrelation'
+import { IPC_ERRORS, IpcFault, type IpcErrorCategory } from '../shared/ipc-result'
+import { connectionFailure } from '../shared/operation'
 
 function held<T>() {
   let resolve!: (value: T) => void
@@ -23,6 +25,30 @@ function harness() {
 }
 
 describe('rotation in the main connection lane', () => {
+  it.each(Object.keys(IPC_ERRORS) as IpcErrorCategory[])('retains returned %s in the lane, FSM and registry (AT-00-004/005)', async category => {
+    const h = harness(), result = { ...connectionFailure(category), newProfile: '' }
+    expect(await h.run(async () => result)).toBe(result)
+    const status = category === 'cancelled' ? 'cancelled' : 'error'
+    expect(h.lane.operation).toMatchObject({ status, category })
+    expect(h.fsm.snapshot.operation).toMatchObject({ status, category })
+    expect(h.registry.list()[0]).toMatchObject({ status, category })
+  })
+
+  it.each(Object.keys(IPC_ERRORS) as IpcErrorCategory[])('retains thrown %s after rotation preflight (AT-00-004/005)', async category => {
+    const h = harness()
+    await expect(h.run(async () => { throw new IpcFault(category) })).rejects.toMatchObject({ category })
+    const status = category === 'cancelled' ? 'cancelled' : 'error'
+    expect(h.lane.operation).toMatchObject({ status, category })
+    expect(h.fsm.snapshot.operation).toMatchObject({ status, category })
+    expect(h.registry.list()[0]).toMatchObject({ status, category })
+  })
+
+  it('does not trust mismatched rotation metadata (AT-00-004)', async () => {
+    const h = harness()
+    await h.run(async () => ({ success: false, code: 'IPC_NETWORK_ERROR', category: 'permission' }))
+    expect(h.lane.operation).toMatchObject({ status: 'error', category: 'internal' })
+  })
+
   it('uses the registry identity and correlation in the real FSM, including idle selection', async () => {
     const h = harness()
     const result = await h.run(async owner => {

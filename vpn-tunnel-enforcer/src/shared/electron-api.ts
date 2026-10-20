@@ -1,5 +1,5 @@
 import type { AppSettings } from './settings'
-import type { ConnectionStartResult, ConnectionStopResult, ManagedOperation } from './operation'
+import type { ConnectionStartResult, ConnectionStopResult, ConnectionRotationResult, ManagedOperation } from './operation'
 import type { TunnelSnapshot } from './tunnel-state'
 import type { PlannedFeatureId, PlannedFeatureStatus } from './planned-features'
 import type { PublicIpInfo } from './publicIp'
@@ -186,7 +186,7 @@ export interface ElectronAPI {
   // Profile Rotation
   rotationGetConfig: () => Promise<RotationConfig>
   rotationSetConfig: (config: Partial<RotationConfig>) => Promise<RotationConfig>
-  rotationRotateNow: () => Promise<{ success: boolean; newProfile: string }>
+  rotationRotateNow: () => Promise<ConnectionRotationResult>
   // Kill-Switch
   killSwitchGetLevel: () => Promise<KillSwitchLevel>
   killSwitchSetLevel: (level: KillSwitchLevel) => Promise<{ success: true; level: KillSwitchLevel }>

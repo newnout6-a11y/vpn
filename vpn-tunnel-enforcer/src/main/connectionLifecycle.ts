@@ -152,13 +152,16 @@ export class ConnectionLifecycle {
       lease.assertActive()
       if (!failed(result)) throw new Error('Rotation completion missing')
       if (!nativeTouched) this.stateMachine?.confirmRetainedRotation(startup.operation.operationId)
-      startup.operation = { ...startup.operation, status: 'error' }
+      const category = connectionFailureCategory(result)
+      startup.operation = { ...startup.operation, status: category === 'cancelled' ? 'cancelled' : 'error', category }
       return result
     } catch (error) {
       if (completed) throw error // registry retains its committed result and diagnoses the throw
       if (!nativeTouched && !startup.terminalPublished) this.stateMachine?.confirmRetainedRotation(startup.operation.operationId)
-      if (!startup.terminalPublished) startup.operation = { ...startup.operation, status: lease.signal.aborted ? 'cancelled' : 'error',
-        category: lease.signal.aborted ? 'cancelled' : 'internal' }
+      if (!startup.terminalPublished) {
+        const category = lease.signal.aborted ? startup.abortCategory ?? 'cancelled' : classifyIpcError(error)
+        startup.operation = { ...startup.operation, status: category === 'cancelled' ? 'cancelled' : 'error', category }
+      }
       throw error
     } finally {
       await Promise.all(effects)

@@ -37,6 +37,7 @@ export function connectionFailure(category: IpcErrorCategory, guidance = ipcErro
 }
 export type ConnectionStartResult = { success: true; error?: never; warning?: string | null; vpnIp?: string | null } | ConnectionFailure | ConnectionOperationRejection
 export type ConnectionStopResult = { success: true; error?: never; warning?: string | null } | ConnectionFailure | ConnectionOperationRejection
+export type ConnectionRotationResult = ({ success: true; error?: never } | ConnectionFailure) & { newProfile: string }
 
 /** Retain the published admission and scheduler codes alongside IPC codes. */
 export function connectionFailureCategory(value: unknown): IpcErrorCategory {

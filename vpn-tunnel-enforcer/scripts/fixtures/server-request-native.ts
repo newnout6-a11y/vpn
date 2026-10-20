@@ -76,7 +76,7 @@ app.whenReady().then(async () => {
       assert.doesNotMatch(JSON.stringify(result), /FAKE-SECRET|\bat |[A-Z]:[\\/]/)
       const operation = operations.list().at(-1)!
       assert.equal(operation.correlationId, result.correlationId)
-      assert.equal(operation.status, 'error'); assert.equal(operation.category, category)
+      assert.equal(operation.status, category === 'cancelled' ? 'cancelled' : 'error'); assert.equal(operation.category, category)
       assert.equal(JSON.stringify(serverPicker.getProfiles()), savedProfiles)
       const groups = await owner.executeJavaScript('window.electronAPI.groupsList()')
       assert.equal(groups.find((item: { id: string }) => item.id === group.id).lastFetchError, ipcError(category).message)

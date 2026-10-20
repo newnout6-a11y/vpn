@@ -218,7 +218,8 @@ export class OperationRegistry {
           return committed.result as T
         }
         if (invalidCommit) { controller.abort(); await Promise.all(effects) }
-        finish('error', classifyIpcError(error))
+        const category = classifyIpcError(error)
+        finish(category === 'cancelled' ? 'cancelled' : 'error', category)
         controller.abort() // Abort sibling network effects on a terminal failure too.
         throw error
       } finally {
