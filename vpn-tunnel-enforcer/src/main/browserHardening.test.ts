@@ -316,7 +316,9 @@ describe('browser hardening error taxonomy', () => {
     const response = await invoke(channel)
     expect(response).toMatchObject({ ok: true, result: { success: false, error: ipcError(category) } })
     safe(response)
-    expect(logEvent).toHaveBeenCalledWith('warn', 'browser-hardening', 'browser hardening step failed', expect.objectContaining({ error }))
+    expect(logEvent).toHaveBeenCalledWith('warn', 'browser-hardening', 'browser hardening step failed', expect.objectContaining({
+      error: expect.objectContaining({ name: error.name, message: error.message, stack: error.stack })
+    }))
     expect(ids.length).toBeGreaterThan(0)
     expect(ids.every(id => id === response.correlationId)).toBe(true)
     if (channel === 'rollback-browser-leak-protection') {
@@ -461,6 +463,61 @@ describe('browser hardening error taxonomy', () => {
     expect(response.result.success).toBe(true)
     expect(response.result).not.toHaveProperty('error')
     safe(response)
+  })
+  it('keeps ordinary absent registry policy probes out of warning logs', async () => {
+    mockExistsSync.mockImplementation((p: string) => p.includes('Google\\Chrome\\User Data'))
+    let installed = false
+    mockExecFile.mockImplementation((_file: string, args: string[], _opts: any, cb: any) => {
+      if (args[0] === 'add') { installed = true; cb(null, { stdout: '', stderr: '' }); return }
+      if (args[0] === 'query' && installed) {
+        cb(null, { stdout: 'WebRtcIPHandlingPolicy    REG_SZ    disable_non_proxied_udp', stderr: '' }); return
+      }
+      cb(Object.assign(new Error('Unable to find the specified registry key or value'), { code: 1 }), null)
+    })
+    expect((await invoke('apply-browser-leak-protection')).result.success).toBe(true)
+    expect(vi.mocked(logEvent).mock.calls.filter(([level]) => level === 'warn' || level === 'error')).toEqual([])
+  })
+  it('preserves non-enumerable Error fields when diagnostics are JSON serialized', async () => {
+    firefox()
+    const error = new Error(raw)
+    mockWriteFile.mockImplementation(async (p: string) => { if (p.endsWith('user.js')) throw error })
+    await invoke('apply-browser-leak-protection')
+    const diagnostic = vi.mocked(logEvent).mock.calls.find(([, , message]) => message === 'browser hardening step failed')![3]
+    expect(JSON.parse(JSON.stringify(diagnostic))).toMatchObject({ step: 'firefox-preferences', error: { name: 'Error', message: raw, stack: error.stack } })
+  })
+  for (const channel of channels) it(`${channel} classifies a real execFile timeout receipt`, async () => {
+    const child = await vi.importActual<typeof import('node:child_process')>('node:child_process')
+    const receipt = await new Promise<Error>((resolve, reject) => {
+      child.execFile(process.execPath, ['-e', 'setTimeout(() => {}, 2000)'], { timeout: 50, windowsHide: true }, error => error ? resolve(error) : reject(new Error('Expected native timeout')))
+    })
+    expect(receipt).toMatchObject({ killed: true, signal: 'SIGTERM' })
+    if (channel === 'apply-browser-leak-protection') mockExistsSync.mockImplementation((p: string) => p.includes('Google\\Chrome\\User Data'))
+    else {
+      mockExistsSync.mockReturnValue(true)
+      mockReadFile.mockResolvedValue(JSON.stringify({ createdAt: 1, registryBackups: [{ key: 'HKCU\\fixture', backupPath: 'C:\\private\\backup.reg' }], fileBackups: [] }))
+    }
+    mockExecFile.mockImplementation((_file: string, args: string[], _opts: any, cb: any) => {
+      if (args[0] === 'add' || args[0] === 'delete') cb(receipt, null)
+      else cb(null, { stdout: '', stderr: '' })
+    })
+    const response = await invoke(channel)
+    expect(response.result.error).toEqual(ipcError('timeout'))
+    safe(response)
+  })
+  it('does not mistake a maxBuffer kill or an unconfirmed termination for a timeout', async () => {
+    mockExistsSync.mockImplementation((p: string) => p.includes('Google\\Chrome\\User Data'))
+    for (const receipt of [
+      Object.assign(new Error(raw), { killed: true, signal: 'SIGTERM', code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }),
+      Object.assign(new Error(raw), { killed: false, signal: 'SIGTERM', code: null })
+    ]) {
+      mockExecFile.mockImplementation((_file: string, args: string[], _opts: any, cb: any) => {
+        if (args[0] === 'add') cb(receipt, null)
+        else cb(null, { stdout: '', stderr: '' })
+      })
+      const response = await invoke('apply-browser-leak-protection')
+      expect(response.result.error).toEqual(ipcError('internal'))
+      safe(response)
+    }
   })
   it('reports missing existing-file backups as internal and still restores valid neighbours', async () => {
     restore()

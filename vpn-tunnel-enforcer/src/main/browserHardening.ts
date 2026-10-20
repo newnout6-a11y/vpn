@@ -11,14 +11,25 @@ import { classifyIpcError, ipcError, type IpcError, type IpcErrorCategory } from
 
 const execFile = promisify(execFileCb)
 
-function recordFailure(errors: unknown[], step: string, error: unknown, context: Record<string, unknown> = {}): string {
+function classifyBrowserError(error: unknown): IpcErrorCategory {
+  // reg.exe has no cancellation signal or custom kill path: this is the
+  // execFile deadline receipt. maxBuffer failures have a distinct string code.
+  if (error && typeof error === 'object' && 'killed' in error && error.killed === true
+    && 'signal' in error && error.signal === 'SIGTERM' && 'code' in error && error.code === null) return 'timeout'
+  return classifyIpcError(error)
+}
+
+function recordFailure(errors: unknown[], step: string, error: unknown, context: Record<string, unknown> = {}, level: 'warn' | 'debug' = 'warn'): string {
   errors.push(error)
-  logEvent('warn', 'browser-hardening', 'browser hardening step failed', { step, ...context, error })
-  return ipcError(classifyIpcError(error)).message
+  // Error.message/stack are non-enumerable; the logger's nested-object path
+  // needs an explicit diagnostic object before its redaction and size bounds.
+  const diagnostic = error instanceof Error ? { ...error, name: error.name, message: error.message, stack: error.stack } : error
+  logEvent(level, 'browser-hardening', 'browser hardening step failed', { step, ...context, error: diagnostic })
+  return ipcError(classifyBrowserError(error)).message
 }
 
 function browserError(errors: unknown[]): IpcError {
-  const categories = errors.map(classifyIpcError)
+  const categories = errors.map(classifyBrowserError)
   const category = (['permission', 'timeout', 'cancelled', 'network', 'conflict', 'internal', 'validation'] satisfies IpcErrorCategory[])
     .find(value => categories.includes(value)) ?? 'internal'
   return ipcError(category)
@@ -141,12 +152,12 @@ async function exportKey(key: string, file: string, errors: unknown[]): Promise<
     await reg(['export', key, file, '/y'])
     return file
   } catch (error) {
-    recordFailure(errors, 'registry-export', error, { key })
+    recordFailure(errors, 'registry-export', error, { key }, 'debug')
     return null
   }
 }
 
-async function queryValue(key: string, value: string, errors: unknown[]): Promise<string | null> {
+async function queryValue(key: string, value: string, errors: unknown[], required = false): Promise<string | null> {
   try {
     const { stdout } = await reg(['query', key, '/v', value])
     const line = stdout.split(/\r?\n/).find(l => l.includes(value))
@@ -154,7 +165,7 @@ async function queryValue(key: string, value: string, errors: unknown[]): Promis
     const parts = line.trim().split(/\s{2,}/)
     return parts[parts.length - 1] ?? null
   } catch (error) {
-    recordFailure(errors, 'registry-query', error, { key })
+    recordFailure(errors, 'registry-query', error, { key }, required ? 'warn' : 'debug')
     return null
   }
 }
@@ -193,7 +204,7 @@ async function ensureManifest(policyKeys: string[], backupErrors: Map<string, un
     if (!backupPath) {
       try { await reg(['query', key, '/v', WEBRTC_POLICY.name]) }
       catch (err: any) {
-        recordFailure(errors, 'registry-backup-query', err, { key })
+        recordFailure(errors, 'registry-backup-query', err, { key }, 'debug')
         safeToModify = /unable to find|не удается найти|не удалось найти/i.test(String(err?.stderr || err?.message || ''))
       }
     }
@@ -264,7 +275,7 @@ async function applyChromiumPolicy(
         throw new Error('Registry backup unavailable; policy unchanged')
       }
       await reg(['add', key, '/v', WEBRTC_POLICY.name, '/t', WEBRTC_POLICY.type, '/d', WEBRTC_POLICY.data, '/f'])
-      const verified = await queryValue(key, WEBRTC_POLICY.name, errors)
+      const verified = await queryValue(key, WEBRTC_POLICY.name, errors, true)
       if (verified === WEBRTC_POLICY.data) {
         verifiedKeys.push(key)
         confirmedCount++
