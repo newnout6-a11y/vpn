@@ -323,6 +323,7 @@ export function redactSensitiveText(value: string): string {
     .replace(/\b(?:password|passwd|token|secret|private[_-]?key|public[_-]?key|api[_-]?key|auth[_-]?str|pbk|sid|x-hwid)\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)/gi, '<redacted-credential>')
     .replace(/\b[A-Za-z0-9+/]{43}=|\b[A-Za-z0-9+/]{86}==/g, '<redacted-key>')
     .replace(/\b(?:vless|trojan|ss|vmess|hysteria2|hy2|naive|anytls|shadowtls|tuic|wg|wireguard|happ|mantaray):\/\/\S+/gi, '<redacted-vpn-uri>')
+    .replace(/\bsocks(?:4a?|5h?)?:\/\/[^\s"'<>]+/gi, '<redacted-proxy-url>')
     .replace(/\bhttps?:\/\/[^\s"'<>]{8,}/gi, '<redacted-url>')
     .replace(/\b(Could not resolve host|No such host is known|resolve host):\s*[^\s"'<>]+/gi, '$1: <redacted-host>')
     .replace(/\bBearer\s+[a-z0-9._~+\/=-]+/gi, 'Bearer <redacted-token>')

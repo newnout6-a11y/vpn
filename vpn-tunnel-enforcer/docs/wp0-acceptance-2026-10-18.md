@@ -2682,3 +2682,25 @@ Production npm.cmd run build (включает165-channel typecheck) —exit0 (.
 
 
 Final npm.cmd test -- --maxWorkers=1 —5774 passed,5 skipped,0 failed;317 passed/2 skipped suites,332.22s,exit0 (.tmp/wp0-canonical-full.log,EXIT_CODE=0). Source/test tree не менялся во время прогона. Typecheck165 channels/0 public any,build и9 native PASS относятся к этому production tree. Coverage AC927/F210 exit0;40 относительных ссылок итоговой матрицы существуют. После push обязательны completed automatic Qodo и success CI окончательного SHA; статус завершения вступает в силу при слиянии follow-up.
+
+
+## Health-check: причины warn/fail в отдельных событиях (20.10.2026)
+
+В установленной сессии 22:17–22:26 МСК у 22 зарегистрированных lifecycle operations есть пары running/terminal с совпадающей correlation: 19 success, 2 cancelled, 1 отказ экспорта proxy-list категории conflict. Это подтверждает наблюдаемость этих операций, а не запись каждого клика. Навигация и ввод без предусмотренного event не видны; часть renderer-сообщений идёт отдельным IPC с другим ID, owner может быть unknown. Агент читает файлы по запросу; постоянное наблюдение не включено.
+
+Обнаружено: общий IPC result усекался до 2000 символов до поздних пунктов health-check warn/fail. Каждый такой пункт теперь создаёт отдельный system diagnostic finding с check/category/label/status/value/details. Сохраняются общий bounded logger, redaction, action correlation и assertActive до записи. Уровень события info сохраняет status warn/fail как данные отчёта; следующая проверка не должна находить собственные findings как новые app-log faults. Полный response и короткая summary не меняются. Нормативные docs/ не редактируются.
+
+Регрессии исполняют production runSystemDiagnostics/combineStatus/getLogSummary с подставленными OS readers, реальным JSONL logger и redactor: причины после длинных 35 info; credential/topology redaction и correlation; bounded длинная запись; отсутствие самоподдерживающего warn при сохранении внешнего fault; healthy и cancellation без поздних findings/terminal. Первый прогон (4 failed) выявил ошибку harness export syntax. Следующий (2 failed/2 passed) содержал missing finding и ошибку synthetic correlation ID; fixture заменена валидным opaque UUID-v4 ID. После реализации focused — 23/23, 4 suites, 1.27s, exit0: npm.cmd test -- src/main/systemDiagnostics.logging.test.ts src/main/systemDiagnostics.test.ts src/main/appLoggerRedaction.test.ts src/main/actionCorrelation.test.ts --maxWorkers=1.
+
+Typecheck — 165 channels, 0 public any, exit0; npm.cmd run build — exit0. Coverage AC927/927,F210/210 и git diff --check — exit0. Полный прогон и внешние review/CI ещё требуют результата.
+
+
+Final npm.cmd test -- --maxWorkers=1: 5778 passed, 5 skipped, 0 failed; 318 passed/2 skipped suites, 281.02s, exit0 (.tmp/health-findings-full.log, EXIT_CODE=0). Source/test tree во время прогона не менялся. Typecheck165/0 any и build выполнены на этом source; coverage AC927/F210 и diff exit0. Требуются completed automatic Qodo и success CI окончательного SHA перед merge.
+
+
+Qodo automatic review1572513 (head4e1d05f8e31364ea4f2662cffbe4e95ba86437a4) обнаружил Proxy passwords persist in app logs: proxy-current сохранял env:ALL_PROXY с SOCKS userinfo. Замечание подтверждено синтетическими реальными JSONL regression fixtures: npm.cmd test -- src/main/systemDiagnostics.logging.test.ts --maxWorkers=1 —5 failed/4 passed,exit1 (.tmp/health-findings-qodo-red.log). Общий redactSensitiveText теперь скрывает целые socks/socks4/socks4a/socks5/socks5h URLs,включая credentials/topology,сохраняя соседнюю причину. Добавлены5 actual logger fixtures и property1000 runs seed1019 с encoded credentials/IPv6/mixed case.
+
+После исправления npm.cmd test -- src/main/systemDiagnostics.logging.test.ts src/main/systemDiagnostics.test.ts src/main/appLoggerRedaction.test.ts src/main/actionCorrelation.test.ts src/main/redactor.property.test.ts --maxWorkers=1 —32/32,5 suites,1.80s,exit0 (.tmp/health-findings-qodo-focused.log). npm.cmd run typecheck —165 channels/0 public any,exit0 (.tmp/health-findings-qodo-typecheck.log); npm.cmd run build —exit0 (.tmp/health-findings-qodo-build.log). Coverage AC927/927,F210/210 и diff exit0. Full ещё выполняется; после push обязательны новый completed automatic Qodo и success CI окончательного SHA. Revix для первого head сообщил quota exhausted до21.10 00:00UTC; это не approval. Ранее собранный EXE без SOCKS fix устарел и не выдаётся как окончательный.
+
+
+Final после SOCKS redaction: npm.cmd test -- --maxWorkers=1 —5784 passed,5 skipped,0 failed;318 passed/2 skipped suites,293.97s,exit0 (.tmp/health-findings-qodo-full.log,EXIT_CODE=0). Source/test tree во время прогона неизменен. Typecheck165/0 any,production build,focused32/32 выполнены на окончательном source. Coverage AC927/F210 подтверждает трассировку,не исполнение AT;exit0. Требуются новый automatic completed Qodo и success CI окончательного SHA перед merge.

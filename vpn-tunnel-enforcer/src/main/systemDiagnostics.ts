@@ -889,6 +889,14 @@ export async function runSystemDiagnostics(assertActive: () => void = () => {}):
     items
   }
   assertActive()
+  for (const finding of result.items) {
+    if (finding.status !== 'warn' && finding.status !== 'fail') continue
+    // Report data, not a new application fault: avoid feeding findings back into the next log health check.
+    logEvent('info', 'diagnostics', 'system diagnostic finding', {
+      check: finding.id, category: finding.category, label: finding.label,
+      status: finding.status, value: finding.value, details: finding.details
+    })
+  }
   logEvent('info', 'diagnostics', 'full system diagnostics finished', {
     summary: result.summary,
     items: result.items.length
