@@ -1,10 +1,42 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { existsSync, lstatSync, readFileSync } from 'node:fs'
-import { IpcFault } from '../shared/ipc-result'
+import { classifyIpcError, IpcFault } from '../shared/ipc-result'
 import { assertStoreSchema, storeSchemaVersion, type StoreId } from './storeSchema'
 import { decryptSecret, protectLegacySecretBackup } from './secretStorage'
 import { logEvent } from './appLogger'
+import { withCorrelation } from './actionCorrelation'
+
+/** Released startup repairs, in dependency order. These checks must run on
+ * every startup; completion does not imply a store was changed. */
+export const STARTUP_STORE_MIGRATIONS = Object.freeze([
+  'migrateLegacyDirectVpnProfiles',
+  'backfillMissingOutbounds',
+  'migrateProfilesIntoGroups',
+  'consolidateBogusSniGroups',
+  'backfillProfileSourceUris',
+  'backfillProfileCountriesFromNames',
+  'clearStaleStoredPings'
+] as const)
+
+type StartupMigrationTarget = Record<typeof STARTUP_STORE_MIGRATIONS[number], () => void>
+
+export function runStartupStoreMigrations(target: StartupMigrationTarget): void {
+  withCorrelation('op_' + randomUUID().replaceAll('-', ''), () => {
+    for (const migrationStep of STARTUP_STORE_MIGRATIONS) {
+      logEvent('info', 'store-migration', 'startup store step started', { migrationStep, status: 'started' })
+      try {
+        target[migrationStep]()
+        logEvent('info', 'store-migration', 'startup store step completed', { migrationStep, status: 'success' })
+      } catch (error) {
+        logEvent('error', 'store-migration', 'startup store step failed', {
+          migrationStep, status: 'error', category: classifyIpcError(error)
+        })
+        throw error
+      }
+    }
+  }, { source: 'lifecycle', owner: 'recovery' })
+}
 
 type SecretStoreId = 'settings' | 'server-picker' | 'server-groups'
 type Document = Record<string, unknown>
