@@ -129,7 +129,7 @@ export function registerNotificationPrefsIpcHandlers(): void {
   })
 
   ipcMain.handle('notifications:check-os-state', async () => {
-    const state = await getWindowsNotificationState()
+    const state = await getWindowsNotificationState(true)
     return { osNotificationsEnabled: state.enabled, appUserModelId: state.appUserModelId }
   })
 

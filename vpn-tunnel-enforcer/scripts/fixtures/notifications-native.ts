@@ -1,7 +1,9 @@
 // AT-00-001/004/005: real notification source/handlers/preload and DPAPI store.
-// Only reg.exe execution and the external Settings launch are controlled.
+// Only registry execution and the external Settings launch are controlled.
 import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { installTrustedIpcBoundary, registerTrustedRenderer } from '../../src/main/ipcSecurity'
@@ -14,15 +16,23 @@ app.setName('notification-legacy-fixture')
 const entry = pathToFileURL(join(work, 'renderer.html')).href
 let view: BrowserWindow | undefined
 let fault: unknown
-let mode: 'fault' | 'partial' | 'enabled' | 'missing' = 'fault'
-const commands: string[][] = []
-;(globalThis as any).vpnteNotificationReg = async (file: string, args: string[]) => {
-  assert.equal(file, 'reg.exe')
-  commands.push(args)
+let mode: 'fault' | 'partial' | 'enabled' | 'missing' | 'real' = 'fault'
+const commands: Array<{ modelId: string; reset: boolean; script: string }> = []
+const realExec = promisify(execFile)
+;(globalThis as any).vpnteNotificationReg = async (file: string, args: string[], options: Parameters<typeof execFile>[2]) => {
+  assert.equal(file, 'powershell.exe')
+  const script = Buffer.from(args[3], 'base64').toString('utf16le')
+  const modelId = Buffer.from(script.match(/FromBase64String\('([^']+)'\)/)![1], 'base64').toString('utf8')
+  const reset = script.includes('$reset = $true')
+  commands.push({ modelId, reset, script })
+  if (mode === 'real') {
+    assert.equal(reset, false)
+    assert.ok(modelId.startsWith('VPNTE-missing-native-fixture-'))
+    return realExec(file, args, options as any)
+  }
   if (mode === 'fault') throw fault
-  if (mode === 'missing') throw Object.assign(new Error('missing'), { code: 1, stderr: Buffer.from('ERROR: The system was unable to find the specified registry key or value.') })
-  if (mode === 'partial' && args[1].includes('notification-legacy-fixture')) throw Object.assign(new Error('FAKE-SECRET at /private/registry'), { code: 'EACCES' })
-  return { stdout: Buffer.from(args[0] === 'query' ? `Enabled REG_DWORD ${mode === 'enabled' ? '0x1' : '0x0'}` : ''), stderr: Buffer.alloc(0) }
+  if (mode === 'partial' && modelId.includes('notification-legacy-fixture')) throw Object.assign(new Error('FAKE-SECRET at /private/registry'), { code: 'EACCES' })
+  return { stdout: JSON.stringify({ value: mode === 'missing' ? null : mode === 'enabled' ? 1 : 0, cleared: reset && mode === 'partial' }), stderr: '' }
 }
 const watchdog = setTimeout(() => app.exit(1), 30_000)
 app.whenReady().then(async () => {
@@ -31,6 +41,9 @@ app.whenReady().then(async () => {
   const { registerNotificationPrefsIpcHandlers } = await import('../../src/main/notificationPrefs')
   const { invalidateOsNotificationStateCache } = await import('../../src/main/notifications')
   registerNotificationPrefsIpcHandlers()
+  const { notificationRegistry } = await import('../../src/main/notificationRegistry')
+  mode = 'real'
+  assert.deepEqual(await notificationRegistry(`VPNTE-missing-native-fixture-${process.pid}`), { value: null, cleared: false })
   view = new BrowserWindow({ show: false, webPreferences: { preload: process.env.VPNTE_SMOKE_PRELOAD!, sandbox: true, contextIsolation: true, nodeIntegration: false } })
   registerTrustedRenderer(view.webContents, entry)
   await view.loadURL(entry)
@@ -39,7 +52,7 @@ app.whenReady().then(async () => {
   for (const locale of ['en', 'ru'] as const) {
     await invoke(`i18nSetLocale('${locale}')`)
     for (const category of ['permission', 'network', 'validation', 'conflict', 'cancelled', 'timeout', 'internal'] as IpcErrorCategory[]) {
-      fault = category === 'permission' ? Object.assign(new Error('FAKE-SECRET'), { code: 1, stderr: Buffer.from('ERROR: Access is denied.') })
+      fault = category === 'permission' ? Object.assign(new Error('FAKE-SECRET'), { code: 'EACCES' })
         : category === 'timeout' ? Object.assign(new Error('FAKE-SECRET'), { killed: true, signal: 'SIGTERM' })
           : Object.assign(new IpcFault(category), { message: 'FAKE-SECRET at /private/registry' })
       mode = 'fault'; invalidateOsNotificationStateCache()
@@ -60,8 +73,8 @@ app.whenReady().then(async () => {
   mode = 'partial'
   const report = await invoke('notificationsResetOsBlock()')
   assert.deepEqual(report, { cleared: ['com.vpntunnelenforcer.app'], errors: [{ appUserModelId: 'notification-legacy-fixture', error: ipcError('permission') }] })
-  assert.ok(commands.some(args => args[0] === 'delete' && args.includes('/v') && args.includes('Enabled')))
-  assert.equal(commands.some(args => args.includes('/va')), false)
+  assert.ok(commands.some(item => item.reset && item.script.includes("$key.DeleteValue('Enabled', $false)")))
+  assert.equal(commands.some(item => /DeleteSubKey|GetValueNames/.test(item.script)), false)
   mode = 'enabled'; invalidateOsNotificationStateCache()
   assert.equal((await invoke('checkOsNotificationState()')).osNotificationsEnabled, true)
   mode = 'missing'; invalidateOsNotificationStateCache()
@@ -69,7 +82,7 @@ app.whenReady().then(async () => {
   assert.deepEqual(await invoke('notificationsGetPrefs()'), before)
   shell.openExternal = async () => { throw Object.assign(new Error('FAKE-SECRET'), { code: 'EACCES' }) }
   assert.equal((await invoke('notificationsOpenWindowsSettings()')).category, 'permission')
-  console.log('NOTIFICATIONS_NATIVE_PASS', JSON.stringify({ electron: process.versions.electron, categories: 7, locales: 2, partialReset: true, safeRetry: true }))
+  console.log('NOTIFICATIONS_NATIVE_PASS', JSON.stringify({ electron: process.versions.electron, categories: 7, locales: 2, partialReset: true, safeRetry: true, actualMissingRegistryRead: true }))
 }).then(() => { clearTimeout(watchdog); app.exit(0) }).catch(error => {
   console.error('NOTIFICATIONS_NATIVE_FAIL', error)
   if (view && !view.isDestroyed()) view.destroy()

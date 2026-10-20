@@ -88,7 +88,7 @@ try {
   await build({ entryPoints: [join(root, 'scripts/fixtures/notifications-native.ts')],
     outfile: join(work, 'notifications.cjs'), bundle: true, platform: 'node', format: 'cjs', external: ['electron', 'koffi'],
     plugins: [{ name: 'controlled-notification-registry', setup(builder) {
-      builder.onResolve({ filter: /^child_process$/ }, args => args.importer.endsWith('notifications.ts')
+      builder.onResolve({ filter: /^child_process$/ }, args => args.importer.endsWith('notificationRegistry.ts')
         ? { path: 'reg', namespace: 'notifications-native' } : undefined)
       builder.onLoad({ filter: /.*/, namespace: 'notifications-native' }, () => ({ loader: 'js', contents:
         'export const execFile=()=>{throw new Error("Use promisified registry boundary")};execFile[Symbol.for("nodejs.util.promisify.custom")]=(...args)=>globalThis.vpnteNotificationReg(...args)' }))
