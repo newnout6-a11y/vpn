@@ -117,6 +117,15 @@ async function pauseAt(phase: 'probe' | 'fingerprint' | 'restart') {
 }
 
 describe('production rotation operation lifetime', () => {
+  it.each(['', '.', '!', '?', '…'])('separates guidance ending with %j from the protection warning once (AT-00-004)', async punctuation => {
+    await live()
+    const guidance = `Проверьте доступность VPN-сервера${punctuation}`
+    state.restart.mockResolvedValueOnce(connectionFailure('network', guidance))
+    expect(await invoke('rotation:rotate-now')).toMatchObject({ ok: true, result: { error: guidance } })
+    const warning = state.notify.mock.calls.find(call => call[0] === 'error')?.[2]
+    expect(warning).toContain(`${guidance}${punctuation ? '' : '.'} Защита после перезапуска не подтверждена`)
+    expect(warning).not.toContain('..')
+  })
   it.each(Object.keys(IPC_ERRORS) as IpcErrorCategory[])('preserves the restart %s receipt through actual IPC and both histories (AT-00-004/005)', async category => {
     await live()
     const failure = connectionFailure(category, 'Проверьте настройки VPN-сервера и повторите подключение')

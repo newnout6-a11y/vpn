@@ -373,10 +373,11 @@ async function performRotationOnce(owner: RotationOwner): Promise<ConnectionRota
       profileName,
       error: reconnectFailure.error, category: reconnectFailure.category
     })
+    const punctuation = /[.!?…]$/.test(reconnectFailure.error) ? '' : '.'
     notify(
       'error',
       'Ротация не удалась',
-      `Не удалось подключиться к профилю ${profileName}: ${reconnectFailure.error}. ${restartAttempted
+      `Не удалось подключиться к профилю ${profileName}: ${reconnectFailure.error}${punctuation} ${restartAttempted
         ? 'Защита после перезапуска не подтверждена — трафик может идти по обычному маршруту.'
         : 'Проверьте состояние защиты.'}`,
       'connectionError'
