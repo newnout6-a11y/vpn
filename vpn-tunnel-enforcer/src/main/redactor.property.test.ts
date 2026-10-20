@@ -3,6 +3,22 @@ import fc from 'fast-check'
 import { redactSensitiveConfig, redactSensitiveText } from './vpnProfiles'
 
 describe('secret redactor properties (AT-01-011)', () => {
+  it('removes SOCKS URLs with encoded credentials while retaining adjacent failure reasons (AT-00-005)', () => {
+    fc.assert(fc.property(
+      fc.constantFrom('socks', 'socks4', 'socks4a', 'socks5', 'socks5h', 'SOCKS5H'),
+      fc.array(fc.constantFrom('a', 'Z', '9', ':', '@', '/', '%', 'я'), { minLength: 8, maxLength: 32 }),
+      (scheme, characters) => {
+        const password = encodeURIComponent(characters.join(''))
+        const uri = `${scheme}://private-user:${password}@[2001:db8::1]:1080`
+        const output = redactSensitiveText(`connection failed ${uri} retry pending`)
+        expect(output).not.toContain(password)
+        expect(output).not.toContain('private-user')
+        expect(output).not.toContain('2001:db8::1')
+        expect(output).toContain('connection failed ')
+        expect(output).toContain(' retry pending')
+      }
+    ), { numRuns: 1000, seed: 1019 })
+  })
   it('scrubs realistic keys, credential assignments and user paths while retaining clean values', () => {
     fc.assert(fc.property(fc.uint8Array({ minLength: 32, maxLength: 32 }), fc.integer({ min: 1, max: 999999 }), (bytes, number) => {
       const key = Buffer.from(bytes).toString('base64')

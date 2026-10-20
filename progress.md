@@ -7879,3 +7879,11 @@ Typecheck — 165 channels, 0 public any, exit0; npm.cmd run build — exit0. Co
 
 
 Final npm.cmd test -- --maxWorkers=1: 5778 passed, 5 skipped, 0 failed; 318 passed/2 skipped suites, 281.02s, exit0 (.tmp/health-findings-full.log, EXIT_CODE=0). Source/test tree во время прогона не менялся. Typecheck165/0 any и build выполнены на этом source; coverage AC927/F210 и diff exit0. Требуются completed automatic Qodo и success CI окончательного SHA перед merge.
+
+
+Qodo automatic review1572513 (head4e1d05f8e31364ea4f2662cffbe4e95ba86437a4) обнаружил Proxy passwords persist in app logs: proxy-current сохранял env:ALL_PROXY с SOCKS userinfo. Замечание подтверждено синтетическими реальными JSONL regression fixtures: npm.cmd test -- src/main/systemDiagnostics.logging.test.ts --maxWorkers=1 —5 failed/4 passed,exit1 (.tmp/health-findings-qodo-red.log). Общий redactSensitiveText теперь скрывает целые socks/socks4/socks4a/socks5/socks5h URLs,включая credentials/topology,сохраняя соседнюю причину. Добавлены5 actual logger fixtures и property1000 runs seed1019 с encoded credentials/IPv6/mixed case.
+
+После исправления npm.cmd test -- src/main/systemDiagnostics.logging.test.ts src/main/systemDiagnostics.test.ts src/main/appLoggerRedaction.test.ts src/main/actionCorrelation.test.ts src/main/redactor.property.test.ts --maxWorkers=1 —32/32,5 suites,1.80s,exit0 (.tmp/health-findings-qodo-focused.log). npm.cmd run typecheck —165 channels/0 public any,exit0 (.tmp/health-findings-qodo-typecheck.log); npm.cmd run build —exit0 (.tmp/health-findings-qodo-build.log). Coverage AC927/927,F210/210 и diff exit0. Full ещё выполняется; после push обязательны новый completed automatic Qodo и success CI окончательного SHA. Revix для первого head сообщил quota exhausted до21.10 00:00UTC; это не approval. Ранее собранный EXE без SOCKS fix устарел и не выдаётся как окончательный.
+
+
+Final после SOCKS redaction: npm.cmd test -- --maxWorkers=1 —5784 passed,5 skipped,0 failed;318 passed/2 skipped suites,293.97s,exit0 (.tmp/health-findings-qodo-full.log,EXIT_CODE=0). Source/test tree во время прогона неизменен. Typecheck165/0 any,production build,focused32/32 выполнены на окончательном source. Coverage AC927/F210 подтверждает трассировку,не исполнение AT;exit0. Требуются новый automatic completed Qodo и success CI окончательного SHA перед merge.

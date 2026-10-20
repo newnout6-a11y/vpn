@@ -90,6 +90,16 @@ it('does not duplicate healthy items as findings', async () => {
   expect((await logged()).filter(row => row.message === 'system diagnostic finding')).toHaveLength(0)
 })
 
+it.each(['socks', 'socks4', 'socks4a', 'socks5', 'socks5h'])('never persists %s proxy userinfo from diagnostic environment details', async scheme => {
+  const { runSystemDiagnostics } = await harness(async () => [check('proxy-current', 'warn', 'not configured',
+    `env:ALL_PROXY=${scheme}://private-user:PRIVATE-PROXY-PASSWORD@proxy.example.test:1080 | listener not selected`)])
+  await runSystemDiagnostics()
+  const raw = JSON.stringify(await logged())
+  expect(raw).toContain('not configured')
+  expect(raw).toContain('listener not selected')
+  expect(raw).not.toMatch(/private-user|PRIVATE-PROXY-PASSWORD|proxy\.example\.test/)
+})
+
 it('does not log late findings or completion after cancellation', async () => {
   let release!: (items: SystemDiagnosticItem[]) => void, cancelled = false
   const { runSystemDiagnostics } = await harness(() => new Promise(resolve => { release = resolve }))
