@@ -2127,3 +2127,53 @@ npm.cmd run typecheck —165 channels/0 public any,exit0.
   (.tmp/wp0-live-history-final-build.log);targeted5 suites102/102;
   coverage927/927,210/210,diff0. Source/test tree frozen во время full.
   Новый SHA ещё требует completed Qodo,разбора Revix и CI success.
+
+## 20.10.2026 — PR #95 принят; live provenance/redaction (WP-0)
+
+PR #95 слит:6539b12e6b73cfe248a26a8f9114d45551779318. Проверенный final head
+3bdee0d538cac70b7aaa61ffbbde9f0205cabd50 и merge имеют одинаковое дерево.
+CI39375050945 success (Windows/Rust/site);Qodo1560112 completed на этом SHA,
+единственная прежняя finding автоматически implemented,новых нет. Attribution
+не менялся. Revix118471219707 completed/neutral,Low risk,title1 issue(s) found;
+это question:при partly valid main сначала используются salvaged main rows,
+backup —если их нет. Это явная recovery policy,а не слияние более старой истории
+поверх новых валидных записей. Corruption логируется;backup остаётся сохранённым.
+Предыдущие suggestion/question и границы source-byte retention описаны выше.
+Допустимые minor questions не называются исправленными или approval.
+
+Следующий участок AT-00-005/006,F-074/F-143: новые live receipts получают
+provenance из admitted lease (source/owner). Общий route unconfirmed/confidence
+indeterminate: DNS,endpoint и isolated proxy могут идти разными путями,их
+наблюдения остаются в собственных diagnostic fields. Старым записям provenance
+не выдумывается;невалидные metadata отсеиваются с history.corrupted.
+
+Три новые проверки до fix:3 failed/47 passed,5.01s,exit1
+(.tmp/wp0-live-provenance-red.log): отсутствующие metadata и секреты в nested
+text. sanitizeLiveCheckForStorage использует общий redactSensitiveText для
+каждого string leaf,сохраняя типы/booleans,и удаляет credential evidence keys.
+Main-generated receipt/profile/correlation identities сохраняются;diagnostic
+credential UUID,пароли,Bearer,VPN URI,user paths маскируются. Legacy read view
+тоже маскируется;точный старый migration backup не переименовывается в sanitized
+copy. Это не заявление об очистке исходных секретов из исторического v0 backup.
+
+Plain JSON schema v0→v1:реестр одного фактического шага live-history-provenance-v1,
+marker с from/to/id/SHA-256 входных bytes,exact prior valid file backup перед
+записью. Read не переписывает v0;marker и history.migrated появляются только
+после успешной записи,повтор v1 сохраняет lineage без повторного шага. Новая
+версия ограждает downgrade к strict v0 reader из #95;future version+1 отказана.
+Migration red:1 failed/39 skipped (.tmp/wp0-live-provenance-migration-red.log).
+
+Исправлена изоляция прежнего liveServerHistory.test:main-only cleanup оставлял
+.bak в OS temp. Теперь каждый case создаёт собственный каталог внутри project
+.tmp и удаляет его целиком;начальная история проверяется пустой. Чужие/прежние
+артефакты не удалялись.
+Адресно4 suites84/84,4.94s,exit0 (.tmp/wp0-live-provenance-targeted3.log),
+typecheck165 channels/0 public any exit0. Усилен failure во втором rename
+migration commit. Полный набор/build/remote gate ещё pending;WP-0 в работе,
+WP-2 не начат. Нормативные docs/ не изменялись.
+
+Первый full после общего redactor: npm.cmd test -- --maxWorkers=1 —5080 passed/5 skipped/2 failed,255.66s,exit1 (.tmp/wp0-live-provenance-full.log). Две прежние regression suites обнаружили UUID-like credentials вне RFC version/variant. Сохранена прежняя широкая UUID-маска [REDACTED_UUID] до общего redactor,на каждом string leaf;internal identities восстанавливаются отдельно. Старые assertions не ослаблялись.
+Адресно npm.cmd test -- src/main/extendedReviewFixed.test.ts src/main/liveServerProbe.extended.test.ts src/main/liveServerHistory.integrity.test.ts src/main/liveServerHistory.test.ts src/main/liveServerProbe.operation.test.ts src/main/liveServerAuditRegression.test.ts —122/122,6 suites,5.80s,exit0 (.tmp/wp0-live-provenance-targeted-final.log).
+Повторный npm.cmd run build включает typecheck:165 channels,0 public any,exit0 (.tmp/wp0-live-provenance-final-build.log). python docs/04-приёмочные-тесты/traceability/check-coverage.py —AC927/927,F210/210,exit0;git diff --check —exit0. Новый full выполняется;remote gate pending.
+
+Final local: npm.cmd test -- --maxWorkers=1 —5082 passed/5 skipped/0 failed,305 files passed/2 skipped,258.89s,exit0 (.tmp/wp0-live-provenance-final-full.log,exit marker0). Source/test tree frozen во время полного прогона. build/typecheck165 channels/0 public any,coverage AC927/927 F210/210,diff check —exit0. Remote CI/Qodo/Revix pending;WP-0 в работе,WP-2 не начат.

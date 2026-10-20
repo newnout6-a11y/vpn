@@ -1,12 +1,13 @@
 import { app } from 'electron'
 import { join } from 'path'
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, renameSync, rmSync, openSync, closeSync, fsyncSync } from 'fs'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { classifyIpcError, IpcFault } from '../shared/ipc-result'
 import { StoreSchemaError } from './storeSchema'
 import { logEvent } from './appLogger'
 import { ioFailureDetails } from './ioFailureDiagnostics'
 import { isStoredLiveCheck } from './liveServerHistorySchema'
+import { redactSensitiveText } from './vpnProfiles'
 import type {
   LiveServerCheck,
   LiveServerCheckHistoryDiff
@@ -14,8 +15,24 @@ import type {
 
 export const MAX_HISTORY_PER_TARGET = 20
 const HISTORY_FILE_NAME = 'live-server-checks.json'
-// This is the existing target-map JSON format, not an electron-store migration.
-export const LIVE_HISTORY_SCHEMA_VERSION = 0
+// Plain JSON keeps its target-map layout; v1 adds diagnostic action provenance.
+export const LIVE_HISTORY_SCHEMA_VERSION = 1
+export const LIVE_HISTORY_MIGRATIONS = [{ id: 'live-history-provenance-v1', from: 0, to: 1 }] as const
+type HistoryMigration = typeof LIVE_HISTORY_MIGRATIONS[number] & { checksum: string }
+interface DecodedHistory {
+  history: Map<string, LiveServerCheck[]>
+  valid: boolean
+  version?: number
+  migration?: HistoryMigration
+}
+
+function isHistoryMigration(value: unknown): value is HistoryMigration {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const marker = value as Record<string, unknown>
+  return Object.keys(marker).length === 4 && LIVE_HISTORY_MIGRATIONS.some(step =>
+    marker.id === step.id && marker.from === step.from && marker.to === step.to)
+    && typeof marker.checksum === 'string' && /^[0-9a-f]{64}$/.test(marker.checksum)
+}
 
 function assertHistoryVersion(value: unknown): void {
   if (!value || typeof value !== 'object' || !Object.hasOwn(value, 'schemaVersion')) return
@@ -29,78 +46,24 @@ function assertHistoryVersion(value: unknown): void {
  * before it is saved into persistent storage or returned to callers.
  */
 export function sanitizeLiveCheckForStorage(check: LiveServerCheck): LiveServerCheck {
-  // Deep clone to ensure immutability
-  const sanitized: LiveServerCheck = JSON.parse(JSON.stringify(check))
-
-  // Clean evidence in findings: remove any potential secret keys
-  if (Array.isArray(sanitized.findings)) {
-    for (const finding of sanitized.findings) {
-      if (finding.evidence) {
-        for (const key of Object.keys(finding.evidence)) {
-          const lower = key.toLowerCase()
-          if (
-            lower.includes('uuid') ||
-            lower.includes('secret') ||
-            lower.includes('password') ||
-            lower.includes('key') ||
-            lower.includes('shortid') ||
-            lower.includes('token') ||
-            lower.includes('uri')
-          ) {
-            delete finding.evidence[key]
-          }
-        }
+  // Preserve structure and booleans (e.g. TLS authorized), redact every text leaf.
+  const sanitized: LiveServerCheck = JSON.parse(JSON.stringify(check, (_key, value) =>
+    typeof value === 'string'
+      ? redactSensitiveText(value.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '[REDACTED_UUID]'))
+      : value))
+  // These are main-generated receipt/profile identities, not credential UUIDs.
+  for (const key of ['id', 'profileId', 'operationKey', 'correlationId'] as const) {
+    if (check[key] !== undefined) sanitized[key] = check[key]
+  }
+  const evidence = [...sanitized.findings.map(finding => finding.evidence), sanitized.handshake?.evidence]
+  for (const fields of evidence) {
+    if (!fields) continue
+    for (const key of Object.keys(fields)) {
+      if (/uuid|secret|password|key|short.?id|token|uri|auth|cookie|header/i.test(key)) {
+        delete (fields as Record<string, unknown>)[key]
       }
     }
   }
-
-  // Clean evidence in handshake
-  if (sanitized.handshake?.evidence) {
-    for (const key of Object.keys(sanitized.handshake.evidence)) {
-      const lower = key.toLowerCase()
-      if (
-        lower.includes('uuid') ||
-        lower.includes('secret') ||
-        lower.includes('password') ||
-        lower.includes('key') ||
-        lower.includes('shortid') ||
-        lower.includes('token') ||
-        lower.includes('uri')
-      ) {
-        delete (sanitized.handshake.evidence as any)[key]
-      }
-    }
-  }
-
-  const UUID_REGEX = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
-  if (sanitized.handshake?.error) {
-    sanitized.handshake.error = sanitized.handshake.error.replace(UUID_REGEX, '[REDACTED_UUID]')
-  }
-  if (sanitized.handshake?.evidence?.detail) {
-    sanitized.handshake.evidence.detail = sanitized.handshake.evidence.detail.replace(UUID_REGEX, '[REDACTED_UUID]')
-  }
-  if (sanitized.error) {
-    sanitized.error = sanitized.error.replace(UUID_REGEX, '[REDACTED_UUID]')
-  }
-
-  if (Array.isArray(sanitized.findings)) {
-    for (const finding of sanitized.findings) {
-      if (typeof finding.detail === 'string') {
-        finding.detail = finding.detail.replace(UUID_REGEX, '[REDACTED_UUID]')
-      }
-      if (typeof finding.title === 'string') {
-        finding.title = finding.title.replace(UUID_REGEX, '[REDACTED_UUID]')
-      }
-      if (finding.evidence && typeof finding.evidence === 'object') {
-        for (const [k, v] of Object.entries(finding.evidence)) {
-          if (typeof v === 'string') {
-            finding.evidence[k] = v.replace(UUID_REGEX, '[REDACTED_UUID]')
-          }
-        }
-      }
-    }
-  }
-
   return sanitized
 }
 
@@ -139,7 +102,7 @@ class LiveServerHistoryManager {
     }
   }
 
-  private decode(raw: string): { history: Map<string, LiveServerCheck[]>; valid: boolean } {
+  private decode(raw: string): DecodedHistory {
     let parsed: unknown
     try { parsed = JSON.parse(raw) }
     catch {
@@ -150,19 +113,29 @@ class LiveServerHistoryManager {
     assertHistoryVersion(parsed)
     const history = new Map<string, LiveServerCheck[]>()
     let rejectedEntries = 0
+    let version: number | undefined, migration: HistoryMigration | undefined
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) rejectedEntries++
-    else for (const [key, items] of Object.entries(parsed)) {
-      if (key === 'schemaVersion') continue
-      if (!Array.isArray(items) || !(key === 'global' || /^(profile|host):.+/.test(key))) { rejectedEntries++; continue }
-      const valid: LiveServerCheck[] = []
-      for (const item of items) {
-        if (isStoredLiveCheck(item) && (key === 'global' || key === this.targetKey(item.profileId, item.host))) valid.push(sanitizeLiveCheckForStorage(item))
+    else {
+      const root = parsed as Record<string, unknown>
+      version = typeof root.schemaVersion === 'number' ? root.schemaVersion : 0
+      if (version === 1 && root.migration !== undefined) {
+        if (isHistoryMigration(root.migration)) migration = root.migration
         else rejectedEntries++
       }
-      history.set(key, valid.slice(0, MAX_HISTORY_PER_TARGET))
+      for (const [key, items] of Object.entries(root)) {
+        if (key === 'schemaVersion') continue
+        if (key === 'migration' && version === 1) continue
+        if (!Array.isArray(items) || !(key === 'global' || /^(profile|host):.+/.test(key))) { rejectedEntries++; continue }
+        const valid: LiveServerCheck[] = []
+        for (const item of items) {
+          if (isStoredLiveCheck(item) && (key === 'global' || key === this.targetKey(item.profileId, item.host))) valid.push(sanitizeLiveCheckForStorage(item))
+          else rejectedEntries++
+        }
+        history.set(key, valid.slice(0, MAX_HISTORY_PER_TARGET))
+      }
     }
     if (rejectedEntries) logEvent('error', 'live-server-history', 'history.corrupted', { reason: 'invalid-schema', rejectedEntries })
-    return { history, valid: rejectedEntries === 0 }
+    return { history, valid: rejectedEntries === 0, version, migration }
   }
 
   private loadFromDisk(): Map<string, LiveServerCheck[]> {
@@ -215,10 +188,18 @@ class LiveServerHistoryManager {
       const existing = raw === undefined ? undefined : this.decode(raw)
       // A newer reader may also have left a future-format backup.
       const backup = this.read(filePath + '.bak')
-      if (backup !== undefined) this.decode(backup)
+      const backupHistory = backup === undefined ? undefined : this.decode(backup)
+      const origin = existing?.version === undefined ? backupHistory : existing
+      const originRaw = existing?.version === undefined ? backup : raw
+      const migrated = origin?.version === 0 && originRaw !== undefined
+      const migration: HistoryMigration | undefined = migrated
+        ? { ...LIVE_HISTORY_MIGRATIONS[0], checksum: createHash('sha256').update(originRaw).digest('hex') }
+        : origin?.migration
       const parentDir = join(filePath, '..')
       mkdirSync(parentDir, { recursive: true })
-      const data: Record<string, LiveServerCheck[] | number> = { schemaVersion: LIVE_HISTORY_SCHEMA_VERSION }
+      const data: Record<string, LiveServerCheck[] | number | HistoryMigration> = {
+        schemaVersion: LIVE_HISTORY_SCHEMA_VERSION, ...(migration ? { migration } : {})
+      }
       for (const [key, items] of next.entries()) {
         data[key] = items
       }
@@ -228,6 +209,10 @@ class LiveServerHistoryManager {
       if (clearing) this.writeAtomic(filePath + '.bak', content)
       else if (existing?.valid) this.writeAtomic(filePath + '.bak', '', filePath)
       this.writeAtomic(filePath, content)
+      if (migrated) {
+        // The durable marker remains authoritative if an observer fails.
+        try { logEvent('info', 'live-server-history', 'history.migrated', migration) } catch { /* Do not undo a committed write. */ }
+      }
     } catch (error) {
       logEvent('error', 'live-server-history', 'history.write-failed', ioFailureDetails(error))
       throw error instanceof StoreSchemaError ? error : new IpcFault(classifyIpcError(error))

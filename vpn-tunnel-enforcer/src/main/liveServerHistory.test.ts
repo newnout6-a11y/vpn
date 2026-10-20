@@ -1,7 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
-import { join } from 'path'
-import { rmSync, existsSync } from 'fs'
-import { tmpdir } from 'os'
+import { join, resolve } from 'path'
+import { rmSync, mkdirSync, mkdtempSync } from 'fs'
 import {
   liveServerHistory,
   sanitizeLiveCheckForStorage,
@@ -66,16 +65,17 @@ function makeMockCheck(overrides: Partial<LiveServerCheck> = {}): LiveServerChec
 }
 
 describe('liveServerHistory', () => {
-  const testStorage = join(tmpdir(), `test-live-history-${Date.now()}.json`)
+  let testDirectory: string
 
   beforeEach(() => {
-    liveServerHistory.init(testStorage)
+    mkdirSync(resolve('.tmp'), { recursive: true })
+    testDirectory = mkdtempSync(resolve('.tmp/live-history-unit-'))
+    liveServerHistory.init(join(testDirectory, 'history.json'))
+    expect(liveServerHistory.getHistory()).toEqual([])
   })
 
   afterEach(() => {
-    if (existsSync(testStorage)) {
-      try { rmSync(testStorage) } catch {}
-    }
+    rmSync(testDirectory, { recursive: true, force: true })
   })
 
   it('sanitizes secrets from evidence in findings before storage', () => {
