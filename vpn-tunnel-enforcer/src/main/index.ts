@@ -1,17 +1,16 @@
 import './snapshotBootstrap'
+import { registerDiagnosticMaintenanceHandlers } from './diagnosticMaintenance'
 import { startElevatedPsHelper, stopElevatedPsHelper, warmElevatedPsHelper } from './elevatedPsHelper'
 import { cacheInspectionResult } from './vpnInspectionCache'
 import { warmRecoveryPsWorker, stopRecoveryPsWorker } from './recoveryPsWorker'
 import { app, BrowserWindow, dialog, ipcMain, Tray, shell, session, Menu, powerMonitor, type IpcMainInvokeEvent } from 'electron'
 import { exec as execCb } from 'child_process'
 import { execFile as execFileCb } from 'child_process'
-import { rm } from 'fs/promises'
 import { promisify } from 'util'
 import { join } from 'path'
 import { isIP } from 'net'
 import { randomUUID } from 'node:crypto'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
-import { directoryExists, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { happDetector } from './happDetector'
 import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart, onNativeStartup } from './tunController'
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
@@ -64,7 +63,7 @@ import {
   rollbackPhysicalAdapterLockdownIfApplied
 } from './physicalAdapterLockdown'
 import { relaunchElevatedIfNeeded } from './admin'
-import { clearAppLog, getFullLogs, logEvent, openLogFolder, startEngineLogRetention, type AppLogLevel } from './appLogger'
+import { getFullLogs, logEvent, openLogFolder, startEngineLogRetention, type AppLogLevel } from './appLogger'
 import { timePhase } from './psTiming'
 import { shutdownNativeHost } from './native/nativeHost'
 import { runSystemDiagnostics } from './systemDiagnostics'
@@ -74,7 +73,7 @@ import { runAutoPilot } from './autoPilot'
 import { notify, setInAppFallbackCallback } from './notifications'
 import { removeHijackingDevShortcut } from './taskbarIdentity'
 import { registerDiagnosticsExportHandler } from './diagnosticsExport'
-import { captureSnapshot, getSnapshotsDir, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
+import { captureSnapshot, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
 import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, setLeakSelfTestCompletedCallback, setNetworkChangeCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
 import { leakSelfTestVerdict } from '../shared/leak-self-test'
 import { getTrafficForensicsStatus, restartTrafficForensicsSession, startTrafficForensicsSession, stopTrafficForensicsSession } from './trafficForensics'
@@ -2419,34 +2418,10 @@ app.whenReady().then(async () => {
     return { success: true }
   })
 
+  registerDiagnosticMaintenanceHandlers()
+
   handleLogged('get-full-logs', async () => {
     return getFullLogs()
-  })
-
-  handleLogged('clear-app-log', async () => {
-    await clearAppLog()
-    logEvent('info', 'app', 'app log cleared')
-    return { success: true }
-  })
-
-  handleLogged('clear-diagnostic-artifacts', async () => {
-    const capture = await stopTrafficForensicsSession('manual diagnostics artifact clear')
-    if (capture.running || capture.cleanupPending) throw new Error('CaptureStopUnconfirmed: diagnostic artifacts retained')
-    const forensicRoot = getPrivilegedRuntimeDir('traffic-forensics')
-    const targets = [getSnapshotsDir()]
-    if (await directoryExists(forensicRoot)) {
-      const acl = await verifyDirectoryHardened(forensicRoot)
-      if (!acl.hardened) throw new Error('RuntimeSecurityAclError: diagnostic cleanup namespace is untrusted')
-      targets.push(forensicRoot)
-    }
-    await Promise.all(targets.map(path => rm(path, { recursive: true, force: true }).catch(() => undefined)))
-    await clearAppLog()
-    logEvent('info', 'app', 'diagnostic artifacts cleared', { targets })
-    return {
-      success: true,
-      message: 'Диагностические артефакты очищены',
-      cleared: targets
-    }
   })
 
   handleLogged('rollback-tun-network-baseline', async () => {
@@ -2530,12 +2505,6 @@ app.whenReady().then(async () => {
     return status
   })
 
-  handleLogged('open-tun-log-folder', async () => {
-    const folder = getTunRuntimeDir()
-    await shell.openPath(folder)
-    return folder
-  })
-
   // ─── VPN Network Repair (Maintenance page) ───────────────────────────────
   handleLogged('network:repair-orphaned-dns', async () => {
     return repairOrphanedPhysicalAdapterDns('manual maintenance trigger')
@@ -2607,23 +2576,6 @@ app.whenReady().then(async () => {
   // egress IP through proxy-out (VPN) vs direct-out, and — when smart RU split
   // is on — that RU hosts egress with the real IP.
   registerRoutingSelfTestHandlers()
-
-  handleLogged('open-snapshots-folder', async () => {
-    const dir = getSnapshotsDir()
-    try {
-      // Ensure the directory exists before opening — on first launch the user
-      // might click this before any snapshot has been written.
-      const { mkdir } = await import('fs/promises')
-      await mkdir(dir, { recursive: true })
-      const { shell } = await import('electron')
-      const result = await shell.openPath(dir)
-      // openPath returns '' on success, error message on failure.
-      if (result) return { success: false, error: result, path: dir }
-      return { success: true, path: dir }
-    } catch (err) {
-      return { success: false, error: (err as Error).message }
-    }
-  })
 
   handleLogged('get-traffic-forensics-status', async () => {
     return getTrafficForensicsStatus()

@@ -16,6 +16,13 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
+// This suite tests the virtual Programs tree. Registry discovery must not
+// query the host or start three real PowerShell processes per test.
+const registryExec = vi.hoisted(() => vi.fn((_file: string, _args: string[], _options: unknown, callback: Function) => {
+  callback(null, { stdout: '', stderr: '' })
+}))
+vi.mock('child_process', () => ({ execFile: registryExec }))
+
 // ─── Virtual filesystem ──────────────────────────────────────────────────────
 // nodeFs maps absolute paths to their directory entries. Entries are plain
 // objects shaped like fs.Dirent for the fields the scanner reads.
@@ -101,13 +108,13 @@ import {
 const PROGRAMS = 'C:\\Users\\Test\\AppData\\Local\\Programs'
 const itWin32 = process.platform === 'win32' ? it : it.skip
 
-// The registry scan shells out to PowerShell; these tests only exercise the
-// local-Programs half, so we let the registry part fail/return nothing by
-// running on a tree where only the Programs root exists.
+// The registry boundary returns no apps; the virtual filesystem covers only
+// the local-Programs half of discovery.
 
 describe('discoverLocalProgramsApps (via discoverInstalledApps)', () => {
   beforeEach(() => {
     storeData = { splitTunnelApps: [], splitTunnelEnabled: true, splitTunnelRemovedPaths: [] }
+    registryExec.mockClear()
   })
 
   itWin32('finds sibling products under the same vendor dir', async () => {
@@ -118,6 +125,15 @@ describe('discoverLocalProgramsApps (via discoverInstalledApps)', () => {
       [`${PROGRAMS}\\Vendor\\ProductB`]: [exe('productb.exe')]
     })
     const apps = await discoverInstalledApps()
+    expect(registryExec.mock.calls.every(([file]) => file === 'powershell.exe')).toBe(true)
+    expect(registryExec.mock.calls.map(([, args]) => {
+      const script = Buffer.from(args.at(-1)!, 'base64').toString('utf16le')
+      return /\$root='([^']+)'/.exec(script)?.[1]
+    })).toEqual([
+      'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+      'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+      'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
+    ])
     const paths = apps.map(a => a.path.toLowerCase())
     expect(paths).toContain(`${PROGRAMS}\\Vendor\\ProductA\\producta.exe`.toLowerCase())
     expect(paths).toContain(`${PROGRAMS}\\Vendor\\ProductB\\productb.exe`.toLowerCase())

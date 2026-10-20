@@ -1,5 +1,15 @@
 import type { AsnInfo } from './ipc-types'
+import type { IpcError } from './ipc-result'
 /** Shared data returned by diagnostic IPC handlers. No main-process dependencies. */
+
+export type DiagnosticArtifact = 'snapshots' | 'traffic-forensics' | 'logs' | 'app-log' | 'app-previous-log'
+  | 'sing-box-log' | 'sing-box-previous-log' | 'xray-log' | 'xray-previous-log'
+export interface DiagnosticClearReport {
+  success: boolean
+  cleared: DiagnosticArtifact[]
+  absent: DiagnosticArtifact[]
+  errors: Array<{ artifact: DiagnosticArtifact; error: IpcError }>
+}
 
 export interface ProxyInfo {
   host: string

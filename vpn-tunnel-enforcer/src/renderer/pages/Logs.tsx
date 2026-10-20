@@ -31,6 +31,7 @@ import {
 import { MacCard, MacInput, MacButton, MacSelect } from '../design-system'
 import { PageTip } from '../components/PageTip'
 import type { ConnectionLogEntry, ConnectionHistoryFilters, SessionOutcome, SessionOutcomeKind } from '../../shared/ipc-types'
+import { ipcError, isIpcRemoteErrorData } from '../../shared/ipc-result'
 import { connectionDurationMs } from '../../shared/connection-history'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -158,12 +159,19 @@ function buildDiagnosticsText(entry: ConnectionLogEntry): string {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export function Logs() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
 
   // ─── State ─────────────────────────────────────────────────────────────────
   const [entries, setEntries] = useState<ConnectionLogEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [clearingLogs, setClearingLogs] = useState(false)
+  const [historyRevision, setHistoryRevision] = useState(0)
+  const cleanupScope = useRef({ active: true, running: false, epoch: 0 })
+  useEffect(() => {
+    const lifetime = { active: true, running: false, epoch: 0 }
+    cleanupScope.current = lifetime
+    return () => { lifetime.active = false }
+  }, [])
   const [rawLogs, setRawLogs] = useState<ParsedLogEntry[]>([])
   const [rawLogsLoading, setRawLogsLoading] = useState(false)
   const [rawLogsError, setRawLogsError] = useState<string | null>(null)
@@ -195,6 +203,7 @@ export function Logs() {
 
   useEffect(() => {
     let active = true
+    const lifetime = cleanupScope.current, epoch = lifetime.epoch
     const run = async () => {
       setLoading(true)
       try {
@@ -217,34 +226,35 @@ export function Logs() {
         const result = hasFilters
           ? await window.electronAPI.connectionHistoryFilter(filters)
           : await window.electronAPI.connectionHistoryList()
-        if (active) setEntries(result || [])
+        if (active && lifetime.active && epoch === lifetime.epoch) setEntries(result || [])
       } catch {
-        if (active) setEntries([])
+        if (active && lifetime.active && epoch === lifetime.epoch) setEntries([])
       } finally {
-        if (active) setLoading(false)
+        if (active && lifetime.active && epoch === lifetime.epoch) setLoading(false)
       }
     }
     void run()
     return () => {
       active = false
     }
-  }, [selectedReasons, dateFrom, dateTo, searchText])
+  }, [selectedReasons, dateFrom, dateTo, searchText, historyRevision])
 
   useEffect(() => {
     let active = true
+    const lifetime = cleanupScope.current, epoch = lifetime.epoch
     const run = async () => {
       try {
         const result = await window.electronAPI.connectionHistoryStats(statsPeriod)
-        if (active) setStats(result)
+        if (active && lifetime.active && epoch === lifetime.epoch) setStats(result)
       } catch {
-        if (active) setStats(null)
+        if (active && lifetime.active && epoch === lifetime.epoch) setStats(null)
       }
     }
     void run()
     return () => {
       active = false
     }
-  }, [statsPeriod])
+  }, [statsPeriod, historyRevision])
 
   // ─── Sorting Logic ─────────────────────────────────────────────────────────
 
@@ -370,33 +380,56 @@ export function Logs() {
   }
 
   const handleClearLogs = async () => {
-    if (!window.confirm('Очистить историю подключений, app/sing-box логи, snapshots и traffic-forensics артефакты?')) return
+    const lifetime = cleanupScope.current
+    if (lifetime.running || !window.confirm(t('logs.cleanup.confirm'))) return
+    lifetime.running = true
+    lifetime.epoch += 1
     setClearingLogs(true)
+    const locale = i18n.language.startsWith('en') ? 'en' : 'ru'
+    const reason = (error: unknown) => ipcError(isIpcRemoteErrorData(error) ? error.category : 'internal', locale).message
     try {
-      await Promise.all([
-        window.electronAPI.clearAppLog(),
+      // Artifact cleanup already clears app/engine logs; never clear them twice.
+      const [history, traffic, artifacts] = await Promise.allSettled([
         window.electronAPI.connectionHistoryClear(),
         window.electronAPI.trafficHistoryClear(),
         window.electronAPI.clearDiagnosticArtifacts()
       ])
-      setEntries([])
-      setRawLogs([])
-      setStats(null)
-      useAppStore.getState().addGlobalToast('success', 'Логи очищены', 'История, runtime-логи и диагностические артефакты удалены')
-    } catch (err: any) {
-      useAppStore.getState().addGlobalToast('error', 'Ошибка', `Не удалось очистить: ${err?.message || err}`)
+      if (!lifetime.active) return
+      lifetime.epoch += 1 // Revoke reads started while deletion was in flight too.
+      let cleared = 0
+      let absent = 0
+      const errors: string[] = []
+      if (history.status === 'fulfilled') { setEntries([]); setStats(null); cleared += 1 }
+      else { errors.push(reason(history.reason)); setHistoryRevision(revision => revision + 1) }
+      if (traffic.status === 'fulfilled') cleared += 1
+      else errors.push(reason(traffic.reason))
+      if (artifacts.status === 'fulfilled') {
+        cleared += artifacts.value.cleared.length
+        absent += artifacts.value.absent.length
+        for (const item of artifacts.value.errors) errors.push(ipcError(item.error.category, locale).message)
+        if (artifacts.value.cleared.includes('app-log')) setRawLogs([])
+      } else errors.push(reason(artifacts.reason))
+      if (errors.length) {
+        useAppStore.getState().addGlobalToast('error', t('logs.cleanup.partialTitle'),
+          t('logs.cleanup.partial', { cleared, absent, failed: errors.length, reason: [...new Set(errors)].join('; ') }))
+      } else {
+        useAppStore.getState().addGlobalToast('success', t('logs.cleanup.successTitle'), t('logs.cleanup.success'))
+      }
     } finally {
-      setClearingLogs(false)
+      lifetime.running = false
+      if (lifetime.active) { setClearingLogs(false); setLoading(false) }
     }
   }
 
   const loadRawLogs = useCallback(async (background = false) => {
-    if (rawLogsFetchInFlightRef.current) return
+    const lifetime = cleanupScope.current, epoch = lifetime.epoch
+    if (rawLogsFetchInFlightRef.current || lifetime.running) return
     rawLogsFetchInFlightRef.current = true
     if (!background) setRawLogsLoading(true)
     setRawLogsError(null)
     try {
       const snapshots = await window.electronAPI.getFullLogs()
+      if (!lifetime.active || epoch !== lifetime.epoch) return
       if (Array.isArray(snapshots)) {
         // Find app.log (current session)
         const appLog = snapshots.find((s: any) => s.name === 'app.log')
@@ -428,12 +461,13 @@ export function Logs() {
         setRawLogs([])
       }
     } catch (err: any) {
+      if (!lifetime.active || epoch !== lifetime.epoch) return
       const message = `Не удалось загрузить логи: ${err?.message || err}`
       setRawLogsError(message)
       setRawLogs([])
     } finally {
       rawLogsFetchInFlightRef.current = false
-      if (!background) setRawLogsLoading(false)
+      if (lifetime.active && !background) setRawLogsLoading(false)
     }
   }, [])
 

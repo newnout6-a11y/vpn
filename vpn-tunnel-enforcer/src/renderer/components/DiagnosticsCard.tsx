@@ -130,8 +130,7 @@ export function DiagnosticsCard() {
 
   const handleOpenSnapshots = async () => {
     try {
-      const r = await window.electronAPI.openSnapshotsFolder()
-      if (!r.success) addLog('warn', `Не удалось открыть папку: ${r.error}`)
+      await window.electronAPI.openSnapshotsFolder()
     } catch (err: any) {
       addLog('error', `Не удалось открыть папку снимков: ${err.message ?? err}`)
     }
