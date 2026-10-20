@@ -30,7 +30,7 @@ describe('Maintenance source regressions', () => {
     expect(source).toContain("type MaintenanceAction = 'health-check' | 'auto-repair' | 'protection-test'")
     expect(source).toContain('runLeakSelfTest(leakRequestId)')
     expect(source).toContain('runRoutingSelfTest(requestId)')
-    expect(source).toContain('physicalAdapterReached')
+    expect(source).toContain('leakSelfTestVerdict(leak)')
     expect(source).toContain("routing.verdict === 'leak'")
     expect(source).toContain("routing.verdict !== 'ok'")
   })

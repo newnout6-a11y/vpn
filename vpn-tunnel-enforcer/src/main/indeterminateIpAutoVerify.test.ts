@@ -9,6 +9,8 @@ vi.mock('axios')
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 import { logEvent } from './appLogger'
 
+const measuredAdapter = { alias: 'Wi-Fi', ipv4: '192.168.1.2', publicIpViaThisAdapter: null, curlExitCode: 7, curlStderrTail: null }
+
 const cleanLeakResult = (ip: string) => ({
   ts: Date.now(),
   physicalAdapterInspectionComplete: true,
@@ -16,7 +18,7 @@ const cleanLeakResult = (ip: string) => ({
   publicIpMismatch: false,
   dnsLeakDetected: false,
   defaultRoutePublicIp: ip,
-  perAdapter: [],
+  perAdapter: [measuredAdapter],
   summary: 'OK'
 })
 
@@ -26,6 +28,18 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
   })
 
   describe('behavioral execution and safety gates', () => {
+    it.each(['empty', 'unknown', 'invalid-ip'])('does not adopt a VPN IP after %s evidence (AT-00-008)', async scenario => {
+      const recheck = vi.fn(), onVerified = vi.fn()
+      await executeIndeterminateVpnIpAutoVerify('13.143.214.3', {
+        isRunning: () => true, getVerdict: () => 'indeterminate', areRoutesActive: async () => true,
+        runLeakTest: async () => ({ ...cleanLeakResult('13.143.214.3'),
+          defaultRoutePublicIp: scenario === 'invalid-ip' ? '999.1.2.3' : '13.143.214.3',
+          perAdapter: scenario === 'empty' ? [] : [{ ...measuredAdapter, curlExitCode: scenario === 'unknown' ? -1 : 7 }] }),
+        recheck, onVerified
+      })
+      expect(recheck).not.toHaveBeenCalled()
+      expect(onVerified).not.toHaveBeenCalled()
+    })
     it('successfully adopts verified VPN IP baseline when leak test is completely clean and matches recheck', async () => {
       const onVerified = vi.fn()
       const recheck = vi.fn().mockResolvedValue({
@@ -45,7 +59,7 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
           publicIpMismatch: false,
           dnsLeakDetected: false,
           defaultRoutePublicIp: '13.143.214.3',
-          perAdapter: [],
+          perAdapter: [measuredAdapter],
           summary: 'OK'
         }),
         recheck,
@@ -71,7 +85,7 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
           publicIpMismatch: false,
           dnsLeakDetected: false,
           defaultRoutePublicIp: '13.143.214.3',
-          perAdapter: [],
+          perAdapter: [measuredAdapter],
           summary: 'Не удалось перечислить физические адаптеры'
         }),
         recheck,
@@ -97,7 +111,7 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
           publicIpMismatch: false,
           dnsLeakDetected: false,
           defaultRoutePublicIp: '13.143.214.3',
-          perAdapter: [],
+          perAdapter: [measuredAdapter],
           summary: 'УТЕЧКА: физический адаптер доступен'
         }),
         recheck,
@@ -123,7 +137,7 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
           publicIpMismatch: true,
           dnsLeakDetected: false,
           defaultRoutePublicIp: '13.143.214.3',
-          perAdapter: [],
+          perAdapter: [measuredAdapter],
           summary: 'УТЕЧКА: IP расходятся'
         }),
         recheck,
@@ -149,7 +163,7 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
           publicIpMismatch: false,
           dnsLeakDetected: true,
           defaultRoutePublicIp: '13.143.214.3',
-          perAdapter: [],
+          perAdapter: [measuredAdapter],
           summary: 'УТЕЧКА DNS'
         }),
         recheck,
@@ -179,7 +193,7 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
           publicIpMismatch: false,
           dnsLeakDetected: false,
           defaultRoutePublicIp: '13.143.214.3',
-          perAdapter: [],
+          perAdapter: [measuredAdapter],
           summary: 'OK'
         }),
         recheck,
@@ -209,7 +223,7 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
           publicIpMismatch: false,
           dnsLeakDetected: false,
           defaultRoutePublicIp: '13.143.214.3',
-          perAdapter: [],
+          perAdapter: [measuredAdapter],
           summary: 'OK'
         }),
         recheck,
@@ -283,7 +297,7 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
     it.each(['adopt', 'safety', 'routes', 'mismatch'])('redacts credentials before logEvent in the %s branch (AT-01-002)', async branch => {
       vi.mocked(logEvent).mockClear()
       const candidate = '198.51.100.3 token=pr44-candidate-secret'
-      const verified = '198.51.100.4 token=pr44-verified-secret'
+      const verified = '198.51.100.4'
       let routeChecks = 0
       await executeIndeterminateVpnIpAutoVerify(candidate, {
         isRunning: () => true,
@@ -300,6 +314,8 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
       expect(logged).not.toContain('pr44-candidate-secret')
       expect(logged).not.toContain('pr44-verified-secret')
       expect(logged).toContain('<redacted-credential>')
+      const expected = { adopt: 'adopting verified VPN IP', safety: 'safety gate', routes: 'routes no longer active', mismatch: 'sample mismatch' }
+      expect(logged).toContain(expected[branch as keyof typeof expected])
     })
 
     it('aborts when TUN stops running during verification', async () => {
@@ -320,7 +336,7 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
             publicIpMismatch: false,
             dnsLeakDetected: false,
             defaultRoutePublicIp: '13.143.214.3',
-            perAdapter: [],
+            perAdapter: [measuredAdapter],
             summary: 'OK'
           }
         },
@@ -346,7 +362,7 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
         publicIpMismatch: false,
         dnsLeakDetected: false,
         defaultRoutePublicIp: '13.143.214.3',
-        perAdapter: [],
+        perAdapter: [measuredAdapter],
         summary: 'OK'
       })
 
@@ -394,7 +410,7 @@ describe('indeterminate IP auto-verification (AT-07-001 / AT-07-005 / AT-07-006)
         publicIpMismatch: false,
         dnsLeakDetected: false,
         defaultRoutePublicIp: '13.143.214.3',
-        perAdapter: [],
+        perAdapter: [measuredAdapter],
         summary: 'OK'
       })
 

@@ -76,6 +76,7 @@ import { removeHijackingDevShortcut } from './taskbarIdentity'
 import { registerDiagnosticsExportHandler } from './diagnosticsExport'
 import { captureSnapshot, getSnapshotsDir, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
 import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, setLeakSelfTestCompletedCallback, setNetworkChangeCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
+import { leakSelfTestVerdict } from '../shared/leak-self-test'
 import { getTrafficForensicsStatus, restartTrafficForensicsSession, startTrafficForensicsSession, stopTrafficForensicsSession } from './trafficForensics'
 import { trafficMonitor, type TrafficStats } from './trafficMonitor'
 import { applyBrowserLeakProtection, rollbackBrowserLeakProtection } from './browserHardening'
@@ -2114,10 +2115,7 @@ app.whenReady().then(async () => {
 
   setLeakSelfTestCompletedCallback((r) => {
     if (
-      r.physicalAdapterInspectionComplete !== false &&
-      !r.physicalAdapterReached &&
-      !r.publicIpMismatch &&
-      !r.dnsLeakDetected &&
+      leakSelfTestVerdict(r) === 'ok' &&
       r.defaultRoutePublicIp
     ) {
       if (tunController.getStatus().running && ipMonitor.getEvidence().verdict === 'indeterminate') {

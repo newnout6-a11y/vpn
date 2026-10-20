@@ -101,3 +101,39 @@ it('cancels a pending leak check when routing fails', async () => {
   expect(useAppStore.getState().maintenanceLastResult).toBe(ipcError('network').message)
   view.unmount()
 })
+
+// AT-00-008: routing success cannot hide incomplete physical inspection.
+it.each([
+  { patch: { physicalAdapterInspectionComplete: false }, variant: 'warning' },
+  { patch: { physicalAdapterInspectionComplete: undefined }, variant: 'warning' },
+  { patch: { defaultRoutePublicIp: null }, variant: 'warning' },
+  { patch: { perAdapter: [] }, variant: 'warning' },
+  { patch: {}, variant: 'success' },
+  { patch: { physicalAdapterReached: true, physicalAdapterInspectionComplete: false }, variant: 'error' }
+])('requires complete protection evidence for toast $variant ($patch)', async ({ patch, variant }) => {
+  api.runLeakSelfTest.mockResolvedValue({ summary: 'FAKE-leak', physicalAdapterReached: false, publicIpMismatch: false,
+    physicalAdapterInspectionComplete: true, defaultRoutePublicIp: '1.2.3.4', perAdapter: [
+      { alias: 'Wi-Fi', ipv4: '192.168.1.2', publicIpViaThisAdapter: null, curlExitCode: 7, curlStderrTail: null }
+    ], ...patch })
+  const view = await start()
+  await act(async () => { resolveRoute({ verdict: 'ok', message: 'FAKE-route' }) })
+  expect(useAppStore.getState().globalToasts.at(-1)?.variant).toBe(variant)
+  expect(useAppStore.getState().maintenanceLastResult).not.toContain('FAKE-leak')
+  if (variant === 'warning') expect(useAppStore.getState().maintenanceLastResult).not.toContain('Проверка защиты пройдена')
+  view.unmount()
+})
+
+it.each(['dns', 'leak', 'cancelled'])('retains %s evidence in Maintenance result, log and toast', async scenario => {
+  api.runLeakSelfTest.mockResolvedValue({ ts: 1, summary: 'OK: stale', physicalAdapterReached: scenario === 'leak', publicIpMismatch: false,
+    cancelled: scenario === 'cancelled' ? true : undefined, physicalAdapterInspectionComplete: scenario !== 'cancelled',
+    defaultRoutePublicIp: '1.2.3.4', dnsLeakDetail: scenario === 'dns' ? 'Cloudflare видит 5.6.7.8, default-route отдаёт 1.2.3.4' : undefined,
+    perAdapter: [{ alias: 'Wi-Fi', ipv4: '192.168.1.2', publicIpViaThisAdapter: scenario === 'leak' ? '5.6.7.8' : null, curlExitCode: 7, curlStderrTail: null }] })
+  const view = await start()
+  await act(async () => { resolveRoute({ verdict: 'ok', message: 'FAKE-route' }) })
+  const state = useAppStore.getState()
+  const expected = scenario === 'cancelled' ? 'Тест отменён' : '5.6.7.8'
+  expect(state.maintenanceLastResult).toContain(expected)
+  expect(state.globalToasts.at(-1)?.description).toContain(expected)
+  expect(state.logs.at(-1)?.message).toContain(expected)
+  view.unmount()
+})

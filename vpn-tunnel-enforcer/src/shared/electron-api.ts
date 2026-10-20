@@ -292,21 +292,5 @@ export interface TrafficStats {
   startedAt: number | null
 }
 
-export interface LeakSelfTestAdapter {
-  alias: string
-  ipv4: string | null
-  publicIpViaThisAdapter: string | null
-  curlExitCode: number | null
-  curlStderrTail: string | null
-}
-export interface LeakSelfTestResult {
-  ts: number
-  physicalAdapterReached: boolean
-  publicIpMismatch: boolean
-  defaultRoutePublicIp: string | null
-  perAdapter: LeakSelfTestAdapter[]
-  summary: string
-  dnsLeakDetected?: boolean
-  dnsLeakDetail?: string
-  physicalAdapterInspectionComplete?: boolean
-}
+import type { LeakSelfTestResult } from './leak-self-test'
+export type { LeakSelfTestAdapter, LeakSelfTestResult } from './leak-self-test'

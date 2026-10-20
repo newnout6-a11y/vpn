@@ -230,23 +230,7 @@ export interface GlobalToast {
   ts: number
 }
 
-export interface LeakSelfTestResultClient {
-  ts: number
-  physicalAdapterReached: boolean
-  publicIpMismatch: boolean
-  defaultRoutePublicIp: string | null
-  dnsLeakDetected?: boolean
-  dnsLeakDetail?: string
-  physicalAdapterInspectionComplete?: boolean
-  perAdapter: Array<{
-    alias: string
-    ipv4: string | null
-    publicIpViaThisAdapter: string | null
-    curlExitCode: number | null
-    curlStderrTail: string | null
-  }>
-  summary: string
-}
+export type LeakSelfTestResultClient = import('../shared/leak-self-test').LeakSelfTestResult
 
 const globalToastTimers = new Map<string, ReturnType<typeof setTimeout>>()
 let firewallStatusRequest = 0
