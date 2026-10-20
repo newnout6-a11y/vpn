@@ -94,13 +94,32 @@ try {
         'export const execFile=()=>{throw new Error("Use promisified registry boundary")};execFile[Symbol.for("nodejs.util.promisify.custom")]=(...args)=>globalThis.vpnteNotificationReg(...args)' }))
     } }]
   })
+  await build({ entryPoints: [join(root, 'scripts/fixtures/maintenance-native.ts')],
+    outfile: join(work, 'maintenance.cjs'), bundle: true, platform: 'node', format: 'cjs', external: ['electron', 'koffi'],
+    plugins: [{ name: 'isolated-maintenance-boundaries', setup(builder) {
+      const boundaries = {
+        './tunController': 'export const getTunRuntimeDir=()=>globalThis.vpnteMaintenanceRuntime("tun-runtime")',
+        './systemSnapshot': 'export const getSnapshotsDir=()=>globalThis.vpnteMaintenanceSnapshots()',
+        './trafficForensics': 'export const stopTrafficForensicsSession=(...args)=>globalThis.vpnteMaintenanceCapture(...args)',
+        './runtimePaths': 'export const getPrivilegedRuntimeDir=(...args)=>globalThis.vpnteMaintenanceRuntime(...args)',
+        './runtimeDirSecurity': 'export const directoryExists=(...args)=>globalThis.vpnteMaintenanceExists(...args);export const verifyDirectoryHardened=(...args)=>globalThis.vpnteMaintenanceAcl(...args)'
+      }
+      builder.onResolve({ filter: /^\.\// }, args => /(?:diagnosticMaintenance|appLogger)\.ts$/.test(args.importer) && boundaries[args.path]
+        ? { path: args.path, namespace: 'maintenance-native' } : undefined)
+      builder.onResolve({ filter: /^fs\/promises$/ }, args => /(?:diagnosticMaintenance|appLogger)\.ts$/.test(args.importer)
+        ? { path: 'fs', namespace: 'maintenance-native' } : undefined)
+      builder.onLoad({ filter: /.*/, namespace: 'maintenance-native' }, ({ path }) => ({ loader: 'js', contents: path === 'fs'
+        ? 'export * from "node:fs/promises";export const rm=(...args)=>globalThis.vpnteMaintenanceRm(...args);export const writeFile=(...args)=>globalThis.vpnteMaintenanceWrite(...args)'
+        : boundaries[path] }))
+    } }]
+  })
   const env = { ...process.env }
   delete env.ELECTRON_RUN_AS_NODE
   delete env.NODE_ENV // No unit-test escape or test cipher in this native smoke.
   env.VPNTE_SMOKE_DIR = work
   env.VPNTE_SMOKE_PRELOAD = join(root, 'out/preload/index.js')
   env.VPNTE_SMOKE_VERSION = require('../package.json').devDependencies.electron
-  for (const [fixture, marker] of [['main.cjs', 'ELECTRON_SMOKE_PASS'], ['notifications.cjs', 'NOTIFICATIONS_NATIVE_PASS'], ['speed-ui.cjs', 'SPEED_UI_NATIVE_PASS'], ['requester.cjs', 'REQUEST_DOCUMENT_NATIVE_PASS'], ['config-request.cjs', 'CONFIG_REQUEST_NATIVE_PASS'], ['server-request.cjs', 'SERVER_REQUEST_NATIVE_PASS'], ['diagnostics-request.cjs', 'DIAGNOSTICS_REQUEST_NATIVE_PASS'], ['url-probe.cjs', 'URL_PROBE_NATIVE_PASS']]) {
+  for (const [fixture, marker] of [['maintenance.cjs', 'MAINTENANCE_NATIVE_PASS'], ['main.cjs', 'ELECTRON_SMOKE_PASS'], ['notifications.cjs', 'NOTIFICATIONS_NATIVE_PASS'], ['speed-ui.cjs', 'SPEED_UI_NATIVE_PASS'], ['requester.cjs', 'REQUEST_DOCUMENT_NATIVE_PASS'], ['config-request.cjs', 'CONFIG_REQUEST_NATIVE_PASS'], ['server-request.cjs', 'SERVER_REQUEST_NATIVE_PASS'], ['diagnostics-request.cjs', 'DIAGNOSTICS_REQUEST_NATIVE_PASS'], ['url-probe.cjs', 'URL_PROBE_NATIVE_PASS']]) {
     const result = spawnSync(require('electron'), [join(work, fixture)], {
       cwd: root, env, encoding: 'utf8', windowsHide: true, timeout: 60_000
     })

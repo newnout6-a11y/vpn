@@ -12,7 +12,7 @@ describe('Logs source regressions', () => {
     const handler = source.slice(handlerStart, handlerEnd)
 
     expect(handlerStart).toBeGreaterThanOrEqual(0)
-    expect(handler).toContain('window.electronAPI.clearAppLog()')
+    expect(handler).not.toContain('window.electronAPI.clearAppLog()') // artifacts already includes log cleanup
     expect(handler).toContain('window.electronAPI.connectionHistoryClear()')
     expect(handler).toContain('window.electronAPI.trafficHistoryClear()')
     expect(handler).toContain('window.electronAPI.clearDiagnosticArtifacts()')

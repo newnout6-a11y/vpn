@@ -4,6 +4,7 @@ import type { TunnelSnapshot } from './tunnel-state'
 import type { PlannedFeatureId, PlannedFeatureStatus } from './planned-features'
 import type { PublicIpInfo } from './publicIp'
 import type { ProxyInfo, AdaptiveBypassStatus, LeakCheckResult, SystemDiagnosticResult, RoutingPlan, LogFileSnapshot, UrlAvailabilityResult, ServerProbeResult } from './diagnostics'
+import type { DiagnosticClearReport } from './diagnostics'
 import type { AutoconfigTarget, SmartRouteRuleSetState, BrowserHardeningResult, AutoPilotResult, SystemNetworkResult, FirewallKillSwitchResult, FirewallRepairHealth, LocationPrivacyStatus } from './network'
 import type { TrafficHistoryEntry, TrafficForensicsStatus } from './traffic'
 import type {
@@ -65,8 +66,8 @@ export interface ElectronAPI {
   killStaleSingbox: () => Promise<{ success: boolean; message: string; skipped?: boolean; blocked?: boolean; candidates?: number; killed?: number; names?: string[]; error?: string }>
   logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => Promise<{ success: boolean }>
   getFullLogs: () => Promise<LogFileSnapshot[]>
-  clearAppLog: () => Promise<{ success: boolean }>
-  clearDiagnosticArtifacts: () => Promise<{ success: boolean; message: string; cleared: string[] }>
+  clearAppLog: () => Promise<DiagnosticClearReport>
+  clearDiagnosticArtifacts: () => Promise<DiagnosticClearReport>
   rollbackTunNetworkBaseline: () => Promise<SystemNetworkResult & { blocked?: boolean }>
   disableFirewallKillSwitch: () => Promise<{ success: boolean; message: string; skipped?: boolean }>
   getFirewallKillSwitchStatus: () => Promise<FirewallKillSwitchStatus>
@@ -91,7 +92,7 @@ export interface ElectronAPI {
     verdict: 'ok' | 'partial' | 'leak' | 'tunnel-off' | 'inconclusive'
     message: string
   }>
-  openSnapshotsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>
+  openSnapshotsFolder: () => Promise<{ success: true; path: string }>
   getTrafficForensicsStatus: () => Promise<TrafficForensicsStatus>
   restartTrafficForensics: () => Promise<TrafficForensicsStatus>
   // Config Import/Export

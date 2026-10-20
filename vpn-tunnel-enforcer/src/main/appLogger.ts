@@ -1,3 +1,5 @@
+import { classifyIpcError, ipcError, IpcFault } from '../shared/ipc-result'
+import type { DiagnosticClearReport, DiagnosticArtifact } from '../shared/diagnostics'
 import type { LogFileSnapshot } from '../shared/diagnostics'
 export type { LogFileSnapshot } from '../shared/diagnostics'
 import { app, shell } from 'electron'
@@ -380,10 +382,10 @@ export async function getFullLogs(): Promise<LogFileSnapshot[]> {
   return snapshots.map(redactSnapshot)
 }
 
-export async function clearAppLog(): Promise<void> {
-  queue = queue.catch(() => undefined).then(async () => {
-    // A pending rollover must finish before clearing, otherwise it could
-    // republish a previous generation after the user has cleared the logs.
+export async function clearAppLog(): Promise<DiagnosticClearReport> {
+  const report: DiagnosticClearReport = { success: true, cleared: [], errors: [] }
+  const cleanup = queue.catch(() => undefined).then(async () => {
+    // Finish rollover before clearing so it cannot republish old generations.
     const watcher = engineLogWatcher
     engineLogWatcher = null
     await watcher?.stop()
@@ -393,29 +395,48 @@ export async function clearAppLog(): Promise<void> {
       const hasTunLogs = await directoryExists(tunLogDir)
       if (hasTunLogs) {
         const acl = await verifyDirectoryHardened(tunLogDir)
-        if (!acl.hardened) throw new Error('RuntimeSecurityAclError: TUN log cleanup namespace is untrusted')
+        if (!acl.hardened) throw new IpcFault('permission')
       }
-      await Promise.all([
-        writeFile(getAppLogPath(), '', 'utf8'),
-        unlink(getAppLogPrevPath()).catch(() => undefined),
+      const targets: Array<{ artifact: DiagnosticArtifact; path: string; remove?: boolean }> = [
+        { artifact: 'app-log', path: getAppLogPath() },
+        { artifact: 'app-previous-log', path: getAppLogPrevPath(), remove: true },
         ...(hasTunLogs ? [
-          writeFile(join(tunLogDir, 'sing-box.log'), '', 'utf8').catch(() => undefined),
-          unlink(join(tunLogDir, 'sing-box.prev.log')).catch(() => undefined),
-          writeFile(join(tunLogDir, 'xray.log'), '', 'utf8').catch(() => undefined),
-          unlink(join(tunLogDir, 'xray.prev.log')).catch(() => undefined)
+          { artifact: 'sing-box-log' as const, path: join(tunLogDir, 'sing-box.log') },
+          { artifact: 'sing-box-previous-log' as const, path: join(tunLogDir, 'sing-box.prev.log'), remove: true },
+          { artifact: 'xray-log' as const, path: join(tunLogDir, 'xray.log') },
+          { artifact: 'xray-previous-log' as const, path: join(tunLogDir, 'xray.prev.log'), remove: true }
         ] : [])
-      ])
-      currentLogBytes = 0
-      integrityMarkerBytes = 0
+      ]
+      const results = await Promise.allSettled(targets.map(async target => {
+        if (!target.remove) return writeFile(target.path, '', 'utf8')
+        try { await unlink(target.path) }
+        catch (error) { if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error }
+      }))
+      results.forEach((result, index) => {
+        const artifact = targets[index].artifact
+        if (result.status === 'fulfilled') report.cleared.push(artifact)
+        else {
+          report.errors.push({ artifact, error: ipcError(classifyIpcError(result.reason)) })
+          logEvent('error', 'diagnostics', 'log cleanup failed', { artifact, error: result.reason })
+        }
+      })
+      report.success = report.errors.length === 0
+      if (report.cleared.includes('app-log')) {
+        currentLogBytes = 0
+        integrityMarkerBytes = 0
+      }
     } finally {
       if (watcher) startEngineLogRetention()
     }
   })
-  await queue
+  queue = cleanup
+  await cleanup
+  return report
 }
 
 export async function openLogFolder(): Promise<string> {
   await ensureLogDir()
-  await shell.openPath(getLogDir())
+  const error = await shell.openPath(getLogDir())
+  if (error) throw new Error(error)
   return getLogDir()
 }
