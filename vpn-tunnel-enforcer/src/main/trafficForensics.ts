@@ -331,8 +331,10 @@ async function writeManifest(manifest: SessionManifest, assertActive: () => void
   runtimeState = normalized
 }
 
-export async function recordTrafficForensicsAppEvent(input: TrafficForensicsAppEventInput): Promise<boolean> {
+export async function recordTrafficForensicsAppEvent(input: TrafficForensicsAppEventInput, assertActive: () => void = () => {}): Promise<boolean> {
+  assertActive()
   const manifest = await readLatestManifest()
+  assertActive()
   if (!manifest?.running || !manifest.sessionDir) return false
   const row = {
     timestamp: input.timestamp ?? Date.now(),
@@ -342,8 +344,10 @@ export async function recordTrafficForensicsAppEvent(input: TrafficForensicsAppE
   }
   try {
     await appendFile(join(manifest.sessionDir, 'app-events-source.ndjson'), JSON.stringify(row) + '\n', 'utf-8')
+    assertActive()
     return true
   } catch (err: any) {
+    assertActive()
     logEvent('warn', 'traffic-forensics', 'failed to record app forensic event', {
       sessionId: manifest.sessionId,
       event: input.event,

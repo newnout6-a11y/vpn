@@ -23,30 +23,50 @@
  *
  * ─── Cancellation ─────────────────────────────────────────────────────────
  * Concurrent `runLeakSelfTest()` callers share the same in-flight run instead
- * of cancelling each other. `cancelLeakSelfTest()` still bumps
- * `activeSessionId`; every await boundary inside the active run checks
- * `mySession !== activeSessionId` and bails out with a sanitized cancelled
- * result. This kills false positives after user-initiated stop without making
- * manual checks race the periodic timer.
+ * of cancelling each other. Each subscriber has its own cancellation/deadline;
+ * the last cancellation or global stop kills physical children. Admission is
+ * retained until child close, native reads and forensic imports have drained.
  */
-import { exec as execCb, execFile as execFileCb } from 'child_process'
-import { promisify } from 'util'
+import { execFile as execFileCb, type ChildProcess } from 'child_process'
+import { randomUUID } from 'node:crypto'
 import { networkInterfaces } from 'os'
 import { logEvent } from './appLogger'
 import { nativePhysicalIpv4Sources } from './native/nativeNetworkReads'
+import { operations } from './operations'
+import type { OperationLease } from './operationRegistry'
+import type { OperationOwner } from '../shared/operation'
+import { IpcFault } from '../shared/ipc-result'
 
-function recordForensicLeakSelfTestEvent(event: string, details: Record<string, unknown>): void {
-  import('./trafficForensics')
-    .then(({ recordTrafficForensicsAppEvent }) => recordTrafficForensicsAppEvent({
-      source: 'leak-self-test',
-      event,
-      details
-    }))
+async function recordForensicLeakSelfTestEvent(event: string, details: Record<string, unknown>, session: number, signal: AbortSignal): Promise<void> {
+  await import('./trafficForensics')
+    .then(async ({ recordTrafficForensicsAppEvent }) => {
+      if (session !== activeSessionId || signal.aborted) return
+      await recordTrafficForensicsAppEvent({
+        source: 'leak-self-test',
+        event,
+        details
+      }, () => { if (session !== activeSessionId || signal.aborted) throw new IpcFault('cancelled') })
+    })
     .catch(() => undefined)
 }
 
-const exec = promisify(execCb)
-const execFile = promisify(execFileCb)
+/** No shell: kill addresses the owned curl/PowerShell process itself. Callback
+ * completion is retained through close even if a provider settles it early. */
+async function runProbeProcess(file: string, args: string[], timeout: number, signal: AbortSignal): Promise<{ stdout: string; stderr: string }> {
+  if (signal.aborted) throw new IpcFault('cancelled')
+  let child: ChildProcess | undefined, closed = Promise.resolve()
+  const stop = () => { try { child?.kill() } catch { /* retain ownership until close */ } }
+  const completion = new Promise<{ stdout: string; stderr: string }>((yes, no) => {
+    const spawned = execFileCb(file, args, { windowsHide: true, timeout, encoding: 'utf8' }, (error, stdout, stderr) =>
+      error ? no(Object.assign(error, { stdout, stderr })) : yes({ stdout, stderr }))
+    child = spawned
+    closed = new Promise<void>(done => { spawned.once('close', () => done()) })
+    signal.addEventListener('abort', stop, { once: true })
+    if (signal.aborted) stop()
+  })
+  try { return await completion }
+  finally { await closed; signal.removeEventListener('abort', stop) }
+}
 
 export interface AdapterReach {
   alias: string
@@ -95,7 +115,14 @@ const DNS_TRACE_ENDPOINTS = [
 // the value at start (`mySession`) and bail at every await boundary if the
 // global has moved past them.
 let activeSessionId = 0
-let inFlightLeakTest: Promise<LeakSelfTestResult> | null = null
+interface SharedLeakRun {
+  session: number
+  controller: AbortController
+  subscribers: Set<OperationLease>
+  completion: Promise<LeakSelfTestResult>
+  finished: boolean
+}
+let inFlightLeakTest: SharedLeakRun | null = null
 let inFlightSessionId = 0
 
 function cancelledResult(): LeakSelfTestResult {
@@ -118,23 +145,21 @@ function parseIp(stdout: string): string | null {
   return null
 }
 
-async function fetchDnsTracePublicIp(): Promise<string | null> {
+async function fetchDnsTracePublicIp(signal: AbortSignal): Promise<string | null> {
   for (const endpoint of DNS_TRACE_ENDPOINTS) {
     try {
-      const { stdout } = await exec(
-        `curl.exe -4 -sS --max-time 4 --connect-timeout 4 ${endpoint}`,
-        { windowsHide: true, timeout: 6000, encoding: 'utf8' }
-      )
+      const { stdout } = await runProbeProcess('curl.exe', ['-4', '-sS', '--max-time', '4', '--connect-timeout', '4', endpoint], 6000, signal)
       const ip = parseIp(stdout)
       if (ip) return ip
     } catch {
+      if (signal.aborted) return null
       // try next endpoint
     }
   }
   return null
 }
 
-async function curlBound(ip: string, url: string, timeoutSec = 4): Promise<{ stdout: string; exitCode: number; stderr: string }> {
+async function curlBound(ip: string, url: string, signal: AbortSignal, timeoutSec = 4): Promise<{ stdout: string; exitCode: number; stderr: string }> {
   // We want curl to succeed (stdout = result) OR fail cleanly. We capture
   // both so we can log details. The `--interface` flag forces the TCP source
   // IP, which is what we want for testing physical adapter reachability.
@@ -142,7 +167,7 @@ async function curlBound(ip: string, url: string, timeoutSec = 4): Promise<{ std
   // as literal arguments — no shell-metacharacter surface.
   const args = ['-4', '--interface', ip, '-sS', '--max-time', String(timeoutSec), '--connect-timeout', String(timeoutSec), url]
   try {
-    const { stdout, stderr } = await execFile('curl.exe', args, { windowsHide: true, timeout: (timeoutSec + 2) * 1000, encoding: 'utf8' })
+    const { stdout, stderr } = await runProbeProcess('curl.exe', args, (timeoutSec + 2) * 1000, signal)
     return { stdout, exitCode: 0, stderr: stderr || '' }
   } catch (err: any) {
     return {
@@ -153,18 +178,20 @@ async function curlBound(ip: string, url: string, timeoutSec = 4): Promise<{ std
   }
 }
 
-async function listPhysicalAdaptersWithIPv4(): Promise<{ adapters: { alias: string; ipv4: string }[]; complete: boolean }> {
+async function listPhysicalAdaptersWithIPv4(signal: AbortSignal): Promise<{ adapters: { alias: string; ipv4: string }[]; complete: boolean }> {
   if (process.platform !== 'win32') return { adapters: [], complete: true }
   // Native iphlpapi read first (no powershell.exe spawn). It throws on ANY
   // error or implausible enumeration; we then use the PowerShell path below,
   // never an empty "nothing to test" answer.
   try {
     const rows = await nativePhysicalIpv4Sources()
+    if (signal.aborted) return { adapters: [], complete: false }
     // An empty native answer is not proof that there is nothing to test (it filters differently
     // from PowerShell, e.g. address DAD state): ask PowerShell before reporting "no adapters".
     if (rows.length > 0) return { adapters: rows.map(r => ({ alias: r.alias, ipv4: r.ipv4 })), complete: true }
     logEvent('debug', 'leak-test', 'native adapter read returned no sources, using PowerShell')
   } catch (err) {
+    if (signal.aborted) return { adapters: [], complete: false }
     logEvent('debug', 'leak-test', 'native adapter read unavailable, using PowerShell', { err: (err as Error).message })
   }
   // Mirror the lockdown filter — keep them consistent so the leak test
@@ -197,11 +224,7 @@ $rows | ConvertTo-Json -Compress
 `
   const encoded = Buffer.from(script, 'utf-16le').toString('base64')
   try {
-    const { stdout } = await exec(`powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`, {
-      windowsHide: true,
-      timeout: 10000,
-      encoding: 'utf8'
-    })
+    const { stdout } = await runProbeProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], 10000, signal)
     const text = String(stdout).trim()
     if (!text || text === 'null') return { adapters: [], complete: true }
     const parsed = JSON.parse(text)
@@ -211,56 +234,75 @@ $rows | ConvertTo-Json -Compress
       complete: true
     }
   } catch (err) {
+    if (signal.aborted) return { adapters: [], complete: false }
     logEvent('warn', 'leak-test', 'failed to list physical adapters', { err: (err as Error).message })
     return { adapters: [], complete: false }
   }
 }
 
-export async function runLeakSelfTest(): Promise<LeakSelfTestResult> {
-  if (inFlightLeakTest && inFlightSessionId === activeSessionId) return inFlightLeakTest
-
-  activeSessionId += 1
-  const mySession = activeSessionId
-  inFlightSessionId = mySession
-
-  const run = runLeakSelfTestOnce(mySession).finally(() => {
-    if (inFlightLeakTest === run) inFlightLeakTest = null
-  })
-  inFlightLeakTest = run
-  return run
+export async function runLeakSelfTest(options: { signal?: AbortSignal; onOperation?: (lease: OperationLease) => void; owner?: OperationOwner; timeoutMs?: number } = {}): Promise<LeakSelfTestResult> {
+  let subscribed: SharedLeakRun | undefined
+  try {
+    return await operations.run('leak-check', async lease => {
+      options.onOperation?.(lease)
+      lease.assertActive()
+      let run = inFlightLeakTest
+      if (run?.controller.signal.aborted) throw new IpcFault('conflict')
+      if (!run) {
+        inFlightSessionId = ++activeSessionId
+        const created: SharedLeakRun = { session: activeSessionId, controller: new AbortController(), subscribers: new Set(), finished: false,
+          completion: Promise.resolve(cancelledResult()) }
+        inFlightLeakTest = run = created
+        created.completion = Promise.resolve().then(() => runLeakSelfTestOnce(created.session, created.controller.signal)).finally(() => {
+          created.finished = true
+          if (inFlightLeakTest === created) inFlightLeakTest = null
+        })
+      }
+      subscribed = run
+      const shared = run
+      shared.subscribers.add(lease)
+      const detach = () => {
+        shared.subscribers.delete(lease)
+        if (!shared.subscribers.size && !shared.finished) shared.controller.abort()
+      }
+      lease.signal.addEventListener('abort', detach, { once: true })
+      try { return structuredClone(await lease.wait(shared.completion)) }
+      finally { lease.signal.removeEventListener('abort', detach); detach() }
+    }, { signal: options.signal, owner: options.owner, timeoutMs: options.timeoutMs, resource: `leak-subscriber:${randomUUID()}` })
+  } catch (error) {
+    // Preserve the legacy global-stop view; per-request cancel/deadline stay typed.
+    if (subscribed && subscribed.session !== activeSessionId && error instanceof IpcFault && error.category === 'cancelled') return cancelledResult()
+    throw error
+  }
 }
 
-async function runLeakSelfTestOnce(mySession: number): Promise<LeakSelfTestResult> {
+async function runLeakSelfTestOnce(mySession: number, signal: AbortSignal): Promise<LeakSelfTestResult> {
   const ts = Date.now()
 
   // 1. Public IP via the default route (which should be the TUN). Use plain
   //    curl with no --interface so the OS picks the default route.
   let defaultRoutePublicIp: string | null = null
   try {
-    const { stdout } = await exec(`curl.exe -4 -sS --max-time 6 --connect-timeout 6 ${IP_ENDPOINT}`, {
-      windowsHide: true,
-      timeout: 8000,
-      encoding: 'utf8'
-    })
-    if (mySession !== activeSessionId) return cancelledResult()
+    const { stdout } = await runProbeProcess('curl.exe', ['-4', '-sS', '--max-time', '6', '--connect-timeout', '6', IP_ENDPOINT], 8000, signal)
+    if (mySession !== activeSessionId || signal.aborted) return cancelledResult()
     defaultRoutePublicIp = parseIp(stdout)
   } catch {
-    if (mySession !== activeSessionId) return cancelledResult()
+    if (mySession !== activeSessionId || signal.aborted) return cancelledResult()
     defaultRoutePublicIp = null
   }
 
   // 2. Per physical adapter: try to reach 1.1.1.1 directly bypassing the
   //    default route. If curl succeeds while TUN+kill-switch are up, that's a
   //    leak.
-  const adapterList = await listPhysicalAdaptersWithIPv4()
-  if (mySession !== activeSessionId) return cancelledResult()
+  const adapterList = await listPhysicalAdaptersWithIPv4(signal)
+  if (mySession !== activeSessionId || signal.aborted) return cancelledResult()
   const adapters = adapterList.adapters
   const physicalAdapterInspectionComplete = adapterList.complete
 
   const perAdapter: AdapterReach[] = []
   for (const a of adapters) {
-    const res = await curlBound(a.ipv4, IP_ENDPOINT, 4)
-    if (mySession !== activeSessionId) return cancelledResult()
+    const res = await curlBound(a.ipv4, IP_ENDPOINT, signal)
+    if (mySession !== activeSessionId || signal.aborted) return cancelledResult()
     perAdapter.push({
       alias: a.alias,
       ipv4: a.ipv4,
@@ -272,7 +314,7 @@ async function runLeakSelfTestOnce(mySession: number): Promise<LeakSelfTestResul
 
   // Cancellation check before computing the verdict — we don't want to log
   // a "leak" against a user who has already torn the tunnel down.
-  if (mySession !== activeSessionId) return cancelledResult()
+  if (mySession !== activeSessionId || signal.aborted) return cancelledResult()
 
   const physicalAdapterReached = perAdapter.some(
     (a) => a.curlExitCode === 0 && a.publicIpViaThisAdapter !== null
@@ -288,8 +330,8 @@ async function runLeakSelfTestOnce(mySession: number): Promise<LeakSelfTestResul
   let dnsLeakDetected = false
   let dnsLeakDetail: string | null = null
   try {
-    const cfIp = await fetchDnsTracePublicIp()
-    if (mySession !== activeSessionId) return cancelledResult()
+    const cfIp = await fetchDnsTracePublicIp(signal)
+    if (mySession !== activeSessionId || signal.aborted) return cancelledResult()
     if (cfIp && defaultRoutePublicIp && cfIp !== defaultRoutePublicIp) {
       dnsLeakDetail = `Cloudflare видит ${cfIp}, default-route отдаёт ${defaultRoutePublicIp}`
     }
@@ -327,8 +369,19 @@ async function runLeakSelfTestOnce(mySession: number): Promise<LeakSelfTestResul
   // Without this, a stop-tun that finishes between adapter probes and here
   // would still emit a misleading "УТЕЧКА" log line and trigger the
   // renderer leak banner.
-  if (mySession !== activeSessionId) return cancelledResult()
+  if (mySession !== activeSessionId || signal.aborted) return cancelledResult()
 
+  await recordForensicLeakSelfTestEvent('leak-self-test-result', {
+    physicalAdapterReached,
+    publicIpMismatch,
+    dnsLeakDetected,
+    dnsLeakDetail,
+    defaultRoutePublicIp,
+    perAdapter,
+    summary
+  }, mySession, signal)
+
+  if (mySession !== activeSessionId || signal.aborted) return cancelledResult()
   logEvent(physicalAdapterReached || publicIpMismatch || dnsLeakDetected ? 'warn' : 'info', 'leak-test', summary, {
     physicalAdapterReached,
     publicIpMismatch,
@@ -337,16 +390,6 @@ async function runLeakSelfTestOnce(mySession: number): Promise<LeakSelfTestResul
     defaultRoutePublicIp,
     perAdapter
   })
-  recordForensicLeakSelfTestEvent('leak-self-test-result', {
-    physicalAdapterReached,
-    publicIpMismatch,
-    dnsLeakDetected,
-    dnsLeakDetail,
-    defaultRoutePublicIp,
-    perAdapter,
-    summary
-  })
-
   return result
 }
 
@@ -364,14 +407,17 @@ export function setLeakSelfTestCompletedCallback(cb: ((r: LeakSelfTestResult) =>
 }
 
 /**
- * Cancel any in-flight `runLeakSelfTest()` by bumping the session id. The
- * existing run will short-circuit at its next await boundary and return a
- * sanitized result. Periodic ticks scheduled after this call get a fresh
+ * Cancel every subscriber, kill physical children and fence late publications.
+ * Owned effects keep draining after the prompt sanitized reply.
+ * Periodic ticks scheduled after this call get a fresh
  * session id of their own and run normally — call `stopPeriodicLeakTest()`
  * if you want them to stop firing entirely.
  */
 export function cancelLeakSelfTest(): void {
   activeSessionId += 1
+  const run = inFlightLeakTest
+  run?.controller.abort()
+  for (const lease of run?.subscribers ?? []) lease.cancel()
 }
 
 export function resetLeakTestThrottlesForTest(): void {
@@ -416,7 +462,7 @@ export function triggerLeakCheckNow(reason: string): void {
   if (now - lastTriggerAt < 5_000) return
   lastTriggerAt = now
   logEvent('debug', 'leak-test', 'event-triggered run', { reason })
-  const run = runLeakSelfTest()
+  const run = runLeakSelfTest({ owner: 'adaptive-retry' })
   const runSession = inFlightSessionId
   run
     .then((r) => {
@@ -427,7 +473,7 @@ export function triggerLeakCheckNow(reason: string): void {
         onLeakSelfTestCompletedCb?.(r)
       }
     })
-    .catch((err) => logEvent('warn', 'leak-test', 'event-triggered run threw', { err: (err as Error).message, reason }))
+    .catch((err) => { if (runSession === activeSessionId) logEvent('warn', 'leak-test', 'event-triggered run threw', { err: (err as Error).message, reason }) })
 }
 
 // Network-change detection. Windows raises NetworkInformation.NetworkAdapter
@@ -506,7 +552,7 @@ export function startPeriodicLeakTest(
   periodicLeakTimer = setInterval(() => {
     if (!shouldRun()) return
     if (isTransitionSuppressed()) return
-    const run = runLeakSelfTest()
+    const run = runLeakSelfTest({ owner: 'adaptive-retry' })
     const runSession = inFlightSessionId
     run
       .then((r) => {
@@ -520,7 +566,7 @@ export function startPeriodicLeakTest(
           onLeakSelfTestCompletedCb?.(r)
         }
       })
-      .catch((err) => logEvent('warn', 'leak-test', 'periodic test threw', { err: (err as Error).message }))
+      .catch((err) => { if (runSession === activeSessionId) logEvent('warn', 'leak-test', 'periodic test threw', { err: (err as Error).message }) })
   }, intervalMs)
 }
 
@@ -529,7 +575,5 @@ export function stopPeriodicLeakTest(): void {
     clearInterval(periodicLeakTimer)
     periodicLeakTimer = null
   }
-  // Bump the session so any still-resolving run from the timer doesn't
-  // sneak past the callback gate after the timer is gone.
-  activeSessionId += 1
+  cancelLeakSelfTest()
 }

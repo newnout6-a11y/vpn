@@ -4,22 +4,25 @@ const execMock = vi.hoisted(() => vi.fn())
 const execFileMock = vi.hoisted(() => vi.fn())
 const logEventMock = vi.hoisted(() => vi.fn())
 
-;(execMock as any)[Symbol.for('nodejs.util.promisify.custom')] = (cmd: string, opts: unknown) =>
-  new Promise((resolve, reject) => {
-    execMock(cmd, opts, (err: Error | null, stdout: string, stderr: string) => {
-      if (err) {
-        reject(Object.assign(err, { stdout, stderr }))
-        return
-      }
-      resolve({ stdout, stderr })
+vi.mock('child_process', async () => {
+  const { EventEmitter } = await import('node:events')
+  const execFile = (file: string, args: string[], options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+    const child = Object.assign(new EventEmitter(), { kill: vi.fn(() => true) })
+    const finished = (error: (Error & { stdout?: string; stderr?: string }) | null, stdout = '', stderr = '') => queueMicrotask(() => {
+      callback(error, stdout || error?.stdout || '', stderr || error?.stderr || '')
+      child.emit('close', error ? 1 : 0)
     })
-  })
-
-vi.mock('child_process', () => ({
-  default: { exec: execMock, execFile: execFileMock },
-  exec: execMock,
-  execFile: execFileMock
-}))
+    if (args.includes('--interface')) execFileMock(file, args, options, finished)
+    else execMock([file, ...args].join(' '), options, finished)
+    return child
+  }
+  return {
+    default: { exec: execMock, execFile },
+    exec: execMock,
+    execFile
+  }
+})
+vi.mock('./trafficForensics', () => ({ recordTrafficForensicsAppEvent: vi.fn() }))
 
 vi.mock('./appLogger', () => ({
   logEvent: logEventMock
