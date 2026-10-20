@@ -81,6 +81,9 @@ vi.mock('tls', async (importOriginal) => {
 
 import { probeTls, registerLiveServerProbeIpcHandlers, runLiveServerCheck } from './liveServerProbe'
 import { computeHistoryDiff, liveServerHistory } from './liveServerHistory'
+import { redactSensitiveConfig } from './vpnProfiles'
+import { withCorrelation } from './actionCorrelation'
+import { operations } from './operations'
 
 describe('Live Server Audit Regressions: Defect Verifications', () => {
   beforeEach(() => {
@@ -126,6 +129,7 @@ describe('Live Server Audit Regressions: Defect Verifications', () => {
       {},
       { profileId: 'audit-p1', host: 'audit.invalid', port: 443, requestId: reqId }
     )
+    const cancelled = expect(pending).rejects.toMatchObject({ category: 'cancelled' })
 
     // Attempting cancel with non-existent ID fails gracefully
     const unknownCancel = await mocks.handlers.get('server:live-check-cancel')!({}, 'wrong-id')
@@ -136,8 +140,8 @@ describe('Live Server Audit Regressions: Defect Verifications', () => {
     expect(response.cancelled).toBe(true)
 
     release([])
-    const checkResult = await pending
-    expect(checkResult.error).toMatch(/cancelled|aborted/i)
+    await cancelled
+    expect(mocks.saved).toHaveLength(0)
   })
 
   // Defect 3 & 7: Unique UUIDs per check and diff attached before history save
@@ -147,27 +151,38 @@ describe('Live Server Audit Regressions: Defect Verifications', () => {
     })
     const prev = vi.spyOn(liveServerHistory, 'getPreviousSuccessfulCheck').mockReturnValue(mocks.previous as any)
 
-    const controller = new AbortController()
-    controller.abort()
-
-    const optionsA = { profileId: 'audit-p2', host: '192.0.2.2', port: 443 }
-    const optionsB = { profileId: 'audit-p2', host: '192.0.2.2', port: 443 }
-
-    const a = await runLiveServerCheck(optionsA, controller.signal)
-    const b = await runLiveServerCheck(optionsB, controller.signal)
-
-    // Defect 3: IDs must be unique UUIDs
-    expect(a.id).not.toBe(b.id)
-    expect(a.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
-    expect(b.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
-
-    // Defect 7: changesFromPrevious must be present in saved history snapshots
-    expect(a.infrastructure?.changesFromPrevious?.ipChanged).toBe(true)
-    expect(mocks.saved[0].infrastructure?.changesFromPrevious).toBeDefined()
-    expect(mocks.saved[0].infrastructure.changesFromPrevious.ipChanged).toBe(true)
-
-    save.mockRestore()
-    prev.mockRestore()
+    // AT-00-003/005: cancelled checks are never history fixtures. Complete two
+    // real loopback checks to verify identity and persistence ordering instead.
+    const server = localHttp.createServer((_req, res) => { res.writeHead(204); res.end() })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const options = { profileId: 'audit-p2', host: '127.0.0.1', port: (server.address() as any).port }
+      const correlationId = 'ipc_11111111111141118111111111111111'
+      const a = await withCorrelation(correlationId, () => runLiveServerCheck(options))
+      const b = await withCorrelation(correlationId, () => runLiveServerCheck(options))
+      expect(a.id).not.toBe(b.id)
+      for (const check of [a, b]) {
+        expect(check.id).toMatch(/^op_[0-9a-f]{32}$/i)
+        expect(check.cancelled).toBe(false)
+        expect(check.infrastructure?.changesFromPrevious?.ipChanged).toBe(true)
+      }
+      expect(mocks.saved).toHaveLength(2)
+      expect(mocks.saved[0].infrastructure.changesFromPrevious.ipChanged).toBe(true)
+      expect(mocks.saved[1].infrastructure.changesFromPrevious.ipChanged).toBe(true)
+      // The real serializer and production redactor must preserve distinct
+      // receipts and the action key, while cancellation UUIDs stay internal.
+      const redacted = JSON.parse(JSON.stringify(redactSensitiveConfig(mocks.saved)))
+      expect(redacted.map((check: any) => check.operationKey)).toEqual([a.id, b.id])
+      expect(redacted.map((check: any) => check.correlationId)).toEqual([correlationId, correlationId])
+      for (const check of [a, b]) {
+        const operation = operations.list().find(item => item.operationKey === check.id)!
+        expect(JSON.stringify(redacted)).not.toContain(operation.operationId)
+      }
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+      save.mockRestore(); prev.mockRestore()
+    }
   })
 })
 
@@ -236,13 +251,15 @@ it('isolates cancellation by sender and rejects duplicate IDs', async () => {
   const cancel = mocks.handlers.get('server:live-check-cancel')!
   const options = { requestId: 'same-id', host: 'audit.invalid', port: 443 }
   const pending = run({ sender: owner }, options)
-  await expect(run({ sender: owner }, options)).rejects.toThrow('Duplicate')
+  const cancelled = expect(pending).rejects.toMatchObject({ category: 'cancelled' })
+  await expect(run({ sender: owner }, options)).rejects.toMatchObject({ category: 'conflict' })
   expect((await cancel({ sender: other }, 'same-id')).cancelled).toBe(false)
   expect((await cancel({ sender: owner }, 'same-id')).cancelled).toBe(true)
+  expect(owner.listenerCount('destroyed')).toBe(1)
   release([]) // Native cancellation initiates cleanup; the raw query must also settle.
-  expect((await pending).cancelled).toBe(true)
+  await cancelled
   expect(mocks.cancelDns).toHaveBeenCalled()
-  expect(owner.listenerCount('destroyed')).toBe(0)
+  await vi.waitFor(() => expect(owner.listenerCount('destroyed')).toBe(0))
   mocks.resolve4.mockResolvedValue([])
 })
 it.each(['timeout', 'filtered'])('does not classify %s as a closed port', state => {

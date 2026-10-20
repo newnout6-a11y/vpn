@@ -1875,3 +1875,46 @@ Final Revix follow-up:full5005 passed/5 skipped/0 failed,307.72s,
 302 files passed/2 skipped;targeted127/127,integration37/37,build/typecheck,
 coverage/diff exit0. Source/test tree не менялся во время full.
 Exact-head Qodo/Revix/CI pending;весь WP-0 ещё не завершён.
+
+#92 принят:final0ae31ed,Qodo1558804 completed —все3 findings implemented,
+новых/pending нет;Revix118402877903 Low risk/neutral без нерешённых подтверждённых
+issue. Stale nit и вопросы разобраны в progress.md. CI39353480596 success
+на том же SHA. Merge/main4410b62,reviewed/main tree422af1b004d73ef3a043e093556d65c7f48adecb
+совпал. Local final5005/5/0,37/37 integration,127/127 targeted,build/typecheck/
+coverage/diff прошли. Это приёмка slice,а не всех AT WP-0.
+Следующий slice —общий live operation owner,поздние progress/history/document/UI.
+
+## Общая live-проверка: root operation (20.10.2026)
+
+AT-00-003/005/007,F-021/F-143:root runLiveServerCheck теперь получает registry
+UUID/correlation/owner и deadline25s/60s;lease.wait ограждает все фазы,
+а handshake physical worker retained самой root lease. Ответ на cancel/
+deadline prompt,shutdown ждёт actual DNS/socket/child/readiness drain.
+Поздние progress и следующие фазы подавлены;history записывается через
+synchronous active-only commit,receipt operationKey связан с internal operationId.
+Delayed split import и оба ASN provider не читают/не меняют state после abort.
+11/11 новых регрессий failed на baseline4410b62;после fix targeted59/59,
+explicit integration37/37,build/typecheck165/0any,coverage927/927 и210/210,
+diff check passed. Full и exact-head PR gates pending.
+Это не закрывает requester/document/batch/UI и provenance/corruption history;
+весь WP-0 остаётся в работе.
+
+Final root slice full:5016 passed/5 skipped/0 failed,303 files passed/2 skipped,
+432.03s,exit0. Первые3 failures были прежними cancellation fixtures;
+они теперь проверяют typed cancelled и два настоящих завершённых loopback
+check для UUID/diff. Targeted70/70,integration37/37,build/typecheck165/0any,
+coverage/diff passed. Exact-head Qodo/Revix/CI ещё pending;WP-0 в работе.
+
+Qodo #93 follow-up:receipt id=op_32hex,operationKey/correlationId сохраняют
+связь после production credential redaction;raw cancellation UUID остаётся
+в registry. Optional поля сохраняют совместимость legacy history.
+Single/batch admission slots и destroyed listener удерживаются через readonly
+lease.drained,включая prompt cancel/deadline;повтор/лимит —typed conflict.
+Четыре sender-limit regressions (single/batch×cancel/deadline) плюс настоящий
+redactor двух loopback receipts воспроизвели замечания;targeted145/145,
+integration37/37,coverage/diff passed. Новые full/build и exact-head gates pending.
+
+Qodo follow-up local final:full5020 passed/5 skipped/0 failed,440.20s,
+303 files passed/2 skipped;build/typecheck165/0any,targeted145/145,
+integration37/37,coverage/diff passed. Старый CI39356680659 success;
+приёмка исправлений требует нового exact-head Qodo/Revix/CI.

@@ -9,6 +9,8 @@ const AsyncFunction = (async () => {}).constructor
 export interface OperationLease {
   readonly signal: AbortSignal
   readonly operation: ManagedOperation
+  /** Settles after all physical effects, even after a prompt terminal reply. */
+  readonly drained: Promise<void>
   assertActive(): void
   /** An admitted coordinator may propagate preemption using the same identity. */
   cancel(): boolean
@@ -135,7 +137,7 @@ export class OperationRegistry {
       effects.push(task.then(() => { pendingEffects-- }, () => { pendingEffects-- }))
       return task
     }
-    const lease: OperationLease = { signal: controller.signal, get operation() { return { ...entry.operation } }, assertActive, cancel: () => entry.cancel('cancelled'), expire: () => entry.cancel('timeout'), retain,
+    const lease: OperationLease = { signal: controller.signal, drained, get operation() { return { ...entry.operation } }, assertActive, cancel: () => entry.cancel('cancelled'), expire: () => entry.cancel('timeout'), retain,
       async wait<R>(task: Promise<R>): Promise<R> {
         retain(task)
         assertActive()
