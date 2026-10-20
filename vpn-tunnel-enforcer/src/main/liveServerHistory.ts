@@ -24,6 +24,7 @@ interface DecodedHistory {
   valid: boolean
   version?: number
   migration?: HistoryMigration
+  invalidMigration?: boolean
 }
 
 function isHistoryMigration(value: unknown): value is HistoryMigration {
@@ -55,6 +56,20 @@ export function sanitizeLiveCheckForStorage(check: LiveServerCheck): LiveServerC
   for (const key of ['id', 'profileId', 'operationKey', 'correlationId'] as const) {
     if (check[key] !== undefined) sanitized[key] = check[key]
   }
+  // Redirect diagnostics need a destination, never URL credentials or parameters.
+  try {
+    const location = new URL(check.http?.locationHeader ?? '')
+    if ((location.protocol === 'http:' || location.protocol === 'https:') && sanitized.http) {
+      const destination = location.protocol + '//' + redactSensitiveText(
+        (location.host + decodeURIComponent(location.pathname))
+          .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '[REDACTED_UUID]'))
+      sanitized.http.locationHeader = destination
+      for (const finding of sanitized.findings) if (finding.code === 'HTTP_REDIRECT') {
+        finding.detail = `Ответ HTTP ${sanitized.http.statusCode ?? ''} перенаправляет на ${destination}`
+        if (finding.evidence) finding.evidence.location = destination
+      }
+    }
+  } catch { /* Invalid/previously redacted URL keeps the generic redaction. */ }
   const evidence = [...sanitized.findings.map(finding => finding.evidence), sanitized.handshake?.evidence]
   for (const fields of evidence) {
     if (!fields) continue
@@ -113,14 +128,14 @@ class LiveServerHistoryManager {
     assertHistoryVersion(parsed)
     const history = new Map<string, LiveServerCheck[]>()
     let rejectedEntries = 0
-    let version: number | undefined, migration: HistoryMigration | undefined
+    let version: number | undefined, migration: HistoryMigration | undefined, invalidMigration = false
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) rejectedEntries++
     else {
       const root = parsed as Record<string, unknown>
       version = typeof root.schemaVersion === 'number' ? root.schemaVersion : 0
       if (version === 1 && root.migration !== undefined) {
         if (isHistoryMigration(root.migration)) migration = root.migration
-        else rejectedEntries++
+        else { rejectedEntries++; invalidMigration = true }
       }
       for (const [key, items] of Object.entries(root)) {
         if (key === 'schemaVersion') continue
@@ -135,7 +150,7 @@ class LiveServerHistoryManager {
       }
     }
     if (rejectedEntries) logEvent('error', 'live-server-history', 'history.corrupted', { reason: 'invalid-schema', rejectedEntries })
-    return { history, valid: rejectedEntries === 0, version, migration }
+    return { history, valid: rejectedEntries === 0, version, migration, invalidMigration }
   }
 
   private loadFromDisk(): Map<string, LiveServerCheck[]> {
@@ -189,8 +204,12 @@ class LiveServerHistoryManager {
       // A newer reader may also have left a future-format backup.
       const backup = this.read(filePath + '.bak')
       const backupHistory = backup === undefined ? undefined : this.decode(backup)
-      const origin = existing?.version === undefined ? backupHistory : existing
-      const originRaw = existing?.version === undefined ? backup : raw
+      const recovered = !existing?.valid && ![...existing?.history.values() ?? []].some(items => items.length) && backupHistory?.valid
+      const canRestoreMigration = backupHistory?.valid && (backupHistory.version === 0 || backupHistory.migration !== undefined)
+      if (existing?.invalidMigration && !canRestoreMigration) throw new StoreSchemaError('STORE_SCHEMA_INVALID')
+      const useBackup = recovered || (existing?.invalidMigration && canRestoreMigration)
+      const origin = useBackup || existing?.version === undefined ? backupHistory : existing
+      const originRaw = useBackup || existing?.version === undefined ? backup : raw
       const migrated = origin?.version === 0 && originRaw !== undefined
       const migration: HistoryMigration | undefined = migrated
         ? { ...LIVE_HISTORY_MIGRATIONS[0], checksum: createHash('sha256').update(originRaw).digest('hex') }
@@ -205,8 +224,20 @@ class LiveServerHistoryManager {
       }
       // Never replace a usable backup with the corrupt file we recovered from.
       const content = JSON.stringify(data, null, 2)
+      // Keep migration input separately from the rolling recovery backup.
+      const migrationBackup = filePath + '.v0.bak'
+      if (migrated && !clearing) {
+        const preserved = this.read(migrationBackup)
+        if (preserved !== undefined && createHash('sha256').update(preserved).digest('hex') !== migration?.checksum) {
+          throw new StoreSchemaError('STORE_SCHEMA_INVALID')
+        }
+        if (preserved === undefined) this.writeAtomic(migrationBackup, originRaw!)
+      }
       // An explicit clear must not resurrect the deleted rows from backup.
-      if (clearing) this.writeAtomic(filePath + '.bak', content)
+      if (clearing) {
+        rmSync(migrationBackup, { force: true })
+        this.writeAtomic(filePath + '.bak', content)
+      }
       else if (existing?.valid) this.writeAtomic(filePath + '.bak', '', filePath)
       this.writeAtomic(filePath, content)
       if (migrated) {

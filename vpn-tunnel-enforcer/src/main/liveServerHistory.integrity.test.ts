@@ -186,7 +186,7 @@ describe('live history integrity', () => {
     const legacy = JSON.stringify({ 'profile:p1': [check('legacy')] })
     writeFileSync(file, legacy); liveServerHistory.init(file)
     expect(disk()).toBe(legacy)
-    state.fail = 'renameSync'; state.failAt = 2
+    state.fail = 'renameSync'; state.failAt = 3
     expect(() => liveServerHistory.addCheck(check('failed'))).toThrow()
     expect(disk()).toBe(legacy)
     expect(state.log.mock.calls.some(call => call[2] === 'history.migrated')).toBe(false)
@@ -206,6 +206,66 @@ describe('live history integrity', () => {
     liveServerHistory.addCheck({ ...check(id, profileId), error: credential }); liveServerHistory.init(file)
     expect(liveServerHistory.getHistory({ profileId })[0]).toMatchObject({ id, profileId })
     expect(JSON.stringify(liveServerHistory.getHistory())).not.toContain(credential)
+  })
+  it('retains migration input through later writes, but removes it on explicit history clear', () => {
+    const legacy = JSON.stringify({ 'profile:p1': [check('legacy')] })
+    writeFileSync(file, legacy); liveServerHistory.init(file)
+    liveServerHistory.addCheck(check('new')); liveServerHistory.addCheck(check('next'))
+    expect(readFileSync(file + '.v0.bak', 'utf8')).toBe(legacy)
+    liveServerHistory.clearHistory(); liveServerHistory.init(file)
+    expect(liveServerHistory.getHistory()).toEqual([])
+    expect(readdirSync(directory)).not.toContain('live-server-checks.json.v0.bak')
+  })
+  it('uses the recovered backup as migration origin despite a recognizable rejected main version', () => {
+    const legacy = JSON.stringify({ 'profile:p1': [check('legacy')] })
+    writeFileSync(file + '.bak', legacy)
+    writeFileSync(file, JSON.stringify({ schemaVersion: 1, migration: { broken: true } }))
+    liveServerHistory.init(file)
+    expect(liveServerHistory.getHistory()[0].id).toBe('legacy')
+    liveServerHistory.addCheck(check('new')); liveServerHistory.init(file)
+    expect(JSON.parse(disk()).migration).toMatchObject({ from: 0, to: 1, checksum: createHash('sha256').update(legacy).digest('hex') })
+    expect(readFileSync(file + '.v0.bak', 'utf8')).toBe(legacy)
+    expect(liveServerHistory.getHistory().map(row => row.id)).toEqual(['new', 'legacy'])
+  })
+  it('refuses to erase a malformed migration marker when no valid backup can restore lineage', () => {
+    writeFileSync(file, JSON.stringify({ schemaVersion: 1, migration: { broken: true }, 'profile:p1': [check('old')] }))
+    liveServerHistory.init(file); const before = disk()
+    expect(() => liveServerHistory.addCheck(check('new'))).toThrow()
+    expect(disk()).toBe(before)
+    expect(liveServerHistory.getHistory().map(row => row.id)).toEqual(['old'])
+    writeFileSync(file + '.bak', JSON.stringify({ schemaVersion: 1, 'profile:p1': [check('older')] }))
+    expect(() => liveServerHistory.addCheck(check('new'))).toThrow()
+    expect(disk()).toBe(before)
+  })
+  it('restores valid backup lineage while keeping newer valid main rows', () => {
+    const migration = { id: 'live-history-provenance-v1', from: 0, to: 1, checksum: 'a'.repeat(64) }
+    writeFileSync(file + '.bak', JSON.stringify({ schemaVersion: 1, migration, 'profile:p1': [check('older')] }))
+    writeFileSync(file, JSON.stringify({ schemaVersion: 1, migration: { broken: true }, 'profile:p1': [check('newer')] }))
+    liveServerHistory.init(file); liveServerHistory.addCheck(check('new'))
+    expect(JSON.parse(disk()).migration).toEqual(migration)
+    expect(liveServerHistory.getHistory().map(row => row.id)).toEqual(['new', 'newer'])
+  })
+  it('refuses to overwrite a conflicting migration backup', () => {
+    const legacy = JSON.stringify({ 'profile:p1': [check('legacy')] })
+    writeFileSync(file, legacy); writeFileSync(file + '.v0.bak', 'previous migration input')
+    liveServerHistory.init(file)
+    expect(() => liveServerHistory.addCheck(check('new'))).toThrow()
+    expect(disk()).toBe(legacy)
+    expect(readFileSync(file + '.v0.bak', 'utf8')).toBe('previous migration input')
+  })
+  it('preserves a safe redirect destination while removing URL credentials, query, fragment and encoded secrets', () => {
+    const location = 'https://user:password@redirect.example/login?token=secret#private'
+    liveServerHistory.addCheck({ ...check(), http: { status: 'ok', durationMs: 1, statusCode: 302, locationHeader: location, confidence: 'low' },
+      findings: [{ code: 'HTTP_REDIRECT', severity: 'info', title: 'HTTP redirect', detail: location, evidence: { location } }] })
+    liveServerHistory.init(file)
+    const row = liveServerHistory.getHistory()[0]
+    expect(row.http?.locationHeader).toBe('https://redirect.example/login')
+    expect(row.findings[0].detail).toContain('https://redirect.example/login')
+    expect(row.findings[0].evidence?.location).toBe('https://redirect.example/login')
+    expect(disk()).not.toMatch(/user:|password@|token=secret|#private/)
+    liveServerHistory.addCheck({ ...check('encoded'), http: { status: 'ok', durationMs: 1,
+      locationHeader: 'https://redirect.example/password%3DPRIVATE_SECRET/11111111-2222-3333-4444-555555555555', confidence: 'low' } })
+    expect(disk()).not.toMatch(/PRIVATE_SECRET|11111111-2222-3333-4444-555555555555/)
   })
   it('redacts credentials in nested diagnostics before returning, saving and backing up records', () => {
     const privateText = 'password=PASSWORD_SECRET Bearer TOKEN_SECRET vless://UUID_SECRET@vpn.example:443 C:\\Users\\private-user\\config.json'
