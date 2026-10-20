@@ -2510,6 +2510,10 @@ app.whenReady().then(async () => {
 
   // ─── VPN Network Repair (Maintenance page) ───────────────────────────────
   handleLogged('network:repair-orphaned-dns', async () => {
+    if (tunController.getStatus().running) {
+      return { success: false, error: ipcError('conflict'), repaired: false, adapters: [], skipped: true, blocked: true,
+        message: 'Отключите VPN перед восстановлением DNS: активный TUN использует текущие настройки адаптеров.' }
+    }
     return repairOrphanedPhysicalAdapterDns('manual maintenance trigger')
   })
 

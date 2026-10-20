@@ -6,6 +6,8 @@ import { randomUUID } from 'crypto'
 import { execElevated } from './admin'
 import { logEvent } from './appLogger'
 import { timePs } from './psTiming'
+import { ipcError, IpcFault, type IpcErrorCategory } from '../shared/ipc-result'
+import { classifyRecoveryError } from './recoveryErrors'
 import { notifyWinInetSettingsChangedNative, WinInetCallError } from './native/winInet'
 import { readRecoveryManifest, writeRecoveryManifest, removeRecoveryManifest, recoveryManifestPath } from './recoveryManifest'
 
@@ -86,10 +88,10 @@ export function getTunNetworkBaselineManifestPath(): string { return recoveryMan
 function readManifest(rejected?: string[]) { return readRecoveryManifest(BASELINE_NAME, value => validateNetworkBackupManifest(value, rejected)) }
 export async function isBaselineApplied(recovery = false): Promise<boolean> { return (await readManifest(recovery ? [] : undefined)) !== null }
 function psJson(value: unknown): string { return `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(JSON.stringify(value)).toString('base64')}')) | ConvertFrom-Json` }
-function ps(script: string, elevated = false, timeout = 30000) {
-  return timePs('cold-ps', elevated ? 'system-network-elevated' : 'system-network', () => psUntimed(script, elevated, timeout))
+function ps(script: string, elevated = false, timeout = 30000, operationId?: string) {
+  return timePs('cold-ps', elevated ? 'system-network-elevated' : 'system-network', () => psUntimed(script, elevated, timeout, operationId))
 }
-async function psUntimed(script: string, elevated: boolean, timeout: number) {
+async function psUntimed(script: string, elevated: boolean, timeout: number, operationId?: string) {
   const prelude = '$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new();$ErrorActionPreference="Stop";'
   const command = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(prelude + script, 'utf16le').toString('base64')}`
   try {
@@ -103,7 +105,8 @@ async function psUntimed(script: string, elevated: boolean, timeout: number) {
     const failure = error as { stderr?: string; code?: string | number; message?: string }
     const diagnostic = String(failure.stderr || failure.message || error)
       .replace(/-EncodedCommand\s+[A-Za-z0-9+/=]+/g, '-EncodedCommand [omitted]').trim()
-    throw new Error(`PowerShell failed${failure.code === undefined ? '' : ` (${failure.code})`}: ${diagnostic.slice(0, 2000)}`)
+    logEvent('error', 'system-network', 'PowerShell failed', { diagnostic: diagnostic.slice(0, 2000), code: failure.code, operationId })
+    throw new IpcFault(classifyRecoveryError(error))
   }
 }
 // Shared snapshot/restore code uses .NET APIs: no locale-dependent reg parsing.
@@ -179,7 +182,7 @@ async function notifyWinInetSettingsChanged() {
 
 export function applyTunNetworkBaseline(): Promise<SystemNetworkResult> { return withBaselineOpLock(applyUnlocked) }
 async function applyUnlocked(): Promise<SystemNetworkResult> {
-  if (process.platform !== 'win32') return { success: false, message: 'Сетевой baseline доступен только на Windows' }
+  if (process.platform !== 'win32') return { success: false, error: ipcError('conflict'), message: 'Сетевой baseline доступен только на Windows' }
   let prepared = false
   try {
     if (await readManifest()) return { success: true, skipped: true, message: 'Baseline уже применён; исходный снимок сохранён' }
@@ -197,21 +200,25 @@ Write-Output 'BASELINE_APPLIED'`)
     if (!String(stdout).includes('BASELINE_APPLIED')) throw new Error('Baseline application verification missing')
     await notifyWinInetSettingsChanged()
     for (const key of PROXY_ENV_KEYS) delete process.env[key]
-    return { success: true, message: 'Сеть нормализована для TUN', details: `Backup: ${getTunNetworkBaselineManifestPath()}`, warnings: [] }
+    return { success: true, message: 'Сеть нормализована для TUN', warnings: [] }
   } catch (error) {
-    const warnings = [String(error)]
+    const failure = ipcError(classifyRecoveryError(error))
+    const warnings = [failure.message]
+    let restoredSteps: string[] | undefined
     if (prepared) {
       const rollback = await rollbackUnlocked()
+      restoredSteps = rollback.restoredSteps
       if (!rollback.success) warnings.push(...(rollback.warnings || [rollback.message]))
     }
-    logEvent('error', 'system-network', 'baseline application failed', { warnings })
-    return { success: false, message: 'Baseline не применён; проверьте отчёт восстановления', warnings, details: warnings.join(' | ') }
+    logEvent('error', 'system-network', 'baseline application failed', { error: String(error), warnings })
+    return { success: false, error: failure, message: 'Baseline не применён; проверьте отчёт восстановления', ...(restoredSteps ? { restoredSteps } : {}), warnings, details: warnings.join(' | ') }
   }
 }
 export function rollbackTunNetworkBaseline(): Promise<SystemNetworkResult> { return withBaselineOpLock(() => rollbackUnlocked()) }
 async function rollbackUnlocked(reason = 'manual', operationId: string = `baseline_${randomUUID().replaceAll('-', '')}`): Promise<SystemNetworkResult> {
-  if (process.platform !== 'win32') return { success: false, message: 'Rollback доступен только на Windows' }
+  if (process.platform !== 'win32') return { success: false, error: ipcError('conflict'), message: 'Rollback доступен только на Windows' }
   logEvent('info', 'system-network', 'baseline rollback started', { operationId, reason })
+  let restoredSteps: string[] | undefined
   try {
     const warnings: string[] = []
     const manifest = await readManifest(warnings)
@@ -222,53 +229,68 @@ async function rollbackUnlocked(reason = 'manual', operationId: string = `baseli
     for (const error of warnings) logEvent('error', 'system-network', 'baseline rollback step rejected', { operationId, error, success: false })
     if (!manifest.values.length) {
       logEvent('error', 'system-network', 'baseline rollback completed', { operationId, success: false, warnings })
-      return { success: false, operationId, message: 'Нет валидных шагов baseline; снимок сохранён', warnings }
+      return { success: false, error: ipcError('validation'), operationId, message: 'Нет валидных шагов baseline; снимок сохранён', warnings, restoredSteps: [] }
     }
+    const hasRejectedRecords = warnings.length > 0
     const { stdout } = await ps(`${REGISTRY_HELPERS}
 ${WININET_NOTIFY_FUNCTION}
 if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '${manifest.userSid}') { throw 'Baseline user identity mismatch' }
 # ConvertFrom-Json emits the decoded array as one pipeline object in Windows
 # PowerShell 5.1. An extra @() would nest it and collapse nine steps into one.
 $values = ${psJson(manifest.values)}
+function Get-RecoveryErrorCategory($failure) {
+  if ($failure.CategoryInfo.Category -in @('PermissionDenied','SecurityError')) { return 'permission' }
+  for ($exception = $failure.Exception; $null -ne $exception; $exception = $exception.InnerException) {
+    if ($exception -is [UnauthorizedAccessException] -or $exception -is [System.Security.SecurityException] -or $exception.HResult -eq -2147024891) { return 'permission' }
+  }
+  return 'internal'
+}
 $results = @()
 $watch = [Diagnostics.Stopwatch]::StartNew()
 foreach ($s in $values) {
   try { Restore-Snapshot $s; $results += [pscustomobject]@{name=($s.target+'/'+$s.name);success=$true;error=$null} }
-  catch { $results += [pscustomobject]@{name=($s.target+'/'+$s.name);success=$false;error=[string]$_} }
+  catch { $results += [pscustomobject]@{name=($s.target+'/'+$s.name);success=$false;error=[string]$_;category=(Get-RecoveryErrorCategory $_)} }
 }
 $registryMs = $watch.ElapsedMilliseconds
 $watch.Restart()
 $notification = [pscustomobject]@{success=$true;error=$null}
 try { Send-WinInetSettingsChanged }
-catch { $notification = [pscustomobject]@{success=$false;error=[string]$_} }
+catch { $notification = [pscustomobject]@{success=$false;error=[string]$_;category=(Get-RecoveryErrorCategory $_)} }
 $watch.Stop()
-[pscustomobject]@{steps=@($results);notification=$notification;timings=@{registryMs=$registryMs;notifyMs=$watch.ElapsedMilliseconds}} | ConvertTo-Json -Depth 6 -Compress`, true)
+[pscustomobject]@{steps=@($results);notification=$notification;timings=@{registryMs=$registryMs;notifyMs=$watch.ElapsedMilliseconds}} | ConvertTo-Json -Depth 6 -Compress`, true, 30000, operationId)
     const report = JSON.parse(String(stdout).trim()) as {
-      steps: Array<{ name: string; success: boolean; error: string | null }>
-      notification: { success: boolean; error: string | null }
+      steps: Array<{ name: string; success: boolean; error: string | null; category?: IpcErrorCategory }>
+      notification: { success: boolean; error: string | null; category?: IpcErrorCategory }
       timings: { registryMs: number; notifyMs: number }
     }
-    const validOutcome = (s: { success: boolean; error: string | null }) => s && typeof s.success === 'boolean' && (s.success ? s.error === null : typeof s.error === 'string')
+    const validOutcome = (s: { success: boolean; error: string | null; category?: IpcErrorCategory }) => s && typeof s.success === 'boolean' && (s.success ? s.error === null : typeof s.error === 'string' && (s.category === 'permission' || s.category === 'internal'))
     const steps = report?.steps
     if (!Array.isArray(steps) || steps.length !== manifest.values.length || steps.some((s, i) => !validOutcome(s) || s.name !== `${manifest.values[i].target}/${manifest.values[i].name}`) ||
         !validOutcome(report.notification) || !report.timings || [report.timings.registryMs, report.timings.notifyMs].some(ms => !Number.isSafeInteger(ms) || ms < 0)) throw new Error('Invalid baseline recovery report')
     for (const [phase, durationMs] of Object.entries(report.timings)) logEvent('debug', 'system-network', 'baseline native phase timing', { operationId, phase, durationMs })
+    restoredSteps = steps.filter(step => step.success).map(step => step.name)
     for (const step of steps) {
       logEvent(step.success ? 'info' : 'error', 'system-network', 'baseline rollback step', { ...step, operationId })
-      if (!step.success) warnings.push(`${step.name}: ${step.error}`)
+      if (!step.success) warnings.push(`${step.name}: ${ipcError(step.category!).message}`)
     }
     logEvent(report.notification.success ? 'info' : 'error', 'system-network', 'baseline rollback notification', { ...report.notification, operationId })
-    if (!report.notification.success) warnings.push(`WinINet notification: ${report.notification.error}`)
+    if (!report.notification.success) warnings.push(`WinINet: ${ipcError(report.notification.category!).message}`)
     if (warnings.length) {
       logEvent('error', 'system-network', 'baseline rollback completed', { operationId, success: false, warnings })
-      return { success: false, operationId, message: 'Baseline восстановлен частично; снимок сохранён', warnings, details: warnings.join(' | ') }
+      const category = steps.some(s => !s.success && s.category === 'permission') || report.notification.category === 'permission' ? 'permission'
+        : hasRejectedRecords ? 'validation' : 'internal'
+      const message = `Baseline восстановлен частично: ${restoredSteps.length} из 9 записей; снимок сохранён.${report.notification.success ? '' : ' Уведомление Windows не подтверждено.'}`
+      return { success: false, error: ipcError(category), operationId, message, restoredSteps, warnings, details: warnings.join(' | ') }
     }
     await removeRecoveryManifest(BASELINE_NAME)
     logEvent('info', 'system-network', 'baseline rollback completed', { operationId, success: true })
-    return { success: true, operationId, message: 'Сетевые настройки восстановлены и проверены', details: `Backup created at: ${new Date(manifest.createdAt).toISOString()}` }
+    return { success: true, operationId, message: 'Сетевые настройки восстановлены и проверены', restoredSteps, details: `Backup created at: ${new Date(manifest.createdAt).toISOString()}` }
   } catch (error) {
     logEvent('error', 'system-network', 'CRITICAL_SECURITY_EVENT: baseline recovery unknown', { operationId, error: String(error) })
-    return { success: false, operationId, message: 'Baseline recovery не подтверждён; снимок сохранён', warnings: [String(error)] }
+    const failure = ipcError(classifyRecoveryError(error))
+    return { success: false, error: failure, operationId,
+      message: `Baseline recovery не подтверждён; снимок сохранён.${restoredSteps ? ` Подтверждено восстановление записей: ${restoredSteps.length}.` : ''}`,
+      ...(restoredSteps ? { restoredSteps } : {}), warnings: [failure.message] }
   }
 }
 export function rollbackTunNetworkBaselineIfApplied(reason: string, operationId?: string): Promise<SystemNetworkResult> {
@@ -281,7 +303,9 @@ export async function rollbackTunNetworkBaselineOrThrow(reason: string): Promise
   const result = await rollbackTunNetworkBaselineIfApplied(reason)
   if (!result.success) {
     const details = result.details || result.warnings?.join(' | ')
-    throw new Error(`${result.message}${details ? `: ${details}` : ''}. Повторите восстановление сети и проверьте диагностику.`)
+    const fault = new IpcFault(result.error?.category ?? 'internal')
+    fault.message = `${result.message}${details ? `: ${details}` : ''}. Повторите восстановление сети и проверьте диагностику.`
+    throw fault
   }
   return result
 }

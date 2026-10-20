@@ -11,7 +11,7 @@ vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 import { ipcMain } from 'electron'
 import { installTrustedIpcBoundary } from './ipcSecurity'
 
-const channels = ['rollback-tun-network-baseline', 'firewall:repair-vpnte-rules', 'network:rollback-adapter-lockdown', 'tun:kill-stale-singbox'] as const
+const channels = ['rollback-tun-network-baseline', 'firewall:repair-vpnte-rules', 'network:rollback-adapter-lockdown', 'network:repair-orphaned-dns', 'tun:kill-stale-singbox'] as const
 const source = ts.createSourceFile('index.ts', readFileSync(join(process.cwd(), 'src/main/index.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
 const registrations: string[] = []
 function visit(node: ts.Node) {
@@ -32,6 +32,7 @@ function harness(active = false) {
     getFirewallRepairHealth: vi.fn(async () => health),
     repairVpnteFirewallRules: vi.fn(async () => ({ success: true, message: 'firewall restored', health })),
     rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async () => ({ rolledBack: true, adapters: ['fixture'] })),
+    repairOrphanedPhysicalAdapterDns: vi.fn(async () => ({ success: true, repaired: true, adapters: ['fixture'] })),
     killOwnedTunRuntimeProcesses: vi.fn(async (): Promise<any> => ({ success: true, candidates: 1, killed: 1, names: ['vpnte-xray.exe'] })) }
   new Function(...Object.keys(deps), js)(...Object.values(deps))
   return { ...deps, health, invoke: (channel: string) => s.handlers.get(channel)!({ sender: {} }) }
@@ -44,6 +45,7 @@ describe('runtime maintenance domain results', () => {
     expect(h.rollbackTunNetworkBaseline).not.toHaveBeenCalled()
     expect(h.repairVpnteFirewallRules).not.toHaveBeenCalled()
     expect(h.rollbackPhysicalAdapterLockdownIfApplied).not.toHaveBeenCalled()
+    expect(h.repairOrphanedPhysicalAdapterDns).not.toHaveBeenCalled()
     expect(h.killOwnedTunRuntimeProcesses).not.toHaveBeenCalled()
     if (channel === 'firewall:repair-vpnte-rules') {
       expect(response.result.health).toEqual(h.health)
@@ -60,6 +62,7 @@ describe('runtime maintenance domain results', () => {
     const target = { 'rollback-tun-network-baseline': h.rollbackTunNetworkBaseline,
       'firewall:repair-vpnte-rules': h.repairVpnteFirewallRules,
       'network:rollback-adapter-lockdown': h.rollbackPhysicalAdapterLockdownIfApplied,
+      'network:repair-orphaned-dns': h.repairOrphanedPhysicalAdapterDns,
       'tun:kill-stale-singbox': h.killOwnedTunRuntimeProcesses }[channel]
     expect(target).toHaveBeenCalledOnce()
     expect(response.result).toMatchObject(await target.mock.results[0].value)
@@ -98,6 +101,7 @@ describe('runtime maintenance domain results', () => {
     const target = { 'rollback-tun-network-baseline': h.rollbackTunNetworkBaseline,
       'firewall:repair-vpnte-rules': h.repairVpnteFirewallRules,
       'network:rollback-adapter-lockdown': h.rollbackPhysicalAdapterLockdownIfApplied,
+      'network:repair-orphaned-dns': h.repairOrphanedPhysicalAdapterDns,
       'tun:kill-stale-singbox': h.killOwnedTunRuntimeProcesses }[channel]
     target.mockRejectedValue(error)
     h.logEvent.mockImplementation(() => { ids.push(currentCorrelationId()) })

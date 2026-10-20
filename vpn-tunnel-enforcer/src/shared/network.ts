@@ -63,6 +63,32 @@ export interface SystemNetworkResult {
   details?: string
   warnings?: string[]
   skipped?: boolean
+  /** Only independently verified restoration steps; absent when outcome is unknown. */
+  restoredSteps?: string[]
+}
+
+export interface AdapterRollbackResult {
+  success: boolean
+  rolledBack: boolean
+  error?: IpcError
+  skipped?: boolean
+  blocked?: boolean
+  message?: string
+  warnings?: string[]
+  /** Only adapters whose DNS and IPv6 restoration were both confirmed. */
+  restoredAdapters?: string[]
+}
+
+export interface AdapterDnsRepairResult {
+  success: boolean
+  repaired: boolean
+  /** Confirmed restorations, including independent successes during partial recovery. */
+  adapters: string[]
+  error?: IpcError
+  skipped?: boolean
+  blocked?: boolean
+  message?: string
+  warnings?: string[]
 }
 
 export interface FirewallKillSwitchResult {
