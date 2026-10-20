@@ -34,4 +34,20 @@ describe('leak evidence verdict', () => {
     expect(leakSelfTestMessage({ ...complete, perAdapter: [{ ...blocked, curlExitCode: -1 }] })).toContain('не все пробы')
     expect(leakSelfTestMessage({ ...complete, physicalAdapterReached: true })).toBe('Обнаружена утечка')
   })
+  it('preserves a conflicting IP reading in the user message', () => {
+    expect(leakSelfTestMessage({ ...complete, dnsLeakDetail: 'Cloudflare видит 5.6.7.8, default-route отдаёт 1.2.3.4' }))
+      .toContain('Cloudflare видит 5.6.7.8, default-route отдаёт 1.2.3.4')
+  })
+  it('preserves positive adapter and IP evidence in the user message', () => {
+    const message = leakSelfTestMessage({ ...complete, perAdapter: [{ ...blocked, publicIpViaThisAdapter: '5.6.7.8' }] })
+    expect(message).toContain('Wi-Fi')
+    expect(message).toContain('5.6.7.8')
+    expect(message).toContain('1.2.3.4')
+  })
+  it('shows explicit cancellation as an inconclusive cancelled check', () => {
+    const cancelled = { ...complete, cancelled: true as const, physicalAdapterInspectionComplete: false, defaultRoutePublicIp: null, perAdapter: [] }
+    expect(leakSelfTestVerdict(cancelled)).toBe('inconclusive')
+    expect(leakSelfTestMessage(cancelled)).toContain('Тест отменён')
+    expect(leakSelfTestMessage(cancelled)).not.toContain('не полностью')
+  })
 })

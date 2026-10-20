@@ -82,3 +82,15 @@ it.each([
   if (expected === 'leak') expect(panel.textContent).toContain('Обнаружена утечка')
   view.unmount()
 })
+
+it.each(['dns', 'leak', 'cancelled'])('retains %s evidence in DiagnosticsCard panel and log', async scenario => {
+  const view = await start()
+  await act(async () => { resolveLeak({ ...result, summary: 'OK: stale',
+    cancelled: scenario === 'cancelled' ? true : undefined, physicalAdapterInspectionComplete: scenario !== 'cancelled',
+    dnsLeakDetail: scenario === 'dns' ? 'Cloudflare видит 5.6.7.8, default-route отдаёт 1.2.3.4' : undefined,
+    perAdapter: [{ alias: 'Wi-Fi', ipv4: '192.168.1.2', publicIpViaThisAdapter: scenario === 'leak' ? '5.6.7.8' : null, curlExitCode: 7, curlStderrTail: null }] }) })
+  const expected = scenario === 'cancelled' ? 'Тест отменён' : '5.6.7.8'
+  expect(screen.getByRole('status', { name: 'Результат проверки утечек' }).textContent).toContain(expected)
+  expect(useAppStore.getState().logs.at(-1)?.message).toContain(expected)
+  view.unmount()
+})

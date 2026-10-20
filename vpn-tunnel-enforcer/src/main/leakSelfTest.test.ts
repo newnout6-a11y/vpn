@@ -224,6 +224,7 @@ describe('runLeakSelfTest coalescing', () => {
     const result = await inFlight
     expect(result.physicalAdapterInspectionComplete).toBe(false)
     expect(result.summary).toContain('отменён')
+    expect(result).toHaveProperty('cancelled', true)
   })
 
   // AT-00-008: no automatic clean callback after inconclusive probe results.

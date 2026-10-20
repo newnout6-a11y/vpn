@@ -97,7 +97,7 @@ export function DiagnosticsCard() {
       if (!owns()) return
       setLeakResult(result)
       const verdict = leakSelfTestVerdict(result)
-      const level = verdict === 'leak' ? 'error' : verdict === 'ok' ? 'info' : 'warn'
+      const level = verdict === 'leak' ? 'error' : verdict === 'ok' || result.cancelled ? 'info' : 'warn'
       addLog(level, `Результат проверки: ${leakSelfTestMessage(result)}`)
     } catch (err: any) {
       if (owns() && !(isIpcRemoteErrorData(err) && err.category === 'cancelled')) {
@@ -407,7 +407,6 @@ function LeakResultPanel({ result }: { result: LeakSelfTestResultClient }) {
         <Icon className={iconClass} />
         <div className="flex-1">
           <p className={summaryClass}>{leakSelfTestMessage(result)}</p>
-          {result.dnsLeakDetail && <p className="text-xs text-[var(--color-text-secondary)]">{result.dnsLeakDetail}</p>}
           <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
             Проверено: {new Date(result.ts).toLocaleTimeString('ru-RU')}
           </p>

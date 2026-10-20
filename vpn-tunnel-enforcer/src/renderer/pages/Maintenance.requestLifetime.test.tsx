@@ -122,3 +122,18 @@ it.each([
   if (variant === 'warning') expect(useAppStore.getState().maintenanceLastResult).not.toContain('Проверка защиты пройдена')
   view.unmount()
 })
+
+it.each(['dns', 'leak', 'cancelled'])('retains %s evidence in Maintenance result, log and toast', async scenario => {
+  api.runLeakSelfTest.mockResolvedValue({ ts: 1, summary: 'OK: stale', physicalAdapterReached: scenario === 'leak', publicIpMismatch: false,
+    cancelled: scenario === 'cancelled' ? true : undefined, physicalAdapterInspectionComplete: scenario !== 'cancelled',
+    defaultRoutePublicIp: '1.2.3.4', dnsLeakDetail: scenario === 'dns' ? 'Cloudflare видит 5.6.7.8, default-route отдаёт 1.2.3.4' : undefined,
+    perAdapter: [{ alias: 'Wi-Fi', ipv4: '192.168.1.2', publicIpViaThisAdapter: scenario === 'leak' ? '5.6.7.8' : null, curlExitCode: 7, curlStderrTail: null }] })
+  const view = await start()
+  await act(async () => { resolveRoute({ verdict: 'ok', message: 'FAKE-route' }) })
+  const state = useAppStore.getState()
+  const expected = scenario === 'cancelled' ? 'Тест отменён' : '5.6.7.8'
+  expect(state.maintenanceLastResult).toContain(expected)
+  expect(state.globalToasts.at(-1)?.description).toContain(expected)
+  expect(state.logs.at(-1)?.message).toContain(expected)
+  view.unmount()
+})

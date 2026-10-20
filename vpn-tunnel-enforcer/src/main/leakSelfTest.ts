@@ -99,6 +99,7 @@ function cancelledResult(): LeakSelfTestResult {
     defaultRoutePublicIp: null,
     perAdapter: [],
     summary: 'Тест отменён (защита остановлена)',
+    cancelled: true,
     physicalAdapterInspectionComplete: false
   }
 }

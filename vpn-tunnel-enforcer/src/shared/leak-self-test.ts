@@ -16,6 +16,8 @@ export interface LeakSelfTestResult {
   summary: string
   dnsLeakDetected?: boolean
   dnsLeakDetail?: string
+  /** Explicit terminal outcome for the legacy global-stop response. */
+  cancelled?: true
   /** Missing on older results. Only explicit true confirms enumeration. */
   physicalAdapterInspectionComplete?: boolean
 }
@@ -35,6 +37,7 @@ export function adapterLeakVerdict(adapter: LeakSelfTestAdapter): 'reached' | 'n
 export function leakSelfTestVerdict(result: LeakSelfTestResult): 'leak' | 'ok' | 'inconclusive' {
   if (result.physicalAdapterReached || result.publicIpMismatch || result.dnsLeakDetected
     || result.perAdapter?.some(adapter => adapterLeakVerdict(adapter) === 'reached')) return 'leak'
+  if (result.cancelled) return 'inconclusive'
   if (result.physicalAdapterInspectionComplete !== true || !isLeakProbeIpv4(result.defaultRoutePublicIp)
     || !result.perAdapter?.length || result.perAdapter.some(adapter => adapterLeakVerdict(adapter) !== 'not-reached')) return 'inconclusive'
   return 'ok'
@@ -43,11 +46,23 @@ export function leakSelfTestVerdict(result: LeakSelfTestResult): 'leak' | 'ok' |
 /** Derive status copy from evidence, including legacy results with stale summary. */
 export function leakSelfTestMessage(result: LeakSelfTestResult): string {
   const verdict = leakSelfTestVerdict(result)
-  if (verdict === 'leak') return 'Обнаружена утечка'
-  if (verdict === 'ok') return 'В IPv4-проверке утечек не обнаружено'
-  const reason = result.physicalAdapterInspectionComplete !== true ? 'физические адаптеры проверены не полностью'
-    : !isLeakProbeIpv4(result.defaultRoutePublicIp) ? 'публичный IP через TUN не определён'
-      : !result.perAdapter?.length ? 'нет физических IPv4-адресов для проверки'
-        : 'не все пробы физических адаптеров дали определённый результат'
-  return `Защита не подтверждена: ${reason}`
+  let message: string
+  if (verdict === 'leak') {
+    const reached = result.perAdapter?.filter(adapter => adapterLeakVerdict(adapter) === 'reached') ?? []
+    message = 'Обнаружена утечка'
+    if (reached.length) message += ': ' + reached.map(adapter => `${adapter.alias} виден как ${adapter.publicIpViaThisAdapter}`).join(', ')
+    else if (result.publicIpMismatch) message += ': выходные IP не совпадают'
+    if (reached.length || result.publicIpMismatch) message += ` (IP через TUN: ${result.defaultRoutePublicIp ?? 'неизвестен'})`
+  } else if (result.cancelled) {
+    return 'Тест отменён (защита остановлена)'
+  } else if (verdict === 'ok') {
+    message = 'В IPv4-проверке утечек не обнаружено'
+  } else {
+    const reason = result.physicalAdapterInspectionComplete !== true ? 'физические адаптеры проверены не полностью'
+      : !isLeakProbeIpv4(result.defaultRoutePublicIp) ? 'публичный IP через TUN не определён'
+        : !result.perAdapter?.length ? 'нет физических IPv4-адресов для проверки'
+          : 'не все пробы физических адаптеров дали определённый результат'
+    message = `Защита не подтверждена: ${reason}`
+  }
+  return result.dnsLeakDetail ? `${message}. IP-проверки расходятся: ${result.dnsLeakDetail}` : message
 }
