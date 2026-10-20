@@ -1202,17 +1202,15 @@ const tunnelState = new TunnelStateMachine(() => ({ ...tunController.getStatus()
   refreshTrayState()
 })
 // Register before any tray, schedule or auto-start action can begin.
-let backgroundTunnelActive = false
-setBackgroundLeakTestGate(() => {
-  const snapshot = tunnelState.snapshot
-  return backgroundTunnelActive && tunController.getStatus().running && snapshot.state === 'connected' && snapshot.transition === null
-})
+let backgroundProtectionExpected = false
+setBackgroundLeakTestGate(() => backgroundProtectionExpected)
 tunController.onStatusChange(status => {
-  if (status === 'running' || status === 'proxy-down') backgroundTunnelActive = true
-  else if (['stopping', 'stopped', 'adapting', 'error', 'killswitch-active'].includes(status) || status.startsWith('restarting:')) backgroundTunnelActive = false
+  if (['running', 'proxy-down', 'killswitch-active'].includes(status)) backgroundProtectionExpected = true
+  else if (status === 'stopping' || status === 'stopped') backgroundProtectionExpected = false
+  // Retain monitoring through a protected restart or crash: a down TUN is precisely
+  // when a physical-adapter reach can expose a broken kill-switch. Full stop disarms it before rollback.
   tunnelState.runtimeChanged(status)
-  const snapshot = tunnelState.snapshot
-  if (!backgroundTunnelActive || snapshot.state !== 'connected' || snapshot.transition !== null) cancelLeakSelfTest()
+  if (!backgroundProtectionExpected) cancelLeakSelfTest()
 })
 onNativeStop(observation => { tunnelState.nativeStopFinished(observation) })
 onNativeStartup(observation => {
