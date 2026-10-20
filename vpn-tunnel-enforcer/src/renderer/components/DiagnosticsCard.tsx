@@ -1,6 +1,7 @@
 import { useDiagnosticsExport } from '../hooks/useDiagnosticsExport'
 import { useEffect, useRef, useState } from 'react'
 import { isIpcRemoteErrorData } from '../../shared/ipc-result'
+import { adapterLeakVerdict, leakSelfTestMessage, leakSelfTestVerdict } from '../../shared/leak-self-test'
 import { useTranslation } from 'react-i18next'
 import { useAppStore, type LeakSelfTestResultClient } from '../store'
 import { AlertTriangle, CheckCircle2, FileArchive, FolderOpen, Loader2, Radar, RefreshCw, Send, ShieldAlert } from 'lucide-react'
@@ -95,8 +96,9 @@ export function DiagnosticsCard() {
       const result = await window.electronAPI.runLeakSelfTest(token)
       if (!owns()) return
       setLeakResult(result)
-      const level = result.physicalAdapterReached || result.publicIpMismatch || result.dnsLeakDetected ? 'error' : 'info'
-      addLog(level, `Результат проверки: ${result.summary}`)
+      const verdict = leakSelfTestVerdict(result)
+      const level = verdict === 'leak' ? 'error' : verdict === 'ok' ? 'info' : 'warn'
+      addLog(level, `Результат проверки: ${leakSelfTestMessage(result)}`)
     } catch (err: any) {
       if (owns() && !(isIpcRemoteErrorData(err) && err.category === 'cancelled')) {
         addLog('error', `Не удалось запустить проверку утечки: ${err.message ?? err}`)
@@ -381,26 +383,31 @@ export function DiagnosticsCard() {
 }
 
 function LeakResultPanel({ result }: { result: LeakSelfTestResultClient }) {
-  const isLeak = result.physicalAdapterReached || result.publicIpMismatch || result.dnsLeakDetected
-  const Icon = isLeak ? ShieldAlert : CheckCircle2
+  const verdict = leakSelfTestVerdict(result)
+  const isLeak = verdict === 'leak', isOk = verdict === 'ok'
+  const Icon = isLeak ? ShieldAlert : isOk ? CheckCircle2 : AlertTriangle
   // Tailwind cannot resolve dynamic class names like `bg-${color}/10` because
-  // it purges unused classes at build time, so we hard-code the two variants.
+  // it purges unused classes at build time, so each variant is explicit.
   const containerClass = isLeak
     ? 'bg-[var(--color-danger)]/10 border border-[var(--color-danger)]/30 rounded-lg p-3 space-y-2'
-    : 'bg-[var(--color-success)]/10 border border-[var(--color-success)]/30 rounded-lg p-3 space-y-2'
+    : isOk ? 'bg-[var(--color-success)]/10 border border-[var(--color-success)]/30 rounded-lg p-3 space-y-2'
+      : 'bg-[var(--color-warning)]/10 border border-[var(--color-warning)]/30 rounded-lg p-3 space-y-2'
   const iconClass = isLeak
     ? 'w-5 h-5 flex-shrink-0 mt-0.5 text-[var(--color-danger)]'
-    : 'w-5 h-5 flex-shrink-0 mt-0.5 text-[var(--color-success)]'
+    : isOk ? 'w-5 h-5 flex-shrink-0 mt-0.5 text-[var(--color-success)]'
+      : 'w-5 h-5 flex-shrink-0 mt-0.5 text-[var(--color-warning)]'
   const summaryClass = isLeak
     ? 'text-sm font-semibold text-[var(--color-danger)]'
-    : 'text-sm font-semibold text-[var(--color-success)]'
+    : isOk ? 'text-sm font-semibold text-[var(--color-success)]'
+      : 'text-sm font-semibold text-[var(--color-warning)]'
 
   return (
-    <div className={containerClass}>
+    <div className={containerClass} role="status" aria-label="Результат проверки утечек" data-verdict={verdict}>
       <div className="flex items-start gap-2">
         <Icon className={iconClass} />
         <div className="flex-1">
-          <p className={summaryClass}>{result.summary}</p>
+          <p className={summaryClass}>{leakSelfTestMessage(result)}</p>
+          {result.dnsLeakDetail && <p className="text-xs text-[var(--color-text-secondary)]">{result.dnsLeakDetail}</p>}
           <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
             Проверено: {new Date(result.ts).toLocaleTimeString('ru-RU')}
           </p>
@@ -415,10 +422,12 @@ function LeakResultPanel({ result }: { result: LeakSelfTestResultClient }) {
           <div key={a.alias} className="border-t border-[var(--color-card-elevated)]/30 pt-1.5">
             <div className="flex justify-between gap-3">
               <span className="text-[var(--color-text-secondary)]">{a.alias} ({a.ipv4 ?? 'no IP'})</span>
-              <span className={`font-mono ${a.publicIpViaThisAdapter ? 'text-[var(--color-danger)]' : 'text-[var(--color-success)]'}`}>
-                {a.publicIpViaThisAdapter
+              <span className={`font-mono ${adapterLeakVerdict(a) === 'reached' ? 'text-[var(--color-danger)]' : 'text-[var(--color-text-secondary)]'}`}>
+                {adapterLeakVerdict(a) === 'reached'
                   ? `видно как ${a.publicIpViaThisAdapter}`
-                  : `заблокирован (curl exit ${a.curlExitCode ?? '?'})`}
+                  : adapterLeakVerdict(a) === 'not-reached'
+                    ? `внешний IP не получен (curl exit ${a.curlExitCode})`
+                    : `результат неизвестен (curl exit ${a.curlExitCode ?? '?'})`}
               </span>
             </div>
             {a.curlStderrTail && (

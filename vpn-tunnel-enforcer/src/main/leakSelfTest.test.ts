@@ -106,7 +106,7 @@ describe('runLeakSelfTest coalescing', () => {
     expect(result.publicIpMismatch).toBe(false)
     expect(result.dnsLeakDetected).toBe(false)
     expect(result.dnsLeakDetail).toContain('5.6.7.8')
-    expect(result.summary).toContain('OK:')
+    expect(result.summary).toContain('Защита не подтверждена')
   })
 
   it('suppresses event-triggered leak checks during TUN start transitions', async () => {
@@ -132,6 +132,11 @@ describe('runLeakSelfTest coalescing', () => {
   })
 
   it('notifies onLeakSelfTestCompletedCb when a triggered check finishes cleanly with zero leaks', async () => {
+    nativeSourcesMock.mockReturnValue([{ alias: 'Wi-Fi', ipv4: '192.168.0.10' }])
+    execFileMock.mockImplementation((_file, _args, _opts, cb) => cb(Object.assign(new Error('blocked'), { code: 7 })))
+    // A completed enumeration with zero sources is insufficient proof.
+    execMock.mockImplementation((cmd, _opts, cb) => cb(null,
+      cmd.includes('EncodedCommand') ? '[{"Alias":"Wi-Fi","Ipv4":"192.168.0.10"}]' : '1.2.3.4', ''))
     const { setLeakSelfTestCompletedCallback, triggerLeakCheckNow, resetLeakTestThrottlesForTest } = await import('./leakSelfTest')
     resetLeakTestThrottlesForTest()
     const completedCb = vi.fn()
@@ -168,6 +173,8 @@ describe('runLeakSelfTest coalescing', () => {
     expect(result.defaultRoutePublicIp).toBe('1.2.3.4')
     expect(result.physicalAdapterInspectionComplete).toBe(false)
     expect(result.physicalAdapterReached).toBe(false)
+    expect(result.summary).toContain('Защита не подтверждена')
+    expect(result.summary).not.toContain('OK:')
 
     triggerLeakCheckNow('test-failed-enum')
     await new Promise((r) => setTimeout(r, 50))
@@ -218,4 +225,40 @@ describe('runLeakSelfTest coalescing', () => {
     expect(result.physicalAdapterInspectionComplete).toBe(false)
     expect(result.summary).toContain('отменён')
   })
+
+  // AT-00-008: no automatic clean callback after inconclusive probe results.
+  it('retains positive egress evidence even if curl exits after receiving the IP', async () => {
+    nativeSourcesMock.mockReturnValue([{ alias: 'Wi-Fi', ipv4: '192.168.0.10' }])
+    execFileMock.mockImplementation((_file, _args, _opts, cb) => cb(Object.assign(new Error('late failure'), { code: 28, stdout: '1.2.3.4' })))
+    const { runLeakSelfTest } = await import('./leakSelfTest')
+    const result = await runLeakSelfTest()
+    expect(result.physicalAdapterReached).toBe(true)
+    expect(result.summary).toContain('УТЕЧКА')
+  })
+  it.each(['empty', 'default-ip', 'launch', 'tls', 'invalid-response'])(
+    'does not certify or clear a leak warning after %s evidence', async scenario => {
+      nativeSourcesMock.mockReturnValue(scenario === 'empty' ? [] : [{ alias: 'Wi-Fi', ipv4: '192.168.0.10' }])
+      execFileMock.mockImplementation((_file, _args, _opts, cb) => {
+        if (scenario === 'invalid-response') cb(null, 'invalid IP response', '')
+        else cb(Object.assign(new Error('probe failed'), { code: scenario === 'tls' ? 60 : scenario === 'launch' ? 'ENOENT' : 7 }))
+      })
+      if (scenario === 'default-ip') execMock.mockImplementation((cmd, _opts, cb) => cb(null,
+        cmd.includes('EncodedCommand') ? '[]' : '999.1.2.3', ''))
+      const { runLeakSelfTest, triggerLeakCheckNow, setLeakSelfTestCompletedCallback, startPeriodicLeakTest, stopPeriodicLeakTest } = await import('./leakSelfTest')
+      const completed = vi.fn()
+      setLeakSelfTestCompletedCallback(completed)
+      const result = await runLeakSelfTest()
+      expect(result.summary).toContain('Защита не подтверждена')
+      expect(result.summary).not.toContain('OK:')
+      logEventMock.mockClear()
+      triggerLeakCheckNow('inconclusive-test')
+      await vi.waitFor(() => expect(logEventMock).toHaveBeenCalledWith('warn', 'leak-test', expect.stringContaining('Защита не подтверждена'), expect.anything()))
+      expect(completed).not.toHaveBeenCalled()
+      logEventMock.mockClear()
+      startPeriodicLeakTest(15)
+      try {
+        await vi.waitFor(() => expect(logEventMock).toHaveBeenCalledWith('warn', 'leak-test', expect.stringContaining('Защита не подтверждена'), expect.anything()))
+        expect(completed).not.toHaveBeenCalled()
+      } finally { stopPeriodicLeakTest() }
+    })
 })

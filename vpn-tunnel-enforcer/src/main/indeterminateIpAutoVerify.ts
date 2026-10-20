@@ -3,6 +3,7 @@ import { redactSensitiveText } from './vpnProfiles'
 import { ipMonitor } from './ipMonitor'
 import { tunController, areTunRoutesActive } from './tunController'
 import { runLeakSelfTest, type LeakSelfTestResult } from './leakSelfTest'
+import { leakSelfTestVerdict } from '../shared/leak-self-test'
 
 export interface IndeterminateAutoVerifyDeps {
   isRunning?: () => boolean
@@ -55,15 +56,9 @@ export async function executeIndeterminateVpnIpAutoVerify(
       const leakResult = await runLeakTestFn()
       if (!isRunning()) return
 
-      // Strict safety gate: NEVER rebaseline if physical adapter inspection was incomplete,
-      // physical adapter was reached, mismatch detected, DNS leak detected, or default route IP missing.
-      if (
-        !leakResult.physicalAdapterInspectionComplete ||
-        leakResult.physicalAdapterReached ||
-        leakResult.publicIpMismatch ||
-        leakResult.dnsLeakDetected ||
-        !leakResult.defaultRoutePublicIp
-      ) {
+      // The same evidence gate as the UI: empty coverage, unknown probe failures
+      // and malformed IPs cannot authorize adopting a new VPN baseline.
+      if (leakSelfTestVerdict(leakResult) !== 'ok' || !leakResult.defaultRoutePublicIp) {
         logEvent('warn', 'ip-monitor', 'indeterminate IP verification failed leak self-test safety gate', {
           candidateIp: redactSensitiveText(candidateIp),
           physicalAdapterInspectionComplete: leakResult.physicalAdapterInspectionComplete,

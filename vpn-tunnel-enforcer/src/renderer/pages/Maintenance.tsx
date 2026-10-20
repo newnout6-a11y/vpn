@@ -3,6 +3,7 @@ import type { FirewallRepairHealth } from '../../shared/network'
 import type { CheckStatus as HealthStatus, SystemDiagnosticItem as DiagnosticItem, SystemDiagnosticResult } from '../../shared/diagnostics'
 import { useEffect, useMemo, useRef } from 'react'
 import { isIpcRemoteErrorData } from '../../shared/ipc-result'
+import { leakSelfTestMessage, leakSelfTestVerdict } from '../../shared/leak-self-test'
 import { Activity, CheckCircle2, Download, Loader2, ShieldCheck, TriangleAlert, Wrench } from 'lucide-react'
 import { useAppStore } from '../store'
 import { MacCard, MacButton } from '../design-system'
@@ -262,13 +263,15 @@ export function Maintenance() {
       })
       const [leak, routing] = await Promise.all([leakTask, routingTask])
       if (!owns()) return
-      const failed = leak.physicalAdapterReached || leak.publicIpMismatch || leak.dnsLeakDetected === true || routing.verdict === 'leak'
-      const inconclusive = !failed && (routing.verdict !== 'ok' || leak.summary.includes('отменён'))
+      const leakVerdict = leakSelfTestVerdict(leak)
+      const failed = leakVerdict === 'leak' || routing.verdict === 'leak'
+      const inconclusive = !failed && (routing.verdict !== 'ok' || leakVerdict !== 'ok')
+      const leakMessage = leakSelfTestMessage(leak)
       const message = failed
-        ? `Проверка защиты: обнаружена проблема. ${leak.summary} ${routing.message}`
+        ? `Проверка защиты: обнаружена проблема. ${leakMessage} ${routing.message}`
         : inconclusive
-          ? `Проверка защиты не завершена однозначно. ${leak.summary} ${routing.message}`
-          : `Проверка защиты пройдена. ${leak.summary} ${routing.message}`
+          ? `Проверка защиты не завершена однозначно. ${leakMessage} ${routing.message}`
+          : `Проверка защиты пройдена. ${leakMessage} ${routing.message}`
       setLastResult(message)
       addLog(failed ? 'error' : inconclusive ? 'warn' : 'info', message)
       useAppStore.getState().addGlobalToast(failed ? 'error' : inconclusive ? 'warning' : 'success', 'Проверка защиты', message)

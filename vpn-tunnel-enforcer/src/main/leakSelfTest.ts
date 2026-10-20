@@ -9,10 +9,9 @@
  * outside.
  *
  * How: use `curl.exe --interface <physical-ip> https://1.1.1.1` with a
- * 4-second connect timeout. If curl returns 0 (or even a TLS handshake
- * happens), the physical adapter is NOT being blocked, which means the
- * kill-switch is leaking. If it returns a nonzero exit and "couldn't
- * connect" in stderr, we're sealed.
+ * 4-second connect timeout. A returned public IP is positive egress evidence.
+ * A connect failure or timeout measures unreachability in this probe only;
+ * other failures are inconclusive and cannot prove firewall enforcement.
  *
  * Also: pull the public IP via TUN and via every physical adapter
  * separately and log all of them so we can see at a glance whether any
@@ -36,6 +35,8 @@ import { operations } from './operations'
 import type { OperationLease } from './operationRegistry'
 import type { OperationOwner } from '../shared/operation'
 import { IpcFault } from '../shared/ipc-result'
+import { isLeakProbeIpv4, leakSelfTestMessage, leakSelfTestVerdict, type LeakSelfTestResult, type LeakSelfTestAdapter as AdapterReach } from '../shared/leak-self-test'
+export type { LeakSelfTestResult, LeakSelfTestAdapter as AdapterReach } from '../shared/leak-self-test'
 
 async function recordForensicLeakSelfTestEvent(event: string, details: Record<string, unknown>, session: number, signal: AbortSignal): Promise<void> {
   await import('./trafficForensics')
@@ -66,41 +67,6 @@ async function runProbeProcess(file: string, args: string[], timeout: number, si
   })
   try { return await completion }
   finally { await closed; signal.removeEventListener('abort', stop) }
-}
-
-export interface AdapterReach {
-  alias: string
-  ipv4: string | null
-  // Public IP we get when we explicitly bind to this adapter's IPv4 address.
-  // null = curl failed (which is what we WANT when kill-switch is engaged).
-  publicIpViaThisAdapter: string | null
-  // Raw curl output, useful for debugging.
-  curlExitCode: number | null
-  curlStderrTail: string | null
-}
-
-export interface LeakSelfTestResult {
-  ts: number
-  // True iff at least one physical adapter could reach the outside while we
-  // expected the kill-switch to block it. This is what we surface as "leak"
-  // in the UI when TUN + kill-switch are supposedly active.
-  physicalAdapterReached: boolean
-  // True iff the public IP via any physical adapter differs from the public
-  // IP via the default route. The default-route IP should be the VPN IP.
-  publicIpMismatch: boolean
-  defaultRoutePublicIp: string | null
-  perAdapter: AdapterReach[]
-  // Compact human-readable summary (one line, used for notifications).
-  summary: string
-  // Set when the Cloudflare side-channel returns a public IP that doesn't
-  // match the default-route public IP — strong signal of a DNS leak (or at
-  // least a different egress for some path). Optional so existing callers
-  // and the renderer client type stay structurally compatible.
-  dnsLeakDetected?: boolean
-  dnsLeakDetail?: string
-  // False if adapter enumeration failed or was cancelled; true when adapter
-  // coverage was successfully checked without error.
-  physicalAdapterInspectionComplete?: boolean
 }
 
 const PROBE_URL = 'https://1.1.1.1'
@@ -141,7 +107,7 @@ function parseIp(stdout: string): string | null {
   const trimmed = String(stdout).trim()
   const trace = trimmed.match(/^ip=(\S+)/m)?.[1]?.trim()
   const candidate = trace || trimmed
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(candidate)) return candidate
+  if (isLeakProbeIpv4(candidate)) return candidate
   return null
 }
 
@@ -316,9 +282,7 @@ async function runLeakSelfTestOnce(mySession: number, signal: AbortSignal): Prom
   // a "leak" against a user who has already torn the tunnel down.
   if (mySession !== activeSessionId || signal.aborted) return cancelledResult()
 
-  const physicalAdapterReached = perAdapter.some(
-    (a) => a.curlExitCode === 0 && a.publicIpViaThisAdapter !== null
-  )
+  const physicalAdapterReached = perAdapter.some((a) => isLeakProbeIpv4(a.publicIpViaThisAdapter))
   const publicIpMismatch = perAdapter.some(
     (a) => a.publicIpViaThisAdapter !== null && a.publicIpViaThisAdapter !== defaultRoutePublicIp
   )
@@ -339,31 +303,25 @@ async function runLeakSelfTestOnce(mySession: number, signal: AbortSignal): Prom
     // Silent — adding a DNS-leak probe should never break the existing test.
   }
 
+  const result: LeakSelfTestResult = {
+    ts, physicalAdapterReached, publicIpMismatch, defaultRoutePublicIp, perAdapter,
+    summary: '', dnsLeakDetected, dnsLeakDetail: dnsLeakDetail ?? undefined, physicalAdapterInspectionComplete
+  }
+  const verdict = leakSelfTestVerdict(result)
   let summary: string
   if (physicalAdapterReached && publicIpMismatch) {
     const leakedIp = perAdapter.find((a) => a.publicIpViaThisAdapter)?.publicIpViaThisAdapter
     summary = `УТЕЧКА: физический адаптер виден из интернета как ${leakedIp} (TUN отдаёт ${defaultRoutePublicIp ?? 'неизвестно'})`
   } else if (physicalAdapterReached) {
     summary = `УТЕЧКА: kill-switch не блокирует физический адаптер (curl до 1.1.1.1 прошёл)`
-  } else if (defaultRoutePublicIp) {
+  } else if (verdict === 'ok') {
     summary = dnsLeakDetail
-      ? `OK: физические адаптеры заблокированы, TUN отдаёт публичный IP ${defaultRoutePublicIp} (IP-проверки расходятся: ${dnsLeakDetail})`
-      : `OK: физические адаптеры заблокированы, TUN отдаёт публичный IP ${defaultRoutePublicIp}`
+      ? `OK: в IPv4-проверке утечек не обнаружено, IP через TUN ${defaultRoutePublicIp} (IP-проверки расходятся: ${dnsLeakDetail})`
+      : `OK: в IPv4-проверке утечек не обнаружено, IP через TUN ${defaultRoutePublicIp}`
   } else {
-    summary = `Не удалось определить публичный IP через TUN (curl не дошёл)`
+    summary = leakSelfTestMessage(result)
   }
-
-  const result: LeakSelfTestResult = {
-    ts,
-    physicalAdapterReached,
-    publicIpMismatch,
-    defaultRoutePublicIp,
-    perAdapter,
-    summary,
-    dnsLeakDetected,
-    dnsLeakDetail: dnsLeakDetail ?? undefined,
-    physicalAdapterInspectionComplete
-  }
+  result.summary = summary
 
   // Final cancellation check before any side effects (logEvent + callback).
   // Without this, a stop-tun that finishes between adapter probes and here
@@ -382,7 +340,7 @@ async function runLeakSelfTestOnce(mySession: number, signal: AbortSignal): Prom
   }, mySession, signal)
 
   if (mySession !== activeSessionId || signal.aborted) return cancelledResult()
-  logEvent(physicalAdapterReached || publicIpMismatch || dnsLeakDetected ? 'warn' : 'info', 'leak-test', summary, {
+  logEvent(verdict === 'ok' ? 'info' : 'warn', 'leak-test', summary, {
     physicalAdapterReached,
     publicIpMismatch,
     dnsLeakDetected,
@@ -469,7 +427,7 @@ export function triggerLeakCheckNow(reason: string): void {
       if (runSession !== activeSessionId) return
       if (r.physicalAdapterReached || r.publicIpMismatch || r.dnsLeakDetected) {
         onLeakDetectedCb?.(r)
-      } else if (r.physicalAdapterInspectionComplete !== false) {
+      } else if (leakSelfTestVerdict(r) === 'ok') {
         onLeakSelfTestCompletedCb?.(r)
       }
     })
@@ -562,7 +520,7 @@ export function startPeriodicLeakTest(
         if (runSession !== activeSessionId) return
         if (r.physicalAdapterReached || r.publicIpMismatch || r.dnsLeakDetected) {
           onLeakDetectedCb?.(r)
-        } else if (r.physicalAdapterInspectionComplete !== false) {
+        } else if (leakSelfTestVerdict(r) === 'ok') {
           onLeakSelfTestCompletedCb?.(r)
         }
       })

@@ -101,3 +101,24 @@ it('cancels a pending leak check when routing fails', async () => {
   expect(useAppStore.getState().maintenanceLastResult).toBe(ipcError('network').message)
   view.unmount()
 })
+
+// AT-00-008: routing success cannot hide incomplete physical inspection.
+it.each([
+  { patch: { physicalAdapterInspectionComplete: false }, variant: 'warning' },
+  { patch: { physicalAdapterInspectionComplete: undefined }, variant: 'warning' },
+  { patch: { defaultRoutePublicIp: null }, variant: 'warning' },
+  { patch: { perAdapter: [] }, variant: 'warning' },
+  { patch: {}, variant: 'success' },
+  { patch: { physicalAdapterReached: true, physicalAdapterInspectionComplete: false }, variant: 'error' }
+])('requires complete protection evidence for toast $variant ($patch)', async ({ patch, variant }) => {
+  api.runLeakSelfTest.mockResolvedValue({ summary: 'FAKE-leak', physicalAdapterReached: false, publicIpMismatch: false,
+    physicalAdapterInspectionComplete: true, defaultRoutePublicIp: '1.2.3.4', perAdapter: [
+      { alias: 'Wi-Fi', ipv4: '192.168.1.2', publicIpViaThisAdapter: null, curlExitCode: 7, curlStderrTail: null }
+    ], ...patch })
+  const view = await start()
+  await act(async () => { resolveRoute({ verdict: 'ok', message: 'FAKE-route' }) })
+  expect(useAppStore.getState().globalToasts.at(-1)?.variant).toBe(variant)
+  expect(useAppStore.getState().maintenanceLastResult).not.toContain('FAKE-leak')
+  if (variant === 'warning') expect(useAppStore.getState().maintenanceLastResult).not.toContain('Проверка защиты пройдена')
+  view.unmount()
+})

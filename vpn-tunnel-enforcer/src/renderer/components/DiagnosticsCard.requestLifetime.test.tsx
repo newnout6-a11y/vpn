@@ -55,3 +55,30 @@ it('does not let a previous mounted check overwrite the current result', async (
   expect(useAppStore.getState().leakSelfTestResult).toEqual(result)
   second.unmount()
 })
+
+// AT-00-008: exercise the real panel, not a source-text assertion.
+it.each([
+  { patch: { physicalAdapterInspectionComplete: false }, expected: 'inconclusive' },
+  { patch: { defaultRoutePublicIp: null }, expected: 'inconclusive' },
+  { patch: { perAdapter: [] }, expected: 'inconclusive' },
+  { patch: { perAdapter: [{ alias: 'Wi-Fi', ipv4: '192.168.1.2', publicIpViaThisAdapter: null, curlExitCode: null, curlStderrTail: null }] }, expected: 'inconclusive' },
+  { patch: {}, expected: 'ok' },
+  { patch: { physicalAdapterReached: true, physicalAdapterInspectionComplete: false }, expected: 'leak' }
+])('shows measured leak verdict $expected without trusting legacy summary ($patch)', async ({ patch, expected }) => {
+  useAppStore.setState({ leakSelfTestResult: { ...result, summary: 'OK: legacy', perAdapter: [
+    { alias: 'Wi-Fi', ipv4: '192.168.1.2', publicIpViaThisAdapter: null, curlExitCode: 7, curlStderrTail: null }
+  ], ...patch } })
+  const view = render(<DiagnosticsCard />)
+  await act(async () => {})
+  const panel = screen.getByRole('status', { name: 'Результат проверки утечек' })
+  expect(panel.getAttribute('data-verdict')).toBe(expected)
+  expect(panel.textContent).not.toContain('OK: legacy')
+  if (expected === 'inconclusive') {
+    expect(panel.textContent).toContain('Защита не подтверждена')
+    expect(panel.innerHTML).not.toContain('color-success')
+    expect(panel.textContent).not.toContain('OK: legacy')
+    expect(panel.textContent).not.toContain('заблокирован')
+  }
+  if (expected === 'leak') expect(panel.textContent).toContain('Обнаружена утечка')
+  view.unmount()
+})
