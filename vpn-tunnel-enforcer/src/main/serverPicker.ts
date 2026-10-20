@@ -2424,7 +2424,6 @@ export async function addFromInput(input: string, options: AddProfilesOptions = 
     const result = await refreshSubscriptionGroup(existing.id, { clientDevice: options.clientDevice, signal: options.signal, onOperation: options.onOperation })
     // The refresh owner decides its terminal result. An abort after its commit
     // must not relabel a saved refresh as cancelled in this continuation.
-    if (!result.ok) throw new Error(result.error)
     const newlyAdded = getProfiles().filter(profile => profile.groupId === existing.id && !beforeIds.has(profile.id))
     logEvent('info', 'server-picker', 'profiles refreshed via re-paste', { groupId: existing.id, added: result.addedCount, updated: result.updatedCount })
     return newlyAdded

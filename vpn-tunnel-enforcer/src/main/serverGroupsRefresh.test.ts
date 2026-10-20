@@ -95,6 +95,7 @@ import type { VpnProfile } from './vpnProfiles'
 import { operations, registerOperationHandlers } from './operations'
 import { logEvent } from './appLogger'
 import { withProfileStoreWriteLock } from './profileStoreQueue'
+import { ipcError } from '../shared/ipc-result'
 
 const pendingRefreshes = new Set<() => void>()
 function heldRefresh() {
@@ -777,7 +778,7 @@ describe('refreshGroup dedup-merge', () => {
       userInfo: undefined
     })
 
-    await refreshGroup(group.id)
+    await expect(refreshGroup(group.id)).rejects.toMatchObject({ category: 'validation' })
     const updated = serverGroups.getGroup(group.id)
     expect(updated?.status).toBe('expired')
     expect(pickerProfiles().filter((p) => p.groupId === group.id)).toHaveLength(1)
@@ -974,13 +975,13 @@ describe('AT-04-007 / F-064: failed subscription refresh', () => {
     const savedStore = JSON.stringify(storeData.current['server-picker'])
     resolveVpnProfilesMock.mockRejectedValue(new Error(message))
 
-    expect(await refreshGroup(group.id)).toEqual({ ok: false, error: message })
+    await expect(refreshGroup(group.id)).rejects.toMatchObject({ category: 'internal' })
     expect(JSON.stringify(storeData.current['server-picker'])).toBe(savedStore)
     expect(serverGroups.getGroup(group.id)).toMatchObject({
       lastFetchedAt: 1,
       lastRefreshProfilesCount: 1,
       lastFetchAttemptAt: expect.any(Number),
-      lastFetchError: message
+      lastFetchError: ipcError('internal').message
     })
   })
 
@@ -989,10 +990,7 @@ describe('AT-04-007 / F-064: failed subscription refresh', () => {
     const savedStore = JSON.stringify(storeData.current['server-picker'])
     resolveVpnProfilesMock.mockResolvedValue({ profiles: [], source: 'subscription', fetched: true })
 
-    expect(await refreshGroup(group.id)).toEqual({
-      ok: false,
-      error: 'Подписка вернула пустой список профилей'
-    })
+    await expect(refreshGroup(group.id)).rejects.toMatchObject({ category: 'validation' })
     expect(JSON.stringify(storeData.current['server-picker'])).toBe(savedStore)
     expect(serverGroups.getGroup(group.id)).toMatchObject({
       status: 'expired',
@@ -1008,9 +1006,9 @@ describe('AT-04-007 / F-064: failed subscription refresh', () => {
     const savedStore = JSON.stringify(storeData.current['server-picker'])
     resolveVpnProfilesMock
       .mockResolvedValueOnce({ profiles: [makeVpnProfile('new.example.com', 443)], source: 'subscription', fetched: true })
-      .mockRejectedValueOnce(new Error('Android subscription timed out'))
+      .mockRejectedValueOnce(Object.assign(new Error('Android subscription timed out'), { code: 'ETIMEDOUT' }))
 
-    expect(await refreshGroup(group.id)).toEqual({ ok: false, error: 'Android subscription timed out' })
+    await expect(refreshGroup(group.id)).rejects.toMatchObject({ category: 'timeout' })
     expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(2)
     expect(JSON.stringify(storeData.current['server-picker'])).toBe(savedStore)
   })
@@ -1023,7 +1021,7 @@ describe('AT-04-007 / F-064: failed subscription refresh', () => {
     const handler = vi.mocked(ipcMain.handle).mock.calls.find(([channel]) => channel === 'groups:refresh')?.[1]
     expect(handler).toBeDefined()
 
-    expect(await handler!({} as any, group.id)).toEqual({ ok: false, error: 'HTTP 500' })
+    await expect(handler!({} as any, group.id)).rejects.toMatchObject({ category: 'internal' })
   })
 
   it('counts network errors and empty responses as failed automatic refreshes', async () => {
@@ -1036,7 +1034,7 @@ describe('AT-04-007 / F-064: failed subscription refresh', () => {
       .mockResolvedValueOnce({ profiles: [makeVpnProfile('new.example.com', 443)], source: 'subscription', fetched: true })
 
     expect(await refreshDueServerGroups()).toEqual({ refreshed: 1, failed: 2 })
-    expect(serverGroups.getGroup(failedId)?.lastFetchError).toBe('HTTP 500')
+    expect(serverGroups.getGroup(failedId)?.lastFetchError).toBe(ipcError('internal').message)
     expect(serverGroups.getGroup(empty.id)?.lastFetchError).toBe('Подписка вернула пустой список профилей')
     expect(serverGroups.getGroup(successful.id)?.lastFetchError).toBeNull()
   })
@@ -1047,7 +1045,7 @@ describe('AT-04-007 / F-064: failed subscription refresh', () => {
       .mockRejectedValueOnce(new Error('HTTP 500'))
       .mockResolvedValueOnce({ profiles: [makeVpnProfile('saved.example.com', 443, 'Saved')], source: 'subscription', fetched: true })
 
-    expect(await refreshGroup(group.id)).toEqual({ ok: false, error: 'HTTP 500' })
+    await expect(refreshGroup(group.id)).rejects.toMatchObject({ category: 'internal' })
     expect(await refreshGroup(group.id)).toMatchObject({ ok: true, updatedCount: 1 })
     expect(resolveVpnProfilesMock).toHaveBeenCalledTimes(2)
     expect(serverGroups.getGroup(group.id)?.lastFetchError).toBeNull()

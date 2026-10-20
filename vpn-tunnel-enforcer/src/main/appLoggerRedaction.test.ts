@@ -12,11 +12,6 @@ vi.mock('electron', () => ({
   shell: { openPath: vi.fn() }
 }))
 
-vi.mock('./vpnProfiles', () => ({
-  redactSensitiveConfig: (value: unknown) => value,
-  redactSensitiveText: (value: string) => value
-}))
-
 const waitForLogContent = async (logPath: string): Promise<string> => {
   for (let i = 0; i < 50; i++) {
     try {
@@ -31,6 +26,18 @@ const waitForLogContent = async (logPath: string): Promise<string> => {
 }
 
 describe('appLogger topology redaction', () => {
+  it('retains subscription cause and failure location while redacting credentials (AT-00-004/005)', async () => {
+    const { logEvent, getAppLogPath } = await import('./appLogger')
+    const error = new Error('HTTP 403; TLS verification failed; Could not resolve host: private.example.test token=PRIVATE-TOKEN https://sub.example.test/PRIVATE-URL')
+    error.stack = `${error.message}\n    at refreshGroupUnlocked (serverGroups.ts:463:5)\n    at C:\\Users\\PrivateUser\\vpn\\main.js:20:4`
+    logEvent('warn', 'server-groups', 'refresh diagnostic', error)
+    const raw = await waitForLogContent(getAppLogPath())
+    expect(raw).toContain('HTTP 403')
+    expect(raw).toContain('TLS verification failed')
+    expect(raw).toContain('Could not resolve host:')
+    expect(raw).toContain('serverGroups.ts:463:5')
+    expect(raw).not.toMatch(/PRIVATE-TOKEN|PRIVATE-URL|private\.example\.test|PrivateUser/)
+  })
   beforeEach(() => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'vpnte-log-redact-'))
     vi.resetModules()

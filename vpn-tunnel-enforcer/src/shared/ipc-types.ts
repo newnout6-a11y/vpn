@@ -1040,6 +1040,5 @@ export type { IpcChannel, IpcRequest, IpcResponse } from './ipc-contract'
 export type { IpcResult, IpcError, IpcRemoteErrorData } from './ipc-result'
 export type { AppSettings, IpcJsonValue } from './settings'
 
-export type RefreshGroupResult =
-  | { ok: true; group: ServerGroup; addedCount: number; updatedCount: number; removedCount: number }
-  | { ok: false; error: string }
+/** Failures reject through the canonical IPC error envelope. */
+export type RefreshGroupResult = { ok: true; group: ServerGroup; addedCount: number; updatedCount: number; removedCount: number }

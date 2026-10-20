@@ -1,5 +1,5 @@
 // AT-00-001/003/008: production refresh/import/registry/preload/stores; held resolver.
-import { app, BrowserWindow, dialog } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { existsSync } from 'node:fs'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import { installTrustedIpcBoundary, registerTrustedRenderer } from '../../src/main/ipcSecurity'
 import { operations, registerOperationHandlers } from '../../src/main/operations'
+import { IpcFault, ipcError, type IpcErrorCategory } from '../../src/shared/ipc-result'
 
 const work = process.env.VPNTE_SMOKE_DIR!
 app.setPath('userData', join(work, 'server-request-userData'))
@@ -27,6 +28,7 @@ async function renderer() {
 }
 app.whenReady().then(async () => {
   installTrustedIpcBoundary(); registerOperationHandlers()
+  ipcMain.handle('i18n:set-locale', () => undefined)
   const { serverGroups, registerServerGroupsHandlers } = await import('../../src/main/serverGroups')
   const { serverPicker, registerServerPickerHandlers } = await import('../../src/main/serverPicker')
   registerServerGroupsHandlers(); registerServerPickerHandlers()
@@ -58,7 +60,36 @@ app.whenReady().then(async () => {
     assert.equal(snapshot(), before)
     assert.deepEqual(['destroyed', 'render-process-gone', 'did-navigate'].map(event => owner.listenerCount(event)), baseline)
   }
+  // AT-00-004/005: the feature catch must preserve typed errors across the
+  // actual sandbox/contextBridge, including its durable group error metadata.
+  const savedProfiles = JSON.stringify(serverPicker.getProfiles())
+  for (const locale of ['en', 'ru'] as const) {
+    await owner.executeJavaScript(`window.electronAPI.i18nSetLocale('${locale}')`)
+    for (const category of ['network', 'permission', 'validation', 'conflict', 'internal', 'cancelled', 'timeout'] as IpcErrorCategory[]) {
+      ;(globalThis as any).vpnteProfileBoundary = async () => { throw Object.assign(new IpcFault(category), {
+        message: 'token=FAKE-SECRET at C:\\private\\subscription.json\n    at featureHandler (C:\\private\\main.js:1:2)'
+      }) }
+      const result = await owner.executeJavaScript(`window.electronAPI.groupsRefresh('${group.id}','${id}').catch(e=>e)`)
+      assert.equal(result.name, 'IpcRemoteError')
+      assert.equal(result.category, category); assert.equal(result.code, ipcError(category).code)
+      assert.equal(result.message, ipcError(category, locale).message)
+      assert.doesNotMatch(JSON.stringify(result), /FAKE-SECRET|\bat |[A-Z]:[\\/]/)
+      const operation = operations.list().at(-1)!
+      assert.equal(operation.correlationId, result.correlationId)
+      assert.equal(operation.status, 'error'); assert.equal(operation.category, category)
+      assert.equal(JSON.stringify(serverPicker.getProfiles()), savedProfiles)
+      const groups = await owner.executeJavaScript('window.electronAPI.groupsList()')
+      assert.equal(groups.find((item: { id: string }) => item.id === group.id).lastFetchError, ipcError(category).message)
+      assert.equal(await owner.executeJavaScript(`window.electronAPI.operationsCancelRequest('${id}')`), false)
+      assert.deepEqual(['destroyed', 'render-process-gone', 'did-navigate'].map(event => owner.listenerCount(event)), baseline)
+    }
+  }
   ;(globalThis as any).vpnteProfileBoundary = async () => response
+  assert.equal((await owner.executeJavaScript(`window.electronAPI.groupsRefresh('${group.id}','${id}')`)).ok, true)
+  assert.equal(serverGroups.getGroup(group.id)?.lastFetchError, null)
+  ;(globalThis as any).vpnteProfileBoundary = async () => ({ ...response, profiles: [{
+    ...response.profiles[0], outbound: { ...response.profiles[0].outbound, server: 'fresh-native.example.test' }
+  }] })
   assert.ok((await owner.executeJavaScript(`window.electronAPI.serversAdd('https://sub.example.test/success',{clientDevice:'pc'},'${id}')`)).length > 0)
   assert.equal(await owner.executeJavaScript(`window.electronAPI.operationsCancelRequest('${id}')`), false)
   // No real clipboard mutation or file picker: cancel before the controlled
@@ -92,6 +123,7 @@ app.whenReady().then(async () => {
   console.log('SERVER_REQUEST_NATIVE_PASS', JSON.stringify({ electron: process.versions.electron,
     checks: ['actual refresh/import/target/repaste handlers and preload; owned cancellation <900ms with original correlation',
       'foreign/stale token refusal; retained physical drain, no late store writes and listener cleanup', 'fresh import succeeds after cancellation',
+      'seven caught refresh fault categories cross real contextBridge in en/ru with matching history/correlation and safe persisted metadata; fresh retry succeeds',
       'five key export entrypoints cancel before secret consent; no save picker/file; fresh secret export succeeds'] }))
 }).then(() => { clearTimeout(watchdog); app.exit(0) }).catch(error => {
   console.error('SERVER_REQUEST_NATIVE_FAIL', error)

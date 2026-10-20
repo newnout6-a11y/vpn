@@ -366,6 +366,7 @@ export function Servers() {
       if (!mounted.current) return
       setGroupsAvailable(true)
       setGroups(Array.isArray(list) ? list : [])
+      return Array.isArray(list) ? list : []
     } catch (err) {
       // If the IPC exists but blows up, fall back rather than wedging the page.
       if (!mounted.current) return
@@ -991,19 +992,16 @@ export function Servers() {
             t('servers.groups.expiredBannerToast')
           )
         }
-      } else {
-        const message = t('servers.groups.refreshFailedDetail', {
-          error: result.error,
-          when: formatRelative(Date.now(), i18n.language)
-        })
-        addLog('warn', `${group.name}: ${result.error}`)
-        showToast('error', t('servers.groups.refreshFailed'), message)
-        // Re-fetch so the lastFetchAttemptAt / lastFetchError fields update.
-        await fetchGroups()
       }
     } catch (err: any) {
       if (!current(requestId) || (isIpcRemoteErrorData(err) && err.category === 'cancelled')) return
-      const message = err?.message ?? String(err)
+      const refreshed = await fetchGroups()
+      if (!current(requestId)) return
+      const failedGroup = refreshed?.find(g => g.id === group.id)
+      const invalidSubscription = isIpcRemoteErrorData(err) && err.category === 'validation' && failedGroup?.status === 'expired'
+      const message = invalidSubscription
+        ? t(failedGroup.lastFetchError === 'Подписка вернула пустой список профилей' ? 'servers.groups.emptySubscription' : 'servers.groups.invalidSubscription')
+        : err?.message ?? String(err)
       addLog('error', `${group.name}: ${message}`)
       showToast('error', t('servers.groups.refreshFailed'), message)
     } finally {
