@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { ConnectionLogEntry, ConnectionHistoryEntryInput } from '../shared/ipc-types'
 import { SESSION_OUTCOME_KINDS } from '../shared/ipc-types'
-import { OPERATION_PRIORITY } from '../shared/operation'
+import { OPERATION_PRIORITY, connectionFailure } from '../shared/operation'
+import { ipcError, classifyIpcError, readIpcErrorCategory } from '../shared/ipc-result'
 import { randomUUID } from 'node:crypto'
 import ts from 'typescript'
 
@@ -71,7 +72,7 @@ async function sessionTracking(service: Awaited<ReturnType<typeof reload>>) {
   visit(source)
   expect(Object.keys(callbacks).sort()).toEqual(['restart', 'status'])
   const notificationIds: Array<string | undefined> = []
-  const dependencies = { currentCorrelationId, currentActionMetadata, withCorrelation, randomUUID, monotonicTimeMs, connectionHistoryService: service, makeOutcome, outcomeKindToDisconnectReason, sessionOutcomeConfidence, isNodeSwitchRestartReason,
+  const dependencies = { connectionFailure, ipcError, classifyIpcError, readIpcErrorCategory, currentCorrelationId, currentActionMetadata, withCorrelation, randomUUID, monotonicTimeMs, connectionHistoryService: service, makeOutcome, outcomeKindToDisconnectReason, sessionOutcomeConfidence, isNodeSwitchRestartReason,
     settingsStore: { get: () => settings, save: noop }, autoconfig, tunnelState,
     connectionLifecycle: new ConnectionLifecycle(noop, undefined, operation => { if (operation.kind === 'connect' && operation.status === 'running') operationIds.push(operation.correlationId) }, tunnelState),
     resolveProxyForTrayStart: vi.fn(async (): Promise<{ proxyAddr: string; proxyType: 'http' } | null> => null), notify: () => notificationIds.push(currentCorrelationId()),

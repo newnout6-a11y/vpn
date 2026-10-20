@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionLifecycle } from './connectionLifecycle'
 import { OPERATION_PRIORITY, type OperationOwner } from '../shared/operation'
+import { IPC_ERRORS, IpcFault, ipcError, type IpcErrorCategory } from '../shared/ipc-result'
 
 function held<T>() {
   let resolve!: (value: T) => void
@@ -12,6 +13,25 @@ function held<T>() {
 afterEach(() => vi.useRealTimers())
 
 describe('connection operation ownership', () => {
+  it.each((Object.keys(IPC_ERRORS) as IpcErrorCategory[]).flatMap(category =>
+    ['start', 'stop'].map(method => ({ category, method: method as 'start' | 'stop' }))))('keeps returned $category in $method history (AT-00-004/005)', async ({ category, method }) => {
+    const events: any[] = [], lane = new ConnectionLifecycle(vi.fn(), undefined, operation => events.push(operation))
+    const error = ipcError(category), result = { success: false, error: error.message, code: error.code, category }
+    expect(await lane[method](async () => result)).toBe(result)
+    expect(events.map(event => event.status)).toEqual(['running', category === 'cancelled' ? 'cancelled' : 'error'])
+    expect(lane.operation).toMatchObject({ category })
+  })
+  it.each((Object.keys(IPC_ERRORS) as IpcErrorCategory[]).flatMap(category =>
+    ['start', 'stop'].map(method => ({ category, method: method as 'start' | 'stop' }))))('keeps thrown $category in $method history (AT-00-004/005)', async ({ category, method }) => {
+    const lane = new ConnectionLifecycle(vi.fn()), fault = new IpcFault(category)
+    await expect(lane[method](async () => { throw fault })).rejects.toBe(fault)
+    expect(lane.operation).toMatchObject({ status: category === 'cancelled' ? 'cancelled' : 'error', category })
+  })
+  it('does not accept mismatched returned code/category as a known cause (AT-00-004)', async () => {
+    const lane = new ConnectionLifecycle(vi.fn())
+    await lane.start(async () => ({ success: false, error: 'legacy reason', code: IPC_ERRORS.network.code, category: 'permission' }))
+    expect(lane.operation).toMatchObject({ status: 'error', category: 'internal' })
+  })
   it.each(['manual', 'schedule'] as const)('joins an in-flight recovery stop for %s without duplicate cleanup (AT-00-007)', async owner => {
     const gate = held<{ success: boolean }>(), cleanup = vi.fn(() => gate.promise)
     const lane = new ConnectionLifecycle(vi.fn())

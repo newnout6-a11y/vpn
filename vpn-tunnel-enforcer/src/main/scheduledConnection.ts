@@ -1,9 +1,9 @@
 import type { ScheduleEntry } from '../shared/ipc-types'
-import type { ConnectionStartResult } from '../shared/operation'
+import { connectionFailure, type ConnectionStartResult } from '../shared/operation'
 import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
 
 type Proxy = { proxyAddr: string; proxyType: 'socks5' | 'http' }
-type ScheduledConnectionResult = ConnectionStartResult | { success: false; code: 'SCHEDULE_PROFILE_UNAVAILABLE'; error: string }
+type ScheduledConnectionResult = ConnectionStartResult | { success: false; code: 'SCHEDULE_PROFILE_UNAVAILABLE'; category: 'conflict'; error: string }
 interface ScheduledConnectionActions {
   resolveProxy(): Promise<Proxy | null>
   selectProfile(id: string): boolean
@@ -21,8 +21,8 @@ export function runScheduledConnection(
   return lifecycle.start<ScheduledConnectionResult>(async owner => {
     const proxy = schedule.mode === 'direct' ? null : await owner.wait(actions.resolveProxy())
     owner.assertActive()
-    if (schedule.mode !== 'direct' && !proxy) return { success: false, error: 'Не найден локальный прокси' }
-    if (schedule.profileId && !actions.selectProfile(schedule.profileId)) return { success: false, code: 'SCHEDULE_PROFILE_UNAVAILABLE', error: 'Профиль расписания недоступен' }
+    if (schedule.mode !== 'direct' && !proxy) return connectionFailure('conflict', 'Не найден локальный прокси')
+    if (schedule.profileId && !actions.selectProfile(schedule.profileId)) return { success: false, code: 'SCHEDULE_PROFILE_UNAVAILABLE', category: 'conflict', error: 'Профиль расписания недоступен' }
     return schedule.mode === 'direct'
       ? owner.wait(actions.startDirect(owner))
       : owner.wait(actions.startProxy(owner, proxy!, schedule.mode))

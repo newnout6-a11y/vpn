@@ -1,4 +1,5 @@
 /** WP-0 operation metadata is serializable; AbortSignal stays inside main. */
+import { ipcError, readIpcErrorCategory, type IpcErrorCategory, type IpcError } from './ipc-result'
 export const OPERATION_PRIORITY = {
   recovery: 6, manual: 5, schedule: 4, rotation: 3, autopilot: 2, 'adaptive-retry': 1
 } as const
@@ -13,7 +14,7 @@ export interface ConnectionOperation {
   readonly startedAt: number
   readonly deadline: number | null
   readonly status: 'running' | 'success' | 'cancelled' | 'error'
-  readonly category?: 'conflict' | 'cancelled' | 'timeout' | 'internal'
+  readonly category?: IpcErrorCategory
 }
 export interface ConnectionOperationRejection {
   success: false
@@ -22,8 +23,34 @@ export interface ConnectionOperationRejection {
   category: 'conflict' | 'cancelled' | 'timeout'
   operationId?: string
 }
-export type ConnectionStartResult = { success: boolean; error?: string; warning?: string | null; vpnIp?: string | null } | ConnectionOperationRejection
-export type ConnectionStopResult = { success: boolean; error?: string; warning?: string } | ConnectionOperationRejection
+export interface ConnectionFailure {
+  success: false
+  error: string
+  code: IpcError['code']
+  category: IpcErrorCategory
+  warning?: string | null
+}
+/** Optional guidance is authored by the caller; never pass exception text. */
+export function connectionFailure(category: IpcErrorCategory, guidance = ipcError(category).message): ConnectionFailure {
+  const error = ipcError(category)
+  return { success: false, error: guidance, code: error.code, category }
+}
+export type ConnectionStartResult = { success: true; error?: never; warning?: string | null; vpnIp?: string | null } | ConnectionFailure | ConnectionOperationRejection
+export type ConnectionStopResult = { success: true; error?: never; warning?: string | null } | ConnectionFailure | ConnectionOperationRejection
+
+/** Retain the published admission and scheduler codes alongside IPC codes. */
+export function connectionFailureCategory(value: unknown): IpcErrorCategory {
+  const canonical = readIpcErrorCategory(value)
+  if (canonical) return canonical
+  try {
+    if (value && typeof value === 'object' && 'code' in value && 'category' in value) {
+      if ((value.code === 'OPERATION_CONFLICT' || value.code === 'SCHEDULE_PROFILE_UNAVAILABLE') && value.category === 'conflict') return 'conflict'
+      if (value.code === 'OPERATION_CANCELLED' && value.category === 'cancelled') return 'cancelled'
+      if (value.code === 'OPERATION_TIMEOUT' && value.category === 'timeout') return 'timeout'
+    }
+  } catch { /* Unreadable receipts have no confirmed category. */ }
+  return 'internal'
+}
 
 /** Logs use a reversible non-secret key; managed cancellation retains UUIDv4. */
 export function operationLogDetails<T extends { readonly operationId: string }>(operation: T): Omit<T, 'operationId'> & { operationId: string; operationKey: string } {

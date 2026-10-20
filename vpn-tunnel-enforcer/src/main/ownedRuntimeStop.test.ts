@@ -9,7 +9,8 @@ import { classifyIpcError, ipcError } from '../shared/ipc-result'
 const source = ts.createSourceFile('tunController.ts', readFileSync(join(process.cwd(), 'src/main/tunController.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
 const node = source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'killOwnedTunRuntimeProcesses')
 if (!node) throw new Error('Production runtime stop missing')
-const js = ts.transpileModule(node.getText(source).replace(/^export /, '') + '\nreturn killOwnedTunRuntimeProcesses;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+const classifier = source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'classifyTunError')!
+const js = ts.transpileModule(classifier.getText(source) + '\n' + node.getText(source).replace(/^export /, '') + '\nreturn killOwnedTunRuntimeProcesses;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
 const runtimeDir = 'C:\\VPNTE-fixture-runtime'
 const reply = { candidates: 1, killed: 1, names: ['vpnte-sing-box.exe'] }
 function harness(platform = 'win32') {

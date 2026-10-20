@@ -1,7 +1,8 @@
 import { recordOwnedTunAdapter, strictRecoveryRequired, readRecoveryManifest } from './recoveryManifest'
 import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
 import { OWNED_RUNTIME_STATUS_QUERY_SCRIPT, OWNED_RUNTIME_STOP_SCRIPT } from './recoveryPsProtocol'
-import { classifyIpcError, ipcError } from '../shared/ipc-result'
+import { classifyIpcError, ipcError, IpcFault, readIpcErrorCategory, type IpcErrorCategory } from '../shared/ipc-result'
+import { connectionFailure, type ConnectionFailure } from '../shared/operation'
 import type { OwnedRuntimeStopResult, FirewallKillSwitchResult } from '../shared/network'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { writeFile, copyFile, access, rename, stat, readFile } from 'fs/promises'
@@ -67,6 +68,16 @@ import { waitForTunRelease } from './tunRestartReadiness'
 
 const exec = promisify(execCb)
 const execFile = promisify(execFileCb)
+type TunStartResult = { success: true; error?: never; warning?: string | null } | ConnectionFailure
+
+function classifyTunError(error: unknown): IpcErrorCategory {
+  if (error instanceof RecoveryWorkerError) return error.code === 'timeout' ? 'timeout'
+    : error.code === 'busy' || error.code === 'closed' ? 'conflict' : 'internal'
+  // A buffer-limit kill has a different code and is not a timeout receipt.
+  if (error instanceof Error && 'killed' in error && error.killed === true && 'signal' in error && error.signal === 'SIGTERM'
+    && 'code' in error && error.code === null) return 'timeout'
+  return classifyIpcError(error)
+}
 
 function recordForensicTunEvent(event: string, details: Record<string, unknown> = {}): void {
   import('./trafficForensics')
@@ -85,14 +96,11 @@ export interface NetworkCleanupReceipt {
   firewall: boolean
   adapters: boolean
 }
-export interface TunStopResult {
-  success: boolean
+export type TunStopResult = ({ success: true; error?: never; warning?: string | null } | ConnectionFailure) & {
   operationId?: string
   // Exit was freshly proved, but a later cleanup step failed. Main may close
   // the session and retry recovery without treating this as a live runtime.
   runtimeStopped?: boolean
-  error?: string
-  warning?: string
   networkCleanup?: NetworkCleanupReceipt
 }
 
@@ -1370,12 +1378,7 @@ export async function killOwnedTunRuntimeProcesses(): Promise<OwnedRuntimeStopRe
     }
   } catch (err) {
     logEvent('debug', 'tun', 'killOwnedRuntimeProcesses failed', err)
-    const category = err instanceof RecoveryWorkerError
-      ? err.code === 'timeout' ? 'timeout' : err.code === 'busy' || err.code === 'closed' ? 'conflict' : 'internal'
-      // execFile's timeout kills its child with SIGTERM and a null exit code.
-      // A maxBuffer failure has a distinct code and must remain internal.
-      : err instanceof Error && 'killed' in err && err.killed === true && 'signal' in err && err.signal === 'SIGTERM' && 'code' in err && err.code === null
-        ? 'timeout' : classifyIpcError(err)
+    const category = classifyTunError(err)
     return { success: false, error: ipcError(category) }
   }
 }
@@ -1383,7 +1386,7 @@ export async function killOwnedTunRuntimeProcesses(): Promise<OwnedRuntimeStopRe
 async function killOwnedRuntimeProcesses(): Promise<void> {
   const result = await killOwnedTunRuntimeProcesses()
   if (!result.success || result.killed < result.candidates) {
-    throw new Error(!result.success ? result.error.message : 'Owned runtime termination was not confirmed')
+    throw new IpcFault(!result.success ? result.error.category : 'internal')
   }
 }
 
@@ -1850,7 +1853,7 @@ async function validateProxyFullTunnel(
   host: string,
   port: number,
   proxyType: 'socks5' | 'http'
-): Promise<{ ok: boolean; message?: string; directIp: string | null; proxyIps: Array<{ label: string; ip: string | null; error?: string }> }> {
+): Promise<{ ok: boolean; reason?: 'split' | 'direct' | 'offline'; message?: string; directIp: string | null; proxyIps: Array<{ label: string; ip: string | null; error?: string }> }> {
   if (process.platform !== 'win32') return { ok: true, directIp: null, proxyIps: [] }
 
   const proxyUrl = curlProxyUrl(host, port, proxyType)
@@ -1922,6 +1925,7 @@ async function validateProxyFullTunnel(
   if (seen.length >= 2) {
     return {
       ok: false,
+      reason: 'split',
       directIp,
       proxyIps,
       message:
@@ -1933,6 +1937,7 @@ async function validateProxyFullTunnel(
   if (directIp && seen.length === 1 && seen[0] === directIp) {
     return {
       ok: false,
+      reason: 'direct',
       directIp,
       proxyIps,
       message:
@@ -1947,6 +1952,7 @@ async function validateProxyFullTunnel(
   if (seen.length === 0) {
     return {
       ok: false,
+      reason: 'offline',
       directIp,
       proxyIps,
       message:
@@ -2421,19 +2427,19 @@ export const tunController = {
     })
   },
 
-  async start(proxyAddrOrOpts: string | StartOptions): Promise<{ success: boolean; error?: string; warning?: string | null }> {
+  async start(proxyAddrOrOpts: string | StartOptions): Promise<TunStartResult> {
     if (currentStatus.running) {
-      return { success: false, error: 'TUN уже запущен' }
+      return connectionFailure('conflict', 'TUN уже запущен')
     }
     if (startInProgress || activeStartCompletion) {
-      return { success: false, error: 'Запуск защиты уже выполняется' }
+      return connectionFailure('conflict', 'Запуск защиты уже выполняется')
     }
     if (stopInProgress || activeStopCompletion) {
-      return { success: false, error: 'Остановка защиты ещё выполняется — подождите' }
+      return connectionFailure('conflict', 'Остановка защиты ещё выполняется — подождите')
     }
     if (transitionCancelRequested) {
       transitionCancelRequested = false
-      return { success: false, error: 'Запуск отменён' }
+      return connectionFailure('cancelled', 'Запуск отменён')
     }
     startInProgress = true
     stopRequested = false
@@ -2453,7 +2459,7 @@ export const tunController = {
     let startupPollCompletion: Promise<void> | null = null
     const startupCleanupTasks: Promise<void>[] = []
     try {
-    const finishStart = <T extends { success: boolean; error?: string; warning?: string | null }>(result: T): T => {
+    const finishStart = (result: TunStartResult): TunStartResult => {
       startInProgress = false
       if (activeStartAbortController === startAbortController) activeStartAbortController = null
       // Consume a cancellation that arrived while this start was unwinding;
@@ -2554,10 +2560,10 @@ export const tunController = {
     }), { parallel: true })
 
     if (mode === 'localProxy' && !proxyAddr) {
-      return finishStart({ success: false, error: 'Не указан upstream proxy' })
+      return finishStart(connectionFailure('validation', 'Не указан upstream proxy'))
     }
     if (mode === 'directVpn' && !vpnProfile) {
-      return finishStart({ success: false, error: 'Не выбран Direct VPN профиль' })
+      return finishStart(connectionFailure('conflict', 'Не выбран Direct VPN профиль'))
     }
 
     // ---------- Pre-flight 1: detect another VPN/TUN ----------
@@ -2567,18 +2573,21 @@ export const tunController = {
     const foreign = detectForeignTun()
     endPhase('foreign-tun-preflight', foreignPreflightStarted, { found: Boolean(foreign) })
     if (foreign) {
-      const message =
-        `Уже активен другой системный туннель: ${foreign}. Второй TUN поверх него не запускается, ` +
-        'потому что так чаще всего ломаются DNS и интернет. Оставьте текущий VPN/TUN включенным или выключите TUN в VPN-клиенте и оставьте только локальный proxy.'
       logEvent('warn', 'tun', 'start refused because another TUN/VPN is already active', { foreign, mode, proxyAddr, proxyType })
-      return finishStart({ success: false, error: message })
+      return finishStart(connectionFailure('conflict', 'Уже активен другой системный туннель. Выключите его TUN-режим и повторите подключение.'))
     }
     // Reserve the sublayer before sing-box strict_route creates its hard permits.
     // This commits only an empty owned container; traffic rules still require
     // the verified TUN and durable recovery journal below.
     if (wantKillSwitch) {
       try { await timeAsync('wfp-priority-reserve', () => reserveKillSwitchIpv6Priority(startAbortController.signal)) }
-      catch (err: any) { return finishStart({ success: false, error: err?.message || String(err) }) }
+      catch (err) {
+        logEvent('warn', 'tun', 'WFP priority reservation failed', err)
+        const category = classifyTunError(err)
+        return finishStart(connectionFailure(category, category === 'conflict'
+          ? 'Конфликт IPv6-фильтров WFP: остановите TUN/VPN другого приложения и повторите подключение'
+          : ipcError(category).message))
+      }
     }
     mark('preflight')
     const warning = null
@@ -2612,6 +2621,7 @@ export const tunController = {
     // the tunnel up (inside the sing-box poller success handler).
     let adapterLockdownEngaged = false
     let adapterLockdownWarning: string | null = null
+    let adapterLockdownCategory: IpcErrorCategory = 'internal'
     logEvent('info', 'tun', 'adapter lockdown decision', {
       wantAdapterLockdown,
       publicWifiCompatibility,
@@ -2654,6 +2664,7 @@ export const tunController = {
           logEvent('warn', 'tun', 'physical adapter lockdown did not apply', lock)
           throw new Error(adapterLockdownWarning)
         } catch (err: any) {
+          adapterLockdownCategory = classifyTunError(err)
           if (!adapterLockdownWarning) {
             adapterLockdownWarning = `Lockdown failed: ${err?.message ?? String(err)}`
           }
@@ -2697,7 +2708,8 @@ export const tunController = {
         parsedProxy = parseProxyAddress(proxyAddr)
       } catch (err: any) {
         await rollbackEarlyAdapterLockdown('proxy address parse failed after adapter lockdown')
-        return finishStart({ success: false, error: err.message || String(err) })
+        logEvent('warn', 'tun', 'invalid upstream proxy address', err)
+        return finishStart(connectionFailure('validation', 'Некорректный адрес upstream proxy. Укажите host:port или [IPv6]:port; порт должен быть от 1 до 65535.'))
       }
 
       const { host, port } = parsedProxy
@@ -2720,12 +2732,10 @@ export const tunController = {
       if (!proxyAlive) {
         logEvent('error', 'tun', 'start refused because upstream proxy is not reachable', { proxyAddr, proxyType })
         await rollbackEarlyAdapterLockdown('proxy not reachable after adapter lockdown')
-        return finishStart({
-          success: false,
-          error:
+        return finishStart(connectionFailure('network',
             `Прокси ${proxyAddr} недоступен. Убедитесь, что Happ запущен в режиме Proxy ` +
             `и слушает порт ${port}.`
-        })
+        ))
       }
       logEvent('info', 'tun', 'upstream proxy is reachable', { proxyAddr, proxyType })
 
@@ -2751,7 +2761,14 @@ export const tunController = {
       logEvent(proxyFullTunnel.ok ? 'info' : 'error', 'tun', 'upstream proxy full-tunnel check', proxyFullTunnel)
       if (!proxyFullTunnel.ok) {
         await rollbackEarlyAdapterLockdown('proxy full-tunnel check failed after adapter lockdown')
-        return finishStart({ success: false, error: proxyFullTunnel.message || 'Upstream proxy не прошёл проверку полного туннеля' })
+        const guidance = proxyFullTunnel.reason === 'split'
+          ? 'Upstream proxy работает как split/direct proxy. Включите в Happ режим Global/Proxy без обхода RU/локальных сайтов.'
+          : proxyFullTunnel.reason === 'direct'
+            ? 'Upstream proxy выходит напрямую и не меняет внешний IP. Включите VPN-сервер в клиенте и режим Global/Proxy перед запуском Hard mode.'
+            : proxyFullTunnel.reason === 'offline'
+              ? 'Upstream proxy принимает соединения, но не выходит в интернет. Проверьте VPN-сервер в Happ/V2RayN: возможно, он недоступен или заблокирован.'
+              : 'Upstream proxy не прошёл проверку полного туннеля. Проверьте VPN-сервер и режим Global/Proxy в клиенте.'
+        return finishStart(connectionFailure('network', guidance))
       }
       mark('proxy-validated')
     } else {
@@ -2799,20 +2816,17 @@ export const tunController = {
             proxyOwnerProgramPaths = [...new Set([...proxyOwnerProgramPaths, xr.exePath])]
             proxyOwnerProcessNames = uniqueProcessNames([...proxyOwnerProcessNames, 'vpnte-xray.exe'])
           } catch (xrErr) {
+            logEvent('error', 'tun', 'xray startup failed', xrErr)
             try { await stopXray('xray startup failed') }
             catch (error) {
               logEvent('warn', 'tun', 'xray cleanup after startup failure not confirmed', error)
               // The concurrent native lockdown still belongs to this start.
               await adapterLockdownPromise?.catch(() => undefined)
-              return finishStart({ success: false,
-                error: `Ошибка запуска движка xray-core: ${(xrErr as Error).message}`,
-                warning: `Xray exit not confirmed; adapter protection retained: ${String(error)}` })
+              return finishStart({ ...connectionFailure(classifyTunError(xrErr), 'Не удалось запустить xray-core. Проверьте конфигурацию VPN-профиля и журнал запуска.'),
+                warning: 'Xray exit not confirmed; adapter protection retained. Повторите остановку и проверьте журнал.' })
             }
             await rollbackEarlyAdapterLockdown('xray startup failed after adapter lockdown')
-            return finishStart({
-              success: false,
-              error: `Ошибка запуска движка xray-core: ${(xrErr as Error).message}`
-            })
+            return finishStart(connectionFailure(classifyTunError(xrErr), 'Не удалось запустить xray-core. Проверьте конфигурацию VPN-профиля и журнал запуска.'))
           }
         }
 
@@ -2822,12 +2836,13 @@ export const tunController = {
           // Confirm its exit before releasing the adapter restrictions.
           try { await stopXray('start cancelled while reading DNS sources') }
           catch (error) {
+            logEvent('warn', 'tun', 'xray cleanup after cancelled startup not confirmed', error)
             await adapterLockdownPromise?.catch(() => undefined)
-            return finishStart({ success: false, error: 'Запуск отменён',
-              warning: `Xray exit not confirmed; adapter protection retained: ${String(error)}` })
+            return finishStart({ ...connectionFailure('cancelled', 'Запуск отменён'),
+              warning: 'Xray exit not confirmed; adapter protection retained. Повторите остановку и проверьте журнал.' })
           }
           await rollbackEarlyAdapterLockdown('start cancelled while reading DNS sources')
-          return finishStart({ success: false, error: 'Запуск отменён' })
+          return finishStart(connectionFailure('cancelled', 'Запуск отменён'))
         }
         if (!runtimePromise) runtimePromise = timePromise('prepare-runtime', prepareRuntime(
           { outbound: vpnProfile.outbound, proxyType, clientDevice: vpnProfile.clientDevice },
@@ -2859,7 +2874,7 @@ export const tunController = {
         // so it doesn't bubble as an unhandled rejection.
         if (runtimePromise) runtimePromise.catch(() => undefined)
         await rollbackEarlyAdapterLockdown('owned runtime cleanup failed after adapter lockdown')
-        return finishStart({ success: false, error: 'Не удалось остановить предыдущий vpnte-sing-box.exe. Завершите его в Диспетчере задач и повторите.' })
+        return finishStart(connectionFailure('conflict', 'Не удалось остановить предыдущий vpnte-sing-box.exe. Завершите его в Диспетчере задач и повторите.'))
       }
     } else {
       // Process is NOT running — nothing to kill. Previously this called
@@ -2929,7 +2944,7 @@ export const tunController = {
       await rollbackEarlyAdapterLockdown('runtime prepare failed after adapter lockdown')
       await stopXray('runtime prepare failed').catch(() => undefined)
       logEvent('error', 'tun', 'failed to prepare TUN runtime', err)
-      return finishStart({ success: false, error: `Не удалось подготовить TUN-окружение: ${err.stderr || err.message || err}` })
+      return finishStart(connectionFailure(classifyTunError(err), 'Не удалось подготовить TUN runtime или проверить конфигурацию sing-box. Проверьте доступ к файлам движка и журнал запуска.'))
     }
     mark('stale-cleanup-done')
     mark('runtime-ready')
@@ -2961,19 +2976,20 @@ export const tunController = {
       await rollbackEarlyAdapterLockdown('start aborted by stop request')
       await stopXray('start aborted by stop request').catch(() => undefined)
       await disableKillSwitchIfActive('start aborted by stop request').catch(() => undefined)
-      return finishStart({ success: false, error: 'Запуск отменен: поступил запрос на остановку' })
+      return finishStart(connectionFailure('cancelled', 'Запуск отменен: поступил запрос на остановку'))
     }
 
     // sudo-prompt's callback fires on child exit. For a long-running daemon we:
     // 1. Fire-and-forget the sudo.exec call, using its callback to mark "stopped" on exit.
     // 2. Poll tasklist for sing-box.exe to determine if it actually started.
-    return await new Promise((resolve) => {
+    return await new Promise<TunStartResult>((resolve) => {
       let resolved = false
       let startupCompensationStarted = false
       let startAbortedReason: string | null = null
-      let pendingKillSwitch: Promise<{ engaged: boolean; warning: string | null }> | null = null
+      let startAbortedCategory: IpcErrorCategory | undefined
+      let pendingKillSwitch: Promise<{ engaged: boolean; warning: string | null; category?: IpcErrorCategory }> | null = null
       let settleFirewallAdapter: ((ready: boolean) => void) | null = null
-      const finish = (result: { success: boolean; error?: string; warning?: string | null }) => {
+      const finish = (result: TunStartResult) => {
         if (resolved) return
         resolved = true
         startInProgress = false
@@ -3123,7 +3139,7 @@ export const tunController = {
           } else {
             notifyStatus('stopped')
           }
-          finish({ success: false, error: msg })
+          finish(connectionFailure(startAbortedCategory ?? classifyTunError(error), startAbortedReason ?? 'sing-box завершился до подтверждения запуска. Проверьте конфигурацию VPN-профиля, права запуска и журнал.'))
         } else if (error || stderr) {
           // A force-kill on user-initiated stop makes the child exit with a
           // non-zero "Command failed" error + empty stderr. That's expected,
@@ -3381,7 +3397,7 @@ export const tunController = {
               startedAt: null,
               restartAttempt: 0
             }
-            finish({ success: false, error: 'Запуск отменен: поступил запрос на остановку' })
+            finish(connectionFailure('cancelled', 'Запуск отменен: поступил запрос на остановку'))
             return
           }
           attempts++
@@ -3408,7 +3424,7 @@ export const tunController = {
                 startupCompensationStarted = true
                 await killOwnedRuntimeProcesses()
                 await rollbackEarlyAdapterLockdown('lockdown failed after sing-box started')
-                finish({ success: false, error: adapterLockdownWarning || 'Adapter lockdown failed' })
+                finish(connectionFailure(adapterLockdownCategory, 'Не удалось применить защиту физических адаптеров. Проверьте журнал.'))
                 return
               }
             }
@@ -3419,7 +3435,7 @@ export const tunController = {
             const parallelStarted = phaseStart()
             const firewallAdapterReady = new Promise<boolean>(resolve => { settleFirewallAdapter = resolve })
 
-            let killSwitchPromise: Promise<{ engaged: boolean; warning: string | null }> | null = null
+            let killSwitchPromise: Promise<{ engaged: boolean; warning: string | null; category?: IpcErrorCategory }> | null = null
             if (wantKillSwitch) {
               killSwitchPromise = (async () => {
                 const ks = await enableKillSwitch({
@@ -3442,10 +3458,12 @@ export const tunController = {
                   return { engaged: true, warning: null }
                 }
                 logEvent('warn', 'tun', 'firewall kill-switch verification failed', ks)
-                return { engaged: false, warning: `Kill-switch не подтверждён: ${ks.message}. Запуск отменён.` }
+                const category = readIpcErrorCategory(ks.error) ?? 'internal'
+                return { engaged: false, category, warning: `Kill-switch не подтверждён: ${ipcError(category).message}. Запуск отменён.` }
               })().catch(err => {
                 logEvent('warn', 'tun', 'kill-switch promise rejected', err)
-                return { engaged: false, warning: `Kill-switch error: ${err?.message || String(err)}` }
+                const category = classifyTunError(err)
+                return { engaged: false, category, warning: `Kill-switch не подтверждён: ${ipcError(category).message}. Запуск отменён.` }
               })
               pendingKillSwitch = killSwitchPromise
             }
@@ -3472,7 +3490,7 @@ export const tunController = {
                 startedAt: null,
                 restartAttempt: 0
               }
-              finish({ success: false, error: 'Запуск отменен: поступил запрос на остановку' })
+              finish(connectionFailure('cancelled', 'Запуск отменен: поступил запрос на остановку'))
               return
             }
 
@@ -3502,7 +3520,7 @@ export const tunController = {
                 startedAt: null,
                 restartAttempt: 0
               }
-              finish({ success: false, error: 'Запуск отменен: поступил запрос на остановку' })
+              finish(connectionFailure('cancelled', 'Запуск отменен: поступил запрос на остановку'))
               return
             }
 
@@ -3529,10 +3547,7 @@ export const tunController = {
                 startedAt: null,
                 restartAttempt: 0
               }
-              finish({
-                success: false,
-                error: `Туннельный интерфейс ${TUN_ADAPTER_ALIAS} не поднялся. Запуск отменен для предотвращения утечки трафика.`
-              })
+              finish(connectionFailure('timeout', 'Туннельный интерфейс не поднялся. Запуск отменен для предотвращения утечки трафика.'))
               return
             }
 
@@ -3574,6 +3589,7 @@ export const tunController = {
                 killSwitchEngaged = true
               } else {
                 startAbortedReason = ksResult.warning || 'Не удалось применить обязательные правила брандмауэра Kill-Switch. Запуск отменен.'
+                startAbortedCategory = ksResult.category ?? 'internal'
                 logEvent('error', 'tun', 'firewall kill-switch failed to engage — aborting start and rolling back', { warning: ksResult.warning })
                 startupCompensationStarted = true
                 await killOwnedRuntimeProcesses()
@@ -3593,10 +3609,7 @@ export const tunController = {
                   startedAt: null,
                   restartAttempt: 0
                 }
-                finish({
-                  success: false,
-                  error: ksResult.warning || 'Не удалось применить обязательные правила брандмауэра Kill-Switch. Запуск отменен.'
-                })
+                finish(connectionFailure(startAbortedCategory, startAbortedReason))
                 return
               }
             } else {
@@ -3623,7 +3636,7 @@ export const tunController = {
                 startedAt: null,
                 restartAttempt: 0
               }
-              finish({ success: false, error: 'Запуск отменен: поступил запрос на остановку' })
+              finish(connectionFailure('cancelled', 'Запуск отменен: поступил запрос на остановку'))
               return
             }
 
@@ -3758,22 +3771,28 @@ export const tunController = {
                 runtimeExited = await waitForOwnedRuntimeToExit()
                 if (!runtimeExited) cleanupErrors.push('runtime exit not confirmed; network protection retained')
               } catch (cleanupError) {
-                cleanupErrors.push(String(cleanupError))
+                logEvent('warn', 'tun', 'timeout runtime cleanup failed', cleanupError)
+                cleanupErrors.push(`runtime cleanup: ${ipcError(classifyTunError(cleanupError)).message}`)
               }
               try { await stopXray(reason) }
-              catch (cleanupError) { cleanupErrors.push(String(cleanupError)) }
+              catch (cleanupError) {
+                logEvent('warn', 'tun', 'timeout xray cleanup failed', cleanupError)
+                cleanupErrors.push(`xray cleanup: ${ipcError(classifyTunError(cleanupError)).message}`)
+              }
               if (runtimeExited) {
-                for (const effect of [
-                  () => disableKillSwitchIfActive(reason),
-                  () => rollbackEarlyAdapterLockdown(reason)
-                ]) {
+                for (const [label, effect] of [
+                  ['firewall', () => disableKillSwitchIfActive(reason)],
+                  ['adapter', () => rollbackEarlyAdapterLockdown(reason)]
+                ] as const) {
                   try { await effect() }
-                  catch (cleanupError) { cleanupErrors.push(String(cleanupError)) }
+                  catch (cleanupError) {
+                    logEvent('warn', 'tun', 'timeout network cleanup failed', cleanupError)
+                    cleanupErrors.push(`${label} cleanup: ${ipcError(classifyTunError(cleanupError)).message}`)
+                  }
                 }
               }
               finish({
-                success: false,
-                error: 'sing-box не стартовал за 7 секунд. Проверьте UAC-подтверждение и журнал.',
+                ...connectionFailure('timeout', 'sing-box не стартовал за 7 секунд. Проверьте UAC-подтверждение и журнал.'),
                 warning: cleanupErrors.length ? cleanupErrors.join('; ') : null
               })
             }
@@ -3797,19 +3816,19 @@ export const tunController = {
             await killOwnedRuntimeProcesses()
             runtimeExited = await waitForOwnedRuntimeToExit()
           } catch (cleanupError) {
-            cleanupErrors.push(String(cleanupError))
+            cleanupErrors.push(`runtime cleanup: ${ipcError(classifyTunError(cleanupError)).message}`)
             logEvent('error', 'tun', 'startup runtime termination failed', cleanupError)
           }
           if (!runtimeExited) cleanupErrors.push('runtime exit not confirmed; network protection retained')
-          const cleanups: Array<() => Promise<unknown>> = [() => stopXray('startup validation failed')]
+          const cleanups: Array<[string, () => Promise<unknown>]> = [['xray', () => stopXray('startup validation failed')]]
           if (runtimeExited) cleanups.push(
-            () => rollbackEarlyAdapterLockdown('startup validation failed'),
-            () => disableKillSwitchIfActive('startup validation failed')
+            ['adapter', () => rollbackEarlyAdapterLockdown('startup validation failed')],
+            ['firewall', () => disableKillSwitchIfActive('startup validation failed')]
           )
-          for (const cleanup of cleanups) {
+          for (const [label, cleanup] of cleanups) {
             try { await cleanup() }
             catch (cleanupError) {
-              cleanupErrors.push(String(cleanupError))
+              cleanupErrors.push(`${label} cleanup: ${ipcError(classifyTunError(cleanupError)).message}`)
               logEvent('error', 'tun', 'startup rollback step failed', cleanupError)
             }
           }
@@ -3818,7 +3837,7 @@ export const tunController = {
           try { notifyStatus(runtimeExited ? 'stopped' : 'error') }
           catch (statusError) { logEvent('error', 'tun', 'startup failure status listener threw', statusError) }
           finally {
-            finish({ success: false, error: startAbortedReason,
+            finish({ ...connectionFailure(classifyTunError(error), startAbortedReason),
               warning: cleanupErrors.length ? cleanupErrors.join('; ') : null })
           }
         } finally {
@@ -3851,7 +3870,7 @@ export const tunController = {
       const stopped = await activeStopCompletion
       if (preserved && options.preserveNetworkProtection !== true) return this.stop(options)
       if (!preserved && options.preserveNetworkProtection === true) {
-        return { success: false, error: 'Полная остановка уже выполнялась; защиту нельзя считать сохранённой' }
+        return connectionFailure('conflict', 'Полная остановка уже выполнялась; защиту нельзя считать сохранённой')
       }
       return stopped
     }
@@ -3940,10 +3959,12 @@ export const tunController = {
     cancelLeakSelfTest()
 
     const cleanupErrors: string[] = []
+    let cleanupCategory: IpcErrorCategory | undefined
     const rememberCleanupError = (label: string, err: unknown) => {
-      const message = (err as Error)?.message || String(err)
-      cleanupErrors.push(`${label}: ${message}`)
-      logEvent('warn', 'tun', `${label} after stop failed`, { operationId, error: message })
+      const category = classifyTunError(err)
+      cleanupCategory ??= category
+      cleanupErrors.push(`${label}: ${ipcError(category).message}`)
+      logEvent('warn', 'tun', `${label} after stop failed`, { operationId, error: err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : err })
     }
 
     try {
@@ -3964,7 +3985,7 @@ export const tunController = {
       // Preserve upstream, status and network protection until exit is proved.
       currentStatus.warning = cleanupErrors.join(' | ')
       notifyStatus('error')
-      return { success: false, error: currentStatus.warning, networkCleanup }
+      return { ...connectionFailure(cleanupCategory ?? 'internal', currentStatus.warning), networkCleanup }
     }
     stopCompetingTunWatch()
     stopProxyWatchdog()
@@ -4005,7 +4026,8 @@ export const tunController = {
       const baseline = await timedStop('rollback-baseline', () => rollbackTunNetworkBaselineIfApplied('TUN stopped', operationId), result => result.success)
       networkCleanup.baseline = baseline.success
       if (!baseline.success) {
-        cleanupErrors.push(`baseline auto-rollback: ${baseline.message}${baseline.warnings?.length ? `: ${baseline.warnings.join(' | ')}` : ''}`)
+        cleanupCategory ??= readIpcErrorCategory(baseline.error) ?? 'internal'
+        cleanupErrors.push(`baseline auto-rollback: ${ipcError(readIpcErrorCategory(baseline.error) ?? 'internal').message}`)
         logEvent('warn', 'tun', 'baseline auto-rollback after stop failed', { ...baseline, operationId })
       }
     } catch (err) {
@@ -4016,7 +4038,8 @@ export const tunController = {
       const killSwitch = await timedStop('disable-firewall', () => disableKillSwitchIfActive('TUN stopped', operationId), result => result.success)
       networkCleanup.firewall = killSwitch.success
       if (!killSwitch.success) {
-        cleanupErrors.push(`kill-switch disable: ${killSwitch.message}${killSwitch.details ? `: ${killSwitch.details}` : ''}`)
+        cleanupCategory ??= readIpcErrorCategory(killSwitch.error) ?? 'internal'
+        cleanupErrors.push(`kill-switch disable: ${ipcError(readIpcErrorCategory(killSwitch.error) ?? 'internal').message}`)
         logEvent('warn', 'tun', 'kill-switch disable after stop failed', { ...killSwitch, operationId })
       }
     } catch (err) {
@@ -4026,7 +4049,13 @@ export const tunController = {
     try {
       const adapters = await timedStop('rollback-adapters', () => rollbackPhysicalAdapterLockdownIfApplied('TUN stopped', { operationId }), result => result.rolledBack || result.skipped === true)
       networkCleanup.adapters = adapters.rolledBack || adapters.skipped === true
-      if (adapters.warnings?.length) cleanupErrors.push(`adapter lockdown rollback: ${adapters.warnings.join(' | ')}`)
+      if (adapters.warnings?.length) {
+        cleanupCategory ??= readIpcErrorCategory(adapters.error) ?? 'internal'
+        // The rollback producer authors every warning from fixed labels and
+        // snapshot indices; native exception text stays in its private log.
+        cleanupErrors.push(`adapter lockdown rollback: ${adapters.warnings.join('; ')}`)
+        logEvent('warn', 'tun', 'adapter lockdown rollback returned warnings', { ...adapters, operationId })
+      }
     } catch (err) {
       rememberCleanupError('adapter lockdown rollback', err)
     }
@@ -4061,7 +4090,7 @@ export const tunController = {
       currentStatus.warning = error
       notify('error', 'Отключение защиты не завершено', error, 'vpnDisconnect')
       notifyStatus('error')
-      return { success: false, runtimeStopped: true, error, warning, networkCleanup }
+      return { ...connectionFailure(cleanupCategory ?? 'internal', error), runtimeStopped: true, warning, networkCleanup }
     }
 
     // Cleanup finished — let the leak-detector run again. The next tunnel
@@ -4131,8 +4160,8 @@ export const tunController = {
     reason: string,
     nextOptions: StartOptions,
     options: { releaseTimeoutMs?: number; signal?: AbortSignal } = {}
-  ): Promise<{ success: boolean; error?: string; warning?: string | null }> {
-    if (options.signal?.aborted) return { success: false, error: 'Перезапуск отменён' }
+  ): Promise<TunStartResult> {
+    if (options.signal?.aborted) return connectionFailure('cancelled', 'Перезапуск отменён')
     const isCancelled = () => options.signal?.aborted === true || transitionCancelRequested
     const releaseTimeoutMs = options.releaseTimeoutMs ?? 5000
     logEvent('info', 'tun', 'protected tunnel restart', {
@@ -4153,7 +4182,7 @@ export const tunController = {
       await this.stop().catch(err =>
         logEvent('warn', 'tun', 'teardown after failed protected stop failed', err)
       )
-      return { success: false, error: stopped.error, warning: stopped.warning ?? null }
+      return { ...connectionFailure(readIpcErrorCategory(stopped) ?? 'internal', stopped.error ?? ipcError('internal').message), warning: stopped.warning ?? null }
     }
 
     const releaseStarted = performance.now()
@@ -4168,7 +4197,7 @@ export const tunController = {
       } catch (err) {
         logEvent('warn', 'tun', 'teardown after cancelled protected restart failed', err)
       }
-      const cancelledResult = { success: false, error: 'Перезапуск отменён' }
+      const cancelledResult = connectionFailure('cancelled', 'Перезапуск отменён')
       return cancelledResult
     }
 
@@ -4176,7 +4205,7 @@ export const tunController = {
       const error = 'Освобождение прежнего TUN-интерфейса не подтверждено; защита сохранена'
       currentStatus = { ...currentStatus, warning: error }
       notifyStatus('error')
-      return { success: false, error }
+      return connectionFailure('conflict', error)
     }
 
     const settings = settingsStore.get()
@@ -4185,11 +4214,12 @@ export const tunController = {
       proxyEngine: nextOptions.proxyEngine ?? lastStartOptions?.proxyEngine ?? (settings as any).proxyEngine
     }
 
-    let started: { success: boolean; error?: string; warning?: string | null }
+    let started: TunStartResult
     try {
       started = await this.start(nextOptions)
     } catch (err) {
-      started = { success: false, error: (err as Error)?.message || String(err) }
+      logEvent('warn', 'tun', 'protected restart startup threw', err)
+      started = connectionFailure(classifyTunError(err), 'Не удалось запустить TUN при защищённом перезапуске. Проверьте VPN-профиль и журнал; повторите остановку защиты.')
     }
     if (started.success && !options.signal?.aborted) {
       return {
@@ -4205,7 +4235,8 @@ export const tunController = {
     await this.stop().catch(err =>
       logEvent('warn', 'tun', 'terminal cleanup after failed protected restart failed', err)
     )
-    return { success: false, error: options.signal?.aborted ? 'Перезапуск отменён' : started.error, warning: started.warning ?? null }
+    return options.signal?.aborted ? connectionFailure('cancelled', 'Перезапуск отменён')
+      : { ...connectionFailure(readIpcErrorCategory(started) ?? 'internal', started.error ?? ipcError('internal').message), warning: started.warning ?? null }
   },
 
   /**
@@ -4220,14 +4251,14 @@ export const tunController = {
    * (which clears it) and replays it. Goes through restartProtected() so the
    * kill-switch is not torn down for the duration of the swap.
    */
-  async restartWithLastOptions(reason: string): Promise<{ success: boolean; error?: string }> {
+  async restartWithLastOptions(reason: string): Promise<TunStartResult> {
     if (!currentStatus.running) {
       return { success: true }
     }
     const snapshot = lastStartOptions
     if (!snapshot) {
       logEvent('warn', 'tun', 'restartWithLastOptions: no last options — leaving tunnel as-is', { reason })
-      return { success: false, error: 'no last start options' }
+      return connectionFailure('conflict', 'no last start options')
     }
     const settings = settingsStore.get()
     const nextSnapshot: StartOptions = {
@@ -4243,20 +4274,20 @@ export const tunController = {
     const restarted = await this.restartProtected(`config change: ${reason}`, nextSnapshot)
     return restarted.success
       ? { success: true }
-      : { success: false, error: restarted.error }
+      : restarted
   },
 
   async restartForAdaptiveChange(
     nextMode: AdaptiveBypassMode,
     reason: string,
     overrides: Pick<StartOptions, 'vpnProfile'> = {}
-  ): Promise<{ success: boolean; error?: string; warning?: string | null }> {
+  ): Promise<TunStartResult> {
     if (!currentStatus.running) {
-      return { success: false, error: 'tunnel is not running' }
+      return connectionFailure('conflict', 'tunnel is not running')
     }
     const snapshot = lastStartOptions
     if (!snapshot) {
-      return { success: false, error: 'no last start options' }
+      return connectionFailure('conflict', 'no last start options')
     }
 
     logEvent('info', 'adaptive-bypass', 'starting protected compatibility transition', {

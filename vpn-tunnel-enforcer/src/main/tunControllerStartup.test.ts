@@ -6,15 +6,23 @@ import { spawnSync } from 'node:child_process'
 import { describe, expect, it, vi } from 'vitest'
 import { TunnelStateMachine } from './tunnelStateMachine'
 import { ConnectionLifecycle } from './connectionLifecycle'
+import { ipcError, IpcFault, classifyIpcError, readIpcErrorCategory } from '../shared/ipc-result'
+import { connectionFailure } from '../shared/operation'
+import { RecoveryWorkerError } from './recoveryPsWorker'
 
 const source = readFileSync(join(process.cwd(), 'src/main/tunController.ts'), 'utf8')
 const start = source.indexOf('const pollRuntime = async () => {')
 const end = source.indexOf('const poller = setInterval(pollRuntime, 250)', start)
 if (start < 0 || end < 0) throw new Error('Production startup callback not found')
 const callback = source.slice(start + 'const pollRuntime = '.length, end).trim()
+const parsedSource = ts.createSourceFile('tunController.ts', source, ts.ScriptTarget.Latest, true)
+const classifier = parsedSource.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'classifyTunError')!
+const classifierCode = ts.transpileModule(classifier.getText(parsedSource) + ';return classifyTunError;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+const classifyTunError = new Function('RecoveryWorkerError', 'classifyIpcError', classifierCode)(RecoveryWorkerError, classifyIpcError)
 
 function harness() {
   const os = {
+    connectionFailure, ipcError, classifyTunError, readIpcErrorCategory,
     isSingboxRunning: vi.fn(async () => true),
     readOwnedSingboxPid: vi.fn(async () => 731),
     recordOwnedTunAdapter: vi.fn(async (): Promise<void> => { throw new Error('driver identity mismatch') }),
@@ -41,7 +49,7 @@ function harness() {
   // Only this extracted callback runs; never import/start the actual engine.
   const compiled = ts.transpileModule(`
 let resolved=false, successHandled=false, pollInFlight=false, stopRequested=false;
-let attempts=0, startAbortedReason=null, pendingKillSwitch=null, settleFirewallAdapter=null;
+let attempts=0, startAbortedReason=null, startAbortedCategory=null, pendingKillSwitch=null, settleFirewallAdapter=null;
 let startupPollCompletion=null;
 const startAbortController=new AbortController();
 let startupCompensationStarted=false;
@@ -61,6 +69,17 @@ return {poll: ${callback}, status:()=>currentStatus, signal: startAbortControlle
 }
 
 describe('startup callback fault boundaries', () => {
+  it('returns a timeout receipt without exposing native compensation errors (AT-00-004)', async () => {
+    const h = harness()
+    h.isSingboxRunning.mockResolvedValue(false)
+    h.stopXray.mockRejectedValue(new Error('FAKE-native-secret at C:\\Users\\Private\\xray.exe'))
+    for (let i=0;i<31;i++) await h.poll()
+    expect(h.onFinish.mock.calls[0][0]).toMatchObject({ success: false, category: 'timeout', code: ipcError('timeout').code, warning: expect.any(String) })
+    expect(JSON.stringify(h.onFinish.mock.calls)).not.toMatch(/FAKE-native-secret|Private|xray.exe/)
+    expect(h.logEvent).toHaveBeenCalledWith('warn', 'tun', 'timeout xray cleanup failed', expect.objectContaining({ message: expect.stringContaining('FAKE-native-secret') }))
+    expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
+    expect(h.rollbackEarlyAdapterLockdown).toHaveBeenCalledOnce()
+  })
   it.each(['owned', 'foreign', 'prefix collision', 'ambiguous', 'unreadable'] as const)('requires one exact executable path for startup PID: %s', async outcome => {
     const executable = 'C:\\VPN\\runtime\\vpnte-sing-box.exe'
     const row = { ExecutablePath: executable, ProcessId: 731 }
@@ -118,7 +137,10 @@ describe('startup callback fault boundaries', () => {
     let release!: () => void
     const reserve = vi.fn(() => new Promise<void>(done => { release = done }))
     const signal = new AbortController().signal
-    const run = new Function('wantKillSwitch','timeAsync','reserveKillSwitchIpv6Priority','startAbortController','finishStart',compiled)(true,async (_phase: string, effect: Function) => effect(),reserve,{signal},(result: unknown)=>result)
+    const logEvent = vi.fn()
+    const bindings = { wantKillSwitch: true, timeAsync: async (_phase: string, effect: Function) => effect(), reserveKillSwitchIpv6Priority: reserve,
+      startAbortController: { signal }, finishStart: (result: unknown) => result, connectionFailure, classifyTunError, ipcError, logEvent }
+    const run = new Function(...Object.keys(bindings),compiled)(...Object.values(bindings))
     const done = vi.fn()
     const pending = run().then(done)
     expect(reserve).toHaveBeenCalledExactlyOnceWith(signal)
@@ -126,8 +148,25 @@ describe('startup callback fault boundaries', () => {
     expect(done).not.toHaveBeenCalled()
     release();await pending
     expect(done).toHaveBeenCalledWith({success:true})
-    reserve.mockRejectedValueOnce(new Error('WFP conflict'))
-    expect(await run()).toEqual({success:false,error:'WFP conflict'})
+    const conflict = new IpcFault('conflict')
+    conflict.message = 'FAKE-native-secret at C:\\Users\\Private\\wfp.exe'
+    reserve.mockRejectedValueOnce(conflict)
+    expect(await run()).toEqual(connectionFailure('conflict', 'Конфликт IPv6-фильтров WFP: остановите TUN/VPN другого приложения и повторите подключение'))
+    for (const [fault, category] of [
+      [Object.assign(new Error('FAKE-native-secret'), { code: 'EACCES' }), 'permission'],
+      [Object.assign(new Error('FAKE-native-secret'), { code: 'ENOTFOUND' }), 'network'],
+      [new RecoveryWorkerError('timeout', 'FAKE-native-secret'), 'timeout'],
+      [new RecoveryWorkerError('busy', 'FAKE-native-secret'), 'conflict'],
+      [Object.assign(new Error('FAKE-native-secret'), { killed: true, signal: 'SIGTERM', code: null }), 'timeout'],
+      [Object.assign(new Error('FAKE-native-secret'), { killed: true, signal: 'SIGTERM', code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }), 'internal'],
+      [new IpcFault('validation'), 'validation'], [new DOMException('FAKE-native-secret', 'AbortError'), 'cancelled']
+    ] as const) {
+      reserve.mockRejectedValueOnce(fault)
+      const result = await run()
+      expect(result).toMatchObject({ success: false, category, code: ipcError(category).code })
+      expect(JSON.stringify(result)).not.toMatch(/FAKE-native-secret|Private/)
+    }
+    expect(logEvent).toHaveBeenCalledWith('warn', 'tun', 'WFP priority reservation failed', conflict)
   })
   it('probes immediately and keeps the 250 ms retry timer (AT-02-002)', () => {
     const registrationStart = source.indexOf('const poller = setInterval(pollRuntime, 250)')
@@ -330,7 +369,11 @@ describe('startup callback fault boundaries', () => {
     await expect(h.poll()).resolves.toBeUndefined()
     const result = h.onFinish.mock.calls[0][0]
     expect(result.success).toBe(false)
-    for (const name of ['xray','adapter','firewall']) expect(result.warning).toContain(`${name} cleanup failed`)
+    for (const name of ['xray','adapter','firewall']) {
+      expect(result.warning).toContain(`${name} cleanup:`)
+      expect(h.logEvent).toHaveBeenCalledWith('error', 'tun', 'startup rollback step failed', expect.objectContaining({ message: `${name} cleanup failed` }))
+    }
+    expect(result.warning).not.toContain('cleanup failed')
     expect(h.onFinish).toHaveBeenCalledOnce()
   })
 

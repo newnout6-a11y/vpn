@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import { OPERATION_PRIORITY, type ConnectionOperation, type ConnectionOperationRejection, type OperationOwner } from '../shared/operation'
+import { OPERATION_PRIORITY, connectionFailureCategory, type ConnectionOperation, type ConnectionOperationRejection, type OperationOwner } from '../shared/operation'
 import type { TunnelStateMachine } from './tunnelStateMachine'
 import { currentCorrelationId, currentActionMetadata, withCorrelation, type ActionMetadata } from './actionCorrelation'
 import type { OperationLease } from './operationRegistry'
-import { IpcFault } from '../shared/ipc-result'
+import { IpcFault, classifyIpcError } from '../shared/ipc-result'
 
 /** Main startup owns baseline effects as well as the controller startup. */
 export interface ConnectionStartupOwner {
@@ -271,17 +271,20 @@ export class ConnectionLifecycle {
           await this.cleanupCancelled?.()
           throw new Error('Connection confirmation missing')
         }
-        startup.operation = { ...startup.operation, status: failed(result) ? 'error' : 'success' }
+        const category = failed(result) ? connectionFailureCategory(result) : undefined
+        startup.operation = { ...startup.operation, status: !failed(result) ? 'success' : category === 'cancelled' ? 'cancelled' : 'error', category }
         if (!failed(result)) this.cleanupFailure = null
         return result
       } catch (error) {
+        this.stateMachine?.invalidateRetainedSoft(startup.operation.operationId)
         if (controller.signal.aborted) {
           const category = startup.abortCategory ?? 'cancelled'
           startup.operation = { ...startup.operation, status: category === 'timeout' ? 'error' : 'cancelled', category }
           return cancellationResult()
         }
         failure = { error }
-        startup.operation = { ...startup.operation, status: 'error', category: 'internal' }
+        const category = classifyIpcError(error)
+        startup.operation = { ...startup.operation, status: category === 'cancelled' ? 'cancelled' : 'error', category }
         throw error
       } finally {
         await Promise.all(effects)
@@ -344,10 +347,12 @@ export class ConnectionLifecycle {
       if (!failed(result) && this.stateMachine && !this.stateMachine.canConfirmStop()) throw new Error('Runtime cleanup confirmation missing')
       if (cancellationErrors.length) throw cancellationErrors[0]
       status = failed(result) ? 'error' : 'success'
+      category = failed(result) ? connectionFailureCategory(result) : undefined
+      if (category === 'cancelled') status = 'cancelled'
       this.cleanupFailure = failed(result) ? { error: new Error('Runtime cleanup confirmation missing') } : null
       return result
     }).catch(error => {
-      status = 'error'; category = 'internal'
+      category = classifyIpcError(error); status = category === 'cancelled' ? 'cancelled' : 'error'
       this.cleanupFailure = { error }
       throw error
     }).finally(() => {

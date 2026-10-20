@@ -15,6 +15,13 @@ afterEach(() => vi.useRealTimers())
 const kinds = Object.keys(OPERATION_DEADLINES) as ManagedOperationKind[]
 
 describe('long operation registry', () => {
+  it.each(Object.keys(IPC_ERRORS) as IpcErrorCategory[])('keeps flattened connection %s failures in operation history (AT-00-004/005)', async category => {
+    const registry = new OperationRegistry(), error = ipcError(category)
+    const result = { success: false, error: error.message, code: error.code, category }
+    expect(await registry.run('rotation', async () => result)).toBe(result)
+    expect(registry.list()).toMatchObject([{ status: category === 'cancelled' ? 'cancelled' : 'error', category }])
+    await registry.close()
+  })
   it.each((Object.keys(IPC_ERRORS) as IpcErrorCategory[]).flatMap(category =>
     [false, true].map(commit => ({ category, commit }))))('records canonical $category returned failures, commit=$commit (AT-00-004/005)', async ({ category, commit }) => {
     const abort = new AbortController()

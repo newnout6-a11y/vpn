@@ -2621,10 +2621,15 @@ async function resolveVpnProfilesUnlocked(trimmed: string, options?: Subscriptio
   return { profiles, source: unwrapped ? 'распакованная ссылка happ://' : 'вставленный текст', fetched: false, userInfo: undefined }
 }
 
+export class NoSupportedVpnProfilesError extends IpcFault {
+  static readonly guidance = 'В подписке/ключе не найдено поддерживаемых профилей (VLESS, Trojan, Shadowsocks, VMess, Hysteria2, Naive, AnyTLS, ShadowTLS, TUIC или sing-box outbound JSON). Проверьте ключ или ссылку подписки в разделе «Серверы».'
+  constructor() { super('validation'); this.name = 'NoSupportedVpnProfilesError'; this.message = NoSupportedVpnProfilesError.guidance }
+}
+
 export async function resolveVpnProfile(input: string, selectedIndex = 0, options?: SubscriptionFetchOptions): Promise<VpnProfile> {
   const { profiles } = await resolveVpnProfiles(input, options)
   if (!profiles.length) {
-    throw new Error('В подписке/ключе не найдено поддерживаемых профилей (VLESS, Trojan, Shadowsocks, VMess, Hysteria2, Naive, AnyTLS, ShadowTLS, TUIC или sing-box outbound JSON)')
+    throw new NoSupportedVpnProfilesError()
   }
   return profiles[Math.min(Math.max(0, selectedIndex), profiles.length - 1)]
 }

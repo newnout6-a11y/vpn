@@ -13,6 +13,9 @@ import { ConnectionLifecycle } from './connectionLifecycle'
 import { TunnelStateMachine } from './tunnelStateMachine'
 import { OperationRegistry } from './operationRegistry'
 import { currentCorrelationId, withCorrelation } from './actionCorrelation'
+import { ipcError, classifyIpcError, readIpcErrorCategory, IpcFault } from '../shared/ipc-result'
+import { connectionFailure } from '../shared/operation'
+import { resolveVpnProfile, NoSupportedVpnProfilesError } from './vpnProfiles'
 
 const recoveryModel = () => new TunnelStateMachine(() => ({ running: false, pid: null, softApplied: false }))
 
@@ -33,7 +36,9 @@ function body(file: string, name: string): string {
 }
 function compile<T>(text: string, dependencies: Record<string, unknown>): T {
   const js = ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
-  const bindings = { currentCorrelationId, withCorrelation, randomUUID, ...dependencies }
+  const classify = ts.transpileModule(body('tunController.ts', 'classifyTunError') + ';return classifyTunError;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const classifyTunError = new Function('RecoveryWorkerError', 'classifyIpcError', classify)(RecoveryWorkerError, classifyIpcError)
+  const bindings = { NoSupportedVpnProfilesError, currentCorrelationId, withCorrelation, randomUUID, connectionFailure, ipcError, classifyIpcError, readIpcErrorCategory, IpcFault, classifyTunError, ...dependencies }
   return new Function(...Object.keys(bindings), js)(...Object.values(bindings))
 }
 const noop = () => vi.fn((..._args: any[]) => {})
@@ -57,6 +62,15 @@ return {restart:(signal)=>controller.restartProtected('fixture',{mode:'directVpn
 }
 
 describe('protected restart readiness (AT-02-002/004/005 / AT-00-003)', () => {
+  it('names protected restart startup failure without exposing its exception (AT-00-004)', async () => {
+    const h = protectedRestartHarness()
+    h.start.mockRejectedValueOnce(Object.assign(new Error('FAKE-private-path C:\\private\\engine.exe'), { code: 'EACCES' }))
+    const result = await h.restart()
+    expect(result).toMatchObject({ success: false, category: 'permission', error: expect.stringContaining('защищённом перезапуске') })
+    expect(result.error).toContain('журнал')
+    expect(result.error).not.toContain('FAKE-private-path')
+    expect(h.stop).toHaveBeenCalledTimes(2)
+  })
   it('does not touch the live runtime for an already aborted rotation signal', async () => {
     const h = protectedRestartHarness(), abort = new AbortController()
     abort.abort()
@@ -220,7 +234,7 @@ function startupExitHarness(pollCompletion: Promise<void> | null = null) {
   }
   const run = compile<{ exit: (error: Error) => void; settled: () => Promise<unknown[]>; pollCompensating: () => void }>(`
 let currentStatus={running:false},mode='directVpn',restartAttempt=0,lastSingBoxExit=null;
-let userInitiatedStop=false,stopInProgress=false,resolved=false,startAbortedReason=null;
+let userInitiatedStop=false,stopInProgress=false,resolved=false,startAbortedReason=null,startAbortedCategory=null;
 let startupCompensationStarted=false;
 let settleFirewallAdapter=null,pendingKillSwitch=null,adapterLockdownPromise=null;
 let startupPollCompletion=pollCompletion;const startupCleanupTasks=[];
@@ -242,12 +256,36 @@ return {start:()=>controller.start('127.0.0.1:1080'),state:()=>({starting:startI
 }
 
 describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () => {
+  it.each(['runtime', 'xray', 'firewall'] as const)('keeps native %s exceptions private while preserving partial cleanup receipts (AT-00-004)', async phase => {
+    const h = stopHarness(), error = Object.assign(new Error('FAKE-native-secret at C:\\Users\\Private\\runtime.exe'), { code: 'EACCES' })
+    if (phase === 'runtime') h.killOwnedRuntimeProcesses.mockRejectedValueOnce(error)
+    else if (phase === 'xray') h.stopXray.mockRejectedValueOnce(error)
+    else h.disableKillSwitchIfActive.mockRejectedValueOnce(error)
+    const result = await h.stop()
+    expect(result).toMatchObject({ success: false, category: 'permission', code: ipcError('permission').code,
+      networkCleanup: { baseline: phase !== 'runtime', firewall: phase !== 'runtime' && phase !== 'firewall', adapters: phase !== 'runtime' } })
+    expect(JSON.stringify(result)).not.toMatch(/FAKE-native-secret|Private|runtime.exe/)
+    expect(JSON.stringify(h.notify.mock.calls)).not.toMatch(/FAKE-native-secret|Private|runtime.exe/)
+    expect(JSON.stringify(h.logEvent.mock.calls)).toContain('FAKE-native-secret')
+    if (phase === 'runtime') expect(h.rollbackTunNetworkBaselineIfApplied).not.toHaveBeenCalled()
+    else expect(result.runtimeStopped).toBe(true)
+  })
   it('includes rejected manifest records in the Stop error delivered to UI (AT-03-003c)', async () => {
     const h = stopHarness()
-    h.rollbackPhysicalAdapterLockdownIfApplied.mockResolvedValue({ rolledBack: false, warnings: ['adapter entry 0: invalid snapshot; skipped'] })
+    const validate = compile<(value: unknown, rejected?: string[]) => any>(body('physicalAdapterLockdown.ts', 'validateLockdownManifest').replace(/^export /, '') + ';return validateLockdownManifest;', { isIP })
+    const rollback = compile<(reason: string) => Promise<any>>(body('physicalAdapterLockdown.ts', 'rollbackPhysicalAdapterLockdownIfApplied').replace(/^export /, '') + ';return rollbackPhysicalAdapterLockdownIfApplied;', {
+      process: { platform: 'win32' }, logEvent: h.logEvent,
+      readManifest: (rejected: string[]) => validate({ schemaVersion: 1, owner: 'VPNTE', appliedAt: 1, tunDnsIpv4: '192.0.2.1',
+        adapters: [{ alias: 'FAKE-native-secret at C:\\private\\credentials.json' }],
+        dnsRegistryPolicy: { smartNameResolution: { exists: false }, parallelAandAAAA: { exists: false } } }, rejected),
+      registryRestoreLine: () => '', runPS: async () => 'DNS_SMNR:delete\nDNS_PARALLEL:delete',
+      clearPhysicalAdaptersSnapshotCache: noop(), deleteManifest: done()
+    })
+    h.rollbackPhysicalAdapterLockdownIfApplied.mockImplementation(() => rollback('TUN stopped'))
     const result = await h.stop()
-    expect(result).toMatchObject({ success: false, networkCleanup: { adapters: false } })
-    expect(result.error).toContain('adapter entry 0: invalid snapshot; skipped')
+    expect(result).toMatchObject({ success: false, category: 'validation', networkCleanup: { adapters: false } })
+    expect(result.error).toContain('adapter entry 0: invalid or conflicting snapshot; skipped')
+    expect(JSON.stringify(result)).not.toMatch(/FAKE-native-secret|credentials.json|private/)
   })
   it.each(['success', 'baseline', 'firewall', 'adapters', 'dns', 'runtime', 'xray'])('correlates Stop steps and their actual outcomes: %s (AT-03-007)', async failing => {
     const h = stopHarness()
@@ -300,7 +338,7 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
     if (failure === 'thrown') h.tunController.stop.mockRejectedValueOnce(new Error('stop failed'))
     else h.tunController.stop.mockResolvedValueOnce({ success: false, error: 'exit unconfirmed', networkCleanup: { adapters: false } })
     if (failure === 'thrown') await expect(h.run()).rejects.toThrow('stop failed')
-    else expect(await h.run()).toEqual({ success: false, error: 'exit unconfirmed' })
+    else expect(await h.run()).toEqual({ ...connectionFailure('internal', 'exit unconfirmed') })
     expect(h.run.state()).toEqual({ session, stopping: false })
     for (const step of [h.writeSessionEntry, h.rollbackSoftAutoconfigIfApplied, h.externalProxy.stopAll, h.stopPeriodicSnapshots, h.stopPeriodicLeakTest, h.stopNetworkChangeWatcher, h.stopTrafficForensicsSession, h.ipMonitor.clearVpnIp, h.trafficMonitor.stop, h.repairOrphanedPhysicalAdapterDns, h.getLocationPrivacyStatus, h.refreshTrayState]) expect(step).not.toHaveBeenCalled()
     expect(await h.run()).toMatchObject({ success: true })
@@ -582,7 +620,7 @@ return ${body('index.ts', 'tunController.onStatusChange')};`, os)
     const h = startupExitHarness(poll)
     h.rollbackEarlyAdapterLockdown.mockReturnValue(new Promise<void>(done => { releaseRollback = done }))
     h.exit(new Error('child failed'))
-    expect(h.finishResult).toHaveBeenCalledWith({success:false,error:'child failed'})
+    expect(h.finishResult).toHaveBeenCalledWith(expect.objectContaining({ success: false, category: 'internal', error: expect.stringContaining('sing-box') }))
     expect(h.stopXray).not.toHaveBeenCalled()
     const settled = vi.fn()
     void h.settled().then(settled)
@@ -745,15 +783,20 @@ return ${body('index.ts', 'tunController.onStatusChange')};`, os)
       h.repairOrphanedPhysicalAdapterDns.mockRejectedValue(error)
     }
     const result = await h.stop()
+    const label = { runtime: 'runtime process stop', baseline: 'baseline auto-rollback', firewall: 'kill-switch disable', adapters: 'adapter lockdown rollback', dns: 'orphaned DNS repair' }[failing]!
+    expect(JSON.stringify(result)).not.toContain(`${failing} failed`)
+    expect(result).toMatchObject({ category: 'internal', code: ipcError('internal').code })
+    expect(JSON.stringify(h.logEvent.mock.calls)).toContain(`${failing} failed`)
     if (failing === 'runtime') {
-      expect(result).toMatchObject({ success: false, error: expect.stringContaining('runtime failed') })
+      expect(result).toMatchObject({ success: false, error: expect.stringContaining(label) })
       for (const cleanup of [h.stopXray, h.rollbackTunNetworkBaselineIfApplied, h.disableKillSwitchIfActive, h.rollbackPhysicalAdapterLockdownIfApplied]) expect(cleanup).not.toHaveBeenCalled()
       expect(h.notifyStatus).toHaveBeenCalledWith('error')
       expect(h.ipMonitor.resume).toHaveBeenCalledOnce()
       return
     }
-    expect(result.warning).toContain(`${failing} failed`)
-    expect(result).toMatchObject({ success: false, runtimeStopped: true, error: expect.stringContaining(`${failing} failed`) })
+    expect(result.warning).toContain(label)
+    expect(result).toMatchObject({ success: false, runtimeStopped: true, error: expect.stringContaining(label) })
+    expect(result.error).toContain('Повторите остановку защиты')
     expect(h.rollbackTunNetworkBaselineIfApplied).toHaveBeenCalledOnce()
     expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
     expect(h.rollbackPhysicalAdapterLockdownIfApplied).toHaveBeenCalledOnce()
@@ -764,7 +807,8 @@ return ${body('index.ts', 'tunController.onStatusChange')};`, os)
     const step = failed === 'baseline' ? h.rollbackTunNetworkBaselineIfApplied : h.disableKillSwitchIfActive
     step.mockResolvedValue({ success: false, message: `${failed} unconfirmed` })
     const result = await h.stop()
-    expect(result).toMatchObject({ success: false, runtimeStopped: true, error: expect.stringContaining(`${failed} unconfirmed`), networkCleanup: { [failed]: false } })
+    expect(result).toMatchObject({ success: false, runtimeStopped: true, category: 'internal', error: expect.stringContaining(failed === 'baseline' ? 'baseline auto-rollback' : 'kill-switch disable'), networkCleanup: { [failed]: false } })
+    expect(JSON.stringify(h.logEvent.mock.calls)).toContain(`${failed} unconfirmed`)
     for (const cleanup of [h.rollbackTunNetworkBaselineIfApplied, h.disableKillSwitchIfActive, h.rollbackPhysicalAdapterLockdownIfApplied]) expect(cleanup).toHaveBeenCalledOnce()
     expect(h.notifyStatus).toHaveBeenLastCalledWith('error')
   })
@@ -828,7 +872,9 @@ return ${body('index.ts', 'tunController.onStatusChange')};`, os)
     const next = await h.stop()
     expect(h.rollbackPhysicalAdapterLockdownIfApplied).toHaveBeenCalledTimes(2)
     expect(next.networkCleanup.adapters).toBe(false)
-    expect(next.warning).toContain('ACL changed')
+    expect(next.warning).toContain('adapter lockdown rollback')
+    expect(next.warning).not.toContain('ACL changed')
+    expect(JSON.stringify(h.logEvent.mock.calls)).toContain('ACL changed')
   })
   it('does not repeat confirmed network rollback during shutdown, while process backstops remain', async () => {
     const h = mainHarness('performShutdownCleanup')
@@ -1328,7 +1374,8 @@ function ipStartupHarness(mode: 'direct' | 'proxy') {
     rollbackSoftAutoconfigIfApplied: done(), suppressLeakSelfTestsFor: noop(), captureSnapshot: done(),
     clearStaleKillSwitchBeforeStart: vi.fn(async () => ({ success: true })), recordStartFailure: noop(),
     settingsStore: { get: () => settings },
-    serverPicker: { getActiveProfile: () => ({ id: 'fixture', name: 'fixture', protocol: 'vless', outbound: { server: 'fixture.invalid', server_port: 443 } }) },
+    serverPicker: { getActiveProfile: vi.fn((): any => ({ id: 'fixture', name: 'fixture', protocol: 'vless', outbound: { server: 'fixture.invalid', server_port: 443 } })) },
+    resolveVpnProfile: vi.fn(resolveVpnProfile),
     killSwitchManifestExists: vi.fn(async () => false), combinedPreStartProbe: vi.fn(async () => ({ tunnels: [], listeners: [] })),
     getRoutingPlan: vi.fn(async () => ({ canStartHard: true })),
     beginAdaptiveConnection: () => ({ capabilities: {}, mode: 'standard' }),
@@ -1360,6 +1407,24 @@ return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : 
 }
 describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-003 / AT-02-002)', mode => {
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
+  it('preserves the recovery-report instruction on baseline failure (AT-00-004)', async () => {
+    const h = ipStartupHarness(mode)
+    h.settings.autoNetworkBaseline = true
+    h.applyTunNetworkBaseline.mockResolvedValueOnce({ success: false, error: ipcError('permission'), message: 'Baseline не применён; проверьте отчёт восстановления' })
+    expect((await h.start()).warning).toContain('отчёт восстановления')
+    h.cancel()
+  })
+  if (mode === 'direct') it('explains unsupported pasted VPN input without echoing it (AT-00-004)', async () => {
+    const h = ipStartupHarness(mode)
+    h.serverPicker.getActiveProfile.mockReturnValue(null)
+    h.settings.directVpnInput = 'FAKE-private-input at C:\\private\\input.txt'
+    const result = await h.start()
+    expect(result).toMatchObject({ success: false, category: 'validation', error: expect.stringContaining('поддерживаемых профилей') })
+    expect(result.error).toContain('VLESS')
+    expect(result.error).not.toContain('FAKE-private-input')
+    expect(h.recordStartFailure).toHaveBeenCalledWith(expect.anything(), result.error)
+    expect(h.tunController.start).not.toHaveBeenCalled()
+  })
   it('does not start native effects when pre-start env recovery fails (AT-00-007)', async () => {
     const h = ipStartupHarness(mode)
     h.rollbackSoftAutoconfigIfApplied.mockRejectedValueOnce(new Error('env recovery unconfirmed'))
@@ -1374,7 +1439,9 @@ describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-00
     const result = await h.start()
     expect(result.success).toBe(false)
     expect(result.error).toContain('native launch failed')
-    expect(result.error).toContain('environment/HTTP_PROXY: access denied')
+    expect(result.error).toContain('Восстановление сетевого baseline не подтверждено')
+    expect(result.error).not.toContain('environment/HTTP_PROXY: access denied')
+    expect(h.logEvent).toHaveBeenCalledWith('warn', 'app', expect.stringContaining('rollback'), expect.objectContaining({ message: expect.stringContaining('environment/HTTP_PROXY: access denied') }))
     expect(result.error).toContain('Повторите восстановление сети')
   })
   it('adopts an unchanged post-start IP once routes are confirmed, without a 16-wave HTTP loop (AT-07-007)', async () => {
@@ -1476,7 +1543,8 @@ describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-00
     await vi.waitFor(() => expect(h.tunController.start).toHaveBeenCalledOnce())
     expect(finished).not.toHaveBeenCalled()
     release({ success: false, message: 'fixture baseline failure' })
-    expect((await pending).warning).toContain('fixture baseline failure')
+    expect((await pending).warning).toContain('Не удалось применить сетевой baseline')
+    expect(JSON.stringify(h.logEvent.mock.calls)).toContain('fixture baseline failure')
     h.cancel()
   })
   it('keeps a native startup failure without launching post-start IP checks', async () => {

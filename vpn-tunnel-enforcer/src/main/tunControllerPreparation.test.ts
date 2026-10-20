@@ -4,12 +4,17 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { connectionFailure } from '../shared/operation'
+import { classifyIpcError } from '../shared/ipc-result'
+import { RecoveryWorkerError } from './recoveryPsWorker'
 
 const source = readFileSync(join(process.cwd(), 'src/main/tunController.ts'), 'utf8')
 const begin = source.indexOf('let runtimePromise: Promise<')
 const end = source.indexOf('// Kill only VPNTE-owned runtime binaries.', begin)
 if (begin < 0 || end < 0) throw new Error('Production preparation boundary not found')
 const preparation = source.slice(begin, end)
+const ast = ts.createSourceFile('tunController.ts', source, ts.ScriptTarget.Latest, true)
+const classifier = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'classifyTunError')!
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -20,7 +25,7 @@ function deferred<T>() {
 
 function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', adapterLockdownPromise = Promise.resolve()) {
   const os = {
-    dns, mode, engine,
+    dns, mode, engine, connectionFailure, classifyIpcError, RecoveryWorkerError,
     adapterLockdownPromise,
     startXray: vi.fn(async () => ({ socksPort: 1234, resolvedIp: '198.51.100.1', exePath: 'fixture-xray.exe' })),
     stopXray: vi.fn(async () => {}),
@@ -37,12 +42,13 @@ function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', a
     timeAsync: async (_name: string, effect: () => Promise<unknown>) => effect(),
     timePromise: (_name: string, promise: Promise<unknown>) => promise,
     finishStart: (result: unknown) => result,
-    parseProxyAddress: () => ({ host: '127.0.0.1', port: 10808 }),
+    parseProxyAddress: vi.fn(() => ({ host: '127.0.0.1', port: 10808 })),
     getProxyOwnerProcesses: vi.fn(async () => []),
     probeTcp: vi.fn(async () => true),
-    validateProxyFullTunnel: vi.fn(async () => ({ ok: true }))
+    validateProxyFullTunnel: vi.fn(async (): Promise<any> => ({ ok: true }))
   }
   const compiled = ts.transpileModule(`
+    ${classifier.getText(ast)}
     const dnsSourcesPromise=dns, smartRuSplit=true, smartRuMapsDirect=false;
     let proxyOwnerProcessNames=[], proxyOwnerProgramPaths=[], stopRequested=false;
     const startAbortController=new AbortController();
@@ -198,7 +204,8 @@ describe('Direct VPN preparation overlap', () => {
     const pending = h.run()
     await vi.waitFor(() => expect(h.prepareRuntime).toHaveBeenCalledOnce())
     xray.reject(new Error('Xray refused shared ACL proof'))
-    expect(await pending).toMatchObject({ success: false, error: expect.stringContaining('shared ACL proof') })
+    expect(await pending).toMatchObject({ success: false, category: 'internal', error: expect.stringContaining('xray-core') })
+    expect(h.logEvent).toHaveBeenCalledWith('error', 'tun', 'xray startup failed', expect.objectContaining({ message: 'Xray refused shared ACL proof' }))
     expect(h.stopXray).toHaveBeenCalledOnce()
     expect(h.rollbackEarlyAdapterLockdown).toHaveBeenCalledOnce()
   })
@@ -277,7 +284,8 @@ describe('Direct VPN preparation overlap', () => {
     await vi.waitFor(() => expect(h.stopXray).toHaveBeenCalledOnce())
     expect(completed).not.toHaveBeenCalled()
     dns.resolve([])
-    expect(await pending).toMatchObject({ success: false, error: expect.stringContaining('config rejected') })
+    expect(await pending).toMatchObject({ success: false, category: 'internal', error: expect.stringContaining('xray-core') })
+    expect(h.logEvent).toHaveBeenCalledWith('error', 'tun', 'xray startup failed', expect.objectContaining({ message: expect.stringContaining('config rejected') }))
     expect(h.prepareRuntime).toHaveBeenCalledOnce()
   })
 
@@ -308,5 +316,56 @@ describe('Direct VPN preparation overlap', () => {
     await pending
     expect(h.probeTcp).toHaveBeenCalledOnce()
     expect(h.startXray).not.toHaveBeenCalled()
+  })
+  it.each([
+    ['split', 'Global/Proxy'], ['direct', 'напрямую'], ['offline', 'VPN-сервер']
+  ] as const)('keeps safe %s proxy remediation in startup failure (AT-00-004)', async (reason, hint) => {
+    const h = harness(Promise.resolve([]), 'localProxy')
+    const validator = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'validateProxyFullTunnel')!
+    let probes = 0
+    const deps = { process: { platform: 'win32' }, curlProxyUrl: () => 'socks5://127.0.0.1:10808',
+      fetchPublicIpDirect: async () => '203.0.113.1',
+      curlText: async () => {
+        if (reason === 'offline') throw new Error('FAKE-native-secret at C:\\private\\proxy.txt')
+        return reason === 'split' && probes++ > 0 ? '203.0.113.2' : '203.0.113.1'
+      }, extractPublicIpv4: (text: string) => text,
+      PROXY_PUBLIC_IP_CHECKS: [{ label: 'a', url: 'https://a.invalid' }, { label: 'b', url: 'https://b.invalid' }],
+      waitForDirectIpGrace: async (task: Promise<string>) => ({ ready: true, ip: await task }) }
+    const js = ts.transpileModule(validator.getText(ast) + ';return validateProxyFullTunnel;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+    const validate = new Function(...Object.keys(deps), js)(...Object.values(deps))
+    h.validateProxyFullTunnel.mockImplementation(validate)
+    const result = await h.run()
+    expect(result).toMatchObject({ success: false, category: 'network', error: expect.stringContaining(hint) })
+    expect(result.error).not.toContain('FAKE-native-secret')
+    expect(h.prepareRuntime).not.toHaveBeenCalled()
+    expect(h.rollbackEarlyAdapterLockdown).toHaveBeenCalledOnce()
+  })
+  it('explains upstream address syntax without returning parse exceptions (AT-00-004)', async () => {
+    const h = harness(Promise.resolve([]), 'localProxy')
+    h.parseProxyAddress.mockImplementation(() => { throw new Error('FAKE-native-secret at C:\\private\\proxy.txt') })
+    const result = await h.run()
+    expect(result).toMatchObject({ success: false, category: 'validation', error: expect.stringContaining('host:port') })
+    expect(result.error).not.toContain('FAKE-native-secret')
+    expect(h.prepareRuntime).not.toHaveBeenCalled()
+  })
+  it('names runtime preparation failure and keeps diagnostics private (AT-00-004)', async () => {
+    let block: ts.CatchClause | undefined
+    const visit = (node: ts.Node) => {
+      if (ts.isCatchClause(node) && node.block.getText(ast).includes("logEvent('error', 'tun', 'failed to prepare TUN runtime'")) block = node
+      ts.forEachChild(node, visit)
+    }
+    visit(ast)
+    if (!block) throw new Error('Runtime preparation catch missing')
+    const error = Object.assign(new Error('FAKE-private-path C:\\private\\engine.exe'), { code: 'EACCES' })
+    const deps = { error, connectionFailure, classifyIpcError, RecoveryWorkerError, cleanupPromise: Promise.resolve(),
+      rollbackEarlyAdapterLockdown: vi.fn(async () => {}), stopXray: vi.fn(async () => {}), logEvent: vi.fn(), finishStart: (result: unknown) => result }
+    const js = ts.transpileModule(`${classifier.getText(ast)}; return async () => {try {throw error} ${block.getText(ast)}}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+    const result = await new Function(...Object.keys(deps), js)(...Object.values(deps))()
+    expect(result).toMatchObject({ success: false, category: 'permission', error: expect.stringContaining('TUN runtime') })
+    expect(result.error).toContain('журнал')
+    expect(result.error).not.toContain('FAKE-private-path')
+    expect(deps.logEvent).toHaveBeenCalledWith('error', 'tun', 'failed to prepare TUN runtime', error)
+    expect(deps.rollbackEarlyAdapterLockdown).toHaveBeenCalledOnce()
+    expect(deps.stopXray).toHaveBeenCalledOnce()
   })
 })
