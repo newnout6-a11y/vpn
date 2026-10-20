@@ -28,7 +28,7 @@ beforeEach(() => {
   vi.resetAllMocks(); s.handlers.clear()
   s.stop.mockResolvedValue({ running: false, cleanupPending: false })
   s.exists.mockResolvedValue(true); s.acl.mockResolvedValue({ hardened: true })
-  s.clear.mockResolvedValue({ success: true, cleared: ['app-log'], errors: [] })
+  s.clear.mockResolvedValue({ success: true, cleared: ['app-log'], absent: [], errors: [] })
   s.open.mockResolvedValue('')
   installTrustedIpcBoundary(); registerDiagnosticMaintenanceHandlers()
 })
@@ -37,10 +37,10 @@ describe('diagnostic maintenance results', () => {
     const error = create(); s.rm.mockRejectedValueOnce(error)
     const response = await invoke('clear-diagnostic-artifacts')
     expect(response).toMatchObject({ ok: true, result: { success: false,
-      cleared: ['traffic-forensics', 'app-log'], errors: [{ artifact: 'snapshots', error: ipcError(category) }] } })
+      cleared: ['traffic-forensics', 'app-log'], absent: [], errors: [{ artifact: 'snapshots', error: ipcError(category) }] } })
     expect(JSON.stringify(response)).not.toMatch(/FAKE-SECRET|\/private\//)
     expect(s.clear).toHaveBeenCalledOnce()
-    expect(logEvent).toHaveBeenCalledWith('error', 'diagnostics', 'artifact cleanup failed', expect.objectContaining({ artifact: 'snapshots', error }))
+    expect(logEvent).toHaveBeenCalledWith('error', 'diagnostics', 'artifact cleanup failed: snapshots', error)
   })
   it.each([{ running: true }, { cleanupPending: true }])('retains all evidence while capture is unconfirmed: %j', async status => {
     s.stop.mockResolvedValue(status)
@@ -54,11 +54,16 @@ describe('diagnostic maintenance results', () => {
   })
   it('skips a missing forensic namespace and returns only confirmed clears', async () => {
     s.exists.mockResolvedValue(false)
-    expect(await invoke('clear-diagnostic-artifacts')).toMatchObject({ ok: true, result: { success: true, cleared: ['snapshots', 'app-log'], errors: [] } })
+    expect(await invoke('clear-diagnostic-artifacts')).toMatchObject({ ok: true, result: { success: true, cleared: ['snapshots', 'app-log'], absent: ['traffic-forensics'], errors: [] } })
     expect(s.acl).not.toHaveBeenCalled(); expect(s.rm).toHaveBeenCalledOnce()
   })
+  it('records an already absent snapshots directory separately', async () => {
+    s.rm.mockRejectedValueOnce(Object.assign(new Error('missing'), { code: 'ENOENT' }))
+    expect(await invoke('clear-diagnostic-artifacts')).toMatchObject({ ok: true, result: { success: true,
+      cleared: ['traffic-forensics', 'app-log'], absent: ['snapshots'], errors: [] } })
+  })
   it('keeps the log partial report in both cleanup channels', async () => {
-    const report = { success: false, cleared: ['app-log'], errors: [{ artifact: 'xray-log', error: ipcError('permission') }] }
+    const report = { success: false, cleared: ['app-log'], absent: [], errors: [{ artifact: 'xray-log', error: ipcError('permission') }] }
     s.clear.mockResolvedValue(report)
     expect(await invoke('clear-app-log')).toMatchObject({ ok: true, result: report })
     expect(await invoke('clear-diagnostic-artifacts')).toMatchObject({ ok: true, result: { ...report, cleared: ['snapshots', 'traffic-forensics', 'app-log'] } })
@@ -66,7 +71,7 @@ describe('diagnostic maintenance results', () => {
   it('retains directory successes if log preflight fails', async () => {
     s.clear.mockRejectedValue(Object.assign(new Error(raw), { code: 'EACCES' }))
     expect(await invoke('clear-diagnostic-artifacts')).toMatchObject({ ok: true, result: { success: false,
-      cleared: ['snapshots', 'traffic-forensics'], errors: [{ artifact: 'logs', error: ipcError('permission') }] } })
+      cleared: ['snapshots', 'traffic-forensics'], absent: [], errors: [{ artifact: 'logs', error: ipcError('permission') }] } })
   })
   for (const ch of ['open-snapshots-folder', 'open-tun-log-folder']) {
     it.each(failures)(`${ch} rejects canonical %s failures`, async (category, create) => {
@@ -92,7 +97,7 @@ describe('diagnostic maintenance results', () => {
   it('writes artifact failure diagnostics after log clear, retaining evidence', async () => {
     s.rm.mockRejectedValueOnce(new Error(raw))
     await invoke('clear-diagnostic-artifacts')
-    const diagnostic = vi.mocked(logEvent).mock.calls.findIndex(call => call[2] === 'artifact cleanup failed')
+    const diagnostic = vi.mocked(logEvent).mock.calls.findIndex(call => call[2] === 'artifact cleanup failed: snapshots')
     expect(vi.mocked(logEvent).mock.invocationCallOrder[diagnostic]).toBeGreaterThan(s.clear.mock.invocationCallOrder[0])
   })
 })

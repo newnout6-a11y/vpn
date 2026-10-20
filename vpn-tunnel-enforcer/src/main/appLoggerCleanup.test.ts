@@ -12,6 +12,7 @@ vi.mock('fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('fs/promises')>()
   const fail = (path: unknown) => { if (failFiles.has(String(path))) throw Object.assign(new Error('FAKE-SECRET at /private/log'), { code: 'EACCES' }) }
   return { ...actual, writeFile: async (...args: Parameters<typeof actual.writeFile>) => { fail(args[0]); return actual.writeFile(...args) },
+    truncate: async (...args: Parameters<typeof actual.truncate>) => { fail(args[0]); return actual.truncate(...args) },
     unlink: async (...args: Parameters<typeof actual.unlink>) => { fail(args[0]); return actual.unlink(...args) } }
 })
 vi.mock('electron', () => ({ app: { getPath: () => join(root, 'user-data') }, shell: { openPath: vi.fn() } }))
@@ -28,9 +29,37 @@ beforeEach(() => {
   failFiles.clear()
   vi.resetModules()
 })
-afterEach(() => rmSync(root, { recursive: true, force: true }))
+afterEach(async () => { const { flushAppLog } = await import('./appLogger'); await flushAppLog(); rmSync(root, { recursive: true, force: true }) })
 
 describe('privileged TUN log cleanup', () => {
+  it('persists the next failure event after rejected cleanup preflight (AT-00-005)', async () => {
+    const runtime = join(root, 'program-data', 'instance', 'tun-runtime')
+    mkdirSync(runtime, { recursive: true })
+    acl.mockResolvedValueOnce({ hardened: false })
+    const { clearAppLog, logEvent, flushAppLog, getAppLogPath } = await import('./appLogger')
+    await expect(clearAppLog()).rejects.toMatchObject({ category: 'permission' })
+    logEvent('error', 'diagnostics', 'cleanup preflight rejected', new Error('retained-preflight-stack'))
+    await flushAppLog()
+    const log = readFileSync(getAppLogPath(), 'utf8')
+    expect(log).toContain('cleanup preflight rejected')
+    expect(log).toContain('retained-preflight-stack')
+  })
+  it('reports absent files separately without inflating cleared counts (AT-00-004)', async () => {
+    const { clearAppLog } = await import('./appLogger')
+    expect(await clearAppLog()).toEqual({ success: true, cleared: [], absent: ['app-log', 'app-previous-log'], errors: [] })
+  })
+  it('keeps message and traceback for a per-file failure in the local log (AT-00-005)', async () => {
+    const runtime = join(root, 'program-data', 'instance', 'tun-runtime')
+    mkdirSync(runtime, { recursive: true }); writeFileSync(join(runtime, 'xray.log'), 'must survive')
+    failFiles.add(join(runtime, 'xray.log'))
+    const { clearAppLog, flushAppLog, getAppLogPath } = await import('./appLogger')
+    await clearAppLog(); await flushAppLog()
+    const log = readFileSync(getAppLogPath(), 'utf8')
+    expect(log).toContain('log cleanup failed')
+    expect(log).toContain('FAKE-SECRET')
+    expect(log).toContain('stack')
+    expect(log).toContain('appLoggerCleanup.test.ts')
+  })
   it('rejects a shell refusal instead of reporting an opened folder (AT-00-004)', async () => {
     const { openLogFolder } = await import('./appLogger')
     vi.mocked(shell.openPath).mockResolvedValueOnce('FAKE-SECRET shell error')
@@ -46,7 +75,7 @@ describe('privileged TUN log cleanup', () => {
     failFiles.add(join(runtime, 'sing-box.log')); failFiles.add(join(runtime, 'xray.prev.log'))
     const { clearAppLog } = await import('./appLogger')
     const result = await clearAppLog()
-    expect(result).toEqual({ success: false, cleared: ['app-log', 'app-previous-log', 'sing-box-previous-log', 'xray-log'],
+    expect(result).toEqual({ success: false, cleared: [], absent: ['app-log', 'app-previous-log', 'sing-box-previous-log', 'xray-log'],
       errors: [{ artifact: 'sing-box-log', error: expect.objectContaining({ category: 'permission', code: 'IPC_PERMISSION_DENIED' }) },
         { artifact: 'xray-previous-log', error: expect.objectContaining({ category: 'permission' }) }] })
     expect(JSON.stringify(result)).not.toMatch(/FAKE-SECRET|\/private\/|program-data/)
@@ -58,7 +87,7 @@ describe('privileged TUN log cleanup', () => {
   it('clears app.log without creating any missing runtime namespace components', async () => {
     const { clearAppLog, getAppLogPath } = await import('./appLogger')
     await clearAppLog()
-    expect(readFileSync(getAppLogPath(), 'utf8')).toBe('')
+    expect(existsSync(getAppLogPath())).toBe(false)
     expect(existsSync(join(root, 'program-data'))).toBe(false)
     expect(acl).not.toHaveBeenCalled()
   })

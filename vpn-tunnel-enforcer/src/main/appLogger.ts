@@ -3,7 +3,7 @@ import type { DiagnosticClearReport, DiagnosticArtifact } from '../shared/diagno
 import type { LogFileSnapshot } from '../shared/diagnostics'
 export type { LogFileSnapshot } from '../shared/diagnostics'
 import { app, shell } from 'electron'
-import { mkdir, open, readFile, stat, writeFile, appendFile, unlink } from 'fs/promises'
+import { mkdir, open, readFile, stat, writeFile, appendFile, unlink, truncate } from 'fs/promises'
 import { join } from 'path'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { directoryExists, verifyDirectoryHardened } from './runtimeDirSecurity'
@@ -383,13 +383,13 @@ export async function getFullLogs(): Promise<LogFileSnapshot[]> {
 }
 
 export async function clearAppLog(): Promise<DiagnosticClearReport> {
-  const report: DiagnosticClearReport = { success: true, cleared: [], errors: [] }
+  const report: DiagnosticClearReport = { success: true, cleared: [], absent: [], errors: [] }
   const cleanup = queue.catch(() => undefined).then(async () => {
     // Finish rollover before clearing so it cannot republish old generations.
     const watcher = engineLogWatcher
     engineLogWatcher = null
-    await watcher?.stop()
     try {
+      await watcher?.stop()
       await ensureLogDir()
       const tunLogDir = getTunLogDir()
       const hasTunLogs = await directoryExists(tunLogDir)
@@ -408,20 +408,25 @@ export async function clearAppLog(): Promise<DiagnosticClearReport> {
         ] : [])
       ]
       const results = await Promise.allSettled(targets.map(async target => {
-        if (!target.remove) return writeFile(target.path, '', 'utf8')
-        try { await unlink(target.path) }
-        catch (error) { if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) throw error }
+        try {
+          if (target.remove) await unlink(target.path)
+          else await truncate(target.path, 0)
+          return 'cleared' as const
+        } catch (error) {
+          if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return 'absent' as const
+          throw error
+        }
       }))
       results.forEach((result, index) => {
         const artifact = targets[index].artifact
-        if (result.status === 'fulfilled') report.cleared.push(artifact)
+        if (result.status === 'fulfilled') report[result.value].push(artifact)
         else {
           report.errors.push({ artifact, error: ipcError(classifyIpcError(result.reason)) })
-          logEvent('error', 'diagnostics', 'log cleanup failed', { artifact, error: result.reason })
+          logEvent('error', 'diagnostics', `log cleanup failed: ${artifact}`, result.reason)
         }
       })
       report.success = report.errors.length === 0
-      if (report.cleared.includes('app-log')) {
+      if (report.cleared.includes('app-log') || report.absent.includes('app-log')) {
         currentLogBytes = 0
         integrityMarkerBytes = 0
       }
@@ -429,7 +434,8 @@ export async function clearAppLog(): Promise<DiagnosticClearReport> {
       if (watcher) startEngineLogRetention()
     }
   })
-  queue = cleanup
+  // Callers see rejection; later audit writes must still append to a healthy lane.
+  queue = cleanup.catch(() => undefined)
   await cleanup
   return report
 }

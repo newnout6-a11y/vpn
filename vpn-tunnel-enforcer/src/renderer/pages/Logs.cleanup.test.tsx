@@ -11,8 +11,8 @@ vi.mock('../components/PageTip', () => ({ PageTip: () => null }))
 import { Logs } from './Logs'
 import { useAppStore } from '../store'
 const row = { id: 'fixture', profileName: 'retained-history', startedAt: 1000, endedAt: 2000, mode: 'direct', bytesDown: 0, bytesUp: 0, disconnectReason: 'user' }
-const complete = { success: true, cleared: ['app-log', 'snapshots'], errors: [] }
-const partial = { success: false, cleared: ['app-log'], errors: [{ artifact: 'snapshots', error: ipcError('permission') }] }
+const complete = { success: true, cleared: ['app-log', 'snapshots'], absent: [], errors: [] }
+const partial = { success: false, cleared: ['app-log'], absent: [], errors: [{ artifact: 'snapshots', error: ipcError('permission') }] }
 const deferred = <T,>() => { let resolve!: (v: T) => void; const promise = new Promise<T>(r => { resolve = r }); return { promise, resolve } }
 beforeEach(() => {
   useAppStore.setState({ logs: [], globalToasts: [] })
@@ -26,14 +26,39 @@ beforeEach(() => {
   } })
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
-async function page(locale: 'ru' | 'en' = 'ru') {
+async function page(locale: 'ru' | 'en' = 'ru', waitInitial = true) {
   const i18n = createInstance()
   await i18n.use(initReactI18next).init({ resources: { ru: { translation: ru }, en: { translation: en } }, lng: locale, interpolation: { escapeValue: false } })
   const view = render(<I18nextProvider i18n={i18n}><Logs /></I18nextProvider>)
-  await screen.findByText('retained-history')
+  if (waitInitial) await screen.findByText('retained-history')
   return { ...view, clear: () => fireEvent.click(screen.getByRole('button', { name: locale === 'ru' ? ru.logs.clear : en.logs.clear })) }
 }
 describe('Logs cleanup', () => {
+  it('reloads pending initial history after failed clear and rejects its stale response', async () => {
+    const pending = deferred<any>()
+    vi.mocked(window.electronAPI.connectionHistoryList).mockReturnValueOnce(pending.promise)
+    vi.mocked(window.electronAPI.connectionHistoryClear).mockRejectedValue(serializeIpcError(new IpcFault('permission'), 'ru'))
+    const view = await page('ru', false); view.clear()
+    await waitFor(() => expect(useAppStore.getState().globalToasts).toHaveLength(1))
+    await act(async () => pending.resolve([{ ...row, profileName: 'stale-before-clear' }]))
+    expect(await screen.findByText('retained-history')).toBeInTheDocument()
+    expect(window.electronAPI.connectionHistoryList).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText('stale-before-clear')).toBeNull()
+  })
+  it('reloads the current filter after failed clear invalidated a pending read', async () => {
+    const pending = deferred<any>()
+    vi.mocked(window.electronAPI.connectionHistoryFilter).mockReturnValueOnce(pending.promise)
+    vi.mocked(window.electronAPI.connectionHistoryClear).mockRejectedValue(serializeIpcError(new IpcFault('permission'), 'ru'))
+    const view = await page()
+    fireEvent.change(screen.getByPlaceholderText(ru.logs.search), { target: { value: 'retained' } })
+    await waitFor(() => expect(window.electronAPI.connectionHistoryFilter).toHaveBeenCalledOnce())
+    view.clear()
+    await waitFor(() => expect(window.electronAPI.connectionHistoryFilter).toHaveBeenCalledTimes(2))
+    await act(async () => pending.resolve([{ ...row, profileName: 'stale-filter' }]))
+    expect(screen.getByText('retained-history')).toBeInTheDocument()
+    expect(screen.queryByText('stale-filter')).toBeNull()
+    expect(window.electronAPI.connectionHistoryFilter).toHaveBeenLastCalledWith({ text: 'retained' })
+  })
   it.each(['ru', 'en'] as const)('shows canonical partial failure in %s and never calls log cleanup twice', async locale => {
     vi.mocked(window.electronAPI.clearDiagnosticArtifacts).mockResolvedValue(partial as any)
     const view = await page(locale); view.clear()

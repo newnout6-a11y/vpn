@@ -35,11 +35,17 @@ export function registerDiagnosticMaintenanceHandlers() {
       if (!acl.hardened) throw new IpcFault('permission')
       targets.push({ artifact: 'traffic-forensics', path: forensicRoot })
     }
-    const report: DiagnosticClearReport = { success: true, cleared: [], errors: [] }
-    const results = await Promise.allSettled(targets.map(target => rm(target.path, { recursive: true, force: true })))
+    const report: DiagnosticClearReport = { success: true, cleared: [], absent: targets.length === 1 ? ['traffic-forensics'] : [], errors: [] }
+    const results = await Promise.allSettled(targets.map(async target => {
+      try { await rm(target.path, { recursive: true }); return 'cleared' as const }
+      catch (error) {
+        if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return 'absent' as const
+        throw error
+      }
+    }))
     results.forEach((result, index) => {
       const artifact = targets[index].artifact
-      if (result.status === 'fulfilled') report.cleared.push(artifact)
+      if (result.status === 'fulfilled') report[result.value].push(artifact)
       else {
         report.errors.push({ artifact, error: ipcError(classifyIpcError(result.reason)) })
       }
@@ -47,6 +53,7 @@ export function registerDiagnosticMaintenanceHandlers() {
     try {
       const logs = await clearAppLog()
       report.cleared.push(...logs.cleared)
+      report.absent.push(...logs.absent)
       report.errors.push(...logs.errors)
     } catch (error) {
       report.errors.push({ artifact: 'logs', error: ipcError(classifyIpcError(error)) })
@@ -54,7 +61,7 @@ export function registerDiagnosticMaintenanceHandlers() {
     }
     // Record failures after clearing app.log so cleanup cannot erase its own evidence.
     results.forEach((result, index) => {
-      if (result.status === 'rejected') logEvent('error', 'diagnostics', 'artifact cleanup failed', { artifact: targets[index].artifact, error: result.reason })
+      if (result.status === 'rejected') logEvent('error', 'diagnostics', `artifact cleanup failed: ${targets[index].artifact}`, result.reason)
     })
     report.success = report.errors.length === 0
     logEvent(report.success ? 'info' : 'warn', 'diagnostics', 'diagnostic cleanup finished', report)

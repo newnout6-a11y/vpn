@@ -403,7 +403,7 @@
     "cleanup": {
       "confirm": "Очистить историю подключений, app/sing-box логи, snapshots и traffic-forensics артефакты?",
       "partialTitle": "Очистка выполнена частично",
-      "partial": "Удалено: {{cleared}}, ошибок: {{failed}}. {{reason}}",
+      "partial": "Удалено: {{cleared}}, отсутствует: {{absent}}, ошибок: {{failed}}. {{reason}}",
       "successTitle": "Логи очищены",
       "success": "История, runtime-логи и диагностические артефакты удалены"
     },

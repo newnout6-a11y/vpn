@@ -109,7 +109,7 @@ try {
       builder.onResolve({ filter: /^fs\/promises$/ }, args => /(?:diagnosticMaintenance|appLogger)\.ts$/.test(args.importer)
         ? { path: 'fs', namespace: 'maintenance-native' } : undefined)
       builder.onLoad({ filter: /.*/, namespace: 'maintenance-native' }, ({ path }) => ({ loader: 'js', contents: path === 'fs'
-        ? 'export * from "node:fs/promises";export const rm=(...args)=>globalThis.vpnteMaintenanceRm(...args);export const writeFile=(...args)=>globalThis.vpnteMaintenanceWrite(...args)'
+        ? 'export * from "node:fs/promises";export const rm=(...args)=>globalThis.vpnteMaintenanceRm(...args);export const truncate=(...args)=>globalThis.vpnteMaintenanceTruncate(...args)'
         : boundaries[path] }))
     } }]
   })

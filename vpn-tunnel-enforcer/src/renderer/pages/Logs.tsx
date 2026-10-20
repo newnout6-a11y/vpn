@@ -165,6 +165,7 @@ export function Logs() {
   const [entries, setEntries] = useState<ConnectionLogEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [clearingLogs, setClearingLogs] = useState(false)
+  const [historyRevision, setHistoryRevision] = useState(0)
   const cleanupScope = useRef({ active: true, running: false, epoch: 0 })
   useEffect(() => {
     const lifetime = { active: true, running: false, epoch: 0 }
@@ -236,7 +237,7 @@ export function Logs() {
     return () => {
       active = false
     }
-  }, [selectedReasons, dateFrom, dateTo, searchText])
+  }, [selectedReasons, dateFrom, dateTo, searchText, historyRevision])
 
   useEffect(() => {
     let active = true
@@ -253,7 +254,7 @@ export function Logs() {
     return () => {
       active = false
     }
-  }, [statsPeriod])
+  }, [statsPeriod, historyRevision])
 
   // ─── Sorting Logic ─────────────────────────────────────────────────────────
 
@@ -395,19 +396,21 @@ export function Logs() {
       ])
       if (!lifetime.active) return
       let cleared = 0
+      let absent = 0
       const errors: string[] = []
       if (history.status === 'fulfilled') { setEntries([]); setStats(null); cleared += 1 }
-      else errors.push(reason(history.reason))
+      else { errors.push(reason(history.reason)); setHistoryRevision(revision => revision + 1) }
       if (traffic.status === 'fulfilled') cleared += 1
       else errors.push(reason(traffic.reason))
       if (artifacts.status === 'fulfilled') {
         cleared += artifacts.value.cleared.length
+        absent += artifacts.value.absent.length
         for (const item of artifacts.value.errors) errors.push(ipcError(item.error.category, locale).message)
         if (artifacts.value.cleared.includes('app-log')) setRawLogs([])
       } else errors.push(reason(artifacts.reason))
       if (errors.length) {
         useAppStore.getState().addGlobalToast('error', t('logs.cleanup.partialTitle'),
-          t('logs.cleanup.partial', { cleared, failed: errors.length, reason: [...new Set(errors)].join('; ') }))
+          t('logs.cleanup.partial', { cleared, absent, failed: errors.length, reason: [...new Set(errors)].join('; ') }))
       } else {
         useAppStore.getState().addGlobalToast('success', t('logs.cleanup.successTitle'), t('logs.cleanup.success'))
       }

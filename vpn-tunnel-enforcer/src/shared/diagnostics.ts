@@ -7,6 +7,7 @@ export type DiagnosticArtifact = 'snapshots' | 'traffic-forensics' | 'logs' | 'a
 export interface DiagnosticClearReport {
   success: boolean
   cleared: DiagnosticArtifact[]
+  absent: DiagnosticArtifact[]
   errors: Array<{ artifact: DiagnosticArtifact; error: IpcError }>
 }
 

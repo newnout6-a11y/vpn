@@ -13,13 +13,13 @@ const snapshots = join(base, 'snapshots'), runtime = join(base, 'tun-runtime'), 
 app.setPath('userData', join(work, 'maintenance-userData'))
 app.setPath('sessionData', join(work, 'maintenance-sessionData'))
 let view: BrowserWindow | undefined
-let fault: unknown, partial = false, active = false
+let fault: unknown, partial = false, active = false, trusted = true
 const bounded = (path: string) => { const resolved = resolve(path); assert.ok(resolved.startsWith(base + sep)); return resolved }
 Object.assign(globalThis, {
   vpnteMaintenanceRuntime: (kind: string) => kind === 'traffic-forensics' ? forensics : runtime,
   vpnteMaintenanceSnapshots: () => snapshots,
   vpnteMaintenanceCapture: async () => ({ running: active, cleanupPending: active }),
-  vpnteMaintenanceAcl: async (path: string) => { bounded(path); return { hardened: true } },
+  vpnteMaintenanceAcl: async (path: string) => { bounded(path); return { hardened: trusted } },
   vpnteMaintenanceExists: async (path: string) => { bounded(path); return files.stat(path).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error }) },
   vpnteMaintenanceRm: async (path: string, options: object) => {
     bounded(path)
@@ -27,9 +27,9 @@ Object.assign(globalThis, {
     if (partial && path === snapshots) throw Object.assign(new Error('FAKE-SECRET at /private/snapshots'), { code: 'EACCES' })
     return files.rm(path, options)
   },
-  vpnteMaintenanceWrite: async (path: string, ...args: any[]) => {
+  vpnteMaintenanceTruncate: async (path: string, len: number) => {
     if (partial && path === join(runtime, 'xray.log')) throw Object.assign(new Error('FAKE-SECRET at /private/xray.log'), { code: 'EACCES' })
-    return (files.writeFile as any)(path, ...args)
+    return files.truncate(path, len)
   }
 })
 shell.openPath = async () => { if (fault) throw fault; return partial ? 'FAKE-SECRET at /private/shell' : '' }
@@ -65,16 +65,27 @@ app.whenReady().then(async () => {
   fault = undefined; active = true
   assert.equal((await invoke('clearDiagnosticArtifacts()')).category, 'conflict')
   assert.equal(await files.readFile(join(snapshots, 'evidence.txt'), 'utf8'), 'retained snapshot evidence')
+  active = false; trusted = false
+  assert.equal((await invoke('clearDiagnosticArtifacts()')).category, 'permission')
+  await flushAppLog()
+  assert.match(await files.readFile(getAppLogPath(), 'utf8'), /clear-diagnostic-artifacts failed/)
+  trusted = true
   await files.writeFile(join(runtime, 'xray.log'), 'retained xray evidence')
   active = false; partial = true
   const report = await invoke('clearDiagnosticArtifacts()')
   assert.equal(report.success, false)
   assert.deepEqual(report.errors.map((item: any) => item.artifact), ['snapshots', 'xray-log'])
+  assert.ok(report.absent.includes('app-previous-log'))
+  assert.equal(report.cleared.includes('app-previous-log'), false)
   assert.equal(await files.readFile(join(runtime, 'xray.log'), 'utf8'), 'retained xray evidence')
   assert.equal(await files.readFile(join(snapshots, 'evidence.txt'), 'utf8'), 'retained snapshot evidence')
   await flushAppLog()
   const log = await files.readFile(getAppLogPath(), 'utf8')
   assert.match(log, /artifact cleanup failed/); assert.match(log, /log cleanup failed/)
+  const failures = log.trim().split('\n').map(line => JSON.parse(line)).filter(event => /cleanup failed:/.test(event.message))
+  assert.equal(failures.length, 2)
+  assert.ok(failures.every(event => event.details.message && /\n\s+at /.test(event.details.stack)))
+  assert.doesNotMatch(log, /[A-Z]:\\Users\\/i)
   assert.equal((await invoke('openSnapshotsFolder()')).category, 'internal')
   partial = false
   assert.equal((await invoke('clearDiagnosticArtifacts()')).success, true)

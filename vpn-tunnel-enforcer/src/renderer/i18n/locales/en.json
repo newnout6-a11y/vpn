@@ -401,7 +401,7 @@
     "cleanup": {
       "confirm": "Clear connection history, app/engine logs, snapshots and traffic-forensics artifacts?",
       "partialTitle": "Cleanup incomplete",
-      "partial": "Cleared: {{cleared}}, failed: {{failed}}. {{reason}}",
+      "partial": "Cleared: {{cleared}}, absent: {{absent}}, failed: {{failed}}. {{reason}}",
       "successTitle": "Logs cleared",
       "success": "History, runtime logs and diagnostic artifacts have been cleared"
     },
