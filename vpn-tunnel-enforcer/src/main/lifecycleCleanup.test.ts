@@ -15,6 +15,7 @@ import { OperationRegistry } from './operationRegistry'
 import { currentCorrelationId, withCorrelation } from './actionCorrelation'
 import { ipcError, classifyIpcError, readIpcErrorCategory, IpcFault } from '../shared/ipc-result'
 import { connectionFailure } from '../shared/operation'
+import { resolveVpnProfile, NoSupportedVpnProfilesError } from './vpnProfiles'
 
 const recoveryModel = () => new TunnelStateMachine(() => ({ running: false, pid: null, softApplied: false }))
 
@@ -37,7 +38,7 @@ function compile<T>(text: string, dependencies: Record<string, unknown>): T {
   const js = ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
   const classify = ts.transpileModule(body('tunController.ts', 'classifyTunError') + ';return classifyTunError;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
   const classifyTunError = new Function('RecoveryWorkerError', 'classifyIpcError', classify)(RecoveryWorkerError, classifyIpcError)
-  const bindings = { currentCorrelationId, withCorrelation, randomUUID, connectionFailure, ipcError, classifyIpcError, readIpcErrorCategory, IpcFault, classifyTunError, ...dependencies }
+  const bindings = { NoSupportedVpnProfilesError, currentCorrelationId, withCorrelation, randomUUID, connectionFailure, ipcError, classifyIpcError, readIpcErrorCategory, IpcFault, classifyTunError, ...dependencies }
   return new Function(...Object.keys(bindings), js)(...Object.values(bindings))
 }
 const noop = () => vi.fn((..._args: any[]) => {})
@@ -61,6 +62,15 @@ return {restart:(signal)=>controller.restartProtected('fixture',{mode:'directVpn
 }
 
 describe('protected restart readiness (AT-02-002/004/005 / AT-00-003)', () => {
+  it('names protected restart startup failure without exposing its exception (AT-00-004)', async () => {
+    const h = protectedRestartHarness()
+    h.start.mockRejectedValueOnce(Object.assign(new Error('FAKE-private-path C:\\private\\engine.exe'), { code: 'EACCES' }))
+    const result = await h.restart()
+    expect(result).toMatchObject({ success: false, category: 'permission', error: expect.stringContaining('защищённом перезапуске') })
+    expect(result.error).toContain('журнал')
+    expect(result.error).not.toContain('FAKE-private-path')
+    expect(h.stop).toHaveBeenCalledTimes(2)
+  })
   it('does not touch the live runtime for an already aborted rotation signal', async () => {
     const h = protectedRestartHarness(), abort = new AbortController()
     abort.abort()
@@ -610,7 +620,7 @@ return ${body('index.ts', 'tunController.onStatusChange')};`, os)
     const h = startupExitHarness(poll)
     h.rollbackEarlyAdapterLockdown.mockReturnValue(new Promise<void>(done => { releaseRollback = done }))
     h.exit(new Error('child failed'))
-    expect(h.finishResult).toHaveBeenCalledWith(connectionFailure('internal'))
+    expect(h.finishResult).toHaveBeenCalledWith(expect.objectContaining({ success: false, category: 'internal', error: expect.stringContaining('sing-box') }))
     expect(h.stopXray).not.toHaveBeenCalled()
     const settled = vi.fn()
     void h.settled().then(settled)
@@ -1364,7 +1374,8 @@ function ipStartupHarness(mode: 'direct' | 'proxy') {
     rollbackSoftAutoconfigIfApplied: done(), suppressLeakSelfTestsFor: noop(), captureSnapshot: done(),
     clearStaleKillSwitchBeforeStart: vi.fn(async () => ({ success: true })), recordStartFailure: noop(),
     settingsStore: { get: () => settings },
-    serverPicker: { getActiveProfile: () => ({ id: 'fixture', name: 'fixture', protocol: 'vless', outbound: { server: 'fixture.invalid', server_port: 443 } }) },
+    serverPicker: { getActiveProfile: vi.fn((): any => ({ id: 'fixture', name: 'fixture', protocol: 'vless', outbound: { server: 'fixture.invalid', server_port: 443 } })) },
+    resolveVpnProfile: vi.fn(resolveVpnProfile),
     killSwitchManifestExists: vi.fn(async () => false), combinedPreStartProbe: vi.fn(async () => ({ tunnels: [], listeners: [] })),
     getRoutingPlan: vi.fn(async () => ({ canStartHard: true })),
     beginAdaptiveConnection: () => ({ capabilities: {}, mode: 'standard' }),
@@ -1396,6 +1407,24 @@ return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : 
 }
 describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-003 / AT-02-002)', mode => {
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
+  it('preserves the recovery-report instruction on baseline failure (AT-00-004)', async () => {
+    const h = ipStartupHarness(mode)
+    h.settings.autoNetworkBaseline = true
+    h.applyTunNetworkBaseline.mockResolvedValueOnce({ success: false, error: ipcError('permission'), message: 'Baseline не применён; проверьте отчёт восстановления' })
+    expect((await h.start()).warning).toContain('отчёт восстановления')
+    h.cancel()
+  })
+  if (mode === 'direct') it('explains unsupported pasted VPN input without echoing it (AT-00-004)', async () => {
+    const h = ipStartupHarness(mode)
+    h.serverPicker.getActiveProfile.mockReturnValue(null)
+    h.settings.directVpnInput = 'FAKE-private-input at C:\\private\\input.txt'
+    const result = await h.start()
+    expect(result).toMatchObject({ success: false, category: 'validation', error: expect.stringContaining('поддерживаемых профилей') })
+    expect(result.error).toContain('VLESS')
+    expect(result.error).not.toContain('FAKE-private-input')
+    expect(h.recordStartFailure).toHaveBeenCalledWith(expect.anything(), result.error)
+    expect(h.tunController.start).not.toHaveBeenCalled()
+  })
   it('does not start native effects when pre-start env recovery fails (AT-00-007)', async () => {
     const h = ipStartupHarness(mode)
     h.rollbackSoftAutoconfigIfApplied.mockRejectedValueOnce(new Error('env recovery unconfirmed'))

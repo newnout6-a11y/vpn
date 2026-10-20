@@ -1853,7 +1853,7 @@ async function validateProxyFullTunnel(
   host: string,
   port: number,
   proxyType: 'socks5' | 'http'
-): Promise<{ ok: boolean; message?: string; directIp: string | null; proxyIps: Array<{ label: string; ip: string | null; error?: string }> }> {
+): Promise<{ ok: boolean; reason?: 'split' | 'direct' | 'offline'; message?: string; directIp: string | null; proxyIps: Array<{ label: string; ip: string | null; error?: string }> }> {
   if (process.platform !== 'win32') return { ok: true, directIp: null, proxyIps: [] }
 
   const proxyUrl = curlProxyUrl(host, port, proxyType)
@@ -1925,6 +1925,7 @@ async function validateProxyFullTunnel(
   if (seen.length >= 2) {
     return {
       ok: false,
+      reason: 'split',
       directIp,
       proxyIps,
       message:
@@ -1936,6 +1937,7 @@ async function validateProxyFullTunnel(
   if (directIp && seen.length === 1 && seen[0] === directIp) {
     return {
       ok: false,
+      reason: 'direct',
       directIp,
       proxyIps,
       message:
@@ -1950,6 +1952,7 @@ async function validateProxyFullTunnel(
   if (seen.length === 0) {
     return {
       ok: false,
+      reason: 'offline',
       directIp,
       proxyIps,
       message:
@@ -2706,7 +2709,7 @@ export const tunController = {
       } catch (err: any) {
         await rollbackEarlyAdapterLockdown('proxy address parse failed after adapter lockdown')
         logEvent('warn', 'tun', 'invalid upstream proxy address', err)
-        return finishStart(connectionFailure('validation'))
+        return finishStart(connectionFailure('validation', 'Некорректный адрес upstream proxy. Укажите host:port или [IPv6]:port; порт должен быть от 1 до 65535.'))
       }
 
       const { host, port } = parsedProxy
@@ -2758,7 +2761,14 @@ export const tunController = {
       logEvent(proxyFullTunnel.ok ? 'info' : 'error', 'tun', 'upstream proxy full-tunnel check', proxyFullTunnel)
       if (!proxyFullTunnel.ok) {
         await rollbackEarlyAdapterLockdown('proxy full-tunnel check failed after adapter lockdown')
-        return finishStart(connectionFailure('network', 'Upstream proxy не прошёл проверку полного туннеля. Проверьте журнал.'))
+        const guidance = proxyFullTunnel.reason === 'split'
+          ? 'Upstream proxy работает как split/direct proxy. Включите в Happ режим Global/Proxy без обхода RU/локальных сайтов.'
+          : proxyFullTunnel.reason === 'direct'
+            ? 'Upstream proxy выходит напрямую и не меняет внешний IP. Включите VPN-сервер в клиенте и режим Global/Proxy перед запуском Hard mode.'
+            : proxyFullTunnel.reason === 'offline'
+              ? 'Upstream proxy принимает соединения, но не выходит в интернет. Проверьте VPN-сервер в Happ/V2RayN: возможно, он недоступен или заблокирован.'
+              : 'Upstream proxy не прошёл проверку полного туннеля. Проверьте VPN-сервер и режим Global/Proxy в клиенте.'
+        return finishStart(connectionFailure('network', guidance))
       }
       mark('proxy-validated')
     } else {
@@ -2812,11 +2822,11 @@ export const tunController = {
               logEvent('warn', 'tun', 'xray cleanup after startup failure not confirmed', error)
               // The concurrent native lockdown still belongs to this start.
               await adapterLockdownPromise?.catch(() => undefined)
-              return finishStart({ ...connectionFailure(classifyTunError(xrErr)),
+              return finishStart({ ...connectionFailure(classifyTunError(xrErr), 'Не удалось запустить xray-core. Проверьте конфигурацию VPN-профиля и журнал запуска.'),
                 warning: 'Xray exit not confirmed; adapter protection retained. Повторите остановку и проверьте журнал.' })
             }
             await rollbackEarlyAdapterLockdown('xray startup failed after adapter lockdown')
-            return finishStart(connectionFailure(classifyTunError(xrErr)))
+            return finishStart(connectionFailure(classifyTunError(xrErr), 'Не удалось запустить xray-core. Проверьте конфигурацию VPN-профиля и журнал запуска.'))
           }
         }
 
@@ -2934,7 +2944,7 @@ export const tunController = {
       await rollbackEarlyAdapterLockdown('runtime prepare failed after adapter lockdown')
       await stopXray('runtime prepare failed').catch(() => undefined)
       logEvent('error', 'tun', 'failed to prepare TUN runtime', err)
-      return finishStart(connectionFailure(classifyTunError(err)))
+      return finishStart(connectionFailure(classifyTunError(err), 'Не удалось подготовить TUN runtime или проверить конфигурацию sing-box. Проверьте доступ к файлам движка и журнал запуска.'))
     }
     mark('stale-cleanup-done')
     mark('runtime-ready')
@@ -3129,7 +3139,7 @@ export const tunController = {
           } else {
             notifyStatus('stopped')
           }
-          finish(connectionFailure(startAbortedCategory ?? classifyTunError(error), startAbortedReason ?? undefined))
+          finish(connectionFailure(startAbortedCategory ?? classifyTunError(error), startAbortedReason ?? 'sing-box завершился до подтверждения запуска. Проверьте конфигурацию VPN-профиля, права запуска и журнал.'))
         } else if (error || stderr) {
           // A force-kill on user-initiated stop makes the child exit with a
           // non-zero "Command failed" error + empty stderr. That's expected,
@@ -4209,7 +4219,7 @@ export const tunController = {
       started = await this.start(nextOptions)
     } catch (err) {
       logEvent('warn', 'tun', 'protected restart startup threw', err)
-      started = connectionFailure(classifyTunError(err))
+      started = connectionFailure(classifyTunError(err), 'Не удалось запустить TUN при защищённом перезапуске. Проверьте VPN-профиль и журнал; повторите остановку защиты.')
     }
     if (started.success && !options.signal?.aborted) {
       return {

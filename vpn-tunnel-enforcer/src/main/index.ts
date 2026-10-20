@@ -79,7 +79,7 @@ import { leakSelfTestVerdict } from '../shared/leak-self-test'
 import { getTrafficForensicsStatus, restartTrafficForensicsSession, startTrafficForensicsSession, stopTrafficForensicsSession } from './trafficForensics'
 import { trafficMonitor, type TrafficStats } from './trafficMonitor'
 import { applyBrowserLeakProtection, rollbackBrowserLeakProtection } from './browserHardening'
-import { resolveVpnProfile, resolveVpnProfiles, redactSensitiveConfig, type VpnProfile } from './vpnProfiles'
+import { resolveVpnProfile, resolveVpnProfiles, NoSupportedVpnProfilesError, redactSensitiveConfig, type VpnProfile } from './vpnProfiles'
 import { executeIndeterminateVpnIpAutoVerify } from './indeterminateIpAutoVerify'
 
 // ─── V2 Feature Modules ──────────────────────────────────────────────────────
@@ -1274,12 +1274,12 @@ async function startProtectionEffects(owner: ConnectionStartupOwner, proxyAddr: 
       .then(baseline => {
         if (!baseline.success) {
           logEvent('warn', 'app', 'startup network baseline not confirmed', baseline)
-          baselineWarning = `Не удалось применить сетевой baseline: ${ipcError(readIpcErrorCategory(baseline.error) ?? 'internal').message}`
+          baselineWarning = `Не удалось применить сетевой baseline: ${ipcError(readIpcErrorCategory(baseline.error) ?? 'internal').message}. Проверьте отчёт восстановления сети.`
         }
       })
       .catch(err => {
         logEvent('warn', 'app', 'startup network baseline failed', err)
-        baselineWarning = `Не удалось применить сетевой baseline: ${ipcError(classifyIpcError(err)).message}`
+        baselineWarning = `Не удалось применить сетевой baseline: ${ipcError(classifyIpcError(err)).message}. Проверьте отчёт восстановления сети.`
       })
   }
 
@@ -1519,7 +1519,8 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
       owner.assertActive()
       logEvent('warn', 'app', 'direct VPN profile resolution failed', err)
       const category = classifyIpcError(err)
-      const errorMsg = ipcError(category).message
+      const errorMsg = err instanceof NoSupportedVpnProfilesError ? NoSupportedVpnProfilesError.guidance
+        : `Не удалось загрузить VPN-профиль: ${ipcError(category).message}. Проверьте ключ или ссылку подписки в разделе «Серверы».`
       recordStartFailure({ id: 'direct-vpn', name: 'Direct VPN', mode: 'direct' }, errorMsg)
       captureSnapshot('tun-start-failed').catch(() => undefined)
       return connectionFailure(category, errorMsg)
@@ -1538,12 +1539,12 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
       .then(baseline => {
         if (!baseline.success) {
           logEvent('warn', 'app', 'startup network baseline not confirmed', baseline)
-          baselineWarning = `Не удалось применить сетевой baseline: ${ipcError(readIpcErrorCategory(baseline.error) ?? 'internal').message}`
+          baselineWarning = `Не удалось применить сетевой baseline: ${ipcError(readIpcErrorCategory(baseline.error) ?? 'internal').message}. Проверьте отчёт восстановления сети.`
         }
       })
       .catch(err => {
         logEvent('warn', 'app', 'startup network baseline failed', err)
-        baselineWarning = `Не удалось применить сетевой baseline: ${ipcError(classifyIpcError(err)).message}`
+        baselineWarning = `Не удалось применить сетевой baseline: ${ipcError(classifyIpcError(err)).message}. Проверьте отчёт восстановления сети.`
       })
   }
 
