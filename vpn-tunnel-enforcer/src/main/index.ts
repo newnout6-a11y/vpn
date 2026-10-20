@@ -16,6 +16,7 @@ import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeP
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
 import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
+import { runStartupStoreMigrations } from './storeMigrations'
 import { monotonicTimeMs } from './eventClock'
 import { operations, registerOperationHandlers } from './operations'
 import { runRequesterOperation } from './requesterOperation'
@@ -2623,37 +2624,7 @@ app.whenReady().then(async () => {
   registerSplitTunnelHandlers()
   registerServerPickerHandlers()
   registerServerGroupsHandlers()
-  // Migrate legacy directVpnCachedProfiles → server-picker store on first run.
-  // No-op for fresh installs and for users already on the new store.
-  serverPicker.migrateLegacyDirectVpnProfiles()
-  // Backfill `outbound` on picker entries that were saved by older builds
-  // before the field existed. No-op when nothing needs fixing.
-  serverPicker.backfillMissingOutbounds()
-  // Assign every dangling picker profile to a default group, so the new
-  // groups-aware UI never has to deal with ungrouped entries from older
-  // versions of the app. Idempotent.
-  serverPicker.migrateProfilesIntoGroups()
-
-  // Repair installs shattered by the old SNI-suffix splitter: fold bogus
-  // camouflage-domain "subscription" groups (no sourceUrl) back into the
-  // single "Ручные ключи" bucket. Idempotent — no-op once cleaned.
-  serverPicker.consolidateBogusSniGroups()
-  // Backfill missing `sourceUri` on profiles that were imported by older
-  // builds before we tracked subscription URLs. Lets the smart-group
-  // classifier re-bin previously-orphaned keys on the next migration pass.
-  // Idempotent — safe to run on every startup.
-  serverPicker.backfillProfileSourceUris()
-  // Provider labels commonly carry either a flag emoji or a concatenated
-  // country name (for example "latviavless4"). Persist that metadata for old
-  // installs as well as newly imported profiles.
-  serverPicker.backfillProfileCountriesFromNames()
-
-  // One-time wipe of stale stored ping/status/lastChecked. Earlier builds
-  // (pre-D6.5) stamped tunnel-RTT onto the active profile during connected
-  // pingAll sweeps, leaving fake "~2 ms" values that survived disconnect.
-  // We clear them on startup so the user starts every session from a clean
-  // baseline; the next offline pingAll repopulates with real numbers.
-  serverPicker.clearStaleStoredPings()
+  runStartupStoreMigrations(serverPicker)
   startServerGroupAutoRefresh()
   // Country geolocation is intentionally manual now: subscriptions can carry
   // many servers, and automatically querying several public geo databases for

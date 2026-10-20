@@ -80,12 +80,13 @@ async function disk(name: string) {
 }
 async function logRows() {
   const logger = await import('./appLogger')
+  await logger.flushAppLog()
   let raw = ''
-  await expect.poll(async () => {
-    try { raw = await readFile(logger.getAppLogPath(), 'utf8'); return raw.trim().split('\n').length }
-    catch { return 0 }
-  }).toBe(state.log.mock.calls.length)
-  return { raw, rows: raw.trim().split('\n').map(line => JSON.parse(line)) }
+  try { raw = await readFile(logger.getAppLogPath(), 'utf8') }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+  const rows = raw.trim() ? raw.trim().split('\n').map(line => JSON.parse(line)) : []
+  expect(rows).toHaveLength(state.log.mock.calls.length)
+  return { raw, rows }
 }
 
 beforeEach(async () => {
@@ -119,7 +120,7 @@ beforeEach(async () => {
   state.openDialog.mockReset().mockResolvedValue({ canceled: false, filePaths: [selected] })
   state.saveDialog.mockReset().mockResolvedValue({ canceled: false, filePath: destination })
   state.consent.mockReset().mockResolvedValue({ response: 1 })
-})
+}, 30_000) // Private directory ACL setup alone permits a 15s native process.
 
 afterEach(async () => {
   const closing = registry?.close()
