@@ -14,6 +14,7 @@ import { SocksClient } from 'socks'
 import axios from 'axios'
 import { logEvent } from './appLogger'
 import { operations } from './operations'
+import type { OperationLease } from './operationRegistry'
 import { IpcFault } from '../shared/ipc-result'
 import { settingsStore } from './settings'
 import { serverPicker } from './serverPicker'
@@ -1272,6 +1273,7 @@ export async function probeInfrastructure(
           timeout: 4000,
           signal
         })
+        if (signal?.aborted) throw new IpcFault('cancelled')
         if (resp.data && !resp.data.error) {
           asnInfo = {
             asn: resp.data.asn || 'unknown',
@@ -1291,6 +1293,7 @@ export async function probeInfrastructure(
               timeout: 4000,
               signal
             })
+            if (signal?.aborted) throw new IpcFault('cancelled')
             if (fbResp.data && fbResp.data.success !== false) {
               const d = fbResp.data
               const rawAsn = d.connection?.asn
@@ -2912,9 +2915,11 @@ export function summarizeSplitTunnelDiagnostics(
 }
 
 /** Read the effective process routing rules without changing the live tunnel. */
-export async function collectSplitTunnelDiagnostics(): Promise<LiveSplitTunnelDiagnostics> {
+export async function collectSplitTunnelDiagnostics(signal?: AbortSignal): Promise<LiveSplitTunnelDiagnostics> {
+  if (signal?.aborted) throw new IpcFault('cancelled')
   try {
     const { splitTunneling } = await import('./splitTunneling')
+    if (signal?.aborted) throw new IpcFault('cancelled')
     const config = splitTunneling.getConfig()
     return summarizeSplitTunnelDiagnostics(
       config.enabled === true,
@@ -2923,6 +2928,7 @@ export async function collectSplitTunnelDiagnostics(): Promise<LiveSplitTunnelDi
       splitTunneling.getDirectProcessPaths()
     )
   } catch (error: any) {
+    if (signal?.aborted) throw new IpcFault('cancelled')
     return {
       status: 'error',
       enabled: false,
@@ -3279,16 +3285,27 @@ foreach ($sz in $ladder) {
 
 /**
  * Main Live Server Check runner
- * Wraps overall timeout, coordinates 11 diagnostic stages, emits progress updates.
+ * Owns the deadline and physical work across all diagnostic stages.
  */
 export async function runLiveServerCheck(
   options: LiveServerCheckOptions,
   signal?: AbortSignal,
   onProgress?: (progress: LiveCheckProgress) => void
 ): Promise<LiveServerCheck> {
+  return operations.run('server-probe', lease => runLiveServerCheckOwned(options, lease, onProgress), {
+    resource: `live-check:${crypto.randomUUID().replaceAll('-', '')}`,
+    timeoutMs: options.mode === 'extended' ? 60_000 : 25_000, signal
+  })
+}
+
+async function runLiveServerCheckOwned(
+  options: LiveServerCheckOptions,
+  lease: OperationLease,
+  onProgress?: (progress: LiveCheckProgress) => void
+): Promise<LiveServerCheck> {
   const startedAt = new Date().toISOString()
   const startTs = Date.now()
-  const checkId = crypto.randomUUID()
+  const checkId = lease.operation.operationId
   const requestId = options.requestId || checkId
 
   // Look up profile if profileId was supplied
@@ -3331,27 +3348,7 @@ export async function runLiveServerCheck(
     disableGeoLookup
   })
 
-  // Create deadline controller to enforce an overall timeout on the entire check
-  const totalTimeoutMs = mode === 'extended' ? 60000 : 25000
-  const deadlineController = new AbortController()
-
-  const overallTimer = setTimeout(() => {
-    deadlineController.abort(new Error('Live check overall deadline exceeded'))
-  }, totalTimeoutMs)
-
-  const abortForwarder = () => {
-    deadlineController.abort(new Error('Live check was cancelled'))
-  }
-
-  if (signal) {
-    if (signal.aborted) {
-      deadlineController.abort(new Error('Live check was cancelled'))
-    } else {
-      signal.addEventListener('abort', abortForwarder, { once: true })
-    }
-  }
-
-  const checkSignal = deadlineController.signal
+  const checkSignal = lease.signal
 
   const totalStages = 13
   let completedStages = 0
@@ -3362,6 +3359,7 @@ export async function runLiveServerCheck(
     status: 'running' | 'completed' | 'failed' | 'skipped',
     detail?: string
   ) => {
+    if (checkSignal.aborted) return
     if (status === 'completed' || status === 'failed' || status === 'skipped') {
       completedStages++
     }
@@ -3379,232 +3377,228 @@ export async function runLiveServerCheck(
     } catch {}
   }
 
-  try {
-    // 1. DNS Probe
-    reportStage('dns', 'running')
-    const dnsRes = await probeDns(host, mode, checkSignal)
-    reportStage('dns', dnsRes.dns.status === 'ok' ? 'completed' : dnsRes.dns.status === 'skipped' ? 'skipped' : 'failed')
-    const primaryIp = dnsRes.dns.a[0] || dnsRes.dns.aaaa[0] || host
+  // 1. DNS Probe
+  reportStage('dns', 'running')
+  const dnsRes = await lease.wait(probeDns(host, mode, checkSignal))
+  reportStage('dns', dnsRes.dns.status === 'ok' ? 'completed' : dnsRes.dns.status === 'skipped' ? 'skipped' : 'failed')
+  const primaryIp = dnsRes.dns.a[0] || dnsRes.dns.aaaa[0] || host
 
-    // 2. Reachability, TLS, HTTP, Ports, Route, Infrastructure Probes
-    const isTlsPort = [443, 8443, 2053, 2083, 2087, 2096, 4433].includes(port)
-    const isTlsApplicable = profileTlsEnabled ?? (isTlsPort || sniHostname !== undefined)
+  // 2. Reachability, TLS, HTTP, Ports, Route, Infrastructure Probes
+  const isTlsPort = [443, 8443, 2053, 2083, 2087, 2096, 4433].includes(port)
+  const isTlsApplicable = profileTlsEnabled ?? (isTlsPort || sniHostname !== undefined)
 
-    reportStage('reachability', 'running')
-    reportStage('tls', 'running')
-    reportStage('http', 'running')
-    reportStage('ports', 'running')
-    if (mode === 'extended') reportStage('route', 'running')
-    else reportStage('route', 'skipped')
-    reportStage('infrastructure', 'running')
+  reportStage('reachability', 'running')
+  reportStage('tls', 'running')
+  reportStage('http', 'running')
+  reportStage('ports', 'running')
+  if (mode === 'extended') reportStage('route', 'running')
+  else reportStage('route', 'skipped')
+  reportStage('infrastructure', 'running')
 
-    const reachabilityPromise = probeReachabilityAndLatency(primaryIp, port, mode, checkSignal).then(
-      res => {
-        reportStage('reachability', res.reachability.status === 'ok' ? 'completed' : 'failed')
-        return res
-      },
-      err => {
-        reportStage('reachability', 'failed')
-        throw err
-      }
-    )
-
-    const tlsPromise = (isTlsApplicable
-      ? probeTls(primaryIp, port, sniHostname || (net.isIP(host) === 0 ? host : undefined), checkSignal)
-      : Promise.resolve<LiveTlsCertInfo | undefined>(undefined)
-    ).then(
-      res => {
-        reportStage('tls', res ? (res.status === 'ok' ? 'completed' : 'failed') : 'skipped')
-        return res
-      },
-      err => {
-        reportStage('tls', 'failed')
-        throw err
-      }
-    )
-
-    const httpPromise = probeHttp(primaryIp, port, isTlsApplicable, host, checkSignal, sniHostname).then(
-      res => {
-        reportStage('http', res.status === 'ok' ? 'completed' : 'failed')
-        return res
-      },
-      err => {
-        reportStage('http', 'failed')
-        throw err
-      }
-    )
-
-    const portsPromise = probePorts(primaryIp, port, mode, checkSignal).then(
-      res => {
-        reportStage('ports', 'completed')
-        return res
-      },
-      err => {
-        reportStage('ports', 'failed')
-        throw err
-      }
-    )
-
-    const routePromise = (mode === 'extended'
-      ? probeRoute(primaryIp, checkSignal)
-      : Promise.resolve<RouteDiagnostics | undefined>(undefined)
-    ).then(
-      res => {
-        if (mode === 'extended') {
-          reportStage('route', res?.status === 'ok' ? 'completed' : 'failed')
-        }
-        return res
-      },
-      err => {
-        if (mode === 'extended') reportStage('route', 'failed')
-        throw err
-      }
-    )
-
-    const infraPromise = probeInfrastructure(host, primaryIp, options.profileId, endpointCountry, disableGeoLookup, checkSignal).then(
-      res => {
-        reportStage('infrastructure', res.status === 'ok' ? 'completed' : 'failed')
-        return res
-      },
-      err => {
-        reportStage('infrastructure', 'failed')
-        throw err
-      }
-    )
-
-    const [reachabilitySettled, tlsSettled, httpSettled, portsSettled, routeSettled, infraSettled] =
-      await Promise.allSettled([
-        reachabilityPromise,
-        tlsPromise,
-        httpPromise,
-        portsPromise,
-        routePromise,
-        infraPromise
-      ])
-
-    const reachabilityRes = reachabilitySettled.status === 'fulfilled'
-      ? reachabilitySettled.value
-      : { reachability: { status: 'error' as const, durationMs: 0, error: 'Probe crashed', tcpReachable: false, port }, latency: undefined }
-
-    const tlsRes: LiveTlsCertInfo | undefined = tlsSettled.status === 'fulfilled' ? tlsSettled.value : { status: 'error', durationMs: 0, error: 'TLS probe failed' }
-
-    const httpRes: HttpProbeResult = httpSettled.status === 'fulfilled' ? httpSettled.value : { status: 'error', durationMs: 0, error: 'HTTP probe failed', confidence: 'low' }
-
-    const openPortsRes = portsSettled.status === 'fulfilled' ? portsSettled.value : undefined
-
-    const routeRes: RouteDiagnostics | undefined = routeSettled.status === 'fulfilled' ? routeSettled.value : { status: 'error', durationMs: 0, error: 'Route probe failed' }
-
-    const infraRes: InfrastructureHints = infraSettled.status === 'fulfilled'
-      ? infraSettled.value
-      : { status: 'error', endpointCountry, error: 'Infrastructure probe failed' }
-
-    // 3. Tunnel Handshake, Fresh Egress & Media Stream Probes
-    reportStage('handshake', 'running')
-    reportStage('egress', 'running')
-    reportStage('mediaStream', 'running')
-    if (mode === 'extended') reportStage('throughput', 'running')
-    else reportStage('throughput', 'skipped')
-    const { handshake: handshakeRes, egress: egressRes, mediaStream: mediaStreamRes, throughput: throughputRes } = await probeTunnelHandshakeAndEgress(
-      matchedProfile,
-      primaryIp,
-      checkSignal,
-      mode === 'extended'
-    )
-    reportStage('handshake', handshakeRes.status === 'ok' ? 'completed' : handshakeRes.status === 'skipped' ? 'skipped' : 'failed')
-    reportStage('egress', egressRes.status === 'ok' ? 'completed' : egressRes.status === 'skipped' ? 'skipped' : 'failed')
-    reportStage('mediaStream', mediaStreamRes.status === 'ok' ? 'completed' : mediaStreamRes.status === 'skipped' ? 'skipped' : 'failed')
-    if (mode === 'extended') {
-      reportStage('throughput', throughputRes?.status === 'ok' ? 'completed' : throughputRes?.status === 'skipped' ? 'skipped' : 'failed')
+  const reachabilityPromise = probeReachabilityAndLatency(primaryIp, port, mode, checkSignal).then(
+    res => {
+      reportStage('reachability', res.reachability.status === 'ok' ? 'completed' : 'failed')
+      return res
+    },
+    err => {
+      reportStage('reachability', 'failed')
+      throw err
     }
+  )
 
-    // 4. Windows Path Confirmation & PMTU Probes
-    reportStage('path', 'running')
-    const pathRes = await probePathConfirmation(primaryIp, checkSignal)
-    reportStage('path', pathRes.status === 'ok' ? 'completed' : pathRes.status === 'skipped' ? 'skipped' : 'failed')
-
-    reportStage('pmtu', 'running')
-    const pmtuRes = await probePmtu(
-      primaryIp,
-      pathRes.activeInterfaceIndex,
-      pathRes.activeInterfaceAlias,
-      checkSignal
-    )
-    reportStage('pmtu', pmtuRes.status === 'ok' || pmtuRes.status === 'lower_bound' ? 'completed' : pmtuRes.status === 'skipped' ? 'skipped' : 'failed')
-
-    const splitTunnelRes = mode === 'extended'
-      ? await collectSplitTunnelDiagnostics()
-      : undefined
-
-    // Get previous successful check for diff & findings
-    const previousCheck = liveServerHistory.getPreviousSuccessfulCheck(options.profileId, host, port)
-
-    const partialCheck: Partial<LiveServerCheck> = {
-      id: checkId,
-      requestId,
-      profileId: options.profileId,
-      host,
-      port,
-      mode,
-      startedAt,
-      finishedAt: new Date().toISOString(),
-      durationMs: Date.now() - startTs,
-      cancelled: checkSignal.aborted || false,
-      error: checkSignal.aborted ? (checkSignal.reason?.message || 'Live check was cancelled') : undefined,
-      dns: dnsRes.dns,
-      reverseDns: dnsRes.reverseDns.length > 0 ? dnsRes.reverseDns : undefined,
-      asn: infraRes.asn,
-      reachability: reachabilityRes.reachability,
-      latency: reachabilityRes.latency,
-      tls: tlsRes,
-      http: httpRes,
-      openPorts: openPortsRes,
-      portsError: portsSettled.status === 'rejected' ? 'Port probe failed' : undefined,
-      route: routeRes,
-      infrastructure: infraRes,
-      handshake: handshakeRes,
-      egress: egressRes,
-      mediaStream: mediaStreamRes,
-      pathDiagnostics: pathRes,
-      pmtu: pmtuRes,
-      throughput: throughputRes,
-      splitTunnel: splitTunnelRes
+  const tlsPromise = (isTlsApplicable
+    ? probeTls(primaryIp, port, sniHostname || (net.isIP(host) === 0 ? host : undefined), checkSignal)
+    : Promise.resolve<LiveTlsCertInfo | undefined>(undefined)
+  ).then(
+    res => {
+      reportStage('tls', res ? (res.status === 'ok' ? 'completed' : 'failed') : 'skipped')
+      return res
+    },
+    err => {
+      reportStage('tls', 'failed')
+      throw err
     }
+  )
 
-    // Attach diff to infrastructure hints BEFORE saving to disk!
-    if (previousCheck && partialCheck.infrastructure) {
-      const diff = computeHistoryDiff(partialCheck as LiveServerCheck, previousCheck)
-      if (diff) {
-        partialCheck.infrastructure.changesFromPrevious = {
-          ipChanged: diff.ipChanged,
-          asnChanged: diff.asnChanged,
-          tlsCertChanged: diff.tlsCertChanged,
-          countryChanged: diff.countryChanged,
-          portsChanged: diff.portsChanged,
-          latencySpike: diff.latencySpike,
-          handshakeChanged: diff.handshakeChanged,
-          egressChanged: diff.egressChanged,
-          pmtuChanged: diff.pmtuChanged,
-          throughputChanged: diff.throughputChanged
-        }
+  const httpPromise = probeHttp(primaryIp, port, isTlsApplicable, host, checkSignal, sniHostname).then(
+    res => {
+      reportStage('http', res.status === 'ok' ? 'completed' : 'failed')
+      return res
+    },
+    err => {
+      reportStage('http', 'failed')
+      throw err
+    }
+  )
+
+  const portsPromise = probePorts(primaryIp, port, mode, checkSignal).then(
+    res => {
+      reportStage('ports', 'completed')
+      return res
+    },
+    err => {
+      reportStage('ports', 'failed')
+      throw err
+    }
+  )
+
+  const routePromise = (mode === 'extended'
+    ? probeRoute(primaryIp, checkSignal)
+    : Promise.resolve<RouteDiagnostics | undefined>(undefined)
+  ).then(
+    res => {
+      if (mode === 'extended') {
+        reportStage('route', res?.status === 'ok' ? 'completed' : 'failed')
       }
+      return res
+    },
+    err => {
+      if (mode === 'extended') reportStage('route', 'failed')
+      throw err
     }
+  )
 
-    // Evaluate Findings
-    const findings = evaluateLiveCheckFindings(partialCheck, previousCheck)
-    partialCheck.findings = findings
+  const infraPromise = probeInfrastructure(host, primaryIp, options.profileId, endpointCountry, disableGeoLookup, checkSignal).then(
+    res => {
+      reportStage('infrastructure', res.status === 'ok' ? 'completed' : 'failed')
+      return res
+    },
+    err => {
+      reportStage('infrastructure', 'failed')
+      throw err
+    }
+  )
 
-    const finalCheck = partialCheck as LiveServerCheck
+  const [reachabilitySettled, tlsSettled, httpSettled, portsSettled, routeSettled, infraSettled] =
+    await lease.wait(Promise.allSettled([
+      reachabilityPromise,
+      tlsPromise,
+      httpPromise,
+      portsPromise,
+      routePromise,
+      infraPromise
+    ]))
 
-    // Save to history (diff is already attached)
-    liveServerHistory.addCheck(finalCheck)
+  const reachabilityRes = reachabilitySettled.status === 'fulfilled'
+    ? reachabilitySettled.value
+    : { reachability: { status: 'error' as const, durationMs: 0, error: 'Probe crashed', tcpReachable: false, port }, latency: undefined }
 
-    return sanitizeLiveCheckForStorage(finalCheck)
-  } finally {
-    clearTimeout(overallTimer)
-    if (signal) {
-      signal.removeEventListener('abort', abortForwarder)
+  const tlsRes: LiveTlsCertInfo | undefined = tlsSettled.status === 'fulfilled' ? tlsSettled.value : { status: 'error', durationMs: 0, error: 'TLS probe failed' }
+
+  const httpRes: HttpProbeResult = httpSettled.status === 'fulfilled' ? httpSettled.value : { status: 'error', durationMs: 0, error: 'HTTP probe failed', confidence: 'low' }
+
+  const openPortsRes = portsSettled.status === 'fulfilled' ? portsSettled.value : undefined
+
+  const routeRes: RouteDiagnostics | undefined = routeSettled.status === 'fulfilled' ? routeSettled.value : { status: 'error', durationMs: 0, error: 'Route probe failed' }
+
+  const infraRes: InfrastructureHints = infraSettled.status === 'fulfilled'
+    ? infraSettled.value
+    : { status: 'error', endpointCountry, error: 'Infrastructure probe failed' }
+
+  // 3. Tunnel Handshake, Fresh Egress & Media Stream Probes
+  reportStage('handshake', 'running')
+  reportStage('egress', 'running')
+  reportStage('mediaStream', 'running')
+  if (mode === 'extended') reportStage('throughput', 'running')
+  else reportStage('throughput', 'skipped')
+  const { handshake: handshakeRes, egress: egressRes, mediaStream: mediaStreamRes, throughput: throughputRes } = await lease.wait(probeTunnelHandshakeAndEgressOwned(
+    matchedProfile,
+    primaryIp,
+    checkSignal,
+    mode === 'extended',
+    () => lease.expire(),
+    task => lease.retain(task)
+  ))
+  reportStage('handshake', handshakeRes.status === 'ok' ? 'completed' : handshakeRes.status === 'skipped' ? 'skipped' : 'failed')
+  reportStage('egress', egressRes.status === 'ok' ? 'completed' : egressRes.status === 'skipped' ? 'skipped' : 'failed')
+  reportStage('mediaStream', mediaStreamRes.status === 'ok' ? 'completed' : mediaStreamRes.status === 'skipped' ? 'skipped' : 'failed')
+  if (mode === 'extended') {
+    reportStage('throughput', throughputRes?.status === 'ok' ? 'completed' : throughputRes?.status === 'skipped' ? 'skipped' : 'failed')
+  }
+
+  // 4. Windows Path Confirmation & PMTU Probes
+  reportStage('path', 'running')
+  const pathRes = await lease.wait(probePathConfirmation(primaryIp, checkSignal))
+  reportStage('path', pathRes.status === 'ok' ? 'completed' : pathRes.status === 'skipped' ? 'skipped' : 'failed')
+
+  reportStage('pmtu', 'running')
+  const pmtuRes = await lease.wait(probePmtu(
+    primaryIp,
+    pathRes.activeInterfaceIndex,
+    pathRes.activeInterfaceAlias,
+    checkSignal
+  ))
+  reportStage('pmtu', pmtuRes.status === 'ok' || pmtuRes.status === 'lower_bound' ? 'completed' : pmtuRes.status === 'skipped' ? 'skipped' : 'failed')
+
+  const splitTunnelRes = mode === 'extended'
+    ? await lease.wait(collectSplitTunnelDiagnostics(checkSignal))
+    : undefined
+
+  // Get previous successful check for diff & findings
+  const previousCheck = liveServerHistory.getPreviousSuccessfulCheck(options.profileId, host, port)
+
+  const partialCheck: Partial<LiveServerCheck> = {
+    id: checkId,
+    requestId,
+    profileId: options.profileId,
+    host,
+    port,
+    mode,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    durationMs: Date.now() - startTs,
+    cancelled: false,
+    dns: dnsRes.dns,
+    reverseDns: dnsRes.reverseDns.length > 0 ? dnsRes.reverseDns : undefined,
+    asn: infraRes.asn,
+    reachability: reachabilityRes.reachability,
+    latency: reachabilityRes.latency,
+    tls: tlsRes,
+    http: httpRes,
+    openPorts: openPortsRes,
+    portsError: portsSettled.status === 'rejected' ? 'Port probe failed' : undefined,
+    route: routeRes,
+    infrastructure: infraRes,
+    handshake: handshakeRes,
+    egress: egressRes,
+    mediaStream: mediaStreamRes,
+    pathDiagnostics: pathRes,
+    pmtu: pmtuRes,
+    throughput: throughputRes,
+    splitTunnel: splitTunnelRes
+  }
+
+  // Attach diff to infrastructure hints BEFORE saving to disk!
+  if (previousCheck && partialCheck.infrastructure) {
+    const diff = computeHistoryDiff(partialCheck as LiveServerCheck, previousCheck)
+    if (diff) {
+      partialCheck.infrastructure.changesFromPrevious = {
+        ipChanged: diff.ipChanged,
+        asnChanged: diff.asnChanged,
+        tlsCertChanged: diff.tlsCertChanged,
+        countryChanged: diff.countryChanged,
+        portsChanged: diff.portsChanged,
+        latencySpike: diff.latencySpike,
+        handshakeChanged: diff.handshakeChanged,
+        egressChanged: diff.egressChanged,
+        pmtuChanged: diff.pmtuChanged,
+        throughputChanged: diff.throughputChanged
+      }
     }
   }
+
+  // Evaluate Findings
+  const findings = evaluateLiveCheckFindings(partialCheck, previousCheck)
+  partialCheck.findings = findings
+
+  const finalCheck = partialCheck as LiveServerCheck
+
+  const sanitized = sanitizeLiveCheckForStorage(finalCheck)
+  // Persistence and terminal success are one synchronous active-owner transition.
+  return lease.commit(() => {
+    liveServerHistory.addCheck(sanitized)
+    return sanitized
+  })
 }
 
 /**

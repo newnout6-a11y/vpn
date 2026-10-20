@@ -6981,3 +6981,77 @@ CI/review нового SHA проверяются отдельно после pu
   не менялся. Build/typecheck165 channels/0 public any,integration37/37,
   targeted127/127,coverage AC927/927,F210/210,diff exit0.
   CI39352438985 на предыдущем3eb8ab2 такжеsuccess;новый head требует своих gates.
+
+### PR #92 принят; общий live-check owner (20.10.2026)
+
+- Final reviewed head0ae31eda4b94bbcaa078c15dae18134daecdfeef.
+  Qodo1558804 completed на этом SHA:все3 findings автоматически implemented,
+  новых/pending нет;attribution не менялся. Revix118402877903 completed/neutral,
+  Low risk:2 последних issue исправлены и исчезли. Остались stale itest nit
+  (suite уже .itest.ts),вопрос о cleanup (5s terminal/blocked admission + physical
+  retention) и вопрос о callers (прямых scheduler callers нет;IPC fault envelope
+  и batch catch существуют). Эти вопросы проверены кодом и регрессиями.
+- CI39353480596 success на том же exact SHA:Windows full + explicit live itest,
+  traceability,real IPC/CSP,native IPv6 WFP/Electron,Rust/site —зелёные.
+  Local final:npm.cmd run build/typecheck165/0any;full5005 passed/5 skipped/
+  0 failed,307.72s;targeted127/127,integration37/37;coverage927/927,210/210,diff0.
+- Squash merge/main4410b6284af082ecd4c06352df1129ef2aae5cfb.
+  Reviewed/main tree422af1b004d73ef3a043e093556d65c7f48adecb совпал;
+  git diff --exit-code0ae31ed vpn/main exit0. #92 MERGED20.10.2026 01:36:36UTC.
+- Следующий участок —codex/wp0-live-operation-owner от этого main. Общий
+  runLiveServerCheck ещё допускает late progress/history после отмены;root UUID/
+  correlation/deadline/document lifetime и batch/UI fencing ещё не закрыты.
+  Детальная рабочая карта —app .tmp/wp0-after92-plan.md (не норматив).
+  WP-0 в работе;WP-2 не начат. Нормативные docs/ не менялись.
+
+### WP-0: общий владелец live-проверки (20.10.2026)
+
+- AT-00-003/005/007, F-021/F-143: подтверждены поздние progress/history
+  после отмены root runLiveServerCheck, отдельный deadline вместо registry,
+  позднее чтение split-routing после import и запись ASN cache после abort.
+- Root теперь выполняется в operations с UUIDv4/correlation/owner и прежним
+  бюджетом 25s basic/60s extended. lease.wait ограждает каждую фазу, а
+  приватный handshake передаёт физический worker прямо root lease. Отмена,
+  deadline и shutdown возвращают terminal IpcFault сразу; DNS/socket/child/
+  readiness удерживаются до settlement. Поздние progress подавляются,
+  последующие фазы не запускаются. History commit синхронный и active-only;
+  id результата совпадает с operationId, legacy requestId сохранён.
+- Split-routing проверяет сигнал до/после dynamic import; оба ASN provider
+  проверяют abort до изменения cache. Новый набор operation.test.ts:
+  delayed DNS cancel/deadline/shutdown, parallel close, pre-cancel, Windows
+  path child, handshake cleanup+readiness, active history commit, оба ASN
+  provider и delayed import. Все 11 регрессий воспроизведены на HEAD4410b62:
+  11 failed/0 passed (exit1, .tmp/wp0-live-owner-red-verified.log).
+  Setup failures (неполный child_process mock, неверный correlation fixture,
+  missing config mock) исправлены в fixtures, до фактического baseline run.
+- npm.cmd test -- src/main/liveServerProbe.operation.test.ts
+  src/main/liveServerProbe.networkDrain.test.ts src/main/liveServerProbe.test.ts
+  —59/59 passed,3 suites,2.64s,exit0 (.tmp/wp0-live-owner-targeted.log).
+  npm.cmd test -- --mode integration src/main/liveServerProbe.handshakeDrain.itest.ts
+  src/main/keyHealthChecker.transportDrain.itest.ts —37/37 passed,2 suites,
+  2.10s,exit0 (.tmp/wp0-live-owner-integration.log).
+- npm.cmd run build —exit0;включает typecheck165 channels/0 public any
+  (.tmp/wp0-live-owner-build.log). python docs/04-приёмочные-тесты/traceability/
+  check-coverage.py —AC927/927,F210/210,exit0;git diff --check exit0.
+  Full suite выполняется;PR/exact-head Qodo/Revix/CI ещё не приняты.
+- Границы slice: requester map/document reload/crash, batch и renderer guards,
+  provenance/corruption live history и остальные producers остаются в плане
+  WP-0. WP-2 не начат;нормативные docs/ не менялись.
+
+- Первый full завершился exit1:5013 passed/5 skipped/3 failed,424.16s
+  (.tmp/wp0-live-owner-full.log). Все3 failures —прежние audit fixtures,
+  ожидавшие cancelled result/history:они вызывали root даже с заранее
+  отменённым signal. Обновлены assertions typed cancelled;unique UUID/diff
+  проверяются двумя завершёнными реальными loopback HTTP/TCP проверками,
+  с2 persisted snapshots вместо отменённых фикстур. Production fix не менялся.
+  Повторный targeted4 suites70/70 passed,5.75s,exit0
+  (.tmp/wp0-live-owner-targeted2.log);final full/typecheck выполняются.
+
+- Final full:npm.cmd test -- --maxWorkers=1 —5016 passed/5 skipped/0 failed,
+  303 files passed/2 skipped,432.03s,exit0
+  (.tmp/wp0-live-owner-final-full.log). Код/тесты во время прогона не менялись.
+  Повторный npm.cmd run typecheck —165 channels/0 public any,exit0
+  (.tmp/wp0-live-owner-final-typecheck.log). Build exit0 до изменения только
+  audit fixtures;production source с момента build не менялся.
+  Targeted70/70,integration37/37,coverage AC927/927,F210/210,diff check exit0.
+  Изменения готовы к PR;exact-head Qodo/Revix/CI остаются обязательными.
