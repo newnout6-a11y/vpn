@@ -2083,3 +2083,47 @@ npm.cmd run typecheck —165 channels/0 public any,exit0.
   ../docs/04-приёмочные-тесты/traceability/check-coverage.py —AC927/927,F210/210,
   exit0;git diff --check —exit0. Source/test tree не менялся во время full.
   Commit/PR и exact-head Qodo/Revix/CI —следующий gate.
+
+- PR #95 initial885e4ec: Qodo1560044 completed, remediation recommended
+  Missing main file hides saved checks. Две регрессии (missing main + valid
+  backup; missing main + future backup) до fix:2 failed/34 passed,465ms,exit1
+  (.tmp/wp0-live-history-review-red.log). Исправлено admission/recovery при
+  отсутствии основного файла; следующий save/restart сохраняет backup rows,
+  future backup отказывается без изменения файлов. Targeted4 suites79/79,
+  4.98s,exit0 (.tmp/wp0-live-history-review-targeted.log). Attribution не менялся.
+- Revix118466883332 completed/neutral,Low risk,title 2 issue(s) found:
+  suggestion о сохранении исходных повреждённых bytes и question о init callers.
+  Фактические production callers (rg по src,исключая tests): только
+  liveServerProbe.ts3543 getPreviousSuccessfulCheck,3606 addCheck внутри owned
+  async operation и3791 guarded history IPC. Отдельного startup init нет;
+  read failures отклоняют этот запрос typed error,а не прерывают startup.
+  Raw rejected rows не сохраняются в отдельный файл после следующей записи:
+  AT-00-010 допускает честную маркировку corruption;history.corrupted сообщает
+  потерю до следующей записи,валидные rows сохраняются,валидный backup не
+  заменяется повреждённым файлом. Восстановление отвергнутых rows и сохранение
+  их исходных bytes не заявляются. Это minor suggestion,не скрытое исправление.
+  Полный повтор/build и новое exact-head review/CI ещё требуются.
+
+- Initial CI39373659588 success на885e4ec (Windows7m34s,Rust,site),но это не
+  проверка follow-up. Review local full:5076 passed/5 skipped/1 failed,
+  263.93s,exit1 (.tmp/wp0-live-history-review-full.log). Прежний
+  liveServerProbe.test.ts209 ожидал отказ на фиксированном 127.0.0.1:65432,
+  но получил ok. После прогона listener отсутствует;владение портом в момент
+  теста не установлено. Фикстура могла получить этот ephemeral port сама;
+  причинный вердикт о конкретном процессе не делается.
+  Заменён только тест: connect принудительно получает ECONNREFUSED,используются
+  настоящий Socket error/close и пять попыток;assertions не ослаблены,добавлена
+  проверка error code. Production TCP probe не менялся.
+  npm.cmd test -- src/main/liveServerProbe.test.ts
+  src/main/liveServerHistory.integrity.test.ts src/main/liveServerHistory.test.ts
+  src/main/liveServerProbe.operation.test.ts src/main/liveServerAuditRegression.test.ts
+  —102/102,5 suites,5.06s,exit0 (.tmp/wp0-live-history-final-targeted.log).
+  Build/новый full запускаются;провал не засчитан как PASS.
+
+- Review final local: npm.cmd test -- --maxWorkers=1 —5077 passed/5 skipped/
+  0 failed;305 files passed/2 skipped,263.46s,exit0
+  (.tmp/wp0-live-history-final-full.log,exit marker0).
+  npm.cmd run build —exit0,typecheck165 channels/0 public any
+  (.tmp/wp0-live-history-final-build.log);targeted5 suites102/102;
+  coverage927/927,210/210,diff0. Source/test tree frozen во время full.
+  Новый SHA ещё требует completed Qodo,разбора Revix и CI success.

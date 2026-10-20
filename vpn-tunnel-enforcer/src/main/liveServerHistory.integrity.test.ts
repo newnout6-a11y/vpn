@@ -84,6 +84,24 @@ describe('live history integrity', () => {
     expect(liveServerHistory.getHistory().map(row => row.id)).toEqual(['new', 'backup'])
     expect(readFileSync(file + '.bak', 'utf8')).toBe(backup)
   })
+  it('loads the backup when the main file disappeared, then retains those rows after save and restart', () => {
+    const backup = JSON.stringify({ 'profile:p1': [check('backup')] })
+    writeFileSync(file + '.bak', backup)
+    liveServerHistory.init(file)
+    expect(liveServerHistory.getHistory().map(row => row.id)).toEqual(['backup'])
+    expect(state.log).toHaveBeenCalledWith('warn', 'live-server-history', 'history.recovered', { source: 'backup' })
+    liveServerHistory.addCheck(check('new')); liveServerHistory.init(file)
+    expect(liveServerHistory.getHistory().map(row => row.id)).toEqual(['new', 'backup'])
+    expect(readFileSync(file + '.bak', 'utf8')).toBe(backup)
+  })
+  it('refuses a future backup even when the main file is missing', () => {
+    const backup = '{"schemaVersion":1}'
+    writeFileSync(file + '.bak', backup)
+    expect(() => liveServerHistory.init(file)).toThrow()
+    expect(() => liveServerHistory.addCheck(check())).toThrow()
+    expect(readFileSync(file + '.bak', 'utf8')).toBe(backup)
+    expect(readdirSync(directory)).toEqual(['live-server-checks.json.bak'])
+  })
   it.each([1, -1, 'future'])('refuses unsupported schema %j at read and write without changing bytes', schemaVersion => {
     liveServerHistory.addCheck(check('old'))
     writeFileSync(file, JSON.stringify({ schemaVersion, 'profile:p1': [check()] })); const before = hash()

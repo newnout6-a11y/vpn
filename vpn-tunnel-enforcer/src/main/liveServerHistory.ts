@@ -170,8 +170,7 @@ class LiveServerHistoryManager {
     if (!filePath) return new Map()
     try {
       const raw = this.read(filePath)
-      if (raw === undefined) return new Map()
-      const loaded = this.decode(raw)
+      const loaded = raw === undefined ? { history: new Map<string, LiveServerCheck[]>(), valid: false } : this.decode(raw)
       if (!loaded.valid && ![...loaded.history.values()].some(items => items.length)) {
         const backup = this.read(filePath + '.bak')
         if (backup !== undefined) {
