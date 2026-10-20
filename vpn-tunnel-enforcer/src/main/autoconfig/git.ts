@@ -3,13 +3,26 @@ import { mkdir, readFile, unlink, writeFile } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 import { promisify } from 'util'
+import { assertDocumentSchema, StoreSchemaError } from '../storeSchema'
 
 const execFileAsync = promisify(execFile)
 
 interface GitProxyBackup {
+  schemaVersion?: number
   createdAt: number
   httpProxy: string | null
   httpsProxy: string | null
+}
+
+async function readBackup(): Promise<GitProxyBackup | null> {
+  try {
+    const value = JSON.parse(await readFile(backupPath(), 'utf8')) as GitProxyBackup
+    assertDocumentSchema('git-proxy-backup', value)
+    return value
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
 }
 
 function backupPath(): string {
@@ -43,18 +56,15 @@ async function getGlobalProxy(key: 'http.proxy' | 'https.proxy'): Promise<string
 }
 
 async function saveBackupIfMissing(): Promise<void> {
-  try {
-    await readFile(backupPath(), 'utf8')
-    return
-  } catch {
-    // no backup yet
-  }
+  if (await readBackup()) return
   await mkdir(join(homedir(), '.vpnte'), { recursive: true })
   const backup: GitProxyBackup = {
+    schemaVersion: 0,
     createdAt: Date.now(),
     httpProxy: await getGlobalProxy('http.proxy'),
     httpsProxy: await getGlobalProxy('https.proxy')
   }
+  if (await readBackup()) return
   await writeFile(backupPath(), JSON.stringify(backup, null, 2), 'utf8')
 }
 
@@ -80,7 +90,8 @@ export const git = {
       await gitConfig(['--global', 'http.proxy', url])
       await gitConfig(['--global', 'https.proxy', url])
       return true
-    } catch {
+    } catch (error) {
+      if (error instanceof StoreSchemaError) throw error
       return false
     }
   },
@@ -89,8 +100,9 @@ export const git = {
     try {
       let backup: GitProxyBackup | null = null
       try {
-        backup = JSON.parse(await readFile(backupPath(), 'utf8')) as GitProxyBackup
-      } catch {
+        backup = await readBackup()
+      } catch (error) {
+        if (error instanceof StoreSchemaError) throw error
         backup = null
       }
       if (!backup) return false
@@ -98,16 +110,19 @@ export const git = {
       await restoreGlobalProxy('https.proxy', backup?.httpsProxy ?? null)
       await unlink(backupPath()).catch(() => undefined)
       return true
-    } catch {
+    } catch (error) {
+      if (error instanceof StoreSchemaError) throw error
       return false
     }
   },
 
   async isApplied(): Promise<boolean> {
     try {
+      await readBackup()
       const { stdout } = await gitConfig(['--global', '--get', 'http.proxy'])
       return stdout.trim().length > 0
-    } catch {
+    } catch (error) {
+      if (error instanceof StoreSchemaError) throw error
       return false
     }
   }

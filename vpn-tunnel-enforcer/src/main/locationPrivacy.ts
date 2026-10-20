@@ -6,6 +6,7 @@ import { mkdir, readFile, writeFile, unlink } from 'fs/promises'
 import { join } from 'path'
 import { promisify } from 'util'
 import { execElevated } from './admin'
+import { assertDocumentSchema } from './storeSchema'
 
 const execFile = promisify(execFileCb)
 
@@ -13,6 +14,7 @@ const HKCU_LOCATION = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Capab
 const HKLM_LOCATION = 'HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\LocationAndSensors'
 
 export interface BackupManifest {
+  schemaVersion?: number
   hkcuBackup: string | null
   hkcuKeyExisted: boolean
   hklmBackup: string | null
@@ -135,19 +137,23 @@ async function createBackup(): Promise<BackupManifest> {
   if (hkcuKeyExisted && !hkcuBackup) throw new Error('Не удалось создать backup HKCU')
   if (hklmKeyExisted && !hklmBackup) throw new Error('Не удалось создать backup HKLM')
   const manifest: BackupManifest = {
+    schemaVersion: 0,
     hkcuBackup,
     hkcuKeyExisted,
     hklmBackup,
     hklmKeyExisted,
     createdAt: Date.now()
   }
+  await readManifest() // Do not replace a newer document arriving during backup preparation.
   await writeFile(manifestPath(), JSON.stringify(manifest, null, 2), 'utf-8')
   return manifest
 }
 
 async function readManifest(): Promise<BackupManifest | null> {
   try {
-    return JSON.parse(await readFile(manifestPath(), 'utf-8')) as BackupManifest
+    const value = JSON.parse(await readFile(manifestPath(), 'utf-8')) as BackupManifest
+    assertDocumentSchema('location-backup', value)
+    return value
   } catch (err: any) {
     if (err?.code === 'ENOENT') return null
     throw err

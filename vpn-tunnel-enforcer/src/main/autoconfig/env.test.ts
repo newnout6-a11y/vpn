@@ -142,6 +142,7 @@ describe('env autoconfig backup and verified rollback', () => {
     const receipt = mockFs[backupFile]
     expect(mockFs[pendingFile]).toBeDefined()
     expect(JSON.parse(receipt)).toEqual({
+      schemaVersion: 0,
       createdAt: expect.any(Number),
       httpProxy: originalValues.HTTP_PROXY,
       httpsProxy: originalValues.HTTPS_PROXY,

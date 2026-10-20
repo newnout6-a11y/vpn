@@ -3,12 +3,14 @@ import { lstat, mkdir, readFile, unlink, writeFile } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 import { promisify } from 'util'
+import { assertDocumentSchema, StoreSchemaError } from '../storeSchema'
 
 const execFileAsync = promisify(execFile)
 // The receipt remains a cleanup obligation until verified rollback retires it.
 let cleanupPending = false
 
 export interface EnvProxyBackup {
+  schemaVersion?: number
   createdAt: number
   httpProxy: string | null
   httpsProxy: string | null
@@ -18,6 +20,7 @@ export interface EnvProxyBackup {
 
 function parseBackup(raw: string): EnvProxyBackup {
   const value = JSON.parse(raw)
+  assertDocumentSchema('env-proxy-backup', value)
   if (!value || !['httpProxy', 'httpsProxy', 'allProxy', 'noProxy'].every(key => value[key] === null || typeof value[key] === 'string')) {
     throw new Error('Invalid environment backup')
   }
@@ -111,6 +114,7 @@ async function deleteUserEnvValue(name: string): Promise<void> {
 
 async function readUserEnvironment(): Promise<EnvProxyBackup> {
   return {
+    schemaVersion: 0,
     createdAt: Date.now(),
     httpProxy: await getUserEnvValue('HTTP_PROXY'),
     httpsProxy: await getUserEnvValue('HTTPS_PROXY'),
@@ -125,6 +129,7 @@ async function saveBackupIfMissing(): Promise<EnvProxyBackup | null> {
   if (await env.isApplied()) return readUserEnvironment()
   await mkdir(join(homedir(), '.vpnte'), { recursive: true })
   const backup = await readUserEnvironment()
+  if (await env.isApplied()) return backup
   await writeFile(backupPath(), JSON.stringify(backup, null, 2), 'utf8')
   await retainCleanupPending()
   return null
@@ -162,7 +167,8 @@ export const env = {
     let previousSoft: EnvProxyBackup | null
     try {
       previousSoft = await saveBackupIfMissing()
-    } catch {
+    } catch (error) {
+      if (error instanceof StoreSchemaError) throw error
       // Failed to prepare backup before modifying system environment.
       // Abort immediately without rollback to avoid deleting user variables.
       return false
@@ -215,7 +221,8 @@ export const env = {
       try {
         backup = parseBackup(await readFile(backupPath(), 'utf8'))
         await retainCleanupPending()
-      } catch {
+      } catch (error) {
+        if (error instanceof StoreSchemaError) throw error
         // Missing or unreadable backup — cannot restore unknown prior environment
         return false
       }
@@ -230,7 +237,8 @@ export const env = {
       cleanupPending = false
       await broadcastEnvironmentChanged()
       return true
-    } catch {
+    } catch (error) {
+      if (error instanceof StoreSchemaError) throw error
       return false
     }
   },

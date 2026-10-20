@@ -4,6 +4,7 @@ import { androidStudio } from './androidStudio'
 import { gradle } from './gradle'
 import { env } from './env'
 import { git } from './git'
+import { StoreSchemaError } from '../storeSchema'
 
 const targets: Record<string, {
   name: string
@@ -43,11 +44,12 @@ export const autoconfig = {
               }
               break
             }
-          } catch {
+          } catch (error) {
             results[id] = false
             for (const appliedId of Object.keys(results).filter((key) => results[key])) {
               results[appliedId] = await (targets[appliedId]?.rollback() ?? Promise.resolve(false))
             }
+            if (error instanceof StoreSchemaError) throw error
             break
           }
       }
@@ -57,16 +59,19 @@ export const autoconfig = {
 
   async rollback(targetIds: string[]): Promise<Record<string, boolean>> {
     const results: Record<string, boolean> = {}
+    let schemaError: StoreSchemaError | undefined
     for (const id of targetIds) {
       const target = targets[id]
       if (target) {
         try {
           results[id] = await target.rollback()
-        } catch {
+        } catch (error) {
           results[id] = false
+          if (error instanceof StoreSchemaError) schemaError ??= error
         }
       }
     }
+    if (schemaError) throw schemaError
     return results
   },
 
@@ -93,7 +98,7 @@ export const autoconfig = {
       let applied = false
       try {
         applied = await target.isApplied()
-      } catch { /* */ }
+      } catch (error) { if (error instanceof StoreSchemaError) throw error }
       result.push({
         id,
         name: target.name,

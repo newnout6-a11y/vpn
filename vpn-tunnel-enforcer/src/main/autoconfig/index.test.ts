@@ -29,11 +29,32 @@ vi.mock('./git', () => ({ git: targets.git }))
 
 import { autoconfig } from './index'
 import { ConnectionLifecycle } from '../connectionLifecycle'
+import { StoreSchemaError } from '../storeSchema'
 
 describe('autoconfig strict status', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    for (const target of Object.values(targets)) target.isApplied.mockResolvedValue(false)
+    for (const target of Object.values(targets)) {
+      target.isApplied.mockResolvedValue(false)
+      target.apply.mockReset(); target.rollback.mockReset()
+    }
+  })
+
+  // AT-00-006: schema refusal stays explicit without abandoning other cleanup.
+  it('compensates already applied targets before reporting a future backup', async () => {
+    const error = new StoreSchemaError('STORE_SCHEMA_FUTURE')
+    targets.env.apply.mockResolvedValue(true); targets.env.rollback.mockResolvedValue(true)
+    targets.git.apply.mockRejectedValue(error)
+    await expect(autoconfig.apply(['env', 'git'], '127.0.0.1:10808')).rejects.toBe(error)
+    expect(targets.env.rollback).toHaveBeenCalledOnce()
+    expect(targets.git.rollback).not.toHaveBeenCalled()
+  })
+
+  it('continues independent rollback targets before reporting an incompatible backup', async () => {
+    const error = new StoreSchemaError('STORE_SCHEMA_FUTURE')
+    targets.env.rollback.mockRejectedValue(error); targets.git.rollback.mockResolvedValue(true)
+    await expect(autoconfig.rollback(['env', 'git'])).rejects.toBe(error)
+    expect(targets.env.rollback).toHaveBeenCalledOnce(); expect(targets.git.rollback).toHaveBeenCalledOnce()
   })
 
   it.each([true, false, 'error'] as const)('uses actual env endpoint evidence without suppressing read failure: %s (AT-00-005)', async result => {

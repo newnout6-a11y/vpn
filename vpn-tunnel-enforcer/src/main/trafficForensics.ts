@@ -11,6 +11,7 @@ import { logEvent } from './appLogger'
 import { settingsStore } from './settings'
 import { ensureElevatedRuntimeDirHardened, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
+import { assertDocumentSchema } from './storeSchema'
 import {
   createForensicsRedactor,
   redactJsonDocument,
@@ -248,6 +249,7 @@ export function createManifest(
 }
 
 function normalizeManifest(manifest: SessionManifest): SessionManifest {
+  assertDocumentSchema('traffic-forensics', manifest)
   return {
     ...manifest,
     schemaVersion: manifest.schemaVersion ?? MANIFEST_SCHEMA_VERSION,
@@ -309,6 +311,19 @@ async function readJson<T>(path: string): Promise<T | null> {
   }
 }
 
+async function readSessionManifest(path: string): Promise<SessionManifest | null> {
+  try {
+    const value = JSON.parse(await readFile(path, 'utf-8')) as SessionManifest
+    assertDocumentSchema('traffic-forensics', value)
+    return value
+  } catch (error) {
+    // Preserve the existing incomplete-JSON recovery during background writes;
+    // access failures and a parsed incompatible schema must remain explicit.
+    if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+}
+
 async function readSummaryForStatus(path: string | null | undefined): Promise<TrafficForensicsStatus['summary']> {
   if (!path) return null
   const summary = await readJson<any>(path)
@@ -323,6 +338,10 @@ async function readSummaryForStatus(path: string | null | undefined): Promise<Tr
 async function writeManifest(manifest: SessionManifest, assertActive: () => void = () => {}): Promise<void> {
   assertActive()
   const normalized = normalizeManifest(manifest)
+  await checkedForensics(readSessionManifest(getLatestManifestPath()), assertActive)
+  if (normalized.sessionDir) {
+    await checkedForensics(readSessionManifest(join(normalized.sessionDir, 'session-manifest.json')), assertActive)
+  }
   await checkedForensics(ensureLayout(assertActive), assertActive)
   if (normalized.sessionDir) {
     await checkedForensics(writeJson(join(normalized.sessionDir, 'session-manifest.json'), normalized, assertActive), assertActive)
@@ -371,9 +390,12 @@ function assertSessionPaths(manifest: SessionManifest): void {
 }
 
 async function readLatestManifest(): Promise<SessionManifest | null> {
-  const manifest = runtimeState ?? await readJson<SessionManifest>(getLatestManifestPath())
+  // Memory does not grant permission to overwrite a newer persisted document.
+  const persisted = await readSessionManifest(getLatestManifestPath())
+  const manifest = runtimeState ?? persisted
   if (!manifest) return null
   assertSessionPaths(manifest)
+  if (manifest.sessionDir) await readSessionManifest(join(manifest.sessionDir, 'session-manifest.json'))
   return normalizeManifest(manifest)
 }
 
