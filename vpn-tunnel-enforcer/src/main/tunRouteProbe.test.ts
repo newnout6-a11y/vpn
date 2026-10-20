@@ -64,5 +64,5 @@ ${script}`
       return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(fake, 'utf16le').toString('base64')], { windowsHide: true, timeout: 10000, encoding: 'utf8', stdio: 'pipe' })
     })
     expect(await h.run()).toBe(scenario === 'fragmented')
-  })
+  }, 15_000) // Native fixture permits 10s for PowerShell; production dispatch remains 3s.
 })
