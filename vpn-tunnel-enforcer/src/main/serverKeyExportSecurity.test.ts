@@ -8,6 +8,7 @@ import { join } from 'path'
 const state = vi.hoisted(() => ({
   nativePrompt: vi.fn(), saveDialog: vi.fn(), uri: vi.fn(), proxyLine: vi.fn(),
   clipboardText: '', clipboardWrite: vi.fn(),
+  writeAttempt: vi.fn(),
   writeFailure: undefined as unknown,
   onOpened: undefined as ((path: string) => Promise<void>) | undefined,
   beforeOpen: undefined as ((path: string) => void) | undefined,
@@ -34,7 +35,10 @@ vi.mock('fs/promises', async importOriginal => {
     state.beforeOpen?.(String(args[0]))
     const file = await actual.open(...args), write = file.writeFile.bind(file)
     try { await state.onOpened?.(String(args[0])) } catch (error) { await file.close(); throw error }
-    file.writeFile = (...writeArgs) => state.writeFailure ? Promise.reject(state.writeFailure) : write(...writeArgs)
+    file.writeFile = (...writeArgs) => {
+      state.writeAttempt()
+      return state.writeFailure ? Promise.reject(state.writeFailure) : write(...writeArgs)
+    }
     return file
   } }
 })
@@ -192,8 +196,11 @@ describe('main-owned export approval (AT-01-008)', () => {
     state.nativePrompt.mockResolvedValue({ response: 1 })
     state.writeFailure = { message: { malformed: true } }
     await expect(invoke(channel)).rejects.toMatchObject({ category: 'internal', message: 'Не удалось выполнить операцию' })
+    expect(state.writeAttempt).toHaveBeenCalledOnce()
     expect(existsSync(exportPath)).toBe(false)
-  })
+  // Reaching the injected write fault performs the same real PowerShell ACL
+  // preparation as the adjacent file-export cases on Windows CI.
+  }, 15_000)
   it('saves native JSON with a JSON file suggestion and preserves main-owned clipboard handling', async () => {
     const secretJson = JSON.stringify({ remarks: 'Native', outbounds: [{ protocol: 'vless', settings: { id: 'FAKE-PRIVATE-KEY' } }], routing: { balancers: [{ tag: 'bridge' }] } })
     state.uri.mockReturnValue(secretJson)

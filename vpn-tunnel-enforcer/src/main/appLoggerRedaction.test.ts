@@ -26,6 +26,26 @@ const waitForLogContent = async (logPath: string): Promise<string> => {
 }
 
 describe('appLogger topology redaction', () => {
+  it('retains browser failure traceback and context through the production diagnostic producer (AT-00-004/005)', async () => {
+    const { logEvent, getAppLogPath, flushAppLog } = await import('./appLogger')
+    const { classifyIpcError, ipcError } = await import('../shared/ipc-result')
+    const ts = await import('typescript')
+    const source = ts.createSourceFile('browserHardening.ts', readFileSync('src/main/browserHardening.ts', 'utf8'), ts.ScriptTarget.Latest, true)
+    const functions = source.statements.filter(node => ts.isFunctionDeclaration(node)
+      && ['classifyBrowserError', 'recordFailure'].includes(node.name?.text ?? ''))
+    expect(functions).toHaveLength(2)
+    const js = ts.transpileModule(functions.map(node => node.getText(source)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+    const report = new Function('logEvent', 'classifyIpcError', 'ipcError', js + '\nreturn recordFailure;')(logEvent, classifyIpcError, ipcError)
+    const error = new Error('Preference write failed token=PRIVATE-TOKEN')
+    error.stack = error.message + '\n    at writeFile (browserHardening.ts:350:5)\n    at C:\\Users\\PrivateUser\\vpn\\main.js:20:4'
+    report([], 'firefox-preferences', error, { path: 'C:\\Users\\PrivateUser\\Firefox\\user.js' })
+    await flushAppLog()
+    const raw = readFileSync(getAppLogPath(), 'utf8')
+    expect(raw).toContain('firefox-preferences')
+    expect(raw).toContain('Preference write failed')
+    expect(raw).toContain('browserHardening.ts:350:5')
+    expect(raw).not.toMatch(/PRIVATE-TOKEN|PrivateUser/)
+  })
   it('retains subscription cause and failure location while redacting credentials (AT-00-004/005)', async () => {
     const { logEvent, getAppLogPath } = await import('./appLogger')
     const error = new Error('HTTP 403; TLS verification failed; Could not resolve host: private.example.test token=PRIVATE-TOKEN https://sub.example.test/PRIVATE-URL')

@@ -4,11 +4,36 @@ import { execFile as execFileCb } from 'child_process'
 import { existsSync } from 'fs'
 import { copyFile, mkdir, readFile, readdir, unlink, writeFile } from 'fs/promises'
 import { app } from 'electron'
-import { basename, dirname, join } from 'path'
+import { join } from 'path'
 import { promisify } from 'util'
 import { logEvent } from './appLogger'
+import { classifyIpcError, ipcError, type IpcError, type IpcErrorCategory } from '../shared/ipc-result'
 
 const execFile = promisify(execFileCb)
+
+function classifyBrowserError(error: unknown): IpcErrorCategory {
+  // reg.exe has no cancellation signal or custom kill path: this is the
+  // execFile deadline receipt. maxBuffer failures have a distinct string code.
+  if (error && typeof error === 'object' && 'killed' in error && error.killed === true
+    && 'signal' in error && error.signal === 'SIGTERM' && 'code' in error && error.code === null) return 'timeout'
+  return classifyIpcError(error)
+}
+
+function recordFailure(errors: unknown[], step: string, error: unknown, context: Record<string, unknown> = {}, level: 'warn' | 'debug' = 'warn'): string {
+  errors.push(error)
+  // Error.message/stack are non-enumerable; the logger's nested-object path
+  // needs an explicit diagnostic object before its redaction and size bounds.
+  const diagnostic = error instanceof Error ? { ...error, name: error.name, message: error.message, stack: error.stack } : error
+  logEvent(level, 'browser-hardening', 'browser hardening step failed', { step, ...context, error: diagnostic })
+  return ipcError(classifyBrowserError(error)).message
+}
+
+function browserError(errors: unknown[]): IpcError {
+  const categories = errors.map(classifyBrowserError)
+  const category = (['permission', 'timeout', 'cancelled', 'network', 'conflict', 'internal', 'validation'] satisfies IpcErrorCategory[])
+    .find(value => categories.includes(value)) ?? 'internal'
+  return ipcError(category)
+}
 
 interface ChromiumTarget {
   name: string
@@ -122,23 +147,25 @@ async function reg(args: string[]): Promise<{ stdout: string; stderr: string }> 
   }) as Promise<{ stdout: string; stderr: string }>
 }
 
-async function exportKey(key: string, file: string): Promise<string | null> {
+async function exportKey(key: string, file: string, errors: unknown[]): Promise<string | null> {
   try {
     await reg(['export', key, file, '/y'])
     return file
-  } catch {
+  } catch (error) {
+    recordFailure(errors, 'registry-export', error, { key }, 'debug')
     return null
   }
 }
 
-async function queryValue(key: string, value: string): Promise<string | null> {
+async function queryValue(key: string, value: string, errors: unknown[], required = false): Promise<string | null> {
   try {
     const { stdout } = await reg(['query', key, '/v', value])
     const line = stdout.split(/\r?\n/).find(l => l.includes(value))
     if (!line) return null
     const parts = line.trim().split(/\s{2,}/)
     return parts[parts.length - 1] ?? null
-  } catch {
+  } catch (error) {
+    recordFailure(errors, 'registry-query', error, { key }, required ? 'warn' : 'debug')
     return null
   }
 }
@@ -159,7 +186,7 @@ async function writeManifest(manifest: BackupManifest): Promise<void> {
   await writeFile(manifestPath(), JSON.stringify(manifest, null, 2), 'utf8')
 }
 
-async function ensureManifest(policyKeys: string[]): Promise<BackupManifest> {
+async function ensureManifest(policyKeys: string[], backupErrors: Map<string, unknown[]>): Promise<BackupManifest> {
   const manifest = await readManifest() ?? {
     createdAt: Date.now(),
     registryBackups: [],
@@ -170,11 +197,14 @@ async function ensureManifest(policyKeys: string[]): Promise<BackupManifest> {
   const knownKeys = new Set(manifest.registryBackups.map(x => x.key))
   for (const key of policyKeys) {
     if (knownKeys.has(key)) continue
-    const backupPath = await exportKey(key, join(dir, `${safeName(key)}.reg`))
+    const errors: unknown[] = []
+    backupErrors.set(key, errors)
+    const backupPath = await exportKey(key, join(dir, `${safeName(key)}.reg`), errors)
     let safeToModify = Boolean(backupPath)
     if (!backupPath) {
       try { await reg(['query', key, '/v', WEBRTC_POLICY.name]) }
       catch (err: any) {
+        recordFailure(errors, 'registry-backup-query', err, { key }, 'debug')
         safeToModify = /unable to find|не удается найти|не удалось найти/i.test(String(err?.stderr || err?.message || ''))
       }
     }
@@ -222,15 +252,17 @@ async function activeChromiumTargets(): Promise<ChromiumTarget[]> {
 async function applyChromiumPolicy(
   target: ChromiumTarget,
   details: string[],
-  manifest: BackupManifest
-): Promise<{ changed: boolean; confirmedCount: number; unconfirmedCount: number }> {
+  manifest: BackupManifest,
+  backupErrors: Map<string, unknown[]>
+): Promise<{ changed: boolean; confirmedCount: number; unconfirmedCount: number; errors: unknown[] }> {
+  const errors: unknown[] = []
   let changed = false
   let confirmedCount = 0
   let unconfirmedCount = 0
   const verifiedKeys: string[] = []
   for (const key of target.policyKeys) {
     try {
-      const current = await queryValue(key, WEBRTC_POLICY.name)
+      const current = await queryValue(key, WEBRTC_POLICY.name, errors)
       if (current === WEBRTC_POLICY.data) {
         verifiedKeys.push(key)
         confirmedCount++
@@ -238,9 +270,12 @@ async function applyChromiumPolicy(
         continue
       }
       const backup = manifest.registryBackups.find(item => item.key === key)
-      if (!backup?.backupPath && !backup?.safeToModify) throw new Error('Registry backup unavailable; policy unchanged')
+      if (!backup?.backupPath && !backup?.safeToModify) {
+        errors.push(...(backupErrors.get(key) ?? []))
+        throw new Error('Registry backup unavailable; policy unchanged')
+      }
       await reg(['add', key, '/v', WEBRTC_POLICY.name, '/t', WEBRTC_POLICY.type, '/d', WEBRTC_POLICY.data, '/f'])
-      const verified = await queryValue(key, WEBRTC_POLICY.name)
+      const verified = await queryValue(key, WEBRTC_POLICY.name, errors, true)
       if (verified === WEBRTC_POLICY.data) {
         verifiedKeys.push(key)
         confirmedCount++
@@ -250,8 +285,8 @@ async function applyChromiumPolicy(
         unconfirmedCount++
         details.push(`${target.name}: policy ${key}\\${WEBRTC_POLICY.name} write was not confirmed by read-back`)
       }
-    } catch (err: any) {
-      details.push(`${target.name}: не удалось записать policy ${key}: ${err?.message || String(err)}`)
+    } catch (err) {
+      details.push(`${target.name}: не удалось записать policy: ${recordFailure(errors, 'registry-policy', err, { key })}`)
     }
   }
   if (
@@ -260,7 +295,7 @@ async function applyChromiumPolicy(
   ) {
     details.push(`${target.name}: only HKCU WebRTC policy was confirmed; HKLM policy was not confirmed`)
   }
-  return { changed, confirmedCount, unconfirmedCount }
+  return { changed, confirmedCount, unconfirmedCount, errors }
 }
 
 function stringifyJsonLikeOriginal(data: unknown, original: string): string {
@@ -272,8 +307,14 @@ function stringifyJsonLikeOriginal(data: unknown, original: string): string {
   return JSON.stringify(data, null, indent) + (trailingNewline ? '\n' : '')
 }
 
-async function applyChromiumPreferences(target: ChromiumTarget, manifest: BackupManifest, details: string[]): Promise<{ changed: boolean; verified: boolean }> {
-  const paths = await profilePreferencePaths(target)
+async function applyChromiumPreferences(target: ChromiumTarget, manifest: BackupManifest, details: string[]): Promise<{ changed: boolean; verified: boolean; errors: unknown[] }> {
+  const errors: unknown[] = []
+  let paths: string[]
+  try { paths = await profilePreferencePaths(target) }
+  catch (error) {
+    details.push(`${target.name}: профили недоступны: ${recordFailure(errors, 'chromium-profile-discovery', error)}`)
+    return { changed: false, verified: false, errors }
+  }
   let changed = false
   let failed = false
   for (const prefsPath of paths) {
@@ -289,7 +330,7 @@ async function applyChromiumPreferences(target: ChromiumTarget, manifest: Backup
       }
       const after = JSON.stringify(data.webrtc)
       if (before === after) {
-        details.push(`${target.name}: ${basename(dirname(prefsPath))} уже защищён`)
+        details.push(`${target.name}: профиль уже защищён`)
         continue
       }
       await addFileBackup(manifest, prefsPath)
@@ -297,13 +338,13 @@ async function applyChromiumPreferences(target: ChromiumTarget, manifest: Backup
       changed = true
       const verified = JSON.parse(await readFile(prefsPath, 'utf8')).webrtc
       if (verified?.ip_handling_policy !== WEBRTC_POLICY.data || verified.multiple_routes_enabled !== false || verified.nonproxied_udp_enabled !== false) throw new Error('Preferences read-back failed')
-      details.push(`${target.name}: обновлён ${prefsPath}`)
-    } catch (err: any) {
+      details.push(`${target.name}: настройки профиля обновлены`)
+    } catch (err) {
       failed = true
-      details.push(`${target.name}: не удалось обновить ${prefsPath}: ${err?.message || String(err)}`)
+      details.push(`${target.name}: не удалось обновить профиль: ${recordFailure(errors, 'chromium-preferences', err, { path: prefsPath })}`)
     }
   }
-  return { changed, verified: paths.length > 0 && !failed }
+  return { changed, verified: paths.length > 0 && !failed, errors }
 }
 
 function setFirefoxPref(raw: string, key: string, value: string): string {
@@ -322,8 +363,14 @@ async function firefoxUserJsPaths(): Promise<string[]> {
     .map(entry => join(profilesDir, entry.name, 'user.js'))
 }
 
-async function applyFirefoxPreferences(manifest: BackupManifest, details: string[]): Promise<{ changed: boolean; verified: boolean }> {
-  const paths = await firefoxUserJsPaths()
+async function applyFirefoxPreferences(manifest: BackupManifest, details: string[]): Promise<{ changed: boolean; verified: boolean; errors: unknown[] }> {
+  const errors: unknown[] = []
+  let paths: string[]
+  try { paths = await firefoxUserJsPaths() }
+  catch (error) {
+    details.push(`Firefox: профили недоступны: ${recordFailure(errors, 'firefox-profile-discovery', error)}`)
+    return { changed: false, verified: false, errors }
+  }
   let changed = false
   let failed = false
   for (const userJsPath of paths) {
@@ -334,20 +381,20 @@ async function applyFirefoxPreferences(manifest: BackupManifest, details: string
       next = setFirefoxPref(next, 'media.peerconnection.ice.proxy_only_if_behind_proxy', 'true')
       next = setFirefoxPref(next, 'media.peerconnection.enabled', 'false')
       if (next === raw) {
-        details.push(`Firefox: ${basename(dirname(userJsPath))} уже защищён`)
+        details.push('Firefox: профиль уже защищён')
         continue
       }
       await addFileBackup(manifest, userJsPath)
       await writeFile(userJsPath, next, 'utf8')
       changed = true
       if (await readFile(userJsPath, 'utf8') !== next) throw new Error('Preferences read-back failed')
-      details.push(`Firefox: обновлён ${userJsPath}`)
-    } catch (err: any) {
+      details.push('Firefox: настройки профиля обновлены')
+    } catch (err) {
       failed = true
-      details.push(`Firefox: не удалось обновить ${userJsPath}: ${err?.message || String(err)}`)
+      details.push(`Firefox: не удалось обновить профиль: ${recordFailure(errors, 'firefox-preferences', err, { path: userJsPath })}`)
     }
   }
-  return { changed, verified: paths.length > 0 && !failed }
+  return { changed, verified: paths.length > 0 && !failed, errors }
 }
 
 export async function applyBrowserLeakProtection(): Promise<BrowserHardeningResult> {
@@ -357,6 +404,7 @@ export async function applyBrowserLeakProtection(): Promise<BrowserHardeningResu
       changed: false,
       restartRequired: false,
       message: 'Защита браузеров доступна только на Windows',
+      error: ipcError('conflict'),
       details: []
     }
   }
@@ -377,13 +425,15 @@ export async function applyBrowserLeakProtection(): Promise<BrowserHardeningResu
     }
   }
 
-  const manifest = await ensureManifest(targets.flatMap(target => target.policyKeys))
+  const backupErrors = new Map<string, unknown[]>()
+  const manifest = await ensureManifest(targets.flatMap(target => target.policyKeys), backupErrors)
+  const errors: unknown[] = []
   let changed = false
   let allTargetsProtected = true
   let anyUnconfirmed = false
 
   for (const target of targets) {
-    const policyResult = await applyChromiumPolicy(target, details, manifest)
+    const policyResult = await applyChromiumPolicy(target, details, manifest, backupErrors)
     const prefsResult = await applyChromiumPreferences(target, manifest, details)
     changed = changed || policyResult.changed || prefsResult.changed
     if (policyResult.unconfirmedCount > 0) {
@@ -392,16 +442,21 @@ export async function applyBrowserLeakProtection(): Promise<BrowserHardeningResu
     const isTargetProtected = policyResult.confirmedCount > 0 || prefsResult.verified
     if (!isTargetProtected) {
       allTargetsProtected = false
+      errors.push(...policyResult.errors, ...prefsResult.errors)
     }
   }
   const firefoxResult = await applyFirefoxPreferences(manifest, details)
   changed = firefoxResult.changed || changed
-  if (firefoxPaths.length > 0 && !firefoxResult.verified) allTargetsProtected = false
+  if ((firefoxPaths.length > 0 || firefoxResult.errors.length > 0) && !firefoxResult.verified) {
+    allTargetsProtected = false
+    errors.push(...firefoxResult.errors)
+  }
 
   const success = allTargetsProtected
 
   const result = {
     success,
+    ...(!success ? { error: browserError(errors) } : {}),
     changed,
     restartRequired: changed || success,
     message: !success
@@ -424,6 +479,7 @@ export async function rollbackBrowserLeakProtection(): Promise<BrowserHardeningR
       changed: false,
       restartRequired: false,
       message: 'Откат защиты браузеров доступен только на Windows',
+      error: ipcError('conflict'),
       details: []
     }
   }
@@ -435,11 +491,13 @@ export async function rollbackBrowserLeakProtection(): Promise<BrowserHardeningR
       changed: false,
       restartRequired: false,
       message: 'Backup защиты браузеров не найден',
+      error: ipcError('conflict'),
       details: []
     }
   }
 
   const details: string[] = []
+  const errors: unknown[] = []
   let failed = false
   for (const item of manifest.registryBackups) {
     try {
@@ -451,40 +509,46 @@ export async function rollbackBrowserLeakProtection(): Promise<BrowserHardeningR
       }
       if (item.backupPath && existsSync(item.backupPath)) {
         await reg(['import', item.backupPath])
-        details.push(`Registry восстановлен: ${item.key}`)
+        details.push('Registry восстановлен из backup')
       } else {
-        details.push(`Registry policy удалена: ${item.key}\\${WEBRTC_POLICY.name}`)
+        details.push('Registry policy удалена')
       }
-    } catch (err: any) {
+    } catch (err) {
       failed = true
-      details.push(`Не удалось восстановить registry ${item.key}: ${err?.message || String(err)}`)
+      details.push(`Не удалось восстановить registry: ${recordFailure(errors, 'registry-restore', err, { key: item.key })}`)
     }
   }
   for (const item of manifest.fileBackups) {
     try {
       if (item.existed && (!item.backupPath || !existsSync(item.backupPath))) {
         failed = true
-        details.push(`Skipped restore for existing file without backup: ${item.path}`)
+        recordFailure(errors, 'file-restore-backup-missing', new Error('Existing file backup missing'), { path: item.path })
+        details.push('Skipped restore for existing file without backup; backup сохранён')
         continue
       }
       if (item.existed && item.backupPath && existsSync(item.backupPath)) {
         await copyFile(item.backupPath, item.path)
-        details.push(`Файл восстановлен: ${item.path}`)
+        details.push('Файл профиля восстановлен')
       } else {
         try { await unlink(item.path) } catch (err: any) { if (err?.code !== 'ENOENT') throw err }
-        details.push(`Файл удалён: ${item.path}`)
+        details.push('Созданный файл профиля удалён')
       }
-    } catch (err: any) {
+    } catch (err) {
       failed = true
-      details.push(`Не удалось восстановить ${item.path}: ${err?.message || String(err)}`)
+      details.push(`Не удалось восстановить файл профиля: ${recordFailure(errors, 'file-restore', err, { path: item.path })}`)
     }
   }
   if (!failed) {
-    try { await unlink(manifestPath()) } catch { failed = true }
+    try { await unlink(manifestPath()) }
+    catch (error) {
+      failed = true
+      details.push(`Не удалось удалить журнал отката: ${recordFailure(errors, 'manifest-delete', error)}`)
+    }
   }
 
   const result = {
     success: !failed,
+    ...(failed ? { error: browserError(errors) } : {}),
     changed: true,
     restartRequired: true,
     message: failed ? 'Откат завершён не полностью. Backup сохранён; повторите попытку.' : 'Защита браузеров откатана из backup. Полностью перезапустите браузеры.',
