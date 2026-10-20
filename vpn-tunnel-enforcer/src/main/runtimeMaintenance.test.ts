@@ -68,7 +68,7 @@ describe('runtime maintenance domain results', () => {
     const h = harness()
     const receipt = { success: false, candidates: 2, killed: 1, names: ['vpnte-xray.exe'], error: ipcError('internal') }
     h.killOwnedTunRuntimeProcesses.mockResolvedValue(receipt)
-    expect(await h.invoke('tun:kill-stale-singbox')).toMatchObject({ ok: true, result: { ...receipt, message: ipcError('internal').message } })
+    expect(await h.invoke('tun:kill-stale-singbox')).toMatchObject({ ok: true, result: { ...receipt, message: 'Завершены процессы VPNTE runtime: 1 из 2. Не все процессы остановлены; повторите очистку.' } })
   })
   it('retains a confirmed empty runtime receipt', async () => {
     const h = harness()

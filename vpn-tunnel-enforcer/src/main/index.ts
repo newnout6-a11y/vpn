@@ -2540,7 +2540,9 @@ app.whenReady().then(async () => {
     const result = await killOwnedTunRuntimeProcesses()
     return {
       ...result,
-      message: !result.success ? result.error.message : result.killed > 0
+      message: !result.success ? result.killed !== undefined && result.candidates !== undefined
+        ? `Завершены процессы VPNTE runtime: ${result.killed} из ${result.candidates}. Не все процессы остановлены; повторите очистку.`
+        : result.error.message : result.killed > 0
         ? `Завершены процессы VPNTE runtime: ${result.killed}`
         : 'Зависшие процессы VPNTE runtime не найдены'
     }

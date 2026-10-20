@@ -16,7 +16,7 @@ beforeEach(() => {
     runRoutingSelfTest: vi.fn(() => new Promise((resolve, reject) => { resolveRoute = resolve; rejectRoute = reject })) }
   Object.assign(window, { electronAPI: api })
 })
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.restoreAllMocks() })
 async function start() {
   const view = render(<Maintenance />)
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Проверить защиту' })) })
@@ -136,4 +136,36 @@ it.each(['dns', 'leak', 'cancelled'])('retains %s evidence in Maintenance result
   expect(state.globalToasts.at(-1)?.description).toContain(expected)
   expect(state.logs.at(-1)?.message).toContain(expected)
   view.unmount()
+})
+
+// AT-00-004/008: TUN may start after the page's initial preflight.
+it.each(['firewall', 'network-baseline', 'adapter-lockdown', 'runtime', 'partial-runtime', 'failure'])('shows honest auto-repair outcome for %s', async scenario => {
+  vi.spyOn(window, 'confirm').mockReturnValue(true)
+  api.getTunStatus.mockResolvedValue({ running: false })
+  const refusal = { success: false, blocked: true, skipped: true, error: ipcError('conflict'), message: 'Отключите VPN перед починкой' }
+  const partial = { success: false, error: ipcError('internal'), candidates: 2, killed: 1, names: ['vpnte-xray.exe'],
+    message: 'Завершены процессы VPNTE runtime: 1 из 2. Не все процессы остановлены; повторите очистку.' }
+  const results: Record<string, unknown> = { firewall: { success: true }, 'network-baseline': { success: true },
+    'adapter-lockdown': { rolledBack: true }, runtime: { success: true, candidates: 0, killed: 0, names: [] } }
+  results[scenario === 'partial-runtime' || scenario === 'failure' ? 'runtime' : scenario] = scenario === 'partial-runtime' ? partial
+    : scenario === 'failure' ? { success: false, error: ipcError('permission'), message: ipcError('permission').message } : refusal
+  Object.assign(api, {
+    firewallRepairVpnteRules: vi.fn(async () => results.firewall), rollbackTunNetworkBaseline: vi.fn(async () => results['network-baseline']),
+    rollbackAdapterLockdown: vi.fn(async () => results['adapter-lockdown']), repairOrphanedDns: vi.fn(async () => ({ repaired: false, adapters: [] })),
+    killStaleSingbox: vi.fn(async () => results.runtime), runSystemDiagnostics: vi.fn(async () => ({ items: [] })),
+    firewallRepairHealth: vi.fn(async () => ({ summary: 'ok', services: [], profiles: [], recommendedActions: [], ourRuleCount: 0 }))
+  })
+  render(<Maintenance />)
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Починить$/ })) })
+  const state = useAppStore.getState(), failed = ['partial-runtime', 'failure'].includes(scenario)
+  const step = state.maintenanceRepairSteps?.find(step => step.id === (failed ? 'runtime' : scenario))
+  expect(step?.status).toBe(failed ? 'fail' : 'warn')
+  expect(state.maintenanceLastResult).toBe(failed ? 'Авто-починка завершена с ошибками' : 'Авто-починка завершена с предупреждениями')
+  expect(state.globalToasts.at(-1)?.variant).toBe('warning')
+  if (!failed) expect(state.logs.some(log => log.level === 'error')).toBe(false)
+  if (scenario === 'partial-runtime') {
+    expect(step?.detail).toContain('1 из 2')
+    expect(screen.getByText(partial.message)).toBeTruthy()
+    expect(state.logs.some(log => log.level === 'error' && log.message.includes('1 из 2'))).toBe(true)
+  }
 })
