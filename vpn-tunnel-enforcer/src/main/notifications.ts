@@ -17,10 +17,12 @@
  *    button so the in-app toggle stays honest.
  */
 import { Notification, app } from 'electron'
-import { exec } from 'child_process'
+import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { logEvent } from './appLogger'
 import { settingsStore } from './settings'
+import type { NotificationResetReport } from '../shared/ipc-types'
+import { classifyIpcError, ipcError, IpcFault } from '../shared/ipc-result'
 
 export type NotificationLevel = 'info' | 'warn' | 'error'
 
@@ -96,6 +98,7 @@ interface OsNotificationState {
 
 let _osState: OsNotificationState | null = null
 let _osStateTs = 0
+let osStateRevision = 0
 const OS_STATE_TTL_MS = 30_000
 
 /**
@@ -121,46 +124,68 @@ function candidateModelIds(): string[] {
  * We try every known candidate AppUserModelID for this app and return the
  * first match.  If none is found we assume notifications are enabled.
  */
-const execAsync = promisify(exec)
+const execFileAsync = promisify(execFile)
+
+// reg.exe uses the OEM code page on Russian Windows. Keep original bytes:
+// decoding them as UTF-8 first would erase the evidence of a missing value.
+function registryErrorText(value: unknown): string {
+  if (!Buffer.isBuffer(value)) return String(value ?? '')
+  return [value.toString('utf8'), new TextDecoder('ibm866').decode(value), new TextDecoder('windows-1251').decode(value)].join('\n')
+}
+
+function isMissingRegistryValue(error: unknown): boolean {
+  const e = error as { code?: unknown; killed?: boolean; signal?: unknown; stderr?: unknown }
+  return e?.code === 1 && !e.killed && !e.signal &&
+    /unable to find the specified registry key or value|cannot find the specified registry key or value|не удается найти указанный раздел или параметр|не удалось найти указанный раздел или параметр/i.test(registryErrorText(e.stderr))
+}
+
+function registryFault(error: unknown): unknown {
+  const e = error as { code?: unknown; killed?: boolean; signal?: unknown; stderr?: unknown }
+  if (e?.killed && e.signal === 'SIGTERM') return new IpcFault('timeout')
+  if (e?.code === 1 && /access is denied|отказано в доступе/i.test(registryErrorText(e.stderr))) return new IpcFault('permission')
+  return error
+}
+
+function registryPath(modelId: string): string {
+  return `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\${modelId}`
+}
+
+async function readNotificationEnabled(modelId: string): Promise<number | null> {
+  try {
+    const { stdout } = await execFileAsync('reg.exe', ['query', registryPath(modelId), '/v', 'Enabled'], { timeout: 3000, windowsHide: true, encoding: 'buffer' })
+    const match = stdout.toString('utf8').match(/Enabled\s+REG_DWORD\s+(0x[0-9a-f]+)\s*(?:$|[\r\n])/i)
+    if (!match) throw new Error('Invalid notification registry value')
+    return parseInt(match[1], 16)
+  } catch (error) {
+    if (isMissingRegistryValue(error)) return null
+    logEvent('warn', 'notify', 'notification registry read failed', error)
+    throw registryFault(error)
+  }
+}
 
 export async function getWindowsNotificationState(): Promise<OsNotificationState> {
+  if (process.platform !== 'win32') return { enabled: true, appUserModelId: null }
   const now = Date.now()
-  if (_osState && now - _osStateTs < OS_STATE_TTL_MS) {
-    return _osState
-  }
-
-  // Default: enabled
+  const revision = osStateRevision
+  if (_osState && now - _osStateTs < OS_STATE_TTL_MS) return _osState
   const result: OsNotificationState = { enabled: true, appUserModelId: null }
-
   for (const modelId of candidateModelIds()) {
-    const regPath = `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\${modelId}`
-    try {
-      const { stdout } = await execAsync(
-        `reg query "${regPath}" /v Enabled`,
-        { timeout: 3000, windowsHide: true }
-      )
-      // reg output looks like:
-      //   "...\Settings\vpn-tunnel-enforcer\r\n    Enabled    REG_DWORD    0x0"
-      const match = stdout.match(/Enabled\s+REG_DWORD\s+(0x[0-9a-f]+)/i)
-      if (match) {
-        const value = parseInt(match[1], 16)
-        result.enabled = value !== 0
-        result.appUserModelId = modelId
-        break
-      }
-    } catch {
-      // Key doesn't exist → Windows default (enabled), try next candidate
-      continue
-    }
+    const value = await readNotificationEnabled(modelId)
+    if (value === null) continue
+    result.enabled = value !== 0
+    result.appUserModelId = modelId
+    break
   }
-
-  _osState = result
-  _osStateTs = now
+  if (revision === osStateRevision) {
+    _osState = result
+    _osStateTs = now
+  }
   return result
 }
 
 /** Invalidate the cached OS state so the next call re-reads the registry. */
 export function invalidateOsNotificationStateCache(): void {
+  ++osStateRevision
   _osState = null
   _osStateTs = 0
 }
@@ -180,42 +205,29 @@ export function invalidateOsNotificationStateCache(): void {
  * repopulate our entry the next time we show a toast.
  *
  * Returns the list of AUMIDs that were cleared (empty if no block existed)
- * and any non-"key not found" errors. Never throws — the caller can show
+ * and canonical per-AUMID errors. The caller can show
  * a friendly result regardless of registry state.
  */
-export async function resetWindowsNotificationBlock(): Promise<{ cleared: string[]; errors: string[] }> {
-  if (process.platform !== 'win32') return { cleared: [], errors: [] }
-  const cleared: string[] = []
-  const errors: string[] = []
+export async function resetWindowsNotificationBlock(): Promise<NotificationResetReport> {
+  const report: NotificationResetReport = { cleared: [], errors: [] }
+  if (process.platform !== 'win32') return report
   for (const modelId of candidateModelIds()) {
-    const regPath = `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\${modelId}`
     try {
-      const { stdout } = await execAsync(
-        `reg query "${regPath}" /v Enabled`,
-        { timeout: 3000, windowsHide: true }
-      )
-      const match = stdout.match(/Enabled\s+REG_DWORD\s+(0x[0-9a-f]+)/i)
-      if (!match || parseInt(match[1], 16) !== 0) continue
-      // Delete only the block value. /va would also erase a current build's
-      // explicit Enabled=1 allow-state and unrelated Windows notification
-      // preferences under the same AUMID.
-      await execAsync(
-        `reg delete "${regPath}" /v Enabled /f`,
-        { timeout: 5000, windowsHide: true }
-      )
-      cleared.push(modelId)
-    } catch (err: any) {
-      // Most failures here are "key not found" — totally fine, treat as a
-      // no-op since the user wasn't blocked under this AUMID anyway.
-      const msg = err?.stderr?.toString?.() || err?.message || String(err)
-      if (!/cannot find/i.test(msg) && !/unable to find/i.test(msg)) {
-        errors.push(`${modelId}: ${msg.slice(0, 120)}`)
-      }
+      if (await readNotificationEnabled(modelId) !== 0) continue
+      // Delete only Enabled: retain explicit allow-state and unrelated values.
+      await execFileAsync('reg.exe', ['delete', registryPath(modelId), '/v', 'Enabled', '/f'], { timeout: 5000, windowsHide: true, encoding: 'buffer' })
+      report.cleared.push(modelId)
+    } catch (error) {
+      // A concurrent deletion already removed the block. Other errors remain
+      // evidence even when a different candidate was successfully cleared.
+      if (isMissingRegistryValue(error)) continue
+      logEvent('warn', 'notify', 'notification reset diagnostic', error)
+      report.errors.push({ appUserModelId: modelId, error: ipcError(classifyIpcError(registryFault(error))) })
     }
   }
   invalidateOsNotificationStateCache()
-  logEvent('info', 'notify', 'reset Windows notification block', { cleared, errors })
-  return { cleared, errors }
+  logEvent(report.errors.length ? 'warn' : 'info', 'notify', 'reset Windows notification block', report)
+  return report
 }
 
 // ─── Notify ─────────────────────────────────────────────────────────────────

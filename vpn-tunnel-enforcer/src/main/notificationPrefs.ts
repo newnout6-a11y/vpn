@@ -17,7 +17,7 @@ import { ipcMain, shell } from 'electron'
 import Store from './versionedStore'
 import { getWindowsNotificationState, resetWindowsNotificationBlock, setNotificationPrefsProvider } from './notifications'
 import type { NotificationPreferences } from '../shared/ipc-types'
-import { requirePlainObject } from './ipcValidation'
+import { requirePlainObject, IpcValidationError } from './ipcValidation'
 
 // ─── Event type mapping ──────────────────────────────────────────────────────
 
@@ -85,7 +85,7 @@ function validatePrefsPatch(value: unknown): Partial<NotificationPreferences> {
   const raw = requirePlainObject(value, 'notification preferences')
   const allowed = new Set([...Object.keys(DEFAULT_PREFS)])
   for (const key of Object.keys(raw)) {
-    if (!allowed.has(key)) throw new Error(`Invalid notification preference: ${key}`)
+    if (!allowed.has(key)) throw new IpcValidationError(`Invalid notification preference: ${key}`)
   }
   const result: Partial<NotificationPreferences> = {}
   const booleanKeys: Array<Exclude<keyof NotificationPreferences, 'method'>> = [
@@ -99,12 +99,12 @@ function validatePrefsPatch(value: unknown): Partial<NotificationPreferences> {
   ]
   for (const key of booleanKeys) {
     if (raw[key] === undefined) continue
-    if (typeof raw[key] !== 'boolean') throw new Error(`Invalid notification preference: ${key} must be boolean`)
+    if (typeof raw[key] !== 'boolean') throw new IpcValidationError(`Invalid notification preference: ${key} must be boolean`)
     result[key] = raw[key] as boolean
   }
   if (raw.method !== undefined) {
     if (raw.method !== 'system' && raw.method !== 'inapp' && raw.method !== 'both') {
-      throw new Error('Invalid notification preference: method')
+      throw new IpcValidationError('Invalid notification preference: method')
     }
     result.method = raw.method
   }
@@ -129,37 +129,16 @@ export function registerNotificationPrefsIpcHandlers(): void {
   })
 
   ipcMain.handle('notifications:check-os-state', async () => {
-    try {
-      const state = await getWindowsNotificationState()
-      return { osNotificationsEnabled: state.enabled, appUserModelId: state.appUserModelId }
-    } catch {
-      return { osNotificationsEnabled: true, appUserModelId: null }
-    }
+    const state = await getWindowsNotificationState()
+    return { osNotificationsEnabled: state.enabled, appUserModelId: state.appUserModelId }
   })
 
-  // Clear the Windows-side notification block (the registry "Enabled = 0"
-  // that Windows sets when the user clicks "Don't show notifications" on a
-  // toast). Returns a structured result — never throws to the renderer, so
-  // the UI can show a single friendly outcome regardless of registry state.
-  ipcMain.handle('notifications:reset-os-block', async () => {
-    try {
-      const result = await resetWindowsNotificationBlock()
-      return { ok: true as const, cleared: result.cleared, errors: result.errors }
-    } catch (err: any) {
-      return { ok: false as const, error: String(err?.message || err) }
-    }
-  })
+  // Partial reset retains cleared AUMIDs and canonical per-AUMID failures.
+  // Unexpected failures reject through the shared IPC boundary.
+  ipcMain.handle('notifications:reset-os-block', () => resetWindowsNotificationBlock())
 
-  // Open Windows' built-in Notifications settings page so the user can
-  // double-check the per-app entry (or unblock manually if our automated
-  // reset somehow wasn't enough). ms-settings: URIs are handled by the
-  // shell on Windows 10/11.
   ipcMain.handle('notifications:open-windows-settings', async () => {
-    try {
-      await shell.openExternal('ms-settings:notifications')
-      return { ok: true as const }
-    } catch (err: any) {
-      return { ok: false as const, error: String(err?.message || err) }
-    }
+    await shell.openExternal('ms-settings:notifications')
+    return { ok: true as const }
   })
 }

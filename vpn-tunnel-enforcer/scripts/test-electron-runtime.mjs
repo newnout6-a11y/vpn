@@ -85,13 +85,22 @@ try {
       builder.onLoad({ filter: /.*/, namespace: 'url-native' }, ({ path }) => ({ loader: 'js', contents: boundaries[path] }))
     } }]
   })
+  await build({ entryPoints: [join(root, 'scripts/fixtures/notifications-native.ts')],
+    outfile: join(work, 'notifications.cjs'), bundle: true, platform: 'node', format: 'cjs', external: ['electron', 'koffi'],
+    plugins: [{ name: 'controlled-notification-registry', setup(builder) {
+      builder.onResolve({ filter: /^child_process$/ }, args => args.importer.endsWith('notifications.ts')
+        ? { path: 'reg', namespace: 'notifications-native' } : undefined)
+      builder.onLoad({ filter: /.*/, namespace: 'notifications-native' }, () => ({ loader: 'js', contents:
+        'export const execFile=()=>{throw new Error("Use promisified registry boundary")};execFile[Symbol.for("nodejs.util.promisify.custom")]=(...args)=>globalThis.vpnteNotificationReg(...args)' }))
+    } }]
+  })
   const env = { ...process.env }
   delete env.ELECTRON_RUN_AS_NODE
   delete env.NODE_ENV // No unit-test escape or test cipher in this native smoke.
   env.VPNTE_SMOKE_DIR = work
   env.VPNTE_SMOKE_PRELOAD = join(root, 'out/preload/index.js')
   env.VPNTE_SMOKE_VERSION = require('../package.json').devDependencies.electron
-  for (const [fixture, marker] of [['main.cjs', 'ELECTRON_SMOKE_PASS'], ['speed-ui.cjs', 'SPEED_UI_NATIVE_PASS'], ['requester.cjs', 'REQUEST_DOCUMENT_NATIVE_PASS'], ['config-request.cjs', 'CONFIG_REQUEST_NATIVE_PASS'], ['server-request.cjs', 'SERVER_REQUEST_NATIVE_PASS'], ['diagnostics-request.cjs', 'DIAGNOSTICS_REQUEST_NATIVE_PASS'], ['url-probe.cjs', 'URL_PROBE_NATIVE_PASS']]) {
+  for (const [fixture, marker] of [['main.cjs', 'ELECTRON_SMOKE_PASS'], ['notifications.cjs', 'NOTIFICATIONS_NATIVE_PASS'], ['speed-ui.cjs', 'SPEED_UI_NATIVE_PASS'], ['requester.cjs', 'REQUEST_DOCUMENT_NATIVE_PASS'], ['config-request.cjs', 'CONFIG_REQUEST_NATIVE_PASS'], ['server-request.cjs', 'SERVER_REQUEST_NATIVE_PASS'], ['diagnostics-request.cjs', 'DIAGNOSTICS_REQUEST_NATIVE_PASS'], ['url-probe.cjs', 'URL_PROBE_NATIVE_PASS']]) {
     const result = spawnSync(require('electron'), [join(work, fixture)], {
       cwd: root, env, encoding: 'utf8', windowsHide: true, timeout: 60_000
     })

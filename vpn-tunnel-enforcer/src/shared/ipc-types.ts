@@ -1,3 +1,4 @@
+import type { IpcError } from './ipc-result'
 import type { IpcJsonValue } from './json'
 import type { ConnectionProvenance } from './connection-provenance'
 
@@ -824,6 +825,12 @@ export interface DomainRule {
 }
 
 /** Notification preferences */
+/** Partial registry reset evidence; failures never contain raw command output. */
+export interface NotificationResetReport {
+  cleared: string[]
+  errors: Array<{ appUserModelId: string; error: IpcError }>
+}
+
 export interface NotificationPreferences {
   vpnConnect: boolean
   vpnDisconnect: boolean
