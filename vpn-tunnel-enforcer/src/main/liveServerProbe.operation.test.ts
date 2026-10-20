@@ -41,7 +41,7 @@ vi.mock('child_process', async original => ({ ...await original<typeof import('c
   const child = Object.assign(new EventEmitter(), { pid: 12001, stdout: Object.assign(new EventEmitter(), { destroy: vi.fn() }), stderr: Object.assign(new EventEmitter(), { destroy: vi.fn() }), kill: vi.fn() })
   state.children.push(child); return child
 } }))
-import { collectSplitTunnelDiagnostics, probeInfrastructure, registerLiveServerProbeIpcHandlers, runLiveServerCheck } from './liveServerProbe'
+import { collectSplitTunnelDiagnostics, probeInfrastructure, registerLiveServerProbeIpcHandlers, runLiveServerBatchCheck, runLiveServerCheck } from './liveServerProbe'
 import { operations } from './operations'
 import { withCorrelation } from './actionCorrelation'
 const flush = async () => { for (let i = 0; i < 60; i++) await Promise.resolve() }
@@ -62,7 +62,7 @@ async function drainFixtures() {
 }
 beforeEach(() => {
   vi.useFakeTimers(); operations.resumeAdmission(); state.sockets = []; state.requests = []; state.children = []
-  state.save.mockClear(); state.a.mockReset().mockResolvedValue([]); state.aaaa.mockReset().mockResolvedValue([])
+  state.save.mockReset(); state.a.mockReset().mockResolvedValue([]); state.aaaa.mockReset().mockResolvedValue([])
   state.profiles = []; state.ready.mockReset().mockResolvedValue(undefined); state.rm.mockReset().mockResolvedValue(undefined)
   state.geo.mockReset()
 })
@@ -154,6 +154,19 @@ describe('root live-check ownership', () => {
     const record = operations.list().find(operation => operation.operationKey === result.value?.id)
     expect(record).toMatchObject({ status: 'success' })
     controller.abort(); await flush(); expect(record?.status).toBe('success'); expect(state.save).toHaveBeenCalledOnce()
+  })
+  it('keeps an already committed check in a cancelled batch receipt without late progress', async () => {
+    const controller = new AbortController(), progress = vi.fn()
+    state.profiles = [{ id: 'target', server: 'probe.example', port: 80 }]
+    // Cancellation inside the synchronous commit loses to that completed commit.
+    state.save.mockImplementationOnce(() => controller.abort())
+    const result = observe(runLiveServerBatchCheck({ profileIds: ['target'], mode: 'basic' }, controller.signal, progress))
+    await drainFixtures()
+    expect(result.error).toBeUndefined(); expect(result.settled).toBe(true)
+    expect(state.save).toHaveBeenCalledOnce()
+    expect(result.value).toMatchObject({ cancelled: true, errors: [] })
+    expect(result.value?.results).toEqual([state.save.mock.calls[0][0]])
+    expect(progress.mock.calls.some(([event]) => event.status === 'completed')).toBe(false)
   })
 })
 it.each([

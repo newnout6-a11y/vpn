@@ -61,6 +61,7 @@
     "speedTestLast": "Last speed test"
   },
   "liveCheck": {
+    "preparing": "Preparing check…",
     "handshakeProbeDurationLabel": "Time to first TCP connection:",
     "handshakeProbeDurationNote": "Probe timing, not VPN startup time.",
     "handshakeProbeDurationTitle": "Measured from handshake-probe start until the first successful TCP CONNECT. The probe uses the selected profile; if it is already active, the running tunnel is reused, so VPN startup is not measured."

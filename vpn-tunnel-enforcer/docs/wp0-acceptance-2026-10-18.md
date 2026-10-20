@@ -1968,3 +1968,69 @@ integration37/37,coverage/diff passed. Старый CI39356680659 success;
   targeted64/64,integration37/37,coverage927/927,210/210,diff0.
   Во время full изменены только AT labels в двух tests,без изменения поведения.
   Commit/PR и exact-head Qodo/Revix/CI —следующий gate.
+
+- PR #94 initial813c4a6:Qodo1559260 completed,2 informational findings.
+  Attribution не менялся. Snapshot .tmp/qodo94-initial.json.
+  (1) Quick cancel/restart может дать typed conflict до physical drain:это
+  преднамеренный bounded admission,покрытый sender-limit tests single/batch×
+  cancel/deadline. Он не означает успешный новый запуск;ресурсы остаются owned,
+  после drain retry допускается. Это информационное UX-ограничение,а не основание
+  убирать safety limit. (2) Cancel между child commit и batch continuation терял
+  уже сохранённый receipt из batch result —воспроизведено и исправлено:возвращённый
+  committed child остаётся в receipt,последующий progress и новый child подавлены.
+- Revix118424075836 Needs changes:новый preparing text без i18n (issue) и sync act
+  в новых tests (suggestion). Добавлен liveCheck.preparing в ru/en,используется t();
+  listener updates ожидают async act. Два locale tests используют настоящий i18n.
+  Объединённый red:2 failed/31 passed (.tmp/wp0-live-document-review-red.log),
+  английская локаль и committed receipt. После fix targeted6 suites67/67,9.38s,
+  exit0 (.tmp/wp0-live-document-review-targeted.log).
+- Review follow-up:npm.cmd run build —exit0,typecheck165/0any
+  (.tmp/wp0-live-document-review-build.log);explicit integration37/37,2.27s,exit0
+  (.tmp/wp0-live-document-review-integration.log);coverage927/927,210/210,diff0.
+  Playwright updated preparing ru/light,en/dark проверены на actual i18n+CSS,
+  output/playwright/wp0-live-preparing-*.png;stand/browser остановлены.
+  Новый full выполняется;исправления ещё не приняты новым exact-head review/CI.
+
+- Initial CI39360106142 на813c4a6 failure:bootRecoveryExecution.test.ts266
+  (corrupt trusted firewall) превысил outer Vitest5000ms. Native helper уже имеет
+  timeout15000ms;describe budget согласован до20000ms,assertions не менялись.
+  Лог .tmp/wp0-live-document-initial-ci-failed.log. Следующий SHA требует нового CI.
+- Review full после длительной паузы выполнения завершился exit1:5038 passed/
+  5 skipped/2 failed,6451.15s. lifecycleCleanup resolver case и configIpcErrors
+  private-export PowerShell boundary каждый получили около6046s. Это observed
+  elapsed gap,причина паузы на уровне ОС не установлена;PASS не заявлен.
+  Лог .tmp/wp0-live-document-review-full.log. Их test budgets не изменялись.
+  Повтор targeted и новый полный прогон запущены после паузы.
+
+- После паузы npm.cmd test -- src/main/bootRecoveryExecution.test.ts
+  src/main/lifecycleCleanup.test.ts src/main/configIpcErrors.test.ts —252/252,
+  3 suites,54.05s,exit0 (.tmp/wp0-live-document-ci-regressions.log).
+  npm.cmd run build повторно exit0,typecheck165/0any,
+  .tmp/wp0-live-document-final-build.log. Source/test tree frozen для full.
+
+- Final full (maxWorkers2) без длительной паузы:exit1,5038 passed/5 skipped/
+  2 failed,304.42s (.tmp/wp0-live-document-final-full.log). Оба —native CIM
+  failure fixtures adaptiveNetworkIdentity.test.ts92:10465/10436ms против outer5s;
+  runNative уже имел30s process timeout. Только этой группе дан outer35s,
+  assertion fixture failure и production budgets не менялись. Targeted25/25,
+  3.23s,exit0 (.tmp/wp0-live-document-cim-regressions.log). Новый full идёт
+  с --maxWorkers=1;это обычный прежний режим полного локального прогона.
+
+- Продолжение после interruption:handle23165 отсутствует,Win32_Process не показывает
+  живых vitest;final2 log обрывается без итогового отчёта. Прогон не засчитан.
+  Новый full запущен с --maxWorkers=1 в .tmp/wp0-live-document-final3-full.log;
+  exit отдельно фиксируется в .tmp/wp0-live-document-final3-exit.txt.
+
+- Final3 full завершился exit1:5039 passed/5 skipped/1 failed,322.15s.
+  Осталась другая группа того же30s helper:adaptiveNetworkIdentity neither
+  identity fixture10563ms против outer5000ms. Ей также дан35s runner budget,
+  как уже было у последнего native fixture в этом файле. Assertion unchanged.
+  .tmp/wp0-live-document-final3-full.log;новый full final4 выполняется.
+
+- Review final local: npm.cmd test -- --maxWorkers=1 —5040 passed/5 skipped/
+  0 failed,304 files passed/2 skipped,334.55s,exit0
+  (.tmp/wp0-live-document-final4-full.log,отдельный exit marker0).
+  Build/typecheck165/0any,targeted67/67,integration37/37,
+  timeout-suite repetition252/252,CIM25/25,coverage927/927,210/210,diff0.
+  Source/test tree не менялся во время успешного full. Новый SHA ещё требует
+  completed Qodo,разбора Revix и CI success.

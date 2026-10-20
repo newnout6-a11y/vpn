@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LiveServerBatchComparison } from './LiveServerBatchComparison'
 import { ipcError } from '../../shared/ipc-result'
+import i18n from '../i18n'
 import type { LiveServerBatchCheckProgress, LiveServerBatchCheckResult, ServerProfile } from '../../shared/ipc-types'
 
 const profiles = [{ id: 'p1', name: 'Fixture server', server: 'fixture.invalid', port: 443 }] as ServerProfile[]
@@ -23,7 +24,8 @@ const progress = (requestId: string, sequence: number, stage: 'dns' | 'tls' = 'd
   requestId, sequence, profileId: 'p1', index: 0, total: 1, status: 'running', stage
 })
 
-beforeEach(() => {
+beforeEach(async () => {
+  await i18n.changeLanguage('ru')
   unsubscribe = vi.fn()
   api = {
     serverLiveCheckBatch: vi.fn(), serverLiveCheckCancel: vi.fn().mockResolvedValue({ cancelled: true }),
@@ -34,6 +36,13 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('AT-00-003 / AT-00-004: batch request lifetime', () => {
+  it.each([['en', 'Preparing check…'], ['ru', 'Подготовка проверки…']])('localizes preparation in %s', async (locale, label) => {
+    await i18n.changeLanguage(locale)
+    api.serverLiveCheckBatch.mockReturnValue(new Promise(() => {}))
+    render(<LiveServerBatchComparison open profiles={profiles} onClose={vi.fn()} />)
+    start()
+    expect(screen.getByRole('status')).toHaveTextContent(label)
+  })
   it('owns a UUID and offers cancel before the first progress event', async () => {
     api.serverLiveCheckBatch.mockReturnValue(new Promise(() => {}))
     render(<LiveServerBatchComparison open profiles={profiles} onClose={vi.fn()} />)
@@ -51,14 +60,14 @@ describe('AT-00-003 / AT-00-004: batch request lifetime', () => {
     render(<LiveServerBatchComparison open profiles={profiles} onClose={vi.fn()} />)
     start()
     const id = api.serverLiveCheckBatch.mock.calls[0][0].requestId
-    act(() => listener(progress('another-request', 99, 'tls')))
+    await act(async () => listener(progress('another-request', 99, 'tls')))
     expect(screen.queryByText('tls')).not.toBeInTheDocument()
-    act(() => listener(progress(id, 2, 'tls')))
-    act(() => listener(progress(id, 1, 'dns')))
+    await act(async () => listener(progress(id, 2, 'tls')))
+    await act(async () => listener(progress(id, 1, 'dns')))
     expect(screen.getByText('tls')).toBeInTheDocument()
     expect(screen.queryByText('dns')).not.toBeInTheDocument()
     await act(async () => pending.resolve(result(id)))
-    act(() => listener(progress(id, 3, 'dns')))
+    await act(async () => listener(progress(id, 3, 'dns')))
     expect(screen.getByText('Готово')).toBeInTheDocument()
     expect(screen.queryByText('dns')).not.toBeInTheDocument()
   })
@@ -70,7 +79,7 @@ describe('AT-00-003 / AT-00-004: batch request lifetime', () => {
     start()
     const oldId = api.serverLiveCheckBatch.mock.calls[0][0].requestId
     // Supply progress so this also reproduces the old early-release UI race.
-    act(() => listener(progress(oldId, 1)))
+    await act(async () => listener(progress(oldId, 1)))
     fireEvent.click(screen.getByRole('button', { name: 'Отмена' }))
     start()
     const id = api.serverLiveCheckBatch.mock.calls[1][0].requestId
@@ -120,8 +129,8 @@ describe('AT-00-003 / AT-00-004: batch request lifetime', () => {
     view.rerender(<LiveServerBatchComparison open profiles={profiles} onClose={vi.fn()} />)
     start()
     const id = api.serverLiveCheckBatch.mock.calls[1][0].requestId
-    act(() => staleListener(progress(id, 99, 'tls')))
-    act(() => listener(progress(oldId, 99, 'tls')))
+    await act(async () => staleListener(progress(id, 99, 'tls')))
+    await act(async () => listener(progress(oldId, 99, 'tls')))
     expect(screen.queryByText('tls')).not.toBeInTheDocument()
     await act(async () => old.resolve(result(oldId)))
     expect(screen.getByRole('button', { name: 'Отмена' })).toBeInTheDocument()

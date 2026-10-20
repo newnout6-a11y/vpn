@@ -3663,7 +3663,8 @@ export async function runLiveServerBatchCheck(
         },
         onAdmitted
       )
-      if (signal?.aborted) break
+      // A returned child has already committed its receipt. Keep that completed
+      // result even if cancellation won before this continuation; emit stays fenced.
       results.push(result)
       emit({
         status: 'completed',

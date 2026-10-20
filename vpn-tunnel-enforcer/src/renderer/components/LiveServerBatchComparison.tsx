@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { AlertTriangle, Check, Gauge, Play, Square } from 'lucide-react'
 import { MacBadge, MacButton, MacInput, MacModal } from '../design-system'
 import { formatThroughputRouteLabel } from '../utils/liveServerPresentation'
@@ -38,6 +39,7 @@ function routeLabel(route: LiveThroughputDiagnostics['route']): string {
 }
 
 export function LiveServerBatchComparison({ open, profiles, onClose }: LiveServerBatchComparisonProps) {
+  const { t } = useTranslation()
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState<string[]>([])
   const [running, setRunning] = useState(false)
@@ -197,7 +199,7 @@ export function LiveServerBatchComparison({ open, profiles, onClose }: LiveServe
             <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--color-bg-tertiary)]">
               <div className="h-full bg-[var(--color-accent)] transition-all" style={{ width: `${Math.max(4, ((progress.index + (progress.status === 'completed' ? 1 : 0)) / Math.max(1, progress.total)) * 100)}%` }} />
             </div>
-            </> : <p role="status">Подготовка проверки…</p>}
+            </> : <p role="status">{t('liveCheck.preparing')}</p>}
             <div className="mt-2 flex justify-end">
               <MacButton size="sm" variant="danger" onClick={handleCancel}><Square size={12} className="mr-1.5" />Отмена</MacButton>
             </div>
