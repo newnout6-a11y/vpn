@@ -8,7 +8,7 @@ vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 vi.mock('./operations', async original => {
   const actual = await original<typeof import('./operations')>()
   return { ...actual, operations: {
-    run: (kind: any, effect: any, options: any) => state.managed ? actual.operations.run(kind, effect, options) : effect({ signal: options.signal, expire: () => false }),
+    run: (kind: any, effect: any, options: any) => state.managed ? actual.operations.run(kind, effect, options) : effect({ signal: options.signal, expire: () => false, retain: (task: Promise<unknown>) => task }),
     close: () => actual.operations.close(), resumeAdmission: () => actual.operations.resumeAdmission()
   } }
 })
@@ -36,6 +36,7 @@ vi.mock('child_process', async original => { const actual = await original<typeo
 } } })
 import { probeMediaStream, probeTunnelHandshakeAndEgress, withHandshakeWorkerLock } from './liveServerProbe'
 import { operations } from './operations'
+import { logEvent } from './appLogger'
 import type { ServerProfile } from '../shared/ipc-types'
 const profile = { id: 'target', name: 'target', protocol: 'vless', server: 'probe.example', port: 443, outbound: { type: 'vless', server: 'probe.example', server_port: 443 } } as unknown as ServerProfile
 const flush = async () => { for (let i = 0; i < 80; i++) await Promise.resolve() }
@@ -44,6 +45,7 @@ function controller() { const value = new AbortController(); controllers.add(val
 function raw() { const socket = Object.assign(new EventEmitter(), { destroy: vi.fn() }); state.raw.push(socket); return socket }
 function observe<T>(promise: Promise<T>) { const result = { settled: false, value: undefined as T | undefined }; const task = promise.then(value => { result.settled = true; result.value = value }, () => { result.settled = true }); tasks.add(task); return { result, task } }
 beforeEach(() => {
+  vi.mocked(logEvent).mockClear()
   vi.useFakeTimers(); state.tls = []; state.raw = []; state.children = []; state.status.running = false; state.tlsError = false
   state.tlsFactory = undefined; state.nativeChild = false; state.persist.mockReset().mockResolvedValue(undefined)
   state.managed = false
@@ -115,10 +117,11 @@ describe('isolated handshake process drain', () => {
     await vi.advanceTimersByTimeAsync(1499); expect(child.kill).toHaveBeenCalledOnce()
     await vi.advanceTimersByTimeAsync(1); expect(child.kill).toHaveBeenLastCalledWith('SIGKILL')
     expect(result.settled).toBe(false); expect(next).not.toHaveBeenCalled(); expect(state.rm).not.toHaveBeenCalled()
-    const pendingTimers = vi.getTimerCount()
     child.emit('close', 0); await flush()
-    // Escalation already fired; close clears the remaining cleanup timer.
-    expect(vi.getTimerCount()).toBe(pendingTimers - 1); expect(result.settled).toBe(false); expect(next).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(3500)
+    expect(child.kill).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(logEvent).mock.calls.some(call => call[0] === 'warn')).toBe(false)
+    expect(result.settled).toBe(false); expect(next).not.toHaveBeenCalled()
     release(); releases.clear(); await task; await queued
     expect(next).toHaveBeenCalledOnce(); expect(state.dial).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0)
   })
@@ -132,13 +135,21 @@ describe('isolated handshake process drain', () => {
     expect(result.settled).toBe(false); expect(state.rm).not.toHaveBeenCalled()
     child.emit('close', 0); await task; expect(vi.getTimerCount()).toBe(0)
   })
-  it('closes inherited pipe handles after confirmed exit, while retaining the close event', async () => {
+  it.each(['ready', 'persist'] as const)('allows trailing diagnostics after exit during %s before closing inherited pipes', async boundary => {
+    let release!: () => void
+    state[boundary].mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve })); releases.add(() => release())
     state.dial.mockRejectedValue(new Error('fixture unavailable'))
     const { result, task } = observe(probeTunnelHandshakeAndEgress(profile))
     await flush(); const child = state.children[0]; child.emit('exit', 0)
+    expect(child.stdout.destroy).not.toHaveBeenCalled(); expect(child.stderr.destroy).not.toHaveBeenCalled()
+    child.stderr.emit('data', Buffer.from('authentication failed: final diagnostic'))
+    release(); releases.clear(); await flush()
+    await vi.advanceTimersByTimeAsync(1499); expect(child.stderr.destroy).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
     expect(child.stdout.destroy).toHaveBeenCalledOnce(); expect(child.stderr.destroy).toHaveBeenCalledOnce()
     await flush(); expect(result.settled).toBe(false); expect(state.rm).not.toHaveBeenCalled()
     child.emit('close', 0); await task; expect(state.rm).toHaveBeenCalledOnce()
+    expect(result.value?.handshake.status).toBe('auth_failed')
   })
   it('keeps the queue and work directory until the child and reflector sockets close', async () => {
     state.dial.mockRejectedValue(new Error('fixture destination unavailable'))
@@ -188,6 +199,23 @@ describe('isolated handshake process drain', () => {
 })
 
 describe('managed caller cancellation and physical ownership', () => {
+  it('rejects queued and new work explicitly when cleanup is blocked, then recovers after physical drain (AT-00-003/007)', async () => {
+    state.managed = true; state.dial.mockRejectedValue(new Error('fixture unavailable'))
+    const { result, task } = observe(probeTunnelHandshakeAndEgress(profile))
+    await flush()
+    const next = vi.fn(), queued = withHandshakeWorkerLock(async () => next()).catch(error => error); tasks.add(queued)
+    let queueResult: any
+    const queueTask = queued.then(value => { queueResult = value }); tasks.add(queueTask)
+    await vi.advanceTimersByTimeAsync(5000); await task
+    expect(result.value?.handshake.status).toBe('timeout')
+    expect(queueResult).toMatchObject({ category: 'conflict' })
+    await expect(withHandshakeWorkerLock(async () => next())).rejects.toMatchObject({ category: 'conflict' })
+    expect(next).not.toHaveBeenCalled(); expect(state.rm).not.toHaveBeenCalled()
+    const drain = observe(operations.close()); await flush(); expect(drain.result.settled).toBe(false)
+    state.children[0].emit('close', 0); await drain.task; await queueTask
+    await withHandshakeWorkerLock(async () => next()); expect(next).toHaveBeenCalledOnce()
+    expect(state.rm).toHaveBeenCalledOnce()
+  })
   it.each(['cancel', 'deadline'])('returns promptly on %s while a stuck child still owns its worker', async boundary => {
     state.managed = true; state.dial.mockRejectedValue(new Error('fixture unavailable'))
     const owner = controller(), { result, task } = observe(probeTunnelHandshakeAndEgress(profile, undefined, owner.signal))
@@ -195,10 +223,12 @@ describe('managed caller cancellation and physical ownership', () => {
     if (boundary === 'cancel') owner.abort(); else await vi.advanceTimersByTimeAsync(5_000)
     await task; expect(result.value?.handshake.status).toBe(boundary === 'cancel' ? 'skipped' : 'timeout')
     expect(state.rm).not.toHaveBeenCalled()
-    const next = vi.fn(), queued = withHandshakeWorkerLock(async () => next()); tasks.add(queued)
+    const next = vi.fn(), queued = withHandshakeWorkerLock(async () => next()).catch(error => error); tasks.add(queued)
     const drain = observe(operations.close()); await flush()
     expect(next).not.toHaveBeenCalled(); expect(drain.result.settled).toBe(false)
+    if (boundary === 'deadline') expect(await queued).toMatchObject({ category: 'conflict' })
     state.children[0].emit('close', 0); await queued; await drain.task
+    if (boundary === 'deadline') await withHandshakeWorkerLock(async () => next())
     expect(next).toHaveBeenCalledOnce(); expect(state.rm).toHaveBeenCalledOnce()
   })
   it('returns media cancellation promptly and keeps shutdown waiting for late SOCKS settlement and close', async () => {

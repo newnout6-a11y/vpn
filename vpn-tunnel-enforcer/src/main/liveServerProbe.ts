@@ -1824,10 +1824,12 @@ export function execPs(
 }
 
 let activeHandshakeWorkerLock: Promise<void> = Promise.resolve()
+let blockedHandshakeWorker: Promise<unknown> | undefined
+let handshakeAdmissionBlocked = new AbortController()
 
 export async function withHandshakeWorkerLock<T>(
   fn: () => Promise<T>,
-  options?: { signal?: AbortSignal; queueTimeoutMs?: number }
+  options?: { signal?: AbortSignal; queueTimeoutMs?: number; retain?: ProbeRetain; onCleanupBlocked?: (block: () => void) => void }
 ): Promise<T> {
   const queueTimeoutMs = options?.queueTimeoutMs ?? 15000
   const signal = options?.signal
@@ -1835,6 +1837,7 @@ export async function withHandshakeWorkerLock<T>(
   if (signal?.aborted) {
     throw new Error('Cancelled')
   }
+  if (blockedHandshakeWorker) throw new IpcFault('conflict')
 
   const previousLock = activeHandshakeWorkerLock
   let release: () => void = () => {}
@@ -1848,10 +1851,12 @@ export async function withHandshakeWorkerLock<T>(
     await new Promise<void>((resolve, reject) => {
       let timer: NodeJS.Timeout | null = null
       let settled = false
+      const blockedSignal = handshakeAdmissionBlocked.signal
 
       const cleanup = () => {
         if (timer) clearTimeout(timer)
         signal?.removeEventListener('abort', onAbort)
+        blockedSignal.removeEventListener('abort', onBlocked)
       }
 
       const onAbort = () => {
@@ -1867,6 +1872,10 @@ export async function withHandshakeWorkerLock<T>(
         cleanup()
         reject(new Error(`Handshake worker queue lease timeout (${queueTimeoutMs}ms)`))
       }
+      const onBlocked = () => {
+        if (settled) return
+        settled = true; cleanup(); reject(new IpcFault('conflict'))
+      }
 
       if (signal?.aborted) {
         onAbort()
@@ -1874,6 +1883,7 @@ export async function withHandshakeWorkerLock<T>(
       }
 
       signal?.addEventListener('abort', onAbort, { once: true })
+      blockedSignal.addEventListener('abort', onBlocked, { once: true })
       timer = setTimeout(onTimeout, queueTimeoutMs)
 
       previousLock.then(
@@ -1893,8 +1903,29 @@ export async function withHandshakeWorkerLock<T>(
     })
 
     if (signal?.aborted) throw new Error('Cancelled')
+    if (blockedHandshakeWorker) throw new IpcFault('conflict')
     acquired = true
-    return await fn()
+    const work = fn()
+    if (!options?.retain || !options.onCleanupBlocked) return await work
+    // The registry retains physical cleanup independently of this execution
+    // queue. A failed stop rejects admission until that cleanup really drains.
+    options.retain(work)
+    let settled = false
+    const drained = () => {
+      settled = true
+      if (blockedHandshakeWorker === work) {
+        blockedHandshakeWorker = undefined
+        handshakeAdmissionBlocked = new AbortController()
+      }
+    }
+    void work.then(drained, drained)
+    const blocked = new Promise<never>((_, reject) => options.onCleanupBlocked!(() => {
+      if (settled) return
+      blockedHandshakeWorker = work
+      handshakeAdmissionBlocked.abort()
+      reject(new IpcFault('conflict'))
+    }))
+    return await Promise.race([work, blocked])
   } finally {
     if (acquired) release()
     else void previousLock.then(release, release)
@@ -2081,7 +2112,7 @@ export async function probeTunnelHandshakeAndEgress(
 ): Promise<{ handshake: TunnelHandshakeResult; egress: LiveEgressResult; mediaStream: LiveMediaStreamDiagnostics; throughput?: LiveThroughputDiagnostics }> {
   const started = Date.now()
   try {
-    return await operations.run('server-probe', lease => probeTunnelHandshakeAndEgressOwned(profile, endpointIp, lease.signal, includeThroughput, () => lease.expire()), {
+    return await operations.run('server-probe', lease => probeTunnelHandshakeAndEgressOwned(profile, endpointIp, lease.signal, includeThroughput, () => lease.expire(), task => lease.retain(task)), {
       resource: `live-handshake:${crypto.randomUUID().replaceAll('-', '')}`, timeoutMs: 60_000, signal
     })
   } catch (error) {
@@ -2100,7 +2131,8 @@ async function probeTunnelHandshakeAndEgressOwned(
   endpointIp?: string,
   signal?: AbortSignal,
   includeThroughput = false,
-  cleanupExpired?: () => void
+  cleanupExpired?: () => void,
+  retainWorker?: ProbeRetain
 ): Promise<{ handshake: TunnelHandshakeResult; egress: LiveEgressResult; mediaStream: LiveMediaStreamDiagnostics; throughput?: LiveThroughputDiagnostics }> {
   const started = Date.now()
   if (!profile || !profile.outbound || typeof profile.outbound !== 'object') {
@@ -2147,6 +2179,7 @@ async function probeTunnelHandshakeAndEgressOwned(
     }
   }
 
+  let blockWorker = () => {}
   try {
     return await withHandshakeWorkerLock(() => withProbeDrain(async retain => {
       if (signal?.aborted) {
@@ -2186,9 +2219,11 @@ async function probeTunnelHandshakeAndEgressOwned(
       let child: any = null
       let childClosed: Promise<void> | undefined
       let childHasClosed = false
+      let childHasExited = false
       let stopStarted = false
       let forceTimer: ReturnType<typeof setTimeout> | undefined
       let cleanupTimer: ReturnType<typeof setTimeout> | undefined
+      let pipeTimer: ReturnType<typeof setTimeout> | undefined
       let logText = ''
       let cfSocket: net.Socket | null = null
       let ipifySocket: net.Socket | null = null
@@ -2204,14 +2239,15 @@ async function probeTunnelHandshakeAndEgressOwned(
       const stopChild = () => {
         if (!child || childHasClosed || stopStarted) return
         stopStarted = true
-        try { child.kill('SIGTERM') } catch {}
+        if (!childHasExited) { try { child.kill('SIGTERM') } catch {} }
         if (childHasClosed) return
         // Escalate from the stop request, even while readiness or PID persistence
         // is pending. Use the captured child handle rather than looking up a PID.
-        forceTimer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 1500)
+        forceTimer = setTimeout(() => { if (!childHasExited) { try { child.kill('SIGKILL') } catch {} } }, 1500)
         cleanupTimer = setTimeout(() => {
           try { logEvent('warn', 'live-server-probe', 'Handshake cleanup blocked: child exit remains unconfirmed', { state: 'blocked', reason: 'child-stop-unconfirmed' }) } catch { /* telemetry cannot block the terminal deadline */ }
           cleanupExpired?.()
+          blockWorker()
         }, 5000)
         forceTimer.unref?.(); cleanupTimer.unref?.()
       }
@@ -2350,14 +2386,20 @@ async function probeTunnelHandshakeAndEgressOwned(
           })
           childClosed = new Promise<void>(resolve => child.once('close', () => {
             childHasClosed = true
-            clearTimeout(forceTimer); clearTimeout(cleanupTimer)
+            clearTimeout(forceTimer); clearTimeout(cleanupTimer); clearTimeout(pipeTimer)
             resolve()
           }))
           retain(childClosed)
-          // Exit can precede close indefinitely when a descendant inherited a
-          // pipe. Close our read handles after confirmed exit; never release a
-          // live process merely because a cleanup timer elapsed.
-          child.once('exit', () => { child.stdout?.destroy(); child.stderr?.destroy() })
+          // Allow buffered diagnostics to arrive after exit. A descendant may
+          // keep inherited pipes open, so bound output drain after proven exit.
+          child.once('exit', () => {
+            childHasExited = true
+            pipeTimer = setTimeout(() => {
+              try { logEvent('warn', 'live-server-probe', 'Handshake output drain exceeded its budget', { reason: 'child-output-incomplete' }) } catch {}
+              child.stdout?.destroy(); child.stderr?.destroy()
+            }, 1500)
+            pipeTimer.unref?.()
+          })
 
           let childErrorReject: ((reason?: any) => void) | null = null
           const childError = new Promise<never>((_, reject) => { childErrorReject = reject })
@@ -2367,6 +2409,8 @@ async function probeTunnelHandshakeAndEgressOwned(
             logText += `\n[child error] ${error.message}`
             childErrorReject?.(error)
           })
+          child.stdout?.on('data', (d: Buffer) => { logText += d.toString() })
+          child.stderr?.on('data', (d: Buffer) => { logText += d.toString() })
 
           await writeManagedChildPidFile(pidPath, {
             owner: 'live-handshake-probe',
@@ -2375,9 +2419,6 @@ async function probeTunnelHandshakeAndEgressOwned(
             configPath: probeConfigPath,
             createdAt: Date.now()
           }).catch(() => {})
-
-          child.stdout?.on('data', (d: Buffer) => { logText += d.toString() })
-          child.stderr?.on('data', (d: Buffer) => { logText += d.toString() })
 
           const readinessController = new AbortController()
           const readinessSignal = signal ? AbortSignal.any([signal, readinessController.signal]) : readinessController.signal
@@ -2703,8 +2744,9 @@ async function probeTunnelHandshakeAndEgressOwned(
           await rm(workDir, { recursive: true, force: true }).catch(() => {})
         }
       }
-    }), { signal, queueTimeoutMs: 15000 })
+    }), { signal, queueTimeoutMs: 15000, retain: retainWorker, onCleanupBlocked: block => { blockWorker = block } })
   } catch (queueErr: any) {
+    if (queueErr instanceof IpcFault) throw queueErr
     const isCancelled = signal?.aborted || queueErr?.message === 'Cancelled'
     return {
       handshake: {

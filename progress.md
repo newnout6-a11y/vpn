@@ -6853,3 +6853,58 @@ CI/review нового SHA проверяются отдельно после pu
   321.74s,но не используется как gate последнего fix. Final build/typecheck,
   targeted109/109,integration33/33,coverage AC927/927,F210/210,diff exit0.
   Новый exact-head Qodo/Revix/CI обязателен после push.
+
+### PR #92 — explicit blocked admission and output drain (20.10.2026)
+
+- Head5269ba3,Qodo1558570 completed:SOCKS implemented,child finding всё ещё
+  pending;attribution не менялся. Revix118391709473 completed/neutral Low risk:
+  retained fail-closed question,новый вопрос о trailing pipe output и suggestion
+  заменить exact timer counts observable assertions. Stale itest nit не применим.
+- Выявлена разница между terminal caller timeout и зависшей execution queue.
+  На5s coordinator теперь отзывает admission,отклоняет queued/new workers
+  типизированным conflict и завершает execution lease. Полный physical work
+  передан lease.retain:child/socket/readiness/workDir остаются owned;shutdown
+  ждёт actual drain. До него новый child не запускается. После physical settlement
+  (включая failure) admission автоматически восстанавливается.
+  Это bounded/fail-closed альтернатива предложенному Qodo удалению workDir
+  после одного лишь таймера. Таймер не доказывает смерть процесса.
+- Новая blocked-admission regression до fix:1 failed/30 skipped,1.31s,exit1
+  (.tmp/wp0-live-handshake-blocked-admission-before.log). Первый integration
+  после fix33 passed/1 failed,1.68s:старый deadline fixture ожидал очередь вместо
+  нового immediate conflict. Ожидание обновлено;34/34 passed,1.79s,exit0
+  (.tmp/wp0-live-handshake-blocked-admission-checked.log). Timer assertion
+  заменён проверкой отсутствия warning/повторного kill и blocked successor.
+- Вопрос Revix о final stderr подтверждён:exit закрывал pipes немедленно.
+  Regression до fix1 failed/30 skipped,1.26s
+  (.tmp/wp0-live-handshake-exit-output-before.log). После confirmed exit даётся
+  1.5s на обычный output drain;потом закрываются inherited pipes и пишется
+  sanitized child-output-incomplete. Actual close снимает timer. Уже exited
+  child не получает новые SIGTERM/SIGKILL. Неподтверждённый live child этим
+  timer не освобождается.
+- Дополнительный PID-persistence case поймал позднюю установку data listeners:
+  1 failed/1 passed/30 skipped,1.52s
+  (.tmp/wp0-live-handshake-persist-output-before.log). Data listeners перенесены
+  сразу после spawn,до await PID persistence. Final integration2 suites35/35
+  passed,1.94s,exit0 (.tmp/wp0-live-handshake-blocked-output-final.log).
+  Сохраняется auth_failed от trailing diagnostic в readiness и persistence cases.
+- Targeted5 suites127/127 passed,3.30s
+  (.tmp/wp0-live-handshake-blocked-targeted.log):npm.cmd test --
+  src/main/operationRegistry.test.ts src/main/liveServerProbe.resourceDrain.test.ts
+  src/main/liveServerProbe.handshake.test.ts src/main/liveServerProbe.extended.test.ts
+  src/main/residualReview2.test.ts. После targeted менялось только время установки
+  child data listeners;новый persistence integration проверил это отдельно.
+- Запущен final build/typecheck (.tmp/wp0-live-handshake-blocked-build-final.log)
+  и full (.tmp/wp0-live-handshake-blocked-full-final.log) на окончательном source.
+  Coverage AC927/927,F210/210,diff exit0. Новый exact-head remote gate нужен после push.
+
+- CI39350002218 на5269ba3 завершилсяsuccess:Windows unit/integration,
+  IPC/CSP,native IPv6 WFP/Electron,Rust/site —зелёные. Это предыдущий head,
+  до новых blocked-admission/output fixes;его success не переносится на них.
+  Final blocked-build с typecheck165 channels/0 public any exit0.
+
+- Final blocked-admission full: npm.cmd test -- --maxWorkers=1 —5005 passed/
+  5 skipped/0 failed,302 files passed/2 skipped,325.89s,exit0
+  (.tmp/wp0-live-handshake-blocked-full-final.log). Source/test tree не менялся
+  во время full. Integration35/35,targeted127/127,build/typecheck165/0any,
+  coverage AC927/927,F210/210,diff exit0. Physical work сохранён в registry,
+  execution queue больше не ждёт unconfirmed child без конечного решения.

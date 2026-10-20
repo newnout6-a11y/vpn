@@ -1838,3 +1838,19 @@ Final второго follow-up: full5005 passed/5 skipped/0 failed,304.20s,
 302 files passed/2 skipped. Targeted109/109,integration33/33,build/typecheck,
 traceability/diff exit0. После начала final full код и тесты не менялись.
 Exact-head Qodo/Revix/CI pending;весь WP-0 ещё не завершён.
+
+#92 third follow-up:Qodo1558570 на5269ba3 оставил child finding pending.
+Теперь5s cleanup budget завершает execution queue и отзывает admission:
+queued/new probes получают conflict,новые children не стартуют до physical
+settlement. Полный work retained операцией;shutdown/resources/workDir не
+освобождаются по таймеру. После drain admission восстанавливается.
+Revix trailing-output вопрос подтверждён:после proven exit до1.5s читается
+stderr/stdout,затем inherited pipes закрываются с incomplete warning;actual
+close отменяет timer. Data listeners устанавливаются до PID-persistence await.
+До fix regressions failed;final integration35/35,targeted127/127 passed.
+Новые full/build и remote gates pending;attribution не менялся.
+
+Final third follow-up:unit5005 passed/5 skipped/0 failed,325.89s,
+302 files passed/2 skipped;integration35/35,targeted127/127,build/typecheck,
+coverage/diff exit0. Source/test tree не менялся во время full.
+Новый exact-head Qodo/Revix/CI обязателен;WP-0 остаётся в работе.
