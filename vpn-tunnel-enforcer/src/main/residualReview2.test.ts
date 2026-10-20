@@ -110,7 +110,7 @@ describe('Residual Review 2 Audit Fixes', () => {
 
       // Abort second while waiting
       ctrl.abort()
-      await expect(p2).rejects.toThrow('Cancelled')
+      await expect(p2).rejects.toMatchObject({ name: 'IpcFault', category: 'cancelled' })
 
       // Unblock first, verify it finishes normally
       releaseFirst()
@@ -129,7 +129,7 @@ describe('Residual Review 2 Audit Fixes', () => {
       // Second task waits with short 30ms queueTimeoutMs
       const p2 = withHandshakeWorkerLock(async () => 'second-done', { queueTimeoutMs: 30 })
 
-      await expect(p2).rejects.toThrow(/queue lease timeout/)
+      await expect(p2).rejects.toMatchObject({ name: 'IpcFault', category: 'timeout' })
 
       releaseFirst()
       expect(await p1).toBe('first-done')

@@ -210,6 +210,7 @@ describe('managed caller cancellation and physical ownership', () => {
     await flush()
     if (boundary === 'cancel') owner.abort(); else await vi.advanceTimersByTimeAsync(15000)
     await task; expect(result.value?.handshake.status).toBe(boundary === 'cancel' ? 'skipped' : 'timeout')
+    expect(result.value?.mediaStream.status).toBe(boundary === 'cancel' ? 'skipped' : 'error')
     const records = operations.list().filter(operation => !before.has(operation.operationId))
     expect(records).toHaveLength(1)
     expect(records[0]).toMatchObject({ status: boundary === 'cancel' ? 'cancelled' : 'error', category: boundary === 'cancel' ? 'cancelled' : 'timeout' })

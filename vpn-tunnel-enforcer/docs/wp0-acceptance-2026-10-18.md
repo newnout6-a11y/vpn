@@ -1864,3 +1864,14 @@ targeted127/127 passed;новые full/build/exact-head gates pending.
 Final queue-taxonomy full5005 passed/5 skipped/0 failed,312.16s,
 302 files passed/2 skipped. Integration37/37,targeted127/127,build/typecheck,
 coverage/diff exit0. Exact-head Qodo/Revix/CI pending;весь WP-0 ещё в работе.
+
+Qodo1558731 на3eb8ab2 completed,все3 findings implemented,новых нет.
+Revix дал2 подтверждённых issue:fragile message classification и skipped media
+при timeout. Queue теперь сама выбрасывает IpcFault;public media fallback
+различает cancelled/skipped и timeout/error. До fix regressions failed,
+final targeted127/127 и integration37/37 passed. Новые full/build/gates pending.
+
+Final Revix follow-up:full5005 passed/5 skipped/0 failed,307.72s,
+302 files passed/2 skipped;targeted127/127,integration37/37,build/typecheck,
+coverage/diff exit0. Source/test tree не менялся во время full.
+Exact-head Qodo/Revix/CI pending;весь WP-0 ещё не завершён.

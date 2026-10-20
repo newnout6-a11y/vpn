@@ -86,7 +86,8 @@ describe('live handshake physical queue', () => {
     await flush()
     const controller = new AbortController()
     const discarded = track(withHandshakeWorkerLock(async () => { order.push('discarded') }, { signal: controller.signal, queueTimeoutMs: 100 }))
-    const rejection = expect(discarded).rejects.toThrow(boundary === 'cancel' ? 'Cancelled' : 'timeout')
+    const rejection = expect(discarded).rejects.toMatchObject({ name: 'IpcFault', category: boundary === 'cancel' ? 'cancelled' : 'timeout' })
+    void rejection.catch(() => {}) // A failing assertion must wait for the controlled timer too.
     if (boundary === 'cancel') controller.abort()
     else await vi.advanceTimersByTimeAsync(101)
     await rejection
@@ -101,7 +102,7 @@ describe('live handshake physical queue', () => {
     const controller = new AbortController()
     const second = track(withHandshakeWorkerLock(fn, { signal: controller.signal }))
     gate.release(); controller.abort()
-    await expect(second).rejects.toThrow('Cancelled'); await first
+    await expect(second).rejects.toMatchObject({ name: 'IpcFault', category: 'cancelled' }); await first
     expect(fn).not.toHaveBeenCalled()
     await track(withHandshakeWorkerLock(async () => {}))
   })

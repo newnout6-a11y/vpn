@@ -6943,3 +6943,41 @@ CI/review нового SHA проверяются отдельно после pu
   (.tmp/wp0-live-handshake-queue-taxonomy-full.log). Source/test tree во время
   full не менялся. Integration37/37,targeted127/127,build/typecheck165/0any,
   coverage927/927 и210/210,diff exit0. Новый exact-head Qodo/Revix/CI обязателен.
+
+### PR #92 — Revix typed queue and media failure status (20.10.2026)
+
+- Head3eb8ab2,Qodo1558731 completed:все3 findings автоматически implemented,
+  новых нет. Revix118399512303 completed/neutral Low risk дал2 issue:
+  timeout классифицировался по message prefix;mediaStream timeout сталskipped.
+  Оба подтверждены. Stale itest nit не соответствует уже имеющемуся filename;
+  прежний fail-closed вопрос покрыт execution/physical ownership split и5s budget.
+- Regression до typed queue fix:resourceDrain3 failed/7 passed,1.96s,exit1
+  (.tmp/wp0-live-handshake-typed-queue-before.log). Был также unhandled rejection
+  самого ожидаемого failing assertion до timer await;на assertion promise теперь
+  сразу установлен rejection observer,его последующий await всё равно проверяет
+  результат. Queue cancellation/deadline проверяются по IpcFault/category,
+  включая прежние residualReview2 cases,без зависимости от текста сообщения.
+- Media status regression до fix1 failed/1 passed/32 skipped,1.47s,exit1
+  (.tmp/wp0-live-handshake-media-timeout-before.log):timeout давалskipped.
+  Теперь public fallback mediaStream error при timeout,skipped приcancel.
+- withHandshakeWorkerLock сам выбрасывает IpcFault(cancelled/timeout/conflict).
+  Внутренний catch сохраняет typed fault;message parsing удалён.
+  Targeted5 suites127/127 passed,3.33s
+  (.tmp/wp0-live-handshake-revix-final-targeted.log);integration2 suites37/37,
+  1.84s,exit0 (.tmp/wp0-live-handshake-revix-final-integration.log).
+- На вопрос Revix о callers:production search этих symbols находит только
+  liveServerProbe.ts (public wrappers,runLiveServerCheck);прямых scheduler callers
+  нет. runLiveServerCheck возвращает rejection в общий IPC error envelope;
+  batch orchestration имеет catch. Ошибкаconflict не должна превращаться в
+  успешный diagnostic result. Общий live caller lifetime/history остаётся
+  следующим участком WP-0,не объявлен завершённым этим PR.
+- Запущен final build/typecheck (.tmp/wp0-live-handshake-revix-final-build.log)
+  и full (.tmp/wp0-live-handshake-revix-final-full.log);coverage AC927/927,
+  F210/210,diff exit0. После push нужны новые exact-head Qodo/Revix/CI.
+
+- Final Revix follow-up full:npm.cmd test -- --maxWorkers=1 —5005 passed/
+  5 skipped/0 failed,302 files passed/2 skipped,307.72s,exit0
+  (.tmp/wp0-live-handshake-revix-final-full.log). Source/test tree во время full
+  не менялся. Build/typecheck165 channels/0 public any,integration37/37,
+  targeted127/127,coverage AC927/927,F210/210,diff exit0.
+  CI39352438985 на предыдущем3eb8ab2 такжеsuccess;новый head требует своих gates.

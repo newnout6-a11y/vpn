@@ -1835,7 +1835,7 @@ export async function withHandshakeWorkerLock<T>(
   const signal = options?.signal
 
   if (signal?.aborted) {
-    throw new Error('Cancelled')
+    throw new IpcFault('cancelled')
   }
   if (blockedHandshakeWorker) throw new IpcFault('conflict')
 
@@ -1863,14 +1863,14 @@ export async function withHandshakeWorkerLock<T>(
         if (settled) return
         settled = true
         cleanup()
-        reject(new Error('Cancelled'))
+        reject(new IpcFault('cancelled'))
       }
 
       const onTimeout = () => {
         if (settled) return
         settled = true
         cleanup()
-        reject(new Error(`Handshake worker queue lease timeout (${queueTimeoutMs}ms)`))
+        reject(new IpcFault('timeout'))
       }
       const onBlocked = () => {
         if (settled) return
@@ -1902,7 +1902,7 @@ export async function withHandshakeWorkerLock<T>(
       )
     })
 
-    if (signal?.aborted) throw new Error('Cancelled')
+    if (signal?.aborted) throw new IpcFault('cancelled')
     if (blockedHandshakeWorker) throw new IpcFault('conflict')
     acquired = true
     const work = fn()
@@ -2121,7 +2121,7 @@ export async function probeTunnelHandshakeAndEgress(
     return {
       handshake: { status, durationMs: Date.now() - started, protocol: profile?.protocol, error: error.message },
       egress: { status, durationMs: 0, reflectors: [], error: error.message },
-      mediaStream: { status: 'skipped', durationMs: 0, error: error.message }
+      mediaStream: { status: error.category === 'cancelled' ? 'skipped' : 'error', durationMs: 0, error: error.message }
     }
   }
 }
@@ -2747,8 +2747,7 @@ async function probeTunnelHandshakeAndEgressOwned(
     }), { signal, queueTimeoutMs: 15000, retain: retainWorker, onCleanupBlocked: block => { blockWorker = block } })
   } catch (queueErr: unknown) {
     if (queueErr instanceof IpcFault) throw queueErr
-    if (signal?.aborted || (queueErr instanceof Error && queueErr.message === 'Cancelled')) throw new IpcFault('cancelled')
-    if (queueErr instanceof Error && queueErr.message.startsWith('Handshake worker queue lease timeout (')) throw new IpcFault('timeout')
+    if (signal?.aborted) throw new IpcFault('cancelled')
     throw queueErr
   }
 }
