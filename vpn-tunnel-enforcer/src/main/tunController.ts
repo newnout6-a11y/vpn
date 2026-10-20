@@ -1,6 +1,8 @@
 import { recordOwnedTunAdapter, strictRecoveryRequired, readRecoveryManifest } from './recoveryManifest'
 import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
 import { OWNED_RUNTIME_STATUS_QUERY_SCRIPT, OWNED_RUNTIME_STOP_SCRIPT } from './recoveryPsProtocol'
+import { classifyIpcError, ipcError } from '../shared/ipc-result'
+import type { OwnedRuntimeStopResult } from '../shared/network'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { writeFile, copyFile, access, rename, stat, readFile } from 'fs/promises'
 import { join, dirname } from 'path'
@@ -1345,7 +1347,7 @@ function psSingleQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
 
-export async function killOwnedTunRuntimeProcesses(): Promise<{ success: boolean; candidates: number; killed: number; names: string[]; error?: string }> {
+export async function killOwnedTunRuntimeProcesses(): Promise<OwnedRuntimeStopResult> {
   if (process.platform !== 'win32') return { success: true, candidates: 0, killed: 0, names: [] }
   try {
     const runtimeDir = getTunRuntimeDir()
@@ -1361,21 +1363,27 @@ export async function killOwnedTunRuntimeProcesses(): Promise<{ success: boolean
         !Number.isSafeInteger(parsed.candidates) || parsed.candidates < 0 || !Number.isSafeInteger(parsed.killed) || parsed.killed < 0 || parsed.killed > parsed.candidates ||
         !Array.isArray(parsed.names) || parsed.names.length !== parsed.killed || parsed.names.some((name: unknown) => typeof name !== 'string' || !['vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe'].includes(name.toLowerCase()))) throw new Error('Owned runtime stop response is invalid')
     return {
-      success: true,
+      ...(parsed.killed === parsed.candidates ? { success: true as const } : { success: false as const, error: ipcError('internal') }),
       candidates: parsed.candidates,
       killed: parsed.killed,
       names: parsed.names
     }
-  } catch (err: any) {
+  } catch (err) {
     logEvent('debug', 'tun', 'killOwnedRuntimeProcesses failed', err)
-    return { success: false, candidates: 0, killed: 0, names: [], error: err?.message || String(err) }
+    const category = err instanceof RecoveryWorkerError
+      ? err.code === 'timeout' ? 'timeout' : err.code === 'busy' || err.code === 'closed' ? 'conflict' : 'internal'
+      // execFile's timeout kills its child with SIGTERM and a null exit code.
+      // A maxBuffer failure has a distinct code and must remain internal.
+      : err instanceof Error && 'killed' in err && err.killed === true && 'signal' in err && err.signal === 'SIGTERM' && 'code' in err && err.code === null
+        ? 'timeout' : classifyIpcError(err)
+    return { success: false, error: ipcError(category) }
   }
 }
 
 async function killOwnedRuntimeProcesses(): Promise<void> {
   const result = await killOwnedTunRuntimeProcesses()
   if (!result.success || result.killed < result.candidates) {
-    throw new Error(result.error || 'Owned runtime termination was not confirmed')
+    throw new Error(!result.success ? result.error.message : 'Owned runtime termination was not confirmed')
   }
 }
 

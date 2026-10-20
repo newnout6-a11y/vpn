@@ -112,6 +112,7 @@ import { registerThemeIpcHandlers } from './themeManager'
 import { externalProxy } from './externalProxy'
 import { requirePlainObject, requireStringArray } from './ipcValidation'
 import { installTrustedIpcBoundary, registerTrustedRenderer } from './ipcSecurity'
+import { ipcError } from '../shared/ipc-result'
 import { pathToFileURL } from 'url'
 import {
   beginAdaptiveConnection,
@@ -2427,7 +2428,8 @@ app.whenReady().then(async () => {
   handleLogged('rollback-tun-network-baseline', async () => {
     if (tunController.getStatus().running) {
       return {
-        success: true,
+        success: false,
+        error: ipcError('conflict'),
         skipped: true,
         blocked: true,
         message: 'Отключите VPN перед откатом network baseline: активный TUN использует текущие DNS/proxy настройки.'
@@ -2479,7 +2481,8 @@ app.whenReady().then(async () => {
   handleLogged('firewall:repair-vpnte-rules', async () => {
     if (tunController.getStatus().running) {
       return {
-        success: true,
+        success: false,
+        error: ipcError('conflict'),
         skipped: true,
         blocked: true,
         message: 'Отключите VPN перед починкой firewall-правил: во время активного TUN kill-switch нельзя снимать безопасно.',
@@ -2513,6 +2516,8 @@ app.whenReady().then(async () => {
   handleLogged('network:rollback-adapter-lockdown', async () => {
     if (tunController.getStatus().running) {
       return {
+        success: false,
+        error: ipcError('conflict'),
         rolledBack: false,
         skipped: true,
         blocked: true,
@@ -2525,33 +2530,21 @@ app.whenReady().then(async () => {
   handleLogged('tun:kill-stale-singbox', async () => {
     if (tunController.getStatus().running) {
       return {
-        success: true,
+        success: false as const,
+        error: ipcError('conflict'),
         skipped: true,
         blocked: true,
-        candidates: 0,
-        killed: 0,
-        names: [],
         message: 'Отключите VPN перед завершением зависших процессов: сейчас runtime активен и обслуживает TUN.'
       }
     }
-    try {
-      const result = await killOwnedTunRuntimeProcesses()
-      if (!result.success) {
-        return {
-          ...result,
-          success: false,
-          message: `Не удалось проверить процессы VPNTE runtime: ${result.error || 'unknown error'}`
-        }
-      }
-      return {
-        ...result,
-        success: true,
-        message: result.killed > 0
-          ? `Завершены процессы VPNTE runtime: ${result.killed}`
-          : 'Зависшие процессы VPNTE runtime не найдены'
-      }
-    } catch (err: any) {
-      return { success: false, message: `Не удалось завершить процессы: ${err?.message || err}` }
+    const result = await killOwnedTunRuntimeProcesses()
+    return {
+      ...result,
+      message: !result.success ? result.killed !== undefined && result.candidates !== undefined
+        ? `Завершены процессы VPNTE runtime: ${result.killed} из ${result.candidates}. Не все процессы остановлены; повторите очистку.`
+        : result.error.message : result.killed > 0
+        ? `Завершены процессы VPNTE runtime: ${result.killed}`
+        : 'Зависшие процессы VPNTE runtime не найдены'
     }
   })
 

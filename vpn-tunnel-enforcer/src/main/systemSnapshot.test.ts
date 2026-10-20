@@ -132,12 +132,28 @@ describe('direct PowerShell diagnostic collection', () => {
     expect(h.execFile).not.toHaveBeenCalled()
     expect(h.exec).not.toHaveBeenCalled()
   })
-  it.skipIf(process.platform !== 'win32')('executes the actual oversized readonly script with all native section markers', async () => {
+  it.skipIf(process.platform !== 'win32')('executes the oversized production script with controlled readonly cmdlets and all native section markers', async () => {
     const h = harness('win32', true)
-    const output = await h.read(h.build(), 30000)
+    // This native transport fixture proves direct argv/encoding and script
+    // execution, not the CI host's network state or cold CIM/module latency.
+    const commands = { ADAPTERS: 'Get-NetAdapter', IPCONFIG: 'Get-NetIPConfiguration',
+      ROUTES4: 'Get-NetRoute', DNS_SERVERS: 'Get-DnsClientServerAddress', NRPT: 'Get-DnsClientNrptRule',
+      DNS_CACHE: 'Get-DnsClientCache', BINDING_IPV6: 'Get-NetAdapterBinding', FIREWALL_RULES: 'Get-NetFirewallRule',
+      FIREWALL_PROFILES: 'Get-NetFirewallProfile', WINHTTP_PROXY: 'netsh' }
+    const fixtures = Object.entries(commands).map(([section, command]) =>
+      `function ${command} { [pscustomobject]@{Name='fixture-native-${section}'; DisplayName='VPNTE-fixture'; InterfaceMetric=1} }`
+    ).join('\n') + '\nfunction Get-NetTCPConnection {}\n'
+    const script = fixtures + h.build()
+    expect(Buffer.from(script, 'utf16le').toString('base64').length).toBeGreaterThan(8191)
+    const output = await h.read(script, 30000)
     if (typeof output !== 'string') throw new Error('Native diagnostic process failed')
-    expect([...h.parse(output).keys()]).toEqual(sections)
-    // Do not print adapter, route, DNS or process payloads in test output.
+    const parsed = h.parse(output)
+    expect([...parsed.keys()]).toEqual(sections)
+    for (const section of Object.keys(commands)) expect(parsed.get(section)).toContain(`fixture-native-${section}`)
+    expect(parsed.get('ROUTES6')).toContain('fixture-native-ROUTES4')
+    expect(parsed.get('PROXY_10808')).toBe('__VPNTE_EMPTY__')
+    expect(parsed.get('PROXY_10809')).toBe('__VPNTE_EMPTY__')
+    expect(parsed.get('ELEVATED')).toMatch(/^(True|False)$/)
     expect(await h.read("Write-Output 'сеть ☃ — проверка'")).toBe('сеть ☃ — проверка')
   }, 40000)
   it.skipIf(process.platform !== 'win32')('returns a diagnostic error on an actual direct-process timeout', async () => {

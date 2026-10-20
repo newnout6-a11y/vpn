@@ -69,8 +69,9 @@ function firewallBlockDefaultLabel(health: FirewallRepairHealth): string {
 }
 
 function stepStatusFromResult(result: any): RepairStep['status'] {
+  if (result?.blocked === true) return 'warn'
   if (result?.success === false) return 'fail'
-  if (result?.blocked === true || result?.warning === true) return 'warn'
+  if (result?.warning === true) return 'warn'
   return 'ok'
 }
 
@@ -225,9 +226,10 @@ export function Maintenance() {
       setSystemDiagnostics(system)
       setFirewallHealth(firewall)
       const failed = nextSteps.some(step => step.status === 'fail')
-      const message = failed ? 'Авто-починка завершена с ошибками' : 'Авто-починка завершена'
+      const warned = nextSteps.some(step => step.status === 'warn')
+      const message = failed ? 'Авто-починка завершена с ошибками' : warned ? 'Авто-починка завершена с предупреждениями' : 'Авто-починка завершена'
       setLastResult(message)
-      useAppStore.getState().addGlobalToast(failed ? 'warning' : 'success', 'Починка', message)
+      useAppStore.getState().addGlobalToast(failed || warned ? 'warning' : 'success', 'Починка', message)
     } finally {
       setRunningAction(null)
     }
