@@ -39,7 +39,7 @@ async function sessionTracking(service: Awaited<ReturnType<typeof reload>>) {
   const source = ts.createSourceFile('index.ts', await readFile(join(process.cwd(), 'src/main/index.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
   const names = ['openSession', 'writeSessionEntry', 'closeSession', 'recordStartFailure', 'startProtectionFromTray',
     'startSoftProtection', 'startSoftProtectionEffects', 'stopProtection', 'stopProtectionEffects',
-    'rollbackSoftAutoconfigIfApplied', 'applyOwnedAutoconfig', 'rollbackOwnedAutoconfig', 'adoptRetainedSoftProtection']
+    'rollbackSoftAutoconfigIfApplied', 'applyOwnedAutoconfig', 'rollbackOwnedAutoconfig', 'adoptRetainedSoftProtection', 'adoptRetainedSoftProtectionEffects']
   const functions = source.statements.filter(node => ts.isFunctionDeclaration(node) && [...names, 'startProtectionFromTrayEffects', 'captureSessionOrigin'].includes(node.name?.text ?? ''))
   expect(names.every(name => functions.some(node => ts.isFunctionDeclaration(node) && node.name?.text === name))).toBe(true)
   const { currentCorrelationId, currentActionMetadata, withCorrelation } = await import('./actionCorrelation')

@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionLifecycle } from './connectionLifecycle'
 import { TunnelStateMachine } from './tunnelStateMachine'
 import { OperationRegistry } from './operationRegistry'
+import { currentCorrelationId, withCorrelation } from './actionCorrelation'
 
 const recoveryModel = () => new TunnelStateMachine(() => ({ running: false, pid: null, softApplied: false }))
 
@@ -26,11 +27,14 @@ function body(file: string, name: string): string {
   }
   visit(source)
   if (!found) throw new Error(`Missing production function ${name}`)
-  return `${ts.isVariableDeclaration(found) ? 'const ' : ''}${found.getText(source)}`
+  const effects = file === 'index.ts' && ['performCrashRecovery', 'adoptRetainedSoftProtection'].includes(name)
+    ? '\n' + body(file, name + 'Effects') : ''
+  return `${ts.isVariableDeclaration(found) ? 'const ' : ''}${found.getText(source)}${effects}`
 }
 function compile<T>(text: string, dependencies: Record<string, unknown>): T {
   const js = ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
-  return new Function(...Object.keys(dependencies), js)(...Object.values(dependencies))
+  const bindings = { currentCorrelationId, withCorrelation, randomUUID, ...dependencies }
+  return new Function(...Object.keys(bindings), js)(...Object.values(bindings))
 }
 const noop = () => vi.fn((..._args: any[]) => {})
 const done = () => vi.fn(async () => {})
