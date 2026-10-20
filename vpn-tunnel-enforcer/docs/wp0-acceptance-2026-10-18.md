@@ -1781,3 +1781,24 @@ Final HTTP full:5001 passed/5 skipped/0 failed,301 files passed/2 skipped,
 165 channels/0 public any,coverage AC927/927,F210/210,diff check —exit0.
 Native evidence —2 loopback HTTP checks;7-fixture Electron runner при
 неизменных IPC/preload/bridge не повторялся. Exact-head Qodo/CI pending.
+
+## Handshake/media/throughput physical drain (20.10.2026)
+
+#91 принят: final head2163427,Qodo1558121 completed без findings,
+CI39343736114 success;merge/main88bca27,reviewed/main tree совпал.
+AT-00-003/007: SOCKS late dial/raw/TLS физически retained;media cancel активен,
+late HEAD/GET не отправляются;throughput sample ждёт close до следующего,
+метрика duration не включает drain,header cap64KiB. Изолированный child/
+readiness poll удерживают queue до physical cleanup;workDir удаляется после
+child close. Ранняя ошибка child во время PID persistence не теряется.
+Targeted8 suites139/139 passed,5.97s,включая2 native cases:loopback TLS cancel
+и actual child close. Промежуточные failures/fixture corrections в progress.md.
+Нужны final full/build и exact-head Qodo/CI. Общий live lifetime/history/UI
+ещё открыт;весь WP-0 в работе.
+
+Final production full5025 passed/5 skipped/0 failed,302 files passed/2 skipped,
+329.86s,exit0. Production source не менялся с начала final full;2 усиленных
+terminal-event assertions отдельно проверены в24/24 suite,1.24s. Final build/
+typecheck165 channels/0 public any exit0. Предыдущий superseded full имел
+1 native identity timeout;отдельно25/25 passed,причина не установлена.
+Exact-head Qodo/CI требуются до следующего участка.

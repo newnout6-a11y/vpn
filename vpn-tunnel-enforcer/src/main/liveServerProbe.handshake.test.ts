@@ -160,7 +160,8 @@ describe('probeTunnelHandshakeAndEgress handshake classification', () => {
       'api.ipify.org',
       443,
       3500,
-      undefined
+      undefined,
+      expect.any(Function)
     )
     expect(result.mediaStream.status).not.toBe('skipped')
   })

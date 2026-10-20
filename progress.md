@@ -6654,3 +6654,67 @@ CI/review нового SHA проверяются отдельно после pu
   Coverage AC927/927,F210/210,diff check —exit0. IPC/preload/bridge не менялись;
  7-fixture Electron runner не повторялся. Native evidence текущего участка —
   две actual loopback HTTP checks. Новые exact-head Qodo/CI pending.
+
+### PR #91 принят; handshake/media/throughput drain (20.10.2026)
+
+- #91 final head216342768edeae28e6cc9b69db75f2143f3eac7c: Qodo1558121 completed
+  без findings (.tmp/qodo91-final.json), CI39343736114 success.
+  Merge/main88bca27e2c12a6f31867da56aa36df90ff196cce; reviewed/main tree совпал:
+  b9c19ecc64aa276537da8eaa050b6b69555fdfd7. Revix до03:00 был по квоте,
+  полного review нет;это не approval.
+- AT-00-003/007: live handshake передаёт signal/retain в SOCKS/HTTPS helpers,
+  удерживает late dial и raw/TLS close. Media активно отменяет TLS и не пишет
+  поздний HEAD. Каждый throughput sample держит raw+TLS до close до следующего
+  sample;duration фиксируется до drain. Header accumulation ограничен64KiB,
+  split delimiter не теряет body;sync TLS failure снимает timer/abort.
+- Изолированный child удерживает worker slot/workDir до actual close. Ранняя
+  ошибка child во время PID persistence не теряется и не вызывает unhandled
+  rejection. Проигравший readiness poll отменяется,retained до settlement/close.
+- До fix handshakeDrain:5 failed/0 passed,1.27s (.tmp/wp0-live-handshake-before.log).
+  Первый fix4 passed/1 failed,6.08s: active-profile fixture ошибочно выбирал
+  isolated child и не закрывал его;fixture исправлен без ослабления drain.
+  Затем5/5 passed,1.22s (.tmp/wp0-live-handshake-targeted2.log).
+- При расширении:24 passed/1 failed (.tmp/wp0-live-handshake-targeted3.log) —
+  fixture эмитил error после close;оставлен late error до close. Затем26 passed/
+  3 failed (.tmp/wp0-live-handshake-targeted4.log):2 native teardown ошибочно
+  advance fake timers при real timers,исправлен teardown;1 реальная regression
+  раннего child error исправлена порядком readiness race. После fix138/138
+  passed,5.63s (.tmp/wp0-live-handshake-targeted5.log).
+- Review выявил также неподконтрольный readiness poll после child error.
+  Добавлены retain+локальная отмена и regression;final targeted8 suites139/139
+  passed,5.97s (.tmp/wp0-live-handshake-targeted6.log). Команда: npm.cmd test --
+  src/main/liveServerProbe.handshakeDrain.test.ts src/main/liveServerProbe.resourceDrain.test.ts
+  src/main/liveServerProbe.networkDrain.test.ts src/main/liveServerProbe.httpDrain.test.ts
+  src/main/liveServerProbe.test.ts src/main/liveServerProbe.extended.test.ts
+  src/main/liveServerProbe.handshake.test.ts src/main/liveServerAuditRegression.test.ts.
+  Новая suite24 cases включает2 native:real loopback TLS cancellation и actual
+  child close до rm. Старое handshake assertion расширено новым retain аргументом.
+- Initial typecheck/build passed (165 channels/0 public any);после readiness fix
+  нужны новые full/build. Начатый .tmp/wp0-live-handshake-full.log не final:
+  source изменился во время прогона;результат не доказательство final tree.
+  Coverage AC927/927,F210/210,diff check exit0. IPC/preload/bridge не менялись;
+  7-fixture Electron runner не повторялся. Нормативные docs/ не менялись.
+  Общий live operation owner/deadline/history/renderer остаётся следующим
+  участком,весь WP-0 не завершён.
+
+- Superseded initial full (.tmp/wp0-live-handshake-full.log):5024 passed/
+  5 skipped/1 failed,339.03s,exit1. Единственный failure —5000ms timeout
+  существующего native PowerShell case adaptiveNetworkIdentity.test.ts
+  keeps the previous profile-only identity behavior (10563ms). Source этого
+  теста/модуля не менялся. Причина таймаута пока не установлена;параллельный
+  final full начался03:05,первый03:03. Выполняется изолированная проверка.
+
+- Native identity отдельно: npm.cmd test -- src/main/adaptiveNetworkIdentity.test.ts
+  —25/25 passed,3.14s,exit0 (.tmp/wp0-live-handshake-network-identity.log).
+  Причина разового предыдущего timeout не установлена;несвязанный код не менялся.
+- Final production full: npm.cmd test -- --maxWorkers=1 —5025 passed/5 skipped/
+  0 failed,302 files passed/2 skipped,329.86s,exit0
+  (.tmp/wp0-live-handshake-full-final.log). Production source не менялся с
+  начала final full. Во время прогона добавлены2 test assertions:media и
+  throughput terminal events обязаны destroy до последующей cancellation,
+  чтобы cancel не маскировал ошибку обработчика. Усиленная suite отдельно:
+  npm.cmd test -- src/main/liveServerProbe.handshakeDrain.test.ts —24/24
+  passed,1.24s (.tmp/wp0-live-handshake-terminal-assertions.log).
+- npm.cmd run build final,включая typecheck165 channels/0 public any —exit0
+  (.tmp/wp0-live-handshake-build-final.log). Перед commit повторяются
+  typecheck/coverage/diff. Exact-head Qodo/CI pending.
