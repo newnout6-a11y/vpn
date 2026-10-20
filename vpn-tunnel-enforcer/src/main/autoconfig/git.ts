@@ -56,6 +56,8 @@ async function getGlobalProxy(key: 'http.proxy' | 'https.proxy'): Promise<string
 }
 
 async function saveBackupIfMissing(): Promise<void> {
+  // An unreadable baseline cannot prove rollback safety. Preserve it and
+  // refuse apply; live proxy status is queried independently in isApplied.
   if (await readBackup()) return
   await mkdir(join(homedir(), '.vpnte'), { recursive: true })
   const backup: GitProxyBackup = {
@@ -119,6 +121,11 @@ export const git = {
   async isApplied(): Promise<boolean> {
     try {
       await readBackup()
+    } catch (error) {
+      if (error instanceof StoreSchemaError) throw error
+      // Backup availability is not evidence that the actual Git proxy is off.
+    }
+    try {
       const { stdout } = await gitConfig(['--global', '--get', 'http.proxy'])
       return stdout.trim().length > 0
     } catch (error) {

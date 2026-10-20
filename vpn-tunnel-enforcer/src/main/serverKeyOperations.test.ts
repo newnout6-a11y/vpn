@@ -255,8 +255,9 @@ describe('VPN key operation lifetime', () => {
     const gate = held(undefined); state.hold = step; state.gate = gate.promise
     const token = '11111111-1111-4111-8111-111111111111'
     const run = invoke('servers:export-key-file', 'a', token)
-    // Real Windows creation/handle-identity preparation precedes this boundary.
-    await vi.waitFor(() => expect(state.reached).toBe(1), { timeout: 5000 })
+    // Native creation/identity and ACL preparation each have a 15s child budget.
+    // Wait for the held boundary before testing cancellation, even on loaded CI.
+    await vi.waitFor(() => expect(state.reached).toBe(1), { timeout: 35_000 })
     expect(await invoke('operations:cancel-request', token)).toMatchObject({ ok: true, result: true })
     expect(await run).toMatchObject({ ok: false, error: { category: 'cancelled' } })
     expect(await invoke('servers:export-all-proxies-file')).toMatchObject({ ok: false, error: { category: 'conflict' } })
@@ -264,7 +265,7 @@ describe('VPN key operation lifetime', () => {
     gate.release(); await registry.close()
     expect(readFileSync(destination, 'utf8')).toBe('previous export'); expect(temporaries()).toEqual([])
     expect(state.handles.every(file => file.closed)).toBe(true)
-  }, 15_000)
+  }, 45_000)
   it.each(files)('maps native file errors without exposing paths/secrets: %s', async channel => {
     state.writeFailure = Object.assign(new Error('C:\\private\\' + secret + '\n at private stack'), { code: 'EACCES' })
     const result = await invokeExport(channel)

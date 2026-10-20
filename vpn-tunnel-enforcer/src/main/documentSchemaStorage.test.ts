@@ -5,7 +5,14 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { dirname, join, resolve } from 'node:path'
 import { writeFileSync } from 'node:fs'
 
-const state = vi.hoisted(() => ({ root: '', values: {} as Record<string, string>, native: vi.fn(), elevated: vi.fn(), spawn: vi.fn() }))
+const state = vi.hoisted(() => ({ root: '', denied: '', values: {} as Record<string, string>, native: vi.fn(), elevated: vi.fn(), spawn: vi.fn() }))
+vi.mock('fs/promises', async original => {
+  const actual = await original<typeof import('fs/promises')>()
+  return { ...actual, readFile: (...args: Parameters<typeof actual.readFile>) => {
+    if (String(args[0]) === state.denied) throw Object.assign(new Error('fixture read denied'), { code: 'EACCES' })
+    return actual.readFile(...args)
+  } }
+})
 vi.mock('electron', () => ({ app: {
   getPath: (name: string) => join(state.root, name), getVersion: () => 'fixture', isPackaged: false
 } }))
@@ -19,7 +26,8 @@ vi.mock('child_process', () => ({
     if (file === 'reg' && args[0] === 'query' && !Object.hasOwn(state.values, key)) {
       callback(Object.assign(new Error('unable to find the specified registry key or value'), { code: 1 })); return
     }
-    const stdout = file === 'reg' && args[0] === 'query' ? `    ${key}    REG_SZ    ${state.values[key]}\r\n` : ''
+    const stdout = file === 'git' && args.includes('--get') ? 'http://configured-proxy'
+      : file === 'reg' && args[0] === 'query' ? `    ${key}    REG_SZ    ${state.values[key]}\r\n` : ''
     callback(null, { stdout, stderr: '' })
   }, spawn: state.spawn
 }))
@@ -77,7 +85,7 @@ async function invoke(kind: Kind, action: 'apply' | 'rollback' | 'status') {
     : action === 'rollback' ? module.stopTrafficForensicsSession('fixture') : module.getTrafficForensicsStatus()
 }
 beforeEach(async () => {
-  vi.resetModules(); vi.clearAllMocks(); state.values = {}
+  vi.resetModules(); vi.clearAllMocks(); state.values = {}; state.denied = ''
   await mkdir(resolve('.tmp'), { recursive: true })
   state.root = await mkdtemp(resolve('.tmp/document-schema-'))
   vi.stubEnv('LOCALAPPDATA', join(state.root, 'local'))
@@ -122,6 +130,18 @@ describe('JSON document admission', () => {
     await expect(invoke(kind, 'status')).rejects.toMatchObject({ code: 'STORE_SCHEMA_FUTURE' })
     expect(await hash(kind)).toBe(before)
   })
+  it.each(['corrupt', 'unreadable'])('reads actual Git status with a %s backup and refuses unsafe apply', async damage => {
+    await mkdir(dirname(files.git()), { recursive: true })
+    await writeFile(files.git(), '{')
+    if (damage === 'unreadable') state.denied = files.git()
+    const { autoconfig } = await import('./autoconfig')
+    expect((await autoconfig.getStatus()).find(target => target.id === 'git')?.applied).toBe(true)
+    vi.clearAllMocks()
+    expect(await autoconfig.apply(['git'], '127.0.0.1:10808')).toEqual({ git: false })
+    state.denied = ''
+    expect(await readFile(files.git(), 'utf8')).toBe('{')
+    expect(state.native).not.toHaveBeenCalled()
+  })
   it.each(['git', 'env', 'browser', 'location'] as const)('rechecks %s before writing a prepared backup', async kind => {
     await mkdir(dirname(files[kind]()), { recursive: true })
     const future = JSON.stringify({ ...legacy(kind), schemaVersion: 1 })
@@ -152,18 +172,43 @@ describe('JSON document admission', () => {
     expect(await hash('forensics')).toBe(before)
     expect(state.elevated).not.toHaveBeenCalled()
   })
-  it.each(['latest', 'session'] as const)('refuses a future %s manifest even after caching a session', async target => {
+  it.each((['latest', 'session'] as const).flatMap(target => ['future', 'invalid', 'unreadable'].map(damage => ({ target, damage }))))('stops owned capture with a $damage $target manifest without replacing it', async ({ target, damage }) => {
     const module = await import('./trafficForensics')
     const started = await module.startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
     expect(started.sessionDir).toBeTruthy()
     const path = target === 'latest' ? files.forensics() : join(started.sessionDir!, 'session-manifest.json')
-    const future = JSON.stringify({ ...JSON.parse(await readFile(path, 'utf8')), schemaVersion: 3 })
+    const future = JSON.stringify({ ...JSON.parse(await readFile(path, 'utf8')), schemaVersion: damage === 'invalid' ? 'newer' : damage === 'future' ? 3 : 2 })
     await writeFile(path, future)
     const snapshots = await Promise.all([files.forensics(), join(started.sessionDir!, 'session-manifest.json')].map(file => readFile(file, 'utf8')))
+    if (damage === 'unreadable') state.denied = path
     vi.clearAllMocks()
-    await expect(module.stopTrafficForensicsSession('future-refusal')).rejects.toMatchObject({ code: 'STORE_SCHEMA_FUTURE' })
-    await expect(module.recordTrafficForensicsAppEvent({ source: 'fixture', event: 'refused' })).rejects.toMatchObject({ code: 'STORE_SCHEMA_FUTURE' })
+    const stopped = await module.stopTrafficForensicsSession('future-refusal')
+    expect(stopped).toMatchObject({ running: false, lastError: expect.stringContaining('CaptureStoppedArtifactsUnavailable:') })
+    expect(state.elevated).toHaveBeenCalledOnce()
+    expect(state.elevated.mock.calls[0][0]).toContain('-EncodedCommand')
+    const stopScript = Buffer.from(state.elevated.mock.calls[0][0].split('-EncodedCommand ')[1], 'base64').toString('utf16le')
+    expect(stopScript).toMatch(/'pktmon\.exe'\)\) stop/)
+    expect(stopScript).not.toContain(started.sessionDir!)
+    await expect(module.recordTrafficForensicsAppEvent({ source: 'fixture', event: 'refused' })).rejects.toMatchObject({ code: damage === 'unreadable' ? 'EACCES' : damage === 'future' ? 'STORE_SCHEMA_FUTURE' : 'STORE_SCHEMA_INVALID' })
+    state.denied = ''
     expect(await Promise.all([files.forensics(), join(started.sessionDir!, 'session-manifest.json')].map(file => readFile(file, 'utf8')))).toEqual(snapshots)
+    expect(state.spawn).not.toHaveBeenCalled()
+  })
+  it('cleans up an owned capture before refusing restart against a newer document', async () => {
+    const module = await import('./trafficForensics')
+    await module.startTrafficForensicsSession({ mode: 'directVpn', target: 'fixture' })
+    const future = JSON.stringify({ ...JSON.parse(await readFile(files.forensics(), 'utf8')), schemaVersion: 3 })
+    await writeFile(files.forensics(), future); vi.clearAllMocks()
+    await expect(module.restartTrafficForensicsSession()).rejects.toMatchObject({ code: 'STORE_SCHEMA_FUTURE' })
+    expect(state.elevated).toHaveBeenCalledOnce()
+    expect(await readFile(files.forensics(), 'utf8')).toBe(future)
+    expect(state.spawn).not.toHaveBeenCalled()
+  })
+  it('does not grant stop authority to an unreadable foreign manifest', async () => {
+    await save('forensics', { ...legacy('forensics'), running: true, engine: 'pktmon' })
+    state.denied = files.forensics()
+    const module = await import('./trafficForensics')
+    await expect(module.stopTrafficForensicsSession('foreign-refused')).rejects.toMatchObject({ code: 'EACCES' })
     expect(state.elevated).not.toHaveBeenCalled(); expect(state.spawn).not.toHaveBeenCalled()
   })
 })

@@ -1261,6 +1261,17 @@ apply:targets=>applyOwnedAutoconfig(targets,'127.0.0.1:8080','http'),rollback:ro
 }
 
 describe('owned Soft startup (AT-00-003/007 subset)', () => {
+  it('stops owned Soft env even when another rollback target refuses its backup (AT-00-006)', async () => {
+    const h = softStartupHarness()
+    await h.start()
+    const { StoreSchemaError } = await import('./storeSchema')
+    const error = new StoreSchemaError('STORE_SCHEMA_FUTURE')
+    h.autoconfig.rollback.mockRejectedValueOnce(error)
+    await expect(h.rollback(['git', 'env'])).rejects.toBe(error)
+    expect(h.autoconfig.rollbackApplied).toHaveBeenCalledExactlyOnceWith('env')
+    expect(h.protected()).toBe(false)
+    expect(h.tunnelState.snapshot).toMatchObject({ state: 'disconnected', transition: null })
+  })
   it('clears Soft evidence after shutdown confirms env rollback (AT-00-003)', async () => {
     const h = softStartupHarness()
     expect(await h.start()).toMatchObject({ success: true })

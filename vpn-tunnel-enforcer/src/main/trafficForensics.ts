@@ -1141,7 +1141,17 @@ export function stopTrafficForensicsSession(reason: string): Promise<TrafficFore
 }
 
 async function stopCapture(reason: string): Promise<TrafficForensicsStatus> {
-  const manifest = await readLatestManifest()
+  let manifest: SessionManifest | null
+  let inspectionFailure: { error: unknown } | undefined
+  try { manifest = await readLatestManifest() }
+  catch (error) {
+    // Only this process's successful native start grants path-free stop
+    // authority. A refused disk document never grants paths or ownership.
+    if (!runtimeState?.running || !ownedCapture || ownedCapture.sessionId !== runtimeState.sessionId
+      || ownedCapture.engine !== runtimeState.engine) throw error
+    manifest = normalizeManifest(runtimeState)
+    inspectionFailure = { error }
+  }
   if (!manifest?.running) {
     if (await legacyCaptureCleanupPending()) throw new Error(LEGACY_CAPTURE_WARNING)
     return getTrafficForensicsStatus()
@@ -1151,6 +1161,7 @@ async function stopCapture(reason: string): Promise<TrafficForensicsStatus> {
   let trusted = false
   let trustError: unknown
   try {
+    if (inspectionFailure) throw inspectionFailure.error
     await assertForensicsExecutionTrusted(manifest)
     trusted = true
   } catch (error) { trustError = error }
@@ -1205,7 +1216,7 @@ async function stopCapture(reason: string): Promise<TrafficForensicsStatus> {
   logEvent('info', 'traffic-forensics', 'stopped deep traffic capture', {
     sessionId: manifest.sessionId, engine: manifest.engine, reason
   })
-  return getTrafficForensicsStatus()
+  return statusForManifest(runtimeState ?? stopped, await legacyCaptureCleanupPending())
 }
 
 export function restartTrafficForensicsSession(reason = 'manual-restart'): Promise<TrafficForensicsStatus> {
@@ -1213,7 +1224,12 @@ export function restartTrafficForensicsSession(reason = 'manual-restart'): Promi
 }
 
 async function restartCapture(reason: string): Promise<TrafficForensicsStatus> {
-  const current = await readLatestManifest()
+  let current: SessionManifest | null
+  try { current = await readLatestManifest() }
+  catch (error) {
+    await stopCapture(reason)
+    throw error // Cleanup may succeed, but an incompatible document still forbids a new capture.
+  }
   const mode = current?.mode
   const target = current?.target
   await stopCapture(reason)
@@ -1224,9 +1240,13 @@ async function restartCapture(reason: string): Promise<TrafficForensicsStatus> {
 }
 
 export async function getTrafficForensicsStatus(): Promise<TrafficForensicsStatus> {
-  const settings = getSettings()
   const legacyPending = await legacyCaptureCleanupPending()
   const manifest = await reconcileStaleRunningManifest(await readLatestManifest())
+  return statusForManifest(manifest, legacyPending)
+}
+
+async function statusForManifest(manifest: SessionManifest | null, legacyPending: boolean): Promise<TrafficForensicsStatus> {
+  const settings = getSettings()
   const artifactFiles = await listTrafficForensicsArtifacts(manifest?.sessionDir ?? null)
   if (!settings.enabled && !manifest?.running && !legacyPending) {
     return {

@@ -1126,12 +1126,16 @@ async function applyOwnedAutoconfig(targets: string[], proxyAddr: string, proxyT
 }
 
 async function rollbackOwnedAutoconfig(targets: string[]): Promise<Record<string, boolean>> {
-  const results = await autoconfig.rollback(targets.filter(target => target !== 'env'))
+  let results: Record<string, boolean> = {}
+  let refusal: { error: unknown } | undefined
+  try { results = await autoconfig.rollback(targets.filter(target => target !== 'env')) }
+  catch (error) { refusal = { error } }
   if (targets.includes('env')) {
     // Restoring Soft env is a protection stop. Never silently remove or alter
     // env underneath an active native connection through this legacy API.
     results.env = tunnelState.snapshot.mode === 'tun' ? false : (await stopProtection()).success
   }
+  if (refusal) throw refusal.error
   return results
 }
 
