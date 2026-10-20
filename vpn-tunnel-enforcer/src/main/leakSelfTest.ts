@@ -124,16 +124,6 @@ interface SharedLeakRun {
 }
 let inFlightLeakTest: SharedLeakRun | null = null
 let inFlightSessionId = 0
-// A subscriber may still own its diagnostic snapshot after shared probes finish.
-const activeLeakSubscribers = new Set<OperationLease>()
-
-interface LeakSelfTestOptions {
-  signal?: AbortSignal
-  onOperation?: (lease: OperationLease) => void
-  owner?: OperationOwner
-  timeoutMs?: number
-  afterResult?: (result: LeakSelfTestResult, signal: AbortSignal) => Promise<unknown>
-}
 
 function cancelledResult(): LeakSelfTestResult {
   return {
@@ -250,7 +240,7 @@ $rows | ConvertTo-Json -Compress
   }
 }
 
-export async function runLeakSelfTest(options: LeakSelfTestOptions = {}): Promise<LeakSelfTestResult> {
+export async function runLeakSelfTest(options: { signal?: AbortSignal; onOperation?: (lease: OperationLease) => void; owner?: OperationOwner; timeoutMs?: number } = {}): Promise<LeakSelfTestResult> {
   let subscribed: SharedLeakRun | undefined
   try {
     return await operations.run('leak-check', async lease => {
@@ -271,20 +261,13 @@ export async function runLeakSelfTest(options: LeakSelfTestOptions = {}): Promis
       subscribed = run
       const shared = run
       shared.subscribers.add(lease)
-      activeLeakSubscribers.add(lease)
       const detach = () => {
         shared.subscribers.delete(lease)
         if (!shared.subscribers.size && !shared.finished) shared.controller.abort()
       }
       lease.signal.addEventListener('abort', detach, { once: true })
-      try {
-        const result = structuredClone(await lease.wait(shared.completion))
-        if (options.afterResult) await lease.wait(options.afterResult(result, lease.signal))
-        return result
-      } finally {
-        activeLeakSubscribers.delete(lease)
-        lease.signal.removeEventListener('abort', detach); detach()
-      }
+      try { return structuredClone(await lease.wait(shared.completion)) }
+      finally { lease.signal.removeEventListener('abort', detach); detach() }
     }, { signal: options.signal, owner: options.owner, timeoutMs: options.timeoutMs, resource: `leak-subscriber:${randomUUID()}` })
   } catch (error) {
     // Preserve the legacy global-stop view; per-request cancel/deadline stay typed.
@@ -434,7 +417,7 @@ export function cancelLeakSelfTest(): void {
   activeSessionId += 1
   const run = inFlightLeakTest
   run?.controller.abort()
-  for (const lease of activeLeakSubscribers) lease.cancel()
+  for (const lease of run?.subscribers ?? []) lease.cancel()
 }
 
 export function resetLeakTestThrottlesForTest(): void {

@@ -2595,15 +2595,15 @@ app.whenReady().then(async () => {
   registerDiagnosticsExportHandler()
 
   handleLogged('run-leak-self-test', (event, requestId?: string) => runRequesterOperation(event.sender, requestId,
-    (signal, onOperation) => runLeakSelfTest({
-      signal, onOperation,
-      afterResult: async (result, snapshotSignal) => {
-        if (result.physicalAdapterReached || result.publicIpMismatch) {
-          // The subscriber retains the snapshot until its physical effects drain.
-          await captureSnapshot('leak-detected', { signal: snapshotSignal }).catch(() => undefined)
-        }
+    async (signal, onOperation) => {
+      const result = await runLeakSelfTest({ signal, onOperation })
+      if (!signal.aborted && (result.physicalAdapterReached || result.publicIpMismatch)) {
+        // Preserve the known verdict while a separate owned operation captures evidence.
+        void operations.run('snapshot', lease => lease.wait(captureSnapshot('leak-detected', { signal: lease.signal })))
+          .catch(() => undefined)
       }
-    })))
+      return result
+    }))
 
   // Routing self-test: prove the VPN/direct split is real by comparing the
   // egress IP through proxy-out (VPN) vs direct-out, and — when smart RU split
