@@ -7055,3 +7055,38 @@ CI/review нового SHA проверяются отдельно после pu
   audit fixtures;production source с момента build не менялся.
   Targeted70/70,integration37/37,coverage AC927/927,F210/210,diff check exit0.
   Изменения готовы к PR;exact-head Qodo/Revix/CI остаются обязательными.
+
+### PR #93: Qodo follow-up (20.10.2026)
+
+- Создан #93 https://github.com/newnout6-a11y/vpn/pull/93,head8e57b56.
+  Qodo1559039 completed на exact SHA8e57b560653bb5a84c8827d485e21a8ebed90b80:
+  c5e8c006 (redacted history correlation) и0fa60b07 (admission released before
+  physical drain) подтверждены. Attribution не менялся. Revix118412979733
+  completed/success,Ready to merge на старом head;это не заменяет новые gates.
+- Receipt id теперь op_32hex,также сохраняются operationKey/correlationId.
+  Raw registry UUID остаётся cancellation identity. Generic secret redactor
+  по-прежнему маскирует поле id;правило не ослаблено:operationKey и action
+  correlation проходят настоящий serializer/redactSensitiveConfig и остаются
+  различимыми у двух реальных завершённых loopback checks. Legacy UUID history
+  остаётся читаемой,новые metadata fields optional для старых записей.
+- OperationLease.drained —readonly promise реального освобождения всех effects.
+  Single/batch IPC сохраняют admission и destroyed listener до этих promises,
+  возвращая caller cancellation/deadline сразу. Cancel больше не удаляет slot;
+  duplicate/limit возвращают typed conflict. Legacy request IDs сохранены.
+- Новые sender-limit regressions:single/batch × cancel/deadline,held DNS,
+  prompt result,отказ replacement/duplicate,independent sender,listener lifetime
+  и повторная admission после drain. До fix6 failed/20 passed
+  (.tmp/wp0-live-owner-qodo-red.log,exit1);первый follow-up показал настоящий
+  generic id-redaction и новый deferred listener lifetime (2 failed),оба
+  учтены без ослабления production redactor.
+- Targeted5 suites145/145 passed,5.97s,exit0
+  (.tmp/wp0-live-owner-qodo-targeted.log);explicit integration37/37,2.11s,exit0
+  (.tmp/wp0-live-owner-qodo-integration.log). Coverage AC927/927,F210/210,diff0.
+  Full/build выполняются;новый commit/push/exact-head review ещё не приняты.
+
+- Qodo follow-up final local:npm.cmd run build —exit0 (typecheck165 channels/
+  0 public any,.tmp/wp0-live-owner-qodo-build.log);npm.cmd test -- --maxWorkers=1
+  —5020 passed/5 skipped/0 failed,303 files passed/2 skipped,440.20s,exit0
+  (.tmp/wp0-live-owner-qodo-full.log). Source/test tree не менялся во время full.
+  Targeted145/145,integration37/37,coverage AC927/927,F210/210,diff0.
+  Старый CI39356680659 на8e57b56 success;новый head требует своих CI/review.

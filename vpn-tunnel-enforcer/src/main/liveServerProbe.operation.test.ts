@@ -5,9 +5,10 @@ const state = vi.hoisted(() => ({
   a: vi.fn(), aaaa: vi.fn(), sockets: [] as any[], requests: [] as any[], children: [] as any[],
   profiles: [] as any[], ready: vi.fn(), rm: vi.fn(), geo: vi.fn(),
   save: vi.fn(), splitRead: vi.fn(() => ({ enabled: false })), splitLoads: 0,
-  splitGate: undefined as Promise<void> | undefined
+  splitGate: undefined as Promise<void> | undefined,
+  handlers: new Map<string, Function>()
 }))
-vi.mock('electron', () => ({ app: { getPath: () => '/tmp/test-userdata' }, ipcMain: { handle: vi.fn() } }))
+vi.mock('electron', () => ({ app: { getPath: () => '/tmp/test-userdata' }, ipcMain: { handle: (channel: string, effect: Function) => state.handlers.set(channel, effect) } }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 vi.mock('axios', () => ({ default: { get: state.geo } }))
 vi.mock('./settings', () => ({ settingsStore: { get: () => ({ disableGeoLookup: true, proxyEngine: 'sing-box' }) } }))
@@ -40,7 +41,7 @@ vi.mock('child_process', async original => ({ ...await original<typeof import('c
   const child = Object.assign(new EventEmitter(), { pid: 12001, stdout: Object.assign(new EventEmitter(), { destroy: vi.fn() }), stderr: Object.assign(new EventEmitter(), { destroy: vi.fn() }), kill: vi.fn() })
   state.children.push(child); return child
 } }))
-import { collectSplitTunnelDiagnostics, probeInfrastructure, runLiveServerCheck } from './liveServerProbe'
+import { collectSplitTunnelDiagnostics, probeInfrastructure, registerLiveServerProbeIpcHandlers, runLiveServerCheck } from './liveServerProbe'
 import { operations } from './operations'
 import { withCorrelation } from './actionCorrelation'
 const flush = async () => { for (let i = 0; i < 60; i++) await Promise.resolve() }
@@ -150,10 +151,43 @@ describe('root live-check ownership', () => {
     const result = observe(runLiveServerCheck({ host: 'probe.example', port: 80 }, controller.signal, progress))
     await drainFixtures(); expect(result.error).toBeUndefined(); expect(result.settled).toBe(true)
     expect(state.save).toHaveBeenCalledOnce(); expect(result.value?.cancelled).toBe(false)
-    const record = operations.list().find(operation => operation.operationId === result.value?.id)
+    const record = operations.list().find(operation => operation.operationKey === result.value?.id)
     expect(record).toMatchObject({ status: 'success' })
     controller.abort(); await flush(); expect(record?.status).toBe('success'); expect(state.save).toHaveBeenCalledOnce()
   })
+})
+it.each([
+  { batch: false, boundary: 'cancel' }, { batch: false, boundary: 'deadline' },
+  { batch: true, boundary: 'cancel' }, { batch: true, boundary: 'deadline' }
+])('retains sender admission through physical drain (batch=$batch, $boundary)', async ({ batch, boundary }) => {
+  registerLiveServerProbeIpcHandlers()
+  const gate = held<Array<{ address: string; ttl: number }>>([]); state.a.mockReturnValue(gate.promise)
+  state.profiles = [{ id: 'target', server: 'probe.example', port: 80 }]
+  const owner = Object.assign(new EventEmitter(), { id: 501, isDestroyed: () => false, send: vi.fn() })
+  const other = Object.assign(new EventEmitter(), { id: 502, isDestroyed: () => false, send: vi.fn() })
+  const run = state.handlers.get(batch ? 'server:live-check-batch' : 'server:live-check')!
+  const cancel = state.handlers.get('server:live-check-cancel')!, count = batch ? 2 : 4
+  const options = (requestId: string) => ({ requestId, host: 'probe.example', port: 80, profileIds: ['target'], mode: 'basic' })
+  const results = Array.from({ length: count }, (_, index) => observe(run({ sender: owner }, options(`legacy-${index}`))))
+  await flush(); expect(state.a).toHaveBeenCalledTimes(count)
+  if (boundary === 'cancel') for (let i = 0; i < count; i++) await cancel({ sender: owner }, `legacy-${i}`)
+  else await vi.advanceTimersByTimeAsync(25_000)
+  await flush(); expect(results.every(result => result.settled)).toBe(true)
+  if (!batch) expect(results.every(result => result.error?.category === (boundary === 'cancel' ? 'cancelled' : 'timeout'))).toBe(true)
+  const refused = observe(run({ sender: owner }, options('replacement')))
+  const duplicate = observe(run({ sender: owner }, options('legacy-0')))
+  await flush()
+  expect(refused.error).toMatchObject({ category: 'conflict' }); expect(duplicate.error).toMatchObject({ category: 'conflict' })
+  expect(state.a).toHaveBeenCalledTimes(count)
+  const independent = observe(run({ sender: other }, options('legacy-0')))
+  await flush(); expect(independent.settled).toBe(false); expect(state.a).toHaveBeenCalledTimes(count + 1)
+  await cancel({ sender: other }, 'legacy-0'); await flush()
+  expect(owner.listenerCount('destroyed')).toBe(count)
+  gate.release([]); await drainFixtures()
+  expect(owner.listenerCount('destroyed')).toBe(0); expect(other.listenerCount('destroyed')).toBe(0)
+  const replacement = observe(run({ sender: owner }, options('legacy-0')))
+  await flush(); expect(replacement.error).toBeUndefined(); expect(state.a).toHaveBeenCalledTimes(count + 2)
+  await cancel({ sender: owner }, 'legacy-0'); await drainFixtures()
 })
 it.each([false, true])('does not cache a late ASN response after cancellation (fallback=%s)', async fallback => {
   const gate = held({ data: { asn: 'AS123', country: 'late' } }), controller = new AbortController()

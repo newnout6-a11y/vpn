@@ -81,6 +81,9 @@ vi.mock('tls', async (importOriginal) => {
 
 import { probeTls, registerLiveServerProbeIpcHandlers, runLiveServerCheck } from './liveServerProbe'
 import { computeHistoryDiff, liveServerHistory } from './liveServerHistory'
+import { redactSensitiveConfig } from './vpnProfiles'
+import { withCorrelation } from './actionCorrelation'
+import { operations } from './operations'
 
 describe('Live Server Audit Regressions: Defect Verifications', () => {
   beforeEach(() => {
@@ -154,17 +157,27 @@ describe('Live Server Audit Regressions: Defect Verifications', () => {
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
     try {
       const options = { profileId: 'audit-p2', host: '127.0.0.1', port: (server.address() as any).port }
-      const a = await runLiveServerCheck(options)
-      const b = await runLiveServerCheck(options)
+      const correlationId = 'ipc_11111111111141118111111111111111'
+      const a = await withCorrelation(correlationId, () => runLiveServerCheck(options))
+      const b = await withCorrelation(correlationId, () => runLiveServerCheck(options))
       expect(a.id).not.toBe(b.id)
       for (const check of [a, b]) {
-        expect(check.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+        expect(check.id).toMatch(/^op_[0-9a-f]{32}$/i)
         expect(check.cancelled).toBe(false)
         expect(check.infrastructure?.changesFromPrevious?.ipChanged).toBe(true)
       }
       expect(mocks.saved).toHaveLength(2)
       expect(mocks.saved[0].infrastructure.changesFromPrevious.ipChanged).toBe(true)
       expect(mocks.saved[1].infrastructure.changesFromPrevious.ipChanged).toBe(true)
+      // The real serializer and production redactor must preserve distinct
+      // receipts and the action key, while cancellation UUIDs stay internal.
+      const redacted = JSON.parse(JSON.stringify(redactSensitiveConfig(mocks.saved)))
+      expect(redacted.map((check: any) => check.operationKey)).toEqual([a.id, b.id])
+      expect(redacted.map((check: any) => check.correlationId)).toEqual([correlationId, correlationId])
+      for (const check of [a, b]) {
+        const operation = operations.list().find(item => item.operationKey === check.id)!
+        expect(JSON.stringify(redacted)).not.toContain(operation.operationId)
+      }
     } finally {
       server.closeAllConnections()
       await new Promise<void>(resolve => server.close(() => resolve()))
@@ -239,13 +252,14 @@ it('isolates cancellation by sender and rejects duplicate IDs', async () => {
   const options = { requestId: 'same-id', host: 'audit.invalid', port: 443 }
   const pending = run({ sender: owner }, options)
   const cancelled = expect(pending).rejects.toMatchObject({ category: 'cancelled' })
-  await expect(run({ sender: owner }, options)).rejects.toThrow('Duplicate')
+  await expect(run({ sender: owner }, options)).rejects.toMatchObject({ category: 'conflict' })
   expect((await cancel({ sender: other }, 'same-id')).cancelled).toBe(false)
   expect((await cancel({ sender: owner }, 'same-id')).cancelled).toBe(true)
+  expect(owner.listenerCount('destroyed')).toBe(1)
   release([]) // Native cancellation initiates cleanup; the raw query must also settle.
   await cancelled
   expect(mocks.cancelDns).toHaveBeenCalled()
-  expect(owner.listenerCount('destroyed')).toBe(0)
+  await vi.waitFor(() => expect(owner.listenerCount('destroyed')).toBe(0))
   mocks.resolve4.mockResolvedValue([])
 })
 it.each(['timeout', 'filtered'])('does not classify %s as a closed port', state => {

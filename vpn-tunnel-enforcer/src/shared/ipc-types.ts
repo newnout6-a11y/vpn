@@ -554,7 +554,10 @@ export interface LiveServerBatchCheckResult {
 }
 
 export interface LiveServerCheck {
+  /** New receipts use a redaction-safe op_ key; legacy UUIDs remain readable. */
   id: string
+  operationKey?: string
+  correlationId?: string
   requestId?: string
   profileId?: string
   host: string

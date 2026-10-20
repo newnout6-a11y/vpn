@@ -3290,9 +3290,13 @@ foreach ($sz in $ladder) {
 export async function runLiveServerCheck(
   options: LiveServerCheckOptions,
   signal?: AbortSignal,
-  onProgress?: (progress: LiveCheckProgress) => void
+  onProgress?: (progress: LiveCheckProgress) => void,
+  onAdmitted?: (lease: OperationLease) => void
 ): Promise<LiveServerCheck> {
-  return operations.run('server-probe', lease => runLiveServerCheckOwned(options, lease, onProgress), {
+  return operations.run('server-probe', lease => {
+    onAdmitted?.(lease)
+    return runLiveServerCheckOwned(options, lease, onProgress)
+  }, {
     resource: `live-check:${crypto.randomUUID().replaceAll('-', '')}`,
     timeoutMs: options.mode === 'extended' ? 60_000 : 25_000, signal
   })
@@ -3305,7 +3309,7 @@ async function runLiveServerCheckOwned(
 ): Promise<LiveServerCheck> {
   const startedAt = new Date().toISOString()
   const startTs = Date.now()
-  const checkId = lease.operation.operationId
+  const checkId = lease.operation.operationKey
   const requestId = options.requestId || checkId
 
   // Look up profile if profileId was supplied
@@ -3539,6 +3543,8 @@ async function runLiveServerCheckOwned(
 
   const partialCheck: Partial<LiveServerCheck> = {
     id: checkId,
+    operationKey: checkId,
+    correlationId: lease.operation.correlationId,
     requestId,
     profileId: options.profileId,
     host,
@@ -3610,7 +3616,8 @@ async function runLiveServerCheckOwned(
 export async function runLiveServerBatchCheck(
   options: LiveServerBatchCheckOptions,
   signal?: AbortSignal,
-  onProgress?: (progress: LiveServerBatchCheckProgress) => void
+  onProgress?: (progress: LiveServerBatchCheckProgress) => void,
+  onAdmitted?: (lease: OperationLease) => void
 ): Promise<LiveServerBatchCheckResult> {
   const startedAt = new Date().toISOString()
   const requestId = options.requestId || crypto.randomUUID()
@@ -3651,7 +3658,8 @@ export async function runLiveServerBatchCheck(
             detail: progress.detail,
             medianMbps: undefined
           })
-        }
+        },
+        onAdmitted
       )
       results.push(result)
       emit({
@@ -3697,9 +3705,10 @@ export function registerLiveServerProbeIpcHandlers(): void {
     const requestId = options.requestId || crypto.randomUUID()
     const owner = _event.sender?.id ?? 0
     const key = `${owner}:${requestId}`
-    if (activeControllers.has(key)) throw new Error('Duplicate live check requestId')
-    if ([...activeControllers.keys()].filter(k => k.startsWith(`${owner}:`)).length >= 4) throw new Error('Too many active live checks')
+    if (activeControllers.has(key)) throw new IpcFault('conflict')
+    if ([...activeControllers.keys()].filter(k => k.startsWith(`${owner}:`)).length >= 4) throw new IpcFault('conflict')
     const controller = new AbortController()
+    const drains: Promise<void>[] = []
     const onDestroyed = () => controller.abort()
     _event.sender?.once('destroyed', onDestroyed)
     activeControllers.set(key, controller)
@@ -3712,14 +3721,16 @@ export function registerLiveServerProbeIpcHandlers(): void {
           if (_event.sender && !_event.sender.isDestroyed()) {
             _event.sender.send('server:live-check-progress', progress)
           }
-        }
+        },
+        lease => { drains.push(lease.drained) }
       )
       return result
     } finally {
-      _event.sender?.removeListener('destroyed', onDestroyed)
-      if (activeControllers.get(key) === controller) {
-        activeControllers.delete(key)
-      }
+      // Caller timeout is prompt; admission and lifetime still cover native work.
+      void Promise.all(drains).then(() => {
+        _event.sender?.removeListener('destroyed', onDestroyed)
+        if (activeControllers.get(key) === controller) activeControllers.delete(key)
+      })
     }
   })
 
@@ -3733,9 +3744,10 @@ export function registerLiveServerProbeIpcHandlers(): void {
     const requestId = options.requestId || crypto.randomUUID()
     const owner = _event.sender?.id ?? 0
     const key = `${owner}:${requestId}`
-    if (activeControllers.has(key)) throw new Error('Duplicate live check requestId')
-    if ([...activeControllers.keys()].filter(k => k.startsWith(`${owner}:`)).length >= 2) throw new Error('Too many active live checks')
+    if (activeControllers.has(key)) throw new IpcFault('conflict')
+    if ([...activeControllers.keys()].filter(k => k.startsWith(`${owner}:`)).length >= 2) throw new IpcFault('conflict')
     const controller = new AbortController()
+    const drains: Promise<void>[] = []
     const onDestroyed = () => controller.abort()
     _event.sender?.once('destroyed', onDestroyed)
     activeControllers.set(key, controller)
@@ -3747,11 +3759,14 @@ export function registerLiveServerProbeIpcHandlers(): void {
           if (_event.sender && !_event.sender.isDestroyed()) {
             _event.sender.send('server:live-check-batch-progress', progress)
           }
-        }
+        },
+        lease => { drains.push(lease.drained) }
       )
     } finally {
-      _event.sender?.removeListener('destroyed', onDestroyed)
-      if (activeControllers.get(key) === controller) activeControllers.delete(key)
+      void Promise.all(drains).then(() => {
+        _event.sender?.removeListener('destroyed', onDestroyed)
+        if (activeControllers.get(key) === controller) activeControllers.delete(key)
+      })
     }
   })
 
@@ -3761,7 +3776,6 @@ export function registerLiveServerProbeIpcHandlers(): void {
       const ctrl = activeControllers.get(key)
       if (ctrl) {
         ctrl.abort()
-        activeControllers.delete(key)
         return { cancelled: true }
       }
       return { cancelled: false, reason: 'not_found' }
