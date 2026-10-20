@@ -6654,3 +6654,330 @@ CI/review нового SHA проверяются отдельно после pu
   Coverage AC927/927,F210/210,diff check —exit0. IPC/preload/bridge не менялись;
  7-fixture Electron runner не повторялся. Native evidence текущего участка —
   две actual loopback HTTP checks. Новые exact-head Qodo/CI pending.
+
+### PR #91 принят; handshake/media/throughput drain (20.10.2026)
+
+- #91 final head216342768edeae28e6cc9b69db75f2143f3eac7c: Qodo1558121 completed
+  без findings (.tmp/qodo91-final.json), CI39343736114 success.
+  Merge/main88bca27e2c12a6f31867da56aa36df90ff196cce; reviewed/main tree совпал:
+  b9c19ecc64aa276537da8eaa050b6b69555fdfd7. Revix до03:00 был по квоте,
+  полного review нет;это не approval.
+- AT-00-003/007: live handshake передаёт signal/retain в SOCKS/HTTPS helpers,
+  удерживает late dial и raw/TLS close. Media активно отменяет TLS и не пишет
+  поздний HEAD. Каждый throughput sample держит raw+TLS до close до следующего
+  sample;duration фиксируется до drain. Header accumulation ограничен64KiB,
+  split delimiter не теряет body;sync TLS failure снимает timer/abort.
+- Изолированный child удерживает worker slot/workDir до actual close. Ранняя
+  ошибка child во время PID persistence не теряется и не вызывает unhandled
+  rejection. Проигравший readiness poll отменяется,retained до settlement/close.
+- До fix handshakeDrain:5 failed/0 passed,1.27s (.tmp/wp0-live-handshake-before.log).
+  Первый fix4 passed/1 failed,6.08s: active-profile fixture ошибочно выбирал
+  isolated child и не закрывал его;fixture исправлен без ослабления drain.
+  Затем5/5 passed,1.22s (.tmp/wp0-live-handshake-targeted2.log).
+- При расширении:24 passed/1 failed (.tmp/wp0-live-handshake-targeted3.log) —
+  fixture эмитил error после close;оставлен late error до close. Затем26 passed/
+  3 failed (.tmp/wp0-live-handshake-targeted4.log):2 native teardown ошибочно
+  advance fake timers при real timers,исправлен teardown;1 реальная regression
+  раннего child error исправлена порядком readiness race. После fix138/138
+  passed,5.63s (.tmp/wp0-live-handshake-targeted5.log).
+- Review выявил также неподконтрольный readiness poll после child error.
+  Добавлены retain+локальная отмена и regression;final targeted8 suites139/139
+  passed,5.97s (.tmp/wp0-live-handshake-targeted6.log). Команда: npm.cmd test --
+  src/main/liveServerProbe.handshakeDrain.test.ts src/main/liveServerProbe.resourceDrain.test.ts
+  src/main/liveServerProbe.networkDrain.test.ts src/main/liveServerProbe.httpDrain.test.ts
+  src/main/liveServerProbe.test.ts src/main/liveServerProbe.extended.test.ts
+  src/main/liveServerProbe.handshake.test.ts src/main/liveServerAuditRegression.test.ts.
+  Новая suite24 cases включает2 native:real loopback TLS cancellation и actual
+  child close до rm. Старое handshake assertion расширено новым retain аргументом.
+- Initial typecheck/build passed (165 channels/0 public any);после readiness fix
+  нужны новые full/build. Начатый .tmp/wp0-live-handshake-full.log не final:
+  source изменился во время прогона;результат не доказательство final tree.
+  Coverage AC927/927,F210/210,diff check exit0. IPC/preload/bridge не менялись;
+  7-fixture Electron runner не повторялся. Нормативные docs/ не менялись.
+  Общий live operation owner/deadline/history/renderer остаётся следующим
+  участком,весь WP-0 не завершён.
+
+- Superseded initial full (.tmp/wp0-live-handshake-full.log):5024 passed/
+  5 skipped/1 failed,339.03s,exit1. Единственный failure —5000ms timeout
+  существующего native PowerShell case adaptiveNetworkIdentity.test.ts
+  keeps the previous profile-only identity behavior (10563ms). Source этого
+  теста/модуля не менялся. Причина таймаута пока не установлена;параллельный
+  final full начался03:05,первый03:03. Выполняется изолированная проверка.
+
+- Native identity отдельно: npm.cmd test -- src/main/adaptiveNetworkIdentity.test.ts
+  —25/25 passed,3.14s,exit0 (.tmp/wp0-live-handshake-network-identity.log).
+  Причина разового предыдущего timeout не установлена;несвязанный код не менялся.
+- Final production full: npm.cmd test -- --maxWorkers=1 —5025 passed/5 skipped/
+  0 failed,302 files passed/2 skipped,329.86s,exit0
+  (.tmp/wp0-live-handshake-full-final.log). Production source не менялся с
+  начала final full. Во время прогона добавлены2 test assertions:media и
+  throughput terminal events обязаны destroy до последующей cancellation,
+  чтобы cancel не маскировал ошибку обработчика. Усиленная suite отдельно:
+  npm.cmd test -- src/main/liveServerProbe.handshakeDrain.test.ts —24/24
+  passed,1.24s (.tmp/wp0-live-handshake-terminal-assertions.log).
+- npm.cmd run build final,включая typecheck165 channels/0 public any —exit0
+  (.tmp/wp0-live-handshake-build-final.log). Перед commit повторяются
+  typecheck/coverage/diff. Exact-head Qodo/CI pending.
+
+### PR #92 — Qodo/Revix remediation (20.10.2026)
+
+- Initial headfef2945dc8f2bcad223c4d8b363aadbe084043b4,Qodo1558277 completed:
+  2 remediation findings —stalled SOCKS dial и child close без верхней границы.
+  Attribution не менялся. Revix после сброса квоты выполнил review:2 minor
+  comments —itest suffix и swallowed expect внутри rm mock.
+- SOCKS finding подтверждён:openTcpViaSocks теперь сам создаёт TCP transport,
+  держит close и начинает SOCKS negotiation только после connect через
+  existing_socket. Abort/общий timeout уничтожают transport до negotiation
+  и во время неё. Поздний socket по-прежнему уничтожается/retained.
+- New transport tests до fix:3 failed/0 passed и1 unhandled rejection
+  (.tmp/wp0-live-handshake-qodo-dial-before.log);fixture старого helper получал
+  undefined вместо нового existing_socket. После fix3/3 passed,1.17s.
+  Related4 suites81/81 passed,1.56s (.tmp/wp0-live-handshake-qodo-dial-targeted.log).
+- Public media/handshake callers теперь идут через существующий registry kind
+  server-probe с отдельными resource IDs и deadlines15s/60s. Cancel/deadline
+  возвращается promptly,а registry.close и shared handshake worker ждут
+  actual close/settlement. Handshake вызывает owned media напрямую,чтобы
+  nested caller race не освободил handshake slot до media drain.
+- Child exit закрывает собственные stdout/stderr handles:наследованный pipe
+  больше не блокирует close после подтверждённого выхода. Таймер НЕ считается
+  доказательством смерти child. Если native kill вообще не завершил процесс,
+  caller получает terminal timeout/cancel,а слот и workDir сохраняются до
+  close;shutdown ждёт тот же ресурс. Это необходимый fail-closed предел,
+  освобождать slot/rm живого процесса по одному таймеру небезопасно.
+  Managed integration tests проверяют prompt caller,blocked queued successor,
+  pending shutdown и late close;raw boundary tests используют controlled
+  registry delegate,отдельные managed cases —настоящий registry.
+- Revix test concern исправлен:closedAtRemoval записывается внутри rm mock
+  и проверяется снаружи после task,так что production catch не проглотит assert.
+  Suite переименована в liveServerProbe.handshakeDrain.itest.ts;новые native
+  SOCKS tests —keyHealthChecker.transportDrain.itest.ts. CI получил отдельный
+  targeted integration step,поэтому rename не убирает проверки из CI.
+- Git mv сначала был вызван с неверным cwd-relative path и завершился fatal;
+  исправлен путь. Обычный npm test исключает itest:промежуточные63 passed
+  не были проверкой новых integration suites. Правильная команда:
+  npm.cmd test -- --mode integration src/main/liveServerProbe.handshakeDrain.itest.ts
+  src/main/keyHealthChecker.transportDrain.itest.ts —31/31 passed,1.94s,exit0
+  (.tmp/wp0-live-handshake-qodo-integration.log),включая3 real SOCKS fixtures.
+- Final targeted unit10 suites172/172 passed,6.28s,exit0
+  (.tmp/wp0-live-handshake-qodo-targeted-final.log);команда из preceding8 suites
+  без переименованного handshakeDrain,плюс keyHealthChecker.test.ts,
+  keyHealthChecker.transportDrain.test.ts,groupHealthOperation.test.ts.
+  npm.cmd run build,включая typecheck165 channels/0 public any —exit0
+  (.tmp/wp0-live-handshake-qodo-build.log). Coverage AC927/927,F210/210 и
+  git diff --check exit0. Новый полный прогон в .tmp/wp0-live-handshake-qodo-full.log.
+
+- Follow-up full (.tmp/wp0-live-handshake-qodo-full.log):5003 passed/5 skipped/
+  1 failed,317.30s,exit1. Failure residualReview2.test.ts ожидал Cancelled,
+  получил connect ECONNREFUSED127.0.0.1:1080:старый fixture мокал только
+  SocksClient,теперь требуется контролировать созданную приложением TCP
+  границу. В этом case замокан Socket.prototype.connect,остальные assertions
+  сохранены. Production source не менялся. npm.cmd test --
+  src/main/residualReview2.test.ts src/main/keyHealthChecker.transportDrain.test.ts
+  —17/17 passed,1.64s,exit0 (.tmp/wp0-live-handshake-qodo-residual-fixture.log).
+  Повтор полного набора: .tmp/wp0-live-handshake-qodo-full-final.log.
+
+- Final follow-up full: npm.cmd test -- --maxWorkers=1 —5004 passed/5 skipped/
+  0 failed,302 files passed/2 skipped,318.23s,exit0
+  (.tmp/wp0-live-handshake-qodo-full-final.log). Production/test tree не менялся
+  во время этого прогона. Integration отдельно31/31 passed (28 handshake/
+  media/throughput ownership +3 actual SOCKS fixtures);itest не входят в unit
+  count и явно запускаются новым CI step. Build/typecheck165 channels/0 public
+  any ранее прошёл на том же production source;после него менялся только
+  residual test fixture и journal. Coverage/diff повторяются перед commit.
+  Новые Qodo/Revix/CI обязательны на follow-up SHA.
+
+### PR #92 — bounded cleanup escalation (20.10.2026)
+
+- Follow-up head0a42d3240fdcf7592914ef0ce89aa8459a3538fd,Qodo1558452 completed:
+  SOCKS finding автоматически implemented,child drain finding остался pending.
+  Attribution не менялся. Revix Low risk;повторный itest nit ссылается на уже
+  переименованный .itest.ts,поэтому устарел;его suggestion о resource ID учтён
+  32hex suffix. Question об escalation потребовал явного shorter cleanup budget.
+- Выбран captured ChildProcess handle,а не PID lookup:на Windows это избегает
+  риска повторного kill чужого процесса после reuse PID. Вызов SIGTERM,через
+  1.5s SIGKILL,через5s без подтверждения close —structured warning state=blocked/
+  child-stop-unconfirmed и lease.expire() с terminal error/category=timeout.
+  Caller получает конечный результат;worker/resource/PID/workDir остаются
+  retained до actual close. Shutdown не выдаёт незавершённый kill за успех.
+  После late close release восстанавливается;таймеры снимаются.
+- Registry API expire делегирует существующий защищённый deadline transition,
+  не обходит commit fence и не освобождает physical lease. Regression до fix:
+  70 passed/1 failed,2.12s (.tmp/wp0-live-handshake-cleanup-deadline-before.log).
+  После fix registry/resource/handshake3 suites87/87 passed,2.27s
+  (.tmp/wp0-live-handshake-escalation-registry.log).
+- Первая integration после edit:31 passed/1 failed,1.65s:edit поменял kill в
+  abortHandler,но finally ещё посылал SIGKILL. Escalation regression это поймала;
+  finally исправлен на SIGTERM. Final integration32/32 passed,1.59s,exit0
+  (.tmp/wp0-live-handshake-escalation-integration-final.log). Проверяются
+  точные1.5s escalation,5s caller timeout,blocked successor/shutdown,late close.
+- Запущены новые build/typecheck и full: .tmp/wp0-live-handshake-escalation-
+  build.log/.tmp/wp0-live-handshake-escalation-full.log. Coverage AC927/927,
+  F210/210,diff exit0. Новый exact-head Qodo/Revix/CI нужен после push.
+
+- В продолжении выявлен timing gap: escalation создавался только в finally,
+  поэтому pending readiness/PID persistence откладывали SIGKILL после abort.
+  Новая regression до fix:1 failed/29 skipped,1.45s,exit1
+  (.tmp/wp0-live-handshake-readiness-stop-before.log). stopChild теперь
+  idempotent,запускает бюджеты непосредственно с первого stop request;
+  actual close снимает таймеры независимо от оставшихся retained promises.
+  Проверены held readiness,точные1.5s,запрет запуска successor и late drain.
+- Два промежуточных integration прогона дали32 passed/1 failed:assert считал
+  уже сработавший escalation timer ещё активным и не учитывал queue timer.
+  Исправлено только ожидание счётчика;final integration33/33 passed,1.72s,
+  exit0 (.tmp/wp0-live-handshake-readiness-stop-checked.log). Команда:
+  npm.cmd test -- --mode integration src/main/liveServerProbe.handshakeDrain.itest.ts
+  src/main/keyHealthChecker.transportDrain.itest.ts.
+- CI39348301027 на head0a42 завершился failure:5004 passed/4 skipped/1 failed,
+  native JSON export fixture превысил default5s при двух реальных PowerShell
+  ACL exports. Для этого fixture задан15s,как для соседних native file cases;
+  assertions и production export не менялись. Последующий targeted3 suites
+  99/99 passed,27.19s,exit0 (.tmp/wp0-live-handshake-cleanup-targeted-final.log).
+  В той команде лишний nonexistent operationRegistry.resources.test.ts не
+  добавил suite;следующий targeted явно содержит liveServerProbe.resourceDrain.
+- Build с typecheck165 channels/0 public any прошёл после stopChild fix
+  (.tmp/wp0-live-handshake-cleanup-build-final.log). Coverage AC927/927,F210/210,
+  diff exit0. Старый full escalation-full начат до stopChild fix и superseded;
+  его результат не будет использован для допуска окончательного дерева.
+
+- Targeted окончательного дерева: npm.cmd test -- src/main/operationRegistry.test.ts
+  src/main/liveServerProbe.resourceDrain.test.ts src/main/liveServerProbe.handshake.test.ts
+  src/main/serverKeyExportSecurity.test.ts —4 suites109/109 passed,23.81s,exit0
+  (.tmp/wp0-live-handshake-cleanup-targeted-checked.log). Full окончательного
+  дерева запущен без дальнейших source/test edits: npm.cmd test -- --maxWorkers=1
+  (.tmp/wp0-live-handshake-cleanup-full-final.log).
+
+- Final full: npm.cmd test -- --maxWorkers=1 —5005 passed/5 skipped/0 failed,
+  302 files passed/2 skipped,304.20s,exit0
+  (.tmp/wp0-live-handshake-cleanup-full-final.log). Source/test tree не менялся
+  во время прогона. Superseded escalation-full тоже завершился5005/5/0,
+  321.74s,но не используется как gate последнего fix. Final build/typecheck,
+  targeted109/109,integration33/33,coverage AC927/927,F210/210,diff exit0.
+  Новый exact-head Qodo/Revix/CI обязателен после push.
+
+### PR #92 — explicit blocked admission and output drain (20.10.2026)
+
+- Head5269ba3,Qodo1558570 completed:SOCKS implemented,child finding всё ещё
+  pending;attribution не менялся. Revix118391709473 completed/neutral Low risk:
+  retained fail-closed question,новый вопрос о trailing pipe output и suggestion
+  заменить exact timer counts observable assertions. Stale itest nit не применим.
+- Выявлена разница между terminal caller timeout и зависшей execution queue.
+  На5s coordinator теперь отзывает admission,отклоняет queued/new workers
+  типизированным conflict и завершает execution lease. Полный physical work
+  передан lease.retain:child/socket/readiness/workDir остаются owned;shutdown
+  ждёт actual drain. До него новый child не запускается. После physical settlement
+  (включая failure) admission автоматически восстанавливается.
+  Это bounded/fail-closed альтернатива предложенному Qodo удалению workDir
+  после одного лишь таймера. Таймер не доказывает смерть процесса.
+- Новая blocked-admission regression до fix:1 failed/30 skipped,1.31s,exit1
+  (.tmp/wp0-live-handshake-blocked-admission-before.log). Первый integration
+  после fix33 passed/1 failed,1.68s:старый deadline fixture ожидал очередь вместо
+  нового immediate conflict. Ожидание обновлено;34/34 passed,1.79s,exit0
+  (.tmp/wp0-live-handshake-blocked-admission-checked.log). Timer assertion
+  заменён проверкой отсутствия warning/повторного kill и blocked successor.
+- Вопрос Revix о final stderr подтверждён:exit закрывал pipes немедленно.
+  Regression до fix1 failed/30 skipped,1.26s
+  (.tmp/wp0-live-handshake-exit-output-before.log). После confirmed exit даётся
+  1.5s на обычный output drain;потом закрываются inherited pipes и пишется
+  sanitized child-output-incomplete. Actual close снимает timer. Уже exited
+  child не получает новые SIGTERM/SIGKILL. Неподтверждённый live child этим
+  timer не освобождается.
+- Дополнительный PID-persistence case поймал позднюю установку data listeners:
+  1 failed/1 passed/30 skipped,1.52s
+  (.tmp/wp0-live-handshake-persist-output-before.log). Data listeners перенесены
+  сразу после spawn,до await PID persistence. Final integration2 suites35/35
+  passed,1.94s,exit0 (.tmp/wp0-live-handshake-blocked-output-final.log).
+  Сохраняется auth_failed от trailing diagnostic в readiness и persistence cases.
+- Targeted5 suites127/127 passed,3.30s
+  (.tmp/wp0-live-handshake-blocked-targeted.log):npm.cmd test --
+  src/main/operationRegistry.test.ts src/main/liveServerProbe.resourceDrain.test.ts
+  src/main/liveServerProbe.handshake.test.ts src/main/liveServerProbe.extended.test.ts
+  src/main/residualReview2.test.ts. После targeted менялось только время установки
+  child data listeners;новый persistence integration проверил это отдельно.
+- Запущен final build/typecheck (.tmp/wp0-live-handshake-blocked-build-final.log)
+  и full (.tmp/wp0-live-handshake-blocked-full-final.log) на окончательном source.
+  Coverage AC927/927,F210/210,diff exit0. Новый exact-head remote gate нужен после push.
+
+- CI39350002218 на5269ba3 завершилсяsuccess:Windows unit/integration,
+  IPC/CSP,native IPv6 WFP/Electron,Rust/site —зелёные. Это предыдущий head,
+  до новых blocked-admission/output fixes;его success не переносится на них.
+  Final blocked-build с typecheck165 channels/0 public any exit0.
+
+- Final blocked-admission full: npm.cmd test -- --maxWorkers=1 —5005 passed/
+  5 skipped/0 failed,302 files passed/2 skipped,325.89s,exit0
+  (.tmp/wp0-live-handshake-blocked-full-final.log). Source/test tree не менялся
+  во время full. Integration35/35,targeted127/127,build/typecheck165/0any,
+  coverage AC927/927,F210/210,diff exit0. Physical work сохранён в registry,
+  execution queue больше не ждёт unconfirmed child без конечного решения.
+
+### PR #92 — typed worker queue expiry (20.10.2026)
+
+- Headba353ed,Qodo1558657 completed:оба прежних findings автоматически
+  implemented;новый aef026e8-23cf-4b97-b92d-909b1de144ca (Observability):
+  queued timeout возвращался как diagnostics object,registry писалsuccess.
+  Attribution не менялся. Revix118396191573 success/Low risk:новых
+  actionable замечаний нет;stale itest nit и прежний fail-closed question
+  проверены текущими filename и blocked-admission regressions.
+- Новая managed regression сравнивает caller result и operation record для
+  queued cancel и15s expiry. До fix1 failed/1 passed/32 skipped,1.52s,exit1
+  (.tmp/wp0-live-handshake-queue-taxonomy-before.log):registry status=success.
+- Внутренний queue catch больше не превращает expiry в fulfilled diagnostics:
+  known cancellation/queue timeout становятся IpcFault(cancelled/timeout),
+  уже typed conflict сохраняется,неожиданные exceptions не объявляютсяtimeout.
+  Fault проходит через operations.run;публичный wrapper после registry
+  переводит cancellation/timeout в прежний диагностический result.
+- npm.cmd test -- --mode integration src/main/liveServerProbe.handshakeDrain.itest.ts
+  src/main/keyHealthChecker.transportDrain.itest.ts —37/37 passed,1.88s,exit0
+  (.tmp/wp0-live-handshake-queue-taxonomy-after.log). Targeted те же5 suites:
+  127/127 passed,3.35s,exit0 (.tmp/wp0-live-handshake-queue-taxonomy-targeted.log).
+  Запущены build/typecheck (.tmp/wp0-live-handshake-queue-taxonomy-build.log)
+  и full (.tmp/wp0-live-handshake-queue-taxonomy-full.log). Coverage927/927,
+  210/210,diff exit0. Новый exact-head review/CI будет обязателен после push.
+
+- CI39351400924 наba353ed завершилсяsuccess (Windows/Rust/site,включая
+  explicit live itest step и native checks). Это предшествующий source;
+  queue-taxonomy fix требует нового exact-head gate. Новый taxonomy build
+  с typecheck165 channels/0 public any прошёл,exit0.
+
+- Final taxonomy full: npm.cmd test -- --maxWorkers=1 —5005 passed/5 skipped/
+  0 failed,302 files passed/2 skipped,312.16s,exit0
+  (.tmp/wp0-live-handshake-queue-taxonomy-full.log). Source/test tree во время
+  full не менялся. Integration37/37,targeted127/127,build/typecheck165/0any,
+  coverage927/927 и210/210,diff exit0. Новый exact-head Qodo/Revix/CI обязателен.
+
+### PR #92 — Revix typed queue and media failure status (20.10.2026)
+
+- Head3eb8ab2,Qodo1558731 completed:все3 findings автоматически implemented,
+  новых нет. Revix118399512303 completed/neutral Low risk дал2 issue:
+  timeout классифицировался по message prefix;mediaStream timeout сталskipped.
+  Оба подтверждены. Stale itest nit не соответствует уже имеющемуся filename;
+  прежний fail-closed вопрос покрыт execution/physical ownership split и5s budget.
+- Regression до typed queue fix:resourceDrain3 failed/7 passed,1.96s,exit1
+  (.tmp/wp0-live-handshake-typed-queue-before.log). Был также unhandled rejection
+  самого ожидаемого failing assertion до timer await;на assertion promise теперь
+  сразу установлен rejection observer,его последующий await всё равно проверяет
+  результат. Queue cancellation/deadline проверяются по IpcFault/category,
+  включая прежние residualReview2 cases,без зависимости от текста сообщения.
+- Media status regression до fix1 failed/1 passed/32 skipped,1.47s,exit1
+  (.tmp/wp0-live-handshake-media-timeout-before.log):timeout давалskipped.
+  Теперь public fallback mediaStream error при timeout,skipped приcancel.
+- withHandshakeWorkerLock сам выбрасывает IpcFault(cancelled/timeout/conflict).
+  Внутренний catch сохраняет typed fault;message parsing удалён.
+  Targeted5 suites127/127 passed,3.33s
+  (.tmp/wp0-live-handshake-revix-final-targeted.log);integration2 suites37/37,
+  1.84s,exit0 (.tmp/wp0-live-handshake-revix-final-integration.log).
+- На вопрос Revix о callers:production search этих symbols находит только
+  liveServerProbe.ts (public wrappers,runLiveServerCheck);прямых scheduler callers
+  нет. runLiveServerCheck возвращает rejection в общий IPC error envelope;
+  batch orchestration имеет catch. Ошибкаconflict не должна превращаться в
+  успешный diagnostic result. Общий live caller lifetime/history остаётся
+  следующим участком WP-0,не объявлен завершённым этим PR.
+- Запущен final build/typecheck (.tmp/wp0-live-handshake-revix-final-build.log)
+  и full (.tmp/wp0-live-handshake-revix-final-full.log);coverage AC927/927,
+  F210/210,diff exit0. После push нужны новые exact-head Qodo/Revix/CI.
+
+- Final Revix follow-up full:npm.cmd test -- --maxWorkers=1 —5005 passed/
+  5 skipped/0 failed,302 files passed/2 skipped,307.72s,exit0
+  (.tmp/wp0-live-handshake-revix-final-full.log). Source/test tree во время full
+  не менялся. Build/typecheck165 channels/0 public any,integration37/37,
+  targeted127/127,coverage AC927/927,F210/210,diff exit0.
+  CI39352438985 на предыдущем3eb8ab2 такжеsuccess;новый head требует своих gates.

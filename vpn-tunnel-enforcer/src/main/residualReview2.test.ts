@@ -1,5 +1,6 @@
 import { it, expect, vi, describe } from 'vitest'
 import { EventEmitter } from 'node:events'
+import { Socket } from 'node:net'
 import { isPublicIp, isPublicIpv4, openTcpViaSocks } from './keyHealthChecker'
 import { withHandshakeWorkerLock, probePmtu, evaluateLiveCheckFindings, queryDoH } from './liveServerProbe'
 import { SocksClient } from 'socks'
@@ -64,6 +65,10 @@ describe('Residual Review 2 Audit Fixes', () => {
       const ctrl = new AbortController()
       const mockDestroy = vi.fn()
       const mockSocket: any = { destroy: mockDestroy }
+      vi.spyOn(Socket.prototype, 'connect').mockImplementation(function (this: Socket) {
+        queueMicrotask(() => this.emit('connect'))
+        return this
+      })
 
       vi.spyOn(SocksClient, 'createConnection').mockImplementation(() => {
         return new Promise((resolve) => {
@@ -105,7 +110,7 @@ describe('Residual Review 2 Audit Fixes', () => {
 
       // Abort second while waiting
       ctrl.abort()
-      await expect(p2).rejects.toThrow('Cancelled')
+      await expect(p2).rejects.toMatchObject({ name: 'IpcFault', category: 'cancelled' })
 
       // Unblock first, verify it finishes normally
       releaseFirst()
@@ -124,7 +129,7 @@ describe('Residual Review 2 Audit Fixes', () => {
       // Second task waits with short 30ms queueTimeoutMs
       const p2 = withHandshakeWorkerLock(async () => 'second-done', { queueTimeoutMs: 30 })
 
-      await expect(p2).rejects.toThrow(/queue lease timeout/)
+      await expect(p2).rejects.toMatchObject({ name: 'IpcFault', category: 'timeout' })
 
       releaseFirst()
       expect(await p1).toBe('first-done')

@@ -13,6 +13,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { SocksClient } from 'socks'
 import axios from 'axios'
 import { logEvent } from './appLogger'
+import { operations } from './operations'
+import { IpcFault } from '../shared/ipc-result'
 import { settingsStore } from './settings'
 import { serverPicker } from './serverPicker'
 import { tunController, getBundledResource, getDirectProxyPort, getTunnelProbePort, pickFreeLocalPort, isVpnOutboundUdpCapable, shouldBlockQuicUdp443 } from './tunController'
@@ -1822,17 +1824,20 @@ export function execPs(
 }
 
 let activeHandshakeWorkerLock: Promise<void> = Promise.resolve()
+let blockedHandshakeWorker: Promise<unknown> | undefined
+let handshakeAdmissionBlocked = new AbortController()
 
 export async function withHandshakeWorkerLock<T>(
   fn: () => Promise<T>,
-  options?: { signal?: AbortSignal; queueTimeoutMs?: number }
+  options?: { signal?: AbortSignal; queueTimeoutMs?: number; retain?: ProbeRetain; onCleanupBlocked?: (block: () => void) => void }
 ): Promise<T> {
   const queueTimeoutMs = options?.queueTimeoutMs ?? 15000
   const signal = options?.signal
 
   if (signal?.aborted) {
-    throw new Error('Cancelled')
+    throw new IpcFault('cancelled')
   }
+  if (blockedHandshakeWorker) throw new IpcFault('conflict')
 
   const previousLock = activeHandshakeWorkerLock
   let release: () => void = () => {}
@@ -1846,24 +1851,30 @@ export async function withHandshakeWorkerLock<T>(
     await new Promise<void>((resolve, reject) => {
       let timer: NodeJS.Timeout | null = null
       let settled = false
+      const blockedSignal = handshakeAdmissionBlocked.signal
 
       const cleanup = () => {
         if (timer) clearTimeout(timer)
         signal?.removeEventListener('abort', onAbort)
+        blockedSignal.removeEventListener('abort', onBlocked)
       }
 
       const onAbort = () => {
         if (settled) return
         settled = true
         cleanup()
-        reject(new Error('Cancelled'))
+        reject(new IpcFault('cancelled'))
       }
 
       const onTimeout = () => {
         if (settled) return
         settled = true
         cleanup()
-        reject(new Error(`Handshake worker queue lease timeout (${queueTimeoutMs}ms)`))
+        reject(new IpcFault('timeout'))
+      }
+      const onBlocked = () => {
+        if (settled) return
+        settled = true; cleanup(); reject(new IpcFault('conflict'))
       }
 
       if (signal?.aborted) {
@@ -1872,6 +1883,7 @@ export async function withHandshakeWorkerLock<T>(
       }
 
       signal?.addEventListener('abort', onAbort, { once: true })
+      blockedSignal.addEventListener('abort', onBlocked, { once: true })
       timer = setTimeout(onTimeout, queueTimeoutMs)
 
       previousLock.then(
@@ -1890,176 +1902,103 @@ export async function withHandshakeWorkerLock<T>(
       )
     })
 
-    if (signal?.aborted) throw new Error('Cancelled')
+    if (signal?.aborted) throw new IpcFault('cancelled')
+    if (blockedHandshakeWorker) throw new IpcFault('conflict')
     acquired = true
-    return await fn()
+    const work = fn()
+    if (!options?.retain || !options.onCleanupBlocked) return await work
+    // The registry retains physical cleanup independently of this execution
+    // queue. A failed stop rejects admission until that cleanup really drains.
+    options.retain(work)
+    let settled = false
+    const drained = () => {
+      settled = true
+      if (blockedHandshakeWorker === work) {
+        blockedHandshakeWorker = undefined
+        handshakeAdmissionBlocked = new AbortController()
+      }
+    }
+    void work.then(drained, drained)
+    const blocked = new Promise<never>((_, reject) => options.onCleanupBlocked!(() => {
+      if (settled) return
+      blockedHandshakeWorker = work
+      handshakeAdmissionBlocked.abort()
+      reject(new IpcFault('conflict'))
+    }))
+    return await Promise.race([work, blocked])
   } finally {
     if (acquired) release()
     else void previousLock.then(release, release)
   }
 }
 
-/**
- * Helper: Probe media endpoint over SOCKS proxy
- */
-async function verifyMediaEndpointViaSocks(
-  socks: { host: string; port: number },
-  endpoint: { host: string; port: number },
-  timeoutMs: number,
-  signal?: AbortSignal
-): Promise<{ reachable: boolean; statusCode?: number; latencyMs: number; error?: string }> {
-  const started = Date.now()
-  let sock: net.Socket | null = null
-  let tlsSock: tls.TLSSocket | null = null
-  try {
-    sock = await openTcpViaSocks(socks, endpoint.host, endpoint.port, timeoutMs, signal)
-    return await new Promise((resolve) => {
-      let settled = false
-      const timer = setTimeout(() => {
-        finish(false, undefined, 'TLS handshake timeout')
-      }, timeoutMs)
+type ProbeRetain = (task: Promise<unknown>) => void
 
-      const finish = (reachable: boolean, statusCode?: number, error?: string) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        try { tlsSock?.destroy() } catch {}
-        try { sock?.destroy() } catch {}
-        resolve({
-          reachable,
-          statusCode,
-          latencyMs: Date.now() - started,
-          error
-        })
-      }
-
-      if (signal?.aborted) {
-        finish(false, undefined, 'Cancelled')
-        return
-      }
-
-      tlsSock = tls.connect({
-        socket: sock ?? undefined,
-        servername: endpoint.host,
-        rejectUnauthorized: false
-      })
-
-      tlsSock.once('secureConnect', () => {
-        tlsSock?.write(
-          `HEAD / HTTP/1.1\r\nHost: ${endpoint.host}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\nConnection: close\r\n\r\n`
-        )
-      })
-
-      let buffer = ''
-      tlsSock.on('data', (chunk) => {
-        buffer += chunk.toString('utf8')
-        const match = buffer.match(/^HTTP\/1\.[01] (\d{3})\b/)
-        if (match) {
-          const code = parseInt(match[1], 10)
-          finish(true, code)
-        }
-      })
-
-      tlsSock.once('error', (err) => {
-        finish(false, undefined, err.message)
-      })
-
-      tlsSock.once('end', () => {
-        if (!settled) {
-          const match = buffer.match(/^HTTP\/1\.[01] (\d{3})\b/)
-          if (match) {
-            finish(true, parseInt(match[1], 10))
-          } else {
-            finish(buffer.length > 0, undefined, buffer.length === 0 ? 'Empty response' : undefined)
-          }
-        }
-      })
-    })
-  } catch (err: any) {
-    if (sock) {
-      try { (sock as net.Socket).destroy() } catch {}
-    }
-    return {
-      reachable: false,
-      latencyMs: Date.now() - started,
-      error: err?.message || 'Connection failed'
+// A cancelled wrapper can finish before SocksClient yields its socket. Drain
+// newly retained work too, including the close added by that late connection.
+async function withProbeDrain<T>(run: (retain: ProbeRetain) => Promise<T>): Promise<T> {
+  const pending: Promise<unknown>[] = []
+  const retain: ProbeRetain = task => { pending.push(task.then(() => undefined, () => undefined)) }
+  try { return await run(retain) }
+  finally {
+    for (let index = 0; index < pending.length;) {
+      const batch = pending.slice(index); index = pending.length
+      await Promise.all(batch)
     }
   }
 }
 
-/**
- * Helper: Probe media endpoint directly via TLS
- */
-async function verifyMediaEndpointDirect(
-  endpoint: { host: string; port: number },
-  timeoutMs: number,
-  signal?: AbortSignal
+function retainProbeSocket(socket: net.Socket, retain: ProbeRetain): void {
+  retain(socket.closed ? Promise.resolve() : new Promise<void>(resolve => socket.once('close', () => resolve())))
+}
+
+/** Probe a media endpoint directly or through a dedicated SOCKS connection. */
+async function verifyMediaEndpoint(
+  endpoint: { host: string; port: number }, timeoutMs: number, signal?: AbortSignal,
+  socks?: { host: string; port: number }
 ): Promise<{ reachable: boolean; statusCode?: number; latencyMs: number; error?: string }> {
   const started = Date.now()
-  let tlsSock: tls.TLSSocket | null = null
-  return new Promise((resolve) => {
-    let settled = false
-    const timer = setTimeout(() => {
-      finish(false, undefined, 'Direct TLS timeout')
-    }, timeoutMs)
-
-    const finish = (reachable: boolean, statusCode?: number, error?: string) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      try { tlsSock?.destroy() } catch {}
-      resolve({
-        reachable,
-        statusCode,
-        latencyMs: Date.now() - started,
-        error
-      })
-    }
-
-    if (signal?.aborted) {
-      finish(false, undefined, 'Cancelled')
-      return
-    }
-
+  return withProbeDrain(async retain => {
+    let raw: net.Socket | undefined
     try {
-      tlsSock = tls.connect({
-        host: endpoint.host,
-        port: endpoint.port,
-        servername: endpoint.host,
-        rejectUnauthorized: false
-      })
-
-      tlsSock.once('secureConnect', () => {
-        tlsSock?.write(
-          `HEAD / HTTP/1.1\r\nHost: ${endpoint.host}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\nConnection: close\r\n\r\n`
-        )
-      })
-
-      let buffer = ''
-      tlsSock.on('data', (chunk) => {
-        buffer += chunk.toString('utf8')
-        const match = buffer.match(/^HTTP\/1\.[01] (\d{3})\b/)
-        if (match) {
-          finish(true, parseInt(match[1], 10))
+      if (signal?.aborted) throw new Error('Cancelled')
+      if (socks) raw = await openTcpViaSocks(socks, endpoint.host, endpoint.port, timeoutMs, signal, retain)
+      if (signal?.aborted) throw new Error('Cancelled')
+      return await new Promise<{ reachable: boolean; statusCode?: number; latencyMs: number; error?: string }>(resolve => {
+        let settled = false, buffer = '', socket: tls.TLSSocket | undefined
+        const finish = (reachable: boolean, statusCode?: number, error?: string) => {
+          if (settled) return
+          settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort)
+          const result = { reachable, statusCode, latencyMs: Date.now() - started, error }
+          socket?.destroy(); raw?.destroy(); resolve(result)
         }
+        const abort = () => finish(false, undefined, 'Cancelled')
+        const timer = setTimeout(() => finish(false, undefined, socks ? 'TLS handshake timeout' : 'Direct TLS timeout'), timeoutMs)
+        try {
+          socket = tls.connect({ ...(raw ? { socket: raw } : { host: endpoint.host, port: endpoint.port }),
+            servername: endpoint.host, rejectUnauthorized: false })
+          retainProbeSocket(socket, retain)
+          socket.once('close', () => { if (!settled) finish(false, undefined, 'Media connection closed'); socket?.removeAllListeners() })
+          socket.on('error', (error: Error) => finish(false, undefined, error.message))
+          signal?.addEventListener('abort', abort, { once: true })
+          socket.once('secureConnect', () => {
+            if (!settled && !signal?.aborted) socket?.write('HEAD / HTTP/1.1\r\nHost: ' + endpoint.host +
+              '\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\nConnection: close\r\n\r\n')
+          })
+          socket.on('data', (chunk: Buffer) => {
+            if (settled) return
+            buffer += chunk.subarray(0, Math.max(0, 65536 - buffer.length)).toString('utf8')
+            const match = buffer.match(/^HTTP\/1\.[01] (\d{3})\b/)
+            if (match) finish(true, Number(match[1]))
+            else if (buffer.length >= 65536) finish(false, undefined, 'Media response headers too large')
+          })
+          socket.once('end', () => finish(buffer.length > 0, undefined, buffer.length ? undefined : 'Empty response'))
+          if (signal?.aborted) abort()
+        } catch (error) { finish(false, undefined, error instanceof Error ? error.message : 'TLS initialization error') }
       })
-
-      tlsSock.once('error', (err) => {
-        finish(false, undefined, err.message)
-      })
-
-      tlsSock.once('end', () => {
-        if (!settled) {
-          const match = buffer.match(/^HTTP\/1\.[01] (\d{3})\b/)
-          if (match) {
-            finish(true, parseInt(match[1], 10))
-          } else {
-            finish(buffer.length > 0, undefined, buffer.length === 0 ? 'Empty response' : undefined)
-          }
-        }
-      })
-    } catch (err: any) {
-      finish(false, undefined, err.message)
+    } catch (error) {
+      raw?.destroy()
+      return { reachable: false, latencyMs: Date.now() - started, error: error instanceof Error ? error.message : 'Connection failed' }
     }
   })
 }
@@ -2070,6 +2009,20 @@ async function verifyMediaEndpointDirect(
  * whether QUIC blackhole risk (Twitch Error #2000) is mitigated.
  */
 export async function probeMediaStream(
+  profile?: ServerProfile | null, socksPort?: number, signal?: AbortSignal
+): Promise<LiveMediaStreamDiagnostics> {
+  const started = Date.now()
+  try {
+    return await operations.run('server-probe', lease => probeMediaStreamOwned(profile, socksPort, lease.signal), {
+      resource: `live-media:${crypto.randomUUID().replaceAll('-', '')}`, timeoutMs: 15_000, signal
+    })
+  } catch (error) {
+    if (!(error instanceof IpcFault) || !['cancelled', 'timeout'].includes(error.category)) throw error
+    return { status: error.category === 'cancelled' ? 'skipped' : 'error', durationMs: Date.now() - started, error: error.message }
+  }
+}
+
+async function probeMediaStreamOwned(
   profile?: ServerProfile | null,
   socksPort?: number,
   signal?: AbortSignal
@@ -2106,9 +2059,8 @@ export async function probeMediaStream(
 
   for (const ep of endpoints) {
     if (signal?.aborted) break
-    const result = effectiveSocksPort
-      ? await verifyMediaEndpointViaSocks({ host: '127.0.0.1', port: effectiveSocksPort }, ep, 3500, signal)
-      : await verifyMediaEndpointDirect(ep, 3500, signal)
+    const result = await verifyMediaEndpoint(ep, 3500, signal,
+      effectiveSocksPort ? { host: '127.0.0.1', port: effectiveSocksPort } : undefined)
 
     testedEndpoints.push({
       endpoint: ep.name,
@@ -2156,10 +2108,31 @@ export async function probeMediaStream(
  * and requests exit IPs from dual independent reflectors (including IPv6 reflector).
  */
 export async function probeTunnelHandshakeAndEgress(
+  profile?: ServerProfile | null, endpointIp?: string, signal?: AbortSignal, includeThroughput = false
+): Promise<{ handshake: TunnelHandshakeResult; egress: LiveEgressResult; mediaStream: LiveMediaStreamDiagnostics; throughput?: LiveThroughputDiagnostics }> {
+  const started = Date.now()
+  try {
+    return await operations.run('server-probe', lease => probeTunnelHandshakeAndEgressOwned(profile, endpointIp, lease.signal, includeThroughput, () => lease.expire(), task => lease.retain(task)), {
+      resource: `live-handshake:${crypto.randomUUID().replaceAll('-', '')}`, timeoutMs: 60_000, signal
+    })
+  } catch (error) {
+    if (!(error instanceof IpcFault) || !['cancelled', 'timeout'].includes(error.category)) throw error
+    const status = error.category === 'cancelled' ? 'skipped' : 'timeout'
+    return {
+      handshake: { status, durationMs: Date.now() - started, protocol: profile?.protocol, error: error.message },
+      egress: { status, durationMs: 0, reflectors: [], error: error.message },
+      mediaStream: { status: error.category === 'cancelled' ? 'skipped' : 'error', durationMs: 0, error: error.message }
+    }
+  }
+}
+
+async function probeTunnelHandshakeAndEgressOwned(
   profile?: ServerProfile | null,
   endpointIp?: string,
   signal?: AbortSignal,
-  includeThroughput = false
+  includeThroughput = false,
+  cleanupExpired?: () => void,
+  retainWorker?: ProbeRetain
 ): Promise<{ handshake: TunnelHandshakeResult; egress: LiveEgressResult; mediaStream: LiveMediaStreamDiagnostics; throughput?: LiveThroughputDiagnostics }> {
   const started = Date.now()
   if (!profile || !profile.outbound || typeof profile.outbound !== 'object') {
@@ -2206,8 +2179,9 @@ export async function probeTunnelHandshakeAndEgress(
     }
   }
 
+  let blockWorker = () => {}
   try {
-    return await withHandshakeWorkerLock(async () => {
+    return await withHandshakeWorkerLock(() => withProbeDrain(async retain => {
       if (signal?.aborted) {
         return {
           handshake: { status: 'skipped', durationMs: 0, protocol: profile?.protocol, error: 'Cancelled' },
@@ -2243,6 +2217,13 @@ export async function probeTunnelHandshakeAndEgress(
       const pidFileName = 'engine.pid'
       let workDir: string | null = null
       let child: any = null
+      let childClosed: Promise<void> | undefined
+      let childHasClosed = false
+      let childHasExited = false
+      let stopStarted = false
+      let forceTimer: ReturnType<typeof setTimeout> | undefined
+      let cleanupTimer: ReturnType<typeof setTimeout> | undefined
+      let pipeTimer: ReturnType<typeof setTimeout> | undefined
       let logText = ''
       let cfSocket: net.Socket | null = null
       let ipifySocket: net.Socket | null = null
@@ -2255,10 +2236,23 @@ export async function probeTunnelHandshakeAndEgress(
       let completedMediaStream: LiveMediaStreamDiagnostics | null = null
       let completedThroughput: LiveThroughputDiagnostics | undefined
 
+      const stopChild = () => {
+        if (!child || childHasClosed || stopStarted) return
+        stopStarted = true
+        if (!childHasExited) { try { child.kill('SIGTERM') } catch {} }
+        if (childHasClosed) return
+        // Escalate from the stop request, even while readiness or PID persistence
+        // is pending. Use the captured child handle rather than looking up a PID.
+        forceTimer = setTimeout(() => { if (!childHasExited) { try { child.kill('SIGKILL') } catch {} } }, 1500)
+        cleanupTimer = setTimeout(() => {
+          try { logEvent('warn', 'live-server-probe', 'Handshake cleanup blocked: child exit remains unconfirmed', { state: 'blocked', reason: 'child-stop-unconfirmed' }) } catch { /* telemetry cannot block the terminal deadline */ }
+          cleanupExpired?.()
+          blockWorker()
+        }, 5000)
+        forceTimer.unref?.(); cleanupTimer.unref?.()
+      }
       const abortHandler = () => {
-        if (child) {
-          try { child.kill('SIGKILL') } catch {}
-        }
+        stopChild()
         if (cfSocket) {
           try { cfSocket.destroy() } catch {}
         }
@@ -2390,14 +2384,33 @@ export async function probeTunnelHandshakeAndEgress(
             windowsHide: true,
             stdio: ['ignore', 'pipe', 'pipe']
           })
+          childClosed = new Promise<void>(resolve => child.once('close', () => {
+            childHasClosed = true
+            clearTimeout(forceTimer); clearTimeout(cleanupTimer); clearTimeout(pipeTimer)
+            resolve()
+          }))
+          retain(childClosed)
+          // Allow buffered diagnostics to arrive after exit. A descendant may
+          // keep inherited pipes open, so bound output drain after proven exit.
+          child.once('exit', () => {
+            childHasExited = true
+            pipeTimer = setTimeout(() => {
+              try { logEvent('warn', 'live-server-probe', 'Handshake output drain exceeded its budget', { reason: 'child-output-incomplete' }) } catch {}
+              child.stdout?.destroy(); child.stderr?.destroy()
+            }, 1500)
+            pipeTimer.unref?.()
+          })
 
           let childErrorReject: ((reason?: any) => void) | null = null
           const childError = new Promise<never>((_, reject) => { childErrorReject = reject })
+          void childError.catch(() => {}) // PID persistence can yield before the readiness race is attached.
           child.on('error', (err: any) => {
             const error = err instanceof Error ? err : new Error(err?.message || String(err))
             logText += `\n[child error] ${error.message}`
             childErrorReject?.(error)
           })
+          child.stdout?.on('data', (d: Buffer) => { logText += d.toString() })
+          child.stderr?.on('data', (d: Buffer) => { logText += d.toString() })
 
           await writeManagedChildPidFile(pidPath, {
             owner: 'live-handshake-probe',
@@ -2407,13 +2420,12 @@ export async function probeTunnelHandshakeAndEgress(
             createdAt: Date.now()
           }).catch(() => {})
 
-          child.stdout?.on('data', (d: Buffer) => { logText += d.toString() })
-          child.stderr?.on('data', (d: Buffer) => { logText += d.toString() })
-
-          await Promise.race([
-            waitForLocalSocks(inboundPort, 2500, signal),
-            childError
-          ])
+          const readinessController = new AbortController()
+          const readinessSignal = signal ? AbortSignal.any([signal, readinessController.signal]) : readinessController.signal
+          const readiness = waitForLocalSocks(inboundPort, 2500, readinessSignal, retain)
+          retain(readiness)
+          try { await Promise.race([childError, readiness]) }
+          finally { readinessController.abort() }
         }
 
         if (signal?.aborted) throw new Error('Cancelled')
@@ -2439,14 +2451,14 @@ export async function probeTunnelHandshakeAndEgress(
         egressStarted = Date.now()
         let cfTrace: { egressIp?: string; country?: string } = {}
         try {
-          cfSocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, '1.1.1.1', 443, 4000, signal)
+          cfSocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, '1.1.1.1', 443, 4000, signal, retain)
           markHandshakeEstablished()
           cfTrace = await verifyHttpsThroughSocket(cfSocket, {
             host: '1.1.1.1',
             port: 443,
             serverName: 'cloudflare-dns.com',
             path: '/cdn-cgi/trace'
-          }, 4000)
+          }, 4000, signal, retain)
           if (cfTrace.egressIp) {
             reflectorResults.push({
               source: 'cloudflare-trace',
@@ -2477,14 +2489,14 @@ export async function probeTunnelHandshakeAndEgress(
         // Reflector 2: ipify over socks (IPv4)
         try {
           const ipifyStart = Date.now()
-          ipifySocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, 'api.ipify.org', 443, 3500, signal)
+          ipifySocket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, 'api.ipify.org', 443, 3500, signal, retain)
           markHandshakeEstablished()
           const ipifyTrace = await verifyHttpsThroughSocket(ipifySocket, {
             host: 'api.ipify.org',
             port: 443,
             serverName: 'api.ipify.org',
             path: '/?format=text'
-          }, 3500)
+          }, 3500, signal, retain)
           if (ipifyTrace.egressIp) {
             reflectorResults.push({
               source: 'ipify',
@@ -2524,14 +2536,14 @@ export async function probeTunnelHandshakeAndEgress(
 
         try {
           const ip6Start = Date.now()
-          ip6Socket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, 'api6.ipify.org', 443, 3500, signal)
+          ip6Socket = await openTcpViaSocks({ host: '127.0.0.1', port: inboundPort }, 'api6.ipify.org', 443, 3500, signal, retain)
           markHandshakeEstablished()
           const ip6Trace = await verifyHttpsThroughSocket(ip6Socket, {
             host: 'api6.ipify.org',
             port: 443,
             serverName: 'api6.ipify.org',
             path: '/?format=text'
-          }, 3500)
+          }, 3500, signal, retain)
           if (ip6Trace.egressIp && net.isIP(ip6Trace.egressIp) === 6) {
             exitIpv6 = ip6Trace.egressIp
             ipv6Status = 'ok'
@@ -2609,7 +2621,7 @@ export async function probeTunnelHandshakeAndEgress(
           durationMs: 0
         }
         try {
-          mediaStream = await probeMediaStream(profile, inboundPort, signal)
+          mediaStream = await probeMediaStreamOwned(profile, inboundPort, signal)
         } catch (mErr: any) {
           mediaStream = {
             status: 'error',
@@ -2714,9 +2726,7 @@ export async function probeTunnelHandshakeAndEgress(
         if (signal) {
           signal.removeEventListener('abort', abortHandler)
         }
-        if (child) {
-          try { child.kill('SIGKILL') } catch {}
-        }
+        stopChild()
         if (cfSocket) {
           try { cfSocket.destroy() } catch {}
         }
@@ -2726,32 +2736,19 @@ export async function probeTunnelHandshakeAndEgress(
         if (ip6Socket) {
           try { ip6Socket.destroy() } catch {}
         }
+        if (childClosed) await childClosed
+        child?.removeAllListeners()
+        child?.stdout?.removeAllListeners()
+        child?.stderr?.removeAllListeners()
         if (workDir) {
           await rm(workDir, { recursive: true, force: true }).catch(() => {})
         }
       }
-    }, { signal, queueTimeoutMs: 15000 })
-  } catch (queueErr: any) {
-    const isCancelled = signal?.aborted || queueErr?.message === 'Cancelled'
-    return {
-      handshake: {
-        status: isCancelled ? 'skipped' : 'timeout',
-        durationMs: Date.now() - started,
-        protocol: profile.protocol,
-        error: queueErr?.message || 'Очередь worker завершилась ошибкой'
-      },
-      egress: {
-        status: isCancelled ? 'skipped' : 'timeout',
-        durationMs: 0,
-        reflectors: [],
-        error: queueErr?.message || 'Очередь worker завершилась ошибкой'
-      },
-      mediaStream: {
-        status: isCancelled ? 'skipped' : 'error',
-        durationMs: 0,
-        error: queueErr?.message || 'Очередь worker завершилась ошибкой'
-      }
-    }
+    }), { signal, queueTimeoutMs: 15000, retain: retainWorker, onCleanupBlocked: block => { blockWorker = block } })
+  } catch (queueErr: unknown) {
+    if (queueErr instanceof IpcFault) throw queueErr
+    if (signal?.aborted) throw new IpcFault('cancelled')
+    throw queueErr
   }
 }
 
@@ -2947,8 +2944,15 @@ async function probeHttpsDownloadThroughSocks(
   sampleIndex: number,
   signal?: AbortSignal
 ): Promise<LiveThroughputSample> {
+  return withProbeDrain(retain => downloadThroughSocksOwned(socks, bytes, sampleIndex, signal, retain))
+}
+
+async function downloadThroughSocksOwned(
+  socks: { host: string; port: number }, bytes: number, sampleIndex: number,
+  signal: AbortSignal | undefined, retain: ProbeRetain
+): Promise<LiveThroughputSample> {
   const started = Date.now()
-  const socket = await openTcpViaSocks(socks, 'speed.cloudflare.com', 443, LIVE_PROBE_THRESHOLDS.THROUGHPUT_TIMEOUT_MS, signal)
+  const socket = await openTcpViaSocks(socks, 'speed.cloudflare.com', 443, LIVE_PROBE_THRESHOLDS.THROUGHPUT_TIMEOUT_MS, signal, retain)
   return await new Promise((resolve, reject) => {
     let settled = false
     let header = Buffer.alloc(0)
@@ -2964,7 +2968,6 @@ async function probeHttpsDownloadThroughSocks(
     const cleanup = () => {
       clearTimeout(timer)
       signal?.removeEventListener('abort', onAbort)
-      socket.removeAllListeners()
       try { tlsSocket?.destroy() } catch {}
       try { socket.destroy() } catch {}
     }
@@ -2991,22 +2994,37 @@ async function probeHttpsDownloadThroughSocks(
     signal?.addEventListener('abort', onAbort, { once: true })
     if (signal?.aborted) { onAbort(); return }
 
-    tlsSocket = tls.connect({ socket, servername: 'speed.cloudflare.com', rejectUnauthorized: true })
+    try {
+      tlsSocket = tls.connect({ socket, servername: 'speed.cloudflare.com', rejectUnauthorized: true })
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error(String(error)))
+      return
+    }
+    retainProbeSocket(tlsSocket, retain)
+    tlsSocket.once('close', () => {
+      if (!settled) finish(new Error('throughput connection closed before completion'))
+      tlsSocket?.removeAllListeners()
+    })
     const onData = (chunk: Buffer) => {
       if (settled) return
       let body = chunk
       if (!headerParsed) {
-        header = Buffer.concat([header, chunk])
+        const previousLength = header.length
+        header = Buffer.concat([header, chunk.subarray(0, Math.max(0, 65536 - previousLength))])
         const delimiter = header.indexOf('\r\n\r\n')
-        if (delimiter < 0) return
+        if (delimiter < 0) {
+          if (header.length >= 65536) finish(new Error('throughput response headers too large'))
+          return
+        }
         const statusLine = header.subarray(0, delimiter).toString('ascii').split('\r\n', 1)[0] || ''
         const statusCode = Number.parseInt(statusLine.split(' ')[1] || '', 10)
         if (!Number.isFinite(statusCode) || statusCode < 200 || statusCode >= 300) {
           finish(new Error(`throughput probe HTTP status ${statusLine || 'unknown'}`))
           return
         }
-        body = header.subarray(delimiter + 4)
+        body = chunk.subarray(Math.max(0, delimiter + 4 - previousLength))
         headerParsed = true
+        header = Buffer.alloc(0)
       }
       if (body.length === 0) return
       const now = Date.now()
@@ -3021,6 +3039,7 @@ async function probeHttpsDownloadThroughSocks(
       if (received >= bytes) finish()
     }
     tlsSocket.once('secureConnect', () => {
+      if (settled || signal?.aborted) return
       tlsSocket.write(
         `GET /__down?bytes=${bytes}&vpnte_probe=${sampleIndex}-${Date.now()} HTTP/1.1\r\n` +
         'Host: speed.cloudflare.com\r\n' +
@@ -3041,7 +3060,8 @@ async function probeHttpsDownloadThroughSocks(
       }
     })
     tlsSocket.once('timeout', () => finish(new Error('throughput probe timeout')))
-    tlsSocket.once('error', (err) => finish(err instanceof Error ? err : new Error(String(err))))
+    tlsSocket.on('error', (err) => finish(err instanceof Error ? err : new Error(String(err))))
+    if (signal?.aborted) onAbort()
   })
 }
 

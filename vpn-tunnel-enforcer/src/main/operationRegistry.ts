@@ -12,6 +12,8 @@ export interface OperationLease {
   assertActive(): void
   /** An admitted coordinator may propagate preemption using the same identity. */
   cancel(): boolean
+  /** A native cleanup coordinator may exhaust its shorter stop budget. */
+  expire(): boolean
   retain<T>(task: Promise<T>): Promise<T>
   wait<T>(task: Promise<T>): Promise<T>
   /** Native consent/picker time is not application work; cancellation still drains it. */
@@ -133,7 +135,7 @@ export class OperationRegistry {
       effects.push(task.then(() => { pendingEffects-- }, () => { pendingEffects-- }))
       return task
     }
-    const lease: OperationLease = { signal: controller.signal, get operation() { return { ...entry.operation } }, assertActive, cancel: () => entry.cancel('cancelled'), retain,
+    const lease: OperationLease = { signal: controller.signal, get operation() { return { ...entry.operation } }, assertActive, cancel: () => entry.cancel('cancelled'), expire: () => entry.cancel('timeout'), retain,
       async wait<R>(task: Promise<R>): Promise<R> {
         retain(task)
         assertActive()

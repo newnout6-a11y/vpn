@@ -1781,3 +1781,97 @@ Final HTTP full:5001 passed/5 skipped/0 failed,301 files passed/2 skipped,
 165 channels/0 public any,coverage AC927/927,F210/210,diff check —exit0.
 Native evidence —2 loopback HTTP checks;7-fixture Electron runner при
 неизменных IPC/preload/bridge не повторялся. Exact-head Qodo/CI pending.
+
+## Handshake/media/throughput physical drain (20.10.2026)
+
+#91 принят: final head2163427,Qodo1558121 completed без findings,
+CI39343736114 success;merge/main88bca27,reviewed/main tree совпал.
+AT-00-003/007: SOCKS late dial/raw/TLS физически retained;media cancel активен,
+late HEAD/GET не отправляются;throughput sample ждёт close до следующего,
+метрика duration не включает drain,header cap64KiB. Изолированный child/
+readiness poll удерживают queue до physical cleanup;workDir удаляется после
+child close. Ранняя ошибка child во время PID persistence не теряется.
+Targeted8 suites139/139 passed,5.97s,включая2 native cases:loopback TLS cancel
+и actual child close. Промежуточные failures/fixture corrections в progress.md.
+Нужны final full/build и exact-head Qodo/CI. Общий live lifetime/history/UI
+ещё открыт;весь WP-0 в работе.
+
+Final production full5025 passed/5 skipped/0 failed,302 files passed/2 skipped,
+329.86s,exit0. Production source не менялся с начала final full;2 усиленных
+terminal-event assertions отдельно проверены в24/24 suite,1.24s. Final build/
+typecheck165 channels/0 public any exit0. Предыдущий superseded full имел
+1 native identity timeout;отдельно25/25 passed,причина не установлена.
+Exact-head Qodo/CI требуются до следующего участка.
+
+#92 initial Qodo1558277 нашёл2 reliability gaps. SOCKS transport теперь owned
+до TCP connect и уничтожается abort/deadline;native negotiation fixtures
+проверяют abort,timeout и успешный SOCKS. Public media/handshake используют
+registry:caller terminal prompt,shutdown/worker физически retained. Confirmed
+child exit закрывает собственные pipes;таймер не подменяет смерть процесса.
+Revix swallowed rm assertion исправлен внешней проверкой;integration suites
+перенесены в itest и явно добавлены в CI. Unit172/172 и integration31/31
+passed;build/typecheck/coverage/diff exit0. Новый full и exact-head gates pending.
+
+Final #92 follow-up:full unit5004 passed/5 skipped/0 failed,302 files passed/
+2 skipped,318.23s;integration отдельно31/31 passed. Последний полный прогон
+без изменений production/test tree. Build/typecheck165 channels/0 public any,
+coverage/diff прошли. Исправлен старый residual fixture (неучтённая новая TCP
+граница);все промежуточные результаты сохранены. Follow-up exact-head
+Qodo/Revix/CI pending.
+
+#92 второй follow-up:Qodo1558452 автоматически принял SOCKS fix,child finding
+ещё pending;attribution не менялся. Добавлены captured-handle escalation
+SIGTERM->SIGKILL через1.5s и5s cleanup deadline. Registry выдаёт timeout и
+blocked event,продолжая удерживать physical resource/worker/workDir до close.
+Ни timer,ни ответ kill не подменяют подтверждённый exit/close. Regression
+registry87/87 и integration32/32 passed;новые full/build/exact-head gates pending.
+
+Stop escalation теперь начинается при первом abort/cleanup request,в том числе
+при pending readiness/PID persistence. Actual child close снимает budgets сразу;
+worker остаётся retained до readiness settlement. Новая regression failed до fix,
+final integration33/33 и targeted109/109 прошли;build/typecheck165/0any,coverage
+927/927 и210/210,diff exit0. CI0a42 упал на прежнем5s native JSON export fixture:
+его бюджет согласован с соседними PowerShell ACL cases (15s),assertions сохранены.
+Новый full и exact-head Qodo/Revix/CI остаются обязательными.
+
+Final второго follow-up: full5005 passed/5 skipped/0 failed,304.20s,
+302 files passed/2 skipped. Targeted109/109,integration33/33,build/typecheck,
+traceability/diff exit0. После начала final full код и тесты не менялись.
+Exact-head Qodo/Revix/CI pending;весь WP-0 ещё не завершён.
+
+#92 third follow-up:Qodo1558570 на5269ba3 оставил child finding pending.
+Теперь5s cleanup budget завершает execution queue и отзывает admission:
+queued/new probes получают conflict,новые children не стартуют до physical
+settlement. Полный work retained операцией;shutdown/resources/workDir не
+освобождаются по таймеру. После drain admission восстанавливается.
+Revix trailing-output вопрос подтверждён:после proven exit до1.5s читается
+stderr/stdout,затем inherited pipes закрываются с incomplete warning;actual
+close отменяет timer. Data listeners устанавливаются до PID-persistence await.
+До fix regressions failed;final integration35/35,targeted127/127 passed.
+Новые full/build и remote gates pending;attribution не менялся.
+
+Final third follow-up:unit5005 passed/5 skipped/0 failed,325.89s,
+302 files passed/2 skipped;integration35/35,targeted127/127,build/typecheck,
+coverage/diff exit0. Source/test tree не менялся во время full.
+Новый exact-head Qodo/Revix/CI обязателен;WP-0 остаётся в работе.
+
+Qodo1558657 наba353ed автоматически принял оба reliability fixes,но нашёл
+новый observability gap:queue expiry записывалсяsuccess. Regression failed до fix;
+теперь typed timeout проходит через registry,публичная диагностика формируется
+после него. Queued cancel и expiry сверены с operation records. Integration37/37,
+targeted127/127 passed;новые full/build/exact-head gates pending.
+
+Final queue-taxonomy full5005 passed/5 skipped/0 failed,312.16s,
+302 files passed/2 skipped. Integration37/37,targeted127/127,build/typecheck,
+coverage/diff exit0. Exact-head Qodo/Revix/CI pending;весь WP-0 ещё в работе.
+
+Qodo1558731 на3eb8ab2 completed,все3 findings implemented,новых нет.
+Revix дал2 подтверждённых issue:fragile message classification и skipped media
+при timeout. Queue теперь сама выбрасывает IpcFault;public media fallback
+различает cancelled/skipped и timeout/error. До fix regressions failed,
+final targeted127/127 и integration37/37 passed. Новые full/build/gates pending.
+
+Final Revix follow-up:full5005 passed/5 skipped/0 failed,307.72s,
+302 files passed/2 skipped;targeted127/127,integration37/37,build/typecheck,
+coverage/diff exit0. Source/test tree не менялся во время full.
+Exact-head Qodo/Revix/CI pending;весь WP-0 ещё не завершён.

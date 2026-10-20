@@ -14,6 +14,16 @@ afterEach(() => vi.useRealTimers())
 const kinds = Object.keys(OPERATION_DEADLINES) as ManagedOperationKind[]
 
 describe('long operation registry', () => {
+  it('lets a coordinator expire failed cleanup promptly while retaining the physical resource', async () => {
+    const registry = new OperationRegistry(), gate = held<void>()
+    let owned!: OperationLease
+    const task = registry.run('server-probe', async lease => { owned = lease; await lease.wait(gate.promise) }).catch(error => error)
+    expect(owned.expire()).toBe(true)
+    expect(await task).toMatchObject({ category: 'timeout' })
+    expect(registry.list()[0]).toMatchObject({ status: 'error', category: 'timeout' })
+    expect(registry.isBusy('server-probe')).toBe(true); expect(owned.expire()).toBe(false)
+    gate.resolve(); await registry.close(); expect(registry.isBusy('server-probe')).toBe(false)
+  })
   it('keeps receipts distinguishable after credential redaction without changing cancellation UUIDs', async () => {
     const registry = new OperationRegistry(), gate = held<void>()
     const first = registry.run('health-check', async lease => { await lease.wait(gate.promise) }, { resource: 'first' }).catch(error => error)

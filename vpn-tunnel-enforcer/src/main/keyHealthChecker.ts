@@ -268,75 +268,49 @@ export async function openTcpDirect(host: string, port: number, timeoutMs: numbe
 }
 
 export async function openTcpViaSocks(
-  socks: { host: string; port: number },
-  host: string,
-  port: number,
-  timeoutMs: number,
-  signal?: AbortSignal,
-  retain?: (task: Promise<unknown>) => void
+  socks: { host: string; port: number }, host: string, port: number,
+  timeoutMs: number, signal?: AbortSignal, retain?: (task: Promise<unknown>) => void
 ): Promise<Socket> {
-  if (signal?.aborted) {
-    throw new Error('Cancelled')
-  }
-
-  // SocksClient's `timeout` covers the proxy command but not the dial to
-  // the proxy itself. Wrap the whole thing so we never hang forever when
-  // sing-box's inbound stalls, and ensure that if the timeout fires first or
-  // an abort signal is received, any late-connecting socket is immediately destroyed.
+  if (signal?.aborted) throw new Error('Cancelled')
   return new Promise<Socket>((resolve, reject) => {
+    // Own TCP before SOCKS starts so abort/deadline can destroy a stalled dial.
+    const transport = new Socket()
+    retainSocketClose(transport, retain)
     let settled = false
-    let timer: NodeJS.Timeout | null = null
-
-    const cleanup = () => {
-      if (timer) clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-    }
-
-    const onAbort = () => {
+    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort) }
+    const fail = (error: Error) => {
       if (settled) return
-      settled = true
-      cleanup()
-      reject(new Error('Cancelled'))
+      settled = true; cleanup(); transport.destroy(); reject(error)
     }
-
+    const onAbort = () => fail(new Error('Cancelled'))
+    const timer = setTimeout(() => fail(new Error('timeout')), timeoutMs)
     signal?.addEventListener('abort', onAbort, { once: true })
-
-    timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      cleanup()
-      reject(new Error('timeout'))
-    }, timeoutMs)
-
-    const connection = SocksClient.createConnection({
-      proxy: { host: socks.host, port: socks.port, type: 5 },
-      command: 'connect',
-      destination: { host, port },
-      timeout: timeoutMs
-    })
-      .then(({ socket }) => {
-        retainSocketClose(socket as Socket, retain)
+    const onError = (error: Error) => fail(error)
+    const onClose = () => { fail(new Error('SOCKS transport closed')); transport.removeListener('error', onError); transport.removeListener('connect', onConnect) }
+    const onConnect = () => {
+      if (settled || signal?.aborted) { onAbort(); return }
+      let negotiation: ReturnType<typeof SocksClient.createConnection>
+      try {
+        negotiation = SocksClient.createConnection({
+          proxy: { host: socks.host, port: socks.port, type: 5 }, command: 'connect',
+          destination: { host, port }, timeout: timeoutMs, existing_socket: transport
+        })
+      } catch (error) { fail(error instanceof Error ? error : new Error('SOCKS initialization failed')); return }
+      const connection = negotiation.then(({ socket }) => {
+        if (socket !== transport) { retainSocketClose(socket as Socket, retain); transport.destroy() }
         if (settled || signal?.aborted) {
-          try { (socket as Socket).destroy() } catch { /* ignore */ }
-          if (!settled) {
-            settled = true
-            cleanup()
-            reject(new Error('Cancelled'))
-          }
-          return
+          socket.destroy(); if (!settled) onAbort(); return
         }
-        settled = true
-        cleanup()
-        resolve(socket as Socket)
-      })
-      .catch((err) => {
-        if (settled) return
-        settled = true
-        cleanup()
-        reject(err)
-      })
-    // The bounded wrapper may reject before SocksClient finishes its dial.
-    retain?.(connection)
+        settled = true; cleanup(); resolve(socket as Socket)
+      }).catch(error => fail(error))
+      retain?.(connection)
+    }
+    transport.on('error', onError)
+    transport.once('close', onClose)
+    transport.once('connect', onConnect)
+    if (signal?.aborted) { onAbort(); return }
+    try { transport.connect(socks.port, socks.host) }
+    catch (error) { fail(error instanceof Error ? error : new Error('SOCKS dial failed')) }
   })
 }
 
