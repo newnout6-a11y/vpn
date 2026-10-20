@@ -395,6 +395,7 @@ export function Logs() {
         window.electronAPI.clearDiagnosticArtifacts()
       ])
       if (!lifetime.active) return
+      lifetime.epoch += 1 // Revoke reads started while deletion was in flight too.
       let cleared = 0
       let absent = 0
       const errors: string[] = []

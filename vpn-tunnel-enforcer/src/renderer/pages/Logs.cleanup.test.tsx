@@ -34,6 +34,18 @@ async function page(locale: 'ru' | 'en' = 'ru', waitInitial = true) {
   return { ...view, clear: () => fireEvent.click(screen.getByRole('button', { name: locale === 'ru' ? ru.logs.clear : en.logs.clear })) }
 }
 describe('Logs cleanup', () => {
+  it('rejects a filtered read started during a successful clear (AT-00-008)', async () => {
+    const clearing = deferred<any>(), pending = deferred<any>()
+    vi.mocked(window.electronAPI.connectionHistoryClear).mockReturnValueOnce(clearing.promise)
+    vi.mocked(window.electronAPI.connectionHistoryFilter).mockReturnValueOnce(pending.promise)
+    const view = await page(); view.clear()
+    fireEvent.change(screen.getByPlaceholderText(ru.logs.search), { target: { value: 'retained' } })
+    await waitFor(() => expect(window.electronAPI.connectionHistoryFilter).toHaveBeenCalledOnce())
+    await act(async () => clearing.resolve(undefined))
+    await waitFor(() => expect(useAppStore.getState().globalToasts[0]?.variant).toBe('success'))
+    await act(async () => pending.resolve([{ ...row, profileName: 'deleted-during-clear' }]))
+    expect(screen.queryByText('deleted-during-clear')).toBeNull()
+  })
   it('reloads pending initial history after failed clear and rejects its stale response', async () => {
     const pending = deferred<any>()
     vi.mocked(window.electronAPI.connectionHistoryList).mockReturnValueOnce(pending.promise)
