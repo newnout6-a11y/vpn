@@ -100,11 +100,13 @@ export interface LeakCheckItem {
   details?: string
 }
 
-export interface LeakCheckResult {
+export interface CheckResult<TItem extends LeakCheckItem = LeakCheckItem> {
   ranAt: number
   summary: CheckStatus
-  items: LeakCheckItem[]
+  items: TItem[]
 }
+
+export type LeakCheckResult = CheckResult<LeakCheckItem>
 
 export interface SystemDiagnosticItem {
   id: string
@@ -115,11 +117,7 @@ export interface SystemDiagnosticItem {
   details?: string
 }
 
-export interface SystemDiagnosticResult {
-  ranAt: number
-  summary: CheckStatus
-  items: SystemDiagnosticItem[]
-}
+export type SystemDiagnosticResult = CheckResult<SystemDiagnosticItem>
 
 export interface LogFileSnapshot {
   name: string

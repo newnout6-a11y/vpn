@@ -1,6 +1,7 @@
 // AT-00-002/008, F-019/F-195: production FSM and real connection admission.
 import { describe, expect, it, vi } from 'vitest'
 import assert from 'node:assert/strict'
+import fc from 'fast-check'
 import { ConnectionLifecycle } from './connectionLifecycle'
 import { TunnelStateMachine } from './tunnelStateMachine'
 import { connectionFailure } from '../shared/operation'
@@ -292,15 +293,14 @@ describe('canonical tunnel state', () => {
   }, 30_000)
 
   it('serializes seeded 200 commands from ten async workers without leaking fake PID/TUN resources (AT-00-007)', async () => {
-    let seed = 0x5eed003, nextPid = 100, running = false, pid: number | null = null, tun = false
+    let nextPid = 100, running = false, pid: number | null = null, tun = false
     const history: { operationId: string; status: string }[] = []
     const model = new TunnelStateMachine(() => ({ running, pid, softApplied: false }))
     const cleanup = async () => { running = false; pid = null; tun = false; return { success: true } }
     const lane = new ConnectionLifecycle(() => {}, cleanup, event => history.push(event), model)
-    const commands = Array.from({ length: 200 }, () => {
-      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
-      return seed % 3
-    })
+    const commands = fc.sample(fc.integer({ min: 0, max: 2 }), { seed: 0x5eed003, numRuns: 200 })
+    expect(new Set(commands)).toEqual(new Set([0, 1, 2]))
+    // disconnect and cancel share the production stop primitive, which aborts pending starts.
     commands[199] = 1 // The final command is an explicit accepted disconnect.
     const results: { success: boolean; category?: string }[] = []
     for (let batch = 0; batch < 20; batch++) {

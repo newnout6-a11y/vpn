@@ -1,8 +1,8 @@
 # WP-0: контракты и наблюдаемость — итоговая приёмка 20.10.2026
 
-Статус: **завершён** по AT-00-001…010 (уровни L0–L2). Эта итоговая запись
+Статус: **завершён при выполнении условия слияния ниже** по AT-00-001…010 (уровни L0–L2). Эта итоговая запись
 применяется при слиянии завершающего PR после автоматического completed Qodo
-и успешного CI его окончательного коммита. WP-2 — следующий пакет, не начат.
+и успешного CI его окончательного коммита, включая follow-up канонических контрактов ниже. WP-2 — следующий пакет, не начат.
 Основание: том 3 §1.1–1.2, ТЗ-06 WP-0 и решения владельца §10.
 Находки: F-019, F-021, F-074, F-138, F-143.
 
@@ -23,13 +23,15 @@ Qodo — главный ревьюер; Revix учитывается при до
 | AT-00-004 | L2 / PASS | [ipcContractAcceptance](../src/main/ipcContractAcceptance.test.ts): каждый privileged канал × 7 категорий, стабильный canonical code/category и отсутствие raw stack/path. Реальные feature handlers имеют отдельные semantic error matrices (config, import/refresh/export, rotation/adaptive, privacy/maintenance и network probes). [shared/ipc-result](../src/shared/ipc-result.ts) документирует коды; native en/ru bridge сохраняет типы и correlation. |
 | AT-00-005 | L2 / PASS | [connectionHistoryStorage](../src/main/connectionHistoryStorage.test.ts), [appLoggerIntegrity](../src/main/appLoggerIntegrity.test.ts) и [appLoggerRedaction](../src/main/appLoggerRedaction.test.ts), [actionCorrelation](../src/main/actionCorrelation.test.ts), [backgroundActionCorrelation](../src/main/backgroundActionCorrelation.test.ts)/[schedulerActionCorrelation](../src/main/schedulerActionCorrelation.test.ts) и [startupStoreMigrations.logging](../src/main/startupStoreMigrations.logging.test.ts): actual Conf/JSONL, action ID через IPC/events/history/diagnostic redaction, монотонный порядок, source/owner/route/confidence, отсутствие секретов и различимость двух запусков. |
 | AT-00-006 | L1 / PASS | [storeSchemaStorage](../src/main/storeSchemaStorage.test.ts), [storeSchemaInventory](../src/main/storeSchemaInventory.test.ts), [storeSchemaElectron](../src/main/storeSchemaElectron.test.ts), [storeMigrations](../src/main/storeMigrations.test.ts)/[startupStoreMigrations](../src/main/startupStoreMigrations.test.ts), [liveServerHistory.integrity](../src/main/liveServerHistory.integrity.test.ts) и [documentSchemaStorage](../src/main/documentSchemaStorage.test.ts): 20 electron-store stores, live-history и 5 application-owned JSON formats. Real legacy fixtures, ordered registered migrations/repairs, encrypted exact backups/checksums/readback; future/invalid schema — typed refusal и неизменный SHA-256. Settings/picker 0/1→2; groups сохраняет released version0; форматы без изменения схемы не получают вымышленных миграций. |
-| AT-00-007 | L2 / PASS | [tunnelStateMachine](../src/main/tunnelStateMachine.test.ts): 200 seeded команд от 10 async workers, seed 0x5eed003, typed losers, парные started/terminal events, финальное состояние disconnected и 0 ресурсов в fake PID/TUN registry. Native bridge отдельно проверяет удержание admission до cleanup/drain. |
+| AT-00-007 | L2 / PASS | [tunnelStateMachine](../src/main/tunnelStateMachine.test.ts): 200 fast-check seeded команд от 10 async workers, seed 0x5eed003, typed losers, парные started/terminal events, финальное состояние disconnected и 0 ресурсов в fake PID/TUN registry. Native bridge отдельно проверяет удержание admission до cleanup/drain. |
 | AT-00-008 | L2 / PASS | [Dashboard.cancel](../src/renderer/pages/Dashboard.cancel.test.tsx) и renderer store/App lifecycle: кадры настоящего status component с production FSM/lane, progress до подтверждения connected, blocked/error/unknown и stale revision fences. Native production snapshots проходят contextBridge и правильно освобождают listeners. |
 | AT-00-009 | L0/L2 / PASS | [plannedFeatures](../src/main/plannedFeatures.test.ts), [Sidebar.plannedFeatures](../src/renderer/components/Sidebar.plannedFeatures.test.tsx) и native Electron: четыре production flags off/null, DOM не содержит planned controls в normal/advanced, forged flags не дают доступа; activation без lab evidence отклоняется и сохраняет correlated audit. |
 | AT-00-010 | L2 / PASS | [connectionHistoryStorage](../src/main/connectionHistoryStorage.test.ts), [appLoggerIntegrity](../src/main/appLoggerIntegrity.test.ts) и [liveServerHistory.integrity](../src/main/liveServerHistory.integrity.test.ts): реальные файлы со 100 событиями, truncated/garbage/schema damage, restart, history.corrupted, сохранение доступных валидных записей/backup и последующая успешная запись. |
 
 PID/TUN в модельных сценариях — управляемые фикстуры. Эта приёмка не удостоверяет натурную изоляцию трафика, реальный cleanup Windows ресурсов, packet oracle или OS-матрицу WP-2/WP-3. L3 WP-3 имеет отдельный статус SKIPPED_BY_OWNER; его статус не переносится на WP-0. Плановые функции и их собственная лабораторная приёмка остаются в WP-12. Старые записи ниже — история выполнения, включая FAIL и interrupted.
 
+
+Канонические доменные контракты: [CheckResult](../src/shared/diagnostics.ts) используется существующими LeakCheckResult/SystemDiagnosticResult без изменения IPC payload; [ProfileCompatibility](../src/shared/profile-compatibility.ts) потребляется production resolver, проверяется [golden fixtures](../src/main/profileCompatibility.test.ts). Решение выбора ядра не является подтверждением лабораторного допуска или сетевого соединения.
 
 ## Итоговые проверки
 
@@ -2663,3 +2665,20 @@ Final после CI fixture budget: npm.cmd test -- --maxWorkers=1 —5760 passe
 
 
 После suite budget fix npm.cmd test -- src/main/serverKeyOperations.test.ts --maxWorkers=1 —57/57,53.25s,exit0 (.tmp/wp0-final-acceptance-key-focused.log). npm.cmd run typecheck —165 channels/0 public any,exit0 (.tmp/wp0-final-acceptance-typecheck-final.log). Coverage AC927/927,F210/210 и diff exit0. Final full запущен в .tmp/wp0-final-acceptance-full-final.log; source/test tree после старта неизменен.
+
+
+## WP-0: канонические доменные контракты — завершающая сверка (20.10.2026)
+
+После слияния #113 (head bd3a96560c5c01248525de03d7b4ddfa74eacc72, merge 918e20dfe1a1e357275aacae26d2845177cd9a3a; CI39476483272 success; Qodo1571517 completed с minor замечанием о нормативной ссылке WP-8/WP-0) сверка полного списка работ выявила два невыделенных канонических имени и собственный LCG вместо fast-check в AT-00-007. Это небольшой остаток WP-0; пакет окончательно закрывается после follow-up PR. WP-2 не начат. Нормативные docs/ не редактируются.
+
+CheckResult<TItem> объединяет существующие диагностические payloads через прежние публичные aliases: wire shape и IPC envelope v1 сохранены. ProfileCompatibility v1 описывает статический выбор sing-box/Xray и причины отказа; production resolveProxyEngine потребляет решение, сохраняя прежние cores, validation и сообщения исключений. Этот контракт не доказывает handshake/lab admission и не включает новые ядра. Golden tests проверяют выбор/отказ, invalid future native profile, JSON roundtrip, неизменность input и отсутствие credentials.
+
+AT-00-007 использует fast-check sample (seed0x5eed003,200 команд,10 async workers). Disconnect/cancel используют существующий lane.stop, который отменяет pending start; отдельный runtime API не добавлен. Сохранены fake PID/TUN ledger, typed losers, terminal event pairing и финальный disconnect.
+
+Red npm.cmd test -- src/main/profileCompatibility.test.ts --maxWorkers=1:13 failed/1 passed,347ms,exit1 (.tmp/wp0-canonical-contracts-red.log). Type-only expectTypeOf не удостоверял существование отсутствующих типов. После реализации focused npm.cmd test -- src/main/profileCompatibility.test.ts src/main/nativeXrayCompatibility.test.ts src/main/transportCompatibility.test.ts src/main/xrayEngine.test.ts src/main/tunAdapter.test.ts src/main/tunnelStateMachine.test.ts src/main/connectionCancellation.test.ts src/main/systemDiagnostics.test.ts --maxWorkers=1:130/130,8suites,2.22s,exit0 (.tmp/wp0-canonical-focused.log). npm.cmd run typecheck:165 channels/0 public any,exit0. Полный прогон и production build/native ещё требуют результата; remote review/CI пока не заявляются.
+
+
+Production npm.cmd run build (включает165-channel typecheck) —exit0 (.tmp/wp0-canonical-build.log). node scripts/test-electron-runtime.mjs —9 *_PASS,exit0 (.tmp/wp0-canonical-native.log). python docs/04-приёмочные-тесты/traceability/check-coverage.py —AC927/927,F210/210,exit0; это трассировка, не исполнение AT. git diff --check —exit0. Удалена только карточка старого #15 для лимита100 после live MERGED проверки (02.10.2026); сам PR не менялся.
+
+
+Final npm.cmd test -- --maxWorkers=1 —5774 passed,5 skipped,0 failed;317 passed/2 skipped suites,332.22s,exit0 (.tmp/wp0-canonical-full.log,EXIT_CODE=0). Source/test tree не менялся во время прогона. Typecheck165 channels/0 public any,build и9 native PASS относятся к этому production tree. Coverage AC927/F210 exit0;40 относительных ссылок итоговой матрицы существуют. После push обязательны completed automatic Qodo и success CI окончательного SHA; статус завершения вступает в силу при слиянии follow-up.
