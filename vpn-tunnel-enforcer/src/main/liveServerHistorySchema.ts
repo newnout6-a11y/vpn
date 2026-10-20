@@ -1,6 +1,7 @@
 import type * as T from '../shared/ipc-types'
 import { matchesIpcArgument, type IpcArgumentSchema as Schema } from '../shared/ipc-contract'
 import { isIpcCorrelationId } from '../shared/ipc-result'
+import { isConnectionProvenance } from '../shared/connection-provenance'
 
 const text: Schema = { type: 'string', max: 65536 }
 const number: Schema = { type: 'number' }
@@ -22,6 +23,7 @@ const changes = object<NonNullable<T.InfrastructureHints['changesFromPrevious']>
 })
 const schema = object<T.LiveServerCheck>({
   id: text, operationKey: optional(text), correlationId: optional(text), requestId: optional(text), profileId: optional(text),
+  provenance: optional({ type: 'object' }),
   host: text, port, mode: oneOf('basic', 'extended'), startedAt: text, finishedAt: text,
   durationMs: duration, cancelled: optional(boolean), error: optional(text), reverseDns: optional(strings), asn: optional(asn),
   dns: object<T.DnsDiagnostics>({ ...timed, a: strings, aaaa: strings, cnameChain: strings, ttl: optional(number), resolverUsed: optional(text),
@@ -82,6 +84,7 @@ export function isStoredLiveCheck(value: unknown): value is T.LiveServerCheck {
     && Number.isFinite(Date.parse(check.startedAt)) && Number.isFinite(Date.parse(check.finishedAt))
     && (check.correlationId === undefined || isIpcCorrelationId(check.correlationId))
     && (check.operationKey === undefined || (/^op_/.test(check.operationKey) && isIpcCorrelationId(check.operationKey)))
+    && (check.provenance === undefined || isConnectionProvenance(check.provenance))
     && check.findings.every(finding => !finding.evidence || Object.values(finding.evidence).every(v =>
       typeof v === 'string' || typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v))))
     && [check.egress?.reflectors.map(r => r.family) ?? [], [check.pmtu?.family]].flat().every(family => family === undefined || family === 4 || family === 6)

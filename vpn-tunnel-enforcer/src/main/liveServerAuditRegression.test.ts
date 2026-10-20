@@ -164,6 +164,9 @@ describe('Live Server Audit Regressions: Defect Verifications', () => {
       expect(a.id).not.toBe(b.id)
       for (const check of [a, b]) {
         expect(isStoredLiveCheck(check)).toBe(true)
+        expect(check).toMatchObject({ correlationId, provenance: {
+          source: 'ipc', owner: 'manual', route: 'unconfirmed', confidence: 'indeterminate'
+        } })
         expect(check.id).toMatch(/^op_[0-9a-f]{32}$/i)
         expect(check.cancelled).toBe(false)
         expect(check.infrastructure?.changesFromPrevious?.ipChanged).toBe(true)

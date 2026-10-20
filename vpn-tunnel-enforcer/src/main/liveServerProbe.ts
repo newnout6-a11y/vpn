@@ -3546,6 +3546,7 @@ async function runLiveServerCheckOwned(
     id: checkId,
     operationKey: checkId,
     correlationId: lease.operation.correlationId,
+    provenance: { source: lease.operation.source, owner: lease.operation.owner, route: 'unconfirmed', confidence: 'indeterminate' },
     requestId,
     profileId: options.profileId,
     host,

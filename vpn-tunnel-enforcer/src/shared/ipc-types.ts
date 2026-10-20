@@ -558,6 +558,8 @@ export interface LiveServerCheck {
   id: string
   operationKey?: string
   correlationId?: string
+  /** Owner of this diagnostic action; its individual probes may use different routes. */
+  provenance?: ConnectionProvenance
   requestId?: string
   profileId?: string
   host: string

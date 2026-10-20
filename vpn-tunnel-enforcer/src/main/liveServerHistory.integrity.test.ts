@@ -15,7 +15,7 @@ vi.mock('fs', async importOriginal => {
     return Reflect.apply(actual[method], actual, args)
   }])) }
 })
-import { liveServerHistory } from './liveServerHistory'
+import { liveServerHistory, LIVE_HISTORY_SCHEMA_VERSION } from './liveServerHistory'
 
 const check = (id = 'legacy-1', profileId = 'p1'): LiveServerCheck => ({
   id, profileId, host: 'probe.example', port: 443, mode: 'basic',
@@ -95,14 +95,14 @@ describe('live history integrity', () => {
     expect(readFileSync(file + '.bak', 'utf8')).toBe(backup)
   })
   it('refuses a future backup even when the main file is missing', () => {
-    const backup = '{"schemaVersion":1}'
+    const backup = JSON.stringify({ schemaVersion: LIVE_HISTORY_SCHEMA_VERSION + 1 })
     writeFileSync(file + '.bak', backup)
     expect(() => liveServerHistory.init(file)).toThrow()
     expect(() => liveServerHistory.addCheck(check())).toThrow()
     expect(readFileSync(file + '.bak', 'utf8')).toBe(backup)
     expect(readdirSync(directory)).toEqual(['live-server-checks.json.bak'])
   })
-  it.each([1, -1, 'future'])('refuses unsupported schema %j at read and write without changing bytes', schemaVersion => {
+  it.each([LIVE_HISTORY_SCHEMA_VERSION + 1, -1, 'future'])('refuses unsupported schema %j at read and write without changing bytes', schemaVersion => {
     liveServerHistory.addCheck(check('old'))
     writeFileSync(file, JSON.stringify({ schemaVersion, 'profile:p1': [check()] })); const before = hash()
     expect(() => liveServerHistory.addCheck(check('new'))).toThrow()
@@ -146,7 +146,7 @@ describe('live history integrity', () => {
     expect(readdirSync(directory).some(name => name.endsWith('.tmp'))).toBe(false)
   })
   it('does not overwrite a future-format backup', () => {
-    liveServerHistory.addCheck(check('old')); const before = disk(), backup = '{"schemaVersion":1}'
+    liveServerHistory.addCheck(check('old')); const before = disk(), backup = JSON.stringify({ schemaVersion: LIVE_HISTORY_SCHEMA_VERSION + 1 })
     writeFileSync(file + '.bak', backup)
     expect(() => liveServerHistory.clearHistory()).toThrow()
     expect(disk()).toBe(before); expect(readFileSync(file + '.bak', 'utf8')).toBe(backup)
@@ -166,6 +166,122 @@ describe('live history integrity', () => {
     const rows = liveServerHistory.getHistory({ profileId: 'p1' }); rows[0].dns.a.push('203.0.113.1'); rows.length = 0
     expect(liveServerHistory.getHistory({ profileId: 'p1' })[0].dns.a).toEqual(['192.0.2.1'])
     expect(disk()).toBe(before)
+  })
+  it('preserves provenance and receipt identities across sanitization, disk and restart', () => {
+    const record = { ...check('op_11111111111141118111111111111111'),
+      operationKey: 'op_11111111111141118111111111111111', correlationId: 'ipc_22222222222242228222222222222222',
+      provenance: { source: 'ipc', owner: 'manual', route: 'unconfirmed', confidence: 'indeterminate' }
+    } as LiveServerCheck
+    liveServerHistory.addCheck(record); liveServerHistory.init(file)
+    expect(liveServerHistory.getHistory()[0]).toEqual(record)
+  })
+  it('does not fabricate provenance for historical rows and rejects forged metadata', () => {
+    writeFileSync(file, JSON.stringify({ 'profile:p1': [check('legacy'),
+      { ...check('forged'), provenance: { source: 'ipc', owner: 'administrator', route: 'tun', confidence: 'observed' } }] }))
+    liveServerHistory.init(file)
+    expect(liveServerHistory.getHistory().map(row => row.id)).toEqual(['legacy'])
+    expect(liveServerHistory.getHistory()[0]).not.toHaveProperty('provenance')
+  })
+  it('records the ordered v0 to v1 migration with the exact backup checksum only after a successful write', () => {
+    const legacy = JSON.stringify({ 'profile:p1': [check('legacy')] })
+    writeFileSync(file, legacy); liveServerHistory.init(file)
+    expect(disk()).toBe(legacy)
+    state.fail = 'renameSync'; state.failAt = 3
+    expect(() => liveServerHistory.addCheck(check('failed'))).toThrow()
+    expect(disk()).toBe(legacy)
+    expect(state.log.mock.calls.some(call => call[2] === 'history.migrated')).toBe(false)
+    state.fail = ''; state.log.mockClear()
+    liveServerHistory.addCheck(check('new'))
+    const migration = { id: 'live-history-provenance-v1', from: 0, to: 1, checksum: createHash('sha256').update(legacy).digest('hex') }
+    expect(JSON.parse(disk())).toMatchObject({ schemaVersion: 1, migration })
+    expect(readFileSync(file + '.bak', 'utf8')).toBe(legacy)
+    expect(state.log).toHaveBeenCalledWith('info', 'live-server-history', 'history.migrated', migration)
+    liveServerHistory.init(file); state.log.mockClear(); liveServerHistory.addCheck(check('next'))
+    expect(JSON.parse(disk()).migration).toEqual(migration)
+    expect(state.log.mock.calls.some(call => call[2] === 'history.migrated')).toBe(false)
+  })
+  it('preserves legacy receipt and profile UUIDs while redacting credential UUIDs in diagnostics', () => {
+    const id = '11111111-1111-4111-8111-111111111111', profileId = '22222222-2222-4222-8222-222222222222'
+    const credential = '33333333-3333-4333-8333-333333333333'
+    liveServerHistory.addCheck({ ...check(id, profileId), error: credential }); liveServerHistory.init(file)
+    expect(liveServerHistory.getHistory({ profileId })[0]).toMatchObject({ id, profileId })
+    expect(JSON.stringify(liveServerHistory.getHistory())).not.toContain(credential)
+  })
+  it('retains migration input through later writes, but removes it on explicit history clear', () => {
+    const legacy = JSON.stringify({ 'profile:p1': [check('legacy')] })
+    writeFileSync(file, legacy); liveServerHistory.init(file)
+    liveServerHistory.addCheck(check('new')); liveServerHistory.addCheck(check('next'))
+    expect(readFileSync(file + '.v0.bak', 'utf8')).toBe(legacy)
+    liveServerHistory.clearHistory(); liveServerHistory.init(file)
+    expect(liveServerHistory.getHistory()).toEqual([])
+    expect(readdirSync(directory)).not.toContain('live-server-checks.json.v0.bak')
+  })
+  it('uses the recovered backup as migration origin despite a recognizable rejected main version', () => {
+    const legacy = JSON.stringify({ 'profile:p1': [check('legacy')] })
+    writeFileSync(file + '.bak', legacy)
+    writeFileSync(file, JSON.stringify({ schemaVersion: 1, migration: { broken: true } }))
+    liveServerHistory.init(file)
+    expect(liveServerHistory.getHistory()[0].id).toBe('legacy')
+    liveServerHistory.addCheck(check('new')); liveServerHistory.init(file)
+    expect(JSON.parse(disk()).migration).toMatchObject({ from: 0, to: 1, checksum: createHash('sha256').update(legacy).digest('hex') })
+    expect(readFileSync(file + '.v0.bak', 'utf8')).toBe(legacy)
+    expect(liveServerHistory.getHistory().map(row => row.id)).toEqual(['new', 'legacy'])
+  })
+  it('refuses to erase a malformed migration marker when no valid backup can restore lineage', () => {
+    writeFileSync(file, JSON.stringify({ schemaVersion: 1, migration: { broken: true }, 'profile:p1': [check('old')] }))
+    liveServerHistory.init(file); const before = disk()
+    expect(() => liveServerHistory.addCheck(check('new'))).toThrow()
+    expect(disk()).toBe(before)
+    expect(liveServerHistory.getHistory().map(row => row.id)).toEqual(['old'])
+    writeFileSync(file + '.bak', JSON.stringify({ schemaVersion: 1, 'profile:p1': [check('older')] }))
+    expect(() => liveServerHistory.addCheck(check('new'))).toThrow()
+    expect(disk()).toBe(before)
+  })
+  it('restores valid backup lineage while keeping newer valid main rows', () => {
+    const migration = { id: 'live-history-provenance-v1', from: 0, to: 1, checksum: 'a'.repeat(64) }
+    writeFileSync(file + '.bak', JSON.stringify({ schemaVersion: 1, migration, 'profile:p1': [check('older')] }))
+    writeFileSync(file, JSON.stringify({ schemaVersion: 1, migration: { broken: true }, 'profile:p1': [check('newer')] }))
+    liveServerHistory.init(file); liveServerHistory.addCheck(check('new'))
+    expect(JSON.parse(disk()).migration).toEqual(migration)
+    expect(liveServerHistory.getHistory().map(row => row.id)).toEqual(['new', 'newer'])
+  })
+  it('refuses to overwrite a conflicting migration backup', () => {
+    const legacy = JSON.stringify({ 'profile:p1': [check('legacy')] })
+    writeFileSync(file, legacy); writeFileSync(file + '.v0.bak', 'previous migration input')
+    liveServerHistory.init(file)
+    expect(() => liveServerHistory.addCheck(check('new'))).toThrow()
+    expect(disk()).toBe(legacy)
+    expect(readFileSync(file + '.v0.bak', 'utf8')).toBe('previous migration input')
+  })
+  it('preserves a safe redirect destination while removing URL credentials, query, fragment and encoded secrets', () => {
+    const location = 'https://user:password@redirect.example/login?token=secret#private'
+    liveServerHistory.addCheck({ ...check(), http: { status: 'ok', durationMs: 1, statusCode: 302, locationHeader: location, confidence: 'low' },
+      findings: [{ code: 'HTTP_REDIRECT', severity: 'info', title: 'HTTP redirect', detail: location, evidence: { location } }] })
+    liveServerHistory.init(file)
+    const row = liveServerHistory.getHistory()[0]
+    expect(row.http?.locationHeader).toBe('https://redirect.example/login')
+    expect(row.findings[0].detail).toContain('https://redirect.example/login')
+    expect(row.findings[0].evidence?.location).toBe('https://redirect.example/login')
+    expect(disk()).not.toMatch(/user:|password@|token=secret|#private/)
+    liveServerHistory.addCheck({ ...check('encoded'), http: { status: 'ok', durationMs: 1,
+      locationHeader: 'https://redirect.example/password%3DPRIVATE_SECRET/11111111-2222-3333-4444-555555555555', confidence: 'low' } })
+    expect(disk()).not.toMatch(/PRIVATE_SECRET|11111111-2222-3333-4444-555555555555/)
+  })
+  it('redacts credentials in nested diagnostics before returning, saving and backing up records', () => {
+    const privateText = 'password=PASSWORD_SECRET Bearer TOKEN_SECRET vless://UUID_SECRET@vpn.example:443 C:\\Users\\private-user\\config.json'
+    const record = { ...check('op_11111111111141118111111111111111'),
+      error: privateText,
+      dns: { ...check().dns, error: privateText },
+      tls: { status: 'error', durationMs: 0, authorized: false, authorizationError: privateText },
+      findings: [{ code: 'TEST', severity: 'warning', title: privateText, detail: privateText,
+        evidence: { normalText: privateText, auth: 'AUTH_SECRET', cookie: 'COOKIE_SECRET', apiKey: 'API_SECRET', port: 443 } }]
+    } as LiveServerCheck
+    const original = JSON.stringify(record)
+    liveServerHistory.addCheck(record); liveServerHistory.addCheck(check('second')); liveServerHistory.init(file)
+    const serialized = JSON.stringify(liveServerHistory.getHistory()) + disk() + readFileSync(file + '.bak', 'utf8')
+    expect(serialized).not.toMatch(/PASSWORD_SECRET|TOKEN_SECRET|UUID_SECRET|private-user|AUTH_SECRET|COOKIE_SECRET|API_SECRET/)
+    expect(JSON.stringify(record)).toBe(original)
+    expect(liveServerHistory.getHistory()[1]).toMatchObject({ id: record.id, tls: { authorized: false }, findings: [{ evidence: { port: 443 } }] })
   })
   it('refuses an add without a persistent userData path', async () => {
     vi.resetModules()
