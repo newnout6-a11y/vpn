@@ -45,6 +45,31 @@ function deferred<T>() {
 }
 
 describe('adapter rollback correlation (AT-03-007)', () => {
+  it.each(['A0_ipv6:noop-unverified', 'A0_ipv6_err: diagnostic mentions A0_ipv6:noop', 'A0_ipv6:noop\nA0_ipv6_err: denied', 'A0_ipv6:noop\nA0_ipv6:noop'])(
+    'does not promote an ambiguous native marker into a restored receipt: %s (AT-00-004/AT-03-007)', async ipv6 => {
+      const deps = { process: { platform: 'win32' }, logEvent: vi.fn(), psSingleQuote: quote,
+        readManifest: async () => ({ adapters: [adapter()], dnsRegistryPolicy: {} }), registryRestoreLine: () => '',
+        runPS: async () => `${ipv6}\nA0_dns:noop\nDNS_SMNR:delete\nDNS_PARALLEL:delete`,
+        deleteManifest: vi.fn(), clearPhysicalAdaptersSnapshotCache: vi.fn() }
+      const rollback = compile<(reason: string) => Promise<any>>('rollbackPhysicalAdapterLockdownIfApplied', deps)
+      expect(await rollback('test')).toMatchObject({ success: false, rolledBack: false, restoredAdapters: [] })
+      expect(deps.deleteManifest).not.toHaveBeenCalled()
+    }
+  )
+  it.each([
+    ['A0_dns:noop', 'A0_dns_err: diagnostic mentions A0_dns:noop'],
+    ['DNS_SMNR:delete', 'DNS_SMNR:delete\nDNS_SMNR_err: denied'],
+    ['TRANS_teredo:restore', 'TRANS_teredo:restore\nTRANS_teredo:unknown']
+  ])('retains recovery after ambiguous DNS/policy/transition marker %s (AT-03-007)', async (original, replacement) => {
+    const deps = { process: { platform: 'win32' }, logEvent: vi.fn(), psSingleQuote: quote,
+      readManifest: async () => ({ adapters: [adapter()], transitionAdapters: {}, dnsRegistryPolicy: {} }),
+      netshRestoreLine: () => '', registryRestoreLine: () => '',
+      runPS: async () => 'A0_ipv6:noop\nA0_dns:noop\nDNS_SMNR:delete\nDNS_PARALLEL:delete\nTRANS_teredo:restore\nTRANS_6to4:unknown\nTRANS_isatap:unknown'.replace(original, replacement),
+      deleteManifest: vi.fn(), clearPhysicalAdaptersSnapshotCache: vi.fn() }
+    const rollback = compile<(reason: string) => Promise<any>>('rollbackPhysicalAdapterLockdownIfApplied', deps)
+    expect(await rollback('test')).toMatchObject({ success: false, rolledBack: false, error: ipcError('internal') })
+    expect(deps.deleteManifest).not.toHaveBeenCalled()
+  })
   // AT-00-004/008 + AT-03-003c: execute rollback and its DNS retry wrapper together.
   it.each(['partial', 'native', 'cleanup', 'absent', 'success'] as const)('reports %s recovery without losing independently restored adapters', async outcome => {
     const raw = 'FAKE-SECRET at C:\\private\\credentials.json\n at unsafe (C:\\private\\app.js:1:2)'
@@ -125,6 +150,8 @@ describe('adapter rollback correlation (AT-03-007)', () => {
     const result = await rollback('partial recovery', { operationId: 'stop_fixture' })
     expect(result).toMatchObject({ rolledBack: false, warnings: expect.any(Array) })
     expect(result.warnings.length).toBeGreaterThan(0)
+    expect(result.message).toContain('Часть записей отката пропущена')
+    expect(result.message).not.toMatch(/\d+ из \d+/)
     expect(deps.deleteManifest).not.toHaveBeenCalled()
     expect(() => validate(disk)).toThrow()
     expect(deps.runPS).toHaveBeenCalledOnce()
@@ -172,6 +199,28 @@ describe('adapter rollback correlation (AT-03-007)', () => {
     const repair = compile<(reason: string, id: string) => Promise<any>>('repairOrphanedPhysicalAdapterDns', deps)
     expect(await repair('safety repair', operationId)).toEqual({ success: true, repaired: true, adapters: ['Wi-Fi'] })
     expect(deps.rollbackPhysicalAdapterLockdownIfApplied).toHaveBeenCalledWith('safety repair', { operationId })
+  })
+  it('retains the trusted manifest until its diagnostic copy is deleted, so cleanup can be retried (AT-00-004/AT-03-007)', async () => {
+    let trusted = true, failDiagnostic = true
+    const effects: string[] = []
+    const deleteManifest = compile<() => Promise<void>>('deleteManifest', {
+      MANIFEST_BASENAME: 'fixture', manifestPath: () => 'diagnostic-only',
+      unlink: async () => { effects.push('diagnostic'); if (failDiagnostic) throw Object.assign(new Error('diagnostic locked'), { code: 'EACCES' }) },
+      removeRecoveryManifest: async () => { effects.push('trusted'); trusted = false }
+    })
+    const deps = { process: { platform: 'win32' }, logEvent: vi.fn(), psSingleQuote: quote,
+      readManifest: async () => trusted ? { adapters: [adapter()], dnsRegistryPolicy: {} } : null,
+      registryRestoreLine: () => '', runPS: async () => 'A0_ipv6:noop\nA0_dns:noop\nDNS_SMNR:delete\nDNS_PARALLEL:delete',
+      deleteManifest, clearPhysicalAdaptersSnapshotCache: vi.fn() }
+    const rollback = compile<(reason: string) => Promise<any>>('rollbackPhysicalAdapterLockdownIfApplied', deps)
+    expect(await rollback('test')).toMatchObject({ success: false, error: ipcError('permission'), restoredAdapters: ['Wi-Fi'] })
+    expect(trusted).toBe(true)
+    expect(effects).toEqual(['diagnostic'])
+    failDiagnostic = false
+    expect(await rollback('retry')).toMatchObject({ success: true, rolledBack: true })
+    expect(trusted).toBe(false)
+    expect(effects).toEqual(['diagnostic', 'diagnostic', 'trusted'])
+    expect(await rollback('empty')).toMatchObject({ success: true, skipped: true })
   })
 })
 

@@ -14,8 +14,8 @@ describe('physicalAdapterLockdown source regressions', () => {
     expect(s).toContain('registryRestoreLine')
     expect(s).toContain("registryRestoreLine('DNS_SMNR'")
     expect(s).toContain("registryRestoreLine('DNS_PARALLEL'")
-    expect(s).toContain('DNS_SMNR:restore|DNS_SMNR:delete')
-    expect(s).toContain('DNS_PARALLEL:restore|DNS_PARALLEL:delete')
+    expect(s).toContain("confirmedOutcome('DNS_SMNR', ['restore', 'delete'])")
+    expect(s).toContain("confirmedOutcome('DNS_PARALLEL', ['restore', 'delete'])")
   })
 
   it('does not treat stale forceDns or resolver manifests as idempotent', () => {

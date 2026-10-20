@@ -48,6 +48,18 @@ describe('admin module', () => {
     vi.clearAllMocks()
     Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
   })
+  // AT-00-004: sudo-prompt's fixed nonlocalized denial is classified at its producer.
+  it.each(['User did not grant permission.', 'unknown elevation transport error'])('preserves the elevation outcome for %s', async message => {
+    const { execElevated, clearElevatedCache } = await import('./admin')
+    const { classifyRecoveryError } = await import('./recoveryErrors')
+    clearElevatedCache()
+    mockExecFile.mockImplementation((_file, _args, _options, callback) => callback(null, { stdout: 'false', stderr: '' }))
+    mockSudoExec.mockImplementation((_command, _options, callback) => callback(new Error(message)))
+    const error = await execElevated('netsh harmless-fixture').catch(error => error)
+    expect(classifyRecoveryError(error)).toBe(message === 'User did not grant permission.' ? 'permission' : 'internal')
+    expect(mockSudoExec).toHaveBeenCalledOnce()
+    mockExecFile.mockReset(); mockSudoExec.mockReset()
+  })
 
   // AT-03-007 / F-033: generated recovery commands bypass the shell boundary.
   it('runs long generated PowerShell directly when already elevated', async () => {

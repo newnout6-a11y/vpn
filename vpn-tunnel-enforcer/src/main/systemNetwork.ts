@@ -240,6 +240,9 @@ if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '${manifes
 $values = ${psJson(manifest.values)}
 function Get-RecoveryErrorCategory($failure) {
   if ($failure.CategoryInfo.Category -in @('PermissionDenied','SecurityError')) { return 'permission' }
+  for ($exception = $failure.Exception; $null -ne $exception; $exception = $exception.InnerException) {
+    if ($exception -is [UnauthorizedAccessException] -or $exception -is [System.Security.SecurityException] -or $exception.HResult -eq -2147024891) { return 'permission' }
+  }
   return 'internal'
 }
 $results = @()
@@ -274,8 +277,8 @@ $watch.Stop()
     if (!report.notification.success) warnings.push(`WinINet: ${ipcError(report.notification.category!).message}`)
     if (warnings.length) {
       logEvent('error', 'system-network', 'baseline rollback completed', { operationId, success: false, warnings })
-      const category = hasRejectedRecords ? 'validation'
-        : steps.some(s => !s.success && s.category === 'permission') || report.notification.category === 'permission' ? 'permission' : 'internal'
+      const category = steps.some(s => !s.success && s.category === 'permission') || report.notification.category === 'permission' ? 'permission'
+        : hasRejectedRecords ? 'validation' : 'internal'
       const message = `Baseline восстановлен частично: ${restoredSteps.length} из 9 записей; снимок сохранён.${report.notification.success ? '' : ' Уведомление Windows не подтверждено.'}`
       return { success: false, error: ipcError(category), operationId, message, restoredSteps, warnings, details: warnings.join(' | ') }
     }

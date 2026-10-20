@@ -251,8 +251,9 @@ async function writeManifest(m: LockdownManifest): Promise<void> {
   await writeFile(target, JSON.stringify(m, null, 2), 'utf8').catch(error => logEvent('warn', 'phys-lockdown', 'diagnostic copy failed', error))
 }
 async function deleteManifest(): Promise<void> {
-  await removeRecoveryManifest(MANIFEST_BASENAME)
+  // Keep the executable recovery journal until every cleanup dependency is gone.
   await unlink(manifestPath()).catch((error: any) => { if (error?.code !== 'ENOENT') throw error })
+  await removeRecoveryManifest(MANIFEST_BASENAME)
 }
 
 function psSingleQuote(s: string): string {
@@ -862,11 +863,16 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
   const warnings = [...rejected]
   try {
     const out = await runPS(combinedScript, 30000)
+    const lines = out.replace(/^\uFEFF/, '').split(/\r?\n/)
+    const confirmedOutcome = (tag: string, states: string[]) => {
+      const outcomes = lines.filter(line => line.startsWith(`${tag}:`) || line.startsWith(`${tag}_err:`))
+      return outcomes.length === 1 && states.some(state => outcomes[0] === `${tag}:${state}`)
+    }
     restoredAdapters = []
     for (let i = 0; i < m.adapters.length; i++) {
       const a = m.adapters[i]
-      const ipv6Ok = new RegExp(`A${i}_ipv6:on|A${i}_ipv6:noop`).test(out)
-      const dnsOk = new RegExp(`A${i}_dns:restore|A${i}_dns:reset|A${i}_dns:noop`).test(out)
+      const ipv6Ok = confirmedOutcome(`A${i}_ipv6`, ['on', 'noop'])
+      const dnsOk = confirmedOutcome(`A${i}_dns`, ['restore', 'reset', 'noop'])
       if (!ipv6Ok || !dnsOk) {
         logEvent('warn', 'phys-lockdown', `partial rollback failure for ${a.alias}`, { operationId, reason, ipv6Ok, dnsOk })
         rollbackSuccess = false
@@ -877,12 +883,12 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
       }
     }
     if (m.transitionAdapters) {
-      const teredoUnknown = /TRANS_teredo:unknown/.test(out)
-      const sixTo4Unknown = /TRANS_6to4:unknown/.test(out)
-      const isatapUnknown = /TRANS_isatap:unknown/.test(out)
-      const teredoOk = /TRANS_teredo:restore/.test(out) || teredoUnknown
-      const sixTo4Ok = /TRANS_6to4:restore/.test(out) || sixTo4Unknown
-      const isatapOk = /TRANS_isatap:restore/.test(out) || isatapUnknown
+      const teredoUnknown = confirmedOutcome('TRANS_teredo', ['unknown'])
+      const sixTo4Unknown = confirmedOutcome('TRANS_6to4', ['unknown'])
+      const isatapUnknown = confirmedOutcome('TRANS_isatap', ['unknown'])
+      const teredoOk = confirmedOutcome('TRANS_teredo', ['restore', 'unknown'])
+      const sixTo4Ok = confirmedOutcome('TRANS_6to4', ['restore', 'unknown'])
+      const isatapOk = confirmedOutcome('TRANS_isatap', ['restore', 'unknown'])
       if (!teredoOk || !sixTo4Ok || !isatapOk) {
         logEvent('warn', 'phys-lockdown', 'partial transition adapter rollback', { operationId, reason, teredoOk, sixTo4Ok, isatapOk })
         rollbackSuccess = false
@@ -893,8 +899,8 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
         logEvent('info', 'phys-lockdown', 'transition adapters restored', { operationId, reason })
       }
     }
-    const dnsSmnrOk = /DNS_SMNR:restore|DNS_SMNR:delete/.test(out)
-    const dnsParallelOk = /DNS_PARALLEL:restore|DNS_PARALLEL:delete/.test(out)
+    const dnsSmnrOk = confirmedOutcome('DNS_SMNR', ['restore', 'delete'])
+    const dnsParallelOk = confirmedOutcome('DNS_PARALLEL', ['restore', 'delete'])
     logEvent(dnsSmnrOk && dnsParallelOk ? 'info' : 'warn', 'phys-lockdown',
       dnsSmnrOk && dnsParallelOk ? 'DNS registry policy restored' : 'partial DNS registry policy rollback', { operationId, reason, dnsSmnrOk, dnsParallelOk })
     if (!dnsSmnrOk || !dnsParallelOk) {
@@ -920,10 +926,13 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
     logEvent('warn', 'phys-lockdown', 'manifest kept for retry on next startup — rollback was incomplete', { operationId, reason })
   }
   clearPhysicalAdaptersSnapshotCache()
+  const restoredDetail = restoredAdapters
+    ? ` Подтверждён откат адаптеров: ${restoredAdapters.length}${rejected.length ? '. Часть записей отката пропущена' : ` из ${m.adapters.length}`}.`
+    : ''
   return { success: rollbackSuccess, rolledBack: rollbackSuccess,
     ...(restoredAdapters ? { restoredAdapters } : {}),
     ...(!rollbackSuccess ? { error: failure ?? ipcError('internal'),
-      message: `Откат адаптеров не завершён; манифест сохранён для повторной попытки.${restoredAdapters ? ` Подтверждён откат адаптеров: ${restoredAdapters.length} из ${m.adapters.length}.` : ''}` } : {}),
+      message: `Откат адаптеров не завершён; манифест сохранён для повторной попытки.${restoredDetail}` } : {}),
     ...(warnings.length ? { warnings } : {}) }
 }
 

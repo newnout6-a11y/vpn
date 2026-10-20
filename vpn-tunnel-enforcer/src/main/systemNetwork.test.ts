@@ -389,6 +389,35 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
     expect(JSON.stringify(result)).not.toMatch(/FAKE-SECRET|private| at /)
     expect(logEvent).toHaveBeenCalledWith('error', 'system-network', 'baseline rollback step', expect.objectContaining({ error: unsafeDiagnostic }))
   })
+  it('does not hide a native permission failure behind rejected manifest records (AT-00-004)', async () => {
+    state.manifest = fixture(); state.manifest.values[0].exists = 'invalid'
+    state.failedSteps = [0]; state.stepCategory = 'permission'
+    const result = await rollbackTunNetworkBaseline()
+    expect(result.error).toEqual(ipcError('permission'))
+    expect(result.restoredSteps).toHaveLength(7)
+    expect(result.warnings?.some(warning => warning.includes('skipped'))).toBe(true)
+    expect(state.manifest).not.toBeNull()
+  })
+  it.skipIf(process.platform !== 'win32')('classifies a real registry method authorization exception through its wrappers (AT-00-004)', async () => {
+    state.manifest = fixture(); await rollbackTunNetworkBaseline()
+    const report = state.scripts[0].slice(state.scripts[0].indexOf('$values ='))
+    const script = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';
+$root='Software\\VPNTE-Recovery-Test-'+[Guid]::NewGuid().ToString('N')
+$created=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($root);$created.Close()
+$readOnly=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($root,$false)
+function Send-WinInetSettingsChanged {}
+function Restore-Snapshot($s) { if ($s.name -eq 'ProxyEnable') { try { $readOnly.SetValue('fixture',1) } catch { $script:observedCategory=[string]$_.CategoryInfo.Category;throw } } }
+try { $json = & { ${report} }; [pscustomobject]@{report=($json|ConvertFrom-Json);observedCategory=$observedCategory}|ConvertTo-Json -Depth 9 -Compress }
+finally { $readOnly.Close();[Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($root,$false) }`
+    const stdout = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 10000 })
+    const nativeResult = JSON.parse(stdout.trim())
+    expect(nativeResult.observedCategory).toBe('NotSpecified')
+    expect(nativeResult.report.steps[0]).toMatchObject({ success: false, category: 'permission' })
+    state.manifest = fixture(); state.reportPatch = nativeResult.report
+    const result = await rollbackTunNetworkBaseline()
+    expect(result.error).toEqual(ipcError('permission'))
+    expect(result.restoredSteps).toHaveLength(8)
+  })
   it.skipIf(process.platform !== 'win32')('native producer reports permission category without parsing localized messages (AT-00-004)', async () => {
     state.manifest = fixture(); await rollbackTunNetworkBaseline()
     const report = state.scripts[0].slice(state.scripts[0].indexOf('$values ='))

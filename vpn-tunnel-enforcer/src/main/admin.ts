@@ -110,7 +110,12 @@ async function execElevatedUntimed(
   return new Promise((resolve, reject) => {
     sudo.exec(command, { name: 'VPN Tunnel Enforcer' }, (error, stdout, stderr) => {
       if (error) {
-        reject(new Error(error.message || String(stderr || '') || 'Elevated command failed'))
+        // sudo-prompt normalizes Windows elevation denial to this fixed English
+        // sentinel. Classify it here, before its structured outcome is lost.
+        const failure = error as Error & { code?: string | number }
+        reject(Object.assign(new Error(error.message || String(stderr || '') || 'Elevated command failed'), {
+          code: failure.message === 'User did not grant permission.' ? 'EACCES' : failure.code
+        }))
       } else {
         resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? '') })
       }
