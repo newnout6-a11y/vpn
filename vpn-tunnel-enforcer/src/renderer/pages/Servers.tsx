@@ -991,21 +991,14 @@ export function Servers() {
             t('servers.groups.expiredBannerToast')
           )
         }
-      } else {
-        const message = t('servers.groups.refreshFailedDetail', {
-          error: result.error,
-          when: formatRelative(Date.now(), i18n.language)
-        })
-        addLog('warn', `${group.name}: ${result.error}`)
-        showToast('error', t('servers.groups.refreshFailed'), message)
-        // Re-fetch so the lastFetchAttemptAt / lastFetchError fields update.
-        await fetchGroups()
       }
     } catch (err: any) {
       if (!current(requestId) || (isIpcRemoteErrorData(err) && err.category === 'cancelled')) return
       const message = err?.message ?? String(err)
       addLog('error', `${group.name}: ${message}`)
       showToast('error', t('servers.groups.refreshFailed'), message)
+      // Failed refreshes preserve profiles but update attempt/error metadata.
+      await fetchGroups()
     } finally {
       if (current(requestId)) setRefreshingGroups((prev) => {
         const next = { ...prev }

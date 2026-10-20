@@ -42,7 +42,7 @@ import { inferCountryMetadata } from '../shared/countries'
 import { operations } from './operations'
 import type { OperationLease } from './operationRegistry'
 import type { OperationOwner } from '../shared/operation'
-import { IpcFault } from '../shared/ipc-result'
+import { IpcFault, classifyIpcError } from '../shared/ipc-result'
 import { withProfileStoreWriteLock } from './profileStoreQueue'
 
 // ─── Persistent Store ────────────────────────────────────────────────────────
@@ -407,9 +407,9 @@ async function refreshGroupUnlocked(
 ): Promise<RefreshGroupResult> {
   lease.assertActive()
   const group = getGroup(groupId)
-  if (!group) return { ok: false, error: 'Группа не найдена' }
+  if (!group) throw new IpcFault('conflict')
   if (group.source !== 'subscription' || !group.sourceUrl) {
-    return { ok: false, error: 'Группа без подписки — обновлять нечего' }
+    throw new IpcFault('validation')
   }
   const assertCurrentGroup = () => {
     lease.assertActive()
@@ -458,21 +458,18 @@ async function refreshGroupUnlocked(
         primaryDevice = device
       }
     }
-  } catch (err: any) {
+  } catch (err) {
     assertCurrentGroup()
-    const message = err?.message || String(err)
-    // Network errors (DNS, TCP, TLS) usually indicate the user is offline
-    // rather than the panel being gone. We still mark expired because the
-    // user-facing meaning is the same: "we couldn't get fresh keys".
+    const fault = new IpcFault(classifyIpcError(err))
+    // Provider failures never publish exception text through group metadata.
+    // A local/internal failure also cannot prove the subscription has expired.
     updateGroup(groupId, {
-      status: /resolve|ENOTFOUND|ECONNREFUSED|EAI/i.test(message) ? 'unreachable' : 'expired',
+      ...(fault.category === 'network' || fault.category === 'timeout' ? { status: 'unreachable' as const } : {}),
       lastFetchAttemptAt: now,
-      lastFetchError: message
+      lastFetchError: fault.message
     })
-    logEvent('warn', 'server-groups', 'refresh failed', { id: groupId, error: message })
-    const refreshed = getGroup(groupId)
-    if (!refreshed) return { ok: false, error: 'Группа исчезла во время обновления' }
-    return { ok: false, error: message }
+    logEvent('warn', 'server-groups', 'refresh failed', { id: groupId, category: fault.category })
+    throw fault
   }
 
   return lease.wait(withProfileStoreWriteLock(() => {
@@ -495,7 +492,7 @@ function commitGroupRefresh(
   const outOfGroup = existing.filter(p => p.groupId !== groupId)
   const primaryResolved = resolvedByDevice.get(primaryDevice) ?? Array.from(resolvedByDevice.values())[0]
   if (!primaryResolved) {
-    return { ok: false, error: 'No subscription response' }
+    throw new IpcFault('internal')
   }
   const resolvedProfilesCount = Array.from(resolvedByDevice.values()).reduce((sum, item) => sum + item.profiles.length, 0)
 
@@ -508,7 +505,7 @@ function commitGroupRefresh(
       lastFetchAttemptAt: now,
       lastFetchError: message
     })
-    return { ok: false, error: message }
+    throw new IpcFault('validation')
   }
 
   // Read userInfo defensively. Agent C may add more fields to
@@ -763,13 +760,12 @@ export async function refreshDueServerGroups(now = Date.now(), signal?: AbortSig
   for (const group of dueGroups) {
     if (signal?.aborted) break
     try {
-      const result = await refreshGroup(group.id, { owner: 'schedule', signal })
-      if (result.ok) refreshed++
-      else failed++
+      await refreshGroup(group.id, { owner: 'schedule', signal })
+      refreshed++
     } catch (error) {
       if (error instanceof IpcFault && error.category === 'cancelled') continue
       failed++
-      logEvent('warn', 'server-groups', 'automatic refresh failed', { groupId: group.id, error })
+      logEvent('warn', 'server-groups', 'automatic refresh failed', { groupId: group.id, category: classifyIpcError(error) })
     }
   }
   return { refreshed, failed }
@@ -881,7 +877,7 @@ function handleLogged<T>(
       logEvent('debug', 'ipc', `${channel} finished`, { ms: Date.now() - started })
       return result
     } catch (err) {
-      logEvent('error', 'ipc', `${channel} failed`, err)
+      logEvent('error', 'ipc', `${channel} failed`, { category: classifyIpcError(err) })
       throw err
     }
   })
@@ -913,12 +909,12 @@ export function registerServerGroupsHandlers(): void {
 
   handleLogged('groups:set-refresh-policy', async (_event, id: string, intervalMinutes: number | null) => {
     if (intervalMinutes !== null && (!Number.isInteger(intervalMinutes) || intervalMinutes < 1 || intervalMinutes > 1440)) {
-      throw new Error('Интервал обновления должен быть от 1 до 1440 минут')
+      throw new IpcFault('validation')
     }
     const updated = updateGroup(id, {
       refreshIntervalOverrideMinutes: intervalMinutes === null ? undefined : intervalMinutes
     })
-    if (!updated) throw new Error('Группа не найдена')
+    if (!updated) throw new IpcFault('conflict')
     logEvent('info', 'server-groups', 'refresh policy changed', {
       id,
       intervalMinutes: intervalMinutes ?? 'auto',

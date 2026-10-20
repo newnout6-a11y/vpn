@@ -39,6 +39,30 @@ const exports = [
     ['serversExportAllKeysToFile', 'servers.exportAllKeys', false], ['serversExportAllProxiesToFile', 'servers.exportProxyList', false]
 ] as const
 describe('Servers requester lifetime', () => {
+  it('refreshes saved group error metadata after a typed refresh failure', async () => {
+    api.groupsRefresh.mockRejectedValue({ name: 'IpcRemoteError', ...ipcError('network') })
+    render(<Servers />)
+    const button = await screen.findByRole('button', { name: 'servers.groups.refresh' })
+    const reads = api.groupsList.mock.calls.length
+    fireEvent.click(button)
+    await waitFor(() => expect(api.groupsList).toHaveBeenCalledTimes(reads + 1))
+    expect(useAppStore.getState().logs.some(log => log.message.includes(ipcError('network').message))).toBe(true)
+    expect(emitServerChanged).not.toHaveBeenCalled()
+    expect(api.serversList).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a typed refresh cancellation quiet without reloading metadata', async () => {
+    api.groupsRefresh.mockRejectedValue({ name: 'IpcRemoteError', ...ipcError('cancelled') })
+    render(<Servers />)
+    const button = await screen.findByRole('button', { name: 'servers.groups.refresh' })
+    const reads = api.groupsList.mock.calls.length
+    fireEvent.click(button)
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false))
+    expect(api.groupsList).toHaveBeenCalledTimes(reads)
+    expect(useAppStore.getState().logs).toEqual([])
+    expect(emitServerChanged).not.toHaveBeenCalled()
+  })
+
   it.each(['success', 'error'])('cancels group health on unmount and suppresses late %s', async outcome => {
     const view = render(<Servers />)
     fireEvent.click(await screen.findByRole('button', { name: 'servers.groups.checkHealth' }))
