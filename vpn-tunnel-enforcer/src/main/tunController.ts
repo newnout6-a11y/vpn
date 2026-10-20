@@ -2,7 +2,7 @@ import { recordOwnedTunAdapter, strictRecoveryRequired, readRecoveryManifest } f
 import { executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
 import { OWNED_RUNTIME_STATUS_QUERY_SCRIPT, OWNED_RUNTIME_STOP_SCRIPT } from './recoveryPsProtocol'
 import { classifyIpcError, ipcError } from '../shared/ipc-result'
-import type { OwnedRuntimeStopResult } from '../shared/network'
+import type { OwnedRuntimeStopResult, FirewallKillSwitchResult } from '../shared/network'
 import { exec as execCb, execFile as execFileCb } from 'child_process'
 import { writeFile, copyFile, access, rename, stat, readFile } from 'fs/promises'
 import { join, dirname } from 'path'
@@ -4273,7 +4273,7 @@ export const tunController = {
     )
   },
 
-  async disableFirewallKillSwitch(reason: string): Promise<{ success: boolean; message: string; skipped?: boolean }> {
+  async disableFirewallKillSwitch(reason: string): Promise<FirewallKillSwitchResult> {
     return disableKillSwitchIfActive(reason)
   },
 

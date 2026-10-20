@@ -7,6 +7,8 @@ import { constants as fsConstants } from 'fs'
 import { execFile as execFileCb } from 'child_process'
 import { isIP } from 'net'
 import { promisify } from 'util'
+import { ipcError, IpcFault, IpcValidationError, type IpcErrorCategory } from '../shared/ipc-result'
+import { classifyRecoveryError } from './recoveryErrors'
 import { execElevated } from './admin'
 import { execElevatedPs, isElevatedPsHelperRunning, type ElevatedPsPolicy } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
@@ -17,9 +19,44 @@ import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR, getTunAdapterAlias } from './
 import { withFirewallRulesApi } from './firewallRulesApi'
 import type { FirewallKillSwitchStatus } from '../shared/ipc-types'
 import { FIREWALL_STATUS_PS, parseFirewallStatusSnapshot, matchesFirewallPolicy } from './firewallStatus'
-import { type WfpIpv6Policy, validateWfpIpv6Policy, prepareWfpIpv6Policy, prepareWfpIpv6Exceptions, applyWfpIpv6Policy, verifyWfpIpv6Policy, removeWfpIpv6Protection, hasWfpIpv6Protection, sameWfpCoreScopes, reserveWfpIpv6Priority } from './wfpIpv6'
+import { type WfpIpv6Policy, wfpPrelude, validateWfpIpv6Policy, prepareWfpIpv6Policy, prepareWfpIpv6Exceptions, applyWfpIpv6Policy, verifyWfpIpv6Policy, removeWfpIpv6Protection, hasWfpIpv6Protection, sameWfpCoreScopes, reserveWfpIpv6Priority } from './wfpIpv6'
 
 const execFile = promisify(execFileCb)
+
+function classifyFirewallError(error: unknown): IpcErrorCategory {
+  if (error instanceof AggregateError) {
+    const categories = error.errors.map(classifyFirewallError)
+    return (['permission', 'timeout', 'cancelled', 'network', 'conflict', 'internal', 'validation'] as const)
+      .find(category => categories.includes(category)) ?? 'internal'
+  }
+  return classifyRecoveryError(error)
+}
+function firewallFailure(error: unknown, message: string): FirewallKillSwitchResult {
+  const failure = ipcError(classifyFirewallError(error))
+  const rejected = error instanceof AggregateError && error.errors.some(item => item instanceof IpcFault && item.category === 'validation')
+  return { success: false, error: failure, message, details: failure.message + (rejected ? '. Повреждённые записи пропущены (skipped); журнал сохранён.' : '') }
+}
+
+// Fixed native protocol, independent of localized PowerShell exception text.
+const FIREWALL_ERROR_CATEGORY_PS = `
+function Get-VpnteFirewallErrorCategory($failure) {
+  if ($failure.CategoryInfo.Category -in @('PermissionDenied','SecurityError')) { return 'permission' }
+  for ($exception = $failure.Exception; $null -ne $exception; $exception = $exception.InnerException) {
+    if ($exception -is [UnauthorizedAccessException] -or $exception -is [System.Security.SecurityException] -or $exception.HResult -eq -2147024891 -or ($exception -is [ComponentModel.Win32Exception] -and $exception.NativeErrorCode -eq 5)) { return 'permission' }
+    # This invariant sentinel originates in the integrity-pinned VPNTE WFP helper.
+    if ($exception.Message.StartsWith('IPv6 WFP priority conflict: ')) { return 'conflict' }
+  }
+  return 'internal'
+}`
+function checkFirewallFailureReport(stdout: string): void {
+  const reports = stdout.split(/\r?\n/).map(line => line.trim()).filter(line => line.startsWith('VPNTE_FW_FAILURE:'))
+  if (!reports.length) return
+  const category = reports.length === 1 ? reports[0].slice('VPNTE_FW_FAILURE:'.length) : ''
+  throw new IpcFault(category === 'permission' || category === 'conflict' ? category : 'internal')
+}
+function hasFirewallProof(stdout: string, marker: string): boolean {
+  return stdout.split(/\r?\n/).filter(line => line.trim() === marker).length === 1
+}
 
 // Rule-name prefix for every firewall rule we add. We rely on this prefix to
 // find and remove our rules during rollback, even if our manifest is missing
@@ -189,6 +226,11 @@ const wfpRun = (script: string) => ps(script, true, 30000, 'wfp-ipv6')
 async function ps(script: string, elevated = false, timeout = 30000, policy: ElevatedPsPolicy = 'firewall-killswitch') {
   const ruleBackend = /\b(?:Get-VpnteFirewallRuleNames|New-VpnteFirewallRule|Remove-VpnteFirewallRules)\b/.test(script) ? 'com' : 'netsecurity'
   script = withFirewallRulesApi(script)
+  // The helper exempts Add-Type only in this exact SHA-256-verified prefix.
+  // Keep the loader first; wrap only the caller body, without relaxing policy.
+  const trustedLoader = policy === 'wfp-ipv6' ? await wfpPrelude() : ''
+  const loader = script.startsWith(trustedLoader) ? trustedLoader : ''
+  script = `${loader}${FIREWALL_ERROR_CATEGORY_PS}\ntry {\n${script.slice(loader.length)}\n} catch { Write-Output ('VPNTE_FW_FAILURE:' + (Get-VpnteFirewallErrorCategory $_)) }`
   // The persistent helper executes source from its pipe. A protected .ps1 is
   // needed only by the fallback; writing it first adds two cold PS launches.
   if (isElevatedPsHelperRunning()) {
@@ -199,7 +241,7 @@ async function ps(script: string, elevated = false, timeout = 30000, policy: Ele
     } catch (err: any) {
       // Only a known rejection before execution permits a fallback. A timeout
       // or lost reply may follow effects; replaying would duplicate mutation.
-      if (!['elevated-helper-script-rejected', 'elevated-helper-script-too-large', 'elevated-helper-unavailable'].includes(err?.code)) throw err
+      if (!['elevated-helper-script-rejected', 'elevated-helper-script-too-large', 'elevated-helper-unavailable'].includes(err?.code)) throw new IpcFault(classifyRecoveryError(err))
       logEvent('debug', 'firewall-killswitch', 'helper fallback', {
         code: err?.code ?? 'unclassified', durationMs: Math.round(performance.now() - started)
       })
@@ -208,7 +250,8 @@ async function ps(script: string, elevated = false, timeout = 30000, policy: Ele
       logEvent('debug', 'firewall-killswitch', 'command timing', {
         transport: 'helper', ruleBackend, durationMs: Math.round(performance.now() - started)
       })
-      if (result.exitCode) throw new Error(result.stderr || `Firewall command failed (exit ${result.exitCode})`)
+      checkFirewallFailureReport(result.stdout)
+      if (result.exitCode) throw new IpcFault('internal')
       logNativeFirewallTimings(result.stdout)
       return { stdout: result.stdout, stderr: result.stderr }
     }
@@ -230,6 +273,7 @@ async function ps(script: string, elevated = false, timeout = 30000, policy: Ele
     if (elevated) {
       const command = `powershell -NoProfile -ExecutionPolicy Bypass -File ${cmdDoubleQuote(scriptPath)}`
       const result = await execElevated(command, { timeout, maxBuffer: 1024 * 1024 * 4 })
+      checkFirewallFailureReport(result.stdout)
       logNativeFirewallTimings(String(result.stdout ?? ''))
       return result
     }
@@ -243,11 +287,14 @@ async function ps(script: string, elevated = false, timeout = 30000, policy: Ele
         encoding: 'utf8'
       }
     ) as { stdout: string; stderr: string }
+    checkFirewallFailureReport(String(result.stdout ?? ''))
     logNativeFirewallTimings(String(result.stdout ?? ''))
     return {
       stdout: String(result.stdout ?? ''),
       stderr: String(result.stderr ?? '')
     }
+  } catch (error) {
+    throw new IpcFault(classifyRecoveryError(error))
   } finally {
     logEvent('debug', 'firewall-killswitch', 'command timing', {
       transport: elevated ? 'elevated-file' : 'file', ruleBackend, persistMs,
@@ -396,7 +443,7 @@ export async function ensureKillSwitchProgramAllowed(
   }
   const trimmed = String(programPath || '').trim()
   if (!trimmed) {
-    return { success: false, message: 'Kill-switch allow rule: program path is empty' }
+    return firewallFailure(new IpcFault('validation'), 'Kill-switch allow rule: program path is empty')
   }
   // This rule affects Windows Firewall only. WFP presence is a cleanup gate;
   // its IPv6 permits require the separately journalled endpoint/App ID policy.
@@ -428,11 +475,7 @@ Write-Output "RULE:$ruleName"
       programPath: trimmed,
       error: err?.message || String(err)
     })
-    return {
-      success: false,
-      message: `Не удалось разрешить ${trimmed} в kill-switch`,
-      details: err?.stderr || err?.message || String(err)
-    }
+    return firewallFailure(err, 'Не удалось разрешить программу в kill-switch')
   }
 }
 
@@ -498,17 +541,17 @@ function validateFirewallExceptionPolicy(value: unknown): FirewallExceptionPolic
   const v = value as FirewallExceptionPolicy
   if (!v || !Array.isArray(v.apps) || !Array.isArray(v.cidrs) || v.apps.length + v.cidrs.length > 256 ||
       v.apps.some(p => typeof p !== 'string' || !/^[a-z]:\\/i.test(p) || !/\.exe$/i.test(p) || /[\x00-\x1f]/.test(p)) ||
-      v.cidrs.some(c => typeof c !== 'string' || !isValidIpOrCidr(c))) throw new Error('Invalid firewall exception policy')
+      v.cidrs.some(c => typeof c !== 'string' || !isValidIpOrCidr(c))) throw new IpcValidationError('Invalid firewall exception policy')
   return { apps: [...new Set(v.apps)], cidrs: [...new Set(v.cidrs)] }
 }
 export async function canonicalizeExceptionAppPath(raw: string): Promise<string> {
-  if (!raw || raw.length > 2048 || /[\x00-\x1f]/.test(raw) || !/\.exe$/i.test(raw)) throw new Error('exception.value must be an executable path')
+  if (!raw || raw.length > 2048 || /[\x00-\x1f]/.test(raw) || !/\.exe$/i.test(raw)) throw new IpcValidationError('exception.value must be an executable path')
   if (process.platform === 'win32') {
-    if (!/^[a-z]:\\/i.test(raw) || !win32.isAbsolute(raw) || raw.slice(2).includes(':') || raw.split(/[\\/]/).includes('..')) throw new Error('exception.value must be a local absolute Windows path')
-  } else if (!isAbsolute(raw)) throw new Error('exception.value must be an absolute path')
+    if (!/^[a-z]:\\/i.test(raw) || !win32.isAbsolute(raw) || raw.slice(2).includes(':') || raw.split(/[\\/]/).includes('..')) throw new IpcValidationError('exception.value must be a local absolute Windows path')
+  } else if (!isAbsolute(raw)) throw new IpcValidationError('exception.value must be an absolute path')
   await access(raw, fsConstants.R_OK)
   const canonical = await realpath(raw)
-  if (!(await stat(canonical)).isFile() || !/\.exe$/i.test(canonical) || (process.platform === 'win32' && !/^[a-z]:\\/i.test(canonical))) throw new Error('exception.value must be a local readable .exe file')
+  if (!(await stat(canonical)).isFile() || !/\.exe$/i.test(canonical) || (process.platform === 'win32' && !/^[a-z]:\\/i.test(canonical))) throw new IpcValidationError('exception.value must be a local readable .exe file')
   return canonical
 }
 function exceptionRuleNames(policy: FirewallExceptionPolicy): string[] {
@@ -574,23 +617,23 @@ export function updateKillSwitchExceptions(apps: string[], cidrs: string[], stri
 async function updateExceptionsUnlocked(apps: string[], cidrs: string[], strictMode?: boolean): Promise<FirewallKillSwitchResult> {
   let previous: FirewallManifest | null
   try { previous = await timedFirewallPhase('live-read-manifest', readManifest) }
-  catch { return { success: false, state: 'unknown', message: 'Live exceptions require a trusted active firewall transaction' } }
-  if (!previous || previous.phase !== 'active') return { success: false, state: 'unknown', message: 'Live exceptions require a trusted active firewall transaction' }
+  catch (error) { return { ...firewallFailure(error, 'Live exceptions require a trusted active firewall transaction'), state: 'unknown' } }
+  if (!previous || previous.phase !== 'active') return { ...firewallFailure(new IpcFault('conflict'), 'Live exceptions require a trusted active firewall transaction'), state: 'unknown' }
   const policy = validateFirewallExceptionPolicy({ apps: await Promise.all(apps.map(canonicalizeExceptionAppPath)), cidrs })
   const old = previous.exceptionPolicy ?? { apps: [], cidrs: [] }
-  if (!previous.ipv6Policy) return { success: false, state: 'unknown', message: 'IPv6 protection requires reconnect before live exceptions' }
+  if (!previous.ipv6Policy) return { ...firewallFailure(new IpcFault('conflict'), 'IPv6 protection requires reconnect before live exceptions'), state: 'unknown' }
   let ipv6Policy: WfpIpv6Policy
   try {
     ipv6Policy = await prepareWfpIpv6Exceptions(previous.ipv6Policy, policy.apps, policy.cidrs, wfpRun)
   } catch (error) {
-    return { success: false, state: 'unknown', message: 'IPv6 exception preparation failed; firewall unchanged', details: String(error) }
+    return { ...firewallFailure(error, 'IPv6 exception preparation failed; firewall unchanged'), state: 'unknown' }
   }
   // Original baseline and core rule names are never replaced by a live update.
   await timedFirewallPhase('live-prepare-journal', () => writeManifest({ ...previous, pendingExceptionPolicy: policy }))
   try {
     await applyWfpIpv6Policy(ipv6Policy, wfpRun)
     const { stdout } = await timedFirewallPhase('live-apply-policy', () => ps(exceptionPolicyScript(policy), true, 30000))
-    if (!String(stdout).split(/\r?\n/).includes('EXCEPTIONS_VERIFIED')) throw new Error('Exception verification marker missing')
+    if (!hasFirewallProof(String(stdout), 'EXCEPTIONS_VERIFIED')) throw new Error('Exception verification marker missing or ambiguous')
     const { pendingExceptionPolicy: _pending, ...committed } = previous
     await timedFirewallPhase('live-commit-journal', () => writeManifest({ ...committed, ipv6Policy, strictMode: strictMode ?? previous.strictMode, exceptionPolicy: policy,
       ruleNames: [...previous.ruleNames.filter(n => !n.startsWith(`${RULE_PREFIX}-user-`) && n !== `${RULE_PREFIX}-allow-extra-ip`), ...exceptionRuleNames(policy)] }))
@@ -601,7 +644,7 @@ async function updateExceptionsUnlocked(apps: string[], cidrs: string[], strictM
       try { await applyWfpIpv6Policy(previous.ipv6Policy, wfpRun) } catch (failure) { failures.push(failure) }
       try {
         const { stdout } = await ps(exceptionPolicyScript(old), true, 30000)
-        if (!String(stdout).split(/\r?\n/).includes('EXCEPTIONS_VERIFIED')) throw new Error('Exception compensation not verified')
+        if (!hasFirewallProof(String(stdout), 'EXCEPTIONS_VERIFIED')) throw new Error('Exception compensation not verified')
       } catch (failure) { failures.push(failure) }
       if (failures.length) throw new AggregateError(failures, 'Exception compensation incomplete')
       await writeManifest(previous)
@@ -611,9 +654,9 @@ async function updateExceptionsUnlocked(apps: string[], cidrs: string[], strictM
         compensation: String((compensationError as any)?.stderr || compensationError).replace(/-EncodedCommand\s+\S+/gi, '-EncodedCommand <omitted>').slice(-2000)
       })
       reportRecoveryWarning('Live-обновление исключений не подтверждено. Core-защита сохранена, но набор исключений требует повторной проверки.')
-      return { success: false, state: 'unknown', message: 'Live exception update and compensation failed; recovery journal retained' }
+      return { ...firewallFailure(new AggregateError([error, compensationError]), 'Live exception update and compensation failed; recovery journal retained'), state: 'unknown' }
     }
-    return { success: false, message: 'Exception update failed; previous exception policy restored', details: String(error) }
+    return firewallFailure(error, 'Exception update failed; previous exception policy restored')
   }
 }
 
@@ -639,26 +682,26 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
     return { success: true, message: 'Firewall kill-switch недоступен (не Windows)' }
   }
 
-  if ((opts.extraAllowedRemoteCidrs ?? []).some(c => !isValidIpOrCidr(c))) return { success: false, message: 'Invalid exception IP/CIDR' }
+  if ((opts.extraAllowedRemoteCidrs ?? []).some(c => !isValidIpOrCidr(c))) return firewallFailure(new IpcFault('validation'), 'Invalid exception IP/CIDR')
   if (opts.appExceptionPaths) opts = { ...opts, appExceptionPaths: await Promise.all(opts.appExceptionPaths.map(canonicalizeExceptionAppPath)) }
   const initialExceptions = opts.appExceptionPaths !== undefined || opts.extraAllowedRemoteCidrs !== undefined
     ? validateFirewallExceptionPolicy({ apps: opts.appExceptionPaths ?? [], cidrs: opts.extraAllowedRemoteCidrs ?? [] })
     : null
   let previous: FirewallManifest | null
   try { previous = await timedFirewallPhase('initial-read-manifest', readManifest) }
-  catch { return { success: false, state: 'unknown', message: 'Recovery manifest is untrusted or invalid; refusing to replace its baseline' } }
+  catch (error) { return { ...firewallFailure(error, 'Recovery manifest is untrusted or invalid; refusing to replace its baseline'), state: 'unknown' } }
   if (opts.tunAdapterReady && !await timedFirewallPhase('verified-adapter-wait', () => opts.tunAdapterReady!)) {
-    return { success: false, message: 'Owned TUN adapter was not confirmed; firewall unchanged' }
+    return firewallFailure(new IpcFault('conflict'), 'Owned TUN adapter was not confirmed; firewall unchanged')
   }
   let ipv6Policy: WfpIpv6Policy
   try {
     ipv6Policy = await prepareWfpIpv6Policy({ corePrograms: [opts.singboxExePath, ...(opts.proxyOwnerProgramPaths ?? [])],
       serverHost: opts.vpnServerHost, signal: opts.signal, tunAlias: opts.tunAdapterAlias || getTunAdapterAlias(),
       apps: initialExceptions?.apps ?? previous?.exceptionPolicy?.apps ?? [], cidrs: initialExceptions?.cidrs ?? previous?.exceptionPolicy?.cidrs ?? [] }, wfpRun)
-  } catch (error) { return { success: false, state: 'unknown', message: 'IPv6 policy preparation failed; firewall unchanged', details: String(error) } }
+  } catch (error) { return { ...firewallFailure(error, 'IPv6 policy preparation failed; firewall unchanged'), state: 'unknown' } }
   if (previous?.phase === 'active' && previous.ipv6Policy && sameWfpCoreScopes(previous.ipv6Policy, ipv6Policy)) {
     try { await verifyWfpIpv6Policy(previous.ipv6Policy, wfpRun) }
-    catch (error) { return { success: false, state: 'unknown', message: 'Existing IPv6 coverage not verified', details: String(error) } }
+    catch (error) { return { ...firewallFailure(error, 'Existing IPv6 coverage not verified'), state: 'unknown' } }
     if (opts.appExceptionPaths !== undefined || opts.extraAllowedRemoteCidrs !== undefined || opts.strictMode !== undefined) {
       return updateExceptionsUnlocked(opts.appExceptionPaths ?? previous.exceptionPolicy?.apps ?? [], opts.extraAllowedRemoteCidrs ?? previous.exceptionPolicy?.cidrs ?? [], opts.strictMode)
     }
@@ -675,7 +718,7 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
   }
   // This durable snapshot MUST precede any New/Remove/Set-NetFirewall operation.
   try { await timedFirewallPhase('initial-prepare-journal', () => writeManifest(prepared)) } catch (error) {
-    return { success: false, message: 'Firewall unchanged: recovery snapshot could not be committed', details: String(error) }
+    return firewallFailure(error, 'Firewall unchanged: recovery snapshot could not be committed')
   }
 
   const tunAlias = opts.tunAdapterAlias || getTunAdapterAlias()
@@ -922,7 +965,7 @@ Write-Output "SAVED:$savedJson"
     const output = String(stdout || '')
     const lines = output.split('\n').map((l) => l.trim())
 
-    if (initialExceptions && !lines.includes('EXCEPTIONS_VERIFIED')) {
+    if (initialExceptions && !hasFirewallProof(output, 'EXCEPTIONS_VERIFIED')) {
       throw new Error('Initial exception verification marker missing')
     }
 
@@ -936,23 +979,22 @@ Write-Output "SAVED:$savedJson"
     }
 
   } catch (err: any) {
+    let failure: unknown = err
+    let recoveryUnknown = false
     try { await restoreAndCleanup(prepared); await clearManifest() }
-    catch (rollbackError) { logEvent('error', 'firewall-killswitch', 'failed transaction recovery retained', { rollbackError: String(rollbackError) }) }
-    logEvent('error', 'firewall-killswitch', 'failed to install kill-switch', err)
-    return {
-      success: false,
-      message: String(err?.stderr || err?.message || err).includes('IPv6 WFP priority conflict')
-        ? 'Конфликт IPv6-фильтров WFP: другое VPN-ядро может обходить блокировку. Остановите его TUN/VPN и повторите подключение'
-        : 'Не удалось установить kill-switch (Windows Firewall / IPv6 WFP)',
-      details: err?.stderr || err?.message || String(err)
+    catch (rollbackError) {
+      failure = new AggregateError([err, rollbackError]); recoveryUnknown = true
+      logEvent('error', 'firewall-killswitch', 'failed transaction recovery retained', { rollbackError: String(rollbackError) })
     }
+    logEvent('error', 'firewall-killswitch', 'failed to install kill-switch', err)
+    const conflict = classifyFirewallError(err) === 'conflict'
+    return { ...firewallFailure(failure, conflict
+      ? 'Конфликт IPv6-фильтров WFP: другое VPN-ядро может обходить блокировку. Остановите его TUN/VPN и повторите подключение'
+      : 'Не удалось установить kill-switch (Windows Firewall / IPv6 WFP)'), ...(recoveryUnknown ? { state: 'unknown' as const } : {}) }
   }
 
   if (installedRules.length === 0) {
-    return {
-      success: false,
-      message: 'Kill-switch: ни одно Allow-правило не создалось'
-    }
+    return firewallFailure(new IpcFault('internal'), 'Kill-switch: ни одно Allow-правило не создалось')
   }
 
   try {
@@ -966,15 +1008,16 @@ Write-Output "SAVED:$savedJson"
     // The firewall transaction is not committed until its recovery manifest
     // is durable. Compensate immediately instead of leaving Block active with
     // no authoritative baseline.
+    let failure: unknown = error
+    let recoveryUnknown = false
     try { await restoreAndCleanup(prepared); await clearManifest() }
     catch (rollbackError) {
+      failure = new AggregateError([error, rollbackError]); recoveryUnknown = true
       logEvent('error', 'firewall-killswitch', 'manifest commit and verified rollback failed; snapshot retained', { rollbackError: String(rollbackError) })
     }
-    return {
-      success: false,
-      message: 'Kill-switch отменён: не удалось надёжно записать recovery manifest',
-      details: error?.message || String(error)
-    }
+    return { ...firewallFailure(failure, recoveryUnknown
+      ? 'Состояние kill-switch не подтверждено; журнал сохранён для повторного восстановления'
+      : 'Kill-switch отменён: не удалось надёжно записать recovery manifest'), ...(recoveryUnknown ? { state: 'unknown' as const } : {}) }
   }
 
   logEvent('info', 'firewall-killswitch', 'kill-switch engaged (DefaultOutboundAction=Block)', {
@@ -1011,13 +1054,14 @@ async function restoreAndCleanup(snapshot?: FirewallManifest, operationId?: stri
 try {
   Set-NetFirewallProfile -Profile ${psSingleQuote(p.name)} -DefaultOutboundAction ${p.defaultOutbound} -ErrorAction Stop
   if ([string](Get-NetFirewallProfile -Profile ${psSingleQuote(p.name)} -ErrorAction Stop).DefaultOutboundAction -ne ${psSingleQuote(p.defaultOutbound)}) { throw 'Policy read-back mismatch' }
-} catch { $errors += ${psSingleQuote(p.name)} + ': ' + [string]$_ }
+} catch { $errors += $_ }
 `).join('\n')
-  const failures: unknown[] = recovery.rejected.map(message => new Error(message))
+  const failures: unknown[] = recovery.rejected.map(() => new IpcFault('validation'))
   for (const error of recovery.rejected) logEvent('error', 'firewall-killswitch', 'firewall rollback step rejected', { operationId, success: false, error })
   if (recovery.rejected.length) reportRecoveryWarning('Часть записей отката firewall повреждена и пропущена. Исправные записи восстанавливаются; файл сохранён для повторной проверки.')
   try {
-    const { stdout } = await ps(`$errors = @()
+    const { stdout } = await ps(`${FIREWALL_ERROR_CATEGORY_PS}
+$errors = @()
 $nativePhaseWatch = [Diagnostics.Stopwatch]::StartNew()
 ${restores}
 Write-Output ('VPNTE_FW_TIMING:restore-profiles:' + $nativePhaseWatch.ElapsedMilliseconds)
@@ -1025,11 +1069,14 @@ $nativePhaseWatch.Restart()
 try {
   Remove-VpnteFirewallRules -DisplayName '${RULE_PREFIX}*' -ErrorAction Stop
   if ((Get-VpnteFirewallRuleNames -DisplayName '${RULE_PREFIX}*' -ErrorAction Stop | Measure-Object).Count -ne 0) { throw 'VPNTE rules remain' }
-} catch { $errors += 'rules: ' + [string]$_ }
+} catch { $errors += $_ }
 Write-Output ('VPNTE_FW_TIMING:restore-remove-rules:' + $nativePhaseWatch.ElapsedMilliseconds)
-if ($errors.Count -gt 0) { throw ($errors -join ' | ') }
+if ($errors.Count -gt 0) {
+  if (@($errors | Where-Object { (Get-VpnteFirewallErrorCategory $_) -eq 'permission' }).Count) { throw [UnauthorizedAccessException]::new('Firewall rollback denied') }
+  throw 'Firewall rollback incomplete'
+}
 Write-Output 'RESTORED'`, true, 30000)
-    if (!String(stdout).split(/\r?\n/).includes('RESTORED')) throw new Error('Firewall rollback read-back was not confirmed')
+    if (!hasFirewallProof(String(stdout), 'RESTORED')) throw new Error('Firewall rollback read-back was not confirmed')
     for (const profile of profiles) logEvent('info', 'firewall-killswitch', 'firewall profile rollback step', { operationId, step: `profile/${profile.name}`, success: true })
     logEvent('info', 'firewall-killswitch', 'firewall rollback step', { operationId, step: 'profiles-and-rules', success: true })
   } catch (failure) {
@@ -1058,11 +1105,7 @@ async function disableKillSwitchUnlocked(reason: string, operationId?: string): 
     await timedFirewallPhase('clear-journal', clearManifest, operationId)
   } catch (err: any) {
     logEvent('warn', 'firewall-killswitch', 'failed to fully restore kill-switch', { operationId, reason, error: String(err) })
-    return {
-      success: false,
-      message: 'Часть правил kill-switch не снялась — проверьте Windows Firewall вручную',
-      details: err?.stderr || err?.message || String(err)
-    }
+    return firewallFailure(err, 'Восстановление kill-switch не завершено. Проверьте Windows Firewall и повторите откат.')
   }
 
   logEvent('info', 'firewall-killswitch', `kill-switch disengaged: ${reason}`, { operationId })
@@ -1144,9 +1187,7 @@ export async function reserveKillSwitchIpv6Priority(signal: AbortSignal): Promis
     signal.throwIfAborted()
     try { await reserveWfpIpv6Priority(wfpRun) }
     catch (err: any) {
-      if (String(err?.stderr || err?.message || err).includes('IPv6 WFP priority conflict')) {
-        throw new Error('Конфликт IPv6-фильтров WFP: остановите TUN/VPN другого приложения и повторите подключение')
-      }
+      if (classifyFirewallError(err) === 'conflict') throw new IpcFault('conflict')
       throw err
     }
     signal.throwIfAborted()
@@ -1158,7 +1199,7 @@ async function recoverStaleKillSwitchUnlocked(isSingboxRunning: () => Promise<bo
   let rejected: string[] | undefined
   try { ({ manifest, rejected } = await readManifestForRecovery()) }
   catch (error) {
-    reportRecoveryWarning(`Восстановление защиты отклонено; сеть не изменена: ${String(error)}`)
+    reportRecoveryWarning(`Восстановление защиты отклонено; сеть не изменена: ${ipcError(classifyFirewallError(error)).message}`)
     return
   }
   if (manifest?.strictMode || await strictRecoveryRequired()) {
@@ -1357,9 +1398,9 @@ function firewallBackupPath(): string {
   return join(backupDir(), `windows-firewall-before-reset-${stamp}.wfw`)
 }
 
-export async function nuclearFirewallReset(): Promise<{ success: boolean; message: string; backupPath?: string }> {
+export async function nuclearFirewallReset(): Promise<FirewallKillSwitchResult & { backupPath?: string }> {
   if (process.platform !== 'win32') {
-    return { success: false, message: 'Only supported on Windows' }
+    return firewallFailure(new IpcFault('conflict'), 'Only supported on Windows')
   }
   const backupPath = firewallBackupPath()
   try {
@@ -1377,6 +1418,6 @@ export async function nuclearFirewallReset(): Promise<{ success: boolean; messag
     }
   } catch (err: any) {
     logEvent('error', 'firewall-killswitch', 'nuclear firewall reset failed', err)
-    return { success: false, message: err.message || String(err) }
+    return firewallFailure(err, 'Не удалось завершить сброс Windows Firewall')
   }
 }

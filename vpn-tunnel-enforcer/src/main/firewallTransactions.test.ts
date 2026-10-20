@@ -6,15 +6,19 @@ import { FIREWALL_RULES_API_PS } from './firewallRulesApi'
 import { FIREWALL_RULES_BOUNDARY_FIXTURE_PS } from './testFixtures/firewallRulesBoundary'
 import { firewallStatusFixture } from './testFixtures/firewallStatus'
 import { getTunAdapterAlias } from './tunAdapter'
+import { ipcError, IpcFault } from '../shared/ipc-result'
 const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], scripts: [] as string[],
   snapshot: ['Domain','Private','Public'].map(name => ({ name, defaultOutbound: 'Block' })),
   failWrite: false, failApply: false, failRestore: false, invalidRead: false, readError: null as Error | null,
   quarantines: [] as string[], failQuarantine: false, ownedRules: false,
   wfpCalls: [] as string[], wfpActive: false, wfpFailApply: 0, wfpFailRemove: false, wfpFailVerify: false, wfpConflict: false, wfpFailPrepareExceptions: false,
+  wfpRemoveError: null as Error | null,
   manifestReads: 0,
+  auditWfpPolicy: false,
   liveFailures: 0, liveMissingMarker: false, failCommit: false,
   artifacts: [] as string[], helperAvailable: true, helperFailure: null as any, helperExitCode: 0, longApps: false,
-  nativeTimings: '', fileProbe: vi.fn((..._args: any[]) => '0'),
+  nativeTimings: '', restoreOutput: null as string | null, cleanupError: null as Error | null,
+  fileProbe: vi.fn((..._args: any[]) => '0'),
   statusSnapshot: '' as string,
   fallback: vi.fn(async (..._args: any[]) => ({ stdout: 'SNAPSHOT:[]', stderr: '' })) }))
 vi.mock('electron', () => ({ app: { getPath: () => 'C:\\VPNTE' },
@@ -30,17 +34,19 @@ vi.mock('./wfpIpv6', async importOriginal => ({
   applyWfpIpv6Policy: async () => {
     state.wfpCalls.push('apply')
     if (!state.manifest?.ipv6Policy) throw new Error('WFP effects without recovery journal')
-    if (state.wfpConflict) throw new Error('IPv6 WFP priority conflict: sing-tun')
+    if (state.wfpConflict) throw new IpcFault('conflict')
     if (state.wfpFailApply > 0) { state.wfpFailApply--; throw new Error('WFP apply failure') }
     state.wfpActive = true
   },
   verifyWfpIpv6Policy: async () => { state.wfpCalls.push('verify'); if (state.wfpFailVerify) throw new Error('WFP coverage changed') },
-  removeWfpIpv6Protection: async () => { state.wfpCalls.push('remove'); if (state.wfpFailRemove) throw new Error('WFP remove failure'); state.wfpActive = false },
+  removeWfpIpv6Protection: async () => { state.wfpCalls.push('remove'); if (state.wfpRemoveError) throw state.wfpRemoveError; if (state.wfpFailRemove) throw new Error('WFP remove failure'); state.wfpActive = false },
   hasWfpIpv6Protection: async () => { state.wfpCalls.push('presence'); return state.wfpActive }
 }))
 vi.mock('fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('fs/promises')>()
   const api = { ...actual,
+    mkdir: vi.fn(async () => undefined),
+    readdir: vi.fn(async () => []),
     access: (...args: Parameters<typeof actual.access>) => state.longApps ? Promise.resolve() : actual.access(...args),
     realpath: (...args: Parameters<typeof actual.realpath>) => state.longApps ? Promise.resolve(args[0]) : actual.realpath(...args),
     stat: (...args: Parameters<typeof actual.stat>) => state.longApps ? Promise.resolve({ isFile: () => true }) : actual.stat(...args)
@@ -63,7 +69,7 @@ vi.mock('./recoveryManifest', async importOriginal => ({
     state.manifest = validate(value); state.writes.push(structuredClone(state.manifest))
   },
   writeRecoveryArtifact: vi.fn(async (name: string) => { state.artifacts.push(name) }),
-  removeRecoveryManifest: async () => { state.manifest = null },
+  removeRecoveryManifest: async () => { if (state.cleanupError) throw state.cleanupError; state.manifest = null },
   strictRecoveryRequired: async () => false,
   quarantineRecoveryManifest: async (name: string) => { if (state.failQuarantine) throw new Error('quarantine refused'); state.quarantines.push(name) }
 }))
@@ -77,8 +83,15 @@ vi.mock('child_process', async importOriginal => {
   return { ...actual, execFile, default: { ...actual, execFile } }
 })
 vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.helperAvailable,
-  execElevatedPs: async (script: string) => {
+  execElevatedPs: async (script: string, timeout: number, policy: import('./elevatedPsHelper').ElevatedPsPolicy) => {
     state.scripts.push(script)
+    if (state.auditWfpPolicy && policy === 'wfp-ipv6') {
+      const helper = await vi.importActual<typeof import('./elevatedPsHelper')>('./elevatedPsHelper')
+      // Reach real policy validation, but explicitly prohibit helper startup.
+      await expect(helper.execElevatedPs(script, timeout, policy, { startIfUnavailable: false }))
+        .rejects.toMatchObject({ code: 'elevated-helper-unavailable' })
+      return { stdout: 'WFP_PRIORITY_VERIFIED', stderr: '', exitCode: 0 }
+    }
     if (state.helperFailure) throw state.helperFailure
     if (script.length > 64 * 1024) {
       // Exercise the real helper's pre-dispatch size guard; no native process.
@@ -105,12 +118,12 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
     if (script.includes('SNAPSHOT:')) return { stdout: 'SNAPSHOT:' + JSON.stringify(state.snapshot), stderr: '' }
     if (script.includes("Write-Output 'RESTORED'")) {
       if (state.failRestore) throw new Error('restore failed')
-      return { stdout: 'RESTORED', stderr: '' }
+      return { stdout: state.restoreOutput ?? 'RESTORED', stderr: '' }
     }
     return { stdout: state.ownedRules && script.includes('Get-VpnteFirewallRuleNames') ? '1' : '0', stderr: '' }
   }
 }))
-import { enableKillSwitch, disableKillSwitch, disableKillSwitchIfActive, isKillSwitchActive, getFirewallKillSwitchStatus, killSwitchManifestExists, updateKillSwitchExceptions, recoverStaleKillSwitch, ensureKillSwitchProgramAllowed, validateFirewallManifest } from './firewallKillSwitch'
+import { enableKillSwitch, disableKillSwitch, disableKillSwitchIfActive, isKillSwitchActive, getFirewallKillSwitchStatus, killSwitchManifestExists, updateKillSwitchExceptions, recoverStaleKillSwitch, ensureKillSwitchProgramAllowed, validateFirewallManifest, nuclearFirewallReset, reserveKillSwitchIpv6Priority, repairVpnteFirewallRules } from './firewallKillSwitch'
 import { RecoveryManifestReadError } from './recoveryManifest'
 import { logEvent } from './appLogger'
 const originalPlatform = process.platform
@@ -135,15 +148,180 @@ beforeEach(() => {
   state.wfpCalls = []; state.wfpActive = false; state.wfpFailApply = 0; state.wfpFailRemove = false; state.wfpFailVerify = false; state.wfpConflict = false
   state.wfpFailPrepareExceptions = false
   state.manifestReads = 0
+  state.auditWfpPolicy = false
   state.liveFailures = 0; state.liveMissingMarker = false; state.failCommit = false
   state.artifacts = []; state.helperAvailable = true; state.helperFailure = null; state.helperExitCode = 0
   state.longApps = false
   state.nativeTimings = ''; vi.mocked(logEvent).mockClear()
+  state.restoreOutput = null; state.cleanupError = null
+  state.wfpRemoveError = null
   state.statusSnapshot = JSON.stringify({ services: [], profiles: [], storedNames: [], foreignAllows: 0, rules: [] })
   state.fallback.mockReset().mockRejectedValue(new Error('Fallback boundary refused'))
   state.fileProbe.mockReset().mockReturnValue('0')
 })
 afterEach(() => { Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true }) })
+describe('firewall error taxonomy (AT-00-004, AT-03-003/007; F-074)', () => {
+  const raw = 'FAKE-SECRET at C:\\private\\firewall.json\n at native (C:\\private\\app.js:1:2)'
+  it('preserves the exact pinned WFP loader before its failure wrapper (AT-03-012)', async () => {
+    state.auditWfpPolicy = true
+    await reserveKillSwitchIpv6Priority(new AbortController().signal)
+    expect(state.artifacts).toEqual([])
+    expect(state.fallback).not.toHaveBeenCalled()
+    expect(state.scripts).toHaveLength(1)
+  })
+  it('preserves the actual post-repair health beside a typed failure', async () => {
+    await enableKillSwitch(options)
+    state.helperFailure = Object.assign(new Error(raw), { code: 'EACCES' })
+    const result = await repairVpnteFirewallRules()
+    expect(result).toMatchObject({ success: false, error: ipcError('permission'), health: { manifestPresent: true, summary: 'warn' } })
+    expect(state.wfpActive).toBe(false)
+    expect(JSON.stringify(result)).not.toMatch(/FAKE-SECRET|private| at /)
+  })
+  it('does not expose storage diagnostics in a startup recovery warning', async () => {
+    state.readError = Object.assign(new Error(raw), { code: 'EACCES' })
+    const { dialog } = await import('electron')
+    vi.mocked(dialog.showMessageBox).mockClear()
+    await recoverStaleKillSwitch(async () => false)
+    expect(dialog.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining(ipcError('permission').message) }))
+    expect(JSON.stringify(vi.mocked(dialog.showMessageBox).mock.calls)).not.toMatch(/FAKE-SECRET|private| at /)
+    expect(state.scripts).toEqual([])
+  })
+  it.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH)('consumes the fixed WFP conflict sentinel from an actual wrapped native exception', async () => {
+    await enableKillSwitch(options)
+    const snapshot = state.scripts.find(script => script.includes('SNAPSHOT:'))!
+    const output = executeNativeFixture(`
+function Get-NetFirewallProfile { throw [Reflection.TargetInvocationException]::new([InvalidOperationException]::new('IPv6 WFP priority conflict: fixture')) }
+${snapshot}`)
+    expect(output).toMatch(/^VPNTE_FW_FAILURE:conflict\s*$/)
+    state.restoreOutput = output
+    expect(await disableKillSwitch('native conflict fixture')).toMatchObject({ success: false, error: ipcError('conflict') })
+    expect(state.manifest).not.toBeNull()
+  }, 20000)
+  it.each(['permission', 'network', 'validation', 'conflict', 'cancelled', 'timeout', 'internal'] as const)(
+    'preserves %s through independent rollback failures without public diagnostics', async category => {
+      await enableKillSwitch(options)
+      state.helperFailure = category === 'internal' ? new Error(raw) : new IpcFault(category)
+      const result = await disableKillSwitch('taxonomy fixture')
+      expect(result).toMatchObject({ success: false, error: ipcError(category) })
+      expect(JSON.stringify(result)).not.toMatch(/FAKE-SECRET|private| at /)
+      expect(state.manifest).not.toBeNull()
+      expect(state.wfpCalls).toContain('remove')
+    })
+  it('retains permission when a valid restore fails beside rejected records', async () => {
+    await enableKillSwitch(options)
+    state.manifest.savedProfiles[0].defaultOutbound = 'invalid'
+    state.helperFailure = Object.assign(new Error(raw), { code: 'EACCES' })
+    expect(await disableKillSwitch('partial fixture')).toMatchObject({ success: false, error: ipcError('permission') })
+    expect(state.manifest).not.toBeNull()
+  })
+  it.each(['permission', 'internal'] as const)('consumes fixed native %s reports despite apparent success', async category => {
+    await enableKillSwitch(options)
+    state.restoreOutput = `RESTORED\nVPNTE_FW_FAILURE:${category}`
+    expect(await disableKillSwitch('native report fixture')).toMatchObject({ success: false, error: ipcError(category) })
+    expect(state.manifest).not.toBeNull()
+  })
+  it('classifies a helper timeout without replaying dispatched effects', async () => {
+    await enableKillSwitch(options)
+    state.helperFailure = Object.assign(new Error(raw), { code: 'elevated-helper-timeout' })
+    expect(await disableKillSwitch('deadline fixture')).toMatchObject({ success: false, error: ipcError('timeout') })
+    expect(state.fallback).not.toHaveBeenCalled()
+  })
+  it('retains a verified rollback journal when its retirement is denied', async () => {
+    await enableKillSwitch(options)
+    state.cleanupError = Object.assign(new Error(raw), { code: 'EPERM' })
+    const result = await disableKillSwitch('cleanup fixture')
+    expect(result).toMatchObject({ success: false, error: ipcError('permission') })
+    expect(JSON.stringify(result)).not.toMatch(/FAKE-SECRET|private| at /)
+    expect(state.manifest).not.toBeNull()
+    expect(state.wfpActive).toBe(false)
+  })
+  it('returns validation before invalid CIDR has effects', async () => {
+    expect(await enableKillSwitch({ ...options, extraAllowedRemoteCidrs: ['0.0.0.0/0'] }))
+      .toMatchObject({ success: false, error: ipcError('validation') })
+    expect(state.writes).toEqual([])
+    expect(state.scripts).toEqual([])
+  })
+  it('returns conflict for an unconfirmed owned adapter', async () => {
+    expect(await enableKillSwitch({ ...options, tunAdapterReady: Promise.resolve(false) }))
+      .toMatchObject({ success: false, error: ipcError('conflict') })
+    expect(state.writes).toEqual([])
+    expect(state.scripts).toEqual([])
+  })
+  it('returns a safe typed reset denial and never attempts reset after failed export', async () => {
+    state.fallback.mockRejectedValue(Object.assign(new Error(raw), { code: 'EACCES' }))
+    const result = await nuclearFirewallReset()
+    expect(result).toMatchObject({ success: false, error: ipcError('permission') })
+    expect(JSON.stringify(result)).not.toMatch(/FAKE-SECRET|private| at /)
+    expect(state.fallback).toHaveBeenCalledOnce()
+    expect(state.fallback.mock.calls[0][0]).toContain('netsh advfirewall export')
+  })
+  it.each(['permission', 'timeout'] as const)('preserves %s from the elevated file fallback without replay', async category => {
+    await enableKillSwitch(options)
+    state.helperAvailable = false
+    state.fallback.mockRejectedValue(Object.assign(new Error(raw), category === 'permission' ? { code: 'EACCES' } : { code: null, killed: true, signal: 'SIGTERM' }))
+    expect(await disableKillSwitch('file fixture')).toMatchObject({ success: false, error: ipcError(category) })
+    expect(state.fallback).toHaveBeenCalledOnce()
+    expect(state.manifest).not.toBeNull()
+  })
+  it('consumes native failure reports from the elevated file fallback', async () => {
+    await enableKillSwitch(options)
+    state.helperAvailable = false
+    state.fallback.mockResolvedValue({ stdout: 'RESTORED\nVPNTE_FW_FAILURE:permission', stderr: '' })
+    expect(await disableKillSwitch('file report')).toMatchObject({ success: false, error: ipcError('permission') })
+    expect(state.fallback).toHaveBeenCalledOnce()
+    expect(state.manifest).not.toBeNull()
+  })
+  it.each(['apply', 'commit'] as const)('retains compensation denial and unknown state after %s failure', async phase => {
+    state.failApply = phase === 'apply'; state.failCommit = phase === 'commit'
+    state.wfpRemoveError = Object.assign(new Error(raw), { code: 'EPERM' })
+    const result = await enableKillSwitch({ ...options, appExceptionPaths: [], extraAllowedRemoteCidrs: [] })
+    expect(result).toMatchObject({ success: false, state: 'unknown', error: ipcError('permission') })
+    expect(JSON.stringify(result)).not.toMatch(/FAKE-SECRET|private| at |отменён/)
+    expect(state.manifest).not.toBeNull()
+  })
+  it.each(['RESTORED\nRESTORED', 'RESTORED_SUFFIX', 'diagnostic RESTORED', 'RESTORED\nVPNTE_FW_FAILURE:permission\nVPNTE_FW_FAILURE:internal'])(
+    'retains retry metadata for ambiguous or missing rollback proof %j', async output => {
+      await enableKillSwitch(options)
+      state.restoreOutput = output
+      expect(await disableKillSwitch('ambiguous fixture')).toMatchObject({ success: false, error: ipcError('internal') })
+      expect(state.manifest).not.toBeNull()
+    })
+  it.skipIf(process.platform !== 'win32' && !process.env.VPNTE_PWSH).each(['category', 'wrapped', 'win32', 'internal', 'conflict'] as const)(
+    'consumes a real native %s error report while restoring independent neighbors', async mode => {
+      await enableKillSwitch(options)
+      await disableKillSwitch('capture native script')
+      const restore = state.scripts.find(script => script.includes("Write-Output 'RESTORED'"))!
+      const failure = mode === 'category'
+        ? "$PSCmdlet.ThrowTerminatingError([Management.Automation.ErrorRecord]::new([Exception]::new('opaque'),'fixture',[Management.Automation.ErrorCategory]::PermissionDenied,$null))"
+        : mode === 'wrapped'
+          ? "throw [Reflection.TargetInvocationException]::new([UnauthorizedAccessException]::new('opaque'))"
+          : mode === 'win32' ? "throw [ComponentModel.Win32Exception]::new(5)"
+          : mode === 'conflict' ? "throw 'IPv6 WFP priority conflict: fixture'" : "throw 'opaque'"
+      const output = executeNativeFixture(`
+$script:attempts=New-Object 'Collections.Generic.List[string]'
+function Set-NetFirewallProfile { [CmdletBinding()]param($Profile,$DefaultOutboundAction)
+  $script:attempts.Add($Profile)
+  if($Profile -eq 'Private'){${failure}}
+}
+function Get-NetFirewallProfile { param($Profile) [pscustomobject]@{DefaultOutboundAction='Block'} }
+function Get-NetFirewallRule { param($DisplayName) @() }
+function Remove-NetFirewallRule { param([Parameter(ValueFromPipeline=$true)]$Rule) process {} }
+${restore}
+Write-Output ('ATTEMPTS:'+($script:attempts -join ','))
+`)
+      const category = ['category', 'wrapped', 'win32'].includes(mode) ? 'permission' : 'internal'
+      // Rollback deliberately reports the aggregate of independent steps;
+      // non-authorization native failures remain internal.
+      expect(output).toContain(`VPNTE_FW_FAILURE:${category}`)
+      expect(output).toContain('ATTEMPTS:Domain,Private,Public')
+      expect(output).not.toMatch(/^RESTORED\r?$/m)
+      await enableKillSwitch(options)
+      state.restoreOutput = output
+      expect(await disableKillSwitch('consume native report')).toMatchObject({ success: false, error: ipcError(category) })
+      expect(state.manifest).not.toBeNull()
+    }, 20000)
+})
+
 describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)', () => {
   it.each(['content', 'trust'] as const)('deduplicates passive %s rejection logs until evidence changes (AT-00-005/AT-03-012)', async kind => {
     await getFirewallKillSwitchStatus()
@@ -316,7 +494,7 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     const events = vi.mocked(logEvent).mock.calls
     const steps = events.filter(call => call[2] === 'firewall rollback step')
     expect(steps.map(call => call[3])).toEqual([
-      { operationId, step: 'profiles-and-rules', success: failing !== 'firewall', ...(failing === 'firewall' ? { error: expect.stringContaining('restore failed') } : {}) },
+      { operationId, step: 'profiles-and-rules', success: failing !== 'firewall', ...(failing === 'firewall' ? { error: expect.stringContaining(ipcError('internal').message) } : {}) },
       { operationId, step: 'ipv6-wfp', success: failing !== 'wfp', ...(failing === 'wfp' ? { error: expect.stringContaining('WFP remove failure') } : {}) }
     ])
     for (const event of events.filter(call => call[2] === 'phase timing' || call[2].startsWith('auto-disable') || call[2].startsWith('kill-switch disengaged') || call[2] === 'failed to fully restore kill-switch')) {
@@ -357,7 +535,8 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     const result = await enableKillSwitch(options)
     expect(result).toMatchObject({ success: false })
     expect(result.message).toContain('Конфликт IPv6-фильтров WFP')
-    expect(result.details).toContain('sing-tun')
+    expect(result.error).toEqual(ipcError('conflict'))
+    expect(result.details).toBe(ipcError('conflict').message)
     expect(state.scripts.some(script => script.includes('# --- Step 2:'))).toBe(false)
     expect(state.wfpCalls).toEqual(['prepare','apply','remove'])
     expect(state.manifest).toBeNull()
@@ -522,7 +701,7 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
   })
   it('treats a failed native helper reply as failure without replaying effects (AT-03-007)', async () => {
     state.helperExitCode = 1
-    await expect(enableKillSwitch(options)).rejects.toThrow('native command failed')
+    await expect(enableKillSwitch(options)).rejects.toMatchObject({ category: 'internal' })
     expect(state.artifacts).toEqual([])
     expect(state.fallback).not.toHaveBeenCalled()
   })
@@ -632,8 +811,10 @@ function Get-NetFirewallRule { param($DisplayName) @($script:rules.Values)|Where
 function Remove-NetFirewallRule { param([Parameter(ValueFromPipeline=$true)]$Rule) process { if($Rule){$script:rules.Remove('own')} } }
 ${mode === 'com-error' ? "function New-Object { param($ComObject) throw 'Fixture COM unavailable' }" : ''}
 $success=$false
-try {${restore}
-$success=$true
+try {$restoreOutput=@(${restore}
+)
+$restoreOutput | Write-Output
+$success=@($restoreOutput | Where-Object { $_ -like 'VPNTE_FW_FAILURE:*' }).Count -eq 0
 }catch{}
 Write-Output ('RESULT:'+(@{success=$success;attempts=$script:attempts.ToArray();ownRemains=$script:rules.ContainsKey('own');foreignRemains=$script:rules.ContainsKey('foreign')}|ConvertTo-Json -Compress))
 `, mode === 'com-error')
@@ -741,7 +922,8 @@ describe('differential live firewall fault injection (AT-03-008/009)', () => {
       state: 'unknown',
       message: 'IPv6 exception preparation failed; firewall unchanged'
     })
-    expect(result.details).toContain('App ID resolution failed')
+    expect(result.error).toEqual(ipcError('internal'))
+    expect(result.details).not.toContain('App ID resolution failed')
     expect(state.writes).toEqual([])
     expect(state.scripts).toEqual([])
     expect(state.manifest.pendingExceptionPolicy).toBeUndefined()
