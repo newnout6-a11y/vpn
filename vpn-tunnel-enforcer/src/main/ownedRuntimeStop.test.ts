@@ -5,6 +5,7 @@ import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 import { RecoveryWorkerError } from './recoveryPsWorker'
 import { OWNED_RUNTIME_STOP_SCRIPT, validateRecoveryRequest, type RecoveryRequest } from './recoveryPsProtocol'
+import { classifyIpcError, ipcError } from '../shared/ipc-result'
 const source = ts.createSourceFile('tunController.ts', readFileSync(join(process.cwd(), 'src/main/tunController.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
 const node = source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'killOwnedTunRuntimeProcesses')
 if (!node) throw new Error('Production runtime stop missing')
@@ -14,7 +15,7 @@ const reply = { candidates: 1, killed: 1, names: ['vpnte-sing-box.exe'] }
 function harness(platform = 'win32') {
   const deps = { process: { platform }, getTunRuntimeDir: () => runtimeDir,
     executeRecoveryOperation: vi.fn(async (_request: RecoveryRequest, _deadline: number) => JSON.stringify(reply)),
-    RecoveryWorkerError, OWNED_RUNTIME_STOP_SCRIPT,
+    RecoveryWorkerError, OWNED_RUNTIME_STOP_SCRIPT, classifyIpcError, ipcError,
     psSingleQuote: (value: string) => `'${value.replace(/'/g, "''")}'`,
     runPowerShell: vi.fn(async (_script: string, _deadline: number) => JSON.stringify(reply)), logEvent: vi.fn() }
   return { ...deps, stop: new Function(...Object.keys(deps), js)(...Object.values(deps)) as () => Promise<any> }
@@ -33,12 +34,13 @@ describe('closed owned runtime stop dispatch', () => {
   })
   it.each(['timeout', 'exited', 'protocol', 'rejected', 'busy', 'closed'] as const)('does not replay after %s', async code => {
     const h = harness(); h.executeRecoveryOperation.mockRejectedValue(new RecoveryWorkerError(code, 'unknown native result'))
-    expect(await h.stop()).toMatchObject({ success: false })
+    const result = await h.stop()
+    expect(result).toEqual({ success: false, error: ipcError(code === 'timeout' ? 'timeout' : ['busy', 'closed'].includes(code) ? 'conflict' : 'internal') })
     expect(h.runPowerShell).not.toHaveBeenCalled()
   })
   it('does not replay a forged unavailable error', async () => {
     const h = harness(); h.executeRecoveryOperation.mockRejectedValue(Object.assign(new Error('unknown'), { code: 'unavailable' }))
-    expect((await h.stop()).success).toBe(false)
+    expect(await h.stop()).toEqual({ success: false, error: ipcError('internal') })
     expect(h.runPowerShell).not.toHaveBeenCalled()
   })
   it.each(['', '{}', 'null', 'garbage', ...[
@@ -47,12 +49,26 @@ describe('closed owned runtime stop dispatch', () => {
     { ...reply, names: [null] }, { ...reply, exitProven: true }
   ].map(value => JSON.stringify(value))])('rejects malformed stop evidence: %s', async value => {
     const h = harness(); h.executeRecoveryOperation.mockResolvedValue(value)
-    expect((await h.stop()).success).toBe(false)
+    expect(await h.stop()).toEqual({ success: false, error: ipcError('internal') })
     expect(h.runPowerShell).not.toHaveBeenCalled()
   })
   it('returns partial termination for the lifecycle owner to reject', async () => {
     const h = harness(); h.executeRecoveryOperation.mockResolvedValue(JSON.stringify({ candidates: 2, killed: 1, names: ['vpnte-xray.exe'] }))
-    expect(await h.stop()).toEqual({ success: true, candidates: 2, killed: 1, names: ['vpnte-xray.exe'] })
+    expect(await h.stop()).toEqual({ success: false, error: ipcError('internal'), candidates: 2, killed: 1, names: ['vpnte-xray.exe'] })
+  })
+  // AT-00-004: errors cross the domain boundary without raw text or invented receipts.
+  it.each([
+    ['permission', { code: 'EACCES' }], ['permission', { code: 'EPERM' }],
+    ['timeout', { code: 'ETIMEDOUT' }], ['timeout', { code: null, killed: true, signal: 'SIGTERM' }],
+    ['internal', { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', killed: true, signal: 'SIGTERM' }]
+  ] as const)('classifies fallback failures as %s without replay', async (category, properties) => {
+    const h = harness()
+    h.executeRecoveryOperation.mockRejectedValue(new RecoveryWorkerError('unavailable', 'fixture'))
+    const error = Object.assign(new Error('secret at C:\\private\\runtime'), properties)
+    h.runPowerShell.mockRejectedValue(error)
+    expect(await h.stop()).toEqual({ success: false, error: ipcError(category) })
+    expect(h.runPowerShell).toHaveBeenCalledOnce()
+    expect(h.logEvent).toHaveBeenCalledWith('debug', 'tun', 'killOwnedRuntimeProcesses failed', error)
   })
   it('does no native work on another platform', async () => {
     const h = harness('linux'); expect(await h.stop()).toEqual({ success: true, candidates: 0, killed: 0, names: [] })

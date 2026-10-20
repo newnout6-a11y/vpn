@@ -5,6 +5,8 @@ import type { PlannedFeatureId, PlannedFeatureStatus } from './planned-features'
 import type { PublicIpInfo } from './publicIp'
 import type { ProxyInfo, AdaptiveBypassStatus, LeakCheckResult, SystemDiagnosticResult, RoutingPlan, LogFileSnapshot, UrlAvailabilityResult, ServerProbeResult } from './diagnostics'
 import type { DiagnosticClearReport } from './diagnostics'
+import type { IpcError } from './ipc-result'
+import type { OwnedRuntimeStopResult } from './network'
 import type { AutoconfigTarget, SmartRouteRuleSetState, BrowserHardeningResult, AutoPilotResult, SystemNetworkResult, FirewallKillSwitchResult, FirewallRepairHealth, LocationPrivacyStatus } from './network'
 import type { TrafficHistoryEntry, TrafficForensicsStatus } from './traffic'
 import type {
@@ -62,8 +64,8 @@ export interface ElectronAPI {
   rollbackBrowserLeakProtection: () => Promise<BrowserHardeningResult>
   runAutoPilot: () => Promise<AutoPilotResult>
   repairOrphanedDns: () => Promise<{ repaired: boolean; adapters: string[] }>
-  rollbackAdapterLockdown: () => Promise<{ rolledBack: boolean; skipped?: boolean; warnings?: string[]; blocked?: boolean; message?: string }>
-  killStaleSingbox: () => Promise<{ success: boolean; message: string; skipped?: boolean; blocked?: boolean; candidates?: number; killed?: number; names?: string[]; error?: string }>
+  rollbackAdapterLockdown: () => Promise<{ rolledBack: boolean; success?: boolean; error?: IpcError; skipped?: boolean; warnings?: string[]; blocked?: boolean; message?: string }>
+  killStaleSingbox: () => Promise<OwnedRuntimeStopResult & { message: string; skipped?: boolean; blocked?: boolean }>
   logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => Promise<{ success: boolean }>
   getFullLogs: () => Promise<LogFileSnapshot[]>
   clearAppLog: () => Promise<DiagnosticClearReport>

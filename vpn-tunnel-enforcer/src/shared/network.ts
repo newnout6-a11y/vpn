@@ -1,5 +1,16 @@
 import type { RoutingPlan } from './diagnostics'
 import type { AppSettings } from './settings'
+import type { IpcError } from './ipc-result'
+
+export interface OwnedRuntimeStopReceipt {
+  candidates: number
+  killed: number
+  names: string[]
+}
+/** Unknown native outcomes carry no receipt; partial confirmed counts survive. */
+export type OwnedRuntimeStopResult =
+  | ({ success: true } & OwnedRuntimeStopReceipt)
+  | ({ success: false; error: IpcError } & Partial<OwnedRuntimeStopReceipt>)
 
 export interface AutoconfigTarget {
   id: string
@@ -46,6 +57,7 @@ export interface LocationPrivacyStatus {
 
 export interface SystemNetworkResult {
   success: boolean
+  error?: IpcError
   operationId?: string
   message: string
   details?: string
@@ -55,6 +67,7 @@ export interface SystemNetworkResult {
 
 export interface FirewallKillSwitchResult {
   success: boolean
+  error?: IpcError
   message: string
   details?: string
   // True iff the call was a no-op because there was nothing to do (kill-switch
