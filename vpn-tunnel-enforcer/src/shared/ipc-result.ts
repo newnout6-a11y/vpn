@@ -43,6 +43,16 @@ export function ipcError(category: IpcErrorCategory, locale: IpcErrorLocale = 'r
   return { category, ...IPC_ERRORS[category], message: locale === 'en' ? IPC_ERROR_MESSAGES_EN[category] : IPC_ERRORS[category].message } as IpcError
 }
 
+/** Domain receipts must agree on a canonical code/category pair. */
+export function readIpcErrorCategory(value: unknown): IpcErrorCategory | undefined {
+  try {
+    if (!value || typeof value !== 'object' || !('category' in value) || !('code' in value)) return undefined
+    const category = value.category
+    return typeof category === 'string' && Object.hasOwn(IPC_ERRORS, category)
+      && value.code === IPC_ERRORS[category as IpcErrorCategory].code ? category as IpcErrorCategory : undefined
+  } catch { return undefined }
+}
+
 /** Stable categories at the privileged boundary; never serialize arbitrary errors. */
 export function classifyIpcError(error: unknown): IpcErrorCategory {
   try {

@@ -102,7 +102,7 @@ export class TunnelStateMachine {
       ? this.canConfirmStart() ? 'connected' : 'unknown'
       : this.canConfirmStop() ? 'disconnected' : 'unknown'
     else if (operation.kind === 'rotation' && this.retainedRotationOperation === operation.operationId && this.canRetainRotation()) state = this.rotationMode === null ? 'disconnected' : 'connected'
-    else if (operation.status === 'error' && !operation.category && this.retainedSoftOperation === operation.operationId && this.canRetainSoft()) state = 'connected'
+    else if (operation.status === 'error' && operation.category !== 'timeout' && this.retainedSoftOperation === operation.operationId && this.canRetainSoft()) state = 'connected'
     else if (state !== 'blocked' && state !== 'unknown') state = 'error'
     this.retainedSoftOperation = null
     this.retainedRotationOperation = null
@@ -128,6 +128,11 @@ export class TunnelStateMachine {
       || this.current.transition !== 'connecting' || !this.canRetainSoft()) return invalid()
     this.retainedSoftOperation = operationId
     return { success: true } as const
+  }
+
+  /** A thrown failure after read-back can invalidate the completed refresh. */
+  invalidateRetainedSoft(operationId: string): void {
+    if (this.retainedSoftOperation === operationId) this.retainedSoftOperation = null
   }
 
   runtimeChanged(status: string) {

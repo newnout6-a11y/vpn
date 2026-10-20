@@ -7,6 +7,7 @@ import { isScheduleActive, computeNextEvent, parseTimeToMinutes, schedulerServic
 import type { ScheduleEntry } from '../shared/ipc-types'
 import { ConnectionLifecycle } from './connectionLifecycle'
 import { runScheduledConnection } from './scheduledConnection'
+import { connectionFailure } from '../shared/operation'
 
 vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }))
 vi.mock('electron-store', () => ({
@@ -30,7 +31,7 @@ describe('unavailable scheduled profiles — AT-00-007 / AT-10-006', () => {
 
   it.each(['restart', 'timer'] as const)('tries the next active profile at %s through the real admission lane', async trigger => {
     if (trigger === 'timer') vi.setSystemTime(new Date(2024, 0, 10, 8, 59))
-    const lane = new ConnectionLifecycle(vi.fn()), selected: string[] = [], start = vi.fn(async () => ({ success: true }))
+    const lane = new ConnectionLifecycle(vi.fn()), selected: string[] = [], start = vi.fn(async () => ({ success: true as const }))
     schedulerService.init({
       onDisconnect: vi.fn(),
       onConnect: async schedule => {
@@ -68,7 +69,7 @@ describe('unavailable scheduled profiles — AT-00-007 / AT-10-006', () => {
       ? lane.start(async owner => { await owner.wait(gate); return { success: true } }) : null
     const selected = vi.fn(() => true), start = vi.fn(async owner => {
       if (outcome === 'cancelled') await owner.wait(gate)
-      return { success: outcome !== 'network-error', error: outcome === 'network-error' ? 'unreachable' : undefined }
+      return outcome === 'network-error' ? connectionFailure('network', 'unreachable') : { success: true as const }
     })
     const onConnect = vi.fn(async (schedule: ScheduleEntry) => {
       const result = await runScheduledConnection(lane, schedule, {

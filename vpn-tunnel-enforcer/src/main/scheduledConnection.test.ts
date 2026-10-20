@@ -37,7 +37,7 @@ describe('scheduled connection admission', () => {
 
   it.each(['soft', 'hard', 'direct'] as const)('runs %s through the same schedule owner and selects before startup', async mode => {
     const lane = new ConnectionLifecycle(vi.fn()), events: string[] = []
-    const start = vi.fn(async owner => { expect(owner.operation.owner).toBe('schedule'); events.push('start'); return { success: true } })
+    const start = vi.fn(async owner => { expect(owner.operation.owner).toBe('schedule'); events.push('start'); return { success: true as const } })
     const actions = {
       resolveProxy: vi.fn(async () => ({ proxyAddr: '127.0.0.1:8080', proxyType: 'http' as const })),
       selectProfile: vi.fn(() => { events.push('select'); return true }), startDirect: start, startProxy: start
@@ -52,6 +52,6 @@ describe('scheduled connection admission', () => {
     const actions = { resolveProxy: vi.fn(), selectProfile: vi.fn(() => false), startDirect: vi.fn(), startProxy: vi.fn() }
     expect(await runScheduledConnection(lane, { mode: 'direct', profileId: 'missing' }, actions)).toMatchObject({ success: false, code: 'SCHEDULE_PROFILE_UNAVAILABLE', error: 'Профиль расписания недоступен' })
     expect(actions.startDirect).not.toHaveBeenCalled()
-    expect(lane.operation).toMatchObject({ owner: 'schedule', status: 'error' })
+    expect(lane.operation).toMatchObject({ owner: 'schedule', status: 'error', category: 'conflict' })
   })
 })

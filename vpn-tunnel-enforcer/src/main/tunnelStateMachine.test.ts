@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest'
 import assert from 'node:assert/strict'
 import { ConnectionLifecycle } from './connectionLifecycle'
 import { TunnelStateMachine } from './tunnelStateMachine'
+import { connectionFailure } from '../shared/operation'
+import { IPC_ERRORS, IpcFault, type IpcErrorCategory } from '../shared/ipc-result'
 
 function harness() {
   const evidence = { running: false, pid: null as number | null, softApplied: false }
@@ -15,16 +17,28 @@ function harness() {
 }
 
 describe('canonical tunnel state', () => {
-  it('keeps confirmed Soft protection while reporting a failed refresh, and requires fresh evidence next time (AT-00-002/008)', async () => {
+  it.each(['internal', 'permission', 'network', 'conflict', 'validation'] as const)('keeps confirmed Soft protection on returned %s refresh failure, and requires fresh evidence next time (AT-00-002/008)', async category => {
     const h = harness()
     await h.lane.start(async () => { h.evidence.softApplied = true; return { success: true } })
     expect(await h.lane.start(async owner => {
       expect(h.model.confirmRetainedSoft(owner.operation.operationId)).toEqual({ success: true })
-      return { success: false, error: 'refresh failed' }
+      return connectionFailure(category)
     }, { refreshSoft: true })).toMatchObject({ success: false })
     expect(h.model.snapshot).toMatchObject({ state: 'connected', mode: 'soft', transition: null, operation: { status: 'error' } })
     await h.lane.start(async () => ({ success: false }), { refreshSoft: true })
     expect(h.model.snapshot.state).toBe('error')
+  })
+
+  it.each(Object.keys(IPC_ERRORS) as IpcErrorCategory[])('invalidates Soft read-back before a later thrown %s failure (AT-00-002/004)', async category => {
+    const h = harness()
+    await h.lane.start(async () => { h.evidence.softApplied = true; return { success: true } })
+    const fault = new IpcFault(category)
+    await expect(h.lane.start(async owner => {
+      expect(h.model.confirmRetainedSoft(owner.operation.operationId).success).toBe(true)
+      throw fault
+    }, { refreshSoft: true })).rejects.toBe(fault)
+    expect(h.model.snapshot.state).not.toBe('connected')
+    expect(h.lane.operation?.category).toBe(category)
   })
 
   it.each(['initial', 'native', 'stale', 'fault', 'lost-env', 'internal'] as const)('does not invent retained Soft protection for %s (AT-00-002)', async failure => {

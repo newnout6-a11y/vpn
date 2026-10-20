@@ -4,12 +4,17 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { connectionFailure } from '../shared/operation'
+import { classifyIpcError } from '../shared/ipc-result'
+import { RecoveryWorkerError } from './recoveryPsWorker'
 
 const source = readFileSync(join(process.cwd(), 'src/main/tunController.ts'), 'utf8')
 const begin = source.indexOf('let runtimePromise: Promise<')
 const end = source.indexOf('// Kill only VPNTE-owned runtime binaries.', begin)
 if (begin < 0 || end < 0) throw new Error('Production preparation boundary not found')
 const preparation = source.slice(begin, end)
+const ast = ts.createSourceFile('tunController.ts', source, ts.ScriptTarget.Latest, true)
+const classifier = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'classifyTunError')!
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -20,7 +25,7 @@ function deferred<T>() {
 
 function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', adapterLockdownPromise = Promise.resolve()) {
   const os = {
-    dns, mode, engine,
+    dns, mode, engine, connectionFailure, classifyIpcError, RecoveryWorkerError,
     adapterLockdownPromise,
     startXray: vi.fn(async () => ({ socksPort: 1234, resolvedIp: '198.51.100.1', exePath: 'fixture-xray.exe' })),
     stopXray: vi.fn(async () => {}),
@@ -43,6 +48,7 @@ function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', a
     validateProxyFullTunnel: vi.fn(async () => ({ ok: true }))
   }
   const compiled = ts.transpileModule(`
+    ${classifier.getText(ast)}
     const dnsSourcesPromise=dns, smartRuSplit=true, smartRuMapsDirect=false;
     let proxyOwnerProcessNames=[], proxyOwnerProgramPaths=[], stopRequested=false;
     const startAbortController=new AbortController();
@@ -198,7 +204,8 @@ describe('Direct VPN preparation overlap', () => {
     const pending = h.run()
     await vi.waitFor(() => expect(h.prepareRuntime).toHaveBeenCalledOnce())
     xray.reject(new Error('Xray refused shared ACL proof'))
-    expect(await pending).toMatchObject({ success: false, error: expect.stringContaining('shared ACL proof') })
+    expect(await pending).toEqual(connectionFailure('internal'))
+    expect(h.logEvent).toHaveBeenCalledWith('error', 'tun', 'xray startup failed', expect.objectContaining({ message: 'Xray refused shared ACL proof' }))
     expect(h.stopXray).toHaveBeenCalledOnce()
     expect(h.rollbackEarlyAdapterLockdown).toHaveBeenCalledOnce()
   })
@@ -277,7 +284,8 @@ describe('Direct VPN preparation overlap', () => {
     await vi.waitFor(() => expect(h.stopXray).toHaveBeenCalledOnce())
     expect(completed).not.toHaveBeenCalled()
     dns.resolve([])
-    expect(await pending).toMatchObject({ success: false, error: expect.stringContaining('config rejected') })
+    expect(await pending).toEqual(connectionFailure('internal'))
+    expect(h.logEvent).toHaveBeenCalledWith('error', 'tun', 'xray startup failed', expect.objectContaining({ message: expect.stringContaining('config rejected') }))
     expect(h.prepareRuntime).toHaveBeenCalledOnce()
   })
 

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { types } from 'node:util'
 import { OPERATION_DEADLINES, OPERATION_PRIORITY, type ManagedOperation, type ManagedOperationKind, type OperationOwner } from '../shared/operation'
-import { IPC_ERRORS, IpcFault, classifyIpcError, type IpcErrorCategory } from '../shared/ipc-result'
+import { IpcFault, classifyIpcError, readIpcErrorCategory, type IpcErrorCategory } from '../shared/ipc-result'
 import { currentActionMetadata, currentCorrelationId, withCorrelation } from './actionCorrelation'
 
 export type SynchronousCommitResult<T> = T & ({ then?: never } | null | undefined)
@@ -132,9 +132,7 @@ export class OperationRegistry {
         if (failed && result && typeof result === 'object') {
           category = 'internal'
           const error = 'error' in result ? result.error : undefined
-          if (error && typeof error === 'object' && 'category' in error && typeof error.category === 'string'
-            && Object.hasOwn(IPC_ERRORS, error.category) && 'code' in error
-            && error.code === IPC_ERRORS[error.category as IpcErrorCategory].code) category = error.category as IpcErrorCategory
+          category = readIpcErrorCategory(error) ?? readIpcErrorCategory(result) ?? 'internal'
           if ('cancelled' in result && result.cancelled === true) category = 'cancelled'
         }
       } catch { failed = true; category = 'internal' }

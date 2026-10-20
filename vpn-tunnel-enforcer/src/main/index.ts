@@ -22,7 +22,7 @@ import { runRequesterOperation } from './requesterOperation'
 import { registerPlannedFeatureHandlers } from './plannedFeatures'
 import { registerRoutingSelfTestHandlers } from './routingSelfTest'
 import { TunnelStateMachine } from './tunnelStateMachine'
-import { operationLogDetails, type ConnectionStartResult, type ConnectionStopResult } from '../shared/operation'
+import { connectionFailure, operationLogDetails, type ConnectionStartResult, type ConnectionStopResult } from '../shared/operation'
 import { runScheduledConnection } from './scheduledConnection'
 import { makeOutcome, outcomeKindToDisconnectReason, isNodeSwitchRestartReason, sessionOutcomeConfidence } from './sessionOutcome'
 import type { ConnectionProvenance } from '../shared/connection-provenance'
@@ -112,7 +112,7 @@ import { registerThemeIpcHandlers } from './themeManager'
 import { externalProxy } from './externalProxy'
 import { requirePlainObject, requireStringArray } from './ipcValidation'
 import { installTrustedIpcBoundary, registerTrustedRenderer } from './ipcSecurity'
-import { ipcError, IpcFault } from '../shared/ipc-result'
+import { ipcError, IpcFault, classifyIpcError, readIpcErrorCategory, type IpcErrorCategory } from '../shared/ipc-result'
 import { pathToFileURL } from 'url'
 import {
   beginAdaptiveConnection,
@@ -1059,7 +1059,7 @@ function refreshTrayState(patch: {
   })
 }
 
-async function clearStaleKillSwitchBeforeStart(context: string): Promise<{ success: boolean; error?: string }> {
+async function clearStaleKillSwitchBeforeStart(context: string): Promise<ConnectionStartResult> {
   if (tunController.getStatus().running) return { success: true }
   if (!(await isKillSwitchActive())) return { success: true }
 
@@ -1067,10 +1067,8 @@ async function clearStaleKillSwitchBeforeStart(context: string): Promise<{ succe
   const result = await disableKillSwitchIfActive(`restart preflight: ${context}`)
   refreshTrayState({ killSwitchActive: await isKillSwitchActive().catch(() => false) })
   if (!result.success) {
-    return {
-      success: false,
-      error: `Не удалось снять старую блокировку перед перезапуском: ${result.message}`
-    }
+    return connectionFailure(readIpcErrorCategory(result.error) ?? 'internal',
+      `Не удалось снять старую блокировку перед перезапуском: ${result.message}`)
   }
   return { success: true }
 }
@@ -1161,7 +1159,7 @@ async function startSoftProtectionEffects(owner: ConnectionStartupOwner, proxyAd
       }
     }
     recordStartFailure(profile, error)
-    return { success: false, error }
+    return connectionFailure('internal', error)
   }
 
   if (currentSession && (currentSession.profile.id !== profile.id || currentSession.profile.name !== profile.name)) {
@@ -1247,10 +1245,7 @@ async function startProtectionEffects(owner: ConnectionStartupOwner, proxyAddr: 
         recordStartFailure({ id: 'local-proxy', name: `Proxy ${proxyAddr}`, mode: 'hard' }, errorMsg, {
           killSwitchEngaged: true
         })
-        return {
-          success: false,
-          error: errorMsg
-        }
+        return connectionFailure(readIpcErrorCategory(ksResult.error) ?? 'internal', errorMsg)
       }
     }
   }
@@ -1265,10 +1260,7 @@ async function startProtectionEffects(owner: ConnectionStartupOwner, proxyAddr: 
   if (!plan.canStartHard) {
     const errorMsg = `${plan.title}. ${plan.explanation} ${plan.after}`
     recordStartFailure({ id: 'local-proxy', name: `Proxy ${proxyAddr}`, mode: 'hard' }, errorMsg)
-    return {
-      success: false,
-      error: errorMsg
-    }
+    return connectionFailure('conflict', errorMsg)
   }
 
   // Kick off the network baseline IN PARALLEL with tunController.start().
@@ -1281,11 +1273,13 @@ async function startProtectionEffects(owner: ConnectionStartupOwner, proxyAddr: 
     baselinePromise = applyTunNetworkBaseline()
       .then(baseline => {
         if (!baseline.success) {
-          baselineWarning = `Не удалось применить сетевой baseline: ${baseline.message}`
+          logEvent('warn', 'app', 'startup network baseline not confirmed', baseline)
+          baselineWarning = `Не удалось применить сетевой baseline: ${ipcError(readIpcErrorCategory(baseline.error) ?? 'internal').message}`
         }
       })
       .catch(err => {
-        baselineWarning = `Не удалось применить сетевой baseline: ${err?.message || String(err)}`
+        logEvent('warn', 'app', 'startup network baseline failed', err)
+        baselineWarning = `Не удалось применить сетевой baseline: ${ipcError(classifyIpcError(err)).message}`
       })
   }
 
@@ -1325,7 +1319,7 @@ async function startProtectionEffects(owner: ConnectionStartupOwner, proxyAddr: 
     let recoveryWarning: string | undefined
     await rollbackTunNetworkBaselineOrThrow('start-tun failed').catch(err => {
       logEvent('warn', 'app', 'rollback after start-tun failure failed', err)
-      recoveryWarning = err?.message || String(err)
+      recoveryWarning = `Восстановление сетевого baseline не подтверждено: ${ipcError(classifyIpcError(err)).message}. Повторите восстановление сети.`
     })
     owner.assertActive()
     captureSnapshot('tun-start-failed').catch(() => undefined)
@@ -1452,7 +1446,7 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
     recordStartFailure({ id: 'direct-vpn', name: 'Direct VPN', mode: 'direct' }, errorMsg, {
       killSwitchEngaged: true
     })
-    return { success: false, error: errorMsg }
+    return staleKillSwitch
   }
 
   const settings = settingsStore.get()
@@ -1509,10 +1503,7 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
         errorMsg
       )
       captureSnapshot('tun-start-failed').catch(() => undefined)
-      return {
-        success: false,
-        error: errorMsg
-      }
+      return connectionFailure('conflict', errorMsg)
     }
   } else if (settings.directVpnInput.trim()) {
     try {
@@ -1526,19 +1517,18 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
       })
     } catch (err: any) {
       owner.assertActive()
-      const errorMsg = err?.message || String(err)
+      logEvent('warn', 'app', 'direct VPN profile resolution failed', err)
+      const category = classifyIpcError(err)
+      const errorMsg = ipcError(category).message
       recordStartFailure({ id: 'direct-vpn', name: 'Direct VPN', mode: 'direct' }, errorMsg)
       captureSnapshot('tun-start-failed').catch(() => undefined)
-      return { success: false, error: errorMsg }
+      return connectionFailure(category, errorMsg)
     }
   } else {
     const errorMsg = 'Нет выбранного сервера. Откройте раздел "Серверы" и добавьте подписку или ключ.'
     recordStartFailure({ id: 'direct-vpn', name: 'Direct VPN', mode: 'direct' }, errorMsg)
     captureSnapshot('tun-start-failed').catch(() => undefined)
-    return {
-      success: false,
-      error: errorMsg
-    }
+    return connectionFailure('conflict', errorMsg)
   }
 
   let baselineWarning: string | null = null
@@ -1547,11 +1537,13 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
     baselinePromise = applyTunNetworkBaseline()
       .then(baseline => {
         if (!baseline.success) {
-          baselineWarning = `Не удалось применить сетевой baseline: ${baseline.message}`
+          logEvent('warn', 'app', 'startup network baseline not confirmed', baseline)
+          baselineWarning = `Не удалось применить сетевой baseline: ${ipcError(readIpcErrorCategory(baseline.error) ?? 'internal').message}`
         }
       })
       .catch(err => {
-        baselineWarning = `Не удалось применить сетевой baseline: ${err?.message || String(err)}`
+        logEvent('warn', 'app', 'startup network baseline failed', err)
+        baselineWarning = `Не удалось применить сетевой baseline: ${ipcError(classifyIpcError(err)).message}`
       })
   }
 
@@ -1600,7 +1592,7 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
     let recoveryWarning: string | undefined
     await rollbackTunNetworkBaselineOrThrow('direct-vpn start failed').catch(err => {
       logEvent('warn', 'app', 'rollback after direct-vpn start failure failed', err)
-      recoveryWarning = err?.message || String(err)
+      recoveryWarning = `Восстановление сетевого baseline не подтверждено: ${ipcError(classifyIpcError(err)).message}. Повторите восстановление сети.`
     })
     owner.assertActive()
     captureSnapshot('tun-start-failed').catch(() => undefined)
@@ -1723,12 +1715,15 @@ async function stopProtectionEffects(
   stopInProgress = true
   const result = await tunController.stop().finally(() => { stopInProgress = false })
   // Keep internal cleanup evidence inside main; IPC exposes the user outcome.
-  const { networkCleanup: _cleanup, runtimeStopped: _runtimeStopped, ...outcome } = result
+  const { networkCleanup: _cleanup, runtimeStopped: _runtimeStopped, error: failureText, ...details } = result
+  const outcome = result.success ? { ...details, success: true as const, error: undefined }
+    : { ...details, ...connectionFailure(readIpcErrorCategory(result) ?? 'internal', failureText ?? ipcError('internal').message) }
   if (!result.success && result.runtimeStopped !== true) return outcome
   if (endingOutcome && !endingSoftSession) closeSession(endingOutcome, endingStats)
   let envRollbackFailed = false
+  let envRollbackCategory: IpcErrorCategory | undefined
   try { await rollbackSoftAutoconfigIfApplied('protection stop') }
-  catch { envRollbackFailed = true } // Keep independent cleanup running; the helper already logged the failure.
+  catch (error) { envRollbackFailed = true; envRollbackCategory = classifyIpcError(error) } // Independent cleanup still runs.
   if (endingOutcome && endingSoftSession && !envRollbackFailed) closeSession(endingOutcome, endingStats)
   activeAdaptiveContext = null
 
@@ -1778,8 +1773,8 @@ async function stopProtectionEffects(
   refreshTrayState({ status: 'off', restartingProgress: null })
   captureSnapshot('tun-post-stop').catch(() => undefined)
   if (envRollbackFailed) return {
-    ...outcome, success: false,
-    error: [outcome.error, 'Не удалось восстановить env autoconfig. Повторите восстановление сети.'].filter(Boolean).join(' | ')
+    ...outcome, ...connectionFailure(readIpcErrorCategory(outcome) ?? envRollbackCategory ?? 'internal',
+      [outcome.error, 'Не удалось восстановить env autoconfig. Повторите восстановление сети.'].filter(Boolean).join(' | '))
   }
   return outcome
 }
@@ -1942,7 +1937,7 @@ async function adoptRetainedSoftProtectionEffects(): Promise<void> {
         // A backup proves a cleanup obligation, not that all proxy writes
         // succeeded before the previous process exited. Reconcile under owner.
         const proxy = await owner.wait(resolveProxyForTrayStart())
-        if (!proxy) return { success: false, error: 'Soft proxy unavailable' }
+        if (!proxy) return connectionFailure('conflict', 'Soft proxy unavailable')
         return startSoftProtectionEffects(owner, proxy.proxyAddr, proxy.proxyType)
       }, { owner: 'recovery' })
       if (!result.success) throw new Error('Retained Soft protection reconciliation failed')

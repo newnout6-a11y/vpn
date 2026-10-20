@@ -217,7 +217,7 @@ describe('Dashboard cancellation', () => {
     expect(screen.getByText('— утечка')).toBeInTheDocument()
   })
   it('responds immediately, prevents repeated clicks, survives remount and waits for cleanup', async () => {
-    const cancellation = deferred<{ success: boolean }>()
+    const cancellation = deferred<{ success: true }>()
     vi.mocked(window.electronAPI.cancelTun).mockReturnValue(cancellation.promise)
     const view = render(<Dashboard />)
     fireEvent.click(screen.getByRole('button', { name: 'Отменить подключение' }))
@@ -261,7 +261,7 @@ describe('Dashboard cancellation', () => {
   })
 
   it('cancellation colour overrides a connected tunnel and disappears after cleanup', async () => {
-    const cancellation = deferred<{ success: boolean }>()
+    const cancellation = deferred<{ success: true }>()
     vi.mocked(window.electronAPI.cancelTun).mockReturnValue(cancellation.promise)
     useAppStore.setState({ tunRunning: true, mode: 'hard' })
     render(<Dashboard />)
@@ -275,7 +275,7 @@ describe('Dashboard cancellation', () => {
 
   it.each(['failed result', 'rejected IPC'])('shows %s without claiming the tunnel stopped', async kind => {
     useAppStore.setState({ tunRunning: true, mode: 'hard' })
-    if (kind === 'failed result') vi.mocked(window.electronAPI.cancelTun).mockResolvedValue({ success: false, error: 'Cleanup failed' })
+    if (kind === 'failed result') vi.mocked(window.electronAPI.cancelTun).mockResolvedValue({ success: false, error: 'Cleanup failed', code: 'IPC_INTERNAL_ERROR', category: 'internal' })
     else vi.mocked(window.electronAPI.cancelTun).mockRejectedValue(new Error('Cleanup failed'))
     render(<Dashboard />)
     fireEvent.click(screen.getByRole('button', { name: 'Отменить подключение' }))
@@ -301,8 +301,8 @@ describe('Dashboard cancellation', () => {
   })
 
   it('ignores a late successful start while cancellation is still pending', async () => {
-    const start = deferred<{ success: boolean }>()
-    const cancel = deferred<{ success: boolean }>()
+    const start = deferred<{ success: true }>()
+    const cancel = deferred<{ success: true }>()
     vi.mocked(window.electronAPI.startDirectVpn).mockReturnValue(start.promise)
     vi.mocked(window.electronAPI.cancelTun).mockReturnValue(cancel.promise)
     useAppStore.setState({ connectionBusy: null })
