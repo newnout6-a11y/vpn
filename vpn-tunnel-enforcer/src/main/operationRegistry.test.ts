@@ -4,7 +4,7 @@ import { OperationRegistry, type OperationLease } from './operationRegistry'
 import { OPERATION_DEADLINES, type ManagedOperation, type ManagedOperationKind } from '../shared/operation'
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
 import { redactSensitiveConfig } from './vpnProfiles'
-import { IPC_ERRORS, ipcError, type IpcErrorCategory } from '../shared/ipc-result'
+import { IPC_ERRORS, IpcFault, ipcError, type IpcErrorCategory } from '../shared/ipc-result'
 
 function held<T>() {
   let resolve!: (value: T) => void, reject!: (error: Error) => void
@@ -15,6 +15,12 @@ afterEach(() => vi.useRealTimers())
 const kinds = Object.keys(OPERATION_DEADLINES) as ManagedOperationKind[]
 
 describe('long operation registry', () => {
+  it.each(Object.keys(IPC_ERRORS) as IpcErrorCategory[])('records thrown %s with the matching terminal status (AT-00-004/005)', async category => {
+    const registry = new OperationRegistry()
+    await expect(registry.run('rotation', async () => { throw new IpcFault(category) })).rejects.toMatchObject({ category })
+    expect(registry.list()).toMatchObject([{ status: category === 'cancelled' ? 'cancelled' : 'error', category }])
+    await registry.close()
+  })
   it.each(Object.keys(IPC_ERRORS) as IpcErrorCategory[])('keeps flattened connection %s failures in operation history (AT-00-004/005)', async category => {
     const registry = new OperationRegistry(), error = ipcError(category)
     const result = { success: false, error: error.message, code: error.code, category }

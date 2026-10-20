@@ -383,7 +383,7 @@ function recordStartFailure(
 }
 let adaptiveVerificationGeneration = 0
 let adaptiveVerificationAbort: AbortController | null = null
-let adaptiveTransitionInFlight: Promise<{ success: boolean; error?: string }> | null = null
+let adaptiveTransitionInFlight: Promise<ConnectionStartResult> | null = null
 let manualProfileSwitchActive = false
 
 setProfileSwitchHooks({
@@ -482,8 +482,8 @@ async function restartAdaptiveWithFreshIp(
   isOwner: () => boolean,
   signal: AbortSignal,
   sibling?: { id: string; profile: VpnProfile }
-): Promise<{ success: boolean; error?: string }> {
-  if (!isOwner()) return { success: false, error: 'Adaptive verification superseded' }
+): Promise<ConnectionStartResult> {
+  if (!isOwner()) return connectionFailure('cancelled')
   const transition = (async () => {
     let ipVerified = false
     const restarted = await withProtectedIpTransition({
@@ -494,10 +494,11 @@ async function restartAdaptiveWithFreshIp(
       restart: () => tunController.restartForAdaptiveChange(mode, reason, sibling ? { vpnProfile: sibling.profile } : {}),
       onVerified: () => { ipVerified = true }
     })
-    if (!restarted.success || !sibling || !isOwner()) return restarted
+    if (!isOwner()) return connectionFailure('cancelled')
+    if (!restarted.success || !sibling) return restarted
     const startedAt = tunController.getStatus().startedAt
     const isCurrent = () => isOwner() && tunController.getStatus().running && tunController.getStatus().startedAt === startedAt
-    if (!isCurrent()) return { success: false, error: 'Adaptive verification superseded' }
+    if (!isCurrent()) return connectionFailure('cancelled')
     const healthy = ipVerified && await verifyAdaptiveFallback({
       isCurrent, signal,
       probe: probeSignal => tunnelHttpProbe(true, 1, probeSignal),
@@ -506,7 +507,7 @@ async function restartAdaptiveWithFreshIp(
         sendToMainWindow('server-active-changed', { profileId: sibling.id, profileName: sibling.profile.name })
       }
     })
-    if (!isCurrent()) return { success: false, error: 'Adaptive verification superseded' }
+    if (!isCurrent()) return connectionFailure('cancelled')
     if (!healthy) {
       // Keep the previous selection and firewall/adapter protection. The failed
       // provisional runtime must not remain displayed as a connected server.
@@ -517,7 +518,7 @@ async function restartAdaptiveWithFreshIp(
           ipMonitor.clearVpnIp()
         }
       }
-      return { success: false, error: 'Соседний сервер не прошёл проверку выхода в интернет через туннель' }
+      return connectionFailure('network', 'Соседний сервер не прошёл проверку выхода в интернет через туннель. Выберите другой VPN-сервер и повторите подключение.')
     }
     return restarted
   })()

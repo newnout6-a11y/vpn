@@ -60,7 +60,7 @@ function expectFailure(response: any, category: IpcErrorCategory) {
   expect(JSON.stringify(state.stores.get('server-groups'))).not.toContain('FAKE-SECRET')
   expect(JSON.stringify(vi.mocked(logEvent).mock.calls)).not.toContain('FAKE-SECRET')
   const operation = operations.list().find(item => item.correlationId === response.correlationId)!
-  expect(operation).toMatchObject({ kind: 'refresh', status: 'error', category, owner: 'manual', source: 'ipc' })
+  expect(operation).toMatchObject({ kind: 'refresh', status: category === 'cancelled' ? 'cancelled' : 'error', category, owner: 'manual', source: 'ipc' })
   expect(operations.isBusy(`refresh:${groupId}`)).toBe(false)
   expect(sender.eventNames()).toEqual([])
 }

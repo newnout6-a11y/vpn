@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { ConnectionLifecycle } from './connectionLifecycle'
 import { operations } from './operations'
 import type { RotationConfig } from '../shared/ipc-types'
+import { connectionFailure } from '../shared/operation'
 
 const storeData = vi.hoisted(() => new Map<string, any>())
 const ipcHandlers = vi.hoisted(() => new Map<string, (...args: any[]) => any>())
@@ -401,7 +402,7 @@ describe('profile rotation IPC', () => {
     // no tunnel, no kill-switch, and a "rotation succeeded" result.
     vi.useFakeTimers()
     tunnelRunning = true
-    tunRestartProtectedMock.mockResolvedValue({ success: false, error: 'handshake timeout' })
+    tunRestartProtectedMock.mockResolvedValue(connectionFailure('timeout', 'Не удалось завершить handshake. Проверьте VPN-сервер.'))
     serverProfiles.push(
       {
         id: 'profile-a',
@@ -434,12 +435,12 @@ describe('profile rotation IPC', () => {
     profileRotation.registerHandlers()
     const result = await ipcHandlers.get('rotation:rotate-now')!({})
 
-    expect(result).toEqual({ success: false, newProfile: 'profile-b' })
+    expect(result).toEqual({ ...connectionFailure('timeout', 'Не удалось завершить handshake. Проверьте VPN-сервер.'), newProfile: 'profile-b' })
     // The user must be told: their traffic is no longer tunnelled.
     expect(notifyMock).toHaveBeenCalledWith(
       'error',
       expect.stringContaining('Ротация'),
-      expect.stringContaining('handshake timeout'),
+      expect.stringContaining('Не удалось завершить handshake'),
       'connectionError'
     )
     // A failure must not disable the schedule — the next tick should retry.

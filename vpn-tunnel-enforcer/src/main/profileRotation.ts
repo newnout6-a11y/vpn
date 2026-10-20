@@ -22,7 +22,8 @@ import { serverPicker, smartOfflinePing } from './serverPicker'
 import { settingsStore } from './settings'
 import { beginAdaptiveConnection, readAdaptiveNetworkFingerprint } from './adaptiveBypass'
 import type { RotationConfig } from '../shared/ipc-types'
-import { IpcFault, classifyIpcError } from '../shared/ipc-result'
+import { IpcFault, classifyIpcError, readIpcErrorCategory } from '../shared/ipc-result'
+import { connectionFailure, connectionFailureCategory, type ConnectionFailure, type ConnectionRotationResult } from '../shared/operation'
 import { operations } from './operations'
 import type { ConnectionLifecycle, RotationOwner } from './connectionLifecycle'
 import { withCorrelation } from './actionCorrelation'
@@ -216,7 +217,7 @@ async function buildAvailabilityMap(profileIds: string[], owner: RotationOwner):
 /**
  * Performs the actual rotation: finds the next available profile and switches to it.
  */
-async function performRotation(sender?: IpcMainInvokeEvent['sender']): Promise<{ success: boolean; newProfile: string }> {
+async function performRotation(sender?: IpcMainInvokeEvent['sender']): Promise<ConnectionRotationResult> {
   if (!connectionLane) throw new IpcFault('conflict')
   if (sender?.isDestroyed()) throw new IpcFault('cancelled')
   const lifetime = new AbortController(), destroyed = () => lifetime.abort()
@@ -232,13 +233,13 @@ async function performRotation(sender?: IpcMainInvokeEvent['sender']): Promise<{
   }
 }
 
-async function performRotationOnce(owner: RotationOwner): Promise<{ success: boolean; newProfile: string }> {
+async function performRotationOnce(owner: RotationOwner): Promise<ConnectionRotationResult> {
   owner.assertActive()
   const config = getConfig()
 
   if (config.profileIds.length === 0) {
     logEvent('warn', 'profile-rotation', 'no profiles configured for rotation')
-    return { success: false, newProfile: '' }
+    return { ...connectionFailure('conflict', 'Не выбраны профили для ротации. Выберите профили в настройках и повторите попытку.'), newProfile: '' }
   }
 
   const availabilityMap = await buildAvailabilityMap(config.profileIds, owner)
@@ -248,7 +249,7 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
   if (!nextProfileId) {
     logEvent('warn', 'profile-rotation', 'no available profiles for rotation')
     scheduleNextRotation(config)
-    return { success: false, newProfile: '' }
+    return { ...connectionFailure('network', 'Нет доступных профилей для ротации. Проверьте доступность VPN-серверов и повторите попытку.'), newProfile: '' }
   }
 
   // Update current index
@@ -284,7 +285,7 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
   // does what the UI promises. When idle we just leave the selection for the
   // next manual connect. Lazy import avoids any load-order coupling with
   // tunController.
-  let reconnectError: string | null = null
+  let reconnectFailure: ConnectionFailure | null = null
   let restartAttempted = false
   try {
     const { tunController } = await owner.wait(import('./tunController'))
@@ -302,7 +303,7 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
         }
         const networkIdentity = settings.adaptiveBypassEnabled ? await owner.wait(readAdaptiveNetworkFingerprint()) : null
         owner.assertActive()
-        if (!tunController.getStatus().running) throw new Error('Ротация не перезапускает остановленный туннель')
+        if (!tunController.getStatus().running) throw new IpcFault('conflict')
         const adaptive = beginAdaptiveConnection({
           enabled: settings.adaptiveBypassEnabled,
           legacyStealthMode: settings.stealthMode,
@@ -342,10 +343,11 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
           { signal: owner.signal }
         ))
         if (!restarted.success) {
-          reconnectError = restarted.error || 'Не удалось поднять туннель на новом профиле'
+          reconnectFailure = connectionFailure(connectionFailureCategory(restarted), readIpcErrorCategory(restarted)
+            ? restarted.error : 'Не удалось поднять туннель на новом профиле. Проверьте настройки VPN-сервера и повторите подключение.')
         }
       } else {
-        reconnectError = 'У профиля нет конфигурации (outbound пуст)'
+        reconnectFailure = connectionFailure('conflict', 'У профиля нет конфигурации VPN. Обновите подписку или выберите другой профиль.')
         logEvent('warn', 'profile-rotation', 'rotated profile has no outbound — cannot reconnect live tunnel', {
           profileId: nextProfileId
         })
@@ -353,7 +355,7 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
     }
   } catch (err) {
     owner.assertActive()
-    reconnectError = 'Не удалось перезапустить туннель'
+    reconnectFailure = connectionFailure(classifyIpcError(err), 'Не удалось подготовить или перезапустить туннель. Проверьте профиль и состояние защиты, затем повторите попытку.')
     logEvent('warn', 'profile-rotation', 'rotate-reconnect path threw', { category: classifyIpcError(err) })
   }
 
@@ -361,7 +363,7 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
   // retried on the next tick rather than silently disabling the feature.
   owner.assertActive()
 
-  if (reconnectError) {
+  if (reconnectFailure) {
     scheduleNextRotation(updatedConfig)
     // A failed native restart may have restored ordinary connectivity. Warn
     // explicitly without claiming that teardown or retained protection is proven.
@@ -369,17 +371,18 @@ async function performRotationOnce(owner: RotationOwner): Promise<{ success: boo
     logEvent('error', 'profile-rotation', 'rotation did not complete', {
       profileId: nextProfileId,
       profileName,
-      error: reconnectError
+      error: reconnectFailure.error, category: reconnectFailure.category
     })
+    const punctuation = /[.!?…]$/.test(reconnectFailure.error) ? '' : '.'
     notify(
       'error',
       'Ротация не удалась',
-      `Не удалось подключиться к профилю ${profileName}: ${reconnectError}. ${restartAttempted
+      `Не удалось подключиться к профилю ${profileName}: ${reconnectFailure.error}${punctuation} ${restartAttempted
         ? 'Защита после перезапуска не подтверждена — трафик может идти по обычному маршруту.'
         : 'Проверьте состояние защиты.'}`,
       'connectionError'
     ).catch(() => undefined)
-    return { success: false, newProfile: nextProfileId }
+    return { ...reconnectFailure, newProfile: nextProfileId }
   }
 
   return owner.complete(() => {

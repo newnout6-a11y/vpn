@@ -6,6 +6,8 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { ConnectionLifecycle } from './connectionLifecycle'
 import { TunnelStateMachine } from './tunnelStateMachine'
+import { IPC_ERRORS, unwrapIpcResult, type IpcErrorCategory } from '../shared/ipc-result'
+import { connectionFailure } from '../shared/operation'
 
 const state = vi.hoisted(() => ({
   dir: '', handlers: new Map<string, (...args: any[]) => any>(), log: vi.fn(),
@@ -115,6 +117,63 @@ async function pauseAt(phase: 'probe' | 'fingerprint' | 'restart') {
 }
 
 describe('production rotation operation lifetime', () => {
+  it.each(['', '.', '!', '?', '…'])('separates guidance ending with %j from the protection warning once (AT-00-004)', async punctuation => {
+    await live()
+    const guidance = `Проверьте доступность VPN-сервера${punctuation}`
+    state.restart.mockResolvedValueOnce(connectionFailure('network', guidance))
+    expect(await invoke('rotation:rotate-now')).toMatchObject({ ok: true, result: { error: guidance } })
+    const warning = state.notify.mock.calls.find(call => call[0] === 'error')?.[2]
+    expect(warning).toContain(`${guidance}${punctuation ? '' : '.'} Защита после перезапуска не подтверждена`)
+    expect(warning).not.toContain('..')
+  })
+  it.each(Object.keys(IPC_ERRORS) as IpcErrorCategory[])('preserves the restart %s receipt through actual IPC and both histories (AT-00-004/005)', async category => {
+    await live()
+    const failure = connectionFailure(category, 'Проверьте настройки VPN-сервера и повторите подключение')
+    state.restart.mockResolvedValueOnce(failure)
+    const response = structuredClone(await invoke('rotation:rotate-now'))
+    expect(response).toMatchObject({ ok: true, result: { ...failure, newProfile: 'b' } })
+    expect(unwrapIpcResult(response)).toEqual({ ...failure, newProfile: 'b' })
+    const status = category === 'cancelled' ? 'cancelled' : 'error'
+    expect(registry.list()[0]).toMatchObject({ status, category, correlationId: response.correlationId })
+    expect(lane.operation).toMatchObject({ status, category })
+    expect(fsm.snapshot.operation).toMatchObject({ status, category })
+    expect(rotation.getConfig().nextRotationAt).toEqual(expect.any(Number))
+    expect(state.notify.mock.calls.find(call => call[0] === 'error')?.[2]).toContain(failure.error)
+  })
+
+  it.each(Object.keys(IPC_ERRORS) as IpcErrorCategory[])('types a thrown %s during selection and retains confirmed old protection (AT-00-004/005)', async category => {
+    await live()
+    const { IpcFault } = await import('../shared/ipc-result')
+    state.select.mockImplementationOnce(() => { throw new IpcFault(category) })
+    const response = await invoke('rotation:rotate-now')
+    const status = category === 'cancelled' ? 'cancelled' : 'error'
+    expect(response).toMatchObject({ ok: true, result: { success: false, category, code: IPC_ERRORS[category].code } })
+    expect(fsm.snapshot).toMatchObject({ state: 'connected', transition: null, pid: 10, operation: { status, category } })
+    expect(registry.list()[0]).toMatchObject({ status, category, correlationId: response.correlationId })
+    expect(state.active).toBe('a')
+    expect(state.restart).not.toHaveBeenCalled()
+    expect(cleanup).not.toHaveBeenCalled()
+  })
+
+  it.each(['empty', 'offline'] as const)('types the %s profile refusal without a native restart (AT-00-004)', async reason => {
+    if (reason === 'empty') await invoke('rotation:set-config', { profileIds: [] })
+    else state.ping.mockResolvedValue(null)
+    const category = reason === 'empty' ? 'conflict' : 'network'
+    const response = await invoke('rotation:rotate-now')
+    expect(response).toMatchObject({ ok: true, result: { success: false, newProfile: '', category, code: IPC_ERRORS[category].code, error: expect.any(String) } })
+    expect(state.restart).not.toHaveBeenCalled()
+    expect(lane.operation).toMatchObject({ status: 'error', category })
+    expect(registry.list()[0]).toMatchObject({ status: 'error', category })
+  })
+
+  it('keeps a malformed legacy restart message out of IPC and notifications (AT-00-004)', async () => {
+    await live()
+    state.restart.mockResolvedValueOnce({ success: false, error: 'at native C:\\private\\token-secret.json', code: IPC_ERRORS.network.code, category: 'permission' })
+    const response = await invoke('rotation:rotate-now')
+    expect(response).toMatchObject({ ok: true, result: { success: false, category: 'internal', code: IPC_ERRORS.internal.code } })
+    expect(JSON.stringify([response, state.notify.mock.calls])).not.toMatch(/token-secret|C:\\private|at native/)
+  })
+
   it.each(['probe', 'fingerprint', 'restart'] as const)('cancels at %s, retains physical ownership and suppresses late persistence/events', async phase => {
     const before = await rotationBytes(), { gate, result } = await pauseAt(phase), operation = running()
     expect(operation).toMatchObject({ kind: 'rotation', owner: 'rotation', deadline: expect.any(Number) })

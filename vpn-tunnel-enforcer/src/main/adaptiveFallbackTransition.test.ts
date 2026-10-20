@@ -5,6 +5,8 @@ import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { verifyAdaptiveFallback } from './adaptiveVerification'
 import { TunnelStateMachine } from './tunnelStateMachine'
+import { connectionFailure, type ConnectionStartResult } from '../shared/operation'
+import { IPC_ERRORS, type IpcErrorCategory } from '../shared/ipc-result'
 
 function harness() {
   let current = true
@@ -12,6 +14,7 @@ function harness() {
   const status = { running: true, startedAt: 1 }
   const tunnelState = new TunnelStateMachine(() => ({ ...status, pid: status.running ? 731 : null, softApplied: false }))
   const deps = {
+    connectionFailure,
     tunnelState,
     withProtectedIpTransition: vi.fn(async (options: any) => {
       const result = await options.restart()
@@ -22,7 +25,7 @@ function harness() {
     tunController: {
       getStatus: () => status,
       areTunRoutesActive: vi.fn(async () => true),
-      restartForAdaptiveChange: vi.fn(async () => ({ success: true })),
+      restartForAdaptiveChange: vi.fn(async (): Promise<ConnectionStartResult> => ({ success: true })),
       stop: vi.fn(async () => { status.running = false; tunnelState.runtimeChanged('adapting'); return { success: true } })
     },
     tunnelHttpProbe: vi.fn(async (): Promise<number | null> => 10),
@@ -45,6 +48,23 @@ function harness() {
 afterEach(() => vi.useRealTimers())
 
 describe('fallback health before commit', () => {
+  it('types a superseded owner before starting native effects (AT-00-004)', async () => {
+    const h = harness()
+    h.supersede()
+    expect(await h.run()).toMatchObject({ success: false, category: 'cancelled', code: 'IPC_CANCELLED' })
+    expect(h.tunController.restartForAdaptiveChange).not.toHaveBeenCalled()
+  })
+  it.each([false, true])('rejects late restart success after ownership is lost, sibling=%s (AT-00-003/004)', async sibling => {
+    const h = harness()
+    let release!: (result: ConnectionStartResult) => void
+    h.tunController.restartForAdaptiveChange.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    const pending = h.run(sibling)
+    h.supersede()
+    release({ success: true })
+    expect(await pending).toMatchObject({ success: false, category: 'cancelled', code: 'IPC_CANCELLED' })
+    expect(h.tunController.stop).not.toHaveBeenCalled()
+    expect(h.serverPicker.selectProfile).not.toHaveBeenCalled()
+  })
   it('publishes only after fresh IP proof and the full 2-of-3 stability check', async () => {
     vi.useFakeTimers()
     const h = harness()
@@ -67,7 +87,7 @@ describe('fallback health before commit', () => {
     if (successes) h.tunnelHttpProbe.mockResolvedValueOnce(10)
     const pending = h.run()
     await vi.runAllTimersAsync()
-    expect((await pending).success).toBe(false)
+    expect(await pending).toMatchObject({ success: false, category: 'network', code: 'IPC_NETWORK_ERROR' })
     expect(h.serverPicker.selectProfile).not.toHaveBeenCalled()
     expect(h.sendToMainWindow).not.toHaveBeenCalled()
     expect(h.tunController.stop).toHaveBeenCalledExactlyOnceWith({ preserveNetworkProtection: true })
@@ -93,10 +113,11 @@ describe('fallback health before commit', () => {
     await expect(h.run()).rejects.toThrow('native stop denied')
     expect(h.tunnelState.snapshot).toMatchObject({ state: 'unknown', transition: null, cleanupRequired: true })
   })
-  it('does not verify or publish a failed native restart', async () => {
+  it.each(Object.keys(IPC_ERRORS) as IpcErrorCategory[])('preserves a native %s failure without verification or publication (AT-00-004)', async category => {
     const h = harness()
-    h.tunController.restartForAdaptiveChange.mockResolvedValue({ success: false })
-    expect((await h.run()).success).toBe(false)
+    const failure = connectionFailure(category)
+    h.tunController.restartForAdaptiveChange.mockResolvedValue(failure)
+    expect(await h.run()).toEqual(failure)
     expect(h.tunnelHttpProbe).not.toHaveBeenCalled()
     expect(h.serverPicker.selectProfile).not.toHaveBeenCalled()
     expect(h.tunController.stop).not.toHaveBeenCalled()
@@ -106,7 +127,7 @@ describe('fallback health before commit', () => {
     const h = harness(), pending = h.run()
     await vi.advanceTimersByTimeAsync(100)
     h.supersede()
-    expect((await pending).success).toBe(false)
+    expect(await pending).toMatchObject({ success: false, category: 'cancelled', code: 'IPC_CANCELLED' })
     expect(h.serverPicker.selectProfile).not.toHaveBeenCalled()
     expect(h.tunController.stop).not.toHaveBeenCalled()
     expect(h.ipMonitor.clearVpnIp).not.toHaveBeenCalled()
@@ -121,7 +142,7 @@ describe('fallback health before commit', () => {
     await vi.advanceTimersByTimeAsync(20_000)
     h.status.startedAt = 2
     release(10)
-    expect((await pending).success).toBe(false)
+    expect(await pending).toMatchObject({ success: false, category: 'cancelled', code: 'IPC_CANCELLED' })
     expect(h.tunnelHttpProbe).toHaveBeenCalledOnce()
     expect(h.serverPicker.selectProfile).not.toHaveBeenCalled()
     expect(h.tunController.stop).not.toHaveBeenCalled()
