@@ -32,6 +32,7 @@ let releaseImport: (() => void) | undefined
 beforeEach(() => {
   vi.resetModules(); vi.clearAllMocks(); children = []; releaseImport = undefined
   state.native.mockResolvedValue([{ alias: 'Wi-Fi', ipv4: '192.0.2.10' }])
+  state.forensic.mockResolvedValue(true)
   state.execFile.mockImplementation((file: string, args: string[], _options: unknown, callback: Callback) => {
     const child = new Child(file, args, callback); children.push(child); return child
   })
@@ -53,9 +54,9 @@ afterEach(async () => {
   await Promise.resolve()
   for (const child of children) child.finish()
 })
-async function finishCheck() {
+async function finishCheck(leaked = false) {
   await vi.waitFor(() => expect(children.length).toBeGreaterThan(0)); children[0].finish('198.51.100.1')
-  await vi.waitFor(() => expect(children.length).toBe(2)); children[1].finish('', 7)
+  await vi.waitFor(() => expect(children.length).toBe(2)); children[1].finish(leaked ? '203.0.113.5' : '', leaked ? 0 : 7)
   await vi.waitFor(() => expect(children.length).toBe(3)); children[2].finish('ip=198.51.100.1')
 }
 
@@ -150,13 +151,28 @@ describe('leak self-test lifetime', () => {
     const { runLeakSelfTest, cancelLeakSelfTest } = await import('./leakSelfTest')
     let drained = false
     const pending = runLeakSelfTest({ onOperation: lease => { void lease.drained.then(() => { drained = true }) } })
-    await finishCheck(); await vi.waitFor(() => expect(entered).toBe(true))
+    await finishCheck(true); await vi.waitFor(() => expect(entered).toBe(true))
+    expect(state.log.mock.calls.filter(([, module, message]) => module === 'leak-test' && String(message).startsWith('УТЕЧКА'))).toEqual([])
     cancelLeakSelfTest()
     expect((await pending).physicalAdapterInspectionComplete).toBe(false)
     expect(drained).toBe(false)
     await expect(runLeakSelfTest()).rejects.toMatchObject({ category: 'conflict' })
     releaseImport!(); await vi.waitFor(() => expect(drained).toBe(true))
     expect(state.forensic).not.toHaveBeenCalled()
+    expect(state.log.mock.calls.filter(([, module, message]) => module === 'leak-test' && String(message).startsWith('УТЕЧКА'))).toEqual([])
+  })
+  it('retains the forensic write promise through cancellation and handles its rejection', async () => {
+    let rejectWrite!: (error: Error) => void
+    state.forensic.mockImplementation(() => new Promise<boolean>((_yes, no) => { rejectWrite = no }))
+    const { runLeakSelfTest } = await import('./leakSelfTest'), controller = new AbortController()
+    let drained = false
+    const pending = runLeakSelfTest({ signal: controller.signal, onOperation: lease => { void lease.drained.then(() => { drained = true }) } }).catch(error => error)
+    await finishCheck(); await vi.waitFor(() => expect(state.forensic).toHaveBeenCalledOnce())
+    controller.abort(); await pending
+    expect(drained).toBe(false)
+    await expect(runLeakSelfTest()).rejects.toMatchObject({ category: 'conflict' })
+    rejectWrite(new Error('manifest unavailable'))
+    await vi.waitFor(() => expect(drained).toBe(true))
   })
   it('physically cancels a periodic run when periodic testing stops', async () => {
     const { startPeriodicLeakTest, stopPeriodicLeakTest } = await import('./leakSelfTest')

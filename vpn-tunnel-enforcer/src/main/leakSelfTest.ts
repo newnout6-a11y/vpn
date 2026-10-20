@@ -39,13 +39,13 @@ import { IpcFault } from '../shared/ipc-result'
 
 async function recordForensicLeakSelfTestEvent(event: string, details: Record<string, unknown>, session: number, signal: AbortSignal): Promise<void> {
   await import('./trafficForensics')
-    .then(({ recordTrafficForensicsAppEvent }) => {
+    .then(async ({ recordTrafficForensicsAppEvent }) => {
       if (session !== activeSessionId || signal.aborted) return
-      recordTrafficForensicsAppEvent({
+      await recordTrafficForensicsAppEvent({
         source: 'leak-self-test',
         event,
         details
-      })
+      }, () => { if (session !== activeSessionId || signal.aborted) throw new IpcFault('cancelled') })
     })
     .catch(() => undefined)
 }
@@ -371,14 +371,6 @@ async function runLeakSelfTestOnce(mySession: number, signal: AbortSignal): Prom
   // renderer leak banner.
   if (mySession !== activeSessionId || signal.aborted) return cancelledResult()
 
-  logEvent(physicalAdapterReached || publicIpMismatch || dnsLeakDetected ? 'warn' : 'info', 'leak-test', summary, {
-    physicalAdapterReached,
-    publicIpMismatch,
-    dnsLeakDetected,
-    dnsLeakDetail,
-    defaultRoutePublicIp,
-    perAdapter
-  })
   await recordForensicLeakSelfTestEvent('leak-self-test-result', {
     physicalAdapterReached,
     publicIpMismatch,
@@ -389,7 +381,16 @@ async function runLeakSelfTestOnce(mySession: number, signal: AbortSignal): Prom
     summary
   }, mySession, signal)
 
-  return mySession !== activeSessionId || signal.aborted ? cancelledResult() : result
+  if (mySession !== activeSessionId || signal.aborted) return cancelledResult()
+  logEvent(physicalAdapterReached || publicIpMismatch || dnsLeakDetected ? 'warn' : 'info', 'leak-test', summary, {
+    physicalAdapterReached,
+    publicIpMismatch,
+    dnsLeakDetected,
+    dnsLeakDetail,
+    defaultRoutePublicIp,
+    perAdapter
+  })
+  return result
 }
 
 let periodicLeakTimer: ReturnType<typeof setInterval> | null = null

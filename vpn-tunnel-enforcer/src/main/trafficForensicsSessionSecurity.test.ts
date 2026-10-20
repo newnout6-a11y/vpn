@@ -1,7 +1,7 @@
 // AT-01-009, F-002/F-104: stored paths must not redirect elevated script writes.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { join } from 'path'
-const fixture = vi.hoisted(() => ({ read: vi.fn(), write: vi.fn(), mkdir: vi.fn(), exec: vi.fn(), spawn: vi.fn(), acl: vi.fn() }))
+const fixture = vi.hoisted(() => ({ read: vi.fn(), write: vi.fn(), append: vi.fn(), mkdir: vi.fn(), exec: vi.fn(), spawn: vi.fn(), acl: vi.fn() }))
 const ROOT = 'C:\\trusted-fixture\\traffic-forensics'
 vi.mock('electron', () => ({ app: { getVersion: () => 'test', getPath: () => ROOT } }))
 vi.mock('./runtimePaths', () => ({ getPrivilegedRuntimeDir: () => ROOT }))
@@ -11,12 +11,46 @@ vi.mock('./settings', () => ({ settingsStore: { get: () => ({ deepTrafficInspect
 vi.mock('./runtimeDirSecurity', () => ({ ensureElevatedRuntimeDirHardened: vi.fn(), verifyDirectoryHardened: fixture.acl }))
 vi.mock('child_process', () => ({ spawn: fixture.spawn, default: { spawn: fixture.spawn } }))
 vi.mock('fs/promises', () => {
-  const api = { readFile: fixture.read, writeFile: fixture.write, mkdir: fixture.mkdir, appendFile: vi.fn(), readdir: vi.fn(async () => []), rm: vi.fn(),
+  const api = { readFile: fixture.read, writeFile: fixture.write, mkdir: fixture.mkdir, appendFile: fixture.append, readdir: vi.fn(async () => []), rm: vi.fn(),
     open: vi.fn(async () => { throw Object.assign(new Error('missing fixture'), { code: 'ENOENT' }) }) }
   return { ...api, default: api }
 })
 beforeEach(() => { vi.resetModules(); vi.clearAllMocks() })
 describe('forensics session path boundary', () => {
+  // AT-00-003/005: cancellation while reading must not start a late append.
+  it('fences a forensic event cancelled during manifest inspection', async () => {
+    let release!: (text: string) => void
+    fixture.read.mockImplementationOnce(() => new Promise<string>(yes => { release = yes }))
+    fixture.acl.mockResolvedValue({ hardened: true })
+    const controller = new AbortController(), sessionDir = join(ROOT, 'sessions', 'fixture')
+    const { recordTrafficForensicsAppEvent } = await import('./trafficForensics')
+    const { IpcFault } = await import('../shared/ipc-result')
+    const pending = recordTrafficForensicsAppEvent({ source: 'leak-self-test', event: 'cancelled' }, () => { if (controller.signal.aborted) throw new IpcFault('cancelled') })
+    const rejected = expect(pending).rejects.toMatchObject({ category: 'cancelled' })
+    await vi.waitFor(() => expect(fixture.read).toHaveBeenCalledOnce())
+    controller.abort()
+    release(JSON.stringify({ sessionId: 'fixture', sessionDir, running: true, engine: 'pktmon' }))
+    await rejected
+    expect(fixture.append).not.toHaveBeenCalled()
+  })
+  it.each([false, true])('retains an in-progress forensic append after cancel (write fails=%s)', async fails => {
+    const sessionDir = join(ROOT, 'sessions', 'fixture')
+    fixture.read.mockResolvedValue(JSON.stringify({ sessionId: 'fixture', sessionDir, running: true, engine: 'pktmon' }))
+    let release!: () => void
+    fixture.append.mockImplementationOnce(() => new Promise<void>((yes, no) => { release = () => fails ? no(new Error('write failed')) : yes() }))
+    const { recordTrafficForensicsAppEvent } = await import('./trafficForensics')
+    const { IpcFault } = await import('../shared/ipc-result')
+    const { logEvent } = await import('./appLogger')
+    const controller = new AbortController()
+    let settled = false
+    const pending = recordTrafficForensicsAppEvent({ source: 'leak-self-test', event: 'retained' }, () => { if (controller.signal.aborted) throw new IpcFault('cancelled') }).finally(() => { settled = true })
+    const rejected = expect(pending).rejects.toMatchObject({ category: 'cancelled' })
+    await vi.waitFor(() => expect(fixture.append).toHaveBeenCalledOnce())
+    controller.abort(); await Promise.resolve()
+    expect(settled).toBe(false)
+    release(); await rejected
+    expect(logEvent).not.toHaveBeenCalled()
+  })
   it.each([1, undefined, Date.now() + 86400000])('warns about an unowned running capture with startedAt=%s after restart (AT-08-004, F-198)', async startedAt => {
     const sessionDir = join(ROOT, 'sessions', 'fixture')
     fixture.read.mockResolvedValue(JSON.stringify({
