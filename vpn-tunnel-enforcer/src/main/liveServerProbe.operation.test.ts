@@ -168,6 +168,16 @@ describe('root live-check ownership', () => {
     expect(result.value?.results).toEqual([state.save.mock.calls[0][0]])
     expect(progress.mock.calls.some(([event]) => event.status === 'completed')).toBe(false)
   })
+  it('fails the owning operation when its history commit cannot persist', async () => {
+    state.save.mockImplementationOnce(() => { throw Object.assign(new Error('private storage path'), { code: 'EACCES' }) })
+    const previous = operations.list().length
+    const result = observe(runLiveServerCheck({ host: 'probe.example', port: 80 }))
+    await drainFixtures()
+    expect(result.settled).toBe(true); expect(result.value).toBeUndefined()
+    expect(result.error).toMatchObject({ code: 'EACCES' })
+    expect(state.save).toHaveBeenCalledOnce()
+    expect(operations.list().slice(previous).find(operation => operation.kind === 'server-probe')).toMatchObject({ status: 'error' })
+  })
 })
 it.each([
   { batch: false, boundary: 'cancel' }, { batch: false, boundary: 'deadline' },

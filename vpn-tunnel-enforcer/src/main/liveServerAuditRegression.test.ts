@@ -81,6 +81,7 @@ vi.mock('tls', async (importOriginal) => {
 
 import { probeTls, registerLiveServerProbeIpcHandlers, runLiveServerCheck } from './liveServerProbe'
 import { computeHistoryDiff, liveServerHistory } from './liveServerHistory'
+import { isStoredLiveCheck } from './liveServerHistorySchema'
 import { redactSensitiveConfig } from './vpnProfiles'
 import { withCorrelation } from './actionCorrelation'
 import { operations } from './operations'
@@ -162,6 +163,7 @@ describe('Live Server Audit Regressions: Defect Verifications', () => {
       const b = await withCorrelation(correlationId, () => runLiveServerCheck(options))
       expect(a.id).not.toBe(b.id)
       for (const check of [a, b]) {
+        expect(isStoredLiveCheck(check)).toBe(true)
         expect(check.id).toMatch(/^op_[0-9a-f]{32}$/i)
         expect(check.cancelled).toBe(false)
         expect(check.infrastructure?.changesFromPrevious?.ipChanged).toBe(true)

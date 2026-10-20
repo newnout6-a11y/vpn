@@ -2034,3 +2034,52 @@ integration37/37,coverage/diff passed. Старый CI39356680659 success;
   timeout-suite repetition252/252,CIM25/25,coverage927/927,210/210,diff0.
   Source/test tree не менялся во время успешного full. Новый SHA ещё требует
   completed Qodo,разбора Revix и CI success.
+
+## 20.10.2026 — PR #94 принят; целостность live history (WP-0)
+
+PR #94 слит в main: 85edf73ca36a8a5a92c50374db28c581a36e502b. Проверенный head
+ d7bdc4fd507fe593fd6626c798d0361c90f631c9 и merge имеют одинаковое дерево (git diff пуст).
+CI 39372090694 completed/success (Windows, Rust, site); Qodo 1559916 completed
+на этом SHA. Dropped committed receipt автоматически implemented. Осталось
+informational/Low: быстрый cancel/restart может получить typed conflict до
+physical drain; safety admission и retry после drain покрыты тестами. Attribution
+не менялся. Revix 118462005020 completed/success, title Ready to merge на том же
+SHA; старый badge в summary не является актуальным verdict. Это minor-ограничение,
+допустимое по решению владельца; не объявляется исправленным.
+
+Следующий участок: AT-00-006/010, F-074/F-143, live-server-checks.json.
+Подтверждены подавленные read/write ошибки и in-memory успех до disk commit.
+Новые 29 real-file cases до fix: 29 failed,395ms,exit1
+(.tmp/wp0-live-history-red.log). Теперь staged memory, temp+fsync+rename,
+exact prior-file backup, bounded diagnostics history.corrupted/unavailable/
+write-failed/recovered, salvage валидных строк и восстановление из backup,
+проверка всех diagnostic shapes, detached read view. Явный clear обновляет
+backup пустым содержимым, чтобы удалённые строки не воскресли после corruption.
+При I/O failure сохраняются предыдущие committed memory/file, наружу идёт
+IpcFault с категорией; raw paths/stack не копируются в error или log.
+
+Это существующий plain JSON target-map v0, отдельный от 20 electron-store stores.
+Добавлен schemaVersion:0 на записи; legacy без marker читается без переписывания.
+Неподдерживаемый/невалидный marker в main или backup отказывается до writes,
+также при замене файла после init. Миграции новой версии здесь не заявляются.
+Сквозной receipt/correlation сохранён; полная provenance всех producers и
+межпроцессная координация ещё остаются задачами WP-0. Нормативные docs/ не менялись.
+
+npm.cmd test -- src/main/liveServerHistory.integrity.test.ts
+src/main/liveServerHistory.test.ts src/main/liveServerProbe.operation.test.ts
+src/main/liveServerAuditRegression.test.ts —77/77,4 suites,5.17s,exit0
+(.tmp/wp0-live-history-targeted4.log). Включены 100 legacy records/5 targets,
+malformed nested diagnostics, future SHA-256 invariance, denied read,
+copy/write/fsync/rename failures, final commit failure после успешного backup,
+retry/restart/clear, реальный loopback receipt и failed operation history commit.
+npm.cmd run typecheck —165 channels/0 public any,exit0.
+Полный набор и build запускаются; commit/review/CI для этого участка ещё pending.
+
+- Final local live-history integrity: npm.cmd test -- --maxWorkers=1 —5075 passed,
+  5 skipped,0 failed;305 files passed/2 skipped,273.24s,exit0
+  (.tmp/wp0-live-history-full.log; .tmp/wp0-live-history-full-exit.txt=0).
+  npm.cmd run build —exit0,включая typecheck165 channels/0 public any
+  (.tmp/wp0-live-history-build.log). Targeted77/77; python -X utf8
+  ../docs/04-приёмочные-тесты/traceability/check-coverage.py —AC927/927,F210/210,
+  exit0;git diff --check —exit0. Source/test tree не менялся во время full.
+  Commit/PR и exact-head Qodo/Revix/CI —следующий gate.
