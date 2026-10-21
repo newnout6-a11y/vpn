@@ -4,7 +4,7 @@
 import { execFileSync } from 'node:child_process'
 import { gzipSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
-import { PHYSICAL_ADAPTER_DNS_SCRIPT } from './physicalAdapterSnapshot'
+import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
 import { recoveryWorkerScript } from './recoveryPsProtocol'
 
 /** Fake cmdlets: Wi-Fi has servers, Ethernet 4 raises ObjectNotFound, anything else raises InvalidData. */
@@ -44,6 +44,35 @@ describe.runIf(process.platform === 'win32')('routing DNS reader script', () => 
     // "Cellular" raises InvalidData: the read must fail, not return a list that looks complete.
     // Matching the injected message proves the read failed because of THIS error, not a broken fixture or a syntax error.
     expect(() => run(`${fakeCmdlets(['Wi-Fi', 'Ethernet 4', 'Cellular'])}\n${PHYSICAL_ADAPTER_DNS_SCRIPT}`)).toThrow(/provider broke/)
+  })
+})
+
+describe.runIf(process.platform === 'win32')('full physical adapter baseline (AT-03-006/012)', () => {
+  it.each([
+    ['missing DNS row', '', []],
+    ['empty DNS list', "[pscustomobject]@{InterfaceIndex=17;ServerAddresses=@()}", []],
+    ['configured resolver', "[pscustomobject]@{InterfaceIndex=17;ServerAddresses=@('1.1.1.1')}", ['1.1.1.1']],
+    ['invalid provider value', "[pscustomobject]@{InterfaceIndex=17;ServerAddresses=@('INVALID-DNS')}", ['INVALID-DNS']]
+  ])('preserves the adapter and DNS baseline for %s', (_name, dnsRow, expected) => {
+    const script = String.raw`
+$ProgressPreference='SilentlyContinue'
+function Get-CimInstance {
+  param($Namespace,$ClassName,$Filter,$ErrorAction)
+  switch ($ClassName) {
+    'MSFT_NetAdapter' { [pscustomobject]@{Hidden=$false;InterfaceOperationalStatus=1;Name='Ethernet';InterfaceDescription='Fixture adapter';PermanentAddress='001122334455';InterfaceGuid='11111111-1111-1111-1111-111111111111';InterfaceIndex=17;MediaType='Ethernet';PhysicalMediaType='Ethernet'} }
+    'MSFT_NetAdapterBindingSettingData' { [pscustomobject]@{Name='Ethernet';InterfaceDescription='Fixture adapter';Enabled=$true} }
+    'MSFT_DNSClientServerAddress' { ${dnsRow} }
+    'MSFT_NetRoute' { }
+    'MSFT_NetConnectionProfile' { }
+    default { throw 'Unexpected fixture class' }
+  }
+}
+function Get-ItemProperty { param($Path,$Name,$ErrorAction); [pscustomobject]@{NameServer=''} }
+function Get-NetAdapter { throw 'Unexpected fallback in fixture' }
+${PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT}`
+    const snapshot = JSON.parse(run(script).trim())
+    expect(snapshot).toMatchObject({ ifIndex: 17, alias: 'Ethernet', ipv6Enabled: true,
+      interfaceGuid: '11111111-1111-1111-1111-111111111111', ipv4Dns: expected })
   })
 })
 

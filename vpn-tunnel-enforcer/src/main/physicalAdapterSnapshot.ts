@@ -50,7 +50,7 @@ try {
 
   foreach ($a in $cimAdapters) {
     $bind6 = $allBindings6 | Where-Object { $_.Name -eq $a.Name -or $_.InterfaceDescription -eq $a.InterfaceDescription } | Select-Object -First 1
-    $dns4 = @(($allDns | Where-Object { $_.InterfaceIndex -eq $a.InterfaceIndex -or $_.InterfaceAlias -eq $a.Name }).ServerAddresses)
+    $dns4 = @(($allDns | Where-Object { $_.InterfaceIndex -eq $a.InterfaceIndex -or $_.InterfaceAlias -eq $a.Name }).ServerAddresses | Where-Object { $null -ne $_ })
     if ($null -eq $dns4) { $dns4 = @() }
 
     $nameServer = ''
