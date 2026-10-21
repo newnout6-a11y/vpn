@@ -13,24 +13,29 @@ function requireRule(snapshot: ReturnType<typeof fixture>['snapshot'], name: str
   return rule
 }
 describe('effective firewall evidence', () => {
-  it.skipIf(process.platform !== 'win32').each(['small', 'large', 'no-owned', 'missing-rule-id', 'missing-filter-id',
+  it.skipIf(process.platform !== 'win32').each(['small', 'large', 'no-owned', 'stored-only', 'no-owned-active-error', 'no-owned-stored-error', 'missing-rule-id', 'missing-filter-id',
     'profile-disabled-interface', 'profile-not-configured', 'profile-null', 'profile-missing-field', 'profile-invalid-value',
     ...['Application', 'Address', 'Port', 'Interface'].flatMap(kind => [`missing-${kind}`, `duplicate-${kind}`, `query-error-${kind}`])])(
-    'reads effective filters in four bulk queries and keeps one-to-one evidence: %s (AT-03-001/004)', variant => {
+    'reads full policy only for owned active rules, preserving one-to-one evidence: %s (AT-03-001/003/004)', variant => {
     const { snapshot } = fixture()
     // The two rules share a display name, but have different native identities/scopes.
     snapshot.rules.push({ ...snapshot.rules[0], program: 'C:\\fixture\\second.exe' })
     if (variant === 'large') snapshot.rules.push(...Array.from({ length: 100 }, (_, i) => ({ ...snapshot.rules[0], name: `${prefix}extra-${i}` })))
-    if (variant === 'no-owned') snapshot.rules = []
+    if (variant.startsWith('no-owned') || variant === 'stored-only') snapshot.rules = []
     if (variant === 'profile-disabled-interface') Object.assign(snapshot.profiles[0], { disabledInterfaces: ['Fixture Ethernet'] })
     if (variant === 'profile-not-configured') Object.assign(snapshot.profiles[0], { disabledInterfaces: ['NotConfigured'] })
     snapshot.storedNames = snapshot.rules.map(rule => rule.name)
+    if (variant === 'stored-only') snapshot.storedNames = [prefix + 'orphan']
     const encoded = Buffer.from(JSON.stringify(snapshot)).toString('base64')
     const script = `
 $fixture=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json
 $global:filterCalls=@{}
-function Get-Service { [CmdletBinding()]param($Name) $fixture.services | ForEach-Object { [pscustomobject]@{Name=$_.name;Status=$_.status} } }
+function Get-Service { [CmdletBinding()]param($Name)
+  if(-not $fixture.rules.Count){throw 'Unneeded service query'}
+  $fixture.services | ForEach-Object { [pscustomobject]@{Name=$_.name;Status=$_.status} }
+}
 function Get-NetFirewallProfile { [CmdletBinding()]param($PolicyStore,$Profile)
+  if(-not $fixture.rules.Count){throw 'Unneeded profile query'}
   if($PolicyStore -ne 'ActiveStore'){throw 'Must read effective profiles'}
   $fixture.profiles | ForEach-Object {
     $profile=[pscustomobject]@{Name=$_.name;Enabled=$_.enabled;DefaultOutboundAction=$_.outbound;DisabledInterfaceAliases=$(if('${variant}' -eq 'profile-null'){$null}else{$_.disabledInterfaces})}
@@ -41,10 +46,16 @@ function Get-NetFirewallProfile { [CmdletBinding()]param($PolicyStore,$Profile)
 }
 function Get-NetFirewallRule { [CmdletBinding()]param($PolicyStore)
   if($PolicyStore -notin @('ActiveStore','PersistentStore')){throw 'Missing policy store'}
+  if(('${variant}' -eq 'no-owned-active-error' -and $PolicyStore -eq 'ActiveStore') -or ('${variant}' -eq 'no-owned-stored-error' -and $PolicyStore -eq 'PersistentStore')){throw 'Fixture rule query denied'}
+  if($PolicyStore -eq 'PersistentStore'){
+    $fixture.storedNames | ForEach-Object { [pscustomobject]@{DisplayName=$_} }
+    return
+  }
   for($i=0;$i -lt $fixture.rules.Count;$i++){ $r=$fixture.rules[$i]; [pscustomobject]@{Name=$(if($i -eq 0 -and '${variant}' -eq 'missing-rule-id'){''}else{'rule-'+$i});DisplayName=$r.name;Enabled=$r.enabled;Direction=$r.direction;Action=$r.action;Profile=$r.profile;Scope=$r} }
   if($PolicyStore -eq 'ActiveStore'){[pscustomobject]@{DisplayName='Foreign allow';Enabled='True';Direction='Outbound';Action='Allow'}}
 }
 function Read-FixtureFilter($kind,$All,$PolicyStore) {
+  if(-not $fixture.rules.Count){throw 'Unneeded filter query'}
   if(-not $All -or $PolicyStore -ne 'ActiveStore'){throw 'Bulk ActiveStore read required'}
   if($global:filterCalls.ContainsKey($kind)){throw 'Repeated filter query'}
   $global:filterCalls[$kind]=1
@@ -75,12 +86,13 @@ $actual=&{${FIREWALL_STATUS_PS}}
     try {
       const file = join(directory, 'fixture.ps1'); writeFileSync(file, '\ufeff' + script)
       const run = () => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8', windowsHide: true, timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] })
-      if (['small', 'large', 'no-owned', 'profile-disabled-interface', 'profile-not-configured', 'profile-null'].includes(variant)) {
+      if (['small', 'large', 'no-owned', 'stored-only', 'profile-disabled-interface', 'profile-not-configured', 'profile-null'].includes(variant)) {
         const actual = JSON.parse(run())
-        expect(parseFirewallStatusSnapshot(actual.snapshot)).toEqual({ ...snapshot, foreignAllows: 1 })
-        expect(actual.calls).toEqual({ Application: 1, Address: 1, Port: 1, Interface: 1 })
+        expect(parseFirewallStatusSnapshot(actual.snapshot)).toEqual({ ...snapshot, foreignAllows: 1,
+          ...(!snapshot.rules.length ? { services: [], profiles: [] } : {}) })
+        expect(actual.calls).toEqual(snapshot.rules.length ? { Application: 1, Address: 1, Port: 1, Interface: 1 } : {})
       } else if (variant === 'profile-invalid-value') expect(() => parseFirewallStatusSnapshot(JSON.parse(run()).snapshot)).toThrow('Incomplete firewall status snapshot')
-      else expect(run).toThrow(variant.startsWith('query-error-') ? 'Fixture filter query denied' :
+      else expect(run).toThrow(variant.endsWith('-error') ? 'Fixture rule query denied' : variant.startsWith('query-error-') ? 'Fixture filter query denied' :
         variant === 'profile-missing-field' ? 'Incomplete firewall profile read-back' : 'Incomplete firewall filter read-back')
     } finally { rmSync(directory, { recursive: true, force: true }) }
   })

@@ -9,6 +9,14 @@ const coreNames = ['singbox', 'app', 'tun-interface', 'loopback-out', 'loopback-
 /** Query effective policy, not merely the local PersistentStore. No writes/UAC. */
 export const FIREWALL_STATUS_PS = `
 $ErrorActionPreference='Stop'
+$active=@(Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction Stop)
+$stored=@(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop | Where-Object { $_.DisplayName -like 'VPNTE-killswitch*' } | ForEach-Object { [string]$_.DisplayName })
+$foreign=@($active | Where-Object { $_.DisplayName -notlike 'VPNTE-killswitch*' -and [string]$_.Enabled -eq 'True' -and [string]$_.Direction -eq 'Outbound' -and [string]$_.Action -eq 'Allow' }).Count
+$ownedRules=@($active | Where-Object { $_.DisplayName -like 'VPNTE-killswitch*' })
+$services=@(); $profiles=@(); $owned=@()
+# No effective owned rule has a filter to verify. Keep both store reads above;
+# orphaned stored rules and WFP protection still prevent an inactive verdict.
+if($ownedRules.Count -gt 0){
 $services=@(Get-Service -Name BFE,MpsSvc -ErrorAction Stop | ForEach-Object { [pscustomobject]@{name=[string]$_.Name;status=[string]$_.Status} })
 $profiles=@(Get-NetFirewallProfile -PolicyStore ActiveStore -Profile Domain,Private,Public -ErrorAction Stop | ForEach-Object {
   $field=$_.PSObject.Properties['DisabledInterfaceAliases']
@@ -18,9 +26,6 @@ $profiles=@(Get-NetFirewallProfile -PolicyStore ActiveStore -Profile Domain,Priv
   if($null -ne $field.Value){$disabled=@($field.Value)}
   [pscustomobject]@{name=[string]$_.Name;enabled=[string]$_.Enabled;outbound=[string]$_.DefaultOutboundAction;disabledInterfaces=$disabled}
 })
-$active=@(Get-NetFirewallRule -PolicyStore ActiveStore -ErrorAction Stop)
-$stored=@(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction Stop | Where-Object { $_.DisplayName -like 'VPNTE-killswitch*' } | ForEach-Object { [string]$_.DisplayName })
-$foreign=@($active | Where-Object { $_.DisplayName -notlike 'VPNTE-killswitch*' -and [string]$_.Enabled -eq 'True' -and [string]$_.Direction -eq 'Outbound' -and [string]$_.Action -eq 'Allow' }).Count
 function Get-VpnteStatusFilterIndex($filters) {
   $index=@{}
   foreach($filter in $filters){
@@ -36,7 +41,7 @@ $appIndex=Get-VpnteStatusFilterIndex @(Get-NetFirewallApplicationFilter -All -Po
 $addressIndex=Get-VpnteStatusFilterIndex @(Get-NetFirewallAddressFilter -All -PolicyStore ActiveStore -ErrorAction Stop)
 $portIndex=Get-VpnteStatusFilterIndex @(Get-NetFirewallPortFilter -All -PolicyStore ActiveStore -ErrorAction Stop)
 $interfaceIndex=Get-VpnteStatusFilterIndex @(Get-NetFirewallInterfaceFilter -All -PolicyStore ActiveStore -ErrorAction Stop)
-$owned=@($active | Where-Object { $_.DisplayName -like 'VPNTE-killswitch*' } | ForEach-Object {
+$owned=@($ownedRules | ForEach-Object {
   $rule=$_
   $key=[string]$rule.Name
   if(-not $key -or -not $appIndex.ContainsKey($key) -or -not $addressIndex.ContainsKey($key) -or -not $portIndex.ContainsKey($key) -or -not $interfaceIndex.ContainsKey($key)){throw 'Incomplete firewall filter read-back'}
@@ -49,6 +54,7 @@ $owned=@($active | Where-Object { $_.DisplayName -like 'VPNTE-killswitch*' } | F
     program=[string]$app[0].Program;remote=@($address[0].RemoteAddress);local=@($address[0].LocalAddress);
     interfaces=@($interface[0].InterfaceAlias);protocol=[string]$port[0].Protocol;remotePorts=@($port[0].RemotePort)}
 })
+}
 [pscustomobject]@{services=$services;profiles=$profiles;storedNames=$stored;foreignAllows=$foreign;rules=$owned} | ConvertTo-Json -Depth 6 -Compress
 `
 
