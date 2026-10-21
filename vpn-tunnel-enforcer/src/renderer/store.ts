@@ -7,6 +7,7 @@ import type { PublicIpVerdict } from '../shared/publicIp'
 import type { FirewallKillSwitchStatus } from '../shared/ipc-types'
 import { create } from 'zustand'
 import type { TunnelSnapshot } from '../shared/tunnel-state'
+import type { RendererLogEventCode } from '../shared/electron-api'
 
 /**
  * State Management Architecture Decision (Task 21.3)
@@ -50,10 +51,10 @@ export interface LogEntry {
   message: string
 }
 
-function persistRendererLog(level: LogEntry['level'], message: string) {
+function persistRendererLog(level: LogEntry['level'], message: string, eventCode?: RendererLogEventCode) {
   try {
     const api = typeof window !== 'undefined' ? window.electronAPI : null
-    if (api?.logRenderer) void api.logRenderer(level, message)
+    if (api?.logRenderer) void api.logRenderer(level, message, eventCode)
   } catch {
     // Logging must never break UI state updates.
   }
@@ -185,7 +186,7 @@ interface AppState {
   setTrafficStats: (stats: TrafficStats) => void
   setBrowserIpCheck: (check: BrowserIpCheck | null) => void
   resetConnectionState: () => void
-  addLog: (level: LogEntry['level'], message: string) => void
+  addLog: (level: LogEntry['level'], message: string, eventCode?: RendererLogEventCode) => void
   setSettings: (s: AppSettings) => void
   updateSettings: (s: Partial<AppSettings>) => void
 
@@ -429,8 +430,8 @@ export const useAppStore = create<AppState>((set) => ({
     traffic: emptyTrafficStats,
     browserIpCheck: null,
   }),
-  addLog: (level, message) => {
-    persistRendererLog(level, message)
+  addLog: (level, message, eventCode) => {
+    persistRendererLog(level, message, eventCode)
     set((s) => ({
       logs: [...s.logs.slice(-500), { timestamp: Date.now(), level, message }]
     }))

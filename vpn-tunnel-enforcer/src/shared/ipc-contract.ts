@@ -113,7 +113,7 @@ export const IPC_REQUESTS = {
   'network:repair-orphaned-dns': request('repairOrphanedDns', []),
   'network:rollback-adapter-lockdown': request('rollbackAdapterLockdown', []),
   'tun:kill-stale-singbox': request('killStaleSingbox', []),
-  'renderer-log': request('logRenderer', [oneOf(['debug', 'info', 'warn', 'error']), text(16 * 1024)]),
+  'renderer-log': request('logRenderer', [oneOf(['debug', 'info', 'warn', 'error']), text(16 * 1024), optional(oneOf(['health-check-summary']))]),
   'get-full-logs': request('getFullLogs', []),
   'clear-app-log': request('clearAppLog', []),
   'clear-diagnostic-artifacts': request('clearDiagnosticArtifacts', []),

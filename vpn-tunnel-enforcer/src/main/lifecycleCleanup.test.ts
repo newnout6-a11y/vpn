@@ -210,6 +210,10 @@ it.each(['baseline', 'firewall', 'adapters', 'preserved'] as const)('cannot cert
   if (step === 'firewall') h.disableKillSwitchIfActive.mockRejectedValue(new Error('denied'))
   if (step === 'adapters') h.rollbackPhysicalAdapterLockdownIfApplied.mockRejectedValue(new Error('denied'))
   await h.stop({ preserveNetworkProtection: step === 'preserved' })
+  if (step === 'preserved') {
+    expect(h.notifyStatus).toHaveBeenCalledWith('adapting')
+    expect(h.notifyStatus).not.toHaveBeenCalledWith('stopping')
+  }
   expect(h.nativeStopCallback).toHaveBeenCalledOnce()
   expect(model.snapshot.state).not.toBe('disconnected')
   expect(model.snapshot.cleanupRequired).toBe(true)
@@ -1448,18 +1452,47 @@ function ipStartupHarness(mode: 'direct' | 'proxy') {
   }
   os.connectionLifecycle = new ConnectionLifecycle(() => { running=false })
   const name = mode === 'direct' ? 'startDirectVpnProtection' : 'startProtection'
-  const control = compile<{ start: () => Promise<any>; cancel: () => void; stop: () => Promise<any>; shutdown: () => Promise<void> }>(`
+  const control = compile<{ start: () => Promise<any>; restore: (options: unknown) => Promise<any>; cancel: () => void; stop: () => Promise<any>; shutdown: () => Promise<void> }>(`
 let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,latestPublicIp=null,currentSession=null,stopInProgress=false,shutdownInProgress=false,softProtectionApplied=false;
 const KILL_SWITCH_RULE_PREFIX='VPNTE-killswitch';
 ${body('index.ts', name)}
 ${body('index.ts', `${name}Effects`)}
+${body('index.ts','restoreCancelledProfileSwitch')}
 ${body('index.ts','stopProtectionEffects')}
 ${body('index.ts','stopProtection')}
 ${body('index.ts','performShutdownCleanup')}
-return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : ''}),stop:stopProtection,shutdown:()=>performShutdownCleanup('test'), cancel: () => {adaptiveVerificationGeneration++}};
+return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : ''}),restore:restoreCancelledProfileSwitch,stop:stopProtection,shutdown:()=>performShutdownCleanup('test'), cancel: () => {adaptiveVerificationGeneration++}};
 `, os)
   return { ...control, ...os, settings, setRunning: (value: boolean) => { running = value } }
 }
+
+describe('cancelled server restoration repeats direct-VPN effects (AT-02-004 / AT-03-007)', () => {
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
+  it('re-applies the rolled-back baseline and monitoring for the exact former options', async () => {
+    vi.useFakeTimers()
+    const h = ipStartupHarness('direct')
+    h.settings.autoNetworkBaseline = true
+    let applied = false
+    h.applyTunNetworkBaseline.mockImplementation(async () => { applied = true; return { success: true } })
+    h.tunController.stop.mockImplementation(async () => { applied = false; h.setRunning(false); return { success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } } })
+    await h.start()
+    expect(applied).toBe(true)
+    await h.tunController.stop()
+    expect(applied).toBe(false)
+    const previous = { mode: 'directVpn', vpnProfile: { name: 'former server', protocol: 'vless', outbound: { type: 'vless', server: 'former.invalid', server_port: 443 } }, proxyEngine: 'xray', adaptiveMode: 'standard', enableFirewallKillSwitch: true }
+    const result = await h.restore(previous)
+    expect(result).toMatchObject({ success: true })
+    expect(applied).toBe(true)
+    expect(h.applyTunNetworkBaseline).toHaveBeenCalledTimes(2)
+    expect(h.tunController.start).toHaveBeenLastCalledWith(previous)
+    expect(h.ipMonitor.startMonitoring).toHaveBeenCalledTimes(2)
+    expect(h.scheduleAdaptiveVerification).toHaveBeenCalledTimes(2)
+    expect(h.startPeriodicLeakTest).toHaveBeenCalledTimes(2)
+    expect(h.openSession).toHaveBeenLastCalledWith(expect.objectContaining({ name: 'former server' }))
+    h.cancel()
+  })
+})
+
 describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-003 / AT-02-002)', mode => {
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
   it('preserves the recovery-report instruction on baseline failure (AT-00-004)', async () => {
@@ -1694,7 +1727,7 @@ describe('cancelled switch restoration ownership (AT-02-004 / AT-00-003)', () =>
     }), stop: vi.fn(async (): Promise<any> => { evidence.running = false; evidence.pid = null; return { success: true } }) }
     const cancel = vi.fn()
     const connectionLifecycle = new ConnectionLifecycle(cancel, () => tunController.stop(), undefined, model)
-    const restore = compile<(options: unknown) => Promise<any>>(body('index.ts', 'restoreCancelledProfileSwitch') + ';return restoreCancelledProfileSwitch;', { tunController, connectionLifecycle })
+    const restore = compile<(options: unknown) => Promise<any>>(body('index.ts', 'restoreCancelledProfileSwitch') + ';return restoreCancelledProfileSwitch;', { tunController, connectionLifecycle, startDirectVpnProtectionEffects: (_owner: unknown, options: unknown) => tunController.start(options) })
     return { evidence, model, tunController, connectionLifecycle, restore, cancel }
   }
   it('confirms a restored connection through the main owner, never a bare running event', async () => {

@@ -15,7 +15,7 @@ import type {
   LiveServerCheckOptions
 } from '../shared/ipc-types'
 
-import type { ElectronAPI, TrafficStats, LeakSelfTestResult } from '../shared/electron-api'
+import type { ElectronAPI, TrafficStats, LeakSelfTestResult, RendererLogEventCode } from '../shared/electron-api'
 export type { ElectronAPI, TrafficStats, LeakSelfTestAdapter, LeakSelfTestResult } from '../shared/electron-api'
 
 const MAX_TEXT_ARG_CHARS = 4096
@@ -202,8 +202,8 @@ contextBridge.exposeInMainWorld('electronAPI', withIpcFailures({
   repairOrphanedDns: () => invoke('network:repair-orphaned-dns'),
   rollbackAdapterLockdown: () => invoke('network:rollback-adapter-lockdown'),
   killStaleSingbox: () => invoke('tun:kill-stale-singbox'),
-  logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) =>
-    invoke('renderer-log', assertEnum(level, ['debug', 'info', 'warn', 'error'] as const, 'level'), assertString(message, 'message', 16 * 1024)),
+  logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string, eventCode?: RendererLogEventCode) =>
+    invoke('renderer-log', assertEnum(level, ['debug', 'info', 'warn', 'error'] as const, 'level'), assertString(message, 'message', 16 * 1024), eventCode),
   getFullLogs: () => invoke('get-full-logs'),
   clearAppLog: () => invoke('clear-app-log'),
   clearDiagnosticArtifacts: () => invoke('clear-diagnostic-artifacts'),

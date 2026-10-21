@@ -17,6 +17,22 @@ beforeEach(() => {
   Object.assign(window, { electronAPI: api })
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
+
+// AT-00-005: the stable event code survives the real Maintenance -> store path.
+it.each(['warn', 'fail'] as const)('persists a %s health summary with its event code and original severity', async status => {
+  Object.assign(api, {
+    logRenderer: vi.fn(async () => ({ success: true })),
+    runSystemDiagnostics: vi.fn(async () => ({ items: [{ id: 'network', category: 'Network', label: 'Network', status, value: 'fixture' }] })),
+    firewallRepairHealth: vi.fn(async () => ({ summary: 'ok', services: [], profiles: [], recommendedActions: [], ourRuleCount: 0 }))
+  })
+  render(<Maintenance />)
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Проверить$/ })) })
+  const level = status === 'fail' ? 'error' : 'warn'
+  const message = useAppStore.getState().maintenanceLastResult
+  expect(api.logRenderer).toHaveBeenLastCalledWith(level, message, 'health-check-summary')
+  expect(useAppStore.getState().logs.at(-1)).toMatchObject({ level, message })
+})
+
 async function start() {
   const view = render(<Maintenance />)
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Проверить защиту' })) })

@@ -169,7 +169,7 @@ export function Maintenance() {
         ? 'Критичных проблем восстановления не найдено'
         : 'Health-check завершён: есть пункты для внимания'
       setLastResult(message)
-      addLog(visibleSystemSummary === 'fail' || firewall.summary === 'fail' ? 'error' : visibleSystemSummary === 'warn' || firewall.summary === 'warn' ? 'warn' : 'info', message)
+      addLog(visibleSystemSummary === 'fail' || firewall.summary === 'fail' ? 'error' : visibleSystemSummary === 'warn' || firewall.summary === 'warn' ? 'warn' : 'info', message, 'health-check-summary')
       return { system, firewall }
     } catch (err: any) {
       const message = `Health-check failed: ${err?.message || err}`

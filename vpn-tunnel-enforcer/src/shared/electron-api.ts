@@ -31,6 +31,8 @@ import type {
   LiveServerCheckOptions
 } from './ipc-types'
 
+export type RendererLogEventCode = 'health-check-summary'
+
 /** Request failures reject with IpcRemoteErrorData; narrow unknown catches
  * with isIpcRemoteErrorData rather than relying on Error identity across realms. */
 export interface ElectronAPI {
@@ -66,7 +68,7 @@ export interface ElectronAPI {
   repairOrphanedDns: () => Promise<AdapterDnsRepairResult>
   rollbackAdapterLockdown: () => Promise<AdapterRollbackResult>
   killStaleSingbox: () => Promise<OwnedRuntimeStopResult & { message: string; skipped?: boolean; blocked?: boolean }>
-  logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => Promise<{ success: boolean }>
+  logRenderer: (level: 'debug' | 'info' | 'warn' | 'error', message: string, eventCode?: RendererLogEventCode) => Promise<{ success: boolean }>
   getFullLogs: () => Promise<LogFileSnapshot[]>
   clearAppLog: () => Promise<DiagnosticClearReport>
   clearDiagnosticArtifacts: () => Promise<DiagnosticClearReport>

@@ -417,7 +417,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         await window.electronAPI.serversCancelSwitch()
         useAppStore.getState().acknowledgeServerSwitchCancellation()
         switchCancellationRequested = true
-        addLog('info', 'Отмена смены сервера запрошена; ожидаем завершения текущей попытки и возврата к прежнему серверу.')
+        addLog('info', t('dashboard.serverSwitchCancellationRequested'))
       } else {
         const result = await window.electronAPI.cancelTun()
         if (result.success) {

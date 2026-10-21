@@ -136,8 +136,8 @@ function isBenignAppLogWarning(row: any): boolean {
   const scope = String(row?.scope || '')
   const message = String(row?.message || '')
   const command = String(row?.details?.command || '')
-  // The renderer repeats the report summary; its underlying findings are already inspected here.
-  if (row?.level === 'warn' && scope === 'renderer' && message === 'Health-check завершён: есть пункты для внимания') return true
+  // Summary findings are already inspected here. The exact text handles older logs without an event code.
+  if (row?.level === 'warn' && scope === 'renderer' && (row?.details?.eventCode === 'health-check-summary' || message === 'Health-check завершён: есть пункты для внимания')) return true
   return scope === 'system-network' &&
     message === 'baseline command failed' &&
     /^reg delete /i.test(command) &&

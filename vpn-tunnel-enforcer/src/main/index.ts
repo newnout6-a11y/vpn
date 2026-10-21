@@ -12,7 +12,7 @@ import { isIP } from 'net'
 import { randomUUID } from 'node:crypto'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { happDetector } from './happDetector'
-import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart, onNativeStartup, onNativeStop } from './tunController'
+import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart, onNativeStartup, onNativeStop, type StartOptions } from './tunController'
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
 import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
@@ -27,6 +27,7 @@ import { connectionFailure, operationLogDetails, type ConnectionStartResult, typ
 import { runScheduledConnection } from './scheduledConnection'
 import { makeOutcome, outcomeKindToDisconnectReason, isNodeSwitchRestartReason, sessionOutcomeConfidence } from './sessionOutcome'
 import type { ConnectionProvenance } from '../shared/connection-provenance'
+import type { RendererLogEventCode } from '../shared/electron-api'
 import type { SessionOutcome, SessionOutcomeEvidence, SessionOutcomeKind } from '../shared/ipc-types'
 import { readRecentXrayOutboundFault, getXrayStatus, stopXray } from './xrayEngine'
 import { classifyNavigation } from './navigationPolicy'
@@ -1245,12 +1246,12 @@ const connectionLifecycle = new ConnectionLifecycle(() => {
 }, tunnelState)
 profileRotation.setLifecycle(connectionLifecycle)
 
-async function restoreCancelledProfileSwitch(options: Parameters<typeof tunController.start>[0]): Promise<ConnectionStartResult> {
+async function restoreCancelledProfileSwitch(options: StartOptions): Promise<ConnectionStartResult> {
   const result = await connectionLifecycle.start(async owner => {
     owner.assertActive()
     let started = false
     try {
-      const result = await owner.wait(tunController.start(options))
+      const result = await owner.wait(startDirectVpnProtectionEffects(owner, options))
       started = result.success
       return result
     } finally {
@@ -1488,7 +1489,7 @@ async function startDirectVpnProtection(): Promise<ConnectionStartResult> {
   return connectionLifecycle.start(owner => startDirectVpnProtectionEffects(owner))
 }
 
-async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): Promise<ConnectionStartResult> {
+async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner, previousOptions?: StartOptions): Promise<ConnectionStartResult> {
   await owner.wait(rollbackSoftAutoconfigIfApplied('direct VPN start'))
   suppressLeakSelfTestsFor(20_000, 'direct-vpn-start')
   captureSnapshot('tun-pre-start').catch(() => undefined)
@@ -1508,8 +1509,8 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
   // profile from there. If its outbound was lost (older builds saved
   // profiles without it) we try to recover from the legacy
   // directVpnCachedProfiles list at runtime.
-  let profile: VpnProfile | undefined
-  const activeServer = serverPicker.getActiveProfile()
+  let profile = previousOptions?.vpnProfile
+  const activeServer = previousOptions ? null : serverPicker.getActiveProfile()
   if (activeServer) {
     let outbound = activeServer.outbound
     if (!outbound || typeof outbound !== 'object') {
@@ -1558,7 +1559,7 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
       captureSnapshot('tun-start-failed').catch(() => undefined)
       return connectionFailure('conflict', errorMsg)
     }
-  } else if (settings.directVpnInput.trim()) {
+  } else if (!profile && settings.directVpnInput.trim()) {
     try {
       profile = await owner.wait(resolveVpnProfile(settings.directVpnInput, settings.directVpnSelectedIndex, {
         proxyAddr: settings.proxyOverride,
@@ -1578,7 +1579,7 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
       captureSnapshot('tun-start-failed').catch(() => undefined)
       return connectionFailure(category, errorMsg)
     }
-  } else {
+  } else if (!profile) {
     const errorMsg = 'Нет выбранного сервера. Откройте раздел "Серверы" и добавьте подписку или ключ.'
     recordStartFailure({ id: 'direct-vpn', name: 'Direct VPN', mode: 'direct' }, errorMsg)
     captureSnapshot('tun-start-failed').catch(() => undefined)
@@ -1622,7 +1623,7 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
     connectionMode: 'directVpn',
     serverFallbackAttempted: false
   }
-  const result = await owner.wait(tunController.start({
+  const result = await owner.wait(tunController.start(previousOptions ?? {
     mode: 'directVpn',
     vpnProfile: profile,
     proxyType: 'socks5',
@@ -2462,9 +2463,9 @@ app.whenReady().then(async () => {
     return runAutoPilot()
   })
 
-  handleLogged('renderer-log', async (_e, level: AppLogLevel, message: string) => {
+  handleLogged('renderer-log', async (_e, level: AppLogLevel, message: string, eventCode?: RendererLogEventCode) => {
     const safeLevel: AppLogLevel = ['debug', 'info', 'warn', 'error'].includes(level) ? level : 'info'
-    logEvent(safeLevel, 'renderer', message)
+    logEvent(safeLevel, 'renderer', message, eventCode ? { eventCode } : undefined)
     return { success: true }
   })
 

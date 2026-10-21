@@ -45,6 +45,7 @@
     "cancelConnection": "Отменить подключение",
     "cancelServerSwitch": "Отменить смену сервера",
     "serverSwitchCancelled": "Смена сервера отменена",
+    "serverSwitchCancellationRequested": "Отмена смены сервера запрошена; ожидаем завершения текущей попытки и возврата к прежнему серверу.",
     "cancelling": "Отменяем…",
     "connectionCancelled": "Подключение отменено",
     "cancelledWithWarnings": "Подключение отменено с предупреждениями",
