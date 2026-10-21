@@ -70,6 +70,11 @@ test('adapter lockdown diagnostics retain verified failure markers without topol
   assert.equal(safeAppEvent({ ...base, scope: 'phys-lockdown', message: 'DNS registry snapshot failed; refusing mutation without baseline',
     details: { message: 'Unsupported DNS registry snapshot value: FAKE-PRIVATE-PAYLOAD' } }).errorKind, 'dns-policy-value')
   assert.ok(!JSON.stringify(result).includes('FAKE-PRIVATE-PAYLOAD'))
+  assert.deepEqual(safeAppEvent({ ...base, message: 'physical adapter lockdown threw', details: {
+    name: 'Error', message: 'Invalid transition snapshot FAKE-PRIVATE-PAYLOAD',
+    stack: 'at private (D:\\private\\app.asar\\out\\main\\index.js:1234:56) FAKE-PRIVATE-PAYLOAD' } }),
+  { at: base.ts, scope: 'tun', message: 'physical adapter lockdown threw', errorKind: 'transition-snapshot',
+    errorName: 'Error', sourceLocations: [{ line: 1234, column: 56 }] })
 })
 
 test('concurrent connect/cancel calls retain separate IDs and elapsed time', async t => {

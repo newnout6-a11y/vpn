@@ -116,6 +116,9 @@ export function safeAppEvent(event) {
     [event.details?.message, event.details?.out, ...(Array.isArray(event.details?.warnings) ? event.details.warnings : [])]
       .filter(value => typeof value === 'string').join('\n')
   for (const [kind, pattern] of [
+    ['lockdown-manifest', /Invalid lockdown manifest/],
+    ['adapter-snapshot', /Missing physical adapter snapshot|Invalid adapter snapshot|Duplicate adapter identity/],
+    ['transition-snapshot', /Invalid transition snapshot/], ['dns-policy-missing', /Missing DNS policy snapshot/],
     ['dns-policy-baseline', /DNS registry baseline could not be verified/],
     ['dns-policy-value', /Unsupported DNS registry snapshot value/],
     ['dns-policy-schema', /Incomplete DNS registry snapshot|Invalid DNS registry snapshot/],
@@ -124,6 +127,11 @@ export function safeAppEvent(event) {
     ['file-missing', /ENOENT|cannot find the file/i], ['permission-denied', /EACCES|EPERM|access is denied/i],
     ['socket-conflict', /EADDRINUSE/], ['native-timeout', /ETIMEDOUT|timed out/i]
   ]) if (pattern.test(errorText)) { result.errorKind = kind; break }
+  if (['Error', 'TypeError', 'SyntaxError', 'RecoveryWorkerError'].includes(event.details?.name)) result.errorName = event.details.name
+  const stack = typeof event.details?.stack === 'string' ? event.details.stack : ''
+  const locations = [...stack.matchAll(/\bindex\.js:([0-9]{1,7}):([0-9]{1,6})/g)].slice(0, 3)
+    .map(match => ({ line: Number(match[1]), column: Number(match[2]) }))
+  if (locations.length) result.sourceLocations = locations
   const issues = []
   for (const [kind, pattern] of [
     ['adapter-ipv6', /A[0-9]+_ipv6_err:|IPv6 (?:binding not verified|read-back mismatch)/],
