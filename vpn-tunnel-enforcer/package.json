@@ -19,7 +19,7 @@
     "test:vpn-profiles": "node scripts/test-vpn-profiles.mjs",
     "test:electron": "npm run prepare:electron && npm run build && node scripts/test-electron-runtime.mjs",
     "test:real-vpn": "node scripts/test-real-vpn.mjs",
-    "test:real-vpn:unit": "node --test scripts/real-vpn-scenario.test.mjs scripts/real-vpn-inspector.test.mjs scripts/real-vpn-runner.test.mjs",
+    "test:real-vpn:unit": "node --test scripts/real-vpn-scenario.test.mjs scripts/real-vpn-inspector.test.mjs scripts/real-vpn-runner.test.mjs scripts/real-vpn-log.test.mjs",
     "test:wp1:fuzz": "node scripts/test-wp1-fuzz.mjs",
     "test:wp1:native": "npm run build && node scripts/test-wp1-native.mjs",
     "test:wp1:migration": "node scripts/test-wp1-migration.mjs",

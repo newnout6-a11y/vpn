@@ -62,6 +62,11 @@ export async function connectInspector(port, expectedPid, timeoutMs = 30_000) {
     contextId = contexts.find(c => c.auxData?.isDefault).id
     if (await evaluate('process.pid') !== expectedPid) throw new Error('Inspector belongs to another process')
     await evaluate(`globalThis.__realVpnElectron = process.mainModule.require('electron'); true`)
-    return { evaluate, close }
+    const renderer = expression => evaluate(`(() => {
+      const w = __realVpnElectron.BrowserWindow.getAllWindows().find(w => !w.isDestroyed()
+        && !w.webContents.isLoadingMainFrame() && w.webContents.getURL().endsWith('/renderer/index.html'));
+      return w ? w.webContents.executeJavaScript(${JSON.stringify(expression)}) : null;
+    })()`)
+    return { evaluate, renderer, close }
   } catch (error) { close(); throw error }
 }

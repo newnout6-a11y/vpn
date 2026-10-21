@@ -12,6 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { assertStable, deadline, runScenario } from './real-vpn-scenario.mjs'
 import { connectInspector } from './real-vpn-inspector.mjs'
 import { requireHostedWindows, readScenarioSecret, seedScenario } from './real-vpn-runner.mjs'
+import { createProgressLog, safeAppEvent, safeSnapshot } from './real-vpn-log.mjs'
 import { runWithCleanup } from './wp1-test-cleanup.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -26,10 +27,6 @@ const ps = async (source, timeout = 30_000) => {
   } catch { throw new Error('Windows oracle/shutdown failed; command output omitted') }
 }
 const hash = value => createHash('sha256').update(value).digest('hex')
-const safeSnapshot = s => ({ at: new Date().toISOString(), revision: s.revision, state: s.state, transition: s.transition,
-  processState: s.processState, pid: s.pid, cleanupRequired: s.cleanupRequired,
-  correlationId: s.operation?.correlationId ?? null, operationStatus: s.operation?.status ?? null })
-
 async function run(config, seed) {
   const report = { schemaVersion: 1, startedAt: new Date().toISOString(), status: 'FAIL', steps: [],
     runner: { os: process.env.RUNNER_OS, image: process.env.ImageOS, commit: process.env.GITHUB_SHA },
@@ -37,25 +34,64 @@ async function run(config, seed) {
       'Windows Server/cloud network timings differ from the user PC.',
       'Not a packet-leak oracle, OS matrix, or p95 acceptance run.'] }
   const save = () => writeFile(join(config.output, 'report.json'), JSON.stringify(report, null, 2) + '\n')
-  const log = async message => {
-    console.log(message)
-    await writeFile(join(config.output, 'progress.log'), `${new Date().toISOString()} ${message}\n`, { flag: 'a' })
-  }
+  const progress = createProgressLog(join(config.output, 'progress.log'))
+  progress.record('runner-started')
   let inspector, application, originalId, runtimeDir, userData, tunAlias = '', renderer, invoke, settingsDigest
-  const proof = async expectedPid => {
+  let eventCursor = 0, eventsReady = false, refreshing = false, lastWindows = ''
+  report.appEvents = []
+  const seen = new Set()
+  const refresh = async () => {
+    if (refreshing) return
+    refreshing = true
+    try {
+      if (userData) for (const name of ['app.prev.log', 'app.log']) {
+        let content
+        try { content = await readFile(join(userData, 'logs', name), 'utf8') } catch { continue }
+        for (const line of content.split(/\r?\n/)) {
+          let event
+          try { event = JSON.parse(line) } catch { continue }
+          if (!event || event.ts < report.startedAt) continue
+          const safe = safeAppEvent(event)
+          if (!safe || seen.has(JSON.stringify(event))) continue
+          seen.add(JSON.stringify(event))
+          report.appEvents.push(safe)
+          progress.record('app', safe)
+        }
+      }
+      if (inspector) {
+        const windows = await inspector.evaluate(`__realVpnElectron.BrowserWindow.getAllWindows().filter(w => !w.isDestroyed()).map(w => ({
+          id:w.id, loading:w.webContents.isLoadingMainFrame(), crashed:w.webContents.isCrashed(),
+          appPage:w.webContents.getURL().endsWith('/renderer/index.html'), visible:w.isVisible()
+        }))`)
+        if (JSON.stringify(windows) !== lastWindows) {
+          lastWindows = JSON.stringify(windows)
+          progress.record('renderer-windows', { windows })
+        }
+      }
+      if (eventsReady) for (const event of await renderer(`window.__realVpnEvents.slice(${eventCursor})`) ?? []) {
+        eventCursor++
+        progress.record('state', event)
+      }
+    } finally { refreshing = false }
+  }
+  const monitor = setInterval(() => { void refresh().catch(() => {}) }, 1000)
+  monitor.unref()
+  const proof = expectedPid => progress.run('oracle/windows', async () => {
     const result = JSON.parse(await ps(`& ${quote(join(root, 'scripts/real-vpn-windows.ps1'))} -RuntimeDir ${quote(runtimeDir)} -ExpectedPid ${expectedPid} -TunAlias ${quote(tunAlias)}`))
     tunAlias = result.tunAlias
+    progress.record('os', { runtimeProcessCount: result.runtimeProcessCount, tunProcessCount: result.tunProcessCount,
+      matchingPid: result.matchingPid, adapterUp: result.adapterUp, interfaceAddressCount: result.interfaceAddressCount })
     return result
-  }
+  })
   await test('AT-00-003/005/007, AT-02-002/009 real connection sequence (partial coverage)', async t => {
     try {
       await runWithCleanup(async () => {
-        const admin = await ps("([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)")
+        const admin = await progress.run('prepare/admin', () => ps("([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)"))
         assert.equal(admin, 'True', 'GitHub runner must already be elevated; no UAC/relaunch is attempted')
         // Reject reuse before launch. Never shut down an existing client or use its DPAPI stores.
-        assert.equal(await ps(`@(Get-CimInstance Win32_Process -Filter "Name='VPN Tunnel Enforcer.exe' OR Name='vpnte-sing-box.exe' OR Name='vpnte-xray.exe'").Count`), '0', 'Existing VPN process found; run refused')
+        assert.equal(await progress.run('prepare/processes', () => ps(`@(Get-CimInstance Win32_Process -Filter "Name='VPN Tunnel Enforcer.exe' OR Name='vpnte-sing-box.exe' OR Name='vpnte-xray.exe'").Count`)), '0', 'Existing VPN process found; run refused')
         userData = win32.join(process.env.APPDATA, 'vpn-tunnel-enforcer')
-        await assert.rejects(stat(userData), { code: 'ENOENT' }, 'Existing application profile found; run refused')
+        await progress.run('prepare/fresh-profile', () => assert.rejects(stat(userData), { code: 'ENOENT' }, 'Existing application profile found; run refused'))
         const server = createServer()
         await new Promise((ok, no) => { server.once('error', no); server.listen(0, '127.0.0.1', ok) })
         const port = server.address().port
@@ -64,34 +100,33 @@ async function run(config, seed) {
         const env = { ...process.env }
         delete env.VPNTE_REAL_SCENARIO
         // Manual spawn: a transport failure must never force-kill a live VPN runtime.
-        application = spawn(config.exe, [`--inspect=127.0.0.1:${port}`], {
-          cwd: dirname(config.exe), env, windowsHide: true, stdio: 'ignore' })
+        application = await progress.run('prepare/launch', () => spawn(config.exe, [`--inspect=127.0.0.1:${port}`], {
+          cwd: dirname(config.exe), env, windowsHide: true, stdio: 'ignore' }))
         const launchError = new Promise((_, reject) => application.once('error', () => reject(new Error('Application launch failed'))))
-        inspector = await Promise.race([connectInspector(port, application.pid, config.timeoutMs), launchError])
-        await inspector.evaluate(`(() => {
+        inspector = await progress.run('prepare/inspector', () => Promise.race([connectInspector(port, application.pid, config.timeoutMs), launchError]))
+        await progress.run('prepare/window-hooks', () => inspector.evaluate(`(() => {
           const e = globalThis.__realVpnElectron;
           const hide = w => { w.hide(); w.on('show', () => w.hide()); };
           e.BrowserWindow.getAllWindows().forEach(hide);
           e.app.on('browser-window-created', (_event, w) => hide(w));
           return true;
-        })()`)
+        })()`))
         const identity = await inspector.evaluate(`({packaged:__realVpnElectron.app.isPackaged, version:__realVpnElectron.app.getVersion(), userData:__realVpnElectron.app.getPath('userData')})`)
         assert.equal(identity.packaged, true, 'Use a packaged production executable')
         assert.equal(win32.resolve(identity.userData).toLowerCase(), win32.resolve(userData).toLowerCase(), 'Unexpected user profile')
         report.build.version = identity.version
         const instance = hash(win32.resolve(userData).toLowerCase()).slice(0, 32)
         runtimeDir = win32.join(process.env.ProgramData || 'C:\\ProgramData', 'VPNTE/runtime', instance, 'tun-runtime')
-        renderer = expression => inspector.evaluate(`(() => {
-          const w = __realVpnElectron.BrowserWindow.getAllWindows().find(w => !w.isDestroyed());
-          return w ? w.webContents.executeJavaScript(${JSON.stringify(expression)}) : null;
-        })()`)
-        const until = Date.now() + config.timeoutMs
-        while (!await renderer('Boolean(window.electronAPI?.getTunStatus)')) {
-          assert.ok(Date.now() < until, 'Production preload did not become ready'); await delay(100)
-        }
-        invoke = (method, ...args) => renderer(`window.electronAPI[${JSON.stringify(method)}](...${JSON.stringify(args)})`)
+        renderer = inspector.renderer
+        await progress.run('prepare/preload', async () => {
+          const until = Date.now() + config.timeoutMs
+          while (!await renderer('Boolean(window.electronAPI?.getTunStatus)')) {
+            assert.ok(Date.now() < until, 'Production preload did not become ready'); await delay(100)
+          }
+        })
+        invoke = (method, ...args) => progress.run(`ipc/${method}`, () => renderer(`window.electronAPI[${JSON.stringify(method)}](...${JSON.stringify(args)})`))
         assertStable(await invoke('getTunStatus'), false)
-        const pair = await seedScenario(invoke, seed)
+        const pair = await progress.run('prepare/settings-and-profiles', () => seedScenario(invoke, seed))
         originalId = pair.original.id
         settingsDigest = hash(JSON.stringify(pair.settings))
         report.settings = { sha256: settingsDigest, connectionMode: pair.settings.connectionMode,
@@ -105,6 +140,7 @@ async function run(config, seed) {
           window.electronAPI.onTunnelStateChanged(s => window.__realVpnEvents.push((${safeSnapshot.toString()})(s)));
           return true;
         })()`)
+        eventsReady = true
         const driver = { invoke, proof, waitTransition: async (kind, revision) => {
           const until = Date.now() + config.timeoutMs
           while (Date.now() < until) {
@@ -116,26 +152,26 @@ async function run(config, seed) {
         await runScenario(driver, { ...pair, ...config }, async (name, action) => {
           let failure
           await t.test(name, async () => {
-            await log(`${name}: started`)
             try {
-              const result = await action()
+              const result = await progress.run(`scenario/${name}`, action)
               report.steps.push({ name, status: 'PASS', ...result })
-              await log(`${name}: PASS ${result.elapsedMs} ms`)
+              progress.record('step-pass', { action: name, elapsedMs: result.elapsedMs,
+                acknowledgementMs: result.acknowledgementMs, cancelToSettledMs: result.cancelToSettledMs })
             } catch (error) {
               failure = error
               report.steps.push({ name, status: 'FAIL', reason: 'Action or oracle failed; see test result' })
-              await log(`${name}: FAIL`)
+              progress.record('step-fail', { action: name })
               throw error
             } finally { await save() }
           })
           if (failure) throw failure
         })
-        report.ipVerification = await renderer(`window.electronAPI.getPublicIp().then(p => ({verdict:p.verdict, isLeak:p.isLeak}))`)
+        report.ipVerification = await progress.run('oracle/vpn-egress', () => renderer(`window.electronAPI.getPublicIp().then(p => ({verdict:p.verdict, isLeak:p.isLeak}))`))
         assert.equal(report.ipVerification.isLeak, false, 'Application detected an IP leak')
         assert.equal(report.ipVerification.verdict, 'passed', 'VPN egress has not been verified by the application')
         report.status = 'PASS'
       }, async () => {
-        await log('Cleanup: disconnect and close the runner application')
+        progress.record('cleanup-started')
         await runWithCleanup(async () => { if (invoke) {
           assert.equal((await deadline(invoke('stopTun'), config.timeoutMs, 'cleanup stop')).success, true)
           assertStable(await invoke('getTunStatus'), false)
@@ -149,7 +185,7 @@ async function run(config, seed) {
         } }, async () => {
           inspector?.close()
           if (application?.pid) {
-            await ps(`& ${quote(join(root, 'build/shutdown-for-update.ps1'))} -InstallDir ${quote(dirname(config.exe))}; if ($LASTEXITCODE -ne 0) { throw 'Acknowledged shutdown failed' }`, 135_000)
+            await progress.run('cleanup/shutdown', () => ps(`& ${quote(join(root, 'build/shutdown-for-update.ps1'))} -InstallDir ${quote(dirname(config.exe))}; if ($LASTEXITCODE -ne 0) { throw 'Acknowledged shutdown failed' }`, 135_000))
             report.debugInstanceClosed = true
           }
         })
@@ -162,20 +198,12 @@ async function run(config, seed) {
       throw error
     } finally {
       report.finishedAt = new Date().toISOString()
-      // Allowlist log fields: raw logs, addresses, settings and import payloads never become artifacts.
-      report.ipc = []
-      if (application?.pid && userData) for (const name of ['app.prev.log', 'app.log']) {
-        try {
-          for (const line of (await readFile(join(userData, 'logs', name), 'utf8')).split(/\r?\n/)) {
-            let event
-            try { event = JSON.parse(line) } catch { continue }
-            if (event.ts < report.startedAt || event.ts > report.finishedAt || event.scope !== 'ipc'
-              || !/^(start-direct-vpn|stop-tun|cancel-tun|servers:(select|cancel-switch|ping-one)|get-firewall-kill-switch-status) (started|finished|failed)$/.test(event.message)) continue
-            report.ipc.push({ at: event.ts, message: event.message, ms: event.details?.ms,
-              correlationId: event.correlationId, clockId: event.clockId })
-          }
-        } catch { /* Missing rotated logs do not replace the state/OS oracles. */ }
-      }
+      clearInterval(monitor)
+      inspector = undefined
+      await refresh()
+      report.ipc = report.appEvents.filter(event => event.scope === 'ipc')
+      progress.record('runner-finished', { status: report.status, cleanup: report.cleanup?.status ?? 'NOT VERIFIED' })
+      progress.close()
       await save()
       if (process.env.GITHUB_STEP_SUMMARY) {
         const rows = report.steps.map(s => `| ${s.name} | ${s.status} | ${s.elapsedMs ?? '-'} | ${s.acknowledgementMs ?? '-'} | ${s.cancelToSettledMs ?? '-'} |`)

@@ -1,0 +1,84 @@
+// AT-00-005, AT-01-001: stream progress immediately; never inspect action arguments/errors.
+import { appendFileSync } from 'node:fs'
+import { performance } from 'node:perf_hooks'
+
+export function createProgressLog(path, { write = line => process.stdout.write(line), heartbeatMs = 5000 } = {}) {
+  const started = performance.now(), pending = new Map()
+  let sequence = 0
+  const record = (event, fields = {}) => {
+    const line = `${new Date().toISOString()} +${Math.round(performance.now() - started)}ms ${JSON.stringify({ event, ...fields })}\n`
+    // One synchronous append preserves order and evidence even if a later operation hangs.
+    appendFileSync(path, line)
+    write(line)
+  }
+  const timer = setInterval(() => {
+    for (const [id, action] of pending) record('waiting', { id, action: action.name,
+      elapsedMs: Math.round(performance.now() - action.started) })
+  }, heartbeatMs)
+  timer.unref()
+  return { record, close: () => clearInterval(timer), async run(action, operation) {
+    const id = ++sequence, start = performance.now()
+    pending.set(id, { name: action, started: start })
+    record('started', { id, action })
+    try {
+      const value = await operation()
+      record('finished', { id, action, elapsedMs: Math.round(performance.now() - start) })
+      return value
+    } catch (error) {
+      record('failed', { id, action, elapsedMs: Math.round(performance.now() - start) })
+      throw error
+    } finally { pending.delete(id) }
+  } }
+}
+
+export function safeSnapshot(s) {
+  const oneOf = (value, allowed) => allowed.includes(value) ? value : null
+  return { at: new Date().toISOString(), revision: Number.isSafeInteger(s.revision) ? s.revision : null,
+    state: oneOf(s.state, ['disconnected', 'connected', 'error', 'blocked', 'unknown']),
+    transition: oneOf(s.transition, ['connecting', 'disconnecting', 'reconnecting']),
+    processState: oneOf(s.processState, ['running', 'stopped']), pid: Number.isSafeInteger(s.pid) ? s.pid : null,
+    cleanupRequired: s.cleanupRequired === true,
+    correlationId: /^(?:[0-9a-f-]{36}|(?:ipc|op)_[0-9a-f]{32})$/i.test(s.operation?.correlationId ?? '') ? s.operation.correlationId : null,
+    operationStatus: oneOf(s.operation?.status, ['pending', 'running', 'success', 'error', 'cancelled']) }
+}
+
+const phases = new Set(`initial-stale-cleanup initial-create-allows initial-set-block initial-exceptions
+  restore-profiles restore-remove-rules live-read-manifest live-prepare-journal live-apply-policy live-commit-journal
+  initial-read-manifest verified-adapter-wait snapshot-profiles initial-prepare-journal initial-apply-policy
+  initial-commit-journal restore-policy clear-journal registryMs notifyMs stop-previous prepare-runtime cleanup-pid
+  rotate-log resolve-server pick-port resolve-connection-graph write-config config-preflight write-pid allow-firewall
+  wait-local-socks physical-dns-sources foreign-tun-preflight split-tunnel-rules wfp-priority-reserve adapter-lockdown
+  physical-dns-sources-await proxy-listen-and-owner-lookup proxy-full-tunnel-preflight owned-runtime-cleanup
+  stale-tun-cleanup singbox-config-check singbox-launch-submit wait-singbox-process adapter-lockdown-await
+  wait-tun-interface tun-ownership-record tun-interface-metric-set tun-interface-metric-readback firewall-kill-switch
+  firewall-kill-switch-await runtime-pid runtime-stop-preflight stop-runtime wait-runtime-exit stop-xray
+  rollback-baseline disable-firewall rollback-adapters repair-dns`.split(/\s+/))
+
+// Raw application logs stay on the disposable runner. Only fixed messages and numeric timings escape.
+export function safeAppEvent(event) {
+  if (!event || typeof event !== 'object') return null
+  const allowed = event.scope === 'ipc'
+    ? /^(start-direct-vpn|stop-tun|cancel-tun|servers:(select|cancel-switch|ping-one)|get-firewall-kill-switch-status) (started|finished|failed)$/.test(event.message)
+    : ({ app: ['application ready', 'renderer process gone', 'renderer became unresponsive', 'failed to load renderer index.html'],
+        tun: ['start timing', 'stop timing', 'stop started', 'stop step started', 'stop step completed'], xray: ['start timing'],
+        'ps-helper': ['command timing'], 'firewall-killswitch': ['command timing', 'phase timing', 'native phase timing'],
+        'system-network': ['baseline native phase timing'] })[event.scope]?.includes?.(event.message)
+  if (!allowed || !Number.isFinite(Date.parse(event.ts))) return null
+  const result = { at: event.ts, scope: event.scope, message: event.message }
+  for (const key of ['ms', 'totalMs', 'durationMs', 'roundtripMs', 'executionMs', 'transportOverheadMs', 'persistMs']) {
+    const value = event.details?.[key]
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) result[key] = value
+  }
+  for (const key of ['correlationId', 'clockId']) {
+    if (/^(?:[0-9a-f-]{36}|(?:ipc|op|clock)_[0-9a-f]{32})$/i.test(event[key] ?? '')) result[key] = event[key]
+  }
+  for (const key of ['phase', 'step']) if (phases.has(event.details?.[key])) result[key] = event.details[key]
+  const timings = {}
+  for (const [phase, value] of Object.entries(event.details?.phaseDurations ?? {})) {
+    const ms = typeof value === 'number' ? value : value?.durationMs
+    if (phases.has(phase) && typeof ms === 'number' && Number.isFinite(ms) && ms >= 0) timings[phase] = ms
+  }
+  if (Object.keys(timings).length) result.phaseDurations = timings
+  if (typeof event.details?.success === 'boolean') result.success = event.details.success
+  return result
+}
