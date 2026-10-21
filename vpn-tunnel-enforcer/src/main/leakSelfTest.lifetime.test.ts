@@ -88,7 +88,7 @@ async function backgroundMainHarness() {
     setBackgroundLeakTestGate: leak.setBackgroundLeakTestGate, cancelLeakSelfTest: leak.cancelLeakSelfTest, onNativeStop: vi.fn(), onNativeStartup: vi.fn() }
   const js = ts.transpileModule(source.slice(start, end), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
   new Function(...Object.keys(deps), js)(...Object.values(deps))
-  return { leak, model, lane, evidence, status }
+  return { leak, model, lane, evidence, status, nativeStop: deps.onNativeStop.mock.calls[0][0], nativeStartup: deps.onNativeStartup.mock.calls[0][0] }
 }
 describe('leak requester main handler', () => {
   it.each(['destroyed', 'did-navigate', 'render-process-gone'])('cancels legacy document work on %s', async event => {
@@ -368,6 +368,33 @@ describe('leak self-test lifetime', () => {
       expect(detected).not.toHaveBeenCalled(); expect(completed).not.toHaveBeenCalled()
       expect(state.log.mock.calls.some(([level, , message]) => level === 'warn' && String(message).startsWith('УТЕЧКА'))).toBe(false)
     } finally { leak.stopPeriodicLeakTest(); vi.useRealTimers() }
+  })
+  it.each([true, false])('re-arms probes after failed runtime exit with retained protection (running=%s, AT-07-002)', async running => {
+    const h = await backgroundMainHarness(), detected = vi.fn()
+    h.leak.setLeakDetectedCallback(detected)
+    h.status('running')
+    h.status('stopping')
+    h.leak.triggerLeakCheckNow('during-stop')
+    expect(children).toHaveLength(0)
+    h.evidence.running = running; h.evidence.pid = running ? 123 : null
+    h.status('error')
+    h.nativeStop({ generation: 0, preserveNetworkProtection: false, result: { success: false, networkCleanup: { baseline: false, firewall: false, adapters: false } } })
+    h.leak.triggerLeakCheckNow('failed-stop-retained-protection')
+    await finishCheck(true)
+    await vi.waitFor(() => expect(detected).toHaveBeenCalledOnce())
+  })
+  it('does not arm probes after partial rollback, a stale receipt or an initially unprotected failed stop (AT-07-002)', async () => {
+    const h = await backgroundMainHarness()
+    h.status('stopping'); h.status('error')
+    const failure = { generation: 0, preserveNetworkProtection: false, result: { success: false } }
+    h.nativeStop(failure)
+    h.leak.triggerLeakCheckNow('initial-failure'); expect(children).toHaveLength(0)
+    h.status('running'); h.status('stopping'); h.status('error')
+    h.nativeStop({ ...failure, result: { success: false, runtimeStopped: true } })
+    h.leak.triggerLeakCheckNow('partial-rollback'); expect(children).toHaveLength(0)
+    h.nativeStartup({ phase: 'begin', generation: 1 })
+    h.nativeStop(failure)
+    h.leak.triggerLeakCheckNow('stale-receipt'); expect(children).toHaveLength(0)
   })
   it.each(['killswitch-active', 'adapting', 'restarting:1/3', 'error'])('still detects a real physical leak while protection is retained after %s (AT-07-002)', async heldStatus => {
     const h = await backgroundMainHarness(), detected = vi.fn()

@@ -41,7 +41,7 @@ import {
   type VpnProfile
 } from './vpnProfiles'
 import { settingsStore } from './settings'
-import { getDirectProxyPort, tunController } from './tunController'
+import { getDirectProxyPort, tunController, type StartOptions } from './tunController'
 import { beginAdaptiveConnection, readAdaptiveNetworkFingerprint } from './adaptiveBypass'
 import { ipMonitor } from './ipMonitor'
 import {
@@ -2150,7 +2150,7 @@ function toVpnProfile(profile: ServerProfile): VpnProfile {
   }
 }
 
-async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promise<void> {
+async function restartDirectVpnForSelectedProfile(profile: ServerProfile, switchOwner: ProfileSwitchOwner): Promise<void> {
   const status = tunController.getStatus()
   if (!status.running) return
   if (status.mode !== 'directVpn') {
@@ -2183,29 +2183,51 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile): Promi
     isCurrent,
     isOwner: () => switchGeneration === profileSwitchGeneration,
     areRoutesActive: () => tunController.areTunRoutesActive(),
-    restart: () => tunController.restartProtected('server switch', {
-      mode: 'directVpn', vpnProfile, proxyType: 'socks5',
-      enableFirewallKillSwitch: settings.firewallKillSwitch,
-      enableAdapterLockdown: settings.strictAdapterLockdown,
-      publicWifiCompatibility: settings.publicWifiCompatibility,
-      stealthMode: settings.stealthMode, adaptiveMode: adaptive.mode,
-      proxyEngine: tunController.getLastStartOptions?.()?.proxyEngine ?? settings.proxyEngine
-    })
+    restart: async () => {
+      switchOwner.nativeTouched = true
+      const abort = () => tunController.cancelTransition()
+      switchOwner.controller.signal.addEventListener('abort', abort, { once: true })
+      try {
+        return await tunController.restartProtected('server switch', {
+          mode: 'directVpn', vpnProfile, proxyType: 'socks5',
+          enableFirewallKillSwitch: settings.firewallKillSwitch,
+          enableAdapterLockdown: settings.strictAdapterLockdown,
+          publicWifiCompatibility: settings.publicWifiCompatibility,
+          stealthMode: settings.stealthMode, adaptiveMode: adaptive.mode,
+          proxyEngine: tunController.getLastStartOptions?.()?.proxyEngine ?? settings.proxyEngine
+        }, { signal: switchOwner.controller.signal })
+      } finally { switchOwner.controller.signal.removeEventListener('abort', abort) }
+    }
   })
   if (!restarted.success) throw new Error(restarted.error || 'Failed to start tunnel with selected server')
 }
 
 let profileSwitchGeneration = 0
 let profileSwitchInProgress = false
-let profileSwitchHooks: { begin: () => void | Promise<void>; end: () => void } | null = null
+interface ProfileSwitchOwner { controller: AbortController; nativeTouched: boolean; abandoned: boolean }
+let activeProfileSwitch: ProfileSwitchOwner | null = null
+let profileSwitchHooks: {
+  begin: () => void | Promise<void>
+  end: () => void
+  restore?: (options: StartOptions) => Promise<{ success: boolean; error?: string }>
+} | null = null
 
 export function setProfileSwitchHooks(hooks: typeof profileSwitchHooks): void {
   profileSwitchHooks = hooks
 }
 
 export function cancelProfileSwitch(): void {
+  if (!activeProfileSwitch || activeProfileSwitch.controller.signal.aborted) return
   profileSwitchGeneration++
+  activeProfileSwitch.controller.abort()
   logEvent('info', 'server-picker', 'profile switch cancellation requested')
+}
+
+/** Explicit disconnect/shutdown wins over returning to the previous server. */
+export function abandonProfileSwitch(): void {
+  if (!activeProfileSwitch) return
+  activeProfileSwitch.abandoned = true
+  cancelProfileSwitch()
 }
 
 /**
@@ -2681,33 +2703,53 @@ export function registerServerPickerHandlers(): void {
     if (profile.enabled === false || profile.removedFromSubscriptionAt) throw new Error('Profile is unavailable')
     if (profileSwitchInProgress) throw new Error('Переключение сервера уже выполняется')
 
+    const previousId = getActiveProfileId()
+    const status = tunController.getStatus()
+    const previousOptions = status.running && status.mode === 'directVpn'
+      ? structuredClone(tunController.getLastStartOptions()) : null
     profileSwitchInProgress = true
     const generation = ++profileSwitchGeneration
-    let cancellationCleanupFailed = false
+    const switchOwner: ProfileSwitchOwner = { controller: new AbortController(), nativeTouched: false, abandoned: false }
+    activeProfileSwitch = switchOwner
+    let selectionChanged = false
     try {
       // Invalidate adaptive work before ANY await (including network identity).
       await profileSwitchHooks?.begin()
       if (generation !== profileSwitchGeneration) throw new Error('Переключение сервера отменено')
       selectProfile(id)
-      await restartDirectVpnForSelectedProfile(profile)
-      if (generation !== profileSwitchGeneration) {
-        await tunController.stop().catch((err) => {
-          cancellationCleanupFailed = true
-          logEvent('warn', 'server-picker', 'failed to stop cancelled profile switch', err)
-          throw err
-        })
-        ipMonitor.clearVpnIp()
-        throw new Error('Переключение сервера отменено')
-      }
+      selectionChanged = true
+      await restartDirectVpnForSelectedProfile(profile, switchOwner)
+      if (generation !== profileSwitchGeneration) throw new Error('Переключение сервера отменено')
     } catch (err) {
-      // Cancellation can surface as an upstream startup error. The generation,
-      // rather than translated error text, identifies the cancelled owner.
-      if (generation !== profileSwitchGeneration && !cancellationCleanupFailed) {
-        logEvent('info', 'server-picker', 'profile switch cancelled')
-        return { cancelled: true as const }
+      if (generation === profileSwitchGeneration) throw err
+      if (selectionChanged) store.set('activeProfileId', previousId)
+      // Before restart the old tunnel is untouched. After dispatch, wait for the
+      // cancelled attempt and full cleanup before giving the old options a new owner.
+      if (switchOwner.nativeTouched && !switchOwner.abandoned) {
+        const stopped = await tunController.stop()
+        if (!stopped.success || stopped.networkCleanup?.baseline !== true
+          || stopped.networkCleanup.firewall !== true || stopped.networkCleanup.adapters !== true) {
+          throw new Error(stopped.error || 'Очистка отменённой смены сервера не подтверждена')
+        }
+        ipMonitor.clearVpnIp()
+        if (!switchOwner.abandoned) {
+          if (!previousOptions || !profileSwitchHooks?.restore) throw new Error('Не удалось восстановить прежнее подключение: параметры запуска недоступны')
+          logEvent('info', 'server-picker', 'restoring previous server after cancellation')
+          const isCurrent = () => !switchOwner.abandoned && tunController.getStatus().running
+          const restored = await withProtectedIpTransition({
+            reason: 'server switch cancellation restore', isCurrent,
+            isOwner: () => !switchOwner.abandoned,
+            areRoutesActive: () => tunController.areTunRoutesActive(),
+            restart: () => profileSwitchHooks!.restore!(previousOptions)
+          })
+          if (!switchOwner.abandoned && !restored.success) throw new Error('Не удалось восстановить прежнее подключение: ' + (restored.error || 'запуск не подтверждён'))
+          if (!switchOwner.abandoned) logEvent('info', 'server-picker', 'previous server restored after cancellation')
+        }
       }
-      throw err
+      logEvent('info', 'server-picker', 'profile switch cancelled', { supersededByStop: switchOwner.abandoned })
+      return { cancelled: true as const }
     } finally {
+      activeProfileSwitch = null
       profileSwitchInProgress = false
       profileSwitchHooks?.end()
     }

@@ -176,23 +176,23 @@ describe('Dashboard cancellation', () => {
     expect(screen.getByText(ru.dashboard.firewallUnknownTitle)).toBeInTheDocument()
     expect(screen.queryByText(ru.dashboard.firewallVerifiedTitle)).not.toBeInTheDocument()
   })
-  it('keeps the power button locked if selection settles before cancelTransition replies (AT-00-007)', async () => {
-    const acknowledgement = deferred<{ requested: boolean }>()
+  it('keeps the power button locked if selection settles before cancellation acknowledgement (AT-00-007)', async () => {
+    const acknowledgement = deferred<{ cancelled: boolean }>()
     Object.assign(window.electronAPI, {
-      serversCancelSwitch: vi.fn().mockResolvedValue({ cancelled: true }),
-      cancelTransition: vi.fn().mockReturnValue(acknowledgement.promise)
+      serversCancelSwitch: vi.fn().mockReturnValue(acknowledgement.promise),
+      cancelTransition: vi.fn()
     })
     useAppStore.setState({ connectionBusy: null, mode: 'hard', tunRunning: true, serverSwitchingName: 'Norway' })
     render(<Dashboard />)
     fireEvent.click(screen.getByRole('button', { name: 'Отменить смену сервера' }))
-    await waitFor(() => expect(window.electronAPI.cancelTransition).toHaveBeenCalledOnce())
+    await waitFor(() => expect(window.electronAPI.serversCancelSwitch).toHaveBeenCalledOnce())
     await act(async () => {
       applyTerminalTunStatus('stopped')
       useAppStore.getState().setServerSwitchingName(null)
     })
     expect(screen.getByRole('button', { name: 'Отменяем…', busy: true })).toBeDisabled()
     expect(window.electronAPI.startDirectVpn).not.toHaveBeenCalled()
-    await act(async () => acknowledgement.resolve({ requested: true }))
+    await act(async () => acknowledgement.resolve({ cancelled: true }))
     expect(screen.getByRole('button', { name: 'Отключено' })).toBeInTheDocument()
   })
   it('waits for server-switch cleanup after cancellation acknowledgements and remount (AT-00-003 / AT-00-008)', async () => {
@@ -203,7 +203,7 @@ describe('Dashboard cancellation', () => {
     useAppStore.setState({ connectionBusy: null, mode: 'hard', tunRunning: true, serverSwitchingName: 'Norway' })
     const view = render(<Dashboard />)
     fireEvent.click(screen.getByRole('button', { name: 'Отменить смену сервера' }))
-    await waitFor(() => expect(window.electronAPI.cancelTransition).toHaveBeenCalledOnce())
+    await waitFor(() => expect(window.electronAPI.serversCancelSwitch).toHaveBeenCalledOnce())
     expect(screen.getByRole('button', { name: 'Отменяем…', busy: true })).toBeDisabled()
     await act(async () => applyTerminalTunStatus('stopped'))
     view.unmount()
@@ -214,12 +214,38 @@ describe('Dashboard cancellation', () => {
     expect(screen.getByRole('button', { name: 'Отключено' })).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('Отключено')
     expect(window.electronAPI.cancelTun).not.toHaveBeenCalled()
+    expect(window.electronAPI.cancelTransition).not.toHaveBeenCalled()
   })
 
+  it('waits for the former connection to be confirmed after cancelling a switch (AT-02-004 / AT-00-003)', async () => {
+    Object.assign(window.electronAPI, { serversCancelSwitch: vi.fn().mockResolvedValue({ cancelled: true }), cancelTransition: vi.fn() })
+    const evidence = { running: false, pid: null as number | null, softApplied: false }
+    const model = new TunnelStateMachine(() => evidence, snapshot => useAppStore.getState().setTunnelSnapshot(snapshot))
+    const lane = new ConnectionLifecycle(vi.fn(), undefined, undefined, model)
+    useAppStore.setState({ connectionBusy: null, serverSwitchingName: 'Norway' })
+    render(<Dashboard />)
+    fireEvent.click(screen.getByRole('button', { name: 'Отменить смену сервера' }))
+    await waitFor(() => expect(window.electronAPI.serversCancelSwitch).toHaveBeenCalledOnce())
+    const ready = deferred<void>()
+    let restore!: Promise<unknown>
+    await act(async () => {
+      restore = lane.start(async owner => {
+        await owner.wait(ready.promise)
+        evidence.running = true; evidence.pid = 321
+        model.runtimeChanged('running')
+        return { success: true }
+      })
+    })
+    expect(screen.queryByRole('button', { name: ru.dashboard.connected })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Отменяем…', busy: true })).toBeDisabled()
+    await act(async () => { ready.resolve(); await restore; useAppStore.getState().setServerSwitchingName(null) })
+    expect(screen.getByRole('button', { name: ru.dashboard.connected })).toBeEnabled()
+    expect(window.electronAPI.cancelTransition).not.toHaveBeenCalled()
+  })
   it('releases cancellation feedback when its request fails, retaining pending selection (AT-00-004)', async () => {
     Object.assign(window.electronAPI, {
-      serversCancelSwitch: vi.fn().mockResolvedValue({ cancelled: true }),
-      cancelTransition: vi.fn().mockRejectedValue(new Error('IPC unavailable'))
+      serversCancelSwitch: vi.fn().mockRejectedValue(new Error('IPC unavailable')),
+      cancelTransition: vi.fn()
     })
     useAppStore.setState({ connectionBusy: null, mode: 'hard', tunRunning: true, serverSwitchingName: 'Norway' })
     render(<Dashboard />)

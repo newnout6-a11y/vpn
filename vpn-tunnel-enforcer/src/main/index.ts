@@ -85,7 +85,7 @@ import { executeIndeterminateVpnIpAutoVerify } from './indeterminateIpAutoVerify
 
 // ─── V2 Feature Modules ──────────────────────────────────────────────────────
 import { registerSplitTunnelHandlers } from './splitTunneling'
-import { registerServerPickerHandlers, serverPicker, setProfileSwitchHooks, tunnelHttpProbe, RESOLVED_IP_TTL_MS } from './serverPicker'
+import { registerServerPickerHandlers, serverPicker, setProfileSwitchHooks, abandonProfileSwitch, tunnelHttpProbe, RESOLVED_IP_TTL_MS } from './serverPicker'
 import {
   registerServerGroupsHandlers,
   startServerGroupAutoRefresh,
@@ -388,6 +388,7 @@ let adaptiveTransitionInFlight: Promise<ConnectionStartResult> | null = null
 let manualProfileSwitchActive = false
 
 setProfileSwitchHooks({
+  restore: options => restoreCancelledProfileSwitch(options),
   begin: async () => {
     manualProfileSwitchActive = true
     adaptiveVerificationGeneration += 1
@@ -1203,29 +1204,65 @@ const tunnelState = new TunnelStateMachine(() => ({ ...tunController.getStatus()
 })
 // Register before any tray, schedule or auto-start action can begin.
 let backgroundProtectionExpected = false
+let backgroundProtectionBeforeStop = false
+let backgroundNativeGeneration = 0
 setBackgroundLeakTestGate(() => backgroundProtectionExpected)
 tunController.onStatusChange(status => {
   if (['running', 'proxy-down', 'killswitch-active'].includes(status)) backgroundProtectionExpected = true
-  else if (status === 'stopping' || status === 'stopped') backgroundProtectionExpected = false
+  else if (status === 'stopping') {
+    backgroundProtectionBeforeStop = backgroundProtectionExpected
+    backgroundProtectionExpected = false
+  } else if (status === 'stopped') backgroundProtectionExpected = false
   // Retain monitoring through a protected restart or crash: a down TUN is precisely
   // when a physical-adapter reach can expose a broken kill-switch. Full stop disarms it before rollback.
   tunnelState.runtimeChanged(status)
   if (!backgroundProtectionExpected) cancelLeakSelfTest()
 })
-onNativeStop(observation => { tunnelState.nativeStopFinished(observation) })
+onNativeStop(observation => {
+  // A failed exit proof returns before any rollback and retains protection.
+  // Re-arm only the current stop's prior obligation, never an initial failed start.
+  if (observation.generation === backgroundNativeGeneration && !observation.preserveNetworkProtection
+    && !observation.result.success && observation.result.runtimeStopped !== true) {
+    backgroundProtectionExpected ||= backgroundProtectionBeforeStop
+  }
+  tunnelState.nativeStopFinished(observation)
+})
 onNativeStartup(observation => {
-  if (observation.phase === 'begin') tunnelState.nativeStartBegan(observation.generation)
+  if (observation.phase === 'begin') {
+    backgroundNativeGeneration = observation.generation
+    tunnelState.nativeStartBegan(observation.generation)
+  }
   else tunnelState.nativeStartFinished(observation)
 })
 
 const connectionLifecycle = new ConnectionLifecycle(() => {
   adaptiveVerificationGeneration += 1
+  if (connectionLifecycle.operation?.category !== 'timeout') abandonProfileSwitch()
   tunController.cancelTransition()
 }, () => stopProtectionEffects(), operation => {
   if (operation.status === 'running' && operation.owner !== 'schedule') schedulerService.cancelPendingConnect()
   logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'connection operation', operationLogDetails(operation))
 }, tunnelState)
 profileRotation.setLifecycle(connectionLifecycle)
+
+async function restoreCancelledProfileSwitch(options: Parameters<typeof tunController.start>[0]): Promise<ConnectionStartResult> {
+  const result = await connectionLifecycle.start(async owner => {
+    owner.assertActive()
+    let started = false
+    try {
+      const result = await owner.wait(tunController.start(options))
+      started = result.success
+      return result
+    } finally {
+      if (!started && !owner.signal.aborted) {
+        const stopped = await owner.wait(tunController.stop())
+        if (!stopped.success) throw new Error(stopped.error || 'Очистка после восстановления не подтверждена')
+      }
+    }
+  })
+  if (!result.success && result.category !== 'conflict') await connectionLifecycle.drain()
+  return result
+}
 
 async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<ConnectionStartResult> {
   return connectionLifecycle.start(owner => startProtectionEffects(owner, proxyAddr, proxyType))

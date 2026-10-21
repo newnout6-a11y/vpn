@@ -1681,3 +1681,89 @@ return clearStaleKillSwitchBeforeStart;
   })
 })
 
+
+// The real main restore entry point must use the canonical connection lane.
+describe('cancelled switch restoration ownership (AT-02-004 / AT-00-003)', () => {
+  function harness() {
+    const evidence = { running: false, pid: null as number | null, softApplied: false }
+    const model = new TunnelStateMachine(() => evidence)
+    const tunController = { start: vi.fn(async (_options: unknown): Promise<any> => {
+      evidence.running = true; evidence.pid = 501
+      model.runtimeChanged('running')
+      return { success: true }
+    }), stop: vi.fn(async (): Promise<any> => { evidence.running = false; evidence.pid = null; return { success: true } }) }
+    const cancel = vi.fn()
+    const connectionLifecycle = new ConnectionLifecycle(cancel, () => tunController.stop(), undefined, model)
+    const restore = compile<(options: unknown) => Promise<any>>(body('index.ts', 'restoreCancelledProfileSwitch') + ';return restoreCancelledProfileSwitch;', { tunController, connectionLifecycle })
+    return { evidence, model, tunController, connectionLifecycle, restore, cancel }
+  }
+  it('confirms a restored connection through the main owner, never a bare running event', async () => {
+    const h = harness(), options = { mode: 'directVpn', vpnProfile: { name: 'previous' } }
+    expect(await h.restore(options)).toMatchObject({ success: true })
+    expect(h.tunController.start).toHaveBeenCalledExactlyOnceWith(options)
+    expect(h.model.snapshot).toMatchObject({ state: 'connected', transition: null, pid: 501 })
+  })
+  it('rejects a successful-looking startup without runtime evidence and drains cleanup', async () => {
+    const h = harness()
+    h.tunController.start.mockResolvedValueOnce({ success: true })
+    await expect(h.restore({})).rejects.toThrow('confirmation')
+    expect(h.tunController.stop).toHaveBeenCalledOnce()
+    expect(h.model.snapshot.state).not.toBe('connected')
+  })
+  it('lets an explicit disconnect drain a pending restoration before final cleanup', async () => {
+    const h = harness()
+    let finish!: () => void
+    h.tunController.start.mockImplementationOnce(() => new Promise(resolve => { finish = () => { h.evidence.running = true; h.evidence.pid = 502; resolve({ success: true }) } }))
+    const restored = h.restore({})
+    const stopped = h.connectionLifecycle.stop(() => h.tunController.stop())
+    expect(h.cancel).toHaveBeenCalledOnce()
+    let released = false
+    void restored.then(() => { released = true })
+    await Promise.resolve()
+    expect(released).toBe(false)
+    expect(h.tunController.stop).not.toHaveBeenCalled()
+    finish()
+    expect(await restored).toMatchObject({ success: false, category: 'cancelled' })
+    expect(await stopped).toMatchObject({ success: true })
+    expect(h.model.snapshot).toMatchObject({ state: 'disconnected', transition: null })
+  })
+  it('refuses restoration after application shutdown closes admission', async () => {
+    const h = harness()
+    await h.connectionLifecycle.close()
+    expect(await h.restore({})).toMatchObject({ success: false, category: 'conflict' })
+    expect(h.tunController.start).not.toHaveBeenCalled()
+  })
+  it('cleans a failed restoration and retains its failure', async () => {
+    const h = harness()
+    h.tunController.start.mockResolvedValueOnce({ success: false, error: 'previous runtime failed' })
+    expect(await h.restore({})).toMatchObject({ success: false, error: 'previous runtime failed' })
+    expect(h.tunController.stop).toHaveBeenCalledOnce()
+    expect(h.model.snapshot.state).not.toBe('connected')
+  })
+  it('retains cleanup failure after an unsuccessful or thrown restoration', async () => {
+    const h = harness()
+    h.tunController.start.mockRejectedValueOnce(new Error('start exception'))
+    h.tunController.stop.mockResolvedValueOnce({ success: false, error: 'runtime exit unconfirmed' })
+    await expect(h.restore({})).rejects.toThrow('runtime exit unconfirmed')
+    expect(h.model.snapshot.state).not.toBe('connected')
+  })
+  it.each(['stop', 'close', 'timeout'] as const)('main %s preserves explicit-stop priority and timeout errors', async action => {
+    const source = ts.createSourceFile('index.ts', readFileSync(join(process.cwd(), 'src/main/index.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
+    let callback: ts.Expression | undefined
+    const visit = (node: ts.Node) => {
+      if (ts.isNewExpression(node) && node.expression.getText(source) === 'ConnectionLifecycle') callback = node.arguments?.[0]
+      ts.forEachChild(node, visit)
+    }
+    visit(source)
+    const events: string[] = []
+    const cancel = compile<() => void>('let adaptiveVerificationGeneration=0;return (' + callback!.getText(source) + ');', {
+      connectionLifecycle: { operation: action === 'timeout' ? { category: 'timeout' } : null },
+      abandonProfileSwitch: () => events.push('abandon'), tunController: { cancelTransition: () => events.push('native-cancel') }
+    })
+    const lane = new ConnectionLifecycle(cancel)
+    if (action !== 'close') await lane.stop(async () => ({ success: true }))
+    else await lane.close()
+    expect(events).toEqual(action === 'timeout' ? ['native-cancel'] : ['abandon', 'native-cancel'])
+  })
+
+})

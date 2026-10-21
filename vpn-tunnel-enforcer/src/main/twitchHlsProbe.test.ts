@@ -3,6 +3,25 @@ import { isVpnOutboundUdpCapable, shouldBlockQuicUdp443 } from './tunController'
 import { probeMediaStream, evaluateLiveCheckFindings } from './liveServerProbe'
 import type { LiveServerCheck, LiveMediaStreamDiagnostics, ServerProfile } from '../shared/ipc-types'
 
+// AT-07-012: these unit tests exercise QUIC policy, with a deterministic TLS boundary.
+// Actual network/handshake lifetime is covered by liveServerProbe.handshakeDrain.itest.ts.
+vi.mock('tls', async original => {
+  const { EventEmitter } = await import('node:events')
+  class MediaSocket extends EventEmitter {
+    closed = false
+    write() { queueMicrotask(() => this.emit('data', Buffer.from('HTTP/1.1 200 OK\r\n\r\n'))); return true }
+    destroy() {
+      if (!this.closed) { this.closed = true; queueMicrotask(() => this.emit('close')) }
+      return this
+    }
+  }
+  return { ...await original<typeof import('tls')>(), connect: () => {
+    const socket = new MediaSocket()
+    queueMicrotask(() => socket.emit('secureConnect'))
+    return socket
+  } }
+})
+
 // Mock Electron & Logger
 vi.mock('electron', () => ({
   app: {
@@ -105,6 +124,8 @@ describe('Twitch HLS & QUIC Error #2000 mitigation', () => {
       }
 
       const result = await probeMediaStream(profile, undefined, new AbortController().signal)
+      expect(result.testedEndpoints).toHaveLength(2)
+      expect(result.twitchHlsReachable).toBe(true)
       expect(result.quicFallbackGuarded).toBe(true)
       expect(result.error2000Risk).toBe(false)
       expect(result.detail).toContain('Защита от QUIC blackhole активна')
@@ -127,6 +148,8 @@ describe('Twitch HLS & QUIC Error #2000 mitigation', () => {
       }
 
       const result = await probeMediaStream(profile, undefined, new AbortController().signal)
+      expect(result.testedEndpoints).toHaveLength(2)
+      expect(result.twitchHlsReachable).toBe(true)
       expect(result.quicFallbackGuarded).toBe(true)
       expect(result.error2000Risk).toBe(false)
       expect(result.detail).toContain('поддерживает UDP/QUIC')
