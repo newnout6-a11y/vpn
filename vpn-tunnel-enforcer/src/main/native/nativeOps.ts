@@ -9,6 +9,7 @@ import { createKoffiSource, snapshotFromSource } from './physicalAdapterCore'
 import { notifyWinInetInProcess } from './winInetCore'
 import type { HostOp } from './hostProtocol'
 import { normalizeRetainedAdapterGuids } from '../physicalAdapterSnapshot'
+import { readOwnedRuntimePidInProcess } from './ownedRuntimePidCore'
 
 function stringArray(value: unknown, what: string): string[] {
   if (!Array.isArray(value) || !value.every(item => typeof item === 'string')) throw new Error(`${what}: expected an array of strings`)
@@ -48,6 +49,9 @@ export async function runNativeOp(op: HostOp, args: unknown): Promise<unknown> {
       const retained = normalizeRetainedAdapterGuids(stringArray(a.retainedGuids ?? [], 'retained GUIDs'))
       return snapshotFromSource(createKoffiSource(profileMap(a.profiles)), retained)
     }
+    case 'owned-runtime-pid':
+      if (typeof a.executable !== 'string') throw new Error('runtime PID: executable path is required')
+      return readOwnedRuntimePidInProcess(a.executable)
     case 'wininet':
       await notifyWinInetInProcess()
       return true

@@ -28,7 +28,10 @@ describe('native host operations', () => {
     ['physical-snapshot', { profiles: [['17', ['Office']]] }, /malformed/],
     ['physical-snapshot', { profiles: [[17, [1]]] }, /array of strings/],
     ['physical-snapshot', { profiles: [], retainedGuids: 'invalid' }, /array of strings/],
-    ['physical-snapshot', { profiles: [], retainedGuids: ["'; throw 'injected'"] }, /Invalid retained adapter GUID/]
+    ['physical-snapshot', { profiles: [], retainedGuids: ["'; throw 'injected'"] }, /Invalid retained adapter GUID/],
+    ['owned-runtime-pid', {}, /executable path is required/],
+    ['owned-runtime-pid', { executable: 'relative.exe' }, /invalid executable path/],
+    ['owned-runtime-pid', { executable: 'C:\\runtime\\core.dll' }, /invalid executable path/]
   ] as const)('rejects bad arguments for %s before touching koffi', async (op, args, message) => {
     await expect(runNativeOp(op, args)).rejects.toThrow(message)
   })

@@ -77,6 +77,7 @@ export function safeAppEvent(event) {
         security: ['Secure store preflight failed; startup refused without changing network protection'],
         tun: ['start timing', 'stop timing', 'stop started', 'stop step started', 'stop step completed',
           'owned runtime status probe failed', 'runtime process stop after stop failed',
+          'native runtime PID unavailable, using PowerShell',
           'start refused because another TUN/VPN is already active', 'WFP priority reservation failed',
           'adapter lockdown result', 'physical adapter lockdown did not apply', 'physical adapter lockdown threw', 'xray startup failed',
           'failed to prepare TUN runtime', 'sing-box exited before startup completed',

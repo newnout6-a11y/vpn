@@ -129,7 +129,17 @@ describe('startup callback fault boundaries', () => {
     expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
     expect(h.rollbackEarlyAdapterLockdown).toHaveBeenCalledOnce()
   })
-  it.each(['owned', 'foreign', 'prefix collision', 'ambiguous', 'unreadable'] as const)('requires one exact executable path for startup PID: %s', async outcome => {
+  it('reads the owned startup PID without spawning PowerShell when the isolated native read succeeds (AT-00-002/AT-02-002)', async () => {
+    const tree = ts.createSourceFile('tunController.ts', source, ts.ScriptTarget.Latest, true)
+    const helper = tree.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'readOwnedSingboxPid')!
+    const code = ts.transpileModule(helper.getText(tree) + '; return readOwnedSingboxPid;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+    const native = vi.fn(async () => 731), powershell = vi.fn(async () => { throw new Error('Unexpected fallback') })
+    const readPid = new Function('runPowerShell', 'psSingleQuote', 'readOwnedRuntimePidNative', 'logEvent', code)(powershell, () => '', native, vi.fn())
+    expect(await readPid('C:\\VPNTE\\runtime\\vpnte-sing-box.exe')).toBe(731)
+    expect(native).toHaveBeenCalledExactlyOnceWith('C:\\VPNTE\\runtime\\vpnte-sing-box.exe')
+    expect(powershell).not.toHaveBeenCalled()
+  })
+  it.each(['owned', 'foreign', 'prefix collision', 'ambiguous', 'unreadable'] as const)('requires one exact executable path in the PowerShell fallback: %s', async outcome => {
     const executable = 'C:\\VPN\\runtime\\vpnte-sing-box.exe'
     const row = { ExecutablePath: executable, ProcessId: 731 }
     const rows = outcome === 'owned' ? [row] : outcome === 'ambiguous' ? [row, { ...row, ProcessId: 732 }]
@@ -145,7 +155,9 @@ describe('startup callback fault boundaries', () => {
       return result.stdout
     }
     const code = ts.transpileModule(helper.getText(tree) + '; return readOwnedSingboxPid;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
-    const readPid = new Function('runPowerShell', 'psSingleQuote', code)(runPowerShell, (value: string) => `'${value.replaceAll("'", "''")}'`)
+    const native = vi.fn().mockRejectedValue(new Error('native read unavailable'))
+    const readPid = new Function('runPowerShell', 'psSingleQuote', 'readOwnedRuntimePidNative', 'logEvent', code)(runPowerShell,
+      (value: string) => `'${value.replaceAll("'", "''")}'`, native, vi.fn())
     if (outcome === 'owned') expect(await readPid(executable)).toBe(731)
     else await expect(readPid(executable)).rejects.toThrow('Runtime observation failed')
   }, 15_000)
