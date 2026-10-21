@@ -73,7 +73,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build:installer-shutdown
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npx --no-install electron-builder --win --dir --config.directories.output=dist/real-vpn
+          # The job is already elevated. requireAdministrator on the shared Chromium
+          # executable prevents restricted GPU/renderer children from starting (SBOX 18).
+          # Override only this disposable artifact, preserving Chromium's sandbox.
+          npx --no-install electron-builder --win --dir --config.directories.output=dist/real-vpn --config.win.requestedExecutionLevel=asInvoker
       - name: Scenario and inspector regressions (no VPN switching)
         run: npm run test:real-vpn:unit
       - name: Run the real connection sequence

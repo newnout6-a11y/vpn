@@ -4,12 +4,17 @@ import { spawnSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
-import { requireHostedWindows, readScenarioSecret, seedScenario } from './real-vpn-runner.mjs'
+import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs } from './real-vpn-runner.mjs'
 
 const hosted = { GITHUB_ACTIONS: 'true', RUNNER_OS: 'Windows', RUNNER_ENVIRONMENT: 'github-hosted',
   GITHUB_EVENT_NAME: 'workflow_dispatch', RUNNER_TEMP: 'C:\\runner-temp', APPDATA: 'C:\\runner-profile' }
 const seed = { schemaVersion: 1, settings: { connectionMode: 'directVpn', routingMode: 'hard', firewallKillSwitch: true },
   profiles: [{ input: 'FAKE-A', clientDevice: 'pc' }, { input: 'FAKE-B' }] }
+
+test('hosted launch exposes only a valid loopback inspector and preserves sandbox/graphics', () => {
+  for (const port of [1, 65535]) assert.deepEqual(hostedLaunchArgs(port), [`--inspect=127.0.0.1:${port}`])
+  for (const port of [0, 65536, -1, 1.5, '127.0.0.1:123', NaN]) assert.throws(() => hostedLaunchArgs(port))
+})
 
 test('only an explicitly dispatched GitHub-hosted Windows run is admitted', () => {
   requireHostedWindows(hosted, 'win32')

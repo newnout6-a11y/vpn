@@ -28,9 +28,10 @@ const ps = async (source, timeout = 30_000) => {
   } catch { throw new Error('Windows oracle/shutdown failed; command output omitted') }
 }
 const hash = value => createHash('sha256').update(value).digest('hex')
+const adminCheck = "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)"
 async function run(config, seed) {
   const report = { schemaVersion: 1, startedAt: new Date().toISOString(), status: 'FAIL', steps: [],
-    runner: { os: process.env.RUNNER_OS, image: process.env.ImageOS, commit: process.env.GITHUB_SHA, graphics: 'software' },
+    runner: { os: process.env.RUNNER_OS, image: process.env.ImageOS, commit: process.env.GITHUB_SHA },
     limits: ['Real production Direct VPN IPC/runtime, without UI clicks.',
       'Windows Server/cloud network timings differ from the user PC.',
       'Not a packet-leak oracle, OS matrix, or p95 acceptance run.'] }
@@ -87,7 +88,7 @@ async function run(config, seed) {
   await test('AT-00-003/005/007, AT-02-002/009 real connection sequence (partial coverage)', async t => {
     try {
       await runWithCleanup(async () => {
-        const admin = await progress.run('prepare/admin', () => ps("([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)"))
+        const admin = await progress.run('prepare/admin', () => ps(adminCheck))
         assert.equal(admin, 'True', 'GitHub runner must already be elevated; no UAC/relaunch is attempted')
         // Reject reuse before launch. Never shut down an existing client or use its DPAPI stores.
         assert.equal(await progress.run('prepare/processes', () => ps(`@(Get-CimInstance Win32_Process -Filter "Name='VPN Tunnel Enforcer.exe' OR Name='vpnte-sing-box.exe' OR Name='vpnte-xray.exe'").Count`)), '0', 'Existing VPN process found; run refused')
@@ -128,6 +129,14 @@ async function run(config, seed) {
         assert.equal(identity.packaged, true, 'Use a packaged production executable')
         assert.equal(win32.resolve(identity.userData).toLowerCase(), win32.resolve(userData).toLowerCase(), 'Unexpected user profile')
         report.build.version = identity.version
+        report.build.executionLevel = 'asInvoker (CI artifact only)'
+        const mainElevated = await progress.run('prepare/application-admin', () => inspector.evaluate(`new Promise((resolve, reject) => {
+          process.mainModule.require('node:child_process').execFile(${JSON.stringify(powershell)},
+            ['-NoProfile', '-NonInteractive', '-EncodedCommand', ${JSON.stringify(Buffer.from(adminCheck, 'utf16le').toString('base64'))}],
+            {windowsHide:true, timeout:10000}, (error, stdout) => error ? reject(new Error('Admin readback failed')) : resolve(stdout.trim() === 'True'));
+        })`))
+        assert.equal(mainElevated, true, 'The actual Electron main process must be elevated')
+        report.runner.elevatedMain = mainElevated
         const instance = hash(win32.resolve(userData).toLowerCase()).slice(0, 32)
         runtimeDir = win32.join(process.env.ProgramData || 'C:\\ProgramData', 'VPNTE/runtime', instance, 'tun-runtime')
         renderer = inspector.renderer

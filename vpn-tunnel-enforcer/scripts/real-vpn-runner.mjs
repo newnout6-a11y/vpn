@@ -3,8 +3,7 @@ import assert from 'node:assert/strict'
 
 export function hostedLaunchArgs(port) {
   assert.ok(Number.isInteger(port) && port > 0 && port <= 65535, 'Invalid inspector port')
-  // Hosted Windows has no reliable GPU. Keep production IPC/network/sandbox settings intact.
-  return [`--inspect=127.0.0.1:${port}`, '--disable-gpu', '--disable-gpu-compositing']
+  return [`--inspect=127.0.0.1:${port}`]
 }
 
 export function requireHostedWindows(env = process.env, platform = process.platform) {
