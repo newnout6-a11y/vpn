@@ -127,6 +127,11 @@ export function safeAppEvent(event) {
     ['file-missing', /ENOENT|cannot find the file/i], ['permission-denied', /EACCES|EPERM|access is denied/i],
     ['socket-conflict', /EADDRINUSE/], ['native-timeout', /ETIMEDOUT|timed out/i]
   ]) if (pattern.test(errorText)) { result.errorKind = kind; break }
+  if (result.errorKind === 'adapter-snapshot') {
+    const fields = ['ifIndex', 'alias', 'ipv6Enabled', 'forcedIpv6Off', 'interfaceGuid', 'ipv4DnsSource', 'ipv4DnsServers', 'forcedDnsTo']
+      .filter(field => new RegExp(`\\b${field}\\b`).test(errorText))
+    if (fields.length) result.invalidFields = fields
+  }
   if (['Error', 'TypeError', 'SyntaxError', 'RecoveryWorkerError'].includes(event.details?.name)) result.errorName = event.details.name
   const stack = typeof event.details?.stack === 'string' ? event.details.stack : ''
   const locations = [...stack.matchAll(/\bindex\.js:([0-9]{1,7}):([0-9]{1,6})/g)].slice(0, 3)

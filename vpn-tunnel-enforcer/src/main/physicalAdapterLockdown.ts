@@ -182,12 +182,18 @@ export function validateLockdownManifest(value: unknown, rejected?: string[]): L
     if (v.adapters.length === 0) throw new Error('Missing physical adapter snapshot')
   })
   v.adapters = v.adapters.filter((a: AdapterSnapshot, index: number) => check(`adapter entry ${index}`, () => {
-    if (!a || !Number.isInteger(a.ifIndex) || a.ifIndex <= 0 || typeof a.alias !== 'string' || a.alias.length > 256 ||
-        /[\x00-\x1f]/.test(a.alias) || typeof a.ipv6Enabled !== 'boolean' || typeof a.forcedIpv6Off !== 'boolean' ||
-        typeof a.interfaceGuid !== 'string' || !/^\{?[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\}?$/i.test(a.interfaceGuid) ||
-        !['dhcp','static','unknown'].includes(a.ipv4DnsSource || '') ||
-        !Array.isArray(a.ipv4DnsServers) || a.ipv4DnsServers.some((ip: unknown) => typeof ip !== 'string' || !isIP(ip)) ||
-        !(a.forcedDnsTo === null || (Array.isArray(a.forcedDnsTo) && a.forcedDnsTo.every((ip: string) => isIP(ip))))) throw new Error('Invalid adapter snapshot')
+    // Report fixed field names only: values contain private topology and never belong in errors.
+    const fields: Record<string, boolean> = {
+      ifIndex: Number.isInteger(a?.ifIndex) && a.ifIndex > 0,
+      alias: typeof a?.alias === 'string' && a.alias.length <= 256 && !/[\x00-\x1f]/.test(a.alias),
+      ipv6Enabled: typeof a?.ipv6Enabled === 'boolean', forcedIpv6Off: typeof a?.forcedIpv6Off === 'boolean',
+      interfaceGuid: typeof a?.interfaceGuid === 'string' && /^\{?[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\}?$/i.test(a.interfaceGuid),
+      ipv4DnsSource: ['dhcp','static','unknown'].includes(a?.ipv4DnsSource || ''),
+      ipv4DnsServers: Array.isArray(a?.ipv4DnsServers) && a.ipv4DnsServers.every((ip: unknown) => typeof ip === 'string' && !!isIP(ip)),
+      forcedDnsTo: a?.forcedDnsTo === null || (Array.isArray(a?.forcedDnsTo) && a.forcedDnsTo.every((ip: string) => !!isIP(ip)))
+    }
+    const invalid = Object.keys(fields).filter(key => !fields[key])
+    if (invalid.length) throw new Error(`Invalid adapter snapshot: ${invalid.join(', ')}`)
     if (v.adapters.filter((other: AdapterSnapshot) => typeof other?.interfaceGuid === 'string' &&
         other.interfaceGuid.replace(/[{}]/g, '').toLowerCase() === a.interfaceGuid!.replace(/[{}]/g, '').toLowerCase()).length !== 1) throw new Error('Duplicate adapter identity')
   }))

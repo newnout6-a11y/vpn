@@ -75,6 +75,8 @@ test('adapter lockdown diagnostics retain verified failure markers without topol
     stack: 'at private (D:\\private\\app.asar\\out\\main\\index.js:1234:56) FAKE-PRIVATE-PAYLOAD' } }),
   { at: base.ts, scope: 'tun', message: 'physical adapter lockdown threw', errorKind: 'transition-snapshot',
     errorName: 'Error', sourceLocations: [{ line: 1234, column: 56 }] })
+  assert.deepEqual(safeAppEvent({ ...base, message: 'physical adapter lockdown threw',
+    details: { message: 'Invalid adapter snapshot: ifIndex, ipv4DnsServers FAKE-PRIVATE-PAYLOAD' } }).invalidFields, ['ifIndex', 'ipv4DnsServers'])
 })
 
 test('concurrent connect/cancel calls retain separate IDs and elapsed time', async t => {
