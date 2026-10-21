@@ -1,6 +1,12 @@
 // Runner policy and seeding. No Electron, filesystem or network side effects on import.
 import assert from 'node:assert/strict'
 
+export function hostedLaunchArgs(port) {
+  assert.ok(Number.isInteger(port) && port > 0 && port <= 65535, 'Invalid inspector port')
+  // Hosted Windows has no reliable GPU. Keep production IPC/network/sandbox settings intact.
+  return [`--inspect=127.0.0.1:${port}`, '--disable-gpu', '--disable-gpu-compositing']
+}
+
 export function requireHostedWindows(env = process.env, platform = process.platform) {
   assert.ok(platform === 'win32' && env.GITHUB_ACTIONS === 'true'
     && env.RUNNER_OS === 'Windows' && env.RUNNER_ENVIRONMENT === 'github-hosted'

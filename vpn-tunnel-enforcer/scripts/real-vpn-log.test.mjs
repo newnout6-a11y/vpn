@@ -38,6 +38,7 @@ test('native Electron crash diagnostics retain only source location and severity
   assert.deepEqual(safeElectronDiagnostic('[123:ERROR:gin/v8_initializer.cc:767] FAKE-PRIVATE-PAYLOAD'),
     { severity: 'ERROR', sourceFile: 'v8_initializer.cc', sourceLine: 767, checkFailed: false })
   assert.equal(safeElectronDiagnostic('FAKE-PRIVATE-PAYLOAD vless://PRIVATE'), null)
+  assert.equal(safeElectronDiagnostic('[123:ERROR:gpu_process_host.cc(1029)] GPU process launch failed: error_code=18 FAKE-PRIVATE-PAYLOAD').gpuCode, 18)
 })
 
 test('concurrent connect/cancel calls retain separate IDs and elapsed time', async t => {

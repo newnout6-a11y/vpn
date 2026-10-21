@@ -12,7 +12,7 @@ import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { assertStable, deadline, runScenario } from './real-vpn-scenario.mjs'
 import { connectInspector } from './real-vpn-inspector.mjs'
-import { requireHostedWindows, readScenarioSecret, seedScenario } from './real-vpn-runner.mjs'
+import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs } from './real-vpn-runner.mjs'
 import { createProgressLog, safeAppEvent, safeSnapshot, safeElectronDiagnostic } from './real-vpn-log.mjs'
 import { runWithCleanup } from './wp1-test-cleanup.mjs'
 
@@ -30,7 +30,7 @@ const ps = async (source, timeout = 30_000) => {
 const hash = value => createHash('sha256').update(value).digest('hex')
 async function run(config, seed) {
   const report = { schemaVersion: 1, startedAt: new Date().toISOString(), status: 'FAIL', steps: [],
-    runner: { os: process.env.RUNNER_OS, image: process.env.ImageOS, commit: process.env.GITHUB_SHA },
+    runner: { os: process.env.RUNNER_OS, image: process.env.ImageOS, commit: process.env.GITHUB_SHA, graphics: 'software' },
     limits: ['Real production Direct VPN IPC/runtime, without UI clicks.',
       'Windows Server/cloud network timings differ from the user PC.',
       'Not a packet-leak oracle, OS matrix, or p95 acceptance run.'] }
@@ -101,7 +101,7 @@ async function run(config, seed) {
         const env = { ...process.env }
         delete env.VPNTE_REAL_SCENARIO
         // Manual spawn: a transport failure must never force-kill a live VPN runtime.
-        application = await progress.run('prepare/launch', () => spawn(config.exe, [`--inspect=127.0.0.1:${port}`], {
+        application = await progress.run('prepare/launch', () => spawn(config.exe, hostedLaunchArgs(port), {
           cwd: dirname(config.exe), env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }))
         report.electronDiagnostics = []
         createInterface({ input: application.stderr }).on('line', line => {

@@ -93,6 +93,9 @@ export function safeAppEvent(event) {
 export function safeElectronDiagnostic(line) {
   // Chromium fatal/error headers identify a source location; the rest can contain private data.
   const match = /:(FATAL|ERROR):(?:[A-Za-z0-9_.\\/-]*[\\/])?([A-Za-z0-9_-]+\.(?:cc|cpp|h))(?:\(|:)([0-9]{1,6})\)?\]/.exec(line)
-  return match ? { severity: match[1], sourceFile: match[2], sourceLine: Number(match[3]),
-    checkFailed: line.includes('Check failed:') } : null
+  if (!match) return null
+  const result = { severity: match[1], sourceFile: match[2], sourceLine: Number(match[3]), checkFailed: line.includes('Check failed:') }
+  const code = /(?:error_code|exit_code)=(-?[0-9]{1,10})/.exec(line)
+  if (match[2] === 'gpu_process_host.cc' && code) result.gpuCode = Number(code[1])
+  return result
 }

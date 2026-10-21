@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { connectInspector } from './real-vpn-inspector.mjs'
 import { deadline } from './real-vpn-scenario.mjs'
+import { hostedLaunchArgs } from './real-vpn-runner.mjs'
 
 test('an inspector with a stalled WebSocket handshake has a bounded deadline', { timeout: 5000 }, async () => {
   const sockets = new Set()
@@ -42,7 +43,7 @@ test('real Electron context, PID binding, concurrent calls and safe transport er
   const port = server.address().port
   await new Promise(ok => server.close(ok))
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
-  const child = spawn(createRequire(import.meta.url)('electron'), [`--inspect=127.0.0.1:${port}`, join(dir, 'main.cjs')],
+  const child = spawn(createRequire(import.meta.url)('electron'), [...hostedLaunchArgs(port), join(dir, 'main.cjs')],
     { cwd: root, env, windowsHide: true, stdio: 'ignore' })
   const exited = new Promise(resolve => child.once('exit', resolve))
   // This fallback applies ONLY to this disposable fixture, which never loads VPN or system modules.
