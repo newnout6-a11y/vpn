@@ -75,6 +75,7 @@ export function safeAppEvent(event) {
           'checking for stale TUN adapter during crash recovery', 'V2 feature modules registered and initialized'],
         security: ['Secure store preflight failed; startup refused without changing network protection'],
         tun: ['start timing', 'stop timing', 'stop started', 'stop step started', 'stop step completed',
+          'owned runtime status probe failed', 'runtime process stop after stop failed',
           'start refused because another TUN/VPN is already active', 'WFP priority reservation failed',
           'adapter lockdown result', 'physical adapter lockdown did not apply', 'physical adapter lockdown threw', 'xray startup failed',
           'failed to prepare TUN runtime', 'sing-box exited before startup completed',
@@ -112,8 +113,10 @@ export function safeAppEvent(event) {
     if (allowed.includes(event.details?.[key])) result[key] = event.details[key]
   }
   // Diagnose native/config failures using fixed labels; never publish matched text.
+  const diagnostic = event.details?.error ?? event.details
   const errorText = typeof event.details === 'string' ? event.details :
-    [event.details?.message, event.details?.out, ...(Array.isArray(event.details?.warnings) ? event.details.warnings : [])]
+    [event.details?.message, typeof diagnostic === 'string' ? diagnostic : diagnostic?.message,
+      event.details?.out, ...(Array.isArray(event.details?.warnings) ? event.details.warnings : [])]
       .filter(value => typeof value === 'string').join('\n')
   for (const [kind, pattern] of [
     ['lockdown-manifest', /Invalid lockdown manifest/],
@@ -123,6 +126,8 @@ export function safeAppEvent(event) {
     ['dns-policy-value', /Unsupported DNS registry snapshot value/],
     ['dns-policy-schema', /Incomplete DNS registry snapshot|Invalid DNS registry snapshot/],
     ['runtime-acl', /RuntimeSecurityAclError|untrusted runtime directory/i],
+    ['runtime-path-unavailable', /Runtime path unavailable|Cannot prove runtime exit: executable path unavailable/],
+    ['runtime-status-invalid', /Owned runtime status response is invalid/],
     ['unknown-config-field', /unknown field/i], ['invalid-config', /decode config|parse config|check config/i],
     ['file-missing', /ENOENT|cannot find the file/i], ['permission-denied', /EACCES|EPERM|access is denied/i],
     ['socket-conflict', /EADDRINUSE/], ['native-timeout', /ETIMEDOUT|timed out/i]
@@ -132,8 +137,9 @@ export function safeAppEvent(event) {
       .filter(field => new RegExp(`\\b${field}\\b`).test(errorText))
     if (fields.length) result.invalidFields = fields
   }
-  if (['Error', 'TypeError', 'SyntaxError', 'RecoveryWorkerError'].includes(event.details?.name)) result.errorName = event.details.name
-  const stack = typeof event.details?.stack === 'string' ? event.details.stack : ''
+  if (['Error', 'TypeError', 'SyntaxError', 'RecoveryWorkerError'].includes(diagnostic?.name)) result.errorName = diagnostic.name
+  if (['unavailable', 'rejected', 'busy', 'closed', 'timeout', 'exited', 'protocol'].includes(diagnostic?.code)) result.workerError = diagnostic.code
+  const stack = typeof diagnostic?.stack === 'string' ? diagnostic.stack : ''
   const locations = [...stack.matchAll(/\bindex\.js:([0-9]{1,7}):([0-9]{1,6})/g)].slice(0, 3)
     .map(match => ({ line: Number(match[1]), column: Number(match[2]) }))
   if (locations.length) result.sourceLocations = locations

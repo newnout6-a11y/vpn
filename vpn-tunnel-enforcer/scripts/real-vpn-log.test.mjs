@@ -79,6 +79,20 @@ test('adapter lockdown diagnostics retain verified failure markers without topol
     details: { message: 'Invalid adapter snapshot: ifIndex, ipv4DnsServers FAKE-PRIVATE-PAYLOAD' } }).invalidFields, ['ifIndex', 'ipv4DnsServers'])
 })
 
+test('runtime exit diagnostics retain only fixed causes for direct and nested errors', () => {
+  const event = { ts: '2026-10-21T16:00:00.000Z', scope: 'tun', message: 'owned runtime status probe failed' }
+  const error = { name: 'RecoveryWorkerError', code: 'rejected', message: 'Cannot prove runtime exit: executable path unavailable FAKE-PRIVATE-PAYLOAD',
+    stack: 'at private (D:\\private\\app.asar\\out\\main\\index.js:100:20) FAKE-PRIVATE-PAYLOAD' }
+  for (const details of [error, { error }]) {
+    const result = safeAppEvent({ ...event, details })
+    assert.deepEqual(result, { at: event.ts, scope: 'tun', message: event.message,
+      errorKind: 'runtime-path-unavailable', errorName: 'RecoveryWorkerError', workerError: 'rejected', sourceLocations: [{ line: 100, column: 20 }] })
+    assert.ok(!JSON.stringify(result).includes('FAKE-PRIVATE-PAYLOAD'))
+  }
+  assert.equal(safeAppEvent({ ...event, message: 'stop step completed', details: { error: 'Error: Owned runtime status response is invalid FAKE-PRIVATE-PAYLOAD' } }).errorKind, 'runtime-status-invalid')
+  assert.equal(safeAppEvent({ ...event, details: { error: { code: 'FAKE-PRIVATE-PAYLOAD' } } }).workerError, undefined)
+})
+
 test('concurrent connect/cancel calls retain separate IDs and elapsed time', async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
   await mkdir(temp, { recursive: true })

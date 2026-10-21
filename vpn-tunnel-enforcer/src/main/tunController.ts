@@ -1399,7 +1399,12 @@ async function killOwnedRuntimeProcesses(): Promise<void> {
 async function waitForOwnedRuntimeToExit(timeoutMs = 3000): Promise<boolean> {
   const started = Date.now()
   while (Date.now() - started < timeoutMs) {
-    if (!(await isOwnedTunRuntimeRunning(true))) return true
+    try {
+      if (!(await isOwnedTunRuntimeRunning(true))) return true
+    } catch {
+      // An exiting process can make one ownership read fail. Keep protection
+      // while polling; only a fresh successful read can prove exit.
+    }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
   return !(await isOwnedTunRuntimeRunning(true))
