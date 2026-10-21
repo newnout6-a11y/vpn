@@ -439,7 +439,10 @@ export async function isKillSwitchActive(options?: { probeWfp?: boolean; recover
 
 /** Presence above remains a cleanup gate. UI evidence must use this fresh read. */
 export function getFirewallKillSwitchStatus(): Promise<FirewallKillSwitchStatus> {
-  return serializeFirewall(async () => {
+  // Share only the pending read at the queue tail. An intervening mutation
+  // changes that barrier and requires a new read after its effects settle.
+  if (pendingFirewallStatus?.barrier === firewallQueue) return pendingFirewallStatus.result
+  const result = serializeFirewall<FirewallKillSwitchStatus>(async () => {
     const unknown = (reason: FirewallKillSwitchStatus['reason']): FirewallKillSwitchStatus => ({ state: 'unknown', cleanupRequired: true, reason })
     if (process.platform !== 'win32' || !isElevatedPsHelperRunning()) return unknown('unavailable')
     let manifest: FirewallManifest | null
@@ -467,6 +470,11 @@ export function getFirewallKillSwitchStatus(): Promise<FirewallKillSwitchStatus>
       return unknown('read-back-failed')
     }
   })
+  const pending = { barrier: firewallQueue, result }
+  pendingFirewallStatus = pending
+  const clear = () => { if (pendingFirewallStatus === pending) pendingFirewallStatus = null }
+  void result.then(clear, clear)
+  return result
 }
 
 export async function ensureKillSwitchProgramAllowed(
@@ -536,6 +544,7 @@ Write-Output "RULE:$ruleName"
  * the script fails partway, only harmless extra Allow rules remain.
  */
 let firewallQueue: Promise<unknown> = Promise.resolve()
+let pendingFirewallStatus: { barrier: Promise<unknown>; result: Promise<FirewallKillSwitchStatus> } | null = null
 async function timedFirewallPhase<T>(phase: string, operation: () => Promise<T>, operationId?: string): Promise<T> {
   const started = performance.now()
   let outcome = 'rejected'

@@ -41,7 +41,7 @@ import {
   type VpnProfile
 } from './vpnProfiles'
 import { settingsStore } from './settings'
-import { getDirectProxyPort, tunController, type StartOptions } from './tunController'
+import { getDirectProxyPort, tunController, type StartOptions, type TunStopResult } from './tunController'
 import { beginAdaptiveConnection, readAdaptiveNetworkFingerprint } from './adaptiveBypass'
 import { ipMonitor } from './ipMonitor'
 import {
@@ -2195,7 +2195,7 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile, switch
           publicWifiCompatibility: settings.publicWifiCompatibility,
           stealthMode: settings.stealthMode, adaptiveMode: adaptive.mode,
           proxyEngine: tunController.getLastStartOptions?.()?.proxyEngine ?? settings.proxyEngine
-        }, { signal: switchOwner.controller.signal })
+        }, { signal: switchOwner.controller.signal, onCleanup: result => { switchOwner.cleanup = result } })
       } finally { switchOwner.controller.signal.removeEventListener('abort', abort) }
     }
   })
@@ -2204,7 +2204,7 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile, switch
 
 let profileSwitchGeneration = 0
 let profileSwitchInProgress = false
-interface ProfileSwitchOwner { controller: AbortController; nativeTouched: boolean; abandoned: boolean }
+interface ProfileSwitchOwner { controller: AbortController; nativeTouched: boolean; abandoned: boolean; cleanup?: TunStopResult }
 let activeProfileSwitch: ProfileSwitchOwner | null = null
 let profileSwitchHooks: {
   begin: () => void | Promise<void>
@@ -2726,7 +2726,12 @@ export function registerServerPickerHandlers(): void {
       // Before restart the old tunnel is untouched. After dispatch, wait for the
       // cancelled attempt and full cleanup before giving the old options a new owner.
       if (switchOwner.nativeTouched && !switchOwner.abandoned) {
-        const stopped = await tunController.stop()
+        // restartProtected may already have fully rolled this attempt back.
+        // Reuse only its complete receipt, never a status bit or a prior stop.
+        const cleanup = switchOwner.cleanup
+        const stopped = cleanup?.success && cleanup.networkCleanup?.baseline === true
+          && cleanup.networkCleanup.firewall === true && cleanup.networkCleanup.adapters === true
+          ? cleanup : await tunController.stop()
         if (!stopped.success || stopped.networkCleanup?.baseline !== true
           || stopped.networkCleanup.firewall !== true || stopped.networkCleanup.adapters !== true) {
           throw new Error(stopped.error || 'Очистка отменённой смены сервера не подтверждена')

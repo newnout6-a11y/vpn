@@ -20,7 +20,7 @@ const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], sc
   artifacts: [] as string[], helperAvailable: true, helperFailure: null as any, helperExitCode: 0, longApps: false,
   nativeTimings: '', restoreOutput: null as string | null, cleanupError: null as Error | null,
   fileProbe: vi.fn((..._args: any[]) => '0'),
-  statusSnapshot: '' as string,
+  statusSnapshot: '' as string, statusReadGate: null as Promise<void> | null,
   fallback: vi.fn(async (..._args: any[]) => ({ stdout: 'SNAPSHOT:[]', stderr: '' })) }))
 vi.mock('electron', () => ({ app: { getPath: () => 'C:\\VPNTE' },
   BrowserWindow: { getAllWindows: () => [] }, dialog: { showMessageBox: vi.fn(async () => ({})) } }))
@@ -100,7 +100,11 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
       return helper.execElevatedPs(script, 1000, 'firewall-killswitch')
     }
     if (state.helperExitCode) return { stdout: '', stderr: 'native command failed', exitCode: state.helperExitCode }
-    if (script.includes('$foreign=@')) return { stdout: state.statusSnapshot, stderr: '', exitCode: 0 }
+    if (script.includes('$foreign=@')) {
+      const snapshot = state.statusSnapshot
+      await state.statusReadGate
+      return { stdout: snapshot, stderr: '', exitCode: 0 }
+    }
     if (script.includes('# --- Step 2:')) {
       if (!state.manifest || state.manifest.phase !== 'prepared') throw new Error('mutated without a durable snapshot')
       if (state.failApply) throw new Error('apply failed')
@@ -158,6 +162,7 @@ beforeEach(() => {
   state.restoreOutput = null; state.cleanupError = null
   state.wfpRemoveError = null
   state.statusSnapshot = JSON.stringify({ services: [], profiles: [], storedNames: [], foreignAllows: 0, rules: [] })
+  state.statusReadGate = null
   state.fallback.mockReset().mockRejectedValue(new Error('Fallback boundary refused'))
   state.fileProbe.mockReset().mockReturnValue('0')
 })
@@ -342,6 +347,34 @@ Write-Output ('ATTEMPTS:'+($script:attempts -join ','))
 })
 
 describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)', () => {
+  it('shares an in-flight passive read without caching its result (AT-03-001/008)', async () => {
+    let release!: () => void
+    state.statusReadGate = new Promise<void>(resolve => { release = resolve })
+    const first = getFirewallKillSwitchStatus()
+    await vi.waitFor(() => expect(state.scripts.filter(s => s.includes('$foreign=@'))).toHaveLength(1))
+    const burst = Array.from({ length: 10 }, () => getFirewallKillSwitchStatus())
+    release()
+    expect(await Promise.all([first, ...burst])).toEqual(Array(11).fill({ state: 'inactive', cleanupRequired: false, reason: 'no-owned-protection' }))
+    expect(state.scripts.filter(s => s.includes('$foreign=@'))).toHaveLength(1)
+    expect(state.manifestReads).toBe(1)
+    state.helperExitCode = 1
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', reason: 'read-back-failed' })
+    state.helperExitCode = 0
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'inactive' })
+    expect(state.manifestReads).toBe(3)
+    expect(state.fallback).not.toHaveBeenCalled()
+  })
+  it('does not share a pre-mutation read with callers after the mutation (AT-03-001/008)', async () => {
+    const before = getFirewallKillSwitchStatus()
+    const applied = enableKillSwitch(options)
+    const after = getFirewallKillSwitchStatus(), duplicate = getFirewallKillSwitchStatus()
+    const [oldStatus, mutation, newStatus, sharedStatus] = await Promise.all([before, applied, after, duplicate])
+    expect(oldStatus).toMatchObject({ state: 'inactive' })
+    expect(mutation.success).toBe(true)
+    expect(newStatus).toMatchObject({ state: 'unknown', reason: 'incomplete-policy' })
+    expect(sharedStatus).toEqual(newStatus)
+    expect(state.scripts.filter(s => s.includes('$foreign=@'))).toHaveLength(2)
+  })
   it.each(['content', 'trust'] as const)('deduplicates passive %s rejection logs until evidence changes (AT-00-005/AT-03-012)', async kind => {
     await getFirewallKillSwitchStatus()
     state.scripts = []; vi.mocked(logEvent).mockClear()

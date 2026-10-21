@@ -69,6 +69,55 @@ return {poll: ${callback}, status:()=>currentStatus, signal: startAbortControlle
 }
 
 describe('startup callback fault boundaries', () => {
+  it.each([
+    ['preserved-stop', 'complete'], ['release', 'complete'], ['startup', 'complete'],
+    ['late-cancel', 'complete'], ['startup', 'partial'], ['startup', 'throw']
+  ] as const)('reports only settled full cleanup after %s: %s (AT-00-003 / AT-03-007)', async (phase, outcome) => {
+    let method!: ts.MethodDeclaration
+    const visit = (node: ts.Node) => {
+      if (ts.isMethodDeclaration(node) && node.name.getText(parsedSource) === 'restartProtected') method = node
+      ts.forEachChild(node, visit)
+    }
+    visit(parsedSource)
+    const code = ts.transpileModule(`return ({${method.getText(parsedSource)}}).restartProtected`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 }
+    }).outputText
+    const cancellation = new AbortController()
+    let resolve!: (value: unknown) => void, reject!: (error: Error) => void
+    const cleanup = new Promise((ok, fail) => { resolve = ok; reject = fail })
+    const deps = {
+      connectionFailure, ipcError, readIpcErrorCategory, classifyTunError,
+      transitionCancelRequested: false, protectedRestartCallback: null, currentStatus: {},
+      lastStartOptions: null, settingsStore: { get: () => ({}) }, notifyStatus: vi.fn(), logEvent: vi.fn(),
+      waitForTunRelease: vi.fn(async () => {
+        if (phase === 'release') { cancellation.abort(); return 'cancelled' }
+        return 'released'
+      })
+    }
+    const restart = new Function(...Object.keys(deps), code)(...Object.values(deps))
+    const engine = {
+      stop: vi.fn().mockResolvedValueOnce(phase === 'preserved-stop' ? connectionFailure('internal') : { success: true })
+        .mockReturnValueOnce(cleanup),
+      start: vi.fn(async () => {
+        if (phase === 'late-cancel') { cancellation.abort(); return { success: true } }
+        return connectionFailure('internal')
+      })
+    }
+    const onCleanup = vi.fn()
+    const pending = restart.call(engine, 'fixture', { mode: 'directVpn' }, { signal: cancellation.signal, onCleanup })
+    await vi.waitFor(() => expect(engine.stop).toHaveBeenCalledTimes(2))
+    expect(engine.stop).toHaveBeenNthCalledWith(1, { preserveNetworkProtection: true, preserveLastStartOptions: true })
+    expect(engine.stop).toHaveBeenNthCalledWith(2)
+    expect(onCleanup).not.toHaveBeenCalled()
+    const receipt = outcome === 'partial'
+      ? { ...connectionFailure('internal'), networkCleanup: { baseline: true, firewall: false, adapters: true } }
+      : { success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } }
+    if (outcome === 'throw') reject(new Error('cleanup failed'))
+    else resolve(receipt)
+    expect(await pending).toMatchObject({ success: false })
+    expect(onCleanup).toHaveBeenCalledTimes(outcome === 'throw' ? 0 : 1)
+    if (outcome !== 'throw') expect(onCleanup).toHaveBeenCalledWith(receipt)
+  })
   it('returns a timeout receipt without exposing native compensation errors (AT-00-004)', async () => {
     const h = harness()
     h.isSingboxRunning.mockResolvedValue(false)

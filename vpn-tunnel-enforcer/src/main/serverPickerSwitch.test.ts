@@ -141,6 +141,26 @@ beforeEach(async () => {
 })
 
 describe('server profile switching', () => {
+  it.each(['complete', 'baseline', 'firewall', 'adapters', 'failed', 'missing'] as const)(
+    'reuses only complete cleanup from this cancelled restart: %s (AT-00-003 / AT-03-007)', async kind => {
+      const restart = deferred<{ success: boolean; error?: string }>()
+      state.restartProtected.mockReturnValueOnce(restart.promise)
+      state.storeData.set('activeProfileId', 'a')
+      const pending = selectProfileHandler({}, 'b')
+      await vi.waitFor(() => expect(state.restartProtected).toHaveBeenCalledOnce())
+      await cancelSwitchHandler({})
+      const receipt = { success: kind !== 'failed', networkCleanup: kind === 'missing' ? undefined : {
+        baseline: kind !== 'baseline', firewall: kind !== 'firewall', adapters: kind !== 'adapters'
+      } }
+      state.restartProtected.mock.calls[0][2].onCleanup?.(receipt)
+      expect(state.restore).not.toHaveBeenCalled()
+      state.tunnelStatus.running = false
+      restart.resolve({ success: false, error: 'new startup cancelled' })
+      await expect(pending).resolves.toEqual({ cancelled: true })
+      expect(state.stop).toHaveBeenCalledTimes(kind === 'complete' ? 0 : 1)
+      expect(state.restore).toHaveBeenCalledExactlyOnceWith(state.lastOptions)
+      expect(state.storeData.get('activeProfileId')).toBe('a')
+    })
   it('does not attach geo evidence to an in-progress profile switch (AT-00-003)', async () => {
     const held = deferred<{ success: boolean }>()
     state.restartProtected.mockReturnValueOnce(held.promise)

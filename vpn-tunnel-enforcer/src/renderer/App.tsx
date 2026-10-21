@@ -139,9 +139,15 @@ export default function App() {
     const unsubState = window.electronAPI.onTunnelStateChanged?.((snapshot) => {
       tunEventSeqRef.current += 1
       const store = useAppStore.getState()
+      const previous = store.tunnelSnapshot
       store.setTunnelSnapshot(snapshot)
-      stoppingNowRef.current = Boolean(useAppStore.getState().tunnelSnapshot?.transition)
-      void store.refreshFirewallKillSwitchStatus()
+      const current = useAppStore.getState().tunnelSnapshot
+      stoppingNowRef.current = Boolean(current?.transition)
+      if (current === previous) return
+      // Transitional receipts cannot verify the final firewall policy. Keep
+      // the banner unknown and leave the helper free for lifecycle effects.
+      if (snapshot.transition) store.invalidateFirewallKillSwitchStatus()
+      else void store.refreshFirewallKillSwitchStatus()
     })
 
     const unsubTun = window.electronAPI.onTunStatusChanged((status) => {

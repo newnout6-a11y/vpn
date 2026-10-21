@@ -4169,7 +4169,7 @@ export const tunController = {
   async restartProtected(
     reason: string,
     nextOptions: StartOptions,
-    options: { releaseTimeoutMs?: number; signal?: AbortSignal } = {}
+    options: { releaseTimeoutMs?: number; signal?: AbortSignal; onCleanup?: (result: TunStopResult) => void } = {}
   ): Promise<TunStartResult> {
     if (options.signal?.aborted) return connectionFailure('cancelled', 'Перезапуск отменён')
     const isCancelled = () => options.signal?.aborted === true || transitionCancelRequested
@@ -4189,9 +4189,10 @@ export const tunController = {
     if (!stopped.success) {
       // The preserved stop failed with protection still applied. Hand over to
       // the ordinary teardown rather than returning half-stopped.
-      await this.stop().catch(err =>
+      const cleanup = await this.stop().catch(err =>
         logEvent('warn', 'tun', 'teardown after failed protected stop failed', err)
       )
+      if (cleanup) options.onCleanup?.(cleanup)
       return { ...connectionFailure(readIpcErrorCategory(stopped) ?? 'internal', stopped.error ?? ipcError('internal').message), warning: stopped.warning ?? null }
     }
 
@@ -4203,7 +4204,8 @@ export const tunController = {
     if (isCancelled() || release === 'cancelled') {
       transitionCancelRequested = false
       try {
-        await this.stop()
+        const cleanup = await this.stop()
+        options.onCleanup?.(cleanup)
       } catch (err) {
         logEvent('warn', 'tun', 'teardown after cancelled protected restart failed', err)
       }
@@ -4242,9 +4244,10 @@ export const tunController = {
       reason,
       error: started.error ?? null
     })
-    await this.stop().catch(err =>
+    const cleanup = await this.stop().catch(err =>
       logEvent('warn', 'tun', 'terminal cleanup after failed protected restart failed', err)
     )
+    if (cleanup) options.onCleanup?.(cleanup)
     return options.signal?.aborted ? connectionFailure('cancelled', 'Перезапуск отменён')
       : { ...connectionFailure(readIpcErrorCategory(started) ?? 'internal', started.error ?? ipcError('internal').message), warning: started.warning ?? null }
   },

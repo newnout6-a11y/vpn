@@ -7950,3 +7950,23 @@ CI39599465585 на0fe81ed был полностью success. Revix остави�
 
 
 Final npm.cmd test на неизменном source/test tree:5834 passed/5 skipped/0 failed;318 passed/2 skipped suites,394.36s,exit0 (.tmp/cancel-switch-verification-full.log,EXIT_CODE=0). npm.cmd run build, включая165-channel typecheck/0 public any, завершил все стадии и запустил следующий native step (.tmp/cancel-switch-verification-build.log). После прерывания транспорта session24154 не восстанавливалась; сохранённые9 native PASS дополнительно подтверждены отдельным node scripts/test-electron-runtime.mjs —9 PASS,exit0 (.tmp/cancel-switch-verification-native-confirmed.log,EXIT_CODE=0). Отдельный typecheck,focused233/233,coverageAC927/F210 и git diff --check —exit0. Production source между проверками не менялся. Перед merge требуются новые automatic Qodo/Revix и success CI окончательного SHA.
+
+
+## Повторные проверки firewall и очистка при отмене смены сервера (21.10.2026)
+
+Адресное исправление WP-0/WP-3 по журналам установленной 1.1.24: подключение 5.76–8.58 с, обычная смена 5.21–6.06 с, восстановление после отмены 13.26–14.01 с от нажатия. Пассивное чтение firewall занимало 1.19–5.15 с; несколько запросов на одно событие накапливались в очереди вместе с WFP reservation. После отмены restartProtected и picker выполняли два полных stop подряд.
+
+Параллельные getFirewallKillSwitchStatus теперь разделяют только выполняющееся чтение на текущем хвосте firewallQueue. Любая поставленная между ними операция изменяет барьер: следующий читатель ждёт её и получает новое доказательство. Завершённый результат не кэшируется. Во время canonical transition App инвалидирует прежнюю проверку и запрашивает полное чтение после завершения; проигнорированный старый snapshot не запускает побочные проверки. restartProtected передаёт owner-scoped квитанцию завершённого полного stop. Picker пропускает второй stop только при success и baseline/firewall/adapters=true; при отсутствующей, неуспешной или частичной квитанции сохраняется обычная очистка. Отмена после успешного старта/во время IP baseline и приоритет disconnect/shutdown сохраняются. Трассировка: AT-00-003/008, AT-03-001/007/008; F-019/F-021/F-030.
+
+Добавлено 15 регрессионных сценариев. До исправления адресный red-прогон: 9 failed, 6 passed. После исправления адресные 7 suites: 260 passed, 1 существующий skipped, exit 0. Сценарии исполняют production firewall queue, App callback, restartProtected и picker handlers с управляемыми OS/IPC границами: 11 одновременных читателей дают одно полное чтение; мутация между чтениями требует нового результата; неполная cleanup receipt не разрешает пропустить stop.
+
+Проверки на неизменных production source/tests:
+- `npm.cmd run typecheck` — exit 0; 165 IPC channels, 0 public any.
+- `npm.cmd test -- --reporter=dot` — 5849 passed, 5 существующих skipped, 0 failed; 318 passed/2 skipped suites, 393.08 s, exit 0. Журнал: `vpn-tunnel-enforcer/.tmp/firewall-lifecycle-20261021-full-vitest.log`.
+- `python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py` из корня — AC 927/927, F 210/210, exit 0; это полнота трассировки.
+- `npx.cmd electron-vite build` — exit 0.
+- `node scripts/test-electron-runtime.mjs` — 9 *_PASS, exit 0, изолированные фикстуры. Журнал: `vpn-tunnel-enforcer/.tmp/firewall-lifecycle-20261021-electron-smoke.log`.
+- `npm.cmd run dist:win -- --config.directories.output=dist/firewall-lifecycle-20261021` — exit 0; включает повторный typecheck/build и штатную подготовку installer shutdown.
+- `git diff --check` — exit 0.
+
+Установщик: `vpn-tunnel-enforcer/dist/firewall-lifecycle-20261021/VPN-Tunnel-Enforcer-Setup-1.1.24.exe`, 139777269 байт, SHA-256 `271e928fa610ee2f9aeaed025202f515dcbf95e1d41d5522f3bd973ec7e4e855`. Все 187 текущих файлов out/ побайтово совпадают с app.asar в win-unpacked. Установщик не запускался; фактическое время подключения/отмены после этих изменений ещё не измерено. Работающее установленное приложение и его VPN не переключались.
