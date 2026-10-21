@@ -27,7 +27,9 @@ export async function connectInspector(port, expectedPid, timeoutMs = 30_000) {
   let contextId
   const contexts = []
   const requests = new Map()
+  let disconnected = false
   const closed = () => {
+    disconnected = true
     for (const request of requests.values()) request.reject(new Error('Electron inspector disconnected'))
     requests.clear()
   }
@@ -43,6 +45,7 @@ export async function connectInspector(port, expectedPid, timeoutMs = 30_000) {
     else request.resolve(message.result?.result?.value)
   })
   const request = (method, params = {}) => {
+    if (disconnected || socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error('Electron inspector disconnected'))
     const id = ++nextId
     const promise = new Promise((resolve, reject) => {
       requests.set(id, { resolve, reject })

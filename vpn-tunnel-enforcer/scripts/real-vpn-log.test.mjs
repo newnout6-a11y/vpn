@@ -57,6 +57,11 @@ test('only known application events and numeric timings enter public logs', () =
   assert.equal(safeAppEvent({ ...event, ts: 'invalid' }), null)
   assert.equal(safeAppEvent(null), null)
   assert.equal(safeAppEvent({ ...event, scope: 'toString' }), null)
+  const correlationId = 'ipc_' + 'a'.repeat(32), clockId = 'clock_' + 'b'.repeat(24)
+  assert.deepEqual(safeAppEvent({ ...event, correlationId, clockId, monotonicMs: 42 }).clockId, clockId)
+  assert.deepEqual(safeAppEvent({ ...event, correlationId }).correlationId, correlationId)
+  assert.equal(safeAppEvent({ ...event, message: 'startup failed; saved configuration retained', scope: 'app',
+    details: { code: 'STARTUP_FAILED', error: 'FAKE-PRIVATE-PAYLOAD' } }).code, 'STARTUP_FAILED')
   assert.deepEqual(safeAppEvent({ ...event, details: { phaseDurations: {
     'wait-tun-interface': { durationMs: 12, error: 'FAKE-PRIVATE-PAYLOAD' }, 'stop-xray': 8,
     'FAKE-PRIVATE-PAYLOAD': 3, 'prepare-runtime': 'FAKE-PRIVATE-PAYLOAD' } } }).phaseDurations,

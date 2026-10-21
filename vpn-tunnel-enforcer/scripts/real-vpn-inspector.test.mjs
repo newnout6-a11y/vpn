@@ -62,5 +62,6 @@ test('real Electron context, PID binding, concurrent calls and safe transport er
   await assert.rejects(inspector.evaluate('throw new Error("FAKE-PRIVATE-PAYLOAD")'), error => !error.message.includes('FAKE-PRIVATE-PAYLOAD'))
   await inspector.evaluate('setTimeout(()=>__realVpnElectron.app.exit(0),30);true')
   inspector.close()
+  await assert.rejects(deadline(inspector.evaluate('true'), 250, 'closed transport'), /Electron inspector disconnected/)
   assert.equal(await deadline(exited, 5000, 'fixture exit'), 0)
 })

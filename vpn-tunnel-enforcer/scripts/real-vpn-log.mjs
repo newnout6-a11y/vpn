@@ -59,7 +59,12 @@ export function safeAppEvent(event) {
   if (!event || typeof event !== 'object') return null
   const allowed = event.scope === 'ipc'
     ? /^(start-direct-vpn|stop-tun|cancel-tun|servers:(select|cancel-switch|ping-one)|get-firewall-kill-switch-status) (started|finished|failed)$/.test(event.message)
-    : ({ app: ['application ready', 'renderer process gone', 'renderer became unresponsive', 'failed to load renderer index.html'],
+    : ({ app: ['application ready', 'renderer process gone', 'renderer became unresponsive', 'failed to load renderer index.html',
+          'relaunching elevated', 'startup failed; saved configuration retained', 'before quit', 'all windows closed',
+          'uncaughtException — keeping app alive', 'unhandledRejection — keeping app alive', 'child process gone',
+          'failed to start elevated PS helper', 'crash recovery failed', 'startup network recovery unconfirmed',
+          'checking for stale TUN adapter during crash recovery', 'V2 feature modules registered and initialized'],
+        security: ['Secure store preflight failed; startup refused without changing network protection'],
         tun: ['start timing', 'stop timing', 'stop started', 'stop step started', 'stop step completed'], xray: ['start timing'],
         'ps-helper': ['command timing'], 'firewall-killswitch': ['command timing', 'phase timing', 'native phase timing'],
         'system-network': ['baseline native phase timing'] })[event.scope]?.includes?.(event.message)
@@ -70,8 +75,10 @@ export function safeAppEvent(event) {
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0) result[key] = value
   }
   for (const key of ['correlationId', 'clockId']) {
-    if (/^(?:[0-9a-f-]{36}|(?:ipc|op|clock)_[0-9a-f]{32})$/i.test(event[key] ?? '')) result[key] = event[key]
+    if (/^(?:[0-9a-f-]{36}|(?:ipc|op)_[0-9a-f]{32}|clock_[0-9a-f]{24})$/i.test(event[key] ?? '')) result[key] = event[key]
   }
+  if (Number.isFinite(event.monotonicMs) && event.monotonicMs >= 0) result.monotonicMs = event.monotonicMs
+  if (['SECURE_STORE_PREFLIGHT_FAILED', 'STARTUP_FAILED'].includes(event.details?.code)) result.code = event.details.code
   for (const key of ['phase', 'step']) if (phases.has(event.details?.[key])) result[key] = event.details[key]
   const timings = {}
   for (const [phase, value] of Object.entries(event.details?.phaseDurations ?? {})) {

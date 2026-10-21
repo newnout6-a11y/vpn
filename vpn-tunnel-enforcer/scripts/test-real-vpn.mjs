@@ -102,6 +102,10 @@ async function run(config, seed) {
         // Manual spawn: a transport failure must never force-kill a live VPN runtime.
         application = await progress.run('prepare/launch', () => spawn(config.exe, [`--inspect=127.0.0.1:${port}`], {
           cwd: dirname(config.exe), env, windowsHide: true, stdio: 'ignore' }))
+        application.once('exit', (code, signal) => {
+          report.applicationExit = { code, signal }
+          progress.record('application-exit', report.applicationExit)
+        })
         const launchError = new Promise((_, reject) => application.once('error', () => reject(new Error('Application launch failed'))))
         inspector = await progress.run('prepare/inspector', () => Promise.race([connectInspector(port, application.pid, config.timeoutMs), launchError]))
         await progress.run('prepare/window-hooks', () => inspector.evaluate(`(() => {
