@@ -9,19 +9,29 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      real_vpn:
+        description: Run the isolated real VPN scenario instead of ordinary checks (requires secret)
+        type: boolean
+        default: false
+      cancel_after_ms:
+        description: Delay before cancelling an admitted VPN operation (ms)
+        type: string
+        default: '500'
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.real_vpn || false }}
+  cancel-in-progress: ${{ !inputs.real_vpn }}
 
 env:
   PYTHONUTF8: '1'
 
 jobs:
   app:
+    if: ${{ !inputs.real_vpn }}
     name: Приложение (Windows)
     runs-on: windows-latest
     timeout-minutes: 40
@@ -81,6 +91,7 @@ jobs:
           npm run build
           node scripts/test-electron-runtime.mjs
           node scripts/test-wp1-native.mjs --ipc-only
+          npm run test:real-vpn:unit
       # Real BFE ABI/read-back inside an aborted transaction; never commits
       # filters. This supplements mocks, not packet/reboot/OS-matrix L3.
       - name: IPv6 WFP — нативный ABI и откат транзакции
@@ -91,6 +102,7 @@ jobs:
         run: npm run test:electron-probe
 
   website:
+    if: ${{ !inputs.real_vpn }}
     name: Сайт (сборка и HTML)
     # Сборщик и линтер — чистый Node без зависимостей и без Win32: хватает Linux-раннера.
     # Проверки в браузере (tools/check.mjs, fontcheck.mjs) требуют Chrome и сюда не входят.
@@ -114,6 +126,7 @@ jobs:
         run: node tools/lint-html.mjs
 
   sidecar:
+    if: ${{ !inputs.real_vpn }}
     name: ETW-сайдкар (Rust)
     runs-on: windows-latest
     timeout-minutes: 30
@@ -124,3 +137,12 @@ jobs:
       - name: cargo test
         shell: bash
         run: cargo test --locked --manifest-path vpn-tunnel-enforcer/native/vpnte-etw-sidecar/Cargo.toml
+
+  real-vpn:
+    name: Реальный VPN-сценарий (отдельная Windows)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.real_vpn && github.actor == github.repository_owner }}
+    uses: ./.github/workflows/real-vpn.yml
+    with:
+      cancel_after_ms: ${{ inputs.cancel_after_ms }}
+    secrets:
+      VPNTE_REAL_SCENARIO: ${{ secrets.VPNTE_REAL_SCENARIO }}

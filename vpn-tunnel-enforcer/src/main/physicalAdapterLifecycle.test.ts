@@ -45,6 +45,17 @@ function deferred<T>() {
 }
 
 describe('adapter rollback correlation (AT-03-007)', () => {
+  it.each([
+    ['ifIndex', 0], ['alias', 'FAKE-PRIVATE\nPAYLOAD'], ['ipv6Enabled', null], ['forcedIpv6Off', 'private'],
+    ['interfaceGuid', 'FAKE-PRIVATE-PAYLOAD'], ['ipv4DnsSource', 'private'], ['ipv4DnsServers', ['FAKE-PRIVATE-PAYLOAD']],
+    ['forcedDnsTo', ['FAKE-PRIVATE-PAYLOAD']]
+  ])('identifies invalid %s without echoing the snapshot (AT-03-012)', (field, value) => {
+    const validate = compile<(value: unknown) => any>('validateLockdownManifest', { isIP })
+    const manifest = { schemaVersion: 1, owner: 'VPNTE', appliedAt: Date.now(), tunDnsIpv4: '192.168.250.254',
+      adapters: [{ ...adapter(), ipv4DnsSource: 'static', ipv6Enabled: true, forcedIpv6Off: true, [field as string]: value }],
+      dnsRegistryPolicy: { smartNameResolution: { exists: false }, parallelAandAAAA: { exists: false } } }
+    expect(() => validate(manifest)).toThrow(`Invalid adapter snapshot: ${field}`)
+  })
   it.each(['A0_ipv6:noop-unverified', 'A0_ipv6_err: diagnostic mentions A0_ipv6:noop', 'A0_ipv6:noop\nA0_ipv6_err: denied', 'A0_ipv6:noop\nA0_ipv6:noop'])(
     'does not promote an ambiguous native marker into a restored receipt: %s (AT-00-004/AT-03-007)', async ipv6 => {
       const deps = { process: { platform: 'win32' }, logEvent: vi.fn(), psSingleQuote: quote,
@@ -336,6 +347,7 @@ describe('physical adapter apply cancellation', () => {
     expect(await h.apply('192.168.250.254', { forceDns: false })).toMatchObject({ applied: true, warnings: [] })
     expect(h.snapshotPhysicalAdapters).toHaveBeenCalledTimes(2)
     expect(h.rollbackPhysicalAdapterLockdownIfApplied).not.toHaveBeenCalled()
+    expect(h.snapshotPhysicalAdapters).toHaveBeenLastCalledWith({ forceFresh: true, retainedGuids: [adapter().interfaceGuid] })
   })
   it('verifies an existing journal against fresh adapters before idempotent success (AT-03-006)', async () => {
     const h = harness()

@@ -20,6 +20,29 @@ function compile(name:string,deps:Record<string,unknown>) {
 }
 beforeEach(()=>useAppStore.setState({tunnelSnapshot:null,connectionBusy:null,connectionCancelling:false,serverSwitchingName:null,publicIp:null,isLeak:false}))
 describe('canonical App event handling',()=>{
+  it('invalidates firewall evidence during transitions and reads only settled snapshots (AT-00-008 / AT-03-001)',async()=>{
+    const stoppingNowRef={current:false},tunEventSeqRef={current:0}
+    const onSnapshot=compile('onTunnelStateChanged',{useAppStore,stoppingNowRef,tunEventSeqRef})
+    const refresh=vi.spyOn(useAppStore.getState(),'refreshFirewallKillSwitchStatus').mockResolvedValue(undefined)
+    let release!:()=>void
+    const held=new Promise<void>(resolve=>{release=resolve})
+    const os={running:false,pid:null as number|null,softApplied:false}
+    const model=new TunnelStateMachine(()=>os,onSnapshot),lane=new ConnectionLifecycle(()=>{},undefined,undefined,model)
+    useAppStore.setState({firewallKillSwitchStatus:{state:'verified',cleanupRequired:true,reason:'policy-verified'}})
+    try {
+      const pending=lane.start(async()=>{await held;os.running=true;os.pid=731;return {success:true}})
+      const stale=model.snapshot
+      expect(stoppingNowRef.current).toBe(true)
+      expect(refresh).not.toHaveBeenCalled()
+      expect(useAppStore.getState().firewallKillSwitchStatus).toMatchObject({state:'unknown',reason:'checking'})
+      release();await pending
+      expect(stoppingNowRef.current).toBe(false)
+      expect(refresh).toHaveBeenCalled()
+      const calls=refresh.mock.calls.length
+      onSnapshot(stale)
+      expect(refresh).toHaveBeenCalledTimes(calls)
+    } finally {release();refresh.mockRestore()}
+  })
   it('keeps renderer Soft mode after a failed refresh with confirmed prior endpoint (AT-00-008)',async()=>{
     const stoppingNowRef={current:false},tunEventSeqRef={current:0}
     const deps={useAppStore,stoppingNowRef,tunEventSeqRef,addLog:vi.fn(),verifyActiveServerCountry:vi.fn(async()=>{})}

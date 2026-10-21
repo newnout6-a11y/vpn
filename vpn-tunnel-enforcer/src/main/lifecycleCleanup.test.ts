@@ -172,6 +172,57 @@ return Object.assign(controller.stop.bind(controller), { setRunning: (running) =
   return { stop, ...os, state }
 }
 
+describe('runtime exit proof polling (AT-02-005/009 / AT-03-007)', () => {
+  afterEach(() => vi.useRealTimers())
+  const waiter = (probe: (proof: boolean) => Promise<boolean>) => compile<(timeout?: number) => Promise<boolean>>(
+    body('tunController.ts', 'waitForOwnedRuntimeToExit') + ';return waitForOwnedRuntimeToExit;', { isOwnedTunRuntimeRunning: probe })
+
+  it('retries a failed read and a live process until a fresh read proves exit', async () => {
+    vi.useFakeTimers()
+    const probe = vi.fn().mockRejectedValueOnce(new Error('Runtime path unavailable')).mockResolvedValueOnce(true).mockResolvedValue(false)
+    const pending = waiter(probe)().catch(error => error)
+    await vi.advanceTimersByTimeAsync(250)
+    expect(probe).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(250)
+    expect(await pending).toBe(true)
+    expect(probe.mock.calls.every(([proof]) => proof === true)).toBe(true)
+  })
+  it('keeps persistent read failure as a failure after the polling budget', async () => {
+    vi.useFakeTimers()
+    const error = new Error('query denied'), probe = vi.fn().mockRejectedValue(error)
+    const pending = waiter(probe)().catch(error => error)
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(await pending).toBe(error)
+    expect(probe).toHaveBeenCalledTimes(13)
+  })
+  it('refuses a process that is still running at the deadline', async () => {
+    vi.useFakeTimers()
+    const probe = vi.fn(async () => true), pending = waiter(probe)()
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(await pending).toBe(false)
+    expect(probe).toHaveBeenCalledTimes(13)
+  })
+  it('accepts an immediate fresh exit proof without an extra delay', async () => {
+    const probe = vi.fn(async () => false)
+    expect(await waiter(probe)()).toBe(true)
+    expect(probe).toHaveBeenCalledExactlyOnceWith(true)
+  })
+  it('holds upstream and network protection through a transient read failure in actual stop', async () => {
+    vi.useFakeTimers()
+    const h = stopHarness()
+    h.isOwnedTunRuntimeRunning.mockRejectedValueOnce(new Error('Runtime path unavailable')).mockResolvedValue(false)
+    h.waitForOwnedRuntimeToExit.mockImplementation(waiter(h.isOwnedTunRuntimeRunning))
+    const pending = h.stop()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.stopXray).not.toHaveBeenCalled()
+    expect(h.rollbackTunNetworkBaselineIfApplied).not.toHaveBeenCalled()
+    expect(h.disableKillSwitchIfActive).not.toHaveBeenCalled()
+    expect(h.rollbackPhysicalAdapterLockdownIfApplied).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(250)
+    expect(await pending).toMatchObject({ success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } })
+  })
+})
+
 it('publishes the actual native rollback receipt after cleanup and observer failures cannot strand stop (AT-00-002/003)', async () => {
   const h = stopHarness()
   const model = new TunnelStateMachine(() => ({ running: h.state.runtime, pid: h.state.runtime ? 123 : null, softApplied: false }))

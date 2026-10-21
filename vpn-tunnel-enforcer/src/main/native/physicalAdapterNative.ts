@@ -11,8 +11,8 @@ export * from './physicalAdapterCore'
  * JSON text equivalent to PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT stdout. Rejects on anything unexpected.
  * With an explicit `source` the snapshot is built in-process (tests); otherwise it runs in the host.
  */
-export async function readPhysicalAdaptersNative(source?: NativeAdapterSource): Promise<string> {
-  if (source) return snapshotFromSource(source)
+export async function readPhysicalAdaptersNative(source?: NativeAdapterSource, retainedGuids: readonly string[] = []): Promise<string> {
+  if (source) return snapshotFromSource(source, retainedGuids)
   const profiles = await fetchNetworkProfiles()
-  return callNativeHost<string>('physical-snapshot', { profiles: [...profiles.entries()] })
+  return callNativeHost<string>('physical-snapshot', { profiles: [...profiles.entries()], retainedGuids })
 }

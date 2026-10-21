@@ -8,7 +8,7 @@
  * Read-only: no DNS/adapter/firewall write is performed here.
  */
 import { ALL_KNOWN_ALIASES } from '../tunAdapter'
-import { ADAPTER_EXCLUSION_PATTERN } from '../physicalAdapterSnapshot'
+import { ADAPTER_EXCLUSION_PATTERN, normalizeRetainedAdapterGuids } from '../physicalAdapterSnapshot'
 import {
   AF_INET, AF_INET6, AF_UNSPEC, assertIfRow2Layout, assertKoffiAllowedHere, defineStruct, ERROR_BUFFER_OVERFLOW, FORWARD_ROW2_SIZE, GAA_FLAGS,
   IF_ROW2_OFFSETS, IF_ROW2_SIZE
@@ -20,12 +20,14 @@ export interface NativeAdapterInfo {
   interfaceGuid: string
   alias: string
   description: string
+  ipv4Enabled: boolean
   ipv6Enabled: boolean
   ifType: number
   ipv4Dns: string[]
   /** MIB_IF_ROW2.PermanentPhysicalAddress (trimmed to PhysicalAddressLength) as hex, '' if none. */
   permanentAddressHex: string
   filterInterface: boolean
+  hardwareInterface: boolean
   /** NDIS Characteristics; NCF_HIDDEN (0x8) adapters are skipped like PowerShell's Hidden. null/undefined = no class-key entry. */
   characteristics?: number | null
   mediaType: number
@@ -74,13 +76,15 @@ const NDIS_MEDIUM_WIRELESS_WAN = 2
 const NDIS_PHYSICAL_MEDIUM_WIRELESS_WAN = 8
 
 /** Pure transformation: same selection and classification as the PowerShell CIM branch. */
-export function buildPhysicalAdapterRows(source: NativeAdapterSource): PhysicalAdapterRow[] {
+export function buildPhysicalAdapterRows(source: NativeAdapterSource, retainedGuids: readonly string[] = []): PhysicalAdapterRow[] {
+  const retained = new Set(normalizeRetainedAdapterGuids(retainedGuids))
   const adapters = source.listUpAdapters()
   const routes = source.listDefaultRoutes()
   const profiles = source.listNetworkProfiles()
   const rows: PhysicalAdapterRow[] = []
   for (const a of adapters) {
-    if (a.filterInterface) continue
+    if (!a.hardwareInterface || a.filterInterface) continue
+    if (!a.ipv4Enabled && !a.ipv6Enabled && !retained.has(a.interfaceGuid.replace(/[{}]/g, '').toLowerCase())) continue
     if (a.characteristics != null && (a.characteristics & NCF_HIDDEN) !== 0) continue
     if (knownAliases.has(a.alias.toLowerCase())) continue
     if (exclusionRe.test(a.description)) continue
@@ -123,8 +127,8 @@ export function serializeRows(rows: PhysicalAdapterRow[]): string {
   return JSON.stringify(rows.length === 1 ? rows[0] : rows)
 }
 
-export function snapshotFromSource(source: NativeAdapterSource): string {
-  return serializeRows(buildPhysicalAdapterRows(source))
+export function snapshotFromSource(source: NativeAdapterSource, retainedGuids: readonly string[] = []): string {
+  return serializeRows(buildPhysicalAdapterRows(source, retainedGuids))
 }
 
 // ───────────────────────── FFI layer ─────────────────────────
@@ -205,12 +209,15 @@ function buildSourceFactory(): SourceFactory {
     listUpAdapters() {
       const characteristics = readNdisCharacteristicsByGuid()
       const size = [0]
-      let rc = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAGS, null, null, size)
+      // Include interfaces whose last IP binding our lockdown disabled; the row
+      // filter below admits unbound interfaces only by a trusted journal GUID.
+      const flags = GAA_FLAGS | 0x100 // GAA_FLAG_INCLUDE_ALL_INTERFACES
+      let rc = GetAdaptersAddresses(AF_UNSPEC, flags, null, null, size)
       let buf: Buffer | null = null
       for (let attempt = 0; attempt < 4 && (rc === ERROR_BUFFER_OVERFLOW || (rc === 0 && !buf)); attempt++) {
         buf = Buffer.alloc(size[0] + 4096)
         size[0] = buf.length
-        rc = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAGS, null, buf, size)
+        rc = GetAdaptersAddresses(AF_UNSPEC, flags, null, buf, size)
       }
       if (rc !== 0 || !buf) throw new Error(`native adapter snapshot: GetAdaptersAddresses rc=${rc}`)
       const base = BigInt(koffi.address(buf))
@@ -269,11 +276,13 @@ function buildSourceFactory(): SourceFactory {
             interfaceGuid: guid,
             alias: utf16z(buf, toOff(friendlyAddr), buf.length - toOff(friendlyAddr)),
             description: utf16z(buf, toOff(descAddr), buf.length - toOff(descAddr)),
+            ipv4Enabled: (flags & 0x80) !== 0,
             ipv6Enabled: (flags & 0x100) !== 0,
             ifType: buf.readUInt32LE(o + 100),
             ipv4Dns: dnsOf(buf.readBigUInt64LE(o + 48)),
             permanentAddressHex: row.subarray(IF_ROW2_OFFSETS.permanentPhysicalAddress, IF_ROW2_OFFSETS.permanentPhysicalAddress + permLen).toString('hex'),
             filterInterface: (row[IF_ROW2_OFFSETS.interfaceAndOperStatusFlags] & 0x2) !== 0,
+            hardwareInterface: (row[IF_ROW2_OFFSETS.interfaceAndOperStatusFlags] & 0x1) !== 0,
             characteristics: characteristics.get(guid.toLowerCase()) ?? null,
             mediaType: row.readUInt32LE(IF_ROW2_OFFSETS.mediaType),
             physicalMediumType: row.readUInt32LE(IF_ROW2_OFFSETS.physicalMediumType)

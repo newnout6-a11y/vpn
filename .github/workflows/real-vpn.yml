@@ -1,0 +1,126 @@
+name: Real VPN scenario (Windows)
+
+# Called only by CI's explicit manual real_vpn mode, including on an unmerged branch.
+on:
+  workflow_call:
+    inputs:
+      cancel_after_ms:
+        description: Delay after backend transition admission before cancelling (ms)
+        default: '500'
+        type: string
+    secrets:
+      VPNTE_REAL_SCENARIO:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-vpn-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  scenario:
+    # Branch measurements are authorized only by the owner who supplied the profiles.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner }}
+    runs-on: windows-2025
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: vpn-tunnel-enforcer
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          cache: npm
+          cache-dependency-path: vpn-tunnel-enforcer/package-lock.json
+      - run: npm ci
+      - name: Inspect hosted network bindings (read only, no addresses)
+        run: |
+          function Get-VpnteCiBinding([string]$AdapterName, [bool]$All) {
+            try {
+              $options = @{Name=$AdapterName; ComponentID='ms_tcpip6'; ErrorAction='Stop'}
+              if ($All) { $options.AllBindings=$true; $options.IncludeHidden=$true }
+              $bindings = @(Get-NetAdapterBinding @options)
+              return @{checked=$true; rows=$bindings.Count; enabled=@($bindings | Where-Object Enabled).Count}
+            } catch { return @{checked=$false; rows=0; enabled=0} }
+          }
+          $rows = @(Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object {
+            [ordered]@{
+              hardware = [bool]$_.HardwareInterface
+              virtual = [bool]$_.Virtual
+              hyperV = [bool]($_.InterfaceDescription -match 'Hyper-V|vEthernet')
+              ipInterfaces = @(Get-NetIPInterface -InterfaceIndex $_.ifIndex -ErrorAction SilentlyContinue).Count
+              ipv4Addresses = @(Get-NetIPAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).Count
+              defaultRoutes = @(Get-NetRoute -InterfaceIndex $_.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).Count
+              ipv6 = Get-VpnteCiBinding $_.Name $false
+              allIpv6 = Get-VpnteCiBinding $_.Name $true
+            }
+          })
+          ConvertTo-Json -InputObject $rows -Depth 4 -Compress
+      - name: Download pinned production engines and Wintun
+        run: |
+          $tmp = Join-Path $env:RUNNER_TEMP 'real-vpn-engines'
+          New-Item -ItemType Directory -Force $tmp | Out-Null
+          function Get-Engine([string]$Url, [string]$Sha256, [string]$Name, [string[]]$Files) {
+            $zip = Join-Path $tmp "$Name.zip"
+            Invoke-WebRequest -Uri $Url -OutFile $zip
+            if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower() -ne $Sha256) {
+              throw "Archive checksum mismatch: $Name"
+            }
+            $dir = Join-Path $tmp $Name
+            Expand-Archive -LiteralPath $zip -DestinationPath $dir
+            foreach ($name in $Files) {
+              $found = @(Get-ChildItem -LiteralPath $dir -Recurse -File | Where-Object Name -eq $name)
+              if ($found.Count -ne 1) { throw "Expected one $name in $Name" }
+              Copy-Item -LiteralPath $found[0].FullName -Destination (Join-Path 'resources' $name)
+            }
+          }
+          Get-Engine 'https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-windows-64.zip' 'c7172078fca4711bcd92a4774dcd1822544579c58816197575c47533317fd8d1' 'xray' @('xray.exe')
+          Get-Engine 'https://github.com/SagerNet/sing-box/releases/download/v1.13.13/sing-box-1.13.13-windows-amd64.zip' 'aea1fa983134a2e2d0600581d1178e98bd6bb93ae12ad8c333eaacae68a1694c' 'sing-box' @('sing-box.exe', 'libcronet.dll')
+          Get-Engine 'https://www.wintun.net/builds/wintun-0.14.1.zip' '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51' 'wintun' @()
+          Copy-Item -LiteralPath (Join-Path $tmp 'wintun/wintun/bin/amd64/wintun.dll') -Destination 'resources/wintun.dll'
+      - name: Package the production application
+        run: |
+          npm run prepare:electron
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build:sidecar
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build:snapshot
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build:installer-shutdown
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The job is already elevated. requireAdministrator on the shared Chromium
+          # executable prevents restricted GPU/renderer children from starting (SBOX 18).
+          # Override only this disposable artifact, preserving Chromium's sandbox.
+          npx --no-install electron-builder --win --dir --config.directories.output=dist/real-vpn --config.win.requestedExecutionLevel=asInvoker
+      - name: Scenario and inspector regressions (no VPN switching)
+        run: npm run test:real-vpn:unit
+      - name: Run the real connection sequence
+        # The script stops admitting scenario work after five minutes, drains
+        # admitted cancellation, then runs stop + acknowledged shutdown.
+        timeout-minutes: 20
+        env:
+          VPNTE_REAL_SCENARIO: ${{ secrets.VPNTE_REAL_SCENARIO }}
+          VPNTE_CANCEL_AFTER_MS: ${{ inputs.cancel_after_ms }}
+        run: node scripts/test-real-vpn.mjs --exe 'dist/real-vpn/win-unpacked/VPN Tunnel Enforcer.exe'
+      - name: Upload timings and state evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-vpn-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          include-hidden-files: true
+          # The repository is public. Never upload userData, raw logs, configs or keys.
+          path: |
+            vpn-tunnel-enforcer/.tmp/real-vpn/report.json
+            vpn-tunnel-enforcer/.tmp/real-vpn/progress.log
