@@ -34,8 +34,8 @@ function body(file: string, name: string): string {
     ? '\n' + body(file, name + 'Effects') : ''
   return `${ts.isVariableDeclaration(found) ? 'const ' : ''}${found.getText(source)}${effects}`
 }
-function compile<T>(text: string, dependencies: Record<string, unknown>): T {
-  const js = ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
+function compile<T>(text: string, dependencies: Record<string, unknown>, module = ts.ModuleKind.None): T {
+  const js = ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ES2022, module } }).outputText
   const classify = ts.transpileModule(body('tunController.ts', 'classifyTunError') + ';return classifyTunError;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
   const classifyTunError = new Function('RecoveryWorkerError', 'classifyIpcError', classify)(RecoveryWorkerError, classifyIpcError)
   const bindings = { NoSupportedVpnProfilesError, currentCorrelationId, withCorrelation, randomUUID, connectionFailure, ipcError, classifyIpcError, readIpcErrorCategory, IpcFault, classifyTunError, ...dependencies }
@@ -1425,9 +1425,9 @@ describe('owned Soft startup (AT-00-003/007 subset)', () => {
   })
 })
 
-function ipStartupHarness(mode: 'direct' | 'proxy') {
+function ipStartupHarness(mode: 'direct' | 'proxy', verifyRestoration = false) {
   let running = false
-  const settings = { autoNetworkBaseline: false, directVpnInput: '' }
+  const settings = { autoNetworkBaseline: false, directVpnInput: '', adaptiveBypassEnabled: false }
   const os = {
     ...mainHarness('stopProtection'),
     rollbackSoftAutoconfigIfApplied: done(), suppressLeakSelfTestsFor: noop(), captureSnapshot: done(),
@@ -1444,16 +1444,28 @@ function ipStartupHarness(mode: 'direct' | 'proxy') {
     applyTunNetworkBaseline: vi.fn(async (): Promise<any> => ({ success: true })), rollbackTunNetworkBaselineIfApplied: done(),
     rollbackTunNetworkBaselineOrThrow: done(),
     markAdaptiveFailure: noop(), readRecentSingBoxOutboundFault: vi.fn(async () => null), scheduleAdaptiveVerification: noop(),
-    ipMonitor: { clearVpnIp:noop(),startMonitoring: noop(), getCurrentIp: vi.fn(async (_guard?: () => boolean) => ({ ip: '203.0.113.1' })),
+    ipMonitor: { clearVpnIp:noop(),startMonitoring: noop(), suspend: noop(), resume: noop(), getCurrentIp: vi.fn(async (_guard?: () => boolean) => ({ ip: '203.0.113.1' })),
       recheck: vi.fn(async (_rebaseline: boolean, _guard?: () => boolean) => ({ ip: '203.0.113.1', isLeak: false })) },
     startTrafficForensicsSession: done(), refreshTrayState: noop(), openSession: noop(), startPeriodicSnapshots: noop(),
     startPeriodicLeakTest: noop(), startNetworkChangeWatcher: noop(), sendToMainWindow: noop(), logEvent: noop(),
     areTunRoutesActive: vi.fn(async () => false)
   }
+  const verification = {
+    collectAdaptiveSamples: vi.fn(async (_current: () => boolean, _signal: AbortSignal, probe: (signal: AbortSignal) => Promise<number>): Promise<number[]> => { await probe(_signal); return [30, 40] }),
+    markAdaptiveVerifying: noop(), markAdaptiveSuccess: done(), getAdaptiveBypassStatus: () => ({ mode: 'standard' }),
+    invalidateAdaptiveLearningContext: noop(), resolveAdaptiveCapabilities: () => ({}),
+    require: (module: string) => {
+      if (module !== './serverPicker') throw new Error('Unexpected verification dependency')
+      return { tunnelHttpProbe: vi.fn(async () => 40) }
+    }
+  }
+  let hooks: { begin: () => Promise<void>; end: () => void }
+  const source = ts.createSourceFile('index.ts', readFileSync('src/main/index.ts', 'utf8'), ts.ScriptTarget.Latest, true)
+  const hookRegistration = source.statements.find(node => ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) && node.expression.expression.getText(source) === 'setProfileSwitchHooks')!
   os.connectionLifecycle = new ConnectionLifecycle(() => { running=false })
   const name = mode === 'direct' ? 'startDirectVpnProtection' : 'startProtection'
   const control = compile<{ start: () => Promise<any>; restore: (options: unknown) => Promise<any>; cancel: () => void; stop: () => Promise<any>; shutdown: () => Promise<void> }>(`
-let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,latestPublicIp=null,currentSession=null,stopInProgress=false,shutdownInProgress=false,softProtectionApplied=false;
+let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,latestPublicIp=null,currentSession=null,stopInProgress=false,shutdownInProgress=false,softProtectionApplied=false,manualProfileSwitchActive=false,adaptiveVerificationAbort=null,adaptiveTransitionInFlight=null;
 const KILL_SWITCH_RULE_PREFIX='VPNTE-killswitch';
 ${body('index.ts', name)}
 ${body('index.ts', `${name}Effects`)}
@@ -1461,9 +1473,11 @@ ${body('index.ts','restoreCancelledProfileSwitch')}
 ${body('index.ts','stopProtectionEffects')}
 ${body('index.ts','stopProtection')}
 ${body('index.ts','performShutdownCleanup')}
+${verifyRestoration ? ['ensureAdaptiveMonitoringForRunningTunnel', 'scheduleAdaptiveVerification', 'verifyAdaptiveConnection'].map(name => body('index.ts', name)).join('\n') + '\n' + hookRegistration.getText(source) : ''}
 return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : ''}),restore:restoreCancelledProfileSwitch,stop:stopProtection,shutdown:()=>performShutdownCleanup('test'), cancel: () => {adaptiveVerificationGeneration++}};
-`, os)
-  return { ...control, ...os, settings, setRunning: (value: boolean) => { running = value } }
+// CommonJS lets the real verifier import only the injected server-probe boundary.
+`, { ...os, ...verification, setProfileSwitchHooks: (value: typeof hooks) => { hooks = value } }, verifyRestoration ? ts.ModuleKind.CommonJS : ts.ModuleKind.None)
+  return { ...control, ...os, ...verification, settings, beginSwitch: () => hooks.begin(), endSwitch: () => hooks.end(), setRunning: (value: boolean) => { running = value } }
 }
 
 describe('cancelled server restoration repeats direct-VPN effects (AT-02-004 / AT-03-007)', () => {
@@ -1490,6 +1504,41 @@ describe('cancelled server restoration repeats direct-VPN effects (AT-02-004 / A
     expect(h.startPeriodicLeakTest).toHaveBeenCalledTimes(2)
     expect(h.openSession).toHaveBeenLastCalledWith(expect.objectContaining({ name: 'former server' }))
     h.cancel()
+  })
+  it.each([false, true])('finishes real restored verification after the manual guard releases (adaptive=%s)', async enabled => {
+    vi.useFakeTimers()
+    const h = ipStartupHarness('direct', true)
+    h.settings.adaptiveBypassEnabled = enabled
+    const previous = { mode: 'directVpn', vpnProfile: { name: 'former server', protocol: 'vless', outbound: { server: 'former.invalid', server_port: 443 } } }
+    await h.beginSwitch()
+    expect(await h.restore(previous)).toMatchObject({ success: true })
+    expect(h.markAdaptiveSuccess).not.toHaveBeenCalled()
+    expect(h.collectAdaptiveSamples).not.toHaveBeenCalled()
+    h.endSwitch()
+    await vi.waitFor(() => expect(h.markAdaptiveSuccess).toHaveBeenCalledExactlyOnceWith(previous.vpnProfile))
+    expect(h.collectAdaptiveSamples).toHaveBeenCalledTimes(enabled ? 1 : 0)
+    h.cancel()
+  })
+  it('reports a verification error after restoration and fences a result superseded by stop', async () => {
+    vi.useFakeTimers()
+    const h = ipStartupHarness('direct', true)
+    h.settings.adaptiveBypassEnabled = true
+    await h.beginSwitch()
+    await h.restore({ mode: 'directVpn', vpnProfile: { name: 'former server', outbound: {} } })
+    h.collectAdaptiveSamples.mockRejectedValueOnce(new Error('verification failed'))
+    h.endSwitch()
+    await vi.waitFor(() => expect(h.markAdaptiveFailure).toHaveBeenCalledExactlyOnceWith('verification failed'))
+    let release!: (samples: number[]) => void
+    h.collectAdaptiveSamples.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    await h.beginSwitch()
+    await h.restore({ mode: 'directVpn', vpnProfile: { name: 'former server', outbound: {} } })
+    h.endSwitch()
+    await vi.waitFor(() => expect(release).toBeDefined())
+    await h.stop()
+    release([30, 40])
+    await Promise.resolve()
+    expect(h.markAdaptiveSuccess).not.toHaveBeenCalled()
+    expect(h.markAdaptiveFailure).toHaveBeenCalledOnce()
   })
 })
 

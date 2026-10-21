@@ -404,7 +404,9 @@ setProfileSwitchHooks({
   end: () => {
     manualProfileSwitchActive = false
     ipMonitor.resume()
-    ensureAdaptiveMonitoringForRunningTunnel()
+    // Restoring via direct startup creates a context while this guard still fences verification.
+    if (activeAdaptiveContext && tunController.getStatus().running) scheduleAdaptiveVerification()
+    else ensureAdaptiveMonitoringForRunningTunnel()
   }
 })
 let activeAdaptiveContext: {
