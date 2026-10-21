@@ -71,6 +71,25 @@ async function invokeRequester(owner: EventEmitter, token?: string) {
   return handler({ sender: owner }, token)
 }
 const sender = () => Object.assign(new EventEmitter(), { isDestroyed: () => false })
+
+async function backgroundMainHarness() {
+  const leak = await import('./leakSelfTest')
+  const { TunnelStateMachine } = await import('./tunnelStateMachine')
+  const { ConnectionLifecycle } = await import('./connectionLifecycle')
+  const evidence = { running: false, pid: null as number | null, softApplied: false }
+  const model = new TunnelStateMachine(() => evidence)
+  const lane = new ConnectionLifecycle(vi.fn(), undefined, undefined, model)
+  const source = readFileSync(join(process.cwd(), 'src/main/index.ts'), 'utf8')
+  const start = source.indexOf('let backgroundProtectionExpected = false')
+  const end = source.indexOf('const connectionLifecycle =', start)
+  expect(start).toBeGreaterThan(-1); expect(end).toBeGreaterThan(start)
+  let status!: (value: string) => void
+  const deps = { tunnelState: model, tunController: { getStatus: () => evidence, onStatusChange: (cb: typeof status) => { status = cb } },
+    setBackgroundLeakTestGate: leak.setBackgroundLeakTestGate, cancelLeakSelfTest: leak.cancelLeakSelfTest, onNativeStop: vi.fn(), onNativeStartup: vi.fn() }
+  const js = ts.transpileModule(source.slice(start, end), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  new Function(...Object.keys(deps), js)(...Object.values(deps))
+  return { leak, model, lane, evidence, status, nativeStop: deps.onNativeStop.mock.calls[0][0], nativeStartup: deps.onNativeStartup.mock.calls[0][0] }
+}
 describe('leak requester main handler', () => {
   it.each(['destroyed', 'did-navigate', 'render-process-gone'])('cancels legacy document work on %s', async event => {
     const owner = sender(), task = invokeRequester(owner).catch(error => error)
@@ -325,6 +344,80 @@ describe('leak self-test lifetime', () => {
       stopPeriodicLeakTest()
       expect(children[0].kill).toHaveBeenCalledOnce()
     } finally { stopPeriodicLeakTest(); vi.useRealTimers() }
+  })
+  it('uses actual main status wiring to cancel probes before rollback and gate later ticks/events (AT-00-003/AT-07-002)', async () => {
+    const { leak, lane, evidence, status } = await backgroundMainHarness()
+    const detected = vi.fn(), completed = vi.fn()
+    leak.setLeakDetectedCallback(detected); leak.setLeakSelfTestCompletedCallback(completed)
+    await lane.start(async () => { evidence.running = true; evidence.pid = 123; status('running'); return { success: true } })
+    status('competing-tun:fixture'); status('competing-tun-cleared')
+    leak.triggerLeakCheckNow('connected')
+    await vi.waitFor(() => expect(children).toHaveLength(1))
+    // Runtime remains alive at stop admission; even here the probe must be cancelled.
+    status('stopping')
+    expect(children[0].kill).toHaveBeenCalledOnce()
+    children[0].finish('198.51.100.1')
+    await (await import('./operations')).operations.close()
+    evidence.running = false; evidence.pid = null; status('stopped')
+    vi.useFakeTimers()
+    try {
+      leak.startPeriodicLeakTest(30_000)
+      await vi.advanceTimersByTimeAsync(30_000)
+      leak.triggerLeakCheckNow('after-cancel')
+      expect(children).toHaveLength(1)
+      expect(detected).not.toHaveBeenCalled(); expect(completed).not.toHaveBeenCalled()
+      expect(state.log.mock.calls.some(([level, , message]) => level === 'warn' && String(message).startsWith('УТЕЧКА'))).toBe(false)
+    } finally { leak.stopPeriodicLeakTest(); vi.useRealTimers() }
+  })
+  it.each([true, false])('re-arms probes after failed runtime exit with retained protection (running=%s, AT-07-002)', async running => {
+    const h = await backgroundMainHarness(), detected = vi.fn()
+    h.leak.setLeakDetectedCallback(detected)
+    h.status('running')
+    h.status('stopping')
+    h.leak.triggerLeakCheckNow('during-stop')
+    expect(children).toHaveLength(0)
+    h.evidence.running = running; h.evidence.pid = running ? 123 : null
+    h.status('error')
+    h.nativeStop({ generation: 0, preserveNetworkProtection: false, result: { success: false, networkCleanup: { baseline: false, firewall: false, adapters: false } } })
+    h.leak.triggerLeakCheckNow('failed-stop-retained-protection')
+    await finishCheck(true)
+    await vi.waitFor(() => expect(detected).toHaveBeenCalledOnce())
+  })
+  it('does not arm probes after partial rollback, a stale receipt or an initially unprotected failed stop (AT-07-002)', async () => {
+    const h = await backgroundMainHarness()
+    h.status('stopping'); h.status('error')
+    const failure = { generation: 0, preserveNetworkProtection: false, result: { success: false } }
+    h.nativeStop(failure)
+    h.leak.triggerLeakCheckNow('initial-failure'); expect(children).toHaveLength(0)
+    h.status('running'); h.status('stopping'); h.status('error')
+    h.nativeStop({ ...failure, result: { success: false, runtimeStopped: true } })
+    h.leak.triggerLeakCheckNow('partial-rollback'); expect(children).toHaveLength(0)
+    h.nativeStartup({ phase: 'begin', generation: 1 })
+    h.nativeStop(failure)
+    h.leak.triggerLeakCheckNow('stale-receipt'); expect(children).toHaveLength(0)
+  })
+  it.each(['killswitch-active', 'adapting', 'restarting:1/3', 'error'])('still detects a real physical leak while protection is retained after %s (AT-07-002)', async heldStatus => {
+    const h = await backgroundMainHarness(), detected = vi.fn()
+    h.leak.setLeakDetectedCallback(detected)
+    await h.lane.start(async () => { h.evidence.running = true; h.evidence.pid = 123; h.status('running'); return { success: true } })
+    h.evidence.running = false; h.evidence.pid = null; h.status(heldStatus)
+    h.leak.triggerLeakCheckNow('retained-protection')
+    await finishCheck(true)
+    await vi.waitFor(() => expect(detected).toHaveBeenCalledOnce())
+    expect(detected.mock.calls[0][0]).toMatchObject({ physicalAdapterReached: true })
+  })
+  it('keeps periodic probes while blocked, but does not arm them for an unprotected initial retry (AT-07-002)', async () => {
+    const h = await backgroundMainHarness()
+    vi.useFakeTimers()
+    try {
+      h.leak.startPeriodicLeakTest(100)
+      h.status('restarting:1/1')
+      await vi.advanceTimersByTimeAsync(100)
+      expect(children).toHaveLength(0)
+      h.status('killswitch-active')
+      await vi.advanceTimersByTimeAsync(100)
+      expect(children).toHaveLength(1)
+    } finally { h.leak.stopPeriodicLeakTest(); children.forEach(child => child.finish()); vi.useRealTimers() }
   })
   it('rejects an already cancelled subscriber without spawning work', async () => {
     const { runLeakSelfTest } = await import('./leakSelfTest'), controller = new AbortController()

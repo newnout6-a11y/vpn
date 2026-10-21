@@ -6,8 +6,11 @@ const state = vi.hoisted(() => ({
   profiles: [] as any[],
   tunnelStatus: { running: true, mode: 'directVpn' },
   restartProtected: vi.fn(),
+  lastOptions: null as any,
+  restore: vi.fn(),
+  cancelTransition: vi.fn(),
   networkIdentity: vi.fn(), settings: {} as Record<string, any>,
-  stop: vi.fn(async () => undefined),
+  stop: vi.fn(async (): Promise<any> => undefined),
   ipMonitor: {
     getCurrentIp: vi.fn(async () => ({ ip: '198.51.100.1' })),
     invalidateVpnIpBaseline: vi.fn(),
@@ -71,7 +74,8 @@ vi.mock('./tunController', () => ({
   getDirectProxyPort: () => 1080,
   tunController: {
     getStatus: () => state.tunnelStatus,
-    getLastStartOptions: () => null,
+    getLastStartOptions: () => state.lastOptions,
+    cancelTransition: state.cancelTransition,
     restartProtected: (...args: any[]) => state.restartProtected(...args),
     stop: () => state.stop(),
     areTunRoutesActive: vi.fn(async () => true),
@@ -123,10 +127,14 @@ beforeEach(async () => {
   state.settings = {}
   state.networkIdentity.mockReset().mockResolvedValue('fixture-network-hmac')
   state.restartProtected.mockReset().mockResolvedValue({ success: true })
-  state.stop.mockReset().mockResolvedValue(undefined)
+  state.stop.mockReset().mockResolvedValue({ success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } })
+  state.lastOptions = { mode: 'directVpn', vpnProfile: { name: 'Profile a', protocol: 'vless', outbound: profile('a').outbound }, proxyEngine: 'xray', adaptiveMode: 'disabled', enableFirewallKillSwitch: true }
+  state.restore.mockReset().mockResolvedValue({ success: true })
+  state.cancelTransition.mockReset()
   for (const mock of Object.values(state.ipMonitor)) mock.mockClear()
 
   const serverPicker = await import('./serverPicker')
+  serverPicker.setProfileSwitchHooks({ begin: () => {}, end: () => {}, restore: state.restore })
   serverPicker.registerServerPickerHandlers()
   selectProfileHandler = state.ipcHandlers.get('servers:select')!
   cancelSwitchHandler = state.ipcHandlers.get('servers:cancel-switch')!
@@ -283,4 +291,133 @@ describe('server profile switching', () => {
     expect(state.restartProtected).not.toHaveBeenCalled()
     expect(end).toHaveBeenCalledOnce()
   })
+  it('restores the exact former runtime and selected profile after a cancelled new startup (AT-02-004 / AT-00-003)', async () => {
+    state.storeData.set('activeProfileId', 'a')
+    const restart = deferred<{ success: boolean; error?: string }>()
+    state.restartProtected.mockReturnValueOnce(restart.promise)
+    const pending = selectProfileHandler({}, 'b')
+    await vi.waitFor(() => expect(state.restartProtected).toHaveBeenCalledOnce())
+    await cancelSwitchHandler({})
+    expect(state.cancelTransition).toHaveBeenCalledOnce()
+    expect(state.restartProtected.mock.calls[0][2].signal.aborted).toBe(true)
+    expect(state.restore).not.toHaveBeenCalled()
+    state.tunnelStatus.running = false
+    restart.resolve({ success: false, error: 'new startup cancelled' })
+    await expect(pending).resolves.toEqual({ cancelled: true })
+    expect(state.restore).toHaveBeenCalledExactlyOnceWith(state.lastOptions)
+    expect(state.storeData.get('activeProfileId')).toBe('a')
+    expect(state.restore.mock.invocationCallOrder[0]).toBeGreaterThan(state.stop.mock.invocationCallOrder[0])
+  })
+  it('holds the switch guard through restoration and ignores repeated cancellation (AT-00-003)', async () => {
+    const restart = deferred<{ success: boolean }>(), restore = deferred<{ success: boolean }>()
+    state.restartProtected.mockReturnValueOnce(restart.promise)
+    state.restore.mockReturnValueOnce(restore.promise)
+    const pending = selectProfileHandler({}, 'b')
+    await vi.waitFor(() => expect(state.restartProtected).toHaveBeenCalledOnce())
+    await cancelSwitchHandler({})
+    restart.resolve({ success: true })
+    await vi.waitFor(() => expect(state.restore).toHaveBeenCalledOnce())
+    await expect(selectProfileHandler({}, 'a')).rejects.toThrow('уже выполняется')
+    await cancelSwitchHandler({})
+    expect(state.cancelTransition).toHaveBeenCalledOnce()
+    restore.resolve({ success: true })
+    await expect(pending).resolves.toEqual({ cancelled: true })
+  })
+  it('keeps the old live runtime when cancelled before native restart (AT-02-004)', async () => {
+    state.settings = { adaptiveBypassEnabled: true }
+    state.storeData.set('activeProfileId', 'a')
+    const identity = deferred<string>()
+    state.networkIdentity.mockReturnValue(identity.promise)
+    const pending = selectProfileHandler({}, 'b')
+    await vi.waitFor(() => expect(state.networkIdentity).toHaveBeenCalledOnce())
+    await cancelSwitchHandler({})
+    identity.resolve('fixture-network-hmac')
+    await expect(pending).resolves.toEqual({ cancelled: true })
+    expect(state.storeData.get('activeProfileId')).toBe('a')
+    expect(state.cancelTransition).not.toHaveBeenCalled()
+    expect(state.stop).not.toHaveBeenCalled()
+    expect(state.restore).not.toHaveBeenCalled()
+  })
+  it('reports restoration failure instead of ordinary cancellation (AT-00-004)', async () => {
+    const restart = deferred<{ success: boolean }>()
+    state.restartProtected.mockReturnValueOnce(restart.promise)
+    state.restore.mockResolvedValueOnce({ success: false, error: 'old server unreachable' })
+    const pending = selectProfileHandler({}, 'b')
+    const rejected = expect(pending).rejects.toThrow('old server unreachable')
+    await vi.waitFor(() => expect(state.restartProtected).toHaveBeenCalledOnce())
+    await cancelSwitchHandler({})
+    restart.resolve({ success: true })
+    await rejected
+  })
+  it('does not start the old runtime after incomplete cleanup (AT-03-007)', async () => {
+    const restart = deferred<{ success: boolean }>()
+    state.restartProtected.mockReturnValueOnce(restart.promise)
+    state.stop.mockResolvedValueOnce({ success: false, error: 'firewall rollback unconfirmed' } as any)
+    const pending = selectProfileHandler({}, 'b')
+    const rejected = expect(pending).rejects.toThrow('firewall rollback unconfirmed')
+    await vi.waitFor(() => expect(state.restartProtected).toHaveBeenCalledOnce())
+    await cancelSwitchHandler({})
+    restart.resolve({ success: true })
+    await rejected
+    expect(state.restore).not.toHaveBeenCalled()
+  })
+  it('lets disconnect or shutdown supersede cancellation while the new attempt drains (AT-02-004)', async () => {
+    const restart = deferred<{ success: boolean }>()
+    state.restartProtected.mockReturnValueOnce(restart.promise)
+    const pending = selectProfileHandler({}, 'b')
+    await vi.waitFor(() => expect(state.restartProtected).toHaveBeenCalledOnce())
+    await cancelSwitchHandler({})
+    const { abandonProfileSwitch } = await import('./serverPicker')
+    abandonProfileSwitch()
+    restart.resolve({ success: true })
+    await expect(pending).resolves.toEqual({ cancelled: true })
+    expect(state.restore).not.toHaveBeenCalled()
+  })
+  it('does not leave a cancellation flag when no switch exists (AT-00-003)', async () => {
+    await cancelSwitchHandler({})
+    expect(state.cancelTransition).not.toHaveBeenCalled()
+    await expect(selectProfileHandler({}, 'b')).resolves.toBeUndefined()
+  })
+
+  it('lets disconnect win while cancellation cleanup is still draining (AT-02-004)', async () => {
+    const restart = deferred<{ success: boolean }>(), cleanup = deferred<any>()
+    state.restartProtected.mockReturnValueOnce(restart.promise)
+    state.stop.mockReturnValueOnce(cleanup.promise)
+    const pending = selectProfileHandler({}, 'b')
+    await vi.waitFor(() => expect(state.restartProtected).toHaveBeenCalledOnce())
+    await cancelSwitchHandler({})
+    restart.resolve({ success: true })
+    await vi.waitFor(() => expect(state.stop).toHaveBeenCalledOnce())
+    ;(await import('./serverPicker')).abandonProfileSwitch()
+    cleanup.resolve({ success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } })
+    await expect(pending).resolves.toEqual({ cancelled: true })
+    expect(state.restore).not.toHaveBeenCalled()
+  })
+  it('does not invent former runtime options when they are unavailable (AT-00-004)', async () => {
+    state.lastOptions = null
+    const restart = deferred<{ success: boolean }>()
+    state.restartProtected.mockReturnValueOnce(restart.promise)
+    const pending = selectProfileHandler({}, 'b')
+    const rejected = expect(pending).rejects.toThrow('параметры запуска недоступны')
+    await vi.waitFor(() => expect(state.restartProtected).toHaveBeenCalledOnce())
+    await cancelSwitchHandler({})
+    restart.resolve({ success: true })
+    await rejected
+    expect(state.restore).not.toHaveBeenCalled()
+  })
+  it('cancels during fresh IP acquisition after the new runtime has already started (AT-07-012)', async () => {
+    state.storeData.set('activeProfileId', 'a')
+    const ip = deferred<{ ip: string }>()
+    state.ipMonitor.recheck.mockReturnValueOnce(ip.promise)
+    const pending = selectProfileHandler({}, 'b')
+    await vi.waitFor(() => expect(state.ipMonitor.recheck).toHaveBeenCalledOnce())
+    await cancelSwitchHandler({})
+    expect(state.cancelTransition).not.toHaveBeenCalled()
+    ip.resolve({ ip: '198.51.100.99' })
+    await expect(pending).resolves.toEqual({ cancelled: true })
+    expect(state.restore).toHaveBeenCalledExactlyOnceWith(state.lastOptions)
+    expect(state.storeData.get('activeProfileId')).toBe('a')
+    expect(state.ipMonitor.recheck).toHaveBeenCalledTimes(2)
+  })
+
 })

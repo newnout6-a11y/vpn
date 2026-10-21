@@ -90,6 +90,50 @@ it('does not duplicate healthy items as findings', async () => {
   expect((await logged()).filter(row => row.message === 'system diagnostic finding')).toHaveLength(0)
 })
 
+it('excludes only the renderer health warning summary, preserving independent warnings and error summaries (AT-00-005)', async () => {
+  const { getLogSummary } = await harness(async () => [])
+  const message = 'Health-check завершён: есть пункты для внимания'
+  for (let i = 0; i < 2; i++) {
+    logger.logEvent('warn', 'renderer', message)
+    await logger.flushAppLog()
+    expect((await getLogSummary(logger.getAppLogPath(), { structuredApp: true })).errors).toEqual([])
+  }
+  logger.logEvent('warn', 'transport', message)
+  logger.logEvent('warn', 'renderer', 'independent UI fault')
+  logger.logEvent('error', 'renderer', message)
+  await logger.flushAppLog()
+  const errors = (await getLogSummary(logger.getAppLogPath(), { structuredApp: true })).errors
+  expect(errors).toHaveLength(3)
+  expect(errors).toEqual(expect.arrayContaining([expect.stringContaining('transport:'), expect.stringContaining('independent UI fault'), expect.stringContaining('error renderer:')]))
+})
+
+it('recognizes the renderer health event through the production handler regardless of summary wording (AT-00-005)', async () => {
+  const source = ts.createSourceFile('index.ts', readFileSync('src/main/index.ts', 'utf8'), ts.ScriptTarget.Latest, true)
+  let handler: ts.Expression | undefined
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(source) === 'handleLogged' && node.arguments[0]?.getText(source) === "'renderer-log'") handler = node.arguments[1]
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  expect(handler).toBeDefined()
+  const js = ts.transpileModule('return ' + handler!.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const writeRenderer = new Function('logEvent', js)(logger.logEvent)
+  const { getLogSummary } = await harness(async () => [])
+  for (const message of ['Health check needs attention', 'Проверка завершена с предупреждениями']) {
+    await writeRenderer({}, 'warn', message, 'health-check-summary')
+    await logger.flushAppLog()
+    expect((await getLogSummary(logger.getAppLogPath(), { structuredApp: true })).errors).toEqual([])
+  }
+  expect((await logged()).filter(row => row.scope === 'renderer').every(row => row.details.eventCode === 'health-check-summary')).toBe(true)
+  await writeRenderer({}, 'error', 'failed health check', 'health-check-summary')
+  await writeRenderer({}, 'warn', 'independent warning')
+  logger.logEvent('warn', 'transport', 'independent transport warning', { eventCode: 'health-check-summary' })
+  await logger.flushAppLog()
+  expect((await getLogSummary(logger.getAppLogPath(), { structuredApp: true })).errors).toEqual([
+    expect.stringContaining('failed health check'), expect.stringContaining('independent warning'), expect.stringContaining('independent transport warning')
+  ])
+})
+
 it.each(['socks', 'socks4', 'socks4a', 'socks5', 'socks5h'])('never persists %s proxy userinfo from diagnostic environment details', async scheme => {
   const { runSystemDiagnostics } = await harness(async () => [check('proxy-current', 'warn', 'not configured',
     `env:ALL_PROXY=${scheme}://private-user:PRIVATE-PROXY-PASSWORD@proxy.example.test:1080 | listener not selected`)])

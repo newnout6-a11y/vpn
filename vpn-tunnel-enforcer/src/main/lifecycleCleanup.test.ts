@@ -34,8 +34,8 @@ function body(file: string, name: string): string {
     ? '\n' + body(file, name + 'Effects') : ''
   return `${ts.isVariableDeclaration(found) ? 'const ' : ''}${found.getText(source)}${effects}`
 }
-function compile<T>(text: string, dependencies: Record<string, unknown>): T {
-  const js = ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
+function compile<T>(text: string, dependencies: Record<string, unknown>, module = ts.ModuleKind.None): T {
+  const js = ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ES2022, module } }).outputText
   const classify = ts.transpileModule(body('tunController.ts', 'classifyTunError') + ';return classifyTunError;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
   const classifyTunError = new Function('RecoveryWorkerError', 'classifyIpcError', classify)(RecoveryWorkerError, classifyIpcError)
   const bindings = { NoSupportedVpnProfilesError, currentCorrelationId, withCorrelation, randomUUID, connectionFailure, ipcError, classifyIpcError, readIpcErrorCategory, IpcFault, classifyTunError, ...dependencies }
@@ -148,6 +148,7 @@ function stopHarness(startupController: AbortController | null = null, startupCo
     startupController,
     startupCompletion,
     randomUUID,
+    nativeStopCallback: vi.fn(),
     isOwnedTunRuntimeRunning: vi.fn(async () => false),
     stopXray: vi.fn(async () => { state.upstream = false }), killOwnedRuntimeProcesses: done(),
     waitForOwnedRuntimeToExit: vi.fn(async () => { state.runtime = false; return true }),
@@ -163,13 +164,60 @@ function stopHarness(startupController: AbortController | null = null, startupCo
   const stop = compile<((options?: { preserveNetworkProtection?: boolean }) => Promise<any>) & { setRunning(running: boolean): void }>(`
 let startInProgress=false,stopRequested=false,stopInProgress=false,userInitiatedStop=false,activeStartAbortController=startupController;
 let activeStartCompletion=startupCompletion,activeStopCompletion=null,activeStopPreservesProtection=false;
-let recoveryCancelGeneration=0,lastStartOptions=null,restartAttempt=0,transitionCancelRequested=false;
+let recoveryCancelGeneration=0,lastStartOptions=null,restartAttempt=0,transitionCancelRequested=false,nativeStartupGeneration=7;
 let currentStatus={running:true,mode:'directVpn'},clashApiInfo=null,directProxyPort=null,tunnelProbePort=null;
 const controller = {${body('tunController.ts', 'stop')}};
 return Object.assign(controller.stop.bind(controller), { setRunning: (running) => { currentStatus.running = running } });
 `, os)
   return { stop, ...os, state }
 }
+
+it('publishes the actual native rollback receipt after cleanup and observer failures cannot strand stop (AT-00-002/003)', async () => {
+  const h = stopHarness()
+  const model = new TunnelStateMachine(() => ({ running: h.state.runtime, pid: h.state.runtime ? 123 : null, softApplied: false }))
+  const lane = new ConnectionLifecycle(vi.fn(), undefined, undefined, model)
+  await lane.start(async () => ({ success: true }))
+  model.nativeStartBegan(7)
+  h.notifyStatus.mockImplementation((status: string) => model.runtimeChanged(status))
+  h.nativeStopCallback.mockImplementation(receipt => model.nativeStopFinished(receipt))
+  let release!: () => void
+  h.rollbackPhysicalAdapterLockdownIfApplied.mockImplementationOnce(async () => {
+    await new Promise<void>(done => { release = done })
+    h.state.adapters = false
+    return { rolledBack: true }
+  })
+  const task = h.stop()
+  await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+  expect(h.nativeStopCallback).not.toHaveBeenCalled()
+  expect(model.snapshot.state).not.toBe('disconnected')
+  release()
+  const result = await task
+  expect(h.nativeStopCallback).toHaveBeenCalledExactlyOnceWith({ generation: 7, preserveNetworkProtection: false, result })
+  expect(model.snapshot).toMatchObject({ state: 'disconnected', cleanupRequired: false })
+  h.nativeStopCallback.mockImplementation(() => { throw new Error('observer failed') })
+  await expect(h.stop()).resolves.toMatchObject({ success: true })
+})
+
+it.each(['baseline', 'firewall', 'adapters', 'preserved'] as const)('cannot certify a native %s stop as disconnected (AT-00-002/003)', async step => {
+  const h = stopHarness()
+  const model = new TunnelStateMachine(() => ({ running: h.state.runtime, pid: h.state.runtime ? 123 : null, softApplied: false }))
+  const lane = new ConnectionLifecycle(vi.fn(), undefined, undefined, model)
+  await lane.start(async () => ({ success: true }))
+  model.nativeStartBegan(7)
+  h.notifyStatus.mockImplementation((status: string) => model.runtimeChanged(status))
+  h.nativeStopCallback.mockImplementation(receipt => model.nativeStopFinished(receipt))
+  if (step === 'baseline') h.rollbackTunNetworkBaselineIfApplied.mockRejectedValue(new Error('denied'))
+  if (step === 'firewall') h.disableKillSwitchIfActive.mockRejectedValue(new Error('denied'))
+  if (step === 'adapters') h.rollbackPhysicalAdapterLockdownIfApplied.mockRejectedValue(new Error('denied'))
+  await h.stop({ preserveNetworkProtection: step === 'preserved' })
+  if (step === 'preserved') {
+    expect(h.notifyStatus).toHaveBeenCalledWith('adapting')
+    expect(h.notifyStatus).not.toHaveBeenCalledWith('stopping')
+  }
+  expect(h.nativeStopCallback).toHaveBeenCalledOnce()
+  expect(model.snapshot.state).not.toBe('disconnected')
+  expect(model.snapshot.cleanupRequired).toBe(true)
+})
 function mainHarness(name: 'performShutdownCleanup' | 'stopProtection', session: object | null = null) {
   const os = {
     connectionLifecycle: new ConnectionLifecycle(() => {}),
@@ -1377,9 +1425,9 @@ describe('owned Soft startup (AT-00-003/007 subset)', () => {
   })
 })
 
-function ipStartupHarness(mode: 'direct' | 'proxy') {
+function ipStartupHarness(mode: 'direct' | 'proxy', verifyRestoration = false) {
   let running = false
-  const settings = { autoNetworkBaseline: false, directVpnInput: '' }
+  const settings = { autoNetworkBaseline: false, directVpnInput: '', adaptiveBypassEnabled: false }
   const os = {
     ...mainHarness('stopProtection'),
     rollbackSoftAutoconfigIfApplied: done(), suppressLeakSelfTestsFor: noop(), captureSnapshot: done(),
@@ -1396,26 +1444,104 @@ function ipStartupHarness(mode: 'direct' | 'proxy') {
     applyTunNetworkBaseline: vi.fn(async (): Promise<any> => ({ success: true })), rollbackTunNetworkBaselineIfApplied: done(),
     rollbackTunNetworkBaselineOrThrow: done(),
     markAdaptiveFailure: noop(), readRecentSingBoxOutboundFault: vi.fn(async () => null), scheduleAdaptiveVerification: noop(),
-    ipMonitor: { clearVpnIp:noop(),startMonitoring: noop(), getCurrentIp: vi.fn(async (_guard?: () => boolean) => ({ ip: '203.0.113.1' })),
+    ipMonitor: { clearVpnIp:noop(),startMonitoring: noop(), suspend: noop(), resume: noop(), getCurrentIp: vi.fn(async (_guard?: () => boolean) => ({ ip: '203.0.113.1' })),
       recheck: vi.fn(async (_rebaseline: boolean, _guard?: () => boolean) => ({ ip: '203.0.113.1', isLeak: false })) },
     startTrafficForensicsSession: done(), refreshTrayState: noop(), openSession: noop(), startPeriodicSnapshots: noop(),
     startPeriodicLeakTest: noop(), startNetworkChangeWatcher: noop(), sendToMainWindow: noop(), logEvent: noop(),
     areTunRoutesActive: vi.fn(async () => false)
   }
+  const verification = {
+    collectAdaptiveSamples: vi.fn(async (_current: () => boolean, _signal: AbortSignal, probe: (signal: AbortSignal) => Promise<number>): Promise<number[]> => { await probe(_signal); return [30, 40] }),
+    markAdaptiveVerifying: noop(), markAdaptiveSuccess: done(), getAdaptiveBypassStatus: () => ({ mode: 'standard' }),
+    invalidateAdaptiveLearningContext: noop(), resolveAdaptiveCapabilities: () => ({}),
+    require: (module: string) => {
+      if (module !== './serverPicker') throw new Error('Unexpected verification dependency')
+      return { tunnelHttpProbe: vi.fn(async () => 40) }
+    }
+  }
+  let hooks: { begin: () => Promise<void>; end: () => void }
+  const source = ts.createSourceFile('index.ts', readFileSync('src/main/index.ts', 'utf8'), ts.ScriptTarget.Latest, true)
+  const hookRegistration = source.statements.find(node => ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) && node.expression.expression.getText(source) === 'setProfileSwitchHooks')!
   os.connectionLifecycle = new ConnectionLifecycle(() => { running=false })
   const name = mode === 'direct' ? 'startDirectVpnProtection' : 'startProtection'
-  const control = compile<{ start: () => Promise<any>; cancel: () => void; stop: () => Promise<any>; shutdown: () => Promise<void> }>(`
-let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,latestPublicIp=null,currentSession=null,stopInProgress=false,shutdownInProgress=false,softProtectionApplied=false;
+  const control = compile<{ start: () => Promise<any>; restore: (options: unknown) => Promise<any>; cancel: () => void; stop: () => Promise<any>; shutdown: () => Promise<void> }>(`
+let adaptiveVerificationGeneration=0,activeAdaptiveContext=null,latestPublicIp=null,currentSession=null,stopInProgress=false,shutdownInProgress=false,softProtectionApplied=false,manualProfileSwitchActive=false,adaptiveVerificationAbort=null,adaptiveTransitionInFlight=null;
 const KILL_SWITCH_RULE_PREFIX='VPNTE-killswitch';
 ${body('index.ts', name)}
 ${body('index.ts', `${name}Effects`)}
+${body('index.ts','restoreCancelledProfileSwitch')}
 ${body('index.ts','stopProtectionEffects')}
 ${body('index.ts','stopProtection')}
 ${body('index.ts','performShutdownCleanup')}
-return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : ''}),stop:stopProtection,shutdown:()=>performShutdownCleanup('test'), cancel: () => {adaptiveVerificationGeneration++}};
-`, os)
-  return { ...control, ...os, settings, setRunning: (value: boolean) => { running = value } }
+${verifyRestoration ? ['ensureAdaptiveMonitoringForRunningTunnel', 'scheduleAdaptiveVerification', 'verifyAdaptiveConnection'].map(name => body('index.ts', name)).join('\n') + '\n' + hookRegistration.getText(source) : ''}
+return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : ''}),restore:restoreCancelledProfileSwitch,stop:stopProtection,shutdown:()=>performShutdownCleanup('test'), cancel: () => {adaptiveVerificationGeneration++}};
+// CommonJS lets the real verifier import only the injected server-probe boundary.
+`, { ...os, ...verification, setProfileSwitchHooks: (value: typeof hooks) => { hooks = value } }, verifyRestoration ? ts.ModuleKind.CommonJS : ts.ModuleKind.None)
+  return { ...control, ...os, ...verification, settings, beginSwitch: () => hooks.begin(), endSwitch: () => hooks.end(), setRunning: (value: boolean) => { running = value } }
 }
+
+describe('cancelled server restoration repeats direct-VPN effects (AT-02-004 / AT-03-007)', () => {
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
+  it('re-applies the rolled-back baseline and monitoring for the exact former options', async () => {
+    vi.useFakeTimers()
+    const h = ipStartupHarness('direct')
+    h.settings.autoNetworkBaseline = true
+    let applied = false
+    h.applyTunNetworkBaseline.mockImplementation(async () => { applied = true; return { success: true } })
+    h.tunController.stop.mockImplementation(async () => { applied = false; h.setRunning(false); return { success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } } })
+    await h.start()
+    expect(applied).toBe(true)
+    await h.tunController.stop()
+    expect(applied).toBe(false)
+    const previous = { mode: 'directVpn', vpnProfile: { name: 'former server', protocol: 'vless', outbound: { type: 'vless', server: 'former.invalid', server_port: 443 } }, proxyEngine: 'xray', adaptiveMode: 'standard', enableFirewallKillSwitch: true }
+    const result = await h.restore(previous)
+    expect(result).toMatchObject({ success: true })
+    expect(applied).toBe(true)
+    expect(h.applyTunNetworkBaseline).toHaveBeenCalledTimes(2)
+    expect(h.tunController.start).toHaveBeenLastCalledWith(previous)
+    expect(h.ipMonitor.startMonitoring).toHaveBeenCalledTimes(2)
+    expect(h.scheduleAdaptiveVerification).toHaveBeenCalledTimes(2)
+    expect(h.startPeriodicLeakTest).toHaveBeenCalledTimes(2)
+    expect(h.openSession).toHaveBeenLastCalledWith(expect.objectContaining({ name: 'former server' }))
+    h.cancel()
+  })
+  it.each([false, true])('finishes real restored verification after the manual guard releases (adaptive=%s)', async enabled => {
+    vi.useFakeTimers()
+    const h = ipStartupHarness('direct', true)
+    h.settings.adaptiveBypassEnabled = enabled
+    const previous = { mode: 'directVpn', vpnProfile: { name: 'former server', protocol: 'vless', outbound: { server: 'former.invalid', server_port: 443 } } }
+    await h.beginSwitch()
+    expect(await h.restore(previous)).toMatchObject({ success: true })
+    expect(h.markAdaptiveSuccess).not.toHaveBeenCalled()
+    expect(h.collectAdaptiveSamples).not.toHaveBeenCalled()
+    h.endSwitch()
+    await vi.waitFor(() => expect(h.markAdaptiveSuccess).toHaveBeenCalledExactlyOnceWith(previous.vpnProfile))
+    expect(h.collectAdaptiveSamples).toHaveBeenCalledTimes(enabled ? 1 : 0)
+    h.cancel()
+  })
+  it('reports a verification error after restoration and fences a result superseded by stop', async () => {
+    vi.useFakeTimers()
+    const h = ipStartupHarness('direct', true)
+    h.settings.adaptiveBypassEnabled = true
+    await h.beginSwitch()
+    await h.restore({ mode: 'directVpn', vpnProfile: { name: 'former server', outbound: {} } })
+    h.collectAdaptiveSamples.mockRejectedValueOnce(new Error('verification failed'))
+    h.endSwitch()
+    await vi.waitFor(() => expect(h.markAdaptiveFailure).toHaveBeenCalledExactlyOnceWith('verification failed'))
+    let release!: (samples: number[]) => void
+    h.collectAdaptiveSamples.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    await h.beginSwitch()
+    await h.restore({ mode: 'directVpn', vpnProfile: { name: 'former server', outbound: {} } })
+    h.endSwitch()
+    await vi.waitFor(() => expect(release).toBeDefined())
+    await h.stop()
+    release([30, 40])
+    await Promise.resolve()
+    expect(h.markAdaptiveSuccess).not.toHaveBeenCalled()
+    expect(h.markAdaptiveFailure).toHaveBeenCalledOnce()
+  })
+})
+
 describe.each(['direct', 'proxy'] as const)('background IP startup: %s (AT-00-003 / AT-02-002)', mode => {
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
   it('preserves the recovery-report instruction on baseline failure (AT-00-004)', async () => {
@@ -1637,3 +1763,89 @@ return clearStaleKillSwitchBeforeStart;
   })
 })
 
+
+// The real main restore entry point must use the canonical connection lane.
+describe('cancelled switch restoration ownership (AT-02-004 / AT-00-003)', () => {
+  function harness() {
+    const evidence = { running: false, pid: null as number | null, softApplied: false }
+    const model = new TunnelStateMachine(() => evidence)
+    const tunController = { start: vi.fn(async (_options: unknown): Promise<any> => {
+      evidence.running = true; evidence.pid = 501
+      model.runtimeChanged('running')
+      return { success: true }
+    }), stop: vi.fn(async (): Promise<any> => { evidence.running = false; evidence.pid = null; return { success: true } }) }
+    const cancel = vi.fn()
+    const connectionLifecycle = new ConnectionLifecycle(cancel, () => tunController.stop(), undefined, model)
+    const restore = compile<(options: unknown) => Promise<any>>(body('index.ts', 'restoreCancelledProfileSwitch') + ';return restoreCancelledProfileSwitch;', { tunController, connectionLifecycle, startDirectVpnProtectionEffects: (_owner: unknown, options: unknown) => tunController.start(options) })
+    return { evidence, model, tunController, connectionLifecycle, restore, cancel }
+  }
+  it('confirms a restored connection through the main owner, never a bare running event', async () => {
+    const h = harness(), options = { mode: 'directVpn', vpnProfile: { name: 'previous' } }
+    expect(await h.restore(options)).toMatchObject({ success: true })
+    expect(h.tunController.start).toHaveBeenCalledExactlyOnceWith(options)
+    expect(h.model.snapshot).toMatchObject({ state: 'connected', transition: null, pid: 501 })
+  })
+  it('rejects a successful-looking startup without runtime evidence and drains cleanup', async () => {
+    const h = harness()
+    h.tunController.start.mockResolvedValueOnce({ success: true })
+    await expect(h.restore({})).rejects.toThrow('confirmation')
+    expect(h.tunController.stop).toHaveBeenCalledOnce()
+    expect(h.model.snapshot.state).not.toBe('connected')
+  })
+  it('lets an explicit disconnect drain a pending restoration before final cleanup', async () => {
+    const h = harness()
+    let finish!: () => void
+    h.tunController.start.mockImplementationOnce(() => new Promise(resolve => { finish = () => { h.evidence.running = true; h.evidence.pid = 502; resolve({ success: true }) } }))
+    const restored = h.restore({})
+    const stopped = h.connectionLifecycle.stop(() => h.tunController.stop())
+    expect(h.cancel).toHaveBeenCalledOnce()
+    let released = false
+    void restored.then(() => { released = true })
+    await Promise.resolve()
+    expect(released).toBe(false)
+    expect(h.tunController.stop).not.toHaveBeenCalled()
+    finish()
+    expect(await restored).toMatchObject({ success: false, category: 'cancelled' })
+    expect(await stopped).toMatchObject({ success: true })
+    expect(h.model.snapshot).toMatchObject({ state: 'disconnected', transition: null })
+  })
+  it('refuses restoration after application shutdown closes admission', async () => {
+    const h = harness()
+    await h.connectionLifecycle.close()
+    expect(await h.restore({})).toMatchObject({ success: false, category: 'conflict' })
+    expect(h.tunController.start).not.toHaveBeenCalled()
+  })
+  it('cleans a failed restoration and retains its failure', async () => {
+    const h = harness()
+    h.tunController.start.mockResolvedValueOnce({ success: false, error: 'previous runtime failed' })
+    expect(await h.restore({})).toMatchObject({ success: false, error: 'previous runtime failed' })
+    expect(h.tunController.stop).toHaveBeenCalledOnce()
+    expect(h.model.snapshot.state).not.toBe('connected')
+  })
+  it('retains cleanup failure after an unsuccessful or thrown restoration', async () => {
+    const h = harness()
+    h.tunController.start.mockRejectedValueOnce(new Error('start exception'))
+    h.tunController.stop.mockResolvedValueOnce({ success: false, error: 'runtime exit unconfirmed' })
+    await expect(h.restore({})).rejects.toThrow('runtime exit unconfirmed')
+    expect(h.model.snapshot.state).not.toBe('connected')
+  })
+  it.each(['stop', 'close', 'timeout'] as const)('main %s preserves explicit-stop priority and timeout errors', async action => {
+    const source = ts.createSourceFile('index.ts', readFileSync(join(process.cwd(), 'src/main/index.ts'), 'utf8'), ts.ScriptTarget.Latest, true)
+    let callback: ts.Expression | undefined
+    const visit = (node: ts.Node) => {
+      if (ts.isNewExpression(node) && node.expression.getText(source) === 'ConnectionLifecycle') callback = node.arguments?.[0]
+      ts.forEachChild(node, visit)
+    }
+    visit(source)
+    const events: string[] = []
+    const cancel = compile<() => void>('let adaptiveVerificationGeneration=0;return (' + callback!.getText(source) + ');', {
+      connectionLifecycle: { operation: action === 'timeout' ? { category: 'timeout' } : null },
+      abandonProfileSwitch: () => events.push('abandon'), tunController: { cancelTransition: () => events.push('native-cancel') }
+    })
+    const lane = new ConnectionLifecycle(cancel)
+    if (action !== 'close') await lane.stop(async () => ({ success: true }))
+    else await lane.close()
+    expect(events).toEqual(action === 'timeout' ? ['native-cancel'] : ['abandon', 'native-cancel'])
+  })
+
+})

@@ -12,7 +12,7 @@ import { isIP } from 'net'
 import { randomUUID } from 'node:crypto'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { happDetector } from './happDetector'
-import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart, onNativeStartup } from './tunController'
+import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart, onNativeStartup, onNativeStop, type StartOptions } from './tunController'
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
 import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
@@ -27,6 +27,7 @@ import { connectionFailure, operationLogDetails, type ConnectionStartResult, typ
 import { runScheduledConnection } from './scheduledConnection'
 import { makeOutcome, outcomeKindToDisconnectReason, isNodeSwitchRestartReason, sessionOutcomeConfidence } from './sessionOutcome'
 import type { ConnectionProvenance } from '../shared/connection-provenance'
+import type { RendererLogEventCode } from '../shared/electron-api'
 import type { SessionOutcome, SessionOutcomeEvidence, SessionOutcomeKind } from '../shared/ipc-types'
 import { readRecentXrayOutboundFault, getXrayStatus, stopXray } from './xrayEngine'
 import { classifyNavigation } from './navigationPolicy'
@@ -75,7 +76,7 @@ import { notify, setInAppFallbackCallback } from './notifications'
 import { removeHijackingDevShortcut } from './taskbarIdentity'
 import { registerDiagnosticsExportHandler } from './diagnosticsExport'
 import { captureSnapshot, startPeriodicSnapshots, stopPeriodicSnapshots } from './systemSnapshot'
-import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, setLeakDetectedCallback, setLeakSelfTestCompletedCallback, setNetworkChangeCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
+import { runLeakSelfTest, startPeriodicLeakTest, stopPeriodicLeakTest, cancelLeakSelfTest, setBackgroundLeakTestGate, setLeakDetectedCallback, setLeakSelfTestCompletedCallback, setNetworkChangeCallback, startNetworkChangeWatcher, stopNetworkChangeWatcher, suppressLeakSelfTestsFor } from './leakSelfTest'
 import { leakSelfTestVerdict } from '../shared/leak-self-test'
 import { getTrafficForensicsStatus, restartTrafficForensicsSession, startTrafficForensicsSession, stopTrafficForensicsSession } from './trafficForensics'
 import { trafficMonitor, type TrafficStats } from './trafficMonitor'
@@ -85,7 +86,7 @@ import { executeIndeterminateVpnIpAutoVerify } from './indeterminateIpAutoVerify
 
 // ─── V2 Feature Modules ──────────────────────────────────────────────────────
 import { registerSplitTunnelHandlers } from './splitTunneling'
-import { registerServerPickerHandlers, serverPicker, setProfileSwitchHooks, tunnelHttpProbe, RESOLVED_IP_TTL_MS } from './serverPicker'
+import { registerServerPickerHandlers, serverPicker, setProfileSwitchHooks, abandonProfileSwitch, tunnelHttpProbe, RESOLVED_IP_TTL_MS } from './serverPicker'
 import {
   registerServerGroupsHandlers,
   startServerGroupAutoRefresh,
@@ -388,6 +389,7 @@ let adaptiveTransitionInFlight: Promise<ConnectionStartResult> | null = null
 let manualProfileSwitchActive = false
 
 setProfileSwitchHooks({
+  restore: options => restoreCancelledProfileSwitch(options),
   begin: async () => {
     manualProfileSwitchActive = true
     adaptiveVerificationGeneration += 1
@@ -402,7 +404,9 @@ setProfileSwitchHooks({
   end: () => {
     manualProfileSwitchActive = false
     ipMonitor.resume()
-    ensureAdaptiveMonitoringForRunningTunnel()
+    // Restoring via direct startup creates a context while this guard still fences verification.
+    if (activeAdaptiveContext && tunController.getStatus().running) scheduleAdaptiveVerification()
+    else ensureAdaptiveMonitoringForRunningTunnel()
   }
 })
 let activeAdaptiveContext: {
@@ -1202,20 +1206,66 @@ const tunnelState = new TunnelStateMachine(() => ({ ...tunController.getStatus()
   refreshTrayState()
 })
 // Register before any tray, schedule or auto-start action can begin.
-tunController.onStatusChange(status => { tunnelState.runtimeChanged(status) })
+let backgroundProtectionExpected = false
+let backgroundProtectionBeforeStop = false
+let backgroundNativeGeneration = 0
+setBackgroundLeakTestGate(() => backgroundProtectionExpected)
+tunController.onStatusChange(status => {
+  if (['running', 'proxy-down', 'killswitch-active'].includes(status)) backgroundProtectionExpected = true
+  else if (status === 'stopping') {
+    backgroundProtectionBeforeStop = backgroundProtectionExpected
+    backgroundProtectionExpected = false
+  } else if (status === 'stopped') backgroundProtectionExpected = false
+  // Retain monitoring through a protected restart or crash: a down TUN is precisely
+  // when a physical-adapter reach can expose a broken kill-switch. Full stop disarms it before rollback.
+  tunnelState.runtimeChanged(status)
+  if (!backgroundProtectionExpected) cancelLeakSelfTest()
+})
+onNativeStop(observation => {
+  // A failed exit proof returns before any rollback and retains protection.
+  // Re-arm only the current stop's prior obligation, never an initial failed start.
+  if (observation.generation === backgroundNativeGeneration && !observation.preserveNetworkProtection
+    && !observation.result.success && observation.result.runtimeStopped !== true) {
+    backgroundProtectionExpected ||= backgroundProtectionBeforeStop
+  }
+  tunnelState.nativeStopFinished(observation)
+})
 onNativeStartup(observation => {
-  if (observation.phase === 'begin') tunnelState.nativeStartBegan(observation.generation)
+  if (observation.phase === 'begin') {
+    backgroundNativeGeneration = observation.generation
+    tunnelState.nativeStartBegan(observation.generation)
+  }
   else tunnelState.nativeStartFinished(observation)
 })
 
 const connectionLifecycle = new ConnectionLifecycle(() => {
   adaptiveVerificationGeneration += 1
+  if (connectionLifecycle.operation?.category !== 'timeout') abandonProfileSwitch()
   tunController.cancelTransition()
 }, () => stopProtectionEffects(), operation => {
   if (operation.status === 'running' && operation.owner !== 'schedule') schedulerService.cancelPendingConnect()
   logEvent(operation.status === 'running' ? 'debug' : 'info', 'lifecycle', 'connection operation', operationLogDetails(operation))
 }, tunnelState)
 profileRotation.setLifecycle(connectionLifecycle)
+
+async function restoreCancelledProfileSwitch(options: StartOptions): Promise<ConnectionStartResult> {
+  const result = await connectionLifecycle.start(async owner => {
+    owner.assertActive()
+    let started = false
+    try {
+      const result = await owner.wait(startDirectVpnProtectionEffects(owner, options))
+      started = result.success
+      return result
+    } finally {
+      if (!started && !owner.signal.aborted) {
+        const stopped = await owner.wait(tunController.stop())
+        if (!stopped.success) throw new Error(stopped.error || 'Очистка после восстановления не подтверждена')
+      }
+    }
+  })
+  if (!result.success && result.category !== 'conflict') await connectionLifecycle.drain()
+  return result
+}
 
 async function startProtection(proxyAddr: string, proxyType?: 'socks5' | 'http'): Promise<ConnectionStartResult> {
   return connectionLifecycle.start(owner => startProtectionEffects(owner, proxyAddr, proxyType))
@@ -1441,7 +1491,7 @@ async function startDirectVpnProtection(): Promise<ConnectionStartResult> {
   return connectionLifecycle.start(owner => startDirectVpnProtectionEffects(owner))
 }
 
-async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): Promise<ConnectionStartResult> {
+async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner, previousOptions?: StartOptions): Promise<ConnectionStartResult> {
   await owner.wait(rollbackSoftAutoconfigIfApplied('direct VPN start'))
   suppressLeakSelfTestsFor(20_000, 'direct-vpn-start')
   captureSnapshot('tun-pre-start').catch(() => undefined)
@@ -1461,8 +1511,8 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
   // profile from there. If its outbound was lost (older builds saved
   // profiles without it) we try to recover from the legacy
   // directVpnCachedProfiles list at runtime.
-  let profile: VpnProfile | undefined
-  const activeServer = serverPicker.getActiveProfile()
+  let profile = previousOptions?.vpnProfile
+  const activeServer = previousOptions ? null : serverPicker.getActiveProfile()
   if (activeServer) {
     let outbound = activeServer.outbound
     if (!outbound || typeof outbound !== 'object') {
@@ -1511,7 +1561,7 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
       captureSnapshot('tun-start-failed').catch(() => undefined)
       return connectionFailure('conflict', errorMsg)
     }
-  } else if (settings.directVpnInput.trim()) {
+  } else if (!profile && settings.directVpnInput.trim()) {
     try {
       profile = await owner.wait(resolveVpnProfile(settings.directVpnInput, settings.directVpnSelectedIndex, {
         proxyAddr: settings.proxyOverride,
@@ -1531,7 +1581,7 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
       captureSnapshot('tun-start-failed').catch(() => undefined)
       return connectionFailure(category, errorMsg)
     }
-  } else {
+  } else if (!profile) {
     const errorMsg = 'Нет выбранного сервера. Откройте раздел "Серверы" и добавьте подписку или ключ.'
     recordStartFailure({ id: 'direct-vpn', name: 'Direct VPN', mode: 'direct' }, errorMsg)
     captureSnapshot('tun-start-failed').catch(() => undefined)
@@ -1575,7 +1625,7 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner): P
     connectionMode: 'directVpn',
     serverFallbackAttempted: false
   }
-  const result = await owner.wait(tunController.start({
+  const result = await owner.wait(tunController.start(previousOptions ?? {
     mode: 'directVpn',
     vpnProfile: profile,
     proxyType: 'socks5',
@@ -2415,9 +2465,9 @@ app.whenReady().then(async () => {
     return runAutoPilot()
   })
 
-  handleLogged('renderer-log', async (_e, level: AppLogLevel, message: string) => {
+  handleLogged('renderer-log', async (_e, level: AppLogLevel, message: string, eventCode?: RendererLogEventCode) => {
     const safeLevel: AppLogLevel = ['debug', 'info', 'warn', 'error'].includes(level) ? level : 'info'
-    logEvent(safeLevel, 'renderer', message)
+    logEvent(safeLevel, 'renderer', message, eventCode ? { eventCode } : undefined)
     return { success: true }
   })
 

@@ -388,6 +388,12 @@ export class ConnectionLifecycle {
     return result
   }
 
+  /** Bounded caller cancellation must not release a surrounding native owner. */
+  async drain(): Promise<void> {
+    if (this.startup) await this.startup.completion
+    if (this.stopping) await this.stopping
+  }
+
   /** Called only after shutdown's independent native/network backstops succeed.
    * Reconcile an earlier stop failure without publishing a second terminal. */
   confirmShutdownCleanup(): void {

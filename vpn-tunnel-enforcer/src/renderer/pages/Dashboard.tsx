@@ -415,10 +415,9 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     try {
       if (isServerSwitching) {
         await window.electronAPI.serversCancelSwitch()
-        await window.electronAPI.cancelTransition()
         useAppStore.getState().acknowledgeServerSwitchCancellation()
         switchCancellationRequested = true
-        addLog('info', 'Отмена смены сервера запрошена; текущий защищённый переход завершит очистку сам.')
+        addLog('info', t('dashboard.serverSwitchCancellationRequested'))
       } else {
         const result = await window.electronAPI.cancelTun()
         if (result.success) {

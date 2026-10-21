@@ -124,3 +124,22 @@ describe('main connection lifecycle ownership',()=>{
     expect(lane.starting).toBe(false)
   })
 })
+
+describe('surrounding native owner drain (AT-00-003 / AT-02-005)', () => {
+  it('waits past a timed-out startup result for both late native completion and cleanup', async () => {
+    const native=held<void>(), cleanup=held<{success:boolean}>()
+    const lane=new ConnectionLifecycle(vi.fn(),()=>cleanup.promise)
+    const started=lane.start(async owner=>{await owner.wait(native.promise);return {success:true}}, {timeoutMs:20})
+    expect(await started).toMatchObject({success:false,category:'timeout'})
+    let drained=false
+    const drain=lane.drain().then(()=>{drained=true})
+    await Promise.resolve();expect(drained).toBe(false)
+    native.resolve()
+    await vi.waitFor(()=>expect(lane.starting).toBe(false))
+    expect(drained).toBe(false)
+    cleanup.resolve({success:true})
+    await drain
+    expect(drained).toBe(true)
+    expect(lane.busy).toBe(false)
+  })
+})

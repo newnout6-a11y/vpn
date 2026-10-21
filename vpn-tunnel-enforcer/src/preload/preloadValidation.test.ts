@@ -42,6 +42,18 @@ describe('preload IPC argument validation', () => {
   })
   afterEach(() => vi.unstubAllGlobals())
 
+  // AT-00-001/005: allowlisted metadata is optional for existing renderer logs.
+  it('forwards a stable renderer event code and rejects unsupported metadata', async () => {
+    const api = await loadApi()
+    await api.logRenderer('warn', 'summary')
+    expect(invokeMock.mock.calls.at(-1)?.slice(0, 3)).toEqual(['renderer-log', 'warn', 'summary'])
+    await api.logRenderer('warn', 'summary translated', 'health-check-summary')
+    expect(invokeMock).toHaveBeenLastCalledWith('renderer-log', 'warn', 'summary translated', 'health-check-summary')
+    invokeMock.mockClear()
+    await expectLocalValidation(() => api.logRenderer('warn', 'summary', 'unsupported-code'))
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
   // AT-00-001: trailing cancellation tokens preserve every legacy call shape.
   it.each([
     ['serverProbe', 'server:probe', ['vpn.example.test', 8443]],

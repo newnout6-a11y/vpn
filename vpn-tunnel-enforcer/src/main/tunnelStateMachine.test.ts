@@ -18,6 +18,48 @@ function harness() {
 }
 
 describe('canonical tunnel state', () => {
+  it('confirms cancelled server-switch cleanup only from a complete current native stop receipt (AT-00-002/003/008)', async () => {
+    const h = harness()
+    await h.connect()
+    h.model.nativeStartBegan(1)
+    h.evidence.running = false; h.evidence.pid = null
+    h.model.runtimeChanged('adapting')
+    h.model.nativeStartBegan(2)
+    h.model.nativeStartFinished({ generation: 2, success: false })
+    h.model.runtimeChanged('stopped')
+    expect(h.model.snapshot.state).toBe('unknown')
+    const receipt = { generation: 2, preserveNetworkProtection: false, result: { success: true as const,
+      networkCleanup: { baseline: true, firewall: true, adapters: true } } }
+    for (const step of ['baseline', 'firewall', 'adapters'] as const) {
+      h.model.nativeStopFinished({ ...receipt, result: { success: true, networkCleanup: { ...receipt.result.networkCleanup, [step]: false } } })
+      expect(h.model.snapshot.state).toBe('unknown')
+    }
+    h.model.nativeStopFinished({ ...receipt, generation: 1 })
+    h.model.nativeStopFinished({ ...receipt, preserveNetworkProtection: true })
+    h.model.nativeStopFinished({ ...receipt, result: { success: true } })
+    expect(h.model.snapshot.state).toBe('unknown')
+    h.model.nativeStopFinished(receipt)
+    expect(h.model.snapshot).toMatchObject({ state: 'disconnected', transition: null, cleanupRequired: false, mode: null })
+    expect(await h.connect()).toMatchObject({ success: true })
+    expect(h.model.snapshot.state).toBe('connected')
+  })
+
+  it('does not let native stop receipts overtake an active connection owner or live runtime (AT-00-003)', async () => {
+    const h = harness()
+    h.model.nativeStartBegan(1)
+    const receipt = { generation: 1, preserveNetworkProtection: false, result: { success: true as const,
+      networkCleanup: { baseline: true, firewall: true, adapters: true } } }
+    await h.lane.start(async () => {
+      const before = h.model.snapshot
+      expect(h.model.nativeStopFinished(receipt).success).toBe(false)
+      expect(h.model.snapshot).toEqual(before)
+      h.evidence.running = true; h.evidence.pid = 123
+      return { success: true }
+    })
+    expect(h.model.nativeStopFinished(receipt).success).toBe(false)
+    expect(h.model.snapshot.state).toBe('connected')
+  })
+
   it.each(['internal', 'permission', 'network', 'conflict', 'validation'] as const)('keeps confirmed Soft protection on returned %s refresh failure, and requires fresh evidence next time (AT-00-002/008)', async category => {
     const h = harness()
     await h.lane.start(async () => { h.evidence.softApplied = true; return { success: true } })

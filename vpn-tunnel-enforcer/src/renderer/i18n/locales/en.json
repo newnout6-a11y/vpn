@@ -45,6 +45,7 @@
     "cancelConnection": "Cancel connection",
     "cancelServerSwitch": "Cancel server switch",
     "serverSwitchCancelled": "Server switch cancelled",
+    "serverSwitchCancellationRequested": "Server switch cancellation requested; waiting for the current attempt to finish and the previous server to reconnect.",
     "cancelling": "Cancelling…",
     "connectionCancelled": "Connection cancelled",
     "cancelledWithWarnings": "Connection cancelled with warnings",

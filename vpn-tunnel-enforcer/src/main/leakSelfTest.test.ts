@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const execMock = vi.hoisted(() => vi.fn())
 const execFileMock = vi.hoisted(() => vi.fn())
 const logEventMock = vi.hoisted(() => vi.fn())
+const interfacesMock = vi.hoisted(() => vi.fn(() => ({})))
+vi.mock('os', () => ({ networkInterfaces: interfacesMock }))
 
 vi.mock('child_process', async () => {
   const { EventEmitter } = await import('node:events')
@@ -51,6 +53,7 @@ describe('runLeakSelfTest coalescing', () => {
     execFileMock.mockReset()
     logEventMock.mockReset()
     nativeSourcesMock.mockReset()
+    interfacesMock.mockReturnValue({})
     nativeSourcesMock.mockImplementation(() => { throw new Error('native unavailable') })
     mockExecSuccesses()
     const { resetLeakTestThrottlesForTest } = await import('./leakSelfTest')
@@ -64,6 +67,70 @@ describe('runLeakSelfTest coalescing', () => {
 
     expect(a.summary).toBe(b.summary)
     expect(execMock).toHaveBeenCalledTimes(process.platform === 'win32' ? 3 : 2)
+  })
+
+  it('gates periodic and event checks after stop, but preserves manual probes and active leak alarms (AT-07-002/AT-00-003)', async () => {
+    vi.useFakeTimers()
+    const leak = await import('./leakSelfTest')
+    let protectedRuntime = false
+    leak.setBackgroundLeakTestGate(() => protectedRuntime)
+    const detected = vi.fn()
+    leak.setLeakDetectedCallback(detected)
+    nativeSourcesMock.mockReturnValue([{ alias: 'Wi-Fi', ipv4: '192.168.0.10' }])
+    execFileMock.mockImplementation((_file, _args, _opts, cb) => cb(null, '5.6.7.8', ''))
+    leak.startPeriodicLeakTest(30_000)
+    try {
+      leak.triggerLeakCheckNow('after-cancel')
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(execMock).not.toHaveBeenCalled()
+      expect(detected).not.toHaveBeenCalled()
+      const manual = leak.runLeakSelfTest()
+      await vi.advanceTimersByTimeAsync(100)
+      expect((await manual).physicalAdapterReached).toBe(true)
+      protectedRuntime = true
+      leak.triggerLeakCheckNow('active-tunnel')
+      await vi.advanceTimersByTimeAsync(100)
+      expect(detected).toHaveBeenCalledOnce()
+      protectedRuntime = false
+      leak.cancelLeakSelfTest()
+      detected.mockClear(); execMock.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      leak.triggerLeakCheckNow('after-second-stop')
+      expect(execMock).not.toHaveBeenCalled()
+      expect(detected).not.toHaveBeenCalled()
+    } finally { leak.stopPeriodicLeakTest(); vi.useRealTimers() }
+  })
+
+  it('retires the pending network-change grace timer on watcher stop/restart (AT-00-003)', async () => {
+    vi.useFakeTimers()
+    const leak = await import('./leakSelfTest')
+    leak.startNetworkChangeWatcher()
+    try {
+      interfacesMock.mockReturnValue({ WiFi: [{ internal: false, family: 'IPv4', address: '192.168.0.10', cidr: '192.168.0.10/24' }] } as any)
+      await vi.advanceTimersByTimeAsync(8_000)
+      leak.stopNetworkChangeWatcher()
+      leak.startNetworkChangeWatcher()
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(execMock).not.toHaveBeenCalled()
+    } finally { leak.stopNetworkChangeWatcher(); leak.cancelLeakSelfTest(); vi.useRealTimers() }
+  })
+
+  it('fences in-flight results when protection stops before probe completion (AT-00-003)', async () => {
+    vi.useFakeTimers()
+    const leak = await import('./leakSelfTest')
+    let protectedRuntime = true
+    leak.setBackgroundLeakTestGate(() => protectedRuntime)
+    const detected = vi.fn(), completed = vi.fn()
+    leak.setLeakDetectedCallback(detected); leak.setLeakSelfTestCompletedCallback(completed)
+    leak.triggerLeakCheckNow('before-stop')
+    protectedRuntime = false
+    leak.cancelLeakSelfTest()
+    try {
+      await vi.advanceTimersByTimeAsync(100)
+      expect(detected).not.toHaveBeenCalled()
+      expect(completed).not.toHaveBeenCalled()
+      expect(logEventMock.mock.calls.some(([level, , message]) => level === 'warn' && String(message).includes('УТЕЧКА'))).toBe(false)
+    } finally { vi.useRealTimers() }
   })
 
   it('tries another DNS trace endpoint when the first one fails', async () => {
