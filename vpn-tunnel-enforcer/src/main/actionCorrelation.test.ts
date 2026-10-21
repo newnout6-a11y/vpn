@@ -3,6 +3,7 @@ import { expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import type { IpcMainInvokeEvent } from 'electron'
+import ts from 'typescript'
 
 const state = vi.hoisted(() => ({ directory: '', handlers: new Map<string, (event: IpcMainInvokeEvent) => Promise<unknown>>() }))
 vi.mock('electron', () => ({ app: { isPackaged: true, getPath: () => state.directory }, shell: {}, ipcMain: {
@@ -146,6 +147,32 @@ it('distinguishes concurrent operation keys within one action through disk and d
     await operations.close()
     vi.restoreAllMocks()
     if (dirname(state.directory) !== root) throw new Error('Unsafe owned operation fixture cleanup')
+    rmSync(state.directory, { recursive: true, force: true })
+  }
+})
+
+
+it('retains a native PID fallback Error in the real private disk log (AT-00-005)', async () => {
+  vi.resetModules()
+  const root = resolve('.tmp')
+  mkdirSync(root, { recursive: true })
+  state.directory = mkdtempSync(join(root, 'pid-fallback-log-'))
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  try {
+    const { logEvent, getAppLogPath } = await import('./appLogger')
+    const tree = ts.createSourceFile('tunController.ts', readFileSync('src/main/tunController.ts', 'utf8'), ts.ScriptTarget.Latest, true)
+    const helper = tree.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'readOwnedSingboxPid')!
+    const code = ts.transpileModule(helper.getText(tree) + '; return readOwnedSingboxPid;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+    const nativeError = new Error('native read refused')
+    const readPid = new Function('runPowerShell', 'psSingleQuote', 'readOwnedRuntimePidNative', 'logEvent', code)(
+      vi.fn(async () => '731'), () => "'fixture.exe'", vi.fn().mockRejectedValue(nativeError), logEvent)
+    expect(await readPid('C:\\VPNTE\\runtime\\vpnte-sing-box.exe')).toBe(731)
+    const lastRow = () => { try { return JSON.parse(readFileSync(getAppLogPath(), 'utf8').trim().split('\n').at(-1)!) } catch { return null } }
+    await expect.poll(() => lastRow()?.message).toBe('native runtime PID unavailable, using PowerShell')
+    expect(lastRow().details).toMatchObject({ name: 'Error', message: 'native read refused', stack: expect.stringContaining('native read refused') })
+  } finally {
+    vi.restoreAllMocks()
+    if (dirname(state.directory) !== root) throw new Error('Unsafe owned PID log fixture cleanup')
     rmSync(state.directory, { recursive: true, force: true })
   }
 })

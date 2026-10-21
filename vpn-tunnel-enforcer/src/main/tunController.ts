@@ -16,6 +16,7 @@ import { stageVerifiedRuntimeArtifact } from './runtimeArtifact'
 import sudo from 'sudo-prompt'
 import { execElevated, isProcessElevated } from './admin'
 import { logEvent } from './appLogger'
+import { readOwnedRuntimePidNative } from './native/ownedRuntimePid'
 import { rollbackTunNetworkBaselineIfApplied, rollbackTunNetworkBaselineOrThrow } from './systemNetwork'
 import { settingsStore } from './settings'
 import { notify } from './notifications'
@@ -1344,6 +1345,12 @@ async function isSingboxRunning(): Promise<boolean> {
 }
 
 async function readOwnedSingboxPid(executable: string): Promise<number> {
+  try { return await readOwnedRuntimePidNative(executable) }
+  catch (error) {
+    // No native match also refuses the startup proof: re-observe through CIM.
+    // Neither refusal is process absence or permission to remove protection.
+    logEvent('warn', 'tun', 'native runtime PID unavailable, using PowerShell', error)
+  }
   const stdout = await runPowerShell(`
 $ErrorActionPreference = 'Stop'
 $rows = @(Get-CimInstance Win32_Process -Filter "Name = 'vpnte-sing-box.exe'" -ErrorAction Stop)

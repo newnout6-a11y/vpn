@@ -111,6 +111,15 @@ test('runtime exit diagnostics retain only fixed causes for direct and nested er
   assert.equal(safeAppEvent({ ...event, details: { error: { code: 'FAKE-PRIVATE-PAYLOAD' } } }).workerError, undefined)
 })
 
+test('native PID fallback is observable without publishing the error or executable path', () => {
+  const event = { ts: '2026-10-21T16:00:00.000Z', scope: 'tun', message: 'native runtime PID unavailable, using PowerShell',
+    details: { error: { message: 'FAKE-PRIVATE-PAYLOAD', path: 'C:\\private\\runtime.exe' } } }
+  assert.deepEqual(safeAppEvent(event), { at: event.ts, scope: event.scope, message: event.message })
+  assert.deepEqual(safeAppEvent({ ...event, details: { name: 'Error', message: 'FAKE-PRIVATE-PAYLOAD',
+    stack: 'FAKE-PRIVATE-PAYLOAD C:\\private\\runtime.exe' } }),
+  { at: event.ts, scope: event.scope, message: event.message, errorName: 'Error' })
+})
+
 test('concurrent connect/cancel calls retain separate IDs and elapsed time', async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
   await mkdir(temp, { recursive: true })

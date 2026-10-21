@@ -27,6 +27,7 @@ export type HostOp =
   | 'physical-sources'
   | 'tunnels'
   | 'physical-snapshot'
+  | 'owned-runtime-pid'
   | 'wininet'
   /** Test only: implemented by nativeHostTestWorker.ts (bundled by the e2e, never shipped); the production host rejects it. */
   | 'abort-for-test'
