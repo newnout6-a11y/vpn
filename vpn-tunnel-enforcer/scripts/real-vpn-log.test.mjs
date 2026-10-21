@@ -60,6 +60,18 @@ test('native Electron crash diagnostics retain only source location and severity
   assert.equal(safeElectronDiagnostic('[123:ERROR:gpu_process_host.cc(1029)] GPU process launch failed: error_code=18 FAKE-PRIVATE-PAYLOAD').gpuCode, 18)
 })
 
+test('adapter lockdown diagnostics retain verified failure markers without topology or warning text', () => {
+  const base = { ts: '2026-10-21T16:00:00.000Z', scope: 'tun', message: 'adapter lockdown result' }
+  const result = safeAppEvent({ ...base, details: { applied: true, adapters: 2,
+    warnings: ['FAKE-PRIVATE-PAYLOAD: A0_dns_err: private address; A1_ipv6_err: private adapter',
+      'TRANS_teredo_err: FAKE-PRIVATE-PAYLOAD', 'DNS_PARALLEL_err: private value'] } })
+  assert.deepEqual(result, { at: base.ts, scope: 'tun', message: base.message, adapters: 2, applied: true,
+    lockdownIssues: ['adapter-ipv6', 'adapter-dns', 'dns-parallel-queries', 'teredo'] })
+  assert.equal(safeAppEvent({ ...base, scope: 'phys-lockdown', message: 'DNS registry snapshot failed; refusing mutation without baseline',
+    details: { message: 'Unsupported DNS registry snapshot value: FAKE-PRIVATE-PAYLOAD' } }).errorKind, 'dns-policy-value')
+  assert.ok(!JSON.stringify(result).includes('FAKE-PRIVATE-PAYLOAD'))
+})
+
 test('concurrent connect/cancel calls retain separate IDs and elapsed time', async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
   await mkdir(temp, { recursive: true })

@@ -76,16 +76,20 @@ export function safeAppEvent(event) {
         security: ['Secure store preflight failed; startup refused without changing network protection'],
         tun: ['start timing', 'stop timing', 'stop started', 'stop step started', 'stop step completed',
           'start refused because another TUN/VPN is already active', 'WFP priority reservation failed',
-          'physical adapter lockdown did not apply', 'physical adapter lockdown threw', 'xray startup failed',
+          'adapter lockdown result', 'physical adapter lockdown did not apply', 'physical adapter lockdown threw', 'xray startup failed',
           'failed to prepare TUN runtime', 'sing-box exited before startup completed',
           'firewall kill-switch failed to engage — aborting start and rolling back',
           'startup validation failed — rolling back', 'startup runtime termination failed', 'startup rollback step failed'],
         'ipc-security': ['IPC request rejected', 'IPC request failed'], xray: ['start timing'],
+        'phys-lockdown': ['batch lockdown failed', 'transition adapters disabled', 'transition adapter snapshot failed',
+          'DNS registry snapshot failed; refusing mutation without baseline', 'snapshot parse failed',
+          'lockdown not checked: no physical adapters were discovered', 'adapter coverage rollback failed',
+          'physical adapter set changed; lockdown coverage is not verified'],
         'ps-helper': ['command timing'], 'firewall-killswitch': ['command timing', 'phase timing', 'native phase timing'],
         'system-network': ['baseline native phase timing'] })[event.scope]?.includes?.(event.message)
   if (!allowed || !Number.isFinite(Date.parse(event.ts))) return null
   const result = { at: event.ts, scope: event.scope, message: event.message }
-  for (const key of ['ms', 'totalMs', 'durationMs', 'roundtripMs', 'executionMs', 'transportOverheadMs', 'persistMs']) {
+  for (const key of ['ms', 'totalMs', 'durationMs', 'roundtripMs', 'executionMs', 'transportOverheadMs', 'persistMs', 'adapters']) {
     const value = event.details?.[key]
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0) result[key] = value
   }
@@ -102,19 +106,33 @@ export function safeAppEvent(event) {
   }
   if (Object.keys(timings).length) result.phaseDurations = timings
   if (typeof event.details?.success === 'boolean') result.success = event.details.success
+  if (typeof event.details?.applied === 'boolean') result.applied = event.details.applied
   for (const [key, allowed] of Object.entries({ reason: [...categories, 'invalid-payload', 'untrusted-sender'],
     status: ['error', 'cancelled'], channel: ['start-direct-vpn', 'stop-tun', 'cancel-tun', 'servers:select', 'servers:cancel-switch', 'servers:ping-one'] })) {
     if (allowed.includes(event.details?.[key])) result[key] = event.details[key]
   }
   // Diagnose native/config failures using fixed labels; never publish matched text.
-  const errorText = typeof event.details === 'string' ? event.details
-    : typeof event.details?.message === 'string' ? event.details.message : ''
+  const errorText = typeof event.details === 'string' ? event.details :
+    [event.details?.message, event.details?.out, ...(Array.isArray(event.details?.warnings) ? event.details.warnings : [])]
+      .filter(value => typeof value === 'string').join('\n')
   for (const [kind, pattern] of [
+    ['dns-policy-baseline', /DNS registry baseline could not be verified/],
+    ['dns-policy-value', /Unsupported DNS registry snapshot value/],
+    ['dns-policy-schema', /Incomplete DNS registry snapshot|Invalid DNS registry snapshot/],
     ['runtime-acl', /RuntimeSecurityAclError|untrusted runtime directory/i],
     ['unknown-config-field', /unknown field/i], ['invalid-config', /decode config|parse config|check config/i],
     ['file-missing', /ENOENT|cannot find the file/i], ['permission-denied', /EACCES|EPERM|access is denied/i],
     ['socket-conflict', /EADDRINUSE/], ['native-timeout', /ETIMEDOUT|timed out/i]
   ]) if (pattern.test(errorText)) { result.errorKind = kind; break }
+  const issues = []
+  for (const [kind, pattern] of [
+    ['adapter-ipv6', /A[0-9]+_ipv6_err:|IPv6 (?:binding not verified|read-back mismatch)/],
+    ['adapter-dns', /A[0-9]+_dns_err:|DNS read-back mismatch/],
+    ['dns-smart-name-resolution', /DNS_SMNR_err:/], ['dns-parallel-queries', /DNS_PARALLEL_err:/],
+    ['teredo', /TRANS_teredo_err:/], ['6to4', /TRANS_6to4_err:/], ['isatap', /TRANS_isatap_err:/],
+    ['adapter-coverage', /physical adapter set (?:changed|could not be verified)/]
+  ]) if (pattern.test(errorText)) issues.push(kind)
+  if (issues.length) result.lockdownIssues = issues
   return result
 }
 
