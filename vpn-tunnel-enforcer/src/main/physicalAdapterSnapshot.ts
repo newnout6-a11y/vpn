@@ -3,6 +3,16 @@ import { ALL_KNOWN_ALIASES } from './tunAdapter'
 
 export const ADAPTER_EXCLUSION_PATTERN = 'Wintun|TAP-Windows|Tailscale|WireGuard|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth'
 
+/** Only trusted journal identities may remain eligible after our own binding mutation. */
+export function normalizeRetainedAdapterGuids(guids: readonly string[]): string[] {
+  return guids.map(guid => {
+    if (typeof guid !== 'string' || !/^(?:\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.test(guid)) {
+      throw new Error('Invalid retained adapter GUID')
+    }
+    return guid.replace(/[{}]/g, '').toLowerCase()
+  })
+}
+
 // Windows marks the guest Hyper-V uplink as hardware; its internal switch is virtual.
 // An SR-IOV VF without an IP interface belongs to the uplink, not to a separate host IP stack.
 // Query ownership, never address/DNS/default-route presence: IPv6-only and DHCP-pending NICs count.
@@ -12,7 +22,7 @@ $ipIndexes = @(Get-NetIPInterface -ErrorAction Stop | Select-Object -ExpandPrope
 $adapters = Get-NetAdapter -Physical -ErrorAction Stop |
   Where-Object {
     $_.Status -eq 'Up' -and
-    $_.ifIndex -in $ipIndexes -and
+    ($_.ifIndex -in $ipIndexes -or ([string]$_.InterfaceGuid).Trim('{}').ToLowerInvariant() -in $retainedGuids) -and
     $_.Name -notin $knownAliases -and
     $_.InterfaceDescription -notmatch '${ADAPTER_EXCLUSION_PATTERN}' -and
     $_.MacAddress -and $_.MacAddress -ne '00-00-00-00-00-00'
@@ -25,6 +35,7 @@ $adapters = Get-NetAdapter -Physical -ErrorAction Stop |
 // Keep this script compact: it is embedded in the worker's encoded command (limit 32767 characters; see the length test).
 export const PHYSICAL_ADAPTER_DNS_SCRIPT = `
 $ErrorActionPreference = 'Stop'
+$retainedGuids = @()
 ${PHYSICAL_ADAPTER_SELECTION}
 $rows = @(foreach ($a in $adapters) {
   $dns4 = @()
@@ -35,8 +46,11 @@ $rows = @(foreach ($a in $adapters) {
 $rows | ConvertTo-Json -Compress -Depth 3
 `
 
-export const PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT = `
+export function physicalAdapterSnapshotScript(retainedGuids: readonly string[] = []): string {
+  const guids = normalizeRetainedAdapterGuids(retainedGuids)
+  return `
 $ErrorActionPreference = 'Stop'
+$retainedGuids = @(${guids.map(guid => `'${guid}'`).join(',')})
 $rows = @()
 $knownAliases = @(${ALL_KNOWN_ALIASES.map(alias => `'${alias.replace(/'/g, "''")}'`).join(',')})
 try {
@@ -46,7 +60,7 @@ try {
     -not $_.Hidden -and
     $_.HardwareInterface -eq $true -and
     $_.InterfaceOperationalStatus -eq 1 -and
-    $_.InterfaceIndex -in $ipIndexes -and
+    ($_.InterfaceIndex -in $ipIndexes -or ([string]$_.InterfaceGuid).Trim('{}').ToLowerInvariant() -in $retainedGuids) -and
     $_.Name -notin $knownAliases -and
     $_.InterfaceDescription -notmatch '${ADAPTER_EXCLUSION_PATTERN}' -and
     $_.PermanentAddress -and $_.PermanentAddress -ne '000000000000'
@@ -157,6 +171,9 @@ try {
 }
 $rows | ConvertTo-Json -Compress -Depth 4
 `
+}
+
+export const PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT = physicalAdapterSnapshotScript()
 
 export const TRANSITION_ADAPTER_SNAPSHOT_SCRIPT = `
 $teredo = $null

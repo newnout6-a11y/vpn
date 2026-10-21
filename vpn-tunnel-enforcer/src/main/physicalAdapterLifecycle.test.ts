@@ -347,6 +347,7 @@ describe('physical adapter apply cancellation', () => {
     expect(await h.apply('192.168.250.254', { forceDns: false })).toMatchObject({ applied: true, warnings: [] })
     expect(h.snapshotPhysicalAdapters).toHaveBeenCalledTimes(2)
     expect(h.rollbackPhysicalAdapterLockdownIfApplied).not.toHaveBeenCalled()
+    expect(h.snapshotPhysicalAdapters).toHaveBeenLastCalledWith({ forceFresh: true, retainedGuids: [adapter().interfaceGuid] })
   })
   it('verifies an existing journal against fresh adapters before idempotent success (AT-03-006)', async () => {
     const h = harness()

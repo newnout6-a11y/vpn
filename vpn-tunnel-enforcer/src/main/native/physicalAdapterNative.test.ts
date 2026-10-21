@@ -84,6 +84,16 @@ describe('native physical adapter snapshot: PowerShell JSON contract', () => {
     // .NET \b is Unicode aware: a Cyrillic neighbour is not a word boundary.
     expect(run({ alias: 'сетьlte' }, v4)).toBe(false)
   })
+  it('retains only journalled GUIDs after lockdown removes their last IP binding (AT-03-006)', () => {
+    const owned = { ...wifi, ipv4Enabled: false, ipv6Enabled: false }
+    const vf = { ...owned, interfaceGuid: '{BBBBBBBB-0000-0000-0000-000000000020}', ifIndex: 20 }
+    const fresh = { ...wifi, interfaceGuid: '{BBBBBBBB-0000-0000-0000-000000000021}', ifIndex: 21 }
+    const retained = [wifi.interfaceGuid.toLowerCase().replace(/[{}]/g, '')]
+    expect(buildPhysicalAdapterRows(source({ adapters: [owned, vf, fresh] }), retained).map(r => r.ifIndex)).toEqual([17, 21])
+    expect(buildPhysicalAdapterRows(source({ adapters: [vf] }), retained)).toEqual([])
+    expect(buildPhysicalAdapterRows(source({ adapters: [{ ...owned, hardwareInterface: false }] }), retained)).toEqual([])
+    expect(buildPhysicalAdapterRows(source({ adapters: [{ ...owned, description: 'Wintun' }] }), retained)).toEqual([])
+  })
   it('excludes on-link zero next hop from gateways', () => {
     const rows = buildPhysicalAdapterRows(source({ routes: [{ ifIndex: 17, family: 4, nextHop: '0.0.0.0' }, { ifIndex: 17, family: 4, nextHop: '10.0.0.1' }] }))
     expect(rows[0].gateways).toEqual(['10.0.0.1'])
@@ -120,13 +130,14 @@ describe('native physical adapter snapshot: fail closed', () => {
 describe('lockdown hook falls back to PowerShell', () => {
   it('uses the PowerShell worker when native throws, and native output when it succeeds', async () => {
     const native = vi.fn()
+    const helper = vi.fn()
     vi.resetModules()
     vi.doMock('electron', () => ({ app: { getPath: () => 'C:\\fixture' } }))
     vi.doMock('../appLogger', () => ({ logEvent: vi.fn() }))
     vi.doMock('../admin', () => ({ execElevated: vi.fn() }))
     vi.doMock('../runtimeDirSecurity', () => ({ ensureElevatedRuntimeDirHardened: vi.fn() }))
     vi.doMock('../recoveryManifest', () => ({ recoveryManifestPath: () => 'C:\\fixture\\m.json', readRecoveryManifest: vi.fn(async () => null), writeRecoveryManifest: vi.fn(), removeRecoveryManifest: vi.fn() }))
-    vi.doMock('../elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => true, execElevatedPs: vi.fn() }))
+    vi.doMock('../elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => true, execElevatedPs: helper }))
     const psRow = JSON.stringify({ ...JSON.parse(snapshotFromSource(source())), alias: 'FromPS' })
     const adapter = vi.fn(async () => psRow)
     vi.doMock('../recoveryPsWorker', () => ({ executeRecoveryOperation: vi.fn(), executeAdapterInspection: adapter, RecoveryWorkerError: class extends Error { constructor(public code: string, m: string) { super(m) } } }))
@@ -144,6 +155,17 @@ describe('lockdown hook falls back to PowerShell', () => {
       lock.clearPhysicalAdaptersSnapshotCache()
       // Native succeeds: its rows are published and the worker is not consulted.
       expect((await lock.snapshotPhysicalAdapters()).map(a => a.alias)).toEqual([wifi.alias])
+      const retained = [wifi.interfaceGuid.toLowerCase().replace(/[{}]/g, '')]
+      native.mockRejectedValueOnce(new Error('host refused observation'))
+      helper.mockResolvedValueOnce({ stdout: psRow, stderr: '', exitCode: 0 })
+      adapter.mockClear()
+      expect((await lock.snapshotPhysicalAdapters({ retainedGuids: retained })).map(a => a.alias)).toEqual(['FromPS'])
+      expect(native).toHaveBeenLastCalledWith(undefined, retained)
+      expect(adapter).not.toHaveBeenCalled()
+      expect(helper).toHaveBeenCalledWith(expect.stringContaining(`$retainedGuids = @('${retained[0]}')`), 20000, 'physical-adapter-lockdown')
+      native.mockResolvedValueOnce(snapshotFromSource(source()))
+      expect((await lock.snapshotPhysicalAdapters({ forceFresh: true })).map(a => a.alias)).toEqual([wifi.alias])
+      expect(native).toHaveBeenLastCalledWith(undefined, [])
     } finally {
       if (prev === undefined) delete process.env.VPNTE_DISABLE_NATIVE_NET; else process.env.VPNTE_DISABLE_NATIVE_NET = prev
       vi.doUnmock('./physicalAdapterNative')

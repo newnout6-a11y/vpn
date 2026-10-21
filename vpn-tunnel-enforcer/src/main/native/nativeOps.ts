@@ -8,6 +8,7 @@ import { toActiveTunnels, toAdapterRows, toIpConfigRows, toPhysicalIpv4Sources, 
 import { createKoffiSource, snapshotFromSource } from './physicalAdapterCore'
 import { notifyWinInetInProcess } from './winInetCore'
 import type { HostOp } from './hostProtocol'
+import { normalizeRetainedAdapterGuids } from '../physicalAdapterSnapshot'
 
 function stringArray(value: unknown, what: string): string[] {
   if (!Array.isArray(value) || !value.every(item => typeof item === 'string')) throw new Error(`${what}: expected an array of strings`)
@@ -43,8 +44,10 @@ export async function runNativeOp(op: HostOp, args: unknown): Promise<unknown> {
       if (typeof a.vpnteAlias !== 'string' || typeof a.vpnteIpv4Prefix !== 'string') throw new Error('tunnels: alias and prefix are required')
       return toActiveTunnels(readRawAdapters(), readRawIfConfigs(), { vpnteAlias: a.vpnteAlias, vpnteIpv4Prefix: a.vpnteIpv4Prefix })
     }
-    case 'physical-snapshot':
-      return snapshotFromSource(createKoffiSource(profileMap(a.profiles)))
+    case 'physical-snapshot': {
+      const retained = normalizeRetainedAdapterGuids(stringArray(a.retainedGuids ?? [], 'retained GUIDs'))
+      return snapshotFromSource(createKoffiSource(profileMap(a.profiles)), retained)
+    }
     case 'wininet':
       await notifyWinInetInProcess()
       return true

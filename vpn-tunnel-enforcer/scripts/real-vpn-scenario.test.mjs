@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
+import { performance } from 'node:perf_hooks'
 import { assertStable, deadline, runScenario } from './real-vpn-scenario.mjs'
 
 const original = { id: 'a', name: 'A', groupId: 'g', server: 'example.test', port: 443 }
@@ -69,6 +70,31 @@ test('exact user sequence calls production API names, saves settings and accepts
   assert.equal(f.calls.filter(([name]) => name === 'saveSettings').length, 3)
   assert.equal(f.results.at(-1).pingMs, 0)
   assert.ok(f.results.find(r => r.name === 'switch-back-cancel').cancelToSettledMs >= 0)
+})
+
+test('exhausted scenario budget refuses new work while leaving cleanup usable (AT-00-003)', async t => {
+  let clock = 0
+  t.mock.method(performance, 'now', () => clock)
+  const f = fixture(), invoke = f.driver.invoke
+  f.driver.invoke = async (...args) => {
+    const result = await invoke(...args)
+    if (args[0] === 'getSettings') clock = 1000
+    return result
+  }
+  await assert.rejects(runScenario(f.driver, { ...options, scenarioTimeoutMs: 100 }, f.step), /budget exhausted/)
+  assert.ok(!f.calls.some(([method]) => method === 'startDirectVpn' || method === 'saveSettings'))
+  assert.equal((await f.driver.invoke('stopTun')).success, true)
+})
+
+test('budget exhaustion still cancels and drains the admitted owner before cleanup (AT-00-003/007)', async t => {
+  let clock = 0
+  t.mock.method(performance, 'now', () => clock)
+  const f = fixture(), transition = f.driver.waitTransition
+  f.driver.waitTransition = async (...args) => { await transition(...args); clock = 1000 }
+  await assert.rejects(runScenario(f.driver, { ...options, scenarioTimeoutMs: 100 }, f.step), /budget exhausted/)
+  assert.ok(f.calls.some(([method]) => method === 'cancelTun'))
+  assert.equal(f.calls.filter(([method]) => method === 'startDirectVpn').length, 2)
+  assert.equal((await f.driver.invoke('stopTun')).success, true)
 })
 
 test('cancel acknowledgement alone does not release the next switch', async () => {

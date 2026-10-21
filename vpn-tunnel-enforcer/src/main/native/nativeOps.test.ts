@@ -26,7 +26,9 @@ describe('native host operations', () => {
     ['tunnels', { vpnteAlias: 'VPNTE' }, /alias and prefix/],
     ['physical-snapshot', { profiles: 'x' }, /pairs/],
     ['physical-snapshot', { profiles: [['17', ['Office']]] }, /malformed/],
-    ['physical-snapshot', { profiles: [[17, [1]]] }, /array of strings/]
+    ['physical-snapshot', { profiles: [[17, [1]]] }, /array of strings/],
+    ['physical-snapshot', { profiles: [], retainedGuids: 'invalid' }, /array of strings/],
+    ['physical-snapshot', { profiles: [], retainedGuids: ["'; throw 'injected'"] }, /Invalid retained adapter GUID/]
   ] as const)('rejects bad arguments for %s before touching koffi', async (op, args, message) => {
     await expect(runNativeOp(op, args)).rejects.toThrow(message)
   })

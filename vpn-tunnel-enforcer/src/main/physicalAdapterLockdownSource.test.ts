@@ -114,7 +114,7 @@ describe('physicalAdapterLockdown source regressions', () => {
     expect(s).toContain('let snapshotGeneration = 0')
     expect(s).toContain('snapshotGeneration++')
     expect(s).toContain('const currentGeneration = snapshotGeneration')
-    expect(s).toContain('if (snapshotGeneration === currentGeneration)')
+    expect(s).toContain('if (ordinary && snapshotGeneration === currentGeneration)')
     expect(s).toContain('if (snapshotPromise === p)')
   })
 

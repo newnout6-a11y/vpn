@@ -501,6 +501,26 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(await isKillSwitchActive()).toBe(true)
     expect(state.wfpCalls).toEqual(['presence'])
   })
+  it('orders program allow mutations between fresh status reads (AT-03-001/004/008)', async () => {
+    await enableKillSwitch(options)
+    state.scripts = []
+    let release!: () => void
+    state.statusReadGate = new Promise<void>(resolve => { release = resolve })
+    const before = getFirewallKillSwitchStatus()
+    await vi.waitFor(() => expect(state.scripts).toHaveLength(1))
+    const mutation = ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe', 'xray-engine')
+    const after = getFirewallKillSwitchStatus()
+    try {
+      // A rule must not be changed underneath an admitted policy read.
+      await Promise.resolve(); await Promise.resolve()
+      expect(state.scripts).toHaveLength(1)
+    } finally { release() }
+    await Promise.all([before, mutation, after])
+    expect(state.scripts).toHaveLength(3)
+    expect(state.scripts[0]).toContain('$foreign=@')
+    expect(state.scripts[1]).toContain('VPNTE-killswitch-allow-xray-engine')
+    expect(state.scripts[2]).toContain('$foreign=@')
+  })
   it.each(['manifest', 'orphan firewall'])('allows Xray through %s without a WFP presence round-trip (AT-03-004/010)', async mode => {
     if (mode === 'manifest') await enableKillSwitch(options)
     else { state.ownedRules = true; state.fileProbe.mockReturnValue('1') }

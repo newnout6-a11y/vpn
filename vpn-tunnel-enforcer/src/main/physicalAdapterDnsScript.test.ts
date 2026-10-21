@@ -4,7 +4,7 @@
 import { execFileSync } from 'node:child_process'
 import { gzipSync } from 'node:zlib'
 import { describe, expect, it } from 'vitest'
-import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
+import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, physicalAdapterSnapshotScript } from './physicalAdapterSnapshot'
 import { recoveryWorkerScript } from './recoveryPsProtocol'
 
 /** Fake cmdlets: Wi-Fi has servers, Ethernet 4 raises ObjectNotFound, anything else raises InvalidData. */
@@ -118,6 +118,20 @@ ${mode === 'dns' ? PHYSICAL_ADAPTER_DNS_SCRIPT : PHYSICAL_ADAPTER_SNAPSHOT_SCRIP
   })
   it.each(['cim', 'fallback', 'dns'])('%s fails when IP ownership cannot be read, instead of silently omitting an adapter', mode => {
     expect(() => run(fixture(mode, true))).toThrow(/IP inventory unavailable/)
+  })
+  it.each(['cim', 'fallback'])('%s retains only a journalled adapter after its last IP binding is disabled (AT-03-006)', mode => {
+    const retained = topology.find(a => a.Name === 'no-address-yet')!.InterfaceGuid
+    const script = fixture(mode).replace(PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT,
+      "$fixture | Where-Object Name -eq 'no-address-yet' | ForEach-Object { $_.Bound=$false }\n" + physicalAdapterSnapshotScript([retained]))
+    const rows = JSON.parse(run(script).trim())
+    expect(rows.map((r: { alias: string }) => r.alias)).toEqual(['uplink', 'no-address-yet'])
+    // A fresh selection must still exclude the unbound VF and the now-unbound old adapter.
+    const fresh = script.slice(0, script.indexOf("$fixture | Where-Object Name -eq 'no-address-yet'")) +
+      "$fixture | Where-Object Name -eq 'no-address-yet' | ForEach-Object { $_.Bound=$false }\n" + PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT
+    expect(JSON.parse(run(fresh).trim()).alias).toBe('uplink')
+  })
+  it('rejects non-GUID journal input before building any PowerShell command', () => {
+    expect(() => physicalAdapterSnapshotScript(["'; throw 'injected'"])).toThrow(/Invalid retained adapter GUID/)
   })
 })
 

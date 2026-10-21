@@ -140,7 +140,7 @@ jobs:
 
   real-vpn:
     name: Реальный VPN-сценарий (отдельная Windows)
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.real_vpn }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.real_vpn && github.actor == github.repository_owner }}
     uses: ./.github/workflows/real-vpn.yml
     with:
       cancel_after_ms: ${{ inputs.cancel_after_ms }}

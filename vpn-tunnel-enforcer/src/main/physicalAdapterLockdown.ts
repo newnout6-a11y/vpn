@@ -1,7 +1,7 @@
 import { recoveryManifestPath, readRecoveryManifest, writeRecoveryManifest, removeRecoveryManifest } from './recoveryManifest'
 import { executeAdapterInspection, executeRecoveryOperation, RecoveryWorkerError } from './recoveryPsWorker'
 import { DNS_POLICY_SNAPSHOT_SCRIPT } from './recoveryPsProtocol'
-import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, TRANSITION_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
+import { PHYSICAL_ADAPTER_DNS_SCRIPT, physicalAdapterSnapshotScript, normalizeRetainedAdapterGuids, TRANSITION_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
 import { readPhysicalAdaptersNative } from './native/physicalAdapterNative'
 import { isIP } from 'net'
 import { networkInterfaces } from 'os'
@@ -363,20 +363,22 @@ export function clearPhysicalAdaptersSnapshotCache(): void {
  * if the network signature has not changed within the TTL window, or querying
  * fresh adapter state from PowerShell.
  */
-export async function snapshotPhysicalAdapters(options?: { forceFresh?: boolean }): Promise<AdapterSnapshot[]> {
+export async function snapshotPhysicalAdapters(options?: { forceFresh?: boolean; retainedGuids?: readonly string[] }): Promise<AdapterSnapshot[]> {
+  const retainedGuids = normalizeRetainedAdapterGuids(options?.retainedGuids ?? [])
+  const ordinary = retainedGuids.length === 0
   const currentSig = getLocalNetSignature()
   // Return the fresh snapshot if taken within 30s to avoid expensive PS reruns, provided network topology has not changed.
-  if (!options?.forceFresh && cachedAdaptersSnapshot && Date.now() - cachedAdaptersSnapshotTime < 30000 && currentSig && currentSig === cachedNetSignature) {
+  if (ordinary && !options?.forceFresh && cachedAdaptersSnapshot && Date.now() - cachedAdaptersSnapshotTime < 30000 && currentSig && currentSig === cachedNetSignature) {
     return cachedAdaptersSnapshot
   }
   // Return the in-flight promise directly so concurrent callers share one PS run (unless a forced fresh read is requested).
-  if (!options?.forceFresh && snapshotPromise) {
+  if (ordinary && !options?.forceFresh && snapshotPromise) {
     return snapshotPromise
   }
 
   const currentGeneration = snapshotGeneration
   const p = (async () => {
-  const stdout = await inspectAdapters('inspect-physical-adapters', PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, 20000)
+  const stdout = await inspectAdapters('inspect-physical-adapters', physicalAdapterSnapshotScript(retainedGuids), 20000, retainedGuids)
   const text = stdout.trim()
   if (!text || text === 'null') return []
   let parsed: any
@@ -419,7 +421,7 @@ export async function snapshotPhysicalAdapters(options?: { forceFresh?: boolean 
         forcedIpv6Off: false
       }
     })
-    if (snapshotGeneration === currentGeneration) {
+    if (ordinary && snapshotGeneration === currentGeneration) {
       cachedAdaptersSnapshot = result
       cachedAdaptersSnapshotTime = Date.now()
       cachedNetSignature = currentSig
@@ -430,10 +432,10 @@ export async function snapshotPhysicalAdapters(options?: { forceFresh?: boolean 
       snapshotPromise = null
     }
   })
-  snapshotPromise = p
+  if (ordinary) snapshotPromise = p
 
   try {
-    return await snapshotPromise
+    return await p
   } catch (err) {
     throw err
   }
@@ -454,12 +456,15 @@ function netshValue(raw: string, label: string): string | null {
   return value ? value.split(/\s+/)[0].toLowerCase() : null
 }
 
-async function inspectAdapters(op: 'inspect-physical-adapters' | 'inspect-transition-adapters', script: string, timeoutMs: number): Promise<string> {
+async function inspectAdapters(op: 'inspect-physical-adapters' | 'inspect-transition-adapters', script: string, timeoutMs: number, retainedGuids: readonly string[] = []): Promise<string> {
   // AT-03-005: read-only native fast path; any native failure falls back to the PowerShell worker (fail closed).
   if (op === 'inspect-physical-adapters' && process.env.VPNTE_DISABLE_NATIVE_NET !== '1') {
-    try { return await readPhysicalAdaptersNative() }
+    try { return await readPhysicalAdaptersNative(undefined, retainedGuids) }
     catch (error) { logEvent('warn', 'phys-lockdown', 'native adapter snapshot unavailable, using PowerShell', { err: (error as Error).message }) }
   }
+  // The fixed worker has no journal arguments. This read uses the same trusted
+  // helper policy, with validated GUID literals, rather than silently losing them.
+  if (retainedGuids.length > 0) return runPS(script, timeoutMs)
   try { return await executeAdapterInspection(op, timeoutMs) }
   catch (error) {
     // Only failure before dispatch allows the existing bounded fallback.
@@ -604,7 +609,8 @@ export async function applyPhysicalAdapterLockdown(tunDnsIpv4: string, options: 
     clearPhysicalAdaptersSnapshotCache()
     let warning = 'physical adapter set changed; lockdown coverage is not verified'
     try {
-      const current = await snapshotPhysicalAdapters({ forceFresh: true })
+      const current = await snapshotPhysicalAdapters({ forceFresh: true,
+        retainedGuids: expected.map(a => a.interfaceGuid || '') })
       const identity = (a: AdapterSnapshot) => (a.interfaceGuid || '').replace(/[{}]/g, '').toLowerCase()
       const expectedIds = new Set(expected.map(identity))
       if (current.length > 0 && current.length === expected.length && expectedIds.size === expected.length &&

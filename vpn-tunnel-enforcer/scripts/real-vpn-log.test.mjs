@@ -51,6 +51,24 @@ test('domain failures and IPC rejections expose only fixed outcome labels', () =
   assert.deepEqual(failed, { at: base.ts, scope: 'tun', message: 'failed to prepare TUN runtime', errorKind: 'unknown-config-field' })
 })
 
+test('admission refusal is logged before dispatch and does not prevent subsequent cleanup (AT-00-003)', async t => {
+  const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
+  await mkdir(temp, { recursive: true })
+  const dir = await mkdtemp(join(temp, 'real-vpn-admission-test-'))
+  t.after(() => rm(dir, { recursive: true }))
+  let cleanup = false, dispatched = false
+  const lines = [], log = createProgressLog(join(dir, 'progress.log'), { write: line => lines.push(line), admit: () => {
+    if (!cleanup) throw new Error('budget exhausted')
+  } })
+  t.after(() => log.close())
+  await assert.rejects(log.run('prepare/launch', () => { dispatched = true }), /budget exhausted/)
+  assert.equal(dispatched, false)
+  assert.match(lines.at(-1), /"event":"failed"/)
+  cleanup = true
+  await log.run('cleanup/shutdown', () => { dispatched = true })
+  assert.equal(dispatched, true)
+})
+
 test('native Electron crash diagnostics retain only source location and severity', () => {
   assert.deepEqual(safeElectronDiagnostic('[123:1021/165511.846:FATAL:electron\\shell\\common\\node_bindings.cc(42)] Check failed: FAKE-PRIVATE-PAYLOAD vless://PRIVATE'),
     { severity: 'FATAL', sourceFile: 'node_bindings.cc', sourceLine: 42, checkFailed: true })
@@ -133,4 +151,18 @@ test('only known application events and numeric timings enter public logs', () =
   assert.ok(!JSON.stringify(safe).includes('FAKE-PRIVATE-PAYLOAD'))
   assert.ok(!JSON.stringify(safeSnapshot({ state: 'FAKE-PRIVATE-PAYLOAD', transition: 'FAKE-PRIVATE-PAYLOAD',
     operation: { correlationId: 'FAKE-PRIVATE-PAYLOAD', status: 'FAKE-PRIVATE-PAYLOAD' } })).includes('FAKE-PRIVATE-PAYLOAD'))
+})
+
+test('public correlation accepts only prefixed identifiers, never credential-shaped UUIDs (AT-00-005)', () => {
+  const event = { ts: '2026-10-21T16:00:00.000Z', scope: 'tun', message: 'start timing' }
+  for (const id of ['aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '-'.repeat(36), 'clock_' + 'a'.repeat(24)]) {
+    assert.equal(safeSnapshot({ operation: { correlationId: id } }).correlationId, null)
+    assert.equal(safeAppEvent({ ...event, correlationId: id }).correlationId, undefined)
+  }
+  for (const id of ['ipc_' + 'a'.repeat(32), 'op_' + 'b'.repeat(32)]) {
+    assert.equal(safeSnapshot({ operation: { correlationId: id } }).correlationId, id)
+    assert.equal(safeAppEvent({ ...event, correlationId: id }).correlationId, id)
+    assert.equal(safeAppEvent({ ...event, clockId: id }).clockId, undefined)
+  }
+  assert.equal(safeAppEvent({ ...event, clockId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }).clockId, undefined)
 })

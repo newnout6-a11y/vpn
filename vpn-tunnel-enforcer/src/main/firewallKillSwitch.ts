@@ -482,6 +482,12 @@ export async function ensureKillSwitchProgramAllowed(
   ruleSuffix = 'program',
   description = 'VPN Tunnel Enforcer kill-switch: allow managed helper outbound.'
 ): Promise<FirewallKillSwitchResult> {
+  return serializeFirewall(() => ensureKillSwitchProgramAllowedUnlocked(programPath, ruleSuffix, description))
+}
+
+async function ensureKillSwitchProgramAllowedUnlocked(
+  programPath: string, ruleSuffix: string, description: string
+): Promise<FirewallKillSwitchResult> {
   if (process.platform !== 'win32') {
     return { success: true, skipped: true, message: 'Firewall kill-switch недоступен (не Windows)' }
   }

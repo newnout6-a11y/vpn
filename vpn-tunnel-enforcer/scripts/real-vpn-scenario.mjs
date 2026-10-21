@@ -27,12 +27,19 @@ export function assertStable(status, connected) {
   if (connected) assert.ok(Number.isInteger(s.pid) && s.pid > 0, 'No live runtime PID')
 }
 
-export async function runScenario(driver, { original, target, cancelAfterMs = 500, timeoutMs = 90_000 }, step) {
-  const invoke = (method, ...args) => deadline(driver.invoke(method, ...args), timeoutMs, method)
+export async function runScenario(driver, { original, target, cancelAfterMs = 500, timeoutMs = 90_000, scenarioTimeoutMs = 300_000 }, step) {
+  const until = performance.now() + scenarioTimeoutMs
+  const checkBudget = () => assert.ok(performance.now() < until, 'Scenario budget exhausted; proceed to cleanup')
+  const invoke = (method, ...args) => {
+    // Cancellation must drain its admitted owner even after the scenario budget.
+    if (!['cancelTun', 'serversCancelSwitch'].includes(method)) checkBudget()
+    return deadline(driver.invoke(method, ...args), timeoutMs, method)
+  }
   const verify = async (connected, profileId) => {
     const status = await invoke('getTunStatus')
     assertStable(status, connected)
     assert.equal((await invoke('serversGetActive')).activeId, profileId, 'Selected profile was not restored/committed')
+    checkBudget()
     const os = await driver.proof(connected ? status.lifecycle.pid : 0)
     if (!connected) assert.equal(os.runtimeProcessCount, 0, 'Runtime remains after stop')
     assert.equal(os.tunProcessCount, connected ? 1 : 0)
@@ -51,9 +58,11 @@ export async function runScenario(driver, { original, target, cancelAfterMs = 50
     return invoke('startDirectVpn')
   }
   const timed = async (name, action, connected, profileId) => step(name, async () => {
+    checkBudget()
     const startedAt = new Date().toISOString(), start = performance.now()
     const result = await action()
     const elapsedMs = Math.round(performance.now() - start)
+    checkBudget()
     const evidence = await verify(connected, profileId)
     return { startedAt, elapsedMs, ...result, ...evidence }
   })

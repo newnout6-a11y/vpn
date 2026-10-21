@@ -10,6 +10,7 @@ import { promisify, parseArgs } from 'node:util'
 import { test } from 'node:test'
 import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
+import { performance } from 'node:perf_hooks'
 import { assertStable, deadline, runScenario } from './real-vpn-scenario.mjs'
 import { connectInspector } from './real-vpn-inspector.mjs'
 import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs } from './real-vpn-runner.mjs'
@@ -36,7 +37,14 @@ async function run(config, seed) {
       'Windows Server/cloud network timings differ from the user PC.',
       'Not a packet-leak oracle, OS matrix, or p95 acceptance run.'] }
   const save = () => writeFile(join(config.output, 'report.json'), JSON.stringify(report, null, 2) + '\n')
-  const progress = createProgressLog(join(config.output, 'progress.log'))
+  const scenarioDeadline = performance.now() + 300_000
+  let cleaningUp = false
+  const progress = createProgressLog(join(config.output, 'progress.log'), { admit: action => {
+    if (!cleaningUp && !['ipc/cancelTun', 'ipc/serversCancelSwitch'].includes(action)) {
+      assert.ok(performance.now() < scenarioDeadline, 'Run budget exhausted; proceed to cleanup')
+    }
+  } })
+  report.budgets = { admissionMs: 300_000, operationMs: config.timeoutMs, shutdownMs: 135_000 }
   progress.record('runner-started')
   let inspector, application, originalId, runtimeDir, userData, tunAlias = '', renderer, invoke, settingsDigest
   let eventCursor = 0, eventsReady = false, refreshing = false, lastWindows = ''
@@ -171,7 +179,7 @@ async function run(config, seed) {
           }
           throw new Error('No admitted backend transition observed for cancellation')
         } }
-        await runScenario(driver, { ...pair, ...config }, async (name, action) => {
+        await runScenario(driver, { ...pair, ...config, scenarioTimeoutMs: Math.max(0, scenarioDeadline - performance.now()) }, async (name, action) => {
           let failure
           await t.test(name, async () => {
             try {
@@ -193,6 +201,7 @@ async function run(config, seed) {
         assert.equal(report.ipVerification.verdict, 'passed', 'VPN egress has not been verified by the application')
         report.status = 'PASS'
       }, async () => {
+        cleaningUp = true
         progress.record('cleanup-started')
         await runWithCleanup(async () => { if (invoke) {
           assert.equal((await deadline(invoke('stopTun'), config.timeoutMs, 'cleanup stop')).success, true)

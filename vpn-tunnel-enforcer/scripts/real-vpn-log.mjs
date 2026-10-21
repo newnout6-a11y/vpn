@@ -2,7 +2,7 @@
 import { appendFileSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 
-export function createProgressLog(path, { write = line => process.stdout.write(line), heartbeatMs = 5000 } = {}) {
+export function createProgressLog(path, { write = line => process.stdout.write(line), heartbeatMs = 5000, admit = () => {} } = {}) {
   const started = performance.now(), pending = new Map()
   let sequence = 0
   const record = (event, fields = {}) => {
@@ -21,6 +21,7 @@ export function createProgressLog(path, { write = line => process.stdout.write(l
     pending.set(id, { name: action, started: start })
     record('started', { id, action })
     try {
+      admit(action)
       const value = await operation()
       record('finished', { id, action, elapsedMs: Math.round(performance.now() - start), ...safeActionResult(value) })
       return value
@@ -47,7 +48,7 @@ export function safeSnapshot(s) {
     transition: oneOf(s.transition, ['connecting', 'disconnecting', 'reconnecting']),
     processState: oneOf(s.processState, ['running', 'stopped']), pid: Number.isSafeInteger(s.pid) ? s.pid : null,
     cleanupRequired: s.cleanupRequired === true,
-    correlationId: /^(?:[0-9a-f-]{36}|(?:ipc|op)_[0-9a-f]{32})$/i.test(s.operation?.correlationId ?? '') ? s.operation.correlationId : null,
+    correlationId: /^(?:ipc|op)_[0-9a-f]{32}$/i.test(s.operation?.correlationId ?? '') ? s.operation.correlationId : null,
     operationStatus: oneOf(s.operation?.status, ['pending', 'running', 'success', 'error', 'cancelled']) }
 }
 
@@ -95,7 +96,8 @@ export function safeAppEvent(event) {
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0) result[key] = value
   }
   for (const key of ['correlationId', 'clockId']) {
-    if (/^(?:[0-9a-f-]{36}|(?:ipc|op)_[0-9a-f]{32}|clock_[0-9a-f]{24})$/i.test(event[key] ?? '')) result[key] = event[key]
+    const pattern = key === 'clockId' ? /^clock_[0-9a-f]{24}$/i : /^(?:ipc|op)_[0-9a-f]{32}$/i
+    if (pattern.test(event[key] ?? '')) result[key] = event[key]
   }
   if (Number.isFinite(event.monotonicMs) && event.monotonicMs >= 0) result.monotonicMs = event.monotonicMs
   if (['SECURE_STORE_PREFLIGHT_FAILED', 'STARTUP_FAILED'].includes(event.details?.code)) result.code = event.details.code

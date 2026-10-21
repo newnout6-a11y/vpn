@@ -21,8 +21,10 @@ concurrency:
 
 jobs:
   scenario:
+    # Branch measurements are authorized only by the owner who supplied the profiles.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner }}
     runs-on: windows-2025
-    timeout-minutes: 35
+    timeout-minutes: 40
     defaults:
       run:
         shell: pwsh
@@ -103,7 +105,9 @@ jobs:
       - name: Scenario and inspector regressions (no VPN switching)
         run: npm run test:real-vpn:unit
       - name: Run the real connection sequence
-        timeout-minutes: 10
+        # The script stops admitting scenario work after five minutes, drains
+        # admitted cancellation, then runs stop + acknowledged shutdown.
+        timeout-minutes: 20
         env:
           VPNTE_REAL_SCENARIO: ${{ secrets.VPNTE_REAL_SCENARIO }}
           VPNTE_CANCEL_AFTER_MS: ${{ inputs.cancel_after_ms }}
