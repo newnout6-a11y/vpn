@@ -1,4 +1,4 @@
-// AT-00-005, AT-01-001: stream progress immediately; never inspect action arguments/errors.
+// AT-00-005, AT-01-001: stream progress immediately; never echo arguments or raw errors.
 import { appendFileSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 
@@ -22,13 +22,22 @@ export function createProgressLog(path, { write = line => process.stdout.write(l
     record('started', { id, action })
     try {
       const value = await operation()
-      record('finished', { id, action, elapsedMs: Math.round(performance.now() - start) })
+      record('finished', { id, action, elapsedMs: Math.round(performance.now() - start), ...safeActionResult(value) })
       return value
     } catch (error) {
-      record('failed', { id, action, elapsedMs: Math.round(performance.now() - start) })
+      record('failed', { id, action, elapsedMs: Math.round(performance.now() - start), ...safeActionResult(error) })
       throw error
     } finally { pending.delete(id) }
   } }
+}
+
+const categories = ['validation', 'permission', 'network', 'conflict', 'internal', 'cancelled', 'timeout']
+export function safeActionResult(value) {
+  const result = {}
+  for (const key of ['success', 'cancelled']) if (typeof value?.[key] === 'boolean') result[key] = value[key]
+  const category = value?.category ?? value?.error?.category
+  if (categories.includes(category)) result.category = category
+  return result
 }
 
 export function safeSnapshot(s) {
@@ -65,7 +74,13 @@ export function safeAppEvent(event) {
           'failed to start elevated PS helper', 'crash recovery failed', 'startup network recovery unconfirmed',
           'checking for stale TUN adapter during crash recovery', 'V2 feature modules registered and initialized'],
         security: ['Secure store preflight failed; startup refused without changing network protection'],
-        tun: ['start timing', 'stop timing', 'stop started', 'stop step started', 'stop step completed'], xray: ['start timing'],
+        tun: ['start timing', 'stop timing', 'stop started', 'stop step started', 'stop step completed',
+          'start refused because another TUN/VPN is already active', 'WFP priority reservation failed',
+          'physical adapter lockdown did not apply', 'physical adapter lockdown threw', 'xray startup failed',
+          'failed to prepare TUN runtime', 'sing-box exited before startup completed',
+          'firewall kill-switch failed to engage — aborting start and rolling back',
+          'startup validation failed — rolling back', 'startup runtime termination failed', 'startup rollback step failed'],
+        'ipc-security': ['IPC request rejected', 'IPC request failed'], xray: ['start timing'],
         'ps-helper': ['command timing'], 'firewall-killswitch': ['command timing', 'phase timing', 'native phase timing'],
         'system-network': ['baseline native phase timing'] })[event.scope]?.includes?.(event.message)
   if (!allowed || !Number.isFinite(Date.parse(event.ts))) return null
@@ -87,6 +102,19 @@ export function safeAppEvent(event) {
   }
   if (Object.keys(timings).length) result.phaseDurations = timings
   if (typeof event.details?.success === 'boolean') result.success = event.details.success
+  for (const [key, allowed] of Object.entries({ reason: [...categories, 'invalid-payload', 'untrusted-sender'],
+    status: ['error', 'cancelled'], channel: ['start-direct-vpn', 'stop-tun', 'cancel-tun', 'servers:select', 'servers:cancel-switch', 'servers:ping-one'] })) {
+    if (allowed.includes(event.details?.[key])) result[key] = event.details[key]
+  }
+  // Diagnose native/config failures using fixed labels; never publish matched text.
+  const errorText = typeof event.details === 'string' ? event.details
+    : typeof event.details?.message === 'string' ? event.details.message : ''
+  for (const [kind, pattern] of [
+    ['runtime-acl', /RuntimeSecurityAclError|untrusted runtime directory/i],
+    ['unknown-config-field', /unknown field/i], ['invalid-config', /decode config|parse config|check config/i],
+    ['file-missing', /ENOENT|cannot find the file/i], ['permission-denied', /EACCES|EPERM|access is denied/i],
+    ['socket-conflict', /EADDRINUSE/], ['native-timeout', /ETIMEDOUT|timed out/i]
+  ]) if (pattern.test(errorText)) { result.errorKind = kind; break }
   return result
 }
 

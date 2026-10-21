@@ -70,7 +70,7 @@ async function run(config, seed) {
           progress.record('renderer-windows', { windows })
         }
       }
-      if (eventsReady) for (const event of await renderer(`window.__realVpnEvents.slice(${eventCursor})`) ?? []) {
+      if (eventsReady && inspector) for (const event of await renderer(`window.__realVpnEvents.slice(${eventCursor})`) ?? []) {
         eventCursor++
         progress.record('state', event)
       }

@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
-import { createProgressLog, safeAppEvent, safeSnapshot, safeElectronDiagnostic } from './real-vpn-log.mjs'
+import { createProgressLog, safeAppEvent, safeSnapshot, safeElectronDiagnostic, safeActionResult } from './real-vpn-log.mjs'
 
 test('start and heartbeat are visible before an action finishes; file matches the live stream', { timeout: 3000 }, async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
@@ -25,11 +25,30 @@ test('start and heartbeat are visible before an action finishes; file matches th
   finish({ input: 'FAKE-PRIVATE-PAYLOAD' })
   assert.deepEqual(await pending, { input: 'FAKE-PRIVATE-PAYLOAD' })
   const error = new Error('FAKE-PRIVATE-PAYLOAD')
+  error.category = 'network'
   await assert.rejects(log.run('ipc/serversAdd', () => { throw error }), e => e === error)
+  await log.run('ipc/startDirectVpn', async () => ({ success: false, category: 'conflict', error: 'FAKE-PRIVATE-PAYLOAD' }))
   log.close()
   assert.match(lines.join(''), /"event":"failed"/)
+  assert.match(lines.join(''), /"event":"failed"[^\n]+"category":"network"/)
+  assert.match(lines.join(''), /"success":false,"category":"conflict"/)
   assert.ok(!lines.join('').includes('FAKE-PRIVATE-PAYLOAD'))
   assert.equal(await readFile(path, 'utf8'), lines.join(''))
+})
+
+test('domain failures and IPC rejections expose only fixed outcome labels', () => {
+  assert.deepEqual(safeActionResult({ success: false, category: 'network', error: 'FAKE-PRIVATE-PAYLOAD' }), { success: false, category: 'network' })
+  assert.deepEqual(safeActionResult({ cancelled: true, error: { category: 'cancelled', message: 'FAKE-PRIVATE-PAYLOAD' } }), { cancelled: true, category: 'cancelled' })
+  assert.deepEqual(safeActionResult({ success: 'FAKE-PRIVATE-PAYLOAD', category: 'FAKE-PRIVATE-PAYLOAD' }), {})
+  assert.deepEqual(safeActionResult(null), {})
+  const base = { ts: '2026-10-21T16:00:00.000Z', scope: 'ipc-security', message: 'IPC request rejected' }
+  assert.deepEqual(safeAppEvent({ ...base, details: { channel: 'start-direct-vpn', status: 'error', reason: 'untrusted-sender', error: 'FAKE-PRIVATE-PAYLOAD' } }),
+    { at: base.ts, scope: base.scope, message: base.message, reason: 'untrusted-sender', status: 'error', channel: 'start-direct-vpn' })
+  const safe = safeAppEvent({ ...base, details: { channel: 'FAKE-PRIVATE-PAYLOAD', reason: 'FAKE-PRIVATE-PAYLOAD' } })
+  assert.ok(!JSON.stringify(safe).includes('FAKE-PRIVATE-PAYLOAD'))
+  const failed = safeAppEvent({ ...base, scope: 'tun', message: 'failed to prepare TUN runtime',
+    details: { message: 'decode config: unknown field FAKE-PRIVATE-PAYLOAD', stack: 'vless://PRIVATE' } })
+  assert.deepEqual(failed, { at: base.ts, scope: 'tun', message: 'failed to prepare TUN runtime', errorKind: 'unknown-config-field' })
 })
 
 test('native Electron crash diagnostics retain only source location and severity', () => {
