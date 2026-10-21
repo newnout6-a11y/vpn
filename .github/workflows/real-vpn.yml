@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   scenario:
-    runs-on: windows-2022
+    runs-on: windows-2025
     timeout-minutes: 35
     defaults:
       run:
@@ -39,6 +39,28 @@ jobs:
           cache: npm
           cache-dependency-path: vpn-tunnel-enforcer/package-lock.json
       - run: npm ci
+      - name: Inspect hosted network bindings (read only, no addresses)
+        run: |
+          function Get-VpnteCiBinding([string]$AdapterName, [bool]$All) {
+            try {
+              $options = @{Name=$AdapterName; ComponentID='ms_tcpip6'; ErrorAction='Stop'}
+              if ($All) { $options.AllBindings=$true; $options.IncludeHidden=$true }
+              $bindings = @(Get-NetAdapterBinding @options)
+              return @{checked=$true; rows=$bindings.Count; enabled=@($bindings | Where-Object Enabled).Count}
+            } catch { return @{checked=$false; rows=0; enabled=0} }
+          }
+          $rows = @(Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object {
+            [ordered]@{
+              hardware = [bool]$_.HardwareInterface
+              virtual = [bool]$_.Virtual
+              hyperV = [bool]($_.InterfaceDescription -match 'Hyper-V|vEthernet')
+              ipv4Addresses = @(Get-NetIPAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).Count
+              defaultRoutes = @(Get-NetRoute -InterfaceIndex $_.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).Count
+              ipv6 = Get-VpnteCiBinding $_.Name $false
+              allIpv6 = Get-VpnteCiBinding $_.Name $true
+            }
+          })
+          ConvertTo-Json -InputObject $rows -Depth 4 -Compress
       - name: Download pinned production engines and Wintun
         run: |
           $tmp = Join-Path $env:RUNNER_TEMP 'real-vpn-engines'
