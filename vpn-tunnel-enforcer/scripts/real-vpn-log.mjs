@@ -89,3 +89,10 @@ export function safeAppEvent(event) {
   if (typeof event.details?.success === 'boolean') result.success = event.details.success
   return result
 }
+
+export function safeElectronDiagnostic(line) {
+  // Chromium fatal/error headers identify a source location; the rest can contain private data.
+  const match = /:(FATAL|ERROR):(?:[A-Za-z0-9_.\\/-]*[\\/])?([A-Za-z0-9_-]+\.(?:cc|cpp|h))(?:\(|:)([0-9]{1,6})\)?\]/.exec(line)
+  return match ? { severity: match[1], sourceFile: match[2], sourceLine: Number(match[3]),
+    checkFailed: line.includes('Check failed:') } : null
+}

@@ -8,11 +8,12 @@ import { dirname, join, resolve, win32 } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify, parseArgs } from 'node:util'
 import { test } from 'node:test'
+import { createInterface } from 'node:readline'
 import { setTimeout as delay } from 'node:timers/promises'
 import { assertStable, deadline, runScenario } from './real-vpn-scenario.mjs'
 import { connectInspector } from './real-vpn-inspector.mjs'
 import { requireHostedWindows, readScenarioSecret, seedScenario } from './real-vpn-runner.mjs'
-import { createProgressLog, safeAppEvent, safeSnapshot } from './real-vpn-log.mjs'
+import { createProgressLog, safeAppEvent, safeSnapshot, safeElectronDiagnostic } from './real-vpn-log.mjs'
 import { runWithCleanup } from './wp1-test-cleanup.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -101,7 +102,15 @@ async function run(config, seed) {
         delete env.VPNTE_REAL_SCENARIO
         // Manual spawn: a transport failure must never force-kill a live VPN runtime.
         application = await progress.run('prepare/launch', () => spawn(config.exe, [`--inspect=127.0.0.1:${port}`], {
-          cwd: dirname(config.exe), env, windowsHide: true, stdio: 'ignore' }))
+          cwd: dirname(config.exe), env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }))
+        report.electronDiagnostics = []
+        createInterface({ input: application.stderr }).on('line', line => {
+          const diagnostic = safeElectronDiagnostic(line)
+          if (diagnostic) {
+            report.electronDiagnostics.push(diagnostic)
+            progress.record('electron-diagnostic', diagnostic)
+          }
+        })
         application.once('exit', (code, signal) => {
           report.applicationExit = { code, signal }
           progress.record('application-exit', report.applicationExit)

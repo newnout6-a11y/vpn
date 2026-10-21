@@ -1,11 +1,12 @@
 // AT-00-005, AT-01-001: live evidence, concurrent owners and no credential/error echo.
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
-import { createProgressLog, safeAppEvent, safeSnapshot } from './real-vpn-log.mjs'
+import { createProgressLog, safeAppEvent, safeSnapshot, safeElectronDiagnostic } from './real-vpn-log.mjs'
 
 test('start and heartbeat are visible before an action finishes; file matches the live stream', { timeout: 3000 }, async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
@@ -20,7 +21,7 @@ test('start and heartbeat are visible before an action finishes; file matches th
   assert.match(lines.join(''), /"event":"started"/)
   assert.ok(!lines.join('').includes('"event":"finished"'))
   while (!lines.some(line => line.includes('"event":"waiting"'))) await delay(5)
-  assert.equal(await readFile(path, 'utf8'), lines.join(''))
+  assert.equal(readFileSync(path, 'utf8'), lines.join(''))
   finish({ input: 'FAKE-PRIVATE-PAYLOAD' })
   assert.deepEqual(await pending, { input: 'FAKE-PRIVATE-PAYLOAD' })
   const error = new Error('FAKE-PRIVATE-PAYLOAD')
@@ -29,6 +30,14 @@ test('start and heartbeat are visible before an action finishes; file matches th
   assert.match(lines.join(''), /"event":"failed"/)
   assert.ok(!lines.join('').includes('FAKE-PRIVATE-PAYLOAD'))
   assert.equal(await readFile(path, 'utf8'), lines.join(''))
+})
+
+test('native Electron crash diagnostics retain only source location and severity', () => {
+  assert.deepEqual(safeElectronDiagnostic('[123:1021/165511.846:FATAL:electron\\shell\\common\\node_bindings.cc(42)] Check failed: FAKE-PRIVATE-PAYLOAD vless://PRIVATE'),
+    { severity: 'FATAL', sourceFile: 'node_bindings.cc', sourceLine: 42, checkFailed: true })
+  assert.deepEqual(safeElectronDiagnostic('[123:ERROR:gin/v8_initializer.cc:767] FAKE-PRIVATE-PAYLOAD'),
+    { severity: 'ERROR', sourceFile: 'v8_initializer.cc', sourceLine: 767, checkFailed: false })
+  assert.equal(safeElectronDiagnostic('FAKE-PRIVATE-PAYLOAD vless://PRIVATE'), null)
 })
 
 test('concurrent connect/cancel calls retain separate IDs and elapsed time', async t => {
