@@ -1,0 +1,88 @@
+// AT-00-003/005, AT-01-001: local-run boundary, deterministic seeding and secret-safe failures.
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { test } from 'node:test'
+import { requireHostedWindows, readScenarioSecret, seedScenario } from './real-vpn-runner.mjs'
+
+const hosted = { GITHUB_ACTIONS: 'true', RUNNER_OS: 'Windows', RUNNER_ENVIRONMENT: 'github-hosted',
+  GITHUB_EVENT_NAME: 'workflow_dispatch', RUNNER_TEMP: 'C:\\runner-temp', APPDATA: 'C:\\runner-profile' }
+const seed = { schemaVersion: 1, settings: { connectionMode: 'directVpn', routingMode: 'hard', firewallKillSwitch: true },
+  profiles: [{ input: 'FAKE-A', clientDevice: 'pc' }, { input: 'FAKE-B' }] }
+
+test('only an explicitly dispatched GitHub-hosted Windows run is admitted', () => {
+  requireHostedWindows(hosted, 'win32')
+  for (const patch of [{ GITHUB_ACTIONS: undefined }, { RUNNER_ENVIRONMENT: 'self-hosted' },
+    { GITHUB_EVENT_NAME: 'pull_request' }, { GITHUB_EVENT_NAME: 'push' }, { RUNNER_OS: 'Linux' },
+    { RUNNER_TEMP: undefined }, { APPDATA: undefined }, { VPNTE_DISABLE_NATIVE_NET: '1' },
+    { ELECTRON_RENDERER_URL: 'http://example.test' }, { ELECTRON_RUN_AS_NODE: '1' }]) {
+    assert.throws(() => requireHostedWindows({ ...hosted, ...patch }, 'win32'))
+  }
+  assert.throws(() => requireHostedWindows(hosted, 'linux'))
+})
+
+test('the real CLI refuses a local run before inspecting an executable or reading a secret', () => {
+  const env = { ...process.env, VPNTE_REAL_SCENARIO: '{FAKE-PRIVATE-PAYLOAD' }
+  delete env.GITHUB_ACTIONS
+  const result = spawnSync(process.execPath, ['scripts/test-real-vpn.mjs', '--exe', 'missing.exe'], {
+    cwd: resolve(dirname(fileURLToPath(import.meta.url)), '..'), env, encoding: 'utf8', timeout: 5000, windowsHide: true })
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /local execution is blocked/)
+  assert.ok(!result.stderr.includes('FAKE-PRIVATE-PAYLOAD'))
+  assert.ok(!result.stderr.includes('ENOENT'))
+})
+
+test('invalid/missing secret, settings, profile counts and device fail without echoing credentials', () => {
+  assert.deepEqual(readScenarioSecret(JSON.stringify(seed)), seed)
+  for (const raw of [undefined, '{FAKE-PRIVATE-PAYLOAD', JSON.stringify({ ...seed, schemaVersion: 2 }),
+    JSON.stringify({ ...seed, settings: { connectionMode: 'localProxy' } }),
+    JSON.stringify({ ...seed, profiles: [] }), JSON.stringify({ ...seed, profiles: [{ input: '' }, seed.profiles[1]] }),
+    JSON.stringify({ ...seed, profiles: [{ input: 'FAKE-PRIVATE-PAYLOAD', clientDevice: 'bad' }, seed.profiles[1]] }),
+    'FAKE-PRIVATE-PAYLOAD'.repeat(4000)]) {
+    assert.throws(() => readScenarioSecret(raw), error => !error.message.includes('FAKE-PRIVATE-PAYLOAD'))
+  }
+})
+
+function fixture({ existing = false, running = false, importCount = 1, duplicate = false, changedSettings = false } = {}) {
+  let settings = {}, activeId, imports = 0
+  const calls = []
+  return { calls, async invoke(method, ...args) {
+    calls.push([method, ...args])
+    if (method === 'serversList') return existing ? [{ id: 'old' }] : []
+    if (method === 'getTunStatus') return { running }
+    if (method === 'getSettings') return changedSettings ? {} : settings
+    if (method === 'saveSettings') { settings = args[0]; return settings }
+    if (method === 'serversAdd') return Array.from({ length: importCount }, () => ({ id: duplicate ? 'a' : String(++imports) }))
+    if (method === 'serversSelect') { activeId = args[0]; return }
+    if (method === 'serversGetActive') return { activeId }
+    throw new Error('Unexpected seed API')
+  } }
+}
+
+test('fresh runner receives actual settings and imports A/B using production public APIs', async () => {
+  const f = fixture()
+  const pair = await seedScenario(f.invoke, seed)
+  assert.equal(pair.original.id, '1')
+  assert.equal(pair.target.id, '2')
+  assert.deepEqual(pair.settings, seed.settings)
+  assert.deepEqual(f.calls.filter(([m]) => m === 'serversAdd'), [
+    ['serversAdd', 'FAKE-A', { clientDevice: 'pc' }], ['serversAdd', 'FAKE-B', undefined] ])
+  assert.ok(!f.calls.some(([m]) => ['startDirectVpn', 'stopTun', 'cancelTun'].includes(m)))
+})
+
+test('existing profile/tunnel is refused before saving settings or importing credentials', async () => {
+  for (const options of [{ existing: true }, { running: true }]) {
+    const f = fixture(options)
+    await assert.rejects(seedScenario(f.invoke, seed))
+    assert.ok(!f.calls.some(([m]) => ['saveSettings', 'serversAdd'].includes(m)))
+  }
+})
+
+test('multiple imported profiles, duplicate A/B and changed settings never count as configured', async () => {
+  for (const options of [{ importCount: 0 }, { importCount: 2 }, { duplicate: true }, { changedSettings: true }]) {
+    const f = fixture(options)
+    await assert.rejects(seedScenario(f.invoke, seed))
+    assert.ok(!f.calls.some(([m]) => m === 'serversSelect'))
+  }
+})

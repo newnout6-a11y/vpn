@@ -7970,3 +7970,24 @@ Final npm.cmd test на неизменном source/test tree:5834 passed/5 skip
 - `git diff --check` — exit 0.
 
 Установщик: `vpn-tunnel-enforcer/dist/firewall-lifecycle-20261021/VPN-Tunnel-Enforcer-Setup-1.1.24.exe`, 139777269 байт, SHA-256 `271e928fa610ee2f9aeaed025202f515dcbf95e1d41d5522f3bd973ec7e4e855`. Все 187 текущих файлов out/ побайтово совпадают с app.asar в win-unpacked. Установщик не запускался; фактическое время подключения/отмены после этих изменений ещё не измерено. Работающее установленное приложение и его VPN не переключались.
+
+## Программный VPN-сценарий: изоляция на GitHub runner (21.10.2026)
+
+По запросу владельца добавлен node:test сценарий через настоящий production preload/IPC: connect A → disconnect → connect/cancel → connect A → switch B → switch A/cancel с восстановлением B → switch A → TCP ping выбранного сервера. Это проверка кода без UI-кликов. Измеряются длительность IPC-действия, cancel acknowledgement и завершение исходного owner. Canonical state сопоставляется с независимым CIM/NetAdapter readback (PID, runtime path/config, TUN, адреса). Трассировка: частичные сценарии AT-00-003/005/007, AT-02-002/009; полная приёмка AT не заявляется. Production src не изменён.
+
+Первая ранее разрешённая локальная попытка (.tmp/real-vpn-LfzFGL) завершилась FAIL из-за неверного требования теста cleanupRequired=false при connected; это нормальная обязанность очистки активной защиты. Проверка исправлена. Отчёт той попытки фиксирует cleanup PASS, 0 runtime-процессов, TUN down и восстановленные выбор/настройки. Зависший внешний wrapper был остановлен после подтверждения очистки. Владелец затем запретил прогоны с отключением своего VPN: повторного локального переключения не было.
+
+Текущий runner допускает только workflow_dispatch на GitHub-hosted Windows и блокирует локальный/self-hosted/PR-запуск до чтения профиля, PowerShell и создания процессов. Удалены автоостановка установленного приложения, UAC relaunch, использование текущего userData и последующий restart клиента. Новый reusable real-vpn.yml вызывается существующим CI только в ручном режиме real_vpn=true; обычные длинные проверки при этом пропускаются. Работающий сценарий не отменяется следующим запуском. На runner собирается обычное production-приложение с закреплёнными SHA-256 движков/Wintun, свежий профиль получает ровно A/B и настройки через production API. Нужен отдельный Actions secret VPNTE_REAL_SCENARIO; ключи с компьютера не экспортировались и не загружались.
+
+Отчёт/Summary содержат времена, allowlist полей IPC-корреляции, состояния и результат очистки. Артефакты: только report.json/progress.log, без raw logs/userData/URI/IP/секретов. Очистка штатная, с независимым main-owned shutdown даже при ошибке readback. Неподтверждённая очистка означает FAIL. Windows Server/облачная сеть не воспроизводят физический ПК и DPI провайдера; packet/reboot/OS-matrix и p95 не проверены.
+
+Фактические проверки этой задачи:
+- npm.cmd run test:real-vpn:unit — 18 passed, 0 failed/skipped, 610.1303 ms (включая безвредный настоящий Electron, зависший inspector handshake, защиту локального CLI, ошибки секрета и отмены).
+- npm.cmd run typecheck — exit 0, 165 IPC channels, 0 public any.
+- npm.cmd test -- --reporter=dot — 5849 passed / 5 existing skipped, 318 passed / 2 skipped suites, 427.70 s, exit 0; .tmp/real-vpn-full-vitest.log. После этого менялись только scripts/workflows/документация, новые проверки scripts запускались отдельно.
+- python -X utf8 docs/04-приёмочные-тесты/traceability/check-coverage.py — exit 0, AC 927/927, F 210/210.
+- npx.cmd --no-install electron-builder --win --dir --config.directories.output=dist/real-vpn — exit 0; упакован win-unpacked, приложение из него не запускалось.
+- node --check scripts/test-real-vpn.mjs; npm.cmd run test:real-vpn -- --help (из корня) — exit 0.
+- Inline Node/js-yaml + PowerShell Parser — PASS: оба workflow, ручной gate, hosted runner, secret/artifact scope, отсутствие отмены активного прогона; PowerShell-блоки и read-only OS oracle без parse errors.
+
+Реальный GitHub VPN-прогон ещё НЕ выполнялся; без переданных серверов и remote result нет PASS всей последовательности и новых end-to-end замеров.
