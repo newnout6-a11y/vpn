@@ -1347,9 +1347,9 @@ async function isSingboxRunning(): Promise<boolean> {
 async function readOwnedSingboxPid(executable: string): Promise<number> {
   try { return await readOwnedRuntimePidNative(executable) }
   catch (error) {
-    // Both paths are fresh read-only observations. A refused native read is
-    // never treated as process absence or as permission to remove protection.
-    logEvent('warn', 'tun', 'native runtime PID unavailable, using PowerShell', { error })
+    // No native match also refuses the startup proof: re-observe through CIM.
+    // Neither refusal is process absence or permission to remove protection.
+    logEvent('warn', 'tun', 'native runtime PID unavailable, using PowerShell', error)
   }
   const stdout = await runPowerShell(`
 $ErrorActionPreference = 'Stop'
