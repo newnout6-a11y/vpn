@@ -54,6 +54,7 @@ jobs:
               hardware = [bool]$_.HardwareInterface
               virtual = [bool]$_.Virtual
               hyperV = [bool]($_.InterfaceDescription -match 'Hyper-V|vEthernet')
+              ipInterfaces = @(Get-NetIPInterface -InterfaceIndex $_.ifIndex -ErrorAction SilentlyContinue).Count
               ipv4Addresses = @(Get-NetIPAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).Count
               defaultRoutes = @(Get-NetRoute -InterfaceIndex $_.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue).Count
               ipv6 = Get-VpnteCiBinding $_.Name $false

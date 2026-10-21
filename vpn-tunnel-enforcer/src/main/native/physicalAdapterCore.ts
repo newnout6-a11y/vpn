@@ -20,12 +20,14 @@ export interface NativeAdapterInfo {
   interfaceGuid: string
   alias: string
   description: string
+  ipv4Enabled: boolean
   ipv6Enabled: boolean
   ifType: number
   ipv4Dns: string[]
   /** MIB_IF_ROW2.PermanentPhysicalAddress (trimmed to PhysicalAddressLength) as hex, '' if none. */
   permanentAddressHex: string
   filterInterface: boolean
+  hardwareInterface: boolean
   /** NDIS Characteristics; NCF_HIDDEN (0x8) adapters are skipped like PowerShell's Hidden. null/undefined = no class-key entry. */
   characteristics?: number | null
   mediaType: number
@@ -80,7 +82,7 @@ export function buildPhysicalAdapterRows(source: NativeAdapterSource): PhysicalA
   const profiles = source.listNetworkProfiles()
   const rows: PhysicalAdapterRow[] = []
   for (const a of adapters) {
-    if (a.filterInterface) continue
+    if (!a.hardwareInterface || a.filterInterface || (!a.ipv4Enabled && !a.ipv6Enabled)) continue
     if (a.characteristics != null && (a.characteristics & NCF_HIDDEN) !== 0) continue
     if (knownAliases.has(a.alias.toLowerCase())) continue
     if (exclusionRe.test(a.description)) continue
@@ -269,11 +271,13 @@ function buildSourceFactory(): SourceFactory {
             interfaceGuid: guid,
             alias: utf16z(buf, toOff(friendlyAddr), buf.length - toOff(friendlyAddr)),
             description: utf16z(buf, toOff(descAddr), buf.length - toOff(descAddr)),
+            ipv4Enabled: (flags & 0x80) !== 0,
             ipv6Enabled: (flags & 0x100) !== 0,
             ifType: buf.readUInt32LE(o + 100),
             ipv4Dns: dnsOf(buf.readBigUInt64LE(o + 48)),
             permanentAddressHex: row.subarray(IF_ROW2_OFFSETS.permanentPhysicalAddress, IF_ROW2_OFFSETS.permanentPhysicalAddress + permLen).toString('hex'),
             filterInterface: (row[IF_ROW2_OFFSETS.interfaceAndOperStatusFlags] & 0x2) !== 0,
+            hardwareInterface: (row[IF_ROW2_OFFSETS.interfaceAndOperStatusFlags] & 0x1) !== 0,
             characteristics: characteristics.get(guid.toLowerCase()) ?? null,
             mediaType: row.readUInt32LE(IF_ROW2_OFFSETS.mediaType),
             physicalMediumType: row.readUInt32LE(IF_ROW2_OFFSETS.physicalMediumType)

@@ -1,13 +1,18 @@
 /** AT-03-005/006/010: fixed adapter selection; DNS discovery is not a lockdown proof. */
 import { ALL_KNOWN_ALIASES } from './tunAdapter'
 
-export const ADAPTER_EXCLUSION_PATTERN = 'Wintun|TAP-Windows|Tailscale|WireGuard|Hyper-V|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth'
+export const ADAPTER_EXCLUSION_PATTERN = 'Wintun|TAP-Windows|Tailscale|WireGuard|Loopback|vEthernet|VPN|VirtualBox|VMware|Bluetooth'
 
+// Windows marks the guest Hyper-V uplink as hardware; its internal switch is virtual.
+// An SR-IOV VF without an IP interface belongs to the uplink, not to a separate host IP stack.
+// Query ownership, never address/DNS/default-route presence: IPv6-only and DHCP-pending NICs count.
 const PHYSICAL_ADAPTER_SELECTION = `
 $knownAliases = @(${ALL_KNOWN_ALIASES.map(alias => `'${alias.replace(/'/g, "''")}'`).join(',')})
-$adapters = Get-NetAdapter |
+$ipIndexes = @(Get-NetIPInterface -ErrorAction Stop | Select-Object -ExpandProperty InterfaceIndex -Unique)
+$adapters = Get-NetAdapter -Physical -ErrorAction Stop |
   Where-Object {
     $_.Status -eq 'Up' -and
+    $_.ifIndex -in $ipIndexes -and
     $_.Name -notin $knownAliases -and
     $_.InterfaceDescription -notmatch '${ADAPTER_EXCLUSION_PATTERN}' -and
     $_.MacAddress -and $_.MacAddress -ne '00-00-00-00-00-00'
@@ -31,14 +36,17 @@ $rows | ConvertTo-Json -Compress -Depth 3
 `
 
 export const PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT = `
-$ErrorActionPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
 $rows = @()
 $knownAliases = @(${ALL_KNOWN_ALIASES.map(alias => `'${alias.replace(/'/g, "''")}'`).join(',')})
 try {
   $namespace = 'root/StandardCimv2'
+  $ipIndexes = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetIPInterface -ErrorAction Stop | Select-Object -ExpandProperty InterfaceIndex -Unique)
   $cimAdapters = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetAdapter -ErrorAction Stop | Where-Object {
     -not $_.Hidden -and
+    $_.HardwareInterface -eq $true -and
     $_.InterfaceOperationalStatus -eq 1 -and
+    $_.InterfaceIndex -in $ipIndexes -and
     $_.Name -notin $knownAliases -and
     $_.InterfaceDescription -notmatch '${ADAPTER_EXCLUSION_PATTERN}' -and
     $_.PermanentAddress -and $_.PermanentAddress -ne '000000000000'

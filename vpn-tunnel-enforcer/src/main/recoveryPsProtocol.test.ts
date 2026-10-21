@@ -57,7 +57,7 @@ function Get-Acl { [CmdletBinding()]param($LiteralPath)
 function Get-Content { [CmdletBinding()]param($LiteralPath,[switch]$Raw,$Encoding) return ([pscustomobject]@{owner='VPNTE';text='сеть'}|ConvertTo-Json -Compress) }
 function Remove-Item { [CmdletBinding()]param($LiteralPath,[switch]$Force) $global:removed++;if($global:variant -eq 'removeError'){throw 'Fixture remove failure'} }
 function Set-Acl { [CmdletBinding()]param($LiteralPath,$AclObject) $global:sets++;if($global:variant -eq 'setError'){throw 'Fixture ACL failure'} }
-function Get-NetAdapter { [CmdletBinding()]param($Name)
+function Get-NetAdapter { [CmdletBinding()]param($Name,[switch]$Physical)
   if (-not $Name) {
     if ($global:variant -eq 'noPhysicalAdapters') { return }
     [pscustomobject]@{Name='Беспроводная сеть';Status='Up';InterfaceDescription='MediaTek Wi-Fi';MacAddress='00-11-22-33-44-55';ifIndex=17;InterfaceGuid='11111111-1111-1111-1111-111111111111';MediaType='802.11';PhysicalMediaType='Native802_11'}
@@ -66,6 +66,7 @@ function Get-NetAdapter { [CmdletBinding()]param($Name)
   $a=[pscustomobject]@{Name=$(if($global:variant -eq 'renamed'){'Ethernet 6'}else{'Ethernet 5'});Status=$(if($global:variant -eq 'down'){'Disconnected'}else{'Up'});DriverDescription=$(if($global:variant -eq 'driver'){'Physical NIC'}else{'Wintun Userspace Tunnel'});PnPDeviceID=$(if($global:variant -eq 'pnp'){'ROOT\NIC\x'}else{'SWD\Wintun\fixture'});ifIndex=5;InterfaceGuid=$(if($global:variant -eq 'guid'){'invalid'}else{'00000000-0000-0000-0000-000000000005'})}
   $a;if($global:variant -eq 'duplicate'){$a}
 }
+function Get-NetIPInterface { [CmdletBinding()]param(); if($global:variant -ne 'noPhysicalAdapters'){[pscustomobject]@{InterfaceIndex=17}} }
 function Get-NetAdapterBinding { [CmdletBinding()]param($InterfaceAlias,$ComponentID) if($global:variant -eq 'dnsOnly'){throw 'DNS discovery queried bindings'}; [pscustomobject]@{Enabled=$true} }
 function Get-DnsClientServerAddress { [CmdletBinding()]param($InterfaceAlias,$AddressFamily) [pscustomobject]@{ServerAddresses=@('1.1.1.1')} }
 function Get-NetRoute { [CmdletBinding()]param($InterfaceIndex,$DestinationPrefix)

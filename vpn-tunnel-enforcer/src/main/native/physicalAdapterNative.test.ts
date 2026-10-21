@@ -7,7 +7,7 @@ const wifi: NativeAdapterInfo = {
   ifIndex: 17, interfaceGuid: '{999D65FE-A8C4-4DB3-9F7E-11EDD6482144}', alias: 'Беспроводная сеть',
   description: 'MediaTek Wi-Fi 6E MT7922 160MHz Wireless LAN Card', ipv6Enabled: true, ifType: 71,
   ipv4Dns: ['1.1.1.1'], permanentAddressHex: '5cc336f5a60a',
-  filterInterface: false, mediaType: 0, physicalMediumType: 9
+  filterInterface: false, hardwareInterface: true, ipv4Enabled: true, mediaType: 0, physicalMediumType: 9
 }
 function source(over: Partial<NativeAdapterSource> & { adapters?: NativeAdapterInfo[]; routes?: NativeDefaultRoute[] } = {}): NativeAdapterSource {
   return {
@@ -46,7 +46,7 @@ describe('native physical adapter snapshot: PowerShell JSON contract', () => {
   it('applies the PowerShell selection filters', () => {
     const adapters = [
       { ...wifi, ifIndex: 1, description: 'VirtualBox Host-Only Ethernet Adapter' },
-      { ...wifi, ifIndex: 2, description: 'Hyper-V Virtual Ethernet Adapter' },
+      { ...wifi, ifIndex: 2, description: 'Hyper-V Virtual Ethernet Adapter', hardwareInterface: false },
       { ...wifi, ifIndex: 3, alias: 'vpnte-tun' },
       { ...wifi, ifIndex: 4, permanentAddressHex: '000000000000' },
       { ...wifi, ifIndex: 6, permanentAddressHex: '' },
@@ -54,6 +54,18 @@ describe('native physical adapter snapshot: PowerShell JSON contract', () => {
       { ...wifi, ifIndex: 8 }
     ]
     expect(buildPhysicalAdapterRows(source({ adapters })).map(r => r.ifIndex)).toEqual([8])
+  })
+  it('keeps the IP-bound hardware Hyper-V uplink and excludes its virtual switch (AT-03-005/006)', () => {
+    const uplink = { ...wifi, ifIndex: 18, description: 'Microsoft Hyper-V Network Adapter' }
+    const internal = { ...uplink, ifIndex: 19, hardwareInterface: false }
+    expect(buildPhysicalAdapterRows(source({ adapters: [internal, uplink] })).map(r => r.ifIndex)).toEqual([18])
+  })
+  it('excludes an unbound VF but retains bound adapters without an address, DNS or default route (AT-03-006)', () => {
+    const bound = { ...wifi, ipv4Dns: [], ipv6Enabled: false }
+    const vf = { ...bound, ifIndex: 20, description: 'SR-IOV VF', ipv4Enabled: false }
+    expect(buildPhysicalAdapterRows(source({ adapters: [vf, bound], routes: [] })).map(r => r.ifIndex)).toEqual([17])
+    expect(buildPhysicalAdapterRows(source({ adapters: [{ ...bound, ipv4Enabled: false, ipv6Enabled: true }], routes: [] }))).toHaveLength(1)
+    expect(() => snapshotFromSource(source({ adapters: [vf] }))).toThrow(/refusing empty/)
   })
   it('flags tethering by device name, hotspot subnet, WWAN media and IPv6-only default route', () => {
     const run = (a: Partial<NativeAdapterInfo>, routes: NativeDefaultRoute[]) =>
