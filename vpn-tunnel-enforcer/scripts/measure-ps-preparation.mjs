@@ -14,8 +14,9 @@ export function parsePreparationProbe(child) {
       || !Array.isArray(value.profiles) || value.profiles.length !== 3) fail()
   const profiles = value.profiles.map(p => {
     if (!p || !['Domain', 'Private', 'Public'].includes(p.name) || !['True', 'False', 'NotConfigured'].includes(p.enabled)
-        || !['Allow', 'Block', 'NotConfigured'].includes(p.outbound)) fail()
-    return { name: p.name, enabled: p.enabled, outbound: p.outbound }
+        || !['Allow', 'Block', 'NotConfigured'].includes(p.outbound) || !Array.isArray(p.disabledInterfaces)
+        || !p.disabledInterfaces.every(alias => typeof alias === 'string')) fail()
+    return { name: p.name, enabled: p.enabled, outbound: p.outbound, disabledInterfaces: [...p.disabledInterfaces].sort() }
   }).sort((a, b) => a.name.localeCompare(b.name))
   if (new Set(profiles.map(p => p.name)).size !== 3) fail()
   return { importsMs: value.importsMs, queryMs: value.queryMs, fallbackUsed: value.fallbackUsed, profiles }
@@ -27,10 +28,15 @@ $fallbackUsed=$false
 $watch=[Diagnostics.Stopwatch]::StartNew()
 ${imports}
 $importsMs=$watch.ElapsedMilliseconds; $watch.Restart()
-$profiles=@(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | ForEach-Object {
-  [pscustomobject]@{name=[string]$_.Name;enabled=[string]$_.Enabled;outbound=[string]$_.DefaultOutboundAction}
+$rawProfiles=@(Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop)
+$queryMs=$watch.ElapsedMilliseconds
+$profiles=@($rawProfiles | ForEach-Object {
+  $field=$_.PSObject.Properties['DisabledInterfaceAliases']
+  if($null -eq $field){throw 'Incomplete profile snapshot'}
+  $disabled=@(); if($null -ne $field.Value){$disabled=@($field.Value)}
+  [pscustomobject]@{name=[string]$_.Name;enabled=[string]$_.Enabled;outbound=[string]$_.DefaultOutboundAction;disabledInterfaces=$disabled}
 })
-[pscustomobject]@{importsMs=$importsMs;queryMs=$watch.ElapsedMilliseconds;fallbackUsed=$fallbackUsed;profiles=$profiles}|ConvertTo-Json -Depth 4 -Compress`
+[pscustomobject]@{importsMs=$importsMs;queryMs=$queryMs;fallbackUsed=$fallbackUsed;profiles=$profiles}|ConvertTo-Json -Depth 4 -Compress`
 }
 
 function measurePreparation() {
@@ -39,8 +45,9 @@ function measurePreparation() {
   const node = ast.statements.find(n => ts.isVariableStatement(n) && n.declarationList.declarations.some(d => d.name.getText(ast) === 'HELPER_WARMUP_COMMANDS'))
   if (!node) throw new Error('Production warm-up unavailable')
   const commands = new Function(ts.transpileModule(node.getText(ast), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText + ';return HELPER_WARMUP_COMMANDS;')()
-  const query = 'Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | Out-Null'
-  if (!commands[0].script.endsWith(query)) throw new Error('Production warm-up query unavailable')
+  const query = ['Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | Out-Null',
+    'Get-Command Get-NetFirewallProfile -ListImported -ErrorAction Stop | Out-Null'].find(suffix => commands[0].script.endsWith(suffix))
+  if (!query) throw new Error('Production warm-up query unavailable')
   const fallback = 'catch { Import-Module NetSecurity -ErrorAction Stop }'
   if (!commands[0].script.includes(fallback)) throw new Error('Production warm-up fallback unavailable')
   const imports = { full: 'Import-Module NetSecurity -ErrorAction Stop',
