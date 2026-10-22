@@ -400,3 +400,9 @@ Qodo1608816 подтвердил два замечания: истёкший cal
 
 
 Real39864808579 на8192332: FAIL на новом независимом native oracle после успешного OS readback работающего VPN; cleanup PASS,settings unchanged,debug exit73/signalnull. Подтверждена ошибка тестового парсера: Vitest выдаёт ANSI reset перед JSON даже в дочернем процессе с FORCE_COLOR=0. Реальный локальный read-only output воспроизвёл её; новый regression сначалаRED1/exit1. Теперь стандартный node:util.stripVTControlCharacters снимает terminal formatting перед строгим JSON.parse всей строки; текстовые префиксы/zero/malformed по-прежнему отклоняются, raw payload не выводится. npm.cmd run test:real-vpn:unit —44/44,946.719мс,exit0; исправленный parser принял тот же фактический child stdout как1positive/1comparison. Vitest-covered src не менялся после полного6102/5; его358.84с результат сохраняется, изменён только отдельно проверяемый mjs driver. Новый hosted run обязателен.
+
+
+Окончательный real PR126 run39865354061,head1072171d851e36e0e771bd4de5fd9612428062c8:8/8PASS,обязательный nativeTunOwnership PASS1comparison/1positive (oracle1763мс отдельно). Действия11320/2383/2438/3119/4473/8035/4622/302мс,сумма36692мс;683/683progress вActions. Exact head,IP passed/isLeak=false,settings unchanged,cleanup,debug exit73/signalnull подтверждены. Native ownership/routes136/8/8/60мс,0fallback. Connect cancel ack/settled1881/1881мс,switch5/7326мс. Qodo1608993 completed на том жеhead: оба прежних finding implemented,новых нет. Обычный final-head CI39865347174 ещё выполняется,PR126 не слит. Стабильное whole-run ускорение не доказано,15000мс НЕ достигнуты.
+
+
+PR126 завершён: CI39865347174 SUCCESS Windows/site/Rust на1072171, Qodo1608993 completed/обаfinding implemented/новыхнет,real39865354061 подтверждён выше. Merge2026-10-22T22:37:42Z,commit6788102d19131206db3afcde2a43ee6bfcea8dc8; dependent branch fast-forward без изменения source. Цель15000мс остаётся открытой.

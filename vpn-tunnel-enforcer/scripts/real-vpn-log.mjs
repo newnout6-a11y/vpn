@@ -90,7 +90,7 @@ export function safeAppEvent(event) {
           'DNS registry snapshot failed; refusing mutation without baseline', 'snapshot parse failed',
           'lockdown not checked: no physical adapters were discovered', 'adapter coverage rollback failed',
           'physical adapter set changed; lockdown coverage is not verified'],
-        'ps-helper': ['command timing'], 'firewall-killswitch': ['command timing', 'phase timing', 'native phase timing'],
+        'ps-helper': ['command timing', 'warm-up timing'], 'firewall-killswitch': ['command timing', 'phase timing', 'native phase timing'],
         'runtime-acl': ['inspection timing'],
         'ip-monitor': ['protected transition IP baseline refreshed', 'protected transition IP baseline not checked'],
         'system-network': ['baseline native phase timing',
@@ -108,6 +108,10 @@ export function safeAppEvent(event) {
   if (Number.isFinite(event.monotonicMs) && event.monotonicMs >= 0) result.monotonicMs = event.monotonicMs
   if (event.scope === 'ip-monitor' && Number.isInteger(event.details?.attempt) && event.details.attempt >= 1 && event.details.attempt <= 3) result.attempt = event.details.attempt
   if (event.scope === 'runtime-acl' && ['worker', 'standalone'].includes(event.details?.transport)) result.transport = event.details.transport
+  if (event.scope === 'ps-helper' && event.message === 'warm-up timing') {
+    if (['NetSecurity', 'NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'].includes(event.details?.module)) result.module = event.details.module
+    if (['complete', 'failed'].includes(event.details?.outcome)) result.outcome = event.details.outcome
+  }
   if (['SECURE_STORE_PREFLIGHT_FAILED', 'STARTUP_FAILED'].includes(event.details?.code)) result.code = event.details.code
   for (const key of ['phase', 'step']) if (phases.has(event.details?.[key])) result[key] = event.details[key]
   const timings = {}
