@@ -8087,3 +8087,7 @@ PR #118: первый реальный run 39684890218 на 0509231 подтве
 Готовится отдельный native route proof GetBestRoute2. Сохраняет свежие GUID/driver/PnP/address ownership, session fencing, три unrestricted выбранных маршрута и полный CIM fallback; конкурирующий маршрут не маскируется retry. 62/62 focused, 19/19 host dispatcher, read-only Windows integration 1/1 (native7.6875 мс / PS624.2087 мс, результаты совпали); typecheck exit0; driver32/32; traceability AC927/927,F210/210; полный suite выполняется. Нормативные docs и локальный VPN не изменены. Подробности — этап42 журнала ускорения.
 
 Полный DoD этапа42: npm.cmd test -- --reporter=dot — 5970 passed / 5 existing skipped, 322 passed / 2 skipped suites, 344.65 с, exit0; реальный Electron utility-process test —1 passed/1 not selected,1.08с,exit0. PR и реальный сценарий новой оптимизации ещё впереди.
+
+PR119: Qodo выявил рост worst-case route proof до≈11с; воспроизведены4red. Исправляется общим budget3000мс дляowner/adapter/native/fallback безkill общегоhost; focused79/79. Первый real-run39744390883 FAIL до действий: startup inspect-runtime timeout, затемcleanupPASS; маршруты не вызывались. Полный повтор и окончательный real-run ещё нужны.
+
+Правка budget PR119 проверена: полный5974passed/5existing skipped,413.70с,exit0;typecheckexit0;driver32/32;traceabilityAC927/927,F210/210;diffcheckexit0. Отправляется повторное независимое ревью и реальный прогон окончательногоHEAD.

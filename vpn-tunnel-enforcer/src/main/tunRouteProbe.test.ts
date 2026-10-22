@@ -23,9 +23,54 @@ function harness() {
   return { run, state, owner, runPowerShell, readRecoveryManifest, nativeRoutes, logEvent, setAlias: (value: string) => { alias = value } }
 }
 
-afterEach(() => { vi.unstubAllEnvs() })
+afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers() })
 
 describe.runIf(process.platform === 'win32')('selected TUN route probe', () => {
+  it('bounds a stalled native read by the caller deadline without retrying or accepting its late answer', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    vi.stubEnv('VPNTE_DISABLE_NATIVE_NET', '0')
+    const h = harness(); h.runPowerShell.mockResolvedValue('7')
+    let finish!: (indexes: number[]) => void
+    h.nativeRoutes.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const complete = vi.fn(), start = performance.now(), pending = h.run().then(complete)
+    await vi.advanceTimersByTimeAsync(2999)
+    expect(complete).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(complete).toHaveBeenCalledExactlyOnceWith(false)
+    expect(performance.now() - start).toBe(3000)
+    expect(h.runPowerShell).toHaveBeenCalledOnce()
+    finish([7, 7, 7]); await pending; await vi.advanceTimersByTimeAsync(5000)
+    expect(complete).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it.each(['ownership', 'adapter'])('includes a stalled %s read in the same route-check budget', async stage => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    vi.stubEnv('VPNTE_DISABLE_NATIVE_NET', '0')
+    const h = harness(), complete = vi.fn()
+    if (stage === 'ownership') h.readRecoveryManifest.mockImplementation(() => new Promise(() => {}))
+    else h.runPowerShell.mockImplementation(() => new Promise(() => {}))
+    const pending = h.run().then(complete)
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(complete).toHaveBeenCalledExactlyOnceWith(false)
+    expect(h.nativeRoutes).not.toHaveBeenCalled()
+    await pending
+  })
+  it('spends only the remaining budget on the complete fresh fallback', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    vi.stubEnv('VPNTE_DISABLE_NATIVE_NET', '0')
+    const h = harness(), complete = vi.fn()
+    h.runPowerShell.mockImplementationOnce(() => new Promise(resolve => setTimeout(() => resolve('7'), 800)))
+      .mockImplementationOnce(() => new Promise(resolve => setTimeout(() => resolve('true'), 2500)))
+    h.nativeRoutes.mockImplementation(() => new Promise((_resolve, reject) => setTimeout(() => reject(new Error('refused')), 600)))
+    const pending = h.run().then(complete)
+    await vi.advanceTimersByTimeAsync(1400)
+    expect(h.runPowerShell).toHaveBeenCalledTimes(2)
+    expect(h.runPowerShell.mock.calls[1][1]).toBe(1600)
+    await vi.advanceTimersByTimeAsync(1600)
+    expect(complete).toHaveBeenCalledExactlyOnceWith(false)
+    await pending; await vi.advanceTimersByTimeAsync(1000)
+    expect(complete).toHaveBeenCalledTimes(1)
+  })
   it('uses fresh adapter ownership before the unrestricted native route selection', async () => {
     vi.stubEnv('VPNTE_DISABLE_NATIVE_NET', '0')
     const h = harness()
@@ -113,7 +158,8 @@ describe.runIf(process.platform === 'win32')('selected TUN route probe', () => {
     if (scenario === 'competing') h.nativeRoutes.mockResolvedValue([7, 8, 7])
     if (scenario === 'missing-route' || scenario === 'query-failure') h.nativeRoutes.mockRejectedValue(new Error('No complete route selection'))
     h.runPowerShell.mockImplementation(async (script, timeout) => {
-      expect(timeout).toBe(3000)
+      expect(timeout).toBeGreaterThan(0)
+      expect(timeout).toBeLessThanOrEqual(3000)
       expect(script).not.toMatch(/Get-NetRoute|Set-Net|New-Net/)
       const fake = `
 function Get-CimInstance {
