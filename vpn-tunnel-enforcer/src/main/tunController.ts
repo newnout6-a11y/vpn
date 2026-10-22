@@ -2152,7 +2152,7 @@ async function prepareRuntime(
     publicWifiCompatibility?: boolean
     smartRuSplit?: boolean
     smartRuMapsDirect?: boolean
-    smartRuDirectDnsSources?: PhysicalAdapterDnsSource[]
+    smartRuDirectDnsSources?: PhysicalAdapterDnsSource[] | Promise<PhysicalAdapterDnsSource[]>
     xraySocksPort?: number
     resolvedVpnEndpointIp?: string | null
     xrayStartup?: Promise<{ socksPort: number; resolvedIp: string | null }>
@@ -2300,7 +2300,11 @@ async function prepareRuntime(
     probePort: tunnelProbePortOverride
   } = await portsPromise
 
-  const existingAliases = (options.smartRuDirectDnsSources ?? []).map((s: PhysicalAdapterDnsSource) => s.alias)
+  // The cold DNS snapshot is independent of ACL verification and staging.
+  // Join it only where configuration and alias selection actually consume it.
+  const smartRuDirectDnsSources = await options.smartRuDirectDnsSources
+  options.signal?.throwIfAborted()
+  const existingAliases = (smartRuDirectDnsSources ?? []).map((s: PhysicalAdapterDnsSource) => s.alias)
   updateTunAdapterAlias(existingAliases.length > 0 ? existingAliases : undefined)
 
   // Files/ACL inspection can overlap Xray startup. Configuration still waits
@@ -2310,6 +2314,7 @@ async function prepareRuntime(
   signal?.throwIfAborted()
   const config = generateSingboxConfig(upstream, proxyType, directProcessNames, {
     ...configOptions,
+    smartRuDirectDnsSources,
     xraySocksPort: xray?.socksPort ?? options.xraySocksPort,
     resolvedVpnEndpointIp: xray ? xray.resolvedIp : options.resolvedVpnEndpointIp,
     // If staging failed, smartRuRuleSetDir is undefined. Force the whole
@@ -2876,9 +2881,7 @@ export const tunController = {
               resolvedIp: vpnProfile.resolvedIp,
               signal: startAbortController.signal
             })
-            runtimePromise = timePromise('prepare-runtime', smartRouteRuntimeOptsPromise.then(runtimeOpts => {
-              startAbortController.signal.throwIfAborted()
-              return prepareRuntime(
+            runtimePromise = timePromise('prepare-runtime', prepareRuntime(
                 { outbound: vpnProfile.outbound, proxyType, clientDevice: vpnProfile.clientDevice },
                 proxyType,
                 uniqueProcessNames([...proxyOwnerProcessNames, 'vpnte-xray.exe']),
@@ -2889,10 +2892,10 @@ export const tunController = {
                   publicWifiCompatibility,
                   xrayStartup,
                   signal: startAbortController.signal,
-                  ...runtimeOpts
+                  smartRuSplit, smartRuMapsDirect,
+                  smartRuDirectDnsSources: dnsSourcesPromise
                 }
-              )
-            }), { mode, parallel: true })
+              ), { mode, parallel: true })
             // Do not release this start owner while cancelled/failed staging
             // can still write files that the next connection would consume.
             startupCleanupTasks.push(runtimePromise.then(() => undefined, () => undefined))

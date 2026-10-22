@@ -210,6 +210,18 @@ test('unknown native exit status publishes only a fixed state, preserving path f
   }
 })
 
+test('runtime ACL inspection exposes timing and fixed transport without paths or principals (AT-00-005, AT-01-002)', () => {
+  const base = { ts: '2026-10-23T00:00:00.000Z', scope: 'runtime-acl', message: 'inspection timing' }
+  for (const transport of ['worker', 'standalone', 'FAKE-PRIVATE-PAYLOAD']) {
+    const result = safeAppEvent({ ...base, details: { transport, durationMs: 123, path: 'C:\\FAKE-PRIVATE-PAYLOAD',
+      principal: 'FAKE-PRIVATE-PAYLOAD', reason: 'FAKE-PRIVATE-PAYLOAD', stdout: 'FAKE-PRIVATE-PAYLOAD' } })
+    assert.deepEqual(result, { at: base.ts, scope: base.scope, message: base.message, durationMs: 123,
+      ...(transport === 'FAKE-PRIVATE-PAYLOAD' ? {} : { transport }) })
+    assert.ok(!JSON.stringify(result).includes('FAKE-PRIVATE-PAYLOAD'))
+  }
+  assert.equal(safeAppEvent({ ...base, message: 'runtime bootstrap refused', details: { path: 'FAKE-PRIVATE-PAYLOAD' } }), null)
+})
+
 test('concurrent connect/cancel calls retain separate IDs and elapsed time', async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
   await mkdir(temp, { recursive: true })
