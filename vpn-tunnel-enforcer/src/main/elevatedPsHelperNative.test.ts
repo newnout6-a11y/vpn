@@ -111,7 +111,7 @@ try { & { ${commands[0].script} }; $succeeded=$true } catch {}
       expect(result.status).toBe(0)
       const evidence = JSON.parse(result.stdout.trim())
       expect(evidence.succeeded).toBe(variant !== 'fallback-failed')
-      expect(evidence.profileReads).toBe(variant === 'fallback-failed' ? 0 : 1)
+      expect(evidence.profileReads).toBe(0) // Definitions only; no discarded CIM policy query.
       if (variant === 'selective' || variant === 'types-failed') {
         expect(evidence.imports.slice(0, 6)).toEqual(['NetFirewallProfile', 'NetFirewallRule', 'NetFirewallApplicationFilter',
           'NetFirewallAddressFilter', 'NetFirewallPortFilter', 'NetFirewallInterfaceFilter'].map(name => name + '.cmdletDefinition.cdxml'))

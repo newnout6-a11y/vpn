@@ -213,7 +213,7 @@ try {
   }
   Update-TypeData -PrependPath (Join-Path $netSecurityRoot 'NetSecurity.types.ps1xml') -ErrorAction Stop
 } catch { Import-Module NetSecurity -ErrorAction Stop }
-Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | Out-Null` },
+Get-Command Get-NetFirewallProfile -ListImported -ErrorAction Stop | Out-Null` },
   // The runner prepares fixed network definitions once, before this fresh query.
   { module: 'Network', policy: 'physical-adapter-lockdown', script: 'Get-NetAdapter -ErrorAction Stop | Out-Null' }
 ]
