@@ -1,7 +1,7 @@
 // AT-00-002 / AT-02-002/009: Win32 enumeration, exact ownership, incomplete reads and handle lifetime.
 import { win32 } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { readOwnedRuntimePidInProcess, type ProcessReadApi } from './ownedRuntimePidCore'
+import { readOwnedRuntimePidInProcess, readOwnedRuntimeStateInProcess, type ProcessReadApi } from './ownedRuntimePidCore'
 
 const executable = 'C:\\VPNTE\\runtime\\vpnte-sing-box.exe'
 type Row = { pid: number; path: string | null; name?: string }
@@ -29,8 +29,66 @@ function fixture(rows: Row[], endError = 18) {
     close: vi.fn(handle => { closed.push(handle); return true }),
     error: vi.fn(() => endError)
   } satisfies ProcessReadApi
-  return { api, closed, read: () => readOwnedRuntimePidInProcess(executable, api) }
+  return { api, closed, read: () => readOwnedRuntimePidInProcess(executable, api),
+    state: () => readOwnedRuntimeStateInProcess(win32.dirname(executable), api) }
 }
+
+describe('native fresh runtime presence (AT-02-001/005, AT-03-007/012)', () => {
+  it('proves absence only after a complete empty enumeration and closes its snapshot', () => {
+    const f = fixture([])
+    expect(f.state()).toBe(false)
+    expect(f.api.error).toHaveBeenCalledOnce()
+    expect(f.closed).toEqual([42n])
+  })
+  it.each(['vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe'])('observes %s by ordinal-insensitive path within the strict runtime directory', name => {
+    const f = fixture([{ pid: 731, name: name.toUpperCase(), path: `c:\\vpnte\\RUNTIME\\subdir\\${name}` }])
+    expect(f.state()).toBe(true)
+    expect(f.closed).toEqual([10731, 42n])
+  })
+  it('does not confuse siblings, lookalike prefixes or unrelated image names with ownership', () => {
+    const f = fixture([{ pid: 731, path: 'C:\\VPNTE\\runtime-evil\\vpnte-sing-box.exe' },
+      { pid: 732, path: 'C:\\Foreign\\vpnte-sing-box.exe' },
+      { pid: 733, path: null, name: 'arbitrary.exe' }])
+    expect(f.state()).toBe(false)
+    expect(f.api.next).toHaveBeenCalledTimes(3)
+    expect(f.closed).toEqual([10731, 10732, 42n])
+  })
+  it('does not cache absence or require a singular PID for a presence observation', () => {
+    const rows: Row[] = [], f = fixture(rows)
+    expect(f.state()).toBe(false)
+    rows.push({ pid: 731, path: executable }, { pid: 732, path: executable })
+    expect(f.state()).toBe(true)
+    expect(f.read).toThrow(/exactly one owned process/)
+    rows.length = 0
+    expect(f.state()).toBe(false)
+    expect(f.api.snapshot).toHaveBeenCalledTimes(4)
+  })
+  it.each([false, true])('rejects incomplete enumeration after observed presence=%s', present => {
+    const f = fixture(present ? [{ pid: 731, path: executable }] : [], 5)
+    expect(f.state).toThrow(/incomplete process enumeration/)
+    expect(f.closed.at(-1)).toBe(42n)
+  })
+  it('keeps unreadable candidate paths unknown even after seeing an owned process', () => {
+    const f = fixture([{ pid: 731, path: executable }, { pid: 732, name: 'vpnte-xray.exe', path: null }])
+    expect(f.state).toThrow(/executable path unavailable/)
+    expect(f.closed).toEqual([10731, 10732, 42n])
+  })
+  it('refuses duplicate/zero process identities and failed handle closure as exit evidence', () => {
+    for (const rows of [[{ pid: 0, path: executable }], [{ pid: 731, path: executable }, { pid: 731, path: executable }]]) {
+      const f = fixture(rows)
+      expect(f.state).toThrow(/process identity/)
+      expect(f.closed.at(-1)).toBe(42n)
+    }
+    const f = fixture([]); f.api.close.mockReturnValue(false)
+    expect(f.state).toThrow(/handle close failed/)
+  })
+  it.each(['', 'relative', '\\\\server\\share', 'C:/runtime', 'C:\\..\\runtime', 'C:\\.\\runtime',
+    'C:\\runtime:stream', 'C:\\runtime\n', 'C:\\"runtime', 'C:\\' + 'x'.repeat(2048)])('rejects an unsafe runtime directory before reading processes: %j', path => {
+    const f = fixture([])
+    expect(() => readOwnedRuntimeStateInProcess(path, f.api)).toThrow(/invalid runtime directory/)
+    expect(f.api.snapshot).not.toHaveBeenCalled()
+  })
+})
 
 describe('native owned runtime PID (AT-00-002, AT-02-002/009)', () => {
   it('finishes enumeration and distinguishes exact case-insensitive paths from siblings/prefix collisions', () => {
@@ -108,7 +166,10 @@ describe('native owned runtime PID (AT-00-002, AT-02-002/009)', () => {
   it('refuses FFI in the Electron main process even with a valid executable', () => {
     const descriptor = Object.getOwnPropertyDescriptor(process, 'type')
     Object.defineProperty(process, 'type', { configurable: true, value: 'browser' })
-    try { expect(() => readOwnedRuntimePidInProcess(win32.resolve(executable))).toThrow(/must not run in the Electron main/) }
+    try {
+      expect(() => readOwnedRuntimePidInProcess(win32.resolve(executable))).toThrow(/must not run in the Electron main/)
+      expect(() => readOwnedRuntimeStateInProcess(win32.dirname(executable))).toThrow(/must not run in the Electron main/)
+    }
     finally {
       if (descriptor) Object.defineProperty(process, 'type', descriptor)
       else Reflect.deleteProperty(process, 'type')

@@ -43,6 +43,7 @@ function assertSurvivesHostDeath(lines: string[], expectAbort = true): void {
   for (const round of ['r1', 'r2']) {
     expect(lines.some(l => l.startsWith(`${round}.adapters=ok`)), `${round}.adapters: ${text}`).toBe(true)
     expect(lines.some(l => l.startsWith(`${round}.selected-routes=ok(3)`) || l.startsWith(`${round}.selected-routes=refused`)), `${round}.selected-routes: ${text}`).toBe(true)
+    expect(lines.some(l => l.startsWith(`${round}.runtime-state=ok`) || l.startsWith(`${round}.runtime-state=refused`)), `${round}.runtime-state: ${text}`).toBe(true)
     expect(lines.filter(l => l.startsWith(`${round}.`) && l.includes('UNAVAILABLE')), text).toEqual([])
   }
   if (expectAbort) {

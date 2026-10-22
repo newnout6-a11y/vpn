@@ -31,7 +31,7 @@ describe('runtime exit proof', () => {
   })
   it.each(['', 'garbage', 'false\nwarning', 'native error'])('never treats an invalid/failed probe as proof of absence: %j', async output => {
     const probe = load<(strict: boolean) => Promise<boolean>>('isOwnedTunRuntimeRunning', {
-      process: { platform: 'win32' }, getTunRuntimeDir: () => 'fixture', RUNTIME_EXE_NAME: 'owned.exe',
+      process: { platform: 'win32', env: { VPNTE_DISABLE_NATIVE_NET: '1' } }, getTunRuntimeDir: () => 'fixture', RUNTIME_EXE_NAME: 'owned.exe',
       RecoveryWorkerError, OWNED_RUNTIME_STATUS_QUERY_SCRIPT, executeRecoveryOperation: async () => { throw new RecoveryWorkerError('unavailable', 'fixture fallback') },
       psSingleQuote: (value: string) => `'${value}'`, logEvent: vi.fn(),
       runPowerShell: async () => { if (output === 'native error') throw new Error(output); return output }
@@ -41,7 +41,7 @@ describe('runtime exit proof', () => {
   it.each([['true', true], ['false\r\n', false]])('accepts only an exact native boolean: %j', async (output, expected) => {
     const native = vi.fn(async (..._args: any[]) => output)
     const probe = load<(strict: boolean) => Promise<boolean>>('isOwnedTunRuntimeRunning', {
-      process: { platform: 'win32' }, getTunRuntimeDir: () => 'fixture', RUNTIME_EXE_NAME: 'owned.exe',
+      process: { platform: 'win32', env: { VPNTE_DISABLE_NATIVE_NET: '1' } }, getTunRuntimeDir: () => 'fixture', RUNTIME_EXE_NAME: 'owned.exe',
       RecoveryWorkerError, OWNED_RUNTIME_STATUS_QUERY_SCRIPT, executeRecoveryOperation: async () => { throw new RecoveryWorkerError('unavailable', 'fixture fallback') },
       psSingleQuote: (value: string) => `'${value}'`, logEvent: vi.fn(), runPowerShell: native
     })

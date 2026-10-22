@@ -39,6 +39,7 @@ app.whenReady().then(async () => {
       await run(`r${round}.ipconfig`, 'ipconfig')
       await run(`r${round}.routes`, 'routes', { prefixes: ['0.0.0.0/0'] })
       await run(`r${round}.selected-routes`, 'selected-route-interfaces')
+      await run(`r${round}.runtime-state`, 'owned-runtime-state', { runtimeDir: app.getPath('temp') + '\\vpnte-empty-e2e-runtime' })
       await run(`r${round}.physical-sources`, 'physical-sources')
       await run(`r${round}.tunnels`, 'tunnels', { vpnteAlias: 'VPNTE', vpnteIpv4Prefix: '10.250.' })
       await run(`r${round}.physical-snapshot`, 'physical-snapshot', { profiles: [] })
