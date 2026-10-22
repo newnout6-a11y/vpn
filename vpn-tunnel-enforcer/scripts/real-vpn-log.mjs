@@ -133,11 +133,12 @@ export function safeAppEvent(event) {
     ['dns-policy-value', /Unsupported DNS registry snapshot value/],
     ['dns-policy-schema', /Incomplete DNS registry snapshot|Invalid DNS registry snapshot/],
     ['runtime-acl', /RuntimeSecurityAclError|untrusted runtime directory/i],
-    ['runtime-path-unavailable', /Runtime path unavailable|Cannot prove runtime exit: executable path unavailable/],
-    ['runtime-status-invalid', /Owned runtime status response is invalid/],
+    ['runtime-path-unavailable', /Runtime path unavailable|Cannot prove runtime exit: executable path unavailable|runtime PID: executable path unavailable/],
+    ['runtime-process-enumeration', /runtime PID: incomplete process enumeration/],
+    ['runtime-status-invalid', /Owned runtime status response is invalid|Native owned runtime state response is invalid/],
     ['unknown-config-field', /unknown field/i], ['invalid-config', /decode config|parse config|check config/i],
     ['file-missing', /ENOENT|cannot find the file/i], ['permission-denied', /EACCES|EPERM|access is denied/i],
-    ['socket-conflict', /EADDRINUSE/], ['native-timeout', /ETIMEDOUT|timed out/i]
+    ['socket-conflict', /EADDRINUSE/], ['native-timeout', /ETIMEDOUT|timed out|Owned runtime status deadline exceeded/i]
   ]) if (pattern.test(errorText)) { result.errorKind = kind; break }
   if (result.errorKind === 'adapter-snapshot') {
     const fields = ['ifIndex', 'alias', 'ipv6Enabled', 'forcedIpv6Off', 'interfaceGuid', 'ipv4DnsSource', 'ipv4DnsServers', 'forcedDnsTo']

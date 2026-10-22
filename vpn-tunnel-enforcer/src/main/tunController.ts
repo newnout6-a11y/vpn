@@ -1502,14 +1502,16 @@ export async function isOwnedTunRuntimeRunning(requireProof = false): Promise<bo
   if (process.platform !== 'win32') return false
   const deadline = performance.now() + 5000
   const remaining = () => Math.max(0, Math.floor(deadline - performance.now()))
-  const bounded = async <T>(read: () => Promise<T>): Promise<T> => {
-    const budget = remaining()
+  const bounded = async <T>(read: () => Promise<T>, maxMs = remaining()): Promise<T> => {
+    const budget = Math.min(remaining(), maxMs), expires = performance.now() + budget
     if (!budget) throw new Error('Owned runtime status deadline exceeded')
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      return await Promise.race([read(), new Promise<T>((_resolve, reject) => {
+      const result = await Promise.race([read(), new Promise<T>((_resolve, reject) => {
         timer = setTimeout(() => reject(new Error('Owned runtime status deadline exceeded')), budget)
       })])
+      if (performance.now() >= expires) throw new Error('Owned runtime status deadline exceeded')
+      return result
     } finally { clearTimeout(timer) }
   }
   try {
@@ -1517,7 +1519,9 @@ export async function isOwnedTunRuntimeRunning(requireProof = false): Promise<bo
     if (process.env.VPNTE_DISABLE_NATIVE_NET !== '1') {
       const started = performance.now()
       try {
-        const running = await bounded(() => readOwnedRuntimeStateNative(runtimeDir))
+        // Reserve the rest of the original deadline for the independent CIM reader.
+        // This caller timer never shortens the shared host's normal 5000 ms timeout.
+        const running = await bounded(() => readOwnedRuntimeStateNative(runtimeDir), 250)
         if (!remaining()) throw new Error('Owned runtime status deadline exceeded')
         logEvent('debug', 'tun', 'native runtime status timing', { durationMs: Math.round(performance.now() - started) })
         return running

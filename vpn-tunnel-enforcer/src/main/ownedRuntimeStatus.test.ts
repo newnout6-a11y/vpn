@@ -67,10 +67,26 @@ describe('fresh owned runtime status', () => {
     const h = harness(); h.process.env.VPNTE_DISABLE_NATIVE_NET = '0'
     let finish!: (running: boolean) => void
     h.readOwnedRuntimeStateNative.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    h.executeRecoveryOperation.mockImplementation(() => new Promise<string>(() => {}))
     const complete = vi.fn(), pending = h.read(true).then(() => complete('unexpected proof'), () => complete('refused'))
     await vi.advanceTimersByTimeAsync(5000)
     expect(complete).toHaveBeenCalledExactlyOnceWith('refused')
-    expect(h.executeRecoveryOperation).not.toHaveBeenCalled()
+    expect(h.executeRecoveryOperation).toHaveBeenCalledOnce()
+    finish(false); await pending
+    expect(complete).toHaveBeenCalledTimes(1)
+  })
+  it('reserves the original deadline for a fresh CIM proof when the native host stalls', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    const h = harness(); h.process.env.VPNTE_DISABLE_NATIVE_NET = '0'
+    let finish!: (running: boolean) => void
+    h.readOwnedRuntimeStateNative.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    h.executeRecoveryOperation.mockResolvedValue('true')
+    const complete = vi.fn()
+    const pending = h.read(true).then(complete)
+    await vi.advanceTimersByTimeAsync(250)
+    expect(h.executeRecoveryOperation).toHaveBeenCalledOnce()
+    expect(h.executeRecoveryOperation.mock.calls[0][1]).toBeGreaterThanOrEqual(4750)
+    expect(complete).toHaveBeenCalledExactlyOnceWith(true)
     finish(false); await pending
     expect(complete).toHaveBeenCalledTimes(1)
   })
@@ -89,7 +105,7 @@ describe('fresh owned runtime status', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
     const h = harness(); h.process.env.VPNTE_DISABLE_NATIVE_NET = '0'
     h.readOwnedRuntimeStateNative.mockImplementation(() => new Promise<boolean>((_resolve, reject) => {
-      setTimeout(() => reject(new Error('native unknown')), 4000)
+      setTimeout(() => reject(new Error('native unknown')), 200)
     }))
     h.executeRecoveryOperation.mockImplementation(() => new Promise<string>((_resolve, reject) => {
       setTimeout(() => reject(new RecoveryWorkerError('unavailable', 'fixture')), 500)
@@ -98,12 +114,12 @@ describe('fresh owned runtime status', () => {
     h.runPowerShell.mockImplementation(() => new Promise<string>(resolve => { finish = resolve }))
     const complete = vi.fn()
     const pending = h.read(true).then(() => complete('unexpected proof'), () => complete('refused'))
-    await vi.advanceTimersByTimeAsync(4500)
+    await vi.advanceTimersByTimeAsync(700)
     expect(h.executeRecoveryOperation.mock.calls[0][1]).toBeGreaterThan(0)
-    expect(h.executeRecoveryOperation.mock.calls[0][1]).toBeLessThanOrEqual(1000)
+    expect(h.executeRecoveryOperation.mock.calls[0][1]).toBeLessThanOrEqual(4800)
     expect(h.runPowerShell.mock.calls[0][1]).toBeGreaterThan(0)
-    expect(h.runPowerShell.mock.calls[0][1]).toBeLessThanOrEqual(500)
-    await vi.advanceTimersByTimeAsync(499)
+    expect(h.runPowerShell.mock.calls[0][1]).toBeLessThanOrEqual(4300)
+    await vi.advanceTimersByTimeAsync(4299)
     expect(complete).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(1)
     expect(complete).toHaveBeenCalledExactlyOnceWith('refused')

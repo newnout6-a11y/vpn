@@ -146,6 +146,19 @@ test('protected transition timing excludes private reason, IP and provider data'
     { at: event.ts, scope: event.scope, message: 'protected transition IP baseline not checked', elapsedMs: 4500 })
 })
 
+test('native runtime fallback diagnostics publish fixed categories without private messages', () => {
+  for (const [message, kind] of [
+    ['runtime PID: executable path unavailable', 'runtime-path-unavailable'],
+    ['runtime PID: incomplete process enumeration', 'runtime-process-enumeration'],
+    ['Native owned runtime state response is invalid', 'runtime-status-invalid'],
+    ['Owned runtime status deadline exceeded', 'native-timeout']
+  ]) {
+    const event = { ts: '2026-10-22T08:00:00.000Z', scope: 'tun', message: 'native runtime status unavailable, using PowerShell',
+      details: { name: 'NativeHostError', message: `${message}: FAKE-PRIVATE-PAYLOAD`, stack: 'C:\\private' } }
+    assert.deepEqual(safeAppEvent(event), { at: event.ts, scope: event.scope, message: event.message, errorKind: kind })
+  }
+})
+
 test('concurrent connect/cancel calls retain separate IDs and elapsed time', async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
   await mkdir(temp, { recursive: true })
