@@ -74,9 +74,11 @@ export function setIpMonitorRecoveryCallback(cb: ((source: string) => void) | nu
 }
 
 export async function fetchPublicIpFrom(url: string, canPublish?: () => boolean, signal?: AbortSignal): Promise<string> {
+  const started = performance.now(), providerIndex = IP_CHECK_URLS.indexOf(url)
+  let outcome = 'failed'
   try {
     if (signal?.aborted) throw new Error('IP probe cancelled')
-    if ((providerBackoff.get(url) ?? 0) > Date.now()) throw new Error('IP provider backoff active')
+    if ((providerBackoff.get(url) ?? 0) > Date.now()) { outcome = 'backoff'; throw new Error('IP provider backoff active') }
     const resp = await axios.get(url, {
       signal,
       timeout: 10000,
@@ -108,6 +110,7 @@ export async function fetchPublicIpFrom(url: string, canPublish?: () => boolean,
       }
     }
     if (ip && (isIP(ip) === 4 || isIP(ip) === 6)) {
+      outcome = 'succeeded'
       const current = !canPublish || canPublish()
       if (current) lastSuccessAt = Date.now()
       if (current) logEvent('debug', 'ip-monitor', 'public IP endpoint succeeded', { url, ip })
@@ -120,6 +123,7 @@ export async function fetchPublicIpFrom(url: string, canPublish?: () => boolean,
     }
     throw new Error('response did not contain a valid IP')
   } catch (err: any) {
+    if (signal?.aborted) outcome = 'cancelled'
     if (!signal?.aborted && err?.response?.status === 429) {
       const retrySeconds = Number(err.response.headers?.['retry-after'])
       const delayMs = Number.isFinite(retrySeconds) && retrySeconds > 0 ? Math.min(retrySeconds * 1000, 300000) : 60000
@@ -127,6 +131,10 @@ export async function fetchPublicIpFrom(url: string, canPublish?: () => boolean,
     }
     if (!signal?.aborted) logEvent('debug', 'ip-monitor', 'public IP endpoint failed', { url, error: err.message || String(err) })
     throw err
+  } finally {
+    if (providerIndex >= 0) logEvent('debug', 'ip-monitor', 'public IP provider timing', {
+      providerIndex, outcome, durationMs: Math.round(performance.now() - started)
+    })
   }
 }
 

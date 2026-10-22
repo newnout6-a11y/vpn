@@ -7,6 +7,37 @@ import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createProgressLog, safeAppEvent, safeSnapshot, safeElectronDiagnostic, safeActionResult } from './real-vpn-log.mjs'
+import { buildPreparationProbe, parsePreparationProbe } from './measure-ps-preparation.mjs'
+
+test('preparation diagnostics accept only timings and complete fixed profiles (AT-00-005)', () => {
+  const value = { importsMs: 10, queryMs: 20, fallbackUsed: false, profiles: ['Public', 'Domain', 'Private'].map(name => ({ name, enabled: 'True', outbound: 'NotConfigured', disabledInterfaces: [], private: 'PRIVATE_DATA' })) }
+  const child = { status: 0, stdout: JSON.stringify(value), stderr: 'PRIVATE_DATA' }
+  const parsed = parsePreparationProbe(child)
+  assert.deepEqual(parsed.profiles.map(p => p.name), ['Domain', 'Private', 'Public'])
+  assert.ok(!JSON.stringify(parsed).includes('PRIVATE_DATA'))
+  // Equality diagnostics must preserve exclusions; they never certify protection.
+  const excluded = { ...value, profiles: value.profiles.map(p => ({ ...p, disabledInterfaces: ['fixture-b', 'fixture-a'] })) }
+  assert.deepEqual(parsePreparationProbe({ ...child, stdout: JSON.stringify(excluded) }).profiles[0].disabledInterfaces, ['fixture-a', 'fixture-b'])
+  assert.equal(parsePreparationProbe({ ...child, stdout: JSON.stringify({ ...value, fallbackUsed: true }) }).fallbackUsed, true)
+  for (const invalid of [null, { ...value, importsMs: '10' }, { ...value, queryMs: -1 }, { ...value, importsMs: 30000 }, { ...value, fallbackUsed: 'PRIVATE_DATA' },
+    { ...value, profiles: [] }, { ...value, profiles: [value.profiles[0], value.profiles[0], value.profiles[0]] },
+    ...[undefined, null, 'PRIVATE_DATA', [7]].map(disabledInterfaces => ({ ...value, profiles: [{ ...value.profiles[0], disabledInterfaces }, ...value.profiles.slice(1)] })),
+    { ...value, profiles: [{ name: 'PRIVATE_DATA' }, ...value.profiles.slice(1)] }]) {
+    assert.throws(() => parsePreparationProbe({ ...child, stdout: JSON.stringify(invalid) }), /^Error: PowerShell preparation probe unavailable$/)
+  }
+  for (const invalid of [{ ...child, error: new Error('PRIVATE_DATA') }, { ...child, status: 1 }, { ...child, stdout: 'PRIVATE_DATA' }]) {
+    assert.throws(() => parsePreparationProbe(invalid), /^Error: PowerShell preparation probe unavailable$/)
+  }
+  const script = buildPreparationProbe('Import-Module NetSecurity -ErrorAction Stop')
+  assert.match(script, /Get-NetFirewallProfile -Profile Domain,Private,Public/)
+  assert.ok(script.indexOf('$queryMs=$watch.ElapsedMilliseconds') < script.indexOf('$profiles=@($rawProfiles'))
+  assert.match(script, /PSObject.Properties\['DisabledInterfaceAliases'\]/)
+  assert.doesNotMatch(script, /\b(?:Set|New|Remove|Disable|Enable)-\w+/)
+  const workflow = readFileSync(new URL('../../.github/workflows/real-vpn.yml', import.meta.url), 'utf8')
+  const diagnostic = workflow.slice(workflow.indexOf('- name: Compare PowerShell preparation'), workflow.indexOf('- name: Upload timings'))
+  assert.match(diagnostic, /continue-on-error: true/)
+  assert.ok(workflow.indexOf('run: node scripts/test-real-vpn.mjs') < workflow.indexOf('- name: Compare PowerShell preparation'))
+})
 
 test('start and heartbeat are visible before an action finishes; file matches the live stream', { timeout: 3000 }, async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
@@ -220,6 +251,23 @@ test('runtime ACL inspection exposes timing and fixed transport without paths or
     assert.ok(!JSON.stringify(result).includes('FAKE-PRIVATE-PAYLOAD'))
   }
   assert.equal(safeAppEvent({ ...base, message: 'runtime bootstrap refused', details: { path: 'FAKE-PRIVATE-PAYLOAD' } }), null)
+})
+
+test('public IP request timings retain only fixed provider/outcome labels (AT-00-005/AT-01-001)', () => {
+  const base = { ts: '2026-10-23T00:00:00.000Z', scope: 'ip-monitor', message: 'public IP provider timing' }
+  for (const [providerIndex, provider] of ['cloudflare', 'ipify', 'icanhazip', 'myip'].entries()) {
+    for (const outcome of ['succeeded', 'failed', 'cancelled', 'backoff']) {
+      assert.deepEqual(safeAppEvent({ ...base, details: { providerIndex, outcome, durationMs: 7587,
+        url: 'PRIVATE_URL', ip: 'PRIVATE_IP', error: 'PRIVATE_ERROR' } }), {
+        at: base.ts, scope: base.scope, message: base.message, durationMs: 7587, provider, outcome
+      })
+    }
+  }
+  for (const providerIndex of [-1, 4, '0', null, 0.5]) {
+    assert.equal(safeAppEvent({ ...base, details: { providerIndex, outcome: 'PRIVATE_ERROR' } }).provider, undefined)
+    assert.equal(safeAppEvent({ ...base, details: { providerIndex, outcome: 'PRIVATE_ERROR' } }).outcome, undefined)
+  }
+  assert.equal(safeAppEvent({ ...base, message: 'protected transition IP baseline refreshed', details: { providerIndex: 0, outcome: 'succeeded' } }).provider, undefined)
 })
 
 test('helper warm-up exposes fixed module/outcome timing without native payloads (AT-00-005)', () => {
