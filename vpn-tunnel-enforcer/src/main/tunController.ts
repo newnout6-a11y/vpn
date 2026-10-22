@@ -17,6 +17,7 @@ import sudo from 'sudo-prompt'
 import { execElevated, isProcessElevated } from './admin'
 import { logEvent } from './appLogger'
 import { readOwnedRuntimePidNative } from './native/ownedRuntimePid'
+import { nativeSelectedIpv4Interfaces } from './native/selectedRouteInterfaces'
 import { rollbackTunNetworkBaselineIfApplied, rollbackTunNetworkBaselineOrThrow } from './systemNetwork'
 import { settingsStore } from './settings'
 import { notify } from './notifications'
@@ -1419,19 +1420,35 @@ async function waitForOwnedRuntimeToExit(timeoutMs = 3000): Promise<boolean> {
 
 export async function areTunRoutesActive(): Promise<boolean> {
   if (process.platform !== 'win32') return true
+  const deadline = performance.now() + 3000
+  const remaining = () => Math.max(0, Math.floor(deadline - performance.now()))
+  const bounded = async <T>(read: () => Promise<T>): Promise<T> => {
+    const budget = remaining()
+    if (!budget) throw new Error('TUN route proof deadline exceeded')
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      // Caller-local refusal never kills the shared host or changes its normal
+      // timeout. Late read-only evidence cannot resume this route proof.
+      return await Promise.race([read(), new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('TUN route proof deadline exceeded')), budget)
+      })])
+    } finally { clearTimeout(timer) }
+  }
   try {
     if (!currentStatus.running) return false
     const runtimePid = currentStatus.pid, runtimeStartedAt = currentStatus.startedAt
     const alias = getTunAdapterAlias()
-    const owner = await readRecoveryManifest<{ interfaceGuid: string }>('tun-owner.json', (value: any) => {
+    const owner = await bounded(() => readRecoveryManifest<{ interfaceGuid: string }>('tun-owner.json', (value: any) => {
       if (!value || value.schemaVersion !== 1 || value.owner !== 'VPNTE' || value.alias !== alias
         || !/^\{?[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\}?$/i.test(value.interfaceGuid)) {
         throw new Error('Invalid TUN ownership snapshot')
       }
       return value
-    })
+    }))
     if (!owner) return false
-    const stdout = await runPowerShell(`
+    const sameSession = () => currentStatus.running && currentStatus.pid === runtimePid
+      && currentStatus.startedAt === runtimeStartedAt && getTunAdapterAlias() === alias
+    const adapterScript = `
 $ErrorActionPreference = 'Stop'
 $namespace = 'root/StandardCimv2'
 $adapter = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetAdapter | Where-Object { $_.Name -eq ${psSingleQuote(alias)} })
@@ -1442,6 +1459,28 @@ $index = $adapter[0].InterfaceIndex
 $addresses = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetIPAddress -Filter "InterfaceIndex = $index" |
   Where-Object { $_.IPAddress -eq '192.168.250.253' -and $_.PrefixLength -eq 30 })
 if ($addresses.Count -ne 1) { 'false'; return }
+`
+    if (process.env.VPNTE_DISABLE_NATIVE_NET !== '1') {
+      // Fresh driver/GUID/address ownership remains mandatory. A native route
+      // answer alone cannot identify the current application's TUN.
+      const indexText = String(await bounded(() => runPowerShell(`${adapterScript}\n[string]$index`, remaining()))).trim()
+      const index = Number(indexText)
+      if (!/^\d+$/.test(indexText) || !Number.isSafeInteger(index) || index <= 0 || index > 0xffffffff || !sameSession()) return false
+      try {
+        const started = performance.now()
+        const indexes = await bounded(() => nativeSelectedIpv4Interfaces())
+        logEvent('debug', 'tun', 'native route selection timing', { durationMs: Math.round(performance.now() - started) })
+        // A valid competing route is authoritative. Do not retry it until a
+        // later observation happens to select the TUN.
+        return remaining() > 0 && sameSession() && indexes.every(selected => selected === index)
+      } catch (error) {
+        logEvent('debug', 'tun', 'native route selection unavailable, using PowerShell', error)
+        if (!sameSession() || !remaining()) return false
+      }
+    }
+    // Native refusal repeats the complete original proof, including a fresh
+    // adapter/address read; no partial or cached ownership is carried forward.
+    const stdout = await bounded(() => runPowerShell(`${adapterScript}
 # Ask Windows for the selected route, including fragmented prefixes and more
 # specific competing routes. These lookups send no packets to the canaries.
 foreach ($destination in @('1.1.1.1', '8.8.8.8', '208.67.222.222')) {
@@ -1450,9 +1489,8 @@ foreach ($destination in @('1.1.1.1', '8.8.8.8', '208.67.222.222')) {
   if ($found.ReturnValue -ne 0 -or $routes.Count -ne 1 -or $routes[0].InterfaceIndex -ne $index) { 'false'; return }
 }
 'true'
-`, 3000)
-    return currentStatus.running && currentStatus.pid === runtimePid && currentStatus.startedAt === runtimeStartedAt
-      && getTunAdapterAlias() === alias && String(stdout || '').trim().toLowerCase() === 'true'
+`, remaining()))
+    return remaining() > 0 && sameSession() && String(stdout || '').trim().toLowerCase() === 'true'
   } catch (err) {
     logEvent('debug', 'tun', 'areTunRoutesActive probe failed', err)
     return false

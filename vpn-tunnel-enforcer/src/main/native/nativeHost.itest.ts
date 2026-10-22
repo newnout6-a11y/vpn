@@ -42,6 +42,7 @@ function assertSurvivesHostDeath(lines: string[], expectAbort = true): void {
   // Both rounds: koffi really loads and enumerates in the utility process, and nothing reported `unavailable`.
   for (const round of ['r1', 'r2']) {
     expect(lines.some(l => l.startsWith(`${round}.adapters=ok`)), `${round}.adapters: ${text}`).toBe(true)
+    expect(lines.some(l => l.startsWith(`${round}.selected-routes=ok(3)`) || l.startsWith(`${round}.selected-routes=refused`)), `${round}.selected-routes: ${text}`).toBe(true)
     expect(lines.filter(l => l.startsWith(`${round}.`) && l.includes('UNAVAILABLE')), text).toEqual([])
   }
   if (expectAbort) {
