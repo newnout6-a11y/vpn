@@ -1,5 +1,6 @@
 // Runner policy and seeding. No Electron, filesystem or network side effects on import.
 import assert from 'node:assert/strict'
+import { stripVTControlCharacters } from 'node:util'
 
 export function hostedLaunchArgs(port) {
   assert.ok(Number.isInteger(port) && port > 0 && port <= 65535, 'Invalid inspector port')
@@ -14,7 +15,7 @@ export async function verifyNativeTunOwnership(execute) {
       { VPNTE_REQUIRE_TUN_OWNERSHIP_COMPARISON: '1', FORCE_COLOR: '0' })
     for (const line of stdout.split(/\r?\n/)) {
       try {
-        const value = JSON.parse(line)
+        const value = JSON.parse(stripVTControlCharacters(line))
         if (value?.fixture === 'owned-tun-read-only') evidence = value
       } catch { /* Vitest status lines are not evidence. */ }
     }

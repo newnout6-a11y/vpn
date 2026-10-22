@@ -26,6 +26,13 @@ test('empty, skipped, missing or malformed native comparison never counts as pos
   }
   await assert.rejects(verifyNativeTunOwnership(async () => '2 tests skipped'))
 })
+
+test('native oracle accepts Vitest ANSI reset prefixes on the exact JSON line', async () => {
+  const result = await verifyNativeTunOwnership(async () => '\u001b[90mstdout\u001b[2m | integration\n'
+    + '\u001b[22m\u001b[39m{"fixture":"owned-tun-read-only","comparisons":1,"positive":1}\n')
+  assert.deepEqual(result, { status: 'PASS', comparisons: 1, positive: 1 })
+  await assert.rejects(verifyNativeTunOwnership(async () => '\u001b[22mPRIVATE {"fixture":"owned-tun-read-only","comparisons":1,"positive":1}'))
+})
 test('native comparison process failure cannot expose raw output or credentials', async () => {
   await assert.rejects(verifyNativeTunOwnership(async () => { throw new Error('FAKE-PRIVATE-PAYLOAD') }),
     error => !error.message.includes('FAKE-PRIVATE-PAYLOAD'))
