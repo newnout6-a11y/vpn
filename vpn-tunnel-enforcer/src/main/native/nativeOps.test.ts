@@ -5,6 +5,7 @@ import { runNativeOp } from './nativeOps'
 import { isHostResponse, NativeHostError } from './hostProtocol'
 import { readSelectedIpv4InterfacesInProcess } from './selectedRouteInterfacesCore'
 import * as runtimeCore from './ownedRuntimePidCore'
+import * as tunCore from './ownedTunInterfaceCore'
 
 vi.mock('./selectedRouteInterfacesCore', () => ({ readSelectedIpv4InterfacesInProcess: vi.fn() }))
 
@@ -15,6 +16,16 @@ afterEach(() => {
 })
 
 describe('native host operations', () => {
+  it('dispatches TUN ownership with the exact identity and preserves unknown reads', async () => {
+    const read = vi.spyOn(tunCore, 'readOwnedTunIndexInProcess').mockReturnValueOnce(7).mockReturnValueOnce(null)
+    try {
+      await expect(runNativeOp('owned-tun-index', { alias: 'Ethernet 5', guid: 'guid' })).resolves.toBe(7)
+      expect(read).toHaveBeenCalledExactlyOnceWith('Ethernet 5', 'guid')
+      await expect(runNativeOp('owned-tun-index', { alias: 'Ethernet 5', guid: 'guid' })).resolves.toBeNull()
+      read.mockImplementationOnce(() => { throw new Error('unknown driver') })
+      await expect(runNativeOp('owned-tun-index', { alias: 'Ethernet 5', guid: 'guid' })).rejects.toThrow('unknown driver')
+    } finally { read.mockRestore() }
+  })
   it('dispatches complete runtime presence and preserves refusals without terminating processes', async () => {
     const read = vi.spyOn(runtimeCore, 'readOwnedRuntimeStateInProcess').mockReturnValueOnce(false)
     try {
@@ -54,7 +65,9 @@ describe('native host operations', () => {
     ['owned-runtime-pid', { executable: 'relative.exe' }, /invalid executable path/],
     ['owned-runtime-pid', { executable: 'C:\\runtime\\core.dll' }, /invalid executable path/],
     ['owned-runtime-state', {}, /runtime directory is required/],
-    ['owned-runtime-state', { runtimeDir: '..' }, /invalid runtime directory/]
+    ['owned-runtime-state', { runtimeDir: '..' }, /invalid runtime directory/],
+    ['owned-tun-index', {}, /alias and GUID are required/],
+    ['owned-tun-index', { alias: 'Ethernet 5', guid: 'invalid' }, /invalid alias or GUID/]
   ] as const)('rejects bad arguments for %s before touching koffi', async (op, args, message) => {
     await expect(runNativeOp(op, args)).rejects.toThrow(message)
   })

@@ -18,7 +18,7 @@ import { execElevated, isProcessElevated } from './admin'
 import { logEvent } from './appLogger'
 import { readOwnedRuntimePidNative } from './native/ownedRuntimePid'
 import { readOwnedRuntimeStateNative } from './native/ownedRuntimeState'
-import { nativeSelectedIpv4Interfaces } from './native/selectedRouteInterfaces'
+import { nativeOwnedTunIndex, nativeSelectedIpv4Interfaces } from './native/selectedRouteInterfaces'
 import { rollbackTunNetworkBaselineIfApplied, rollbackTunNetworkBaselineOrThrow } from './systemNetwork'
 import { settingsStore } from './settings'
 import { notify } from './notifications'
@@ -1423,8 +1423,8 @@ export async function areTunRoutesActive(): Promise<boolean> {
   if (process.platform !== 'win32') return true
   const deadline = performance.now() + 3000
   const remaining = () => Math.max(0, Math.floor(deadline - performance.now()))
-  const bounded = async <T>(read: () => Promise<T>): Promise<T> => {
-    const budget = remaining()
+  const bounded = async <T>(read: () => Promise<T>, maxMs = remaining()): Promise<T> => {
+    const budget = Math.min(remaining(), maxMs)
     if (!budget) throw new Error('TUN route proof deadline exceeded')
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
@@ -1462,13 +1462,12 @@ $addresses = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetIPAddres
 if ($addresses.Count -ne 1) { 'false'; return }
 `
     if (process.env.VPNTE_DISABLE_NATIVE_NET !== '1') {
-      // Fresh driver/GUID/address ownership remains mandatory. A native route
-      // answer alone cannot identify the current application's TUN.
-      const indexText = String(await bounded(() => runPowerShell(`${adapterScript}\n[string]$index`, remaining()))).trim()
-      const index = Number(indexText)
-      if (!/^\d+$/.test(indexText) || !Number.isSafeInteger(index) || index <= 0 || index > 0xffffffff || !sameSession()) return false
       try {
         const started = performance.now()
+        // The host proves fresh GUID/alias, PnP/driver and the exact /30 address.
+        // Reserve the rest of the caller budget for the complete CIM fallback.
+        const index = await bounded(() => nativeOwnedTunIndex(alias, owner.interfaceGuid), 250)
+        if (index === null || !sameSession() || !remaining()) return false
         const indexes = await bounded(() => nativeSelectedIpv4Interfaces())
         logEvent('debug', 'tun', 'native route selection timing', { durationMs: Math.round(performance.now() - started) })
         // A valid competing route is authoritative. Do not retry it until a

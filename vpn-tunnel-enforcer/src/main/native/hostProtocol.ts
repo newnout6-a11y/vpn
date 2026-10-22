@@ -30,6 +30,7 @@ export type HostOp =
   | 'owned-runtime-pid'
   | 'owned-runtime-state'
   | 'selected-route-interfaces'
+  | 'owned-tun-index'
   | 'wininet'
   /** Test only: implemented by nativeHostTestWorker.ts (bundled by the e2e, never shipped); the production host rejects it. */
   | 'abort-for-test'
