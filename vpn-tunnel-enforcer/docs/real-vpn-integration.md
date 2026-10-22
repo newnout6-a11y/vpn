@@ -241,3 +241,26 @@ npm.cmd --prefix vpn-tunnel-enforcer run test:real-vpn:unit
 Отмена подключения: acknowledgement/settled **1983/1983 мс**; отмена смены — **5/8765 мс**. Все **678/678** строк progress присутствуют в Actions stdout. Настройки совпали, debug instance закрыт, финально 0 runtime / 0 TUN / adapterDown / 0 адресов. WinINet notifyMs в четырёх откатах — 127/120/130/149 мс; прежний выброс 2168 мс здесь не повторился. Protected transition elapsed 4597/6039/4198 мс включает весь restart/route/IP и не является HTTP latency.
 
 Обычный CI39839619591 также PASS: Win32/CIM fixture **4/4**, unknown 0; native 9.2362/3.6210/3.5296/3.4284 мс против CIM 390.7076/370.7427/375.9448/374.4694 мс. Qodo1606775 на этом HEAD нашёл исчерпание всего caller budget зависшим native host. Этот первый успешный run не подменяет новый прогон после исправления замечания.
+
+
+## Окончательный замер PR #120 после исправления ревью — 22.10.2026
+
+[Run 39841813332](https://github.com/newnout6-a11y/vpn/actions/runs/39841813332) проверил f4e9df95a6c2e9d2718cf97a0192ba9fba6e12ff, image win25-vs2026, cancel_after_ms=500 и прежний SHA-256 настроек d092a2c90d947e77ad2e92ce39d4eb6842e24a6a8d9c8a22031d693676760c3d. Восемь действий PASS, IP verification passed/isLeak=false; cleanup PASS/settingsUnchanged=true; debugInstanceClosed=true; финально 0 runtime / 0 TUN / adapterDown / 0 адресов. Все 680/680 строк progress присутствуют в Actions stdout.
+
+| Действие | Исходный ce95391, мс | f4e9df9, мс |
+| --- | ---: | ---: |
+| Подключение | 10030 | 12243 |
+| Отключение | 1942 | 1997 |
+| Подключение и отмена | 2148 | 2128 |
+| Повторное подключение | 2582 | 2779 |
+| Смена сервера | 4709 | 4629 |
+| Обратная смена и отмена с восстановлением | 8375 | 7550 |
+| Обратная смена | 6297 | 5679 |
+| Пинг | 317 | 320 |
+
+Сумма 37325 мс против исходных 36400 мс; устойчивое общее ускорение не подтверждено. Native presence 126/5/6/4/4/8/7 мс, ещё пять чтений честно перешли на CIM с фиксированной категорией runtime-path-unavailable. Эти пять отказов относятся к чтению пути процесса; точный Win32 status намеренно не публикуется и причина на уровне ОС не доказана. Отмена подключения acknowledgement/settled 1508/1508 мс; отмена смены 23/6921 мс. WinINet notifyMs в четырёх откатах 121/100/129/112 мс, registryMs 109/82/96/91 мс.
+
+Read-only fixture окончательного CI39841792826: четыре обязательных совпадения Win32/CIM, cimUnknown=0; native 8.4783/3.4359/3.5596/3.3162 мс против CIM 372.8546/372.5947/372.8012/360.4666 мс. Qodo1607025 завершил review точного f4e9df9: прежнее замечание implemented, новых нет. Первый CI этого SHA прошёл unit/typecheck/route/runtime/traceability, но упал в Electron smoke при загрузке localhost с ERR_NO_BUFFER_SPACE; это не зелёный CI. Запущен повтор только failed job без изменения кода; результат должен быть проверен перед merge.
+
+
+Повтор CI39841792826 attempt2 на неизменном f4e9df9 завершился SUCCESS: Windows/site/Rust, Electron smoke и native host зелёные; read-only Win32/CIM четыре сравнения без unknown. Первая ошибка localhost ERR_NO_BUFFER_SPACE на повторе не воспроизвелась; её первопричина не установлена. PR #120 слит 2026-10-22T19:54:44Z, merge b397932847c6b3851108e80569761ced2717268d. Текущая dependent-ветка fast-forward на этот merge без изменения source tree и без потери этапа44.

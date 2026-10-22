@@ -8103,3 +8103,13 @@ Read-only ToolHelp/QueryFullProcessImageNameW заменяет foreground inspec
 PR120 на31a6584: CI39839619591 success Windows/Rust/site,4/4 Win32/CIM сравнений без unknown. Real39839635990:8/8PASS, IP/settings/cleanup/debug exit подтверждены,678/678 progress, native presence8–169мс,4fallback неизвестной причины; сумма40543мс, общего ускорения нет. Qodo1606775 подтвердил риск расходования5000мс до CIM fallback. Repro1red; caller-local native окно250мс оставляет бюджет fresh CIM без сокращения shared host timeout. После исправления контекста патча focused102/102; typecheck/traceability зелёные, driver35/35. Полный повтор и новый real-run окончательногоHEAD ещё нужны; PR не слит.
 
 DoD исправления PR120: полный **6015 passed / 5 existing skipped**,352.54с,exit0; typecheck exit0; driver35/35; traceability AC927/927,F210/210; diffcheck exit0. Отправляются повторные review/CI/real на окончательный commit.
+
+
+### 2026-10-22 — этап 44: native WinINet при rollback baseline
+
+Удалена повторная Add-Type/WinINet часть из registry rollback. Девять записей/SID/read-back сохраняются; notification ожидается через существующий native host, настоящий false не повторяется, unavailable использует прежний fallback. Manifest и очередь сохраняются до подтверждения; 30000 мс охватывают registry+notification, fallback получает только остаток. Регрессии ожидания/очереди/partial restore/false/fallback/privacy/deadline: focused309passed/1existing skipped; typecheck exit0; driver36/36; traceability AC927/927,F210/210; полныйsuite **6021passed/5existing skipped**,323passed/2skipped suites,375.86с,exit0.
+
+Окончательный real PR120 f4e9df9:39841813332,8/8PASS,IP/settings/cleanup/debug exit,680/680progress,сумма37325мс; общего ускорения нет. Qodo1607025:implemented,новых замечаний нет. CI39841792826 упал только Electron localhost ERR_NO_BUFFER_SPACE после зелёных unit/read-only/CIM4из4; failed job перезапущена на том же SHA. PR120 пока не слит.
+
+
+Повтор CI39841792826 attempt2 на неизменном f4e9df9 завершился SUCCESS: Windows/site/Rust, Electron smoke и native host зелёные; read-only Win32/CIM четыре сравнения без unknown. Первая ошибка localhost ERR_NO_BUFFER_SPACE на повторе не воспроизвелась; её первопричина не установлена. PR #120 слит 2026-10-22T19:54:44Z, merge b397932847c6b3851108e80569761ced2717268d. Текущая dependent-ветка fast-forward на этот merge без изменения source tree и без потери этапа44.
