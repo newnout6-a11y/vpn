@@ -120,6 +120,15 @@ test('native PID fallback is observable without publishing the error or executab
   { at: event.ts, scope: event.scope, message: event.message, errorName: 'Error' })
 })
 
+test('native route timings and refusal expose no destination, adapter or private error', () => {
+  const event = { ts: '2026-10-21T16:00:00.000Z', scope: 'tun', message: 'native route selection timing',
+    details: { durationMs: 8, indexes: [7, 8, 7], adapter: 'FAKE-PRIVATE-PAYLOAD', destination: 'private.example' } }
+  assert.deepEqual(safeAppEvent(event), { at: event.ts, scope: event.scope, message: event.message, durationMs: 8 })
+  assert.deepEqual(safeAppEvent({ ...event, message: 'native route selection unavailable, using PowerShell',
+    details: { name: 'Error', message: 'FAKE-PRIVATE-PAYLOAD', stack: 'C:\\private\\app.js FAKE-PRIVATE-PAYLOAD' } }),
+  { at: event.ts, scope: event.scope, message: 'native route selection unavailable, using PowerShell', errorName: 'Error' })
+})
+
 test('concurrent connect/cancel calls retain separate IDs and elapsed time', async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
   await mkdir(temp, { recursive: true })

@@ -3,6 +3,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runNativeOp } from './nativeOps'
 import { isHostResponse, NativeHostError } from './hostProtocol'
+import { readSelectedIpv4InterfacesInProcess } from './selectedRouteInterfacesCore'
+
+vi.mock('./selectedRouteInterfacesCore', () => ({ readSelectedIpv4InterfacesInProcess: vi.fn() }))
 
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
 beforeEach(() => { Object.defineProperty(process, 'platform', { value: 'win32' }) })
@@ -11,6 +14,14 @@ afterEach(() => {
 })
 
 describe('native host operations', () => {
+  it('dispatches selected-route-interfaces without forcing an adapter or destination', async () => {
+    const read = vi.mocked(readSelectedIpv4InterfacesInProcess)
+    read.mockReturnValueOnce([7, 8, 7])
+    await expect(runNativeOp('selected-route-interfaces', undefined)).resolves.toEqual([7, 8, 7])
+    expect(read).toHaveBeenCalledExactlyOnceWith()
+    read.mockImplementationOnce(() => { throw new Error('Selected route unavailable') })
+    await expect(runNativeOp('selected-route-interfaces', undefined)).rejects.toThrow('Selected route unavailable')
+  })
   it('does not implement the test-only crash op: the production host rejects it as unknown', async () => {
     const abort = vi.spyOn(process, 'abort').mockImplementation((() => { throw new Error('process.abort was called') }) as () => never)
     await expect(runNativeOp('abort-for-test', undefined)).rejects.toThrow(/unknown native op/)

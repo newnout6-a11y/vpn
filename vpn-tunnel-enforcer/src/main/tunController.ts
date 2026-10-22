@@ -17,6 +17,7 @@ import sudo from 'sudo-prompt'
 import { execElevated, isProcessElevated } from './admin'
 import { logEvent } from './appLogger'
 import { readOwnedRuntimePidNative } from './native/ownedRuntimePid'
+import { nativeSelectedIpv4Interfaces } from './native/selectedRouteInterfaces'
 import { rollbackTunNetworkBaselineIfApplied, rollbackTunNetworkBaselineOrThrow } from './systemNetwork'
 import { settingsStore } from './settings'
 import { notify } from './notifications'
@@ -1431,7 +1432,9 @@ export async function areTunRoutesActive(): Promise<boolean> {
       return value
     })
     if (!owner) return false
-    const stdout = await runPowerShell(`
+    const sameSession = () => currentStatus.running && currentStatus.pid === runtimePid
+      && currentStatus.startedAt === runtimeStartedAt && getTunAdapterAlias() === alias
+    const adapterScript = `
 $ErrorActionPreference = 'Stop'
 $namespace = 'root/StandardCimv2'
 $adapter = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetAdapter | Where-Object { $_.Name -eq ${psSingleQuote(alias)} })
@@ -1442,6 +1445,28 @@ $index = $adapter[0].InterfaceIndex
 $addresses = @(Get-CimInstance -Namespace $namespace -ClassName MSFT_NetIPAddress -Filter "InterfaceIndex = $index" |
   Where-Object { $_.IPAddress -eq '192.168.250.253' -and $_.PrefixLength -eq 30 })
 if ($addresses.Count -ne 1) { 'false'; return }
+`
+    if (process.env.VPNTE_DISABLE_NATIVE_NET !== '1') {
+      // Fresh driver/GUID/address ownership remains mandatory. A native route
+      // answer alone cannot identify the current application's TUN.
+      const indexText = String(await runPowerShell(`${adapterScript}\n[string]$index`, 3000)).trim()
+      const index = Number(indexText)
+      if (!/^\d+$/.test(indexText) || !Number.isSafeInteger(index) || index <= 0 || index > 0xffffffff || !sameSession()) return false
+      try {
+        const started = performance.now()
+        const indexes = await nativeSelectedIpv4Interfaces()
+        logEvent('debug', 'tun', 'native route selection timing', { durationMs: Math.round(performance.now() - started) })
+        // A valid competing route is authoritative. Do not retry it until a
+        // later observation happens to select the TUN.
+        return sameSession() && indexes.every(selected => selected === index)
+      } catch (error) {
+        logEvent('debug', 'tun', 'native route selection unavailable, using PowerShell', error)
+        if (!sameSession()) return false
+      }
+    }
+    // Native refusal repeats the complete original proof, including a fresh
+    // adapter/address read; no partial or cached ownership is carried forward.
+    const stdout = await runPowerShell(`${adapterScript}
 # Ask Windows for the selected route, including fragmented prefixes and more
 # specific competing routes. These lookups send no packets to the canaries.
 foreach ($destination in @('1.1.1.1', '8.8.8.8', '208.67.222.222')) {
@@ -1451,8 +1476,7 @@ foreach ($destination in @('1.1.1.1', '8.8.8.8', '208.67.222.222')) {
 }
 'true'
 `, 3000)
-    return currentStatus.running && currentStatus.pid === runtimePid && currentStatus.startedAt === runtimeStartedAt
-      && getTunAdapterAlias() === alias && String(stdout || '').trim().toLowerCase() === 'true'
+    return sameSession() && String(stdout || '').trim().toLowerCase() === 'true'
   } catch (err) {
     logEvent('debug', 'tun', 'areTunRoutesActive probe failed', err)
     return false

@@ -8079,3 +8079,11 @@ PR #117 слит после повторной критики (Qodo 1591698: 5/5
 
 
 PR #118: первый реальный run 39684890218 на 0509231 подтвердил 8/8 PASS и native PID 6–9 мс (fallback 0), но сумма действий 38627 мс не подтвердила общего ускорения. Qodo 1591881 нашёл потерю nested Error и опасный локальный timeout 1500 мс общего host. Обе находки воспроизведены: 2 failed / 14 passed. Исправления: прямой Error → logger, штатный host timeout 5000 мс без override, явное пояснение no-owner fallback. Новые проверки исполняют production helper → настоящий logger → диск и настоящий hostClient с PID+routes, задержанными на 1600 мс; kill/death отсутствуют. Focused 70/70; полный повтор 5923 passed / 5 existing skipped, 320 passed / 2 skipped suites, 355.97 с; typecheck exit 0; driver 31/31; traceability AC 927/927, F 210/210; diff check exit 0. Повторное remote review и новый реальный run обязательны до merge.
+
+### Автономное ускорение: этап 42, native selected routes (22.10.2026)
+
+Окончательный PR #118 d7f9c44: повторный run39686574613 прошёл 8/8, IP/settings/cleanup/648 строк progress; PID 7/5/9/6/4 мс, сумма действий 40628 мс — общего ускорения не заявляем. Qodo1592020 подтвердил обе правки как implemented; Revix оставил только minor test-maintainability/nit. CI39686537550 завершился success; PR #118 слит как 0d87dfb после проверки точного HEAD. На minor Revix даны ответы.
+
+Готовится отдельный native route proof GetBestRoute2. Сохраняет свежие GUID/driver/PnP/address ownership, session fencing, три unrestricted выбранных маршрута и полный CIM fallback; конкурирующий маршрут не маскируется retry. 62/62 focused, 19/19 host dispatcher, read-only Windows integration 1/1 (native7.6875 мс / PS624.2087 мс, результаты совпали); typecheck exit0; driver32/32; traceability AC927/927,F210/210; полный suite выполняется. Нормативные docs и локальный VPN не изменены. Подробности — этап42 журнала ускорения.
+
+Полный DoD этапа42: npm.cmd test -- --reporter=dot — 5970 passed / 5 existing skipped, 322 passed / 2 skipped suites, 344.65 с, exit0; реальный Electron utility-process test —1 passed/1 not selected,1.08с,exit0. PR и реальный сценарий новой оптимизации ещё впереди.
