@@ -150,6 +150,26 @@ const PS_RUNNER_SCRIPT = `
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
+$networkModulesReady = $false
+function Initialize-VpnteNetworkModules {
+  if ($script:networkModulesReady) { return }
+  $modulesRoot = Join-Path $PSHOME 'Modules'
+  try {
+    foreach ($pair in @(
+      @('NetAdapter','MSFT_NetAdapter.cmdletDefinition.cdxml'),
+      @('NetAdapter','MSFT_NetAdapterBinding.cmdletDefinition.cdxml'),
+      @('DnsClient','MSFT_DnsClientServerAddress.cdxml'), @('DnsClient','MSFT_DnsClientCache.cdxml'),
+      @('NetTCPIP','MSFT_NetIPInterface.cdxml'), @('NetTCPIP','MSFT_NetIPAddress.cdxml'),
+      @('NetTCPIP','MSFT_NetRoute.cdxml'), @('NetConnection','MSFT_NetConnectionProfile.cdxml')
+    )) { Import-Module (Join-Path (Join-Path $modulesRoot $pair[0]) $pair[1]) -Global -ErrorAction Stop }
+    foreach ($pair in @(
+      @('NetAdapter','NetAdapter.Types.ps1xml'), @('DnsClient','DnsCmdlets.Types.ps1xml'),
+      @('DnsClient','DnsConfig.Types.ps1xml'), @('DnsClient','DnsClientPSProvider.Types.ps1xml'),
+      @('NetTCPIP','Tcpip.Types.ps1xml'), @('NetConnection','MSFT_NetConnectionProfile.types.ps1xml')
+    )) { Update-TypeData -PrependPath (Join-Path (Join-Path $modulesRoot $pair[0]) $pair[1]) -ErrorAction Stop }
+  } catch { Import-Module NetAdapter,DnsClient,NetTCPIP,NetConnection -Global -ErrorAction Stop }
+  $script:networkModulesReady = $true
+}
 while ($line = [Console]::In.ReadLine()) {
   if ($line -eq '__EXIT__') { break }
   try {
@@ -159,6 +179,7 @@ while ($line = [Console]::In.ReadLine()) {
     $exitCode = 0
     $executionWatch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
+      if ($cmd.policy -eq 'physical-adapter-lockdown') { Initialize-VpnteNetworkModules }
       $sb = [ScriptBlock]::Create($cmd.script)
       $output = & $sb *>&1 | Where-Object { $_ -isnot [System.Management.Automation.VerboseRecord] -and $_ -isnot [System.Management.Automation.DebugRecord] }
       $stdout = ($output | Out-String)
@@ -193,12 +214,8 @@ try {
   Update-TypeData -PrependPath (Join-Path $netSecurityRoot 'NetSecurity.types.ps1xml') -ErrorAction Stop
 } catch { Import-Module NetSecurity -ErrorAction Stop }
 Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | Out-Null` },
-  // Yield to admitted work between imports; never queue one long adapter warm-up.
-  ...['NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'].map(moduleName => ({
-    module: moduleName,
-    policy: 'physical-adapter-lockdown' as const,
-    script: `Import-Module ${moduleName} -ErrorAction Stop; Get-NetAdapter -ErrorAction Stop | Out-Null`
-  }))
+  // The runner prepares fixed network definitions once, before this fresh query.
+  { module: 'Network', policy: 'physical-adapter-lockdown', script: 'Get-NetAdapter -ErrorAction Stop | Out-Null' }
 ]
 
 /** Prepare this helper only; query results are discarded, never reused as evidence. */
@@ -436,7 +453,7 @@ export async function execElevatedPs(
 
     pendingCommands.set(id, { resolve, reject, timer, script, policy, submittedAt: performance.now() })
 
-    const cmd = JSON.stringify({ id, script, timeout: timeoutMs }) + '\n'
+    const cmd = JSON.stringify({ id, script, timeout: timeoutMs, policy }) + '\n'
     try {
       helperProcess!.stdin!.write(cmd)
     } catch (err: any) {

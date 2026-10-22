@@ -224,7 +224,7 @@ test('runtime ACL inspection exposes timing and fixed transport without paths or
 
 test('helper warm-up exposes fixed module/outcome timing without native payloads (AT-00-005)', () => {
   const base = { ts: '2026-10-23T00:00:00.000Z', scope: 'ps-helper', message: 'warm-up timing' }
-  for (const module of ['NetSecurity', 'NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection', 'FAKE-PRIVATE-PAYLOAD']) {
+  for (const module of ['NetSecurity', 'Network', 'NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection', 'FAKE-PRIVATE-PAYLOAD']) {
     const result = safeAppEvent({ ...base, details: { module, outcome: 'complete', durationMs: 123,
       script: 'FAKE-PRIVATE-PAYLOAD', stdout: 'FAKE-PRIVATE-PAYLOAD', policy: 'FAKE-PRIVATE-PAYLOAD' } })
     assert.deepEqual(result, { at: base.ts, scope: base.scope, message: base.message, durationMs: 123, outcome: 'complete',
