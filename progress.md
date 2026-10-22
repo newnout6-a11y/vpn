@@ -8119,3 +8119,20 @@ PR121 на8c950ba: CI39844343892 SUCCESS, real39844362955 8/8PASS,IP/settings/cl
 
 
 Окончательный локальный DoD исправления Qodo PR121: npm.cmd test -- --reporter=dot — **6024 passed / 5 existing skipped**, 323 passed / 2 skipped suites, **374.94 с**, exit 0 (.tmp/native-baseline-notify-review-full.log). Typecheck exit0,165IPC/0public any; final focused97passed/1existing skipped,9.11с; driver36/36,1234.3176мс; traceability AC927/927,F210/210; diffcheck exit0. Исправление и замер первого HEAD отправляются отдельным commit в существующий PR; окончательные remote gates ещё нужны.
+
+
+### 2026-10-22 — этап45: свежий runtime rescan
+
+В dependent-ветке реализован один новый полный ToolHelp scan после typed path-unavailable. Повторный unknown/незавершённая enumeration/плохой handle сохраняют отказ; startup PID и budgets не меняются. Repro3red; focused120/120,4.21с; read-only2/2,3.52с (presence CIM0сравнений/4unknown — эквивалентность не заявляется); контролируемая реальная snapshot/exit гонка теперь false42.008мс. Typecheck/coverage зелёные, полныйsuite выполняется. PR121 final Qodo1607476 completed/implemented/no new findings; finalCI39846666724 иreal39846701135 ещё идут,mergepending.
+
+
+Окончательный real PR121 run39846701135 на41beb41:8/8PASS,IP/settings/cleanup/debug exit,675/675progress; сумма39955мс, notify11/5/5/2мс, fallback WinINet0, registry122/114/112/118мс. Runtime path fallback5. Полная таблица в документации стенда. Qodo1607476 completed/implemented/no new findings; finalCI39846666724 ещё выполняется, mergepending. Стабильный выигрыш относится к notify, не к полному сценарию.
+
+
+Первый CI39846666724 окончательного41beb41 FAIL:6024passed/4skipped/1failed,405.21с; единственный отказ runtimeAclPolicy.test.ts:102, reports a refused boundary as a receipt line... достиг default Vitest5000мс при запуске реального PowerShell. Этот файл в PR121 не менялся. Это не зелёный gate; failed job повторена на неизменном SHA. При повторном отказе потребуется отдельное воспроизведение/исправление; причина первого таймаута пока не установлена.
+
+
+Окончательный локальный DoD этапа45: npm.cmd test -- --reporter=dot — **6030passed/5existing skipped**,323passed/2skipped suites,**373.66с**,exit0 (.tmp/native-runtime-rescan-full.log). Typecheck exit0,165IPC/0public any; focused120/120,4.21с; read-only integration2/2,3.52с с0presence CIM comparisons как отмечено выше. Driver36/36,749.0904мс,exit0; traceability AC927/927,F210/210; git diff --check exit0. Source заморожен с начала полного прогона. Commit/PR ожидает финального CI родительскогоPR121.
+
+
+Повтор CI39846666724 attempt2 на41beb41 завершился SUCCESS Windows/site/Rust, включая Electron/WFP/native host. Runtime Win32/CIM4/4,cimUnknown0: native11.5606/4.6124/4.4079/5.9938мс,CIM512.6578/508.0805/511.4163/495.0896мс. Первый ACL timeout5000мс не повторился; причина не установлена. Отдельный npx.cmd vitest run src/main/runtimeAclPolicy.test.ts --reporter=dot —28/28,586мс,exit0; source ACL не менялся. PR121 слит 2026-10-22T20:31:56Z,merge b8e3ab6a52adda40879d721389cae72f913686aa. Dependent-ветка fast-forward, tree идентичен41beb41; проверенный source этапа45 не изменился.

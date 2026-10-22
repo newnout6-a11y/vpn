@@ -19,6 +19,10 @@ const invalidHandle = (handle: Handle) => [0n, -1n, 0xffffffffffffffffn].include
 let cached: ProcessReadApi | undefined
 const runtimeNames = ['vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe']
 
+class RuntimePathUnavailableError extends Error {
+  constructor() { super('runtime PID: executable path unavailable') }
+}
+
 function getApi(): ProcessReadApi {
   assertKoffiAllowedHere('runtime PID')
   if (process.platform !== 'win32' || !['x64', 'arm64'].includes(process.arch)) throw new Error('runtime PID: unsupported platform')
@@ -74,10 +78,11 @@ function ownedProcesses(expected: string, directory: boolean, supplied?: Process
         if (!candidate || seen.has(candidate)) throw new Error('runtime PID: invalid or duplicate process identity')
         seen.add(candidate)
         const processHandle = api.open(0x1000, false, candidate) // PROCESS_QUERY_LIMITED_INFORMATION
-        if (invalidHandle(processHandle)) throw new Error('runtime PID: executable path unavailable')
+        if (invalidHandle(processHandle)) throw new RuntimePathUnavailableError()
         try {
           const buffer = Buffer.alloc(PATH_CHARS * 2), length = [PATH_CHARS]
-          if (!api.image(processHandle, 0, buffer, length) || !Number.isInteger(length[0]) || length[0] <= 0 || length[0] >= PATH_CHARS) {
+          if (!api.image(processHandle, 0, buffer, length)) throw new RuntimePathUnavailableError()
+          if (!Number.isInteger(length[0]) || length[0] <= 0 || length[0] >= PATH_CHARS) {
             throw new Error('runtime PID: executable path unavailable')
           }
           const path = buffer.toString('utf16le', 0, length[0] * 2)
@@ -108,5 +113,12 @@ export function readOwnedRuntimeStateInProcess(runtimeDir: string, supplied?: Pr
       || runtimeDir.split('\\').some(part => part === '..' || part === '.')) {
     throw new Error('runtime status: invalid runtime directory')
   }
-  return ownedProcesses(runtimeDir.replace(/\\+$/, '') + '\\', true, supplied).length > 0
+  const expected = runtimeDir.replace(/\\+$/, '') + '\\'
+  try { return ownedProcesses(expected, true, supplied).length > 0 }
+  catch (error) {
+    if (!(error instanceof RuntimePathUnavailableError)) throw error
+    // A candidate can exit after the snapshot. One new complete observation
+    // may prove the current state; another unreadable path still refuses proof.
+    return ownedProcesses(expected, true, supplied).length > 0
+  }
 }

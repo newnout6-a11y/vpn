@@ -71,7 +71,58 @@ describe('native fresh runtime presence (AT-02-001/005, AT-03-007/012)', () => {
   it('keeps unreadable candidate paths unknown even after seeing an owned process', () => {
     const f = fixture([{ pid: 731, path: executable }, { pid: 732, name: 'vpnte-xray.exe', path: null }])
     expect(f.state).toThrow(/executable path unavailable/)
-    expect(f.closed).toEqual([10731, 10732, 42n])
+    expect(f.api.snapshot).toHaveBeenCalledTimes(2)
+    expect(f.closed).toEqual([10731, 10732, 42n, 10731, 10732, 42n])
+  })
+  it.each(['open', 'image'] as const)('uses a fresh complete observation after a candidate disappears during %s', failure => {
+    for (const after of [[], [{ pid: 732, path: executable }], [{ pid: 732, path: 'C:\\Foreign\\vpnte-sing-box.exe' }]]) {
+      const rows: Row[] = [{ pid: 731, path: null }], f = fixture(rows)
+      if (failure === 'open') f.api.open.mockReturnValueOnce(0)
+      f.api.snapshot.mockImplementation(() => {
+        if (f.api.snapshot.mock.calls.length === 2) {
+          expect(f.closed).toEqual(failure === 'open' ? [42n] : [10731, 42n])
+          rows.splice(0, rows.length, ...after)
+          return 43n
+        }
+        return 42n
+      })
+      expect(f.state()).toBe(after[0]?.path === executable)
+      expect(f.api.snapshot).toHaveBeenCalledTimes(2)
+      expect(f.api.first.mock.calls.map(call => call[0])).toEqual([42n, 43n])
+      expect(f.api.error).toHaveBeenCalledOnce()
+      expect(f.closed.at(-1)).toBe(43n)
+    }
+  })
+  it('keeps a fresh rescan incomplete even if its readable owned process was observed', () => {
+    const rows: Row[] = [{ pid: 731, path: null }], f = fixture(rows, 5)
+    f.api.snapshot.mockImplementation(() => {
+      if (f.api.snapshot.mock.calls.length === 2) rows.splice(0, 1, { pid: 732, path: executable })
+      return 42n
+    })
+    expect(f.state).toThrow(/incomplete process enumeration/)
+    expect(f.api.snapshot).toHaveBeenCalledTimes(2)
+    expect(f.closed).toEqual([10731, 42n, 10732, 42n])
+  })
+  it('does not retry a failed handle closure after an unreadable candidate', () => {
+    const f = fixture([{ pid: 731, path: null }]); f.api.close.mockReturnValue(false)
+    expect(f.state).toThrow(/handle close failed/)
+    expect(f.api.snapshot).toHaveBeenCalledOnce()
+  })
+  it('does not retry malformed image evidence or arbitrary reader exceptions', () => {
+    for (const failure of ['length', 'exception']) {
+      const f = fixture([{ pid: 731, path: executable }])
+      f.api.image.mockImplementation((_handle, _flags, _buffer, length) => {
+        if (failure === 'exception') throw new Error('runtime PID: executable path unavailable')
+        length[0] = 0; return true
+      })
+      expect(f.state).toThrow(/executable path unavailable/)
+      expect(f.api.snapshot).toHaveBeenCalledOnce()
+    }
+  })
+  it('keeps startup PID proof strict when the candidate path disappears', () => {
+    const f = fixture([{ pid: 731, path: null }])
+    expect(f.read).toThrow(/executable path unavailable/)
+    expect(f.api.snapshot).toHaveBeenCalledOnce()
   })
   it('refuses duplicate/zero process identities and failed handle closure as exit evidence', () => {
     for (const rows of [[{ pid: 0, path: executable }], [{ pid: 731, path: executable }, { pid: 731, path: executable }]]) {

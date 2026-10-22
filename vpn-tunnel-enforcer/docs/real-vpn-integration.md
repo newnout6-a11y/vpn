@@ -286,3 +286,24 @@ Read-only fixture окончательного CI39841792826: четыре об�
 Холодный tun start pipeline вырос с 6902 до 8700 мс. Измеренные фазы: prepare-runtime 2249→2534, physical-dns-sources 1220→2016, adapter-lockdown 3662→5398 (остаточное ожидание1197→2281), firewall-kill-switch 3084→2980 (ожидание2204→2655), metric-readback937→1129 мс. Фазы исполняются с перекрытием и не суммируются; более медленный общий run нельзя приписывать WinINet. Причина отличий hosted-машин не установлена. Отмена подключения acknowledgement/settled2078/2078 мс, отмена смены18/8466 мс; runtime path fallback три раза.
 
 Обычный CI39844343892 на8c950ba SUCCESS. Qodo1607274 нашёл, что rejected records маскируют notification timeout как validation. Этот замер предшествует исправлению категории ошибки и не заменяет проверку окончательного HEAD.
+
+
+## Окончательный замер PR #121 — 22.10.2026
+
+[Run 39846701135](https://github.com/newnout6-a11y/vpn/actions/runs/39846701135) на41beb4148455e454d57b5e0ebe9ac6180830eef9 после исправления Qodo, win25-vs2026, отмена500мс, прежний SHA-256 настроек d092a2c90d947e77ad2e92ce39d4eb6842e24a6a8d9c8a22031d693676760c3d. Все8действий PASS; IP passed/isLeak=false; cleanup PASS/settingsUnchanged=true; debugInstanceClosed=true;0runtime/0TUN/adapterDown/0адресов. Все675/675строк progress присутствуют в Actions stdout.
+
+| Действие | Исходный ce95391, мс | 41beb41, мс |
+| --- | ---: | ---: |
+| Подключение | 10030 | 12071 |
+| Отключение | 1942 | 3301 |
+| Подключение и отмена | 2148 | 2323 |
+| Повторное подключение | 2582 | 2777 |
+| Смена сервера | 4709 | 5274 |
+| Обратная смена и отмена с восстановлением | 8375 | 8711 |
+| Обратная смена | 6297 | 5216 |
+| Пинг | 317 | 282 |
+
+Сумма39955мс; устойчивого общего ускорения нет. WinINet notify **11/5/5/2мс**, fallback0; registry122/114/112/118мс. Снижение непосредственно notify относительно прежних100–149мс повторилось на втором hosted-образце, но оно не объясняет общий elapsed. Отмена подключения acknowledgement/settled1760/1760мс, отмена смены34/7966мс. Native runtime path fallback ещё пять раз; следующий кандидат должен отдельно проверить его влияние. Qodo1607476 на точном41beb41:completed, прежнее замечание implemented, новых нет. Окончательный CI39846666724 пока выполняется; merge ещё не подтверждён.
+
+
+Повтор CI39846666724 attempt2 на41beb41 завершился SUCCESS Windows/site/Rust, включая Electron/WFP/native host. Runtime Win32/CIM4/4,cimUnknown0: native11.5606/4.6124/4.4079/5.9938мс,CIM512.6578/508.0805/511.4163/495.0896мс. Первый ACL timeout5000мс не повторился; причина не установлена. Отдельный npx.cmd vitest run src/main/runtimeAclPolicy.test.ts --reporter=dot —28/28,586мс,exit0; source ACL не менялся. PR121 слит 2026-10-22T20:31:56Z,merge b8e3ab6a52adda40879d721389cae72f913686aa. Dependent-ветка fast-forward, tree идентичен41beb41; проверенный source этапа45 не изменился.
