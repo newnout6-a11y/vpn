@@ -32,6 +32,7 @@ function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', a
     rollbackEarlyAdapterLockdown: vi.fn(async () => {}),
     prepareRuntime: vi.fn(async (...args: any[]) => {
       args[3].signal?.throwIfAborted()
+      await args[3].smartRuDirectDnsSources
       await args[3].xrayStartup
       return { singbox: 'fixture.exe', config: 'fixture.json' }
     }),
@@ -92,6 +93,44 @@ function runtimeHarness() {
 afterEach(() => vi.useRealTimers())
 
 describe('parallel runtime staging safety (AT-01-009 / AT-02-002/005)', () => {
+  it('stages artifacts while DNS is pending, then uses its complete snapshot for aliases and config', async () => {
+    const dns = deferred<any[]>()
+    const h = runtimeHarness()
+    const pending = h.run({ outbound: { type: 'vless' } }, 'socks5', [], {
+      smartRuDirectDnsSources: dns.promise
+    })
+    const finished = vi.fn()
+    const settled = pending.then(finished, finished)
+    await vi.waitFor(() => expect(h.copyResourceIfStale).toHaveBeenCalledTimes(3))
+    expect(finished).not.toHaveBeenCalled()
+    expect(h.generateSingboxConfig).not.toHaveBeenCalled()
+    expect(h.updateTunAdapterAlias).not.toHaveBeenCalled()
+    expect(h.writeFile).not.toHaveBeenCalled()
+    const sources = [{ ifIndex: 2, alias: 'Ethernet 5', ipv4DnsServers: ['192.0.2.53'] }]
+    dns.resolve(sources)
+    await settled
+    expect(h.updateTunAdapterAlias).toHaveBeenCalledExactlyOnceWith(['Ethernet 5'])
+    expect(h.generateSingboxConfig.mock.calls[0][3]).toMatchObject({ smartRuDirectDnsSources: sources })
+    expect(h.writeFile).toHaveBeenCalledOnce()
+  })
+
+  it('does not select an alias or write config after cancellation during the DNS join (AT-00-003)', async () => {
+    const dns = deferred<any[]>()
+    const controller = new AbortController()
+    const h = runtimeHarness()
+    const pending = h.run({ outbound: {} }, 'socks5', [], {
+      smartRuDirectDnsSources: dns.promise, signal: controller.signal
+    })
+    const rejected = expect(pending).rejects.toThrow()
+    await vi.waitFor(() => expect(h.copyResourceIfStale).toHaveBeenCalledTimes(3))
+    controller.abort()
+    dns.resolve([{ alias: 'late-alias', ipv4DnsServers: [] }])
+    await rejected
+    expect(h.updateTunAdapterAlias).not.toHaveBeenCalled()
+    expect(h.generateSingboxConfig).not.toHaveBeenCalled()
+    expect(h.writeFile).not.toHaveBeenCalled()
+  })
+
   it('preserves explicit runtime options without an Xray startup join', async () => {
     const h = runtimeHarness()
     await h.run('127.0.0.1:10808', 'socks5', [], { xraySocksPort: 54321, resolvedVpnEndpointIp: '198.51.100.12' })
@@ -151,6 +190,31 @@ describe('parallel runtime staging safety (AT-01-009 / AT-02-002/005)', () => {
 })
 
 describe('Direct VPN preparation overlap', () => {
+  it('overlaps cold DNS and file staging instead of adding their seconds (AT-02-002)', async () => {
+    vi.useFakeTimers()
+    const dns = new Promise<unknown[]>(done => setTimeout(() => done([]), 2600))
+    const h = harness(dns)
+    h.startXray.mockImplementation(async () => {
+      await new Promise(done => setTimeout(done, 1800))
+      return { socksPort: 1234, resolvedIp: '198.51.100.1', exePath: 'fixture-xray.exe' }
+    })
+    h.prepareRuntime.mockImplementation(async (...args: any[]) => {
+      await new Promise(done => setTimeout(done, 1400))
+      await args[3].smartRuDirectDnsSources
+      await args[3].xrayStartup
+      return { singbox: 'fixture.exe', config: 'fixture.json' }
+    })
+    const completed = vi.fn()
+    const pending = h.run().then(completed)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(h.prepareRuntime).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(2599)
+    expect(completed).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    await pending
+    expect(completed).toHaveBeenCalledOnce()
+  })
+
   it('stages sing-box while Xray is starting and joins their simulated costs (AT-02-002)', async () => {
     vi.useFakeTimers()
     const h = harness(Promise.resolve([]))
@@ -209,19 +273,18 @@ describe('Direct VPN preparation overlap', () => {
     expect(h.stopXray).toHaveBeenCalledOnce()
     expect(h.rollbackEarlyAdapterLockdown).toHaveBeenCalledOnce()
   })
-  it('starts Xray before DNS sources finish, but passes the complete snapshot to runtime', async () => {
+  it('starts both engines preparation before DNS finishes, joining the complete snapshot before config', async () => {
     const dns = deferred<unknown[]>()
     const h = harness(dns.promise)
     const pending = h.run()
     await vi.waitFor(() => expect(h.startXray).toHaveBeenCalledOnce())
-    expect(h.prepareRuntime).not.toHaveBeenCalled()
+    expect(h.prepareRuntime).toHaveBeenCalledOnce()
     const sources = [{ interfaceGuid: 'fixture-guid', servers: ['192.0.2.53'] }]
     dns.resolve(sources)
     await pending
     expect(h.prepareRuntime).toHaveBeenCalledOnce()
-    expect(h.prepareRuntime.mock.calls[0][3]).toMatchObject({
-      smartRuSplit: true, smartRuDirectDnsSources: sources
-    })
+    expect(h.prepareRuntime.mock.calls[0][3].smartRuSplit).toBe(true)
+    expect(await h.prepareRuntime.mock.calls[0][3].smartRuDirectDnsSources).toEqual(sources)
     expect(await h.prepareRuntime.mock.calls[0][3].xrayStartup).toMatchObject({ socksPort: 1234, resolvedIp: '198.51.100.1' })
     expect(h.stopXray).not.toHaveBeenCalled()
   })
@@ -254,7 +317,7 @@ describe('Direct VPN preparation overlap', () => {
     dns.resolve([])
     await vi.waitFor(() => expect(h.stopXray).toHaveBeenCalledOnce())
     expect(h.rollbackEarlyAdapterLockdown).not.toHaveBeenCalled()
-    expect(h.prepareRuntime).not.toHaveBeenCalled()
+    expect(h.prepareRuntime).toHaveBeenCalledOnce()
     exit.resolve()
     expect(await pending).toMatchObject({ success: false, error: 'Запуск отменён' })
     expect(h.rollbackEarlyAdapterLockdown).toHaveBeenCalledOnce()
@@ -269,7 +332,7 @@ describe('Direct VPN preparation overlap', () => {
     h.cancel()
     dns.resolve([])
     expect(await pending).toMatchObject({ success: false, warning: expect.stringContaining('protection retained') })
-    expect(h.prepareRuntime).not.toHaveBeenCalled()
+    expect(h.prepareRuntime).toHaveBeenCalledOnce()
     expect(h.rollbackEarlyAdapterLockdown).not.toHaveBeenCalled()
   })
 

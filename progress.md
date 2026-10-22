@@ -8154,3 +8154,20 @@ PR122 окончательно проверен: Qodo1607729 completed/no findin
 GetExitCodeProcess исключает только доказанно завершённых кандидатов после false image read; startup strict, полный scan, права, deadlines и OpenProcess fallback сохранены. Repro14red/1log-red; focused104/104,612мс; driver39/39,1051.8362мс; readonly2/2,3.30с (presence CIM0comparisons/4unknown); контролируемая snapshot/exit гонка false28.846мс,1snapshot. Typecheck/coverage PASS. Полныйsuite выполняется,source frozen.
 
 Окончательный локальный DoD этапа47: npm.cmd test -- --reporter=dot —6049passed/5existing skipped,323passed/2skipped suites,385.96с,exit0 (.tmp/native-exit-status-full.log). Source заморожен с начала suite. Повторный npm.cmd run typecheck —exit0,165IPC/0public any; python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py —AC927/927,F210/210,exit0; git diff --check —exit0. Focused104/104,driver39/39,readonly2/2 и границыCIM записаны выше. Commit/PR после этого результата; новый hosted effect ещё не измерен.
+
+
+Первый real PR124 run39854606174 на5d4b4e67453dace777e5c1c7c69cd71a8cf37451:8/8PASS,IP/settings/cleanup/debug exit73/signalnull,658/658progress; действия11573/1779/1705/2369/4995/8445/4991/320мс,сумма36177мс. Native runtime fallback0,successful129/6/7/6/5/12/6/7/5/9/6мс; notify2/2/2/2мс,registry68/69/81/79мс. Connect cancel ack/settled1134/1134мс,switch5/7642мс. Qodo1608129 на точномhead completed/no findings. CI39854585574 ещё выполняется,PR124 не слит. Нулевой fallback в одном sample не доказывает стабильное ускорение; тот же неизменныйHEAD отправлен на второй hosted-прогон для проверки повторяемости.
+
+### 2026-10-23 — этап48: runtime ACL timing evidence
+
+Существующее inspection timing допущено в real report только с durationMs и transport worker/standalone; ACL policy и runtime не менялись. Red1; driver40/40,1138.0559мс; typecheck/traceability/diffcheck PASS. Полныйsuite выполняется. Prototype16своихобъектов: одинаковый ACL JSON,медианыGet-Acl37.6032/.NET22.0952мс,это не whole-app gain; backend не менялся.
+
+
+### 2026-10-23 — этап49: цель15с и overlap холодного runtime
+
+По уточнению владельца приоритет — секунды полного пользовательского сценария,цель≤15000мс покаНЕдостигнута. PR124 завершён:Qodo1608129 no findings,CI39854585574 SUCCESS/Win32-CIM4из4 безunknown;второй real39855582066:8/8PASS,678/678progress,сумма38589мс,ещёразfallback0,общегоускорениянет. Merge79a225d5cdfab0452719773152463f83dd12bce5.
+
+Первая правка критического пути запускает свежую ACL/staging sing-box параллельноDNS;alias/config всё ещё ждут полныйDNS иXray. Repro2red;focused84/84,4.94с до третьей регрессии;typecheck165IPC/0public any;driver40/40,833.6831мс;coverageAC927/927,F210/210. Полныйsuite выполняется. Бюджет15с не подменяется acknowledgement или отдельным ACL prototype. Этап48 отдельный полныйsuite завершён6049passed/5existing skipped,373.43с,exit0;в новыйsource49 этот результат не переносится. ЛокальныйVPN не переключался.
+
+
+Окончательная проверка этапа49: npx.cmd vitest run src/main/tunControllerPreparation.test.ts src/main/tunControllerStartup.test.ts src/main/tunControllerRecoverySource.test.ts src/main/lifecycleCleanup.test.ts src/main/serverPickerSwitch.test.ts --reporter=dot —329/329,5файлов,57.65с,exit0. npm.cmd test -- --reporter=dot —6052passed/5existing skipped,323passed/2skipped suites,430.14с,exit0 (.tmp/cold-dns-preparation-full.log). Исходный код не менялся с начала полного прогона. Повторный npm.cmd run typecheck —exit0,165IPC/0public any; npm.cmd run test:real-vpn:unit —40/40,833.6831мс; python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py —AC927/927,F210/210,exit0; git diff --check —exit0. Новый hosted эффект ещё не измерен, цель15000мс пока не достигнута.
