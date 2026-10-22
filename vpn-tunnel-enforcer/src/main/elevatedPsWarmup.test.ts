@@ -40,6 +40,9 @@ describe('same helper fixed read-only warm-up', () => {
     expect(h.commands[0].script).toContain('NetFirewallProfile.cmdletDefinition.cdxml')
     expect(h.commands[0].script).toContain('NetFirewallRule.cmdletDefinition.cdxml')
     expect(h.commands[0].script).toContain('Update-TypeData')
+    // Preparing definitions is enough; foreground policy checks take their own fresh snapshot.
+    expect(h.commands[0].script).toContain('Get-Command Get-NetFirewallProfile -ListImported -ErrorAction Stop')
+    expect(h.commands[0].script).not.toMatch(/^Get-NetFirewallProfile\s/m)
     expect(h.commands[0].script).toMatch(/catch\s*\{\s*Import-Module NetSecurity -ErrorAction Stop/)
     expect(h.commands.map((command: {module: string}) => command.module)).toEqual(['NetSecurity', 'Network'])
     expect(h.execElevatedPs).toHaveBeenNthCalledWith(2, h.commands[1].script, 15000, 'physical-adapter-lockdown')
