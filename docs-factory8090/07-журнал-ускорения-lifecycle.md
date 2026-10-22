@@ -1241,3 +1241,30 @@ Read-only исследование следующего кандидата (.tmp
 
 
 Окончательный локальный DoD исправления Qodo PR121: npm.cmd test -- --reporter=dot — **6024 passed / 5 existing skipped**, 323 passed / 2 skipped suites, **374.94 с**, exit 0 (.tmp/native-baseline-notify-review-full.log). Typecheck exit0,165IPC/0public any; final focused97passed/1existing skipped,9.11с; driver36/36,1234.3176мс; traceability AC927/927,F210/210; diffcheck exit0. Исправление и замер первого HEAD отправляются отдельным commit в существующий PR; окончательные remote gates ещё нужны.
+
+
+## Этап 45 — один свежий native rescan после исчезновения кандидата (22.10.2026)
+
+Поддержка AT-00-002/003, AT-02-001/002/005/009 и AT-03-007/012 в текущем WP-0. В двух предыдущих hosted-прогонах runtime presence честно перешёл на CIM пять и три раза с path-unavailable; это не доказывает одну причину всех отказов. Независимый локальный read-only prototype воспроизвёл конкретную гонку: создан реальный ToolHelp snapshot своего безвредного Node child, затем child завершён до чтения snapshot. Старый reader unknown/path-unavailable16.596мс, QueryFullProcessImageNameW error31 при GetExitCodeProcess exit1; следующий полный свежий scan false9.279мс. Сеть и работающий VPN на ПК не менялись.
+
+Теперь только boolean presence/absence при внутреннем typed path-unavailable делает **один** новый полный scan с новым ToolHelp snapshot и закрытием всех прежних handles до его начала. Второй unreadable path, неполная enumeration, повреждённая image length, произвольная exception и failed handle closure не превращаются в false. Startup PID по-прежнему требует ровно один точный executable без rescan. Имена, строгая граница runtimeDir, complete enumeration, ownership и public IPC/native protocol не менялись. Caller-local250мс и общий5000мс бюджет, CIM fallback и stop ordering остаются прежними; новый scan выполняется внутри прежнего native вызова. Нормативные документы не менялись.
+
+Регрессии нового поведения на старом коде: npx.cmd vitest run src/main/native/ownedRuntimePidCore.test.ts -t 'fresh complete observation|fresh rescan incomplete' --reporter=dot — **3failed/44not selected**,308мс,exit1 (.tmp/native-runtime-rescan-red.log). После исправления native PID/state/host/caller/exit tests — **120/120**,6файлов,4.21с,exit0 (.tmp/native-runtime-rescan-focused.log). Проверяются исчезновение во время OpenProcess/image, свежие empty/owned/foreign состояния, второй incomplete scan, bounded retry при постоянно unreadable path, закрытие handles до нового snapshot, отсутствие retry при malformed/generic/close errors, strict startup PID. Тот же реальный контролируемый prototype теперь false42.008мс вместо unknown, с native error31/exit1 всё ещё подтверждёнными (.tmp/runtime-exited-rescan-result.log).
+
+Read-only integration: npx.cmd vitest run --mode integration src/main/native/ownedRuntimeStateCore.itest.ts src/main/native/ownedRuntimePidCore.itest.ts --reporter=dot —2/2,3.52с,exit0. PID native16.7341мс/CIM541.4432мс совпали. Presence native38.6540/13.9778/10.4801/10.6120мс; CIM665.9575/548.2572/555.3699/526.3199мс вернул unknown во всех четырёх наблюдениях из-за другого elevated runtime — **0 сравнений**, это не доказательство эквивалентности. Обязательный CI по-прежнему требует4/4 без unknown. Typecheck exit0,165IPC/0public any; traceability AC927/927,F210/210; diffcheck exit0. Полный suite запущен на замороженном source; окончательный итог, review и новый hosted-замер ещё нужны.
+
+Окончательный Qodo1607476 PR121 на41beb4148455e454d57b5e0ebe9ac6180830eef9 completed: timeout finding implemented, новых нет. Remote CI39846666724 и real39846701135 пока выполняются; PR121 до их проверки не слит. Этап45 остаётся dependent-веткой без commit/PR до этого gate.
+
+
+Окончательный real PR121 run39846701135 на41beb41:8/8PASS,IP/settings/cleanup/debug exit,675/675progress; сумма39955мс, notify11/5/5/2мс, fallback WinINet0, registry122/114/112/118мс. Runtime path fallback5. Полная таблица в документации стенда. Qodo1607476 completed/implemented/no new findings; finalCI39846666724 ещё выполняется, mergepending. Стабильный выигрыш относится к notify, не к полному сценарию.
+
+
+Первый CI39846666724 окончательного41beb41 FAIL:6024passed/4skipped/1failed,405.21с; единственный отказ runtimeAclPolicy.test.ts:102, reports a refused boundary as a receipt line... достиг default Vitest5000мс при запуске реального PowerShell. Этот файл в PR121 не менялся. Это не зелёный gate; failed job повторена на неизменном SHA. При повторном отказе потребуется отдельное воспроизведение/исправление; причина первого таймаута пока не установлена.
+
+
+Окончательный локальный DoD этапа45: npm.cmd test -- --reporter=dot — **6030passed/5existing skipped**,323passed/2skipped suites,**373.66с**,exit0 (.tmp/native-runtime-rescan-full.log). Typecheck exit0,165IPC/0public any; focused120/120,4.21с; read-only integration2/2,3.52с с0presence CIM comparisons как отмечено выше. Driver36/36,749.0904мс,exit0; traceability AC927/927,F210/210; git diff --check exit0. Source заморожен с начала полного прогона. Commit/PR ожидает финального CI родительскогоPR121.
+
+Уточнение следующего поиска: tun-interface-metric-readback выполняется через void runPowerShell и является background diagnostic (tunController.ts). Его наблюдаемые937–1129мс нельзя автоматически считать foreground задержкой. Для foreground важны фактические adapter-lockdown-await и firewall-kill-switch-await; их зависимость от фонового чтения пока не измерена. Изменений этого пути нет.
+
+
+Повтор CI39846666724 attempt2 на41beb41 завершился SUCCESS Windows/site/Rust, включая Electron/WFP/native host. Runtime Win32/CIM4/4,cimUnknown0: native11.5606/4.6124/4.4079/5.9938мс,CIM512.6578/508.0805/511.4163/495.0896мс. Первый ACL timeout5000мс не повторился; причина не установлена. Отдельный npx.cmd vitest run src/main/runtimeAclPolicy.test.ts --reporter=dot —28/28,586мс,exit0; source ACL не менялся. PR121 слит 2026-10-22T20:31:56Z,merge b8e3ab6a52adda40879d721389cae72f913686aa. Dependent-ветка fast-forward, tree идентичен41beb41; проверенный source этапа45 не изменился.
