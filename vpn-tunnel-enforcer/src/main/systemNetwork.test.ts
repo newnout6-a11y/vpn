@@ -9,7 +9,8 @@ const state = vi.hoisted(() => ({
   manifest: null as any, failRead: false, failWrite: false, failApply: false,
   failNetsh: false, failNotify: false, failedSteps: [] as number[], scripts: [] as string[],
   writes: [] as any[], operations: [] as string[], nativeFailure: false, reportPatch: null as any, logDirectory: '',
-  processError: null as unknown, removeError: null as unknown, stepCategory: 'internal'
+  processError: null as unknown, removeError: null as unknown, stepCategory: 'internal',
+  restoreEffect: null as (() => void) | null, processTimeouts: [] as number[]
 }))
 vi.mock('electron', () => ({ app: { getPath: () => state.logDirectory }, shell: { openPath: vi.fn() } }))
 const fixture = () => ({
@@ -39,11 +40,12 @@ function response(command: string) {
     return { stdout: 'BASELINE_APPLIED', stderr: '' }
   }
   if (script.includes('steps=@($results)')) {
+    state.restoreEffect?.()
     const valuesPayload = /\$values = .*FromBase64String\('([^']+)'\)/.exec(script)?.[1]
     if (!valuesPayload) throw new Error('Baseline rollback fixture: missing encoded values payload')
     return {
       stdout: JSON.stringify({ steps: JSON.parse(Buffer.from(valuesPayload, 'base64').toString('utf8')).map((s: any, i: number) => ({ name: `${s.target}/${s.name}`, success: !state.failedSteps.includes(i), error: state.failedSteps.includes(i) ? unsafeDiagnostic : null, ...(state.failedSteps.includes(i) ? { category: state.stepCategory } : {}) })),
-        notification: { success: !state.failNotify, error: state.failNotify ? unsafeDiagnostic : null, ...(state.failNotify ? { category: 'internal' } : {}) }, timings: { registryMs: 1, notifyMs: 2 }, ...state.reportPatch }), stderr: ''
+        timings: { registryMs: 1 }, ...state.reportPatch }), stderr: ''
     }
   }
   if (script.includes('InternetSetOption') && state.failNotify) throw new Error('notification failed')
@@ -53,6 +55,7 @@ vi.mock('./admin', () => ({ execElevated: vi.fn(async (command: string) => respo
 vi.mock('child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('child_process')>()
   const execFile = (file: string, args: string[], _options: unknown, callback: Function) => {
+    state.processTimeouts.push((_options as { timeout: number }).timeout)
     const command = `${file} ${args.join(' ')}`
     try { const result = response(command); callback(null, { stdout: result.stdout, stderr: result.stderr }) }
     catch (error) { callback(error) }
@@ -60,13 +63,16 @@ vi.mock('child_process', async importOriginal => {
   return { ...actual, execFile, default: { ...actual, execFile } }
 })
 // AT-03-003 / AT-03-007: native WinINet notification is mocked; default is "koffi unavailable" so the PS fallback stays covered.
-const native = vi.hoisted(() => ({ mode: 'unavailable' as 'unavailable' | 'ok' | 'false', calls: 0 }))
+const native = vi.hoisted(() => ({ mode: 'unavailable' as 'unavailable' | 'ok' | 'false', calls: 0,
+  effect: null as (() => Promise<void>) | null }))
 vi.mock('./native/winInet', () => {
   class WinInetCallError extends Error {}
   return {
     WinInetCallError,
     notifyWinInetSettingsChangedNative: async () => {
       native.calls++
+      state.operations.push('native-notify')
+      if (native.effect) await native.effect()
       if (native.mode === 'unavailable') throw new Error('koffi load failed')
       if (native.mode === 'false') throw new WinInetCallError('WinINet refresh failed')
     }
@@ -93,12 +99,115 @@ beforeEach(() => {
   state.manifest = null; state.failRead = false; state.failWrite = false; state.failApply = false
   state.failNetsh = false; state.failNotify = false; state.failedSteps = []; state.scripts = []; state.writes = []; state.operations = []
   state.nativeFailure = false; state.reportPatch = null
-  state.processError = null; state.removeError = null; state.stepCategory = 'internal'
-  native.mode = 'unavailable'; native.calls = 0
+  state.processError = null; state.removeError = null; state.stepCategory = 'internal'; state.restoreEffect = null; state.processTimeouts = []
+  native.mode = 'unavailable'; native.calls = 0; native.effect = null
   Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
 })
-afterEach(() => Object.defineProperty(process, 'platform', platform))
+afterEach(() => { Object.defineProperty(process, 'platform', platform); vi.useRealTimers() })
 describe('trusted typed network baseline', () => {
+  it('rollback native notification waits after registry proof and before clearing the manifest', async () => {
+    state.manifest = fixture(); native.mode = 'ok'
+    let release!: () => void
+    native.effect = () => new Promise<void>(resolve => { release = resolve })
+    const settled = vi.fn()
+    const pending = rollbackTunNetworkBaseline().then(result => { settled(result); return result })
+    await vi.waitFor(() => expect(native.calls).toBe(1))
+    const queuedDone = vi.fn()
+    const queued = rollbackTunNetworkBaseline().then(result => { queuedDone(result); return result })
+    expect(state.scripts).toHaveLength(1)
+    expect(state.scripts[0]).toContain('Registry read-back mismatch')
+    expect(state.scripts[0]).not.toContain('InternetSetOption')
+    expect(state.manifest).not.toBeNull()
+    expect(settled).not.toHaveBeenCalled()
+    expect(queuedDone).not.toHaveBeenCalled()
+    release()
+    expect((await pending).success).toBe(true)
+    expect(await queued).toMatchObject({ success: true, skipped: true })
+    expect(state.operations).toEqual(['ps', 'native-notify', 'clear'])
+  })
+  it('rollback native false retains all verified steps without retrying notification in PowerShell', async () => {
+    state.manifest = fixture(); native.mode = 'false'
+    // A stale/forged notification field in a registry receipt is not notification proof.
+    state.reportPatch = { notification: { success: true, error: null } }
+    const result = await rollbackTunNetworkBaseline()
+    expect(result).toMatchObject({ success: false, error: ipcError('internal'),
+      restoredSteps: fixture().values.map(s => `${s.target}/${s.name}`) })
+    expect(state.manifest).not.toBeNull()
+    expect(native.calls).toBe(1)
+    expect(state.scripts).toHaveLength(1)
+    expect(state.scripts[0]).not.toContain('InternetSetOption')
+    expect(JSON.stringify(result)).not.toContain('WinINet refresh failed')
+  })
+  it.each([false, true])('rollback native unavailability uses one standalone notification fallback (failure %s)', async fail => {
+    state.manifest = fixture(); state.failNotify = fail
+    const result = await rollbackTunNetworkBaseline()
+    expect(result.success).toBe(!fail)
+    expect(result.restoredSteps).toHaveLength(9)
+    expect(native.calls).toBe(1)
+    expect(state.scripts).toHaveLength(2)
+    expect(state.scripts.filter(script => script.includes('foreach ($s in $values)'))).toHaveLength(1)
+    expect(state.scripts[0]).not.toContain('InternetSetOption')
+    expect(state.scripts[1]).toContain('Send-WinInetSettingsChanged')
+    expect(state.manifest === null).toBe(!fail)
+  })
+  it('rollback native notification still follows a partial registry restore and preserves the manifest', async () => {
+    state.manifest = fixture(); state.failedSteps = [3]; native.mode = 'ok'
+    const result = await rollbackTunNetworkBaseline()
+    expect(result.success).toBe(false)
+    expect(result.restoredSteps).toHaveLength(8)
+    expect(native.calls).toBe(1)
+    expect(state.manifest).not.toBeNull()
+    expect(vi.mocked(logEvent).mock.calls.filter(call => call[2] === 'baseline rollback step')).toHaveLength(9)
+  })
+  it('rollback native notification shares the original 30-second script budget and cannot start a late fallback', async () => {
+    vi.useFakeTimers({ toFake: ['performance', 'setTimeout', 'clearTimeout'] })
+    state.manifest = fixture(); native.mode = 'ok'
+    state.restoreEffect = () => vi.advanceTimersByTime(29000)
+    native.effect = () => new Promise<void>(() => {})
+    const settled = vi.fn()
+    const pending = rollbackTunNetworkBaseline().then(result => { settled(result); return result })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(native.calls).toBe(1)
+    await vi.advanceTimersByTimeAsync(999)
+    expect(settled).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(settled).toHaveBeenCalledOnce()
+    expect(await pending).toMatchObject({ success: false, error: ipcError('timeout'),
+      restoredSteps: fixture().values.map(s => `${s.target}/${s.name}`) })
+    expect(state.manifest).not.toBeNull()
+    expect(state.scripts).toHaveLength(1)
+  })
+  it('rollback notification fallback receives only the time remaining after the registry restore', async () => {
+    vi.useFakeTimers({ toFake: ['performance', 'setTimeout', 'clearTimeout'] })
+    state.manifest = fixture()
+    state.restoreEffect = () => vi.advanceTimersByTime(29000)
+    expect((await rollbackTunNetworkBaseline()).success).toBe(true)
+    expect(state.processTimeouts).toHaveLength(1)
+    expect(state.processTimeouts[0]).toBeGreaterThan(0)
+    expect(state.processTimeouts[0]).toBeLessThanOrEqual(1000)
+    expect(state.scripts).toHaveLength(2)
+  })
+  it.each(['missing', 'invalid', 'duplicate'] as const)('does not hide notification timeout behind %s baseline records (AT-00-004, AT-03-003c)', async kind => {
+    vi.useFakeTimers({ toFake: ['performance', 'setTimeout', 'clearTimeout'] })
+    const original = fixture()
+    state.manifest = structuredClone(original); native.mode = 'ok'
+    if (kind === 'missing') state.manifest.values.splice(0, 4)
+    if (kind === 'invalid') for (let i = 0; i < 4; i++) state.manifest.values[i].exists = 'false'
+    if (kind === 'duplicate') state.manifest.values[0] = { ...state.manifest.values[1] }
+    state.restoreEffect = () => vi.advanceTimersByTime(29000)
+    let release!: () => void
+    native.effect = () => new Promise<void>(resolve => { release = resolve })
+    const pending = rollbackTunNetworkBaseline()
+    await vi.advanceTimersByTimeAsync(1000)
+    const result = await pending
+    expect(result).toMatchObject({ success: false, error: ipcError('timeout'),
+      restoredSteps: original.values.slice(kind === 'duplicate' ? 2 : 4).map(s => `${s.target}/${s.name}`) })
+    expect(result.warnings).toContain(`WinINet: ${ipcError('timeout').message}`)
+    release(); await vi.advanceTimersByTimeAsync(0)
+    expect(state.manifest).not.toBeNull()
+    expect(state.operations).not.toContain('clear')
+    expect(state.scripts).toHaveLength(1)
+  })
   it.each(['missing', 'invalid', 'duplicate'] as const)('restores valid baseline records after %s records, retaining the journal (AT-03-003c)', async kind => {
     const original = fixture()
     state.manifest = structuredClone(original)
@@ -107,6 +216,7 @@ describe('trusted typed network baseline', () => {
     if (kind === 'duplicate') state.manifest.values[0] = { ...state.manifest.values[1] }
     const result = await rollbackTunNetworkBaseline()
     expect(result.success).toBe(false)
+    expect(result.error).toEqual(ipcError('validation'))
     expect(result.warnings?.length).toBeGreaterThan(0)
     expect(state.manifest).not.toBeNull()
     expect(state.operations).not.toContain('clear')
@@ -190,23 +300,23 @@ describe('trusted typed network baseline', () => {
     expect(await rollbackTunNetworkBaselineOrThrow('retry')).toMatchObject({ success: true })
     expect(state.manifest).toBeNull()
   })
-  it('restores all values and notifies WinINet in one native process', async () => {
-    state.manifest = fixture()
+  it('restores all values and uses the existing native host for WinINet notification', async () => {
+    state.manifest = fixture(); native.mode = 'ok'
     expect((await rollbackTunNetworkBaseline()).success).toBe(true)
     expect(state.scripts).toHaveLength(1)
-    expect(state.scripts[0]).toContain('try { Send-WinInetSettingsChanged }')
-    expect(state.operations).toEqual(['ps', 'clear'])
+    expect(state.scripts[0]).not.toContain('InternetSetOption')
+    expect(state.operations).toEqual(['ps', 'native-notify', 'clear'])
   })
   it.each([
-    { notification: undefined }, { notification: { success: true, error: 'unverified' } },
-    { notification: { success: false, error: null } }, { timings: undefined },
-    { timings: { registryMs: -1, notifyMs: 0 } }, { timings: { registryMs: 1, notifyMs: '0' } },
+    { timings: undefined }, { timings: null }, { timings: {} },
+    { timings: { registryMs: -1 } }, { timings: { registryMs: '0' } }, { timings: { registryMs: 0.5 } },
     { steps: [] }, { steps: fixture().values.map(s => ({ name: `${s.target}/${s.name}`, success: 'true', error: null })) }
-  ])('retains journal on malformed combined recovery report: %j', patch => {
+  ])('retains journal without notification on malformed registry recovery report: %j', patch => {
     state.manifest = fixture(); state.reportPatch = patch
     return rollbackTunNetworkBaseline().then(result => {
       expect(result.success).toBe(false)
       expect(state.manifest).not.toBeNull()
+      expect(native.calls).toBe(0)
     })
   })
   it.skipIf(process.platform !== 'win32')('native restore/read-back handles all registry types in an isolated test subtree', async () => {
@@ -267,18 +377,6 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
     expect(logEvent).toHaveBeenCalledWith('error', 'system-network', 'PowerShell failed', expect.objectContaining({ diagnostic: 'Baseline user identity mismatch', code: 1 }))
     expect(state.manifest).not.toBeNull()
   })
-  it.skipIf(process.platform !== 'win32')('native notification failure preserves the nine independent step results', async () => {
-    state.manifest = fixture(); await rollbackTunNetworkBaseline()
-    const report = state.scripts[0].slice(state.scripts[0].indexOf('$values ='))
-    const script = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';function Restore-Snapshot($s) {};function Send-WinInetSettingsChanged {throw 'injected notification failure'};${report}`
-    const stdout = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true, timeout: 10000 })
-    const result = JSON.parse(stdout.trim())
-    expect(result.steps).toHaveLength(9)
-    expect(result.steps.every((s: any) => s.success)).toBe(true)
-    expect(result.notification).toEqual({ success: false, error: 'injected notification failure', category: 'internal' })
-    expect(result.timings.registryMs).toBeGreaterThanOrEqual(0)
-    expect(result.timings.notifyMs).toBeGreaterThanOrEqual(0)
-  })
   it('uses canonical trusted storage rather than AppData or arbitrary reg files', () => {
     expect(getTunNetworkBaselineManifestPath()).toBe('C:\\ProgramData\\VPNTE\\manifests\\latest-tun-network-baseline.json')
     expect(validateNetworkBackupManifest(fixture()).values).toHaveLength(9)
@@ -324,16 +422,16 @@ finally { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($testRoot,$fa
     state.manifest = null; state.failNotify = true
     expect((await applyTunNetworkBaseline()).success).toBe(false)
   })
-  it('apply treats a native WinINet false as authoritative: no PowerShell retry, baseline rolled back', async () => {
+  it('apply and compensating rollback treat native WinINet false as authoritative and retain the journal', async () => {
     native.mode = 'false'
     const result = await applyTunNetworkBaseline()
     expect(result.success).toBe(false)
     expect(result.error).toEqual(ipcError('internal'))
     expect(result.details).toContain(ipcError('internal').message)
     expect(JSON.stringify(result)).not.toContain('WinINet refresh failed')
-    // Only the (separate) combined rollback script embeds InternetSetOption; no standalone notify script ran.
-    expect(state.scripts.filter(script => script.includes('InternetSetOption') && !script.includes('steps=@($results)'))).toHaveLength(0)
-    expect(state.manifest).toBeNull()
+    expect(state.scripts.filter(script => script.includes('InternetSetOption'))).toHaveLength(0)
+    expect(native.calls).toBe(2)
+    expect(state.manifest).not.toBeNull()
   })
   it('does not claim successful apply on WinHTTP reset failure', async () => {
     state.failNetsh = true

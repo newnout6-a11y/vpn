@@ -168,16 +168,29 @@ if (-not $type::InternetSetOption([IntPtr]::Zero,39,[IntPtr]::Zero,0)) { throw '
 if (-not $type::InternetSetOption([IntPtr]::Zero,37,[IntPtr]::Zero,0)) { throw 'WinINet refresh failed' }
 }
 `
-async function notifyWinInetSettingsChanged() {
+async function notifyWinInetSettingsChanged(operationId?: string, deadline = Infinity) {
+  const requireTime = () => { if (performance.now() >= deadline) throw new IpcFault('timeout') }
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    await notifyWinInetSettingsChangedNative()
+    requireTime()
+    const pending = notifyWinInetSettingsChangedNative()
+    if (Number.isFinite(deadline)) {
+      await Promise.race([pending, new Promise<void>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new IpcFault('timeout')), Math.max(0, Math.floor(deadline - performance.now())))
+      })])
+    } else await pending
+    requireTime()
     return
   } catch (error) {
     // A real WinINet failure is authoritative. Only an unusable native binding falls back (fail closed).
     if (error instanceof WinInetCallError) throw error
-    logEvent('warn', 'system-network', 'native WinINet notification unavailable; falling back to PowerShell', { error: String(error) })
-  }
-  await ps(`${WININET_NOTIFY_FUNCTION}\nSend-WinInetSettingsChanged`, false, 10000)
+    requireTime()
+    logEvent('warn', 'system-network', 'native WinINet notification unavailable; falling back to PowerShell', { error: String(error), operationId })
+  } finally { clearTimeout(timer) }
+  const timeout = Math.min(10000, Math.floor(deadline - performance.now()))
+  if (timeout <= 0) throw new IpcFault('timeout')
+  await ps(`${WININET_NOTIFY_FUNCTION}\nSend-WinInetSettingsChanged`, false, timeout, operationId)
+  requireTime()
 }
 
 export function applyTunNetworkBaseline(): Promise<SystemNetworkResult> { return withBaselineOpLock(applyUnlocked) }
@@ -232,8 +245,8 @@ async function rollbackUnlocked(reason = 'manual', operationId: string = `baseli
       return { success: false, error: ipcError('validation'), operationId, message: 'Нет валидных шагов baseline; снимок сохранён', warnings, restoredSteps: [] }
     }
     const hasRejectedRecords = warnings.length > 0
+    const recoveryDeadline = performance.now() + 30000
     const { stdout } = await ps(`${REGISTRY_HELPERS}
-${WININET_NOTIFY_FUNCTION}
 if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '${manifest.userSid}') { throw 'Baseline user identity mismatch' }
 # ConvertFrom-Json emits the decoded array as one pipeline object in Windows
 # PowerShell 5.1. An extra @() would nest it and collapse nine steps into one.
@@ -252,34 +265,36 @@ foreach ($s in $values) {
   catch { $results += [pscustomobject]@{name=($s.target+'/'+$s.name);success=$false;error=[string]$_;category=(Get-RecoveryErrorCategory $_)} }
 }
 $registryMs = $watch.ElapsedMilliseconds
-$watch.Restart()
-$notification = [pscustomobject]@{success=$true;error=$null}
-try { Send-WinInetSettingsChanged }
-catch { $notification = [pscustomobject]@{success=$false;error=[string]$_;category=(Get-RecoveryErrorCategory $_)} }
 $watch.Stop()
-[pscustomobject]@{steps=@($results);notification=$notification;timings=@{registryMs=$registryMs;notifyMs=$watch.ElapsedMilliseconds}} | ConvertTo-Json -Depth 6 -Compress`, true, 30000, operationId)
+[pscustomobject]@{steps=@($results);timings=@{registryMs=$registryMs}} | ConvertTo-Json -Depth 6 -Compress`, true, 30000, operationId)
     const report = JSON.parse(String(stdout).trim()) as {
       steps: Array<{ name: string; success: boolean; error: string | null; category?: IpcErrorCategory }>
-      notification: { success: boolean; error: string | null; category?: IpcErrorCategory }
-      timings: { registryMs: number; notifyMs: number }
+      timings: { registryMs: number }
     }
     const validOutcome = (s: { success: boolean; error: string | null; category?: IpcErrorCategory }) => s && typeof s.success === 'boolean' && (s.success ? s.error === null : typeof s.error === 'string' && (s.category === 'permission' || s.category === 'internal'))
     const steps = report?.steps
     if (!Array.isArray(steps) || steps.length !== manifest.values.length || steps.some((s, i) => !validOutcome(s) || s.name !== `${manifest.values[i].target}/${manifest.values[i].name}`) ||
-        !validOutcome(report.notification) || !report.timings || [report.timings.registryMs, report.timings.notifyMs].some(ms => !Number.isSafeInteger(ms) || ms < 0)) throw new Error('Invalid baseline recovery report')
-    for (const [phase, durationMs] of Object.entries(report.timings)) logEvent('debug', 'system-network', 'baseline native phase timing', { operationId, phase, durationMs })
+        !report.timings || !Number.isSafeInteger(report.timings.registryMs) || report.timings.registryMs < 0) throw new Error('Invalid baseline recovery report')
+    logEvent('debug', 'system-network', 'baseline native phase timing', { operationId, phase: 'registryMs', durationMs: report.timings.registryMs })
     restoredSteps = steps.filter(step => step.success).map(step => step.name)
+    // Keep the operation lock and durable journal until notification also settles.
+    // A real WinINet false is authoritative; only unavailable bindings use the existing fallback.
+    let notification: { success: boolean; error: string | null; category?: IpcErrorCategory } = { success: true, error: null }
+    const notifyStarted = performance.now()
+    try { await notifyWinInetSettingsChanged(operationId, recoveryDeadline) }
+    catch (error) { notification = { success: false, error: String(error), category: classifyRecoveryError(error) } }
+    logEvent('debug', 'system-network', 'baseline native phase timing', { operationId, phase: 'notifyMs', durationMs: Math.round(performance.now() - notifyStarted) })
     for (const step of steps) {
       logEvent(step.success ? 'info' : 'error', 'system-network', 'baseline rollback step', { ...step, operationId })
       if (!step.success) warnings.push(`${step.name}: ${ipcError(step.category!).message}`)
     }
-    logEvent(report.notification.success ? 'info' : 'error', 'system-network', 'baseline rollback notification', { ...report.notification, operationId })
-    if (!report.notification.success) warnings.push(`WinINet: ${ipcError(report.notification.category!).message}`)
+    logEvent(notification.success ? 'info' : 'error', 'system-network', 'baseline rollback notification', { ...notification, operationId })
+    if (!notification.success) warnings.push(`WinINet: ${ipcError(notification.category!).message}`)
     if (warnings.length) {
       logEvent('error', 'system-network', 'baseline rollback completed', { operationId, success: false, warnings })
-      const category = steps.some(s => !s.success && s.category === 'permission') || report.notification.category === 'permission' ? 'permission'
-        : hasRejectedRecords ? 'validation' : 'internal'
-      const message = `Baseline восстановлен частично: ${restoredSteps.length} из 9 записей; снимок сохранён.${report.notification.success ? '' : ' Уведомление Windows не подтверждено.'}`
+      const category = steps.some(s => !s.success && s.category === 'permission') || notification.category === 'permission' ? 'permission'
+        : notification.category === 'timeout' ? 'timeout' : hasRejectedRecords ? 'validation' : notification.category ?? 'internal'
+      const message = `Baseline восстановлен частично: ${restoredSteps.length} из 9 записей; снимок сохранён.${notification.success ? '' : ' Уведомление Windows не подтверждено.'}`
       return { success: false, error: ipcError(category), operationId, message, restoredSteps, warnings, details: warnings.join(' | ') }
     }
     await removeRecoveryManifest(BASELINE_NAME)

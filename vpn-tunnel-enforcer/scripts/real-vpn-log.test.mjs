@@ -159,6 +159,13 @@ test('native runtime fallback diagnostics publish fixed categories without priva
   }
 })
 
+test('WinINet fallback publishes its fixed event without the private native error', () => {
+  const event = { ts: '2026-10-22T08:00:00.000Z', scope: 'system-network',
+    message: 'native WinINet notification unavailable; falling back to PowerShell',
+    details: { error: 'FAKE-PRIVATE-PAYLOAD C:\\private\\library.node', operationId: 'private' } }
+  assert.deepEqual(safeAppEvent(event), { at: event.ts, scope: event.scope, message: event.message })
+})
+
 test('concurrent connect/cancel calls retain separate IDs and elapsed time', async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
   await mkdir(temp, { recursive: true })

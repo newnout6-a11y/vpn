@@ -92,7 +92,8 @@ export function safeAppEvent(event) {
           'physical adapter set changed; lockdown coverage is not verified'],
         'ps-helper': ['command timing'], 'firewall-killswitch': ['command timing', 'phase timing', 'native phase timing'],
         'ip-monitor': ['protected transition IP baseline refreshed', 'protected transition IP baseline not checked'],
-        'system-network': ['baseline native phase timing'] })[event.scope]?.includes?.(event.message)
+        'system-network': ['baseline native phase timing',
+          'native WinINet notification unavailable; falling back to PowerShell'] })[event.scope]?.includes?.(event.message)
   if (!allowed || !Number.isFinite(Date.parse(event.ts))) return null
   const result = { at: event.ts, scope: event.scope, message: event.message }
   for (const key of ['ms', 'totalMs', 'durationMs', 'elapsedMs', 'roundtripMs', 'executionMs', 'transportOverheadMs', 'persistMs', 'adapters']) {
