@@ -200,6 +200,16 @@ test('path labels require the exact producer message and fallback event (AT-00-0
   }
 })
 
+test('unknown native exit status publishes only a fixed state, preserving path failure labels (AT-00-005, AT-01-002)', () => {
+  const base = { ts: '2026-10-22T08:00:00.000Z', scope: 'tun', message: 'native runtime status unavailable, using PowerShell' }
+  for (const state of ['active', 'unavailable', 'invalid', 'FAKE-PRIVATE-PAYLOAD']) {
+    const message = `runtime PID: executable path unavailable (QueryFullProcessImageNameW; win32=5; exit=${state})`
+    const result = safeAppEvent({ ...base, details: { error: { message, status: 'FAKE-PRIVATE-PAYLOAD' } } })
+    assert.deepEqual(result, { at: base.ts, scope: base.scope, message: base.message, errorKind: 'runtime-path-unavailable',
+      ...(state === 'FAKE-PRIVATE-PAYLOAD' ? {} : { runtimePathApi: 'QueryFullProcessImageNameW', runtimePathError: 'access-denied', runtimePathState: state }) })
+  }
+})
+
 test('concurrent connect/cancel calls retain separate IDs and elapsed time', async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
   await mkdir(temp, { recursive: true })

@@ -9,6 +9,7 @@ export interface ProcessReadApi {
   next(handle: Handle, entry: Buffer): boolean
   open(access: number, inherit: boolean, pid: number): Handle
   image(handle: Handle, flags: number, path: Buffer, length: number[]): boolean
+  exitCode(handle: Handle, status: number[]): boolean
   compare(a: string, alen: number, b: string, blen: number, ignoreCase: boolean): number
   close(handle: Handle): boolean
   error(): number
@@ -20,8 +21,8 @@ let cached: ProcessReadApi | undefined
 const runtimeNames = ['vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe']
 
 class RuntimePathUnavailableError extends Error {
-  constructor(api: 'OpenProcess' | 'QueryFullProcessImageNameW', code: number) {
-    super(`runtime PID: executable path unavailable (${api}; win32=${code})`)
+  constructor(api: 'OpenProcess' | 'QueryFullProcessImageNameW', code: number, state?: 'active' | 'unavailable' | 'invalid') {
+    super(`runtime PID: executable path unavailable (${api}; win32=${code}${state ? `; exit=${state}` : ''})`)
   }
 }
 
@@ -45,6 +46,7 @@ function getApi(): ProcessReadApi {
     next: kernel.func('bool __stdcall Process32NextW(intptr_t handle, _Inout_ uint8_t *entry)'),
     open: kernel.func('intptr_t __stdcall OpenProcess(uint32_t access, bool inherit, uint32_t pid)'),
     image: kernel.func('bool __stdcall QueryFullProcessImageNameW(intptr_t handle, uint32_t flags, _Out_ uint8_t *path, _Inout_ uint32_t *length)'),
+    exitCode: kernel.func('bool __stdcall GetExitCodeProcess(intptr_t handle, _Out_ uint32_t *status)'),
     compare: kernel.func('int32_t __stdcall CompareStringOrdinal(str16 a, int32_t alen, str16 b, int32_t blen, bool ignoreCase)'),
     close: kernel.func('bool __stdcall CloseHandle(intptr_t handle)'),
     error: kernel.func('uint32_t __stdcall GetLastError()')
@@ -83,13 +85,25 @@ function ownedProcesses(expected: string, directory: boolean, supplied?: Process
         if (invalidHandle(processHandle)) throw new RuntimePathUnavailableError('OpenProcess', api.error())
         try {
           const buffer = Buffer.alloc(PATH_CHARS * 2), length = [PATH_CHARS]
-          if (!api.image(processHandle, 0, buffer, length)) throw new RuntimePathUnavailableError('QueryFullProcessImageNameW', api.error())
-          if (!Number.isInteger(length[0]) || length[0] <= 0 || length[0] >= PATH_CHARS) {
-            throw new Error('runtime PID: executable path unavailable')
+          if (!api.image(processHandle, 0, buffer, length)) {
+            const code = api.error()
+            if (!directory) throw new RuntimePathUnavailableError('QueryFullProcessImageNameW', code)
+            // The image may be gone before the process object leaves ToolHelp.
+            // A successful exit-status read can exclude that terminated candidate;
+            // STILL_ACTIVE (259), failed or malformed reads remain unknown.
+            const status = [259], checked = api.exitCode(processHandle, status)
+            const state = !checked ? 'unavailable' :
+              !Number.isInteger(status[0]) || status[0] < 0 || status[0] > 0xffffffff ? 'invalid' :
+                status[0] === 259 ? 'active' : undefined
+            if (state) throw new RuntimePathUnavailableError('QueryFullProcessImageNameW', code, state)
+          } else {
+            if (!Number.isInteger(length[0]) || length[0] <= 0 || length[0] >= PATH_CHARS) {
+              throw new Error('runtime PID: executable path unavailable')
+            }
+            const path = buffer.toString('utf16le', 0, length[0] * 2)
+            if (path.includes('\0')) throw new Error('runtime PID: invalid executable path response')
+            if (equal(directory ? path.slice(0, expected.length) : path, expected)) owned.push(candidate)
           }
-          const path = buffer.toString('utf16le', 0, length[0] * 2)
-          if (path.includes('\0')) throw new Error('runtime PID: invalid executable path response')
-          if (equal(directory ? path.slice(0, expected.length) : path, expected)) owned.push(candidate)
         } finally { close(processHandle) }
       }
       more = api.next(snapshot, entry)

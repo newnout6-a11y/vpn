@@ -327,3 +327,23 @@ Read-only fixture окончательного CI39841792826: четыре об�
 Сумма43113мс, общего ускорения нет. WinINet notify3/3/2/3мс. Native runtime success136/10/13/7/8/14/10/10/11/8мс; path-unavailable fallback2, против5 в предыдущем sample. Connect cancellation acknowledgement/settled2955/2956мс; switch6/8687мс. Одного runner sample недостаточно для причинного вывода о полном elapsed. CI39849748956 SUCCESS, обязательный Win32/CIM4/4,cimUnknown0; Qodo1607729 completed/no findings на точном head; PR122 merge f48a916446559cd4dfa00b353e505e5e7fb6d31d.
 
 Следующая диагностическая правка публикует runtimePathApi (OpenProcess/QueryFullProcessImageNameW) и runtimePathError только как фиксированные labels. Win32-код читается до cleanup; неизвестный код выводится как other. Совпадение с точным producer форматом обязательно, сырые messages/коды/пути не публикуются. Safety/ownership/retry/deadline поведение не меняется.
+
+
+## Окончательный замер PR #123 — 22.10.2026 UTC
+
+[Run 39852360804](https://github.com/newnout6-a11y/vpn/actions/runs/39852360804), head a1b9300a985f92f0373dc8a941fcb96c626a9e94,win25-vs2026,cancel500мс,прежний SHA-256 настроек d092a2c90d947e77ad2e92ce39d4eb6842e24a6a8d9c8a22031d693676760c3d. Все8действий PASS; IP passed/isLeak=false; settingsUnchanged/cleanup/debugInstanceClosed PASS;0runtime/0TUN/adapterDown/0адресов,выход73/signalnull. Все668/668строк progress присутствуют в Actions stdout.
+
+| Действие | Исходный ce95391, мс | a1b9300, мс |
+| --- | ---: | ---: |
+| Подключение | 10030 | 9771 |
+| Отключение | 1942 | 1548 |
+| Подключение и отмена | 2148 | 1964 |
+| Повторное подключение | 2582 | 2413 |
+| Смена сервера | 4709 | 4381 |
+| Обратная смена и отмена с восстановлением | 8375 | 7552 |
+| Обратная смена | 6297 | 4804 |
+| Пинг | 317 | 318 |
+
+Сумма32751мс; одного быстрого hosted sample недостаточно для вывода об устойчивом ускорении, а diagnostic-only правка его не объясняет. Notify2/2/2/2мс,registry70/75/127/95мс; native runtime success115/6/6/10/4/15/7/9/10мс. Native fallback2: QueryFullProcessImageNameW/access-denied и OpenProcess/invalid-parameter. Connect cancel ack/settled1401/1402мс,switch7/6784мс. CI39852344052 SUCCESS,Win32/CIM4/4,cimUnknown0; Qodo1607926 completed/no findings на точномhead. PR123 merge11d53267781c319e62228db034213236151e1619.
+
+Следующая правка проверяет GetExitCodeProcess по уже открытому дескриптору только после false image read. Только положительное завершение допускает исключение кандидата; active259/failed/malformed остаются unknown,а публичный runtimePathState принимает только active/unavailable/invalid. OpenProcess87 не трактуется как отсутствие. Эффект ещё не измерен.
