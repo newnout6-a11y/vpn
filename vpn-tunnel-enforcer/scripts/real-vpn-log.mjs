@@ -109,7 +109,7 @@ export function safeAppEvent(event) {
   if (event.scope === 'ip-monitor' && Number.isInteger(event.details?.attempt) && event.details.attempt >= 1 && event.details.attempt <= 3) result.attempt = event.details.attempt
   if (event.scope === 'runtime-acl' && ['worker', 'standalone'].includes(event.details?.transport)) result.transport = event.details.transport
   if (event.scope === 'ps-helper' && event.message === 'warm-up timing') {
-    if (['NetSecurity', 'NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'].includes(event.details?.module)) result.module = event.details.module
+    if (['NetSecurity', 'Network', 'NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'].includes(event.details?.module)) result.module = event.details.module
     if (['complete', 'failed'].includes(event.details?.outcome)) result.outcome = event.details.outcome
   }
   if (['SECURE_STORE_PREFLIGHT_FAILED', 'STARTUP_FAILED'].includes(event.details?.code)) result.code = event.details.code

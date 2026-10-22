@@ -236,7 +236,9 @@ describe('elevated PS helper errors', () => {
     const clock = vi.spyOn(performance, 'now').mockReturnValue(100)
     try {
       const pending = execElevatedPs('Get-NetFirewallProfile # private-source', 5000, 'firewall-killswitch')
-      const { id } = JSON.parse(child.stdin.write.mock.calls.at(-1)[0])
+      const wire = JSON.parse(child.stdin.write.mock.calls.at(-1)[0])
+      expect(wire).toMatchObject({ script: 'Get-NetFirewallProfile # private-source', timeout: 5000, policy: 'firewall-killswitch' })
+      const { id } = wire
       clock.mockReturnValue(150)
       receive(Buffer.from(JSON.stringify({ id, stdout: 'private-output', stderr: 'private-error', exitCode: 0, executionMs }) + '\n'))
       expect(await pending).toEqual({ stdout: 'private-output', stderr: 'private-error', exitCode: 0 })

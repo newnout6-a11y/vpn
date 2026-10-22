@@ -34,21 +34,21 @@ describe('same helper fixed read-only warm-up', () => {
   it('runs bounded fixed commands in policy order and discards native data', async () => {
     const h = harness()
     await h.warm()
-    expect(h.execElevatedPs).toHaveBeenCalledTimes(5)
+    expect(h.execElevatedPs).toHaveBeenCalledTimes(2)
     expect(h.execElevatedPs).toHaveBeenNthCalledWith(1, h.commands[0].script, 15000, 'firewall-killswitch')
     expect(h.commands[0].script).toContain('Get-NetFirewallProfile')
     expect(h.commands[0].script).toContain('NetFirewallProfile.cmdletDefinition.cdxml')
     expect(h.commands[0].script).toContain('NetFirewallRule.cmdletDefinition.cdxml')
     expect(h.commands[0].script).toContain('Update-TypeData')
     expect(h.commands[0].script).toMatch(/catch\s*\{\s*Import-Module NetSecurity -ErrorAction Stop/)
-    expect(h.commands.slice(1).map((command: {script: string}) => command.script.match(/Import-Module (\w+)/)?.[1]))
-      .toEqual(['NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'])
+    expect(h.commands.map((command: {module: string}) => command.module)).toEqual(['NetSecurity', 'Network'])
+    expect(h.execElevatedPs).toHaveBeenNthCalledWith(2, h.commands[1].script, 15000, 'physical-adapter-lockdown')
     for (const command of h.commands.slice(1)) expect(command.script).toContain('Get-NetAdapter')
     for (const command of h.commands) {
       expect(command.script).toContain('Out-Null')
       expect(command.script).not.toMatch(/\b(?:Set-|Disable-|Enable-|Remove-|New-)\w+|reg\s+add|netsh/i)
     }
-    expect(h.logEvent.mock.calls.filter((call: unknown[]) => call[2] === 'warm-up timing')).toHaveLength(5)
+    expect(h.logEvent.mock.calls.filter((call: unknown[]) => call[2] === 'warm-up timing')).toHaveLength(2)
   })
   it('resumes after admitted native work drains instead of abandoning all imports (AT-02-005)', async () => {
     vi.useFakeTimers()
@@ -59,7 +59,7 @@ describe('same helper fixed read-only warm-up', () => {
     h.pendingCommands.clear()
     await vi.advanceTimersByTimeAsync(100)
     await pending
-    expect(h.execElevatedPs).toHaveBeenCalledTimes(5)
+    expect(h.execElevatedPs).toHaveBeenCalledTimes(2)
     expect(vi.getTimerCount()).toBe(0)
   })
   it('does not start a missing helper', async () => {
@@ -70,11 +70,10 @@ describe('same helper fixed read-only warm-up', () => {
   it('yields between module imports when a connect command arrives (AT-02-005)', async () => {
     vi.useFakeTimers()
     const h = harness()
-    h.execElevatedPs.mockImplementationOnce(async () => success)
     h.execElevatedPs.mockImplementationOnce(async () => { h.pendingCommands.set(99, {}); return success })
     const pending = h.warm()
     await vi.advanceTimersByTimeAsync(300)
-    expect(h.execElevatedPs).toHaveBeenCalledTimes(2)
+    expect(h.execElevatedPs).toHaveBeenCalledTimes(1)
     h.pendingCommands.clear()
     await vi.advanceTimersByTimeAsync(100)
     await pending
@@ -90,7 +89,7 @@ describe('same helper fixed read-only warm-up', () => {
     busy = false
     await vi.advanceTimersByTimeAsync(100)
     await pending
-    expect(h.execElevatedPs).toHaveBeenCalledTimes(5)
+    expect(h.execElevatedPs).toHaveBeenCalledTimes(2)
   })
   it.each([null, {}])('drops deferred warm-up when its original helper is stopped/replaced: %j (AT-03-007)', async owner => {
     vi.useFakeTimers()
@@ -118,7 +117,7 @@ describe('same helper fixed read-only warm-up', () => {
     if (kind === 'throw') h.execElevatedPs.mockRejectedValueOnce(new Error('PRIVATE_NATIVE_ERROR'))
     else h.execElevatedPs.mockResolvedValueOnce({ stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR', exitCode: 1 })
     await expect(h.warm()).resolves.toBeUndefined()
-    expect(h.execElevatedPs).toHaveBeenCalledTimes(5)
+    expect(h.execElevatedPs).toHaveBeenCalledTimes(2)
     expect(h.logEvent).toHaveBeenCalledWith('warn', 'ps-helper', 'fixed read-only warm-up unavailable', { policy: 'firewall-killswitch' })
     expect(h.logEvent.mock.calls.some((call: unknown[]) => call[2] === 'warm-up timing' && (call[3] as any)?.outcome === 'failed')).toBe(true)
     expect(JSON.stringify(h.logEvent.mock.calls)).not.toMatch(/PRIVATE_|stdout|stderr|script/)
