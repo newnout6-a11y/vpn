@@ -166,6 +166,40 @@ test('WinINet fallback publishes its fixed event without the private native erro
   assert.deepEqual(safeAppEvent(event), { at: event.ts, scope: event.scope, message: event.message })
 })
 
+test('native path diagnostics publish fixed API/error labels only (AT-00-005, AT-01-002)', () => {
+  const base = { ts: '2026-10-22T08:00:00.000Z', scope: 'tun', message: 'native runtime status unavailable, using PowerShell' }
+  for (const api of ['OpenProcess', 'QueryFullProcessImageNameW']) {
+    for (const [code, kind] of [[0, 'unspecified'], [5, 'access-denied'], [6, 'invalid-handle'], [31, 'general-failure'],
+      [87, 'invalid-parameter'], [122, 'insufficient-buffer'], [299, 'partial-copy'], [1168, 'not-found'], [1234567, 'other']]) {
+      const message = `runtime PID: executable path unavailable (${api}; win32=${code})`
+      for (const details of [message, { message, path: 'FAKE-PRIVATE-PAYLOAD' }, { error: { message, stack: 'FAKE-PRIVATE-PAYLOAD' } }]) {
+        for (const eventMessage of [base.message, 'native runtime PID unavailable, using PowerShell']) {
+          assert.deepEqual(safeAppEvent({ ...base, message: eventMessage, details }), { at: base.ts, scope: base.scope, message: eventMessage,
+            errorKind: 'runtime-path-unavailable', runtimePathApi: api, runtimePathError: kind })
+        }
+      }
+    }
+  }
+})
+
+test('path labels require the exact producer message and fallback event (AT-00-005, AT-01-002)', () => {
+  const base = { ts: '2026-10-22T08:00:00.000Z', scope: 'tun', message: 'native runtime status unavailable, using PowerShell' }
+  const valid = 'runtime PID: executable path unavailable (OpenProcess; win32=5)'
+  const events = [
+    ...[valid + ' FAKE-PRIVATE-PAYLOAD', valid + '\n', valid.replace('OpenProcess', 'FAKE-PRIVATE-PAYLOAD'),
+      valid.replace('win32=5', 'win32=FAKE-PRIVATE-PAYLOAD'), valid.replace('win32=5', 'win32=-5'), valid.replace('win32=5', 'win32=5.0')]
+      .map(message => ({ ...base, details: { message } })),
+    { ...base, message: 'owned runtime status probe failed', details: { message: valid } },
+    { ...base, details: { message: 'FAKE-PRIVATE-PAYLOAD', runtimePathApi: 'OpenProcess', runtimePathError: 'access-denied', warnings: [valid] } }
+  ]
+  for (const event of events) {
+    const safe = safeAppEvent(event)
+    assert.equal(safe.runtimePathApi, undefined)
+    assert.equal(safe.runtimePathError, undefined)
+    assert.ok(!JSON.stringify(safe).includes('FAKE-PRIVATE-PAYLOAD'))
+  }
+})
+
 test('concurrent connect/cancel calls retain separate IDs and elapsed time', async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
   await mkdir(temp, { recursive: true })

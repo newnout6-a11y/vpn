@@ -8136,3 +8136,12 @@ PR121 на8c950ba: CI39844343892 SUCCESS, real39844362955 8/8PASS,IP/settings/cl
 
 
 Повтор CI39846666724 attempt2 на41beb41 завершился SUCCESS Windows/site/Rust, включая Electron/WFP/native host. Runtime Win32/CIM4/4,cimUnknown0: native11.5606/4.6124/4.4079/5.9938мс,CIM512.6578/508.0805/511.4163/495.0896мс. Первый ACL timeout5000мс не повторился; причина не установлена. Отдельный npx.cmd vitest run src/main/runtimeAclPolicy.test.ts --reporter=dot —28/28,586мс,exit0; source ACL не менялся. PR121 слит 2026-10-22T20:31:56Z,merge b8e3ab6a52adda40879d721389cae72f913686aa. Dependent-ветка fast-forward, tree идентичен41beb41; проверенный source этапа45 не изменился.
+
+
+### 2026-10-22 — этап46: причины оставшегося native path fallback
+
+PR122 окончательно проверен: Qodo1607729 completed/no findings; CI39849748956 SUCCESS, обязательный runtime Win32/CIM4/4 без unknown; real39849791199 8/8PASS,IP/settings/cleanup/debug exit,687/687progress. Действия13351/2697/3517/3970/5428/9324/4495/331мс,сумма43113мс; notify3/3/2/3мс,path fallback2 против5 в предыдущем sample, общего ускорения нет. PR122 слит 2026-10-22T20:42:52Z,merge f48a916446559cd4dfa00b353e505e5e7fb6d31d.
+
+В следующей ветке добавлен немедленный GetLastError для двух path API и безопасные фиксированные labels в реальном сценарии. Rescan/deadline/ownership/cleanup не менялись. Repro3red плюс1log-red; focused88/88,431мс; driver38/38,1190.2841мс; typecheck165IPC/0public any,traceability AC927/927,F210/210,diffcheck PASS. Полныйsuite выполняется; новый PR/review/hosted evidence ещё нужны. Локальный VPN не переключался.
+
+Окончательный локальный DoD этапа46: npm.cmd test -- --reporter=dot —6033passed/5existing skipped,323passed/2skipped suites,325.93с,exit0 (.tmp/native-path-diagnostics-full.log). Source не менялся с начала полного suite. Точные остальные команды: npm.cmd run typecheck; npm.cmd run test:real-vpn:unit; python -X utf8 ../docs/04-приёмочные-тесты/traceability/check-coverage.py; git diff --check —всеexit0,результаты выше. Новый PR/review/hosted evidence ожидаются.
