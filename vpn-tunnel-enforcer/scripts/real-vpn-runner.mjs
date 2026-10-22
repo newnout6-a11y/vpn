@@ -6,6 +6,25 @@ export function hostedLaunchArgs(port) {
   return [`--inspect=127.0.0.1:${port}`]
 }
 
+/** The hosted positive oracle runs after the action timer, on the existing TUN. */
+export async function verifyNativeTunOwnership(execute) {
+  let evidence
+  try {
+    const stdout = await execute(['run', '--mode', 'integration', 'src/main/native/ownedTunInterfaceCore.itest.ts', '--reporter=dot'],
+      { VPNTE_REQUIRE_TUN_OWNERSHIP_COMPARISON: '1', FORCE_COLOR: '0' })
+    for (const line of stdout.split(/\r?\n/)) {
+      try {
+        const value = JSON.parse(line)
+        if (value?.fixture === 'owned-tun-read-only') evidence = value
+      } catch { /* Vitest status lines are not evidence. */ }
+    }
+  } catch { throw new Error('Positive native/CIM TUN comparison failed; output omitted') }
+  assert.ok(Number.isInteger(evidence?.comparisons) && evidence.comparisons > 0 && evidence.comparisons <= 4096
+    && Number.isInteger(evidence?.positive) && evidence.positive > 0 && evidence.positive <= evidence.comparisons,
+  'Positive native/CIM TUN comparison was not confirmed')
+  return { status: 'PASS', comparisons: evidence.comparisons, positive: evidence.positive }
+}
+
 export function requireHostedWindows(env = process.env, platform = process.platform) {
   assert.ok(platform === 'win32' && env.GITHUB_ACTIONS === 'true'
     && env.RUNNER_OS === 'Windows' && env.RUNNER_ENVIRONMENT === 'github-hosted'
