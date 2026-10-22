@@ -187,6 +187,27 @@ describe('trusted typed network baseline', () => {
     expect(state.processTimeouts[0]).toBeLessThanOrEqual(1000)
     expect(state.scripts).toHaveLength(2)
   })
+  it.each(['missing', 'invalid', 'duplicate'] as const)('does not hide notification timeout behind %s baseline records (AT-00-004, AT-03-003c)', async kind => {
+    vi.useFakeTimers({ toFake: ['performance', 'setTimeout', 'clearTimeout'] })
+    const original = fixture()
+    state.manifest = structuredClone(original); native.mode = 'ok'
+    if (kind === 'missing') state.manifest.values.splice(0, 4)
+    if (kind === 'invalid') for (let i = 0; i < 4; i++) state.manifest.values[i].exists = 'false'
+    if (kind === 'duplicate') state.manifest.values[0] = { ...state.manifest.values[1] }
+    state.restoreEffect = () => vi.advanceTimersByTime(29000)
+    let release!: () => void
+    native.effect = () => new Promise<void>(resolve => { release = resolve })
+    const pending = rollbackTunNetworkBaseline()
+    await vi.advanceTimersByTimeAsync(1000)
+    const result = await pending
+    expect(result).toMatchObject({ success: false, error: ipcError('timeout'),
+      restoredSteps: original.values.slice(kind === 'duplicate' ? 2 : 4).map(s => `${s.target}/${s.name}`) })
+    expect(result.warnings).toContain(`WinINet: ${ipcError('timeout').message}`)
+    release(); await vi.advanceTimersByTimeAsync(0)
+    expect(state.manifest).not.toBeNull()
+    expect(state.operations).not.toContain('clear')
+    expect(state.scripts).toHaveLength(1)
+  })
   it.each(['missing', 'invalid', 'duplicate'] as const)('restores valid baseline records after %s records, retaining the journal (AT-03-003c)', async kind => {
     const original = fixture()
     state.manifest = structuredClone(original)
@@ -195,6 +216,7 @@ describe('trusted typed network baseline', () => {
     if (kind === 'duplicate') state.manifest.values[0] = { ...state.manifest.values[1] }
     const result = await rollbackTunNetworkBaseline()
     expect(result.success).toBe(false)
+    expect(result.error).toEqual(ipcError('validation'))
     expect(result.warnings?.length).toBeGreaterThan(0)
     expect(state.manifest).not.toBeNull()
     expect(state.operations).not.toContain('clear')

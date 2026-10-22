@@ -264,3 +264,25 @@ Read-only fixture окончательного CI39841792826: четыре об�
 
 
 Повтор CI39841792826 attempt2 на неизменном f4e9df9 завершился SUCCESS: Windows/site/Rust, Electron smoke и native host зелёные; read-only Win32/CIM четыре сравнения без unknown. Первая ошибка localhost ERR_NO_BUFFER_SPACE на повторе не воспроизвелась; её первопричина не установлена. PR #120 слит 2026-10-22T19:54:44Z, merge b397932847c6b3851108e80569761ced2717268d. Текущая dependent-ветка fast-forward на этот merge без изменения source tree и без потери этапа44.
+
+
+## Первый замер native WinINet rollback в PR #121 — 22.10.2026
+
+[Run 39844362955](https://github.com/newnout6-a11y/vpn/actions/runs/39844362955), 8c950bafea99a31e4fb6dbf4ba010d7442ebacf9, win25-vs2026, cancel_after_ms=500; SHA-256 настроек прежний d092a2c90d947e77ad2e92ce39d4eb6842e24a6a8d9c8a22031d693676760c3d. Все восемь действий PASS; IP passed/isLeak=false, cleanup PASS/settingsUnchanged=true, debugInstanceClosed=true, 0 runtime / 0 TUN / adapterDown / 0 адресов. Все 675/675 строк progress присутствуют в Actions stdout.
+
+| Действие | Исходный ce95391, мс | 8c950ba, мс |
+| --- | ---: | ---: |
+| Подключение | 10030 | 16082 |
+| Отключение | 1942 | 3142 |
+| Подключение и отмена | 2148 | 2635 |
+| Повторное подключение | 2582 | 3009 |
+| Смена сервера | 4709 | 5006 |
+| Обратная смена и отмена с восстановлением | 8375 | 9134 |
+| Обратная смена | 6297 | 4433 |
+| Пинг | 317 | 345 |
+
+Сумма 43786 мс; общего ускорения этот run не доказывает. Измеренный WinINet notifyMs снизился до **2/3/3/3 мс**, без fallback-событий; registryMs 126/96/115/158 мс. В окончательном предыдущем run эти фазы были 121/100/129/112 мс и 109/82/96/91 мс. Этот локальный выигрыш сохраняет полное ожидание notification и не переносит готовность в фон.
+
+Холодный tun start pipeline вырос с 6902 до 8700 мс. Измеренные фазы: prepare-runtime 2249→2534, physical-dns-sources 1220→2016, adapter-lockdown 3662→5398 (остаточное ожидание1197→2281), firewall-kill-switch 3084→2980 (ожидание2204→2655), metric-readback937→1129 мс. Фазы исполняются с перекрытием и не суммируются; более медленный общий run нельзя приписывать WinINet. Причина отличий hosted-машин не установлена. Отмена подключения acknowledgement/settled2078/2078 мс, отмена смены18/8466 мс; runtime path fallback три раза.
+
+Обычный CI39844343892 на8c950ba SUCCESS. Qodo1607274 нашёл, что rejected records маскируют notification timeout как validation. Этот замер предшествует исправлению категории ошибки и не заменяет проверку окончательного HEAD.

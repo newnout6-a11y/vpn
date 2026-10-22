@@ -8113,3 +8113,9 @@ DoD исправления PR120: полный **6015 passed / 5 existing skippe
 
 
 Повтор CI39841792826 attempt2 на неизменном f4e9df9 завершился SUCCESS: Windows/site/Rust, Electron smoke и native host зелёные; read-only Win32/CIM четыре сравнения без unknown. Первая ошибка localhost ERR_NO_BUFFER_SPACE на повторе не воспроизвелась; её первопричина не установлена. PR #120 слит 2026-10-22T19:54:44Z, merge b397932847c6b3851108e80569761ced2717268d. Текущая dependent-ветка fast-forward на этот merge без изменения source tree и без потери этапа44.
+
+
+PR121 на8c950ba: CI39844343892 SUCCESS, real39844362955 8/8PASS,IP/settings/cleanup/debug exit,675/675progress. WinINet notify2/3/3/3мс вместо100–149мс; сумма43786мс, общего ускорения нет. Qodo1607274 нашёл маскировку timeout повреждённым manifest. Repro3red; приоритет timeout исправлен, validation-only и permission сохранены; focused97passed/1existing skipped,9.11с; typecheck/driver36/coverage зелёные. Полный повтор выполняется, PR не слит.
+
+
+Окончательный локальный DoD исправления Qodo PR121: npm.cmd test -- --reporter=dot — **6024 passed / 5 existing skipped**, 323 passed / 2 skipped suites, **374.94 с**, exit 0 (.tmp/native-baseline-notify-review-full.log). Typecheck exit0,165IPC/0public any; final focused97passed/1existing skipped,9.11с; driver36/36,1234.3176мс; traceability AC927/927,F210/210; diffcheck exit0. Исправление и замер первого HEAD отправляются отдельным commit в существующий PR; окончательные remote gates ещё нужны.

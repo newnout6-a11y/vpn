@@ -293,7 +293,7 @@ $watch.Stop()
     if (warnings.length) {
       logEvent('error', 'system-network', 'baseline rollback completed', { operationId, success: false, warnings })
       const category = steps.some(s => !s.success && s.category === 'permission') || notification.category === 'permission' ? 'permission'
-        : hasRejectedRecords ? 'validation' : notification.category ?? 'internal'
+        : notification.category === 'timeout' ? 'timeout' : hasRejectedRecords ? 'validation' : notification.category ?? 'internal'
       const message = `Baseline восстановлен частично: ${restoredSteps.length} из 9 записей; снимок сохранён.${notification.success ? '' : ' Уведомление Windows не подтверждено.'}`
       return { success: false, error: ipcError(category), operationId, message, restoredSteps, warnings, details: warnings.join(' | ') }
     }
