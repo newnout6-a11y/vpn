@@ -112,6 +112,9 @@ jobs:
           VPNTE_REAL_SCENARIO: ${{ secrets.VPNTE_REAL_SCENARIO }}
           VPNTE_CANCEL_AFTER_MS: ${{ inputs.cancel_after_ms }}
         run: node scripts/test-real-vpn.mjs --exe 'dist/real-vpn/win-unpacked/VPN Tunnel Enforcer.exe'
+      - name: Compare PowerShell preparation after scenario (read only)
+        timeout-minutes: 4
+        run: node scripts/measure-ps-preparation.mjs
       - name: Upload timings and state evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -124,3 +127,4 @@ jobs:
           path: |
             vpn-tunnel-enforcer/.tmp/real-vpn/report.json
             vpn-tunnel-enforcer/.tmp/real-vpn/progress.log
+            vpn-tunnel-enforcer/.tmp/real-vpn/ps-preparation.json

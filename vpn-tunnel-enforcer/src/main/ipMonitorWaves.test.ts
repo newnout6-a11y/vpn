@@ -18,6 +18,26 @@ beforeEach(async () => {
 })
 afterEach(() => { module.ipMonitor.clearVpnIp(); vi.clearAllTimers(); vi.useRealTimers() })
 describe('IP provider wave budget', () => {
+  it.each(['success', 'failure', 'cancelled'])('times a complete provider request without changing its result: %s (AT-00-005)', async kind => {
+    const { logEvent } = await import('./appLogger')
+    vi.mocked(logEvent).mockClear()
+    const pending = held(), controller = new AbortController(), failure = new Error('PRIVATE_ERROR')
+    vi.mocked(axios.get).mockReturnValue(pending.promise)
+    const read = module.fetchPublicIpFrom(module.IP_CHECK_URLS[1], undefined, controller.signal).catch(error => error)
+    await vi.advanceTimersByTimeAsync(7500)
+    if (kind === 'cancelled') controller.abort()
+    if (kind === 'failure') pending.resolve(Promise.reject(failure))
+    else pending.resolve(response())
+    const result = await read
+    if (kind === 'success') expect(result).toBe('198.51.100.1')
+    else if (kind === 'failure') expect(result).toBe(failure)
+    else expect(result).toBeInstanceOf(Error)
+    const timing = vi.mocked(logEvent).mock.calls.filter(call => call[2] === 'public IP provider timing')
+    expect(timing).toEqual([['debug', 'ip-monitor', 'public IP provider timing', {
+      providerIndex: 1, durationMs: 7500, outcome: kind === 'success' ? 'succeeded' : kind === 'failure' ? 'failed' : 'cancelled'
+    }]])
+    expect(JSON.stringify(timing)).not.toMatch(/198\.51|PRIVATE_|https?:/)
+  })
   it('aborts every provider on caller cancellation without cancelling another owner (AT-00-003)', async () => {
     const controller = new AbortController(), another = held(), signals: AbortSignal[] = []
     vi.mocked(axios.get).mockImplementation((_url, options) => {

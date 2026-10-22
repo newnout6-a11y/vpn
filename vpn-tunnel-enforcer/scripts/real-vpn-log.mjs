@@ -92,7 +92,7 @@ export function safeAppEvent(event) {
           'physical adapter set changed; lockdown coverage is not verified'],
         'ps-helper': ['command timing', 'warm-up timing'], 'firewall-killswitch': ['command timing', 'phase timing', 'native phase timing'],
         'runtime-acl': ['inspection timing'],
-        'ip-monitor': ['protected transition IP baseline refreshed', 'protected transition IP baseline not checked'],
+        'ip-monitor': ['protected transition IP baseline refreshed', 'protected transition IP baseline not checked', 'public IP provider timing'],
         'system-network': ['baseline native phase timing',
           'native WinINet notification unavailable; falling back to PowerShell'] })[event.scope]?.includes?.(event.message)
   if (!allowed || !Number.isFinite(Date.parse(event.ts))) return null
@@ -107,6 +107,11 @@ export function safeAppEvent(event) {
   }
   if (Number.isFinite(event.monotonicMs) && event.monotonicMs >= 0) result.monotonicMs = event.monotonicMs
   if (event.scope === 'ip-monitor' && Number.isInteger(event.details?.attempt) && event.details.attempt >= 1 && event.details.attempt <= 3) result.attempt = event.details.attempt
+  if (event.scope === 'ip-monitor' && event.message === 'public IP provider timing') {
+    const index = event.details?.providerIndex
+    if (Number.isInteger(index) && index >= 0 && index < 4) result.provider = ['cloudflare', 'ipify', 'icanhazip', 'myip'][index]
+    if (['succeeded', 'failed', 'cancelled', 'backoff'].includes(event.details?.outcome)) result.outcome = event.details.outcome
+  }
   if (event.scope === 'runtime-acl' && ['worker', 'standalone'].includes(event.details?.transport)) result.transport = event.details.transport
   if (event.scope === 'ps-helper' && event.message === 'warm-up timing') {
     if (['NetSecurity', 'Network', 'NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'].includes(event.details?.module)) result.module = event.details.module
