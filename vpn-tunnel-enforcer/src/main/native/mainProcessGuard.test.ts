@@ -9,6 +9,7 @@ import { readRawAdapters, readRawIfConfigs, readRawRoutes } from './ipHelperRead
 import { createKoffiSource, resetKoffiSourceForTests } from './physicalAdapterCore'
 import { notifyWinInetInProcess, resetWinInetNativeForTests } from './winInetCore'
 import { assertKoffiAllowedHere } from './koffiTypes'
+import { readOwnedTunIndexInProcess } from './ownedTunInterfaceCore'
 
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
 const type = Object.getOwnPropertyDescriptor(process, 'type')
@@ -28,6 +29,10 @@ afterEach(() => {
 })
 
 describe('koffi main-process guard', () => {
+  it('TUN ownership cannot read adapters in the Electron main process', () => {
+    setProcessType('browser')
+    expect(() => readOwnedTunIndexInProcess('Ethernet 5', '{11111111-2222-3333-4444-555555555555}')).toThrow(/must not run in the Electron main process/)
+  })
   it.each(['readRawAdapters', 'readRawIfConfigs', 'readRawRoutes(4)'] as const)('%s throws in the main process before touching koffi', name => {
     setProcessType('browser')
     const run = { readRawAdapters, readRawIfConfigs, 'readRawRoutes(4)': () => readRawRoutes(4) }[name]

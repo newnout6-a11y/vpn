@@ -13,7 +13,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { performance } from 'node:perf_hooks'
 import { assertStable, deadline, runScenario } from './real-vpn-scenario.mjs'
 import { connectInspector } from './real-vpn-inspector.mjs'
-import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs } from './real-vpn-runner.mjs'
+import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership } from './real-vpn-runner.mjs'
 import { createProgressLog, safeAppEvent, safeSnapshot, safeElectronDiagnostic } from './real-vpn-log.mjs'
 import { runWithCleanup } from './wp1-test-cleanup.mjs'
 
@@ -91,6 +91,13 @@ async function run(config, seed) {
     tunAlias = result.tunAlias
     progress.record('os', { runtimeProcessCount: result.runtimeProcessCount, tunProcessCount: result.tunProcessCount,
       matchingPid: result.matchingPid, adapterUp: result.adapterUp, interfaceAddressCount: result.interfaceAddressCount })
+    if (expectedPid && !report.nativeTunOwnership) {
+      report.nativeTunOwnership = await progress.run('oracle/native-tun-ownership', () => verifyNativeTunOwnership(async (args, envPatch) =>
+        (await exec(process.execPath, [join(root, 'node_modules/vitest/vitest.mjs'), ...args], {
+          cwd: root, env: { ...process.env, ...envPatch }, windowsHide: true, timeout: 30_000, maxBuffer: 1024 * 1024
+        })).stdout))
+      progress.record('native-tun-ownership', report.nativeTunOwnership)
+    }
     return result
   })
   await test('AT-00-003/005/007, AT-02-002/009 real connection sequence (partial coverage)', async t => {

@@ -1,9 +1,29 @@
 // Runner policy and seeding. No Electron, filesystem or network side effects on import.
 import assert from 'node:assert/strict'
+import { stripVTControlCharacters } from 'node:util'
 
 export function hostedLaunchArgs(port) {
   assert.ok(Number.isInteger(port) && port > 0 && port <= 65535, 'Invalid inspector port')
   return [`--inspect=127.0.0.1:${port}`]
+}
+
+/** The hosted positive oracle runs after the action timer, on the existing TUN. */
+export async function verifyNativeTunOwnership(execute) {
+  let evidence
+  try {
+    const stdout = await execute(['run', '--mode', 'integration', 'src/main/native/ownedTunInterfaceCore.itest.ts', '--reporter=dot'],
+      { VPNTE_REQUIRE_TUN_OWNERSHIP_COMPARISON: '1', FORCE_COLOR: '0' })
+    for (const line of stdout.split(/\r?\n/)) {
+      try {
+        const value = JSON.parse(stripVTControlCharacters(line))
+        if (value?.fixture === 'owned-tun-read-only') evidence = value
+      } catch { /* Vitest status lines are not evidence. */ }
+    }
+  } catch { throw new Error('Positive native/CIM TUN comparison failed; output omitted') }
+  assert.ok(Number.isInteger(evidence?.comparisons) && evidence.comparisons > 0 && evidence.comparisons <= 4096
+    && Number.isInteger(evidence?.positive) && evidence.positive > 0 && evidence.positive <= evidence.comparisons,
+  'Positive native/CIM TUN comparison was not confirmed')
+  return { status: 'PASS', comparisons: evidence.comparisons, positive: evidence.positive }
 }
 
 export function requireHostedWindows(env = process.env, platform = process.platform) {

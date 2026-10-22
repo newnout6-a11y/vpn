@@ -367,3 +367,36 @@ Read-only fixture окончательного CI39841792826: четыре об�
 | Пинг | 320 | 235 |
 
 По прямому уточнению владельца целевой бюджет пользовательского сценария — максимум15000мс; он пока НЕ выполнен. Числа20–40мс в ACL prototype — время отдельной fixture, не подключения. Основной приоритет — секунды первого подключения, смен и отмены с восстановлением. Сумма elapsed восьми действий не включает независимые OS-оракулы между действиями, подготовку стенда и финальную очистку; их фактический wall time остаётся в progress.log. Нельзя объявлять достижение бюджета, убрав ожидание готовности/settlement/восстановления или проверки cleanup.
+
+
+## Окончательный замер PR #125 — 23.10.2026 MSK
+
+[Run39858892366](https://github.com/newnout6-a11y/vpn/actions/runs/39858892366),head030ef3c863cd0faa63d0190a68f084a77b32c4d3,win25-vs2026,cancel500мс,прежний settings SHA-256 d092a2c90d947e77ad2e92ce39d4eb6842e24a6a8d9c8a22031d693676760c3d. Все8действий PASS;IP passed/isLeak=false;settingsUnchanged/cleanup/debugInstanceClosed PASS;0runtime/0TUN/adapterDown/0адресов,выход73/signalnull. Все679/679строк progress вActions stdout.
+
+| Действие | Исходный ce95391, мс | 030ef3c, мс |
+| --- | ---: | ---: |
+| Подключение | 10030 | 10555 |
+| Отключение | 1942 | 1731 |
+| Подключение и отмена | 2148 | 1954 |
+| Повторное подключение | 2582 | 2473 |
+| Смена сервера | 4709 | 5265 |
+| Обратная смена и отмена с восстановлением | 8375 | 7134 |
+| Обратная смена | 6297 | 4653 |
+| Пинг | 317 | 324 |
+
+Сумма34089мс,целевые15000мсНЕдостигнуты. Нельзя причинно приписать весь разброс одной правке overlapDNS. ColdTUN7161мс,DNS1643мс,Xray3521мс,lockdown3603мс,остатокawait0,TUNwait1419мс,firewall3203мс/остаток1580мс;эти перекрывающиеся фазы НЕ суммируются. Смена5265мс включает после TUN ещё~0,7с CIM ownership перед native route selection и~2,1с внешней IP baseline. Следующее изменение заменяет свежий ownership Win32/registry proof с полным CIM fallback;эффект ещё не измерен. CI39858880074 SUCCESS Windows/site/Rust,Win32-CIM4/4,cimUnknown0;Qodo1608505 completed/no findings;mergec15efd089441f21c6b68865faba4a3f32ac3420e.
+
+
+## PR #126: первый замер и обязательный положительный oracle — 23.10.2026 MSK
+
+
+Первый hosted PR126 на2e2b293295b6da458e1933f07f21f21c7272c63d: CI39862784644 SUCCESS Windows/site/Rust; real39862802673 8/8PASS. Действия connect9519/disconnect1579/connect-cancel2011/connect-again2429/switch4460/switch-back-cancel7254/switch-back3875/ping321мс, сумма31448мс. Native ownership+route8/5/7мс, fallback0; IP passed/isLeak=false, настройки неизменны, cleanup0runtime/0TUN/adapterDown/0адресов, debugInstanceClosed=true, exit73/signalnull;680/680progress вActions. Settings SHA-256 d092a2c90d947e77ad2e92ce39d4eb6842e24a6a8d9c8a22031d693676760c3d. Успешные смены5265→4460 и4653→3875мс против PR125; разброс холодного connect не приписывается этой правке. Цель15000мс НЕ достигнута.
+
+Qodo1608816 подтвердил два замечания: истёкший caller250мс оставлял ownership в общем native host до5с, а CI без TUN не доказывал положительную эквивалентность. Исправления: отдельный persistent ownership host изолирует зависшую registry/adapter операцию от routes/runtime/adapters; shutdown завершает оба и запрещает respawn. Интеграционный test явно SKIP без активного TUN, а real driver на уже поднятом hosted TUN обязательно требует хотя бы1положительное CIM/native сравнение и записывает nativeTunOwnership. Независимый oracle выполняется после action timer, его wall time отдельно остаётся в progress; ожидания готовности/settlement не менялись. Raw child output не публикуется.
+
+Проверки review-fix: npm.cmd run typecheck —exit0,165IPC/0public any; npx.cmd vitest run src/main/native/nativeHost.test.ts src/main/native/hostClient.test.ts src/main/tunRouteProbe.test.ts --reporter=dot —49/49,4.93с,exit0; npm.cmd run test:real-vpn:unit —43/43,1266.5397мс,exit0. VPNTE_REQUIRE_TUN_OWNERSHIP_COMPARISON=1 npx.cmd vitest run --mode integration src/main/native/ownedTunInterfaceCore.itest.ts --reporter=dot —2/2,992мс,exit0,1positive comparison,74.0531мс совокупных native reads. Это read-only проверка уже работающего локального TUN, без переключений сети. Coverage AC927/927,F210/210 и git diff --check —exit0.
+
+Полный DoD после review-fix: npm.cmd test -- --reporter=dot —6102passed/5existing skipped,325passed/2skipped suites,358.84с,exit0 (.tmp/native-tun-ownership-review-full.log); source не менялся во время suite. Новый exact-head hosted run и повторное review ещё требуются.
+
+
+Real39864808579 на8192332: FAIL на новом независимом native oracle после успешного OS readback работающего VPN; cleanup PASS,settings unchanged,debug exit73/signalnull. Подтверждена ошибка тестового парсера: Vitest выдаёт ANSI reset перед JSON даже в дочернем процессе с FORCE_COLOR=0. Реальный локальный read-only output воспроизвёл её; новый regression сначалаRED1/exit1. Теперь стандартный node:util.stripVTControlCharacters снимает terminal formatting перед строгим JSON.parse всей строки; текстовые префиксы/zero/malformed по-прежнему отклоняются, raw payload не выводится. npm.cmd run test:real-vpn:unit —44/44,946.719мс,exit0; исправленный parser принял тот же фактический child stdout как1positive/1comparison. Vitest-covered src не менялся после полного6102/5; его358.84с результат сохраняется, изменён только отдельно проверяемый mjs driver. Новый hosted run обязателен.

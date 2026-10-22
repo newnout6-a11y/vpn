@@ -11,6 +11,7 @@ import type { HostOp } from './hostProtocol'
 import { normalizeRetainedAdapterGuids } from '../physicalAdapterSnapshot'
 import { readOwnedRuntimePidInProcess, readOwnedRuntimeStateInProcess } from './ownedRuntimePidCore'
 import { readSelectedIpv4InterfacesInProcess } from './selectedRouteInterfacesCore'
+import { readOwnedTunIndexInProcess } from './ownedTunInterfaceCore'
 
 function stringArray(value: unknown, what: string): string[] {
   if (!Array.isArray(value) || !value.every(item => typeof item === 'string')) throw new Error(`${what}: expected an array of strings`)
@@ -55,6 +56,9 @@ export async function runNativeOp(op: HostOp, args: unknown): Promise<unknown> {
       return readOwnedRuntimePidInProcess(a.executable)
     case 'selected-route-interfaces':
       return readSelectedIpv4InterfacesInProcess()
+    case 'owned-tun-index':
+      if (typeof a.alias !== 'string' || typeof a.guid !== 'string') throw new Error('TUN ownership: alias and GUID are required')
+      return readOwnedTunIndexInProcess(a.alias, a.guid)
     case 'owned-runtime-state':
       if (typeof a.runtimeDir !== 'string') throw new Error('runtime status: runtime directory is required')
       return readOwnedRuntimeStateInProcess(a.runtimeDir)

@@ -37,6 +37,8 @@ export interface RawUnicast {
   dadState: number
   /** NL_SUFFIX_ORIGIN: 5 = random (temporary IPv6 address) */
   suffixOrigin: number
+  /** Absent on older/incomplete IP_ADAPTER_UNICAST_ADDRESS layouts. */
+  prefixLength?: number
 }
 
 export interface RawIfConfig {

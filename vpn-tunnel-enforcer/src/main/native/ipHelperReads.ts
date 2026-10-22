@@ -43,6 +43,9 @@ function load(): any {
     PrefixOrigin: 'uint32_t', SuffixOrigin: 'uint32_t', DadState: 'uint32_t',
     ValidLifetime: 'uint32_t', PreferredLifetime: 'uint32_t', LeaseLifetime: 'uint32_t', OnLinkPrefixLength: 'uint8_t'
   })
+  if (koffi.offsetof(Unicast, 'OnLinkPrefixLength') !== 56 || koffi.sizeof(Unicast) !== 64) {
+    throw new Error('unsupported IP_ADAPTER_UNICAST_ADDRESS layout')
+  }
   const AddrNode = defineStruct(koffi, 'VPNTE_IP_ADAPTER_ADDRESS_NODE', {
     Length: 'uint32_t', Reserved: 'uint32_t', Next: 'void *', Address: SockAddr
   })
@@ -155,7 +158,7 @@ export function readNdisCharacteristicsByGuid(): Map<string, number> {
 }
 
 /** All interfaces (including hidden/filter/loopback) from GetIfTable2 + NDIS hidden flag. */
-export function readRawAdapters(): RawAdapter[] {
+export function readRawAdapters(includeCharacteristics = true): RawAdapter[] {
   const a = load()
   const out = [null as unknown]
   const rc = a.GetIfTable2(out)
@@ -165,7 +168,8 @@ export function readRawAdapters(): RawAdapter[] {
     const n = a.koffi.decode(out[0], 'uint32_t') as number
     if (!Number.isInteger(n) || n < 0 || n > MAX_ADAPTERS) throw new Error(`implausible interface count ${n}`)
     const raw = Buffer.from(a.koffi.decode(out[0], 'uint8_t', 8 + n * IF_ROW2_SIZE))
-    const chars = readNdisCharacteristics(a)
+    // Ownership reads need all aliases, including Wintun, but no visibility flags.
+    const chars = includeCharacteristics ? readNdisCharacteristics(a) : new Map<string, number>()
     rows = []
     for (let i = 0; i < n; i++) {
       const o = 8 + i * IF_ROW2_SIZE
@@ -216,7 +220,8 @@ export function readRawIfConfigs(): RawIfConfig[] {
       if (g >= MAX_UNICAST) throw new Error(`GetAdaptersAddresses: more than ${MAX_UNICAST} unicast addresses on interface ${cur.IfIndex}`)
       const r: any = a.koffi.decode(u, a.Unicast)
       const s = sockaddrText(a, r.Address)
-      unicast.push({ ifIndex: cur.IfIndex, family: s.family, address: s.text, dadState: r.DadState, suffixOrigin: r.SuffixOrigin })
+      unicast.push({ ifIndex: cur.IfIndex, family: s.family, address: s.text, dadState: r.DadState, suffixOrigin: r.SuffixOrigin,
+        prefixLength: r.Length >= 57 ? r.OnLinkPrefixLength : undefined })
       u = r.Next
     }
     const walk = (head: any): string[] => {

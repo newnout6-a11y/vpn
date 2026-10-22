@@ -4,12 +4,39 @@ import { spawnSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
-import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs } from './real-vpn-runner.mjs'
+import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership } from './real-vpn-runner.mjs'
 
 const hosted = { GITHUB_ACTIONS: 'true', RUNNER_OS: 'Windows', RUNNER_ENVIRONMENT: 'github-hosted',
   GITHUB_EVENT_NAME: 'workflow_dispatch', RUNNER_TEMP: 'C:\\runner-temp', APPDATA: 'C:\\runner-profile' }
 const seed = { schemaVersion: 1, settings: { connectionMode: 'directVpn', routingMode: 'hard', firewallKillSwitch: true },
   profiles: [{ input: 'FAKE-A', clientDevice: 'pc' }, { input: 'FAKE-B' }] }
+
+test('hosted native oracle requires a positive real CIM comparison, with no network mutation', async () => {
+  const result = await verifyNativeTunOwnership(async (args, env) => {
+    assert.deepEqual(args, ['run', '--mode', 'integration', 'src/main/native/ownedTunInterfaceCore.itest.ts', '--reporter=dot'])
+    assert.equal(env.VPNTE_REQUIRE_TUN_OWNERSHIP_COMPARISON, '1')
+    return 'Vitest output\n{"fixture":"owned-tun-read-only","comparisons":2,"positive":1}\n'
+  })
+  assert.deepEqual(result, { status: 'PASS', comparisons: 2, positive: 1 })
+})
+test('empty, skipped, missing or malformed native comparison never counts as positive', async () => {
+  for (const value of [null, {}, { comparisons: 0, positive: 0 }, { comparisons: 1, positive: 0 },
+    { comparisons: 1, positive: 2 }, { comparisons: '1', positive: 1 }, { comparisons: 5000, positive: 1 }]) {
+    await assert.rejects(verifyNativeTunOwnership(async () => JSON.stringify({ fixture: 'owned-tun-read-only', ...value })))
+  }
+  await assert.rejects(verifyNativeTunOwnership(async () => '2 tests skipped'))
+})
+
+test('native oracle accepts Vitest ANSI reset prefixes on the exact JSON line', async () => {
+  const result = await verifyNativeTunOwnership(async () => '\u001b[90mstdout\u001b[2m | integration\n'
+    + '\u001b[22m\u001b[39m{"fixture":"owned-tun-read-only","comparisons":1,"positive":1}\n')
+  assert.deepEqual(result, { status: 'PASS', comparisons: 1, positive: 1 })
+  await assert.rejects(verifyNativeTunOwnership(async () => '\u001b[22mPRIVATE {"fixture":"owned-tun-read-only","comparisons":1,"positive":1}'))
+})
+test('native comparison process failure cannot expose raw output or credentials', async () => {
+  await assert.rejects(verifyNativeTunOwnership(async () => { throw new Error('FAKE-PRIVATE-PAYLOAD') }),
+    error => !error.message.includes('FAKE-PRIVATE-PAYLOAD'))
+})
 
 test('hosted launch exposes only a valid loopback inspector and preserves sandbox/graphics', () => {
   for (const port of [1, 65535]) assert.deepEqual(hostedLaunchArgs(port), [`--inspect=127.0.0.1:${port}`])
