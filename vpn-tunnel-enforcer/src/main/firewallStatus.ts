@@ -36,11 +36,20 @@ function Get-VpnteStatusFilterIndex($filters) {
   }
   return $index
 }
-# One CIM read per type; never reuse indices across status requests.
-$appIndex=Get-VpnteStatusFilterIndex @(Get-NetFirewallApplicationFilter -All -PolicyStore ActiveStore -ErrorAction Stop)
-$addressIndex=Get-VpnteStatusFilterIndex @(Get-NetFirewallAddressFilter -All -PolicyStore ActiveStore -ErrorAction Stop)
-$portIndex=Get-VpnteStatusFilterIndex @(Get-NetFirewallPortFilter -All -PolicyStore ActiveStore -ErrorAction Stop)
-$interfaceIndex=Get-VpnteStatusFilterIndex @(Get-NetFirewallInterfaceFilter -All -PolicyStore ActiveStore -ErrorAction Stop)
+# Independent read-only CIM queries; no indices or jobs survive this request.
+$filterJobs=@{}
+try {
+  $filterJobs.app=Get-NetFirewallApplicationFilter -All -PolicyStore ActiveStore -AsJob -ErrorAction Stop
+  $filterJobs.address=Get-NetFirewallAddressFilter -All -PolicyStore ActiveStore -AsJob -ErrorAction Stop
+  $filterJobs.port=Get-NetFirewallPortFilter -All -PolicyStore ActiveStore -AsJob -ErrorAction Stop
+  $filterJobs.interface=Get-NetFirewallInterfaceFilter -All -PolicyStore ActiveStore -AsJob -ErrorAction Stop
+  $appIndex=Get-VpnteStatusFilterIndex @(Receive-Job -Job $filterJobs.app -Wait -ErrorAction Stop)
+  $addressIndex=Get-VpnteStatusFilterIndex @(Receive-Job -Job $filterJobs.address -Wait -ErrorAction Stop)
+  $portIndex=Get-VpnteStatusFilterIndex @(Receive-Job -Job $filterJobs.port -Wait -ErrorAction Stop)
+  $interfaceIndex=Get-VpnteStatusFilterIndex @(Receive-Job -Job $filterJobs.interface -Wait -ErrorAction Stop)
+} finally {
+  if($filterJobs.Count){$filterJobs.Values | Remove-Job -Force -ErrorAction SilentlyContinue}
+}
 $owned=@($ownedRules | ForEach-Object {
   $rule=$_
   $key=[string]$rule.Name
