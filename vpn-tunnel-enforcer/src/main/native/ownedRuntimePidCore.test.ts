@@ -25,6 +25,7 @@ function fixture(rows: Row[], endError = 18) {
       if (path == null) return false
       buffer.write(path, 'utf16le'); length[0] = path.length; return true
     }),
+    exitCode: vi.fn((_handle, status: number[]) => { status[0] = 259; return true }),
     compare: vi.fn((a: string, _alen, b: string): number => a.toUpperCase() === b.toUpperCase() ? 2 : 1),
     close: vi.fn(handle => { closed.push(handle); return true }),
     error: vi.fn(() => endError)
@@ -73,6 +74,68 @@ describe('native fresh runtime presence (AT-02-001/005, AT-03-007/012)', () => {
     expect(f.state).toThrow(/executable path unavailable/)
     expect(f.api.snapshot).toHaveBeenCalledTimes(2)
     expect(f.closed).toEqual([10731, 10732, 42n, 10731, 10732, 42n])
+  })
+  it.each([0, 1, 258, 260, 0xffffffff])('excludes an unreadable candidate only after positive process exit status %s (AT-02-001/009)', status => {
+    const f = fixture([{ pid: 731, path: null }])
+    f.api.exitCode.mockImplementation((_handle, code) => { code[0] = status; return true })
+    expect(f.state()).toBe(false)
+    expect(f.api.open).toHaveBeenCalledWith(0x1000, false, 731)
+    expect(f.api.exitCode).toHaveBeenCalledOnce()
+    expect(f.api.snapshot).toHaveBeenCalledOnce()
+    expect(f.api.next).toHaveBeenCalledOnce()
+    expect(f.closed).toEqual([10731, 42n])
+  })
+  it('continues complete enumeration after confirmed exit and still observes live ownership', () => {
+    const f = fixture([{ pid: 731, path: null }, { pid: 732, path: executable }])
+    f.api.exitCode.mockImplementation((_handle, code) => { code[0] = 0; return true })
+    expect(f.state()).toBe(true)
+    expect(f.api.exitCode).toHaveBeenCalledOnce()
+    expect(f.api.next).toHaveBeenCalledTimes(2)
+    expect(f.closed).toEqual([10731, 10732, 42n])
+  })
+  it('keeps a later unreadable live candidate unknown after confirmed exit of another candidate', () => {
+    const f = fixture([{ pid: 731, path: null }, { pid: 732, path: null }])
+    f.api.exitCode.mockImplementation((handle, code) => { code[0] = handle === 10731 ? 0 : 259; return true })
+    expect(f.state).toThrow(/exit=active/)
+    expect(f.api.snapshot).toHaveBeenCalledTimes(2)
+    expect(f.closed).toEqual([10731, 10732, 42n, 10731, 10732, 42n])
+  })
+  it.each(['active', 'unavailable', 'negative', 'overflow', 'fractional', 'untouched'] as const)('keeps %s exit evidence unknown and the existing rescan bounded', kind => {
+    const f = fixture([{ pid: 731, path: null }])
+    f.api.exitCode.mockImplementation((_handle, code) => {
+      if (kind !== 'untouched') code[0] = ({ active: 259, unavailable: 0, negative: -1, overflow: 0x100000000, fractional: 1.5 })[kind]
+      return kind !== 'unavailable'
+    })
+    expect(f.state).toThrow(/executable path unavailable/)
+    expect(f.api.exitCode).toHaveBeenCalledTimes(2)
+    expect(f.api.snapshot).toHaveBeenCalledTimes(2)
+    expect(f.closed).toEqual([10731, 42n, 10731, 42n])
+  })
+  it('does not turn incomplete enumeration or failed closure into absence after positive exit', () => {
+    for (const failure of ['enumeration', 'close']) {
+      const f = fixture([{ pid: 731, path: null }], failure === 'enumeration' ? 5 : 18)
+      f.api.exitCode.mockImplementation((_handle, code) => { code[0] = 0; return true })
+      if (failure === 'close') f.api.close.mockReturnValue(false)
+      expect(f.state).toThrow(failure === 'enumeration' ? /incomplete process enumeration/ : /handle close failed/)
+      expect(f.api.snapshot).toHaveBeenCalledOnce()
+    }
+  })
+  it('preserves the image failure code when exit-status failure overwrites GetLastError', () => {
+    const f = fixture([{ pid: 731, path: null }])
+    let lastError = 0
+    f.api.image.mockImplementation(() => { lastError = 5; return false })
+    f.api.exitCode.mockImplementation(() => { lastError = 6; return false })
+    f.api.error.mockImplementation(() => lastError)
+    expect(f.state).toThrow('runtime PID: executable path unavailable (QueryFullProcessImageNameW; win32=5; exit=unavailable)')
+  })
+  it('keeps startup path proof strict and avoids extra status reads for readable images', () => {
+    const missing = fixture([{ pid: 731, path: null }])
+    missing.api.exitCode.mockImplementation((_handle, code) => { code[0] = 0; return true })
+    expect(missing.read).toThrow(/executable path unavailable/)
+    expect(missing.api.exitCode).not.toHaveBeenCalled()
+    const live = fixture([{ pid: 731, path: executable }])
+    expect(live.state()).toBe(true)
+    expect(live.api.exitCode).not.toHaveBeenCalled()
   })
   it.each(['open', 'image'] as const)('uses a fresh complete observation after a candidate disappears during %s', failure => {
     for (const after of [[], [{ pid: 732, path: executable }], [{ pid: 732, path: 'C:\\Foreign\\vpnte-sing-box.exe' }]]) {

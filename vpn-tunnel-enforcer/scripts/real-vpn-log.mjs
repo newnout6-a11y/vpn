@@ -143,11 +143,12 @@ export function safeAppEvent(event) {
   ]) if (pattern.test(errorText)) { result.errorKind = kind; break }
   if (event.scope === 'tun' && ['native runtime PID unavailable, using PowerShell', 'native runtime status unavailable, using PowerShell'].includes(event.message)) {
     const pathMessage = typeof diagnostic === 'string' ? diagnostic : diagnostic?.message
-    const pathFailure = typeof pathMessage === 'string' && /^runtime PID: executable path unavailable \((OpenProcess|QueryFullProcessImageNameW); win32=(0|[1-9][0-9]{0,9})\)$/.exec(pathMessage)
+    const pathFailure = typeof pathMessage === 'string' && /^runtime PID: executable path unavailable \((OpenProcess|QueryFullProcessImageNameW); win32=(0|[1-9][0-9]{0,9})(?:; exit=(active|unavailable|invalid))?\)$/.exec(pathMessage)
     if (pathFailure && pathFailure[0] === pathMessage) {
       result.runtimePathApi = pathFailure[1]
       result.runtimePathError = ({ 0: 'unspecified', 5: 'access-denied', 6: 'invalid-handle', 31: 'general-failure',
         87: 'invalid-parameter', 122: 'insufficient-buffer', 299: 'partial-copy', 1168: 'not-found' })[pathFailure[2]] ?? 'other'
+      if (pathFailure[3]) result.runtimePathState = pathFailure[3]
     }
   }
   if (result.errorKind === 'adapter-snapshot') {
