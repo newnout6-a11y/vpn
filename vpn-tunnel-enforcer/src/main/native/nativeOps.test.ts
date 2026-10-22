@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runNativeOp } from './nativeOps'
 import { isHostResponse, NativeHostError } from './hostProtocol'
 import { readSelectedIpv4InterfacesInProcess } from './selectedRouteInterfacesCore'
+import * as runtimeCore from './ownedRuntimePidCore'
 
 vi.mock('./selectedRouteInterfacesCore', () => ({ readSelectedIpv4InterfacesInProcess: vi.fn() }))
 
@@ -14,6 +15,15 @@ afterEach(() => {
 })
 
 describe('native host operations', () => {
+  it('dispatches complete runtime presence and preserves refusals without terminating processes', async () => {
+    const read = vi.spyOn(runtimeCore, 'readOwnedRuntimeStateInProcess').mockReturnValueOnce(false)
+    try {
+      await expect(runNativeOp('owned-runtime-state', { runtimeDir: 'C:\\runtime' })).resolves.toBe(false)
+      expect(read).toHaveBeenCalledExactlyOnceWith('C:\\runtime')
+      read.mockImplementationOnce(() => { throw new Error('Runtime evidence unavailable') })
+      await expect(runNativeOp('owned-runtime-state', { runtimeDir: 'C:\\runtime' })).rejects.toThrow('Runtime evidence unavailable')
+    } finally { read.mockRestore() }
+  })
   it('dispatches selected-route-interfaces without forcing an adapter or destination', async () => {
     const read = vi.mocked(readSelectedIpv4InterfacesInProcess)
     read.mockReturnValueOnce([7, 8, 7])
@@ -42,7 +52,9 @@ describe('native host operations', () => {
     ['physical-snapshot', { profiles: [], retainedGuids: ["'; throw 'injected'"] }, /Invalid retained adapter GUID/],
     ['owned-runtime-pid', {}, /executable path is required/],
     ['owned-runtime-pid', { executable: 'relative.exe' }, /invalid executable path/],
-    ['owned-runtime-pid', { executable: 'C:\\runtime\\core.dll' }, /invalid executable path/]
+    ['owned-runtime-pid', { executable: 'C:\\runtime\\core.dll' }, /invalid executable path/],
+    ['owned-runtime-state', {}, /runtime directory is required/],
+    ['owned-runtime-state', { runtimeDir: '..' }, /invalid runtime directory/]
   ] as const)('rejects bad arguments for %s before touching koffi', async (op, args, message) => {
     await expect(runNativeOp(op, args)).rejects.toThrow(message)
   })

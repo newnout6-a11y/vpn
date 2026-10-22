@@ -8091,3 +8091,11 @@ PR #118: первый реальный run 39684890218 на 0509231 подтве
 PR119: Qodo выявил рост worst-case route proof до≈11с; воспроизведены4red. Исправляется общим budget3000мс дляowner/adapter/native/fallback безkill общегоhost; focused79/79. Первый real-run39744390883 FAIL до действий: startup inspect-runtime timeout, затемcleanupPASS; маршруты не вызывались. Полный повтор и окончательный real-run ещё нужны.
 
 Правка budget PR119 проверена: полный5974passed/5existing skipped,413.70с,exit0;typecheckexit0;driver32/32;traceabilityAC927/927,F210/210;diffcheckexit0. Отправляется повторное независимое ревью и реальный прогон окончательногоHEAD.
+
+PR119 окончательный real-run39746009829:8/8PASS,IP/settings/cleanup/655строк progress подтверждены, native routes1–2мс безfallback. Сумма36759мс; отмена смены12246мс, rollback-baseline3425мс. Qodo1596415 на точном030d838 подтвердил finding implemented, новых нет; CI39746008698 success Windows/Rust/site. PR119 слит22.10.2026 19:10:08UTC как3e809c2 после повторной проверки CI/review/real evidence. Зависимая ветка runtime-state обновлена fast-forward без потери рабочих правок.
+
+### Автономное ускорение: этап43, native runtime presence (22.10.2026)
+
+Read-only ToolHelp/QueryFullProcessImageNameW заменяет foreground inspect-runtime; полный свежий scan, все handles закрыты, strict path boundary. Native refusal сохраняет worker/CIM fallback в общем5000мс бюджете; unknown не даёт exit proof. Stop commands и readiness/cleanup порядок не изменены. Focused333/333 после явногоenv в старойfixture; read-only Windows2/2,Electron1/1. Native presence10–21мс на controlledNode fixture; общий CIM наПКunknown,0сравнений. ВCI4CIM-сравнения обязательны. Полныйsuite выполняется, новый PR/real-run ещё нужны. Подробности и red/failure evidence — этап43 журнала.
+
+Полный повтор этапа 43: 6 failed / 6007 passed из-за второго старого fake process без env; исправлены только fixture dependencies. Добавлена проверка общего deadline для трёх последовательных readers, focused 34/34. Окончательный `npm.cmd test -- --reporter=dot`: **6014 passed / 5 existing skipped**, 356.95 с, exit 0; `npm.cmd run typecheck` exit 0 (165 IPC / 0 public any); driver 34/34; traceability AC 927/927, F 210/210; diff check exit 0. Прерванный первый log не выдаётся за проверку. Новая правка готова к отдельному PR, независимому ревью и реальному прогону.

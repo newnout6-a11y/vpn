@@ -17,6 +17,7 @@ import sudo from 'sudo-prompt'
 import { execElevated, isProcessElevated } from './admin'
 import { logEvent } from './appLogger'
 import { readOwnedRuntimePidNative } from './native/ownedRuntimePid'
+import { readOwnedRuntimeStateNative } from './native/ownedRuntimeState'
 import { nativeSelectedIpv4Interfaces } from './native/selectedRouteInterfaces'
 import { rollbackTunNetworkBaselineIfApplied, rollbackTunNetworkBaselineOrThrow } from './systemNetwork'
 import { settingsStore } from './settings'
@@ -1499,21 +1500,46 @@ foreach ($destination in @('1.1.1.1', '8.8.8.8', '208.67.222.222')) {
 
 export async function isOwnedTunRuntimeRunning(requireProof = false): Promise<boolean> {
   if (process.platform !== 'win32') return false
+  const deadline = performance.now() + 5000
+  const remaining = () => Math.max(0, Math.floor(deadline - performance.now()))
+  const bounded = async <T>(read: () => Promise<T>): Promise<T> => {
+    const budget = remaining()
+    if (!budget) throw new Error('Owned runtime status deadline exceeded')
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([read(), new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('Owned runtime status deadline exceeded')), budget)
+      })])
+    } finally { clearTimeout(timer) }
+  }
   try {
     const runtimeDir = getTunRuntimeDir()
+    if (process.env.VPNTE_DISABLE_NATIVE_NET !== '1') {
+      const started = performance.now()
+      try {
+        const running = await bounded(() => readOwnedRuntimeStateNative(runtimeDir))
+        if (!remaining()) throw new Error('Owned runtime status deadline exceeded')
+        logEvent('debug', 'tun', 'native runtime status timing', { durationMs: Math.round(performance.now() - started) })
+        return running
+      } catch (error) {
+        logEvent('debug', 'tun', 'native runtime status unavailable, using PowerShell', error)
+        if (!remaining()) throw error
+      }
+    }
     let stdout: string
-    try { stdout = await executeRecoveryOperation({ op: 'inspect-runtime', runtimeDir }, 5000) }
+    try { stdout = await bounded(() => executeRecoveryOperation({ op: 'inspect-runtime', runtimeDir }, remaining())) }
     catch (error) {
       if (!(error instanceof RecoveryWorkerError) || error.code !== 'unavailable') throw error
       // Only known pre-dispatch unavailability permits the existing reader.
       // Query failure/deadline/closed admission cannot prove that the runtime exited.
-      stdout = await runPowerShell(`
+      stdout = await bounded(() => runPowerShell(`
 $runtimeDir = ${psSingleQuote(runtimeDir)}
 ${OWNED_RUNTIME_STATUS_QUERY_SCRIPT}
-`, 5000)
+`, remaining()))
     }
     const result = String(stdout || '').trim().toLowerCase()
     if (result !== 'true' && result !== 'false') throw new Error('Owned runtime status response is invalid')
+    if (!remaining()) throw new Error('Owned runtime status deadline exceeded')
     return result === 'true'
   } catch (err) {
     logEvent('debug', 'tun', 'owned runtime status probe failed', err)

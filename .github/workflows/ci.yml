@@ -83,6 +83,10 @@ jobs:
         run: npm test -- --mode integration src/main/liveServerProbe.handshakeDrain.itest.ts src/main/keyHealthChecker.transportDrain.itest.ts
       - name: Маршруты Windows — read-only Win32/CIM
         run: npm test -- --mode integration src/main/native/selectedRouteInterfacesCore.itest.ts
+      - name: Runtime Windows — read-only Win32/CIM
+        env:
+          VPNTE_REQUIRE_CIM_RUNTIME_COMPARISON: '1'
+        run: npm test -- --mode integration src/main/native/ownedRuntimeStateCore.itest.ts
       - name: Трассировка приёмочных тестов
         working-directory: .
         run: python docs/04-приёмочные-тесты/traceability/check-coverage.py

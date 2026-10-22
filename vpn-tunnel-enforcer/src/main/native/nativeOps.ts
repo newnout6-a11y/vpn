@@ -9,7 +9,7 @@ import { createKoffiSource, snapshotFromSource } from './physicalAdapterCore'
 import { notifyWinInetInProcess } from './winInetCore'
 import type { HostOp } from './hostProtocol'
 import { normalizeRetainedAdapterGuids } from '../physicalAdapterSnapshot'
-import { readOwnedRuntimePidInProcess } from './ownedRuntimePidCore'
+import { readOwnedRuntimePidInProcess, readOwnedRuntimeStateInProcess } from './ownedRuntimePidCore'
 import { readSelectedIpv4InterfacesInProcess } from './selectedRouteInterfacesCore'
 
 function stringArray(value: unknown, what: string): string[] {
@@ -55,6 +55,9 @@ export async function runNativeOp(op: HostOp, args: unknown): Promise<unknown> {
       return readOwnedRuntimePidInProcess(a.executable)
     case 'selected-route-interfaces':
       return readSelectedIpv4InterfacesInProcess()
+    case 'owned-runtime-state':
+      if (typeof a.runtimeDir !== 'string') throw new Error('runtime status: runtime directory is required')
+      return readOwnedRuntimeStateInProcess(a.runtimeDir)
     case 'wininet':
       await notifyWinInetInProcess()
       return true

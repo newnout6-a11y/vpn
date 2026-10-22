@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RecoveryWorkerError } from './recoveryPsWorker'
 import { OWNED_RUNTIME_STATUS_QUERY_SCRIPT, OWNED_RUNTIME_STOP_SCRIPT, validateRecoveryRequest, type RecoveryRequest } from './recoveryPsProtocol'
 
@@ -18,7 +18,7 @@ function compile(name: string) {
 const runtimeDir = 'C:\\VPNTE-fixture-runtime'
 function harness(platform = 'win32') {
   const deps = {
-    process: { platform },
+    process: { platform, env: { VPNTE_DISABLE_NATIVE_NET: '1' } },
     getTunRuntimeDir: () => runtimeDir,
     executeRecoveryOperation: vi.fn(async (_request: RecoveryRequest, _deadline: number) => 'false'),
     RecoveryWorkerError,
@@ -27,13 +27,53 @@ function harness(platform = 'win32') {
     RUNTIME_EXE_NAME: 'vpnte-sing-box.exe',
     psSingleQuote: (text: string) => `'${text.replace(/'/g, "''")}'`,
     runPowerShell: vi.fn(async (_script: string, _deadline: number) => 'false'),
+    readOwnedRuntimeStateNative: vi.fn(async (_runtimeDir: string) => false),
     logEvent: vi.fn()
   }
   const read = new Function(...Object.keys(deps), compile('isOwnedTunRuntimeRunning'))(...Object.values(deps)) as (requireProof?: boolean) => Promise<boolean>
   return { ...deps, read }
 }
 
+afterEach(() => { vi.useRealTimers() })
+
 describe('fresh owned runtime status', () => {
+  it('uses a fresh native presence or absence result without invoking CIM or termination', async () => {
+    const h = harness(); h.process.env.VPNTE_DISABLE_NATIVE_NET = '0'
+    h.readOwnedRuntimeStateNative.mockResolvedValueOnce(true).mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    expect(await h.read(true)).toBe(true)
+    expect(await h.read(true)).toBe(false)
+    expect(await h.read(true)).toBe(true)
+    expect(h.readOwnedRuntimeStateNative.mock.calls).toEqual([[runtimeDir], [runtimeDir], [runtimeDir]])
+    expect(h.executeRecoveryOperation).not.toHaveBeenCalled()
+    expect(h.runPowerShell).not.toHaveBeenCalled()
+  })
+  it('falls back to the original fresh worker query after native refusal and preserves private diagnostics', async () => {
+    const h = harness(), error = new Error('native process path unavailable')
+    h.process.env.VPNTE_DISABLE_NATIVE_NET = '0'; h.readOwnedRuntimeStateNative.mockRejectedValue(error)
+    h.executeRecoveryOperation.mockResolvedValue('true')
+    expect(await h.read(true)).toBe(true)
+    expect(h.executeRecoveryOperation).toHaveBeenCalledOnce()
+    expect(h.logEvent).toHaveBeenCalledWith('debug', 'tun', 'native runtime status unavailable, using PowerShell', error)
+  })
+  it('never treats two failed observations as process absence', async () => {
+    const h = harness(); h.process.env.VPNTE_DISABLE_NATIVE_NET = '0'
+    h.readOwnedRuntimeStateNative.mockRejectedValue(new Error('native unknown'))
+    const error = new RecoveryWorkerError('rejected', 'CIM unknown'); h.executeRecoveryOperation.mockRejectedValue(error)
+    await expect(h.read(true)).rejects.toBe(error)
+    expect(h.runPowerShell).not.toHaveBeenCalled()
+  })
+  it('refuses a stalled native read within the original total budget and does not begin a late fallback', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    const h = harness(); h.process.env.VPNTE_DISABLE_NATIVE_NET = '0'
+    let finish!: (running: boolean) => void
+    h.readOwnedRuntimeStateNative.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const complete = vi.fn(), pending = h.read(true).then(() => complete('unexpected proof'), () => complete('refused'))
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(complete).toHaveBeenCalledExactlyOnceWith('refused')
+    expect(h.executeRecoveryOperation).not.toHaveBeenCalled()
+    finish(false); await pending
+    expect(complete).toHaveBeenCalledTimes(1)
+  })
   it('reads changing process state on every call with the original query deadline', async () => {
     const h = harness()
     h.executeRecoveryOperation.mockResolvedValueOnce('true').mockResolvedValueOnce('false').mockResolvedValueOnce('true')
@@ -41,15 +81,42 @@ describe('fresh owned runtime status', () => {
     expect(await h.read(true)).toBe(false)
     expect(await h.read(true)).toBe(true)
     expect(h.executeRecoveryOperation).toHaveBeenCalledTimes(3)
-    expect(h.executeRecoveryOperation).toHaveBeenCalledWith({ op: 'inspect-runtime', runtimeDir }, 5000)
+    expect(h.executeRecoveryOperation).toHaveBeenLastCalledWith({ op: 'inspect-runtime', runtimeDir }, expect.any(Number))
+    expect(h.executeRecoveryOperation.mock.calls.every(([, deadline]) => deadline > 0 && deadline <= 5000)).toBe(true)
     expect(h.runPowerShell).not.toHaveBeenCalled()
+  })
+  it('shares one deadline across a slow native refusal, unavailable worker and standalone fallback', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    const h = harness(); h.process.env.VPNTE_DISABLE_NATIVE_NET = '0'
+    h.readOwnedRuntimeStateNative.mockImplementation(() => new Promise<boolean>((_resolve, reject) => {
+      setTimeout(() => reject(new Error('native unknown')), 4000)
+    }))
+    h.executeRecoveryOperation.mockImplementation(() => new Promise<string>((_resolve, reject) => {
+      setTimeout(() => reject(new RecoveryWorkerError('unavailable', 'fixture')), 500)
+    }))
+    let finish!: (value: string) => void
+    h.runPowerShell.mockImplementation(() => new Promise<string>(resolve => { finish = resolve }))
+    const complete = vi.fn()
+    const pending = h.read(true).then(() => complete('unexpected proof'), () => complete('refused'))
+    await vi.advanceTimersByTimeAsync(4500)
+    expect(h.executeRecoveryOperation.mock.calls[0][1]).toBeGreaterThan(0)
+    expect(h.executeRecoveryOperation.mock.calls[0][1]).toBeLessThanOrEqual(1000)
+    expect(h.runPowerShell.mock.calls[0][1]).toBeGreaterThan(0)
+    expect(h.runPowerShell.mock.calls[0][1]).toBeLessThanOrEqual(500)
+    await vi.advanceTimersByTimeAsync(499)
+    expect(complete).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(complete).toHaveBeenCalledExactlyOnceWith('refused')
+    finish('false'); await pending
+    expect(complete).toHaveBeenCalledTimes(1)
   })
   it('uses the shared fixed reader only on pre-dispatch unavailability', async () => {
     const h = harness()
     h.executeRecoveryOperation.mockRejectedValue(new RecoveryWorkerError('unavailable', 'fixture'))
     expect(await h.read(true)).toBe(false)
     const [script, deadline] = h.runPowerShell.mock.calls[0] as unknown as [string, number]
-    expect(deadline).toBe(5000)
+    expect(deadline).toBeGreaterThan(0)
+    expect(deadline).toBeLessThanOrEqual(5000)
     expect(script).toContain("$runtimeDir = 'C:\\VPNTE-fixture-runtime'")
     expect(script).toContain("@('vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')")
     expect(script).toContain('Get-CimInstance Win32_Process -ErrorAction Stop')

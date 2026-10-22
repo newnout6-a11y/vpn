@@ -78,6 +78,7 @@ export function safeAppEvent(event) {
         tun: ['start timing', 'stop timing', 'stop started', 'stop step started', 'stop step completed',
           'owned runtime status probe failed', 'runtime process stop after stop failed',
           'native runtime PID unavailable, using PowerShell',
+          'native runtime status timing', 'native runtime status unavailable, using PowerShell',
           'native route selection timing', 'native route selection unavailable, using PowerShell',
           'start refused because another TUN/VPN is already active', 'WFP priority reservation failed',
           'adapter lockdown result', 'physical adapter lockdown did not apply', 'physical adapter lockdown threw', 'xray startup failed',
@@ -90,10 +91,11 @@ export function safeAppEvent(event) {
           'lockdown not checked: no physical adapters were discovered', 'adapter coverage rollback failed',
           'physical adapter set changed; lockdown coverage is not verified'],
         'ps-helper': ['command timing'], 'firewall-killswitch': ['command timing', 'phase timing', 'native phase timing'],
+        'ip-monitor': ['protected transition IP baseline refreshed', 'protected transition IP baseline not checked'],
         'system-network': ['baseline native phase timing'] })[event.scope]?.includes?.(event.message)
   if (!allowed || !Number.isFinite(Date.parse(event.ts))) return null
   const result = { at: event.ts, scope: event.scope, message: event.message }
-  for (const key of ['ms', 'totalMs', 'durationMs', 'roundtripMs', 'executionMs', 'transportOverheadMs', 'persistMs', 'adapters']) {
+  for (const key of ['ms', 'totalMs', 'durationMs', 'elapsedMs', 'roundtripMs', 'executionMs', 'transportOverheadMs', 'persistMs', 'adapters']) {
     const value = event.details?.[key]
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0) result[key] = value
   }
@@ -102,6 +104,7 @@ export function safeAppEvent(event) {
     if (pattern.test(event[key] ?? '')) result[key] = event[key]
   }
   if (Number.isFinite(event.monotonicMs) && event.monotonicMs >= 0) result.monotonicMs = event.monotonicMs
+  if (event.scope === 'ip-monitor' && Number.isInteger(event.details?.attempt) && event.details.attempt >= 1 && event.details.attempt <= 3) result.attempt = event.details.attempt
   if (['SECURE_STORE_PREFLIGHT_FAILED', 'STARTUP_FAILED'].includes(event.details?.code)) result.code = event.details.code
   for (const key of ['phase', 'step']) if (phases.has(event.details?.[key])) result[key] = event.details[key]
   const timings = {}

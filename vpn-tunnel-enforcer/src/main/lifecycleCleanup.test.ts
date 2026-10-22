@@ -1218,7 +1218,7 @@ function Get-CimInstance {param($ClassName,$ErrorAction) $fixture}
 ${OWNED_RUNTIME_STATUS_QUERY_SCRIPT}`
       const logEvent = noop()
       let observations = 0
-      const runtimeDeps = { process: { platform: 'win32' }, getTunRuntimeDir: () => 'C:\\startup-fixture',
+      const runtimeDeps = { process: { platform: 'win32', env: { VPNTE_DISABLE_NATIVE_NET: '1' } }, getTunRuntimeDir: () => 'C:\\startup-fixture',
         executeRecoveryOperation: vi.fn(async () => {
           observations++
           if (outcome === 'unknown at firewall' && observations === 2 || outcome === 'unknown at adapter' && observations === 3) {

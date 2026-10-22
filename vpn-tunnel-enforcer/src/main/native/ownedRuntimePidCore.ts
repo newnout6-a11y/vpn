@@ -17,6 +17,7 @@ export interface ProcessReadApi {
 const ENTRY_SIZE = 568, NAME_OFFSET = 44, NAME_BYTES = 520, PATH_CHARS = 32768
 const invalidHandle = (handle: Handle) => [0n, -1n, 0xffffffffffffffffn].includes(BigInt(handle))
 let cached: ProcessReadApi | undefined
+const runtimeNames = ['vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe']
 
 function getApi(): ProcessReadApi {
   assertKoffiAllowedHere('runtime PID')
@@ -45,12 +46,9 @@ function getApi(): ProcessReadApi {
   return cached!
 }
 
-/** The explicit API is a test seam. Production code loads FFI only inside the utility process. */
-export function readOwnedRuntimePidInProcess(executable: string, supplied?: ProcessReadApi): number {
-  if (typeof executable !== 'string' || executable.length >= PATH_CHARS || !win32.isAbsolute(executable) || executable.includes('\0') || !/\.exe$/i.test(executable)) {
-    throw new Error('runtime PID: invalid executable path')
-  }
-  const api = supplied ?? getApi(), name = win32.basename(executable)
+/** Complete fresh enumeration is required even when no owned process is found. */
+function ownedProcesses(expected: string, directory: boolean, supplied?: ProcessReadApi): number[] {
+  const api = supplied ?? getApi(), candidateNames = directory ? runtimeNames : [win32.basename(expected)]
   const equal = (a: string, b: string) => {
     const result = api.compare(a, a.length, b, b.length, true)
     if (![1, 2, 3].includes(result)) throw new Error('runtime PID: ordinal comparison failed')
@@ -60,9 +58,9 @@ export function readOwnedRuntimePidInProcess(executable: string, supplied?: Proc
   const snapshot = api.snapshot(2, 0) // TH32CS_SNAPPROCESS
   if (invalidHandle(snapshot)) throw new Error('runtime PID: snapshot unavailable')
   try {
-    const entry = Buffer.alloc(ENTRY_SIZE), seen = new Set<number>()
+    const entry = Buffer.alloc(ENTRY_SIZE), seen = new Set<number>(), owned: number[] = []
     entry.writeUInt32LE(ENTRY_SIZE)
-    let more = api.first(snapshot, entry), pid = 0
+    let more = api.first(snapshot, entry)
     for (let count = 0; ; count++) {
       if (!more) {
         if (api.error() !== 18) throw new Error('runtime PID: incomplete process enumeration') // ERROR_NO_MORE_FILES
@@ -71,7 +69,7 @@ export function readOwnedRuntimePidInProcess(executable: string, supplied?: Proc
       if (count >= 100000 || entry.readUInt32LE(0) !== ENTRY_SIZE) throw new Error('runtime PID: malformed process entry')
       const names = entry.subarray(NAME_OFFSET, NAME_OFFSET + NAME_BYTES).toString('utf16le'), end = names.indexOf('\0')
       if (end < 0) throw new Error('runtime PID: unterminated process name')
-      if (equal(names.slice(0, end), name)) {
+      if (candidateNames.some(name => equal(names.slice(0, end), name))) {
         const candidate = entry.readUInt32LE(8)
         if (!candidate || seen.has(candidate)) throw new Error('runtime PID: invalid or duplicate process identity')
         seen.add(candidate)
@@ -84,15 +82,31 @@ export function readOwnedRuntimePidInProcess(executable: string, supplied?: Proc
           }
           const path = buffer.toString('utf16le', 0, length[0] * 2)
           if (path.includes('\0')) throw new Error('runtime PID: invalid executable path response')
-          if (equal(path, executable)) {
-            if (pid) throw new Error('runtime PID: exactly one owned process required')
-            pid = candidate
-          }
+          if (equal(directory ? path.slice(0, expected.length) : path, expected)) owned.push(candidate)
         } finally { close(processHandle) }
       }
       more = api.next(snapshot, entry)
     }
-    if (!pid) throw new Error('runtime PID: exactly one owned process required')
-    return pid
+    return owned
   } finally { close(snapshot) }
+}
+
+/** Startup still requires exactly one PID; no match never proves process exit here. */
+export function readOwnedRuntimePidInProcess(executable: string, supplied?: ProcessReadApi): number {
+  if (typeof executable !== 'string' || executable.length >= PATH_CHARS || !win32.isAbsolute(executable) || executable.includes('\0') || !/\.exe$/i.test(executable)) {
+    throw new Error('runtime PID: invalid executable path')
+  }
+  const owned = ownedProcesses(executable, false, supplied)
+  if (owned.length !== 1) throw new Error('runtime PID: exactly one owned process required')
+  return owned[0]
+}
+
+/** Same names and strict directory boundary as OWNED_RUNTIME_STATUS_QUERY_SCRIPT. */
+export function readOwnedRuntimeStateInProcess(runtimeDir: string, supplied?: ProcessReadApi): boolean {
+  if (typeof runtimeDir !== 'string' || runtimeDir.length > 2048 || !/^[a-z]:\\/i.test(runtimeDir)
+      || /[\x00-\x1f"/]/.test(runtimeDir) || runtimeDir.slice(2).includes(':')
+      || runtimeDir.split('\\').some(part => part === '..' || part === '.')) {
+    throw new Error('runtime status: invalid runtime directory')
+  }
+  return ownedProcesses(runtimeDir.replace(/\\+$/, '') + '\\', true, supplied).length > 0
 }
