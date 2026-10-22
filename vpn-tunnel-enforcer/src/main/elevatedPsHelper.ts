@@ -181,10 +181,21 @@ export function isElevatedPsHelperRunning(): boolean {
   return helperProcess !== null && !helperProcess.killed && helperProcess.exitCode === null
 }
 
-const HELPER_WARMUP_COMMANDS: ReadonlyArray<{ policy: ElevatedPsPolicy; script: string }> = [
-  { policy: 'firewall-killswitch', script: 'Import-Module NetSecurity -ErrorAction Stop; Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | Out-Null' },
+const HELPER_WARMUP_COMMANDS: ReadonlyArray<{ module: string; policy: ElevatedPsPolicy; script: string }> = [
+  { module: 'NetSecurity', policy: 'firewall-killswitch', script: `
+try {
+  $netSecurityRoot = Join-Path $PSHOME 'Modules\\NetSecurity'
+  foreach ($definition in @('NetFirewallProfile.cmdletDefinition.cdxml', 'NetFirewallRule.cmdletDefinition.cdxml',
+    'NetFirewallApplicationFilter.cmdletDefinition.cdxml', 'NetFirewallAddressFilter.cmdletDefinition.cdxml',
+    'NetFirewallPortFilter.cmdletDefinition.cdxml', 'NetFirewallInterfaceFilter.cmdletDefinition.cdxml')) {
+    Import-Module (Join-Path $netSecurityRoot $definition) -ErrorAction Stop
+  }
+  Update-TypeData -PrependPath (Join-Path $netSecurityRoot 'NetSecurity.types.ps1xml') -ErrorAction Stop
+} catch { Import-Module NetSecurity -ErrorAction Stop }
+Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | Out-Null` },
   // Yield to admitted work between imports; never queue one long adapter warm-up.
   ...['NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'].map(moduleName => ({
+    module: moduleName,
     policy: 'physical-adapter-lockdown' as const,
     script: `Import-Module ${moduleName} -ErrorAction Stop; Get-NetAdapter -ErrorAction Stop | Out-Null`
   }))
@@ -195,7 +206,7 @@ export async function warmElevatedPsHelper(shouldDefer: () => boolean = () => fa
   const owner = helperProcess
   if (!owner || !isElevatedPsHelperRunning()) return
   for (const command of HELPER_WARMUP_COMMANDS) {
-    const module = command.script.match(/^Import-Module (\w+)/)![1]
+    const module = command.module
     let deferred = false
     for (;;) {
       // Never restart this helper or dispatch into its replacement.

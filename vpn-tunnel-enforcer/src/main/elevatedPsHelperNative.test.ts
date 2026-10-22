@@ -19,6 +19,43 @@ if (!warmup) throw new Error('Production helper warm-up commands not found')
 const commands = new Function(ts.transpileModule(warmup.getText(ast), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText + '\nreturn HELPER_WARMUP_COMMANDS;')()
 
 describe.skipIf(process.platform !== 'win32')('native helper timing envelope', () => {
+  it.each(['selective', 'definition-missing', 'types-failed', 'fallback-failed'])(
+    'loads only required firewall definitions, with a complete fallback: %s (AT-00-005/AT-03-007)', variant => {
+      const script = `
+$global:imports=@(); $global:typeReads=0; $global:profileReads=0
+function Import-Module { [CmdletBinding()]param($Name)
+  $global:imports += Split-Path -Leaf $Name
+  if ($Name -eq 'NetSecurity') {
+    if ('${variant}' -eq 'fallback-failed') { throw 'Fallback unavailable' }
+  } elseif ('${variant}' -in @('definition-missing','fallback-failed')) { throw 'Definition unavailable' }
+}
+function Update-TypeData { [CmdletBinding()]param($PrependPath)
+  $global:typeReads++
+  if ('${variant}' -eq 'types-failed') { throw 'Types unavailable' }
+}
+function Get-NetFirewallProfile { [CmdletBinding()]param($Profile)
+  $global:profileReads++
+  [pscustomobject]@{ Name='Domain'; DefaultOutboundAction='NotConfigured' }
+}
+$succeeded=$false
+try { & { ${commands[0].script} }; $succeeded=$true } catch {}
+[pscustomobject]@{ imports=$global:imports; typeReads=$global:typeReads; profileReads=$global:profileReads; succeeded=$succeeded } | ConvertTo-Json -Compress
+`
+      const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+        { encoding: 'utf8', windowsHide: true, timeout: 10000 })
+      expect(result.error).toBeUndefined()
+      expect(result.status).toBe(0)
+      const evidence = JSON.parse(result.stdout.trim())
+      expect(evidence.succeeded).toBe(variant !== 'fallback-failed')
+      expect(evidence.profileReads).toBe(variant === 'fallback-failed' ? 0 : 1)
+      if (variant === 'selective' || variant === 'types-failed') {
+        expect(evidence.imports.slice(0, 6)).toEqual(['NetFirewallProfile', 'NetFirewallRule', 'NetFirewallApplicationFilter',
+          'NetFirewallAddressFilter', 'NetFirewallPortFilter', 'NetFirewallInterfaceFilter'].map(name => name + '.cmdletDefinition.cdxml'))
+        expect(evidence.typeReads).toBe(1)
+      }
+      if (variant === 'selective') expect(evidence.imports).toHaveLength(6)
+      else expect(evidence.imports.at(-1)).toBe('NetSecurity')
+    })
   it('executes fixed warm-up and fresh native reads in the same production runner', () => {
     const requests = commands.map((command: { script: string }, index: number) => ({ id: index + 1, script: command.script }))
     requests.push({ id: 6, script: "Get-NetFirewallProfile -Profile Domain,Private,Public -ErrorAction Stop | ForEach-Object { [string]$_.Name }" })

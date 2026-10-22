@@ -222,6 +222,20 @@ test('runtime ACL inspection exposes timing and fixed transport without paths or
   assert.equal(safeAppEvent({ ...base, message: 'runtime bootstrap refused', details: { path: 'FAKE-PRIVATE-PAYLOAD' } }), null)
 })
 
+test('helper warm-up exposes fixed module/outcome timing without native payloads (AT-00-005)', () => {
+  const base = { ts: '2026-10-23T00:00:00.000Z', scope: 'ps-helper', message: 'warm-up timing' }
+  for (const module of ['NetSecurity', 'NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection', 'FAKE-PRIVATE-PAYLOAD']) {
+    const result = safeAppEvent({ ...base, details: { module, outcome: 'complete', durationMs: 123,
+      script: 'FAKE-PRIVATE-PAYLOAD', stdout: 'FAKE-PRIVATE-PAYLOAD', policy: 'FAKE-PRIVATE-PAYLOAD' } })
+    assert.deepEqual(result, { at: base.ts, scope: base.scope, message: base.message, durationMs: 123, outcome: 'complete',
+      ...(module === 'FAKE-PRIVATE-PAYLOAD' ? {} : { module }) })
+    assert.ok(!JSON.stringify(result).includes('FAKE-PRIVATE-PAYLOAD'))
+  }
+  assert.equal(safeAppEvent({ ...base, details: { outcome: 'failed' } }).outcome, 'failed')
+  assert.equal(safeAppEvent({ ...base, details: { outcome: 'FAKE-PRIVATE-PAYLOAD' } }).outcome, undefined)
+  assert.equal(safeAppEvent({ ...base, message: 'command timing', details: { module: 'NetSecurity', outcome: 'complete' } }).module, undefined)
+})
+
 test('concurrent connect/cancel calls retain separate IDs and elapsed time', async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
   await mkdir(temp, { recursive: true })
