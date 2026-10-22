@@ -20,7 +20,9 @@ let cached: ProcessReadApi | undefined
 const runtimeNames = ['vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe']
 
 class RuntimePathUnavailableError extends Error {
-  constructor() { super('runtime PID: executable path unavailable') }
+  constructor(api: 'OpenProcess' | 'QueryFullProcessImageNameW', code: number) {
+    super(`runtime PID: executable path unavailable (${api}; win32=${code})`)
+  }
 }
 
 function getApi(): ProcessReadApi {
@@ -78,10 +80,10 @@ function ownedProcesses(expected: string, directory: boolean, supplied?: Process
         if (!candidate || seen.has(candidate)) throw new Error('runtime PID: invalid or duplicate process identity')
         seen.add(candidate)
         const processHandle = api.open(0x1000, false, candidate) // PROCESS_QUERY_LIMITED_INFORMATION
-        if (invalidHandle(processHandle)) throw new RuntimePathUnavailableError()
+        if (invalidHandle(processHandle)) throw new RuntimePathUnavailableError('OpenProcess', api.error())
         try {
           const buffer = Buffer.alloc(PATH_CHARS * 2), length = [PATH_CHARS]
-          if (!api.image(processHandle, 0, buffer, length)) throw new RuntimePathUnavailableError()
+          if (!api.image(processHandle, 0, buffer, length)) throw new RuntimePathUnavailableError('QueryFullProcessImageNameW', api.error())
           if (!Number.isInteger(length[0]) || length[0] <= 0 || length[0] >= PATH_CHARS) {
             throw new Error('runtime PID: executable path unavailable')
           }

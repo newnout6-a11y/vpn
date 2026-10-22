@@ -307,3 +307,23 @@ Read-only fixture окончательного CI39841792826: четыре об�
 
 
 Повтор CI39846666724 attempt2 на41beb41 завершился SUCCESS Windows/site/Rust, включая Electron/WFP/native host. Runtime Win32/CIM4/4,cimUnknown0: native11.5606/4.6124/4.4079/5.9938мс,CIM512.6578/508.0805/511.4163/495.0896мс. Первый ACL timeout5000мс не повторился; причина не установлена. Отдельный npx.cmd vitest run src/main/runtimeAclPolicy.test.ts --reporter=dot —28/28,586мс,exit0; source ACL не менялся. PR121 слит 2026-10-22T20:31:56Z,merge b8e3ab6a52adda40879d721389cae72f913686aa. Dependent-ветка fast-forward, tree идентичен41beb41; проверенный source этапа45 не изменился.
+
+
+## Окончательный замер PR #122 — 22.10.2026
+
+[Run 39849791199](https://github.com/newnout6-a11y/vpn/actions/runs/39849791199), head d08d59e7df75d9a03faea7d3e36323a0ac4c7ded, win25-vs2026, отмена500мс, SHA-256 настроек d092a2c90d947e77ad2e92ce39d4eb6842e24a6a8d9c8a22031d693676760c3d. Все8действий PASS; IP passed/isLeak=false; cleanup/settingsUnchanged/debugInstanceClosed PASS; 0runtime/0TUN/adapterDown/0адресов, выход73/signalnull. Все687/687строк progress присутствуют в Actions stdout.
+
+| Действие | Исходный ce95391, мс | d08d59e, мс |
+| --- | ---: | ---: |
+| Подключение | 10030 | 13351 |
+| Отключение | 1942 | 2697 |
+| Подключение и отмена | 2148 | 3517 |
+| Повторное подключение | 2582 | 3970 |
+| Смена сервера | 4709 | 5428 |
+| Обратная смена и отмена с восстановлением | 8375 | 9324 |
+| Обратная смена | 6297 | 4495 |
+| Пинг | 317 | 331 |
+
+Сумма43113мс, общего ускорения нет. WinINet notify3/3/2/3мс. Native runtime success136/10/13/7/8/14/10/10/11/8мс; path-unavailable fallback2, против5 в предыдущем sample. Connect cancellation acknowledgement/settled2955/2956мс; switch6/8687мс. Одного runner sample недостаточно для причинного вывода о полном elapsed. CI39849748956 SUCCESS, обязательный Win32/CIM4/4,cimUnknown0; Qodo1607729 completed/no findings на точном head; PR122 merge f48a916446559cd4dfa00b353e505e5e7fb6d31d.
+
+Следующая диагностическая правка публикует runtimePathApi (OpenProcess/QueryFullProcessImageNameW) и runtimePathError только как фиксированные labels. Win32-код читается до cleanup; неизвестный код выводится как other. Совпадение с точным producer форматом обязательно, сырые messages/коды/пути не публикуются. Safety/ownership/retry/deadline поведение не меняется.

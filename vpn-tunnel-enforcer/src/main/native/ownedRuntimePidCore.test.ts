@@ -89,7 +89,7 @@ describe('native fresh runtime presence (AT-02-001/005, AT-03-007/012)', () => {
       expect(f.state()).toBe(after[0]?.path === executable)
       expect(f.api.snapshot).toHaveBeenCalledTimes(2)
       expect(f.api.first.mock.calls.map(call => call[0])).toEqual([42n, 43n])
-      expect(f.api.error).toHaveBeenCalledOnce()
+      expect(f.api.error).toHaveBeenCalledTimes(2) // failed path read, then complete fresh enumeration
       expect(f.closed.at(-1)).toBe(43n)
     }
   })
@@ -142,6 +142,26 @@ describe('native fresh runtime presence (AT-02-001/005, AT-03-007/012)', () => {
 })
 
 describe('native owned runtime PID (AT-00-002, AT-02-002/009)', () => {
+  it.each(['open', 'image'] as const)('captures the %s Win32 failure before handle cleanup overwrites it (AT-00-005)', failure => {
+    const f = fixture([{ pid: 731, path: executable }])
+    let lastError = failure === 'open' ? 5 : 31
+    if (failure === 'open') f.api.open.mockReturnValue(0)
+    else f.api.image.mockReturnValue(false)
+    f.api.error.mockImplementation(() => lastError)
+    f.api.close.mockImplementation(handle => { f.closed.push(handle); lastError = 6; return true })
+    expect(f.read).toThrow(`runtime PID: executable path unavailable (${failure === 'open' ? 'OpenProcess' : 'QueryFullProcessImageNameW'}; win32=${failure === 'open' ? 5 : 31})`)
+    expect(f.api.error).toHaveBeenCalledOnce()
+    expect(f.closed).toEqual(failure === 'open' ? [42n] : [10731, 42n])
+  })
+  it('reports the fresh scan failure while preserving the bounded retry (AT-00-005)', () => {
+    const f = fixture([{ pid: 731, path: executable }])
+    f.api.open.mockReturnValue(0)
+    f.api.error.mockReturnValueOnce(87).mockReturnValueOnce(5)
+    expect(f.state).toThrow('runtime PID: executable path unavailable (OpenProcess; win32=5)')
+    expect(f.api.error).toHaveBeenCalledTimes(2)
+    expect(f.api.snapshot).toHaveBeenCalledTimes(2)
+    expect(f.closed).toEqual([42n, 42n])
+  })
   it('finishes enumeration and distinguishes exact case-insensitive paths from siblings/prefix collisions', () => {
     const f = fixture([{ pid: 731, path: executable.toLowerCase() },
       { pid: 732, path: 'C:\\Foreign\\vpnte-sing-box.exe' },
