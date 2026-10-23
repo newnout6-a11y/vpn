@@ -15,7 +15,8 @@ function declaration(ast, name) {
   if (!statement) throw new Error('Production declaration missing: ' + name)
   return statement.getText(ast)
 }
-const runner = new Function(compile(declaration(helperAst, 'PS_RUNNER_SCRIPT')) + '\nreturn PS_RUNNER_SCRIPT;')()
+const { NETWORK_MODULE_PREPARATION_PS } = await import('data:text/javascript;base64,' + Buffer.from(compile(await readFile(main('networkModulePreparation'), 'utf8'))).toString('base64'))
+const runner = new Function('NETWORK_MODULE_PREPARATION_PS', compile(declaration(helperAst, 'PS_RUNNER_SCRIPT')) + '\nreturn PS_RUNNER_SCRIPT;')(NETWORK_MODULE_PREPARATION_PS)
 const warmup = new Function(compile(declaration(helperAst, 'HELPER_WARMUP_COMMANDS')) + '\nreturn HELPER_WARMUP_COMMANDS;')()
 const tunSource = await readFile(main('tunAdapter'), 'utf8')
 const { ALL_KNOWN_ALIASES } = await import('data:text/javascript;base64,' + Buffer.from(compile(tunSource)).toString('base64'))

@@ -137,7 +137,7 @@ ${mode === 'dns' ? PHYSICAL_ADAPTER_DNS_SCRIPT : PHYSICAL_ADAPTER_SNAPSHOT_SCRIP
 
 describe('worker launch command budget', () => {
   it.each([false, true])('stays well below the 32767-character command limit (adapters scope: %s)', adapters => {
-    const compressed = gzipSync(Buffer.from(recoveryWorkerScript('C:\\ProgramData', adapters), 'utf8')).toString('base64')
+    const compressed = gzipSync(Buffer.from(recoveryWorkerScript('C:\\ProgramData', adapters), 'utf8'), { level: 9 }).toString('base64')
     // Same launcher text as RecoveryPsWorker; UTF-16 + base64 make every extra source byte cost about 3.5 characters.
     const launcher = `$bytes=[Convert]::FromBase64String('${compressed}');
 $stream=New-Object IO.MemoryStream(,$bytes);

@@ -52,7 +52,7 @@ export class RecoveryPsWorker {
     try {
       // Encoded UTF-16 grows beyond Windows' 32767-character command limit.
       // Transport the fixed source compressed in memory, without script files.
-      const compressed = gzipSync(Buffer.from(recoveryWorkerScript(programData, scope === 'adapters'), 'utf8')).toString('base64')
+      const compressed = gzipSync(Buffer.from(recoveryWorkerScript(programData, scope === 'adapters'), 'utf8'), { level: 9 }).toString('base64')
       const launcher = `$bytes=[Convert]::FromBase64String('${compressed}');
 $stream=New-Object IO.MemoryStream(,$bytes);
 $gzip=New-Object IO.Compression.GZipStream($stream,[IO.Compression.CompressionMode]::Decompress);

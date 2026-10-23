@@ -15,7 +15,7 @@ function requireRule(snapshot: ReturnType<typeof fixture>['snapshot'], name: str
 describe('effective firewall evidence', () => {
   it.skipIf(process.platform !== 'win32').each(['small', 'large', 'no-owned', 'stored-only', 'no-owned-active-error', 'no-owned-stored-error', 'missing-rule-id', 'missing-filter-id',
     'profile-disabled-interface', 'profile-not-configured', 'profile-null', 'profile-missing-field', 'profile-invalid-value',
-    ...['Application', 'Address', 'Port', 'Interface'].flatMap(kind => [`missing-${kind}`, `duplicate-${kind}`, `query-error-${kind}`, `dispatch-error-${kind}`])])(
+    ...['Application', 'Address', 'Port', 'Interface'].flatMap(kind => [`missing-${kind}`, `duplicate-${kind}`, `query-error-${kind}`])])(
     'reads full policy only for owned active rules, preserving one-to-one evidence: %s (AT-03-001/003/004)', variant => {
     const { snapshot } = fixture()
     // The two rules share a display name, but have different native identities/scopes.
@@ -30,7 +30,6 @@ describe('effective firewall evidence', () => {
     const script = `
 $fixture=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')) | ConvertFrom-Json
 $global:filterCalls=@{}
-$global:filterJobs=@{}
 function Get-Service { [CmdletBinding()]param($Name)
   if(-not $fixture.rules.Count){throw 'Unneeded service query'}
   $fixture.services | ForEach-Object { [pscustomobject]@{Name=$_.name;Status=$_.status} }
@@ -58,6 +57,8 @@ function Get-NetFirewallRule { [CmdletBinding()]param($PolicyStore)
 function Read-FixtureFilter($kind,$All,$PolicyStore) {
   if(-not $fixture.rules.Count){throw 'Unneeded filter query'}
   if(-not $All -or $PolicyStore -ne 'ActiveStore'){throw 'Bulk ActiveStore read required'}
+  if($global:filterCalls.ContainsKey($kind)){throw 'Repeated filter query'}
+  $global:filterCalls[$kind]=1
   if('${variant}' -eq ('query-error-'+$kind)){throw 'Fixture filter query denied'}
   # Filter enumeration order must not determine its association with a rule.
   for($i=$fixture.rules.Count-1;$i -ge 0;$i--){
@@ -74,31 +75,11 @@ function Read-FixtureFilter($kind,$All,$PolicyStore) {
     if($i -eq 0 -and '${variant}' -eq ('duplicate-'+$kind)){$filter}
   }
 }
-function New-FixtureFilterJob($kind,$All,$PolicyStore,$AsJob) {
-  if(-not $AsJob -or -not $All -or $PolicyStore -ne 'ActiveStore'){throw 'Independent ActiveStore job required'}
-  if($global:filterCalls.ContainsKey($kind)){throw 'Repeated filter query'}
-  $global:filterCalls[$kind]=1
-  if('${variant}' -eq ('dispatch-error-'+$kind)){throw 'Fixture filter dispatch denied'}
-  $job=[pscustomobject]@{kind=$kind}
-  $global:filterJobs[$kind]=$job
-  return $job
-}
-function Get-NetFirewallApplicationFilter { [CmdletBinding()]param([switch]$All,$PolicyStore,[switch]$AsJob) New-FixtureFilterJob 'Application' $All $PolicyStore $AsJob }
-function Get-NetFirewallAddressFilter { [CmdletBinding()]param([switch]$All,$PolicyStore,[switch]$AsJob) New-FixtureFilterJob 'Address' $All $PolicyStore $AsJob }
-function Get-NetFirewallPortFilter { [CmdletBinding()]param([switch]$All,$PolicyStore,[switch]$AsJob) New-FixtureFilterJob 'Port' $All $PolicyStore $AsJob }
-function Get-NetFirewallInterfaceFilter { [CmdletBinding()]param([switch]$All,$PolicyStore,[switch]$AsJob) New-FixtureFilterJob 'Interface' $All $PolicyStore $AsJob }
-function Receive-Job { [CmdletBinding()]param($Job,[switch]$Wait)
-  if(-not $Wait -or $global:filterJobs.Count -ne 4){throw 'All four queries must start before collection'}
-  Read-FixtureFilter $Job.kind $true 'ActiveStore'
-}
-function Remove-Job { [CmdletBinding()]param([Parameter(ValueFromPipeline=$true)]$Job,[switch]$Force)
-  process {
-    if(-not $Force -or -not $global:filterJobs.ContainsKey($Job.kind)){throw 'Unowned job cleanup'}
-    $global:filterJobs.Remove($Job.kind)
-  }
-}
-try { $actual=&{${FIREWALL_STATUS_PS}} }
-finally { if($global:filterJobs.Count){throw 'Leaked filter query jobs'} }
+function Get-NetFirewallApplicationFilter { [CmdletBinding()]param([switch]$All,$PolicyStore) Read-FixtureFilter 'Application' $All $PolicyStore }
+function Get-NetFirewallAddressFilter { [CmdletBinding()]param([switch]$All,$PolicyStore) Read-FixtureFilter 'Address' $All $PolicyStore }
+function Get-NetFirewallPortFilter { [CmdletBinding()]param([switch]$All,$PolicyStore) Read-FixtureFilter 'Port' $All $PolicyStore }
+function Get-NetFirewallInterfaceFilter { [CmdletBinding()]param([switch]$All,$PolicyStore) Read-FixtureFilter 'Interface' $All $PolicyStore }
+$actual=&{${FIREWALL_STATUS_PS}}
 [pscustomobject]@{snapshot=$actual;calls=$global:filterCalls}|ConvertTo-Json -Compress`
     mkdirSync(join(process.cwd(), '.tmp'), { recursive: true })
     const directory = mkdtempSync(join(process.cwd(), '.tmp', 'vpnte-status-'))
@@ -112,7 +93,6 @@ finally { if($global:filterJobs.Count){throw 'Leaked filter query jobs'} }
         expect(actual.calls).toEqual(snapshot.rules.length ? { Application: 1, Address: 1, Port: 1, Interface: 1 } : {})
       } else if (variant === 'profile-invalid-value') expect(() => parseFirewallStatusSnapshot(JSON.parse(run()).snapshot)).toThrow('Incomplete firewall status snapshot')
       else expect(run).toThrow(variant.endsWith('-error') ? 'Fixture rule query denied' : variant.startsWith('query-error-') ? 'Fixture filter query denied' :
-        variant.startsWith('dispatch-error-') ? 'Fixture filter dispatch denied' :
         variant === 'profile-missing-field' ? 'Incomplete firewall profile read-back' : 'Incomplete firewall filter read-back')
     } finally { rmSync(directory, { recursive: true, force: true }) }
   })
