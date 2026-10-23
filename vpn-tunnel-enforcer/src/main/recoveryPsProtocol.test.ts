@@ -79,9 +79,14 @@ function Get-ItemProperty { [CmdletBinding()]param($Path,$Name) if($global:varia
 function Get-NetIPAddress { [CmdletBinding()]param($InterfaceIndex,$AddressFamily)
   [pscustomobject]@{IPAddress=$(if($global:variant -eq 'ip'){'192.168.250.254'}else{'192.168.250.253'});PrefixLength=$(if($global:variant -eq 'prefix'){24}else{30})}
 }
-function Import-Module { [CmdletBinding()]param($Name)
-  if ($Name -notin @('NetAdapter','DnsClient','NetTCPIP','NetConnection') -and $Name -notlike '*Microsoft.PowerShell.Security.psd1') { throw 'Unexpected import' }
-  $global:steps += 'import:'+$Name
+function Import-Module { [CmdletBinding()]param([string[]]$Name,[switch]$Global)
+  foreach($item in $Name){
+    if ($item -notin @('NetAdapter','DnsClient','NetTCPIP','NetConnection') -and $item -notlike '*Microsoft.PowerShell.Security.psd1' -and $item -notlike ($PSHOME+'\Modules\*.cdxml')) { throw 'Unexpected import' }
+    $global:steps += 'import:'+$item
+  }
+}
+function Update-TypeData { [CmdletBinding()]param($PrependPath)
+  if($PrependPath -notlike ($PSHOME+'\Modules\*.ps1xml')){throw 'Unexpected type data'}
 }
 function netsh {
   switch ($args -join ' ') {
@@ -120,14 +125,21 @@ describe('fixed recovery dispatcher native proof', () => {
   it.skipIf(!native)('returns the identical full baseline through the fixed dispatcher without writes', () => {
     const result = run({ op: 'inspect-physical-adapters' })
     expect(JSON.parse(result.value)).toEqual(JSON.parse(run({op:'inspect-physical-dns'}, 'trusted', true).value))
-    expect(result).toMatchObject({set:0,removed:0,queries:0,order:[]})
+    expect(result).toMatchObject({set:0,removed:0,queries:0})
+    expect(result.order).toHaveLength(8)
+    expect(result.order.every(step => step.startsWith('import:') && step.endsWith('.cdxml'))).toBe(true)
     const transitions = run({ op: 'inspect-transition-adapters' })
     expect(JSON.parse(transitions.value)).toEqual({ teredo: 'Type : client', sixToFour: '6to4 Service State : enabled', isatap: 'ISATAP State : disabled' })
-    expect(transitions).toMatchObject({set:0,removed:0,queries:0,order:[]})
+    expect(transitions).toMatchObject({set:0,removed:0,queries:0})
+    expect(transitions.order).toHaveLength(8)
+    expect(transitions.order.every(step => step.startsWith('import:') && step.endsWith('.cdxml'))).toBe(true)
   }, 20000)
-  it.skipIf(!native)('limits each adapter warm-up to one fixed module and leaves recovery warm-up short', () => {
+  it.skipIf(!native)('prepares fixed network definitions and leaves recovery warm-up short', () => {
     for (const module of ['NetAdapter','DnsClient','NetTCPIP','NetConnection']) {
-      expect(run({op:'warmup-adapters',module})).toMatchObject({value:'RECOVERY_MODULES_READY',set:0,removed:0,queries:0,order:['import:'+module]})
+      const preparation = run({op:'warmup-adapters',module})
+      expect(preparation).toMatchObject({value:'RECOVERY_MODULES_READY',set:0,removed:0,queries:0})
+      expect(preparation.order).toHaveLength(8)
+      expect(preparation.order.every(step => step.startsWith('import:') && step.endsWith('.cdxml'))).toBe(true)
     }
     const recovery = run({op:'warmup'})
     expect(recovery.order).toHaveLength(1)

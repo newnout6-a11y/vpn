@@ -2,6 +2,7 @@
 import { runtimeAclWorkerFunction } from './runtimeAclInspection'
 import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, TRANSITION_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
 import { ADAPTIVE_NETWORK_IDENTITY_SCRIPT } from './adaptiveNetworkIdentityScript'
+import { NETWORK_MODULE_PREPARATION_PS } from './networkModulePreparation'
 export const RECOVERY_MAX_BYTES = 1024 * 1024
 export const ADAPTER_WARMUP_MODULES = ['NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'] as const
 export type RecoveryRequest =
@@ -128,6 +129,7 @@ export function recoveryWorkerFunctions(programData: string): string {
   const literal = `'${programData.replace(/'/g, "''")}'`
   return String.raw`
 $expectedProgramData=${literal}
+${NETWORK_MODULE_PREPARATION_PS}
 ${runtimeAclWorkerFunction(programData)}
 function Read-DnsPolicySnapshot {
 ${DNS_POLICY_SNAPSHOT_SCRIPT}
@@ -205,6 +207,7 @@ function Invoke-RecoveryOperation($request) {
     }
     'inspect-physical-dns' {
       if ($fields -cne 'op') { throw 'Invalid recovery worker fields' }
+      Initialize-VpnteNetworkModules
       $snapshot = Read-PhysicalAdapterDns
       if ($null -eq $snapshot) { return '[]' }
       return $snapshot
@@ -220,21 +223,24 @@ function Invoke-RecoveryOperation($request) {
     }
     'warmup-adapters' {
       if ($fields -cne 'module,op' -or $request.module -isnot [string] -or @(${ADAPTER_WARMUP_MODULES.map(name => `'${name}'`).join(',')}) -cnotcontains $request.module) { throw 'Invalid adapter warm-up fields' }
-      Import-Module $request.module -ErrorAction Stop
+      Initialize-VpnteNetworkModules
       return 'RECOVERY_MODULES_READY'
     }
     'inspect-physical-adapters' {
       if ($fields -cne 'op') { throw 'Invalid recovery worker fields' }
+      Initialize-VpnteNetworkModules
       $snapshot = Read-PhysicalAdapters
       if ($null -eq $snapshot) { return '[]' }
       return $snapshot
     }
     'inspect-transition-adapters' {
       if ($fields -cne 'op') { throw 'Invalid recovery worker fields' }
+      Initialize-VpnteNetworkModules
       return (Read-TransitionAdapters)
     }
     'inspect-tun' {
       if ($fields -ne 'alias,op' -or $request.alias -isnot [string] -or $request.alias -cnotmatch '^(Ethernet (?:[5-9]|1[0-2])|VPNTE-TUN|awg-tun)$') { throw 'Invalid TUN alias' }
+      Initialize-VpnteNetworkModules
       $adapter = @(Get-NetAdapter -Name $request.alias -ErrorAction Stop)
       if ($adapter.Count -ne 1 -or [string]$adapter[0].Name -cne $request.alias) { throw 'VPNTE TUN alias identity mismatch' }
       $adapter = $adapter[0]
