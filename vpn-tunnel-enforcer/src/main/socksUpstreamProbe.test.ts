@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process'
 import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { join, resolve as resolvePath } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { LOOPBACK_CERT, LOOPBACK_KEY } from '../../scripts/fixtures/socks-upstream-certificate'
 
 const fixture = vi.hoisted(() => ({ sockets: [] as any[], tls: null as any, req: null as any,
   tlsSockets: [] as any[], requests: [] as any[], responseCallbacks: [] as any[],
@@ -56,54 +57,7 @@ beforeEach(async () => {
   probe = (await import('./socksUpstreamProbe')).probeSocksUpstream
 })
 
-// AT-02-004: real Node/socks transports, confined to loopback. This public test
-// certificate/key belongs only to this fixture; the client explicitly trusts it.
-const LOOPBACK_CERT = `-----BEGIN CERTIFICATE-----
-MIIC/DCCAeSgAwIBAgIUPMv8VYRlUMoZwVx5nO9AAhYQ9u8wDQYJKoZIhvcNAQEL
-BQAwGDEWMBQGA1UEAwwNYXBpLmlwaWZ5Lm9yZzAgFw0yNjEwMjQwMDAwMDBaGA8y
-MTI2MDkzMDAwMDAwMFowGDEWMBQGA1UEAwwNYXBpLmlwaWZ5Lm9yZzCCASIwDQYJ
-KoZIhvcNAQEBBQADggEPADCCAQoCggEBAOl6pkub6StnYMYpsOqKnUB9ZPEN5IEW
-EyRcS2pCS9Eh8/HcIEes4km5pWCXOjjsDgrjPG/BcyvFdBuYUJZ7YRMLmNKqiKC7
-IjAlC7gFVCv21wY/o3zP0PZlPTG5dvmeE0uFKEN+uQd0gxRT/QW/T7ngFioigPyM
-/7wl4wyXhNe2SgiXzwkC+Tpt5U9S1TRaig7zV+ww8lh+majkicnpfUHetFPN36om
-Lj2mWCq8WFt5nkD2O1UZyunqG+sx12Xj0nkkXvrNCyQ4QQo/aD1vaM1aw4qMf789
-xRbbPRhJwO5PpQmaSwKrt+EJOtqGLYtFwq+Vn069nOHuFjgvo/elHLsCAwEAAaM8
-MDowDwYDVR0TAQH/BAUwAwEB/zAnBgNVHREEIDAegg1hcGkuaXBpZnkub3Jngg1p
-Y2FuaGF6aXAuY29tMA0GCSqGSIb3DQEBCwUAA4IBAQBRWnOjiN9R2p1jHr4RVCNt
-b1rCd+ZYZwNVe1IXg+mq7rtVpYAVbkpC/x80jSNshsijm36WUvTKyY/ZY01RrI0b
-td0UtSyQaI8z1fK+n7JTKBDajiyiQEB1oSdY5+zYi9maARLumpm4ro1zUWqdcjlb
-eCS1Nj+pPqDe1jdEW84DfNv28vt4WrYwDKliQRZZisRTGYZa4YeReZY5q4jStek5
-guAYCEiAsc7V3b5y8HkzB6Y4ZhESmqHQ3AHunHTAjniw6RkbfiGxzh/QxyklhIli
-xbuXncsu1PDRtGbo32d0UjXiXhd+hm/FQkR5n+FBC0IJSzxMrV7YOK+G7T+8wEQ3
------END CERTIFICATE-----`
-const LOOPBACK_KEY = `-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDpeqZLm+krZ2DG
-KbDqip1AfWTxDeSBFhMkXEtqQkvRIfPx3CBHrOJJuaVglzo47A4K4zxvwXMrxXQb
-mFCWe2ETC5jSqoiguyIwJQu4BVQr9tcGP6N8z9D2ZT0xuXb5nhNLhShDfrkHdIMU
-U/0Fv0+54BYqIoD8jP+8JeMMl4TXtkoIl88JAvk6beVPUtU0WooO81fsMPJYfpmo
-5InJ6X1B3rRTzd+qJi49plgqvFhbeZ5A9jtVGcrp6hvrMddl49J5JF76zQskOEEK
-P2g9b2jNWsOKjH+/PcUW2z0YScDuT6UJmksCq7fhCTrahi2LRcKvlZ9OvZzh7hY4
-L6P3pRy7AgMBAAECggEAByXAyEj9UE9Xz3drKAWd98UNK6QzEYmxvYtib94KB85y
-Vr4tjpQqCe0xCnw4dx/3uzHtxTa6W3sRd5foC6mB0afwgedgdigUacwewOMk3+aQ
-FuvvtF/yuvkqVAbAobagSyUPPsPv3SPzd4sfV4rd0znwjm5uwP5FIUOOi6qGrhB3
-9NUSt+00IV6f8QCI1kOXO4uRq7m+gxUdBUuF+K9f8GdBSY5Um07bjuDuyyphJ/iW
-P4cTZUx8s6TekzMD5WfDMlMEUe83rw1SFozSNnPwGQyjBGzdP6e11RAylVUSKLkY
-HYSrAaSJ4wLZNNVnGUq5rAQfKs0tL++R+4A3RtiW5QKBgQD6LVyp4wwOvM0NRXCS
-jtWwTD5qouLysTaKiHcWk8I3v7kG4JkJvwBtms3lJhTJEwjN2MDdV34rxQubrFki
-hThX5eL1EPjDb2wMWimmtMWtjqi1AGvddew/bQnm29xZXX0JZMVrl91CA1lr72uA
-MH3zBJ4cs28WB1wnzcjOd8S8xwKBgQDu6ct9NMano/mOhm5bU8sqW5UBrckzeU7z
-UllIn5k6+Wu70m4g2CPDbzYe6uZeVQrBk6Si95N4KrrJpiJFCFqz0iRUuyMfGjBn
-NJK8CIp/n0P3I26eGCtmXAchM1HbvGMJKNUeIM6l5pwmxpb5isfF9fNlgnV+5JFj
-iSnOVsVkbQKBgASfb/XnryJalMNpBBKBNyuhzQl1ZxIq+iIHMYQmSNF05ntdDRbk
-A6MC2EkisgGhK2l6Vt4ALuGqK3O99IuxwH/HTLFQlfguh+WWiOx+rKRvXWiy0Etw
-UWQ+pI8ygtjX5GaXCRra3IjKvQ1EiEz/GGS0MiO/oQ7cJfTKVaqTBfyjAoGBAMzr
-U1JtNgcMKj0JKRbEZHpMWx45hV3VKtahR1t3KOLglHthHnylZud2OCGEsVsv7i3j
-CU+OsrpbTCMxkCtN4x5hnC/g41sGB4Y+Ha2SVdjpLk6H4ZVQfckqHiNn9UpX50ov
-77wLv7OkfUL1CwG2+2rcbowevdC9E8cgGu+UlXJxAoGAROJDFJelL2H+5qScDjtf
-wSHiOJBFZhYeREnS2WVNNzLI1juoayOoje+2Fashjuh7k5KRWy6Uigmq6vC3z54d
-wERn5IiQBBKvCM+OWldzqaBTU0s9kMG+MAMymPN4dOD3ttlr7D43h3iof7Ciw16R
-+P4cUnHwtkKh605ljPSiUt0=
------END PRIVATE KEY-----`
+// AT-02-004: real Node/socks transports, confined to loopback.
 
 async function realTransport(options: { trustCertificate?: boolean; holdResponse?: boolean; noAuth?: boolean; xray?: boolean; primaryFailure?: boolean } = {}) {
   vi.useRealTimers()
@@ -467,6 +421,28 @@ describe('authenticated candidate egress probe', () => {
     const failed = expect(pending).rejects.toMatchObject({ category: 'network' })
     for (const secured of fixture.tlsSockets) secured.emit('error', new Error('certificate mismatch'))
     respond('8.8.8.8'); await failed
+  })
+  it.each(['ECONNRESET', 'ERR_TLS_CERT_ALTNAME_INVALID'])('records only the bounded native TLS code %s', async code => {
+    const { pending } = await running()
+    const failed = expect(pending).rejects.toMatchObject({ category: 'network' })
+    for (const secured of fixture.tlsSockets) secured.emit('error', Object.assign(new Error(upstream.password), { code }))
+    await failed
+    expect(fixture.logEvent.mock.calls.every(call => call[3].nativeCode === code)).toBe(true)
+    expect(JSON.stringify(fixture.logEvent.mock.calls)).not.toContain(upstream.password)
+  })
+  it('captures synchronous HTTPS setup errors without exposing their messages', async () => {
+    fixture.request.mockImplementation(() => { throw Object.assign(new Error(upstream.password), { code: 'ERR_INVALID_ARG_TYPE' }) })
+    await expect(probe(upstream)).rejects.toMatchObject({ category: 'network' })
+    expect(fixture.logEvent.mock.calls.every(call => call[3].nativeCode === 'ERR_INVALID_ARG_TYPE')).toBe(true)
+    expect(JSON.stringify(fixture.logEvent.mock.calls)).not.toContain(upstream.password)
+  })
+  it('omits unknown native codes even when their strings contain a credential', async () => {
+    const { pending } = await running()
+    const failed = expect(pending).rejects.toMatchObject({ category: 'network' })
+    for (const secured of fixture.tlsSockets) secured.emit('error', Object.assign(new Error(upstream.password), { code: upstream.password }))
+    await failed
+    expect(fixture.logEvent.mock.calls.every(call => !('nativeCode' in call[3]))).toBe(true)
+    expect(JSON.stringify(fixture.logEvent.mock.calls)).not.toContain(upstream.password)
   })
   it('does not report success when physical socket closure cannot be confirmed', async () => {
     const { pending } = await running()

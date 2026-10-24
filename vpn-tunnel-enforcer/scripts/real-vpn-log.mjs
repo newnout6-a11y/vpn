@@ -38,6 +38,7 @@ export function safeActionResult(value) {
   for (const key of ['success', 'cancelled']) if (typeof value?.[key] === 'boolean') result[key] = value[key]
   const category = value?.category ?? value?.error?.category
   if (categories.includes(category)) result.category = category
+  if (typeof value?.oracleCode === 'string' && /^VPNTE_ORACLE_(?:RUNTIME_INVENTORY|CONFIG_READ|ADAPTER_INVENTORY|ADDRESS_INVENTORY|SELECTOR_IDENTITY|TUN_IDENTITY|SLOT_IDENTITY|ENDPOINT_ROUTE)$/.test(value.oracleCode)) result.oracleCode = value.oracleCode
   return result
 }
 
@@ -137,8 +138,16 @@ export function safeAppEvent(event) {
       stage: ['local-connect', 'socks-handshake', 'tls-handshake', 'https-response', 'response-body', 'socket-close'],
       outcome: ['success', 'network', 'cancelled', 'timeout', 'internal'],
       code: ['CONNECT_FAILED', 'SOCKS_FAILED', 'SOCKS_AUTH_REQUIRED', 'SOCKS_AUTH_REJECTED', 'SOCKS_UPSTREAM_REJECTED', 'SOCKS_CLOSED', 'TLS_FAILED', 'HTTPS_FAILED', 'HTTP_STATUS', 'RESPONSE_TOO_LARGE',
-        'INVALID_PUBLIC_IP', 'SOCKET_CLOSE_UNCONFIRMED', 'CANCELLED', 'DEADLINE', 'OK']
+        'INVALID_PUBLIC_IP', 'SOCKET_CLOSE_UNCONFIRMED', 'CANCELLED', 'DEADLINE', 'OK'],
+      nativeCode: ['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT', 'ERR_SOCKET_CLOSED',
+        'ERR_INVALID_ARG_TYPE', 'ERR_INVALID_ARG_VALUE', 'ERR_INVALID_PROTOCOL', 'ERR_STREAM_WRITE_AFTER_END',
+        'ERR_TLS_INVALID_PROTOCOL_VERSION', 'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED',
+        'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+        'ERR_SSL_WRONG_VERSION_NUMBER', 'ERR_SSL_NO_SUITABLE_SIGNATURE_ALGORITHM', 'ERR_OSSL_EVP_UNSUPPORTED',
+        'ECONNABORTED', 'EACCES', 'EPERM', 'ENETUNREACH', 'EHOSTUNREACH', 'ERR_TLS_HANDSHAKE_TIMEOUT',
+        'ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE', 'ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION', 'ERR_SSL_UNEXPECTED_EOF_WHILE_READING']
     })) if (allowed.includes(event.details?.[key])) result[key] = event.details[key]
+    if ([0, 1].includes(event.details?.providerIndex)) result.providerIndex = event.details.providerIndex
   }
   if (event.scope === 'ps-helper' && event.message === 'warm-up timing') {
     if (['NetSecurity', 'Network', 'NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'].includes(event.details?.module)) result.module = event.details.module

@@ -4,6 +4,40 @@ import { stripVTControlCharacters } from 'node:util'
 import { connect as connectTls } from 'node:tls'
 import { request } from 'node:http'
 import { setTimeout as delay } from 'node:timers/promises'
+import { open } from 'node:fs/promises'
+import { join } from 'node:path'
+
+export function runtimeFailureKinds(text) {
+  const kinds = []
+  for (const [kind, pattern] of [
+    ['dns-failed', /failed to (?:lookup|resolve|retrieve response)|dns[^\r\n]*(?:fail|timeout)/i],
+    ['tls-rejected', /tls[^\r\n]*(?:fail|reject|certificate|first record)|certificate[^\r\n]*(?:fail|invalid|unknown)|handshake[^\r\n]*(?:fail|timeout)/i],
+    ['connection-refused', /connection (?:was )?refused/i], ['connection-reset', /connection (?:was )?reset/i],
+    ['dial-failed', /failed to (?:dial|connect)|all (?:dial|connection) attempts failed/i],
+    ['network-unreachable', /no route to host|network is unreachable/i],
+    ['deadline', /deadline exceeded|i\/o timeout|operation timed out/i],
+    ['access-denied', /permission denied|access (?:is )?denied/i],
+    ['unexpected-eof', /unexpected eof|read: eof/i]
+  ]) if (pattern.test(String(text))) kinds.push(kind)
+  return kinds
+}
+
+// Bounded, fixed-file inspection on the disposable hosted runner only. Raw
+// runtime logs/configuration are never returned or uploaded.
+export async function inspectRuntimeFailures(directory) {
+  return Promise.all(['xray-a.log', 'xray-b.log', 'xray.log'].map(async file => {
+    let handle
+    try {
+      handle = await open(join(directory, file), 'r')
+      const info = await handle.stat()
+      if (!info.isFile()) throw new Error('Not a regular log')
+      const buffer = Buffer.alloc(Math.min(65536, info.size))
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, Math.max(0, info.size - buffer.length))
+      return { file, checked: true, kinds: runtimeFailureKinds(buffer.subarray(0, bytesRead).toString('utf8')) }
+    } catch { return { file, checked: false, kinds: [] } }
+    finally { await handle?.close().catch(() => {}) }
+  }))
+}
 
 function readControllerJson(api, path, signal) {
   return new Promise((resolve, reject) => {
@@ -158,4 +192,12 @@ export async function seedScenario(invoke, seed) {
   await invoke('serversSelect', profiles[0].id)
   assert.ok((await invoke('serversGetActive')).activeId === profiles[0].id, 'Initial selection was not retained')
   return { original: profiles[0], target: profiles[1], settings }
+}
+// Fixed diagnostic vocabulary only: PowerShell may include private configuration
+// in its error output, so neither its message nor arbitrary native codes escape.
+export function safeWindowsOracleError(error) {
+  const tag = String(error?.stderr ?? '').match(/\bVPNTE_ORACLE_(?:RUNTIME_INVENTORY|CONFIG_READ|ADAPTER_INVENTORY|ADDRESS_INVENTORY|SELECTOR_IDENTITY|TUN_IDENTITY|SLOT_IDENTITY|ENDPOINT_ROUTE)\b/)?.[0]
+  const failure = new Error(`Windows oracle/shutdown failed${tag ? ` [${tag}]` : ''}; command output omitted`)
+  if (tag) failure.oracleCode = tag
+  return failure
 }

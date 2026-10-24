@@ -6,7 +6,62 @@ import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs'
-import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership, verifySelectorTlsFlow } from './real-vpn-runner.mjs'
+import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership, verifySelectorTlsFlow, safeWindowsOracleError, runtimeFailureKinds, inspectRuntimeFailures } from './real-vpn-runner.mjs'
+import { safeActionResult } from './real-vpn-log.mjs'
+
+test('Windows oracle failures expose only a fixed stage, never private command output (AT-00-005)', () => {
+  for (const stage of ['RUNTIME_INVENTORY', 'CONFIG_READ', 'ADAPTER_INVENTORY', 'ADDRESS_INVENTORY', 'SELECTOR_IDENTITY', 'TUN_IDENTITY', 'SLOT_IDENTITY', 'ENDPOINT_ROUTE']) {
+    const error = safeWindowsOracleError({ stderr: `FAKE-PRIVATE-key 10.0.0.1 VPNTE_ORACLE_${stage}\nC:\\private\\profile.json`, stdout: 'FAKE-PRIVATE-key', message: 'FAKE-PRIVATE-key' })
+    assert.equal(error.message, `Windows oracle/shutdown failed [VPNTE_ORACLE_${stage}]; command output omitted`)
+    assert.deepEqual(safeActionResult(error), { oracleCode: `VPNTE_ORACLE_${stage}` })
+    assert.ok(!JSON.stringify(error).includes('FAKE-PRIVATE'))
+  }
+  for (const stderr of ['FAKE-PRIVATE-key', 'VPNTE_ORACLE_FAKE_PRIVATE', 'VPNTE_ORACLE_CONFIG_READ_SUFFIX']) {
+    const error = safeWindowsOracleError({ stderr })
+    assert.equal(error.message, 'Windows oracle/shutdown failed; command output omitted')
+    assert.deepEqual(safeActionResult(error), {})
+  }
+  assert.deepEqual(safeActionResult({ oracleCode: 'VPNTE_ORACLE_CONFIG_READ\nFAKE-PRIVATE-key' }), {})
+})
+
+test('runtime failure inspection returns bounded fixed kinds without raw private logs (AT-00-005)', async () => {
+  const temporary = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
+  mkdirSync(temporary, { recursive: true })
+  const dir = mkdtempSync(resolve(temporary, 'real-vpn-log-kinds-'))
+  try {
+    assert.deepEqual(runtimeFailureKinds('FAKE-PRIVATE-key private.test 10.0.0.1'), [])
+    writeFileSync(resolve(dir, 'xray-a.log'), 'FAKE-PRIVATE-key '.repeat(10000) + '\nfailed to retrieve response for private.test > connection reset by peer > tls handshake failed')
+    const result = await inspectRuntimeFailures(dir)
+    assert.deepEqual(result, [
+      { file: 'xray-a.log', checked: true, kinds: ['dns-failed', 'tls-rejected', 'connection-reset'] },
+      { file: 'xray-b.log', checked: false, kinds: [] }, { file: 'xray.log', checked: false, kinds: [] }
+    ])
+    assert.ok(!JSON.stringify(result).includes('FAKE-PRIVATE'))
+    assert.ok(!JSON.stringify(result).includes('private.test'))
+  } finally { assert.equal(dirname(dir), temporary); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('Windows oracle distinguishes no TUN from unreadable configuration without echoing it (AT-00-005)', { skip: process.platform !== 'win32', timeout: 20000 }, () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..'), temporary = resolve(root, '.tmp')
+  mkdirSync(temporary, { recursive: true })
+  const dir = mkdtempSync(resolve(temporary, 'real-vpn-before-tun-'))
+  const config = resolve(dir, 'sing-box.json')
+  const run = () => spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File',
+    resolve(root, 'scripts/real-vpn-windows.ps1'), '-RuntimeDir', dir, '-ExpectedPid', '0'],
+    { encoding: 'utf8', windowsHide: true, timeout: 8000 })
+  try {
+    const absent = run()
+    assert.equal(absent.status, 0)
+    const result = JSON.parse(absent.stdout.trim())
+    assert.equal(result.runtimeProcessCount, 0)
+    assert.equal(result.adapterUp, false)
+    writeFileSync(config, '{"password":"FAKE-PRIVATE-key", invalid-json')
+    const failed = run()
+    assert.notEqual(failed.status, 0)
+    assert.match(failed.stderr, /VPNTE_ORACLE_CONFIG_READ/)
+    assert.ok(!failed.stderr.includes('FAKE-PRIVATE-key'))
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
 
 const selectorConfig = () => ({ outbounds: [{ tag: 'proxy-out', type: 'selector', outbounds: ['vpnte-upstream-a', 'vpnte-upstream-b'] }],
   experimental: { clash_api: { external_controller: '127.0.0.1:25551', secret: 'a'.repeat(32) } } })

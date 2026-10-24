@@ -13,7 +13,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { performance } from 'node:perf_hooks'
 import { assertStable, deadline, runScenario } from './real-vpn-scenario.mjs'
 import { connectInspector } from './real-vpn-inspector.mjs'
-import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership, verifySelectorTlsFlow } from './real-vpn-runner.mjs'
+import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership, verifySelectorTlsFlow, safeWindowsOracleError, inspectRuntimeFailures } from './real-vpn-runner.mjs'
 import { createProgressLog, safeAppEvent, safeSnapshot, safeElectronDiagnostic } from './real-vpn-log.mjs'
 import { runWithCleanup } from './wp1-test-cleanup.mjs'
 
@@ -26,7 +26,7 @@ const ps = async (source, timeout = 30_000) => {
     return (await exec(powershell, ['-NoProfile', '-NonInteractive', '-EncodedCommand',
       Buffer.from("$ErrorActionPreference='Stop';\n" + source, 'utf16le').toString('base64')],
     { windowsHide: true, maxBuffer: 1024 * 1024, timeout })).stdout.trim()
-  } catch { throw new Error('Windows oracle/shutdown failed; command output omitted') }
+  } catch (error) { throw safeWindowsOracleError(error) }
 }
 const hash = value => createHash('sha256').update(value).digest('hex')
 const adminCheck = "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)"
@@ -218,6 +218,10 @@ async function run(config, seed) {
             } catch (error) {
               failure = error
               report.steps.push({ name, status: 'FAIL', reason: 'Action or oracle failed; see test result' })
+              if (runtimeDir) {
+                report.runtimeFailureKinds = await inspectRuntimeFailures(runtimeDir)
+                progress.record('runtime-failure-kinds', { files: report.runtimeFailureKinds })
+              }
               progress.record('step-fail', { action: name })
               throw error
             } finally { await save() }

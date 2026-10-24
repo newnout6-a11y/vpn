@@ -17,6 +17,16 @@ type ProbeCode = 'CONNECT_FAILED' | 'SOCKS_FAILED' | 'SOCKS_AUTH_REQUIRED' | 'TL
   'SOCKS_AUTH_REJECTED' | 'SOCKS_UPSTREAM_REJECTED' | 'SOCKS_CLOSED' |
   'RESPONSE_TOO_LARGE' | 'INVALID_PUBLIC_IP' | 'SOCKET_CLOSE_UNCONFIRMED' | 'CANCELLED' | 'DEADLINE' | 'OK'
 
+// Fixed runtime categories only: never publish a provider, address, message or credential.
+const NATIVE_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'EPIPE', 'ETIMEDOUT',
+  'EACCES', 'EPERM', 'ENETUNREACH', 'EHOSTUNREACH', 'ERR_SOCKET_CLOSED',
+  'ERR_INVALID_ARG_TYPE', 'ERR_INVALID_ARG_VALUE', 'ERR_INVALID_PROTOCOL', 'ERR_STREAM_WRITE_AFTER_END',
+  'ERR_TLS_INVALID_PROTOCOL_VERSION', 'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED',
+  'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'ERR_SSL_WRONG_VERSION_NUMBER', 'ERR_SSL_NO_SUITABLE_SIGNATURE_ALGORITHM', 'ERR_OSSL_EVP_UNSUPPORTED',
+  'ERR_TLS_HANDSHAKE_TIMEOUT', 'ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE', 'ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION',
+  'ERR_SSL_UNEXPECTED_EOF_WHILE_READING'])
+
 function socksFailureCode(error: unknown): ProbeCode {
   if (!(error instanceof Error)) return 'SOCKS_FAILED'
   if (error.message === 'Socks5 Authentication failed') return 'SOCKS_AUTH_REJECTED'
@@ -73,7 +83,7 @@ function probeProvider(upstream: SocksUpstream, providerIndex: number, deadlineA
     let authReply = Buffer.alloc(0)
     const finish = (error?: IpcFault, ip?: string, code: ProbeCode = error ?
       (stage === 'local-connect' ? 'CONNECT_FAILED' : stage === 'socks-handshake' ? 'SOCKS_FAILED' :
-        stage === 'tls-handshake' ? 'TLS_FAILED' : 'HTTPS_FAILED') : 'OK') => {
+        stage === 'tls-handshake' ? 'TLS_FAILED' : 'HTTPS_FAILED') : 'OK', cause?: unknown) => {
       if (settled) return
       settled = true
       clearTimeout(deadline)
@@ -86,11 +96,13 @@ function probeProvider(upstream: SocksUpstream, providerIndex: number, deadlineA
       let closeDeadline: ReturnType<typeof setTimeout>
       const complete = (closeFailed = false) => {
         const failure = closeFailed ? new IpcFault('internal') : error
+        const nativeCode = cause && typeof cause === 'object' && 'code' in cause &&
+          typeof cause.code === 'string' && NATIVE_CODES.has(cause.code) ? cause.code : undefined
         logEvent(failure ? 'warn' : 'debug', 'socks-upstream-probe', 'candidate egress probe completed', {
           providerIndex,
           stage: closeFailed ? 'socket-close' : stage,
           outcome: failure?.category ?? 'success', code: closeFailed ? 'SOCKET_CLOSE_UNCONFIRMED' : code,
-          durationMs: Math.round(performance.now() - began)
+          durationMs: Math.round(performance.now() - began), ...(nativeCode ? { nativeCode } : {})
         })
         if (failure) reject(failure)
         else resolve(ip!)
@@ -109,7 +121,7 @@ function probeProvider(upstream: SocksUpstream, providerIndex: number, deadlineA
     }
     const abort = () => finish(new IpcFault('cancelled'), undefined, 'CANCELLED')
     const deadline = setTimeout(() => finish(new IpcFault('timeout'), undefined, 'DEADLINE'), Math.max(0, deadlineAt - performance.now()))
-    socket.on('error', () => finish(new IpcFault('network')))
+    socket.on('error', error => finish(new IpcFault('network'), undefined, undefined, error))
     socket.once('connect', () => {
       stage = 'socks-handshake'
       // socks also offers NoAuth when credentials are present. A slot must
@@ -124,7 +136,7 @@ function probeProvider(upstream: SocksUpstream, providerIndex: number, deadlineA
         if (!authenticated) { finish(new IpcFault('network'), undefined, 'SOCKS_AUTH_REQUIRED'); return }
         stage = 'tls-handshake'
         secured = connectTls({ socket, servername: host, rejectUnauthorized: true, ALPNProtocols: ['http/1.1'], minVersion: 'TLSv1.2' })
-        secured.on('error', () => finish(new IpcFault('network')))
+        secured.on('error', error => finish(new IpcFault('network'), undefined, undefined, error))
         secured.once('secureConnect', () => { if (!settled) stage = 'https-response' })
         agent = new Agent({ keepAlive: false, maxSockets: 1 })
         // A private agent consumes this exact TLS connection instead of allocating a direct connection.
@@ -132,7 +144,7 @@ function probeProvider(upstream: SocksUpstream, providerIndex: number, deadlineA
         req = request({ hostname: host, port: 443, path: '/', method: 'GET', agent,
           headers: { Accept: 'text/plain', Connection: 'close' } }, incoming => {
           response = incoming
-          incoming.on('error', () => finish(new IpcFault('network')))
+          incoming.on('error', error => finish(new IpcFault('network'), undefined, undefined, error))
           incoming.once('aborted', () => finish(new IpcFault('network')))
           if (settled) { incoming.destroy(); return }
           stage = 'response-body'
@@ -152,10 +164,10 @@ function probeProvider(upstream: SocksUpstream, providerIndex: number, deadlineA
             else finish(undefined, ip)
           })
         })
-        req.on('error', () => finish(new IpcFault('network')))
+        req.on('error', error => finish(new IpcFault('network'), undefined, undefined, error))
         req.end()
       }).catch(error => finish(new IpcFault('network'), undefined,
-        stage === 'socks-handshake' ? socksFailureCode(error) : undefined))
+        stage === 'socks-handshake' ? socksFailureCode(error) : undefined, error))
     })
     signal?.addEventListener('abort', abort, { once: true })
     if (signal?.aborted) abort()

@@ -1,11 +1,14 @@
 # Read-only second oracle for the real integration runner. Never stops processes or changes adapters.
 param([Parameter(Mandatory)][string]$RuntimeDir, [int]$ExpectedPid = 0, [string]$TunAlias = '', [switch]$RequireEndpointPair)
 $ErrorActionPreference = 'Stop'
+$stage = 'RUNTIME_INVENTORY'
 try {
 $runtime = [IO.Path]::GetFullPath($RuntimeDir).TrimEnd('\')
 $processes = @(Get-CimInstance Win32_Process -Filter "Name='vpnte-sing-box.exe' OR Name='vpnte-xray.exe'" |
     Where-Object { $_.ExecutablePath -and [IO.Path]::GetDirectoryName($_.ExecutablePath) -eq $runtime })
 $tun = @($processes | Where-Object { $_.Name -eq 'vpnte-sing-box.exe' })
+$stage = 'CONFIG_READ'
+$config = $null
 $configPath = Join-Path $runtime 'sing-box.json'
 if (Test-Path -LiteralPath $configPath) {
     $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
@@ -13,8 +16,10 @@ if (Test-Path -LiteralPath $configPath) {
     if ($inbound.Count -ne 1) { throw 'Expected one TUN inbound' }
     $TunAlias = $inbound[0].interface_name
 }
+$stage = 'ADAPTER_INVENTORY'
 $adapter = @(Get-NetAdapter -IncludeHidden | Where-Object { $TunAlias -and $_.Name -eq $TunAlias })
 $up = @($adapter | Where-Object { $_.Status -eq 'Up' })
+$stage = 'ADDRESS_INVENTORY'
 $addresses = @($up | ForEach-Object { Get-NetIPAddress -InterfaceIndex $_.ifIndex -ErrorAction Stop })
 $matching = $false
 if ($tun.Count -eq 1) {
@@ -23,14 +28,17 @@ if ($tun.Count -eq 1) {
 $endpointRoutes = [ordered]@{ applicable = $false }
 $selector = @($config.outbounds | Where-Object { $_.tag -eq 'proxy-out' -and $_.type -eq 'selector' })
 if ($ExpectedPid -gt 0 -and $selector.Count -gt 0) {
+    $stage = 'SELECTOR_IDENTITY'
     if (-not $matching -or $up.Count -ne 1 -or $selector.Count -ne 1 -or
         (@($selector[0].outbounds | Sort-Object) -join ',') -cne 'vpnte-upstream-a,vpnte-upstream-b') { throw 'Selector identity not confirmed' }
+    $stage = 'TUN_IDENTITY'
     $ownerPath = Join-Path (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'VPNTE\manifests') 'tun-owner.json'
     $owner = Get-Content -LiteralPath $ownerPath -Raw | ConvertFrom-Json
     if ($owner.schemaVersion -ne 1 -or $owner.owner -cne 'VPNTE' -or $owner.alias -ne $TunAlias -or
         [guid]$owner.interfaceGuid -ne [guid]$up[0].InterfaceGuid -or $up[0].DriverDescription -notmatch '^Wintun\b' -or
         $up[0].PnPDeviceID -notlike 'SWD\Wintun\*' -or
         -not @($addresses | Where-Object { $_.IPAddress -eq '192.168.250.253' -and $_.PrefixLength -eq 30 }).Count) { throw 'Owned TUN identity not confirmed' }
+    $stage = 'SLOT_IDENTITY'
     $endpoints = @()
     $slots = 0
     foreach ($slot in @('a','b')) {
@@ -57,6 +65,7 @@ if ($ExpectedPid -gt 0 -and $selector.Count -gt 0) {
     }
     if ($slots -lt 1 -or ($RequireEndpointPair -and $slots -ne 2)) { throw 'Endpoint pair missing' }
     $endpoints = @($endpoints | Select-Object -Unique)
+    $stage = 'ENDPOINT_ROUTE'
     foreach ($endpoint in $endpoints) {
         $indices = @(Find-NetRoute -RemoteIPAddress $endpoint -ErrorAction Stop | Where-Object { $_.InterfaceIndex } |
             Select-Object -ExpandProperty InterfaceIndex -Unique)
@@ -74,4 +83,4 @@ if ($ExpectedPid -gt 0 -and $selector.Count -gt 0) {
     tunAlias = $TunAlias
     endpointOsRoutes = $endpointRoutes
 } | ConvertTo-Json -Depth 4 -Compress
-} catch { throw 'Windows oracle failed; private configuration and command output omitted' }
+} catch { throw "VPNTE_ORACLE_$stage" }
