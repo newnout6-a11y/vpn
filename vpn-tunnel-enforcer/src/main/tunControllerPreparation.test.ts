@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { connectionFailure } from '../shared/operation'
-import { classifyIpcError } from '../shared/ipc-result'
+import { classifyIpcError, IpcFault } from '../shared/ipc-result'
 import { RecoveryWorkerError } from './recoveryPsWorker'
 
 const source = readFileSync(join(process.cwd(), 'src/main/tunController.ts'), 'utf8')
@@ -15,6 +15,11 @@ const end = source.indexOf('// Kill only VPNTE-owned runtime binaries.', begin)
 if (begin < 0 || end < 0) throw new Error('Production preparation boundary not found')
 const preparation = source.slice(begin, end)
 const ast = ts.createSourceFile('tunController.ts', source, ts.ScriptTarget.Latest, true)
+const retirementHelper = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'retireOwnedRuntimeBeforeStart')!
+const retirementBegin = source.lastIndexOf('    try {', source.indexOf("await timeAsync('owned-runtime-cleanup'"))
+const retirementEnd = source.indexOf('    // Adapter lockdown can run', retirementBegin)
+if (retirementBegin < 0 || retirementEnd < 0) throw new Error('Production retirement barrier not found')
+const retirement = source.slice(retirementBegin, retirementEnd)
 const classifier = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'classifyTunError')!
 const slotHelpers = ['allocateXraySwitchSlots', 'outboundConfigurationKey'].map(name => {
   const helper = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
@@ -31,7 +36,10 @@ function deferred<T>() {
 
 function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', adapterLockdownPromise = Promise.resolve()) {
   const os = {
-    dns, mode, engine, connectionFailure, classifyIpcError, RecoveryWorkerError,
+    dns, mode, engine, connectionFailure, classifyIpcError, RecoveryWorkerError, IpcFault,
+    isOwnedTunRuntimeRunning: vi.fn(async () => false),
+    killOwnedRuntimeProcesses: vi.fn(async () => {}),
+    waitForOwnedRuntimeToExit: vi.fn(async () => true),
     adapterLockdownPromise,
     pickFreeLocalPort: vi.fn(async (_exclude?: number[]) => 1234).mockResolvedValueOnce(1234).mockResolvedValueOnce(1235),
     randomSecret: vi.fn().mockReturnValueOnce('a'.repeat(32)).mockReturnValueOnce('b'.repeat(32))
@@ -61,6 +69,7 @@ function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', a
   }
   const compiled = ts.transpileModule(`
     ${classifier.getText(ast)}
+    ${retirementHelper.getText(ast)}
     ${slotHelpers}
     const dnsSourcesPromise=dns, smartRuSplit=true, smartRuMapsDirect=false;
     let proxyOwnerProcessNames=[], proxyOwnerProgramPaths=[], stopRequested=false, preparedXraySwitch=null;
@@ -69,7 +78,7 @@ function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', a
     const startOptions={}, publicWifiCompatibility=true, splitTunnelDirectNames=[], splitTunnelDirectPaths=[];
     const vpnProfile={outbound:{type:'vless'},clientDevice:'pc',name:'fixture'};
     const startupCleanupTasks=[];
-    async function run(){ try { ${preparation}
+    async function run(){ try { ${retirement} ${preparation}
       return runtimePromise ? await runtimePromise : null;
       } finally {await Promise.allSettled(startupCleanupTasks)}
     }
@@ -202,6 +211,32 @@ describe('parallel runtime staging safety (AT-01-009 / AT-02-002/005)', () => {
 })
 
 describe('Direct VPN preparation overlap', () => {
+  it('retires stale sing-box/Xray before staging or spawning the new generation (AT-02-002 / F-022)', async () => {
+    const h = harness(Promise.resolve([])), stopped = deferred<void>()
+    h.isOwnedTunRuntimeRunning.mockResolvedValue(true)
+    h.killOwnedRuntimeProcesses.mockReturnValueOnce(stopped.promise)
+    const pending = h.run()
+    await vi.waitFor(() => expect(h.killOwnedRuntimeProcesses).toHaveBeenCalledOnce())
+    expect(h.startXray).not.toHaveBeenCalled(); expect(h.prepareRuntime).not.toHaveBeenCalled()
+    stopped.resolve(); await pending
+    expect(h.waitForOwnedRuntimeToExit).toHaveBeenCalledOnce()
+    expect(h.waitForOwnedRuntimeToExit.mock.invocationCallOrder[0]).toBeLessThan(h.startXray.mock.invocationCallOrder[0])
+    expect(h.waitForOwnedRuntimeToExit.mock.invocationCallOrder[0]).toBeLessThan(h.prepareRuntime.mock.invocationCallOrder[0])
+    expect(h.killOwnedRuntimeProcesses).toHaveBeenCalledOnce()
+  })
+  it.each(['unknown-owner', 'unconfirmed-exit', 'kill-failed', 'cancelled'] as const)('refuses new staging when previous retirement is %s (AT-02-001/002/005)', async failure => {
+    const h = harness(Promise.resolve([]))
+    if (failure === 'unknown-owner') h.isOwnedTunRuntimeRunning.mockRejectedValueOnce(new Error('ownership unavailable'))
+    else if (failure === 'cancelled') h.cancel()
+    else {
+      h.isOwnedTunRuntimeRunning.mockResolvedValue(true)
+      if (failure === 'unconfirmed-exit') h.waitForOwnedRuntimeToExit.mockResolvedValueOnce(false)
+      else h.killOwnedRuntimeProcesses.mockRejectedValueOnce(new Error('exit unavailable'))
+    }
+    expect(await h.run()).toMatchObject({ success: false })
+    expect(h.startXray).not.toHaveBeenCalled(); expect(h.prepareRuntime).not.toHaveBeenCalled()
+    expect(h.rollbackEarlyAdapterLockdown).not.toHaveBeenCalled()
+  })
   it('forwards the allocated authenticated cold slot to Xray and sing-box preparation (AT-02-002)', async () => {
     const h = harness(Promise.resolve([]))
     await h.run()

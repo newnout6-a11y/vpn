@@ -1,9 +1,14 @@
 // AT-00-003; AT-02-004; AT-10-004: production probe over fully synthetic socket/TLS/HTTPS boundaries.
 import { EventEmitter } from 'node:events'
+import type { Socket as RealSocket } from 'node:net'
+import type { TLSSocket } from 'node:tls'
+import { spawn } from 'node:child_process'
+import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { join, resolve as resolvePath } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const fixture = vi.hoisted(() => ({ sockets: [] as any[], tls: null as any, req: null as any,
-  responseCallback: null as any, holdClose: false, socks: vi.fn(), tlsConnect: vi.fn(), request: vi.fn() }))
+  responseCallback: null as any, holdClose: false, socks: vi.fn(), tlsConnect: vi.fn(), request: vi.fn(), logEvent: vi.fn() }))
 class FixtureSocket extends EventEmitter {
   closed = false
   destroyed = false
@@ -14,20 +19,25 @@ class FixtureSocket extends EventEmitter {
     return this
   })
 }
-vi.mock('node:net', async importActual => {
-  const actual = await importActual<typeof import('node:net')>()
-  return { ...actual, Socket: class extends FixtureSocket { constructor() { super(); fixture.sockets.push(this) } } }
-})
-vi.mock('node:tls', () => ({ connect: fixture.tlsConnect }))
-vi.mock('socks', () => ({ SocksClient: { createConnection: fixture.socks } }))
-vi.mock('node:https', () => ({ Agent: class { createConnection: any; destroy = vi.fn() }, request: fixture.request }))
+vi.mock('./appLogger', () => ({ logEvent: fixture.logEvent }))
 
 const upstream = { port: 51002, username: 'candidate-user', password: 'candidate-secret' }
 let probe: typeof import('./socksUpstreamProbe').probeSocksUpstream
 beforeEach(async () => {
   vi.resetModules(); vi.useFakeTimers(); vi.clearAllMocks()
+  // Each test starts with synthetic boundaries, including after a real fixture.
+  vi.doMock('node:net', async () => {
+    const actual = await vi.importActual<typeof import('node:net')>('node:net')
+    return { ...actual, Socket: class extends FixtureSocket { constructor() { super(); fixture.sockets.push(this) } } }
+  })
+  vi.doMock('node:tls', () => ({ connect: fixture.tlsConnect }))
+  vi.doMock('socks', () => ({ SocksClient: { createConnection: fixture.socks } }))
+  vi.doMock('node:https', () => ({ Agent: class { createConnection: any; destroy = vi.fn() }, request: fixture.request }))
   fixture.sockets = []; fixture.tls = null; fixture.req = null; fixture.holdClose = false
-  fixture.socks.mockImplementation(async (options: any) => ({ socket: options.existing_socket }))
+  fixture.socks.mockImplementation(async (options: any) => {
+    options.existing_socket.emit('data', Buffer.from([5, 2]))
+    return { socket: options.existing_socket }
+  })
   fixture.tlsConnect.mockImplementation(() => { fixture.tls = new FixtureSocket(); return fixture.tls })
   fixture.request.mockImplementation((_options: any, callback: any) => {
     fixture.responseCallback = callback
@@ -35,6 +45,257 @@ beforeEach(async () => {
     return fixture.req
   })
   probe = (await import('./socksUpstreamProbe')).probeSocksUpstream
+})
+
+// AT-02-004: real Node/socks transports, confined to loopback. This public test
+// certificate/key belongs only to this fixture; the client explicitly trusts it.
+const LOOPBACK_CERT = `-----BEGIN CERTIFICATE-----
+MIIDLTCCAhWgAwIBAgIUNdndWqSiKVAMqsEmuuoXLDjxMwUwDQYJKoZIhvcNAQEL
+BQAwGDEWMBQGA1UEAwwNYXBpLmlwaWZ5Lm9yZzAgFw0yNjEwMjQyMDA2MDVaGA8y
+MTI2MDkzMDIwMDYwNVowGDEWMBQGA1UEAwwNYXBpLmlwaWZ5Lm9yZzCCASIwDQYJ
+KoZIhvcNAQEBBQADggEPADCCAQoCggEBAOl6pkub6StnYMYpsOqKnUB9ZPEN5IEW
+EyRcS2pCS9Eh8/HcIEes4km5pWCXOjjsDgrjPG/BcyvFdBuYUJZ7YRMLmNKqiKC7
+IjAlC7gFVCv21wY/o3zP0PZlPTG5dvmeE0uFKEN+uQd0gxRT/QW/T7ngFioigPyM
+/7wl4wyXhNe2SgiXzwkC+Tpt5U9S1TRaig7zV+ww8lh+majkicnpfUHetFPN36om
+Lj2mWCq8WFt5nkD2O1UZyunqG+sx12Xj0nkkXvrNCyQ4QQo/aD1vaM1aw4qMf789
+xRbbPRhJwO5PpQmaSwKrt+EJOtqGLYtFwq+Vn069nOHuFjgvo/elHLsCAwEAAaNt
+MGswHQYDVR0OBBYEFIUNHsCL3Ul6Z78FlqAOI7AWTwHlMB8GA1UdIwQYMBaAFIUN
+HsCL3Ul6Z78FlqAOI7AWTwHlMA8GA1UdEwEB/wQFMAMBAf8wGAYDVR0RBBEwD4IN
+YXBpLmlwaWZ5Lm9yZzANBgkqhkiG9w0BAQsFAAOCAQEAQIHZxddxWqM9i+4GGozV
+ZMBBNgQK1LO2mo/83yi7tjjbCkMjolXm7diJ9NGWfUKODhnefvp9pXXrI96eCmA4
+fcmqng13coM1WM4jrqgetCVVqWGuZvP0wbwotc4+VIfLN0MlVQPdIpROUI4eCmjJ
+tpXAVDsFpGBlvPRN746nKloyFGGRpTiCDbOa5GAvrOoI4Vp3A9QqaKJ5bw/74Yua
+WHULSdyRzUQjrEqsBNSAOm7Wu18vhIaJPukmNutbaN2P3Sz7lCqoqlyZUPclm1X/
+oV0v9mrl59tCYcbfyjN53sXnroo8rn/7xidW83Dk/w2CwM2sIXYlFAFXVH3PxcUe
+sA==
+-----END CERTIFICATE-----`
+const LOOPBACK_KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDpeqZLm+krZ2DG
+KbDqip1AfWTxDeSBFhMkXEtqQkvRIfPx3CBHrOJJuaVglzo47A4K4zxvwXMrxXQb
+mFCWe2ETC5jSqoiguyIwJQu4BVQr9tcGP6N8z9D2ZT0xuXb5nhNLhShDfrkHdIMU
+U/0Fv0+54BYqIoD8jP+8JeMMl4TXtkoIl88JAvk6beVPUtU0WooO81fsMPJYfpmo
+5InJ6X1B3rRTzd+qJi49plgqvFhbeZ5A9jtVGcrp6hvrMddl49J5JF76zQskOEEK
+P2g9b2jNWsOKjH+/PcUW2z0YScDuT6UJmksCq7fhCTrahi2LRcKvlZ9OvZzh7hY4
+L6P3pRy7AgMBAAECggEAByXAyEj9UE9Xz3drKAWd98UNK6QzEYmxvYtib94KB85y
+Vr4tjpQqCe0xCnw4dx/3uzHtxTa6W3sRd5foC6mB0afwgedgdigUacwewOMk3+aQ
+FuvvtF/yuvkqVAbAobagSyUPPsPv3SPzd4sfV4rd0znwjm5uwP5FIUOOi6qGrhB3
+9NUSt+00IV6f8QCI1kOXO4uRq7m+gxUdBUuF+K9f8GdBSY5Um07bjuDuyyphJ/iW
+P4cTZUx8s6TekzMD5WfDMlMEUe83rw1SFozSNnPwGQyjBGzdP6e11RAylVUSKLkY
+HYSrAaSJ4wLZNNVnGUq5rAQfKs0tL++R+4A3RtiW5QKBgQD6LVyp4wwOvM0NRXCS
+jtWwTD5qouLysTaKiHcWk8I3v7kG4JkJvwBtms3lJhTJEwjN2MDdV34rxQubrFki
+hThX5eL1EPjDb2wMWimmtMWtjqi1AGvddew/bQnm29xZXX0JZMVrl91CA1lr72uA
+MH3zBJ4cs28WB1wnzcjOd8S8xwKBgQDu6ct9NMano/mOhm5bU8sqW5UBrckzeU7z
+UllIn5k6+Wu70m4g2CPDbzYe6uZeVQrBk6Si95N4KrrJpiJFCFqz0iRUuyMfGjBn
+NJK8CIp/n0P3I26eGCtmXAchM1HbvGMJKNUeIM6l5pwmxpb5isfF9fNlgnV+5JFj
+iSnOVsVkbQKBgASfb/XnryJalMNpBBKBNyuhzQl1ZxIq+iIHMYQmSNF05ntdDRbk
+A6MC2EkisgGhK2l6Vt4ALuGqK3O99IuxwH/HTLFQlfguh+WWiOx+rKRvXWiy0Etw
+UWQ+pI8ygtjX5GaXCRra3IjKvQ1EiEz/GGS0MiO/oQ7cJfTKVaqTBfyjAoGBAMzr
+U1JtNgcMKj0JKRbEZHpMWx45hV3VKtahR1t3KOLglHthHnylZud2OCGEsVsv7i3j
+CU+OsrpbTCMxkCtN4x5hnC/g41sGB4Y+Ha2SVdjpLk6H4ZVQfckqHiNn9UpX50ov
+77wLv7OkfUL1CwG2+2rcbowevdC9E8cgGu+UlXJxAoGAROJDFJelL2H+5qScDjtf
+wSHiOJBFZhYeREnS2WVNNzLI1juoayOoje+2Fashjuh7k5KRWy6Uigmq6vC3z54d
+wERn5IiQBBKvCM+OWldzqaBTU0s9kMG+MAMymPN4dOD3ttlr7D43h3iof7Ciw16R
++P4cUnHwtkKh605ljPSiUt0=
+-----END PRIVATE KEY-----`
+
+async function realTransport(options: { trustCertificate?: boolean; holdResponse?: boolean; noAuth?: boolean; xray?: boolean } = {}) {
+  vi.useRealTimers()
+  const net = await vi.importActual<typeof import('node:net')>('node:net')
+  const tls = await vi.importActual<typeof import('node:tls')>('node:tls')
+  const https = await vi.importActual<typeof import('node:https')>('node:https')
+  const socks = await vi.importActual<typeof import('socks')>('socks')
+  const peers = new Set<RealSocket>(), clients: TLSSocket[] = [], destinations: string[] = []
+  let authenticated = 0, requests = 0
+  const own = (socket: RealSocket) => {
+    peers.add(socket); socket.on('error', () => {}); socket.once('close', () => peers.delete(socket)); return socket
+  }
+  const endpoint = https.createServer({ key: LOOPBACK_KEY, cert: LOOPBACK_CERT }, (_request, response) => {
+    requests++
+    if (!options.holdResponse) response.writeHead(200, { 'Content-Type': 'text/plain' }).end('8.8.8.8\n')
+  })
+  endpoint.on('connection', own)
+  endpoint.on('tlsClientError', () => {})
+  const listen = (server: import('node:net').Server) => new Promise<number>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve((server.address() as import('node:net').AddressInfo).port))
+  })
+  const endpointPort = await listen(endpoint)
+  const proxy = net.createServer(socket => {
+    own(socket)
+    let phase = 0, buffered = Buffer.alloc(0)
+    const receive = (chunk: Buffer) => {
+      buffered = Buffer.concat([buffered, chunk])
+      if (phase === 0) {
+        if (buffered.length < 2 || buffered.length < 2 + buffered[1]) return
+        const length = 2 + buffered[1]
+        if (buffered[0] !== 5 || !buffered.subarray(2, length).includes(2)) { socket.end(Buffer.from([5, 255])); return }
+        buffered = buffered.subarray(length); phase = options.noAuth ? 2 : 1
+        if (options.noAuth) {
+          // Fragment the method reply to exercise the mandatory auth guard.
+          socket.write(Buffer.from([5])); setImmediate(() => socket.write(Buffer.from([0])))
+        } else socket.write(Buffer.from([5, 2]))
+      }
+      if (phase === 1) {
+        if (buffered.length < 2 || buffered.length < 3 + buffered[1]) return
+        const usernameEnd = 2 + buffered[1], length = usernameEnd + 1 + buffered[usernameEnd]
+        if (buffered.length < length) return
+        const valid = buffered[0] === 1 && buffered.subarray(2, usernameEnd).toString() === upstream.username &&
+          buffered.subarray(usernameEnd + 1, length).toString() === upstream.password
+        if (!valid) { socket.end(Buffer.from([1, 1])); return }
+        authenticated++; buffered = buffered.subarray(length); phase = 2; socket.write(Buffer.from([1, 0]))
+      }
+      if (phase === 2) {
+        if (buffered.length < 5) return
+        if (buffered[0] !== 5 || buffered[1] !== 1 || buffered[3] !== 3) { socket.destroy(); return }
+        const length = 7 + buffered[4]
+        if (buffered.length < length) return
+        const destination = `${buffered.subarray(5, length - 2).toString()}:${buffered.readUInt16BE(length - 2)}`
+        destinations.push(destination)
+        if (destination !== 'api.ipify.org:443') { socket.destroy(); return }
+        const trailing = buffered.subarray(length)
+        phase = 3; socket.off('data', receive)
+        // Only the requested logical endpoint is rewritten, always to our own listener.
+        const target = own(net.connect(endpointPort, '127.0.0.1', () => {
+          socket.write(Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, endpointPort >> 8, endpointPort & 255]))
+          if (trailing.length) target.write(trailing)
+          socket.pipe(target); target.pipe(socket)
+        }))
+        socket.once('close', () => target.destroy()); target.once('close', () => socket.destroy())
+      }
+    }
+    socket.on('data', receive)
+  })
+  const port = await listen(proxy)
+  let xray: ReturnType<typeof spawn> | undefined, directory: string | undefined
+  const stopXray = async () => {
+    if (xray && xray.exitCode === null && xray.signalCode === null) {
+      const closed = new Promise<void>(done => xray!.once('close', () => done()))
+      xray.kill()
+      let timer: ReturnType<typeof setTimeout>
+      try { await Promise.race([closed, new Promise<never>((_done, fail) => {
+        timer = setTimeout(() => fail(new Error('Loopback Xray exit not confirmed')), 2000)
+      })]) } finally { clearTimeout(timer!) }
+    }
+    if (directory) {
+      if (resolvePath(directory, '..') !== resolvePath('.tmp')) throw new Error('Invalid loopback fixture directory')
+      await rm(directory, { recursive: true, force: true })
+    }
+  }
+  if (options.xray) {
+    await new Promise<void>(done => proxy.close(() => done()))
+    await mkdir(resolvePath('.tmp'), { recursive: true })
+    directory = await mkdtemp(join(resolvePath('.tmp'), 'socks-xray-'))
+    const configPath = join(directory, 'xray.json')
+    await writeFile(configPath, JSON.stringify({ log: { loglevel: 'none' },
+      inbounds: [{ listen: '127.0.0.1', port, protocol: 'socks', settings: {
+        auth: 'password', accounts: [{ user: upstream.username, pass: upstream.password }], udp: false } }],
+      outbounds: [{ protocol: 'freedom', settings: { redirect: `127.0.0.1:${endpointPort}` } }]
+    }))
+    xray = spawn(resolvePath('resources/xray.exe'), ['run', '-c', configPath], { windowsHide: true, stdio: 'ignore' })
+    const childStarted = new Promise<void>((done, fail) => { xray!.once('spawn', () => done()); xray!.once('error', fail) })
+    try {
+      await childStarted
+      await vi.waitFor(async () => {
+        if (xray!.exitCode !== null) throw new Error('Loopback Xray exited before readiness')
+        await new Promise<void>((done, fail) => {
+          const readiness = net.connect(port, '127.0.0.1', () => { readiness.destroy(); done() })
+          readiness.once('error', fail)
+        })
+      }, { timeout: 2000, interval: 10 })
+    } catch (error) { await stopXray(); await new Promise<void>(done => endpoint.close(() => done())); throw error }
+  }
+  vi.doMock('node:net', () => net)
+  vi.doMock('socks', () => socks)
+  vi.doMock('node:https', () => https)
+  vi.doMock('node:tls', () => ({ ...tls, connect: (connection: import('node:tls').ConnectionOptions) => {
+    if (!connection.socket) throw new Error('Fixture forbids unowned TLS connections')
+    const secured = tls.connect({ ...connection, ...(options.trustCertificate === false ? {} : { ca: LOOPBACK_CERT }) })
+    clients.push(secured)
+    return secured
+  } }))
+  vi.resetModules()
+  const realProbe = (await import('./socksUpstreamProbe')).probeSocksUpstream
+  return {
+    probe: (signal?: AbortSignal, password = upstream.password) => realProbe({ ...upstream, port, password }, signal),
+    get authenticated() { return authenticated }, get requests() { return requests }, destinations, clients,
+    async drained() { await vi.waitFor(() => { expect(peers.size).toBe(0); expect(clients.every(socket => socket.closed)).toBe(true) }, { timeout: 1000 }) },
+    async close() {
+      for (const socket of peers) socket.destroy()
+      for (const socket of clients) socket.destroy()
+      await stopXray()
+      await Promise.all([proxy, endpoint].map(server => new Promise<void>(resolve => server.close(() => resolve()))))
+    }
+  }
+}
+
+describe('real authenticated SOCKS5 → verified TLS → HTTPS loopback transport', () => {
+  it.skipIf(process.platform !== 'win32')('passes through the actual bundled Xray SOCKS inbound and verified loopback TLS', async () => {
+    const transport = await realTransport({ xray: true })
+    try {
+      await expect(transport.probe()).resolves.toBe('8.8.8.8')
+      expect(transport.requests).toBe(1)
+      expect(transport.clients).toHaveLength(1); expect(transport.clients[0].authorized).toBe(true)
+      await transport.drained()
+    } finally { await transport.close() }
+  }, 10000)
+  it('rejects a server selecting NoAuth before creating TLS or HTTP', async () => {
+    const transport = await realTransport({ noAuth: true })
+    try {
+      await expect(transport.probe()).rejects.toMatchObject({ category: 'network' })
+      expect(transport.authenticated).toBe(0); expect(transport.clients).toHaveLength(0); expect(transport.requests).toBe(0)
+      const { logEvent } = await import('./appLogger')
+      expect(logEvent).toHaveBeenLastCalledWith('warn', 'socks-upstream-probe', 'candidate egress probe completed',
+        expect.objectContaining({ stage: 'socks-handshake', code: 'SOCKS_AUTH_REQUIRED', outcome: 'network' }))
+      await transport.drained()
+    } finally { await transport.close() }
+  })
+  it('returns a public address through the authenticated owned socket using the real socks and HTTPS libraries', async () => {
+    const transport = await realTransport()
+    try {
+      await expect(transport.probe()).resolves.toBe('8.8.8.8')
+      expect(transport.authenticated).toBe(1); expect(transport.requests).toBe(1)
+      expect(transport.destinations).toEqual(['api.ipify.org:443'])
+      expect(transport.clients).toHaveLength(1); expect(transport.clients[0].authorized).toBe(true)
+      expect(fixture.logEvent).toHaveBeenCalledWith('debug', 'socks-upstream-probe', 'candidate egress probe completed',
+        { stage: 'response-body', outcome: 'success', code: 'OK', durationMs: expect.any(Number) })
+      await transport.drained()
+    } finally { await transport.close() }
+  })
+  it('rejects wrong SOCKS credentials before opening TLS or HTTPS', async () => {
+    const transport = await realTransport()
+    try {
+      await expect(transport.probe(undefined, 'wrong-password')).rejects.toMatchObject({ category: 'network' })
+      expect(transport.authenticated).toBe(0); expect(transport.requests).toBe(0); expect(transport.clients).toHaveLength(0)
+      expect(fixture.logEvent.mock.calls[0][3]).toMatchObject({ stage: 'socks-handshake', code: 'SOCKS_AUTH_REJECTED' })
+      await transport.drained()
+    } finally { await transport.close() }
+  })
+  it('rejects the untrusted certificate with real verification enabled', async () => {
+    const transport = await realTransport({ trustCertificate: false })
+    try {
+      await expect(transport.probe()).rejects.toMatchObject({ category: 'network' })
+      expect(transport.authenticated).toBe(1); expect(transport.requests).toBe(0)
+      expect(transport.clients[0].authorized).toBe(false)
+      expect(fixture.logEvent.mock.calls[0][3]).toMatchObject({ stage: 'tls-handshake', code: 'TLS_FAILED' })
+      await transport.drained()
+    } finally { await transport.close() }
+  })
+  it('aborts an in-flight HTTPS response and closes the real sockets', async () => {
+    const transport = await realTransport({ holdResponse: true }), controller = new AbortController()
+    try {
+      const pending = transport.probe(controller.signal)
+      const failed = expect(pending).rejects.toMatchObject({ category: 'cancelled' })
+      await vi.waitFor(() => expect(transport.requests).toBe(1))
+      controller.abort(); await failed; await transport.drained()
+    } finally { await transport.close() }
+  })
+  it('bounds a stalled real HTTPS response by the common deadline and closes the real sockets', async () => {
+    const transport = await realTransport({ holdResponse: true })
+    try {
+      await expect(transport.probe()).rejects.toMatchObject({ category: 'timeout' })
+      expect(transport.requests).toBe(1); await transport.drained()
+    } finally { await transport.close() }
+  })
 })
 afterEach(() => { vi.useRealTimers() })
 async function running(signal?: AbortSignal) {
@@ -144,6 +405,18 @@ describe('authenticated candidate egress probe', () => {
     fixture.socks.mockRejectedValue(new Error(`authentication failed ${upstream.password}`))
     const failed = await probe(upstream).catch(error => error)
     expect(failed.category).toBe('network'); expect(failed.message).not.toContain(upstream.password)
+    expect(JSON.stringify(fixture.logEvent.mock.calls)).not.toContain(upstream.password)
+    expect(fixture.logEvent.mock.calls[0][3]).toMatchObject({ stage: 'socks-handshake', code: 'SOCKS_FAILED' })
+  })
+  it.each([
+    ['Socks5 Authentication failed', 'SOCKS_AUTH_REJECTED'],
+    ['Socks5 proxy rejected connection - ConnectionRefused', 'SOCKS_UPSTREAM_REJECTED'],
+    ['Socket closed', 'SOCKS_CLOSED']
+  ])('maps only exact library failure %s to the fixed diagnostic %s', async (message, code) => {
+    fixture.socks.mockRejectedValue(new Error(message))
+    await expect(probe(upstream)).rejects.toMatchObject({ category: 'network' })
+    expect(fixture.logEvent.mock.calls[0][3]).toMatchObject({ stage: 'socks-handshake', code })
+    expect(JSON.stringify(fixture.logEvent.mock.calls)).not.toContain(message)
   })
   it('validates before allocating handles and rejects an already aborted owner', async () => {
     await expect(probe({ ...upstream, port: 0 })).rejects.toMatchObject({ category: 'validation' })

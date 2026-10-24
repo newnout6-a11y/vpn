@@ -93,6 +93,7 @@ export function safeAppEvent(event) {
           'physical adapter set changed; lockdown coverage is not verified'],
         'ps-helper': ['command timing', 'warm-up timing'], 'firewall-killswitch': ['command timing', 'phase timing', 'native phase timing'],
         'runtime-acl': ['inspection timing'],
+        'socks-upstream-probe': ['candidate egress probe completed'],
         'ip-monitor': ['protected transition IP baseline refreshed', 'protected transition IP baseline not checked', 'public IP provider timing'],
         'system-network': ['baseline native phase timing',
           'native WinINet notification unavailable; falling back to PowerShell'] })[event.scope]?.includes?.(event.message)
@@ -116,7 +117,7 @@ export function safeAppEvent(event) {
   if (event.scope === 'runtime-acl' && ['worker', 'standalone'].includes(event.details?.transport)) result.transport = event.details.transport
   if (event.scope === 'tun' && event.message === 'retained TUN upstream switch finished') {
     if (['success', 'cancelled', 'failed'].includes(event.details?.outcome)) result.outcome = event.details.outcome
-    for (const key of ['committed', 'previousPreserved']) {
+    for (const key of ['committed', 'previousPreserved', 'ownershipLost']) {
       if (typeof event.details?.[key] === 'boolean') result[key] = event.details[key]
     }
     if (Array.isArray(event.details?.phases)) {
@@ -124,6 +125,20 @@ export function safeAppEvent(event) {
         'stop-candidate', 'stop-previous', 'ownership']
       result.phases = [...new Set(event.details.phases.filter(phase => allowed.includes(phase)))]
     }
+    const phaseTimes = {}
+    for (const phase of ['stage', 'probe', 'select', 'restore-selector', 'confirm-candidate', 'confirm-previous', 'stop-candidate', 'stop-previous']) {
+      const ms = event.details?.phasesMs?.[phase]
+      if (typeof ms === 'number' && Number.isFinite(ms) && ms >= 0) phaseTimes[phase] = ms
+    }
+    if (Object.keys(phaseTimes).length) result.phasesMs = phaseTimes
+  }
+  if (event.scope === 'socks-upstream-probe') {
+    for (const [key, allowed] of Object.entries({
+      stage: ['local-connect', 'socks-handshake', 'tls-handshake', 'https-response', 'response-body', 'socket-close'],
+      outcome: ['success', 'network', 'cancelled', 'timeout', 'internal'],
+      code: ['CONNECT_FAILED', 'SOCKS_FAILED', 'SOCKS_AUTH_REQUIRED', 'SOCKS_AUTH_REJECTED', 'SOCKS_UPSTREAM_REJECTED', 'SOCKS_CLOSED', 'TLS_FAILED', 'HTTPS_FAILED', 'HTTP_STATUS', 'RESPONSE_TOO_LARGE',
+        'INVALID_PUBLIC_IP', 'SOCKET_CLOSE_UNCONFIRMED', 'CANCELLED', 'DEADLINE', 'OK']
+    })) if (allowed.includes(event.details?.[key])) result[key] = event.details[key]
   }
   if (event.scope === 'ps-helper' && event.message === 'warm-up timing') {
     if (['NetSecurity', 'Network', 'NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'].includes(event.details?.module)) result.module = event.details.module

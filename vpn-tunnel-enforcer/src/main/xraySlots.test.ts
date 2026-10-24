@@ -7,7 +7,7 @@ const fixture = vi.hoisted(() => ({ children: [] as any[], sockets: [] as any[],
   rejectAuth: false, writePid: vi.fn(async (..._args: any[]) => {}), removePid: vi.fn(async (..._args: any[]) => {}),
   preflight: vi.fn(async (..._args: any[]) => {}), stopPreflight: vi.fn(async () => {}),
   cleanup: vi.fn(async (..._args: any[]) => true), allow: vi.fn(async () => ({ success: true })),
-  beforeSpawn: null as null | (() => void) }))
+  beforeSpawn: null as null | (() => void), resolve: vi.fn(async (..._args: any[]): Promise<string | null> => '203.0.113.20') }))
 vi.mock('child_process', () => {
   const api = { spawn: vi.fn(() => {
     fixture.beforeSpawn?.()
@@ -18,8 +18,9 @@ vi.mock('child_process', () => {
   }) }
   return { ...api, default: api }
 })
-vi.mock('net', () => {
-  const api = { isIP: () => 4, Socket: class extends EventEmitter {
+vi.mock('net', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:net')>()
+  const api = { isIP: actual.isIP, Socket: class extends EventEmitter {
     port = 0
     phase = 0
     destroyed = false
@@ -49,6 +50,7 @@ vi.mock('./managedChildProcess', () => ({ writeManagedChildPidFile: fixture.writ
   removeManagedChildPidFile: fixture.removePid, cleanupManagedChildPidFile: fixture.cleanup }))
 vi.mock('./firewallKillSwitch', () => ({ ensureKillSwitchProgramAllowed: fixture.allow }))
 vi.mock('./xrayPreflight', () => ({ runXrayConfigPreflight: fixture.preflight, stopXrayPreflights: fixture.stopPreflight }))
+vi.mock('./xrayDns', () => ({ resolveXrayEndpoint: fixture.resolve }))
 
 const outbound = { type: 'vless', server: '192.0.2.1', server_port: 443, uuid: 'fixture' }
 const auth = { username: 'slot-user', password: 'slot-password' }
@@ -60,6 +62,7 @@ beforeEach(async () => {
   fixture.writePid.mockResolvedValue(undefined); fixture.removePid.mockResolvedValue(undefined)
   fixture.preflight.mockResolvedValue(undefined); fixture.stopPreflight.mockResolvedValue(undefined)
   fixture.cleanup.mockResolvedValue(true); fixture.allow.mockResolvedValue({ success: true })
+  fixture.resolve.mockReset().mockResolvedValue('203.0.113.20')
   engine = await import('./xrayEngine')
 })
 afterEach(async () => {
@@ -74,6 +77,46 @@ async function activeA() {
 }
 
 describe('owned Xray upstream slots', () => {
+  function nativeHostnameProfile() {
+    return { ...outbound, server: 'entry.example', vpnte_xray: {
+      version: 1, selectedTag: 'entry', entry: { outboundTag: 'entry' },
+      outbounds: [{ tag: 'entry', protocol: 'vless', settings: {
+        vnext: [{ address: 'entry.example', port: 443, users: [{ id: outbound.uuid, encryption: 'none' }] }]
+      } }]
+    } }
+  }
+  it('resolves the primary endpoint and its native graph once per start, with no cross-start DNS cache (AT-02-002)', async () => {
+    fixture.resolve.mockResolvedValueOnce('203.0.113.21').mockResolvedValueOnce('203.0.113.22')
+    const a = await engine.startXrayInSlot('a', nativeHostnameProfile(), { portOverride: 51001, socksAuth: auth })
+    const b = await engine.startXrayInSlot('b', nativeHostnameProfile(), { portOverride: 51002, socksAuth: auth })
+    expect(a.resolvedIp).toBe('203.0.113.21'); expect(b.resolvedIp).toBe('203.0.113.22')
+    expect(fixture.resolve).toHaveBeenCalledTimes(2)
+    expect(fixture.resolve.mock.calls.map(call => call[0])).toEqual(['entry.example', 'entry.example'])
+    const { writeFile } = await import('fs/promises')
+    const configs = vi.mocked(writeFile).mock.calls.filter(call => String(call[0]).endsWith('.json')).map(call => JSON.parse(String(call[1])))
+    expect(configs[0].outbounds.find((item: any) => item.tag === 'proxy').settings.vnext[0].address).toBe(a.resolvedIp)
+    expect(configs[1].outbounds.find((item: any) => item.tag === 'proxy').settings.vnext[0].address).toBe(b.resolvedIp)
+  })
+  it('uses the supplied primary resolution consistently in the native graph (AT-02-002)', async () => {
+    const result = await engine.startXrayInSlot('a', nativeHostnameProfile(), {
+      portOverride: 51001, socksAuth: auth, resolvedIp: '203.0.113.25'
+    })
+    expect(result.resolvedIp).toBe('203.0.113.25')
+    expect(fixture.resolve).not.toHaveBeenCalled()
+  })
+  it('does not reuse or publish late DNS evidence after the start owner is aborted (AT-00-003)', async () => {
+    let release!: (ip: string) => void
+    fixture.resolve.mockReturnValueOnce(new Promise<string>(done => { release = done }))
+    const controller = new AbortController()
+    const start = engine.startXrayInSlot('a', nativeHostnameProfile(), {
+      portOverride: 51001, socksAuth: auth, signal: controller.signal
+    }).catch(error => error)
+    await vi.waitFor(() => expect(fixture.resolve).toHaveBeenCalledOnce())
+    controller.abort(); release('203.0.113.25')
+    expect((await start).message).toContain('cancelled')
+    expect(fixture.preflight).not.toHaveBeenCalled()
+    expect(fixture.children).toHaveLength(0)
+  })
   it('preserves legacy noauth and adds password auth only when explicitly requested', () => {
     const xray = engine.toXrayOutbound(outbound)
     expect(engine.buildXrayConfig(xray, 51001).inbounds[0].settings).toEqual({ udp: true })

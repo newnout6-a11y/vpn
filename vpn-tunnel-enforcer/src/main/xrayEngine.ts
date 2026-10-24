@@ -710,9 +710,21 @@ async function startXrayRuntime(runtime: XrayRuntime,
     })
 
     const server = String(sbOutbound.server || '')
+    // One fresh plan per start: native JSON can repeat the selected hostname
+    // in its graph. Reuse this owner's exact DNS result, never another start's.
+    const resolutions = new Map<string, Promise<string | null>>()
+    const resolveEndpoint = (host: string): Promise<string | null> => {
+      let pending = resolutions.get(host)
+      if (!pending) {
+        pending = resolveServerAddress(host, options.signal)
+        resolutions.set(host, pending)
+      }
+      return pending
+    }
+    if (options.resolvedIp && isIP(options.resolvedIp)) resolutions.set(server, Promise.resolve(options.resolvedIp))
     let resolvedIp = options.resolvedIp || null
     if (!resolvedIp && isIP(server) === 0) {
-      resolvedIp = await timed('resolve-server', () => resolveServerAddress(server, options.signal))
+      resolvedIp = await timed('resolve-server', () => resolveEndpoint(server))
     }
     logEvent('info', 'xray', 'bootstrap destination selected', {
       method: options.resolvedIp ? 'supplied-resolution' : isIP(server) ? 'literal' : resolvedIp ? 'resolved' : 'engine-resolution-required',
@@ -738,7 +750,7 @@ async function startXrayRuntime(runtime: XrayRuntime,
     const nativeProfile = getNativeXrayProfile(sbOutbound)
     const config = buildXrayConfig(xrayOutbound, socksPort, { logPath, nativeProfile, socksAuth: options.socksAuth })
     if (nativeProfile) {
-      await timed('resolve-connection-graph', () => resolveXrayConfigEndpoints(config, host => resolveServerAddress(host, options.signal)))
+      await timed('resolve-connection-graph', () => resolveXrayConfigEndpoints(config, resolveEndpoint))
     }
     logEvent('info', 'xray', 'effective connection configuration', {
       source: nativeProfile ? 'preserved-xray-json' : 'translated-profile',

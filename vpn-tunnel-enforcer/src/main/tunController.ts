@@ -1480,6 +1480,19 @@ async function waitForOwnedRuntimeToExit(timeoutMs = 3000): Promise<boolean> {
   return !(await isOwnedTunRuntimeRunning(true))
 }
 
+/** Retire the previous generation before any new runtime artifacts or children exist (F-022). */
+async function retireOwnedRuntimeBeforeStart(signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted()
+  // Unlike a name-only sing-box probe, this also reconciles orphan Xray slots
+  // and refuses unknown process ownership instead of treating it as absence.
+  if (await isOwnedTunRuntimeRunning(true)) {
+    signal.throwIfAborted()
+    await killOwnedRuntimeProcesses()
+    if (!(await waitForOwnedRuntimeToExit())) throw new IpcFault('conflict')
+  }
+  signal.throwIfAborted()
+}
+
 export async function areTunRoutesActive(): Promise<boolean> {
   if (process.platform !== 'win32') return true
   const deadline = performance.now() + 3000
@@ -2768,6 +2781,13 @@ export const tunController = {
       endPhase('split-tunnel-rules', splitTunnelStarted, { count: splitTunnelDirectNames.length + splitTunnelDirectPaths.length })
     }
 
+    try {
+      await timeAsync('owned-runtime-cleanup', () => retireOwnedRuntimeBeforeStart(startAbortController.signal))
+    } catch (error) {
+      logEvent('warn', 'tun', 'previous owned runtime retirement not confirmed', error)
+      return finishStart(connectionFailure(classifyTunError(error), 'Не удалось подтвердить остановку предыдущего VPN runtime. Повторите остановку защиты и проверьте журнал.'))
+    }
+
     // Adapter lockdown can run while we validate the proxy and prepare the
     // runtime. It does not depend on the proxy address, the sing-box config,
     // or the TUN interface — it only needs TUN_IPV4_RESOLVER (a constant).
@@ -3023,25 +3043,8 @@ export const tunController = {
 
     // Kill only VPNTE-owned runtime binaries. Never kill generic sing-box.exe elsewhere:
     // Happ may use its own sing-box/xray core.
-    const runtimeCleanupStarted = phaseStart()
-    if (await isSingboxRunning()) {
-      await killOwnedRuntimeProcesses()
-      if (!(await waitForOwnedRuntimeToExit())) {
-        endPhase('owned-runtime-cleanup', runtimeCleanupStarted, { failed: true, previousRuntimeRunning: true })
-        // Same harmless-throwaway dance as on validate failure: the eager
-        // prepareRuntime is already running, drop its rejection on the floor
-        // so it doesn't bubble as an unhandled rejection.
-        if (runtimePromise) runtimePromise.catch(() => undefined)
-        await rollbackEarlyAdapterLockdown('owned runtime cleanup failed after adapter lockdown')
-        return finishStart(connectionFailure('conflict', 'Не удалось остановить предыдущий vpnte-sing-box.exe. Завершите его в Диспетчере задач и повторите.'))
-      }
-    } else {
-      // Process is NOT running — nothing to kill. Previously this called
-      // killRuntimeProcess which spawned elevated PowerShell to kill a
-      // non-existent process, wasting ~250-700ms. Skip it entirely.
-      logEvent('debug', 'tun', 'no stale sing-box process running — skipping kill')
-    }
-    endPhase('owned-runtime-cleanup', runtimeCleanupStarted)
+    // The retirement barrier above already proved the previous generation
+    // absent. Running a broad cleanup here could kill the newly started Xray.
 
     // Smart stale-cleanup gate: only walk the per-alias cleanup loop when at
     // least one of our well-known TUN aliases is currently present. After a
@@ -3576,26 +3579,6 @@ export const tunController = {
             clearInterval(poller)
             endPhase('wait-singbox-process', processWaitStarted, { attempts })
 
-            // Await the adapter lockdown NOW — it was kicked off ~3-4s ago and
-            // is very likely already done by this point. If it hasn't finished
-            // yet, we overlap the remaining few hundred ms with the TUN wait
-            // below. If lockdown fails, we must tear down sing-box since we
-            // already launched it.
-            if (adapterLockdownPromise) {
-              try {
-                await timeAsync('adapter-lockdown-await', () => adapterLockdownPromise!)
-                if (resolved) return
-                mark('lockdown-done')
-              } catch {
-                // Lockdown failed after sing-box started — kill it and abort.
-                startupCompensationStarted = true
-                await killOwnedRuntimeProcesses()
-                await rollbackEarlyAdapterLockdown('lockdown failed after sing-box started')
-                finish(connectionFailure(adapterLockdownCategory, 'Не удалось применить защиту физических адаптеров. Проверьте журнал.'))
-                return
-              }
-            }
-
             // Prepare the durable firewall transaction while JS waits for TUN.
             // Native effects wait for exact ownership validation, eliminating a
             // second native adapter poll without weakening the helper policy.
@@ -3716,6 +3699,20 @@ export const tunController = {
               }
               finish(connectionFailure('timeout', 'Туннельный интерфейс не поднялся. Запуск отменен для предотвращения утечки трафика.'))
               return
+            }
+
+            // TUN creation and physical lockdown are independent. Join here,
+            // before fresh ownership/WFP scopes can authorize firewall writes.
+            if (adapterLockdownPromise) {
+              try {
+                await timeAsync('adapter-lockdown-await', () => adapterLockdownPromise!)
+                if (resolved) return
+                mark('lockdown-done')
+              } catch {
+                // The shared failure owner closes the firewall barrier and
+                // proves runtime exit before restoring adapter/firewall state.
+                throw new IpcFault(adapterLockdownCategory)
+              }
             }
 
             await timeAsync('tun-ownership-record', () => recordOwnedTunAdapter(getTunAdapterAlias()))
@@ -3994,8 +3991,9 @@ export const tunController = {
             logEvent('error', 'tun', 'startup runtime termination failed', cleanupError)
           }
           if (!runtimeExited) cleanupErrors.push('runtime exit not confirmed; network protection retained')
-          const cleanups: Array<[string, () => Promise<unknown>]> = [['xray', () => stopXray('startup validation failed')]]
+          const cleanups: Array<[string, () => Promise<unknown>]> = []
           if (runtimeExited) cleanups.push(
+            ['xray', () => stopXray('startup validation failed')],
             ['adapter', () => rollbackEarlyAdapterLockdown('startup validation failed')],
             ['firewall', () => disableKillSwitchIfActive('startup validation failed')]
           )

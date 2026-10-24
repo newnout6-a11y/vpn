@@ -358,3 +358,23 @@ test('public correlation accepts only prefixed identifiers, never credential-sha
   }
   assert.equal(safeAppEvent({ ...event, clockId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }).clockId, undefined)
 })
+
+test('retained-switch timings and probe failures retain fixed labels without private payloads (AT-00-005)', () => {
+  const event = { ts: '2026-10-24T20:00:00.000Z', scope: 'tun', message: 'retained TUN upstream switch finished',
+    details: { ownershipLost: false, phasesMs: { stage: 2850, probe: 12, 'confirm-previous': 320,
+      'FAKE-PRIVATE-PAYLOAD': 99, select: Infinity, 'restore-selector': -1, 'stop-candidate': 'FAKE-PRIVATE-PAYLOAD' } } }
+  assert.deepEqual(safeAppEvent(event).phasesMs, { stage: 2850, probe: 12, 'confirm-previous': 320 })
+  assert.equal(safeAppEvent(event).ownershipLost, false)
+  const probe = { ...event, scope: 'socks-upstream-probe', message: 'candidate egress probe completed',
+    details: { durationMs: 11, stage: 'socks-handshake', outcome: 'network', code: 'SOCKS_FAILED',
+      error: 'FAKE-PRIVATE-PAYLOAD', password: 'FAKE-PRIVATE-PAYLOAD' } }
+  assert.deepEqual(safeAppEvent(probe), { at: event.ts, scope: probe.scope, message: probe.message,
+    durationMs: 11, stage: 'socks-handshake', outcome: 'network', code: 'SOCKS_FAILED' })
+  for (const code of ['SOCKS_AUTH_REQUIRED', 'SOCKS_AUTH_REJECTED', 'SOCKS_UPSTREAM_REJECTED', 'SOCKS_CLOSED']) {
+    assert.equal(safeAppEvent({ ...probe, details: { code } }).code, code)
+  }
+  for (const key of ['stage', 'outcome', 'code']) {
+    assert.equal(safeAppEvent({ ...probe, details: { [key]: 'FAKE-PRIVATE-PAYLOAD' } })[key], undefined)
+  }
+  assert.ok(!JSON.stringify([safeAppEvent(event), safeAppEvent(probe)]).includes('FAKE-PRIVATE-PAYLOAD'))
+})

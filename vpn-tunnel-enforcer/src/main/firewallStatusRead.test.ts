@@ -15,6 +15,9 @@ describe('isolated passive firewall reader', () => {
     expect(file).toBe('powershell.exe')
     expect(args.slice(0, -1)).toEqual(['-NoProfile', '-NoLogo', '-NonInteractive', '-Command'])
     expect(args.at(-1)).toContain(FIREWALL_STATUS_PS)
+    // Win32 CreateProcessW permits32767 UTF-16 units. Even doubling every
+    // script character for argument escaping leaves room for fixed argv/path.
+    expect(args.at(-1).length * 2 + 1024).toBeLessThan(32767)
     expect(args.at(-1)).toContain("Join-Path $PSHOME 'Modules\\NetSecurity\\NetSecurity.psd1'")
     expect(args.at(-1)).toContain("Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'")
     expect(args.at(-1)).not.toMatch(/(?:Set|New|Remove|Enable|Disable)-NetFirewall|Start-Process|Invoke-Expression|EncodedCommand/)
