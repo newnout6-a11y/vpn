@@ -80,6 +80,7 @@ function Get-NetIPAddress { [CmdletBinding()]param($InterfaceIndex,$AddressFamil
   [pscustomobject]@{IPAddress=$(if($global:variant -eq 'ip'){'192.168.250.254'}else{'192.168.250.253'});PrefixLength=$(if($global:variant -eq 'prefix'){24}else{30})}
 }
 function Import-Module { [CmdletBinding()]param([string[]]$Name,[switch]$Global)
+  if($global:variant -eq 'modulesUnavailable'){throw 'Network modules unavailable'}
   foreach($item in $Name){
     if ($item -notin @('NetAdapter','DnsClient','NetTCPIP','NetConnection') -and $item -notlike '*Microsoft.PowerShell.Security.psd1' -and $item -notlike ($PSHOME+'\Modules\*.cdxml')) { throw 'Unexpected import' }
     $global:steps += 'import:'+$item
@@ -125,15 +126,19 @@ describe('fixed recovery dispatcher native proof', () => {
   it.skipIf(!native)('returns the identical full baseline through the fixed dispatcher without writes', () => {
     const result = run({ op: 'inspect-physical-adapters' })
     expect(JSON.parse(result.value)).toEqual(JSON.parse(run({op:'inspect-physical-dns'}, 'trusted', true).value))
-    expect(result).toMatchObject({set:0,removed:0,queries:0})
-    expect(result.order).toHaveLength(8)
-    expect(result.order.every(step => step.startsWith('import:') && step.endsWith('.cdxml'))).toBe(true)
+    expect(result).toMatchObject({set:0,removed:0,queries:0,order:[]})
     const transitions = run({ op: 'inspect-transition-adapters' })
     expect(JSON.parse(transitions.value)).toEqual({ teredo: 'Type : client', sixToFour: '6to4 Service State : enabled', isatap: 'ISATAP State : disabled' })
-    expect(transitions).toMatchObject({set:0,removed:0,queries:0})
-    expect(transitions.order).toHaveLength(8)
-    expect(transitions.order.every(step => step.startsWith('import:') && step.endsWith('.cdxml'))).toBe(true)
+    expect(transitions).toMatchObject({set:0,removed:0,queries:0,order:[]})
   }, 20000)
+  it.skipIf(!native)('keeps CIM/netsh snapshots available when network modules cannot load', () => {
+    const transition = run({op:'inspect-transition-adapters'}, 'modulesUnavailable')
+    expect(JSON.parse(transition.value)).toEqual({teredo:'Type : client',sixToFour:'6to4 Service State : enabled',isatap:'ISATAP State : disabled'})
+    expect(transition).toMatchObject({set:0,removed:0,order:[]})
+    const physical = run({op:'inspect-physical-adapters'}, 'modulesUnavailable')
+    expect(JSON.parse(physical.value).alias).toBe('Беспроводная сеть')
+    expect(physical).toMatchObject({set:0,removed:0,order:[]})
+  })
   it.skipIf(!native)('prepares fixed network definitions and leaves recovery warm-up short', () => {
     for (const module of ['NetAdapter','DnsClient','NetTCPIP','NetConnection']) {
       const preparation = run({op:'warmup-adapters',module})

@@ -228,14 +228,12 @@ function Invoke-RecoveryOperation($request) {
     }
     'inspect-physical-adapters' {
       if ($fields -cne 'op') { throw 'Invalid recovery worker fields' }
-      Initialize-VpnteNetworkModules
       $snapshot = Read-PhysicalAdapters
       if ($null -eq $snapshot) { return '[]' }
       return $snapshot
     }
     'inspect-transition-adapters' {
       if ($fields -cne 'op') { throw 'Invalid recovery worker fields' }
-      Initialize-VpnteNetworkModules
       return (Read-TransitionAdapters)
     }
     'inspect-tun' {

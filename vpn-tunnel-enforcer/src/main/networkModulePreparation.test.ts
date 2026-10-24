@@ -61,12 +61,14 @@ $retry=Invoke-RecoveryOperation ([pscustomobject]@{op='inspect-physical-dns'})
       } finally { rmSync(directory, { recursive: true, force: true }) }
       expect(result.error?.message).toBeUndefined(); expect(result.status, String(result.stderr)).toBe(0)
       const evidence = JSON.parse(String(result.stdout).trim())
-      expect(evidence.before.failed).toBe(variant === 'fallback-failed' ? 6 : 0)
-      expect(evidence.before.reads).toBe(variant === 'fallback-failed' ? 0 : 5)
+      expect(evidence.before.failed).toBe(variant === 'fallback-failed' ? 4 : 0)
+      expect(evidence.before.reads).toBe(variant === 'fallback-failed' ? 2 : 5)
       if (variant === 'fallback-failed') {
-        expect(evidence.before.imports).toHaveLength(12) // Every failed command retries, without reaching its query.
-        expect(evidence.imports).toHaveLength(20)
-        expect(evidence.retry).toBe('fresh-1')
+        // CIM/netsh operations stay independent of network command definitions.
+        expect(evidence.before.values).toEqual(['fresh-adapters', 'fresh-transition'])
+        expect(evidence.before.imports).toHaveLength(8) // Every definition-dependent command retries before its query.
+        expect(evidence.imports).toHaveLength(16)
+        expect(evidence.retry).toBe('fresh-3')
       } else {
         expect(evidence.before.values.slice(0, 2)).toEqual(['fresh-1', 'fresh-2'])
         expect(evidence.imports).toEqual(evidence.before.imports) // Successful definitions only are cached.
