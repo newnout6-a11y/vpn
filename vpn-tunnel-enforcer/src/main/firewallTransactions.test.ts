@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], sc
   wfpCalls: [] as string[], wfpActive: false, wfpFailApply: 0, wfpFailRemove: false, wfpFailVerify: false, wfpConflict: false, wfpFailPrepareExceptions: false,
   wfpRemoveError: null as Error | null,
   manifestReads: 0,
+  ruleReads: 0, ruleReadError: null as Error | null, ruleReadValue: null as string | null,
   manifestReadGate: null as Promise<void> | null,
   auditWfpPolicy: false,
   wfpPriorityOutput: 'WFP_PRIORITY_VERIFIED',
@@ -28,6 +29,15 @@ const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], sc
 vi.mock('electron', () => ({ app: { getPath: () => 'C:\\VPNTE' },
   BrowserWindow: { getAllWindows: () => [] }, dialog: { showMessageBox: vi.fn(async () => ({})) } }))
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
+vi.mock('./recoveryPsWorker', async importOriginal => ({
+  ...await importOriginal<typeof import('./recoveryPsWorker')>(),
+  executeRecoveryOperation: async (request: { op: string }) => {
+    if (request.op !== 'inspect-owned-firewall-rules') throw new Error('Unexpected ownership read')
+    state.ruleReads++
+    if (state.ruleReadError) throw state.ruleReadError
+    return state.ruleReadValue ?? (state.ownedRules ? '1' : '0')
+  }
+}))
 vi.mock('./wfpIpv6', async importOriginal => ({
   ...await importOriginal<typeof import('./wfpIpv6')>(),
   prepareWfpIpv6Policy: async (opts: { signal?: AbortSignal }) => { state.wfpCalls.push('prepare'); opts.signal?.throwIfAborted(); return { schemaVersion: 1, rules: ['connect','accept','boot'].map((layer, i) => ({ id: `00000000-0000-0000-0000-00000000000${i + 1}`, role: 'block', appId: '', remote: '', luid: '', originalApp: false, inbound: layer === 'accept', boot: layer === 'boot' })) } },
@@ -174,6 +184,7 @@ beforeEach(() => {
   state.wfpCalls = []; state.wfpActive = false; state.wfpFailApply = 0; state.wfpFailRemove = false; state.wfpFailVerify = false; state.wfpConflict = false
   state.wfpFailPrepareExceptions = false
   state.manifestReads = 0; state.manifestReadGate = null
+  state.ruleReads = 0; state.ruleReadError = null; state.ruleReadValue = null
   state.auditWfpPolicy = false
   state.wfpPriorityOutput = 'WFP_PRIORITY_VERIFIED'
   state.liveFailures = 0; state.liveMissingMarker = false; state.failCommit = false
@@ -626,6 +637,37 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(await isKillSwitchActive()).toBe(true)
     expect(state.wfpCalls).toEqual(['presence'])
   })
+  it('uses fresh isolated ownership reads without entering the blocked mutation helper (AT-03-004/012)', async () => {
+    state.helperFailure = new Error('Mutation helper is occupied')
+    expect(await ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe')).toMatchObject({ success: true, skipped: true })
+    expect(state.ruleReads).toBe(1)
+    expect(state.scripts).toEqual([])
+    state.helperFailure = null; state.ownedRules = true
+    expect(await ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe')).toMatchObject({ success: true })
+    expect(state.ruleReads).toBe(2)
+    expect(state.scripts).toHaveLength(1)
+    state.scripts = []; state.ownedRules = false
+    expect(await ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe')).toMatchObject({ success: true, skipped: true })
+    expect(state.ruleReads).toBe(3)
+    expect(state.scripts).toEqual([])
+  })
+  it.each(['unavailable', 'malformed'])('retains a fresh helper fallback when the isolated ownership reader is %s (AT-03-004/012)', async failure => {
+    if (failure === 'unavailable') state.ruleReadError = new Error('Reader unavailable')
+    else state.ruleReadValue = '0garbage'
+    state.ownedRules = true
+    expect(await ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe')).toMatchObject({ success: true })
+    expect(state.ruleReads).toBe(1)
+    expect(state.scripts).toHaveLength(2)
+    expect(state.scripts[0]).toContain('Measure-Object')
+    expect(state.scripts[1]).toContain('New-VpnteFirewallRule')
+  })
+  it('refuses to declare an inactive firewall when both fresh ownership reads fail (AT-03-001/012)', async () => {
+    state.ruleReadError = new Error('Reader unavailable'); state.helperExitCode = 1
+    await expect(ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe')).rejects.toThrow()
+    expect(state.scripts).toHaveLength(1)
+    expect(state.scripts[0]).not.toContain('New-VpnteFirewallRule `')
+    expect(state.writes).toEqual([])
+  })
   it('never lets a held passive read block a program allow mutation (AT-03-001/004/008)', async () => {
     await enableKillSwitch(options)
     state.scripts = []
@@ -866,13 +908,15 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(state.artifacts).toEqual([])
     expect(state.fallback).not.toHaveBeenCalled()
   })
-  it('uses a live helper for inactive-firewall read-only probes without a file or cold process (AT-03-004)', async () => {
+  it('uses the isolated reader for inactive-firewall probes without a file or cold process (AT-03-004)', async () => {
     expect(await isKillSwitchActive()).toBe(false)
-    expect(state.scripts).toHaveLength(1)
+    expect(state.ruleReads).toBe(1)
+    expect(state.scripts).toEqual([])
     expect(state.artifacts).toEqual([])
     expect(state.fileProbe).not.toHaveBeenCalled()
   })
   it('retains the trusted-file read-only fallback when no helper is running (AT-03-004)', async () => {
+    state.ruleReadError = new Error('Reader unavailable')
     state.helperAvailable = false
     expect(await isKillSwitchActive()).toBe(false)
     expect(state.scripts).toEqual([])

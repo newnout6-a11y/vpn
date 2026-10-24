@@ -498,25 +498,36 @@ export async function resolveServerAddress(server: string, signal?: AbortSignal)
 
 /** Bootstrap every reachable VPN endpoint, including bridge and balancer leaves. */
 export async function resolveXrayConfigEndpoints(config: Record<string, any>,
-  resolver: (host: string) => Promise<string | null>): Promise<void> {
+  resolver: (host: string) => Promise<string | null>,
+  additionalHosts: readonly string[] = []): Promise<ReadonlyMap<string, string>> {
   const nodes: Record<string, any>[] = []
   for (const outbound of config.outbounds || []) {
     if (!['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria'].includes(outbound.protocol)) continue
     nodes.push(...(outbound.settings?.vnext || []), ...(outbound.settings?.servers || []))
     if (typeof outbound.settings?.address === 'string') nodes.push(outbound.settings)
   }
-  const hosts = [...new Set(nodes.map(node => String(node.address || '')).filter(host => host && isIP(host) === 0))]
+  const hosts = [...new Set([...additionalHosts, ...nodes.map(node => String(node.address || ''))]
+    .filter(host => host && isIP(host) === 0))]
   let next = 0
   const resolved = new Map<string, string>()
-  await Promise.all(Array.from({ length: Math.min(4, hosts.length) }, async () => {
-    while (next < hosts.length) {
-      const host = hosts[next++]
-      const ip = await resolver(host)
-      if (!ip || !isIP(ip)) throw new Error('Не удалось разрешить адрес узла native Xray до запуска туннеля')
-      resolved.set(host, ip)
+  let failed = false
+  const workers = await Promise.allSettled(Array.from({ length: Math.min(4, hosts.length) }, async () => {
+    try {
+      while (!failed && next < hosts.length) {
+        const host = hosts[next++]
+        const ip = await resolver(host)
+        if (!ip || !isIP(ip)) throw new Error('Не удалось разрешить адрес узла native Xray до запуска туннеля')
+        resolved.set(host, ip)
+      }
+    } catch (error) {
+      failed = true
+      throw error
     }
   }))
+  const failure = workers.find(worker => worker.status === 'rejected')
+  if (failure?.status === 'rejected') throw failure.reason
   for (const node of nodes) if (resolved.has(node.address)) node.address = resolved.get(node.address)
+  return resolved
 }
 
 // Internal diagnostic input; never publish the address in diagnostic details.
@@ -710,10 +721,12 @@ async function startXrayRuntime(runtime: XrayRuntime,
     })
 
     const server = String(sbOutbound.server || '')
+    const nativeProfile = getNativeXrayProfile(sbOutbound)
     // One fresh plan per start: native JSON can repeat the selected hostname
     // in its graph. Reuse this owner's exact DNS result, never another start's.
     const resolutions = new Map<string, Promise<string | null>>()
     const resolveEndpoint = (host: string): Promise<string | null> => {
+      if (options.signal?.aborted) return Promise.reject(new Error('Xray startup cancelled'))
       let pending = resolutions.get(host)
       if (!pending) {
         pending = resolveServerAddress(host, options.signal)
@@ -723,16 +736,9 @@ async function startXrayRuntime(runtime: XrayRuntime,
     }
     if (options.resolvedIp && isIP(options.resolvedIp)) resolutions.set(server, Promise.resolve(options.resolvedIp))
     let resolvedIp = options.resolvedIp || null
-    if (!resolvedIp && isIP(server) === 0) {
+    if (!nativeProfile && !resolvedIp && isIP(server) === 0) {
       resolvedIp = await timed('resolve-server', () => resolveEndpoint(server))
     }
-    logEvent('info', 'xray', 'bootstrap destination selected', {
-      method: options.resolvedIp ? 'supplied-resolution' : isIP(server) ? 'literal' : resolvedIp ? 'resolved' : 'engine-resolution-required',
-      family: isIP(resolvedIp || server),
-      port: Number(sbOutbound.server_port),
-      stage: 'before-process-start'
-    })
-    const dialTarget = { host: resolvedIp || server, port: Number(sbOutbound.server_port) }
 
     const socksPort = options.portOverride ?? (await timed('pick-port', pickFreeLocalPort))
     if (!Number.isInteger(socksPort) || socksPort < 1 || socksPort > 65535 ||
@@ -747,11 +753,20 @@ async function startXrayRuntime(runtime: XrayRuntime,
       resolvedIp
     })
 
-    const nativeProfile = getNativeXrayProfile(sbOutbound)
     const config = buildXrayConfig(xrayOutbound, socksPort, { logPath, nativeProfile, socksAuth: options.socksAuth })
     if (nativeProfile) {
-      await timed('resolve-connection-graph', () => resolveXrayConfigEndpoints(config, resolveEndpoint))
+      // Compile hostnames first so the selected endpoint and other reachable
+      // leaves share one bounded DNS plan instead of two serial DNS waits.
+      const plan = await timed('resolve-connection-graph', () => resolveXrayConfigEndpoints(config, resolveEndpoint, [server]))
+      resolvedIp = resolvedIp || plan.get(server) || null
     }
+    logEvent('info', 'xray', 'bootstrap destination selected', {
+      method: options.resolvedIp ? 'supplied-resolution' : isIP(server) ? 'literal' : resolvedIp ? 'resolved' : 'engine-resolution-required',
+      family: isIP(resolvedIp || server),
+      port: Number(sbOutbound.server_port),
+      stage: 'before-process-start'
+    })
+    const dialTarget = { host: resolvedIp || server, port: Number(sbOutbound.server_port) }
     logEvent('info', 'xray', 'effective connection configuration', {
       source: nativeProfile ? 'preserved-xray-json' : 'translated-profile',
       fingerprint: xrayOutbound.streamSettings?.realitySettings?.fingerprint || xrayOutbound.streamSettings?.tlsSettings?.fingerprint || null,

@@ -97,6 +97,16 @@ function netsh {
     default { throw 'Unexpected native command' }
   }
 }
+${(request as { op?: string })?.op === 'inspect-owned-firewall-rules' ? `
+function New-Object {
+  [CmdletBinding()]param([string]$ComObject)
+  $global:queries++
+  if($ComObject -cne 'HNetCfg.FwPolicy2' -or $global:variant -eq 'firewallQueryError'){throw 'Fixture firewall query refused'}
+  if($global:variant -eq 'firewallMissingRules'){return [pscustomobject]@{Rules=$null}}
+  $names=@('Foreign-VPNTE-killswitch','VPNTE','ordinary-rule')
+  if($global:variant -eq 'firewallOwned'){$names+=@('VPNTE-killswitch-allow-one','vpnte-KILLSWITCH-legacy')}
+  [pscustomobject]@{Rules=@($names|ForEach-Object{[pscustomobject]@{Name=$_}})}
+}` : ''}
 ${recoveryWorkerFunctions(variant === 'environmentMismatch' ? 'C:\\different-programdata' : process.env.ProgramData || 'C:\\ProgramData')}
 $request=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${serialized}'))|ConvertFrom-Json
 $value=${fullSnapshot ? `& { ${PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT} }` : 'Invoke-RecoveryOperation $request'}
@@ -111,6 +121,12 @@ $value=${fullSnapshot ? `& { ${PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT} }` : 'Invoke-Re
   return JSON.parse(stdout.replace(/^\uFEFF/,'').trim())
 }
 describe('fixed recovery dispatcher native proof', () => {
+  it.skipIf(!native).each([['trusted','0'], ['firewallOwned','2']])('reads only owned firewall names without network imports or effects: %s (AT-03-004/012)', (variant, value) => {
+    expect(run({op:'inspect-owned-firewall-rules'}, variant)).toEqual({value,set:0,removed:0,queries:1,order:[]})
+  }, 20000)
+  it.skipIf(!native).each(['firewallQueryError','firewallMissingRules'])('refuses to prove absent firewall rules on %s (AT-03-001/012)', variant => {
+    expect(() => run({op:'inspect-owned-firewall-rules'}, variant)).toThrow()
+  }, 20000)
   it.skipIf(!native)('reads only the selected adapter DNS without baseline queries or mutations (AT-03-006)', () => {
     const result = run({ op: 'inspect-physical-dns' }, 'dnsOnly')
     expect(JSON.parse(result.value)).toEqual({ ifIndex: 17, alias: 'Беспроводная сеть', ipv4Dns: ['1.1.1.1'] })
@@ -292,7 +308,8 @@ describe('fixed recovery dispatcher native proof', () => {
   it.skipIf(!native).each(['down','driver','pnp','ip','prefix','guid','duplicate','renamed'])('rejects bad TUN evidence: %s',variant=>{
     expect(()=>run({op:'inspect-tun',alias:'Ethernet 5'},variant)).toThrow()
   },20000)
-  it.skipIf(!native).each([{op:'read',name:'..\\file.json'},{op:'protect',name:'firewall.json'},{op:'ensure',script:'Remove-Item'},{op:'inspect-tun',alias:'Ethernet 5; x'},{op:'bogus'},{op:'READ',name:'firewall.json'}])('validates data again in PowerShell: %j',request=>{
+  it.skipIf(!native).each([{op:'read',name:'..\\file.json'},{op:'protect',name:'firewall.json'},{op:'ensure',script:'Remove-Item'},{op:'inspect-tun',alias:'Ethernet 5; x'},{op:'bogus'},{op:'READ',name:'firewall.json'},
+    {op:'inspect-owned-firewall-rules',prefix:'foreign'}, {op:'inspect-owned-firewall-rules',script:'Remove-NetFirewallRule'}, {op:'INSPECT-OWNED-FIREWALL-RULES'}])('validates data again in PowerShell: %j',request=>{
     expect(()=>run(request)).toThrow()
   },20000)
   it('does not interpret incoming scripts or reset arbitrary trees',()=>{

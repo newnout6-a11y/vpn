@@ -9,7 +9,7 @@ import { IpcFault } from '../shared/ipc-result'
 import { logEvent } from './appLogger'
 
 export interface SocksUpstream { port: number; username: string; password: string }
-const HOST = 'api.ipify.org'
+const HOSTS = ['api.ipify.org', 'icanhazip.com'] as const
 const DEADLINE_MS = 2000
 const MAX_BODY_BYTES = 4096
 type ProbeStage = 'local-connect' | 'socks-handshake' | 'tls-handshake' | 'https-response' | 'response-body' | 'socket-close'
@@ -36,7 +36,31 @@ export function probeSocksUpstream(upstream: SocksUpstream, signal?: AbortSignal
     return Promise.reject(new IpcFault('validation'))
   }
   if (signal?.aborted) return Promise.reject(new IpcFault('cancelled'))
+  return probeProviders(upstream, signal)
+}
+
+async function probeProviders(upstream: SocksUpstream, signal?: AbortSignal): Promise<string> {
+  const deadlineAt = performance.now() + DEADLINE_MS
+  const losers = new AbortController()
+  const ownedSignal = signal ? AbortSignal.any([signal, losers.signal]) : losers.signal
+  let selected: string | undefined
+  const results = await Promise.allSettled(HOSTS.map((_host, providerIndex) =>
+    probeProvider(upstream, providerIndex, deadlineAt, ownedSignal).then(ip => {
+      if (!selected) { selected = ip; losers.abort() }
+      return ip
+    })))
+  // A winner cannot release ownership while another socket's closure is unknown.
+  const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+  const closeFailure = failures.find(result => result.reason?.category === 'internal')
+  if (closeFailure) throw closeFailure.reason
+  if (signal?.aborted) throw new IpcFault('cancelled')
+  if (selected) return selected
+  throw failures.find(result => result.reason?.category === 'timeout')?.reason ?? failures[0]?.reason ?? new IpcFault('network')
+}
+
+function probeProvider(upstream: SocksUpstream, providerIndex: number, deadlineAt: number, signal: AbortSignal): Promise<string> {
   return new Promise<string>((resolve, reject) => {
+    const host = HOSTS[providerIndex]
     const began = performance.now()
     let stage: ProbeStage = 'local-connect'
     const socket = new Socket()
@@ -63,6 +87,7 @@ export function probeSocksUpstream(upstream: SocksUpstream, signal?: AbortSignal
       const complete = (closeFailed = false) => {
         const failure = closeFailed ? new IpcFault('internal') : error
         logEvent(failure ? 'warn' : 'debug', 'socks-upstream-probe', 'candidate egress probe completed', {
+          providerIndex,
           stage: closeFailed ? 'socket-close' : stage,
           outcome: failure?.category ?? 'success', code: closeFailed ? 'SOCKET_CLOSE_UNCONFIRMED' : code,
           durationMs: Math.round(performance.now() - began)
@@ -83,7 +108,7 @@ export function probeSocksUpstream(upstream: SocksUpstream, signal?: AbortSignal
       if (!authenticated) finish(new IpcFault('network'), undefined, 'SOCKS_AUTH_REQUIRED')
     }
     const abort = () => finish(new IpcFault('cancelled'), undefined, 'CANCELLED')
-    const deadline = setTimeout(() => finish(new IpcFault('timeout'), undefined, 'DEADLINE'), DEADLINE_MS)
+    const deadline = setTimeout(() => finish(new IpcFault('timeout'), undefined, 'DEADLINE'), Math.max(0, deadlineAt - performance.now()))
     socket.on('error', () => finish(new IpcFault('network')))
     socket.once('connect', () => {
       stage = 'socks-handshake'
@@ -92,19 +117,19 @@ export function probeSocksUpstream(upstream: SocksUpstream, signal?: AbortSignal
       socket.prependListener('data', requirePasswordAuth)
       void SocksClient.createConnection({
         proxy: { host: '127.0.0.1', port: upstream.port, type: 5, userId: upstream.username, password: upstream.password },
-        destination: { host: HOST, port: 443 }, command: 'connect', timeout: DEADLINE_MS, existing_socket: socket
+        destination: { host, port: 443 }, command: 'connect', timeout: Math.max(1, Math.ceil(deadlineAt - performance.now())), existing_socket: socket
       }).then(connection => {
         if (settled) { connection.socket.destroy(); return }
         if (connection.socket !== socket) { connection.socket.destroy(); throw new Error('Unexpected SOCKS socket') }
         if (!authenticated) { finish(new IpcFault('network'), undefined, 'SOCKS_AUTH_REQUIRED'); return }
         stage = 'tls-handshake'
-        secured = connectTls({ socket, servername: HOST, rejectUnauthorized: true, ALPNProtocols: ['http/1.1'], minVersion: 'TLSv1.2' })
+        secured = connectTls({ socket, servername: host, rejectUnauthorized: true, ALPNProtocols: ['http/1.1'], minVersion: 'TLSv1.2' })
         secured.on('error', () => finish(new IpcFault('network')))
         secured.once('secureConnect', () => { if (!settled) stage = 'https-response' })
         agent = new Agent({ keepAlive: false, maxSockets: 1 })
         // A private agent consumes this exact TLS connection instead of allocating a direct connection.
         agent.createConnection = () => secured!
-        req = request({ hostname: HOST, port: 443, path: '/', method: 'GET', agent,
+        req = request({ hostname: host, port: 443, path: '/', method: 'GET', agent,
           headers: { Accept: 'text/plain', Connection: 'close' } }, incoming => {
           response = incoming
           incoming.on('error', () => finish(new IpcFault('network')))

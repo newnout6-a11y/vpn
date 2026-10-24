@@ -107,7 +107,7 @@ interface SingboxConfig {
   inbounds: Array<Record<string, any>>
   outbounds: Array<Record<string, any>>
   route: { rules: Array<Record<string, any>>; final: string }
-  experimental: { clash_api: { external_controller: string } }
+  experimental: { clash_api: { external_controller: string }; cache_file: { enabled: boolean } }
 }
 
 function gen(
@@ -769,9 +769,8 @@ describe('generateSingboxConfig smart RU split', () => {
     expect(cfg.route.rules.some((r: any) => r.rule_set)).toBe(false)
   })
 
-  it('always enables cache_file for the DNS answer cache (perf, even w/o smart-RU)', () => {
-    // cache_file is now always-on: persisting the DNS cache across restarts is
-    // what kills the cold-start DNS storm. Previously gated on smart-RU.
+  it('keeps the legacy cache with or without Smart RU', () => {
+    // Legacy configurations retain their cache across restarts.
     const off = genSmart({})
     expect(off.experimental.cache_file?.enabled).toBe(true)
     const on = genSmart({ smartRuSplit: true })
@@ -968,6 +967,12 @@ describe('authenticated Xray selector configuration', () => {
   const options = () => ({ xraySocksPort: 25551, xraySwitchSlots: slots(),
     clashPortOverride: 25553, directProxyPortOverride: 25554, tunnelProbePortOverride: 25555 })
   const generate = (outbound = realityOutbound) => generateSingboxConfig({ outbound }, 'socks5', [], options()) as SingboxConfig
+
+  it('never restores a previous session slot before the initial authenticated selection (AT-02-002)', () => {
+    expect(generate().experimental.cache_file.enabled).toBe(false)
+    const legacy = generateSingboxConfig({ outbound: realityOutbound }, 'socks5', [], { xraySocksPort: 25551 }) as SingboxConfig
+    expect(legacy.experimental.cache_file.enabled).toBe(true)
+  })
 
   it('routes DNS, diagnostics and application traffic through the authenticated selector', () => {
     const cfg = generate()

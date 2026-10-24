@@ -61,7 +61,7 @@ const phases = new Set(`initial-stale-cleanup initial-create-allows initial-set-
   physical-dns-sources-await proxy-listen-and-owner-lookup proxy-full-tunnel-preflight owned-runtime-cleanup
   stale-tun-cleanup singbox-config-check singbox-launch-submit wait-singbox-process adapter-lockdown-await
   wait-tun-interface tun-ownership-record tun-interface-metric-set tun-interface-metric-readback firewall-kill-switch
-  firewall-kill-switch-await runtime-pid runtime-stop-preflight stop-runtime wait-runtime-exit stop-xray
+  firewall-kill-switch-await initial-upstream-probe initial-outbound-selection runtime-pid runtime-stop-preflight stop-runtime wait-runtime-exit stop-xray
   rollback-baseline disable-firewall rollback-adapters repair-dns`.split(/\s+/))
 
 // Raw application logs stay on the disposable runner. Only fixed messages and numeric timings escape.

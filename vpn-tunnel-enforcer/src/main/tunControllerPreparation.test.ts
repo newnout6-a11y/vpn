@@ -47,6 +47,7 @@ function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', a
     createHash, settingsStore: { get: () => ({ smartRuSplit: true }) },
     dnsProfiles: { getActiveDnsProfile: () => null }, generateDomainRouteRules: () => [],
     startXray: vi.fn(async (..._args: any[]) => ({ socksPort: 1234, resolvedIp: '198.51.100.1', exePath: 'fixture-xray.exe' })),
+    probeSocksUpstream: vi.fn(async (..._args: any[]) => '198.51.100.9'),
     stopXray: vi.fn(async () => {}),
     rollbackEarlyAdapterLockdown: vi.fn(async () => {}),
     prepareRuntime: vi.fn(async (...args: any[]) => {
@@ -211,6 +212,46 @@ describe('parallel runtime staging safety (AT-01-009 / AT-02-002/005)', () => {
 })
 
 describe('Direct VPN preparation overlap', () => {
+  it('waits for authenticated cold egress while runtime files stage (AT-02-002/004)', async () => {
+    const proof = deferred<string>()
+    const h = harness(Promise.resolve([]))
+    h.probeSocksUpstream.mockImplementation(() => proof.promise)
+    const completed = vi.fn()
+    const pending = h.run().then(result => { completed(); return result })
+    await vi.waitFor(() => expect(h.probeSocksUpstream).toHaveBeenCalledOnce())
+    expect(h.prepareRuntime).toHaveBeenCalledOnce()
+    expect(completed).not.toHaveBeenCalled()
+    expect(h.probeSocksUpstream).toHaveBeenCalledWith({
+      port: 1234, username: 'a'.repeat(32), password: 'b'.repeat(32)
+    }, h.startXray.mock.calls[0][1].signal)
+    proof.resolve('198.51.100.9')
+    expect(await pending).toMatchObject({ singbox: 'fixture.exe' })
+  })
+
+  it.each(['network', 'timeout'] as const)('retires a listening but unusable cold upstream on %s before rollback (AT-02-004)', async category => {
+    const h = harness(Promise.resolve([]))
+    h.probeSocksUpstream.mockRejectedValue(new IpcFault(category))
+    expect(await h.run()).toMatchObject({ success: false, category })
+    expect(h.stopXray).toHaveBeenCalledOnce()
+    expect(h.rollbackEarlyAdapterLockdown).toHaveBeenCalledOnce()
+    expect(h.stopXray.mock.invocationCallOrder[0]).toBeLessThan(h.rollbackEarlyAdapterLockdown.mock.invocationCallOrder[0])
+  })
+
+  it('drains an aborted cold probe and fences its late success (AT-00-003 / AT-02-005)', async () => {
+    const proof = deferred<string>()
+    const h = harness(Promise.resolve([]))
+    h.probeSocksUpstream.mockImplementation(() => proof.promise)
+    const completed = vi.fn()
+    const pending = h.run().then(result => { completed(); return result })
+    await vi.waitFor(() => expect(h.probeSocksUpstream).toHaveBeenCalledOnce())
+    h.cancel()
+    expect(h.probeSocksUpstream.mock.calls[0][1].aborted).toBe(true)
+    expect(completed).not.toHaveBeenCalled()
+    proof.resolve('198.51.100.9')
+    expect(await pending).toMatchObject({ success: false })
+    expect(h.stopXray).toHaveBeenCalledOnce()
+  })
+
   it('retires stale sing-box/Xray before staging or spawning the new generation (AT-02-002 / F-022)', async () => {
     const h = harness(Promise.resolve([])), stopped = deferred<void>()
     h.isOwnedTunRuntimeRunning.mockResolvedValue(true)

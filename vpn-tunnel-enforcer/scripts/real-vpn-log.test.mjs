@@ -336,8 +336,9 @@ test('only known application events and numeric timings enter public logs', () =
     details: { code: 'STARTUP_FAILED', error: 'FAKE-PRIVATE-PAYLOAD' } }).code, 'STARTUP_FAILED')
   assert.deepEqual(safeAppEvent({ ...event, details: { phaseDurations: {
     'wait-tun-interface': { durationMs: 12, error: 'FAKE-PRIVATE-PAYLOAD' }, 'stop-xray': 8,
+    'initial-upstream-probe': { durationMs: 321, password: 'FAKE-PRIVATE-PAYLOAD' }, 'initial-outbound-selection': 6,
     'FAKE-PRIVATE-PAYLOAD': 3, 'prepare-runtime': 'FAKE-PRIVATE-PAYLOAD' } } }).phaseDurations,
-  { 'wait-tun-interface': 12, 'stop-xray': 8 })
+  { 'wait-tun-interface': 12, 'stop-xray': 8, 'initial-upstream-probe': 321, 'initial-outbound-selection': 6 })
   const safe = safeAppEvent({ ...event, scope: 'ipc', message: 'start-direct-vpn failed',
     correlationId: 'FAKE-PRIVATE-PAYLOAD', clockId: 'FAKE-PRIVATE-PAYLOAD', details: { ms: 'FAKE-PRIVATE-PAYLOAD' } })
   assert.ok(!JSON.stringify(safe).includes('FAKE-PRIVATE-PAYLOAD'))

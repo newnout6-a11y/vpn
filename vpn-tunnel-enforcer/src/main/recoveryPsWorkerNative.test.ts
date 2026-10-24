@@ -6,6 +6,16 @@ vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 import { RecoveryPsWorker } from './recoveryPsWorker'
 
 describe('persistent DNS policy reader native proof', () => {
+  it.skipIf(process.platform !== 'win32')('returns fresh owned-firewall count frames without any network-module preparation (AT-03-004/012)', async () => {
+    const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData', spawn, 'adapters')
+    try {
+      for (let read=0;read<2;read++) {
+        expect(await worker.execute({op:'inspect-owned-firewall-rules'})).toMatch(/^\d+$/)
+      }
+      await expect(worker.execute({op:'ensure'})).rejects.toMatchObject({code:'rejected'})
+    } finally { await worker.stop() }
+    expect(worker.hasExited).toBe(true)
+  }, 20000)
   it.skipIf(process.platform !== 'win32')('warms each adapter module and returns repeated full and transition frames without mutation (AT-03-006/010)', async () => {
     const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData', spawn, 'adapters')
     try {

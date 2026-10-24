@@ -1354,13 +1354,11 @@ export function generateSingboxConfig(
         secret: clashSecret,
         default_mode: 'rule'
       },
-      // cache_file persists the DNS answer cache (and downloaded rule-sets /
-      // clash selections) across restarts. ALWAYS on now — it's a pure
-      // performance win: warm reconnects skip re-resolving every hostname,
-      // which directly cuts the cold-start DNS storm the user felt as
-      // "каждое видео проверяется по несколько секунд". store_rdrc also
-      // persists reject decisions. Relative path → runtime dir (sing-box cwd).
-      cache_file: { enabled: true, path: 'cache.db', store_rdrc: true }
+      // Slot credentials/listeners are recreated on every cold start. A saved
+      // selection of b would route startup traffic/DNS to a stopped upstream
+      // before the authenticated initial selector readback can run. Keep the
+      // legacy cache, but never restore a selector from an earlier session.
+      cache_file: { enabled: !options.xraySwitchSlots, path: 'cache.db', store_rdrc: true }
     }
   }
 }
@@ -2994,6 +2992,13 @@ export const tunController = {
             resolvedVpnEndpointIp = xr.resolvedIp
             proxyOwnerProgramPaths = [...new Set([...proxyOwnerProgramPaths, xr.exePath])]
             proxyOwnerProcessNames = uniqueProcessNames([...proxyOwnerProcessNames, 'vpnte-xray.exe'])
+            // A listening SOCKS port does not prove the provider's outbound
+            // graph is ready. Establish authenticated TLS/IP before installing
+            // TUN routes; this overlaps runtime staging and drains on abort.
+            await timeAsync('initial-upstream-probe', () => probeSocksUpstream(
+              { ...slots.a, port: xr.socksPort }, startAbortController.signal
+            ))
+            startAbortController.signal.throwIfAborted()
           } catch (xrErr) {
             logEvent('error', 'tun', 'xray startup failed', xrErr)
             try { await stopXray('xray startup failed') }

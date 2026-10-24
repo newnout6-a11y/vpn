@@ -85,6 +85,88 @@ describe('owned Xray upstream slots', () => {
       } }]
     } }
   }
+  function nativeGraphProfile() {
+    const profile = nativeHostnameProfile()
+    profile.vpnte_xray.outbounds = Array.from({ length: 6 }, (_, index) => ({
+      tag: index ? `hop-${index}` : 'entry', protocol: 'vless', settings: {
+        vnext: [{ address: index ? `hop-${index}.example` : 'entry.example', port: 443,
+          users: [{ id: outbound.uuid, encryption: 'none' }] }]
+      }, streamSettings: { network: 'ws', security: 'tls',
+        tlsSettings: { serverName: 'sni.example' }, wsSettings: { headers: { Host: 'front.example' } },
+        ...(index < 5 ? { sockopt: { dialerProxy: `hop-${index + 1}` } } : {}) }
+    }))
+    return profile
+  }
+  it('resolves selected and reachable graph hosts together with at most four reads, then joins before any launch effect (AT-02-002)', async () => {
+    const releases = new Map<string, (ip: string | null) => void>()
+    let active = 0, maximum = 0
+    fixture.resolve.mockImplementation(host => {
+      maximum = Math.max(maximum, ++active)
+      return new Promise<string | null>(resolve => releases.set(host, resolve)).finally(() => { active-- })
+    })
+    const profile = nativeGraphProfile(), original = structuredClone(profile)
+    const start = engine.startXrayInSlot('a', profile, { portOverride: 51001, socksAuth: auth })
+    await vi.waitFor(() => expect(fixture.resolve).toHaveBeenCalledTimes(4))
+    // A held primary lookup must not delay the other three admitted endpoints.
+    expect(releases.has('entry.example')).toBe(true)
+    expect(releases.size).toBe(4)
+    const { writeFile } = await import('fs/promises')
+    expect(writeFile).not.toHaveBeenCalled(); expect(fixture.preflight).not.toHaveBeenCalled()
+    expect(fixture.children).toHaveLength(0)
+    releases.get('entry.example')!('203.0.113.11')
+    const other = [...releases.keys()].find(host => host !== 'entry.example')!
+    releases.get(other)!('203.0.113.12')
+    await vi.waitFor(() => expect(fixture.resolve).toHaveBeenCalledTimes(6))
+    expect(writeFile).not.toHaveBeenCalled(); expect(fixture.preflight).not.toHaveBeenCalled()
+    expect(fixture.children).toHaveLength(0)
+    for (const [host, release] of releases) if (host !== 'entry.example' && host !== other) release('203.0.113.13')
+    expect((await start).resolvedIp).toBe('203.0.113.11')
+    expect(maximum).toBe(4); expect(active).toBe(0)
+    const config = JSON.parse(String(vi.mocked(writeFile).mock.calls.find(call => String(call[0]).endsWith('.json'))![1]))
+    for (const item of config.outbounds.filter((item: any) => item.protocol === 'vless')) {
+      expect(item.settings.vnext[0].address).toMatch(/^203\.0\.113\./)
+      expect(item.streamSettings.tlsSettings.serverName).toBe('sni.example')
+      expect(item.streamSettings.wsSettings.headers.Host).toBe('front.example')
+    }
+    expect(profile).toEqual(original)
+  })
+  it('drains admitted graph reads after a DNS failure without admitting more hosts or writing a partial config (AT-02-002/004)', async () => {
+    const releases = new Map<string, (ip: string | null) => void>()
+    fixture.resolve.mockImplementation(host => new Promise<string | null>(resolve => releases.set(host, resolve)))
+    const finished = vi.fn()
+    const start = engine.startXrayInSlot('a', nativeGraphProfile(), { portOverride: 51001, socksAuth: auth })
+      .catch(error => error).then(result => { finished(); return result })
+    await vi.waitFor(() => expect(fixture.resolve).toHaveBeenCalledTimes(4))
+    releases.get('entry.example')!(null)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(finished).not.toHaveBeenCalled()
+    for (const [host, release] of releases) if (host !== 'entry.example') release('203.0.113.12')
+    expect((await start).message).toContain('native Xray')
+    expect(fixture.resolve).toHaveBeenCalledTimes(4)
+    const { writeFile } = await import('fs/promises')
+    expect(writeFile).not.toHaveBeenCalled(); expect(fixture.preflight).not.toHaveBeenCalled()
+    expect(fixture.children).toHaveLength(0)
+  })
+  it('fences an aborted graph plan and leaves its next start with fresh DNS (AT-00-003/AT-02-005)', async () => {
+    const releases = new Map<string, (ip: string | null) => void>()
+    fixture.resolve.mockImplementation(host => new Promise<string | null>(resolve => releases.set(host, resolve)))
+    const controller = new AbortController()
+    const start = engine.startXrayInSlot('a', nativeGraphProfile(), {
+      portOverride: 51001, socksAuth: auth, signal: controller.signal
+    }).catch(error => error)
+    await vi.waitFor(() => expect(fixture.resolve).toHaveBeenCalledTimes(4))
+    controller.abort()
+    for (const release of releases.values()) release('203.0.113.12')
+    expect((await start).message).toContain('cancelled')
+    expect(fixture.resolve).toHaveBeenCalledTimes(4)
+    const { writeFile } = await import('fs/promises')
+    expect(writeFile).not.toHaveBeenCalled(); expect(fixture.preflight).not.toHaveBeenCalled()
+    expect(fixture.children).toHaveLength(0)
+    fixture.resolve.mockResolvedValue('203.0.113.25')
+    expect((await engine.startXrayInSlot('a', nativeHostnameProfile(), { portOverride: 51001, socksAuth: auth })).resolvedIp)
+      .toBe('203.0.113.25')
+    expect(fixture.resolve).toHaveBeenCalledTimes(5)
+  })
   it('resolves the primary endpoint and its native graph once per start, with no cross-start DNS cache (AT-02-002)', async () => {
     fixture.resolve.mockResolvedValueOnce('203.0.113.21').mockResolvedValueOnce('203.0.113.22')
     const a = await engine.startXrayInSlot('a', nativeHostnameProfile(), { portOverride: 51001, socksAuth: auth })
@@ -103,6 +185,27 @@ describe('owned Xray upstream slots', () => {
     })
     expect(result.resolvedIp).toBe('203.0.113.25')
     expect(fixture.resolve).not.toHaveBeenCalled()
+  })
+  it('retains translated profile engine DNS fallback when bootstrap returns no address (AT-02-002)', async () => {
+    fixture.resolve.mockResolvedValue(null)
+    const result = await engine.startXrayInSlot('a', { ...outbound, server: 'entry.example',
+      tls: { enabled: true, server_name: 'sni.example' }, transport: { type: 'ws', headers: { Host: 'front.example' } }
+    }, { portOverride: 51001, socksAuth: auth })
+    expect(result.resolvedIp).toBeNull()
+    const { writeFile } = await import('fs/promises')
+    const config = JSON.parse(String(vi.mocked(writeFile).mock.calls.find(call => String(call[0]).endsWith('.json'))![1]))
+    expect(config.outbounds[0].settings.vnext[0].address).toBe('entry.example')
+    expect(config.outbounds[0].streamSettings.tlsSettings.serverName).toBe('sni.example')
+    expect(config.outbounds[0].streamSettings.wsSettings.headers.Host).toBe('front.example')
+  })
+  it.each(['192.0.2.1', '2001:db8::1'])('keeps literal native endpoint %s without a bootstrap lookup (AT-02-002)', async address => {
+    const profile = nativeHostnameProfile()
+    profile.server = address; profile.vpnte_xray.outbounds[0].settings.vnext[0].address = address
+    await engine.startXrayInSlot('a', profile, { portOverride: 51001, socksAuth: auth })
+    expect(fixture.resolve).not.toHaveBeenCalled()
+    const { writeFile } = await import('fs/promises')
+    const config = JSON.parse(String(vi.mocked(writeFile).mock.calls.find(call => String(call[0]).endsWith('.json'))![1]))
+    expect(config.outbounds.find((item: any) => item.tag === 'proxy').settings.vnext[0].address).toBe(address)
   })
   it('does not reuse or publish late DNS evidence after the start owner is aborted (AT-00-003)', async () => {
     let release!: (ip: string) => void

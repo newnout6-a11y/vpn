@@ -20,6 +20,7 @@ import { withFirewallRulesApi } from './firewallRulesApi'
 import type { FirewallKillSwitchStatus } from '../shared/ipc-types'
 import { parseFirewallStatusSnapshot, matchesFirewallPolicy } from './firewallStatus'
 import { readFirewallStatusSnapshot } from './firewallStatusRead'
+import { executeRecoveryOperation } from './recoveryPsWorker'
 import { type WfpIpv6Policy, wfpPrelude, validateWfpIpv6Policy, prepareWfpIpv6Policy, prepareWfpIpv6Exceptions, applyWfpIpv6Policy, verifyWfpIpv6Policy, removeWfpIpv6Protection, hasWfpIpv6Protection, sameWfpCoreScopes, reserveWfpIpv6Priority } from './wfpIpv6'
 
 const execFile = promisify(execFileCb)
@@ -1224,16 +1225,25 @@ async function probeForStuckBlockDefault(): Promise<boolean> {
 
 async function probeFirewallForOurRules(): Promise<boolean> {
   if (process.platform !== 'win32') return false
+  const parseCount = (stdout: unknown): boolean => {
+    const value = String(stdout ?? '').trim()
+    if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error('Firewall ownership query was not confirmed')
+    return Number(value) > 0
+  }
   try {
+    // Reuse the isolated, already prepared reader: this fixed fresh COM query
+    // must not queue behind lockdown writes in the elevated helper.
+    return parseCount(await executeRecoveryOperation({ op: 'inspect-owned-firewall-rules' }, 15000))
+  } catch (error) {
+    // Read-only work can safely retry through the established helper. Failed
+    // reads never prove protection absent, including a failed fallback.
+    logEvent('debug', 'firewall-killswitch', 'ownership reader fallback', { category: classifyRecoveryError(error) })
     const { stdout } = await ps(
       `(Get-VpnteFirewallRuleNames -DisplayName '${RULE_PREFIX}*' -ErrorAction Stop | Measure-Object).Count`,
       false,
       15000
     )
-    const count = parseInt(String(stdout || '0').trim(), 10)
-    return Number.isFinite(count) && count > 0
-  } catch {
-    return false
+    return parseCount(stdout)
   }
 }
 
