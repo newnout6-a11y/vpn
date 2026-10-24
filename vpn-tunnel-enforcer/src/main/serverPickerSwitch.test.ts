@@ -6,6 +6,7 @@ const state = vi.hoisted(() => ({
   profiles: [] as any[],
   tunnelStatus: { running: true, mode: 'directVpn' },
   restartProtected: vi.fn(),
+  switchOutbound: vi.fn(),
   lastOptions: null as any,
   restore: vi.fn(),
   cancelTransition: vi.fn(),
@@ -77,6 +78,7 @@ vi.mock('./tunController', () => ({
     getLastStartOptions: () => state.lastOptions,
     cancelTransition: state.cancelTransition,
     restartProtected: (...args: any[]) => state.restartProtected(...args),
+    switchOutbound: (...args: any[]) => state.switchOutbound(...args),
     stop: () => state.stop(),
     areTunRoutesActive: vi.fn(async () => true),
     setWatchdogProbeConfirmationChecker: vi.fn()
@@ -127,6 +129,7 @@ beforeEach(async () => {
   state.settings = {}
   state.networkIdentity.mockReset().mockResolvedValue('fixture-network-hmac')
   state.restartProtected.mockReset().mockResolvedValue({ success: true })
+  state.switchOutbound.mockReset().mockResolvedValue(null)
   state.stop.mockReset().mockResolvedValue({ success: true, networkCleanup: { baseline: true, firewall: true, adapters: true } })
   state.lastOptions = { mode: 'directVpn', vpnProfile: { name: 'Profile a', protocol: 'vless', outbound: profile('a').outbound }, proxyEngine: 'xray', adaptiveMode: 'disabled', enableFirewallKillSwitch: true }
   state.restore.mockReset().mockResolvedValue({ success: true })
@@ -141,6 +144,126 @@ beforeEach(async () => {
 })
 
 describe('server profile switching', () => {
+  it('uses a confirmed upstream receipt without restarting the TUN (AT-00-003 / AT-02-002)', async () => {
+    state.switchOutbound.mockImplementationOnce(async (_next, options) => {
+      options.onCommit()
+      return { outcome: 'success', committed: true, activeSlot: 'b', previousPreserved: false,
+        candidateStopped: false, previousStopped: true, failures: [] }
+    })
+    await expect(selectProfileHandler({}, 'b')).resolves.toBeUndefined()
+    expect(state.storeData.get('activeProfileId')).toBe('b')
+    expect(state.restartProtected).not.toHaveBeenCalled()
+    expect(state.stop).not.toHaveBeenCalled()
+    expect(state.restore).not.toHaveBeenCalled()
+    expect(state.ipMonitor.recheck).not.toHaveBeenCalled()
+  })
+
+  it('cancels a candidate with proved previous upstream using no full stop or restore (AT-00-003)', async () => {
+    state.storeData.set('activeProfileId', 'a')
+    const held = deferred<any>()
+    state.switchOutbound.mockReturnValueOnce(held.promise)
+    const pending = selectProfileHandler({}, 'b')
+    await vi.waitFor(() => expect(state.switchOutbound).toHaveBeenCalledOnce())
+    const options = state.switchOutbound.mock.calls[0][1]
+    await cancelSwitchHandler({})
+    expect(options.signal.aborted).toBe(true)
+    expect(options.isOwner()).toBe(true)
+    held.resolve({ outcome: 'cancelled', committed: false, activeSlot: 'a', previousPreserved: true,
+      candidateStopped: true, previousStopped: false, failures: [] })
+    await expect(pending).resolves.toEqual({ cancelled: true })
+    expect(state.storeData.get('activeProfileId')).toBe('a')
+    expect(state.stop).not.toHaveBeenCalled()
+    expect(state.restore).not.toHaveBeenCalled()
+    expect(state.restartProtected).not.toHaveBeenCalled()
+    expect(state.ipMonitor.clearVpnIp).not.toHaveBeenCalled()
+  })
+
+  it('ignores user cancellation after upstream commit while previous cleanup drains (AT-00-003)', async () => {
+    state.storeData.set('activeProfileId', 'a')
+    const held = deferred<any>()
+    state.switchOutbound.mockImplementationOnce((_next, options) => { options.onCommit(); return held.promise })
+    const pending = selectProfileHandler({}, 'b')
+    await vi.waitFor(() => expect(state.switchOutbound).toHaveBeenCalledOnce())
+    const options = state.switchOutbound.mock.calls[0][1]
+    await cancelSwitchHandler({})
+    expect(options.signal.aborted).toBe(false)
+    held.resolve({ outcome: 'success', committed: true, activeSlot: 'b', previousPreserved: false,
+      candidateStopped: false, previousStopped: true, failures: [] })
+    await expect(pending).resolves.toBeUndefined()
+    expect(state.storeData.get('activeProfileId')).toBe('b')
+    expect(state.stop).not.toHaveBeenCalled()
+    expect(state.restore).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('disconnect supersedes a staged upstream even after commit=%s (AT-00-003)', async committed => {
+    const held = deferred<any>()
+    state.storeData.set('activeProfileId', 'a')
+    state.switchOutbound.mockImplementationOnce((_next, options) => {
+      if (committed) options.onCommit()
+      return held.promise
+    })
+    const pending = selectProfileHandler({}, 'b')
+    await vi.waitFor(() => expect(state.switchOutbound).toHaveBeenCalledOnce())
+    const options = state.switchOutbound.mock.calls[0][1]
+    const { abandonProfileSwitch } = await import('./serverPicker')
+    abandonProfileSwitch()
+    expect(options.signal.aborted).toBe(true)
+    expect(options.isOwner()).toBe(false)
+    held.resolve({ outcome: 'cancelled', committed, activeSlot: null, previousPreserved: false,
+      candidateStopped: !committed, previousStopped: committed, failures: [] })
+    await expect(pending).resolves.toEqual({ cancelled: true })
+    expect(state.storeData.get('activeProfileId')).toBe(committed ? 'b' : 'a')
+    expect(state.stop).not.toHaveBeenCalled()
+    expect(state.restore).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('failed candidate with previous proof=%s uses only required cleanup (AT-02-011)', async previousPreserved => {
+    state.storeData.set('activeProfileId', 'a')
+    state.switchOutbound.mockResolvedValueOnce({ outcome: 'failed', committed: false, activeSlot: previousPreserved ? 'a' : null,
+      previousPreserved, candidateStopped: true, previousStopped: false, failures: [] })
+    await expect(selectProfileHandler({}, 'b')).rejects.toThrow('upstream')
+    expect(state.storeData.get('activeProfileId')).toBe('a')
+    expect(state.stop).toHaveBeenCalledTimes(previousPreserved ? 0 : 1)
+    expect(state.restore).not.toHaveBeenCalled()
+    expect(state.restartProtected).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('native owner loss during switch preserves successor recovery, committed=%s (AT-00-007 / AT-02-011)', async committed => {
+    state.storeData.set('activeProfileId', 'a')
+    state.switchOutbound.mockImplementationOnce(async (_next, options) => {
+      if (committed) options.onCommit()
+      return { outcome: 'cancelled', committed, activeSlot: null, previousPreserved: false,
+        candidateStopped: !committed, previousStopped: committed, ownershipLost: true, failures: [] }
+    })
+    await expect(selectProfileHandler({}, 'b')).resolves.toEqual({ cancelled: true })
+    expect(state.storeData.get('activeProfileId')).toBe(committed ? 'b' : 'a')
+    expect(state.stop).not.toHaveBeenCalled()
+    expect(state.restore).not.toHaveBeenCalled()
+    expect(state.restartProtected).not.toHaveBeenCalled()
+    expect(state.ipMonitor.clearVpnIp).not.toHaveBeenCalled()
+  })
+
+  it('retains the committed profile when old cleanup fails instead of restarting it (AT-02-011)', async () => {
+    state.storeData.set('activeProfileId', 'a')
+    state.switchOutbound.mockImplementationOnce(async (_next, options) => {
+      options.onCommit()
+      return { outcome: 'failed', committed: true, activeSlot: 'b', previousPreserved: false,
+        candidateStopped: false, previousStopped: false, failures: [{ phase: 'stop-previous', message: 'unknown' }] }
+    })
+    await expect(selectProfileHandler({}, 'b')).rejects.toThrow('upstream')
+    expect(state.storeData.get('activeProfileId')).toBe('b')
+    expect(state.stop).not.toHaveBeenCalled()
+    expect(state.restore).not.toHaveBeenCalled()
+  })
+
+  it('reports unconfirmed rollback after a failed upstream instead of silently succeeding (AT-02-004)', async () => {
+    state.switchOutbound.mockResolvedValueOnce({ outcome: 'failed', committed: false, activeSlot: null,
+      previousPreserved: false, candidateStopped: false, previousStopped: false, failures: [] })
+    state.stop.mockResolvedValueOnce({ success: true, networkCleanup: { baseline: true, firewall: false, adapters: true } })
+    await expect(selectProfileHandler({}, 'b')).rejects.toThrow('Очистка')
+    expect(state.restore).not.toHaveBeenCalled()
+  })
+
   it.each(['complete', 'baseline', 'firewall', 'adapters', 'failed', 'missing'] as const)(
     'reuses only complete cleanup from this cancelled restart: %s (AT-00-003 / AT-03-007)', async kind => {
       const restart = deferred<{ success: boolean; error?: string }>()

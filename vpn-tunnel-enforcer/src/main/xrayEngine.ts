@@ -32,7 +32,6 @@ import type { ClientDevice } from '../shared/ipc-types'
 import { compileNativeXrayProfile, getNativeXrayProfile, nativeXraySelectedOutbound, type NativeXrayProfile } from './nativeXrayProfile'
 
 export const XRAY_RUNTIME_EXE_NAME = 'vpnte-xray.exe'
-const XRAY_PID_FILE = 'xray.pid'
 const SOCKS_PROBE_TIMEOUT_MS = 3500
 const RUNTIME_EXIT_CONFIRMATION_MS = 1000
 const exitedChildren = new WeakSet<ChildProcess>()
@@ -75,7 +74,12 @@ export interface XrayOutboundOptions {
 export interface StartXrayOptions extends XrayOutboundOptions {
   portOverride?: number
   signal?: AbortSignal
+  socksAuth?: { username: string; password: string }
+  slot?: XraySlot
 }
+
+export type XraySlot = 'a' | 'b'
+type XrayRuntime = XraySlot | 'legacy'
 
 export interface XrayEngineStatus {
   running: boolean
@@ -97,7 +101,7 @@ interface XrayState {
   resolvedIp: string | null
 }
 
-let activeXrayState: XrayState = {
+function emptyXrayState(): XrayState { return {
   running: false,
   proc: null,
   socksPort: null,
@@ -106,6 +110,42 @@ let activeXrayState: XrayState = {
   logPath: null,
   startedAt: null,
   resolvedIp: null
+} }
+const xrayStates: Record<XrayRuntime, XrayState> = { legacy: emptyXrayState(), a: emptyXrayState(), b: emptyXrayState() }
+let activeXrayRuntime: XrayRuntime = 'legacy'
+const pendingStarts = new Map<XrayRuntime, { controller: AbortController; settled: Promise<void> }>()
+const pendingStops = new Map<XrayRuntime, { proc: ChildProcess | null; settled: Promise<void> }>()
+let stopGeneration = 0
+let stopsInProgress = 0
+let coldStartOwner: object | null = null
+
+function runtimeStem(runtime: XrayRuntime): string { return runtime === 'legacy' ? 'xray' : `xray-${runtime}` }
+function requireSlot(slot: XraySlot): void {
+  if (slot !== 'a' && slot !== 'b') throw new Error('Invalid Xray slot')
+}
+function validateSocksAuth(auth: StartXrayOptions['socksAuth']): void {
+  if (auth !== undefined && (!auth || [auth.username, auth.password].some(value =>
+    typeof value !== 'string' || Buffer.byteLength(value, 'utf8') < 1 || Buffer.byteLength(value, 'utf8') > 255))) {
+    throw new Error('Invalid Xray SOCKS authentication')
+  }
+}
+function stateStatus(state: XrayState): XrayEngineStatus {
+  return { running: state.running && !!state.proc && !runtimeHasExited(state.proc), socksPort: state.socksPort,
+    pid: state.proc?.pid ?? null, startedAt: state.startedAt, resolvedIp: state.resolvedIp }
+}
+
+export function getActiveXraySlot(): XraySlot | null {
+  return activeXrayRuntime === 'legacy' ? null : activeXrayRuntime
+}
+export function getXraySlotStatus(slot: XraySlot): XrayEngineStatus {
+  requireSlot(slot)
+  return stateStatus(xrayStates[slot])
+}
+/** Call only after the corresponding sing-box selector commit was read back. */
+export function activateXraySlot(slot: XraySlot): void {
+  requireSlot(slot)
+  if (!getXraySlotStatus(slot).running) throw new Error('Xray slot is not ready')
+  activeXrayRuntime = slot
 }
 
 export function getXrayRuntimeExePath(): string {
@@ -113,13 +153,7 @@ export function getXrayRuntimeExePath(): string {
 }
 
 export function getXrayStatus(): XrayEngineStatus {
-  return {
-    running: activeXrayState.running,
-    socksPort: activeXrayState.socksPort,
-    pid: activeXrayState.proc?.pid ?? null,
-    startedAt: activeXrayState.startedAt,
-    resolvedIp: activeXrayState.resolvedIp
-  }
+  return stateStatus(xrayStates[activeXrayRuntime])
 }
 
 /**
@@ -332,8 +366,9 @@ export function toXrayOutbound(
 export function buildXrayConfig(
   xrayOutbound: Record<string, any>,
   socksPort: number,
-  options: { logPath?: string; nativeProfile?: NativeXrayProfile | null; leafDialerProxy?: string } = {}
+  options: { logPath?: string; nativeProfile?: NativeXrayProfile | null; leafDialerProxy?: string; socksAuth?: StartXrayOptions['socksAuth'] } = {}
 ): Record<string, any> {
+  validateSocksAuth(options.socksAuth)
   const logOutput = options.logPath
     ? options.logPath.replace(/\\/g, '/')
     : join(getTunRuntimeDir(), 'xray.log').replace(/\\/g, '/')
@@ -357,7 +392,8 @@ export function buildXrayConfig(
         port: socksPort,
         protocol: 'socks',
         settings: {
-          udp: true
+          udp: true,
+          ...(options.socksAuth ? { auth: 'password', accounts: [{ user: options.socksAuth.username, pass: options.socksAuth.password }] } : {})
         },
         sniffing: {
           enabled: true,
@@ -485,7 +521,8 @@ export async function resolveXrayConfigEndpoints(config: Record<string, any>,
 
 // Internal diagnostic input; never publish the address in diagnostic details.
 export function getXrayDialTarget(): { host: string; port: number } | null {
-  return activeXrayState.running ? activeXrayState.dialTarget ?? null : null
+  const state = xrayStates[activeXrayRuntime]
+  return getXrayStatus().running ? state.dialTarget ?? null : null
 }
 
 /**
@@ -501,7 +538,8 @@ export async function stageXrayRuntime(): Promise<string> {
   return dst
 }
 
-async function waitForLocalSocks(port: number, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+async function waitForLocalSocks(port: number, timeoutMs: number, signal?: AbortSignal,
+  auth?: StartXrayOptions['socksAuth']): Promise<void> {
   const deadline = Date.now() + timeoutMs
   const cancelled = () => new Error('Xray startup cancelled')
   let lastError: unknown = null
@@ -511,6 +549,8 @@ async function waitForLocalSocks(port: number, timeoutMs: number, signal?: Abort
       await new Promise<void>((resolve, reject) => {
         const socket = new Socket()
         let settled = false
+        let received = Buffer.alloc(0)
+        let authenticating = false
         const finish = (error?: Error) => {
           if (settled) return
           settled = true
@@ -521,7 +561,24 @@ async function waitForLocalSocks(port: number, timeoutMs: number, signal?: Abort
         }
         const abort = () => finish(cancelled())
         socket.setTimeout(Math.min(250, Math.max(1, deadline - Date.now())))
-        socket.once('connect', () => finish())
+        socket.once('connect', () => {
+          if (!auth) { finish(); return }
+          socket.write(Buffer.from([5, 1, 2]))
+        })
+        if (auth) socket.on('data', (chunk: Buffer) => {
+          if (settled) return
+          received = Buffer.concat([received, chunk])
+          if (received.length > 2) { finish(new Error('Invalid SOCKS authentication response')); return }
+          if (received.length < 2) return
+          if (!authenticating) {
+            if (received[0] !== 5 || received[1] !== 2) { finish(new Error('SOCKS authentication required')); return }
+            authenticating = true
+            received = Buffer.alloc(0)
+            const username = Buffer.from(auth.username, 'utf8'), password = Buffer.from(auth.password, 'utf8')
+            socket.write(Buffer.concat([Buffer.from([1, username.length]), username, Buffer.from([password.length]), password]))
+          } else if (received[0] === 1 && received[1] === 0) finish()
+          else finish(new Error('SOCKS authentication failed'))
+        })
         socket.once('error', error => finish(error))
         socket.once('timeout', () => finish(new Error('timeout')))
         signal?.addEventListener('abort', abort, { once: true })
@@ -558,6 +615,60 @@ export async function startXray(
   sbOutbound: Record<string, any>,
   options: StartXrayOptions = {}
 ): Promise<{ socksPort: number; exePath: string; resolvedIp: string | null }> {
+  validateSocksAuth(options.socksAuth)
+  if (options.slot !== undefined) {
+    requireSlot(options.slot)
+    if (!options.socksAuth) throw new Error('Xray slots require SOCKS authentication')
+  }
+  if (options.signal?.aborted) throw new Error('Xray startup cancelled')
+  if (coldStartOwner) throw new Error('Xray runtime operation in progress')
+  const owner = {}
+  coldStartOwner = owner
+  const expectedStop = stopGeneration + 1
+  const assertActive = () => {
+    if (stopGeneration !== expectedStop || options.signal?.aborted) throw new Error('Xray startup cancelled')
+  }
+  try {
+    await stopXray('preparing fresh start')
+    assertActive()
+    const runtime = options.slot ?? 'legacy'
+    if (runtime === 'legacy') activeXrayRuntime = 'legacy'
+    const result = await beginXrayStart(runtime, sbOutbound, options, owner)
+    try { assertActive() } catch (error) {
+      await stopXrayRuntime(runtime, 'cold startup cancelled')
+      throw error
+    }
+    if (options.slot !== undefined) activateXraySlot(options.slot)
+    return result
+  } finally { if (coldStartOwner === owner) coldStartOwner = null }
+}
+
+/** Prepare an isolated userspace upstream; selecting it is a separate commit. */
+export function startXrayInSlot(slot: XraySlot, sbOutbound: Record<string, any>, options: StartXrayOptions = {}) {
+  requireSlot(slot)
+  validateSocksAuth(options.socksAuth)
+  if (!options.socksAuth) return Promise.reject(new Error('Xray slots require SOCKS authentication'))
+  return beginXrayStart(slot, sbOutbound, options)
+}
+
+function beginXrayStart(runtime: XrayRuntime, sbOutbound: Record<string, any>, options: StartXrayOptions, owner?: object) {
+  if ((coldStartOwner && coldStartOwner !== owner) || stopsInProgress || pendingStarts.has(runtime) || pendingStops.has(runtime)) {
+    return Promise.reject(new Error('Xray runtime operation in progress'))
+  }
+  const controller = new AbortController()
+  const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal
+  const pending = { controller, settled: Promise.resolve() }
+  pendingStarts.set(runtime, pending)
+  const started = startXrayRuntime(runtime, sbOutbound, { ...options, signal }, !!owner)
+  pending.settled = started.then(() => undefined, () => undefined).finally(() => {
+    if (pendingStarts.get(runtime) === pending) pendingStarts.delete(runtime)
+  })
+  return started
+}
+
+async function startXrayRuntime(runtime: XrayRuntime,
+  sbOutbound: Record<string, any>, options: StartXrayOptions, cold = false
+): Promise<{ socksPort: number; exePath: string; resolvedIp: string | null }> {
   const startTime = performance.now()
   const phaseDurations: Record<string, number> = {}
   let completed = false
@@ -572,22 +683,31 @@ export async function startXray(
     finally { phaseDurations[phase] = Math.round(performance.now() - began) }
   }
   try {
-    await timed('stop-previous', () => stopXray('preparing fresh start'))
+    await timed('stop-previous', () => stopXrayRuntime(runtime, 'preparing fresh start'))
 
     const runtimeDir = getTunRuntimeDir()
     const exePath = await timed('prepare-runtime', stageXrayRuntime)
-    const configPath = join(runtimeDir, 'xray.json')
-    const logPath = join(runtimeDir, 'xray.log')
-    const pidPath = join(runtimeDir, XRAY_PID_FILE)
+    const stem = runtimeStem(runtime)
+    const configPath = join(runtimeDir, `${stem}.json`)
+    const logPath = join(runtimeDir, `${stem}.log`)
+    const pidPath = join(runtimeDir, `${stem}.pid`)
 
-    // Reap an orphan vpnte-xray.exe from a previous hard-crashed session before
-    // we spawn a new one (identity-verified against the recorded exe+config path).
-    await timed('cleanup-pid', () => cleanupManagedChildPidFile(pidPath, 'xray-engine', (message, details) => {
-      logEvent('warn', 'xray', message, details)
-    })).catch(() => undefined)
+    // Only the cold-start owner reconciles all crash leftovers, after the
+    // runtime ACL was checked above. Staging a candidate preserves other slots.
+    await timed('cleanup-pid', async () => {
+      for (const previous of cold ? ['legacy', 'a', 'b'] as const : [runtime]) {
+        if (options.signal?.aborted) throw new Error('Xray startup cancelled')
+        const cleaned = await cleanupManagedChildPidFile(join(runtimeDir, `${runtimeStem(previous)}.pid`),
+          'xray-engine', (message, details) => logEvent('warn', 'xray', message, details))
+        if (options.signal?.aborted) throw new Error('Xray startup cancelled')
+        if (cleaned === false || ((cold || runtime !== 'legacy') && cleaned !== true)) throw new Error('Previous Xray runtime cleanup not confirmed')
+      }
+    })
 
     // Preserve the previous run; engineLogRetention bounds logs during uptime.
-    await timed('rotate-log', () => rename(logPath, join(runtimeDir, 'xray.prev.log'))).catch(() => undefined)
+    await timed('rotate-log', () => rename(logPath, join(runtimeDir, `${stem}.prev.log`))).catch(error => {
+      if (options.signal?.aborted) throw error
+    })
 
     const server = String(sbOutbound.server || '')
     let resolvedIp = options.resolvedIp || null
@@ -603,6 +723,11 @@ export async function startXray(
     const dialTarget = { host: resolvedIp || server, port: Number(sbOutbound.server_port) }
 
     const socksPort = options.portOverride ?? (await timed('pick-port', pickFreeLocalPort))
+    if (!Number.isInteger(socksPort) || socksPort < 1 || socksPort > 65535 ||
+        Object.entries(xrayStates).some(([key, state]) => key !== runtime && state.proc &&
+          !runtimeHasExited(state.proc) && state.socksPort === socksPort)) {
+      throw new Error('Xray SOCKS port is invalid or owned by another slot')
+    }
 
     const xrayOutbound = toXrayOutbound(sbOutbound, {
       clientDevice: options.clientDevice,
@@ -611,7 +736,7 @@ export async function startXray(
     })
 
     const nativeProfile = getNativeXrayProfile(sbOutbound)
-    const config = buildXrayConfig(xrayOutbound, socksPort, { logPath, nativeProfile })
+    const config = buildXrayConfig(xrayOutbound, socksPort, { logPath, nativeProfile, socksAuth: options.socksAuth })
     if (nativeProfile) {
       await timed('resolve-connection-graph', () => resolveXrayConfigEndpoints(config, host => resolveServerAddress(host, options.signal)))
     }
@@ -638,7 +763,7 @@ export async function startXray(
 
     const pid = child.pid ?? 0
     // Own the spawned child before any asynchronous persistence or readiness.
-    activeXrayState = { running: false, proc: child, socksPort, exePath, configPath,
+    xrayStates[runtime] = { running: false, proc: child, socksPort, exePath, configPath,
       logPath, startedAt: Date.now(), resolvedIp, dialTarget }
     let childStderr = ''
     child.stderr?.on('data', (chunk) => { childStderr = (childStderr + chunk.toString()).slice(-64 * 1024) })
@@ -649,7 +774,7 @@ export async function startXray(
     child.once('exit', (code, signal) => {
       exitedChildren.add(child)
       logEvent(code === 0 ? 'info' : 'warn', 'xray', 'xray process exited', { code, signal, stderr: childStderr.slice(-500) })
-      if (activeXrayState.proc === child) activeXrayState.running = false
+      if (xrayStates[runtime].proc === child) xrayStates[runtime].running = false
     })
     child.once('close', () => { exitedChildren.add(child) })
     try {
@@ -661,6 +786,7 @@ export async function startXray(
         createdAt: Date.now()
       })).catch((err) => {
         logEvent('warn', 'xray', 'failed to write xray pidfile', err)
+        if (options.signal?.aborted || runtime !== 'legacy') throw err
       })
 
       // Allow xray through the firewall kill-switch by exe path. tunController's
@@ -677,21 +803,25 @@ export async function startXray(
       )).then((res) => {
         if (!res.success && !res.skipped) {
           logEvent('warn', 'xray', 'kill-switch allow rule for xray not confirmed', { message: res.message })
+          if (runtime !== 'legacy') throw new Error('Xray firewall permission not confirmed')
         }
       }).catch((err) => {
         if (options.signal?.aborted) logEvent('info', 'xray', 'xray startup cancelled while awaiting firewall')
         else logEvent('warn', 'xray', 'failed to ensure xray kill-switch allow rule', err)
+        if (runtime !== 'legacy') throw err
       })
 
       try {
-        await timed('wait-local-socks', () => waitForLocalSocks(socksPort, SOCKS_PROBE_TIMEOUT_MS, options.signal))
+        await timed('wait-local-socks', () => options.socksAuth
+          ? waitForLocalSocks(socksPort, SOCKS_PROBE_TIMEOUT_MS, options.signal, options.socksAuth)
+          : waitForLocalSocks(socksPort, SOCKS_PROBE_TIMEOUT_MS, options.signal))
       } catch (probeErr) {
         if (options.signal?.aborted) throw new Error('Xray startup cancelled')
         throw new Error(`xray-движок запустился, но локальный SOCKS-порт ${socksPort} не отвечает: ${(probeErr as Error).message}`)
       }
-      if (runtimeHasExited(child) || activeXrayState.proc !== child) throw new Error('Xray exited before readiness was confirmed')
+      if (runtimeHasExited(child) || xrayStates[runtime].proc !== child) throw new Error('Xray exited before readiness was confirmed')
 
-      activeXrayState = {
+      xrayStates[runtime] = {
         running: true,
         proc: child,
         socksPort,
@@ -715,11 +845,11 @@ export async function startXray(
       return { socksPort, exePath, resolvedIp }
     } catch (error) {
       // stop retains the PID/handle on an unconfirmed exit so cleanup can retry.
-      await stopXray('startup failed')
+      await stopXrayRuntime(runtime, 'startup failed')
       throw error
     }
   } finally {
-    logEvent('info', 'xray', 'start timing', { phaseDurations,
+    logEvent('info', 'xray', 'start timing', { runtime, phaseDurations,
       totalMs: Math.round(performance.now() - startTime), success: completed })
   }
 }
@@ -728,9 +858,46 @@ export async function startXray(
  * Stops the managed Xray process.
  */
 export async function stopXray(reason = 'stopped'): Promise<void> {
-  const preflightError = await stopXrayPreflights().then(() => null, error => error)
-  const { proc } = activeXrayState
-  const pidPath = join(getTunRuntimeDir(), XRAY_PID_FILE)
+  stopGeneration++
+  stopsInProgress++
+  const starts = [...pendingStarts.values()]
+  for (const start of starts) start.controller.abort()
+  try {
+    const results = await Promise.allSettled([
+      stopXrayPreflights(),
+      ...(['legacy', 'a', 'b'] as const).map(runtime => stopXrayRuntime(runtime, reason)),
+      ...starts.map(start => start.settled)
+    ])
+    const failure = results.find(result => result.status === 'rejected')
+    if (failure?.status === 'rejected') throw failure.reason
+  } finally { stopsInProgress-- }
+}
+
+export async function stopXraySlot(slot: XraySlot, reason = 'stopped'): Promise<void> {
+  requireSlot(slot)
+  const pending = pendingStarts.get(slot)
+  pending?.controller.abort()
+  const results = await Promise.allSettled([stopXrayRuntime(slot, reason), pending?.settled])
+  const failure = results.find(result => result.status === 'rejected')
+  if (failure?.status === 'rejected') throw failure.reason
+  // A pending startup may have owned a child before observing cancellation.
+  await stopXrayRuntime(slot, reason)
+}
+
+function stopXrayRuntime(runtime: XrayRuntime, reason: string): Promise<void> {
+  const { proc } = xrayStates[runtime]
+  const pending = pendingStops.get(runtime)
+  if (pending && pending.proc === proc) return pending.settled
+  const stopping = { proc, settled: Promise.resolve() }
+  pendingStops.set(runtime, stopping)
+  stopping.settled = finishXrayStop(runtime, proc, reason).finally(() => {
+    if (pendingStops.get(runtime) === stopping) pendingStops.delete(runtime)
+  })
+  return stopping.settled
+}
+
+async function finishXrayStop(runtime: XrayRuntime, proc: ChildProcess | null, reason: string): Promise<void> {
+  const pidPath = join(getTunRuntimeDir(), `${runtimeStem(runtime)}.pid`)
 
   if (proc) await stopOwnedXrayChild(proc)
 
@@ -738,26 +905,16 @@ export async function stopXray(reason = 'stopped'): Promise<void> {
   // identity-checked orphan cleanup owns that record; do not erase it here.
   if (proc) await removeManagedChildPidFile(pidPath, proc.pid).catch(() => undefined)
 
-  if (activeXrayState.proc === proc) activeXrayState = {
-    running: false,
-    proc: null,
-    socksPort: null,
-    exePath: null,
-    configPath: null,
-    logPath: null,
-    startedAt: null,
-    resolvedIp: null
-  }
+  if (xrayStates[runtime].proc === proc) xrayStates[runtime] = emptyXrayState()
 
-  logEvent('info', 'xray', 'xray engine stopped', { reason })
-  if (preflightError) throw preflightError
+  logEvent('info', 'xray', 'xray engine stopped', { reason, runtime })
 }
 
 /**
  * Scans the tail of the live xray.log for persistent outbound faults.
  */
 export async function readRecentXrayOutboundFault(
-  logPath: string = join(getTunRuntimeDir(), 'xray.log')
+  logPath: string = xrayStates[activeXrayRuntime].logPath ?? join(getTunRuntimeDir(), 'xray.log')
 ): Promise<SingBoxOutboundFault | null> {
   try {
     const raw = await readFile(logPath, 'utf8')

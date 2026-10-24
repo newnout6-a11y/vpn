@@ -18,7 +18,8 @@ import { getRecoveryManifestDir, recoveryManifestPath, readRecoveryManifest, wri
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR, getTunAdapterAlias } from './tunAdapter'
 import { withFirewallRulesApi } from './firewallRulesApi'
 import type { FirewallKillSwitchStatus } from '../shared/ipc-types'
-import { FIREWALL_STATUS_PS, parseFirewallStatusSnapshot, matchesFirewallPolicy } from './firewallStatus'
+import { parseFirewallStatusSnapshot, matchesFirewallPolicy } from './firewallStatus'
+import { readFirewallStatusSnapshot } from './firewallStatusRead'
 import { type WfpIpv6Policy, wfpPrelude, validateWfpIpv6Policy, prepareWfpIpv6Policy, prepareWfpIpv6Exceptions, applyWfpIpv6Policy, verifyWfpIpv6Policy, removeWfpIpv6Protection, hasWfpIpv6Protection, sameWfpCoreScopes, reserveWfpIpv6Priority } from './wfpIpv6'
 
 const execFile = promisify(execFileCb)
@@ -439,25 +440,35 @@ export async function isKillSwitchActive(options?: { probeWfp?: boolean; recover
 
 /** Presence above remains a cleanup gate. UI evidence must use this fresh read. */
 export function getFirewallKillSwitchStatus(): Promise<FirewallKillSwitchStatus> {
-  // Share only the pending read at the queue tail. An intervening mutation
-  // changes that barrier and requires a new read after its effects settle.
-  if (pendingFirewallStatus?.barrier === firewallQueue) return pendingFirewallStatus.result
-  const result = serializeFirewall<FirewallKillSwitchStatus>(async () => {
-    const unknown = (reason: FirewallKillSwitchStatus['reason']): FirewallKillSwitchStatus => ({ state: 'unknown', cleanupRequired: true, reason })
+  const unknown = (reason: FirewallKillSwitchStatus['reason']): FirewallKillSwitchStatus => ({ state: 'unknown', cleanupRequired: true, reason })
+  const epoch = firewallMutationEpoch
+  const current = () => epoch === firewallMutationEpoch && pendingFirewallMutations === 0
+  // UI evidence must never hold up lifecycle mutations. A read that overlaps
+  // any admitted mutation cannot prove a consistent policy, even after it ends.
+  if (!current()) return Promise.resolve(unknown('unavailable'))
+  if (pendingFirewallStatus?.epoch === epoch) return pendingFirewallStatus.result
+  const result = (async (): Promise<FirewallKillSwitchStatus> => {
     if (process.platform !== 'win32' || !isElevatedPsHelperRunning()) return unknown('unavailable')
     let manifest: FirewallManifest | null
     try { manifest = await readManifest(undefined, true) }
     catch { return unknown('untrusted-manifest') }
-    // Bypass ps(): passive reads must never fall back to UAC or restart a helper.
-    const run = async (script: string, policy: 'firewall-killswitch' | 'wfp-ipv6') => {
+    if (!current()) return unknown('unavailable')
+    // Only the short WFP proof uses the existing helper; never submit stale
+    // work, restart a helper, or use the mutation/fallback ps() path here.
+    const run = async (script: string, policy: 'wfp-ipv6') => {
+      if (!current()) throw new Error('Firewall status was invalidated')
       const result = await execElevatedPs(script, 15000, policy, { startIfUnavailable: false })
+      if (!current()) throw new Error('Firewall status was invalidated')
       if (result.exitCode) throw new Error('Firewall status read-back failed')
       return result
     }
     try {
-      const snapshot = parseFirewallStatusSnapshot((await run(FIREWALL_STATUS_PS, 'firewall-killswitch')).stdout)
+      const raw = await readFirewallStatusSnapshot()
+      if (!current()) return unknown('unavailable')
+      const snapshot = parseFirewallStatusSnapshot(raw)
       if (!manifest) {
         const wfpPresent = await hasWfpIpv6Protection(script => run(script, 'wfp-ipv6'))
+        if (!current()) return unknown('unavailable')
         if (snapshot.rules.length || snapshot.storedNames.length || wfpPresent) return unknown('incomplete-policy')
         return { state: 'inactive', cleanupRequired: false, reason: 'no-owned-protection' }
       }
@@ -465,12 +476,13 @@ export function getFirewallKillSwitchStatus(): Promise<FirewallKillSwitchStatus>
           !matchesFirewallPolicy(snapshot, manifest, { app: process.execPath, proxy: externalProxyProgramPath() },
             getTunAdapterAlias(), LAN_BYPASS_CIDRS, TUN_IPV4_NETWORK_CIDR)) return unknown('incomplete-policy')
       await verifyWfpIpv6Policy(manifest.ipv6Policy, script => run(script, 'wfp-ipv6'), getTunAdapterAlias())
+      if (!current()) return unknown('unavailable')
       return { state: 'verified', cleanupRequired: true, reason: 'policy-verified' }
     } catch {
-      return unknown('read-back-failed')
+      return unknown(current() ? 'read-back-failed' : 'unavailable')
     }
-  })
-  const pending = { barrier: firewallQueue, result }
+  })()
+  const pending = { epoch, result }
   pendingFirewallStatus = pending
   const clear = () => { if (pendingFirewallStatus === pending) pendingFirewallStatus = null }
   void result.then(clear, clear)
@@ -550,7 +562,9 @@ Write-Output "RULE:$ruleName"
  * the script fails partway, only harmless extra Allow rules remain.
  */
 let firewallQueue: Promise<unknown> = Promise.resolve()
-let pendingFirewallStatus: { barrier: Promise<unknown>; result: Promise<FirewallKillSwitchStatus> } | null = null
+let firewallMutationEpoch = 0
+let pendingFirewallMutations = 0
+let pendingFirewallStatus: { epoch: number; result: Promise<FirewallKillSwitchStatus> } | null = null
 async function timedFirewallPhase<T>(phase: string, operation: () => Promise<T>, operationId?: string): Promise<T> {
   const started = performance.now()
   let outcome = 'rejected'
@@ -565,7 +579,9 @@ async function timedFirewallPhase<T>(phase: string, operation: () => Promise<T>,
   }
 }
 function serializeFirewall<T>(operation: () => Promise<T>): Promise<T> {
-  const result = firewallQueue.then(operation, operation)
+  firewallMutationEpoch++
+  pendingFirewallMutations++
+  const result = firewallQueue.then(operation, operation).finally(() => { pendingFirewallMutations-- })
   firewallQueue = result.then(() => undefined, () => undefined)
   return result
 }
@@ -1454,6 +1470,10 @@ function firewallBackupPath(): string {
 }
 
 export async function nuclearFirewallReset(): Promise<FirewallKillSwitchResult & { backupPath?: string }> {
+  return serializeFirewall(nuclearFirewallResetUnlocked)
+}
+
+async function nuclearFirewallResetUnlocked(): Promise<FirewallKillSwitchResult & { backupPath?: string }> {
   if (process.platform !== 'win32') {
     return firewallFailure(new IpcFault('conflict'), 'Only supported on Windows')
   }

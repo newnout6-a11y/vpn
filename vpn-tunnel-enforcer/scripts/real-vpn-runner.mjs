@@ -1,6 +1,91 @@
 // Runner policy and seeding. No Electron, filesystem or network side effects on import.
 import assert from 'node:assert/strict'
 import { stripVTControlCharacters } from 'node:util'
+import { connect as connectTls } from 'node:tls'
+import { request } from 'node:http'
+import { setTimeout as delay } from 'node:timers/promises'
+
+function readControllerJson(api, path, signal) {
+  return new Promise((resolve, reject) => {
+    const req = request({ hostname: '127.0.0.1', port: api.port, path, method: 'GET', agent: false, signal,
+      headers: { Authorization: `Bearer ${api.secret}` } }, response => {
+      const chunks = []; let size = 0
+      response.on('data', chunk => {
+        size += chunk.length
+        if (size > 1024 * 1024) response.destroy(new Error('Controller response too large'))
+        else chunks.push(chunk)
+      })
+      response.on('error', reject)
+      response.on('end', () => {
+        try {
+          if (response.statusCode !== 200) throw new Error('Controller read rejected')
+          resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+        } catch (error) { reject(error) }
+      })
+    })
+    req.setTimeout(1000, () => req.destroy(new Error('Controller read deadline')))
+    req.on('error', reject); req.end()
+  })
+}
+
+/** Independent ordinary OS TLS flow, followed by its live sing-box chain. No endpoint packet-capture claim. */
+export async function verifySelectorTlsFlow(config, { dial = connectTls, readJson = readControllerJson, pause = delay, timeoutMs = 5000 } = {}) {
+  const selectors = config?.outbounds?.filter(outbound => outbound.tag === 'proxy-out' && outbound.type === 'selector') ?? []
+  if (!selectors.length) return { applicable: false }
+  const abort = new AbortController()
+  let socket, timer
+  try {
+    assert.ok(Number.isInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 30000)
+    const tags = ['vpnte-upstream-a', 'vpnte-upstream-b']
+    assert.ok(selectors.length === 1 && JSON.stringify([...selectors[0].outbounds].sort()) === JSON.stringify(tags))
+    const controller = config.experimental?.clash_api
+    const match = /^127\.0\.0\.1:([0-9]{1,5})$/.exec(controller?.external_controller ?? '')
+    assert.ok(match && +match[1] > 0 && +match[1] <= 65535 && /^[a-f0-9]{32}$/i.test(controller.secret))
+    const api = { port: +match[1], secret: controller.secret }
+    const work = async () => {
+      const selected = await readJson(api, '/proxies/proxy-out', abort.signal)
+      abort.signal.throwIfAborted()
+      assert.ok(selected?.type === 'Selector' && tags.includes(selected.now)
+        && Array.isArray(selected.all) && JSON.stringify([...selected.all].sort()) === JSON.stringify(tags))
+      await new Promise((resolve, reject) => {
+        socket = dial({ host: '1.1.1.1', port: 443, servername: 'cloudflare-dns.com', rejectUnauthorized: true,
+          minVersion: 'TLSv1.2', signal: abort.signal }, () => socket.authorized === true ? resolve() : reject(new Error('TLS unverified')))
+        socket.on('error', reject)
+      })
+      abort.signal.throwIfAborted()
+      assert.ok(Number.isInteger(socket.localPort) && socket.localPort > 0)
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const snapshot = await readJson(api, '/connections', abort.signal)
+        abort.signal.throwIfAborted()
+        assert.ok(Array.isArray(snapshot?.connections) && snapshot.connections.length <= 10000)
+        const matches = snapshot.connections.filter(connection => String(connection.metadata?.sourcePort) === String(socket.localPort)
+          && connection.metadata?.destinationIP === '1.1.1.1' && String(connection.metadata?.destinationPort) === '443')
+        assert.ok(matches.length <= 1)
+        if (matches.length) {
+          const chains = matches[0].chains
+          assert.ok(Array.isArray(chains) && chains.includes('proxy-out') && chains.includes(selected.now)
+            && !chains.includes('direct-out'))
+          return { applicable: true, tlsVerified: true, proxyOutChainVerified: true }
+        }
+        await pause(50, undefined, { signal: abort.signal })
+      }
+      throw new Error('Ordinary TLS flow chain not found')
+    }
+    return await Promise.race([work(), new Promise((_, reject) => {
+      timer = setTimeout(() => { abort.abort(); reject(new Error('Flow deadline')) }, timeoutMs)
+    })])
+  } catch { throw new Error('Selector ordinary TLS flow was not confirmed; private details omitted') }
+  finally {
+    clearTimeout(timer); abort.abort()
+    if (socket && !socket.closed) {
+      await new Promise((resolve, reject) => {
+        const closed = () => { clearTimeout(limit); resolve() }
+        const limit = setTimeout(() => { socket.removeListener('close', closed); reject(new Error('Selector probe socket close not confirmed')) }, 250)
+        socket.once('close', closed); socket.destroy()
+      })
+    }
+  }
+}
 
 export function hostedLaunchArgs(port) {
   assert.ok(Number.isInteger(port) && port > 0 && port <= 65535, 'Invalid inspector port')

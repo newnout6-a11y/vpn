@@ -10,7 +10,7 @@ import { join, dirname } from 'path'
 import { promisify } from 'util'
 import { createConnection, createServer, isIP } from 'net'
 import { networkInterfaces } from 'os'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { app } from 'electron'
 import { stageVerifiedRuntimeArtifact } from './runtimeArtifact'
 import sudo from 'sudo-prompt'
@@ -65,7 +65,9 @@ import { getPrivilegedRuntimeDir } from './runtimePaths'
 import type { PhysicalAdapterDnsSource } from './physicalAdapterLockdown'
 import type { AdaptiveBypassMode } from './adaptiveBypass'
 import { resolveProxyEngine, type ProxyEngineMode } from './proxyEngine'
-import { startXray, stopXray, getXrayRuntimeExePath } from './xrayEngine'
+import { startXray, stopXray, getXrayRuntimeExePath, startXrayInSlot, stopXraySlot, getXraySlotStatus, getActiveXraySlot, activateXraySlot } from './xrayEngine'
+import { runProtectedOutboundSwitch, selectProtectedOutbound, type OutboundSlot, type OutboundSwitchReceipt } from './protectedOutboundSwitch'
+import { probeSocksUpstream } from './socksUpstreamProbe'
 import { getNativeXrayProfile } from './nativeXrayProfile'
 import { waitForTunRelease } from './tunRestartReadiness'
 
@@ -156,6 +158,39 @@ export interface StartOptions {
 // having to spawn another sing-box.
 let clashApiInfo: { port: number; secret: string } | null = null
 
+interface XraySwitchSlot { port: number; username: string; password: string }
+type XraySwitchSlots = Record<OutboundSlot, XraySwitchSlot>
+let xraySwitchRuntime: { slots: XraySwitchSlots; configurationKey: string } | null = null
+let outboundSwitchAbort: AbortController | null = null
+let outboundSwitchCompletion: Promise<void> | null = null
+type OutboundSwitchObservation = { phase: 'begin'; generation: number }
+  | { phase: 'finished'; generation: number; verified: boolean }
+let outboundSwitchGeneration = 0
+let outboundSwitchCallback: ((observation: OutboundSwitchObservation) => void) | null = null
+export function onOutboundSwitch(callback: (observation: OutboundSwitchObservation) => void): void {
+  outboundSwitchCallback = callback
+}
+function observeOutboundSwitch(observation: OutboundSwitchObservation): void {
+  try { outboundSwitchCallback?.(observation) } catch { /* Observers cannot release native ownership. */ }
+}
+
+// This is a configuration compatibility key, never a cached OS/security proof.
+function outboundConfigurationKey(options: StartOptions): string {
+  return createHash('sha256').update(JSON.stringify({
+    settings: settingsStore.get(), dns: dnsProfiles.getActiveDnsProfile(), domain: generateDomainRouteRules(),
+    firewall: options.enableFirewallKillSwitch === true, lockdown: options.enableAdapterLockdown === true,
+    publicWifi: options.publicWifiCompatibility === true, stealth: options.stealthMode === true,
+    adaptive: options.adaptiveMode ?? null, engine: options.proxyEngine ?? 'auto'
+  })).digest('hex')
+}
+
+async function allocateXraySwitchSlots(): Promise<XraySwitchSlots> {
+  const a = await pickFreeLocalPort()
+  const b = await pickFreeLocalPort([a])
+  const credentials = (port: number): XraySwitchSlot => ({ port, username: randomSecret(), password: randomSecret() })
+  return { a: credentials(a), b: credentials(b) }
+}
+
 let directProxyPort: number | null = null;
 let tunnelProbePort: number | null = null
 
@@ -170,6 +205,13 @@ export function getTunnelProbePort(): number | null {
 
 export function getClashApiInfo(): { port: number; secret: string } | null {
   return clashApiInfo
+}
+
+/** Main-only diagnostics credentials; never exposed through status or IPC. */
+export function getActiveXraySocksEndpoint(): XraySwitchSlot | null {
+  const slot = getActiveXraySlot()
+  return currentStatus.running && xraySwitchRuntime && slot && getXraySlotStatus(slot).running
+    ? { ...xraySwitchRuntime.slots[slot] } : null
 }
 
 function randomLocalPort(): number {
@@ -920,6 +962,7 @@ export function generateSingboxConfig(
     smartRuDirectDnsSources?: PhysicalAdapterDnsSource[]
     physicalDnsSources?: PhysicalAdapterDnsSource[]
     xraySocksPort?: number
+    xraySwitchSlots?: XraySwitchSlots
     resolvedVpnEndpointIp?: string | null
     /** Full paths of applications that bypass the VPN; matched by path, not by file name (F-076). */
     directProcessPaths?: string[]
@@ -948,6 +991,16 @@ export function generateSingboxConfig(
     publicWifiCompatibility: options.publicWifiCompatibility === true
   })
   const isDirectVpn = typeof upstream !== 'string'
+  if (options.xraySwitchSlots) {
+    const { a, b } = options.xraySwitchSlots
+    const validEndpoint = (endpoint: XraySwitchSlot) => endpoint && Number.isInteger(endpoint.port)
+      && endpoint.port > 0 && endpoint.port <= 65535
+      && typeof endpoint.username === 'string' && Buffer.byteLength(endpoint.username) > 0 && Buffer.byteLength(endpoint.username) <= 255
+      && typeof endpoint.password === 'string' && Buffer.byteLength(endpoint.password) > 0 && Buffer.byteLength(endpoint.password) <= 255
+    if (!isDirectVpn || !validEndpoint(a) || !validEndpoint(b) || a.port === b.port || a.port !== options.xraySocksPort) {
+      throw new Error('Invalid authenticated Xray upstream slots')
+    }
+  }
   const explicitClientDevice = isDirectVpn && upstream.clientDevice
     ? normalizeClientDevice(upstream.clientDevice)
     : null
@@ -1116,7 +1169,9 @@ export function generateSingboxConfig(
     : null
   const directServerCandidate = options.resolvedVpnEndpointIp || (rawDirectServer && isIP(rawDirectServer) === 4 ? rawDirectServer : null) || (proxyOutbound.server !== '127.0.0.1' ? proxyOutbound.server : null)
   const directVpnEndpointRouteExcludes =
-    isDirectVpn && typeof directServerCandidate === 'string' && isIP(directServerCandidate) === 4
+    // Selector slots use the managed-core process rule below. A permanent
+    // endpoint /32 would keep the previous server outside TUN after a swap.
+    isDirectVpn && !options.xraySwitchSlots && typeof directServerCandidate === 'string' && isIP(directServerCandidate) === 4
       ? [`${directServerCandidate}/32`]
       : []
 
@@ -1216,7 +1271,13 @@ export function generateSingboxConfig(
     // sing-box 1.13 has no wireguard outbound (F-047): it is an endpoint that shares the `proxy-out` tag.
     ...(proxyIsWireGuard ? { endpoints: [wireguardOutboundToEndpoint(proxyOutbound)] } : {}),
     outbounds: [
-      ...(proxyIsWireGuard ? [] : [proxyOutbound]),
+      ...(options.xraySwitchSlots ? [
+        { type: 'selector', tag: 'proxy-out', outbounds: ['vpnte-upstream-a', 'vpnte-upstream-b'],
+          default: 'vpnte-upstream-a', interrupt_exist_connections: true },
+        ...(['a', 'b'] as const).map(slot => ({ type: 'socks', tag: `vpnte-upstream-${slot}`, version: '5',
+          server: '127.0.0.1', server_port: options.xraySwitchSlots![slot].port,
+          username: options.xraySwitchSlots![slot].username, password: options.xraySwitchSlots![slot].password, udp_fragment: true }))
+      ] : proxyIsWireGuard ? [] : [proxyOutbound]),
       { type: 'direct', tag: 'direct-out' },
       { type: 'block', tag: 'block-out' }
     ],
@@ -2155,6 +2216,7 @@ async function prepareRuntime(
     xraySocksPort?: number
     resolvedVpnEndpointIp?: string | null
     xrayStartup?: Promise<{ socksPort: number; resolvedIp: string | null }>
+    xraySwitchSlots?: XraySwitchSlots
     signal?: AbortSignal
     directProcessPaths?: string[]
   } = {}
@@ -2200,23 +2262,25 @@ async function prepareRuntime(
   // and exit at startup. Each later port pick excludes the earlier ones so
   // they never collide.
   const portsPromise = (async () => {
+    const upstreamPorts = options.xraySwitchSlots
+      ? [options.xraySwitchSlots.a.port, options.xraySwitchSlots.b.port] : []
     let directPort: number | undefined
     let clashPort: number | undefined
     let probePort: number | undefined
     try {
-      directPort = await pickFreeLocalPort()
+      directPort = await pickFreeLocalPort(upstreamPorts)
     } catch (err) {
       logEvent('warn', 'tun', 'pickFreeLocalPort (direct) failed — falling back to random port', err)
     }
     try {
-      clashPort = await pickFreeLocalPort(directPort ? [directPort] : [])
+      clashPort = await pickFreeLocalPort([...upstreamPorts, ...(directPort ? [directPort] : [])])
     } catch (err) {
       logEvent('warn', 'tun', 'pickFreeLocalPort (clash) failed — falling back to random port', err)
     }
     if (typeof upstream !== 'string') {
       try {
         probePort = await pickFreeLocalPort(
-          [directPort, clashPort].filter((port): port is number => typeof port === 'number')
+          [...upstreamPorts, directPort, clashPort].filter((port): port is number => typeof port === 'number')
         )
       } catch (err) {
         logEvent('warn', 'tun', 'pickFreeLocalPort (live-check) failed — falling back to random port', err)
@@ -2311,6 +2375,7 @@ async function prepareRuntime(
   const { xrayStartup, signal, ...configOptions } = options
   const xray = await xrayStartup
   signal?.throwIfAborted()
+  if (xray && options.xraySwitchSlots) options.xraySwitchSlots.a.port = xray.socksPort
   const config = generateSingboxConfig(upstream, proxyType, directProcessNames, {
     ...configOptions,
     smartRuDirectDnsSources,
@@ -2521,7 +2586,7 @@ export const tunController = {
     if (currentStatus.running) {
       return connectionFailure('conflict', 'TUN уже запущен')
     }
-    if (startInProgress || activeStartCompletion) {
+    if (startInProgress || activeStartCompletion || outboundSwitchCompletion) {
       return connectionFailure('conflict', 'Запуск защиты уже выполняется')
     }
     if (stopInProgress || activeStopCompletion) {
@@ -2617,6 +2682,7 @@ export const tunController = {
     const proxyType: 'socks5' | 'http' =
       startOptions.proxyType ?? 'socks5'
     const vpnProfile = startOptions.vpnProfile
+    let preparedXraySwitch: { slots: XraySwitchSlots; configurationKey: string } | null = null
     const requestedKillSwitch =
       startOptions.enableFirewallKillSwitch === true
     const wantKillSwitch = requestedKillSwitch
@@ -2874,7 +2940,11 @@ export const tunController = {
         let resolvedVpnEndpointIp: string | null = null
         if (engine === 'xray') {
           try {
+            const slots = await allocateXraySwitchSlots()
+            preparedXraySwitch = { slots, configurationKey: outboundConfigurationKey(startOptions) }
             const xrayStartup = startXray(vpnProfile.outbound, {
+              slot: 'a', portOverride: slots.a.port,
+              socksAuth: { username: slots.a.username, password: slots.a.password },
               clientDevice: vpnProfile.clientDevice,
               stealthMode: startOptions.stealthMode === true,
               resolvedIp: vpnProfile.resolvedIp,
@@ -2890,6 +2960,7 @@ export const tunController = {
                   adaptiveMode: startOptions.adaptiveMode,
                   publicWifiCompatibility,
                   xrayStartup,
+                  xraySwitchSlots: slots,
                   signal: startAbortController.signal,
                   smartRuSplit, smartRuMapsDirect,
                   smartRuDirectDnsSources: dnsSourcesPromise
@@ -3115,6 +3186,10 @@ export const tunController = {
           startedAt: null,
           restartAttempt
         }
+        // Release a retained-upstream operation promptly on native loss. Its
+        // receipt hands recovery to this exit owner instead of tearing it down.
+        const pendingOutboundSwitch = outboundSwitchCompletion
+        outboundSwitchAbort?.abort()
         if (!resolved && startupCompensationStarted) {
           // The poll already owns failure cleanup. Its kill triggers this
           // callback too; do not start a second rollback or settle it early.
@@ -3306,14 +3381,18 @@ export const tunController = {
 
             clearRestartTimers()
             const optsSnapshot = lastStartOptions
+            const recoveryGeneration = recoveryCancelGeneration
             restartTimer = setTimeout(async () => {
               restartTimer = null
               await startCompletion
+              if (pendingOutboundSwitch) await pendingOutboundSwitch
               if (settingsStore.get().autoRestartOnCrash === false) {
                 logEvent('info', 'tun', 'auto-restart cancelled because setting is off', { attempt })
                 return
               }
-              if (userInitiatedStop || stopInProgress) {
+              if (userInitiatedStop || stopInProgress || stopRequested
+                || recoveryGeneration !== recoveryCancelGeneration || nativeGeneration !== nativeStartupGeneration
+                || currentStatus.running || startInProgress) {
                 logEvent('info', 'tun', 'auto-restart cancelled — user initiated stop', { attempt })
                 return
               }
@@ -3729,6 +3808,12 @@ export const tunController = {
             }
 
             const combinedWarning = [warning, killSwitchWarning].filter(Boolean).join(' | ') || null
+            // cache.db can retain an old selector choice. Establish the live
+            // initial slot explicitly; a config default is not read-back proof.
+            if (preparedXraySwitch) {
+              if (!clashApiInfo) throw new Error('Protected outbound controller unavailable')
+              await timeAsync('initial-outbound-selection', () => selectProtectedOutbound(clashApiInfo!, 'a'))
+            }
             const runtimePid = await timeAsync('runtime-pid', () => readOwnedSingboxPid(runtime.singbox))
             if (resolved) return
             if (stopRequested) throw new Error('Startup cancelled during PID confirmation')
@@ -3802,6 +3887,7 @@ export const tunController = {
               adaptiveMode: startOptions.adaptiveMode,
               proxyEngine: startOptions.proxyEngine
             }
+            xraySwitchRuntime = preparedXraySwitch
             if (!stopInProgress) {
               userInitiatedStop = false
             }
@@ -3953,6 +4039,9 @@ export const tunController = {
   async stop(options: { preserveNetworkProtection?: boolean; preserveLastStartOptions?: boolean } = {}): Promise<TunStopResult> {
     stopRequested = true
     activeStartAbortController?.abort()
+    outboundSwitchAbort?.abort()
+    if (outboundSwitchCompletion) await outboundSwitchCompletion
+    xraySwitchRuntime = null
     if (activeStopCompletion) {
       const preserved = activeStopPreservesProtection
       const stopped = await activeStopCompletion
@@ -4217,6 +4306,123 @@ export const tunController = {
     finally {
       if (activeStopCompletion === stopped) activeStopCompletion = null
       stopInProgress = false
+    }
+  },
+
+  /** Swap a userspace upstream while retaining this exact TUN and its security transaction. */
+  async switchOutbound(nextOptions: StartOptions, options: {
+    signal: AbortSignal; isOwner: () => boolean; onCommit: () => void
+  }): Promise<OutboundSwitchReceipt | null> {
+    const runtime = xraySwitchRuntime, api = clashApiInfo, previousOptions = lastStartOptions
+    if (!runtime || !api || !previousOptions?.vpnProfile || !nextOptions.vpnProfile
+      || !currentStatus.running || currentStatus.mode !== 'directVpn' || nextOptions.mode !== 'directVpn'
+      || startInProgress || stopInProgress || outboundSwitchCompletion
+      || resolveProxyEngine(nextOptions.vpnProfile.outbound, nextOptions.proxyEngine ?? 'auto') !== 'xray'
+      || runtime.configurationKey !== outboundConfigurationKey(nextOptions)
+      || shouldBlockQuicUdp443(previousOptions.vpnProfile.outbound, 'socks5', true)
+        !== shouldBlockQuicUdp443(nextOptions.vpnProfile.outbound, 'socks5', true)
+      || isTcpOnlyNetworkOutbound(previousOptions.vpnProfile.outbound)
+        !== isTcpOnlyNetworkOutbound(nextOptions.vpnProfile.outbound)) return null
+    // Split rules have their own store; a retained TUN must match the current
+    // rules as well as settings, DNS and domain routing.
+    if (!appliedSplitTunnelRules) return null
+    try {
+      const { splitTunneling } = await import('./splitTunneling')
+      if (JSON.stringify(appliedSplitTunnelRules) !== JSON.stringify({
+        names: splitTunneling.getDirectProcessNames(), paths: splitTunneling.getDirectProcessPaths()
+      })) return null
+    } catch { return null }
+    // The lazy read above yields; recheck admission before reserving the owner.
+    if (startInProgress || stopInProgress || stopRequested || outboundSwitchCompletion
+      || !currentStatus.running || xraySwitchRuntime !== runtime || clashApiInfo !== api
+      || lastStartOptions !== previousOptions) return null
+    const previous = getActiveXraySlot()
+    if (!previous || !getXraySlotStatus(previous).running) return null
+    // IPv6 transport permits are endpoint-exact. Until a dual-endpoint WFP
+    // transaction is implemented, those profiles retain the protected restart.
+    const hasIpv6Endpoint = (outbound: Record<string, any>) => isIP(String(outbound.server ?? '')) === 6
+      || JSON.stringify(getNativeXrayProfile(outbound) ?? {}).includes(':') &&
+        /"(?:address|server)"\s*:\s*"[^"]*:[^"]*"/.test(JSON.stringify(getNativeXrayProfile(outbound) ?? {}))
+    if (hasIpv6Endpoint(previousOptions.vpnProfile.outbound) || hasIpv6Endpoint(nextOptions.vpnProfile.outbound)) return null
+    const candidate: OutboundSlot = previous === 'a' ? 'b' : 'a'
+    const pid = currentStatus.pid, startedAt = currentStatus.startedAt
+    const owner = () => options.isOwner() && !stopRequested && !stopInProgress
+      && currentStatus.running && currentStatus.pid === pid && currentStatus.startedAt === startedAt
+      && xraySwitchRuntime === runtime
+    const controller = new AbortController()
+    // A cancelled candidate confirmation must drain its public-IP wave. The
+    // previous slot can then obtain a fresh proof even though the user aborted.
+    const cancelConfirmation = () => ipMonitor.deferResume()
+    controller.signal.addEventListener('abort', cancelConfirmation, { once: true })
+    const abort = () => controller.abort()
+    options.signal.addEventListener('abort', abort, { once: true })
+    if (options.signal.aborted) abort()
+    outboundSwitchAbort = controller
+    let release!: () => void
+    outboundSwitchCompletion = new Promise<void>(done => { release = done })
+    const generation = ++outboundSwitchGeneration, began = performance.now()
+    const phasesMs: Record<string, number> = {}
+    const timed = async <T>(phase: string, effect: () => Promise<T>): Promise<T> => {
+      const started = performance.now()
+      try { return await effect() }
+      finally { phasesMs[phase] = (phasesMs[phase] ?? 0) + Math.round(performance.now() - started) }
+    }
+    let verified = false
+    ipMonitor.deferResume()
+    observeOutboundSwitch({ phase: 'begin', generation })
+    try {
+      const receipt = await runProtectedOutboundSwitch({ previous, candidate, signal: controller.signal, isOwner: owner,
+        stage: (slot, signal) => timed('stage', async () => {
+          const endpoint = runtime.slots[slot]
+          const result = await startXrayInSlot(slot, nextOptions.vpnProfile!.outbound, {
+            portOverride: endpoint.port, socksAuth: endpoint,
+            clientDevice: nextOptions.vpnProfile!.clientDevice,
+            stealthMode: nextOptions.stealthMode, signal
+          })
+          if (result.resolvedIp && isIP(result.resolvedIp) === 6) throw new Error('IPv6 upstream requires protected restart')
+        }),
+        probe: (slot, signal) => timed('probe', async () => { await probeSocksUpstream(runtime.slots[slot], signal) }),
+        select: slot => timed(slot === previous ? 'restore-selector' : 'select', () => selectProtectedOutbound(api, slot)),
+        confirm: slot => timed(slot === previous ? 'confirm-previous' : 'confirm-candidate', async () => {
+          const canPublish = () => owner() && (slot === previous || !controller.signal.aborted)
+          if (!canPublish() || !getXraySlotStatus(slot).running || !(await areTunRoutesActive()) || !canPublish()) {
+            throw new Error('Retained TUN route proof failed')
+          }
+          ipMonitor.invalidateVpnIpBaseline()
+          const evidence = await ipMonitor.recheck(true, canPublish)
+          if (!canPublish() || !evidence.ip || evidence.vpnIp !== evidence.ip || evidence.isLeak
+            || !getXraySlotStatus(slot).running || !(await areTunRoutesActive()) || !canPublish()) {
+            throw new Error('Retained TUN egress proof failed')
+          }
+        }),
+        alive: slot => getXraySlotStatus(slot).running,
+        stop: slot => timed(slot === previous ? 'stop-previous' : 'stop-candidate', () => stopXraySlot(slot, 'protected upstream transition')),
+        commit: slot => {
+          if (!owner()) throw new Error('Outbound switch superseded')
+          activateXraySlot(slot)
+          currentStatus = { ...currentStatus, vpnProfileName: nextOptions.vpnProfile!.name,
+            vpnProtocol: nextOptions.vpnProfile!.protocol, proxyReachable: true }
+          lastStartOptions = { ...nextOptions }
+          try { protectedRestartCallback?.('server switch') } catch { /* History observers cannot undo selector commit. */ }
+          options.onCommit()
+        }
+      })
+      if (!owner()) receipt.ownershipLost = true
+      verified = !receipt.ownershipLost && (receipt.previousPreserved || receipt.outcome === 'success')
+      logEvent(receipt.outcome === 'success' ? 'info' : 'warn', 'tun', 'retained TUN upstream switch finished', {
+        outcome: receipt.outcome, committed: receipt.committed, previousPreserved: receipt.previousPreserved,
+        ownershipLost: receipt.ownershipLost === true,
+        durationMs: Math.round(performance.now() - began), phasesMs, phases: receipt.failures.map(failure => failure.phase)
+      })
+      return receipt
+    } finally {
+      observeOutboundSwitch({ phase: 'finished', generation, verified })
+      ipMonitor.releaseDeferredResume()
+      options.signal.removeEventListener('abort', abort)
+      controller.signal.removeEventListener('abort', cancelConfirmation)
+      if (outboundSwitchAbort === controller) outboundSwitchAbort = null
+      outboundSwitchCompletion = null
+      release()
     }
   },
 

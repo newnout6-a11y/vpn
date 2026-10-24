@@ -177,6 +177,25 @@ test('protected transition timing excludes private reason, IP and provider data'
     { at: event.ts, scope: event.scope, message: 'protected transition IP baseline not checked', elapsedMs: 4500 })
 })
 
+test('retained TUN switch exposes timing and fixed recovery evidence without endpoint or errors (AT-00-005/AT-01-001)', () => {
+  const base = { ts: '2026-10-24T00:00:00.000Z', scope: 'tun', message: 'retained TUN upstream switch finished' }
+  const phases = ['stage', 'probe', 'select', 'confirm', 'commit', 'restore', 'confirm-previous',
+    'stop-candidate', 'stop-previous', 'ownership']
+  for (const outcome of ['success', 'cancelled', 'failed']) {
+    const result = safeAppEvent({ ...base, details: { outcome, durationMs: 754, committed: false, previousPreserved: true,
+      phases: [...phases, 'confirm', 'FAKE-PRIVATE-PAYLOAD', null, {}],
+      endpoint: 'FAKE-PRIVATE-PAYLOAD', error: 'FAKE-PRIVATE-PAYLOAD', secret: 'FAKE-PRIVATE-PAYLOAD' } })
+    assert.deepEqual(result, { at: base.ts, scope: base.scope, message: base.message, durationMs: 754,
+      outcome, committed: false, previousPreserved: true, phases })
+    assert.ok(!JSON.stringify(result).includes('FAKE-PRIVATE-PAYLOAD'))
+  }
+  assert.deepEqual(safeAppEvent({ ...base, details: { outcome: 'FAKE-PRIVATE-PAYLOAD', committed: 'false',
+    previousPreserved: 1, phases: 'FAKE-PRIVATE-PAYLOAD' } }), { at: base.ts, scope: base.scope, message: base.message })
+  const unrelated = safeAppEvent({ ...base, message: 'start timing', details: { outcome: 'success',
+    committed: true, previousPreserved: true, phases } })
+  assert.deepEqual(unrelated, { at: base.ts, scope: base.scope, message: 'start timing' })
+})
+
 test('native runtime fallback diagnostics publish fixed categories without private messages', () => {
   for (const [message, kind] of [
     ['runtime PID: executable path unavailable', 'runtime-path-unavailable'],

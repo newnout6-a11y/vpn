@@ -12,7 +12,7 @@ import { isIP } from 'net'
 import { randomUUID } from 'node:crypto'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { happDetector } from './happDetector'
-import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart, onNativeStartup, onNativeStop, type StartOptions } from './tunController'
+import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart, onNativeStartup, onNativeStop, onOutboundSwitch, type StartOptions } from './tunController'
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
 import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
@@ -1236,6 +1236,12 @@ onNativeStartup(observation => {
     tunnelState.nativeStartBegan(observation.generation)
   }
   else tunnelState.nativeStartFinished(observation)
+})
+onOutboundSwitch(observation => {
+  // This transaction keeps the current native process and its background protection obligation.
+  // Dedicated FSM evidence fences a late callback after disconnect or a native restart.
+  if (observation.phase === 'begin') tunnelState.upstreamSwitchBegan(observation.generation)
+  else tunnelState.upstreamSwitchFinished(observation)
 })
 
 const connectionLifecycle = new ConnectionLifecycle(() => {

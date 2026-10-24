@@ -108,4 +108,28 @@ describe('bounded engine logs', () => {
       expect((await stat(current)).size).toBe(0)
     } finally { await watcher.stop() }
   })
+  it('bounds both upstream slots with live append handles and ignores non-allowlisted log names (AT-08-001 / AT-01-009)', async () => {
+    const { dir } = await fixture()
+    const writers = []
+    for (const slot of ['a', 'b']) {
+      const current = join(dir, `xray-${slot}.log`)
+      await writeFile(current, Buffer.alloc(ENGINE_LOG_BYTES + 1, 10))
+      writers.push(await open(current, 'a'))
+    }
+    await writeFile(join(dir, 'xray-c.log'), Buffer.alloc(ENGINE_LOG_BYTES + 1, 10))
+    const authorize = vi.fn(async () => {}), error = vi.fn()
+    const watcher = watchEngineLogs(dir, authorize, error)
+    try {
+      await watcher.check()
+      expect(authorize).toHaveBeenCalledTimes(2)
+      expect(error).not.toHaveBeenCalled()
+      for (const [index, slot] of ['a', 'b'].entries()) {
+        expect((await stat(join(dir, `xray-${slot}.log`))).size).toBe(0)
+        expect((await stat(join(dir, `xray-${slot}.prev.log`))).size).toBeLessThanOrEqual(ENGINE_LOG_BYTES)
+        await writers[index].writeFile(`still writing ${slot}\n`)
+        expect(await readFile(join(dir, `xray-${slot}.log`), 'utf8')).toBe(`still writing ${slot}\n`)
+      }
+      expect((await stat(join(dir, 'xray-c.log'))).size).toBe(ENGINE_LOG_BYTES + 1)
+    } finally { await watcher.stop(); await Promise.all(writers.map(writer => writer.close())) }
+  })
 })

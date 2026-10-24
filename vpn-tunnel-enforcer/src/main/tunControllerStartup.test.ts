@@ -20,8 +20,10 @@ const classifier = parsedSource.statements.find(node => ts.isFunctionDeclaration
 const classifierCode = ts.transpileModule(classifier.getText(parsedSource) + ';return classifyTunError;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
 const classifyTunError = new Function('RecoveryWorkerError', 'classifyIpcError', classifierCode)(RecoveryWorkerError, classifyIpcError)
 
-function harness() {
+function harness(retained = false) {
   const os = {
+    retained,
+    selectProtectedOutbound: vi.fn(async () => {}),
     connectionFailure, ipcError, classifyTunError, readIpcErrorCategory,
     isSingboxRunning: vi.fn(async () => true),
     readOwnedSingboxPid: vi.fn(async () => 731),
@@ -61,10 +63,12 @@ const TUN_ADAPTER_ALIAS='Ethernet 5',mode='directVpn',proxyAddr='',proxyType='so
 const vpnProfile={name:'fixture',protocol:'vless'},warning=null,publicWifiCompatibility=true;
 const wantAdapterLockdown=false,startOptions={},STABLE_RESET_MS=60000;
 let killSwitchEngaged=false,killSwitchWarning=null,restartAttempt=0,lastStartOptions=null;
+let preparedXraySwitch=retained ? {slots:{a:{port:51001},b:{port:51002}},configurationKey:'fixture'} : null;
+let xraySwitchRuntime=null,clashApiInfo={port:51003,secret:'0123456789abcdef0123456789abcdef'};
 let stopInProgress=false,userInitiatedStop=false,stableTimer=null;
 function finish(result){if(!resolved){resolved=true;onFinish(result)}}
-return {poll: ${callback}, status:()=>currentStatus, signal: startAbortController.signal, requestStop: () => {stopRequested=true;startAbortController.abort()}, exit: () => {resolved=true;settleFirewallAdapter?.(false)}, completion: () => startupPollCompletion};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
-  const control = new Function(...Object.keys(os), compiled)(...Object.values(os)) as { poll: () => Promise<void>; status: () => { running: boolean; pid: number | null }; signal: AbortSignal; requestStop: () => void; exit: () => void; completion: () => Promise<void> | null }
+return {poll: ${callback}, status:()=>currentStatus, switchRuntime:()=>xraySwitchRuntime, signal: startAbortController.signal, requestStop: () => {stopRequested=true;startAbortController.abort()}, exit: () => {resolved=true;settleFirewallAdapter?.(false)}, completion: () => startupPollCompletion};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const control = new Function(...Object.keys(os), compiled)(...Object.values(os)) as { poll: () => Promise<void>; status: () => { running: boolean; pid: number | null }; switchRuntime: () => object | null; signal: AbortSignal; requestStop: () => void; exit: () => void; completion: () => Promise<void> | null }
   return { ...control, ...os }
 }
 
@@ -343,6 +347,36 @@ describe('startup callback fault boundaries', () => {
     expect(h.onFinish).toHaveBeenCalledWith({ success: true, warning: null })
     expect(h.notifyStatus).toHaveBeenCalledWith('running')
     expect(h.killOwnedRuntimeProcesses).not.toHaveBeenCalled()
+  })
+
+  it('establishes the initial live selector before publishing a retained-slot startup (AT-02-002)', async () => {
+    const h = harness(true)
+    h.recordOwnedTunAdapter.mockResolvedValue(undefined)
+    let select!: () => void
+    h.selectProtectedOutbound.mockReturnValueOnce(new Promise<void>(done => { select = done }))
+    const pending = h.poll()
+    await vi.waitFor(() => expect(h.selectProtectedOutbound).toHaveBeenCalledOnce())
+    expect(h.selectProtectedOutbound).toHaveBeenCalledWith({ port: 51003, secret: '0123456789abcdef0123456789abcdef' }, 'a')
+    expect(h.readOwnedSingboxPid).not.toHaveBeenCalled()
+    expect(h.onFinish).not.toHaveBeenCalled()
+    expect(h.switchRuntime()).toBeNull()
+    select()
+    await pending
+    expect(h.onFinish).toHaveBeenCalledWith({ success: true, warning: null })
+    expect(h.switchRuntime()).toMatchObject({ configurationKey: 'fixture', slots: { a: { port: 51001 }, b: { port: 51002 } } })
+  })
+
+  it('compensates selector readback failure without publishing ready slots (AT-02-004/005)', async () => {
+    const h = harness(true)
+    h.recordOwnedTunAdapter.mockResolvedValue(undefined)
+    h.selectProtectedOutbound.mockRejectedValueOnce(new Error('selector readback failed'))
+    await h.poll()
+    expect(h.onFinish).toHaveBeenCalledWith(expect.objectContaining({ success: false }))
+    expect(h.switchRuntime()).toBeNull()
+    expect(h.notifyStatus).not.toHaveBeenCalledWith('running')
+    expect(h.killOwnedRuntimeProcesses).toHaveBeenCalledOnce()
+    expect(h.stopXray).toHaveBeenCalledOnce()
+    expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
   })
 
   it('fails a required firewall check instead of reporting a protected connection', async () => {

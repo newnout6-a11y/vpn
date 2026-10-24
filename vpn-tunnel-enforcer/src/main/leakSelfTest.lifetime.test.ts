@@ -85,10 +85,12 @@ async function backgroundMainHarness() {
   expect(start).toBeGreaterThan(-1); expect(end).toBeGreaterThan(start)
   let status!: (value: string) => void
   const deps = { tunnelState: model, tunController: { getStatus: () => evidence, onStatusChange: (cb: typeof status) => { status = cb } },
-    setBackgroundLeakTestGate: leak.setBackgroundLeakTestGate, cancelLeakSelfTest: leak.cancelLeakSelfTest, onNativeStop: vi.fn(), onNativeStartup: vi.fn() }
+    setBackgroundLeakTestGate: leak.setBackgroundLeakTestGate, cancelLeakSelfTest: leak.cancelLeakSelfTest,
+    onNativeStop: vi.fn(), onNativeStartup: vi.fn(), onOutboundSwitch: vi.fn() }
   const js = ts.transpileModule(source.slice(start, end), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
   new Function(...Object.keys(deps), js)(...Object.values(deps))
-  return { leak, model, lane, evidence, status, nativeStop: deps.onNativeStop.mock.calls[0][0], nativeStartup: deps.onNativeStartup.mock.calls[0][0] }
+  return { leak, model, lane, evidence, status, nativeStop: deps.onNativeStop.mock.calls[0][0],
+    nativeStartup: deps.onNativeStartup.mock.calls[0][0], outboundSwitch: deps.onOutboundSwitch.mock.calls[0][0] }
 }
 describe('leak requester main handler', () => {
   it.each(['destroyed', 'did-navigate', 'render-process-gone'])('cancels legacy document work on %s', async event => {
@@ -368,6 +370,30 @@ describe('leak self-test lifetime', () => {
       expect(detected).not.toHaveBeenCalled(); expect(completed).not.toHaveBeenCalled()
       expect(state.log.mock.calls.some(([level, , message]) => level === 'warn' && String(message).startsWith('УТЕЧКА'))).toBe(false)
     } finally { leak.stopPeriodicLeakTest(); vi.useRealTimers() }
+  })
+  it('keeps background protection armed through an upstream-only switch and fences its late stop callback (AT-00-003/AT-07-002)', async () => {
+    const h = await backgroundMainHarness()
+    await h.lane.start(async () => { h.evidence.running = true; h.evidence.pid = 123; h.status('running'); return { success: true } })
+    h.nativeStartup({ phase: 'begin', generation: 1 })
+    h.outboundSwitch({ phase: 'begin', generation: 100 })
+    expect(h.model.snapshot).toMatchObject({ transition: 'reconnecting', pid: 123 })
+    h.leak.triggerLeakCheckNow('upstream-only-switch')
+    await vi.waitFor(() => expect(children).toHaveLength(1))
+    expect(children[0].kill).not.toHaveBeenCalled()
+    h.outboundSwitch({ phase: 'finished', generation: 100, verified: true })
+    expect(h.model.snapshot).toMatchObject({ state: 'connected', transition: null, pid: 123 })
+    h.outboundSwitch({ phase: 'begin', generation: 101 })
+    h.status('stopping')
+    expect(children[0].kill).toHaveBeenCalledOnce()
+    h.evidence.running = false; h.evidence.pid = null; h.status('stopped')
+    // Upstream generation 100 must not overwrite native generation 1 used by stop receipts.
+    h.nativeStop({ generation: 1, preserveNetworkProtection: false, result: { success: true,
+      networkCleanup: { baseline: true, firewall: true, adapters: true } } })
+    const stopped = h.model.snapshot
+    h.outboundSwitch({ phase: 'finished', generation: 101, verified: true })
+    expect(h.model.snapshot).toEqual(stopped)
+    expect(stopped).toMatchObject({ state: 'disconnected', transition: null })
+    children[0].finish()
   })
   it.each([true, false])('re-arms probes after failed runtime exit with retained protection (running=%s, AT-07-002)', async running => {
     const h = await backgroundMainHarness(), detected = vi.fn()

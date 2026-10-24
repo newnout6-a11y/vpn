@@ -84,7 +84,8 @@ export function safeAppEvent(event) {
           'adapter lockdown result', 'physical adapter lockdown did not apply', 'physical adapter lockdown threw', 'xray startup failed',
           'failed to prepare TUN runtime', 'sing-box exited before startup completed',
           'firewall kill-switch failed to engage — aborting start and rolling back',
-          'startup validation failed — rolling back', 'startup runtime termination failed', 'startup rollback step failed'],
+          'startup validation failed — rolling back', 'startup runtime termination failed', 'startup rollback step failed',
+          'retained TUN upstream switch finished'],
         'ipc-security': ['IPC request rejected', 'IPC request failed'], xray: ['start timing'],
         'phys-lockdown': ['batch lockdown failed', 'transition adapters disabled', 'transition adapter snapshot failed',
           'DNS registry snapshot failed; refusing mutation without baseline', 'snapshot parse failed',
@@ -113,6 +114,17 @@ export function safeAppEvent(event) {
     if (['succeeded', 'failed', 'cancelled', 'backoff'].includes(event.details?.outcome)) result.outcome = event.details.outcome
   }
   if (event.scope === 'runtime-acl' && ['worker', 'standalone'].includes(event.details?.transport)) result.transport = event.details.transport
+  if (event.scope === 'tun' && event.message === 'retained TUN upstream switch finished') {
+    if (['success', 'cancelled', 'failed'].includes(event.details?.outcome)) result.outcome = event.details.outcome
+    for (const key of ['committed', 'previousPreserved']) {
+      if (typeof event.details?.[key] === 'boolean') result[key] = event.details[key]
+    }
+    if (Array.isArray(event.details?.phases)) {
+      const allowed = ['stage', 'probe', 'select', 'confirm', 'commit', 'restore', 'confirm-previous',
+        'stop-candidate', 'stop-previous', 'ownership']
+      result.phases = [...new Set(event.details.phases.filter(phase => allowed.includes(phase)))]
+    }
+  }
   if (event.scope === 'ps-helper' && event.message === 'warm-up timing') {
     if (['NetSecurity', 'Network', 'NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'].includes(event.details?.module)) result.module = event.details.module
     if (['complete', 'failed'].includes(event.details?.outcome)) result.outcome = event.details.outcome

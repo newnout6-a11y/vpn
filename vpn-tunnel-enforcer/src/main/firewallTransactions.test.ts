@@ -14,13 +14,16 @@ const state = vi.hoisted(() => ({ manifest: null as any, writes: [] as any[], sc
   wfpCalls: [] as string[], wfpActive: false, wfpFailApply: 0, wfpFailRemove: false, wfpFailVerify: false, wfpConflict: false, wfpFailPrepareExceptions: false,
   wfpRemoveError: null as Error | null,
   manifestReads: 0,
+  manifestReadGate: null as Promise<void> | null,
   auditWfpPolicy: false,
   wfpPriorityOutput: 'WFP_PRIORITY_VERIFIED',
   liveFailures: 0, liveMissingMarker: false, failCommit: false,
   artifacts: [] as string[], helperAvailable: true, helperFailure: null as any, helperExitCode: 0, longApps: false,
   nativeTimings: '', restoreOutput: null as string | null, cleanupError: null as Error | null,
   fileProbe: vi.fn((..._args: any[]) => '0'),
-  statusSnapshot: '' as string, statusReadGate: null as Promise<void> | null,
+  statusSnapshot: '' as string, statusReadGate: null as Promise<void> | null, statusReads: 0, statusReadError: null as Error | null,
+  wfpVerifyGate: null as Promise<void> | null,
+  wfpPresenceGate: null as Promise<void> | null, dispatchWfpPresence: false,
   fallback: vi.fn(async (..._args: any[]) => ({ stdout: 'SNAPSHOT:[]', stderr: '' })) }))
 vi.mock('electron', () => ({ app: { getPath: () => 'C:\\VPNTE' },
   BrowserWindow: { getAllWindows: () => [] }, dialog: { showMessageBox: vi.fn(async () => ({})) } }))
@@ -39,9 +42,13 @@ vi.mock('./wfpIpv6', async importOriginal => ({
     if (state.wfpFailApply > 0) { state.wfpFailApply--; throw new Error('WFP apply failure') }
     state.wfpActive = true
   },
-  verifyWfpIpv6Policy: async () => { state.wfpCalls.push('verify'); if (state.wfpFailVerify) throw new Error('WFP coverage changed') },
+  verifyWfpIpv6Policy: async () => { state.wfpCalls.push('verify'); await state.wfpVerifyGate; if (state.wfpFailVerify) throw new Error('WFP coverage changed') },
   removeWfpIpv6Protection: async () => { state.wfpCalls.push('remove'); if (state.wfpRemoveError) throw state.wfpRemoveError; if (state.wfpFailRemove) throw new Error('WFP remove failure'); state.wfpActive = false },
-  hasWfpIpv6Protection: async () => { state.wfpCalls.push('presence'); return state.wfpActive }
+  hasWfpIpv6Protection: async (run: (script: string) => Promise<unknown>) => {
+    state.wfpCalls.push('presence'); await state.wfpPresenceGate
+    if (state.dispatchWfpPresence) await run('FIXED_WFP_READ_FIXTURE')
+    return state.wfpActive
+  }
 }))
 vi.mock('fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('fs/promises')>()
@@ -60,6 +67,7 @@ vi.mock('./recoveryManifest', async importOriginal => ({
   recoveryManifestPath: (name: string) => `C:\\ProgramData\\VPNTE\\manifests\\${name}`,
   readRecoveryManifest: async (_name: string, validate: Function) => {
     state.manifestReads++
+    await state.manifestReadGate
     if (state.readError) throw state.readError
     if (state.invalidRead) throw new Error('untrusted ACL')
     return state.manifest ? validate(state.manifest) : null
@@ -75,6 +83,13 @@ vi.mock('./recoveryManifest', async importOriginal => ({
   quarantineRecoveryManifest: async (name: string) => { if (state.failQuarantine) throw new Error('quarantine refused'); state.quarantines.push(name) }
 }))
 vi.mock('./admin', () => ({ execElevated: (...args: any[]) => state.fallback(...args), isProcessElevated: async () => false }))
+vi.mock('./firewallStatusRead', () => ({ readFirewallStatusSnapshot: async () => {
+  state.statusReads++
+  const snapshot = state.statusSnapshot
+  await state.statusReadGate
+  if (state.statusReadError) throw state.statusReadError
+  return snapshot
+} }))
 vi.mock('child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('child_process')>()
   const execFile = (...args: any[]) => {
@@ -100,11 +115,7 @@ vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => state.he
       return helper.execElevatedPs(script, 1000, 'firewall-killswitch')
     }
     if (state.helperExitCode) return { stdout: '', stderr: 'native command failed', exitCode: state.helperExitCode }
-    if (script.includes('$foreign=@')) {
-      const snapshot = state.statusSnapshot
-      await state.statusReadGate
-      return { stdout: snapshot, stderr: '', exitCode: 0 }
-    }
+    if (script.includes("Write-Output 'WFP_PRIORITY_VERIFIED'")) return { stdout: state.wfpPriorityOutput, stderr: '', exitCode: 0 }
     if (script.includes('# --- Step 2:')) {
       if (!state.manifest || state.manifest.phase !== 'prepared') throw new Error('mutated without a durable snapshot')
       if (state.failApply) throw new Error('apply failed')
@@ -145,6 +156,16 @@ function executeNativeFixture(script: string, productionApi = false): string {
       { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] })
   } finally { unlinkSync(scriptPath); rmdirSync(temporary) }
 }
+async function prepareVerifiedStatusFixture() {
+  await enableKillSwitch(options)
+  const { snapshot, manifest } = firewallStatusFixture()
+  snapshot.rules.find(r => r.name === 'VPNTE-killswitch-allow-app')!.program = process.execPath
+  snapshot.rules.find(r => r.name === 'VPNTE-killswitch-allow-tun-interface')!.interfaces = [getTunAdapterAlias()]
+  snapshot.rules.find(r => r.name === 'VPNTE-killswitch-allow-lan')!.remote = ['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '224.0.0.0/4', 'fc00::/7', 'fe80::/10', 'ff00::/8']
+  state.manifest.ruleNames = manifest.ruleNames
+  state.statusSnapshot = JSON.stringify(snapshot)
+  return snapshot
+}
 beforeEach(() => {
   Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
   state.manifest = null; state.writes = []; state.scripts = []
@@ -152,7 +173,7 @@ beforeEach(() => {
   state.readError = null; state.quarantines = []; state.failQuarantine = false; state.ownedRules = false
   state.wfpCalls = []; state.wfpActive = false; state.wfpFailApply = 0; state.wfpFailRemove = false; state.wfpFailVerify = false; state.wfpConflict = false
   state.wfpFailPrepareExceptions = false
-  state.manifestReads = 0
+  state.manifestReads = 0; state.manifestReadGate = null
   state.auditWfpPolicy = false
   state.wfpPriorityOutput = 'WFP_PRIORITY_VERIFIED'
   state.liveFailures = 0; state.liveMissingMarker = false; state.failCommit = false
@@ -163,6 +184,8 @@ beforeEach(() => {
   state.wfpRemoveError = null
   state.statusSnapshot = JSON.stringify({ services: [], profiles: [], storedNames: [], foreignAllows: 0, rules: [] })
   state.statusReadGate = null
+  state.statusReads = 0; state.statusReadError = null; state.wfpVerifyGate = null
+  state.wfpPresenceGate = null; state.dispatchWfpPresence = false
   state.fallback.mockReset().mockRejectedValue(new Error('Fallback boundary refused'))
   state.fileProbe.mockReset().mockReturnValue('0')
 })
@@ -351,15 +374,15 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     let release!: () => void
     state.statusReadGate = new Promise<void>(resolve => { release = resolve })
     const first = getFirewallKillSwitchStatus()
-    await vi.waitFor(() => expect(state.scripts.filter(s => s.includes('$foreign=@'))).toHaveLength(1))
+    await vi.waitFor(() => expect(state.statusReads).toBe(1))
     const burst = Array.from({ length: 10 }, () => getFirewallKillSwitchStatus())
     release()
     expect(await Promise.all([first, ...burst])).toEqual(Array(11).fill({ state: 'inactive', cleanupRequired: false, reason: 'no-owned-protection' }))
-    expect(state.scripts.filter(s => s.includes('$foreign=@'))).toHaveLength(1)
+    expect(state.statusReads).toBe(1)
     expect(state.manifestReads).toBe(1)
-    state.helperExitCode = 1
+    state.statusReadError = new Error('Read failed')
     expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', reason: 'read-back-failed' })
-    state.helperExitCode = 0
+    state.statusReadError = null
     expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'inactive' })
     expect(state.manifestReads).toBe(3)
     expect(state.fallback).not.toHaveBeenCalled()
@@ -369,11 +392,112 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     const applied = enableKillSwitch(options)
     const after = getFirewallKillSwitchStatus(), duplicate = getFirewallKillSwitchStatus()
     const [oldStatus, mutation, newStatus, sharedStatus] = await Promise.all([before, applied, after, duplicate])
-    expect(oldStatus).toMatchObject({ state: 'inactive' })
+    expect(oldStatus).toMatchObject({ state: 'unknown', reason: 'unavailable' })
     expect(mutation.success).toBe(true)
-    expect(newStatus).toMatchObject({ state: 'unknown', reason: 'incomplete-policy' })
+    expect(newStatus).toMatchObject({ state: 'unknown', reason: 'unavailable' })
     expect(sharedStatus).toEqual(newStatus)
-    expect(state.scripts.filter(s => s.includes('$foreign=@'))).toHaveLength(2)
+    expect(state.statusReads).toBe(0)
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', reason: 'incomplete-policy' })
+    expect(state.statusReads).toBe(1)
+  })
+  it('does not wait for a held mutation or dispatch a policy read (AT-03-001/008)', async () => {
+    let release!: (ready: boolean) => void
+    const mutation = enableKillSwitch({ ...options, tunAdapterReady: new Promise(resolve => { release = resolve }) })
+    await vi.waitFor(() => expect(state.manifestReads).toBeGreaterThan(0))
+    const reads = state.manifestReads
+    try {
+      expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', reason: 'unavailable' })
+      expect(state.statusReads).toBe(0)
+      expect(state.manifestReads).toBe(reads)
+    } finally { release(true); await mutation }
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ reason: 'incomplete-policy' })
+    expect(state.statusReads).toBe(1)
+  })
+  it('does not dispatch a stale snapshot when a mutation arrives during manifest read (AT-03-001/012)', async () => {
+    let release!: () => void
+    state.manifestReadGate = new Promise(resolve => { release = resolve })
+    const status = getFirewallKillSwitchStatus()
+    await vi.waitFor(() => expect(state.manifestReads).toBe(1))
+    const mutation = reserveKillSwitchIpv6Priority(new AbortController().signal)
+    release()
+    expect(await status).toMatchObject({ state: 'unknown', reason: 'unavailable' })
+    await mutation
+    expect(state.statusReads).toBe(0)
+  })
+  it.each(['enable', 'disable'] as const)('does not block %s behind an already dispatched passive snapshot (AT-03-001/007)', async kind => {
+    if (kind === 'disable') await prepareVerifiedStatusFixture()
+    let release!: () => void
+    state.statusReadGate = new Promise(resolve => { release = resolve })
+    const status = getFirewallKillSwitchStatus()
+    await vi.waitFor(() => expect(state.statusReads).toBe(1))
+    try {
+      expect((await (kind === 'enable' ? enableKillSwitch(options) : disableKillSwitch('held passive read'))).success).toBe(true)
+    } finally { release() }
+    expect(await status).toMatchObject({ state: 'unknown', reason: 'unavailable' })
+  })
+  it('invalidates a verified snapshot after a fully completed mutation and shares only the new epoch (AT-03-001/008)', async () => {
+    await prepareVerifiedStatusFixture()
+    state.wfpCalls = []
+    let release!: () => void
+    state.statusReadGate = new Promise(resolve => { release = resolve })
+    const before = getFirewallKillSwitchStatus()
+    await vi.waitFor(() => expect(state.statusReads).toBe(1))
+    let after!: Promise<Awaited<ReturnType<typeof getFirewallKillSwitchStatus>>>
+    try {
+      await reserveKillSwitchIpv6Priority(new AbortController().signal)
+      after = getFirewallKillSwitchStatus()
+      expect(after).not.toBe(before)
+      expect(getFirewallKillSwitchStatus()).toBe(after)
+      await vi.waitFor(() => expect(state.statusReads).toBe(2))
+    } finally { release() }
+    expect(await before).toMatchObject({ state: 'unknown', reason: 'unavailable' })
+    expect(await after).toMatchObject({ state: 'verified', reason: 'policy-verified' })
+    expect(state.wfpCalls.filter(call => call === 'verify')).toHaveLength(1)
+  })
+  it('refuses proof if a mutation completes during the final WFP await (AT-03-001/010)', async () => {
+    await prepareVerifiedStatusFixture()
+    let release!: () => void
+    state.wfpVerifyGate = new Promise(resolve => { release = resolve })
+    state.wfpCalls = []
+    const status = getFirewallKillSwitchStatus()
+    await vi.waitFor(() => expect(state.wfpCalls).toContain('verify'))
+    try { await reserveKillSwitchIpv6Priority(new AbortController().signal) }
+    finally { release() }
+    expect(await status).toMatchObject({ state: 'unknown', reason: 'unavailable' })
+  })
+  it('does not dispatch a stale WFP command after asynchronous proof preparation (AT-03-001/010)', async () => {
+    let release!: () => void
+    state.dispatchWfpPresence = true
+    state.wfpPresenceGate = new Promise(resolve => { release = resolve })
+    const status = getFirewallKillSwitchStatus()
+    await vi.waitFor(() => expect(state.wfpCalls).toContain('presence'))
+    try { await reserveKillSwitchIpv6Priority(new AbortController().signal) }
+    finally { release() }
+    expect(await status).toMatchObject({ state: 'unknown', reason: 'unavailable' })
+    expect(state.scripts.some(script => script === 'FIXED_WFP_READ_FIXTURE')).toBe(false)
+  })
+  it('invalidates a held verified read across a completed manual firewall reset (AT-03-001/007)', async () => {
+    await prepareVerifiedStatusFixture()
+    state.fallback.mockResolvedValue({ stdout: '', stderr: '' })
+    let release!: () => void
+    state.statusReadGate = new Promise(resolve => { release = resolve })
+    const status = getFirewallKillSwitchStatus()
+    await vi.waitFor(() => expect(state.statusReads).toBe(1))
+    try { expect((await nuclearFirewallReset()).success).toBe(true) }
+    finally { release() }
+    expect(await status).toMatchObject({ state: 'unknown', reason: 'unavailable' })
+    expect(state.fallback.mock.calls.map(call => call[0])).toEqual([
+      expect.stringContaining('netsh advfirewall export'), 'netsh advfirewall reset',
+      'netsh advfirewall set allprofiles firewallpolicy blockinbound,allowoutbound'
+    ])
+    expect(state.manifest).toBeNull()
+  })
+  it('allows a fresh read after a rejected mutation without leaking its pending count (AT-03-001/008)', async () => {
+    state.readError = new Error('Rejected mutation fixture')
+    await expect(ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe')).rejects.toThrow('Rejected mutation fixture')
+    state.readError = null
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'inactive' })
+    expect(state.statusReads).toBe(1)
   })
   it.each(['content', 'trust'] as const)('deduplicates passive %s rejection logs until evidence changes (AT-00-005/AT-03-012)', async kind => {
     await getFirewallKillSwitchStatus()
@@ -438,7 +562,7 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
   })
   it('distinguishes proven absence from a failed passive read (AT-03-001/003)', async () => {
     expect(await getFirewallKillSwitchStatus()).toEqual({ state: 'inactive', cleanupRequired: false, reason: 'no-owned-protection' })
-    state.helperExitCode = 1
+    state.statusReadError = new Error('Native read timed out')
     expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', cleanupRequired: true })
     expect(state.writes).toEqual([])
     expect(state.fallback).not.toHaveBeenCalled()
@@ -455,11 +579,12 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
       expect(state.fallback).not.toHaveBeenCalled()
       if (kind === 'helper-down' || kind === 'untrusted') expect(state.scripts).toEqual([])
     })
-  it('serializes a fresh status after mutations; presence alone is insufficient (AT-03-001/008)', async () => {
+  it('reports unknown immediately while a mutation is pending (AT-03-001/008)', async () => {
     const [applied, status] = await Promise.all([enableKillSwitch(options), getFirewallKillSwitchStatus()])
     expect(applied.success).toBe(true)
     expect(await isKillSwitchActive()).toBe(true)
-    expect(status).toMatchObject({ state: 'unknown', reason: 'incomplete-policy' })
+    expect(status).toMatchObject({ state: 'unknown', reason: 'unavailable' })
+    expect(state.statusReads).toBe(0)
     expect(state.manifest.phase).toBe('active')
   })
   it('verifies effective policy and WFP, then invalidates it on WFP failure or an unfinished journal (AT-03-001/008/010)', async () => {
@@ -501,25 +626,21 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(await isKillSwitchActive()).toBe(true)
     expect(state.wfpCalls).toEqual(['presence'])
   })
-  it('orders program allow mutations between fresh status reads (AT-03-001/004/008)', async () => {
+  it('never lets a held passive read block a program allow mutation (AT-03-001/004/008)', async () => {
     await enableKillSwitch(options)
     state.scripts = []
     let release!: () => void
     state.statusReadGate = new Promise<void>(resolve => { release = resolve })
     const before = getFirewallKillSwitchStatus()
-    await vi.waitFor(() => expect(state.scripts).toHaveLength(1))
-    const mutation = ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe', 'xray-engine')
-    const after = getFirewallKillSwitchStatus()
+    await vi.waitFor(() => expect(state.statusReads).toBe(1))
     try {
-      // A rule must not be changed underneath an admitted policy read.
-      await Promise.resolve(); await Promise.resolve()
+      expect(await ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe', 'xray-engine')).toMatchObject({ success: true })
       expect(state.scripts).toHaveLength(1)
+      expect(state.scripts[0]).toContain('VPNTE-killswitch-allow-xray-engine')
     } finally { release() }
-    await Promise.all([before, mutation, after])
-    expect(state.scripts).toHaveLength(3)
-    expect(state.scripts[0]).toContain('$foreign=@')
-    expect(state.scripts[1]).toContain('VPNTE-killswitch-allow-xray-engine')
-    expect(state.scripts[2]).toContain('$foreign=@')
+    expect(await before).toMatchObject({ state: 'unknown', reason: 'unavailable' })
+    expect(state.statusReads).toBe(1)
+    expect(state.wfpCalls).not.toContain('verify')
   })
   it.each(['manifest', 'orphan firewall'])('allows Xray through %s without a WFP presence round-trip (AT-03-004/010)', async mode => {
     if (mode === 'manifest') await enableKillSwitch(options)

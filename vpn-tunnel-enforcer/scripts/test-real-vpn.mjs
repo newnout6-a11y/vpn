@@ -13,7 +13,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { performance } from 'node:perf_hooks'
 import { assertStable, deadline, runScenario } from './real-vpn-scenario.mjs'
 import { connectInspector } from './real-vpn-inspector.mjs'
-import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership } from './real-vpn-runner.mjs'
+import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership, verifySelectorTlsFlow } from './real-vpn-runner.mjs'
 import { createProgressLog, safeAppEvent, safeSnapshot, safeElectronDiagnostic } from './real-vpn-log.mjs'
 import { runWithCleanup } from './wp1-test-cleanup.mjs'
 
@@ -86,15 +86,36 @@ async function run(config, seed) {
   }
   const monitor = setInterval(() => { void refresh().catch(() => {}) }, 1000)
   monitor.unref()
-  const proof = expectedPid => progress.run('oracle/windows', async () => {
-    const result = JSON.parse(await ps(`& ${quote(join(root, 'scripts/real-vpn-windows.ps1'))} -RuntimeDir ${quote(runtimeDir)} -ExpectedPid ${expectedPid} -TunAlias ${quote(tunAlias)}`))
+  const proof = (expectedPid, { requireEndpointPair = false } = {}) => progress.run('oracle/windows', async () => {
+    const until = performance.now() + 30000
+    const remaining = () => {
+      const ms = Math.floor(until - performance.now())
+      assert.ok(ms > 0, 'Independent Windows oracle deadline exceeded')
+      return ms
+    }
+    const result = JSON.parse(await ps(`& ${quote(join(root, 'scripts/real-vpn-windows.ps1'))} -RuntimeDir ${quote(runtimeDir)} -ExpectedPid ${expectedPid} -TunAlias ${quote(tunAlias)}${requireEndpointPair ? ' -RequireEndpointPair' : ''}`, remaining()))
     tunAlias = result.tunAlias
     progress.record('os', { runtimeProcessCount: result.runtimeProcessCount, tunProcessCount: result.tunProcessCount,
       matchingPid: result.matchingPid, adapterUp: result.adapterUp, interfaceAddressCount: result.interfaceAddressCount })
+    if (result.endpointOsRoutes?.applicable) {
+      assert.ok(result.endpointOsRoutes.allViaOwnedTun === true && Number.isInteger(result.endpointOsRoutes.endpointCount)
+        && result.endpointOsRoutes.endpointCount > 0 && result.endpointOsRoutes.tunRouteCount === result.endpointOsRoutes.endpointCount
+        && Number.isInteger(result.endpointOsRoutes.configuredSlots) && result.endpointOsRoutes.configuredSlots >= 1
+        && result.endpointOsRoutes.configuredSlots <= 2 && (!requireEndpointPair || result.endpointOsRoutes.configuredSlots === 2), 'Endpoint OS routes were not confirmed')
+      progress.record('endpoint-os-routes', result.endpointOsRoutes)
+      result.selectorTlsFlow = await progress.run('oracle/selector-ordinary-tls-flow', async () => {
+        let config
+        try { config = JSON.parse(await readFile(join(runtimeDir, 'sing-box.json'), 'utf8')) }
+        catch { throw new Error('Selector configuration unavailable; private details omitted') }
+        return verifySelectorTlsFlow(config, { timeoutMs: Math.min(5000, remaining()) })
+      })
+      assert.equal(result.selectorTlsFlow.applicable, true, 'Selector disappeared during ordinary TLS proof')
+      progress.record('selector-ordinary-tls-flow', result.selectorTlsFlow)
+    }
     if (expectedPid && !report.nativeTunOwnership) {
       report.nativeTunOwnership = await progress.run('oracle/native-tun-ownership', () => verifyNativeTunOwnership(async (args, envPatch) =>
         (await exec(process.execPath, [join(root, 'node_modules/vitest/vitest.mjs'), ...args], {
-          cwd: root, env: { ...process.env, ...envPatch }, windowsHide: true, timeout: 30_000, maxBuffer: 1024 * 1024
+          cwd: root, env: { ...process.env, ...envPatch }, windowsHide: true, timeout: remaining(), maxBuffer: 1024 * 1024
         })).stdout))
       progress.record('native-tun-ownership', report.nativeTunOwnership)
     }

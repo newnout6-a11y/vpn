@@ -164,6 +164,7 @@ function stopHarness(startupController: AbortController | null = null, startupCo
   const stop = compile<((options?: { preserveNetworkProtection?: boolean }) => Promise<any>) & { setRunning(running: boolean): void }>(`
 let startInProgress=false,stopRequested=false,stopInProgress=false,userInitiatedStop=false,activeStartAbortController=startupController;
 let activeStartCompletion=startupCompletion,activeStopCompletion=null,activeStopPreservesProtection=false;
+let outboundSwitchAbort=null,outboundSwitchCompletion=null,xraySwitchRuntime=null;
 let recoveryCancelGeneration=0,lastStartOptions=null,restartAttempt=0,transitionCancelRequested=false,nativeStartupGeneration=7;
 let currentStatus={running:true,mode:'directVpn'},clashApiInfo=null,directProxyPort=null,tunnelProbePort=null;
 const controller = {${body('tunController.ts', 'stop')}};
@@ -334,6 +335,7 @@ function startupExitHarness(pollCompletion: Promise<void> | null = null) {
   const run = compile<{ exit: (error: Error) => void; settled: () => Promise<unknown[]>; pollCompensating: () => void }>(`
 let currentStatus={running:false},mode='directVpn',restartAttempt=0,lastSingBoxExit=null;
 let userInitiatedStop=false,stopInProgress=false,resolved=false,startAbortedReason=null,startAbortedCategory=null;
+let outboundSwitchCompletion=null,outboundSwitchAbort=null;
 let startupCompensationStarted=false;
 let settleFirewallAdapter=null,pendingKillSwitch=null,adapterLockdownPromise=null;
 let startupPollCompletion=pollCompletion;const startupCleanupTasks=[];
@@ -349,6 +351,7 @@ function startupAdmissionHarness(stopCompletion: Promise<unknown> | null = null)
   return compile<{start: () => Promise<any>; state: () => {starting:boolean;completion:Promise<void>|null}; receipts: ReturnType<typeof vi.fn>}>(`
 let currentStatus={running:false},startInProgress=false,stopInProgress=false,transitionCancelRequested=false;
 let activeStartCompletion=null,activeStopCompletion=stopCompletion,activeStartAbortController=null,stopRequested=false,userInitiatedStop=false,nativeStartupGeneration=0;
+let outboundSwitchCompletion=null;
 const controller={${body('tunController.ts','start')}};
 return {start:()=>controller.start('127.0.0.1:1080'),state:()=>({starting:startInProgress,completion:activeStartCompletion}),receipts:notifyNativeStartup};
 `,os)
@@ -1030,14 +1033,18 @@ function xrayStartHarness() {
       return child
     })
   }
-  const text = body('xrayEngine.ts', 'startXray').replace(/^export /, '')
+  // Measure the production runtime transaction; the public cold-start wrapper
+  // and selected/candidate ownership are exercised by xraySlots.test.ts.
+  const text = body('xrayEngine.ts', 'startXrayRuntime').replace(/^export /, '')
   const start = compile<(outbound: Record<string, unknown>, options?: Record<string, unknown>) => Promise<any>>(`
-const XRAY_PID_FILE='fixture.pid',SOCKS_PROBE_TIMEOUT_MS=3500;
+const SOCKS_PROBE_TIMEOUT_MS=3500;
 const exitedChildren=new WeakSet();
 ${body('xrayEngine.ts', 'runtimeHasExited')}
-let activeXrayState={proc:null};
+${body('xrayEngine.ts', 'runtimeStem')}
+const xrayStates={legacy:{proc:null}};
+const stopXrayRuntime=(_runtime,reason)=>stopXray(reason);
 ${text}
-return startXray;
+return (outbound,options={})=>startXrayRuntime('legacy',outbound,options);
 `, os)
   return { start, ...os }
 }
@@ -1123,7 +1130,7 @@ describe('Xray startup phase measurements (AT-02-002 / AT-02-004)', () => {
     const h = xrayStartHarness()
     expect(await h.start({ server: 'fixture.invalid' })).toEqual({ socksPort: 10800, exePath: 'fixture.exe', resolvedIp: '192.0.2.1' })
     expect(h.logEvent).toHaveBeenCalledWith('info', 'xray', 'start timing', {
-      success: true, totalMs: 118,
+      runtime: 'legacy', success: true, totalMs: 118,
       phaseDurations: { 'stop-previous': 5, 'prepare-runtime': 24, 'cleanup-pid': 3, 'rotate-log': 2,
         'resolve-server': 17, 'pick-port': 4, 'write-config': 3, 'config-preflight': 11,
         'write-pid': 5, 'allow-firewall': 41, 'wait-local-socks': 2 }
@@ -1146,7 +1153,7 @@ describe('Xray startup phase measurements (AT-02-002 / AT-02-004)', () => {
     await expect(h.start({ server: 'fixture.invalid' })).rejects.toBe(error)
     expect(h.spawn).not.toHaveBeenCalled()
     expect(h.logEvent).toHaveBeenCalledWith('info', 'xray', 'start timing', {
-      success: false, totalMs: 5, phaseDurations: { 'stop-previous': 5, 'prepare-runtime': 0 }
+      runtime: 'legacy', success: false, totalMs: 5, phaseDurations: { 'stop-previous': 5, 'prepare-runtime': 0 }
     })
     expect(JSON.stringify(h.logEvent.mock.calls)).not.toContain(error.message)
   })
@@ -1306,6 +1313,7 @@ ${OWNED_RUNTIME_STATUS_QUERY_SCRIPT}`
     const exit = compile<() => void>(`
 let currentStatus={running:true},mode='directVpn',lastSingBoxExit=null,restartAttempt=0,lastStartOptions=null;
 let userInitiatedStop=false,stopInProgress=false,resolved=true,adapterLockdownEngaged=false,killSwitchEngaged=false;
+let outboundSwitchCompletion=null,outboundSwitchAbort=null;
 const RESTART_BACKOFF_MS=[1000];
 ${body('tunController.ts', 'onExit')}
 return onExit;`, deps)

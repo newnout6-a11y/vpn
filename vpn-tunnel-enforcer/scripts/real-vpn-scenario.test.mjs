@@ -72,6 +72,21 @@ test('exact user sequence calls production API names, saves settings and accepts
   assert.ok(f.results.find(r => r.name === 'switch-back-cancel').cancelToSettledMs >= 0)
 })
 
+test('endpoint pair and TLS oracles run after the unchanged action timer boundary', async t => {
+  let clock = 0
+  t.mock.method(performance, 'now', () => clock)
+  const f = fixture(), invoke = f.driver.invoke, proof = f.driver.proof, requirements = []
+  f.driver.invoke = async (...args) => { clock += 10; return invoke(...args) }
+  f.driver.proof = async (pid, context) => {
+    requirements.push(context.requireEndpointPair)
+    clock += 1000
+    return proof(pid)
+  }
+  await runScenario(f.driver, options, f.step)
+  assert.deepEqual(requirements, [false, false, false, false, true, true, true, false])
+  assert.ok(f.results.every(result => result.elapsedMs < 1000), 'Oracle time entered an action measurement')
+})
+
 test('exhausted scenario budget refuses new work while leaving cleanup usable (AT-00-003)', async t => {
   let clock = 0
   t.mock.method(performance, 'now', () => clock)

@@ -4,7 +4,120 @@ import { spawnSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
-import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership } from './real-vpn-runner.mjs'
+import { EventEmitter } from 'node:events'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs'
+import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership, verifySelectorTlsFlow } from './real-vpn-runner.mjs'
+
+const selectorConfig = () => ({ outbounds: [{ tag: 'proxy-out', type: 'selector', outbounds: ['vpnte-upstream-a', 'vpnte-upstream-b'] }],
+  experimental: { clash_api: { external_controller: '127.0.0.1:25551', secret: 'a'.repeat(32) } } })
+function flowFixture(patch = {}) {
+  const socket = Object.assign(new EventEmitter(), { localPort: 34567, authorized: true, closed: false,
+    destroy() { this.closed = true; this.emit('close') } })
+  const calls = []
+  return { socket, calls, dependencies: {
+    dial(options, ready) { calls.push(options); queueMicrotask(ready); return socket },
+    async readJson(_api, path) {
+      if (patch.reject) throw new Error('FAKE-PRIVATE-PAYLOAD')
+      return path === '/proxies/proxy-out'
+        ? { type: 'Selector', now: 'vpnte-upstream-b', all: ['vpnte-upstream-a', 'vpnte-upstream-b'] }
+        : { connections: [{ metadata: { sourcePort: '34567', destinationIP: '1.1.1.1', destinationPort: '443' },
+          chains: patch.chains ?? ['vpnte-upstream-b', 'proxy-out'] }] }
+    }, pause: async () => {}
+  } }
+}
+test('ordinary TLS oracle verifies the exact live selector chain and closes its socket', async () => {
+  const f = flowFixture()
+  assert.deepEqual(await verifySelectorTlsFlow(selectorConfig(), f.dependencies),
+    { applicable: true, tlsVerified: true, proxyOutChainVerified: true })
+  assert.deepEqual(f.calls, [{ host: '1.1.1.1', port: 443, servername: 'cloudflare-dns.com',
+    rejectUnauthorized: true, minVersion: 'TLSv1.2', signal: f.calls[0].signal }])
+  assert.equal(f.socket.closed, true)
+})
+test('ordinary TLS oracle refuses direct, wrong-slot and unavailable evidence without private output', async () => {
+  for (const patch of [{ chains: ['direct-out'] }, { chains: ['vpnte-upstream-a', 'proxy-out'] }, { reject: true }]) {
+    const f = flowFixture(patch)
+    await assert.rejects(verifySelectorTlsFlow(selectorConfig(), f.dependencies), error =>
+      error.message === 'Selector ordinary TLS flow was not confirmed; private details omitted')
+  }
+  const f = flowFixture(); f.socket.authorized = false
+  await assert.rejects(verifySelectorTlsFlow(selectorConfig(), f.dependencies))
+  assert.equal(f.socket.closed, true)
+})
+test('legacy configurations do not run selector TLS traffic or expose private config', async () => {
+  const f = flowFixture()
+  assert.deepEqual(await verifySelectorTlsFlow({ outbounds: [{ type: 'direct', password: 'FAKE-PRIVATE-PAYLOAD' }] }, f.dependencies), { applicable: false })
+  assert.deepEqual(f.calls, [])
+  for (const controller of [{ external_controller: 'example.test:443', secret: 'FAKE-PRIVATE-PAYLOAD' },
+    { external_controller: '127.0.0.1:65536', secret: 'a'.repeat(32) }]) {
+    const config = selectorConfig(); config.experimental.clash_api = controller
+    await assert.rejects(verifySelectorTlsFlow(config, f.dependencies), error => !error.message.includes('FAKE-PRIVATE-PAYLOAD'))
+  }
+})
+test('ordinary TLS oracle has a bounded deadline and consumes a late read', async () => {
+  const f = flowFixture()
+  let finish
+  f.dependencies.readJson = () => new Promise(resolve => { finish = resolve })
+  await assert.rejects(verifySelectorTlsFlow(selectorConfig(), { ...f.dependencies, timeoutMs: 5 }), /private details omitted/)
+  finish({ type: 'Selector', now: 'vpnte-upstream-a', all: ['vpnte-upstream-a', 'vpnte-upstream-b'] })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(f.calls, [], 'Late controller read must not open a socket')
+})
+
+test('endpoint OS-route oracle checks both private slot configs using synthetic Windows reads', { skip: process.platform !== 'win32', timeout: 20000 }, () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..'), temporary = resolve(root, '.tmp')
+  mkdirSync(temporary, { recursive: true })
+  const dir = mkdtempSync(resolve(temporary, 'real-vpn-route-fixture-'))
+  try {
+    const guid = '01234567-89ab-cdef-0123-456789abcdef'
+    const config = { ...selectorConfig(), inbounds: [{ type: 'tun', interface_name: 'Ethernet 5' }] }
+    for (const [i, slot] of ['a', 'b'].entries()) {
+      config.outbounds.push({ tag: `vpnte-upstream-${slot}`, type: 'socks', server: '127.0.0.1', server_port: 25551 + i,
+        username: `FAKE-PRIVATE-user-${slot}`, password: 'FAKE-PRIVATE-password' })
+      writeFileSync(resolve(dir, `xray-${slot}.json`), JSON.stringify({ inbounds: [{ protocol: 'socks', listen: '127.0.0.1', port: 25551 + i,
+        settings: { auth: 'password', accounts: [{ user: `FAKE-PRIVATE-user-${slot}`, pass: 'FAKE-PRIVATE-password' }] } }],
+      outbounds: [{ protocol: 'vless', settings: { vnext: [{ address: `192.0.2.${i + 1}`, port: 443 }] } }] }))
+    }
+    writeFileSync(resolve(dir, 'sing-box.json'), JSON.stringify(config))
+    const quote = value => "'" + value.replaceAll("'", "''") + "'"
+    const fixture = resolve(dir, 'fixture.ps1')
+    writeFileSync(fixture, `param([string]$RuntimeDir,[string]$Mode)
+function Get-CimInstance { param($ClassName,$Filter) [pscustomobject]@{Name='vpnte-sing-box.exe';ExecutablePath=(Join-Path $RuntimeDir 'vpnte-sing-box.exe');ProcessId=123;CommandLine=(Join-Path $RuntimeDir 'sing-box.json')} }
+function Get-NetAdapter { param([switch]$IncludeHidden) [pscustomobject]@{Name='Ethernet 5';Status='Up';ifIndex=7;InterfaceGuid='${guid}';DriverDescription='Wintun';PnPDeviceID='SWD\\Wintun\\fixture'} }
+function Get-NetIPAddress { param($InterfaceIndex) [pscustomobject]@{IPAddress='192.168.250.253';PrefixLength=30} }
+function Get-Content { param($LiteralPath,[switch]$Raw)
+ if($LiteralPath -like '*tun-owner.json'){ '{"schemaVersion":1,"owner":"VPNTE","alias":"Ethernet 5","interfaceGuid":"${guid}"}' }
+ else { Microsoft.PowerShell.Management\\Get-Content -LiteralPath $LiteralPath -Raw }
+}
+function Find-NetRoute { [CmdletBinding()] param($RemoteIPAddress)
+ if($Mode -eq 'failed'){throw 'FAKE-PRIVATE-PAYLOAD'}
+ [pscustomobject]@{InterfaceIndex=$(if($Mode -eq 'physical' -and $RemoteIPAddress -eq '192.0.2.2'){8}else{7})}
+}
+& ${quote(resolve(root, 'scripts/real-vpn-windows.ps1'))} -RuntimeDir $RuntimeDir -ExpectedPid 123 -RequireEndpointPair
+`)
+    const originalSlot = readFileSync(resolve(dir, 'xray-b.json'), 'utf8')
+    for (const mode of ['ok', 'physical', 'failed', 'bad-auth', 'hostname', 'missing-slot']) {
+      writeFileSync(resolve(dir, 'xray-b.json'), originalSlot)
+      if (mode === 'missing-slot') rmSync(resolve(dir, 'xray-b.json'))
+      if (mode === 'bad-auth' || mode === 'hostname') {
+        const broken = JSON.parse(originalSlot)
+        if (mode === 'bad-auth') broken.inbounds[0].settings.accounts[0].pass = 'FAKE-PRIVATE-wrong'
+        else broken.outbounds[0].settings.vnext[0].address = 'FAKE-PRIVATE.example'
+        writeFileSync(resolve(dir, 'xray-b.json'), JSON.stringify(broken))
+      }
+      const child = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', fixture, '-RuntimeDir', dir, '-Mode', mode],
+        { encoding: 'utf8', windowsHide: true, timeout: 8000 })
+      assert.doesNotMatch(child.stdout + child.stderr, /FAKE-PRIVATE|192\.0\.2\./)
+      if (mode === 'ok') {
+        assert.equal(child.status, 0)
+        assert.deepEqual(JSON.parse(child.stdout).endpointOsRoutes,
+          { applicable: true, configuredSlots: 2, endpointCount: 2, tunRouteCount: 2, allViaOwnedTun: true })
+      } else assert.notEqual(child.status, 0)
+    }
+  } finally {
+    assert.equal(dirname(resolve(dir)), temporary)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 const hosted = { GITHUB_ACTIONS: 'true', RUNNER_OS: 'Windows', RUNNER_ENVIRONMENT: 'github-hosted',
   GITHUB_EVENT_NAME: 'workflow_dispatch', RUNNER_TEMP: 'C:\\runner-temp', APPDATA: 'C:\\runner-profile' }

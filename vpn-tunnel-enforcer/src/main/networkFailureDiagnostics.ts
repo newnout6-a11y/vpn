@@ -63,7 +63,7 @@ export function summarizeCoreNetwork(text: string, since: number) {
   return counts
 }
 
-async function coreSummary(dir: string, name: 'xray.log' | 'sing-box.log', since: number) {
+async function coreSummary(dir: string, name: 'xray.log' | 'xray-a.log' | 'xray-b.log' | 'sing-box.log', since: number) {
   try {
     const tail = await readCoreLogTail(join(dir, name))
     return { readable: true, truncated: tail.truncated, ...summarizeCoreNetwork(tail.text, since) }
@@ -79,7 +79,8 @@ export function failureAssessment(physicalTcp: { ok?: boolean; checked?: boolean
 }
 // Only the configured VPN endpoint is probed over the physical path. The
 // foreign HTTPS reflector always uses Xray's local SOCKS, bypassing TUN/DNS.
-export function probeSocksPath(localPort: number, destination: { host: string; port: number }, verifyHttps = false): Promise<{ ok: boolean; stage: string; code?: string; elapsedMs: number }> {
+export function probeSocksPath(localPort: number, destination: { host: string; port: number }, verifyHttps = false,
+  socksAuth?: { username: string; password: string }): Promise<{ ok: boolean; stage: string; code?: string; elapsedMs: number }> {
   return new Promise(resolve => {
     const began = Date.now()
     let socket: Socket | undefined
@@ -96,7 +97,8 @@ export function probeSocksPath(localPort: number, destination: { host: string; p
       resolve({ ok, stage, code, elapsedMs: Date.now() - began })
     }
     const timer = setTimeout(() => finish(false, 'ETIMEDOUT'), PATH_PROBE_TIMEOUT_MS)
-    SocksClient.createConnection({ proxy: { host: '127.0.0.1', port: localPort, type: 5 }, command: 'connect', destination, timeout: PATH_PROBE_TIMEOUT_MS })
+    SocksClient.createConnection({ proxy: { host: '127.0.0.1', port: localPort, type: 5,
+      ...(socksAuth ? { userId: socksAuth.username, password: socksAuth.password } : {}) }, command: 'connect', destination, timeout: PATH_PROBE_TIMEOUT_MS })
       .then(result => {
         socket = result.socket
         if (done) { socket.destroy(); return }
@@ -127,15 +129,18 @@ export function probeSocksPath(localPort: number, destination: { host: string; p
 
 export async function collectTunnelFailureDiagnostics(options: {
   runtimeDir: string; startedAt: number; xrayStartedAt?: number | null
+  xraySlot?: 'a' | 'b' | null
+  xraySocksAuth?: { username: string; password: string }
   xrayPort?: number | null; directPort?: number | null
   dialTarget?: { host: string; port: number } | null
 }) {
   const [xray, tun, physicalTcp, engineHttps] = await Promise.all([
-    coreSummary(options.runtimeDir, 'xray.log', options.xrayStartedAt ?? options.startedAt),
+    coreSummary(options.runtimeDir, options.xraySlot === 'a' ? 'xray-a.log' : options.xraySlot === 'b' ? 'xray-b.log' : 'xray.log',
+      options.xrayStartedAt ?? options.startedAt),
     coreSummary(options.runtimeDir, 'sing-box.log', options.startedAt),
     options.directPort && options.dialTarget && isIP(options.dialTarget.host)
       ? probeSocksPath(options.directPort, options.dialTarget) : Promise.resolve({ checked: false }),
-    options.xrayPort ? probeSocksPath(options.xrayPort, { host: '1.1.1.1', port: 443 }, true) : Promise.resolve({ checked: false })
+    options.xrayPort ? probeSocksPath(options.xrayPort, { host: '1.1.1.1', port: 443 }, true, options.xraySocksAuth) : Promise.resolve({ checked: false })
   ])
   return { schemaVersion: 1, sessionStartedAt: options.startedAt, assessment: failureAssessment(physicalTcp, engineHttps), xray, tun, physicalTcp, engineHttps }
 }

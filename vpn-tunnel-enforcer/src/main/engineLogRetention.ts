@@ -6,6 +6,7 @@ import { identityDiff } from './fileIdentityDiff'
 
 export const ENGINE_LOG_BYTES = 10 * 1024 * 1024
 export const ENGINE_LOG_CHECK_MS = 5000
+export const ENGINE_LOG_STEMS = ['sing-box', 'xray', 'xray-a', 'xray-b'] as const
 
 async function checkedFile(path: string, create = false): Promise<FileHandle | null> {
   let before
@@ -76,7 +77,7 @@ export function watchEngineLogs(directory: string, authorize: () => Promise<void
     if (stopped) return Promise.resolve()
     if (pending) return pending
     pending = (async () => {
-      for (const name of ['sing-box', 'xray']) {
+      for (const name of ENGINE_LOG_STEMS) {
         const paths = [join(directory, `${name}.log`), join(directory, `${name}.prev.log`)]
         const infos = await Promise.all(paths.map(path => lstat(path).catch(error => {
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null

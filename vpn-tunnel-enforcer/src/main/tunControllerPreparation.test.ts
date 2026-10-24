@@ -1,6 +1,7 @@
 // AT-02-002/004/005, AT-03-006: execute production preparation with fake OS boundaries.
 // These L2 races verify ordering; they do not prove native Windows latency or egress.
 import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -15,6 +16,11 @@ if (begin < 0 || end < 0) throw new Error('Production preparation boundary not f
 const preparation = source.slice(begin, end)
 const ast = ts.createSourceFile('tunController.ts', source, ts.ScriptTarget.Latest, true)
 const classifier = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'classifyTunError')!
+const slotHelpers = ['allocateXraySwitchSlots', 'outboundConfigurationKey'].map(name => {
+  const helper = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
+  if (!helper) throw new Error(`Production slot helper missing: ${name}`)
+  return helper.getText(ast)
+}).join('\n')
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -27,7 +33,12 @@ function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', a
   const os = {
     dns, mode, engine, connectionFailure, classifyIpcError, RecoveryWorkerError,
     adapterLockdownPromise,
-    startXray: vi.fn(async () => ({ socksPort: 1234, resolvedIp: '198.51.100.1', exePath: 'fixture-xray.exe' })),
+    pickFreeLocalPort: vi.fn(async (_exclude?: number[]) => 1234).mockResolvedValueOnce(1234).mockResolvedValueOnce(1235),
+    randomSecret: vi.fn().mockReturnValueOnce('a'.repeat(32)).mockReturnValueOnce('b'.repeat(32))
+      .mockReturnValueOnce('c'.repeat(32)).mockReturnValueOnce('d'.repeat(32)),
+    createHash, settingsStore: { get: () => ({ smartRuSplit: true }) },
+    dnsProfiles: { getActiveDnsProfile: () => null }, generateDomainRouteRules: () => [],
+    startXray: vi.fn(async (..._args: any[]) => ({ socksPort: 1234, resolvedIp: '198.51.100.1', exePath: 'fixture-xray.exe' })),
     stopXray: vi.fn(async () => {}),
     rollbackEarlyAdapterLockdown: vi.fn(async () => {}),
     prepareRuntime: vi.fn(async (...args: any[]) => {
@@ -50,8 +61,9 @@ function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', a
   }
   const compiled = ts.transpileModule(`
     ${classifier.getText(ast)}
+    ${slotHelpers}
     const dnsSourcesPromise=dns, smartRuSplit=true, smartRuMapsDirect=false;
-    let proxyOwnerProcessNames=[], proxyOwnerProgramPaths=[], stopRequested=false;
+    let proxyOwnerProcessNames=[], proxyOwnerProgramPaths=[], stopRequested=false, preparedXraySwitch=null;
     const startAbortController=new AbortController();
     const proxyAddr='127.0.0.1:10808', proxyType='socks5', wantKillSwitch=true;
     const startOptions={}, publicWifiCompatibility=true, splitTunnelDirectNames=[], splitTunnelDirectPaths=[];
@@ -61,10 +73,10 @@ function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', a
       return runtimePromise ? await runtimePromise : null;
       } finally {await Promise.allSettled(startupCleanupTasks)}
     }
-    return {run,cancel:()=>{stopRequested=true;startAbortController.abort()}};
+    return {run,cancel:()=>{stopRequested=true;startAbortController.abort()},prepared:()=>preparedXraySwitch};
   `, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
   const control = new Function(...Object.keys(os), compiled)(...Object.values(os)) as {
-    run: () => Promise<any>; cancel: () => void
+    run: () => Promise<any>; cancel: () => void; prepared: () => { slots: Record<string, { port: number; username: string; password: string }>; configurationKey: string } | null
   }
   return { ...os, ...control }
 }
@@ -190,6 +202,28 @@ describe('parallel runtime staging safety (AT-01-009 / AT-02-002/005)', () => {
 })
 
 describe('Direct VPN preparation overlap', () => {
+  it('forwards the allocated authenticated cold slot to Xray and sing-box preparation (AT-02-002)', async () => {
+    const h = harness(Promise.resolve([]))
+    await h.run()
+    const slots = {
+      a: { port: 1234, username: 'a'.repeat(32), password: 'b'.repeat(32) },
+      b: { port: 1235, username: 'c'.repeat(32), password: 'd'.repeat(32) }
+    }
+    expect(h.pickFreeLocalPort).toHaveBeenNthCalledWith(1)
+    expect(h.pickFreeLocalPort).toHaveBeenNthCalledWith(2, [1234])
+    expect(h.randomSecret).toHaveBeenCalledTimes(4)
+    expect(h.startXray).toHaveBeenCalledExactlyOnceWith(expect.any(Object), expect.objectContaining({
+      slot: 'a', portOverride: slots.a.port,
+      socksAuth: { username: slots.a.username, password: slots.a.password }, signal: expect.any(AbortSignal)
+    }))
+    const preparationOptions = h.prepareRuntime.mock.calls[0][3]
+    expect(preparationOptions.xraySwitchSlots).toEqual(slots)
+    expect(preparationOptions.signal).toBe(h.startXray.mock.calls[0][1].signal)
+    expect(await preparationOptions.xrayStartup).toMatchObject({ socksPort: slots.a.port })
+    expect(h.prepared()?.slots).toBe(preparationOptions.xraySwitchSlots)
+    expect(h.prepared()?.configurationKey).toMatch(/^[a-f0-9]{64}$/)
+  })
+
   it('overlaps cold DNS and file staging instead of adding their seconds (AT-02-002)', async () => {
     vi.useFakeTimers()
     const dns = new Promise<unknown[]>(done => setTimeout(() => done([]), 2600))

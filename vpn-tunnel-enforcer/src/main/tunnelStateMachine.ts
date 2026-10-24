@@ -19,6 +19,8 @@ export class TunnelStateMachine {
   private rotationMode: 'tun' | 'soft' | null = null
   private rotationEvidence: TunnelEvidence | null = null
   private retainedRotationOperation: string | null = null
+  private upstreamGeneration = 0
+  private upstreamSwitch: { generation: number; evidence: TunnelEvidence } | null = null
 
   constructor(private readonly readEvidence: () => TunnelEvidence, private readonly onChange: (snapshot: TunnelSnapshot) => void = () => {}) {}
 
@@ -84,6 +86,7 @@ export class TunnelStateMachine {
     if (operation.status === 'running') {
       if (this.current.operation?.status === 'running' && operation.kind !== 'disconnect') return invalid()
       if (operation.kind === 'rotation' && !this.canRotate()) return invalid()
+      this.upstreamSwitch = null
       this.rotationMode = operation.kind === 'rotation' ? this.current.mode : null
       this.rotationEvidence = operation.kind === 'rotation' ? this.evidence() : null
       if (this.rotationEvidence) this.rotationEvidence = { ...this.rotationEvidence }
@@ -114,6 +117,7 @@ export class TunnelStateMachine {
   }
 
   fault(state: Extract<TunnelState, 'error' | 'blocked' | 'unknown'>) {
+    this.upstreamSwitch = null
     this.retainedSoftOperation = null
     this.faultDuringOperation = true
     this.reconnectEligible = false
@@ -138,8 +142,12 @@ export class TunnelStateMachine {
 
   runtimeChanged(status: string) {
     const e = this.evidence(), active = this.current.operation?.status === 'running'
+    if (status === 'stopping' || status === 'stopped') this.upstreamSwitch = null
     if (status === 'error' || status === 'killswitch-active') return this.fault(status === 'error' ? 'error' : 'blocked')
     if ((status === 'adapting' || status.startsWith('restarting:')) && !active) {
+      // A native transition owns recovery now. Its reconnecting state must
+      // survive the older retained-upstream operation's late receipt.
+      this.upstreamSwitch = null
       if (this.current.transition !== 'reconnecting') this.expectedNativeGeneration = null
       this.reconnectEligible ||= this.current.state === 'connected'
       return this.commit({ transition: 'reconnecting', proxyStatus: e?.running ? this.current.proxyStatus : 'stopped' })
@@ -159,6 +167,7 @@ export class TunnelStateMachine {
 
   nativeStartBegan(generation: number) {
     if (!Number.isSafeInteger(generation) || generation <= this.nativeGeneration) return invalid()
+    this.upstreamSwitch = null
     this.nativeGeneration = generation
     this.expectedNativeGeneration = this.current.operation?.status !== 'running' && this.current.transition === 'reconnecting' ? generation : null
     return { success: true } as const
@@ -171,6 +180,30 @@ export class TunnelStateMachine {
     this.reconnectEligible = false
     return this.commit({ state: confirmed ? 'connected' : result.success ? 'unknown' : 'error',
       transition: null, mode: confirmed ? 'tun' : null, proxyStatus: confirmed ? 'running' : 'stopped' })
+  }
+
+  /** An upstream swap changes no native generation: the same proved TUN must survive it. */
+  upstreamSwitchBegan(generation: number) {
+    const evidence = this.evidence()
+    if (!Number.isSafeInteger(generation) || generation <= this.upstreamGeneration || this.upstreamSwitch
+        || this.current.operation?.status === 'running' || this.current.transition !== null
+        || this.current.state !== 'connected' || this.current.mode !== 'tun' || !evidence?.running
+        || !Number.isSafeInteger(evidence.pid) || evidence.pid! <= 0) return invalid()
+    this.upstreamGeneration = generation
+    this.upstreamSwitch = { generation, evidence: { ...evidence } }
+    return this.commit({ transition: 'reconnecting', cleanupRequired: true })
+  }
+
+  upstreamSwitchFinished(result: { generation: number; verified: boolean }) {
+    const pending = this.upstreamSwitch, evidence = this.evidence()
+    if (!pending || pending.generation !== result.generation || this.current.operation?.status === 'running'
+        || this.current.transition !== 'reconnecting') return invalid()
+    this.upstreamSwitch = null
+    const retained = !!evidence?.running && evidence.pid === pending.evidence.pid
+      && evidence.startedAt === pending.evidence.startedAt && !evidence.softApplied
+    const confirmed = result.verified && retained && !this.faultDuringOperation
+    return this.commit({ state: confirmed ? 'connected' : 'unknown', transition: null,
+      mode: confirmed ? 'tun' : null, proxyStatus: confirmed ? 'running' : 'proxy-down', cleanupRequired: true })
   }
 
   /** A process exit alone cannot certify rollback; require the current native cleanup receipt. */

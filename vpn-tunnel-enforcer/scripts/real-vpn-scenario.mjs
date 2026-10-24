@@ -35,12 +35,14 @@ export async function runScenario(driver, { original, target, cancelAfterMs = 50
     if (!['cancelTun', 'serversCancelSwitch'].includes(method)) checkBudget()
     return deadline(driver.invoke(method, ...args), timeoutMs, method)
   }
-  const verify = async (connected, profileId) => {
+  const verify = async (connected, profileId, action) => {
     const status = await invoke('getTunStatus')
     assertStable(status, connected)
     assert.equal((await invoke('serversGetActive')).activeId, profileId, 'Selected profile was not restored/committed')
     checkBudget()
-    const os = await driver.proof(connected ? status.lifecycle.pid : 0)
+    const os = await driver.proof(connected ? status.lifecycle.pid : 0, {
+      requireEndpointPair: ['switch', 'switch-back-cancel', 'switch-back'].includes(action)
+    })
     if (!connected) assert.equal(os.runtimeProcessCount, 0, 'Runtime remains after stop')
     assert.equal(os.tunProcessCount, connected ? 1 : 0)
     assert.equal(os.adapterUp, connected, 'OS adapter disagrees with canonical state')
@@ -63,7 +65,7 @@ export async function runScenario(driver, { original, target, cancelAfterMs = 50
     const result = await action()
     const elapsedMs = Math.round(performance.now() - start)
     checkBudget()
-    const evidence = await verify(connected, profileId)
+    const evidence = await verify(connected, profileId, name)
     return { startedAt, elapsedMs, ...result, ...evidence }
   })
   const success = async action => {
