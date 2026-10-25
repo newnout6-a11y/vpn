@@ -95,6 +95,28 @@ describe('AT-04-002 / AT-04-006 / AT-02-002: preserved Xray connection pipeline'
     delete simple.outbound[NATIVE_XRAY_FIELD]
     expect(parseVpnProfiles(JSON.stringify([doc, exportOutboundToUri(simple)])).map(p => p.name)).toEqual(['Norway', 'Simple'])
   })
+  it('AT-02-008 / AT-04-006 / AT-06-001: keeps loopback routes ahead of shared fail-closed guards after repeated export/import', () => {
+    let { profile, config } = compile()
+    for (let round = 0; round < 3; round++) {
+      const loops = config.outbounds.filter((outbound: any) => outbound.protocol === 'loopback')
+      expect(loops).toHaveLength(2)
+      for (const loop of loops) {
+        const matching = config.routing.rules.filter((rule: any) => rule.inboundTag?.includes(loop.settings.inboundTag))
+        // The provider's unconditional balancer must win before either an
+        // imported shared guard or the newly appended compiler guard.
+        expect(matching[0].balancerTag, `round ${round}: native fallback must not be shadowed by blackhole`).toBeTypeOf('string')
+        expect(matching[0].outboundTag).toBeUndefined()
+        const guard = matching.at(-1)
+        expect(guard).toEqual({ type: 'field', inboundTag: expect.arrayContaining(loops.map((outbound: any) => outbound.settings.inboundTag)), outboundTag: 'block' })
+      }
+      const shared = exportOutboundForSharing(profile)!
+      expect(shared.format).toBe('json')
+      const restored = parseVpnProfiles(shared.content)
+      expect(restored).toHaveLength(1)
+      profile = restored[0]
+      config = buildXrayConfig(toXrayOutbound(profile.outbound), 50124, { nativeProfile: getNativeXrayProfile(profile.outbound) })
+    }
+  })
   it('exports independent native JSON and ordinary sing-box multiplex without degradation', () => {
     const [profile] = parseVpnProfiles(JSON.stringify(vless('single')))
     const restored = parseVpnProfiles(exportOutboundForSharing(profile)!.content)

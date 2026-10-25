@@ -173,7 +173,9 @@ export function compileNativeXrayProfile(profile: NativeXrayProfile, primary: Js
     return outbound
   })
   outbounds.sort((a, b) => Number(b.tag === 'proxy') - Number(a.tag === 'proxy'))
-  const rules = loopRules.map(rule => {
+  // Reachability is discovered depth-first; routing priority remains the
+  // provider's source order, including shared guards restored by JSON import.
+  const rules = (profile.routing?.rules || []).filter((rule: Json) => loopRules.includes(rule)).map((rule: Json) => {
     const copy = JSON.parse(JSON.stringify(rule))
     copy.inboundTag = copy.inboundTag.filter((tag: string) => [...visited].some(t => byTag.get(t)?.settings?.inboundTag === tag)).map(mappedInbound)
     if (copy.outboundTag) copy.outboundTag = mappedTag(copy.outboundTag)
