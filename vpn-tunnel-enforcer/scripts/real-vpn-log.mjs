@@ -38,7 +38,8 @@ export function safeActionResult(value) {
   for (const key of ['success', 'cancelled']) if (typeof value?.[key] === 'boolean') result[key] = value[key]
   const category = value?.category ?? value?.error?.category
   if (categories.includes(category)) result.category = category
-  if (typeof value?.oracleCode === 'string' && /^VPNTE_ORACLE_(?:RUNTIME_INVENTORY|CONFIG_READ|ADAPTER_INVENTORY|ADDRESS_INVENTORY|SELECTOR_IDENTITY|TUN_IDENTITY|SLOT_IDENTITY|ENDPOINT_ROUTE)$/.test(value.oracleCode)) result.oracleCode = value.oracleCode
+  if (typeof value?.oracleCode === 'string' && /^VPNTE_ORACLE_(?:RUNTIME_INVENTORY|CONFIG_READ|ADAPTER_INVENTORY|ADDRESS_INVENTORY|PID_IDENTITY|SELECTOR_READ|SELECTOR_IDENTITY|TUN_IDENTITY|SLOT_IDENTITY|ENDPOINT_ROUTE|REPORT_SERIALIZE)$/.test(value.oracleCode)) result.oracleCode = value.oracleCode
+  if (result.oracleCode && typeof value?.oracleNativeCode === 'string' && /^VPNTE_NATIVE_(?:ADDRESS_NOT_FOUND|ACCESS_DENIED|READ_FAILED)$/.test(value.oracleNativeCode)) result.oracleNativeCode = value.oracleNativeCode
   return result
 }
 
@@ -147,7 +148,7 @@ export function safeAppEvent(event) {
         'ECONNABORTED', 'EACCES', 'EPERM', 'ENETUNREACH', 'EHOSTUNREACH', 'ERR_TLS_HANDSHAKE_TIMEOUT',
         'ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE', 'ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION', 'ERR_SSL_UNEXPECTED_EOF_WHILE_READING']
     })) if (allowed.includes(event.details?.[key])) result[key] = event.details[key]
-    if ([0, 1].includes(event.details?.providerIndex)) result.providerIndex = event.details.providerIndex
+    if ([0, 1, 2, 3].includes(event.details?.providerIndex)) result.providerIndex = event.details.providerIndex
   }
   if (event.scope === 'ps-helper' && event.message === 'warm-up timing') {
     if (['NetSecurity', 'Network', 'NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'].includes(event.details?.module)) result.module = event.details.module

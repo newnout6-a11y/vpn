@@ -17,23 +17,45 @@ export function runtimeFailureKinds(text) {
     ['network-unreachable', /no route to host|network is unreachable/i],
     ['deadline', /deadline exceeded|i\/o timeout|operation timed out/i],
     ['access-denied', /permission denied|access (?:is )?denied/i],
-    ['unexpected-eof', /unexpected eof|read: eof/i]
+    ['unexpected-eof', /unexpected eof|read: eof/i],
+    ['outbound-transfer-failed', /failed to (?:process outbound traffic|transfer request)/i],
+    ['response-header-failed', /failed to read response header/i],
+    ['closed-pipe', /io: read\/write on closed pipe/i]
   ]) if (pattern.test(String(text))) kinds.push(kind)
   return kinds
 }
 
 // Bounded, fixed-file inspection on the disposable hosted runner only. Raw
 // runtime logs/configuration are never returned or uploaded.
-export async function inspectRuntimeFailures(directory) {
-  return Promise.all(['xray-a.log', 'xray-b.log', 'xray.log'].map(async file => {
+const runtimeLogFiles = ['xray-a.log', 'xray-b.log', 'xray.log']
+export async function snapshotRuntimeLogs(directory) {
+  return Promise.all(runtimeLogFiles.map(async file => {
     let handle
     try {
       handle = await open(join(directory, file), 'r')
       const info = await handle.stat()
       if (!info.isFile()) throw new Error('Not a regular log')
-      const buffer = Buffer.alloc(Math.min(65536, info.size))
+      return { file, state: 'present', size: info.size, dev: info.dev, ino: info.ino, birthtimeMs: info.birthtimeMs }
+    } catch (error) { return { file, state: error?.code === 'ENOENT' ? 'missing' : 'unavailable' } }
+    finally { await handle?.close().catch(() => {}) }
+  }))
+}
+
+export async function inspectRuntimeFailures(directory, baseline) {
+  return Promise.all(runtimeLogFiles.map(async file => {
+    let handle
+    try {
+      handle = await open(join(directory, file), 'r')
+      const info = await handle.stat()
+      if (!info.isFile()) throw new Error('Not a regular log')
+      const before = baseline?.find(entry => entry.file === file)
+      if (!before || before.state === 'unavailable') throw new Error('No reliable step boundary')
+      if (before.state === 'present' && (info.size < before.size || info.dev !== before.dev ||
+        info.ino !== before.ino || info.birthtimeMs !== before.birthtimeMs)) throw new Error('Log rotated during step')
+      const offset = before.state === 'present' ? before.size : 0
+      const buffer = Buffer.alloc(Math.min(65536, info.size - offset))
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, Math.max(0, info.size - buffer.length))
-      return { file, checked: true, kinds: runtimeFailureKinds(buffer.subarray(0, bytesRead).toString('utf8')) }
+      return { file, checked: true, bytesRead, kinds: runtimeFailureKinds(buffer.subarray(0, bytesRead).toString('utf8')) }
     } catch { return { file, checked: false, kinds: [] } }
     finally { await handle?.close().catch(() => {}) }
   }))
@@ -196,8 +218,11 @@ export async function seedScenario(invoke, seed) {
 // Fixed diagnostic vocabulary only: PowerShell may include private configuration
 // in its error output, so neither its message nor arbitrary native codes escape.
 export function safeWindowsOracleError(error) {
-  const tag = String(error?.stderr ?? '').match(/\bVPNTE_ORACLE_(?:RUNTIME_INVENTORY|CONFIG_READ|ADAPTER_INVENTORY|ADDRESS_INVENTORY|SELECTOR_IDENTITY|TUN_IDENTITY|SLOT_IDENTITY|ENDPOINT_ROUTE)\b/)?.[0]
+  const stderr = String(error?.stderr ?? '')
+  const tag = stderr.match(/\bVPNTE_ORACLE_(?:RUNTIME_INVENTORY|CONFIG_READ|ADAPTER_INVENTORY|ADDRESS_INVENTORY|PID_IDENTITY|SELECTOR_READ|SELECTOR_IDENTITY|TUN_IDENTITY|SLOT_IDENTITY|ENDPOINT_ROUTE|REPORT_SERIALIZE)\b/)?.[0]
+  const native = tag && stderr.match(/\bVPNTE_NATIVE_(?:ADDRESS_NOT_FOUND|ACCESS_DENIED|READ_FAILED)\b/)?.[0]
   const failure = new Error(`Windows oracle/shutdown failed${tag ? ` [${tag}]` : ''}; command output omitted`)
   if (tag) failure.oracleCode = tag
+  if (native) failure.oracleNativeCode = native
   return failure
 }

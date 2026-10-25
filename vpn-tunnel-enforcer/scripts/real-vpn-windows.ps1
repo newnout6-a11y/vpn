@@ -21,11 +21,13 @@ $adapter = @(Get-NetAdapter -IncludeHidden | Where-Object { $TunAlias -and $_.Na
 $up = @($adapter | Where-Object { $_.Status -eq 'Up' })
 $stage = 'ADDRESS_INVENTORY'
 $addresses = @($up | ForEach-Object { Get-NetIPAddress -InterfaceIndex $_.ifIndex -ErrorAction Stop })
+$stage = 'PID_IDENTITY'
 $matching = $false
 if ($tun.Count -eq 1) {
     $matching = $tun[0].ProcessId -eq $ExpectedPid -and $tun[0].CommandLine -like ('*' + $configPath + '*')
 }
 $endpointRoutes = [ordered]@{ applicable = $false }
+$stage = 'SELECTOR_READ'
 $selector = @($config.outbounds | Where-Object { $_.tag -eq 'proxy-out' -and $_.type -eq 'selector' })
 if ($ExpectedPid -gt 0 -and $selector.Count -gt 0) {
     $stage = 'SELECTOR_IDENTITY'
@@ -74,6 +76,7 @@ if ($ExpectedPid -gt 0 -and $selector.Count -gt 0) {
     $endpointRoutes = [ordered]@{ applicable = $true; configuredSlots = $slots; endpointCount = $endpoints.Count;
         tunRouteCount = $endpoints.Count; allViaOwnedTun = $true }
 }
+$stage = 'REPORT_SERIALIZE'
 [ordered]@{
     runtimeProcessCount = $processes.Count
     tunProcessCount = $tun.Count
@@ -83,4 +86,14 @@ if ($ExpectedPid -gt 0 -and $selector.Count -gt 0) {
     tunAlias = $TunAlias
     endpointOsRoutes = $endpointRoutes
 } | ConvertTo-Json -Depth 4 -Compress
-} catch { throw "VPNTE_ORACLE_$stage" }
+} catch {
+    # Fixed vocabulary only; a native ErrorRecord can contain topology or keys.
+    $native = 'READ_FAILED'
+    if ($stage -eq 'ADDRESS_INVENTORY' -and
+        $_.FullyQualifiedErrorId -match '^CmdletizationQuery_NotFound(?:_[A-Za-z0-9]+)?,Get-NetIPAddress$') {
+        $native = 'ADDRESS_NOT_FOUND'
+    } elseif ($_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::PermissionDenied) {
+        $native = 'ACCESS_DENIED'
+    }
+    throw "VPNTE_ORACLE_$stage VPNTE_NATIVE_$native"
+}

@@ -5,8 +5,8 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs'
-import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership, verifySelectorTlsFlow, safeWindowsOracleError, runtimeFailureKinds, inspectRuntimeFailures } from './real-vpn-runner.mjs'
+import { mkdtempSync, writeFileSync, appendFileSync, renameSync, readFileSync, rmSync, mkdirSync } from 'node:fs'
+import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership, verifySelectorTlsFlow, safeWindowsOracleError, runtimeFailureKinds, snapshotRuntimeLogs, inspectRuntimeFailures } from './real-vpn-runner.mjs'
 import { safeActionResult } from './real-vpn-log.mjs'
 
 test('Windows oracle failures expose only a fixed stage, never private command output (AT-00-005)', () => {
@@ -30,15 +30,42 @@ test('runtime failure inspection returns bounded fixed kinds without raw private
   const dir = mkdtempSync(resolve(temporary, 'real-vpn-log-kinds-'))
   try {
     assert.deepEqual(runtimeFailureKinds('FAKE-PRIVATE-key private.test 10.0.0.1'), [])
+    const baseline = await snapshotRuntimeLogs(dir)
     writeFileSync(resolve(dir, 'xray-a.log'), 'FAKE-PRIVATE-key '.repeat(10000) + '\nfailed to retrieve response for private.test > connection reset by peer > tls handshake failed')
-    const result = await inspectRuntimeFailures(dir)
+    const result = await inspectRuntimeFailures(dir, baseline)
     assert.deepEqual(result, [
-      { file: 'xray-a.log', checked: true, kinds: ['dns-failed', 'tls-rejected', 'connection-reset'] },
+      { file: 'xray-a.log', checked: true, bytesRead: 65536, kinds: ['dns-failed', 'tls-rejected', 'connection-reset'] },
       { file: 'xray-b.log', checked: false, kinds: [] }, { file: 'xray.log', checked: false, kinds: [] }
     ])
     assert.ok(!JSON.stringify(result).includes('FAKE-PRIVATE'))
     assert.ok(!JSON.stringify(result).includes('private.test'))
   } finally { assert.equal(dirname(dir), temporary); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('runtime hints classify only the current step and refuse unknown or rotated log boundaries (AT-00-005)', async () => {
+  const temporary = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
+  mkdirSync(temporary, { recursive: true })
+  const dir = mkdtempSync(resolve(temporary, 'real-vpn-log-boundary-'))
+  const file = resolve(dir, 'xray-a.log')
+  try {
+    writeFileSync(file, 'connection reset by peer from previous cancelled step\n')
+    const before = await snapshotRuntimeLogs(dir)
+    assert.deepEqual((await inspectRuntimeFailures(dir, before))[0], { file: 'xray-a.log', checked: true, bytesRead: 0, kinds: [] })
+    appendFileSync(file, 'connection refused in this step\n')
+    assert.deepEqual((await inspectRuntimeFailures(dir, before))[0].kinds, ['connection-refused'])
+    assert.equal((await inspectRuntimeFailures(dir))[0].checked, false)
+    writeFileSync(file, 'unexpected eof')
+    assert.equal((await inspectRuntimeFailures(dir, before))[0].checked, false, 'Truncation cannot include prior bytes')
+    writeFileSync(resolve(dir, 'replacement.log'), 'network is unreachable'.repeat(20))
+    renameSync(file, resolve(dir, 'old.log')); renameSync(resolve(dir, 'replacement.log'), file)
+    assert.equal((await inspectRuntimeFailures(dir, before))[0].checked, false, 'Replacement cannot inherit an old offset')
+    assert.equal((await inspectRuntimeFailures(dir, [{ file: 'xray-a.log', state: 'unavailable' }]))[0].checked, false)
+  } finally { assert.equal(dirname(dir), temporary); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('common Xray terminal hints retain only fixed categories (AT-00-005)', () => {
+  assert.deepEqual(runtimeFailureKinds('private.test FAKE-PRIVATE-key > failed to process outbound traffic > failed to transfer request > failed to read response header > io: read/write on closed pipe'),
+    ['outbound-transfer-failed', 'response-header-failed', 'closed-pipe'])
 })
 
 test('Windows oracle distinguishes no TUN from unreadable configuration without echoing it (AT-00-005)', { skip: process.platform !== 'win32', timeout: 20000 }, () => {
@@ -284,5 +311,45 @@ test('multiple imported profiles, duplicate A/B and changed settings never count
     const f = fixture(options)
     await assert.rejects(seedScenario(f.invoke, seed))
     assert.ok(!f.calls.some(([m]) => m === 'serversSelect'))
+  }
+})
+
+test('Windows oracle publishes only separated fixed stages and native read categories (AT-00-005)', () => {
+  for (const stage of ['PID_IDENTITY', 'SELECTOR_READ', 'REPORT_SERIALIZE']) {
+    for (const native of ['ADDRESS_NOT_FOUND', 'ACCESS_DENIED', 'READ_FAILED']) {
+      const error = safeWindowsOracleError({ stderr: `FAKE-PRIVATE-key VPNTE_ORACLE_${stage} VPNTE_NATIVE_${native}` })
+      assert.deepEqual(safeActionResult(error), { oracleCode: `VPNTE_ORACLE_${stage}`, oracleNativeCode: `VPNTE_NATIVE_${native}` })
+      assert.ok(!JSON.stringify(error).includes('FAKE-PRIVATE'))
+    }
+  }
+  for (const native of ['READ_FAILED_PRIVATE', 'PRIVATE', 'ACCESS_DENIED\nFAKE-PRIVATE']) {
+    const value = safeActionResult({ oracleCode: 'VPNTE_ORACLE_ADDRESS_INVENTORY', oracleNativeCode: `VPNTE_NATIVE_${native}` })
+    assert.deepEqual(value, { oracleCode: 'VPNTE_ORACLE_ADDRESS_INVENTORY' })
+  }
+})
+
+test('Windows address inventory failure stays fatal and emits its fixed native category (AT-00-005)', { skip: process.platform !== 'win32', timeout: 15000 }, () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..'), temporary = resolve(root, '.tmp')
+  mkdirSync(temporary, { recursive: true })
+  const dir = mkdtempSync(resolve(temporary, 'real-vpn-address-fault-'))
+  try {
+    const quote = value => "'" + value.replaceAll("'", "''") + "'"
+    const fixture = resolve(dir, 'fixture.ps1')
+    writeFileSync(fixture, `param([string]$RuntimeDir)
+function Get-CimInstance { param($ClassName,$Filter) }
+function Get-NetAdapter { param([switch]$IncludeHidden) [pscustomobject]@{Name='Ethernet 5';Status='Up';ifIndex=7} }
+function Get-NetIPAddress { [CmdletBinding()] param($InterfaceIndex)
+  throw [Management.Automation.ErrorRecord]::new([Exception]::new('FAKE-PRIVATE-key'), 'CmdletizationQuery_NotFound_InterfaceIndex,Get-NetIPAddress', [Management.Automation.ErrorCategory]::ObjectNotFound, $null)
+}
+& ${quote(resolve(root, 'scripts/real-vpn-windows.ps1'))} -RuntimeDir $RuntimeDir -ExpectedPid 0 -TunAlias 'Ethernet 5'
+`)
+    const child = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', fixture, '-RuntimeDir', dir],
+      { encoding: 'utf8', windowsHide: true, timeout: 8000 })
+    assert.notEqual(child.status, 0)
+    assert.match(child.stderr, /VPNTE_ORACLE_ADDRESS_INVENTORY VPNTE_NATIVE_ADDRESS_NOT_FOUND/)
+    assert.doesNotMatch(child.stdout + child.stderr, /FAKE-PRIVATE-key/)
+  } finally {
+    assert.equal(dirname(resolve(dir)), temporary)
+    rmSync(dir, { recursive: true, force: true })
   }
 })

@@ -381,6 +381,9 @@ test('retained-switch timings and probe failures retain fixed labels without pri
 })
 test('probe native diagnostics publish only fixed codes and provider indexes (AT-00-005)', () => {
   const event = { ts: '2026-10-25T00:00:00.000Z', scope: 'socks-upstream-probe', message: 'candidate egress probe completed' }
+  for (const providerIndex of [0, 1, 2, 3]) {
+    assert.equal(safeAppEvent({ ...event, details: { providerIndex } }).providerIndex, providerIndex)
+  }
   for (const nativeCode of ['ECONNRESET', 'ERR_SSL_WRONG_VERSION_NUMBER', 'EHOSTUNREACH', 'ERR_INVALID_ARG_TYPE']) {
     const result = safeAppEvent({ ...event, details: { nativeCode, providerIndex: 1, message: 'FAKE-PRIVATE-key', host: 'private.test', ip: '10.0.0.1' } })
     assert.equal(result.nativeCode, nativeCode)
@@ -388,7 +391,7 @@ test('probe native diagnostics publish only fixed codes and provider indexes (AT
     assert.ok(!JSON.stringify(result).includes('private'))
   }
   for (const nativeCode of ['PRIVATE_CODE', 'ECONNRESET FAKE-PRIVATE-key', 'ERR_TLS_CERT_ALTNAME_INVALID\nprivate.test']) {
-    const result = safeAppEvent({ ...event, details: { nativeCode, providerIndex: 2 } })
+    const result = safeAppEvent({ ...event, details: { nativeCode, providerIndex: 4 } })
     assert.equal(result.nativeCode, undefined)
     assert.equal(result.providerIndex, undefined)
   }

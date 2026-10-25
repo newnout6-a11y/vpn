@@ -13,7 +13,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { performance } from 'node:perf_hooks'
 import { assertStable, deadline, runScenario } from './real-vpn-scenario.mjs'
 import { connectInspector } from './real-vpn-inspector.mjs'
-import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership, verifySelectorTlsFlow, safeWindowsOracleError, inspectRuntimeFailures } from './real-vpn-runner.mjs'
+import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership, verifySelectorTlsFlow, safeWindowsOracleError, snapshotRuntimeLogs, inspectRuntimeFailures } from './real-vpn-runner.mjs'
 import { createProgressLog, safeAppEvent, safeSnapshot, safeElectronDiagnostic } from './real-vpn-log.mjs'
 import { runWithCleanup } from './wp1-test-cleanup.mjs'
 
@@ -209,6 +209,7 @@ async function run(config, seed) {
         } }
         await runScenario(driver, { ...pair, ...config, scenarioTimeoutMs: Math.max(0, scenarioDeadline - performance.now()) }, async (name, action) => {
           let failure
+          const runtimeLogBaseline = runtimeDir ? await snapshotRuntimeLogs(runtimeDir) : undefined
           await t.test(name, async () => {
             try {
               const result = await progress.run(`scenario/${name}`, action)
@@ -219,7 +220,7 @@ async function run(config, seed) {
               failure = error
               report.steps.push({ name, status: 'FAIL', reason: 'Action or oracle failed; see test result' })
               if (runtimeDir) {
-                report.runtimeFailureKinds = await inspectRuntimeFailures(runtimeDir)
+                report.runtimeFailureKinds = await inspectRuntimeFailures(runtimeDir, runtimeLogBaseline)
                 progress.record('runtime-failure-kinds', { files: report.runtimeFailureKinds })
               }
               progress.record('step-fail', { action: name })
