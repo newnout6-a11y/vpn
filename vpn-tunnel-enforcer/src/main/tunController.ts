@@ -160,7 +160,7 @@ let clashApiInfo: { port: number; secret: string } | null = null
 
 interface XraySwitchSlot { port: number; username: string; password: string }
 type XraySwitchSlots = Record<OutboundSlot, XraySwitchSlot>
-let xraySwitchRuntime: { slots: XraySwitchSlots; configurationKey: string } | null = null
+let xraySwitchRuntime: { slots: XraySwitchSlots; configurationKey: string; egressIps: Partial<Record<OutboundSlot, string>> } | null = null
 let outboundSwitchAbort: AbortController | null = null
 let outboundSwitchCompletion: Promise<void> | null = null
 type OutboundSwitchObservation = { phase: 'begin'; generation: number }
@@ -176,10 +176,13 @@ function observeOutboundSwitch(observation: OutboundSwitchObservation): void {
 
 // This is a configuration compatibility key, never a cached OS/security proof.
 function outboundConfigurationKey(options: StartOptions): string {
+  const settings = settingsStore.get()
   return createHash('sha256').update(JSON.stringify({
-    settings: settingsStore.get(), dns: dnsProfiles.getActiveDnsProfile(), domain: generateDomainRouteRules(),
+    settings: { smartRuSplit: settings.smartRuSplit, smartRuMapsDirect: settings.smartRuMapsDirect,
+      smartRuRuleSetMode: settings.smartRuRuleSetMode },
+    dns: dnsProfiles.getActiveDnsProfile(), domain: generateDomainRouteRules(),
     firewall: options.enableFirewallKillSwitch === true, lockdown: options.enableAdapterLockdown === true,
-    publicWifi: options.publicWifiCompatibility === true, stealth: options.stealthMode === true,
+    publicWifi: options.publicWifiCompatibility ?? settings.publicWifiCompatibility, stealth: options.stealthMode === true,
     adaptive: options.adaptiveMode ?? null, engine: options.proxyEngine ?? 'auto'
   })).digest('hex')
 }
@@ -1911,7 +1914,7 @@ function startServerWatchdog(_host: string, _port: number, label: string) {
     watchdogFailures += 1
     if (watchdogFailures >= 3) {
       markProxyUnreachable(
-        `VPN через сервер «${label}» не подтверждён. Трафик остаётся внутри TUN (реальный IP не утекает). Проверьте соединение или выберите другой сервер.`
+        `VPN через сервер «${currentStatus.vpnProfileName || label}» не подтверждён. Трафик остаётся внутри TUN (реальный IP не утекает). Проверьте соединение или выберите другой сервер.`
       )
     }
   }, DIRECT_VPN_WATCHDOG_INTERVAL_MS)
@@ -2693,7 +2696,7 @@ export const tunController = {
     const proxyType: 'socks5' | 'http' =
       startOptions.proxyType ?? 'socks5'
     const vpnProfile = startOptions.vpnProfile
-    let preparedXraySwitch: { slots: XraySwitchSlots; configurationKey: string } | null = null
+    let preparedXraySwitch: typeof xraySwitchRuntime = null
     const requestedKillSwitch =
       startOptions.enableFirewallKillSwitch === true
     const wantKillSwitch = requestedKillSwitch
@@ -2959,7 +2962,7 @@ export const tunController = {
         if (engine === 'xray') {
           try {
             const slots = await allocateXraySwitchSlots()
-            preparedXraySwitch = { slots, configurationKey: outboundConfigurationKey(startOptions) }
+            preparedXraySwitch = { slots, configurationKey: outboundConfigurationKey(startOptions), egressIps: {} }
             const xrayStartup = startXray(vpnProfile.outbound, {
               slot: 'a', portOverride: slots.a.port,
               socksAuth: { username: slots.a.username, password: slots.a.password },
@@ -2995,7 +2998,7 @@ export const tunController = {
             // A listening SOCKS port does not prove the provider's outbound
             // graph is ready. Establish authenticated TLS/IP before installing
             // TUN routes; this overlaps runtime staging and drains on abort.
-            await timeAsync('initial-upstream-probe', () => probeSocksUpstream(
+            preparedXraySwitch.egressIps.a = await timeAsync('initial-upstream-probe', () => probeSocksUpstream(
               { ...slots.a, port: xr.socksPort }, startAbortController.signal
             ))
             startAbortController.signal.throwIfAborted()
@@ -3716,6 +3719,7 @@ export const tunController = {
               } catch {
                 // The shared failure owner closes the firewall barrier and
                 // proves runtime exit before restoring adapter/firewall state.
+                startAbortedReason = 'Не удалось применить защиту физических адаптеров. Проверьте журнал.'
                 throw new IpcFault(adapterLockdownCategory)
               }
             }
@@ -3976,7 +3980,7 @@ export const tunController = {
         } catch (error) {
           clearInterval(poller)
           if (resolved) return
-          startAbortedReason = 'Не удалось подтвердить создание и защиту TUN-интерфейса. Запуск отменён; подробности в журнале.'
+          startAbortedReason ??= 'Не удалось подтвердить создание и защиту TUN-интерфейса. Запуск отменён; подробности в журнале.'
           logEvent('error', 'tun', 'startup validation failed — rolling back', {
             error: String((error as any)?.stderr || error).replace(/-EncodedCommand\s+\S+/gi, '-EncodedCommand <omitted>').slice(-2000),
             phases, phaseDurations, totalMs: Date.now() - tStart
@@ -4380,20 +4384,25 @@ export const tunController = {
           const result = await startXrayInSlot(slot, nextOptions.vpnProfile!.outbound, {
             portOverride: endpoint.port, socksAuth: endpoint,
             clientDevice: nextOptions.vpnProfile!.clientDevice,
+            resolvedIp: nextOptions.vpnProfile!.resolvedIp,
             stealthMode: nextOptions.stealthMode, signal
           })
           if (result.resolvedIp && isIP(result.resolvedIp) === 6) throw new Error('IPv6 upstream requires protected restart')
         }),
-        probe: (slot, signal) => timed('probe', async () => { await probeSocksUpstream(runtime.slots[slot], signal) }),
+        probe: (slot, signal) => timed('probe', async () => {
+          runtime.egressIps[slot] = await probeSocksUpstream(runtime.slots[slot], signal)
+        }),
         select: slot => timed(slot === previous ? 'restore-selector' : 'select', () => selectProtectedOutbound(api, slot)),
         confirm: slot => timed(slot === previous ? 'confirm-previous' : 'confirm-candidate', async () => {
           const canPublish = () => owner() && (slot === previous || !controller.signal.aborted)
           if (!canPublish() || !getXraySlotStatus(slot).running || !(await areTunRoutesActive()) || !canPublish()) {
             throw new Error('Retained TUN route proof failed')
           }
+          const expectedIp = runtime.egressIps[slot]
+          if (!expectedIp) throw new Error('Upstream egress identity is unavailable')
           ipMonitor.invalidateVpnIpBaseline()
-          const evidence = await ipMonitor.recheck(true, canPublish)
-          if (!canPublish() || !evidence.ip || evidence.vpnIp !== evidence.ip || evidence.isLeak
+          const evidence = await ipMonitor.recheck(true, canPublish, expectedIp)
+          if (!canPublish() || evidence.ip !== expectedIp || evidence.vpnIp !== expectedIp || evidence.isLeak
             || !getXraySlotStatus(slot).running || !(await areTunRoutesActive()) || !canPublish()) {
             throw new Error('Retained TUN egress proof failed')
           }
@@ -4412,6 +4421,11 @@ export const tunController = {
       })
       if (!owner()) receipt.ownershipLost = true
       verified = !receipt.ownershipLost && (receipt.previousPreserved || receipt.outcome === 'success')
+      // A failed stage can mean that another listener claimed the standby
+      // port. Keep the restored session's metadata, but reallocate via the
+      // protected restart on the next request instead of retrying that port.
+      if (verified && receipt.previousPreserved && receipt.candidateStopped
+        && receipt.failures.some(failure => failure.phase === 'stage')) runtime.configurationKey = ''
       logEvent(receipt.outcome === 'success' ? 'info' : 'warn', 'tun', 'retained TUN upstream switch finished', {
         outcome: receipt.outcome, committed: receipt.committed, previousPreserved: receipt.previousPreserved,
         ownershipLost: receipt.ownershipLost === true,

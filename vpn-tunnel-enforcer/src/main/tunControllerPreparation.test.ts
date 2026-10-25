@@ -297,6 +297,7 @@ describe('Direct VPN preparation overlap', () => {
     expect(preparationOptions.signal).toBe(h.startXray.mock.calls[0][1].signal)
     expect(await preparationOptions.xrayStartup).toMatchObject({ socksPort: slots.a.port })
     expect(h.prepared()?.slots).toBe(preparationOptions.xraySwitchSlots)
+    expect(h.prepared()).toMatchObject({ egressIps: { a: '198.51.100.9' } })
     expect(h.prepared()?.configurationKey).toMatch(/^[a-f0-9]{64}$/)
   })
 

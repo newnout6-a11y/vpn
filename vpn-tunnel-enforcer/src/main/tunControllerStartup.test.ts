@@ -98,7 +98,8 @@ describe('startup callback fault boundaries', () => {
     expect(h.stopXray).toHaveBeenCalledExactlyOnceWith('startup validation failed')
     expect(h.waitForOwnedRuntimeToExit.mock.invocationCallOrder[0]).toBeLessThan(h.rollbackEarlyAdapterLockdown.mock.invocationCallOrder[0])
     expect(h.stopXray.mock.invocationCallOrder[0]).toBeLessThan(h.rollbackEarlyAdapterLockdown.mock.invocationCallOrder[0])
-    expect(h.onFinish).toHaveBeenCalledWith(expect.objectContaining({ success: false }))
+    expect(h.onFinish).toHaveBeenCalledWith(expect.objectContaining({ success: false,
+      error: 'Не удалось применить защиту физических адаптеров. Проверьте журнал.' }))
     expect(h.selectProtectedOutbound).not.toHaveBeenCalled()
   })
   it.each(['alive', 'unknown', 'kill-failed'] as const)('retains network protection after lockdown failure when runtime exit is %s (AT-02-004 / AT-03-007)', async outcome => {

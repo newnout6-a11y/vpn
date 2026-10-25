@@ -38,19 +38,31 @@ function execFileAsync(file: string, args: string[], timeout = 5000): Promise<{ 
   })
 }
 
-async function stopWindowsProcessIfMatches(entry: ManagedChildPidFile): Promise<boolean> {
-  if (!entry.exePath && !entry.configPath) return false
+type ProcessCleanupOutcome = 'missing' | 'stopped' | 'mismatch' | 'unconfirmed'
+
+async function stopWindowsProcessIfMatches(entry: ManagedChildPidFile): Promise<ProcessCleanupOutcome> {
+  if (!entry.exePath && !entry.configPath) return 'unconfirmed'
   const script = [
     'param([int]$TargetPid,[string]$ExePath,[string]$ConfigPath)',
-    '$p=Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $TargetPid) -ErrorAction SilentlyContinue',
+    '$ErrorActionPreference="Stop"',
+    '$p=Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $TargetPid) -ErrorAction Stop',
     'if (-not $p) { "missing"; exit 0 }',
-    '$match=$false',
-    'if ($ExePath -and $p.ExecutablePath -eq $ExePath) { $match=$true }',
-    'if ($ConfigPath -and $p.CommandLine -like ("*" + $ConfigPath + "*")) { $match=$true }',
-    'if (-not $match) { "mismatch"; exit 2 }',
+    // An inaccessible identity is not evidence that the old process is gone.
+    'if (($ExePath -and -not $p.ExecutablePath) -or ($ConfigPath -and -not $p.CommandLine)) { "unconfirmed"; exit 0 }',
+    // Every config-bearing managed child is spawned as exe run -c config.
+    // Match that argument shape, never a substring or a value of another flag.
+    `$configArgument='"'+[regex]::Escape($ConfigPath)+'"'`,
+    `if ($ConfigPath -notmatch '\\s') { $configArgument='(?:'+$configArgument+'|'+[regex]::Escape($ConfigPath)+')' }`,
+    `$configMatches=(!$ConfigPath -or $p.CommandLine -match ('^\\s*(?:"[^"]+"|[^\\s"]+)\\s+run\\s+-c\\s+'+$configArgument+'\\s*$'))`,
+    '$match=(!$ExePath -or $p.ExecutablePath -eq $ExePath) -and $configMatches',
+    'if (-not $match) { "mismatch"; exit 0 }',
     'Stop-Process -Id $TargetPid -Force -ErrorAction Stop',
     '"stopped"'
   ].join('; ')
+  // -Command appends trailing argv to the source; it does not bind param().
+  // Invoke the block explicitly and quote recorded paths as PowerShell literals.
+  const literal = (value = '') => `'${value.replace(/'/g, "''")}'`
+  const command = `& { ${script} } -TargetPid ${entry.pid} -ExePath ${literal(entry.exePath)} -ConfigPath ${literal(entry.configPath)}`
 
   try {
     const { stdout } = await execFileAsync('powershell.exe', [
@@ -58,14 +70,12 @@ async function stopWindowsProcessIfMatches(entry: ManagedChildPidFile): Promise<
       '-ExecutionPolicy',
       'Bypass',
       '-Command',
-      script,
-      String(entry.pid),
-      entry.exePath ?? '',
-      entry.configPath ?? ''
+      command
     ])
-    return /missing|stopped/i.test(stdout)
+    const outcome = stdout.trim()
+    return outcome === 'missing' || outcome === 'stopped' || outcome === 'mismatch' ? outcome : 'unconfirmed'
   } catch {
-    return false
+    return 'unconfirmed'
   }
 }
 
@@ -100,9 +110,12 @@ export async function cleanupManagedChildPidFile(
   owner: string,
   log?: (message: string, details?: unknown) => void
 ): Promise<boolean> {
-  const raw = await readFile(pidFile, 'utf8').catch(() => null)
-  if (raw === null) {
-    return true
+  let raw: string
+  try { raw = await readFile(pidFile, 'utf8') }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true
+    log?.('managed child pidfile read unconfirmed', { pidFile, owner })
+    return false
   }
 
   const entry = parsePidFile(raw)
@@ -121,12 +134,20 @@ export async function cleanupManagedChildPidFile(
     return false
   }
 
-  const cleaned = process.platform === 'win32'
+  const outcome = process.platform === 'win32'
     ? await stopWindowsProcessIfMatches(entry)
-    : stopPosixProcess(entry)
+    : stopPosixProcess(entry) ? 'stopped' : 'unconfirmed'
+  const cleaned = outcome !== 'unconfirmed'
 
   if (cleaned) {
-    await rm(pidFile, { force: true }).catch(() => undefined)
+    try { await rm(pidFile, { force: true }) }
+    catch {
+      log?.('managed child pidfile cleanup skipped', { pidFile, owner, pid: entry.pid, outcome: 'record-remove-failed' })
+      return false
+    }
+    if (outcome === 'missing' || outcome === 'mismatch') {
+      log?.('managed child stale pidfile removed', { pidFile, owner, pid: entry.pid, outcome })
+    }
   } else {
     log?.('managed child pidfile cleanup skipped', { pidFile, owner, pid: entry.pid })
   }

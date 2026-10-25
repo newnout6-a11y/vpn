@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import ts from 'typescript'
 
 const h = vi.hoisted(() => ({
   trafficStats: { running: false, downloadBps: 0, uploadBps: 0 },
@@ -133,5 +135,27 @@ describe('tunController.recoverProxyIfAlive', () => {
     expect(typeof tunController.recoverProxyIfAlive).toBe('function')
     expect(typeof tunController.markProxyRecovered).toBe('function')
     expect(typeof tunController.hasRecentWatchdogConfirmation).toBe('function')
+  })
+})
+
+describe('retained-TUN watchdog profile name (AT-00-005 / AT-02-011)', () => {
+  it.each(['Switched server', null])('reports the current profile name %j with the original label as fallback', async name => {
+    const source = ts.createSourceFile('tunController.ts', readFileSync('src/main/tunController.ts', 'utf8'), ts.ScriptTarget.Latest, true)
+    const method = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'startServerWatchdog')!
+    const status = { running: true, vpnProfileName: 'Original server' as string | null }
+    let tick!: () => Promise<void>
+    const deps = { currentStatus: status, stopProxyWatchdog: vi.fn(), markProxyRecovered: vi.fn(),
+      markProxyUnreachable: vi.fn(), hasRecentPublicIpConfirmation: () => false, hasRecentWatchdogConfirmation: () => false,
+      DIRECT_VPN_WATCHDOG_SUPPRESS_MS: 45000, DIRECT_VPN_WATCHDOG_INTERVAL_MS: 5000,
+      setInterval: (callback: () => Promise<void>) => { tick = callback; return 1 } }
+    const code = ts.transpileModule(`let watchdogTimer=null,watchdogFailures=0; ${method.getText(source)}; return startServerWatchdog;`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+    const start = new Function(...Object.keys(deps), code)(...Object.values(deps))
+    start('fixture.example', 443, 'Original server')
+    await tick()
+    // A retained switch keeps this watchdog callback and changes the active status.
+    status.vpnProfileName = name
+    await tick(); await tick()
+    expect(deps.markProxyUnreachable).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(`«${name || 'Original server'}»`))
   })
 })

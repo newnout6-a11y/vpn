@@ -2,6 +2,7 @@
 // TUN-controller method and transition coordinator, with no native processes.
 import { readFileSync } from 'node:fs'
 import { isIP } from 'node:net'
+import { createHash } from 'node:crypto'
 import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 import { runProtectedOutboundSwitch, type OutboundSlot, type OutboundSwitchReceipt } from './protectedOutboundSwitch'
@@ -30,9 +31,9 @@ function harness() {
   const state = { owner: true, active: 'a' as OutboundSlot, configurationKey: 'retained', engine: 'xray' }
   const outbound = { type: 'vless', server: 'server.example', blockQuic: false, tcpOnly: false }
   const previous = { mode: 'directVpn', vpnProfile: { name: 'Previous', protocol: 'vless', outbound: { ...outbound } } }
-  const next = { mode: 'directVpn', vpnProfile: { name: 'Candidate', protocol: 'vless', outbound: { ...outbound } } }
+  const next = { mode: 'directVpn', vpnProfile: { name: 'Candidate', protocol: 'vless', resolvedIp: '203.0.113.20', outbound: { ...outbound } } }
   const initial = {
-    runtime: { configurationKey: 'retained', slots: {
+    runtime: { configurationKey: 'retained', egressIps: { a: '198.51.100.42' } as Partial<Record<OutboundSlot, string>>, slots: {
       a: { port: 51001, username: 'user-a', password: 'secret-a' },
       b: { port: 51002, username: 'user-b', password: 'secret-b' }
     } },
@@ -77,7 +78,7 @@ function harness() {
       deferResume: vi.fn(() => { calls.push('defer') }),
       releaseDeferredResume: vi.fn(() => { calls.push('release') }),
       invalidateVpnIpBaseline: vi.fn(() => { calls.push('invalidate') }),
-      recheck: vi.fn(async (_rebaseline: boolean, _owner: () => boolean): Promise<Evidence> => { calls.push('fresh-ip'); return fresh() })
+      recheck: vi.fn(async (_rebaseline: boolean, _owner: () => boolean, _expectedIp: string): Promise<Evidence> => { calls.push('fresh-ip'); return fresh() })
     },
     activateXraySlot: vi.fn((slot: OutboundSlot) => { calls.push(`activate:${slot}`); state.active = slot }),
     stopXraySlot: vi.fn(async (slot: OutboundSlot, _reason: string) => { calls.push(`stop:${slot}`); running.delete(slot) }),
@@ -124,7 +125,10 @@ describe('retained TUN controller integration (AT-00-003 / AT-00-007 / AT-02-002
     expect(h.calls.lastIndexOf('routes')).toBeGreaterThan(h.calls.indexOf('fresh-ip'))
     expect(h.calls.indexOf('publish')).toBeLessThan(h.calls.indexOf('stop:a'))
     expect(h.api.snapshot()).toMatchObject({ busy: false, abort: null, status: { pid: 4100, startedAt: 1234, vpnProfileName: 'Candidate', proxyReachable: true } })
-    expect(h.startXrayInSlot).toHaveBeenCalledWith('b', h.next.vpnProfile.outbound, expect.objectContaining({ portOverride: 51002, socksAuth: h.initial.runtime.slots.b }))
+    expect(h.startXrayInSlot).toHaveBeenCalledWith('b', h.next.vpnProfile.outbound, expect.objectContaining({
+      portOverride: 51002, socksAuth: h.initial.runtime.slots.b, resolvedIp: h.next.vpnProfile.resolvedIp
+    }))
+    expect(h.ipMonitor.recheck).toHaveBeenCalledWith(true, expect.any(Function), '198.51.100.42')
     expect(h.native).not.toHaveBeenCalled()
     expect(h.observations.at(-1)).toMatchObject({ phase: 'finished', verified: true })
   })
@@ -234,6 +238,38 @@ describe('retained TUN controller integration (AT-00-003 / AT-00-007 / AT-02-002
     expect(h.native).not.toHaveBeenCalled()
   })
 
+  it('reallocates a failed standby stage via protected restart on the next request (AT-02-004)', async () => {
+    const h = harness()
+    h.startXrayInSlot.mockRejectedValueOnce(new Error('standby listener unavailable'))
+    expect(await h.run()).toMatchObject({ outcome: 'failed', previousPreserved: true, candidateStopped: true })
+    expect(h.initial.runtime.configurationKey).toBe('')
+    expect(h.observations.at(-1)).toMatchObject({ phase: 'finished', verified: true })
+    expect(await h.run()).toBeNull()
+    expect(h.startXrayInSlot).toHaveBeenCalledOnce()
+    expect(h.running.has('a')).toBe(true)
+    expect(h.native).not.toHaveBeenCalled()
+  })
+
+  it('rejects a rebaselined IP from another upstream and binds restoration to the previous proof (AT-02-011)', async () => {
+    const h = harness()
+    h.probeSocksUpstream.mockResolvedValueOnce('203.0.113.43')
+    // Rebaseline alone would make vpnIp === ip for the wrong path.
+    h.ipMonitor.recheck.mockResolvedValueOnce(fresh())
+    expect(await h.run()).toMatchObject({ outcome: 'failed', committed: false, previousPreserved: true })
+    expect(h.ipMonitor.recheck.mock.calls.map(call => call[2])).toEqual(['203.0.113.43', '198.51.100.42'])
+    expect(h.onCommit).not.toHaveBeenCalled()
+    expect(h.state.active).toBe('a')
+  })
+
+  it('does not verify restoration without the previous slot egress identity (AT-02-011)', async () => {
+    const h = harness()
+    delete h.initial.runtime.egressIps.a
+    h.startXrayInSlot.mockRejectedValueOnce(new Error('candidate failed'))
+    expect(await h.run()).toMatchObject({ outcome: 'failed', previousPreserved: false, activeSlot: null })
+    expect(h.ipMonitor.recheck).not.toHaveBeenCalled()
+    expect(h.observations.at(-1)).toMatchObject({ phase: 'finished', verified: false })
+  })
+
   it.each(['unavailable-ip', 'mismatched-ip', 'leak', 'routes'] as const)('failed %s evidence never marks a transition verified', async failure => {
     const h = harness()
     if (failure === 'unavailable-ip') h.ipMonitor.recheck.mockResolvedValue({ ip: null, vpnIp: '198.51.100.42', isLeak: false })
@@ -289,5 +325,37 @@ describe('retained TUN controller integration (AT-00-003 / AT-00-007 / AT-02-002
       status: { pid: 4100, startedAt: 1234, vpnProfileName: 'Candidate', vpnProtocol: 'vless', proxyReachable: true },
       previous: { vpnProfile: { name: 'Candidate' } }
     })
+  })
+})
+
+describe('retained TUN compatibility key (AT-02-011)', () => {
+  const keyFunction = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'outboundConfigurationKey')!
+  const text = ts.transpileModule(keyFunction.getText(source) + ';return outboundConfigurationKey;',
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  function setup() {
+    const settings: Record<string, unknown> = { smartRuSplit: false, smartRuMapsDirect: false,
+      smartRuRuleSetMode: 'bundled', publicWifiCompatibility: true,
+      minimizeToTray: true, desktopNotifications: true, autoStart: false, directVpnCachedInput: 'old input' }
+    const deps = { createHash, settingsStore: { get: () => settings },
+      dnsProfiles: { getActiveDnsProfile: () => ({ id: 'dns' }) }, generateDomainRouteRules: () => [] }
+    const key = new Function(...Object.keys(deps), text)(...Object.values(deps)) as (options: unknown) => string
+    return { settings, key }
+  }
+  it('retains the fast path across UI and cached-input changes', () => {
+    const h = setup(), original = h.key({})
+    Object.assign(h.settings, { minimizeToTray: false, desktopNotifications: false, autoStart: true,
+      directVpnCachedInput: 'new input', checkInterval: 1000, advancedMode: true })
+    expect(h.key({})).toBe(original)
+  })
+  it.each(['smartRuSplit', 'smartRuMapsDirect', 'smartRuRuleSetMode', 'publicWifiCompatibility'])(
+    'invalidates the path when effective network setting %s changes', field => {
+      const h = setup(), original = h.key({})
+      h.settings[field] = field === 'smartRuRuleSetMode' ? 'managed' : !h.settings[field]
+      expect(h.key({})).not.toBe(original)
+    })
+  it('uses explicit public Wi-Fi options over the stored default', () => {
+    const h = setup(), original = h.key({ publicWifiCompatibility: false })
+    h.settings.publicWifiCompatibility = false
+    expect(h.key({ publicWifiCompatibility: false })).toBe(original)
   })
 })
