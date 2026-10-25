@@ -231,7 +231,7 @@ export async function executeRecoveryOperation(request: RecoveryRequest, timeout
   if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) throw new Error('Invalid recovery worker deadline')
   const started = performance.now()
   // These fixed reads need the same prepared Net modules as full snapshots.
-  const scope = request.op === 'inspect-physical-dns' || request.op === 'inspect-tun' || request.op === 'inspect-owned-firewall-rules' ? 'adapters' : 'recovery'
+  const scope = request.op === 'inspect-physical-dns' || request.op === 'inspect-tun' || request.op === 'inspect-owned-firewall-rules' || request.op === 'inspect-network-identity' ? 'adapters' : 'recovery'
   try { return await (await getWorker(scope)).execute(request, timeoutMs) }
   finally { logEvent('debug', scope === 'adapters' ? 'adapter-worker' : 'recovery-worker', 'operation timing', { operation: request.op, durationMs: Math.round(performance.now() - started) }) }
 }

@@ -1496,8 +1496,8 @@ function ipStartupHarness(mode: 'direct' | 'proxy', verifyRestoration = false) {
     resolveVpnProfile: vi.fn(resolveVpnProfile),
     killSwitchManifestExists: vi.fn(async () => false), combinedPreStartProbe: vi.fn(async () => ({ tunnels: [], listeners: [] })),
     getRoutingPlan: vi.fn(async () => ({ canStartHard: true })),
-    beginAdaptiveConnection: () => ({ capabilities: {}, mode: 'standard' }),
-    readAdaptiveNetworkFingerprint: vi.fn(async () => null),
+    beginAdaptiveConnection: vi.fn((_input?: unknown) => ({ capabilities: {}, mode: 'standard' })),
+    readAdaptiveNetworkFingerprint: vi.fn(async (): Promise<string | null> => null),
     tunController: { start: vi.fn(async (): Promise<any> => { running = true; return { success: true } }), getStatus: () => ({ running }),
       stop: vi.fn(async () => ({ success:true,networkCleanup:{baseline:true,firewall:true,adapters:true} })) },
     applyTunNetworkBaseline: vi.fn(async (): Promise<any> => ({ success: true })), rollbackTunNetworkBaselineIfApplied: done(),
@@ -1538,6 +1538,47 @@ return {start: () => ${name}(${mode === 'proxy' ? "'127.0.0.1:1080','socks5'" : 
 `, { ...os, ...verification, setProfileSwitchHooks: (value: typeof hooks) => { hooks = value } }, verifyRestoration ? ts.ModuleKind.CommonJS : ts.ModuleKind.None)
   return { ...control, ...os, ...verification, settings, beginSwitch: () => hooks.begin(), endSwitch: () => hooks.end(), setRunning: (value: boolean) => { running = value } }
 }
+
+describe('independent direct VPN preflight reads (AT-00-003 / AT-02-002)', () => {
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })
+  it('reads network identity while firewall cleanup is pending and joins both before startup', async () => {
+    vi.useFakeTimers()
+    const h = ipStartupHarness('direct')
+    h.settings.adaptiveBypassEnabled = true
+    let releaseFirewall!: () => void, releaseIdentity!: () => void
+    h.clearStaleKillSwitchBeforeStart.mockReturnValue(new Promise(resolve => { releaseFirewall = () => resolve({ success: true }) }))
+    h.readAdaptiveNetworkFingerprint.mockReturnValue(new Promise(resolve => { releaseIdentity = () => resolve('current-network') }))
+    const pending = h.start()
+    await vi.waitFor(() => expect(h.readAdaptiveNetworkFingerprint).toHaveBeenCalledOnce())
+    expect(h.clearStaleKillSwitchBeforeStart).toHaveBeenCalledOnce()
+    expect(h.tunController.start).not.toHaveBeenCalled()
+    releaseFirewall()
+    await Promise.resolve(); await Promise.resolve()
+    expect(h.tunController.start).not.toHaveBeenCalled()
+    releaseIdentity()
+    expect(await pending).toMatchObject({ success: true })
+    expect(h.beginAdaptiveConnection).toHaveBeenCalledWith(expect.objectContaining({ networkIdentity: 'current-network' }))
+    h.cancel()
+  })
+  it('cancels promptly but retains a pending identity read before cleanup or retry admission', async () => {
+    const h = ipStartupHarness('direct')
+    h.settings.adaptiveBypassEnabled = true
+    let release!: () => void
+    h.readAdaptiveNetworkFingerprint.mockReturnValue(new Promise(resolve => { release = () => resolve(null) }))
+    const started = h.start()
+    await vi.waitFor(() => expect(h.readAdaptiveNetworkFingerprint).toHaveBeenCalledOnce())
+    let stopped = false
+    const stopping = h.stop().then(() => { stopped = true })
+    expect(await started).toMatchObject({ success: false, code: 'OPERATION_CANCELLED' })
+    expect(stopped).toBe(false)
+    expect(h.tunController.stop).not.toHaveBeenCalled()
+    expect(await h.start()).toMatchObject({ success: false, category: 'conflict' })
+    release()
+    await stopping
+    expect(h.tunController.start).not.toHaveBeenCalled()
+    expect(h.beginAdaptiveConnection).not.toHaveBeenCalled()
+  })
+})
 
 describe('cancelled server restoration repeats direct-VPN effects (AT-02-004 / AT-03-007)', () => {
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers() })

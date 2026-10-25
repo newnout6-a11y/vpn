@@ -332,7 +332,7 @@ while ($line = [Console]::In.ReadLine()) {
     $cmd = $line | ConvertFrom-Json -ErrorAction Stop
     if ((@($cmd.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'id,request' -or $cmd.id -isnot [int] -or $cmd.id -le 0) { throw 'Invalid recovery envelope' }
     $id = $cmd.id
-    ${adapterInspectionOnly ? "if (@('warmup-adapters','inspect-physical-dns','inspect-tun','inspect-physical-adapters','inspect-transition-adapters','inspect-owned-firewall-rules') -cnotcontains $cmd.request.op) { throw 'Adapter inspection operation refused' }" : ''}
+    ${adapterInspectionOnly ? "if (@('warmup-adapters','inspect-physical-dns','inspect-tun','inspect-physical-adapters','inspect-transition-adapters','inspect-owned-firewall-rules','inspect-network-identity') -cnotcontains $cmd.request.op) { throw 'Adapter inspection operation refused' }" : ''}
     $value = Invoke-RecoveryOperation $cmd.request
     if ($value -isnot [string] -or [Text.Encoding]::UTF8.GetByteCount($value) -gt ${RECOVERY_MAX_BYTES * 2}) { throw 'Invalid recovery operation output' }
     $value = [string]$value

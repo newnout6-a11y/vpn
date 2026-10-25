@@ -3,8 +3,10 @@ import { execFileSync } from 'child_process'
 import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, unlinkSync, rmdirSync } from 'fs'
 import { join } from 'path'
 import { createHash, randomUUID } from 'crypto'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-const state = vi.hoisted(() => ({ owner: null as any, source: null as string | null, resolve6: vi.fn(), cancelDns: vi.fn() }))
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { NativeHostError } from './native/hostProtocol'
+const state = vi.hoisted(() => ({ owner: null as any, source: null as string | null, resolve6: vi.fn(), cancelDns: vi.fn(), ownedTunIndex: vi.fn() }))
+vi.mock('./native/selectedRouteInterfaces', () => ({ nativeOwnedTunIndex: (...args: unknown[]) => state.ownedTunIndex(...args) }))
 vi.mock('dns/promises', () => ({ Resolver: class {
   constructor(public options: unknown) {}
   resolve6(host: string) { return state.resolve6(host) }
@@ -25,6 +27,72 @@ const blocks = (): WfpIpv6Policy => ({ schemaVersion: 1, rules: ['connect','acce
 beforeEach(() => {
   state.owner = { schemaVersion: 1, owner: 'VPNTE', interfaceGuid: '11111111-1111-1111-1111-111111111111' }; state.source = source
   state.resolve6.mockReset().mockResolvedValue([]); state.cancelDns.mockReset()
+  state.ownedTunIndex.mockReset().mockResolvedValue(7)
+  vi.stubEnv('VPNTE_DISABLE_NATIVE_NET', '1')
+})
+afterEach(() => vi.unstubAllEnvs())
+
+describe.skipIf(process.platform !== 'win32' || !['x64', 'arm64'].includes(process.arch))('fresh native WFP TUN identity (AT-02-002 / AT-03-004/007/010/012)', () => {
+  const opts = { corePrograms: [], tunAlias: 'Ethernet 5', apps: [], cidrs: [] }
+  const prepared = 'WFP_PREPARED:{"tunLuid":"12","appIds":[],"vpn":[],"ipv6Uplink":false}'
+  it('uses the existing strict native proof on every preparation, retaining exact GUID-to-LUID resolution', async () => {
+    vi.stubEnv('VPNTE_DISABLE_NATIVE_NET', '0')
+    const run = vi.fn(async (_script: string) => ({ stdout: prepared }))
+    await prepareWfpIpv6Policy(opts, run)
+    await prepareWfpIpv6Policy(opts, run)
+    expect(state.ownedTunIndex.mock.calls).toEqual([[opts.tunAlias, state.owner.interfaceGuid], [opts.tunAlias, state.owner.interfaceGuid]])
+    expect(run).toHaveBeenCalledTimes(2)
+    const script = run.mock.calls[0][0]
+    expect(script).not.toContain('$owned=@(Get-NetAdapter')
+    expect(script).not.toContain('Get-NetIPAddress')
+    expect(script).toContain(`::InterfaceLuid('${state.owner.interfaceGuid}')`)
+    expect(script).toContain('Get-NetAdapter -Physical -ErrorAction Stop')
+    // Exercise the real dedicated helper validator with native startup prohibited.
+    await expect(execElevatedPs(script, 1000, 'wfp-ipv6', { startIfUnavailable: false }))
+      .rejects.toMatchObject({ code: 'elevated-helper-unavailable' })
+  })
+  it('rechecks identity for a second preparation after IPv6 DNS discovery', async () => {
+    vi.stubEnv('VPNTE_DISABLE_NATIVE_NET', '0')
+    const run = vi.fn(async (_script: string) => ({ stdout: prepared.replace('false', 'true') }))
+    await prepareWfpIpv6Policy({ ...opts, serverHost: '2001:db8::1' }, run)
+    expect(state.ownedTunIndex).toHaveBeenCalledTimes(2)
+    expect(run).toHaveBeenCalledTimes(2)
+  })
+  it('refuses missing ownership without running the WFP helper or replaying CIM', async () => {
+    vi.stubEnv('VPNTE_DISABLE_NATIVE_NET', '0')
+    state.ownedTunIndex.mockResolvedValue(null)
+    const run = vi.fn()
+    await expect(prepareWfpIpv6Policy(opts, run)).rejects.toThrow('Owned TUN not verified')
+    expect(run).not.toHaveBeenCalled()
+  })
+  it.each([
+    new NativeHostError('unavailable', 'native host request timed out'),
+    new NativeHostError('unavailable', 'native host could not start'),
+    new NativeHostError('read-refused', 'driver identity unavailable'),
+    new Error('malformed native response')
+  ])('does not replay ambiguous native failure %s through CIM', async error => {
+    vi.stubEnv('VPNTE_DISABLE_NATIVE_NET', '0')
+    state.ownedTunIndex.mockRejectedValue(error)
+    const run = vi.fn()
+    await expect(prepareWfpIpv6Policy(opts, run)).rejects.toBe(error)
+    expect(run).not.toHaveBeenCalled()
+  })
+  it('checks cancellation after the owned native read and before any WFP helper execution', async () => {
+    vi.stubEnv('VPNTE_DISABLE_NATIVE_NET', '0')
+    const controller = new AbortController()
+    state.ownedTunIndex.mockImplementation(async () => { controller.abort(); return 7 })
+    const run = vi.fn()
+    await expect(prepareWfpIpv6Policy({ ...opts, signal: controller.signal }, run)).rejects.toMatchObject({ name: 'AbortError' })
+    expect(run).not.toHaveBeenCalled()
+  })
+  it('preserves full CIM proof when native network reads are explicitly disabled', async () => {
+    const run = vi.fn(async (_script: string) => ({ stdout: prepared }))
+    await prepareWfpIpv6Policy(opts, run)
+    expect(state.ownedTunIndex).not.toHaveBeenCalled()
+    expect(run.mock.calls[0][0]).toContain('$owned=@(Get-NetAdapter')
+    expect(run.mock.calls[0][0]).toContain('Owned TUN subnet mismatch')
+    expect(run.mock.calls[0][0]).toContain(`::InterfaceLuid('${state.owner.interfaceGuid}')`)
+  })
 })
 describe('independent IPv6 WFP lifecycle', () => {
   it('binds passive status verification to fresh trusted TUN identity, LUID and subnet (AT-03-001/006/012)', async () => {

@@ -434,9 +434,19 @@ export function isValidIpOrCidr(value: string): boolean {
 }
 
 export async function isKillSwitchActive(options?: { probeWfp?: boolean; recovery?: boolean }): Promise<boolean> {
-  if ((await readManifest(options?.recovery ? [] : undefined)) !== null || await probeFirewallForOurRules()) return true
-  if (options?.probeWfp === false) return false
-  return hasWfpIpv6Protection(wfpRun)
+  // Independent fresh reads may overlap, but none may outlive this cleanup
+  // gate. Preserve the serial path's error precedence and short-circuit result.
+  const [manifest, rules, wfp] = await Promise.allSettled([
+    readManifest(options?.recovery ? [] : undefined),
+    probeFirewallForOurRules(),
+    options?.probeWfp === false ? Promise.resolve(false) : hasWfpIpv6Protection(wfpRun)
+  ])
+  if (manifest.status === 'rejected') throw manifest.reason
+  if (manifest.value !== null) return true
+  if (rules.status === 'rejected') throw rules.reason
+  if (rules.value) return true
+  if (wfp.status === 'rejected') throw wfp.reason
+  return wfp.value
 }
 
 /** Presence above remains a cleanup gate. UI evidence must use this fresh read. */

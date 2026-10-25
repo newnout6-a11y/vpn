@@ -35,8 +35,8 @@ describe('persistent DNS policy reader native proof', () => {
     } finally { await worker.stop() }
     expect(worker.hasExited).toBe(true)
   }, 30000)
-  it.skipIf(process.platform !== 'win32')('reads network identity twice without breaking later frames (AT-10-007/AT-03-012)', async () => {
-    const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData')
+  it.skipIf(process.platform !== 'win32')('reads network identity in the isolated adapter worker without recovery authority (AT-10-007/AT-03-012)', async () => {
+    const worker = new RecoveryPsWorker(process.env.ProgramData || 'C:\\ProgramData', spawn, 'adapters')
     try {
       for (let read = 0; read < 2; read++) {
         const rows = JSON.parse(await worker.execute({ op: 'inspect-network-identity' }, 4000))
@@ -48,7 +48,8 @@ describe('persistent DNS policy reader native proof', () => {
           expect(Array.isArray(row.profiles)).toBe(true)
           expect(Array.isArray(row.gateways)).toBe(true)
         }
-        expect(JSON.parse(await worker.execute({ op: 'inspect-dns-policy' }))).toHaveLength(2)
+        await expect(worker.execute({ op: 'read', name: 'firewall.json' })).rejects.toMatchObject({ code: 'rejected' })
+        expect(await worker.execute({ op: 'inspect-owned-firewall-rules' })).toMatch(/^\d+$/)
       }
     } finally { await worker.stop() }
     expect(worker.hasExited).toBe(true)

@@ -824,7 +824,9 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(result.success).toBe(false)
     expect(state.scripts).toEqual([])
     expect(state.quarantines).toEqual([])
-    expect(state.wfpCalls).toEqual([])
+    // Independent read-only presence may overlap the rejected manifest;
+    // neither apply nor remove is admitted after that refusal.
+    expect(state.wfpCalls).toEqual(['presence'])
   })
   it('logs only bounded unique native phases without treating them as security proof (AT-00-005/AT-03-007)', async () => {
     state.nativeTimings = [

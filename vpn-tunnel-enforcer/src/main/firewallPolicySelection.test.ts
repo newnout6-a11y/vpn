@@ -1,7 +1,8 @@
 // AT-03-007: the elevated helper policy is chosen by the caller, not guessed from the first line of the script.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const state = vi.hoisted(() => ({ calls: [] as Array<{ script: string; policy: string }>, readOwnership: vi.fn() }))
+const state = vi.hoisted(() => ({ calls: [] as Array<{ script: string; policy: string }>, readOwnership: vi.fn(),
+  readManifest: vi.fn(), wfpPresence: vi.fn() }))
 
 vi.mock('electron', () => ({ app: { getPath: () => 'C:\\VPNTE' },
   BrowserWindow: { getAllWindows: () => [] }, dialog: { showMessageBox: vi.fn(async () => ({})) } }))
@@ -9,7 +10,7 @@ vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 vi.mock('./recoveryPsWorker', () => ({ executeRecoveryOperation: state.readOwnership }))
 vi.mock('./recoveryManifest', async importOriginal => ({
   ...await importOriginal<typeof import('./recoveryManifest')>(),
-  readRecoveryManifest: async () => null
+  readRecoveryManifest: state.readManifest
 }))
 vi.mock('./elevatedPsHelper', () => ({
   isElevatedPsHelperRunning: () => true,
@@ -22,8 +23,9 @@ vi.mock('./elevatedPsHelper', () => ({
 vi.mock('./wfpIpv6', async importOriginal => ({
   ...await importOriginal<typeof import('./wfpIpv6')>(),
   hasWfpIpv6Protection: async (run: (script: string) => Promise<{ stdout: string }>) => {
+    const present = await state.wfpPresence()
     await run('# WFP-PRESENCE')
-    return false
+    return present
   }
 }))
 
@@ -35,6 +37,8 @@ describe('firewall kill-switch helper policy', () => {
   beforeEach(() => {
     state.calls = []
     state.readOwnership.mockReset().mockResolvedValue('0')
+    state.readManifest.mockReset().mockResolvedValue(null)
+    state.wfpPresence.mockReset().mockResolvedValue(false)
     Object.defineProperty(process, 'platform', { value: 'win32' })
   })
   afterEach(() => { Object.defineProperty(process, 'platform', platform) })
@@ -59,5 +63,43 @@ describe('firewall kill-switch helper policy', () => {
     expect(state.calls).toHaveLength(1)
     expect(state.calls[0].script).toContain('Get-VpnteFirewallRuleNames')
     expect(state.calls[0].policy).toBe('firewall-killswitch')
+  })
+
+  it('overlaps all fresh reads and waits for their physical settlement (AT-03-004/007)', async () => {
+    let releaseManifest!: () => void, releaseWfp!: () => void
+    state.readManifest.mockReturnValue(new Promise(resolve => { releaseManifest = () => resolve(null) }))
+    state.wfpPresence.mockReturnValue(new Promise(resolve => { releaseWfp = () => resolve(false) }))
+    let settled = false
+    const pending = isKillSwitchActive().then(value => { settled = true; return value })
+    await vi.waitFor(() => expect(state.wfpPresence).toHaveBeenCalledOnce())
+    expect(state.readManifest).toHaveBeenCalledOnce()
+    expect(state.readOwnership).toHaveBeenCalledOnce()
+    releaseManifest()
+    await Promise.resolve(); await Promise.resolve()
+    expect(settled).toBe(false)
+    releaseWfp()
+    expect(await pending).toBe(false)
+  })
+
+  it('keeps an ACL refusal authoritative and drains other reads before rejecting (AT-03-003/007)', async () => {
+    const aclError = new Error('untrusted manifest ACL')
+    state.readManifest.mockRejectedValue(aclError)
+    state.readOwnership.mockResolvedValue('1')
+    let release!: () => void, settled = false
+    state.wfpPresence.mockReturnValue(new Promise(resolve => { release = () => resolve(false) }))
+    const pending = isKillSwitchActive().catch(error => { settled = true; return error })
+    await vi.waitFor(() => expect(state.wfpPresence).toHaveBeenCalledOnce())
+    expect(settled).toBe(false)
+    release()
+    expect(await pending).toBe(aclError)
+  })
+
+  it.each(['manifest', 'rules', 'neither'])('preserves result/error precedence with %s evidence (AT-03-007)', async evidence => {
+    if (evidence === 'manifest') state.readManifest.mockResolvedValue({ owner: 'VPNTE' })
+    if (evidence === 'rules') state.readOwnership.mockResolvedValue('1')
+    const error = new Error('WFP read failed')
+    state.wfpPresence.mockRejectedValue(error)
+    if (evidence === 'neither') await expect(isKillSwitchActive()).rejects.toBe(error)
+    else expect(await isKillSwitchActive()).toBe(true)
   })
 })
