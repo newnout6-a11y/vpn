@@ -9,6 +9,7 @@ vi.mock('fs/promises', async importOriginal => {
   return { ...mocked, default: mocked }
 })
 import { stageVerifiedRuntimeArtifact } from './runtimeArtifact'
+import { withRuntimeDirectoryInspection } from './runtimeFileCoordination'
 let directory: string, source: string, destination: string
 beforeEach(async () => { directory = await mkdtemp(join(tmpdir(), 'vpnte-runtime-hash-')); source = join(directory, 'bundled.exe'); destination = join(directory, 'runtime.exe'); await writeFile(source, 'trusted executable') })
 afterEach(async () => {
@@ -21,6 +22,22 @@ afterEach(async () => {
   await rm(directory, { recursive: true, force: true })
 })
 describe('runtime artifact authentication', () => {
+  it('keeps a simultaneous ACL tree scan outside the entire staging/cleanup lifetime (AT-01-009)', async () => {
+    const fs = await vi.importActual<typeof import('fs/promises')>('fs/promises')
+    let publish!: () => void, admitted!: () => void
+    const ready = new Promise<void>(done => { admitted = done })
+    const release = new Promise<void>(done => { publish = done })
+    vi.mocked(rename).mockImplementationOnce(async (from, to) => { admitted(); await release; await fs.rename(from, to) })
+    const staging = stageVerifiedRuntimeArtifact(source, destination)
+    await ready
+    let scanning = false
+    const scan = withRuntimeDirectoryInspection(directory, async () => { scanning = true; return readdir(directory) })
+    await Promise.resolve()
+    expect(scanning).toBe(false)
+    publish()
+    expect(await staging).toBe(true)
+    expect(await scan).toEqual(['bundled.exe', 'runtime.exe'])
+  })
   it('reuses only byte-identical copies', async () => {
     expect(await stageVerifiedRuntimeArtifact(source, destination)).toBe(true)
     expect(await stageVerifiedRuntimeArtifact(source, destination)).toBe(false)

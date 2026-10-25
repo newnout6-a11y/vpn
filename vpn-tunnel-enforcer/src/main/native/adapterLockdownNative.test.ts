@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const mocks = vi.hoisted(() => ({ spawn: vi.fn(), stage: vi.fn(), harden: vi.fn(), verify: vi.fn(), elevated: vi.fn(), exists: vi.fn() }))
+const mocks = vi.hoisted(() => ({ spawn: vi.fn(), stage: vi.fn(), harden: vi.fn(), verify: vi.fn(), elevated: vi.fn(), exists: vi.fn(), log: vi.fn() }))
 vi.mock('child_process', () => ({ spawn: mocks.spawn }))
 vi.mock('fs', () => ({ existsSync: mocks.exists }))
 vi.mock('os', () => ({ release: () => '10.0.26100' }))
@@ -12,7 +12,7 @@ vi.mock('../admin', () => ({ isProcessElevated: mocks.elevated }))
 vi.mock('../runtimePaths', () => ({ getPrivilegedRuntimeDir: () => 'C:\\ProgramData\\VPNTE\\runtime\\fixture\\tun-runtime' }))
 vi.mock('../runtimeArtifact', () => ({ stageVerifiedRuntimeArtifact: mocks.stage }))
 vi.mock('../runtimeDirSecurity', () => ({ ensureElevatedRuntimeDirHardened: mocks.harden, verifyDirectoryHardened: mocks.verify }))
-vi.mock('../appLogger', () => ({ logEvent: vi.fn() }))
+vi.mock('../appLogger', () => ({ logEvent: mocks.log }))
 
 import { encodeAdapterCommands, checkAdapterReceipt, runAdapterCommands, applyNativeAdapterLockdown, restoreNativeAdapterLockdown, type AdapterCommand } from './adapterLockdownNative'
 const guid = '11111111-1111-1111-1111-111111111111'
@@ -110,6 +110,29 @@ describe.skipIf(process.platform !== 'win32' || process.arch !== 'x64')('native 
     fixture(); mocks.harden.mockResolvedValue({ hardened: false })
     await expect(runAdapterCommands([command()])).rejects.toThrow('untrusted')
     expect(mocks.spawn).not.toHaveBeenCalled()
+  })
+  it('times trusted preparation separately from spawn and emits no paths or error text', async () => {
+    const child = fixture(), result = runAdapterCommands([command()])
+    await admitted()
+    const records = mocks.log.mock.calls.filter(call => call[2] === 'native adapter preparation timing').map(call => call[3])
+    expect(records).toEqual([
+      { phase: 'ensure-trust', outcome: 'verified', durationMs: expect.any(Number) },
+      { phase: 'stage-hash', outcome: 'reused', durationMs: expect.any(Number) },
+      { phase: 'verify-after-stage', outcome: 'verified', durationMs: expect.any(Number) },
+      { phase: 'total', outcome: 'verified', durationMs: expect.any(Number) }
+    ])
+    expect(mocks.log.mock.calls.some(call => call[2] === 'native adapter batch timing')).toBe(false)
+    expect(JSON.stringify(records)).not.toMatch(/ProgramData|VPNTE|resources|runtime.exe/)
+    child.stdout.write('A0_ipv6:off\nA0_dns:set\n'); child.emit('close', 0)
+    await result
+    mocks.log.mockClear(); mocks.stage.mockRejectedValueOnce(new Error('FAKE-SECRET C:\\private\\runtime.exe'))
+    await expect(runAdapterCommands([command()])).rejects.toThrow('FAKE-SECRET')
+    expect(mocks.log.mock.calls.filter(call => call[2] === 'native adapter preparation timing').map(call => call[3])).toEqual([
+      { phase: 'ensure-trust', outcome: 'verified', durationMs: expect.any(Number) },
+      { phase: 'stage-hash', outcome: 'failed', durationMs: expect.any(Number) },
+      { phase: 'total', outcome: 'failed', durationMs: expect.any(Number) }
+    ])
+    expect(JSON.stringify(mocks.log.mock.calls)).not.toMatch(/FAKE-SECRET|private|runtime.exe/)
   })
   it('preserves mobile IPv6/public Wi-Fi DNS and exact static restore actions', async () => {
     const adapter = { interfaceGuid: guid, ipv6Enabled: true, forcedIpv6Off: false, forcedDnsTo: null, ipv4DnsServers: [], isCellularOrTethering: true }

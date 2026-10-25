@@ -63,17 +63,33 @@ export function checkAdapterReceipt(output: string, commands: AdapterCommand[]):
   return output
 }
 
+type PreparationOutcome = 'verified' | 'refused' | 'staged' | 'reused'
+async function preparationPhase<T>(phase: 'ensure-trust' | 'stage-hash' | 'verify-after-stage', operation: () => Promise<T>, outcome: (value: T) => PreparationOutcome): Promise<T> {
+  const started = performance.now()
+  let result: PreparationOutcome | 'failed' = 'failed'
+  try { const value = await operation(); result = outcome(value); return value }
+  finally { logEvent('debug', 'phys-lockdown', 'native adapter preparation timing', { phase, outcome: result, durationMs: Math.round(performance.now() - started) }) }
+}
+
 async function executable(): Promise<string | null> {
-  if (process.platform !== 'win32' || process.arch !== 'x64' || process.env.VPNTE_DISABLE_NATIVE_LOCKDOWN === '1' ||
-      Number(release().split('.')[2]) < 19041) return null
-  const source = app.isPackaged ? join(process.resourcesPath, BINARY) : join(process.cwd(), 'resources', BINARY)
-  if (!existsSync(source) || !await isProcessElevated()) return null
-  const dir = getPrivilegedRuntimeDir('tun-runtime')
-  if (!(await ensureElevatedRuntimeDirHardened(dir, 'adapter-lockdown-native')).hardened) throw new Error('Native adapter runtime untrusted')
-  const destination = join(dir, BINARY)
-  await stageVerifiedRuntimeArtifact(source, destination)
-  if (!(await verifyDirectoryHardened(dir)).hardened) throw new Error('Native adapter runtime ACL not verified')
-  return destination
+  const started = performance.now()
+  let outcome = 'failed'
+  try {
+    if (process.platform !== 'win32' || process.arch !== 'x64' || process.env.VPNTE_DISABLE_NATIVE_LOCKDOWN === '1' ||
+        Number(release().split('.')[2]) < 19041) { outcome = 'unavailable'; return null }
+    const source = app.isPackaged ? join(process.resourcesPath, BINARY) : join(process.cwd(), 'resources', BINARY)
+    if (!existsSync(source) || !await isProcessElevated()) { outcome = 'unavailable'; return null }
+    const dir = getPrivilegedRuntimeDir('tun-runtime')
+    const aclOutcome = (value: { hardened: boolean }): PreparationOutcome => value.hardened ? 'verified' : 'refused'
+    if (!(await preparationPhase('ensure-trust', () => ensureElevatedRuntimeDirHardened(dir, 'adapter-lockdown-native'), aclOutcome)).hardened) throw new Error('Native adapter runtime untrusted')
+    const destination = join(dir, BINARY)
+    await preparationPhase('stage-hash', () => stageVerifiedRuntimeArtifact(source, destination), staged => staged ? 'staged' : 'reused')
+    if (!(await preparationPhase('verify-after-stage', () => verifyDirectoryHardened(dir), aclOutcome)).hardened) throw new Error('Native adapter runtime ACL not verified')
+    outcome = 'verified'
+    return destination
+  } finally {
+    logEvent('debug', 'phys-lockdown', 'native adapter preparation timing', { phase: 'total', outcome, durationMs: Math.round(performance.now() - started) })
+  }
 }
 
 export async function runAdapterCommands(commands: AdapterCommand[], signal?: AbortSignal, mode: '--batch' | '--restore' = '--batch'): Promise<string | null> {
