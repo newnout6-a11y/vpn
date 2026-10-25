@@ -24,6 +24,28 @@ describe('trusted firewall schema (AT-03-003, AT-03-012; F-186)', () => {
     expect(() => validateFirewallManifest(value)).toThrow()
   })
   it('rejects a forged policy snapshot', () => { expect(() => validateSavedProfiles([])).toThrow() })
+  it('preserves exact approved helper paths without mutating legacy journals (AT-03-003/012)', () => {
+    expect(validateFirewallManifest(manifest())).not.toHaveProperty('programRules')
+    const programRules = [{ name: 'VPNTE-killswitch-allow-proxy-0', program: 'C:\\ProgramData\\VPNTE\\tun-runtime\\vpnte-xray.exe' }]
+    const value = validateFirewallManifest({ ...manifest(), programRules })
+    expect(value.programRules).toEqual(programRules)
+    expect(value.programRules).not.toBe(programRules)
+  })
+  it.each([null, {}, [{ name: 'foreign', program: 'C:\\xray.exe' }],
+    [{ name: 'VPNTE-killswitch-allow-app', program: 'C:\\xray.exe' }],
+    ...['Any', '*', 'xray.exe', '\\\\server\\share\\xray.exe', 'C:\\..\\xray.exe', 'C:\\folder\\.\\xray.exe',
+      'C:\\xray.exe:other.exe', 'C:\\xray.exe\n', 'C:\\xray.dll'].map(program => [{ name: 'VPNTE-killswitch-allow-proxy-0', program }]),
+    [{ name: 'VPNTE-killswitch-allow-proxy-0', program: 'C:\\xray.exe' }, { name: 'VPNTE-killswitch-allow-proxy-0', program: 'C:\\other.exe' }]
+  ])('rejects invalid or ambiguous approved program metadata %j (AT-03-009/012)', programRules => {
+    expect(() => validateFirewallManifest({ ...manifest(), programRules })).toThrow('Invalid firewall program rules')
+  })
+  it('retains valid independent recovery steps after damaged program metadata (AT-03-003/007)', () => {
+    const rejected: string[] = []
+    const restored = validateFirewallManifest({ ...manifest(), programRules: [{ name: 'foreign', program: 'Any' }] }, rejected)
+    expect(restored.savedProfiles).toEqual(profiles)
+    expect(restored.programRules).toEqual([])
+    expect(rejected).toEqual(['firewall program scopes: invalid or conflicting snapshot; skipped'])
+  })
   it('never selects AppData as an authoritative source', () => {
     expect(getKillSwitchManifestPath()).toMatch(/VPNTE[\\/]manifests[\\/]firewall\.json$/)
   })

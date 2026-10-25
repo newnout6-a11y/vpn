@@ -629,6 +629,60 @@ describe('firewall transaction fault injection (AT-03-003/004/007; F-030, F-186)
     expect(state.writes).toHaveLength(writesBefore)
     expect(state.fallback).not.toHaveBeenCalled()
   })
+  it('journals exact Xray and helper scopes before effects and verifies their read-back (AT-03-001/009/012)', async () => {
+    const snapshot = await prepareVerifiedStatusFixture()
+    const program = 'C:\\ProgramData\\VPNTE\\tun-runtime\\vpnte-xray.exe'
+    const name = 'VPNTE-killswitch-allow-xray-engine'
+    state.scripts = []
+    expect(await ensureKillSwitchProgramAllowed(program, 'xray-engine')).toMatchObject({ success: true })
+    expect(state.manifest.programRules).toContainEqual({ name, program })
+    expect(state.manifest.ruleNames).toContain(name)
+    snapshot.rules.push({ ...snapshot.rules[0], name, program }); snapshot.storedNames.push(name)
+    state.statusSnapshot = JSON.stringify(snapshot)
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'verified' })
+    const { programRules: _programRules, ...legacy } = state.manifest
+    state.manifest = legacy
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'unknown', reason: 'incomplete-policy' })
+  })
+  it('does not mutate a helper rule if its exact scope cannot be journalled (AT-03-003/012)', async () => {
+    await enableKillSwitch(options)
+    state.scripts = []; state.failWrite = true
+    expect(await ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe', 'xray-engine')).toMatchObject({ success: false })
+    expect(state.scripts).toEqual([])
+  })
+  it('records initial exact proxy scopes in the prepared journal (AT-03-001/012)', async () => {
+    const program = 'C:\\ProgramData\\VPNTE\\tun-runtime\\vpnte-xray.exe'
+    expect(await enableKillSwitch({ ...options, proxyOwnerProgramPaths: [program] })).toMatchObject({ success: true })
+    expect(state.writes[0]).toMatchObject({ phase: 'prepared', programRules: [
+      { name: 'VPNTE-killswitch-allow-proxy-0', program },
+      { name: 'VPNTE-killswitch-allow-proxy-1', program: expect.stringContaining('vpnte-external-proxy.exe') }
+    ] })
+  })
+  it('logs only fixed mismatch codes once per changed observation and resets after verification (AT-00-005, AT-03-001)', async () => {
+    const snapshot = await prepareVerifiedStatusFixture()
+    await getFirewallKillSwitchStatus()
+    vi.mocked(logEvent).mockClear()
+    snapshot.rules[0].program = 'C:\\FAKE-SECRET\\other.exe'
+    state.statusSnapshot = JSON.stringify(snapshot)
+    for (let i = 0; i < 3; i++) await getFirewallKillSwitchStatus()
+    const events = () => vi.mocked(logEvent).mock.calls.filter(call => call[2] === 'passive policy mismatch')
+    expect(events()).toHaveLength(1)
+    expect(events()[0][3]).toEqual({ reason: 'program-scope' })
+    snapshot.foreignAllows = 1; state.statusSnapshot = JSON.stringify(snapshot)
+    await getFirewallKillSwitchStatus()
+    expect(events()).toHaveLength(2)
+    expect(events()[1][3]).toEqual({ reason: 'foreign-allows' })
+    expect(JSON.stringify(events())).not.toMatch(/FAKE-SECRET|other\.exe|C:/)
+    snapshot.foreignAllows = 0; snapshot.rules[0].program = options.singboxExePath
+    state.statusSnapshot = JSON.stringify(snapshot)
+    expect(await getFirewallKillSwitchStatus()).toMatchObject({ state: 'verified' })
+    snapshot.foreignAllows = 1; state.statusSnapshot = JSON.stringify(snapshot)
+    await getFirewallKillSwitchStatus()
+    expect(events()).toHaveLength(3)
+    await ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe', 'xray-engine')
+    await getFirewallKillSwitchStatus()
+    expect(events()).toHaveLength(4) // New mutation gets its own first observation.
+  })
   it('skips the Windows Firewall program rule without probing WFP-only protection (AT-03-003/010)', async () => {
     state.wfpActive = true
     expect(await ensureKillSwitchProgramAllowed('C:\\VPNTE\\xray.exe')).toMatchObject({ success: true, skipped: true })
