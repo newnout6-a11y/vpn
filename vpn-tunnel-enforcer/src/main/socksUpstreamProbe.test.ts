@@ -324,7 +324,7 @@ describe('authenticated candidate egress probe', () => {
     respondOne(index, '8.8.8.8')
     await expect(pending).resolves.toBe('8.8.8.8')
   })
-  it.each(['8.8.8.8', '2606:4700:4700::1111'])('accepts a complete HTTPS200 public address %s through the exact authenticated SOCKS socket', async ip => {
+  it.each(['8.8.8.8'])('accepts a complete HTTPS200 public address %s through the exact authenticated SOCKS socket', async ip => {
     const { pending } = await running()
     respond(` ${ip}\n`)
     await expect(pending).resolves.toBe(ip)
@@ -342,6 +342,30 @@ describe('authenticated candidate egress probe', () => {
     expect(JSON.stringify(options.headers)).not.toContain(upstream.password)
     expect(fixture.req.end).toHaveBeenCalledOnce()
     expect(fixture.sockets.every(socket => socket.closed)).toBe(true); expect(fixture.tlsSockets.every(socket => socket.closed)).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('rejects public IPv6 egress and drains every provider instead of returning a different TUN address family (AT-10-004)', async () => {
+    const { pending } = await running()
+    const failed = expect(pending).rejects.toMatchObject({ category: 'network' })
+    respond('2606:4700:4700::1111'); await failed
+    expect(fixture.logEvent.mock.calls.every(call => call[3].code === 'INVALID_PUBLIC_IP')).toBe(true)
+    expect(fixture.sockets.every(socket => socket.closed)).toBe(true)
+    expect(fixture.tlsSockets.every(socket => socket.closed)).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('keeps waiting after a fast IPv6 echo and returns the later IPv4 proof with all sockets closed (AT-10-004)', async () => {
+    const { pending } = await running(), finished = vi.fn()
+    const result = pending.then(ip => { finished(); return ip })
+    respondOne(0, '2606:4700:4700::1111')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(finished).not.toHaveBeenCalled()
+    expect(fixture.sockets[0].closed).toBe(true)
+    expect(fixture.tlsSockets[0].closed).toBe(true)
+    expect(fixture.requests[1].destroy).not.toHaveBeenCalled()
+    respondOne(1, '8.8.4.4')
+    await expect(result).resolves.toBe('8.8.4.4')
+    expect(fixture.sockets.every(socket => socket.closed)).toBe(true)
+    expect(fixture.tlsSockets.every(socket => socket.closed)).toBe(true)
     expect(vi.getTimerCount()).toBe(0)
   })
   it.each(['', '127.0.0.1', '10.0.0.1', '100.64.0.1', '192.0.2.1', '::1', '2001:db8::1', '8.8.8.8 garbage', '[8.8.8.8]'])(

@@ -20,14 +20,15 @@ app.whenReady().then(async () => {
   if (process.env.VPNTE_SOCKS_FORCE_HANG === '1') await new Promise(() => setInterval(() => {}, 1000))
   const originalCAs = getCACertificates('default')
   const peers = new Set<Socket>(), requests: Array<() => void> = []
-  let hold = false, primaryFailure = false
+  let hold = false, primaryFailure = false, ipv6: 'none' | 'all' | 'primary' = 'none'
   const backupHosts = new Set<string>()
   const endpoint = createServer({ key: LOOPBACK_KEY, cert: LOOPBACK_CERT }, (request, response) => {
     for (const notify of requests.splice(0)) notify()
     const host = String(request.headers.host || '').split(':')[0]
     if (primaryFailure) backupHosts.add(host)
-    const body = host === 'cloudflare.com' ? 'ip=8.8.8.8\n' : host === 'icanhazip.com' ? '8.8.8.8\n'
-      : JSON.stringify({ ip: '8.8.8.8', country: 'ZZ' })
+    const ip = ipv6 === 'all' || (ipv6 === 'primary' && host === 'cloudflare.com') ? '2606:4700:4700::1111' : '8.8.8.8'
+    const body = host === 'cloudflare.com' ? `ip=${ip}\n` : host === 'icanhazip.com' ? `${ip}\n`
+      : JSON.stringify({ ip, country: 'ZZ' })
     if (!hold) response.writeHead(primaryFailure && ['cloudflare.com', 'api.ipify.org'].includes(host) ? 503 : 200,
       { 'Content-Type': 'text/plain' }).end(body)
   })
@@ -63,6 +64,12 @@ app.whenReady().then(async () => {
     setDefaultCACertificates([LOOPBACK_CERT]) // This isolated fixture alone trusts its public test CA.
     assert.equal(await probeSocksUpstream(upstream), '8.8.8.8')
     await drained()
+    ipv6 = 'all'
+    await assert.rejects(probeSocksUpstream(upstream), (error: any) => error.category === 'network')
+    await drained()
+    ipv6 = 'primary'
+    assert.equal(await probeSocksUpstream(upstream), '8.8.8.8', 'An IPv6 echo must not displace the IPv4 egress proof')
+    await drained(); ipv6 = 'none'
     primaryFailure = true
     assert.equal(await probeSocksUpstream(upstream), '8.8.8.8', 'Backup provider must survive primary HTTP failure')
     assert([...backupHosts].some(host => ['icanhazip.com', 'api.myip.com'].includes(host)))
@@ -88,7 +95,7 @@ app.whenReady().then(async () => {
     } finally { controller.abort(); await cancelled }
     await drained()
     console.log('SOCKS_UPSTREAM_NATIVE_PASS', JSON.stringify({ electron: process.versions.electron,
-      checks: ['actual bundled Xray RFC1929', 'verified TLS and HTTPS', 'backup provider',
+      checks: ['actual bundled Xray RFC1929', 'verified TLS and HTTPS', 'IPv4 proof despite IPv6 echo', 'backup provider',
         'untrusted certificate rejected', 'wrong credentials rejected', 'cancellation closes native transports'] }))
   } finally {
     setDefaultCACertificates(originalCAs)

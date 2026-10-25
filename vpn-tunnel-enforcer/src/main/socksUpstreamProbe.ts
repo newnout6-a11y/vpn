@@ -176,7 +176,9 @@ function probeProvider(upstream: SocksUpstream, providerIndex: number, deadlineA
           incoming.once('end', () => {
             if (settled) return
             const ip = provider.parse(Buffer.concat(chunks).toString('utf8'))
-            if (!ip || !isIP(ip) || !isPublicIp(ip)) finish(new IpcFault('network'), undefined, 'INVALID_PUBLIC_IP')
+            // Retained TUN confirmation samples IPv4. An IPv6 echo cannot
+            // establish that identity or win the race against its IPv4 proof.
+            if (!ip || isIP(ip) !== 4 || !isPublicIp(ip)) finish(new IpcFault('network'), undefined, 'INVALID_PUBLIC_IP')
             else finish(undefined, ip)
           })
         })
