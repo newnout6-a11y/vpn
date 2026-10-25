@@ -16,6 +16,7 @@ vi.mock('./recoveryPsWorker', () => ({
   executeRecoveryOperation: vi.fn(async () => JSON.stringify(['smartNameResolution', 'parallelAandAAAA'].map(tag => ({ tag, exists: false, type: null, data: null }))))
 }))
 vi.mock('./elevatedPsHelper', () => ({ isElevatedPsHelperRunning: () => true, execElevatedPs: fixture.ps }))
+vi.mock('./native/adapterLockdownNative', () => ({ applyNativeAdapterLockdown: vi.fn(async () => null), restoreNativeAdapterLockdown: vi.fn(async () => null) }))
 
 beforeEach(() => {
   vi.resetModules(); vi.clearAllMocks()

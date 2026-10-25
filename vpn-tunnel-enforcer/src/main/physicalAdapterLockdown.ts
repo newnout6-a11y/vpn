@@ -3,6 +3,7 @@ import { executeAdapterInspection, executeRecoveryOperation, RecoveryWorkerError
 import { DNS_POLICY_SNAPSHOT_SCRIPT } from './recoveryPsProtocol'
 import { PHYSICAL_ADAPTER_DNS_SCRIPT, physicalAdapterSnapshotScript, normalizeRetainedAdapterGuids, TRANSITION_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
 import { readPhysicalAdaptersNative } from './native/physicalAdapterNative'
+import { applyNativeAdapterLockdown, restoreNativeAdapterLockdown } from './native/adapterLockdownNative'
 import { isIP } from 'net'
 import { networkInterfaces } from 'os'
 import { ipcError, type IpcError } from '../shared/ipc-result'
@@ -726,8 +727,10 @@ ${dnsLine}
 `
   }
 
-  // Also include the transition adapters in the same script
+  // Keep transition technology and global DNS policy semantics in the existing
+  // recovery-compatible batch. Native replaces only per-interface mutations.
   combinedScript += `
+# VPNTE_AUXILIARY_LOCKDOWN
 ${transitionAdapters.teredoType ? `try { netsh interface teredo set state type=disabled | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'native command failed' }; Write-Output 'TRANS_teredo:disabled' } catch { Write-Output "TRANS_teredo_err: $_" }` : "Write-Output 'TRANS_teredo:absent'"}
 ${transitionAdapters.sixToFourState ? `try { netsh interface 6to4 set state state=disabled | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'native command failed' }; Write-Output 'TRANS_6to4:disabled' } catch { Write-Output "TRANS_6to4_err: $_" }` : "Write-Output 'TRANS_6to4:absent'"}
 ${transitionAdapters.isatapState ? `try { netsh interface isatap set state state=disabled | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'native command failed' }; Write-Output 'TRANS_isatap:disabled' } catch { Write-Output "TRANS_isatap_err: $_" }` : "Write-Output 'TRANS_isatap:absent'"}
@@ -737,7 +740,9 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}
 `
 
   try {
-    const out = await runPS(combinedScript, 30000, options.signal)
+    const native = await applyNativeAdapterLockdown(pendingAdapters, tunDnsIpv4, forceDns, options.signal)
+    const script = native === null ? combinedScript : combinedScript.slice(combinedScript.indexOf('# VPNTE_AUXILIARY_LOCKDOWN'))
+    const out = (native ?? '') + await runPS(script, 30000, native === null ? options.signal : undefined)
     
     // Parse results for physical adapters
     for (let i = 0; i < adapters.length; i++) {
@@ -857,6 +862,7 @@ ${dnsRestoreLine}
 `
   }
 
+  combinedScript += '\n# VPNTE_AUXILIARY_LOCKDOWN\n'
   if (m.transitionAdapters) {
     combinedScript += `
 ${netshRestoreLine('TRANS_teredo', 'netsh interface teredo set state type=', m.transitionAdapters.teredoType)}
@@ -874,7 +880,16 @@ try { Clear-DnsClientCache -ErrorAction SilentlyContinue } catch {}`
   let restoredAdapters: string[] | undefined
   const warnings = [...rejected]
   try {
-    const out = await runPS(combinedScript, 30000)
+    let native: string | null
+    try { native = await restoreNativeAdapterLockdown(m.adapters, options.resetDnsToDhcp === true) }
+    catch {
+      // A failed native admission must not skip independent transition/DNS
+      // policy recovery. No interface batch is replayed after this refusal.
+      native = m.adapters.map((_, i) => `A${i}_ipv6_err: native code=1\nA${i}_dns_err: native code=1\n`).join('')
+      logEvent('warn', 'phys-lockdown', 'native adapter restore unavailable; independent policy recovery continues', { operationId, reason })
+    }
+    const script = native === null ? combinedScript : combinedScript.slice(combinedScript.indexOf('# VPNTE_AUXILIARY_LOCKDOWN'))
+    const out = (native ?? '') + await runPS(script, 30000)
     const lines = out.replace(/^\uFEFF/, '').split(/\r?\n/)
     const confirmedOutcome = (tag: string, states: string[]) => {
       const outcomes = lines.filter(line => line.startsWith(`${tag}:`) || line.startsWith(`${tag}_err:`))

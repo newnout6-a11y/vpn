@@ -38,6 +38,8 @@ nsis:
 portable:
   artifactName: VPN-Tunnel-Enforcer-${version}.${ext}
 extraResources:
+  - from: resources/vpnte-adapter-lockdown.exe
+    to: vpnte-adapter-lockdown.exe
   - from: resources/sing-box.exe
     to: sing-box.exe
   - from: resources/xray.exe

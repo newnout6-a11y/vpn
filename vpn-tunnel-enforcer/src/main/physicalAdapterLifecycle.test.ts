@@ -11,7 +11,7 @@ import { classifyRecoveryError } from './recoveryErrors'
 const source = readFileSync(join(process.cwd(), 'src/main/physicalAdapterLockdown.ts'), 'utf8')
 const ast = ts.createSourceFile('physicalAdapterLockdown.ts', source, ts.ScriptTarget.Latest, true)
 function compile<T>(name: string, deps: Record<string, unknown>): T {
-  deps = { ipcError, classifyRecoveryError, ...deps }
+  deps = { ipcError, classifyRecoveryError, applyNativeAdapterLockdown: async () => null, restoreNativeAdapterLockdown: async () => null, ...deps }
   const declaration = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
   if (!declaration) throw new Error(`Missing production function ${name}`)
   const js = ts.transpileModule(declaration.getText(ast).replace(/^export /, '') + `\nreturn ${name};`, {
@@ -33,7 +33,8 @@ function harness() {
     snapshotDnsRegistryPolicy: vi.fn(async () => ({ smartNameResolution: { exists: false }, parallelAandAAAA: { exists: false } })),
     rollbackPhysicalAdapterLockdownIfApplied: vi.fn(async () => ({ rolledBack: true })),
     runPS: vi.fn(async (_script: string, _timeout: number, _signal?: AbortSignal) => 'A0_ipv6:off\nA0_dns:skip' + policyProof),
-    registryApplyLine, psSingleQuote: quote, clearPhysicalAdaptersSnapshotCache: vi.fn()
+    registryApplyLine, psSingleQuote: quote, clearPhysicalAdaptersSnapshotCache: vi.fn(),
+    applyNativeAdapterLockdown: vi.fn(async (): Promise<string | null> => null)
   }
   const apply = compile<(dns: string, options?: { forceDns?: boolean; signal?: AbortSignal }) => Promise<any>>('applyPhysicalAdapterLockdown', deps)
   return { ...deps, apply }
@@ -45,6 +46,19 @@ function deferred<T>() {
 }
 
 describe('adapter rollback correlation (AT-03-007)', () => {
+  it('continues independent policy recovery after native staging refusal without replaying interface writes', async () => {
+    const deps = { process: { platform: 'win32' }, logEvent: vi.fn(), psSingleQuote: quote,
+      readManifest: async () => ({ adapters: [adapter()], dnsRegistryPolicy: {} }), registryRestoreLine: () => 'restore-independent-policy',
+      restoreNativeAdapterLockdown: vi.fn(async () => { throw new Error('untrusted native runtime') }),
+      runPS: vi.fn(async (_script: string) => 'DNS_SMNR:delete\nDNS_PARALLEL:delete'),
+      deleteManifest: vi.fn(), clearPhysicalAdaptersSnapshotCache: vi.fn() }
+    const rollback = compile<(reason: string) => Promise<any>>('rollbackPhysicalAdapterLockdownIfApplied', deps)
+    expect(await rollback('test')).toMatchObject({ success: false, rolledBack: false, restoredAdapters: [] })
+    expect(deps.runPS).toHaveBeenCalledOnce()
+    expect(deps.runPS.mock.calls[0][0]).toContain('restore-independent-policy')
+    expect(deps.runPS.mock.calls[0][0]).not.toMatch(/Enable-NetAdapterBinding|Set-DnsClientServerAddress|Get-NetAdapter/)
+    expect(deps.deleteManifest).not.toHaveBeenCalled()
+  })
   it.each([
     ['ifIndex', 0], ['alias', 'FAKE-PRIVATE\nPAYLOAD'], ['ipv6Enabled', null], ['forcedIpv6Off', 'private'],
     ['interfaceGuid', 'FAKE-PRIVATE-PAYLOAD'], ['ipv4DnsSource', 'private'], ['ipv4DnsServers', ['FAKE-PRIVATE-PAYLOAD']],
@@ -375,6 +389,28 @@ describe('physical adapter apply cancellation', () => {
 })
 
 describe('adapter native transport', () => {
+  it('calls native only after the durable journal and never replays its adapter mutations', async () => {
+    const h = harness()
+    h.runPS.mockResolvedValue(policyProof)
+    h.applyNativeAdapterLockdown.mockImplementation(async () => {
+      expect(h.writeManifest).toHaveBeenCalledOnce()
+      expect(h.runPS).not.toHaveBeenCalled()
+      return 'A0_ipv6:off\nA0_dns:skip\n'
+    })
+    expect(await h.apply('192.168.250.254', { forceDns: false })).toMatchObject({ applied: true, warnings: [] })
+    const script = h.runPS.mock.calls[0][0]
+    expect(script).toContain('VPNTE_AUXILIARY_LOCKDOWN')
+    expect(script).not.toMatch(/Disable-NetAdapterBinding|Set-DnsClientServerAddress|\$ownedAdapter/)
+    expect(h.writeManifest).toHaveBeenCalledTimes(2)
+  })
+  it('retains pending recovery after native failure while still running independent global policy', async () => {
+    const h = harness()
+    h.runPS.mockResolvedValue(policyProof)
+    h.applyNativeAdapterLockdown.mockResolvedValue('A0_ipv6_err: native code=1\nA0_dns_err: native code=1\n')
+    expect(await h.apply('192.168.250.254', { forceDns: false })).toMatchObject({ applied: true, warnings: [expect.stringContaining('native code=1')] })
+    expect(h.runPS.mock.calls[0][0]).not.toContain('Disable-NetAdapterBinding')
+    expect(h.writeManifest).toHaveBeenCalledOnce()
+  })
   it('admits the complete native apply through the physical helper policy', async () => {
     const h = harness(); await h.apply('192.168.250.254', { forceDns: false })
     const helperSource = readFileSync(join(process.cwd(), 'src/main/elevatedPsHelper.ts'), 'utf8')

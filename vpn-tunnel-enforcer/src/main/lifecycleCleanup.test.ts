@@ -381,6 +381,7 @@ describe('lifecycle cleanup evidence and retries (AT-02-005 / AT-03-007)', () =>
         adapters: [{ alias: 'FAKE-native-secret at C:\\private\\credentials.json' }],
         dnsRegistryPolicy: { smartNameResolution: { exists: false }, parallelAandAAAA: { exists: false } } }, rejected),
       registryRestoreLine: () => '', runPS: async () => 'DNS_SMNR:delete\nDNS_PARALLEL:delete',
+      restoreNativeAdapterLockdown: async () => null,
       clearPhysicalAdaptersSnapshotCache: noop(), deleteManifest: done()
     })
     h.rollbackPhysicalAdapterLockdownIfApplied.mockImplementation(() => rollback('TUN stopped'))
