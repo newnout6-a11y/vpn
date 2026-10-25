@@ -16,7 +16,7 @@ import {
 
 describe('ipMonitor multi-provider configuration', () => {
   it('contains the expected multi-provider check URLs', () => {
-    expect(IP_CHECK_URLS).toContain('https://cloudflare.com/cdn-cgi/trace')
+    expect(IP_CHECK_URLS).toContain('https://1.1.1.1/cdn-cgi/trace')
     expect(IP_CHECK_URLS).toContain('https://api.ipify.org?format=json')
     expect(IP_CHECK_URLS).toContain('https://icanhazip.com')
     expect(IP_CHECK_URLS).toContain('https://api.myip.com')
@@ -59,7 +59,8 @@ describe('fetchPublicIpFrom provider parsing', () => {
       'https://icanhazip.com',
       expect.objectContaining({
         httpAgent: expect.objectContaining({ keepAlive: false }),
-        httpsAgent: expect.objectContaining({ keepAlive: false })
+        httpsAgent: expect.objectContaining({ keepAlive: false }),
+        proxy: false, maxRedirects: 0, headers: expect.objectContaining({ Connection: 'close' })
       })
     )
   })

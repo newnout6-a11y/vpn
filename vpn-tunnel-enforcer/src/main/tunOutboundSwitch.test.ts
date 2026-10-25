@@ -78,7 +78,8 @@ function harness() {
       deferResume: vi.fn(() => { calls.push('defer') }),
       releaseDeferredResume: vi.fn(() => { calls.push('release') }),
       invalidateVpnIpBaseline: vi.fn(() => { calls.push('invalidate') }),
-      recheck: vi.fn(async (_rebaseline: boolean, _owner: () => boolean, _expectedIp: string): Promise<Evidence> => { calls.push('fresh-ip'); return fresh() })
+      recheck: vi.fn(async (_rebaseline: boolean, _owner: () => boolean, _expectedIp: string,
+        _options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<Evidence> => { calls.push('fresh-ip'); return fresh() })
     },
     activateXraySlot: vi.fn((slot: OutboundSlot) => { calls.push(`activate:${slot}`); state.active = slot }),
     stopXraySlot: vi.fn(async (slot: OutboundSlot, _reason: string) => { calls.push(`stop:${slot}`); running.delete(slot) }),
@@ -128,7 +129,9 @@ describe('retained TUN controller integration (AT-00-003 / AT-00-007 / AT-02-002
     expect(h.startXrayInSlot).toHaveBeenCalledWith('b', h.next.vpnProfile.outbound, expect.objectContaining({
       portOverride: 51002, socksAuth: h.initial.runtime.slots.b, resolvedIp: h.next.vpnProfile.resolvedIp
     }))
-    expect(h.ipMonitor.recheck).toHaveBeenCalledWith(true, expect.any(Function), '198.51.100.42')
+    expect(h.ipMonitor.recheck).toHaveBeenCalledWith(true, expect.any(Function), '198.51.100.42', {
+      timeoutMs: 2000, signal: expect.any(AbortSignal)
+    })
     expect(h.native).not.toHaveBeenCalled()
     expect(h.observations.at(-1)).toMatchObject({ phase: 'finished', verified: true })
   })
@@ -301,9 +304,23 @@ describe('retained TUN controller integration (AT-00-003 / AT-00-007 / AT-02-002
     expect(await pending).toMatchObject({ outcome: 'cancelled', committed: false, previousPreserved: true, candidateStopped: true })
     expect(h.ipMonitor.recheck).toHaveBeenCalledTimes(2)
     expect(h.ipMonitor.recheck.mock.calls[1][1]()).toBe(true)
+    expect(h.ipMonitor.recheck.mock.calls[0][3]?.signal?.aborted).toBe(true)
+    expect(h.ipMonitor.recheck.mock.calls[1][3]).toEqual({ timeoutMs: 1000, signal: undefined })
     expect(h.selectProtectedOutbound.mock.calls.map(call => call[1])).toEqual(['b', 'a'])
     expect(h.stopXraySlot).toHaveBeenCalledExactlyOnceWith('b', 'protected upstream transition')
     expect(h.onCommit).not.toHaveBeenCalled()
+    expect(h.native).not.toHaveBeenCalled()
+  })
+
+  it('never calls a timed-out recovery verified or publishes the candidate (AT-02-011)', async () => {
+    const h = harness()
+    h.startXrayInSlot.mockImplementationOnce(async () => { h.controller.abort(); throw new Error('cancelled') })
+    h.ipMonitor.recheck.mockResolvedValueOnce({ ip: null, vpnIp: null, isLeak: false })
+    expect(await h.run()).toMatchObject({ outcome: 'cancelled', committed: false, previousPreserved: false })
+    expect(h.ipMonitor.recheck.mock.calls[0][3]).toEqual({ timeoutMs: 1000, signal: undefined })
+    expect(h.onCommit).not.toHaveBeenCalled()
+    expect(h.observations.at(-1)).toMatchObject({ phase: 'finished', verified: false })
+    expect(h.ipMonitor.releaseDeferredResume).toHaveBeenCalledOnce()
     expect(h.native).not.toHaveBeenCalled()
   })
 

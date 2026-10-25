@@ -2760,6 +2760,10 @@ export function registerServerPickerHandlers(): void {
             throw new Error(cleanup.error || 'Очистка неудачной смены upstream не подтверждена')
           }
           ipMonitor.clearVpnIp()
+          if (fast.outcome === 'cancelled') {
+            logEvent('warn', 'server-picker', 'previous upstream restoration unverified after cancellation; VPN stopped')
+            throw new Error('Не удалось подтвердить прежнее подключение после отмены. VPN отключён.')
+          }
         }
         if (fast.outcome === 'cancelled' || generation !== profileSwitchGeneration) return { cancelled: true as const }
         throw err

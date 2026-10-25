@@ -46,7 +46,7 @@ describe('IP monitor session ownership (AT-00-003 / AT-02-005)', () => {
     expect(axios.get).toHaveBeenCalledTimes(4)
     current = false
     pending.resolve(response('198.51.100.99'))
-    expect(await result).toEqual({ ip: '203.0.113.1', vpnIp: '203.0.113.1', isLeak: false })
+    expect(await result).toEqual({ ip: kind === 'rebaseline' ? null : '203.0.113.1', vpnIp: '203.0.113.1', isLeak: false })
     expect(module.ipMonitor.getLastSuccessAt()).toBe(lastSuccess)
     expect(notify).not.toHaveBeenCalled()
     expect(recovered).not.toHaveBeenCalled()

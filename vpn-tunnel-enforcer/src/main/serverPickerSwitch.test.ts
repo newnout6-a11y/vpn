@@ -178,6 +178,23 @@ describe('server profile switching', () => {
     expect(state.ipMonitor.clearVpnIp).not.toHaveBeenCalled()
   })
 
+  it('reports failed cancellation restoration after verified cleanup instead of ordinary cancellation (AT-00-004 / AT-02-011)', async () => {
+    state.storeData.set('activeProfileId', 'a')
+    const held = deferred<any>()
+    state.switchOutbound.mockReturnValueOnce(held.promise)
+    const pending = selectProfileHandler({}, 'b')
+    await vi.waitFor(() => expect(state.switchOutbound).toHaveBeenCalledOnce())
+    await cancelSwitchHandler({})
+    held.resolve({ outcome: 'cancelled', committed: false, activeSlot: null, previousPreserved: false,
+      candidateStopped: true, previousStopped: false, failures: [{ phase: 'confirm-previous', message: 'unverified' }] })
+    await expect(pending).rejects.toThrow('Не удалось подтвердить прежнее подключение после отмены. VPN отключён.')
+    expect(state.stop).toHaveBeenCalledOnce()
+    expect(state.ipMonitor.clearVpnIp).toHaveBeenCalledOnce()
+    expect(state.storeData.get('activeProfileId')).toBe('a')
+    expect(state.restore).not.toHaveBeenCalled()
+    expect(state.restartProtected).not.toHaveBeenCalled()
+  })
+
   it('ignores user cancellation after upstream commit while previous cleanup drains (AT-00-003)', async () => {
     state.storeData.set('activeProfileId', 'a')
     const held = deferred<any>()

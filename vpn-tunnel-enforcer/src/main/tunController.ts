@@ -4407,7 +4407,12 @@ export const tunController = {
           const expectedIp = runtime.egressIps[slot]
           if (!expectedIp) throw new Error('Upstream egress identity is unavailable')
           ipMonitor.invalidateVpnIpBaseline()
-          const evidence = await ipMonitor.recheck(true, canPublish, expectedIp)
+          // Recovery has its own short, fresh proof after the cancelled wave
+          // drains. The user's aborted candidate signal cannot cancel it.
+          const evidence = await ipMonitor.recheck(true, canPublish, expectedIp, {
+            timeoutMs: slot === previous ? 1000 : 2000,
+            signal: slot === previous ? undefined : controller.signal
+          })
           if (!canPublish() || evidence.ip !== expectedIp || evidence.vpnIp !== expectedIp || evidence.isLeak
             || !getXraySlotStatus(slot).running || !(await areTunRoutesActive()) || !canPublish()) {
             throw new Error('Retained TUN egress proof failed')
