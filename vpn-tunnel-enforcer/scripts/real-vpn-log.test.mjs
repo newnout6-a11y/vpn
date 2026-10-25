@@ -82,6 +82,31 @@ test('domain failures and IPC rejections expose only fixed outcome labels', () =
   assert.deepEqual(failed, { at: base.ts, scope: 'tun', message: 'failed to prepare TUN runtime', errorKind: 'unknown-config-field' })
 })
 
+test('effective Xray configuration exposes only fixed source, entry and bounded graph counts (AT-00-005/AT-01-002)', () => {
+  const base = { ts: '2026-10-25T12:00:00.000Z', scope: 'xray', message: 'effective connection configuration' }
+  for (const source of ['translated-profile', 'preserved-xray-json']) {
+    for (const providerEntry of ['outbound', 'balancer']) {
+      const projected = safeAppEvent({ ...base, details: { source, providerEntry,
+        outboundCount: 4096, balancerCount: 0, virtualRouteCount: 2, fingerprint: 'FAKE-PRIVATE-PAYLOAD',
+        muxEnabled: true, tag: 'vpnte-source:FAKE-PRIVATE-PAYLOAD', address: 'private.test', profile: { password: 'FAKE-PRIVATE-PAYLOAD' } } })
+      assert.deepEqual(projected, { at: base.ts, scope: base.scope, message: base.message,
+        source, providerEntry, outboundCount: 4096, balancerCount: 0, virtualRouteCount: 2 })
+      assert.ok(!JSON.stringify(projected).includes('FAKE-PRIVATE'))
+      assert.ok(!JSON.stringify(projected).includes('private.test'))
+    }
+  }
+  for (const invalid of [-1, 0.5, 4097, Infinity, NaN, '2', null, {}, 'FAKE-PRIVATE-PAYLOAD']) {
+    assert.deepEqual(safeAppEvent({ ...base, details: { source: invalid, providerEntry: invalid,
+      outboundCount: invalid, balancerCount: invalid, virtualRouteCount: invalid } }),
+    { at: base.ts, scope: base.scope, message: base.message })
+  }
+  assert.equal(safeAppEvent({ ...base, scope: 'tun' }), null)
+  assert.equal(safeAppEvent({ ...base, message: 'effective connection configuration FAKE-PRIVATE-PAYLOAD' }), null)
+  assert.deepEqual(safeAppEvent({ ...base, message: 'start timing', details: {
+    source: 'translated-profile', providerEntry: 'outbound', outboundCount: 2, balancerCount: 1, virtualRouteCount: 3 } }),
+  { at: base.ts, scope: base.scope, message: 'start timing' })
+})
+
 test('admission refusal is logged before dispatch and does not prevent subsequent cleanup (AT-00-003)', async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
   await mkdir(temp, { recursive: true })

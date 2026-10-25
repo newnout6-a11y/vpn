@@ -20,7 +20,12 @@ $stage = 'ADAPTER_INVENTORY'
 $adapter = @(Get-NetAdapter -IncludeHidden | Where-Object { $TunAlias -and $_.Name -eq $TunAlias })
 $up = @($adapter | Where-Object { $_.Status -eq 'Up' })
 $stage = 'ADDRESS_INVENTORY'
-$addresses = @($up | ForEach-Object { Get-NetIPAddress -InterfaceIndex $_.ifIndex -ErrorAction Stop })
+# An Up adapter may have no addresses after teardown. A filtered CIM query
+# throws NotFound for that valid empty result; inventory first so OS failures
+# remain fatal and an empty match is reported as zero addresses.
+$addresses = @(if ($up.Count -gt 0) {
+    Get-NetIPAddress -ErrorAction Stop | Where-Object { $up.ifIndex -contains $_.InterfaceIndex }
+})
 $stage = 'PID_IDENTITY'
 $matching = $false
 if ($tun.Count -eq 1) {

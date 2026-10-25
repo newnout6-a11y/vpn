@@ -8,6 +8,7 @@ import { open } from 'node:fs/promises'
 import { join } from 'node:path'
 
 export function runtimeFailureKinds(text) {
+  const sample = String(text).slice(-65536)
   const kinds = []
   for (const [kind, pattern] of [
     ['dns-failed', /failed to (?:lookup|resolve|retrieve response)|dns[^\r\n]*(?:fail|timeout)/i],
@@ -20,9 +21,37 @@ export function runtimeFailureKinds(text) {
     ['unexpected-eof', /unexpected eof|read: eof/i],
     ['outbound-transfer-failed', /failed to (?:process outbound traffic|transfer request)/i],
     ['response-header-failed', /failed to read response header/i],
+    ['response-header-decode-failed', /failed to decode response header/i],
+    ['reality-invalid', /REALITY: (?:processed invalid connection|received real certificate \(potential MITM or redirection\))/i],
+    ['retry-exhausted', /all retry attempts failed/i],
     ['closed-pipe', /io: read\/write on closed pipe/i]
-  ]) if (pattern.test(String(text))) kinds.push(kind)
+  ]) if (pattern.test(sample)) kinds.push(kind)
   return kinds
+}
+
+// Pinned Xray v26.7.28 messages from proxy/socks, app/dispatcher,
+// proxy/vless/outbound, transport/internet/reality and common/retry.
+// Match only fixed producer/message structure. Tags, destinations and connection
+// IDs are consumed locally; output contains a fixed vocabulary and capped counts.
+export function runtimeRouteStageCounts(text) {
+  const patterns = [
+    ['socks-connect', /\bproxy\/socks: TCP Connect request to /],
+    ['sniffed', /\bapp\/dispatcher: sniffed domain: /],
+    ...['block', 'proxy', 'direct'].map(tag => [`detour-${tag}`,
+      new RegExp(`\\bapp/dispatcher: (?:Hit route rule: \\[[^\\]\\r\\n]*\\] so )?taking (?:platform initialized )?detour \\[${tag}\\] for \\[`)]),
+    ['detour-source', /\bapp\/dispatcher: (?:Hit route rule: \[[^\]\r\n]*\] so )?taking (?:platform initialized )?detour \[vpnte-source:[^\]\r\n]+\] for \[/],
+    ['detour-default', /\bapp\/dispatcher: default route for /],
+    ['tunneling-request', /\bproxy\/vless\/outbound: tunneling request to /],
+    ['missing-handler', /\bapp\/dispatcher: (?:non existing outTag: |non existing tag for platform initialized detour: |default outbound handler not exist(?:$|\s))/],
+    ['response-header-decode-failed', /\bproxy\/vless\/outbound: [^\r\n]*failed to decode response header/],
+    ['reality-invalid', /\btransport\/internet\/reality: REALITY: (?:processed invalid connection|received real certificate \(potential MITM or redirection\))/],
+    ['retry-exhausted', /\ball retry attempts failed\b/]
+  ]
+  const counts = {}
+  for (const line of String(text).slice(-65536).split(/\r?\n/)) {
+    for (const [stage, pattern] of patterns) if (pattern.test(line)) counts[stage] = Math.min(255, (counts[stage] ?? 0) + 1)
+  }
+  return counts
 }
 
 // Bounded, fixed-file inspection on the disposable hosted runner only. Raw
@@ -55,7 +84,8 @@ export async function inspectRuntimeFailures(directory, baseline) {
       const offset = before.state === 'present' ? before.size : 0
       const buffer = Buffer.alloc(Math.min(65536, info.size - offset))
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, Math.max(0, info.size - buffer.length))
-      return { file, checked: true, bytesRead, kinds: runtimeFailureKinds(buffer.subarray(0, bytesRead).toString('utf8')) }
+      const sample = buffer.subarray(0, bytesRead).toString('utf8')
+      return { file, checked: true, bytesRead, kinds: runtimeFailureKinds(sample), stageCounts: runtimeRouteStageCounts(sample) }
     } catch { return { file, checked: false, kinds: [] } }
     finally { await handle?.close().catch(() => {}) }
   }))
@@ -218,7 +248,9 @@ export async function seedScenario(invoke, seed) {
 // Fixed diagnostic vocabulary only: PowerShell may include private configuration
 // in its error output, so neither its message nor arbitrary native codes escape.
 export function safeWindowsOracleError(error) {
-  const stderr = String(error?.stderr ?? '')
+  // -EncodedCommand serializes errors as CLIXML. Decode only line separators
+  // so its escaped CR/LF cannot hide the boundary of an allowed fixed code.
+  const stderr = String(error?.stderr ?? '').replace(/_x000[DA]_/gi, '\n')
   const tag = stderr.match(/\bVPNTE_ORACLE_(?:RUNTIME_INVENTORY|CONFIG_READ|ADAPTER_INVENTORY|ADDRESS_INVENTORY|PID_IDENTITY|SELECTOR_READ|SELECTOR_IDENTITY|TUN_IDENTITY|SLOT_IDENTITY|ENDPOINT_ROUTE|REPORT_SERIALIZE)\b/)?.[0]
   const native = tag && stderr.match(/\bVPNTE_NATIVE_(?:ADDRESS_NOT_FOUND|ACCESS_DENIED|READ_FAILED)\b/)?.[0]
   const failure = new Error(`Windows oracle/shutdown failed${tag ? ` [${tag}]` : ''}; command output omitted`)

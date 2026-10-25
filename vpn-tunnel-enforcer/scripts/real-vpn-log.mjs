@@ -88,7 +88,7 @@ export function safeAppEvent(event) {
           'firewall kill-switch failed to engage — aborting start and rolling back',
           'startup validation failed — rolling back', 'startup runtime termination failed', 'startup rollback step failed',
           'retained TUN upstream switch finished'],
-        'ipc-security': ['IPC request rejected', 'IPC request failed'], xray: ['start timing'],
+        'ipc-security': ['IPC request rejected', 'IPC request failed'], xray: ['start timing', 'effective connection configuration'],
         'phys-lockdown': ['batch lockdown failed', 'transition adapters disabled', 'transition adapter snapshot failed',
           'DNS registry snapshot failed; refusing mutation without baseline', 'snapshot parse failed',
           'lockdown not checked: no physical adapters were discovered', 'adapter coverage rollback failed',
@@ -117,6 +117,14 @@ export function safeAppEvent(event) {
     if (['succeeded', 'failed', 'cancelled', 'backoff'].includes(event.details?.outcome)) result.outcome = event.details.outcome
   }
   if (event.scope === 'runtime-acl' && ['worker', 'standalone'].includes(event.details?.transport)) result.transport = event.details.transport
+  if (event.scope === 'xray' && event.message === 'effective connection configuration') {
+    if (['translated-profile', 'preserved-xray-json'].includes(event.details?.source)) result.source = event.details.source
+    if (['outbound', 'balancer'].includes(event.details?.providerEntry)) result.providerEntry = event.details.providerEntry
+    for (const key of ['outboundCount', 'balancerCount', 'virtualRouteCount']) {
+      const count = event.details?.[key]
+      if (Number.isInteger(count) && count >= 0 && count <= 4096) result[key] = count
+    }
+  }
   if (event.scope === 'tun' && event.message === 'retained TUN upstream switch finished') {
     if (['success', 'cancelled', 'failed'].includes(event.details?.outcome)) result.outcome = event.details.outcome
     for (const key of ['committed', 'previousPreserved', 'ownershipLost']) {

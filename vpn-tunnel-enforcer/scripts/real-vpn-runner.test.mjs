@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync, writeFileSync, appendFileSync, renameSync, readFileSync, rmSync, mkdirSync } from 'node:fs'
-import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership, verifySelectorTlsFlow, safeWindowsOracleError, runtimeFailureKinds, snapshotRuntimeLogs, inspectRuntimeFailures } from './real-vpn-runner.mjs'
+import { requireHostedWindows, readScenarioSecret, seedScenario, hostedLaunchArgs, verifyNativeTunOwnership, verifySelectorTlsFlow, safeWindowsOracleError, runtimeFailureKinds, runtimeRouteStageCounts, snapshotRuntimeLogs, inspectRuntimeFailures } from './real-vpn-runner.mjs'
 import { safeActionResult } from './real-vpn-log.mjs'
 
 test('Windows oracle failures expose only a fixed stage, never private command output (AT-00-005)', () => {
@@ -34,7 +34,7 @@ test('runtime failure inspection returns bounded fixed kinds without raw private
     writeFileSync(resolve(dir, 'xray-a.log'), 'FAKE-PRIVATE-key '.repeat(10000) + '\nfailed to retrieve response for private.test > connection reset by peer > tls handshake failed')
     const result = await inspectRuntimeFailures(dir, baseline)
     assert.deepEqual(result, [
-      { file: 'xray-a.log', checked: true, bytesRead: 65536, kinds: ['dns-failed', 'tls-rejected', 'connection-reset'] },
+      { file: 'xray-a.log', checked: true, bytesRead: 65536, kinds: ['dns-failed', 'tls-rejected', 'connection-reset'], stageCounts: {} },
       { file: 'xray-b.log', checked: false, kinds: [] }, { file: 'xray.log', checked: false, kinds: [] }
     ])
     assert.ok(!JSON.stringify(result).includes('FAKE-PRIVATE'))
@@ -48,11 +48,13 @@ test('runtime hints classify only the current step and refuse unknown or rotated
   const dir = mkdtempSync(resolve(temporary, 'real-vpn-log-boundary-'))
   const file = resolve(dir, 'xray-a.log')
   try {
-    writeFileSync(file, 'connection reset by peer from previous cancelled step\n')
+    writeFileSync(file, 'connection reset by peer from previous cancelled step\napp/dispatcher: taking detour [block] for [tcp:private.test:443]\n')
     const before = await snapshotRuntimeLogs(dir)
-    assert.deepEqual((await inspectRuntimeFailures(dir, before))[0], { file: 'xray-a.log', checked: true, bytesRead: 0, kinds: [] })
-    appendFileSync(file, 'connection refused in this step\n')
-    assert.deepEqual((await inspectRuntimeFailures(dir, before))[0].kinds, ['connection-refused'])
+    assert.deepEqual((await inspectRuntimeFailures(dir, before))[0], { file: 'xray-a.log', checked: true, bytesRead: 0, kinds: [], stageCounts: {} })
+    appendFileSync(file, 'connection refused in this step\napp/dispatcher: taking detour [proxy] for [tcp:private.test:443]\n')
+    const [current] = await inspectRuntimeFailures(dir, before)
+    assert.deepEqual(current.kinds, ['connection-refused'])
+    assert.deepEqual(current.stageCounts, { 'detour-proxy': 1 }, 'Prior cancelled-step routes must not be counted')
     assert.equal((await inspectRuntimeFailures(dir))[0].checked, false)
     writeFileSync(file, 'unexpected eof')
     assert.equal((await inspectRuntimeFailures(dir, before))[0].checked, false, 'Truncation cannot include prior bytes')
@@ -66,6 +68,58 @@ test('runtime hints classify only the current step and refuse unknown or rotated
 test('common Xray terminal hints retain only fixed categories (AT-00-005)', () => {
   assert.deepEqual(runtimeFailureKinds('private.test FAKE-PRIVATE-key > failed to process outbound traffic > failed to transfer request > failed to read response header > io: read/write on closed pipe'),
     ['outbound-transfer-failed', 'response-header-failed', 'closed-pipe'])
+})
+
+test('pinned Xray route stages expose fixed counts without destinations, rules or source tags (AT-00-005/AT-01-002)', () => {
+  const privateValue = 'FAKE-PRIVATE-key-private.test-10.0.0.1'
+  const fixture = [
+    `proxy/socks: TCP Connect request to tcp:${privateValue}:443`,
+    `app/dispatcher: sniffed domain: ${privateValue}`,
+    `app/dispatcher: Hit route rule: [${privateValue}] so taking detour [block] for [tcp:${privateValue}:443]`,
+    `app/dispatcher: taking detour [proxy] for [tcp:${privateValue}:443]`,
+    `app/dispatcher: taking platform initialized detour [direct] for [tcp:${privateValue}:443]`,
+    `app/dispatcher: taking detour [vpnte-source:${privateValue}] for [tcp:${privateValue}:443]`,
+    `app/dispatcher: default route for tcp:${privateValue}:443`,
+    `proxy/vless/outbound: tunneling request to tcp:${privateValue}:443 via tcp:${privateValue}:443`,
+    `app/dispatcher: non existing outTag: ${privateValue}`,
+    `app/dispatcher: non existing tag for platform initialized detour: ${privateValue}`,
+    'app/dispatcher: default outbound handler not exist',
+    `proxy/vless/outbound: failed to transfer request > failed to decode response header > ${privateValue}`,
+    `transport/internet/reality: REALITY: processed invalid connection > ${privateValue}`,
+    `transport/internet/reality: REALITY: received real certificate (potential MITM or redirection) > ${privateValue}`,
+    `common/retry: all retry attempts failed > ${privateValue}`
+  ].map(line => `2026/10/25 10:00:00.123456 [Info] [123456789] ${line}`).join('\r\n')
+  const counts = runtimeRouteStageCounts(fixture)
+  assert.deepEqual(counts, { 'socks-connect': 1, sniffed: 1, 'detour-block': 1, 'detour-proxy': 1,
+    'detour-direct': 1, 'detour-source': 1, 'detour-default': 1, 'tunneling-request': 1,
+    'missing-handler': 3, 'response-header-decode-failed': 1, 'reality-invalid': 2, 'retry-exhausted': 1 })
+  for (const value of ['FAKE-PRIVATE', 'private.test', '10.0.0.1', '123456789', 'vpnte-source:']) {
+    assert.ok(!JSON.stringify(counts).includes(value))
+  }
+})
+
+test('Xray stage matching requires fixed producers and exact static route tags (AT-00-005/AT-01-002)', () => {
+  const lines = [
+    'unknown/private: TCP Connect request to private.test:443',
+    'unknown/private: sniffed domain: private.test',
+    'unknown/private: taking detour [block] for [tcp:private.test:443]',
+    'unknown/private: tunneling request to tcp:private.test:443',
+    ...['block-secret', 'secret-proxy', 'direct-secret', 'vpnte-source:', 'FAKE-PRIVATE'].map(tag =>
+      `app/dispatcher: taking detour [${tag}] for [tcp:private.test:443]`)
+  ]
+  assert.deepEqual(runtimeRouteStageCounts(lines.join('\n')), {})
+})
+
+test('Xray stage counters saturate and both diagnostic classifiers ignore bytes outside the tail (AT-00-005)', () => {
+  const line = 'proxy/socks: TCP Connect request to tcp:private.test:443\n'
+  assert.deepEqual(runtimeRouteStageCounts(line.repeat(300)), { 'socks-connect': 255 })
+  const old = `${line}failed to decode response header > REALITY: processed invalid connection > all retry attempts failed\n`
+  const tail = 'x'.repeat(65536)
+  assert.deepEqual(runtimeRouteStageCounts(old + tail), {})
+  assert.deepEqual(runtimeFailureKinds(old + tail), [])
+  assert.deepEqual(runtimeFailureKinds('FAKE-PRIVATE > failed to decode response header > REALITY: processed invalid connection > all retry attempts failed'),
+    ['response-header-decode-failed', 'reality-invalid', 'retry-exhausted'])
+  assert.deepEqual(runtimeFailureKinds('REALITY: received real certificate (potential MITM or redirection)'), ['reality-invalid'])
 })
 
 test('Windows oracle distinguishes no TUN from unreadable configuration without echoing it (AT-00-005)', { skip: process.platform !== 'win32', timeout: 20000 }, () => {
@@ -165,7 +219,7 @@ test('endpoint OS-route oracle checks both private slot configs using synthetic 
     writeFileSync(fixture, `param([string]$RuntimeDir,[string]$Mode)
 function Get-CimInstance { param($ClassName,$Filter) [pscustomobject]@{Name='vpnte-sing-box.exe';ExecutablePath=(Join-Path $RuntimeDir 'vpnte-sing-box.exe');ProcessId=123;CommandLine=(Join-Path $RuntimeDir 'sing-box.json')} }
 function Get-NetAdapter { param([switch]$IncludeHidden) [pscustomobject]@{Name='Ethernet 5';Status='Up';ifIndex=7;InterfaceGuid='${guid}';DriverDescription='Wintun';PnPDeviceID='SWD\\Wintun\\fixture'} }
-function Get-NetIPAddress { param($InterfaceIndex) [pscustomobject]@{IPAddress='192.168.250.253';PrefixLength=30} }
+function Get-NetIPAddress { param($InterfaceIndex) [pscustomobject]@{InterfaceIndex=7;IPAddress='192.168.250.253';PrefixLength=30} }
 function Get-Content { param($LiteralPath,[switch]$Raw)
  if($LiteralPath -like '*tun-owner.json'){ '{"schemaVersion":1,"owner":"VPNTE","alias":"Ethernet 5","interfaceGuid":"${guid}"}' }
  else { Microsoft.PowerShell.Management\\Get-Content -LiteralPath $LiteralPath -Raw }
@@ -317,10 +371,16 @@ test('multiple imported profiles, duplicate A/B and changed settings never count
 test('Windows oracle publishes only separated fixed stages and native read categories (AT-00-005)', () => {
   for (const stage of ['PID_IDENTITY', 'SELECTOR_READ', 'REPORT_SERIALIZE']) {
     for (const native of ['ADDRESS_NOT_FOUND', 'ACCESS_DENIED', 'READ_FAILED']) {
-      const error = safeWindowsOracleError({ stderr: `FAKE-PRIVATE-key VPNTE_ORACLE_${stage} VPNTE_NATIVE_${native}` })
-      assert.deepEqual(safeActionResult(error), { oracleCode: `VPNTE_ORACLE_${stage}`, oracleNativeCode: `VPNTE_NATIVE_${native}` })
-      assert.ok(!JSON.stringify(error).includes('FAKE-PRIVATE'))
+      for (const ending of ['', '\n', '_x000D__x000A_', '_x000d__x000a_']) {
+        const error = safeWindowsOracleError({ stderr: `FAKE-PRIVATE-key VPNTE_ORACLE_${stage} VPNTE_NATIVE_${native}${ending}` })
+        assert.deepEqual(safeActionResult(error), { oracleCode: `VPNTE_ORACLE_${stage}`, oracleNativeCode: `VPNTE_NATIVE_${native}` })
+        assert.ok(!JSON.stringify(error).includes('FAKE-PRIVATE'))
+      }
     }
+  }
+  for (const suffix of ['_PRIVATE', '_x0041_', '_x000DPRIVATE']) {
+    const error = safeWindowsOracleError({ stderr: `VPNTE_ORACLE_ADDRESS_INVENTORY VPNTE_NATIVE_READ_FAILED${suffix}` })
+    assert.deepEqual(safeActionResult(error), { oracleCode: 'VPNTE_ORACLE_ADDRESS_INVENTORY' })
   }
   for (const native of ['READ_FAILED_PRIVATE', 'PRIVATE', 'ACCESS_DENIED\nFAKE-PRIVATE']) {
     const value = safeActionResult({ oracleCode: 'VPNTE_ORACLE_ADDRESS_INVENTORY', oracleNativeCode: `VPNTE_NATIVE_${native}` })
@@ -328,7 +388,7 @@ test('Windows oracle publishes only separated fixed stages and native read categ
   }
 })
 
-test('Windows address inventory failure stays fatal and emits its fixed native category (AT-00-005)', { skip: process.platform !== 'win32', timeout: 15000 }, () => {
+test('Windows encoded oracle failure stays fatal and preserves only fixed categories through CLIXML (AT-00-005)', { skip: process.platform !== 'win32', timeout: 15000 }, () => {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..'), temporary = resolve(root, '.tmp')
   mkdirSync(temporary, { recursive: true })
   const dir = mkdtempSync(resolve(temporary, 'real-vpn-address-fault-'))
@@ -343,13 +403,50 @@ function Get-NetIPAddress { [CmdletBinding()] param($InterfaceIndex)
 }
 & ${quote(resolve(root, 'scripts/real-vpn-windows.ps1'))} -RuntimeDir $RuntimeDir -ExpectedPid 0 -TunAlias 'Ethernet 5'
 `)
-    const child = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', fixture, '-RuntimeDir', dir],
+    const source = `$ErrorActionPreference='Stop';\n& ${quote(fixture)} -RuntimeDir ${quote(dir)}`
+    const powershell = resolve(process.env.SystemRoot || 'C:\\Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe')
+    const child = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64')],
       { encoding: 'utf8', windowsHide: true, timeout: 8000 })
     assert.notEqual(child.status, 0)
-    assert.match(child.stderr, /VPNTE_ORACLE_ADDRESS_INVENTORY VPNTE_NATIVE_ADDRESS_NOT_FOUND/)
+    assert.match(child.stderr, /^#< CLIXML/)
+    assert.match(child.stderr, /VPNTE_ORACLE_ADDRESS_INVENTORY VPNTE_NATIVE_ADDRESS_NOT_FOUND_x000D__x000A_/)
+    const error = safeWindowsOracleError(child)
+    assert.deepEqual(safeActionResult(error), {
+      oracleCode: 'VPNTE_ORACLE_ADDRESS_INVENTORY', oracleNativeCode: 'VPNTE_NATIVE_ADDRESS_NOT_FOUND'
+    })
+    assert.equal(error.message, 'Windows oracle/shutdown failed [VPNTE_ORACLE_ADDRESS_INVENTORY]; command output omitted')
     assert.doesNotMatch(child.stdout + child.stderr, /FAKE-PRIVATE-key/)
   } finally {
     assert.equal(dirname(resolve(dir)), temporary)
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('Windows oracle inventories addresses before filtering an Up adapter with no IP (AT-00-005)', { skip: process.platform !== 'win32', timeout: 20000 }, () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..'), temporary = resolve(root, '.tmp')
+  mkdirSync(temporary, { recursive: true })
+  const dir = mkdtempSync(resolve(temporary, 'real-vpn-empty-addresses-'))
+  try {
+    const quote = value => "'" + value.replaceAll("'", "''") + "'"
+    for (const hasAddress of [false, true]) {
+      const fixture = resolve(dir, 'fixture.ps1')
+      writeFileSync(fixture, `param([string]$RuntimeDir)
+function Get-CimInstance { param($ClassName,$Filter) }
+function Get-NetAdapter { param([switch]$IncludeHidden) [pscustomobject]@{Name='Ethernet 5';Status='Up';ifIndex=7} }
+function Get-NetIPAddress { [CmdletBinding()] param($InterfaceIndex)
+  if ($PSBoundParameters.ContainsKey('InterfaceIndex')) { throw 'Filtered query cannot prove empty inventory' }
+  [pscustomobject]@{InterfaceIndex=8;IPAddress='192.0.2.1';PrefixLength=24}
+  ${hasAddress ? "[pscustomobject]@{InterfaceIndex=7;IPAddress='192.168.250.253';PrefixLength=30}" : ''}
+}
+& ${quote(resolve(root, 'scripts/real-vpn-windows.ps1'))} -RuntimeDir $RuntimeDir -ExpectedPid 0 -TunAlias 'Ethernet 5'
+`)
+      const child = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', fixture, '-RuntimeDir', dir],
+        { encoding: 'utf8', windowsHide: true, timeout: 8000 })
+      assert.equal(child.status, 0, child.stderr)
+      const result = JSON.parse(child.stdout.trim())
+      assert.equal(result.adapterUp, true, 'An addressless Up adapter still prevents a clean-disconnect proof')
+      assert.equal(result.interfaceAddressCount, hasAddress ? 1 : 0)
+      assert.equal(result.runtimeProcessCount, 0)
+    }
+  } finally { assert.equal(dirname(dir), temporary); rmSync(dir, { recursive: true, force: true }) }
 })
