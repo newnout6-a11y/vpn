@@ -1,12 +1,11 @@
 // AT-02-004; AT-10-004: actual Electron/BoringSSL + bundled Xray, confined to loopback.
 import { app } from 'electron'
 import { strict as assert } from 'node:assert'
-import { spawn } from 'node:child_process'
-import { createServer as createTcpServer, type AddressInfo, type Socket } from 'node:net'
+import { connect, type Socket } from 'node:net'
 import { createServer } from 'node:https'
 import { getCACertificates, setDefaultCACertificates } from 'node:tls'
-import { mkdir, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
 import { probeSocksUpstream } from '../../src/main/socksUpstreamProbe'
 import { LOOPBACK_CERT, LOOPBACK_KEY } from './socks-upstream-certificate'
 
@@ -18,50 +17,55 @@ const wait = (ms: number) => new Promise<void>(done => setTimeout(done, ms))
 app.whenReady().then(async () => {
   await mkdir(directory, { recursive: true })
   assert(process.versions.electron, 'This fixture must use real Electron')
+  if (process.env.VPNTE_SOCKS_FORCE_HANG === '1') await new Promise(() => setInterval(() => {}, 1000))
   const originalCAs = getCACertificates('default')
   const peers = new Set<Socket>(), requests: Array<() => void> = []
   let hold = false, primaryFailure = false
+  const backupHosts = new Set<string>()
   const endpoint = createServer({ key: LOOPBACK_KEY, cert: LOOPBACK_CERT }, (request, response) => {
     for (const notify of requests.splice(0)) notify()
-    if (!hold) response.writeHead(primaryFailure && request.headers.host === 'api.ipify.org' ? 503 : 200,
-      { 'Content-Type': 'text/plain' }).end('8.8.8.8\n')
+    const host = String(request.headers.host || '').split(':')[0]
+    if (primaryFailure) backupHosts.add(host)
+    const body = host === 'cloudflare.com' ? 'ip=8.8.8.8\n' : host === 'icanhazip.com' ? '8.8.8.8\n'
+      : JSON.stringify({ ip: '8.8.8.8', country: 'ZZ' })
+    if (!hold) response.writeHead(primaryFailure && ['cloudflare.com', 'api.ipify.org'].includes(host) ? 503 : 200,
+      { 'Content-Type': 'text/plain' }).end(body)
   })
   endpoint.on('tlsClientError', () => {})
   endpoint.on('connection', socket => {
     peers.add(socket); socket.on('error', () => {}); socket.once('close', () => peers.delete(socket))
   })
-  await new Promise<void>(done => endpoint.listen(0, '127.0.0.1', done))
-  const endpointPort = (endpoint.address() as AddressInfo).port
-  const reservation = createTcpServer()
-  await new Promise<void>(done => reservation.listen(0, '127.0.0.1', done))
-  const port = (reservation.address() as AddressInfo).port
-  await new Promise<void>(done => reservation.close(() => done()))
+  const port = Number(process.env.VPNTE_SOCKS_UPSTREAM_PORT)
+  await new Promise<void>(done => endpoint.listen(Number(process.env.VPNTE_SOCKS_ENDPOINT_PORT), '127.0.0.1', done))
   const upstream = { port, username: 'loopback-user', password: 'loopback-password' }
-  const config = join(directory, 'xray.json')
-  await writeFile(config, JSON.stringify({ log: { loglevel: 'none' },
-    inbounds: [{ listen: '127.0.0.1', port, protocol: 'socks', settings: {
-      auth: 'password', accounts: [{ user: upstream.username, pass: upstream.password }], udp: false } }],
-    outbounds: [{ protocol: 'freedom', settings: { redirect: `127.0.0.1:${endpointPort}` } }]
-  }))
-  const xray = spawn(resolve('resources/xray.exe'), ['run', '-c', config], { windowsHide: true, stdio: 'ignore' })
-  const exited = new Promise<void>(done => xray.once('close', () => done()))
   const drained = async () => {
     const deadline = Date.now() + 1000
     while (peers.size && Date.now() < deadline) await wait(10)
     assert.equal(peers.size, 0, 'Probe must close the actual TLS peer before reuse')
   }
   try {
-    await new Promise<void>((done, fail) => { xray.once('spawn', () => done()); xray.once('error', fail) })
-    setDefaultCACertificates([LOOPBACK_CERT]) // This isolated fixture alone trusts its public test CA.
-    const readyBy = Date.now() + 2000
+    // Listener startup has its own budget; the production probe keeps its 2 s deadline.
+    const readyBy = Date.now() + 5000
     while (true) {
-      assert.equal(xray.exitCode, null, 'Loopback Xray exited before readiness')
-      try { assert.equal(await probeSocksUpstream(upstream), '8.8.8.8'); break }
+      try {
+        await new Promise<void>((done, fail) => {
+          const socket = connect(port, '127.0.0.1')
+          let failure: Error | undefined
+          socket.once('connect', () => socket.destroy())
+          socket.once('error', error => { failure = error })
+          socket.once('close', () => { if (failure) fail(failure); else done() })
+          socket.setTimeout(100, () => socket.destroy(new Error('Loopback listener not ready')))
+        })
+        break
+      }
       catch (error) { if (Date.now() >= readyBy) throw error; await wait(20) }
     }
+    setDefaultCACertificates([LOOPBACK_CERT]) // This isolated fixture alone trusts its public test CA.
+    assert.equal(await probeSocksUpstream(upstream), '8.8.8.8')
     await drained()
     primaryFailure = true
     assert.equal(await probeSocksUpstream(upstream), '8.8.8.8', 'Backup provider must survive primary HTTP failure')
+    assert([...backupHosts].some(host => ['icanhazip.com', 'api.myip.com'].includes(host)))
     await drained(); primaryFailure = false
     setDefaultCACertificates(originalCAs)
     await assert.rejects(probeSocksUpstream(upstream), (error: any) => error.category === 'network')
@@ -89,11 +93,6 @@ app.whenReady().then(async () => {
   } finally {
     setDefaultCACertificates(originalCAs)
     for (const peer of peers) peer.destroy()
-    if (xray.exitCode === null && xray.signalCode === null) xray.kill()
-    let timer: ReturnType<typeof setTimeout> | undefined
-    await Promise.race([exited, new Promise<never>((_done, fail) => {
-      timer = setTimeout(() => fail(new Error('Loopback Xray exit was not confirmed')), 2000)
-    })]).finally(() => clearTimeout(timer))
     await new Promise<void>(done => endpoint.close(() => done()))
   }
   app.exit(0)

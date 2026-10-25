@@ -24,6 +24,8 @@ class FixtureSocket extends EventEmitter {
 vi.mock('./appLogger', () => ({ logEvent: fixture.logEvent }))
 
 const upstream = { port: 51002, username: 'candidate-user', password: 'candidate-secret' }
+const PROVIDER_HOSTS = ['cloudflare.com', 'api.ipify.org', 'icanhazip.com', 'api.myip.com'] as const
+const providerIndexForHost = (host: string) => PROVIDER_HOSTS.indexOf(host as typeof PROVIDER_HOSTS[number])
 let probe: typeof import('./socksUpstreamProbe').probeSocksUpstream
 beforeEach(async () => {
   vi.resetModules(); vi.useFakeTimers(); vi.clearAllMocks()
@@ -43,13 +45,13 @@ beforeEach(async () => {
     return { socket: options.existing_socket }
   })
   fixture.tlsConnect.mockImplementation((options: any) => {
-    const secured = new FixtureSocket(); fixture.tlsSockets[options.servername === 'api.ipify.org' ? 0 : 1] = secured
+    const secured = new FixtureSocket(); fixture.tlsSockets[providerIndexForHost(options.servername)] = secured
     fixture.tls ??= secured
     return secured
   })
   fixture.request.mockImplementation((options: any, callback: any) => {
     const req = Object.assign(new EventEmitter(), { destroy: vi.fn(), end: vi.fn() })
-    const providerIndex = options.hostname === 'api.ipify.org' ? 0 : 1
+    const providerIndex = providerIndexForHost(options.hostname)
     fixture.responseCallbacks[providerIndex] = callback; fixture.requests[providerIndex] = req
     fixture.responseCallback ??= callback; fixture.req ??= req
     return req
@@ -72,8 +74,13 @@ async function realTransport(options: { trustCertificate?: boolean; holdResponse
   }
   const endpoint = https.createServer({ key: LOOPBACK_KEY, cert: LOOPBACK_CERT }, (request, response) => {
     requests++
-    if (!options.holdResponse) response.writeHead(options.primaryFailure && request.headers.host === 'api.ipify.org' ? 503 : 200,
-      { 'Content-Type': 'text/plain' }).end('8.8.8.8\n')
+    if (!options.holdResponse) {
+      const host = String(request.headers.host || '').split(':')[0]
+      const failed = options.primaryFailure && ['cloudflare.com', 'api.ipify.org'].includes(host)
+      const body = host === 'cloudflare.com' ? 'ip=8.8.8.8\n' : host === 'icanhazip.com' ? '8.8.8.8\n'
+        : JSON.stringify({ ip: '8.8.8.8', country: 'ZZ' })
+      response.writeHead(failed ? 503 : 200, { 'Content-Type': 'text/plain' }).end(body)
+    }
   })
   endpoint.on('connection', own)
   endpoint.on('tlsClientError', () => {})
@@ -113,7 +120,7 @@ async function realTransport(options: { trustCertificate?: boolean; holdResponse
         if (buffered.length < length) return
         const destination = `${buffered.subarray(5, length - 2).toString()}:${buffered.readUInt16BE(length - 2)}`
         destinations.push(destination)
-        if (!['api.ipify.org:443', 'icanhazip.com:443'].includes(destination)) { socket.destroy(); return }
+        if (!PROVIDER_HOSTS.some(host => `${host}:443` === destination)) { socket.destroy(); return }
         const trailing = buffered.subarray(length)
         phase = 3; socket.off('data', receive)
         // Only the requested logical endpoint is rewritten, always to our own listener.
@@ -217,8 +224,8 @@ describe('real authenticated SOCKS5 → verified TLS → HTTPS loopback transpor
     try {
       await expect(transport.probe()).resolves.toBe('8.8.8.8')
       expect(transport.authenticated).toBeGreaterThanOrEqual(1); expect(transport.requests).toBeGreaterThanOrEqual(1)
-      expect(transport.destinations).toContain('api.ipify.org:443')
-      expect(transport.destinations.every(destination => ['api.ipify.org:443', 'icanhazip.com:443'].includes(destination))).toBe(true)
+      expect(transport.destinations).toContain('cloudflare.com:443')
+      expect(transport.destinations.every(destination => PROVIDER_HOSTS.some(host => `${host}:443` === destination))).toBe(true)
       expect(transport.clients.every(socket => socket.authorized)).toBe(true)
       expect(fixture.logEvent).toHaveBeenCalledWith('debug', 'socks-upstream-probe', 'candidate egress probe completed',
         { providerIndex: expect.any(Number), stage: 'response-body', outcome: 'success', code: 'OK', durationMs: expect.any(Number) })
@@ -229,10 +236,9 @@ describe('real authenticated SOCKS5 → verified TLS → HTTPS loopback transpor
     const transport = await realTransport({ primaryFailure: true })
     try {
       await expect(transport.probe()).resolves.toBe('8.8.8.8')
-      expect(transport.destinations).toContain('icanhazip.com:443')
+      expect(transport.destinations.some(destination => ['icanhazip.com:443', 'api.myip.com:443'].includes(destination))).toBe(true)
       expect(transport.clients.every(socket => socket.authorized)).toBe(true)
-      expect(fixture.logEvent).toHaveBeenCalledWith('debug', 'socks-upstream-probe', 'candidate egress probe completed',
-        expect.objectContaining({ providerIndex: 1, code: 'OK' }))
+      expect(fixture.logEvent.mock.calls.some(call => call[0] === 'debug' && call[3].code === 'OK' && [2, 3].includes(call[3].providerIndex))).toBe(true)
       await transport.drained()
     } finally { await transport.close() }
   })
@@ -249,7 +255,7 @@ describe('real authenticated SOCKS5 → verified TLS → HTTPS loopback transpor
     const transport = await realTransport({ trustCertificate: false })
     try {
       await expect(transport.probe()).rejects.toMatchObject({ category: 'network' })
-      expect(transport.authenticated).toBe(2); expect(transport.requests).toBe(0)
+      expect(transport.authenticated).toBe(4); expect(transport.requests).toBe(0)
       expect(transport.clients[0].authorized).toBe(false)
       expect(fixture.logEvent.mock.calls[0][3]).toMatchObject({ stage: 'tls-handshake', code: 'TLS_FAILED' })
       await transport.drained()
@@ -260,7 +266,7 @@ describe('real authenticated SOCKS5 → verified TLS → HTTPS loopback transpor
     try {
       const pending = transport.probe(controller.signal)
       const failed = expect(pending).rejects.toMatchObject({ category: 'cancelled' })
-      await vi.waitFor(() => expect(transport.requests).toBe(2))
+      await vi.waitFor(() => expect(transport.requests).toBe(4))
       controller.abort(); await failed; await transport.drained()
     } finally { await transport.close() }
   })
@@ -268,7 +274,7 @@ describe('real authenticated SOCKS5 → verified TLS → HTTPS loopback transpor
     const transport = await realTransport({ holdResponse: true })
     try {
       await expect(transport.probe()).rejects.toMatchObject({ category: 'timeout' })
-      expect(transport.requests).toBe(2); await transport.drained()
+      expect(transport.requests).toBe(4); await transport.drained()
     } finally { await transport.close() }
   })
 })
@@ -280,16 +286,44 @@ async function running(signal?: AbortSignal) {
 }
 function respond(body: string, statusCode = 200, providerIndex?: number) {
   const response = Object.assign(new EventEmitter(), { statusCode, destroy: vi.fn() })
-  for (const callback of providerIndex === undefined ? fixture.responseCallbacks.filter(Boolean) : [fixture.responseCallbacks[providerIndex]]) {
+  const targets = providerIndex === undefined
+    ? fixture.responseCallbacks.map((callback, index) => ({ callback, index })).filter(item => item.callback)
+    : [{ callback: fixture.responseCallbacks[providerIndex], index: providerIndex }]
+  for (const { callback, index } of targets) {
+    const formatted = statusCode === 200 && isPublicIpForFixture(body)
+      ? index === 0 ? `ip=${body.trim()}\n` : index === 1 || index === 3 ? JSON.stringify({ ip: body.trim() }) : `${body.trim()}\n`
+      : body
     callback(response)
-    response.emit('data', Buffer.from(body.slice(0, 2)))
-    response.emit('data', Buffer.from(body.slice(2)))
+    response.emit('data', Buffer.from(formatted.slice(0, 2)))
+    response.emit('data', Buffer.from(formatted.slice(2)))
     response.emit('end')
   }
   return response
 }
+function respondOne(index: number, body: string, statusCode = 200) {
+  const response = Object.assign(new EventEmitter(), { statusCode, destroy: vi.fn() })
+  const callback = fixture.responseCallbacks[index]
+  if (!callback) throw new Error(`Missing provider callback ${index}`)
+  const formatted = statusCode === 200 && isPublicIpForFixture(body)
+    ? index === 0 ? `ip=${body.trim()}\n` : index === 1 || index === 3 ? JSON.stringify({ ip: body.trim() }) : `${body.trim()}\n`
+    : body
+  callback(response)
+  response.emit('data', Buffer.from(formatted.slice(0, 2)))
+  response.emit('data', Buffer.from(formatted.slice(2)))
+  response.emit('end')
+}
+function isPublicIpForFixture(body: string): boolean {
+  const value = body.trim()
+  return value === '8.8.8.8' || value === '8.8.4.4' || value === '2606:4700:4700::1111'
+}
 
 describe('authenticated candidate egress probe', () => {
+  it.each(PROVIDER_HOSTS.map((host, index) => [host, index] as const))('parses the fixed response format for %s', async (_host, index) => {
+    const { pending } = await running()
+    for (let other = 0; other < PROVIDER_HOSTS.length; other++) if (other !== index) respondOne(other, 'unavailable', 503)
+    respondOne(index, '8.8.8.8')
+    await expect(pending).resolves.toBe('8.8.8.8')
+  })
   it.each(['8.8.8.8', '2606:4700:4700::1111'])('accepts a complete HTTPS200 public address %s through the exact authenticated SOCKS socket', async ip => {
     const { pending } = await running()
     respond(` ${ip}\n`)
@@ -297,20 +331,20 @@ describe('authenticated candidate egress probe', () => {
     expect(fixture.sockets[0].connect).toHaveBeenCalledWith(51002, '127.0.0.1')
     expect(fixture.socks).toHaveBeenCalledWith(expect.objectContaining({ existing_socket: fixture.sockets[0],
       proxy: { host: '127.0.0.1', port: 51002, type: 5, userId: upstream.username, password: upstream.password },
-      destination: { host: 'api.ipify.org', port: 443 }, command: 'connect', timeout: expect.any(Number)
+      destination: { host: 'cloudflare.com', port: 443 }, command: 'connect', timeout: expect.any(Number)
     }))
     expect(fixture.socks.mock.calls.every(call => call[0].timeout > 0 && call[0].timeout <= 2000)).toBe(true)
-    expect(fixture.tlsConnect).toHaveBeenCalledWith({ socket: fixture.sockets[0], servername: 'api.ipify.org',
+    expect(fixture.tlsConnect).toHaveBeenCalledWith({ socket: fixture.sockets[0], servername: 'cloudflare.com',
       rejectUnauthorized: true, ALPNProtocols: ['http/1.1'], minVersion: 'TLSv1.2' })
     const options = fixture.request.mock.calls[0][0]
-    expect(options).toMatchObject({ hostname: 'api.ipify.org', port: 443, path: '/', method: 'GET' })
+    expect(options).toMatchObject({ hostname: 'cloudflare.com', port: 443, path: '/cdn-cgi/trace', method: 'GET' })
     expect(options.agent.createConnection()).toBe(fixture.tls)
     expect(JSON.stringify(options.headers)).not.toContain(upstream.password)
     expect(fixture.req.end).toHaveBeenCalledOnce()
-    expect(fixture.sockets[0].closed).toBe(true); expect(fixture.tls.closed).toBe(true)
+    expect(fixture.sockets.every(socket => socket.closed)).toBe(true); expect(fixture.tlsSockets.every(socket => socket.closed)).toBe(true)
     expect(vi.getTimerCount()).toBe(0)
   })
-  it.each(['', '127.0.0.1', '10.0.0.1', '100.64.0.1', '192.0.2.1', '::1', '2001:db8::1', '8.8.8.8 garbage', '[8.8.8.8]', '{"ip":"8.8.8.8"}'])(
+  it.each(['', '127.0.0.1', '10.0.0.1', '100.64.0.1', '192.0.2.1', '::1', '2001:db8::1', '8.8.8.8 garbage', '[8.8.8.8]'])(
     'refuses a nonpublic or malformed body %j', async body => {
       const { pending } = await running()
       const failed = expect(pending).rejects.toMatchObject({ category: 'network' })
@@ -322,11 +356,11 @@ describe('authenticated candidate egress probe', () => {
     respond('unavailable', 503, 0)
     respond('8.8.4.4', 200, 1)
     await expect(pending).resolves.toBe('8.8.4.4')
-    expect(fixture.socks).toHaveBeenCalledTimes(2)
+    expect(fixture.socks).toHaveBeenCalledTimes(4)
     expect(fixture.sockets.every(socket => socket.closed)).toBe(true)
     expect(fixture.tlsSockets.every(socket => socket.closed)).toBe(true)
-    expect(fixture.logEvent).toHaveBeenCalledWith('debug', 'socks-upstream-probe', 'candidate egress probe completed',
-      expect.objectContaining({ providerIndex: 1, code: 'OK' }))
+    expect(fixture.logEvent.mock.calls.some(call => call[0] === 'debug' && call[1] === 'socks-upstream-probe' &&
+      call[3]?.code === 'OK' && Number(call[3]?.providerIndex) > 0)).toBe(true)
     expect(vi.getTimerCount()).toBe(0)
   })
   it('uses the backup while primary SOCKS is held and closes a late primary negotiation result (AT-02-004)', async () => {
@@ -337,7 +371,7 @@ describe('authenticated candidate egress probe', () => {
     await expect(pending).resolves.toBe('8.8.4.4')
     expect(fixture.sockets.every(socket => socket.closed)).toBe(true)
     release({ socket: fixture.sockets[0] }); await vi.advanceTimersByTimeAsync(0)
-    expect(fixture.tlsConnect).toHaveBeenCalledTimes(1); expect(fixture.request).toHaveBeenCalledTimes(1)
+    expect(fixture.tlsConnect).toHaveBeenCalledTimes(3); expect(fixture.request).toHaveBeenCalledTimes(3)
     expect(vi.getTimerCount()).toBe(0)
   })
   it('keeps one total2s deadline when a provider fails near its end (AT-02-004)', async () => {
@@ -355,29 +389,33 @@ describe('authenticated candidate egress probe', () => {
   })
   it.each([false, true])('drains losing sockets before success and rejects unconfirmed closure=%s (AT-00-003)', async closeFails => {
     const { pending } = await running(), finished = vi.fn()
-    for (const owned of [fixture.sockets[0], fixture.tlsSockets[0]]) owned.destroy.mockImplementation(() => { owned.destroyed = true; return owned })
+    // The selected provider closes normally, then aborts this held loser.
+    const held = [fixture.sockets[0], fixture.tlsSockets[0]]
+    for (const owned of held) owned.destroy.mockImplementation(() => { owned.destroyed = true; return owned })
     const result = pending.then(ip => { finished(); return ip }, error => { finished(); return error })
     respond('8.8.4.4', 200, 1)
     await vi.advanceTimersByTimeAsync(100)
     expect(finished).not.toHaveBeenCalled()
+    expect(held.every(owned => owned.destroyed && !owned.closed)).toBe(true)
     if (closeFails) await vi.advanceTimersByTimeAsync(150)
-    else for (const owned of [fixture.sockets[0], fixture.tlsSockets[0]]) { owned.closed = true; owned.emit('close') }
+    else for (const owned of held) { owned.closed = true; owned.emit('close') }
     if (closeFails) expect(await result).toMatchObject({ category: 'internal' })
     else expect(await result).toBe('8.8.4.4')
-    for (const owned of [fixture.sockets[0], fixture.tlsSockets[0]]) { owned.closed = true; owned.emit('close') }
+    for (const owned of held) { owned.closed = true; owned.emit('close') }
     expect(vi.getTimerCount()).toBe(0)
   })
   it('refuses redirects and non200 responses without following either provider redirect', async () => {
     const { pending } = await running()
     const failed = expect(pending).rejects.toMatchObject({ category: 'network' })
     respond('8.8.8.8', 302); await failed
-    expect(fixture.request).toHaveBeenCalledTimes(2)
+    expect(fixture.request).toHaveBeenCalledTimes(4)
   })
   it('refuses oversized responses and physically closes both owned sockets', async () => {
     const { pending } = await running()
     const failed = expect(pending).rejects.toMatchObject({ category: 'network' })
     respond('8'.repeat(4097)); await failed
-    expect(fixture.sockets[0].destroy).toHaveBeenCalled(); expect(fixture.tls.destroy).toHaveBeenCalled()
+    expect(fixture.sockets.every(socket => socket.destroy.mock.calls.length > 0)).toBe(true)
+    expect(fixture.tlsSockets.every(socket => socket.destroy.mock.calls.length > 0)).toBe(true)
     expect(vi.getTimerCount()).toBe(0)
   })
   it('bounds a held SOCKS negotiation by the common2s deadline and closes a late result', async () => {
@@ -386,7 +424,7 @@ describe('authenticated candidate egress probe', () => {
     const pending = probe(upstream)
     const failed = expect(pending).rejects.toMatchObject({ category: 'timeout' })
     await vi.advanceTimersByTimeAsync(2000); await failed
-    expect(fixture.sockets[0].closed).toBe(true)
+    expect(fixture.sockets.every(socket => socket.closed)).toBe(true)
     release({ socket: fixture.sockets[0] }); await vi.advanceTimersByTimeAsync(0)
     expect(fixture.tlsConnect).not.toHaveBeenCalled(); expect(fixture.request).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
@@ -397,7 +435,7 @@ describe('authenticated candidate egress probe', () => {
     fixture.socks.mockReturnValue(new Promise(resolve => { release = resolve }))
     const pending = probe(upstream, controller.signal)
     const failed = expect(pending).rejects.toMatchObject({ category: 'cancelled' })
-    await vi.waitFor(() => expect(fixture.socks).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(fixture.socks).toHaveBeenCalledTimes(4))
     controller.abort(); await failed
     expect(fixture.sockets[0].closed).toBe(true)
     release({ socket: fixture.sockets[0] }); await vi.advanceTimersByTimeAsync(0)
@@ -450,7 +488,7 @@ describe('authenticated candidate egress probe', () => {
     const failed = expect(pending).rejects.toMatchObject({ category: 'internal' })
     respond('8.8.8.8')
     await vi.advanceTimersByTimeAsync(250); await failed
-    for (const socket of [fixture.sockets[0], fixture.tls]) { socket.closed = true; socket.emit('close') }
+    for (const socket of [...fixture.sockets, ...fixture.tlsSockets]) { socket.closed = true; socket.emit('close') }
     expect(vi.getTimerCount()).toBe(0)
   })
   it('sanitizes SOCKS errors that contain credentials', async () => {
@@ -461,7 +499,7 @@ describe('authenticated candidate egress probe', () => {
     expect(JSON.stringify(fixture.logEvent.mock.calls)).not.toContain(upstream.username)
     for (const call of fixture.logEvent.mock.calls) {
       expect(Object.keys(call[3]).sort()).toEqual(['code', 'durationMs', 'outcome', 'providerIndex', 'stage'])
-      expect([0, 1]).toContain(call[3].providerIndex)
+      expect([0, 1, 2, 3]).toContain(call[3].providerIndex)
     }
     expect(fixture.logEvent.mock.calls[0][3]).toMatchObject({ stage: 'socks-handshake', code: 'SOCKS_FAILED' })
   })

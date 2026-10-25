@@ -9,7 +9,22 @@ import { IpcFault } from '../shared/ipc-result'
 import { logEvent } from './appLogger'
 
 export interface SocksUpstream { port: number; username: string; password: string }
-const HOSTS = ['api.ipify.org', 'icanhazip.com'] as const
+type Provider = { host: string; path: string; parse: (body: string) => string | null }
+const jsonIp = (body: string): string | null => {
+  try {
+    const value = JSON.parse(body)
+    return value && typeof value.ip === 'string' ? value.ip.trim() : null
+  } catch { return null }
+}
+const plainIp = (body: string): string | null => body.trim()
+const traceIp = (body: string): string | null =>
+  body.split(/\r?\n/).find(line => line.startsWith('ip='))?.slice(3).trim() || null
+const PROVIDERS: readonly Provider[] = [
+  { host: 'cloudflare.com', path: '/cdn-cgi/trace', parse: traceIp },
+  { host: 'api.ipify.org', path: '/?format=json', parse: jsonIp },
+  { host: 'icanhazip.com', path: '/', parse: plainIp },
+  { host: 'api.myip.com', path: '/', parse: jsonIp }
+]
 const DEADLINE_MS = 2000
 const MAX_BODY_BYTES = 4096
 type ProbeStage = 'local-connect' | 'socks-handshake' | 'tls-handshake' | 'https-response' | 'response-body' | 'socket-close'
@@ -54,7 +69,7 @@ async function probeProviders(upstream: SocksUpstream, signal?: AbortSignal): Pr
   const losers = new AbortController()
   const ownedSignal = signal ? AbortSignal.any([signal, losers.signal]) : losers.signal
   let selected: string | undefined
-  const results = await Promise.allSettled(HOSTS.map((_host, providerIndex) =>
+  const results = await Promise.allSettled(PROVIDERS.map((_provider, providerIndex) =>
     probeProvider(upstream, providerIndex, deadlineAt, ownedSignal).then(ip => {
       if (!selected) { selected = ip; losers.abort() }
       return ip
@@ -70,7 +85,8 @@ async function probeProviders(upstream: SocksUpstream, signal?: AbortSignal): Pr
 
 function probeProvider(upstream: SocksUpstream, providerIndex: number, deadlineAt: number, signal: AbortSignal): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const host = HOSTS[providerIndex]
+    const provider = PROVIDERS[providerIndex]
+    const host = provider.host
     const began = performance.now()
     let stage: ProbeStage = 'local-connect'
     const socket = new Socket()
@@ -141,7 +157,7 @@ function probeProvider(upstream: SocksUpstream, providerIndex: number, deadlineA
         agent = new Agent({ keepAlive: false, maxSockets: 1 })
         // A private agent consumes this exact TLS connection instead of allocating a direct connection.
         agent.createConnection = () => secured!
-        req = request({ hostname: host, port: 443, path: '/', method: 'GET', agent,
+        req = request({ hostname: host, port: 443, path: provider.path, method: 'GET', agent,
           headers: { Accept: 'text/plain', Connection: 'close' } }, incoming => {
           response = incoming
           incoming.on('error', error => finish(new IpcFault('network'), undefined, undefined, error))
@@ -159,8 +175,8 @@ function probeProvider(upstream: SocksUpstream, providerIndex: number, deadlineA
           })
           incoming.once('end', () => {
             if (settled) return
-            const ip = Buffer.concat(chunks).toString('utf8').trim()
-            if (!isIP(ip) || !isPublicIp(ip)) finish(new IpcFault('network'), undefined, 'INVALID_PUBLIC_IP')
+            const ip = provider.parse(Buffer.concat(chunks).toString('utf8'))
+            if (!ip || !isIP(ip) || !isPublicIp(ip)) finish(new IpcFault('network'), undefined, 'INVALID_PUBLIC_IP')
             else finish(undefined, ip)
           })
         })
