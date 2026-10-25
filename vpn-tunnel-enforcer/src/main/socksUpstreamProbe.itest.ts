@@ -31,6 +31,9 @@ describe.skipIf(process.platform !== 'win32')('SOCKS egress probe under actual E
       })))
       const config = join(directory, 'xray.json')
       writeFileSync(config, JSON.stringify({ log: { loglevel: 'none' },
+        // This fixture intentionally holds a remote response forever. Avoid
+        // racing its 1s peer assertion against Xray's default 1s half-close grace.
+        policy: { levels: { '0': { uplinkOnly: 0, downlinkOnly: 0 } } },
         inbounds: [{ listen: '127.0.0.1', port: ports[0], protocol: 'socks', settings: {
           auth: 'password', accounts: [{ user: 'loopback-user', pass: 'loopback-password' }], udp: false } }],
         outbounds: [{ protocol: 'freedom', settings: { redirect: `127.0.0.1:${ports[1]}` } }]

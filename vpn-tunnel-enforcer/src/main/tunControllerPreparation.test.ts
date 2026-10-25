@@ -48,6 +48,7 @@ function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', a
     dnsProfiles: { getActiveDnsProfile: () => null }, generateDomainRouteRules: () => [],
     startXray: vi.fn(async (..._args: any[]) => ({ socksPort: 1234, resolvedIp: '198.51.100.1', exePath: 'fixture-xray.exe' })),
     probeSocksUpstream: vi.fn(async (..._args: any[]) => '198.51.100.9'),
+    validateRuntime: vi.fn(async () => {}),
     stopXray: vi.fn(async () => {}),
     rollbackEarlyAdapterLockdown: vi.fn(async () => {}),
     prepareRuntime: vi.fn(async (...args: any[]) => {
@@ -73,7 +74,7 @@ function harness(dns: Promise<unknown[]>, mode = 'directVpn', engine = 'xray', a
     ${retirementHelper.getText(ast)}
     ${slotHelpers}
     const dnsSourcesPromise=dns, smartRuSplit=true, smartRuMapsDirect=false;
-    let proxyOwnerProcessNames=[], proxyOwnerProgramPaths=[], stopRequested=false, preparedXraySwitch=null;
+    let proxyOwnerProcessNames=[], proxyOwnerProgramPaths=[], stopRequested=false, preparedXraySwitch=null, runtimeCheckPromise=null;
     const startAbortController=new AbortController();
     const proxyAddr='127.0.0.1:10808', proxyType='socks5', wantKillSwitch=true;
     const startOptions={}, publicWifiCompatibility=true, splitTunnelDirectNames=[], splitTunnelDirectPaths=[];

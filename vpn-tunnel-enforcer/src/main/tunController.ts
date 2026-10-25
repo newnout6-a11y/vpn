@@ -48,6 +48,7 @@ import { ipMonitor } from './ipMonitor'
 import { trafficMonitor } from './trafficMonitor'
 import { cancelLeakSelfTest } from './leakSelfTest'
 import { startCompetingTunWatch, stopCompetingTunWatch } from './competingTunDetector'
+import { findForeignTun } from './foreignTunDetection'
 import { dnsProfiles } from './dnsProfiles'
 import { granularKillSwitchStore, serverPickerStore, serverGroupsStore } from './sharedStores'
 import { generateDomainRouteRules } from './domainRouting'
@@ -2197,23 +2198,18 @@ function readGranularKillSwitchExceptions(type: 'app' | 'ip'): string[] {
 // Detect another active VPN/TUN adapter (Happ TUN, WireGuard, OpenVPN, …).
 // Returns the interface name if found. We refuse to start in that case so we
 // don't rip apart the user's working tunnel with our own auto_route.
-// Our own adapter uses TUN_IPV4_PREFIX (and a legacy 172.19.0.x prefix) — anything else matching VPN patterns is foreign.
+// Private subnets are shared by other clients and cannot identify our adapter.
 //
 // Uses os.networkInterfaces() which returns raw adapter names as Windows knows them
 // (e.g. 'happ-tun', 'wg0', 'WireGuard Tunnel'). Locale-independent, no external process.
 export function detectForeignTun(): string | null {
-  const vpnNameRx = /wintun|\btun\b|wireguard|\bwg\d*\b|openvpn|tap-windows|happ|hiddify|singbox|v2ray|xray/i
-  const nics = networkInterfaces()
-  for (const [name, addrs] of Object.entries(nics)) {
-    if (!addrs) continue
-    if (!vpnNameRx.test(name)) continue
-    for (const a of addrs) {
-      if (a.family !== 'IPv4' || a.internal) continue
-      if (isOwnTunAddress(a.address)) continue // our own TUN
-      return `${name} (${a.address})`
-    }
-  }
-  return null
+  // running is published only after recordOwnedTunAdapter and runtime PID
+  // verification. A stale journal, alias, subnet or PID alone is insufficient.
+  const own = currentStatus.running && Number.isInteger(currentStatus.pid) && currentStatus.pid! > 0 &&
+    !stopRequested && !stopInProgress
+    ? { alias: getTunAdapterAlias(), ipv4Address: TUN_IPV4_ADDRESS_CIDR.split('/')[0] }
+    : undefined
+  return findForeignTun(networkInterfaces(), own)
 }
 
 async function prepareRuntime(
@@ -2680,6 +2676,19 @@ export const tunController = {
         }
       )
     }
+    const validateRuntime = (runtime: { singbox: string; config: string }) =>
+      timeAsync('singbox-config-check', async () => {
+        startAbortController.signal.throwIfAborted()
+        const checked = execFile(runtime.singbox, ['check', '-c', runtime.config], {
+          windowsHide: true, timeout: 10000, encoding: 'utf8', maxBuffer: 1024 * 1024,
+          signal: startAbortController.signal
+        })
+        // Abort can reject execFile before stdio/process close. Keep ownership
+        // until the cancelled checker has actually released its handles.
+        const closed = new Promise<void>(done => checked.child.once('close', () => done()))
+        try { return await checked } finally { await closed }
+      })
+    let runtimeCheckPromise: ReturnType<typeof validateRuntime> | null = null
 
     // A new start() always reopens the auto-restart window. If a pending
     // restart timer is still ticking from a crash recovery, cancel it — the
@@ -2990,6 +2999,10 @@ export const tunController = {
             // Do not release this start owner while cancelled/failed staging
             // can still write files that the next connection would consume.
             startupCleanupTasks.push(runtimePromise.then(() => undefined, () => undefined))
+            // Config validation is read-only and independent of HTTPS readiness.
+            // Keep both owned by this start and join both before TUN can spawn.
+            runtimeCheckPromise = runtimePromise.then(validateRuntime)
+            startupCleanupTasks.push(runtimeCheckPromise.then(() => undefined, () => undefined))
             const xr = await xrayStartup
             xraySocksPort = xr.socksPort
             resolvedVpnEndpointIp = xr.resolvedIp
@@ -3098,14 +3111,7 @@ export const tunController = {
       // Run sing-box check in parallel with the stale-cleanup. Both are
       // independent and the check is the longer of the two on a clean box.
       await Promise.all([
-        timeAsync('singbox-config-check', () =>
-          execFile(runtime.singbox, ['check', '-c', runtime.config], {
-            windowsHide: true,
-            timeout: 10000,
-            encoding: 'utf8',
-            maxBuffer: 1024 * 1024
-          })
-        ),
+        runtimeCheckPromise ?? validateRuntime(runtime),
         cleanupPromise
       ])
     } catch (err: any) {
