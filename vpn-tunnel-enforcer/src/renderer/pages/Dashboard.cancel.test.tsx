@@ -5,8 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ru from '../i18n/locales/ru.json'
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({
-  t: (key: string, fallback?: string) => key.startsWith('dashboard.')
-    ? (ru.dashboard as Record<string, string>)[key.slice(10)] ?? fallback ?? key : fallback ?? key
+  t: (key: string, options?: string | Record<string, unknown>) => {
+    const text = (key.startsWith('dashboard.') ? (ru.dashboard as Record<string, string>)[key.slice(10)] : undefined)
+      ?? (typeof options === 'string' ? options : key)
+    return typeof options === 'object' ? text.replace(/\{\{(\w+)\}\}/g, (_, name: string) => String(options[name] ?? '')) : text
+  }
 }) }))
 vi.mock('../components/PageTip', () => ({ PageTip: () => null }))
 vi.mock('../components/DiagnosticsCard', () => ({ DiagnosticsCard: () => null }))
@@ -137,6 +140,19 @@ describe('canonical FSM frames (AT-00-008)', () => {
 })
 
 describe('Dashboard cancellation', () => {
+  it('describes normal disconnect recovery without promising a persistent traffic block (AT-00-008)', async () => {
+    useAppStore.setState({ connectionBusy: null, mode: 'hard', tunRunning: true })
+    render(<Dashboard />)
+    fireEvent.click(screen.getByRole('button', { name: ru.dashboard.connected }))
+    await waitFor(() => expect(screen.getByText(ru.dashboard.disconnectConfirmation)).toBeVisible())
+    expect(screen.queryByText(/Интернет будет заблокирован до следующего включения/)).not.toBeInTheDocument()
+  })
+  it('shows the selected server during canonical reconnecting instead of generic connecting (AT-00-008)', () => {
+    useAppStore.setState({ connectionBusy: 'connecting', serverSwitchingName: 'Norway', mode: 'hard', tunRunning: true })
+    render(<Dashboard />)
+    expect(screen.getByRole('status')).toHaveTextContent('Переключение сервера: Norway')
+    expect(screen.getByRole('button', { name: 'Отменить смену сервера' })).toBeEnabled()
+  })
   it('shows failed rollback steps and the retry recommendation instead of success (AT-03-007)', async () => {
     const error = 'baseline auto-rollback: environment/HTTP_PROXY: access denied | kill-switch disable: WFP removal failed. Повторите остановку защиты и проверьте диагностику сети.'
     Object.assign(window.electronAPI, { stopTun: vi.fn().mockResolvedValue({ success: false, error }) })

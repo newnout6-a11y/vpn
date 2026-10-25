@@ -87,6 +87,9 @@ export default function App() {
   // IPC callbacks below can read the live value without re-subscribing
   // every time it flips.
   const stoppingNowRef = useRef(false)
+  // Main can publish its fresh IP proof immediately before the terminal FSM
+  // frame. Keep it pending until that same transition is confirmed connected.
+  const pendingIpRef = useRef<{ ip: string; vpnIp: string; verdict: 'passed' } | null>(null)
   const tunEventSeqRef = useRef(0)
   const detectHappFailureCountRef = useRef(0)
   const detectHappNextAllowedAtRef = useRef(0)
@@ -110,10 +113,9 @@ export default function App() {
   useEffect(() => {
     const unsubIp = window.electronAPI.onIpChanged(({ ip, isLeak, vpnIp, verdict }) => {
       if (stoppingNowRef.current) {
-        // Drop on the floor — we're in the middle of stop-tun rollback. The
-        // ipMonitor in main is being told to suspend via IPC below, but the
-        // bridge call is best-effort and this client-side guard is the
-        // authoritative defense.
+        const transition = useAppStore.getState().tunnelSnapshot?.transition
+        pendingIpRef.current = transition && transition !== 'disconnecting' && ip && !isLeak && vpnIp === ip && verdict === 'passed'
+          ? { ip, vpnIp, verdict } : null
         return
       }
       const store = useAppStore.getState()
@@ -144,10 +146,21 @@ export default function App() {
       const current = useAppStore.getState().tunnelSnapshot
       stoppingNowRef.current = Boolean(current?.transition)
       if (current === previous) return
+      if (previous?.operation?.operationId !== snapshot.operation?.operationId) pendingIpRef.current = null
       // Transitional receipts cannot verify the final firewall policy. Keep
       // the banner unknown and leave the helper free for lifecycle effects.
-      if (snapshot.transition) store.invalidateFirewallKillSwitchStatus()
-      else void store.refreshFirewallKillSwitchStatus()
+      if (snapshot.transition) {
+        if (previous?.transition !== snapshot.transition) pendingIpRef.current = null
+        store.invalidateFirewallKillSwitchStatus()
+      } else {
+        const pending = pendingIpRef.current
+        pendingIpRef.current = null
+        if (snapshot.state === 'connected' && pending) {
+          store.setPublicIp(pending.ip, false, pending.verdict)
+          store.setVpnIp(pending.vpnIp)
+        }
+        void store.refreshFirewallKillSwitchStatus()
+      }
     })
 
     const unsubTun = window.electronAPI.onTunStatusChanged((status) => {

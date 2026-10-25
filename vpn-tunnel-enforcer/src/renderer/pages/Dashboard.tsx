@@ -268,20 +268,13 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         if (result.success) {
           setMode('hard')
           setTunRunning(true)
-          if (result.vpnIp) {
+          if (result.vpnIp && (!useAppStore.getState().tunnelSnapshot ||
+              useAppStore.getState().tunnelSnapshot?.state === 'connected' && !useAppStore.getState().tunnelSnapshot?.transition)) {
             setVpnIp(result.vpnIp)
             setPublicIp(result.vpnIp, false)
           }
           addLog('info', t(tunnelStartedMessageKey(saved.smartRuSplit)))
           if (result.warning) addLog('warn', result.warning)
-          // Refresh public IP a bit later so the leak banner clears once
-          // the tunnel routes have settled.
-          setTimeout(async () => {
-            try {
-              const ipInfo = await window.electronAPI.getPublicIp()
-              setPublicIp(ipInfo.ip, ipInfo.isLeak, ipInfo.verdict)
-            } catch {}
-          }, 2000)
         } else {
           const errorMsg = result.error || 'Unknown error'
           showToast('error', t('dashboard.connectionError'), errorMsg)
@@ -326,20 +319,13 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         if (result.success) {
           setMode('hard')
           setTunRunning(true)
-          if (result.vpnIp) {
+          if (result.vpnIp && (!useAppStore.getState().tunnelSnapshot ||
+              useAppStore.getState().tunnelSnapshot?.state === 'connected' && !useAppStore.getState().tunnelSnapshot?.transition)) {
             setVpnIp(result.vpnIp)
             setPublicIp(result.vpnIp, false)
           }
           addLog('info', t(tunnelStartedMessageKey(saved.smartRuSplit)))
           if (result.warning) addLog('warn', result.warning)
-          // Refresh public IP a bit later so the leak banner clears once
-          // the tunnel routes have settled.
-          setTimeout(async () => {
-            try {
-              const ipInfo = await window.electronAPI.getPublicIp()
-              setPublicIp(ipInfo.ip, ipInfo.isLeak, ipInfo.verdict)
-            } catch {}
-          }, 2000)
         } else {
           const errorMsg = result.error || 'Unknown error'
           showToast('error', t('dashboard.connectionError'), errorMsg)
@@ -571,9 +557,9 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
 
   const statusLabel = (() => {
     if (cancelling) return t('dashboard.cancelling')
+    if (isServerSwitching) return t('dashboard.switchingServer', { name: serverSwitchingName })
     if (connecting) return t('dashboard.connecting')
     if (disconnecting) return t('dashboard.disconnecting', 'Отключение...')
-    if (isServerSwitching) return `Переключение сервера${serverSwitchingName ? `: ${serverSwitchingName}` : '...'}`
     if (restartingProgress) return `Перезапуск ${restartingProgress}`
     if (tunnelSnapshot?.state === 'blocked') return t('dashboard.tunnelBlocked')
     if (tunnelSnapshot?.state === 'unknown') return t('dashboard.tunnelUnknown')
@@ -792,20 +778,20 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
             className="flex flex-col items-center gap-2 z-10"
           >
             <p className="text-sm text-[var(--color-warning)] font-medium text-center">
-              Отключить VPN? Интернет будет заблокирован до следующего включения.
+              {t('dashboard.disconnectConfirmation')}
             </p>
             <div className="flex gap-2">
               <button
                 onClick={() => { setConfirmDisconnect(false); handleToggleChange(false) }}
                 className="px-4 py-1.5 text-sm font-medium rounded-[var(--radius-sm)] bg-[var(--color-danger)] text-white hover:opacity-90 transition-opacity"
               >
-                Да, отключить
+                {t('dashboard.confirmDisconnect')}
               </button>
               <button
                 onClick={() => setConfirmDisconnect(false)}
                 className="px-4 py-1.5 text-sm font-medium rounded-[var(--radius-sm)] border border-[var(--color-border)] text-[var(--color-text)] hover:border-[var(--color-accent)]/50 transition-all"
               >
-                Отмена
+                {t('dashboard.cancelDisconnect')}
               </button>
             </div>
           </motion.div>

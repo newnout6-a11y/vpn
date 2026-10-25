@@ -262,7 +262,10 @@ export const useAppStore = create<AppState>((set) => ({
         ? 'disconnecting' : snapshot.transition ? 'connecting' : null,
       proxyDown: snapshot.proxyStatus === 'proxy-down', competingTun: snapshot.competingTun,
       ...(snapshot.transition === null ? { restartingProgress: null } : {}),
-      ...(snapshot.state !== 'connected' && snapshot.transition === null ? { vpnIp: null, tunStartedAt: null } : {})
+      ...(snapshot.transition || snapshot.state !== 'connected'
+        ? { vpnIp: null, publicIpVerdict: 'not-checked', isLeak: false, browserIpCheck: null, leakChecks: null, leakSelfTestResult: null } : {}),
+      ...(snapshot.state !== 'connected' && snapshot.transition === null
+        ? { publicIp: null, tunStartedAt: null, traffic: emptyTrafficStats } : {})
     }
   }),
   tunRunning: false,
@@ -363,7 +366,8 @@ export const useAppStore = create<AppState>((set) => ({
   setConnectionCancelling: (cancelling) => set((state) => ({
     connectionCancelling: cancelling,
     serverSwitchCancelAcknowledged: false,
-    connectionBusy: cancelling ? 'disconnecting' : state.connectionBusy
+    connectionBusy: cancelling ? 'disconnecting' : state.tunnelSnapshot?.transition === 'disconnecting'
+      ? 'disconnecting' : state.tunnelSnapshot?.transition ? 'connecting' : null
   })),
   acknowledgeServerSwitchCancellation: () => set((state) => ({
     serverSwitchCancelAcknowledged: true,
