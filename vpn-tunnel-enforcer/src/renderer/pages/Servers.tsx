@@ -43,6 +43,7 @@ import { CountryFlagIcon } from '../components/CountryFlagIcon'
 import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { SERVER_CHANGED_EVENT, emitServerChanged } from '../nav'
 import { useAppStore } from '../store'
+import { usePageActive } from '../hooks/usePageActive'
 import type { ClientDevice, ServerGroup, ServerProfile } from '../../shared/ipc-types'
 import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 
@@ -108,13 +109,25 @@ function groupByProtocol(profiles: ServerProfile[]): Record<string, ServerProfil
  * when the profile carries a full sing-box outbound object (which every
  * dial-able profile does), exactly like Happ marking JSON-config entries.
  */
-function formatHappType(profile: ServerProfile): string {
+export function formatHappType(profile: ServerProfile): string {
   const proto = (profile.protocol || 'unknown').toUpperCase()
-  const hasJson = !!profile.outbound && typeof profile.outbound === 'object'
+  const hasJson = profile.display?.hasOutbound ?? (!!profile.outbound && typeof profile.outbound === 'object')
   return hasJson ? `${proto} | JSON` : proto
 }
 
 export function profileStealthBadge(profile: ServerProfile): { label: string; title: string; variant: BadgeVariant } | null {
+  if (profile.display) {
+    const badges = {
+      ech: { label: 'ECH', title: 'Encrypted ClientHello configured', variant: 'info' },
+      reality: { label: 'Reality', title: 'Reality TLS camouflage', variant: 'info' },
+      naive: { label: 'Naive', title: 'NaiveProxy-style TLS profile', variant: 'neutral' },
+      obfs: { label: 'OBFS', title: 'Hysteria2 obfuscation configured', variant: 'info' },
+      utls: { label: 'uTLS', title: 'Browser-like TLS fingerprint', variant: 'neutral' },
+      tls: { label: 'TLS', title: 'TLS profile without explicit uTLS/Reality marker', variant: 'neutral' },
+      plain: { label: 'Plain', title: 'No TLS/Reality/uTLS marker detected', variant: 'warning' }
+    } as const
+    return profile.display.stealth ? badges[profile.display.stealth] : null
+  }
   const outbound = profile.outbound && typeof profile.outbound === 'object' ? profile.outbound : null
   const protocol = (profile.protocol || (typeof outbound?.type === 'string' ? outbound.type : '')).toLowerCase()
   const configuredTls = asJsonObject(outbound?.tls)
@@ -243,6 +256,7 @@ function writeExpandedIds(ids: Set<string>) {
 // ─── Page ──────────────────────────────────────────────────────────────────
 
 export function Servers() {
+  const active = usePageActive()
   const { t, i18n } = useTranslation()
   const mounted = useRef(false)
   const profileReadSequence = useRef(0)
@@ -397,6 +411,7 @@ export function Servers() {
   // Background subscription refreshes update the stores outside this page.
   // Poll the local stores while visible so the list follows them promptly.
   useEffect(() => {
+    if (!active) return
     const refreshVisibleData = () => {
       if (document.hidden) return
       void Promise.all([fetchProfiles(false), fetchGroups()])
@@ -411,7 +426,7 @@ export function Servers() {
       document.removeEventListener('visibilitychange', refreshVisibleData)
       window.removeEventListener('focus', refreshVisibleData)
     }
-  }, [fetchProfiles, fetchGroups])
+  }, [active, fetchProfiles, fetchGroups])
 
   // Auto-expand when there is exactly one effective group, and remember the
   // user's choices via localStorage on every change.

@@ -5,6 +5,7 @@ import { Globe, Search, Trash2, RefreshCw, Loader2, ExternalLink } from 'lucide-
 import { MacCard, MacInput, MacButton, MacBadge } from '../design-system'
 import { PageTip } from '../components/PageTip'
 import { useAppStore } from '../store'
+import { usePageActive } from '../hooks/usePageActive'
 
 const TRAFFIC_HISTORY_POLL_INTERVAL_MS = 15_000
 const MAX_RENDERED_ENTRIES = 300
@@ -28,6 +29,7 @@ function formatBytes(bytes: number): string {
 }
 
 export function TrafficHistory() {
+  const active = usePageActive()
   const { t } = useTranslation()
   const publicIp = useAppStore(s => s.publicIp)
   const tunRunning = useAppStore(s => s.tunRunning)
@@ -59,21 +61,22 @@ export function TrafficHistory() {
   }, [publicIp])
 
   useEffect(() => {
+    if (!active) return
     void fetchHistory(false)
-  }, [fetchHistory])
+  }, [active, fetchHistory])
 
   useEffect(() => {
-    if (!tunRunning) return
+    if (!active || !tunRunning) return
 
     void fetchHistory(true)
     const id = window.setInterval(() => {
       void fetchHistory(true)
     }, TRAFFIC_HISTORY_POLL_INTERVAL_MS)
     return () => window.clearInterval(id)
-  }, [fetchHistory, tunRunning])
+  }, [active, fetchHistory, tunRunning])
 
   useEffect(() => {
-    if (!domainEnrichmentEnabled) return
+    if (!active || !domainEnrichmentEnabled) return
 
     const unsubscribe = window.electronAPI.onTrafficHistoryUpdated(() => {
       // Metadata jobs can complete in a burst. Coalesce their notifications
@@ -92,7 +95,7 @@ export function TrafficHistory() {
         enrichmentRefreshTimerRef.current = null
       }
     }
-  }, [domainEnrichmentEnabled, fetchHistory])
+  }, [active, domainEnrichmentEnabled, fetchHistory])
 
   const filtered = useMemo(() => {
     if (!search.trim()) return entries

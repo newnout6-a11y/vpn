@@ -2772,9 +2772,8 @@ export const tunController = {
     const warning = null
 
     // Split-tunnel "direct" app rules — these processes must bypass the VPN
-    // (route through direct-out). Without merging them into directProcessNames
-    // here, the split-tunnel feature has no effect at all: getDirectProcessNames
-    // was never wired into config generation. Lazy import avoids the
+    // (route through direct-out). Read names and verified paths in one snapshot.
+    // Lazy import avoids the
     // tunController↔splitTunneling circular dependency.
     let splitTunnelDirectNames: string[] = []
     let splitTunnelDirectPaths: string[] = []
@@ -2782,13 +2781,17 @@ export const tunController = {
     appliedSplitTunnelRules = null
     try {
       const { splitTunneling } = await import('./splitTunneling')
-      splitTunnelDirectNames = splitTunneling.getDirectProcessNames()
-      splitTunnelDirectPaths = splitTunneling.getDirectProcessPaths()
+      const targets = await splitTunneling.getDirectProcessTargets()
+      splitTunnelDirectNames = targets.names
+      splitTunnelDirectPaths = targets.paths
       appliedSplitTunnelRules = { names: [...splitTunnelDirectNames], paths: [...splitTunnelDirectPaths] }
     } catch (err) {
       logEvent('debug', 'tun', 'could not read split-tunnel direct names', err)
     } finally {
       endPhase('split-tunnel-rules', splitTunnelStarted, { count: splitTunnelDirectNames.length + splitTunnelDirectPaths.length })
+    }
+    if (stopRequested || startAbortController.signal.aborted) {
+      return finishStart(connectionFailure('cancelled', 'Запуск отменён'))
     }
 
     try {
@@ -4341,9 +4344,7 @@ export const tunController = {
     if (!appliedSplitTunnelRules) return null
     try {
       const { splitTunneling } = await import('./splitTunneling')
-      if (JSON.stringify(appliedSplitTunnelRules) !== JSON.stringify({
-        names: splitTunneling.getDirectProcessNames(), paths: splitTunneling.getDirectProcessPaths()
-      })) return null
+      if (JSON.stringify(appliedSplitTunnelRules) !== JSON.stringify(await splitTunneling.getDirectProcessTargets())) return null
     } catch { return null }
     // The lazy read above yields; recheck admission before reserving the owner.
     if (startInProgress || stopInProgress || stopRequested || outboundSwitchCompletion

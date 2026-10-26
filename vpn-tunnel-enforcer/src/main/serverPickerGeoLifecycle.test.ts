@@ -81,7 +81,7 @@ beforeEach(async () => {
 afterEach(() => { vi.useRealTimers() })
 
 describe('country verification lifecycle', () => {
-  it('preserves nested protocol JSON in list and active profile results (AT-00-001)', async () => {
+  it('keeps list/active IPC metadata-only while the selected runtime keeps full protocol JSON (AT-00-001 / AT-01-008)', async () => {
     const outbound = {
       type: 'vless', server: 'a.test', server_port: 443,
       tls: { enabled: true, utls: { fingerprint: 'chrome' }, alpn: ['h2', 'http/1.1'] },
@@ -90,8 +90,11 @@ describe('country verification lifecycle', () => {
     state.data.set('profiles', [{ id: 'a', name: 'a', server: 'a.test', port: 443, protocol: 'vless', status: 'unknown', outbound }])
     const listed = await state.handlers.get('servers:list')!({})
     const active = await state.handlers.get('servers:get-active')!({})
-    expect(listed[0].outbound).toEqual(outbound)
-    expect(active).toMatchObject({ activeId: 'a', profile: { id: 'a', outbound } })
+    expect(listed[0]).toMatchObject({ id: 'a', display: { hasOutbound: true, stealth: 'utls', clientFingerprint: 'chrome' } })
+    expect(listed[0]).not.toHaveProperty('outbound')
+    expect(active).toMatchObject({ activeId: 'a', profile: { id: 'a', display: { hasOutbound: true } } })
+    expect(active.profile).not.toHaveProperty('outbound')
+    expect(picker.getActiveProfile()?.outbound).toEqual(outbound)
   })
 
   it('shares one five-provider lookup across 50 duplicate requests and caches the country', async () => {

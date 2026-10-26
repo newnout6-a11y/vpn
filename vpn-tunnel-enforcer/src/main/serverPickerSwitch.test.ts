@@ -4,6 +4,7 @@ const state = vi.hoisted(() => ({
   storeData: new Map<string, any>(),
   ipcHandlers: new Map<string, (...args: any[]) => any>(),
   profiles: [] as any[],
+  decrypted: [] as string[],
   tunnelStatus: { running: true, mode: 'directVpn' },
   restartProtected: vi.fn(),
   switchOutbound: vi.fn(),
@@ -26,6 +27,11 @@ const state = vi.hoisted(() => ({
 
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/vpnte-test', getAppPath: () => '/tmp/vpnte-test' },
+  safeStorage: {
+    isEncryptionAvailable: () => true,
+    encryptString: (value: string) => Buffer.from(value),
+    decryptString: (value: Buffer) => { const decoded = value.toString(); state.decrypted.push(decoded); return decoded }
+  },
   dialog: {},
   ipcMain: {
     handle: vi.fn((channel: string, handler: (...args: any[]) => any) => {
@@ -123,6 +129,7 @@ beforeEach(async () => {
   vi.resetModules()
   state.storeData.clear()
   state.ipcHandlers.clear()
+  state.decrypted.length = 0
   state.profiles = [profile('a'), profile('b')]
   state.storeData.set('profiles', state.profiles)
   state.tunnelStatus = { running: true, mode: 'directVpn' }
@@ -144,6 +151,43 @@ beforeEach(async () => {
 })
 
 describe('server profile switching', () => {
+  it('decrypts only the selected profile on click and revalidates it after begin (AT-01-008 / AT-00-007)', async () => {
+    const { serverPickerStore } = await import('./sharedStores')
+    serverPickerStore.set('profiles', Array.from({ length: 100 }, (_, index) => ({ ...profile(String(index)), status: 'unknown' as const })))
+    state.decrypted.length = 0
+    state.tunnelStatus.running = false
+    await selectProfileHandler({}, '57')
+    expect(state.decrypted).toHaveLength(2)
+    expect(state.decrypted.map(value => JSON.parse(value).server)).toEqual(['57.example.test', '57.example.test'])
+    expect(state.storeData.get('activeProfileId')).toBe('57')
+  })
+
+  it.each(['deleted', 'disabled', 'removed'] as const)('refuses a profile %s during begin before selection or restart (AT-00-007)', async boundary => {
+    const { setProfileSwitchHooks } = await import('./serverPicker')
+    const gate = deferred<void>()
+    setProfileSwitchHooks({ begin: () => gate.promise, end: () => {} })
+    const pending = selectProfileHandler({}, 'b')
+    state.storeData.set('profiles', boundary === 'deleted' ? [profile('a')] : [profile('a'), {
+      ...profile('b'), ...(boundary === 'disabled' ? { enabled: false } : { removedFromSubscriptionAt: 1 })
+    }])
+    gate.resolve()
+    await expect(pending).rejects.toThrow('Profile is unavailable')
+    expect(state.storeData.get('activeProfileId') ?? null).toBeNull()
+    expect(state.restartProtected).not.toHaveBeenCalled()
+    expect(state.switchOutbound).not.toHaveBeenCalled()
+  })
+
+  it('uses a fresh profile edited during begin instead of the earlier outbound (AT-00-007)', async () => {
+    const { setProfileSwitchHooks } = await import('./serverPicker')
+    const gate = deferred<void>()
+    setProfileSwitchHooks({ begin: () => gate.promise, end: () => {} })
+    const pending = selectProfileHandler({}, 'b')
+    state.storeData.set('profiles', [profile('a'), { ...profile('b'), outbound: { ...profile('b').outbound, server: 'fresh.example.test' } }])
+    gate.resolve()
+    await pending
+    expect(state.switchOutbound.mock.calls[0][0].vpnProfile.outbound.server).toBe('fresh.example.test')
+  })
+
   it('uses a confirmed upstream receipt without restarting the TUN (AT-00-003 / AT-02-002)', async () => {
     state.switchOutbound.mockImplementationOnce(async (_next, options) => {
       options.onCommit()

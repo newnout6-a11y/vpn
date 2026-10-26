@@ -19,6 +19,7 @@ import {
   assertEnumerationPlausible, formatIpv4, formatIpv6,
   type RawAdapter, type RawIfConfig, type RawRoute, type RawUnicast
 } from './ipHelperTransforms'
+import { decodeTrafficCounterTable, validateTrafficAdapterName, type NativeTrafficCounters } from './trafficCounters'
 
 
 const MAX_ADAPTERS = 4096
@@ -195,6 +196,23 @@ export function readRawAdapters(includeCharacteristics = true): RawAdapter[] {
   }
   assertEnumerationPlausible(rows)
   return rows
+}
+
+/** Read-only counters, without the registry/CIM inventory used for adapter policy. */
+export function readTrafficCounters(adapterName: string): NativeTrafficCounters {
+  validateTrafficAdapterName(adapterName)
+  const a = load()
+  const out = [null as unknown]
+  const rc = a.GetIfTable2(out)
+  if (rc !== 0) throw new Error(`GetIfTable2 failed: ${rc}`)
+  try {
+    if (!out[0]) throw new Error('traffic counters: missing table')
+    const count = a.koffi.decode(out[0], 'uint32_t') as number
+    if (!Number.isInteger(count) || count < 1 || count > MAX_ADAPTERS) throw new Error('traffic counters: invalid interface count')
+    return decodeTrafficCounterTable(Buffer.from(a.koffi.decode(out[0], 'uint8_t', 8 + count * IF_ROW2_SIZE)), adapterName)
+  } finally {
+    a.FreeMibTable(out[0])
+  }
 }
 
 /** Unicast addresses, gateways and DNS servers per interface (GetAdaptersAddresses). */

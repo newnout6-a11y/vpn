@@ -19,7 +19,8 @@ describe('resolved IP display', () => {
     expect(mainSource).toContain('const CONCURRENCY = 24')
     expect(mainSource).toContain('async function resolveAndPersistProfileIps()')
     expect(mainSource).toContain("handleLogged('servers:resolve-ips'")
-    expect(mainSource).toContain("handleLogged('servers:list', async () => {\n    return getProfiles()")
+    expect(mainSource).toContain("handleLogged('servers:list', async () => {\n    return store.getProfileSummaries()")
+    expect(readSource('src/main/index.ts')).not.toContain('void serverPicker.resolveAndPersistProfileIps()')
   })
 
   it('renders the resolved IP and refreshes it in the background', () => {

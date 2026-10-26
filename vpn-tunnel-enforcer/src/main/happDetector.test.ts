@@ -9,10 +9,10 @@ const axiosGetMock = vi.hoisted(() => vi.fn())
 const createConnectionMock = vi.hoisted(() => vi.fn())
 const socksCreateConnectionMock = vi.hoisted(() => vi.fn())
 const execMock = vi.hoisted(() => vi.fn())
+const execAsyncMock = vi.hoisted(() => vi.fn())
 const openPorts = vi.hoisted(() => new Set<number>())
 
-;(execMock as any)[Symbol.for('nodejs.util.promisify.custom')] = () =>
-  Promise.resolve({ stdout: '', stderr: '' })
+;(execMock as any)[Symbol.for('nodejs.util.promisify.custom')] = (...args: unknown[]) => execAsyncMock(...args)
 
 class FakeSocket extends EventEmitter {
   setTimeout() {
@@ -105,6 +105,7 @@ describe('happDetector config and port probing', () => {
     axiosGetMock.mockReset()
     socksCreateConnectionMock.mockReset()
     execMock.mockClear()
+    execAsyncMock.mockReset().mockResolvedValue({ stdout: '', stderr: '' })
     for (const name of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) {
       delete process.env[name]
     }
@@ -157,5 +158,59 @@ describe('happDetector config and port probing', () => {
       type: 'http',
       verified: true
     })
+  })
+
+  it('shares physical discovery even after the positive cache TTL elapsed (AT-09-010)', async () => {
+    const { happDetector } = await import('./happDetector')
+    let release!: (value: null) => void
+    const physical = new Promise<null>(resolve => { release = resolve })
+    const scan = vi.spyOn(happDetector, '_detectUncached').mockReturnValue(physical)
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1000)
+    try {
+      const first = happDetector.detect()
+      clock.mockReturnValue(20000)
+      const second = happDetector.detect()
+      expect(scan).toHaveBeenCalledTimes(1)
+      release(null)
+      expect(await Promise.all([first, second])).toEqual([null, null])
+    } finally { release(null); scan.mockRestore(); clock.mockRestore() }
+  })
+
+  it.runIf(process.platform === 'win32')('overlaps independent WinHTTP, WinINet and listener reads (AT-09-010)', async () => {
+    const { happDetector } = await import('./happDetector')
+    const releases: Array<() => void> = []
+    execAsyncMock.mockImplementation(() => new Promise(resolve => {
+      releases.push(() => resolve({ stdout: '', stderr: '' }))
+    }))
+    const task = happDetector._detectUncached()
+    try { await vi.waitFor(() => expect(execAsyncMock).toHaveBeenCalledTimes(3)) }
+    finally { for (const release of releases) release() }
+    expect(await task).toBeNull()
+  })
+
+  it('briefly shares a negative result then discovers a newly started proxy (AT-09-010)', async () => {
+    const { happDetector } = await import('./happDetector')
+    const found = { host: '127.0.0.1', port: 10808, type: 'http' as const, verified: true, publicIpViaProxy: null }
+    const scan = vi.spyOn(happDetector, '_detectUncached').mockResolvedValueOnce(null).mockResolvedValue(found)
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1000)
+    try {
+      expect(await happDetector.detect()).toBeNull()
+      clock.mockReturnValue(1499)
+      expect(await happDetector.detect()).toBeNull()
+      expect(scan).toHaveBeenCalledTimes(1)
+      clock.mockReturnValue(1500)
+      expect(await happDetector.detect()).toEqual(found)
+      expect(scan).toHaveBeenCalledTimes(2)
+    } finally { scan.mockRestore(); clock.mockRestore() }
+  })
+
+  it('releases a rejected discovery so a new caller can retry (AT-09-010)', async () => {
+    const { happDetector } = await import('./happDetector')
+    const scan = vi.spyOn(happDetector, '_detectUncached').mockRejectedValueOnce(new Error('fixture')).mockResolvedValue(null)
+    try {
+      await expect(happDetector.detect()).rejects.toThrow('fixture')
+      expect(await happDetector.detect()).toBeNull()
+      expect(scan).toHaveBeenCalledTimes(2)
+    } finally { scan.mockRestore() }
   })
 })

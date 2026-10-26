@@ -549,6 +549,7 @@ describe('trafficForensics', () => {
     })
     writeFileSync(join(status.sessionDir!, 'pktmon.etl'), Buffer.alloc(4096))
     writeFileSync(join(status.sessionDir!, 'events.ndjson'), JSON.stringify({
+      session: status.sessionId,
       provider: 'sidecar',
       category: 'lifecycle',
       event: 'started'
@@ -583,6 +584,7 @@ describe('trafficForensics', () => {
       })
       writeFileSync(join(status.sessionDir!, 'pktmon.etl'), Buffer.alloc(4096))
       writeFileSync(join(status.sessionDir!, 'events.ndjson'), JSON.stringify({
+        session: status.sessionId,
         provider: 'sidecar',
         category: 'lifecycle',
         event: 'started'

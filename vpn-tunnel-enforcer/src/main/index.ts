@@ -2120,7 +2120,6 @@ app.whenReady().then(async () => {
     isQuitting || shutdownInProgress || connectionLifecycle.busy || tunController.getStatus().running)
 
   createWindow()
-  void serverPicker.resolveAndPersistProfileIps().catch(() => undefined)
   tray = createTray(mainWindow!, {
     onStart: startProtectionFromTray,
     onStop: stopProtection,

@@ -44,8 +44,7 @@ function harness() {
   const native = vi.fn(() => { throw new Error('Retained TUN must not restart or mutate native network protection') })
   const observations: Array<{ phase: string; generation: number; verified?: boolean }> = []
   const splitTunneling = {
-    getDirectProcessNames: vi.fn(() => ['fixture.exe']),
-    getDirectProcessPaths: vi.fn(() => ['C:\\Fixture\\fixture.exe'])
+    getDirectProcessTargets: vi.fn(async () => ({ names: ['fixture.exe'], paths: ['C:\\Fixture\\fixture.exe'] }))
   }
   const splitImport = vi.fn(async () => ({ splitTunneling }))
   const deps = {
@@ -183,8 +182,9 @@ describe('retained TUN controller integration (AT-00-003 / AT-00-007 / AT-02-002
 
   it.each(['names', 'paths'] as const)('changed split-tunnel %s rejects retaining stale TUN rules', async changed => {
     const h = harness()
-    if (changed === 'names') h.splitTunneling.getDirectProcessNames.mockReturnValue(['other.exe'])
-    else h.splitTunneling.getDirectProcessPaths.mockReturnValue(['C:\\Other\\other.exe'])
+    h.splitTunneling.getDirectProcessTargets.mockResolvedValue(changed === 'names'
+      ? { names: ['other.exe'], paths: ['C:\\Fixture\\fixture.exe'] }
+      : { names: ['fixture.exe'], paths: ['C:\\Other\\other.exe'] })
     expect(await h.run()).toBeNull()
     expect(h.startXrayInSlot).not.toHaveBeenCalled()
     expect(h.selectProtectedOutbound).not.toHaveBeenCalled()

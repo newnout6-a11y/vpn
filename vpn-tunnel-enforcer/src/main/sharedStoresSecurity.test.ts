@@ -3,24 +3,31 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { logEvent } from './appLogger'
+import ts from 'typescript'
+import type { ServerProfile } from '../shared/ipc-types'
+import { withProfileStoreWriteLock } from './profileStoreQueue'
 
 const state = vi.hoisted(() => ({
   stores: {} as Record<string, Record<string, any>>,
   failOnEncryptCall: 0,
   encryptCalls: 0,
   failDecrypt: false,
+  available: true,
+  decryptCalls: 0,
   directory: ''
 }))
 
 vi.mock('electron', () => ({
+  app: { isPackaged: true },
   safeStorage: {
-    isEncryptionAvailable: () => true,
+    isEncryptionAvailable: () => state.available,
     encryptString: (value: string) => {
       state.encryptCalls += 1
       if (state.failOnEncryptCall === state.encryptCalls) throw new Error('injected safeStorage failure')
       return Buffer.from(`encrypted:${value}`, 'utf8')
     },
     decryptString: (value: Buffer) => {
+      state.decryptCalls += 1
       if (state.failDecrypt) throw new Error('FAKE-DECRYPT-ERROR')
       return value.toString('utf8').replace(/^encrypted:/, '')
     }
@@ -57,7 +64,128 @@ vi.mock('electron-store', () => ({
 
 afterEach(() => {
   if (state.directory) rmSync(state.directory, { recursive: true, force: true })
-  state.directory = ''; state.failDecrypt = false
+  state.directory = ''; state.failDecrypt = false; state.available = true
+})
+
+describe('public profile metadata and DNS merge (AT-01-001/008/010, AT-04-008)', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    state.encryptCalls = 0; state.decryptCalls = 0; state.failOnEncryptCall = 0; state.failDecrypt = false; state.available = true
+    state.stores = { 'server-picker': { schemaVersion: 2, profiles: [], activeProfileId: 'a' } }
+  })
+
+  it('decodes once for public hints, then refreshes without secret decrypts or returning credentials', async () => {
+    const { serverPickerStore: store } = await import('./sharedStores')
+    store.set('profiles', [{ ...plaintextProfile('a'), outbound: { type: 'vless', uuid: 'FAKE-SECRET',
+      tls: { enabled: true, reality: { enabled: true, public_key: 'FAKE-KEY' }, utls: { fingerprint: 'chrome' } } } } as ServerProfile])
+    const first = store.getProfileSummaries()
+    const decoded = state.decryptCalls
+    expect(first[0]).toMatchObject({ id: 'a', port: 443, display: { hasOutbound: true, stealth: 'reality', clientFingerprint: 'chrome' } })
+    expect(first[0]).not.toHaveProperty('outbound'); expect(first[0]).not.toHaveProperty('sourceUri')
+    expect(JSON.stringify(first)).not.toContain('FAKE-')
+    first[0].display!.stealth = 'plain'
+    expect(store.getProfileSummaries()[0].display?.stealth).toBe('reality')
+    expect(state.decryptCalls).toBe(decoded)
+    expect(store.get('profiles')[0].outbound?.uuid).toBe('FAKE-SECRET')
+  })
+
+  it('decodes only the selected usable profile for runtime and preserves the full outbound', async () => {
+    const { serverPickerStore: store } = await import('./sharedStores')
+    store.set('profiles', [plaintextProfile('a'), { ...plaintextProfile('b'), enabled: false }, plaintextProfile('c')] as ServerProfile[])
+    state.decryptCalls = 0
+    expect(store.getProfile('c', true)?.outbound?.uuid).toBe('c')
+    expect(state.decryptCalls).toBe(2)
+    expect(store.getProfile('b', true)?.id).toBe('a')
+  })
+
+  it.each([
+    [undefined, '8443', 8443], [0, 8443, 443], [65536, 8443, 443], [443, 8443, 443]
+  ])('preserves runtime port normalization for %s / %s', async (port, serverPort, expected) => {
+    const { serverPickerStore: store } = await import('./sharedStores')
+    store.set('profiles', [{ ...plaintextProfile('a'), port, outbound: { type: 'vless', server_port: serverPort } }] as ServerProfile[])
+    expect(store.getProfile('a')).toMatchObject({ port: expected, outbound: { server_port: expected } })
+    expect(store.getProfileSummaries()[0].port).toBe(expected)
+  })
+
+  it.each([
+    [{ tls: { enabled: true, ech: { config: ['config'] } } }, 'vless', 'ech'],
+    [{ tls: { enabled: true, ech: { enabled: false, config: ['config'] }, utls: { enabled: true } } }, 'vless', 'utls'],
+    [{ tls: { enabled: true, reality: { enabled: true } } }, 'vless', 'reality'],
+    [{ tls: { enabled: true, utls: { enabled: true } } }, 'vless', 'utls'],
+    [{ tls: { enabled: true, utls: { enabled: false } } }, 'vless', 'tls'],
+    [{ tls: { enabled: false, reality: { enabled: true } } }, 'vless', 'plain'],
+    [{ tls: { reality: [], utls: [], ech: [] } }, 'vless', 'tls'],
+    [{ tls: [] }, 'vless', 'plain'], [{ tls: 'invalid' }, 'vless', 'plain'],
+    [{ type: 'naive' }, '', 'naive'], [{ type: { invalid: true } }, '', undefined],
+    [{ obfs: { type: 'salamander' } }, 'hysteria2', 'obfs'], [{ obfs: [] }, 'hysteria2', undefined]
+  ])('derives safe display markers from current encrypted configuration %j', async (outbound, protocol, stealth) => {
+    const { serverPickerStore: store } = await import('./sharedStores')
+    store.set('profiles', [{ ...plaintextProfile('a'), protocol, outbound }] as ServerProfile[])
+    expect(store.getProfileSummaries()[0].display).toEqual({ hasOutbound: true, ...(stealth ? { stealth } : {}) })
+  })
+
+  it('discards caller-provided hints and refreshes them when public inputs change', async () => {
+    const { serverPickerStore: store } = await import('./sharedStores')
+    store.set('profiles', [{ ...plaintextProfile('a'), display: { hasOutbound: false, stealth: 'ech', clientFingerprint: 'forged' } }] as ServerProfile[])
+    expect(state.stores['server-picker'].profiles[0]).not.toHaveProperty('display')
+    expect(store.getProfileSummaries()[0].display).toEqual({ hasOutbound: true, stealth: 'plain' })
+    Object.assign(state.stores['server-picker'].profiles[0], { protocol: 'naive', port: 8443, clientFingerprint: 'firefox' })
+    expect(store.getProfileSummaries()[0]).toMatchObject({ port: 8443, display: { hasOutbound: true, stealth: 'naive', clientFingerprint: 'firefox' } })
+  })
+
+  it.each(['outbound', 'sourceUri'] as const)('invalidates public hints when current %s ciphertext changes', async field => {
+    const { serverPickerStore: store } = await import('./sharedStores')
+    store.set('profiles', [plaintextProfile('a')] as ServerProfile[])
+    store.getProfileSummaries()
+    state.stores['server-picker'].profiles[0][field].ciphertext += 'invalid'
+    state.failDecrypt = true
+    const before = JSON.stringify(state.stores['server-picker'])
+    expect(() => store.getProfileSummaries()).toThrow('FAKE-DECRYPT-ERROR')
+    expect(JSON.stringify(state.stores['server-picker'])).toBe(before)
+  })
+
+  it('refuses cached summaries and metadata writes when safeStorage becomes unavailable', async () => {
+    const { serverPickerStore: store } = await import('./sharedStores')
+    store.set('profiles', [plaintextProfile('a')] as ServerProfile[])
+    store.getProfileSummaries()
+    const before = JSON.stringify(state.stores['server-picker'])
+    state.available = false
+    expect(() => store.getProfileSummaries()).toThrow('unavailable')
+    expect(() => store.getProfile('a')).toThrow('unavailable')
+    expect(() => store.mergeResolvedIps(new Map([['a', { server: 'vpn.example', ip: '198.51.100.1', at: 5 }]]))).toThrow('unavailable')
+    expect(JSON.stringify(state.stores['server-picker'])).toBe(before)
+  })
+
+  it('merges a delayed DNS result into current rows under the existing write queue', async () => {
+    const { serverPickerStore: store } = await import('./sharedStores')
+    store.set('profiles', ['a', 'deleted', 'changed'].map(plaintextProfile) as ServerProfile[])
+    const source = ts.createSourceFile('serverPicker.ts', readFileSync('src/main/serverPicker.ts', 'utf8'), ts.ScriptTarget.Latest, true)
+    const fn = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'resolveAndPersistProfileIps')!
+    const compiled = ts.transpileModule('let resolveIpsInFlight = null;\n' + fn.getText(source) + '\nreturn resolveAndPersistProfileIps', {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 }
+    }).outputText
+    let finish!: (profiles: ServerProfile[]) => void
+    const dns = new Promise<ServerProfile[]>(resolve => { finish = resolve })
+    const profilesForDisplay = vi.fn(() => dns)
+    const resolve = new Function('store', 'profilesForDisplay', 'withProfileStoreWriteLock', compiled)(store, profilesForDisplay, withProfileStoreWriteLock) as () => Promise<ServerProfile[]>
+    const pending = resolve()
+    const original = store.getProfileSummaries()
+    store.set('profiles', [{ ...plaintextProfile('a'), name: 'New name' }, { ...plaintextProfile('changed'), server: 'new.example' }, plaintextProfile('new')] as ServerProfile[])
+    const ciphertext = state.stores['server-picker'].profiles[0].outbound.ciphertext
+    let release!: () => void
+    const held = withProfileStoreWriteLock(() => new Promise<void>(done => { release = done }))
+    await Promise.resolve()
+    finish(original.map(profile => ({ ...profile, resolvedIp: '198.51.100.7', resolvedIpAt: 42 })))
+    await Promise.resolve(); await Promise.resolve()
+    expect(state.stores['server-picker'].profiles[0].resolvedIp).toBeUndefined()
+    release(); await held
+    const result = await pending
+    expect(result.map(profile => profile.id)).toEqual(['a', 'changed', 'new'])
+    expect(result[0]).toMatchObject({ name: 'New name', resolvedIp: '198.51.100.7', resolvedIpAt: 42 })
+    expect(result[1].resolvedIp).toBeUndefined(); expect(result[2].resolvedIp).toBeUndefined()
+    expect(state.stores['server-picker'].profiles[0].outbound.ciphertext).toBe(ciphertext)
+    expect(result[0]).not.toHaveProperty('outbound')
+  })
 })
 
 function plaintextProfile(id: string) {

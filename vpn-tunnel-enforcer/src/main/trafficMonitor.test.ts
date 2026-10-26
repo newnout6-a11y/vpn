@@ -1,7 +1,7 @@
 /**
- * Tests for trafficMonitor's persistent-reader design.
+ * Tests for the explicit compatibility reader; native coverage is below.
  *
- * The point of the rewrite is that the monitor keeps ONE long-lived
+ * When native reads are explicitly disabled, the monitor keeps ONE long-lived
  * powershell.exe alive and reads a counter sample per second off its stdout,
  * instead of spawning a fresh powershell.exe every second. These tests pin
  * that behaviour (single spawn, killed on stop) and the bps math.
@@ -12,6 +12,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 vi.mock('./appLogger', () => ({ logEvent: vi.fn() }))
 
 const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }))
+const { nativeMock } = vi.hoisted(() => ({ nativeMock: vi.fn() }))
+vi.mock('./native/nativeHost', () => ({ callNativeHost: nativeMock }))
 // trafficMonitor is the only module in this import chain that touches
 // child_process, so a full manual mock (rather than importOriginal) is enough
 // and avoids the named-binding pitfalls of partially mocking a node builtin.
@@ -35,6 +37,7 @@ class FakeProc extends EventEmitter {
 import { calculateBurstiness, smoothTrafficRate, trafficMonitor } from './trafficMonitor'
 
 const realPlatform = process.platform
+const previousDisableNative = process.env.VPNTE_DISABLE_NATIVE_NET
 function setPlatform(p: string) {
   Object.defineProperty(process, 'platform', { value: p, configurable: true })
 }
@@ -44,6 +47,7 @@ describe('trafficMonitor persistent reader', () => {
 
   beforeEach(() => {
     setPlatform('win32')
+    process.env.VPNTE_DISABLE_NATIVE_NET = '1'
     spawnMock.mockReset()
     proc = new FakeProc()
     spawnMock.mockReturnValue(proc)
@@ -51,6 +55,8 @@ describe('trafficMonitor persistent reader', () => {
 
   afterEach(() => {
     trafficMonitor.stop()
+    if (previousDisableNative === undefined) delete process.env.VPNTE_DISABLE_NATIVE_NET
+    else process.env.VPNTE_DISABLE_NATIVE_NET = previousDisableNative
     setPlatform(realPlatform)
   })
 
@@ -144,5 +150,75 @@ describe('trafficMonitor persistent reader', () => {
 
     expect(spawnMock).not.toHaveBeenCalled()
     expect(seen.at(-1)).toEqual({ running: false, adapterFound: false })
+  })
+})
+
+describe('native traffic sampling (AT-07-009 / AT-07-012)', () => {
+  const sample = (receivedBytes = '1000', sentBytes = '500', identity = 'a'.repeat(32)) => ({ found: true, name: 'VPNTE-TUN', identity, receivedBytes, sentBytes })
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(100000)
+    setPlatform('win32')
+    delete process.env.VPNTE_DISABLE_NATIVE_NET
+    spawnMock.mockClear()
+    nativeMock.mockReset().mockResolvedValue(sample())
+  })
+  afterEach(async () => {
+    trafficMonitor.stop()
+    await Promise.resolve()
+    vi.useRealTimers()
+    setPlatform(realPlatform)
+    if (previousDisableNative === undefined) delete process.env.VPNTE_DISABLE_NATIVE_NET
+    else process.env.VPNTE_DISABLE_NATIVE_NET = previousDisableNative
+  })
+  it('uses the utility host with no PowerShell process and keeps uint64 deltas exact above 2^53', async () => {
+    nativeMock.mockResolvedValueOnce(sample('9007199254740993', '4294967297'))
+      .mockResolvedValueOnce(sample('9007199254740994', '4294967299'))
+    trafficMonitor.start('VPNTE-TUN')
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(nativeMock).toHaveBeenCalledWith('traffic-counters', { adapterName: 'VPNTE-TUN' }, 1500)
+    expect(spawnMock).not.toHaveBeenCalled()
+    expect(trafficMonitor.getCurrentStats()).toMatchObject({ adapterFound: true, downloadBps: 1, uploadBps: 2, sessionDownloadBytes: 1, sessionUploadBytes: 2 })
+  })
+  it('does not overlap pending reads or publish after stop, then drains before a successor samples', async () => {
+    let finish!: (value: ReturnType<typeof sample>) => void
+    nativeMock.mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+      .mockResolvedValueOnce(sample('2000'))
+    trafficMonitor.start('VPNTE-TUN')
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(nativeMock).toHaveBeenCalledTimes(1)
+    trafficMonitor.stop()
+    trafficMonitor.start('VPNTE-TUN')
+    expect(nativeMock).toHaveBeenCalledTimes(1)
+    finish(sample('99999'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(nativeMock).toHaveBeenCalledTimes(2)
+    expect(trafficMonitor.getCurrentStats()).toMatchObject({ totalDownloadBytes: 2000, sessionDownloadBytes: 0 })
+    trafficMonitor.stop()
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(nativeMock).toHaveBeenCalledTimes(2)
+  })
+  it.each(['unavailable', 'read-refused', 'timeout', 'protocol'])('never replays %s through PowerShell and clears stale healthy status', async kind => {
+    nativeMock.mockResolvedValueOnce(sample()).mockRejectedValueOnce(Object.assign(new Error('fixture'), { kind }))
+    trafficMonitor.start('VPNTE-TUN')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(trafficMonitor.getCurrentStats().adapterFound).toBe(true)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(trafficMonitor.getCurrentStats()).toMatchObject({ running: true, adapterFound: false, downloadBps: 0, uploadBps: 0 })
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+  it('resets the baseline when the adapter is recreated or its counters reset', async () => {
+    nativeMock.mockResolvedValueOnce(sample('10000')).mockResolvedValueOnce(sample('20000', '500', 'b'.repeat(32)))
+      .mockResolvedValueOnce(sample('1', '1', 'b'.repeat(32)))
+    trafficMonitor.start('VPNTE-TUN')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(trafficMonitor.getCurrentStats()).toMatchObject({ adapterFound: true, sessionDownloadBytes: 0, downloadBps: 0, totalDownloadBytes: 1 })
+  })
+  it('rejects malformed or out-of-range counters instead of displaying a successful sample', async () => {
+    nativeMock.mockResolvedValueOnce(sample('18446744073709551616'))
+    trafficMonitor.start('VPNTE-TUN')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(trafficMonitor.getCurrentStats().adapterFound).toBe(false)
+    expect(spawnMock).not.toHaveBeenCalled()
   })
 })

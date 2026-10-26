@@ -1107,13 +1107,14 @@ let resolveIpsInFlight: Promise<ServerProfile[]> | null = null
 async function resolveAndPersistProfileIps(): Promise<ServerProfile[]> {
   if (resolveIpsInFlight) return resolveIpsInFlight
   resolveIpsInFlight = (async () => {
-  const profiles = getProfiles()
-  const enriched = await profilesForDisplay(profiles)
-  const changed = enriched.some((profile, index) =>
-    profile.resolvedIp !== profiles[index]?.resolvedIp
-  )
-  if (changed) saveProfiles(enriched)
-  return enriched
+    const profiles = store.getProfileSummaries()
+    const enriched = await profilesForDisplay(profiles)
+    const updates = new Map(enriched.flatMap((profile, index) => profile.resolvedIp && profile.resolvedIp !== profiles[index]?.resolvedIp
+      ? [[profile.id, { server: profiles[index].server, ip: profile.resolvedIp, at: profile.resolvedIpAt! }] as const] : []))
+    return withProfileStoreWriteLock(() => {
+      store.mergeResolvedIps(updates)
+      return store.getProfileSummaries()
+    })
   })()
   try {
     return await resolveIpsInFlight
@@ -2113,16 +2114,16 @@ function getActiveProfileId(): string | null {
  * Sets the active profile by ID. Auto-selects the first available profile if
  * none is currently active and at least one profile exists.
  */
-export function selectProfile(id: string): void {
-  const profiles = getProfiles()
-  const selectable = profiles.some((p) => p.id === id && p.enabled !== false && !p.removedFromSubscriptionAt)
-  if (!selectable) {
+export function selectProfile(id: string): ServerProfile | null {
+  const profile = store.getProfile(id)
+  if (!profile || profile.enabled === false || profile.removedFromSubscriptionAt) {
     logEvent('warn', 'server-picker', 'selectProfile: profile not found or unavailable', { id })
-    return
+    return null
   }
   store.set('activeProfileId', id)
   activeCountryGeneration += 1
   logEvent('info', 'server-picker', 'profile selected', { id })
+  return profile
 }
 
 export function backfillProfileCountriesFromNames(): number {
@@ -2262,11 +2263,7 @@ export function abandonProfileSwitch(): void {
  * the first one. Returns null only when there are no profiles at all.
  */
 export function getActiveProfile(): ServerProfile | null {
-  const profiles = getProfiles().filter((profile) => profile.enabled !== false && !profile.removedFromSubscriptionAt)
-  if (!profiles.length) return null
-  const activeId = getActiveProfileId()
-  const found = activeId ? profiles.find((p) => p.id === activeId) : null
-  return found ?? profiles[0]
+  return store.getProfile(getActiveProfileId(), true)
 }
 
 /**
@@ -2719,12 +2716,12 @@ function sanitizeAddProfilesOptions(value: unknown): AddProfilesOptions | undefi
  */
 export function registerServerPickerHandlers(): void {
   handleLogged('servers:list', async () => {
-    return getProfiles()
+    return store.getProfileSummaries()
   })
 
   handleLogged('servers:select', async (_event, id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
-    const profile = getProfiles().find((p) => p.id === id)
+    const profile = store.getProfile(id)
     if (!profile) throw new Error('Profile not found')
     if (profile.enabled === false || profile.removedFromSubscriptionAt) throw new Error('Profile is unavailable')
     if (profileSwitchInProgress) throw new Error('Переключение сервера уже выполняется')
@@ -2742,9 +2739,10 @@ export function registerServerPickerHandlers(): void {
       // Invalidate adaptive work before ANY await (including network identity).
       await profileSwitchHooks?.begin()
       if (generation !== profileSwitchGeneration) throw new Error('Переключение сервера отменено')
-      selectProfile(id)
+      const selected = selectProfile(id)
+      if (!selected) throw new Error('Profile is unavailable')
       selectionChanged = true
-      await restartDirectVpnForSelectedProfile(profile, switchOwner)
+      await restartDirectVpnForSelectedProfile(selected, switchOwner)
       if (generation !== profileSwitchGeneration) throw new Error('Переключение сервера отменено')
     } catch (err) {
       const fast = switchOwner.fastReceipt
@@ -2813,8 +2811,10 @@ export function registerServerPickerHandlers(): void {
   })
 
   handleLogged('servers:get-active', async () => {
-    const profile = getActiveProfile()
-    return { profile, activeId: getActiveProfileId() }
+    const activeId = getActiveProfileId()
+    const profiles = store.getProfileSummaries().filter(profile => profile.enabled !== false && !profile.removedFromSubscriptionAt)
+    const profile = profiles.find(profile => profile.id === activeId) ?? profiles[0] ?? null
+    return { profile, activeId }
   })
 
   handleLogged('servers:ping-all', async () => {

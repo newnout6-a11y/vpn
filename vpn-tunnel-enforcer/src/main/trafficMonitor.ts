@@ -1,8 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { logEvent } from './appLogger'
 import { TUN_ADAPTER_ALIAS } from './tunAdapter'
+import { callNativeHost } from './native/nativeHost'
+import { validateTrafficAdapterName, type NativeTrafficCounters } from './native/trafficCounters'
 
-// How often the persistent PowerShell reader samples the adapter counters.
+// Native sampler cadence; also used by the explicit compatibility reader.
 const SAMPLE_INTERVAL_MS = 1000
 const SMOOTHING_ALPHA = 0.35
 const BURSTINESS_WINDOW_SIZE = 5
@@ -34,8 +36,9 @@ export interface TrafficStats {
 interface AdapterCounters {
   found: boolean
   name: string
-  receivedBytes: number
-  sentBytes: number
+  receivedBytes: bigint
+  sentBytes: bigint
+  identity: string | null
   ts: number
 }
 
@@ -63,13 +66,10 @@ function emptyStats(adapterName = TUN_ADAPTER_ALIAS): TrafficStats {
 
 let currentStats = emptyStats()
 let callbacks: Array<(stats: TrafficStats) => void> = []
-// The monitor is "running" between start() and stop(), independent of whether
-// the PowerShell reader is momentarily alive (it may be respawning).
+// Monitor lifetime is independent of whether the latest counter read succeeded.
 let running = false
-// Persistent PowerShell reader. We keep ONE process alive for the whole
-// session and read a counter sample per second off its stdout, instead of
-// spawning a fresh powershell.exe every second (process-creation cost that
-// dominated CPU on long-running connections).
+// Compatibility only: explicitly disabled/unsupported native reads can use one
+// persistent PowerShell process. Native failures never activate this path.
 let readerProc: ChildProcessWithoutNullStreams | null = null
 let readerStdoutBuf = ''
 let respawnTimer: ReturnType<typeof setTimeout> | null = null
@@ -77,6 +77,10 @@ let respawnTimer: ReturnType<typeof setTimeout> | null = null
 // publish a neutral no-adapter state on a JS timer without pretending the TUN
 // interface is running.
 let fallbackTimer: ReturnType<typeof setInterval> | null = null
+let nativeTimer: ReturnType<typeof setTimeout> | null = null
+let nativeReadInFlight: Promise<NativeTrafficCounters> | null = null
+let nativeReadFailed = false
+let generation = 0
 let adapterName = TUN_ADAPTER_ALIAS
 let baseCounters: AdapterCounters | null = null
 let previousCounters: AdapterCounters | null = null
@@ -153,9 +157,8 @@ function rememberSample(samples: number[], value: number): number[] {
   return [...samples, value].slice(-BURSTINESS_WINDOW_SIZE)
 }
 
-// Turn one counter sample into a published TrafficStats update. Mirrors the
-// previous poll() math exactly — the only change is where the samples come
-// from (a persistent reader stream instead of a per-second PowerShell spawn).
+// Subtract uint64 counters before converting to the renderer's numeric rates
+// and totals, so small deltas above 2^53 remain visible without rounding loss.
 function processCounters(counters: AdapterCounters) {
   if (!counters.found) {
     publishAdapterNotFound()
@@ -165,6 +168,7 @@ function processCounters(counters: AdapterCounters) {
   if (
     !baseCounters ||
     !previousCounters ||
+    counters.identity !== previousCounters.identity ||
     counters.receivedBytes < previousCounters.receivedBytes ||
     counters.sentBytes < previousCounters.sentBytes
   ) {
@@ -179,16 +183,16 @@ function processCounters(counters: AdapterCounters) {
       ts: counters.ts,
       running: true,
       adapterFound: true,
-      totalDownloadBytes: counters.receivedBytes,
-      totalUploadBytes: counters.sentBytes,
+      totalDownloadBytes: Number(counters.receivedBytes),
+      totalUploadBytes: Number(counters.sentBytes),
       startedAt
     })
     return
   }
 
   const seconds = Math.max((counters.ts - previousCounters.ts) / 1000, 0.001)
-  const downloadBps = Math.max(0, (counters.receivedBytes - previousCounters.receivedBytes) / seconds)
-  const uploadBps = Math.max(0, (counters.sentBytes - previousCounters.sentBytes) / seconds)
+  const downloadBps = Math.max(0, Number(counters.receivedBytes - previousCounters.receivedBytes) / seconds)
+  const uploadBps = Math.max(0, Number(counters.sentBytes - previousCounters.sentBytes) / seconds)
   if (counters.receivedBytes > previousCounters.receivedBytes || counters.sentBytes > previousCounters.sentBytes) {
     lastTrafficAt = counters.ts || Date.now()
   }
@@ -211,14 +215,54 @@ function processCounters(counters: AdapterCounters) {
     smoothedUploadBps,
     downloadBurstinessPct: calculateBurstiness(downloadSamples),
     uploadBurstinessPct: calculateBurstiness(uploadSamples),
-    totalDownloadBytes: counters.receivedBytes,
-    totalUploadBytes: counters.sentBytes,
-    sessionDownloadBytes: Math.max(0, counters.receivedBytes - baseCounters.receivedBytes),
-    sessionUploadBytes: Math.max(0, counters.sentBytes - baseCounters.sentBytes),
+    totalDownloadBytes: Number(counters.receivedBytes),
+    totalUploadBytes: Number(counters.sentBytes),
+    sessionDownloadBytes: Number(counters.receivedBytes - baseCounters.receivedBytes),
+    sessionUploadBytes: Number(counters.sentBytes - baseCounters.sentBytes),
     peakDownloadBps,
     peakUploadBps,
     startedAt
   })
+}
+
+function uint64(value: unknown): bigint {
+  if (typeof value !== 'string' || !/^(0|[1-9]\d{0,19})$/.test(value)) throw new Error('invalid traffic counter')
+  const counter = BigInt(value)
+  if (counter > 0xffffffffffffffffn) throw new Error('traffic counter exceeds uint64')
+  return counter
+}
+
+function nativeCounters(value: NativeTrafficCounters): AdapterCounters {
+  if (!value || typeof value.found !== 'boolean' || typeof value.name !== 'string'
+    || value.name.toLowerCase() !== adapterName.toLowerCase()
+    || (value.found && (typeof value.identity !== 'string' || !/^[a-f0-9]{32}$/.test(value.identity)))) {
+    throw new Error('invalid traffic counter response')
+  }
+  return { ...value, receivedBytes: uint64(value.receivedBytes), sentBytes: uint64(value.sentBytes), ts: Date.now() }
+}
+
+async function sampleNative(owner: number): Promise<void> {
+  let reading: Promise<NativeTrafficCounters> | null = null
+  try {
+    if (nativeReadInFlight) await nativeReadInFlight.catch(() => undefined)
+    if (!running || generation !== owner) return
+    reading = callNativeHost<NativeTrafficCounters>('traffic-counters', { adapterName }, 1500)
+    nativeReadInFlight = reading
+    const counters = await reading
+    if (running && generation === owner) {
+      processCounters(nativeCounters(counters))
+      nativeReadFailed = false
+    }
+  } catch {
+    if (running && generation === owner) {
+      publishAdapterNotFound()
+      if (!nativeReadFailed) logEvent('warn', 'traffic', 'native traffic counter sample unavailable')
+      nativeReadFailed = true
+    }
+  } finally {
+    if (reading && nativeReadInFlight === reading) nativeReadInFlight = null
+    if (running && generation === owner) nativeTimer = setTimeout(() => { nativeTimer = null; void sampleNative(owner) }, SAMPLE_INTERVAL_MS)
+  }
 }
 
 function handleReaderLine(line: string) {
@@ -226,15 +270,18 @@ function handleReaderLine(line: string) {
   if (!raw) return
   try {
     const parsed = JSON.parse(raw)
+    if (typeof parsed.Found !== 'boolean' || typeof parsed.Name !== 'string'
+      || parsed.Name.toLowerCase() !== adapterName.toLowerCase()) throw new Error('invalid reader response')
     processCounters({
-      found: Boolean(parsed.Found),
-      name: String(parsed.Name || adapterName),
-      receivedBytes: Number(parsed.ReceivedBytes) || 0,
-      sentBytes: Number(parsed.SentBytes) || 0,
+      found: parsed.Found,
+      name: parsed.Name,
+      receivedBytes: uint64(String(parsed.ReceivedBytes)),
+      sentBytes: uint64(String(parsed.SentBytes)),
+      identity: null,
       ts: Date.now()
     })
   } catch {
-    // Non-JSON noise (e.g. a stray PowerShell warning). Ignore the line.
+    publishAdapterNotFound()
   }
 }
 
@@ -251,7 +298,7 @@ while ($true) {
   if ($null -eq $stats) {
     $row = [pscustomobject]@{Found=$false;Name=$adapterName;ReceivedBytes=0;SentBytes=0}
   } else {
-    $row = [pscustomobject]@{Found=$true;Name=$stats.Name;ReceivedBytes=[double]$stats.ReceivedBytes;SentBytes=[double]$stats.SentBytes}
+    $row = [pscustomobject]@{Found=$true;Name=$stats.Name;ReceivedBytes=[string]$stats.ReceivedBytes;SentBytes=[string]$stats.SentBytes}
   }
   [Console]::Out.WriteLine(($row | ConvertTo-Json -Compress))
   [Console]::Out.Flush()
@@ -293,9 +340,11 @@ function spawnReader() {
     return
   }
   readerProc = proc
+  const owner = generation
 
   proc.stdout.setEncoding('utf8')
   proc.stdout.on('data', (chunk: string) => {
+    if (!running || generation !== owner || readerProc !== proc) return
     readerStdoutBuf += chunk
     let nl: number
     while ((nl = readerStdoutBuf.indexOf('\n')) >= 0) {
@@ -307,13 +356,16 @@ function spawnReader() {
     if (readerStdoutBuf.length > 64 * 1024) readerStdoutBuf = ''
   })
   proc.on('error', (err) => {
+    if (!running || generation !== owner || readerProc !== proc) return
+    publishAdapterNotFound()
     logEvent('warn', 'traffic', 'traffic counter reader errored', err)
   })
   proc.on('exit', (code, signal) => {
     if (readerProc === proc) readerProc = null
     // Only respawn if the monitor is still meant to be running and we didn't
     // kill it ourselves in stop().
-    if (running) {
+    if (running && generation === owner) {
+      publishAdapterNotFound()
       logEvent('warn', 'traffic', 'traffic counter reader exited; will respawn', { code, signal })
       scheduleRespawn()
     }
@@ -330,6 +382,7 @@ function scheduleRespawn() {
 
 function stopReader() {
   clearRespawnTimer()
+  if (nativeTimer) { clearTimeout(nativeTimer); nativeTimer = null }
   if (fallbackTimer) {
     clearInterval(fallbackTimer)
     fallbackTimer = null
@@ -349,9 +402,13 @@ function stopReader() {
 export const trafficMonitor = {
   start(name = TUN_ADAPTER_ALIAS) {
     if (running) return
+    validateTrafficAdapterName(name)
+    generation++
     running = true
     adapterName = name
     startedAt = Date.now()
+    lastTrafficAt = 0
+    nativeReadFailed = false
     baseCounters = null
     previousCounters = null
     peakDownloadBps = 0
@@ -361,10 +418,15 @@ export const trafficMonitor = {
     downloadSamples = []
     uploadSamples = []
     publish({ ...emptyStats(adapterName), running: true, startedAt })
-    spawnReader()
+    // These are known before dispatch. A native crash/timeout/read refusal never
+    // replays the read through CIM; report missing evidence and retry next tick.
+    if (process.platform !== 'win32' || process.env.VPNTE_DISABLE_NATIVE_NET === '1'
+      || (process.arch !== 'x64' && process.arch !== 'arm64')) spawnReader()
+    else void sampleNative(generation)
   },
 
   stop() {
+    generation++
     running = false
     stopReader()
     baseCounters = null
@@ -376,6 +438,7 @@ export const trafficMonitor = {
     downloadSamples = []
     uploadSamples = []
     startedAt = null
+    lastTrafficAt = 0
     publish(emptyStats(adapterName))
   },
 

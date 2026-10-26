@@ -4,6 +4,7 @@ import { MacCard } from '../design-system/MacCard'
 import { MacButton } from '../design-system/MacButton'
 import { MacSelect, type SelectOption } from '../design-system/MacSelect'
 import { useAppStore } from '../store'
+import { usePageActive } from '../hooks/usePageActive'
 import { SERVER_CHANGED_EVENT } from '../nav'
 import type { ExternalProxyInstanceStatus, ExternalProxyProfileRow, ExternalProxyStatus } from '../../shared/ipc-types'
 
@@ -100,6 +101,7 @@ function firstAvailableSlot(instances: ExternalProxyInstanceStatus[]): number {
 }
 
 export function ExternalProxyCard() {
+  const active = usePageActive()
   const addLog = useAppStore(s => s.addLog)
   const addGlobalToast = useAppStore(s => s.addGlobalToast)
 
@@ -157,6 +159,7 @@ export function ExternalProxyCard() {
   }, [applyStatus])
 
   useEffect(() => {
+    if (!active) return
     let pollTimer: number | null = null
     let disposed = false
 
@@ -198,6 +201,7 @@ export function ExternalProxyCard() {
     document.addEventListener('visibilitychange', handleVisibilityChange)
     return () => {
       disposed = true
+      refreshVersionRef.current += 1
       clearScheduledRefresh()
       scheduleRefreshRef.current = () => undefined
       window.removeEventListener(EXTERNAL_PROXY_CHANGED_EVENT, refreshNow)
@@ -205,7 +209,7 @@ export function ExternalProxyCard() {
       window.removeEventListener('focus', refreshNow)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
-  }, [refreshStatus])
+  }, [active, refreshStatus])
 
   const runAction = async (slot: number, action: BusyAction, profileId?: string) => {
     setBusy({ slot, action })

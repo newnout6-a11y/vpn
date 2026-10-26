@@ -22,6 +22,28 @@ describe('ipMonitor multi-provider configuration', () => {
     expect(IP_CHECK_URLS).toContain('https://api.myip.com')
     expect(IP_CHECK_URLS.length).toBeGreaterThanOrEqual(4)
   })
+
+  it('retains a live sampling timer when the configured interval did not change (AT-07-012)', () => {
+    vi.useFakeTimers()
+    const schedule = vi.spyOn(globalThis, 'setInterval')
+    const clear = vi.spyOn(globalThis, 'clearInterval')
+    vi.mocked(axios.get).mockRejectedValue(new Error('offline fixture'))
+    try {
+      ipMonitor.stopMonitoring()
+      ipMonitor.setCheckInterval(12000)
+      ipMonitor.startMonitoring(false)
+      schedule.mockClear(); clear.mockClear()
+      ipMonitor.setCheckInterval(12000)
+      expect(schedule).not.toHaveBeenCalled()
+      expect(clear).not.toHaveBeenCalled()
+      ipMonitor.setCheckInterval(15000)
+      expect(clear).toHaveBeenCalledTimes(1)
+      expect(schedule).toHaveBeenCalledTimes(1)
+    } finally {
+      ipMonitor.clearVpnIp()
+      schedule.mockRestore(); clear.mockRestore(); vi.useRealTimers()
+    }
+  })
 })
 
 describe('fetchPublicIpFrom provider parsing', () => {

@@ -161,24 +161,17 @@ async function getWindowsProxyCandidates(): Promise<ProxyCandidate[]> {
     candidates.push(...extractProxyCandidates(`env:${name}`, process.env[name]))
   }
 
-  try {
-    const { stdout, stderr } = await exec('netsh winhttp show proxy', {
-      windowsHide: true,
-      timeout: 8000,
-      encoding: 'utf8'
-    })
-    candidates.push(...extractProxyCandidates('WinHTTP', stdout || stderr))
-  } catch {
-    // ignore, other sources can still work
-  }
-
-  try {
-    const command =
+  const command =
       "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new();" +
       "$p=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -ErrorAction Stop;" +
       "[pscustomobject]@{ProxyEnable=$p.ProxyEnable;ProxyServer=$p.ProxyServer;AutoConfigURL=$p.AutoConfigURL} | ConvertTo-Json -Compress\""
-    const { stdout } = await exec(command, { windowsHide: true, timeout: 8000, encoding: 'utf8' })
-    const data = JSON.parse(stdout.trim() || '{}')
+  const [winHttp, winInet] = await Promise.all([
+    exec('netsh winhttp show proxy', { windowsHide: true, timeout: 8000, encoding: 'utf8' }).catch(() => null),
+    exec(command, { windowsHide: true, timeout: 8000, encoding: 'utf8' }).catch(() => null)
+  ])
+  if (winHttp) candidates.push(...extractProxyCandidates('WinHTTP', winHttp.stdout || winHttp.stderr))
+  try {
+    const data = JSON.parse(winInet?.stdout.trim() || '{}')
     if (Number(data.ProxyEnable) === 1) candidates.push(...extractProxyCandidates('WinINet', data.ProxyServer))
     candidates.push(...extractProxyCandidates('WinINet PAC', data.AutoConfigURL))
   } catch {
@@ -384,14 +377,15 @@ async function scanHappConfig(): Promise<ProxyCandidate[]> {
 
 let detectCache: { promise: Promise<ProxyInfo | null>; ts: number; resolved: boolean; result: ProxyInfo | null } | null = null
 const DETECT_CACHE_TTL = 8000
+const NEGATIVE_DETECT_CACHE_TTL = 500
 
 export const happDetector = {
   async detect(): Promise<ProxyInfo | null> {
     const now = Date.now()
-    // Only reuse the cache if it resolved with a non-null result.
-    // A null result (Happ not found) must not be cached for the full TTL —
-    // the user may have just launched their VPN client and we need to re-scan.
-    if (detectCache && now - detectCache.ts < DETECT_CACHE_TTL && detectCache.resolved && detectCache.result !== null) {
+    // Share physical discovery while it runs. Negative results expire quickly
+    // so a newly launched proxy is discovered without repeating a scan storm.
+    if (detectCache && (!detectCache.resolved ||
+        now - detectCache.ts < (detectCache.result ? DETECT_CACHE_TTL : NEGATIVE_DETECT_CACHE_TTL))) {
       return detectCache.promise
     }
     const promise = this._detectUncached()
@@ -400,6 +394,7 @@ export const happDetector = {
       if (detectCache && detectCache.promise === promise) {
         detectCache.resolved = true
         detectCache.result = result
+        detectCache.ts = Date.now()
       }
     }).catch(() => {
       if (detectCache && detectCache.promise === promise) {
@@ -418,10 +413,10 @@ export const happDetector = {
     }
 
     // 2. Check existing system proxy settings and live loopback listeners from VPN/proxy apps
-    const discoveredCandidates = uniqueCandidates([
-      ...await getWindowsProxyCandidates(),
-      ...await getLoopbackListenerCandidates()
+    const [windowsProxies, listeners] = await Promise.all([
+      getWindowsProxyCandidates(), getLoopbackListenerCandidates()
     ])
+    const discoveredCandidates = uniqueCandidates([...windowsProxies, ...listeners])
 
     for (const candidate of discoveredCandidates) {
       const verified = await verifyCandidate(candidate)

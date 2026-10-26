@@ -2,7 +2,7 @@ import { app } from 'electron'
 import { IpcFault, classifyIpcError, ipcError } from '../shared/ipc-result'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
-import { access, copyFile, mkdir, rm, stat, writeFile } from 'fs/promises'
+import { access, mkdir, rm, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { randomBytes, timingSafeEqual } from 'crypto'
 import { lookup } from 'dns/promises'
@@ -704,16 +704,6 @@ async function writeControlEndpoint(port: number): Promise<void> {
 function bundledResource(name: string): string {
   if (app.isPackaged) return join(process.resourcesPath, name)
   return join(app.getAppPath(), 'resources', name)
-}
-
-async function copyIfStale(src: string, dst: string): Promise<void> {
-  try {
-    const [srcStat, dstStat] = await Promise.all([stat(src), stat(dst)])
-    if (srcStat.size === dstStat.size && srcStat.mtimeMs === dstStat.mtimeMs) return
-  } catch {
-    // Missing destination or stat failure: copy below.
-  }
-  await copyFile(src, dst)
 }
 
 function normalizeText(value: string | null | undefined): string {

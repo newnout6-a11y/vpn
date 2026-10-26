@@ -20,6 +20,7 @@ const Maintenance = lazy(() => import('./pages/Maintenance').then(m => ({ defaul
 import type { AppSettings } from './store'
 import type { ElectronAPI } from '../preload/index'
 import { emitServerChanged, NAV_EVENT, type AppPage } from './nav'
+import { PageActivityProvider } from './hooks/usePageActive'
 
 type Page = SidebarPage | 'maintenance'
 
@@ -581,6 +582,7 @@ export default function App() {
   // while we're inside the auto-restart loop.
   useEffect(() => {
     const interval = setInterval(async () => {
+      if (document.hidden) return
       const state = useAppStore.getState()
       if (state.tunRunning) return
       if (state.restartingProgress !== null) return
@@ -697,9 +699,11 @@ export default function App() {
                   }
                   style={{ display: active ? undefined : 'none' }}
                 >
-                  <Suspense fallback={<div className="flex items-center justify-center h-full text-zinc-400">Загрузка...</div>}>
-                    {renderPage(pageId)}
-                  </Suspense>
+                  <PageActivityProvider value={active}>
+                    <Suspense fallback={<div className="flex items-center justify-center h-full text-zinc-400">Загрузка...</div>}>
+                      {renderPage(pageId)}
+                    </Suspense>
+                  </PageActivityProvider>
                 </motion.main>
               )
             })}

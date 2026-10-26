@@ -34,6 +34,7 @@ import {
 import { MacCard } from '../design-system/MacCard'
 import { cn } from '../design-system/utils'
 import { useAppStore } from '../store'
+import { usePageActive } from '../hooks/usePageActive'
 import { CountryFlagIcon } from './CountryFlagIcon'
 import { SERVER_CHANGED_EVENT, emitServerChanged } from '../nav'
 import type { ServerGroup, ServerProfile } from '../../shared/ipc-types'
@@ -81,6 +82,7 @@ function groupPillTone(status: ServerGroup['status']): string {
  * feedback follows the active UI locale.
  */
 function QuickServers() {
+  const active = usePageActive()
   const { t } = useTranslation()
   const addLog = useAppStore(s => s.addLog)
   const tunRunning = useAppStore(s => s.tunRunning)
@@ -131,6 +133,7 @@ function QuickServers() {
   }, [])
 
   useEffect(() => {
+    if (!active) return
     void refresh()
     // SERVER_CHANGED_EVENT keeps ordinary UI changes immediate. The interval
     // is only a low-frequency fallback for changes made outside this window.
@@ -149,7 +152,7 @@ function QuickServers() {
       window.removeEventListener('focus', handler)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
     }
-  }, [refresh])
+  }, [active, refresh])
 
   // Drop cached per-row numbers whenever routing changes. Each value is a
   // physical-adapter endpoint RTT, but the route and adapter set may differ
@@ -619,6 +622,7 @@ interface RecentEntry {
  * the user can request an immediate refresh with the button.
  */
 function RecentSites() {
+  const active = usePageActive()
   const { t } = useTranslation()
   const tunRunning = useAppStore(s => s.tunRunning)
   const [entries, setEntries] = useState<RecentEntry[]>([])
@@ -645,8 +649,9 @@ function RecentSites() {
   }, [])
 
   useEffect(() => {
+    if (!active) return
     void refresh()
-  }, [refresh, tunRunning])
+  }, [active, refresh, tunRunning])
 
   return (
     <MacCard className="!p-3">

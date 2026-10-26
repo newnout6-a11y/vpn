@@ -401,6 +401,7 @@ export const ipMonitor = {
   },
 
   setCheckInterval(ms: number) {
+    if (checkInterval === ms) return
     checkInterval = ms
     if (intervalId) {
       stopMonitoring()

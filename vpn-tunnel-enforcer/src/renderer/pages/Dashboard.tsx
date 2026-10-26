@@ -12,6 +12,7 @@ import { ExternalProxyCard } from '../components/ExternalProxyCard'
 import { ProfileSelectorInline } from '../components/ProfileSelectorInline'
 import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { DashboardSide } from '../components/DashboardSide'
+import { usePageActive } from '../hooks/usePageActive'
 import { CountryFlagIcon } from '../components/CountryFlagIcon'
 import {
   CheckCircle2,
@@ -42,9 +43,11 @@ function formatUptime(ms: number): string {
 }
 
 function UptimeLabel({ startedAt }: { startedAt: number }) {
+  const active = usePageActive()
   const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
+    if (!active) return
     const updateNow = () => setNow(Date.now())
     const id = window.setInterval(() => {
       if (!document.hidden) updateNow()
@@ -56,7 +59,7 @@ function UptimeLabel({ startedAt }: { startedAt: number }) {
       window.clearInterval(id)
       document.removeEventListener('visibilitychange', updateNow)
     }
-  }, [startedAt])
+  }, [active, startedAt])
 
   return (
     <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">

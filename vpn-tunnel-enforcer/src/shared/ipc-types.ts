@@ -42,6 +42,13 @@ export interface SplitTunnelConfig {
 export type ClientDevice = 'pc' | 'android' | 'ios' | 'mac'
 
 /** Server/Profile entry */
+/** Non-secret display hints; never evidence that a profile can be dialled. */
+export interface ServerProfileDisplay {
+  hasOutbound: boolean
+  stealth?: 'ech' | 'reality' | 'naive' | 'obfs' | 'utls' | 'tls' | 'plain'
+  clientFingerprint?: string
+}
+
 export interface ServerProfile {
   id: string
   name: string
@@ -65,6 +72,8 @@ export interface ServerProfile {
   countryGeoVersion?: number
   clientDevice?: ClientDevice
   clientFingerprint?: string
+  /** List/active IPC returns this summary instead of outbound/sourceUri secrets. */
+  display?: ServerProfileDisplay
   ping?: number | null
   status: 'online' | 'offline' | 'unknown'
   lastChecked?: number

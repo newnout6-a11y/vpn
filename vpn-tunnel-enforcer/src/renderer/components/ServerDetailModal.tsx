@@ -247,6 +247,7 @@ export function ServerDetailModal({ open, profile, onClose, onProfileUpdated }: 
   const outboundFingerprint = asJsonObject(asJsonObject(profile.outbound?.tls)?.utls)?.fingerprint
   const clientFingerprint =
     profile.clientFingerprint ||
+    profile.display?.clientFingerprint ||
     (typeof outboundFingerprint === 'string' && outboundFingerprint) ||
     (clientDevice === 'android' ? 'android' : clientDevice === 'ios' ? 'ios' : clientDevice === 'mac' ? 'safari' : 'chrome')
   // Name-based country recognition is used as the universal fallback. ASN

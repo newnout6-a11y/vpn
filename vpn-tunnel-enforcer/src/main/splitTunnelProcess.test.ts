@@ -41,7 +41,7 @@ vi.mock('./tunController', () => ({
 import {
   normalizeProcessName,
   addProcessName,
-  getDirectProcessNames
+  getDirectProcessTargets
 } from './splitTunneling'
 
 describe('normalizeProcessName', () => {
@@ -94,9 +94,9 @@ describe('addProcessName', () => {
     expect(storeData.splitTunnelApps).toHaveLength(1)
   })
 
-  it('makes the new command show up in getDirectProcessNames', async () => {
+  it('makes the new command show up in the direct target snapshot', async () => {
     await addProcessName('yt-dlp')
-    expect(getDirectProcessNames()).toContain('yt-dlp.exe')
+    expect((await getDirectProcessTargets()).names).toContain('yt-dlp.exe')
   })
 
   it('de-dupes case-insensitively without adding a second entry', async () => {

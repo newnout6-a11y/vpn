@@ -6,6 +6,7 @@ import { isHostResponse, NativeHostError } from './hostProtocol'
 import { readSelectedIpv4InterfacesInProcess } from './selectedRouteInterfacesCore'
 import * as runtimeCore from './ownedRuntimePidCore'
 import * as tunCore from './ownedTunInterfaceCore'
+import * as ipReads from './ipHelperReads'
 
 vi.mock('./selectedRouteInterfacesCore', () => ({ readSelectedIpv4InterfacesInProcess: vi.fn() }))
 
@@ -16,6 +17,16 @@ afterEach(() => {
 })
 
 describe('native host operations', () => {
+  it('dispatches exact traffic counter reads and propagates native failures', async () => {
+    const value = { found: true, name: 'VPNTE-TUN', identity: 'a'.repeat(32), receivedBytes: '9007199254740993', sentBytes: '0' }
+    const read = vi.spyOn(ipReads, 'readTrafficCounters').mockReturnValueOnce(value)
+    try {
+      await expect(runNativeOp('traffic-counters', { adapterName: 'VPNTE-TUN' })).resolves.toEqual(value)
+      expect(read).toHaveBeenCalledExactlyOnceWith('VPNTE-TUN')
+      read.mockImplementationOnce(() => { throw new Error('counter read refused') })
+      await expect(runNativeOp('traffic-counters', { adapterName: 'VPNTE-TUN' })).rejects.toThrow('counter read refused')
+    } finally { read.mockRestore() }
+  })
   it('dispatches TUN ownership with the exact identity and preserves unknown reads', async () => {
     const read = vi.spyOn(tunCore, 'readOwnedTunIndexInProcess').mockReturnValueOnce(7).mockReturnValueOnce(null)
     try {
@@ -51,6 +62,10 @@ describe('native host operations', () => {
   })
 
   it.each([
+    ['traffic-counters', undefined, /adapter name/],
+    ['traffic-counters', { adapterName: 'x', extra: true }, /adapter name/],
+    ['traffic-counters', { adapterName: '' }, /adapter name/],
+    ['traffic-counters', { adapterName: 'x\0y' }, /adapter name/],
     ['routes', { prefixes: 'not-an-array' }, /prefixes/],
     ['routes', { prefixes: [1, 2] }, /prefixes/],
     ['routes', undefined, /prefixes/],
