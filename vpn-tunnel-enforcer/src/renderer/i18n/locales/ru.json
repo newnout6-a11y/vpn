@@ -92,6 +92,7 @@
     "scheduleAt": "{{action}} в {{time}} (через {{until}})"
   },
   "sidebar": {
+    "platform": "win-x64",
     "dashboard": "Панель",
     "apps": "Приложения",
     "servers": "Серверы",
