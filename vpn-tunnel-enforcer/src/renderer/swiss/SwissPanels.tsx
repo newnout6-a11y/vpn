@@ -8,7 +8,7 @@ import { SERVER_CHANGED_EVENT, emitServerChanged } from '../nav'
 import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 import { CountryFlagIcon } from '../components/CountryFlagIcon'
 import type { ServerProfile } from '../../shared/ipc-types'
-import { SwissJournal } from './SwissJournal'
+import { ExternalProxyCard } from '../components/ExternalProxyCard'
 import { SWISS_PING_EVENT, type SwissPingDetail } from './SwissIdentity'
 
 const HISTORY = 48
@@ -18,13 +18,13 @@ const announcePing = (detail: SwissPingDetail) => {
   window.dispatchEvent(new CustomEvent<SwissPingDetail>(SWISS_PING_EVENT, { detail }))
 }
 
-/** «Пломба» panel row under the slab: traffic · servers · journal. */
+/** «Пломба» panel row under the slab: speed · servers · external proxies (the journal lives on the Logs page). */
 export function SwissPanels() {
   return (
     <div className="swiss-panels">
       <SwissTraffic />
       <SwissServers />
-      <SwissJournal />
+      <ExternalProxyCard />
     </div>
   )
 }
