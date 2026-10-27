@@ -286,3 +286,209 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ── Stage 2: legacy dashboard cards in the «Пломба» skin ──────────────
+   Inside the dashboard the app's own theme tokens are remapped to the Swiss
+   palette, so every existing card (servers, traffic, diagnostics, browser IP…)
+   adopts paper/ink/orange, square corners and the bundled fonts without any
+   change to its markup or logic. */
+.swiss-skin {
+  --rgb-bg: 242 240 235;
+  --rgb-sidebar: 242 240 235;
+  --rgb-card: 242 240 235;
+  --rgb-card-elevated: 233 230 223;
+  --rgb-accent: 255 79 0;
+  --rgb-accent-hover: 224 68 0;
+  --rgb-text: 17 17 17;
+  --rgb-text-secondary: 107 104 98;
+  --rgb-text-muted: 141 138 132;
+  --rgb-border: 214 211 205;
+  --rgb-border-strong: 17 17 17;
+  --rgb-success: 17 17 17;
+  --rgb-warning: 194 65 0;
+  --rgb-danger: 255 79 0;
+  --color-bg: rgb(var(--rgb-bg));
+  --color-card: rgb(var(--rgb-card));
+  --color-card-elevated: rgb(var(--rgb-card-elevated));
+  --color-accent: rgb(var(--rgb-accent));
+  --color-accent-hover: rgb(var(--rgb-accent-hover));
+  --color-text: rgb(var(--rgb-text));
+  --color-text-secondary: rgb(var(--rgb-text-secondary));
+  --color-text-muted: rgb(var(--rgb-text-muted));
+  --color-sidebar: rgb(var(--rgb-sidebar));
+  --color-border: rgb(var(--rgb-border));
+  --color-border-strong: rgb(var(--rgb-border-strong));
+  --color-success: rgb(var(--rgb-success));
+  --color-warning: rgb(var(--rgb-warning));
+  --color-danger: rgb(var(--rgb-danger));
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --shadow-card: none;
+  --shadow-card-hover: none;
+  --shadow-button: none;
+  --shadow-button-hover: none;
+  --glass-bg: rgb(var(--rgb-card));
+  --glass-border: rgb(var(--rgb-border));
+  --glow-accent: none;
+  --glow-success: none;
+  --glow-danger: none;
+  /* Fill the page area (the page container has p-6) with paper */
+  margin: -24px;
+  padding: 24px;
+  min-height: calc(100% + 48px);
+  background: var(--paper);
+  color: var(--ink);
+}
+[data-theme='dark'] .swiss-skin {
+  --rgb-bg: 13 13 12;
+  --rgb-sidebar: 13 13 12;
+  --rgb-card: 13 13 12;
+  --rgb-card-elevated: 26 26 24;
+  --rgb-accent: 255 90 31;
+  --rgb-accent-hover: 255 120 70;
+  --rgb-text: 237 235 230;
+  --rgb-text-secondary: 141 138 132;
+  --rgb-text-muted: 110 107 102;
+  --rgb-border: 46 46 44;
+  --rgb-border-strong: 237 235 230;
+  --rgb-success: 237 235 230;
+  --rgb-warning: 255 140 80;
+  --rgb-danger: 255 90 31;
+}
+.swiss-skin .glass,
+[data-theme='dark'] .swiss-skin .glass { box-shadow: none; }
+
+/* Facts strip sits flush on top of the slab, panels flush under it */
+.swiss-facts {
+  display: flex;
+  height: 44px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+}
+.swiss-facts + .swiss-slab { margin-top: 0 !important; border-top: 0; }
+.swiss-slab + .swiss-panels { margin-top: 0 !important; }
+.swiss-fact {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+  border-right: 1px solid var(--rule);
+  padding: 0 20px;
+}
+.swiss-fact:last-child { border-right: 0; }
+.c-swiss .swiss-fact-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.c-swiss .swiss-fact-value.is-dim { color: var(--mute); }
+.c-swiss .swiss-fact-value.is-alert { color: var(--signal); }
+.c-swiss .swiss-fact-action {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--mute);
+  text-decoration: underline;
+  text-decoration-color: var(--rule-strong);
+  text-underline-offset: 3px;
+}
+.c-swiss .swiss-fact-action:hover:not(:disabled) { color: var(--signal); text-decoration-color: var(--signal); }
+.c-swiss .swiss-fact-action:disabled { cursor: default; opacity: 0.5; }
+.c-swiss .swiss-fact-action.is-hidden { visibility: hidden; }
+@media (max-width: 900px) {
+  .swiss-facts { height: auto; flex-wrap: wrap; }
+  .swiss-fact { height: 44px; flex-basis: 50%; border-bottom: 1px solid var(--rule); }
+}
+
+/* Ten-cell progress ruler across the slab */
+.swiss-progress {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+  border-top: 1px solid var(--rule);
+}
+.swiss-progress-cell {
+  position: relative;
+  display: flex;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-right: 1px solid var(--rule);
+  font-size: 10px;
+  color: var(--mute);
+}
+.swiss-progress-cell:last-child { border-right: 0; }
+.swiss-progress-cell::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--signal);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.3s;
+}
+.swiss-progress-cell.is-done::before { transform: scaleX(1); }
+.swiss-progress-cell.is-done { color: var(--on-signal); }
+.swiss-progress-cell > span { position: relative; }
+.swiss-progress.is-indeterminate {
+  background-image: repeating-linear-gradient(-45deg, var(--signal) 0 10px, transparent 10px 20px);
+  background-size: 28px 28px;
+  animation: swiss-stripes 0.8s linear infinite;
+}
+
+/* Panels row: traffic · servers · journal, recent sites full width below */
+.swiss-panels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.swiss-panels > * { min-width: 0; margin: 0 -1px -1px 0; }
+.swiss-panels-wide { grid-column: 1 / -1; }
+@media (max-width: 1100px) {
+  .swiss-panels { grid-template-columns: minmax(0, 1fr); }
+}
+.swiss-panel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+}
+.swiss-panel-head {
+  display: flex;
+  height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--rule);
+  padding: 0 20px;
+}
+.c-swiss .swiss-label-ink { color: var(--ink); }
+.swiss-panel-body { max-height: 260px; overflow: auto; }
+.swiss-log-row {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 8px;
+  border-bottom: 1px solid var(--rule);
+  padding: 7px 20px;
+}
+.swiss-log-time { font-size: 11px; color: var(--mute); font-variant-numeric: tabular-nums; }
+.swiss-log-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.swiss-log-msg.is-warn { color: var(--signal); }
+.swiss-empty { padding: 16px 20px; font-size: 13px; color: var(--mute); }
+.c-swiss .row-in { animation: swiss-row-in 1.6s ease-out both; }
+@keyframes swiss-row-in {
+  0% { background: var(--signal); color: var(--on-signal); transform: translateX(-6px); }
+  18% { transform: none; }
+  100% { background: transparent; }
+}
