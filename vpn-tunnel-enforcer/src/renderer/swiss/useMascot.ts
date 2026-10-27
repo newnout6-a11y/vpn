@@ -41,6 +41,7 @@ export type MascotEvent =
   | 'hover-in' | 'hover-out'
   | 'leak-start' | 'leak-ok' | 'leak-warn' | 'leak-fail'
   | 'smart-on' | 'smart-off'
+  | 'notice-error' | 'notice-warn' | 'notice-ok'
 
 type ActOpts = { ms?: number; fx?: Fx; body?: BodyAnim; text?: string; textMs?: number; announce?: boolean }
 
@@ -289,6 +290,7 @@ export function useMascot(input: MascotInput) {
 
   // Events from the dashboard (power button hover)
   const phaseRef = useRef(phase)
+  const lastNotice = useRef(0)
   useEffect(() => {
     phaseRef.current = phase
   }, [phase])
@@ -326,6 +328,18 @@ export function useMascot(input: MascotInput) {
           hopTo('smart', 2600)
           act(kind === 'smart-on' ? 'wink' : 'think', { text: tr(kind === 'smart-on' ? 'mascot.smartOn' : 'mascot.smartOff') })
           break
+        // Toasts (MacToast): react to every new one, but not to a burst
+        case 'notice-error':
+        case 'notice-warn':
+        case 'notice-ok': {
+          const now = Date.now()
+          if (now - lastNotice.current < 2500) break
+          lastNotice.current = now
+          if (kind === 'notice-error') act('scared', { fx: 'sweat', body: 'm-startle', text: tr('mascot.noticeError'), ms: 2400 })
+          else if (kind === 'notice-warn') act('worried', { body: 'm-lean', text: tr('mascot.noticeWarn') })
+          else act('happy', { body: 'm-jump', text: tr('mascot.noticeOk') })
+          break
+        }
       }
     }
     window.addEventListener(MASCOT_EVENT, onEvent)
