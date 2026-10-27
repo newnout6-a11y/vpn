@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from 'react'
-import { CheckCircle2, Eye, Globe2, Loader2, RadioTower, RefreshCw, ShieldAlert, TriangleAlert } from 'lucide-react'
+import { Loader2, RadioTower, RefreshCw, ShieldAlert } from 'lucide-react'
+import { cn } from '../design-system/utils'
+import '../styles/swiss.css'
 import { useAppStore, type BrowserIpCheck } from '../store'
 import { Address4, Address6 } from 'ip-address'
-import { MacCard, MacButton } from '../design-system'
 import { usePageActive } from '../hooks/usePageActive'
 
 export interface WebRtcCandidate {
@@ -260,20 +261,6 @@ export function summarize(args: {
   }
 }
 
-function statusClass(status: BrowserIpCheck['summary'] | 'unknown'): string {
-  if (status === 'ok') return 'text-[var(--color-success)]'
-  if (status === 'warn') return 'text-[var(--color-warning)]'
-  if (status === 'fail') return 'text-[var(--color-danger)]'
-  return 'text-[var(--color-text-secondary)]'
-}
-
-function statusIcon(status: BrowserIpCheck['summary'] | 'unknown') {
-  if (status === 'ok') return <CheckCircle2 className="w-4 h-4 text-[var(--color-success)]" />
-  if (status === 'fail') return <ShieldAlert className="w-4 h-4 text-[var(--color-danger)]" />
-  if (status === 'warn') return <TriangleAlert className="w-4 h-4 text-[var(--color-warning)]" />
-  return <Eye className="w-4 h-4 text-[var(--color-text-secondary)]" />
-}
-
 export function BrowserIpCard() {
   const active = usePageActive()
   const check = useAppStore(s => s.browserIpCheck)
@@ -414,89 +401,79 @@ export function BrowserIpCard() {
             : 'Браузер ещё не проверялся'
 
   return (
-    <MacCard className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-semibold text-[var(--color-text)] uppercase tracking-wider flex items-center gap-2">
-            <Globe2 className="w-4 h-4 text-[var(--color-accent)]" />
-            Что видят сайты
-          </h3>
-          <p className={`text-sm mt-1 ${statusClass(status)}`}>{title}</p>
-        </div>
-        <MacButton variant="secondary" onClick={() => runCheck(false)} disabled={running} className="flex items-center gap-2 text-sm">
-          {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+    // «Пломба» panel: same check and hardening actions as before, Swiss layout
+    <section className="swiss-panel">
+      <header className="swiss-panel-head" data-perch="browser" data-perch-y="bottom" data-perch-scale="0.32" data-perch-fit="gap">
+        <span className="swiss-label swiss-label-ink">Что видят сайты</span>
+        <button type="button" className="swiss-fact-action" onClick={() => runCheck(false)} disabled={running}>
+          {running && <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />}
           Проверить браузер
-        </MacButton>
-      </div>
+        </button>
+      </header>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-        <Metric label="Browser IPv4" value={check?.browserIpv4 ?? '—'} status={check?.browserMatchesNode === true ? 'ok' : check?.browserMatchesNode === false ? tunRunning ? 'fail' : 'warn' : 'info'} />
-        <Metric label="Main/Node IPv4" value={check?.nodeIp ?? '—'} status="info" />
-        <Metric label="Browser IPv6" value={check?.browserIpv6 ?? (check ? 'IPv6 не проверен' : '—')} status={check?.browserIpv6 ? 'warn' : 'info'} />
-        <Metric
-          label="WebRTC"
-          value={
-            check
-              ? check.webRtcPublicIps.length > 0
-                ? check.webRtcPublicIps.join(', ')
-                : check.webRtcLocalIps.length > 0
-                  ? check.webRtcLocalIps.join(', ')
-                  : check.webRtcMdnsCount > 0
-                    ? 'mDNS скрытие активно'
-                    : check.webRtcError || 'IP не выдан'
-              : '—'
-          }
-          status={webRtcUnexpectedPublicIps.length || webRtcHasLocalLeak ? 'warn' : !check || check.webRtcError ? 'info' : 'ok'}
-          icon={<RadioTower className="w-3.5 h-3.5" />}
-        />
-      </div>
-
-      {check && (
-        <div className="space-y-1.5">
-          {check.details.map((detail, index) => (
-            <div key={index} className="flex items-start gap-2 text-xs text-[var(--color-text-secondary)]">
-              {statusIcon(index === 0 ? check.summary : 'info')}
-              <span className="break-words">{detail}</span>
-            </div>
-          ))}
-          <p className="text-[10px] text-[var(--color-text-muted)] pt-1">Проверено: {new Date(check.ranAt).toLocaleTimeString('ru-RU')}</p>
+      <div className="swiss-panel-pad">
+        <p className={cn('swiss-browser-title', 'is-' + status)}>{title}</p>
+        <div className="swiss-metrics">
+          <Metric label="Browser IPv4" value={check?.browserIpv4 ?? '—'} status={check?.browserMatchesNode === true ? 'ok' : check?.browserMatchesNode === false ? tunRunning ? 'fail' : 'warn' : 'info'} />
+          <Metric label="Main/Node IPv4" value={check?.nodeIp ?? '—'} status="info" />
+          <Metric label="Browser IPv6" value={check?.browserIpv6 ?? (check ? 'IPv6 не проверен' : '—')} status={check?.browserIpv6 ? 'warn' : 'info'} />
+          <Metric
+            label="WebRTC"
+            value={
+              check
+                ? check.webRtcPublicIps.length > 0
+                  ? check.webRtcPublicIps.join(', ')
+                  : check.webRtcLocalIps.length > 0
+                    ? check.webRtcLocalIps.join(', ')
+                    : check.webRtcMdnsCount > 0
+                      ? 'mDNS скрытие активно'
+                      : check.webRtcError || 'IP не выдан'
+                : '—'
+            }
+            status={webRtcUnexpectedPublicIps.length || webRtcHasLocalLeak ? 'warn' : !check || check.webRtcError ? 'info' : 'ok'}
+            icon={<RadioTower className="h-3 w-3" />}
+          />
         </div>
-      )}
-
-      <div className={`${browserProtectionAttention ? 'bg-[var(--color-warning)]/10 border-[var(--color-warning)]/30' : 'bg-[var(--color-bg)]/60 border-[var(--color-card-elevated)]/40'} border rounded-lg p-3 space-y-2`}>
-        <div className="flex items-start gap-2">
-          <ShieldAlert className={`w-4 h-4 ${browserProtectionAttention ? 'text-[var(--color-warning)]' : 'text-[var(--color-accent)]'} flex-shrink-0 mt-0.5`} />
-          <div className={`text-xs ${browserProtectionAttention ? 'text-[var(--color-warning)]/90' : 'text-[var(--color-text-secondary)]'}`}>
-            <p className="font-semibold">{browserProtectionAttention ? 'Если внешний Яндекс/Chrome всё ещё показывает реальный IP — это WebRTC leak самого браузера.' : 'Защита внешних браузеров от WebRTC leak'}</p>
-            <p className={`${browserProtectionAttention ? 'text-[var(--color-warning)]/75' : 'text-[var(--color-text-secondary)]'} mt-1`}>Нажмите защиту, закройте все окна браузера и откройте его заново. Backup сохраняется для отката.</p>
+        {check && (
+          <div className="swiss-browser-details">
+            {check.details.map((detail, index) => (
+              <p key={index} className={cn('swiss-browser-detail', index === 0 && 'is-' + check.summary)}>
+                {detail}
+              </p>
+            ))}
+            <p className="swiss-mono swiss-browser-time">Проверено: {new Date(check.ranAt).toLocaleTimeString('ru-RU')}</p>
           </div>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <MacButton variant="secondary" onClick={applyHardening} disabled={hardening || rollingBack} className="flex items-center gap-2 text-sm">
-            {hardening ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldAlert className="w-4 h-4" />}
-            Защитить браузеры от WebRTC
-          </MacButton>
-          <MacButton variant="secondary" onClick={rollbackHardening} disabled={hardening || rollingBack} className="flex items-center gap-2 text-sm">
-            {rollingBack ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-            Откатить
-          </MacButton>
-        </div>
-        {hardeningMessage && <p className="text-xs text-[var(--color-text-secondary)]">{hardeningMessage}</p>}
+        )}
       </div>
-    </MacCard>
+
+      <div className={cn('swiss-browser-guard', browserProtectionAttention && 'is-attention')}>
+        <p className="swiss-browser-guard-title">
+          {browserProtectionAttention ? 'Если внешний Яндекс/Chrome всё ещё показывает реальный IP — это WebRTC leak самого браузера.' : 'Защита внешних браузеров от WebRTC leak'}
+        </p>
+        <p className="swiss-browser-guard-body">Нажмите защиту, закройте все окна браузера и откройте его заново. Backup сохраняется для отката.</p>
+        <div className="swiss-browser-guard-actions">
+          <button type="button" className="swiss-btn" onClick={applyHardening} disabled={hardening || rollingBack}>
+            {hardening ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldAlert className="h-4 w-4" />}
+            Защитить браузеры от WebRTC
+          </button>
+          <button type="button" className="swiss-btn is-ghost" onClick={rollbackHardening} disabled={hardening || rollingBack}>
+            {rollingBack ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            Откатить
+          </button>
+        </div>
+        {hardeningMessage && <p className="swiss-browser-guard-body">{hardeningMessage}</p>}
+      </div>
+    </section>
   )
 }
-
 function Metric({ label, value, status, icon }: { label: string; value: string; status: BrowserIpCheck['summary']; icon?: JSX.Element }) {
   return (
-    <div className="bg-[var(--color-bg)]/60 border border-[var(--color-card-elevated)]/40 rounded-lg px-3 py-2">
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-xs text-[var(--color-text-secondary)] flex items-center gap-1.5">
-          {icon}
-          {label}
-        </span>
-        <span className={`text-xs font-mono text-right break-all ${statusClass(status)}`}>{value}</span>
-      </div>
+    <div className="swiss-metric">
+      <span className="swiss-label swiss-metric-label">
+        {icon}
+        {label}
+      </span>
+      <span className={cn('swiss-mono swiss-metric-value', 'is-' + status)}>{value}</span>
     </div>
   )
 }
