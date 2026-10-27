@@ -500,6 +500,8 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
             : 'Есть предупреждения маршрутизации.'
       addLog(result.summary === 'fail' ? 'error' : result.summary === 'warn' ? 'warn' : 'info', `Проверка маршрута: ${message}`)
     } catch (err: any) {
+      // No verdict from this run: drop the previous one so nothing presents it as current
+      setLeakChecks(null)
       addLog('error', `Проверка не выполнена: ${err.message}`)
     } finally {
       setChecking(false)
