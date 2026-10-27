@@ -12,21 +12,10 @@ interface SidebarProps {
   onNavigate: (page: SidebarPage) => void
 }
 
-type ConnectionStatus = 'connected' | 'disconnected' | 'connecting'
-
-/** «Пломба» navigation: wordmark, numbered index, live status + clock. */
+/** «Пломба» navigation: wordmark, numbered index, clock. */
 export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
   const { t } = useTranslation()
-  const tunRunning = useAppStore(s => s.tunRunning)
-  const restartingProgress = useAppStore(s => s.restartingProgress)
-  const detecting = useAppStore(s => s.detecting)
   const advancedMode = useAppStore(s => s.settings?.advancedMode === true)
-
-  const connectionStatus: ConnectionStatus = (() => {
-    if (tunRunning) return 'connected'
-    if (restartingProgress !== null || detecting) return 'connecting'
-    return 'disconnected'
-  })()
 
   const navItems: Array<{ id: SidebarPage; label: string }> = [
     { id: 'dashboard', label: t('sidebar.dashboard') },
@@ -40,12 +29,6 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
     { id: 'settings', label: t('sidebar.settings') },
     ...(advancedMode ? [{ id: 'maintenance' as const, label: t('sidebar.maintenance', 'Починка') }] : [])
   ]
-
-  const statusLabels: Record<ConnectionStatus, string> = {
-    connected: t('sidebar.statusConnected'),
-    disconnected: t('sidebar.statusDisconnected'),
-    connecting: t('sidebar.statusConnecting')
-  }
 
   return (
     <aside className="c-swiss swiss-sidebar flex h-full shrink-0 flex-col border-r border-[var(--rule)] bg-[var(--paper)] p-5 text-[var(--ink)]">
@@ -80,18 +63,9 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
         ))}
       </nav>
 
-      <div className="mt-auto flex items-center gap-2 border-t border-[var(--rule)] pt-3" data-perch="clock" data-perch-x="0.55" data-perch-scale="0.5">
-        <span
-          aria-hidden="true"
-          className={cn(
-            'h-2.5 w-2.5 shrink-0',
-            connectionStatus === 'connected' && 'bg-[var(--signal)]',
-            connectionStatus === 'connecting' && 'blink bg-[var(--signal)]',
-            connectionStatus === 'disconnected' && 'border-2 border-[var(--ink)]'
-          )}
-        />
-        <span className="swiss-mono min-w-0 truncate text-[11px] font-bold uppercase tracking-[0.06em]">{statusLabels[connectionStatus]}</span>
-        <span className="swiss-mono ml-auto text-[11px] text-[var(--mute)]">
+      {/* Just the clock: the slab already says whether protection is on */}
+      <div className="mt-auto pt-3" data-perch="clock" data-perch-x="0.55" data-perch-scale="0.5">
+        <span className="swiss-mono text-[15px] font-medium text-[var(--mute)]">
           <Clock />
         </span>
       </div>
