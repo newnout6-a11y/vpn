@@ -612,7 +612,9 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   const swissBusy = circleBusy || cancelling || Boolean(restartingProgress)
   const swissAlert = swissState === 'leak' || swissState === 'alert' || swissState === 'blocked' || swissState === 'degraded'
   const swissOn = swissState === 'secure'
-  const swissPhase: SwissPhase = swissOn ? 'on' : swissAlert ? 'alert' : swissBusy || swissState === 'verify' ? 'connecting' : 'off'
+  // 'verify' = a live tunnel waiting for its IP check, not a transition: the mascot
+  // must not treat a recheck as reconnecting.
+  const swissPhase: SwissPhase = swissOn || swissState === 'verify' ? 'on' : swissAlert ? 'alert' : swissBusy ? 'connecting' : 'off'
   // Sized to the column so the longest word always fits on one line
   const swissWordSize = 'min(150px, ' + (100 / (0.62 * Math.max(4, swissWord.length))).toFixed(1) + 'cqw)'
   const nudgeMascot = (kind: 'hover-in' | 'hover-out') => {
