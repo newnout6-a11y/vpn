@@ -69,12 +69,58 @@ function prefersReducedMotion(): boolean {
   return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
 }
 
+type Surface = 'paper' | 'signal' | 'inverse'
+
+function parseColor(value: string): [number, number, number, number] | null {
+  const s = value.trim()
+  const hex = /^#([0-9a-f]{6})$/i.exec(s)
+  if (hex) {
+    const n = parseInt(hex[1] as string, 16)
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255, 1]
+  }
+  const fn = /^rgba?\(([^)]+)\)$/.exec(s)
+  if (!fn) return null
+  const p = (fn[1] as string).split(/[\s,/]+/).filter(Boolean).map(Number)
+  return [p[0] ?? 0, p[1] ?? 0, p[2] ?? 0, p[3] ?? 1]
+}
+const channel = (v: number) => {
+  const c = v / 255
+  return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
+}
+const luminance = (c: number[]) => 0.2126 * channel(c[0] ?? 0) + 0.7152 * channel(c[1] ?? 0) + 0.0722 * channel(c[2] ?? 0)
+const contrast = (a: number[], b: number[]) => {
+  const [x, y] = [luminance(a), luminance(b)]
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05)
+}
+
+/**
+ * What he stands on decides his colours: orange slab = black body (signal),
+ * an ink-filled surface such as the action button = light body (inverse),
+ * otherwise the normal ink body. Standing inside (perch-y bottom) sees the
+ * perch's own fill; sitting on top sees what is around it.
+ */
+function surfaceOf(name: string): Surface {
+  const el = document.querySelector<HTMLElement>('[data-perch="' + name + '"]')
+  if (!el) return 'paper'
+  const vars = getComputedStyle(el)
+  const ink = parseColor(vars.getPropertyValue('--ink'))
+  const signal = parseColor(vars.getPropertyValue('--signal'))
+  for (let node: HTMLElement | null = el.dataset.perchY === 'bottom' ? el : el.parentElement; node; node = node.parentElement) {
+    const bg = parseColor(getComputedStyle(node).backgroundColor)
+    if (!bg || (bg[3] ?? 1) < 0.5) continue
+    if (signal && Math.abs(bg[0] - signal[0]) + Math.abs(bg[1] - signal[1]) + Math.abs(bg[2] - signal[2]) < 60) return 'signal'
+    return ink && contrast(ink, bg) < 3 ? 'inverse' : 'paper'
+  }
+  return 'paper'
+}
+
 /** Fixed overlay that draws the mascot on its current perch and hops between perches. */
 export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: MascotApi }) {
   const { view, perch } = mascot
   const [pos, setPos] = useState<Pt | null>(null)
   const [dir, setDir] = useState<number | null>(null) // non-null while airborne
   const [landId, setLandId] = useState(0)
+  const [surface, setSurface] = useState<Surface>('paper')
   const posRef = useRef<Pt | null>(null)
   const perchRef = useRef(perch)
   const flying = useRef(false)
@@ -100,9 +146,14 @@ export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: Mas
 
   // Re-glue only when the target or the tunnel phase changes (layout may shift);
   // traffic-driven re-renders don't force layout reads. Scroll/resize/interval cover the rest.
+  const readSurface = useCallback(() => {
+    const s = surfaceOf(perchRef.current)
+    setSurface(prev => (prev === s ? prev : s))
+  }, [])
   useLayoutEffect(() => {
     glue()
-  }, [glue, perch, phase])
+    readSurface()
+  }, [glue, readSurface, perch, phase])
 
   useEffect(() => {
     // One measure per frame at most, however many scroll events fire
@@ -129,10 +180,12 @@ export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: Mas
   // while he sits on a fit=gap perch, and stops when the window is hidden.
   useEffect(() => {
     const id = window.setInterval(() => {
-      if (!document.hidden) glue()
+      if (document.hidden) return
+      glue()
+      readSurface() // surfaces recolour (slab turns orange, button state changes)
     }, perch === 'home' ? 1500 : 500)
     return () => window.clearInterval(id)
-  }, [glue, perch])
+  }, [glue, readSurface, perch])
 
   // Hop along a parabola whenever the perch changes
   useEffect(() => {
@@ -167,6 +220,7 @@ export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: Mas
         flying.current = false
         setDir(null)
         setLandId(i => i + 1)
+        setSurface(surfaceOf(perch))
       }
     }
     raf.current = window.requestAnimationFrame(step)
@@ -174,7 +228,8 @@ export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: Mas
 
   if (!pos) return null
   const airborne = dir !== null
-  const onSignal = perch === 'home' && !airborne && phase === 'on'
+  const onSignal = !airborne && surface === 'signal'
+  const inverse = !airborne && surface === 'inverse'
 
   return (
     <div className="c-swiss pointer-events-none fixed inset-0 z-40">
@@ -197,6 +252,7 @@ export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: Mas
           label={mascot.name}
           landId={landId}
           onSignal={onSignal}
+          inverse={inverse}
         />
       </div>
       {view.speech && <Bubble speech={view.speech} pos={pos} />}
