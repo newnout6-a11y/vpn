@@ -81,7 +81,7 @@ export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: Mas
   const raf = useRef(0)
 
   const goHomeRef = useRef(mascot.goHome)
-  useLayoutEffect(() => {
+  useEffect(() => {
     posRef.current = pos
     goHomeRef.current = mascot.goHome
   })
@@ -105,11 +105,21 @@ export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: Mas
   }, [glue, perch, phase])
 
   useEffect(() => {
-    window.addEventListener('scroll', glue, true)
-    window.addEventListener('resize', glue)
+    // One measure per frame at most, however many scroll events fire
+    let frame = 0
+    const onScrollOrResize = () => {
+      if (frame) return
+      frame = window.requestAnimationFrame(() => {
+        frame = 0
+        glue()
+      })
+    }
+    window.addEventListener('scroll', onScrollOrResize, true)
+    window.addEventListener('resize', onScrollOrResize)
     return () => {
-      window.removeEventListener('scroll', glue, true)
-      window.removeEventListener('resize', glue)
+      window.removeEventListener('scroll', onScrollOrResize, true)
+      window.removeEventListener('resize', onScrollOrResize)
+      if (frame) window.cancelAnimationFrame(frame)
       window.cancelAnimationFrame(raf.current)
     }
   }, [glue])
