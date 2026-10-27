@@ -18,6 +18,7 @@ import { Stagger } from '../swiss/motion'
 import { SwissMascot, type SwissPhase } from '../swiss/SwissMascot'
 import { MASCOT_EVENT } from '../swiss/useMascot'
 import '../styles/swiss.css'
+import { cn } from '../design-system/utils'
 import {
   CheckCircle2,
   AlertTriangle,
@@ -576,36 +577,44 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     return t('dashboard.disconnected')
   })()
 
-  const statusColor = (() => {
-    if (cancelling) return 'text-[var(--color-text)]'
-    if (connecting || disconnecting || restartingProgress || isServerSwitching) return 'text-[var(--color-warning)]'
-    if (tunnelSnapshot && ['error', 'blocked', 'unknown'].includes(tunnelSnapshot.state)) return 'text-[var(--color-warning)]'
-    if (isConnected && isProxyActuallyDown) return 'text-[var(--color-warning)]'
-    if (isConnected) return 'text-[var(--color-success)]'
-    return 'text-[var(--color-text-secondary)]'
-  })()
-
   // ─── «Пломба» redesign: one big Latin status word + slab state ─────────
 
-  const swissWord = cancelling ? 'Cancel'
-    : isServerSwitching ? 'Switch'
-    : connecting ? 'Linking'
-    : disconnecting ? 'Closing'
-    : restartingProgress ? 'Restart'
-    : isConnected && visibleLeak ? 'Leak'
-    : tunnelSnapshot && ['error', 'blocked', 'unknown'].includes(tunnelSnapshot.state) ? 'Alert'
-    : isConnected && isProxyActuallyDown ? 'Blocked'
-    : isConnected ? 'Secure'
-    : 'Exposed'
+  // Secure only when connected, healthy and the exit IP is verified. The words
+  // are deliberately Latin in every locale (heavy Cyrillic caps read poorly at
+  // this size); they still live in en/ru.json.
+  const swissState = cancelling ? 'cancel'
+    : isServerSwitching ? 'switch'
+    : connecting ? 'linking'
+    : disconnecting ? 'closing'
+    : restartingProgress ? 'restart'
+    : isConnected && visibleLeak ? 'leak'
+    : tunnelSnapshot && ['error', 'blocked', 'unknown'].includes(tunnelSnapshot.state) ? 'alert'
+    : isConnected && isProxyActuallyDown ? 'blocked'
+    : isConnected && (tunnelSnapshot?.health === 'degraded' || Boolean(competingTun)) ? 'degraded'
+    : isConnected && publicIpVerdict !== 'passed' ? 'verify'
+    : isConnected ? 'secure'
+    : 'exposed'
+  const swissWordKeys = {
+    cancel: 'dashboard.swissWordCancel',
+    switch: 'dashboard.swissWordSwitch',
+    linking: 'dashboard.swissWordLinking',
+    closing: 'dashboard.swissWordClosing',
+    restart: 'dashboard.swissWordRestart',
+    leak: 'dashboard.swissWordLeak',
+    alert: 'dashboard.swissWordAlert',
+    blocked: 'dashboard.swissWordBlocked',
+    degraded: 'dashboard.swissWordDegraded',
+    verify: 'dashboard.swissWordVerify',
+    secure: 'dashboard.swissWordSecure',
+    exposed: 'dashboard.swissWordExposed'
+  } as const
+  const swissWord = t(swissWordKeys[swissState])
   const swissBusy = circleBusy || cancelling || Boolean(restartingProgress)
-  const swissAlert = swissWord === 'Leak' || swissWord === 'Alert' || swissWord === 'Blocked'
-  const swissOn = swissWord === 'Secure'
-  const swissPhase: SwissPhase = swissOn ? 'on' : swissBusy ? 'connecting' : 'off'
+  const swissAlert = swissState === 'leak' || swissState === 'alert' || swissState === 'blocked' || swissState === 'degraded'
+  const swissOn = swissState === 'secure'
+  const swissPhase: SwissPhase = swissOn ? 'on' : swissAlert ? 'alert' : swissBusy || swissState === 'verify' ? 'connecting' : 'off'
   // Sized to the column so the longest word always fits on one line
-  const swissWordSize = 'min(150px, ' + (100 / (0.62 * swissWord.length)).toFixed(1) + 'cqw)'
-  const swissActionLabel = circleBusy
-    ? statusLabel
-    : hasConnectionResources ? t('dashboard.swissDisable', 'Снять защиту') : t('dashboard.swissEnable', 'Включить защиту')
+  const swissWordSize = 'min(150px, ' + (100 / (0.62 * Math.max(4, swissWord.length))).toFixed(1) + 'cqw)'
   const nudgeMascot = (kind: 'hover-in' | 'hover-out') => {
     window.dispatchEvent(new CustomEvent(MASCOT_EVENT, { detail: kind }))
   }
@@ -722,7 +731,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
       )}
 
       {/* Main VPN Toggle Card — «Пломба» status slab */}
-      <section className={'c-swiss swiss-slab' + (swissOn ? ' is-on' : '') + (swissAlert ? ' is-alert' : '')}>
+      <section className={cn('c-swiss swiss-slab', swissOn && 'is-on', swissAlert && 'is-alert')}>
         <div className="swiss-slab-main">
           {swissBusy && <div className="swiss-stripes" aria-hidden="true" />}
           <h2 className="swiss-label relative">{t('dashboard.vpnToggle')}</h2>
@@ -763,7 +772,8 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           aria-label={statusLabel}
           animate={isServerSwitching && !cancelling ? { scale: [1, 1.025, 1] } : { scale: 1 }}
           transition={isServerSwitching && !cancelling ? { duration: 1.2, repeat: Infinity, ease: 'easeInOut' } : { duration: 0.2 }}
-          className={'swiss-power' + (cancelling ? ' is-cancel' : isServerSwitching ? ' is-busy' : isConnected ? ' is-on' : '') + (circleBusy ? ' is-wait' : '')}
+          className={cn('swiss-power', cancelling ? 'is-cancel' : isServerSwitching ? 'is-busy' : isConnected && 'is-on', circleBusy && 'is-wait')}
+          title={hasConnectionResources ? t('dashboard.swissDisable', 'Снять защиту') : t('dashboard.swissEnable', 'Включить защиту')}
           onMouseEnter={() => nudgeMascot('hover-in')}
           onMouseLeave={() => nudgeMascot('hover-out')}
           data-perch="toggle"
@@ -779,11 +789,6 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
                 animate={{ scale: [0.95, 1.18, 0.95], opacity: [0.65, 0.08, 0.65] }}
                 transition={{ duration: 1.35, repeat: Infinity, ease: 'easeOut' }}
               />
-              <motion.div
-                className="absolute inset-0 opacity-0"
-                animate={{ rotate: 360 }}
-                transition={{ duration: 1.4, repeat: Infinity, ease: 'linear' }}
-              />
             </>
           )}
           {isConnected && !isServerSwitching && !cancelling && (
@@ -795,7 +800,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
             />
           )}
           <div className="swiss-power-content">
-            <span className="truncate">{swissActionLabel}</span>
+            <span className="truncate">{statusLabel}</span>
             {circleBusy ? (
               <Loader2 size={20} className="shrink-0 animate-spin" />
             ) : (
