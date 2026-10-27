@@ -12,6 +12,7 @@ import { FitWord } from '../swiss/FitWord'
 import { SwissFactsStrip } from '../swiss/SwissFactsStrip'
 import { SwissProgress } from '../swiss/SwissProgress'
 import { SwissPanels } from '../swiss/SwissPanels'
+import { deriveSwissState } from '../swiss/swissState'
 import { useActiveProfile, useHomeIp } from '../swiss/SwissIdentity'
 import { SwissMascot, type SwissPhase } from '../swiss/SwissMascot'
 import { MASCOT_EVENT } from '../swiss/useMascot'
@@ -535,18 +536,19 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   // Secure only when connected, healthy and the exit IP is verified. The words
   // are deliberately Latin in every locale (heavy Cyrillic caps read poorly at
   // this size); they still live in en/ru.json.
-  const swissState = cancelling ? 'cancel'
-    : isServerSwitching ? 'switch'
-    : connecting ? 'linking'
-    : disconnecting ? 'closing'
-    : restartingProgress ? 'restart'
-    : isConnected && visibleLeak ? 'leak'
-    : tunnelSnapshot && ['error', 'blocked', 'unknown'].includes(tunnelSnapshot.state) ? 'alert'
-    : isConnected && isProxyActuallyDown ? 'blocked'
-    : isConnected && (tunnelSnapshot?.health === 'degraded' || Boolean(competingTun)) ? 'degraded'
-    : isConnected && publicIpVerdict !== 'passed' ? 'verify'
-    : isConnected ? 'secure'
-    : 'exposed'
+  const swissState = deriveSwissState({
+    cancelling,
+    switching: isServerSwitching,
+    connecting,
+    disconnecting,
+    restarting: Boolean(restartingProgress),
+    connected: Boolean(isConnected),
+    leak: visibleLeak,
+    tunnelState: tunnelSnapshot?.state ?? null,
+    proxyDown: Boolean(isProxyActuallyDown),
+    degraded: tunnelSnapshot?.health === 'degraded' || Boolean(competingTun),
+    verdict: publicIpVerdict ?? null
+  })
   const swissWordKeys = {
     cancel: 'dashboard.swissWordCancel',
     switch: 'dashboard.swissWordSwitch',
