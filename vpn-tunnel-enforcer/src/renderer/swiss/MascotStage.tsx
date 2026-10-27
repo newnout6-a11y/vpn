@@ -98,9 +98,11 @@ export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: Mas
     setPos(p => (p && Math.abs(p.x - t.x) < 0.5 && Math.abs(p.y - t.y) < 0.5 && p.scale === t.scale ? p : t))
   }, [])
 
+  // Re-glue only when the target or the tunnel phase changes (layout may shift);
+  // traffic-driven re-renders don't force layout reads. Scroll/resize/interval cover the rest.
   useLayoutEffect(() => {
     glue()
-  })
+  }, [glue, perch, phase])
 
   useEffect(() => {
     window.addEventListener('scroll', glue, true)
@@ -177,11 +179,20 @@ export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: Mas
           transformOrigin: 'bottom center'
         }}
       >
-        <div key={'land-' + landId} className={landId ? 'm-land' : ''}>
-          <Mascot phase={phase} view={airborne ? { ...view, mood: 'excited' } : view} onPoke={mascot.poke} label={mascot.name} onSignal={onSignal} />
-        </div>
+        <Mascot
+          phase={phase}
+          view={airborne ? { ...view, mood: 'excited' } : view}
+          onPoke={mascot.poke}
+          label={mascot.name}
+          landId={landId}
+          onSignal={onSignal}
+        />
       </div>
       {view.speech && <Bubble speech={view.speech} pos={pos} />}
+      {/* Replies the user asked for (pokes) are read out; ambient chatter is not */}
+      <span className="sr-only" aria-live="polite">
+        {view.speech && view.speech.announce ? view.speech.text : ''}
+      </span>
     </div>
   )
 }
