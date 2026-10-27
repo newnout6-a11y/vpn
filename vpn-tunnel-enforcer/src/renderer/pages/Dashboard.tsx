@@ -14,6 +14,10 @@ import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { DashboardSide } from '../components/DashboardSide'
 import { usePageActive } from '../hooks/usePageActive'
 import { CountryFlagIcon } from '../components/CountryFlagIcon'
+import { Stagger } from '../swiss/motion'
+import { SwissMascot, type SwissPhase } from '../swiss/SwissMascot'
+import { MASCOT_EVENT } from '../swiss/useMascot'
+import '../styles/swiss.css'
 import {
   CheckCircle2,
   AlertTriangle,
@@ -581,6 +585,31 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     return 'text-[var(--color-text-secondary)]'
   })()
 
+  // ─── «Пломба» redesign: one big Latin status word + slab state ─────────
+
+  const swissWord = cancelling ? 'Cancel'
+    : isServerSwitching ? 'Switch'
+    : connecting ? 'Linking'
+    : disconnecting ? 'Closing'
+    : restartingProgress ? 'Restart'
+    : isConnected && visibleLeak ? 'Leak'
+    : tunnelSnapshot && ['error', 'blocked', 'unknown'].includes(tunnelSnapshot.state) ? 'Alert'
+    : isConnected && isProxyActuallyDown ? 'Blocked'
+    : isConnected ? 'Secure'
+    : 'Exposed'
+  const swissBusy = circleBusy || cancelling || Boolean(restartingProgress)
+  const swissAlert = swissWord === 'Leak' || swissWord === 'Alert' || swissWord === 'Blocked'
+  const swissOn = swissWord === 'Secure'
+  const swissPhase: SwissPhase = swissOn ? 'on' : swissBusy ? 'connecting' : 'off'
+  // Sized to the column so the longest word always fits on one line
+  const swissWordSize = 'min(150px, ' + (100 / (0.62 * swissWord.length)).toFixed(1) + 'cqw)'
+  const swissActionLabel = circleBusy
+    ? statusLabel
+    : hasConnectionResources ? t('dashboard.swissDisable', 'Снять защиту') : t('dashboard.swissEnable', 'Включить защиту')
+  const nudgeMascot = (kind: 'hover-in' | 'hover-out') => {
+    window.dispatchEvent(new CustomEvent(MASCOT_EVENT, { detail: kind }))
+  }
+
   // ─── Render ────────────────────────────────────────────────────────────
 
   return (
@@ -692,24 +721,30 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         </motion.div>
       )}
 
-      {/* Main VPN Toggle Card */}
-      <MacCard className="flex flex-col items-center justify-center py-10 gap-6 relative overflow-hidden">
-        {/* Subtle gradient backdrop inside the card */}
-        <div className="absolute inset-0 pointer-events-none opacity-50"
-          style={{
-            background: cancelling
-              ? 'radial-gradient(ellipse 60% 60% at 50% 50%, rgb(var(--rgb-cancellation) / 0.16), transparent)'
-              : isConnected
-              ? isServerSwitching
-                ? 'radial-gradient(ellipse 60% 60% at 50% 50%, rgb(var(--rgb-warning) / 0.10), transparent)'
-                : 'radial-gradient(ellipse 60% 60% at 50% 50%, rgb(var(--rgb-success) / 0.08), transparent)'
-              : 'radial-gradient(ellipse 60% 60% at 50% 50%, rgb(var(--rgb-accent) / 0.06), transparent)'
-          }}
-        />
-        <h2 className="text-lg font-semibold text-[var(--color-text)] relative z-10">
-          {t('dashboard.vpnToggle')}
-        </h2>
+      {/* Main VPN Toggle Card — «Пломба» status slab */}
+      <section className={'c-swiss swiss-slab' + (swissOn ? ' is-on' : '') + (swissAlert ? ' is-alert' : '')}>
+        <div className="swiss-slab-main">
+          {swissBusy && <div className="swiss-stripes" aria-hidden="true" />}
+          <h2 className="swiss-label relative">{t('dashboard.vpnToggle')}</h2>
+          <div className="swiss-word-row relative">
+            <div className="swiss-word-wrap">
+              <div key={swissWord} className="swiss-word" style={{ fontSize: swissWordSize }} aria-hidden="true">
+                <Stagger text={swissWord} />
+                {swissBusy && <span className="blink">.</span>}
+              </div>
+            </div>
+            {/* The mascot's home perch; SwissMascot draws him on top of it */}
+            <div className="swiss-home" data-perch="home" data-perch-y="bottom" aria-hidden="true" />
+          </div>
+          <div className="relative">
+        {/* During cancellation the button shows the label; keep live status for screen readers. */}
+        <p className={cancelling ? 'sr-only' : 'swiss-caption'} role="status" aria-live="polite">
+          {statusLabel}
+        </p>
+          </div>
+        </div>
 
+        <div className="swiss-slab-side" data-perch="side" data-perch-x="0.7" data-perch-scale="0.5">
         {/* Large circular power button with glow */}
         <motion.button
           onClick={() => {
@@ -723,34 +758,27 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
             handleToggleChange(!hasConnectionResources)
           }}
           disabled={circleBusy}
-          whileHover={!circleBusy ? { scale: 1.03 } : {}}
-          whileTap={!circleBusy ? { scale: 0.97 } : {}}
+          whileHover={!circleBusy ? { scale: 1.01 } : {}}
+          whileTap={!circleBusy ? { scale: 0.99 } : {}}
           aria-label={statusLabel}
           animate={isServerSwitching && !cancelling ? { scale: [1, 1.025, 1] } : { scale: 1 }}
           transition={isServerSwitching && !cancelling ? { duration: 1.2, repeat: Infinity, ease: 'easeInOut' } : { duration: 0.2 }}
-          className={`
-            relative w-36 h-36 rounded-full flex items-center justify-center z-10
-            transition-all duration-300 ease-out
-            ${cancelling
-              ? 'cancellation-orbit bg-[var(--color-cancellation)] shadow-[0_0_60px_rgb(var(--rgb-cancellation)/0.4),0_8px_32px_rgba(0,0,0,0.25)]'
-              : isServerSwitching
-              ? 'bg-[var(--color-warning)] shadow-[0_0_60px_rgb(var(--rgb-warning)/0.32),0_8px_32px_rgba(0,0,0,0.25)]'
-              : isConnected
-              ? 'bg-[var(--color-success)] shadow-[0_0_60px_rgb(var(--rgb-success)/0.35),0_8px_32px_rgba(0,0,0,0.25)]'
-              : 'bg-[var(--color-accent)] shadow-[0_0_40px_rgb(var(--rgb-accent)/0.2),0_8px_32px_rgba(0,0,0,0.25)]'
-            }
-            ${circleBusy ? 'opacity-80 cursor-wait' : 'cursor-pointer'}
-          `}
+          className={'swiss-power' + (cancelling ? ' is-cancel' : isServerSwitching ? ' is-busy' : isConnected ? ' is-on' : '') + (circleBusy ? ' is-wait' : '')}
+          onMouseEnter={() => nudgeMascot('hover-in')}
+          onMouseLeave={() => nudgeMascot('hover-out')}
+          data-perch="toggle"
+          data-perch-x="0.8"
+          data-perch-scale="0.55"
         >
           {isServerSwitching && !cancelling && (
             <>
               <motion.div
-                className="absolute inset-[-10px] rounded-full border border-[var(--color-warning)]/35"
+                className="absolute inset-0 border-2 border-[var(--signal)]"
                 animate={{ scale: [0.95, 1.18, 0.95], opacity: [0.65, 0.08, 0.65] }}
                 transition={{ duration: 1.35, repeat: Infinity, ease: 'easeOut' }}
               />
               <motion.div
-                className="absolute inset-2 rounded-full bg-white/10"
+                className="absolute inset-0 opacity-0"
                 animate={{ rotate: 360 }}
                 transition={{ duration: 1.4, repeat: Infinity, ease: 'linear' }}
               />
@@ -758,17 +786,18 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           )}
           {isConnected && !isServerSwitching && !cancelling && (
             <motion.div
-              className="absolute inset-0 rounded-full bg-[var(--color-success)]"
+              className="absolute inset-0 bg-[var(--signal)]"
               initial={{ scale: 1, opacity: 0.35 }}
               animate={{ scale: 1.12, opacity: 0 }}
               transition={{ duration: 0.6, ease: 'easeOut' }}
             />
           )}
-          <div className="relative z-10">
+          <div className="swiss-power-content">
+            <span className="truncate">{swissActionLabel}</span>
             {circleBusy ? (
-              <Loader2 size={56} className="text-white animate-spin" />
+              <Loader2 size={20} className="shrink-0 animate-spin" />
             ) : (
-              <Power size={56} className="text-white" strokeWidth={2.5} />
+              <Power size={20} className="shrink-0" strokeWidth={2.5} />
             )}
           </div>
         </motion.button>
@@ -778,21 +807,21 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="flex flex-col items-center gap-2 z-10"
+            className="flex flex-col gap-2"
           >
-            <p className="text-sm text-[var(--color-warning)] font-medium text-center">
+            <p className="text-sm text-[var(--color-warning)] font-medium">
               {t('dashboard.disconnectConfirmation')}
             </p>
             <div className="flex gap-2">
               <button
                 onClick={() => { setConfirmDisconnect(false); handleToggleChange(false) }}
-                className="px-4 py-1.5 text-sm font-medium rounded-[var(--radius-sm)] bg-[var(--color-danger)] text-white hover:opacity-90 transition-opacity"
+                className="px-4 py-1.5 text-sm font-medium rounded-none bg-[var(--color-danger)] text-white hover:opacity-90 transition-opacity"
               >
                 {t('dashboard.confirmDisconnect')}
               </button>
               <button
                 onClick={() => setConfirmDisconnect(false)}
-                className="px-4 py-1.5 text-sm font-medium rounded-[var(--radius-sm)] border border-[var(--color-border)] text-[var(--color-text)] hover:border-[var(--color-accent)]/50 transition-all"
+                className="px-4 py-1.5 text-sm font-medium rounded-none border border-[var(--color-border)] text-[var(--color-text)] hover:border-[var(--color-accent)]/50 transition-all"
               >
                 {t('dashboard.cancelDisconnect')}
               </button>
@@ -800,18 +829,13 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           </motion.div>
         )}
 
-        {/* During cancellation the button shows the label; keep live status for screen readers. */}
-        <p className={cancelling ? 'sr-only' : `text-sm font-medium ${statusColor}`} role="status" aria-live="polite">
-          {statusLabel}
-        </p>
-
         {(connecting || isServerSwitching || cancelling) && (
           <button
             type="button"
             onClick={handleCancelTransition}
             disabled={cancelling}
             aria-busy={cancelling}
-            className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium rounded-[var(--radius-sm)] border border-[var(--color-warning)]/60 text-[var(--color-warning)] hover:bg-[var(--color-warning)]/10 transition-colors z-10"
+            className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium rounded-none border border-[var(--color-warning)]/60 text-[var(--color-warning)] hover:bg-[var(--color-warning)]/10 transition-colors self-start"
           >
             {cancelling ? <Loader2 size={13} className="animate-spin" /> : <Square size={13} />}
             {cancelling ? t('dashboard.cancelling') : isServerSwitching ? t('dashboard.cancelServerSwitch') : t('dashboard.cancelConnection')}
@@ -819,16 +843,16 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         )}
 
         {/* Profile selector card */}
-        <div className="w-full max-w-md space-y-2">
+        <div className="w-full space-y-2">
           <ForeignVpnBanner />
           <ProfileSelectorInline />
         </div>
 
         {/* Connection info chips */}
         {isConnected && (
-          <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
             {publicIp && !visibleLeak && publicIpVerdict === 'passed' && vpnIp && publicIp === vpnIp ? (
-              <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-success)]/10 px-3 py-1.5 text-[var(--color-success)]">
+              <span className="flex items-center gap-1.5 swiss-chip bg-[var(--color-success)]/10 px-3 py-1.5 text-[var(--color-success)]">
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 {ipGeo.country && (
                   <CountryFlagIcon country={ipGeo.country} size={16} />
@@ -841,40 +865,43 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
                 )}
               </span>
             ) : publicIp && visibleLeak ? (
-              <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-danger)]/10 px-3 py-1.5 text-[var(--color-danger)]">
+              <span className="flex items-center gap-1.5 swiss-chip bg-[var(--color-danger)]/10 px-3 py-1.5 text-[var(--color-danger)]">
                 <AlertTriangle className="w-3.5 h-3.5" />
                 <span className="font-mono">{publicIp}</span>
                 <span className="opacity-80">— утечка</span>
               </span>
             ) : publicIp && isConnected && (publicIpVerdict === 'indeterminate' || publicIpVerdict === 'not-checked') ? (
-              <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-warning)]/10 px-3 py-1.5 text-[var(--color-warning)]" role="status">
+              <span className="flex items-center gap-1.5 swiss-chip bg-[var(--color-warning)]/10 px-3 py-1.5 text-[var(--color-warning)]" role="status">
                 <AlertTriangle className="w-3.5 h-3.5" />
                 <span className="font-mono">{publicIp}</span>
                 <span>— {publicIpVerdict === 'indeterminate' ? t('dashboard.ipChangedUnverified') : t('dashboard.ipNotChecked')}</span>
               </span>
             ) : isConnected ? (
-              <span className="flex items-center gap-1.5 rounded-full glass px-3 py-1.5 text-[var(--color-text-secondary)]">
+              <span className="flex items-center gap-1.5 swiss-chip glass px-3 py-1.5 text-[var(--color-text-secondary)]">
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 Определяем IP...
               </span>
             ) : null}
-            <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
+            <span className="flex items-center gap-1.5 swiss-chip bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
               <Download className="w-3.5 h-3.5 text-[var(--color-success)]" />
               ↓ <span className="font-mono">{formatSpeed(traffic.smoothedDownloadBps || traffic.downloadBps)}</span>
             </span>
-            <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
+            <span className="flex items-center gap-1.5 swiss-chip bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
               <Upload className="w-3.5 h-3.5 text-[var(--color-accent)]" />
               ↑ <span className="font-mono">{formatSpeed(traffic.smoothedUploadBps || traffic.uploadBps)}</span>
             </span>
             {tunStartedAt && <UptimeLabel startedAt={tunStartedAt} />}
-            <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
+            <span className="flex items-center gap-1.5 swiss-chip bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
               {t('dashboard.trafficDown')}: <span className="font-mono">{formatBytes(traffic.sessionDownloadBytes)}</span>
               {' / '}
               {t('dashboard.trafficUp')}: <span className="font-mono">{formatBytes(traffic.sessionUploadBytes)}</span>
             </span>
           </div>
         )}
-      </MacCard>
+        </div>
+
+        <SwissMascot phase={swissPhase} />
+      </section>
 
       {/* Leak warning banner */}
       {visibleLeak && (
