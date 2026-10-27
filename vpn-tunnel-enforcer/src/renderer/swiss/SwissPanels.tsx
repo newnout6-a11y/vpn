@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Loader2, RefreshCw } from 'lucide-react'
 import { cn } from '../design-system/utils'
@@ -9,9 +9,14 @@ import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 import { CountryFlagIcon } from '../components/CountryFlagIcon'
 import type { ServerProfile } from '../../shared/ipc-types'
 import { SwissJournal } from './SwissJournal'
+import { SWISS_PING_EVENT, type SwissPingDetail } from './SwissIdentity'
 
 const HISTORY = 48
 const REFRESH_MS = 10000
+
+const announcePing = (detail: SwissPingDetail) => {
+  window.dispatchEvent(new CustomEvent<SwissPingDetail>(SWISS_PING_EVENT, { detail }))
+}
 
 /** «Пломба» panel row under the slab: traffic · servers · journal. */
 export function SwissPanels() {
@@ -44,11 +49,11 @@ function SwissTraffic() {
   const [history, setHistory] = useState<number[]>(() => Array(HISTORY).fill(0))
   const [hover, setHover] = useState<number | null>(null)
 
-  // One bar per traffic sample
+  // One bar per traffic sample (a new sample changes ts and the rate together)
   useEffect(() => {
     if (!running) return
     setHistory(h => h.slice(1).concat(down))
-  }, [traffic.ts]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [traffic.ts, running, down])
 
   const max = Math.max(10, ...history)
   const hovered = hover !== null ? history[hover] : undefined
@@ -147,15 +152,13 @@ function SwissServers() {
     return p.ping ?? p.healthLatencyMs ?? null
   }
 
-  const best = useMemo(() => {
-    let bestId: string | null = null
-    let bestMs = Infinity
-    for (const p of profiles) {
-      const ms = pingOf(p)
-      if ((p.healthStatus ?? p.status) !== 'offline' && ms !== null && ms < bestMs) { bestMs = ms; bestId = p.id }
-    }
-    return bestId
-  }, [profiles, pings]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Cheap enough to recompute each render: a handful of rows
+  let best: string | null = null
+  let bestMs = Infinity
+  for (const p of profiles) {
+    const ms = pingOf(p)
+    if ((p.healthStatus ?? p.status) !== 'offline' && ms !== null && ms < bestMs) { bestMs = ms; best = p.id }
+  }
 
   const pingOne = async (p: ServerProfile) => {
     if (!p.server || !p.port) return
@@ -163,8 +166,10 @@ function SwissServers() {
     try {
       const ms = await window.electronAPI.serversPingOne(p.server, p.port)
       setPings(prev => ({ ...prev, [p.id]: ms }))
+      announcePing({ id: p.id, ms })
     } catch {
       setPings(prev => ({ ...prev, [p.id]: null }))
+      announcePing({ id: p.id, ms: null })
     }
   }
 
@@ -174,6 +179,7 @@ function SwissServers() {
       const updated = await window.electronAPI.serversPingAll()
       setPings({})
       setProfiles(updated.filter(p => !p.removedFromSubscriptionAt))
+      announcePing({})
     } catch (err: unknown) {
       addLog('error', t('swiss.pingFailed') + ': ' + (isIpcRemoteErrorData(err) || err instanceof Error ? err.message : String(err)))
     } finally {
