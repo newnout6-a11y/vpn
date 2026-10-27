@@ -7,6 +7,7 @@ import { Sidebar, type SidebarPage } from './components/Sidebar'
 import { FirstRunWizard } from './components/FirstRunWizard'
 import { MacToast } from './design-system'
 import { ThemeProvider } from './providers/ThemeProvider'
+import { TitleBar } from './components/TitleBar'
 const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })))
 const SplitTunnel = lazy(() => import('./pages/SplitTunnel').then(m => ({ default: m.SplitTunnel })))
 const Servers = lazy(() => import('./pages/Servers').then(m => ({ default: m.Servers })))
@@ -680,7 +681,9 @@ export default function App() {
 
   return (
     <ThemeProvider>
-      <div className="flex h-screen gradient-bg">
+      {/* pt-9 = the 36px title bar (TITLE_BAR_HEIGHT in main/themeManager.ts) */}
+      <div className="flex h-screen gradient-bg pt-9">
+        <TitleBar />
         <Sidebar currentPage={page} onNavigate={setPage} />
         <div className="flex-1 min-w-0 relative">
           <AnimatePresence initial={false}>
