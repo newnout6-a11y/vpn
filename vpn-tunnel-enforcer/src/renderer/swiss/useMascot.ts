@@ -56,7 +56,7 @@ const PET_ENOUGH_MS = 6000
 const WANDER: Array<[string, Mood, string]> = [
   ['toggle', 'happy', 'mascot.wanderToggle'],
   ['clock', 'calm', 'mascot.wanderClock'],
-  ['nav-servers', 'think', 'mascot.wanderServers'],
+  ['servers', 'think', 'mascot.wanderServers'],
   ['journal', 'squint', 'mascot.wanderLogs']
 ]
 
