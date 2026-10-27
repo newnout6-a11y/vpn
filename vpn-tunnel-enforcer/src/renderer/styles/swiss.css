@@ -614,3 +614,15 @@
 .swiss-server-row:hover .swiss-server-ping-btn,
 .c-swiss .swiss-server-ping-btn:focus-visible { opacity: 0.7; }
 .c-swiss .swiss-server-ping-btn:hover { opacity: 1; color: var(--signal); }
+
+/* ── Title bar (TitleBar.tsx): drag strip under the native caption buttons ── */
+.swiss-titlebar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 90;
+  height: 36px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper);
+  -webkit-app-region: drag;
+  app-region: drag;
+}
