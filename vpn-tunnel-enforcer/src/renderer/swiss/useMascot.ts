@@ -15,7 +15,7 @@ export type Mood =
   | 'think' | 'dizzy' | 'wink' | 'excited' | 'sleep' | 'scared'
 export type Fx = 'confetti' | 'zzz' | 'dots' | 'sweat' | 'speed' | null
 export type BodyAnim = 'm-jump' | 'm-shake' | 'm-spin' | 'm-lean' | 'm-startle' | ''
-export type Speech = { id: number; text: string } | null
+export type Speech = { id: number; text: string; announce: boolean } | null
 
 export interface MascotView {
   mood: Mood
@@ -39,7 +39,7 @@ export interface MascotInput {
 export const MASCOT_EVENT = 'vpnte:mascot'
 export type MascotEvent = 'hover-in' | 'hover-out'
 
-type ActOpts = { ms?: number; fx?: Fx; body?: BodyAnim; text?: string; textMs?: number }
+type ActOpts = { ms?: number; fx?: Fx; body?: BodyAnim; text?: string; textMs?: number; announce?: boolean }
 
 const IDLE_MS = 30000
 const EXPOSED_NAG_MS = 20000
@@ -95,9 +95,10 @@ export function useMascot(input: MascotInput) {
     return () => Object.values(all).forEach(id => window.clearTimeout(id))
   }, [])
 
-  const say = useCallback((text: string, ms = 3200) => {
+  /** announce: also read it out to screen readers (only for replies the user asked for). */
+  const say = useCallback((text: string, ms = 3200, announce = false) => {
     seq.current += 1
-    setSpeech({ id: seq.current, text })
+    setSpeech({ id: seq.current, text, announce })
     later('speech', () => setSpeech(null), ms)
   }, [later])
 
@@ -106,7 +107,7 @@ export function useMascot(input: MascotInput) {
     if (o.fx) setFxId(i => i + 1)
     later('emote', () => setEmote(null), o.ms ?? 1800)
     if (o.body) setBody(b => ({ name: o.body ?? '', id: b.id + 1 }))
-    if (o.text) say(o.text, o.textMs)
+    if (o.text) say(o.text, o.textMs, o.announce)
   }, [later, say])
 
   const hopTo = useCallback((name: string, stay = 3500) => {
@@ -145,9 +146,19 @@ export function useMascot(input: MascotInput) {
     }
     const events = ['mousemove', 'mousedown', 'keydown', 'wheel'] as const
     events.forEach(e => window.addEventListener(e, onActivity, { passive: true }))
+    // Coming back to the window counts as activity, but quietly: welcome-back handles the reaction
+    const onVisible = () => {
+      if (document.hidden) return
+      window.clearTimeout(idle)
+      idle = window.setTimeout(goSleep, IDLE_MS)
+      sleepingRef.current = false
+      setSleeping(false)
+    }
+    document.addEventListener('visibilitychange', onVisible)
     return () => {
       window.clearTimeout(idle)
       events.forEach(e => window.removeEventListener(e, onActivity))
+      document.removeEventListener('visibilitychange', onVisible)
     }
   }, [act, line])
 
@@ -278,15 +289,15 @@ export function useMascot(input: MascotInput) {
     pokes.current = pokes.current.filter(p => now - p < 2500).concat(now)
     if (pokes.current.length >= 5) {
       pokes.current = []
-      act('dizzy', { body: 'm-spin', text: tRef.current('mascot.dizzy'), ms: 2600 })
+      act('dizzy', { body: 'm-spin', text: tRef.current('mascot.dizzy'), ms: 2600, announce: true })
       return
     }
     if (Math.random() < 0.25) {
-      act('wink', { body: 'm-jump', text: line('wink') })
+      act('wink', { body: 'm-jump', text: line('wink'), announce: true })
       return
     }
     const uneasy = phaseRef.current === 'off' || phaseRef.current === 'alert'
-    act(uneasy ? 'worried' : 'happy', { body: 'm-jump', text: line(uneasy ? 'pokeOff' : 'pokeOn'), ms: 1200 })
+    act(uneasy ? 'worried' : 'happy', { body: 'm-jump', text: line(uneasy ? 'pokeOff' : 'pokeOn'), ms: 1200, announce: true })
   }, [act, line])
 
   const goHome = useCallback(() => hopTo('home'), [hopTo])
