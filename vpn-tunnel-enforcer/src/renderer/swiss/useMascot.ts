@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 
 /**
  * «Пломбик» brain: maps real tunnel state and UI events to moods, effects,
  * short lines and hops between perches (see MascotStage for perches).
+ *
+ * Lines never claim a safeguard state (kill-switch, DNS, leaks) the mascot
+ * doesn't actually know — they react to the dashboard's derived phase only.
  */
 
-export type MascotPhase = 'on' | 'off' | 'connecting'
+export type MascotPhase = 'on' | 'off' | 'connecting' | 'alert'
 export type Mood =
   | 'calm' | 'worried' | 'scan' | 'happy' | 'love' | 'squint'
   | 'think' | 'dizzy' | 'wink' | 'excited' | 'sleep' | 'scared'
@@ -23,6 +27,7 @@ export interface MascotView {
 }
 
 export interface MascotInput {
+  /** Derived by the dashboard: 'alert' = connected but something is wrong. */
   phase: MascotPhase
   /** Wall-clock ms the tunnel started, or null. */
   startedAt: number | null
@@ -36,34 +41,34 @@ export type MascotEvent = 'hover-in' | 'hover-out'
 
 type ActOpts = { ms?: number; fx?: Fx; body?: BodyAnim; text?: string; textMs?: number }
 
-const pick = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]
-
 const IDLE_MS = 30000
 const EXPOSED_NAG_MS = 20000
 
-const CONNECTED = ['Готово. Я на посту.', 'Туннель есть. Дышим ровно.', 'Защищено. Можно жить.']
-const POKE_ON = ['Kill-switch держу крепко.', 'IPv6? Не, не слышал.', 'DNS перехвачен. Всё под контролем.', 'Watchdog сверяет IP каждые 15 с.', 'Щекотно!']
-const POKE_OFF = ['Включи меня уже.', 'Провайдер всё видит…', 'Мне неспокойно.']
+/** How many numbered variants each line family has in the locale files (mascot.<family><n>). */
+const VARIANTS = { connected: 3, pokeOn: 5, pokeOff: 3, wink: 2, startle: 3 } as const
+type Family = keyof typeof VARIANTS
+
 const WANDER: Array<[string, Mood, string]> = [
-  ['toggle', 'happy', 'Посижу на кнопке. Тёплая.'],
-  ['clock', 'calm', 'Который час? Ага.'],
-  ['nav-servers', 'think', 'Проверю серверы.'],
-  ['nav-logs', 'squint', 'Что там в журнале…']
+  ['toggle', 'happy', 'mascot.wanderToggle'],
+  ['clock', 'calm', 'mascot.wanderClock'],
+  ['nav-servers', 'think', 'mascot.wanderServers'],
+  ['nav-logs', 'squint', 'mascot.wanderLogs']
 ]
 
-// Greet once per app session, not every time the dashboard tab is reopened.
+// Greet once per app session, not every time the dashboard remounts.
 let greeted = false
 
-function greeting(): [Mood, string] {
+function greetingKey(): [Mood, string] {
   const h = new Date().getHours()
-  if (h < 5) return ['sleep', 'Ночь на дворе… Ты чего не спишь?']
-  if (h < 12) return ['happy', 'Доброе утро! Я Пломбик.']
-  if (h < 18) return ['happy', 'Привет! Я Пломбик. Ткни меня.']
-  return ['calm', 'Добрый вечер. Я на посту.']
+  if (h < 5) return ['sleep', 'mascot.greetNight']
+  if (h < 12) return ['happy', 'mascot.greetMorning']
+  if (h < 18) return ['happy', 'mascot.greetDay']
+  return ['calm', 'mascot.greetEvening']
 }
 
 export function useMascot(input: MascotInput) {
   const { phase, startedAt, downMbps } = input
+  const { t } = useTranslation()
   const [speech, setSpeech] = useState<Speech>(null)
   const [emote, setEmote] = useState<{ mood: Mood; fx: Fx } | null>(null)
   const [hoverMood, setHoverMood] = useState<Mood | null>(null)
@@ -74,13 +79,20 @@ export function useMascot(input: MascotInput) {
   const timers = useRef<Record<string, number>>({})
   const seq = useRef(0)
 
+  // Latest t without re-subscribing every effect on language change
+  const tRef = useRef(t)
+  useEffect(() => {
+    tRef.current = t
+  }, [t])
+  const line = useCallback((family: Family) => tRef.current('mascot.' + family + Math.floor(Math.random() * VARIANTS[family])), [])
+
   const later = useCallback((key: string, fn: () => void, ms: number) => {
     window.clearTimeout(timers.current[key])
     timers.current[key] = window.setTimeout(fn, ms)
   }, [])
   useEffect(() => {
     const all = timers.current
-    return () => Object.values(all).forEach(t => window.clearTimeout(t))
+    return () => Object.values(all).forEach(id => window.clearTimeout(id))
   }, [])
 
   const say = useCallback((text: string, ms = 3200) => {
@@ -106,12 +118,12 @@ export function useMascot(input: MascotInput) {
   // Greeting
   useEffect(() => {
     if (greeted) return
-    const t = window.setTimeout(() => {
+    const id = window.setTimeout(() => {
       greeted = true
-      const [mood, text] = greeting()
-      act(mood, { text, ms: 2000, body: mood === 'sleep' ? '' : 'm-jump' })
+      const [mood, key] = greetingKey()
+      act(mood, { text: tRef.current(key), ms: 2000, body: mood === 'sleep' ? '' : 'm-jump' })
     }, 700)
-    return () => window.clearTimeout(t)
+    return () => window.clearTimeout(id)
   }, [act])
 
   // Falls asleep after 30 s without input, startles awake
@@ -128,7 +140,7 @@ export function useMascot(input: MascotInput) {
       if (sleepingRef.current) {
         sleepingRef.current = false
         setSleeping(false)
-        act('scared', { body: 'm-startle', text: pick(['А? Я не спал!', 'Я просто моргнул.', 'Всё под контролем! Честно.']), ms: 1200 })
+        act('scared', { body: 'm-startle', text: line('startle'), ms: 1200 })
       }
     }
     const events = ['mousemove', 'mousedown', 'keydown', 'wheel'] as const
@@ -137,7 +149,7 @@ export function useMascot(input: MascotInput) {
       window.clearTimeout(idle)
       events.forEach(e => window.removeEventListener(e, onActivity))
     }
-  }, [act])
+  }, [act, line])
 
   // Tunnel state changes
   const prevPhase = useRef(phase)
@@ -147,21 +159,23 @@ export function useMascot(input: MascotInput) {
     if (prev === phase) return
     setHoverMood(null)
     if (phase !== 'connecting') hopTo('home')
-    if (phase === 'on') act('happy', { fx: 'confetti', body: 'm-jump', text: pick(CONNECTED), ms: 2200 })
+    const tr = tRef.current
+    if (phase === 'on') act('happy', { fx: 'confetti', body: 'm-jump', text: line('connected'), ms: 2200 })
+    else if (phase === 'alert') act('scared', { fx: 'sweat', body: 'm-shake', text: tr('mascot.alert'), ms: 2600 })
     else if (phase === 'off') {
-      if (prev === 'connecting') act('worried', { text: 'Ну ладно, отбой.', ms: 1200 })
-      else act('scared', { fx: 'sweat', body: 'm-shake', text: 'Эй! Ты без защиты.', ms: 2600 })
-    } else say(prev === 'on' ? 'Переезжаем…' : 'Строю туннель…', 2600)
-  }, [phase, act, say, hopTo])
+      if (prev === 'connecting') act('worried', { text: tr('mascot.cancelled'), ms: 1200 })
+      else act('scared', { fx: 'sweat', body: 'm-shake', text: tr('mascot.exposed'), ms: 2600 })
+    } else say(prev === 'on' ? tr('mascot.switching') : tr('mascot.building'), 2600)
+  }, [phase, act, say, hopTo, line])
 
-  // Left exposed: hops onto the button once
+  // Genuinely exposed (not merely degraded): hops onto the power button once
   useEffect(() => {
     if (phase !== 'off') return
-    const t = window.setTimeout(() => {
+    const id = window.setTimeout(() => {
       hopTo('toggle', 4500)
-      act('scared', { fx: 'sweat', text: 'Жми сюда! Ты всё ещё без защиты.', ms: 3000 })
+      act('scared', { fx: 'sweat', text: tRef.current('mascot.exposedNag'), ms: 3000 })
     }, EXPOSED_NAG_MS)
-    return () => window.clearTimeout(t)
+    return () => window.clearTimeout(id)
   }, [phase, act, hopTo])
 
   // Session milestones every 10 min, checked without re-rendering every second
@@ -172,9 +186,9 @@ export function useMascot(input: MascotInput) {
       const mark = Math.floor((Date.now() - startedAt) / 600000)
       if (mark <= lastMark) return
       lastMark = mark
-      const min = mark * 10
-      if (min % 60 === 0) act('love', { fx: 'confetti', body: 'm-jump', text: min / 60 + ' ч без единой утечки!' })
-      else act('happy', { body: 'm-jump', text: 'Уже ' + min + ' минут на посту.' })
+      const minutes = mark * 10
+      if (minutes % 60 === 0) act('love', { fx: 'confetti', body: 'm-jump', text: tRef.current('mascot.milestoneHour', { hours: minutes / 60 }) })
+      else act('happy', { body: 'm-jump', text: tRef.current('mascot.milestoneMin', { minutes }) })
     }, 5000)
     return () => window.clearInterval(id)
   }, [phase, startedAt, act])
@@ -186,15 +200,15 @@ export function useMascot(input: MascotInput) {
     const now = Date.now()
     if (now - lastSpike.current < 30000) return
     lastSpike.current = now
-    act('excited', { fx: 'speed', text: 'Летим! ' + downMbps.toFixed(0) + ' Мбит/с', ms: 2200 })
+    act('excited', { fx: 'speed', text: tRef.current('mascot.speed', { mbps: downMbps.toFixed(0) }), ms: 2200 })
   }, [downMbps, phase, act])
 
-  // Back to the window
+  // Back to the window (hook stays mounted while the window is hidden)
   useEffect(() => {
     let hiddenAt = 0
     const onVis = () => {
       if (document.hidden) hiddenAt = Date.now()
-      else if (hiddenAt && Date.now() - hiddenAt > 5000) act('love', { body: 'm-jump', text: 'С возвращением! Я всё сторожил.' })
+      else if (hiddenAt && Date.now() - hiddenAt > 5000) act('love', { body: 'm-jump', text: tRef.current('mascot.welcomeBack') })
     }
     document.addEventListener('visibilitychange', onVis)
     return () => document.removeEventListener('visibilitychange', onVis)
@@ -208,8 +222,8 @@ export function useMascot(input: MascotInput) {
       const next = html.getAttribute('data-theme')
       if (next === theme) return
       theme = next
-      if (next === 'dark') act('calm', { text: 'Темно — как в туннеле. Уютно.' })
-      else act('squint', { text: 'Ай, светло! Глаза щурятся.' })
+      if (next === 'dark') act('calm', { text: tRef.current('mascot.themeDark') })
+      else act('squint', { text: tRef.current('mascot.themeLight') })
     })
     obs.observe(html, { attributes: true, attributeFilter: ['data-theme'] })
     return () => obs.disconnect()
@@ -218,22 +232,22 @@ export function useMascot(input: MascotInput) {
   // Wanders on his own every 25–45 s while protected and idle
   const calmRef = useRef(false)
   useEffect(() => {
-    calmRef.current = phase === 'on' && !sleeping && perch === 'home'
+    calmRef.current = phase === 'on' && !sleeping && perch === 'home' && !document.hidden
   }, [phase, sleeping, perch])
   useEffect(() => {
-    let t = 0
+    let id = 0
     const schedule = () => {
-      t = window.setTimeout(() => {
-        if (calmRef.current) {
-          const [spot, mood, text] = pick(WANDER)
+      id = window.setTimeout(() => {
+        if (calmRef.current && !document.hidden) {
+          const [spot, mood, key] = WANDER[Math.floor(Math.random() * WANDER.length)]
           hopTo(spot, 4500)
-          act(mood, { text, ms: 2500 })
+          act(mood, { text: tRef.current(key), ms: 2500 })
         }
         schedule()
       }, 25000 + Math.random() * 20000)
     }
     schedule()
-    return () => window.clearTimeout(t)
+    return () => window.clearTimeout(id)
   }, [act, hopTo])
 
   // Events from the dashboard (power button hover)
@@ -249,7 +263,7 @@ export function useMascot(input: MascotInput) {
         if (phaseRef.current === 'off') setHoverMood('excited')
         else if (phaseRef.current === 'on') {
           setHoverMood('squint')
-          say('Уверен?', 1400)
+          say(tRef.current('mascot.hoverSure'), 1400)
         }
       }
     }
@@ -257,25 +271,27 @@ export function useMascot(input: MascotInput) {
     return () => window.removeEventListener(MASCOT_EVENT, onEvent)
   }, [say])
 
-  // Poking
+  // Poking (mouse or keyboard)
   const pokes = useRef<number[]>([])
   const poke = useCallback(() => {
     const now = Date.now()
-    pokes.current = pokes.current.filter(t => now - t < 2500).concat(now)
+    pokes.current = pokes.current.filter(p => now - p < 2500).concat(now)
     if (pokes.current.length >= 5) {
       pokes.current = []
-      act('dizzy', { body: 'm-spin', text: 'Хватит! Голова кружится…', ms: 2600 })
+      act('dizzy', { body: 'm-spin', text: tRef.current('mascot.dizzy'), ms: 2600 })
       return
     }
     if (Math.random() < 0.25) {
-      act('wink', { body: 'm-jump', text: pick(['Подмигиваю. Никому ни слова.', 'Мы с тобой команда.']) })
+      act('wink', { body: 'm-jump', text: line('wink') })
       return
     }
-    const off = phaseRef.current === 'off'
-    act(off ? 'worried' : 'happy', { body: 'm-jump', text: pick(off ? POKE_OFF : POKE_ON), ms: 1200 })
-  }, [act])
+    const uneasy = phaseRef.current === 'off' || phaseRef.current === 'alert'
+    act(uneasy ? 'worried' : 'happy', { body: 'm-jump', text: line(uneasy ? 'pokeOff' : 'pokeOn'), ms: 1200 })
+  }, [act, line])
 
-  const base: Mood = sleeping ? 'sleep' : phase === 'on' ? 'calm' : phase === 'off' ? 'worried' : 'scan'
+  const goHome = useCallback(() => hopTo('home'), [hopTo])
+
+  const base: Mood = sleeping ? 'sleep' : phase === 'on' ? 'calm' : phase === 'connecting' ? 'scan' : 'worried'
   const view: MascotView = {
     mood: emote?.mood ?? hoverMood ?? base,
     fx: emote?.fx ?? (sleeping ? 'zzz' : null),
@@ -285,9 +301,7 @@ export function useMascot(input: MascotInput) {
     speech
   }
 
-  const goHome = useCallback(() => hopTo('home'), [hopTo])
-
-  return { view, perch, goHome, poke }
+  return { view, perch, goHome, poke, name: t('mascot.name') }
 }
 
 export type MascotApi = ReturnType<typeof useMascot>
