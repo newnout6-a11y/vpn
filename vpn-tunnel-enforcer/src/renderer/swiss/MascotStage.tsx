@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { cn } from '../design-system/utils'
 import { Mascot } from './Mascot'
 import type { MascotApi, MascotPhase, Speech } from './useMascot'
 
@@ -104,15 +105,22 @@ export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: Mas
   useEffect(() => {
     window.addEventListener('scroll', glue, true)
     window.addEventListener('resize', glue)
-    // Layout can shift without scroll/resize (banners appear, cards expand)
-    const id = window.setInterval(glue, 500)
     return () => {
       window.removeEventListener('scroll', glue, true)
       window.removeEventListener('resize', glue)
-      window.clearInterval(id)
       window.cancelAnimationFrame(raf.current)
     }
   }, [glue])
+
+  // Layout and text can change without scroll/resize (banners, ticking values).
+  // At home the check is one cheap rect read; the text-gap scan only runs
+  // while he sits on a fit=gap perch, and stops when the window is hidden.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      if (!document.hidden) glue()
+    }, perch === 'home' ? 1500 : 500)
+    return () => window.clearInterval(id)
+  }, [glue, perch])
 
   // Hop along a parabola whenever the perch changes
   useEffect(() => {
@@ -157,7 +165,7 @@ export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: Mas
   const onSignal = perch === 'home' && !airborne && phase === 'on'
 
   return (
-    <div className="c-swiss pointer-events-none fixed inset-0 z-40" aria-hidden="true">
+    <div className="c-swiss pointer-events-none fixed inset-0 z-40">
       <div
         className="pointer-events-auto absolute"
         style={{
@@ -170,7 +178,7 @@ export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: Mas
         }}
       >
         <div key={'land-' + landId} className={landId ? 'm-land' : ''}>
-          <Mascot phase={phase} view={airborne ? { ...view, mood: 'excited' } : view} onPoke={mascot.poke} onSignal={onSignal} />
+          <Mascot phase={phase} view={airborne ? { ...view, mood: 'excited' } : view} onPoke={mascot.poke} label={mascot.name} onSignal={onSignal} />
         </div>
       </div>
       {view.speech && <Bubble speech={view.speech} pos={pos} />}
@@ -186,12 +194,16 @@ function Bubble({ speech, pos }: { speech: NonNullable<Speech>; pos: Pt }) {
     <div
       key={'speech-' + speech.id}
       className="absolute"
+      aria-hidden="true"
       style={{ left: pos.x, top: below ? pos.y + 12 : head - 14, transform: 'translate(-' + k + '%, ' + (below ? '0' : '-100%') + ')' }}
     >
       <div className="bubble-in swiss-mono relative w-max max-w-[230px] border-2 border-[var(--ink)] bg-[var(--paper)] px-2.5 py-1.5 text-[11px] leading-snug text-[var(--ink)]">
         {speech.text}
         <span
-          className={'absolute h-3 w-3 -translate-x-1/2 rotate-45 border-[var(--ink)] bg-[var(--paper)] ' + (below ? '-top-[7px] border-l-2 border-t-2' : '-bottom-[7px] border-b-2 border-r-2')}
+          className={cn(
+            'absolute h-3 w-3 -translate-x-1/2 rotate-45 border-[var(--ink)] bg-[var(--paper)]',
+            below ? '-top-[7px] border-l-2 border-t-2' : '-bottom-[7px] border-b-2 border-r-2'
+          )}
           style={{ left: k + '%' }}
         />
       </div>
