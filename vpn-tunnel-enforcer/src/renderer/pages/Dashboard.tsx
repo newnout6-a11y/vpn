@@ -18,6 +18,7 @@ import { SwissMascot, type SwissPhase } from '../swiss/SwissMascot'
 import { MASCOT_EVENT } from '../swiss/useMascot'
 import '../styles/swiss.css'
 import { cn } from '../design-system/utils'
+import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 import { ArrowRight, Loader2, Lock, ShieldOff, Square, TriangleAlert } from 'lucide-react'
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -504,10 +505,11 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
             ? t('dashboard.routeCheckFail')
             : t('dashboard.routeCheckWarn')
       addLog(result.summary === 'fail' ? 'error' : result.summary === 'warn' ? 'warn' : 'info', t('dashboard.routeCheckResult', { message }))
-    } catch (err: any) {
+    } catch (err: unknown) {
       // No verdict from this run: drop the previous one so nothing presents it as current
       setLeakChecks(null)
-      addLog('error', t('dashboard.routeCheckFailed', { message: err?.message ?? String(err) }))
+      const message = isIpcRemoteErrorData(err) || err instanceof Error ? err.message : String(err)
+      addLog('error', t('dashboard.routeCheckFailed', { message }))
     } finally {
       setChecking(false)
     }
