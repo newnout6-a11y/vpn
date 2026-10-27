@@ -4,6 +4,7 @@ import { cn } from './utils'
 import { X } from 'lucide-react'
 import { MASCOT_EVENT, type MascotEvent } from '../swiss/useMascot'
 import '../styles/swiss.css'
+import { usePageActive } from '../hooks/usePageActive'
 
 export type ToastVariant = 'success' | 'error' | 'warning' | 'info'
 
@@ -77,16 +78,18 @@ export const MacToast: React.FC<MacToastContainerProps> = ({
 }) => {
   // Toasts already showing on mount are old news; only new ones get a reaction
   const seen = useRef<Set<string>>(new Set(toasts.map(t => t.id)))
+  // A hidden page's toasts stay silent (and must not use up the mascot's throttle)
+  const pageActive = usePageActive()
   useEffect(() => {
     for (const toast of toasts) {
       if (seen.current.has(toast.id)) continue
       seen.current.add(toast.id)
       const reaction = MASCOT_REACTION[toast.variant]
-      if (reaction) window.dispatchEvent(new CustomEvent(MASCOT_EVENT, { detail: reaction }))
+      if (reaction && pageActive) window.dispatchEvent(new CustomEvent(MASCOT_EVENT, { detail: reaction }))
     }
     const live = new Set(toasts.map(t => t.id))
     for (const id of seen.current) if (!live.has(id)) seen.current.delete(id)
-  }, [toasts])
+  }, [toasts, pageActive])
 
   return (
     <div className={cn('c-swiss fixed z-[100] flex flex-col gap-2', positionClasses[position])}>
