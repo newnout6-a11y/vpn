@@ -42,6 +42,7 @@ export type MascotEvent =
   | 'leak-start' | 'leak-ok' | 'leak-warn' | 'leak-fail'
   | 'smart-on' | 'smart-off'
   | 'notice-error' | 'notice-warn' | 'notice-ok'
+  | 'proxy-start' | 'proxy-rotate' | 'proxy-stop' | 'proxy-stop-all'
 
 type ActOpts = { ms?: number; fx?: Fx; body?: BodyAnim; text?: string; textMs?: number; announce?: boolean }
 
@@ -58,7 +59,7 @@ const WANDER: Array<[string, Mood, string]> = [
   ['toggle', 'happy', 'mascot.wanderToggle'],
   ['clock', 'calm', 'mascot.wanderClock'],
   ['servers', 'think', 'mascot.wanderServers'],
-  ['journal', 'squint', 'mascot.wanderLogs']
+  ['proxies', 'squint', 'mascot.wanderProxies']
 ]
 
 // Greet once per app session, not every time the dashboard remounts.
@@ -327,6 +328,17 @@ export function useMascot(input: MascotInput) {
         case 'smart-off':
           hopTo('smart', 2600)
           act(kind === 'smart-on' ? 'wink' : 'think', { text: tr(kind === 'smart-on' ? 'mascot.smartOn' : 'mascot.smartOff') })
+          break
+        // External proxies column: hop over and comment on what the user just did
+        case 'proxy-start':
+        case 'proxy-rotate':
+        case 'proxy-stop':
+        case 'proxy-stop-all':
+          hopTo('proxies', 3000)
+          if (kind === 'proxy-start') act('scan', { fx: 'dots', ms: 1200, text: tr('mascot.proxyStart'), textMs: 1200 })
+          else if (kind === 'proxy-rotate') act('think', { body: 'm-lean', text: tr('mascot.proxyRotate') })
+          else if (kind === 'proxy-stop') act('calm', { text: tr('mascot.proxyStop') })
+          else act('squint', { body: 'm-shake', text: tr('mascot.proxyStopAll') })
           break
         // Toasts (MacToast): react to every new one, but not to a burst
         case 'notice-error':

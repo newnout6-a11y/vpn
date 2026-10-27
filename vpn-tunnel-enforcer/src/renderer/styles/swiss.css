@@ -20,25 +20,27 @@
 
 .c-swiss {
   --paper: #f2f0eb;
-  --ink: #111111;
+  /* Warm charcoal rather than pure black: softer on paper, still ~14:1 */
+  --ink: #26241f;
   --mute: #6b6862;
-  --rule: rgba(17, 17, 17, 0.14);
-  --rule-strong: rgba(17, 17, 17, 0.9);
+  --rule: rgba(38, 36, 31, 0.14);
+  --rule-strong: rgba(38, 36, 31, 0.9);
   --signal: #ff4f00;
-  --on-signal: #111111;
-  --on-rule: rgba(17, 17, 17, 0.22);
+  --on-signal: #26241f;
+  --on-rule: rgba(38, 36, 31, 0.22);
   font-family: 'Inter Tight', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
   @apply antialiased;
 }
 [data-theme='dark'] .c-swiss {
-  --paper: #0d0d0c;
+  /* Warm graphite rather than near-black */
+  --paper: #1c1b18;
   --ink: #edebe6;
   --mute: #8d8a84;
   --rule: rgba(237, 235, 230, 0.14);
   --rule-strong: rgba(237, 235, 230, 0.85);
   --signal: #ff5a1f;
-  --on-signal: #0d0d0c;
-  --on-rule: rgba(13, 13, 12, 0.28);
+  --on-signal: #1c1b18;
+  --on-rule: rgba(28, 27, 24, 0.28);
 }
 
 .c-swiss .swiss-mono,
@@ -300,12 +302,12 @@
   --rgb-card-elevated: 233 230 223;
   --rgb-accent: 255 79 0;
   --rgb-accent-hover: 224 68 0;
-  --rgb-text: 17 17 17;
+  --rgb-text: 38 36 31;
   --rgb-text-secondary: 107 104 98;
   --rgb-text-muted: 141 138 132;
   --rgb-border: 214 211 205;
-  --rgb-border-strong: 17 17 17;
-  --rgb-success: 17 17 17;
+  --rgb-border-strong: 38 36 31;
+  --rgb-success: 38 36 31;
   --rgb-warning: 194 65 0;
   --rgb-danger: 255 79 0;
   --color-bg: rgb(var(--rgb-bg));
@@ -342,10 +344,10 @@
   color: var(--ink);
 }
 [data-theme='dark'] .swiss-skin {
-  --rgb-bg: 13 13 12;
-  --rgb-sidebar: 13 13 12;
-  --rgb-card: 13 13 12;
-  --rgb-card-elevated: 26 26 24;
+  --rgb-bg: 28 27 24;
+  --rgb-sidebar: 28 27 24;
+  --rgb-card: 28 27 24;
+  --rgb-card-elevated: 40 39 35;
   --rgb-accent: 255 90 31;
   --rgb-accent-hover: 255 120 70;
   --rgb-text: 237 235 230;
@@ -727,7 +729,7 @@
 }
 
 /* Orange as small text: #ff4f00 on paper is ~2.9:1. Text uses --signal-ink:
-   #bf3c00 is 4.8:1 on #f2f0eb (light), #ff5a1f is 6.2:1 on #0d0d0c (dark).
+   #bf3c00 is 4.8:1 on #f2f0eb (light), #ff5a1f is 5.4:1 on #1c1b18 (dark).
    Fills, rules and large type keep --signal. */
 .c-swiss { --signal-ink: #bf3c00; }
 [data-theme='dark'] .c-swiss { --signal-ink: #ff5a1f; }
@@ -743,3 +745,56 @@
 
 /* Long adapter names wrap instead of being clipped */
 .c-swiss .swiss-notice-tag { min-width: 0; flex-shrink: 1; overflow-wrap: anywhere; }
+
+/* ── Final dashboard layout: speed · servers · proxies, fitted to the window ──
+   The page column fills the window; strip and slab keep their height and the
+   panel row takes the rest, lists scrolling inside their panels. A window too
+   short for that still scrolls as a whole (min-heights below). */
+.swiss-skin { display: flex; flex-direction: column; }
+.swiss-skin > .space-y-6 { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; }
+.swiss-skin > .space-y-6 > * { flex-shrink: 0; }
+.swiss-skin > .space-y-6 > .swiss-panels { flex: 1 1 0; min-height: 230px; grid-template-rows: minmax(0, 1fr); }
+.swiss-panels { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr) minmax(0, 1fr); }
+.swiss-panels > .swiss-panel { min-height: 0; overflow: hidden; }
+.swiss-panels .swiss-panel-body { max-height: none; min-height: 0; flex: 1 1 0; overflow: auto; }
+@media (max-width: 1100px) {
+  .swiss-panels { grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.1fr) minmax(0, 1fr); }
+  .swiss-panels > :last-child { grid-column: auto; }
+}
+@media (max-width: 860px) {
+  .swiss-panels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .swiss-skin > .space-y-6 > .swiss-panels { min-height: 380px; grid-template-rows: repeat(2, minmax(0, 1fr)); }
+  .swiss-panels > :last-child { grid-column: 1 / -1; }
+}
+
+/* Slab follows the window height */
+.swiss-slab-main { min-height: clamp(200px, 32vh, 300px); }
+.swiss-word-row { padding-top: clamp(8px, 4.8vh, 64px); }
+.swiss-identity { gap: clamp(8px, 1.8vh, 20px); padding-top: clamp(12px, 1.8vh, 20px); padding-bottom: clamp(12px, 1.8vh, 20px); }
+.c-swiss .swiss-slab-side .swiss-power { height: clamp(52px, 7.5vh, 68px); }
+
+/* External proxies column */
+.swiss-proxy-top { display: flex; flex-shrink: 0; flex-direction: column; gap: 10px; padding: 12px 20px; }
+.swiss-proxy-summary { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
+.c-swiss .swiss-proxy-count { font-size: 32px; font-weight: 900; line-height: 1; letter-spacing: -0.05em; font-variant-numeric: tabular-nums; }
+.c-swiss .swiss-proxy-countries { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--mute); }
+.swiss-proxy-add { display: flex; align-items: flex-end; gap: 6px; }
+.swiss-proxy-add > .swiss-proxy-select { min-width: 0; flex: 1 1 auto; }
+.c-swiss .swiss-proxy-select label { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-size: 10px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--mute); }
+.c-swiss .swiss-proxy-start { display: flex; height: 32px; width: 32px; flex-shrink: 0; align-items: center; justify-content: center; background: var(--ink); color: var(--paper); transition: background-color 0.15s, color 0.15s; }
+.c-swiss .swiss-proxy-start:hover:not(:disabled) { background: var(--signal); color: var(--on-signal); }
+.c-swiss .swiss-proxy-start:disabled { cursor: default; opacity: 0.45; }
+.c-swiss .swiss-proxy-start:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+.c-swiss .swiss-proxy-empty { border-top: 1px solid var(--rule); }
+.swiss-proxy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; border-top: 1px solid var(--rule); padding: 7px 20px; }
+.c-swiss .swiss-proxy-name { display: flex; min-width: 0; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; }
+.c-swiss .swiss-proxy-cc { flex-shrink: 0; font-size: 10px; color: var(--mute); }
+.c-swiss .swiss-proxy-meta { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--mute); }
+.swiss-proxy-actions { display: flex; }
+.c-swiss .swiss-icon-btn { display: inline-flex; height: 28px; width: 28px; align-items: center; justify-content: center; color: var(--mute); transition: color 0.15s, background-color 0.15s; }
+.c-swiss .swiss-icon-btn:hover:not(:disabled) { background: var(--rule); color: var(--ink); }
+.c-swiss .swiss-icon-btn.is-danger:hover:not(:disabled) { color: var(--signal-ink); }
+.c-swiss .swiss-icon-btn:disabled { cursor: default; opacity: 0.4; }
+.c-swiss .swiss-icon-btn:focus-visible { outline: 2px solid var(--signal); outline-offset: 1px; }
+.c-swiss .swiss-health-dot.is-wait { animation: swiss-blink 1s steps(2, start) infinite; }
+.c-swiss .swiss-panel-error { overflow-wrap: anywhere; padding: 8px 20px; font-size: 12px; color: var(--signal-ink); }
