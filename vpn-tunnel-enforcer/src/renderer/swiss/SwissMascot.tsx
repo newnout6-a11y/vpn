@@ -20,12 +20,16 @@ export function SwissMascot({ phase }: { phase: SwissPhase }) {
 
 function MascotRuntime({ phase }: { phase: SwissPhase }) {
   const startedAt = useAppStore(s => s.tunStartedAt)
-  // Only the 75 Mbit/s spike matters to the mascot: 0 below it, 10 Mbit/s buckets above,
-  // so ordinary traffic samples don't re-render the overlay.
-  const fastMbps = useAppStore(s => {
+  // The mascot only reacts to two bands, so it only re-renders when they change:
+  //   fast  ≥ 75 Mbit/s → 10 Mbit/s buckets ("Летим!")
+  //   slow  0.3–3 Mbit/s → 0.5 Mbit/s buckets ("Тащимся…")
+  //   anything else → 0 (idle or ordinary: nothing to say)
+  const bandMbps = useAppStore(s => {
     const mbps = (Math.max(0, s.traffic.smoothedDownloadBps || s.traffic.downloadBps) * 8) / 1000000
-    return mbps >= 75 ? Math.round(mbps / 10) * 10 : 0
+    if (mbps >= 75) return Math.round(mbps / 10) * 10
+    if (mbps >= 0.3 && mbps < 3) return Math.max(0.5, Math.floor(mbps * 2) / 2)
+    return 0
   })
-  const mascot = useMascot({ phase, startedAt, downMbps: fastMbps })
+  const mascot = useMascot({ phase, startedAt, downMbps: bandMbps })
   return <MascotStage phase={phase} mascot={mascot} />
 }
