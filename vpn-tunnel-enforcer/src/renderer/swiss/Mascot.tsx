@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { cn } from '../design-system/utils'
 import type { Fx, MascotPhase, MascotView, Mood } from './useMascot'
 
@@ -8,6 +8,8 @@ interface Props {
   phase: MascotPhase
   view: MascotView
   onPoke: () => void
+  /** Called on each detected stroke while the pointer rubs over him. */
+  onPet: () => void
   /** Translated accessible name. */
   label: string
   /** Bumps on every landing to replay the squash. */
@@ -30,6 +32,7 @@ interface Face {
   left: Eye
   right?: Eye
   mouth: (eye: string) => CSSProperties
+  cheeks?: boolean
 }
 
 const open = (o: Partial<Eye> = {}): Eye => ({ w: 18, h: 18, pupil: 8, blink: true, ...o })
@@ -49,14 +52,41 @@ const FACES: Record<Mood, Face> = {
   dizzy: { left: open({ pupil: 6, anim: 'm-orbit', blink: false }), mouth: rect(18, 3, { transform: 'rotate(-14deg)' }) },
   wink: { left: open(), right: bar(3, 4), mouth: rect(18, 4, { transform: 'rotate(-8deg)' }) },
   excited: { left: open({ w: 20, h: 20, pupil: 10 }), mouth: rect(22, 11) },
-  sleep: { left: bar(3, 5), mouth: rect(8, 4) }
+  sleep: { left: bar(3, 5), mouth: rect(8, 4) },
+  petted: { left: bar(4, -1), mouth: rect(20, 6), cheeks: true }
 }
 
-const LOOP: Partial<Record<Mood, string>> = { calm: 'm-breathe', sleep: 'm-breathe-slow', excited: 'm-bounce' }
+const LOOP: Partial<Record<Mood, string>> = { calm: 'm-breathe', sleep: 'm-breathe-slow', excited: 'm-bounce', petted: 'm-purr' }
 
-export function Mascot({ phase, view, onPoke, label, landId, onSignal }: Props) {
+/** A stroke = enough pointer travel with a change of direction within a short window. */
+function useStrokeDetector(onPet: () => void) {
+  const s = useRef({ x: 0, y: 0, dirX: 0, dirY: 0, dist: 0, turns: 0, since: 0 })
+  return (e: ReactPointerEvent) => {
+    const st = s.current
+    const now = performance.now()
+    if (now - st.since > 900) Object.assign(st, { dist: 0, turns: 0, since: now, dirX: 0, dirY: 0, x: e.clientX, y: e.clientY })
+    const dx = e.clientX - st.x
+    const dy = e.clientY - st.y
+    st.x = e.clientX
+    st.y = e.clientY
+    st.dist += Math.hypot(dx, dy)
+    const sx = Math.sign(dx)
+    const sy = Math.sign(dy)
+    if (sx && st.dirX && sx !== st.dirX) st.turns += 1
+    if (sy && st.dirY && sy !== st.dirY) st.turns += 1
+    if (sx) st.dirX = sx
+    if (sy) st.dirY = sy
+    if (st.dist > 90 && st.turns >= 1) {
+      onPet()
+      Object.assign(st, { dist: 0, turns: 0, since: now })
+    }
+  }
+}
+
+export function Mascot({ phase, view, onPoke, onPet, label, landId, onSignal }: Props) {
   const bodyRef = useRef<HTMLDivElement>(null)
   const [look, setLook] = useState({ x: 0, y: 0 })
+  const onStroke = useStrokeDetector(onPet)
 
   // Pupils follow the cursor (rAF-throttled)
   useEffect(() => {
@@ -93,6 +123,8 @@ export function Mascot({ phase, view, onPoke, label, landId, onSignal }: Props) 
       <button
         type="button"
         onClick={onPoke}
+        onPointerMove={onStroke}
+        data-mascot=""
         aria-label={label}
         title={label}
         className="relative mx-auto block focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[var(--signal)]"
@@ -114,6 +146,12 @@ export function Mascot({ phase, view, onPoke, label, landId, onSignal }: Props) 
                 <EyeView key={i} spec={e} eye={eye} body={body} look={look} side={i === 0 ? 'left' : 'right'} />
               ))}
             </div>
+            {face.cheeks && (
+              <>
+                <span className="absolute left-[10px] top-[44px] h-[4px] w-[10px]" style={{ background: onSignal ? 'var(--paper)' : 'var(--signal)' }} />
+                <span className="absolute right-[10px] top-[44px] h-[4px] w-[10px]" style={{ background: onSignal ? 'var(--paper)' : 'var(--signal)' }} />
+              </>
+            )}
             <span className="absolute bottom-[14px] left-1/2 -ml-[13px] flex w-[26px] justify-center" aria-hidden="true">
               <span className="block transition-[width,height,background-color,transform] duration-200" style={face.mouth(eye)} />
             </span>
@@ -209,6 +247,16 @@ function Effects({ fx, fxId, body, eye, onSignal }: { fx: Fx; fxId: number; body
   }
   if (fx === 'sweat') {
     return <span className="m-drop pointer-events-none absolute -left-1 top-1 z-10 h-[10px] w-[6px] border-2" style={{ borderColor: body, background: eye }} aria-hidden="true" />
+  }
+  if (fx === 'hearts') {
+    // little diamonds rising off the head while he is being petted
+    return (
+      <span className="pointer-events-none absolute -top-[18px] left-1/2 z-10" aria-hidden="true">
+        {[-22, 4, 24, -6].map((x, i) => (
+          <span key={i} className="m-heart absolute block h-[7px] w-[7px]" style={{ left: x, background: onSignal ? 'var(--paper)' : 'var(--signal)', animationDelay: i * 0.28 + 's' }} />
+        ))}
+      </span>
+    )
   }
   return (
     <span className="pointer-events-none absolute -left-8 top-[24px] flex flex-col gap-2.5" aria-hidden="true">
