@@ -767,8 +767,10 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           onMouseEnter={() => nudgeMascot('hover-in')}
           onMouseLeave={() => nudgeMascot('hover-out')}
           data-perch="toggle"
-          data-perch-x="0.8"
-          data-perch-scale="0.55"
+          data-perch-y="bottom"
+          data-perch-x="0.6"
+          data-perch-scale="0.48"
+          data-perch-fit="gap"
         >
           {isServerSwitching && !cancelling && (
             <>
