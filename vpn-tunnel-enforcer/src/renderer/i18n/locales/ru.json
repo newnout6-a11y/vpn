@@ -21,6 +21,12 @@
     "legacyCleanupRequired": "Остановка захвата старого клиента не подтверждена. Отключите VPN и штатно закройте старый клиент до обновления; новый захват заблокирован."
   },
   "dashboard": {
+    "routeCheckStart": "Проверяем маршрут — куда сейчас идёт трафик…",
+    "routeCheckOk": "Утечек не найдено — всё через VPN.",
+    "routeCheckFail": "Найдена критичная проблема маршрутизации.",
+    "routeCheckWarn": "Есть предупреждения маршрутизации.",
+    "routeCheckResult": "Проверка маршрута: {{message}}",
+    "routeCheckFailed": "Проверка не выполнена: {{message}}",
     "swissSitesSee": "Выходной IP",
     "swissRealAddress": "Настоящий адрес",
     "swissNode": "Узел",
