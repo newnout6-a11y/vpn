@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Loader2, RefreshCw } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 import { cn } from '../design-system/utils'
 import { useAppStore } from '../store'
 import { usePageActive } from '../hooks/usePageActive'
@@ -239,23 +239,27 @@ function SwissServers() {
                 <span className="swiss-server-flag">{p.country ? <CountryFlagIcon country={p.country} size={14} /> : null}</span>
                 <button type="button" className="swiss-server-name" onClick={() => void select(p)} title={p.name}>
                   <span className="truncate">{p.name}</span>
-                  {p.id === best && !sel && <span className="swiss-best">{t('swiss.best')}</span>}
                 </button>
-                <span className="swiss-mono swiss-server-ping">
-                  {pings[p.id] === 'pinging' ? <Loader2 className="ml-auto h-3 w-3 animate-spin" /> : ms ?? '—'}
-                </span>
+                {/* Click the ping to measure again; the best server's ping is the orange chip */}
+                <button
+                  type="button"
+                  className={cn('swiss-mono swiss-server-ping', p.id === best && 'is-best')}
+                  onClick={() => void pingOne(p)}
+                  disabled={pings[p.id] === 'pinging'}
+                  title={p.id === best ? t('swiss.bestPing') : t('swiss.pingOne')}
+                  aria-label={t('swiss.pingOne') + ': ' + p.name + (p.id === best ? ', ' + t('swiss.best') : '')}
+                >
+                  {pings[p.id] === 'pinging' ? <Loader2 className="h-3 w-3 animate-spin" /> : <span>{ms ?? '—'}</span>}
+                </button>
                 <span className={cn('swiss-mono swiss-server-health', health === 'offline' && 'is-offline')}>
                   {health === 'offline' ? (
                     <><span className="swiss-health-dot is-offline" />{t('swiss.offline')}</>
                   ) : health === 'unknown' ? (
                     <><span className="swiss-health-dot is-unknown" />{t('swiss.unchecked')}</>
                   ) : (
-                    <><span className="swiss-health-dot" />{ago === null ? t('swiss.online') : t('swiss.minAgo', { n: ago })}</>
+                    <><span className="swiss-health-dot" />{ago === null ? t('swiss.online') : ago === 0 ? t('swiss.justNow') : t('swiss.minAgo', { n: ago })}</>
                   )}
                 </span>
-                <button type="button" className="swiss-server-ping-btn" onClick={() => void pingOne(p)} title={t('swiss.pingOne')} aria-label={t('swiss.pingOne') + ': ' + p.name}>
-                  <RefreshCw className="h-3 w-3" />
-                </button>
               </div>
             )
           })
