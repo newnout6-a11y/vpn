@@ -10,6 +10,8 @@ interface Props {
   onPoke: () => void
   /** Translated accessible name. */
   label: string
+  /** Bumps on every landing to replay the squash. */
+  landId: number
   /** True while sitting on the orange slab: black body + orange eyes. */
   onSignal: boolean
 }
@@ -52,7 +54,7 @@ const FACES: Record<Mood, Face> = {
 
 const LOOP: Partial<Record<Mood, string>> = { calm: 'm-breathe', sleep: 'm-breathe-slow', excited: 'm-bounce' }
 
-export function Mascot({ phase, view, onPoke, label, onSignal }: Props) {
+export function Mascot({ phase, view, onPoke, label, landId, onSignal }: Props) {
   const bodyRef = useRef<HTMLDivElement>(null)
   const [look, setLook] = useState({ x: 0, y: 0 })
 
@@ -86,15 +88,18 @@ export function Mascot({ phase, view, onPoke, label, onSignal }: Props) {
 
   return (
     <div className="relative w-[96px] select-none">
-      {/* One-shot body move (re-keyed to replay) → idle loop → figure */}
-      <div key={'body-' + view.bodyId} className={view.body}>
-        <button
-          type="button"
-          onClick={onPoke}
-          aria-label={label}
-          title={label}
-          className={cn('relative mx-auto block focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[var(--signal)]', LOOP[view.mood])}
-        >
+      {/* The button never remounts (keyboard focus survives); only the keyed
+          inner layers do, to replay landing squash and one-shot body moves. */}
+      <button
+        type="button"
+        onClick={onPoke}
+        aria-label={label}
+        title={label}
+        className="relative mx-auto block focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[var(--signal)]"
+      >
+        <span key={'land-' + landId} className={cn('block', landId > 0 && 'm-land')}>
+        <span key={'body-' + view.bodyId} className={cn('block', view.body)}>
+        <span className={cn('relative block', LOOP[view.mood])}>
           <Effects fx={view.fx} fxId={view.fxId} body={body} eye={eye} onSignal={onSignal} />
 
           {/* Seal tag */}
@@ -118,8 +123,10 @@ export function Mascot({ phase, view, onPoke, label, onSignal }: Props) {
             <span className="h-1.5 w-4" style={{ background: body }} />
             <span className="h-1.5 w-4" style={{ background: body }} />
           </div>
-        </button>
-      </div>
+        </span>
+        </span>
+        </span>
+      </button>
     </div>
   )
 }
