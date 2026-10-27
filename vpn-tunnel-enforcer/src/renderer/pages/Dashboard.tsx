@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { tunnelStartedMessageKey } from '../tunnelMessages'
 import { motion } from 'framer-motion'
@@ -15,6 +15,8 @@ import { DashboardSide } from '../components/DashboardSide'
 import { usePageActive } from '../hooks/usePageActive'
 import { CountryFlagIcon } from '../components/CountryFlagIcon'
 import { FitWord } from '../swiss/FitWord'
+import { SwissFactsStrip } from '../swiss/SwissFactsStrip'
+import { SwissProgress } from '../swiss/SwissProgress'
 import { SwissMascot, type SwissPhase } from '../swiss/SwissMascot'
 import { MASCOT_EVENT } from '../swiss/useMascot'
 import '../styles/swiss.css'
@@ -619,6 +621,24 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     window.dispatchEvent(new CustomEvent(MASCOT_EVENT, { detail: kind }))
   }
 
+  // Ctrl/Cmd+Enter presses the power button: same confirm/cancel rules as a click
+  const powerRef = useRef<HTMLButtonElement>(null)
+  const pageActive = usePageActive()
+  useEffect(() => {
+    if (!pageActive) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.key !== 'Enter' || e.repeat) return
+      const target = e.target as HTMLElement | null
+      if (target && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return
+      const button = powerRef.current
+      if (!button || button.disabled) return
+      e.preventDefault()
+      button.click()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [pageActive])
+
   // ─── Render ────────────────────────────────────────────────────────────
 
   return (
@@ -632,8 +652,8 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
      * The right column is `sticky` so it stays in view as the user scrolls
      * the long primary column (kill-switch banner → toggle → leak → diagnostics).
      */
-    <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] xl:gap-6 items-start">
-      <div className="space-y-6 max-w-3xl xl:max-w-none">
+    <div className="c-swiss swiss-skin">
+      <div className="space-y-6">
         {/* Onboarding tip */}
         <PageTip tipKey="dashboard">{t('tips.dashboard')}</PageTip>
 
@@ -730,6 +750,9 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         </motion.div>
       )}
 
+      {/* «Пломба» facts strip: mode · Smart RU · kill-switch · leaks */}
+      <SwissFactsStrip onCheckLeaks={runDiagnostics} checking={checking} />
+
       {/* Main VPN Toggle Card — «Пломба» status slab */}
       <section className={cn('c-swiss swiss-slab', swissOn && 'is-on', swissAlert && 'is-alert')}>
         <div className="swiss-slab-main">
@@ -751,6 +774,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         <div className="swiss-slab-side" data-perch="side" data-perch-x="0.7" data-perch-scale="0.5">
         {/* Large circular power button with glow */}
         <motion.button
+          ref={powerRef}
           onClick={() => {
             if (hasConnectionResources && !confirmDisconnect && !isBusy) {
               setConfirmDisconnect(true)
@@ -902,8 +926,12 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         )}
         </div>
 
+        <SwissProgress operation={tunnelSnapshot?.operation ?? null} busy={swissBusy} />
         <SwissMascot phase={swissPhase} />
       </section>
+
+      {/* Traffic · servers · journal (+ recent sites): the former right column, now a row under the slab */}
+      <DashboardSide />
 
       {/* Leak warning banner */}
       {visibleLeak && (
@@ -968,13 +996,6 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
       <DiagnosticsCard />
       </div>
 
-      {/* Right-hand companion column. Hidden on narrower windows via the
-          parent grid template (no `xl:` size on the right tracks). The
-          column itself sticks to the top of the viewport as the user
-          scrolls through the primary column. */}
-      <aside className="hidden xl:block sticky top-6 self-start max-h-[calc(100vh-3rem)] overflow-y-auto pr-1">
-        <DashboardSide />
-      </aside>
     </div>
   )
 }
