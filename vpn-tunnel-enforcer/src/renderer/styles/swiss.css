@@ -717,3 +717,11 @@
   .swiss-traffic-figures { padding-top: 12px; }
   .swiss-bars { height: 56px; padding: 12px 20px; }
 }
+
+/* Long addresses (IPv6, or IPv4 + the copy label) wrap inside the identity column */
+.c-swiss .swiss-ip { flex-wrap: wrap; row-gap: 2px; }
+.c-swiss .swiss-ip > .roll { min-width: 0; overflow-wrap: anywhere; }
+.c-swiss .swiss-real { overflow-wrap: anywhere; }
+@media (max-width: 1100px) {
+  .c-swiss .swiss-ip { font-size: 20px; }
+}
