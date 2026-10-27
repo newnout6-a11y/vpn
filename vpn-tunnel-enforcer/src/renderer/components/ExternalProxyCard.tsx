@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Globe2, Loader2, Plus, RefreshCw, Square } from 'lucide-react'
-import { MacCard } from '../design-system/MacCard'
-import { MacButton } from '../design-system/MacButton'
+import { Loader2, Plus, RefreshCw, Square } from 'lucide-react'
+import { cn } from '../design-system/utils'
 import { MacSelect, type SelectOption } from '../design-system/MacSelect'
 import { useAppStore } from '../store'
 import { usePageActive } from '../hooks/usePageActive'
 import { SERVER_CHANGED_EVENT } from '../nav'
 import type { ExternalProxyInstanceStatus, ExternalProxyProfileRow, ExternalProxyStatus } from '../../shared/ipc-types'
+import '../styles/swiss.css'
 
 const STOPPED: ExternalProxyStatus = {
   slot: 1,
@@ -317,124 +317,89 @@ export function ExternalProxyCard() {
     }
   })
   return (
-    <MacCard>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider flex items-center gap-2">
-            <Globe2 className="w-4 h-4 text-[var(--color-accent)]" />
-            Внешние прокси
-          </h3>
-          {countrySummary && (
-            <p className="text-xs mt-1 text-[var(--color-text-muted)] truncate" title={activeCountries.join(', ')}>
-              Страны: {countrySummary}
-            </p>
-          )}
-          <p className="text-sm mt-1 text-[var(--color-text-secondary)]">
-            Запущено: {processRunningCount}
-          </p>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap justify-end">
-          <MacButton
-            variant="danger"
-            size="sm"
-            onClick={handleStopAll}
-            disabled={isBusy || processRunningCount === 0}
-            title="Остановить все внешние прокси"
-          >
-            {busy?.action === 'stopAll' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4" />}
-            Остановить все
-          </MacButton>
-        </div>
-      </div>
+    // «Пломба» panel: same controls as before, Swiss layout
+    <section className="swiss-panel">
+      <header className="swiss-panel-head" data-perch="proxies" data-perch-y="bottom" data-perch-scale="0.32" data-perch-fit="gap">
+        <span className="swiss-label swiss-label-ink">Внешние прокси</span>
+        <button type="button" className="swiss-fact-action" onClick={handleStopAll} disabled={isBusy || processRunningCount === 0} title="Остановить все внешние прокси">
+          {busy?.action === 'stopAll' && <Loader2 className="mr-1 inline h-3 w-3 animate-spin" />}
+          Остановить все
+        </button>
+      </header>
 
-      <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
-        <MacSelect
-          label="Сервер для нового прокси"
-          options={profileOptions}
-          value={selectedProfileId}
-          onChange={setSelectedProfileId}
-          placeholder={profileOptions.length ? 'Выберите сервер' : 'Нет доступных серверов'}
-          disabled={isBusy || profileOptions.length === 0}
-        />
-        <MacButton
-          variant="primary"
-          size="sm"
-          onClick={handleAdd}
-          disabled={isBusy || !selectedProfileId}
-          title="Запустить выбранный сервер как внешний прокси"
-          className="md:min-w-32"
-        >
-          {busy?.action === 'start' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-          Запустить
-        </MacButton>
+      <div className="swiss-panel-pad">
+        <div className="swiss-proxy-summary">
+          <span className="swiss-proxy-count">{processRunningCount}</span>
+          <span className="swiss-label">Запущено</span>
+          {countrySummary && (
+            <span className="swiss-mono swiss-proxy-countries" title={activeCountries.join(', ')}>
+              {countrySummary}
+            </span>
+          )}
+        </div>
+        <div className="swiss-proxy-add">
+          <div className="min-w-0 flex-1">
+            <MacSelect
+              label="Сервер для нового прокси"
+              options={profileOptions}
+              value={selectedProfileId}
+              onChange={setSelectedProfileId}
+              placeholder={profileOptions.length ? 'Выберите сервер' : 'Нет доступных серверов'}
+              disabled={isBusy || profileOptions.length === 0}
+            />
+          </div>
+          <button type="button" className="swiss-btn" onClick={handleAdd} disabled={isBusy || !selectedProfileId} title="Запустить выбранный сервер как внешний прокси">
+            {busy?.action === 'start' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+            Запустить
+          </button>
+        </div>
       </div>
 
       {instances.length > 0 && (
-        <div className="mt-3 border-y border-[var(--color-border)] divide-y divide-[var(--color-border)]">
+        <div className="swiss-panel-body">
           {instances.map((instance) => {
             const rowBusy = busy?.slot === instance.slot
+            const starting = instance.health === 'starting' || instance.health === 'rotating'
             return (
-              <div key={instance.slot} className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 py-3">
+              <div key={instance.slot} className="swiss-proxy-row">
+                <span className="swiss-mono swiss-proxy-slot">{String(instance.slot).padStart(2, '0')}</span>
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-[var(--color-text)]">Прокси {instance.slot}</span>
+                  <div className="swiss-proxy-name">
                     <span
-                      className={`inline-flex items-center gap-1.5 text-xs ${
-                        instance.health === 'healthy'
-                          ? 'text-[var(--color-success)]'
-                          : instance.health === 'starting' || instance.health === 'rotating'
-                            ? 'text-[var(--color-warning)]'
-                            : 'text-[var(--color-danger)]'
-                      }`}
+                      className={cn('swiss-health-dot shrink-0', starting && 'is-unknown is-wait', !starting && instance.health !== 'healthy' && 'is-offline')}
                       title={instance.lastError ?? instance.health}
-                    >
-                      <span
-                        className={`w-1.5 h-1.5 rounded-full ${
-                          instance.health === 'healthy'
-                            ? 'bg-[var(--color-success)]'
-                            : instance.health === 'starting' || instance.health === 'rotating'
-                              ? 'bg-[var(--color-warning)]'
-                              : 'bg-[var(--color-danger)]'
-                        }`}
-                      />
-                      {instance.autoDisabled ? 'disabled' : instance.health}
+                    />
+                    <span className="truncate">
+                      {instance.profileName ?? 'Без имени'}{instance.country ? ', ' + instance.country : ''}
                     </span>
                   </div>
-                  <p className="text-xs text-[var(--color-text-secondary)] truncate mt-0.5">
-                    {instance.profileName ?? 'Без имени'}{instance.country ? `, ${instance.country}` : ''}
-                  </p>
-                  {instance.egressIp && (
-                    <p className="text-xs text-[var(--color-text-muted)] font-mono truncate mt-0.5">
-                      {instance.egressIp}{instance.latencyMs !== null ? `, ${instance.latencyMs} ms` : ''}
-                    </p>
-                  )}
+                  <div className="swiss-mono swiss-proxy-meta">
+                    {instance.proxyUrl ?? '—'}
+                    {instance.egressIp ? ' · ' + instance.egressIp : ''}
+                    {instance.latencyMs !== null ? ' · ' + instance.latencyMs + ' мс' : ''}
+                  </div>
                 </div>
-
-                <span className="text-xs font-mono text-[var(--color-text)] break-all md:text-right">
-                  {instance.proxyUrl ?? '—'}
-                </span>
-
-                <div className="flex items-center gap-1 justify-start md:justify-end">
-                  <MacButton
-                    variant="ghost"
-                    size="sm"
+                <div className="swiss-proxy-actions">
+                  <button
+                    type="button"
+                    className="swiss-icon-btn"
                     onClick={() => handleRotate(instance)}
                     disabled={isBusy}
                     aria-label={`Сменить профиль прокси ${instance.slot}`}
                     title={`Сменить профиль прокси ${instance.slot}`}
                   >
-                    {rowBusy && busy?.action === 'rotate' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-                  </MacButton>
-                  <MacButton
-                    variant="ghost"
-                    size="sm"
+                    {rowBusy && busy?.action === 'rotate' ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                  </button>
+                  <button
+                    type="button"
+                    className="swiss-icon-btn is-danger"
                     onClick={() => handleStop(instance)}
                     disabled={isBusy}
                     aria-label={`Остановить прокси ${instance.slot}`}
                     title={`Остановить прокси ${instance.slot}`}
                   >
-                    {rowBusy && busy?.action === 'stop' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4 text-[var(--color-danger)]" />}
-                  </MacButton>
+                    {rowBusy && busy?.action === 'stop' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
+                  </button>
                 </div>
               </div>
             )
@@ -442,11 +407,9 @@ export function ExternalProxyCard() {
         </div>
       )}
 
-      {error && <p className="text-xs text-[var(--color-danger)] mt-3 break-words">{error}</p>}
+      {error && <p className="swiss-panel-error">{error}</p>}
 
-      <p className="text-xs text-[var(--color-text-muted)] font-mono mt-3">
-        Control API: {status.controlUrl ?? '—'}
-      </p>
-    </MacCard>
+      <p className="swiss-mono swiss-panel-foot">Control API: {status.controlUrl ?? '—'}</p>
+    </section>
   )
 }
