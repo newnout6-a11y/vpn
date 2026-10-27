@@ -737,6 +737,7 @@
     "milestoneMin": "{{minutes}} minutes on duty.",
     "milestoneHour": "{{hours}} h on duty!",
     "speed": "Zoom! {{mbps}} Mbit/s",
+    "slow": "Crawling… {{mbps}} Mbit/s. If it feels slow, try another server.",
     "welcomeBack": "Welcome back!",
     "themeDark": "Dark — like a tunnel. Cozy.",
     "themeLight": "Ow, bright! Squinting.",
