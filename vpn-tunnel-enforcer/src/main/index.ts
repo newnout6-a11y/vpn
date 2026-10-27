@@ -110,7 +110,7 @@ import { registerNotificationPrefsIpcHandlers } from './notificationPrefs'
 import { i18nBackend, registerI18nIpcHandlers } from './i18n'
 import { shutdown as shutdownEn } from '../renderer/i18n/locales/en.json'
 import { shutdown as shutdownRu } from '../renderer/i18n/locales/ru.json'
-import { registerThemeIpcHandlers } from './themeManager'
+import { registerThemeIpcHandlers, themeManager, titleBarOverlayFor } from './themeManager'
 import { externalProxy } from './externalProxy'
 import { requirePlainObject, requireStringArray } from './ipcValidation'
 import { installTrustedIpcBoundary, registerTrustedRenderer } from './ipcSecurity'
@@ -799,7 +799,10 @@ function createWindow() {
     minWidth: 860,
     minHeight: 600,
     show: false,
-    frame: true,
+    // «Пломба» title bar: no system caption strip; the renderer draws its own
+    // drag strip and Windows keeps native caption buttons (see titleBarOverlayFor).
+    titleBarStyle: 'hidden',
+    titleBarOverlay: titleBarOverlayFor(themeManager.getActiveTheme()),
     autoHideMenuBar: true,
     icon: getIconPath(),
     webPreferences: {
