@@ -79,15 +79,21 @@ export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: Mas
   const flying = useRef(false)
   const raf = useRef(0)
 
+  const goHomeRef = useRef(mascot.goHome)
   useLayoutEffect(() => {
     posRef.current = pos
-  }, [pos])
+    goHomeRef.current = mascot.goHome
+  })
 
-  // Stick to the current perch while it moves (scroll, resize, layout changes)
+  // Stick to the current perch while it moves (scroll, resize, layout changes).
+  // If the spot disappears (text grew into it), hop home: never snap.
   const glue = useCallback(() => {
     if (flying.current) return
-    const t = measure(perchRef.current) ?? measure('home')
-    if (!t) return
+    const t = measure(perchRef.current)
+    if (!t) {
+      if (perchRef.current !== 'home') goHomeRef.current()
+      return
+    }
     setPos(p => (p && Math.abs(p.x - t.x) < 0.5 && Math.abs(p.y - t.y) < 0.5 && p.scale === t.scale ? p : t))
   }, [])
 
