@@ -255,8 +255,8 @@ export const TITLE_BAR_HEIGHT = 36
 export function titleBarOverlayFor(theme: ThemeConfig): { color: string; symbolColor: string; height: number } {
   const dark = theme.mode === 'system' ? nativeTheme.shouldUseDarkColors : theme.mode === 'dark'
   return dark
-    ? { color: '#0d0d0c', symbolColor: '#edebe6', height: TITLE_BAR_HEIGHT }
-    : { color: '#f2f0eb', symbolColor: '#111111', height: TITLE_BAR_HEIGHT }
+    ? { color: '#1c1b18', symbolColor: '#edebe6', height: TITLE_BAR_HEIGHT }
+    : { color: '#f2f0eb', symbolColor: '#26241f', height: TITLE_BAR_HEIGHT }
 }
 
 function syncTitleBarOverlays(theme: ThemeConfig): void {
