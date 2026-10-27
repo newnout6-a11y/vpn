@@ -141,7 +141,10 @@ function SwissServers() {
   }, [active, refresh])
 
   // Endpoint RTTs depend on the route; measure again after connect/disconnect
+  // (routeGen lets a probe that started before the change discard its result)
+  const routeGen = useRef(0)
   useEffect(() => {
+    routeGen.current++
     setPings({})
   }, [tunRunning])
 
@@ -163,11 +166,14 @@ function SwissServers() {
   const pingOne = async (p: ServerProfile) => {
     if (!p.server || !p.port) return
     setPings(prev => ({ ...prev, [p.id]: 'pinging' }))
+    const gen = routeGen.current
     try {
       const ms = await window.electronAPI.serversPingOne(p.server, p.port)
+      if (gen !== routeGen.current) return
       setPings(prev => ({ ...prev, [p.id]: ms }))
       announcePing({ id: p.id, ms })
     } catch {
+      if (gen !== routeGen.current) return
       setPings(prev => ({ ...prev, [p.id]: null }))
       announcePing({ id: p.id, ms: null })
     }
