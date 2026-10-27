@@ -725,3 +725,17 @@
 @media (max-width: 1100px) {
   .c-swiss .swiss-ip { font-size: 20px; }
 }
+
+/* Orange as small text: #ff4f00 on paper is ~2.9:1. Text uses --signal-ink
+   (≥4.5:1 on paper); fills, rules and large type keep --signal. */
+.c-swiss { --signal-ink: #e04500; }
+[data-theme='dark'] .c-swiss { --signal-ink: #ff5a1f; }
+.c-swiss .swiss-nav-item[aria-current='page'] .swiss-nav-num { color: var(--signal-ink); }
+.c-swiss .swiss-fact-value.is-alert { color: var(--signal-ink); }
+.c-swiss .swiss-fact-action:hover:not(:disabled) { color: var(--signal-ink); }
+.swiss-log-msg.is-warn { color: var(--signal-ink); }
+.c-swiss .swiss-sub.is-alert { color: var(--signal-ink); }
+.swiss-server-health.is-offline { color: var(--signal-ink); }
+.c-swiss .swiss-toast.is-error .swiss-toast-title { color: var(--signal-ink); }
+.c-swiss .swiss-toast-close:hover { color: var(--signal-ink); }
+.c-swiss .swiss-notice-tag { color: var(--signal-ink); }
