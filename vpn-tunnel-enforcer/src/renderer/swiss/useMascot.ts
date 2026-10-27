@@ -37,7 +37,10 @@ export interface MascotInput {
 
 /** Window event other components dispatch to talk to the mascot. */
 export const MASCOT_EVENT = 'vpnte:mascot'
-export type MascotEvent = 'hover-in' | 'hover-out'
+export type MascotEvent =
+  | 'hover-in' | 'hover-out'
+  | 'leak-start' | 'leak-ok' | 'leak-warn' | 'leak-fail'
+  | 'smart-on' | 'smart-off'
 
 type ActOpts = { ms?: number; fx?: Fx; body?: BodyAnim; text?: string; textMs?: number; announce?: boolean }
 
@@ -54,7 +57,7 @@ const WANDER: Array<[string, Mood, string]> = [
   ['toggle', 'happy', 'mascot.wanderToggle'],
   ['clock', 'calm', 'mascot.wanderClock'],
   ['nav-servers', 'think', 'mascot.wanderServers'],
-  ['nav-logs', 'squint', 'mascot.wanderLogs']
+  ['journal', 'squint', 'mascot.wanderLogs']
 ]
 
 // Greet once per app session, not every time the dashboard remounts.
@@ -292,18 +295,42 @@ export function useMascot(input: MascotInput) {
   useEffect(() => {
     const onEvent = (e: Event) => {
       const kind = (e as CustomEvent<MascotEvent>).detail
-      if (kind === 'hover-out') setHoverMood(null)
-      else if (kind === 'hover-in') {
-        if (phaseRef.current === 'off') setHoverMood('excited')
-        else if (phaseRef.current === 'on') {
-          setHoverMood('squint')
-          say(tRef.current('mascot.hoverSure'), 1400)
-        }
+      const tr = tRef.current
+      switch (kind) {
+        case 'hover-out':
+          setHoverMood(null)
+          break
+        case 'hover-in':
+          if (phaseRef.current === 'off') setHoverMood('excited')
+          else if (phaseRef.current === 'on') {
+            setHoverMood('squint')
+            say(tr('mascot.hoverSure'), 1400)
+          }
+          break
+        // Leak check: hop onto the cell, then react to the real verdict
+        case 'leak-start':
+          hopTo('leak', 2600)
+          act('think', { fx: 'dots', body: 'm-lean', ms: 1500, text: tr('mascot.leakStart'), textMs: 1500 })
+          break
+        case 'leak-ok':
+          act('happy', { body: 'm-jump', text: tr('mascot.leakOk') })
+          break
+        case 'leak-warn':
+          act('think', { text: tr('mascot.leakWarn') })
+          break
+        case 'leak-fail':
+          act('scared', { fx: 'sweat', body: 'm-shake', text: tr('mascot.leakFail'), ms: 2600 })
+          break
+        case 'smart-on':
+        case 'smart-off':
+          hopTo('smart', 2600)
+          act(kind === 'smart-on' ? 'wink' : 'think', { text: tr(kind === 'smart-on' ? 'mascot.smartOn' : 'mascot.smartOff') })
+          break
       }
     }
     window.addEventListener(MASCOT_EVENT, onEvent)
     return () => window.removeEventListener(MASCOT_EVENT, onEvent)
-  }, [say])
+  }, [say, act, hopTo])
 
   // Poking (mouse or keyboard)
   const pokes = useRef<number[]>([])
