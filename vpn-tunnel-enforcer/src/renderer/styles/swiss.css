@@ -1,0 +1,258 @@
+/* «Пломба» — Swiss redesign layer.
+ * Scoped to .c-swiss so the rest of the app keeps its existing theme tokens.
+ * Dark mode follows the app's [data-theme="dark"] attribute (see ThemeProvider).
+ * Fonts are bundled locally: CSP is font-src 'self', so no web-font CDN. */
+
+@font-face {
+  font-family: 'Inter Tight';
+  src: url('../assets/fonts/InterTight-Variable.ttf') format('truetype');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('../assets/fonts/JetBrainsMono-Variable.ttf') format('truetype');
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+.c-swiss {
+  --paper: #f2f0eb;
+  --ink: #111111;
+  --mute: #6b6862;
+  --rule: rgba(17, 17, 17, 0.14);
+  --rule-strong: rgba(17, 17, 17, 0.9);
+  --signal: #ff4f00;
+  --on-signal: #111111;
+  --on-rule: rgba(17, 17, 17, 0.22);
+  font-family: 'Inter Tight', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+[data-theme='dark'] .c-swiss {
+  --paper: #0d0d0c;
+  --ink: #edebe6;
+  --mute: #8d8a84;
+  --rule: rgba(237, 235, 230, 0.14);
+  --rule-strong: rgba(237, 235, 230, 0.85);
+  --signal: #ff5a1f;
+  --on-signal: #0d0d0c;
+  --on-rule: rgba(13, 13, 12, 0.28);
+}
+
+.c-swiss .swiss-mono,
+.swiss-mono {
+  font-family: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-feature-settings: 'zero' 1;
+}
+.c-swiss .swiss-label {
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mute);
+}
+
+/* ── Sidebar ─────────────────────────────────────────── */
+.swiss-sidebar { width: 200px; }
+.c-swiss .swiss-brand {
+  font-size: 22px;
+  font-weight: 900;
+  text-transform: uppercase;
+  line-height: 0.9;
+  letter-spacing: -0.03em;
+}
+.c-swiss .swiss-nav-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid var(--rule);
+  padding: 9px 0;
+  text-align: left;
+  color: var(--mute);
+  transition: color 0.15s;
+}
+.c-swiss .swiss-nav-item:hover,
+.c-swiss .swiss-nav-item[aria-current='page'] { color: var(--ink); }
+.c-swiss .swiss-nav-item:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+.c-swiss .swiss-nav-num { width: 20px; font-size: 10px; }
+.c-swiss .swiss-nav-item[aria-current='page'] .swiss-nav-num { color: var(--signal); }
+.c-swiss .swiss-nav-label { flex: 1; font-size: 14px; font-weight: 500; letter-spacing: -0.01em; transition: transform 0.2s; }
+.c-swiss .swiss-nav-item:hover .swiss-nav-label { transform: translateX(4px); }
+.c-swiss .swiss-nav-item[aria-current='page'] .swiss-nav-label { font-weight: 600; }
+.c-swiss .swiss-nav-mark { height: 8px; width: 0; background: var(--ink); transition: width 0.2s; }
+.c-swiss .swiss-nav-item:hover .swiss-nav-mark { width: 8px; }
+.c-swiss .swiss-nav-item[aria-current='page'] .swiss-nav-mark { width: 8px; background: var(--signal); }
+
+/* ── Dashboard status slab ───────────────────────────── */
+.swiss-slab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+}
+@media (max-width: 1100px) {
+  .swiss-slab { grid-template-columns: minmax(0, 1fr); }
+  .swiss-slab .swiss-slab-side { border-left: 0; border-top: 1px solid var(--rule); }
+}
+.swiss-slab-main {
+  position: relative;
+  display: flex;
+  min-height: 300px;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 16px;
+  overflow: hidden;
+  padding: 20px 24px;
+  transition: background-color 0.5s, color 0.5s;
+}
+.swiss-slab.is-on .swiss-slab-main { background: var(--signal); color: var(--on-signal); }
+.swiss-slab.is-on .swiss-slab-main .swiss-label { color: var(--on-signal); opacity: 0.7; }
+.swiss-slab.is-alert .swiss-slab-main { box-shadow: inset 0 0 0 3px var(--signal); }
+.swiss-slab-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border-left: 1px solid var(--rule);
+  padding: 20px;
+}
+.swiss-word-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; padding-top: 28px; }
+.swiss-word-wrap { min-width: 0; flex: 1; container-type: inline-size; }
+.c-swiss .swiss-word {
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: -0.055em;
+  line-height: 0.8;
+  white-space: nowrap;
+  user-select: none;
+}
+.swiss-home { width: 96px; height: 89px; flex-shrink: 0; margin-bottom: 4px; }
+.c-swiss .swiss-caption { font-size: 22px; font-weight: 600; line-height: 1.15; letter-spacing: -0.015em; }
+.swiss-stripes {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  opacity: 0.16;
+  background-image: repeating-linear-gradient(-45deg, var(--signal) 0 14px, transparent 14px 28px);
+  background-size: 40px 40px;
+  animation: swiss-stripes 0.8s linear infinite;
+}
+@keyframes swiss-stripes { to { background-position: 40px 0; } }
+
+.c-swiss .swiss-power {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 64px;
+  overflow: hidden;
+  border-radius: 0;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-align: left;
+}
+.c-swiss .swiss-power::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--signal);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+.c-swiss .swiss-power:hover:not(:disabled)::before { transform: scaleX(1); }
+.c-swiss .swiss-power:hover:not(:disabled) { color: var(--on-signal); }
+.c-swiss .swiss-power.is-on { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 2px var(--ink); }
+.c-swiss .swiss-power.is-busy,
+.c-swiss .swiss-power.is-cancel { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 2px var(--signal); }
+.c-swiss .swiss-power.is-wait { cursor: wait; }
+.c-swiss .swiss-power:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+.c-swiss .swiss-power-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 20px;
+}
+.c-swiss .swiss-chip { border-radius: 0; }
+
+/* ── Micro-motion ────────────────────────────────────── */
+.c-swiss .roll { display: inline-block; animation: swiss-roll 0.32s cubic-bezier(0.2, 0.9, 0.3, 1) both; }
+@keyframes swiss-roll { from { transform: translateY(-0.45em); opacity: 0; } to { transform: none; opacity: 1; } }
+.c-swiss .letter { display: inline-block; animation: swiss-letter 0.5s cubic-bezier(0.2, 0.9, 0.2, 1) both; }
+@keyframes swiss-letter { from { transform: translateY(0.35em) skewY(6deg); opacity: 0; } to { transform: none; opacity: 1; } }
+.c-swiss .blink { animation: swiss-blink 1s steps(2, start) infinite; }
+@keyframes swiss-blink { to { visibility: hidden; } }
+.c-swiss .bubble-in { animation: swiss-bubble 0.28s cubic-bezier(0.3, 1.5, 0.5, 1) both; transform-origin: bottom center; }
+@keyframes swiss-bubble { from { transform: scale(0.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+/* ── Mascot «Пломбик» ────────────────────────────────── */
+.c-swiss .m-eye { animation: m-eye-blink 4.6s infinite; transform-origin: center; }
+.c-swiss .m-eye.right { animation-delay: 0.04s; }
+@keyframes m-eye-blink { 0%, 94%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.08); } }
+.c-swiss .m-scan { animation: m-scan 1.1s ease-in-out infinite alternate; }
+@keyframes m-scan { from { transform: translateX(-4px); } to { transform: translateX(4px); } }
+.c-swiss .m-tag { animation: m-tag 2.4s ease-in-out infinite; transform-origin: bottom center; }
+@keyframes m-tag { 0%, 100% { transform: rotate(-8deg); } 50% { transform: rotate(8deg); } }
+.c-swiss .m-breathe { animation: m-breathe 3.2s ease-in-out infinite; transform-origin: bottom center; }
+.c-swiss .m-breathe-slow { animation: m-breathe 5s ease-in-out infinite; transform-origin: bottom center; }
+@keyframes m-breathe { 0%, 100% { transform: scale(1, 1); } 50% { transform: scale(1.015, 0.975); } }
+.c-swiss .m-bounce { animation: m-bounce 0.42s ease-in-out infinite alternate; }
+@keyframes m-bounce { from { transform: translateY(0); } to { transform: translateY(-6px); } }
+.c-swiss .m-jump { animation: m-jump 0.5s cubic-bezier(0.3, 1.6, 0.5, 1); }
+@keyframes m-jump {
+  0% { transform: translateY(0) scale(1, 1); }
+  25% { transform: translateY(2px) scale(1.08, 0.9); }
+  55% { transform: translateY(-14px) scale(0.95, 1.06); }
+  100% { transform: translateY(0) scale(1, 1); }
+}
+.c-swiss .m-shake { animation: m-shake 0.45s ease-in-out; }
+@keyframes m-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-5px) rotate(-3deg); }
+  40% { transform: translateX(5px) rotate(3deg); }
+  60% { transform: translateX(-3px) rotate(-2deg); }
+  80% { transform: translateX(3px) rotate(1deg); }
+}
+.c-swiss .m-spin { animation: m-spin 0.9s cubic-bezier(0.4, 1.4, 0.5, 1); }
+@keyframes m-spin { from { transform: rotate(0); } to { transform: rotate(720deg); } }
+.c-swiss .m-lean { animation: m-lean 1.4s ease-in-out; transform-origin: bottom center; }
+@keyframes m-lean { 0%, 100% { transform: rotate(0); } 25% { transform: rotate(-7deg); } 75% { transform: rotate(7deg); } }
+.c-swiss .m-startle { animation: m-startle 0.5s cubic-bezier(0.3, 1.8, 0.5, 1); }
+@keyframes m-startle { 0% { transform: none; } 30% { transform: translateY(-18px) scale(0.92, 1.12); } 100% { transform: none; } }
+.c-swiss .m-land { animation: m-land 0.35s cubic-bezier(0.3, 1.6, 0.5, 1); transform-origin: bottom center; }
+@keyframes m-land { 0% { transform: scale(1.18, 0.78); } 60% { transform: scale(0.95, 1.06); } 100% { transform: none; } }
+.c-swiss .m-orbit { animation: m-orbit 0.7s linear infinite; }
+@keyframes m-orbit { from { transform: rotate(0deg) translateX(3px) rotate(0deg); } to { transform: rotate(360deg) translateX(3px) rotate(-360deg); } }
+.c-swiss .m-tremble { animation: m-tremble 0.12s linear infinite; }
+@keyframes m-tremble { 0%, 100% { transform: translate(0, 0); } 33% { transform: translate(1px, -1px); } 66% { transform: translate(-1px, 1px); } }
+.c-swiss .m-confetti { animation: m-confetti 0.9s cubic-bezier(0.2, 0.8, 0.3, 1) both; }
+@keyframes m-confetti {
+  from { transform: translate(0, 0) rotate(0); opacity: 1; }
+  to { transform: translate(var(--dx), var(--dy)) rotate(var(--rot)); opacity: 0; }
+}
+.c-swiss .m-zzz { animation: m-zzz 2.4s ease-out infinite; opacity: 0; }
+@keyframes m-zzz { 0% { transform: translate(0, 0) scale(0.6); opacity: 0; } 20% { opacity: 1; } 100% { transform: translate(14px, -30px) scale(1.2); opacity: 0; } }
+.c-swiss .m-dot { animation: m-dot 1s steps(1) infinite; opacity: 0.2; }
+@keyframes m-dot { 0%, 100% { opacity: 0.2; } 33% { opacity: 1; } }
+.c-swiss .m-drop { animation: m-drop 1.2s ease-in infinite; }
+@keyframes m-drop { 0% { transform: translateY(0); opacity: 0; } 15% { opacity: 1; } 100% { transform: translateY(26px); opacity: 0; } }
+.c-swiss .m-speed { animation: m-speed 0.5s linear infinite; }
+@keyframes m-speed { from { transform: translateX(10px); opacity: 0; } 30% { opacity: 1; } to { transform: translateX(-24px); opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .c-swiss *, .c-swiss *::before, .c-swiss *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
