@@ -193,6 +193,7 @@ export function MascotStage({ phase, mascot }: { phase: MascotPhase; mascot: Mas
           phase={phase}
           view={airborne ? { ...view, mood: 'excited' } : view}
           onPoke={mascot.poke}
+          onPet={mascot.pet}
           label={mascot.name}
           landId={landId}
           onSignal={onSignal}
