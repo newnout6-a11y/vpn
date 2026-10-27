@@ -21,6 +21,12 @@
     "legacyCleanupRequired": "Stopping the old client's capture is not confirmed. Disconnect the VPN and close the old client normally before updating; new capture is blocked."
   },
   "dashboard": {
+    "routeCheckStart": "Checking the route — where traffic goes right now…",
+    "routeCheckOk": "No leaks found — everything goes through the VPN.",
+    "routeCheckFail": "Critical routing problem found.",
+    "routeCheckWarn": "There are routing warnings.",
+    "routeCheckResult": "Route check: {{message}}",
+    "routeCheckFailed": "Check failed: {{message}}",
     "swissSitesSee": "Exit IP",
     "swissRealAddress": "Real address",
     "swissNode": "Node",
