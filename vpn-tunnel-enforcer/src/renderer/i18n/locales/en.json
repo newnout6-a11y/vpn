@@ -92,6 +92,7 @@
     "scheduleAt": "{{action}} at {{time}} ({{until}})"
   },
   "sidebar": {
+    "platform": "win-x64",
     "dashboard": "Dashboard",
     "apps": "Applications",
     "servers": "Servers",
