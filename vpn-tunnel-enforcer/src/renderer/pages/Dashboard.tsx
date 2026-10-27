@@ -600,6 +600,10 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
       if (!(e.ctrlKey || e.metaKey) || e.key !== 'Enter' || e.repeat) return
       const target = e.target as HTMLElement | null
       if (target && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return
+      // A focused control keeps its own Ctrl+Enter (e.g. «Отмена» in the confirm), dialogs own the keyboard
+      if (target && target !== powerRef.current && target.closest('button, a, [role="dialog"], [aria-modal="true"]')) return
+      // The first-run wizard covers the dashboard: no VPN toggling underneath it
+      if (!useAppStore.getState().settings.firstRunComplete) return
       const button = powerRef.current
       if (!button || button.disabled) return
       e.preventDefault()
