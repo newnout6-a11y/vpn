@@ -36,10 +36,11 @@ export function SwissFactsStrip({ onCheckLeaks, checking }: Props) {
   const toggleSmart = async () => {
     const next = !smart
     setSavingSmart(true)
-    nudge(next ? 'smart-on' : 'smart-off')
     try {
       // Same persisted setting as the Settings page; applies on the next connect
       setSettings(await window.electronAPI.saveSettings({ smartRuSplit: next }))
+      // Only a saved change gets the mascot's comment
+      nudge(next ? 'smart-on' : 'smart-off')
     } catch (err) {
       addLog('error', t('swiss.smartSaveFailed') + ': ' + (isIpcRemoteErrorData(err) || err instanceof Error ? err.message : String(err)))
     } finally {
