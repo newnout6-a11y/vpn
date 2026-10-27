@@ -738,7 +738,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           <div className="swiss-word-row relative">
             <FitWord key={swissWord} text={swissWord} busyDot={swissBusy} />
             {/* The mascot's home perch; SwissMascot draws him on top of it */}
-            <div className="swiss-home" data-perch="home" data-perch-y="bottom" aria-hidden="true" />
+            <div className="swiss-home" data-perch="home" data-perch-y="bottom" data-perch-scale="0.8" aria-hidden="true" />
           </div>
           <div className="relative">
         {/* During cancellation the button shows the label; keep live status for screen readers. */}
