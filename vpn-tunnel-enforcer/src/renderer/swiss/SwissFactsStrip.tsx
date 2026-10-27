@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '../design-system/utils'
 import { useAppStore } from '../store'
+import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 import { MASCOT_EVENT, type MascotEvent } from './useMascot'
 
 interface Props {
@@ -40,7 +41,7 @@ export function SwissFactsStrip({ onCheckLeaks, checking }: Props) {
       // Same persisted setting as the Settings page; applies on the next connect
       setSettings(await window.electronAPI.saveSettings({ smartRuSplit: next }))
     } catch (err) {
-      addLog('error', t('swiss.smartSaveFailed') + ': ' + (err instanceof Error ? err.message : String(err)))
+      addLog('error', t('swiss.smartSaveFailed') + ': ' + (isIpcRemoteErrorData(err) || err instanceof Error ? err.message : String(err)))
     } finally {
       setSavingSmart(false)
     }
