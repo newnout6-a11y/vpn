@@ -739,3 +739,6 @@
 .c-swiss .swiss-toast.is-error .swiss-toast-title { color: var(--signal-ink); }
 .c-swiss .swiss-toast-close:hover { color: var(--signal-ink); }
 .c-swiss .swiss-notice-tag { color: var(--signal-ink); }
+
+/* Long adapter names wrap instead of being clipped */
+.c-swiss .swiss-notice-tag { min-width: 0; flex-shrink: 1; overflow-wrap: anywhere; }
