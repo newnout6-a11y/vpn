@@ -285,7 +285,9 @@ export function useMascot(input: MascotInput) {
     speech
   }
 
-  return { view, perch, poke }
+  const goHome = useCallback(() => hopTo('home'), [hopTo])
+
+  return { view, perch, goHome, poke }
 }
 
 export type MascotApi = ReturnType<typeof useMascot>
