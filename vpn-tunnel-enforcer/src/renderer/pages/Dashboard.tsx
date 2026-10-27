@@ -728,13 +728,8 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
       <section className={cn('c-swiss swiss-slab', swissOn && 'is-on', swissAlert && 'is-alert')}>
         <div className="swiss-slab-main">
           {swissBusy && <div className="swiss-stripes" aria-hidden="true" />}
-          <div className="swiss-head-row relative">
-            <h2 className="swiss-label">{t('dashboard.vpnToggle')}</h2>
-            <span className="swiss-kbd-row" aria-hidden="true">
-              <kbd className="swiss-kbd">Ctrl</kbd>
-              <kbd className="swiss-kbd">↵</kbd>
-            </span>
-          </div>
+          {/* Heading for screen readers; the slab itself carries no visible label */}
+          <h2 className="sr-only">{t('dashboard.vpnToggle')}</h2>
           <div className="swiss-word-row relative">
             <FitWord key={swissWord} text={swissWord} busyDot={swissBusy} />
             {/* The mascot's home perch; SwissMascot draws him on top of it */}
@@ -790,7 +785,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
             <div>
               <div className="swiss-label">{t('dashboard.swissRealAddress')}</div>
               <div className={cn('swiss-real', realHidden && Boolean(homeIp) && 'is-hidden')}>{homeIp ?? '—'}</div>
-              <div className={cn('swiss-sub', !realHidden && 'is-alert')}>{realHidden ? t('dashboard.swissHidden') : t('dashboard.swissExposedToAll')}</div>
+              {!realHidden && <div className="swiss-sub is-alert">{t('dashboard.swissExposedToAll')}</div>}
             </div>
             <div>
               <div className="swiss-label">{t('dashboard.swissNode')}</div>
