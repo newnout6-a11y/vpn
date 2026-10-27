@@ -31,7 +31,7 @@ export interface MascotInput {
   phase: MascotPhase
   /** Wall-clock ms the tunnel started, or null. */
   startedAt: number | null
-  /** Current download speed in Mbit/s. */
+  /** Download speed in Mbit/s, bucketed by the caller: 0 = idle or ordinary (nothing to say). */
   downMbps: number
 }
 
@@ -213,6 +213,24 @@ export function useMascot(input: MascotInput) {
     lastSpike.current = now
     act('excited', { fx: 'speed', text: tRef.current('mascot.speed', { mbps: downMbps.toFixed(0) }), ms: 2200 })
   }, [downMbps, phase, act])
+
+  // Slow connection: something is downloading (> 0.3) but stays under 3 Mbit/s
+  // for 30 s. Near-zero traffic means idle, not slow, so it doesn't count.
+  const slow = phase === 'on' && downMbps > 0 && downMbps < 3
+  const downRef = useRef(downMbps)
+  useEffect(() => {
+    downRef.current = downMbps
+  }, [downMbps])
+  const lastSlow = useRef(0)
+  useEffect(() => {
+    if (!slow) return
+    const id = window.setTimeout(() => {
+      if (Date.now() - lastSlow.current < 120000) return
+      lastSlow.current = Date.now()
+      act('think', { fx: 'dots', body: 'm-lean', text: tRef.current('mascot.slow', { mbps: downRef.current.toFixed(1) }), ms: 2600, textMs: 4500 })
+    }, 30000)
+    return () => window.clearTimeout(id)
+  }, [slow, act])
 
   // Back to the window (hook stays mounted while the window is hidden)
   useEffect(() => {
