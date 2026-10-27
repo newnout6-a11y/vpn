@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '../design-system/utils'
 import { useAppStore } from '../store'
+import { version as appVersion } from '../../../package.json'
 import '../styles/swiss.css'
 
 export type SidebarPage = 'dashboard' | 'apps' | 'servers' | 'speedtest' | 'availability' | 'trafficHistory' | 'schedule' | 'logs' | 'settings' | 'maintenance'
@@ -52,6 +53,10 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
         Tunnel
         <br />
         Enforcer
+      </div>
+      {/* Version comes from package.json, so it follows every release */}
+      <div className="swiss-mono mt-1.5 text-[10px] text-[var(--mute)]">
+        {'v' + appVersion + ' / ' + t('sidebar.platform', 'win-x64')}
       </div>
 
       <nav className="mt-10 flex flex-col">
