@@ -14,7 +14,7 @@ import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
 import { DashboardSide } from '../components/DashboardSide'
 import { usePageActive } from '../hooks/usePageActive'
 import { CountryFlagIcon } from '../components/CountryFlagIcon'
-import { Stagger } from '../swiss/motion'
+import { FitWord } from '../swiss/FitWord'
 import { SwissMascot, type SwissPhase } from '../swiss/SwissMascot'
 import { MASCOT_EVENT } from '../swiss/useMascot'
 import '../styles/swiss.css'
@@ -615,8 +615,6 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   // 'verify' = a live tunnel waiting for its IP check, not a transition: the mascot
   // must not treat a recheck as reconnecting.
   const swissPhase: SwissPhase = swissOn || swissState === 'verify' ? 'on' : swissAlert ? 'alert' : swissBusy ? 'connecting' : 'off'
-  // Sized to the column so the longest word always fits on one line
-  const swissWordSize = 'min(150px, ' + (100 / (0.62 * Math.max(4, swissWord.length))).toFixed(1) + 'cqw)'
   const nudgeMascot = (kind: 'hover-in' | 'hover-out') => {
     window.dispatchEvent(new CustomEvent(MASCOT_EVENT, { detail: kind }))
   }
@@ -738,12 +736,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           {swissBusy && <div className="swiss-stripes" aria-hidden="true" />}
           <h2 className="swiss-label relative">{t('dashboard.vpnToggle')}</h2>
           <div className="swiss-word-row relative">
-            <div className="swiss-word-wrap">
-              <div key={swissWord} className="swiss-word" style={{ fontSize: swissWordSize }} aria-hidden="true">
-                <Stagger text={swissWord} />
-                {swissBusy && <span className="blink">.</span>}
-              </div>
-            </div>
+            <FitWord key={swissWord} text={swissWord} busyDot={swissBusy} />
             {/* The mascot's home perch; SwissMascot draws him on top of it */}
             <div className="swiss-home" data-perch="home" data-perch-y="bottom" aria-hidden="true" />
           </div>
