@@ -18,6 +18,8 @@ vi.mock('../components/ExternalProxyCard', () => ({ ExternalProxyCard: () => nul
 vi.mock('../components/ProfileSelectorInline', () => ({ ProfileSelectorInline: () => null }))
 vi.mock('../components/ForeignVpnBanner', () => ({ ForeignVpnBanner: () => null }))
 vi.mock('../components/DashboardSide', () => ({ DashboardSide: () => null }))
+// The panel row (traffic · servers · journal) mirrors log lines; these tests assert toasts, not the journal.
+vi.mock('../swiss/SwissPanels', () => ({ SwissPanels: () => null }))
 vi.mock('../components/CountryFlagIcon', () => ({ CountryFlagIcon: () => null }))
 
 import { Dashboard } from './Dashboard'
