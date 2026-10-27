@@ -1,6 +1,6 @@
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
-import { AlertTriangle } from 'lucide-react'
+import '../styles/swiss.css'
 import { useForeignVpn, foreignVpnFriendlyName } from './useForeignVpn'
 
 /**
@@ -28,20 +28,18 @@ export function ForeignVpnBanner() {
           transition={{ duration: 0.2 }}
           className="overflow-hidden"
         >
-          <div className="flex items-start gap-2.5 rounded-[var(--radius-sm)] border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2.5 text-[var(--color-text)]">
-            <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0 text-[var(--color-warning)]" />
-            <div className="min-w-0 text-xs leading-relaxed">
-              <p className="font-medium">
-                {t('foreignVpn.title', 'Обнаружен другой VPN')}
-                {name ? `: ${name}` : ''}
-              </p>
-              <p className="text-[var(--color-text-secondary)] mt-0.5">
-                {t(
-                  'foreignVpn.body',
-                  'Пока он запущен, пинг ненадёжен — его адаптер перехватывает проверки и отвечает за все серверы (отсюда одинаковые ~1–40 мс). Полностью закройте другой VPN (выход из трея), чтобы увидеть реальные задержки.'
-                )}
-              </p>
-            </div>
+          {/* «Пломба» notice strip: orange bar, mono title, one or two lines of body */}
+          <div className="c-swiss swiss-notice" role="note">
+            <span className="swiss-label swiss-notice-tag">
+              {t('foreignVpn.title', 'Обнаружен другой VPN')}
+              {name ? ': ' + name : ''}
+            </span>
+            <p className="swiss-notice-body">
+              {t(
+                'foreignVpn.body',
+                'Пока он запущен, пинг ненадёжен — его адаптер перехватывает проверки и отвечает за все серверы (отсюда одинаковые ~1–40 мс). Полностью закройте другой VPN (выход из трея), чтобы увидеть реальные задержки.'
+              )}
+            </p>
           </div>
         </motion.div>
       )}
