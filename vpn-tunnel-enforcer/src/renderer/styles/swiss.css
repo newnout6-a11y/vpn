@@ -140,7 +140,7 @@
   border-left: 1px solid var(--rule);
   padding: 20px;
 }
-.swiss-word-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; padding-top: 28px; }
+.swiss-word-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding-top: 28px; }
 .swiss-word-wrap { min-width: 0; flex: 1; container-type: inline-size; }
 .c-swiss .swiss-word {
   font-weight: 900;
@@ -150,7 +150,8 @@
   white-space: nowrap;
   user-select: none;
 }
-.swiss-home { width: 96px; height: 89px; flex-shrink: 0; margin-bottom: 4px; }
+/* Mascot sits at 80% at home so he doesn't read as one more letter of the word */
+.swiss-home { width: 78px; height: 72px; flex-shrink: 0; margin-bottom: 4px; }
 .c-swiss .swiss-caption { font-size: 22px; font-weight: 600; line-height: 1.15; letter-spacing: -0.015em; }
 .swiss-stripes {
   pointer-events: none;
