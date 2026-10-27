@@ -775,7 +775,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           animate={isServerSwitching && !cancelling ? { scale: [1, 1.025, 1] } : { scale: 1 }}
           transition={isServerSwitching && !cancelling ? { duration: 1.2, repeat: Infinity, ease: 'easeInOut' } : { duration: 0.2 }}
           className={cn('swiss-power', cancelling ? 'is-cancel' : isServerSwitching ? 'is-busy' : isConnected && 'is-on', circleBusy && 'is-wait')}
-          title={hasConnectionResources ? t('dashboard.swissDisable', 'Снять защиту') : t('dashboard.swissEnable', 'Включить защиту')}
+          title={hasConnectionResources ? t('dashboard.swissDisable') : t('dashboard.swissEnable')}
           onMouseEnter={() => nudgeMascot('hover-in')}
           onMouseLeave={() => nudgeMascot('hover-out')}
           data-perch="toggle"
