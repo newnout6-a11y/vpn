@@ -218,7 +218,7 @@ function Bubble({ speech, pos }: { speech: NonNullable<Speech>; pos: Pt }) {
       aria-hidden="true"
       style={{ left: pos.x, top: below ? pos.y + 12 : head - 14, transform: 'translate(-' + k + '%, ' + (below ? '0' : '-100%') + ')' }}
     >
-      <div className="bubble-in swiss-mono relative w-max max-w-[230px] border-2 border-[var(--ink)] bg-[var(--paper)] px-2.5 py-1.5 text-[11px] leading-snug text-[var(--ink)]">
+      <div className="bubble-in swiss-mono relative w-max max-w-56 border-2 border-[var(--ink)] bg-[var(--paper)] px-2.5 py-1.5 text-[11px] leading-snug text-[var(--ink)]">
         {speech.text}
         <span
           className={cn(
