@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { cn } from '../design-system/utils'
 import { useAppStore } from '../store'
 import '../styles/swiss.css'
 
@@ -78,14 +79,12 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
       <div className="mt-auto flex items-center gap-2 border-t border-[var(--rule)] pt-3" data-perch="clock" data-perch-x="0.55" data-perch-scale="0.5">
         <span
           aria-hidden="true"
-          className={
-            'h-2.5 w-2.5 shrink-0 ' +
-            (connectionStatus === 'connected'
-              ? 'bg-[var(--signal)]'
-              : connectionStatus === 'connecting'
-                ? 'blink bg-[var(--signal)]'
-                : 'border-2 border-[var(--ink)]')
-          }
+          className={cn(
+            'h-2.5 w-2.5 shrink-0',
+            connectionStatus === 'connected' && 'bg-[var(--signal)]',
+            connectionStatus === 'connecting' && 'blink bg-[var(--signal)]',
+            connectionStatus === 'disconnected' && 'border-2 border-[var(--ink)]'
+          )}
         />
         <span className="swiss-mono min-w-0 truncate text-[11px] font-bold uppercase tracking-[0.06em]">{statusLabels[connectionStatus]}</span>
         <span className="swiss-mono ml-auto text-[11px] text-[var(--mute)]">
