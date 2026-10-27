@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { cn } from '../design-system/utils'
 import type { Fx, MascotPhase, MascotView, Mood } from './useMascot'
 
 /** «Пломбик» — the seal-mascot, built from plain squares. */
@@ -7,6 +8,8 @@ interface Props {
   phase: MascotPhase
   view: MascotView
   onPoke: () => void
+  /** Translated accessible name. */
+  label: string
   /** True while sitting on the orange slab: black body + orange eyes. */
   onSignal: boolean
 }
@@ -49,7 +52,7 @@ const FACES: Record<Mood, Face> = {
 
 const LOOP: Partial<Record<Mood, string>> = { calm: 'm-breathe', sleep: 'm-breathe-slow', excited: 'm-bounce' }
 
-export function Mascot({ phase, view, onPoke, onSignal }: Props) {
+export function Mascot({ phase, view, onPoke, label, onSignal }: Props) {
   const bodyRef = useRef<HTMLDivElement>(null)
   const [look, setLook] = useState({ x: 0, y: 0 })
 
@@ -87,11 +90,10 @@ export function Mascot({ phase, view, onPoke, onSignal }: Props) {
       <div key={'body-' + view.bodyId} className={view.body}>
         <button
           type="button"
-          tabIndex={-1}
           onClick={onPoke}
-          aria-label="Пломбик"
-          title="Пломбик"
-          className={'relative mx-auto block ' + (LOOP[view.mood] ?? '')}
+          aria-label={label}
+          title={label}
+          className={cn('relative mx-auto block focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[var(--signal)]', LOOP[view.mood])}
         >
           <Effects fx={view.fx} fxId={view.fxId} body={body} eye={eye} onSignal={onSignal} />
 
@@ -101,14 +103,14 @@ export function Mascot({ phase, view, onPoke, onSignal }: Props) {
             <span className="h-3 w-[2px]" style={{ background: body }} />
           </span>
 
-          <div ref={bodyRef} className="relative h-[80px] w-[80px] transition-colors duration-300" style={{ background: body }}>
+          <div ref={bodyRef} className="relative h-[80px] w-[80px] transition-[background-color] duration-300" style={{ background: body }}>
             <div className="absolute left-0 right-0 top-[22px] flex h-6 items-center justify-center gap-3">
               {eyes.map((e, i) => (
                 <EyeView key={i} spec={e} eye={eye} body={body} look={look} side={i === 0 ? 'left' : 'right'} />
               ))}
             </div>
             <span className="absolute bottom-[14px] left-1/2 -ml-[13px] flex w-[26px] justify-center" aria-hidden="true">
-              <span className="block transition-all duration-200" style={face.mouth(eye)} />
+              <span className="block transition-[width,height,background-color,transform] duration-200" style={face.mouth(eye)} />
             </span>
           </div>
 
@@ -136,7 +138,7 @@ function EyeView({ spec, eye, body, look, side }: { spec: Eye; eye: string; body
     : free ? 'translate(' + look.x + 'px, ' + look.y + 'px)' : undefined
   return (
     <span
-      className={(spec.blink ? 'm-eye ' + side + ' ' : '') + 'flex items-center justify-center overflow-hidden transition-all duration-200'}
+      className={cn(spec.blink && 'm-eye ' + side, 'flex items-center justify-center overflow-hidden transition-[width,height,background-color,transform] duration-200')}
       style={{ background: eye, width: spec.w, height: spec.h, transform: spec.dy ? 'translateY(' + spec.dy + 'px)' : undefined }}
     >
       {spec.pupil > 0 && (
