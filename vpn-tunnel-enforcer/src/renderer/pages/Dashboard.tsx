@@ -12,6 +12,8 @@ import { FitWord } from '../swiss/FitWord'
 import { SwissFactsStrip } from '../swiss/SwissFactsStrip'
 import { SwissProgress } from '../swiss/SwissProgress'
 import { SwissPanels } from '../swiss/SwissPanels'
+import { BrowserIpCard } from '../components/BrowserIpCard'
+import { ExternalProxyCard } from '../components/ExternalProxyCard'
 import { deriveSwissState } from '../swiss/swissState'
 import { useActiveProfile, useHomeIp } from '../swiss/SwissIdentity'
 import { SwissMascot, type SwissPhase } from '../swiss/SwissMascot'
@@ -921,6 +923,12 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
 
       {/* Traffic · servers · journal: the panel row under the slab */}
       <SwissPanels />
+
+      {/* Browser check · external proxies: the second panel row */}
+      <div className="c-swiss swiss-panels swiss-panels-2">
+        <BrowserIpCard />
+        <ExternalProxyCard />
+      </div>
       </div>
     </div>
   )
