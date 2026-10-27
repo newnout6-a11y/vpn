@@ -12,8 +12,8 @@ import { useTranslation } from 'react-i18next'
 export type MascotPhase = 'on' | 'off' | 'connecting' | 'alert'
 export type Mood =
   | 'calm' | 'worried' | 'scan' | 'happy' | 'love' | 'squint'
-  | 'think' | 'dizzy' | 'wink' | 'excited' | 'sleep' | 'scared'
-export type Fx = 'confetti' | 'zzz' | 'dots' | 'sweat' | 'speed' | null
+  | 'think' | 'dizzy' | 'wink' | 'excited' | 'sleep' | 'scared' | 'petted'
+export type Fx = 'confetti' | 'zzz' | 'dots' | 'sweat' | 'speed' | 'hearts' | null
 export type BodyAnim = 'm-jump' | 'm-shake' | 'm-spin' | 'm-lean' | 'm-startle' | ''
 export type Speech = { id: number; text: string; announce: boolean } | null
 
@@ -45,8 +45,10 @@ const IDLE_MS = 30000
 const EXPOSED_NAG_MS = 20000
 
 /** How many numbered variants each line family has in the locale files (mascot.<family><n>). */
-const VARIANTS = { connected: 3, pokeOn: 5, pokeOff: 3, wink: 2, startle: 3 } as const
+const VARIANTS = { connected: 3, pokeOn: 5, pokeOff: 3, wink: 2, startle: 3, pet: 4 } as const
 type Family = keyof typeof VARIANTS
+
+const PET_ENOUGH_MS = 6000
 
 const WANDER: Array<[string, Mood, string]> = [
   ['toggle', 'happy', 'mascot.wanderToggle'],
@@ -75,6 +77,7 @@ export function useMascot(input: MascotInput) {
   const [fxId, setFxId] = useState(0)
   const [body, setBody] = useState<{ name: BodyAnim; id: number }>({ name: '', id: 0 })
   const [sleeping, setSleeping] = useState(false)
+  const [petting, setPetting] = useState(false)
   const [perch, setPerch] = useState('home')
   const timers = useRef<Record<string, number>>({})
   const seq = useRef(0)
@@ -135,13 +138,15 @@ export function useMascot(input: MascotInput) {
       sleepingRef.current = true
       setSleeping(true)
     }
-    const onActivity = () => {
+    const onActivity = (e: Event) => {
       window.clearTimeout(idle)
       idle = window.setTimeout(goSleep, IDLE_MS)
       if (sleepingRef.current) {
         sleepingRef.current = false
         setSleeping(false)
-        act('scared', { body: 'm-startle', text: line('startle'), ms: 1200 })
+        // Woken by a stroke: wake gently, the petting reaction takes over
+        const onMascot = e.target instanceof Element && e.target.closest('[data-mascot]')
+        if (!onMascot) act('scared', { body: 'm-startle', text: line('startle'), ms: 1200 })
       }
     }
     const events = ['mousemove', 'mousedown', 'keydown', 'wheel'] as const
@@ -318,19 +323,47 @@ export function useMascot(input: MascotInput) {
     act(uneasy ? 'worried' : 'happy', { body: 'm-jump', text: line(uneasy ? 'pokeOff' : 'pokeOn'), ms: 1200, announce: true })
   }, [act, line])
 
+  // Petting: pointer strokes over him (stroke detection lives in Mascot)
+  const petStart = useRef(0)
+  const lastPetLine = useRef(0)
+  const petCooldown = useRef(0)
+  const pet = useCallback(() => {
+    const now = Date.now()
+    if (now < petCooldown.current) return
+    if (!petStart.current) petStart.current = now
+    if (now - petStart.current > PET_ENOUGH_MS) {
+      petStart.current = 0
+      petCooldown.current = now + 3000
+      setPetting(false)
+      act('squint', { text: tRef.current('mascot.petEnough'), ms: 1600, announce: true })
+      return
+    }
+    setEmote(null)
+    setPetting(true)
+    if (now - lastPetLine.current > 3500) {
+      lastPetLine.current = now
+      say(line('pet'), 1800, true)
+    }
+    // Stops being petted shortly after the strokes stop
+    later('pet', () => {
+      setPetting(false)
+      petStart.current = 0
+    }, 800)
+  }, [act, say, later, line])
+
   const goHome = useCallback(() => hopTo('home'), [hopTo])
 
   const base: Mood = sleeping ? 'sleep' : phase === 'on' ? 'calm' : phase === 'connecting' ? 'scan' : 'worried'
   const view: MascotView = {
-    mood: emote?.mood ?? hoverMood ?? base,
-    fx: emote?.fx ?? (sleeping ? 'zzz' : null),
+    mood: emote?.mood ?? (petting ? 'petted' : hoverMood ?? base),
+    fx: emote?.fx ?? (petting ? 'hearts' : sleeping ? 'zzz' : null),
     fxId,
     body: body.name,
     bodyId: body.id,
     speech
   }
 
-  return { view, perch, goHome, poke, name: t('mascot.name') }
+  return { view, perch, goHome, poke, pet, name: t('mascot.name') }
 }
 
 export type MascotApi = ReturnType<typeof useMascot>
