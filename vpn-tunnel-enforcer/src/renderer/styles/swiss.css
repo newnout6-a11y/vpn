@@ -688,3 +688,32 @@
   .swiss-word-row { padding-top: 28px; }
   .c-swiss .swiss-slab-side .swiss-power { height: 60px; }
 }
+
+/* Notice strip (ForeignVpnBanner) */
+.swiss-notice {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  padding: 10px 16px 10px 20px;
+  color: var(--ink);
+}
+.swiss-notice::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--signal); }
+.c-swiss .swiss-notice-tag { flex-shrink: 0; color: var(--signal); }
+.c-swiss .swiss-notice-body { min-width: 0; flex: 1 1 320px; font-size: 12px; line-height: 1.45; color: var(--mute); }
+
+/* Short windows (the default 720px-tall window): everything above the fold */
+@media (max-height: 820px) {
+  .swiss-slab-main { padding: 16px 24px; }
+  .swiss-identity { gap: 12px; padding: 16px 20px; }
+  .c-swiss .swiss-ip { font-size: 20px; }
+  .c-swiss .swiss-real,
+  .c-swiss .swiss-node { font-size: 14px; }
+  .swiss-panel-body { max-height: 180px; }
+  .c-swiss .swiss-traffic-big { font-size: 40px; }
+  .swiss-traffic-figures { padding-top: 12px; }
+  .swiss-bars { height: 56px; padding: 12px 20px; }
+}
