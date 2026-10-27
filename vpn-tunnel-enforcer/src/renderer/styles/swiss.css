@@ -28,7 +28,7 @@
   --on-signal: #111111;
   --on-rule: rgba(17, 17, 17, 0.22);
   font-family: 'Inter Tight', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
-  -webkit-font-smoothing: antialiased;
+  @apply antialiased;
 }
 [data-theme='dark'] .c-swiss {
   --paper: #0d0d0c;
@@ -131,7 +131,8 @@
   transition: background-color 0.5s, color 0.5s;
 }
 .swiss-slab.is-on .swiss-slab-main { background: var(--signal); color: var(--on-signal); }
-.swiss-slab.is-on .swiss-slab-main .swiss-label { color: var(--on-signal); opacity: 0.7; }
+/* Full opacity: 10px labels need it to keep WCAG AA contrast on the orange slab */
+.swiss-slab.is-on .swiss-slab-main .swiss-label { color: var(--on-signal); opacity: 1; }
 .swiss-slab.is-alert .swiss-slab-main { box-shadow: inset 0 0 0 3px var(--signal); }
 .swiss-slab-side {
   display: flex;
