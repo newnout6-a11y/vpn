@@ -3,7 +3,8 @@
 //
 // Every operation returns data in the same shape the corresponding PowerShell script produced, or THROWS. A throw
 // means "no answer"; callers fall back to PowerShell and never treat it as an empty (= "clean") result.
-import { readRawAdapters, readRawIfConfigs, readRawRoutes } from './ipHelperReads'
+import { readRawAdapters, readRawIfConfigs, readRawRoutes, readTrafficCounters } from './ipHelperReads'
+import { validateTrafficAdapterName } from './trafficCounters'
 import { toActiveTunnels, toAdapterRows, toIpConfigRows, toPhysicalIpv4Sources, toRouteRows } from './ipHelperTransforms'
 import { createKoffiSource, snapshotFromSource } from './physicalAdapterCore'
 import { notifyWinInetInProcess } from './winInetCore'
@@ -32,6 +33,9 @@ export async function runNativeOp(op: HostOp, args: unknown): Promise<unknown> {
   if (process.platform !== 'win32') throw new Error('native network reads are Windows-only')
   const a = (args ?? {}) as Record<string, unknown>
   switch (op) {
+    case 'traffic-counters':
+      if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(a).length !== 1) throw new Error('traffic counters: adapter name is required')
+      return readTrafficCounters(validateTrafficAdapterName(a.adapterName))
     case 'adapters':
       return toAdapterRows(readRawAdapters())
     case 'ipconfig':

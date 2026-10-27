@@ -3,6 +3,7 @@ export type { AppSettings } from '../shared/settings'
 import { app, dialog } from 'electron'
 import Store from './versionedStore'
 import { join } from 'path'
+import { isDeepStrictEqual } from 'node:util'
 import { execElevated } from './admin'
 import { domainEnrichmentService } from './domainEnrichment'
 import { readBootRecoveryReport } from './recoveryManifest'
@@ -381,6 +382,7 @@ export const settingsStore = {
   save(partial: Partial<AppSettings>): AppSettings {
     const previous = normalizeSettings(readSettingsWithMigration())
     const settings = normalizeSettings({ ...previous, ...partial })
+    if (isDeepStrictEqual(settings, previous)) return previous
     persistSettings(settings)
     if (!settings.domainEnrichmentEnabled && previous.domainEnrichmentEnabled) {
       domainEnrichmentService.setEnabled(false)

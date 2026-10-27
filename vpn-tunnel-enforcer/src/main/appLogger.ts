@@ -8,7 +8,7 @@ import { join } from 'path'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { directoryExists, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { redactSensitiveConfig, redactSensitiveText } from './vpnProfiles'
-import { watchEngineLogs } from './engineLogRetention'
+import { ENGINE_LOG_STEMS, watchEngineLogs } from './engineLogRetention'
 import { currentActionMetadata, currentCorrelationId } from './actionCorrelation'
 import { eventClockId, monotonicTimeMs } from './eventClock'
 import { inspectAuditLog } from './auditLogIntegrity'
@@ -372,10 +372,7 @@ export async function getFullLogs(): Promise<LogFileSnapshot[]> {
   const files = [
     getAppLogPath(),
     getAppLogPrevPath(),
-    join(getTunLogDir(), 'sing-box.log'),
-    join(getTunLogDir(), 'sing-box.prev.log'),
-    join(getTunLogDir(), 'xray.log'),
-    join(getTunLogDir(), 'xray.prev.log'),
+    ...ENGINE_LOG_STEMS.flatMap(name => [join(getTunLogDir(), `${name}.log`), join(getTunLogDir(), `${name}.prev.log`)]),
     join(getTunLogDir(), 'sing-box.json')
   ]
   const snapshots = await Promise.all(files.map(file => readTail(file)))
@@ -400,12 +397,10 @@ export async function clearAppLog(): Promise<DiagnosticClearReport> {
       const targets: Array<{ artifact: DiagnosticArtifact; path: string; remove?: boolean }> = [
         { artifact: 'app-log', path: getAppLogPath() },
         { artifact: 'app-previous-log', path: getAppLogPrevPath(), remove: true },
-        ...(hasTunLogs ? [
-          { artifact: 'sing-box-log' as const, path: join(tunLogDir, 'sing-box.log') },
-          { artifact: 'sing-box-previous-log' as const, path: join(tunLogDir, 'sing-box.prev.log'), remove: true },
-          { artifact: 'xray-log' as const, path: join(tunLogDir, 'xray.log') },
-          { artifact: 'xray-previous-log' as const, path: join(tunLogDir, 'xray.prev.log'), remove: true }
-        ] : [])
+        ...(hasTunLogs ? ENGINE_LOG_STEMS.flatMap(name => [
+          { artifact: `${name}-log` as const, path: join(tunLogDir, `${name}.log`) },
+          { artifact: `${name}-previous-log` as const, path: join(tunLogDir, `${name}.prev.log`), remove: true }
+        ]) : [])
       ]
       const results = await Promise.allSettled(targets.map(async target => {
         try {

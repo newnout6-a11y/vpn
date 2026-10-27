@@ -107,7 +107,7 @@ interface SingboxConfig {
   inbounds: Array<Record<string, any>>
   outbounds: Array<Record<string, any>>
   route: { rules: Array<Record<string, any>>; final: string }
-  experimental: { clash_api: { external_controller: string } }
+  experimental: { clash_api: { external_controller: string }; cache_file: { enabled: boolean } }
 }
 
 function gen(
@@ -769,9 +769,8 @@ describe('generateSingboxConfig smart RU split', () => {
     expect(cfg.route.rules.some((r: any) => r.rule_set)).toBe(false)
   })
 
-  it('always enables cache_file for the DNS answer cache (perf, even w/o smart-RU)', () => {
-    // cache_file is now always-on: persisting the DNS cache across restarts is
-    // what kills the cold-start DNS storm. Previously gated on smart-RU.
+  it('keeps the legacy cache with or without Smart RU', () => {
+    // Legacy configurations retain their cache across restarts.
     const off = genSmart({})
     expect(off.experimental.cache_file?.enabled).toBe(true)
     const on = genSmart({ smartRuSplit: true })
@@ -956,6 +955,80 @@ describe('generateSingboxConfig with xraySocksPort', () => {
       server_port: 10808,
       udp_fragment: true
     })
+  })
+})
+
+// AT-00-007 / AT-02-002: switching userspace upstreams retains one protected TUN.
+describe('authenticated Xray selector configuration', () => {
+  const slots = () => ({
+    a: { port: 25551, username: 'fixture-a', password: 'SYNTHETIC-a' },
+    b: { port: 25552, username: 'fixture-b', password: 'SYNTHETIC-b' }
+  })
+  const options = () => ({ xraySocksPort: 25551, xraySwitchSlots: slots(),
+    clashPortOverride: 25553, directProxyPortOverride: 25554, tunnelProbePortOverride: 25555 })
+  const generate = (outbound = realityOutbound) => generateSingboxConfig({ outbound }, 'socks5', [], options()) as SingboxConfig
+
+  it('never restores a previous session slot before the initial authenticated selection (AT-02-002)', () => {
+    expect(generate().experimental.cache_file.enabled).toBe(false)
+    const legacy = generateSingboxConfig({ outbound: realityOutbound }, 'socks5', [], { xraySocksPort: 25551 }) as SingboxConfig
+    expect(legacy.experimental.cache_file.enabled).toBe(true)
+  })
+
+  it('routes DNS, diagnostics and application traffic through the authenticated selector', () => {
+    const cfg = generate()
+    expect(cfg.inbounds.filter(inbound => inbound.type === 'tun')).toHaveLength(1)
+    expect(cfg.outbounds.find(outbound => outbound.tag === 'proxy-out')).toEqual({
+      type: 'selector', tag: 'proxy-out', outbounds: ['vpnte-upstream-a', 'vpnte-upstream-b'],
+      default: 'vpnte-upstream-a', interrupt_exist_connections: true
+    })
+    for (const slot of ['a', 'b'] as const) expect(cfg.outbounds.find(outbound => outbound.tag === `vpnte-upstream-${slot}`))
+      .toMatchObject({ type: 'socks', version: '5', server: '127.0.0.1', server_port: slots()[slot].port,
+        username: slots()[slot].username, password: slots()[slot].password, udp_fragment: true })
+    expect(cfg.route.final).toBe('proxy-out')
+    expect(cfg.route.rules).toContainEqual({ inbound: 'live-check-in', outbound: 'proxy-out' })
+    expect(cfg.dns.servers.filter(server => server.tag.startsWith('dns-remote')))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ detour: 'proxy-out' })]))
+  })
+
+  it('retains TCP-only and UDP/443 rejection rules from the actual remote profile', () => {
+    const cfg = generate({ ...realityOutbound, network: 'tcp' })
+    expect(cfg.route.rules).toContainEqual({ network: 'udp', port: 443, action: 'reject', method: 'default' })
+    expect(cfg.route.rules).toContainEqual({ network: 'udp', action: 'reject', method: 'drop' })
+  })
+
+  it('keeps ordinary endpoint traffic inside TUN while the managed Xray process uses the physical path', () => {
+    const cfg = generate({ ...realityOutbound, server: '185.100.100.1' })
+    expect(cfg.inbounds.find(inbound => inbound.type === 'tun')?.route_exclude_address ?? []).not.toContain('185.100.100.1/32')
+    expect(cfg.route.rules).toContainEqual(expect.objectContaining({
+      process_name: expect.arrayContaining(['vpnte-xray.exe']), outbound: 'direct-out'
+    }))
+    expect(cfg.route).toMatchObject({ auto_detect_interface: true, final: 'proxy-out' })
+  })
+
+  it.each(['duplicate-port', 'empty-user', 'oversized-password', 'mismatched-active-port'] as const)('refuses %s', invalid => {
+    const value = options()
+    if (invalid === 'duplicate-port') value.xraySwitchSlots.b.port = value.xraySwitchSlots.a.port
+    if (invalid === 'empty-user') value.xraySwitchSlots.b.username = ''
+    if (invalid === 'oversized-password') value.xraySwitchSlots.b.password = 'x'.repeat(256)
+    if (invalid === 'mismatched-active-port') value.xraySocksPort++
+    expect(() => generateSingboxConfig({ outbound: realityOutbound }, 'socks5', [], value)).toThrow('Invalid authenticated')
+  })
+
+  it('refuses upstream slots for local proxy mode', () => {
+    expect(() => generateSingboxConfig('127.0.0.1:1080', 'socks5', [], options())).toThrow('Invalid authenticated')
+  })
+
+  it.runIf(process.platform === 'win32')('passes bundled sing-box config validation without starting a tunnel', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vpnte-selector-check-'))
+    try {
+      const file = join(dir, 'config.json')
+      writeFileSync(file, JSON.stringify(generate()))
+      expect(() => execFileSync(resolve('resources/sing-box.exe'), ['check', '-c', file],
+        { windowsHide: true, stdio: 'pipe', timeout: 15000 })).not.toThrow()
+    } finally {
+      if (dirname(resolve(dir)) !== resolve(tmpdir())) throw new Error('Unsafe cleanup target')
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

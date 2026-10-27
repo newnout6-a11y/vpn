@@ -7,7 +7,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 it('normalizes mapped form of expected public IPv4', () => {
   const result = summarize({ browserIpv4: '8.8.8.8', browserIpv6: null, nodeIp: '8.8.8.8',
     webRtcCandidates: [{ address: '::ffff:8.8.8.8', type: 'srflx', protocol: 'udp' }], webRtcError: null, tunRunning: true })
-  expect(result.summary).toBe('ok')
+  expect(result.summary).toBe('info')
   expect(result.details.some(d => d.includes('другие публичные'))).toBe(false)
 })
 it('recognizes alternative valid compressed IPv4-mapped representation', () => {

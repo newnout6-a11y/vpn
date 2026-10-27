@@ -11,6 +11,7 @@ import { execElevatedPs } from './elevatedPsHelper'
 import { logEvent } from './appLogger'
 import { SECURITY_MODULE_IMPORT_LINE, SID_ADMINISTRATORS, ALLOWED_SIDS, ANCESTOR_SIDS, ARTIFACT_WRITE_MASK, NAMESPACE_WRITE_MASK, POLICY_FAILURE, RUNTIME_TREE_HELPERS, knownFolderCheck, buildInspectScript } from './runtimeAclInspection'
 import { executeRecoveryOperation } from './recoveryPsWorker'
+import { withRuntimeDirectoryInspection, withRuntimeDirectoryMutation } from './runtimeFileCoordination'
 
 const execFile = promisify(execFileCb)
 export interface DirectoryHardeningResult {
@@ -224,6 +225,10 @@ function findOffenders(snapshot: AclSnapshot, ancestor = false): string[] {
 }
 function normalize(path: string): string { return win32.resolve(path).toLowerCase() }
 export async function verifyDirectoryHardened(dir: string): Promise<DirectoryHardeningResult> {
+  return withRuntimeDirectoryInspection(dir, () => inspectDirectoryHardened(dir))
+}
+
+async function inspectDirectoryHardened(dir: string): Promise<DirectoryHardeningResult> {
   if (process.platform !== 'win32') return { hardened: true, skipped: true, message: 'ACL hardening не применяется (не Windows)' }
   try {
     const snapshot = parseAclSnapshot(await inspectRuntimeAcl(dir))
@@ -274,12 +279,21 @@ const hardenedDirs = new Map<string, Promise<DirectoryHardeningResult>>()
 async function hardenOnce(dir: string, label: string): Promise<DirectoryHardeningResult> {
   const before = await verifyDirectoryHardened(dir)
   if (before.hardened) return before
+  // Record the bounded cause even if bootstrap/readback later succeeds. Paths,
+  // SIDs, offending ACEs and arbitrary PowerShell messages are excluded here.
+  logEvent('debug', 'runtime-acl', 'runtime inspection refused before bootstrap', {
+    refusalCode: before.refusalCode ?? 'inspection-failed',
+    operation: before.diagnostic?.operation ?? 'validate-acl',
+    reason: before.diagnostic?.reason ?? 'SnapshotRejected',
+    errorType: before.diagnostic?.errorType ?? 'SnapshotError',
+    ...(before.diagnostic?.hresult === undefined ? {} : { hresult: before.diagnostic.hresult })
+  })
   if (!await isProcessElevated()) {
     logEvent('error', 'runtime-acl', `${label}: runtime elevation required`, { dir, before })
     return { hardened: false, message: 'нет прав администратора для создания доверенного runtime' }
   }
   try {
-    const stdout = await runPowerShell(buildHelperBootstrapScript(dir), true, 60000)
+    const stdout = await withRuntimeDirectoryMutation(dir, () => runPowerShell(buildHelperBootstrapScript(dir), true, 60000))
     if (!stdout.split(/\r?\n/).includes('HARDENED')) throw new Error('Missing runtime bootstrap confirmation')
   } catch (error: unknown) {
     const diagnostic = failureDiagnostic(error)

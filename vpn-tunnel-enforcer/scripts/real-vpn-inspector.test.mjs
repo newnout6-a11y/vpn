@@ -51,6 +51,8 @@ test('real Electron context, PID binding, concurrent calls and safe transport er
   await assert.rejects(connectInspector(port, child.pid + 1, 5000), /another process/)
   const inspector = await connectInspector(port, child.pid, 5000)
   t.after(() => inspector.close())
+  // The inspector may accept connections before Electron can create windows.
+  await inspector.evaluate('__realVpnElectron.app.whenReady().then(()=>true)')
   assert.deepEqual(await Promise.all([inspector.evaluate('Promise.resolve(7)'), inspector.evaluate('Promise.resolve(8)')]), [7, 8])
   assert.equal(await inspector.evaluate('__realVpnElectron.BrowserWindow.getAllWindows().length'), 0)
   assert.equal(await inspector.renderer('true'), null, 'No window is not a ready preload')

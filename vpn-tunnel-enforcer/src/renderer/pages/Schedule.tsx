@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { usePageActive } from '../hooks/usePageActive'
 import { useTranslation } from 'react-i18next'
 import { Calendar, Plus, Trash2, Edit2, Clock, Play, Square } from 'lucide-react'
 import { useAppStore } from '../store'
@@ -74,6 +75,7 @@ function getDayAbbreviations(days: number[], t: (key: string) => string): string
  * for scheduled VPN connections.
  */
 export function Schedule() {
+  const active = usePageActive()
   const { t } = useTranslation()
   const [schedules, setSchedules] = useState<ScheduleEntry[]>([])
   const [nextEvent, setNextEvent] = useState<NextEvent | null>(null)
@@ -119,12 +121,13 @@ export function Schedule() {
   }, [])
 
   useEffect(() => {
+    if (!active) return
     fetchSchedules()
     fetchNextEvent()
     fetchProfiles()
     const interval = setInterval(fetchNextEvent, 30_000)
     return () => clearInterval(interval)
-  }, [fetchSchedules, fetchNextEvent, fetchProfiles])
+  }, [active, fetchSchedules, fetchNextEvent, fetchProfiles])
 
   const handleCreate = async () => {
     try {

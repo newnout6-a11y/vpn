@@ -24,7 +24,7 @@ vi.mock('./networkFailureDiagnostics', async () => ({
   ...await vi.importActual<typeof import('./networkFailureDiagnostics')>('./networkFailureDiagnostics'),
   collectTunnelFailureDiagnostics: (...args: any[]) => diagnostics(...args)
 }))
-vi.mock('./xrayEngine', () => ({ getXrayStatus: () => ({ running: true, startedAt: 1000, socksPort: 50123 }), getXrayDialTarget: () => ({ host: '192.0.2.1', port: 443 }) }))
+vi.mock('./xrayEngine', () => ({ getXrayStatus: () => ({ running: true, startedAt: 1000, socksPort: 50123 }), getActiveXraySlot: () => 'b', getXrayDialTarget: () => ({ host: '192.0.2.1', port: 443 }) }))
 
 vi.mock('electron', () => ({
   app: { getPath: () => '/tmp/vpnte-test', getAppPath: () => '/tmp/vpnte-test' },
@@ -54,6 +54,7 @@ vi.mock('./tunController', () => ({
     })
   },
   getDirectProxyPort: () => null,
+  getActiveXraySocksEndpoint: () => ({ port: 50123, username: 'FIXTURE_SLOT_USER', password: 'FIXTURE_SLOT_SECRET' }),
   getTunRuntimeDir: () => '/tmp/vpnte-test'
 }))
 vi.mock('./serverGroups', () => ({
@@ -105,13 +106,15 @@ describe('tunnelHttpProbe egress validation', () => {
     const { tunnelHttpProbe } = await import('./serverPicker')
     expect(await tunnelHttpProbe(true, 0)).toBeNull()
     expect(diagnostics).toHaveBeenCalledOnce()
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({ xraySlot: 'b', xrayStartedAt: 1000, xrayPort: 50123 }))
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({ xraySocksAuth: { username: 'FIXTURE_SLOT_USER', password: 'FIXTURE_SLOT_SECRET' } }))
     const { logEvent } = await import('./appLogger')
     const entry = vi.mocked(logEvent).mock.calls.find(call => call[2] === 'tunnel HTTPS probe results')!
     expect(entry[3]).toMatchObject({ outcomes: [
       { target: 'gstatic-204', code: 'ETIMEDOUT' }, { target: 'google-204', code: 'ETIMEDOUT' },
       { target: 'cloudflare-204', code: 'ETIMEDOUT' }, { target: 'cloudflare-ip-trace', code: 'ETIMEDOUT' }
     ] })
-    expect(JSON.stringify(vi.mocked(logEvent).mock.calls)).not.toMatch(/private\.example|192\.0\.2\.1/)
+    expect(JSON.stringify(vi.mocked(logEvent).mock.calls)).not.toMatch(/private\.example|192\.0\.2\.1|FIXTURE_SLOT/)
     await tunnelHttpProbe(true, 0)
     expect(diagnostics).toHaveBeenCalledOnce()
   })

@@ -7,6 +7,7 @@ import { isIP } from 'net'
 import { Resolver } from 'dns/promises'
 import { logEvent } from './appLogger'
 import { readRecoveryManifest } from './recoveryManifest'
+import { nativeOwnedTunIndex } from './native/selectedRouteInterfaces'
 
 export const WFP_SOURCE_SHA256 = '6eebcb4430e2b8969d94d9afb09eb803296dfd8cbea5eaf24b8a78407db06249'
 export interface Ipv6Rule {
@@ -120,11 +121,25 @@ export async function prepareWfpIpv6Policy(opts: { corePrograms: string[]; serve
   let addresses: string[] = []
   opts.signal?.throwIfAborted()
   const prelude = await wfpPrelude()
-  const prepare = (addresses: string[]) => run(`${prelude}
+  const prepare = async (addresses: string[]) => {
+    opts.signal?.throwIfAborted()
+    let nativeOwned = false
+    if (process.env.VPNTE_DISABLE_NATIVE_NET !== '1' && process.platform === 'win32' && ['x64', 'arm64'].includes(process.arch)) {
+      // This host freshly proves GUID/alias, registry driver/PnP, Up state and
+      // the exact IPv4 /30. An unavailable host may have run: refuse, do not replay.
+      const index = await nativeOwnedTunIndex(opts.tunAlias, owner.interfaceGuid)
+      opts.signal?.throwIfAborted()
+      if (index === null) throw new Error('Owned TUN not verified for WFP')
+      nativeOwned = true
+    }
+    opts.signal?.throwIfAborted()
+    return run(`${prelude}
+${nativeOwned ? '' : `
 $owned=@(Get-NetAdapter -ErrorAction Stop | Where-Object { [string]$_.InterfaceGuid -eq ${quote(owner.interfaceGuid)} })
 if ($owned.Count -ne 1 -or $owned[0].Status -ne 'Up' -or $owned[0].Name -ne ${quote(opts.tunAlias)} -or $owned[0].DriverDescription -notmatch '^Wintun\\b' -or $owned[0].PnPDeviceID -notlike 'SWD\\Wintun\\*') { throw 'Owned TUN not verified for WFP' }
 if (-not @(Get-NetIPAddress -InterfaceIndex $owned[0].ifIndex -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.IPAddress -eq '192.168.250.253' -and $_.PrefixLength -eq 30 }).Count) { throw 'Owned TUN subnet mismatch' }
-$tunLuid=[VPNTE.IPv6.NativeEngine]::InterfaceLuid([string]$owned[0].InterfaceGuid)
+`}
+$tunLuid=[VPNTE.IPv6.NativeEngine]::InterfaceLuid(${quote(owner.interfaceGuid)})
 $appIds=@(${opts.apps.map(path => `[VPNTE.IPv6.NativeEngine]::AppId(${quote(path)})`).join(';')})
 $vpn=@()
 ${opts.serverHost || opts.corePrograms.length > 1 ? `
@@ -143,6 +158,7 @@ foreach($ip in @($addresses | Select-Object -Unique)) {
 $physical=@(Get-NetAdapter -Physical -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' })
 $ipv6Uplink=[bool](@(Get-NetRoute -AddressFamily IPv6 -ErrorAction Stop | Where-Object { $_.DestinationPrefix -eq '::/0' -and $_.InterfaceIndex -in $physical.ifIndex }).Count -gt 0)
 Write-Output ('WFP_PREPARED:'+([pscustomobject]@{tunLuid=$tunLuid;appIds=@($appIds);vpn=@($vpn);ipv6Uplink=$ipv6Uplink} | ConvertTo-Json -Depth 5 -Compress))`)
+  }
   type NativePlan = { tunLuid: string; appIds: string[]; vpn: Array<{ appId: string; remote: string; luid: string }>; ipv6Uplink: boolean }
   let native = parseMarker((await prepare([])).stdout, 'WFP_PREPARED:') as NativePlan
   if (!native || typeof native.ipv6Uplink !== 'boolean') throw new Error('Physical IPv6 uplink not verified')

@@ -38,6 +38,8 @@ export function safeActionResult(value) {
   for (const key of ['success', 'cancelled']) if (typeof value?.[key] === 'boolean') result[key] = value[key]
   const category = value?.category ?? value?.error?.category
   if (categories.includes(category)) result.category = category
+  if (typeof value?.oracleCode === 'string' && /^VPNTE_ORACLE_(?:RUNTIME_INVENTORY|CONFIG_READ|ADAPTER_INVENTORY|ADDRESS_INVENTORY|PID_IDENTITY|SELECTOR_READ|SELECTOR_IDENTITY|TUN_IDENTITY|SLOT_IDENTITY|ENDPOINT_ROUTE|REPORT_SERIALIZE)$/.test(value.oracleCode)) result.oracleCode = value.oracleCode
+  if (result.oracleCode && typeof value?.oracleNativeCode === 'string' && /^VPNTE_NATIVE_(?:ADDRESS_NOT_FOUND|ACCESS_DENIED|READ_FAILED)$/.test(value.oracleNativeCode)) result.oracleNativeCode = value.oracleNativeCode
   return result
 }
 
@@ -61,7 +63,7 @@ const phases = new Set(`initial-stale-cleanup initial-create-allows initial-set-
   physical-dns-sources-await proxy-listen-and-owner-lookup proxy-full-tunnel-preflight owned-runtime-cleanup
   stale-tun-cleanup singbox-config-check singbox-launch-submit wait-singbox-process adapter-lockdown-await
   wait-tun-interface tun-ownership-record tun-interface-metric-set tun-interface-metric-readback firewall-kill-switch
-  firewall-kill-switch-await runtime-pid runtime-stop-preflight stop-runtime wait-runtime-exit stop-xray
+  firewall-kill-switch-await initial-upstream-probe initial-outbound-selection runtime-pid runtime-stop-preflight stop-runtime wait-runtime-exit stop-xray
   rollback-baseline disable-firewall rollback-adapters repair-dns`.split(/\s+/))
 
 // Raw application logs stay on the disposable runner. Only fixed messages and numeric timings escape.
@@ -84,14 +86,16 @@ export function safeAppEvent(event) {
           'adapter lockdown result', 'physical adapter lockdown did not apply', 'physical adapter lockdown threw', 'xray startup failed',
           'failed to prepare TUN runtime', 'sing-box exited before startup completed',
           'firewall kill-switch failed to engage — aborting start and rolling back',
-          'startup validation failed — rolling back', 'startup runtime termination failed', 'startup rollback step failed'],
-        'ipc-security': ['IPC request rejected', 'IPC request failed'], xray: ['start timing'],
+          'startup validation failed — rolling back', 'startup runtime termination failed', 'startup rollback step failed',
+          'retained TUN upstream switch finished'],
+        'ipc-security': ['IPC request rejected', 'IPC request failed'], xray: ['start timing', 'effective connection configuration'],
         'phys-lockdown': ['batch lockdown failed', 'transition adapters disabled', 'transition adapter snapshot failed',
           'DNS registry snapshot failed; refusing mutation without baseline', 'snapshot parse failed',
           'lockdown not checked: no physical adapters were discovered', 'adapter coverage rollback failed',
           'physical adapter set changed; lockdown coverage is not verified'],
         'ps-helper': ['command timing', 'warm-up timing'], 'firewall-killswitch': ['command timing', 'phase timing', 'native phase timing'],
         'runtime-acl': ['inspection timing'],
+        'socks-upstream-probe': ['candidate egress probe completed'],
         'ip-monitor': ['protected transition IP baseline refreshed', 'protected transition IP baseline not checked', 'public IP provider timing'],
         'system-network': ['baseline native phase timing',
           'native WinINet notification unavailable; falling back to PowerShell'] })[event.scope]?.includes?.(event.message)
@@ -113,6 +117,47 @@ export function safeAppEvent(event) {
     if (['succeeded', 'failed', 'cancelled', 'backoff'].includes(event.details?.outcome)) result.outcome = event.details.outcome
   }
   if (event.scope === 'runtime-acl' && ['worker', 'standalone'].includes(event.details?.transport)) result.transport = event.details.transport
+  if (event.scope === 'xray' && event.message === 'effective connection configuration') {
+    if (['translated-profile', 'preserved-xray-json'].includes(event.details?.source)) result.source = event.details.source
+    if (['outbound', 'balancer'].includes(event.details?.providerEntry)) result.providerEntry = event.details.providerEntry
+    for (const key of ['outboundCount', 'balancerCount', 'virtualRouteCount']) {
+      const count = event.details?.[key]
+      if (Number.isInteger(count) && count >= 0 && count <= 4096) result[key] = count
+    }
+  }
+  if (event.scope === 'tun' && event.message === 'retained TUN upstream switch finished') {
+    if (['success', 'cancelled', 'failed'].includes(event.details?.outcome)) result.outcome = event.details.outcome
+    for (const key of ['committed', 'previousPreserved', 'ownershipLost']) {
+      if (typeof event.details?.[key] === 'boolean') result[key] = event.details[key]
+    }
+    if (Array.isArray(event.details?.phases)) {
+      const allowed = ['stage', 'probe', 'select', 'confirm', 'commit', 'restore', 'confirm-previous',
+        'stop-candidate', 'stop-previous', 'ownership']
+      result.phases = [...new Set(event.details.phases.filter(phase => allowed.includes(phase)))]
+    }
+    const phaseTimes = {}
+    for (const phase of ['stage', 'probe', 'select', 'restore-selector', 'confirm-candidate', 'confirm-previous', 'stop-candidate', 'stop-previous']) {
+      const ms = event.details?.phasesMs?.[phase]
+      if (typeof ms === 'number' && Number.isFinite(ms) && ms >= 0) phaseTimes[phase] = ms
+    }
+    if (Object.keys(phaseTimes).length) result.phasesMs = phaseTimes
+  }
+  if (event.scope === 'socks-upstream-probe') {
+    for (const [key, allowed] of Object.entries({
+      stage: ['local-connect', 'socks-handshake', 'tls-handshake', 'https-response', 'response-body', 'socket-close'],
+      outcome: ['success', 'network', 'cancelled', 'timeout', 'internal'],
+      code: ['CONNECT_FAILED', 'SOCKS_FAILED', 'SOCKS_AUTH_REQUIRED', 'SOCKS_AUTH_REJECTED', 'SOCKS_UPSTREAM_REJECTED', 'SOCKS_CLOSED', 'TLS_FAILED', 'HTTPS_FAILED', 'HTTP_STATUS', 'RESPONSE_TOO_LARGE',
+        'INVALID_PUBLIC_IP', 'SOCKET_CLOSE_UNCONFIRMED', 'CANCELLED', 'DEADLINE', 'OK'],
+      nativeCode: ['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT', 'ERR_SOCKET_CLOSED',
+        'ERR_INVALID_ARG_TYPE', 'ERR_INVALID_ARG_VALUE', 'ERR_INVALID_PROTOCOL', 'ERR_STREAM_WRITE_AFTER_END',
+        'ERR_TLS_INVALID_PROTOCOL_VERSION', 'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED',
+        'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+        'ERR_SSL_WRONG_VERSION_NUMBER', 'ERR_SSL_NO_SUITABLE_SIGNATURE_ALGORITHM', 'ERR_OSSL_EVP_UNSUPPORTED',
+        'ECONNABORTED', 'EACCES', 'EPERM', 'ENETUNREACH', 'EHOSTUNREACH', 'ERR_TLS_HANDSHAKE_TIMEOUT',
+        'ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE', 'ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION', 'ERR_SSL_UNEXPECTED_EOF_WHILE_READING']
+    })) if (allowed.includes(event.details?.[key])) result[key] = event.details[key]
+    if ([0, 1, 2, 3].includes(event.details?.providerIndex)) result.providerIndex = event.details.providerIndex
+  }
   if (event.scope === 'ps-helper' && event.message === 'warm-up timing') {
     if (['NetSecurity', 'Network', 'NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'].includes(event.details?.module)) result.module = event.details.module
     if (['complete', 'failed'].includes(event.details?.outcome)) result.outcome = event.details.outcome

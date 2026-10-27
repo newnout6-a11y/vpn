@@ -34,6 +34,7 @@ import {
 import { MacCard } from '../design-system/MacCard'
 import { cn } from '../design-system/utils'
 import { useAppStore } from '../store'
+import { usePageActive } from '../hooks/usePageActive'
 import { CountryFlagIcon } from './CountryFlagIcon'
 import { SERVER_CHANGED_EVENT, emitServerChanged } from '../nav'
 import type { ServerGroup, ServerProfile } from '../../shared/ipc-types'
@@ -81,11 +82,14 @@ function groupPillTone(status: ServerGroup['status']): string {
  * feedback follows the active UI locale.
  */
 function QuickServers() {
+  const active = usePageActive()
   const { t } = useTranslation()
   const addLog = useAppStore(s => s.addLog)
   const tunRunning = useAppStore(s => s.tunRunning)
   const connectionMode = useAppStore(s => s.settings.connectionMode)
   const setServerSwitchingName = useAppStore(s => s.setServerSwitchingName)
+  const selectionBusy = useAppStore(s => Boolean(s.serverSwitchingName || s.connectionBusy))
+  const refreshSequence = useRef(0)
 
   const [profiles, setProfiles] = useState<ServerProfile[]>([])
   const [groups, setGroups] = useState<ServerGroup[]>([])
@@ -95,22 +99,27 @@ function QuickServers() {
   const [pingingAll, setPingingAll] = useState(false)
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current
+    const current = () => sequence === refreshSequence.current
     try {
-      const [list, active] = await Promise.all([
-        window.electronAPI.serversList(),
-        window.electronAPI.serversGetActive()
+      await Promise.all([
+        window.electronAPI.serversList().then(list => { if (current()) setProfiles(list) }),
+        window.electronAPI.serversGetActive().then(active => {
+          if (current() && !useAppStore.getState().serverSwitchingName) setActiveId(active.activeId ?? active.profile?.id ?? null)
+        })
       ])
-      setProfiles(list)
-      setActiveId(active.activeId ?? active.profile?.id ?? null)
+      if (!current()) return
       const api = window.electronAPI as unknown as {
         groupsList?: () => Promise<ServerGroup[]>
       }
       if (typeof api.groupsList === 'function') {
         try {
           const gs = await api.groupsList()
+          if (!current()) return
           setGroups(Array.isArray(gs) ? gs : [])
           setGroupsAvailable(true)
         } catch {
+          if (!current()) return
           setGroupsAvailable(false)
           setGroups([])
         }
@@ -124,6 +133,7 @@ function QuickServers() {
   }, [])
 
   useEffect(() => {
+    if (!active) return
     void refresh()
     // SERVER_CHANGED_EVENT keeps ordinary UI changes immediate. The interval
     // is only a low-frequency fallback for changes made outside this window.
@@ -136,12 +146,13 @@ function QuickServers() {
     window.addEventListener('focus', handler)
     document.addEventListener('visibilitychange', refreshWhenVisible)
     return () => {
+      refreshSequence.current++
       clearInterval(id)
       window.removeEventListener(SERVER_CHANGED_EVENT, handler)
       window.removeEventListener('focus', handler)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
     }
-  }, [refresh])
+  }, [active, refresh])
 
   // Drop cached per-row numbers whenever routing changes. Each value is a
   // physical-adapter endpoint RTT, but the route and adapter set may differ
@@ -181,22 +192,20 @@ function QuickServers() {
         if (useAppStore.getState().serverSwitchingName || useAppStore.getState().connectionBusy) return
         const shouldAnimateSwitch = tunRunning && connectionMode === 'directVpn'
         if (shouldAnimateSwitch) setServerSwitchingName(profile.name)
-        setActiveId(profile.id)
+        refreshSequence.current++
         try {
           const result = await window.electronAPI.serversSelect(profile.id)
           if (result?.cancelled) {
             addLog('info', t('dashboard.serverSwitchCancelled'))
-            emitServerChanged()
             return
           }
           addLog('info', `Сервер выбран: ${profile.name}`)
-          emitServerChanged()
         } catch (err: unknown) {
           const message = isIpcRemoteErrorData(err) || err instanceof Error ? err.message : String(err)
           addLog('error', `Не удалось выбрать сервер: ${message}`)
-          refresh()
         } finally {
           if (shouldAnimateSwitch) setServerSwitchingName(null)
+          emitServerChanged()
         }
       }
     })
@@ -372,6 +381,7 @@ function QuickServers() {
                       <button
                         type="button"
                         onClick={row.onSelect}
+                        disabled={selectionBusy}
                         aria-pressed={row.selected}
                         className={cn(
                           'group w-full flex items-center gap-2 px-2 py-1.5 rounded-[var(--radius-sm)] text-left',
@@ -612,6 +622,7 @@ interface RecentEntry {
  * the user can request an immediate refresh with the button.
  */
 function RecentSites() {
+  const active = usePageActive()
   const { t } = useTranslation()
   const tunRunning = useAppStore(s => s.tunRunning)
   const [entries, setEntries] = useState<RecentEntry[]>([])
@@ -638,8 +649,9 @@ function RecentSites() {
   }, [])
 
   useEffect(() => {
+    if (!active) return
     void refresh()
-  }, [refresh, tunRunning])
+  }, [active, refresh, tunRunning])
 
   return (
     <MacCard className="!p-3">

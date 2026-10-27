@@ -24,7 +24,7 @@ vi.mock('./liveServerHistory', () => ({
 }))
 vi.mock('./splitTunneling', async () => {
   state.splitLoads++; await state.splitGate
-  return { splitTunneling: { getConfig: state.splitRead, getDirectProcessNames: () => [], getVpnProcessNames: () => [], getDirectProcessPaths: () => [] } }
+  return { splitTunneling: { getConfig: state.splitRead, getDirectProcessTargets: async () => ({ names: [], paths: [] }), getVpnProcessNames: () => [] } }
 })
 vi.mock('dns', async original => ({ ...await original<typeof import('dns')>(), promises: { Resolver: class {
   cancel = vi.fn(); resolve4 = state.a; resolve6 = state.aaaa; resolveCname = async () => []; reverse = async () => []

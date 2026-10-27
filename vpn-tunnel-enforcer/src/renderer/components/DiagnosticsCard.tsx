@@ -1,4 +1,5 @@
 import { useDiagnosticsExport } from '../hooks/useDiagnosticsExport'
+import { usePageActive } from '../hooks/usePageActive'
 import { useEffect, useRef, useState } from 'react'
 import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 import { adapterLeakVerdict, leakSelfTestMessage, leakSelfTestVerdict } from '../../shared/leak-self-test'
@@ -21,6 +22,7 @@ const UNKNOWN_CAPTURE_STATUS = { cleanupPending: true, statusUnavailable: true }
  *   3. Export diagnostics: bundles logs and artifacts into a ZIP for support.
  */
 export function DiagnosticsCard() {
+  const active = usePageActive()
   const { t } = useTranslation()
   const leakResult = useAppStore((s) => s.leakSelfTestResult)
   const setLeakResult = useAppStore((s) => s.setLeakSelfTestResult)
@@ -53,6 +55,7 @@ export function DiagnosticsCard() {
   }
 
   useEffect(() => {
+    if (!active) return
     let cancelled = false
     let timeout: number | null = null
 
@@ -82,7 +85,7 @@ export function DiagnosticsCard() {
       cancelled = true
       if (timeout) window.clearTimeout(timeout)
     }
-  }, [])
+  }, [active])
 
   const handleSelfTest = async () => {
     const current = selfTestScope.current

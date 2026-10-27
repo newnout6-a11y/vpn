@@ -82,6 +82,31 @@ test('domain failures and IPC rejections expose only fixed outcome labels', () =
   assert.deepEqual(failed, { at: base.ts, scope: 'tun', message: 'failed to prepare TUN runtime', errorKind: 'unknown-config-field' })
 })
 
+test('effective Xray configuration exposes only fixed source, entry and bounded graph counts (AT-00-005/AT-01-002)', () => {
+  const base = { ts: '2026-10-25T12:00:00.000Z', scope: 'xray', message: 'effective connection configuration' }
+  for (const source of ['translated-profile', 'preserved-xray-json']) {
+    for (const providerEntry of ['outbound', 'balancer']) {
+      const projected = safeAppEvent({ ...base, details: { source, providerEntry,
+        outboundCount: 4096, balancerCount: 0, virtualRouteCount: 2, fingerprint: 'FAKE-PRIVATE-PAYLOAD',
+        muxEnabled: true, tag: 'vpnte-source:FAKE-PRIVATE-PAYLOAD', address: 'private.test', profile: { password: 'FAKE-PRIVATE-PAYLOAD' } } })
+      assert.deepEqual(projected, { at: base.ts, scope: base.scope, message: base.message,
+        source, providerEntry, outboundCount: 4096, balancerCount: 0, virtualRouteCount: 2 })
+      assert.ok(!JSON.stringify(projected).includes('FAKE-PRIVATE'))
+      assert.ok(!JSON.stringify(projected).includes('private.test'))
+    }
+  }
+  for (const invalid of [-1, 0.5, 4097, Infinity, NaN, '2', null, {}, 'FAKE-PRIVATE-PAYLOAD']) {
+    assert.deepEqual(safeAppEvent({ ...base, details: { source: invalid, providerEntry: invalid,
+      outboundCount: invalid, balancerCount: invalid, virtualRouteCount: invalid } }),
+    { at: base.ts, scope: base.scope, message: base.message })
+  }
+  assert.equal(safeAppEvent({ ...base, scope: 'tun' }), null)
+  assert.equal(safeAppEvent({ ...base, message: 'effective connection configuration FAKE-PRIVATE-PAYLOAD' }), null)
+  assert.deepEqual(safeAppEvent({ ...base, message: 'start timing', details: {
+    source: 'translated-profile', providerEntry: 'outbound', outboundCount: 2, balancerCount: 1, virtualRouteCount: 3 } }),
+  { at: base.ts, scope: base.scope, message: 'start timing' })
+})
+
 test('admission refusal is logged before dispatch and does not prevent subsequent cleanup (AT-00-003)', async t => {
   const temp = resolve(dirname(fileURLToPath(import.meta.url)), '../.tmp')
   await mkdir(temp, { recursive: true })
@@ -175,6 +200,25 @@ test('protected transition timing excludes private reason, IP and provider data'
   assert.deepEqual(safeAppEvent(event), { at: event.ts, scope: event.scope, message: event.message, elapsedMs: 4500, attempt: 2 })
   assert.deepEqual(safeAppEvent({ ...event, message: 'protected transition IP baseline not checked', details: { ...event.details, attempt: 99 } }),
     { at: event.ts, scope: event.scope, message: 'protected transition IP baseline not checked', elapsedMs: 4500 })
+})
+
+test('retained TUN switch exposes timing and fixed recovery evidence without endpoint or errors (AT-00-005/AT-01-001)', () => {
+  const base = { ts: '2026-10-24T00:00:00.000Z', scope: 'tun', message: 'retained TUN upstream switch finished' }
+  const phases = ['stage', 'probe', 'select', 'confirm', 'commit', 'restore', 'confirm-previous',
+    'stop-candidate', 'stop-previous', 'ownership']
+  for (const outcome of ['success', 'cancelled', 'failed']) {
+    const result = safeAppEvent({ ...base, details: { outcome, durationMs: 754, committed: false, previousPreserved: true,
+      phases: [...phases, 'confirm', 'FAKE-PRIVATE-PAYLOAD', null, {}],
+      endpoint: 'FAKE-PRIVATE-PAYLOAD', error: 'FAKE-PRIVATE-PAYLOAD', secret: 'FAKE-PRIVATE-PAYLOAD' } })
+    assert.deepEqual(result, { at: base.ts, scope: base.scope, message: base.message, durationMs: 754,
+      outcome, committed: false, previousPreserved: true, phases })
+    assert.ok(!JSON.stringify(result).includes('FAKE-PRIVATE-PAYLOAD'))
+  }
+  assert.deepEqual(safeAppEvent({ ...base, details: { outcome: 'FAKE-PRIVATE-PAYLOAD', committed: 'false',
+    previousPreserved: 1, phases: 'FAKE-PRIVATE-PAYLOAD' } }), { at: base.ts, scope: base.scope, message: base.message })
+  const unrelated = safeAppEvent({ ...base, message: 'start timing', details: { outcome: 'success',
+    committed: true, previousPreserved: true, phases } })
+  assert.deepEqual(unrelated, { at: base.ts, scope: base.scope, message: 'start timing' })
 })
 
 test('native runtime fallback diagnostics publish fixed categories without private messages', () => {
@@ -317,8 +361,9 @@ test('only known application events and numeric timings enter public logs', () =
     details: { code: 'STARTUP_FAILED', error: 'FAKE-PRIVATE-PAYLOAD' } }).code, 'STARTUP_FAILED')
   assert.deepEqual(safeAppEvent({ ...event, details: { phaseDurations: {
     'wait-tun-interface': { durationMs: 12, error: 'FAKE-PRIVATE-PAYLOAD' }, 'stop-xray': 8,
+    'initial-upstream-probe': { durationMs: 321, password: 'FAKE-PRIVATE-PAYLOAD' }, 'initial-outbound-selection': 6,
     'FAKE-PRIVATE-PAYLOAD': 3, 'prepare-runtime': 'FAKE-PRIVATE-PAYLOAD' } } }).phaseDurations,
-  { 'wait-tun-interface': 12, 'stop-xray': 8 })
+  { 'wait-tun-interface': 12, 'stop-xray': 8, 'initial-upstream-probe': 321, 'initial-outbound-selection': 6 })
   const safe = safeAppEvent({ ...event, scope: 'ipc', message: 'start-direct-vpn failed',
     correlationId: 'FAKE-PRIVATE-PAYLOAD', clockId: 'FAKE-PRIVATE-PAYLOAD', details: { ms: 'FAKE-PRIVATE-PAYLOAD' } })
   assert.ok(!JSON.stringify(safe).includes('FAKE-PRIVATE-PAYLOAD'))
@@ -338,4 +383,41 @@ test('public correlation accepts only prefixed identifiers, never credential-sha
     assert.equal(safeAppEvent({ ...event, clockId: id }).clockId, undefined)
   }
   assert.equal(safeAppEvent({ ...event, clockId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' }).clockId, undefined)
+})
+
+test('retained-switch timings and probe failures retain fixed labels without private payloads (AT-00-005)', () => {
+  const event = { ts: '2026-10-24T20:00:00.000Z', scope: 'tun', message: 'retained TUN upstream switch finished',
+    details: { ownershipLost: false, phasesMs: { stage: 2850, probe: 12, 'confirm-previous': 320,
+      'FAKE-PRIVATE-PAYLOAD': 99, select: Infinity, 'restore-selector': -1, 'stop-candidate': 'FAKE-PRIVATE-PAYLOAD' } } }
+  assert.deepEqual(safeAppEvent(event).phasesMs, { stage: 2850, probe: 12, 'confirm-previous': 320 })
+  assert.equal(safeAppEvent(event).ownershipLost, false)
+  const probe = { ...event, scope: 'socks-upstream-probe', message: 'candidate egress probe completed',
+    details: { durationMs: 11, stage: 'socks-handshake', outcome: 'network', code: 'SOCKS_FAILED',
+      error: 'FAKE-PRIVATE-PAYLOAD', password: 'FAKE-PRIVATE-PAYLOAD' } }
+  assert.deepEqual(safeAppEvent(probe), { at: event.ts, scope: probe.scope, message: probe.message,
+    durationMs: 11, stage: 'socks-handshake', outcome: 'network', code: 'SOCKS_FAILED' })
+  for (const code of ['SOCKS_AUTH_REQUIRED', 'SOCKS_AUTH_REJECTED', 'SOCKS_UPSTREAM_REJECTED', 'SOCKS_CLOSED']) {
+    assert.equal(safeAppEvent({ ...probe, details: { code } }).code, code)
+  }
+  for (const key of ['stage', 'outcome', 'code']) {
+    assert.equal(safeAppEvent({ ...probe, details: { [key]: 'FAKE-PRIVATE-PAYLOAD' } })[key], undefined)
+  }
+  assert.ok(!JSON.stringify([safeAppEvent(event), safeAppEvent(probe)]).includes('FAKE-PRIVATE-PAYLOAD'))
+})
+test('probe native diagnostics publish only fixed codes and provider indexes (AT-00-005)', () => {
+  const event = { ts: '2026-10-25T00:00:00.000Z', scope: 'socks-upstream-probe', message: 'candidate egress probe completed' }
+  for (const providerIndex of [0, 1, 2, 3]) {
+    assert.equal(safeAppEvent({ ...event, details: { providerIndex } }).providerIndex, providerIndex)
+  }
+  for (const nativeCode of ['ECONNRESET', 'ERR_SSL_WRONG_VERSION_NUMBER', 'EHOSTUNREACH', 'ERR_INVALID_ARG_TYPE']) {
+    const result = safeAppEvent({ ...event, details: { nativeCode, providerIndex: 1, message: 'FAKE-PRIVATE-key', host: 'private.test', ip: '10.0.0.1' } })
+    assert.equal(result.nativeCode, nativeCode)
+    assert.equal(result.providerIndex, 1)
+    assert.ok(!JSON.stringify(result).includes('private'))
+  }
+  for (const nativeCode of ['PRIVATE_CODE', 'ECONNRESET FAKE-PRIVATE-key', 'ERR_TLS_CERT_ALTNAME_INVALID\nprivate.test']) {
+    const result = safeAppEvent({ ...event, details: { nativeCode, providerIndex: 4 } })
+    assert.equal(result.nativeCode, undefined)
+    assert.equal(result.providerIndex, undefined)
+  }
 })

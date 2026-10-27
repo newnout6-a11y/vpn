@@ -28,7 +28,9 @@ export const IF_ROW2_OFFSETS = {
   interfaceAndOperStatusFlags: 1152,
   operStatus: 1156,
   mediaConnectState: 1164,
-  transmitLinkSpeed: 1192
+  transmitLinkSpeed: 1192,
+  inOctets: 1208,
+  outOctets: 1280
 } as const
 
 /**
@@ -59,7 +61,9 @@ export function assertIfRow2Layout(koffi: any): void {
     ['InterfaceAndOperStatusFlags', IF_ROW2_OFFSETS.interfaceAndOperStatusFlags],
     ['OperStatus', IF_ROW2_OFFSETS.operStatus],
     ['MediaConnectState', IF_ROW2_OFFSETS.mediaConnectState],
-    ['TransmitLinkSpeed', IF_ROW2_OFFSETS.transmitLinkSpeed]
+    ['TransmitLinkSpeed', IF_ROW2_OFFSETS.transmitLinkSpeed],
+    ['InOctets', IF_ROW2_OFFSETS.inOctets],
+    ['OutOctets', IF_ROW2_OFFSETS.outOctets]
   ]
   for (const [member, offset] of expected) {
     const actual = koffi.offsetof(row, member)

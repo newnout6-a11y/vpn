@@ -7,7 +7,7 @@ import { emitServerChanged } from '../nav'
 import { ipcError } from '../../shared/ipc-result'
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'ru' } }) }))
-vi.mock('../nav', () => ({ emitServerChanged: vi.fn() }))
+vi.mock('../nav', () => ({ emitServerChanged: vi.fn(), SERVER_CHANGED_EVENT: 'vpnte:server-changed' }))
 vi.mock('../components/ForeignVpnBanner', () => ({ ForeignVpnBanner: () => null }))
 vi.mock('../components/ServerDetailModal', () => ({ ServerDetailModal: () => null }))
 vi.mock('../components/LiveServerBatchComparison', () => ({ LiveServerBatchComparison: () => null }))

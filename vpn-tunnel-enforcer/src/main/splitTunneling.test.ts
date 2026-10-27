@@ -48,29 +48,22 @@ vi.mock('./tunController', () => ({
 import {
   addProcessName,
   fallbackAppNameFromPath,
-  generateSplitTunnelRouteRules,
-  getDirectProcessNames,
-  getDirectProcessPaths,
+  getDirectProcessTargets,
   getVpnProcessNames,
   sanitizeAppDisplayName,
   normalizeProcessName,
   splitTunneling
 } from './splitTunneling'
-import { processPathRegex } from './splitTunnelPath'
 import { logEvent } from './appLogger'
 
-describe('splitTunneling', () => {
-  describe('generateSplitTunnelRouteRules', () => {
-    it('returns empty array when no apps have rules', () => {
-      const rules = generateSplitTunnelRouteRules()
-      expect(rules).toEqual([])
-    })
-  })
+beforeEach(async () => {
+  for (const app of splitTunneling.getApps()) await splitTunneling.removeApp(app.id)
+})
 
-  describe('getDirectProcessNames', () => {
-    it('returns empty array when no apps have direct rule', () => {
-      const names = getDirectProcessNames()
-      expect(names).toEqual([])
+describe('splitTunneling', () => {
+  describe('getDirectProcessTargets', () => {
+    it('returns an empty snapshot when no apps have direct rules', async () => {
+      expect(await getDirectProcessTargets()).toEqual({ names: [], paths: [] })
     })
   })
 
@@ -123,10 +116,7 @@ describe('splitTunneling', () => {
       const entry = await addProcessName('yt-dlp')
 
       expect(entry.path).toBe('yt-dlp.exe')
-      expect(getDirectProcessNames()).toContain('yt-dlp.exe')
-      expect(generateSplitTunnelRouteRules()).toEqual([
-        { process_name: ['yt-dlp.exe'], outbound: 'direct-out' }
-      ])
+      expect(await getDirectProcessTargets()).toEqual({ names: ['yt-dlp.exe'], paths: [] })
     })
 
     it('does not emit redundant proxy-out rules for vpn entries', async () => {
@@ -134,7 +124,7 @@ describe('splitTunneling', () => {
       await splitTunneling.setRule(entry.id, 'vpn')
 
       expect(getVpnProcessNames()).toEqual(['curl.exe'])
-      expect(generateSplitTunnelRouteRules().some((rule) => rule.outbound === 'proxy-out')).toBe(false)
+      expect(await getDirectProcessTargets()).toEqual({ names: [], paths: [] })
     })
   })
 })
@@ -150,28 +140,25 @@ describe('split tunneling by application path', () => {
   it('emits a path rule and no name rule for an installed application', async () => {
     const entry = await splitTunneling.addApp(exe)
     await splitTunneling.setRule(entry.id, 'direct')
-    const rules = generateSplitTunnelRouteRules()
-    const pathRule = rules.find((rule) => rule.process_path_regex)
+    const targets = await getDirectProcessTargets()
     // The runner's temp dir can be an 8.3 path: the rule then carries both spellings, the stored one among them.
-    expect(pathRule?.outbound).toBe('direct-out')
-    expect(pathRule?.process_path_regex).toContain(processPathRegex(exe))
-    expect(getDirectProcessPaths().map((p) => p.toLowerCase())).toContain(exe.toLowerCase())
-    expect(getDirectProcessNames()).not.toContain('app.exe')
-    expect(rules.some((rule) => (rule.process_name ?? []).includes('app.exe'))).toBe(false)
+    expect(targets.paths.map((p) => p.toLowerCase())).toContain(exe.toLowerCase())
+    expect(targets.names).not.toContain('app.exe')
   })
 
   it('drops the rule (and logs it) when the file is gone: no silent match by name', async () => {
     const entry = await splitTunneling.addApp(exe)
     await splitTunneling.setRule(entry.id, 'direct')
     rmSync(exe)
-    expect(getDirectProcessPaths().map((p) => p.toLowerCase())).not.toContain(exe.toLowerCase())
-    expect(generateSplitTunnelRouteRules().some((rule) => JSON.stringify(rule).includes('app.exe'))).toBe(false)
+    const targets = await getDirectProcessTargets()
+    expect(targets.paths.map((p) => p.toLowerCase())).not.toContain(exe.toLowerCase())
+    expect(targets.names).not.toContain('app.exe')
     expect(logEvent).toHaveBeenCalledWith('warn', 'split-tunnel', expect.stringContaining('inactive'), expect.objectContaining({ reason: 'file-missing' }))
   })
 
   it('keeps bare process names matched by name', async () => {
     const entry = await addProcessName('curl')
     await splitTunneling.setRule(entry.id, 'direct')
-    expect(getDirectProcessNames()).toContain('curl.exe')
+    expect((await getDirectProcessTargets()).names).toContain('curl.exe')
   })
 })

@@ -3,6 +3,7 @@ import { CheckCircle2, Eye, Globe2, Loader2, RadioTower, RefreshCw, ShieldAlert,
 import { useAppStore, type BrowserIpCheck } from '../store'
 import { Address4, Address6 } from 'ip-address'
 import { MacCard, MacButton } from '../design-system'
+import { usePageActive } from '../hooks/usePageActive'
 
 export interface WebRtcCandidate {
   type: string
@@ -14,6 +15,7 @@ const IPV4_URLS = [
   'https://api.ipify.org?format=json',
   'https://api.myip.com'
 ]
+export const BROWSER_CHECK_DEADLINE_MS = 5000
 
 export function unwrapIpv4Mapped(ip: string): string {
   const trimmed = ip.trim().toLowerCase()
@@ -75,27 +77,48 @@ async function fetchWithTimeout(url: string, timeoutMs = 8000, signal?: AbortSig
   }
 }
 
-async function fetchBrowserIpv4(signal?: AbortSignal): Promise<string | null> {
-  for (const url of IPV4_URLS) {
-    if (signal?.aborted) break
-    try {
-      const data = await fetchWithTimeout(url, 8000, signal)
-      const ip = data?.ip || data?.query
-      if (typeof ip === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return ip
-    } catch {
-    }
+export async function fetchBrowserIpv4(signal?: AbortSignal): Promise<string | null> {
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  signal?.addEventListener('abort', abort, { once: true })
+  if (signal?.aborted) controller.abort()
+  const reads = IPV4_URLS.map(async url => {
+    const data = await fetchWithTimeout(url, BROWSER_CHECK_DEADLINE_MS, controller.signal)
+    const ip = data?.ip || data?.query
+    if (typeof ip !== 'string' || !Address4.isValid(ip)) throw new Error('Browser IPv4 unavailable')
+    return ip
+  })
+  try {
+    return await Promise.any(reads).catch(() => null)
+  } finally {
+    controller.abort()
+    await Promise.allSettled(reads)
+    signal?.removeEventListener('abort', abort)
   }
-  return null
 }
 
 async function fetchBrowserIpv6(signal?: AbortSignal): Promise<string | null> {
   try {
-    const data = await fetchWithTimeout('https://api6.ipify.org?format=json', 6000, signal)
+    const data = await fetchWithTimeout('https://api6.ipify.org?format=json', BROWSER_CHECK_DEADLINE_MS, signal)
     const ip = data?.ip
-    return typeof ip === 'string' && ip.includes(':') ? ip : null
+    return typeof ip === 'string' && Address6.isValid(ip) ? new Address6(ip).correctForm() : null
   } catch {
     return null
   }
+}
+
+function readNodeIp(signal: AbortSignal): Promise<string | null> {
+  return new Promise(resolve => {
+    const finish = (ip: string | null) => {
+      signal.removeEventListener('abort', abort)
+      resolve(ip)
+    }
+    const abort = () => finish(null)
+    if (signal.aborted) { resolve(null); return }
+    signal.addEventListener('abort', abort, { once: true })
+    // Observe the bounded main read without substituting a cached IP on failure.
+    window.electronAPI.getPublicIp().then(result => finish(result.ip), () => finish(null))
+  })
 }
 
 function parseCandidate(raw: string): WebRtcCandidate | null {
@@ -136,7 +159,7 @@ function collectWebRtcCandidates(timeoutMs = 4500, signal?: AbortSignal): Promis
     }
 
     const abort = () => finish('Cancelled')
-    const timer = setTimeout(() => finish(null), timeoutMs)
+    const timer = setTimeout(() => finish('Истекло время ожидания WebRTC'), timeoutMs)
     signal?.addEventListener('abort', abort, { once: true })
     pc.onicecandidate = (event) => {
       if (!event.candidate) {
@@ -176,8 +199,11 @@ export function summarize(args: {
   const browserMatchesNode = args.browserIpv4 && args.nodeIp ? unwrapIpv4Mapped(args.browserIpv4) === unwrapIpv4Mapped(args.nodeIp) : null
 
   if (!args.browserIpv4) {
-    summary = worse(summary, 'fail')
-    details.push('Браузерный fetch не смог получить публичный IPv4.')
+    summary = worse(summary, 'info')
+    details.push('Публичный IPv4 браузера не проверен: сервисы недоступны или истекло время ожидания.')
+  } else if (!args.nodeIp) {
+    summary = worse(summary, 'info')
+    details.push('IPv4 main-процесса не проверен; сравнение с браузером недоступно.')
   } else if (browserMatchesNode === false) {
     summary = worse(summary, args.tunRunning ? 'fail' : 'warn')
     details.push(`Браузер видит ${args.browserIpv4}, а main-процесс видит ${args.nodeIp}. Это может означать обход системного маршрута браузером.`)
@@ -189,7 +215,8 @@ export function summarize(args: {
     summary = worse(summary, 'warn')
     details.push(`Браузер получил публичный IPv6: ${args.browserIpv6}. Если это провайдерский IPv6, сайты могут видеть не VPN.`)
   } else {
-    details.push('Отдельный публичный IPv6 из браузера не получен.')
+    summary = worse(summary, 'info')
+    details.push('Публичный IPv6 браузера не проверен: отсутствие ответа не подтверждает отсутствие IPv6-утечки.')
   }
 
   const webRtcAddresses = args.webRtcCandidates.map(c => c.address)
@@ -202,17 +229,19 @@ export function summarize(args: {
   if (args.webRtcError) {
     summary = worse(summary, 'info')
     details.push(`WebRTC проверка не завершилась: ${args.webRtcError}`)
-  } else if (unexpectedWebRtcPublicIps.length > 0) {
+  }
+  if (unexpectedWebRtcPublicIps.length > 0) {
     summary = worse(summary, 'warn')
     details.push(`WebRTC показал другие публичные адреса: ${unexpectedWebRtcPublicIps.join(', ')}.`)
   } else if (webRtcPublicIps.length > 0) {
     details.push(`WebRTC показал только текущий публичный VPN IP: ${webRtcPublicIps.join(', ')}.`)
-  } else if (webRtcLocalIps.length > 0) {
+  }
+  if (webRtcLocalIps.length > 0) {
     summary = worse(summary, 'warn')
     details.push(`WebRTC показал локальные адреса: ${webRtcLocalIps.join(', ')}.`)
   } else if (webRtcMdnsCount > 0) {
     details.push('WebRTC скрывает локальные адреса через mDNS — это нормально.')
-  } else {
+  } else if (webRtcPublicIps.length === 0 && !args.webRtcError) {
     details.push('WebRTC не выдал IP-кандидатов или заблокирован браузером.')
   }
 
@@ -246,6 +275,7 @@ function statusIcon(status: BrowserIpCheck['summary'] | 'unknown') {
 }
 
 export function BrowserIpCard() {
+  const active = usePageActive()
   const check = useAppStore(s => s.browserIpCheck)
   const setCheck = useAppStore(s => s.setBrowserIpCheck)
   const tunRunning = useAppStore(s => s.tunRunning)
@@ -264,18 +294,20 @@ export function BrowserIpCard() {
       ++checkIdRef.current
       abortRef.current?.abort()
     }
-  }, [tunRunning, publicIp, networkContext])
+  }, [tunRunning, publicIp, networkContext, active])
 
   const runCheck = async (silent = false) => {
+    if (!active) return
     abortRef.current?.abort()
     const controller = new AbortController()
     abortRef.current = controller
     const currentCheckId = ++checkIdRef.current
+    const deadline = setTimeout(() => controller.abort(), BROWSER_CHECK_DEADLINE_MS)
     setRunning(true)
     if (!silent) addLog('info', 'Проверяем, какой IP видят сайты в браузере…')
     try {
-      const [nodeIpInfo, browserIpv4, browserIpv6, webRtc] = await Promise.all([
-        window.electronAPI.getPublicIp().catch(() => ({ ip: publicIp, isLeak: false, vpnIp: null })),
+      const [nodeIp, browserIpv4, browserIpv6, webRtc] = await Promise.all([
+        readNodeIp(controller.signal),
         fetchBrowserIpv4(controller.signal),
         fetchBrowserIpv6(controller.signal),
         collectWebRtcCandidates(4500, controller.signal)
@@ -286,7 +318,7 @@ export function BrowserIpCard() {
       const result = summarize({
         browserIpv4,
         browserIpv6,
-        nodeIp: nodeIpInfo.ip ?? publicIp,
+        nodeIp,
         webRtcCandidates: webRtc.candidates,
         webRtcError: webRtc.error,
         tunRunning
@@ -298,6 +330,7 @@ export function BrowserIpCard() {
             ? `Сайты видят VPN IP: ${result.browserIpv4 ?? 'неизвестно'}`
             : result.summary === 'fail'
               ? 'Браузер видит другой IP или IP не проверился.'
+              : result.summary === 'info' ? 'Проверка браузера завершилась не полностью; отсутствие утечки не подтверждено.'
               : 'Есть предупреждения по браузеру/WebRTC/IPv6.'
         addLog(result.summary === 'fail' ? 'error' : result.summary === 'warn' ? 'warn' : 'info', `Проверка браузера: ${message}`)
       }
@@ -310,7 +343,7 @@ export function BrowserIpCard() {
         summary: 'fail',
         browserIpv4: null,
         browserIpv6: null,
-        nodeIp: publicIp,
+        nodeIp: null,
         browserMatchesNode: null,
         webRtcPublicIps: [],
         webRtcLocalIps: [],
@@ -321,6 +354,8 @@ export function BrowserIpCard() {
       setCheck(failed)
       if (!silent) addLog('error', failed.details[0])
     } finally {
+      clearTimeout(deadline)
+      controller.abort()
       if (checkIdRef.current === currentCheckId) {
         setRunning(false)
       }
@@ -374,7 +409,9 @@ export function BrowserIpCard() {
         ? 'Браузерный IP под вопросом'
         : status === 'warn'
           ? 'Есть browser-предупреждения'
-          : 'Браузер ещё не проверялся'
+          : status === 'info'
+            ? 'Проверка браузера не завершена'
+            : 'Браузер ещё не проверялся'
 
   return (
     <MacCard className="space-y-4">
@@ -393,9 +430,9 @@ export function BrowserIpCard() {
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-        <Metric label="Browser IPv4" value={check?.browserIpv4 ?? '—'} status={check?.browserIpv4 ? check.browserMatchesNode === false ? 'fail' : 'ok' : 'info'} />
-        <Metric label="Main/Node IPv4" value={check?.nodeIp ?? publicIp ?? '—'} status="info" />
-        <Metric label="Browser IPv6" value={check?.browserIpv6 ?? 'IPv6 не доступен'} status={check?.browserIpv6 ? 'warn' : 'ok'} />
+        <Metric label="Browser IPv4" value={check?.browserIpv4 ?? '—'} status={check?.browserMatchesNode === true ? 'ok' : check?.browserMatchesNode === false ? tunRunning ? 'fail' : 'warn' : 'info'} />
+        <Metric label="Main/Node IPv4" value={check?.nodeIp ?? '—'} status="info" />
+        <Metric label="Browser IPv6" value={check?.browserIpv6 ?? (check ? 'IPv6 не проверен' : '—')} status={check?.browserIpv6 ? 'warn' : 'info'} />
         <Metric
           label="WebRTC"
           value={
@@ -409,7 +446,7 @@ export function BrowserIpCard() {
                     : check.webRtcError || 'IP не выдан'
               : '—'
           }
-          status={webRtcUnexpectedPublicIps.length || webRtcHasLocalLeak ? 'warn' : check?.webRtcError ? 'info' : 'ok'}
+          status={webRtcUnexpectedPublicIps.length || webRtcHasLocalLeak ? 'warn' : !check || check.webRtcError ? 'info' : 'ok'}
           icon={<RadioTower className="w-3.5 h-3.5" />}
         />
       </div>

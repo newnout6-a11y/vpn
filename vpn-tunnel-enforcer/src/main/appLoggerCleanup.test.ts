@@ -75,7 +75,8 @@ describe('privileged TUN log cleanup', () => {
     failFiles.add(join(runtime, 'sing-box.log')); failFiles.add(join(runtime, 'xray.prev.log'))
     const { clearAppLog } = await import('./appLogger')
     const result = await clearAppLog()
-    expect(result).toEqual({ success: false, cleared: [], absent: ['app-log', 'app-previous-log', 'sing-box-previous-log', 'xray-log'],
+    expect(result).toEqual({ success: false, cleared: [], absent: ['app-log', 'app-previous-log', 'sing-box-previous-log', 'xray-log',
+      'xray-a-log', 'xray-a-previous-log', 'xray-b-log', 'xray-b-previous-log'],
       errors: [{ artifact: 'sing-box-log', error: expect.objectContaining({ category: 'permission', code: 'IPC_PERMISSION_DENIED' }) },
         { artifact: 'xray-previous-log', error: expect.objectContaining({ category: 'permission' }) }] })
     expect(JSON.stringify(result)).not.toMatch(/FAKE-SECRET|\/private\/|program-data/)
@@ -99,6 +100,11 @@ describe('privileged TUN log cleanup', () => {
     writeFileSync(join(runtime, 'sing-box.prev.log'), 'previous')
     writeFileSync(join(runtime, 'xray.log'), 'current xray')
     writeFileSync(join(runtime, 'xray.prev.log'), 'previous xray')
+    for (const slot of ['a', 'b']) {
+      writeFileSync(join(runtime, `xray-${slot}.log`), `current ${slot}`)
+      writeFileSync(join(runtime, `xray-${slot}.prev.log`), `previous ${slot}`)
+    }
+    writeFileSync(join(runtime, 'xray-foreign.log'), 'unowned')
     const { clearAppLog, startEngineLogRetention } = await import('./appLogger')
     const stop = startEngineLogRetention()
     try {
@@ -108,7 +114,47 @@ describe('privileged TUN log cleanup', () => {
       expect(existsSync(join(runtime, 'sing-box.prev.log'))).toBe(false)
       expect(readFileSync(join(runtime, 'xray.log'), 'utf8')).toBe('')
       expect(existsSync(join(runtime, 'xray.prev.log'))).toBe(false)
+      for (const slot of ['a', 'b']) {
+        expect(readFileSync(join(runtime, `xray-${slot}.log`), 'utf8')).toBe('')
+        expect(existsSync(join(runtime, `xray-${slot}.prev.log`))).toBe(false)
+      }
+      expect(readFileSync(join(runtime, 'xray-foreign.log'), 'utf8')).toBe('unowned')
     } finally { await stop() }
+  })
+
+  it('exports both fixed upstream slots through the existing redaction without admitting other files (AT-08-001 / AT-01-002)', async () => {
+    const runtime = join(root, 'program-data', 'instance', 'tun-runtime')
+    mkdirSync(runtime, { recursive: true })
+    for (const slot of ['a', 'b']) for (const suffix of ['log', 'prev.log']) {
+      writeFileSync(join(runtime, `xray-${slot}.${suffix}`), `slot ${slot} peer 203.0.113.9:443`)
+    }
+    writeFileSync(join(runtime, 'xray-foreign.log'), 'must not export')
+    const { getFullLogs } = await import('./appLogger')
+    const logs = await getFullLogs()
+    const slots = logs.filter(log => /^xray-[ab]\.(?:prev\.)?log$/.test(log.name))
+    expect(slots.map(log => log.name)).toEqual(['xray-a.log', 'xray-a.prev.log', 'xray-b.log', 'xray-b.prev.log'])
+    for (const log of slots) {
+      expect(log.exists).toBe(true)
+      expect(log.content).toContain('slot')
+      expect(log.content).not.toContain('203.0.113.9')
+    }
+    expect(logs.some(log => log.name === 'xray-foreign.log')).toBe(false)
+  })
+
+  it('reports an upstream slot clear failure without hiding its neighboring clear (AT-00-004 / AT-08-001)', async () => {
+    const runtime = join(root, 'program-data', 'instance', 'tun-runtime')
+    mkdirSync(runtime, { recursive: true })
+    writeFileSync(join(runtime, 'xray-a.log'), 'retained')
+    writeFileSync(join(runtime, 'xray-b.log'), 'cleared')
+    failFiles.add(join(runtime, 'xray-a.log'))
+    const { clearAppLog } = await import('./appLogger')
+    const report = await clearAppLog()
+    expect(report.success).toBe(false)
+    expect(report.cleared).toContain('xray-b-log')
+    expect(report.errors).toEqual([{ artifact: 'xray-a-log', error: expect.objectContaining({ category: 'permission' }) }])
+    expect(JSON.stringify(report)).not.toMatch(/FAKE-SECRET|program-data/)
+    expect(readFileSync(join(runtime, 'xray-a.log'), 'utf8')).toBe('retained')
+    expect(readFileSync(join(runtime, 'xray-b.log'), 'utf8')).toBe('')
   })
 
   it('refuses untrusted runtime writes without poisoning a later cleanup attempt', async () => {

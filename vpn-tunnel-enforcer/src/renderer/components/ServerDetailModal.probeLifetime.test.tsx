@@ -21,6 +21,14 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 describe('server detail probe scope', () => {
+  it('shows normalized summary port and fingerprint without the outbound (AT-01-008)', async () => {
+    render(<ServerDetailModal {...props} profile={{ ...profile, display: { hasOutbound: true, clientFingerprint: 'firefox' } }} />)
+    await act(async () => {})
+    expect(screen.getByText('firefox')).toBeTruthy()
+    expect(screen.getByText('8443')).toBeTruthy()
+    expect(api.serverProbe.mock.calls[0].slice(0, 2)).toEqual([profile.server, 8443])
+  })
+
   it.each(['close', 'profile', 'empty', 'unmount'])('cancels its pending main probe on %s and fences late replies', async boundary => {
     const first = deferred(), next = deferred()
     api.serverProbe.mockReturnValueOnce(first.promise).mockReturnValueOnce(next.promise)

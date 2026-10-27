@@ -2922,11 +2922,13 @@ export async function collectSplitTunnelDiagnostics(signal?: AbortSignal): Promi
     const { splitTunneling } = await import('./splitTunneling')
     if (signal?.aborted) throw new IpcFault('cancelled')
     const config = splitTunneling.getConfig()
+    const { names, paths } = await splitTunneling.getDirectProcessTargets()
+    if (signal?.aborted) throw new IpcFault('cancelled')
     return summarizeSplitTunnelDiagnostics(
       config.enabled === true,
-      splitTunneling.getDirectProcessNames(),
+      names,
       splitTunneling.getVpnProcessNames(),
-      splitTunneling.getDirectProcessPaths()
+      paths
     )
   } catch (error: any) {
     if (signal?.aborted) throw new IpcFault('cancelled')

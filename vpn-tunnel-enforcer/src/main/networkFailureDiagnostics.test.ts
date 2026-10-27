@@ -53,6 +53,35 @@ describe('bounded diagnostic evidence', () => {
     expect(result).toMatchObject({ xray: { readable: false }, tun: { readable: false }, physicalTcp: { checked: false }, engineHttps: { checked: false } })
     expect(mocks.connect).not.toHaveBeenCalled()
   })
+  it.each(['a', 'b', null] as const)('uses only the active Xray log and startup timestamp: %s (AT-07-002/AT-08-001)', async slot => {
+    const root = join(process.cwd(), '.tmp')
+    await mkdir(root, { recursive: true })
+    const dir = await mkdtemp(join(root, 'network-slot-diagnostics-'))
+    const active = slot === null ? 'xray.log' : `xray-${slot}.log`
+    try {
+      for (const name of ['xray.log', 'xray-a.log', 'xray-b.log', 'xray-foreign.log']) {
+        await writeFile(join(dir, name), name === active
+          ? '2026/10/02 16:59:30.001 [Info] connection refused OLD_PRIVATE\n2026/10/02 17:00:01.001 [Info] i/o timeout PRIVATE_ENDPOINT\n'
+          : '2026/10/02 17:00:02.001 [Info] connection refused INACTIVE_PRIVATE\n')
+      }
+      const result = await collectTunnelFailureDiagnostics({ runtimeDir: dir, xraySlot: slot,
+        startedAt: new Date(2026, 9, 2, 16, 0, 0).getTime(), xrayStartedAt: new Date(2026, 9, 2, 17, 0, 0).getTime() })
+      expect(result.xray).toMatchObject({ readable: true, records: 1, timeouts: 1, refused: 0 })
+      expect(JSON.stringify(result)).not.toMatch(/PRIVATE/)
+      expect(mocks.connect).not.toHaveBeenCalled()
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+  it('does not replace missing active slot evidence with a readable stale legacy log (AT-07-002)', async () => {
+    const root = join(process.cwd(), '.tmp')
+    await mkdir(root, { recursive: true })
+    const dir = await mkdtemp(join(root, 'network-slot-missing-'))
+    try {
+      await writeFile(join(dir, 'xray.log'), '2026/10/02 17:00:02.001 [Info] connection refused PRIVATE_ENDPOINT\n')
+      const result = await collectTunnelFailureDiagnostics({ runtimeDir: dir, xraySlot: 'b', startedAt: 0 })
+      expect(result.xray).toMatchObject({ readable: false })
+      expect(mocks.connect).not.toHaveBeenCalled()
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
   it('only emits known error codes and inspects wrapped causes', () => {
     expect(networkFailureCode({ cause: { code: 'ENETUNREACH' } })).toBe('ENETUNREACH')
     expect(networkFailureCode({ code: 'password=SECRET', message: 'private.example' })).toBe('UNKNOWN')
@@ -61,6 +90,18 @@ describe('bounded diagnostic evidence', () => {
 })
 
 describe('controlled network path diagnostics', () => {
+  it('authenticates the slot probe while returning only a fixed failure code (AT-07-002/AT-08-001)', async () => {
+    mocks.connect.mockRejectedValue({ code: 'FIXTURE_SLOT_SECRET', message: 'FIXTURE_SLOT_USER FIXTURE_SLOT_SECRET' })
+    const result = await collectTunnelFailureDiagnostics({ runtimeDir: join(process.cwd(), '.tmp', 'absent-core-fixture'),
+      startedAt: 0, xraySlot: 'a', xrayPort: 50123,
+      xraySocksAuth: { username: 'FIXTURE_SLOT_USER', password: 'FIXTURE_SLOT_SECRET' } })
+    expect(mocks.connect).toHaveBeenCalledWith(expect.objectContaining({ proxy: {
+      host: '127.0.0.1', port: 50123, type: 5, userId: 'FIXTURE_SLOT_USER', password: 'FIXTURE_SLOT_SECRET'
+    } }))
+    expect(result.engineHttps).toMatchObject({ ok: false, code: 'UNKNOWN', stage: 'local-socks-and-remote-connect' })
+    expect(JSON.stringify(result)).not.toMatch(/FIXTURE_SLOT/)
+    expect(mocks.tls).not.toHaveBeenCalled()
+  })
   it('probes the supplied endpoint through the local direct SOCKS and closes its socket', async () => {
     const socket = { destroy: vi.fn() }
     mocks.connect.mockResolvedValue({ socket })

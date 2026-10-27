@@ -108,49 +108,69 @@ function sameAddresses(actual: string[], expected: readonly string[]): boolean {
     new Set(a).size === a.length && a.every(value => b.includes(value))
 }
 
-/** Conservative proof: unexpected permits (including foreign rules) remain unknown. */
-export function matchesFirewallPolicy(snapshot: FirewallStatusSnapshot, manifest: FirewallManifest,
-  programs: { app: string; proxy: string }, tunAlias: string, lan: readonly string[], tunCidr: string): boolean {
+export type FirewallPolicyMismatch = 'foreign-allows' | 'services' | 'profiles' | 'rule-names' |
+  'exception-rule-names' | 'rule-shape' | 'duplicate-rule' | 'program-scope' | 'rule-scope' | 'unapproved-rule'
+
+/** Fixed reason codes contain no rule names, paths, addresses or exception values. */
+export function firewallPolicyMismatch(snapshot: FirewallStatusSnapshot, manifest: FirewallManifest,
+  programs: { app: string; proxy: string }, tunAlias: string, lan: readonly string[], tunCidr: string): FirewallPolicyMismatch | null {
   const same = (a: string[], b: readonly string[]) => a.length === b.length && a.every(x => b.includes(x)) && new Set(a).size === a.length
   const pathEquals = (a: string, b: string | null) => !!b && a.toLowerCase() === b.toLowerCase()
-  if (snapshot.foreignAllows !== 0 || !same(snapshot.services.map(s => s.name.toLowerCase()), ['bfe', 'mpssvc']) ||
-      snapshot.services.some(s => s.status !== 'Running') || snapshot.profiles.length !== 3 ||
+  if (snapshot.foreignAllows !== 0) return 'foreign-allows'
+  if (!same(snapshot.services.map(s => s.name.toLowerCase()), ['bfe', 'mpssvc']) ||
+      snapshot.services.some(s => s.status !== 'Running')) return 'services'
+  if (snapshot.profiles.length !== 3 ||
       !same(snapshot.profiles.map(p => p.name), ['Domain', 'Private', 'Public']) ||
       snapshot.profiles.some(p => p.enabled !== 'True' || p.outbound !== 'Block' || !Array.isArray(p.disabledInterfaces) ||
-        !(p.disabledInterfaces.length === 0 || same(p.disabledInterfaces, ['NotConfigured']))) ||
-      coreNames.some(n => !manifest.ruleNames.includes(n)) ||
+        !(p.disabledInterfaces.length === 0 || same(p.disabledInterfaces, ['NotConfigured'])))) return 'profiles'
+  if (coreNames.some(n => !manifest.ruleNames.includes(n)) ||
       !same([...new Set(snapshot.storedNames)], manifest.ruleNames) ||
-      !same([...new Set(snapshot.rules.map(r => r.name))], manifest.ruleNames)) return false
+      !same([...new Set(snapshot.rules.map(r => r.name))], manifest.ruleNames)) return 'rule-names'
   const exceptions = manifest.exceptionPolicy ?? { apps: [], cidrs: [] }
   const exceptionNames = new Map([
     ...exceptions.apps.map(value => ['app:' + value.toLowerCase(), { program: value }] as const),
     ...exceptions.cidrs.map(value => ['ip:' + value, { remote: value }] as const)
   ].map(([key, scope]) => [prefix + 'user-' + createHash('sha256').update(key).digest('hex').slice(0, 24), scope]))
-  if ([...exceptionNames.keys()].some(n => !manifest.ruleNames.includes(n))) return false
-  return snapshot.rules.every(r => {
+  if ([...exceptionNames.keys()].some(n => !manifest.ruleNames.includes(n))) return 'exception-rule-names'
+  const approvedPrograms = new Map((manifest.programRules ?? []).map(r => [r.name, r.program]))
+  for (const r of snapshot.rules) {
     if (r.enabled !== 'True' || r.action !== 'Allow' || r.profile !== 'Any' ||
-        r.direction !== (r.name === prefix + 'allow-loopback-in' ? 'Inbound' : 'Outbound')) return false
+        r.direction !== (r.name === prefix + 'allow-loopback-in' ? 'Inbound' : 'Outbound')) return 'rule-shape'
     // Duplicate names are expected only for the two loopback address families.
     const peers = snapshot.rules.filter(p => p.name === r.name)
     if (peers.length !== 1 && (!r.name.startsWith(prefix + 'allow-loopback-') || peers.length !== 2 ||
-        JSON.stringify(peers[0].remote) === JSON.stringify(peers[1].remote) && JSON.stringify(peers[0].local) === JSON.stringify(peers[1].local))) return false
+        JSON.stringify(peers[0].remote) === JSON.stringify(peers[1].remote) && JSON.stringify(peers[0].local) === JSON.stringify(peers[1].local))) return 'duplicate-rule'
+    let matches: boolean
+    let programRule = false
     switch (r.name.slice(prefix.length)) {
-      case 'allow-singbox': return pathEquals(r.program, manifest.singboxExePath)
-      case 'allow-app': return pathEquals(r.program, programs.app)
-      case 'allow-tun-interface': return same(r.interfaces, [tunAlias])
-      case 'allow-loopback-out': return ['127.0.0.0/8', '::1/128'].some(scope => sameAddresses(r.remote, [scope]))
-      case 'allow-loopback-in': return ['127.0.0.0/8', '::1/128'].some(scope => sameAddresses(r.local, [scope]))
-      case 'allow-lan': return sameAddresses(r.remote, lan)
-      case 'allow-tun': return sameAddresses(r.remote, [tunCidr])
-      case 'allow-dhcp': return ['UDP', '17'].includes(r.protocol) && same(r.remotePorts, ['67', '68'])
-      case 'allow-ntp': return ['UDP', '17'].includes(r.protocol) && same(r.remotePorts, ['123'])
+      case 'allow-singbox': programRule = true; matches = pathEquals(r.program, manifest.singboxExePath); break
+      case 'allow-app': programRule = true; matches = pathEquals(r.program, programs.app); break
+      case 'allow-tun-interface': matches = same(r.interfaces, [tunAlias]); break
+      case 'allow-loopback-out': matches = ['127.0.0.0/8', '::1/128'].some(scope => sameAddresses(r.remote, [scope])); break
+      case 'allow-loopback-in': matches = ['127.0.0.0/8', '::1/128'].some(scope => sameAddresses(r.local, [scope])); break
+      case 'allow-lan': matches = sameAddresses(r.remote, lan); break
+      case 'allow-tun': matches = sameAddresses(r.remote, [tunCidr]); break
+      case 'allow-dhcp': matches = ['UDP', '17'].includes(r.protocol) && same(r.remotePorts, ['67', '68']); break
+      case 'allow-ntp': matches = ['UDP', '17'].includes(r.protocol) && same(r.remotePorts, ['123']); break
       default:
-        // Older journals do not record arbitrary proxy/helper program paths.
-        // Never infer their approved scope from a display name alone.
-        if (/^allow-proxy-\d+$/.test(r.name.slice(prefix.length))) return pathEquals(r.program, programs.proxy)
+        // Legacy journals can prove only the fixed external-proxy runtime.
+        // Xray/helpers require an exact approved path in the trusted journal.
+        if (approvedPrograms.has(r.name) || /^allow-proxy-\d+$/.test(r.name.slice(prefix.length))) {
+          programRule = true
+          matches = pathEquals(r.program, approvedPrograms.get(r.name) ?? programs.proxy)
+          break
+        }
         const exception = exceptionNames.get(r.name)
-        if (exception) return 'program' in exception ? pathEquals(r.program, exception.program) : sameAddresses(r.remote, [exception.remote])
-        return false
+        if (!exception) return 'unapproved-rule'
+        programRule = 'program' in exception
+        matches = 'program' in exception ? pathEquals(r.program, exception.program) : sameAddresses(r.remote, [exception.remote])
     }
-  })
+    if (!matches) return programRule ? 'program-scope' : 'rule-scope'
+  }
+  return null
+}
+
+/** Conservative proof: unexpected permits (including foreign rules) remain unknown. */
+export function matchesFirewallPolicy(...args: Parameters<typeof firewallPolicyMismatch>): boolean {
+  return firewallPolicyMismatch(...args) === null
 }

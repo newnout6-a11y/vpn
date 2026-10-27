@@ -80,7 +80,7 @@ jobs:
       - name: Unit-тесты
         run: npm test
       - name: Live probe — закрытие SOCKS, TLS и дочерних процессов
-        run: npm test -- --mode integration src/main/liveServerProbe.handshakeDrain.itest.ts src/main/keyHealthChecker.transportDrain.itest.ts
+        run: npm test -- --mode integration src/main/liveServerProbe.handshakeDrain.itest.ts src/main/keyHealthChecker.transportDrain.itest.ts src/main/socksUpstreamProbe.itest.ts
       - name: Маршруты Windows — read-only Win32/CIM
         run: npm test -- --mode integration src/main/native/selectedRouteInterfacesCore.itest.ts src/main/native/ownedTunInterfaceCore.itest.ts
       - name: Runtime Windows — read-only Win32/CIM

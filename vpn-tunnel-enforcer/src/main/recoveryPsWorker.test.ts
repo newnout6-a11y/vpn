@@ -112,6 +112,8 @@ describe('typed recovery worker ownership', () => {
     {op:'inspect-runtime-acl',runtimeDir:'C:\\runtime',script:'Get-Acl'},
     ...['relative', 'C:\\..\\runtime', 'C:\\runtime:stream'].map(runtimeDir => ({op:'inspect-runtime-acl',runtimeDir})),
     {op:'inspect-physical-dns',script:'Get-NetAdapter'}, {op:'inspect-physical-dns',alias:'Wi-Fi'},
+    {op:'inspect-owned-firewall-rules',script:'Get-Process'}, {op:'inspect-owned-firewall-rules',prefix:'foreign'},
+    {op:'INSPECT-OWNED-FIREWALL-RULES'},
     {op:'inspect-physical-adapters',script:'Get-NetAdapter'}, {op:'inspect-transition-adapters',path:'arbitrary'},
     {op:'warmup-adapters',module:'NetAdapter;evil'}, {op:'warmup-adapters',module:'netadapter'},
     {op:'warmup-adapters',module:'NetAdapter',script:'evil'}, {op:'warmup-adapters'},

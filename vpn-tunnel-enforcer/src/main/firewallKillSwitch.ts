@@ -18,7 +18,9 @@ import { getRecoveryManifestDir, recoveryManifestPath, readRecoveryManifest, wri
 import { TUN_ADAPTER_ALIAS, TUN_IPV4_NETWORK_CIDR, getTunAdapterAlias } from './tunAdapter'
 import { withFirewallRulesApi } from './firewallRulesApi'
 import type { FirewallKillSwitchStatus } from '../shared/ipc-types'
-import { FIREWALL_STATUS_PS, parseFirewallStatusSnapshot, matchesFirewallPolicy } from './firewallStatus'
+import { parseFirewallStatusSnapshot, firewallPolicyMismatch, type FirewallPolicyMismatch } from './firewallStatus'
+import { readFirewallStatusSnapshot } from './firewallStatusRead'
+import { executeRecoveryOperation } from './recoveryPsWorker'
 import { type WfpIpv6Policy, wfpPrelude, validateWfpIpv6Policy, prepareWfpIpv6Policy, prepareWfpIpv6Exceptions, applyWfpIpv6Policy, verifyWfpIpv6Policy, removeWfpIpv6Protection, hasWfpIpv6Protection, sameWfpCoreScopes, reserveWfpIpv6Priority } from './wfpIpv6'
 
 const execFile = promisify(execFileCb)
@@ -131,6 +133,7 @@ export interface FirewallManifest {
   createdAt: number
   ruleNames: string[]
   singboxExePath: string | null
+  programRules?: Array<{ name: string; program: string }>
   savedProfiles: SavedProfile[]
   exceptionPolicy?: FirewallExceptionPolicy
   pendingExceptionPolicy?: FirewallExceptionPolicy
@@ -169,9 +172,22 @@ export function validateFirewallManifest(value: unknown, rejected?: string[]): F
   return { schemaVersion: 1, owner: 'VPNTE', operationId: v.operationId, phase: v.phase!,
     strictMode: v.strictMode, createdAt: v.createdAt!, ruleNames: [...new Set(v.ruleNames)],
     singboxExePath: v.singboxExePath!, savedProfiles: validateSavedProfiles(v.savedProfiles, rejected),
+    ...(v.programRules !== undefined ? { programRules: validateProgramRules(v.programRules, rejected) } : {}),
     ...(v.exceptionPolicy ? { exceptionPolicy: validateFirewallExceptionPolicy(v.exceptionPolicy) } : {}),
     ...(v.pendingExceptionPolicy ? { pendingExceptionPolicy: validateFirewallExceptionPolicy(v.pendingExceptionPolicy) } : {}),
     ...(v.ipv6Policy ? { ipv6Policy: validateWfpIpv6Policy(v.ipv6Policy) } : {}) }
+}
+function validateProgramRules(value: FirewallManifest['programRules'], rejected?: string[]): NonNullable<FirewallManifest['programRules']> {
+  if (!Array.isArray(value) || value.length > 500 || value.some(r => !r ||
+      typeof r.name !== 'string' || !/^VPNTE-killswitch-allow-[a-zA-Z0-9_-]{1,90}$/.test(r.name) ||
+      /-allow-(?:singbox|app|tun-interface|loopback-out|loopback-in|lan|tun|dhcp|ntp)$/.test(r.name) ||
+      typeof r.program !== 'string' || r.program.length > 32767 || !/^[a-z]:\\.+\.exe$/i.test(r.program) ||
+      /[\x00-\x1f<>"|?*:]/.test(r.program.slice(2)) || r.program.split(/[\\/]+/).some(p => p === '.' || p === '..')) ||
+      new Set(value.map(r => r.name.toLowerCase())).size !== value.length) {
+    if (rejected) { rejected.push('firewall program scopes: invalid or conflicting snapshot; skipped'); return [] }
+    throw new Error('Invalid firewall program rules')
+  }
+  return value.map(r => ({ name: r.name, program: r.program }))
 }
 export function getKillSwitchManifestPath(): string { return recoveryManifestPath('firewall.json') }
 function backupDir(): string { return getRecoveryManifestDir() }
@@ -432,45 +448,76 @@ export function isValidIpOrCidr(value: string): boolean {
 }
 
 export async function isKillSwitchActive(options?: { probeWfp?: boolean; recovery?: boolean }): Promise<boolean> {
-  if ((await readManifest(options?.recovery ? [] : undefined)) !== null || await probeFirewallForOurRules()) return true
-  if (options?.probeWfp === false) return false
-  return hasWfpIpv6Protection(wfpRun)
+  // Independent fresh reads may overlap, but none may outlive this cleanup
+  // gate. Preserve the serial path's error precedence and short-circuit result.
+  const [manifest, rules, wfp] = await Promise.allSettled([
+    readManifest(options?.recovery ? [] : undefined),
+    probeFirewallForOurRules(),
+    options?.probeWfp === false ? Promise.resolve(false) : hasWfpIpv6Protection(wfpRun)
+  ])
+  if (manifest.status === 'rejected') throw manifest.reason
+  if (manifest.value !== null) return true
+  if (rules.status === 'rejected') throw rules.reason
+  if (rules.value) return true
+  if (wfp.status === 'rejected') throw wfp.reason
+  return wfp.value
 }
 
 /** Presence above remains a cleanup gate. UI evidence must use this fresh read. */
 export function getFirewallKillSwitchStatus(): Promise<FirewallKillSwitchStatus> {
-  // Share only the pending read at the queue tail. An intervening mutation
-  // changes that barrier and requires a new read after its effects settle.
-  if (pendingFirewallStatus?.barrier === firewallQueue) return pendingFirewallStatus.result
-  const result = serializeFirewall<FirewallKillSwitchStatus>(async () => {
-    const unknown = (reason: FirewallKillSwitchStatus['reason']): FirewallKillSwitchStatus => ({ state: 'unknown', cleanupRequired: true, reason })
+  const unknown = (reason: FirewallKillSwitchStatus['reason']): FirewallKillSwitchStatus => ({ state: 'unknown', cleanupRequired: true, reason })
+  const epoch = firewallMutationEpoch
+  const incomplete = (reason: FirewallPolicyMismatch | 'missing-manifest' | 'unfinished-manifest' | 'missing-ipv6-policy'): FirewallKillSwitchStatus => {
+    const fingerprint = `${epoch}:${reason}`
+    if (passivePolicyMismatch !== fingerprint) logEvent('warn', 'firewall-killswitch', 'passive policy mismatch', { reason })
+    passivePolicyMismatch = fingerprint
+    return unknown('incomplete-policy')
+  }
+  const current = () => epoch === firewallMutationEpoch && pendingFirewallMutations === 0
+  // UI evidence must never hold up lifecycle mutations. A read that overlaps
+  // any admitted mutation cannot prove a consistent policy, even after it ends.
+  if (!current()) return Promise.resolve(unknown('unavailable'))
+  if (pendingFirewallStatus?.epoch === epoch) return pendingFirewallStatus.result
+  const result = (async (): Promise<FirewallKillSwitchStatus> => {
     if (process.platform !== 'win32' || !isElevatedPsHelperRunning()) return unknown('unavailable')
     let manifest: FirewallManifest | null
     try { manifest = await readManifest(undefined, true) }
     catch { return unknown('untrusted-manifest') }
-    // Bypass ps(): passive reads must never fall back to UAC or restart a helper.
-    const run = async (script: string, policy: 'firewall-killswitch' | 'wfp-ipv6') => {
+    if (!current()) return unknown('unavailable')
+    // Only the short WFP proof uses the existing helper; never submit stale
+    // work, restart a helper, or use the mutation/fallback ps() path here.
+    const run = async (script: string, policy: 'wfp-ipv6') => {
+      if (!current()) throw new Error('Firewall status was invalidated')
       const result = await execElevatedPs(script, 15000, policy, { startIfUnavailable: false })
+      if (!current()) throw new Error('Firewall status was invalidated')
       if (result.exitCode) throw new Error('Firewall status read-back failed')
       return result
     }
     try {
-      const snapshot = parseFirewallStatusSnapshot((await run(FIREWALL_STATUS_PS, 'firewall-killswitch')).stdout)
+      const raw = await readFirewallStatusSnapshot()
+      if (!current()) return unknown('unavailable')
+      const snapshot = parseFirewallStatusSnapshot(raw)
       if (!manifest) {
         const wfpPresent = await hasWfpIpv6Protection(script => run(script, 'wfp-ipv6'))
-        if (snapshot.rules.length || snapshot.storedNames.length || wfpPresent) return unknown('incomplete-policy')
+        if (!current()) return unknown('unavailable')
+        if (snapshot.rules.length || snapshot.storedNames.length || wfpPresent) return incomplete('missing-manifest')
+        passivePolicyMismatch = undefined
         return { state: 'inactive', cleanupRequired: false, reason: 'no-owned-protection' }
       }
-      if (manifest.phase !== 'active' || manifest.pendingExceptionPolicy || !manifest.ipv6Policy ||
-          !matchesFirewallPolicy(snapshot, manifest, { app: process.execPath, proxy: externalProxyProgramPath() },
-            getTunAdapterAlias(), LAN_BYPASS_CIDRS, TUN_IPV4_NETWORK_CIDR)) return unknown('incomplete-policy')
+      if (manifest.phase !== 'active' || manifest.pendingExceptionPolicy) return incomplete('unfinished-manifest')
+      if (!manifest.ipv6Policy) return incomplete('missing-ipv6-policy')
+      const mismatch = firewallPolicyMismatch(snapshot, manifest, { app: process.execPath, proxy: externalProxyProgramPath() },
+        getTunAdapterAlias(), LAN_BYPASS_CIDRS, TUN_IPV4_NETWORK_CIDR)
+      if (mismatch) return incomplete(mismatch)
       await verifyWfpIpv6Policy(manifest.ipv6Policy, script => run(script, 'wfp-ipv6'), getTunAdapterAlias())
+      if (!current()) return unknown('unavailable')
+      passivePolicyMismatch = undefined
       return { state: 'verified', cleanupRequired: true, reason: 'policy-verified' }
     } catch {
-      return unknown('read-back-failed')
+      return unknown(current() ? 'read-back-failed' : 'unavailable')
     }
-  })
-  const pending = { barrier: firewallQueue, result }
+  })()
+  const pending = { epoch, result }
   pendingFirewallStatus = pending
   const clear = () => { if (pendingFirewallStatus === pending) pendingFirewallStatus = null }
   void result.then(clear, clear)
@@ -497,7 +544,8 @@ async function ensureKillSwitchProgramAllowedUnlocked(
   }
   // This rule affects Windows Firewall only. WFP presence is a cleanup gate;
   // its IPv6 permits require the separately journalled endpoint/App ID policy.
-  if (!(await readManifest()) && !(await probeFirewallForOurRules())) {
+  const manifest = await readManifest()
+  if (!manifest && !(await probeFirewallForOurRules())) {
     return { success: true, skipped: true, message: 'Kill-switch inactive' }
   }
 
@@ -516,6 +564,10 @@ Write-Output "RULE:$ruleName"
 `
 
   try {
+    const programRules = validateProgramRules([...(manifest?.programRules ?? []).filter(r => r.name !== ruleName), { name: ruleName, program: trimmed }])
+    // Record the exact intended scope before effects. Failed/partial effects
+    // cannot verify unless fresh rule read-back matches this durable journal.
+    if (manifest) await writeManifest({ ...manifest, ruleNames: [...new Set([...manifest.ruleNames, ruleName])], programRules })
     await ps(script, true, 30000)
     logEvent('info', 'firewall-killswitch', 'program allow rule ensured', { ruleName, programPath: trimmed })
     return { success: true, message: `Kill-switch allow rule ensured: ${ruleName}` }
@@ -550,7 +602,10 @@ Write-Output "RULE:$ruleName"
  * the script fails partway, only harmless extra Allow rules remain.
  */
 let firewallQueue: Promise<unknown> = Promise.resolve()
-let pendingFirewallStatus: { barrier: Promise<unknown>; result: Promise<FirewallKillSwitchStatus> } | null = null
+let firewallMutationEpoch = 0
+let pendingFirewallMutations = 0
+let pendingFirewallStatus: { epoch: number; result: Promise<FirewallKillSwitchStatus> } | null = null
+let passivePolicyMismatch: string | undefined
 async function timedFirewallPhase<T>(phase: string, operation: () => Promise<T>, operationId?: string): Promise<T> {
   const started = performance.now()
   let outcome = 'rejected'
@@ -565,7 +620,9 @@ async function timedFirewallPhase<T>(phase: string, operation: () => Promise<T>,
   }
 }
 function serializeFirewall<T>(operation: () => Promise<T>): Promise<T> {
-  const result = firewallQueue.then(operation, operation)
+  firewallMutationEpoch++
+  pendingFirewallMutations++
+  const result = firewallQueue.then(operation, operation).finally(() => { pendingFirewallMutations-- })
   firewallQueue = result.then(() => undefined, () => undefined)
   return result
 }
@@ -760,11 +817,15 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
   }
   opts.signal?.throwIfAborted()
   const savedProfiles = previous?.savedProfiles ?? await timedFirewallPhase('snapshot-profiles', snapshotFirewallProfiles)
+  const proxyPaths = [...new Set([...(opts.proxyOwnerProgramPaths ?? []), externalProxyProgramPath()])]
+  let programRules: NonNullable<FirewallManifest['programRules']>
+  try { programRules = validateProgramRules(proxyPaths.map((program, i) => ({ name: `${RULE_PREFIX}-allow-proxy-${i}`, program }))) }
+  catch { return firewallFailure(new IpcFault('validation'), 'Invalid kill-switch program scope') }
   const prepared: FirewallManifest = {
     schemaVersion: 1, owner: 'VPNTE', operationId: previous?.operationId ?? randomUUID(),
     phase: 'prepared', strictMode: opts.strictMode ?? previous?.strictMode ?? false,
     createdAt: previous?.createdAt ?? Date.now(), savedProfiles,
-    ruleNames: previous?.ruleNames ?? [], singboxExePath: opts.singboxExePath, ipv6Policy,
+    ruleNames: previous?.ruleNames ?? [], singboxExePath: opts.singboxExePath, ipv6Policy, programRules,
     ...(initialExceptions ? { pendingExceptionPolicy: initialExceptions } : {})
   }
   // This durable snapshot MUST precede any New/Remove/Set-NetFirewall operation.
@@ -789,7 +850,6 @@ async function enableKillSwitchUnlocked(opts: KillSwitchOptions): Promise<Firewa
     .join(',')
 
   // Build proxy process allow rules dynamically
-  const proxyPaths = [...new Set([...(opts.proxyOwnerProgramPaths ?? []), externalProxyProgramPath()])]
   const proxyAllowParts: string[] = []
   for (let i = 0; i < proxyPaths.length; i++) {
     const ruleName = `${RULE_PREFIX}-allow-proxy-${i}`
@@ -1208,16 +1268,25 @@ async function probeForStuckBlockDefault(): Promise<boolean> {
 
 async function probeFirewallForOurRules(): Promise<boolean> {
   if (process.platform !== 'win32') return false
+  const parseCount = (stdout: unknown): boolean => {
+    const value = String(stdout ?? '').trim()
+    if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error('Firewall ownership query was not confirmed')
+    return Number(value) > 0
+  }
   try {
+    // Reuse the isolated, already prepared reader: this fixed fresh COM query
+    // must not queue behind lockdown writes in the elevated helper.
+    return parseCount(await executeRecoveryOperation({ op: 'inspect-owned-firewall-rules' }, 15000))
+  } catch (error) {
+    // Read-only work can safely retry through the established helper. Failed
+    // reads never prove protection absent, including a failed fallback.
+    logEvent('debug', 'firewall-killswitch', 'ownership reader fallback', { category: classifyRecoveryError(error) })
     const { stdout } = await ps(
       `(Get-VpnteFirewallRuleNames -DisplayName '${RULE_PREFIX}*' -ErrorAction Stop | Measure-Object).Count`,
       false,
       15000
     )
-    const count = parseInt(String(stdout || '0').trim(), 10)
-    return Number.isFinite(count) && count > 0
-  } catch {
-    return false
+    return parseCount(stdout)
   }
 }
 
@@ -1454,6 +1523,10 @@ function firewallBackupPath(): string {
 }
 
 export async function nuclearFirewallReset(): Promise<FirewallKillSwitchResult & { backupPath?: string }> {
+  return serializeFirewall(nuclearFirewallResetUnlocked)
+}
+
+async function nuclearFirewallResetUnlocked(): Promise<FirewallKillSwitchResult & { backupPath?: string }> {
   if (process.platform !== 'win32') {
     return firewallFailure(new IpcFault('conflict'), 'Only supported on Windows')
   }

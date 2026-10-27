@@ -18,6 +18,93 @@ function harness() {
 }
 
 describe('canonical tunnel state', () => {
+  it.each([true, false])('publishes a retained TUN only after upstream verification=%s (AT-00-002/008)', async verified => {
+    const h = harness()
+    await h.connect()
+    h.model.nativeStartBegan(1)
+    expect(h.model.upstreamSwitchBegan(1)).toEqual({ success: true })
+    expect(h.model.snapshot).toMatchObject({ state: 'connected', transition: 'reconnecting', pid: 123, processState: 'running' })
+    expect(h.model.upstreamSwitchFinished({ generation: 1, verified })).toEqual({ success: true })
+    expect(h.model.snapshot).toMatchObject({ state: verified ? 'connected' : 'unknown', transition: null,
+      pid: 123, mode: verified ? 'tun' : null, cleanupRequired: true })
+    expect(h.model.upstreamSwitchFinished({ generation: 1, verified: true }).success).toBe(false)
+  })
+
+  it.each(['pid', 'startedAt', 'dead', 'soft'] as const)('rejects upstream proof if the retained TUN changes: %s (AT-00-002)', async changed => {
+    const h = harness()
+    await h.connect()
+    h.model.upstreamSwitchBegan(1)
+    if (changed === 'pid') h.evidence.pid = 456
+    if (changed === 'startedAt') Object.assign(h.evidence, { startedAt: 1234 })
+    if (changed === 'dead') { h.evidence.running = false; h.evidence.pid = null }
+    if (changed === 'soft') h.evidence.softApplied = true
+    h.model.upstreamSwitchFinished({ generation: 1, verified: true })
+    expect(h.model.snapshot).toMatchObject({ state: 'unknown', transition: null, cleanupRequired: true })
+  })
+
+  it.each(['stop', 'native', 'fault', 'operation'] as const)('fences a late upstream receipt after %s supersedes it (AT-00-003)', async superseded => {
+    const h = harness()
+    await h.connect()
+    h.model.nativeStartBegan(1)
+    h.model.upstreamSwitchBegan(1)
+    if (superseded === 'stop') h.model.runtimeChanged('stopping')
+    if (superseded === 'native') h.model.nativeStartBegan(2)
+    if (superseded === 'fault') h.model.fault('blocked')
+    if (superseded === 'operation') await h.lane.stop(h.cleanup)
+    const before = h.model.snapshot
+    expect(h.model.upstreamSwitchFinished({ generation: 1, verified: true }).success).toBe(false)
+    expect(h.model.snapshot).toEqual(before)
+  })
+
+  it.each(['adapting', 'restarting:1/3'])('hands %s to native recovery without a late upstream receipt clearing it (AT-00-003 / AT-02-003)', async status => {
+    const h = harness()
+    await h.connect()
+    h.model.nativeStartBegan(1)
+    h.model.upstreamSwitchBegan(1)
+    h.evidence.running = false; h.evidence.pid = null
+    expect(h.model.runtimeChanged(status)).toEqual({ success: true })
+    const reconnecting = h.model.snapshot
+    expect(reconnecting).toMatchObject({ transition: 'reconnecting', processState: 'stopped' })
+    expect(h.model.upstreamSwitchFinished({ generation: 1, verified: false }).success).toBe(false)
+    expect(h.model.snapshot).toEqual(reconnecting)
+    expect(h.model.nativeStartBegan(2)).toEqual({ success: true })
+    h.evidence.running = true; h.evidence.pid = 456
+    expect(h.model.nativeStartFinished({ generation: 2, success: true })).toEqual({ success: true })
+    expect(h.model.snapshot).toMatchObject({ state: 'connected', transition: null, mode: 'tun', pid: 456, proxyStatus: 'running' })
+  })
+
+  it.each(['adapting', 'restarting:1/3'])('explicit stop wins over %s and both older completion receipts (AT-00-007 / AT-02-011)', async status => {
+    const h = harness()
+    await h.connect()
+    h.model.nativeStartBegan(1)
+    h.model.upstreamSwitchBegan(1)
+    h.evidence.running = false; h.evidence.pid = null
+    h.model.runtimeChanged(status)
+    h.model.nativeStartBegan(2)
+    await h.lane.stop(h.cleanup)
+    const stopped = h.model.snapshot
+    expect(stopped).toMatchObject({ state: 'disconnected', transition: null, mode: null, pid: null })
+    expect(h.model.upstreamSwitchFinished({ generation: 1, verified: true }).success).toBe(false)
+    expect(h.model.nativeStartFinished({ generation: 2, success: true }).success).toBe(false)
+    expect(h.model.snapshot).toEqual(stopped)
+  })
+
+  it('rejects stale and concurrent upstream generation without changing native generation (AT-00-003)', async () => {
+    const h = harness()
+    expect(h.model.upstreamSwitchBegan(1).success).toBe(false)
+    await h.connect()
+    h.model.nativeStartBegan(1)
+    h.model.upstreamSwitchBegan(1)
+    const before = h.model.snapshot
+    expect(h.model.upstreamSwitchBegan(2).success).toBe(false)
+    expect(h.model.upstreamSwitchFinished({ generation: 0, verified: true }).success).toBe(false)
+    expect(h.model.snapshot).toEqual(before)
+    h.model.upstreamSwitchFinished({ generation: 1, verified: true })
+    expect(h.model.upstreamSwitchBegan(1).success).toBe(false)
+    // A new native generation is independent of however many upstream swaps happened.
+    expect(h.model.nativeStartBegan(2).success).toBe(true)
+  })
+
   it('confirms cancelled server-switch cleanup only from a complete current native stop receipt (AT-00-002/003/008)', async () => {
     const h = harness()
     await h.connect()

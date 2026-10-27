@@ -71,8 +71,25 @@ describe('BrowserIpCard IP helpers', () => {
       expect(summary.webRtcLocalIps).toContain('192.168.1.10')
       expect(summary.webRtcPublicIps).not.toContain('192.168.1.10')
       expect(summary.webRtcPublicIps).toEqual(['198.51.100.1'])
+      expect(summary.summary).toBe('warn')
+      expect(summary.details).toContain('WebRTC показал локальные адреса: 192.168.1.10.')
       // Should not claim that an unexpected public IP leaked
       expect(summary.details.some(d => d.includes('WebRTC показал другие публичные адреса'))).toBe(false)
+    })
+
+    // AT-07-004: an incomplete observation cannot erase an already observed leak.
+    it.each([
+      ['203.0.113.9', 'другие публичные адреса'],
+      ['192.168.1.10', 'локальные адреса']
+    ])('retains the warning for %s when ICE completion times out', (address, detail) => {
+      const result = summarize({
+        browserIpv4: '198.51.100.1', browserIpv6: null, nodeIp: '198.51.100.1',
+        webRtcCandidates: [{ type: 'host', address, protocol: 'udp' }],
+        webRtcError: 'Истекло время ожидания WebRTC', tunRunning: true
+      })
+      expect(result.summary).toBe('warn')
+      expect(result.details.some(line => line.includes(detail) && line.includes(address))).toBe(true)
+      expect(result.details).toContain('WebRTC проверка не завершилась: Истекло время ожидания WebRTC')
     })
   })
 })

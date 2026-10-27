@@ -1,6 +1,6 @@
 // AT-03-003 / AT-03-012: fail-closed storage boundaries (Windows calls mocked).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { execFileSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'crypto'
 import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, readdirSync, unlinkSync, rmdirSync } from 'fs'
 import { join } from 'path'
@@ -33,6 +33,21 @@ import { ensureRecoveryManifestDir, readRecoveryManifest, readRecoveryArtifact, 
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
 const originalProgramData = process.env.ProgramData
 function decode(command: string) { return Buffer.from(command.split(' ').at(-1)!, 'base64').toString('utf16le') }
+// Run readable fixture files instead of repeatedly encoding long command lines.
+// Only a completed PowerShell rejection can satisfy a negative native test.
+function runNativeFixture(script: string) {
+  const root = join(process.cwd(), '.tmp'); mkdirSync(root, { recursive: true })
+  const folder = mkdtempSync(join(root, 'recovery-storage-script-'))
+  const entry = join(folder, 'fixture.ps1')
+  try {
+    writeFileSync(entry, '\ufeff' + script, 'utf8')
+    const result = spawnSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile', '-NonInteractive', '-File', entry],
+      { encoding: 'utf8', timeout: 15000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    if (result.error) throw result.error
+    if (result.signal || result.status === null) throw new Error('Native fixture did not complete')
+    return result
+  } finally { if (readdirSync(folder).includes('fixture.ps1')) unlinkSync(entry); rmdirSync(folder) }
+}
 beforeEach(() => {
   vi.resetAllMocks()
   mocks.worker.mockRejectedValue(new RecoveryWorkerError('unavailable', 'fixture unavailable before dispatch'))
@@ -96,19 +111,25 @@ $path='${path.replace(/'/g, "''")}'
 $expectedHash='${createHash('sha256').update('{').digest('hex')}'
 ${RECOVERY_QUARANTINE_SCRIPT}`
     try {
-      const invoke = () => execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 15000, windowsHide: true, stdio: ['ignore','pipe','pipe'] })
+      const result = runNativeFixture(script)
       if (variant === 'same') {
-        expect(invoke()).toContain('RECOVERY_ARTIFACT_QUARANTINED')
+        expect(result.status, result.stderr).toBe(0)
+        expect(result.stdout).toContain('RECOVERY_ARTIFACT_QUARANTINED')
         const files = readdirSync(folder); expect(files).toHaveLength(1)
         expect(files[0]).toMatch(/^firewall\.json\.corrupt-/)
         expect(readFileSync(join(folder, files[0]), 'utf8')).toBe(body)
       } else if (variant.startsWith('replaced')) {
-        expect(invoke).toThrow()
+        expect(result.status).toBe(1)
+        expect(result.stderr).toContain(variant === 'replaced' ? 'Recovery manifest changed during quarantine' : 'Recovery quarantine raced with replacement')
         expect(readFileSync(path, 'utf8')).toBe(variant === 'replaced' ? '{"schemaVersion":1}' : '{"schemaVersion":1,"newer":true}')
         const quarantined = readdirSync(folder).filter(name => name.startsWith('firewall.json.corrupt-'))
         expect(quarantined).toHaveLength(variant === 'replaced-again' ? 1 : 0)
         if (quarantined.length) expect(readFileSync(join(folder, quarantined[0]), 'utf8')).toBe('{"schemaVersion":1}')
-      } else { expect(invoke).toThrow(); expect(readdirSync(folder)).toEqual(['firewall.json']); expect(readFileSync(path, 'utf8')).toBe(body) }
+      } else {
+        expect(result.status).toBe(1)
+        expect(result.stderr).toContain(variant === 'untrusted' ? 'Untrusted fixture' : 'Recovery manifest changed since rejection')
+        expect(readdirSync(folder)).toEqual(['firewall.json']); expect(readFileSync(path, 'utf8')).toBe(body)
+      }
     } finally { for (const name of readdirSync(folder)) unlinkSync(join(folder, name)); rmdirSync(folder) }
   }, 20000)
   it('preserves nested future-version errors and fingerprints corrupt content (AT-03-003)', async () => {
@@ -190,11 +211,23 @@ function Get-Acl { [CmdletBinding()]param($LiteralPath)
 }
 function Get-Content { [CmdletBinding()]param($LiteralPath,[switch]$Raw,$Encoding) '{"schemaVersion":1,"owner":"VPNTE","strictMode":false}' }
 ${generated}`
-      try {
-        return execFileSync(process.env.VPNTE_PWSH || 'powershell.exe',
-          ['-NoProfile','-NonInteractive','-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
-          { encoding: 'utf8', timeout: 15000, stdio: ['ignore','pipe','pipe'] })
-      } catch { throw new Error('Native trusted boundary rejected') }
+      const result = runNativeFixture(script)
+      if (result.status !== 0) {
+        const rejections: Partial<Record<string, string>> = {
+          rootOwner: 'Untrusted recovery owner', directoryAce: 'Untrusted recovery ACE',
+          parentReparse: 'Untrusted ProgramData path', fileReparse: 'Reparse recovery artifact rejected',
+          fileType: 'Wrong recovery artifact type', fileOwner: 'Untrusted recovery owner',
+          unprotected: 'Recovery ACL must be protected', oversized: 'Recovery manifest exceeds limit',
+          fileAce: 'Untrusted recovery ACE', fileUnprotected: 'Recovery ACL must be protected',
+          directoryReparse: 'Reparse recovery artifact rejected', environmentMismatch: 'ProgramData environment does not match'
+        }
+        const rejection = rejections[variant]
+        expect(result.status).toBe(1)
+        expect(rejection).toBeDefined()
+        expect(result.stderr).toContain(rejection)
+        throw new Error('Native trusted boundary rejected')
+      }
+      return result.stdout
     })
     if (accepted) {
       const value = await readRecoveryManifest('firewall.json', value => value)
@@ -218,9 +251,15 @@ ${generated}`
 function Get-NetAdapter { [pscustomobject]@{Name='Ethernet 5';Status=$(if($fixture.status){$fixture.status}else{'Up'});InterfaceDescription='sing-tun Tunnel';DriverDescription=$fixture.driver;PnPDeviceID=$fixture.pnp;ifIndex=5;InterfaceGuid='00000000-0000-0000-0000-000000000005'} }
 function Get-NetIPAddress { [pscustomobject]@{IPAddress=$fixture.ip;PrefixLength=$fixture.prefix} }
 ${Buffer.from(args.at(-1), 'base64').toString('utf16le')}`
-      try {
-        return execFileSync(process.env.VPNTE_PWSH || 'powershell.exe', ['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 15000, stdio: ['ignore','pipe','pipe'] })
-      } catch { throw new Error('Native TUN identity rejected') }
+      const result = runNativeFixture(script)
+      if (result.status !== 0) {
+        expect(result.status).toBe(1)
+        expect(result.stderr).toContain(fixture.status === 'Disconnected' ? 'VPNTE TUN adapter is not Up'
+          : fixture.driver !== 'Wintun Userspace Tunnel' || fixture.pnp !== 'SWD\\Wintun\\fixture'
+            ? 'VPNTE TUN driver identity mismatch' : 'VPNTE TUN address identity mismatch')
+        throw new Error('Native TUN identity rejected')
+      }
+      return result.stdout
     })
     if (fixture.accepted) {
       await expect(recordOwnedTunAdapter('Ethernet 5')).resolves.toBeUndefined()

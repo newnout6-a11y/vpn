@@ -3,6 +3,7 @@ import { constants, type Stats } from 'fs'
 import { lstat, open, rename, unlink, type FileHandle } from 'fs/promises'
 import { basename, dirname, join, resolve } from 'path'
 import { identityDiff } from './fileIdentityDiff'
+import { withRuntimeArtifactStage } from './runtimeFileCoordination'
 
 function isMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT'
@@ -79,6 +80,10 @@ const hash = (data: Buffer) => createHash('sha256').update(data).digest('hex')
  * Run after native directory ACL/owner/reparse verification, before execution.
  * Do not overwrite an existing inode or learn an expected hash from staging. */
 export async function stageVerifiedRuntimeArtifact(source: string, destination: string): Promise<boolean> {
+  return withRuntimeArtifactStage(destination, () => stageArtifact(source, destination))
+}
+
+async function stageArtifact(source: string, destination: string): Promise<boolean> {
   source = resolve(source)
   destination = resolve(destination)
   const bytes = (await readVerifiedFile(source))!

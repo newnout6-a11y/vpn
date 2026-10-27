@@ -1,5 +1,13 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useAppStore } from '../store'
+import { usePageActive } from '../hooks/usePageActive'
+
+let pendingRead: Promise<string | null> | null = null
+function readForeignVpn(): Promise<string | null> {
+  return pendingRead ??= window.electronAPI.detectForeignVpn()
+    .then(result => result?.foreign ?? null)
+    .finally(() => { pendingRead = null })
+}
 
 /**
  * Polls the main process for a foreign VPN/TUN adapter (Happ, WireGuard,
@@ -19,31 +27,33 @@ import { useAppStore } from '../store'
  * Returns the foreign adapter descriptor ("happ-tun (172.18.0.1)") or null.
  */
 export function useForeignVpn(pollMs = 5000): string | null {
+  const active = usePageActive()
   const tunRunning = useAppStore(s => s.tunRunning)
   const [foreign, setForeign] = useState<string | null>(null)
 
-  const check = useCallback(async () => {
-    // While our tunnel is up the main process returns null by design; skip
-    // the IPC entirely to avoid flicker and needless work.
-    if (tunRunning) {
+  useEffect(() => {
+    if (!active || tunRunning) {
       setForeign(null)
       return
     }
-    try {
-      const res = await window.electronAPI.detectForeignVpn()
-      setForeign(res?.foreign ?? null)
-    } catch {
-      // Tolerate missing IPC (older preload) — just report "no foreign VPN".
-      setForeign(null)
+    let disposed = false
+    let inFlight = false
+    const check = async () => {
+      if (inFlight) return
+      inFlight = true
+      try {
+        const result = await readForeignVpn()
+        if (!disposed) setForeign(result)
+      } catch {
+        if (!disposed) setForeign(null)
+      } finally {
+        inFlight = false
+      }
     }
-  }, [tunRunning])
-
-  useEffect(() => {
-    check()
-    if (tunRunning) return
+    void check()
     const id = setInterval(check, pollMs)
-    return () => clearInterval(id)
-  }, [check, tunRunning, pollMs])
+    return () => { disposed = true; clearInterval(id) }
+  }, [active, tunRunning, pollMs])
 
   return foreign
 }

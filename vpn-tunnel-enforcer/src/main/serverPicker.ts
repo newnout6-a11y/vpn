@@ -23,6 +23,7 @@ import { createHash, randomUUID } from 'crypto'
 import { logEvent } from './appLogger'
 import { nativePhysicalIpv4Sources } from './native/nativeNetworkReads'
 import { withProtectedIpTransition } from './protectedIpTransition'
+import type { OutboundSwitchReceipt } from './protectedOutboundSwitch'
 import { compactForIpcLog } from './ipcLogging'
 import { copySecretToClipboard } from './secretClipboard'
 import { withSecretExportConsent, type CancelledSecretExport } from './secretExportConsent'
@@ -182,9 +183,12 @@ async function logTunnelFailureDiagnostics(sessionKey: string): Promise<void> {
       if (currentTunnelProbeSessionKey() !== sessionKey) return
       const status = tunController.getStatus()
       const engine = xray.getXrayStatus()
+      const xraySlot = xray.getActiveXraySlot()
+      const engineSocks = runtime.getActiveXraySocksEndpoint()
       const details = await collectTunnelFailureDiagnostics({
         runtimeDir: runtime.getTunRuntimeDir(), startedAt: status.startedAt ?? Date.now(),
-        xrayStartedAt: engine.startedAt, xrayPort: engine.running ? engine.socksPort : null,
+        xrayStartedAt: engine.startedAt, xraySlot, xrayPort: xraySlot ? engineSocks?.port ?? null : engine.running ? engine.socksPort : null,
+        xraySocksAuth: engineSocks ? { username: engineSocks.username, password: engineSocks.password } : undefined,
         directPort: getDirectProxyPort(), dialTarget: xray.getXrayDialTarget()
       })
       if (currentTunnelProbeSessionKey() === sessionKey) {
@@ -1103,13 +1107,14 @@ let resolveIpsInFlight: Promise<ServerProfile[]> | null = null
 async function resolveAndPersistProfileIps(): Promise<ServerProfile[]> {
   if (resolveIpsInFlight) return resolveIpsInFlight
   resolveIpsInFlight = (async () => {
-  const profiles = getProfiles()
-  const enriched = await profilesForDisplay(profiles)
-  const changed = enriched.some((profile, index) =>
-    profile.resolvedIp !== profiles[index]?.resolvedIp
-  )
-  if (changed) saveProfiles(enriched)
-  return enriched
+    const profiles = store.getProfileSummaries()
+    const enriched = await profilesForDisplay(profiles)
+    const updates = new Map(enriched.flatMap((profile, index) => profile.resolvedIp && profile.resolvedIp !== profiles[index]?.resolvedIp
+      ? [[profile.id, { server: profiles[index].server, ip: profile.resolvedIp, at: profile.resolvedIpAt! }] as const] : []))
+    return withProfileStoreWriteLock(() => {
+      store.mergeResolvedIps(updates)
+      return store.getProfileSummaries()
+    })
   })()
   try {
     return await resolveIpsInFlight
@@ -2109,16 +2114,16 @@ function getActiveProfileId(): string | null {
  * Sets the active profile by ID. Auto-selects the first available profile if
  * none is currently active and at least one profile exists.
  */
-export function selectProfile(id: string): void {
-  const profiles = getProfiles()
-  const selectable = profiles.some((p) => p.id === id && p.enabled !== false && !p.removedFromSubscriptionAt)
-  if (!selectable) {
+export function selectProfile(id: string): ServerProfile | null {
+  const profile = store.getProfile(id)
+  if (!profile || profile.enabled === false || profile.removedFromSubscriptionAt) {
     logEvent('warn', 'server-picker', 'selectProfile: profile not found or unavailable', { id })
-    return
+    return null
   }
   store.set('activeProfileId', id)
   activeCountryGeneration += 1
   logEvent('info', 'server-picker', 'profile selected', { id })
+  return profile
 }
 
 export function backfillProfileCountriesFromNames(): number {
@@ -2178,6 +2183,29 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile, switch
   logEvent('info', 'server-picker', 'hot-reloading direct VPN after profile selection', {
     id: profile.id, name: profile.name, protocol: profile.protocol
   })
+  const nextOptions: StartOptions = {
+    mode: 'directVpn', vpnProfile, proxyType: 'socks5',
+    enableFirewallKillSwitch: settings.firewallKillSwitch,
+    enableAdapterLockdown: settings.strictAdapterLockdown,
+    publicWifiCompatibility: settings.publicWifiCompatibility,
+    stealthMode: settings.stealthMode, adaptiveMode: adaptive.mode,
+    proxyEngine: tunController.getLastStartOptions?.()?.proxyEngine ?? settings.proxyEngine
+  }
+  // A compatible upstream transaction retains TUN/security and supplies its own fresh route/IP proof.
+  if (typeof tunController.switchOutbound === 'function') {
+    const receipt = await tunController.switchOutbound(nextOptions, {
+      signal: switchOwner.controller.signal,
+      isOwner: () => !switchOwner.abandoned,
+      onCommit: () => { switchOwner.committed = true }
+    })
+    if (receipt) {
+      switchOwner.nativeTouched = true
+      switchOwner.fastReceipt = receipt
+      if (receipt.outcome !== 'success') throw new Error(receipt.outcome === 'cancelled'
+        ? 'Переключение сервера отменено' : 'Смена upstream не подтверждена')
+      return
+    }
+  }
   const restarted = await withProtectedIpTransition({
     reason: 'server switch',
     isCurrent,
@@ -2188,14 +2216,8 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile, switch
       const abort = () => tunController.cancelTransition()
       switchOwner.controller.signal.addEventListener('abort', abort, { once: true })
       try {
-        return await tunController.restartProtected('server switch', {
-          mode: 'directVpn', vpnProfile, proxyType: 'socks5',
-          enableFirewallKillSwitch: settings.firewallKillSwitch,
-          enableAdapterLockdown: settings.strictAdapterLockdown,
-          publicWifiCompatibility: settings.publicWifiCompatibility,
-          stealthMode: settings.stealthMode, adaptiveMode: adaptive.mode,
-          proxyEngine: tunController.getLastStartOptions?.()?.proxyEngine ?? settings.proxyEngine
-        }, { signal: switchOwner.controller.signal, onCleanup: result => { switchOwner.cleanup = result } })
+        return await tunController.restartProtected('server switch', nextOptions,
+          { signal: switchOwner.controller.signal, onCleanup: result => { switchOwner.cleanup = result } })
       } finally { switchOwner.controller.signal.removeEventListener('abort', abort) }
     }
   })
@@ -2204,7 +2226,8 @@ async function restartDirectVpnForSelectedProfile(profile: ServerProfile, switch
 
 let profileSwitchGeneration = 0
 let profileSwitchInProgress = false
-interface ProfileSwitchOwner { controller: AbortController; nativeTouched: boolean; abandoned: boolean; cleanup?: TunStopResult }
+interface ProfileSwitchOwner { controller: AbortController; nativeTouched: boolean; abandoned: boolean;
+  committed?: boolean; fastReceipt?: OutboundSwitchReceipt; cleanup?: TunStopResult }
 let activeProfileSwitch: ProfileSwitchOwner | null = null
 let profileSwitchHooks: {
   begin: () => void | Promise<void>
@@ -2217,7 +2240,7 @@ export function setProfileSwitchHooks(hooks: typeof profileSwitchHooks): void {
 }
 
 export function cancelProfileSwitch(): void {
-  if (!activeProfileSwitch || activeProfileSwitch.controller.signal.aborted) return
+  if (!activeProfileSwitch || activeProfileSwitch.committed || activeProfileSwitch.controller.signal.aborted) return
   profileSwitchGeneration++
   activeProfileSwitch.controller.abort()
   logEvent('info', 'server-picker', 'profile switch cancellation requested')
@@ -2227,7 +2250,11 @@ export function cancelProfileSwitch(): void {
 export function abandonProfileSwitch(): void {
   if (!activeProfileSwitch) return
   activeProfileSwitch.abandoned = true
-  cancelProfileSwitch()
+  // Disconnect/shutdown supersedes even a published switch while the old child drains.
+  if (!activeProfileSwitch.controller.signal.aborted) {
+    profileSwitchGeneration++
+    activeProfileSwitch.controller.abort()
+  }
 }
 
 /**
@@ -2236,11 +2263,7 @@ export function abandonProfileSwitch(): void {
  * the first one. Returns null only when there are no profiles at all.
  */
 export function getActiveProfile(): ServerProfile | null {
-  const profiles = getProfiles().filter((profile) => profile.enabled !== false && !profile.removedFromSubscriptionAt)
-  if (!profiles.length) return null
-  const activeId = getActiveProfileId()
-  const found = activeId ? profiles.find((p) => p.id === activeId) : null
-  return found ?? profiles[0]
+  return store.getProfile(getActiveProfileId(), true)
 }
 
 /**
@@ -2693,12 +2716,12 @@ function sanitizeAddProfilesOptions(value: unknown): AddProfilesOptions | undefi
  */
 export function registerServerPickerHandlers(): void {
   handleLogged('servers:list', async () => {
-    return getProfiles()
+    return store.getProfileSummaries()
   })
 
   handleLogged('servers:select', async (_event, id: string) => {
     id = requireString(id, 'id', { maxLength: 200 })
-    const profile = getProfiles().find((p) => p.id === id)
+    const profile = store.getProfile(id)
     if (!profile) throw new Error('Profile not found')
     if (profile.enabled === false || profile.removedFromSubscriptionAt) throw new Error('Profile is unavailable')
     if (profileSwitchInProgress) throw new Error('Переключение сервера уже выполняется')
@@ -2716,11 +2739,33 @@ export function registerServerPickerHandlers(): void {
       // Invalidate adaptive work before ANY await (including network identity).
       await profileSwitchHooks?.begin()
       if (generation !== profileSwitchGeneration) throw new Error('Переключение сервера отменено')
-      selectProfile(id)
+      const selected = selectProfile(id)
+      if (!selected) throw new Error('Profile is unavailable')
       selectionChanged = true
-      await restartDirectVpnForSelectedProfile(profile, switchOwner)
+      await restartDirectVpnForSelectedProfile(selected, switchOwner)
       if (generation !== profileSwitchGeneration) throw new Error('Переключение сервера отменено')
     } catch (err) {
+      const fast = switchOwner.fastReceipt
+      if (fast) {
+        // This receipt belongs to the completed upstream transaction. Never restart an already
+        // committed candidate or tear down a freshly proved retained upstream on cancellation.
+        // Native stop/recovery may already own the successor; its protection is not ours to remove.
+        if (!fast.committed && selectionChanged) store.set('activeProfileId', previousId)
+        if (!fast.committed && !fast.previousPreserved && !fast.ownershipLost && !switchOwner.abandoned) {
+          const cleanup = await tunController.stop()
+          if (!cleanup.success || cleanup.networkCleanup?.baseline !== true
+              || cleanup.networkCleanup.firewall !== true || cleanup.networkCleanup.adapters !== true) {
+            throw new Error(cleanup.error || 'Очистка неудачной смены upstream не подтверждена')
+          }
+          ipMonitor.clearVpnIp()
+          if (fast.outcome === 'cancelled') {
+            logEvent('warn', 'server-picker', 'previous upstream restoration unverified after cancellation; VPN stopped')
+            throw new Error('Не удалось подтвердить прежнее подключение после отмены. VPN отключён.')
+          }
+        }
+        if (fast.outcome === 'cancelled' || generation !== profileSwitchGeneration) return { cancelled: true as const }
+        throw err
+      }
       if (generation === profileSwitchGeneration) throw err
       if (selectionChanged) store.set('activeProfileId', previousId)
       // Before restart the old tunnel is untouched. After dispatch, wait for the
@@ -2766,8 +2811,10 @@ export function registerServerPickerHandlers(): void {
   })
 
   handleLogged('servers:get-active', async () => {
-    const profile = getActiveProfile()
-    return { profile, activeId: getActiveProfileId() }
+    const activeId = getActiveProfileId()
+    const profiles = store.getProfileSummaries().filter(profile => profile.enabled !== false && !profile.removedFromSubscriptionAt)
+    const profile = profiles.find(profile => profile.id === activeId) ?? profiles[0] ?? null
+    return { profile, activeId }
   })
 
   handleLogged('servers:ping-all', async () => {

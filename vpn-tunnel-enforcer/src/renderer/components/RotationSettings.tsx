@@ -16,6 +16,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { usePageActive } from '../hooks/usePageActive'
 import { RefreshCw, Clock, Shuffle, TriangleAlert } from 'lucide-react'
 import { MacCard } from '../design-system/MacCard'
 import { MacSwitch } from '../design-system/MacSwitch'
@@ -49,6 +50,7 @@ function formatCountdown(targetMs: number | null): string {
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export const RotationSettings: React.FC = () => {
+  const active = usePageActive()
   const { t } = useTranslation()
   const [config, setConfig] = useState<RotationConfig | null>(null)
   const [profiles, setProfiles] = useState<ServerProfile[]>([])
@@ -90,7 +92,7 @@ export const RotationSettings: React.FC = () => {
   // ─── Countdown tick ──────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (config?.enabled && config.nextRotationAt) {
+    if (active && config?.enabled && config.nextRotationAt) {
       tickRef.current = setInterval(() => setTick((t) => t + 1), 1000)
     } else if (tickRef.current) {
       clearInterval(tickRef.current)
@@ -99,7 +101,7 @@ export const RotationSettings: React.FC = () => {
     return () => {
       if (tickRef.current) clearInterval(tickRef.current)
     }
-  }, [config?.enabled, config?.nextRotationAt])
+  }, [active, config?.enabled, config?.nextRotationAt])
 
   // ─── Update config via IPC ───────────────────────────────────────────────
 

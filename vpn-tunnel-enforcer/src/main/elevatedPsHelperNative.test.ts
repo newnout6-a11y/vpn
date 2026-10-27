@@ -5,13 +5,14 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import ts from 'typescript'
 import { PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
+import { NETWORK_MODULE_PREPARATION_PS } from './networkModulePreparation'
 
 const source = readFileSync(join(process.cwd(), 'src/main/elevatedPsHelper.ts'), 'utf8')
 const marker = 'const PS_RUNNER_SCRIPT = `'
 const begin = source.indexOf(marker)
 const end = source.indexOf('\n`', begin + marker.length)
 if (begin < 0 || end < 0) throw new Error('Production helper runner not found')
-const runner = source.slice(begin + marker.length, end)
+const runner = source.slice(begin + marker.length, end).replace('${NETWORK_MODULE_PREPARATION_PS}', NETWORK_MODULE_PREPARATION_PS)
 const shell = process.env.VPNTE_PWSH || 'powershell.exe'
 const ast = ts.createSourceFile('elevatedPsHelper.ts', source, ts.ScriptTarget.Latest, true)
 const warmup = ast.statements.find(node => ts.isVariableStatement(node) && node.declarationList.declarations.some(decl => decl.name.getText(ast) === 'HELPER_WARMUP_COMMANDS'))

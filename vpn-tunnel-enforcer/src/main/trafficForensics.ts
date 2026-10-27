@@ -8,6 +8,7 @@ import { release as osRelease, type as osType, version as osVersion } from 'os'
 import { basename, dirname, join, resolve } from 'path'
 import { execElevated } from './admin'
 import { logEvent } from './appLogger'
+import { createSidecarEventProbeReader, emptySidecarEventProbe, type SidecarEventProbe } from './sidecarEventProbe'
 import { settingsStore } from './settings'
 import { ensureElevatedRuntimeDirHardened, verifyDirectoryHardened } from './runtimeDirSecurity'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
@@ -414,91 +415,11 @@ function artifactMtime(files: TrafficForensicsArtifactFile[], name: string): num
   return files.find(file => file.name === name)?.mtimeMs ?? null
 }
 
-interface SidecarEventProbe {
-  events: number
-  dataEvents: number
-  engine: string | null
-  categoryCounts: Record<string, number>
-  wfpBlocks: number
-  topDomains: Array<{ name: string; count: number }>
-  topRemotes: Array<{ address: string; count: number }>
-  lastDataEventAt: number | null
-}
+const sidecarProbeReader = createSidecarEventProbeReader()
 
-function emptySidecarEventProbe(): SidecarEventProbe {
-  return {
-    events: 0,
-    dataEvents: 0,
-    engine: null,
-    categoryCounts: {},
-    wfpBlocks: 0,
-    topDomains: [],
-    topRemotes: [],
-    lastDataEventAt: null
-  }
+function readSidecarEventProbe(sessionDir: string | null | undefined, sessionId: string): Promise<SidecarEventProbe> {
+  return sessionDir ? sidecarProbeReader.read(join(sessionDir, 'events.ndjson'), sessionId) : Promise.resolve(emptySidecarEventProbe())
 }
-
-async function readSidecarEventProbe(sessionDir: string | null | undefined): Promise<SidecarEventProbe> {
-  if (!sessionDir) return emptySidecarEventProbe()
-  try {
-    const text = await readFile(join(sessionDir, 'events.ndjson'), 'utf-8')
-    let events = 0
-    let dataEvents = 0
-    let wfpBlocks = 0
-    let engine: string | null = null
-    let lastDataEventAt: number | null = null
-    const categoryCounts: Record<string, number> = {}
-    const domainCounts = new Map<string, number>()
-    const remoteCounts = new Map<string, number>()
-    for (const line of text.split(/\r?\n/)) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      events++
-      let row: any
-      try {
-        row = JSON.parse(trimmed)
-      } catch {
-        dataEvents++
-        continue
-      }
-      const category = typeof row?.category === 'string' ? row.category : undefined
-      if (category === 'lifecycle') {
-        if (typeof row?.engine === 'string' && row.engine) engine = row.engine
-        continue
-      }
-      if (category === 'health') continue
-      dataEvents++
-      const key = category || 'other'
-      categoryCounts[key] = (categoryCounts[key] ?? 0) + 1
-      if (category === 'wfp' && (row?.event === 'block' || row?.action === 'block' || row?.action === 'drop')) {
-        wfpBlocks++
-      }
-      if (typeof row?.queryName === 'string' && row.queryName) {
-        domainCounts.set(row.queryName, (domainCounts.get(row.queryName) ?? 0) + 1)
-      }
-      if (typeof row?.remoteAddress === 'string' && row.remoteAddress) {
-        const addr = row?.remotePort ? `${row.remoteAddress}:${row.remotePort}` : row.remoteAddress
-        remoteCounts.set(addr, (remoteCounts.get(addr) ?? 0) + 1)
-      }
-      if (typeof row?.ts === 'string') {
-        const parsed = Date.parse(row.ts)
-        if (Number.isFinite(parsed)) lastDataEventAt = parsed
-      }
-    }
-    const topDomains = Array.from(domainCounts.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5)
-      .map(([name, count]) => ({ name, count }))
-    const topRemotes = Array.from(remoteCounts.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5)
-      .map(([address, count]) => ({ address, count }))
-    return { events, dataEvents, engine, categoryCounts, wfpBlocks, topDomains, topRemotes, lastDataEventAt }
-  } catch {
-    return emptySidecarEventProbe()
-  }
-}
-
 
 function emptyHealth(): TrafficForensicsStatus['health'] {
   return {
@@ -537,7 +458,7 @@ function buildTrafficForensicsHealth(
   const liveEtlBytes = artifactSize(files, 'pktmon-live.etl')
   const eventsBytes = artifactSize(files, 'events.ndjson')
   const liveSnapshotAt = artifactMtime(files, 'pktmon-live-status.txt')
-  const warnings: string[] = []
+  const warnings: string[] = sidecarProbe.warning ? [sidecarProbe.warning] : []
   const ageMs = startedAt ? Date.now() - startedAt : Number.POSITIVE_INFINITY
   const sidecarWarmingUp = Boolean(sidecar?.running && sidecarDataEvents === 0 && ageMs < 30000)
   const sidecarOnlyLifecycle = Boolean(sidecar?.running && sidecarDataEvents === 0 && !sidecarWarmingUp)
@@ -1282,7 +1203,7 @@ async function statusForManifest(manifest: SessionManifest | null, legacyPending
     Boolean(manifest?.running) ||
     (typeof manifest?.startedAt === 'number' && manifest.startedAt >= PROCESS_START_MS)
   const sidecarProbe = isCurrentSession
-    ? await readSidecarEventProbe(manifest?.sessionDir)
+    ? await readSidecarEventProbe(manifest?.sessionDir, manifest!.sessionId)
     : emptySidecarEventProbe()
   return {
     enabled: settings.enabled,

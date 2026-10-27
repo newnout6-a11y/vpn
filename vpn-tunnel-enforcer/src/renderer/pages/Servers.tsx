@@ -41,8 +41,9 @@ import { ServerDetailModal } from '../components/ServerDetailModal'
 import { LiveServerBatchComparison } from '../components/LiveServerBatchComparison'
 import { CountryFlagIcon } from '../components/CountryFlagIcon'
 import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
-import { emitServerChanged } from '../nav'
+import { SERVER_CHANGED_EVENT, emitServerChanged } from '../nav'
 import { useAppStore } from '../store'
+import { usePageActive } from '../hooks/usePageActive'
 import type { ClientDevice, ServerGroup, ServerProfile } from '../../shared/ipc-types'
 import { isIpcRemoteErrorData } from '../../shared/ipc-result'
 
@@ -108,13 +109,25 @@ function groupByProtocol(profiles: ServerProfile[]): Record<string, ServerProfil
  * when the profile carries a full sing-box outbound object (which every
  * dial-able profile does), exactly like Happ marking JSON-config entries.
  */
-function formatHappType(profile: ServerProfile): string {
+export function formatHappType(profile: ServerProfile): string {
   const proto = (profile.protocol || 'unknown').toUpperCase()
-  const hasJson = !!profile.outbound && typeof profile.outbound === 'object'
+  const hasJson = profile.display?.hasOutbound ?? (!!profile.outbound && typeof profile.outbound === 'object')
   return hasJson ? `${proto} | JSON` : proto
 }
 
 export function profileStealthBadge(profile: ServerProfile): { label: string; title: string; variant: BadgeVariant } | null {
+  if (profile.display) {
+    const badges = {
+      ech: { label: 'ECH', title: 'Encrypted ClientHello configured', variant: 'info' },
+      reality: { label: 'Reality', title: 'Reality TLS camouflage', variant: 'info' },
+      naive: { label: 'Naive', title: 'NaiveProxy-style TLS profile', variant: 'neutral' },
+      obfs: { label: 'OBFS', title: 'Hysteria2 obfuscation configured', variant: 'info' },
+      utls: { label: 'uTLS', title: 'Browser-like TLS fingerprint', variant: 'neutral' },
+      tls: { label: 'TLS', title: 'TLS profile without explicit uTLS/Reality marker', variant: 'neutral' },
+      plain: { label: 'Plain', title: 'No TLS/Reality/uTLS marker detected', variant: 'warning' }
+    } as const
+    return profile.display.stealth ? badges[profile.display.stealth] : null
+  }
   const outbound = profile.outbound && typeof profile.outbound === 'object' ? profile.outbound : null
   const protocol = (profile.protocol || (typeof outbound?.type === 'string' ? outbound.type : '')).toLowerCase()
   const configuredTls = asJsonObject(outbound?.tls)
@@ -243,8 +256,10 @@ function writeExpandedIds(ids: Set<string>) {
 // ─── Page ──────────────────────────────────────────────────────────────────
 
 export function Servers() {
+  const active = usePageActive()
   const { t, i18n } = useTranslation()
   const mounted = useRef(false)
+  const profileReadSequence = useRef(0)
   const requests = useRef(new Set<string>())
   const toastTimers = useRef(new Set<number>())
   const current = (id: string) => mounted.current && requests.current.has(id)
@@ -330,20 +345,22 @@ export function Servers() {
   // ─── Data fetch ─────────────────────────────────────────────────────────
 
   const fetchProfiles = useCallback(async (resolveIps = true) => {
+    const sequence = ++profileReadSequence.current
+    const current = () => mounted.current && sequence === profileReadSequence.current
     try {
-      const [list, active] = await Promise.all([
-        window.electronAPI.serversList(),
-        window.electronAPI.serversGetActive()
+      await Promise.all([
+        window.electronAPI.serversList().then(list => { if (current()) setProfiles(list) }),
+        window.electronAPI.serversGetActive().then(active => {
+          if (current() && !useAppStore.getState().serverSwitchingName) setActiveId(active.activeId ?? active.profile?.id ?? null)
+        })
       ])
-      if (!mounted.current) return
-      setProfiles(list)
-      setActiveId(active.activeId ?? active.profile?.id ?? null)
+      if (!current()) return
       const api = window.electronAPI as unknown as {
         serversResolveIps?: () => Promise<ServerProfile[]>
       }
       if (resolveIps && typeof api.serversResolveIps === 'function') {
         void api.serversResolveIps()
-          .then((resolved) => { if (mounted.current) setProfiles(resolved) })
+          .then((resolved) => { if (current()) setProfiles(resolved) })
           .catch(() => {})
       }
     } catch (err) {
@@ -394,19 +411,22 @@ export function Servers() {
   // Background subscription refreshes update the stores outside this page.
   // Poll the local stores while visible so the list follows them promptly.
   useEffect(() => {
+    if (!active) return
     const refreshVisibleData = () => {
       if (document.hidden) return
       void Promise.all([fetchProfiles(false), fetchGroups()])
     }
     const timer = window.setInterval(refreshVisibleData, 10_000)
+    window.addEventListener(SERVER_CHANGED_EVENT, refreshVisibleData)
     document.addEventListener('visibilitychange', refreshVisibleData)
     window.addEventListener('focus', refreshVisibleData)
     return () => {
       window.clearInterval(timer)
+      window.removeEventListener(SERVER_CHANGED_EVENT, refreshVisibleData)
       document.removeEventListener('visibilitychange', refreshVisibleData)
       window.removeEventListener('focus', refreshVisibleData)
     }
-  }, [fetchProfiles, fetchGroups])
+  }, [active, fetchProfiles, fetchGroups])
 
   // Auto-expand when there is exactly one effective group, and remember the
   // user's choices via localStorage on every change.
@@ -688,15 +708,12 @@ export function Servers() {
       setServerSwitchingName(profileName)
     }
     setSwitchingId(id)
+    profileReadSequence.current++
     try {
       const result = await window.electronAPI.serversSelect(id)
       if (result?.cancelled) {
-        await fetchProfiles(false)
-        emitServerChanged()
         return
       }
-      setActiveId(id)
-      emitServerChanged()
     } catch (err: any) {
       console.error('Select failed:', err)
       addGlobalToast(
@@ -709,6 +726,7 @@ export function Servers() {
       if (shouldAnimateSwitch) {
         setServerSwitchingName(null)
       }
+      emitServerChanged()
     }
   }
 
@@ -2042,6 +2060,8 @@ function ServerProfileCard({
   return (
     <MacCard
       flat
+      role="group"
+      aria-label={profile.name}
       className={
         '!p-3 cursor-pointer relative overflow-hidden transition-colors duration-150 hover:!border-[color-mix(in_srgb,var(--color-accent)_24%,var(--color-border))] ' +
         (isActive || isSwitching ? '!border-[var(--color-accent)] ring-1 ring-[var(--color-accent)]/30 ' : '') +
@@ -2175,6 +2195,7 @@ function ServerProfileCard({
           <MacButton
             size="sm"
             variant={isActive ? 'secondary' : 'primary'}
+            aria-pressed={isActive}
             disabled={isSelectDisabled}
             onClick={(e) => {
               e.stopPropagation()

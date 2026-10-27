@@ -20,7 +20,7 @@ import { captureSnapshot } from './systemSnapshot'
 import { writeConfigExport } from './configOperationIo'
 import { ioFailureDetails } from './ioFailureDiagnostics'
 import { IpcFault } from '../shared/ipc-result'
-import { mkdtemp, writeFile, copyFile, readdir, rm, readFile, mkdir, stat } from 'fs/promises'
+import { mkdtemp, writeFile, readdir, rm, readFile, mkdir, stat } from 'fs/promises'
 import { existsSync } from 'fs'
 import { tmpdir, hostname, release, type as osType, arch as osArch, totalmem, freemem, cpus } from 'os'
 import { join } from 'path'
@@ -72,17 +72,6 @@ async function snapshotSystemInfo(): Promise<string> {
     nodeVersion: process.versions.node
   }
   return JSON.stringify(info, null, 2)
-}
-
-async function copyIfExists(src: string, dst: string): Promise<boolean> {
-  try {
-    if (!existsSync(src)) return false
-    await copyFile(src, dst)
-    return true
-  } catch (err) {
-    logEvent('warn', 'diag-export', 'failed to copy file', { src, err: (err as Error)?.message })
-    return false
-  }
 }
 
 const REDACTABLE_DIAGNOSTIC_FILE_RE = /\.(?:json|jsonl|ndjson|log|txt|csv|md|manifest)$/i

@@ -13,14 +13,12 @@ vi.mock('child_process', async importOriginal => {
 import { clearElevatedCache, execElevated } from './admin'
 
 describe.skipIf(process.platform !== 'win32')('native PowerShell recovery transport', () => {
-  it('executes a harmless payload longer than the failing baseline invocation', async () => {
-    clearElevatedCache()
-    const script = "$ErrorActionPreference='Stop';Write-Output 'TRANSPORT_OK'\n#" + 'x'.repeat(5000)
-    const command = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`
-    expect(command.length).toBeGreaterThan(10482)
-    expect((await execElevated(command)).stdout.trim()).toBe('TRANSPORT_OK')
-  })
+  // The long-command boundary is covered with mocked child_process in
+  // admin.test.ts. An artificial 5000-character encoded comment triggered
+  // Defender; sending that synthetic payload to a real interpreter adds no
+  // coverage of recovery behavior and must not run on developer machines.
   it('propagates an actual PowerShell failure instead of reporting success', async () => {
+    clearElevatedCache()
     const script = "$ErrorActionPreference='Stop';throw 'NATIVE_TRANSPORT_FAILURE'"
     const command = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`
     await expect(execElevated(command)).rejects.toThrow('NATIVE_TRANSPORT_FAILURE')

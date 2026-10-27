@@ -1,6 +1,7 @@
 // AT-01-009, F-002/F-104: root DACL is insufficient without a stable namespace.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { win32 } from 'path'
+import { lstat } from 'fs/promises'
 const mocks = vi.hoisted(() => ({ read: vi.fn(), write: vi.fn(), elevated: vi.fn(), log: vi.fn(), worker: vi.fn() }))
 vi.mock('child_process', () => {
   const execFile = vi.fn()
@@ -11,7 +12,13 @@ vi.mock('./admin', () => ({ isProcessElevated: mocks.elevated }))
 vi.mock('./elevatedPsHelper', () => ({ execElevatedPs: mocks.write }))
 vi.mock('./appLogger', () => ({ logEvent: mocks.log }))
 vi.mock('./recoveryPsWorker', () => ({ executeRecoveryOperation: mocks.worker }))
+vi.mock('fs/promises', async importOriginal => {
+  const fs = await importOriginal<typeof import('fs/promises')>()
+  return { ...fs, lstat: vi.fn(fs.lstat) }
+})
 import { ensureElevatedRuntimeDirHardened, resetRuntimeDirHardeningCache, verifyDirectoryHardened } from './runtimeDirSecurity'
+import { withRuntimeArtifactStage } from './runtimeFileCoordination'
+import { stageVerifiedRuntimeArtifact } from './runtimeArtifact'
 const SYSTEM = 'S-1-5-18', ADMINS = 'S-1-5-32-544', USER = 'S-1-5-21-1-2-3-1001'
 const TI = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 const DIR = 'C:\\ProgramData\\VPNTE\\runtime\\0123456789abcdef0123456789abcdef\\tun-runtime'
@@ -45,6 +52,21 @@ beforeEach(() => {
 })
 afterEach(() => vi.unstubAllEnvs())
 describe('verified runtime tree and namespace', () => {
+  it('waits for nested staging before the fresh ACL read instead of observing its temporary files (AT-01-009)', async () => {
+    let release!: () => void, admitted!: () => void
+    const ready = new Promise<void>(done => { admitted = done })
+    const gate = new Promise<void>(done => { release = done })
+    const staging = withRuntimeArtifactStage(DIR + '\\nested\\runtime.exe', async () => { admitted(); await gate })
+    await ready
+    const scan = verifyDirectoryHardened(DIR)
+    await Promise.resolve()
+    expect(mocks.worker).not.toHaveBeenCalled()
+    release()
+    await staging
+    expect((await scan).hardened).toBe(true)
+    expect(mocks.worker).toHaveBeenCalledOnce()
+    expect(mocks.write).not.toHaveBeenCalled()
+  })
   it('reads fresh worker ACLs on every attempt and refuses a changed parent (AT-01-009)', async () => {
     mocks.worker.mockResolvedValueOnce(JSON.stringify(proof()))
     const changed = proof(); changed.ancestors[1].rules.push(ace(USER, 0x40))
@@ -231,6 +253,32 @@ describe.skipIf(process.platform !== 'win32')('native read-only PowerShell polic
 })
 
 describe('trusted bootstrap, never repair unsafe existing directories', () => {
+  it('blocks production artifact staging below a directory until its bootstrap releases ownership (AT-01-009)', async () => {
+    mocks.worker.mockResolvedValueOnce(receipt(diagnostic('PowerShellError'))).mockResolvedValueOnce(JSON.stringify(proof()))
+    let release!: () => void, admitted!: () => void
+    const ready = new Promise<void>(done => { admitted = done })
+    const gate = new Promise<void>(done => { release = done })
+    mocks.write.mockImplementationOnce(async () => { admitted(); await gate; return { stdout: 'HARDENED', stderr: '', exitCode: 0 } })
+    const bootstrap = ensureElevatedRuntimeDirHardened(DIR, 'tun')
+    await ready
+    // The source is intentionally absent: no filesystem writes are possible,
+    // and even its first source inspection must wait for bootstrap ownership.
+    const staging = stageVerifiedRuntimeArtifact('C:\\vpnte-absent-fixture\\bundled.exe', DIR + '\\nested\\runtime.exe')
+    const rejected = expect(staging).rejects.toMatchObject({ code: 'ENOENT' })
+    await Promise.resolve()
+    expect(lstat).not.toHaveBeenCalled()
+    release()
+    await rejected
+    expect((await bootstrap).hardened).toBe(true)
+    expect(lstat).toHaveBeenCalled()
+  })
+  it('logs a bounded path-free refusal reason even when bootstrap later succeeds (AT-01-002/009)', async () => {
+    mocks.worker.mockResolvedValueOnce(receipt(diagnostic('PowerShellError'))).mockResolvedValueOnce(JSON.stringify(proof()))
+    expect((await ensureElevatedRuntimeDirHardened(DIR, 'tun')).hardened).toBe(true)
+    const record = mocks.log.mock.calls.find(call => call[2] === 'runtime inspection refused before bootstrap')
+    expect(record?.[3]).toEqual({ refusalCode: 'inspection-failed', operation: 'validate-acl', reason: 'PowerShellError', errorType: 'System.Management.Automation.RuntimeException', hresult: -2146233087 })
+    expect(JSON.stringify(record)).not.toMatch(/ProgramData|VPNTE|S-1-/)
+  })
   it('does not mutate already proven storage', async () => {
     expect((await ensureElevatedRuntimeDirHardened(DIR, 'tun')).hardened).toBe(true)
     expect(mocks.write).not.toHaveBeenCalled()

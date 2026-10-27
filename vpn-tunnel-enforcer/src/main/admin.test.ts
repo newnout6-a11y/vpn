@@ -73,7 +73,7 @@ describe('admin module', () => {
     })
     const payload = Buffer.from("Write-Output 'RECOVERY_OK'\n#" + 'x'.repeat(5000), 'utf16le').toString('base64')
     const command = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${payload}`
-    expect(command.length).toBeGreaterThan(8191)
+    expect(command.length).toBeGreaterThan(10482)
     expect((await execElevated(command, { timeout: 12345, maxBuffer: 45678 })).stdout).toBe('RECOVERY_OK')
     expect(mockExecFile).toHaveBeenLastCalledWith('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', payload

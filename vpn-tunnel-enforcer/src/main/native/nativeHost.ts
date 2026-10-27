@@ -8,6 +8,9 @@ let client: HostClient | null = null
 // Registry/adapter ownership can stall in native code. Its host must not hold
 // up ordinary adapter, route or runtime reads after the caller switches to CIM.
 let tunOwnershipClient: HostClient | null = null
+// A sampler deadline must not kill pending adapter/route reads, and a slow
+// inventory read must not queue ahead of the next traffic sample.
+let trafficCountersClient: HostClient | null = null
 let stopped = false
 
 function log(level: 'info' | 'warn', message: string, details?: Record<string, unknown>): void {
@@ -27,13 +30,17 @@ function getClient(op: HostOp): HostClient {
     tunOwnershipClient ??= createHostClient({ fork: forkHost, log })
     return tunOwnershipClient
   }
+  if (op === 'traffic-counters') {
+    trafficCountersClient ??= createHostClient({ fork: forkHost, log })
+    return trafficCountersClient
+  }
   client ??= createHostClient({ fork: forkHost, log })
   return client
 }
 
 /**
- * Runs a native read in the host. Rejects with NativeHostError: `unavailable` (host crashed, timed out, could not
- * start or is disabled) and `read-refused` both mean "use PowerShell"; `wininet-false` is authoritative.
+ * Runs a native read in the host. NativeHostError preserves unavailable/read-refused failures for the
+ * caller's fallback policy; `wininet-false` is authoritative. Traffic sampling never replays failed reads.
  */
 export async function callNativeHost<T>(op: HostOp, args?: unknown, timeoutMs?: number): Promise<T> {
   if (process.platform !== 'win32') throw new NativeHostError('unavailable', 'native reads are Windows-only')
@@ -47,6 +54,8 @@ export function shutdownNativeHost(): void {
   stopped = true
   client?.shutdown()
   tunOwnershipClient?.shutdown()
+  trafficCountersClient?.shutdown()
   client = null
   tunOwnershipClient = null
+  trafficCountersClient = null
 }

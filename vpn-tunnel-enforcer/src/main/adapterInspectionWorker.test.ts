@@ -54,7 +54,7 @@ describe.skipIf(process.platform !== 'win32')('isolated adapter inspection owner
   })
   it('keeps narrow DNS and fresh TUN proof in the prepared adapter process (AT-03-006/010)', async () => {
     const api = await import('./recoveryPsWorker')
-    const requests = [{op:'inspect-physical-dns'}, {op:'inspect-tun',alias:'Ethernet 5'}] as const
+    const requests = [{op:'inspect-physical-dns'}, {op:'inspect-tun',alias:'Ethernet 5'}, {op:'inspect-owned-firewall-rules'}] as const
     for (const request of requests) {
       const pending = api.executeRecoveryOperation(request)
       const count = processes[0]?.writes.length || 0
@@ -63,6 +63,23 @@ describe.skipIf(process.platform !== 'win32')('isolated adapter inspection owner
       expect(await pending).toBe('FRESH')
     }
     expect(mocks.spawn).toHaveBeenCalledOnce()
+  })
+  it('reads fresh firewall ownership through the existing adapter process while recovery is occupied (AT-03-004/012)', async () => {
+    const api = await import('./recoveryPsWorker')
+    const heldRecovery = api.executeRecoveryOperation({ op: 'ensure' })
+    await vi.waitFor(() => expect(processes[0]?.writes).toHaveLength(1))
+    for (const value of ['0', '2', '0']) {
+      const pending = api.executeRecoveryOperation({ op: 'inspect-owned-firewall-rules' })
+      const count = processes[1]?.writes.length || 0
+      await vi.waitFor(() => expect(processes[1]?.writes).toHaveLength(count + 1))
+      const p = processes[1]
+      expect(p.writes.at(-1)!.request).toEqual({ op: 'inspect-owned-firewall-rules' })
+      p.reply(p.writes.at(-1)!.id, value)
+      expect(await pending).toBe(value)
+    }
+    expect(mocks.spawn).toHaveBeenCalledTimes(2)
+    processes[0].reply(processes[0].writes[0].id, 'RECOVERY_STORAGE_VERIFIED')
+    await heldRecovery
   })
   it('waits admitted work in both processes before shutdown and closes both admissions', async () => {
     const api = await import('./recoveryPsWorker')

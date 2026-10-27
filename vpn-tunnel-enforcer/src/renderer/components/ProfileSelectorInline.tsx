@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEventHandler } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -39,6 +39,8 @@ export function ProfileSelectorInline() {
   const setServerSwitchingName = useAppStore(s => s.setServerSwitchingName)
   const tunRunning = useAppStore(s => s.tunRunning)
   const connectionMode = useAppStore(s => s.settings.connectionMode)
+  const selectionBusy = useAppStore(s => Boolean(s.serverSwitchingName || s.connectionBusy))
+  const refreshSequence = useRef(0)
 
   const [open, setOpen] = useState(false)
   const [profiles, setProfiles] = useState<ServerProfile[]>([])
@@ -50,14 +52,17 @@ export function ProfileSelectorInline() {
   const [pingMs, setPingMs] = useState<number | null | 'pinging' | -1>(null)
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current
+    const current = () => sequence === refreshSequence.current
     setLoading(true)
     try {
-      const [list, active] = await Promise.all([
-        window.electronAPI.serversList(),
-        window.electronAPI.serversGetActive()
+      await Promise.all([
+        window.electronAPI.serversList().then(list => { if (current()) setProfiles(list) }),
+        window.electronAPI.serversGetActive().then(active => {
+          if (current() && !useAppStore.getState().serverSwitchingName) setActiveId(active.activeId ?? active.profile?.id ?? null)
+        })
       ])
-      setProfiles(list)
-      setActiveId(active.activeId ?? active.profile?.id ?? null)
+      if (!current()) return
       // Best-effort group fetch; tolerate missing IPC.
       const api = window.electronAPI as unknown as {
         groupsList?: () => Promise<ServerGroup[]>
@@ -65,9 +70,11 @@ export function ProfileSelectorInline() {
       if (typeof api.groupsList === 'function') {
         try {
           const gs = await api.groupsList()
+          if (!current()) return
           setGroups(Array.isArray(gs) ? gs : [])
           setGroupsAvailable(true)
         } catch {
+          if (!current()) return
           setGroupsAvailable(false)
           setGroups([])
         }
@@ -78,12 +85,13 @@ export function ProfileSelectorInline() {
     } catch (err) {
       console.warn('[ProfileSelectorInline] refresh failed:', err)
     } finally {
-      setLoading(false)
+      if (current()) setLoading(false)
     }
   }, [])
 
   useEffect(() => {
     refresh()
+    return () => { refreshSequence.current++ }
   }, [refresh])
 
   // Re-fetch when another component announces a server change (e.g. the
@@ -108,7 +116,7 @@ export function ProfileSelectorInline() {
     setPingMs(null)
   }, [tunRunning])
 
-  const current = profiles.find(p => p.id === activeId) ?? profiles[0] ?? null
+  const current = profiles.find(p => p.id === activeId) ?? null
   const currentName = current?.name ?? null
   const currentProtocol = current?.protocol ?? null
   const hasProfiles = profiles.length > 0
@@ -162,21 +170,15 @@ export function ProfileSelectorInline() {
     if (wasConnected && connectionMode === 'directVpn') {
       setServerSwitchingName(profileName)
     }
-    setActiveId(id)
+    refreshSequence.current++
     setPingMs(null)
     try {
       const result = await window.electronAPI.serversSelect(id)
       if (result?.cancelled) {
         addLog('info', t('dashboard.serverSwitchCancelled'))
-        emitServerChanged()
         return
       }
       addLog('info', `Сервер выбран: ${profileName}`)
-      emitServerChanged()
-      if (wasConnected && connectionMode === 'directVpn') {
-        addLog('info', `Переподключаемся через новый сервер: ${profileName}…`)
-        useAppStore.getState().addGlobalToast('info', 'Переподключение', `Через ${profileName}`)
-      }
       if (profile) {
         const gid = (profile as ServerProfile & { groupId?: string }).groupId
         const group = gid ? groupById.get(gid) : null
@@ -189,12 +191,11 @@ export function ProfileSelectorInline() {
       }
     } catch (err: any) {
       addLog('error', `Не удалось выбрать сервер: ${err.message}`)
-      // Roll back optimistic state
-      refresh()
     } finally {
       if (wasConnected && connectionMode === 'directVpn') {
         setServerSwitchingName(null)
       }
+      emitServerChanged()
     }
   }
 
@@ -361,6 +362,8 @@ export function ProfileSelectorInline() {
                       <button
                         key={profile.id}
                         type="button"
+                        disabled={selectionBusy}
+                        aria-pressed={selected}
                         onClick={() => handleSelect(profile.id)}
                         className={`w-full flex items-center gap-3 px-3 py-2 rounded-[var(--radius-sm)] text-left transition-all duration-[var(--transition-fast)] ${
                           selected

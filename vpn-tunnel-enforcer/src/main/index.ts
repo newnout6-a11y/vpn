@@ -12,7 +12,7 @@ import { isIP } from 'net'
 import { randomUUID } from 'node:crypto'
 import { getPrivilegedRuntimeDir } from './runtimePaths'
 import { happDetector } from './happDetector'
-import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart, onNativeStartup, onNativeStop, type StartOptions } from './tunController'
+import { tunController, getTunRuntimeDir, detectForeignTun, killOwnedTunRuntimeProcesses, isOwnedTunRuntimeRunning, readRecentSingBoxOutboundFault, areTunRoutesActive, getLastSingBoxExit, onProtectedRestart, onNativeStartup, onNativeStop, onOutboundSwitch, type StartOptions } from './tunController'
 import type { NetworkCleanupReceipt, SingBoxOutboundFault } from './tunController'
 import { ConnectionLifecycle, type ConnectionStartupOwner } from './connectionLifecycle'
 import { currentCorrelationId, currentActionMetadata, withCorrelation } from './actionCorrelation'
@@ -1237,6 +1237,12 @@ onNativeStartup(observation => {
   }
   else tunnelState.nativeStartFinished(observation)
 })
+onOutboundSwitch(observation => {
+  // This transaction keeps the current native process and its background protection obligation.
+  // Dedicated FSM evidence fences a late callback after disconnect or a native restart.
+  if (observation.phase === 'begin') tunnelState.upstreamSwitchBegan(observation.generation)
+  else tunnelState.upstreamSwitchFinished(observation)
+})
 
 const connectionLifecycle = new ConnectionLifecycle(() => {
   adaptiveVerificationGeneration += 1
@@ -1492,11 +1498,18 @@ async function startDirectVpnProtection(): Promise<ConnectionStartResult> {
 }
 
 async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner, previousOptions?: StartOptions): Promise<ConnectionStartResult> {
+  const preflightStarted = performance.now()
   await owner.wait(rollbackSoftAutoconfigIfApplied('direct VPN start'))
   suppressLeakSelfTestsFor(20_000, 'direct-vpn-start')
   captureSnapshot('tun-pre-start').catch(() => undefined)
 
-  const staleKillSwitch = await owner.wait(clearStaleKillSwitchBeforeStart('Direct VPN start'))
+  const settings = settingsStore.get()
+  const staleKillSwitchPending = owner.retain(clearStaleKillSwitchBeforeStart('Direct VPN start'))
+  // Identity is read-only and independent of firewall cleanup. Retain it even
+  // on an early refusal/cancel so a later start cannot inherit pending work.
+  const networkIdentity = owner.retain(settings.adaptiveBypassEnabled
+    ? readAdaptiveNetworkFingerprint() : Promise.resolve(null))
+  const staleKillSwitch = await owner.wait(staleKillSwitchPending)
   if (!staleKillSwitch.success) {
     const errorMsg = staleKillSwitch.error || 'Не удалось очистить старый kill-switch'
     recordStartFailure({ id: 'direct-vpn', name: 'Direct VPN', mode: 'direct' }, errorMsg, {
@@ -1504,8 +1517,6 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner, pr
     })
     return staleKillSwitch
   }
-
-  const settings = settingsStore.get()
 
   // V2: server-picker store is the single source of truth. Pull the active
   // profile from there. If its outbound was lost (older builds saved
@@ -1615,7 +1626,7 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner, pr
     legacyStealthMode: settings.stealthMode,
     mode: 'directVpn',
     profile,
-    networkIdentity: settings.adaptiveBypassEnabled ? await owner.wait(readAdaptiveNetworkFingerprint()) : null
+    networkIdentity: await owner.wait(networkIdentity)
   })
   activeAdaptiveContext = {
     profile,
@@ -1625,6 +1636,7 @@ async function startDirectVpnProtectionEffects(owner: ConnectionStartupOwner, pr
     connectionMode: 'directVpn',
     serverFallbackAttempted: false
   }
+  logEvent('debug', 'tun', 'direct VPN preflight timing', { durationMs: Math.round(performance.now() - preflightStarted) })
   const result = await owner.wait(tunController.start(previousOptions ?? {
     mode: 'directVpn',
     vpnProfile: profile,
@@ -2108,7 +2120,6 @@ app.whenReady().then(async () => {
     isQuitting || shutdownInProgress || connectionLifecycle.busy || tunController.getStatus().running)
 
   createWindow()
-  void serverPicker.resolveAndPersistProfileIps().catch(() => undefined)
   tray = createTray(mainWindow!, {
     onStart: startProtectionFromTray,
     onStop: stopProtection,

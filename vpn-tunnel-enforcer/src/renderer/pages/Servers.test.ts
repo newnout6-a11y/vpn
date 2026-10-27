@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { displayedServerPing, hasSuccessfulRowPing, profileStealthBadge } from './Servers'
+import { displayedServerPing, formatHappType, hasSuccessfulRowPing, profileStealthBadge } from './Servers'
 import type { ServerProfile } from '../../shared/ipc-types'
 
 describe('profile JSON transport fields (AT-00-001)', () => {
@@ -27,6 +27,24 @@ describe('profile JSON transport fields (AT-00-001)', () => {
     expect(badge({ type: { invalid: true } }, '')).toBeUndefined()
     expect(badge({ obfs: { type: 'salamander', password: 'fixture' } }, 'hysteria2')).toBe('OBFS')
     expect(badge({ obfs: [] }, 'hysteria2')).toBeUndefined()
+  })
+})
+
+describe('public profile display metadata (AT-01-008)', () => {
+  const profile: ServerProfile = { id: 'metadata', name: 'Metadata', server: 'vpn.example.test', port: 443, status: 'unknown', protocol: 'vless' }
+
+  it.each([
+    ['ech', 'ECH', 'info'], ['reality', 'Reality', 'info'], ['naive', 'Naive', 'neutral'],
+    ['obfs', 'OBFS', 'info'], ['utls', 'uTLS', 'neutral'], ['tls', 'TLS', 'neutral'], ['plain', 'Plain', 'warning']
+  ] as const)('renders %s without outbound secrets', (stealth, label, variant) => {
+    expect(profileStealthBadge({ ...profile, display: { hasOutbound: true, stealth } })).toMatchObject({ label, variant })
+  })
+
+  it('uses the public JSON hint and does not invent a stealth badge without a marker', () => {
+    expect(formatHappType({ ...profile, display: { hasOutbound: true } })).toBe('VLESS | JSON')
+    expect(formatHappType({ ...profile, display: { hasOutbound: false } })).toBe('VLESS')
+    expect(formatHappType({ ...profile, outbound: { type: 'vless' } })).toBe('VLESS | JSON')
+    expect(profileStealthBadge({ ...profile, display: { hasOutbound: true } })).toBeNull()
   })
 })
 

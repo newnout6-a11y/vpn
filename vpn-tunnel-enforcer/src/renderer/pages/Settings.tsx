@@ -1,4 +1,5 @@
 import { useDiagnosticsExport } from '../hooks/useDiagnosticsExport'
+import { usePageActive } from '../hooks/usePageActive'
 import type { SmartRouteRuleSetState } from '../../shared/network'
 import { useAppStore, type AppSettings } from '../store'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -274,6 +275,7 @@ function ThemeSettings() {
 /* ─── Main Settings Page ────────────────────────────────────────────────────── */
 
 export function Settings() {
+  const active = usePageActive()
   const { t } = useTranslation()
   const storeSettings = useAppStore(s => s.settings)
   const setSettings = useAppStore(s => s.setSettings)
@@ -332,6 +334,7 @@ export function Settings() {
   }, [addLog])
 
   useEffect(() => {
+    if (!active) return
     let disposed = false
     const refresh = async () => {
       try {
@@ -347,7 +350,7 @@ export function Settings() {
       disposed = true
       clearInterval(timer)
     }
-  }, [])
+  }, [active])
 
   const handleRefreshRuleSets = async () => {
     setRuleSetRefreshing(true)

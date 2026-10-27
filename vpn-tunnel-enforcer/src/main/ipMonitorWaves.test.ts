@@ -24,7 +24,7 @@ describe('IP provider wave budget', () => {
     const pending = held(), controller = new AbortController(), failure = new Error('PRIVATE_ERROR')
     vi.mocked(axios.get).mockReturnValue(pending.promise)
     const read = module.fetchPublicIpFrom(module.IP_CHECK_URLS[1], undefined, controller.signal).catch(error => error)
-    await vi.advanceTimersByTimeAsync(7500)
+    await vi.advanceTimersByTimeAsync(750)
     if (kind === 'cancelled') controller.abort()
     if (kind === 'failure') pending.resolve(Promise.reject(failure))
     else pending.resolve(response())
@@ -33,9 +33,10 @@ describe('IP provider wave budget', () => {
     else if (kind === 'failure') expect(result).toBe(failure)
     else expect(result).toBeInstanceOf(Error)
     const timing = vi.mocked(logEvent).mock.calls.filter(call => call[2] === 'public IP provider timing')
-    expect(timing).toEqual([['debug', 'ip-monitor', 'public IP provider timing', {
-      providerIndex: 1, durationMs: 7500, outcome: kind === 'success' ? 'succeeded' : kind === 'failure' ? 'failed' : 'cancelled'
-    }]])
+    expect(timing).toEqual([['debug', 'ip-monitor', 'public IP provider timing', expect.objectContaining({
+      providerIndex: 1, durationMs: 750, outcome: kind === 'success' ? 'succeeded' : kind === 'failure' ? 'failed' : 'cancelled',
+      code: kind === 'success' ? 'OK' : kind === 'failure' ? 'NETWORK' : 'CANCELLED', stage: 'dns', closeFailed: false
+    })]])
     expect(JSON.stringify(timing)).not.toMatch(/198\.51|PRIVATE_|https?:/)
   })
   it('aborts every provider on caller cancellation without cancelling another owner (AT-00-003)', async () => {
@@ -161,5 +162,38 @@ describe('IP provider wave budget', () => {
     vi.mocked(axios.get).mockClear()
     await vi.advanceTimersByTimeAsync(60000)
     expect(axios.get).not.toHaveBeenCalled()
+  })
+  it('settles a recovery deadline even when the provider ignores abort, without adopting cached IP (AT-00-003 / AT-07-012)', async () => {
+    await module.ipMonitor.recheck(true)
+    module.ipMonitor.stopMonitoring()
+    const lastSuccess = module.ipMonitor.getLastSuccessAt()
+    vi.mocked(axios.get).mockImplementation(() => new Promise(() => undefined))
+    const result = module.ipMonitor.recheck(true, () => true, '198.51.100.1', { timeoutMs: 1000 })
+    await vi.advanceTimersByTimeAsync(999)
+    expect(await result).toEqual({ ip: null, vpnIp: '198.51.100.1', isLeak: false })
+    expect(module.ipMonitor.getEvidence().verdict).toBe('not-checked')
+    expect(module.ipMonitor.getLastSuccessAt()).toBe(lastSuccess)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('does not let a faster IPv6 echo win an expected IPv4 proof (AT-07-006/011)', async () => {
+    const ipv4 = held()
+    vi.mocked(axios.get).mockImplementation(async url => url === module.IP_CHECK_URLS[0] ? response('2001:db8::1') : ipv4.promise)
+    const result = module.ipMonitor.recheck(true, () => true, '198.51.100.1')
+    await Promise.resolve()
+    ipv4.resolve(response())
+    expect(await result).toEqual({ ip: '198.51.100.1', vpnIp: '198.51.100.1', isLeak: false })
+    expect(vi.mocked(axios.get).mock.calls.every(call => call[1]?.family === 4)).toBe(true)
+  })
+  it.each(['abort', 'deadline'])('bounds a queued rebaseline before it acquires network ownership: %s (AT-00-003)', async kind => {
+    const pending = held(), controller = new AbortController()
+    vi.mocked(axios.get).mockReturnValue(pending.promise)
+    const first = module.ipMonitor.recheck(true, () => true)
+    const second = module.ipMonitor.recheck(true, () => true, undefined, { timeoutMs: 1000, signal: controller.signal })
+    if (kind === 'abort') controller.abort()
+    else await vi.advanceTimersByTimeAsync(1000)
+    expect(await second).toEqual({ ip: null, vpnIp: null, isLeak: false })
+    expect(axios.get).toHaveBeenCalledTimes(4)
+    pending.resolve(response())
+    expect((await first).ip).toBe('198.51.100.1')
   })
 })

@@ -16,11 +16,33 @@ import {
 
 describe('ipMonitor multi-provider configuration', () => {
   it('contains the expected multi-provider check URLs', () => {
-    expect(IP_CHECK_URLS).toContain('https://cloudflare.com/cdn-cgi/trace')
+    expect(IP_CHECK_URLS).toContain('https://1.1.1.1/cdn-cgi/trace')
     expect(IP_CHECK_URLS).toContain('https://api.ipify.org?format=json')
     expect(IP_CHECK_URLS).toContain('https://icanhazip.com')
     expect(IP_CHECK_URLS).toContain('https://api.myip.com')
     expect(IP_CHECK_URLS.length).toBeGreaterThanOrEqual(4)
+  })
+
+  it('retains a live sampling timer when the configured interval did not change (AT-07-012)', () => {
+    vi.useFakeTimers()
+    const schedule = vi.spyOn(globalThis, 'setInterval')
+    const clear = vi.spyOn(globalThis, 'clearInterval')
+    vi.mocked(axios.get).mockRejectedValue(new Error('offline fixture'))
+    try {
+      ipMonitor.stopMonitoring()
+      ipMonitor.setCheckInterval(12000)
+      ipMonitor.startMonitoring(false)
+      schedule.mockClear(); clear.mockClear()
+      ipMonitor.setCheckInterval(12000)
+      expect(schedule).not.toHaveBeenCalled()
+      expect(clear).not.toHaveBeenCalled()
+      ipMonitor.setCheckInterval(15000)
+      expect(clear).toHaveBeenCalledTimes(1)
+      expect(schedule).toHaveBeenCalledTimes(1)
+    } finally {
+      ipMonitor.clearVpnIp()
+      schedule.mockRestore(); clear.mockRestore(); vi.useRealTimers()
+    }
   })
 })
 
@@ -59,7 +81,8 @@ describe('fetchPublicIpFrom provider parsing', () => {
       'https://icanhazip.com',
       expect.objectContaining({
         httpAgent: expect.objectContaining({ keepAlive: false }),
-        httpsAgent: expect.objectContaining({ keepAlive: false })
+        httpsAgent: expect.objectContaining({ keepAlive: false }),
+        proxy: false, maxRedirects: 0, headers: expect.objectContaining({ Connection: 'close' })
       })
     )
   })

@@ -2,10 +2,11 @@
 import { runtimeAclWorkerFunction } from './runtimeAclInspection'
 import { PHYSICAL_ADAPTER_DNS_SCRIPT, PHYSICAL_ADAPTER_SNAPSHOT_SCRIPT, TRANSITION_ADAPTER_SNAPSHOT_SCRIPT } from './physicalAdapterSnapshot'
 import { ADAPTIVE_NETWORK_IDENTITY_SCRIPT } from './adaptiveNetworkIdentityScript'
+import { NETWORK_MODULE_PREPARATION_PS } from './networkModulePreparation'
 export const RECOVERY_MAX_BYTES = 1024 * 1024
 export const ADAPTER_WARMUP_MODULES = ['NetAdapter', 'DnsClient', 'NetTCPIP', 'NetConnection'] as const
 export type RecoveryRequest =
-  | { op: 'ensure' | 'warmup' | 'inspect-dns-policy' | 'inspect-physical-dns' | 'inspect-network-identity' | 'inspect-physical-adapters' | 'inspect-transition-adapters' }
+  | { op: 'ensure' | 'warmup' | 'inspect-dns-policy' | 'inspect-physical-dns' | 'inspect-network-identity' | 'inspect-physical-adapters' | 'inspect-transition-adapters' | 'inspect-owned-firewall-rules' }
   | { op: 'warmup-adapters'; module: typeof ADAPTER_WARMUP_MODULES[number] }
   | { op: 'read' | 'binary' | 'remove'; name: string }
   | { op: 'protect'; name: string }
@@ -15,7 +16,7 @@ export type RecoveryRequest =
 
 export function validateRecoveryRequest(value: RecoveryRequest): void {
   const fields = Object.keys(value).sort().join(',')
-  if (value.op === 'ensure' || value.op === 'warmup' || value.op === 'inspect-dns-policy' || value.op === 'inspect-physical-dns' || value.op === 'inspect-network-identity' || value.op === 'inspect-physical-adapters' || value.op === 'inspect-transition-adapters') {
+  if (value.op === 'ensure' || value.op === 'warmup' || value.op === 'inspect-dns-policy' || value.op === 'inspect-physical-dns' || value.op === 'inspect-network-identity' || value.op === 'inspect-physical-adapters' || value.op === 'inspect-transition-adapters' || value.op === 'inspect-owned-firewall-rules') {
     if (fields === 'op') return
   } else if (value.op === 'warmup-adapters') {
     if (fields === 'module,op' && ADAPTER_WARMUP_MODULES.includes(value.module)) return
@@ -46,7 +47,11 @@ $found = @($candidates | Where-Object { $_.ExecutablePath.StartsWith($runtimePre
 if ($found.Count -gt 0) { 'true' } else { 'false' }
 `
 
-/** Fixed stop command; its result is never used as proof that runtime exited. */
+/**
+ * Fixed stop command; its result is never used as proof that runtime exited.
+ * Stop the TUN consumer before its upstream regardless of CIM enumeration order,
+ * including orphan/shutdown cleanup.
+ */
 export const OWNED_RUNTIME_STOP_SCRIPT = String.raw`
 $names = @('vpnte-sing-box.exe', 'vpnte-etw-sidecar.exe', 'vpnte-xray.exe')
 $runtimePrefix = $runtimeDir.TrimEnd('\') + '\'
@@ -57,8 +62,6 @@ $rows = @(Get-CimInstance Win32_Process -ErrorAction Stop |
     $_.ExecutablePath.StartsWith($runtimePrefix, [System.StringComparison]::OrdinalIgnoreCase)
   })
 $killed = @()
-# The upstream must stay alive until the TUN consumer has exited, regardless
-# of CIM enumeration order. This also applies to orphan/shutdown cleanup.
 foreach ($p in ($rows | Sort-Object { if ($_.Name -ieq 'vpnte-sing-box.exe') { 0 } else { 1 } })) {
   try {
     $stopped = Stop-Process -Id $p.ProcessId -Force -PassThru -ErrorAction Stop
@@ -72,7 +75,11 @@ foreach ($p in ($rows | Sort-Object { if ($_.Name -ieq 'vpnte-sing-box.exe') { 0
 [pscustomobject]@{candidates=[int]$rows.Count;killed=[int]$killed.Count;names=@($killed | ForEach-Object { $_.name })} | ConvertTo-Json -Compress -Depth 3
 `
 
-/** Fixed quarantine operation; callers provide only a checked artifact and hash. */
+/**
+ * Fixed quarantine operation; callers provide only a checked artifact and hash.
+ * Share.Delete permits replacement during the first read. Recheck the moved
+ * file with writes/replacements denied; File.Move never overwrites a newer baseline.
+ */
 export const RECOVERY_QUARANTINE_SCRIPT = String.raw`
 function Get-QuarantineContentHash($stream) {
   if ($stream.Length -gt ${RECOVERY_MAX_BYTES}) { throw 'Recovery manifest exceeds limit' }
@@ -90,12 +97,9 @@ try {
   Move-Item -LiteralPath $path -Destination $quarantine -ErrorAction Stop
 } finally { $stream.Dispose() }
 Assert-TrustedArtifact $quarantine $false
-# Share.Delete allows another writer's atomic replacement during the first read.
-# Validate the file actually moved, denying writes/replacements during this read.
 $moved=[IO.File]::Open($quarantine,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
 try { $movedHash=Get-QuarantineContentHash $moved } finally { $moved.Dispose() }
 if ($movedHash -ne $expectedHash) {
-  # File.Move refuses an existing destination: never overwrite a newer baseline.
   try { [IO.File]::Move($quarantine,$path) }
   catch { throw 'Recovery quarantine raced with replacement; newer baseline and quarantined data preserved' }
   throw 'Recovery manifest changed during quarantine; replacement restored'
@@ -123,11 +127,15 @@ function Read-RegValue([string]$key, [string]$name, [string]$tag) {
   Read-RegValue 'HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters' 'DisableParallelAandAAAA' 'parallelAandAAAA'
 ) | ConvertTo-Json -Compress`
 
-/** Kept separate so the real dispatcher can run against fake cmdlets in L2 tests. */
+/**
+ * Kept separate so the real dispatcher can run against fake cmdlets in L2 tests.
+ * Firewall ownership enumerates fresh rules on every request; no snapshot cache.
+ */
 export function recoveryWorkerFunctions(programData: string): string {
   const literal = `'${programData.replace(/'/g, "''")}'`
   return String.raw`
 $expectedProgramData=${literal}
+${NETWORK_MODULE_PREPARATION_PS}
 ${runtimeAclWorkerFunction(programData)}
 function Read-DnsPolicySnapshot {
 ${DNS_POLICY_SNAPSHOT_SCRIPT}
@@ -143,6 +151,13 @@ ${TRANSITION_ADAPTER_SNAPSHOT_SCRIPT}
 }
 function Read-AdaptiveNetworkIdentity {
 ${ADAPTIVE_NETWORK_IDENTITY_SCRIPT}
+}
+function Read-OwnedFirewallRuleCount {
+  $policy=New-Object -ComObject HNetCfg.FwPolicy2
+  if($null -eq $policy -or $null -eq $policy.Rules){throw 'Firewall rules unavailable'}
+  $count=0
+  foreach($rule in $policy.Rules){if(([string]$rule.Name).StartsWith('VPNTE-killswitch',[StringComparison]::OrdinalIgnoreCase)){$count++}}
+  return [string]$count
 }
 function Read-OwnedRuntimeStatus([string]$runtimeDir) {
 ${OWNED_RUNTIME_STATUS_QUERY_SCRIPT}
@@ -188,9 +203,13 @@ function Assert-RecoveryDirectories($root, [bool]$create) {
   return $true
 }
 function Invoke-RecoveryOperation($request) {
-  if ($request.op -isnot [string] -or @('warmup','warmup-adapters','inspect-tun','inspect-runtime','inspect-runtime-acl','stop-runtime','inspect-dns-policy','inspect-physical-dns','inspect-network-identity','inspect-physical-adapters','inspect-transition-adapters','ensure','read','binary','remove','protect','quarantine') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
+  if ($request.op -isnot [string] -or @('warmup','warmup-adapters','inspect-tun','inspect-runtime','inspect-runtime-acl','stop-runtime','inspect-dns-policy','inspect-physical-dns','inspect-network-identity','inspect-physical-adapters','inspect-transition-adapters','inspect-owned-firewall-rules','ensure','read','binary','remove','protect','quarantine') -cnotcontains $request.op) { throw 'Unknown recovery worker operation' }
   $fields = @($request.PSObject.Properties.Name | Sort-Object) -join ','
   switch -Exact ($request.op) {
+    'inspect-owned-firewall-rules' {
+      if ($fields -cne 'op') { throw 'Invalid recovery worker fields' }
+      return (Read-OwnedFirewallRuleCount)
+    }
     { $_ -cin @('inspect-runtime','inspect-runtime-acl','stop-runtime') } {
       if ($fields -cne 'op,runtimeDir' -or $request.runtimeDir -isnot [string] -or $request.runtimeDir.Length -gt 2048 -or
           $request.runtimeDir -notmatch '^[a-z]:\\' -or $request.runtimeDir -match '[\x00-\x1f"/]' -or
@@ -205,6 +224,7 @@ function Invoke-RecoveryOperation($request) {
     }
     'inspect-physical-dns' {
       if ($fields -cne 'op') { throw 'Invalid recovery worker fields' }
+      Initialize-VpnteNetworkModules
       $snapshot = Read-PhysicalAdapterDns
       if ($null -eq $snapshot) { return '[]' }
       return $snapshot
@@ -220,7 +240,7 @@ function Invoke-RecoveryOperation($request) {
     }
     'warmup-adapters' {
       if ($fields -cne 'module,op' -or $request.module -isnot [string] -or @(${ADAPTER_WARMUP_MODULES.map(name => `'${name}'`).join(',')}) -cnotcontains $request.module) { throw 'Invalid adapter warm-up fields' }
-      Import-Module $request.module -ErrorAction Stop
+      Initialize-VpnteNetworkModules
       return 'RECOVERY_MODULES_READY'
     }
     'inspect-physical-adapters' {
@@ -235,6 +255,7 @@ function Invoke-RecoveryOperation($request) {
     }
     'inspect-tun' {
       if ($fields -ne 'alias,op' -or $request.alias -isnot [string] -or $request.alias -cnotmatch '^(Ethernet (?:[5-9]|1[0-2])|VPNTE-TUN|awg-tun)$') { throw 'Invalid TUN alias' }
+      Initialize-VpnteNetworkModules
       $adapter = @(Get-NetAdapter -Name $request.alias -ErrorAction Stop)
       if ($adapter.Count -ne 1 -or [string]$adapter[0].Name -cne $request.alias) { throw 'VPNTE TUN alias identity mismatch' }
       $adapter = $adapter[0]
@@ -294,6 +315,7 @@ ${RECOVERY_QUARANTINE_SCRIPT}
 `
 }
 
+/** PS 5.1 provider strings must be cast before framing to omit attached properties. */
 export function recoveryWorkerScript(programData: string, adapterInspectionOnly = false): string {
   return String.raw`
 $ErrorActionPreference='Stop'
@@ -310,11 +332,9 @@ while ($line = [Console]::In.ReadLine()) {
     $cmd = $line | ConvertFrom-Json -ErrorAction Stop
     if ((@($cmd.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'id,request' -or $cmd.id -isnot [int] -or $cmd.id -le 0) { throw 'Invalid recovery envelope' }
     $id = $cmd.id
-    ${adapterInspectionOnly ? "if (@('warmup-adapters','inspect-physical-dns','inspect-tun','inspect-physical-adapters','inspect-transition-adapters') -cnotcontains $cmd.request.op) { throw 'Adapter inspection operation refused' }" : ''}
+    ${adapterInspectionOnly ? "if (@('warmup-adapters','inspect-physical-dns','inspect-tun','inspect-physical-adapters','inspect-transition-adapters','inspect-owned-firewall-rules','inspect-network-identity') -cnotcontains $cmd.request.op) { throw 'Adapter inspection operation refused' }" : ''}
     $value = Invoke-RecoveryOperation $cmd.request
     if ($value -isnot [string] -or [Text.Encoding]::UTF8.GetByteCount($value) -gt ${RECOVERY_MAX_BYTES * 2}) { throw 'Invalid recovery operation output' }
-    # PS 5.1 Get-Content attaches provider properties to its string. Without
-    # this cast ConvertTo-Json emits an object instead of the wire string.
     $value = [string]$value
     $result = @{id=$id;ok=$true;value=$value}
   } catch { $result = @{id=$id;ok=$false;error='Recovery operation rejected: ' + $_.Exception.Message} }

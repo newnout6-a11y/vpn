@@ -26,15 +26,17 @@
     "test:wp1:migration:local": "node scripts/test-wp1-migration.mjs --same-version",
     "preview": "electron-vite preview",
     "build:sidecar": "node scripts/build-sidecar.mjs",
+    "build:adapter-native": "node scripts/build-adapter-lockdown.mjs",
+    "bench:adapter-lockdown": "node scripts/bench-adapter-lockdown.mjs",
     "build:installer-shutdown": "node scripts/generate-installer-shutdown.mjs",
     "build:snapshot": "node scripts/generate-v8-snapshot.mjs",
     "prepare:electron": "install-electron --no",
     "predist": "npm run prepare:electron",
     "predist:win": "npm run prepare:electron",
     "predist:portable": "npm run prepare:electron",
-    "dist": "npm run build:sidecar && npm run build:snapshot && npm run build && npm run build:installer-shutdown && electron-builder",
-    "dist:win": "npm run build:sidecar && npm run build:snapshot && npm run build && npm run build:installer-shutdown && electron-builder --win nsis",
-    "dist:portable": "npm run build:sidecar && npm run build:snapshot && npm run build && electron-builder --win portable"
+    "dist": "npm run build:adapter-native && npm run build:sidecar && npm run build:snapshot && npm run build && npm run build:installer-shutdown && electron-builder",
+    "dist:win": "npm run build:adapter-native && npm run build:sidecar && npm run build:snapshot && npm run build && npm run build:installer-shutdown && electron-builder --win nsis",
+    "dist:portable": "npm run build:adapter-native && npm run build:sidecar && npm run build:snapshot && npm run build && electron-builder --win portable"
   },
   "dependencies": {
     "axios": "^1.7.2",

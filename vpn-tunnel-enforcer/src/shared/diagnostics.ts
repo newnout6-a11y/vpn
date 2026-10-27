@@ -4,6 +4,7 @@ import type { IpcError } from './ipc-result'
 
 export type DiagnosticArtifact = 'snapshots' | 'traffic-forensics' | 'logs' | 'app-log' | 'app-previous-log'
   | 'sing-box-log' | 'sing-box-previous-log' | 'xray-log' | 'xray-previous-log'
+  | 'xray-a-log' | 'xray-a-previous-log' | 'xray-b-log' | 'xray-b-previous-log'
 export interface DiagnosticClearReport {
   success: boolean
   cleared: DiagnosticArtifact[]

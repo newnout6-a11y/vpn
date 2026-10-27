@@ -20,9 +20,11 @@ const classifier = parsedSource.statements.find(node => ts.isFunctionDeclaration
 const classifierCode = ts.transpileModule(classifier.getText(parsedSource) + ';return classifyTunError;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
 const classifyTunError = new Function('RecoveryWorkerError', 'classifyIpcError', classifierCode)(RecoveryWorkerError, classifyIpcError)
 
-function harness() {
+function harness(retained = false, lockdown: Promise<void> | null = null) {
   const os = {
-    connectionFailure, ipcError, classifyTunError, readIpcErrorCategory,
+    retained, lockdown,
+    selectProtectedOutbound: vi.fn(async () => {}),
+    connectionFailure, ipcError, IpcFault, classifyTunError, readIpcErrorCategory,
     isSingboxRunning: vi.fn(async () => true),
     readOwnedSingboxPid: vi.fn(async () => 731),
     recordOwnedTunAdapter: vi.fn(async (): Promise<void> => { throw new Error('driver identity mismatch') }),
@@ -53,7 +55,7 @@ let attempts=0, startAbortedReason=null, startAbortedCategory=null, pendingKillS
 let startupPollCompletion=null;
 const startAbortController=new AbortController();
 let startupCompensationStarted=false;
-const maxAttempts=31, poller=1, wantKillSwitch=true, adapterLockdownPromise=null;
+const maxAttempts=31, poller=1, wantKillSwitch=true, adapterLockdownPromise=lockdown, adapterLockdownCategory='internal';
 const runtime={singbox:'fixture.exe'}, proxyOwnerProgramPaths=[], processWaitStarted=0;
 const phases={},phaseDurations={},tStart=Date.now();
 let currentStatus={running:false,pid:null,startedAt:null,warning:null};
@@ -61,14 +63,62 @@ const TUN_ADAPTER_ALIAS='Ethernet 5',mode='directVpn',proxyAddr='',proxyType='so
 const vpnProfile={name:'fixture',protocol:'vless'},warning=null,publicWifiCompatibility=true;
 const wantAdapterLockdown=false,startOptions={},STABLE_RESET_MS=60000;
 let killSwitchEngaged=false,killSwitchWarning=null,restartAttempt=0,lastStartOptions=null;
+let preparedXraySwitch=retained ? {slots:{a:{port:51001},b:{port:51002}},configurationKey:'fixture'} : null;
+let xraySwitchRuntime=null,clashApiInfo={port:51003,secret:'0123456789abcdef0123456789abcdef'};
 let stopInProgress=false,userInitiatedStop=false,stableTimer=null;
 function finish(result){if(!resolved){resolved=true;onFinish(result)}}
-return {poll: ${callback}, status:()=>currentStatus, signal: startAbortController.signal, requestStop: () => {stopRequested=true;startAbortController.abort()}, exit: () => {resolved=true;settleFirewallAdapter?.(false)}, completion: () => startupPollCompletion};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
-  const control = new Function(...Object.keys(os), compiled)(...Object.values(os)) as { poll: () => Promise<void>; status: () => { running: boolean; pid: number | null }; signal: AbortSignal; requestStop: () => void; exit: () => void; completion: () => Promise<void> | null }
+return {poll: ${callback}, status:()=>currentStatus, switchRuntime:()=>xraySwitchRuntime, signal: startAbortController.signal, requestStop: () => {stopRequested=true;startAbortController.abort()}, exit: () => {resolved=true;settleFirewallAdapter?.(false)}, completion: () => startupPollCompletion};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const control = new Function(...Object.keys(os), compiled)(...Object.values(os)) as { poll: () => Promise<void>; status: () => { running: boolean; pid: number | null }; switchRuntime: () => object | null; signal: AbortSignal; requestStop: () => void; exit: () => void; completion: () => Promise<void> | null }
   return { ...control, ...os }
 }
 
 describe('startup callback fault boundaries', () => {
+  it('waits for TUN while physical lockdown runs, joining both before ownership/firewall proof (AT-02-002)', async () => {
+    let release!: () => void
+    const lockdown = new Promise<void>(done => { release = done })
+    const h = harness(true, lockdown)
+    h.recordOwnedTunAdapter.mockResolvedValue(undefined)
+    const pending = h.poll()
+    await vi.waitFor(() => expect(h.waitForTunInterface).toHaveBeenCalledOnce())
+    expect(h.recordOwnedTunAdapter).not.toHaveBeenCalled()
+    expect(h.onFinish).not.toHaveBeenCalled()
+    release(); await pending
+    expect(h.recordOwnedTunAdapter).toHaveBeenCalledOnce()
+    expect(h.onFinish).toHaveBeenCalledWith(expect.objectContaining({ success: true }))
+  })
+  it('closes the firewall barrier and drains Xray before compensating failed lockdown (AT-02-004/005)', async () => {
+    let reject!: (error: Error) => void
+    const lockdown = new Promise<void>((_done, fail) => { reject = fail })
+    const h = harness(true, lockdown)
+    const pending = h.poll()
+    await vi.waitFor(() => expect(h.waitForTunInterface).toHaveBeenCalledOnce())
+    reject(new Error('lockdown refused'))
+    await pending
+    expect(h.recordOwnedTunAdapter).not.toHaveBeenCalled()
+    expect(h.stopXray).toHaveBeenCalledExactlyOnceWith('startup validation failed')
+    expect(h.waitForOwnedRuntimeToExit.mock.invocationCallOrder[0]).toBeLessThan(h.rollbackEarlyAdapterLockdown.mock.invocationCallOrder[0])
+    expect(h.stopXray.mock.invocationCallOrder[0]).toBeLessThan(h.rollbackEarlyAdapterLockdown.mock.invocationCallOrder[0])
+    expect(h.onFinish).toHaveBeenCalledWith(expect.objectContaining({ success: false,
+      error: 'Не удалось применить защиту физических адаптеров. Проверьте журнал.' }))
+    expect(h.selectProtectedOutbound).not.toHaveBeenCalled()
+  })
+  it.each(['alive', 'unknown', 'kill-failed'] as const)('retains network protection after lockdown failure when runtime exit is %s (AT-02-004 / AT-03-007)', async outcome => {
+    let reject!: (error: Error) => void
+    const lockdown = new Promise<void>((_done, fail) => { reject = fail })
+    const h = harness(true, lockdown)
+    if (outcome === 'alive') h.waitForOwnedRuntimeToExit.mockResolvedValue(false)
+    if (outcome === 'unknown') h.waitForOwnedRuntimeToExit.mockRejectedValue(new Error('ownership unreadable'))
+    if (outcome === 'kill-failed') h.killOwnedRuntimeProcesses.mockRejectedValue(new Error('kill rejected'))
+    const pending = h.poll()
+    await vi.waitFor(() => expect(h.waitForTunInterface).toHaveBeenCalledOnce())
+    reject(new Error('lockdown refused'))
+    await pending
+    expect(h.stopXray).not.toHaveBeenCalled()
+    expect(h.rollbackEarlyAdapterLockdown).not.toHaveBeenCalled()
+    expect(h.disableKillSwitchIfActive).not.toHaveBeenCalled()
+    expect(h.onFinish).toHaveBeenCalledWith(expect.objectContaining({ success: false, warning: expect.stringContaining('network protection retained') }))
+    expect(h.selectProtectedOutbound).not.toHaveBeenCalled()
+  })
   it.each([
     ['preserved-stop', 'complete'], ['release', 'complete'], ['startup', 'complete'],
     ['late-cancel', 'complete'], ['startup', 'partial'], ['startup', 'throw']
@@ -345,6 +395,36 @@ describe('startup callback fault boundaries', () => {
     expect(h.killOwnedRuntimeProcesses).not.toHaveBeenCalled()
   })
 
+  it('establishes the initial live selector before publishing a retained-slot startup (AT-02-002)', async () => {
+    const h = harness(true)
+    h.recordOwnedTunAdapter.mockResolvedValue(undefined)
+    let select!: () => void
+    h.selectProtectedOutbound.mockReturnValueOnce(new Promise<void>(done => { select = done }))
+    const pending = h.poll()
+    await vi.waitFor(() => expect(h.selectProtectedOutbound).toHaveBeenCalledOnce())
+    expect(h.selectProtectedOutbound).toHaveBeenCalledWith({ port: 51003, secret: '0123456789abcdef0123456789abcdef' }, 'a')
+    expect(h.readOwnedSingboxPid).not.toHaveBeenCalled()
+    expect(h.onFinish).not.toHaveBeenCalled()
+    expect(h.switchRuntime()).toBeNull()
+    select()
+    await pending
+    expect(h.onFinish).toHaveBeenCalledWith({ success: true, warning: null })
+    expect(h.switchRuntime()).toMatchObject({ configurationKey: 'fixture', slots: { a: { port: 51001 }, b: { port: 51002 } } })
+  })
+
+  it('compensates selector readback failure without publishing ready slots (AT-02-004/005)', async () => {
+    const h = harness(true)
+    h.recordOwnedTunAdapter.mockResolvedValue(undefined)
+    h.selectProtectedOutbound.mockRejectedValueOnce(new Error('selector readback failed'))
+    await h.poll()
+    expect(h.onFinish).toHaveBeenCalledWith(expect.objectContaining({ success: false }))
+    expect(h.switchRuntime()).toBeNull()
+    expect(h.notifyStatus).not.toHaveBeenCalledWith('running')
+    expect(h.killOwnedRuntimeProcesses).toHaveBeenCalledOnce()
+    expect(h.stopXray).toHaveBeenCalledOnce()
+    expect(h.disableKillSwitchIfActive).toHaveBeenCalledOnce()
+  })
+
   it('fails a required firewall check instead of reporting a protected connection', async () => {
     const h = harness()
     h.recordOwnedTunAdapter.mockResolvedValue(undefined)
@@ -402,7 +482,7 @@ describe('startup callback fault boundaries', () => {
     if (outcome === 'probe failed') h.waitForOwnedRuntimeToExit.mockRejectedValue(new Error('exit probe failed'))
     if (outcome === 'kill failed') h.killOwnedRuntimeProcesses.mockRejectedValue(new Error('process cleanup failed'))
     await h.poll()
-    expect(h.stopXray).toHaveBeenCalledOnce()
+    expect(h.stopXray).not.toHaveBeenCalled()
     expect(h.rollbackEarlyAdapterLockdown).not.toHaveBeenCalled()
     expect(h.disableKillSwitchIfActive).not.toHaveBeenCalled()
     expect(h.notifyStatus).not.toHaveBeenCalledWith('stopped')

@@ -1,6 +1,6 @@
 // AT-03-001/003/004/009/010: effective policy evidence, fail-closed status.
 import { assert, describe, expect, it } from 'vitest'
-import { FIREWALL_STATUS_PS, parseFirewallStatusSnapshot } from './firewallStatus'
+import { FIREWALL_STATUS_PS, parseFirewallStatusSnapshot, firewallPolicyMismatch } from './firewallStatus'
 import { execFileSync } from 'child_process'
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'fs'
 import { join } from 'path'
@@ -101,6 +101,30 @@ $actual=&{${FIREWALL_STATUS_PS}}
     expect(parseFirewallStatusSnapshot(JSON.stringify(snapshot))).toEqual(snapshot)
     expect(matches()).toBe(true)
     snapshot.rules.push({ ...snapshot.rules[3], remote: ['::1/128'] })
+    expect(matches()).toBe(true)
+  })
+  it.each(['proxy-0', 'xray-engine', 'external-proxy'])('verifies the exact journalled %s executable (AT-03-001/009/012)', suffix => {
+    const { snapshot, manifest, matches } = fixture()
+    const name = prefix + suffix, program = 'C:\\ProgramData\\VPNTE\\tun-runtime\\vpnte-xray.exe'
+    snapshot.rules.push({ ...snapshot.rules[0], name, program })
+    snapshot.storedNames.push(name); manifest.ruleNames.push(name)
+    expect(matches()).toBe(false) // Display name alone cannot approve Xray.
+    manifest.programRules = [{ name, program }]
+    expect(matches()).toBe(true)
+    snapshot.rules.at(-1)!.program = program.toUpperCase()
+    expect(matches()).toBe(true)
+    snapshot.rules.at(-1)!.program = program.replace('vpnte-xray.exe', 'other.exe')
+    expect(matches()).toBe(false)
+    expect(firewallPolicyMismatch(snapshot, manifest, { app: requireRule(snapshot, 'app').program, proxy: 'unused' }, 'Ethernet 5',
+      ['127.0.0.0/8', '10.0.0.0/8'], '192.168.250.252/30')).toBe('program-scope')
+    delete manifest.programRules
+    expect(matches()).toBe(false)
+  })
+  it('retains the provable fixed external proxy path for legacy journals (AT-03-001/003)', () => {
+    const { snapshot, manifest, matches } = fixture()
+    const name = prefix + 'proxy-0'
+    snapshot.rules.push({ ...snapshot.rules[0], name, program: manifest.singboxExePath!.replace('sing-box.exe', 'proxy.exe') })
+    snapshot.storedNames.push(name); manifest.ruleNames.push(name)
     expect(matches()).toBe(true)
   })
   it.each(['Domain', 'Private', 'Public'])('refuses disabled physical interfaces in the %s profile (AT-03-001)', name => {
