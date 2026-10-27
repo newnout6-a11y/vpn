@@ -492,6 +492,10 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         proxyType: settings.proxyOverride.trim() ? settings.proxyType : proxy?.type ?? settings.proxyType
       })
       setLeakChecks(result)
+      // The dashboard shows only the verdict; the journal keeps which checks need attention
+      for (const item of result.items) {
+        if (item.status === 'warn' || item.status === 'fail') addLog(item.status === 'fail' ? 'error' : 'warn', item.label + ': ' + item.value)
+      }
       const message =
         result.summary === 'ok'
           ? 'Утечек не найдено — всё через VPN.'
