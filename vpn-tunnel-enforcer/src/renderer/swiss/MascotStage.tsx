@@ -11,9 +11,10 @@ interface Pt { x: number; y: number; scale: number }
 
 /**
  * Any element with data-perch="name" is a spot the mascot can sit on.
- *   data-perch-x     0..1 horizontal anchor (default 0.5)
- *   data-perch-y     "top" (sits on the top edge, default) | "bottom"
+ *   data-perch-x     0..1 preferred horizontal anchor (default 0.5)
+ *   data-perch-y     "top" (sits on the top edge, default) | "bottom" (stands inside, on the bottom edge)
  *   data-perch-scale size multiplier (default 1)
+ *   data-perch-fit   "gap": only land in a horizontal gap free of text/icons; no gap = not available
  */
 function measure(name: string): Pt | null {
   const el = document.querySelector<HTMLElement>('[data-perch="' + name + '"]')
@@ -23,7 +24,44 @@ function measure(name: string): Pt | null {
   const ax = Number(el.dataset.perchX ?? 0.5)
   const y = el.dataset.perchY === 'bottom' ? r.bottom : r.top
   const scale = Number(el.dataset.perchScale ?? 1)
-  return { x: r.left + r.width * ax, y, scale }
+  const prefer = r.left + r.width * ax
+  if (el.dataset.perchFit !== 'gap') return { x: prefer, y, scale }
+  const x = freeSpotX(el, r, W * scale + 4, prefer)
+  return x === null ? null : { x, y, scale }
+}
+
+/** x-centre of the free horizontal slot (no glyphs, no icons) closest to prefer. */
+function freeSpotX(el: HTMLElement, r: DOMRect, need: number, prefer: number): number | null {
+  const taken: Array<[number, number]> = []
+  const range = document.createRange()
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (!n.textContent || !n.textContent.trim()) continue
+    range.selectNodeContents(n)
+    for (const box of Array.from(range.getClientRects())) if (box.width > 0) taken.push([box.left, box.right])
+  }
+  // Text-less leaves: icons, status squares (but not full-width background layers)
+  el.querySelectorAll('*').forEach(c => {
+    if (c.children.length > 0 || (c.textContent && c.textContent.trim())) return
+    const box = c.getBoundingClientRect()
+    if (box.width > 0 && box.height > 0 && box.width < r.width * 0.6) taken.push([box.left, box.right])
+  })
+  taken.sort((a, b) => a[0] - b[0])
+  const pad = 6
+  const gaps: Array<[number, number]> = []
+  let cursor = r.left + pad
+  for (const [a, b] of taken) {
+    if (a - pad > cursor) gaps.push([cursor, a - pad])
+    cursor = Math.max(cursor, b + pad)
+  }
+  if (r.right - pad > cursor) gaps.push([cursor, r.right - pad])
+  let best: number | null = null
+  for (const [a, b] of gaps) {
+    if (b - a < need) continue
+    const x = Math.min(Math.max(prefer, a + need / 2), b - need / 2)
+    if (best === null || Math.abs(x - prefer) < Math.abs(best - prefer)) best = x
+  }
+  return best
 }
 
 function prefersReducedMotion(): boolean {
