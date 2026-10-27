@@ -21,7 +21,7 @@
     "legacyCleanupRequired": "Stopping the old client's capture is not confirmed. Disconnect the VPN and close the old client normally before updating; new capture is blocked."
   },
   "dashboard": {
-    "swissSitesSee": "Sites see",
+    "swissSitesSee": "Exit IP",
     "swissRealAddress": "Real address",
     "swissNode": "Node",
     "swissIpLeak": "leak",
@@ -778,6 +778,8 @@
     "wanderLogs": "What's in the log…"
   },
   "swiss": {
+    "justNow": "now",
+    "bestPing": "Best ping · click to ping again",
     "traffic": "Traffic",
     "mbps": "Mbit/s",
     "secondsAgo": "{{n}} s ago",
