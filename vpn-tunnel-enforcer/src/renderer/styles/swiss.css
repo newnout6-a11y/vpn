@@ -726,9 +726,10 @@
   .c-swiss .swiss-ip { font-size: 20px; }
 }
 
-/* Orange as small text: #ff4f00 on paper is ~2.9:1. Text uses --signal-ink
-   (≥4.5:1 on paper); fills, rules and large type keep --signal. */
-.c-swiss { --signal-ink: #e04500; }
+/* Orange as small text: #ff4f00 on paper is ~2.9:1. Text uses --signal-ink:
+   #bf3c00 is 4.8:1 on #f2f0eb (light), #ff5a1f is 6.2:1 on #0d0d0c (dark).
+   Fills, rules and large type keep --signal. */
+.c-swiss { --signal-ink: #bf3c00; }
 [data-theme='dark'] .c-swiss { --signal-ink: #ff5a1f; }
 .c-swiss .swiss-nav-item[aria-current='page'] .swiss-nav-num { color: var(--signal-ink); }
 .c-swiss .swiss-fact-value.is-alert { color: var(--signal-ink); }
