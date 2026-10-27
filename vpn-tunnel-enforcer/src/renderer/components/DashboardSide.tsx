@@ -1,9 +1,7 @@
 /**
- * Right-hand companion column for the Dashboard.
- *
- * Only renders on `xl:` and above (≥1280px viewport). On narrower windows the
- * dashboard collapses to a single column and this component is hidden — see
- * the Tailwind classes on the parent grid in Dashboard.tsx.
+ * Panel row under the dashboard status slab («Пломба»): live traffic, quick
+ * server picker and the journal side by side, recent sites below them. On
+ * narrow windows the row stacks into one column (see .swiss-panels).
  *
  * Three at-a-glance widgets, top to bottom:
  *   1. Quick server picker — every profile with country flag and live ping,
@@ -36,6 +34,7 @@ import { cn } from '../design-system/utils'
 import { useAppStore } from '../store'
 import { usePageActive } from '../hooks/usePageActive'
 import { CountryFlagIcon } from './CountryFlagIcon'
+import { SwissJournal } from '../swiss/SwissJournal'
 import { SERVER_CHANGED_EVENT, emitServerChanged } from '../nav'
 import type { ServerGroup, ServerProfile } from '../../shared/ipc-types'
 
@@ -714,10 +713,13 @@ function RecentSites() {
 /** Composes the dashboard's server, traffic, and recent-site panels. */
 export function DashboardSide() {
   return (
-    <div className="flex flex-col gap-4 min-h-0">
-      <QuickServers />
+    <div className="swiss-panels">
       <LiveTraffic />
-      <RecentSites />
+      <QuickServers />
+      <SwissJournal />
+      <div className="swiss-panels-wide">
+        <RecentSites />
+      </div>
     </div>
   )
 }

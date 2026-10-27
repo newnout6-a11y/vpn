@@ -18,6 +18,8 @@ vi.mock('../components/ExternalProxyCard', () => ({ ExternalProxyCard: () => nul
 vi.mock('../components/ProfileSelectorInline', () => ({ ProfileSelectorInline: () => null }))
 vi.mock('../components/ForeignVpnBanner', () => ({ ForeignVpnBanner: () => null }))
 vi.mock('../components/DashboardSide', () => ({ DashboardSide: () => null }))
+// The panel row (traffic · servers · journal) mirrors log lines; these tests assert toasts, not the journal.
+vi.mock('../swiss/SwissPanels', () => ({ SwissPanels: () => null }))
 vi.mock('../components/CountryFlagIcon', () => ({ CountryFlagIcon: () => null }))
 
 import { Dashboard } from './Dashboard'
@@ -299,8 +301,8 @@ describe('Dashboard cancellation', () => {
     expect(cancelButton).toHaveTextContent('Отменяем…')
     expect(cancelButton).toBeVisible()
     const powerButton = screen.getAllByRole('button', { name: 'Отменяем…' }).find(button => button !== cancelButton)!
-    expect(powerButton).toHaveClass('bg-[var(--color-cancellation)]')
-    expect(powerButton).not.toHaveClass('bg-[var(--color-accent)]')
+    expect(powerButton).toHaveClass('swiss-power', 'is-cancel')
+    expect(powerButton).not.toHaveClass('is-on')
     expect(screen.getByRole('status')).toHaveTextContent('Отменяем…')
     expect(screen.getByRole('status')).toHaveClass('sr-only')
     fireEvent.click(cancelButton)
@@ -338,10 +340,11 @@ describe('Dashboard cancellation', () => {
     render(<Dashboard />)
     fireEvent.click(screen.getByRole('button', { name: 'Отменить подключение' }))
     const powerButton = screen.getAllByRole('button', { name: 'Отменяем…' }).find(button => !button.hasAttribute('aria-busy'))!
-    expect(powerButton).toHaveClass('bg-[var(--color-cancellation)]')
-    expect(powerButton).not.toHaveClass('bg-[var(--color-success)]')
+    expect(powerButton).toHaveClass('swiss-power', 'is-cancel')
+    expect(powerButton).not.toHaveClass('is-on')
     await act(async () => cancellation.resolve({ success: true }))
-    expect(screen.getByRole('button', { name: 'Отключено' })).toHaveClass('bg-[var(--color-accent)]')
+    expect(screen.getByRole('button', { name: 'Отключено' })).toHaveClass('swiss-power')
+    expect(screen.getByRole('button', { name: 'Отключено' })).not.toHaveClass('is-cancel')
   })
 
   it.each(['failed result', 'rejected IPC'])('shows %s without claiming the tunnel stopped', async kind => {

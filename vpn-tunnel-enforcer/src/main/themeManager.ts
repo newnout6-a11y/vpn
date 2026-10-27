@@ -245,6 +245,32 @@ export const themeManager = {
 
 // ─── IPC Registration ────────────────────────────────────────────────────────
 
+// ─── «Пломба» title bar ──────────────────────────────────────────────────────
+// The renderer draws a 36px paper strip as the drag region (TitleBar.tsx) and
+// Windows keeps its own caption buttons through the Window Controls Overlay,
+// along with snap, resize, the shadow and Windows 11 rounded corners. The
+// overlay must match the strip: --paper / --ink from styles/swiss.css.
+export const TITLE_BAR_HEIGHT = 36
+
+export function titleBarOverlayFor(theme: ThemeConfig): { color: string; symbolColor: string; height: number } {
+  const dark = theme.mode === 'system' ? nativeTheme.shouldUseDarkColors : theme.mode === 'dark'
+  return dark
+    ? { color: '#0d0d0c', symbolColor: '#edebe6', height: TITLE_BAR_HEIGHT }
+    : { color: '#f2f0eb', symbolColor: '#111111', height: TITLE_BAR_HEIGHT }
+}
+
+function syncTitleBarOverlays(theme: ThemeConfig): void {
+  const overlay = titleBarOverlayFor(theme)
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue
+    try {
+      win.setTitleBarOverlay(overlay)
+    } catch {
+      // Windows created without an overlay (offscreen helpers) reject this
+    }
+  }
+}
+
 export function registerThemeIpcHandlers(): void {
   ipcMain.handle('theme:list', () => {
     return themeManager.getAllThemes()
@@ -258,6 +284,7 @@ export function registerThemeIpcHandlers(): void {
     themeManager.setActiveTheme(id)
     // Notify all renderer windows about the theme change
     const activeTheme = themeManager.getActiveTheme()
+    syncTitleBarOverlays(activeTheme)
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) {
         win.webContents.send('theme-changed', activeTheme)
@@ -278,6 +305,7 @@ export function registerThemeIpcHandlers(): void {
     const activeId = themeStore.get('activeThemeId')
     if (activeId === 'builtin-system') {
       const activeTheme = themeManager.getActiveTheme()
+      syncTitleBarOverlays(activeTheme)
       for (const win of BrowserWindow.getAllWindows()) {
         if (!win.isDestroyed()) {
           win.webContents.send('theme-changed', activeTheme)

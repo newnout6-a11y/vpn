@@ -1,0 +1,745 @@
+/* «Пломба» — Swiss redesign layer.
+ * Scoped to .c-swiss so the rest of the app keeps its existing theme tokens.
+ * Dark mode follows the app's [data-theme="dark"] attribute (see ThemeProvider).
+ * Fonts are bundled locally: CSP is font-src 'self', so no web-font CDN. */
+
+@font-face {
+  font-family: 'Inter Tight';
+  src: url('../assets/fonts/InterTight-Variable.ttf') format('truetype');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('../assets/fonts/JetBrainsMono-Variable.ttf') format('truetype');
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+.c-swiss {
+  --paper: #f2f0eb;
+  --ink: #111111;
+  --mute: #6b6862;
+  --rule: rgba(17, 17, 17, 0.14);
+  --rule-strong: rgba(17, 17, 17, 0.9);
+  --signal: #ff4f00;
+  --on-signal: #111111;
+  --on-rule: rgba(17, 17, 17, 0.22);
+  font-family: 'Inter Tight', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  @apply antialiased;
+}
+[data-theme='dark'] .c-swiss {
+  --paper: #0d0d0c;
+  --ink: #edebe6;
+  --mute: #8d8a84;
+  --rule: rgba(237, 235, 230, 0.14);
+  --rule-strong: rgba(237, 235, 230, 0.85);
+  --signal: #ff5a1f;
+  --on-signal: #0d0d0c;
+  --on-rule: rgba(13, 13, 12, 0.28);
+}
+
+.c-swiss .swiss-mono,
+.swiss-mono {
+  font-family: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-feature-settings: 'zero' 1;
+}
+.c-swiss .swiss-label {
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mute);
+}
+
+/* Scrollbars inside Swiss areas: thin, square, no arrows; orange on hover.
+   Chromium uses the ::-webkit-scrollbar parts (scrollbar-color would override
+   them), so the standard properties are only a fallback elsewhere. */
+.c-swiss::-webkit-scrollbar,
+.c-swiss ::-webkit-scrollbar { width: 6px; height: 6px; }
+.c-swiss::-webkit-scrollbar-track,
+.c-swiss ::-webkit-scrollbar-track { background: transparent; }
+.c-swiss::-webkit-scrollbar-thumb,
+.c-swiss ::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 0; }
+.c-swiss:hover::-webkit-scrollbar-thumb,
+.c-swiss :hover::-webkit-scrollbar-thumb { background: var(--mute); }
+.c-swiss::-webkit-scrollbar-thumb:hover,
+.c-swiss ::-webkit-scrollbar-thumb:hover { background: var(--signal); }
+.c-swiss::-webkit-scrollbar-button,
+.c-swiss ::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+.c-swiss ::-webkit-scrollbar-corner { background: transparent; }
+@supports not selector(::-webkit-scrollbar) {
+  .c-swiss, .c-swiss * { scrollbar-width: thin; scrollbar-color: var(--mute) transparent; }
+}
+
+/* ── Sidebar ─────────────────────────────────────────── */
+.swiss-sidebar { width: 200px; }
+.c-swiss .swiss-brand {
+  font-size: 22px;
+  font-weight: 900;
+  text-transform: uppercase;
+  line-height: 0.9;
+  letter-spacing: -0.03em;
+}
+.c-swiss .swiss-nav-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid var(--rule);
+  padding: 9px 0;
+  text-align: left;
+  color: var(--mute);
+  transition: color 0.15s;
+}
+.c-swiss .swiss-nav-item:hover,
+.c-swiss .swiss-nav-item[aria-current='page'] { color: var(--ink); }
+.c-swiss .swiss-nav-item:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+.c-swiss .swiss-nav-num { width: 20px; font-size: 10px; }
+.c-swiss .swiss-nav-item[aria-current='page'] .swiss-nav-num { color: var(--signal); }
+.c-swiss .swiss-nav-label { flex: 1; font-size: 14px; font-weight: 500; letter-spacing: -0.01em; transition: transform 0.2s; }
+.c-swiss .swiss-nav-item:hover .swiss-nav-label { transform: translateX(4px); }
+.c-swiss .swiss-nav-item[aria-current='page'] .swiss-nav-label { font-weight: 600; }
+.c-swiss .swiss-nav-mark { height: 8px; width: 0; background: var(--ink); transition: width 0.2s; }
+.c-swiss .swiss-nav-item:hover .swiss-nav-mark { width: 8px; }
+.c-swiss .swiss-nav-item[aria-current='page'] .swiss-nav-mark { width: 8px; background: var(--signal); }
+
+/* ── Dashboard status slab ───────────────────────────── */
+.swiss-slab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+}
+@media (max-width: 1100px) {
+  .swiss-slab { grid-template-columns: minmax(0, 1fr); }
+  .swiss-slab .swiss-slab-side { border-left: 0; border-top: 1px solid var(--rule); }
+}
+.swiss-slab-main {
+  position: relative;
+  display: flex;
+  min-height: 300px;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 16px;
+  overflow: hidden;
+  padding: 20px 24px;
+  transition: background-color 0.5s, color 0.5s;
+}
+.swiss-slab.is-on .swiss-slab-main { background: var(--signal); color: var(--on-signal); }
+/* Full opacity: 10px labels need it to keep WCAG AA contrast on the orange slab */
+.swiss-slab.is-on .swiss-slab-main .swiss-label { color: var(--on-signal); opacity: 1; }
+.swiss-slab.is-alert .swiss-slab-main { box-shadow: inset 0 0 0 3px var(--signal); }
+.swiss-slab-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border-left: 1px solid var(--rule);
+  padding: 20px;
+}
+/* padding-top keeps the word where it sat under the (removed) 20px header row */
+.swiss-word-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding-top: 64px; }
+.swiss-word-wrap { min-width: 0; flex: 1; container-type: inline-size; }
+.c-swiss .swiss-word {
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: -0.055em;
+  line-height: 0.8;
+  white-space: nowrap;
+  user-select: none;
+}
+/* Mascot sits at 80% at home so he doesn't read as one more letter of the word */
+.swiss-home { width: 78px; height: 72px; flex-shrink: 0; margin-bottom: 4px; }
+.c-swiss .swiss-caption { font-size: 22px; font-weight: 600; line-height: 1.15; letter-spacing: -0.015em; }
+.swiss-stripes {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  opacity: 0.16;
+  background-image: repeating-linear-gradient(-45deg, var(--signal) 0 14px, transparent 14px 28px);
+  background-size: 40px 40px;
+  animation: swiss-stripes 0.8s linear infinite;
+}
+@keyframes swiss-stripes { to { background-position: 40px 0; } }
+
+.c-swiss .swiss-power {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 64px;
+  overflow: hidden;
+  border-radius: 0;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-align: left;
+}
+.c-swiss .swiss-power::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--signal);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+.c-swiss .swiss-power:hover:not(:disabled)::before { transform: scaleX(1); }
+.c-swiss .swiss-power:hover:not(:disabled) { color: var(--on-signal); }
+.c-swiss .swiss-power.is-on { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 2px var(--ink); }
+.c-swiss .swiss-power.is-busy,
+.c-swiss .swiss-power.is-cancel { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 2px var(--signal); }
+.c-swiss .swiss-power.is-wait { cursor: wait; }
+.c-swiss .swiss-power:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+.c-swiss .swiss-power-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 20px;
+}
+.c-swiss .swiss-chip { border-radius: 0; }
+
+/* ── Micro-motion ────────────────────────────────────── */
+.c-swiss .roll { display: inline-block; animation: swiss-roll 0.32s cubic-bezier(0.2, 0.9, 0.3, 1) both; }
+@keyframes swiss-roll { from { transform: translateY(-0.45em); opacity: 0; } to { transform: none; opacity: 1; } }
+.c-swiss .letter { display: inline-block; animation: swiss-letter 0.5s cubic-bezier(0.2, 0.9, 0.2, 1) both; }
+@keyframes swiss-letter { from { transform: translateY(0.35em) skewY(6deg); opacity: 0; } to { transform: none; opacity: 1; } }
+.c-swiss .blink { animation: swiss-blink 1s steps(2, start) infinite; }
+@keyframes swiss-blink { to { visibility: hidden; } }
+.c-swiss .bubble-in { animation: swiss-bubble 0.28s cubic-bezier(0.3, 1.5, 0.5, 1) both; transform-origin: bottom center; }
+@keyframes swiss-bubble { from { transform: scale(0.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+/* ── Mascot «Пломбик» ────────────────────────────────── */
+.c-swiss .m-eye { animation: m-eye-blink 4.6s infinite; transform-origin: center; }
+.c-swiss .m-eye.right { animation-delay: 0.04s; }
+@keyframes m-eye-blink { 0%, 94%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.08); } }
+.c-swiss .m-scan { animation: m-scan 1.1s ease-in-out infinite alternate; }
+@keyframes m-scan { from { transform: translateX(-4px); } to { transform: translateX(4px); } }
+.c-swiss .m-tag { animation: m-tag 2.4s ease-in-out infinite; transform-origin: bottom center; }
+@keyframes m-tag { 0%, 100% { transform: rotate(-8deg); } 50% { transform: rotate(8deg); } }
+.c-swiss .m-breathe { animation: m-breathe 3.2s ease-in-out infinite; transform-origin: bottom center; }
+.c-swiss .m-breathe-slow { animation: m-breathe 5s ease-in-out infinite; transform-origin: bottom center; }
+@keyframes m-breathe { 0%, 100% { transform: scale(1, 1); } 50% { transform: scale(1.015, 0.975); } }
+.c-swiss .m-bounce { animation: m-bounce 0.42s ease-in-out infinite alternate; }
+@keyframes m-bounce { from { transform: translateY(0); } to { transform: translateY(-6px); } }
+.c-swiss .m-jump { animation: m-jump 0.5s cubic-bezier(0.3, 1.6, 0.5, 1); }
+@keyframes m-jump {
+  0% { transform: translateY(0) scale(1, 1); }
+  25% { transform: translateY(2px) scale(1.08, 0.9); }
+  55% { transform: translateY(-14px) scale(0.95, 1.06); }
+  100% { transform: translateY(0) scale(1, 1); }
+}
+.c-swiss .m-shake { animation: m-shake 0.45s ease-in-out; }
+@keyframes m-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-5px) rotate(-3deg); }
+  40% { transform: translateX(5px) rotate(3deg); }
+  60% { transform: translateX(-3px) rotate(-2deg); }
+  80% { transform: translateX(3px) rotate(1deg); }
+}
+.c-swiss .m-spin { animation: m-spin 0.9s cubic-bezier(0.4, 1.4, 0.5, 1); }
+@keyframes m-spin { from { transform: rotate(0); } to { transform: rotate(720deg); } }
+.c-swiss .m-lean { animation: m-lean 1.4s ease-in-out; transform-origin: bottom center; }
+@keyframes m-lean { 0%, 100% { transform: rotate(0); } 25% { transform: rotate(-7deg); } 75% { transform: rotate(7deg); } }
+.c-swiss .m-startle { animation: m-startle 0.5s cubic-bezier(0.3, 1.8, 0.5, 1); }
+@keyframes m-startle { 0% { transform: none; } 30% { transform: translateY(-18px) scale(0.92, 1.12); } 100% { transform: none; } }
+.c-swiss .m-land { animation: m-land 0.35s cubic-bezier(0.3, 1.6, 0.5, 1); transform-origin: bottom center; }
+@keyframes m-land { 0% { transform: scale(1.18, 0.78); } 60% { transform: scale(0.95, 1.06); } 100% { transform: none; } }
+.c-swiss .m-purr { animation: m-purr 0.32s ease-in-out infinite alternate; transform-origin: bottom center; }
+@keyframes m-purr { from { transform: scale(1, 1) rotate(-1.5deg); } to { transform: scale(1.03, 0.95) rotate(1.5deg); } }
+.c-swiss .m-heart { transform: rotate(45deg); animation: m-heart 1.1s ease-out infinite; opacity: 0; }
+@keyframes m-heart {
+  0% { transform: translateY(0) rotate(45deg) scale(0.5); opacity: 0; }
+  25% { opacity: 1; }
+  100% { transform: translateY(-26px) rotate(45deg) scale(1.1); opacity: 0; }
+}
+.c-swiss .m-orbit { animation: m-orbit 0.7s linear infinite; }
+@keyframes m-orbit { from { transform: rotate(0deg) translateX(3px) rotate(0deg); } to { transform: rotate(360deg) translateX(3px) rotate(-360deg); } }
+.c-swiss .m-tremble { animation: m-tremble 0.12s linear infinite; }
+@keyframes m-tremble { 0%, 100% { transform: translate(0, 0); } 33% { transform: translate(1px, -1px); } 66% { transform: translate(-1px, 1px); } }
+.c-swiss .m-confetti { animation: m-confetti 0.9s cubic-bezier(0.2, 0.8, 0.3, 1) both; }
+@keyframes m-confetti {
+  from { transform: translate(0, 0) rotate(0); opacity: 1; }
+  to { transform: translate(var(--dx), var(--dy)) rotate(var(--rot)); opacity: 0; }
+}
+.c-swiss .m-zzz { animation: m-zzz 2.4s ease-out infinite; opacity: 0; }
+@keyframes m-zzz { 0% { transform: translate(0, 0) scale(0.6); opacity: 0; } 20% { opacity: 1; } 100% { transform: translate(14px, -30px) scale(1.2); opacity: 0; } }
+.c-swiss .m-dot { animation: m-dot 1s steps(1) infinite; opacity: 0.2; }
+@keyframes m-dot { 0%, 100% { opacity: 0.2; } 33% { opacity: 1; } }
+.c-swiss .m-drop { animation: m-drop 1.2s ease-in infinite; }
+@keyframes m-drop { 0% { transform: translateY(0); opacity: 0; } 15% { opacity: 1; } 100% { transform: translateY(26px); opacity: 0; } }
+.c-swiss .m-speed { animation: m-speed 0.5s linear infinite; }
+@keyframes m-speed { from { transform: translateX(10px); opacity: 0; } 30% { opacity: 1; } to { transform: translateX(-24px); opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .c-swiss *, .c-swiss *::before, .c-swiss *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── Stage 2: legacy dashboard cards in the «Пломба» skin ──────────────
+   Inside the dashboard the app's own theme tokens are remapped to the Swiss
+   palette, so every existing card (servers, traffic, diagnostics, browser IP…)
+   adopts paper/ink/orange, square corners and the bundled fonts without any
+   change to its markup or logic. */
+.swiss-skin {
+  --rgb-bg: 242 240 235;
+  --rgb-sidebar: 242 240 235;
+  --rgb-card: 242 240 235;
+  --rgb-card-elevated: 233 230 223;
+  --rgb-accent: 255 79 0;
+  --rgb-accent-hover: 224 68 0;
+  --rgb-text: 17 17 17;
+  --rgb-text-secondary: 107 104 98;
+  --rgb-text-muted: 141 138 132;
+  --rgb-border: 214 211 205;
+  --rgb-border-strong: 17 17 17;
+  --rgb-success: 17 17 17;
+  --rgb-warning: 194 65 0;
+  --rgb-danger: 255 79 0;
+  --color-bg: rgb(var(--rgb-bg));
+  --color-card: rgb(var(--rgb-card));
+  --color-card-elevated: rgb(var(--rgb-card-elevated));
+  --color-accent: rgb(var(--rgb-accent));
+  --color-accent-hover: rgb(var(--rgb-accent-hover));
+  --color-text: rgb(var(--rgb-text));
+  --color-text-secondary: rgb(var(--rgb-text-secondary));
+  --color-text-muted: rgb(var(--rgb-text-muted));
+  --color-sidebar: rgb(var(--rgb-sidebar));
+  --color-border: rgb(var(--rgb-border));
+  --color-border-strong: rgb(var(--rgb-border-strong));
+  --color-success: rgb(var(--rgb-success));
+  --color-warning: rgb(var(--rgb-warning));
+  --color-danger: rgb(var(--rgb-danger));
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --shadow-card: none;
+  --shadow-card-hover: none;
+  --shadow-button: none;
+  --shadow-button-hover: none;
+  --glass-bg: rgb(var(--rgb-card));
+  --glass-border: rgb(var(--rgb-border));
+  --glow-accent: none;
+  --glow-success: none;
+  --glow-danger: none;
+  /* Fill the page area (the page container has p-6) with paper */
+  margin: -24px;
+  padding: 24px;
+  min-height: calc(100% + 48px);
+  background: var(--paper);
+  color: var(--ink);
+}
+[data-theme='dark'] .swiss-skin {
+  --rgb-bg: 13 13 12;
+  --rgb-sidebar: 13 13 12;
+  --rgb-card: 13 13 12;
+  --rgb-card-elevated: 26 26 24;
+  --rgb-accent: 255 90 31;
+  --rgb-accent-hover: 255 120 70;
+  --rgb-text: 237 235 230;
+  --rgb-text-secondary: 141 138 132;
+  --rgb-text-muted: 110 107 102;
+  --rgb-border: 46 46 44;
+  --rgb-border-strong: 237 235 230;
+  --rgb-success: 237 235 230;
+  --rgb-warning: 255 140 80;
+  --rgb-danger: 255 90 31;
+}
+.swiss-skin .glass,
+[data-theme='dark'] .swiss-skin .glass { box-shadow: none; }
+
+/* Facts strip sits flush on top of the slab, panels flush under it */
+.swiss-facts {
+  display: flex;
+  height: 44px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+}
+.swiss-facts + .swiss-slab { margin-top: 0 !important; border-top: 0; }
+.swiss-slab + .swiss-panels { margin-top: 0 !important; }
+.swiss-fact {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+  border-right: 1px solid var(--rule);
+  padding: 0 20px;
+}
+.swiss-fact:last-child { border-right: 0; }
+.c-swiss .swiss-fact-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.c-swiss .swiss-fact-value.is-dim { color: var(--mute); }
+.c-swiss .swiss-fact-value.is-alert { color: var(--signal); }
+.c-swiss .swiss-fact-action {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--mute);
+  text-decoration: underline;
+  text-decoration-color: var(--rule-strong);
+  text-underline-offset: 3px;
+}
+.c-swiss .swiss-fact-action:hover:not(:disabled) { color: var(--signal); text-decoration-color: var(--signal); }
+.c-swiss .swiss-fact-action:disabled { cursor: default; opacity: 0.5; }
+.c-swiss .swiss-fact-action.is-hidden { visibility: hidden; }
+@media (max-width: 900px) {
+  .swiss-facts { height: auto; flex-wrap: wrap; }
+  .swiss-fact { height: 44px; flex-basis: 50%; border-bottom: 1px solid var(--rule); }
+}
+
+/* Ten-cell progress ruler across the slab */
+.swiss-progress {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+  border-top: 1px solid var(--rule);
+}
+.swiss-progress-cell {
+  position: relative;
+  display: flex;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-right: 1px solid var(--rule);
+  font-size: 10px;
+  color: var(--mute);
+}
+.swiss-progress-cell:last-child { border-right: 0; }
+.swiss-progress-cell::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--signal);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.3s;
+}
+.swiss-progress-cell.is-done::before { transform: scaleX(1); }
+.swiss-progress-cell.is-done { color: var(--on-signal); }
+.swiss-progress-cell > span { position: relative; }
+.swiss-progress.is-indeterminate {
+  background-image: repeating-linear-gradient(-45deg, var(--signal) 0 10px, transparent 10px 20px);
+  background-size: 28px 28px;
+  animation: swiss-stripes 0.8s linear infinite;
+}
+
+/* Panels row: traffic · servers · journal, recent sites full width below */
+.swiss-panels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.swiss-panels > * { min-width: 0; margin: 0 -1px -1px 0; }
+.swiss-panels-wide { grid-column: 1 / -1; }
+@media (max-width: 1100px) {
+  .swiss-panels { grid-template-columns: minmax(0, 1fr); }
+}
+.swiss-panel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+}
+.swiss-panel-head {
+  display: flex;
+  height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--rule);
+  padding: 0 20px;
+}
+.c-swiss .swiss-label-ink { color: var(--ink); }
+.swiss-panel-body { max-height: 260px; overflow: auto; }
+.swiss-log-row {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 8px;
+  border-bottom: 1px solid var(--rule);
+  padding: 7px 20px;
+}
+.swiss-log-time { font-size: 11px; color: var(--mute); font-variant-numeric: tabular-nums; }
+.swiss-log-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.swiss-log-msg.is-warn { color: var(--signal); }
+.swiss-empty { padding: 16px 20px; font-size: 13px; color: var(--mute); }
+.c-swiss .row-in { animation: swiss-row-in 1.6s ease-out both; }
+@keyframes swiss-row-in {
+  0% { background: var(--signal); color: var(--on-signal); transform: translateX(-6px); }
+  18% { transform: none; }
+  100% { background: transparent; }
+}
+
+/* ── Stage 3: slab identity column and panel internals (mockup layout) ── */
+.swiss-slab.is-on { background: var(--signal); color: var(--on-signal); }
+.swiss-slab.is-on .swiss-label { color: var(--on-signal); }
+.swiss-slab.is-on .swiss-slab-side,
+.swiss-slab.is-on .swiss-progress,
+.swiss-slab.is-on .swiss-progress-cell { border-color: var(--on-rule); }
+.swiss-slab.is-on .swiss-progress-cell { color: var(--on-signal); }
+.swiss-slab .swiss-slab-side { gap: 0; padding: 0; }
+.swiss-identity { display: flex; flex: 1; flex-direction: column; gap: 20px; padding: 20px; }
+.swiss-slab-side > .swiss-transient { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 0 20px 14px; }
+.swiss-head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.swiss-kbd-row { display: flex; align-items: center; gap: 4px; color: var(--mute); }
+.swiss-slab.is-on .swiss-kbd-row { color: var(--on-signal); opacity: 0.7; }
+.c-swiss .swiss-kbd {
+  display: inline-flex;
+  height: 20px;
+  min-width: 20px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--rule);
+  padding: 0 4px;
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  font-size: 10px;
+}
+.swiss-slab.is-on .swiss-kbd { border-color: var(--on-rule); }
+.c-swiss .swiss-confirm-text { font-size: 13px; font-weight: 600; }
+.swiss-confirm-actions { display: flex; gap: 8px; }
+.c-swiss .swiss-confirm-yes { padding: 6px 14px; background: var(--ink); color: var(--paper); font-size: 13px; font-weight: 700; }
+.c-swiss .swiss-confirm-no,
+.c-swiss .swiss-cancel-btn { padding: 6px 14px; box-shadow: inset 0 0 0 1px currentColor; font-size: 13px; font-weight: 600; }
+.c-swiss .swiss-cancel-btn { display: inline-flex; align-items: center; gap: 8px; }
+.c-swiss .swiss-cancel-btn:disabled { cursor: wait; opacity: 0.7; }
+.c-swiss .swiss-confirm-yes:hover,
+.c-swiss .swiss-confirm-no:hover,
+.c-swiss .swiss-cancel-btn:hover:not(:disabled) { background: var(--signal); color: var(--on-signal); box-shadow: none; }
+.swiss-slab.is-on .swiss-confirm-yes { background: var(--on-signal); color: var(--signal); }
+.swiss-slab.is-on .swiss-confirm-yes:hover,
+.swiss-slab.is-on .swiss-confirm-no:hover,
+.swiss-slab.is-on .swiss-cancel-btn:hover:not(:disabled) { background: var(--paper); color: var(--ink); }
+.c-swiss .swiss-power-arrow { transition: transform 0.3s; }
+.c-swiss .swiss-power:hover:not(:disabled) .swiss-power-arrow { transform: translateX(6px); }
+.c-swiss .swiss-ip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  text-align: left;
+}
+.c-swiss .swiss-ip.is-dim { color: var(--mute); }
+.c-swiss .swiss-ip-copy { font-size: 10px; font-weight: 500; letter-spacing: 0; opacity: 0; transition: opacity 0.15s; }
+.c-swiss .swiss-ip:hover .swiss-ip-copy,
+.c-swiss .swiss-ip-copy.is-copied { opacity: 0.7; }
+.c-swiss .swiss-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  opacity: 0.75;
+}
+.c-swiss .swiss-sub.is-alert { color: var(--signal); opacity: 1; }
+.swiss-slab.is-on .swiss-sub.is-alert { color: var(--on-signal); font-weight: 700; }
+.c-swiss .swiss-real { margin-top: 4px; font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-size: 15px; }
+.c-swiss .swiss-real.is-hidden { text-decoration: line-through; text-decoration-thickness: 2px; opacity: 0.6; }
+.c-swiss .swiss-node { display: flex; min-width: 0; align-items: center; gap: 8px; margin-top: 4px; font-size: 15px; font-weight: 600; }
+.c-swiss .swiss-node.is-dim { color: var(--mute); font-weight: 500; }
+.swiss-slab.is-on .swiss-node.is-dim { color: var(--on-signal); opacity: 0.7; }
+.c-swiss .swiss-uptime { margin-left: 8px; font-size: 22px; font-weight: 600; letter-spacing: -0.015em; font-variant-numeric: tabular-nums; }
+.swiss-caption-row { display: flex; flex-wrap: wrap; align-items: baseline; }
+.c-swiss .swiss-slab-side .swiss-power { height: 68px; }
+.swiss-slab.is-on .swiss-power,
+.swiss-slab.is-on .swiss-power.is-on { background: var(--on-signal); color: var(--signal); box-shadow: none; }
+.swiss-slab.is-on .swiss-power::before { background: var(--paper); }
+.swiss-slab.is-on .swiss-power:hover:not(:disabled) { color: var(--ink); }
+
+/* Traffic panel */
+.swiss-traffic-figures { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 16px; padding: 16px 20px 0; }
+.c-swiss .swiss-traffic-big { margin-top: 6px; font-size: 48px; font-weight: 900; line-height: 1; letter-spacing: -0.05em; font-variant-numeric: tabular-nums; }
+.c-swiss .swiss-traffic-big.is-dim { color: var(--mute); }
+.swiss-traffic-small { display: flex; flex-direction: column; gap: 6px; padding-bottom: 2px; }
+.swiss-traffic-small > div { display: flex; align-items: baseline; justify-content: flex-end; gap: 12px; }
+.swiss-traffic-small .swiss-mono { width: 96px; text-align: right; font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.swiss-bars { display: flex; height: 72px; align-items: flex-end; gap: 2px; margin-top: auto; padding: 16px 20px; }
+.swiss-bar-slot { display: flex; height: 100%; flex: 1; align-items: flex-end; cursor: crosshair; }
+.swiss-bar { width: 100%; background: var(--ink); transition: height 0.5s, background-color 0.2s; }
+.swiss-bar.is-off { background: var(--rule); }
+.swiss-bar.is-faded { background: var(--mute); }
+.swiss-bar.is-hot { background: var(--signal); }
+
+/* Servers panel */
+.swiss-server-row {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto 64px;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--rule);
+  padding: 7px 20px;
+  font-size: 12px;
+}
+.swiss-server-row:hover { background: var(--rule); }
+.swiss-server-row.is-selected { background: var(--ink); color: var(--paper); }
+.swiss-server-row.is-offline { color: var(--mute); }
+.swiss-server-flag { display: flex; align-items: center; }
+.c-swiss .swiss-server-name { display: flex; min-width: 0; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; text-align: left; }
+.c-swiss .swiss-best { flex-shrink: 0; background: var(--signal); padding: 0 4px; color: var(--on-signal); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 9px; text-transform: uppercase; }
+.swiss-server-ping { text-align: right; font-variant-numeric: tabular-nums; }
+.swiss-server-health { display: flex; align-items: center; justify-content: flex-end; gap: 6px; font-size: 10px; opacity: 0.8; }
+.swiss-server-health.is-offline { color: var(--signal); opacity: 1; text-transform: uppercase; }
+.swiss-health-dot { width: 8px; height: 8px; background: currentColor; }
+.swiss-health-dot.is-offline { background: var(--signal); }
+.swiss-health-dot.is-unknown { background: transparent; border: 1px solid currentColor; }
+.c-swiss .swiss-server-ping-btn { opacity: 0; color: inherit; transition: opacity 0.15s; }
+.swiss-server-row:hover .swiss-server-ping-btn,
+.c-swiss .swiss-server-ping-btn:focus-visible { opacity: 0.7; }
+.c-swiss .swiss-server-ping-btn:hover { opacity: 1; color: var(--signal); }
+
+/* ── Title bar (TitleBar.tsx): drag strip under the native caption buttons ── */
+.swiss-titlebar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 90;
+  height: 36px;
+  background: var(--paper);
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+/* ── Toasts (MacToast): square paper cards, a 4px state bar on the left ── */
+.swiss-toast {
+  position: relative;
+  display: flex;
+  width: 360px;
+  align-items: flex-start;
+  gap: 12px;
+  border: 1px solid var(--rule-strong);
+  background: var(--paper);
+  padding: 14px 12px 14px 20px;
+  color: var(--ink);
+  box-shadow: 6px 6px 0 var(--rule);
+}
+.swiss-toast::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--ink); }
+.swiss-toast.is-error::before,
+.swiss-toast.is-warning::before { background: var(--signal); }
+.swiss-toast.is-info::before { background: var(--mute); }
+.c-swiss .swiss-toast-title { font-size: 14px; font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; }
+.c-swiss .swiss-toast.is-error .swiss-toast-title { color: var(--signal); }
+.c-swiss .swiss-toast-desc { margin-top: 4px; overflow-wrap: anywhere; font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.45; color: var(--mute); }
+.c-swiss .swiss-toast-close { flex-shrink: 0; padding: 2px; color: var(--mute); transition: color 0.15s; }
+.c-swiss .swiss-toast-close:hover { color: var(--signal); }
+.c-swiss .swiss-toast-close:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+
+/* Server ping cell: click to re-ping; the best server is the orange chip */
+.c-swiss .swiss-server-ping { display: flex; justify-content: flex-end; text-align: right; font-variant-numeric: tabular-nums; }
+.c-swiss .swiss-server-ping > span { padding: 0 4px; }
+.c-swiss .swiss-server-ping.is-best > span { background: var(--signal); color: var(--on-signal); }
+.swiss-server-row:hover .swiss-server-ping:not(.is-best) > span { text-decoration: underline; text-decoration-color: var(--signal); text-underline-offset: 3px; }
+.c-swiss .swiss-server-ping:disabled { cursor: default; }
+
+/* ── Adaptive: windowed sizes ────────────────────────────────────────────
+   Media queries, not container queries: containment on an ancestor would
+   re-anchor the fixed mascot overlay and toasts. Content width is about
+   viewport − 248px (sidebar 200 + page padding 48). These come last so they
+   override the earlier single-column fallbacks at 1100px. */
+@media (max-width: 1100px) {
+  /* Word + identity side by side down to a ~630px content width */
+  .swiss-slab { grid-template-columns: minmax(0, 1fr) minmax(240px, 280px); }
+  .swiss-slab .swiss-slab-side { border-top: 0; border-left: 1px solid var(--rule); }
+  /* Traffic | servers, journal full width underneath */
+  .swiss-panels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .swiss-panels > :last-child { grid-column: 1 / -1; }
+}
+@media (max-width: 880px) {
+  /* Narrowest window: identity becomes a band of three under the word */
+  .swiss-slab { grid-template-columns: minmax(0, 1fr); }
+  .swiss-slab .swiss-slab-side { border-left: 0; border-top: 1px solid var(--rule); }
+  .swiss-identity { flex-direction: row; flex-wrap: wrap; gap: 16px 24px; }
+  .swiss-identity > * { min-width: 0; flex: 1 1 150px; }
+}
+@media (max-width: 760px) {
+  .swiss-panels { grid-template-columns: minmax(0, 1fr); }
+}
+.swiss-slab.is-on .swiss-slab-side { border-color: var(--on-rule); }
+@media (max-height: 820px) {
+  /* Short windows: a lower slab so the panels start above the fold */
+  .swiss-slab-main { min-height: 240px; }
+  .swiss-word-row { padding-top: 28px; }
+  .c-swiss .swiss-slab-side .swiss-power { height: 60px; }
+}
+
+/* Notice strip (ForeignVpnBanner) */
+.swiss-notice {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  padding: 10px 16px 10px 20px;
+  color: var(--ink);
+}
+.swiss-notice::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--signal); }
+.c-swiss .swiss-notice-tag { flex-shrink: 0; color: var(--signal); }
+.c-swiss .swiss-notice-body { min-width: 0; flex: 1 1 320px; font-size: 12px; line-height: 1.45; color: var(--mute); }
+
+/* Short windows (the default 720px-tall window): everything above the fold */
+@media (max-height: 820px) {
+  .swiss-slab-main { padding: 16px 24px; }
+  .swiss-identity { gap: 12px; padding: 16px 20px; }
+  .c-swiss .swiss-ip { font-size: 20px; }
+  .c-swiss .swiss-real,
+  .c-swiss .swiss-node { font-size: 14px; }
+  .swiss-panel-body { max-height: 180px; }
+  .c-swiss .swiss-traffic-big { font-size: 40px; }
+  .swiss-traffic-figures { padding-top: 12px; }
+  .swiss-bars { height: 56px; padding: 12px 20px; }
+}
+
+/* Long addresses (IPv6, or IPv4 + the copy label) wrap inside the identity column */
+.c-swiss .swiss-ip { flex-wrap: wrap; row-gap: 2px; }
+.c-swiss .swiss-ip > .roll { min-width: 0; overflow-wrap: anywhere; }
+.c-swiss .swiss-real { overflow-wrap: anywhere; }
+@media (max-width: 1100px) {
+  .c-swiss .swiss-ip { font-size: 20px; }
+}
+
+/* Orange as small text: #ff4f00 on paper is ~2.9:1. Text uses --signal-ink:
+   #bf3c00 is 4.8:1 on #f2f0eb (light), #ff5a1f is 6.2:1 on #0d0d0c (dark).
+   Fills, rules and large type keep --signal. */
+.c-swiss { --signal-ink: #bf3c00; }
+[data-theme='dark'] .c-swiss { --signal-ink: #ff5a1f; }
+.c-swiss .swiss-nav-item[aria-current='page'] .swiss-nav-num { color: var(--signal-ink); }
+.c-swiss .swiss-fact-value.is-alert { color: var(--signal-ink); }
+.c-swiss .swiss-fact-action:hover:not(:disabled) { color: var(--signal-ink); }
+.swiss-log-msg.is-warn { color: var(--signal-ink); }
+.c-swiss .swiss-sub.is-alert { color: var(--signal-ink); }
+.swiss-server-health.is-offline { color: var(--signal-ink); }
+.c-swiss .swiss-toast.is-error .swiss-toast-title { color: var(--signal-ink); }
+.c-swiss .swiss-toast-close:hover { color: var(--signal-ink); }
+.c-swiss .swiss-notice-tag { color: var(--signal-ink); }
+
+/* Long adapter names wrap instead of being clipped */
+.c-swiss .swiss-notice-tag { min-width: 0; flex-shrink: 1; overflow-wrap: anywhere; }
