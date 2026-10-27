@@ -88,8 +88,9 @@ export interface MacToastContainerProps {
 }
 
 const positionClasses = {
-  'top-right': 'top-4 right-4',
-  'top-center': 'top-4 left-1/2 -translate-x-1/2',
+  // top-[52px]: below the 36px title bar and the native caption buttons
+  'top-right': 'top-[52px] right-4',
+  'top-center': 'top-[52px] left-1/2 -translate-x-1/2',
   'bottom-right': 'bottom-4 right-4',
 }
 
