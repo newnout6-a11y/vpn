@@ -3,6 +3,9 @@ import { Stagger } from './motion'
 
 const MAX = 150
 const MIN = 40
+// The word never outgrows ~15% of the window height, so a windowed app keeps
+// the identity column and the panels on screen (fullscreen still reaches MAX)
+const HEIGHT_SHARE = 0.15
 
 /**
  * Big status word that fills its column: measures the word's real width in the
@@ -22,16 +25,20 @@ export function FitWord({ text, busyDot = false }: { text: string; busyDot?: boo
     const fit = () => {
       const at100 = probe.getBoundingClientRect().width
       if (!at100) return // not laid out (hidden page, jsdom)
-      const next = Math.max(MIN, Math.min(MAX, (box.clientWidth / at100) * 100 * 0.98))
+      const cap = Math.min(MAX, window.innerHeight * HEIGHT_SHARE)
+      const next = Math.max(MIN, Math.min(cap, (box.clientWidth / at100) * 100 * 0.98))
       setSize(s => (s !== null && Math.abs(s - next) < 0.5 ? s : next))
     }
     fit()
     const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(fit) : null
     if (ro) ro.observe(box)
+    // Height changes don't resize the box; the cap still depends on them
+    window.addEventListener('resize', fit)
     // Re-fit once the bundled font has loaded (fallback metrics differ)
     if (document.fonts) void document.fonts.ready.then(fit)
     return () => {
       if (ro) ro.disconnect()
+      window.removeEventListener('resize', fit)
     }
   }, [text, busyDot])
 
