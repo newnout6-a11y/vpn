@@ -141,7 +141,8 @@
   border-left: 1px solid var(--rule);
   padding: 20px;
 }
-.swiss-word-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding-top: 28px; }
+/* padding-top keeps the word where it sat under the (removed) 20px header row */
+.swiss-word-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding-top: 64px; }
 .swiss-word-wrap { min-width: 0; flex: 1; container-type: inline-size; }
 .c-swiss .swiss-word {
   font-weight: 900;
@@ -591,7 +592,7 @@
 /* Servers panel */
 .swiss-server-row {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) 40px 76px 16px;
+  grid-template-columns: 20px minmax(0, 1fr) auto 64px;
   align-items: center;
   gap: 8px;
   border-bottom: 1px solid var(--rule);
@@ -649,3 +650,41 @@
 .c-swiss .swiss-toast-close { flex-shrink: 0; padding: 2px; color: var(--mute); transition: color 0.15s; }
 .c-swiss .swiss-toast-close:hover { color: var(--signal); }
 .c-swiss .swiss-toast-close:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+
+/* Server ping cell: click to re-ping; the best server is the orange chip */
+.c-swiss .swiss-server-ping { display: flex; justify-content: flex-end; text-align: right; font-variant-numeric: tabular-nums; }
+.c-swiss .swiss-server-ping > span { padding: 0 4px; }
+.c-swiss .swiss-server-ping.is-best > span { background: var(--signal); color: var(--on-signal); }
+.swiss-server-row:hover .swiss-server-ping:not(.is-best) > span { text-decoration: underline; text-decoration-color: var(--signal); text-underline-offset: 3px; }
+.c-swiss .swiss-server-ping:disabled { cursor: default; }
+
+/* ── Adaptive: windowed sizes ────────────────────────────────────────────
+   Media queries, not container queries: containment on an ancestor would
+   re-anchor the fixed mascot overlay and toasts. Content width is about
+   viewport − 248px (sidebar 200 + page padding 48). These come last so they
+   override the earlier single-column fallbacks at 1100px. */
+@media (max-width: 1100px) {
+  /* Word + identity side by side down to a ~630px content width */
+  .swiss-slab { grid-template-columns: minmax(0, 1fr) minmax(240px, 280px); }
+  .swiss-slab .swiss-slab-side { border-top: 0; border-left: 1px solid var(--rule); }
+  /* Traffic | servers, journal full width underneath */
+  .swiss-panels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .swiss-panels > :last-child { grid-column: 1 / -1; }
+}
+@media (max-width: 880px) {
+  /* Narrowest window: identity becomes a band of three under the word */
+  .swiss-slab { grid-template-columns: minmax(0, 1fr); }
+  .swiss-slab .swiss-slab-side { border-left: 0; border-top: 1px solid var(--rule); }
+  .swiss-identity { flex-direction: row; flex-wrap: wrap; gap: 16px 24px; }
+  .swiss-identity > * { min-width: 0; flex: 1 1 150px; }
+}
+@media (max-width: 760px) {
+  .swiss-panels { grid-template-columns: minmax(0, 1fr); }
+}
+.swiss-slab.is-on .swiss-slab-side { border-color: var(--on-rule); }
+@media (max-height: 820px) {
+  /* Short windows: a lower slab so the panels start above the fold */
+  .swiss-slab-main { min-height: 240px; }
+  .swiss-word-row { padding-top: 28px; }
+  .c-swiss .swiss-slab-side .swiss-power { height: 60px; }
+}
