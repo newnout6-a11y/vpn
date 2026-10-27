@@ -46,8 +46,9 @@ const POKE_ON = ['Kill-switch держу крепко.', 'IPv6? Не, не сл�
 const POKE_OFF = ['Включи меня уже.', 'Провайдер всё видит…', 'Мне неспокойно.']
 const WANDER: Array<[string, Mood, string]> = [
   ['toggle', 'happy', 'Посижу на кнопке. Тёплая.'],
-  ['side', 'squint', 'Проверю, что тут справа.'],
-  ['side', 'calm', 'Всё спокойно.']
+  ['clock', 'calm', 'Который час? Ага.'],
+  ['nav-servers', 'think', 'Проверю серверы.'],
+  ['nav-logs', 'squint', 'Что там в журнале…']
 ]
 
 // Greet once per app session, not every time the dashboard tab is reopened.
