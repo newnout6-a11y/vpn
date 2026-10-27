@@ -63,8 +63,10 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
             aria-current={item.id === currentPage ? 'page' : undefined}
             className="swiss-nav-item"
             data-perch={'nav-' + item.id}
-            data-perch-x="0.8"
-            data-perch-scale="0.4"
+            data-perch-y="bottom"
+            data-perch-x="0.85"
+            data-perch-scale="0.3"
+            data-perch-fit="gap"
           >
             <span className="swiss-nav-num swiss-mono">{String(i + 1).padStart(2, '0')}</span>
             <span className="swiss-nav-label">{item.label}</span>
