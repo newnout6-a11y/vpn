@@ -53,7 +53,6 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
         <br />
         Enforcer
       </div>
-      <div className="swiss-mono mt-1.5 text-[10px] text-[var(--mute)]">windows / x64</div>
 
       <nav className="mt-10 flex flex-col">
         {navItems.map((item, i) => (
