@@ -2,54 +2,33 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { tunnelStartedMessageKey } from '../tunnelMessages'
 import { motion } from 'framer-motion'
-import { PageTip } from '../components/PageTip'
 import { MacCard } from '../design-system/MacCard'
 import { MacToast, ToastData } from '../design-system/MacToast'
 import { useAppStore } from '../store'
-import { DiagnosticsCard } from '../components/DiagnosticsCard'
-import { BrowserIpCard } from '../components/BrowserIpCard'
-import { ExternalProxyCard } from '../components/ExternalProxyCard'
-import { ProfileSelectorInline } from '../components/ProfileSelectorInline'
 import { ForeignVpnBanner } from '../components/ForeignVpnBanner'
-import { DashboardSide } from '../components/DashboardSide'
 import { usePageActive } from '../hooks/usePageActive'
 import { CountryFlagIcon } from '../components/CountryFlagIcon'
 import { FitWord } from '../swiss/FitWord'
 import { SwissFactsStrip } from '../swiss/SwissFactsStrip'
 import { SwissProgress } from '../swiss/SwissProgress'
+import { SwissPanels } from '../swiss/SwissPanels'
+import { useActiveProfile, useHomeIp } from '../swiss/SwissIdentity'
 import { SwissMascot, type SwissPhase } from '../swiss/SwissMascot'
 import { MASCOT_EVENT } from '../swiss/useMascot'
 import '../styles/swiss.css'
 import { cn } from '../design-system/utils'
-import {
-  CheckCircle2,
-  AlertTriangle,
-  Clock,
-  Download,
-  Info,
-  Loader2,
-  Lock,
-  Power,
-  Radar,
-  ShieldOff,
-  Square,
-  TriangleAlert,
-  Upload
-} from 'lucide-react'
+import { ArrowRight, Loader2, Lock, ShieldOff, Square, TriangleAlert } from 'lucide-react'
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function formatUptime(ms: number): string {
   const totalSec = Math.max(0, Math.floor(ms / 1000))
-  const hours = Math.floor(totalSec / 3600)
-  const minutes = Math.floor((totalSec % 3600) / 60)
-  const seconds = totalSec % 60
-  if (hours > 0) return `${hours} ч ${minutes} мин`
-  if (minutes > 0) return `${minutes} мин ${seconds} с`
-  return `${seconds} с`
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return pad(Math.floor(totalSec / 3600)) + ':' + pad(Math.floor((totalSec % 3600) / 60)) + ':' + pad(totalSec % 60)
 }
 
 function UptimeLabel({ startedAt }: { startedAt: number }) {
+  const { t } = useTranslation()
   const active = usePageActive()
   const [now, setNow] = useState(() => Date.now())
 
@@ -68,26 +47,7 @@ function UptimeLabel({ startedAt }: { startedAt: number }) {
     }
   }, [active, startedAt])
 
-  return (
-    <span className="flex items-center gap-1.5 rounded-full bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
-      <Clock className="w-3.5 h-3.5 text-[var(--color-accent)]" />
-      {formatUptime(now - startedAt)}
-    </span>
-  )
-}
-
-function formatSpeed(bytesPerSecond: number): string {
-  const bits = Math.max(0, bytesPerSecond * 8)
-  if (bits < 1_000_000) return `${Math.round(bits / 1_000)} Kbps`
-  return `${(bits / 1_000_000).toFixed(bits < 10_000_000 ? 1 : 0)} Mbps`
-}
-
-function formatBytes(bytes: number): string {
-  const value = Math.max(0, bytes)
-  if (value < 1024) return `${Math.round(value)} B`
-  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`
-  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MB`
-  return `${(value / 1024 ** 3).toFixed(2)} GB`
+  return <span className="swiss-uptime">{'· ' + formatUptime(now - startedAt) + ' ' + t('dashboard.swissInTunnel')}</span>
 }
 
 let toastIdCounter = 0
@@ -120,8 +80,6 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   const publicIpVerdict = useAppStore(s => s.publicIpVerdict)
   const traffic = useAppStore(s => s.traffic)
   const firewallStatus = useAppStore(s => s.firewallKillSwitchStatus)
-  const routingHealth = useAppStore(s => s.routingHealth)
-  const leakChecks = useAppStore(s => s.leakChecks)
   const restartingProgress = useAppStore(s => s.restartingProgress)
   const serverSwitchingName = useAppStore(s => s.serverSwitchingName)
 
@@ -153,6 +111,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   const [nuclearResetting, setNuclearResetting] = useState(false)
   const [ipGeo, setIpGeo] = useState<{ country: string | null; city: string | null }>({ country: null, city: null })
   const [confirmDisconnect, setConfirmDisconnect] = useState(false)
+  const [ipCopied, setIpCopied] = useState(false)
 
   // Fetch country/city for the current public IP via ipapi.co
   // Only after VPN IP is confirmed — avoids geolocating the user's real IP.
@@ -538,27 +497,13 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
           ? 'Утечек не найдено — всё через VPN.'
           : result.summary === 'fail'
             ? 'Найдена критичная проблема маршрутизации.'
-            : 'Есть предупреждения, посмотрите детали ниже.'
+            : 'Есть предупреждения маршрутизации.'
       addLog(result.summary === 'fail' ? 'error' : result.summary === 'warn' ? 'warn' : 'info', `Проверка маршрута: ${message}`)
     } catch (err: any) {
       addLog('error', `Проверка не выполнена: ${err.message}`)
     } finally {
       setChecking(false)
     }
-  }
-
-  const statusClass = (status: string) => {
-    if (status === 'ok') return 'text-[var(--color-success)]'
-    if (status === 'warn') return 'text-[var(--color-warning)]'
-    if (status === 'fail') return 'text-[var(--color-danger)]'
-    return 'text-[var(--color-text-secondary)]'
-  }
-
-  const statusIcon = (status: string) => {
-    if (status === 'ok') return <CheckCircle2 className="w-4 h-4 text-[var(--color-success)]" />
-    if (status === 'fail') return <TriangleAlert className="w-4 h-4 text-[var(--color-danger)]" />
-    if (status === 'warn') return <TriangleAlert className="w-4 h-4 text-[var(--color-warning)]" />
-    return <Info className="w-4 h-4 text-[var(--color-text-secondary)]" />
   }
 
   // ─── Status label ──────────────────────────────────────────────────────
@@ -621,6 +566,25 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
     window.dispatchEvent(new CustomEvent(MASCOT_EVENT, { detail: kind }))
   }
 
+  // «Пломба» identity column: what sites see, the real address, the active node
+  const homeIp = useHomeIp(publicIp ?? null, Boolean(isConnected))
+  const activeProfile = useActiveProfile()
+  const realHidden = Boolean(isConnected) && !visibleLeak
+  const copyIp = async () => {
+    if (!publicIp) return
+    try {
+      await navigator.clipboard.writeText(publicIp)
+      setIpCopied(true)
+      window.setTimeout(() => setIpCopied(false), 1300)
+    } catch {
+      // Clipboard unavailable: no false "copied" feedback
+    }
+  }
+  const nodePing = activeProfile ? activeProfile.ping ?? activeProfile.healthLatencyMs ?? null : null
+  const nodeHealth = activeProfile ? activeProfile.healthStatus ?? activeProfile.status : undefined
+  const nodeMeta = activeProfile
+    ? [activeProfile.protocol ? activeProfile.protocol.toUpperCase() : '', nodePing !== null ? nodePing + ' ' + t('dashboard.swissMs') : nodeHealth === 'offline' ? t('dashboard.swissOffline') : t('dashboard.swissUnchecked')].filter(Boolean).join(' · ')
+    : ''
   // Ctrl/Cmd+Enter presses the power button: same confirm/cancel rules as a click
   const powerRef = useRef<HTMLButtonElement>(null)
   const pageActive = usePageActive()
@@ -642,21 +606,9 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   // ─── Render ────────────────────────────────────────────────────────────
 
   return (
-    /*
-     * Two-column layout:
-     *   • Default (narrow / windowed mode): single column, behaves like before.
-     *   • xl breakpoint and up (≥1280px viewport): companion column appears
-     *     on the right with a quick server picker, live traffic graph, and
-     *     a recent-sites mini-panel.
-     *
-     * The right column is `sticky` so it stays in view as the user scrolls
-     * the long primary column (kill-switch banner → toggle → leak → diagnostics).
-     */
+    /* «Пломба» dashboard: facts strip → status slab → panel row (traffic · servers · journal). */
     <div className="c-swiss swiss-skin">
       <div className="space-y-6">
-        {/* Onboarding tip */}
-        <PageTip tipKey="dashboard">{t('tips.dashboard')}</PageTip>
-
       {/* Toast notifications */}
       <MacToast toasts={toasts} onDismiss={dismissToast} position="top-right" />
 
@@ -750,189 +702,6 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         </motion.div>
       )}
 
-      {/* «Пломба» facts strip: mode · Smart RU · kill-switch · leaks */}
-      <SwissFactsStrip onCheckLeaks={runDiagnostics} checking={checking} />
-
-      {/* Main VPN Toggle Card — «Пломба» status slab */}
-      <section className={cn('c-swiss swiss-slab', swissOn && 'is-on', swissAlert && 'is-alert')}>
-        <div className="swiss-slab-main">
-          {swissBusy && <div className="swiss-stripes" aria-hidden="true" />}
-          <h2 className="swiss-label relative">{t('dashboard.vpnToggle')}</h2>
-          <div className="swiss-word-row relative">
-            <FitWord key={swissWord} text={swissWord} busyDot={swissBusy} />
-            {/* The mascot's home perch; SwissMascot draws him on top of it */}
-            <div className="swiss-home" data-perch="home" data-perch-y="bottom" data-perch-scale="0.8" aria-hidden="true" />
-          </div>
-          <div className="relative">
-        {/* During cancellation the button shows the label; keep live status for screen readers. */}
-        <p className={cancelling ? 'sr-only' : 'swiss-caption'} role="status" aria-live="polite">
-          {statusLabel}
-        </p>
-          </div>
-        </div>
-
-        <div className="swiss-slab-side" data-perch="side" data-perch-x="0.7" data-perch-scale="0.5">
-        {/* Large circular power button with glow */}
-        <motion.button
-          ref={powerRef}
-          onClick={() => {
-            if (hasConnectionResources && !confirmDisconnect && !isBusy) {
-              setConfirmDisconnect(true)
-              // Auto-cancel confirmation after 3s
-              setTimeout(() => setConfirmDisconnect(false), 3000)
-              return
-            }
-            setConfirmDisconnect(false)
-            handleToggleChange(!hasConnectionResources)
-          }}
-          disabled={circleBusy}
-          whileHover={!circleBusy ? { scale: 1.01 } : {}}
-          whileTap={!circleBusy ? { scale: 0.99 } : {}}
-          aria-label={statusLabel}
-          animate={isServerSwitching && !cancelling ? { scale: [1, 1.025, 1] } : { scale: 1 }}
-          transition={isServerSwitching && !cancelling ? { duration: 1.2, repeat: Infinity, ease: 'easeInOut' } : { duration: 0.2 }}
-          className={cn('swiss-power', cancelling ? 'is-cancel' : isServerSwitching ? 'is-busy' : isConnected && 'is-on', circleBusy && 'is-wait')}
-          title={hasConnectionResources ? t('dashboard.swissDisable') : t('dashboard.swissEnable')}
-          onMouseEnter={() => nudgeMascot('hover-in')}
-          onMouseLeave={() => nudgeMascot('hover-out')}
-          data-perch="toggle"
-          data-perch-y="bottom"
-          data-perch-x="0.6"
-          data-perch-scale="0.48"
-          data-perch-fit="gap"
-        >
-          {isServerSwitching && !cancelling && (
-            <>
-              <motion.div
-                className="absolute inset-0 border-2 border-[var(--signal)]"
-                animate={{ scale: [0.95, 1.18, 0.95], opacity: [0.65, 0.08, 0.65] }}
-                transition={{ duration: 1.35, repeat: Infinity, ease: 'easeOut' }}
-              />
-            </>
-          )}
-          {isConnected && !isServerSwitching && !cancelling && (
-            <motion.div
-              className="absolute inset-0 bg-[var(--signal)]"
-              initial={{ scale: 1, opacity: 0.35 }}
-              animate={{ scale: 1.12, opacity: 0 }}
-              transition={{ duration: 0.6, ease: 'easeOut' }}
-            />
-          )}
-          <div className="swiss-power-content">
-            <span className="truncate">{statusLabel}</span>
-            {circleBusy ? (
-              <Loader2 size={20} className="shrink-0 animate-spin" />
-            ) : (
-              <Power size={20} className="shrink-0" strokeWidth={2.5} />
-            )}
-          </div>
-        </motion.button>
-
-        {/* Disconnect confirmation */}
-        {confirmDisconnect && (
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="flex flex-col gap-2"
-          >
-            <p className="text-sm text-[var(--color-warning)] font-medium">
-              {t('dashboard.disconnectConfirmation')}
-            </p>
-            <div className="flex gap-2">
-              <button
-                onClick={() => { setConfirmDisconnect(false); handleToggleChange(false) }}
-                className="px-4 py-1.5 text-sm font-medium rounded-none bg-[var(--color-danger)] text-white hover:opacity-90 transition-opacity"
-              >
-                {t('dashboard.confirmDisconnect')}
-              </button>
-              <button
-                onClick={() => setConfirmDisconnect(false)}
-                className="px-4 py-1.5 text-sm font-medium rounded-none border border-[var(--color-border)] text-[var(--color-text)] hover:border-[var(--color-accent)]/50 transition-all"
-              >
-                {t('dashboard.cancelDisconnect')}
-              </button>
-            </div>
-          </motion.div>
-        )}
-
-        {(connecting || isServerSwitching || cancelling) && (
-          <button
-            type="button"
-            onClick={handleCancelTransition}
-            disabled={cancelling}
-            aria-busy={cancelling}
-            className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium rounded-none border border-[var(--color-warning)]/60 text-[var(--color-warning)] hover:bg-[var(--color-warning)]/10 transition-colors self-start"
-          >
-            {cancelling ? <Loader2 size={13} className="animate-spin" /> : <Square size={13} />}
-            {cancelling ? t('dashboard.cancelling') : isServerSwitching ? t('dashboard.cancelServerSwitch') : t('dashboard.cancelConnection')}
-          </button>
-        )}
-
-        {/* Profile selector card */}
-        <div className="w-full space-y-2">
-          <ForeignVpnBanner />
-          <ProfileSelectorInline />
-        </div>
-
-        {/* Connection info chips */}
-        {isConnected && (
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            {publicIp && !visibleLeak && publicIpVerdict === 'passed' && vpnIp && publicIp === vpnIp ? (
-              <span className="flex items-center gap-1.5 swiss-chip bg-[var(--color-success)]/10 px-3 py-1.5 text-[var(--color-success)]">
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                {ipGeo.country && (
-                  <CountryFlagIcon country={ipGeo.country} size={16} />
-                )}
-                <span className="font-mono">{publicIp}</span>
-                {ipGeo.country && (
-                  <span className="opacity-80">
-                    — {ipGeo.country}{ipGeo.city ? `, ${ipGeo.city}` : ''}
-                  </span>
-                )}
-              </span>
-            ) : publicIp && visibleLeak ? (
-              <span className="flex items-center gap-1.5 swiss-chip bg-[var(--color-danger)]/10 px-3 py-1.5 text-[var(--color-danger)]">
-                <AlertTriangle className="w-3.5 h-3.5" />
-                <span className="font-mono">{publicIp}</span>
-                <span className="opacity-80">— утечка</span>
-              </span>
-            ) : publicIp && isConnected && (publicIpVerdict === 'indeterminate' || publicIpVerdict === 'not-checked') ? (
-              <span className="flex items-center gap-1.5 swiss-chip bg-[var(--color-warning)]/10 px-3 py-1.5 text-[var(--color-warning)]" role="status">
-                <AlertTriangle className="w-3.5 h-3.5" />
-                <span className="font-mono">{publicIp}</span>
-                <span>— {publicIpVerdict === 'indeterminate' ? t('dashboard.ipChangedUnverified') : t('dashboard.ipNotChecked')}</span>
-              </span>
-            ) : isConnected ? (
-              <span className="flex items-center gap-1.5 swiss-chip glass px-3 py-1.5 text-[var(--color-text-secondary)]">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                Определяем IP...
-              </span>
-            ) : null}
-            <span className="flex items-center gap-1.5 swiss-chip bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
-              <Download className="w-3.5 h-3.5 text-[var(--color-success)]" />
-              ↓ <span className="font-mono">{formatSpeed(traffic.smoothedDownloadBps || traffic.downloadBps)}</span>
-            </span>
-            <span className="flex items-center gap-1.5 swiss-chip bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
-              <Upload className="w-3.5 h-3.5 text-[var(--color-accent)]" />
-              ↑ <span className="font-mono">{formatSpeed(traffic.smoothedUploadBps || traffic.uploadBps)}</span>
-            </span>
-            {tunStartedAt && <UptimeLabel startedAt={tunStartedAt} />}
-            <span className="flex items-center gap-1.5 swiss-chip bg-[var(--color-bg)] px-3 py-1.5 text-[var(--color-text-secondary)]">
-              {t('dashboard.trafficDown')}: <span className="font-mono">{formatBytes(traffic.sessionDownloadBytes)}</span>
-              {' / '}
-              {t('dashboard.trafficUp')}: <span className="font-mono">{formatBytes(traffic.sessionUploadBytes)}</span>
-            </span>
-          </div>
-        )}
-        </div>
-
-        <SwissProgress operation={tunnelSnapshot?.operation ?? null} busy={swissBusy} />
-        <SwissMascot phase={swissPhase} />
-      </section>
-
-      {/* Traffic · servers · journal (+ recent sites): the former right column, now a row under the slab */}
-      <DashboardSide />
-
       {/* Leak warning banner */}
       {visibleLeak && (
         <MacCard className="!border-[var(--color-danger)]/40 !bg-[var(--color-danger)]/10">
@@ -948,54 +717,202 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
         </MacCard>
       )}
 
-      <BrowserIpCard />
+      <ForeignVpnBanner />
 
-      <ExternalProxyCard />
+      {/* «Пломба» facts strip: mode · Smart RU · kill-switch · leaks */}
+      <SwissFactsStrip onCheckLeaks={runDiagnostics} checking={checking} />
 
-      {/* Diagnostics */}
-
-      {/* Route diagnostics card */}
-      <MacCard>
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider">
-              Проверка маршрута
-            </h3>
-            <p className={`text-sm mt-1 ${statusClass(routingHealth.summary)}`}>
-              {routingHealth.message}
-            </p>
+      {/* Main VPN Toggle Card — «Пломба» status slab */}
+      <section className={cn('c-swiss swiss-slab', swissOn && 'is-on', swissAlert && 'is-alert')}>
+        <div className="swiss-slab-main">
+          {swissBusy && <div className="swiss-stripes" aria-hidden="true" />}
+          <div className="swiss-head-row relative">
+            <h2 className="swiss-label">{t('dashboard.vpnToggle')}</h2>
+            <span className="swiss-kbd-row" aria-hidden="true">
+              <kbd className="swiss-kbd">Ctrl</kbd>
+              <kbd className="swiss-kbd">↵</kbd>
+            </span>
           </div>
-          <button
-            onClick={runDiagnostics}
-            disabled={checking}
-            className="flex items-center gap-2 text-sm px-4 py-2 rounded-[var(--radius-sm)] bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20 transition-colors duration-[var(--transition-fast)] disabled:opacity-50"
-          >
-            {checking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Radar className="w-4 h-4" />}
-            Проверить
-          </button>
+          <div className="swiss-word-row relative">
+            <FitWord key={swissWord} text={swissWord} busyDot={swissBusy} />
+            {/* The mascot's home perch; SwissMascot draws him on top of it */}
+            <div className="swiss-home" data-perch="home" data-perch-y="bottom" data-perch-scale="0.8" aria-hidden="true" />
+          </div>
+          <div className="swiss-caption-row relative">
+        {/* During cancellation the button shows the label; keep live status for screen readers. */}
+        <p className={cancelling ? 'sr-only' : 'swiss-caption'} role="status" aria-live="polite">
+          {statusLabel}
+        </p>
+        {isConnected && !swissBusy && tunStartedAt && <UptimeLabel startedAt={tunStartedAt} />}
+          </div>
         </div>
-        {leakChecks && (
-          <div className="space-y-2 mt-4">
-            {leakChecks.items.map(item => (
-              <div key={item.id} className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-[var(--radius-sm)] px-3 py-2">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    {statusIcon(item.status)}
-                    <span className="text-sm text-[var(--color-text)]">{item.label}</span>
-                  </div>
-                  <span className={`text-xs font-mono text-right ${statusClass(item.status)}`}>{item.value}</span>
-                </div>
-                {item.details && <p className="text-xs text-[var(--color-text-secondary)] mt-1 break-words">{item.details}</p>}
+
+        <div className="swiss-slab-side">
+          <div className="swiss-identity">
+            <div>
+              <div className="swiss-label">{t('dashboard.swissSitesSee')}</div>
+              {publicIp ? (
+                <button type="button" className="swiss-ip" onClick={() => void copyIp()} title={t('dashboard.swissCopy')}>
+                  <span key={publicIp} className="roll">{publicIp}</span>
+                  <span className={cn('swiss-ip-copy', ipCopied && 'is-copied')}>{ipCopied ? t('dashboard.swissCopied') : t('dashboard.swissCopy')}</span>
+                </button>
+              ) : (
+                <div className="swiss-ip is-dim">—</div>
+              )}
+              <div
+                className={cn('swiss-sub', Boolean(publicIp) && visibleLeak && 'is-alert')}
+                data-perch="ip"
+                data-perch-y="bottom"
+                data-perch-x="1"
+                data-perch-scale="0.24"
+                data-perch-fit="gap"
+              >
+                {publicIp && visibleLeak ? (
+                  <span>{'— ' + t('dashboard.swissIpLeak')}</span>
+                ) : publicIp && isConnected && (publicIpVerdict === 'indeterminate' || publicIpVerdict === 'not-checked') ? (
+                  <span>{'— ' + (publicIpVerdict === 'indeterminate' ? t('dashboard.ipChangedUnverified') : t('dashboard.ipNotChecked'))}</span>
+                ) : publicIp && isConnected && publicIpVerdict === 'passed' && ipGeo.country ? (
+                  <>
+                    <CountryFlagIcon country={ipGeo.country} size={14} />
+                    <span>{ipGeo.country + (ipGeo.city ? ', ' + ipGeo.city : '')}</span>
+                  </>
+                ) : publicIp && isConnected && publicIpVerdict === 'passed' ? (
+                  <span>{t('dashboard.swissViaVpn')}</span>
+                ) : isConnected ? (
+                  <span>{t('dashboard.swissIpDetecting')}</span>
+                ) : (
+                  <span>{t('dashboard.swissIpYourIsp')}</span>
+                )}
               </div>
-            ))}
+            </div>
+            <div>
+              <div className="swiss-label">{t('dashboard.swissRealAddress')}</div>
+              <div className={cn('swiss-real', realHidden && Boolean(homeIp) && 'is-hidden')}>{homeIp ?? '—'}</div>
+              <div className={cn('swiss-sub', !realHidden && 'is-alert')}>{realHidden ? t('dashboard.swissHidden') : t('dashboard.swissExposedToAll')}</div>
+            </div>
+            <div>
+              <div className="swiss-label">{t('dashboard.swissNode')}</div>
+              {activeProfile ? (
+                <>
+                  <div className="swiss-node">
+                    {activeProfile.country ? <CountryFlagIcon country={activeProfile.country} size={14} /> : null}
+                    <span className="truncate">{activeProfile.name}</span>
+                  </div>
+                  {nodeMeta && <div className="swiss-sub">{nodeMeta}</div>}
+                </>
+              ) : (
+                <div className="swiss-node is-dim">{t('dashboard.swissNoServer')}</div>
+              )}
+            </div>
           </div>
-        )}
-      </MacCard>
 
-      {/* Diagnostics card */}
-      <DiagnosticsCard />
+          {(confirmDisconnect || connecting || isServerSwitching || cancelling) && (
+            <div className="swiss-transient">
+              {/* Disconnect confirmation */}
+              {confirmDisconnect && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="flex flex-col gap-2"
+                >
+                  <p className="swiss-confirm-text">
+                    {t('dashboard.disconnectConfirmation')}
+                  </p>
+                  <div className="swiss-confirm-actions">
+                    <button
+                      onClick={() => { setConfirmDisconnect(false); handleToggleChange(false) }}
+                      className="swiss-confirm-yes"
+                    >
+                      {t('dashboard.confirmDisconnect')}
+                    </button>
+                    <button
+                      onClick={() => setConfirmDisconnect(false)}
+                      className="swiss-confirm-no"
+                    >
+                      {t('dashboard.cancelDisconnect')}
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+
+              {(connecting || isServerSwitching || cancelling) && (
+                <button
+                  type="button"
+                  onClick={handleCancelTransition}
+                  disabled={cancelling}
+                  aria-busy={cancelling}
+                  className="swiss-cancel-btn"
+                >
+                  {cancelling ? <Loader2 size={13} className="animate-spin" /> : <Square size={13} />}
+                  {cancelling ? t('dashboard.cancelling') : isServerSwitching ? t('dashboard.cancelServerSwitch') : t('dashboard.cancelConnection')}
+                </button>
+              )}
+            </div>
+          )}
+
+          <motion.button
+            ref={powerRef}
+            onClick={() => {
+              if (hasConnectionResources && !confirmDisconnect && !isBusy) {
+                setConfirmDisconnect(true)
+                // Auto-cancel confirmation after 3s
+                setTimeout(() => setConfirmDisconnect(false), 3000)
+                return
+              }
+              setConfirmDisconnect(false)
+              handleToggleChange(!hasConnectionResources)
+            }}
+            disabled={circleBusy}
+            whileHover={!circleBusy ? { scale: 1.01 } : {}}
+            whileTap={!circleBusy ? { scale: 0.99 } : {}}
+            aria-label={statusLabel}
+            animate={isServerSwitching && !cancelling ? { scale: [1, 1.025, 1] } : { scale: 1 }}
+            transition={isServerSwitching && !cancelling ? { duration: 1.2, repeat: Infinity, ease: 'easeInOut' } : { duration: 0.2 }}
+            className={cn('swiss-power', cancelling ? 'is-cancel' : isServerSwitching ? 'is-busy' : isConnected && 'is-on', circleBusy && 'is-wait')}
+            title={hasConnectionResources ? t('dashboard.swissDisable') : t('dashboard.swissEnable')}
+            onMouseEnter={() => nudgeMascot('hover-in')}
+            onMouseLeave={() => nudgeMascot('hover-out')}
+            data-perch="toggle"
+            data-perch-y="bottom"
+            data-perch-x="0.6"
+            data-perch-scale="0.48"
+            data-perch-fit="gap"
+          >
+            {isServerSwitching && !cancelling && (
+              <>
+                <motion.div
+                  className="absolute inset-0 border-2 border-[var(--signal)]"
+                  animate={{ scale: [0.95, 1.18, 0.95], opacity: [0.65, 0.08, 0.65] }}
+                  transition={{ duration: 1.35, repeat: Infinity, ease: 'easeOut' }}
+                />
+              </>
+            )}
+            {isConnected && !isServerSwitching && !cancelling && (
+              <motion.div
+                className="absolute inset-0 bg-[var(--signal)]"
+                initial={{ scale: 1, opacity: 0.35 }}
+                animate={{ scale: 1.12, opacity: 0 }}
+                transition={{ duration: 0.6, ease: 'easeOut' }}
+              />
+            )}
+            <div className="swiss-power-content">
+              <span className="truncate">{swissBusy ? statusLabel : hasConnectionResources ? t('dashboard.swissDisable') : t('dashboard.swissEnable')}</span>
+              {circleBusy ? (
+                <Loader2 size={20} className="shrink-0 animate-spin" />
+              ) : (
+                <ArrowRight size={20} className="swiss-power-arrow shrink-0" strokeWidth={2.5} />
+              )}
+            </div>
+          </motion.button>
+        </div>
+
+        <SwissProgress operation={tunnelSnapshot?.operation ?? null} busy={swissBusy} />
+        <SwissMascot phase={swissPhase} />
+      </section>
+
+      {/* Traffic · servers · journal: the panel row under the slab */}
+      <SwissPanels />
       </div>
-
     </div>
   )
 }
