@@ -567,7 +567,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   }
 
   // «Пломба» identity column: what sites see, the real address, the active node
-  const homeIp = useHomeIp(publicIp ?? null, Boolean(isConnected))
+  const homeIp = useHomeIp(Boolean(isConnected))
   const activeProfile = useActiveProfile()
   const realHidden = Boolean(isConnected) && !visibleLeak
   const copyIp = async () => {
