@@ -16,6 +16,8 @@ interface Props {
   landId: number
   /** True while sitting on the orange slab: black body + orange eyes. */
   onSignal: boolean
+  /** True while standing on an ink-coloured surface (e.g. the action button): light body, dark eyes. */
+  inverse?: boolean
 }
 
 interface Eye {
@@ -83,7 +85,7 @@ function useStrokeDetector(onPet: () => void) {
   }
 }
 
-export function Mascot({ phase, view, onPoke, onPet, label, landId, onSignal }: Props) {
+export function Mascot({ phase, view, onPoke, onPet, label, landId, onSignal, inverse = false }: Props) {
   const bodyRef = useRef<HTMLDivElement>(null)
   const [look, setLook] = useState({ x: 0, y: 0 })
   const onStroke = useStrokeDetector(onPet)
@@ -110,8 +112,8 @@ export function Mascot({ phase, view, onPoke, onPet, label, landId, onSignal }: 
   }, [])
 
   const on = phase === 'on'
-  const body = onSignal ? 'var(--on-signal)' : 'var(--ink)'
-  const eye = onSignal || on ? 'var(--signal)' : 'var(--paper)'
+  const body = onSignal ? 'var(--on-signal)' : inverse ? 'var(--paper)' : 'var(--ink)'
+  const eye = onSignal || on ? 'var(--signal)' : inverse ? 'var(--ink)' : 'var(--paper)'
   const tagFill = on ? (onSignal ? 'var(--paper)' : 'var(--signal)') : 'transparent'
   const face = FACES[view.mood]
   const eyes = [face.left, face.right ?? face.left]
