@@ -486,7 +486,7 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
   const runDiagnostics = async () => {
     const addr = settings.proxyOverride.trim() || (proxy ? `${proxy.host}:${proxy.port}` : '')
     setChecking(true)
-    addLog('info', 'Проверяем маршрут — куда сейчас идёт трафик…')
+    addLog('info', t('dashboard.routeCheckStart'))
     try {
       const result = await window.electronAPI.runLeakCheck({
         proxyAddr: addr || undefined,
@@ -499,15 +499,15 @@ export function Dashboard({ suppressFirewallBannerUntil = 0 }: DashboardProps) {
       }
       const message =
         result.summary === 'ok'
-          ? 'Утечек не найдено — всё через VPN.'
+          ? t('dashboard.routeCheckOk')
           : result.summary === 'fail'
-            ? 'Найдена критичная проблема маршрутизации.'
-            : 'Есть предупреждения маршрутизации.'
-      addLog(result.summary === 'fail' ? 'error' : result.summary === 'warn' ? 'warn' : 'info', `Проверка маршрута: ${message}`)
+            ? t('dashboard.routeCheckFail')
+            : t('dashboard.routeCheckWarn')
+      addLog(result.summary === 'fail' ? 'error' : result.summary === 'warn' ? 'warn' : 'info', t('dashboard.routeCheckResult', { message }))
     } catch (err: any) {
       // No verdict from this run: drop the previous one so nothing presents it as current
       setLeakChecks(null)
-      addLog('error', `Проверка не выполнена: ${err.message}`)
+      addLog('error', t('dashboard.routeCheckFailed', { message: err?.message ?? String(err) }))
     } finally {
       setChecking(false)
     }
