@@ -55,6 +55,26 @@
   color: var(--mute);
 }
 
+/* Scrollbars inside Swiss areas: thin, square, no arrows; orange on hover.
+   Chromium uses the ::-webkit-scrollbar parts (scrollbar-color would override
+   them), so the standard properties are only a fallback elsewhere. */
+.c-swiss::-webkit-scrollbar,
+.c-swiss ::-webkit-scrollbar { width: 6px; height: 6px; }
+.c-swiss::-webkit-scrollbar-track,
+.c-swiss ::-webkit-scrollbar-track { background: transparent; }
+.c-swiss::-webkit-scrollbar-thumb,
+.c-swiss ::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 0; }
+.c-swiss:hover::-webkit-scrollbar-thumb,
+.c-swiss :hover::-webkit-scrollbar-thumb { background: var(--mute); }
+.c-swiss::-webkit-scrollbar-thumb:hover,
+.c-swiss ::-webkit-scrollbar-thumb:hover { background: var(--signal); }
+.c-swiss::-webkit-scrollbar-button,
+.c-swiss ::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+.c-swiss ::-webkit-scrollbar-corner { background: transparent; }
+@supports not selector(::-webkit-scrollbar) {
+  .c-swiss, .c-swiss * { scrollbar-width: thin; scrollbar-color: var(--mute) transparent; }
+}
+
 /* ── Sidebar ─────────────────────────────────────────── */
 .swiss-sidebar { width: 200px; }
 .c-swiss .swiss-brand {
