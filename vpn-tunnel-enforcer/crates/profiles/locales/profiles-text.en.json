@@ -1,0 +1,40 @@
+{
+  "profiles": {
+    "caps": {
+      "stealth": {
+        "reality": "REALITY",
+        "ech": "TLS with ECH",
+        "naive": "Naive",
+        "obfs": "Obfuscated",
+        "utls": "TLS with a browser fingerprint",
+        "tls": "TLS",
+        "plain": "No camouflage"
+      },
+      "insecure": "Server TLS certificate verification is disabled",
+      "udpOnTcpOnly": "The protocol runs over UDP (QUIC), but the key allows TCP only: the connection may fail",
+      "defaultFingerprint": "The provider set no TLS fingerprint: the app default is used",
+      "note": {
+        "naiveInsecureIgnored": "Naive cannot skip certificate checks: the insecure option is kept but not applied",
+        "certPinNotEnforced": "The key pins the server certificate, but the engine cannot enforce the pin yet",
+        "alterIdNormalized": "alterId {{alterId}} was replaced with 0 (AEAD)",
+        "fingerprintDroppedOnQuic": "The provider's TLS fingerprint does not apply to QUIC",
+        "unsupportedField": "Unsupported option {{field}} was skipped",
+        "fileReferenceDropped": "The local file reference in {{field}} was dropped",
+        "dialFieldDropped": "Connection option {{field}} was dropped",
+        "unencrypted": "Traffic is not encrypted",
+        "muxSingBoxOnly": "Multiplexing works with sing-box servers only"
+      },
+      "skip": {
+        "notAKey": "This line does not look like a VPN key",
+        "unknownScheme": "Unknown key format: {{scheme}}",
+        "invalid": "Broken {{scheme}} key: {{detail}}",
+        "missingCredential": "The key has no password or ID",
+        "shadowTlsNeedsInner": "ShadowTLS only runs around Shadowsocks: a standalone ShadowTLS link cannot be imported",
+        "unsupportedPlugin": "Plugin {{plugin}} is not supported",
+        "unsupportedTransport": "Transport {{transport}} is not supported",
+        "duplicate": "This key is already in the list",
+        "nativeGraphRejected": "Xray configuration rejected: {{reason}}"
+      }
+    }
+  }
+}

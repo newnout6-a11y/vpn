@@ -5380,10 +5380,8 @@ dependencies = [
 name = "vpnte-automation"
 version = "2.0.0"
 dependencies = [
- "async-trait",
  "base64 0.23.1",
  "fastrand",
- "futures-util",
  "getrandom 0.3.4",
  "hmac",
  "jiff",
@@ -5628,9 +5626,6 @@ version = "2.0.0"
 dependencies = [
  "async-trait",
  "futures-util",
- "getrandom 0.3.4",
- "hex",
- "ipnet",
  "parking_lot 0.13.0",
  "serde",
  "serde_json",

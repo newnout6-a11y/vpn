@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "legacy": {
+      "notAnObject": "The saved server is damaged: its settings are not a JSON object.",
+      "unsupportedProtocol": "The saved server uses an unsupported protocol: {{protocol}}.",
+      "unusable": "The saved server cannot be used: its settings are incomplete or invalid.",
+      "invalidNativeGraph": "The saved Xray graph of this server is damaged."
+    }
+  }
+}

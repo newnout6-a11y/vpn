@@ -1,0 +1,25 @@
+{
+  "profiles": {
+    "emit": {
+      "xrayOnly": "Этот профиль запускается только на движке Xray ({{feature}}).",
+      "muxUnsupported": "Multiplex не поддерживается этим протоколом sing-box",
+      "tlsUnsupported": "sing-box не поддерживает TLS для протокола {{protocol}}.",
+      "transportUnsupported": "sing-box не поддерживает транспорт для протокола {{protocol}}.",
+      "realityWithEch": "Reality нельзя совмещать с ECH.",
+      "realityOverQuic": "Reality не работает поверх QUIC.",
+      "pinWithCertificate": "Закрепление открытого ключа нельзя совмещать с собственным сертификатом.",
+      "echConfig": "Некорректная конфигурация ECH.",
+      "ssPlugin": "Плагин Shadowsocks «{{plugin}}» не поддерживается (доступны obfs-local и v2ray-plugin).",
+      "hy2Obfs": "Обфускация Hysteria2 «{{obfs}}» не поддерживается или для неё не задан пароль.",
+      "wireguard": {
+        "noAddress": "WireGuard: не указан локальный адрес туннеля (ip=…)",
+        "noPeer": "WireGuard: не указан ни один пир",
+        "noPrivateKey": "WireGuard: не указан приватный ключ",
+        "noPeerAddress": "WireGuard: у пира не указан адрес",
+        "badPeerPort": "WireGuard: у пира некорректный порт",
+        "noPublicKey": "WireGuard: у пира не указан публичный ключ",
+        "allowedIpsRequired": "WireGuard: у пира не указаны allowed_ips (при нескольких пирах обязательны)"
+      }
+    }
+  }
+}

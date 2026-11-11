@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "wgIni": {
+      "amneziaIncompatible": "This is an AmneziaWG config: the server expects an obfuscated handshake (S1–S4, H1–H4) that the app does not support yet. A plain WireGuard connection to it will most likely fail.",
+      "amneziaJunkDropped": "AmneziaWG junk-packet settings (Jc, I1–I5, J1–J3) are not supported and were ignored: the connection runs as plain WireGuard without them."
+    }
+  }
+}

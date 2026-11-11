@@ -1,0 +1,34 @@
+{
+  "profiles": {
+    "deeplink": {
+      "encryptedHapp": "This is an encrypted Happ subscription ({{variant}}). VPNTE cannot decrypt it — ask your provider for a regular subscription URL (https://…) or a vless:// link.",
+      "encryptedMantaray": "This is an encrypted MantaRay subscription (mantaray://{{variant}}/...). VPNTE cannot decrypt it without the MantaRay app's keys. Ask your provider for a regular subscription URL (https://...) or a direct key link (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
+      "encrypted": "This is an encrypted {{app}} link ({{variant}}). VPNTE cannot decrypt it — ask your provider for a regular subscription URL (https://…) or a protocol key (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
+      "routingProfile": "This is a Happ routing rule (happ://routing/…), not a VPN subscription. Paste a subscription link or a protocol key (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
+      "addPayloadUnrecognised": "Could not read the app link (happ://add/…, mantaray://…): it should contain a subscription URL or a protocol key (vless://…), but the content looks like neither.",
+      "unknownHost": "Unknown link type {{link}}/. Paste a regular subscription link (https://…) or a protocol key (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://)."
+    },
+    "xrayNative": {
+      "invalidProfile": "The saved Xray profile is damaged. Import the provider's configuration again.",
+      "missingSelected": "The saved Xray profile has no main server. Import the provider's configuration again.",
+      "duplicateTag": "Servers in the Xray configuration have missing or repeated tags.",
+      "badBalancerTag": "A balancer in the Xray configuration has a missing or repeated tag.",
+      "missingBalancer": "A route in the Xray configuration points to a balancer that does not exist.",
+      "emptyBalancer": "A balancer in the Xray configuration selects no servers.",
+      "missingDependency": "The Xray configuration points to a server that does not exist (dialerProxy, fallbackTag or a route).",
+      "applicationBypass": "The Xray configuration can send application traffic directly, bypassing the VPN; such a route is not accepted.",
+      "cyclic": "Servers in the Xray configuration refer to each other in a loop.",
+      "missingLoopbackRoute": "A loopback server in the Xray configuration has no route.",
+      "loopbackRouteNoDestination": "A loopback route in the Xray configuration does not say where to send traffic.",
+      "unsupportedProtocol": "The Xray configuration uses a protocol that is not supported in a chain.",
+      "noEntry": "The Xray configuration does not say where traffic enters.",
+      "selectedOutsideGraph": "The main server of the Xray configuration is not part of its route.",
+      "localFileReference": "The Xray configuration refers to a local file (certificate, key or TLS key log); such subscriptions are not accepted.",
+      "multipleEndpoints": "A server in the Xray configuration must list exactly one server and one user; Xray refuses anything else.",
+      "insecureWithoutPin": "The Xray configuration turns off certificate checks (allowInsecure) without pinnedPeerCertSha256; Xray refuses to run it.",
+      "reservedTag": "The Xray configuration uses the reserved tag vpnte-block.",
+      "tooDeep": "The chain of servers in the Xray configuration is too long.",
+      "geoData": "The Xray configuration routes by geo data (geoip, geosite or an ext: file) that the app does not ship; Xray could not start it."
+    }
+  }
+}

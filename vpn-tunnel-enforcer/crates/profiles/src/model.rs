@@ -8,9 +8,12 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+/// Redacting `Debug` for the types that hold credentials.
+mod debug;
+
 /// One server key, as the provider described it. Defaults (uTLS, ALPN, mux policy) are applied
 /// when engine config is emitted, never here, so re-export stays faithful to the source.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
     /// Display name: trimmed, control characters replaced by spaces, at most 256 chars.
     pub name: String,
@@ -58,14 +61,32 @@ impl std::fmt::Display for Host {
 }
 
 /// Protocol and its credentials.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "protocol", rename_all = "lowercase")]
 pub enum Kind {
-    Vless { uuid: String, flow: Option<String>, packet_encoding: Option<String>, encryption: Option<String> },
+    Vless {
+        uuid: String,
+        flow: Option<String>,
+        packet_encoding: Option<String>,
+        encryption: Option<String>,
+    },
     /// `alter_id` is always 0 (AEAD); a non-zero provider value becomes [`Note::AlterIdNormalized`].
-    Vmess { uuid: String, security: String, global_padding: bool, authenticated_length: bool },
-    Trojan { password: String },
-    Shadowsocks { method: String, password: String, plugin: Option<SsPlugin>, shadowtls: Option<ShadowTlsLayer>, uot: Option<u8> },
+    Vmess {
+        uuid: String,
+        security: String,
+        global_padding: bool,
+        authenticated_length: bool,
+    },
+    Trojan {
+        password: String,
+    },
+    Shadowsocks {
+        method: String,
+        password: String,
+        plugin: Option<SsPlugin>,
+        shadowtls: Option<ShadowTlsLayer>,
+        uot: Option<u8>,
+    },
     Hysteria2 {
         password: String,
         obfs: Option<Hy2Obfs>,
@@ -77,12 +98,36 @@ pub enum Kind {
         down_mbps: Option<u32>,
         bbr_profile: Option<String>,
     },
-    Tuic { uuid: String, password: String, congestion: Option<String>, udp_relay_mode: Option<String>, zero_rtt: bool, heartbeat_s: Option<u32> },
-    Naive { username: String, password: String, quic: bool, extra_headers: Vec<(String, String)>, insecure_concurrency: Option<u32> },
-    Anytls { password: String, idle_check_s: Option<u32>, idle_timeout_s: Option<u32>, min_idle: Option<u32> },
+    Tuic {
+        uuid: String,
+        password: String,
+        congestion: Option<String>,
+        udp_relay_mode: Option<String>,
+        zero_rtt: bool,
+        heartbeat_s: Option<u32>,
+    },
+    Naive {
+        username: String,
+        password: String,
+        quic: bool,
+        extra_headers: Vec<(String, String)>,
+        insecure_concurrency: Option<u32>,
+    },
+    Anytls {
+        password: String,
+        idle_check_s: Option<u32>,
+        idle_timeout_s: Option<u32>,
+        min_idle: Option<u32>,
+    },
     Wireguard(WireGuard),
-    Socks { username: Option<String>, password: Option<String> },
-    Http { username: Option<String>, password: Option<String> },
+    Socks {
+        username: Option<String>,
+        password: Option<String>,
+    },
+    Http {
+        username: Option<String>,
+        password: Option<String>,
+    },
 }
 
 impl Kind {
@@ -105,7 +150,13 @@ impl Kind {
 
     /// True when the protocol itself runs over UDP (QUIC or WireGuard): TCP probes say nothing about it.
     pub fn is_udp_transport(&self) -> bool {
-        matches!(self, Kind::Hysteria2 { .. } | Kind::Tuic { .. } | Kind::Wireguard(_) | Kind::Naive { quic: true, .. })
+        matches!(
+            self,
+            Kind::Hysteria2 { .. }
+                | Kind::Tuic { .. }
+                | Kind::Wireguard(_)
+                | Kind::Naive { quic: true, .. }
+        )
     }
 }
 
@@ -117,7 +168,7 @@ pub struct SsPlugin {
 }
 
 /// ShadowTLS wrapper around a Shadowsocks key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShadowTlsLayer {
     pub version: u8,
     pub password: String,
@@ -125,7 +176,7 @@ pub struct ShadowTlsLayer {
 }
 
 /// Hysteria2 obfuscation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hy2Obfs {
     /// `salamander` (or `gecko` on sing-box 1.14).
     pub kind: String,
@@ -169,19 +220,41 @@ pub struct Ech {
 }
 
 /// Stream transport under the protocol.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Transport {
-    Ws { path: String, host: Option<String>, max_early_data: Option<u32>, early_data_header: Option<String> },
+    Ws {
+        path: String,
+        host: Option<String>,
+        max_early_data: Option<u32>,
+        early_data_header: Option<String>,
+    },
     /// `multi_mode: Some(_)` exists only in Xray.
-    Grpc { service_name: String, multi_mode: Option<bool> },
-    Http { hosts: Vec<String>, path: String },
-    HttpUpgrade { host: String, path: String },
+    Grpc {
+        service_name: String,
+        multi_mode: Option<bool>,
+    },
+    Http {
+        hosts: Vec<String>,
+        path: String,
+    },
+    HttpUpgrade {
+        host: String,
+        path: String,
+    },
     Quic,
     /// Xray only.
-    Xhttp { host: String, path: String, mode: Option<String>, extra: Option<Map<String, Value>> },
+    Xhttp {
+        host: String,
+        path: String,
+        mode: Option<String>,
+        extra: Option<Map<String, Value>>,
+    },
     /// TCP with an HTTP header mask; Xray only.
-    TcpHttpHeader { host: Vec<String>, path: Vec<String> },
+    TcpHttpHeader {
+        host: Vec<String>,
+        path: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,7 +286,7 @@ impl DialPrefs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct WireGuard {
     pub private_key: String,
     pub local_address: Vec<ipnet::IpNet>,
@@ -222,7 +295,7 @@ pub struct WireGuard {
     pub peers: Vec<WgPeer>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct WgPeer {
     pub host: Host,
     pub port: u16,
@@ -235,7 +308,7 @@ pub struct WgPeer {
 
 /// Provider Xray graph kept as data: outbounds with their own tags, plus the routing pieces that
 /// tie them together. `vpnte_engine::xray` compiles it with namespaced tags.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeXray {
     /// Format version, currently 1.
@@ -269,7 +342,7 @@ pub struct NativeRouting {
 }
 
 /// Where a profile came from. `Uri` keeps the exact imported line for lossless re-export.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "lowercase")]
 pub enum Source {
     Uri(String),
@@ -320,7 +393,10 @@ pub struct Skipped {
 pub enum SkipReason {
     UnknownScheme(String),
     /// Recognised scheme/format, but the entry is malformed; `detail` is an English diagnostic.
-    Invalid { scheme: String, detail: String },
+    Invalid {
+        scheme: String,
+        detail: String,
+    },
     MissingCredential,
     ShadowTlsNeedsInner,
     UnsupportedPlugin(String),

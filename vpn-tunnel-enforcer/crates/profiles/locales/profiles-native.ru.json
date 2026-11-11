@@ -1,0 +1,34 @@
+{
+  "profiles": {
+    "deeplink": {
+      "encryptedHapp": "Это зашифрованная подписка Happ ({{variant}}). VPNTE не умеет её расшифровать — попросите у вашего провайдера обычный subscription URL (https://…) или vless://-ссылку.",
+      "encryptedMantaray": "Это зашифрованная подписка MantaRay (mantaray://{{variant}}/...). VPNTE не может расшифровать ее без ключей приложения MantaRay. Попросите у провайдера обычный subscription URL (https://...) или прямую ссылку ключа (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
+      "encrypted": "Это зашифрованная ссылка {{app}} ({{variant}}). VPNTE не умеет её расшифровать — попросите у провайдера обычный subscription URL (https://…) или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
+      "routingProfile": "Это правило маршрутизации Happ (happ://routing/…), а не VPN-подписка. Вставьте ссылку на подписку или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
+      "addPayloadUnrecognised": "Не удалось разобрать ссылку приложения (happ://add/…, mantaray://…) — внутри ожидается subscription URL или ключ протокола (vless://…), но содержимое не похоже ни на то, ни на другое.",
+      "unknownHost": "Неизвестная схема {{link}}/. Вставьте обычную ссылку подписки (https://…) или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://)."
+    },
+    "xrayNative": {
+      "invalidProfile": "Сохранённый профиль Xray повреждён. Импортируйте конфигурацию провайдера заново.",
+      "missingSelected": "В сохранённом профиле Xray нет основного узла. Импортируйте конфигурацию провайдера заново.",
+      "duplicateTag": "В конфигурации Xray у узлов отсутствуют или повторяются теги (tag).",
+      "badBalancerTag": "В конфигурации Xray у балансировщика отсутствует или повторяется тег (tag).",
+      "missingBalancer": "Маршрут конфигурации Xray ссылается на несуществующий балансировщик.",
+      "emptyBalancer": "Балансировщик в конфигурации Xray не выбирает ни одного узла.",
+      "missingDependency": "Конфигурация Xray ссылается на несуществующий узел (dialerProxy, fallbackTag или маршрут).",
+      "applicationBypass": "Конфигурация Xray может отправить трафик приложений напрямую в обход VPN — такой маршрут не принимается.",
+      "cyclic": "Узлы конфигурации Xray ссылаются друг на друга по кругу.",
+      "missingLoopbackRoute": "Для loopback-узла конфигурации Xray нет маршрута.",
+      "loopbackRouteNoDestination": "Маршрут loopback-узла конфигурации Xray не указывает, куда отправлять трафик.",
+      "unsupportedProtocol": "Конфигурация Xray использует протокол, который не поддерживается в цепочке.",
+      "noEntry": "В конфигурации Xray не указана точка входа трафика.",
+      "selectedOutsideGraph": "Основной узел конфигурации Xray не участвует в её маршруте.",
+      "localFileReference": "Конфигурация Xray ссылается на локальный файл (сертификат, ключ или журнал TLS) — такие подписки не принимаются.",
+      "multipleEndpoints": "Узел конфигурации Xray должен содержать ровно один сервер и одного пользователя — другое Xray не запускает.",
+      "insecureWithoutPin": "Конфигурация Xray отключает проверку сертификата (allowInsecure) без pinnedPeerCertSha256; Xray такое не запускает.",
+      "reservedTag": "Конфигурация Xray использует служебный тег vpnte-block.",
+      "tooDeep": "Цепочка узлов конфигурации Xray слишком длинная.",
+      "geoData": "Конфигурация Xray маршрутизирует по геоданным (geoip, geosite или файл ext:), которых нет в приложении; Xray не сможет её запустить."
+    }
+  }
+}
