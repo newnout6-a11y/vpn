@@ -1,0 +1,53 @@
+# Early proof for the privileged Windows layer while the Rust rewrite is still being assembled: runs the
+# tests named `elevated_*` (real WFP provider / sublayer / filters, transactions) of the finished crates on
+# an elevated GitHub runner. Temporary: folded into ci.yml's `elevated` job once the workspace builds as a whole.
+name: Elevated probe
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'vpn-tunnel-enforcer/crates/winnet/**'
+      - 'vpn-tunnel-enforcer/crates/base/**'
+      - '.github/workflows/elevated-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: elevated-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  winnet:
+    name: winnet (WFP, elevated)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: vpn-tunnel-enforcer
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Runner must be elevated
+        shell: pwsh
+        run: |
+          $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'The privileged tests need an elevated runner; they would prove nothing here.'
+          }
+      - name: Toolchain
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
+      # Not --locked: the lock file follows crates that are still being written.
+      - name: Unprivileged tests of the crate
+        run: cargo test -p vpnte-winnet
+      - name: Privileged tests (real WFP objects, harmless filters only)
+        run: cargo test -p vpnte-winnet -- --ignored elevated_ --test-threads=1 --nocapture

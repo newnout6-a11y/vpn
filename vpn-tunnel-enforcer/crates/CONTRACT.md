@@ -150,8 +150,9 @@ A crate that needs something from a crate it does not depend on takes it as a sm
    image name for `xray.exe` or `sing-box.exe` (`taskkill /IM`, `Stop-Process -Name`): the user's own VPN
    runs an `xray.exe` and this session's network goes through it. Stop every process you
    start (engines, demo binaries, browsers). Code that needs admin: write it against the real API, unit-test
-   the pure parts, add integration tests marked `#[ignore = "needs elevation"]` that clean up after
-   themselves, and say in your progress file what was not executed.
+   the pure parts, add integration tests marked `#[ignore = "needs elevation"]` and NAMED `elevated_*` (CI runs
+   exactly `-- --ignored elevated_` on an elevated runner) that clean up after themselves, and say in your
+   progress file what was not executed.
 8. **Style.** Fast, current, ordered, concise. Small modules with one job; no speculative abstraction; no dead
    code; no `todo!()` / `unimplemented!()` left behind; no `unwrap()` / `expect()` on fallible runtime paths
    (tests and proven invariants excepted); errors are `thiserror` enums or `AppError`. Comments explain WHY
