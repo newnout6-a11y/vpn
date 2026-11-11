@@ -1,8 +1,5 @@
 //! Locale fragments: valid JSON, the same keys and placeholders in ru and en, and every key the
 //! code emits present.
-use std::collections::BTreeMap;
-
-use serde_json::Value;
 use vpnte_base::Msg;
 
 use crate::diagnostics::checks::{self, ProfileFacts, ProxyState};
@@ -12,53 +9,14 @@ use crate::diagnostics::routing::derive_routing_verdict;
 use crate::diagnostics::sysinfo::OsInfo;
 use crate::diagnostics::{Category, CheckItem};
 use crate::local_proxy::{LocalProxy, Source, SystemProxy};
+use crate::test_support::{flatten, placeholders};
 
 const RU: &str = include_str!("../../../locales/probes-diag.ru.json");
 const EN: &str = include_str!("../../../locales/probes-diag.en.json");
 
-fn flatten(prefix: &str, v: &Value, out: &mut BTreeMap<String, String>) {
-    match v {
-        Value::Object(map) => {
-            for (k, v) in map {
-                let key = if prefix.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{prefix}.{k}")
-                };
-                flatten(&key, v, out);
-            }
-        }
-        Value::String(s) => {
-            out.insert(prefix.to_owned(), s.clone());
-        }
-        other => panic!("{prefix}: not a string: {other}"),
-    }
-}
-
-fn catalog(text: &str) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    flatten(
-        "",
-        &serde_json::from_str(text).expect("valid JSON"),
-        &mut out,
-    );
-    out
-}
-
-fn placeholders(s: &str) -> Vec<String> {
-    let mut found: Vec<String> = s
-        .split("{{")
-        .skip(1)
-        .filter_map(|p| p.split_once("}}").map(|(n, _)| n.to_owned()))
-        .collect();
-    found.sort();
-    found.dedup();
-    found
-}
-
 #[test]
 fn ru_and_en_match() {
-    let (ru, en) = (catalog(RU), catalog(EN));
+    let (ru, en) = (flatten(RU), flatten(EN));
     assert_eq!(ru.keys().collect::<Vec<_>>(), en.keys().collect::<Vec<_>>());
     for (k, v) in &ru {
         assert_eq!(placeholders(v), placeholders(&en[k]), "placeholders of {k}");
@@ -220,7 +178,7 @@ fn report_items() -> Vec<CheckItem> {
 
 #[test]
 fn every_emitted_key_exists() {
-    let (ru, en) = (catalog(RU), catalog(EN));
+    let (ru, en) = (flatten(RU), flatten(EN));
     let mut msgs = plan_msgs();
     for (t, vpn, direct, smart, ru_ip) in [
         (false, None, None, false, None),

@@ -1,15 +1,14 @@
-//! Internet reachability as an ordinary app sees it: Windows' own `curl.exe` (absolute System32
-//! path, proxies off). The kill switch permits our own exe, not curl, so an in-process client
-//! would get through where the user's apps are blocked and report a lie (B-SD-5).
+//! Internet reachability as an ordinary app sees it: Windows' own `curl.exe` ([`crate::curl`]:
+//! absolute System32 path, proxies off). The kill switch permits our own exe, not curl, so an
+//! in-process client would get through where the user's apps are blocked and report a lie
+//! (B-SD-5).
 use std::net::IpAddr;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use vpnte_base::Msg;
 use vpnte_base::types::Verdict;
 
 use super::{Category, CheckItem};
-use crate::local_proxy::PROXY_ENV;
 
 /// `(id, label key, url)` of the endpoints, checked in parallel.
 pub const ENDPOINTS: [(&str, &str, &str); 5] = [
@@ -44,9 +43,9 @@ pub const ENDPOINTS: [(&str, &str, &str); 5] = [
 const CURL_MAX_TIME_S: u32 = 12;
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// What one curl run reported.
+/// What one curl run reported through its `--write-out` line.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CurlOutcome {
+pub struct WriteOut {
     pub exit: Option<i32>,
     pub http_code: u16,
     pub remote_ip: Option<IpAddr>,
@@ -55,11 +54,11 @@ pub struct CurlOutcome {
 }
 
 /// Parses `-w "%{http_code}|%{remote_ip}|%{time_total}|%{errormsg}"`.
-pub fn parse_write_out(exit: Option<i32>, stdout: &str) -> CurlOutcome {
+pub fn parse_write_out(exit: Option<i32>, stdout: &str) -> WriteOut {
     let mut parts = stdout.trim().splitn(4, '|');
     let mut next = || parts.next().unwrap_or_default().trim().to_owned();
     let (code, ip, time, error) = (next(), next(), next(), next());
-    CurlOutcome {
+    WriteOut {
         exit,
         http_code: code.parse().unwrap_or(0),
         remote_ip: ip.parse().ok(),
@@ -74,7 +73,7 @@ pub fn endpoint_item(
     id: &str,
     label: &'static str,
     url: &str,
-    outcome: Result<CurlOutcome, String>,
+    outcome: Result<WriteOut, String>,
 ) -> CheckItem {
     let o = match outcome {
         Ok(o) => o,
@@ -116,45 +115,29 @@ pub fn endpoint_item(
     CheckItem::new(id, Category::Internet, label, Some(verdict), value).details(rows, 4)
 }
 
-/// `%SystemRoot%\System32\curl.exe` (never a bare name: no lookup in the current directory).
-pub fn curl_path() -> PathBuf {
-    let root = std::env::var_os("SystemRoot")
-        .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| "C:\\Windows".into());
-    PathBuf::from(root).join("System32").join("curl.exe")
-}
-
-/// Runs curl once for `url` with every proxy variable removed.
-pub async fn run_curl(url: &str) -> Result<CurlOutcome, String> {
-    let exe = curl_path();
-    if !exe.is_file() {
-        return Err("curl.exe not found".to_owned());
+/// Runs curl once for `url`; `Err` when it could not be started or did not finish in time.
+pub async fn run_curl(url: &str) -> Result<WriteOut, String> {
+    let max_time = CURL_MAX_TIME_S.to_string();
+    let args = [
+        "-q",
+        "--noproxy",
+        "*",
+        "-L",
+        "-sS",
+        "-o",
+        "NUL",
+        "--max-time",
+        &max_time,
+        "-w",
+        "%{http_code}|%{remote_ip}|%{time_total}|%{errormsg}",
+        url,
+    ];
+    let out = crate::curl::run_curl(args.map(str::to_owned).to_vec(), PROCESS_TIMEOUT).await;
+    match out.exit {
+        _ if !out.launched => Err("curl.exe not started".to_owned()),
+        None => Err("curl did not finish in time".to_owned()),
+        exit => Ok(parse_write_out(exit, &out.stdout)),
     }
-    let mut cmd = tokio::process::Command::new(exe);
-    cmd.args(["--noproxy", "*", "-L", "-sS", "-o", "NUL", "--max-time"])
-        .arg(CURL_MAX_TIME_S.to_string())
-        .args([
-            "-w",
-            "%{http_code}|%{remote_ip}|%{time_total}|%{errormsg}",
-            url,
-        ]);
-    for name in PROXY_ENV
-        .iter()
-        .flat_map(|n| [n.to_string(), n.to_ascii_lowercase()])
-    {
-        cmd.env_remove(name);
-    }
-    let job = vpnte_winnet::process::app_job().map_err(|e| e.to_string())?;
-    let child = vpnte_winnet::process::spawn_hidden(&mut cmd, job).map_err(|e| e.to_string())?;
-    // A timeout drops the child: kill-on-drop ends curl.
-    let out = tokio::time::timeout(PROCESS_TIMEOUT, child.wait_with_output())
-        .await
-        .map_err(|_| "curl did not finish in time".to_owned())?
-        .map_err(|e| e.to_string())?;
-    Ok(parse_write_out(
-        out.status.code(),
-        &String::from_utf8_lossy(&out.stdout),
-    ))
 }
 
 /// All endpoint items, in parallel.

@@ -19,7 +19,7 @@ const DNS_TAG: &str = "dns-bootstrap";
 
 /// How the probe engine reaches the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProbeRoute {
+pub enum Uplink {
     /// Our TUN runs: dial through its authenticated `mixed-direct-in` (routed `direct-out`).
     Detour(Loopback),
     /// No TUN of ours: bind to this physical adapter alias (`None`: none found).
@@ -32,7 +32,7 @@ pub fn probe_config(
     p: &Profile,
     listen: &Loopback,
     device: ClientDevice,
-    route: &ProbeRoute,
+    route: &Uplink,
 ) -> Result<Value, EmitError> {
     let policy = EmitPolicy {
         device: Some(device),
@@ -44,9 +44,9 @@ pub fn probe_config(
         // Only entries that dial the server themselves; a chain's inner hop already detours.
         if entry.get("detour").is_none() {
             match route {
-                ProbeRoute::Detour(_) => entry["detour"] = json!(DIRECT_TAG),
-                ProbeRoute::Bind(Some(alias)) => entry["bind_interface"] = json!(alias),
-                ProbeRoute::Bind(None) => {}
+                Uplink::Detour(_) => entry["detour"] = json!(DIRECT_TAG),
+                Uplink::Bind(Some(alias)) => entry["bind_interface"] = json!(alias),
+                Uplink::Bind(None) => {}
             }
         }
         entry
@@ -54,7 +54,7 @@ pub fn probe_config(
     let mut outbounds: Vec<Value> = fragment.outbounds().iter().cloned().map(place).collect();
     let endpoints: Vec<Value> = fragment.endpoints().iter().cloned().map(place).collect();
     outbounds.push(match route {
-        ProbeRoute::Detour(direct) => {
+        Uplink::Detour(direct) => {
             let mut socks = json!({
                 "type": "socks",
                 "tag": DIRECT_TAG,
@@ -68,7 +68,7 @@ pub fn probe_config(
             }
             socks
         }
-        ProbeRoute::Bind(_) => json!({ "type": "direct", "tag": DIRECT_TAG }),
+        Uplink::Bind(_) => json!({ "type": "direct", "tag": DIRECT_TAG }),
     });
     let mut inbound = json!({
         "type": "mixed",

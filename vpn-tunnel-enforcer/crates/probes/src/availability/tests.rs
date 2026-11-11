@@ -392,52 +392,17 @@ async fn operation_and_history() {
     assert_eq!(history.snapshot().history.len(), 3);
 }
 
-/// Flattened `key → text` of a fragment.
-fn flatten(json: &str) -> std::collections::BTreeMap<String, String> {
-    fn walk(prefix: &str, v: &Value, out: &mut std::collections::BTreeMap<String, String>) {
-        match v {
-            Value::Object(map) => {
-                for (k, v) in map {
-                    let key = if prefix.is_empty() {
-                        k.clone()
-                    } else {
-                        format!("{prefix}.{k}")
-                    };
-                    walk(&key, v, out);
-                }
-            }
-            Value::String(s) => {
-                out.insert(prefix.to_owned(), s.clone());
-            }
-            other => panic!("{prefix}: not a string: {other}"),
-        }
-    }
-    let mut out = std::collections::BTreeMap::new();
-    walk(
-        "",
-        &serde_json::from_str(json).expect("valid JSON fragment"),
-        &mut out,
-    );
-    out
-}
-
 /// CONTRACT §3.2: the fragments are valid JSON under `probes`, with the same keys and
 /// placeholders in ru and en, and every key the code names exists.
 #[test]
 fn locale_fragments_cover_every_key() {
+    use crate::test_support::{flatten, placeholders};
     let ru = flatten(include_str!("../../locales/probes-web.ru.json"));
     let en = flatten(include_str!("../../locales/probes-web.en.json"));
     assert_eq!(ru.keys().collect::<Vec<_>>(), en.keys().collect::<Vec<_>>());
-    let placeholder = regex::Regex::new(r"\{\{(\w+)\}\}").unwrap();
-    let vars = |s: &str| {
-        placeholder
-            .captures_iter(s)
-            .map(|c| c[1].to_owned())
-            .collect::<Vec<_>>()
-    };
     for (key, text) in &ru {
         assert!(key.starts_with("probes."), "{key}");
-        assert_eq!(vars(text), vars(&en[key]), "{key}");
+        assert_eq!(placeholders(text), placeholders(&en[key]), "{key}");
     }
     let sources = [
         include_str!("mod.rs"),

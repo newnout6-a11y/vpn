@@ -20,6 +20,36 @@ fn item(category: Category, verdict: Option<Verdict>) -> CheckItem {
     CheckItem::new("x", category, "probes.diag.x.label", verdict, Msg::new("v"))
 }
 
+/// AT-07-002: leak-check rows keep their verdict in the report (`NotChecked` is never `Ok`,
+/// `Info` stays informational) and land in the Routing group.
+#[cfg(feature = "probes-ip")]
+#[test]
+fn leak_items_become_routing_rows() {
+    use crate::leak::{CheckItem as LeakItem, CheckStatus};
+    let leak = |status| LeakItem {
+        id: "dns",
+        label: Msg::new("t.label"),
+        status,
+        value: Msg::new("t.value"),
+        details: vec![Msg::new("t.detail")],
+    };
+    let row = CheckItem::from(&leak(CheckStatus::NotChecked));
+    assert_eq!(row.id, "dns");
+    assert_eq!(row.category, Category::Routing);
+    assert_eq!(row.verdict, Some(Verdict::NotChecked));
+    assert_eq!(
+        (row.label, row.value),
+        (Msg::new("t.label"), Msg::new("t.value"))
+    );
+    assert_eq!(row.notes, vec![Msg::new("t.detail")]);
+    assert!(row.details.is_empty());
+    assert_eq!(CheckItem::from(&leak(CheckStatus::Info)).verdict, None);
+    assert_eq!(
+        CheckItem::from(&leak(CheckStatus::Fail)).verdict,
+        Some(Verdict::Fail)
+    );
+}
+
 #[test]
 fn summary_rule() {
     use Category::*;

@@ -463,8 +463,7 @@ async fn real_report_runs() {
     use crate::diagnostics::{ReportInputs, TunnelFacts, system_report};
     let mut settings = vpnte_core::settings::Settings::default();
     settings.connection_mode = vpnte_core::settings::ConnectionMode::DirectVpn;
-    let resources =
-        std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources"));
+    let resources = crate::test_support::resources();
     let tmp = std::env::temp_dir().join("vpnte-probes-report");
     let dirs = vpnte_core::paths::DataDirs::new(tmp.clone(), tmp.join("legacy"), resources);
     let inputs = ReportInputs {

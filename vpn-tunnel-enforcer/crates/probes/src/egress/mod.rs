@@ -111,63 +111,42 @@ pub async fn reliable_socks_latency(
     crate::ping::median(&samples)
 }
 
-/// One egress identity service: SNI and SOCKS domain (port 443), path, body format.
+/// One egress identity service: SNI and SOCKS domain (port 443) and path.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Provider {
     pub host: &'static str,
     pub path: &'static str,
-    pub format: BodyFormat,
-}
-
-/// How a provider answers with the address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BodyFormat {
-    /// Cloudflare trace: the line starting `ip=`.
-    TraceLine,
-    /// JSON object with a string field `ip`.
-    JsonIp,
-    /// The whole body is the address.
-    Plain,
 }
 
 /// Raced in parallel (socksUpstreamProbe.ts:22-27); the index is the only identity in logs.
+/// Domain names on purpose: the exit resolves them (SOCKS domain CONNECT), unlike the
+/// family-pinned endpoints of `public_ip::PROVIDERS`.
 const PROVIDERS: [Provider; 4] = [
     Provider {
         host: "cloudflare.com",
         path: "/cdn-cgi/trace",
-        format: BodyFormat::TraceLine,
     },
     Provider {
         host: "api.ipify.org",
         path: "/?format=json",
-        format: BodyFormat::JsonIp,
     },
     Provider {
         host: "icanhazip.com",
         path: "/",
-        format: BodyFormat::Plain,
     },
     Provider {
         host: "api.myip.com",
         path: "/",
-        format: BodyFormat::JsonIp,
     },
 ];
 
 /// The address in a provider body, if it is a public IPv4. IPv6 echoes are refused: the
 /// retained tunnel confirmation compares IPv4 samples.
-pub(crate) fn parse_body(format: BodyFormat, body: &str) -> Option<Ipv4Addr> {
-    let text = match format {
-        BodyFormat::TraceLine => body.lines().find_map(|l| l.strip_prefix("ip="))?.to_owned(),
-        BodyFormat::JsonIp => serde_json::from_str::<serde_json::Value>(body)
-            .ok()?
-            .get("ip")?
-            .as_str()?
-            .to_owned(),
-        BodyFormat::Plain => body.to_owned(),
-    };
-    let ip: Ipv4Addr = text.trim().parse().ok()?;
-    is_public_ip(IpAddr::V4(ip)).then_some(ip)
+pub(crate) fn parse_body(body: &str) -> Option<Ipv4Addr> {
+    match crate::ip_echo::parse_provider_body(body)? {
+        IpAddr::V4(ip) if is_public_ip(IpAddr::V4(ip)) => Some(ip),
+        _ => None,
+    }
 }
 
 /// Where a provider attempt ended (log field `stage`).
@@ -289,7 +268,7 @@ async fn attempt(
         HttpFail::BodyIo => Fail::new(Stage::ResponseBody, Code::HttpsFailed),
     })?;
     let text = String::from_utf8_lossy(&body);
-    parse_body(provider.format, &text).ok_or(Fail::new(Stage::ResponseBody, Code::InvalidPublicIp))
+    parse_body(&text).ok_or(Fail::new(Stage::ResponseBody, Code::InvalidPublicIp))
 }
 
 /// The four fields of a provider log line (plus the index); never names, addresses or text.

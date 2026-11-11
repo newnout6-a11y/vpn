@@ -123,10 +123,6 @@ pub enum NotCheckedReason {
     TunnelTransition,
     /// The user turned geo lookups off.
     GeoDisabled,
-    /// The check deadline passed before the stage could start.
-    QueuedTimeout,
-    /// The engine probe could not be started (another probe engine still being reaped).
-    EngineBusy,
 }
 
 impl NotCheckedReason {
@@ -138,8 +134,6 @@ impl NotCheckedReason {
             NotCheckedReason::BasicMode => "probes.liveStages.notChecked.basicMode",
             NotCheckedReason::TunnelTransition => "probes.liveStages.notChecked.tunnelTransition",
             NotCheckedReason::GeoDisabled => "probes.liveStages.notChecked.geoDisabled",
-            NotCheckedReason::QueuedTimeout => "probes.liveStages.notChecked.queuedTimeout",
-            NotCheckedReason::EngineBusy => "probes.liveStages.notChecked.engineBusy",
         })
     }
 }
@@ -258,54 +252,19 @@ impl ProbePath {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use regex::Regex;
-    use serde_json::Value;
+    use std::collections::BTreeSet;
 
     use super::icmp::{PmtuObservation, RungOutcome, classify_pmtu};
     use super::*;
+    use crate::test_support::{flatten, placeholders};
 
     const RU: &str = include_str!("../../locales/probes-live-stages.ru.json");
     const EN: &str = include_str!("../../locales/probes-live-stages.en.json");
 
-    fn leaves(v: &Value, prefix: &str, out: &mut BTreeMap<String, String>) {
-        match v {
-            Value::Object(map) => {
-                for (k, v) in map {
-                    let key = if prefix.is_empty() {
-                        k.clone()
-                    } else {
-                        format!("{prefix}.{k}")
-                    };
-                    leaves(v, &key, out);
-                }
-            }
-            Value::String(s) => {
-                out.insert(prefix.to_owned(), s.clone());
-            }
-            other => panic!("{prefix}: unexpected {other}"),
-        }
-    }
-
-    fn table(json: &str) -> BTreeMap<String, String> {
-        let mut out = BTreeMap::new();
-        leaves(&serde_json::from_str(json).unwrap(), "", &mut out);
-        out
-    }
-
-    fn placeholders(text: &str) -> Vec<String> {
-        let re = Regex::new(r"\{\{(\w+)\}\}").unwrap();
-        let mut names: Vec<String> = re.captures_iter(text).map(|c| c[1].to_owned()).collect();
-        names.sort();
-        names.dedup();
-        names
-    }
-
     /// Locale fragments: valid JSON, one `probes` root, equal keys and placeholders in ru / en.
     #[test]
     fn locale_fragments_match() {
-        let (ru, en) = (table(RU), table(EN));
+        let (ru, en) = (flatten(RU), flatten(EN));
         assert_eq!(ru.keys().collect::<Vec<_>>(), en.keys().collect::<Vec<_>>());
         for (key, text) in &ru {
             assert!(key.starts_with("probes.liveStages."), "{key}");
@@ -323,8 +282,6 @@ mod tests {
             NotCheckedReason::BasicMode,
             NotCheckedReason::TunnelTransition,
             NotCheckedReason::GeoDisabled,
-            NotCheckedReason::QueuedTimeout,
-            NotCheckedReason::EngineBusy,
         ]
         .map(NotCheckedReason::msg)
         .to_vec();
@@ -364,14 +321,13 @@ mod tests {
             classify_pmtu(false, None, None),
         ];
         msgs.extend(cases.into_iter().map(|v| v.detail));
-        let (ru, en) = (table(RU), table(EN));
+        let (ru, en) = (flatten(RU), flatten(EN));
         for msg in msgs {
             for lang in [&ru, &en] {
                 let text = lang
                     .get(msg.key.as_ref())
                     .unwrap_or_else(|| panic!("missing {}", msg.key));
-                let mut args: Vec<String> = msg.args.iter().map(|(k, _)| k.to_string()).collect();
-                args.sort();
+                let args: BTreeSet<&str> = msg.args.iter().map(|(k, _)| k.as_ref()).collect();
                 assert_eq!(placeholders(text), args, "{}", msg.key);
             }
         }

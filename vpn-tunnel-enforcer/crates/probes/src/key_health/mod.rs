@@ -27,7 +27,7 @@ mod engine;
 mod tests;
 
 pub use classify::{classify_failure, parse_trace};
-pub use config::{DIRECT_TAG, INBOUND_TAG, PROXY_TAG, ProbeRoute, probe_config};
+pub use config::{DIRECT_TAG, INBOUND_TAG, PROXY_TAG, Uplink, probe_config};
 
 use destinations::{DESTINATIONS, Destination, Race};
 use engine::{Running, Start};

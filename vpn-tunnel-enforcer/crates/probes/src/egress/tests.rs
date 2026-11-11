@@ -266,21 +266,18 @@ async fn run_plain(s: Script, budget: Duration) -> (Result<Ipv4Addr, EgressError
 #[test]
 fn body_formats() {
     assert_eq!(
-        parse_body(BodyFormat::TraceLine, "fl=1\nip=8.8.8.8\nts=1\n"),
+        parse_body("fl=1\nip=8.8.8.8\nts=1\n"),
         Some(Ipv4Addr::new(8, 8, 8, 8))
     );
     assert_eq!(
-        parse_body(BodyFormat::JsonIp, r#"{"ip":"8.8.8.8"}"#),
+        parse_body(r#"{"ip":"8.8.8.8"}"#),
         Some(Ipv4Addr::new(8, 8, 8, 8))
     );
     assert_eq!(
-        parse_body(BodyFormat::JsonIp, r#"{"ip":" 8.8.8.8 "}"#),
+        parse_body(r#"{"ip":" 8.8.8.8 "}"#),
         Some(Ipv4Addr::new(8, 8, 8, 8))
     );
-    assert_eq!(
-        parse_body(BodyFormat::Plain, "8.8.8.8\n"),
-        Some(Ipv4Addr::new(8, 8, 8, 8))
-    );
+    assert_eq!(parse_body("8.8.8.8\n"), Some(Ipv4Addr::new(8, 8, 8, 8)));
     for bad in [
         "",
         "127.0.0.1",
@@ -293,17 +290,9 @@ fn body_formats() {
         "[8.8.8.8]",
         "2606:4700:4700::1111",
     ] {
-        assert_eq!(parse_body(BodyFormat::Plain, bad), None, "{bad}");
-        assert_eq!(
-            parse_body(BodyFormat::TraceLine, &format!("ip={bad}\n")),
-            None,
-            "{bad}"
-        );
-        assert_eq!(
-            parse_body(BodyFormat::JsonIp, &format!(r#"{{"ip":"{bad}"}}"#)),
-            None,
-            "{bad}"
-        );
+        assert_eq!(parse_body(bad), None, "{bad}");
+        assert_eq!(parse_body(&format!("ip={bad}\n")), None, "{bad}");
+        assert_eq!(parse_body(&format!(r#"{{"ip":"{bad}"}}"#)), None, "{bad}");
     }
 }
 

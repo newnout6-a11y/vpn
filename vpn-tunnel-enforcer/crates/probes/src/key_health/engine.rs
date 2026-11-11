@@ -20,7 +20,7 @@ use vpnte_engine::xray_process::{SlotLaunch, XrayError, XraySupervisor};
 use vpnte_profiles::model::Profile;
 
 use super::ProbeCtx;
-use super::config::{ProbeRoute, probe_config};
+use super::config::{Uplink, probe_config};
 use crate::ping::is_loopback_host;
 
 /// Budget for the probe's local SOCKS port (keyHealthChecker.ts:595; Xray keeps its launcher's
@@ -82,10 +82,10 @@ pub(crate) async fn start_singbox(
     cancel: &CancellationToken,
 ) -> Result<Start, AppError> {
     let route = match &ctx.net.tun_direct {
-        Some(direct) => ProbeRoute::Detour(direct.clone()),
+        Some(direct) => Uplink::Detour(direct.clone()),
         // A server on this PC is not reached through a NIC.
-        None if is_loopback_host(&p.server.to_string()) => ProbeRoute::Bind(None),
-        None => ProbeRoute::Bind(physical_alias().await),
+        None if is_loopback_host(&p.server.to_string()) => Uplink::Bind(None),
+        None => Uplink::Bind(physical_alias().await),
     };
     let mut lost: Vec<u16> = Vec::new();
     loop {
@@ -137,7 +137,7 @@ async fn ready_singbox(
             match exit_start(&sb, info.as_ref(), listen.port) {
                 Start::Failed(text) => Ok(Start::Failed(format!(
                     "{text}\nlocal socks not ready: {}",
-                    socks_text(err)
+                    readiness_text(err)
                 ))),
                 lost => Ok(lost),
             }
@@ -169,7 +169,7 @@ fn exit_start(sb: &SingBoxProcess, info: Option<&ExitInfo>, port: u16) -> Start 
 
 /// Classifier wording of a readiness failure: a timeout must read as one, and nothing about our
 /// own listener (its authentication) may read as the key's.
-fn socks_text(err: SocksError) -> &'static str {
+fn readiness_text(err: SocksError) -> &'static str {
     match err {
         SocksError::Timeout => "timeout",
         _ => "no answer",
@@ -237,7 +237,7 @@ pub(crate) async fn start_xray(
             Err(XrayError::ExitedEarly { tail, .. }) => Ok(Start::Failed(tail)),
             Err(XrayError::NotReady { cause, .. }) => Ok(Start::Failed(format!(
                 "local socks not ready: {}",
-                socks_text(cause)
+                readiness_text(cause)
             ))),
             Err(err) => Err(err.into()),
         };

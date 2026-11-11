@@ -1,13 +1,11 @@
 //! Direct TLS inspection: what certificate the server presents, whether Windows trusts it and
 //! whether it names the identity we dial. Never fails the probe on trust (we inspect, not trust).
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::CryptoProvider;
+use rustls::ProtocolVersion;
+use rustls::client::danger::ServerCertVerifier;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, ProtocolVersion, SignatureScheme};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -84,7 +82,8 @@ pub async fn inspect_tls(
     let name = server_name(identity, addr.ip());
     let handshake = async {
         let tcp = net::connect(addr, path, timeouts::TLS).await?;
-        let config = client_config(&[b"h2".as_slice(), b"http/1.1".as_slice()])?;
+        let config = crate::tls_client::inspecting(&[b"h2".as_slice(), b"http/1.1".as_slice()])
+            .map_err(|e| e.to_string())?;
         tokio_rustls::TlsConnector::from(config)
             .connect(name.clone(), tcp)
             .await
@@ -156,67 +155,6 @@ pub async fn inspect_tls(
     }
 }
 
-fn provider() -> Arc<CryptoProvider> {
-    static PROVIDER: std::sync::OnceLock<Arc<CryptoProvider>> = std::sync::OnceLock::new();
-    PROVIDER
-        .get_or_init(|| Arc::new(rustls::crypto::ring::default_provider()))
-        .clone()
-}
-
-/// Accepts any certificate (we inspect, not trust) but still checks the handshake signatures.
-#[derive(Debug)]
-struct Inspect(Arc<CryptoProvider>);
-
-impl ServerCertVerifier for Inspect {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        let algs = &self.0.signature_verification_algorithms;
-        rustls::crypto::verify_tls12_signature(message, cert, dss, algs)
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        let algs = &self.0.signature_verification_algorithms;
-        rustls::crypto::verify_tls13_signature(message, cert, dss, algs)
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
-}
-
-/// Client config for probes: TLS 1.2 / 1.3, any certificate accepted, the given ALPN list.
-pub(crate) fn client_config(alpn: &[&[u8]]) -> Result<Arc<ClientConfig>, String> {
-    let provider = provider();
-    let mut config = ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .map_err(|e| e.to_string())?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(Inspect(provider)))
-        .with_no_client_auth();
-    config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
-    Ok(Arc::new(config))
-}
-
 /// SNI / verification name: a DNS name, or the IP (no SNI is sent for IPs).
 pub(crate) fn server_name(identity: &str, fallback: IpAddr) -> ServerName<'static> {
     let id = identity.trim().trim_end_matches('.');
@@ -263,7 +201,8 @@ async fn windows_trust(
     name: ServerName<'static>,
 ) -> Option<Result<(), rustls::Error>> {
     let job = tokio::task::spawn_blocking(move || {
-        let verifier = rustls_platform_verifier::Verifier::new(provider()).ok()?;
+        let verifier =
+            rustls_platform_verifier::Verifier::new(crate::tls_client::provider()).ok()?;
         let (leaf, intermediates) = chain.split_first()?;
         let now = UnixTime::now();
         Some(
@@ -311,179 +250,4 @@ fn fingerprint(der: &[u8]) -> String {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
-    use tokio::net::TcpListener;
-
-    use super::*;
-    use crate::live_stages::{CANCELLED, ProbeRoute};
-
-    const CERT: &[u8] = include_bytes!("testdata/self-signed.der");
-    const KEY: &[u8] = include_bytes!("testdata/self-signed.key.der");
-    const FINGERPRINT: &str = "8E:83:17:E6:3A:B1:3D:9B:A8:93:6E:35:B3:2B:42:7F:EB:26:9C:0A:BB:90:A6:C1:1F:9F:94:2A:69:84:8A:1E";
-
-    /// rustls server config with the fake self-signed certificate.
-    pub(crate) fn server_config(alpn: &[&[u8]]) -> Arc<rustls::ServerConfig> {
-        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY.to_vec()));
-        let mut config = rustls::ServerConfig::builder_with_provider(provider())
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(vec![CertificateDer::from(CERT.to_vec())], key)
-            .unwrap();
-        config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
-        Arc::new(config)
-    }
-
-    /// A loopback TLS server answering handshakes until the test ends.
-    async fn tls_server() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let acceptor = tokio_rustls::TlsAcceptor::from(server_config(&[b"h2".as_slice()]));
-        tokio::spawn(async move {
-            while let Ok((sock, _)) = listener.accept().await {
-                let acceptor = acceptor.clone();
-                tokio::spawn(async move {
-                    if let Ok(stream) = acceptor.accept(sock).await {
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                        drop(stream);
-                    }
-                });
-            }
-        });
-        addr
-    }
-
-    /// AT-05-001 (audit defect 4): identity checked against the IP; self-signed is untrusted
-    /// but still `ok`; ALPN, fingerprint and validity are reported.
-    #[tokio::test]
-    async fn inspects_a_self_signed_certificate_by_ip() {
-        let addr = tls_server().await;
-        let cancel = CancellationToken::new();
-        let info = inspect_tls(addr, "127.0.0.1", &ProbePath::Os, &cancel).await;
-        assert_eq!(info.timed.status, TimedStatus::Ok, "{info:?}");
-        assert_eq!(info.hostname_verified, Some(false));
-        assert!(
-            info.timed
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("does not match")
-        );
-        assert_eq!(info.authorized, Some(false));
-        assert_eq!(
-            info.authorization_error.as_deref(),
-            Some("DEPTH_ZERO_SELF_SIGNED_CERT")
-        );
-        assert_eq!(info.alpn.as_deref(), Some("h2"));
-        assert_eq!(info.protocol.as_deref(), Some("TLSv1.3"));
-        assert!(info.cipher.as_deref().unwrap().starts_with("TLS_"));
-        assert_eq!(info.fingerprint.as_deref(), Some(FINGERPRINT));
-        assert_eq!(info.subject.as_deref(), Some("unrelated.example"));
-        assert_eq!(info.issuer.as_deref(), Some("Test Org"));
-        assert_eq!(info.valid_to.as_deref(), Some("Oct 18 04:12:44 2126 GMT"));
-        assert_eq!(info.sans.len(), 4);
-        assert!(info.days_remaining.unwrap() > 36_000);
-        assert_eq!(info.timed.route, Some(ProbeRoute::Os));
-    }
-
-    /// The SNI identity named by the certificate verifies.
-    #[tokio::test]
-    async fn matching_identity_verifies() {
-        let addr = tls_server().await;
-        let cancel = CancellationToken::new();
-        let info = inspect_tls(addr, "unrelated.example", &ProbePath::Os, &cancel).await;
-        assert_eq!(info.timed.status, TimedStatus::Ok, "{info:?}");
-        assert_eq!(info.hostname_verified, Some(true));
-        assert_eq!(info.timed.error, None);
-    }
-
-    /// AT-00-003: cancel -> skipped, nothing sent; early close -> error (§7.7).
-    #[tokio::test]
-    async fn cancel_and_close() {
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
-        let info = inspect_tls(addr, "x.example", &ProbePath::Os, &cancel).await;
-        assert_eq!(info.timed.status, TimedStatus::Skipped);
-        assert_eq!(info.timed.error.as_deref(), Some(CANCELLED));
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            while let Ok((sock, _)) = listener.accept().await {
-                drop(sock);
-            }
-        });
-        let info = inspect_tls(addr, "x.example", &ProbePath::Os, &CancellationToken::new()).await;
-        assert_eq!(info.timed.status, TimedStatus::Error);
-        assert!(info.timed.error.is_some());
-        assert_eq!(info.fingerprint, None);
-    }
-
-    /// AT-00-003: a server that never answers the ClientHello -> `TLS handshake timeout` at 3.5 s.
-    #[tokio::test]
-    async fn silent_server_times_out() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let mut held = Vec::new();
-            while let Ok((sock, _)) = listener.accept().await {
-                held.push(sock);
-            }
-        });
-        let info = inspect_tls(addr, "x.example", &ProbePath::Os, &CancellationToken::new()).await;
-        assert_eq!(info.timed.status, TimedStatus::Error);
-        assert_eq!(info.timed.error.as_deref(), Some("TLS handshake timeout"));
-        assert!(
-            (3500..4000).contains(&info.timed.duration_ms),
-            "{}",
-            info.timed.duration_ms
-        );
-    }
-
-    #[test]
-    fn helpers() {
-        assert_eq!(
-            cipher_text("TLS13_AES_128_GCM_SHA256"),
-            "TLS_AES_128_GCM_SHA256"
-        );
-        assert_eq!(
-            cipher_text("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"),
-            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
-        );
-        let ip = IpAddr::from([192, 0, 2, 1]);
-        assert!(matches!(
-            server_name("192.0.2.1", ip),
-            ServerName::IpAddress(_)
-        ));
-        assert!(matches!(
-            server_name("vpn.example.com.", ip),
-            ServerName::DnsName(_)
-        ));
-        assert!(matches!(
-            server_name("bad name", ip),
-            ServerName::IpAddress(_)
-        ));
-        // 1.5 days rounds up, 1.4 down, -0.5 to 0 (JS Math.round).
-        assert_eq!(days_remaining(129_600, 0), 2);
-        assert_eq!(days_remaining(120_960, 0), 1);
-        assert_eq!(days_remaining(0, 43_200_000), 0);
-    }
-
-    #[test]
-    fn authorization_codes() {
-        use rustls::CertificateError as C;
-        let bad = |e| Err(rustls::Error::InvalidCertificate(e));
-        assert_eq!(authorization(Ok(()), false), (true, None));
-        assert_eq!(authorization(bad(C::NotValidForName), false), (true, None));
-        assert_eq!(
-            authorization(bad(C::UnknownIssuer), true).1.as_deref(),
-            Some("DEPTH_ZERO_SELF_SIGNED_CERT")
-        );
-        assert_eq!(
-            authorization(bad(C::Expired), false),
-            (false, Some("CERT_HAS_EXPIRED".into()))
-        );
-    }
-}
+pub(crate) mod tests;

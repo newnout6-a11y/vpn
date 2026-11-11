@@ -1,11 +1,7 @@
 //! One `GET` over a SOCKS-tunnelled stream: TLS (SNI, ALPN http/1.1, verified certificates),
 //! the request bytes and a small HTTP/1.1 response reader (Content-Length, chunked or EOF body,
 //! capped). Hand-written on purpose: one GET does not justify an HTTP client stack here.
-use std::sync::Arc;
-
-use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
-use rustls_platform_verifier::BuilderVerifierExt;
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
 };
@@ -44,17 +40,15 @@ impl Wrap {
     /// TLS with the Windows trust store (platform verifier), ALPN `http/1.1`; rustls never
     /// negotiates below TLS 1.2.
     pub(crate) fn tls() -> Result<Self, rustls::Error> {
-        vpnte_base::http::init_tls();
-        let config = ClientConfig::builder()
-            .with_platform_verifier()?
-            .with_no_client_auth();
-        Ok(Self::with_config(config))
+        let config = crate::tls_client::verified(&[b"http/1.1".as_slice()])?;
+        Ok(Wrap::Tls(TlsConnector::from(config)))
     }
 
     /// TLS with a given client config (ALPN set here).
-    pub(crate) fn with_config(mut config: ClientConfig) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_config(mut config: rustls::ClientConfig) -> Self {
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
-        Wrap::Tls(TlsConnector::from(Arc::new(config)))
+        Wrap::Tls(TlsConnector::from(std::sync::Arc::new(config)))
     }
 
     /// `GET path` on `host` over `stream`; the body when the status is 200 and the body fits.

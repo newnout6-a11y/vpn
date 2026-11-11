@@ -6,10 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use reqwest::header::{ACCEPT, CACHE_CONTROL, RANGE, SERVER};
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::CryptoProvider;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
+use rustls::ClientConfig;
+use rustls::pki_types::ServerName;
 use tokio::net::{TcpSocket, TcpStream};
 use url::{Host, Url};
 use vpnte_core::net::{self, Route};
@@ -298,56 +296,7 @@ pub(super) async fn tls_stage(
 
 /// rustls client config of the TLS stage (ring provider, browser-like ALPN, any certificate).
 fn tls_config() -> Option<Arc<ClientConfig>> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut config = ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .ok()?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(AnyCertificate(provider)))
-        .with_no_client_auth();
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    Some(Arc::new(config))
-}
-
-/// Accepts any certificate but still checks the handshake signatures.
-#[derive(Debug)]
-struct AnyCertificate(Arc<CryptoProvider>);
-
-impl ServerCertVerifier for AnyCertificate {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        let algs = &self.0.signature_verification_algorithms;
-        rustls::crypto::verify_tls12_signature(message, cert, dss, algs)
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        let algs = &self.0.signature_verification_algorithms;
-        rustls::crypto::verify_tls13_signature(message, cert, dss, algs)
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
+    crate::tls_client::inspecting(&[b"h2".as_slice(), b"http/1.1".as_slice()]).ok()
 }
 
 /// The two HTTP clients of one path: the status probe (≤ 3 redirects, as before) and the page

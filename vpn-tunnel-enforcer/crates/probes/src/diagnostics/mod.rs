@@ -122,6 +122,23 @@ impl CheckItem {
     }
 }
 
+/// A leak-check item as a row for [`ReportInputs::routing`]: `Info` stays informational,
+/// `NotChecked` stays not checked, the localized details become notes.
+#[cfg(feature = "probes-ip")]
+impl From<&crate::leak::CheckItem> for CheckItem {
+    fn from(item: &crate::leak::CheckItem) -> Self {
+        Self {
+            id: item.id.to_owned(),
+            category: Category::Routing,
+            label: item.label.clone(),
+            verdict: item.status.verdict(),
+            value: item.value.clone(),
+            details: Vec::new(),
+            notes: item.details.clone(),
+        }
+    }
+}
+
 /// The health-check report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -1,5 +1,5 @@
 //! Verdict reasons from engine output and errors, and the Cloudflare trace parser
-//! (keyHealthChecker.ts:76-87, 383-420; patterns verbatim).
+//! (keyHealthChecker.ts:76-87, 383-420; patterns verbatim except the two fixes noted below).
 use std::net::IpAddr;
 use std::sync::LazyLock;
 
@@ -20,7 +20,11 @@ static HY2_CONFIG: LazyLock<Regex> = LazyLock::new(|| {
     )
 });
 static HY2_AUTH: LazyLock<Regex> = LazyLock::new(|| {
-    re(r"auth|authentication|unauthori[sz]ed|password|bad key|permission denied|obfs|salamander")
+    // `\bauth\b`, not the old bare `auth`: Go's "x509: certificate signed by unknown authority"
+    // (a self-signed server without `insecure`) is a certificate failure, not a wrong password.
+    re(
+        r"\bauth\b|authentication|unauthori[sz]ed|password|bad key|permission denied|obfs|salamander",
+    )
 });
 static HY2_UDP: LazyLock<Regex> = LazyLock::new(|| {
     re(concat!(
@@ -73,12 +77,14 @@ pub fn classify_failure(hysteria2: bool, log: &str, err: &str) -> HealthReason {
             HealthReason::Hy2HandshakeFailed
         };
     }
+    // Auth before the broad `tls` pattern (live-probe B-37): in the old order a "tls" substring
+    // anywhere in the debug log turned a rejected key into `tls-failed`.
     if CONFIG.is_match(&text) {
         HealthReason::ConfigFailed
-    } else if TLS.is_match(&text) {
-        HealthReason::TlsFailed
     } else if AUTH.is_match(&text) {
         HealthReason::AuthFailed
+    } else if TLS.is_match(&text) {
+        HealthReason::TlsFailed
     } else if TIMEOUT.is_match(&text) {
         HealthReason::Timeout
     } else {

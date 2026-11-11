@@ -1,7 +1,6 @@
 //! Key health tests (servers §7 vectors 30-35; keyHealthChecker.test.ts, AT-00-001, AT-00-003).
 //! Engine tests run the bundled engines on loopback only and skip quietly without them.
 use std::net::IpAddr;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::json;
@@ -15,16 +14,13 @@ use vpnte_profiles::uri::parse_uri;
 
 use super::destinations::Destination;
 use super::*;
+use crate::test_support::resources;
 
 const CA: &[u8] = include_bytes!("../egress/testdata/ca.der");
 const LEAF: &[u8] = include_bytes!("../egress/testdata/leaf.der");
 const LEAF_KEY: &[u8] = include_bytes!("../egress/testdata/leaf.key.der");
 /// Fake Reality key (43 base64url characters), never a real one.
 const FAKE_PBK: &str = "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVIkT4E7RoLJS0";
-
-fn resources() -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources"))
-}
 
 /// Probe context for loopback tests (tunnel down), `None` when the engine is not bundled.
 fn ctx(pref: EnginePref) -> Option<ProbeCtx> {
@@ -97,6 +93,57 @@ fn classify_vectors() {
     );
 }
 
+/// AT-00-001: live-probe §7 cross-slice vectors (liveServerProbe.extended.test.ts:147-162), the
+/// contract `live` relies on for its handshake verdict.
+#[test]
+fn classify_live_probe_vectors() {
+    use HealthReason::*;
+    let cases = [
+        ("user authentication failed: bad key", AuthFailed),
+        ("wrong uuid in request header", AuthFailed),
+        (
+            "reality verification failed: invalid server name",
+            TlsFailed,
+        ),
+        ("x509: certificate signed by unknown authority", TlsFailed),
+        ("dial tcp 198.51.100.1:443: i/o timeout", Timeout),
+        ("connection refused", Timeout),
+    ];
+    for (err, want) in cases {
+        assert_eq!(classify_failure(false, "", err), want, "{err}");
+    }
+}
+
+/// AT-00-001 (B-37 and the hy2 `auth` word): a "tls" substring elsewhere in the debug log no
+/// longer hides a rejected key, and an untrusted hy2 certificate is not a wrong password.
+#[test]
+fn classify_order_fixes() {
+    use HealthReason::*;
+    let log = "DEBUG outbound/naive[proxy-out]: tls handshake done\n\
+               ERROR connection: unexpected status: 407 Proxy Authentication Required";
+    assert_eq!(classify_failure(false, log, ""), AuthFailed);
+    assert_eq!(
+        classify_failure(false, "remote error: tls: handshake failure", ""),
+        TlsFailed
+    );
+    let untrusted = "CRYPTO_ERROR 0x12a (local): tls: failed to verify certificate: \
+                     x509: certificate signed by unknown authority";
+    assert_eq!(hy2_classify(untrusted, ""), Hy2TlsFailed);
+    assert_eq!(
+        hy2_classify("auth failed, status code: 404", ""),
+        Hy2AuthFailed
+    );
+    // The real rejection text of sing-quic (hysteria2/client.go, `authenticateAndWrap`).
+    assert_eq!(
+        hy2_classify("", "authentication failed, status code: 404"),
+        Hy2AuthFailed
+    );
+    assert_eq!(
+        classify_failure(false, "", "x509: certificate signed by unknown authority"),
+        TlsFailed
+    );
+}
+
 /// Vector 31 (keyHealthChecker.test.ts:174-210) plus the public-IP and ISO filters.
 #[test]
 fn trace_vectors() {
@@ -120,6 +167,14 @@ fn trace_vectors() {
         (None, Iso2::new("NL"))
     );
     assert_eq!(parse_trace("ip=8.8.8.8\nloc=XX\n").1, None);
+    // live-probe §7 (liveServerProbe.extended.test.ts:133-145).
+    assert_eq!(
+        parse_trace(
+            "fl=1f1\nh=www.cloudflare.com\nip=198.41.214.162\nuag=x\nloc=DE\nsliver=none\n"
+        ),
+        (Some("198.41.214.162".parse().unwrap()), Iso2::new("DE"))
+    );
+    assert_eq!(parse_trace("error 502 Bad Gateway"), (None, None));
 }
 
 /// Stored reason strings are the old ones (and the server list's).
@@ -170,7 +225,7 @@ fn probe_config_shapes() {
         &reality(),
         &listen(),
         ClientDevice::Pc,
-        &ProbeRoute::Detour(direct),
+        &Uplink::Detour(direct),
     )
     .unwrap();
     assert_eq!(tun["route"]["final"], "proxy-out");
@@ -198,7 +253,7 @@ fn probe_config_shapes() {
         &reality(),
         &listen(),
         ClientDevice::Pc,
-        &ProbeRoute::Bind(Some("Wi-Fi".into())),
+        &Uplink::Bind(Some("Wi-Fi".into())),
     )
     .unwrap();
     assert_eq!(off["outbounds"][0]["bind_interface"], "Wi-Fi");
@@ -215,8 +270,7 @@ fn probe_config_shapes() {
 fn probe_config_dns_and_chains() {
     let named =
         parse_uri("trojan://fake-pass@trojan.example.com:443?sni=trojan.example.com#T").unwrap();
-    let config =
-        probe_config(&named, &listen(), ClientDevice::Pc, &ProbeRoute::Bind(None)).unwrap();
+    let config = probe_config(&named, &listen(), ClientDevice::Pc, &Uplink::Bind(None)).unwrap();
     assert_eq!(
         config["dns"],
         json!({ "servers": [{ "type": "local", "tag": "dns-bootstrap" }], "strategy": "ipv4_only" })
@@ -251,9 +305,9 @@ async fn probe_configs_pass_singbox_check() {
     ];
     for p in &profiles {
         for route in [
-            ProbeRoute::Detour(direct.clone()),
-            ProbeRoute::Bind(Some("Wi-Fi".into())),
-            ProbeRoute::Bind(None),
+            Uplink::Detour(direct.clone()),
+            Uplink::Bind(Some("Wi-Fi".into())),
+            Uplink::Bind(None),
         ] {
             let config = probe_config(p, &listen(), ClientDevice::Pc, &route).unwrap();
             let bytes = serde_json::to_vec(&config).unwrap();
@@ -557,22 +611,6 @@ async fn live_key_online_and_scrambled_offline() {
     assert!(!fake.online, "{fake:?}");
 }
 
-fn flatten(prefix: &str, v: &serde_json::Value, out: &mut Vec<String>) {
-    match v {
-        serde_json::Value::Object(map) => {
-            for (k, v) in map {
-                let key = if prefix.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{prefix}.{k}")
-                };
-                flatten(&key, v, out);
-            }
-        }
-        _ => out.push(prefix.to_owned()),
-    }
-}
-
 /// The package's locale fragments are valid JSON with identical keys, and every key this
 /// package returns exists in both.
 #[test]
@@ -584,10 +622,11 @@ fn locale_fragments_cover_every_key() {
         include_str!("../../locales/probes-servers.ru.json"),
         include_str!("../../locales/probes-servers.en.json"),
     ] {
-        let mut flat = Vec::new();
-        flatten("", &serde_json::from_str(text).unwrap(), &mut flat);
-        flat.sort();
-        keys.push(flat);
+        keys.push(
+            crate::test_support::flatten(text)
+                .into_keys()
+                .collect::<Vec<_>>(),
+        );
     }
     assert_eq!(keys[0], keys[1], "ru and en key sets differ");
     let mut used: Vec<String> = [
