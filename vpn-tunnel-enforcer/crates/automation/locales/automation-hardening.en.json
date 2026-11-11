@@ -1,0 +1,40 @@
+{
+  "automation": {
+    "hardening": {
+      "needsAdmin": "Administrator rights are needed: the app runs without elevation.",
+      "browser": {
+        "applied": "Browser protection against WebRTC and DNS leaks is on. Close the browsers completely, background processes included, and open them again.",
+        "alreadyApplied": "The protection is already in place. If a browser was open, restart it completely.",
+        "noneFound": "No supported browser profiles were found.",
+        "failed": "Could not apply the browser protection policy.",
+        "notConfirmed": "The WebRTC policy did not read back as written. Check the administrator rights.",
+        "foreignValue": "A policy of this browser is already set with an unexpected value type; the browser was left as it is.",
+        "managedNote": "A browser with these policies shows \"Managed by your organization\"; that is expected, and rolling back removes the policies.",
+        "cleanupPartial": "Some browser policies left by earlier settings could not be restored; the next apply or rollback tries again.",
+        "rolledBack": "Browser protection was rolled back. Restart the browsers completely.",
+        "rollbackPartial": "The rollback did not finish. The original values are kept; try again.",
+        "notApplied": "Browser protection was not applied: nothing to roll back.",
+        "state": {
+          "notInstalled": "Not installed",
+          "notVerified": "Not checked",
+          "off": "Not protected",
+          "protected": "Protected",
+          "drifted": "Changed by another program",
+          "unknown": "Could not check",
+          "failed": "Error"
+        }
+      },
+      "location": {
+        "unreadable": "Could not check the {{hive}} registry state. The location settings were not changed.",
+        "failed": "Could not apply the location settings; the changes were undone.",
+        "foreignValue": "A location value is already set with an unexpected type; nothing was changed.",
+        "rollbackFailed": "Could not fully restore the registry settings. The backup is kept."
+      },
+      "legacy": {
+        "browserLeftover": "The previous version may have left WebRTC policies in the registry that cannot be restored automatically: check chrome://policy (edge://policy, browser://policy).",
+        "browserFiles": "The previous version changed WebRTC settings in browser profiles (Preferences, user.js); they are not restored automatically. If calls do not work in Firefox, reset the media.peerconnection.* preferences on about:config.",
+        "locationLeftover": "The previous version may have left Windows location turned off in a way that cannot be restored automatically: check Settings > Privacy > Location."
+      }
+    }
+  }
+}

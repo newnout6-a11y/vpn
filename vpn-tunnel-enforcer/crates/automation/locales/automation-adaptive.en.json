@@ -1,0 +1,80 @@
+{
+  "automation": {
+    "adaptive": {
+      "status": {
+        "idle": "Ready to connect",
+        "connecting": "Connecting...",
+        "verifying": "Checking the connection...",
+        "adapting": "Adjusting the connection to this network...",
+        "serverFailover": "Looking for a more reachable server...",
+        "connectedBaseline": "Connected. Standard mode",
+        "connectedCompatibility": "Connected. Compatibility mode for this network",
+        "externalManaged": "Connected. Transport is managed by an external VPN client",
+        "failed": "Could not find a working mode for this network"
+      },
+      "reason": {
+        "external": "Encryption is handled by the external local proxy",
+        "reality": "Reality does not use TLS fragmentation",
+        "xray": "TLS fragmentation is not available with the Xray engine",
+        "realityKeyMismatch": "The server rejects the key (REALITY verification failed). The key is probably outdated: update the subscription or re-import the key, or choose another server.",
+        "tlsHandshakeFailed": "The server fails the TLS check: it may be down or its settings may have changed. Try another server.",
+        "upstreamUnreachable": "The server does not respond. Try another server or check the subscription.",
+        "probeFailed": "The internet check through the tunnel failed",
+        "siblingStartFailed": "Could not connect to a neighbouring server",
+        "siblingFailed": "The neighbouring server failed the internet check through the tunnel. Choose another VPN server and connect again.",
+        "compatFailed": "Could not apply the compatibility mode"
+      }
+    },
+    "autopilot": {
+      "busyTitle": "AutoPilot is already running",
+      "busy": "The previous AutoPilot run has not finished yet. This run was skipped.",
+      "activeTitle": "Protection is already on",
+      "active": "AutoPilot changed nothing: a connection is already running.",
+      "externalTitle": "AutoPilot kept the external VPN",
+      "external": "Internet traffic already goes through an existing system tunnel. The VPNTE tunnel is not needed and will not be started.",
+      "tunnelsUnknownTitle": "AutoPilot could not check the network adapters",
+      "tunnelsUnknown": "Could not tell whether another VPN is already running. Protection was not turned on, to avoid a second tunnel.",
+      "noProxyTitle": "AutoPilot found no working proxy",
+      "noProxy": "Turn on Proxy mode in your VPN client or enter the address manually. Until then it is safer not to redirect anything.",
+      "successTitle": "AutoPilot turned on Hard TUN",
+      "success": "The safe setup was applied automatically: one TUN, one proxy, no double tunnel.",
+      "failedTitle": "AutoPilot could not turn on Hard TUN",
+      "failed": "Starting TUN failed.",
+      "step": {
+        "busy": {
+          "label": "Concurrent run check",
+          "before": "AutoPilot is already active.",
+          "after": "The concurrent run was blocked to avoid races."
+        },
+        "active": {
+          "label": "Check the current connection",
+          "before": "Protection is already running.",
+          "after": "Nothing changed: AutoPilot does not interfere with a running connection."
+        },
+        "external": {
+          "label": "Keep a single system VPN",
+          "before": "The system already has an external TUN/VPN.",
+          "after": "No second TUN is created. The app switches to observation and leaves DNS alone."
+        },
+        "tunnelsUnknown": {
+          "label": "Check system tunnels",
+          "before": "The list of network adapters could not be read.",
+          "after": "Nothing turned on: a second tunnel would break the internet."
+        },
+        "proxy": {
+          "label": "Find a working proxy",
+          "before": "Checking the proxy from the settings, a detected VPN client and open ports.",
+          "after": "{{endpoint}} ({{kind}}) will be used.",
+          "noneBefore": "There are listeners or settings, but no proxy passed the check.",
+          "noneAfter": "Nothing changed: starting TUN without a proxy would break the internet."
+        },
+        "start": {
+          "label": "Turn on a single system TUN",
+          "before": "No external TUN, the proxy works.",
+          "after": "The tunnel is on; internet traffic goes through the selected proxy.",
+          "failed": "The tunnel was not turned on."
+        }
+      }
+    }
+  }
+}

@@ -8,26 +8,26 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
+fastrand.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
+jiff.workspace = true
+parking_lot.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
 vpnte-base.workspace = true
 vpnte-core.workspace = true
 vpnte-winnet.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-tokio.workspace = true
-tokio-util.workspace = true
-parking_lot.workspace = true
-jiff.workspace = true
-sha2.workspace = true
-hmac.workspace = true
-base64.workspace = true
-fastrand.workspace = true
-uuid.workspace = true
-async-trait.workspace = true
 windows.workspace = true
-futures-util.workspace = true
-regex.workspace = true
+zeroize.workspace = true
 
 [features]
 # Build scaffolding: one flag per work package while they are written in parallel.
