@@ -1,14 +1,13 @@
 //! Spec external-proxy §7.3 (engine config, pinning) and §7.7 (one listener per slot).
 use std::net::IpAddr;
 
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use vpnte_base::types::Creds;
 use vpnte_profiles::emit_singbox::{EmitPolicy, SingBoxFragment, emit_singbox};
-use vpnte_profiles::model::{
-    DialPrefs, Host, Kind, Profile, ShadowTlsLayer, Source, WgPeer, WireGuard,
-};
+use vpnte_profiles::model::{Host, Kind, ShadowTlsLayer};
 
 use super::*;
+use crate::test_support::{self, profile};
 
 /// The old fixture outbound (fake UUID), as emitted with the slot tag.
 pub(super) fn sample() -> SingBoxFragment {
@@ -30,47 +29,9 @@ pub(super) fn hostname(extra: Value) -> SingBoxFragment {
     SingBoxFragment::Outbound(o)
 }
 
-pub(super) fn profile(server: Host, port: u16, kind: Kind) -> Profile {
-    Profile {
-        name: "test".into(),
-        description: None,
-        server,
-        port,
-        kind,
-        tls: None,
-        transport: None,
-        mux: None,
-        dial: DialPrefs::default(),
-        native_xray: None,
-        singbox_extra: Map::new(),
-        source: Source::Json,
-        notes: Vec::new(),
-    }
-}
-
-/// WireGuard with fake all-zero keys.
+/// WireGuard with fake all-zero keys, as emitted with the slot tag.
 pub(super) fn wireguard(peer: Host) -> SingBoxFragment {
-    let zero_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string();
-    let wg = WireGuard {
-        private_key: zero_key.clone(),
-        local_address: vec!["10.66.0.2/32".parse().unwrap()],
-        mtu: None,
-        dns: Vec::new(),
-        peers: vec![WgPeer {
-            host: peer,
-            port: 51820,
-            public_key: zero_key,
-            pre_shared_key: None,
-            allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
-            keepalive_s: None,
-            reserved: None,
-        }],
-    };
-    let p = profile(
-        Host::Ip("203.0.113.20".parse().unwrap()),
-        51820,
-        Kind::Wireguard(wg),
-    );
+    let p = test_support::wireguard(peer);
     emit_singbox(&p, PROXY_OUT_TAG, &EmitPolicy::default()).unwrap()
 }
 

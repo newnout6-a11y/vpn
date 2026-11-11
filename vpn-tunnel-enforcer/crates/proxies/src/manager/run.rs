@@ -13,7 +13,7 @@ use vpnte_base::types::{UnixMs, now_ms};
 use vpnte_core::redact;
 
 use super::Inner;
-use super::launch::{Engine, Exit, STOP_TIMEOUT};
+use super::launch::{Engine, Exit, STOP_TIMEOUT, code_text};
 use super::registry::{Live, Registry};
 use crate::health::{Duplicate, Next, ms, resolve_duplicate};
 use crate::model::Degradation;
@@ -85,7 +85,7 @@ impl Inner {
 
     /// Applies a probe result to `slot` if it still runs `generation` (3.17); returns what the
     /// loop does next, or `None` when the result is stale.
-    fn apply_probe(
+    pub(super) fn apply_probe(
         self: &Arc<Self>,
         slot: Slot,
         generation: u64,
@@ -96,9 +96,7 @@ impl Inner {
         let reg = &mut *guard;
         let leased = reg.leases.lease(slot, now).is_some();
         let state = reg.slots.get_mut(&slot)?;
-        if state.generation != generation || state.live.is_none() {
-            return None;
-        }
+        state.live_of(generation)?;
         let profile = state.profile.as_ref().map(|p| p.id.clone());
         let outcome = match result {
             Ok(ok) => Ok((ok.egress_ip, state.route.succeeded(ok, now))),
@@ -154,7 +152,7 @@ impl Inner {
         if let Some(state) = reg
             .slots
             .get_mut(&slot)
-            .filter(|s| s.generation == generation)
+            .filter(|s| s.live_of(generation).is_some())
         {
             state.route.next_check_at = Some(now_ms() + ms(delay));
             self.publish(&reg);
@@ -171,14 +169,12 @@ impl Inner {
         let current = state
             .live
             .as_ref()
-            .is_some_and(|live| Arc::ptr_eq(&live.engine, engine));
+            .is_some_and(|live| Arc::ptr_eq(&live.engine, engine) && !live.cancel.is_cancelled());
         if !current {
             return;
         }
         state.take_live();
-        let code = exit
-            .code
-            .map_or_else(|| "unknown".into(), |c| c.to_string());
+        let code = code_text(exit.code);
         let message = format!("External proxy instance exited ({code})");
         state.route.process_failed(message, now);
         state.updated_at = Some(now);

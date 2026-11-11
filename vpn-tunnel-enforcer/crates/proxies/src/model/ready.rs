@@ -14,12 +14,33 @@ fn fresh(at: Option<UnixMs>, now: UnixMs) -> bool {
     at.is_some_and(|t| now - t < FRESH_WINDOW_MS)
 }
 
+/// A healthy route at `now`: its engine runs, it is `ready` + `healthy` and its egress IP was
+/// confirmed less than [`FRESH_WINDOW_MS`] ago. Readiness adds uniqueness on top; the manager's
+/// duplicate check (`health::Route::is_healthy`) uses this rule as it is.
+pub(crate) fn is_healthy_route(
+    running: bool,
+    state: Lifecycle,
+    health: Health,
+    egress_ip: Option<IpAddr>,
+    last_success_at: Option<UnixMs>,
+    now: UnixMs,
+) -> bool {
+    running
+        && state == Lifecycle::Ready
+        && health == Health::Healthy
+        && egress_ip.is_some()
+        && fresh(last_success_at, now)
+}
+
 fn healthy_route(i: &InstanceStatus, now: UnixMs) -> bool {
-    i.process_running
-        && i.state == Lifecycle::Ready
-        && i.health == Health::Healthy
-        && i.egress_ip.is_some()
-        && fresh(i.last_success_at, now)
+    is_healthy_route(
+        i.process_running,
+        i.state,
+        i.health,
+        i.egress_ip,
+        i.last_success_at,
+        now,
+    )
 }
 
 /// Sets `ready` and `running` of every instance at `now`. A route is ready when its engine runs,
@@ -89,7 +110,8 @@ impl Aggregate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Degradation, healthy_instance};
+    use crate::model::Degradation;
+    use crate::test_support::healthy_instance;
 
     const NOW: UnixMs = 1_762_800_000_000;
 

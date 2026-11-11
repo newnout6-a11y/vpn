@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use vpnte_base::types::{UnixMs, now_ms};
 
-use crate::slot::CONTROL_HOST;
+use crate::slot::{CONTROL_HOST, loopback_url};
 
 /// Token file name: 64 lowercase hex characters and a newline.
 pub const TOKEN_FILE: &str = "external-proxy-control-token";
@@ -20,9 +20,7 @@ pub struct ControlToken(String);
 impl ControlToken {
     /// Draws a fresh token from the OS RNG.
     pub fn generate() -> io::Result<Self> {
-        let mut bytes = [0u8; 32];
-        getrandom::fill(&mut bytes).map_err(rng_error)?;
-        Ok(Self(hex::encode(bytes)))
+        crate::token::generate().map(Self).map_err(rng_error)
     }
 
     /// A token with known text (tests only).
@@ -38,10 +36,7 @@ impl ControlToken {
 
     /// Constant-time comparison with a token a client sent; an empty one never matches.
     pub fn matches(&self, provided: &str) -> bool {
-        let (a, b) = (self.0.as_bytes(), provided.as_bytes());
-        !a.is_empty()
-            && a.len() == b.len()
-            && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+        crate::token::matches(&self.0, provided)
     }
 }
 
@@ -70,7 +65,7 @@ impl Endpoint {
         Self {
             host: CONTROL_HOST.into(),
             port,
-            url: format!("http://{CONTROL_HOST}:{port}"),
+            url: loopback_url(port),
             token_file: dir.join(TOKEN_FILE),
             updated_at: now_ms(),
         }
@@ -149,7 +144,7 @@ mod dacl {
     use windows::core::{HSTRING, Owned, PCWSTR, PWSTR};
 
     /// Creates a new file whose protected DACL grants full control to the current user only
-    /// (ТЗ vol. 01 §6.1 item 1). The elevated app and the user's non-elevated CLI share that SID.
+    /// (ТЗ vol. 01 §6.1 item 1). The app and the CLI run as the same user, so they share that SID.
     pub(super) fn create_private(path: &Path) -> io::Result<File> {
         let sid = current_user_sid().map_err(io::Error::other)?;
         let sddl = HSTRING::from(format!("D:P(A;;FA;;;{sid})"));

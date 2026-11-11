@@ -86,9 +86,9 @@ pub fn parse_port(raw: &str) -> Result<u16, ProxyError> {
         .ok_or_else(|| ProxyError::BadRequest("invalid port".into()))
 }
 
-/// URL of a slot listener as reported on the wire. The `mixed` inbound also speaks SOCKS5 on
-/// the same port, so `socks5://` works as well.
-pub fn proxy_url(port: u16) -> String {
+/// `http://127.0.0.1:<port>`: the wire URL of a slot listener (its `mixed` inbound also speaks
+/// SOCKS5 on the same port, so `socks5://` works as well) and of the control API.
+pub fn loopback_url(port: u16) -> String {
     format!("http://{CONTROL_HOST}:{port}")
 }
 
@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(serde_json::to_string(&slot).unwrap(), "7");
         assert_eq!(serde_json::from_str::<Slot>("7").unwrap(), slot);
         assert!(serde_json::from_str::<Slot>("0").is_err());
-        assert_eq!(proxy_url(17990), "http://127.0.0.1:17990");
+        assert_eq!(loopback_url(17990), "http://127.0.0.1:17990");
         assert_eq!(Slot::all().next(), Some(Slot::DEFAULT));
         assert_eq!(Slot::all().count(), usize::from(MAX_SLOT));
     }

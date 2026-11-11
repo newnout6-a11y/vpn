@@ -1,8 +1,9 @@
 //! The external proxy manager (spec 6.2–6.4): a registry of slots, each an unauthenticated
 //! `mixed` listener on 127.0.0.1 backed by its own sing-box child (plus an Xray child for
 //! profiles that run on Xray), health-probed through its data plane, rotated between servers and
-//! leased to automation clients. [`ProxyManager`] implements [`ProxyOps`] for the control API
-//! and the UI, and pushes a [`ProxySnapshot`] on every change.
+//! leased to automation clients. [`ProxyManager`] implements
+//! [`ProxyOps`](crate::model::ProxyOps) for the control API and the UI, and pushes a
+//! [`ProxySnapshot`] on every change.
 //!
 //! Locking: the registry sits behind one `parking_lot` mutex held only for validation and state
 //! changes, never across an await. Engine starts, readiness waits, DNS and probes run outside it,
@@ -30,11 +31,13 @@ use crate::probe::{ProbeConfig, Prober};
 use crate::slot::{self, CONTROL_HOST, Slot};
 
 mod api;
+mod batch;
 mod launch;
-mod ops;
 mod pick;
 mod registry;
 mod run;
+mod start;
+mod stop;
 #[cfg(test)]
 mod tests;
 
@@ -230,7 +233,7 @@ impl Inner {
     }
 
     fn control_url(&self) -> Option<String> {
-        self.control_port().map(slot::proxy_url)
+        self.control_port().map(slot::loopback_url)
     }
 
     /// `slot` plus every instance and the aggregate, derived now.

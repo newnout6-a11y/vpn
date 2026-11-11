@@ -13,7 +13,7 @@ use crate::model::{
     Action, ControlError, ProfileList, ProfileRow, ProxyError, ProxyOps, ReserveRequest,
     StartRequest, StopReason, prewarm_count,
 };
-use crate::slot::{CONTROL_HOST, CONTROL_PORT, Slot, parse_port};
+use crate::slot::{CONTROL_HOST, CONTROL_PORT, Slot, loopback_url, parse_port};
 
 /// Header carrying the control token (alternative: `Authorization: Bearer <token>`).
 pub const TOKEN_HEADER: &str = "x-vpnte-control-token";
@@ -150,7 +150,7 @@ pub(super) fn gate(shared: &Shared, head: &Head) -> Gate {
     if head.method == "OPTIONS" {
         return Gate::Respond(Response::text(204, ""));
     }
-    let base = format!("http://{CONTROL_HOST}:{CONTROL_PORT}");
+    let base = loopback_url(CONTROL_PORT);
     let Ok(url) = url::Url::parse(&base).and_then(|b| b.join(&head.target)) else {
         let err = ProxyError::BadRequest("invalid request target".into());
         return Gate::Respond(Response::json(400, &ControlError::from(&err)));

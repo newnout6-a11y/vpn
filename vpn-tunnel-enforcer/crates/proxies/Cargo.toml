@@ -8,26 +8,26 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-vpnte-base.workspace = true
-vpnte-core = { workspace = true, optional = true }
-vpnte-winnet = { workspace = true, optional = true }
-vpnte-profiles = { workspace = true, optional = true }
-vpnte-engine = { workspace = true, optional = true }
+async-trait.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+jiff.workspace = true
+parking_lot.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-parking_lot.workspace = true
-reqwest.workspace = true
-getrandom.workspace = true
-hex.workspace = true
-futures-util.workspace = true
-ipnet.workspace = true
-async-trait.workspace = true
-jiff.workspace = true
+tracing.workspace = true
 url.workspace = true
+vpnte-base.workspace = true
+vpnte-core = { workspace = true, optional = true }
+vpnte-engine = { workspace = true, optional = true }
+vpnte-profiles = { workspace = true, optional = true }
+# Unused by the code: kept only because the `proxies-manager` scaffolding feature names it.
+vpnte-winnet = { workspace = true, optional = true }
 windows.workspace = true
 
 [features]
@@ -39,7 +39,7 @@ proxies-control = ["proxies-model", "dep:vpnte-core"]
 
 [[bin]]
 name = "vpnte_proxy"
-path = "src/bin/vpnte_proxy.rs"
+path = "src/bin/vpnte_proxy/main.rs"
 required-features = ["proxies-control"]
 
 [lints]

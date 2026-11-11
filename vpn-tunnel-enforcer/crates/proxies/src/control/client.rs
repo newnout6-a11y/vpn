@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use super::http::find;
 use super::router::TOKEN_HEADER;
 use crate::slot::{CONTROL_HOST, CONTROL_PORT};
 
@@ -145,7 +146,7 @@ pub(super) fn read_reply(stream: &mut impl io::Read) -> io::Result<Reply> {
 
 /// End of the head and the announced `Content-Length`, once the head is complete.
 fn head_info(raw: &[u8]) -> Option<(usize, Option<usize>)> {
-    let end = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let end = find(raw, b"\r\n\r\n")?;
     let head = String::from_utf8_lossy(&raw[..end]);
     let length = head.lines().skip(1).find_map(|line| {
         let (name, value) = line.split_once(':')?;

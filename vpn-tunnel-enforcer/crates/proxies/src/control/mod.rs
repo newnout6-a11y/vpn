@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use vpnte_base::{AppError, ErrorKind, Msg};
 
 use crate::model::{ControlError, ProxyOps};
-use crate::slot::{CONTROL_HOST, CONTROL_PORT};
+use crate::slot::{CONTROL_HOST, CONTROL_PORT, loopback_url};
 
 pub mod client;
 mod files;
@@ -172,7 +172,7 @@ impl ControlServer {
 
     /// `http://127.0.0.1:<port>`.
     pub fn url(&self) -> String {
-        format!("http://{CONTROL_HOST}:{}", self.port)
+        loopback_url(self.port)
     }
 
     /// The token file written at start.

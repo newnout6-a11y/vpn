@@ -98,8 +98,8 @@ impl ProxyOps for ProxyManager {
     }
 
     async fn check_group_health(&self, group_id: String) -> Result<GroupHealth, ProxyError> {
-        let source = self.inner.source.clone();
-        source.check_group_health(&group_id).await.map_err(|err| {
+        let checked = self.inner.source.check_group_health(&group_id).await;
+        checked.map_err(|err| {
             tracing::warn!(error = %err, "group health check failed");
             ProxyError::group_health(err.kind)
         })

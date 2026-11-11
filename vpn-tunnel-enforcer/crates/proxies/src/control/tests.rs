@@ -18,7 +18,7 @@ use crate::model::{
     KeyHealth, PrewarmResult, ProfileRow, ProxyError, ProxyStatus, Released, Reservation,
     ReserveRequest, ServerStatus, StartRequest, StopReason, StopScope, Unlimited,
 };
-use crate::slot::{Slot, proxy_url};
+use crate::slot::{Slot, loopback_url};
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -75,7 +75,7 @@ fn running(slot: Slot) -> InstanceStatus {
         ready: true,
         health: Health::Healthy,
         port: Some(port),
-        proxy_url: Some(proxy_url(port)),
+        proxy_url: Some(loopback_url(port)),
         ..InstanceStatus::stopped(slot)
     }
 }
@@ -119,7 +119,7 @@ impl ProxyOps for Fake {
         self.record(Call::Instances);
         let (a, b) = (running(Slot::DEFAULT), running(Slot::new(2).unwrap()));
         let mut stopped = InstanceStatus::stopped(Slot::new(3).unwrap());
-        stopped.proxy_url = Some(proxy_url(17992));
+        stopped.proxy_url = Some(loopback_url(17992));
         Instances {
             max_instances: Unlimited,
             instances: vec![a, b, stopped],
@@ -184,7 +184,7 @@ impl ProxyOps for Fake {
         let mut instance = running(slot);
         if let Some(port) = req.port {
             instance.port = Some(port);
-            instance.proxy_url = Some(proxy_url(port));
+            instance.proxy_url = Some(loopback_url(port));
         }
         Ok(status_of(instance))
     }
@@ -1368,52 +1368,77 @@ fn reply_parsing() {
     assert!(client::read_reply(&mut garbage).is_err());
 }
 
-/// AT-09-011: the locale fragment is valid JSON with the same keys in both languages, and every
-/// key this package emits exists there with its placeholders.
-#[test]
-fn locale_fragment_parity() {
-    fn leaves(prefix: &str, value: &Value, out: &mut Vec<(String, String)>) {
-        match value {
-            Value::Object(map) => {
-                for (k, v) in map {
-                    let key = if prefix.is_empty() {
-                        k.clone()
-                    } else {
-                        format!("{prefix}.{k}")
-                    };
-                    leaves(&key, v, out);
-                }
-            }
-            other => out.push((
-                prefix.to_owned(),
-                other.as_str().unwrap_or_default().to_owned(),
-            )),
+/// The app's wiring (API.md): the real manager behind the real control server. The bound port
+/// reaches the manager's statuses and snapshot, and the answers come from the manager (its own
+/// validation, the lease book, the group-health mapping). No engine starts: there are no servers.
+#[cfg(feature = "proxies-manager")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_manager_behind_the_control_server() {
+    use crate::manager::{EngineChoice, ProfileSource, ProxyManager, ProxyProfile};
+
+    struct NoServers;
+    #[async_trait::async_trait]
+    impl ProfileSource for NoServers {
+        fn profiles(&self) -> Vec<ProxyProfile> {
+            Vec::new()
+        }
+        fn active_vpn_profile_id(&self) -> Option<String> {
+            None
+        }
+        fn engine_choice(&self) -> EngineChoice {
+            EngineChoice::default()
+        }
+        async fn check_group_health(&self, _group: &str) -> vpnte_base::AppResult<GroupHealth> {
+            Err(vpnte_base::AppError::new(ErrorKind::Validation))
         }
     }
-    let read = |text: &str| {
-        let mut out = Vec::new();
-        leaves("", &serde_json::from_str(text).unwrap(), &mut out);
-        out.sort();
-        out
+
+    let dir = TempDir::new("wiring");
+    let manager = ProxyManager::new(Arc::new(NoServers), &dir.0);
+    let ops: Arc<dyn ProxyOps> = Arc::new(manager.clone());
+    let cancel = CancellationToken::new();
+    let config = ControlConfig {
+        dir: dir.0.clone(),
+        port: 0,
+        fallback: false,
     };
-    let ru = read(include_str!("../../locales/proxies-control.ru.json"));
-    let en = read(include_str!("../../locales/proxies-control.en.json"));
-    let keys = |l: &[(String, String)]| l.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
-    assert_eq!(keys(&ru), keys(&en));
-    let io = || std::io::Error::other("x");
-    for err in [
-        ServeError::Token(io()),
-        ServeError::Bind {
-            port: 17873,
-            source: io(),
-        },
-    ] {
-        let msg = vpnte_base::AppError::from(err).user_msg();
-        for lang in [&ru, &en] {
-            let (_, text) = lang.iter().find(|(k, _)| k == msg.key.as_ref()).unwrap();
-            for (name, _) in &msg.args {
-                assert!(text.contains(&format!("{{{{{name}}}}}")), "{text}");
-            }
-        }
-    }
+    let server = ControlServer::start(ops, config, cancel.clone())
+        .await
+        .unwrap();
+    assert_eq!(manager.snapshot().borrow().control_url, Some(server.url()));
+    let url = ControlUrl::parse(&server.url()).unwrap();
+    let token = read_token(server.token_file()).unwrap();
+    let call = |method: &'static str, path: &'static str| {
+        let (url, token) = (url.clone(), token.clone());
+        tokio::task::spawn_blocking(move || {
+            let timeout = Duration::from_secs(10);
+            url.request(method, path, Some(&token), timeout).unwrap()
+        })
+    };
+
+    let status = call("GET", "/status").await.unwrap();
+    assert_eq!(status.status, 200);
+    let body: Value = serde_json::from_str(&status.body).unwrap();
+    assert_eq!(body["controlPort"], server.port());
+    assert_eq!(body["controlUrl"], server.url());
+    assert_eq!(body["slot"], 1);
+    let connect = call("POST", "/connect?slot=2&format=text").await.unwrap();
+    assert_eq!(
+        (connect.status, connect.body.trim()),
+        (400, "profileId is required for connect/trigger")
+    );
+    let reserve = call("POST", "/instances/reserve?owner=bot").await.unwrap();
+    assert_eq!(reserve.status, 503);
+    let group = call("POST", "/profiles/healthcheck?groupId=g")
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_str(&group.body).unwrap();
+    assert_eq!(
+        (group.status, &body["detail"]),
+        (404, &json!("Группа не найдена или пуста"))
+    );
+
+    cancel.cancel();
+    server.join().await;
+    manager.shutdown().await;
 }

@@ -271,7 +271,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
     }
 }
 
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+/// Position of `needle` in `haystack` (the CRLF delimiters of requests and answers).
+pub(super) fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 

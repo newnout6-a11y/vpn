@@ -13,7 +13,7 @@ use super::launch::Engine;
 use super::run::LoopCmd;
 use crate::health::Route;
 use crate::lease::LeaseBook;
-use crate::model::{InstanceStatus, derive_readiness};
+use crate::model::{InstanceStatus, Lifecycle, derive_readiness};
 use crate::slot::{self, CONTROL_HOST, Slot};
 
 /// Rotation keys remembered per slot, and how long one suppresses a repeated rotation (B-14:
@@ -90,13 +90,29 @@ impl SlotState {
             auto_disabled: self.auto_disabled,
             host: CONTROL_HOST.into(),
             port,
-            proxy_url: port.map(slot::proxy_url),
+            proxy_url: port.map(slot::loopback_url),
             profile_id: profile.map(|p| p.id.clone()),
             profile_name: profile.map(|p| p.name.clone()),
             country: profile.and_then(|p| p.country.clone()),
             pid: self.live.as_ref().map(|l| l.pid),
             started_at: self.started_at.filter(|_| running),
         }
+    }
+
+    /// Shown in statuses and the snapshot: configured, auto-disabled (it keeps showing which
+    /// profile died) or still running.
+    pub fn is_listed(&self) -> bool {
+        self.configured || self.auto_disabled || self.live.is_some()
+    }
+
+    /// The engine runs or is being (re)started: the profile is in use (B-8: a crashed slot
+    /// does not hold its profile in the picker).
+    pub fn is_active(&self) -> bool {
+        self.live.is_some()
+            || matches!(
+                self.route.lifecycle,
+                Lifecycle::Starting | Lifecycle::Rotating
+            )
     }
 
     /// Whether a rotation with `key` already ran within the key TTL.
@@ -117,6 +133,15 @@ impl SlotState {
     /// Forgets the rotation keys (explicit stop).
     pub fn forget_rotations(&mut self) {
         self.rotations.clear();
+    }
+
+    /// The engine of `generation`, unless a stop is already taking it down: the stop cancels the
+    /// slot's tasks under the registry lock, so a probe result or an exit that lands in the
+    /// meantime is dropped instead of overwriting the stopped state.
+    pub fn live_of(&self, generation: u64) -> Option<&Live> {
+        self.live
+            .as_ref()
+            .filter(|live| self.generation == generation && !live.cancel.is_cancelled())
     }
 
     /// Takes the live engine out and ends its tasks.
@@ -140,12 +165,12 @@ pub(super) struct Registry {
 }
 
 impl Registry {
-    /// Configured or auto-disabled slots in slot order, readiness derived at `now`.
+    /// The listed slots (see [`SlotState::is_listed`]) in slot order, readiness derived at `now`.
     pub fn instances(&self, now: UnixMs) -> Vec<InstanceStatus> {
         let mut list: Vec<InstanceStatus> = self
             .slots
             .iter()
-            .filter(|(_, s)| s.configured || s.auto_disabled || s.live.is_some())
+            .filter(|(_, s)| s.is_listed())
             .map(|(slot, s)| s.instance(*slot))
             .collect();
         derive_readiness(&mut list, now);
@@ -222,17 +247,5 @@ impl Registry {
             dead.get_or_insert(*slot);
         }
         (false, dead)
-    }
-}
-
-impl SlotState {
-    /// The engine runs or is being (re)started: the profile is in use (B-8: a crashed slot
-    /// does not hold its profile in the picker).
-    pub fn is_active(&self) -> bool {
-        self.live.is_some()
-            || matches!(
-                self.route.lifecycle,
-                crate::model::Lifecycle::Starting | crate::model::Lifecycle::Rotating
-            )
     }
 }

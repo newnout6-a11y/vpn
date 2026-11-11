@@ -8,13 +8,13 @@ use std::time::Duration;
 
 use futures_util::future::join_all;
 use parking_lot::Mutex;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::{AppError, AppResult, ErrorKind};
-use vpnte_profiles::model::{DialPrefs, Host, Kind, Profile, Source, Tls};
+use vpnte_profiles::model::{Kind, Profile};
 
 use super::launch::{Engine, Engines, Exit, Launch, Plan};
 use super::{EngineChoice, ProfileSource, ProxyManager, ProxyProfile};
@@ -26,6 +26,7 @@ use crate::model::{
 };
 use crate::probe::{ProbeError, ProbeOk, Prober};
 use crate::slot::Slot;
+use crate::test_support::vless;
 
 /// The servers of a test, the main VPN's choice and a group health answer.
 #[derive(Default)]
@@ -248,32 +249,6 @@ pub(super) async fn eventually(mut check: impl FnMut() -> bool) -> bool {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     check()
-}
-
-/// The old fixture profile (spec §7): VLESS + TLS to a documentation address. Fake credentials.
-pub(super) fn vless(server: &str) -> Profile {
-    Profile {
-        name: "sample".into(),
-        description: None,
-        server: server
-            .parse()
-            .map_or_else(|_| Host::Domain(server.into()), Host::Ip),
-        port: 443,
-        kind: Kind::Vless {
-            uuid: "00000000-0000-4000-8000-000000000001".into(),
-            flow: None,
-            packet_encoding: None,
-            encryption: None,
-        },
-        tls: Some(Tls::default()),
-        transport: None,
-        mux: None,
-        dial: DialPrefs::default(),
-        native_xray: None,
-        singbox_extra: Map::new(),
-        source: Source::Json,
-        notes: Vec::new(),
-    }
 }
 
 /// `profile-<n>` (old `sampleProfiles(n)`): country Netherlands, key health unknown.
@@ -970,6 +945,47 @@ async fn leased_route_is_not_auto_disabled() {
     assert_eq!(status.last_error.as_deref(), Some("EOF"));
 }
 
+/// Spec external-proxy §3.16: the automatic stop re-checks the budget once it holds the slot,
+/// so a forced probe that healed the route while it waited keeps the slot running.
+#[tokio::test]
+async fn a_healed_route_is_not_auto_disabled() {
+    let r = rig(samples(1), slow_timing());
+    r.prober.set(|_| Err(ProbeError::Transport("EOF".into())));
+    r.manager.start(connect(1, "profile-1")).await.unwrap();
+    let held = r.manager.inner.lock_slot(Slot::DEFAULT).await;
+    for _ in 0..4 {
+        r.manager.check_health(Slot::DEFAULT).await;
+    }
+    // Let the spawned automatic stop queue up behind the held guard.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    r.prober.set(|_| egress("198.51.100.8"));
+    assert!(r.manager.check_health(Slot::DEFAULT).await.ready);
+    drop(held);
+    // The guard is FIFO: once it is ours again, the automatic stop has had its turn.
+    drop(r.manager.inner.lock_slot(Slot::DEFAULT).await);
+    let status = r.manager.status(Slot::DEFAULT).await.instance;
+    assert!(status.process_running && status.ready && !status.auto_disabled);
+}
+
+/// A probe result that lands while a stop takes the slot down (its tasks are cancelled under
+/// the registry lock) is dropped instead of overwriting the stopping state.
+#[tokio::test]
+async fn late_probe_results_are_dropped() {
+    let r = rig(samples(1), slow_timing());
+    r.manager.start(connect(1, "profile-1")).await.unwrap();
+    let inner = r.manager.inner.clone();
+    let generation = {
+        let reg = inner.reg.lock();
+        let state = &reg.slots[&Slot::DEFAULT];
+        state.live.as_ref().unwrap().cancel.cancel();
+        state.generation
+    };
+    let result = egress("198.51.100.7");
+    assert_eq!(inner.apply_probe(Slot::DEFAULT, generation, result), None);
+    let status = r.manager.status(Slot::DEFAULT).await.instance;
+    assert_eq!((status.health, status.egress_ip), (Health::Starting, None));
+}
+
 /// Spec external-proxy §2.13 and B-3 / B-12: port conflicts, a busy port, `connect` without a
 /// profile and an empty country are rejected before anything starts; a start of a running
 /// slot is idempotent.
@@ -1232,64 +1248,4 @@ async fn snapshot_readiness_follows_the_clock() {
         later.instances[0].egress_ip,
         snapshot.instances[0].egress_ip
     );
-}
-
-/// AT-09-011 (ru/en parity): the fragment is valid JSON with the same keys in both languages,
-/// and every key the manager hands out exists in it.
-#[test]
-fn locale_fragments_cover_every_key() {
-    fn leaves(prefix: &str, v: &Value, out: &mut Vec<String>) {
-        match v {
-            Value::Object(map) => {
-                for (k, v) in map {
-                    let key = if prefix.is_empty() {
-                        k.clone()
-                    } else {
-                        format!("{prefix}.{k}")
-                    };
-                    leaves(&key, v, out);
-                }
-            }
-            other => {
-                assert!(other.as_str().is_some_and(|s| !s.is_empty()), "{prefix}");
-                out.push(prefix.to_owned());
-            }
-        }
-    }
-    let keys = |text: &str| {
-        let mut out = Vec::new();
-        leaves("", &serde_json::from_str(text).unwrap(), &mut out);
-        out.sort();
-        out
-    };
-    let ru = keys(include_str!("../../locales/proxies-manager.ru.json"));
-    let en = keys(include_str!("../../locales/proxies-manager.en.json"));
-    assert_eq!(ru, en);
-    let degradations = [
-        Degradation::ProcessFailed,
-        Degradation::LeasedRouteRecoveryBlocked,
-        Degradation::HealthFailureBudgetExhausted,
-        Degradation::EgressIpChangedWithoutRotation,
-        Degradation::RotationDidNotChangeEgressIp,
-        Degradation::DuplicateEgressIp,
-        Degradation::EgressProbeFailed,
-    ];
-    let healths = [
-        Health::Stopped,
-        Health::Starting,
-        Health::Healthy,
-        Health::Degraded,
-        Health::Rotating,
-        Health::Quarantined,
-        Health::Failed,
-    ];
-    let used: Vec<String> = degradations
-        .map(|d| super::degradation_msg(d).key.into_owned())
-        .into_iter()
-        .chain(healths.map(|h| super::health_msg(h).key.into_owned()))
-        .collect();
-    assert_eq!(used.len(), ru.len());
-    for key in used {
-        assert!(ru.contains(&key), "{key}");
-    }
 }

@@ -6,7 +6,7 @@
 //! child on an ephemeral loopback port; either child exiting fails the slot.
 use std::collections::HashMap;
 use std::future::Future;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,7 +23,7 @@ use vpnte_engine::slot::{Slot as XraySlot, SlotEndpoint};
 use vpnte_engine::xray_config::{build_config, proxy_graph, select_engine};
 use vpnte_engine::xray_process::{SlotLaunch, XrayEvent, XraySupervisor};
 use vpnte_profiles::emit_singbox::{EmitPolicy, emit_singbox};
-use vpnte_profiles::model::{Host, Profile};
+use vpnte_profiles::model::Profile;
 
 use super::EngineChoice;
 use crate::config::{self, PROXY_OUT_TAG};
@@ -101,14 +101,10 @@ pub(super) async fn prepare(
         .map_err(|e| ProxyError::Engine(format!("no port for the Xray child: {e}")))?;
     let bridge = config::xray_bridge(endpoint.port(), endpoint.creds())?;
     let singbox = config::build(&bridge, port)?.to_string().into_bytes();
-    let dial_target = match &profile.server {
-        Host::Ip(ip) => Some(*ip),
-        Host::Domain(_) => resolved.values().next().copied(),
-    }
-    .map(|ip| SocketAddr::new(ip, profile.port));
     let launch = SlotLaunch {
         config: build_config(&graph, &endpoint).to_string().into_bytes(),
-        dial_target,
+        // Only the supervisor's own status would report it, and nothing here reads that.
+        dial_target: None,
     };
     Ok(Plan {
         port,
@@ -351,10 +347,13 @@ fn start_failure(port: u16, info: Option<ExitInfo>) -> ProxyError {
     if info.binds_any(&[port]) {
         return ProxyError::Conflict(format!("Port {port} is unavailable: {last}"));
     }
-    let code = info
-        .code
-        .map_or_else(|| "unknown".into(), |c| c.to_string());
+    let code = code_text(info.code);
     ProxyError::Engine(format!("sing-box exited during start ({code}): {last}"))
+}
+
+/// An engine exit code for texts and logs (`unknown` when none was reported).
+pub(super) fn code_text(code: Option<i32>) -> String {
+    code.map_or_else(|| "unknown".into(), |c| c.to_string())
 }
 
 #[async_trait::async_trait]
@@ -398,233 +397,4 @@ const UNKNOWN_EXIT: Exit = Exit {
 };
 
 #[cfg(test)]
-mod tests {
-    use serde_json::{Value, json};
-    use vpnte_base::types::{ClientDevice, EnginePref};
-    use vpnte_profiles::model::{Kind, Reality, Tls, Transport, WgPeer, WireGuard};
-
-    use super::*;
-    use crate::manager::tests::vless;
-
-    const RESOURCES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources");
-
-    /// Names with `host` already resolved (no lookup happens).
-    fn names(entries: &[(&str, &str)]) -> Names {
-        let names = Names::default();
-        for (host, ip) in entries {
-            let ip = ip.parse().unwrap();
-            names
-                .cache
-                .lock()
-                .insert((*host).into(), (ip, Instant::now()));
-        }
-        names
-    }
-
-    async fn singbox_config(profile: &Profile, names: &Names) -> Value {
-        let plan = prepare(profile, 17990, EngineChoice::default(), names)
-            .await
-            .unwrap();
-        assert!(plan.xray.is_none());
-        serde_json::from_slice(&plan.singbox).unwrap()
-    }
-
-    /// Spec external-proxy §7.3 (Rust vectors): a host name endpoint is pinned to the resolved
-    /// IP with no DNS machinery in the config; the provider SNI stays; an IP endpoint needs no
-    /// resolution at all.
-    #[tokio::test]
-    async fn hostname_endpoints_are_pinned() {
-        let mut p = vless("vpn.example.test");
-        p.tls = Some(Tls {
-            server_name: Some("cdn.example.test".into()),
-            ..Tls::default()
-        });
-        p.dial.dns_strategy = Some("prefer_ipv4".into());
-        let original = p.clone();
-        let names = names(&[("vpn.example.test", "203.0.113.5")]);
-        let config = singbox_config(&p, &names).await;
-        let out = &config["outbounds"][0];
-        assert_eq!(out["server"], "203.0.113.5");
-        assert_eq!(out["tag"], "proxy-out");
-        assert_eq!(out["tls"]["server_name"], "cdn.example.test");
-        for key in ["domain_strategy", "domain_resolver"] {
-            assert!(out.get(key).is_none(), "{key}");
-        }
-        assert!(config.get("dns").is_none());
-        assert!(config["route"].get("default_domain_resolver").is_none());
-        assert_eq!(p, original);
-
-        // No SNI of its own: the host name keeps the certificate check; ws gets its Host.
-        p.tls = Some(Tls::default());
-        p.transport = Some(Transport::Ws {
-            path: "/x".into(),
-            host: None,
-            max_early_data: None,
-            early_data_header: None,
-        });
-        let config = singbox_config(&p, &names).await;
-        let out = &config["outbounds"][0];
-        assert_eq!(out["tls"]["server_name"], "vpn.example.test");
-        assert_eq!(out["transport"]["headers"]["Host"], "vpn.example.test");
-
-        let ip = vless("203.0.113.10");
-        let config = singbox_config(&ip, &Names::default()).await;
-        assert_eq!(config["outbounds"][0]["server"], "203.0.113.10");
-        assert!(config.get("dns").is_none());
-    }
-
-    /// Spec external-proxy §7.3: OS resolver first, DoH when it fails, IPv4 preferred, and a
-    /// clear error when both fail.
-    #[tokio::test]
-    async fn resolution_falls_back_to_doh() {
-        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
-        let doh_only =
-            |how| async move { (how == How::Doh).then(|| vec!["203.0.113.6".parse().unwrap()]) };
-        assert_eq!(
-            resolve_with("vpn.example.test", doh_only).await.unwrap(),
-            ip("203.0.113.6")
-        );
-        let none = |_| async { None };
-        let err = resolve_with("vpn.example.test", none).await.unwrap_err();
-        assert_eq!(
-            err,
-            ProxyError::Engine("cannot resolve vpn.example.test".into())
-        );
-        let mixed = |_| async {
-            Some(vec![
-                "2001:db8::1".parse().unwrap(),
-                "203.0.113.7".parse().unwrap(),
-            ])
-        };
-        assert_eq!(
-            resolve_with("vpn.example.test", mixed).await.unwrap(),
-            ip("203.0.113.7")
-        );
-        assert!(dialable(ip("198.51.100.1")) && dialable(ip("10.0.0.1")));
-        for blocked in [
-            "127.0.0.1",
-            "0.0.0.0",
-            "0.1.2.3",
-            "169.254.1.1",
-            "255.255.255.255",
-            "::",
-        ] {
-            assert!(!dialable(ip(blocked)), "{blocked}");
-        }
-    }
-
-    fn wireguard() -> Profile {
-        let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string();
-        Profile {
-            port: 51820,
-            kind: Kind::Wireguard(WireGuard {
-                private_key: key.clone(),
-                local_address: vec!["10.66.0.2/32".parse().unwrap()],
-                mtu: None,
-                dns: Vec::new(),
-                peers: vec![WgPeer {
-                    host: Host::Ip("203.0.113.20".parse().unwrap()),
-                    port: 51820,
-                    public_key: key,
-                    pre_shared_key: None,
-                    allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
-                    keepalive_s: None,
-                    reserved: None,
-                }],
-            }),
-            tls: None,
-            ..vless("203.0.113.20")
-        }
-    }
-
-    /// REALITY over VLESS: Xray is preferred (engine selection of the main tunnel). Fake keys.
-    fn reality() -> Profile {
-        Profile {
-            tls: Some(Tls {
-                server_name: Some("www.example.com".into()),
-                fingerprint: Some("chrome".into()),
-                reality: Some(Reality {
-                    public_key: "fakefakefakefakefakefakefakefakefakefakefak".into(),
-                    short_id: "ab".into(),
-                    spider_x: None,
-                }),
-                ..Tls::default()
-            }),
-            ..vless("203.0.113.30")
-        }
-    }
-
-    /// B-28 / B-27: WireGuard runs as a sing-box endpoint; an Xray profile runs behind a SOCKS5
-    /// bridge to its own Xray child; there is never a `block` outbound and the last rule
-    /// rejects (B-2).
-    #[tokio::test]
-    async fn wireguard_and_xray_shapes() {
-        let config = singbox_config(&wireguard(), &Names::default()).await;
-        assert_eq!(config["endpoints"][0]["tag"], "proxy-out");
-        let outbounds = config["outbounds"].as_array().unwrap();
-        assert!(
-            outbounds
-                .iter()
-                .all(|o| o["type"] != "wireguard" && o["type"] != "block")
-        );
-
-        let plan = prepare(
-            &reality(),
-            17991,
-            EngineChoice::default(),
-            &Names::default(),
-        )
-        .await
-        .unwrap();
-        let xray = plan.xray.as_ref().unwrap();
-        let config: Value = serde_json::from_slice(&plan.singbox).unwrap();
-        let bridge = &config["outbounds"][0];
-        let creds = xray.endpoint.creds();
-        let expected = json!({
-            "type": "socks", "tag": "proxy-out", "version": "5", "server": "127.0.0.1",
-            "server_port": xray.endpoint.port(), "username": creds.user, "password": creds.pass,
-            "udp_fragment": true,
-        });
-        assert_eq!(bridge, &expected);
-        assert_eq!(
-            config["route"]["rules"].as_array().unwrap().last(),
-            Some(&json!({ "action": "reject" }))
-        );
-        assert_eq!(
-            xray.launch.dial_target,
-            Some("203.0.113.30:443".parse().unwrap())
-        );
-        let forced = EngineChoice {
-            pref: EnginePref::SingBox,
-            device: ClientDevice::Android,
-        };
-        let plan = prepare(&reality(), 17991, forced, &Names::default())
-            .await
-            .unwrap();
-        assert!(plan.xray.is_none());
-    }
-
-    /// AT-02-008: the prepared configs pass the bundled engines' own checks (skipped quietly
-    /// when the binaries are not present).
-    #[tokio::test]
-    async fn prepared_configs_pass_the_engine_checks() {
-        let resources = Path::new(RESOURCES);
-        let (singbox, xray) = (resources.join("sing-box.exe"), resources.join("xray.exe"));
-        if !singbox.exists() || !xray.exists() {
-            return;
-        }
-        for profile in [vless("203.0.113.10"), wireguard(), reality()] {
-            let plan = prepare(&profile, 17990, EngineChoice::default(), &Names::default())
-                .await
-                .unwrap();
-            let checked =
-                vpnte_engine::singbox_process::check_config(&singbox, &plan.singbox).await;
-            assert!(checked.is_ok(), "{}: {checked:?}", profile.kind.label());
-            if let Some(x) = plan.xray {
-                let checked =
-                    vpnte_engine::xray_process::check_config(&xray, &x.launch.config).await;
-                assert!(checked.is_ok(), "xray: {checked:?}");
-            }
-        }
-    }
-}
+mod tests;

@@ -1,17 +1,18 @@
 //! AT-02-008 (sing-box 1.14 compatibility): every config shape `build` produces passes the real
 //! `sing-box check -c stdin` (the bundled 1.14 binary rejects unknown keys and refused
 //! combinations; `check` neither listens nor dials). Skipped quietly when the binary is absent.
-use std::io::Write;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+//! Runs with the engine crate's checker, so only in builds with `proxies-manager`.
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use vpnte_base::types::Creds;
+use vpnte_engine::singbox_process::check_config;
 use vpnte_profiles::emit_singbox::{EmitPolicy, emit_singbox};
 use vpnte_profiles::model::{Host, Kind, Tls};
 
-use super::tests::{hostname, profile, sample, shadowtls_chain, wireguard};
+use super::tests::{hostname, sample, shadowtls_chain, wireguard};
 use super::{build, pin, xray_bridge};
+use crate::test_support::profile;
 
 fn sing_box() -> Option<PathBuf> {
     let exe = PathBuf::from(concat!(
@@ -22,41 +23,21 @@ fn sing_box() -> Option<PathBuf> {
 }
 
 /// Runs `sing-box check` on `config`; the error carries the engine's message.
-fn check(exe: &PathBuf, config: &Value) -> Result<(), String> {
-    let mut cmd = Command::new(exe);
-    cmd.args(["check", "-c", "stdin", "--disable-color"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(config.to_string().as_bytes())
-            .map_err(|e| e.to_string())?;
-    }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+async fn check(exe: &Path, config: &Value) -> Result<(), String> {
+    check_config(exe, config.to_string().as_bytes())
+        .await
+        .map_err(|e| format!("{e:?}"))
 }
 
-#[test]
-fn every_config_shape_passes_sing_box_check() {
+#[tokio::test]
+async fn every_config_shape_passes_sing_box_check() {
     let Some(exe) = sing_box() else {
         return;
     };
     // Negative control: the checker really rejects what sing-box does not know.
     let mut bogus = build(&sample(), 17990).unwrap();
     bogus["route"]["no_such_option"] = json!(true);
-    assert!(check(&exe, &bogus).is_err());
+    assert!(check(&exe, &bogus).await.is_err());
     let ip = "203.0.113.5".parse().unwrap();
     let mut ws = hostname(json!({
         "tls": { "enabled": true },
@@ -94,7 +75,7 @@ fn every_config_shape_passes_sing_box_check() {
     ];
     for (name, upstream) in cases {
         let config = build(&upstream, 17990).unwrap();
-        if let Err(e) = check(&exe, &config) {
+        if let Err(e) = check(&exe, &config).await {
             panic!("{name}: sing-box check failed: {e}");
         }
     }

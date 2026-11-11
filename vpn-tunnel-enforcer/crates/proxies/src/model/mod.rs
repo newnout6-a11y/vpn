@@ -9,7 +9,7 @@ use crate::slot::Slot;
 
 mod error;
 mod ops;
-mod ready;
+pub(crate) mod ready;
 mod wire;
 
 pub use error::ProxyError;
@@ -177,31 +177,4 @@ pub fn prewarm_count(count: u64) -> Result<u16, ProxyError> {
                 crate::slot::MAX_SLOT
             ))
         })
-}
-
-/// A running, freshly probed, healthy slot exiting through `ip` (test fixture).
-#[cfg(test)]
-pub(crate) fn healthy_instance(
-    slot: u64,
-    ip: &str,
-    now: vpnte_base::types::UnixMs,
-) -> InstanceStatus {
-    let slot = Slot::new(slot).unwrap();
-    let port = slot.default_port();
-    InstanceStatus {
-        process_running: true,
-        health: Health::Healthy,
-        state: Lifecycle::Ready,
-        generation: 1,
-        egress_ip: Some(ip.parse().unwrap()),
-        latency_ms: Some(123),
-        last_checked_at: Some(now - 1_000),
-        last_success_at: Some(now - 1_000),
-        egress_checked_at: Some(now - 1_000),
-        port: Some(port),
-        proxy_url: Some(crate::slot::proxy_url(port)),
-        profile_id: Some(format!("profile-{slot}")),
-        pid: Some(1000 + u32::from(slot.get())),
-        ..InstanceStatus::stopped(slot)
-    }
 }
