@@ -1,0 +1,163 @@
+/* maintenance.css — the Maintenance page («Починка», vpnte_ui::maintenance) in the «Пломба»
+ * language: swiss.css tokens only (--paper --ink --mute --rule --rule-strong --signal
+ * --on-signal --signal-ink), square corners, hairlines, mono captions. Panels, badges, buttons,
+ * the progress bar and dialogs are the shared widgets; selectors here are prefixed mt-. */
+
+/* ── Page ─────────────────────────────────────────────────────────────────── */
+.mt-page { display: flex; min-height: 100%; max-width: 960px; flex-direction: column; gap: 20px; padding-bottom: 24px; color: var(--ink); }
+.mt-page > .w-section-head { margin-bottom: 0; }
+.mt-sections { display: flex; flex-direction: column; gap: 16px; }
+.mt-sections > .w-panel { scroll-margin-top: 16px; }
+
+/* ── Text helpers ─────────────────────────────────────────────────────────── */
+.mt-quiet { margin: 0; font-size: 13px; line-height: 1.45; color: var(--mute); }
+.mt-hint { margin: 6px 0 0; max-width: 72ch; font-size: 12px; line-height: 1.45; color: var(--mute); }
+.mt-meta { margin: 4px 0 0; font-size: 11px; letter-spacing: 0.02em; color: var(--mute); font-variant-numeric: tabular-nums; }
+.mt-path { font-size: 12px; word-break: break-all; }
+.mt-warning,
+.mt-alert {
+  margin: 0 0 12px;
+  border-left: 3px solid var(--signal);
+  padding: 6px 0 6px 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+.mt-alert { border: 1px solid var(--signal); border-left-width: 3px; padding: 8px 12px; font-weight: 500; color: var(--signal-ink); }
+
+/* ── Status marks: square, ink = fine, signal = problem, dashed = not checked ── */
+.mt-mark { display: inline-block; flex: 0 0 auto; width: 10px; height: 10px; margin-top: 4px; border: 1px solid var(--rule-strong); background: transparent; }
+.mt-mark[data-state='ok'] { border-color: var(--ink); background: var(--ink); }
+.mt-mark[data-state='warn'] { border-color: var(--signal); background: transparent; box-shadow: inset 0 0 0 2px var(--paper), inset 0 0 0 5px var(--signal); }
+.mt-mark[data-state='fail'] { border-color: var(--signal); background: var(--signal); }
+.mt-mark[data-state='unknown'] { border-style: dashed; border-color: var(--mute); }
+.mt-mark[data-state='info'] { border-color: var(--rule-strong); }
+.mt-mark[data-state='running'] { border-color: var(--signal); animation: mt-blink 1s steps(2, start) infinite; }
+@keyframes mt-blink { to { background: var(--signal); } }
+
+/* ── State panel ──────────────────────────────────────────────────────────── */
+.mt-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.mt-actions + .mt-actions { margin-top: 10px; }
+.mt-block > .mt-actions { margin-top: 12px; }
+.mt-export { display: flex; align-items: center; gap: 14px; margin-top: 14px; }
+.mt-export .w-progress-wrap { flex: 1 1 auto; }
+.mt-export-stage { flex: 0 0 auto; min-width: 16ch; font-size: 11px; color: var(--mute); text-align: right; }
+.mt-outcome { margin: 14px 0 0; border-top: 1px solid var(--rule); padding-top: 10px; font-size: 13px; line-height: 1.5; color: var(--ink); overflow-wrap: anywhere; }
+.mt-outcome::before { content: ''; display: inline-block; width: 6px; height: 6px; margin: 0 10px 2px 0; background: var(--ink); }
+.mt-outcome[data-verdict='warn']::before,
+.mt-outcome[data-verdict='unknown']::before { background: transparent; outline: 1px solid var(--signal); }
+.mt-outcome[data-verdict='fail'] { color: var(--signal-ink); }
+.mt-outcome[data-verdict='fail']::before { background: var(--signal); }
+.mt-outcome.is-empty { display: none; }
+
+/* ── Steps: a readout, nothing here looks pressable ───────────────────────── */
+.mt-steps { margin: 0; padding: 0; list-style: none; }
+.mt-step { display: flex; align-items: flex-start; gap: 12px; border-top: 1px solid var(--rule); padding: 10px 0; }
+.mt-step:first-child { border-top: 0; padding-top: 0; }
+.mt-step:last-child { padding-bottom: 0; }
+.mt-step .w-spinner { margin-top: 2px; }
+.mt-step-text { min-width: 0; }
+.mt-step-label { margin: 0; font-size: 14px; font-weight: 500; letter-spacing: -0.01em; }
+.mt-step-detail { margin: 2px 0 0; font-size: 12px; line-height: 1.45; color: var(--mute); overflow-wrap: anywhere; }
+.mt-step-detail[data-state='fail'] { color: var(--signal-ink); }
+.mt-step-detail[data-state='warn'] { color: var(--ink); }
+
+/* ── Blocks inside a panel (protection, report, ETW, legacy parts) ────────── */
+.mt-block + .mt-block { margin-top: 16px; border-top: 1px solid var(--rule); padding-top: 14px; }
+.mt-block-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.mt-block-title {
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.mt-lines { margin: 0; padding: 0; list-style: none; }
+.mt-line { display: flex; align-items: flex-start; gap: 10px; margin: 0; padding: 4px 0; font-size: 13px; line-height: 1.45; }
+.mt-line > span, .mt-line > div { min-width: 0; overflow-wrap: anywhere; }
+
+/* ── Report items ─────────────────────────────────────────────────────────── */
+.mt-items { margin: 0; padding: 0; list-style: none; }
+.mt-item { border-top: 1px solid var(--rule); padding: 8px 0; }
+.mt-items > .mt-item:first-child { border-top: 0; padding-top: 2px; }
+.mt-item-head { display: flex; align-items: flex-start; gap: 10px; }
+.mt-item-label { flex: 1 1 auto; min-width: 0; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.mt-item-value { flex: 0 1 50%; min-width: 0; font-size: 12px; line-height: 1.5; text-align: right; color: var(--mute); overflow-wrap: anywhere; }
+.mt-item[data-state='fail'] .mt-item-value { color: var(--signal-ink); }
+.mt-item[data-state='warn'] .mt-item-value { color: var(--ink); }
+.mt-item-note { margin: 4px 0 0 20px; font-size: 12px; line-height: 1.45; color: var(--ink); }
+.mt-item-details {
+  margin: 6px 0 0 20px;
+  border-left: 1px solid var(--rule-strong);
+  padding: 2px 0 2px 10px;
+  max-height: 160px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--mute);
+}
+.mt-report { margin-top: 12px; }
+.mt-report-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  list-style: none;
+}
+.mt-report-toggle::-webkit-details-marker { display: none; }
+.mt-report-toggle::before { content: '+'; display: inline-block; width: 1ch; }
+.mt-report[open] > .mt-report-toggle::before { content: '−'; }
+.mt-report-toggle:hover { color: var(--signal-ink); }
+.mt-report-toggle:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+.mt-group { margin-top: 14px; }
+.mt-group-title { margin: 0 0 4px; border-bottom: 1px solid var(--rule-strong); padding-bottom: 4px; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; }
+
+/* ── Leak result panel ────────────────────────────────────────────────────── */
+.mt-leak { border-left: 3px solid var(--rule-strong); padding-left: 14px; }
+.mt-leak[data-tone='ok'] { border-left-color: var(--ink); }
+.mt-leak[data-tone='warn'] { border-left-color: var(--signal); }
+.mt-leak[data-tone='fail'] { border-left-color: var(--signal); }
+.mt-leak[data-tone='unknown'] { border-left-style: dashed; border-left-color: var(--mute); }
+.mt-leak-headline { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.4; letter-spacing: -0.01em; }
+.mt-leak[data-tone='fail'] .mt-leak-headline { color: var(--signal-ink); }
+.mt-leak-note { margin: 4px 0 0; font-size: 13px; line-height: 1.45; }
+.mt-leak .mt-lines { margin-top: 8px; }
+.mt-probe-alias { font-weight: 500; }
+.mt-probe[data-state='fail'] .mt-probe-result { font-weight: 600; color: var(--signal-ink); }
+.mt-probe-result { color: var(--mute); }
+.mt-probe .mt-item-details { margin-left: 0; }
+
+/* ── Capture tiles, chips, top lists ──────────────────────────────────────── */
+.mt-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0 0 14px; border: 1px solid var(--rule); }
+.mt-tile { display: flex; min-width: 0; flex-direction: column; gap: 4px; border-left: 1px solid var(--rule); padding: 10px 12px; }
+.mt-tile:first-child { border-left: 0; }
+.mt-tile.is-warn { box-shadow: inset 0 -2px 0 var(--signal); }
+.mt-tile-label { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-size: 10px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--mute); }
+.mt-tile-value { font-size: 12px; line-height: 1.4; color: var(--ink); overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  .mt-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mt-tile:nth-child(3) { border-left: 0; }
+  .mt-tile:nth-child(n + 3) { border-top: 1px solid var(--rule); }
+}
+.mt-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.mt-chip { border: 1px solid var(--rule-strong); padding: 2px 8px; font-size: 11px; line-height: 1.6; color: var(--ink); }
+.mt-chip.is-warn { border-color: var(--signal); color: var(--signal-ink); }
+.mt-top { margin-top: 10px; }
+.mt-top-title { display: block; margin-bottom: 4px; font-size: 12px; font-weight: 600; }
+.mt-top-list { margin: 0; padding: 0; list-style: none; font-size: 12px; }
+.mt-top-list li { display: flex; justify-content: space-between; gap: 16px; border-top: 1px dashed var(--rule); padding: 3px 0; }
+.mt-top-list li:first-child { border-top: 0; }
+.mt-top-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mt-top-count { flex: 0 0 auto; color: var(--mute); font-variant-numeric: tabular-nums; }
+.mt-block[data-block='etw'] { margin-bottom: 14px; }

@@ -1,0 +1,90 @@
+{
+  "ui": {
+    "tray": {
+      "ip": "IP: {{ip}}",
+      "ipUnknown": "IP: неизвестен",
+      "proxy": "Proxy: {{addr}}",
+      "proxyNone": "Proxy: не выбран",
+      "tip": {
+        "protected": "VPN Tunnel Enforcer — Защищено",
+        "leak": "VPN Tunnel Enforcer — УТЕЧКА IP",
+        "off": "VPN Tunnel Enforcer — Выключено",
+        "starting": "VPN Tunnel Enforcer — Запуск защиты",
+        "proxyDown": "VPN Tunnel Enforcer — VPN-сервер недоступен",
+        "killSwitch": "VPN Tunnel Enforcer — Kill-switch: требуется проверка",
+        "restarting": "VPN Tunnel Enforcer — Перезапуск",
+        "restartingProgress": "VPN Tunnel Enforcer — Перезапуск {{n}}/{{max}}",
+        "stopping": "VPN Tunnel Enforcer — Отключение защиты",
+        "error": "VPN Tunnel Enforcer — Ошибка защиты — повторите восстановление",
+        "unknown": "VPN Tunnel Enforcer — Состояние защиты не подтверждено",
+        "speed": "↓ {{down}} / ↑ {{up}}"
+      },
+      "menu": {
+        "status": {
+          "protected": "Статус: Защищено",
+          "leak": "Статус: УТЕЧКА IP",
+          "off": "Статус: Выключено",
+          "starting": "Статус: Запуск защиты",
+          "proxyDown": "Статус: VPN-сервер недоступен",
+          "killSwitch": "Статус: Kill-switch: требуется проверка",
+          "restarting": "Статус: Перезапуск",
+          "restartingProgress": "Статус: Перезапуск {{n}}/{{max}}",
+          "stopping": "Статус: Отключение защиты",
+          "error": "Статус: Ошибка защиты — повторите восстановление",
+          "unknown": "Статус: Состояние защиты не подтверждено"
+        },
+        "speed": "Скорость: ↓ {{down}} / ↑ {{up}}",
+        "show": "Показать окно",
+        "start": "Включить защиту",
+        "stop": "Выключить защиту",
+        "checkRoute": "Проверить маршрут",
+        "openLogs": "Открыть логи",
+        "quit": "Выход"
+      },
+      "close": {
+        "title": "Защита включена",
+        "message": "VPN сейчас активен.",
+        "detailTray": "Окно можно свернуть в трей — защита продолжит работать в фоне. Или полностью отключить защиту и закрыть приложение (это безопасно откатит все сетевые настройки, занимает несколько секунд).",
+        "detailStop": "Чтобы корректно завершить работу, нужно сначала отключить защиту: мы вернём DNS, IPv6 и правила брандмауэра в исходное состояние. Это займёт несколько секунд.",
+        "toTray": "Свернуть в трей",
+        "stopAndClose": "Отключить и закрыть",
+        "cancel": "Отмена"
+      },
+      "quitFailed": {
+        "title": "Выход не завершён",
+        "note": "Если выйти без восстановления, прежние настройки прокси вернутся при следующем запуске приложения.",
+        "retry": "Повторить",
+        "exitAnyway": "Выйти без восстановления"
+      },
+      "demo": {
+        "title": "Трей",
+        "menu": "Меню трея",
+        "tooltip": "Подсказка значка",
+        "icons": "Значки состояний",
+        "scene": "Состояние",
+        "options": "Параметры",
+        "native": "Нативный трей",
+        "calls": "Вызовов Win32: текст {{text}} · доступность {{enabled}} · подсказка {{tooltip}} · значок {{icon}}",
+        "noTray": "Значок в трее не создан",
+        "minimizeToTray": "Сворачивать в трей",
+        "killSwitch": "Kill switch включён",
+        "leak": "Флаг утечки",
+        "traffic": "Трафик",
+        "closeWindow": "Закрыть окно",
+        "restoreFailed": "Не удалось вернуть прежние настройки системного прокси (демо).",
+        "status": {
+          "protected": "Защищено",
+          "leak": "Утечка",
+          "off": "Выключено",
+          "starting": "Запуск",
+          "proxyDown": "Сервер недоступен",
+          "killSwitch": "Kill-switch",
+          "restarting": "Перезапуск",
+          "stopping": "Отключение",
+          "error": "Ошибка",
+          "unknown": "Не подтверждено"
+        }
+      }
+    }
+  }
+}

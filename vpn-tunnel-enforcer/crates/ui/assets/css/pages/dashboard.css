@@ -1,0 +1,37 @@
+/* ui-dashboard — what the reference start page did with framer-motion, as CSS (spec §2.8), plus
+   one state the reference had no style for. swiss.css stays verbatim; reduced motion is handled
+   globally by base.css. No rule here may put a transform, filter or containment on a page
+   ancestor: the mascot overlay and the toasts are position: fixed (D-22). */
+
+/* Banners enter from above (restart, second TUN, kill-switch). */
+.c-swiss .enter-down { animation: vpnte-enter-down 0.3s cubic-bezier(0.2, 0.9, 0.3, 1) both; }
+@keyframes vpnte-enter-down { from { opacity: 0; transform: translateY(-20px); } }
+
+/* The disconnect confirmation rises into place. */
+.c-swiss .enter-up { animation: vpnte-enter-up 0.3s cubic-bezier(0.2, 0.9, 0.3, 1) both; }
+@keyframes vpnte-enter-up { from { opacity: 0; transform: translateY(10px); } }
+
+/* Power button: slight grow on hover, press-in on click (not while it waits). */
+.c-swiss .swiss-power:not(:disabled) { transition: transform 0.2s; }
+.c-swiss .swiss-power:hover:not(:disabled) { transform: scale(1.01); }
+.c-swiss .swiss-power:active:not(:disabled) { transform: scale(0.99); }
+
+/* A server switch: the button breathes and a signal ring pulses out of it. */
+.c-swiss .swiss-power.is-busy:not(.is-cancel) { animation: vpnte-power-pulse 1.2s ease-in-out infinite; }
+@keyframes vpnte-power-pulse { 50% { transform: scale(1.025); } }
+.c-swiss .power-ring { animation: vpnte-power-ring 1.35s ease-out infinite; }
+@keyframes vpnte-power-ring {
+  0%, 100% { transform: scale(0.95); opacity: 0.65; }
+  50% { transform: scale(1.18); opacity: 0.08; }
+}
+
+/* Protection came up: one orange flash, never a loop (the old source test pinned it). */
+.c-swiss .power-flash { animation: vpnte-power-flash 0.6s ease-out both; }
+@keyframes vpnte-power-flash {
+  from { transform: scale(1); opacity: 0.35; }
+  to { transform: scale(1.12); opacity: 0; }
+}
+
+/* D-29: mid-transition or with a faulted tunnel the real address is neither struck through nor
+   "exposed": nothing is proven either way, so it is shown dim (as the exit address is). */
+.c-swiss .swiss-real.is-dim { color: var(--mute); }

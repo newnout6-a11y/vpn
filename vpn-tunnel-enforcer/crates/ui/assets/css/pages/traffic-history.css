@@ -1,0 +1,41 @@
+/* traffic-history.css — the Traffic page (vpnte_ui::traffic_history) in the «Пломба» language:
+ * swiss.css tokens only, square corners, hairlines, mono numbers. Panels, badges, buttons and the
+ * confirmation are the shared widgets. */
+
+/* The page fill (paper over the page container, its padding) comes from swiss.css .swiss-skin. */
+.traffic { display: flex; flex-direction: column; gap: 20px; color: var(--ink); }
+.traffic > .w-section-head { margin-bottom: 0; }
+.traffic-search .w-input { width: 100%; }
+
+/* ── Summary ─────────────────────────────────────────────────────────── */
+.traffic-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  margin-bottom: -8px;
+  font-size: 12px;
+  color: var(--mute);
+}
+.traffic-summary > :first-child { font-weight: 600; color: var(--ink); }
+.traffic-summary .swiss-mono { font-variant-numeric: tabular-nums; }
+.traffic-more { color: var(--signal-ink); }
+
+/* ── Day groups ──────────────────────────────────────────────────────── */
+.traffic-list { margin: 0; padding: 0; list-style: none; }
+.traffic-item { display: flex; align-items: center; gap: 16px; border-top: 1px solid var(--rule); padding: 10px 12px 10px 20px; }
+.traffic-item:first-child { border-top: 0; }
+.traffic-item-text { min-width: 0; flex: 1 1 auto; }
+.traffic-item-head { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0; }
+.traffic-domain { min-width: 0; font-size: 14px; font-weight: 600; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.traffic-item-head .w-badge { font-variant-numeric: tabular-nums; }
+.traffic-pending { display: inline-flex; color: var(--mute); }
+.traffic-item-seen {
+  margin: 3px 0 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--mute);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.traffic-bytes { flex-shrink: 0; font-size: 12px; color: var(--ink); white-space: nowrap; font-variant-numeric: tabular-nums; }

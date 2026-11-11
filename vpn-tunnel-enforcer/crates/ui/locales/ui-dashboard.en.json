@@ -1,0 +1,20 @@
+{
+  "ui": {
+    "dashboard": {
+      "restartTitle": "VPN connection lost — automatic restart",
+      "restartBody": "Trying to restore the connection automatically. If that fails, turn protection on manually.",
+      "competingTitle": "Second VPN/TUN detected:",
+      "competingBody": "Two tunnels at once break DNS and the internet. Keep only one on: turn off either our protection or the other client (Happ TUN, WireGuard, OpenVPN and the like).",
+      "releaseKillSwitch": "Remove the block",
+      "leakTitle": "Your real IP is visible",
+      "leakBody": "Turn protection on or check your VPN client. If protection is already on, the VPN server may be down.",
+      "offWithWarnings": "Protection turned off with warnings",
+      "recheckFailed": "Could not check the kill switch",
+      "releaseFailed": "Could not remove the kill switch",
+      "foreignVpn": {
+        "title": "Another VPN detected",
+        "body": "While it runs, pings are unreliable: its adapter intercepts the checks and answers for every server (hence the identical ~1–40 ms). Quit the other VPN completely (exit it from the tray) to see the real latencies."
+      }
+    }
+  }
+}

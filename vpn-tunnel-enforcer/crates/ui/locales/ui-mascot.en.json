@@ -1,0 +1,37 @@
+{
+  "ui": {
+    "mascot": {
+      "demo": {
+        "proxies": "External proxies",
+        "stopAll": "stop all",
+        "stopAllTitle": "Stop all external proxies",
+        "running": "running",
+        "proxyServer": "Server for a new proxy",
+        "startProxy": "Start proxy",
+        "noProxies": "No proxies are running.",
+        "leakTitle": "Your real IP is visible",
+        "leakBody": "Turn protection on or check your VPN client. If protection is already on, the VPN server may be down.",
+        "bench": "Mascot test bench",
+        "phaseOff": "off",
+        "phaseConnecting": "linking",
+        "phaseOn": "on",
+        "phaseAlert": "alert",
+        "leakOk": "clean",
+        "leakWarn": "doubtful",
+        "leakFail": "leak",
+        "proxyStart": "proxy +",
+        "proxyRotate": "rotate",
+        "proxyStop": "proxy −",
+        "noticeError": "error",
+        "noticeWarn": "warning",
+        "noticeOk": "success",
+        "fast": "80 Mbit/s",
+        "slow": "1.5 Mbit/s",
+        "idle": "0 Mbit/s",
+        "milestone": "9:58 in tunnel",
+        "page": "other page",
+        "theme": "theme"
+      }
+    }
+  }
+}

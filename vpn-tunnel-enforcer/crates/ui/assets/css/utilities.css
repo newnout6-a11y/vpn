@@ -1928,3 +1928,65 @@
 .fi-us.fis {
   background-image:url("data:image/svg+xml,%3csvg%20xmlns='http://www.w3.org/2000/svg'%20id='flag-icons-us'%20viewBox='0%200%20512%20512'%3e%3cpath%20fill='%23bd3d44'%20d='M0%200h512v512H0'/%3e%3cpath%20stroke='%23fff'%20stroke-width='40'%20d='M0%2058h512M0%20137h512M0%20216h512M0%20295h512M0%20374h512M0%20453h512'/%3e%3cpath%20fill='%23192f5d'%20d='M0%200h390v275H0z'/%3e%3cmarker%20id='us-a'%20markerHeight='30'%20markerWidth='30'%3e%3cpath%20fill='%23fff'%20d='m15%200%209.3%2028.6L0%2011h30L5.7%2028.6'/%3e%3c/marker%3e%3cpath%20fill='none'%20marker-mid='url(%23us-a)'%20d='m0%200%2018%2011h65%2065%2065%2065%2066L51%2039h65%2065%2065%2065L18%2066h65%2065%2065%2065%2066L51%2094h65%2065%2065%2065L18%20121h65%2065%2065%2065%2066L51%20149h65%2065%2065%2065L18%20177h65%2065%2065%2065%2066L51%20205h65%2065%2065%2065L18%20232h65%2065%2065%2065%2066z'/%3e%3c/svg%3e");
 }
+
+/* ── flag-icons 7.5 1x1 (MIT, assets/flags/LICENSE): the other countries the exit-IP detector
+ * reports (ui.panels.country.*); separate files, fetched only when a coin shows them ── */
+.fi-ae.fis { background-image: url("../flags/ae.svg"); }
+.fi-am.fis { background-image: url("../flags/am.svg"); }
+.fi-ar.fis { background-image: url("../flags/ar.svg"); }
+.fi-at.fis { background-image: url("../flags/at.svg"); }
+.fi-au.fis { background-image: url("../flags/au.svg"); }
+.fi-az.fis { background-image: url("../flags/az.svg"); }
+.fi-be.fis { background-image: url("../flags/be.svg"); }
+.fi-bg.fis { background-image: url("../flags/bg.svg"); }
+.fi-br.fis { background-image: url("../flags/br.svg"); }
+.fi-by.fis { background-image: url("../flags/by.svg"); }
+.fi-ca.fis { background-image: url("../flags/ca.svg"); }
+.fi-ch.fis { background-image: url("../flags/ch.svg"); }
+.fi-cl.fis { background-image: url("../flags/cl.svg"); }
+.fi-cn.fis { background-image: url("../flags/cn.svg"); }
+.fi-cy.fis { background-image: url("../flags/cy.svg"); }
+.fi-cz.fis { background-image: url("../flags/cz.svg"); }
+.fi-dk.fis { background-image: url("../flags/dk.svg"); }
+.fi-ee.fis { background-image: url("../flags/ee.svg"); }
+.fi-eg.fis { background-image: url("../flags/eg.svg"); }
+.fi-es.fis { background-image: url("../flags/es.svg"); }
+.fi-fr.fis { background-image: url("../flags/fr.svg"); }
+.fi-gb.fis { background-image: url("../flags/gb.svg"); }
+.fi-ge.fis { background-image: url("../flags/ge.svg"); }
+.fi-gr.fis { background-image: url("../flags/gr.svg"); }
+.fi-hk.fis { background-image: url("../flags/hk.svg"); }
+.fi-hr.fis { background-image: url("../flags/hr.svg"); }
+.fi-hu.fis { background-image: url("../flags/hu.svg"); }
+.fi-id.fis { background-image: url("../flags/id.svg"); }
+.fi-ie.fis { background-image: url("../flags/ie.svg"); }
+.fi-il.fis { background-image: url("../flags/il.svg"); }
+.fi-in.fis { background-image: url("../flags/in.svg"); }
+.fi-is.fis { background-image: url("../flags/is.svg"); }
+.fi-it.fis { background-image: url("../flags/it.svg"); }
+.fi-jp.fis { background-image: url("../flags/jp.svg"); }
+.fi-kr.fis { background-image: url("../flags/kr.svg"); }
+.fi-kz.fis { background-image: url("../flags/kz.svg"); }
+.fi-lt.fis { background-image: url("../flags/lt.svg"); }
+.fi-lu.fis { background-image: url("../flags/lu.svg"); }
+.fi-lv.fis { background-image: url("../flags/lv.svg"); }
+.fi-md.fis { background-image: url("../flags/md.svg"); }
+.fi-mx.fis { background-image: url("../flags/mx.svg"); }
+.fi-my.fis { background-image: url("../flags/my.svg"); }
+.fi-no.fis { background-image: url("../flags/no.svg"); }
+.fi-nz.fis { background-image: url("../flags/nz.svg"); }
+.fi-ph.fis { background-image: url("../flags/ph.svg"); }
+.fi-pk.fis { background-image: url("../flags/pk.svg"); }
+.fi-pt.fis { background-image: url("../flags/pt.svg"); }
+.fi-ro.fis { background-image: url("../flags/ro.svg"); }
+.fi-rs.fis { background-image: url("../flags/rs.svg"); }
+.fi-ru.fis { background-image: url("../flags/ru.svg"); }
+.fi-sg.fis { background-image: url("../flags/sg.svg"); }
+.fi-sk.fis { background-image: url("../flags/sk.svg"); }
+.fi-th.fis { background-image: url("../flags/th.svg"); }
+.fi-tr.fis { background-image: url("../flags/tr.svg"); }
+.fi-tw.fis { background-image: url("../flags/tw.svg"); }
+.fi-ua.fis { background-image: url("../flags/ua.svg"); }
+.fi-uz.fis { background-image: url("../flags/uz.svg"); }
+.fi-vn.fis { background-image: url("../flags/vn.svg"); }
+.fi-za.fis { background-image: url("../flags/za.svg"); }

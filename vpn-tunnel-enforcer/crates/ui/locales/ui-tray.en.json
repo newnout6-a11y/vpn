@@ -1,0 +1,90 @@
+{
+  "ui": {
+    "tray": {
+      "ip": "IP: {{ip}}",
+      "ipUnknown": "IP: unknown",
+      "proxy": "Proxy: {{addr}}",
+      "proxyNone": "Proxy: not selected",
+      "tip": {
+        "protected": "VPN Tunnel Enforcer — Protected",
+        "leak": "VPN Tunnel Enforcer — IP LEAK",
+        "off": "VPN Tunnel Enforcer — Off",
+        "starting": "VPN Tunnel Enforcer — Starting protection",
+        "proxyDown": "VPN Tunnel Enforcer — VPN server unreachable",
+        "killSwitch": "VPN Tunnel Enforcer — Kill switch: check required",
+        "restarting": "VPN Tunnel Enforcer — Restarting",
+        "restartingProgress": "VPN Tunnel Enforcer — Restarting {{n}}/{{max}}",
+        "stopping": "VPN Tunnel Enforcer — Stopping protection",
+        "error": "VPN Tunnel Enforcer — Protection error, retry recovery",
+        "unknown": "VPN Tunnel Enforcer — Protection state not confirmed",
+        "speed": "↓ {{down}} / ↑ {{up}}"
+      },
+      "menu": {
+        "status": {
+          "protected": "Status: Protected",
+          "leak": "Status: IP LEAK",
+          "off": "Status: Off",
+          "starting": "Status: Starting protection",
+          "proxyDown": "Status: VPN server unreachable",
+          "killSwitch": "Status: Kill switch: check required",
+          "restarting": "Status: Restarting",
+          "restartingProgress": "Status: Restarting {{n}}/{{max}}",
+          "stopping": "Status: Stopping protection",
+          "error": "Status: Protection error, retry recovery",
+          "unknown": "Status: Protection state not confirmed"
+        },
+        "speed": "Speed: ↓ {{down}} / ↑ {{up}}",
+        "show": "Show window",
+        "start": "Turn protection on",
+        "stop": "Turn protection off",
+        "checkRoute": "Check route",
+        "openLogs": "Open logs",
+        "quit": "Exit"
+      },
+      "close": {
+        "title": "Protection is on",
+        "message": "The VPN is active.",
+        "detailTray": "You can minimize the window to the tray and protection keeps running in the background. Or turn protection off and close the app (this safely rolls back every network setting and takes a few seconds).",
+        "detailStop": "To exit cleanly, protection has to be turned off first: DNS, IPv6 and firewall rules go back to their original state. This takes a few seconds.",
+        "toTray": "Minimize to tray",
+        "stopAndClose": "Turn off and close",
+        "cancel": "Cancel"
+      },
+      "quitFailed": {
+        "title": "Exit not completed",
+        "note": "If you exit without restoring, the previous proxy settings come back the next time the app starts.",
+        "retry": "Retry",
+        "exitAnyway": "Exit without restoring"
+      },
+      "demo": {
+        "title": "Tray",
+        "menu": "Tray menu",
+        "tooltip": "Icon tooltip",
+        "icons": "Status icons",
+        "scene": "State",
+        "options": "Options",
+        "native": "Native tray",
+        "calls": "Win32 calls: text {{text}} · enabled {{enabled}} · tooltip {{tooltip}} · icon {{icon}}",
+        "noTray": "No tray icon was created",
+        "minimizeToTray": "Minimize to tray",
+        "killSwitch": "Kill switch engaged",
+        "leak": "Leak flag",
+        "traffic": "Traffic",
+        "closeWindow": "Close window",
+        "restoreFailed": "Could not restore the previous system proxy settings (demo).",
+        "status": {
+          "protected": "Protected",
+          "leak": "Leak",
+          "off": "Off",
+          "starting": "Starting",
+          "proxyDown": "Server down",
+          "killSwitch": "Kill switch",
+          "restarting": "Restarting",
+          "stopping": "Stopping",
+          "error": "Error",
+          "unknown": "Not confirmed"
+        }
+      }
+    }
+  }
+}

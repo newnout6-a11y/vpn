@@ -1,0 +1,93 @@
+{
+  "logs": {
+    "cleanup": {
+      "title": "Clear the logs?",
+      "action": "Clear",
+      "confirm": "Clear connection history, app/engine logs, snapshots and traffic-forensics artifacts? Packet capture will be stopped."
+    },
+    "exportDone": "File saved",
+    "exportFailed": "Export failed",
+    "resetFilters": "Reset filters",
+    "searchLabel": "Search the history",
+    "noMatches": "No session matches the filters.",
+    "period": "Period",
+    "connectionsCount_one": "{{count}} connection",
+    "connectionsCount_few": "{{count}} connections",
+    "connectionsCount_many": "{{count}} connections",
+    "connectionsCount_other": "{{count}} connections",
+    "startFailuresCount": "Failed to start ({{count}})",
+    "dateTime": "{{month}} {{day}}, {{time}}",
+    "month": {
+      "1": "Jan",
+      "2": "Feb",
+      "3": "Mar",
+      "4": "Apr",
+      "5": "May",
+      "6": "Jun",
+      "7": "Jul",
+      "8": "Aug",
+      "9": "Sep",
+      "10": "Oct",
+      "11": "Nov",
+      "12": "Dec"
+    },
+    "duration": {
+      "hm": "{{h}}h {{m}}m",
+      "ms": "{{m}}m {{s}}s",
+      "s": "{{s}}s"
+    },
+    "copy": {
+      "profile": "Profile: {{name}} ({{mode}})",
+      "started": "Started: {{time}}",
+      "ended": "Ended: {{time}}",
+      "traffic": "Traffic: ↓{{down}} / ↑{{up}} bytes",
+      "outcome": "Outcome: {{kind}} — {{headline}}",
+      "details": "Details:",
+      "reason": "Reason: {{reason}}",
+      "message": "Message: {{message}}"
+    },
+    "live": {
+      "title": "Journal",
+      "hint": "The latest lines of the app and engine logs, refreshed while this page is open.",
+      "refresh": "Refresh",
+      "openFolder": "Open folder",
+      "openFailed": "Could not open the logs folder",
+      "source": "Log file",
+      "sourceApp": "App",
+      "sourceSingBox": "sing-box",
+      "sourceXray": "Xray",
+      "levelAll": "All",
+      "levelWarn": "Warnings",
+      "levelError": "Errors",
+      "follow": "Follow",
+      "lines_one": "{{count}} line",
+      "lines_few": "{{count}} lines",
+      "lines_many": "{{count}} lines",
+      "lines_other": "{{count}} lines",
+      "loading": "Loading the log…",
+      "failed": "Could not load the logs: {{message}}",
+      "missing": "This log does not exist yet",
+      "missingHint": "It appears when the engine runs for the first time.",
+      "empty": "No log lines yet",
+      "noLevel": "No lines at this level",
+      "truncated": "Showing the end of the file; the full log is in the logs folder."
+    },
+    "demo": {
+      "headline": {
+        "userStop": "You turned protection off",
+        "serverDown": "Node unreachable — the connection was refused or timed out",
+        "rotation": "Automatic server rotation",
+        "schedule": "Disconnected on schedule",
+        "singboxCrash": "The VPN core (sing-box) exited unexpectedly (code {{code}}) after {{n}} auto-restart attempts. Last error: the server aborted the TLS handshake",
+        "networkLost": "The network changed under the tunnel: Wi-Fi → Ethernet",
+        "killswitch": "The kill switch held traffic after the tunnel dropped, after 2 auto-restart attempts.",
+        "systemSleep": "The computer went to sleep — the tunnel was recreated",
+        "noServer": "Could not start: no server selected",
+        "realityKey": "Could not start: the server rejected the REALITY key"
+      },
+      "hint": {
+        "noServer": "No server selected"
+      }
+    }
+  }
+}

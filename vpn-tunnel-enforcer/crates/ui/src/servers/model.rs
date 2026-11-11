@@ -1,0 +1,381 @@
+//! View models of the Servers page: display data only (never keys, URIs or subscription URLs)
+//! and no Dioxus types. The app fills them from the profiles / servers / probes stores.
+use std::net::IpAddr;
+use std::num::NonZeroU32;
+
+use vpnte_base::Msg;
+use vpnte_base::types::{ClientDevice, UnixMs};
+
+/// Id of the synthetic group that holds every server while the store has no groups at all.
+pub const VIRTUAL_ALL_GROUP: &str = "__virtual_all__";
+
+/// Persisted result of the last latency ping of a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnlineStatus {
+    Online,
+    Offline,
+    #[default]
+    Unknown,
+}
+
+/// Transport camouflage of a key, computed by the backend from the stored profile. A display
+/// hint, never evidence that the key can be dialled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Stealth {
+    Ech,
+    Reality,
+    Naive,
+    Obfs,
+    Utls,
+    Tls,
+    Plain,
+}
+
+/// Why a key-health check found a key dead (backend codes `auth-failed`, `hy2-udp-blocked`, …).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyHealthReason {
+    AuthFailed,
+    TlsFailed,
+    Timeout,
+    ConfigFailed,
+    HandshakeFailed,
+    NoOutbound,
+    Hy2AuthFailed,
+    Hy2UdpBlocked,
+    Hy2TlsFailed,
+    Hy2ConfigFailed,
+    Hy2HandshakeFailed,
+    /// A code this build does not know: shown raw.
+    Other(String),
+}
+
+impl KeyHealthReason {
+    const CODES: [(&'static str, KeyHealthReason); 11] = [
+        ("auth-failed", KeyHealthReason::AuthFailed),
+        ("tls-failed", KeyHealthReason::TlsFailed),
+        ("timeout", KeyHealthReason::Timeout),
+        ("config-failed", KeyHealthReason::ConfigFailed),
+        ("handshake-failed", KeyHealthReason::HandshakeFailed),
+        ("no-outbound", KeyHealthReason::NoOutbound),
+        ("hy2-auth-failed", KeyHealthReason::Hy2AuthFailed),
+        ("hy2-udp-blocked", KeyHealthReason::Hy2UdpBlocked),
+        ("hy2-tls-failed", KeyHealthReason::Hy2TlsFailed),
+        ("hy2-config-failed", KeyHealthReason::Hy2ConfigFailed),
+        ("hy2-handshake-failed", KeyHealthReason::Hy2HandshakeFailed),
+    ];
+
+    /// Parses a backend reason code.
+    pub fn from_code(code: &str) -> Self {
+        Self::CODES.iter().find(|(c, _)| *c == code).map_or_else(
+            || KeyHealthReason::Other(code.to_owned()),
+            |(_, r)| r.clone(),
+        )
+    }
+
+    /// The backend code (the suffix of the `servers.health.reasons.*` key).
+    pub fn code(&self) -> &str {
+        match self {
+            KeyHealthReason::Other(code) => code,
+            known => Self::CODES
+                .iter()
+                .find(|(_, r)| r == known)
+                .map_or("", |(c, _)| c),
+        }
+    }
+}
+
+/// Verdict of a key-health check (is the key alive, not how far away the server is).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyHealth {
+    pub online: bool,
+    /// Health latency: a different metric from the ping; never shown as the ping.
+    pub latency_ms: Option<u32>,
+    pub reason: Option<KeyHealthReason>,
+    pub checked_at: UnixMs,
+}
+
+/// Why a server is archived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArchiveReason {
+    /// The provider stopped publishing it: still selectable by hand (with a warning), never by
+    /// automation or as an external proxy.
+    Provider,
+    /// The user removed it (soft delete): not selectable until restored.
+    User,
+}
+
+/// Archive state of a server: it is purged for good at `purge_at` (30 days) unless restored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Archive {
+    pub reason: ArchiveReason,
+    pub at: UnixMs,
+    pub purge_at: UnixMs,
+}
+
+/// One saved server (a redacted profile summary).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ServerView {
+    pub id: String,
+    pub name: String,
+    /// Lower-case protocol: `vless`, `hysteria2`, `shadowsocks`, …
+    pub protocol: String,
+    pub host: String,
+    pub port: u16,
+    /// Latest DNS answer for `host` (the entry bridge), for display.
+    pub resolved_ip: Option<IpAddr>,
+    /// Best known exit country, ISO 3166-1 alpha-2 upper case.
+    pub country: Option<String>,
+    /// Verified exit IP (country check or probe); differs from `resolved_ip` behind relays.
+    pub exit_ip: Option<IpAddr>,
+    pub device: ClientDevice,
+    /// uTLS fingerprint the stored profile pins (`None`: the device default applies).
+    pub fingerprint: Option<String>,
+    /// The profile carries a full engine outbound (the «| JSON» suffix of Happ-style labels).
+    pub has_outbound: bool,
+    pub stealth: Option<Stealth>,
+    /// Persisted ping (measured while the tunnel was down).
+    pub ping_ms: Option<u32>,
+    pub status: OnlineStatus,
+    /// Persisted key-health verdict.
+    pub health: Option<KeyHealth>,
+    pub group_id: Option<String>,
+    pub last_seen_in_subscription_at: Option<UnixMs>,
+    /// Archived rows stay visible (and restorable) until they are purged.
+    pub archived: Option<Archive>,
+    /// `false`: switched off by the user; cannot be selected or started as a proxy.
+    pub enabled: bool,
+}
+
+/// Where a group's servers come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroupSource {
+    Subscription,
+    #[default]
+    Manual,
+}
+
+/// Result of the last subscription refresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroupStatus {
+    Active,
+    /// The provider answered but the feed is gone or empty; the keys are kept (they often work).
+    Expired,
+    /// Network error: usually the user is offline.
+    Unreachable,
+    #[default]
+    Unknown,
+}
+
+/// Why a subscription refresh failed (typed, replaces the old Russian sentinel string, S-4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchError {
+    /// The feed answered with no profiles.
+    Empty,
+    /// The feed answered with nothing this app supports.
+    Invalid,
+    Http(u16),
+    Network,
+    Tls,
+    Timeout,
+}
+
+/// One server group (a subscription or the manual key ring).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GroupView {
+    pub id: String,
+    pub name: String,
+    pub source: GroupSource,
+    pub status: GroupStatus,
+    pub imported_at: UnixMs,
+    /// Last successful refresh.
+    pub last_fetched_at: Option<UnixMs>,
+    pub last_fetch_attempt_at: Option<UnixMs>,
+    /// Set while the last refresh failed; cleared by a successful one.
+    pub last_fetch_error: Option<FetchError>,
+    pub traffic_used: Option<u64>,
+    pub traffic_total: Option<u64>,
+    pub expires_at: Option<UnixMs>,
+    /// Provider panel link (provider-controlled text: the page opens only `http(s)` URLs).
+    pub web_page_url: Option<String>,
+    /// User override of the auto-refresh interval; `None` = provider / default interval.
+    pub refresh_minutes: Option<NonZeroU32>,
+}
+
+/// Everything the Servers page renders from the stores, pushed on every change.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ServersView {
+    /// `false` until the first store read finished (the page shows a loading line).
+    pub loaded: bool,
+    /// Servers in store order.
+    pub servers: Vec<ServerView>,
+    pub groups: Vec<GroupView>,
+    /// The committed selection (what a connect would use).
+    pub active_id: Option<String>,
+    /// A server switch in flight; the marker moves only when it finishes.
+    pub switching_to: Option<String>,
+    /// Our tunnel is up (pings then go around it; the connected server is `active_id`).
+    pub tunnel_running: bool,
+    /// A connect / disconnect is in flight: no switch may start.
+    pub tunnel_busy: bool,
+    /// Another VPN's adapter is up: direct pings are unreliable.
+    pub foreign_vpn: bool,
+    /// The user turned third-party geo lookups off (privacy settings).
+    pub geo_lookup_disabled: bool,
+}
+
+/// Where an import lands.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AddTarget {
+    /// A new subscription gets its own group, a known one is refreshed, plain keys go to the
+    /// manual key ring.
+    #[default]
+    Auto,
+    Group(String),
+}
+
+/// What an import did.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ImportReport {
+    pub group_name: String,
+    /// The input was a subscription URL (fetched as `device`).
+    pub subscription: bool,
+    pub added: u32,
+    pub updated: u32,
+    pub unchanged: u32,
+    /// Lines that could not be imported (their text is never echoed: it may hold a key).
+    pub skipped: Vec<SkippedLine>,
+}
+
+/// One input line that was not imported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedLine {
+    /// 1-based line number in the pasted text.
+    pub line: u32,
+    pub reason: Msg,
+}
+
+/// How a server switch ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectOutcome {
+    Switched,
+    /// Cancelled by the user (here or on the start page): silent.
+    Cancelled,
+}
+
+/// Result of an exit-country check through the server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CountryCheck {
+    /// ISO 3166-1 alpha-2 code of the exit.
+    Verified(String),
+    /// Third-party geo lookups are off in the privacy settings.
+    GeoDisabled,
+    /// The lookup did not answer.
+    Failed,
+}
+
+/// A bulk export written to a file the user picked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportReport {
+    /// Display path of the written file.
+    pub path: String,
+    pub exported: u32,
+    pub skipped: u32,
+}
+
+/// Outcome of starting external loopback proxies for servers.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProxyStartReport {
+    pub started: Vec<StartedProxy>,
+    /// Servers already bound to a proxy slot.
+    pub already_running: Vec<String>,
+    pub skipped: Vec<(String, ProxySkip)>,
+    pub failed: Vec<(String, Msg)>,
+}
+
+/// A proxy slot that was started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartedProxy {
+    pub profile_id: String,
+    pub slot: u16,
+    /// `127.0.0.1:port` (credentials are never part of the view).
+    pub listen: Option<String>,
+}
+
+/// Why a server was not started as a proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxySkip {
+    /// It is the main VPN's server.
+    ActiveVpn,
+    /// Removed from its subscription, switched off or without a connection config.
+    Unavailable,
+}
+
+/// Outcome of a subscription refresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    Refreshed {
+        added: u32,
+        updated: u32,
+        removed: u32,
+        /// The provider says the subscription expired (keys kept).
+        expired: bool,
+    },
+    Failed(FetchError),
+}
+
+/// Passive facts about a server's endpoint (DNS, ASN, TCP latency to its own port). Never a TLS
+/// or HTTP request to the endpoint: a ClientHello with a VPN front's SNI gets the IP throttled by
+/// DPI boxes for minutes (users reported "the diagnostics page killed my internet").
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ProbeReport {
+    pub resolved_ips: Vec<IpAddr>,
+    pub reverse_dns: Vec<String>,
+    pub asn: Option<AsnInfo>,
+    /// `None` while our tunnel runs: TCP connects would measure the tunnel, not the server.
+    pub latency: Option<LatencyStats>,
+    /// The server's own port when it accepted a TCP connect (no port fan: a DPI signal).
+    pub open_ports: Vec<OpenPort>,
+}
+
+/// Autonomous system of an address.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AsnInfo {
+    pub asn: String,
+    pub org: String,
+    pub network: Option<String>,
+    pub country: Option<String>,
+}
+
+/// TCP connect latency samples, ms.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LatencyStats {
+    pub min: u32,
+    pub avg: u32,
+    pub median: u32,
+    pub max: u32,
+    pub jitter: u32,
+    /// Failed connects, 0..=1.
+    pub loss: f64,
+    pub samples: Vec<u32>,
+    pub attempted: Option<u32>,
+    pub succeeded: Option<u32>,
+}
+
+/// An open TCP port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenPort {
+    pub port: u16,
+    pub service: Option<String>,
+}
+
+/// Geolocation of a server's resolved address (cached by the backend; `None` when lookups are
+/// off in the privacy settings).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GeoInfo {
+    pub ip: Option<IpAddr>,
+    pub country: Option<String>,
+    pub city: Option<String>,
+    pub region: Option<String>,
+    pub org: Option<String>,
+    pub timezone: Option<String>,
+}

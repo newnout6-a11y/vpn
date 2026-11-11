@@ -1,0 +1,75 @@
+/* split-tunnel.css — the Apps page (vpnte_ui::split_tunnel) in the «Пломба» language: swiss.css
+ * tokens only, square corners, hairlines, mono paths. The rule control reuses the widgets' segmented
+ * look (.w-seg / .w-seg-item / .is-on) with its own pressed-button behaviour. */
+
+/* The page fill (paper over the page container, its padding) comes from swiss.css .swiss-skin. */
+.apps { display: flex; flex-direction: column; gap: 20px; color: var(--ink); }
+.apps > .w-section-head { margin-bottom: 0; }
+.apps-search .w-input { width: 100%; }
+
+/* ── Bypass command ──────────────────────────────────────────────────── */
+.apps-cmd { display: flex; flex-direction: column; gap: 12px; }
+.apps-cmd-hint { max-width: 80ch; font-size: 13px; line-height: 1.45; color: var(--mute); }
+.apps-cmd-row { display: flex; gap: 8px; }
+.apps-cmd-row .w-input { min-width: 0; flex: 1 1 auto; }
+.apps-cmd-row .w-btn { flex-shrink: 0; }
+.apps-cmd-result { margin: 0; border-left: 2px solid var(--ink); padding-left: 10px; font-size: 13px; overflow-wrap: anywhere; }
+.apps-cmd-result.is-error { border-left-color: var(--signal); font-weight: 500; color: var(--signal-ink); }
+
+/* ── Table ───────────────────────────────────────────────────────────── */
+.apps .w-td { vertical-align: middle; }
+.apps-th-actions { width: 56px; }
+.apps-row { transition: background-color 0.15s; }
+.apps-row.is-busy { background: color-mix(in srgb, var(--rule) 55%, transparent); }
+.apps-app { display: flex; min-width: 0; align-items: center; gap: 12px; }
+.apps-icon {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  object-fit: contain;
+}
+.apps-icon.is-letter {
+  border: 1px solid var(--rule-strong);
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mute);
+}
+.apps-icon.is-process { border: 1px solid var(--ink); color: var(--ink); }
+.apps-app-text { min-width: 0; flex: 1 1 auto; }
+.apps-app-name { display: flex; min-width: 0; align-items: center; gap: 8px; margin: 0; }
+.apps-app-title { min-width: 0; overflow: hidden; font-size: 14px; font-weight: 600; letter-spacing: -0.01em; text-overflow: ellipsis; white-space: nowrap; }
+.apps-app-path {
+  margin: 3px 0 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--mute);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.apps-app-path.swiss-mono { font-size: 11px; }
+
+/* A fixed width: the app column takes the rest (a th width alone loses against the growing cell). */
+.apps-rule { width: 312px; }
+.apps-rule-item {
+  display: inline-flex;
+  height: 30px;
+  min-width: 0;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+/* Three distinct "on" looks without a wall of orange: VPN = ink fill (the default .is-on), «Напрямую»
+ * (traffic leaves the tunnel) = signal frame, «Нет» (no rule, default routing) = grey fill. */
+.apps-rule-item.is-on[data-rule='Direct'] { background: transparent; color: var(--signal-ink); box-shadow: inset 0 0 0 2px var(--signal); }
+.apps-rule-item.is-on[data-rule='None'] { background: var(--rule); color: var(--ink); }
+.apps-rule-item:disabled { cursor: default; }
+.apps-row.is-busy .apps-rule-item:not(.is-on) { opacity: 0.5; }

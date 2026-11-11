@@ -1,0 +1,84 @@
+{
+  "common": {
+    "refresh": "Refresh"
+  },
+  "schedule": {
+    "emptyHint": "Create a schedule and the VPN will connect and disconnect on its own.",
+    "allDay": "All day",
+    "untilNextDay": "until {{time}} the next day",
+    "server": "Server",
+    "currentServer": "Current server",
+    "serverMissing": "server not found",
+    "serverHint": "Direct VPN connects to this server. “Current server” is the one selected when the schedule starts.",
+    "modeHint": "Hard and Soft go through the local proxy, so no server is picked here.",
+    "saveFailed": "Could not save the schedule: {{error}}",
+    "toggleFailed": "Could not switch the schedule",
+    "deleteFailed": "Could not delete the schedule",
+    "editItem": "Edit “{{name}}”",
+    "deleteItem": "Delete “{{name}}”",
+    "problem": {
+      "name": "Enter a name",
+      "days": "Pick at least one day",
+      "start": "Enter the start time (HH:MM)",
+      "end": "Enter the end time (HH:MM)",
+      "server": "The chosen server was deleted: pick another one or “Current server”"
+    },
+    "until": {
+      "dh": "{{d}}d {{h}}h",
+      "hm": "{{h}}h {{m}}m",
+      "m": "{{m}}m"
+    }
+  },
+  "splitTunneling": {
+    "refresh": "Refresh",
+    "refreshTitle": "Rescan installed apps",
+    "refreshed": "List updated",
+    "refreshAdded": "New apps found: {{n}}",
+    "refreshNone": "No new apps found",
+    "refreshFailed": "Could not update the list",
+    "addFailed": "Could not add the app",
+    "ruleFailed": "Could not change the rule",
+    "removeFailed": "Could not remove the app",
+    "searchLabel": "Search apps",
+    "columnApp": "App",
+    "columnRule": "Route",
+    "columnActions": "Actions",
+    "removeItem": "Remove “{{name}}”",
+    "ruleFor": "Route for “{{name}}”",
+    "ruleVpnTitle": "Through the VPN",
+    "ruleDirectTitle": "Around the VPN",
+    "ruleNoneTitle": "No rule",
+    "commandAdded": "{{name}} now bypasses the VPN.",
+    "invalidProcess": "Invalid process name. Example: curl.exe or yt-dlp"
+  },
+  "trafficHistory": {
+    "total_one": "{{count}} unique domain",
+    "total_other": "{{count}} unique domains",
+    "showingLatest": "Showing the latest {{count}} entries. Refine the search to see earlier ones.",
+    "searchLabel": "Search by domain",
+    "refreshFailed": "Could not refresh the traffic history",
+    "clearTitle": "Delete the traffic history?",
+    "clearConfirm": "Every recorded domain and its counters will be deleted. This cannot be undone.",
+    "clearFailed": "Could not delete the traffic history",
+    "openFailed": "Could not open the site",
+    "openSite": "Open {{host}} in the browser",
+    "sitePending": "Fetching site metadata",
+    "siteUnavailable": "No metadata",
+    "dateTime": "{{month}} {{day}}, {{time}}",
+    "day": "{{year}}-{{month}}-{{day}}",
+    "month": {
+      "1": "Jan",
+      "2": "Feb",
+      "3": "Mar",
+      "4": "Apr",
+      "5": "May",
+      "6": "Jun",
+      "7": "Jul",
+      "8": "Aug",
+      "9": "Sep",
+      "10": "Oct",
+      "11": "Nov",
+      "12": "Dec"
+    }
+  }
+}

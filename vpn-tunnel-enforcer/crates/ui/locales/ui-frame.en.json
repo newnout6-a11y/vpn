@@ -1,0 +1,18 @@
+{
+  "ui": {
+    "frame": {
+      "webview2Missing": "Microsoft Edge WebView2 Runtime is not installed; VPN Tunnel Enforcer needs it to show its window. Install it from https://developer.microsoft.com/microsoft-edge/webview2/ and start the app again.",
+      "demo": {
+        "title": "UI frame",
+        "fonts": "Fonts",
+        "palette": "Palette",
+        "legacyPalette": "Palette of the older screens",
+        "theme": "Theme",
+        "language": "Language",
+        "scheme": "Now: {{scheme}}",
+        "sample": "The quick brown fox jumps over the lazy dog",
+        "close": "Close"
+      }
+    }
+  }
+}
