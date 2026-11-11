@@ -10,7 +10,7 @@
     "currentServer": "Current server",
     "serverMissing": "server not found",
     "serverHint": "Direct VPN connects to this server. “Current server” is the one selected when the schedule starts.",
-    "modeHint": "Hard and Soft go through the local proxy, so no server is picked here.",
+    "modeHint": "In Tunnel and Proxy modes traffic goes through the local proxy, so no server is picked here.",
     "saveFailed": "Could not save the schedule: {{error}}",
     "toggleFailed": "Could not switch the schedule",
     "deleteFailed": "Could not delete the schedule",

@@ -282,7 +282,8 @@ fn SessionLine(row: SessionRow, open: bool, expanded: Signal<Option<String>>) ->
                 Trunc { text: row.profile_name.clone(), max: 40 }
             }
             Cell { muted: true,
-                span { title: t!(row.mode.label_key()), "{row.mode.short()}" }
+                // «Direct VPN» stays on one line: a wrapped mode doubles the row height
+                span { class: "truncate", {t!(row.mode.label_key())} }
             }
             Cell { mono: true, "{date_time(row.started_at, &tz)}" }
             Cell { mono: true,

@@ -65,7 +65,7 @@ pub(super) fn facts(bus: &MascotBus, b: Bench) -> Element {
         div { class: "swiss-facts",
             div { class: "swiss-fact", "data-perch-y": "bottom", "data-perch-x": "0.6", "data-perch-scale": "0.36", "data-perch-fit": "gap",
                 span { class: "swiss-label shrink-0", {t!("swiss.labelMode")} }
-                span { class: "swiss-fact-value", {t!("swiss.modeHard")} }
+                span { class: "swiss-fact-value", {t!("view.fact.modeTunnel")} }
             }
             div { class: "swiss-fact", "data-perch": "smart", "data-perch-y": "bottom", "data-perch-x": "0.6", "data-perch-scale": "0.36", "data-perch-fit": "gap",
                 span { class: "swiss-label shrink-0", {t!("swiss.labelSmart")} }
@@ -291,7 +291,7 @@ pub(super) fn identity(look: Look) -> Element {
 /// The leak banner above the facts strip (the `mascot-alert` reference has it).
 pub(super) fn leak_banner() -> Element {
     rsx! {
-        div { class: "glass rounded-[var(--radius-md)] transition-all duration-[var(--transition-normal)] p-5 !border-[var(--color-danger)]/40 !bg-[var(--color-danger)]/10",
+        div { class: "glass rounded-[var(--radius-md)] transition-colors duration-[var(--transition-normal)] p-5 !border-[var(--color-danger)]/40 !bg-[var(--color-danger)]/10",
             div { class: "flex items-center gap-3",
                 svg {
                     xmlns: "http://www.w3.org/2000/svg",
@@ -309,7 +309,7 @@ pub(super) fn leak_banner() -> Element {
                     path { d: "M9.309 3.652A12.252 12.252 0 0 0 11.24 2.28a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1v7a9.784 9.784 0 0 1-.08 1.264" }
                 }
                 div {
-                    p { class: "text-sm font-bold text-[var(--color-danger)]", {t!("ui.mascot.demo.leakTitle")} }
+                    p { class: "text-sm font-semibold text-[var(--color-danger)]", {t!("ui.mascot.demo.leakTitle")} }
                     p { class: "text-xs text-[var(--color-danger)]/80", {t!("ui.mascot.demo.leakBody")} }
                 }
             }

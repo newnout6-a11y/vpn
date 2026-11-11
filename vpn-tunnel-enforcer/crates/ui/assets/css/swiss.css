@@ -83,7 +83,8 @@
   font-size: 22px;
   font-weight: 900;
   text-transform: uppercase;
-  line-height: 0.9;
+  /* 20px a line: the two-line wordmark is 40px, on the 4px grid (0.9 gave 39.6px) */
+  line-height: 20px;
   letter-spacing: -0.03em;
 }
 .c-swiss .swiss-nav-item {
@@ -138,9 +139,7 @@
 .swiss-slab-side {
   display: flex;
   flex-direction: column;
-  gap: 14px;
   border-left: 1px solid var(--rule);
-  padding: 20px;
 }
 /* padding-top keeps the word where it sat under the (removed) 20px header row */
 .swiss-word-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding-top: 64px; }
@@ -178,7 +177,7 @@
   background: var(--ink);
   color: var(--paper);
   font-size: 17px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: -0.01em;
   text-align: left;
 }
@@ -369,7 +368,9 @@
 .swiss-slab + .swiss-panels { margin-top: 0 !important; }
 .swiss-fact {
   display: flex;
-  min-width: 0;
+  /* a long value («Нужны права администратора») widens its own cell instead of an ellipsis;
+     with short values the four cells stay equal */
+  min-width: max-content;
   flex: 1;
   align-items: center;
   gap: 12px;
@@ -476,7 +477,7 @@
   grid-template-columns: 62px minmax(0, 1fr);
   gap: 8px;
   border-bottom: 1px solid var(--rule);
-  padding: 7px 20px;
+  padding: 8px 20px;
 }
 .swiss-log-time { font-size: 11px; color: var(--mute); font-variant-numeric: tabular-nums; }
 .swiss-log-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
@@ -495,9 +496,8 @@
 .swiss-slab.is-on .swiss-progress,
 .swiss-slab.is-on .swiss-progress-cell { border-color: var(--on-rule); }
 .swiss-slab.is-on .swiss-progress-cell { color: var(--on-signal); }
-.swiss-slab .swiss-slab-side { gap: 0; padding: 0; }
 .swiss-identity { display: flex; flex: 1; flex-direction: column; gap: 20px; padding: 20px; }
-.swiss-slab-side > .swiss-transient { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 0 20px 14px; }
+.swiss-slab-side > .swiss-transient { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 0 20px 16px; }
 .swiss-head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .swiss-kbd-row { display: flex; align-items: center; gap: 4px; color: var(--mute); }
 .swiss-slab.is-on .swiss-kbd-row { color: var(--on-signal); opacity: 0.7; }
@@ -515,7 +515,7 @@
 .swiss-slab.is-on .swiss-kbd { border-color: var(--on-rule); }
 .c-swiss .swiss-confirm-text { font-size: 13px; font-weight: 600; }
 .swiss-confirm-actions { display: flex; gap: 8px; }
-.c-swiss .swiss-confirm-yes { padding: 6px 14px; background: var(--ink); color: var(--paper); font-size: 13px; font-weight: 700; }
+.c-swiss .swiss-confirm-yes { padding: 6px 14px; background: var(--ink); color: var(--paper); font-size: 13px; font-weight: 600; }
 .c-swiss .swiss-confirm-no,
 .c-swiss .swiss-cancel-btn { padding: 6px 14px; box-shadow: inset 0 0 0 1px currentColor; font-size: 13px; font-weight: 600; }
 .c-swiss .swiss-cancel-btn { display: inline-flex; align-items: center; gap: 8px; }
@@ -536,7 +536,7 @@
   margin-top: 4px;
   font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
   font-size: 24px;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1;
   letter-spacing: -0.02em;
   text-align: left;
@@ -555,7 +555,11 @@
   opacity: 0.75;
 }
 .c-swiss .swiss-sub.is-alert { color: var(--signal); opacity: 1; }
-.swiss-slab.is-on .swiss-sub.is-alert { color: var(--on-signal); font-weight: 700; }
+.swiss-slab.is-on .swiss-sub.is-alert { color: var(--on-signal); font-weight: 600; }
+/* Full opacity on the orange slab as for its labels: ink at 75% / 60% on #ff4f00 is ~3.4 / 2.7:1,
+   under AA for 11-14px text; the strike-through alone still says the address is hidden */
+.swiss-slab.is-on .swiss-sub,
+.swiss-slab.is-on .swiss-real.is-hidden { opacity: 1; }
 .c-swiss .swiss-real { margin-top: 4px; font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-size: 15px; }
 .c-swiss .swiss-real.is-hidden { text-decoration: line-through; text-decoration-thickness: 2px; opacity: 0.6; }
 .c-swiss .swiss-node { display: flex; min-width: 0; align-items: center; gap: 8px; margin-top: 4px; font-size: 15px; font-weight: 600; }
@@ -570,9 +574,9 @@
 .swiss-slab.is-on .swiss-power:hover:not(:disabled) { color: var(--ink); }
 /* Traffic panel */
 .swiss-traffic-figures { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 16px; padding: 16px 20px 0; }
-.c-swiss .swiss-traffic-big { margin-top: 6px; font-size: 48px; font-weight: 900; line-height: 1; letter-spacing: -0.05em; font-variant-numeric: tabular-nums; }
+.c-swiss .swiss-traffic-big { margin-top: 8px; font-size: 48px; font-weight: 600; line-height: 1; letter-spacing: -0.05em; font-variant-numeric: tabular-nums; }
 .c-swiss .swiss-traffic-big.is-dim { color: var(--mute); }
-.swiss-traffic-small { display: flex; flex-direction: column; gap: 6px; padding-bottom: 2px; }
+.swiss-traffic-small { display: flex; flex-direction: column; gap: 8px; padding-bottom: 2px; }
 .swiss-traffic-small > div { display: flex; align-items: baseline; justify-content: flex-end; gap: 12px; }
 .swiss-traffic-small .swiss-mono { width: 96px; text-align: right; font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .swiss-bars { display: flex; height: 72px; align-items: flex-end; gap: 2px; margin-top: auto; padding: 16px 20px; }
@@ -588,7 +592,7 @@
   align-items: center;
   gap: 8px;
   border-bottom: 1px solid var(--rule);
-  padding: 7px 20px;
+  padding: 8px 20px;
   font-size: 12px;
 }
 .swiss-server-row:hover { background: var(--rule); }
@@ -596,7 +600,7 @@
 .swiss-server-row.is-offline { color: var(--mute); }
 .swiss-server-flag { display: flex; align-items: center; }
 .c-swiss .swiss-server-name { display: flex; min-width: 0; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; text-align: left; }
-.c-swiss .swiss-best { flex-shrink: 0; background: var(--signal); padding: 0 4px; color: var(--on-signal); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 9px; text-transform: uppercase; }
+.c-swiss .swiss-best { flex-shrink: 0; background: var(--signal); padding: 0 4px; color: var(--on-signal); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; }
 .swiss-server-ping { text-align: right; font-variant-numeric: tabular-nums; }
 .swiss-server-health { display: flex; align-items: center; justify-content: flex-end; gap: 6px; font-size: 10px; opacity: 0.8; }
 .swiss-server-health.is-offline { color: var(--signal); opacity: 1; text-transform: uppercase; }
@@ -752,19 +756,20 @@
 .swiss-identity { gap: clamp(8px, 1.8vh, 20px); padding-top: clamp(12px, 1.8vh, 20px); padding-bottom: clamp(12px, 1.8vh, 20px); }
 .c-swiss .swiss-slab-side .swiss-power { height: clamp(52px, 7.5vh, 68px); }
 /* External proxies column */
-.swiss-proxy-top { display: flex; flex-shrink: 0; flex-direction: column; gap: 10px; padding: 12px 20px; }
+.swiss-proxy-top { display: flex; flex-shrink: 0; flex-direction: column; gap: 12px; padding: 12px 20px; }
 .swiss-proxy-summary { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
-.c-swiss .swiss-proxy-count { font-size: 32px; font-weight: 900; line-height: 1; letter-spacing: -0.05em; font-variant-numeric: tabular-nums; }
+.c-swiss .swiss-proxy-count { font-size: 32px; font-weight: 600; line-height: 1; letter-spacing: -0.05em; font-variant-numeric: tabular-nums; }
 .c-swiss .swiss-proxy-countries { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--mute); }
-.swiss-proxy-add { display: flex; align-items: flex-end; gap: 6px; }
+.swiss-proxy-add { display: flex; align-items: flex-end; gap: 8px; }
 .swiss-proxy-add > .swiss-proxy-select { min-width: 0; flex: 1 1 auto; }
 .c-swiss .swiss-proxy-select label { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-size: 10px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--mute); }
 .c-swiss .swiss-proxy-start { display: flex; height: 32px; width: 32px; flex-shrink: 0; align-items: center; justify-content: center; background: var(--ink); color: var(--paper); transition: background-color 0.15s, color 0.15s; }
 .c-swiss .swiss-proxy-start:hover:not(:disabled) { background: var(--signal); color: var(--on-signal); }
-.c-swiss .swiss-proxy-start:disabled { cursor: default; opacity: 0.45; }
+/* disabled: an empty square, not a grey slab that reads as a pressed button */
+.c-swiss .swiss-proxy-start:disabled { cursor: default; background: transparent; box-shadow: inset 0 0 0 1px var(--rule); color: var(--mute); }
 .c-swiss .swiss-proxy-start:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
 .c-swiss .swiss-proxy-empty { border-top: 1px solid var(--rule); }
-.swiss-proxy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; border-top: 1px solid var(--rule); padding: 7px 20px; }
+.swiss-proxy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; border-top: 1px solid var(--rule); padding: 8px 20px; }
 .c-swiss .swiss-proxy-name { display: flex; min-width: 0; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; }
 .c-swiss .swiss-proxy-cc { flex-shrink: 0; font-size: 10px; color: var(--mute); }
 .c-swiss .swiss-proxy-meta { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--mute); }

@@ -65,12 +65,12 @@
 @keyframes wz-in {
   from { opacity: 0; transform: translateY(6px); }
 }
-.wz-step-head { display: flex; flex-direction: column; gap: 6px; }
+.wz-step-head { display: flex; flex-direction: column; gap: 8px; }
 .wz-step-num { margin: 0; font-size: 11px; font-weight: 500; letter-spacing: 0.05em; color: var(--signal-ink); }
 .c-swiss .wz-title {
   margin: 0;
   font-size: 28px;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1.05;
   letter-spacing: -0.03em;
   color: var(--ink);
@@ -80,7 +80,7 @@
 }
 .wz-lead { max-width: 64ch; margin: 0; font-size: 14px; line-height: 1.5; color: var(--mute); }
 .wz-group-label {
-  margin: 4px 0 -6px;
+  margin: 4px 0 -8px;
   font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
   font-size: 10px;
   font-weight: 500;
@@ -88,7 +88,7 @@
   text-transform: uppercase;
   color: var(--mute);
 }
-.wz-note { max-width: 72ch; margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--mute); }
+.wz-note { max-width: 72ch; margin: 0; font-size: 13px; line-height: 1.45; color: var(--mute); }
 
 /* ── Radio cards ── */
 .wz-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
@@ -99,9 +99,9 @@
   min-width: 0;
   flex-direction: column;
   align-items: flex-start;
-  gap: 6px;
+  gap: 4px;
   border: 1px solid var(--rule-strong);
-  padding: 13px 16px 14px 38px;
+  padding: 12px 16px 16px 40px;
   background: transparent;
   color: var(--ink);
   text-align: left;
@@ -111,11 +111,11 @@
 .wz-card.is-on { border-color: var(--ink); background: var(--ink); color: var(--paper); }
 .wz-card:disabled { cursor: default; opacity: 0.45; }
 .wz-card:focus-visible { border-radius: 0; outline: 2px solid var(--signal); outline-offset: 2px; }
-.wz-card-mark { position: absolute; top: 17px; left: 16px; width: 12px; height: 12px; border: 1px solid currentColor; }
+.wz-card-mark { position: absolute; top: 16px; left: 16px; width: 12px; height: 12px; border: 1px solid currentColor; }
 .wz-card.is-on .wz-card-mark { border-color: var(--signal); background: var(--signal); }
 .wz-card-title { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
-.wz-card-text { font-size: 12.5px; line-height: 1.45; color: var(--mute); }
-.wz-card-meta { margin-top: 2px; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--mute); }
+.wz-card-text { font-size: 13px; line-height: 1.45; color: var(--mute); }
+.wz-card-meta { margin-top: 4px; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--mute); }
 .wz-card.is-on :is(.wz-card-text, .wz-card-meta) { color: color-mix(in srgb, var(--paper) 74%, transparent); }
 
 /* ── Key field, proxy search, results ── */
@@ -169,11 +169,11 @@
 @media (max-height: 640px) {
   /* the ruler already says which step this is */
   .wz-head { display: none; }
-  .wz-frame { gap: 10px; padding-top: 14px; }
-  .wz-card { padding-top: 10px; padding-bottom: 11px; }
-  .wz-card-mark { top: 14px; }
-  .wz-panel { gap: 12px; padding: 18px 22px 22px; }
-  .wz-foot { padding-bottom: 14px; }
+  .wz-frame { gap: 8px; padding-top: 16px; }
+  .wz-card { padding-top: 8px; padding-bottom: 12px; }
+  .wz-card-mark { top: 12px; }
+  .wz-panel { gap: 12px; padding: 16px 24px 24px; }
+  .wz-foot { padding-bottom: 16px; }
   .c-swiss .wz-title { font-size: 24px; }
 }
 @media (prefers-reduced-motion: reduce) {

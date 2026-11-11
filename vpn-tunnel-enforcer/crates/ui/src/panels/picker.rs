@@ -82,7 +82,7 @@ fn option_class(selected: bool, active: bool, disabled: bool) -> String {
     class
 }
 
-const TRIGGER: &str = "w-full flex items-center justify-between h-8 px-2 text-xs bg-[var(--color-card)] rounded-[var(--radius-sm)] border transition-all duration-[var(--transition-fast)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed";
+const TRIGGER: &str = "w-full flex items-center justify-between h-8 px-2 text-xs bg-[var(--color-card)] rounded-[var(--radius-sm)] border transition-colors duration-[var(--transition-fast)] focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed";
 
 /// Status dot + truncated label (the old `OptionLabel`).
 #[component]
@@ -189,7 +189,7 @@ pub(super) fn Picker(
     let activedescendant = active_now.map(|i| format!("{id}-listbox-option-{i}"));
     rsx! {
         div {
-            class: "relative flex flex-col gap-1.5",
+            class: "relative flex flex-col gap-2",
             class: if is_open { "z-[120]" },
             class: "swiss-proxy-select",
             onfocusout: move |_| open.set(false),

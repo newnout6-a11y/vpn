@@ -132,7 +132,7 @@ fn Figures(result: Option<SpeedResult>, dim: bool) -> Element {
             }
         }
         p { class: "st-meta swiss-mono", id: "st-meta",
-            "{result.server_name} • {result.profile_used} • {when}"
+            "{result.server_name} · {result.profile_used} · {when}"
         }
         if let Some((key, _, tone)) = egress_look(result.egress) {
             p { class: "st-note", id: "st-egress", "data-tone": tone.name(),
@@ -229,8 +229,8 @@ fn HistoryRow(row: SpeedResult, lang: Lang, tz: TimeZone, mbps: String, ms: Stri
             Cell { align: Align::End, mono: true, "{row.latency_ms} {ms}" }
             Cell { grow: true,
                 span { class: "st-server",
-                    span { class: "w-trunc", title: "{row.server_name} • {row.profile_used}",
-                        "{row.server_name} • {row.profile_used}"
+                    span { class: "w-trunc", title: "{row.server_name} · {row.profile_used}",
+                        "{row.server_name} · {row.profile_used}"
                     }
                     if let Some((sentence, mark_key, tone)) = mark {
                         Badge { tone, title: text(lang, sentence), {text(lang, mark_key)} }

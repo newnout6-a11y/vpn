@@ -11,7 +11,7 @@
 
 /* ── Text helpers ─────────────────────────────────────────────────────────── */
 .mt-quiet { margin: 0; font-size: 13px; line-height: 1.45; color: var(--mute); }
-.mt-hint { margin: 6px 0 0; max-width: 72ch; font-size: 12px; line-height: 1.45; color: var(--mute); }
+.mt-hint { margin: 8px 0 0; max-width: 72ch; font-size: 12px; line-height: 1.45; color: var(--mute); }
 .mt-meta { margin: 4px 0 0; font-size: 11px; letter-spacing: 0.02em; color: var(--mute); font-variant-numeric: tabular-nums; }
 .mt-path { font-size: 12px; word-break: break-all; }
 .mt-warning,

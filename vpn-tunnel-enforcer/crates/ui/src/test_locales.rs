@@ -1,7 +1,5 @@
 //! Locale checks shared by the packages' tests: flattening, placeholders, the runtime catalogs and
 //! the crate-wide fragment rules (valid JSON, equal ru/en keys and placeholders, allowed sections).
-// Shared by the packages' tests: a build with one package feature uses only some of them.
-#![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;

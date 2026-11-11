@@ -13,6 +13,13 @@
         "sample": "The quick brown fox jumps over the lazy dog",
         "close": "Close"
       }
+    },
+    "units": {
+      "b": "{{n}} B",
+      "kb": "{{n}} KB",
+      "mb": "{{n}} MB",
+      "gb": "{{n}} GB",
+      "tb": "{{n}} TB"
     }
   }
 }

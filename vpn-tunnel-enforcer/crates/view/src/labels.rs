@@ -138,12 +138,13 @@ impl FactValue {
     }
 }
 
-/// Routing mode fact: Hard or Soft (the setting, applied on the next connect).
+/// Routing mode fact: «Прокси» (Soft) or «Туннель» (Hard), the setting applied on the next
+/// connect. Named by what takes the traffic: the old «Soft Mode» was English inside Russian text.
 pub fn mode_fact(soft: bool) -> FactValue {
     FactValue::plain(if soft {
-        "swiss.modeSoft"
+        "view.fact.modeProxy"
     } else {
-        "swiss.modeHard"
+        "view.fact.modeTunnel"
     })
 }
 
@@ -184,6 +185,11 @@ pub enum FwState {
     Inactive,
     /// Not confirmed either way: never presented as protected.
     Unknown,
+    /// No WFP in this process, level standard: only Soft's system-proxy hold can act (programs
+    /// that honour the proxy stay blocked while the engine is down).
+    ProxyHold,
+    /// The saved level needs WFP, which this process cannot host (not elevated).
+    NeedsAdmin,
 }
 
 /// Kill-switch status as the firewall backend publishes it.
@@ -204,7 +210,22 @@ impl Default for FirewallStatus {
     }
 }
 
-/// Kill-switch fact: Проверяем / Держит / Снят / Неизвестно; an unconfirmed state is an alert.
+impl FirewallStatus {
+    /// The status as the routing mode presents it: the proxy hold exists only in Soft, so in
+    /// Hard (TUN, needs WFP) a level without WFP holds nothing and needs administrator rights.
+    pub fn in_mode(self, soft: bool) -> Self {
+        match self.state {
+            FwState::ProxyHold if !soft => Self {
+                state: FwState::NeedsAdmin,
+                ..self
+            },
+            _ => self,
+        }
+    }
+}
+
+/// Kill-switch fact: Проверяем / Держит / Снят / Неизвестно / Через прокси / Нужны права
+/// администратора; an unconfirmed state and a level that cannot hold are alerts.
 pub fn kill_switch_fact(fw: &FirewallStatus) -> FactValue {
     let key = if fw.checking {
         "swiss.ksChecking"
@@ -213,10 +234,12 @@ pub fn kill_switch_fact(fw: &FirewallStatus) -> FactValue {
             FwState::Verified => "swiss.ksHolding",
             FwState::Inactive => "swiss.ksOff",
             FwState::Unknown => "swiss.ksUnknown",
+            FwState::ProxyHold => "view.fact.ksProxy",
+            FwState::NeedsAdmin => "view.fact.ksNeedsAdmin",
         }
     };
     FactValue {
-        alert: fw.state == FwState::Unknown && !fw.checking,
+        alert: matches!(fw.state, FwState::Unknown | FwState::NeedsAdmin) && !fw.checking,
         dim: fw.state == FwState::Inactive,
         ..FactValue::plain(key)
     }
@@ -279,6 +302,9 @@ pub struct ExitLine {
     pub ip: Option<IpAddr>,
     /// Render dim: no address, or a transition is in flight.
     pub dim: bool,
+    /// Settled off and nothing measured yet (before the first session): the slot says
+    /// «ещё не определён» instead of a dash that reads as a broken value.
+    pub unmeasured: bool,
     pub sub: SubLine,
 }
 
@@ -308,9 +334,11 @@ pub fn exit_line(conn: &ConnView, exit: &ExitIp) -> ExitLine {
         _ if connected => SubLine::plain(Msg::new("dashboard.swissIpDetecting")),
         _ => SubLine::plain(Msg::new("dashboard.swissIpYourIsp")),
     };
+    let settled_off = !neutral && !connected && !leak;
     ExitLine {
         ip: exit.ip,
         dim: neutral || exit.ip.is_none(),
+        unmeasured: settled_off && exit.ip.is_none(),
         sub,
     }
 }
@@ -371,6 +399,11 @@ impl RealLine {
             ..SubLine::plain(Msg::new("dashboard.swissExposedToAll"))
         })
     }
+
+    /// Exposed with no address captured yet: the slot says «ещё не определён», not «—».
+    pub fn unmeasured(&self) -> bool {
+        self.look == RealLook::Exposed && self.ip.is_none()
+    }
 }
 
 /// The real-address block: exposure wording only for a settled off state or a visible leak
@@ -429,11 +462,12 @@ pub struct KillSwitchBanner {
     pub body: Msg,
 }
 
-/// The kill-switch banner: shown when our protection holds (or cannot be confirmed) while no TUN
-/// runs and nothing is in flight. A read-back in flight hides it; the backend publishes the
-/// status after a settled transition, so no suppression timer is needed (D-28).
+/// The kill-switch banner: shown when our WFP protection holds (or cannot be confirmed) while no
+/// TUN runs and nothing is in flight. A read-back in flight hides it; the backend publishes the
+/// status after a settled transition, so no suppression timer is needed (D-28). The proxy hold
+/// and a level that needs administrator rights install no filters: no banner.
 pub fn kill_switch_banner(conn: &ConnView, fw: &FirewallStatus) -> Option<KillSwitchBanner> {
-    let show = fw.state != FwState::Inactive
+    let show = matches!(fw.state, FwState::Verified | FwState::Unknown)
         && !fw.checking
         && !conn.tun_running()
         && conn.switching.is_none()

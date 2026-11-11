@@ -31,7 +31,7 @@
 .traffic-item-head .w-badge { font-variant-numeric: tabular-nums; }
 .traffic-pending { display: inline-flex; color: var(--mute); }
 .traffic-item-seen {
-  margin: 3px 0 0;
+  margin: 4px 0 0;
   overflow: hidden;
   font-size: 12px;
   color: var(--mute);

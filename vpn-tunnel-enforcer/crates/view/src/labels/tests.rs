@@ -176,8 +176,8 @@ fn switch_during_reconnect() {
 /// ui-dashboard §2.4 (`SwissFactsStrip.tsx:56-64`) value tables and emphasis.
 #[test]
 fn facts_strip_values() {
-    assert_eq!(key(&mode_fact(false).text), "swiss.modeHard");
-    assert_eq!(key(&mode_fact(true).text), "swiss.modeSoft");
+    assert_eq!(key(&mode_fact(false).text), "view.fact.modeTunnel");
+    assert_eq!(key(&mode_fact(true).text), "view.fact.modeProxy");
     let smart = smart_fact(true);
     assert_eq!(
         (
@@ -210,6 +210,16 @@ fn facts_strip_values() {
         (key(&unknown.text), unknown.alert),
         ("swiss.ksUnknown", true)
     );
+    let proxy = fw(FwState::ProxyHold, false);
+    assert_eq!(
+        (key(&proxy.text), proxy.alert, proxy.dim),
+        ("view.fact.ksProxy", false, false)
+    );
+    let admin = fw(FwState::NeedsAdmin, false);
+    assert_eq!(
+        (key(&admin.text), admin.alert, admin.dim),
+        ("view.fact.ksNeedsAdmin", true, false)
+    );
 
     let none = leak_fact(Verdict::NotChecked, false);
     assert_eq!(
@@ -225,6 +235,43 @@ fn facts_strip_values() {
     assert_eq!(key(&leak_fact(Verdict::Warn, false).text), "swiss.leakWarn");
     let found = leak_fact(Verdict::Fail, false);
     assert_eq!((key(&found.text), found.alert), ("swiss.leakFound", true));
+}
+
+/// NOADMIN §2: the proxy hold is Soft's kill switch; in Hard (TUN) a level without WFP holds
+/// nothing, so the fact asks for administrator rights instead of naming the proxy.
+#[test]
+fn kill_switch_state_follows_the_routing_mode() {
+    let fw = |state| FirewallStatus {
+        state,
+        checking: false,
+    };
+    assert_eq!(
+        fw(FwState::ProxyHold).in_mode(true).state,
+        FwState::ProxyHold
+    );
+    assert_eq!(
+        fw(FwState::ProxyHold).in_mode(false).state,
+        FwState::NeedsAdmin
+    );
+    for state in [
+        FwState::Verified,
+        FwState::Inactive,
+        FwState::Unknown,
+        FwState::NeedsAdmin,
+    ] {
+        for soft in [false, true] {
+            assert_eq!(
+                fw(state).in_mode(soft).state,
+                state,
+                "{state:?} soft={soft}"
+            );
+        }
+    }
+    let checking = FirewallStatus {
+        checking: true,
+        ..fw(FwState::ProxyHold)
+    };
+    assert!(checking.in_mode(false).checking);
 }
 
 fn exit(ip: Option<&str>, verdict: Verdict, leak: bool) -> ExitIp {
@@ -285,6 +332,15 @@ fn exit_line_branches() {
         &exit(Some("203.0.113.47"), Verdict::NotChecked, false),
     );
     assert_eq!(key(&isp.sub.text), "dashboard.swissIpYourIsp");
+    assert!(!isp.unmeasured);
+    // ui-unslop: before the first session nothing is measured; the slot says so in words
+    let first = exit_line(
+        &ConnView::default(),
+        &exit(None, Verdict::NotChecked, false),
+    );
+    assert!(first.unmeasured && first.dim);
+    assert_eq!(key(&first.sub.text), "dashboard.swissIpYourIsp");
+    assert!(!detecting.unmeasured);
     // D-29: mid-switch the old exit IP is dim with the neutral status, never «ваш провайдер».
     let switching = with(|c| {
         c.switching = Some("Riga-2".into());
@@ -333,7 +389,10 @@ fn real_line_looks() {
     );
     let off = real_line(&ConnView::default(), &clean, home);
     assert_eq!(off.look, RealLook::Exposed);
-    assert!(!off.struck());
+    assert!(!off.struck() && !off.unmeasured());
+    // ui-unslop: exposed with no address captured yet reads «ещё не определён», not «—»
+    assert!(real_line(&ConnView::default(), &clean, None).unmeasured());
+    assert!(!real_line(&on(), &clean, None).unmeasured());
     for conn in [
         with(|c| c.transition = Some(Transition::Connecting)),
         with(|c| c.cancelling = true),
@@ -433,6 +492,14 @@ fn kill_switch_banner_visibility() {
         checking: false,
     };
     assert!(kill_switch_banner(&off, &inactive).is_none());
+    // the proxy hold and a level that needs administrator rights install no WFP filters
+    for state in [FwState::ProxyHold, FwState::NeedsAdmin] {
+        let fw = FirewallStatus {
+            state,
+            checking: false,
+        };
+        assert!(kill_switch_banner(&off, &fw).is_none(), "{state:?}");
+    }
     for conn in [
         on(),
         ConnView {
@@ -565,11 +632,17 @@ fn emitted() -> Vec<Msg> {
         geo(Some("Amsterdam")),
         geo(None),
     ];
-    let firewalls =
-        [FwState::Verified, FwState::Inactive, FwState::Unknown].map(|state| FirewallStatus {
-            state,
-            checking: false,
-        });
+    let firewalls = [
+        FwState::Verified,
+        FwState::Inactive,
+        FwState::Unknown,
+        FwState::ProxyHold,
+        FwState::NeedsAdmin,
+    ]
+    .map(|state| FirewallStatus {
+        state,
+        checking: false,
+    });
     for conn in &conns {
         out.push(status_label(conn));
         let power = power_button(conn);

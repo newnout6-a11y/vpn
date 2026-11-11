@@ -14,11 +14,5 @@ vpnte-base.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 
-[features]
-# Build scaffolding: one flag per work package while they are written in parallel.
-default = ["view-logic", "view-mascot"]
-view-logic = []
-view-mascot = []
-
 [lints]
 workspace = true

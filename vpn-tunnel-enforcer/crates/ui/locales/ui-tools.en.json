@@ -77,7 +77,7 @@
     },
     "speedTest": {
       "time": "Time",
-      "server": "Server • profile",
+      "server": "Server · profile",
       "noResult": "No results yet: run a test.",
       "uploadMissing": "Upload not measured: the upload server did not answer.",
       "plainHttp": "The download was measured over plain HTTP: the HTTPS test servers did not answer.",

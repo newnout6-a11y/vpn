@@ -14,7 +14,7 @@
 .st-figure { min-width: 0; padding: 16px 20px 18px; }
 .st-figure + .st-figure { border-left: 1px solid var(--rule); }
 .st-big { display: flex; min-width: 0; align-items: baseline; gap: 8px; margin-top: 8px; }
-.st-value { font-size: 48px; font-weight: 900; line-height: 1; letter-spacing: -0.05em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.st-value { font-size: 48px; font-weight: 600; line-height: 1; letter-spacing: -0.05em; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .st-unit { font-size: 13px; font-weight: 500; color: var(--mute); white-space: nowrap; }
 .st-big.is-empty .st-value, .st-figures.is-dim .st-value { color: var(--mute); }
 @container st (max-width: 640px) { .st-value { font-size: 36px; } .st-figure { padding: 14px 16px 16px; } }

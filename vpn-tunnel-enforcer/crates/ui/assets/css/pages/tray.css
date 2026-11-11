@@ -31,7 +31,7 @@
 .c-swiss .tray-dialog-title {
   margin: 10px 0 0;
   font-size: 24px;
-  font-weight: 800;
+  font-weight: 600;
   line-height: 1.1;
   letter-spacing: -0.02em;
 }
@@ -71,7 +71,7 @@
 .c-swiss .tray-dialog-btn.is-default {
   background: var(--ink);
   color: var(--paper);
-  font-weight: 700;
+  font-weight: 600;
   box-shadow: none;
 }
 .c-swiss .tray-dialog-btn:hover {

@@ -36,7 +36,7 @@ pub(super) fn FactsStrip() -> Element {
                 }
             }
             Fact { label: t!("swiss.labelKs"), perch: "killswitch",
-                Value { value: kill_switch_fact(&view.firewall) }
+                Value { value: kill_switch_fact(&view.firewall.in_mode(view.soft_mode)) }
             }
             Fact { label: t!("swiss.labelLeaks"), perch: "leak",
                 Value { value: leak, blink: checking }

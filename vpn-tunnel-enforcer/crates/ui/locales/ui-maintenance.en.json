@@ -2,7 +2,7 @@
   "ui": {
     "maintenance": {
       "title": "Repair",
-      "subtitle": "Checks and restores the VPNTE network without unnecessary legacy actions.",
+      "subtitle": "Checks and restores the app's network settings",
       "state": {
         "title": "State"
       },
@@ -30,7 +30,7 @@
         "legacy": "Old version leftovers: undo its changes",
         "engines": "Processes: stop stuck sing-box/xray",
         "pending": "Waiting…",
-        "running": "Running...",
+        "running": "Running…",
         "done": "Done",
         "noChanges": "Nothing needed changing",
         "changed": "Changed: {{items}}"

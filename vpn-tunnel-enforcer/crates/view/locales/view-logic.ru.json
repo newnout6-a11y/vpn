@@ -12,10 +12,17 @@
       "ping": "{{ms}} мс",
       "metaPing": "{{protocol}} · {{ms}} мс",
       "metaOffline": "{{protocol}} · офлайн",
-      "metaUnchecked": "{{protocol}} · не проверен"
+      "metaUnchecked": "{{protocol}} · не проверен",
+      "unmeasured": "ещё не определён"
     },
     "traffic": {
       "hover": "{{mbps}} Мбит/с · {{n}} с назад"
+    },
+    "fact": {
+      "modeProxy": "Прокси",
+      "modeTunnel": "Туннель",
+      "ksProxy": "Через прокси",
+      "ksNeedsAdmin": "Нужны права администратора"
     }
   }
 }

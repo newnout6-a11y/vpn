@@ -12,10 +12,17 @@
       "ping": "{{ms}} ms",
       "metaPing": "{{protocol}} · {{ms}} ms",
       "metaOffline": "{{protocol}} · offline",
-      "metaUnchecked": "{{protocol}} · not checked"
+      "metaUnchecked": "{{protocol}} · not checked",
+      "unmeasured": "not measured yet"
     },
     "traffic": {
       "hover": "{{mbps}} Mbit/s · {{n}} s ago"
+    },
+    "fact": {
+      "modeProxy": "Proxy",
+      "modeTunnel": "Tunnel",
+      "ksProxy": "Via proxy",
+      "ksNeedsAdmin": "Needs administrator rights"
     }
   }
 }

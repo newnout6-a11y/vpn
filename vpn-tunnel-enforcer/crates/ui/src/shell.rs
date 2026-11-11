@@ -146,7 +146,7 @@ fn Sidebar(version: String) -> Element {
                 br {}
                 "Enforcer"
             }
-            div { class: "swiss-mono mt-1.5 text-[10px] text-[var(--mute)]",
+            div { class: "swiss-mono mt-2 text-[10px] text-[var(--mute)]",
                 "v{version} / {platform}"
             }
             nav { class: "mt-10 flex flex-col",

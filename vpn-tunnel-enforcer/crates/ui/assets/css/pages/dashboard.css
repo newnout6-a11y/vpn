@@ -16,9 +16,8 @@
 .c-swiss .swiss-power:hover:not(:disabled) { transform: scale(1.01); }
 .c-swiss .swiss-power:active:not(:disabled) { transform: scale(0.99); }
 
-/* A server switch: the button breathes and a signal ring pulses out of it. */
-.c-swiss .swiss-power.is-busy:not(.is-cancel) { animation: vpnte-power-pulse 1.2s ease-in-out infinite; }
-@keyframes vpnte-power-pulse { 50% { transform: scale(1.025); } }
+/* A server switch: a signal ring pulses out of the button. One loop only: the slab's stripes
+   already say "in flight", so the button itself no longer breathes (unslop pass). */
 .c-swiss .power-ring { animation: vpnte-power-ring 1.35s ease-out infinite; }
 @keyframes vpnte-power-ring {
   0%, 100% { transform: scale(0.95); opacity: 0.65; }
@@ -35,3 +34,11 @@
 /* D-29: mid-transition or with a faulted tunnel the real address is neither struck through nor
    "exposed": nothing is proven either way, so it is shown dim (as the exit address is). */
 .c-swiss .swiss-real.is-dim { color: var(--mute); }
+
+/* No address measured yet (before the first session): words at the real address's size, set
+   inside the address's own line box (height 1em of the 24 / 20px address), so nothing moves. */
+.c-swiss .swiss-ip.is-words { height: 1em; }
+.c-swiss .swiss-ip.is-words > span { font-size: 15px; font-weight: 400; line-height: 1; letter-spacing: 0; }
+@media (max-height: 820px) {
+  .c-swiss .swiss-ip.is-words > span { font-size: 14px; }
+}

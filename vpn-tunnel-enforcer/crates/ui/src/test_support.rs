@@ -1,6 +1,4 @@
 //! Helpers for the component tests that drive a `VirtualDom` without a webview.
-// Shared by the packages' tests: a build with one package feature uses only some of them.
-#![allow(dead_code)]
 
 use std::time::Duration;
 

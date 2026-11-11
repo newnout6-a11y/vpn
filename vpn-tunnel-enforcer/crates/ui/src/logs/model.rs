@@ -89,15 +89,7 @@ impl Mode {
             Mode::Direct => "direct",
         }
     }
-    /// The product word shown in the table (the same in both languages).
-    pub fn short(self) -> &'static str {
-        match self {
-            Mode::Hard => "Hard",
-            Mode::Soft => "Soft",
-            Mode::Direct => "Direct",
-        }
-    }
-    /// Key of the full mode name (`modes.hard` = «Hard (TUN)»).
+    /// Key of the mode name shown in the table (`modes.hard` = «Туннель»).
     pub fn label_key(self) -> &'static str {
         match self {
             Mode::Hard => "modes.hard",

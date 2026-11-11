@@ -60,7 +60,6 @@ pub fn fragments() -> Vec<(String, String, String)> {
 }
 
 /// What the app registers for this crate, `[ru, en]`: UI strings, then [`crate::LOCALES`].
-#[cfg(any(feature = "view-logic", feature = "view-mascot"))]
 pub fn catalogs() -> [Catalog; 2] {
     let mut ru = flatten(include_str!("../../ui/assets/locales/ru.json"));
     let mut en = flatten(include_str!("../../ui/assets/locales/en.json"));
@@ -72,7 +71,6 @@ pub fn catalogs() -> [Catalog; 2] {
 }
 
 /// `msg` resolves in both languages and supplies every `{{placeholder}}` of its template.
-#[cfg(any(feature = "view-logic", feature = "view-mascot"))]
 pub fn assert_resolves(msg: &vpnte_base::Msg, catalogs: &[Catalog; 2]) {
     for (lang, cat) in ["ru", "en"].into_iter().zip(catalogs) {
         let template = cat

@@ -43,7 +43,7 @@
 .apps-app-name { display: flex; min-width: 0; align-items: center; gap: 8px; margin: 0; }
 .apps-app-title { min-width: 0; overflow: hidden; font-size: 14px; font-weight: 600; letter-spacing: -0.01em; text-overflow: ellipsis; white-space: nowrap; }
 .apps-app-path {
-  margin: 3px 0 0;
+  margin: 4px 0 0;
   overflow: hidden;
   font-size: 12px;
   color: var(--mute);

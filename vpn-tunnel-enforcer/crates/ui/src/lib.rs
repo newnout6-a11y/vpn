@@ -1,12 +1,9 @@
 //! Dioxus desktop UI: window frame, shell, the start page in the Plomba design, the mascot and every other page. Talks to the backend only through view models and API traits.
 
-// --- shared by the work packages ---
-pub mod hooks;
-#[cfg(all(test, feature = "ui-frame"))]
+#[cfg(test)]
 mod test_locales;
 #[cfg(test)]
 mod test_support;
-pub mod units;
 
 /// This crate's locale fragments as `(ru_json, en_json)` layers, one per work package in file-name
 /// order. [`lang::init_locales`] registers them after the old app's catalog; the app passes the
@@ -70,72 +67,26 @@ pub const LOCALES: &[(&str, &str)] = &[
     ),
 ];
 
-// --- work package `ui-dashboard` ---
-#[cfg(feature = "ui-dashboard")]
-pub mod dashboard;
-
-// --- work package `ui-frame` ---
-#[cfg(feature = "ui-frame")]
 pub mod assets;
-#[cfg(feature = "ui-frame")]
-pub mod lang;
-#[cfg(feature = "ui-frame")]
-pub mod launch;
-#[cfg(feature = "ui-frame")]
-pub mod theme;
-
-// --- work package `ui-lists` ---
-#[cfg(feature = "ui-lists")]
-pub mod schedule;
-#[cfg(feature = "ui-lists")]
-pub mod split_tunnel;
-#[cfg(feature = "ui-lists")]
-pub mod traffic_history;
-
-// --- work package `ui-logs` ---
-#[cfg(feature = "ui-logs")]
-pub mod logs;
-
-// --- work package `ui-maintenance` ---
-#[cfg(feature = "ui-maintenance")]
-pub mod maintenance;
-
-// --- work package `ui-mascot` ---
-#[cfg(feature = "ui-mascot")]
-pub mod mascot;
-
-// --- work package `ui-panels` ---
-#[cfg(feature = "ui-panels")]
-pub mod panels;
-
-// --- work package `ui-servers` ---
-#[cfg(feature = "ui-servers")]
-pub mod servers;
-
-// --- work package `ui-settings` ---
-#[cfg(feature = "ui-settings")]
-pub mod settings;
-
-// --- work package `ui-shell` ---
-#[cfg(feature = "ui-shell")]
-pub mod pages;
-#[cfg(feature = "ui-shell")]
-pub mod shell;
-
-// --- work package `ui-tools` ---
-#[cfg(feature = "ui-tools")]
 pub mod availability;
-#[cfg(feature = "ui-tools")]
+pub mod dashboard;
+pub mod hooks;
+pub mod lang;
+pub mod launch;
+pub mod logs;
+pub mod maintenance;
+pub mod mascot;
+pub mod pages;
+pub mod panels;
+pub mod schedule;
+pub mod servers;
+pub mod settings;
+pub mod shell;
 pub mod speedtest;
-
-// --- work package `ui-tray` ---
-#[cfg(feature = "ui-tray")]
+pub mod split_tunnel;
+pub mod theme;
+pub mod traffic_history;
 pub mod tray;
-
-// --- work package `ui-widgets` ---
-#[cfg(feature = "ui-widgets")]
+pub mod units;
 pub mod widgets;
-
-// --- work package `ui-wizard` ---
-#[cfg(feature = "ui-wizard")]
 pub mod wizard;

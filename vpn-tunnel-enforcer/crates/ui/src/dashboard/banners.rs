@@ -44,7 +44,7 @@ fn RestartBanner(progress: String) -> Element {
                 Spinner { class: "w-6 h-6 text-[var(--color-warning)] animate-spin flex-shrink-0" }
                 div {
                     // two text nodes, as the reference: the title and the progress
-                    p { class: "text-sm font-bold text-[var(--color-warning)]",
+                    p { class: "text-sm font-semibold text-[var(--color-warning)]",
                         {format!("{} ", t!("ui.dashboard.restartTitle"))}
                         "{progress}"
                     }
@@ -92,7 +92,7 @@ fn KillSwitchBanner(title: String, body: String) -> Element {
             div { class: "flex items-start gap-4",
                 Lock { class: "w-8 h-8 text-[var(--color-danger)] flex-shrink-0 mt-0.5" }
                 div { class: "flex-1",
-                    p { class: "text-lg font-bold text-[var(--color-danger)]", "{title}" }
+                    p { class: "text-lg font-semibold text-[var(--color-danger)]", "{title}" }
                     p { class: "text-sm text-[var(--color-danger)]/90 mt-1", "{body}" }
                     div { class: "flex flex-wrap gap-2 mt-3",
                         button {
@@ -128,11 +128,11 @@ fn KillSwitchBanner(title: String, body: String) -> Element {
 #[component]
 fn LeakCard() -> Element {
     rsx! {
-        div { class: "glass rounded-[var(--radius-md)] transition-all duration-[var(--transition-normal)] p-5 !border-[var(--color-danger)]/40 !bg-[var(--color-danger)]/10",
+        div { class: "glass rounded-[var(--radius-md)] transition-colors duration-[var(--transition-normal)] p-5 !border-[var(--color-danger)]/40 !bg-[var(--color-danger)]/10",
             div { class: "flex items-center gap-3",
                 ShieldOff { class: "w-6 h-6 text-[var(--color-danger)] flex-shrink-0" }
                 div {
-                    p { class: "text-sm font-bold text-[var(--color-danger)]",
+                    p { class: "text-sm font-semibold text-[var(--color-danger)]",
                         {t!("ui.dashboard.leakTitle")}
                     }
                     p { class: "text-xs text-[var(--color-danger)]/80",

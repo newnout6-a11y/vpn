@@ -244,7 +244,9 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
                         {t!("ui.servers.row.restore")}
                     }
                 } else {
+                    // quiet in the list: the page header keeps the one primary action («Добавить»)
                     Button {
+                        kind: ButtonKind::Ghost,
                         small: true,
                         disabled: select_reason.is_some(),
                         disabled_reason: select_reason,

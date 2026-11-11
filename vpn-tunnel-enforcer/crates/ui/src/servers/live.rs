@@ -241,7 +241,7 @@ pub(crate) fn LiveCheckPanel(id: String) -> Element {
     }
 }
 
-/// Stage caption, «Этап i из n • t с» and the bar (never under 5 %); before the first event
+/// Stage caption, «Этап i из n · t с» and the bar (never under 5 %); before the first event
 /// «Подготовка проверки…».
 #[component]
 fn Progress(progress: Option<LiveProgress>) -> Element {

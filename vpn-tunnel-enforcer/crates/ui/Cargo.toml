@@ -23,99 +23,67 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 vpnte-base.workspace = true
-vpnte-view = { workspace = true, optional = true }
+vpnte-view.workspace = true
 # frame: WebView2 settings, at the versions wry builds
 webview2-com = "0.38"
 windows.workspace = true
 windows-core-061 = { package = "windows-core", version = "0.61" }
 
-[features]
-# Build scaffolding: one flag per work package while they are written in parallel.
-default = ["ui-frame", "ui-shell", "ui-panels", "ui-mascot", "ui-widgets", "ui-dashboard", "ui-tray", "ui-servers", "ui-settings", "ui-logs", "ui-tools", "ui-lists", "ui-maintenance", "ui-wizard"]
-ui-frame = []
-ui-shell = ["ui-frame"]
-ui-panels = ["ui-frame", "dep:vpnte-view"]
-ui-mascot = ["ui-frame", "dep:vpnte-view"]
-ui-widgets = ["ui-frame"]
-ui-dashboard = ["ui-shell", "ui-widgets", "ui-mascot", "ui-panels", "dep:vpnte-view"]
-ui-tray = ["ui-frame"]
-ui-servers = ["ui-shell", "ui-widgets"]
-ui-settings = ["ui-shell", "ui-widgets"]
-ui-logs = ["ui-shell", "ui-widgets"]
-ui-tools = ["ui-shell", "ui-widgets"]
-ui-lists = ["ui-shell", "ui-widgets"]
-ui-maintenance = ["ui-shell", "ui-widgets"]
-ui-wizard = ["ui-shell", "ui-widgets"]
-
 [[bin]]
 name = "demo_frame"
 path = "src/bin/demo_frame.rs"
-required-features = ["ui-frame"]
 
 [[bin]]
 name = "demo_shell"
 path = "src/bin/demo_shell.rs"
-required-features = ["ui-shell"]
 
 [[bin]]
 name = "demo_panels"
 path = "src/bin/demo_panels.rs"
-required-features = ["ui-panels"]
 
 [[bin]]
 name = "demo_mascot"
 path = "src/bin/demo_mascot/main.rs"
-required-features = ["ui-mascot"]
 
 [[bin]]
 name = "demo_widgets"
 path = "src/bin/demo_widgets/main.rs"
-required-features = ["ui-widgets"]
 
 [[bin]]
 name = "demo_dashboard"
 path = "src/bin/demo_dashboard.rs"
-required-features = ["ui-dashboard"]
 
 [[bin]]
 name = "demo_tray"
 path = "src/bin/demo_tray.rs"
-required-features = ["ui-tray"]
 
 [[bin]]
 name = "demo_servers"
 path = "src/bin/demo_servers.rs"
-required-features = ["ui-servers"]
 
 [[bin]]
 name = "demo_settings"
 path = "src/bin/demo_settings.rs"
-required-features = ["ui-settings"]
 
 [[bin]]
 name = "demo_logs"
 path = "src/bin/demo_logs.rs"
-required-features = ["ui-logs"]
 
 [[bin]]
 name = "demo_tools"
 path = "src/bin/demo_tools.rs"
-required-features = ["ui-tools"]
 
 [[bin]]
 name = "demo_lists"
 path = "src/bin/demo_lists.rs"
-required-features = ["ui-lists"]
 
 [[bin]]
 name = "demo_maintenance"
 path = "src/bin/demo_maintenance.rs"
-required-features = ["ui-maintenance"]
 
 [[bin]]
 name = "demo_wizard"
 path = "src/bin/demo_wizard.rs"
-required-features = ["ui-wizard"]
 
 [lints]
 workspace = true

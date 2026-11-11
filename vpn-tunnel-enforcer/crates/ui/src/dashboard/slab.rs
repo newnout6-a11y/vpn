@@ -206,6 +206,11 @@ fn ExitBlock(line: ExitLine, country: Option<String>) -> Element {
                         }
                     }
                 }
+            } else if line.unmeasured {
+                // words at the real address's size inside the address's own line box: nothing moves
+                div { class: "swiss-ip is-dim is-words",
+                    span { {t!("view.identity.unmeasured")} }
+                }
             } else {
                 div { class: "swiss-ip is-dim", "—" }
             }
@@ -230,8 +235,12 @@ fn ExitBlock(line: ExitLine, country: Option<String>) -> Element {
 /// while nothing is proven either way.
 #[component]
 fn RealBlock(line: RealLine) -> Element {
-    let address = line.ip.map_or_else(|| "—".to_owned(), |ip| ip.to_string());
-    let dim = line.look == vpnte_view::labels::RealLook::Neutral;
+    let address = match line.ip {
+        Some(ip) => ip.to_string(),
+        None if line.unmeasured() => t!("view.identity.unmeasured"),
+        None => "—".to_owned(),
+    };
+    let dim = line.look == vpnte_view::labels::RealLook::Neutral || line.unmeasured();
     rsx! {
         div {
             div { class: "swiss-label", {t!("dashboard.swissRealAddress")} }

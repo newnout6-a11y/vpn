@@ -55,11 +55,11 @@
       "routing": {
         "title": "Mode",
         "lead": "What goes through the tunnel.",
-        "hard": "Hard (TUN)",
+        "hard": "Tunnel",
         "hardText": "All Windows traffic goes through the tunnel: browsers, games, updates, any program.",
-        "soft": "Soft",
+        "soft": "Proxy",
         "softText": "No TUN: programs are given the proxy address through environment variables. Only the programs that honour them use the tunnel.",
-        "softNeedsProxy": "Soft works only through a local proxy: with a key the connection always uses TUN."
+        "softNeedsProxy": "Proxy mode works only through a local proxy: with a key the connection always uses TUN."
       },
       "protection": {
         "title": "Protection",
