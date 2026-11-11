@@ -1,3 +1,7 @@
 # Static MSVC CRT: the exe must not need the VC++ Redistributable on a clean Windows.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# `cargo xtask <command>`: build, engine pins and packaging live in the standalone xtask crate.
+[alias]
+xtask = "run --quiet --manifest-path xtask/Cargo.toml --target-dir target/xtask --"

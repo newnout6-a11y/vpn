@@ -1,0 +1,35 @@
+# The one pin manifest for bundled third-party binaries. `cargo xtask engines` downloads each
+# archive, checks its SHA-256, extracts the listed files (each also checked) and fills
+# resources/ for development and tests; `cargo xtask dist` stages the same bytes for packaging.
+schema = 1
+
+[[archive]]
+id = "sing-box"
+version = "1.14.4"
+url = "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip"
+sha256 = "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df"
+license = "GPL-3.0-or-later"
+files = [
+  { path = "sing-box-1.14.4-windows-amd64/sing-box.exe", name = "sing-box.exe", sha256 = "8f30682ee198855440d2a7fe070d5d3653793b2d01bb8c85eea88f93bbe7c8b9" },
+  { path = "sing-box-1.14.4-windows-amd64/libcronet.dll", name = "libcronet.dll", sha256 = "3217c6260fbca5f16072e0b79735742f40109a63bb0ff88fd6b96dd6b54a2928" },
+]
+
+[[archive]]
+id = "xray"
+version = "26.11.9"
+url = "https://github.com/XTLS/Xray-core/releases/download/v26.11.9/Xray-windows-64.zip"
+sha256 = "1262522266337b824f07beb8e1375786b437683b3890105469088f8e17e0a69d"
+license = "MPL-2.0"
+files = [
+  { path = "xray.exe", name = "xray.exe", sha256 = "1ca7a2cf61ba2c5d20b21a80d405b57933939751081cb289f07bd8ddf7cc3185" },
+]
+
+[[archive]]
+id = "wintun"
+version = "0.14.1"
+url = "https://www.wintun.net/builds/wintun-0.14.1.zip"
+sha256 = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
+license = "Wintun Prebuilt Binaries License"
+files = [
+  { path = "wintun/bin/amd64/wintun.dll", name = "wintun.dll", sha256 = "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce" },
+]
