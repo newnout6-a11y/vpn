@@ -1,0 +1,35 @@
+{
+  "probes": {
+    "egress": {
+      "invalid": "Invalid local SOCKS port or credentials",
+      "failed": "Could not determine the public IPv4 address through the local SOCKS port"
+    },
+    "geo": {
+      "reject": {
+        "geoDisabled": "IP country lookup is turned off in the settings",
+        "invalidIp": "The address is not a public IP",
+        "superseded": "The check is out of date: the server or the connection changed",
+        "switchInProgress": "A server switch is in progress",
+        "noActiveProfile": "No server is active",
+        "resolveFailed": "Could not get the server's IP address",
+        "lookupFailed": "Geolocation services did not return a country"
+      }
+    },
+    "keyHealth": {
+      "groupEmpty": "The group was not found or has no keys",
+      "reason": {
+        "noOutbound": "The profile has no connection configuration",
+        "configFailed": "The key configuration is not supported",
+        "tlsFailed": "The TLS/Reality handshake failed",
+        "authFailed": "The server rejected the key or password",
+        "timeout": "The server did not transfer data in time",
+        "handshakeFailed": "The server is reachable, but the key could not connect",
+        "hy2ConfigFailed": "The Hysteria2 configuration is not supported",
+        "hy2AuthFailed": "The server rejected the Hysteria2 password",
+        "hy2UdpBlocked": "UDP/QUIC is unavailable for Hysteria2",
+        "hy2TlsFailed": "The Hysteria2 TLS handshake failed",
+        "hy2HandshakeFailed": "Hysteria2 could not establish a connection"
+      }
+    }
+  }
+}

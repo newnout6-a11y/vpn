@@ -24,10 +24,16 @@ reqwest.workspace = true
 rustls.workspace = true
 ipnet.workspace = true
 futures-util.workspace = true
-windows.workspace = true
+windows = { workspace = true, features = ["Win32_Networking_WinHttp", "Win32_System_Services", "Win32_NetworkManagement_Dns"] }
 url.workspace = true
 fastrand.workspace = true
 regex.workspace = true
+jiff.workspace = true
+uuid.workspace = true
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
+rustls-platform-verifier = "0.7"
+sha2.workspace = true
+httparse = "1"
 
 [features]
 # Build scaffolding: one flag per work package while they are written in parallel.

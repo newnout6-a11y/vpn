@@ -1,0 +1,121 @@
+{
+  "probes": {
+    "diag": {
+      "readFailed": "Could not be read",
+      "category": { "app": "App", "tun": "TUN", "proxy": "Proxy", "network": "Network", "internet": "Internet", "windows": "Windows", "logs": "Logs", "routing": "Routing", "profile": "Profile" },
+      "app": { "label": "App and system", "value": "{{os}} {{arch}}, app {{version}}" },
+      "settings": { "label": "Routing settings", "value": "mode {{mode}}, proxy {{proxyType}}, bootstrap {{bootstrap}}, interval {{interval}} ms" },
+      "tun": { "label": "TUN status", "running": "running via {{upstream}}", "stopped": "stopped" },
+      "binaries": { "label": "Engine files", "present": "present", "missing": "missing files: {{files}}" },
+      "proxy": {
+        "label": "Current proxy",
+        "directVpnUnused": "not used in Direct VPN mode",
+        "directVpnIdle": "Direct VPN mode, tunnel not running",
+        "externalTunnel": "not needed: another VPN/TUN is already running",
+        "notSelected": "proxies found, but none is selected (listeners: {{count}})",
+        "notConfigured": "not configured and not found",
+        "open": "{{addr}} accepts connections",
+        "closed": "{{addr}} does not accept connections"
+      },
+      "adapters": { "label": "Network adapters", "value": "{{up}} of {{total}} up" },
+      "ipConfig": { "label": "IP configuration", "value": "configured interfaces: {{count}}" },
+      "routes": { "label": "Default and TUN routes", "viaTun": "Internet traffic goes through our TUN", "notViaTun": "the TUN runs, but the route to the Internet bypasses it", "count": "default routes: {{count}}" },
+      "dns": { "label": "Name resolution (DNS)", "records": "records received: {{count}}", "empty": "answer without addresses", "failed": "the name did not resolve" },
+      "listeners": { "label": "Local proxy ports", "value": "found: {{count}}" },
+      "processes": { "label": "VPN and proxy processes", "value": "found: {{count}}" },
+      "endpoint": {
+        "ipv4": "Internet: api.ipify.org",
+        "cloudflare": "Internet: Cloudflare",
+        "google": "Internet: Google",
+        "msft": "Internet: Microsoft connectivity test",
+        "store": "Internet: Microsoft Store",
+        "notRun": "not checked: curl.exe did not run",
+        "http": "HTTP {{code}} {{ip}}",
+        "noConnection": "no connection"
+      },
+      "servicesCore": { "label": "Filtering and DNS services", "value": "{{running}} of {{total}} running" },
+      "services": { "label": "Windows network services", "value": "disabled or missing: {{bad}} of {{total}}" },
+      "tunLog": { "label": "Engine log", "clean": "no errors", "errors": "errors in the current session: {{count}}", "historical": "TUN stopped, these are past entries (errors: {{count}}); they say nothing about the current route" },
+      "appLog": { "label": "App log", "clean": "no recent warnings", "problems": "warnings and errors in the last 15 minutes: {{count}}" },
+      "profile": { "label": "Active profile capabilities", "none": "no active profile selected", "value": "{{protocol}}, disguise {{stealth}}, remarks: {{count}}" }
+    },
+    "routing": {
+      "tunnelOff": "Protection is off — there is no routing to check.",
+      "inconclusive": "Could not measure both IPs (some echo servers did not answer). Run the check again.",
+      "leak": "The SAME IP ({{vpn}}) is seen through the VPN and directly. The tunnel does not change your public address — this is a leak, or the proxy goes direct.",
+      "smartUnverified": "The tunnel works (VPN {{vpn}} ≠ direct {{direct}}), but the Smart-RU runtime check did not finish: no reliable Russian echo through the TUN. Routing rules are covered by config tests; this live self-test only confirms the general VPN/direct split.",
+      "smartOk": "Everything works as intended: foreign sites go through the VPN ({{vpn}}) and Russian sites go direct with your real IP ({{direct}}). Smart RU mode really splits the traffic.",
+      "ruViaVpn": "The tunnel works, but the Russian host went out through the VPN ({{ru}}) instead of directly ({{direct}}). The Russian domain lists may still be downloading — try again in a minute.",
+      "ok": "The tunnel works: {{vpn}} is seen through the VPN, {{direct}} directly. Your public address really changes."
+    },
+    "plan": {
+      "tunnelsUnverified": "Could not check for other tunnels: a double tunnel is not ruled out.",
+      "readyUnverified": "All other start conditions are met, but the absence of a conflict is not confirmed.",
+      "doubleTunnel": {
+        "title": "Double tunnel found",
+        "explanation": "This is exactly the setup that makes the Internet “sometimes die”: DNS and HTTPS can end up in a routing loop.",
+        "before": "Before: {{foreign}} + {{tun}}.",
+        "after": "After: one active tunnel. Stop {{tun}}, or turn off TUN in the VPN client and keep only its proxy.",
+        "blocker": "An external TUN and {{tun}} are active at the same time.",
+        "gate": "Double tunnel found. This is exactly the setup that makes the Internet “sometimes die”: DNS and HTTPS can end up in a routing loop. After: one active tunnel. Stop {{tun}}, or turn off TUN in the VPN client and keep only its proxy."
+      },
+      "foreignTun": {
+        "title": "A VPN/TUN is already on",
+        "explanation": "Hard mode is not needed here and would do harm. The system already has an active tunnel, so the app must not add a second one.",
+        "before": "Before: active system tunnel {{foreign}}.",
+        "after": "After: the current VPN stays the main route; VPNTE only shows the status and helps set up apps when needed.",
+        "blocker": "An external VPN/TUN is already active. Starting our protection would create a routing conflict.",
+        "gate": "A VPN/TUN is already on. Hard mode is not needed here and would do harm. The system already has an active tunnel, so the app must not add a second one. After: the current VPN stays the main route; VPNTE only shows the status and helps set up apps when needed."
+      },
+      "noProfile": {
+        "title": "No VPN profile selected",
+        "explanation": "Direct VPN mode needs no local proxy, but it needs an active server profile.",
+        "before": "Before: Direct VPN is on in the settings, but no server is selected.",
+        "after": "After: once a profile is selected, the app brings the TUN up straight to that VPN server.",
+        "blocker": "No active Direct VPN profile is selected.",
+        "gate": "No VPN profile selected. Direct VPN mode needs no local proxy, but it needs an active server profile. After: once a profile is selected, the app brings the TUN up straight to that VPN server."
+      },
+      "directReady": {
+        "title": "Direct VPN can be turned on",
+        "explanation": "Direct VPN mode needs no local proxy: only an active profile and no conflict with another TUN.",
+        "before": "Before: the Internet takes the normal route, active profile {{profile}} is selected.",
+        "after": "After: Internet traffic goes through {{tun}} straight to {{profile}}."
+      },
+      "noProxy": {
+        "title": "Proxy not found",
+        "explanation": "Hard mode builds the system tunnel on top of a local proxy. Without a proxy the TUN must not start: traffic would go nowhere.",
+        "before": "Before: no working proxy.",
+        "after": "After: once a proxy is on, the TUN gets a safe entry point.",
+        "blocker": "No local proxy found. There is nothing to turn into a system tunnel.",
+        "gate": "Proxy not found. Hard mode builds the system tunnel on top of a local proxy. Without a proxy the TUN must not start: traffic would go nowhere. After: once a proxy is on, the TUN gets a safe entry point."
+      },
+      "proxyDead": {
+        "title": "Proxy does not answer",
+        "explanation": "Starting the TUN on a closed proxy would break the Internet at once.",
+        "before": "Before: {{proxy}} is closed or unreachable.",
+        "after": "After: once the proxy runs, a safe route appears.",
+        "blocker": "Proxy {{proxy}} was found but does not answer.",
+        "gate": "Proxy does not answer. Starting the TUN on a closed proxy would break the Internet at once. After: once the proxy runs, a safe route appears."
+      },
+      "hardReady": {
+        "title": "Hard mode can be turned on",
+        "explanation": "No conflicting TUN found and the proxy is alive. This is a safe setup for system-wide redirection.",
+        "before": "Before: the Internet takes the normal route, the proxy is available at {{proxy}}.",
+        "after": "After: Internet traffic goes through {{tun}}, and the proxy core is excluded from the tunnel so there is no loop."
+      },
+      "step": {
+        "removeDouble": { "label": "Remove the double tunnel", "before": "Two system tunnels are on now: {{foreign}} and {{tun}}.", "after": "The app stops {{tun}}. One existing VPN/TUN remains, so DNS stops looping." },
+        "useExisting": { "label": "Use the VPN that is already up", "before": "The system already goes through {{foreign}}.", "after": "VPNTE does not create a second TUN. This is safer: one route, no DNS loop." },
+        "viaProxy": { "label": "Connect apps through the local proxy", "before": "Local proxy found: {{proxy}}.", "after": "Soft mode can be turned on for individual apps: they use this proxy without a second TUN." },
+        "chooseProfile": { "label": "Select a VPN profile", "before": "Direct VPN has nowhere to connect: no active profile is selected.", "after": "Once a profile is selected, the app can bring the TUN up straight to that server." },
+        "connectProfile": { "label": "Connect the Direct VPN profile", "before": "There is no system {{tun}} now; active profile {{profile}} is ready to start.", "after": "VPNTE brings up one system tunnel straight to the selected VPN server." },
+        "lanDirectVpn": { "label": "Keep the local network direct", "before": "Local addresses and localhost must not go to the VPN server.", "after": "The local network stays direct, Internet traffic goes through Direct VPN." },
+        "findProxy": { "label": "Find a proxy", "before": "There is no recognisable local proxy port now.", "after": "Start your VPN client in Proxy mode; then the app can build the system TUN." },
+        "checkProxy": { "label": "Check the proxy", "before": "{{proxy}} is selected, but the port does not accept connections.", "after": "Once the proxy answers, VPNTE can send all Internet traffic through it." },
+        "createTun": { "label": "Create the system TUN", "before": "There is no system {{tun}} now, and proxy {{proxy}} works.", "after": "VPNTE creates one system tunnel and sends ordinary Internet traffic through this proxy." },
+        "lanDirectProxy": { "label": "Keep the local network direct", "before": "Local addresses and localhost must not go to the external proxy.", "after": "The local network stays direct, Internet traffic goes through the proxy." },
+        "checkTunnels": { "label": "Check for other tunnels", "before": "Could not check for other tunnels: a double tunnel is not ruled out.", "after": "Run the check again; it is not confirmed that there is no second TUN." }
+      }
+    }
+  }
+}
