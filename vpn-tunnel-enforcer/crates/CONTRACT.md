@@ -14,9 +14,21 @@ this file says HOW the pieces fit and overrides a spec wherever they disagree.
 - sing-box owns routes and DNS hijack (TUN `auto_route` + `strict_route`, dual stack). The app never rewrites
   physical adapter settings. Kill switch / leak protection = WFP filters in our own provider + sublayer:
   dynamic session for `standard` (gone when the process dies), persistent only for `strict`. Default: Off.
-- The process runs elevated (manifest `asInvoker`; at start it relaunches itself via ShellExecute "runas").
-  `--no-elevate` / env `VPNTE_NO_ELEVATE=1` skips that: UI, soft mode, probes and external proxies work,
-  privileged operations return `ErrorKind::Permission`. Development and automated UI checks use this mode.
+- **Privilege model (owner requirement of 2026-11-11, replaces "the process runs elevated").** The application
+  never runs elevated and never triggers UAC on its own (manifest `asInvoker`, no self-relaunch). Unprivileged
+  by itself: UI, storage, probes, external proxies, soft-mode tweaks, autostart, and **proxy capture**: the
+  engine listens on a loopback mixed inbound and the app points the per-user system proxy at it. Privileged
+  operations (TUN capture, the WFP kill switch and leak protection, browser policies, packet capture / ETW,
+  removal of the old version's system leftovers) run in the optional helper service `vpnte-service`
+  (LocalSystem, installed once by the per-machine installer), which the app drives over a named pipe; when the
+  process happens to be elevated (development, CI) the app hosts the same code in-process. Without service and
+  without elevation those operations return `ErrorKind::Permission` and the UI shows them as unavailable, never
+  as working. Libraries therefore never self-elevate, privileged modules take everything through parameters
+  and return plain data (they may live in another process than the UI), and "not available" is reported
+  honestly. Work finished under the old assumption is adapted by dedicated follow-up packages (`noadmin-*`):
+  if you are reviewing or integrating something else, do NOT redesign for this yourself; keep the code as its
+  brief says and just add no new dependency on running elevated. `--no-elevate` / `VPNTE_NO_ELEVATE=1` are
+  accepted and mean nothing any more.
 - Data dir `%APPDATA%\VPN Tunnel Enforcer\` (override: env `VPNTE_DATA_DIR`). JSON documents, atomic writes,
   secrets wrapped with DPAPI. One-time non-destructive import from the Electron dir
   `%APPDATA%\vpn-tunnel-enforcer\` (override: env `VPNTE_LEGACY_DIR`).

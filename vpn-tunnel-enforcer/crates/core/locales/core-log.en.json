@@ -1,0 +1,12 @@
+{
+  "core": {
+    "log": {
+      "file": {
+        "app": "Application log",
+        "appPrevious": "Application log (previous)",
+        "engine": "{{engine}} log",
+        "enginePrevious": "{{engine}} log (previous)"
+      }
+    }
+  }
+}

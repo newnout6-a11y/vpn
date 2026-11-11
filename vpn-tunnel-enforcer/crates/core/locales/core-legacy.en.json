@@ -1,0 +1,11 @@
+{
+  "core": {
+    "legacy": {
+      "keyUnavailable": "The keys saved by the old version could not be unlocked with Windows secure storage. The old version's files are unchanged, so the key import can be retried later.",
+      "secretUnreadable": "A key saved by the old version cannot be decrypted and was skipped.",
+      "fileNewer": "A file of the old version was created by a newer version of the app and was not transferred.",
+      "fileInvalid": "A file of the old version is damaged and was not transferred.",
+      "fileUnreadable": "A file of the old version could not be read and was not transferred."
+    }
+  }
+}
