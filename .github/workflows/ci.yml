@@ -134,9 +134,9 @@ jobs:
       # Tests marked #[ignore = "needs elevation"] (and any other ignored test); one at a time because they
       # share machine-wide state (WFP provider, TUN adapter, task folder).
       # A finished crate the rest of the workspace does not depend on yet: prove its privileged code early.
-      - name: winnet: unprivileged tests
+      - name: 'winnet: unprivileged tests'
         run: cargo test -p vpnte-winnet
-      - name: winnet: real WFP objects and the autostart task
+      - name: 'winnet: real WFP objects and the autostart task'
         run: cargo test -p vpnte-winnet -- --ignored elevated_ --test-threads=1 --nocapture
       - name: Tests that need elevation
         run: cargo test --workspace --locked -- --ignored --test-threads=1
@@ -175,8 +175,10 @@ jobs:
         run: cargo xtask nsis
       - name: Build the installer
         run: cargo xtask dist
-      # GitHub sets CI=true; smoke-install refuses to run anywhere else.
-      - name: Silent install, upgrade over itself, uninstall
+      # GitHub sets CI=true; smoke-install refuses to run anywhere else. The installer is per-user (no
+      # administrator rights); the runner is elevated, so smoke-install also checks that nothing machine-wide
+      # (HKLM keys, all-users links) was written.
+      - name: Silent per-user install, upgrade over itself, uninstall
         run: cargo xtask smoke-install
       # The repository is public: only the installer and its checksums, never logs or user data.
       - name: Upload the installer
