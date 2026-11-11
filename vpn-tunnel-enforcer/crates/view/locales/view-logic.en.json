@@ -1,0 +1,21 @@
+{
+  "view": {
+    "dash": "—",
+    "status": {
+      "proxyDown": "Server not responding — traffic blocked",
+      "degraded": "Connected — protection weakened",
+      "degradedTun": "Connected — protection weakened: second VPN/TUN {{name}}"
+    },
+    "identity": {
+      "country": "{{country}}",
+      "countryCity": "{{country}}, {{city}}",
+      "ping": "{{ms}} ms",
+      "metaPing": "{{protocol}} · {{ms}} ms",
+      "metaOffline": "{{protocol}} · offline",
+      "metaUnchecked": "{{protocol}} · not checked"
+    },
+    "traffic": {
+      "hover": "{{mbps}} Mbit/s · {{n}} s ago"
+    }
+  }
+}

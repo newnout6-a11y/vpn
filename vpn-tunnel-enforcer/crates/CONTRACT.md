@@ -97,6 +97,12 @@ A crate that needs something from a crate it does not depend on takes it as a sm
     The start page must match the reference in `.tmp/rewrite/ref/ui/` exactly; every other page is rebuilt in
     the same visual language (paper / ink / rule / signal tokens, square corners, mono captions, hairlines)
     with the shared widgets, never with the old rounded "Mac" look.
+    Convention for every `XxxApi` (so the app can implement all of them the same way): `trait XxxApi: 'static`,
+    handed to components through context as `Rc<dyn XxxApi>` (`use_context::<Rc<dyn XxxApi>>()`). Pushed state
+    is exposed as `tokio::sync::watch::Receiver<T>` (one `Clone + PartialEq` snapshot struct per page or
+    panel) that the page's root turns into a `Signal` with one `use_future` pump; actions are async methods
+    declared with `#[async_trait::async_trait(?Send)]` returning `vpnte_base::AppResult<T>`, called from
+    `spawn` / `use_action`. View-model types hold display data only (never secrets) and no Dioxus types.
 
 ## 4. Rules for every implementer
 1. **Work incrementally — hard technical limit.** Any single model response that streams longer than about

@@ -1,0 +1,21 @@
+{
+  "view": {
+    "dash": "—",
+    "status": {
+      "proxyDown": "Сервер не отвечает — трафик заблокирован",
+      "degraded": "Подключено — защита ослаблена",
+      "degradedTun": "Подключено — защита ослаблена: второй VPN/TUN {{name}}"
+    },
+    "identity": {
+      "country": "{{country}}",
+      "countryCity": "{{country}}, {{city}}",
+      "ping": "{{ms}} мс",
+      "metaPing": "{{protocol}} · {{ms}} мс",
+      "metaOffline": "{{protocol}} · офлайн",
+      "metaUnchecked": "{{protocol}} · не проверен"
+    },
+    "traffic": {
+      "hover": "{{mbps}} Мбит/с · {{n}} с назад"
+    }
+  }
+}
