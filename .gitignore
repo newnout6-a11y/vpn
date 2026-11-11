@@ -33,3 +33,6 @@ vpn-tunnel-enforcer/scripts/inspect-bundle.mjs
 coverage/
 .agents/
 .codebase-memory/
+
+# Rust build output
+vpn-tunnel-enforcer/target/

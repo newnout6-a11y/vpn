@@ -1,0 +1,32 @@
+[package]
+name = "vpnte-tunnel"
+description = "Connection runtime and lifecycle: start, stop, switch, state machine and session history."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+vpnte-base.workspace = true
+vpnte-core.workspace = true
+vpnte-winnet.workspace = true
+vpnte-profiles.workspace = true
+vpnte-servers.workspace = true
+vpnte-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+parking_lot.workspace = true
+futures-util.workspace = true
+ipnet.workspace = true
+uuid.workspace = true
+async-trait.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,37 @@
+[package]
+name = "vpnte-core"
+description = "Foundation services: data directories, JSON stores, DPAPI secrets, settings, redaction, logging, net helpers, SOCKS5 client, operation registry, legacy-data primitives."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+vpnte-base.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+parking_lot.workspace = true
+anyhow.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+windows.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hex.workspace = true
+getrandom.workspace = true
+regex.workspace = true
+zeroize.workspace = true
+hmac.workspace = true
+futures-util.workspace = true
+jiff.workspace = true
+fastrand.workspace = true
+ipnet.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true
