@@ -104,6 +104,7 @@ async fn run(tunnel: &TunnelView, throughput: bool, cancel: &CancellationToken) 
         wire: &wire,
         endpoint_ip: None,
         throughput,
+        deadline: None,
     };
     run_engine_probe(input, cancel).await
 }
@@ -198,7 +199,7 @@ async fn connect_alone_is_no_handshake() {
     let fake = fake_socks(|_| Reply::Close).await;
     let wire = Wire::plain();
     let cancel = CancellationToken::new();
-    let m = measure(&wire, &fake.inbound, None, &cancel).await;
+    let m = measure(&wire, &fake.inbound, None, None, &cancel).await;
     let log = "outbound/vless[proxy-out]: tls handshake\nvless: authentication failed";
     let stage = assemble(
         m,
@@ -220,7 +221,7 @@ async fn connect_alone_is_no_handshake() {
         Some("probe destination closed without HTTP response")
     );
     assert_eq!(stage.egress.status, EgressStatus::Error);
-    let m = measure(&wire, &fake.inbound, None, &cancel).await;
+    let m = measure(&wire, &fake.inbound, None, None, &cancel).await;
     let stage = assemble(
         m,
         &vless(),
@@ -244,6 +245,7 @@ async fn reflectors_disagree() {
     let m = measure(
         &Wire::plain(),
         &fake.inbound,
+        None,
         None,
         &CancellationToken::new(),
     )
@@ -281,6 +283,7 @@ async fn throughput_samples_prove_the_handshake() {
         &Wire::plain(),
         &fake.inbound,
         Some(EngineRoute::PhysicalDirect),
+        None,
         &CancellationToken::new(),
     )
     .await;
@@ -366,6 +369,7 @@ async fn temporary_singbox_engine() {
         wire: &wire,
         endpoint_ip: None,
         throughput: false,
+        deadline: None,
     };
     let stage = run_engine_probe(input, &CancellationToken::new()).await;
     let h = &stage.handshake;
@@ -398,6 +402,7 @@ async fn non_2xx_reflector() {
     let m = measure(
         &Wire::plain(),
         &fake.inbound,
+        None,
         None,
         &CancellationToken::new(),
     )

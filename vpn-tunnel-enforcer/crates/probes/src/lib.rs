@@ -5,6 +5,10 @@
 /// at start (after the UI's base layer).
 pub const LOCALES: &[(&str, &str)] = &[
     (
+        include_str!("../locales/probe-discipline.ru.json"),
+        include_str!("../locales/probe-discipline.en.json"),
+    ),
+    (
         include_str!("../locales/probes-diag.ru.json"),
         include_str!("../locales/probes-diag.en.json"),
     ),
@@ -40,6 +44,7 @@ mod tls_client;
 pub mod availability;
 pub mod curl;
 pub mod diagnostics;
+pub mod discipline;
 pub mod egress;
 pub mod geo;
 pub mod ip_monitor;

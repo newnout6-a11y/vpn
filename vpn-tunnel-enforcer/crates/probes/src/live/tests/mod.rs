@@ -10,6 +10,7 @@ use crate::live_stages::Text;
 
 mod engine;
 mod findings;
+mod gate;
 mod history;
 mod locales;
 mod pure;

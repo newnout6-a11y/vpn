@@ -15,7 +15,8 @@ vpnte-probes.workspace = true
 | `ping` | server latency ladder (direct-out SOCKS / physical-bound TCP + ICMP / unbound), `ping_all` stream |
 | `geo` | `Geo`: country of an IP (3 providers, vote, 429 back-off, cache), exit / entry verification, ASN |
 | `egress` | SOCKS connect latency, public egress IPv4 through a loopback SOCKS endpoint |
-| `key_health` | `check_profile` / `check_many`: temporary sing-box / Xray probe engine, verdict + `HealthReason` |
+| `key_health` | `check_profile[_verdict]` / `check_many[_verdicts]`: temporary probe engine, one budgeted transfer, verdict + `HealthReason` + classification |
+| `discipline` | RU discipline: per-endpoint handshake budget, 64 KiB transfer check (freeze), reach probe (ICMP + TCP), classifier |
 | `public_ip` | `IpReader`: provider race per family through a route (TUN-bound, loopback proxy, direct) |
 | `ip_monitor` | `IpMonitor`: evidence store + periodic task, baseline adoption, verdicts, auto-verify |
 | `leak` | adapter-bound leak self-test (curl.exe), `LeakWatch` scheduler, leak check card, direct-out audit |
@@ -136,7 +137,7 @@ Latency = socket creation to the full CONNECT reply, `max(1, round(ms))`. Egress
 ## key_health (`vpnte_probes::key_health`)
 
 ```rust
-pub const CONCURRENCY: usize /*5*/;  pub const BATCH_DEADLINE: Duration /*600 s*/;
+pub const CONCURRENCY: usize /*5*/;  pub const BATCH_DEADLINE: Duration /*600 s*/;  pub const KEY_WAIT: Duration /*65 s*/;
 pub const PROXY_TAG /*"proxy-out"*/, DIRECT_TAG /*"probe-direct-out"*/, INBOUND_TAG /*"probe-in"*/: &str;
 pub enum HealthReason { NoOutbound, ConfigFailed, TlsFailed, AuthFailed, Timeout, HandshakeFailed,
     Hy2ConfigFailed, Hy2AuthFailed, Hy2UdpBlocked, Hy2TlsFailed, Hy2HandshakeFailed }   // kebab-case; msg()
@@ -145,6 +146,7 @@ pub struct ProbeCtx { pub singbox_exe: PathBuf, pub xray_exe: PathBuf, pub engin
 pub struct KeyHealth { pub online: bool, pub at: UnixMs, pub rtt_ms: Option<u32>, pub reason: Option<HealthReason>,
     pub egress_ip: Option<IpAddr>, pub country: Option<Iso2>, pub engine: Option<Engine> }   // camelCase
 impl KeyHealth { pub fn offline(reason: HealthReason, engine: Option<Engine>) -> Self }
+pub struct KeyCheck { pub health: KeyHealth, pub verdict: discipline::Classification }
 pub enum Uplink { Detour(Loopback), Bind(Option<String>) }   // how the probe engine leaves this PC
 pub fn probe_config(p: &Profile, listen: &Loopback, device: ClientDevice, route: &Uplink) -> Result<Value, EmitError>;
 pub fn classify_failure(hysteria2: bool, log: &str, err: &str) -> HealthReason;
@@ -153,14 +155,26 @@ pub struct ProbeEngine;   // socks() -> &Loopback, engine() -> Engine, output() 
 pub enum Started { Ready(ProbeEngine), Offline(KeyHealth) }
 pub async fn start_probe_engine(p: &Profile, ctx: &ProbeCtx, cancel: &CancellationToken) -> AppResult<Started>;
 pub async fn check_profile(p: &Profile, ctx: &ProbeCtx, cancel: &CancellationToken) -> AppResult<KeyHealth>;
+pub async fn check_profile_verdict(p: &Profile, ctx: &ProbeCtx, cancel: &CancellationToken) -> AppResult<KeyCheck>;
 pub enum HealthError { GroupNotFoundOrEmpty, Cancelled, Timeout, Setup(AppError) }   // From for AppError
 pub async fn check_many<K: Send>(items: Vec<(K, Option<Profile>)>, ctx: &ProbeCtx, cancel: &CancellationToken)
     -> Result<Vec<(K, KeyHealth)>, HealthError>;   // None profile = unreadable → no-outbound
+pub async fn check_many_verdicts<K: Send>(items: Vec<(K, Option<Profile>)>, ctx: &ProbeCtx,
+    cancel: &CancellationToken) -> Result<Vec<(K, KeyCheck)>, HealthError>;
 ```
-`Err` only for setup failures (engine missing, ports exhausted) and cancellation; an engine that
+One check = one budgeted handshake (`discipline::budget`, wait ≤ `KEY_WAIT`, else `Err`
+`probes.discipline.deferred`: not checked, no result in a batch), the probe engine, then ONE
+connection through it: the Cloudflare trace (exit IP / country) and a 64 KiB transfer
+(`discipline::TRANSFER_BYTES`). `online` = the whole transfer arrived, or an HTTP status came back
+through the tunnel (volume then unproven: verdict `not-verified`); a stall = `online: false`,
+reason `timeout`, verdict `frozen` (12–24 KiB) or `stalled`, and a freeze holds the endpoint for
+`FREEZE_BACKOFF`. A failed dial adds the reach probe (ICMP + TCP to the key's port) for the
+classifier. `rtt_ms` = start of the transfer check to the first response head. `Err` only for
+setup failures (engine missing, ports exhausted), deferral and cancellation; an engine that
 rejects the profile, exits or never serves its port is an offline verdict. `HealthReason` mirrors
 `vpnte_servers::model::HealthReason` (same wire names): map 1:1 into `HealthRecord`, commit with
-`Servers::record_health(HealthUpdate { identity: row.identity() taken before the probe, .. })`.
+`Servers::record_health(HealthUpdate { identity: row.identity() taken before the probe, .. })`, and
+the verdict with `Servers::record_verdicts`.
 `classify_failure` (also used by `live`): over lowercased `log + "\n" + err`, first match of config →
 auth → tls → timeout → handshake (auth before tls on purpose); Hysteria2 has its own ladder (empty
 text → `hy2-handshake-failed`). Probe engine log level stays `debug` (the patterns need it).
@@ -424,11 +438,79 @@ pub async fn infrastructure(geo: Option<&GeoCache> /* None = geo off */, ip: Opt
 Gating of stages (UDP transports, REALITY, basic mode, tunnel transitions), findings, the diff
 (`ChangesFromPrevious` is defined here, filled by `live`) and row assembly belong to `live`.
 
+## discipline (`vpnte_probes::discipline`)
+
+RU network discipline (Nov 2026): more than ~3 TLS handshakes to one server name in a minute
+freeze that server for the client for ~120 s; TCP to many foreign data centres freezes without
+RST after ~16–20 KB; a banned IP answers ICMP while TCP and UDP are dropped; mobile networks cut
+UDP. Every check that makes an engine dial a server takes a slot of one shared budget.
+```rust
+pub const WINDOW: Duration /*60 s*/;  pub const MAX_PER_WINDOW: usize /*3*/;  pub const MIN_GAP: Duration /*400 ms*/;
+pub const FREEZE_BACKOFF: Duration /*130 s: quiet time after a freeze verdict*/;
+pub struct Endpoint;   // budget key: "sni:<tls server name>" (else the server's domain), or "host:port"
+impl Endpoint { pub fn of(p: &Profile) -> Option<Endpoint> /* None: loopback server */;
+    pub fn server_name(&str) -> Self; pub fn host_port(&str, u16) -> Self; pub fn as_str(&self) -> &str }
+pub enum BudgetError { Deferred { retry_after: Duration }, Cancelled }   // -> AppError Conflict probes.discipline.deferred {{seconds}}
+pub fn budget() -> &'static HandshakeBudget;                    // the one process-wide budget
+impl HandshakeBudget {
+    pub async fn acquire(&self, e: &Endpoint, max_wait: Duration, cancel: &CancellationToken) -> Result<(), BudgetError>;
+    pub fn hold(&self, e: &Endpoint, quiet: Duration);   // after a freeze: no handshake before `quiet` passed
+    pub fn wait_for(&self, e: &Endpoint) -> Duration;    // zero = a slot is free now
+}
+// transfer check (one connection = one handshake): GET /cdn-cgi/trace (keep-alive), then
+// GET /__down?bytes=65536 on https://speed.cloudflare.com (exact byte count, no per-client cap)
+pub const TRANSFER_HOST: &str; pub const TRANSFER_BYTES: u64 /*64 KiB*/; pub const FREEZE_BAND: RangeInclusive<u64> /*12..=24 KiB raw*/;
+pub struct Limits { pub first_byte, pub gap, pub deadline: Duration }   // Limits::STANDARD = 10 s / 5 s / 20 s
+pub enum Transfer { Complete { bytes, ms }, Stalled { bytes }, NoData, Failed { bytes, error: String } }
+impl Transfer { pub fn frozen(&self) -> bool /* stall inside FREEZE_BAND */; pub fn complete(&self) -> bool }
+pub struct TransferReport { pub transfer: Transfer, pub trace: Option<Trace>, pub answer_ms: Option<u32> }
+pub type Trace = (Option<IpAddr>, Option<Iso2>);
+pub async fn transfer_through(proxy: &Loopback, endpoint: Option<&Endpoint>, max_wait: Duration,
+    cancel: &CancellationToken) -> AppResult<TransferReport>;   // through an engine that already runs
+// reach probe (not budgeted): ICMP echo + one TCP connect to the server's own port, physical source
+pub enum Seen { NotRun, Answered, Refused, Silent }
+pub struct Reach { pub icmp: Seen, pub tcp: Seen }
+pub async fn reach(host: &str, port: u16, udp_only: bool, net: &NetPath, cancel: &CancellationToken) -> Reach;
+// classifier
+pub struct Observations { pub udp_transport: bool, pub deferred: bool, pub transfer: Option<Transfer>,
+    pub failure: Option<HealthReason>, pub real_certificate: bool, pub icmp: Seen, pub tcp: Seen }
+pub enum Verdict { Healthy, Frozen, Stalled, HandshakeFailed, KeyRejected, IpBanned, UdpBlocked, Offline,
+    Deferred, NotVerified }                                   // kebab-case; msg() -> probes.verdict.*
+pub enum Reaction { None, SwitchServer, TryAnotherFingerprint, PreferTcpTransport, RetryLater }  // msg() -> probes.reaction.*
+pub struct Classification { pub verdict: Verdict, pub reaction: Reaction }   // camelCase
+pub fn classify(o: &Observations) -> Classification;
+pub fn real_certificate(engine_log: &str) -> bool;            // "received real certificate", REALITY verification
+```
+Bytes are counted below the inner TLS (what the proxy delivered), the closest observable to what
+the server sent; a stall = first bytes, then `gap` of silence (no FIN / RST). Classifier order:
+deferred → an observed transfer (complete = healthy, stall in band = frozen / switch server, other
+stall = stalled / retry later, an HTTP error after data = not-verified) → the engine failure
+(auth = key-rejected, config = not-verified) → a real certificate (handshake-failed / try another
+fingerprint) → reach: UDP transport with a TLS failure inside QUIC = handshake-failed (the
+datagrams passed), with TCP answering (a reset counts) = udp-blocked / prefer TCP;
+TCP silent + ICMP answering = ip-banned / switch server (changing port or transport will not help);
+both silent or the port refused = offline; TCP connects + TLS failure = handshake-failed / try
+another fingerprint, + a hang = handshake-failed / retry later (changing the fingerprint inside a
+freeze is reported to extend it); no evidence = not-verified. `Verdict` / `Reaction` share their
+wire names with `vpnte_servers::model::{ServerVerdict, ServerReaction}`: store them with
+`Servers::record_verdicts` (map 1:1 like `HealthReason`).
+Not wired by this crate (no dependency): the tunnel's post-connect egress probe
+(`vpnte_tunnel` `egress_via`) and the automation; the app should route the former through
+`transfer_through` or `budget().acquire` and feed `Classification` to the latter.
+
 ## live (`vpnte_probes::live`)
 
 One FIFO runner, one job at a time (a batch is one job, its checks sequential: probe engines and
 throughput share the uplink). A check = target + DNS, the direct stages concurrently, the engine
 stage, split-tunnel snapshot, diff with the baseline, findings, sanitising, history write.
+Engine stage and the handshake budget: every request through the engine is a new handshake to
+the server, so a check of a non-loopback server dials one at a time through
+`discipline::budget()` in order trace → throughput samples (when asked) → ipify → first media
+host → ipify6 → second media host, none later than 8 s before the check's deadline; what the
+budget refuses is left out of the rows and named in the handshake note
+(`probes.discipline.liveDeferred`); nothing dialled → handshake / media `skipped`, never failed.
+In practice a check gets three dials per minute per server name (the rest of a basic check is
+left out; a second check within the minute is mostly left out).
 ```rust
 pub const MAX_BATCH: usize /*12*/;  pub const HISTORY_PER_TARGET: usize /*20*/;
 pub const BASIC_DEADLINE /*25 s*/, EXTENDED_DEADLINE /*60 s*/: Duration;   // throughput → extended budget in any mode
@@ -525,7 +607,8 @@ registered through `LOCALES`): `probes.egress.*`, `probes.geo.reject.*`,
 `probes.leak.{why,probe,selfTest,check}.*`; `probes.diag.*`, `probes.routing.*`, `probes.plan.*`;
 `probes.availability.*`, `probes.speed.*`; `probes.liveStages.*`; `probes.live.{profileNotFound,
 shuttingDown,batch,history,engine,egress,media,throughput,split,finding}.*` (findings:
-`probes.live.finding.<rule>.{title,detail}`). Technical stage errors in stored
+`probes.live.finding.<rule>.{title,detail}`); `probes.discipline.{deferred,liveDeferred}`,
+`probes.verdict.*`, `probes.reaction.*` (probe-discipline). Technical stage errors in stored
 rows stay English strings (`ECONNREFUSED`, `ETIMEDOUT`, …). Errors are `AppError` (`Validation`,
 `Conflict`, `Network`, `Timeout`, `Cancelled`) or the module enums listed above, each with
 `From<_> for AppError`.
@@ -568,3 +651,9 @@ change notification from the store.
   `sockopt.interface` option yet). The tunnel must list the Xray executable in the engine's
   `RoutingInputs::engine_paths` in every mode, else Xray probes made while connected go through
   `proxy-out`.
+- probe-discipline, not run here: the real transfer endpoint (`speed.cloudflare.com`), a real
+  frozen / banned / UDP-blocked server, ICMP / TCP reach of real servers (tests use loopback,
+  where `reach` reports `NotRun` by design). Mobile white-list detection is the
+  `ru-network-matrix` package's; the budget does not count the tunnel's own reconnects (engine
+  crate) nor the tunnel's post-connect egress probe (tunnel crate) until the app routes them
+  through `discipline`.

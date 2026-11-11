@@ -1,8 +1,5 @@
 //! The user's server list: groups, subscriptions (fetch and refresh), selection, persistence.
 
-// --- shared by the work packages (each package build uses only part of it) ---
-#[cfg(any(feature = "servers-parse", feature = "servers-store"))]
-#[cfg_attr(not(feature = "servers-store"), allow(dead_code))]
 mod common;
 #[cfg(test)]
 mod test_locales;
@@ -24,20 +21,9 @@ pub const LOCALES: &[(&str, &str)] = &[
     ),
 ];
 
-// --- work package `servers-parse` ---
-#[cfg(feature = "servers-parse")]
-pub mod parse;
-
-// --- work package `servers-refresh` ---
-#[cfg(feature = "servers-refresh")]
-pub mod refresh;
-#[cfg(feature = "servers-refresh")]
-pub mod subscription;
-
-// --- work package `servers-store` ---
-#[cfg(feature = "servers-store")]
 pub mod legacy;
-#[cfg(feature = "servers-store")]
 pub mod model;
-#[cfg(feature = "servers-store")]
+pub mod parse;
+pub mod refresh;
 pub mod store;
+pub mod subscription;

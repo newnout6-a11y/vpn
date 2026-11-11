@@ -3,8 +3,8 @@
 The user's server list: groups (manual keys, one group per subscription URL + device), rows with
 DPAPI-sealed typed profiles, the selection, archive and purge, key-health / country / ping results,
 text and subscription import (fetch, parse, reconcile), the background refresh, and the one-time
-Electron import. Depends on `vpnte-base`, `vpnte-core`, `vpnte-profiles`. Build with default
-features (all packages).
+Electron import. Depends on `vpnte-base`, `vpnte-core`, `vpnte-profiles`. The crate has no cargo
+features.
 
 ```toml
 vpnte-servers.workspace = true
@@ -103,11 +103,18 @@ pub struct HealthRecord { pub online: bool, pub at: UnixMs, pub rtt_ms: Option<u
                           pub reason: Option<HealthReason>, pub egress_ip: Option<IpAddr> }
 pub enum HealthReason { NoOutbound, ConfigFailed, TlsFailed, AuthFailed, Timeout, HandshakeFailed,
     Hy2ConfigFailed, Hy2AuthFailed, Hy2UdpBlocked, Hy2TlsFailed, Hy2HandshakeFailed }
+// the probes' classifier verdict (vpnte_probes::discipline::{Verdict, Reaction}, same wire names);
+// a name this version does not know reads as Unknown instead of failing the whole list
+pub enum ServerVerdict { Healthy, Frozen, Stalled, HandshakeFailed, KeyRejected, IpBanned, UdpBlocked,
+    Offline, Deferred, NotVerified, Unknown }                  // kebab-case
+pub enum ServerReaction { None, SwitchServer, TryAnotherFingerprint, PreferTcpTransport, RetryLater, Unknown }
+pub struct VerdictRecord { pub verdict: ServerVerdict, pub reaction: ServerReaction, pub at: UnixMs }  // camelCase
 pub struct ServerRow { pub id: ProfileId, pub group_id: GroupId, pub origin: Origin,
     pub name: String, pub protocol: String, pub server: String, pub port: u16,   // plain copies
     pub device: ClientDevice, pub profile: Secret /* the typed Profile as JSON */, pub imported_at: UnixMs,
     pub last_seen_at, pub missing_since: Option<UnixMs>, pub archived: Option<Archived>,
-    pub country: Option<VerifiedCountry>, pub health: Option<HealthRecord> }
+    pub country: Option<VerifiedCountry>, pub health: Option<HealthRecord>,
+    pub verdict: Option<VerdictRecord> /* beside health: may come from another check, compare `at` */ }
 impl ServerRow {
     pub fn new(&Profile, GroupId, Origin, ClientDevice, now) -> AppResult<Self>;
     pub fn profile(&self) -> AppResult<Profile>;    // Conflict servers.locked (other PC / account), Internal servers.unreadable
@@ -167,6 +174,8 @@ impl Servers {
     pub fn set_profile_device(&self, &ProfileId, ClientDevice) -> AppResult<()>;  // manual rows only
     // probe results
     pub fn record_health(&self, Vec<HealthUpdate>) -> AppResult<usize>;  // skips rows deleted / re-keyed meanwhile
+    pub fn record_verdicts(&self, Vec<VerdictUpdate>) -> AppResult<usize>;  // same guards; an older verdict never wins
+    pub fn verdicts(&self) -> HashMap<ProfileId, VerdictRecord>;         // rows that have one (page, automation)
     pub fn record_country(&self, &ProfileId, VerifiedCountry, expected_generation: u64) -> AppResult<bool>;
     pub fn record_ping(&self, &ProfileId, rtt_ms: Option<u32>);          // memory only
 }
@@ -180,6 +189,7 @@ pub struct AddReport { pub group: GroupId, pub added: Vec<ProfileId>, pub restor
                        pub duplicates: usize, pub selected: Option<ProfileId> /* set when nothing was selected */ }
 pub struct HealthUpdate { pub id: ProfileId, pub identity: [u8; 16] /* row.identity() at probe start */,
                           pub record: HealthRecord, pub country: Option<VerifiedCountry> }
+pub struct VerdictUpdate { pub id: ProfileId, pub identity: [u8; 16], pub record: VerdictRecord }
 pub fn subscription_name(url: &Url, info: &SubscriptionMeta) -> String;   // title > web-page host > URL host > ""
 ```
 Every change is applied under the store's writer lock and written through before listeners hear

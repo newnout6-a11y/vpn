@@ -2,10 +2,14 @@
 //! to the proxy, so DNS resolves at the exit), TLS with certificate verification, and a small
 //! HTTP/1.1 response reader. Hand-written like `egress`: a few requests do not justify a client.
 use std::net::{Ipv4Addr, SocketAddr};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use rustls::pki_types::ServerName;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio_rustls::TlsConnector;
 use vpnte_base::types::Loopback;
 use vpnte_core::net::HostPort;
@@ -47,6 +51,21 @@ impl Wire {
         port: u16,
         sni: &str,
     ) -> Result<(Stream, Option<String>), WireError> {
+        let raw = Arc::new(AtomicU64::new(0));
+        self.open_counted(proxy, host, port, sni, &raw).await
+    }
+
+    /// [`Wire::open`] that adds every byte the proxy delivers after its CONNECT reply (TLS
+    /// records included) to `raw`, also while the TLS handshake is still running: the transfer
+    /// check judges a freeze by what the server sent, not by what TLS decrypted.
+    pub(crate) async fn open_counted(
+        &self,
+        proxy: &Loopback,
+        host: &str,
+        port: u16,
+        sni: &str,
+        raw: &Arc<AtomicU64>,
+    ) -> Result<(Stream, Option<String>), WireError> {
         let target =
             HostPort::new(host, port).map_err(|_| WireError::Socks(SocksError::InvalidInput))?;
         let local = SocketAddr::from((Ipv4Addr::LOCALHOST, proxy.port));
@@ -59,6 +78,10 @@ impl Wire {
         )
         .await
         .map_err(WireError::Socks)?;
+        let tcp = Counted {
+            inner: tcp,
+            read: raw.clone(),
+        };
         let Some(connector) = &self.tls else {
             return Ok((Box::new(tcp), None));
         };
@@ -75,6 +98,46 @@ impl Wire {
             .and_then(|v| v.as_str())
             .map(|v| v.replace('_', "."));
         Ok((Box::new(tls), version))
+    }
+}
+
+/// A stream that counts the bytes read from it.
+struct Counted<S> {
+    inner: S,
+    read: Arc<AtomicU64>,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Counted<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = poll {
+            let n = buf.filled().len().saturating_sub(before);
+            self.read.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        poll
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Counted<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 

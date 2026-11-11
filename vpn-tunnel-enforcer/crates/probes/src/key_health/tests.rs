@@ -4,21 +4,18 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use serde_json::json;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::ErrorKind;
 use vpnte_base::types::{ClientDevice, Creds, Engine, EnginePref, Loopback};
 use vpnte_profiles::model::Profile;
 use vpnte_profiles::uri::parse_uri;
 
-use super::destinations::Destination;
 use super::*;
+use crate::discipline::far_side::{Answer, download, far_side, trace};
+use crate::discipline::{Reaction, Verdict};
 use crate::test_support::resources;
 
-const CA: &[u8] = include_bytes!("../egress/testdata/ca.der");
-const LEAF: &[u8] = include_bytes!("../egress/testdata/leaf.der");
-const LEAF_KEY: &[u8] = include_bytes!("../egress/testdata/leaf.key.der");
 /// Fake Reality key (43 base64url characters), never a real one.
 const FAKE_PBK: &str = "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVIkT4E7RoLJS0";
 
@@ -388,116 +385,69 @@ async fn xray_probe_runs() {
     assert_eq!(health.engine, Some(Engine::Xray));
 }
 
-/// What the fake upstream answers for a CONNECT host: delay (ms) and body.
-type Answer = fn(&str) -> (u64, String);
+/// Loopback timing: the engine relays at once, a stall shows within half a second.
+const FAST: Limits = Limits {
+    first_byte: Duration::from_secs(3),
+    gap: Duration::from_millis(500),
+    deadline: Duration::from_secs(10),
+};
 
-/// A fake SOCKS5 upstream (no auth) that terminates TLS with the test certificate and answers
-/// each request with `answer(host)`.
-async fn upstream(answer: Answer) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        while let Ok((s, _)) = listener.accept().await {
-            tokio::spawn(async move {
-                let _ = serve(s, answer).await;
-            });
-        }
-    });
-    port
+/// A probe through the real engine to the scripted far side (plain HTTP after the CONNECT).
+async fn probe_far_side(
+    ctx: &ProbeCtx,
+    answers: Vec<Answer>,
+    cancel: &CancellationToken,
+) -> AppResult<KeyCheck> {
+    let (inbound, task) = far_side(answers).await;
+    let socks = parse_uri(&format!("socks://127.0.0.1:{}#S", inbound.port)).unwrap();
+    let out = probe_with(&socks, ctx, &Wire::plain(), FAST, cancel).await;
+    task.abort();
+    out
 }
 
-async fn serve(mut s: TcpStream, answer: Answer) -> std::io::Result<()> {
-    let mut greet = [0; 3];
-    s.read_exact(&mut greet).await?;
-    s.write_all(&[5, 0]).await?;
-    let mut head = [0; 5];
-    s.read_exact(&mut head).await?;
-    let mut name = vec![0; head[4] as usize + 2];
-    s.read_exact(&mut name).await?;
-    let host = String::from_utf8_lossy(&name[..name.len() - 2]).into_owned();
-    s.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80]).await?;
-    vpnte_base::http::init_tls();
-    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(LEAF_KEY.to_vec().into());
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(vec![LEAF.to_vec().into()], key)
-        .map_err(std::io::Error::other)?;
-    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
-    let tls = acceptor.accept(s).await?;
-    respond(tls, answer(&host)).await
-}
-
-async fn respond<S>(mut s: S, (delay, body): (u64, String)) -> std::io::Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut buf = vec![0; 4096];
-    let mut seen = Vec::new();
-    while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
-        let n = s.read(&mut buf).await?;
-        if n == 0 {
-            return Ok(());
-        }
-        seen.extend_from_slice(&buf[..n]);
-    }
-    tokio::time::sleep(Duration::from_millis(delay)).await;
-    let head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    s.write_all(head.as_bytes()).await?;
-    s.write_all(body.as_bytes()).await?;
-    s.shutdown().await
-}
-
-fn trust_test_ca(b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    b.tls_certs_only([reqwest::Certificate::from_der(CA).unwrap()])
-}
-
-const TEST_DESTINATIONS: [Destination; 2] = [
-    Destination {
-        url: "https://cloudflare.com/cdn-cgi/trace",
-        trace: true,
-    },
-    Destination {
-        url: "https://api.ipify.org/",
-        trace: false,
-    },
-];
-
-fn slow_trace(host: &str) -> (u64, String) {
-    if host == "cloudflare.com" {
-        (300, "fl=1\nip=8.8.8.8\nloc=DE\n".to_owned())
-    } else {
-        (0, String::new())
-    }
-}
-
-/// End to end on loopback: probe engine → fake upstream → TLS destinations. The fast non-trace
-/// answer wins, the trace (later, within the grace) still yields the exit IP and country.
+/// End to end on loopback: probe engine → far side → the trace and 64 KiB on one connection:
+/// online with the exit IP, country and round trip; the classifier says healthy.
 #[tokio::test]
-async fn online_with_trace_grace() {
+async fn online_needs_the_whole_transfer() {
     let Some(ctx) = ctx(EnginePref::Auto) else {
         return;
     };
-    let port = upstream(slow_trace).await;
-    let socks = parse_uri(&format!("socks://127.0.0.1:{port}#S")).unwrap();
-    let cancel = CancellationToken::new();
-    let health = probe_with(&socks, &ctx, &TEST_DESTINATIONS, trust_test_ca, &cancel)
+    let answers = vec![trace(), Answer::Send(download(64 * 1024))];
+    let check = probe_far_side(&ctx, answers, &CancellationToken::new())
         .await
         .unwrap();
-    assert!(health.online, "{health:?}");
-    assert_eq!(health.egress_ip, Some("8.8.8.8".parse().unwrap()));
-    assert_eq!(health.country, Iso2::new("DE"));
+    let health = &check.health;
+    assert!(health.online, "{check:?}");
+    assert_eq!(health.egress_ip, Some("185.220.101.5".parse().unwrap()));
+    assert_eq!(health.country, Iso2::new("NL"));
     assert!(
-        health.rtt_ms.is_some_and(|ms| (1..300).contains(&ms)),
+        health.rtt_ms.is_some() && health.reason.is_none(),
         "{health:?}"
     );
-    assert_eq!(health.reason, None);
+    assert_eq!(check.verdict.verdict, Verdict::Healthy);
 }
 
-fn never(_: &str) -> (u64, String) {
-    (5_000, String::new())
+/// Fact (b): a server whose data stops after 16 KiB (no FIN, no RST) answered the trace, yet
+/// it is not online: the data timed out and the classifier names the freeze.
+#[tokio::test]
+async fn a_frozen_server_is_not_online() {
+    let Some(ctx) = ctx(EnginePref::Auto) else {
+        return;
+    };
+    let answers = vec![trace(), Answer::SendThenHang(download(16 * 1024))];
+    let check = probe_far_side(&ctx, answers, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(!check.health.online, "{check:?}");
+    assert_eq!(check.health.reason, Some(HealthReason::Timeout));
+    assert_eq!(
+        (check.verdict.verdict, check.verdict.reaction),
+        (Verdict::Frozen, Reaction::SwitchServer)
+    );
+    assert_eq!(
+        check.health.egress_ip,
+        Some("185.220.101.5".parse().unwrap())
+    );
 }
 
 /// Cancellation before or during a probe is an error (never "offline").
@@ -506,10 +456,9 @@ async fn cancellation_is_an_error() {
     let Some(ctx) = ctx(EnginePref::Auto) else {
         return;
     };
-    let port = upstream(never).await;
-    let socks = parse_uri(&format!("socks://127.0.0.1:{port}#S")).unwrap();
     let gone = CancellationToken::new();
     gone.cancel();
+    let socks = parse_uri("socks://127.0.0.1:9#S").unwrap();
     let err = check_profile(&socks, &ctx, &gone).await.unwrap_err();
     assert_eq!(err.kind, ErrorKind::Cancelled);
     let later = CancellationToken::new();
@@ -518,7 +467,7 @@ async fn cancellation_is_an_error() {
         tokio::time::sleep(Duration::from_millis(1500)).await;
         trigger.cancel();
     });
-    let err = probe_with(&socks, &ctx, &TEST_DESTINATIONS, trust_test_ca, &later)
+    let err = probe_far_side(&ctx, vec![Answer::Hang], &later)
         .await
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::Cancelled);

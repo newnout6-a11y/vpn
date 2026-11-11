@@ -252,7 +252,7 @@ pub(crate) async fn direct_socks(
 }
 
 /// The address to probe: the literal itself, else the first OS-resolver answer (IPv4 first).
-async fn resolve_target(host: &str) -> Option<IpAddr> {
+pub(crate) async fn resolve_target(host: &str) -> Option<IpAddr> {
     if let Ok(ip) = host
         .trim_start_matches('[')
         .trim_end_matches(']')
@@ -339,7 +339,7 @@ async fn echo(src: Option<IpAddr>, dst: IpAddr) -> Option<u32> {
 /// Unicast addresses of the physical adapters (IPv4 without 169.254/16, global IPv6), in adapter
 /// order. A non-empty list is cached briefly; an empty one is re-read so that bound probes come
 /// back as soon as the network does (the old 60 s cache of an empty answer kept them off).
-async fn physical_sources() -> Vec<IpAddr> {
+pub(crate) async fn physical_sources() -> Vec<IpAddr> {
     /// When the list was read, and the list.
     type Sources = (Instant, Vec<IpAddr>);
     static CACHE: LazyLock<Mutex<Option<Sources>>> = LazyLock::new(Mutex::default);

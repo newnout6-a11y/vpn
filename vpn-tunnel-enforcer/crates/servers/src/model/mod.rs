@@ -19,8 +19,8 @@ mod summary;
 pub(crate) mod tests;
 
 pub use row::{
-    ArchiveReason, Archived, CountrySource, HealthReason, HealthRecord, Origin, ServerRow,
-    VerifiedCountry,
+    ArchiveReason, Archived, CountrySource, HealthReason, HealthRecord, Origin, ServerReaction,
+    ServerRow, ServerVerdict, VerdictRecord, VerifiedCountry,
 };
 pub use summary::{GroupSummary, Ping, ServerSummary, ServersView};
 

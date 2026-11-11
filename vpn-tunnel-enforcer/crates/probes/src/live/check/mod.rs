@@ -217,7 +217,18 @@ pub(crate) async fn run_check<B: DnsBackend>(
             token.cancel();
         })
     };
-    let outcome = measure_all(stages, env, req, profile.as_ref(), &facts, &token, report).await;
+    let deadline = start + stages.budget.of(req.mode, req.throughput);
+    let outcome = measure_all(
+        stages,
+        env,
+        req,
+        profile.as_ref(),
+        &facts,
+        deadline,
+        &token,
+        report,
+    )
+    .await;
     timer.abort();
     if cancel.is_cancelled() {
         return Err(AppError::cancelled());
@@ -250,13 +261,16 @@ fn new_id() -> String {
     format!("lc_{}", uuid::Uuid::new_v4().simple())
 }
 
-/// Every stage of the check, without timestamps, diff, findings or storage.
+/// Every stage of the check, without timestamps, diff, findings or storage. `deadline` is the
+/// check's: the engine stage plans its budgeted dials against it.
+#[allow(clippy::too_many_arguments)]
 async fn measure_all<B: DnsBackend>(
     stages: &Stages<B>,
     env: &dyn LiveEnv,
     req: &CheckRequest,
     profile: Option<&ProfileTarget>,
     facts: &Facts,
+    deadline: Instant,
     token: &CancellationToken,
     report: &Reporter<'_>,
 ) -> AppResult<LiveCheck> {
@@ -341,6 +355,7 @@ async fn measure_all<B: DnsBackend>(
                 wire: &stages.wire,
                 endpoint_ip: ip,
                 throughput: req.throughput,
+                deadline: Some(deadline),
             };
             run_engine_probe(input, token).await
         }

@@ -10,10 +10,14 @@ use tokio_util::sync::CancellationToken;
 use vpnte_base::Msg;
 use vpnte_base::types::{Loopback, now_ms};
 
+use super::engine_probe::Gate;
 use super::model::{EngineRoute, Throughput, ThroughputSample, ThroughputStatus};
 use super::ms;
 use super::wire::{Wire, exchange_head};
 use crate::live_stages::CANCELLED;
+
+/// The error of a series the handshake budget cut short (English, stored like the others).
+const DEFERRED: &str = "deferred: the server's handshake budget is used up";
 
 /// `throughput.endpoint` label.
 pub(crate) const ENDPOINT: &str = "speed.cloudflare.com/__down";
@@ -250,18 +254,29 @@ async fn sample(
     (sample, outcome.err())
 }
 
-/// Three sequential samples (the second starts after the first connection is closed).
+/// Three sequential samples (the second starts after the first connection is closed). Through
+/// a gate each sample is one handshake of the server's budget; a deferred one ends the series
+/// (what came so far is summarised).
 pub(crate) async fn probe_throughput(
     wire: &Wire,
     proxy: &Loopback,
     route: EngineRoute,
+    gate: Option<&Gate>,
     cancel: &CancellationToken,
-) -> Throughput {
+) -> (Throughput, u32) {
     let start = Instant::now();
     let mut samples = Vec::new();
     let mut last_error = None;
+    let mut deferred = 0;
     for index in 0..SAMPLES {
         if cancel.is_cancelled() {
+            break;
+        }
+        if let Some(gate) = gate
+            && !gate.admit(cancel).await
+        {
+            last_error = Some(DEFERRED.to_owned());
+            deferred = SAMPLES - index;
             break;
         }
         let (sample, error) = sample(wire, proxy, index, cancel).await;
@@ -275,5 +290,5 @@ pub(crate) async fn probe_throughput(
     }
     let mut t = summarize_throughput(samples, ENDPOINT, ms(start.elapsed()), last_error);
     t.route = Some(route);
-    t
+    (t, deferred)
 }

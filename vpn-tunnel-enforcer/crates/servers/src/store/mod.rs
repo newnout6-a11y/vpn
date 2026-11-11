@@ -14,7 +14,7 @@ use vpnte_profiles::model::SubscriptionMeta;
 
 use crate::model::{
     ArchiveReason, GroupId, GroupSummary, HealthRecord, Ping, ProfileId, ServerRow, ServerSummary,
-    ServersDoc, ServersView, VerifiedCountry,
+    ServersDoc, ServersView, VerdictRecord, VerifiedCountry,
 };
 
 mod add;
@@ -22,6 +22,8 @@ mod edit;
 mod probes;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod verdict_tests;
 
 pub use add::subscription_name;
 
@@ -101,6 +103,15 @@ pub struct HealthUpdate {
     pub identity: [u8; 16],
     pub record: HealthRecord,
     pub country: Option<VerifiedCountry>,
+}
+
+/// One classifier verdict for [`Servers::record_verdicts`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerdictUpdate {
+    pub id: ProfileId,
+    /// [`ServerRow::identity`] when the check started: a key changed meanwhile is not judged.
+    pub identity: [u8; 16],
+    pub record: VerdictRecord,
 }
 
 /// Handle to the server list (`profiles.json`). Share it in an `Arc`.

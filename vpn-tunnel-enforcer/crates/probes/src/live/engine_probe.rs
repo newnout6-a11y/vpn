@@ -2,8 +2,10 @@
 //! The running tunnel's own probe inbound when the profile is the active one (never a second
 //! proxy process for it), else a temporary engine with the config on stdin
 //! (`key_health::start_probe_engine`: kill-on-close Job, authenticated inbound) dialling the server
-//! through the tunnel's bypass inbound or bound to the physical adapter. Reflectors and media run
-//! concurrently, throughput after them; the engine is stopped and reaped before the stage returns.
+//! through the tunnel's bypass inbound or bound to the physical adapter. Every request through
+//! it is a new handshake to the server, so in production the dials go one at a time through the
+//! server's handshake budget (RU freeze discipline, `discipline::budget`); the engine is stopped
+//! and reaped before the stage returns.
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
@@ -20,12 +22,14 @@ use super::model::{
 };
 use super::ms;
 use super::reflect::{
-    Attempt, MEDIA, REFLECTORS, aggregate_egress, media_endpoint, reflector, summarize_media,
+    Attempt, MEDIA, REFLECTORS, ReflectorSpec, aggregate_egress, media_endpoint, reflector,
+    summarize_media,
 };
 use super::throughput::probe_throughput;
 use super::wire::Wire;
+use crate::discipline::{self, Endpoint};
 use crate::key_health::{HealthReason, Started, classify_failure, start_probe_engine};
-use crate::live_stages::{CANCELLED, NotCheckedReason};
+use crate::live_stages::{CANCELLED, NotCheckedReason, Text};
 
 /// The engine logs a failed dial asynchronously; give its last lines a moment to arrive before
 /// they decide auth vs transport.
@@ -49,6 +53,40 @@ pub(crate) struct EngineInput<'a> {
     /// The address the direct stages probed (for `egress.matchesEndpoint`).
     pub endpoint_ip: Option<IpAddr>,
     pub throughput: bool,
+    /// The check's deadline: dials then go through the server's handshake budget (one at a
+    /// time, none that could not finish in time). `None` = ungated (tests).
+    pub deadline: Option<Instant>,
+}
+
+/// The longest single dial of the stage (a throughput sample): a slot later than this before
+/// the deadline would be cut off by it, and a timed-out check is not stored at all.
+const DIAL_MARGIN: Duration = Duration::from_secs(8);
+
+/// The checked server's handshake budget for one stage.
+pub(crate) struct Gate {
+    endpoint: Endpoint,
+    /// Latest start of a dial.
+    until: Instant,
+}
+
+impl Gate {
+    /// `None` for a loopback server (no budget) or without a deadline.
+    pub(crate) fn new(profile: &Profile, deadline: Option<Instant>) -> Option<Self> {
+        let until = deadline?.checked_sub(DIAL_MARGIN)?;
+        Some(Gate {
+            endpoint: Endpoint::of(profile)?,
+            until,
+        })
+    }
+
+    /// Takes the next slot (waiting for it); `false` = deferred, do not dial.
+    pub(crate) async fn admit(&self, cancel: &CancellationToken) -> bool {
+        let wait = self.until.saturating_duration_since(Instant::now());
+        discipline::budget()
+            .acquire(&self.endpoint, wait, cancel)
+            .await
+            .is_ok()
+    }
 }
 
 impl EngineStage {
@@ -149,6 +187,8 @@ pub(crate) struct Measured {
     /// Reflectors and media (they run together).
     pub probes_ms: u64,
     pub total_ms: u64,
+    /// Dials the handshake budget did not allow (left out of the rows, never failures).
+    pub deferred: u32,
 }
 
 impl Measured {
@@ -159,38 +199,93 @@ impl Measured {
     }
 }
 
-/// Reflectors and media concurrently (B-29), then the throughput samples when asked. Throughput
-/// is not gated on the reflectors: an exit that blocks them but reaches the speed host still
-/// yields a speed and the handshake proof.
+/// Reflectors and media, then the throughput samples when asked. Ungated (a loopback server,
+/// tests) they run concurrently (B-29); through a gate one dial at a time, most telling first
+/// (the trace carries the proof, the exit IPv4 and its country), each in its own budget slot.
+/// Throughput is not gated on the reflectors: an exit that blocks them but reaches the speed
+/// host still yields a speed and the handshake proof.
 pub(crate) async fn measure(
     wire: &Wire,
     socks: &Loopback,
     throughput: Option<EngineRoute>,
+    gate: Option<&Gate>,
     cancel: &CancellationToken,
 ) -> Measured {
     let start = Instant::now();
-    let [cf, ipify, ipify6] = REFLECTORS;
-    let (r1, r2, r3, m1, m2) = tokio::join!(
-        reflector(wire, socks, cf, cancel),
-        reflector(wire, socks, ipify, cancel),
-        reflector(wire, socks, ipify6, cancel),
-        media_endpoint(wire, socks, MEDIA[0], cancel),
-        media_endpoint(wire, socks, MEDIA[1], cancel),
-    );
-    let probes_ms = ms(start.elapsed());
-    let throughput = match throughput {
-        Some(route) if !cancel.is_cancelled() => {
-            Some(probe_throughput(wire, socks, route, cancel).await)
-        }
-        _ => None,
+    let Some(gate) = gate else {
+        let [cf, ipify, ipify6] = REFLECTORS;
+        let (r1, r2, r3, m1, m2) = tokio::join!(
+            reflector(wire, socks, cf, cancel),
+            reflector(wire, socks, ipify, cancel),
+            reflector(wire, socks, ipify6, cancel),
+            media_endpoint(wire, socks, MEDIA[0], cancel),
+            media_endpoint(wire, socks, MEDIA[1], cancel),
+        );
+        let probes_ms = ms(start.elapsed());
+        let throughput = match throughput {
+            Some(route) if !cancel.is_cancelled() => {
+                Some(probe_throughput(wire, socks, route, None, cancel).await.0)
+            }
+            _ => None,
+        };
+        return Measured {
+            reflectors: vec![r1, r2, r3],
+            media: vec![m1, m2],
+            throughput,
+            probes_ms,
+            total_ms: ms(start.elapsed()),
+            deferred: 0,
+        };
     };
-    Measured {
-        reflectors: vec![r1, r2, r3],
-        media: vec![m1, m2],
-        throughput,
-        probes_ms,
-        total_ms: ms(start.elapsed()),
+    let [cf, ipify, ipify6] = REFLECTORS;
+    let mut m = Measured {
+        reflectors: Vec::new(),
+        media: Vec::new(),
+        throughput: None,
+        probes_ms: 0,
+        total_ms: 0,
+        deferred: 0,
+    };
+    if gate.admit(cancel).await {
+        m.reflectors.push(reflector(wire, socks, cf, cancel).await);
+    } else {
+        m.deferred += 1;
     }
+    // Asked for, the samples come before the rest of the egress and media evidence.
+    if let Some(route) = throughput.filter(|_| !cancel.is_cancelled()) {
+        let (t, deferred) = probe_throughput(wire, socks, route, Some(gate), cancel).await;
+        m.deferred += deferred;
+        m.throughput = Some(t);
+    }
+    for dial in [
+        Dial::Reflector(ipify),
+        Dial::Media(MEDIA[0]),
+        Dial::Reflector(ipify6),
+        Dial::Media(MEDIA[1]),
+    ] {
+        if cancel.is_cancelled() || !gate.admit(cancel).await {
+            m.deferred += 1;
+            continue;
+        }
+        match dial {
+            Dial::Reflector(spec) => m
+                .reflectors
+                .push(reflector(wire, socks, spec, cancel).await),
+            Dial::Media(endpoint) => m
+                .media
+                .push(media_endpoint(wire, socks, endpoint, cancel).await),
+        }
+    }
+    m.probes_ms = ms(start.elapsed());
+    m.total_ms = m.probes_ms;
+    m
+}
+
+/// One gated dial after the trace, in order of value: the second IPv4 answer (egress `ok`
+/// needs two), the first media host, IPv6, the second media host.
+enum Dial {
+    Reflector(ReflectorSpec),
+    Media((&'static str, &'static str)),
 }
 
 /// Turns the measurements into the stage. `log` = the probe engine's output ("" for the
@@ -224,7 +319,12 @@ pub(crate) fn assemble(
         route: Some(route),
         ..Handshake::default()
     };
-    if proof_ms.is_none() && !body_seen {
+    if proof_ms.is_none() && !body_seen && attempts.is_empty() && m.deferred > 0 {
+        // Nothing was dialled: the budget deferred every attempt. Not a failure of the server.
+        handshake.status = HandshakeStatus::Skipped;
+        handshake.duration_ms = m.total_ms;
+        handshake.note = Some(deferred_note(m.deferred));
+    } else if proof_ms.is_none() && !body_seen {
         let err = attempts
             .iter()
             .find_map(|a| a.error.clone())
@@ -234,6 +334,8 @@ pub(crate) fn assemble(
         handshake.duration_ms = m.total_ms;
         handshake.error = Some(err);
         evidence.detail = Some(code(reason));
+    } else if m.deferred > 0 {
+        handshake.note = Some(deferred_note(m.deferred));
     }
     handshake.evidence = Some(evidence);
     let egress = aggregate_egress(
@@ -241,12 +343,20 @@ pub(crate) fn assemble(
         endpoint_ip,
         m.probes_ms,
     );
-    let media = summarize_media(
-        m.media.into_iter().map(|(e, _)| e).collect(),
-        udp_capable(profile),
-        block_quic(profile),
-        m.probes_ms,
-    );
+    let media = if m.media.is_empty() && m.deferred > 0 {
+        MediaStream {
+            status: MediaStatus::Skipped,
+            detail: Some(deferred_note(m.deferred)),
+            ..MediaStream::default()
+        }
+    } else {
+        summarize_media(
+            m.media.into_iter().map(|(e, _)| e).collect(),
+            udp_capable(profile),
+            block_quic(profile),
+            m.probes_ms,
+        )
+    };
     EngineStage {
         handshake,
         egress,
@@ -255,12 +365,20 @@ pub(crate) fn assemble(
     }
 }
 
+/// "N dials were left out: the server's handshake budget is used up" (`probes.discipline.liveDeferred`).
+fn deferred_note(count: u32) -> Text {
+    Msg::new("probes.discipline.liveDeferred")
+        .arg("count", count)
+        .into()
+}
+
 /// Runs the stage for a profile (the check's cancel token also carries its deadline).
 pub(crate) async fn run_engine_probe(
     input: EngineInput<'_>,
     cancel: &CancellationToken,
 ) -> EngineStage {
     let profile = &input.target.profile;
+    let gate = Gate::new(profile, input.deadline);
     let protocol = profile.kind.label();
     let tunnel = input.tunnel;
     if cancel.is_cancelled() {
@@ -283,6 +401,7 @@ pub(crate) async fn run_engine_probe(
             input.wire,
             inbound,
             input.throughput.then_some(route),
+            gate.as_ref(),
             cancel,
         )
         .await;
@@ -332,6 +451,7 @@ pub(crate) async fn run_engine_probe(
         input.wire,
         &socks,
         input.throughput.then_some(route),
+        gate.as_ref(),
         cancel,
     )
     .await;

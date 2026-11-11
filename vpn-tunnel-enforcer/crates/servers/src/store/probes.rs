@@ -1,10 +1,14 @@
-//! Probe results: key health, verified countries (with the selection generation guard) and the
-//! memory-only pings.
+//! Probe results: key health, classifier verdicts, verified countries (with the selection
+//! generation guard) and the memory-only pings.
+use std::collections::HashMap;
+
 use vpnte_base::AppResult;
 use vpnte_base::types::now_ms;
 
-use super::{HealthUpdate, Servers, ServersEvent};
-use crate::model::{ArchiveReason, CountrySource, Ping, ProfileId, ServerRow, VerifiedCountry};
+use super::{HealthUpdate, Servers, ServersEvent, VerdictUpdate};
+use crate::model::{
+    ArchiveReason, CountrySource, Ping, ProfileId, ServerRow, VerdictRecord, VerifiedCountry,
+};
 
 impl Servers {
     /// Stores key-health verdicts (and the exit country of the trace). A row that was deleted,
@@ -28,6 +32,39 @@ impl Servers {
                 applied += 1;
             }
             Ok(applied)
+        })
+    }
+
+    /// Stores classifier verdicts (frozen, IP ban, …) beside the health records, with the same
+    /// per-row guards as [`Servers::record_health`]; an older verdict never replaces a newer one.
+    /// Returns how many landed.
+    pub fn record_verdicts(&self, updates: Vec<VerdictUpdate>) -> AppResult<usize> {
+        self.update(|doc| {
+            let mut applied = 0;
+            for update in &updates {
+                let Some(row) = doc.row_mut(&update.id) else {
+                    continue;
+                };
+                if row.archived_for(ArchiveReason::User)
+                    || row.identity() != Some(update.identity)
+                    || row.verdict.is_some_and(|v| v.at > update.record.at)
+                {
+                    continue;
+                }
+                row.verdict = Some(update.record);
+                applied += 1;
+            }
+            Ok(applied)
+        })
+    }
+
+    /// The stored verdicts of every row that has one (the Servers page, the automation).
+    pub fn verdicts(&self) -> HashMap<ProfileId, VerdictRecord> {
+        self.store.read(|doc| {
+            doc.profiles
+                .iter()
+                .filter_map(|r| r.verdict.map(|v| (r.id.clone(), v)))
+                .collect()
         })
     }
 

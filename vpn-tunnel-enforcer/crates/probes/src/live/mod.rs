@@ -24,7 +24,7 @@ mod runner;
 mod sanitize;
 mod split;
 mod throughput;
-mod wire;
+pub(crate) mod wire;
 
 #[cfg(test)]
 mod tests;

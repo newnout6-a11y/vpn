@@ -124,6 +124,55 @@ pub enum HealthReason {
     Hy2HandshakeFailed,
 }
 
+/// What the probes' classifier concluded about a server (`vpnte_probes::discipline::Verdict`,
+/// same wire names: the app maps them 1:1). A name this version does not know (a file written
+/// by a newer one) reads as `Unknown` instead of failing the whole list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServerVerdict {
+    Healthy,
+    /// Data stops after the first ~12–24 KB without a reset (hosting freeze on this network).
+    Frozen,
+    /// Data stopped at another volume.
+    Stalled,
+    /// TCP connects, the TLS / REALITY handshake fails, hangs or gets the real certificate.
+    HandshakeFailed,
+    KeyRejected,
+    /// ICMP answers, TCP and UDP time out: changing port or transport will not help.
+    IpBanned,
+    /// QUIC / Hysteria / TUIC fail while TCP works.
+    UdpBlocked,
+    Offline,
+    /// Not checked: the server's handshake budget was used up.
+    Deferred,
+    NotVerified,
+    #[serde(other)]
+    Unknown,
+}
+
+/// The reaction the classifier suggests (`vpnte_probes::discipline::Reaction` wire names).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServerReaction {
+    None,
+    SwitchServer,
+    TryAnotherFingerprint,
+    PreferTcpTransport,
+    RetryLater,
+    #[serde(other)]
+    Unknown,
+}
+
+/// The classifier's last verdict on a row. Kept beside [`HealthRecord`] (not inside it): it may
+/// come from another check (the live check, the post-connect transfer), so compare the `at`s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerdictRecord {
+    pub verdict: ServerVerdict,
+    pub reaction: ServerReaction,
+    pub at: UnixMs,
+}
+
 /// One server of the list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -154,6 +203,9 @@ pub struct ServerRow {
     pub country: Option<VerifiedCountry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<HealthRecord>,
+    /// The classifier's verdict (frozen, IP ban, …); absent in older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<VerdictRecord>,
 }
 
 impl ServerRow {
@@ -181,6 +233,7 @@ impl ServerRow {
             archived: None,
             country: None,
             health: None,
+            verdict: None,
         };
         row.set_profile(profile)?;
         Ok(row)

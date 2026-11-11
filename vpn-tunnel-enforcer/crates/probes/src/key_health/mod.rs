@@ -1,9 +1,14 @@
 //! Key health (servers §2.10, §3.11): start a temporary engine for one profile (sing-box or
-//! Xray, config on stdin, authenticated loopback inbound, kill-on-close Job), race three HTTPS
-//! destinations through it, and turn the outcome into a verdict. A key that does not work is a
-//! verdict (`online: false` + [`HealthReason`]); a probe that could not be set up (no free port,
-//! engine missing, cancelled) is an error, never "offline". Used by the server list, the
-//! tunnel's post-trial failover (one candidate at a time) and the live check.
+//! Xray, config on stdin, authenticated loopback inbound, kill-on-close Job), push one transfer
+//! through it and turn the outcome into a verdict. A key that does not work is a verdict
+//! (`online: false` + [`HealthReason`], plus the classifier's [`Classification`]); a probe that
+//! could not be set up (no free port, engine missing, cancelled, handshake budget deferred) is
+//! an error, never "offline". Used by the server list, the tunnel's post-trial failover (one
+//! candidate at a time) and the live check.
+//! RU discipline (Nov 2026): one budgeted handshake per check (the old three parallel requests
+//! were a burst to one server name), and "online" needs more than the ~16 KB freeze threshold:
+//! the trace and [`TRANSFER_BYTES`](crate::discipline::TRANSFER_BYTES) go over that one
+//! connection.
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,11 +22,15 @@ use vpnte_engine::xray_config::select_engine;
 use vpnte_profiles::countries::Iso2;
 use vpnte_profiles::model::{Kind, Profile};
 
-use crate::ping::NetPath;
+use crate::discipline::{
+    self, Classification, Endpoint, FREEZE_BACKOFF, Limits, Observations, Reach, Transfer,
+    TransferReport, classify, real_certificate,
+};
+use crate::live::wire::Wire;
+use crate::ping::{NetPath, PingTarget};
 
 mod classify;
 mod config;
-mod destinations;
 mod engine;
 #[cfg(test)]
 mod tests;
@@ -29,13 +38,17 @@ mod tests;
 pub use classify::{classify_failure, parse_trace};
 pub use config::{DIRECT_TAG, INBOUND_TAG, PROXY_TAG, Uplink, probe_config};
 
-use destinations::{DESTINATIONS, Destination, Race};
 use engine::{Running, Start};
 
 /// Probes running at once in a batch.
 pub const CONCURRENCY: usize = 5;
 /// Deadline of a batch (a group check).
 pub const BATCH_DEADLINE: Duration = Duration::from_secs(600);
+/// Longest wait of one key for its handshake slot: just over one budget window, so the 4th–6th
+/// key behind one server name are still checked and later ones are deferred.
+pub const KEY_WAIT: Duration = Duration::from_secs(65);
+/// The engine logs a failed dial asynchronously: give its last lines a moment to arrive.
+const LOG_SETTLE: Duration = Duration::from_millis(150);
 
 /// Why a key is offline (the old `healthReason` strings; same wire names as the server list's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -198,60 +211,159 @@ pub async fn start_probe_engine(
     })
 }
 
-/// Checks one key: engine up, destinations raced (first 2xx wins, the trace may add the exit IP
-/// and country), engine stopped. `Err` only for setup failures and cancellation.
+/// One key's verdict and what the classifier made of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyCheck {
+    pub health: KeyHealth,
+    pub verdict: Classification,
+}
+
+/// Checks one key: [`check_profile_verdict`] without the classification.
 pub async fn check_profile(
     p: &Profile,
     ctx: &ProbeCtx,
     cancel: &CancellationToken,
 ) -> AppResult<KeyHealth> {
-    probe_with(p, ctx, &DESTINATIONS, |b| b, cancel).await
+    Ok(check_profile_verdict(p, ctx, cancel).await?.health)
 }
 
-/// [`check_profile`] with the destinations and the HTTP client settings given (test seam).
+/// Checks one key: a handshake slot of its endpoint (waits up to [`KEY_WAIT`], else `Err`
+/// "deferred"), engine up, the trace and the transfer on one connection, the reach probe when
+/// the dial failed, engine stopped. `Err` only for setup failures, deferral and cancellation.
+pub async fn check_profile_verdict(
+    p: &Profile,
+    ctx: &ProbeCtx,
+    cancel: &CancellationToken,
+) -> AppResult<KeyCheck> {
+    let wire = Wire::verified().map_err(AppError::internal)?;
+    probe_with(p, ctx, &wire, Limits::STANDARD, cancel).await
+}
+
+/// [`check_profile_verdict`] with the connection maker and the timing given (test seam).
 pub(crate) async fn probe_with(
     p: &Profile,
     ctx: &ProbeCtx,
-    destinations: &[Destination],
-    tune: fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+    wire: &Wire,
+    limits: Limits,
     cancel: &CancellationToken,
-) -> AppResult<KeyHealth> {
+) -> AppResult<KeyCheck> {
+    let endpoint = Endpoint::of(p);
+    if let Some(endpoint) = &endpoint {
+        discipline::budget()
+            .acquire(endpoint, KEY_WAIT, cancel)
+            .await?;
+    }
+    let udp_transport = PingTarget::of(p).udp_only;
     let probe = match start_probe_engine(p, ctx, cancel).await? {
         Started::Ready(probe) => probe,
-        Started::Offline(verdict) => return Ok(verdict),
-    };
-    let client = destinations::builder(probe.socks())
-        .map(tune)
-        .and_then(destinations::build);
-    let raced = match client {
-        Ok(client) => destinations::race(&client, destinations, cancel).await,
-        Err(err) => Err(err),
-    };
-    let verdict = match raced {
-        Ok(Race::Online {
-            rtt_ms,
-            egress_ip,
-            country,
-        }) => Ok(KeyHealth {
-            online: true,
-            at: now_ms(),
-            rtt_ms: Some(rtt_ms),
-            reason: None,
-            egress_ip,
-            country,
-            engine: Some(probe.engine()),
-        }),
-        Ok(Race::Offline(errors)) => {
-            let reason = classify_failure(is_hysteria2(p), &probe.output(), &errors);
-            Ok(KeyHealth::offline(reason, Some(probe.engine())))
+        Started::Offline(health) => {
+            let seen = Observations {
+                udp_transport,
+                failure: health.reason,
+                ..Observations::default()
+            };
+            let verdict = classify(&seen);
+            return Ok(KeyCheck { health, verdict });
         }
-        Err(err) => Err(err),
     };
-    probe.stop().await;
-    if let Ok(health) = &verdict {
-        tracing::debug!(online = health.online, reason = ?health.reason, "key probe finished");
+    let report = discipline::transfer_check(wire, probe.socks(), true, limits, cancel).await;
+    let report = match report {
+        Ok(report) => report,
+        Err(err) => {
+            probe.stop().await;
+            return Err(err);
+        }
+    };
+    let online = answered(&report);
+    if !online {
+        tokio::time::sleep(LOG_SETTLE).await;
     }
-    verdict
+    let log = if online {
+        String::new()
+    } else {
+        probe.output()
+    };
+    let engine = probe.engine();
+    probe.stop().await;
+    if let Some(endpoint) = &endpoint
+        && report.transfer.frozen()
+    {
+        discipline::budget().hold(endpoint, FREEZE_BACKOFF);
+    }
+    let failure = (!online).then(|| failure_of(is_hysteria2(p), &log, &report.transfer));
+    let reach = if needs_reach(&report.transfer, failure) {
+        discipline::reach(
+            &p.server.to_string(),
+            p.port,
+            udp_transport,
+            &ctx.net,
+            cancel,
+        )
+        .await
+    } else {
+        Reach::default()
+    };
+    let verdict = classify(&Observations {
+        udp_transport,
+        deferred: false,
+        transfer: Some(report.transfer.clone()),
+        failure,
+        real_certificate: real_certificate(&log),
+        icmp: reach.icmp,
+        tcp: reach.tcp,
+    });
+    let (egress_ip, country) = report.trace.unwrap_or_default();
+    let health = KeyHealth {
+        online,
+        at: now_ms(),
+        rtt_ms: if online { report.answer_ms } else { None },
+        reason: failure,
+        egress_ip,
+        country,
+        engine: Some(engine),
+    };
+    tracing::debug!(online, verdict = ?verdict.verdict, "key probe finished");
+    Ok(KeyCheck { health, verdict })
+}
+
+/// The tunnel works end to end: the whole transfer came, or the destination answered with an
+/// HTTP status through it (the volume is then unproven: the verdict says so).
+fn answered(report: &TransferReport) -> bool {
+    match &report.transfer {
+        Transfer::Complete { .. } => true,
+        Transfer::Failed { error, .. } => {
+            report.answer_ms.is_some() && error.starts_with("http status")
+        }
+        _ => false,
+    }
+}
+
+/// The failure class: a stall is the data timing out; otherwise the engine's log and the error.
+fn failure_of(hysteria2: bool, log: &str, transfer: &Transfer) -> HealthReason {
+    match transfer {
+        Transfer::Stalled { .. } => HealthReason::Timeout,
+        Transfer::Failed { error, .. } => classify_failure(hysteria2, log, error),
+        Transfer::NoData | Transfer::Complete { .. } => classify_failure(hysteria2, log, "timeout"),
+    }
+}
+
+/// The plain probes only matter when nothing came back and the failure is not the key itself.
+fn needs_reach(transfer: &Transfer, failure: Option<HealthReason>) -> bool {
+    let silent = matches!(
+        transfer,
+        Transfer::NoData | Transfer::Failed { bytes: 0, .. }
+    );
+    let decisive = matches!(
+        failure,
+        Some(
+            HealthReason::AuthFailed
+                | HealthReason::Hy2AuthFailed
+                | HealthReason::ConfigFailed
+                | HealthReason::Hy2ConfigFailed
+                | HealthReason::NoOutbound
+        )
+    );
+    silent && !decisive
 }
 
 /// Why a batch produced no results.
@@ -264,7 +376,8 @@ pub enum HealthError {
     Cancelled,
     #[error("health check deadline passed")]
     Timeout,
-    /// Every probe failed to set up (engine missing or blocked, no free port).
+    /// Every probe failed to set up (engine missing or blocked, no free port) or was deferred by
+    /// the handshake budget (`probes.discipline.deferred`).
     #[error("no probe could be started")]
     Setup(#[source] AppError),
 }
@@ -282,15 +395,26 @@ impl From<HealthError> for AppError {
     }
 }
 
-/// Checks a batch (a group's keys; `None` = the row's profile is unreadable here → `no-outbound`)
-/// with [`CONCURRENCY`] probes at a time under [`BATCH_DEADLINE`]. Results come in completion
-/// order; a key whose probe could not be set up gets no result (not checked), and when that
-/// happened to every key the first setup error is returned.
+/// [`check_many_verdicts`] without the classifications.
 pub async fn check_many<K: Send>(
     items: Vec<(K, Option<Profile>)>,
     ctx: &ProbeCtx,
     cancel: &CancellationToken,
 ) -> Result<Vec<(K, KeyHealth)>, HealthError> {
+    let checked = check_many_verdicts(items, ctx, cancel).await?;
+    Ok(checked.into_iter().map(|(k, c)| (k, c.health)).collect())
+}
+
+/// Checks a batch (a group's keys; `None` = the row's profile is unreadable here → `no-outbound`)
+/// with [`CONCURRENCY`] probes at a time under [`BATCH_DEADLINE`], each behind its endpoint's
+/// handshake budget. Results come in completion order; a key whose probe could not be set up
+/// or was deferred gets no result (not checked), and when that happened to every key the first
+/// such error is returned.
+pub async fn check_many_verdicts<K: Send>(
+    items: Vec<(K, Option<Profile>)>,
+    ctx: &ProbeCtx,
+    cancel: &CancellationToken,
+) -> Result<Vec<(K, KeyCheck)>, HealthError> {
     if items.is_empty() {
         return Err(HealthError::GroupNotFoundOrEmpty);
     }
@@ -298,8 +422,8 @@ pub async fn check_many<K: Send>(
     let checks = stream::iter(items)
         .map(|(key, profile)| async move {
             let result = match &profile {
-                Some(p) => check_profile(p, ctx, cancel).await,
-                None => Ok(KeyHealth::offline(HealthReason::NoOutbound, None)),
+                Some(p) => check_profile_verdict(p, ctx, cancel).await,
+                None => Ok(unreadable()),
             };
             (key, result)
         })
@@ -317,7 +441,7 @@ pub async fn check_many<K: Send>(
     let mut first_error = None;
     for (key, result) in outcome {
         match result {
-            Ok(health) => results.push((key, health)),
+            Ok(check) => results.push((key, check)),
             Err(err) if err.kind == vpnte_base::ErrorKind::Cancelled => {
                 return Err(HealthError::Cancelled);
             }
@@ -331,4 +455,14 @@ pub async fn check_many<K: Send>(
         Some(err) if results.is_empty() => Err(HealthError::Setup(err)),
         _ => Ok(results),
     }
+}
+
+/// The verdict of a row whose profile cannot be opened here.
+fn unreadable() -> KeyCheck {
+    let health = KeyHealth::offline(HealthReason::NoOutbound, None);
+    let verdict = classify(&Observations {
+        failure: health.reason,
+        ..Observations::default()
+    });
+    KeyCheck { health, verdict }
 }
