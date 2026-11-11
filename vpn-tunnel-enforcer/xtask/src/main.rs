@@ -21,7 +21,8 @@ cargo xtask <command>
   dist [--skip-build] [--bin-dir DIR]
                         build the two shipped binaries (release, --locked), stage the installed layout in
                         target/stage, check its exact file set, compile installer/vpnte.nsi and write
-                        target/dist/{VPN-Tunnel-Enforcer-Setup-<version>.exe, checksums.txt};
+                        target/dist/{VPN-Tunnel-Enforcer-Setup-<version>.exe,
+                        VPN-Tunnel-Enforcer-<version>-portable.zip (no installation, no administrator), checksums.txt};
                         --skip-build takes vpn-tunnel-enforcer.exe, vpnte_proxy.exe and
                         THIRD-PARTY-NOTICES.txt from DIR (default target/release) instead of running cargo
   smoke-install         CI only (requires CI=true): install the built installer silently, check files,

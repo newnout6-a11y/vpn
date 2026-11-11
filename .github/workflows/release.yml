@@ -60,4 +60,4 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
             --title "VPN Tunnel Enforcer ${TAG#v}" \
             --notes "Verify the download against checksums.txt (SHA-256)." \
-            target/dist/VPN-Tunnel-Enforcer-Setup-*.exe target/dist/checksums.txt
+            target/dist/VPN-Tunnel-Enforcer-Setup-*.exe target/dist/VPN-Tunnel-Enforcer-*-portable.zip target/dist/checksums.txt

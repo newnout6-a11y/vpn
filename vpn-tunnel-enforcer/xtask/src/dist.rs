@@ -1,5 +1,7 @@
-//! `cargo xtask dist`: release build, the installed layout in `target/stage`, the installer and `checksums.txt`.
+//! `cargo xtask dist`: release build, the installed layout in `target/stage`, the installer, the portable archive
+//! and `checksums.txt`.
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -18,10 +20,17 @@ pub const BUILT: [(&str, &str); 3] = [
     ),
 ];
 const SCRIPT: &str = "installer/vpnte.nsi";
+/// Top-level folder inside the portable archive.
+const PORTABLE_ROOT: &str = "VPN Tunnel Enforcer";
 
 /// Installer file name for a version (old electron-builder naming kept).
 pub fn installer_name(version: &str) -> String {
     format!("VPN-Tunnel-Enforcer-Setup-{version}.exe")
+}
+
+/// Portable archive file name for a version: the staged layout as a zip; needs no installation and no administrator.
+pub fn portable_name(version: &str) -> String {
+    format!("VPN-Tunnel-Enforcer-{version}-portable.zip")
 }
 
 /// Runs the whole pipeline; with `skip_build` the build outputs are taken from `bin_dir` (default target/release).
@@ -65,8 +74,11 @@ pub fn run(root: &Path, skip_build: bool, bin_dir: Option<PathBuf>) -> Result<()
         "makensis reported success but {} is missing",
         installer.display()
     );
+    let portable = dist.join(portable_name(&version));
+    write_portable(&stage, expected.keys().map(String::as_str), &portable)?;
     write_checksums(&dist)?;
     println!("  dist     {}", installer.display());
+    println!("  dist     {}", portable.display());
     Ok(())
 }
 
@@ -182,6 +194,28 @@ fn compile(root: &Path, makensis: &Path, version: &str, stage: &Path, dist: &Pat
     run_tool(&mut cmd)
 }
 
+/// Zips the staged layout under one top-level folder. Entries are sorted and carry a fixed timestamp, so the same
+/// stage always gives the same archive bytes.
+fn write_portable<'a>(
+    stage: &Path,
+    files: impl Iterator<Item = &'a str>,
+    out: &Path,
+) -> Result<()> {
+    let mut names: Vec<&str> = files.collect();
+    names.sort_unstable();
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(zip::DateTime::DEFAULT);
+    let file = fs::File::create(out).with_context(|| format!("create {}", out.display()))?;
+    let mut zip = zip::ZipWriter::new(file);
+    for name in names {
+        let data = fs::read(stage.join(name)).with_context(|| format!("read staged {name}"))?;
+        zip.start_file(format!("{PORTABLE_ROOT}/{name}"), options)?;
+        zip.write_all(&data)?;
+    }
+    zip.finish()?.flush().context("write the portable archive")
+}
+
 /// `checksums.txt`: `<sha256>  <file>` per artifact, sorted by name, the file itself not listed.
 fn write_checksums(dist: &Path) -> Result<()> {
     let mut names: Vec<String> = fs::read_dir(dist)?
@@ -295,6 +329,38 @@ mod tests {
             installer_name("2.0.0"),
             "VPN-Tunnel-Enforcer-Setup-2.0.0.exe"
         );
+    }
+
+    /// The portable archive holds exactly the staged files under one folder and is reproducible.
+    #[test]
+    fn portable_archive_is_the_stage_and_reproducible() {
+        let dir = root().join("target/xtask/test-scratch/portable");
+        recreate(&dir).unwrap();
+        let stage = dir.join("stage");
+        fs::create_dir_all(stage.join("resources")).unwrap();
+        fs::write(stage.join("b.exe"), b"bbbb").unwrap();
+        fs::write(stage.join("resources/a.dll"), b"aaaa").unwrap();
+        let files = ["resources/a.dll", "b.exe"];
+        let (one, two) = (dir.join("one.zip"), dir.join("two.zip"));
+        write_portable(&stage, files.into_iter(), &one).unwrap();
+        write_portable(&stage, files.into_iter().rev(), &two).unwrap();
+        assert_eq!(fs::read(&one).unwrap(), fs::read(&two).unwrap());
+        let mut zip = zip::ZipArchive::new(fs::File::open(&one).unwrap()).unwrap();
+        let names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().unwrap().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "VPN Tunnel Enforcer/b.exe",
+                "VPN Tunnel Enforcer/resources/a.dll"
+            ]
+        );
+        assert_eq!(
+            portable_name("2.0.0"),
+            "VPN-Tunnel-Enforcer-2.0.0-portable.zip"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// AT-11-006: one `<sha256>  <name>` line per artifact, sorted, the checksum file itself not listed.
