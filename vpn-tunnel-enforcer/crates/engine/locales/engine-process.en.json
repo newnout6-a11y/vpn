@@ -1,0 +1,28 @@
+{
+  "engine": {
+    "process": {
+      "singboxExited": "sing-box exited during start-up (code {{code}}).",
+      "singboxNotReady": "sing-box did not report readiness in time.",
+      "spawnFailed": "Could not start {{engine}}: the engine file is missing or blocked.",
+      "stopUnconfirmed": "Could not confirm that {{engine}} stopped.",
+      "configRejected": "{{engine}} rejected the configuration.",
+      "xray": {
+        "exited": "Xray exited during start-up (code {{code}}).",
+        "socksNotReady": "The Xray engine started, but its local SOCKS port {{port}} does not answer.",
+        "slotOccupied": "The Xray slot is already used by a running instance.",
+        "portTaken": "The port is already used by the other Xray slot.",
+        "notRunning": "The Xray slot is not running.",
+        "notStarted": "The Xray slot was never started, so there is nothing to restart."
+      }
+    },
+    "clash": {
+      "invalid": "Invalid sing-box controller address or key.",
+      "unreachable": "The sing-box control interface does not answer.",
+      "badAnswer": "The sing-box control interface returned an unexpected answer.",
+      "notConfirmed": "The server switch was not confirmed."
+    },
+    "ports": {
+      "exhausted": "No free local port was found for the engine."
+    }
+  }
+}

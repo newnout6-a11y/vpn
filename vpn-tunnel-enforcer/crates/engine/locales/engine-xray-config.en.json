@@ -1,0 +1,42 @@
+{
+  "engine": {
+    "xray": {
+      "reject": {
+        "nativeXray": "This JSON profile contains Xray settings; choose Auto or Xray to keep its route.",
+        "xrayTransport": "The transport settings require Xray; choose Auto or Xray."
+      },
+      "singBoxOnly": {
+        "h2Transport": "The profile uses features Xray does not have (HTTP/2 transport); choose Auto or sing-box.",
+        "quicTransport": "The profile uses features Xray does not have (QUIC transport); choose Auto or sing-box.",
+        "insecureWithoutPin": "The profile uses features Xray does not have (certificate checks disabled without a pinned certificate); choose Auto or sing-box.",
+        "spkiPin": "The profile uses features Xray does not have (certificate public key pinning); choose Auto or sing-box.",
+        "ech": "The profile uses features Xray does not have (ECH); choose Auto or sing-box.",
+        "shadowsocksPlugin": "The profile uses features Xray does not have (Shadowsocks plugin); choose Auto or sing-box.",
+        "shadowsocksUdpOverTcp": "The profile uses features Xray does not have (Shadowsocks UDP over TCP); choose Auto or sing-box.",
+        "shadowsocksMethod": "The profile uses features Xray does not have (Shadowsocks cipher); choose Auto or sing-box.",
+        "realityTransport": "The profile uses features Xray does not have (REALITY over WebSocket or HTTPUpgrade); choose Auto or sing-box.",
+        "plaintext": "The profile uses features Xray does not have (an unencrypted connection to a public server); choose Auto or sing-box."
+      },
+      "conflict": {
+        "h2Transport": "The profile needs an Xray transport but also uses the HTTP/2 transport, which Xray does not support.",
+        "quicTransport": "The profile needs an Xray transport but also uses the QUIC transport, which Xray does not support.",
+        "insecureWithoutPin": "The profile needs an Xray transport but also disables certificate checks, which Xray does not support (to skip certificate checks, set pinnedPeerCertSha256 / pcs).",
+        "spkiPin": "The profile needs an Xray transport but also pins the certificate public key, which Xray does not support.",
+        "ech": "The profile needs an Xray transport but also uses ECH, which Xray does not support.",
+        "shadowsocksPlugin": "The profile needs an Xray transport but also uses a Shadowsocks plugin, which Xray does not support.",
+        "shadowsocksUdpOverTcp": "The profile needs an Xray transport but also uses Shadowsocks UDP over TCP, which Xray does not support.",
+        "shadowsocksMethod": "The profile needs an Xray transport but also uses a Shadowsocks cipher Xray does not support.",
+        "realityTransport": "The profile needs an Xray transport but also uses REALITY over WebSocket or HTTPUpgrade, which Xray does not support.",
+        "plaintext": "The profile needs an Xray transport but also uses an unencrypted connection to a public server, which Xray does not allow."
+      },
+      "config": {
+        "protocol": "Xray does not support the {{protocol}} protocol."
+      },
+      "resolve": {
+        "failed": "Could not resolve the Xray server address before starting the tunnel.",
+        "sinkhole": "DNS returned a blocked address for the Xray server; the tunnel was not started.",
+        "bootstrapFallback": "The system DNS did not answer; the Xray server address was resolved through the fallback DNS server."
+      }
+    }
+  }
+}
