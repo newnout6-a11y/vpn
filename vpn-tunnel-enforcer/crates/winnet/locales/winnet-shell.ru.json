@@ -1,0 +1,20 @@
+{
+  "winnet": {
+    "elevation": {
+      "declined": "Для работы VPN Tunnel Enforcer нужны права администратора.",
+      "relaunchFailed": "Не удалось перезапустить VPN Tunnel Enforcer с правами администратора."
+    },
+    "singleInstance": {
+      "otherSession": "VPN Tunnel Enforcer уже запущен в другом сеансе Windows.",
+      "noAnswer": "VPN Tunnel Enforcer уже запущен, но не ответил. Откройте его окно из трея."
+    },
+    "shell": {
+      "badUrl": "Эту ссылку нельзя открыть: разрешены только адреса http и https.",
+      "noFolder": "Папка не найдена.",
+      "openFailed": "Windows не смогла открыть ссылку или папку."
+    },
+    "toast": {
+      "productionAumid": "Отладочная сборка не может создавать ярлык с идентификатором установленного приложения."
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "winnet": {
+    "autostart": {
+      "failed": "Could not change autostart — the setting is unchanged.",
+      "needsAdmin": "Changing autostart requires administrator rights.",
+      "unknown": "Autostart state is unknown: the change failed and the previous setting could not be restored. Check the \"VPN Tunnel Enforcer\" task in Task Scheduler."
+    },
+    "clipboard": {
+      "busy": "The clipboard is in use by another program. Try again.",
+      "failed": "Could not copy to the clipboard."
+    }
+  }
+}

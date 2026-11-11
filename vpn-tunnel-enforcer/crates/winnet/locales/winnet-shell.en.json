@@ -1,0 +1,20 @@
+{
+  "winnet": {
+    "elevation": {
+      "declined": "VPN Tunnel Enforcer needs administrator rights to work.",
+      "relaunchFailed": "Could not restart VPN Tunnel Enforcer with administrator rights."
+    },
+    "singleInstance": {
+      "otherSession": "VPN Tunnel Enforcer is already running in another Windows session.",
+      "noAnswer": "VPN Tunnel Enforcer is already running but did not respond. Open its window from the tray."
+    },
+    "shell": {
+      "badUrl": "This link cannot be opened: only http and https addresses are allowed.",
+      "noFolder": "Folder not found.",
+      "openFailed": "Windows could not open the link or folder."
+    },
+    "toast": {
+      "productionAumid": "A debug build may not create a shortcut with the installed app's identity."
+    }
+  }
+}
