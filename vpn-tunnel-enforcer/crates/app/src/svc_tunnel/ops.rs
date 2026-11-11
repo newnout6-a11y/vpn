@@ -57,8 +57,9 @@ impl TunnelService {
         }
         let token = CancellationToken::new();
         *self.pending.lock() = Some(token.clone());
+        let detector = crate::svc_tunnel::make_detector(&self.detector);
         let found = tokio::select! {
-            found = self.detector.detect() => found,
+            found = detector.detect() => found,
             () = token.cancelled() => {
                 return Err(ConnError::Cancelled(Msg::new("tunnel.lifecycle.lane.startCancelled")));
             }

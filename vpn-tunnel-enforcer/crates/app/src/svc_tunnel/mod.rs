@@ -55,6 +55,9 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
     ));
     let reader = Arc::new(IpReader::new());
     let ip = IpMonitor::new(reader.clone());
+    // One Soft capture for the whole process: the runtime writes its mixed port, the local-proxy
+    // detector reads it so a scan can never pick our own inbound as the upstream.
+    let proxy_capture = Arc::new(ProxyCapture::new());
     let runtime = TunnelHandle::spawn(RuntimeDeps {
         engines: Arc::new(RealEngines::new(
             b.engines.singbox.clone(),
@@ -67,7 +70,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
             .wfp
             .as_ref()
             .map(|p| Arc::new(TunCapture::new(p.clone())) as Arc<dyn Capture>),
-        proxy: Arc::new(ProxyCapture::new()),
+        proxy: Arc::clone(&proxy_capture) as Arc<dyn Capture>,
         inputs: Arc::new(inputs::StoreInputs {
             settings: b.settings.clone(),
             rules: b.rules.clone(),
@@ -161,13 +164,20 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
         settings: b.settings.clone(),
         servers: b.servers.clone(),
         engines: b.engines.clone(),
-        detector: LocalProxyDetector::new(ScanOptions {
-            skip_ports: Vec::new(),
-            skip_pids: Vec::new(),
-        }),
+        detector: Arc::clone(&proxy_capture),
         pending: Mutex::new(None),
         rule_sets,
     }))
+}
+
+/// The local-proxy detector for one scan. Our own mixed inbound is always skipped (NOADMIN §2):
+/// while Soft runs, the per-user system proxy we applied points at that port, so a scan that found
+/// it would chain the engine to itself.
+fn make_detector(proxy: &ProxyCapture) -> LocalProxyDetector {
+    LocalProxyDetector::new(ScanOptions {
+        skip_ports: proxy.port().into_iter().collect(),
+        skip_pids: Vec::new(),
+    })
 }
 
 /// The [`TunnelOps`] implementation (methods in `ops.rs`).
@@ -181,8 +191,8 @@ struct TunnelService {
     settings: Arc<Store<Settings>>,
     servers: Arc<Servers>,
     engines: Engines,
-    /// Finds Happ's (or another client's) local proxy when none is configured.
-    detector: LocalProxyDetector,
+    /// The Soft capture: the runtime owns its mixed port, the detector skips it (see [`make_detector`]).
+    detector: Arc<ProxyCapture>,
     /// The token of the user's connect / switch in flight, cancelled by "Cancel".
     pending: Mutex<Option<CancellationToken>>,
     /// Wakes the rule-set refresh task (a Smart RU / rule-set setting changed).

@@ -44,6 +44,11 @@ impl ProxyCapture {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// The mixed port of the running (or starting) session; `None` between sessions.
+    pub fn port(&self) -> Option<u16> {
+        *self.port.lock()
+    }
 }
 
 fn loopback(port: u16) -> SocketAddr {
