@@ -1,0 +1,8 @@
+{
+  "proxies": {
+    "control": {
+      "tokenFailed": "The external proxy control API did not start: the token file could not be written",
+      "bindFailed": "The external proxy control API did not start: port {{port}} could not be bound"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "proxies": {
+    "error": {
+      "badRequest": "Invalid external proxy request: {{detail}}",
+      "forbidden": "External proxy lease not found or expired: {{detail}}",
+      "notFound": "Not found: {{detail}}",
+      "conflict": "The external proxy is busy right now: {{detail}}",
+      "unavailable": "No free healthy external proxy: {{detail}}",
+      "upstream": "Server group check failed: {{detail}}",
+      "engine": "Could not start the external proxy: {{detail}}"
+    }
+  }
+}

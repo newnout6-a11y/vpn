@@ -26,6 +26,9 @@ hex.workspace = true
 futures-util.workspace = true
 ipnet.workspace = true
 async-trait.workspace = true
+jiff.workspace = true
+url.workspace = true
+windows.workspace = true
 
 [features]
 # Build scaffolding: one flag per work package while they are written in parallel.
