@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use serde_json::{Map, Value, json};
 
 use super::compile::observed;
-use super::reach::{DEPENDENCY_POINTERS, reach};
+use super::reach::{dials_through, reach};
 use super::{EXPORT_BLOCK_TAG, NativeError, PROXY_TAG, SELECTABLE_PROTOCOLS};
 use super::{
     keep_inbounds, list_of, non_empty, non_empty_str, selected_outbound, strings, tag, truthy,
@@ -91,9 +91,7 @@ pub fn preserve(
     });
     let needs_graph = non_empty_str(entry.balancer_tag.as_deref()).is_some()
         || non_empty_str(entry.outbound_tag.as_deref()).is_some_and(|t| t != raw_tag)
-        || DEPENDENCY_POINTERS
-            .iter()
-            .any(|p| non_empty(raw.pointer(p)).is_some());
+        || dials_through(&raw);
     let doc_outbounds = doc
         .and_then(|d| d.get("outbounds"))
         .and_then(Value::as_array);

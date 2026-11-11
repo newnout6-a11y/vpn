@@ -140,6 +140,10 @@ pub enum EmitError {
     RealityOverQuic,
     #[error("public key pins cannot be combined with a trusted certificate")]
     PinWithCertificate,
+    /// `insecure` next to a whole-certificate pin and no public-key pin: sing-box 1.14 cannot
+    /// check that pin, so the server would not be verified at all (Xray enforces it).
+    #[error("the certificate pin cannot be enforced while certificate checks are off")]
+    CertPinUnenforced,
     #[error("ECH config is not valid base64 or PEM")]
     EchConfig,
     /// Shadowsocks plugin sing-box does not implement (plugin name).
@@ -183,6 +187,7 @@ impl From<EmitError> for AppError {
             EmitError::RealityWithEch => Msg::new("profiles.emit.realityWithEch"),
             EmitError::RealityOverQuic => Msg::new("profiles.emit.realityOverQuic"),
             EmitError::PinWithCertificate => Msg::new("profiles.emit.pinWithCertificate"),
+            EmitError::CertPinUnenforced => Msg::new("profiles.emit.certPinUnenforced"),
             EmitError::EchConfig => Msg::new("profiles.emit.echConfig"),
             EmitError::SsPlugin(name) => Msg::new("profiles.emit.ssPlugin").arg("plugin", name),
             EmitError::Hy2Obfs(kind) => Msg::new("profiles.emit.hy2Obfs").arg("obfs", kind),

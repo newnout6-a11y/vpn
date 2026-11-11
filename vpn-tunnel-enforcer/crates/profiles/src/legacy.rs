@@ -101,21 +101,8 @@ pub fn from_legacy(
 }
 
 /// `vpnte_xray` read and checked by the graph owner (`xray_native::decode`).
-#[cfg(feature = "profiles-native")]
 fn native_graph(v: &Value) -> Result<NativeXray, LegacyError> {
     crate::xray_native::decode(v).map_err(|_| LegacyError::InvalidNativeGraph)
-}
-
-/// `vpnte_xray` exactly as the Electron app wrote it (`nativeXrayProfile.ts:15-21` checks).
-#[cfg(not(feature = "profiles-native"))]
-fn native_graph(v: &Value) -> Result<NativeXray, LegacyError> {
-    // The serde message is not kept: it can quote parts of the graph.
-    let graph: NativeXray =
-        serde_json::from_value(v.clone()).map_err(|_| LegacyError::InvalidNativeGraph)?;
-    if graph.version != 1 || graph.selected_tag.trim().is_empty() {
-        return Err(LegacyError::InvalidNativeGraph);
-    }
-    Ok(graph)
 }
 
 fn forget_old_defaults(profile: &mut Profile) {
@@ -130,7 +117,6 @@ fn forget_old_defaults(profile: &mut Profile) {
 }
 
 /// The share link of a URI-imported row, read by the URI importer (feed URLs are not links).
-#[cfg(feature = "profiles-uri")]
 fn reparse(source_uri: Option<&str>) -> Option<Profile> {
     let line = source_uri?.trim();
     let (scheme, _) = line.split_once("://")?;
@@ -138,12 +124,6 @@ fn reparse(source_uri: Option<&str>) -> Option<Profile> {
         return None;
     }
     crate::uri::parse_uri(line).ok()
-}
-
-/// Without the `profiles-uri` package the stored outbound is the only source.
-#[cfg(not(feature = "profiles-uri"))]
-fn reparse(_source_uri: Option<&str>) -> Option<Profile> {
-    None
 }
 
 /// English diagnostic of a skip reason (for logs; never contains credentials).
@@ -165,6 +145,6 @@ fn describe(reason: &SkipReason) -> String {
 #[cfg(test)]
 mod tests;
 
-/// Rows imported from a share link are read again from it (needs the `profiles-uri` package).
-#[cfg(all(test, feature = "profiles-uri"))]
+/// Rows imported from a share link are read again from it.
+#[cfg(test)]
 mod reparse_tests;

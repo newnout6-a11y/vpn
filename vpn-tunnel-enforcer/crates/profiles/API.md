@@ -55,6 +55,13 @@ pub enum Transport { Ws{..}, Grpc{service_name, multi_mode}, Http{hosts, path}, 
 pub enum Note { NaiveInsecureIgnored, CertPinNotEnforced, AlterIdNormalized(u32), ProviderFpDroppedOnQuic,
     UnsupportedField(String), FileReferenceDropped(String), DialFieldDropped(String), Unencrypted,
     MuxSingBoxOnly, Other(String /* an i18n key */) }
+impl Note {
+    pub const REALITY_FINGERPRINT: &str;     // Other key: REALITY fp current servers refuse
+    pub const XRAY_TRANSPORT_REMOVED: &str;  // Other key: Xray h2/QUIC stream converted for sing-box
+    pub fn for_tls(tls: Option<&Tls>) -> Option<Note>;  // the note every importer adds for these TLS
+}
+pub const REALITY_REFUSED_FINGERPRINTS: [&str; 6];  // edge ios qq random android 360
+impl Tls { pub fn refused_reality_fingerprint(&self) -> bool }  // REALITY + one of those
 pub struct ParseReport { pub profiles: Vec<Profile>, pub skipped: Vec<Skipped>, pub meta: SubscriptionMeta }
 pub struct Skipped { pub excerpt: String /* redacted, <= 80 chars */, pub reason: SkipReason }
 pub enum SkipReason { UnknownScheme(String), Invalid{scheme, detail /* English */}, MissingCredential,
@@ -141,6 +148,21 @@ pub fn from_legacy(name: &str, protocol: &str, outbound: &Value, source_uri: Opt
   share links, Clash text). Never walks `inbounds dns route routing log ...`. Xray 26 Hysteria
   `finalmask` maps Salamander / Gecko, `udpHop` and the Brutal rates (`brutalUp` / `brutalDown`
   -> `up_mbps` / `down_mbps` as Xray's client applies them); other masks / QUIC knobs are Notes.
+- Xray VLESS / VMess / Trojan / Shadowsocks: a lone outbound (or a document routing everything to
+  it) that says nothing the model drops is a typed profile without `native_xray`, so both engines
+  run it. The graph is kept when the outbound has a balancer / chain / loopback around it, or any
+  Xray-only field (enabled `mux`, `sockopt`, `finalmask`, `sendThrough`, kcp, the TCP HTTP header
+  mask, several pins, unknown keys; `json/xray_plain.rs` lists what counts as carried). A stream
+  Xray 26 removed (`h2` / `http` -> `Transport::Http`, plain `quic` -> `Transport::Quic`) is typed
+  with `Note::Other(XRAY_TRANSPORT_REMOVED)` plus an `UnsupportedField` per dropped Xray field;
+  `h3`, QUIC with a packet key / header mask, or such a stream behind a `dialerProxy` chain are
+  skipped. Xray `socks` / `http` (flat `user`/`pass` or `servers[].users[]`; SOCKS over TLS, a
+  transport or a chain -> skipped) and `wireguard` (`secretKey`, `address`, `peers[].endpoint`,
+  `reserved`, `mtu`, `remoteDNS`) outbounds are typed profiles. Another protocol pointing at a
+  server -> `UnknownScheme(protocol)`; a known one without a server -> `Invalid`; `freedom`,
+  `blackhole`, `dns`, `loopback` and stray inbounds stay silent.
+- Every importer adds `Note::for_tls` (REALITY with `edge ios qq random android 360`: servers since
+  Xray 26.9.8 refuse those hellos; the provider's choice is kept).
 - `parse_clash` streams only the first root `proxies` list (limits: 5000 entries, nesting 32,
   64 MiB of approximate materialised bytes, alias copies included); every unread key becomes
   `Note::UnsupportedField`, so do unread sub-keys of the transport's `*-opts` map and of
@@ -245,8 +267,8 @@ impl SingBoxFragment {
     pub fn endpoint_ips(&self) -> Vec<IpAddr>;  // dialed IP literals (route_exclude_address)
 }
 pub enum EmitError { XrayOnly(&'static str), MuxUnsupported(&'static str), TlsUnsupported(&'static str),
-    TransportUnsupported(&'static str), RealityWithEch, RealityOverQuic, PinWithCertificate, EchConfig,
-    SsPlugin(String), Hy2Obfs(String), WireGuard(WgProblem) }
+    TransportUnsupported(&'static str), RealityWithEch, RealityOverQuic, PinWithCertificate,
+    CertPinUnenforced, EchConfig, SsPlugin(String), Hy2Obfs(String), WireGuard(WgProblem) }
 pub enum WgProblem { NoAddress, NoPeer, NoPrivateKey, NoPeerAddress, BadPeerPort, NoPublicKey, AllowedIpsRequired }
 impl From<EmitError> for AppError;        // Validation + profiles.emit.*
 pub fn emit_singbox(p: &Profile, tag: &str, policy: &EmitPolicy) -> Result<SingBoxFragment, EmitError>;
@@ -264,6 +286,13 @@ fragment never carries `domain_strategy`, `detour` (except inside the chain), bi
 `*_path` keys. `XrayOnly(feature)`: native graph, XHTTP, gRPC multi mode (`multi_mode: Some(true)`;
 explicit gun is emitted as sing-box gRPC), TCP HTTP header, VLESS
 encryption — run those on Xray. Provider uTLS names sing-box does not know fall back to the default.
+Default uTLS when the provider names none: REALITY always `chrome` (servers since Xray 26.9.8 refuse
+the device defaults `android` / `ios`); other TCP TLS the device default, else the stealth rotation,
+else `chrome`. Pins: `spki_pin_sha256` goes out as `certificate_public_key_sha256`, which sing-box
+checks even next to `insecure: true`; `insecure` with a non-blank `cert_pin_sha256` (whole-certificate
+hash, which sing-box 1.14 cannot check) and no SPKI pin is refused with `CertPinUnenforced` on every
+kind (route such keys to Xray, which enforces `pinnedPeerCertSha256`); without `insecure` the
+certificate pin is not emitted and the CA check runs (`Note::CertPinNotEnforced` stays true).
 
 ## xray_native (provider Xray graphs; Xray JSON itself is `vpnte_engine::xray_config`'s job)
 
@@ -273,7 +302,7 @@ pub const EXPORT_BLOCK_TAG: &str = "vpnte-block"; // reserved blackhole tag of e
 pub enum NativeError { InvalidProfile, MissingSelected, DuplicateTag, BadBalancerTag, MissingBalancer,
     EmptyBalancer, MissingDependency, ApplicationBypass, Cyclic, MissingLoopbackRoute,
     LoopbackRouteNoDestination, UnsupportedProtocol, NoEntry, SelectedOutsideGraph, LocalFileReference,
-    MultipleEndpoints, InsecureWithoutPin, ReservedTag, TooDeep, GeoData }
+    MultipleEndpoints, InsecureWithoutPin, ReservedTag, TooDeep, GeoData, RemovedTransport }
 impl NativeError { pub fn msg(&self) -> Msg }      // profiles.xrayNative.*
 impl From<NativeError> for AppError;               // Validation
 pub struct CompiledGraph { pub outbounds: Vec<Value>, pub rules: Vec<Value>, pub balancers: Vec<Value>,
@@ -297,7 +326,9 @@ Compiled tags: selected -> `proxy`, other -> `vpnte-source:T`, balancer -> `vpnt
 loopback -> `vpnte-loop:L`. `compile` re-runs every import check (file references, insecure TLS
 without pin, exactly one server and one user per outbound, bypass protocols, cycles, depth > 64,
 copied loop rules that match by `geoip:` / `geosite:` / `ext:` data, which the bundled Xray does
-not ship -> `GeoData`); `allowInsecure` next to a pin is dropped (Xray 26 refuses the flag).
+not ship -> `GeoData`, a reachable outbound streaming over `h2` / `h3` / `http` / `quic`, which
+Xray 26 refuses to load -> `RemovedTransport`; `export_document` refuses those graphs too);
+`allowInsecure` next to a pin is dropped (Xray 26 refuses the flag).
 
 ## export
 
@@ -329,7 +360,8 @@ warning and use the clipboard / file helpers of the app.
   `addPayloadUnrecognised`, `unknownHost`).
 - What the UI must render with this crate's keys: `caps::note_msg(&note)` for every `Profile.notes`
   entry (`profiles.caps.note.*`; `Note::Other` keys: `profiles.wgIni.amneziaIncompatible`,
-  `profiles.wgIni.amneziaJunkDropped`), `caps::skip_msg(&skipped.reason)` for every skipped entry
+  `profiles.wgIni.amneziaJunkDropped`, `profiles.import.realityFingerprint`,
+  `profiles.import.xrayTransportRemoved`), `caps::skip_msg(&skipped.reason)` for every skipped entry
   (`profiles.caps.skip.*`), `Stealth::msg()` (`profiles.caps.stealth.*`), `Capabilities.notes`,
   `Shared::notice()` (`profiles.export.sharedAsJson`).
 - Register the strings at start: `for (ru, en) in vpnte_profiles::LOCALES { … }` (one pair per work
@@ -348,8 +380,9 @@ warning and use the clipboard / file helpers of the app.
 - Xray JSON for typed profiles and engine selection: `vpnte-engine` (`xray_config`, `select_engine`).
 - AmneziaWG (planned WP-12): parameters are classified into Notes, never applied.
 - Clash `proxy-providers` (remote lists), mihomo-only protocols / plugins (TUIC v4, restls, jls,
-  kcptun, SOCKS over TLS, …), Xray `socks` / `http` outbounds: skipped with a reason.
-- Certificate pins: stored and exported, not enforced by sing-box 1.14 (`Note::CertPinNotEnforced`).
+  kcptun, SOCKS over TLS, …): skipped with a reason.
+- Whole-certificate pins (`cert_pin_sha256`) on sing-box 1.14: not emitted (`Note::CertPinNotEnforced`);
+  next to `insecure` the emitter refuses the key (`CertPinUnenforced`), Xray enforces it.
 - Typed mapping of Xray `mux` (kept inside a native graph only).
 - Xray geo data: provider graphs whose copied loop rules need `geoip.dat` / `geosite.dat` / an
   `ext:` file are refused (`NativeError::GeoData`); no `.dat` file is shipped or read.
@@ -361,7 +394,9 @@ warning and use the clipboard / file helpers of the app.
 - `emit_singbox` `check` tests pipe the emitter's whole shape matrix (every protocol / transport /
   TLS combination and protocol knob) through `resources/sing-box.exe check`; `clash::check` does
   the same for what the Clash and WireGuard INI importers produce (20 profiles, default and
-  stealth policy); `xray_native` tests run `resources/xray.exe run -test` (all skipped quietly
+  stealth policy), `json::xray_tests` for the typed profiles the Xray-format importer produces
+  (SOCKS / HTTP / WireGuard, plain outbounds, h2 / QUIC conversions); `xray_native` tests run
+  `resources/xray.exe run -test` (all skipped quietly
   when the binary is absent). Two `emit_singbox::dial` tests (`#[ignore]`, they start two
   sing-box processes on loopback) dial a real Hysteria2 and a ShadowTLS v3 server.
 - Nothing needs elevation; `MachineIdentity::current()` is read-only.

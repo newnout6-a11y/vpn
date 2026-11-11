@@ -49,9 +49,7 @@ fn layer_import(text: &str, depth: usize, out: &mut Out) -> bool {
 }
 
 /// Clash YAML and share links (embedded in prose too), through their own importers.
-#[cfg(any(feature = "profiles-uri", feature = "profiles-clash"))]
 fn other_formats(text: &str, out: &mut Out) {
-    #[cfg(feature = "profiles-clash")]
     if text.lines().any(|l| l.trim_start().starts_with("proxies:"))
         && let Some(report) = crate::clash::parse_clash(text)
     {
@@ -59,11 +57,7 @@ fn other_formats(text: &str, out: &mut Out) {
     }
     // Share-link schemes only: `http(s)://` in JSON are web pages, feed URLs or local proxy
     // settings far more often than keys.
-    #[cfg(feature = "profiles-uri")]
     for link in crate::text::uri_candidates(text) {
         out.push(crate::uri::parse_uri(link), || crate::uri::excerpt(link));
     }
 }
-
-#[cfg(not(any(feature = "profiles-uri", feature = "profiles-clash")))]
-fn other_formats(_text: &str, _out: &mut Out) {}

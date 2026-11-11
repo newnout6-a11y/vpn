@@ -204,6 +204,22 @@ pub struct Tls {
     pub max_version: Option<String>,
 }
 
+/// uTLS fingerprints REALITY servers since Xray 26.9.8 refuse (`android` and `360` fail on every
+/// version): field reports of the RU November 2026 plan. Only `chrome`, `firefox`, `safari` pass.
+pub const REALITY_REFUSED_FINGERPRINTS: [&str; 6] =
+    ["edge", "ios", "qq", "random", "android", "360"];
+
+impl Tls {
+    /// REALITY with a provider fingerprint that current REALITY servers refuse.
+    pub fn refused_reality_fingerprint(&self) -> bool {
+        self.reality.is_some()
+            && self.fingerprint.as_deref().is_some_and(|fp| {
+                let fp = fp.trim().to_ascii_lowercase();
+                REALITY_REFUSED_FINGERPRINTS.contains(&fp.as_str())
+            })
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Reality {
@@ -371,6 +387,20 @@ pub enum Note {
     MuxSingBoxOnly,
     /// Free-form note for cases without a dedicated variant (already localized by the importer is NOT allowed: use an i18n key).
     Other(String),
+}
+
+impl Note {
+    /// [`Note::Other`] key: the REALITY key names a fingerprint current servers refuse.
+    pub const REALITY_FINGERPRINT: &str = "profiles.import.realityFingerprint";
+    /// [`Note::Other`] key: an Xray stream Xray 26 removed (HTTP/2, QUIC) now runs on sing-box.
+    pub const XRAY_TRANSPORT_REMOVED: &str = "profiles.import.xrayTransportRemoved";
+
+    /// The note every importer adds for these TLS settings, if any (the REALITY fingerprint risk;
+    /// it holds whichever engine runs the key).
+    pub fn for_tls(tls: Option<&Tls>) -> Option<Note> {
+        tls.filter(|t| t.refused_reality_fingerprint())
+            .map(|_| Note::Other(Note::REALITY_FINGERPRINT.into()))
+    }
 }
 
 /// Outcome of parsing a piece of text (pasted keys or a subscription body).

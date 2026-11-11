@@ -45,7 +45,14 @@ pub(super) fn candidates(
         }
     }
     for o in cands.iter().filter_map(|c| c.as_object()) {
-        if xray::protocol(o).is_none() || !o.get("settings").is_some_and(Value::is_object) {
+        if !o.get("settings").is_some_and(Value::is_object) {
+            continue;
+        }
+        if xray::protocol(o).is_none() {
+            // A proxy protocol this app does not import gets a reason instead of vanishing.
+            if let Some(name) = xray::unknown_proxy(o) {
+                out.push(Err(SkipReason::UnknownScheme(name)), || excerpt(o));
+            }
             continue;
         }
         let name = xray_name(o, remarks);
@@ -171,7 +178,8 @@ fn excerpt(o: &Map<String, Value>) -> String {
     let address = text(o, &["server"])
         .or_else(|| first("vnext"))
         .or_else(|| first("servers"))
-        .or_else(|| settings?.get("address")?.as_str());
+        .or_else(|| settings?.get("address")?.as_str())
+        .or_else(|| settings?.pointer("/peers/0/endpoint")?.as_str());
     let mut s = text(o, &["type", "protocol"])
         .unwrap_or("outbound")
         .to_owned();
@@ -189,7 +197,6 @@ fn excerpt(o: &Map<String, Value>) -> String {
 /// A provider Xray document (its last routing rule sends everything to one outbound or balancer)
 /// is ONE profile carrying the whole reachable graph (profiles spec K4). A rejected graph skips
 /// this document only.
-#[cfg(feature = "profiles-native")]
 fn provider_document(doc: &Value, remarks: Option<&str>, out: &mut Out) -> bool {
     let Some(entry) = crate::xray_native::document_entry(doc) else {
         return false;
@@ -214,10 +221,4 @@ fn provider_document(doc: &Value, remarks: Option<&str>, out: &mut Out) -> bool 
         }
         None => false,
     }
-}
-
-/// Without the `profiles-native` package no document is treated as one provider graph.
-#[cfg(not(feature = "profiles-native"))]
-fn provider_document(_doc: &Value, _remarks: Option<&str>, _out: &mut Out) -> bool {
-    false
 }

@@ -663,6 +663,7 @@ fn locale_fragments_cover_every_message() {
         NativeError::ReservedTag,
         NativeError::TooDeep,
         NativeError::GeoData,
+        NativeError::RemovedTransport,
     ];
     let used: std::collections::BTreeSet<String> =
         native.iter().map(|e| e.msg().key.into_owned()).collect();
@@ -801,6 +802,42 @@ fn bundled_xray_accepts_compiled_and_exported_graphs() {
     // The check is live: a config Xray cannot build is refused.
     let broken = json!({"outbounds": [{"tag": "x", "protocol": "no-such-protocol"}]});
     assert!(xray_check(&broken).is_some_and(|r| r.is_err()));
+}
+
+/// Engine audit: Xray 26 removed the HTTP/2 and QUIC transports and refuses the whole config,
+/// so a graph with such a hop (here a bridge behind a loopback) is refused at import, at start
+/// and at export, with a reason instead of a raw engine error. The bundled binary agrees.
+#[test]
+fn refuses_transports_xray_removed() {
+    for network in ["h2", "http", "H3", "quic"] {
+        let mut doc = document();
+        doc["outbounds"][3]["streamSettings"]["network"] = json!(network);
+        assert_eq!(
+            import(&doc),
+            Err(NativeError::RemovedTransport),
+            "{network}"
+        );
+    }
+    let mut graph = import(&document()).unwrap();
+    let bridge = graph
+        .outbounds
+        .iter_mut()
+        .find(|o| o["tag"] == "l1bridgevless1")
+        .unwrap();
+    bridge["streamSettings"]["network"] = json!("h2");
+    let primary = selected_outbound(&graph).unwrap().clone();
+    let refused = Err(NativeError::RemovedTransport);
+    assert_eq!(compile(&graph, &primary).map(|_| ()), refused);
+    assert_eq!(export_document(&graph, "Norway").map(|_| ()), refused);
+
+    let mut lone = vless("p", "192.0.2.1", None);
+    for network in ["h2", "quic"] {
+        lone["streamSettings"]["network"] = json!(network);
+        if let Some(result) = xray_check(&json!({"outbounds": [lone]})) {
+            let err = result.expect_err(network);
+            assert!(err.contains("removed"), "{network}: {err}");
+        }
+    }
 }
 
 /// Review regression: the bundled Xray refuses `allowInsecure: true` even next to a pin, so

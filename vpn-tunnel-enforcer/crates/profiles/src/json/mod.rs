@@ -13,7 +13,11 @@ mod tests;
 mod values;
 mod wireguard;
 mod xray;
+mod xray_plain;
+mod xray_proxy;
 mod xray_stream;
+#[cfg(test)]
+mod xray_tests;
 
 use serde_json::{Map, Value};
 
@@ -114,7 +118,6 @@ impl Out {
     }
 
     /// Takes over what the Clash importer reported for a Clash list inside a JSON string.
-    #[cfg_attr(not(feature = "profiles-clash"), allow(dead_code))]
     fn extend(&mut self, report: ParseReport) {
         self.profiles.extend(report.profiles);
         self.skipped.extend(report.skipped);

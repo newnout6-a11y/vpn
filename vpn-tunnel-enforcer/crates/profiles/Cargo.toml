@@ -31,16 +31,5 @@ vpnte-base.workspace = true
 # Winsock host name and user name for the legacy subscription HWID.
 windows.workspace = true
 
-[features]
-# Build scaffolding: one flag per work package while they are written in parallel.
-default = ["profiles-emit", "profiles-uri", "profiles-json", "profiles-native", "profiles-text", "profiles-export", "profiles-clash"]
-profiles-emit = []
-profiles-uri = []
-profiles-json = []
-profiles-native = []
-profiles-text = []
-profiles-export = []
-profiles-clash = []
-
 [lints]
 workspace = true

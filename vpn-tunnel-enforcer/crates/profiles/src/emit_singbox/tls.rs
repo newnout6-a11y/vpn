@@ -119,6 +119,16 @@ fn build(tls: &Tls, family: Family, p: &Profile, policy: &EmitPolicy) -> Result<
     }
     put_str(&mut o, "server_name", tls.server_name.as_deref());
     if tls.insecure && reality.is_none() {
+        // sing-box 1.14 pins public keys only: `insecure` with a whole-certificate pin it cannot
+        // check would connect without any verification (engine audit: Hysteria2 `pinSHA256`).
+        // A blank pin is no pin, as in the engine's selection.
+        let cert_pin = tls
+            .cert_pin_sha256
+            .as_deref()
+            .is_some_and(|pin| !pin.trim().is_empty());
+        if cert_pin && tls.spki_pin_sha256.is_empty() {
+            return Err(EmitError::CertPinUnenforced);
+        }
         o.insert("insecure".into(), Value::Bool(true));
     }
     // ALPN is never injected: ws/httpupgrade/grpc/hysteria2/QUIC fill their own only when it is
@@ -205,9 +215,10 @@ fn ech_pem(lines: &[&str]) -> Result<Vec<String>, EmitError> {
     Ok(pem)
 }
 
-/// Provider fingerprint, else the device default, else (stealth, no Reality) the per-server
-/// rotation, else `chrome`. Without uTLS sing-box sends a Go-stdlib ClientHello, a pattern
-/// Russian DPI rate-limits.
+/// Provider fingerprint, else `chrome` for REALITY, else the device default, else (stealth) the
+/// per-server rotation, else `chrome`. Without uTLS sing-box sends a Go-stdlib ClientHello, a
+/// pattern Russian DPI rate-limits. REALITY servers since Xray 26.9.8 accept only chrome, firefox
+/// and safari hellos (RU 2026 plan): the device defaults `android` / `ios` would never connect.
 fn fingerprint(
     provider: Option<&str>,
     reality: bool,
@@ -221,9 +232,12 @@ fn fingerprint(
     {
         return fp;
     }
+    if reality {
+        return "chrome";
+    }
     match policy.device {
         Some(device) => utls_fingerprint(device),
-        None if policy.tls_compat && !reality => stealth_fingerprint(&rotation_seed(p)),
+        None if policy.tls_compat => stealth_fingerprint(&rotation_seed(p)),
         None => "chrome",
     }
 }

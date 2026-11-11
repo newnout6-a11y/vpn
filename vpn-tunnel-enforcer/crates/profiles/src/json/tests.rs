@@ -497,13 +497,8 @@ fn xray_transports() {
             multi_mode: Some(true)
         })
     );
-    // Without a preserved graph, kcp has nowhere to go; with one it is carried by the graph.
-    let unusable = if cfg!(feature = "profiles-native") {
-        2
-    } else {
-        3
-    };
-    assert_eq!(r.skipped.len(), unusable, "{:?}", r.skipped);
+    // The two broken XHTTP entries are skipped; kcp is carried by the preserved graph.
+    assert_eq!(r.skipped.len(), 2, "{:?}", r.skipped);
     assert!(matches!(r.skipped[0].reason, SkipReason::Invalid { .. }));
 }
 
@@ -704,8 +699,40 @@ fn inbounds_are_ignored() {
     assert_eq!((r.profiles.len(), r.skipped.len()), (0, 0));
 }
 
-/// Provider Xray graphs (need the `profiles-native` package, which owns graph validation).
-#[cfg(feature = "profiles-native")]
+/// RU 2026 plan: a REALITY key naming a fingerprint current servers refuse gets a Note from every
+/// importer (sing-box JSON, Xray JSON, share link, Clash); accepted ones and plain TLS do not.
+#[test]
+fn refused_reality_fingerprints_are_noted() {
+    let note = Note::Other(Note::REALITY_FINGERPRINT.into());
+    let singbox = |fp: &str| {
+        json!({ "type": "vless", "tag": "sb", "server": "s.example", "server_port": 443, "uuid": UUID,
+            "tls": { "enabled": true, "server_name": "front.example.com",
+                     "utls": { "enabled": true, "fingerprint": fp },
+                     "reality": { "enabled": true, "public_key": "PBK-FAKE", "short_id": "1234" } } })
+    };
+    let mut xray = xray_vless("xr", "x.example", 443, json!([{ "id": UUID }]));
+    xray["streamSettings"]["realitySettings"]["fingerprint"] = json!("Edge");
+    let link = format!(
+        "vless://{UUID}@l.example:443?security=reality&pbk=PBK-FAKE&sid=12&sni=front.example.com&fp=random#link"
+    );
+    let clash = format!(
+        "proxies:\n- name: c\n  type: vless\n  server: c.example\n  port: 443\n  uuid: {UUID}\n  tls: true\n  client-fingerprint: android\n  reality-opts:\n    public-key: PBK-FAKE\n"
+    );
+    for input in [json!([singbox("ios"), xray]), json!(link), json!(clash)] {
+        let r = parse(input);
+        assert!(!r.profiles.is_empty(), "{:?}", r.skipped);
+        for p in &r.profiles {
+            assert!(p.notes.contains(&note), "{}: {:?}", p.name, p.notes);
+        }
+    }
+    let mut tls_only = singbox("ios");
+    tls_only["tls"].as_object_mut().unwrap().remove("reality");
+    let r = parse(json!([singbox("chrome"), singbox("firefox"), tls_only]));
+    assert_eq!(r.profiles.len(), 3, "{:?}", r.skipped);
+    assert!(r.profiles.iter().all(|p| !p.notes.contains(&note)));
+}
+
+/// Provider Xray graphs.
 mod native {
     use super::*;
 
@@ -774,26 +801,31 @@ mod native {
     }
 
     /// Spec §7.2 "independent outbounds" / "multi-user": every graph holds only its own outbound,
-    /// narrowed to one node and one user (no quadratic credential copies).
+    /// narrowed to one node and one user (no quadratic credential copies). Xray mux keeps the
+    /// graph (the model has no Xray mux).
     #[test]
     fn graphs_hold_only_their_own_outbound() {
+        let mux = json!({ "enabled": true, "concurrency": 8 });
         let outs: Vec<Value> = (0..100)
             .map(|i| {
-                xray_vless(
+                let mut o = xray_vless(
                     &format!("node-{i}"),
                     &format!("n{i}.example"),
                     443,
                     json!([{ "id": UUID }]),
-                )
+                );
+                o["mux"] = mux.clone();
+                o
             })
             .collect();
         let r = parse(json!({ "outbounds": outs }));
+        assert_eq!(r.profiles.len(), 100);
         assert!(r.profiles.iter().all(|p| {
             p.native_xray
                 .as_ref()
                 .is_some_and(|g| g.outbounds.len() == 1)
         }));
-        let multi = json!({ "tag": "Multi", "protocol": "vless", "settings": { "vnext": [
+        let multi = json!({ "tag": "Multi", "protocol": "vless", "mux": mux, "settings": { "vnext": [
             { "address": "one.example", "port": 443, "users": [{ "id": UUID }, { "id": "00000000-0000-4000-8000-000000000002" }] },
             { "address": "two.example", "port": 443, "users": [{ "id": "00000000-0000-4000-8000-000000000003" }] } ] } });
         let r = parse(json!({ "outbounds": [multi] }));
@@ -810,8 +842,7 @@ mod native {
     }
 }
 
-/// Share links and Clash text inside JSON strings (need the `profiles-uri` / `profiles-clash` packages).
-#[cfg(feature = "profiles-uri")]
+/// Share links and Clash text inside JSON strings.
 mod strings_with_links {
     use super::*;
 
@@ -840,7 +871,6 @@ mod strings_with_links {
     }
 
     /// Spec §7.2 "doc + URI": a provider document and a share link side by side in one array.
-    #[cfg(feature = "profiles-native")]
     #[test]
     fn document_next_to_a_link() {
         let doc = json!({ "remarks": "Norway", "outbounds": [xray_vless("proxy", "no.example", 443, json!([{ "id": UUID }]))],
@@ -851,7 +881,6 @@ mod strings_with_links {
     }
 
     /// A Clash list stored as a JSON string goes to the Clash importer.
-    #[cfg(feature = "profiles-clash")]
     #[test]
     fn clash_inside_json() {
         let yaml = "proxies:\n- name: c0\n  type: trojan\n  server: t.example\n  port: 443\n  password: p\n";

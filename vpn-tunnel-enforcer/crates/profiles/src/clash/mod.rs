@@ -19,7 +19,7 @@ mod kinds;
 mod tls;
 mod yaml;
 
-#[cfg(all(test, feature = "profiles-emit"))]
+#[cfg(test)]
 mod check;
 #[cfg(test)]
 mod tests;

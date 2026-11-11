@@ -627,7 +627,6 @@ fn share_prefers_the_link() {
 
 /// A key without a lossless link is shared as the emitted sing-box JSON wrapped as
 /// `{"remarks", "outbounds"|"endpoints"}` (outbound, WireGuard endpoint, ShadowTLS chain).
-#[cfg(feature = "profiles-emit")]
 #[test]
 fn share_falls_back_to_singbox_json() {
     use crate::emit_singbox::{EmitPolicy, emit_singbox};
@@ -716,7 +715,6 @@ fn share_falls_back_to_singbox_json() {
 }
 
 /// A provider graph is shared as its Xray document, never as a link.
-#[cfg(feature = "profiles-native")]
 #[test]
 fn share_of_a_native_graph_is_its_xray_document() {
     let mut p = base();
@@ -832,7 +830,6 @@ fn faithful_line_is_kept() {
 }
 
 /// Profiles beyond the spec vectors that the round trip covers too.
-#[cfg(feature = "profiles-uri")]
 fn more_linkable() -> Vec<Profile> {
     let xhttp = Transport::Xhttp {
         host: "front.example.com".into(),
@@ -997,7 +994,6 @@ fn more_linkable() -> Vec<Profile> {
     out
 }
 
-#[cfg(feature = "profiles-uri")]
 fn comparable(p: Profile) -> Profile {
     Profile {
         source: Source::Json,
@@ -1007,8 +1003,7 @@ fn comparable(p: Profile) -> Profile {
 }
 
 /// Round trip through the real importer (AT-04-001, AT-04-006): every exported link reads back
-/// as the same profile. Built when the `uri` importer is part of the build.
-#[cfg(feature = "profiles-uri")]
+/// as the same profile.
 #[test]
 fn links_read_back_as_the_same_profile() {
     let profiles = golden().into_iter().map(|(p, _)| p).chain(more_linkable());
@@ -1021,7 +1016,6 @@ fn links_read_back_as_the_same_profile() {
 
 /// The provider's line comes back byte for byte, unmodelled parameters included, until the
 /// profile changes.
-#[cfg(feature = "profiles-uri")]
 #[test]
 fn imported_lines_are_returned_unchanged() {
     let lines = [

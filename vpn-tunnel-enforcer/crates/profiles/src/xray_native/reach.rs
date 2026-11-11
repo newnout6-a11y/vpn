@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use super::{BYPASS_PROTOCOLS, EXPORT_BLOCK_TAG, GRAPH_PROTOCOLS, NativeError};
+use super::{BYPASS_PROTOCOLS, EXPORT_BLOCK_TAG, GRAPH_PROTOCOLS, NativeError, removed_network};
 use super::{non_empty, non_empty_str, protocol, routes_inbound, strings, tag, truthy};
 use crate::model::NativeXray;
 
@@ -19,6 +19,13 @@ pub(super) const DEPENDENCY_POINTERS: [&str; 4] = [
 
 /// Deeper chains are refused (see [`NativeError::TooDeep`]).
 const MAX_DEPTH: usize = 64;
+
+/// True when `outbound` dials through another outbound of its document.
+pub(crate) fn dials_through(outbound: &Value) -> bool {
+    DEPENDENCY_POINTERS
+        .iter()
+        .any(|p| non_empty(outbound.pointer(p)).is_some())
+}
 
 /// The part of a graph reachable from its entry, in source tags.
 pub(super) struct Reach<'g> {
@@ -271,6 +278,9 @@ fn uses_geo_data(rule: &Value) -> bool {
 
 /// Refusals the bundled Xray (or plain safety) would otherwise produce only at start.
 fn check_outbound(outbound: &Value) -> Result<(), NativeError> {
+    if removed_network(outbound).is_some() {
+        return Err(NativeError::RemovedTransport);
+    }
     // Xray wants exactly one member in `vnext` (and one user in it) or `servers`; an empty list
     // or a node without `users` is refused like several. The flat `settings.address` form has none.
     let len = |list: Option<&Value>| list.and_then(Value::as_array).map(Vec::len);

@@ -59,7 +59,7 @@ pub(super) fn tls(p: &Params, mode: TlsMode, notes: &mut Vec<Note>) -> Res<Optio
     if cert_pin_sha256.is_some() {
         notes.push(Note::CertPinNotEnforced);
     }
-    Ok(Some(Tls {
+    let tls = Tls {
         server_name: p.get(SNI).map(str::to_owned),
         disable_sni: p.flag(&["disable_sni", "disableSni"]),
         insecure: p.flag(INSECURE),
@@ -72,7 +72,9 @@ pub(super) fn tls(p: &Params, mode: TlsMode, notes: &mut Vec<Note>) -> Res<Optio
         ech: ech(p, notes),
         cert_pin_sha256,
         ..Tls::default()
-    }))
+    };
+    notes.extend(Note::for_tls(Some(&tls)));
+    Ok(Some(tls))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

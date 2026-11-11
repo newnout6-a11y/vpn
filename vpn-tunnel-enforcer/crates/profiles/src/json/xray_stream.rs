@@ -82,12 +82,9 @@ fn ech(raw: &str) -> Ech {
     }
 }
 
-/// Transport of an Xray stream. Transports the model cannot express are an error unless a
-/// preserved graph (`graph`) carries the original stream to Xray.
-pub(crate) fn transport(
-    stream: &Map<String, Value>,
-    graph: bool,
-) -> Result<Option<Transport>, SkipReason> {
+/// Transport of an Xray stream; a network the model cannot express is `UnsupportedTransport`
+/// (the caller keeps a native graph for it when it can).
+pub(crate) fn transport(stream: &Map<String, Value>) -> Result<Option<Transport>, SkipReason> {
     let network = text(stream, &["method", "network"])
         .unwrap_or("raw")
         .to_ascii_lowercase();
@@ -145,13 +142,25 @@ pub(crate) fn transport(
                 path: path(http),
             }
         }
+        // sing-box speaks plain QUIC only: Xray's packet key and header masks have no counterpart.
+        "quic" => {
+            let quic = sub(stream, "quicSettings");
+            let security = text(quic, &["security"]).unwrap_or("none");
+            let header = text(sub(quic, "header"), &["type"]).unwrap_or("none");
+            if !security.eq_ignore_ascii_case("none") || !header.eq_ignore_ascii_case("none") {
+                return Err(SkipReason::Invalid {
+                    scheme: "quic".into(),
+                    detail: "QUIC with a packet key or a header mask is not supported".into(),
+                });
+            }
+            Transport::Quic
+        }
         "xhttp" | "splithttp" | "split-http" => match stream.get("xhttpSettings") {
             Some(_) => xhttp(sub(stream, "xhttpSettings"), &["mode"])?,
             None => xhttp(sub(stream, "splithttpSettings"), &["mode"])?,
         },
         // The Hysteria protocol brings its own QUIC stream.
         "hysteria" => return Ok(None),
-        _ if graph => return Ok(None),
         other => return Err(SkipReason::UnsupportedTransport(other.to_owned())),
     };
     Ok(Some(transport))

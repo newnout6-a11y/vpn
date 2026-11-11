@@ -1,15 +1,20 @@
 //! Xray outbound objects (`protocol` + `settings` + `streamSettings`) -> typed profiles, one per
 //! server node and user. VLESS / VMess / Trojan / Shadowsocks keep their Xray graph (`native_xray`)
-//! so provider details the model does not cover still reach Xray.
+//! when it carries something the model cannot (a balancer, a chain, an Xray-only option), so those
+//! provider details still reach Xray; a plain outbound is typed, so either engine runs it.
 use serde_json::{Map, Value};
 
 use super::singbox::{hy2_obfs, port_ranges};
 use super::values::{duration_secs, number, port, rounded_positive, text, text_or_number};
+use super::xray_plain::untyped;
+use super::xray_proxy;
 use super::xray_stream::{self, sub};
 use crate::common::fields::{parse_host, port_range};
 use crate::model::{
     DialPrefs, Host, Hy2Obfs, Kind, NativeEntry, NativeXray, Note, Profile, SkipReason, Source,
+    Tls, Transport,
 };
+use crate::xray_native::{self, NativeError};
 
 /// Lower-case model protocol of an Xray `protocol` value (`hysteria` is Xray's Hysteria2).
 pub(crate) fn protocol(raw: &Map<String, Value>) -> Option<&'static str> {
@@ -24,14 +29,37 @@ pub(crate) fn protocol(raw: &Map<String, Value>) -> Option<&'static str> {
         "anytls" => "anytls",
         "shadowtls" => "shadowtls",
         "tuic" => "tuic",
+        "socks" => "socks",
+        "http" => "http",
+        "wireguard" => "wireguard",
         _ => return None,
     })
+}
+
+/// The protocol name of an outbound that points at a server but speaks a protocol this app does
+/// not import (it gets a skip reason instead of vanishing); `None` for the routing helpers
+/// (`freedom`, `blackhole`, `dns`, `loopback`) and for inbounds.
+pub(crate) fn unknown_proxy(raw: &Map<String, Value>) -> Option<String> {
+    const HELPERS: [&str; 4] = ["freedom", "blackhole", "dns", "loopback"];
+    let p = text(raw, &["protocol"])?.trim().to_ascii_lowercase();
+    let settings = sub(raw, "settings");
+    let server = ["vnext", "servers", "address", "peers"]
+        .iter()
+        .any(|k| settings.contains_key(*k));
+    (server && !HELPERS.contains(&p.as_str()) && !inbound(raw)).then_some(p)
+}
+
+/// An Xray inbound (a server config's listener) that sits outside `inbounds`: outbounds have no
+/// top-level `port` / `listen` and no `clients`.
+fn inbound(raw: &Map<String, Value>) -> bool {
+    raw.contains_key("port")
+        || raw.contains_key("listen")
+        || sub(raw, "settings").contains_key("clients")
 }
 
 /// Where the provider document routes traffic (when it is one), and the document itself.
 #[derive(Clone, Copy)]
 pub(crate) struct Doc<'a> {
-    #[cfg_attr(not(feature = "profiles-native"), allow(dead_code))]
     pub(crate) value: Option<&'a Value>,
     pub(crate) entry: Option<&'a NativeEntry>,
 }
@@ -47,6 +75,12 @@ pub(crate) fn profiles(
         return Vec::new();
     };
     let settings = sub(raw, "settings");
+    // WireGuard names its server per peer; the interface `address` is not a server.
+    if proto == "wireguard" {
+        let built = unchained(proto, &Value::Object(raw.clone()))
+            .and_then(|()| xray_proxy::wireguard(settings, name.to_owned()));
+        return vec![built];
+    }
     let mut out = Vec::new();
     for (index, count, list, node, user) in nodes(settings) {
         let name = if count > 1 {
@@ -63,7 +97,38 @@ pub(crate) fn profiles(
             break;
         }
     }
+    if out.is_empty() && !inbound(raw) {
+        out.push(Err(SkipReason::Invalid {
+            scheme: proto.to_owned(),
+            detail: "no server address".into(),
+        }));
+    }
     out
+}
+
+/// Typed profiles of protocols without a native graph cannot follow a `dialerProxy` /
+/// `proxySettings` chain: the key would quietly dial its server directly.
+fn unchained(proto: &str, selected: &Value) -> Result<(), SkipReason> {
+    match xray_native::dials_through(selected) {
+        true => Err(SkipReason::Invalid {
+            scheme: proto.to_owned(),
+            detail: "dials through another outbound, which only VLESS, VMess, Trojan and Shadowsocks graphs can".into(),
+        }),
+        false => Ok(()),
+    }
+}
+
+/// Short transport name for a skip reason.
+fn transport_name(t: &Transport) -> &'static str {
+    match t {
+        Transport::Ws { .. } => "ws",
+        Transport::Grpc { .. } => "grpc",
+        Transport::Http { .. } => "http",
+        Transport::HttpUpgrade { .. } => "httpupgrade",
+        Transport::Quic => "quic",
+        Transport::Xhttp { .. } => "xhttp",
+        Transport::TcpHttpHeader { .. } => "tcp header=http",
+    }
 }
 
 /// `(user index, users in node, settings list key, node, user)`. The list key is empty for the
@@ -89,22 +154,28 @@ fn nodes(settings: &Map<String, Value>) -> Vec<Node<'_>> {
     };
     let mut out = Vec::new();
     let is_list = |key: &str| settings.get(key).is_some_and(Value::is_array);
-    if is_list("vnext") {
-        for node in list("vnext") {
+    // `vnext` nodes (VLESS / VMess) and older `servers` nodes (SOCKS / HTTP) list their users;
+    // Trojan / Shadowsocks `servers` carry the credential in the node itself.
+    if let Some(key) = ["vnext", "servers"].into_iter().find(|k| is_list(k)) {
+        for node in list(key) {
             let users: Vec<&Map<String, Value>> = node
                 .get("users")
                 .and_then(Value::as_array)
                 .map(|u| u.iter().filter_map(Value::as_object).collect())
                 .unwrap_or_default();
             if users.is_empty() {
-                out.push((0, 1, "vnext", node, &*NO_USER));
+                out.push((
+                    0,
+                    1,
+                    key,
+                    node,
+                    if key == "vnext" { &*NO_USER } else { node },
+                ));
             }
             for (i, user) in users.iter().enumerate() {
-                out.push((i, users.len(), "vnext", node, *user));
+                out.push((i, users.len(), key, node, *user));
             }
         }
-    } else if is_list("servers") {
-        out.extend(list("servers").map(|node| (0, 1, "servers", node, node)));
     } else if settings.contains_key("address") {
         out.push((0, 1, "", settings, settings));
     }
@@ -123,7 +194,7 @@ fn narrowed(
     if list.is_empty() {
         return Value::Object(raw.clone());
     }
-    let item = match list == "vnext" && node.contains_key("users") {
+    let item = match node.contains_key("users") {
         true => replaced(
             node,
             "users",
@@ -244,6 +315,7 @@ fn build(
             heartbeat_s: None,
         },
         "shadowtls" => return Err(SkipReason::ShadowTlsNeedsInner),
+        "socks" | "http" => xray_proxy::proxy_kind(proto, user),
         _ => return Err(SkipReason::UnknownScheme(proto.to_owned())),
     };
     let port = node
@@ -251,14 +323,36 @@ fn build(
         .and_then(port)
         .or(hop_first_port)
         .ok_or_else(|| invalid("missing or invalid port"))?;
+    let tls = xray_stream::tls(stream).map_err(invalid)?;
+    notes.extend(Note::for_tls(tls.as_ref()));
+    let typed = xray_stream::transport(stream);
     let native_xray = match proto {
         "vless" | "vmess" | "trojan" | "shadowsocks" => {
-            preserve(selected, doc).map_err(SkipReason::NativeGraphRejected)?
+            native_graph(selected, doc, typed.is_ok(), tls.as_ref(), &mut notes)?
         }
         _ => None,
     };
-    let tls = xray_stream::tls(stream).map_err(invalid)?;
-    let transport = xray_stream::transport(stream, native_xray.is_some())?;
+    let transport = match typed {
+        // mKCP and other streams the model lacks travel inside the graph.
+        Err(SkipReason::UnsupportedTransport(_)) if native_xray.is_some() => None,
+        other => other?,
+    };
+    if matches!(kind, Kind::Socks { .. } | Kind::Http { .. }) {
+        unchained(proto, selected)?;
+        if let Some(t) = &transport {
+            return Err(SkipReason::UnsupportedTransport(transport_name(t).into()));
+        }
+        // sing-box has no SOCKS over TLS (Clash skips it the same way).
+        if proto == "socks" && tls.is_some() {
+            return Err(invalid("SOCKS over TLS is not supported"));
+        }
+        if tls.is_none() {
+            notes.push(Note::Unencrypted);
+        }
+        if node.contains_key("headers") {
+            notes.push(Note::UnsupportedField("settings.headers".into()));
+        }
+    }
     // Xray enforces its own pin; anything that runs on sing-box 1.14 cannot (profiles spec P-03).
     if native_xray.is_none() && tls.as_ref().is_some_and(|t| t.cert_pin_sha256.is_some()) {
         notes.push(Note::CertPinNotEnforced);
@@ -473,16 +567,41 @@ fn xray_mbps(raw: &str) -> Option<u32> {
     (value > 0.0 && mbps <= f64::from(u32::MAX)).then_some(mbps as u32)
 }
 
-/// The provider graph for this outbound (validated by `xray_native`).
-#[cfg(feature = "profiles-native")]
-fn preserve(selected: &Value, doc: Doc<'_>) -> Result<Option<NativeXray>, String> {
-    crate::xray_native::preserve(selected, doc.value, doc.entry.cloned())
-        .map(Some)
-        .map_err(|e| e.to_string())
-}
-
-/// Without the `profiles-native` package the typed profile is all there is.
-#[cfg(not(feature = "profiles-native"))]
-fn preserve(_selected: &Value, _doc: Doc<'_>) -> Result<Option<NativeXray>, String> {
-    Ok(None)
+/// The provider graph to keep for this outbound, or `None` when the typed profile carries it
+/// all: a lone outbound with nothing Xray-only (both engines run it), or a stream Xray 26
+/// removed (HTTP/2, QUIC: the graph could never start, sing-box runs the typed key). `selected`
+/// is the outbound narrowed to this node and user (walking it stays linear in many users);
+/// `typed`: the model can express the stream's transport.
+fn native_graph(
+    selected: &Value,
+    doc: Doc<'_>,
+    typed: bool,
+    tls: Option<&Tls>,
+    notes: &mut Vec<Note>,
+) -> Result<Option<NativeXray>, SkipReason> {
+    let rejected = |e: NativeError| SkipReason::NativeGraphRejected(e.to_string());
+    let left_over = || selected.as_object().map(untyped).unwrap_or_default();
+    if xray_native::removed_network(selected).is_some() {
+        // Without its chain the typed key would quietly dial the server directly.
+        if xray_native::dials_through(selected) {
+            return Err(rejected(NativeError::RemovedTransport));
+        }
+        if typed {
+            notes.push(Note::Other(Note::XRAY_TRANSPORT_REMOVED.into()));
+            notes.extend(left_over().into_iter().map(Note::UnsupportedField));
+        }
+        return Ok(None);
+    }
+    let graph = xray_native::preserve(selected, doc.value, doc.entry.cloned()).map_err(rejected)?;
+    let lone = graph.outbounds.len() == 1
+        && graph.entry.outbound_tag.as_deref() == Some(graph.selected_tag.as_str())
+        && graph
+            .routing
+            .as_ref()
+            .is_none_or(|r| r.rules.is_empty() && r.balancers.is_empty());
+    // With the CA check off only Xray verifies the pin (sing-box refuses such a key), so the
+    // graph that already runs on Xray stays.
+    let pinned_insecure = tls.is_some_and(|t| t.insecure && t.cert_pin_sha256.is_some());
+    let plain = typed && lone && !pinned_insecure && left_over().is_empty();
+    Ok((!plain).then_some(graph))
 }

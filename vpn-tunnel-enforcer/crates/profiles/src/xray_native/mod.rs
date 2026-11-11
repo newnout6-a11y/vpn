@@ -38,6 +38,20 @@ const GRAPH_PROTOCOLS: [&str; 7] = [
 const BYPASS_PROTOCOLS: [&str; 4] = ["freedom", "socks", "http", "dns"];
 /// Protocols a document import may pick as the profile's selected outbound.
 const SELECTABLE_PROTOCOLS: [&str; 4] = ["vless", "vmess", "trojan", "shadowsocks"];
+/// Stream networks the bundled Xray 26 refuses at load (checked with `xray run -test`).
+const REMOVED_NETWORKS: [&str; 4] = ["h2", "h3", "http", "quic"];
+
+/// The stream network of `outbound` when it is one Xray 26 removed (lower case).
+pub(crate) fn removed_network(outbound: &Value) -> Option<String> {
+    let network = outbound
+        .pointer("/streamSettings/network")?
+        .as_str()?
+        .trim()
+        .to_ascii_lowercase();
+    REMOVED_NETWORKS
+        .contains(&network.as_str())
+        .then_some(network)
+}
 
 /// Why a provider graph was refused. `Display` keeps the old English diagnostics (logs, skip reasons).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -87,6 +101,10 @@ pub enum NativeError {
     /// no `.dat` files, so the graph could never start (and `ext:` reads a file from disk).
     #[error("Preserved Xray route needs geo data files the app does not ship")]
     GeoData,
+    /// An outbound streams over HTTP/2 (`h2`, `h3`, `http`) or QUIC, which Xray 26 removed: the
+    /// bundled binary refuses the whole config ("removed and migrated to XHTTP").
+    #[error("Preserved Xray outbound uses the HTTP/2 or QUIC transport removed from Xray 26")]
+    RemovedTransport,
 }
 
 impl NativeError {
@@ -115,6 +133,7 @@ impl NativeError {
             NativeError::ReservedTag => "profiles.xrayNative.reservedTag",
             NativeError::TooDeep => "profiles.xrayNative.tooDeep",
             NativeError::GeoData => "profiles.xrayNative.geoData",
+            NativeError::RemovedTransport => "profiles.xrayNative.removedTransport",
         })
     }
 }
@@ -131,6 +150,7 @@ mod reach;
 
 pub use compile::{CompiledGraph, compile};
 pub use document::{document_entry, document_selected, export_document, preserve};
+pub(crate) use reach::dials_through;
 
 /// Some outbound of the graph runs Xray mux with UDP/443 refused (`mux.enabled` and
 /// `xudpProxyUDP443` absent — Xray's default — or `reject`): QUIC through such a connection must

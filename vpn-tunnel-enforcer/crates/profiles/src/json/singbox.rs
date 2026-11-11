@@ -178,6 +178,9 @@ pub(crate) fn import(input: Input<'_>) -> Result<Profile, SkipReason> {
         Kind::Shadowsocks { method, .. } if method == "none" => scan.note(Note::Unencrypted),
         _ => {}
     }
+    if let Some(note) = Note::for_tls(tls.as_ref()) {
+        scan.note(note);
+    }
     let mut profile = finish(name, server, port, kind_value, tls, dial, scan, origin);
     profile.transport = transport;
     profile.mux = mux;

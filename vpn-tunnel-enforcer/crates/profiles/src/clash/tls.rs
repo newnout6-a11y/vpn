@@ -122,6 +122,7 @@ pub(super) fn read_tls(
             }
         }
     }
+    notes.extend(Note::for_tls(Some(&tls)));
     Ok(Some(tls))
 }
 

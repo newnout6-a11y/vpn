@@ -56,7 +56,6 @@ impl Shared {
 
 /// Tag of the outbound / endpoint in a sing-box share document. Importers treat it as generic and
 /// name the key by `remarks`.
-#[cfg(feature = "profiles-emit")]
 const SHARE_TAG: &str = "proxy";
 
 /// Share link of the profile, or `None` when no link can carry it without loss.
@@ -85,18 +84,10 @@ pub fn export_share(p: &Profile) -> Option<Shared> {
     Some(Shared::Json(doc))
 }
 
-#[cfg(feature = "profiles-native")]
 fn xray_document(graph: &crate::model::NativeXray, name: &str) -> Option<Value> {
     crate::xray_native::export_document(graph, name).ok()
 }
 
-/// Without the native-graph package in the build a graph has no share document.
-#[cfg(not(feature = "profiles-native"))]
-fn xray_document(_graph: &crate::model::NativeXray, _name: &str) -> Option<Value> {
-    None
-}
-
-#[cfg(feature = "profiles-emit")]
 fn singbox_document(p: &Profile) -> Option<Value> {
     use crate::emit_singbox::{EmitPolicy, emit_singbox};
     let fragment = emit_singbox(p, SHARE_TAG, &EmitPolicy::default()).ok()?;
@@ -110,12 +101,6 @@ fn singbox_document(p: &Profile) -> Option<Value> {
         doc.insert("endpoints".into(), Value::Array(endpoints.to_vec()));
     }
     Some(Value::Object(doc))
-}
-
-/// Without the emitter in the build there is no sing-box share document.
-#[cfg(not(feature = "profiles-emit"))]
-fn singbox_document(_p: &Profile) -> Option<Value> {
-    None
 }
 
 /// Plain proxy-list line (`http://`, `https://`, `socks5://`) for proxy pool tools. VPN
@@ -172,13 +157,6 @@ fn faithful_line(p: &Profile, reparse: impl FnOnce(&str) -> Option<Profile>) -> 
         .then_some(line.as_str())
 }
 
-#[cfg(feature = "profiles-uri")]
 fn reparse(line: &str) -> Option<Profile> {
     crate::uri::parse_uri(line).ok()
-}
-
-/// Without the importer in the build the stored line cannot be checked: always rebuild.
-#[cfg(not(feature = "profiles-uri"))]
-fn reparse(_line: &str) -> Option<Profile> {
-    None
 }

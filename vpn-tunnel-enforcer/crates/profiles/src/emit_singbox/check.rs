@@ -282,6 +282,19 @@ fn cases() -> Vec<(&'static str, Profile, EmitPolicy)> {
             plain.clone(),
         ),
         (
+            "hy2 insecure public-key pin",
+            with_tls(
+                hy2("192.0.2.3"),
+                Tls {
+                    insecure: true,
+                    cert_pin_sha256: Some("ab".repeat(32)),
+                    spki_pin_sha256: vec!["47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=".into()],
+                    ..tls("s.example.com")
+                },
+            ),
+            plain.clone(),
+        ),
+        (
             "tuic",
             with_tls(tuic("tuic.example.com"), tls("front.example.com")),
             stealth.clone(),

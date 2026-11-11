@@ -277,6 +277,40 @@ fn device_picks_the_default_fingerprint() {
     assert!(o.get("tls").is_none());
 }
 
+/// RU 2026 plan: REALITY servers since Xray 26.9.8 refuse the `android` / `ios` hellos, so a
+/// REALITY key without a provider fingerprint gets `chrome` on every device; the provider's own
+/// choice still wins (the importers note the risky ones).
+#[test]
+fn reality_default_fingerprint_is_chrome() {
+    let mut p = vless("v.example.com");
+    p.tls = Some(Tls {
+        reality: Some(reality()),
+        ..tls("www.example.com")
+    });
+    for d in [
+        ClientDevice::Pc,
+        ClientDevice::Android,
+        ClientDevice::Ios,
+        ClientDevice::Mac,
+    ] {
+        for tls_compat in [false, true] {
+            let policy = EmitPolicy {
+                device: Some(d),
+                tls_compat,
+                ..EmitPolicy::default()
+            };
+            assert_eq!(fp(&out(&p, &policy)), "chrome", "{d:?}");
+            assert_eq!(effective_fingerprint(&p, &policy), Some("chrome"));
+        }
+    }
+    p.tls = Some(Tls {
+        fingerprint: Some("ios".into()),
+        reality: Some(reality()),
+        ..tls("www.example.com")
+    });
+    assert_eq!(fp(&out(&p, &device(ClientDevice::Android))), "ios");
+}
+
 /// AT-04-006 (K3): the provider's fingerprint and ALPN win over device and stealth defaults.
 #[test]
 fn provider_fingerprint_and_alpn_win() {
@@ -422,9 +456,12 @@ fn alpn_is_provider_only() {
     );
 }
 
-/// P-03: an HY2 pin is not expressible in 1.14: `insecure` stays as given, no pin key leaks.
+/// Engine audit (P-03): `insecure` never goes out next to a certificate pin sing-box cannot
+/// check (the key used to run with no certificate check at all); a public-key pin goes out as
+/// `certificate_public_key_sha256`, which sing-box verifies even with `insecure` set.
 #[test]
-fn hy2_pin_keeps_insecure_and_alpn() {
+fn insecure_needs_an_enforced_pin() {
+    const SPKI: &str = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";
     let mut h = hy2("a.example");
     h.kind = Kind::Hysteria2 {
         password: "pw".into(),
@@ -439,18 +476,61 @@ fn hy2_pin_keeps_insecure_and_alpn() {
         down_mbps: None,
         bbr_profile: None,
     };
-    h.tls = Some(Tls {
+    let pinned = Tls {
         insecure: true,
         alpn: vec!["h3".into()],
         cert_pin_sha256: Some("ab".repeat(32)),
         ..tls("s.example")
+    };
+    h.tls = Some(pinned.clone());
+    let refused = emit_singbox(&h, "proxy-out", &EmitPolicy::default());
+    assert_eq!(refused, Err(EmitError::CertPinUnenforced));
+    let err = AppError::from(EmitError::CertPinUnenforced);
+    assert_eq!(
+        (err.kind, err.user_msg().key.as_ref()),
+        (ErrorKind::Validation, "profiles.emit.certPinUnenforced")
+    );
+    // The same rule for every TLS kind, the ShadowTLS dialer included.
+    let mut t = trojan("t.example");
+    t.tls = Some(pinned.clone());
+    let mut chain = chained();
+    chain.tls = Some(pinned.clone());
+    for p in [&t, &chain] {
+        let refused = emit_singbox(p, "proxy-out", &EmitPolicy::default());
+        assert_eq!(
+            refused,
+            Err(EmitError::CertPinUnenforced),
+            "{}",
+            p.kind.label()
+        );
+    }
+
+    h.tls = Some(Tls {
+        spki_pin_sha256: vec![SPKI.into()],
+        ..pinned.clone()
     });
     let o = out(&h, &EmitPolicy::default());
     assert_eq!(
         o["tls"],
-        json!({ "enabled": true, "server_name": "s.example", "insecure": true, "alpn": ["h3"] })
+        json!({ "enabled": true, "server_name": "s.example", "insecure": true, "alpn": ["h3"],
+                "certificate_public_key_sha256": [SPKI] })
     );
     assert_eq!(o["obfs"], json!({ "type": "salamander", "password": "op" }));
+    // Without `insecure` the CA check runs; the pin it cannot add stays a Note of the profile.
+    h.tls = Some(Tls {
+        insecure: false,
+        ..pinned.clone()
+    });
+    assert_eq!(
+        out(&h, &EmitPolicy::default())["tls"],
+        json!({ "enabled": true, "server_name": "s.example", "alpn": ["h3"] })
+    );
+    // A blank pin is no pin: `insecure` as the provider asked.
+    h.tls = Some(Tls {
+        cert_pin_sha256: Some("  ".into()),
+        ..pinned
+    });
+    assert_eq!(out(&h, &EmitPolicy::default())["tls"]["insecure"], true);
 }
 
 /// profiles §7.1 "HY2 advanced" / "HY2 comma ports", P-10: hopping, Go durations, int Mbps.
@@ -1594,7 +1674,8 @@ fn golden_shapes() {
             json!({
             "type": "vless", "tag": "proxy-out", "server": "reality.example.com", "server_port": 443,
             "uuid": UUID, "flow": "xtls-rprx-vision",
-            "tls": { "enabled": true, "server_name": "www.example.com", "utls": utls("android"),
+            // REALITY on an Android device still says chrome (servers refuse `android`).
+            "tls": { "enabled": true, "server_name": "www.example.com", "utls": utls("chrome"),
                      "reality": { "enabled": true, "public_key": PBK, "short_id": "1234" } } }),
         ),
         (

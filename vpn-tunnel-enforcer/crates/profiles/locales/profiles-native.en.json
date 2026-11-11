@@ -28,7 +28,8 @@
       "insecureWithoutPin": "The Xray configuration turns off certificate checks (allowInsecure) without pinnedPeerCertSha256; Xray refuses to run it.",
       "reservedTag": "The Xray configuration uses the reserved tag vpnte-block.",
       "tooDeep": "The chain of servers in the Xray configuration is too long.",
-      "geoData": "The Xray configuration routes by geo data (geoip, geosite or an ext: file) that the app does not ship; Xray could not start it."
+      "geoData": "The Xray configuration routes by geo data (geoip, geosite or an ext: file) that the app does not ship; Xray could not start it.",
+      "removedTransport": "The Xray configuration uses the HTTP/2 or QUIC transport, which Xray 26 removed; Xray could not start it."
     }
   }
 }
