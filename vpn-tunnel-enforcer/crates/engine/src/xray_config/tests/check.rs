@@ -277,3 +277,88 @@ fn native_graph_passes_xray_test() {
     assert_eq!(again.name, "Norway");
     assert_runs(&again, "re-imported native graph");
 }
+
+/// The outbounds the bundled Xray could always run (ENGINE-GAPS decision 1), fake credentials,
+/// servers on 127.0.0.1: Hysteria2 with every knob and with gecko, WireGuard (also after its
+/// endpoint was pre-resolved), SOCKS, HTTP, HTTPS, ECH and SS-2022 UDP-over-TCP.
+#[test]
+fn new_outbounds_pass_xray_test() {
+    use std::collections::HashMap;
+    use vpnte_profiles::model::{Ech, Hy2Obfs};
+
+    if xray_exe().is_none() {
+        return;
+    }
+    let local = |kind: Kind| Profile {
+        server: ip("127.0.0.1"),
+        ..profile(kind)
+    };
+    let pinned = Some(Tls {
+        server_name: Some("hy.example".into()),
+        insecure: true,
+        cert_pin_sha256: Some("ab".repeat(32)),
+        ..Tls::default()
+    });
+    for obfs in ["salamander", "gecko"] {
+        let kind = Kind::Hysteria2 {
+            password: PW.into(),
+            obfs: Some(Hy2Obfs {
+                kind: obfs.into(),
+                password: "OBFS".into(),
+            }),
+            ports: vec![(20000, 30000), (443, 443)],
+            hop_interval_s: Some(10),
+            hop_interval_max_s: Some(20),
+            up_mbps: Some(50),
+            down_mbps: Some(100),
+            bbr_profile: Some("aggressive".into()),
+        };
+        let hy2 = Profile {
+            tls: pinned.clone(),
+            ..local(kind)
+        };
+        assert_runs(&hy2, obfs);
+    }
+    assert_runs(&local(hysteria2()), "hysteria2 without options");
+    let mut wg = local(wireguard());
+    assert_runs(&wg, "wireguard (host name endpoint)");
+    if let Kind::Wireguard(w) = &mut wg.kind {
+        w.peers[0].host = ip("::1");
+    }
+    assert_runs(&wg, "wireguard (IPv6 endpoint)");
+    let mut graph = proxy_graph(&local(wireguard()), ClientDevice::Pc).expect("translates");
+    let resolved = HashMap::from([("wg.example".to_owned(), "127.0.0.1".parse().expect("IP"))]);
+    graph.substitute(&resolved);
+    let config = build_config(&graph, &endpoint(20006));
+    assert!(
+        xray_check(&config).is_ok(),
+        "pre-resolved wireguard: {config}"
+    );
+    assert_runs(&local(socks()), "socks");
+    assert_runs(&local(http()), "http");
+    let https = Profile {
+        tls: tls("proxy.example"),
+        ..local(http())
+    };
+    assert_runs(&https, "https");
+    let ech = Profile {
+        tls: Some(Tls {
+            server_name: Some("front.example".into()),
+            ech: Some(Ech {
+                config_lines: vec![ECH_CONFIG.into()],
+                query_server_name: None,
+            }),
+            ..Tls::default()
+        }),
+        ..local(vless())
+    };
+    assert_runs(&ech, "ech");
+    let uot = local(Kind::Shadowsocks {
+        method: "2022-blake3-aes-256-gcm".into(),
+        password: KEY32.into(),
+        plugin: None,
+        shadowtls: None,
+        uot: Some(2),
+    });
+    assert_runs(&uot, "ss-2022 udp over tcp");
+}

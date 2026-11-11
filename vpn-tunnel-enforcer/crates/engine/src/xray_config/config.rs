@@ -45,16 +45,37 @@ impl fmt::Debug for ProxyGraph {
 }
 
 /// The proxy side of an Xray config for `p`: its provider graph (validated and compiled), else
-/// the translated typed profile. Addresses are still the stored host names.
+/// the translated typed profile. Addresses are still the stored host names. mux.cool is removed
+/// from a provider's XHTTP outbounds: XHTTP multiplexes itself (xmux) and the XHTTP authors
+/// advise against mux.cool on top (XTLS discussion #4113); [`super::warnings`] says so.
 pub fn proxy_graph(p: &Profile, device: ClientDevice) -> Result<ProxyGraph, XrayConfigError> {
     let Some(graph) = &p.native_xray else {
         return translate(p, device).map(ProxyGraph::Translated);
     };
     xray_native::validate(graph)?;
     let primary = xray_native::selected_outbound(graph)?;
-    Ok(ProxyGraph::Native(Box::new(xray_native::compile(
-        graph, primary,
-    )?)))
+    let mut compiled = xray_native::compile(graph, primary)?;
+    for outbound in compiled.outbounds.iter_mut().filter(|o| xhttp_with_mux(o)) {
+        if let Some(outbound) = outbound.as_object_mut() {
+            outbound.remove("mux");
+        }
+    }
+    Ok(ProxyGraph::Native(Box::new(compiled)))
+}
+
+/// An XHTTP (or old SplitHTTP) outbound with mux.cool enabled.
+pub(super) fn xhttp_with_mux(outbound: &Value) -> bool {
+    let mux = outbound
+        .get("mux")
+        .and_then(|m| m.get("enabled"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let stream = outbound.get("streamSettings");
+    let network = ["method", "network"]
+        .into_iter()
+        .find_map(|k| stream?.get(k)?.as_str());
+    mux && network
+        .is_some_and(|n| ["xhttp", "splithttp"].contains(&n.to_ascii_lowercase().as_str()))
 }
 
 /// The complete Xray config for one instance listening on `ep` (valid by construction, so this

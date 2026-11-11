@@ -1,6 +1,8 @@
 //! Engine selection vectors (xray-engine spec §7 "Engine selection"; AT-00-001 / AT-00-004).
 use vpnte_base::types::{Engine, EnginePref};
-use vpnte_profiles::model::{Kind, NativeEntry, NativeXray, Profile, ShadowTlsLayer, Transport};
+use vpnte_profiles::model::{
+    Ech, Kind, NativeEntry, NativeXray, Profile, ShadowTlsLayer, Tls, Transport,
+};
 
 use super::*;
 use crate::xray_config::{Decision, Reject, SelectReason, SingBoxOnly, select_engine};
@@ -94,20 +96,10 @@ fn defaults_and_preferences() {
     );
 }
 
-/// Protocols Xray has no outbound for stay on sing-box even when Xray is forced.
+/// TUIC, Naive, AnyTLS and ShadowTLS have no Xray outbound (`unknown config id`); SOCKS over TLS
+/// and a stream transport under Hysteria2 are not translated either. They stay on sing-box.
 #[test]
 fn protocols_without_xray_outbound_run_on_sing_box() {
-    let hy2 = profile(Kind::Hysteria2 {
-        password: PW.into(),
-        obfs: None,
-        ports: Vec::new(),
-        hop_interval_s: None,
-        hop_interval_max_s: None,
-        up_mbps: None,
-        down_mbps: None,
-        bbr_profile: None,
-    });
-    assert_eq!(select_engine(&hy2, XRAY), sing_box(SelectReason::Protocol));
     let shadowtls = profile(Kind::Shadowsocks {
         method: "aes-128-gcm".into(),
         password: PW.into(),
@@ -119,9 +111,165 @@ fn protocols_without_xray_outbound_run_on_sing_box() {
         }),
         uot: None,
     });
+    let tuic = profile(Kind::Tuic {
+        uuid: UUID.into(),
+        password: PW.into(),
+        congestion: None,
+        udp_relay_mode: None,
+        zero_rtt: false,
+        heartbeat_s: None,
+    });
+    let anytls = profile(Kind::Anytls {
+        password: PW.into(),
+        idle_check_s: None,
+        idle_timeout_s: None,
+        min_idle: None,
+    });
+    let socks_tls = Profile {
+        tls: tls("proxy.example"),
+        ..profile(socks())
+    };
+    let hy2_ws = Profile {
+        transport: ws(),
+        ..profile(hysteria2())
+    };
+    for p in [shadowtls, tuic, anytls, socks_tls, hy2_ws] {
+        assert_eq!(select_engine(&p, XRAY), sing_box(SelectReason::Protocol));
+    }
+}
+
+/// Hysteria2, WireGuard, SOCKS and HTTP (also over TLS) run on Xray when it is forced; Auto and
+/// forced sing-box keep them on sing-box.
+#[test]
+fn new_xray_outbounds_follow_the_preference() {
+    let https = Profile {
+        tls: tls("proxy.example"),
+        ..profile(http())
+    };
+    for p in [
+        profile(hysteria2()),
+        profile(wireguard()),
+        profile(socks()),
+        profile(http()),
+        https,
+    ] {
+        let kind = p.kind.label();
+        assert_eq!(
+            select_engine(&p, XRAY),
+            xray(SelectReason::Preference),
+            "{kind}"
+        );
+        assert_eq!(
+            select_engine(&p, AUTO),
+            sing_box(SelectReason::Default),
+            "{kind}"
+        );
+        assert_eq!(
+            select_engine(&p, SING_BOX),
+            sing_box(SelectReason::Preference),
+            "{kind}"
+        );
+    }
+}
+
+/// A certificate pin moves Auto to Xray: sing-box would drop the pin (it pins public keys only).
+/// An insecure Hysteria2 key without a pin stays a sing-box-only feature; REALITY ignores pins.
+#[test]
+fn cert_pin_prefers_xray() {
+    let pinned = |kind: Kind, insecure: bool, pin: Option<&str>| Profile {
+        tls: Some(Tls {
+            server_name: Some("hy.example".into()),
+            insecure,
+            cert_pin_sha256: pin.map(str::to_owned),
+            ..Tls::default()
+        }),
+        ..profile(kind)
+    };
+    let pin = "ab".repeat(32);
+    let hy2 = pinned(hysteria2(), true, Some(&pin));
+    assert_eq!(select_engine(&hy2, AUTO), xray(SelectReason::CertPin));
+    assert_eq!(select_engine(&hy2, XRAY), xray(SelectReason::Preference));
     assert_eq!(
-        select_engine(&shadowtls, XRAY),
-        sing_box(SelectReason::Protocol)
+        select_engine(&hy2, SING_BOX),
+        sing_box(SelectReason::Preference)
+    );
+    let vless_pinned = pinned(vless(), false, Some(&pin));
+    assert_eq!(
+        select_engine(&vless_pinned, AUTO),
+        xray(SelectReason::CertPin)
+    );
+    let f = SingBoxOnly::InsecureWithoutPin;
+    let hy2_insecure = pinned(hysteria2(), true, None);
+    assert_eq!(
+        select_engine(&hy2_insecure, AUTO),
+        sing_box(SelectReason::SingBoxOnly(f))
+    );
+    assert_eq!(
+        select_engine(&hy2_insecure, XRAY),
+        Decision::Rejected(Reject::SingBoxOnly(f))
+    );
+    let mut reality_pinned = Profile {
+        tls: reality("yahoo.com"),
+        ..profile(vless())
+    };
+    if let Some(t) = reality_pinned.tls.as_mut() {
+        t.cert_pin_sha256 = Some(pin.clone());
+    }
+    assert_eq!(
+        select_engine(&reality_pinned, AUTO),
+        xray(SelectReason::Reality)
+    );
+}
+
+/// A static ECH config runs on Xray (`echConfigList`); one that needs a DNS lookup, or ECH with
+/// REALITY or over QUIC, stays sing-box only. SS UDP-over-TCP runs on Xray with 2022 ciphers.
+#[test]
+fn ech_and_udp_over_tcp() {
+    let ech = |kind: Kind, lines: &[&str]| {
+        let mut p = Profile {
+            tls: tls("front.example"),
+            ..profile(kind)
+        };
+        if let Some(t) = p.tls.as_mut() {
+            t.ech = Some(Ech {
+                config_lines: lines.iter().map(|l| (*l).to_owned()).collect(),
+                query_server_name: None,
+            });
+        }
+        p
+    };
+    let fixed = ech(vless(), &[ECH_CONFIG]);
+    assert_eq!(select_engine(&fixed, XRAY), xray(SelectReason::Preference));
+    assert_eq!(select_engine(&fixed, AUTO), sing_box(SelectReason::Default));
+    let f = SingBoxOnly::Ech;
+    let mut reality_ech = ech(vless(), &[ECH_CONFIG]);
+    if let Some(t) = reality_ech.tls.as_mut() {
+        t.reality = reality("yahoo.com").and_then(|r| r.reality);
+    }
+    for p in [
+        ech(vless(), &[" "]),
+        ech(hysteria2(), &[ECH_CONFIG]),
+        reality_ech,
+    ] {
+        assert_eq!(
+            select_engine(&p, XRAY),
+            Decision::Rejected(Reject::SingBoxOnly(f))
+        );
+    }
+    let uot = |method: &str| {
+        let mut p = profile(shadowsocks(method));
+        if let Kind::Shadowsocks { uot, .. } = &mut p.kind {
+            *uot = Some(2);
+        }
+        p
+    };
+    assert_eq!(
+        select_engine(&uot("2022-blake3-aes-128-gcm"), XRAY),
+        xray(SelectReason::Preference)
+    );
+    assert_eq!(
+        select_engine(&uot("chacha20-ietf-poly1305"), XRAY),
+        Decision::Rejected(Reject::SingBoxOnly(SingBoxOnly::ShadowsocksUdpOverTcp))
     );
 }
 

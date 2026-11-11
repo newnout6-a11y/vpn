@@ -88,7 +88,6 @@ impl SlotEndpoint {
     }
 
     /// A fresh endpoint: a free loopback TCP port outside `taken` and new random credentials.
-    #[cfg(feature = "engine-process")]
     pub fn allocate(taken: &[u16]) -> Result<Self, crate::ports::PortsExhausted> {
         Ok(Self {
             port: crate::ports::alloc_port(false, taken)?,
@@ -147,7 +146,6 @@ mod tests {
         assert_eq!(err.kind, vpnte_base::ErrorKind::Internal);
     }
 
-    #[cfg(feature = "engine-process")]
     #[test]
     fn allocated_endpoints_are_valid() {
         let fresh = SlotEndpoint::allocate(&[]).unwrap();

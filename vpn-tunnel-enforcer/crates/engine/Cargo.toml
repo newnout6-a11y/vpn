@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 hex.workspace = true
@@ -28,14 +29,6 @@ vpnte-core.workspace = true
 vpnte-profiles.workspace = true
 vpnte-winnet.workspace = true
 windows.workspace = true
-
-[features]
-# Build scaffolding: one flag per work package while they are written in parallel.
-default = ["engine-config", "engine-process", "engine-xray-config", "engine-routing"]
-engine-config = []
-engine-process = []
-engine-xray-config = []
-engine-routing = []
 
 [lints]
 workspace = true

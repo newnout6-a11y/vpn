@@ -5,32 +5,41 @@ use vpnte_profiles::model::{Kind, Profile};
 
 use super::select::{singbox_only, vless_encryption, xray_protocol};
 use super::stream::stream;
-use super::{PROXY_TAG, XrayConfigError};
+use super::{PROXY_TAG, XrayConfigError, hysteria, wireguard};
 
 /// Translates the typed fields of `p` into an Xray outbound tagged `proxy`. `address` is the
 /// profile's server as stored (host name or IP literal): endpoint pre-resolution replaces it
 /// with an IP later, and every name Xray would derive from it (SNI, Host, gRPC authority) is
 /// already written out. A provider graph (`native_xray`) is not looked at; [`super::proxy_graph`]
-/// compiles it instead. `device` picks the default uTLS fingerprint.
+/// compiles it instead. `device` picks the default uTLS fingerprint. What the translation leaves
+/// out is reported by [`super::warnings`].
 pub fn translate(p: &Profile, device: ClientDevice) -> Result<Value, XrayConfigError> {
-    if !xray_protocol(&p.kind) {
+    if !xray_protocol(p) {
         return Err(XrayConfigError::Protocol(protocol_name(&p.kind)));
     }
     if let Some(feature) = singbox_only(p) {
         return Err(XrayConfigError::Feature(feature));
     }
-    log_ignored(p);
-    let stream = stream(p, device)?;
-    let settings = settings(&p.kind, &p.server.to_string(), p.port, stream.flow_ok)?;
-    Ok(json!({
-        "tag": PROXY_TAG,
-        "protocol": p.kind.label(),
-        "settings": settings,
-        "streamSettings": stream.settings,
-    }))
+    let mut outbound = match &p.kind {
+        Kind::Hysteria2 { .. } => hysteria::outbound(p)?,
+        // TLS, transport and mux mean nothing to WireGuard; sing-box ignores them too.
+        Kind::Wireguard(wg) => wireguard::outbound(wg),
+        kind => {
+            let stream = stream(p, device)?;
+            let settings = settings(kind, &p.server.to_string(), p.port, stream.flow_ok)?;
+            json!({
+                "protocol": kind.label(),
+                "settings": settings,
+                "streamSettings": stream.settings,
+            })
+        }
+    };
+    outbound["tag"] = json!(PROXY_TAG);
+    Ok(outbound)
 }
 
-/// Exactly one `vnext` / `servers` entry with one user: Xray refuses more.
+/// Exactly one `vnext` / `servers` entry with one user (Xray refuses more), or the simple
+/// `address` / `port` form of SOCKS and HTTP.
 fn settings(
     kind: &Kind,
     address: &str,
@@ -77,13 +86,40 @@ fn settings(
             json!({"servers": [{"address": address, "port": port, "password": password}]})
         }
         Kind::Shadowsocks {
-            method, password, ..
-        } => json!({"servers": [{
-            "address": address,
-            "port": port,
-            "method": method.trim().to_ascii_lowercase(),
-            "password": password,
-        }]}),
+            method,
+            password,
+            uot,
+            ..
+        } => {
+            let mut server = json!({
+                "address": address,
+                "port": port,
+                "method": method.trim().to_ascii_lowercase(),
+                "password": password,
+            });
+            // Selection lets UoT through only with a 2022 cipher, the only kind Xray applies it
+            // to. sing-box's default version is 2.
+            if let Some(version) = uot {
+                server["uot"] = json!(true);
+                server["UoTVersion"] = json!(if *version == 1 { 1 } else { 2 });
+            }
+            json!({"servers": [server]})
+        }
+        Kind::Socks { username, password } | Kind::Http { username, password } => {
+            let mut s = Map::new();
+            s.insert("address".into(), json!(address));
+            s.insert("port".into(), json!(port));
+            // Xray authenticates only with a user name; a lone password means no auth there.
+            if let Some(user) = username.as_deref().filter(|u| !u.is_empty()) {
+                s.insert("user".into(), json!(user));
+                s.insert(
+                    "pass".into(),
+                    json!(password.as_deref().unwrap_or_default()),
+                );
+            }
+            Value::Object(s)
+        }
+        // Hysteria2 and WireGuard have their own modules; selection keeps the rest away.
         other => return Err(XrayConfigError::Protocol(protocol_name(other))),
     })
 }
@@ -95,37 +131,5 @@ fn protocol_name(kind: &Kind) -> &'static str {
             shadowtls: Some(_), ..
         } => "shadowtls",
         other => other.label(),
-    }
-}
-
-/// sing-box options with no Xray counterpart. Multiplex: sing-mux is not Xray mux.cool and
-/// sing-box servers also accept plain connections; packet encoding: Xray picks XUDP itself;
-/// dial options: the address is pre-resolved and Xray has no per-outbound connect timeout (TFO /
-/// MPTCP are not mapped); `disable_sni`: Xray sends the server name of a host name regardless.
-fn log_ignored(p: &Profile) {
-    let mut ignored = Vec::new();
-    if p.mux.as_ref().is_some_and(|m| m.enabled) {
-        ignored.push("multiplex");
-    }
-    if matches!(
-        p.kind,
-        Kind::Vless {
-            packet_encoding: Some(_),
-            ..
-        }
-    ) {
-        ignored.push("packet_encoding");
-    }
-    if !p.dial.is_default() {
-        ignored.push("dial");
-    }
-    if !p.singbox_extra.is_empty() {
-        ignored.push("singbox_extra");
-    }
-    if p.tls.as_ref().is_some_and(|t| t.disable_sni) {
-        ignored.push("disable_sni");
-    }
-    if !ignored.is_empty() {
-        tracing::debug!(profile = %p.name, ?ignored, "xray: sing-box options not translated");
     }
 }

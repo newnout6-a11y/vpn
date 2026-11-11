@@ -1,4 +1,8 @@
 //! The `dns` section: routing's servers and rules plus the servers the upstream needs.
+//! Upstream server names resolve direct, in the order of the app resolver
+//! (`vpnte_core::resolve`, ru-2026 Ф9): DoH by IP literal first (no SNI to filter on), DNS over
+//! TCP next, the ISP's resolver last; never plain UDP to a public resolver, which RU networks
+//! redirect to the NSDI (forged NXDOMAIN for blocked names).
 use std::net::{IpAddr, Ipv4Addr};
 
 use serde_json::{Value, json};
@@ -8,8 +12,29 @@ use super::outbounds::UpstreamParts;
 use super::{ConfigError, ConfigInputs, require_objects};
 use crate::tags::{DNS_BOOTSTRAP, DNS_BOOTSTRAP_IN, DNS_REMOTE, DNS_RESOLVER, PROXY_OUT};
 
-/// Public resolver of last resort for `dns-bootstrap` when no physical resolver is known.
+/// Public resolver of last resort for the UDP retry of `xray_config::resolve_hosts` when no
+/// physical resolver is known.
 const FALLBACK_BOOTSTRAP: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
+/// DoH by IP literal after `dns-bootstrap` (1.1.1.1), then DNS over TCP: the rest of the
+/// bootstrap order for queries of `dns-bootstrap-in`.
+const BOOTSTRAP_QUAD9: (&str, &str) = ("dns-bootstrap-quad9", "9.9.9.9");
+const BOOTSTRAP_GOOGLE: (&str, &str) = ("dns-bootstrap-google", "8.8.8.8");
+const BOOTSTRAP_TCP: (&str, &str) = ("dns-bootstrap-tcp", "8.8.8.8");
+/// The physical adapter's resolver: last, it answers unblocked names when every public
+/// resolver is cut off (mobile whitelists).
+const BOOTSTRAP_ISP: &str = "dns-bootstrap-isp";
+/// Budget of one step of the bootstrap order: Xray gives a whole lookup 4 s, so two blackholed
+/// steps must still leave room for the third.
+const STEP_TIMEOUT: &str = "1500ms";
+/// Tags the builder owns: routing must not define them.
+const RESERVED: [&str; 6] = [
+    DNS_RESOLVER,
+    DNS_BOOTSTRAP,
+    BOOTSTRAP_QUAD9.0,
+    BOOTSTRAP_GOOGLE.0,
+    BOOTSTRAP_TCP.0,
+    BOOTSTRAP_ISP,
+];
 
 pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, ConfigError> {
     let r = &i.routing;
@@ -19,9 +44,9 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
     let mut tags: Vec<&str> = Vec::new();
     for s in &r.dns_servers {
         let tag = s.get("tag").and_then(Value::as_str).unwrap_or_default();
-        // The builder owns these two: a `dns-resolver` given by name would resolve itself.
-        let reserved = [DNS_RESOLVER, DNS_BOOTSTRAP].contains(&tag);
-        if tag.is_empty() || reserved || tags.contains(&tag) {
+        // The builder owns the resolver and bootstrap tags: a `dns-resolver` given by name
+        // would resolve itself.
+        if tag.is_empty() || RESERVED.contains(&tag) || tags.contains(&tag) {
             return Err(ConfigError::BadRouting(format!(
                 "dns server tag {tag:?} is empty, reserved or repeated"
             )));
@@ -45,17 +70,15 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
     }
     let bootstrap_in = i.listeners.dns_bootstrap.is_some();
     if up.needs_bootstrap || bootstrap_in {
-        // No detour: the server's own direct dialer. `type: local` would recurse into the TUN
-        // resolver, `detour: direct-out` is refused by sing-box.
-        servers.push(json!({
-            "type": "udp",
-            "tag": DNS_BOOTSTRAP,
-            "server": bootstrap_resolver(&i.phys_dns).to_string(),
-        }));
+        // An outbound's `domain_resolver` names one server and bypasses the DNS rules (sing-box
+        // 1.14 `dns/router.go` Lookup), so `dns-bootstrap` is the first step of the order.
+        servers.push(doh_direct(DNS_BOOTSTRAP, "1.1.1.1"));
     }
     let mut rules = Vec::new();
     if bootstrap_in {
-        rules.push(json!({ "inbound": [DNS_BOOTSTRAP_IN], "server": DNS_BOOTSTRAP }));
+        let isp = usable_physical_dns(&i.phys_dns);
+        servers.extend(bootstrap_servers(isp));
+        rules.extend(bootstrap_rules(isp.is_some()));
     }
     rules.extend(r.dns_rules.iter().cloned());
     let mut dns = json!({ "servers": servers });
@@ -68,9 +91,55 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
     Ok(dns)
 }
 
+/// The bootstrap order after `dns-bootstrap`: all direct (no detour: the server's own dialer;
+/// `type: local` would recurse into the TUN resolver, `detour: direct-out` is refused).
+fn bootstrap_servers(isp: Option<Ipv4Addr>) -> Vec<Value> {
+    let (tcp_tag, tcp_ip) = BOOTSTRAP_TCP;
+    let mut servers = vec![
+        doh_direct(BOOTSTRAP_QUAD9.0, BOOTSTRAP_QUAD9.1),
+        doh_direct(BOOTSTRAP_GOOGLE.0, BOOTSTRAP_GOOGLE.1),
+        json!({ "type": "tcp", "tag": tcp_tag, "server": tcp_ip }),
+    ];
+    servers.extend(
+        isp.map(|ip| json!({ "type": "udp", "tag": BOOTSTRAP_ISP, "server": ip.to_string() })),
+    );
+    servers
+}
+
+/// Rules for queries of `dns-bootstrap-in` (Xray's server names), first in the list. Each step
+/// is evaluated and its answer taken when it has an address or, over DoH (TLS: not forgeable
+/// on the path), when the name does not exist; an error, a timeout or an empty answer moves
+/// on. The last step's answer stands as it is: an honest failure, never an empty success.
+fn bootstrap_rules(isp: bool) -> Vec<Value> {
+    let inbound = json!([DNS_BOOTSTRAP_IN]);
+    let step = |action: &str, server: &str| json!({ "inbound": inbound, "action": action, "server": server, "timeout": STEP_TIMEOUT });
+    let has_address = json!({
+        "inbound": inbound, "match_response": true, "ip_accept_any": true, "action": "respond",
+    });
+    let no_such_name = json!({
+        "inbound": inbound, "match_response": true, "response_rcode": "NXDOMAIN",
+        "action": "respond",
+    });
+    let mut rules = Vec::new();
+    for doh in [DNS_BOOTSTRAP, BOOTSTRAP_QUAD9.0, BOOTSTRAP_GOOGLE.0] {
+        rules.extend([
+            step("evaluate", doh),
+            has_address.clone(),
+            no_such_name.clone(),
+        ]);
+    }
+    if isp {
+        rules.extend([step("evaluate", BOOTSTRAP_TCP.0), has_address]);
+        rules.push(step("route", BOOTSTRAP_ISP));
+    } else {
+        rules.push(step("route", BOOTSTRAP_TCP.0));
+    }
+    rules
+}
+
 /// The first physical resolver that is not our TUN's, not loopback (a local resolver would
 /// forward through the TUN it is meant to bypass) and not unspecified: the server of
-/// `dns-direct` in `routing`.
+/// `dns-direct` in `routing` and the last bootstrap step.
 pub fn usable_physical_dns(physical: &[Ipv4Addr]) -> Option<Ipv4Addr> {
     physical
         .iter()
@@ -78,8 +147,8 @@ pub fn usable_physical_dns(physical: &[Ipv4Addr]) -> Option<Ipv4Addr> {
         .find(|ip| !TUN_V4.contains(ip) && !ip.is_loopback() && !ip.is_unspecified())
 }
 
-/// The direct resolver for upstream server names: the usable physical resolver, else 1.1.1.1.
-/// Serves `dns-bootstrap` here and the bootstrap retry of `xray_config::resolve_hosts`.
+/// The UDP resolver of the retry in `xray_config::resolve_hosts` (TUN down): the usable
+/// physical resolver, else 1.1.1.1. sing-box's own `dns-bootstrap` does not use it.
 pub fn bootstrap_resolver(physical: &[Ipv4Addr]) -> Ipv4Addr {
     usable_physical_dns(physical).unwrap_or(FALLBACK_BOOTSTRAP)
 }
@@ -104,3 +173,12 @@ fn doh_cloudflare(tag: &str) -> Value {
         "tls": { "server_name": "cloudflare-dns.com" },
     })
 }
+
+/// Direct DoH to an IP literal without `tls.server_name`: the TLS name is the address, so no
+/// SNI is sent and the certificate must carry the address (it does for these services).
+fn doh_direct(tag: &str, ip: &str) -> Value {
+    json!({ "type": "https", "tag": tag, "server": ip, "path": "/dns-query" })
+}
+
+#[cfg(test)]
+mod tests;

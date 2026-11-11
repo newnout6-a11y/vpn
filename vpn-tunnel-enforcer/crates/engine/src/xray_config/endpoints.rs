@@ -6,7 +6,7 @@
 //! "circular DNS deadlock"). So the app resolves first ([`super::resolve_hosts`]) and Xray only
 //! gets IP literals.
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use serde_json::{Map, Value};
 
@@ -14,14 +14,17 @@ use super::config::ProxyGraph;
 
 impl ProxyGraph {
     /// Every server address that is a host name (VLESS / VMess `vnext`, Trojan / SS `servers`,
-    /// the simple `settings.address` form, XHTTP `extra.downloadSettings.address`), unique, in
-    /// config order.
+    /// the simple `settings.address` form, XHTTP `extra.downloadSettings.address`, WireGuard
+    /// `peers[].endpoint`), unique, in config order.
     pub fn hosts(&self) -> Vec<String> {
         let mut hosts: Vec<String> = Vec::new();
         for outbound in self.outbounds() {
             let download = download_settings(outbound).into_iter();
-            let addresses = node_holders(outbound).chain(download);
-            for host in addresses.filter_map(|h| h.get("address").and_then(Value::as_str)) {
+            let addresses = node_holders(outbound)
+                .chain(download)
+                .filter_map(|h| h.get("address").and_then(Value::as_str));
+            let peers = peer_endpoints(outbound).filter_map(|e| Some(split_endpoint(e)?.0));
+            for host in addresses.chain(peers) {
                 let host = host.trim();
                 if !host.is_empty() && !is_literal(host) && !hosts.iter().any(|h| h == host) {
                     hosts.push(host.to_owned());
@@ -39,6 +42,7 @@ impl ProxyGraph {
         for outbound in self.outbounds_mut() {
             let mut pinned = None;
             if let Some(settings) = outbound.get_mut("settings") {
+                substitute_peers(settings, resolved);
                 for holder in node_holders_mut(settings) {
                     if let Some(host) = replace_address(holder, resolved) {
                         pinned.get_or_insert(host);
@@ -133,6 +137,44 @@ fn replace_address(holder: &mut Value, resolved: &HashMap<String, IpAddr>) -> Op
         .as_object_mut()?
         .insert("address".into(), Value::String(ip.to_string()));
     Some(host)
+}
+
+/// WireGuard peer endpoints (`host:port`, an IPv6 literal in brackets).
+fn peer_endpoints(outbound: &Value) -> impl Iterator<Item = &str> {
+    outbound
+        .get("settings")
+        .and_then(|s| s.get("peers"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|peer| peer.get("endpoint")?.as_str())
+}
+
+/// `host:port` -> (host without brackets, port).
+fn split_endpoint(endpoint: &str) -> Option<(&str, u16)> {
+    let (host, port) = endpoint.trim().rsplit_once(':')?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    Some((host, port.parse().ok()?))
+}
+
+/// Writes the IP into every WireGuard peer endpoint whose host name was resolved.
+fn substitute_peers(settings: &mut Value, resolved: &HashMap<String, IpAddr>) {
+    let Some(peers) = settings.get_mut("peers").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for peer in peers {
+        let endpoint = peer.get("endpoint").and_then(Value::as_str);
+        let Some((ip, port)) = endpoint
+            .and_then(split_endpoint)
+            .and_then(|(host, port)| Some((*resolved.get(host)?, port)))
+        else {
+            continue;
+        };
+        if let Some(peer) = peer.as_object_mut() {
+            let endpoint = SocketAddr::new(ip, port).to_string();
+            peer.insert("endpoint".into(), Value::String(endpoint));
+        }
+    }
 }
 
 /// Pins the names Xray would derive from the (now IP) dial address of `stream`.

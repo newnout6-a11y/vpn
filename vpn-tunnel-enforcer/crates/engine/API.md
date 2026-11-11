@@ -132,7 +132,8 @@ pub fn compat_key(i: &ConfigInputs) -> [u8; 32];   // equal keys: a running conf
                                                    // upstream (ignores profile, slots, listener ports,
                                                    // secrets, alias; the capture and its proxy port count)
 pub fn usable_physical_dns(physical: &[Ipv4Addr]) -> Option<Ipv4Addr>;  // not TUN /30, loopback, 0.0.0.0
-pub fn bootstrap_resolver(physical: &[Ipv4Addr]) -> Ipv4Addr;           // usable one, else 1.1.1.1
+pub fn bootstrap_resolver(physical: &[Ipv4Addr]) -> Ipv4Addr;           // usable one, else 1.1.1.1: the UDP
+                                                   // retry of xray_config::resolve_hosts only
 ```
 Rules the caller must keep (review of the WFP / TUN design):
 - `tun.ipv6 = !tun.dns_hijack = Protection::session_guarded()` (kill switch != Off or leak
@@ -151,9 +152,20 @@ Rules the caller must keep (review of the WFP / TUN design):
   `isLocalSource`), on Windows by the client socket's local address in the TCP / UDP tables
   (`winiphlpapi.FindPid`). Programs that ignore the proxy are not captured at all.
 - DNS: routing's servers / rules; `dns-remote` defaults to Cloudflare DoH through the tunnel;
-  `dns-resolver` is added for hostname tunnelled servers, `dns-bootstrap` (UDP to
-  `bootstrap_resolver(phys_dns)`) when the upstream dials a name or bootstrap-in exists;
-  `strategy: ipv4_only`. Clash API on `127.0.0.1:clash_port` with `clash_secret`.
+  `dns-resolver` is added for hostname tunnelled servers. Upstream server names resolve direct
+  in the order of `vpnte_core::resolve` (ru-2026 Ф9), never by plain UDP to a public resolver:
+  `dns-bootstrap` = DoH to `1.1.1.1` by IP literal (no SNI, no detour) when the upstream dials
+  a name or bootstrap-in exists. An outbound's `domain_resolver` names one server and bypasses
+  the DNS rules (sing-box 1.14 `dns/router.go` `Lookup`), so native outbounds get this first
+  step only. Queries of `dns-bootstrap-in` (Xray slots) get the whole order, first in
+  `dns.rules`: `evaluate` (1.5 s each) `dns-bootstrap` -> `dns-bootstrap-quad9` (DoH 9.9.9.9)
+  -> `dns-bootstrap-google` (DoH 8.8.8.8), a step's answer taken (`respond`) when it has an
+  address or is NXDOMAIN; then `dns-bootstrap-tcp` (TCP 8.8.8.8:53) and, when
+  `usable_physical_dns` gives one, `dns-bootstrap-isp` (UDP to it) last. These tags are
+  reserved (routing must not define them). Routing's DNS rules must not use legacy address
+  filters (`ip_cidr` / `ip_is_private` without `match_response`): `evaluate` turns legacy DNS
+  mode off and sing-box then refuses them. `strategy: ipv4_only`. Clash API on
+  `127.0.0.1:clash_port` with `clash_secret`.
 - Upstream server IPs are excluded from the TUN routes (Native); slot mode excludes nothing:
   pass the Xray exe in `RoutingInputs::engine_paths` (process rule -> direct) instead.
 
@@ -293,7 +305,7 @@ unreachable, badAnswer, notConfirmed}`.
 ## `xray_config` — Xray JSON (the only producer) and name pre-resolution
 
 ```rust
-pub enum SelectReason { Default, Protocol, Preference, Reality, XrayTransport, NativeXray,
+pub enum SelectReason { Default, Protocol, Preference, Reality, XrayTransport, NativeXray, CertPin,
     SingBoxOnly(SingBoxOnly) }                                          // Serialize, kebab-case
 pub enum SingBoxOnly { H2Transport, QuicTransport, InsecureWithoutPin, SpkiPin, Ech, ShadowsocksPlugin,
     ShadowsocksUdpOverTcp, ShadowsocksMethod, RealityTransport, Plaintext }
@@ -303,6 +315,7 @@ pub enum Decision { Selected { engine: Engine, reason: SelectReason }, Rejected(
 impl Decision { pub fn engine(self) -> Result<Engine, Reject>; }
 pub fn select_engine(p: &Profile, pref: EnginePref) -> Decision;      // pure
 pub fn translate(p: &Profile, device: ClientDevice) -> Result<Value, XrayConfigError>; // outbound "proxy"
+pub fn warnings(p: &Profile, tls_compat: bool) -> Vec<Msg>;           // pure; engine.xray.warn.*
 pub enum ProxyGraph { Translated(Value), Native(Box<CompiledGraph>) } // Debug shows only the shape
 pub fn proxy_graph(p: &Profile, device: ClientDevice) -> Result<ProxyGraph, XrayConfigError>; // provider
                                                                      // graph validated + compiled, else translate
@@ -311,8 +324,29 @@ impl ProxyGraph {
     pub fn substitute(&mut self, resolved: &HashMap<String, IpAddr>); // address -> IP, derived names pinned
 }
 pub fn build_config(graph: &ProxyGraph, ep: &SlotEndpoint) -> Value; // infallible
-pub enum XrayConfigError { Protocol(&'static str), Feature(SingBoxOnly), Native(NativeError) } // -> Validation
+pub enum XrayConfigError { Protocol(&'static str), Feature(SingBoxOnly), Invalid(&'static str),
+    Native(NativeError) }                                             // -> Validation
+```
+**Outbounds** (bundled Xray 26.11.9; each shape passes `xray run -test`): VLESS, VMess, Trojan,
+Shadowsocks (9 ciphers; UDP-over-TCP only with 2022 ciphers), Hysteria2 (`hysteria` v2: TLS
+always, salamander / gecko in `finalmask.udp`, port hopping, Brutal bandwidth and BBR preset in
+`finalmask.quicParams`, certificate pin as `pinnedPeerCertSha256`), WireGuard (user-space, no
+adapter, provider DNS as `remoteDNS`), SOCKS (no TLS, no transport), HTTP (TLS allowed, no
+transport). TUIC, Naive, AnyTLS and ShadowTLS have no Xray outbound (`SelectReason::Protocol`).
+Static ECH configs go to `echConfigList`; ECH by DNS lookup, over QUIC or with REALITY stays
+`SingBoxOnly::Ech`. uTLS: the provider's fingerprint is kept (with a warning when servers refuse
+it), otherwise the device default if it is chrome / firefox / safari, else chrome. XHTTP gets
+an explicit `extra.xmux` (4-6 connections) unless the provider set one; no typed outbound ever
+carries `mux`, and mux.cool is removed from a provider graph's XHTTP outbounds.
+**Selection:** Auto picks Xray for provider graphs, Xray-only transports, explicit gRPC gun,
+REALITY and (new) any non-REALITY TLS profile with a certificate pin (`CertPin`: sing-box
+cannot enforce a DER hash pin); sing-box otherwise. Forced Xray runs every Xray-capable kind.
+**Warnings:** call `warnings(&profile, tls_compat)` whenever Xray runs the profile and show them
+(the sing-box options Xray drops: mux, dial, pasted sing-box options, `disable_sni`, stealth /
+TLS compatibility, ws early data; refused / broken / unknown fingerprints; an unknown BBR preset;
+mux.cool removed from a provider XHTTP outbound). `tls_compat` = stealth or adaptive TLS mode.
 
+```rust
 // async: names are resolved by the app, never by Xray (its lookup would loop through the TUN)
 pub enum ResolvePath { System { bootstrap: SocketAddr }, ViaSingBox(SocketAddr) }
 pub struct Resolved { pub addrs: HashMap<String, IpAddr>, pub bootstrap_used: bool }
@@ -324,7 +358,8 @@ pub async fn resolve_hosts(hosts: &[String], path: ResolvePath, cancel: &Cancell
 Config shape: SOCKS inbound `in` on `127.0.0.1:ep.port()` with password auth, UDP, route-only
 sniffing (tls / http / quic); outbounds proxy (graph), `direct`, `block`; private CIDRs direct;
 log `info` to stdout, access log off; never dns / api / stats. Reject texts are complete
-sentences (render `reject.msg()`). `resolve_hosts`: `System` = OS resolver (TUN down), on
+sentences (render `reject.msg()`). `hosts()` / `substitute()` also cover WireGuard
+`peers[].endpoint` (`host:port`). `resolve_hosts`: `System` = OS resolver (TUN down), on
 failure one UDP retry at `bootstrap` = `(singbox_config::bootstrap_resolver(&phys_dns), 53)`;
 `ViaSingBox(addr)` = UDP DNS to the running sing-box's `dns-bootstrap-in` (TUN up). A, else
 AAAA; <= 4 lookups in flight, 4 s per attempt; the first failure fails the plan (no partial
@@ -335,6 +370,7 @@ map); block-page answers (loopback, 0.0.0.0/8, link-local, multicast, broadcast)
 // Xray upstream in slot A (cold start, TUN down) — sketch.
 let engine = select_engine(&profile, settings.engine_pref).engine()?;   // Engine::Xray here
 let mut graph = proxy_graph(&profile, device)?;
+notify_all(warnings(&profile, stealth || adaptive == AdaptiveMode::TlsCompatibility));
 let path = ResolvePath::System { bootstrap: (singbox_config::bootstrap_resolver(&phys_dns), 53).into() };
 let resolved = resolve_hosts(&graph.hosts(), path, &cancel).await?;
 if let Some(msg) = resolved.warning() { notify(msg) }

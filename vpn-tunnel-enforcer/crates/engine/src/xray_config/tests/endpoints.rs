@@ -213,3 +213,31 @@ fn translated_profile_substitution() {
     let config = crate::xray_config::build_config(&g, &super::config::endpoint(20007));
     assert!(crate::test_support::xray_check(&config).is_ok());
 }
+
+/// WireGuard peer endpoints (`host:port`) and the Hysteria2 simple address are pre-resolved like
+/// every other server: Xray would otherwise resolve them through the TUN.
+#[test]
+fn wireguard_and_hysteria2_endpoints() {
+    let mut wg = proxy_graph(&profile(wireguard()), ClientDevice::Pc).expect("translates");
+    assert_eq!(wg.hosts(), ["wg.example"]);
+    wg.substitute(&map(&[("wg.example", "2001:db8::7")]));
+    assert_eq!(
+        outbounds(&wg)[0]["settings"]["peers"][0]["endpoint"],
+        "[2001:db8::7]:51820"
+    );
+    assert!(wg.hosts().is_empty());
+    let literal = graph(vec![
+        json!({"protocol": "wireguard", "settings": {"peers": [
+        {"endpoint": "[::1]:51820"}, {"endpoint": "192.0.2.1:51820"}]}}),
+    ]);
+    assert!(literal.hosts().is_empty());
+    let mut hy2 = proxy_graph(&profile(hysteria2()), ClientDevice::Pc).expect("translates");
+    assert_eq!(hy2.hosts(), ["nl.example"]);
+    hy2.substitute(&map(&[("nl.example", "192.0.2.9")]));
+    let o = &outbounds(&hy2)[0];
+    assert_eq!(o["settings"]["address"], "192.0.2.9");
+    assert_eq!(
+        o["streamSettings"]["tlsSettings"]["serverName"],
+        "nl.example"
+    );
+}

@@ -26,7 +26,8 @@ const XRAY_SS_METHODS: [&str; 9] = [
 pub enum SelectReason {
     /// Nothing asks for Xray: sing-box is the main engine.
     Default,
-    /// Xray has no outbound for the protocol (Hysteria2, TUIC, WireGuard, ShadowTLS, …).
+    /// Xray has no outbound for the protocol (TUIC, Naive, AnyTLS, ShadowTLS) or for this form of
+    /// it (SOCKS over TLS, a stream transport under Hysteria2 / WireGuard / SOCKS / HTTP).
     Protocol,
     /// The user forced this engine and the profile allows it.
     Preference,
@@ -36,6 +37,9 @@ pub enum SelectReason {
     XrayTransport,
     /// Provider Xray graph (balancers, bridges, loopback reroutes).
     NativeXray,
+    /// A pinned certificate hash: Xray enforces it, sing-box only pins public keys (a different
+    /// value) and would run the profile without the pin.
+    CertPin,
     /// The profile uses something only sing-box can do.
     SingBoxOnly(SingBoxOnly),
 }
@@ -52,11 +56,13 @@ pub enum SingBoxOnly {
     InsecureWithoutPin,
     /// Xray ignores public-key (SPKI) pins: running there would silently drop the pin.
     SpkiPin,
-    /// ECH (mapping the sing-box config lines to Xray `echConfigList` is not done).
+    /// ECH whose config must be looked up in DNS (Xray would ask a public resolver itself), ECH
+    /// with REALITY (Xray has no ECH there) or over QUIC. A static TCP TLS config runs on Xray.
     Ech,
     /// SIP003 plugins.
     ShadowsocksPlugin,
-    /// The Xray Shadowsocks outbound has no UDP-over-TCP.
+    /// UDP-over-TCP with a pre-2022 cipher: Xray applies `uot` only to 2022 ciphers and would
+    /// silently send native UDP instead.
     ShadowsocksUdpOverTcp,
     /// A cipher the bundled Xray does not build.
     ShadowsocksMethod,
@@ -148,7 +154,7 @@ pub fn select_engine(p: &Profile, pref: EnginePref) -> Decision {
             EnginePref::Auto | EnginePref::Xray => xray(SelectReason::NativeXray),
         };
     }
-    if !xray_protocol(&p.kind) {
+    if !xray_protocol(p) {
         return sing_box(SelectReason::Protocol);
     }
     match (xray_only(p), singbox_only(p)) {
@@ -168,6 +174,7 @@ pub fn select_engine(p: &Profile, pref: EnginePref) -> Decision {
         // Explicit gRPC "gun" runs on both engines; Auto keeps the old app's Xray choice.
         EnginePref::Auto if explicit_gun(p) => xray(SelectReason::XrayTransport),
         EnginePref::Auto if reality(p) => xray(SelectReason::Reality),
+        EnginePref::Auto if cert_pin(p).is_some() => xray(SelectReason::CertPin),
         EnginePref::Auto => sing_box(SelectReason::Default),
         EnginePref::Xray if explicit_gun(p) => xray(SelectReason::XrayTransport),
         EnginePref::Xray => xray(SelectReason::Preference),
@@ -188,12 +195,16 @@ fn sing_box(reason: SelectReason) -> Decision {
     }
 }
 
-/// VLESS, VMess, Trojan and plain Shadowsocks (a ShadowTLS layer is a protocol Xray lacks).
-pub(super) fn xray_protocol(kind: &Kind) -> bool {
-    match kind {
+/// Kinds with an Xray outbound in the form `p` uses. TUIC, Naive, AnyTLS and ShadowTLS have none
+/// (`unknown config id`). A stream transport under Hysteria2 / WireGuard / SOCKS / HTTP is refused
+/// by sing-box too; SOCKS over TLS would send its UDP beside the TLS (Xray docs, transport.md).
+pub(super) fn xray_protocol(p: &Profile) -> bool {
+    match &p.kind {
         Kind::Vless { .. } | Kind::Vmess { .. } | Kind::Trojan { .. } => true,
         Kind::Shadowsocks { shadowtls, .. } => shadowtls.is_none(),
-        _ => false,
+        Kind::Hysteria2 { .. } | Kind::Wireguard(_) | Kind::Http { .. } => p.transport.is_none(),
+        Kind::Socks { .. } => p.transport.is_none() && p.tls.is_none(),
+        Kind::Tuic { .. } | Kind::Naive { .. } | Kind::Anytls { .. } => false,
     }
 }
 
@@ -227,6 +238,14 @@ fn reality(p: &Profile) -> bool {
     p.tls.as_ref().is_some_and(|t| t.reality.is_some())
 }
 
+/// The certificate pin of a TLS (not REALITY: no CA check there) profile. A blank pin is not
+/// emitted, so it does not count.
+pub(super) fn cert_pin(p: &Profile) -> Option<&str> {
+    let tls = p.tls.as_ref().filter(|t| t.reality.is_none())?;
+    let pin = tls.cert_pin_sha256.as_deref()?.trim();
+    (!pin.is_empty()).then_some(pin)
+}
+
 /// The VLESS Encryption string (`mlkem768x25519plus.…`) when set and not `none`.
 pub(super) fn vless_encryption(kind: &Kind) -> Option<&str> {
     match kind {
@@ -247,20 +266,17 @@ pub(super) fn singbox_only(p: &Profile) -> Option<SingBoxOnly> {
     }
     let reality = reality(p);
     if let Some(tls) = p.tls.as_ref().filter(|_| !reality) {
-        // REALITY has no CA check, so `insecure` and certificate pins mean nothing there. A blank
-        // pin is not emitted, so it does not count.
-        let pinned = tls
-            .cert_pin_sha256
-            .as_deref()
-            .is_some_and(|p| !p.trim().is_empty());
-        if tls.insecure && !pinned {
+        if tls.insecure && cert_pin(p).is_none() {
             return Some(SingBoxOnly::InsecureWithoutPin);
         }
         if !tls.spki_pin_sha256.is_empty() {
             return Some(SingBoxOnly::SpkiPin);
         }
     }
-    if p.tls.as_ref().is_some_and(|t| t.ech.is_some()) {
+    // Xray's ECH over QUIC (Hysteria2) is unproven; REALITY has no ECH at all.
+    let ech = p.tls.as_ref().and_then(|t| t.ech.as_ref());
+    let quic = matches!(p.kind, Kind::Hysteria2 { .. });
+    if ech.is_some_and(|e| reality || quic || e.config_lines.iter().all(|l| l.trim().is_empty())) {
         return Some(SingBoxOnly::Ech);
     }
     if let Kind::Shadowsocks {
@@ -270,13 +286,14 @@ pub(super) fn singbox_only(p: &Profile) -> Option<SingBoxOnly> {
         ..
     } = &p.kind
     {
+        let method = method.trim().to_ascii_lowercase();
         if plugin.is_some() {
             return Some(SingBoxOnly::ShadowsocksPlugin);
         }
-        if uot.is_some() {
+        if uot.is_some() && !method.starts_with("2022-") {
             return Some(SingBoxOnly::ShadowsocksUdpOverTcp);
         }
-        if !XRAY_SS_METHODS.contains(&method.trim().to_ascii_lowercase().as_str()) {
+        if !XRAY_SS_METHODS.contains(&method.as_str()) {
             return Some(SingBoxOnly::ShadowsocksMethod);
         }
     }

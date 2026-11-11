@@ -233,13 +233,15 @@ fn invalid_native_graph() {
 }
 
 /// A provider XHTTP outbound runs through its graph untouched (nativeXrayCompatibility.test.ts:
-/// 252-271): the compiled `proxy` keeps the provider's `streamSettings` byte for byte.
+/// 252-271): the compiled `proxy` keeps the provider's `streamSettings` byte for byte. The
+/// `sockopt` the model has no field for keeps it a graph (a plain lone outbound imports typed).
 #[test]
 fn native_xhttp_passes_through() {
     let stream = json!({"network": "xhttp", "security": "tls",
         "tlsSettings": {"serverName": "front.example.com", "fingerprint": "firefox"},
         "xhttpSettings": {"mode": "packet-up", "path": "/path", "host": "front.example.com",
-                          "extra": {"noSSEHeader": true}}});
+                          "extra": {"noSSEHeader": true}},
+        "sockopt": {"tcpKeepAliveIdle": 30}});
     let doc = json!({"outbounds": [{"tag": "proxy", "protocol": "vless",
         "settings": {"vnext": [{"address": "192.0.2.10", "port": 443,
                                 "users": [{"id": UUID, "encryption": "none"}]}]},

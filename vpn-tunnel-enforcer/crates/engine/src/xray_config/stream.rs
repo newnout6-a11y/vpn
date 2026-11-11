@@ -5,31 +5,14 @@
 //! the address with an IP and CDN-fronted servers fail on an IP Host or SNI.
 use serde_json::{Map, Value, json};
 use vpnte_base::types::ClientDevice;
-use vpnte_profiles::device::utls_fingerprint;
 use vpnte_profiles::model::{Host, Profile, Tls, Transport};
 use vpnte_profiles::xray_native::NativeError;
 
 use super::XrayConfigError;
+use super::ech::config_list;
+use super::fingerprint::fingerprint;
 use super::select::SingBoxOnly;
 
-/// uTLS presets the bundled Xray accepts (case-insensitive); other provider names fall back to
-/// the default instead of failing the build with `unknown "fingerprint"`.
-const XRAY_FINGERPRINTS: [&str; 12] = [
-    "chrome",
-    "firefox",
-    "safari",
-    "ios",
-    "android",
-    "edge",
-    "360",
-    "qq",
-    "random",
-    "randomized",
-    "randomizednoalpn",
-    "unsafe",
-];
-/// REALITY needs an X25519MLKEM768 key share; Xray guarantees it only for these presets.
-const MLKEM_FINGERPRINTS: [&str; 3] = ["chrome", "firefox", "safari"];
 /// Xray reads WebSocket early data from `?ed=` in the path; 8192 is its documented maximum.
 const MAX_EARLY_DATA: u32 = 8192;
 /// Keys that make the (elevated) engine read or write a local file.
@@ -40,6 +23,20 @@ const FILE_KEYS: [&str; 5] = [
     "sessionTicketKeyFile",
     "masterKeyLog",
 ];
+/// XHTTP connection reuse when the provider sets none (ru-2026 R3, XTLS discussion #4113): a few
+/// long-lived connections instead of a handshake burst, which RU DPI answers with a freeze. Every
+/// field is explicit because setting one drops all of Xray's defaults, and those changed between
+/// releases (6 -> 3 connections in 26.7.28). `maxConcurrency` stays unset: it excludes
+/// `maxConnections`.
+fn default_xmux() -> Value {
+    json!({
+        "maxConnections": "4-6",
+        "cMaxReuseTimes": "64-128",
+        "hMaxRequestTimes": "600-900",
+        "hMaxReusableSecs": "1800-3000",
+        "hKeepAlivePeriod": 0,
+    })
+}
 
 /// Transport and security of `p`; `flow_ok` says whether XTLS `flow` may be used.
 pub(super) struct Stream {
@@ -63,7 +60,7 @@ pub(super) fn stream(p: &Profile, device: ClientDevice) -> Result<Stream, XrayCo
                 // The REALITY public key; Xray renamed `publicKey` to `password` (old name still read).
                 r.insert("password".into(), json!(reality.public_key.trim()));
                 r.insert("shortId".into(), json!(reality.short_id.trim()));
-                r.insert("fingerprint".into(), json!(fingerprint(tls, device, true)));
+                r.insert("fingerprint".into(), json!(fingerprint(tls, device)));
                 if let Some(spider) = non_empty(reality.spider_x.as_deref()) {
                     // Xray refuses a spiderX that does not start with `/`.
                     let spider = if spider.starts_with('/') {
@@ -77,8 +74,13 @@ pub(super) fn stream(p: &Profile, device: ClientDevice) -> Result<Stream, XrayCo
                 s.insert("realitySettings".into(), Value::Object(r));
             }
             None => {
+                let mut t = tls_common(p, tls);
+                t.insert("fingerprint".into(), json!(fingerprint(tls, device)));
+                if let Some(list) = tls.ech.as_ref().map(config_list).transpose()?.flatten() {
+                    t.insert("echConfigList".into(), json!(list));
+                }
                 s.insert("security".into(), json!("tls"));
-                s.insert("tlsSettings".into(), tls_settings(p, tls, device));
+                s.insert("tlsSettings".into(), Value::Object(t));
             }
         },
     }
@@ -90,12 +92,12 @@ pub(super) fn stream(p: &Profile, device: ClientDevice) -> Result<Stream, XrayCo
     })
 }
 
-/// Never `allowInsecure` (the bundled Xray refuses it): an insecure profile reaches Xray only
-/// with a pinned certificate, which replaces the CA check.
-fn tls_settings(p: &Profile, tls: &Tls, device: ClientDevice) -> Value {
+/// `tlsSettings` without uTLS and ECH, which a QUIC outbound has not. Never `allowInsecure`
+/// (the bundled Xray refuses it): an insecure profile reaches Xray only with a pinned
+/// certificate, which replaces the CA check.
+pub(super) fn tls_common(p: &Profile, tls: &Tls) -> Map<String, Value> {
     let mut t = Map::new();
     t.insert("serverName".into(), json!(sni(p, tls)));
-    t.insert("fingerprint".into(), json!(fingerprint(tls, device, false)));
     let alpn: Vec<&str> = tls.alpn.iter().filter_map(|a| non_empty(Some(a))).collect();
     if !alpn.is_empty() {
         // Only an explicit ALPN: Xray's per-transport default (http/1.1 for ws) must stay.
@@ -126,7 +128,7 @@ fn tls_settings(p: &Profile, tls: &Tls, device: ClientDevice) -> Value {
             t.insert(key.into(), json!(v));
         }
     }
-    Value::Object(t)
+    t
 }
 
 /// Writes `network` and the transport's settings object; returns the network name.
@@ -211,11 +213,16 @@ fn transport(p: &Profile, s: &mut Map<String, Value>) -> Result<&'static str, Xr
             if let Some(mode) = non_empty(mode.as_deref()) {
                 xhttp.insert("mode".into(), json!(mode));
             }
-            if let Some(extra) = extra {
-                let mut extra = Value::Object(extra);
-                sanitize_extra(&mut extra)?;
-                xhttp.insert("extra".into(), extra);
+            // Xray rebuilds the settings from `extra` when it is present (only host, path and
+            // mode survive from outside), so the connection reuse goes there.
+            let mut extra = Value::Object(extra.unwrap_or_default());
+            sanitize_extra(&mut extra)?;
+            if let Some(extra) = extra.as_object_mut()
+                && !extra.keys().any(|k| k.eq_ignore_ascii_case("xmux"))
+            {
+                extra.insert("xmux".into(), default_xmux());
             }
+            xhttp.insert("extra".into(), extra);
             ("xhttp", Some(("xhttpSettings", Value::Object(xhttp))))
         }
         Some(Transport::Http { .. }) => {
@@ -248,7 +255,7 @@ fn host_name(p: &Profile, explicit: Option<&str>) -> Option<String> {
 }
 
 /// TLS / REALITY server name, else the server itself; Xray wants an IPv6 name in brackets.
-fn sni(p: &Profile, tls: &Tls) -> String {
+pub(super) fn sni(p: &Profile, tls: &Tls) -> String {
     let server = p.server.to_string();
     let name = non_empty(tls.server_name.as_deref()).unwrap_or(server.trim());
     match name.parse::<std::net::Ipv6Addr>() {
@@ -257,50 +264,40 @@ fn sni(p: &Profile, tls: &Tls) -> String {
     }
 }
 
-/// The provider's fingerprint when Xray knows it, else the device default (for REALITY only
-/// an MLKEM-capable one, else `chrome`).
-fn fingerprint(tls: &Tls, device: ClientDevice, reality: bool) -> &'static str {
-    let provider = tls
-        .fingerprint
-        .as_deref()
-        .map(|f| f.trim().to_ascii_lowercase());
-    let known = XRAY_FINGERPRINTS
-        .iter()
-        .find(|&&k| Some(k) == provider.as_deref() && !(reality && k == "unsafe"));
-    if let Some(fp) = known {
-        return fp;
-    }
-    let default = utls_fingerprint(device);
-    if reality && !MLKEM_FINGERPRINTS.contains(&default) {
-        "chrome"
-    } else {
-        default
-    }
-}
-
 /// WebSocket path with sing-box early data moved into `?ed=N` (Xray has no `maxEarlyData` key).
-/// Only the `Sec-WebSocket-Protocol` header form exists in Xray; other header names lose 0-RTT.
+/// Only the `Sec-WebSocket-Protocol` header form exists in Xray: other header names lose 0-RTT
+/// ([`early_data_dropped`] reports it).
 fn ws_path(path: &str, max_early_data: Option<u32>, header: Option<&str>) -> String {
     let mut path = or_root(path).to_owned();
     let Some(n) = max_early_data.filter(|n| *n > 0) else {
         return path;
     };
-    let query = path.split_once('?').map(|(_, q)| q.to_owned());
-    if query
-        .as_deref()
-        .is_some_and(|q| q.split('&').any(|kv| kv.split('=').next() == Some("ed")))
-    {
+    if has_ed_query(&path) || !protocol_header(header) {
         return path;
     }
-    if non_empty(header).is_some_and(|h| !h.eq_ignore_ascii_case("Sec-WebSocket-Protocol")) {
-        tracing::warn!(
-            "xray: websocket early data needs the Sec-WebSocket-Protocol header; dropped"
-        );
-        return path;
-    }
-    path.push(if query.is_some() { '&' } else { '?' });
+    path.push(if path.contains('?') { '&' } else { '?' });
     path.push_str(&format!("ed={}", n.min(MAX_EARLY_DATA)));
     path
+}
+
+/// sing-box WebSocket early data that Xray cannot send (a header other than
+/// `Sec-WebSocket-Protocol`, no `ed` in the path).
+pub(super) fn early_data_dropped(transport: Option<&Transport>) -> bool {
+    matches!(transport, Some(Transport::Ws {
+        path,
+        max_early_data: Some(n),
+        early_data_header,
+        ..
+    }) if *n > 0 && !has_ed_query(path) && !protocol_header(early_data_header.as_deref()))
+}
+
+fn has_ed_query(path: &str) -> bool {
+    path.split_once('?')
+        .is_some_and(|(_, q)| q.split('&').any(|kv| kv.split('=').next() == Some("ed")))
+}
+
+fn protocol_header(header: Option<&str>) -> bool {
+    non_empty(header).is_none_or(|h| h.eq_ignore_ascii_case("Sec-WebSocket-Protocol"))
 }
 
 /// Removes `Host` (any case) from XHTTP `extra.headers`, returning its value.

@@ -93,8 +93,9 @@ fn reality_spider_x() {
     assert_eq!(spider(None), None);
 }
 
-/// Provider fingerprint when Xray knows it (any case), else the device default; REALITY falls
-/// back to an MLKEM-capable preset and never takes `unsafe`.
+/// Provider fingerprint when Xray knows it (any case), even one servers refuse (a warning says
+/// so); otherwise the device default when servers accept it, else `chrome` (ru-2026-plan §2:
+/// the Android / iOS presets are broken or refused). REALITY never takes `unsafe`.
 #[test]
 fn fingerprints() {
     let fp = |provider: Option<&str>, reality_on: bool, device: ClientDevice| {
@@ -125,12 +126,16 @@ fn fingerprints() {
     assert_eq!(fp(Some("Firefox"), false, Pc).as_deref(), Some("firefox"));
     assert_eq!(
         fp(Some("chrome_120"), false, Android).as_deref(),
-        Some("android")
+        Some("chrome")
     );
-    assert_eq!(fp(None, false, Ios).as_deref(), Some("ios"));
+    assert_eq!(fp(None, false, Pc).as_deref(), Some("chrome"));
+    assert_eq!(fp(None, false, Ios).as_deref(), Some("chrome"));
+    assert_eq!(fp(None, false, Android).as_deref(), Some("chrome"));
+    assert_eq!(fp(None, false, Mac).as_deref(), Some("safari"));
     assert_eq!(fp(None, true, Ios).as_deref(), Some("chrome"));
     assert_eq!(fp(None, true, Mac).as_deref(), Some("safari"));
     assert_eq!(fp(Some("ios"), true, Pc).as_deref(), Some("ios"));
+    assert_eq!(fp(Some("android"), false, Pc).as_deref(), Some("android"));
     assert_eq!(fp(Some("unsafe"), false, Pc).as_deref(), Some("unsafe"));
     assert_eq!(fp(Some("unsafe"), true, Android).as_deref(), Some("chrome"));
 }
@@ -200,19 +205,29 @@ fn names_survive_pre_resolution() {
 /// What Xray cannot run is an error, never a silently degraded config.
 #[test]
 fn untranslatable_profiles() {
-    let hy2 = profile(Kind::Hysteria2 {
+    let tuic = profile(Kind::Tuic {
+        uuid: UUID.into(),
         password: PW.into(),
-        obfs: None,
-        ports: Vec::new(),
-        hop_interval_s: None,
-        hop_interval_max_s: None,
-        up_mbps: None,
-        down_mbps: None,
-        bbr_profile: None,
+        congestion: None,
+        udp_relay_mode: None,
+        zero_rtt: false,
+        heartbeat_s: None,
     });
     assert_eq!(
-        translate(&hy2, ClientDevice::Pc),
-        Err(XrayConfigError::Protocol("hysteria2"))
+        translate(&tuic, ClientDevice::Pc),
+        Err(XrayConfigError::Protocol("tuic"))
+    );
+    // SOCKS over TLS would send its UDP beside the TLS.
+    let socks_tls = Profile {
+        tls: tls("proxy.example"),
+        ..profile(Kind::Socks {
+            username: None,
+            password: None,
+        })
+    };
+    assert_eq!(
+        translate(&socks_tls, ClientDevice::Pc),
+        Err(XrayConfigError::Protocol("socks"))
     );
     let h2 = Profile {
         tls: tls("front.example"),

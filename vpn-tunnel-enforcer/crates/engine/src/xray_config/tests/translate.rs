@@ -187,9 +187,11 @@ fn xhttp_settings() {
         let v = out(&p);
         assert_eq!(p, before);
         assert_eq!(v["streamSettings"]["network"], "xhttp");
+        let mut sent = extra.clone();
+        sent.insert("xmux".into(), default_xmux());
         assert_eq!(
             v["streamSettings"]["xhttpSettings"],
-            json!({"path": "/a%2Fb", "host": "front.example.com", "mode": "packet-up", "extra": extra})
+            json!({"path": "/a%2Fb", "host": "front.example.com", "mode": "packet-up", "extra": sent})
         );
     }
     let with_header = Profile {
@@ -210,7 +212,10 @@ fn xhttp_settings() {
     let x = &out(&with_header)["streamSettings"]["xhttpSettings"];
     assert_eq!(x["host"], "header.example");
     assert_eq!(x["mode"], "stream-up");
-    assert_eq!(x["extra"], json!({"headers": {"X-Pad": "1"}}));
+    assert_eq!(
+        x["extra"],
+        json!({"headers": {"X-Pad": "1"}, "xmux": default_xmux()})
+    );
 }
 
 /// gRPC gun / multi; without TLS the authority is pinned to the host name.
@@ -334,7 +339,8 @@ fn xhttp_links_round_trip() {
         assert_eq!(
             first["streamSettings"]["xhttpSettings"],
             json!({"path": "/a%2Fb", "host": "front.example.com", "mode": "packet-up",
-                   "extra": {"noSSEHeader": true, "custom": {"escaped": "%2F&=%25", "array": [true, 0, "text"]}}})
+                   "extra": {"noSSEHeader": true, "custom": {"escaped": "%2F&=%25", "array": [true, 0, "text"]},
+                             "xmux": default_xmux()}})
         );
         p.source = Source::Json;
         let again = parse_uri(&export_uri(&p).expect("exports as a link")).expect("re-imports");

@@ -327,8 +327,9 @@ pub(super) fn ipv6_reject_rule() -> Value {
 
 // ---- §7.5 DNS ----
 
-/// AT-02-002: a hostname endpoint brings `dns-bootstrap` (first physical resolver) and resolves
-/// through it; an IP endpoint does not; `final` is `dns-remote`.
+/// AT-02-002: a hostname endpoint brings `dns-bootstrap` and resolves through it; an IP
+/// endpoint does not; `final` is `dns-remote`. ru-2026 Ф9: the bootstrap is direct DoH to an
+/// IP literal (no SNI), never plain UDP, whatever the physical resolvers are.
 #[test]
 fn bootstrap_dns_only_for_hostname_endpoints() {
     let mut i = inputs(native(&vless("sub.example.com", None)));
@@ -338,10 +339,9 @@ fn bootstrap_dns_only_for_hostname_endpoints() {
     ];
     let c = build(&i).unwrap();
     let bootstrap = dns_server(&c, DNS_BOOTSTRAP).unwrap();
-    // The TUN's own resolver is never a bootstrap server.
     assert_eq!(
         bootstrap,
-        &json!({ "type": "udp", "tag": "dns-bootstrap", "server": "77.88.8.8" })
+        &json!({ "type": "https", "tag": "dns-bootstrap", "server": "1.1.1.1", "path": "/dns-query" })
     );
     assert_eq!(
         c["outbounds"][0]["domain_resolver"]["server"],
@@ -349,19 +349,31 @@ fn bootstrap_dns_only_for_hostname_endpoints() {
     );
     assert_eq!(c["dns"]["final"], DNS_REMOTE);
     assert_eq!(c["dns"]["strategy"], "ipv4_only");
+    // The rest of the bootstrap order serves only `dns-bootstrap-in` (slot mode).
+    assert!(c["dns"].get("rules").is_none());
+    assert_eq!(c["dns"]["servers"].as_array().unwrap().len(), 2);
 
     let c = build(&inputs(native(&vless("1.2.3.4", None)))).unwrap();
     assert!(dns_server(&c, DNS_BOOTSTRAP).is_none());
     assert_eq!(c["dns"]["final"], DNS_REMOTE);
 }
 
-/// B-DNS-8 fallback: no usable physical resolver -> 1.1.1.1 (routing reports the warning).
+/// B-DNS-8 fallback of Xray's UDP retry: no usable physical resolver -> 1.1.1.1 (routing
+/// reports the warning); sing-box's own bootstrap does not depend on it.
 #[test]
-fn bootstrap_falls_back_to_cloudflare() {
+fn xray_retry_resolver_falls_back_to_cloudflare() {
+    let none = [
+        Ipv4Addr::LOCALHOST,
+        Ipv4Addr::UNSPECIFIED,
+        Ipv4Addr::new(192, 168, 250, 254),
+    ];
+    assert_eq!(bootstrap_resolver(&none), Ipv4Addr::new(1, 1, 1, 1));
+    let phys = [Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 168, 1, 1)];
+    assert_eq!(bootstrap_resolver(&phys), Ipv4Addr::new(192, 168, 1, 1));
     let mut i = inputs(native(&vless("sub.example.com", None)));
-    i.phys_dns = vec![Ipv4Addr::LOCALHOST, Ipv4Addr::UNSPECIFIED];
+    i.phys_dns = none.to_vec();
     let c = build(&i).unwrap();
-    assert_eq!(dns_server(&c, DNS_BOOTSTRAP).unwrap()["server"], "1.1.1.1");
+    assert_eq!(dns_server(&c, DNS_BOOTSTRAP).unwrap()["type"], "https");
 }
 
 /// AT-02-002: no DNS profile -> Cloudflare DoH through the tunnel; no `dns-backup`.
@@ -439,9 +451,14 @@ fn malformed_routing_dns_is_refused() {
     i.routing.dns_servers = Vec::new();
     i.routing.dns_rules = vec![json!("dns-direct")];
     assert!(matches!(build(&i), Err(ConfigError::BadRouting(_))));
-    // `dns-resolver` / `dns-bootstrap` belong to the builder.
+    // `dns-resolver` and the bootstrap servers belong to the builder.
     i.routing.dns_rules = Vec::new();
-    for tag in [DNS_RESOLVER, DNS_BOOTSTRAP] {
+    for tag in [
+        DNS_RESOLVER,
+        DNS_BOOTSTRAP,
+        "dns-bootstrap-tcp",
+        "dns-bootstrap-isp",
+    ] {
         i.routing.dns_servers = vec![json!({ "type": "udp", "tag": tag, "server": "1.1.1.1" })];
         assert!(matches!(build(&i), Err(ConfigError::BadRouting(_))));
     }
@@ -955,7 +972,9 @@ fn listener_ports_and_credentials_are_checked() {
     assert!(matches!(build(&i), Err(ConfigError::InvalidListeners(_))));
 }
 
-/// D-8: the loopback DNS inbound for Xray answers from `dns-bootstrap`, first in both rule lists.
+/// D-8: the loopback DNS inbound for Xray answers through the bootstrap order (DoH by IP
+/// literal, TCP, the physical resolver last; ru-2026 Ф9), first in the DNS rules; the inbound
+/// rule is first in the route rules.
 #[test]
 fn dns_bootstrap_inbound() {
     let mut i = inputs(slots(UdpPolicy {
@@ -977,14 +996,21 @@ fn dns_bootstrap_inbound() {
         rules(&c)[0],
         json!({ "inbound": "dns-bootstrap-in", "action": "hijack-dns" })
     );
-    assert_eq!(
-        c["dns"]["rules"][0],
-        json!({ "inbound": ["dns-bootstrap-in"], "server": "dns-bootstrap" })
+    let dns_rules = c["dns"]["rules"].as_array().unwrap();
+    assert!(
+        dns_rules[..dns_rules.len() - 1]
+            .iter()
+            .all(|r| r["inbound"] == json!(["dns-bootstrap-in"]))
     );
-    assert_eq!(c["dns"]["rules"][1]["server"], "dns-direct");
     assert_eq!(
-        dns_server(&c, DNS_BOOTSTRAP).unwrap()["server"],
-        "77.88.8.8"
+        dns_rules[0],
+        json!({ "inbound": ["dns-bootstrap-in"], "action": "evaluate", "server": "dns-bootstrap", "timeout": "1500ms" })
+    );
+    assert_eq!(dns_rules.last().unwrap()["server"], "dns-direct");
+    assert_eq!(dns_server(&c, DNS_BOOTSTRAP).unwrap()["type"], "https");
+    assert_eq!(
+        dns_server(&c, "dns-bootstrap-isp").unwrap(),
+        &json!({ "type": "udp", "tag": "dns-bootstrap-isp", "server": "77.88.8.8" })
     );
 }
 
