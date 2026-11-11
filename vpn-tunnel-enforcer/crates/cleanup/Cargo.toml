@@ -8,18 +8,17 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
 vpnte-base.workspace = true
 vpnte-core.workspace = true
 vpnte-winnet.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-tokio.workspace = true
-tokio-util.workspace = true
-parking_lot.workspace = true
 windows.workspace = true
-ipnet.workspace = true
+# `#[interface]` declarations of the INetCfg family, absent from the `windows` 0.62 metadata
+# (same windows-core version the `windows` crate already builds).
+windows-core = "0.62"
 
 [features]
 # Build scaffolding: one flag per work package while they are written in parallel.
