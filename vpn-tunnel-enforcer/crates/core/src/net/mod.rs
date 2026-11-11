@@ -24,7 +24,9 @@ mod locale_tests {
             "core.net.resolveInvalidName",
             "core.net.resolveNotFound",
             "core.net.resolveFiltered",
+            "core.net.resolvePoisoned",
             "core.net.resolveFailed",
+            "core.net.resolveLastKnown",
         ];
         let used: std::collections::BTreeSet<String> = used.map(String::from).into();
         assert_eq!(crate::test_support::package_keys("core-net"), used);

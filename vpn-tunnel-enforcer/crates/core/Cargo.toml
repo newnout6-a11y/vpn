@@ -33,14 +33,5 @@ vpnte-base.workspace = true
 windows.workspace = true
 zeroize.workspace = true
 
-[features]
-# Build scaffolding: one flag per work package while they are written in parallel.
-default = ["core-store", "core-net", "core-ops", "core-log", "core-legacy"]
-core-store = []
-core-net = []
-core-ops = []
-core-log = []
-core-legacy = []
-
 [lints]
 workspace = true

@@ -11,7 +11,9 @@
       "resolveInvalidName": "Invalid host name.",
       "resolveNotFound": "No address was found for this name.",
       "resolveFiltered": "The name points only to addresses that cannot be used (local or reserved).",
-      "resolveFailed": "The DNS query failed."
+      "resolveFailed": "The DNS query failed.",
+      "resolvePoisoned": "The DNS answers for this name were forged (it looks like blocking by the network), and no trustworthy DNS server could be reached.",
+      "resolveLastKnown": "DNS could not find the server's address: using the address it had last time."
     }
   }
 }

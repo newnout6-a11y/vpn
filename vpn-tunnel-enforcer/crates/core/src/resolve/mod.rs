@@ -1,32 +1,37 @@
-//! Name resolution for app-side lookups: the OS resolver, or DNS-over-HTTPS when the system DNS
-//! is blocked or poisoned (the subscription fallback, profiles §3.7 / servers §2.5). Only the
-//! addresses the caller's filter accepts come back: a poisoned `127.0.0.1` answer must never
-//! become a dial target (S-29).
+//! Name resolution for app-side lookups: the OS resolver, or a direct chain of public resolvers
+//! (DoH by IP literal, DoH by name, DNS over TCP) that survives the 2026 Russian DNS blocking
+//! (ru-2026 Ф9), plus [`resolve_server`] for VPN server names with a last-known-address bridge.
+//! Only the addresses the caller's filter accepts come back: a poisoned `127.0.0.1` answer must
+//! never become a dial target (S-29).
 use std::io;
 use std::net::IpAddr;
+use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
-use reqwest::header::ACCEPT;
-use serde::Deserialize;
-use url::Url;
-use vpnte_base::{AppError, ErrorKind, Msg, http};
+use vpnte_base::{AppError, ErrorKind, Msg};
 
 use crate::net::Host;
 
-/// DoH JSON endpoints, tried in order. IP literals: the lookup needs no DNS of its own and sends
-/// no SNI (the certificates of both services carry these addresses).
-const DOH_ENDPOINTS: [&str; 2] = ["https://1.1.1.1/dns-query", "https://8.8.8.8/resolve"];
-/// Per-request limits of the old curl DoH call (`--max-time 12 --connect-timeout 6`).
-const DOH_TIMEOUT: Duration = Duration::from_secs(12);
-const DOH_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
-const DOH_BODY_CAP: usize = 64 * 1024;
+mod chain;
+mod server;
+mod transport;
+mod wire;
+
+use chain::{Chain, STAGGER, UPSTREAM_LIMIT, UPSTREAMS};
+use server::LastKnown;
+pub use server::ServerAddrs;
+use transport::Net;
+
+/// Budget of the OS resolver inside [`resolve_server`] (the old endpoint-resolution limit).
+const SYSTEM_LIMIT: Duration = Duration::from_millis(2_500);
 
 /// How to resolve a name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum How {
     /// The OS resolver (`getaddrinfo`); follows the system DNS, through the tunnel when it is up.
     System,
-    /// DNS-over-HTTPS, direct: Cloudflare `1.1.1.1`, then Google `8.8.8.8`; A and AAAA.
+    /// The direct chain: DoH to 1.1.1.1, 9.9.9.9, 8.8.8.8, 94.140.14.140, then DoH by name
+    /// (Yandex, Cloudflare), then DNS over TCP to 8.8.8.8, 1.1.1.1, 77.88.8.8; A and AAAA.
     Doh,
 }
 
@@ -39,6 +44,9 @@ pub enum ResolveError {
     NotFound,
     #[error("every address was refused by the filter")]
     Filtered,
+    /// Only forged answers came back (NXDOMAIN with AA, block-page addresses).
+    #[error("the DNS answers were forged")]
+    Poisoned,
     #[error("the resolver failed")]
     Failed,
 }
@@ -49,6 +57,7 @@ impl From<ResolveError> for AppError {
             ResolveError::InvalidName => (ErrorKind::Validation, "core.net.resolveInvalidName"),
             ResolveError::NotFound => (ErrorKind::Network, "core.net.resolveNotFound"),
             ResolveError::Filtered => (ErrorKind::Network, "core.net.resolveFiltered"),
+            ResolveError::Poisoned => (ErrorKind::Network, "core.net.resolvePoisoned"),
             ResolveError::Failed => (ErrorKind::Network, "core.net.resolveFailed"),
         };
         AppError::msg(kind, Msg::new(key)).with_source(err)
@@ -57,8 +66,8 @@ impl From<ResolveError> for AppError {
 
 /// Resolves `name` to its addresses that pass `keep`: deduplicated, IPv4 (A) before IPv6
 /// (AAAA). An IP literal is checked and returned without a lookup. `System` has no deadline of
-/// its own (wrap the call in `tokio::time::timeout`); `Doh` allows 12 s per request. Dropping
-/// the future cancels the lookup.
+/// its own (wrap the call in `tokio::time::timeout`); `Doh` gives each upstream 3 s and starts
+/// the next one after 0.7 s without an answer. Dropping the future cancels the lookup.
 pub async fn resolve_host(
     name: &str,
     how: How,
@@ -70,8 +79,41 @@ pub async fn resolve_host(
     };
     match how {
         How::System => filtered(system(&name).await?, &keep),
-        How::Doh => doh(&DOH_ENDPOINTS, &name, &keep).await,
+        How::Doh => chain().resolve(&name, &keep).await,
     }
+}
+
+/// Resolves a VPN server name before an engine dials it: the direct chain, then the OS
+/// resolver (2.5 s), then the addresses this name resolved to last time in this process
+/// (`last_known`, with a warning for the user) when DNS fails or is poisoned. Block-page
+/// addresses are never returned. An IP literal comes back as is (filtered, not remembered).
+pub async fn resolve_server(
+    name: &str,
+    keep: impl Fn(IpAddr) -> bool,
+) -> Result<ServerAddrs, ResolveError> {
+    let name = match Host::parse(name).map_err(|_| ResolveError::InvalidName)? {
+        Host::Ip(ip) => {
+            let addrs = filtered(vec![ip], &keep)?;
+            return Ok(ServerAddrs {
+                addrs,
+                last_known: false,
+            });
+        }
+        Host::Name(name) => name,
+    };
+    static LAST_KNOWN: LazyLock<LastKnown> = LazyLock::new(LastKnown::default);
+    let os = || async {
+        tokio::time::timeout(SYSTEM_LIMIT, system(&name))
+            .await
+            .unwrap_or(Err(ResolveError::Failed))
+    };
+    server::server(&name, &keep, chain(), &LAST_KNOWN, os).await
+}
+
+/// The process-wide chain: one connection pool and one remembered winner for every caller.
+fn chain() -> &'static Chain<Net> {
+    static CHAIN: OnceLock<Chain<Net>> = OnceLock::new();
+    CHAIN.get_or_init(|| Chain::new(UPSTREAMS.to_vec(), Net::new(), STAGGER, UPSTREAM_LIMIT))
 }
 
 async fn system(name: &str) -> Result<Vec<IpAddr>, ResolveError> {
@@ -113,154 +155,6 @@ fn filtered(
     } else {
         Ok(unique)
     }
-}
-
-/// Asks each endpoint for A and AAAA (in parallel); the first endpoint with a usable address
-/// wins. Final error: `Filtered` if some answer was refused by `keep`, else `NotFound` if some
-/// endpoint answered without addresses, else `Failed`.
-async fn doh(
-    endpoints: &[&str],
-    name: &str,
-    keep: &impl Fn(IpAddr) -> bool,
-) -> Result<Vec<IpAddr>, ResolveError> {
-    let client = http::client_builder(DOH_TIMEOUT)
-        .connect_timeout(DOH_CONNECT_TIMEOUT)
-        .build()
-        .map_err(|err| {
-            tracing::warn!(error = %err, "DoH client could not be built");
-            ResolveError::Failed
-        })?;
-    let mut outcome = ResolveError::Failed;
-    for (index, endpoint) in endpoints.iter().enumerate() {
-        let (a, aaaa) = tokio::join!(
-            query(&client, endpoint, name, Record::A),
-            query(&client, endpoint, name, Record::Aaaa)
-        );
-        let mut found = Vec::new();
-        let mut answered = false;
-        for result in [a, aaaa] {
-            match result {
-                Ok(addrs) => {
-                    answered = true;
-                    found.extend(addrs);
-                }
-                Err(ResolveError::NotFound) => answered = true,
-                Err(_) => {}
-            }
-        }
-        match filtered(found, keep) {
-            Ok(addrs) => return Ok(addrs),
-            Err(ResolveError::Filtered) => outcome = ResolveError::Filtered,
-            Err(_) if answered && outcome == ResolveError::Failed => {
-                outcome = ResolveError::NotFound
-            }
-            Err(_) => {}
-        }
-        tracing::debug!(
-            endpoint = index,
-            ?outcome,
-            "DoH endpoint gave no usable address"
-        );
-    }
-    Err(outcome)
-}
-
-#[derive(Debug, Clone, Copy)]
-enum Record {
-    A,
-    Aaaa,
-}
-
-impl Record {
-    fn name(self) -> &'static str {
-        match self {
-            Record::A => "A",
-            Record::Aaaa => "AAAA",
-        }
-    }
-
-    fn code(self) -> u16 {
-        match self {
-            Record::A => 1,
-            Record::Aaaa => 28,
-        }
-    }
-
-    /// Parses an answer's `data` as an address of this record's family.
-    fn address(self, data: &str) -> Option<IpAddr> {
-        let ip: IpAddr = data.trim().parse().ok()?;
-        (ip.is_ipv4() == matches!(self, Record::A)).then_some(ip)
-    }
-}
-
-/// JSON DoH reply (Cloudflare `application/dns-json` and Google `/resolve` share the shape).
-#[derive(Deserialize)]
-struct Reply {
-    #[serde(rename = "Status")]
-    status: u32,
-    #[serde(rename = "Answer", default)]
-    answer: Vec<Answer>,
-}
-
-#[derive(Deserialize)]
-struct Answer {
-    #[serde(rename = "type")]
-    record: u16,
-    data: String,
-}
-
-/// One DoH question. NXDOMAIN → `NotFound`; transport, HTTP, size or JSON problems → `Failed`;
-/// NOERROR → the addresses of the asked type (CNAME steps and malformed data are skipped).
-async fn query(
-    client: &reqwest::Client,
-    endpoint: &str,
-    name: &str,
-    record: Record,
-) -> Result<Vec<IpAddr>, ResolveError> {
-    let mut url = Url::parse(endpoint).map_err(|_| ResolveError::Failed)?;
-    url.query_pairs_mut()
-        .append_pair("name", name)
-        .append_pair("type", record.name());
-    let failed = |what: &str, err: Option<reqwest::Error>| {
-        let err = err.map(|e| e.without_url().to_string()).unwrap_or_default();
-        tracing::debug!(record = record.name(), error = %err, "DoH query failed: {what}");
-        ResolveError::Failed
-    };
-    let response = client
-        .get(url)
-        .header(ACCEPT, "application/dns-json")
-        .send()
-        .await
-        .map_err(|err| failed("request", Some(err)))?;
-    if !response.status().is_success() {
-        return Err(failed("HTTP status", None));
-    }
-    let body = read_capped(response, DOH_BODY_CAP)
-        .await
-        .ok_or_else(|| failed("body", None))?;
-    let reply: Reply = serde_json::from_slice(&body).map_err(|_| failed("JSON", None))?;
-    match reply.status {
-        0 => Ok(reply
-            .answer
-            .iter()
-            .filter(|answer| answer.record == record.code())
-            .filter_map(|answer| record.address(&answer.data))
-            .collect()),
-        3 => Err(ResolveError::NotFound),
-        _ => Err(failed("DNS status", None)),
-    }
-}
-
-/// The body, or `None` when reading fails or it exceeds `cap` bytes.
-async fn read_capped(mut response: reqwest::Response, cap: usize) -> Option<Vec<u8>> {
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.ok()? {
-        if body.len() + chunk.len() > cap {
-            return None;
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Some(body)
 }
 
 #[cfg(test)]

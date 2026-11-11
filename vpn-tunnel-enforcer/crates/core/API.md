@@ -9,12 +9,12 @@ of the old Electron data. Depends on `vpnte-base` only.
 Paths: `vpnte_core::{paths, store, secret, settings, redact, logging, net, socks5, resolve, ops,
 legacy}` plus `vpnte_core::LOCALES`. Shared types used below come from `vpnte_base`:
 `AppError` / `ErrorKind` / `AppResult`, `Msg`, `types::{UnixMs, now_ms, Owner, ProxyKind, Creds,
-KillSwitchLevel, EnginePref}`, `i18n::Lang`. Build with default features (all packages).
+KillSwitchLevel, EnginePref}`, `i18n::Lang`. The crate has no cargo features.
 
 **Elevation: nothing here needs it** (everything works in `--no-elevate` mode). DPAPI runs as the
 current user; files are written only where the caller points (the app: under the data dir), the
 legacy dir is only read, and nothing touches the registry, firewall, routes or services. Tests use
-temp dirs only; the one test that needs the internet (`resolve::tests::live_doh_endpoints`) is
+temp dirs only; the one test that needs the internet (`resolve::tests::live_resolvers`) is
 ignored.
 **Runtime:** `ops`, `socks5`, `resolve` and the `reqwest` clients of `net` need a tokio runtime;
 `logging` owns one writer thread; `Store`, `Secret` (DPAPI) and `legacy` (file reads, DPAPI, which
@@ -40,7 +40,8 @@ Every `Msg` / `AppError::msg` this crate returns has its key here (all under `co
 | `core.net.addressInvalid` | — | `From<AddrError> for AppError` |
 | `core.net.socks{Unreachable,Malformed,AuthRequired,AuthRejected,InvalidInput}` | — | `From<SocksError>` |
 | `core.net.socksUpstreamRejected` | `code` | `From<SocksError>` |
-| `core.net.resolve{InvalidName,NotFound,Filtered,Failed}` | — | `From<ResolveError>` |
+| `core.net.resolve{InvalidName,NotFound,Filtered,Poisoned,Failed}` | — | `From<ResolveError>` |
+| `core.net.resolveLastKnown` | — | `ServerAddrs::warning` |
 | `core.ops.{busy,closing,invalidTimeout}` | — | `OperationRegistry::run` |
 | `core.log.file.{app,appPrevious}` / `core.log.file.{engine,enginePrevious}` | — / `engine` | `LogFile::label` |
 | `core.legacy.{keyUnavailable,secretUnreadable,fileNewer,fileInvalid,fileUnreadable}` | — | `From<KeyError / SecretFault / DocError>` |
@@ -361,14 +362,39 @@ Port 0 and credentials outside 1..=255 bytes → `InvalidInput` before any I/O.
 
 ## `resolve` — app-side name resolution
 ```rust
-pub enum How { System, Doh }                 // OS resolver | DoH JSON at https://1.1.1.1, then https://8.8.8.8 (direct)
-pub enum ResolveError { InvalidName, NotFound, Filtered, Failed }   // Copy; From for AppError
+pub enum How { System, Doh }                 // OS resolver | the direct chain below (A and AAAA)
+pub enum ResolveError { InvalidName, NotFound, Filtered, Poisoned, Failed }  // Copy; From for AppError
 pub async fn resolve_host(name: &str, how: How, keep: impl Fn(IpAddr) -> bool)
     -> Result<Vec<IpAddr>, ResolveError>;    // deduplicated, IPv4 first, only addresses `keep` accepts
+pub struct ServerAddrs { pub addrs: Vec<IpAddr>, pub last_known: bool }   // Clone, PartialEq
+impl ServerAddrs { pub fn warning(&self) -> Option<Msg>; }   // core.net.resolveLastKnown when last_known
+pub async fn resolve_server(name: &str, keep: impl Fn(IpAddr) -> bool)
+    -> Result<ServerAddrs, ResolveError>;    // VPN server names: chain -> OS (2.5 s) -> last known
 ```
-An IP literal is returned without a lookup (still filtered). `System` has no deadline of its own:
-wrap it in `tokio::time::timeout`. `Doh` asks A and AAAA in parallel, 12 s per request.
-`keep = net::is_public_ip` refuses poisoned answers (`127.0.0.1`, private ranges) for subscriptions.
+An IP literal is returned without a lookup (still filtered; `resolve_server` never marks it
+`last_known`). `System` has no deadline of its own: wrap it in `tokio::time::timeout`. It is
+the honest OS answer (diagnostics rely on it) and cannot see poisoning.
+
+`Doh` = the direct chain against the 2026 Russian DNS blocking (ru-2026 Ф9: DoT cut, DoH cut
+by SNI, UDP/53 to public resolvers redirected to the NSDI, which forges NXDOMAIN with AA; TCP/53
+untouched): RFC 8484 DoH POST to `1.1.1.1`, `9.9.9.9` (HTTP/2 only), `8.8.8.8`,
+`94.140.14.140` (AdGuard unfiltered) by IP literal (no SNI, no DNS of its own), then DoH by
+name (`common.dot.dns.yandex.net`, `cloudflare-dns.com`), then DNS over TCP/53 to `8.8.8.8`,
+`1.1.1.1`, `77.88.8.8`. In that order; the next upstream also starts after a 0.7 s head start
+or at once when one fails; 3 s per upstream; the second record type gets 0.3 s once the first
+brought addresses; the upstream that answered last is asked first next time (process-wide).
+Poisoned (NXDOMAIN with AA, or only block-page addresses: unspecified, loopback, `0/8`,
+link-local, multicast, class E) counts as a failure and moves on; block-page addresses are
+dropped next to real ones (private and CGNAT stay). All upstreams missing = the most telling
+error (`Filtered` > `NotFound` > `Poisoned` > `Failed`), never an empty success.
+`keep = net::is_public_ip` refuses private answers too (subscriptions).
+
+`resolve_server` (before an engine dials a server name): the chain, then the OS resolver
+(mobile whitelists may leave only the ISP's DNS; a block-page-only OS answer = `Poisoned`; the
+chain's verdict stands over an OS `NotFound`, which cannot be told from a forged one), then the
+addresses the name had at its last successful lookup in this process (in memory, 256 names,
+no document stores DNS answers): returned with `last_known: true` on `Failed` / `Poisoned` /
+`NotFound`, never on `Filtered` (a real answer the caller refuses). Show `warning()` to the user.
 
 ## `ops` — registry of long feature operations
 ```rust
@@ -536,5 +562,8 @@ waiting for the key; consumers check `legacy::is_locked(v)` at their secret posi
 - `log`-crate bridge (`tracing-log`): not in the dependency tree; the app installs one if wanted.
 - Redaction gaps left open on purpose (no producer logs such text, B5): triple-escaped JSON,
   percent-encoded or `\/\/`-escaped share links in free text, secrets inside cookies.
-- `How::Doh` through the tunnel's DNS (sing-box UDP path) and SOCKS latency / egress probes:
+- Name lookups through the tunnel's DNS (sing-box UDP path) and SOCKS latency / egress probes:
   engine and probes crates (they use `socks5::connect` / `handshake` and `resolve_host`).
+- Persisting the last-known server addresses (`resolve_server` keeps them in memory: no
+  document exists for DNS answers); the chain does not bind to the physical adapter, so with
+  the TUN up its lookups go through the tunnel like any app request.

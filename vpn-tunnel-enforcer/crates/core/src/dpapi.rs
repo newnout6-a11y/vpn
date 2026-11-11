@@ -8,8 +8,6 @@ use windows::core::PCWSTR;
 use zeroize::{Zeroize, Zeroizing};
 
 /// `CryptProtectData` (CurrentUser scope, never shows UI).
-// The legacy importer only opens blobs; only its tests seal one.
-#[cfg_attr(not(feature = "core-store"), allow(dead_code))]
 pub(crate) fn protect(plain: &[u8], entropy: Option<&[u8]>) -> windows::core::Result<Vec<u8>> {
     let input = blob(plain)?;
     let entropy = entropy.map(blob).transpose()?;
