@@ -1,0 +1,14 @@
+{
+  "app": {
+    "clickjack": {
+      "saveDialog": {
+        "failed": "Could not open the save dialog."
+      },
+      "clipboard": {
+        "busy": "The clipboard is in use by another program. Try again.",
+        "failed": "Could not read the clipboard.",
+        "noText": "There is no text on the clipboard."
+      }
+    }
+  }
+}

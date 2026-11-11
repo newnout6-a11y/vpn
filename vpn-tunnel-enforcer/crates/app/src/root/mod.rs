@@ -43,6 +43,9 @@ pub fn run(args: &Args) -> ExitCode {
         Instance::Primary(primary) => primary,
         Instance::Exit(code) => return code,
     };
+    // One registration for the whole app: `svc_core::locale_layers` carries every crate's layers and
+    // every app package's fragments (each behind its own cargo feature), so no package has to chain
+    // another package's list. The first registration wins, so this must stay the only call.
     vpnte_ui::lang::init_locales(&svc_core::locale_layers());
     let backend = match svc_core::build(args) {
         Ok(backend) => backend,
@@ -115,6 +118,12 @@ fn contexts(wiring: Wiring) -> Vec<Box<dyn Any>> {
     let mut out = api_dashboard::contexts(&backend);
     out.extend(api_servers::contexts(&backend));
     out.extend(api_settings::contexts(&backend));
+    #[cfg(feature = "app-maintenance")]
+    out.extend(crate::api_maintenance::contexts(&backend));
+    #[cfg(feature = "app-tools")]
+    out.extend(crate::api_tools::contexts(&backend));
+    #[cfg(feature = "app-lists")]
+    out.extend(crate::api_lists::contexts(&backend));
     out.push(Box::new(Rc::new(wiring)));
     out
 }
@@ -194,6 +203,21 @@ fn registry() -> PageRegistry {
         .register(Page::Servers, vpnte_ui::servers::ServersPage)
         .register(Page::Settings, vpnte_ui::settings::SettingsPage)
         .register(Page::Logs, vpnte_ui::logs::LogsPage);
+    #[cfg(feature = "app-tools")]
+    registry
+        .register(Page::SpeedTest, vpnte_ui::speedtest::SpeedTestPage)
+        .register(Page::Availability, vpnte_ui::availability::AvailabilityPage);
+    #[cfg(feature = "app-lists")]
+    registry
+        .register(Page::Apps, vpnte_ui::split_tunnel::SplitTunnelPage)
+        .register(
+            Page::TrafficHistory,
+            vpnte_ui::traffic_history::TrafficHistoryPage,
+        )
+        .register(Page::Schedule, vpnte_ui::schedule::SchedulePage);
+    // Advanced mode only: the shell offers the page while `advanced` is on.
+    #[cfg(feature = "app-maintenance")]
+    registry.register(Page::Maintenance, vpnte_ui::maintenance::MaintenancePage);
     registry
 }
 

@@ -1,0 +1,9 @@
+{
+  "app": {
+    "tools": {
+      "speed": {
+        "softUnavailable": "The speed test is not available in Soft mode (system proxy): this build measures only traffic through the Hard-mode TUN tunnel; otherwise the figures would describe your direct connection, not the VPN."
+      }
+    }
+  }
+}

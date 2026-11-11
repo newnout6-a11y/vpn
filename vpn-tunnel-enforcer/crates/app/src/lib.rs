@@ -39,3 +39,19 @@ pub mod root;
 // --- work package `app-import` ---
 
 // --- work package `app-setup` ---
+
+// --- work package `app-clickjack` ---
+#[cfg(feature = "app-clickjack")]
+pub mod support;
+
+// --- work package `app-maintenance` ---
+#[cfg(feature = "app-maintenance")]
+pub mod api_maintenance;
+
+// --- work package `app-lists` ---
+#[cfg(feature = "app-lists")]
+pub mod api_lists;
+
+// --- work package `app-tools` ---
+#[cfg(feature = "app-tools")]
+pub mod api_tools;

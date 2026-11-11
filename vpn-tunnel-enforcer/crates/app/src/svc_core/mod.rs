@@ -217,6 +217,26 @@ const APP: &[(&str, &str)] = &[
         include_str!("../../locales/app-setup.ru.json"),
         include_str!("../../locales/app-setup.en.json"),
     ),
+    #[cfg(feature = "app-clickjack")]
+    (
+        include_str!("../../locales/app-clickjack.ru.json"),
+        include_str!("../../locales/app-clickjack.en.json"),
+    ),
+    #[cfg(feature = "app-maintenance")]
+    (
+        include_str!("../../locales/app-maintenance.ru.json"),
+        include_str!("../../locales/app-maintenance.en.json"),
+    ),
+    #[cfg(feature = "app-tools")]
+    (
+        include_str!("../../locales/app-tools.ru.json"),
+        include_str!("../../locales/app-tools.en.json"),
+    ),
+    #[cfg(feature = "app-lists")]
+    (
+        include_str!("../../locales/app-lists.ru.json"),
+        include_str!("../../locales/app-lists.en.json"),
+    ),
 ];
 
 /// First-start settings and the log pseudonym key. A read-only `settings.json` (newer version,

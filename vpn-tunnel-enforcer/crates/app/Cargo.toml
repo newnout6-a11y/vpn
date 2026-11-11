@@ -48,13 +48,15 @@ uuid.workspace = true
 # app-import tests: synthetic Electron `safeStorage` fixtures (v10 = AES-256-GCM, base64).
 aes-gcm.workspace = true
 base64.workspace = true
+# app-tools: the routing self-test's echo client through a Soft session's mixed inbound.
+reqwest.workspace = true
 
 [build-dependencies]
 embed-resource = "3.0.12"
 
 [features]
 # Build scaffolding: one flag per work package while they are written in parallel.
-default = ["app-base", "app-dashboard", "app-servers", "app-settings", "app-tunnel", "app-main", "app-import", "app-setup"]
+default = ["app-base", "app-dashboard", "app-servers", "app-settings", "app-tunnel", "app-main", "app-import", "app-setup", "app-clickjack", "app-maintenance", "app-tools", "app-lists"]
 app-base = []
 app-dashboard = ["app-base"]
 app-servers = ["app-base"]
@@ -63,6 +65,15 @@ app-tunnel = ["app-base"]
 app-main = ["app-base", "app-dashboard", "app-servers", "app-settings", "app-tunnel"]
 app-import = ["app-main"]
 app-setup = ["app-main"]
+# Support helpers (Save dialog, clipboard read) the remaining pages share; needs no other package.
+app-clickjack = []
+# The Maintenance page (advanced mode) wired to the backend and registered in app-main's root.
+app-maintenance = ["app-main", "app-clickjack"]
+# The Schedule, Apps (split tunnel) and Traffic history pages wired to the backend and
+# registered in app-main's root.
+app-lists = ["app-main"]
+# The Availability and Speed test pages wired to the backend and registered in app-main's root.
+app-tools = ["app-main"]
 
 [lints]
 workspace = true
