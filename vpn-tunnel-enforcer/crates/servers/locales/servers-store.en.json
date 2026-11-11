@@ -1,0 +1,28 @@
+{
+  "servers": {
+    "notFound": "Server not found: it may have been deleted already.",
+    "locked": "This key was saved on another computer or under another Windows account and cannot be decrypted here. Add it again.",
+    "unreadable": "The saved key is damaged and cannot be read. Add it again.",
+    "deviceFollowsGroup": "The device of a subscription key is set for the whole subscription.",
+    "select": {
+      "archived": "The server is archived. Restore it to select it."
+    },
+    "group": {
+      "title": "{{name}}",
+      "manualDefault": "Manual keys",
+      "subscriptionDefault": "Subscription",
+      "notFound": "Group not found: it may have been deleted already.",
+      "keepManual": "The manual keys group can only be deleted together with its keys.",
+      "overrideInvalid": "The refresh interval must be a whole number of minutes from 1 to 1440.",
+      "manualNoRefresh": "Manual keys are not refreshed: they have no subscription.",
+      "manualNoDevice": "Manual keys have a device per key.",
+      "deviceTaken": "This subscription is already added for the selected device."
+    },
+    "legacy": {
+      "groupUnreadable": "A group from the previous version could not be read and was not imported.",
+      "rowUnreadable": "An entry from the previous version could not be read and was not imported.",
+      "noOutbound": "The previous version did not keep this key's connection settings: add it again.",
+      "sealFailed": "Windows could not encrypt this key, so it was not imported."
+    }
+  }
+}
