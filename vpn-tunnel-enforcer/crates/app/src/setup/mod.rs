@@ -5,24 +5,20 @@
 //! installer decodes it as ANSI): information on stdout, one line on stderr when a command
 //! fails. Exit codes: 0 success, 1 failed or refused, 2 usage error.
 //!
-//! The installer runs `--setup` elevated; everything else stays unelevated (NOADMIN §0): the
-//! privileged parts of `--cleanup` run only when the process happens to be elevated and are
-//! reported as needing administrator rights otherwise.
+//! The installer is per-user and runs `--setup` with the user's own token; nothing here needs or
+//! asks for elevation (NOADMIN §0): the privileged parts of `--setup uninstall` and `--cleanup` run
+//! only when the process happens to be elevated and are reported as needing administrator rights
+//! otherwise.
 use std::process::ExitCode;
 
 use crate::args::Args;
 
-#[cfg(feature = "app-setup")]
 pub mod gate;
-#[cfg(feature = "app-setup")]
 mod procs;
-#[cfg(feature = "app-setup")]
 mod shell;
-#[cfg(feature = "app-setup")]
 mod smoke;
-#[cfg(feature = "app-setup")]
 pub mod system;
-#[cfg(all(test, feature = "app-setup"))]
+#[cfg(test)]
 mod tests;
 
 /// `Some(code)` = exit with it without opening the UI.
@@ -95,18 +91,7 @@ fn ascii_line(text: &str) -> String {
         .collect()
 }
 
-/// A build without this package: the installer helper refuses, the rest opens the UI.
-#[cfg(not(feature = "app-setup"))]
-fn command(args: &Args) -> Option<End> {
-    match &args.setup {
-        Some(Err(usage)) => Some(End::Usage(usage.clone())),
-        Some(Ok(_)) => Some(End::failed("Setup helper is not available in this build.")),
-        None => None,
-    }
-}
-
 /// `--setup` first (the installer's helper), then `--cleanup`, then `--smoke`.
-#[cfg(feature = "app-setup")]
 fn command(args: &Args) -> Option<End> {
     if let Some(setup) = &args.setup {
         return Some(match setup {
@@ -128,7 +113,6 @@ fn command(args: &Args) -> Option<End> {
 
 /// One `--setup` command. Everything comes from `--install-dir`, never from the helper's own
 /// name or location (the installer runs a copy from its temp folder).
-#[cfg(feature = "app-setup")]
 fn installer(setup: &crate::args::Setup) -> End {
     use crate::args::SetupCommand;
 
@@ -159,26 +143,28 @@ fn installer(setup: &crate::args::Setup) -> End {
     }
 }
 
-/// `--setup uninstall` (standalone uninstall, after `await-shutdown`): the network protection
-/// first, which decides the exit code (strict filters would keep the PC offline without the
-/// app); then, as warnings only, this user's tweaks, autostart and jump list. User data stays.
-#[cfg(feature = "app-setup")]
+/// `--setup uninstall` (standalone uninstall, after `await-shutdown`): this user's tweaks with
+/// the system proxy, the autostart value and the jump list of our AUMID (the uninstaller deletes
+/// the links itself); our WFP objects and the old version's firewall leftovers only when this
+/// process happens to be elevated, else they are listed as not checked. Refused (exit 1) when an
+/// elevated network cleanup fails (strict filters would keep the PC offline) or the system proxy
+/// stays the app's (it would point at a dead port): the app stays installed and its next start
+/// retries from the journal. Other failures are warnings. User data stays.
 fn uninstall(dir: &std::path::Path) -> End {
-    use system::{Step, app_err};
+    use system::{Outcome, Step, app_err};
 
-    if !vpnte_winnet::elevation::is_elevated() {
-        return End::failed(
-            "Administrator rights are required to remove the network protection; nothing was removed.",
-        );
-    }
     if system::app_running() {
         return End::failed(
             "VPN Tunnel Enforcer is still running; quit it and retry. Nothing was removed.",
         );
     }
-    let network = system::network(&dir.join("resources"), true);
+    let elevated = vpnte_winnet::elevation::is_elevated();
+    let network = system::network(&dir.join("resources"), elevated);
     let mut lines: Vec<String> = network.iter().map(ToString::to_string).collect();
-    if let Some(step) = network.iter().find(|s| !s.is_done()) {
+    if let Some(step) = network
+        .iter()
+        .find(|s| matches!(s.outcome, Outcome::Failed(_)))
+    {
         return End::Failed(lines, format!("Network protection cleanup failed: {step}."));
     }
     let warn = |step: Step| {
@@ -188,14 +174,24 @@ fn uninstall(dir: &std::path::Path) -> End {
             format!("warning: {step}")
         }
     };
-    lines.push(match vpnte_core::paths::DataDirs::resolve() {
-        Ok(dirs) => warn(system::tweaks(&dirs, true)),
-        Err(err) => format!(
+    match vpnte_core::paths::DataDirs::resolve() {
+        Ok(dirs) => {
+            let tweaks = system::tweaks(&dirs, elevated);
+            if tweaks.proxy_stuck {
+                lines.push(tweaks.step.to_string());
+                return End::Failed(
+                    lines,
+                    "The system proxy could not be restored; uninstall stopped so that the app can retry at its next start.".to_owned(),
+                );
+            }
+            lines.push(warn(tweaks.step));
+        }
+        Err(err) => lines.push(format!(
             "warning: {}: FAILED ({})",
             system::AREA_TWEAKS,
             app_err(&err)
-        ),
-    });
+        )),
+    }
     lines.push(warn(system::autostart_value(&dir.join(gate::MAIN_EXE))));
     lines.push(match shell::remove_jump_list() {
         Ok(()) => "jump list: cleared".to_owned(),
@@ -214,7 +210,6 @@ fn uninstall(dir: &std::path::Path) -> End {
 /// `--cleanup`: removes what the app put into the system for this user (tweaks, autostart) and,
 /// when elevated, our WFP objects and the old version's leftovers (the `sing-tun` firewall rule
 /// included). Refused while the app runs: its filters, proxy and journal belong to it.
-#[cfg(feature = "app-setup")]
 fn cleanup() -> End {
     use system::Outcome;
 
@@ -243,7 +238,7 @@ fn cleanup() -> End {
     };
     let elevated = vpnte_winnet::elevation::is_elevated();
     let mut steps = system::network(&dirs.resources, elevated);
-    steps.push(system::tweaks(&dirs, elevated));
+    steps.push(system::tweaks(&dirs, elevated).step);
     steps.push(system::autostart_value(&exe));
     let lines = steps.iter().map(ToString::to_string).collect();
     match steps.iter().find(|s| !s.is_done() && s.outcome != Outcome::NeedsAdmin) {

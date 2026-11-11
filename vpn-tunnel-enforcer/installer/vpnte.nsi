@@ -1,8 +1,12 @@
-﻿; VPN Tunnel Enforcer: per-machine installer and uninstaller (NSIS 3.13, built by `cargo xtask dist`).
+﻿; VPN Tunnel Enforcer: per-user installer and uninstaller (NSIS 3.13, built by `cargo xtask dist`).
 ;
-; Identity is byte-identical to the Electron installer (electron-builder, last version 1.1.24): the same GUID
-; registry keys, exe and uninstaller names, shortcut names and AUMID. So this installer finds and chains the
-; Electron uninstaller and upgrades in place, and an Electron installer could chain this uninstaller back.
+; No administrator rights anywhere (owner requirement 2026-11-11, NOADMIN.md): both run with the user's own
+; token, install into $LOCALAPPDATA\Programs, write only HKCU and the user's own links, and never show UAC.
+; Identity is the Electron installer's (electron-builder, last version 1.1.24): the same GUID registry keys
+; (now under HKCU), exe and uninstaller names, shortcut name and AUMID.
+; The old per-machine installation (Electron 1.x, HKLM + Program Files) cannot be removed without
+; administrator rights: it is detected by reading HKLM, left in place and named to the user once. Its
+; uninstaller is never started.
 ; Calls into the app go through its `--setup <command>` helper mode (contract: installer/PROGRESS.md). The
 ; helper always runs from a copy in $PLUGINSDIR: never from $INSTDIR, whose files are being replaced.
 ; No PowerShell, no scheduled tasks, no force-kill of the client: the shutdown gate asks it to exit.
@@ -11,7 +15,7 @@
 
 Unicode true
 ManifestDPIAware true
-RequestExecutionLevel admin
+RequestExecutionLevel user
 SetCompressor /SOLID lzma
 SetCompressorDictSize 64
 ; A file that cannot be written stops setup; never skip it silently into a mixed installation.
@@ -48,8 +52,8 @@ AllowSkipFiles off
 
 Name "${PRODUCT}"
 OutFile "${OUTDIR}\VPN-Tunnel-Enforcer-Setup-${VERSION}.exe"
-; No directory page (an always-elevated app must not live in a user-writable folder); /D= stays for admins.
-InstallDir "$PROGRAMFILES64\${PRODUCT}"
+; The user's own program folder (FOLDERID_UserProgramFiles); no directory page, /D= still chooses another one.
+InstallDir "$LOCALAPPDATA\Programs\${PRODUCT}"
 BrandingText "${PRODUCT} ${VERSION}"
 ShowInstDetails hide
 ShowUninstDetails hide
@@ -80,6 +84,7 @@ Var ForceRun       ; --force-run: start the app after a silent install
 Var NoDesktop      ; --no-desktop-shortcut
 Var KeepShortcuts  ; --keep-shortcuts (uninstaller)
 Var DeleteAppData  ; --delete-app-data (uninstaller): user data is kept unless this is given
+Var Fresh          ; 1 = no per-user installation existed before this run (the first install for this user)
 
 !macro ReadFlag NAME VAR
   ClearErrors
@@ -120,8 +125,9 @@ Function .onInit
     MessageBox MB_OK|MB_ICONSTOP "$(NeedsWin10)" /SD IDOK
     Abort
   ${EndIf}
+  ; HKLM is only ever read (the old per-machine installation, in the 64-bit view the Electron installer used).
   SetRegView 64
-  SetShellVarContext all
+  SetShellVarContext current
   ; One setup at a time; the mutex name is the Electron installer's, so the two generations exclude each other.
   System::Call 'kernel32::CreateMutexW(p 0, i 1, w "${APP_GUID}") p .r0 ?e'
   Pop $1
@@ -129,9 +135,14 @@ Function .onInit
     MessageBox MB_OK|MB_ICONEXCLAMATION "$(AlreadyRunning)" /SD IDOK
     Abort
   ${EndIf}
-  ; Upgrade where the product already lives (64-bit view: read after SetRegView), unless /D= chose a path.
-  ${If} $INSTDIR == "$PROGRAMFILES64\${PRODUCT}"
-    ReadRegStr $0 HKLM "${KEY_INSTALL}" "InstallLocation"
+  StrCpy $Fresh 1
+  ReadRegStr $0 HKCU "${KEY_UNINSTALL}" "UninstallString"
+  ${If} $0 != ""
+    StrCpy $Fresh 0
+  ${EndIf}
+  ; Upgrade where this user's installation already lives, unless /D= chose a path.
+  ${If} $INSTDIR == "$LOCALAPPDATA\Programs\${PRODUCT}"
+    ReadRegStr $0 HKCU "${KEY_INSTALL}" "InstallLocation"
     ${If} $0 != ""
       StrCpy $INSTDIR $0
     ${EndIf}
@@ -148,10 +159,8 @@ Section "Install"
   File "/oname=${HELPER}" "${STAGE}\${EXE}" ; same bytes as the installed exe, stored once (datablock optimisation)
   !insertmacro Gate
   Call UninstallPrevious
-  ; The Electron installer left a copy of itself (~134 MB) per installing user and never removed it.
-  SetShellVarContext current
+  ; The Electron installer left a copy of itself (~134 MB) in each installing user's profile and never removed it.
   RMDir /r "$LOCALAPPDATA\vpn-tunnel-enforcer-updater"
-  SetShellVarContext all
 
   SetOutPath "$INSTDIR"
   File "${STAGE}\${EXE}"
@@ -167,20 +176,22 @@ Section "Install"
   Call WriteRegistry
   Call CreateShortcuts
   Call CheckWebView2
+  Call MachineWideNotice
   ${If} ${Silent}
   ${AndIf} $ForceRun == 1
     Call RunApp
   ${EndIf}
 SectionEnd
 
-; Chains the previous uninstaller (Electron or Rust: same key) so the user never has to uninstall first.
-; It runs from a copy with `_?=` so that ExecWait waits for the real work; user data is always kept.
+; Chains this user's previous uninstaller (same key under HKCU) so the user never has to uninstall first.
+; It runs from a copy with `_?=` so that ExecWait waits for the real work; user data is always kept. The
+; per-machine key (HKLM) is never followed: that uninstaller needs administrator rights.
 Function UninstallPrevious
-  ReadRegStr $R0 HKLM "${KEY_UNINSTALL}" "UninstallString"
+  ReadRegStr $R0 HKCU "${KEY_UNINSTALL}" "UninstallString"
   ${If} $R0 == ""
     Return
   ${EndIf}
-  ; UninstallString is `"<dir>\Uninstall VPN Tunnel Enforcer.exe" /allusers`: take the quoted path.
+  ; UninstallString is `"<dir>\Uninstall VPN Tunnel Enforcer.exe"`: take the quoted path.
   StrCpy $R1 $R0 1
   ${If} $R1 == '"'
     StrCpy $R1 $R0 "" 1
@@ -188,7 +199,7 @@ Function UninstallPrevious
   ${Else}
     StrCpy $R1 $R0
   ${EndIf}
-  ReadRegStr $R2 HKLM "${KEY_INSTALL}" "InstallLocation"
+  ReadRegStr $R2 HKCU "${KEY_INSTALL}" "InstallLocation"
   ${If} $R2 == ""
     ${GetParent} $R1 $R2
   ${EndIf}
@@ -200,10 +211,10 @@ Function UninstallPrevious
   StrCpy $R4 0
   attempt:
     ClearErrors
-    ExecWait '"$PLUGINSDIR\old-uninstaller.exe" /S /KEEP_APP_DATA /allusers --keep-shortcuts --updated _?=$R2' $R3
+    ExecWait '"$PLUGINSDIR\old-uninstaller.exe" /S --keep-shortcuts --updated _?=$R2' $R3
     ${If} ${Errors}
       ClearErrors
-      ExecWait '"$R1" /S /KEEP_APP_DATA /allusers --keep-shortcuts --updated _?=$R2' $R3
+      ExecWait '"$R1" /S --keep-shortcuts --updated _?=$R2' $R3
     ${EndIf}
     ${If} ${Errors}
       DetailPrint "Not able to launch the previous uninstaller: installing over the old files"
@@ -223,25 +234,28 @@ Function UninstallPrevious
   Quit
 FunctionEnd
 
-; Exactly the value set the Electron installer wrote, so Apps & features and old installers see one product.
+; The Electron installer's value set, in the user's hive: Apps & features lists this installation for this
+; user next to an old per-machine one. No `/allusers` (an electron-builder flag for per-machine removal).
 Function WriteRegistry
-  WriteRegStr HKLM "${KEY_INSTALL}" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKLM "${KEY_INSTALL}" "KeepShortcuts" "true"
-  WriteRegStr HKLM "${KEY_INSTALL}" "ShortcutName" "${PRODUCT}"
-  WriteRegStr HKLM "${KEY_UNINSTALL}" "DisplayName" "${PRODUCT} ${VERSION}"
-  WriteRegStr HKLM "${KEY_UNINSTALL}" "UninstallString" '"$INSTDIR\${UNINST}" /allusers'
-  WriteRegStr HKLM "${KEY_UNINSTALL}" "QuietUninstallString" '"$INSTDIR\${UNINST}" /allusers /S'
-  WriteRegStr HKLM "${KEY_UNINSTALL}" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKLM "${KEY_UNINSTALL}" "DisplayIcon" "$INSTDIR\${EXE},0"
-  WriteRegStr HKLM "${KEY_UNINSTALL}" "Comments" "${DESCRIPTION}"
-  WriteRegDWORD HKLM "${KEY_UNINSTALL}" "NoModify" 1
-  WriteRegDWORD HKLM "${KEY_UNINSTALL}" "NoRepair" 1
+  WriteRegStr HKCU "${KEY_INSTALL}" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "${KEY_INSTALL}" "KeepShortcuts" "true"
+  WriteRegStr HKCU "${KEY_INSTALL}" "ShortcutName" "${PRODUCT}"
+  WriteRegStr HKCU "${KEY_UNINSTALL}" "DisplayName" "${PRODUCT} ${VERSION}"
+  WriteRegStr HKCU "${KEY_UNINSTALL}" "UninstallString" '"$INSTDIR\${UNINST}"'
+  WriteRegStr HKCU "${KEY_UNINSTALL}" "QuietUninstallString" '"$INSTDIR\${UNINST}" /S'
+  WriteRegStr HKCU "${KEY_UNINSTALL}" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKCU "${KEY_UNINSTALL}" "DisplayIcon" "$INSTDIR\${EXE},0"
+  WriteRegStr HKCU "${KEY_UNINSTALL}" "Comments" "${DESCRIPTION}"
+  WriteRegDWORD HKCU "${KEY_UNINSTALL}" "NoModify" 1
+  WriteRegDWORD HKCU "${KEY_UNINSTALL}" "NoRepair" 1
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
-  WriteRegDWORD HKLM "${KEY_UNINSTALL}" "EstimatedSize" $0
+  WriteRegDWORD HKCU "${KEY_UNINSTALL}" "EstimatedSize" $0
 FunctionEnd
 
-; Both links are mandatory: Windows keeps the app in Settings > Notifications only while a Start-menu link
-; carries its AUMID. A fresh install re-creates both; an --updated run keeps a deleted desktop link deleted.
+; Both links are mandatory and the user's own: Windows keeps the app in Settings > Notifications only while a
+; Start-menu link carries its AUMID. A fresh install re-creates both; an --updated run keeps a deleted desktop
+; link deleted. An old per-machine installation keeps its all-users links (removing them needs administrator
+; rights); they carry the same AUMID and go with that installation.
 Function CreateShortcuts
   CreateShortCut "$SMPROGRAMS\${PRODUCT}.lnk" "$INSTDIR\${EXE}" "" "$INSTDIR\${EXE}" 0 "" "" "${DESCRIPTION}"
   ${If} $Updated == 1
@@ -285,10 +299,25 @@ Function CheckWebView2
   ${EndIf}
 FunctionEnd
 
-; Starts the app as the desktop user, not with the installer's elevated token (the app elevates itself).
+; Starts the installed app as this user, unelevated (contract: `launch-as-user`).
 Function RunApp
   nsExec::Exec /TIMEOUT=30000 '"${HELPER}" --setup launch-as-user --install-dir "$INSTDIR"'
   Pop $0
+FunctionEnd
+
+; The old per-machine installation (Electron 1.x: HKLM key, Program Files, all-users links) needs administrator
+; rights to remove, so it stays. The user is told once, at the first installation for this user (a silent one
+; only logs it). Its uninstaller is never started from here.
+Function MachineWideNotice
+  ReadRegStr $0 HKLM "${KEY_UNINSTALL}" "UninstallString"
+  ${If} $0 == ""
+    Return
+  ${EndIf}
+  ReadRegStr $1 HKLM "${KEY_UNINSTALL}" "DisplayVersion"
+  DetailPrint "Per-machine installation $1 found: left in place (removing it needs administrator rights)"
+  ${If} $Fresh == 1
+    MessageBox MB_OK|MB_ICONINFORMATION "$(MachineWideKept)" /SD IDOK
+  ${EndIf}
 FunctionEnd
 
 ; ---------------------------------------------------------------------------------------------------------
@@ -296,7 +325,7 @@ FunctionEnd
 
 Function un.onInit
   SetRegView 64
-  SetShellVarContext all
+  SetShellVarContext current
   ${GetParameters} $R9
   !insertmacro ReadFlag "--updated" $Updated
   !insertmacro ReadFlag "--keep-shortcuts" $KeepShortcuts
@@ -310,8 +339,9 @@ Section "Uninstall"
     CopyFiles /SILENT /FILESONLY "$INSTDIR\${EXE}" "${HELPER}"
     !insertmacro Gate
     ${If} $Updated != 1
-      ; Network protection objects, the autostart task and the user's tweaks go before the files: strict
-      ; filters would keep the PC offline without the app. During an upgrade the new version owns them.
+      ; This user's system proxy, tweaks and autostart go before the files: a proxy left pointing at the
+      ; dead engine port cuts the browsers off. Network filters only if this process happens to be elevated.
+      ; During an upgrade the new version owns all of it.
       nsExec::ExecToStack /TIMEOUT=150000 '"${HELPER}" --setup uninstall --install-dir "$INSTDIR"'
       Pop $0
       Pop $1
@@ -348,16 +378,16 @@ Section "Uninstall"
   ${EndIf}
   ${If} $DeleteAppData == 1
   ${AndIf} $Updated != 1
-    SetShellVarContext current
     RMDir /r "$APPDATA\${PRODUCT}"
-    RMDir /r "$APPDATA\vpn-tunnel-enforcer"
     RMDir /r "$LOCALAPPDATA\${PRODUCT}"
-    SetShellVarContext all
-    RMDir /r "$APPDATA\VPNTE"
-    RMDir /r "$APPDATA\VPN-Tunnel-Enforcer"
+    ; The Electron data folder is the old per-machine installation's while that one is still installed.
+    ReadRegStr $0 HKLM "${KEY_UNINSTALL}" "UninstallString"
+    ${If} $0 == ""
+      RMDir /r "$APPDATA\vpn-tunnel-enforcer"
+    ${EndIf}
   ${EndIf}
-  DeleteRegKey HKLM "${KEY_UNINSTALL}"
-  DeleteRegKey HKLM "${KEY_INSTALL}"
+  DeleteRegKey HKCU "${KEY_UNINSTALL}"
+  DeleteRegKey HKCU "${KEY_INSTALL}"
 SectionEnd
 
 ; A file that another process still holds open cannot be replaced; check every installed file first.

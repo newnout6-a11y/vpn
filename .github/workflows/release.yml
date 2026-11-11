@@ -50,7 +50,7 @@ jobs:
       # No caches here: a release downloads every pinned archive afresh (verified against the pins).
       - name: Build the installer
         run: cargo xtask dist
-      - name: Silent install, upgrade over itself, uninstall
+      - name: Silent per-user install, upgrade over itself, uninstall
         run: cargo xtask smoke-install
       - name: Draft GitHub release with the installer and checksums
         env:

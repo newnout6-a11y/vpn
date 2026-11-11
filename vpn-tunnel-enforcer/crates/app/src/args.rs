@@ -13,7 +13,8 @@ pub const AWAIT_SHUTDOWN_TIMEOUT_RANGE: std::ops::RangeInclusive<u32> = 1..=300;
 pub enum SetupCommand {
     /// Ask the running client to clean up and exit, and wait for its acknowledgement.
     AwaitShutdown { timeout_s: u32 },
-    /// Remove everything the app put into the system (filters, tasks, tweaks, jump list).
+    /// Undo what the app put into this user's system (tweaks with the system proxy, autostart,
+    /// jump list); network filters only when the process happens to be elevated.
     Uninstall,
     /// Bind the shortcuts the installer created to the app identity (AUMID).
     StampShortcuts,

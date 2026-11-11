@@ -4,11 +4,14 @@
 LangString GateFailed ${LANG_ENGLISH} "VPNTE shutdown was not confirmed. Exit the client normally and retry. Installation/removal has stopped; no processes were force-killed."
 LangString GateFailed ${LANG_RUSSIAN} "Завершение VPNTE не подтверждено. Штатно выйдите из клиента и повторите попытку. Установка/удаление остановлены без принудительного завершения процессов."
 
-LangString CleanupFailed ${LANG_ENGLISH} "VPNTE could not remove its network protection rules. Uninstall has stopped so that you can restore network access from the app (Maintenance → Reset network protection)."
-LangString CleanupFailed ${LANG_RUSSIAN} "VPNTE не удалось снять правила сетевой защиты. Удаление остановлено, чтобы вы могли восстановить доступ к сети из приложения (Обслуживание → Сбросить сетевую защиту)."
+LangString CleanupFailed ${LANG_ENGLISH} "VPN Tunnel Enforcer could not restore your network settings (system proxy or network protection rules). Uninstall has stopped and the app stays installed: start it once to restore them (or use Maintenance → Reset network protection), quit it, then uninstall again."
+LangString CleanupFailed ${LANG_RUSSIAN} "VPN Tunnel Enforcer не удалось восстановить сетевые настройки (системный прокси или правила сетевой защиты). Удаление остановлено, приложение осталось установленным: запустите его, чтобы восстановить настройки (или выберите «Обслуживание → Сбросить сетевую защиту»), закройте его и повторите удаление."
 
-LangString AppMissing ${LANG_ENGLISH} "VPN Tunnel Enforcer.exe is missing, so its network protection rules cannot be removed. Reinstall VPN Tunnel Enforcer, then uninstall it again."
-LangString AppMissing ${LANG_RUSSIAN} "Файл VPN Tunnel Enforcer.exe отсутствует, поэтому правила сетевой защиты не могут быть сняты. Переустановите VPN Tunnel Enforcer, затем удалите его снова."
+LangString AppMissing ${LANG_ENGLISH} "VPN Tunnel Enforcer.exe is missing, so the network settings it changed (system proxy, network protection rules) cannot be restored. Reinstall VPN Tunnel Enforcer, then uninstall it again."
+LangString AppMissing ${LANG_RUSSIAN} "Файл VPN Tunnel Enforcer.exe отсутствует, поэтому изменённые им сетевые настройки (системный прокси, правила сетевой защиты) не могут быть восстановлены. Переустановите VPN Tunnel Enforcer, затем удалите его снова."
+
+LangString MachineWideKept ${LANG_ENGLISH} "An older version of VPN Tunnel Enforcer is installed on this computer for all users. Removing it needs administrator rights, so it was left in place. You can remove it in Windows Settings > Apps (quit VPN Tunnel Enforcer first). Its data is imported into this version automatically."
+LangString MachineWideKept ${LANG_RUSSIAN} "На этом компьютере для всех пользователей установлена старая версия VPN Tunnel Enforcer. Для её удаления нужны права администратора, поэтому она оставлена. Удалить её можно в «Параметры Windows → Приложения» (сначала закройте VPN Tunnel Enforcer). Её данные переносятся в эту версию автоматически."
 
 LangString PreviousBusy ${LANG_ENGLISH} "The previous version of VPN Tunnel Enforcer is still in use and cannot be removed. Close it and click Retry, or click Cancel to stop the installation."
 LangString PreviousBusy ${LANG_RUSSIAN} "Предыдущая версия VPN Tunnel Enforcer ещё используется и не может быть удалена. Закройте её и нажмите «Повтор» или нажмите «Отмена», чтобы прервать установку."

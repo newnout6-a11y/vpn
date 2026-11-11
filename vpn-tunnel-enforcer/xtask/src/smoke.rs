@@ -1,7 +1,8 @@
-//! `cargo xtask smoke-install` — CI only. Proves the built installer on a disposable machine: silent install,
-//! installed files equal the verified stage, registry identity, shortcuts with the AUMID, the installed engines
-//! and app start, an upgrade over itself (chains the installed uninstaller with `--updated`), silent
-//! uninstall, and nothing left behind. Never run it on a machine that matters.
+//! `cargo xtask smoke-install` — CI only. Proves the built per-user installer on a disposable machine: silent
+//! install into `%LOCALAPPDATA%\Programs`, installed files equal the verified stage, the HKCU registry identity,
+//! the user's shortcuts with the AUMID, nothing machine-wide written (no HKLM key, no all-users link), the
+//! installed engines and app start, an upgrade over itself (chains the installed uninstaller with `--updated`),
+//! silent uninstall, and nothing left behind. Never run it on a machine that matters.
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -10,7 +11,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
-use windows_registry::LOCAL_MACHINE;
+use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
 
 use crate::dist;
 use crate::manifest::{self, Expect};
@@ -38,11 +39,14 @@ pub fn run(root: &Path) -> Result<()> {
         installer.display()
     );
     let stage = root.join("target/stage");
-    let dir = PathBuf::from(env::var("ProgramW6432").or_else(|_| env::var("ProgramFiles"))?)
+    let dir = PathBuf::from(env::var("LOCALAPPDATA").context("LOCALAPPDATA")?)
+        .join("Programs")
         .join(PRODUCT);
-    // Second guard: an existing installation (any generation) is never touched.
+    // Second guard: an existing installation is never touched, this user's or a machine-wide one (whose keys and
+    // all-users links would also blur the "nothing machine-wide" checks below).
+    let machine = machine_wide_state()?;
     ensure!(
-        !dir.exists() && LOCAL_MACHINE.open(KEY_UNINSTALL).is_err(),
+        !dir.exists() && CURRENT_USER.open(KEY_UNINSTALL).is_err() && machine.is_empty(),
         "{PRODUCT} is already installed here; smoke-install needs a clean machine"
     );
 
@@ -134,7 +138,8 @@ fn uninstall(dir: &Path) -> Result<()> {
     result
 }
 
-/// Installed tree == verified stage + uninstaller; registry values as the Electron installer wrote them; links.
+/// Installed tree == verified stage + uninstaller; the Electron installer's values under HKCU; the user's links
+/// with the AUMID; nothing machine-wide.
 fn check_installed(dir: &Path, stage: &Path, version: &str) -> Result<()> {
     let mut expected: std::collections::BTreeMap<String, Expect> = manifest::tree_hashes(stage)?
         .into_iter()
@@ -144,7 +149,7 @@ fn check_installed(dir: &Path, stage: &Path, version: &str) -> Result<()> {
     manifest::verify_stage(dir, &expected).context("installed files differ from the stage")?;
 
     let d = dir.display();
-    let key = LOCAL_MACHINE.open(KEY_INSTALL).context(KEY_INSTALL)?;
+    let key = CURRENT_USER.open(KEY_INSTALL).context(KEY_INSTALL)?;
     expect_value(
         &key.get_string("InstallLocation")?,
         &d.to_string(),
@@ -152,8 +157,8 @@ fn check_installed(dir: &Path, stage: &Path, version: &str) -> Result<()> {
     )?;
     expect_value(&key.get_string("KeepShortcuts")?, "true", "KeepShortcuts")?;
     expect_value(&key.get_string("ShortcutName")?, PRODUCT, "ShortcutName")?;
-    let key = LOCAL_MACHINE.open(KEY_UNINSTALL).context(KEY_UNINSTALL)?;
-    let uninstall = format!("\"{d}\\{UNINSTALLER}\" /allusers");
+    let key = CURRENT_USER.open(KEY_UNINSTALL).context(KEY_UNINSTALL)?;
+    let uninstall = format!("\"{d}\\{UNINSTALLER}\"");
     expect_value(
         &key.get_string("DisplayName")?,
         &format!("{PRODUCT} {version}"),
@@ -200,7 +205,13 @@ fn check_installed(dir: &Path, stage: &Path, version: &str) -> Result<()> {
             link.display()
         );
     }
-    println!("  files, registry identity and both shortcuts OK");
+    let machine = machine_wide_state()?;
+    ensure!(
+        machine.is_empty(),
+        "the per-user installer wrote machine-wide state:\n  {}",
+        machine.join("\n  ")
+    );
+    println!("  files, HKCU identity and both per-user shortcuts OK; nothing machine-wide");
     Ok(())
 }
 
@@ -212,15 +223,63 @@ fn expect_value(actual: &str, expected: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Start-menu and desktop shortcuts of the per-machine install.
+/// The user's own Start-menu and desktop shortcuts.
 fn links() -> Result<[PathBuf; 2]> {
+    let name = format!("{PRODUCT}.lnk");
+    Ok([
+        shell_folder("Programs")?.join(&name),
+        shell_folder("Desktop")?.join(&name),
+    ])
+}
+
+/// A per-user shell folder as Explorer resolves it: `User Shell Folders` (REG_EXPAND_SZ), so a redirected
+/// desktop is found too.
+fn shell_folder(name: &str) -> Result<PathBuf> {
+    let key = CURRENT_USER
+        .open(r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders")?;
+    let raw = key
+        .get_string(name)
+        .with_context(|| format!("shell folder {name}"))?;
+    Ok(PathBuf::from(expand_vars(&raw, |var| env::var(var).ok())?))
+}
+
+/// Expands `%NAME%` (the only syntax of REG_EXPAND_SZ); an unset name or an unclosed `%` is an error.
+fn expand_vars(text: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<String> {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let end = after
+            .find('%')
+            .with_context(|| format!("unclosed % in {text:?}"))?;
+        let name = &after[..end];
+        out.push_str(&lookup(name).with_context(|| format!("%{name}% is not set"))?);
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Machine-wide traces of the product: the per-machine registry keys and the all-users links. The per-user
+/// installer must never create any; CI runs elevated, where a stray HKLM or all-users write would succeed.
+fn machine_wide_state() -> Result<Vec<String>> {
+    let mut found: Vec<String> = [KEY_INSTALL, KEY_UNINSTALL]
+        .into_iter()
+        .filter(|key| LOCAL_MACHINE.open(key).is_ok())
+        .map(|key| format!(r"HKLM\{key}"))
+        .collect();
     let start =
         PathBuf::from(env::var("ProgramData")?).join(r"Microsoft\Windows\Start Menu\Programs");
     let desktop = PathBuf::from(env::var("PUBLIC")?).join("Desktop");
-    Ok([
-        start.join(format!("{PRODUCT}.lnk")),
-        desktop.join(format!("{PRODUCT}.lnk")),
-    ])
+    found.extend(
+        [start, desktop]
+            .into_iter()
+            .map(|folder| folder.join(format!("{PRODUCT}.lnk")))
+            .filter(|link| link.exists())
+            .map(|link| link.display().to_string()),
+    );
+    Ok(found)
 }
 
 /// The installed engines start from Program Files and are the pinned versions.
@@ -282,15 +341,15 @@ fn check_app(dir: &Path, version: &str) -> Result<()> {
     Ok(())
 }
 
-/// Nothing of the product is left: install dir, both registry keys, both shortcuts.
+/// Nothing of the product is left: install dir, both HKCU keys, both shortcuts; and nothing machine-wide appeared.
 fn check_removed(dir: &Path) -> Result<()> {
-    let mut left = Vec::new();
+    let mut left = machine_wide_state()?;
     if dir.exists() {
         left.push(dir.display().to_string());
     }
     for key in [KEY_INSTALL, KEY_UNINSTALL] {
-        if LOCAL_MACHINE.open(key).is_ok() {
-            left.push(format!(r"HKLM\{key}"));
+        if CURRENT_USER.open(key).is_ok() {
+            left.push(format!(r"HKCU\{key}"));
         }
     }
     left.extend(
@@ -308,11 +367,12 @@ fn check_removed(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// smoke-install changes the machine (Program Files, HKLM, shortcuts): only a disposable CI runner qualifies.
+/// smoke-install changes this user's state (programs folder, HKCU, shortcuts): only a disposable CI runner
+/// qualifies.
 fn ci_guard(ci: Option<&str>) -> Result<()> {
     ensure!(
         ci == Some("true"),
-        "smoke-install installs and removes the product machine-wide; it runs only where CI=true \
+        "smoke-install installs and removes the product for the current user; it runs only where CI=true \
          (a disposable CI runner)"
     );
     Ok(())
@@ -328,5 +388,38 @@ mod tests {
         assert!(ci_guard(Some("1")).is_err());
         assert!(ci_guard(Some("false")).is_err());
         assert!(ci_guard(Some("true")).is_ok());
+    }
+
+    /// `User Shell Folders` values are REG_EXPAND_SZ: every `%NAME%` is expanded, nothing else is touched.
+    #[test]
+    fn shell_folder_values_expand() {
+        let lookup = |name: &str| match name {
+            "USERPROFILE" => Some(r"C:\Users\runner".to_owned()),
+            "APPDATA" => Some(r"C:\Users\runner\AppData\Roaming".to_owned()),
+            _ => None,
+        };
+        assert_eq!(
+            expand_vars(r"%USERPROFILE%\Desktop", lookup).unwrap(),
+            r"C:\Users\runner\Desktop"
+        );
+        assert_eq!(
+            expand_vars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs", lookup).unwrap(),
+            r"C:\Users\runner\AppData\Roaming\Microsoft\Windows\Start Menu\Programs"
+        );
+        assert_eq!(expand_vars(r"D:\Desk", lookup).unwrap(), r"D:\Desk");
+        assert!(expand_vars(r"%NOPE%\x", lookup).is_err());
+        assert!(expand_vars(r"%USERPROFILE\x", lookup).is_err());
+    }
+
+    /// The per-user folders resolve on this machine (read only).
+    #[test]
+    fn per_user_shell_folders_resolve() {
+        for name in ["Programs", "Desktop"] {
+            let dir = shell_folder(name).unwrap();
+            assert!(
+                dir.is_absolute() && !dir.to_string_lossy().contains('%'),
+                "{name}: {dir:?}"
+            );
+        }
     }
 }

@@ -66,6 +66,8 @@ $INSTDIR\licenses\sing-box.txt GPL-3.0.txt xray.txt wintun.txt OFL-InterTight.tx
   published anywhere CI could fetch it by pin). See open points.
 
 ## Contract for the app team: what the installer and CI call (implement exactly this)
+> Since 2026-11-12 the installer is per-user and never elevated: where this section says "elevated",
+> "per-machine", HKLM, `%ProgramData%` links or `/allusers`, the `noadmin-installer` section at the end wins.
 
 ### General rules for `--setup`
 - Form: `"<exe>" --setup <command> --install-dir "<dir>" [options]`; `--setup` is argv[1]. `<dir>` is the absolute
@@ -215,3 +217,176 @@ $INSTDIR\licenses\sing-box.txt GPL-3.0.txt xray.txt wintun.txt OFL-InterTight.tx
   nobody runs it by mistake (it would install the xtask exe as the app). Reproduce the check with:
   `cargo xtask dist --skip-build --bin-dir target/xtask/stand-in` (stand-ins: `vpn-tunnel-enforcer.exe` and
   `vpnte_proxy.exe` = copies of `target/xtask/debug/xtask.exe`, plus any `THIRD-PARTY-NOTICES.txt`).
+
+# Work package `noadmin-installer` — per-user installation without administrator rights (2026-11-12)
+
+Owner requirement (2026-11-11): "without admin rights means none at all, and it must still work". Binding:
+`.tmp/rewrite/NOADMIN.md`, `crates/CONTRACT.md` §1. This section overrides the per-machine parts above
+(D6 elevated helper token, D8 `/allusers`, D11 `%ProgramData%` removal, D12 HKLM / Program Files, D13).
+
+## Status (update as you go)
+- [x] `vpnte.nsi` per-user (user level, `$LOCALAPPDATA\Programs`, HKCU, per-user links, no HKLM writes)
+- [x] old per-machine install: detected through HKLM (read only), left alone, one notice (ru/en)
+- [x] `--setup` contract without elevation (`crates/app/src/setup/**`)
+- [x] `xtask smoke-install`: per-user paths and HKCU keys; script lint test (no HKLM writes, no UAC)
+- [x] non-loopback listeners reported (not edited)
+- [x] makensis `/WX` stand-in compile, xtask test / clippy / fmt, app setup + args tests and clippy (see
+      "Verified": the live app crate's test target is blocked by other packages' work in progress)
+
+## Log
+- 10:00 read NOADMIN.md, CONTRACT.md, this file, vpnte.nsi, lang.nsh, xtask dist/smoke, app setup/**,
+  the electron-builder uninstaller template (node_modules/app-builder-lib/templates/nsis/uninstaller.nsh)
+  and the old `build/installer.nsh` + `build/shutdown-for-update.ps1`.
+- 10:40 vpnte.nsi + lang.nsh per-user; setup/{mod,system,shell}.rs + args.rs doc; `cargo check -p
+  vpnte-app --all-targets` green.
+- 10:55 xtask smoke per-user + `script_needs_no_administrator_rights`; xtask 16 tests green; stand-in
+  `dist --skip-build --bin-dir target/xtask/stand-in`: 17 files staged, makensis `/WX` compiled, installer
+  manifest `asInvoker`; the stand-in artifacts in `target/dist` deleted again (never run).
+- 11:30 listeners audited (report below); `ci.yml` YAML error found in the `elevated` job (not edited).
+- 11:35 live `cargo test -p vpnte-app` cannot compile: other packages' new `svc_live` / `svc_proxies` declare
+  `mod tests;` without the files (waited ~35 min). Ran the setup tests in a throw-away copy of the tree with
+  two empty stand-in `tests.rs` (copy deleted afterwards): `cargo test -p vpnte-app --lib -- setup:: args::`
+  35 passed, 1 ignored (`desktop_shell_is_reachable`, needs Explorer). `clippy -D warnings` on lib + lib
+  tests: the only errors are two `type_complexity` in `svc_proxies/health.rs` (not mine); none in
+  `setup/**` or `args.rs`.
+- 11:50 the missing test modules landed: live `cargo test -p vpnte-app --all-targets` 235 passed, 0 failed,
+  3 ignored. Live `cargo clippy -p vpnte-app --all-targets -D warnings` still fails only on
+  `svc_proxies/health.rs:79-80` (`type_complexity`, another package's file, unchanged after a 9-minute wait).
+  Next for whoever continues: re-run that clippy once it is fixed; nothing else of this package is open.
+
+## Installer now (per-user)
+- `RequestExecutionLevel user` (manifest `asInvoker`, checked in the built exe), `SetShellVarContext current`
+  in `.onInit` and `un.onInit`; `InstallDir "$LOCALAPPDATA\Programs\VPN Tunnel Enforcer"` (no directory page,
+  `/D=` still works); upgrade location from `HKCU\Software\{GUID}\InstallLocation`.
+- Registry: the Electron value set under HKCU only (`HKCU\Software\{GUID}`, `HKCU\...\Uninstall\{GUID}`);
+  `UninstallString` = `"<dir>\Uninstall VPN Tunnel Enforcer.exe"`, `QuietUninstallString` = the same + ` /S`
+  (no `/allusers`). HKLM is only read: the old per-machine installation and the WebView2 version.
+- Links: the user's own Start menu (`$SMPROGRAMS`) and desktop (`$DESKTOP`); stamped by the helper.
+- Upgrade over itself: chains this user's previous uninstaller found under HKCU, from a copy, with
+  `/S --keep-shortcuts --updated _?=<dir>` (retries and messages as D8). The HKLM uninstaller is never run.
+- Uninstall: helper gate + `--setup uninstall` as before; `--delete-app-data` removes `%APPDATA%\VPN Tunnel
+  Enforcer` and `%LOCALAPPDATA%\VPN Tunnel Enforcer`, and the Electron data dir `%APPDATA%\vpn-tunnel-enforcer`
+  only when no per-machine installation is registered (it is still the old version's data); never anything
+  under `%ProgramData%` (the old version's, and not writable without rights). Keys: HKCU only.
+- Old per-machine installation (HKLM `...\Uninstall\{GUID}` present, 64-bit view = electron-builder's): left in
+  place, one detail-log line every time, and one message box (`MachineWideKept`, en/ru) at the first
+  installation for this user (`$Fresh` = no HKCU uninstall key before this run); silent installs only log.
+  The text says where to remove it (Windows Settings > Apps), to quit VPN Tunnel Enforcer first (the old
+  uninstaller's PowerShell gate counts every `VPN Tunnel Enforcer.exe` by name and refuses while ours runs),
+  and that its data is imported automatically.
+- Texts changed: `CleanupFailed` (system proxy or network rules not restored), `AppMissing`; new
+  `MachineWideKept`. `GateFailed` stays verbatim.
+
+## `--setup` contract without elevation (replaces the per-machine rows of the contract above)
+- Runs with the installer's token, which is the user's own (per-user installer, no UAC). Nothing in the helper
+  needs elevation; the privileged parts run only when the process happens to be elevated (setup started
+  "as administrator", CI) and are printed as `not checked (needs administrator rights)` otherwise.
+- `await-shutdown`: unchanged (layout, refusals, exit codes, `%ProgramData%\VPNTE\runtime` still recognised:
+  while a client runs from another directory, e.g. the old per-machine one, its engines are left alone).
+- `uninstall` (standalone only, after the gate): refuses while the app runs; then (1) our WFP objects and the
+  old version's leftovers incl. the `sing-tun` rule of `<dir>\resources\sing-box.exe` — elevated only; a
+  failure there → exit 1; while the per-machine version is still registered the leftovers step is skipped
+  as a whole (its firewall rules, task and engines are its working parts; crate `cleanup` cannot remove the
+  `sing-tun` rule alone, see needs); (2) roll back this user's journalled tweaks incl. the system proxy —
+  a system proxy that could not be restored → exit 1 (it would point at a dead port; the app stays installed
+  and its next start retries from the journal), other failures → `warning:` line; (3) delete the autostart
+  `Run` value → warning on failure; (4) `RemoveAllDestinations` for AUMID `com.vpntunnelenforcer.app`. The
+  uninstaller deletes the per-user links itself (unless `--keep-shortcuts`).
+- `stamp-shortcuts`: the per-user links `FOLDERID_Programs\VPN Tunnel Enforcer.lnk` and
+  `FOLDERID_Desktop\VPN Tunnel Enforcer.lnk` (each only if present and targeting `<dir>\VPN Tunnel
+  Enforcer.exe`). All-users links are never touched.
+- `launch-as-user`: unelevated helper → `CreateProcessW` of `<dir>\VPN Tunnel Enforcer.exe` (no arguments,
+  cwd `<dir>`, no handle inheritance, so nsExec is not kept waiting on its pipe); an elevated helper (setup
+  started as administrator) still goes through Explorer's `IShellDispatch2::ShellExecute`, so the app never
+  inherits an elevated token by accident. Returns at once.
+- `--smoke`, `--shutdown-for-update`, exit codes, ASCII output, time limits: unchanged.
+
+## Decisions (noadmin-installer, owner busy)
+- N1 Same GUID keys and AUMID as before, now under HKCU: Apps & features lists the per-user install next to an
+  old per-machine one (separate hives, different versions); the electron-builder uninstaller deletes only its
+  own context (`SHELL_CONTEXT` = HKLM, all-users links; checked in its template), so it never removes ours.
+- N2 The per-machine notice is shown once per user (first per-user install) instead of a stored "shown" flag:
+  no extra registry state; a later upgrade only logs the line.
+- N3 The old per-machine links (same name and AUMID) stay until the user removes that version; Windows then
+  has two links with one AUMID. Not testable here (would need real Start-menu links); the notice asks the
+  user to remove the old version.
+- N4 `--setup uninstall` without elevation never refuses for missing rights (old behaviour: "Administrator
+  rights are required"): it does the per-user part and lists the privileged part as not checked.
+- N5 A system proxy that cannot be restored stops the uninstall (exit 1): it is the no-admin counterpart of the
+  strict-filter rule (it would cut the browsers off with no app left to fix it). An unreadable journal does
+  not stop it (nothing could restore it either way); it prints a warning to check the proxy by hand.
+- N6 The elevated legacy cleanup is skipped while the per-machine version is registered (or HKLM cannot be
+  read): `legacy::uninstall` would stop its engines, reset its firewall rules and delete its boot task.
+- N7 `launch-as-user` keeps the Explorer path only for an elevated helper; normally a plain `CreateProcessW`
+  without inherited handles (a Rust `Command` would pass nsExec's inheritable pipe on and keep it waiting).
+- N8 No directory page: `/D=` stays for scripted installs; a path the user cannot write fails visibly
+  (`AllowSkipFiles off`), never with UAC.
+- N9 `smoke-install` checks per-user paths (`%LOCALAPPDATA%\Programs`, shell folders from `User Shell
+  Folders`), HKCU values, and that no HKLM key or all-users link appears (CI runs elevated, so a stray
+  machine-wide write would otherwise pass). It does not run the installer under a filtered token (not
+  runnable here, so not written blind).
+- N10 The desktop link stays optional the way it was: `--no-desktop-shortcut`, and an upgrade keeps a deleted
+  one deleted. No extra page or finish-page checkbox (a link made after the install section would also miss
+  the AUMID stamp).
+
+## Verified on this machine (2026-11-12)
+- xtask: `cargo test` 16 green (new: `script_needs_no_administrator_rights`, `shell_folder_values_expand`,
+  `per_user_shell_folders_resolve`), `clippy --all-targets -D warnings` clean, `cargo fmt --check` clean.
+- `cargo xtask nsis` ok; `cargo xtask dist --skip-build --bin-dir target/xtask/stand-in`: 17 files, makensis
+  `/V2 /WX` compiled the per-user installer (33.3 MB) and the portable zip; the installer's manifest is
+  `requestedExecutionLevel level="asInvoker"`. Artifacts deleted afterwards; the installer was never run.
+- `cargo check -p vpnte-app --all-targets` green (before other packages' work-in-progress `mod tests;`);
+  setup + args tests 35 passed / 1 ignored and clippy clean for `setup/**` + `args.rs`, run on a throw-away
+  copy of the tree (see Log 11:35); `rustfmt --edition 2024 --check` clean for my four app files.
+- Workflows: `release.yml` parses (js-yaml); `ci.yml` parses only with the two `name: winnet: ...` lines of
+  the `elevated` job quoted (not my lane, see needs); the package job itself is valid.
+
+## Only CI / not run here
+- Every runtime behaviour of the installer and uninstaller (silent install, HKCU values, per-user links +
+  AUMID, upgrade chain, notice box, uninstall, nothing left, no HKLM write) — `smoke-install`, job `package`.
+- `--setup uninstall`, `stamp-shortcuts`, `launch-as-user` end to end (they change real per-user state).
+- The coexistence with an installed Electron 1.x (no old installer available to CI; see open points above).
+
+## Non-loopback listeners (report only, nothing edited)
+A listener on a non-loopback address makes Windows Firewall ask for administrator rights.
+- `crates/engine/src/singbox_config/mod.rs:175-176` (`TunStack::Mixed` is the default) with
+  `crates/engine/src/singbox_config/inbounds.rs:63` (`"stack"` of the TUN inbound): sing-tun's system TCP stack
+  accepts tunnelled TCP on a listener bound to the TUN interface address, and sing-box adds the `sing-tun
+  (<path>)` firewall rule itself. Hard / TUN mode only, i.e. only in an elevated process today.
+- `crates/engine/src/xray_config/resolve.rs:254-257`: UDP socket bound to `0.0.0.0:0` / `[::]:0` (wildcard,
+  ephemeral port) for the engine's own DNS lookups; it is connected to the resolver and sends first (a client
+  flow), so it is not expected to raise the dialog. Not verified here (that would need the dialog to appear).
+- Checked and loopback-only: sing-box inbounds `inbounds.rs:74,113,134`, Clash API `singbox_config/mod.rs:278`,
+  Xray slot inbound `engine/src/xray_config/config.rs:90`, proxies control server
+  `crates/proxies/src/control/mod.rs:240`, external proxy slots `crates/proxies/src/config/mod.rs:49`,
+  key-health engine `crates/probes/src/key_health/config.rs:76`; source-bound TCP sockets in probes
+  (`availability/probe.rs:207`, `discipline/reach.rs:85`, `ping/mod.rs:321`) connect, never listen;
+  the UI's own edit socket (dependency `dioxus-desktop` 0.7.10 `src/edits.rs:148`) binds 127.0.0.1:0.
+  Test-only LAN listener: `crates/probes/src/live/tests/runner.rs:137-141` (only with `VPNTE_LAN_TESTS`).
+
+## Needs from others
+- `.github/workflows/ci.yml:137,139` (job `elevated`, not this lane): `- name: winnet: ...` is invalid YAML (an
+  unquoted `: ` inside a plain scalar); GitHub rejects the whole workflow, so no job runs, `package` included.
+  Quote both names.
+- crate `cleanup`: a way to remove only the `sing-tun (<path>)` rule of our engine. While the per-machine
+  version is still installed the elevated per-user uninstall skips `legacy::uninstall` as a whole (N6), so
+  our own rule stays in that case.
+- app / cleanup (start-up `legacy::run`, elevated only): decide whether to wait while the per-machine version
+  is still registered (HKLM `...\Uninstall\{6ed500d7-e3cc-5276-81ea-221a0c3a3238}`); today it would delete
+  that installation's boot-recovery task and firewall rules while it is still installed.
+- winnet `API.md` (`toast` paragraph) still says the installer creates the all-users link and "never creates
+  a per-user link": the installer's links are now `user_programs_dir()` / the user's desktop; a release build
+  that re-stamps its link must look there.
+- engine / tunnel: the per-user install folder is user-writable; when the user starts the app as
+  administrator it launches `resources\sing-box.exe` / `xray.exe` from there. Verify the pinned SHA-256
+  (`resources/engines.toml`) before starting an engine from an elevated process.
+
+## Open points (noadmin-installer)
+- `await-shutdown` is unchanged by brief. It still counts Electron engines under `%ProgramData%\VPNTE\runtime`
+  as ours when no client runs elsewhere: an old elevated orphan engine there cannot be stopped by the
+  unelevated helper and would refuse the install ("background processes remain"). Proposal: pass no legacy
+  runtime dir from `--setup` now that the install never replaces the old files.
+- Code signing (§10.8) still open: an unsigned per-user installer gets SmartScreen, not UAC.
+- NOADMIN §3 lists "removal of the old Electron version's system leftovers" as an elevated installer step;
+  the per-user installer has none. They go with the old version's own uninstaller (Settings > Apps, which
+  asks for administrator rights itself), an app start as administrator, or `--cleanup` as administrator.

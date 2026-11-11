@@ -1,24 +1,28 @@
-//! Shell work of the installer helper: the AUMID on the installer's links (`stamp-shortcuts`),
-//! starting the installed client as the desktop user (`launch-as-user`), the jump list of our
-//! AUMID (uninstall) and the known folders these need.
-use std::ffi::OsString;
+//! Shell work of the installer helper: the AUMID on the installer's per-user links
+//! (`stamp-shortcuts`), starting the installed client unelevated (`launch-as-user`), the jump
+//! list of our AUMID (uninstall) and the known folders these need.
+use std::ffi::{OsStr, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use vpnte_winnet::toast::{self, AUMID, Shortcut};
+use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IDispatch, IServiceProvider,
 };
+use windows::Win32::System::Threading::{
+    CreateProcessW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
+};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Shell::{
-    ApplicationDestinations, CSIDL_DESKTOP, FOLDERID_ProgramData, FOLDERID_PublicDesktop,
+    ApplicationDestinations, CSIDL_DESKTOP, FOLDERID_Desktop, FOLDERID_ProgramData,
     IApplicationDestinations, IShellBrowser, IShellDispatch2, IShellFolderViewDual, IShellWindows,
     KF_FLAG_DEFAULT, SHGetKnownFolderPath, SID_STopLevelBrowser, SVGIO_BACKGROUND, SWC_DESKTOP,
     SWFO_NEEDDISPATCH, ShellWindows,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use windows::core::{BSTR, GUID, HSTRING, Interface};
+use windows::core::{BSTR, GUID, HSTRING, Interface, PCWSTR, PWSTR};
 
 use super::gate::{MAIN_EXE, same_path};
 
@@ -68,14 +72,15 @@ pub fn legacy_runtime_dir() -> Option<PathBuf> {
         .map(|dir| dir.join(r"VPNTE\runtime"))
 }
 
-/// `--setup stamp-shortcuts`: each of the installer's two links (all-users Start menu, public
-/// desktop) that exists and targets `<dir>\VPN Tunnel Enforcer.exe` gets the app's AUMID and is
-/// read back; nothing else is created. `Ok` lists what was done (stdout lines).
+/// `--setup stamp-shortcuts`: each of the installer's two per-user links (the user's Start menu
+/// and desktop) that exists and targets `<dir>\VPN Tunnel Enforcer.exe` gets the app's AUMID and
+/// is read back; nothing else is created. All-users links (an old per-machine installation) are
+/// never touched. `Ok` lists what was done (stdout lines).
 pub fn stamp_shortcuts(install_dir: &Path) -> Result<Vec<String>, String> {
     let exe = install_dir.join(MAIN_EXE);
     let folders = [
-        ("start menu", toast::common_programs_dir().ok()),
-        ("desktop", known_folder(&FOLDERID_PublicDesktop).ok()),
+        ("start menu", toast::user_programs_dir().ok()),
+        ("desktop", known_folder(&FOLDERID_Desktop).ok()),
     ];
     let mut done = Vec::new();
     for (place, folder) in folders {
@@ -114,35 +119,86 @@ pub fn stamp_shortcuts(install_dir: &Path) -> Result<Vec<String>, String> {
     Ok(done)
 }
 
-/// `--setup launch-as-user`: starts `<dir>\VPN Tunnel Enforcer.exe` without arguments through
-/// the desktop's own shell (Explorer's `IShellDispatch2::ShellExecute`), so it runs as the
-/// interactive user with Explorer's unelevated token, not the installer's; returns at once.
+/// `--setup launch-as-user`: starts `<dir>\VPN Tunnel Enforcer.exe` without arguments and returns
+/// at once. The per-user installer already runs as the user, so a plain start is enough; only a
+/// helper that happens to be elevated (setup started "as administrator") goes through the
+/// desktop's own shell, so that the app never inherits an elevated token by accident.
 pub fn launch_as_user(install_dir: &Path) -> Result<(), String> {
     let exe = install_dir.join(MAIN_EXE);
     if !exe.is_file() {
         return Err("The installed client was not found; not started.".to_owned());
     }
-    let _com = Apartment::enter();
-    desktop_shell_execute(&exe, install_dir).map_err(|err| {
+    let started = if vpnte_winnet::elevation::is_elevated() {
+        let _com = Apartment::enter();
+        desktop_shell_execute(&exe, install_dir)
+    } else {
+        start_detached(&exe, install_dir)
+    };
+    started.map_err(|err| {
         format!(
-            "Cannot start the client as the desktop user (0x{:08X}).",
+            "Cannot start the client (0x{:08X}).",
             err.code().0.cast_unsigned()
         )
     })
 }
 
+/// A NUL-terminated wide string.
+fn wide(text: &OsStr) -> Vec<u16> {
+    text.encode_wide().chain(Some(0)).collect()
+}
+
+/// The child's command line: the quoted exe path alone (argv[0]; the path has spaces).
+fn command_line(exe: &Path) -> Vec<u16> {
+    let mut line = OsString::from("\"");
+    line.push(exe.as_os_str());
+    line.push("\"");
+    wide(&line)
+}
+
+/// Starts the app without handing it any handle: the installer reads this helper's output
+/// through a pipe and would otherwise wait for the app to close its inherited copy.
+fn start_detached(exe: &Path, dir: &Path) -> windows::core::Result<()> {
+    let app = wide(exe.as_os_str());
+    let cwd = wide(dir.as_os_str());
+    let mut line = command_line(exe);
+    let startup = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut info = PROCESS_INFORMATION::default();
+    // SAFETY: every string is NUL-terminated and outlives the call; `line` is writable, as
+    // CreateProcessW requires; the two returned handles are ours and closed once.
+    unsafe {
+        CreateProcessW(
+            PCWSTR(app.as_ptr()),
+            Some(PWSTR(line.as_mut_ptr())),
+            None,
+            None,
+            false,
+            PROCESS_CREATION_FLAGS(0),
+            None,
+            PCWSTR(cwd.as_ptr()),
+            &startup,
+            &mut info,
+        )?;
+        let _ = CloseHandle(info.hThread);
+        let _ = CloseHandle(info.hProcess);
+    }
+    Ok(())
+}
+
 /// Raymond Chen's "launch an unelevated process from an elevated one": `ShellExecute` runs
 /// inside Explorer, with Explorer's token.
 fn desktop_shell_execute(exe: &Path, dir: &Path) -> windows::core::Result<()> {
-    let wide = |p: &Path| p.as_os_str().encode_wide().collect::<Vec<u16>>();
+    let bstr = |p: &Path| BSTR::from_wide(&p.as_os_str().encode_wide().collect::<Vec<u16>>());
     let shell = desktop_shell()?;
     // SAFETY: COM is initialised on this thread (`Apartment`); every variant and string
     // outlives the call.
     unsafe {
         shell.ShellExecute(
-            &BSTR::from_wide(&wide(exe)),
+            &bstr(exe),
             &VARIANT::from(""),
-            &VARIANT::from(BSTR::from_wide(&wide(dir))),
+            &VARIANT::from(bstr(dir)),
             &VARIANT::from(""),
             &VARIANT::from(SW_SHOWNORMAL.0),
         )
@@ -198,7 +254,18 @@ mod tests {
     fn known_folders_resolve() {
         let runtime = legacy_runtime_dir().expect("ProgramData");
         assert!(runtime.ends_with(r"VPNTE\runtime"));
-        assert!(known_folder(&FOLDERID_PublicDesktop).is_ok_and(|d| d.is_absolute()));
+        assert!(known_folder(&FOLDERID_Desktop).is_ok_and(|d| d.is_absolute()));
+        assert!(toast::user_programs_dir().is_ok_and(|d| d.is_absolute()));
+    }
+
+    /// The child gets its exe as one quoted argv[0], spaces and all, NUL-terminated.
+    #[test]
+    fn command_line_quotes_the_exe() {
+        let exe = Path::new(r"C:\Users\A B\AppData\Local\Programs\VPN Tunnel Enforcer\x.exe");
+        let line = command_line(exe);
+        assert_eq!(line.last(), Some(&0));
+        let text = String::from_utf16(&line[..line.len() - 1]).expect("UTF-16");
+        assert_eq!(text, format!("\"{}\"", exe.display()));
     }
 
     /// The desktop's automation object is reachable: every step of `launch-as-user` except the

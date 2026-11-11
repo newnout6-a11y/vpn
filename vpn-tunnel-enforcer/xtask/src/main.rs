@@ -25,8 +25,9 @@ cargo xtask <command>
                         VPN-Tunnel-Enforcer-<version>-portable.zip (no installation, no administrator), checksums.txt};
                         --skip-build takes vpn-tunnel-enforcer.exe, vpnte_proxy.exe and
                         THIRD-PARTY-NOTICES.txt from DIR (default target/release) instead of running cargo
-  smoke-install         CI only (requires CI=true): install the built installer silently, check files,
-                        registry and app start, upgrade over itself, uninstall, check that nothing is left
+  smoke-install         CI only (requires CI=true): install the built per-user installer silently, check files,
+                        HKCU registry, links and app start, that nothing machine-wide was written, upgrade over
+                        itself, uninstall, check that nothing is left
   version               print the workspace version (release tags must be v<version>)
 ";
 

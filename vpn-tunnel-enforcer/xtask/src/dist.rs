@@ -321,6 +321,43 @@ mod tests {
         );
     }
 
+    /// NOADMIN: installer and uninstaller run with the user's own token. User level, the user's program folder
+    /// and shell context, every registry write under HKCU (HKLM is only read: the old per-machine installation),
+    /// no elevation verb, and the previous uninstaller is looked up in HKCU only (never the per-machine one).
+    #[test]
+    fn script_needs_no_administrator_rights() {
+        let script = fs::read_to_string(root().join(SCRIPT)).unwrap();
+        let code: Vec<&str> = script
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with(';'))
+            .collect();
+        assert!(code.contains(&"RequestExecutionLevel user"));
+        assert!(code.contains(&"InstallDir \"$LOCALAPPDATA\\Programs\\${PRODUCT}\""));
+        assert!(code.contains(&"ReadRegStr $R0 HKCU \"${KEY_UNINSTALL}\" \"UninstallString\""));
+        for line in &code {
+            let lower = line.to_ascii_lowercase();
+            let writes_registry = ["writereg", "deletereg"]
+                .iter()
+                .any(|w| lower.starts_with(w));
+            assert!(
+                !writes_registry || lower.contains(" hkcu "),
+                "registry write outside HKCU: {line}"
+            );
+            for banned in [
+                "requestexecutionlevel admin",
+                "requestexecutionlevel highest",
+                "setshellvarcontext all",
+                "shctx",
+                "$programfiles",
+                "runas",
+                "uac::",
+            ] {
+                assert!(!lower.contains(banned), "`{banned}` in: {line}");
+            }
+        }
+    }
+
     #[test]
     fn workspace_version_is_plain_semver() {
         let version = workspace_version(root()).unwrap();

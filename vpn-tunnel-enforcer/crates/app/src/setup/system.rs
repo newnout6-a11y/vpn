@@ -1,8 +1,8 @@
 //! What the app put into the system, removed again: `--cleanup` (the user's emergency exit) and
-//! the network, tweak and autostart part of `--setup uninstall` (installer contract). Privileged
-//! parts (our WFP objects, the old version's leftovers including the `sing-tun` firewall rule)
-//! run only in an elevated process (NOADMIN §0); unelevated they are reported as needing
-//! administrator rights, never as done.
+//! `--setup uninstall` (installer contract). Per-user parts (tweaks with the system proxy, the
+//! autostart value) need no rights. Privileged parts (our WFP objects, the old version's leftovers
+//! including the `sing-tun` firewall rule) run only in an elevated process (NOADMIN §0);
+//! unelevated they are reported as needing administrator rights, never as done.
 use std::fmt;
 use std::path::Path;
 
@@ -15,6 +15,7 @@ use vpnte_base::{AppError, ErrorKind};
 use vpnte_cleanup::legacy;
 use vpnte_core::paths::DataDirs;
 use vpnte_winnet::autostart::{self, AutostartState, RunValue};
+use vpnte_winnet::registry::{Access, Hive, Key, View};
 use windows::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, WIN32_ERROR};
 use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
 use windows::core::HSTRING;
@@ -93,7 +94,10 @@ pub fn app_running() -> bool {
 
 /// Our WFP objects (persistent `strict` filters included, then sublayer and provider) and the
 /// old version's system leftovers: firewall rules and profiles, its WFP sublayer, tasks, files
-/// and the `sing-tun` rules of `<resources>\sing-box.exe` (crate `cleanup`). Elevated only.
+/// and the `sing-tun` rules of `<resources>\sing-box.exe` (crate `cleanup`). Elevated only. While
+/// the old per-machine version is still installed (the per-user installer leaves it in place)
+/// those are its own working parts, not leftovers: the whole step leaves them alone, the
+/// `sing-tun` rule of our engine included (crate `cleanup` removes it only together).
 pub fn network(resources: &Path, elevated: bool) -> Vec<Step> {
     if !elevated {
         return vec![
@@ -110,13 +114,39 @@ pub fn network(resources: &Path, elevated: bool) -> Vec<Step> {
         )),
         Err(err) => Outcome::Failed(err.to_string()),
     };
+    let leftovers = if hklm_key_present(MACHINE_WIDE_KEY) {
+        Outcome::Done("left alone: the old per-machine version is still installed".into())
+    } else {
+        leftovers(resources)
+    };
+    vec![
+        Step::new(AREA_FILTERS, filters),
+        Step::new(AREA_LEGACY, leftovers),
+    ]
+}
+
+/// Uninstall key of the old per-machine installation (electron-builder's GUID for
+/// `com.vpntunnelenforcer.app`, 64-bit view). The per-user installer writes only HKCU.
+const MACHINE_WIDE_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Uninstall\6ed500d7-e3cc-5276-81ea-221a0c3a3238";
+
+/// A key exists in HKLM (64-bit view, read only). Unreadable counts as present: the old
+/// version's processes and rules are touched only when it is provably gone.
+fn hklm_key_present(path: &str) -> bool {
+    !matches!(
+        Key::open(Hive::LocalMachine, path, Access::Read, View::Bits64),
+        Ok(None)
+    )
+}
+
+fn leftovers(resources: &Path) -> Outcome {
     let ctx = legacy::Context {
         resources: resources.to_path_buf(),
         // Read by the start-up run only; uninstall has no strict gate (the app is going away).
         level: KillSwitchLevel::Off,
         strict_ready: false,
     };
-    let leftovers = match legacy::uninstall(&ctx) {
+    match legacy::uninstall(&ctx) {
         Ok(report) => {
             let failed: Vec<&str> = report
                 .steps
@@ -135,31 +165,41 @@ pub fn network(resources: &Path, elevated: bool) -> Vec<Step> {
             }
         }
         Err(err) => Outcome::Failed(app_err(&err)),
-    };
-    vec![
-        Step::new(AREA_FILTERS, filters),
-        Step::new(AREA_LEGACY, leftovers),
-    ]
+    }
 }
 
 fn gone(removed: bool) -> &'static str {
     if removed { "removed" } else { "absent" }
 }
 
+/// This user's tweak rollback: the step, and whether the system proxy is still the app's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tweaks {
+    pub step: Step,
+    /// The journalled system proxy could not be restored: it may still point at the engine's
+    /// dead port, which cuts every program that honours it off. The journal keeps the record, so
+    /// the app's next start retries it.
+    pub proxy_stuck: bool,
+}
+
 /// Rolls back the journalled tweaks of this user: the Soft session (system proxy, variables,
 /// Git / Gradle / Android Studio), browser policies and location privacy. A value someone changed
 /// since is kept; what fails stays journalled for the next attempt. Runs under the data-dir lock
 /// (a running app owns its journal); a missing data dir means nothing was ever applied.
-pub fn tweaks(dirs: &DataDirs, elevated: bool) -> Step {
+pub fn tweaks(dirs: &DataDirs, elevated: bool) -> Tweaks {
+    let only = |outcome| Tweaks {
+        step: Step::new(AREA_TWEAKS, outcome),
+        proxy_stuck: false,
+    };
     if !dirs.root.is_dir() {
-        return Step::new(AREA_TWEAKS, Outcome::Done("nothing applied".into()));
+        return only(Outcome::Done("nothing applied".into()));
     }
     let _lock = match dirs.lock() {
         Ok(lock) => lock,
         Err(err) if err.kind == ErrorKind::Conflict => {
-            return Step::new(AREA_TWEAKS, Outcome::Failed("the app is running".into()));
+            return only(Outcome::Failed("the app is running".into()));
         }
-        Err(err) => return Step::new(AREA_TWEAKS, Outcome::Failed(app_err(&err))),
+        Err(err) => return only(Outcome::Failed(app_err(&err))),
     };
     let journal = Journal::open(&dirs.root, hardening::admit);
     let lost = journal.notice().map(|notice| notice.key);
@@ -172,7 +212,10 @@ pub fn tweaks(dirs: &DataDirs, elevated: bool) -> Step {
         report = journal.rollback(&SoftSystem::current_user(), &SOFT_FEATURES);
         report.merge(journal.rollback(&WinSystem::new(), &HARDENING));
     }
-    Step::new(AREA_TWEAKS, judge(&report, lost.as_deref(), elevated))
+    Tweaks {
+        step: Step::new(AREA_TWEAKS, judge(&report, lost.as_deref(), elevated)),
+        proxy_stuck: report.failed.contains(&Target::SystemProxy),
+    }
 }
 
 /// The outcome of a rollback. Unelevated, machine-wide policy values (HKLM) cannot be written:
@@ -202,6 +245,11 @@ fn judge(report: &RollbackReport, lost: Option<&str>, elevated: bool) -> Outcome
     };
     if !elevated && report.failed.iter().all(machine_wide) {
         Outcome::NeedsAdmin
+    } else if report.failed.contains(&Target::SystemProxy) {
+        Outcome::Failed(format!(
+            "system proxy not restored, {} value(s) in all",
+            report.failed.len()
+        ))
     } else {
         Outcome::Failed(format!("{} value(s) not restored", report.failed.len()))
     }
@@ -257,6 +305,14 @@ mod tests {
         };
         assert_eq!(judge(&hklm, None, false), Outcome::NeedsAdmin);
         assert!(matches!(judge(&hklm, None, true), Outcome::Failed(_)));
+        let proxy = RollbackReport {
+            failed: vec![Target::SystemProxy, reg(RegHive::Hklm)],
+            ..RollbackReport::default()
+        };
+        assert_eq!(
+            judge(&proxy, None, false),
+            Outcome::Failed("system proxy not restored, 2 value(s) in all".into())
+        );
         let lost = judge(&empty, Some("automation.tweaks.journalCorrupt"), true);
         assert!(matches!(lost, Outcome::Failed(text) if text.contains("journalCorrupt")));
     }
@@ -267,13 +323,30 @@ mod tests {
     fn tweaks_without_a_journal_change_nothing() {
         let base = std::env::temp_dir().join(format!("vpnte-setup-tweaks-{}", std::process::id()));
         let dirs = DataDirs::new(base.join("data"), base.join("legacy"), base.join("res"));
-        let step = tweaks(&dirs, false);
-        assert_eq!(step.outcome, Outcome::Done("nothing applied".into()));
+        let none = tweaks(&dirs, false);
+        assert_eq!(none.step.outcome, Outcome::Done("nothing applied".into()));
+        assert!(!none.proxy_stuck);
         assert!(!dirs.root.exists(), "no data folder is created");
         std::fs::create_dir_all(&dirs.root).expect("temp data dir");
-        let step = tweaks(&dirs, false);
-        assert!(step.is_done(), "{step}");
+        let empty = tweaks(&dirs, false);
+        assert!(empty.step.is_done() && !empty.proxy_stuck, "{}", empty.step);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The old per-machine installation is found by reading HKLM only; an absent key is the only
+    /// "gone" (read only, no key is created).
+    #[test]
+    fn machine_wide_probe_reads_hklm() {
+        assert!(hklm_key_present(
+            r"Software\Microsoft\Windows\CurrentVersion"
+        ));
+        assert!(!hklm_key_present(
+            r"Software\Microsoft\Windows\CurrentVersion\Uninstall\VPNTE-Test-absent-0c1d"
+        ));
+        // The same product identity as the installer's keys.
+        let script = include_str!("../../../../installer/vpnte.nsi");
+        let guid = MACHINE_WIDE_KEY.rsplit('\\').next().unwrap_or_default();
+        assert!(script.contains(&format!("!define APP_GUID \"{guid}\"")));
     }
 
     /// Output lines are plain ASCII and say what happened.
