@@ -4,8 +4,7 @@ Measurements: public IP monitor and leak checks, system diagnostics and the rout
 upstream-proxy detection, URL availability, speed test, server pings, country / ASN lookups, egress
 IP and SOCKS latency, key health (temporary probe engine), the stages of the live server check and
 the live check runner. Depends on `vpnte-base`, `vpnte-core`, `vpnte-winnet`, `vpnte-profiles`,
-`vpnte-engine`. Build with default features (all packages; the per-package features are build
-scaffolding).
+`vpnte-engine`. No cargo features.
 
 ```toml
 vpnte-probes.workspace = true

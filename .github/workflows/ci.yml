@@ -70,6 +70,9 @@ jobs:
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo clippy --manifest-path xtask/Cargo.toml --target-dir target/xtask --all-targets --locked -- -D warnings
       - name: Tests
+        env:
+          # Tests that open a listener on the LAN address (skipped on workstations: firewall prompt).
+          VPNTE_LAN_TESTS: '1'
         run: |
           cargo test --workspace --locked
           cargo test --manifest-path xtask/Cargo.toml --target-dir target/xtask --locked

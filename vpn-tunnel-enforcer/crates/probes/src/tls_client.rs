@@ -21,7 +21,6 @@ fn with_alpn(mut config: ClientConfig, alpn: &[&[u8]]) -> Arc<ClientConfig> {
 }
 
 /// Any certificate accepted (we inspect, not trust), handshake signatures still checked.
-#[cfg(any(feature = "probes-live-stages", feature = "probes-web"))]
 pub(crate) fn inspecting(alpn: &[&[u8]]) -> Result<Arc<ClientConfig>, rustls::Error> {
     let provider = provider();
     let config = ClientConfig::builder_with_provider(provider.clone())
@@ -33,7 +32,6 @@ pub(crate) fn inspecting(alpn: &[&[u8]]) -> Result<Arc<ClientConfig>, rustls::Er
 }
 
 /// Certificates verified against the Windows trust store (platform verifier).
-#[cfg(feature = "probes-servers")]
 pub(crate) fn verified(alpn: &[&[u8]]) -> Result<Arc<ClientConfig>, rustls::Error> {
     use rustls_platform_verifier::BuilderVerifierExt;
     let config = ClientConfig::builder_with_provider(provider())
@@ -43,7 +41,6 @@ pub(crate) fn verified(alpn: &[&[u8]]) -> Result<Arc<ClientConfig>, rustls::Erro
     Ok(with_alpn(config, alpn))
 }
 
-#[cfg(any(feature = "probes-live-stages", feature = "probes-web"))]
 mod inspect {
     use std::sync::Arc;
 

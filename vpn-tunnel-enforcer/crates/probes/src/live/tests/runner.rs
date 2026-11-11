@@ -134,8 +134,11 @@ async fn single(handle: JobHandle) -> AppResult<LiveCheck> {
 }
 
 /// A local non-loopback address with a listener on it (loopback targets are refused, B-06);
-/// `None` on a machine without one.
+/// `None` on a machine without one, and `None` unless `VPNTE_LAN_TESTS` is set: a listener on the
+/// LAN address makes Windows Firewall ask the person at the desk to allow every rebuilt test
+/// binary, so these tests run in CI (which sets the variable) and are skipped on a workstation.
 async fn local_server() -> Option<(IpAddr, tokio::net::TcpListener)> {
+    std::env::var_os("VPNTE_LAN_TESTS")?;
     let probe = UdpSocket::bind("0.0.0.0:0").ok()?;
     probe.connect("192.0.2.1:9").ok()?;
     let ip = probe.local_addr().ok()?.ip();

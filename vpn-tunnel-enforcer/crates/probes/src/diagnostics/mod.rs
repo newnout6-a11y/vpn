@@ -124,7 +124,6 @@ impl CheckItem {
 
 /// A leak-check item as a row for [`ReportInputs::routing`]: `Info` stays informational,
 /// `NotChecked` stays not checked, the localized details become notes.
-#[cfg(feature = "probes-ip")]
 impl From<&crate::leak::CheckItem> for CheckItem {
     fn from(item: &crate::leak::CheckItem) -> Self {
         Self {

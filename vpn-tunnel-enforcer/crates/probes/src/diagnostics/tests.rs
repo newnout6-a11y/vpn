@@ -22,7 +22,6 @@ fn item(category: Category, verdict: Option<Verdict>) -> CheckItem {
 
 /// AT-07-002: leak-check rows keep their verdict in the report (`NotChecked` is never `Ok`,
 /// `Info` stays informational) and land in the Routing group.
-#[cfg(feature = "probes-ip")]
 #[test]
 fn leak_items_become_routing_rows() {
     use crate::leak::{CheckItem as LeakItem, CheckStatus};

@@ -7,24 +7,25 @@ use crate::test_support::{flatten, placeholders};
 
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
-/// Fragment files on disk as `(package, ru, en)`, sorted by package name (`probes-live` before
-/// `probes-live-stages`, unlike a listing of the file names).
+/// Fragment files on disk as `(package, ru, en)`, in file-name order (`probes-live-stages.*`
+/// before `probes-live.*`: `-` sorts before `.`).
 fn fragments() -> Vec<(String, String, String)> {
     let dir = Path::new(ROOT).join("locales");
-    let mut packages: Vec<String> = std::fs::read_dir(&dir)
+    let mut files: Vec<String> = std::fs::read_dir(&dir)
         .expect("locales dir")
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
-        .filter_map(|name| name.strip_suffix(".ru.json").map(str::to_owned))
+        .filter(|name| name.ends_with(".ru.json"))
         .collect();
-    packages.sort();
-    packages
-        .into_iter()
+    files.sort();
+    files
+        .iter()
+        .filter_map(|name| name.strip_suffix(".ru.json"))
         .map(|p| {
             let read = |lang: &str| {
                 std::fs::read_to_string(dir.join(format!("{p}.{lang}.json"))).expect("fragment")
             };
             let (ru, en) = (read("ru"), read("en"));
-            (p, ru, en)
+            (p.to_owned(), ru, en)
         })
         .collect()
 }

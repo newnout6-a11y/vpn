@@ -1,6 +1,4 @@
 //! Helpers shared by the tests: locale fragment reading and the bundled engines' directory.
-// Feature scaffolding: a single-package test build does not use every helper.
-#![allow(dead_code)]
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
