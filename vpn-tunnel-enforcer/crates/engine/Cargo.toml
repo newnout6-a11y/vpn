@@ -29,5 +29,13 @@ futures-util.workspace = true
 windows.workspace = true
 url.workspace = true
 
+[features]
+# Build scaffolding: one flag per work package while they are written in parallel.
+default = ["engine-config", "engine-process", "engine-xray-config", "engine-routing"]
+engine-config = []
+engine-process = []
+engine-xray-config = []
+engine-routing = []
+
 [lints]
 workspace = true

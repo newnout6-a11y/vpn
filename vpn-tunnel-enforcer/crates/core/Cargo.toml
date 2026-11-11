@@ -32,6 +32,17 @@ jiff.workspace = true
 fastrand.workspace = true
 ipnet.workspace = true
 url.workspace = true
+aes-gcm.workspace = true
+tracing-subscriber.workspace = true
+
+[features]
+# Build scaffolding: one flag per work package while they are written in parallel.
+default = ["core-store", "core-net", "core-ops", "core-log", "core-legacy"]
+core-store = []
+core-net = []
+core-ops = []
+core-log = []
+core-legacy = []
 
 [lints]
 workspace = true

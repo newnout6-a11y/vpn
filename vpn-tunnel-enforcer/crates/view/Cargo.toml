@@ -1,0 +1,24 @@
+[package]
+name = "vpnte-view"
+description = "Pure UI logic without a webview: start-page state derivation, labels, identity column rules, traffic maths and the mascot's behaviour machine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+vpnte-base.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+fastrand.workspace = true
+
+[features]
+# Build scaffolding: one flag per work package while they are written in parallel.
+default = ["view-logic", "view-mascot"]
+view-logic = []
+view-mascot = []
+
+[lints]
+workspace = true

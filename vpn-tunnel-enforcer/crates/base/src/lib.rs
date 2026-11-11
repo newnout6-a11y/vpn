@@ -1,6 +1,6 @@
 //! Frozen cross-crate contract: errors, user messages, shared enums, i18n lookup, HTTP/TLS defaults.
 
-// --- work package `lead` ---
+// --- written by the lead (cross-package contract) ---
 pub mod error;
 pub mod http;
 pub mod i18n;

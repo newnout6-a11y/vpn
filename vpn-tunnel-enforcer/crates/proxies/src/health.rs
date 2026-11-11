@@ -1,1 +1,1 @@
-//! (to be written by work package `proxies-core`)
+//! (to be written by work package `proxies-manager`)

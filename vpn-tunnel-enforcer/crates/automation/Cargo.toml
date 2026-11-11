@@ -11,9 +11,6 @@ publish.workspace = true
 vpnte-base.workspace = true
 vpnte-core.workspace = true
 vpnte-winnet.workspace = true
-vpnte-profiles.workspace = true
-vpnte-servers.workspace = true
-vpnte-probes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -31,6 +28,14 @@ async-trait.workspace = true
 windows.workspace = true
 futures-util.workspace = true
 regex.workspace = true
+
+[features]
+# Build scaffolding: one flag per work package while they are written in parallel.
+default = ["automation-sched", "automation-adaptive", "automation-tweaks", "automation-hardening"]
+automation-sched = []
+automation-adaptive = ["automation-sched"]
+automation-tweaks = []
+automation-hardening = ["automation-tweaks"]
 
 [lints]
 workspace = true

@@ -19,5 +19,14 @@ parking_lot.workspace = true
 windows.workspace = true
 ipnet.workspace = true
 
+[features]
+# Build scaffolding: one flag per work package while they are written in parallel.
+default = ["winnet-wfp", "winnet-adapters", "winnet-process", "winnet-system", "winnet-shell"]
+winnet-wfp = []
+winnet-adapters = []
+winnet-process = []
+winnet-system = []
+winnet-shell = []
+
 [lints]
 workspace = true

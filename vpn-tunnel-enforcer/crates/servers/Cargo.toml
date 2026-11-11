@@ -9,8 +9,8 @@ publish.workspace = true
 
 [dependencies]
 vpnte-base.workspace = true
-vpnte-core.workspace = true
-vpnte-profiles.workspace = true
+vpnte-core = { workspace = true, optional = true }
+vpnte-profiles = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -27,6 +27,13 @@ uuid.workspace = true
 fastrand.workspace = true
 futures-util.workspace = true
 windows.workspace = true
+
+[features]
+# Build scaffolding: one flag per work package while they are written in parallel.
+default = ["servers-parse", "servers-store", "servers-refresh"]
+servers-parse = ["dep:vpnte-profiles"]
+servers-store = ["dep:vpnte-core", "dep:vpnte-profiles"]
+servers-refresh = ["servers-store", "servers-parse", "dep:vpnte-core", "dep:vpnte-profiles"]
 
 [lints]
 workspace = true

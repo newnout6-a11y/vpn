@@ -9,10 +9,10 @@ publish.workspace = true
 
 [dependencies]
 vpnte-base.workspace = true
-vpnte-core.workspace = true
-vpnte-winnet.workspace = true
-vpnte-profiles.workspace = true
-vpnte-engine.workspace = true
+vpnte-core = { workspace = true, optional = true }
+vpnte-winnet = { workspace = true, optional = true }
+vpnte-profiles = { workspace = true, optional = true }
+vpnte-engine = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -28,6 +28,16 @@ windows.workspace = true
 url.workspace = true
 fastrand.workspace = true
 regex.workspace = true
+
+[features]
+# Build scaffolding: one flag per work package while they are written in parallel.
+default = ["probes-servers", "probes-live-stages", "probes-ip", "probes-diag", "probes-web", "probes-live"]
+probes-servers = ["dep:vpnte-core", "dep:vpnte-winnet", "dep:vpnte-profiles", "dep:vpnte-engine"]
+probes-live-stages = ["dep:vpnte-core", "dep:vpnte-winnet"]
+probes-ip = ["dep:vpnte-core", "dep:vpnte-winnet"]
+probes-diag = ["dep:vpnte-core", "dep:vpnte-winnet"]
+probes-web = ["dep:vpnte-core", "dep:vpnte-winnet"]
+probes-live = ["probes-live-stages", "probes-servers", "dep:vpnte-core", "dep:vpnte-winnet", "dep:vpnte-profiles", "dep:vpnte-engine"]
 
 [lints]
 workspace = true

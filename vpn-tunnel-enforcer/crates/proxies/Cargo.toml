@@ -9,12 +9,10 @@ publish.workspace = true
 
 [dependencies]
 vpnte-base.workspace = true
-vpnte-core.workspace = true
-vpnte-winnet.workspace = true
-vpnte-profiles.workspace = true
-vpnte-servers.workspace = true
-vpnte-engine.workspace = true
-vpnte-probes.workspace = true
+vpnte-core = { workspace = true, optional = true }
+vpnte-winnet = { workspace = true, optional = true }
+vpnte-profiles = { workspace = true, optional = true }
+vpnte-engine = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -27,6 +25,19 @@ getrandom.workspace = true
 hex.workspace = true
 futures-util.workspace = true
 ipnet.workspace = true
+async-trait.workspace = true
+
+[features]
+# Build scaffolding: one flag per work package while they are written in parallel.
+default = ["proxies-model", "proxies-manager", "proxies-control"]
+proxies-model = ["dep:vpnte-core", "dep:vpnte-profiles"]
+proxies-manager = ["proxies-model", "dep:vpnte-core", "dep:vpnte-winnet", "dep:vpnte-profiles", "dep:vpnte-engine"]
+proxies-control = ["proxies-model", "dep:vpnte-core"]
+
+[[bin]]
+name = "vpnte_proxy"
+path = "src/bin/vpnte_proxy.rs"
+required-features = ["proxies-control"]
 
 [lints]
 workspace = true

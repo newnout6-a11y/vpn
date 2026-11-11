@@ -19,12 +19,15 @@ vpnte-core = { path = "crates/core" }
 vpnte-winnet = { path = "crates/winnet" }
 vpnte-profiles = { path = "crates/profiles" }
 vpnte-servers = { path = "crates/servers" }
+vpnte-view = { path = "crates/view" }
+vpnte-ui = { path = "crates/ui" }
 vpnte-engine = { path = "crates/engine" }
 vpnte-probes = { path = "crates/probes" }
 vpnte-forensics = { path = "crates/forensics" }
 vpnte-tunnel = { path = "crates/tunnel" }
 vpnte-proxies = { path = "crates/proxies" }
 vpnte-automation = { path = "crates/automation" }
+vpnte-cleanup = { path = "crates/cleanup" }
 
 async-trait = "0.1"
 
@@ -54,6 +57,7 @@ uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "socks", "json", "gzip", "brotli", "stream", "http2"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 zeroize = "1"
+aes-gcm = "0.11"
 hmac = "0.13"
 # One feature set for the whole workspace, so `windows` is compiled once. A crate that needs
 # more adds it locally: `windows = { workspace = true, features = ["Win32_X"] }`.
@@ -87,9 +91,8 @@ dbg_macro = "warn"
 todo = "warn"
 
 [profile.dev]
-debug = "line-tables-only"
-
-[profile.dev.package."*"]
+# No debug info: smaller target directories and faster links. A panic still reports its
+# source location; use a debugger build locally with `--config profile.dev.debug=true`.
 debug = false
 
 [profile.release]

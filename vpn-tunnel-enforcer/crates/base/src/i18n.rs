@@ -165,8 +165,8 @@ mod tests {
 
     fn load() {
         init(&[(
-            include_str!("../../../assets/locales/ru.json"),
-            include_str!("../../../assets/locales/en.json"),
+            include_str!("../../ui/assets/locales/ru.json"),
+            include_str!("../../ui/assets/locales/en.json"),
         )]);
     }
 

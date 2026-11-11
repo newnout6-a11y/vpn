@@ -1,1 +1,1 @@
-//! (to be written by work package `automation-sched`)
+//! (to be written by work package `automation-adaptive`)

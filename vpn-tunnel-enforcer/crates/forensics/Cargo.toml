@@ -26,5 +26,12 @@ hex.workspace = true
 futures-util.workspace = true
 url.workspace = true
 
+[features]
+# Build scaffolding: one flag per work package while they are written in parallel.
+default = ["forensics-traffic", "forensics-capture", "forensics-export"]
+forensics-traffic = []
+forensics-capture = []
+forensics-export = ["forensics-traffic", "forensics-capture"]
+
 [lints]
 workspace = true
