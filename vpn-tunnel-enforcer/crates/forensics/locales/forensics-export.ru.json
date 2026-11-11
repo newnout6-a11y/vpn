@@ -1,0 +1,55 @@
+{
+  "forensics": {
+    "summary": {
+      "check": {
+        "trafficLeakDetected": "Утечка трафика мимо туннеля",
+        "dnsLeakDetected": "Утечка DNS",
+        "tunPathConfirmed": "Трафик идёт через туннель",
+        "killSwitchBlockedTraffic": "Kill switch блокировал трафик",
+        "windowsFirewallBlockedTraffic": "Брандмауэр Windows блокировал трафик",
+        "remoteResetLikely": "Вероятны сбросы соединений удалённой стороной",
+        "timeoutOrPacketLossLikely": "Вероятны таймауты или потеря пакетов",
+        "mtuIssueLikely": "Вероятна проблема с MTU",
+        "singBoxFailureLikely": "Вероятен сбой sing-box"
+      },
+      "finding": {
+        "detected": "обнаружено",
+        "notDetected": "не обнаружено",
+        "unknown": "нет данных"
+      },
+      "warning": {
+        "manifestMissing": "Нет манифеста сессии",
+        "etwNotRun": "События ETW не записывались",
+        "etwNoData": "ETW работал, но не записал сетевых событий",
+        "etwEventsLost": "Часть событий ETW потеряна",
+        "pktmonNotRun": "Захват пакетов не выполнялся",
+        "noCounters": "Нет счётчиков pktmon",
+        "malformedLines": "Часть строк журналов не прочитана",
+        "artifactUnreadable": "Часть артефактов не прочитана",
+        "appEventsDropped": "Журнал событий приложения переполнен",
+        "noLeakTest": "Проверка утечек в этой сессии не запускалась",
+        "noWfpDropSource": "Блокировки WFP не перечисляются"
+      }
+    },
+    "export": {
+      "dialogTitle": "Сохранить диагностику",
+      "zipFilter": "ZIP-архив",
+      "saved": "Диагностика сохранена: {{name}}",
+      "cleanupFailed": {
+        "title": "Очистка диагностики не завершена",
+        "body": "Временные файлы диагностического архива могли остаться на диске."
+      },
+      "stage": {
+        "preparing": "Подготовка",
+        "settings": "Настройки",
+        "logs": "Журналы",
+        "system": "Сведения о системе",
+        "runtime": "Конфигурация движков",
+        "recovery": "Состояние восстановления",
+        "snapshots": "Снимки состояния",
+        "forensics": "Сетевая диагностика",
+        "finishing": "Завершение архива"
+      }
+    }
+  }
+}

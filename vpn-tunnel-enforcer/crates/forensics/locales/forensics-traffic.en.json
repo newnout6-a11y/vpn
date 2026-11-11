@@ -1,0 +1,10 @@
+{
+  "forensics": {
+    "traffic": {
+      "invalidAdapter": "Invalid tunnel adapter name."
+    },
+    "history": {
+      "sourceUnavailable": "Traffic history is not being updated: the engine's connection source does not respond."
+    }
+  }
+}
