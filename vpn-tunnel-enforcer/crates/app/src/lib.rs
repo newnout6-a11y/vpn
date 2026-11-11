@@ -22,9 +22,9 @@ pub mod api_servers;
 
 // --- work package `app-settings` ---
 #[cfg(feature = "app-settings")]
-pub mod api_settings;
-#[cfg(feature = "app-settings")]
 pub mod api_logs;
+#[cfg(feature = "app-settings")]
+pub mod api_settings;
 
 // --- work package `app-tunnel` ---
 #[cfg(feature = "app-tunnel")]

@@ -984,7 +984,10 @@ fn unread_option_sub_keys_are_noted() {
     let upgrade = one(
         "proxies:\n- {name: u, type: vmess, server: v.example, port: 80, uuid: u, alterId: 0, cipher: auto, network: ws, ws-opts: {path: /u, v2ray-http-upgrade: true, max-early-data: 2048}}\n",
     );
-    assert!(matches!(upgrade.transport, Some(Transport::HttpUpgrade { .. })));
+    assert!(matches!(
+        upgrade.transport,
+        Some(Transport::HttpUpgrade { .. })
+    ));
     assert_eq!(
         upgrade.notes,
         [Note::UnsupportedField("ws-opts.max-early-data".into())]

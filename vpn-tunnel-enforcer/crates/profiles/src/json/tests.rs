@@ -89,7 +89,10 @@ fn reality_with_ech_or_on_quic_is_skipped() {
     };
     assert_eq!(
         [detail(0), detail(1)],
-        ["REALITY cannot be combined with ECH", "REALITY cannot run over QUIC"],
+        [
+            "REALITY cannot be combined with ECH",
+            "REALITY cannot run over QUIC"
+        ],
         "{r:?}"
     );
 }

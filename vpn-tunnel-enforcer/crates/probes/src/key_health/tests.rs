@@ -526,7 +526,9 @@ fn scrambled(mut p: Profile) -> Profile {
     }
     if let Some(Kind::Shadowsocks { .. }) = Some(&p.kind) {
         // 2022 methods need a base64 key of the method's size: keep the shape, change the bytes.
-        if let Kind::Shadowsocks { method, password, .. } = &mut p.kind
+        if let Kind::Shadowsocks {
+            method, password, ..
+        } = &mut p.kind
             && method.starts_with("2022-")
         {
             *password = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into();
@@ -541,8 +543,12 @@ fn scrambled(mut p: Profile) -> Profile {
 #[tokio::test]
 #[ignore = "needs the internet and a real key in VPNTE_LIVE_KEY"]
 async fn live_key_online_and_scrambled_offline() {
-    let Ok(link) = std::env::var("VPNTE_LIVE_KEY") else { return };
-    let Some(ctx) = ctx(EnginePref::Auto) else { return };
+    let Ok(link) = std::env::var("VPNTE_LIVE_KEY") else {
+        return;
+    };
+    let Some(ctx) = ctx(EnginePref::Auto) else {
+        return;
+    };
     let key = parse_uri(link.trim()).unwrap();
     let cancel = CancellationToken::new();
     let health = check_profile(&key, &ctx, &cancel).await.unwrap();

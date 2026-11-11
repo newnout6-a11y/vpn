@@ -79,8 +79,8 @@ fn imported_profiles_pass_sing_box_check() {
     let mut failures = Vec::new();
     for p in imported() {
         for policy in &policies {
-            let fragment = emit_singbox(&p, "proxy-out", policy)
-                .unwrap_or_else(|e| panic!("{}: {e}", p.name));
+            let fragment =
+                emit_singbox(&p, "proxy-out", policy).unwrap_or_else(|e| panic!("{}: {e}", p.name));
             if let Some(exe) = &exe
                 && let Err(e) = check(exe, &fragment)
             {

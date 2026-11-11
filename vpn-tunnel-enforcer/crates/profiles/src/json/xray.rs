@@ -429,7 +429,13 @@ fn finalmask(
     };
     let up_mbps = rate("brutalUp").filter(|_| up_applies);
     let down_mbps = rate("brutalDown");
-    let handled = ["udpHop", "bbrProfile", "congestion", "brutalUp", "brutalDown"];
+    let handled = [
+        "udpHop",
+        "bbrProfile",
+        "congestion",
+        "brutalUp",
+        "brutalDown",
+    ];
     for key in quic.keys().filter(|k| !handled.contains(&k.as_str())) {
         note(format!("finalmask.quicParams.{key}"));
     }

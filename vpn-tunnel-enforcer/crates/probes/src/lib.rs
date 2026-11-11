@@ -8,11 +8,11 @@ pub mod local_proxy;
 
 // --- work package `probes-ip` ---
 #[cfg(feature = "probes-ip")]
-pub mod public_ip;
-#[cfg(feature = "probes-ip")]
 pub mod ip_monitor;
 #[cfg(feature = "probes-ip")]
 pub mod leak;
+#[cfg(feature = "probes-ip")]
+pub mod public_ip;
 
 // --- work package `probes-live` ---
 #[cfg(feature = "probes-live")]
@@ -24,13 +24,13 @@ pub mod live_stages;
 
 // --- work package `probes-servers` ---
 #[cfg(feature = "probes-servers")]
-pub mod ping;
+pub mod egress;
 #[cfg(feature = "probes-servers")]
 pub mod geo;
 #[cfg(feature = "probes-servers")]
 pub mod key_health;
 #[cfg(feature = "probes-servers")]
-pub mod egress;
+pub mod ping;
 
 // --- work package `probes-web` ---
 #[cfg(feature = "probes-web")]

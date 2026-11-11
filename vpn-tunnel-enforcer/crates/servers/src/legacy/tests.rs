@@ -327,7 +327,11 @@ fn ports_are_normalised() {
         old["outbound"]["server_port"] = server_port;
         let (doc, _) = from_legacy(Some(&json!({ "profiles": [old] })), None, None, NOW);
         let r = by_id(&doc, "p");
-        assert_eq!((r.port, r.profile().unwrap().port), (expected, expected), "case {n}");
+        assert_eq!(
+            (r.port, r.profile().unwrap().port),
+            (expected, expected),
+            "case {n}"
+        );
     }
 }
 

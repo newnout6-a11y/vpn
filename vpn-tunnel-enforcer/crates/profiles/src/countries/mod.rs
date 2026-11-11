@@ -174,7 +174,9 @@ fn flag_code(name: &str) -> Option<Iso2> {
 /// with the country (`gbsct` -> `GB`).
 fn subdivision_country(mut tags: impl Iterator<Item = char>) -> Option<Iso2> {
     let mut letter = || {
-        let offset = u32::from(tags.next()?).checked_sub(0xE0061).filter(|o| *o < 26)?;
+        let offset = u32::from(tags.next()?)
+            .checked_sub(0xE0061)
+            .filter(|o| *o < 26)?;
         char::from_u32(u32::from(b'A') + offset)
     };
     let code = [letter()?, letter()?];

@@ -6,18 +6,18 @@ pub mod control;
 
 // --- work package `proxies-manager` ---
 #[cfg(feature = "proxies-manager")]
-pub mod probe;
-#[cfg(feature = "proxies-manager")]
 pub mod health;
 #[cfg(feature = "proxies-manager")]
 pub mod manager;
+#[cfg(feature = "proxies-manager")]
+pub mod probe;
 
 // --- work package `proxies-model` ---
-#[cfg(feature = "proxies-model")]
-pub mod slot;
-#[cfg(feature = "proxies-model")]
-pub mod model;
 #[cfg(feature = "proxies-model")]
 pub mod config;
 #[cfg(feature = "proxies-model")]
 pub mod lease;
+#[cfg(feature = "proxies-model")]
+pub mod model;
+#[cfg(feature = "proxies-model")]
+pub mod slot;

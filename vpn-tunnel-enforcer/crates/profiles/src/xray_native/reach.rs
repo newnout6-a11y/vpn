@@ -243,7 +243,10 @@ pub(super) fn reach<'g>(graph: &'g NativeXray, primary: &Value) -> Result<Reach<
     }
     // Only the loop rules are copied into the running config; other provider rules are dropped.
     let copied = reach.rules.iter().zip(&reach.loop_rules);
-    if copied.filter(|(_, copied)| **copied).any(|(rule, _)| uses_geo_data(rule)) {
+    if copied
+        .filter(|(_, copied)| **copied)
+        .any(|(rule, _)| uses_geo_data(rule))
+    {
         return Err(NativeError::GeoData);
     }
     Ok(reach)

@@ -46,7 +46,8 @@ impl Servers {
                         Some(archived) => {
                             // A key the provider dropped and the user pastes back is the user's
                             // now: as a feed row the next refresh would archive it again (S-22).
-                            if archived.reason == ArchiveReason::Provider && origin == Origin::Manual
+                            if archived.reason == ArchiveReason::Provider
+                                && origin == Origin::Manual
                             {
                                 row.origin = Origin::Manual;
                                 row.device = device;

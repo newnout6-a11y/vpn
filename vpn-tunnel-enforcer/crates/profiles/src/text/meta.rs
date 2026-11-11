@@ -184,7 +184,10 @@ fn disposition_title(value: &str) -> Option<String> {
         .captures_iter(value)
         .filter_map(|c| Some((c.get(1).is_some(), c.get(2)?.as_str())))
         .collect();
-    let (_, raw) = names.iter().find(|(extended, _)| *extended).or(names.first())?;
+    let (_, raw) = names
+        .iter()
+        .find(|(extended, _)| *extended)
+        .or(names.first())?;
     let name = percent_decode_strict(raw).unwrap_or_else(|| (*raw).to_owned());
     let name = name.trim();
     let stem = [".yaml", ".yml", ".txt", ".json"]

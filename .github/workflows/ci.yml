@@ -130,9 +130,12 @@ jobs:
           cargo xtask verify
       # Tests marked #[ignore = "needs elevation"] (and any other ignored test); one at a time because they
       # share machine-wide state (WFP provider, TUN adapter, task folder).
+      # A finished crate the rest of the workspace does not depend on yet: prove its privileged code early.
+      - name: winnet: unprivileged tests
+        run: cargo test -p vpnte-winnet
+      - name: winnet: real WFP objects and the autostart task
+        run: cargo test -p vpnte-winnet -- --ignored elevated_ --test-threads=1 --nocapture
       - name: Tests that need elevation
-        env:
-          VPNTE_ALLOW_WFP_TEST: '1'
         run: cargo test --workspace --locked -- --ignored --test-threads=1
 
   package:
