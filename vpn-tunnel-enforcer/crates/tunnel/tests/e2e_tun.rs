@@ -16,9 +16,10 @@ use vpnte_base::AppResult;
 use vpnte_base::types::{AdaptiveMode, EnginePref, KillSwitchLevel, ProxyKind};
 use vpnte_core::net::{Route, client_for};
 use vpnte_engine::singbox_process::SingBoxProcess;
-use vpnte_tunnel::api::{Mode, Origin, Runtime, StartRequest, StopOptions};
+use vpnte_tunnel::api::{CaptureKind, Mode, Origin, Runtime, StartRequest, StopOptions};
 use vpnte_tunnel::runtime::{
-    InputsSource, RealEngines, RuntimeDeps, Timings, TunCapture, TunnelHandle, UserInputs,
+    InputsSource, ProxyCapture, RealEngines, RuntimeDeps, Timings, TunCapture, TunnelHandle,
+    UserInputs,
 };
 use vpnte_winnet::adapters;
 use vpnte_winnet::wfp::{EnginePaths, KillSwitchState, Protection, ProtectionSettings};
@@ -91,10 +92,11 @@ async fn https_get() -> bool {
         .is_ok_and(|r| r.status().is_success())
 }
 
-/// The helper upstream: a plain sing-box mixed proxy on loopback, straight out.
+/// The helper upstream: a plain sing-box mixed proxy on loopback, straight out (log level info:
+/// readiness is the `sing-box started` info line).
 fn helper_config(port: u16) -> Vec<u8> {
     serde_json::json!({
-        "log": { "level": "warn" },
+        "log": { "level": "info" },
         "inbounds": [{ "type": "mixed", "tag": "in", "listen": "127.0.0.1", "listen_port": port }],
         "outbounds": [{ "type": "direct", "tag": "direct" }]
     })
@@ -159,7 +161,8 @@ async fn elevated_tun_session_end_to_end() {
     // 2. The runtime in local-proxy mode, kill switch standard.
     let deps = RuntimeDeps {
         engines: Arc::new(RealEngines::new(singbox, xray, Some(logs.clone()))),
-        capture: Arc::new(TunCapture::new(protection.clone())),
+        tun: Some(Arc::new(TunCapture::new(protection.clone()))),
+        proxy: Arc::new(ProxyCapture::new()),
         inputs: Arc::new(NoStores),
         failover: None,
         confirmations: None,
@@ -172,6 +175,7 @@ async fn elevated_tun_session_end_to_end() {
             addr: format!("127.0.0.1:{port}"),
             kind: ProxyKind::Socks5,
         },
+        capture: CaptureKind::Tun,
         kill_switch: KillSwitchLevel::Standard,
         public_wifi: false,
         stealth: false,

@@ -2,10 +2,11 @@
 //!
 //! Inputs are plain data decided by the caller (tunnel runtime): the upstream (a local proxy,
 //! the outbound / endpoint emitted from a typed profile, or the two authenticated Xray slots),
-//! the TUN form agreed with the WFP layer, loopback listeners and the route / DNS fragments
+//! the capture (a TUN in the form agreed with the WFP layer, or an unprivileged loopback proxy
+//! the app points the system proxy at), loopback listeners and the route / DNS fragments
 //! built by `routing` (which also owns every process rule: own engines, third-party cores and
 //! split-tunnel apps). Key order is stable (`serde_json` `preserve_order`), so the same inputs
-//! always give the same text. Tags: [`crate::tags`].
+//! always give the same text. Tags: [`crate::tags`] and [`PROXY_IN`].
 mod dns;
 mod inbounds;
 mod outbounds;
@@ -13,6 +14,10 @@ mod route;
 
 #[cfg(test)]
 mod check;
+#[cfg(test)]
+mod live;
+#[cfg(test)]
+mod proxy_tests;
 #[cfg(test)]
 mod tests;
 
@@ -34,11 +39,14 @@ pub use dns::{bootstrap_resolver, usable_physical_dns};
 use crate::slot::{Slot, SlotEndpoint};
 use crate::tags::{DIRECT_OUT, DNS_BOOTSTRAP, PROXY_OUT};
 
+/// Tag of the proxy-capture inbound ([`Capture::Proxy`]).
+pub const PROXY_IN: &str = "proxy-in";
+
 /// Everything that shapes the generated JSON.
 #[derive(Debug, Clone)]
 pub struct ConfigInputs {
     pub upstream: Upstream,
-    pub tun: TunParams,
+    pub capture: Capture,
     pub listeners: Listeners,
     pub routing: RoutingParts,
     /// Physical adapters' IPv4 resolvers in priority order (`winnet::adapters::physical_dns_v4`);
@@ -125,6 +133,18 @@ impl UdpPolicy {
             block_quic: block_quic(p),
         }
     }
+}
+
+/// How traffic reaches the engine (NOADMIN.md §2: `routing_mode` Hard = `Tun`, Soft = `Proxy`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Capture {
+    /// The TUN inbound (`tun-in`); creating the adapter needs administrator rights.
+    Tun(TunParams),
+    /// A loopback `mixed` inbound ([`PROXY_IN`], HTTP + SOCKS on `127.0.0.1:port`, no
+    /// authentication) that needs no privileges. The app points the system proxy at it itself,
+    /// reversibly: sing-box's `set_system_proxy` is never used. Nothing that exists only for the
+    /// TUN is generated: no TUN DNS hijack and no physical interface binding.
+    Proxy { port: u16 },
 }
 
 /// The TUN inbound. The WFP layer and the TUN must agree (review winnet-wfp D1 / D2): pass
@@ -234,7 +254,10 @@ impl From<ConfigError> for AppError {
 /// Builds the whole configuration (sing-box reads it from stdin).
 pub fn build(i: &ConfigInputs) -> Result<Value, ConfigError> {
     let up = outbounds::upstream(&i.upstream)?;
-    let mut inbounds = vec![inbounds::tun(&i.tun, &up.exclude)?];
+    let mut inbounds = vec![match &i.capture {
+        Capture::Tun(t) => inbounds::tun(t, &up.exclude)?,
+        Capture::Proxy { port } => inbounds::proxy(*port),
+    }];
     inbounds.extend(inbounds::listeners(i)?);
     let dns = dns::section(i, &up)?;
     let route = route::section(i, &up)?;
@@ -273,9 +296,10 @@ pub fn select_mtu(stealth: bool, adaptive: AdaptiveMode, public_wifi: bool) -> u
 }
 
 /// SHA-256 over every input that shapes the JSON except the upstream's identity (profile,
-/// addresses, slots), the TUN alias, ports and secrets. Meaningful between two Xray-slot inputs
-/// only (the one upstream that switches without a restart): equal keys mean the running config
-/// can serve the other slot; never a proof of OS or security state.
+/// addresses, slots), the TUN alias, the app-owned listener ports and secrets. The proxy-capture
+/// port counts: the system proxy points at it. Meaningful between two Xray-slot inputs only (the
+/// one upstream that switches without a restart): equal keys mean the running config can serve
+/// the other slot; never a proof of OS or security state.
 pub fn compat_key(i: &ConfigInputs) -> [u8; 32] {
     let upstream = match &i.upstream {
         Upstream::LocalProxy { kind, .. } => json!({ "kind": "local-proxy", "proxy": kind }),
@@ -286,16 +310,22 @@ pub fn compat_key(i: &ConfigInputs) -> [u8; 32] {
             json!({ "kind": "xray-slots", "udp": udp.udp, "blockQuic": udp.block_quic })
         }
     };
+    let capture = match &i.capture {
+        Capture::Tun(t) => json!({
+            "tun": {
+                "mtu": t.mtu,
+                "ipv6": t.ipv6,
+                "dnsHijack": t.dns_hijack,
+                "stack": t.stack.as_str(),
+            }
+        }),
+        Capture::Proxy { port } => json!({ "proxy": { "port": port } }),
+    };
     let r = &i.routing;
     let canonical = json!({
-        "v": 1,
+        "v": 2,
         "upstream": upstream,
-        "tun": {
-            "mtu": i.tun.mtu,
-            "ipv6": i.tun.ipv6,
-            "dnsHijack": i.tun.dns_hijack,
-            "stack": i.tun.stack.as_str(),
-        },
+        "capture": capture,
         "probe": i.listeners.probe.is_some(),
         "dnsBootstrapIn": i.listeners.dns_bootstrap.is_some(),
         "routing": {

@@ -29,7 +29,6 @@
         "envRollbackFailed": "Could not restore the proxy settings. Retry the network restore."
       },
       "outcome": {
-        "softRetainUnconfirmed": "The previous Soft settings could not be confirmed after a failed refresh",
         "softModeSwitch": "Soft protection was turned off before another mode started",
         "cancelled": "The connection was cancelled",
         "timeout": "Protection start timed out — the connection was stopped",

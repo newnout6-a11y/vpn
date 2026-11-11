@@ -58,7 +58,7 @@ mod key {
     pub const SOFT_ROLLBACK_BEFORE_START: &str = "tunnel.lifecycle.soft.rollbackBeforeStart";
     pub const SOFT_APPLY_FAILED: &str = "tunnel.lifecycle.soft.applyFailed";
     pub const SOFT_ENV_ROLLBACK_FAILED: &str = "tunnel.lifecycle.soft.envRollbackFailed";
-    pub const OUTCOME_SOFT_LOST: &str = "tunnel.lifecycle.outcome.softRetainUnconfirmed";
+    pub const SOFT_STRICT: &str = "tunnel.lifecycle.soft.strictUnavailable";
     pub const OUTCOME_SOFT_MODE_SWITCH: &str = "tunnel.lifecycle.outcome.softModeSwitch";
     pub const OUTCOME_CANCELLED: &str = "tunnel.lifecycle.outcome.cancelled";
     pub const OUTCOME_TIMEOUT: &str = "tunnel.lifecycle.outcome.timeout";
@@ -76,15 +76,29 @@ const MAINTENANCE_BUDGET: Duration = DEFAULT_TIMEOUT;
 #[cfg(test)]
 const MAINTENANCE_BUDGET: Duration = Duration::from_secs(1);
 
-/// What to connect.
+/// What to connect. Hard targets capture through the TUN (elevated process only: otherwise the
+/// start answers `Permission`); Soft targets run the same engine behind a loopback mixed inbound
+/// and point the user-level tweaks ([`SoftProxy`]) at it (NOADMIN.md §2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectTarget {
-    /// sing-box TUN through a local upstream proxy (`host:port`).
+    /// Hard: sing-box TUN through a local upstream proxy (`host:port`).
     LocalProxy { addr: String, kind: ProxyKind },
-    /// A server of the server list; `None` = the active selection.
+    /// Hard: a server of the server list; `None` = the active selection.
     DirectVpn { profile_id: Option<String> },
-    /// Soft mode: user-level proxy settings only, no TUN.
+    /// Soft through a local upstream proxy (`host:port`, e.g. Happ's).
     Soft { addr: String, kind: ProxyKind },
+    /// Soft through a server of the server list; `None` = the active selection.
+    SoftVpn { profile_id: Option<String> },
+}
+
+impl ConnectTarget {
+    /// Soft mode (proxy capture plus the user-level tweaks).
+    pub fn is_soft(&self) -> bool {
+        matches!(
+            self,
+            ConnectTarget::Soft { .. } | ConnectTarget::SoftVpn { .. }
+        )
+    }
 }
 
 /// A connect request.
@@ -257,7 +271,7 @@ pub struct SessionView {
     pub profile_id: String,
     pub profile_name: String,
     pub mode: SessionMode,
-    /// Engine run of a TUN session (`None` for Soft).
+    /// Engine run of the session (Hard or Soft).
     pub generation: Option<u64>,
     /// Adaptive compatibility mode the engine was started with.
     pub adaptive: AdaptiveMode,
@@ -311,8 +325,8 @@ impl Lifecycle {
     }
 
     /// Connects. Refused while another operation runs (a strictly higher owner pre-empts a
-    /// running start), while the state does not allow a start (a Soft request may refresh a
-    /// connected Soft session), and while closing.
+    /// running start), while the state does not allow a start (connected: in either mode), and
+    /// while closing. Soft with the kill switch `strict` fails before anything is touched.
     pub async fn connect(&self, req: ConnectReq) -> Result<Done, ConnError> {
         let job = actor::Job::Connect {
             target: req.target,
@@ -322,8 +336,9 @@ impl Lifecycle {
         self.start(job, head, req.cancel).await
     }
 
-    /// Stops the tunnel and rolls back Soft mode. Joins a stop already in flight; refused only
-    /// while a start of a higher owner runs. Dropping the future stops waiting, not the rollback.
+    /// Rolls back the Soft tweaks, then stops the engines. Joins a stop already in flight;
+    /// refused only while a start of a higher owner runs. Dropping the future stops waiting, not
+    /// the rollback.
     pub async fn disconnect(&self, req: DisconnectReq) -> Result<Done, ConnError> {
         let (reply, rx) = oneshot::channel();
         self.send(actor::Cmd::Disconnect { req, reply });

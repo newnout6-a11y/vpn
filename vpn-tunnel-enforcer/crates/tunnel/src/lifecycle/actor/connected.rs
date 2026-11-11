@@ -15,20 +15,7 @@ impl Actor {
         };
         match up {
             Up::Idle => return,
-            Up::Soft { addr, kind } => {
-                let profile = SessionProfile::soft(&addr, kind);
-                // Identical refreshes stay one session; another address or protocol splits.
-                if self.session.as_ref().is_none_or(|s| s.profile != profile) {
-                    let ending = Captured::now(&self.deps);
-                    self.close_current(OutcomeKind::ServerSwitch, None, ending)
-                        .await;
-                    self.deps.forensics.start_session(profile.mode, &addr);
-                    let mut live = LiveSession::open(profile, Some(by), holder);
-                    live.soft = Some((addr, kind));
-                    self.session = Some(live);
-                }
-            }
-            Up::Tun {
+            Up::Run {
                 profile,
                 country,
                 generation,

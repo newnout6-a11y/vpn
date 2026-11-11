@@ -12,6 +12,30 @@ fn current_run(deps: &LifecycleDeps) -> Run {
     s.running.then_some((s.pid, s.started_at))
 }
 
+/// Capture of the running session (a switch or restart keeps it).
+fn running_capture(deps: &LifecycleDeps) -> CaptureKind {
+    let capture = deps.runtime.status().borrow().capture;
+    capture.unwrap_or(CaptureKind::Tun)
+}
+
+/// The session profile of `server` in the running mode.
+fn server_profile(server: &VpnProfile, capture: CaptureKind) -> SessionProfile {
+    match capture {
+        CaptureKind::Tun => SessionProfile::direct(server),
+        CaptureKind::Proxy => SessionProfile::soft_server(server),
+    }
+}
+
+/// A restart put a new run in place: in Soft the tweaks follow its port (`port` = where they
+/// point now; the port is kept across restarts, so normally nothing changes), then the actor
+/// confirms. A failed re-point is `touched`: the recovery stop rolls back and stops.
+async fn confirm_restart(ctx: &Ctx, up: Up, port: Option<u16>) -> Result<Up, Failure> {
+    if running_capture(&ctx.deps) == CaptureKind::Proxy {
+        point_tweaks(ctx, port).await?;
+    }
+    confirm(ctx, up).await
+}
+
 /// A failed restart that left its run untouched (the runtime refused before stopping it: no
 /// last start, unreadable settings, cancelled at entry) keeps the previous state; any other
 /// failure changed the tunnel.
@@ -41,11 +65,12 @@ pub(in crate::lifecycle) async fn switch(
     if !deps.runtime.status().borrow().running {
         return StartReport::done(Ok(Up::Idle));
     }
-    let profile = SessionProfile::direct(&choice.server);
+    let capture = running_capture(deps);
+    let profile = server_profile(&choice.server, capture);
     let mode = Mode::DirectVpn {
         profile: choice.server.clone(),
     };
-    let req = start_request(deps, mode, adaptive, ctx.owner);
+    let req = start_request(deps, mode, capture, adaptive, ctx.owner);
     let token = ctx.token.clone();
     let is_owner: OwnerCheck = Arc::new(move || !token.is_cancelled());
     let in_place = deps
@@ -53,7 +78,7 @@ pub(in crate::lifecycle) async fn switch(
         .switch_upstream(req.clone(), ctx.token.clone(), is_owner)
         .await;
     if let Some(receipt) = in_place {
-        let up = Up::Tun {
+        let up = Up::Run {
             profile,
             country: choice.country,
             generation: None,
@@ -72,10 +97,10 @@ pub(in crate::lifecycle) async fn switch(
         cancel: ctx.token.clone(),
         ..RestartOptions::default()
     };
-    let before = current_run(deps);
+    let (before, port) = (current_run(deps), session_port(deps));
     let result = match deps.runtime.restart_protected(reason, req, opts).await {
         Ok(receipt) => {
-            let up = Up::Tun {
+            let up = Up::Run {
                 profile,
                 country: choice.country,
                 generation: Some(receipt.generation),
@@ -83,7 +108,7 @@ pub(in crate::lifecycle) async fn switch(
                 adaptive,
                 warnings: receipt.warnings,
             };
-            confirm_tun(&ctx, up).await
+            confirm_restart(&ctx, up, port).await
         }
         Err(_) if ctx.token.is_cancelled() => Err(failed_restart(cancelled(), deps, before)),
         Err(e) => Err(failed_restart(
@@ -99,7 +124,7 @@ pub(in crate::lifecycle) async fn switch(
 /// unchanged), or a tunnel in an unproven state.
 async fn switched_in_place(ctx: &Ctx, receipt: SwitchReceipt, up: Up) -> Result<Up, Failure> {
     if receipt.outcome == SwitchOutcome::Success && receipt.verified() {
-        return confirm_tun(ctx, up).await;
+        return confirm(ctx, up).await;
     }
     for f in &receipt.failures {
         tracing::warn!(phase = ?f.phase, message = %f.message, "upstream switch step failed");
@@ -118,7 +143,7 @@ async fn switched_in_place(ctx: &Ctx, receipt: SwitchReceipt, up: Up) -> Result<
 
 /// Settings changed: the runtime re-applies its last start (a no-op when nothing runs).
 pub(in crate::lifecycle) async fn restart_last(ctx: Ctx, reason: String) -> StartReport {
-    let before = current_run(&ctx.deps);
+    let (before, port) = (current_run(&ctx.deps), session_port(&ctx.deps));
     let result = match ctx.deps.runtime.restart_with_last(reason).await {
         Ok(None) => Ok(Up::Idle),
         Ok(Some(receipt)) => {
@@ -128,7 +153,7 @@ pub(in crate::lifecycle) async fn restart_last(ctx: Ctx, reason: String) -> Star
                 adaptive: None,
                 warnings: receipt.warnings,
             };
-            confirm_tun(&ctx, up).await
+            confirm_restart(&ctx, up, port).await
         }
         Err(e) => Err(failed_restart(
             Failure::new(ConnError::Failed(e)),
@@ -162,12 +187,12 @@ pub(in crate::lifecycle) async fn restart_adaptive(
     };
     let reason = format!("adaptive restart: {mode:?}");
     let server = choice.as_ref().map(|c| c.server.clone());
-    let before = current_run(deps);
+    let (before, port) = (current_run(deps), session_port(deps));
     let result = match deps.runtime.restart_adaptive(mode, reason, server).await {
         Ok(receipt) => {
             let up = match choice {
-                Some(choice) => Up::Tun {
-                    profile: SessionProfile::direct(&choice.server),
+                Some(choice) => Up::Run {
+                    profile: server_profile(&choice.server, running_capture(deps)),
                     country: choice.country,
                     generation: Some(receipt.generation),
                     engine: Some(receipt.engine),
@@ -181,7 +206,7 @@ pub(in crate::lifecycle) async fn restart_adaptive(
                     warnings: receipt.warnings,
                 },
             };
-            confirm_tun(&ctx, up).await
+            confirm_restart(&ctx, up, port).await
         }
         Err(e) => Err(failed_restart(
             Failure::new(ConnError::Failed(e)),

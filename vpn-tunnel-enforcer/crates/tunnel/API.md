@@ -8,7 +8,7 @@ the pure state machine (`fsm`), session outcomes and the connection history (`ou
 `tunnel-lifecycle`, `tunnel-runtime`) are build scaffolding; the default enables all.
 
 ```rust
-pub const LOCALES: &[(&str, &str)];   // (ru, en) per fragment, file-name order: fsm, history, lifecycle, runtime
+pub const LOCALES: &[(&str, &str)];   // (ru, en) per fragment, file-name order: noadmin-tunnel, fsm, history, lifecycle, runtime
 ```
 The app registers it with `vpnte_base::i18n::init` after the UI's base layer. Every user-facing
 text is a `Msg` (render with `vpnte_base`'s lookup or `outcome::render`); English strings in this
@@ -25,8 +25,10 @@ pub enum Mode { LocalProxy { addr: String, kind: ProxyKind }, DirectVpn { profil
 impl Mode { pub fn kind(&self) -> ModeKind }
 pub enum ModeKind { LocalProxy, DirectVpn }                         // "localProxy" / "directVpn"
 pub enum Origin { User, Schedule, Rotation, Adaptive, Recovery }     // all but Recovery reset the crash budget
-pub struct StartRequest { pub mode: Mode, pub kill_switch: KillSwitchLevel, pub public_wifi: bool,
-    pub stealth: bool, pub adaptive: AdaptiveMode, pub engine: EnginePref, pub origin: Origin }
+pub enum CaptureKind { Tun, Proxy }                                  // "tun" / "proxy"; settings routing_mode Hard / Soft
+pub struct StartRequest { pub mode: Mode, pub capture: CaptureKind, pub kill_switch: KillSwitchLevel,
+    pub public_wifi: bool, pub stealth: bool, pub adaptive: AdaptiveMode, pub engine: EnginePref,
+    pub origin: Origin }                                             // capture: a strategy the host lacks -> Permission
 pub struct StartReceipt { pub generation: u64, pub pid: u32, pub started_at: UnixMs, pub engine: Engine,
     pub warnings: Vec<Msg> }
 pub struct StopOptions { pub preserve_protection: bool, pub preserve_last: bool }   // Default = full stop
@@ -41,10 +43,12 @@ pub struct TunStatus { pub running: bool, pub mode: Option<ModeKind>, pub proxy_
     pub proxy_type: Option<ProxyKind>, pub profile_name: Option<String>, pub protocol: Option<String>,
     pub pid: Option<u32>, pub warning: Option<Msg>, pub proxy_reachable: bool /* Default true */,
     pub started_at: Option<UnixMs>, pub restart_attempt: u8,
+    pub capture: Option<CaptureKind> /* Some while a session runs; omitted from JSON when None */,
     pub session: Option<SessionEndpoints> /* #[serde(skip)]: secrets never serialized */ }
 pub struct SessionEndpoints { pub clash_port: u16, pub clash_secret: String, pub direct: ProxyEndpoint,
     pub probe: Option<ProxyEndpoint>, pub tun_luid: Option<u64>, pub tun_alias: Option<String>,
-    pub logs: Vec<PathBuf> }                                         // Debug hides secrets; no serde
+    pub proxy_port: Option<u16> /* mixed inbound of a proxy capture */, pub logs: Vec<PathBuf> }
+                                                                     // Debug hides secrets; no serde
 pub struct ProxyEndpoint { pub port: u16, pub user: String, pub pass: String }
 pub enum TunStatusKind { Stopping, Adapting, Stopped, Running, KillSwitchActive,
     Restarting { attempt: u8, max: u8 }, ProxyDown { reason: Msg }, Error { warning: Msg },
@@ -105,10 +109,11 @@ pub struct TunnelSnapshot { pub version: u8, pub revision: u64, pub state: Tunne
     pub process_state: ProcessState, pub proxy_status: ProxyStatus, pub pid: Option<u32>,
     pub started_at: Option<UnixMs>, pub competing_tun: Option<String>, pub cleanup_required: bool,
     pub operation: Option<OpMeta> }                                  // serde camelCase (old wire shape)
-pub struct Evidence { pub running: bool, pub pid: Option<u32>, pub soft_applied: bool, pub started_at: Option<UnixMs> }
+pub struct Evidence { pub running: bool, pub pid: Option<u32>, pub soft_applied: bool, pub started_at: Option<UnixMs>,
+    pub proxy_capture: bool }                                       // the running engine serves Soft (TunStatus::capture)
 impl Evidence { pub fn from_status(status: &TunStatus, soft_applied: bool) -> Self }
 pub struct Invalid;                                                  // Into<AppError> = Conflict
-impl Fsm { new, snapshot, can_start, can_rotate, can_refresh_soft,
+impl Fsm { new, snapshot, can_start, can_rotate,
     can_confirm_start(Option<Evidence>), can_confirm_stop(Option<Evidence>),
     op_changed(&OpMeta, ..), fault(FaultState, ..), keep_previous(OpId, ..), runtime(&TunStatusKind, ..),
     native_start_began(u64), native_start_finished(u64, bool, ..), upstream_began(u64, ..),
@@ -116,6 +121,9 @@ impl Fsm { new, snapshot, can_start, can_rotate, can_refresh_soft,
                                        // `..` = the current Option<Evidence>; mutators return Result<(), Invalid>
                                        // except `fault` (always accepted)
 ```
+Proofs: Hard = our engine with a real PID and the TUN capture; Soft (NOADMIN.md §2) = our engine
+with the proxy capture AND the applied tweaks (`soft_applied`); the mode follows `proxy_capture`.
+A connect while connected is refused in both modes (the old Soft refresh is gone).
 Used inside the lifecycle; others only read `TunnelSnapshot` (`Lifecycle::snapshot()`). A start-up
 fault is seeded with `fault(FaultState::Unknown, ..)` on a fresh machine (the lifecycle's `fault`).
 `fsm::Evidence` (OS evidence) is unrelated to `outcome::Evidence` (session facts in history).
@@ -208,8 +216,11 @@ app reads (`list` / `filter` / `stats` / exports, `subscribe` for changes), clea
 ```rust
 pub const DEFAULT_TIMEOUT: Duration;                                 // 120 s per lane operation
 pub use crate::api::TUN_SETUP_KEY_PREFIX;
-pub enum ConnectTarget { LocalProxy { addr: String, kind: ProxyKind },
-    DirectVpn { profile_id: Option<String> /* None = active server */ }, Soft { addr: String, kind: ProxyKind } }
+pub enum ConnectTarget { LocalProxy { addr: String, kind: ProxyKind },   // Hard (TUN): elevated host only
+    DirectVpn { profile_id: Option<String> /* None = active server */ },
+    Soft { addr: String, kind: ProxyKind },                          // Soft: engine + proxy capture + tweaks
+    SoftVpn { profile_id: Option<String> } }
+impl ConnectTarget { pub fn is_soft(&self) -> bool }
 pub struct ConnectReq { pub target: ConnectTarget, pub owner: Owner, pub source: Source,
     pub correlation: Option<CorrelationId>, pub adaptive: AdaptiveMode, pub timeout: Duration,
     pub cancel: Option<CancellationToken> }
@@ -260,7 +271,7 @@ pub struct ServerChoice { pub server: VpnProfile, pub country: Option<String> }
 pub trait ProfileSource: Send + Sync { fn resolve(&self, id: Option<&str>) -> Option<ServerChoice>; }
 #[async_trait] pub trait SoftProxy: Send + Sync { fn applied(&self) -> Option<bool>;
     async fn apply(&self, addr: &str, kind: ProxyKind) -> AppResult<()>; async fn rollback(&self) -> AppResult<()>;
-    async fn is_configured(&self, addr: &str, kind: ProxyKind) -> AppResult<bool>; }
+    async fn is_configured(&self, addr: &str, kind: ProxyKind) -> AppResult<bool>; }   // read-back proof of Soft
 pub trait Monitor: Send + Sync { fn suppress_leak_tests(&self, span: Duration); fn start(&self, generation: Option<u64>);
     fn stop(&self); fn egress_ip(&self) -> Option<String>; }
 #[async_trait] pub trait Forensics: Send + Sync { fn start_session(&self, mode: SessionMode, target: &str);
@@ -281,12 +292,27 @@ start origin from the owner. Not enforced here (the app's automation `Coordinato
 failed `rotate` (on failure: still connected on the old server -> report "not started", else
 `connect` the previous server).
 
+Soft (NOADMIN.md §2): a Soft connect starts the runtime with `CaptureKind::Proxy` for either upstream,
+then `SoftProxy::apply("127.0.0.1:<SessionEndpoints::proxy_port>", Http)` and `is_configured` must read
+it back; only then is it published (FSM: engine + tweaks). A failed apply / read-back is a failed start
+with a row; the recovery stop rolls back what was applied and stops the engine. `strict` in Soft is
+`ConnError::Failed(Validation, tunnel.lifecycle.soft.strictUnavailable)` before anything is touched.
+Disconnect / shutdown roll the tweaks back FIRST, then stop the engines. A Hard start rolls leftover
+tweaks back first (refused rollback = failed start, L-15); a running engine of an earlier run gets the
+full stop. Switch / restarts keep the capture; after a new run the tweaks follow its port (normally
+unchanged: kept, read back). Engine lost for good (runtime `Stopped` / `KillSwitchActive` outside an
+operation): the session ends; kill switch `off` -> tweaks rolled back at once + notice `softRestored`;
+`standard` -> tweaks stay on the dead port, state `blocked`, notice `crashBlocked`, until reconnect /
+disconnect.
+
 ## `runtime` — the actor and its seams
 ```rust
 #[derive(Clone)] pub struct TunnelHandle;                           // implements api::Runtime
 impl TunnelHandle { pub fn spawn(deps: RuntimeDeps) -> Self }        // inside a tokio runtime
-#[derive(Clone)] pub struct RuntimeDeps { pub engines: Arc<dyn Engines>, pub capture: Arc<dyn Capture>,
-    pub inputs: Arc<dyn InputsSource>, pub failover: Option<Arc<dyn Failover>>,
+#[derive(Clone)] pub struct RuntimeDeps { pub engines: Arc<dyn Engines>,
+    pub tun: Option<Arc<dyn Capture>> /* None = not elevated: Tun starts answer Permission */,
+    pub proxy: Arc<dyn Capture> /* ProxyCapture */, pub inputs: Arc<dyn InputsSource>,
+    pub failover: Option<Arc<dyn Failover>>,
     pub confirmations: Option<Arc<dyn Confirmations>>, pub timings: Timings }
 pub struct Timings { pub ready, capture_ready, exit, release: Duration, pub backoff: [Duration; 3] /* 2/5/10 s */,
     pub stable /* 30 s */, proxy_watch /* 5 s */, proxy_probe, proxy_listen, egress_watch /* 15 s */,
@@ -303,7 +329,8 @@ pub struct InactiveSplit { pub name: String, pub path: String, pub missing: bool
     async fn next_live_sibling(&self, cancel: &CancellationToken) -> Option<VpnProfile>;
     fn commit(&self, profile_id: &str); }
 pub trait Confirmations: Send + Sync { fn confirmed_within(&self, age: Duration) -> bool; } // monitoring
-// how traffic is captured (the only module that knows TUN / WFP / adapters)
+// how traffic is captured (the only module that knows TUN / WFP / adapters); chosen per start by
+// StartRequest::capture; switching strategy first releases what the old one still holds
 #[async_trait] pub trait Capture: Send + Sync {
     async fn prepare(&self, req: &StartRequest, avoid: &[String]) -> AppResult<CapturePlan>;
     fn config(&self, plan: &CapturePlan, parts: &EngineParts) -> Result<(Value, [u8; 32]), ConfigError>;
@@ -314,15 +341,17 @@ pub trait Confirmations: Send + Sync { fn confirmed_within(&self, age: Duration)
     async fn release(&self) -> AppResult<()>;
     async fn wait_gone(&self, plan: &CapturePlan, timeout: Duration, cancel: &CancellationToken) -> bool;
     async fn check(&self, proof: &CaptureProof) -> CaptureCheck; }
-pub struct CapturePlan { pub alias: Option<String>, pub form: TunForm, pub stack: TunStack, pub mtu: u16,
-    pub guard: KillSwitchLevel /* what the protection enforces */, pub warnings: Vec<Msg> }
-pub struct CaptureProof { pub luid: Option<u64>, pub alias: Option<String> }
-pub enum CaptureCheck { Clear, Competing(String), Unknown }
+pub struct CapturePlan { pub alias: Option<String> /* TUN alias, or the mixed port as text */, pub form: TunForm,
+    pub stack: TunStack, pub mtu: u16, pub guard: KillSwitchLevel /* what the protection enforces */,
+    pub warnings: Vec<Msg> }
+pub struct CaptureProof { pub luid: Option<u64>, pub alias: Option<String>, pub port: Option<u16> }
+pub enum CaptureCheck { Clear, Competing(String), Unknown, Lost }  // Lost: the core is ended as a crash
 pub struct EngineParts { pub upstream: Upstream, pub listeners: Listeners, pub routing: RoutingParts,
     pub phys_dns: Vec<Ipv4Addr> }
 pub struct TunForm { pub dual_stack: bool, pub dns_hijack: bool }
 pub fn tun_form(level: KillSwitchLevel, leak_protection: bool) -> TunForm;  // WFP guard -> dual stack + native DNS
 pub struct TunCapture;  impl TunCapture { pub fn new(protection: Arc<vpnte_winnet::wfp::Protection>) -> Self }
+pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self }   // + Default; needs no privileges
 // engines (real: RealEngines over vpnte_engine; tests: fakes in runtime/tests)
 #[async_trait] pub trait CoreProc: Send + Sync { fn pid(&self) -> u32;
     async fn wait_ready(&self, timeout: Duration, cancel: &CancellationToken) -> Result<(), StartError>;
@@ -356,9 +385,15 @@ Crash policy: auto-restart (origin `Recovery`, `Restarting{n,3}` first, backoff 
 reset after 30 s stable), then failover once (when a `Failover` is given), then terminal: kill
 switch off -> release + `Stopped`; strict, or standard with auto-restart off -> keep blocking
 (`KillSwitchActive`); standard + budget exhausted -> release + `Stopped`. Watchdogs never stop the
-tunnel (`ProxyDown` / `Running`). The runtime never calls `Protection::set_level`: the owner of the
-settings keeps the level in sync. `TunStatus::session` carries the Clash secret and the loopback
-proxy passwords: serde skips it and `Debug` hides them; never format its fields into a log.
+tunnel (`ProxyDown` / `Running`). Proxy capture: the plan guard is the request's kill switch (`off` /
+`standard`; `strict` -> `Validation`, `tunnel.runtime.proxy.strictUnavailable`), nothing to engage or
+release; the mixed port is kept from the first start until a full stop / failed start (crash
+restarts, preserved stops and protected restarts reuse it; an unverified release takes a fresh
+one); `check` = the port accepts (3 probes), `Lost` ends the core as a crash. A Tun start without
+`RuntimeDeps::tun` -> `Permission`, `tunnel.runtime.tunUnavailable`, before anything runs.
+The runtime never calls `Protection::set_level`: the owner of the settings keeps the level in sync.
+`TunStatus::session` carries the Clash secret and the loopback proxy passwords: serde skips it and
+`Debug` hides them; never format its fields into a log.
 
 ## `switch` — protected upstream switch (used by the runtime)
 ```rust
@@ -375,7 +410,8 @@ pub async fn run_protected_switch<O: SwitchOps + Send>(previous: Slot, candidate
 // `Arc<wfp::Protection>` after `startup()`; `app` = the app's implementations of the traits.
 let runtime = TunnelHandle::spawn(RuntimeDeps {
     engines: Arc::new(RealEngines::new(singbox_exe, xray_exe, Some(logs_dir))),
-    capture: Arc::new(TunCapture::new(protection.clone())),
+    tun: elevated.then(|| Arc::new(TunCapture::new(protection.clone())) as Arc<dyn Capture>),
+    proxy: Arc::new(ProxyCapture::new()),                  // Soft: always available
     inputs: app.clone(),                                   // impl InputsSource over the stores
     failover: Some(app.clone()), confirmations: Some(app.clone()),
     timings: Timings::default(),
@@ -388,7 +424,7 @@ let lifecycle = Lifecycle::spawn(LifecycleDeps {
 lifecycle.fault(FaultState::Unknown);                      // only when start-up recovery found leftovers
 
 // UI "connect" / "disconnect" / server change
-let target = ConnectTarget::DirectVpn { profile_id: None };            // the active server
+let target = ConnectTarget::SoftVpn { profile_id: None };   // the active server; Hard: DirectVpn
 let done = lifecycle.connect(ConnectReq::new(target, Owner::Manual, Source::Ui)).await?;  // done.warnings
 lifecycle.disconnect(DisconnectReq::new(StopCause::User, Owner::Manual, Source::Ui)).await?;
 lifecycle.switch_upstream(SwitchReq::new("srv-b", Owner::Manual, Source::Ui)).await?;
@@ -406,8 +442,9 @@ cleaning up in the background. `Done::warnings` / `ConnError::warnings` are extr
   `tunnel.lifecycle.notice.<name>`): `connected`, `restored` (runtime reconnect), `disconnected`,
   `stopFailed`, `stopped` (unexpected end; body = outcome headline), `crashRestarting`
   (`attempt`, `max`), `crashBlocked`, `failover` (`name`), `restartFailed` (body = runtime warning),
-  `internalError` (a lane effect panicked: the lane is released and the state reads `unknown`,
-  A-01). Rotation, schedule and tray toasts are their owners'. The notifier applies the user's
+  `internalError` (a lane effect panicked: the lane is released, A-01; whatever the start brought
+  up is stopped by the recovery stop), `softRestored` (a Soft engine was lost for good with the kill
+  switch off: the tweaks were rolled back, programs connect directly). Rotation, schedule and tray toasts are their owners'. The notifier applies the user's
   `NoticeKind` switches; the lifecycle does not.
 - **`maintenance`** past the 120 s lane budget: the action is dropped, the caller gets
   `ConnError::Timeout` (`tunnel.lifecycle.lane.maintenanceTimeout`) and the state reads `unknown`
@@ -426,6 +463,7 @@ cleaning up in the background. `Done::warnings` / `ConnError::warnings` are extr
 | `tunnel.warning.{foreignTunUnverified,releaseUnverified}` | `TunWarning::msg` | — |
 | `tunnel.runtime.{alreadyRunning,actorGone,notRunning,noLastStart,previousNotStopped,proxyAddressInvalid,proxyNotListening,profileUnusable,egressUnknown,fullStopRan,stopIncomplete,restartStopFailed,restartCancelled,switchUnconfirmed}` | runtime errors / warnings | `addr` (`proxyNotListening`) |
 | `tunnel.runtime.tunSetup.{adapter,protection,routes}` | TUN bring-up failures (`TUN_SETUP_KEY_PREFIX`) | — |
+| `tunnel.runtime.tunUnavailable`, `tunnel.runtime.proxy.{strictUnavailable,notAccepting}` | strategy refusals, proxy readiness | `port` (`notAccepting`) |
 | `tunnel.runtime.cleanup.{exitUnproven,xray,protection}` | compensation / stop warnings, `Error{warning}` | — |
 | `tunnel.runtime.watchdog.{proxyDown,upstreamDown,slotExited}` | `ProxyDown{reason}` | `addr` / `name` / — |
 | `tunnel.lifecycle.lane.*`, `.server.{none,unavailable}`, `.soft.*` | `ConnError` messages | — |
@@ -434,10 +472,14 @@ cleaning up in the background. `Done::warnings` / `ConnError::warnings` are extr
 | `tunnel.outcome.verbatim`, `tunnel.outcome.headline.*` | `SessionOutcome::headline` (plurals on `count`) | `text`, `code`, `count`, … |
 | `tunnel.history.{invalidEntry,legacyDropped}` | `History::add`, `LegacyImport::warning` | `count` |
 
-## Elevation and privilege model
+## Elevation and privilege model (NOADMIN.md: current phase, no helper service)
 Needs nothing: `api`, `fsm`, `outcome`, `history`, `lifecycle`, `switch`; of the runtime the actor,
-`RealEngines` (spawning sing-box / Xray, Clash API, IP echo, listener owner lookup) and
-`TunCapture::prepare` / `check` (adapter and registry reads). Needs elevation: the TUN capture.
+`RealEngines` (spawning sing-box / Xray, Clash API, IP echo, listener owner lookup), the whole
+`ProxyCapture` (Soft mode: loopback mixed inbound; proven unelevated by
+`runtime/tests/live.rs`) and `TunCapture::prepare` / `check` (adapter and registry reads). Needs
+elevation: the TUN capture. The host passes `RuntimeDeps::tun = None` when the process is not
+elevated, so a Hard start answers `Permission` (`tunnel.runtime.tunUnavailable`) up front; the
+paragraph below is what happens if a `TunCapture` is supplied to an unelevated process anyway.
 sing-box creates the Wintun adapter (administrators only) and `TunCapture::begin` / `ready` /
 `lost` / `release` change winnet's WFP `Protection`. Nothing checks elevation up front (libraries
 never self-elevate, CONTRACT §1), so an unelevated start ends like this:
@@ -445,8 +487,7 @@ never self-elevate, CONTRACT §1), so an unelevated start ends like this:
   `ErrorKind::Permission` (winnet `AccessDenied`) and the start is refused before any engine runs;
 - kill switch `off` and leak protection off: no WFP filter is wanted, nothing refuses the start, and
   it fails when sing-box cannot create its adapter: sing-box's exit (`engine.process.singboxExited`,
-  kind `Internal`), not `Permission`. Never run unelevated on this machine; the `noadmin-*`
-  packages decide how the app reports TUN as unavailable without service or elevation.
+  kind `Internal`), not `Permission`. Hence the app must not supply `tun` unelevated.
 
 Per CONTRACT §1 the privileged half (`TunnelHandle` + `TunCapture` + `RealEngines`) is meant to run
 in the helper service `vpnte-service` or in an elevated process. Inputs come through `RuntimeDeps`
@@ -456,8 +497,6 @@ secrets), so the wire types of that split are still to be written. The split its
 is not done here.
 
 ## Not implemented / not run
-- Proxy capture (unprivileged): a second `Capture` with a loopback mixed inbound, and the engine
-  builder it needs (`singbox_config::build` always emits the TUN). Follow-up package.
 - Local-proxy full-tunnel validation (public IP via the proxy vs direct): a probe before
   `connect`, not in the runtime (it only checks the listener and its owner).
 - Routing-plan decision table and bootstrap routes; engine log size rotation; the window focus of
@@ -468,6 +507,9 @@ is not done here.
   `cargo test -p vpnte-tunnel -- --ignored elevated_`), so `TunCapture` and `RealEngines`' network
   reads run only there. Known leftover: sing-tun's `mixed` stack adds a Windows Firewall rule
   `sing-tun (<engine path>)` nobody removes (cleanup crate's job).
+- Soft mode against the real per-user system proxy: not run (the `SoftProxy` is the app's tweak
+  journal; every test uses a fake). The real unelevated proxy capture IS run
+  (`runtime/tests/live.rs`: sing-box + `RealEngines` + `ProxyCapture`, loopback only).
 - Not exercised by tests: the lifecycle's session rule "wall-clock end, monotonic duration" under a
   moved system clock (§7.11 calendar correction); the race "stop queued while the crash backoff fires"
   (`select!` picks among ready branches; covered by reasoning and `stop_cancels_a_pending_restart`).

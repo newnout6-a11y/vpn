@@ -1,0 +1,12 @@
+{
+  "automation": {
+    "tweaks": {
+      "target": {
+        "systemProxy": {
+          "name": "System proxy",
+          "warning": "While Soft mode is on, the Windows proxy settings point at the app; programs that ignore them go direct. The previous settings come back when it is turned off."
+        }
+      }
+    }
+  }
+}

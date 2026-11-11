@@ -5,7 +5,7 @@ use super::*;
 use crate::test_support::TempDir;
 use crate::tweaks::journal::{Journal, no_registry};
 use crate::tweaks::soft::{SOFT_FEATURES, SoftSystem};
-use crate::tweaks::test_support::Fake;
+use crate::tweaks::test_support::{Fake, FakeProxy};
 
 fn sz(s: &str) -> Val {
     Val::Sz(s.into())
@@ -156,6 +156,7 @@ fn old_files_are_cleaned_exactly() {
     std::fs::write(foreign.join("other.xml"), OLD_OTHER_XML).unwrap();
 
     let sys = SoftSystem {
+        proxy: FakeProxy::with(Default::default()),
         env: UserEnv::under(r"Software\VPNTE-Test-tweaks-unused"),
         git: None,
         gradle_home: None,

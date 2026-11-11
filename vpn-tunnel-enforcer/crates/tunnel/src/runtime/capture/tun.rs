@@ -150,6 +150,7 @@ impl Capture for TunCapture {
         let proof = CaptureProof {
             luid: Some(tun.luid),
             alias: Some(tun.alias.clone()),
+            port: None,
         };
         *self.current.lock() = Some(tun);
         Ok(proof)
@@ -216,13 +217,13 @@ pub(crate) fn tun_config(
 ) -> Result<(Value, [u8; 32]), ConfigError> {
     let inputs = ConfigInputs {
         upstream: parts.upstream.clone(),
-        tun: TunParams {
+        capture: singbox_config::Capture::Tun(TunParams {
             alias: plan.alias.clone().unwrap_or_default(),
             mtu: plan.mtu,
             ipv6: plan.form.dual_stack,
             dns_hijack: plan.form.dns_hijack,
             stack: plan.stack,
-        },
+        }),
         listeners: parts.listeners.clone(),
         routing: parts.routing.clone(),
         phys_dns: parts.phys_dns.clone(),

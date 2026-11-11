@@ -68,10 +68,23 @@ pub enum Origin {
     Recovery,
 }
 
+/// How a session takes traffic (NOADMIN.md §2; settings `routing_mode`: Hard = `Tun`, Soft =
+/// `Proxy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CaptureKind {
+    /// The whole machine through our TUN, guarded by WFP (needs an elevated process).
+    Tun,
+    /// A loopback `mixed` inbound the user-level system proxy points at (no privileges).
+    Proxy,
+}
+
 /// Everything one start needs. Kept by the runtime as "last start" for restarts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StartRequest {
     pub mode: Mode,
+    /// How traffic is captured; a strategy the host did not supply answers `Permission`.
+    pub capture: CaptureKind,
     /// Kill-switch level for this run (`Off` = no WFP protection).
     pub kill_switch: KillSwitchLevel,
     /// Public Wi-Fi compatibility (TUN MTU 1380).
@@ -185,6 +198,9 @@ pub struct TunStatus {
     /// Start of this run (UI uptime).
     pub started_at: Option<UnixMs>,
     pub restart_attempt: u8,
+    /// How the running session takes traffic (`None` while nothing runs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture: Option<CaptureKind>,
     /// What the app needs to observe the running session. Holds secrets: never serialized
     /// (the status keeps the old wire shape, which had no session).
     #[serde(skip)]
@@ -206,6 +222,7 @@ impl Default for TunStatus {
             proxy_reachable: true,
             started_at: None,
             restart_attempt: 0,
+            capture: None,
             session: None,
         }
     }
@@ -242,6 +259,9 @@ pub struct SessionEndpoints {
     /// LUID of our TUN adapter (interface counters are read by LUID, never by alias).
     pub tun_luid: Option<u64>,
     pub tun_alias: Option<String>,
+    /// Unauthenticated loopback `mixed` inbound of a proxy capture (`127.0.0.1:port`): where the
+    /// Soft-mode system proxy points.
+    pub proxy_port: Option<u16>,
     /// Engine log files of this session (`sing-box.log`, `xray-a.log`, ...).
     pub logs: Vec<std::path::PathBuf>,
 }
@@ -254,6 +274,7 @@ impl fmt::Debug for SessionEndpoints {
             .field("probe", &self.probe)
             .field("tun_luid", &self.tun_luid)
             .field("tun_alias", &self.tun_alias)
+            .field("proxy_port", &self.proxy_port)
             .field("logs", &self.logs)
             .finish_non_exhaustive()
     }

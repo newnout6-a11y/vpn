@@ -51,7 +51,7 @@ impl Actor {
             }
             _ => {
                 let released = if holding {
-                    self.deps.capture.release().await
+                    self.capture.release().await
                 } else {
                     Ok(())
                 };

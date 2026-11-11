@@ -41,6 +41,14 @@ fn direct(id: Option<&str>, owner: Owner) -> ConnectReq {
     ConnectReq::new(target, owner, Source::Ui)
 }
 
+/// Soft mode through the server `id` (`None` = the active server).
+fn soft_vpn(id: Option<&str>, owner: Owner) -> ConnectReq {
+    let target = ConnectTarget::SoftVpn {
+        profile_id: id.map(str::to_owned),
+    };
+    ConnectReq::new(target, owner, Source::Ui)
+}
+
 fn user_stop() -> DisconnectReq {
     DisconnectReq::new(StopCause::User, Owner::Manual, Source::Ui)
 }
@@ -60,6 +68,7 @@ fn notices_are_localized() {
         ("failover", true),
         ("restartFailed", false),
         ("internalError", true),
+        ("softRestored", true),
     ] {
         let title = format!("tunnel.lifecycle.notice.{name}.title");
         let body = format!("tunnel.lifecycle.notice.{name}.body");

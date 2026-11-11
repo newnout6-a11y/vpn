@@ -148,6 +148,7 @@ pub(super) fn endpoints(
         probe: l.probe.as_ref().map(proxy_endpoint),
         tun_luid: proof.luid,
         tun_alias: proof.alias.clone(),
+        proxy_port: proof.port,
         logs,
     }
 }

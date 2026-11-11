@@ -56,13 +56,6 @@ impl Fsm {
             }
         } else if op.kind == OpKind::Rotation && kept && self.can_retain_rotation(e) {
             rotation_end
-        } else if op.kind == OpKind::Connect
-            && op.status == OpStatus::Error
-            && op.category != Some(ErrorKind::Timeout)
-            && kept
-            && self.can_retain_soft(e)
-        {
-            TunnelState::Connected
         } else if matches!(self.snap.state, TunnelState::Blocked | TunnelState::Unknown) {
             self.snap.state
         } else {
@@ -70,15 +63,12 @@ impl Fsm {
         };
         self.kept = None;
         let running = e.is_some_and(|e| e.running);
+        let mode = e.map_or(TunnelMode::Tun, |e| e.mode());
         self.commit(e, |s| {
             s.operation = Some(op.clone());
             s.transition = None;
             s.state = state;
-            s.mode = (state == TunnelState::Connected).then_some(if running {
-                TunnelMode::Tun
-            } else {
-                TunnelMode::Soft
-            });
+            s.mode = (state == TunnelState::Connected).then_some(mode);
             s.cleanup_required = state != TunnelState::Disconnected;
             s.proxy_status = if running {
                 ProxyStatus::Running
@@ -107,23 +97,13 @@ impl Fsm {
         });
     }
 
-    /// The running operation's effect failed but read back the previous protection unchanged:
-    /// a failed Soft refresh (connect while connected in Soft mode) or a failed rotation.
+    /// The running rotation's effect failed but read back the previous protection unchanged.
     /// Accepted only while that operation runs and the evidence still proves the old state.
     pub fn keep_previous(&mut self, op: OpId, e: Option<Evidence>) -> Result<(), Invalid> {
         let Some(cur) = self.running_op().filter(|cur| cur.id == op) else {
             return Err(Invalid);
         };
-        let allowed = match cur.kind {
-            OpKind::Rotation => self.can_retain_rotation(e),
-            OpKind::Connect => {
-                self.snap.state == TunnelState::Connected
-                    && self.snap.mode == Some(TunnelMode::Soft)
-                    && self.snap.transition == Some(Transition::Connecting)
-                    && self.can_retain_soft(e)
-            }
-            _ => false,
-        };
+        let allowed = cur.kind == OpKind::Rotation && self.can_retain_rotation(e);
         if !allowed {
             return Err(Invalid);
         }
@@ -231,7 +211,7 @@ impl Fsm {
                 TunnelState::Error
             };
             s.transition = None;
-            s.mode = confirmed.then_some(TunnelMode::Tun);
+            s.mode = e.filter(|_| confirmed).map(|e| e.mode());
             s.proxy_status = if confirmed {
                 ProxyStatus::Running
             } else {
@@ -242,7 +222,7 @@ impl Fsm {
     }
 
     /// An in-place upstream switch `generation` (strictly increasing, independent of native
-    /// generations) began on an idle, connected, proven TUN.
+    /// generations) began on an idle, connected, proven engine run (Hard or Soft).
     pub fn upstream_began(&mut self, generation: u64, e: Option<Evidence>) -> Result<(), Invalid> {
         let Some(evidence) = e.filter(Evidence::native_ready) else {
             return Err(Invalid);
@@ -252,7 +232,7 @@ impl Fsm {
             || self.running_op().is_some()
             || self.snap.transition.is_some()
             || self.snap.state != TunnelState::Connected
-            || self.snap.mode != Some(TunnelMode::Tun)
+            || self.snap.mode != Some(evidence.mode())
         {
             return Err(Invalid);
         }
@@ -266,7 +246,7 @@ impl Fsm {
     }
 
     /// The pending upstream switch finished. Confirms only if it was verified and the very same
-    /// TUN process survived it.
+    /// engine run survived it with the same proofs (the Soft tweaks included).
     pub fn upstream_finished(
         &mut self,
         generation: u64,
@@ -283,9 +263,7 @@ impl Fsm {
             return Err(Invalid);
         }
         self.upstream = None;
-        let retained = e.is_some_and(|e| {
-            e.running && e.pid == before.pid && e.started_at == before.started_at && !e.soft_applied
-        });
+        let retained = e == Some(before);
         let confirmed = verified && retained && !self.fault;
         self.commit(e, |s| {
             s.state = if confirmed {
@@ -294,7 +272,7 @@ impl Fsm {
                 TunnelState::Unknown
             };
             s.transition = None;
-            s.mode = confirmed.then_some(TunnelMode::Tun);
+            s.mode = confirmed.then_some(before.mode());
             s.proxy_status = if confirmed {
                 ProxyStatus::Running
             } else {

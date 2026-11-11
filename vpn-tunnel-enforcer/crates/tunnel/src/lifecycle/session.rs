@@ -56,6 +56,14 @@ impl SessionProfile {
         }
     }
 
+    /// Soft mode over a server of the server list (its id: switching servers splits sessions).
+    pub fn soft_server(server: &VpnProfile) -> Self {
+        Self {
+            mode: SessionMode::Soft,
+            ..Self::direct(server)
+        }
+    }
+
     /// A Direct VPN start that failed before a server was known.
     pub fn direct_unknown() -> Self {
         Self {
@@ -78,8 +86,6 @@ pub(super) struct Provenance {
 #[derive(Debug, Clone)]
 pub(super) struct LiveSession {
     pub profile: SessionProfile,
-    /// Endpoint of a Soft session (a failed refresh reads it back).
-    pub soft: Option<(String, ProxyKind)>,
     /// Who holds the session; restarts and switches keep it.
     pub holder: Owner,
     /// Provenance: the operation that opened it (`None`: the runtime brought it back alone).
@@ -104,7 +110,6 @@ impl LiveSession {
     pub fn open(profile: SessionProfile, by: Option<&Provenance>, holder: Owner) -> Self {
         Self {
             profile,
-            soft: None,
             holder,
             owner: by.map(|p| p.owner),
             source: by.map_or(Source::Runtime, |p| p.source),
@@ -150,7 +155,8 @@ impl LiveSession {
     /// Everything the session knows, for an unexpected end.
     pub fn facts(&self, egress_ip: Option<String>) -> Evidence {
         Evidence {
-            adaptive_mode: (!self.is_soft()).then(|| AdaptiveContext::from(self.adaptive)),
+            // Soft sessions run the engine too, adaptive mode included.
+            adaptive_mode: Some(AdaptiveContext::from(self.adaptive)),
             leak_detected_during_session: Some(self.leak_detected),
             network_transition: self.transition.clone(),
             ..self.egress(egress_ip)

@@ -70,7 +70,7 @@ impl Actor {
                 routing: p.routing.clone(),
                 phys_dns: p.phys_dns.clone(),
             };
-            let (json, compat) = self.deps.capture.config(p.plan, &parts)?;
+            let (json, compat) = self.capture.config(p.plan, &parts)?;
             let core = self
                 .deps
                 .engines
@@ -149,6 +149,7 @@ pub(super) fn running_status(s: &Session, attempt: u8) -> TunStatus {
         proxy_reachable: true,
         started_at: Some(s.started_at),
         restart_attempt: attempt,
+        capture: Some(s.req.capture),
         session: Some(s.endpoints.clone()),
     }
 }

@@ -1,0 +1,9 @@
+{
+  "app": {
+    "dashboard": {
+      "routeCheck": "Route check",
+      "proxiesUnavailable": "External proxies are not available in this build.",
+      "restoreFailed": "The previous Windows proxy settings could not be restored."
+    }
+  }
+}

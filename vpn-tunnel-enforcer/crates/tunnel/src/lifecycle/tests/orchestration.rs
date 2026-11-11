@@ -428,16 +428,17 @@ async fn crash_with_failed_cleanup_ends_the_session() {
     assert_eq!(h.rows().len(), 1);
 }
 
-/// L-05: a start that ran out of time while refreshing a Soft session ends that session with
-/// its real cause (unknown, "timed out"), not as a user stop.
+/// L-05: a start that ran out of time while a Soft session was still open (after a fault) ends
+/// that session with its real cause (unknown, "timed out"), not as a user stop.
 #[tokio::test]
 async fn timeout_compensation_records_its_cause() {
     let h = Harness::new();
     h.lc.connect(soft(8080, ProxyKind::Http, Owner::Manual))
         .await
         .unwrap();
+    h.lc.fault(crate::fsm::FaultState::Unknown);
     let gate = Gate::new();
-    h.soft.state.lock().apply_gate = Some(gate.clone());
+    h.rt.script.lock().start_gate = Some(gate.clone());
     let mut req = soft(9090, ProxyKind::Http, Owner::Manual);
     req.timeout = std::time::Duration::from_millis(30);
     let err = h.lc.connect(req).await.unwrap_err();

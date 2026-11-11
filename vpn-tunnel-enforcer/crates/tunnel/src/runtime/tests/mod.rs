@@ -23,13 +23,16 @@ use vpnte_engine::xray_config::{ResolveFault, ResolvePath, Resolved};
 use vpnte_engine::xray_process::{SlotLaunch, XrayError, XrayEvent};
 
 use super::capture::{
-    Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, tun_config, tun_form,
+    Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, ProxyCapture, tun_config,
+    tun_form,
 };
 use super::engines::{CoreProc, Engines, Slots};
 use super::{InputsSource, RuntimeDeps, Timings, UserInputs};
-use crate::api::{StartRequest, TunnelEvent};
+use crate::api::{CaptureKind, StartRequest, TunnelEvent};
 
 mod lane;
+mod live;
+mod proxy;
 mod recovery;
 mod supervision;
 
@@ -134,6 +137,8 @@ pub struct FakeCore {
     ready: Ready,
     world: Arc<World>,
     exit: watch::Sender<Option<ExitInfo>>,
+    /// The `proxy-in` listener of a proxy-capture config (connects succeed into its backlog).
+    listener: Mutex<Option<std::net::TcpListener>>,
 }
 
 fn exit_info(code: i32, user_initiated: bool, bind: Vec<u16>) -> ExitInfo {
@@ -150,8 +155,23 @@ fn exit_info(code: i32, user_initiated: bool, bind: Vec<u16>) -> ExitInfo {
 impl FakeCore {
     /// The engine dies on its own.
     pub fn crash(&self) {
+        self.listener.lock().take();
         self.exit
             .send_replace(Some(exit_info(2, false, Vec::new())));
+    }
+
+    /// The engine stays alive but its mixed inbound stops accepting.
+    pub fn deafen(&self) {
+        self.listener.lock().take();
+    }
+
+    /// Port of the `proxy-in` listener, while it listens.
+    pub fn proxy_port(&self) -> Option<u16> {
+        let listener = self.listener.lock();
+        listener
+            .as_ref()
+            .and_then(|l| l.local_addr().ok())
+            .map(|a| a.port())
     }
 }
 
@@ -168,6 +188,7 @@ impl CoreProc for FakeCore {
         match &self.ready {
             Ready::Ok => Ok(()),
             Ready::Exit(ports) => {
+                self.listener.lock().take();
                 let info = exit_info(1, false, ports.clone());
                 self.exit.send_replace(Some(info.clone()));
                 Err(StartError::Exited(info))
@@ -186,6 +207,7 @@ impl CoreProc for FakeCore {
         if !self.world.kill_ok.load(Ordering::SeqCst) {
             return Err(StopError::ExitNotConfirmed);
         }
+        self.listener.lock().take();
         let info = exit_info(1, true, Vec::new());
         self.exit.send_replace(Some(info.clone()));
         Ok(info)
@@ -262,7 +284,7 @@ impl Engines for FakeEngines {
         let w = &self.0;
         let json: Value = serde_json::from_slice(config).map_err(std::io::Error::other)?;
         let port = clash_port(&json);
-        w.configs.lock().push(json);
+        w.configs.lock().push(json.clone());
         let pid = 4100 + u32::try_from(w.cores.lock().len()).unwrap_or(0);
         w.note(format!("spawn:{pid}"));
         let ready = match w.ready.lock().pop_front().unwrap_or(Ready::Ok) {
@@ -274,6 +296,7 @@ impl Engines for FakeEngines {
             ready,
             world: w.clone(),
             exit: watch::channel(None).0,
+            listener: Mutex::new(proxy_listener(&json)),
         });
         w.cores.lock().push(core.clone());
         Ok(core)
@@ -386,6 +409,7 @@ impl Capture for FakeCapture {
         Ok(CaptureProof {
             luid: Some(42),
             alias: plan.alias.clone(),
+            port: None,
         })
     }
     async fn routes_ok(&self, _proof: &CaptureProof) -> bool {
@@ -442,7 +466,8 @@ pub fn timings() -> Timings {
 pub fn deps(world: &Arc<World>) -> RuntimeDeps {
     RuntimeDeps {
         engines: Arc::new(FakeEngines(world.clone())),
-        capture: Arc::new(FakeCapture(world.clone())),
+        tun: Some(Arc::new(FakeCapture(world.clone()))),
+        proxy: Arc::new(ProxyCapture::new()),
         inputs: Arc::new(FakeInputs(world.clone())),
         failover: None,
         confirmations: None,
@@ -489,6 +514,14 @@ pub async fn until(
     seen
 }
 
+/// Binds the `proxy-in` port of a proxy-capture config, as sing-box would.
+fn proxy_listener(config: &Value) -> Option<std::net::TcpListener> {
+    let inbounds = config["inbounds"].as_array()?;
+    let inbound = inbounds.iter().find(|i| i["tag"] == "proxy-in")?;
+    let port = u16::try_from(inbound["listen_port"].as_u64()?).ok()?;
+    std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).ok()
+}
+
 /// The Clash API port a generated config listens on.
 pub fn clash_port(config: &Value) -> u16 {
     config["experimental"]["clash_api"]["external_controller"]
@@ -504,6 +537,7 @@ pub fn local_req() -> StartRequest {
             addr: "127.0.0.1:10808".into(),
             kind: vpnte_base::types::ProxyKind::Socks5,
         },
+        capture: CaptureKind::Tun,
         kill_switch: KillSwitchLevel::Standard,
         public_wifi: false,
         stealth: false,

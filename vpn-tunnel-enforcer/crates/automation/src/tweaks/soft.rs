@@ -1,5 +1,5 @@
-//! Soft mode as a session: the per-user proxy variables plus the dev-tool targets the user opted
-//! into, applied and rolled back together (spec G6: the old app left Git / Gradle pointing at a
+//! Soft mode as a session: the per-user system proxy and proxy variables plus the dev-tool targets
+//! the user opted into, applied and rolled back together (spec G6: the old app left Git / Gradle pointing at a
 //! dead proxy after Soft stopped). The lifecycle calls [`Soft::apply`] on a Soft start or refresh
 //! and [`Soft::rollback`] on stop, before a Hard / Direct start, at shutdown and in startup
 //! recovery when the settings no longer say Soft.
@@ -17,10 +17,12 @@ use super::git::{self, GitCli};
 use super::journal::{
     Backend, BlockKind, Feature, Journal, RollbackReport, Target, TweakError, TweakState, Val,
 };
+use super::sysproxy::{self, SystemProxy, WinInet};
 use super::{block, env, run_blocking, studio, user};
 
 /// Every feature a Soft session owns, in apply order.
-pub const SOFT_FEATURES: [Feature; 4] = [
+pub const SOFT_FEATURES: [Feature; 5] = [
+    Feature::SoftProxy,
     Feature::SoftEnv,
     Feature::DevGit,
     Feature::DevGradle,
@@ -28,9 +30,12 @@ pub const SOFT_FEATURES: [Feature; 4] = [
 ];
 
 /// Where the Soft-mode targets live. Production: [`SoftSystem::current_user`]; tests point every
-/// field at throw-away places (a test registry key, a temp Git config file, temp directories).
+/// field at throw-away places (a fake system proxy, a test registry key, a temp Git config file,
+/// temp directories).
 #[derive(Debug, Clone)]
 pub struct SoftSystem {
+    /// The per-user system proxy ([`WinInet`]).
+    pub proxy: Arc<dyn SystemProxy>,
     /// The per-user environment (`HKCU\Environment`).
     pub env: UserEnv,
     /// Git, `None` when not installed.
@@ -57,6 +62,7 @@ impl SoftSystem {
         let profile = var("USERPROFILE");
         let appdata = var("APPDATA").or_else(|| Some(profile.as_ref()?.join(r"AppData\Roaming")));
         Self {
+            proxy: Arc::new(WinInet),
             env: UserEnv::current_user(),
             git: GitCli::find(),
             gradle_home: var("GRADLE_USER_HOME").or_else(|| Some(profile?.join(".gradle"))),
@@ -85,6 +91,7 @@ impl Backend for SoftSystem {
             Target::Block { kind, path } => block::read(*kind, path),
             Target::StudioOpt { path, option } => studio::read_option(path, *option),
             Target::Lines { path, lines } => block::read_lines(path, lines),
+            Target::SystemProxy => sysproxy::read(&*self.proxy),
             Target::Reg { .. } => Err(unsupported()),
         }
     }
@@ -100,6 +107,7 @@ impl Backend for SoftSystem {
             Target::Lines { path, lines } if *value == Val::Absent => {
                 block::remove_lines(path, lines).map(|()| false)
             }
+            Target::SystemProxy => sysproxy::write(&*self.proxy, value),
             Target::Lines { .. } | Target::Reg { .. } => Err(unsupported()),
         }
     }
@@ -147,7 +155,7 @@ impl DevTargets {
 /// Outcome of a Soft apply.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SoftReport {
-    /// Configured now (`SoftEnv` first).
+    /// Configured now (`SoftProxy`, then `SoftEnv`, then the dev targets).
     pub applied: Vec<Feature>,
     /// Selected but not installed: skipped, nothing created.
     pub not_detected: Vec<Feature>,
@@ -155,10 +163,25 @@ pub struct SoftReport {
     pub dropped: RollbackReport,
 }
 
+/// Who the per-user system proxy belongs to right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProxyOwner {
+    /// It holds the value Soft mode wrote (journalled and read back).
+    Ours,
+    /// It holds the user's own settings: Soft never set it, or someone changed it since (kept on
+    /// rollback).
+    User,
+    /// It could not be read: not checked.
+    Unreadable,
+}
+
 /// Read-back of every Soft feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SoftStatus {
+    /// The second proof of a Soft connection (NOADMIN §2): `Ours` while it is up.
+    pub system_proxy: ProxyOwner,
     pub env: TweakState,
     pub git: TweakState,
     pub gradle: TweakState,
@@ -181,9 +204,10 @@ impl Soft {
         }
     }
 
-    /// Points the variables (and the selected dev targets) at `addr`. A refresh while Soft is on
-    /// keeps the original baselines; any failure puts back what was there before this call. No
-    /// credentials are ever written: they would sit in plain text in the registry and files.
+    /// Points the system proxy, the variables and the selected dev targets at `addr` (the engine's
+    /// mixed inbound; `kind` picks the scheme of the variables and dev targets). A refresh while
+    /// Soft is on keeps the original baselines; any failure puts back what was there before this
+    /// call. No credentials are ever written: they would sit in plain text in the registry and files.
     pub async fn apply(
         &self,
         addr: HostPort,
@@ -204,9 +228,10 @@ impl Soft {
         if self.sys.check_user {
             user::ensure_session_user()?;
         }
-        let mut plan = env::plan(addr, kind);
+        let mut plan = sysproxy::plan(addr);
+        plan.extend(env::plan(addr, kind));
         let mut report = SoftReport {
-            applied: vec![Feature::SoftEnv],
+            applied: vec![Feature::SoftProxy, Feature::SoftEnv],
             ..SoftReport::default()
         };
         for feature in dev.features() {
@@ -296,7 +321,17 @@ impl Soft {
     /// Blocking form of [`Soft::status`].
     pub fn status_blocking(&self) -> SoftStatus {
         let state = |f| self.journal.status(&*self.sys, f);
+        let system_proxy = match state(Feature::SoftProxy) {
+            TweakState::On => ProxyOwner::Ours,
+            TweakState::Drifted => ProxyOwner::User,
+            TweakState::Unknown => ProxyOwner::Unreadable,
+            TweakState::Off => match self.sys.read(&Target::SystemProxy) {
+                Ok(_) => ProxyOwner::User,
+                Err(_) => ProxyOwner::Unreadable,
+            },
+        };
         SoftStatus {
+            system_proxy,
             env: state(Feature::SoftEnv),
             git: state(Feature::DevGit),
             gradle: state(Feature::DevGradle),
@@ -308,6 +343,7 @@ impl Soft {
 /// Display name of a Soft feature (for the opt-in list).
 pub fn feature_name(feature: Feature) -> Msg {
     Msg::new(match feature {
+        Feature::SoftProxy => "automation.tweaks.target.systemProxy.name",
         Feature::DevGit => "automation.tweaks.target.git.name",
         Feature::DevGradle => "automation.tweaks.target.gradle.name",
         Feature::DevStudio => "automation.tweaks.target.studio.name",
@@ -318,6 +354,7 @@ pub fn feature_name(feature: Feature) -> Msg {
 /// What a Soft feature changes while applied (shown next to its switch).
 pub fn feature_warning(feature: Feature) -> Msg {
     Msg::new(match feature {
+        Feature::SoftProxy => "automation.tweaks.target.systemProxy.warning",
         Feature::DevGit => "automation.tweaks.target.git.warning",
         Feature::DevGradle => "automation.tweaks.target.gradle.warning",
         Feature::DevStudio => "automation.tweaks.target.studio.warning",

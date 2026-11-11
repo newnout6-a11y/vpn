@@ -178,7 +178,7 @@ impl Actor {
             }
         }
         tokio::spawn(capture_watch(
-            self.deps.capture.clone(),
+            self.capture.clone(),
             s.proof.clone(),
             t,
             self.internal_tx.clone(),
@@ -208,6 +208,10 @@ impl Actor {
             Internal::ProxyUp { generation } if generation == current => self.proxy_up(),
             Internal::Capture { generation, check } if generation == current => {
                 let kind = match check {
+                    CaptureCheck::Lost => {
+                        tracing::error!("the capture stopped taking traffic: ending the core");
+                        return self.end_as_crash().await;
+                    }
                     CaptureCheck::Competing(name) if s.competing.as_ref() != Some(&name) => {
                         tracing::warn!(foreign = %name, "a competing tunnel appeared");
                         s.competing = Some(name.clone());

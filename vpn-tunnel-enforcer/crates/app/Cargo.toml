@@ -43,6 +43,11 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 windows.workspace = true
+jiff.workspace = true
+uuid.workspace = true
+# app-import tests: synthetic Electron `safeStorage` fixtures (v10 = AES-256-GCM, base64).
+aes-gcm.workspace = true
+base64.workspace = true
 
 [build-dependencies]
 embed-resource = "3.0.12"

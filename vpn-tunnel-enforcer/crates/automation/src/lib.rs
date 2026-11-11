@@ -19,6 +19,10 @@ pub const LOCALES: &[(&str, &str)] = &[
         include_str!("../locales/automation-tweaks.ru.json"),
         include_str!("../locales/automation-tweaks.en.json"),
     ),
+    (
+        include_str!("../locales/noadmin-system.ru.json"),
+        include_str!("../locales/noadmin-system.en.json"),
+    ),
 ];
 
 // --- shared by the work packages ---

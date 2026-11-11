@@ -5,9 +5,9 @@
 //! input arrives through [`RuntimeDeps`] and the [`StartRequest`], every output leaves as plain
 //! data on the status watch, the event broadcast and the return values.
 //!
-//! The one seam between "what is captured how" and everything else is [`Capture`]: supervision,
-//! crash policy, watchdog scheduling, compensation, protected restart and the upstream switch
-//! never name the TUN, WFP or adapters.
+//! The one seam between "what is captured how" and everything else is [`Capture`] (TUN or
+//! loopback proxy, chosen per start): supervision, crash policy, watchdog scheduling,
+//! compensation, protected restart and the upstream switch never name the TUN, WFP or adapters.
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,7 +41,8 @@ mod watchdog;
 pub(crate) mod tests;
 
 pub use capture::{
-    Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, TunCapture, TunForm, tun_form,
+    Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, ProxyCapture, TunCapture,
+    TunForm, tun_form,
 };
 pub use engines::{CoreProc, Engines, RealEngines, Slots};
 pub use handle::TunnelHandle;
@@ -132,7 +133,11 @@ pub trait Confirmations: Send + Sync {
 #[derive(Clone)]
 pub struct RuntimeDeps {
     pub engines: Arc<dyn Engines>,
-    pub capture: Arc<dyn Capture>,
+    /// TUN capture; `None` when the host cannot create adapters or WFP filters (not elevated):
+    /// a [`crate::api::CaptureKind::Tun`] start then answers `Permission`.
+    pub tun: Option<Arc<dyn Capture>>,
+    /// Loopback proxy capture (Soft mode; needs no privileges, so always available).
+    pub proxy: Arc<dyn Capture>,
     pub inputs: Arc<dyn InputsSource>,
     pub failover: Option<Arc<dyn Failover>>,
     pub confirmations: Option<Arc<dyn Confirmations>>,

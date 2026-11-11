@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{AdaptiveMode, Engine, Owner, ProxyKind};
+use vpnte_base::types::{AdaptiveMode, Engine, KillSwitchLevel, Owner, ProxyKind};
 use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::ops::OpId;
 
@@ -14,9 +14,10 @@ use super::actor::Cmd;
 use super::session::SessionProfile;
 use super::{ConnError, LifecycleDeps, ServerChoice, key};
 use crate::api::{
-    Mode, Origin, OwnerCheck, RestartOptions, StartRequest, StopOptions, StopReceipt,
+    CaptureKind, Mode, Origin, OwnerCheck, RestartOptions, StartRequest, StopOptions, StopReceipt,
     SwitchOutcome, SwitchReceipt, TUN_SETUP_KEY_PREFIX, TunError, VpnProfile,
 };
+use crate::history::SessionMode;
 use crate::outcome::{Evidence, OutcomeKind, SessionOutcome};
 
 /// No leak alarms while a tunnel comes up (old `suppressLeakSelfTestsFor(20_000)`).
@@ -25,8 +26,19 @@ const LEAK_QUIET: Duration = Duration::from_secs(20);
 /// What protection a start must prove before it is published.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Want {
+    /// Our engine runs with the TUN capture.
     Tun,
+    /// Our engine runs with the proxy capture and the user-level tweaks point at it.
     Soft,
+}
+
+impl Want {
+    pub fn of(capture: CaptureKind) -> Self {
+        match capture {
+            CaptureKind::Tun => Want::Tun,
+            CaptureKind::Proxy => Want::Soft,
+        }
+    }
 }
 
 /// Asks the actor whether the state machine accepts the start of `op` (old `canConfirmStart`).
@@ -58,8 +70,8 @@ pub(super) struct Ctx {
 /// Protection a start brought up.
 #[derive(Debug)]
 pub(super) enum Up {
-    /// A tunnel on `profile` (connect, switch, restart onto a sibling).
-    Tun {
+    /// An engine run on `profile` (connect, switch, restart onto a sibling), Hard or Soft.
+    Run {
         profile: SessionProfile,
         country: Option<String>,
         /// New engine run; `None` = the same run continues (in-place upstream switch).
@@ -77,10 +89,6 @@ pub(super) enum Up {
         adaptive: Option<AdaptiveMode>,
         warnings: Vec<Msg>,
     },
-    Soft {
-        addr: String,
-        kind: ProxyKind,
-    },
     /// Nothing was running, so nothing had to change (restart / rotation while disconnected).
     Idle,
 }
@@ -89,12 +97,10 @@ pub(super) enum Up {
 #[derive(Debug)]
 pub(super) struct Failure {
     pub error: ConnError,
-    /// The previous protection was read back unchanged (failed Soft refresh, preserved upstream).
+    /// The previous protection was read back unchanged (refused switch, preserved upstream).
     pub kept_previous: bool,
     /// The previous tunnel was torn down or changed (a switch or restart got past its start).
     pub touched: bool,
-    /// A failed Soft refresh could not prove the previous proxy: that session is lost.
-    pub soft_lost: bool,
     /// Zero-duration history row of the failed start.
     pub row: Option<Box<(SessionProfile, SessionOutcome)>>,
 }
@@ -105,7 +111,6 @@ impl Failure {
             error,
             kept_previous: false,
             touched: false,
-            soft_lost: false,
             row: None,
         }
     }
@@ -209,9 +214,9 @@ fn refused_outcome(hint: Msg) -> SessionOutcome {
     SessionOutcome::start_failure(false, Some(hint), Evidence::default())
 }
 
-/// What a Hard start runs.
+/// The upstream a connect runs (either capture).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum TunTarget {
+pub(super) enum Target {
     Proxy {
         addr: String,
         kind: ProxyKind,
@@ -220,51 +225,84 @@ pub(super) enum TunTarget {
     Direct(Option<String>),
 }
 
-impl TunTarget {
+impl Target {
     /// Session profile, once the server is known (`server`) or as far as the request tells.
-    fn profile(&self, server: Option<&VpnProfile>) -> SessionProfile {
+    fn profile(&self, server: Option<&VpnProfile>, capture: CaptureKind) -> SessionProfile {
+        let soft = capture == CaptureKind::Proxy;
         match (self, server) {
+            (_, Some(server)) if soft => SessionProfile::soft_server(server),
             (_, Some(server)) => SessionProfile::direct(server),
-            (TunTarget::Proxy { addr, .. }, None) => SessionProfile::local_proxy(addr),
-            (TunTarget::Direct(Some(id)), None) => SessionProfile {
-                id: id.clone(),
+            (Target::Proxy { addr, kind }, None) if soft => SessionProfile::soft(addr, *kind),
+            (Target::Proxy { addr, .. }, None) => SessionProfile::local_proxy(addr),
+            (Target::Direct(id), None) => SessionProfile {
+                id: id.clone().unwrap_or_else(|| "direct-vpn".into()),
+                mode: if soft {
+                    SessionMode::Soft
+                } else {
+                    SessionMode::Direct
+                },
                 ..SessionProfile::direct_unknown()
             },
-            (TunTarget::Direct(None), None) => SessionProfile::direct_unknown(),
         }
     }
 }
 
-/// Hard start: Soft rolled back first (modes never overlap), then the runtime start.
-pub(super) async fn connect_tun(
+/// Connect in either mode (NOADMIN.md §2). Leftovers of an earlier run end first (modes never
+/// overlap): Soft tweaks go before a Hard start (a refused rollback refuses it, L-15), a running
+/// engine gets the full stop; a Soft start keeps leftover tweaks blocking until it re-points
+/// them. Then the runtime starts with `capture` and, in Soft, the tweaks point at the session's
+/// mixed port.
+pub(super) async fn connect(
     ctx: Ctx,
-    target: TunTarget,
+    target: Target,
+    capture: CaptureKind,
     adaptive: AdaptiveMode,
 ) -> StartReport {
     let deps = &ctx.deps;
+    let soft = capture == CaptureKind::Proxy;
+    if soft && deps.settings.read(|s| s.kill_switch) == KillSwitchLevel::Strict {
+        // Refused before anything is touched: strict needs WFP, Soft has none.
+        let msg = Msg::new(key::SOFT_STRICT);
+        let error = ConnError::Failed(TunError::new(ErrorKind::Validation, msg.clone()));
+        let row = (target.profile(None, capture), refused_outcome(msg));
+        return StartReport::done(Err(Failure::new(error).row(row.0, row.1)));
+    }
     let mut mode_switch = None;
-    if deps.soft.applied() != Some(false) {
+    if !soft && deps.soft.applied() != Some(false) {
         let ending = Captured::now(deps);
         if let Err(e) = deps.soft.rollback().await {
-            // L-15: a refused rollback is a failed start with a row, not a raw error.
+            // L-15: a refused rollback is a failed start with a row, not a raw error; nothing
+            // else was touched yet.
             tracing::warn!(error = %e, "soft rollback before a tunnel start failed");
             let hint = Msg::new(key::SOFT_ROLLBACK_BEFORE_START);
             let error = ConnError::Failed(TunError::from(AppError::msg(e.kind, hint.clone())));
-            let row = (target.profile(None), refused_outcome(hint));
+            let row = (target.profile(None, capture), refused_outcome(hint));
             return StartReport::done(Err(Failure::new(error).row(row.0, row.1)));
+        }
+        mode_switch = Some(ending);
+    }
+    if deps.runtime.status().borrow().running {
+        let ending = mode_switch.take().unwrap_or_else(|| Captured::now(deps));
+        if !stop(deps.clone(), false).await.runtime_gone() {
+            let msg = Msg::new(key::CLEANUP_UNCONFIRMED);
+            let error = ConnError::Failed(TunError::new(ErrorKind::Internal, msg.clone()));
+            let failure = Failure::new(error)
+                .touched()
+                .row(target.profile(None, capture), refused_outcome(msg));
+            return StartReport::done(Err(failure));
         }
         mode_switch = Some(ending);
     }
     deps.monitor.suppress_leak_tests(LEAK_QUIET);
     let (mode, choice) = match &target {
-        TunTarget::Proxy { addr, kind } => {
+        Target::Proxy { addr, kind } => {
             let mode = Mode::LocalProxy {
                 addr: addr.clone(),
                 kind: *kind,
             };
             (mode, None)
         }
-        TunTarget::Direct(id) => match deps.profiles.resolve(id.as_deref()) {
+        Target::Direct(id) => match deps.profiles.resolve(id.as_deref()) {
             Some(choice) => {
                 let mode = Mode::DirectVpn {
                     profile: choice.server.clone(),
@@ -273,14 +311,14 @@ pub(super) async fn connect_tun(
             }
             None => {
                 return StartReport {
-                    result: Err(no_server(&target)),
+                    result: Err(no_server(&target, capture)),
                     mode_switch,
                 };
             }
         },
     };
-    let profile = target.profile(choice.as_ref().map(|c| &c.server));
-    let req = start_request(deps, mode, adaptive, ctx.owner);
+    let profile = target.profile(choice.as_ref().map(|c| &c.server), capture);
+    let req = start_request(deps, mode, capture, adaptive, ctx.owner);
     StartReport {
         result: run_start(&ctx, req, profile, choice, adaptive).await,
         mode_switch,
@@ -288,23 +326,26 @@ pub(super) async fn connect_tun(
 }
 
 /// No server selected, or the requested one is not in the list (old Conflict + start-failed row).
-fn no_server(target: &TunTarget) -> Failure {
+fn no_server(target: &Target, capture: CaptureKind) -> Failure {
     let msg = Msg::new(match target {
-        TunTarget::Direct(Some(_)) => key::SERVER_UNAVAILABLE,
+        Target::Direct(Some(_)) => key::SERVER_UNAVAILABLE,
         _ => key::NO_SERVER,
     });
-    Failure::new(ConnError::NoServer(msg.clone())).row(target.profile(None), refused_outcome(msg))
+    let profile = target.profile(None, capture);
+    Failure::new(ConnError::NoServer(msg.clone())).row(profile, refused_outcome(msg))
 }
 
 /// The start request for `mode` with the current settings.
 fn start_request(
     deps: &LifecycleDeps,
     mode: Mode,
+    capture: CaptureKind,
     adaptive: AdaptiveMode,
     owner: Owner,
 ) -> StartRequest {
     deps.settings.read(|s| StartRequest {
         mode,
+        capture,
         kill_switch: s.kill_switch,
         public_wifi: s.public_wifi_compatibility,
         stealth: s.stealth_mode,
@@ -314,7 +355,8 @@ fn start_request(
     })
 }
 
-/// `runtime.start` of a new server or proxy, then the actor's confirmation.
+/// `runtime.start` of a new server or proxy, then (Soft) the tweaks, then the actor's
+/// confirmation.
 async fn run_start(
     ctx: &Ctx,
     req: StartRequest,
@@ -326,9 +368,16 @@ async fn run_start(
     if ctx.token.is_cancelled() {
         return Err(cancelled());
     }
+    let capture = req.capture;
     match deps.runtime.start(req, ctx.token.clone()).await {
         Ok(receipt) => {
-            let up = Up::Tun {
+            if capture == CaptureKind::Proxy
+                && let Err(failure) = point_tweaks(ctx, None).await
+            {
+                let hint = failure.error.user_msg();
+                return Err(failure.row(profile, refused_outcome(hint)));
+            }
+            let up = Up::Run {
                 profile,
                 country: choice.and_then(|c| c.country),
                 generation: Some(receipt.generation),
@@ -336,7 +385,7 @@ async fn run_start(
                 adaptive,
                 warnings: receipt.warnings,
             };
-            confirm_tun(ctx, up).await
+            confirm(ctx, up).await
         }
         Err(_) if ctx.token.is_cancelled() => Err(cancelled()),
         Err(e) => {
@@ -346,106 +395,105 @@ async fn run_start(
     }
 }
 
-/// Publishes `up` only once the state machine accepts it; otherwise the tunnel this owner
-/// started is stopped here, so no process is abandoned ("Connection confirmation missing").
-async fn confirm_tun(ctx: &Ctx, up: Up) -> Result<Up, Failure> {
-    if ctx.confirm.check(Want::Tun).await {
+/// `127.0.0.1:<port>`: where the Soft tweaks point.
+fn soft_addr(port: u16) -> String {
+    format!("127.0.0.1:{port}")
+}
+
+/// The mixed port of the running proxy-capture session.
+pub(super) fn session_port(deps: &LifecycleDeps) -> Option<u16> {
+    let status = deps.runtime.status();
+    let s = status.borrow();
+    s.session.as_ref().and_then(|e| e.proxy_port)
+}
+
+/// Soft: points the user-level tweaks at the session's mixed port (HTTP: what WinINet and the
+/// `*_PROXY` variables take; the inbound also serves SOCKS5) and reads them back. `applied` =
+/// the port they already point at: kept while the read-back still shows it. A failure is
+/// `touched`: the lane's recovery stop then rolls back whatever was applied and stops the
+/// engine (no tweak left behind).
+async fn point_tweaks(ctx: &Ctx, applied: Option<u16>) -> Result<(), Failure> {
+    let deps = &ctx.deps;
+    let result = match session_port(deps) {
+        Some(port) => {
+            let addr = soft_addr(port);
+            let kept = applied == Some(port)
+                && matches!(
+                    deps.soft.is_configured(&addr, ProxyKind::Http).await,
+                    Ok(true)
+                );
+            if kept {
+                Ok(())
+            } else {
+                apply_and_read_back(deps, &addr).await
+            }
+        }
+        // A proxy-capture session always publishes its port; without it nothing can be pointed.
+        None => Err(AppError::new(ErrorKind::Internal)),
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(_) if ctx.token.is_cancelled() => Err(cancelled().touched()),
+        Err(e) => {
+            tracing::warn!(error = %e, "soft tweaks not applied");
+            let hint = e.msg.unwrap_or_else(|| Msg::new(key::SOFT_APPLY_FAILED));
+            let error = ConnError::Failed(TunError::from(AppError::msg(e.kind, hint)));
+            Err(Failure::new(error).touched())
+        }
+    }
+}
+
+/// Applies the tweaks for `addr`; Soft counts as applied only once the system reads back `addr`.
+async fn apply_and_read_back(deps: &LifecycleDeps, addr: &str) -> Result<(), AppError> {
+    deps.soft.apply(addr, ProxyKind::Http).await?;
+    if deps.soft.is_configured(addr, ProxyKind::Http).await? {
+        Ok(())
+    } else {
+        tracing::warn!("soft tweaks applied but not read back");
+        Err(AppError::msg(
+            ErrorKind::Internal,
+            Msg::new(key::SOFT_APPLY_FAILED),
+        ))
+    }
+}
+
+/// Publishes `up` only once the state machine accepts it (Hard: the TUN run; Soft: the run
+/// plus the applied tweaks); otherwise what this owner started is undone here, so no process
+/// or tweak is abandoned ("Connection confirmation missing").
+async fn confirm(ctx: &Ctx, up: Up) -> Result<Up, Failure> {
+    let capture = ctx.deps.runtime.status().borrow().capture;
+    let want = Want::of(capture.unwrap_or(CaptureKind::Tun));
+    if ctx.confirm.check(want).await {
         return Ok(up);
     }
     if ctx.token.is_cancelled() {
         // Aborted: the lane's compensating stop cleans up, exactly once.
         return Err(cancelled().touched());
     }
-    let stop = ctx.deps.runtime.stop(StopOptions::default()).await;
-    tracing::warn!(
-        stopped = stop.runtime_stopped,
-        "tunnel start not confirmed; compensated"
-    );
+    let stopped = undo_start(&ctx.deps).await;
+    tracing::warn!(stopped, "start not confirmed; compensated");
     Err(Failure::new(failed(ErrorKind::Internal, key::CONFIRMATION_MISSING)).touched())
 }
 
-/// Soft start: a running TUN gets the full stop first (modes never overlap; its forensics and
-/// external proxies go with it), then the proxy is applied.
-/// `previous`: endpoint of the Soft session this start refreshes.
-pub(super) async fn connect_soft(
-    ctx: Ctx,
-    addr: String,
-    kind: ProxyKind,
-    previous: Option<(String, ProxyKind)>,
-) -> StartReport {
-    let deps = &ctx.deps;
-    let profile = SessionProfile::soft(&addr, kind);
-    let mut mode_switch = None;
-    let tun_running = deps.runtime.status().borrow().running;
-    if tun_running {
-        let ending = Captured::now(deps);
-        if !stop(ctx.deps.clone(), false).await.runtime_gone() {
-            let msg = Msg::new(key::CLEANUP_UNCONFIRMED);
-            let error = ConnError::Failed(TunError::new(ErrorKind::Internal, msg.clone()));
-            let failure = Failure::new(error)
-                .touched()
-                .row(profile, refused_outcome(msg));
-            return StartReport::done(Err(failure));
-        }
-        mode_switch = Some(ending);
+/// Undoes a start that will not be published: the tweaks first (they would point at a dead
+/// port), then the engine. `true` = the engine's exit is proven.
+async fn undo_start(deps: &LifecycleDeps) -> bool {
+    if deps.soft.applied() != Some(false)
+        && let Err(e) = deps.soft.rollback().await
+    {
+        tracing::warn!(error = %e, "unconfirmed start: soft rollback failed");
     }
-    deps.monitor.suppress_leak_tests(LEAK_QUIET);
-    let result = if ctx.token.is_cancelled() {
-        Err(cancelled())
-    } else {
-        match deps.soft.apply(&addr, kind).await {
-            Ok(()) if ctx.confirm.check(Want::Soft).await => Ok(Up::Soft { addr, kind }),
-            Ok(()) if ctx.token.is_cancelled() => Err(cancelled().touched()),
-            Ok(()) => {
-                if let Err(e) = deps.soft.rollback().await {
-                    tracing::warn!(error = %e, "unconfirmed soft start: rollback failed");
-                }
-                Err(Failure::new(failed(ErrorKind::Internal, key::CONFIRMATION_MISSING)).touched())
-            }
-            Err(_) if ctx.token.is_cancelled() => Err(cancelled()),
-            Err(e) => Err(soft_failure(&ctx, e, profile, previous).await),
-        }
-    };
-    StartReport {
-        result,
-        mode_switch,
-    }
-}
-
-/// A failed apply. On a refresh the previous endpoint is read back: still configured → the
-/// previous session is kept; not readable or changed → it is lost. A cancellation during the
-/// read-back writes nothing (no late history).
-async fn soft_failure(
-    ctx: &Ctx,
-    e: AppError,
-    profile: SessionProfile,
-    previous: Option<(String, ProxyKind)>,
-) -> Failure {
-    tracing::warn!(error = %e, "soft proxy apply failed");
-    let hint = e
-        .msg
-        .clone()
-        .unwrap_or_else(|| Msg::new(key::SOFT_APPLY_FAILED));
-    let error = ConnError::Failed(TunError::from(AppError::msg(e.kind, hint.clone())));
-    let mut failure = Failure::new(error).row(profile, refused_outcome(hint));
-    if let Some((addr, kind)) = previous {
-        let still = ctx.deps.soft.is_configured(&addr, kind).await;
-        if ctx.token.is_cancelled() {
-            return cancelled();
-        }
-        match still {
-            Ok(true) => failure.kept_previous = true,
-            Ok(false) | Err(_) => failure.soft_lost = true,
-        }
-    }
-    failure
+    deps.runtime
+        .stop(StopOptions::default())
+        .await
+        .runtime_stopped
 }
 
 /// What a full stop achieved.
 #[derive(Debug)]
 pub(super) struct StopReport {
     pub receipt: StopReceipt,
-    /// Soft rollback result; `None`: not attempted because the runtime did not prove its exit.
+    /// Soft rollback result (it runs before the engine stops); `None` only from a panicked effect.
     pub soft: Option<Result<(), AppError>>,
     pub capture_stopped: bool,
 }
@@ -475,25 +523,26 @@ impl StopReport {
     }
 }
 
-/// Full stop (old `stopProtectionEffects`): the runtime first; when its exit is not proven,
+/// Full stop (old `stopProtectionEffects`): Soft tweaks first (NOADMIN.md §2: they must not
+/// point at an engine that is going away), then the runtime; when its exit is not proven,
 /// nothing else is touched (protection retained) unless the app quits (H-06: the kill-on-close
-/// job ends the engines with the process, so the rest is cleaned up now). Then Soft rollback,
-/// forensics, external proxies and monitoring, each independent of the others.
+/// job ends the engines with the process, so the rest is cleaned up now). Then forensics,
+/// external proxies and monitoring, each independent of the others.
 pub(super) async fn stop(deps: Arc<LifecycleDeps>, quitting: bool) -> StopReport {
     let reason = if quitting { "shutdown" } else { "vpn-stop" };
-    let receipt = deps.runtime.stop(StopOptions::default()).await;
-    if !receipt.ok && !receipt.runtime_stopped && !quitting {
-        return StopReport {
-            receipt,
-            soft: None,
-            capture_stopped: false,
-        };
-    }
     let soft = if deps.soft.applied() == Some(false) {
         Ok(())
     } else {
         deps.soft.rollback().await
     };
+    let receipt = deps.runtime.stop(StopOptions::default()).await;
+    if !receipt.ok && !receipt.runtime_stopped && !quitting {
+        return StopReport {
+            receipt,
+            soft: Some(soft),
+            capture_stopped: false,
+        };
+    }
     let capture_stopped = deps.forensics.stop_session(reason).await;
     // External proxies are tied to the runtime: they go only once its exit is proven (or on quit).
     deps.proxies.stop_all(reason).await;

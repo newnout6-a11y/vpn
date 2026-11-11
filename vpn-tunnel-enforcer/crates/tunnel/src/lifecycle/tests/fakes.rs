@@ -12,9 +12,9 @@ use vpnte_base::types::{Engine, Notice, OutboundFault, ProxyKind, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 
 use crate::api::{
-    ExitInfo, ModeKind, OwnerCheck, RestartOptions, Runtime, StartReceipt, StartRequest,
-    StopOptions, StopReceipt, SwitchReceipt, TunError, TunStatus, TunStatusKind, TunnelEvent,
-    VpnProfile,
+    CaptureKind, ExitInfo, ModeKind, OwnerCheck, ProxyEndpoint, RestartOptions, Runtime,
+    SessionEndpoints, StartReceipt, StartRequest, StopOptions, StopReceipt, SwitchReceipt,
+    TunError, TunStatus, TunStatusKind, TunnelEvent, VpnProfile,
 };
 use crate::test_support::TempDir;
 
@@ -61,6 +61,35 @@ pub struct RtScript {
     pub restart_refusal: Option<TunError>,
     pub fault: Option<OutboundFault>,
     pub exit: Option<ExitInfo>,
+    /// Mixed port of the next proxy-capture run (default [`SOFT_PORT`]).
+    pub soft_port: Option<u16>,
+}
+
+/// Mixed port of a proxy-capture run of the fake runtime.
+pub const SOFT_PORT: u16 = 20808;
+
+/// Where the Soft tweaks point for `port`.
+pub fn soft_addr(port: u16) -> String {
+    format!("127.0.0.1:{port}")
+}
+
+/// Session endpoints of a proxy-capture run (obvious fake secrets).
+fn endpoints(port: u16) -> SessionEndpoints {
+    let fake = |port| ProxyEndpoint {
+        port,
+        user: "FAKE-user".into(),
+        pass: "FAKE-pass".into(),
+    };
+    SessionEndpoints {
+        clash_port: 20001,
+        clash_secret: "FAKE-secret".into(),
+        direct: fake(20002),
+        probe: None,
+        tun_luid: None,
+        tun_alias: None,
+        proxy_port: Some(port),
+        logs: Vec::new(),
+    }
 }
 
 pub struct FakeRuntime {
@@ -109,6 +138,18 @@ impl FakeRuntime {
                 self.status.borrow().profile_name.clone(),
             ),
         };
+        // A proxy-capture run publishes its mixed port; a restart keeps it (as the runtime does).
+        let port = self.script.lock().soft_port.unwrap_or(SOFT_PORT);
+        let (capture, session) = match req {
+            Some(r) => (
+                Some(r.capture),
+                (r.capture == CaptureKind::Proxy).then(|| endpoints(port)),
+            ),
+            None => {
+                let s = self.status.borrow();
+                (s.capture, s.session.clone())
+            }
+        };
         self.status.send_modify(|s| {
             s.running = true;
             s.pid = with_pid.then_some(pid);
@@ -116,6 +157,8 @@ impl FakeRuntime {
             s.mode = mode;
             s.profile_name = name;
             s.restart_attempt = 0;
+            s.capture = capture;
+            s.session = session;
         });
         generation
     }

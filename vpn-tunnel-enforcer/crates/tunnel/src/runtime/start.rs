@@ -23,7 +23,8 @@ use super::config;
 use super::engines::CoreProc;
 use super::spawn::Parts;
 use crate::api::{
-    Mode, Origin, StartReceipt, StartRequest, TunError, TunStatusKind, TunnelEvent, VpnProfile,
+    CaptureKind, Mode, Origin, StartReceipt, StartRequest, TunError, TunStatusKind, TunnelEvent,
+    VpnProfile,
 };
 
 /// Effects of a start in progress: exactly what the compensation must undo.
@@ -152,6 +153,39 @@ fn previous_not_stopped() -> TunError {
 }
 
 impl Actor {
+    /// Makes `kind` the strategy of the next session. A strategy the host did not supply (TUN
+    /// without elevation) answers `Permission`. Protection the previous strategy still holds
+    /// (preserved stop, blocking crash outcome, failed release) is released first: two
+    /// strategies never share a session; a failed release refuses the start.
+    async fn adopt_strategy(&mut self, kind: CaptureKind) -> Result<(), TunError> {
+        let next = match kind {
+            CaptureKind::Tun => self.deps.tun.clone().ok_or_else(|| {
+                let msg = Msg::new("tunnel.runtime.tunUnavailable");
+                TunError::new(ErrorKind::Permission, msg)
+            })?,
+            CaptureKind::Proxy => self.deps.proxy.clone(),
+        };
+        if kind == self.strategy {
+            return Ok(());
+        }
+        if matches!(self.phase, Phase::Adapting(_)) || self.protection_dirty {
+            if let Err(e) = self.capture.release().await {
+                tracing::error!(error = %e, "previous strategy's protection not released");
+                self.protection_dirty = true;
+                let msg = Msg::new("tunnel.runtime.cleanup.protection");
+                return Err(TunError::new(e.kind, msg));
+            }
+            self.protection_dirty = false;
+            self.phase = Phase::Idle;
+        }
+        tracing::info!(strategy = ?kind, "capture strategy changed");
+        self.capture = next;
+        self.strategy = kind;
+        Ok(())
+    }
+}
+
+impl Actor {
     /// One start under `op`: a new native generation, `StartBegan` / `StartFinished` exactly
     /// once, compensation of every effect on failure. `avoid` = capture identities not to reuse.
     pub(super) async fn start_run(
@@ -161,6 +195,7 @@ impl Actor {
         avoid: &[String],
     ) -> Result<StartReceipt, TunError> {
         self.retire().await?;
+        self.adopt_strategy(req.capture).await?;
         if req.origin != Origin::Recovery {
             // Every start but a crash recovery (protected restarts included) reopens the
             // auto-restart window (§3.5 (d)).
@@ -277,7 +312,7 @@ impl Actor {
         work: &mut Work,
     ) -> AppResult<Box<Session>> {
         let user = self.deps.inputs.snapshot().await?;
-        let plan = self.deps.capture.prepare(req, avoid).await?;
+        let plan = self.capture.prepare(req, avoid).await?;
         work.warnings.extend(plan.warnings.iter().cloned());
         work.plan = Some(plan.clone());
         cancelled_if(op)?;
@@ -296,7 +331,7 @@ impl Actor {
             Mode::DirectVpn { profile } => config::endpoint_is_hostname(&profile.profile),
             Mode::LocalProxy { .. } => false,
         };
-        self.deps.capture.begin(&plan, &programs).await?;
+        self.capture.begin(&plan, &programs).await?;
         work.began = true;
         cancelled_if(op)?;
         if let Planned::Xray {
@@ -320,7 +355,6 @@ impl Actor {
         };
         let (core, clash, listeners, compat) = self.spawn_ready(&parts, op, work).await?;
         let proof = self
-            .deps
             .capture
             .ready(&plan, self.deps.timings.capture_ready, op)
             .await?;

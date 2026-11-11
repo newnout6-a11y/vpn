@@ -1,0 +1,8 @@
+{
+  "app": {
+    "tunnel": {
+      "noLocalProxy": "No local proxy found. Start your VPN client (for example Happ) or enter the proxy address in Settings.",
+      "leakDetected": "Leak detected"
+    }
+  }
+}

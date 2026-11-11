@@ -25,8 +25,8 @@ fn variants() -> Vec<(&'static str, ConfigInputs)> {
     ));
 
     let mut i = inputs(native(&reality("sub.example.com")));
-    i.tun = tun(true, false);
-    i.tun.stack = TunStack::Gvisor;
+    i.capture = Capture::Tun(tun(true, false));
+    tun_of(&mut i).stack = TunStack::Gvisor;
     i.phys_dns = vec![Ipv4Addr::new(192, 168, 1, 1)];
     v.push(("reality hostname, dual stack, native dns, gvisor", i));
 
@@ -37,16 +37,16 @@ fn variants() -> Vec<(&'static str, ConfigInputs)> {
             block_quic: true,
         },
     });
-    i.tun = tun(true, true);
+    i.capture = Capture::Tun(tun(true, true));
     v.push(("tcp-only upstream, dual stack, hijack", i));
 
     v.push(("hysteria2", inputs(native(&hysteria2("1.2.3.4")))));
     let mut i = inputs(native(&shadowsocks("2001:db8::7")));
-    i.tun = tun(true, false);
+    i.capture = Capture::Tun(tun(true, false));
     v.push(("shadowsocks ipv6 endpoint excluded, dual stack", i));
 
     let mut i = inputs(native(&wireguard("wg.example.com")));
-    i.tun = tun(true, false);
+    i.capture = Capture::Tun(tun(true, false));
     v.push(("wireguard hostname peer, dual stack", i));
 
     let mut i = inputs(native(&wireguard("203.0.113.5")));
@@ -84,7 +84,7 @@ fn variants() -> Vec<(&'static str, ConfigInputs)> {
         block_quic: true,
     }));
     i.listeners.dns_bootstrap = Some(25556);
-    i.tun = tun(true, false);
+    i.capture = Capture::Tun(tun(true, false));
     i.routing = smart_ru();
     i.routing.process_rules = vec![
         json!({
@@ -124,6 +124,25 @@ fn every_variant_passes_sing_box_check() {
         let config = build(&inputs).unwrap_or_else(|e| panic!("{name}: {e}"));
         if let Err(e) = singbox_check(&config) {
             failures.push(format!("{name}: {e}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// NOADMIN.md §2: every upstream variant (local proxy, native outbound / endpoint, Xray slots)
+/// with the loopback proxy instead of the TUN passes `sing-box check` too.
+#[test]
+fn every_variant_passes_sing_box_check_in_proxy_form() {
+    if crate::test_support::singbox_exe().is_none() {
+        return;
+    }
+    let mut failures = Vec::new();
+    for (name, inputs) in variants() {
+        let config =
+            build(&super::proxy_tests::proxied(inputs)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(config["inbounds"][0]["tag"], PROXY_IN, "{name}");
+        if let Err(e) = singbox_check(&config) {
+            failures.push(format!("{name} (proxy form): {e}"));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));

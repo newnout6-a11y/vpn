@@ -15,7 +15,7 @@ vpnte-engine.workspace = true
 | `tags` | every sing-box tag (`PROXY_OUT`, `SLOT_TAGS`, `DNS_REMOTE`, ...) |
 | `slot` | `Slot` (A / B) and the validated `SlotEndpoint` (authenticated loopback SOCKS) |
 | `ports` | loopback port allocation, random secrets / credentials |
-| `singbox_config` | pure builder of the whole sing-box 1.14 config (`build`), `select_mtu`, `compat_key` |
+| `singbox_config` | pure builder of the whole sing-box 1.14 config (`build`; TUN or loopback-proxy capture), `select_mtu`, `compat_key` |
 | `singbox_process` | one sing-box child: spawn, readiness, exit, faults, version, `check_config` |
 | `xray_process` | `XraySupervisor`: the two Xray slots, exit events, faults, `check_config` |
 | `clash_api` | Clash API client: version, selector switch with read-back, connections, traffic |
@@ -29,9 +29,10 @@ vpnte-engine.workspace = true
 blocking file / registry I/O (`apps::discover`, `routing::process::probe_fs`,
 `routing::domain::read_list_file`, `RuleSetService::prune`: call them from `spawn_blocking`).
 **Elevation:** nothing in this crate asks for it, but a `sing-box run` with the TUN inbound of
-`singbox_config::build` needs an elevated process (Wintun); without it sing-box exits during
-start-up (`StartError::Exited`, reason in `ExitInfo::stderr_tail`). `check` / `-test` runs and
-Xray never need it. Not executed here: a real TUN start (all engine tests are loopback-only).
+`singbox_config::build` (`Capture::Tun`) needs an elevated process (Wintun); without it sing-box
+exits during start-up (`StartError::Exited`, reason in `ExitInfo::stderr_tail`). The proxy
+capture (`Capture::Proxy`, NOADMIN.md §2), `check` / `-test` runs and Xray never need it. Not
+executed here: a real TUN start (all engine tests are loopback-only).
 **Errors:** every error enum has `From<_> for vpnte_base::AppError` with an `engine.*` message;
 callers bubble them with `?` and render `AppError::user_msg()`.
 **Children:** every engine runs hidden (CREATE_NO_WINDOW) in its own kill-on-close Job: dropping
@@ -96,8 +97,13 @@ Ports are test-bound (bind then release): allocate right before the engine start
 ## `singbox_config` — the config of one tunnel start (pure, deterministic)
 
 ```rust
-pub struct ConfigInputs { pub upstream: Upstream, pub tun: TunParams, pub listeners: Listeners,
+pub struct ConfigInputs { pub upstream: Upstream, pub capture: Capture, pub listeners: Listeners,
     pub routing: RoutingParts, pub phys_dns: Vec<Ipv4Addr> /* physical adapters' resolvers */ }
+pub enum Capture {               // NOADMIN.md §2: routing_mode Hard = Tun, Soft = Proxy
+    Tun(TunParams),              // `tun-in`; needs an elevated process
+    Proxy { port: u16 },         // `proxy-in`: mixed (HTTP + SOCKS) on 127.0.0.1:port, no users,
+}                                // no set_system_proxy (the app sets the system proxy itself)
+pub const PROXY_IN: &str = "proxy-in";
 pub enum Upstream {
     LocalProxy { addr: vpnte_core::net::HostPort, kind: ProxyKind, creds: Option<Creds> }, // "hard mode"
     Native { fragment: vpnte_profiles::emit_singbox::SingBoxFragment, udp: UdpPolicy },
@@ -123,18 +129,27 @@ pub enum ConfigError { InvalidSlots(&'static str), InvalidListeners(&'static str
 pub fn build(i: &ConfigInputs) -> Result<serde_json::Value, ConfigError>;
 pub fn select_mtu(stealth: bool, adaptive: AdaptiveMode, public_wifi: bool) -> u16; // 1280 | 1380 | 1500
 pub fn compat_key(i: &ConfigInputs) -> [u8; 32];   // equal keys: a running config can serve the new
-                                                   // upstream (ignores profile, slots, ports, secrets, alias)
+                                                   // upstream (ignores profile, slots, listener ports,
+                                                   // secrets, alias; the capture and its proxy port count)
 pub fn usable_physical_dns(physical: &[Ipv4Addr]) -> Option<Ipv4Addr>;  // not TUN /30, loopback, 0.0.0.0
 pub fn bootstrap_resolver(physical: &[Ipv4Addr]) -> Ipv4Addr;           // usable one, else 1.1.1.1
 ```
 Rules the caller must keep (review of the WFP / TUN design):
 - `tun.ipv6 = !tun.dns_hijack = Protection::session_guarded()` (kill switch != Off or leak
   protection on): dual-stack TUN + IPv6 reject only while the app's own WFP layer guards IPv6/DNS.
-- Every app-owned port (controller, direct, probe, bootstrap-in, slots) non-zero and distinct;
-  mixed inbounds always authenticated (user / password 1..=255 bytes); secret without spaces.
+- Every app-owned port (controller, direct, probe, bootstrap-in, slots, proxy capture) non-zero
+  and distinct; authenticated mixed inbounds (direct, probe) always have user / password
+  1..=255 bytes; secret without spaces. Keep the proxy-capture port for the whole session.
 - Generated route order: loopback inbounds -> `routing.process_rules` -> QUIC reject (when
-  `udp.block_quic`) -> IPv6 reject (dual stack) -> sniff -> hijack-dns -> private direct ->
-  all-UDP drop (when `!udp.udp`) -> STUN pin -> `routing.domain_rules`; final `proxy-out`.
+  `udp.block_quic`) -> IPv6 reject (dual-stack TUN, always in proxy form) -> sniff -> hijack-dns
+  (TUN only) -> private direct -> all-UDP drop (when `!udp.udp`) -> STUN pin ->
+  `routing.domain_rules`; final `proxy-out`; `auto_detect_interface` only with the TUN.
+- Proxy form = the TUN form minus the TUN inbound, the DNS hijack rule and
+  `auto_detect_interface`; upstreams, selector, DNS, rule sets, sniffing, the UDP / QUIC / IPv6
+  policy, process rules, loopback inbounds and the Clash API are the same. Process rules keep
+  working: sing-box looks up the owner of every loopback source (`route/process_cache.go`
+  `isLocalSource`), on Windows by the client socket's local address in the TCP / UDP tables
+  (`winiphlpapi.FindPid`). Programs that ignore the proxy are not captured at all.
 - DNS: routing's servers / rules; `dns-remote` defaults to Cloudflare DoH through the tunnel;
   `dns-resolver` is added for hostname tunnelled servers, `dns-bootstrap` (UDP to
   `bootstrap_resolver(phys_dns)`) when the upstream dials a name or bootstrap-in exists;
@@ -149,8 +164,9 @@ let direct_port = ports::alloc_port(false, &[clash.port])?;
 let routing = routing::build(&routing_inputs);      // see `routing`; show routing.warnings
 let inputs = ConfigInputs {
     upstream: Upstream::native(&profile, &EmitPolicy { device, ..Default::default() })?,
-    tun: TunParams { alias, mtu: select_mtu(stealth, adaptive, public_wifi), ipv6: guarded,
-                     dns_hijack: !guarded, stack: TunStack::Mixed },
+    capture: Capture::Tun(TunParams { alias, mtu: select_mtu(stealth, adaptive, public_wifi),
+                     ipv6: guarded, dns_hijack: !guarded, stack: TunStack::Mixed }),
+    // Soft: Capture::Proxy { port: session_port }  (ports::alloc_port(false, &[..]) once per session)
     listeners: Listeners { clash_port: clash.port, clash_secret: clash.secret.clone(),
                            direct: Loopback { port: direct_port, creds: Some(ports::creds()) },
                            probe: None, dns_bootstrap: None },
@@ -523,7 +539,9 @@ no fragment key is unused).
 - Not run: a real TUN start (needs elevation): routes, WFP interplay and runtime DNS are only
   checked by `sing-box check`; review risks R-E1..R-E5 (firewall vs mixed stack, IPv6 preference,
   UDP process lookup, link-local, VirtualBox) are open. The kill-not-delivered path of a stop
-  (`ExitNotConfirmed` after a refused kill) was not executed.
+  (`ExitNotConfirmed` after a refused kill) was not executed. The proxy capture runs live in a
+  loopback test (HTTP GET, CONNECT and SOCKS5 through `proxy-in`); process rules against proxy
+  clients and SOCKS5 UDP through it were not executed (source-verified only).
 - Not here: a sing-box config for a standalone loopback proxy / probe instance (no TUN):
   `proxies` / `probes` compose it from `vpnte_profiles::emit_singbox` + an authenticated mixed
   inbound and run it with `SingBoxProcess`. Planned `ipv6_egress` (IPv6 through the VPN) is not

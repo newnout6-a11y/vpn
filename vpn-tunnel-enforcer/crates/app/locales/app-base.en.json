@@ -1,0 +1,8 @@
+{
+  "app": {
+    "base": {
+      "needsAdmin": "Available only when the app is started as administrator.",
+      "tunnelMissing": "Internal error: the tunnel is not ready yet."
+    }
+  }
+}

@@ -30,6 +30,10 @@ mod win;
 /// app's locale registration (after the UI's base layer).
 pub const LOCALES: &[(&str, &str)] = &[
     (
+        include_str!("../locales/noadmin-system.ru.json"),
+        include_str!("../locales/noadmin-system.en.json"),
+    ),
+    (
         include_str!("../locales/winnet-adapters.ru.json"),
         include_str!("../locales/winnet-adapters.en.json"),
     ),
@@ -88,6 +92,8 @@ pub mod env;
     feature = "winnet-shell"
 ))]
 pub mod registry;
+#[cfg(feature = "winnet-system")]
+pub mod sysproxy;
 
 // --- work package `winnet-wfp` ---
 #[cfg(feature = "winnet-wfp")]

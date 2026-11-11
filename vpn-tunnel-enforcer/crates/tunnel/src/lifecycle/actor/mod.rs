@@ -9,18 +9,18 @@ use futures_util::future::BoxFuture;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{AdaptiveMode, Level, Notice, Owner, UnixMs, now_ms};
+use vpnte_base::types::{AdaptiveMode, KillSwitchLevel, Level, Notice, Owner, UnixMs, now_ms};
 use vpnte_base::{ErrorKind, Msg};
 use vpnte_core::ops::{CorrelationId, OpId, OpKind, OpMeta, OpStatus, Source};
 
-use super::effects::{self, Captured, Ctx, StartReport, StopReport, TunTarget, Up, Want};
+use super::effects::{self, Captured, Ctx, StartReport, StopReport, Target, Up, Want};
 use super::session::{self, LiveSession, Provenance, SessionProfile, start_failure_row};
 use super::{
     ConnError, ConnectTarget, DEFAULT_TIMEOUT, DisconnectReq, Done, Lifecycle, LifecycleDeps,
     NoticeKind, SessionEvent, SessionView, ShutdownReport, StopCause, key,
 };
-use crate::api::{ModeKind, TunError, TunStatus, TunStatusKind, TunnelEvent};
-use crate::fsm::{Evidence, FaultState, Fsm, Transition, TunnelMode, TunnelSnapshot, TunnelState};
+use crate::api::{CaptureKind, ModeKind, TunError, TunStatus, TunStatusKind, TunnelEvent};
+use crate::fsm::{Evidence, FaultState, Fsm, Transition, TunnelSnapshot, TunnelState};
 use crate::outcome::{
     self, EndSignals, EngineExit, NetworkTransition, OutcomeKind, SessionOutcome,
 };
@@ -433,9 +433,12 @@ impl Actor {
         let e = self.evidence();
         current
             && self.fsm.can_confirm_start(e)
-            && e.is_some_and(|e| match want {
-                Want::Tun => e.running && e.pid.is_some_and(|pid| pid > 0),
-                Want::Soft => e.soft_applied && !e.running,
+            && e.is_some_and(|e| {
+                let run = e.running && e.pid.is_some_and(|pid| pid > 0);
+                match want {
+                    Want::Tun => run && !e.proxy_capture,
+                    Want::Soft => run && e.proxy_capture && e.soft_applied,
+                }
             })
     }
 }

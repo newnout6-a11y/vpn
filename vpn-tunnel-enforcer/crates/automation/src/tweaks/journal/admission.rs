@@ -2,7 +2,7 @@
 use std::path::{Component, Path, Prefix};
 
 use super::model::{BlockKind, Feature, Record, RegHive, Target, Val};
-use crate::tweaks::block;
+use crate::tweaks::{block, sysproxy};
 
 /// Load-time admission of [`Target::Reg`] records: `(hive, key, name, value) -> allowed`. The
 /// package that writes registry values supplies it; records it does not admit are dropped.
@@ -30,6 +30,7 @@ pub(crate) fn admitted(r: &Record, admit_reg: RegAdmit) -> bool {
         Target::StudioOpt { .. } => r.feature == Feature::DevStudio,
         Target::Lines { .. } => r.feature == Feature::DevGradle,
         Target::Reg { .. } => true,
+        Target::SystemProxy => r.feature == Feature::SoftProxy,
     };
     feature_ok
         && match &r.target {
@@ -66,6 +67,8 @@ pub(crate) fn admitted(r: &Record, admit_reg: RegAdmit) -> bool {
                     && matches!(r.applied, Val::Absent | Val::Text(_))
             }
             Target::Reg { hive, key, name } => all(&|v| admit_reg(*hive, key, name, v)),
+            // Settings only ever go back to WinINet (no file, no other user): well-formed is enough.
+            Target::SystemProxy => all(&|v| sysproxy::decode(v).is_some()),
         }
 }
 

@@ -16,10 +16,9 @@ const PID: u32 = 123;
 #[derive(Clone, Copy)]
 enum Effect {
     Ok,
-    /// Returned failure of a category (old `connectionFailure(category)`).
+    /// Failure of a category (old `connectionFailure(category)`; a thrown failure is the same
+    /// now that no connect keeps a previous session).
     Fail(ErrorKind),
-    /// Thrown failure of a category (old `throw new IpcFault(category)`).
-    Throw(ErrorKind),
 }
 
 /// The machine plus a fake OS whose evidence the tests mutate (or make unreadable).
@@ -140,15 +139,6 @@ impl H {
                 (OpStatus::Error, Some(ErrorKind::Internal))
             }
             Effect::Fail(kind) => (failure_status(kind), Some(kind)),
-            Effect::Throw(kind) => {
-                // Old `invalidateRetainedSoft`: a later failure voids the read-back. The Rust
-                // lane keeps a read-back only right before the terminal record, so this
-                // emulation needs no API of its own.
-                if self.fsm.kept == Some(op.id) {
-                    self.fsm.kept = None;
-                }
-                (failure_status(kind), Some(kind))
-            }
         };
         self.end(&op, status, kind)
             .expect("terminal record accepted");
@@ -164,8 +154,13 @@ impl H {
         })
     }
 
+    /// Soft (NOADMIN.md §2): our engine comes up behind its loopback proxy, then the tweaks
+    /// point at it.
     fn connect_soft(&mut self) -> bool {
         self.start(|h, _| {
+            h.native_up(PID);
+            h.os.proxy_capture = true;
+            h.runtime(TunStatusKind::Running).expect("running accepted");
             h.os.soft_applied = true;
             Effect::Ok
         })
@@ -417,146 +412,134 @@ fn native_stop_receipt_cannot_overtake_owner_or_live_runtime() {
     assert_eq!(h.snap().state, TunnelState::Connected);
 }
 
-/// AT-00-002/008: a returned refresh failure (internal, permission, network, conflict,
-/// validation) keeps the confirmed Soft session; the next refresh needs a fresh read-back.
+/// AT-00-002 (NOADMIN.md §2, replaces the old "Soft = tweaks alone" vectors): Soft is confirmed
+/// only on both proofs, the engine behind its loopback proxy and the applied tweaks.
 #[test]
-fn soft_refresh_failure_keeps_confirmed_soft() {
-    for kind in [
-        ErrorKind::Internal,
-        ErrorKind::Permission,
-        ErrorKind::Network,
-        ErrorKind::Conflict,
-        ErrorKind::Validation,
-    ] {
+fn soft_needs_the_engine_and_the_tweaks() {
+    type Setup = fn(&mut H);
+    let half_proofs: [Setup; 3] = [
+        // The tweaks alone (the old Soft): no engine carries the traffic.
+        |h| h.os.soft_applied = true,
+        // The engine alone: nothing points programs at it.
+        |h| {
+            h.native_up(PID);
+            h.os.proxy_capture = true;
+        },
+        // Tweaks plus an engine without a real process id.
+        |h| {
+            h.native_up(0);
+            h.os.soft_applied = true;
+            h.os.proxy_capture = true;
+        },
+    ];
+    for setup in half_proofs {
         let mut h = H::new();
-        assert!(h.connect_soft());
-        assert!(h.fsm.can_refresh_soft());
-        assert!(!h.start(|h, op| {
-            let e = h.e();
-            assert_eq!(h.fsm.keep_previous(op.id, e), Ok(()));
-            Effect::Fail(kind)
+        assert!(!h.start(|h, _| {
+            setup(h);
+            Effect::Ok
         }));
-        let s = h.snap();
-        assert_eq!(
-            (s.state, s.mode, s.transition),
-            (TunnelState::Connected, Some(TunnelMode::Soft), None)
-        );
-        assert_eq!(s.operation.map(|op| op.status), Some(OpStatus::Error));
-        assert!(!h.start(|_, _| Effect::Fail(ErrorKind::Internal)));
         assert_eq!(h.snap().state, TunnelState::Error);
     }
-}
-
-/// AT-00-002/004: a thrown failure after the read-back invalidates it (every category).
-#[test]
-fn thrown_failure_invalidates_soft_read_back() {
-    for kind in [
-        ErrorKind::Validation,
-        ErrorKind::Permission,
-        ErrorKind::Network,
-        ErrorKind::Conflict,
-        ErrorKind::Internal,
-        ErrorKind::Cancelled,
-        ErrorKind::Timeout,
-    ] {
-        let mut h = H::new();
-        assert!(h.connect_soft());
-        assert!(!h.start(|h, op| {
-            let e = h.e();
-            assert_eq!(h.fsm.keep_previous(op.id, e), Ok(()));
-            Effect::Throw(kind)
-        }));
-        let s = h.snap();
-        assert_ne!(s.state, TunnelState::Connected);
-        assert_eq!(s.operation.and_then(|op| op.category), Some(kind));
-    }
-}
-
-/// AT-00-002: retained Soft is never invented (initial, native, stale, fault, lost env,
-/// later internal error).
-#[test]
-fn retained_soft_is_never_invented() {
-    // Native: no running Soft refresh to keep.
     let mut h = H::new();
-    assert!(h.connect());
+    assert!(h.connect_soft());
+    let s = h.snap();
+    assert_eq!(
+        (s.state, s.mode, s.proxy_status),
+        (
+            TunnelState::Connected,
+            Some(TunnelMode::Soft),
+            ProxyStatus::Running
+        )
+    );
+    assert_eq!((s.process_state, s.pid), (ProcessState::Running, Some(PID)));
+}
+
+/// New (the old Soft refresh is gone): a connect while connected is refused in either mode,
+/// and no connect may keep a previous session.
+#[test]
+fn connect_while_connected_is_refused_in_soft_too() {
+    let mut h = H::new();
+    assert!(h.connect_soft());
+    assert!(!h.fsm.can_start());
     let before = h.snap();
     let last = before.operation.clone().expect("connect recorded").id;
     assert_eq!(h.fsm.keep_previous(last, h.e()), Err(Invalid));
     assert_eq!(h.snap(), before);
-    assert!(!h.fsm.can_refresh_soft());
+}
 
-    type Case = fn(&mut H, &OpMeta) -> (OpId, bool);
-    let cases: [(bool, Case); 5] = [
-        // initial: nothing connected yet, the "refresh" is a plain start.
-        (false, |_, op| (op.id, false)),
-        (true, |_, _| (OpId::next(), false)),
-        (true, |h, op| {
-            let e = h.e();
-            h.fsm.fault(FaultState::Unknown, e);
-            (op.id, false)
-        }),
-        (true, |h, op| {
-            h.os.soft_applied = false;
-            (op.id, false)
-        }),
-        // internal: the read-back is accepted, then a later error is thrown.
-        (true, |_, op| (op.id, true)),
-    ];
-    for (soft_first, case) in cases {
+/// AT-00-002/008: a failed Soft start (refused strict, `Permission`, apply failure: every
+/// category) never reads as connected, and a stop that cleans up returns to "disconnected".
+#[test]
+fn failed_soft_start_is_an_error() {
+    for kind in [
+        ErrorKind::Validation,
+        ErrorKind::Permission,
+        ErrorKind::Network,
+        ErrorKind::Internal,
+    ] {
         let mut h = H::new();
-        if soft_first {
-            assert!(h.connect_soft());
-        }
-        assert!(!h.start(|h, op| {
-            let (id, accepted) = case(h, op);
-            let before = h.snap();
-            let kept = h.fsm.keep_previous(id, h.e());
-            if accepted {
-                assert_eq!(kept, Ok(()));
-                return Effect::Throw(ErrorKind::Internal);
-            }
-            assert_eq!(kept, Err(Invalid));
-            assert_eq!(h.snap(), before);
-            Effect::Fail(ErrorKind::Internal)
+        assert!(!h.start(|h, _| {
+            h.native_up(PID);
+            h.os.proxy_capture = true;
+            Effect::Fail(kind)
         }));
-        assert_ne!(h.snap().state, TunnelState::Connected);
+        let s = h.snap();
+        assert_eq!((s.state, s.mode), (TunnelState::Error, None));
+        assert_eq!(s.operation.and_then(|op| op.category), Some(kind));
+        assert!(h.stop());
+        assert_eq!(h.snap().state, TunnelState::Disconnected);
     }
 }
 
-/// AT-00-002/003: an accepted Soft retention is invalidated by a later native process, a fault
-/// or a cancelling stop; a second `keep_previous` is rejected afterwards.
+/// AT-00-002: a connected Soft session loses its proof when the tweaks vanish or the engine
+/// ends outside an operation; the state fails closed to unknown with cleanup owed.
 #[test]
-fn soft_retention_is_invalidated_by_native_fault_or_cancel() {
-    for case in 0..3 {
+fn soft_proof_is_lost_with_the_tweaks_or_the_engine() {
+    for lose_tweaks in [true, false] {
         let mut h = H::new();
         assert!(h.connect_soft());
-        let refresh = h.begin(OpKind::Connect);
-        h.fsm.keep_previous(refresh.id, h.e()).unwrap();
-        match case {
-            0 => h.native_up(PID),
-            1 => {
-                let e = h.e();
-                h.fsm.fault(FaultState::Unknown, e);
-            }
-            _ => {
-                // The stop pre-empts the refresh: its record lands first, the late
-                // cancelled terminal of the refresh is stale.
-                let stop = h.begin(OpKind::Disconnect);
-                h.cleanup();
-                let stale = h.end(&refresh, OpStatus::Cancelled, Some(ErrorKind::Cancelled));
-                assert_eq!(stale, Err(Invalid));
-                h.end(&stop, OpStatus::Success, None).unwrap();
-            }
+        if lose_tweaks {
+            h.os.soft_applied = false;
+            h.runtime(TunStatusKind::Running).unwrap();
+        } else {
+            h.native_down();
+            h.runtime(TunStatusKind::Stopped).unwrap();
         }
-        if case < 2 {
-            h.end(&refresh, OpStatus::Error, Some(ErrorKind::Internal))
-                .unwrap();
-        }
-        assert_ne!(h.snap().state, TunnelState::Connected);
-        let before = h.snap();
-        assert_eq!(h.fsm.keep_previous(refresh.id, h.e()), Err(Invalid));
-        assert_eq!(h.snap(), before);
+        let s = h.snap();
+        assert_eq!((s.state, s.mode), (TunnelState::Unknown, None));
+        assert!(s.cleanup_required);
+        assert!(h.stop());
+        assert_eq!(h.snap().state, TunnelState::Disconnected);
     }
+}
+
+/// AT-00-002/003 in Soft: an in-place upstream switch and a native reconnect confirm Soft again
+/// only with both proofs; a switch that lost the tweaks is not confirmed.
+#[test]
+fn soft_switch_and_native_reconnect_keep_the_mode() {
+    let mut h = H::new();
+    assert!(h.connect_soft());
+    h.fsm.upstream_began(1, h.e()).unwrap();
+    h.fsm.upstream_finished(1, true, h.e()).unwrap();
+    assert_eq!(h.snap().mode, Some(TunnelMode::Soft));
+    assert_eq!(h.snap().state, TunnelState::Connected);
+
+    h.native_down();
+    h.runtime(TunStatusKind::Restarting { attempt: 1, max: 3 })
+        .unwrap();
+    h.fsm.native_start_began(1).unwrap();
+    h.native_up(456);
+    h.fsm.native_start_finished(1, true, h.e()).unwrap();
+    let s = h.snap();
+    assert_eq!(
+        (s.state, s.mode, s.pid),
+        (TunnelState::Connected, Some(TunnelMode::Soft), Some(456))
+    );
+
+    h.fsm.upstream_began(2, h.e()).unwrap();
+    h.os.soft_applied = false;
+    h.fsm.upstream_finished(2, true, h.e()).unwrap();
+    assert_eq!(h.snap().state, TunnelState::Unknown);
 }
 
 /// AT-00-002: a running native process is not "connected" until every effect of the start
@@ -606,15 +589,14 @@ fn owned_recovery_clears_a_fault() {
     assert_eq!(h.snap().state, TunnelState::Connected);
 }
 
-/// A second connect and a Soft refresh over a native tunnel are not admitted (the lane asks
-/// these predicates before any effect); asking does not change the snapshot.
+/// A second connect over a native tunnel is not admitted (the lane asks these predicates
+/// before any effect); asking does not change the snapshot.
 #[test]
-fn second_connect_and_soft_refresh_over_native_are_not_admitted() {
+fn second_connect_over_native_is_not_admitted() {
     let mut h = H::new();
     assert!(h.connect());
     let before = h.snap();
     assert!(!h.fsm.can_start());
-    assert!(!h.fsm.can_refresh_soft());
     assert!(!h.fsm.can_confirm_stop(h.e()));
     assert_eq!(h.snap(), before);
     // Only a disconnect may pre-empt a running operation.
@@ -695,9 +677,10 @@ fn late_native_receipt_after_manual_stop_is_ignored() {
     assert_eq!(conflict.kind, ErrorKind::Conflict);
 }
 
-/// Soft is confirmed only after its own env apply and never gets a native PID.
+/// Soft (NOADMIN.md §2) runs our engine: it shows its PID, and a stop must end the engine and
+/// the tweaks before "disconnected".
 #[test]
-fn soft_is_confirmed_only_after_env_apply() {
+fn soft_shows_the_engine_and_stops_both() {
     let mut h = H::new();
     assert!(h.connect_soft());
     let s = h.snap();
@@ -705,7 +688,8 @@ fn soft_is_confirmed_only_after_env_apply() {
         (s.state, s.mode),
         (TunnelState::Connected, Some(TunnelMode::Soft))
     );
-    assert_eq!((s.process_state, s.pid), (ProcessState::Stopped, None));
+    assert_eq!((s.process_state, s.pid), (ProcessState::Running, Some(PID)));
+    assert!(!h.stop_with(false));
     assert!(h.stop());
     assert_eq!(h.snap().state, TunnelState::Disconnected);
 }
@@ -947,9 +931,9 @@ fn rotation_is_confirmed_only_on_evidence() {
         (TunnelState::Connected, Some(TunnelMode::Tun), Some(456))
     );
 
-    // Success claimed, but only Soft is applied: not proven.
+    // Success claimed, but the new run is a Soft one: not the mode the rotation started from.
     let rotation = h.begin(OpKind::Rotation);
-    h.cleanup();
+    h.os.proxy_capture = true;
     h.os.soft_applied = true;
     h.end(&rotation, OpStatus::Success, None).unwrap();
     assert_eq!(h.snap().state, TunnelState::Unknown);
@@ -1093,9 +1077,18 @@ fn evidence_from_runtime_status() {
             pid: Some(PID),
             soft_applied: false,
             started_at: Some(42),
+            proxy_capture: false,
         }
     );
-    assert!(e.native_ready() && !e.soft_ready());
+    assert!(e.tun_ready() && !e.soft_ready());
     assert!(!Evidence { pid: Some(0), ..e }.native_ready());
-    assert!(Evidence::from_status(&TunStatus::default(), true).soft_ready());
+    // Soft: the engine of a proxy-capture session plus the tweaks; the tweaks alone prove nothing.
+    let soft = TunStatus {
+        capture: Some(CaptureKind::Proxy),
+        ..status
+    };
+    let e = Evidence::from_status(&soft, true);
+    assert!(e.proxy_capture && e.soft_ready() && !e.tun_ready());
+    assert!(!Evidence::from_status(&soft, false).soft_ready());
+    assert!(!Evidence::from_status(&TunStatus::default(), true).soft_ready());
 }

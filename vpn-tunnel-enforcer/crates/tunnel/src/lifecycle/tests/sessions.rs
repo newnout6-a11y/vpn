@@ -1,10 +1,11 @@
 //! Session tracking and history rows (lifecycle-app §7.11, rows tagged AT-00-005 / AT-00-010).
 use vpnte_base::ErrorKind;
-use vpnte_base::types::{Owner, ProxyKind};
-use vpnte_core::ops::{CorrelationId, OpStatus, Source};
+use vpnte_base::types::{KillSwitchLevel, Owner, ProxyKind};
+use vpnte_core::ops::{CorrelationId, Source};
 
-use super::fakes::{Gate, Harness, eventually};
-use super::{local, soft, user_stop};
+use super::fakes::{Gate, Harness, SOFT_PORT, eventually, soft_addr};
+use super::{local, soft, soft_vpn, user_stop};
+use crate::api::{CaptureKind, Mode};
 use crate::fsm::{FaultState, TunnelMode, TunnelState};
 use crate::history::{Entry, Route, SessionMode};
 use crate::lifecycle::ConnectReq;
@@ -58,155 +59,170 @@ async fn owned_soft_session_writes_one_row_at_stop() {
     }
 }
 
-/// AT-00-005: runtime stop / node-switch events never end a Soft session.
+/// NOADMIN.md §2: a Soft connect starts the engine with the proxy capture for either upstream
+/// kind and points the tweaks (HTTP) at the session's mixed port; a server keeps its own id.
 #[tokio::test]
-async fn runtime_events_do_not_end_a_soft_session() {
-    use crate::api::{TunStatusKind, TunnelEvent};
+async fn soft_runs_the_engine_and_points_the_tweaks_at_it() {
     let h = Harness::new();
-    h.lc.connect(soft(8080, ProxyKind::Http, Owner::Manual))
+    h.profiles.add("srv-a", "Server A", true);
+    h.lc.connect(soft_vpn(None, Owner::Manual))
+        .await
+        .expect("soft over a server");
+    let req = h.rt.script.lock().requests.last().cloned().expect("start");
+    assert_eq!(req.capture, CaptureKind::Proxy);
+    let applied = h.soft.state.lock().applied.clone();
+    assert_eq!(applied, Some((soft_addr(SOFT_PORT), ProxyKind::Http)));
+    let live = h.lc.session().borrow().clone().expect("session");
+    assert_eq!(live.mode, SessionMode::Soft);
+    assert_eq!(live.profile_id, "srv-a");
+    assert!(live.generation.is_some(), "a Soft session is an engine run");
+    h.lc.disconnect(user_stop()).await.unwrap();
+    assert_eq!(h.soft.state.lock().applied, None);
+    let rows = h.rows();
+    let route = rows[0].provenance.as_ref().map(|p| p.route);
+    assert_eq!(
+        (rows[0].mode, route),
+        (SessionMode::Soft, Some(Route::SoftEnv))
+    );
+    assert_eq!(rows[0].profile_id, "srv-a");
+
+    h.lc.connect(soft(10808, ProxyKind::Socks5, Owner::Manual))
+        .await
+        .expect("soft over a local proxy");
+    let req = h.rt.script.lock().requests.last().cloned().expect("start");
+    assert_eq!(req.capture, CaptureKind::Proxy);
+    assert!(matches!(req.mode, Mode::LocalProxy { .. }));
+    let live = h.lc.session().borrow().clone().expect("session");
+    assert_eq!(live.profile_id, "local-proxy-soft-socks5");
+}
+
+/// NOADMIN.md §2: disconnect rolls the tweaks back before the engine stops.
+#[tokio::test]
+async fn soft_disconnect_rolls_back_before_the_engine_stops() {
+    let h = Harness::new();
+    h.lc.connect(soft(10808, ProxyKind::Socks5, Owner::Manual))
         .await
         .unwrap();
-    h.rt.emit(TunnelEvent::Status(TunStatusKind::Stopped));
-    h.rt.emit(TunnelEvent::ProtectedRestart {
-        reason: "server switch".into(),
-    });
-    h.settle().await;
-    assert!(h.rows().is_empty());
+    let gate = Gate::new();
+    h.rt.script.lock().stop_gate = Some(gate.clone());
+    let lc = h.lc.clone();
+    let stop = tokio::spawn(async move { lc.disconnect(user_stop()).await });
+    eventually("runtime stop called", || h.rt.script.lock().stops == 1).await;
+    assert_eq!(h.soft.state.lock().applied, None, "tweaks first");
+    assert!(h.rt.running(), "the engine still runs");
+    gate.open();
+    stop.await.unwrap().expect("stop");
+    assert!(!h.rt.running());
+    assert_eq!(h.snap().state, TunnelState::Disconnected);
+}
+
+/// New (the old Soft refresh is gone): a connect while connected in Soft is refused as in Hard
+/// mode; the session stays one.
+#[tokio::test]
+async fn soft_connect_while_connected_is_refused() {
+    let h = Harness::new();
+    h.lc.connect(soft(10808, ProxyKind::Socks5, Owner::Manual))
+        .await
+        .unwrap();
+    let err =
+        h.lc.connect(soft(9090, ProxyKind::Http, Owner::Manual))
+            .await
+            .unwrap_err();
+    assert_eq!(
+        err.user_msg().key,
+        "tunnel.lifecycle.lane.stateRefusesStart"
+    );
+    assert_eq!(h.rt.script.lock().starts, 1);
     h.lc.disconnect(user_stop()).await.unwrap();
     assert_eq!(kinds(&h.rows()), [OutcomeKind::UserStop]);
 }
 
-/// AT-00-005: identical Soft refreshes stay one session; an address or protocol change splits.
+/// NOADMIN.md §2: a failed apply (or read-back) leaves no tweak behind and stops the engine this
+/// start ran; the failure gets its own row.
 #[tokio::test]
-async fn soft_refreshes_split_on_address_or_protocol() {
-    let h = Harness::new();
-    let mut ids = Vec::new();
-    for (port, kind) in [
-        (8080, ProxyKind::Http),
-        (8080, ProxyKind::Http),
-        (8080, ProxyKind::Socks5),
-        (10808, ProxyKind::Socks5),
-    ] {
-        let (req, id) = with_id(soft(port, kind, Owner::Manual));
-        h.lc.connect(req).await.expect("refresh");
-        ids.push(id);
-    }
-    h.lc.disconnect(user_stop()).await.unwrap();
-    let rows = h.rows();
-    assert_eq!(
-        kinds(&rows),
-        [
-            OutcomeKind::ServerSwitch,
-            OutcomeKind::ServerSwitch,
-            OutcomeKind::UserStop
-        ]
-    );
-    let row_ids: Vec<_> = rows.iter().map(|r| r.correlation_id.clone()).collect();
-    assert_eq!(
-        row_ids,
-        [
-            Some(ids[0].clone()),
-            Some(ids[2].clone()),
-            Some(ids[3].clone())
-        ]
-    );
-}
-
-/// AT-00-005: a failed refresh whose previous proxy is read back unchanged keeps the session;
-/// the failure gets its own row under its own id.
-#[tokio::test]
-async fn failed_refresh_keeps_the_previous_soft_session() {
-    let h = Harness::new();
-    let (first, first_id) = with_id(soft(8080, ProxyKind::Http, Owner::Manual));
-    h.lc.connect(first).await.unwrap();
-    h.soft.state.lock().apply_failures = 1;
-    let (refresh, failure_id) = with_id(soft(9090, ProxyKind::Http, Owner::Manual));
-    let err = h.lc.connect(refresh).await.unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Permission);
-    let snap = h.snap();
-    assert_eq!(
-        (snap.state, snap.mode, snap.transition),
-        (TunnelState::Connected, Some(TunnelMode::Soft), None)
-    );
-    assert_eq!(snap.operation.map(|o| o.status), Some(OpStatus::Error));
-    h.lc.disconnect(user_stop()).await.unwrap();
-    let rows = h.rows();
-    assert_eq!(
-        kinds(&rows),
-        [OutcomeKind::StartFailed, OutcomeKind::UserStop]
-    );
-    assert_eq!(rows[0].correlation_id.as_ref(), Some(&failure_id));
-    assert_eq!(rows[1].correlation_id.as_ref(), Some(&first_id));
-}
-
-/// AT-00-005: a failed refresh that cannot prove the previous proxy (changed, or unreadable)
-/// ends that session as unknown, then records the failure; the state is unknown and a later
-/// stop adds nothing.
-#[tokio::test]
-async fn failed_refresh_with_lost_settings_ends_the_session() {
-    for clobber in [true, false] {
+async fn failed_tweaks_leave_nothing_behind() {
+    for unread in [false, true] {
         let h = Harness::new();
-        h.lc.connect(soft(8080, ProxyKind::Http, Owner::Manual))
-            .await
-            .unwrap();
         {
             let mut s = h.soft.state.lock();
-            s.apply_failures = 1;
-            s.failure_clears = clobber;
-            s.read_back_fails = !clobber;
+            s.apply_failures = u32::from(!unread);
+            s.failure_clears = true;
+            s.read_back_fails = unread;
         }
-        h.lc.connect(soft(9090, ProxyKind::Http, Owner::Manual))
-            .await
-            .unwrap_err();
-        let rows = h.rows();
-        assert_eq!(
-            kinds(&rows),
-            [OutcomeKind::Unknown, OutcomeKind::StartFailed]
-        );
-        assert_eq!(rows[0].mode, SessionMode::Soft);
-        let p = rows[0].provenance.as_ref().unwrap();
-        assert_eq!(p.confidence, Confidence::Indeterminate);
-        let headline = &rows[0].outcome.as_ref().unwrap().headline;
-        assert_eq!(
-            headline.key,
-            "tunnel.lifecycle.outcome.softRetainUnconfirmed"
-        );
-        let snap = h.snap();
-        assert_eq!((snap.state, snap.transition), (TunnelState::Unknown, None));
-        assert!(snap.cleanup_required);
-        h.lc.disconnect(user_stop()).await.unwrap();
-        assert_eq!(h.rows().len(), 2, "the stop adds nothing");
+        let err =
+            h.lc.connect(soft(10808, ProxyKind::Socks5, Owner::Manual))
+                .await
+                .unwrap_err();
+        let kind = if unread {
+            ErrorKind::Internal
+        } else {
+            ErrorKind::Permission
+        };
+        assert_eq!(err.kind(), kind);
+        eventually("cleanup", || {
+            !h.rt.running() && h.soft.state.lock().applied.is_none() && !h.lc.busy()
+        })
+        .await;
+        assert_eq!(kinds(&h.rows()), [OutcomeKind::StartFailed]);
+        assert_ne!(h.snap().state, TunnelState::Connected);
     }
 }
 
-/// AT-00-003 / AT-00-005: a stop during the refresh's endpoint read-back cancels it; nothing
-/// late is written and the stop records exactly one user-stop of the original session.
+/// NOADMIN.md §2: the strict kill switch is refused in Soft before anything is touched.
 #[tokio::test]
-async fn cancellation_during_endpoint_read_back() {
+async fn strict_is_refused_in_soft() {
     let h = Harness::new();
-    let (first, first_id) = with_id(soft(8080, ProxyKind::Http, Owner::Manual));
-    h.lc.connect(first).await.unwrap();
-    let gate = Gate::new();
-    {
-        let mut s = h.soft.state.lock();
-        s.apply_failures = 1;
-        s.read_back_gate = Some(gate.clone());
-    }
-    let lc = h.lc.clone();
-    let refresh =
-        tokio::spawn(async move { lc.connect(soft(9090, ProxyKind::Http, Owner::Manual)).await });
-    eventually("failed apply", || h.soft.state.lock().applies == 2).await;
-    let lc = h.lc.clone();
-    let stop = tokio::spawn(async move { lc.disconnect(user_stop()).await });
+    h.settings
+        .update(|s| s.kill_switch = KillSwitchLevel::Strict)
+        .unwrap();
+    let err =
+        h.lc.connect(soft(10808, ProxyKind::Socks5, Owner::Manual))
+            .await
+            .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Validation);
     assert_eq!(
-        refresh.await.unwrap().unwrap_err().kind(),
-        ErrorKind::Cancelled
+        err.user_msg().key,
+        "tunnel.lifecycle.soft.strictUnavailable"
     );
-    gate.open();
-    stop.await.unwrap().expect("stop");
-    let rows = h.rows();
-    assert_eq!(kinds(&rows), [OutcomeKind::UserStop]);
-    assert_eq!(rows[0].correlation_id.as_ref(), Some(&first_id));
+    assert_eq!(h.rt.script.lock().starts, 0);
+    assert_eq!(h.soft.state.lock().applies, 0);
+    assert_eq!(kinds(&h.rows()), [OutcomeKind::StartFailed]);
+}
+
+/// NOADMIN.md §2: a Soft session whose engine is lost for good ends; kill switch `off` rolls
+/// the tweaks back at once with a notice, `standard` keeps them on the dead port (state
+/// "blocked") until the disconnect rolls them back.
+#[tokio::test]
+async fn soft_engine_loss_follows_the_kill_switch() {
+    for level in [KillSwitchLevel::Off, KillSwitchLevel::Standard] {
+        let h = Harness::new();
+        h.settings.update(|s| s.kill_switch = level).unwrap();
+        h.lc.connect(soft(10808, ProxyKind::Socks5, Owner::Manual))
+            .await
+            .unwrap();
+        h.rt.crash(1);
+        eventually("session ended", || h.rows().len() == 1).await;
+        h.settle().await;
+        let applied = h.soft.state.lock().applied.clone();
+        let titles = h.notifier.titles();
+        let noticed = |name: &str| {
+            let title = format!("tunnel.lifecycle.notice.{name}.title");
+            titles.contains(&title)
+        };
+        if level == KillSwitchLevel::Off {
+            assert_eq!(applied, None);
+            assert!(noticed("softRestored"), "{titles:?}");
+            assert_eq!(h.snap().state, TunnelState::Unknown);
+        } else {
+            assert_eq!(applied, Some((soft_addr(SOFT_PORT), ProxyKind::Http)));
+            assert!(noticed("crashBlocked"), "{titles:?}");
+            assert_eq!(h.snap().state, TunnelState::Blocked);
+            h.lc.disconnect(user_stop()).await.expect("stop");
+            assert_eq!(h.soft.state.lock().applied, None);
+            assert_eq!(h.snap().state, TunnelState::Disconnected);
+        }
+        assert_eq!(h.rows()[0].mode, SessionMode::Soft);
+    }
 }
 
 /// AT-00-005: a Soft session is recorded only once the user's proxy settings are back.
@@ -227,43 +243,32 @@ async fn soft_session_waits_for_the_rollback() {
     assert_eq!(kinds(&h.rows()), [OutcomeKind::UserStop]);
 }
 
-/// AT-00-005: cancelled Soft starts stay out of history; the rollback runs once; a refreshed
-/// session is closed by the stop under its first operation's id.
+/// AT-00-005: a cancelled Soft start stays out of history; the compensating stop rolls the
+/// tweaks it applied back once and ends its engine.
 #[tokio::test]
-async fn cancelled_soft_starts_stay_out_of_history() {
-    for retained in [false, true] {
-        let h = Harness::new();
-        let mut first_id = None;
-        if retained {
-            let (first, id) = with_id(soft(8080, ProxyKind::Http, Owner::Manual));
-            h.lc.connect(first).await.unwrap();
-            first_id = Some(id);
-        }
-        let gate = Gate::new();
-        h.soft.state.lock().apply_gate = Some(gate.clone());
-        let lc = h.lc.clone();
-        let start =
-            tokio::spawn(
-                async move { lc.connect(soft(9090, ProxyKind::Http, Owner::Manual)).await },
-            );
-        eventually("start in flight", || h.lc.busy()).await;
-        let lc = h.lc.clone();
-        let stop = tokio::spawn(async move { lc.disconnect(user_stop()).await });
-        assert_eq!(
-            start.await.unwrap().unwrap_err().kind(),
-            ErrorKind::Cancelled
-        );
-        gate.open();
-        stop.await.unwrap().expect("stop");
-        assert_eq!(h.soft.state.lock().rollbacks, 1);
-        let rows = h.rows();
-        if retained {
-            assert_eq!(kinds(&rows), [OutcomeKind::UserStop]);
-            assert_eq!(rows[0].correlation_id, first_id);
-        } else {
-            assert!(rows.is_empty());
-        }
-    }
+async fn cancelled_soft_start_stays_out_of_history() {
+    let h = Harness::new();
+    let gate = Gate::new();
+    h.soft.state.lock().apply_gate = Some(gate.clone());
+    let lc = h.lc.clone();
+    let start =
+        tokio::spawn(async move { lc.connect(soft(9090, ProxyKind::Http, Owner::Manual)).await });
+    eventually("apply in flight", || {
+        h.soft.state.lock().apply_gate.is_none()
+    })
+    .await;
+    let lc = h.lc.clone();
+    let stop = tokio::spawn(async move { lc.disconnect(user_stop()).await });
+    assert_eq!(
+        start.await.unwrap().unwrap_err().kind(),
+        ErrorKind::Cancelled
+    );
+    gate.open();
+    stop.await.unwrap().expect("stop");
+    assert_eq!(h.soft.state.lock().rollbacks, 1);
+    assert_eq!(h.soft.state.lock().applied, None);
+    assert!(!h.rt.running());
+    assert!(h.rows().is_empty());
 }
 
 /// AT-00-005 + L-05 / L-15: a TUN start over an applied Soft proxy rolls it back first and
@@ -296,7 +301,9 @@ async fn mode_switch_from_soft() {
             );
             assert_eq!(kinds(&rows), [OutcomeKind::StartFailed]);
             assert_eq!(rows[0].profile_id, "local-proxy");
-            assert_eq!(h.rt.script.lock().starts, 0, "the tunnel never started");
+            // Only the Soft session's engine ever started; it still runs.
+            assert_eq!(h.rt.script.lock().starts, 1, "the tunnel never started");
+            assert!(h.rt.running());
             let live = h.lc.session().borrow().clone().unwrap();
             assert_eq!(live.mode, SessionMode::Soft);
         }

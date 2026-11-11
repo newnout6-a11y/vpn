@@ -506,8 +506,8 @@ async fn shutdown_cleans_up_even_when_the_engine_exit_is_unproven() {
 }
 
 /// A-01 / §7.2 "startup unexpectedly throws": a panicking effect never strands the lane; the
-/// caller gets an internal failure, the state reads unknown (nothing is proven) and the user is
-/// told; the next connect works.
+/// caller gets an internal failure, the user is told, whatever the start brought up is stopped
+/// by the recovery stop; the next connect works.
 #[tokio::test]
 async fn panicking_effect_releases_the_lane() {
     let h = Harness::new();
@@ -519,7 +519,10 @@ async fn panicking_effect_releases_the_lane() {
     assert_eq!(err.kind(), ErrorKind::Internal);
     h.settle().await;
     assert!(!h.lc.busy());
-    assert_eq!(h.snap().state, TunnelState::Unknown);
+    // The panicked Soft start had brought its engine up: the recovery stop ends it, so the
+    // state is proven again (the old Soft had no engine and stayed "unknown").
+    assert!(!h.rt.running());
+    assert_eq!(h.snap().state, TunnelState::Disconnected);
     let title = "tunnel.lifecycle.notice.internalError.title".to_owned();
     assert!(h.notifier.titles().contains(&title));
     h.lc.connect(local(Owner::Manual))

@@ -1,6 +1,6 @@
 //! Reversible soft-mode tweaks: user-level settings that point applications at the local proxy
-//! (per-user environment variables, and opt-in Git / Gradle / Android Studio targets), recorded in
-//! one journal so that exactly our own values are rolled back.
+//! (the per-user system proxy, per-user environment variables, and opt-in Git / Gradle / Android
+//! Studio targets), recorded in one journal so that exactly our own values are rolled back.
 //!
 //! Rules carried over from the field (spec automation-soft §3.5-3.6, §4, §6.8):
 //! - every original value is read before anything is written; an unreadable one aborts the apply
@@ -24,6 +24,7 @@ pub mod journal;
 pub mod legacy;
 pub mod soft;
 pub mod studio;
+pub mod sysproxy;
 pub mod user;
 
 #[cfg(test)]
@@ -32,7 +33,8 @@ mod test_support;
 pub use journal::{
     Backend, Feature, Journal, Record, RollbackReport, Target, TweakError, TweakState, Val,
 };
-pub use soft::{DevTargets, Soft, SoftReport, SoftStatus, SoftSystem};
+pub use soft::{DevTargets, ProxyOwner, Soft, SoftReport, SoftStatus, SoftSystem};
+pub use sysproxy::{SystemProxy, WinInet};
 
 /// Runs blocking tweak work (registry, files, `git`) on tokio's blocking pool; the async facades of
 /// Soft mode, browser hardening and location privacy go through it.

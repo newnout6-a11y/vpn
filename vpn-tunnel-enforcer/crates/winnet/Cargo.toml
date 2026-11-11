@@ -16,7 +16,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 vpnte-base.workspace = true
-windows = { workspace = true, features = ["Win32_System_Com_StructuredStorage", "Win32_UI_Shell_PropertiesSystem"] }
+windows = { workspace = true, features = ["Win32_Networking_WinInet", "Win32_System_Com_StructuredStorage", "Win32_UI_Shell_PropertiesSystem"] }
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -35,15 +35,8 @@ impl Actor {
             }
             return;
         }
-        let soft_refresh = matches!(
-            cmd.job,
-            Job::Connect {
-                target: ConnectTarget::Soft { .. },
-                ..
-            }
-        ) && self.fsm.can_refresh_soft();
         let allowed = match cmd.job {
-            Job::Connect { .. } => self.fsm.can_start() || soft_refresh,
+            Job::Connect { .. } => self.fsm.can_start(),
             _ => self.fsm.can_rotate(),
         };
         if !allowed {
@@ -52,7 +45,7 @@ impl Actor {
         let op = op_meta(cmd.job.op_kind(), &cmd.head);
         self.publish(&op);
         let token = cmd.token.child_token();
-        self.spawn_start_effect(&op, &cmd.job, soft_refresh, token.clone());
+        self.spawn_start_effect(&op, &cmd.job, token.clone());
         self.watch_start(op.id, cmd.head.timeout, cmd.token, token.clone());
         self.start = Some(Start {
             op,
@@ -64,13 +57,7 @@ impl Actor {
         });
     }
 
-    pub(super) fn spawn_start_effect(
-        &self,
-        op: &OpMeta,
-        job: &Job,
-        soft_refresh: bool,
-        token: CancellationToken,
-    ) {
+    pub(super) fn spawn_start_effect(&self, op: &OpMeta, job: &Job, token: CancellationToken) {
         let ctx = Ctx {
             deps: self.deps.clone(),
             token,
@@ -80,11 +67,6 @@ impl Actor {
             },
             owner: op.owner,
         };
-        let previous = self
-            .session
-            .as_ref()
-            .filter(|_| soft_refresh)
-            .and_then(|s| s.soft.clone());
         let adaptive = self
             .session
             .as_ref()
@@ -92,18 +74,20 @@ impl Actor {
         let job = job.clone();
         let fut = async move {
             match job {
-                Job::Connect {
-                    target: ConnectTarget::Soft { addr, kind },
-                    ..
-                } => effects::connect_soft(ctx, addr, kind, previous).await,
-                Job::Connect {
-                    target: ConnectTarget::LocalProxy { addr, kind },
-                    adaptive,
-                } => effects::connect_tun(ctx, TunTarget::Proxy { addr, kind }, adaptive).await,
-                Job::Connect {
-                    target: ConnectTarget::DirectVpn { profile_id },
-                    adaptive,
-                } => effects::connect_tun(ctx, TunTarget::Direct(profile_id), adaptive).await,
+                Job::Connect { target, adaptive } => {
+                    let capture = if target.is_soft() {
+                        CaptureKind::Proxy
+                    } else {
+                        CaptureKind::Tun
+                    };
+                    let target = match target {
+                        ConnectTarget::LocalProxy { addr, kind }
+                        | ConnectTarget::Soft { addr, kind } => Target::Proxy { addr, kind },
+                        ConnectTarget::DirectVpn { profile_id }
+                        | ConnectTarget::SoftVpn { profile_id } => Target::Direct(profile_id),
+                    };
+                    effects::connect(ctx, target, capture, adaptive).await
+                }
                 Job::Switch { profile_id, kind } => {
                     effects::switch(ctx, profile_id, kind, adaptive).await
                 }
@@ -256,8 +240,8 @@ pub(super) fn abort_error(kind: ErrorKind, start: bool) -> ConnError {
 impl Actor {
     pub(super) async fn start_succeeded(&mut self, start: Start, up: Up, by: Provenance) {
         let warnings = match &up {
-            Up::Tun { warnings, .. } | Up::Restarted { warnings, .. } => warnings.clone(),
-            Up::Soft { .. } | Up::Idle => Vec::new(),
+            Up::Run { warnings, .. } | Up::Restarted { warnings, .. } => warnings.clone(),
+            Up::Idle => Vec::new(),
         };
         self.publish(&terminal(&start.op, None));
         let state = self.fsm.snapshot().state;
@@ -291,7 +275,6 @@ impl Actor {
             error,
             kept_previous,
             mut touched,
-            mut soft_lost,
             row,
         } = failure;
         let is_connect = matches!(start.job, Job::Connect { .. });
@@ -299,19 +282,10 @@ impl Actor {
             let e = self.evidence();
             if self.fsm.keep_previous(start.op.id, e).is_err() {
                 // The read-back no longer holds: the previous protection is not proven.
-                soft_lost |= is_connect;
                 touched |= !is_connect;
             }
         }
         self.publish(&terminal(&start.op, Some(error.kind())));
-        if soft_lost {
-            let headline = Msg::new(key::OUTCOME_SOFT_LOST);
-            let ending = Captured::now(&self.deps);
-            self.close_current(OutcomeKind::Unknown, Some(headline), ending)
-                .await;
-            let e = self.evidence();
-            self.fsm.fault(FaultState::Unknown, e);
-        }
         if touched {
             if !is_connect {
                 self.close_switched(&start.job, error.user_msg()).await;
@@ -334,7 +308,7 @@ impl Actor {
     /// A switch or restart tore the previous tunnel down: its session ends as that switch
     /// (rotation / server switch) or, for a restart, as unknown with `headline`.
     pub(super) async fn close_switched(&mut self, job: &Job, headline: Msg) {
-        if self.session.as_ref().is_none_or(LiveSession::is_soft) {
+        if self.session.is_none() {
             return;
         }
         let ending = Captured::now(&self.deps);
@@ -349,13 +323,7 @@ impl Actor {
 
     /// The other mode was ended before a start: its session closes as a mode switch (L-05).
     pub(super) async fn close_mode_switch(&mut self, job: &Job, ending: Captured) {
-        let soft_start = matches!(
-            job,
-            Job::Connect {
-                target: ConnectTarget::Soft { .. },
-                ..
-            }
-        );
+        let soft_start = matches!(job, Job::Connect { target, .. } if target.is_soft());
         // A session of the start's own mode was not ended by it (an unreadable Soft state
         // before a TUN start rolls back defensively).
         let Some(soft) = self.session.as_ref().map(LiveSession::is_soft) else {

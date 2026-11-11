@@ -44,10 +44,18 @@ pub(super) fn tun(ipv6: bool, dns_hijack: bool) -> TunParams {
     }
 }
 
+/// The TUN parameters of TUN-capture inputs.
+pub(super) fn tun_of(i: &mut ConfigInputs) -> &mut TunParams {
+    match &mut i.capture {
+        Capture::Tun(t) => t,
+        Capture::Proxy { .. } => panic!("not a TUN capture"),
+    }
+}
+
 pub(super) fn inputs(upstream: Upstream) -> ConfigInputs {
     ConfigInputs {
         upstream,
-        tun: tun(false, true),
+        capture: Capture::Tun(tun(false, true)),
         listeners: Listeners {
             clash_port: 25553,
             clash_secret: "0123456789abcdef0123456789abcdef".into(),
@@ -243,7 +251,7 @@ fn ipv4_only_tun() {
 #[test]
 fn dual_stack_tun() {
     let mut i = inputs(native(&vless("1.2.3.4", None)));
-    i.tun = tun(true, false);
+    i.capture = Capture::Tun(tun(true, false));
     let c = build(&i).unwrap();
     let tun = tun_in(&c);
     assert_eq!(
@@ -265,7 +273,7 @@ fn dual_stack_tun() {
 fn dns_mode_is_an_input() {
     let mut i = inputs(native(&vless("1.2.3.4", None)));
     assert_eq!(tun_in(&build(&i).unwrap())["dns_mode"], "hijack");
-    i.tun = tun(true, false);
+    i.capture = Capture::Tun(tun(true, false));
     assert_eq!(tun_in(&build(&i).unwrap())["dns_mode"], "native");
 }
 
@@ -273,7 +281,7 @@ fn dns_mode_is_an_input() {
 #[test]
 fn stack_is_an_input() {
     let mut i = inputs(native(&vless("1.2.3.4", None)));
-    i.tun.stack = TunStack::Gvisor;
+    tun_of(&mut i).stack = TunStack::Gvisor;
     assert_eq!(tun_in(&build(&i).unwrap())["stack"], "gvisor");
     assert_eq!(TunStack::default(), TunStack::Mixed);
 }
@@ -281,13 +289,13 @@ fn stack_is_an_input() {
 #[test]
 fn tun_parameters_are_checked() {
     let mut i = inputs(native(&vless("1.2.3.4", None)));
-    i.tun.alias = "  ".into();
+    tun_of(&mut i).alias = "  ".into();
     assert!(matches!(build(&i), Err(ConfigError::InvalidTun(_))));
-    i.tun.alias = "Ethernet 5".into();
-    i.tun.mtu = 1200;
+    tun_of(&mut i).alias = "Ethernet 5".into();
+    tun_of(&mut i).mtu = 1200;
     assert!(matches!(build(&i), Err(ConfigError::InvalidTun(_))));
     // IPv4-only (no WFP guard) with `native` DNS: nothing would block port 53 outside the TUN.
-    i.tun = tun(false, false);
+    i.capture = Capture::Tun(tun(false, false));
     assert!(matches!(build(&i), Err(ConfigError::InvalidTun(_))));
 }
 
@@ -655,7 +663,7 @@ fn endpoint_exclusion() {
     let c = build(&inputs(v6.clone())).unwrap();
     assert!(!c.to_string().contains("2001:db8::7/128"));
     let mut i = inputs(v6);
-    i.tun = tun(true, false);
+    i.capture = Capture::Tun(tun(true, false));
     let c = build(&i).unwrap();
     let excluded = tun_in(&c)["route_exclude_address"].as_array().unwrap();
     assert!(excluded.contains(&json!("2001:db8::7/128")));
@@ -697,7 +705,7 @@ fn routing_rules_placement() {
 #[test]
 fn ipv6_reject_sits_before_sniff() {
     let mut i = inputs(native(&vless("1.2.3.4", None)));
-    i.tun = tun(true, false);
+    i.capture = Capture::Tun(tun(true, false));
     let c = build(&i).unwrap();
     let reject = index_of(&c, &ipv6_reject_rule()).unwrap();
     let sniff = index_of(&c, &json!({ "action": "sniff" })).unwrap();
@@ -1063,7 +1071,7 @@ fn compat_key_scope() {
     same.listeners.clash_port = 30000;
     same.listeners.clash_secret = "ffffffffffffffffffffffffffffffff".into();
     same.listeners.direct = lb(30001, "other");
-    same.tun.alias = "Ethernet 9".into();
+    tun_of(&mut same).alias = "Ethernet 9".into();
     same.upstream = Upstream::XraySlots {
         slots: [ep(31000, "x"), ep(31001, "y")],
         active: Slot::B,
@@ -1075,10 +1083,10 @@ fn compat_key_scope() {
     assert_eq!(compat_key(&same), key);
 
     let changes: [fn(&mut ConfigInputs); 12] = [
-        |i| i.tun.mtu = 1280,
-        |i| i.tun.ipv6 = true,
-        |i| i.tun.dns_hijack = false,
-        |i| i.tun.stack = TunStack::Gvisor,
+        |i| tun_of(i).mtu = 1280,
+        |i| tun_of(i).ipv6 = true,
+        |i| tun_of(i).dns_hijack = false,
+        |i| tun_of(i).stack = TunStack::Gvisor,
         |i| {
             let curl = json!({ "process_path_regex": [r"(?i)(?:^|\\)curl\.exe$"], "outbound": DIRECT_OUT });
             i.routing.process_rules.push(curl);

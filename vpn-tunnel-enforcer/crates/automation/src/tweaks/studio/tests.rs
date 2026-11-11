@@ -7,9 +7,11 @@ use super::*;
 use crate::test_support::TempDir;
 use crate::tweaks::journal::{Journal, TweakError, no_registry};
 use crate::tweaks::soft::SoftSystem;
+use crate::tweaks::test_support::FakeProxy;
 
 fn files_only() -> SoftSystem {
     SoftSystem {
+        proxy: FakeProxy::with(Default::default()),
         env: UserEnv::under(r"Software\VPNTE-Test-tweaks-unused"),
         git: None,
         gradle_home: None,

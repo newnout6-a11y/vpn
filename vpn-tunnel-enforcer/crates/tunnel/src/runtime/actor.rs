@@ -18,12 +18,12 @@ use vpnte_engine::slot::{Slot, SlotEndpoint};
 use vpnte_engine::xray_process::XrayEvent;
 
 use super::RuntimeDeps;
-use super::capture::{CaptureCheck, CapturePlan, CaptureProof};
+use super::capture::{Capture, CaptureCheck, CapturePlan, CaptureProof};
 use super::engines::{CoreProc, Slots};
 use super::handle::{Cmd, Shared};
 use crate::api::{
-    SessionEndpoints, StartRequest, StopOptions, StopReceipt, TunStatus, TunStatusKind, TunWarning,
-    TunnelEvent,
+    CaptureKind, SessionEndpoints, StartRequest, StopOptions, StopReceipt, TunStatus,
+    TunStatusKind, TunWarning, TunnelEvent,
 };
 
 /// The Xray side of a slot-mode session.
@@ -104,6 +104,10 @@ pub(super) enum Internal {
 
 pub(super) struct Actor {
     pub deps: RuntimeDeps,
+    /// Strategy of the current (or last) session; every capture call goes here. Replaced only
+    /// by a start with the other strategy, after the old one released what it held.
+    pub capture: Arc<dyn Capture>,
+    pub strategy: CaptureKind,
     inbox: mpsc::Receiver<Cmd>,
     /// The last stop: calls issued before it finished share its receipt.
     pub last_stop: Option<DoneStop>,
@@ -165,6 +169,8 @@ impl Actor {
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(16);
         Self {
+            capture: deps.proxy.clone(),
+            strategy: CaptureKind::Proxy,
             deps,
             inbox,
             last_stop: None,

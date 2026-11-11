@@ -550,7 +550,7 @@ fn deterministic() {
 
 /// The fragments inside the real generated config (a local SOCKS upstream, IPv4 TUN).
 fn config(f: &RoutingFragments) -> Value {
-    use crate::singbox_config::{ConfigInputs, Listeners, TunParams, TunStack, Upstream};
+    use crate::singbox_config::{Capture, ConfigInputs, Listeners, TunParams, TunStack, Upstream};
     use vpnte_base::types::{Creds, Loopback, ProxyKind};
     let direct = Loopback {
         port: 25554,
@@ -565,13 +565,13 @@ fn config(f: &RoutingFragments) -> Value {
             kind: ProxyKind::Socks5,
             creds: None,
         },
-        tun: TunParams {
+        capture: Capture::Tun(TunParams {
             alias: "Ethernet 5".into(),
             mtu: 1500,
             ipv6: false,
             dns_hijack: true,
             stack: TunStack::Mixed,
-        },
+        }),
         listeners: Listeners {
             clash_port: 25553,
             clash_secret: "0123456789abcdef0123456789abcdef".into(),

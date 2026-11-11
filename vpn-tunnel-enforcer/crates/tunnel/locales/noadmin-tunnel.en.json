@@ -1,0 +1,22 @@
+{
+  "tunnel": {
+    "runtime": {
+      "tunUnavailable": "Hard mode (TUN) is unavailable: it needs the app to be started as administrator. Use Soft mode instead.",
+      "proxy": {
+        "strictUnavailable": "The strict kill switch is not available in Soft mode: it needs WFP filters (Hard mode, started as administrator).",
+        "notAccepting": "The engine's local proxy does not accept connections on port {{port}}."
+      }
+    },
+    "lifecycle": {
+      "soft": {
+        "strictUnavailable": "The strict kill switch is not available in Soft mode. Choose Standard or Off, or Hard mode."
+      },
+      "notice": {
+        "softRestored": {
+          "title": "Soft mode stopped",
+          "body": "The VPN engine stopped. The system proxy was restored: programs connect directly, without the VPN."
+        }
+      }
+    }
+  }
+}

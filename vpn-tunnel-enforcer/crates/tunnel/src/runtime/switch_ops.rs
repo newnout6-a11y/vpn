@@ -201,6 +201,9 @@ impl Actor {
         let Phase::Running(s) = &self.phase else {
             return false;
         };
+        if next.capture != s.req.capture {
+            return false;
+        }
         let (Mode::DirectVpn { .. }, Mode::DirectVpn { profile }) = (&s.req.mode, &next.mode)
         else {
             return false;
@@ -231,8 +234,7 @@ impl Actor {
             routing,
             phys_dns,
         };
-        self.deps
-            .capture
+        self.capture
             .config(&plan, &parts)
             .is_ok_and(|(_, key)| key == s.compat)
     }
@@ -250,6 +252,7 @@ impl Actor {
             return None;
         };
         let deps = &self.deps;
+        let capture = &*self.capture;
         let stops = &self.shared.stops;
         let Phase::Running(s) = &mut self.phase else {
             return None;
@@ -259,7 +262,7 @@ impl Actor {
         let mut exit = s.core.exit_watch();
         let mut ops = RuntimeSwitch {
             engines: &*deps.engines,
-            capture: &*deps.capture,
+            capture,
             slots,
             clash: &s.clash,
             proof: &s.proof,

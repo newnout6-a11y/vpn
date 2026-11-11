@@ -24,6 +24,10 @@ mod test_support;
 /// order, for the app's locale registration at start (after the UI's base layer).
 pub const LOCALES: &[(&str, &str)] = &[
     (
+        include_str!("../locales/noadmin-tunnel.ru.json"),
+        include_str!("../locales/noadmin-tunnel.en.json"),
+    ),
+    (
         include_str!("../locales/tunnel-fsm.ru.json"),
         include_str!("../locales/tunnel-fsm.en.json"),
     ),

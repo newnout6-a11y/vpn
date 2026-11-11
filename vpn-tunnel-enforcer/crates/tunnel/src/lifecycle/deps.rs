@@ -28,17 +28,18 @@ pub trait ProfileSource: Send + Sync {
     fn resolve(&self, id: Option<&str>) -> Option<ServerChoice>;
 }
 
-/// Soft mode: the user-level proxy settings that point apps at a local proxy (no TUN).
+/// Soft mode: the user-level tweaks (system proxy, opted-in variables and dev targets) that point
+/// programs at the engine's loopback mixed inbound (NOADMIN.md §2).
 #[async_trait]
 pub trait SoftProxy: Send + Sync {
     /// Our Soft proxy is applied, as read back from the system; `None` when it cannot be read
     /// (the state machine then fails closed).
     fn applied(&self) -> Option<bool>;
-    /// Applies the proxy `addr` (`host:port`) of `kind`.
+    /// Applies the proxy `addr` (`host:port`) of `kind` (over whatever is applied).
     async fn apply(&self, addr: &str, kind: ProxyKind) -> AppResult<()>;
     /// Restores the user's previous settings; `Ok` also when nothing was applied.
     async fn rollback(&self) -> AppResult<()>;
-    /// The system still points at `addr` / `kind` (read-back after a failed refresh).
+    /// The system points at `addr` / `kind` (the read-back that proves Soft: our mixed port).
     async fn is_configured(&self, addr: &str, kind: ProxyKind) -> AppResult<bool>;
 }
 
@@ -46,7 +47,7 @@ pub trait SoftProxy: Send + Sync {
 pub trait Monitor: Send + Sync {
     /// No leak alarms while a tunnel comes up.
     fn suppress_leak_tests(&self, span: Duration);
-    /// A tunnel is up (`generation` of the engine run, `None` for Soft): start IP monitoring, the
+    /// A tunnel is up (`generation` of the engine run, Hard or Soft): start IP monitoring, the
     /// post-connect egress probe and the periodic leak tests.
     fn start(&self, generation: Option<u64>);
     /// The tunnel is down: stop them and forget the VPN IP.

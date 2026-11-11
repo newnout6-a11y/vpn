@@ -1,0 +1,26 @@
+{
+  "app": {
+    "servers": {
+      "liveUnavailable": "Live server checks are not available in this build.",
+      "proxiesUnavailable": "External proxies are not available in this build.",
+      "probe": {
+        "privateTarget": "The server address is local or private, so it is not probed."
+      },
+      "export": {
+        "unsupported": "This key cannot be exported: neither a link nor JSON can carry it without loss.",
+        "nothing": "There are no keys that can be exported.",
+        "noProxies": "No servers fit a proxy list: only SOCKS, HTTP and naive can.",
+        "writeFailed": "Could not write the file. Choose another folder."
+      },
+      "dialog": {
+        "failed": "Could not open the save dialog.",
+        "saveKey": "Save VPN key — the file contains an access secret",
+        "saveAllKeys": "Save all VPN keys — the file contains passwords and keys",
+        "saveProxyList": "Save proxy list — the file may contain passwords",
+        "textFile": "Text file",
+        "jsonFile": "JSON configuration",
+        "allFiles": "All files"
+      }
+    }
+  }
+}

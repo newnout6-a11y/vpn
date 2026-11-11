@@ -1,0 +1,46 @@
+{
+  "app": {
+    "settings": {
+      "hardNeedsAdmin": "Hard (TUN) mode is available only when the app is started as administrator. Choose Soft: it works without administrator rights.",
+      "captureUnavailable": "Deep packet capture is not available in this version of the app.",
+      "locationUnavailable": "Hiding the Windows location is not available in this version of the app.",
+      "browserUnavailable": "Browser WebRTC protection is not available in this version of the app.",
+      "adaptiveUnavailable": "Adaptive bypass status and controls are not available in this version of the app.",
+      "rotationUnavailable": "Server rotation is not available in this version of the app.",
+      "transferUnavailable": "Configuration import and export are not available in this version of the app.",
+      "diagnosticsUnavailable": "The diagnostics ZIP export is not available in this version of the app.",
+      "themeUnknown": "This theme no longer exists.",
+      "killSwitch": {
+        "unconfirmed": "The Windows filters could not be verified.",
+        "strictUnverified": "Strict mode cannot be checked: available only when the app is started as administrator."
+      },
+      "domains": {
+        "ruleGone": "This rule no longer exists.",
+        "noList": "Choose a domain list file first."
+      },
+      "dialog": {
+        "failed": "Could not open the file dialog.",
+        "domainList": "Import a domain list",
+        "pickApp": "Choose a program",
+        "textFiles": "Text files",
+        "programs": "Programs",
+        "allFiles": "All files"
+      },
+      "wizard": {
+        "softChosen": "Soft mode selected",
+        "softChosenBody": "Hard (TUN) mode needs the app to be started as administrator, so Soft mode was saved. Programs that ignore the system proxy connect directly.",
+        "restoreFailed": "The wizard could not undo all of its changes: check the kill switch and autostart in Settings."
+      }
+    },
+    "logs": {
+      "historyUnreadable": "The connection history could not be read. It will be read again at the next start.",
+      "trafficUnavailable": "Clearing the traffic history is not available in this version of the app.",
+      "exportFailed": "Could not write the file. Choose another folder.",
+      "dialog": {
+        "export": "Export connection history",
+        "csv": "CSV table",
+        "json": "JSON"
+      }
+    }
+  }
+}

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub fn tool_name(feature: Feature) -> &'static str {
     match feature {
         Feature::SoftEnv => "Environment",
+        Feature::SoftProxy => "System proxy",
         Feature::DevGit => "Git",
         Feature::DevGradle => "Gradle",
         Feature::DevStudio => "Android Studio",
@@ -21,6 +22,8 @@ pub fn tool_name(feature: Feature) -> &'static str {
 pub enum Feature {
     /// Per-user proxy environment variables (Soft mode).
     SoftEnv,
+    /// The per-user system proxy, WinINet's default connection (Soft mode, package `noadmin-system`).
+    SoftProxy,
     /// Git `http.proxy` / `https.proxy` in the user's global config.
     DevGit,
     /// Managed block in `gradle.properties`.
@@ -163,6 +166,9 @@ pub enum Target {
         key: String,
         name: String,
     },
+    /// The per-user system proxy as one value (`Val::Text` = the settings as canonical JSON,
+    /// [`crate::tweaks::sysproxy::encode`]): a change by the user to any part of it keeps all of it.
+    SystemProxy,
 }
 
 impl Target {
@@ -179,6 +185,7 @@ impl Target {
             Target::StudioOpt { path, option } => format!("{} in {}", option.name(), file(path)),
             Target::Lines { path, .. } => format!("legacy lines in {}", file(path)),
             Target::Reg { hive, key, name } => format!("{hive:?}\\{key}\\{name}"),
+            Target::SystemProxy => "system proxy".to_owned(),
         }
     }
 
@@ -204,7 +211,7 @@ pub enum Val {
     ExpandSz(String),
     /// `REG_DWORD`.
     Dword(u32),
-    /// Text in a file or the Git config.
+    /// Text in a file or the Git config; the system proxy settings as canonical JSON.
     Text(String),
 }
 

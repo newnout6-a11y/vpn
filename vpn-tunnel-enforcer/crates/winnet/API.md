@@ -1,11 +1,11 @@
 # vpnte-winnet — API
 
 Windows system layer (x64 only): adapters / routes / TUN identity, processes and jobs, interface
-counters, ICMP, the WFP kill switch and leak protection, registry, user environment, elevation,
-autostart task, single instance, secret clipboard, power / session / theme events, toasts and the
-Start-menu shortcut. Depends only on `vpnte-base`. Paths: `vpnte_winnet::{adapters, process,
-counters, icmp, wfp, registry, env, autostart, clipboard, elevation, single_instance, shell,
-toast, power}` plus `vpnte_winnet::LOCALES`. Shared types used below come from `vpnte_base`
+counters, ICMP, the WFP kill switch and leak protection, registry, user environment, the per-user
+system proxy, elevation, autostart (per-user `Run` value), single instance, secret clipboard,
+power / session / theme events, toasts and the Start-menu shortcut. Depends only on `vpnte-base`.
+Paths: `vpnte_winnet::{adapters, process, counters, icmp, wfp, registry, env, sysproxy, autostart,
+clipboard, elevation, single_instance, shell, toast, power}` plus `vpnte_winnet::LOCALES`. Shared types used below come from `vpnte_base`
 (`AppError`, `AppResult`, `ErrorKind`, `Msg`, `Notice`, `types::{KillSwitchLevel, UnixMs}`),
 `ipnet` (`IpNet`, `Ipv4Net`, `Ipv6Net`), `windows::core::{GUID, Error, Result}`,
 `tokio_util::sync::CancellationToken`.
@@ -26,13 +26,14 @@ toast, power}` plus `vpnte_winnet::LOCALES`. Shared types used below come from `
 - **Elevation.** The app normally runs elevated (CONTRACT §1). Unelevated (`--no-elevate`) these
   fail with access denied / `ErrorKind::Permission`: every WFP change and enumeration
   (`wfp::Protection` ops → `ProtectionError::AccessDenied`, `wfp::remove_all`, `wfp::Engine`),
-  registering the autostart task (`autostart::set(true, ..)` and `set_checked` / `sync` when they
-  register), writing the installer's all-users Start-menu link (`toast::ensure_shortcut` under
+  deleting the 1.x logon task (`autostart::delete_task`; `sync` then keeps it and carries on),
+  writing the installer's all-users Start-menu link (`toast::ensure_shortcut` under
   `toast::common_programs_dir()`), terminating an elevated orphan in
   `process::sweep_orphans` (reported as `survived`). Everything else works unelevated, including
   `wfp::app_id`, `wfp::outbound_block_profiles`, `wfp::tun_inbound_blocked`, the `wfp`
   validation functions, `Protection::settings` / `session_guarded`, all adapter / route / counter
-  reads, `icmp::echo`, `env`, HKCU `registry` access and the per-user `toast` paths.
+  reads, `icmp::echo`, `env`, `sysproxy`, `autostart` (the `Run` value), HKCU `registry` access
+  and the per-user `toast` paths.
 - **Feature flags** `winnet-wfp`, `winnet-adapters`, `winnet-process`, `winnet-system`,
   `winnet-shell` are build scaffolding (all on by default; depend on the crate with default
   features). Do not name them.
@@ -59,7 +60,9 @@ vpnte_ui::lang::init_locales(&layers);
 | `winnet.wfp.notice.exceptionSkipped` | `label` | `Protection::notices` |
 | `winnet.wfp.status.firewallOutboundBlock` | — | `ProtectionStatus::firewall_warning` |
 | `winnet.wfp.status.hypervUnfiltered` | — | `ProtectionStatus::hyperv_warning` |
-| `winnet.autostart.{failed,needsAdmin,unknown}` | — | `AutostartError` |
+| `winnet.autostart.{failed,denied,stateUnknown}` | — | `AutostartError` |
+| `winnet.autostart.disabledByUser` | — | `AutostartState::hint` |
+| `winnet.autostart.{needsAdmin,unknown}` | — | not emitted any more (logon-task texts; the `Run` value needs no elevation) |
 | `winnet.clipboard.{busy,failed}` | — | `SecretClipboard::copy` |
 | `winnet.elevation.{declined,relaunchFailed}` | — | `relaunch_elevated` |
 | `winnet.singleInstance.noAnswer` | — | `single_instance::send` |
@@ -445,21 +448,42 @@ pub fn broadcast_change(timeout: Duration) -> windows::core::Result<()>;  // blo
 Writes do not broadcast: call `broadcast_change(BROADCAST_TIMEOUT)` once per batch on a blocking
 thread. Treat any `Err` from `get` as "unreadable → abort, no writes".
 
-## `autostart` — logon task over COM `ITaskService` (blocking)
+## `sysproxy` — the per-user system proxy (WinINet default connection; blocking, unelevated)
 ```rust
-pub const TASK_NAME: &str = "VPN Tunnel Enforcer";
+#[derive(Default, PartialEq, Eq, Hash, Serialize, Deserialize)]   // serde camelCase, missing = default
+pub struct ProxyConfig { pub use_proxy: bool /* PROXY_TYPE_PROXY */, pub server: String /* "host:port" | "http=…;https=…" */,
+    pub bypass: String /* ";"-list, "<local>" */, pub use_pac: bool, pub pac_url: String, pub auto_detect: bool }
+pub fn read() -> windows::core::Result<ProxyConfig>;            // FLAGS_UI (FLAGS before IE 8), server, bypass, PAC URL
+pub fn write(config: &ProxyConfig) -> windows::core::Result<()>; // FLAGS (+DIRECT) and the three strings, then notify
+```
+Only the documented `InternetQueryOptionW` / `InternetSetOptionW(INTERNET_OPTION_PER_CONNECTION_OPTION)`
+on the default (LAN) connection, so the `DefaultConnectionSettings` blob stays consistent; `write`
+then sends `INTERNET_OPTION_SETTINGS_CHANGED` and `INTERNET_OPTION_REFRESH` and stops at the first
+failure. Empty strings mean unset. A machine-wide proxy policy (`ProxySettingsPerUser = 0`) makes
+`write` fail with access denied. The Soft-mode tweak (`vpnte_automation::tweaks::sysproxy`) is the
+only writer; tests never write the real setting (`system_*` test is `#[ignore = "changes system state"]`).
+
+## `autostart` — per-user `Run` value (registry, blocking, unelevated); 1.x task helpers over COM
+```rust
+pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";              // under HKCU
+pub const APPROVED_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+pub const RUN_VALUE: &str = "VPN Tunnel Enforcer";    // data: "\"<exe>\" --autostart" (REG_SZ)
+pub const TASK_NAME: &str = "VPN Tunnel Enforcer";    // the 1.x logon task (root folder), removed by `sync`
 pub const AUTOSTART_ARG: &str = "--autostart";
-pub enum AutostartState { Absent, Present { matches_exe: bool } }  // enabled, one exec action, exe + --autostart
-pub fn set(enabled: bool, exe: &Path) -> windows::core::Result<()>;  // register needs elevation; delete absent = Ok
+pub enum AutostartState { Absent, Present { matches_exe: bool },
+    DisabledByUser { matches_exe: bool } }            // switched off in Task Manager: never switched on
+impl AutostartState { pub fn hint(self) -> Option<Msg>; }   // DisabledByUser -> winnet.autostart.disabledByUser
+pub fn set(enabled: bool, exe: &Path) -> windows::core::Result<()>;  // write / delete (absent = Ok)
 pub fn state(exe: &Path) -> windows::core::Result<AutostartState>;  // Err = unknown, never Absent
 pub trait AutostartOs { fn apply(&self, enabled: bool) -> windows::core::Result<()>;
-    fn read(&self) -> windows::core::Result<AutostartState>; }
-pub struct LogonTask { pub exe: PathBuf }                            // impl AutostartOs (the real task)
+    fn read(&self) -> windows::core::Result<AutostartState>;
+    fn remove_legacy_task(&self) -> windows::core::Result<bool>; }  // Ok(false): absent or not deletable
+pub struct RunValue { pub exe: PathBuf }                             // impl AutostartOs (the real value)
 pub enum Step { Os(windows::core::Error), Readback { expected: AutostartState, found: AutostartState },
     Persist(Box<AppError>) }
 pub enum AutostartError { Unchanged(Step), Unknown { cause: Step, restore: Step } }
-    // -> AppError: Unknown = Internal + winnet.autostart.unknown; access denied = Permission +
-    //    winnet.autostart.needsAdmin; persist failure = its kind + winnet.autostart.failed;
+    // -> AppError: Unknown = Internal + winnet.autostart.stateUnknown; access denied = Permission +
+    //    winnet.autostart.denied; persist failure = its kind + winnet.autostart.failed;
     //    else Internal + winnet.autostart.failed
 pub fn set_checked(os: &impl AutostartOs, previous: bool, enabled: bool,
     persist: impl FnOnce(bool) -> AppResult<()>) -> Result<(), AutostartError>;  // apply, read back, persist
@@ -470,13 +494,22 @@ pub fn read_task(path: &str) -> windows::core::Result<Option<TaskInfo>>;   // "N
 pub fn delete_task(path: &str) -> windows::core::Result<bool>;             // false = absent
 pub fn delete_task_folder(path: &str) -> windows::core::Result<bool>;      // not empty = Err
 ```
-Settings toggle: `spawn_blocking(move || autostart::set_checked(&LogonTask { exe }, prev, on, |on|
+Matching: the value's command must be this exe (case-insensitive, quotes and slash style ignored)
+with exactly `--autostart`; anything else, or a non-string value under our name, is stale.
+`StartupApproved\Run\<RUN_VALUE>` is read only: binary data with an odd first byte (03) = switched
+off by the user, even (02 / 06) or no value = on. An entry switched off there counts as applied for
+`set_checked(.., true, ..)` and `sync(.., true)` (the app's part is done; the switch is the
+user's, `AutostartState::hint` says where it is) and is re-pointed when stale but never switched
+on; `false` deletes the value. `sync` also deletes the 1.x logon task `TASK_NAME` (access denied =
+kept and logged: it was created elevated; the installer's elevated cleanup removes it) and
+reports a failure of that only after the value was synced.
+Settings toggle: `spawn_blocking(move || autostart::set_checked(&RunValue { exe }, prev, on, |on|
 store.update(|s| s.autostart = on)))`, map with `AppError::from`; the UI disables the switch while
-pending. Startup: `autostart::sync(&LogonTask { exe }, settings.autostart)` on a blocking thread
-(log failures, never block startup). Legacy import: imported `autoStart` true →
-`set_checked(.., previous = false, true, ..)`; false → `sync(.., false)` (removes a task that still
-points at the Electron exe). cleanup-legacy: `read_task` / `delete_task` / `delete_task_folder`
-for `\VPNTE\BootRecoveryTask`, `\VPNTE Boot Recovery`, `\VPNTE`.
+pending and shows `autostart::state(&exe)?.hint()` next to it. Startup: `autostart::sync(&RunValue
+{ exe }, settings.autostart)` on a blocking thread (log failures, never block startup). Legacy
+import: imported `autoStart` true → `set_checked(.., previous = false, true, ..)`; false →
+`sync(.., false)`. cleanup-legacy: `read_task` / `delete_task` / `delete_task_folder` for
+`\VPNTE\BootRecoveryTask`, `\VPNTE Boot Recovery`, `\VPNTE`.
 
 ## `clipboard` — secret copy with privacy formats and auto-clear
 ```rust
@@ -619,7 +652,11 @@ re-check the tunnel) and the theme service.
   (`cargo test -p vpnte-winnet -- --ignored`, 5 tests, elevated), the §7.10 manual checklist,
   traffic of Hyper-V guests and Mobile Hotspot clients (not local sockets, so ALE filters do not
   see it; only the Hyper-V switch is detected and warned about).
-- Autostart task registration (1 ignored test, elevated); `relaunch_elevated` (UAC).
+- Writing the real `Run` key (`system_run_value_round_trip`, throw-away value name) and the real
+  system proxy (`sysproxy::system_write_reads_back_and_restores`): both `#[ignore = "changes system
+  state"]`, never run here (this machine's network depends on its proxy settings); the registry
+  code runs on throw-away keys and `sysproxy::read` read-only. Deleting a real 1.x logon task
+  (`RunValue::remove_legacy_task`) was never called; `relaunch_elevated` (UAC).
 - A real sing-box TUN for `wait_owned_tun` / `route_proof` success paths (unit vectors only);
   `watch_network` with real network changes (its loop is tested with a fake reader).
 - The real clipboard write / clear (`OpenClipboard` is denied in this sandboxed shell), including
@@ -637,7 +674,7 @@ re-check the tunnel) and the theme service.
   adapters, `alias::choose` walks down the candidates and can end in `AliasError::Exhausted`
   (a Wintun ghost was seen here, none with our names). Any local process can pre-create the
   instance mutex / pipe name: the app then stays a secondary (denial of service only; the client
-  connects with identification-level impersonation). One autostart task per machine: a second
-  admin user enabling autostart replaces the first user's task (`matches_exe` ignores the user).
+  connects with identification-level impersonation). Task Manager's `StartupApproved` encoding
+  (odd first byte = off) is the observed convention, not a documented format.
   The clipboard sequence number is read right after `CloseClipboard`: a write by another program
   in that instant would be adopted and cleared.

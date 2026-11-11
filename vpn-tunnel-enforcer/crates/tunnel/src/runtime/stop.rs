@@ -94,7 +94,7 @@ impl Actor {
         } else {
             // Nothing held and nothing failed earlier: no protection call at all.
             let released = if plan.is_some() || self.protection_dirty {
-                self.deps.capture.release().await
+                self.capture.release().await
             } else {
                 Ok(())
             };
@@ -112,7 +112,6 @@ impl Actor {
                 Some(plan) => {
                     let never = CancellationToken::new();
                     let gone = self
-                        .deps
                         .capture
                         .wait_gone(plan, self.deps.timings.release, &never);
                     gone.await
@@ -273,11 +272,7 @@ impl Actor {
         let mut warnings = stopped.warnings;
         let mut avoid = Vec::new();
         if let Some(plan) = &old_plan
-            && !self
-                .deps
-                .capture
-                .wait_gone(plan, opts.release_timeout, op)
-                .await
+            && !self.capture.wait_gone(plan, opts.release_timeout, op).await
         {
             if op.is_cancelled() {
                 return Err(self.cancel_restart().await);

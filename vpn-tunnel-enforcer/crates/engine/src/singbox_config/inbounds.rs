@@ -1,11 +1,11 @@
-//! The TUN inbound and the app-owned loopback inbounds.
+//! The capture inbound (TUN or loopback proxy) and the app-owned loopback inbounds.
 use std::net::IpAddr;
 
 use serde_json::{Value, json};
 use vpnte_base::types::Loopback;
 use vpnte_winnet::adapters::{TUN_V4, TUN_V6};
 
-use super::{ConfigError, ConfigInputs, TunParams, Upstream};
+use super::{Capture, ConfigError, ConfigInputs, PROXY_IN, TunParams, Upstream};
 use crate::tags::{DIRECT_IN, DNS_BOOTSTRAP_IN, PROBE_IN, TUN_IN};
 
 /// Never routed into the TUN: loopback, link-local, multicast. RFC 1918 stays in the TUN on
@@ -64,6 +64,18 @@ pub(super) fn tun(t: &TunParams, exclude: &[IpAddr]) -> Result<Value, ConfigErro
     }))
 }
 
+/// `proxy-in`: HTTP + SOCKS for the programs the app points at it (system proxy, environment
+/// variables, dev tools). No users: the system proxy cannot carry credentials, and every flow
+/// still goes through the routing below. No `set_system_proxy`: the app owns that tweak.
+pub(super) fn proxy(port: u16) -> Value {
+    json!({
+        "type": "mixed",
+        "tag": PROXY_IN,
+        "listen": "127.0.0.1",
+        "listen_port": port,
+    })
+}
+
 /// The authenticated mixed inbounds and the loopback DNS inbound, after checking that every
 /// app-owned port of this start is set and distinct.
 pub(super) fn listeners(i: &ConfigInputs) -> Result<Vec<Value>, ConfigError> {
@@ -73,6 +85,9 @@ pub(super) fn listeners(i: &ConfigInputs) -> Result<Vec<Value>, ConfigError> {
     ports.extend(l.dns_bootstrap);
     if let Upstream::XraySlots { slots, .. } = &i.upstream {
         ports.extend(slots.iter().map(|s| s.port()));
+    }
+    if let Capture::Proxy { port } = i.capture {
+        ports.push(port);
     }
     if ports.contains(&0) {
         return Err(ConfigError::InvalidListeners("port 0"));

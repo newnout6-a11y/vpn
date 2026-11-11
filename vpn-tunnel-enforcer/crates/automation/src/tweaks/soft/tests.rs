@@ -1,16 +1,19 @@
-//! Soft mode end to end on throw-away places: an HKCU test key instead of `HKCU\Environment`,
-//! temp directories instead of `~\.gradle` and `%APPDATA%\Google`.
+//! Soft mode end to end on throw-away places: an in-memory system proxy, an HKCU test key instead
+//! of `HKCU\Environment`, temp directories instead of `~\.gradle` and `%APPDATA%\Google`.
 use std::sync::Arc;
 
 use vpnte_base::AppError;
 use vpnte_winnet::env::EnvValue;
+use vpnte_winnet::sysproxy::ProxyConfig;
 
 use super::*;
 use crate::test_support::{TempDir, TestKey};
 use crate::tweaks::journal::no_registry;
+use crate::tweaks::test_support::{FakeProxy, corporate};
 
-fn system(key: &TestKey, dir: &TempDir) -> SoftSystem {
+fn system(key: &TestKey, dir: &TempDir, proxy: &Arc<FakeProxy>) -> SoftSystem {
     SoftSystem {
+        proxy: proxy.clone(),
         env: UserEnv::under(&key.0),
         git: None,
         gradle_home: Some(dir.path().join(".gradle")),
@@ -21,8 +24,12 @@ fn system(key: &TestKey, dir: &TempDir) -> SoftSystem {
 }
 
 fn soft(key: &TestKey, dir: &TempDir) -> Soft {
+    soft_with(key, dir, &FakeProxy::with(ProxyConfig::default()))
+}
+
+fn soft_with(key: &TestKey, dir: &TempDir, proxy: &Arc<FakeProxy>) -> Soft {
     let journal = Arc::new(Journal::open(&dir.path().join("data"), no_registry));
-    Soft::new(journal, system(key, dir))
+    Soft::new(journal, system(key, dir, proxy))
 }
 
 fn addr(s: &str) -> HostPort {
@@ -81,7 +88,7 @@ fn missing_tools_are_skipped_without_creating_anything() {
     let report = soft
         .apply_blocking(&addr("127.0.0.1:10808"), ProxyKind::Socks5, all)
         .unwrap();
-    assert_eq!(report.applied, vec![Feature::SoftEnv]);
+    assert_eq!(report.applied, vec![Feature::SoftProxy, Feature::SoftEnv]);
     assert_eq!(
         report.not_detected,
         vec![Feature::DevGit, Feature::DevGradle, Feature::DevStudio]
@@ -122,7 +129,12 @@ fn dev_targets_follow_the_session() {
         .unwrap();
     assert_eq!(
         report.applied,
-        vec![Feature::SoftEnv, Feature::DevGradle, Feature::DevStudio]
+        vec![
+            Feature::SoftProxy,
+            Feature::SoftEnv,
+            Feature::DevGradle,
+            Feature::DevStudio
+        ]
     );
     let text = std::fs::read_to_string(&props).unwrap();
     assert!(
@@ -206,4 +218,108 @@ fn dev_targets_are_camel_case() {
     );
     let read: DevTargets = serde_json::from_str(r#"{"androidStudio": true}"#).unwrap();
     assert_eq!(read, dev);
+}
+
+/// NOADMIN §2: Soft points the system proxy at the mixed inbound for every protocol (loopback and
+/// local names direct, setup script and auto-detection off), keeps the original across a
+/// refresh, and restores it exactly on stop.
+#[test]
+fn the_system_proxy_follows_the_session_and_comes_back_exactly() {
+    let (key, dir) = (TestKey::new("tweaks"), TempDir::new("tweaks"));
+    let proxy = FakeProxy::with(corporate());
+    let soft = soft_with(&key, &dir, &proxy);
+    assert_eq!(soft.status_blocking().system_proxy, ProxyOwner::User);
+
+    let none = DevTargets::default();
+    soft.apply_blocking(&addr("127.0.0.1:10808"), ProxyKind::Socks5, none)
+        .unwrap();
+    let ours = proxy.get();
+    assert_eq!(
+        (ours.use_proxy, ours.server.as_str(), ours.bypass.as_str()),
+        (true, "127.0.0.1:10808", "localhost;127.*;[::1];<local>")
+    );
+    assert!(!ours.use_pac && !ours.auto_detect && ours.pac_url.is_empty());
+    assert_eq!(
+        UserEnv::under(&key.0).get("ALL_PROXY").unwrap(),
+        Some(EnvValue::Plain("socks5h://127.0.0.1:10808".into())),
+        "the variables keep the session's scheme"
+    );
+    assert_eq!(soft.status_blocking().system_proxy, ProxyOwner::Ours);
+
+    soft.apply_blocking(&addr("127.0.0.1:10809"), ProxyKind::Http, none)
+        .unwrap();
+    assert_eq!(proxy.get().server, "127.0.0.1:10809");
+    let report = soft.rollback_blocking();
+    assert!(report.is_complete());
+    assert!(report.restored.contains(&Target::SystemProxy));
+    assert_eq!(
+        proxy.get(),
+        corporate(),
+        "the original, not the first Soft value"
+    );
+    assert_eq!(soft.status_blocking().system_proxy, ProxyOwner::User);
+    assert!(!soft.is_applied());
+}
+
+/// F-121 for the system proxy: settings the user changed while Soft was on are kept on stop.
+#[test]
+fn a_system_proxy_the_user_changed_is_kept() {
+    let (key, dir) = (TestKey::new("tweaks"), TempDir::new("tweaks"));
+    let proxy = FakeProxy::with(ProxyConfig::default());
+    let soft = soft_with(&key, &dir, &proxy);
+    soft.apply_blocking(
+        &addr("127.0.0.1:10808"),
+        ProxyKind::Http,
+        DevTargets::default(),
+    )
+    .unwrap();
+    let theirs = ProxyConfig {
+        auto_detect: true,
+        ..proxy.get()
+    };
+    *proxy.config.lock() = theirs.clone();
+    assert_eq!(soft.status_blocking().system_proxy, ProxyOwner::User);
+    let report = soft.rollback_blocking();
+    assert_eq!(report.kept_user_value, vec![Target::SystemProxy]);
+    assert!(report.is_complete());
+    assert_eq!(proxy.get(), theirs);
+    assert!(!soft.is_applied());
+}
+
+/// An unreadable system proxy aborts the whole apply: no variable is written either; a refused
+/// write is undone the same way.
+#[test]
+fn a_system_proxy_that_fails_changes_nothing() {
+    let (key, dir) = (TestKey::new("tweaks"), TempDir::new("tweaks"));
+    let proxy = FakeProxy::with(corporate());
+    let soft = soft_with(&key, &dir, &proxy);
+    let env = UserEnv::under(&key.0);
+    let apply = || {
+        soft.apply_blocking(
+            &addr("127.0.0.1:10808"),
+            ProxyKind::Http,
+            DevTargets::default(),
+        )
+    };
+
+    proxy
+        .fail_read
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let err = apply().unwrap_err();
+    assert_eq!(err.user_msg().key, "automation.tweaks.unreadable");
+    assert_eq!(soft.status_blocking().system_proxy, ProxyOwner::Unreadable);
+    proxy
+        .fail_read
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    proxy
+        .fail_write
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let err = apply().unwrap_err();
+    assert_eq!(err.user_msg().key, "automation.tweaks.writeFailed");
+
+    assert!(proxy.writes.lock().is_empty());
+    assert_eq!(proxy.get(), corporate());
+    assert_eq!(env.get("HTTP_PROXY").unwrap(), None);
+    assert!(!soft.is_applied());
 }

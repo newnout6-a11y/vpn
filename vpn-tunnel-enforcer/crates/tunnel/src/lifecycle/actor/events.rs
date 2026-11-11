@@ -37,7 +37,7 @@ impl Actor {
                 // Inside a lane operation its own ending decides about the session.
                 if let Some(kind) = outcome::node_switch_kind(&reason)
                     && self.lane_idle()
-                    && self.tun_session()
+                    && self.session.is_some()
                 {
                     let ending = Captured::now(&self.deps);
                     self.close_current(kind, None, ending).await;
@@ -67,8 +67,11 @@ impl Actor {
             return; // the operation in flight owns the session and the user's attention
         }
         match kind {
+            TunStatusKind::Stopped | TunStatusKind::KillSwitchActive if self.soft_session() => {
+                self.soft_engine_lost().await;
+            }
             TunStatusKind::Stopped | TunStatusKind::KillSwitchActive => {
-                if self.tun_session() {
+                if self.session.is_some() {
                     let blocked = kind == TunStatusKind::KillSwitchActive;
                     self.unexpected_end(blocked).await;
                     if blocked {
@@ -95,7 +98,9 @@ impl Actor {
             }
             TunStatusKind::Error { warning } => {
                 // A crash whose cleanup failed: the engine is gone and the session with it.
-                if !self.runtime_running() && self.tun_session() {
+                if !self.runtime_running() && self.soft_session() {
+                    self.soft_engine_lost().await;
+                } else if !self.runtime_running() && self.session.is_some() {
                     self.unexpected_end(false).await;
                 }
                 let kind = NoticeKind::ConnectionError;
@@ -105,8 +110,42 @@ impl Actor {
         }
     }
 
-    fn tun_session(&self) -> bool {
-        self.session.as_ref().is_some_and(|s| !s.is_soft())
+    fn soft_session(&self) -> bool {
+        self.session.as_ref().is_some_and(LiveSession::is_soft)
+    }
+
+    /// The engine of a Soft session is gone for good (NOADMIN.md §2): the session ends, and the
+    /// kill switch decides about the tweaks. `off`: rolled back at once, so programs connect
+    /// directly again (with a notice); otherwise they keep pointing at the dead port and
+    /// programs that honour the system proxy stay blocked until reconnect or disconnect.
+    async fn soft_engine_lost(&mut self) {
+        let keep = self.deps.settings.read(|s| s.kill_switch) != KillSwitchLevel::Off;
+        self.unexpected_end(keep).await;
+        if keep {
+            let e = self.evidence();
+            self.fsm.fault(FaultState::Blocked, e);
+            self.notify(
+                Level::Warn,
+                "crashBlocked",
+                NoticeKind::ConnectionError,
+                None,
+            );
+            return;
+        }
+        match self.deps.soft.rollback().await {
+            Ok(()) => {
+                let kind = NoticeKind::ConnectionError;
+                self.notify(Level::Warn, "softRestored", kind, None);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "soft rollback after the engine was lost failed");
+                let body = Some(Msg::new(key::SOFT_ENV_ROLLBACK_FAILED));
+                self.notify(Level::Error, "stopFailed", NoticeKind::VpnDisconnect, body);
+            }
+        }
+        // The state follows what is left: nothing of ours (unknown, as after any lost run).
+        let e = self.evidence();
+        let _ = self.fsm.runtime(&TunStatusKind::Stopped, e);
     }
 
     /// The TUN session ended without being asked to: classify it from what is known now
@@ -161,7 +200,7 @@ impl Actor {
         let e = self.evidence();
         if self.runtime_running() {
             self.on_status(TunStatusKind::Running, e).await;
-        } else if self.fsm.snapshot().mode == Some(TunnelMode::Tun) {
+        } else if self.fsm.snapshot().mode.is_some() {
             self.on_status(TunStatusKind::Stopped, e).await;
         }
     }

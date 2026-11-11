@@ -32,7 +32,7 @@ tunnel, profiles and probes, spawns the three tasks and wires the lifecycle hook
 ## Crate root
 ```rust
 pub const LOCALES: &[(&str, &str)];   // (ru_json, en_json) per package, file-name order:
-                                      // automation-adaptive, -hardening, -sched, -tweaks
+                                      // automation-adaptive, -hardening, -sched, -tweaks, noadmin-system
 ```
 Register with the other crates' layers at start, after the UI's base layer:
 `vpnte_base::i18n::init(&[ui_layers, .., vpnte_automation::LOCALES, ..].concat())`. Every key is
@@ -353,11 +353,12 @@ impl<C: Coordinator, E: AutoPilotEnv> AutoPilot<C, E> {
 ## `tweaks` — the shared journal and Soft mode (per-user, no elevation)
 ```rust
 use vpnte_automation::tweaks::{self, *};   // root re-exports: Backend, Feature, Journal, Record,
-    // RollbackReport, Target, TweakError, TweakState, Val, DevTargets, Soft, SoftReport, SoftStatus, SoftSystem
+    // RollbackReport, Target, TweakError, TweakState, Val, DevTargets, ProxyOwner, Soft, SoftReport,
+    // SoftStatus, SoftSystem, SystemProxy, WinInet
 
 // journal — one per process, shared by Soft, browsers and location; blocking, serialised by a mutex
-pub enum Feature { SoftEnv, DevGit, DevGradle, DevStudio, BrowserWebRtc, LocationPrivacy } // serde kebab-case
-pub fn tool_name(feature: Feature) -> &'static str;   // "Git", "Gradle", "Android Studio", …
+pub enum Feature { SoftEnv, SoftProxy, DevGit, DevGradle, DevStudio, BrowserWebRtc, LocationPrivacy } // serde kebab-case
+pub fn tool_name(feature: Feature) -> &'static str;   // "System proxy", "Git", "Gradle", "Android Studio", …
 pub enum EnvVar { HttpProxy, HttpsProxy, AllProxy, NoProxy }   // ALL; name() -> "HTTP_PROXY" …
 pub enum GitKey { HttpProxy, HttpsProxy }                       // ALL; name() -> "http.proxy" …
 pub enum BlockKind { Gradle, VmOptions }                        // file_name()
@@ -367,9 +368,11 @@ pub enum Target {                                      // serde tag "t"
     Env { var: EnvVar }, Git { key: GitKey }, Block { kind: BlockKind, path: PathBuf },
     StudioOpt { path: PathBuf, option: StudioOption }, Lines { path: PathBuf, lines: Vec<String> },
     Reg { hive: RegHive, key: String, name: String },
+    SystemProxy,                                       // the whole WinINet setting as one value
 }
 impl Target { pub fn label(&self) -> String; }         // log-safe: file name only, never a value
 pub enum Val { Absent, Sz(String), ExpandSz(String), Dword(u32), Text(String) }  // serde tag "t", content "v"
+    // Text: file / Git text, or the system proxy as canonical JSON (sysproxy::encode)
 pub struct Record { pub feature: Feature, pub target: Target, pub baseline: Val, pub applied: Val, pub created: bool }
 pub type RegAdmit = fn(RegHive, &str, &str, &Val) -> bool;      // load-time allow-list for Reg records
 pub fn no_registry(_: RegHive, _: &str, _: &str, _: &Val) -> bool;  // admits none
@@ -399,16 +402,19 @@ impl Journal {
     pub fn legacy_imported(&self) -> bool;  pub fn adopt_legacy(&self, records: Vec<Record>) -> AppResult<usize>;
 }
 
-// soft — the Soft session: env variables + the opted-in dev targets, applied / rolled back together
-pub const SOFT_FEATURES: [Feature; 4];                 // SoftEnv, DevGit, DevGradle, DevStudio
-pub struct SoftSystem { pub env: UserEnv, pub git: Option<GitCli>, pub gradle_home: Option<PathBuf>,
-    pub studio_root: Option<PathBuf>, pub broadcast: bool, pub check_user: bool }   // impl Backend
-impl SoftSystem { pub fn current_user() -> Self; }    // HKCU\Environment, Git, GRADLE_USER_HOME|~\.gradle, %APPDATA%\Google
+// soft — the Soft session: system proxy + env variables + the opted-in dev targets, together
+pub const SOFT_FEATURES: [Feature; 5];                 // SoftProxy, SoftEnv, DevGit, DevGradle, DevStudio
+pub struct SoftSystem { pub proxy: Arc<dyn SystemProxy>, pub env: UserEnv, pub git: Option<GitCli>,
+    pub gradle_home: Option<PathBuf>, pub studio_root: Option<PathBuf>, pub broadcast: bool,
+    pub check_user: bool }                             // impl Backend
+impl SoftSystem { pub fn current_user() -> Self; }    // WinInet, HKCU\Environment, Git, GRADLE_USER_HOME|~\.gradle, %APPDATA%\Google
 pub struct DevTargets { pub git: bool, pub gradle: bool, pub android_studio: bool }
     // serde camelCase + default: {"git","gradle","androidStudio"}; all off by default
-pub struct SoftReport { pub applied: Vec<Feature>, pub not_detected: Vec<Feature>, pub dropped: RollbackReport }
-pub struct SoftStatus { pub env: TweakState, pub git: TweakState, pub gradle: TweakState,
-                        pub android_studio: TweakState }   // serde camelCase
+pub struct SoftReport { pub applied: Vec<Feature> /* SoftProxy, SoftEnv, dev… */, pub not_detected: Vec<Feature>,
+    pub dropped: RollbackReport }
+pub enum ProxyOwner { Ours, User, Unreadable }          // serde kebab-case
+pub struct SoftStatus { pub system_proxy: ProxyOwner, pub env: TweakState, pub git: TweakState,
+                        pub gradle: TweakState, pub android_studio: TweakState }   // serde camelCase
 #[derive(Clone)] pub struct Soft;
 impl Soft {
     pub fn new(journal: Arc<Journal>, sys: SoftSystem) -> Self;
@@ -420,6 +426,15 @@ impl Soft {
     // status_blocking() -> SoftStatus
 }
 pub fn feature_name(feature: Feature) -> Msg;  pub fn feature_warning(feature: Feature) -> Msg;  // opt-in list
+
+// sysproxy — the system-proxy tweak (blocking trait; production = WinInet over vpnte_winnet::sysproxy)
+pub trait SystemProxy: Send + Sync + Debug { fn read(&self) -> io::Result<ProxyConfig>;
+    fn write(&self, config: &ProxyConfig) -> io::Result<()>; }
+pub struct WinInet;                                    // impl SystemProxy (the real per-user setting)
+pub const BYPASS: &str = "localhost;127.*;[::1];<local>";
+pub fn applied(addr: &HostPort) -> ProxyConfig;        // addr for every protocol, BYPASS, PAC / auto-detect off
+pub fn plan(addr: &HostPort) -> Vec<(Feature, Target, Val)>;  pub fn encode(&ProxyConfig) -> Val;
+pub fn decode(&Val) -> Option<ProxyConfig>;            // Text ≤ 64 KiB of ProxyConfig JSON, else None
 
 // building blocks (soft, legacy and hardening use them; the app normally does not)
 endpoint::{proxy_url(&HostPort, ProxyKind) -> String /* socks5h://… | http://…, [v6] */, host_bare(&HostPort) -> String}
@@ -435,14 +450,22 @@ legacy::{LegacySources { receipts_dir, gradle_props, studio_root } + current_use
 - Every original value is read before anything is written (unreadable → nothing written); a refresh
   keeps the first baselines; rollback restores a value only while it still holds ours (a later user
   change is kept: `kept_user_value`); failed records stay journalled for the next rollback.
-- `Soft::apply` writes `HTTP(S)_PROXY` / `ALL_PROXY` = the proxy URL and `NO_PROXY` to
-  `HKCU\Environment` (new processes only; `WM_SETTINGCHANGE` broadcast) and the selected dev targets;
+- `Soft::apply` points the per-user system proxy at `addr` (WinINet default connection: `addr` as
+  an HTTP proxy for every protocol, so it must be the engine's mixed inbound; loopback and local
+  names direct; setup script and auto-detection off), writes `HTTP(S)_PROXY` / `ALL_PROXY` = the
+  proxy URL of `kind` and `NO_PROXY` to `HKCU\Environment` (new processes only;
+  `WM_SETTINGCHANGE` broadcast) and the selected dev targets, all in one journal apply (the
+  system proxy's whole baseline is journalled before the write and restored exactly);
   proxy credentials are never written. A selected but missing tool is skipped (`not_detected`); an
   unreadable or malformed one fails the whole apply with nothing left half-applied. Errors:
   `automation.tweaks.unreadable` / `.writeFailed` / `.notVerified` {target}, `.otherUser`
   (Permission), journal store errors.
 - Lifecycle: `apply` on a Soft start / refresh; `rollback` on stop, before a Hard / Direct start,
   at shutdown and in startup recovery when the settings are not Soft (Soft → re-apply = re-verify).
+  NOADMIN §2: "connected" in Soft needs `status().system_proxy == ProxyOwner::Ours` besides the
+  engine accepting on the mixed port; `User` = never set or changed by someone since (rollback
+  keeps it: `kept_user_value`), `Unreadable` = not checked. Kill switch `off` → `rollback` when
+  the engine dies; `standard` → leave it applied until reconnect / stop (the app decides).
   Append `report.failure_msg()` to the stop result; show `report.kept_msg()` as info.
 
 ## `hardening` — browser policies and location privacy (registry, journalled)

@@ -44,7 +44,7 @@ impl Actor {
         self.slot_due = None;
         self.xray_rx = None;
         // Removing the block here would defeat the kill switch: it exists for this moment.
-        if let Err(e) = self.deps.capture.lost().await {
+        if let Err(e) = self.capture.lost().await {
             tracing::error!(error = %e, "protection did not follow the lost capture");
         }
         let Session { plan, slots, .. } = *session;
@@ -165,7 +165,7 @@ impl Actor {
             self.phase = Phase::Adapting(plan);
             return self.announce(TunStatusKind::KillSwitchActive);
         }
-        let released = self.deps.capture.release().await;
+        let released = self.capture.release().await;
         self.protection_dirty = released.is_err();
         if let Err(e) = released {
             tracing::error!(error = %e, "protection not released after the crash");
@@ -248,7 +248,7 @@ impl Actor {
         self.proxy_down(Msg::new("tunnel.runtime.watchdog.slotExited"));
         match SLOT_BACKOFF.get(tries) {
             Some(delay) => self.slot_due = Some(Instant::now() + *delay),
-            None => self.slot_exhausted().await,
+            None => self.end_as_crash().await,
         }
     }
 
@@ -280,14 +280,14 @@ impl Actor {
                 tracing::warn!(error = %e, "Xray slot restart failed");
                 match SLOT_BACKOFF.get(tries) {
                     Some(delay) => self.slot_due = Some(Instant::now() + *delay),
-                    None => self.slot_exhausted().await,
+                    None => self.end_as_crash().await,
                 }
             }
         }
     }
 
-    /// The upstream cannot be kept alive: end the core and treat it as a crash.
-    async fn slot_exhausted(&mut self) {
+    /// The upstream or the capture cannot be kept alive: end the core and treat it as a crash.
+    pub(super) async fn end_as_crash(&mut self) {
         let Phase::Running(session) = std::mem::replace(&mut self.phase, Phase::Idle) else {
             return;
         };

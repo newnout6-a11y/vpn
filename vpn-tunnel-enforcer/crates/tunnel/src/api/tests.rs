@@ -188,6 +188,7 @@ fn status_never_exposes_session_secrets() {
             probe: Some(proxy(20003, "FAKE-probe-pass")),
             tun_luid: Some(7),
             tun_alias: Some("vpnte-tun".into()),
+            proxy_port: None,
             logs: Vec::new(),
         }),
         ..TunStatus::default()

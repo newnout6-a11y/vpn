@@ -3,10 +3,9 @@
 //! engines start, the readiness proof, loss and release, and its periodic checks.
 //!
 //! [`TunCapture`] captures the whole machine through a sing-box TUN guarded by the WFP layer
-//! (needs elevation). A second strategy (loopback proxy capture, follow-up package) implements
-//! the same trait: its plan carries no alias / TUN form, `begin` / `lost` / `release` do nothing,
-//! `ready` proves the loopback inbound answers, and `config` emits a mixed inbound instead of
-//! the TUN; the actor stays unchanged.
+//! (needs elevation). [`ProxyCapture`] runs the same engine behind a loopback `mixed` inbound the
+//! user-level system proxy points at (no privileges): no protection steps, `ready` = the inbound
+//! accepts. The actor serves both; [`crate::api::StartRequest::capture`] picks one per start.
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -20,8 +19,10 @@ use vpnte_engine::singbox_config::{ConfigError, Listeners, RoutingParts, TunStac
 
 use crate::api::StartRequest;
 
+mod proxy;
 mod tun;
 
+pub use proxy::ProxyCapture;
 pub use tun::TunCapture;
 #[cfg(test)]
 pub(crate) use tun::tun_config;
@@ -51,7 +52,7 @@ pub fn tun_form(level: KillSwitchLevel, leak_protection: bool) -> TunForm {
 /// What a capture decided for one start, before any effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturePlan {
-    /// Identity of the capture interface (the TUN alias), if it has one.
+    /// Identity of the capture: the TUN alias, or the mixed port (as text) of a proxy capture.
     pub alias: Option<String>,
     pub form: TunForm,
     pub stack: TunStack,
@@ -68,6 +69,8 @@ pub struct CaptureProof {
     /// Adapter LUID and alias (the app counts interface bytes by LUID).
     pub luid: Option<u64>,
     pub alias: Option<String>,
+    /// Loopback `mixed` inbound of a proxy capture.
+    pub port: Option<u16>,
 }
 
 /// One periodic capture check while running.
@@ -78,6 +81,9 @@ pub enum CaptureCheck {
     Competing(String),
     /// The check could not run (nothing changes).
     Unknown,
+    /// The capture no longer takes traffic although the core runs (the mixed inbound stopped
+    /// accepting): the core is ended and the crash policy decides.
+    Lost,
 }
 
 /// The capture-independent parts of the engine config.

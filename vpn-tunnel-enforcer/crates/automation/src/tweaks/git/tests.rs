@@ -7,6 +7,7 @@ use super::*;
 use crate::test_support::TempDir;
 use crate::tweaks::journal::{Journal, TweakError, no_registry};
 use crate::tweaks::soft::SoftSystem;
+use crate::tweaks::test_support::FakeProxy;
 
 fn git_on(dir: &TempDir) -> Option<GitCli> {
     let mut git = GitCli::find()?;
@@ -29,6 +30,7 @@ fn git_on(dir: &TempDir) -> Option<GitCli> {
 
 fn with_git(git: GitCli) -> SoftSystem {
     let mut sys = SoftSystem {
+        proxy: FakeProxy::with(Default::default()),
         env: vpnte_winnet::env::UserEnv::under(r"Software\VPNTE-Test-tweaks-unused"),
         git: None,
         gradle_home: None,

@@ -9,7 +9,7 @@ use vpnte_base::types::UnixMs;
 use vpnte_base::{AppError, ErrorKind};
 use vpnte_core::ops::{OpId, OpKind, OpMeta, OpStatus};
 
-use crate::api::{StopReceipt, TunStatus, TunStatusKind};
+use crate::api::{CaptureKind, StopReceipt, TunStatus, TunStatusKind};
 
 /// Stable protection state. A running operation is a [`Transition`], not a state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -42,7 +42,8 @@ pub enum Health {
     Degraded,
 }
 
-/// How protection is applied: our sing-box TUN, or the Soft (system proxy) mode.
+/// How protection is applied: our engine behind the TUN, or behind a loopback proxy the Soft-mode
+/// system proxy points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TunnelMode {
@@ -139,6 +140,8 @@ pub struct Evidence {
     /// The Soft-mode system proxy is applied by us and read back.
     pub soft_applied: bool,
     pub started_at: Option<UnixMs>,
+    /// The running engine captures through its loopback proxy (Soft), not the TUN.
+    pub proxy_capture: bool,
 }
 
 impl Evidence {
@@ -149,17 +152,33 @@ impl Evidence {
             pid: status.pid,
             soft_applied,
             started_at: status.started_at,
+            proxy_capture: status.capture == Some(CaptureKind::Proxy),
         }
     }
 
-    /// Our TUN runtime is up with a real process.
+    /// Our engine is up with a real process (either capture).
     fn native_ready(&self) -> bool {
         self.running && self.pid.is_some_and(|pid| pid > 0)
     }
 
-    /// Soft mode alone is applied, with no engine process around.
+    /// Hard mode: our engine runs with the TUN capture.
+    fn tun_ready(&self) -> bool {
+        self.native_ready() && !self.proxy_capture
+    }
+
+    /// Soft mode needs both proofs (NOADMIN.md §2): the engine runs with the proxy capture and
+    /// the system proxy points at it.
     fn soft_ready(&self) -> bool {
-        self.soft_applied && !self.running && self.pid.is_none()
+        self.native_ready() && self.proxy_capture && self.soft_applied
+    }
+
+    /// The mode the running engine serves.
+    fn mode(&self) -> TunnelMode {
+        if self.proxy_capture {
+            TunnelMode::Soft
+        } else {
+            TunnelMode::Tun
+        }
     }
 }
 
@@ -225,17 +244,10 @@ impl Fsm {
             )
     }
 
-    /// A Soft refresh (re-apply over a connected Soft session) may be admitted although
-    /// [`Fsm::can_start`] is false; never over a native tunnel or a running transition.
-    pub fn can_refresh_soft(&self) -> bool {
-        self.snap.state == TunnelState::Connected
-            && self.snap.mode == Some(TunnelMode::Soft)
-            && self.snap.transition.is_none()
-    }
-
-    /// `e` proves a successful start (our TUN with a real process, or Soft alone).
+    /// `e` proves a successful start: our engine with a real process behind the TUN, or behind
+    /// its loopback proxy with the Soft tweaks applied.
     pub fn can_confirm_start(&self, e: Option<Evidence>) -> bool {
-        e.is_some_and(|e| !self.fault && (e.native_ready() || e.soft_ready()))
+        e.is_some_and(|e| !self.fault && (e.tun_ready() || e.soft_ready()))
     }
 
     /// `e` proves nothing of ours is left running or applied.
@@ -253,13 +265,7 @@ impl Fsm {
     fn can_confirm_rotation(&self, e: Option<Evidence>) -> bool {
         match self.rotation.and_then(|r| r.mode) {
             None => !self.fault && self.can_confirm_stop(e),
-            Some(mode) => {
-                self.can_confirm_start(e)
-                    && e.is_some_and(|e| match mode {
-                        TunnelMode::Tun => e.running,
-                        TunnelMode::Soft => e.soft_applied,
-                    })
-            }
+            Some(mode) => self.can_confirm_start(e) && e.is_some_and(|e| e.mode() == mode),
         }
     }
 
@@ -267,10 +273,6 @@ impl Fsm {
     fn can_retain_rotation(&self, e: Option<Evidence>) -> bool {
         let previous = self.rotation.and_then(|r| r.evidence);
         !self.fault && e.is_some() && previous == e && self.can_confirm_rotation(e)
-    }
-
-    fn can_retain_soft(&self, e: Option<Evidence>) -> bool {
-        e.is_some_and(|e| !self.fault && e.soft_ready())
     }
 
     /// Applies `patch`, then re-derives the evidence fields and fails closed on lost proof.
@@ -302,10 +304,10 @@ impl Fsm {
                         // A live process or applied proxy we do not account for.
                         TunnelState::Disconnected => e.running || e.pid.is_some() || e.soft_applied,
                         TunnelState::Connected => {
-                            !if s.mode == Some(TunnelMode::Tun) {
-                                e.native_ready()
-                            } else {
+                            !if s.mode == Some(TunnelMode::Soft) {
                                 e.soft_ready()
+                            } else {
+                                e.tun_ready()
                             }
                         }
                         _ => false,
