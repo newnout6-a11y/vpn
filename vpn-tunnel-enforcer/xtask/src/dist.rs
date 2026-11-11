@@ -1,0 +1,318 @@
+//! `cargo xtask dist`: release build, the installed layout in `target/stage`, the installer and `checksums.txt`.
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Context, Result, bail, ensure};
+
+use crate::manifest::{self, Manifest, Sha256Hex};
+use crate::{fetch, notices, tools};
+
+/// Stage files produced by the build, not pinned: (path in the stage, file name in the build output dir).
+pub const BUILT: [(&str, &str); 3] = [
+    ("VPN Tunnel Enforcer.exe", "vpn-tunnel-enforcer.exe"),
+    ("vpnte-proxy.exe", "vpnte_proxy.exe"),
+    (
+        "licenses/THIRD-PARTY-NOTICES.txt",
+        "THIRD-PARTY-NOTICES.txt",
+    ),
+];
+const SCRIPT: &str = "installer/vpnte.nsi";
+
+/// Installer file name for a version (old electron-builder naming kept).
+pub fn installer_name(version: &str) -> String {
+    format!("VPN-Tunnel-Enforcer-Setup-{version}.exe")
+}
+
+/// Runs the whole pipeline; with `skip_build` the build outputs are taken from `bin_dir` (default target/release).
+pub fn run(root: &Path, skip_build: bool, bin_dir: Option<PathBuf>) -> Result<()> {
+    let version = workspace_version(root)?;
+    let manifest = Manifest::load(root)?;
+    let bin_dir = if skip_build {
+        let dir = match bin_dir {
+            Some(dir) => std::path::absolute(dir)?,
+            None => root.join("target/release"),
+        };
+        println!(
+            "  build    skipped: taking build outputs from {}",
+            dir.display()
+        );
+        dir
+    } else {
+        ensure!(
+            bin_dir.is_none(),
+            "--bin-dir applies only with --skip-build"
+        );
+        build(root, &manifest, &version)?
+    };
+    let stage = root.join("target/stage");
+    stage_all(root, &manifest, &bin_dir, &stage)?;
+    let built: Vec<&str> = BUILT.iter().map(|(staged, _)| *staged).collect();
+    let expected = manifest.expected_stage(&built)?;
+    manifest::verify_stage(&stage, &expected)?;
+    println!(
+        "  stage    exact file set verified ({} files)",
+        expected.len()
+    );
+
+    let makensis = tools::nsis(root)?;
+    let dist = root.join("target/dist");
+    recreate(&dist)?;
+    compile(root, &makensis, &version, &stage, &dist)?;
+    let installer = dist.join(installer_name(&version));
+    ensure!(
+        installer.is_file(),
+        "makensis reported success but {} is missing",
+        installer.display()
+    );
+    write_checksums(&dist)?;
+    println!("  dist     {}", installer.display());
+    Ok(())
+}
+
+/// `[workspace.package] version` of the workspace `Cargo.toml`; must be plain `X.Y.Z` (NSIS version resource).
+pub fn workspace_version(root: &Path) -> Result<String> {
+    let text = fs::read_to_string(root.join("Cargo.toml")).context("read workspace Cargo.toml")?;
+    let table: toml::Table = toml::from_str(&text).context("parse workspace Cargo.toml")?;
+    let version = table
+        .get("workspace")
+        .and_then(|w| w.get("package"))
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.as_str())
+        .context("workspace Cargo.toml has no [workspace.package] version")?;
+    let parts: Vec<&str> = version.split('.').collect();
+    let numeric = parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    ensure!(
+        numeric,
+        "workspace version `{version}` must be X.Y.Z (the installer version resource is numeric)"
+    );
+    Ok(version.to_owned())
+}
+
+/// Release build of the two shipped binaries plus the generated notices; returns the output directory.
+fn build(root: &Path, manifest: &Manifest, version: &str) -> Result<PathBuf> {
+    let args = [
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "vpnte-app",
+        "-p",
+        "vpnte-proxies",
+    ];
+    run_tool(
+        Command::new(cargo())
+            .args(args)
+            .args(["--bin", "vpn-tunnel-enforcer", "--bin", "vpnte_proxy"])
+            .current_dir(root),
+    )?;
+    let metadata = notices::metadata(root)?;
+    let out = metadata.target_directory.join("release");
+    let text = notices::render(root, manifest, &metadata, version)?;
+    fs::write(
+        out.join("THIRD-PARTY-NOTICES.txt"),
+        manifest::to_crlf(text.as_bytes()),
+    )
+    .context("write THIRD-PARTY-NOTICES.txt")?;
+    Ok(out)
+}
+
+/// Fresh `target/stage` with every pinned file (verified) and the build outputs under their installed names.
+fn stage_all(root: &Path, manifest: &Manifest, bin_dir: &Path, stage: &Path) -> Result<()> {
+    recreate(stage)?;
+    let put = |install: &str, data: &[u8]| -> Result<()> {
+        let target = stage.join(install);
+        fs::create_dir_all(target.parent().context("install path has no parent")?)?;
+        fs::write(&target, data).with_context(|| format!("write {}", target.display()))
+    };
+    for archive in &manifest.archive {
+        let bytes = fetch::cached(root, &archive.id, &archive.url, &archive.sha256, false)?;
+        let mut zip = fetch::open(&archive.id, bytes)?;
+        for file in &archive.files {
+            put(
+                file.install.as_str(),
+                &fetch::member(&mut zip, &archive.id, &file.path, &file.sha256)?,
+            )?;
+        }
+    }
+    for local in &manifest.local {
+        let raw = fs::read(root.join(local.repo.as_str()))
+            .with_context(|| format!("read {}", local.repo))?;
+        let pinned = if local.text {
+            manifest::normalize_text(&raw)
+        } else {
+            raw
+        };
+        let actual = Sha256Hex::of(&pinned);
+        ensure!(
+            actual == local.sha256,
+            "{}: hash mismatch (pinned {}, found {actual})",
+            local.repo,
+            local.sha256
+        );
+        put(
+            local.install.as_str(),
+            &if local.text {
+                manifest::to_crlf(&pinned)
+            } else {
+                pinned
+            },
+        )?;
+    }
+    for (staged, built) in BUILT {
+        let source = bin_dir.join(built);
+        let data = fs::read(&source)
+            .with_context(|| format!("build output {} is missing", source.display()))?;
+        put(staged, &data)?;
+    }
+    Ok(())
+}
+
+/// `makensis` with warnings as errors; every path goes in as a define, so the script holds no machine paths.
+fn compile(root: &Path, makensis: &Path, version: &str, stage: &Path, dist: &Path) -> Result<()> {
+    let mut cmd = Command::new(makensis);
+    cmd.args(["/V2", "/WX", "/INPUTCHARSET", "UTF8"])
+        .arg(format!("/DVERSION={version}"))
+        .arg(format!("/DSTAGE={}", win(stage)))
+        .arg(format!("/DOUTDIR={}", win(dist)))
+        .arg(win(&root.join(SCRIPT)));
+    run_tool(&mut cmd)
+}
+
+/// `checksums.txt`: `<sha256>  <file>` per artifact, sorted by name, the file itself not listed.
+fn write_checksums(dist: &Path) -> Result<()> {
+    let mut names: Vec<String> = fs::read_dir(dist)?
+        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<_, _>>()?;
+    names.retain(|n| n != "checksums.txt");
+    names.sort();
+    let mut text = String::new();
+    for name in names {
+        let digest = Sha256Hex::of(&fs::read(dist.join(&name))?);
+        text.push_str(&format!("{digest}  {name}\n"));
+    }
+    fs::write(dist.join("checksums.txt"), text).context("write checksums.txt")
+}
+
+/// Empties a build directory (only ever one of ours under target/).
+fn recreate(dir: &Path) -> Result<()> {
+    if dir.exists() {
+        fs::remove_dir_all(dir).with_context(|| format!("remove {}", dir.display()))?;
+    }
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))
+}
+
+/// Runs a tool with inherited output and fails on a non-zero exit.
+pub fn run_tool(cmd: &mut Command) -> Result<()> {
+    let shown = format!(
+        "{} {}",
+        cmd.get_program().to_string_lossy(),
+        cmd.get_args()
+            .map(|a| a.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    println!("  run      {shown}");
+    let status = cmd.status().with_context(|| format!("start {shown}"))?;
+    if !status.success() {
+        bail!("`{shown}` failed with {status}");
+    }
+    Ok(())
+}
+
+/// The cargo that runs this xtask (`cargo xtask` sets CARGO), so the same toolchain builds the product.
+pub fn cargo() -> PathBuf {
+    std::env::var_os("CARGO")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("cargo"))
+}
+
+/// A path with Windows separators for tools that do not accept `/`.
+fn win(path: &Path) -> String {
+    path.to_string_lossy().replace('/', "\\")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+    }
+
+    /// AT-11-004: the script installs and removes exactly what the stage holds. Root files are listed by
+    /// name in both directions (the uninstaller never runs `RMDir /r $INSTDIR`); folders are copied whole.
+    #[test]
+    fn script_installs_and_removes_every_staged_root_entry() {
+        let script = fs::read_to_string(root().join(SCRIPT)).unwrap();
+        let script = script.replace("${EXE}", "VPN Tunnel Enforcer.exe");
+        let manifest = Manifest::load(root()).unwrap();
+        let built: Vec<&str> = BUILT.iter().map(|(staged, _)| *staged).collect();
+        let stage = manifest.expected_stage(&built).unwrap();
+        let mut folders = std::collections::BTreeSet::new();
+        for path in stage.keys() {
+            match path.split_once('/') {
+                Some((folder, _)) => {
+                    folders.insert(folder.to_owned());
+                }
+                None => {
+                    let file = format!("File \"${{STAGE}}\\{path}\"");
+                    let delete = format!("Delete \"$INSTDIR\\{path}\"");
+                    assert!(script.contains(&file), "missing `{file}`");
+                    assert!(script.contains(&delete), "missing `{delete}`");
+                }
+            }
+        }
+        assert_eq!(
+            folders.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["licenses", "resources"]
+        );
+        for folder in folders {
+            let copy = format!("File /r \"${{STAGE}}\\{folder}\\*\"");
+            let remove = format!("RMDir /r \"$INSTDIR\\{folder}\"");
+            assert!(
+                script.contains(&copy) && script.contains(&remove),
+                "{folder}"
+            );
+        }
+        let unscoped = script
+            .lines()
+            .any(|l| l.trim().starts_with("RMDir /r \"$INSTDIR\""));
+        assert!(
+            !unscoped,
+            "the uninstaller must not delete $INSTDIR recursively"
+        );
+    }
+
+    #[test]
+    fn workspace_version_is_plain_semver() {
+        let version = workspace_version(root()).unwrap();
+        assert_eq!(version.split('.').count(), 3);
+        assert_eq!(
+            installer_name("2.0.0"),
+            "VPN-Tunnel-Enforcer-Setup-2.0.0.exe"
+        );
+    }
+
+    /// AT-11-006: one `<sha256>  <name>` line per artifact, sorted, the checksum file itself not listed.
+    #[test]
+    fn checksums_list_every_artifact_once() {
+        let dir = root().join("target/xtask/test-scratch/checksums");
+        recreate(&dir).unwrap();
+        fs::write(dir.join("b.exe"), b"b").unwrap();
+        fs::write(dir.join("VPN-Tunnel-Enforcer-Setup-2.0.0.exe"), b"setup").unwrap();
+        write_checksums(&dir).unwrap();
+        write_checksums(&dir).unwrap(); // a re-run must not list checksums.txt
+        let text = fs::read_to_string(dir.join("checksums.txt")).unwrap();
+        let expected = format!(
+            "{}  VPN-Tunnel-Enforcer-Setup-2.0.0.exe\n{}  b.exe\n",
+            Sha256Hex::of(b"setup"),
+            Sha256Hex::of(b"b")
+        );
+        assert_eq!(text, expected);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}

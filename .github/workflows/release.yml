@@ -1,0 +1,63 @@
+# Release: a `v<version>` tag builds the installer from the tagged commit, proves it with the same silent
+# install / upgrade / uninstall round trip as CI, and attaches it with checksums.txt to a draft GitHub release.
+# The owner publishes the draft (code signing is still an open owner decision, ТЗ-06 §10.8).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  RUST_TOOLCHAIN: '1.99.1'
+
+jobs:
+  release:
+    name: Installer release
+    runs-on: windows-2025
+    timeout-minutes: 75
+    permissions:
+      contents: write # this job only: create the release and upload its assets
+    defaults:
+      run:
+        shell: bash
+        working-directory: vpn-tunnel-enforcer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # the token is not needed after checkout and must not stay in .git/config
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Tag must equal the workspace version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(cargo xtask version)"
+          if [ "$TAG" != "v$version" ]; then
+            echo "tag $TAG does not match the workspace version $version" >&2
+            exit 1
+          fi
+      # No caches here: a release downloads every pinned archive afresh (verified against the pins).
+      - name: Build the installer
+        run: cargo xtask dist
+      - name: Silent install, upgrade over itself, uninstall
+        run: cargo xtask smoke-install
+      - name: Draft GitHub release with the installer and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "VPN Tunnel Enforcer ${TAG#v}" \
+            --notes "Verify the download against checksums.txt (SHA-256)." \
+            target/dist/VPN-Tunnel-Enforcer-Setup-*.exe target/dist/checksums.txt

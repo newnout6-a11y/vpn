@@ -1,7 +1,10 @@
-# The one pin manifest for bundled third-party binaries. `cargo xtask engines` downloads each
-# archive, checks its SHA-256, extracts the listed files (each also checked) and fills
-# resources/ for development and tests; `cargo xtask dist` stages the same bytes for packaging.
-schema = 1
+# The one pin manifest for everything third-party or repo-tracked that ships, and for the build tools.
+# `cargo xtask engines` downloads each archive, checks its SHA-256, extracts the listed files (each also checked)
+# and fills the development drop resources/ with the members installed under `resources/`; `cargo xtask dist`
+# stages every entry at its `install` path (relative to the installation directory) for packaging.
+# Hash rules: archives and members = raw bytes; [[local]] with `text = true` = the text with LF line endings
+# (staged with CRLF), so the pin does not depend on git's core.autocrlf.
+schema = 2
 
 [[archive]]
 id = "sing-box"
@@ -9,9 +12,11 @@ version = "1.14.4"
 url = "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip"
 sha256 = "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df"
 license = "GPL-3.0-or-later"
+source = "https://github.com/SagerNet/sing-box/tree/v1.14.4"
 files = [
-  { path = "sing-box-1.14.4-windows-amd64/sing-box.exe", name = "sing-box.exe", sha256 = "8f30682ee198855440d2a7fe070d5d3653793b2d01bb8c85eea88f93bbe7c8b9" },
-  { path = "sing-box-1.14.4-windows-amd64/libcronet.dll", name = "libcronet.dll", sha256 = "3217c6260fbca5f16072e0b79735742f40109a63bb0ff88fd6b96dd6b54a2928" },
+  { path = "sing-box-1.14.4-windows-amd64/sing-box.exe", install = "resources/sing-box.exe", sha256 = "8f30682ee198855440d2a7fe070d5d3653793b2d01bb8c85eea88f93bbe7c8b9" },
+  { path = "sing-box-1.14.4-windows-amd64/libcronet.dll", install = "resources/libcronet.dll", sha256 = "3217c6260fbca5f16072e0b79735742f40109a63bb0ff88fd6b96dd6b54a2928" },
+  { path = "sing-box-1.14.4-windows-amd64/LICENSE", install = "licenses/sing-box.txt", sha256 = "bb3805862b583aee73ad6f7805ec634747a37257a637a3069857843f05ea589c" },
 ]
 
 [[archive]]
@@ -20,8 +25,10 @@ version = "26.11.9"
 url = "https://github.com/XTLS/Xray-core/releases/download/v26.11.9/Xray-windows-64.zip"
 sha256 = "1262522266337b824f07beb8e1375786b437683b3890105469088f8e17e0a69d"
 license = "MPL-2.0"
+source = "https://github.com/XTLS/Xray-core/tree/v26.11.9"
 files = [
-  { path = "xray.exe", name = "xray.exe", sha256 = "1ca7a2cf61ba2c5d20b21a80d405b57933939751081cb289f07bd8ddf7cc3185" },
+  { path = "xray.exe", install = "resources/xray.exe", sha256 = "1ca7a2cf61ba2c5d20b21a80d405b57933939751081cb289f07bd8ddf7cc3185" },
+  { path = "LICENSE", install = "licenses/xray.txt", sha256 = "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5" },
 ]
 
 [[archive]]
@@ -31,5 +38,60 @@ url = "https://www.wintun.net/builds/wintun-0.14.1.zip"
 sha256 = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
 license = "Wintun Prebuilt Binaries License"
 files = [
-  { path = "wintun/bin/amd64/wintun.dll", name = "wintun.dll", sha256 = "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce" },
+  { path = "wintun/bin/amd64/wintun.dll", install = "resources/wintun.dll", sha256 = "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce" },
+  { path = "wintun/LICENSE.txt", install = "licenses/wintun.txt", sha256 = "183adac21e7d96c508c8fd34d394b7b6708bc81564ad1bad61ab66143a008cd2" },
 ]
+
+# Smart-RU rule-sets: shipped as local files because a remote rule-set whose first download fails is a fatal
+# sing-box error that takes the whole tunnel down.
+[[local]]
+repo = "resources/geoip-ru.srs"
+install = "resources/geoip-ru.srs"
+sha256 = "133d045108290b7e1ea929e3021807ad1842876d959bfc5ae347fdc7db4b5865"
+
+[[local]]
+repo = "resources/geosite-category-gov-ru.srs"
+install = "resources/geosite-category-gov-ru.srs"
+sha256 = "9d30a966cc2cfbf59b918320c0d5e9f83ab05e514c3d9609904e89825548200d"
+
+# The full GPL text: the sing-box LICENSE above is a notice that refers to it.
+[[local]]
+repo = "installer/licenses/GPL-3.0.txt"
+install = "licenses/GPL-3.0.txt"
+sha256 = "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+text = true
+
+[[local]]
+repo = "crates/ui/assets/fonts/OFL-InterTight.txt"
+install = "licenses/OFL-InterTight.txt"
+sha256 = "50240ab035cf1b6b3307940235481d515c4b6de3ab1fa843dbe59e7892cb9d58"
+text = true
+
+[[local]]
+repo = "crates/ui/assets/fonts/OFL-JetBrainsMono.txt"
+install = "licenses/OFL-JetBrainsMono.txt"
+sha256 = "b2fe5e8987594e9ffd1d2ca52a2f5d73eb8335243893c5d6254b5ad69269591d"
+text = true
+
+# Old CLI names kept as forwarding shims: user scripts call them (external-proxy D9).
+[[local]]
+repo = "installer/shims/vpnte-proxy.cmd"
+install = "vpnte-proxy.cmd"
+sha256 = "8603a72e715b82d11d5db6990fa02c4f6abd4a2b580dcd404907a1772edf4030"
+text = true
+
+[[local]]
+repo = "installer/shims/vpnte-proxy.ps1"
+install = "vpnte-proxy.ps1"
+sha256 = "3fecf0f080dfb21a46f7b4b74e654e0cc152e472dc0dbdc927ffb67c3362b641"
+text = true
+
+# Build-time only. NSIS 3.13 (2026-09-27): retry-restricted $PLUGINSDIR creation (3.11, CVE-2025-43715),
+# elevated installers stop using the Low-IL temp dir (3.12).
+[[tool]]
+id = "nsis"
+version = "3.13"
+url = "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.13/nsis-3.13.zip"
+sha256 = "ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8"
+root = "nsis-3.13"
+exe = "makensis.exe"
