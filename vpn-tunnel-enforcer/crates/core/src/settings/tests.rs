@@ -248,7 +248,7 @@ fn defaults() {
     assert_eq!(s.proxy_engine, EnginePref::Auto);
     assert_eq!(
         (s.locale, s.active_theme_id.as_str()),
-        (None, "builtin-system")
+        (None, "builtin-dark")
     );
     let n = &s.notifications;
     assert!(n.vpn_connect && n.vpn_disconnect && n.leak_detected && n.profile_rotation);
@@ -438,7 +438,7 @@ fn lenient_per_field_loading() {
     assert_eq!(s.deep_inspection_max_mb, 2_048);
     assert_eq!(s.smart_ru_rule_set_update_hours, 13);
     assert_eq!((s.proxy_override, s.locale), (None, None));
-    assert_eq!(s.active_theme_id, "builtin-system");
+    assert_eq!(s.active_theme_id, "builtin-dark");
     assert!(s.notifications.sound);
     assert_eq!(s.notifications.method, NotifyMethod::InApp);
     assert_eq!(s.ui, UiPrefs::default());
