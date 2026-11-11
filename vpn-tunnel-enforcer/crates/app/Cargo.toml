@@ -8,15 +8,56 @@ license.workspace = true
 publish.workspace = true
 build = "build.rs"
 
+[lib]
+name = "vpnte_app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "vpn-tunnel-enforcer"
 path = "src/main.rs"
 
 [dependencies]
 vpnte-base.workspace = true
+vpnte-core.workspace = true
+vpnte-winnet.workspace = true
+vpnte-profiles.workspace = true
+vpnte-servers.workspace = true
+vpnte-engine.workspace = true
+vpnte-probes.workspace = true
+vpnte-forensics.workspace = true
+vpnte-tunnel.workspace = true
+vpnte-proxies.workspace = true
+vpnte-automation.workspace = true
+vpnte-cleanup.workspace = true
+vpnte-view.workspace = true
+vpnte-ui.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+dioxus.workspace = true
+futures-util.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+windows.workspace = true
 
 [build-dependencies]
 embed-resource = "3.0.12"
+
+[features]
+# Build scaffolding: one flag per work package while they are written in parallel.
+default = ["app-base", "app-dashboard", "app-servers", "app-settings", "app-tunnel", "app-main", "app-import", "app-setup"]
+app-base = []
+app-dashboard = ["app-base"]
+app-servers = ["app-base"]
+app-settings = ["app-base"]
+app-tunnel = ["app-base"]
+app-main = ["app-base", "app-dashboard", "app-servers", "app-settings", "app-tunnel"]
+app-import = ["app-main"]
+app-setup = ["app-main"]
 
 [lints]
 workspace = true

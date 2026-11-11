@@ -1,0 +1,485 @@
+//! Protected restart (§7.19), crash recovery (§7.20) and the in-place switch (§7.17).
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use tokio_util::sync::CancellationToken;
+use vpnte_base::ErrorKind;
+use vpnte_base::types::{Engine, EnginePref};
+
+use super::*;
+use crate::api::{
+    RestartOptions, Runtime, StopOptions, SwitchOutcome, TunStatusKind, TunWarning, TunnelEvent,
+};
+use crate::runtime::TunnelHandle;
+
+fn spawn(world: &Arc<World>) -> TunnelHandle {
+    TunnelHandle::spawn(deps(world))
+}
+
+/// AT-02-005: protection is kept across the gap (no release), the new adapter is created only
+/// after the old one is gone, history sees the restart while the tunnel is still up.
+#[tokio::test]
+async fn protected_restart_keeps_protection_across_the_gap() {
+    let w = World::new();
+    let h = spawn(&w);
+    let mut events = h.subscribe();
+    h.start(local_req(), CancellationToken::new())
+        .await
+        .unwrap();
+    let receipt = h
+        .restart_protected(
+            "server switch".into(),
+            local_req(),
+            RestartOptions::default(),
+        )
+        .await
+        .expect("restart");
+    assert_eq!(receipt.generation, 2);
+    assert_eq!(w.count("release"), 0);
+    assert!(w.at("terminate:4100") < w.at("wait-gone"));
+    assert!(w.at("wait-gone") < w.at("spawn:4101"));
+    let seen = drain(&mut events);
+    let restart = seen
+        .iter()
+        .position(|e| matches!(e, TunnelEvent::ProtectedRestart { .. }));
+    let preserved = seen.iter().position(|e| {
+        matches!(
+            e,
+            TunnelEvent::StopFinished {
+                generation: 1,
+                preserved: true,
+                ..
+            }
+        )
+    });
+    assert!(restart.is_some() && restart < preserved, "{seen:?}");
+    assert!(h.status().borrow().running);
+}
+
+/// tunnel-core §3.7 (decided): an unverified release continues on a fresh identity with a
+/// warning instead of stranding the user offline.
+#[tokio::test]
+async fn unverified_release_continues_on_a_fresh_identity() {
+    let w = World::new();
+    let h = spawn(&w);
+    h.start(local_req(), CancellationToken::new())
+        .await
+        .unwrap();
+    w.gone.store(false, Ordering::SeqCst);
+    let receipt = h
+        .restart_protected(
+            "config change: dns".into(),
+            local_req(),
+            RestartOptions::default(),
+        )
+        .await
+        .expect("restart");
+    assert!(
+        receipt
+            .warnings
+            .contains(&TunWarning::ReleaseUnverified.msg())
+    );
+    let avoid = w.avoid.lock().clone();
+    assert_eq!(avoid.last(), Some(&vec!["Ethernet 5".to_owned()]));
+}
+
+/// A pre-cancelled restart has no effect; a failed start after the preserved stop ends in a
+/// full stop that releases the protection.
+#[tokio::test]
+async fn cancelled_or_failed_restart() {
+    let w = World::new();
+    let h = spawn(&w);
+    h.start(local_req(), CancellationToken::new())
+        .await
+        .unwrap();
+    let before = w.log().len();
+    let opts = RestartOptions::default();
+    opts.cancel.cancel();
+    let err = h
+        .restart_protected("x".into(), local_req(), opts)
+        .await
+        .unwrap_err();
+    assert_eq!(err.user_msg().key, "tunnel.runtime.restartCancelled");
+    assert_eq!(w.log().len(), before);
+
+    w.ready_fail.store(true, Ordering::SeqCst);
+    let err = h
+        .restart_protected("x".into(), local_req(), RestartOptions::default())
+        .await
+        .unwrap_err();
+    assert!(err.user_msg().key.starts_with("tunnel.runtime.tunSetup"));
+    assert_eq!(w.count("release"), 1);
+    assert!(!h.status().borrow().running);
+}
+
+/// `restart_with_last` is a no-op when idle; `restart_adaptive` needs a running tunnel.
+#[tokio::test]
+async fn restarts_of_the_last_start() {
+    let w = World::new();
+    let h = spawn(&w);
+    assert_eq!(h.restart_with_last("rules".into()).await.unwrap(), None);
+    let err = h
+        .restart_adaptive(
+            vpnte_base::types::AdaptiveMode::MtuCompatibility,
+            "x".into(),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Conflict);
+    h.start(local_req(), CancellationToken::new())
+        .await
+        .unwrap();
+    let r = h
+        .restart_adaptive(
+            vpnte_base::types::AdaptiveMode::MtuCompatibility,
+            "x".into(),
+            None,
+        )
+        .await
+        .expect("adaptive restart");
+    assert_eq!(r.generation, 2);
+    let mtu = w.configs.lock()[1]["inbounds"][0]["mtu"].clone();
+    assert_eq!(mtu, 1280);
+    assert!(h.restart_with_last("rules".into()).await.unwrap().is_some());
+}
+
+/// AT-02-005 (§7.20): a crash restarts the last start after the backoff, protection held
+/// (lost, never released), through a new native generation.
+#[tokio::test]
+async fn crash_restarts_after_the_backoff() {
+    let w = World::new();
+    let h = spawn(&w);
+    let mut events = h.subscribe();
+    h.start(local_req(), CancellationToken::new())
+        .await
+        .unwrap();
+    w.core(0).crash();
+    let seen = until(&mut events, |e| {
+        matches!(e, TunnelEvent::StartFinished { generation: 2, .. })
+    })
+    .await;
+    assert!(
+        seen.contains(&TunnelEvent::Status(TunStatusKind::Restarting {
+            attempt: 1,
+            max: 3
+        }))
+    );
+    assert!(seen.contains(&TunnelEvent::StartFinished {
+        generation: 2,
+        ok: true
+    }));
+    assert!(w.at("lost") < w.at("spawn:4101"));
+    assert_eq!(w.count("release"), 0);
+    assert_eq!(h.status().borrow().restart_attempt, 1);
+    assert_eq!(h.last_exit().map(|e| e.user_initiated), Some(false));
+}
+
+/// A stop during the backoff cancels the pending restart.
+#[tokio::test]
+async fn stop_cancels_a_pending_restart() {
+    let w = World::new();
+    let mut d = deps(&w);
+    d.timings.backoff = [Duration::from_millis(300); 3];
+    let h = TunnelHandle::spawn(d);
+    let mut events = h.subscribe();
+    h.start(local_req(), CancellationToken::new())
+        .await
+        .unwrap();
+    w.core(0).crash();
+    until(&mut events, |e| {
+        matches!(e, TunnelEvent::Status(TunStatusKind::Restarting { .. }))
+    })
+    .await;
+    let receipt = h.stop(StopOptions::default()).await;
+    assert!(receipt.confirms_cleanup());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(w.count("spawn:4101"), 0);
+}
+
+/// Failed recovery starts consume the budget (B-43 fixed: the chain does not silently end);
+/// exhausted with a standard kill switch: protection released, `Stopped`.
+#[tokio::test]
+async fn exhausted_budget_releases_a_standard_kill_switch() {
+    let w = World::new();
+    let h = spawn(&w);
+    let mut events = h.subscribe();
+    h.start(local_req(), CancellationToken::new())
+        .await
+        .unwrap();
+    w.ready_fail.store(true, Ordering::SeqCst);
+    w.core(0).crash();
+    let stopped = TunnelEvent::Status(TunStatusKind::Stopped);
+    let seen = until(&mut events, |e| *e == stopped).await;
+    assert_eq!(h.status().borrow().restart_attempt, 3);
+    for attempt in 1..=3 {
+        let restarting = TunnelEvent::Status(TunStatusKind::Restarting { attempt, max: 3 });
+        assert!(seen.contains(&restarting), "{attempt}: {seen:?}");
+    }
+    assert!(w.count("release") >= 1);
+    assert!(!h.status().borrow().running);
+}
+
+/// Auto-restart off: the kill switch keeps blocking (`KillSwitchActive`), nothing released
+/// until the user's full stop.
+#[tokio::test]
+async fn auto_restart_off_keeps_blocking() {
+    let w = World::new();
+    w.auto_restart.store(false, Ordering::SeqCst);
+    let h = spawn(&w);
+    let mut events = h.subscribe();
+    h.start(local_req(), CancellationToken::new())
+        .await
+        .unwrap();
+    w.core(0).crash();
+    until(&mut events, |e| {
+        *e == TunnelEvent::Status(TunStatusKind::KillSwitchActive)
+    })
+    .await;
+    assert_eq!(w.count("release"), 0);
+    let receipt = h.stop(StopOptions::default()).await;
+    assert!(receipt.confirms_cleanup());
+    assert_eq!(w.count("release"), 1);
+
+    // Kill switch off: nothing to keep, the session ends.
+    let w = World::new();
+    w.auto_restart.store(false, Ordering::SeqCst);
+    *w.guard.lock() = KillSwitchLevel::Off;
+    let h = spawn(&w);
+    let mut events = h.subscribe();
+    h.start(local_req(), CancellationToken::new())
+        .await
+        .unwrap();
+    w.core(0).crash();
+    until(&mut events, |e| {
+        *e == TunnelEvent::Status(TunStatusKind::Stopped)
+    })
+    .await;
+    assert_eq!(w.count("release"), 1);
+}
+
+/// Xray slots: slot A starts and is probed before the TUN, the selector is read back before
+/// running; an in-place switch stages B, selects, confirms, commits, then stops A.
+#[tokio::test]
+async fn slot_session_and_in_place_switch() {
+    let w = World::new();
+    let h = spawn(&w);
+    let mut events = h.subscribe();
+    let receipt = h
+        .start(
+            vpn_req(XRAY_KEY, EnginePref::Xray),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("slot start");
+    assert_eq!(receipt.engine, Engine::Xray);
+    assert!(w.at("begin:0") < w.at("xray-start:a"));
+    assert!(w.at("xray-start:a") < w.at("spawn:4100"));
+    assert!(w.at("ready") < w.at("select:a"));
+    assert!(w.at("select:a") < w.at("activate:a"));
+    let status = h.status().borrow().clone();
+    assert_eq!(status.profile_name.as_deref(), Some("Fake A"));
+    assert!(status.session.as_ref().is_some_and(|s| s.probe.is_some()));
+
+    let owner: crate::api::OwnerCheck = Arc::new(|| true);
+    let next = vpn_req(XRAY_KEY_2, EnginePref::Xray);
+    let sw = h
+        .switch_upstream(next, CancellationToken::new(), owner.clone())
+        .await
+        .expect("in place");
+    assert_eq!(sw.outcome, SwitchOutcome::Success, "{sw:?}");
+    assert!(sw.verified());
+    assert!(w.at("xray-start:b") < w.at("select:b"));
+    assert!(w.at("activate:b") < w.at("xray-stop:a"));
+    assert_eq!(h.status().borrow().profile_name.as_deref(), Some("Fake B"));
+    let seen = drain(&mut events);
+    assert!(seen.contains(&TunnelEvent::SwitchFinished {
+        generation: 1,
+        verified: true
+    }));
+
+    // A config-shaping change (stealth = another MTU) is not possible in place.
+    let mut stealth = vpn_req(XRAY_KEY, EnginePref::Xray);
+    stealth.stealth = true;
+    let none = h
+        .switch_upstream(stealth, CancellationToken::new(), owner)
+        .await;
+    assert!(none.is_none());
+}
+
+/// A native sing-box or local-proxy session never switches in place.
+#[tokio::test]
+async fn no_in_place_switch_without_slots() {
+    let w = World::new();
+    let h = spawn(&w);
+    h.start(
+        vpn_req(NATIVE_KEY, EnginePref::SingBox),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("native start");
+    let owner: crate::api::OwnerCheck = Arc::new(|| true);
+    let next = vpn_req(XRAY_KEY, EnginePref::Xray);
+    assert!(
+        h.switch_upstream(next, CancellationToken::new(), owner)
+            .await
+            .is_none()
+    );
+}
+
+/// The active slot's exit: upstream down at once, slot restarted, upstream back.
+#[tokio::test]
+async fn active_slot_exit_is_restarted() {
+    let w = World::new();
+    let h = spawn(&w);
+    let mut events = h.subscribe();
+    h.start(
+        vpn_req(XRAY_KEY, EnginePref::Xray),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    drain(&mut events);
+    let tx = w.xray_events.lock().clone().expect("slot events");
+    w.running.lock()[0] = false;
+    tx.send(XrayEvent::Exited {
+        slot: Slot::A,
+        pid: 1,
+        code: Some(2),
+        expected: false,
+        tail: String::new(),
+    })
+    .await
+    .unwrap();
+    let seen = until(&mut events, |e| {
+        *e == TunnelEvent::Status(TunStatusKind::Running)
+    })
+    .await;
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, TunnelEvent::Status(TunStatusKind::ProxyDown { .. })))
+    );
+    assert_eq!(w.count("xray-restart:a"), 1);
+    assert!(h.status().borrow().proxy_reachable);
+}
+
+/// §7.17: the fresh tunnel egress differs from the candidate's probe: failed, the previous
+/// upstream re-selected and re-proven (verified), the candidate drained.
+#[tokio::test]
+async fn candidate_egress_mismatch_preserves_the_previous_upstream() {
+    let w = World::new();
+    let h = spawn(&w);
+    h.start(
+        vpn_req(XRAY_KEY, EnginePref::Xray),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    w.select_ignored.store(true, Ordering::SeqCst);
+    let owner: crate::api::OwnerCheck = Arc::new(|| true);
+    let next = vpn_req(XRAY_KEY_2, EnginePref::Xray);
+    let sw = h
+        .switch_upstream(next, CancellationToken::new(), owner)
+        .await
+        .expect("in place");
+    assert_eq!(sw.outcome, SwitchOutcome::Failed);
+    assert!(sw.previous_preserved && sw.candidate_stopped && !sw.committed);
+    assert!(sw.verified());
+    assert_eq!(sw.failures[0].phase, crate::api::SwitchPhase::Confirm);
+    assert!(w.at("select:b") < w.at("xray-stop:b"));
+    assert_eq!(h.status().borrow().profile_name.as_deref(), Some("Fake A"));
+}
+
+/// §7.17: a failed stage keeps the previous upstream but marks the standby port suspect: the
+/// next request goes through the protected restart (`None`).
+#[tokio::test]
+async fn failed_stage_sends_the_next_switch_to_a_restart() {
+    let w = World::new();
+    let h = spawn(&w);
+    h.start(
+        vpn_req(XRAY_KEY, EnginePref::Xray),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    w.stage_fail.store(true, Ordering::SeqCst);
+    let owner: crate::api::OwnerCheck = Arc::new(|| true);
+    let sw = h
+        .switch_upstream(
+            vpn_req(XRAY_KEY_2, EnginePref::Xray),
+            CancellationToken::new(),
+            owner.clone(),
+        )
+        .await
+        .expect("in place");
+    assert!(sw.previous_preserved && sw.verified());
+    w.stage_fail.store(false, Ordering::SeqCst);
+    let next = vpn_req(XRAY_KEY_2, EnginePref::Xray);
+    assert!(
+        h.switch_upstream(next, CancellationToken::new(), owner)
+            .await
+            .is_none()
+    );
+}
+
+/// §7.17 "native stop mid-switch": a runtime stop ends the switch's ownership at once —
+/// cancelled, `ownership_lost`, the previous upstream neither re-selected nor re-proven — and
+/// the stop then runs to a certified cleanup.
+#[tokio::test]
+async fn stop_mid_switch_ends_its_ownership() {
+    let w = World::new();
+    let h = spawn(&w);
+    h.start(
+        vpn_req(XRAY_KEY, EnginePref::Xray),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    w.stage_hold.store(true, Ordering::SeqCst);
+    let switching = {
+        let h = h.clone();
+        let owner: crate::api::OwnerCheck = Arc::new(|| true);
+        let next = vpn_req(XRAY_KEY_2, EnginePref::Xray);
+        tokio::spawn(async move {
+            h.switch_upstream(next, CancellationToken::new(), owner)
+                .await
+        })
+    };
+    while w.count("xray-start:b") == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let receipt = h.stop(StopOptions::default()).await;
+    let sw = switching.await.expect("join").expect("in place");
+    assert_eq!(sw.outcome, SwitchOutcome::Cancelled, "{sw:?}");
+    assert!(sw.ownership_lost && !sw.previous_preserved && sw.active_slot.is_none());
+    assert!(!sw.verified());
+    assert_eq!(w.count("egress"), 0, "no re-proof after the stop");
+    assert!(w.at("xray-stop:b") < w.at("terminate:4100"));
+    assert!(receipt.confirms_cleanup(), "{receipt:?}");
+}
+
+/// §3.5 (d): every start but a crash recovery reopens the auto-restart window — a protected
+/// restart (user, rotation, adaptive) included.
+#[tokio::test]
+async fn protected_restart_resets_the_crash_budget() {
+    let w = World::new();
+    let h = spawn(&w);
+    let mut events = h.subscribe();
+    h.start(local_req(), CancellationToken::new())
+        .await
+        .unwrap();
+    w.core(0).crash();
+    until(&mut events, |e| {
+        matches!(e, TunnelEvent::StartFinished { generation: 2, .. })
+    })
+    .await;
+    assert_eq!(h.status().borrow().restart_attempt, 1);
+    h.restart_protected(
+        "server switch".into(),
+        local_req(),
+        RestartOptions::default(),
+    )
+    .await
+    .expect("restart");
+    assert_eq!(h.status().borrow().restart_attempt, 0);
+}

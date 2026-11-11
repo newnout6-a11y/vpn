@@ -5372,8 +5372,33 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vpnte-app"
 version = "2.0.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "dioxus",
  "embed-resource",
+ "futures-util",
+ "parking_lot 0.13.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "vpnte-automation",
  "vpnte-base",
+ "vpnte-cleanup",
+ "vpnte-core",
+ "vpnte-engine",
+ "vpnte-forensics",
+ "vpnte-probes",
+ "vpnte-profiles",
+ "vpnte-proxies",
+ "vpnte-servers",
+ "vpnte-tunnel",
+ "vpnte-ui",
+ "vpnte-view",
+ "vpnte-winnet",
+ "windows 0.62.2",
 ]
 
 [[package]]

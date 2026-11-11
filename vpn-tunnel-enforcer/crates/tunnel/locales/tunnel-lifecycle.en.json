@@ -1,0 +1,80 @@
+{
+  "tunnel": {
+    "lifecycle": {
+      "lane": {
+        "stopInProgress": "Protection is still being stopped — please wait",
+        "cancelledDraining": "The cancelled operation is still finishing",
+        "preemptFailed": "The cancelled operation could not be finished",
+        "startInProgress": "Protection is already starting",
+        "stateRefusesStart": "The tunnel state does not allow a new start",
+        "higherPriority": "A higher-priority operation is still running",
+        "startCancelled": "Start cancelled",
+        "startTimeout": "Protection start timed out",
+        "stopTimeout": "Protection stop timed out",
+        "confirmationMissing": "Connection not confirmed: the protection state could not be verified",
+        "cleanupUnconfirmed": "Stop not confirmed: the tunnel or its settings may still be active",
+        "switchFailed": "Could not switch the server",
+        "notRunning": "Protection is not running",
+        "maintenanceRefused": "Turn protection off before network maintenance",
+        "maintenanceBusy": "Network maintenance is running — please wait",
+        "maintenanceTimeout": "Network maintenance timed out"
+      },
+      "server": {
+        "none": "No server selected. Open “Servers” and add a subscription or a key.",
+        "unavailable": "The selected server is not in the server list. Refresh the subscription or pick another server in “Servers”."
+      },
+      "soft": {
+        "rollbackBeforeStart": "Could not turn Soft mode off before starting the tunnel",
+        "applyFailed": "Could not apply the Soft proxy settings",
+        "envRollbackFailed": "Could not restore the proxy settings. Retry the network restore."
+      },
+      "outcome": {
+        "softRetainUnconfirmed": "The previous Soft settings could not be confirmed after a failed refresh",
+        "softModeSwitch": "Soft protection was turned off before another mode started",
+        "cancelled": "The connection was cancelled",
+        "timeout": "Protection start timed out — the connection was stopped",
+        "preempted": "The connection was interrupted by a higher-priority operation",
+        "failed": "The protection state was not confirmed — the connection was stopped"
+      },
+      "notice": {
+        "connected": {
+          "title": "Protection on",
+          "body": "All traffic goes through the VPN."
+        },
+        "restored": {
+          "title": "Protection restored",
+          "body": "The VPN connection was restored after attempt {{attempt}}."
+        },
+        "disconnected": {
+          "title": "Protection off",
+          "body": "Traffic takes the normal route."
+        },
+        "stopFailed": {
+          "title": "Protection stop not completed"
+        },
+        "stopped": {
+          "title": "Protection stopped"
+        },
+        "crashBlocked": {
+          "title": "sing-box crashed",
+          "body": "The firewall blocks traffic so your IP does not leak. Turn protection on again."
+        },
+        "crashRestarting": {
+          "title": "sing-box crashed",
+          "body": "Restarting (attempt {{attempt}}/{{max}})."
+        },
+        "failover": {
+          "title": "Server changed",
+          "body": "The active key stopped answering. Switched to “{{name}}”, another key of the same subscription. The source subscription has expired, but this key still works."
+        },
+        "restartFailed": {
+          "title": "Could not restart protection"
+        },
+        "internalError": {
+          "title": "Internal error",
+          "body": "The protection state is not confirmed"
+        }
+      }
+    }
+  }
+}

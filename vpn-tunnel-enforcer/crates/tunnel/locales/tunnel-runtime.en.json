@@ -1,0 +1,35 @@
+{
+  "tunnel": {
+    "runtime": {
+      "alreadyRunning": "The TUN is already running",
+      "actorGone": "The tunnel service does not respond. Restart the app and check the log.",
+      "notRunning": "The tunnel is not running",
+      "noLastStart": "No parameters of a previous start: turn protection on again.",
+      "previousNotStopped": "Could not confirm that the previous VPN runtime stopped. Stop protection again and check the log.",
+      "proxyAddressInvalid": "Invalid upstream proxy address. Use host:port or [IPv6]:port; the port must be between 1 and 65535.",
+      "proxyNotListening": "Proxy {{addr}} is unreachable. Make sure Happ runs in Proxy mode and listens on this port.",
+      "profileUnusable": "This VPN profile cannot run in sing-box. Check the key or choose another server.",
+      "egressUnknown": "Could not determine the external IP through the tunnel.",
+      "fullStopRan": "A full stop already ran; protection cannot be considered preserved",
+      "stopIncomplete": "Turning protection off did not complete. Stop protection again and check the network diagnostics.",
+      "restartStopFailed": "Could not stop the previous VPN runtime during the protected restart. Stop protection again and check the log.",
+      "restartCancelled": "Restart cancelled",
+      "switchUnconfirmed": "The new server did not confirm internet access through the tunnel.",
+      "tunSetup": {
+        "adapter": "The tunnel interface did not come up. The start was cancelled to prevent a traffic leak.",
+        "protection": "The kill switch was not confirmed. The start was cancelled.",
+        "routes": "Could not confirm that the TUN interface was created and protected. The start was cancelled; details are in the log."
+      },
+      "cleanup": {
+        "exitUnproven": "The VPN runtime exit was not confirmed; network protection is kept. Stop protection again and check the log.",
+        "xray": "The xray-core exit was not confirmed; protection is kept. Stop again and check the log.",
+        "protection": "The kill-switch firewall rules were not removed. Stop protection again and check the network diagnostics."
+      },
+      "watchdog": {
+        "proxyDown": "Proxy {{addr}} does not respond. Traffic is held inside the TUN so it cannot leak past the VPN.",
+        "upstreamDown": "The VPN through server «{{name}}» is not confirmed. Traffic stays inside the TUN (your real IP does not leak). Check the connection or choose another server.",
+        "slotExited": "The server's xray-core exited; restarting it. Traffic stays inside the TUN."
+      }
+    }
+  }
+}

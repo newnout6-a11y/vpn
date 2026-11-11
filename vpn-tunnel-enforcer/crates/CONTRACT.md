@@ -29,6 +29,9 @@ this file says HOW the pieces fit and overrides a spec wherever they disagree.
   if you are reviewing or integrating something else, do NOT redesign for this yourself; keep the code as its
   brief says and just add no new dependency on running elevated. `--no-elevate` / `VPNTE_NO_ELEVATE=1` are
   accepted and mean nothing any more.
+  **Current phase:** the helper service is NOT built yet. A privileged operation is available only when the
+  process itself is elevated (the user started it as administrator, or CI); the details and the Soft / proxy
+  capture design are in `.tmp/rewrite/NOADMIN.md` (binding for `noadmin-*` and `app-*` packages).
 - Data dir `%APPDATA%\VPN Tunnel Enforcer\` (override: env `VPNTE_DATA_DIR`). JSON documents, atomic writes,
   secrets wrapped with DPAPI. One-time non-destructive import from the Electron dir
   `%APPDATA%\vpn-tunnel-enforcer\` (override: env `VPNTE_LEGACY_DIR`).
