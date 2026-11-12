@@ -610,8 +610,11 @@ fn legacy_import() {
 async fn timer_loop_rotates_when_due() {
     let fx = fixture(&["a", "b"], 0, RotationOrder::Sequential);
     fx.live_on("a");
+    // The task's first `arm` treats an instant that has already passed as a countdown missed
+    // while the app was closed (only a future instant survives a restart) and starts a fresh
+    // one. 100 ms was outrun by the spawned task's scheduling delay on a loaded CI runner.
     fx.store
-        .update(|c| c.next_rotation_at = Some(now_ms() + 100))
+        .update(|c| c.next_rotation_at = Some(now_ms() + 2_000))
         .unwrap();
     let cancel = CancellationToken::new();
     let task = tokio::spawn({
