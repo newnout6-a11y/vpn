@@ -231,6 +231,25 @@ pub(super) fn tweaks(
     report.notes.extend(done.notice);
 }
 
+/// Adopts the old app's browser-policy and location leftovers into the tweak journal (second,
+/// after the Soft ones: automation API), so a later rollback restores exactly the old values.
+/// Runs once (`hardening.json` keeps its own marker); only reads the registry and files.
+pub(super) fn hardening(
+    report: &mut ImportReport,
+    root: &Path,
+    sources: &hardening::legacy::LegacySources,
+    system: &dyn hardening::System,
+) {
+    let journal = Journal::open(root, hardening::admit);
+    let done = hardening::legacy::import(&journal, root, system, sources);
+    if done.adopted > 0 {
+        report
+            .imported
+            .push((TweakDoc::FILE.to_owned(), done.adopted));
+    }
+    report.notes.extend(done.notices);
+}
+
 /// The `count` argument of an owning crate's "n entries dropped" warning.
 fn count_arg(msg: &Msg) -> usize {
     msg.args

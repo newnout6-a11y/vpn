@@ -7,12 +7,11 @@ use tokio::sync::watch;
 use vpnte_core::settings::RuleSetMode;
 use vpnte_engine::routing::rulesets::ActiveSource;
 use vpnte_tunnel::fsm::{TunnelSnapshot, TunnelState};
-use vpnte_tunnel::history::SessionMode;
 use vpnte_tunnel::lifecycle::SessionView;
 use vpnte_ui::settings as ui;
 
 use super::project::{self, dns_view, domains_view, kill_switch_view, notifications_view};
-use super::{Shared, actions, wizard};
+use super::{Shared, actions, auto, wizard};
 use crate::services::{Backend, KillSwitchStatus, TunnelOps};
 use crate::support::{changed, changed_opt};
 
@@ -42,11 +41,22 @@ async fn run(shared: Arc<Shared>, tunnel: Option<Arc<dyn TunnelOps>>) {
     let mut themes = backend.themes.subscribe();
     let mut snapshot = tunnel.as_ref().map(|t| t.snapshot());
     let mut session = tunnel.as_ref().map(|t| t.session());
+    let auto = shared.automation.clone();
+    let mut adaptive = auto.as_ref().map(|a| a.adaptive.status());
+    let mut rotation = auto.as_ref().map(|a| a.rotation.subscribe());
+    let mut servers = backend.servers.subscribe();
 
     // Facts read from Windows once at start; the actions refresh them later.
     let autostart = actions::read_autostart(&shared).await;
     shared.touch(|l| l.autostart = autostart);
     let _ = actions::check_os_notifications(&shared).await;
+    if let Some(auto) = &auto {
+        // Read-only, unelevated: what the browsers hold now.
+        match auto.browsers.status().await {
+            Ok(report) => shared.touch(|l| l.browser = Some(auto::browser_view(&report))),
+            Err(e) => tracing::warn!(error = %e, "browser policies not read"),
+        }
+    }
     if !backend.settings.read(|s| s.first_run_complete) {
         wizard::open(&shared).await;
     }
@@ -69,6 +79,9 @@ async fn run(shared: Arc<Shared>, tunnel: Option<Arc<dyn TunnelOps>>) {
             () = changed_opt(&mut snapshot) => true,
             () = changed_opt(&mut session) => true,
             () = shared.dirty.notified() => true,
+            () = changed_opt(&mut adaptive) => false,
+            () = changed_opt(&mut rotation) => false,
+            () = servers_changed(&mut servers) => false,
         };
         tokio::time::sleep(DEBOUNCE).await;
     }
@@ -86,7 +99,7 @@ fn tunnel_now(tunnel: Option<&dyn TunnelOps>) -> (TunnelSnapshot, Option<Session
 fn publish_stores(shared: &Shared, snap: &TunnelSnapshot, session: Option<&SessionView>) {
     let backend = &shared.backend;
     let settings = backend.settings.snapshot();
-    let (autostart, os, refreshing, last_error) = {
+    let (autostart, os, refreshing, last_error, browser) = {
         let l = shared.local.lock();
         let os = l.os_notifications.clone();
         (
@@ -94,6 +107,7 @@ fn publish_stores(shared: &Shared, snap: &TunnelSnapshot, session: Option<&Sessi
             os,
             l.rule_sets_refreshing,
             l.rule_sets_error.clone(),
+            l.browser.clone(),
         )
     };
     let soft = backend.soft.read(|d| d.dev_targets);
@@ -104,8 +118,8 @@ fn publish_stores(shared: &Shared, snap: &TunnelSnapshot, session: Option<&Sessi
         active_theme_id: settings.active_theme_id.clone(),
         themes: backend.themes.read(project::themes),
         autostart: autostart.unwrap_or(false),
-        // Location privacy is not wired in this build: never shown as active.
-        location_privacy: false,
+        // The stored choice (applied with each session); never shown without the automation.
+        location_privacy: shared.automation.is_some() && settings.location_privacy,
         proxy_credentials_saved: settings
             .proxy_override
             .as_ref()
@@ -113,11 +127,14 @@ fn publish_stores(shared: &Shared, snap: &TunnelSnapshot, session: Option<&Sessi
         capture_consent_given: false,
         capture_used_bytes: None,
         connected: snap.state == TunnelState::Connected,
-        direct_session: session.is_some_and(|s| s.mode == SessionMode::Direct),
-        // `message: None` = adaptive status unavailable (not exposed by the tunnel here).
-        adaptive: ui::AdaptiveView::default(),
+        // Rotation moves any session over a server of the list (TUN or system proxy).
+        direct_session: session.is_some_and(|s| s.server_id().is_some()),
+        // `message: None` = adaptive status unavailable (no automation behind the page).
+        adaptive: (shared.automation.as_ref())
+            .map(|a| auto::adaptive_view(&a.adaptive.status().borrow()))
+            .unwrap_or_default(),
         rule_sets: rule_set_view(backend, &settings, refreshing, last_error),
-        browser: ui::BrowserView::default(),
+        browser: browser.unwrap_or_default(),
         diagnostics_export_running: false,
     };
     publish(&shared.state, state);
@@ -125,6 +142,10 @@ fn publish_stores(shared: &Shared, snap: &TunnelSnapshot, session: Option<&Sessi
     publish(&shared.dns, dns_view(&doc));
     publish(&shared.domains, domains_view(&doc, settings.smart_ru_split));
     publish(&shared.notifications, notifications_view(&settings, os));
+    if let Some(auto) = &shared.automation {
+        let view = auto::rotation_view(&auto.rotation.config(), &backend.servers);
+        publish(&shared.rotation, view);
+    }
 }
 
 /// Which Smart RU lists the next engine start uses (the service's own choice rule).
@@ -156,4 +177,19 @@ pub fn publish<T: PartialEq>(tx: &watch::Sender<T>, value: T) {
         }
         differs
     });
+}
+
+/// A change of the server rows (the rotation's server list); a closed list never wakes again.
+async fn servers_changed(
+    events: &mut tokio::sync::broadcast::Receiver<vpnte_servers::store::ServersEvent>,
+) {
+    use tokio::sync::broadcast::error::RecvError;
+    use vpnte_servers::store::ServersEvent;
+    loop {
+        match events.recv().await {
+            Ok(ServersEvent::Changed) | Err(RecvError::Lagged(_)) => return,
+            Ok(_) => {}
+            Err(RecvError::Closed) => std::future::pending::<()>().await,
+        }
+    }
 }

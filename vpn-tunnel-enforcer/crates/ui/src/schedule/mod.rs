@@ -25,8 +25,8 @@ pub use form::{
     time_until, until_next_change, window_hint,
 };
 pub use model::{
-    HhMm, NextAction, NextEvent, ScheduleApi, ScheduleEntry, ScheduleInput, ScheduleMode,
-    ScheduleSnapshot, ServerChoice,
+    Capture, HhMm, NextAction, NextEvent, ScheduleApi, ScheduleEntry, ScheduleInput,
+    ScheduleSnapshot, ServerChoice, Upstream,
 };
 pub use page::SchedulePage;
 

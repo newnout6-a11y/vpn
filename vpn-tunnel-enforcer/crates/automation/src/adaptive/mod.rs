@@ -82,9 +82,10 @@ impl Capabilities {
     }
 }
 
-/// Capabilities of a session (AB:156-179 with fixes A2 and A7).
+/// Capabilities of a session (AB:156-179 with fixes A2 and A7). Only a session over the server
+/// list has knobs; the MTU mode needs the TUN (a system-proxy session has no adapter to shrink).
 pub fn capabilities(kind: SessionKind, profile: Option<&ProfileView>) -> Capabilities {
-    if kind != SessionKind::Direct {
+    if !kind.server() {
         return Capabilities {
             tls: false,
             mtu: false,
@@ -110,7 +111,7 @@ pub fn capabilities(kind: SessionKind, profile: Option<&ProfileView>) -> Capabil
     };
     Capabilities {
         tls: tls_on && !reality && !xray,
-        mtu: true,
+        mtu: kind.tun(),
         external: false,
         reason,
     }

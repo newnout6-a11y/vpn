@@ -20,15 +20,20 @@ pub struct ProxyEndpoint {
     pub creds: Option<Creds>,
 }
 
-/// What automation asks the tunnel to run.
+/// What automation asks the tunnel to run. Two choices make a session (NOADMIN §2): how the
+/// traffic is taken (the TUN, elevated only, or the per-user system proxy in front of a
+/// loopback engine) and the upstream (a server of the list or a local proxy).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectRequest {
-    /// Direct VPN through a stored server profile.
+    /// TUN capture through a stored server profile.
     Direct { profile_id: String },
-    /// Hard TUN through a local proxy. `None`: the proxy a manual connect would use
+    /// Proxy capture through a stored server profile: the main mode without administrator
+    /// rights.
+    SoftDirect { profile_id: String },
+    /// TUN capture through a local proxy. `None`: the proxy a manual connect would use
     /// (settings override, else detection); none found → [`OpError::NoLocalProxy`].
     LocalProxyHard { endpoint: Option<ProxyEndpoint> },
-    /// Soft mode (user-level proxy variables plus the user's enabled dev-tool targets). `None` as above.
+    /// Proxy capture through a local proxy. `None` as above.
     Soft { endpoint: Option<ProxyEndpoint> },
 }
 
@@ -37,18 +42,48 @@ impl ConnectRequest {
     pub fn kind(&self) -> SessionKind {
         match self {
             ConnectRequest::Direct { .. } => SessionKind::Direct,
+            ConnectRequest::SoftDirect { .. } => SessionKind::SoftDirect,
             ConnectRequest::LocalProxyHard { .. } => SessionKind::LocalProxyHard,
             ConnectRequest::Soft { .. } => SessionKind::Soft,
         }
     }
+
+    /// The server profile of a request over the server list.
+    pub fn profile_id(&self) -> Option<&str> {
+        match self {
+            ConnectRequest::Direct { profile_id } | ConnectRequest::SoftDirect { profile_id } => {
+                Some(profile_id)
+            }
+            ConnectRequest::LocalProxyHard { .. } | ConnectRequest::Soft { .. } => None,
+        }
+    }
 }
 
-/// Route architecture of a running session.
+/// Route architecture of a running session: capture (TUN / system proxy) x upstream (server /
+/// local proxy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessionKind {
+    /// TUN through a server of the list.
     Direct,
+    /// System proxy through a server of the list.
+    SoftDirect,
+    /// TUN through a local proxy.
     LocalProxyHard,
+    /// System proxy through a local proxy.
     Soft,
+}
+
+impl SessionKind {
+    /// The upstream is a server of the list: rotation, server switches and the check-verdict
+    /// reactions can move it.
+    pub fn server(self) -> bool {
+        matches!(self, SessionKind::Direct | SessionKind::SoftDirect)
+    }
+
+    /// Traffic is captured by the TUN (the MTU compatibility mode exists only there).
+    pub fn tun(self) -> bool {
+        matches!(self, SessionKind::Direct | SessionKind::LocalProxyHard)
+    }
 }
 
 /// The running session as the coordinator sees it.
@@ -58,7 +93,7 @@ pub struct SessionInfo {
     /// Who holds the session. Restarts that continue it (crash auto-restart, settings restart,
     /// adaptive restart, profile switch) keep the owner; a connect by a higher owner takes it over.
     pub owner: Owner,
-    /// Server profile of a `Direct` session.
+    /// Server profile of a session over the server list (`Direct`, `SoftDirect`).
     pub profile_id: Option<String>,
     pub runtime_id: RuntimeId,
     /// Adaptive compatibility mode the running engine was started with.
@@ -209,7 +244,8 @@ pub trait Coordinator: Send + Sync + 'static {
     /// Stops the session; `Conflict` if `owner < session.owner`. No session → `Ok` without effects.
     fn disconnect(&self, owner: Owner) -> impl Future<Output = Result<(), OpError>> + Send;
 
-    /// Moves a `Direct` session to another profile: protected restart (kill switch kept), egress
+    /// Moves a session over the server list (`Direct`, `SoftDirect`) to another profile, keeping
+    /// its capture: protected restart (kill switch kept), egress
     /// and tunnel proof, the selection committed only on success; on failure the previous profile
     /// is restarted; if that fails too the session stops with protection rolled back. The session
     /// keeps its owner.
@@ -273,6 +309,24 @@ mod tests {
         assert_eq!(
             ConnectRequest::Soft { endpoint: None }.kind(),
             SessionKind::Soft
+        );
+        let proxy = ConnectRequest::SoftDirect {
+            profile_id: "p".into(),
+        };
+        assert_eq!(
+            (proxy.kind(), proxy.profile_id()),
+            (SessionKind::SoftDirect, Some("p"))
+        );
+        assert_eq!(direct.profile_id(), Some("p"));
+    }
+
+    /// NOADMIN §2: capture and upstream are separate questions.
+    #[test]
+    fn session_kinds_split_capture_and_upstream() {
+        use SessionKind::*;
+        assert_eq!(
+            [Direct, SoftDirect, LocalProxyHard, Soft].map(|k| (k.server(), k.tun())),
+            [(true, true), (true, false), (false, true), (false, false)]
         );
     }
 }

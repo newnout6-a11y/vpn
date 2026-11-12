@@ -17,7 +17,7 @@ use vpnte_tunnel::runtime::HandshakeGate;
 const EGRESS_WAIT: Duration = WINDOW.saturating_add(Duration::from_secs(5));
 
 /// [`HandshakeGate`] over the process-wide budget every check shares.
-pub(super) struct BudgetGate;
+pub(crate) struct BudgetGate;
 
 #[async_trait]
 impl HandshakeGate for BudgetGate {

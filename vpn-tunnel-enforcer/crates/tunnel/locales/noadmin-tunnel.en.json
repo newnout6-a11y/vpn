@@ -27,6 +27,14 @@
           "title": "The VPN engine stopped",
           "body": "The system proxy still points at the stopped engine: programs that use it get no connection until you turn protection on again or off. Other programs connect directly."
         },
+        "softPaused": {
+          "title": "System proxy paused",
+          "body": "The VPN engine restarts in {{seconds}} s: the server has to wait out a block. Until then programs connect directly, without the VPN; the proxy comes back with the connection."
+        },
+        "softResumeFailed": {
+          "title": "System proxy not restored",
+          "body": "The VPN engine runs again, but the system proxy could not be pointed at it: programs connect directly, without the VPN. Turn protection off and on again."
+        },
         "softRestored": {
           "title": "Proxy mode stopped",
           "body": "The VPN engine stopped. The system proxy was restored: programs connect directly, without the VPN."

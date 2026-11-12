@@ -12,7 +12,7 @@ use super::{Scheduler, SchedulerStatus, Wake, system_zone, upcoming};
 use crate::coordinator::{
     ConnectOutcome, ConnectRequest, Coordinator, LifecycleEvent, NoticeCategory, OpError, StopCause,
 };
-use crate::schedule::{self, Run, ScheduleEntry, ScheduleMode};
+use crate::schedule::{self, Capture, Run, ScheduleEntry, Upstream};
 
 /// Delays of the retries after a failed scheduled connect (fix S2): 1, 2, 5, then every 10 min.
 const RETRY_BACKOFF_S: [i64; 4] = [60, 120, 300, 600];
@@ -412,16 +412,21 @@ fn name_of(entries: &[ScheduleEntry], idx: usize) -> String {
     entries.get(idx).map(|e| e.name.clone()).unwrap_or_default()
 }
 
-/// The coordinator request of a schedule; `None` for a Direct schedule without a profile.
+/// The coordinator request of a schedule; `None` for a server schedule without a profile. A
+/// local-proxy schedule never touches the profile id (fix S6).
 fn request_for(entry: &ScheduleEntry) -> Option<ConnectRequest> {
-    match entry.mode {
-        ScheduleMode::Direct if entry.profile_id.is_empty() => None,
-        ScheduleMode::Direct => Some(ConnectRequest::Direct {
-            profile_id: entry.profile_id.clone(),
-        }),
-        // Hard / Soft use the local proxy; the profile id is not touched (fix S6).
-        ScheduleMode::Hard => Some(ConnectRequest::LocalProxyHard { endpoint: None }),
-        ScheduleMode::Soft => Some(ConnectRequest::Soft { endpoint: None }),
+    let profile_id = || Some(entry.profile_id.clone()).filter(|id| !id.is_empty());
+    match (entry.capture, entry.upstream) {
+        (Capture::Tun, Upstream::Server) => {
+            profile_id().map(|profile_id| ConnectRequest::Direct { profile_id })
+        }
+        (Capture::Proxy, Upstream::Server) => {
+            profile_id().map(|profile_id| ConnectRequest::SoftDirect { profile_id })
+        }
+        (Capture::Tun, Upstream::LocalProxy) => {
+            Some(ConnectRequest::LocalProxyHard { endpoint: None })
+        }
+        (Capture::Proxy, Upstream::LocalProxy) => Some(ConnectRequest::Soft { endpoint: None }),
     }
 }
 

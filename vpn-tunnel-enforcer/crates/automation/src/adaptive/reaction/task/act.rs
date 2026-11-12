@@ -72,11 +72,11 @@ impl<C: Coordinator, H: ReactionHost> Reactions<C, H> {
             .with(|m| decide::decide(report, server, active, m, servers, allowed))
     }
 
-    /// The running Direct session is on `server`.
+    /// The running session over the server list (TUN or system proxy) is on `server`.
     fn still_on(&self, server: &ServerFacts) -> bool {
-        self.coord.session().is_some_and(|s| {
-            s.kind == SessionKind::Direct && s.profile_id.as_deref() == Some(server.id.as_str())
-        })
+        self.coord
+            .session()
+            .is_some_and(|s| s.kind.server() && s.profile_id.as_deref() == Some(server.id.as_str()))
     }
 
     /// Records (`on`) or withdraws a reaction for this network session.

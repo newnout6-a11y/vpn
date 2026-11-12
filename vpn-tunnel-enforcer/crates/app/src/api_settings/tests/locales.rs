@@ -31,6 +31,7 @@ fn fragments_match_and_cover_the_code() {
         include_str!("../project.rs"),
         include_str!("../save.rs"),
         include_str!("../actions.rs"),
+        include_str!("../auto.rs"),
         include_str!("../rules.rs"),
         include_str!("../wizard.rs"),
         include_str!("../../support/files.rs"),

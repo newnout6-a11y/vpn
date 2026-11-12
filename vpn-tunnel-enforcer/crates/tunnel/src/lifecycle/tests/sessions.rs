@@ -1,4 +1,6 @@
 //! Session tracking and history rows (lifecycle-app §7.11, rows tagged AT-00-005 / AT-00-010).
+use std::time::Duration;
+
 use vpnte_base::ErrorKind;
 use vpnte_base::types::{KillSwitchLevel, Owner, ProxyKind};
 use vpnte_core::ops::{CorrelationId, Source};
@@ -77,6 +79,11 @@ async fn soft_runs_the_engine_and_points_the_tweaks_at_it() {
     let live = h.lc.session().borrow().clone().expect("session");
     assert_eq!(live.mode, SessionMode::Soft);
     assert_eq!(live.profile_id, "srv-a");
+    assert_eq!(
+        live.server_id(),
+        Some("srv-a"),
+        "a server session over the proxy"
+    );
     assert!(live.generation.is_some(), "a Soft session is an engine run");
     // Proxy mode never claims that all traffic goes through the VPN.
     let titles = h.notifier.titles();
@@ -100,6 +107,11 @@ async fn soft_runs_the_engine_and_points_the_tweaks_at_it() {
     assert!(matches!(req.mode, Mode::LocalProxy { .. }));
     let live = h.lc.session().borrow().clone().expect("session");
     assert_eq!(live.profile_id, "local-proxy-soft-socks5");
+    assert_eq!(
+        live.server_id(),
+        None,
+        "a local proxy is not a server of the list"
+    );
 }
 
 /// NOADMIN.md §2: disconnect rolls the tweaks back before the engine stops.
@@ -231,6 +243,62 @@ async fn soft_engine_loss_follows_the_kill_switch() {
         }
         assert_eq!(h.rows()[0].mode, SessionMode::Soft);
     }
+}
+
+/// NOADMIN §2 with the RU freeze window: kill switch `off` → a crash restart that must wait
+/// longer than the plain backoff rolls the tweaks back at once (programs connect directly, with a
+/// notice) and points them at the run again when it is back; a short backoff or `standard`
+/// (its blocking) keeps them. The session continues either way.
+#[tokio::test]
+async fn long_restart_wait_pauses_the_soft_tweaks_with_the_kill_switch_off() {
+    for (level, wait, paused) in [
+        (KillSwitchLevel::Off, Duration::from_secs(130), true),
+        (KillSwitchLevel::Off, Duration::from_secs(10), false),
+        (KillSwitchLevel::Standard, Duration::from_secs(130), false),
+    ] {
+        let h = Harness::new();
+        h.settings.update(|s| s.kill_switch = level).unwrap();
+        h.profiles.add("srv-a", "Server A", true);
+        h.lc.connect(soft_vpn(None, Owner::Manual)).await.unwrap();
+        let tweaks = Some((soft_addr(SOFT_PORT), ProxyKind::Http));
+        h.rt.crash_with_restart_in(wait);
+        h.settle().await;
+        let during = h.soft.state.lock().applied.clone();
+        assert_eq!(during.is_none(), paused, "{level:?} {wait:?}");
+        h.rt.come_back();
+        h.settle().await;
+        assert_eq!(h.soft.state.lock().applied, tweaks, "{level:?} {wait:?}");
+        assert_eq!(h.snap().state, TunnelState::Connected, "{level:?} {wait:?}");
+        let pause = "tunnel.lifecycle.notice.softPaused.title".to_owned();
+        assert_eq!(h.notifier.titles().contains(&pause), paused);
+        assert!(h.rows().is_empty(), "the session continues");
+        assert_eq!(
+            h.lc.session().borrow().as_ref().map(|s| s.owner),
+            Some(Owner::Manual)
+        );
+    }
+}
+
+/// A paused session whose tweaks cannot be pointed at the new run is not called connected: the
+/// proxy is rolled back again (nothing half-set) and the user is told.
+#[tokio::test]
+async fn failed_soft_resume_is_not_connected() {
+    let h = Harness::new();
+    h.settings
+        .update(|s| s.kill_switch = KillSwitchLevel::Off)
+        .unwrap();
+    h.lc.connect(soft(10808, ProxyKind::Socks5, Owner::Manual))
+        .await
+        .unwrap();
+    h.rt.crash_with_restart_in(Duration::from_secs(130));
+    h.settle().await;
+    h.soft.state.lock().read_back_fails = true;
+    h.rt.come_back();
+    h.settle().await;
+    assert_eq!(h.soft.state.lock().applied, None);
+    assert_ne!(h.snap().state, TunnelState::Connected);
+    let failed = "tunnel.lifecycle.notice.softResumeFailed.title".to_owned();
+    assert!(h.notifier.titles().contains(&failed));
 }
 
 /// AT-00-005: a Soft session is recorded only once the user's proxy settings are back.

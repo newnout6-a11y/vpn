@@ -1,17 +1,24 @@
 //! Tests of the three list pages over a throw-away backend (temp data dir, fake tunnel): no
 //! network, no real dialog, no browser, no system change.
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::sync::watch;
-use vpnte_base::types::ClientDevice;
+use tokio::sync::{broadcast, watch};
+use vpnte_automation::coordinator::{
+    ConnectOutcome, ConnectRequest, Coordinator, LifecycleEvent, NoticeCategory, OpError,
+    RuntimeId, SessionInfo, SwitchError,
+};
+use vpnte_automation::scheduler::{Scheduler, Schedules};
+use vpnte_base::types::{AdaptiveMode, ClientDevice, Notice, Owner};
 use vpnte_base::{AppError, ErrorKind};
+use vpnte_core::store::Store;
 use vpnte_servers::store::AddTarget;
 use vpnte_tunnel::fsm::TunnelState;
 use vpnte_ui::schedule::{
-    HhMm, ScheduleApi, ScheduleEntry, ScheduleInput, ScheduleMode, ScheduleSnapshot,
+    Capture, HhMm, ScheduleApi, ScheduleEntry, ScheduleInput, ScheduleSnapshot, Upstream,
 };
 use vpnte_ui::split_tunnel::{AppKind, AppRule, SplitApp, SplitSnapshot, SplitTunnelApi};
 use vpnte_ui::traffic_history::{DomainRow, SiteInfo, TrafficHistoryApi, TrafficSnapshot};
@@ -95,7 +102,7 @@ fn locales_paired_and_complete() {
         .flat_map(|src| src.split('"').skip(1).step_by(2))
         .filter(|s| s.starts_with("app.lists."))
         .collect();
-    assert!(named.len() >= 5, "{named:?}");
+    assert!(named.len() >= 4, "{named:?}");
     for key in &named {
         assert!(ru_keys.contains(*key), "missing {key}");
     }
@@ -124,7 +131,7 @@ fn hhmm(hour: u16, minute: u16) -> HhMm {
     HhMm::new(hour, minute).expect("valid time")
 }
 
-fn input(name: &str, enabled: bool, mode: ScheduleMode, profile_id: &str) -> ScheduleInput {
+fn input(name: &str, enabled: bool, upstream: Upstream, profile_id: &str) -> ScheduleInput {
     ScheduleInput {
         name: name.into(),
         enabled,
@@ -132,7 +139,8 @@ fn input(name: &str, enabled: bool, mode: ScheduleMode, profile_id: &str) -> Sch
         start: hhmm(22, 0),
         end: hhmm(6, 30),
         profile_id: profile_id.into(),
-        mode,
+        capture: Capture::Proxy,
+        upstream,
     }
 }
 
@@ -145,6 +153,62 @@ fn entries(snapshot: &ScheduleSnapshot) -> Vec<ScheduleEntry> {
 
 fn schedule_backend(dir: &TempDir) -> Arc<Backend> {
     backend(dir, FakeTunnel::new(false))
+}
+
+/// The page over a scheduler of its own `schedules.json` (its reconcile task is the
+/// automation's and is not run here: `Idle` is never asked to connect).
+fn schedule_api(backend: &Arc<Backend>) -> ScheduleService<Idle> {
+    let store = Arc::new(Store::<Schedules>::open(&backend.dirs.root));
+    let scheduler = Arc::new(Scheduler::new(store.clone(), Arc::new(Idle)));
+    ScheduleService::start(backend.clone(), store, scheduler, false)
+}
+
+/// A coordinator with no tunnel behind it (the reconcile task does not run in these tests).
+struct Idle;
+
+impl Coordinator for Idle {
+    fn session(&self) -> Option<SessionInfo> {
+        None
+    }
+
+    fn busy(&self) -> bool {
+        false
+    }
+
+    fn connect(
+        &self,
+        _owner: Owner,
+        _req: ConnectRequest,
+    ) -> impl Future<Output = Result<ConnectOutcome, OpError>> + Send {
+        std::future::ready(Err(OpError::Conflict))
+    }
+
+    fn disconnect(&self, _owner: Owner) -> impl Future<Output = Result<(), OpError>> + Send {
+        std::future::ready(Ok(()))
+    }
+
+    fn switch_profile(
+        &self,
+        _owner: Owner,
+        _profile_id: &str,
+    ) -> impl Future<Output = Result<(), SwitchError>> + Send {
+        std::future::ready(Err(SwitchError::NotStarted(OpError::Conflict)))
+    }
+
+    fn adaptive_restart(
+        &self,
+        _owner: Owner,
+        _mode: AdaptiveMode,
+        _sibling: Option<&str>,
+    ) -> impl Future<Output = Result<RuntimeId, OpError>> + Send {
+        std::future::ready(Err(OpError::Conflict))
+    }
+
+    fn events(&self) -> broadcast::Receiver<LifecycleEvent> {
+        broadcast::channel(1).1
+    }
+
+    fn notify(&self, _category: NoticeCategory, _notice: Notice) {}
 }
 
 /// Adds one server from a fake key; the first one added becomes the selected server.
@@ -166,64 +230,52 @@ fn add_server(backend: &Backend, name: &str) -> String {
     report.added[0].as_str().to_owned()
 }
 
-/// The list API without the reconcile task: CRUD of switched-off schedules works and is
-/// pushed before each call returns; anything that would leave a schedule switched on is
-/// refused with its own sentence (it could never fire); no next event is invented.
+/// The list API: CRUD is pushed before each call returns, schedules can be switched on (the
+/// automation's reconcile task fires them), both choices are stored apart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn schedules_edit_switched_off_and_refuse_enabling() {
+async fn schedules_are_edited_through_the_scheduler() {
     let dir = TempDir::new("lists-schedule-crud");
-    let api = ScheduleService::start(schedule_backend(&dir));
+    let backend = schedule_backend(&dir);
+    let api = schedule_api(&backend);
     let mut state = api.state();
     assert!(entries(&state.borrow()).is_empty());
+    assert!(!state.borrow().tun_available);
 
-    let unavailable = (ErrorKind::Conflict, "app.lists.schedule.unavailable".into());
-    let err = api
-        .create(input("Work", true, ScheduleMode::Hard, ""))
-        .await
-        .expect_err("enabled refused");
-    assert_eq!(refusal(&err), unavailable);
-    assert!(entries(&state.borrow()).is_empty());
-
-    api.create(input("  Work  ", false, ScheduleMode::Soft, ""))
+    api.create(input("  Work  ", true, Upstream::LocalProxy, ""))
         .await
         .expect("create");
     let list = entries(&state.borrow_and_update());
     assert_eq!(list.len(), 1);
     let created = &list[0];
     assert_eq!(created.name, "Work");
-    assert!(!created.enabled);
+    assert!(created.enabled);
     assert_eq!(created.days, vec![1, 3, 5]);
     assert_eq!((created.start, created.end), (hhmm(22, 0), hhmm(6, 30)));
-    assert_eq!(created.mode, ScheduleMode::Soft);
+    assert_eq!(
+        (created.capture, created.upstream),
+        (Capture::Proxy, Upstream::LocalProxy)
+    );
     assert_eq!(created.profile_id, "");
     let id = created.id.clone();
 
-    let err = api
-        .set_enabled(id.clone(), true)
-        .await
-        .expect_err("refused");
-    assert_eq!(refusal(&err), unavailable);
-    let err = api
-        .update(id.clone(), input("Work", true, ScheduleMode::Hard, ""))
-        .await
-        .expect_err("refused");
-    assert_eq!(refusal(&err), unavailable);
-
-    let mut renamed = input("Evenings", false, ScheduleMode::Hard, "");
+    let mut renamed = input("Evenings", false, Upstream::LocalProxy, "");
+    renamed.capture = Capture::Tun;
     renamed.days = vec![6, 0, 6];
     api.update(id.clone(), renamed).await.expect("update");
     let list = entries(&state.borrow_and_update());
-    assert_eq!(list.len(), 1);
     assert_eq!(
         (list[0].id.as_str(), list[0].name.as_str()),
         (id.as_str(), "Evenings")
     );
     assert_eq!(list[0].days, vec![0, 6], "stored sorted without duplicates");
-    assert_eq!(list[0].mode, ScheduleMode::Hard);
+    assert_eq!(list[0].capture, Capture::Tun);
+    let stored = std::fs::read_to_string(backend.dirs.root.join("schedules.json")).unwrap();
+    assert!(
+        stored.contains("\"capture\": \"tun\"") && stored.contains("\"upstream\": \"local-proxy\"")
+    );
 
-    api.set_enabled(id.clone(), false)
-        .await
-        .expect("switch off");
+    api.set_enabled(id.clone(), true).await.expect("switch on");
+    assert!(entries(&state.borrow_and_update())[0].enabled);
     let err = api
         .set_enabled("missing".into(), false)
         .await
@@ -233,21 +285,20 @@ async fn schedules_edit_switched_off_and_refuse_enabling() {
     api.delete(id.clone()).await.expect("delete");
     assert!(entries(&state.borrow_and_update()).is_empty());
     api.delete(id).await.expect("unknown id is no error");
-    assert_eq!(state.borrow().next, None);
 }
 
-/// «Текущий сервер» of a Direct schedule is stored as the server selected at save time (the
+/// «Текущий сервер» of a server schedule is stored as the server selected at save time (the
 /// scheduler needs a concrete one); without any server the scheduler's own refusal is shown.
 /// The server picker lists name and protocol only.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn direct_schedule_takes_the_selected_server() {
+async fn server_schedule_takes_the_selected_server() {
     let dir = TempDir::new("lists-schedule-direct");
     let backend = schedule_backend(&dir);
-    let api = ScheduleService::start(backend.clone());
+    let api = schedule_api(&backend);
     let mut state = api.state();
 
     let err = api
-        .create(input("Night", false, ScheduleMode::Direct, ""))
+        .create(input("Night", false, Upstream::Server, ""))
         .await
         .expect_err("no server");
     assert_eq!(
@@ -265,10 +316,10 @@ async fn direct_schedule_takes_the_selected_server() {
     assert_eq!(snapshot.servers[0].name, "one");
     assert_eq!(snapshot.servers[0].protocol, "vless");
 
-    api.create(input("Night", false, ScheduleMode::Direct, ""))
+    api.create(input("Night", false, Upstream::Server, ""))
         .await
         .expect("current server");
-    api.create(input("Late", false, ScheduleMode::Direct, &second))
+    api.create(input("Late", false, Upstream::Server, &second))
         .await
         .expect("picked server");
     let list = entries(&state.borrow_and_update());
@@ -276,8 +327,8 @@ async fn direct_schedule_takes_the_selected_server() {
     assert_eq!(list[1].profile_id, second);
 }
 
-/// Schedules already in `schedules.json` (an import from the old app) are shown as stored,
-/// switched-on ones included; days keep the stored numbering (0 = Sunday).
+/// Schedules already in `schedules.json` (an import from the old app, the old one-word mode)
+/// are shown as stored, switched-on ones included; days keep the stored numbering.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stored_schedules_are_projected_as_stored() {
     let dir = TempDir::new("lists-schedule-stored");
@@ -294,7 +345,7 @@ async fn stored_schedules_are_projected_as_stored() {
         serde_json::to_vec_pretty(&doc).expect("json"),
     )
     .expect("write");
-    let api = ScheduleService::start(backend);
+    let api = schedule_api(&backend);
     let state = api.state();
     let list = entries(&state.borrow());
     assert_eq!(list.len(), 1);
@@ -304,11 +355,9 @@ async fn stored_schedules_are_projected_as_stored() {
     assert_eq!(entry.days, vec![0, 6]);
     assert_eq!((entry.start, entry.end), (hhmm(9, 5), hhmm(9, 5)));
     assert_eq!(entry.profile_id, "p-9");
-    assert_eq!(entry.mode, ScheduleMode::Direct);
     assert_eq!(
-        state.borrow().next,
-        None,
-        "no reconcile task, no next event"
+        (entry.capture, entry.upstream),
+        (Capture::Tun, Upstream::Server)
     );
 }
 
@@ -607,7 +656,8 @@ async fn the_pages_render_over_the_package_contexts() {
     let dir = TempDir::new("lists-dom");
     let backend = backend(&dir, FakeTunnel::new(false));
     write_history(&backend, HISTORY);
-    let contexts = super::contexts(&backend);
+    let schedule: Rc<dyn ScheduleApi> = Rc::new(schedule_api(&backend));
+    let contexts = super::with_schedule(&backend, schedule);
     // `use_context` finds a root context by its exact type: these are the types the pages ask
     // for (a missing one does not fail the render below, so check them here).
     assert_eq!(contexts.len(), 3);

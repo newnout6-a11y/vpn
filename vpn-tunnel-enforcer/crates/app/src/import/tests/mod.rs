@@ -22,6 +22,7 @@ fn host(elevated: bool) -> Host<'static> {
     Host {
         elevated,
         tweaks: None,
+        hardening: None,
     }
 }
 
@@ -405,6 +406,7 @@ fn old_soft_mode_leftovers_are_adopted_once() {
     let host = Host {
         elevated: false,
         tweaks: Some((&sources, &OldEnv)),
+        hardening: None,
     };
     let report = run(&fx.dirs(), &host).expect("adoption reported");
     assert_eq!(report.imported, [("tweaks.json".to_owned(), 1)]);

@@ -14,7 +14,7 @@ use vpnte_core::store::Store;
 use super::decide::{self, Allowed, Decision};
 use super::memory::Attempt;
 use super::{ReactionHost, Report, ServerFacts, Verdicts};
-use crate::coordinator::{Coordinator, LifecycleEvent, SessionKind};
+use crate::coordinator::{Coordinator, LifecycleEvent};
 
 mod act;
 

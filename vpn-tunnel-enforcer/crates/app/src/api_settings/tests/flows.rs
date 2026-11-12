@@ -24,7 +24,7 @@ pub(super) fn setup(
     let dir = TempDir::new(name);
     let fake = FakeTunnel::new(tun);
     let autostart = Arc::new(autostart);
-    let shared = Shared::start(backend(&dir, fake.clone()), autostart.clone());
+    let shared = Shared::start(backend(&dir, fake.clone()), autostart.clone(), None);
     (shared, fake, autostart, dir)
 }
 

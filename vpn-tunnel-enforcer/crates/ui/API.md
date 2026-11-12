@@ -600,7 +600,10 @@ pub trait TrafficHistoryApi: 'static {  // root component TrafficHistoryPage (ac
     async fn open_site(&self, url: String) -> AppResult<()>;  // always https://<domain>, default browser
 }
 ```
-Types: `ScheduleEntry`, `ScheduleInput`, `ScheduleMode`, `HhMm` (minutes; strict `H:MM` / `HH:MM`),
+Types: `ScheduleEntry`, `ScheduleInput` (both with `capture: Capture` {Proxy, Tun} and `upstream:
+Upstream` {Server, LocalProxy}: NOADMIN §2 keeps the two apart; `Upstream::uses_profile`),
+`ScheduleSnapshot.tun_available` (a TUN schedule is shown as needing administrator rights), `HhMm`
+(minutes; strict `H:MM` / `HH:MM`),
 `NextEvent`, `NextAction`, `ServerChoice`, form rules `ScheduleForm`, `FormProblem`, `time_until`,
 `local_hhmm`; `SplitApp`, `AppKind`, `AppRule`, `display_path`, `matches`; `DomainRow`, `SiteInfo`,
 `Moment`, `by_day`, `filter`, `totals`, `MAX_RENDERED`. Demos: `DemoSchedule`, `DemoSplitTunnel`,

@@ -129,12 +129,14 @@ impl<C: Coordinator, H: AdaptiveHost> Adaptive<C, H> {
         self.status.subscribe()
     }
 
-    /// Called by the app's connect path right before it starts a `Direct` or local-proxy Hard
-    /// tunnel: reads the network identity, looks up what worked here before and returns the mode
-    /// to start in. `Baseline` when adaptive bypass is off (fix A3) or for a local proxy.
+    /// Called by the app's connect path right before it starts a session over the server list
+    /// (TUN or system proxy) or a local-proxy TUN: reads the network identity, looks up what worked
+    /// here before and returns the mode to start in. `Baseline` when adaptive bypass is off (fix
+    /// A3) or for a local proxy.
     pub async fn begin(&self, kind: SessionKind, profile: Option<ProfileView>) -> AdaptiveMode {
         if kind == SessionKind::Soft {
-            // Soft mode has no tunnel to verify.
+            // A local proxy behind the system proxy is not verified (as the old Soft mode): its
+            // upstream belongs to another client and nothing here could change it.
             self.start_failed(None);
             return AdaptiveMode::Baseline;
         }

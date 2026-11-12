@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 use vpnte_base::{ErrorKind, Msg};
 
 use super::form::{DISPLAY_ORDER, ScheduleForm, day_key};
-use super::model::{ScheduleMode, ServerChoice};
+use super::model::{Capture, ServerChoice, Upstream};
 use super::use_api;
 use crate::lang::tr;
 use crate::t;
@@ -15,7 +15,11 @@ use crate::widgets::{
 /// The form. Save stays disabled (with the reason as its title) until the form is valid; a
 /// failed save keeps the form open and says why inline.
 #[component]
-pub(super) fn FormPanel(form: Signal<Option<ScheduleForm>>, servers: Vec<ServerChoice>) -> Element {
+pub(super) fn FormPanel(
+    form: Signal<Option<ScheduleForm>>,
+    servers: Vec<ServerChoice>,
+    tun_available: bool,
+) -> Element {
     let api = use_api();
     let save_job = use_job::<()>();
     let mut failure = use_signal(|| None::<Msg>);
@@ -68,19 +72,29 @@ pub(super) fn FormPanel(form: Signal<Option<ScheduleForm>>, servers: Vec<ServerC
             .iter()
             .map(|s| SelectOption::new(s.id.clone(), format!("{} ({})", s.name, s.protocol))),
     );
-    let modes: Vec<(ScheduleMode, String)> = ScheduleMode::ALL
+    let captures: Vec<(Capture, String)> = Capture::ALL
         .iter()
-        .map(|&m| (m, t!(m.label_key())))
+        .map(|&c| (c, t!(c.label_key())))
+        .collect();
+    let upstreams: Vec<(Upstream, String)> = Upstream::ALL
+        .iter()
+        .map(|&u| (u, t!(u.label_key())))
         .collect();
     let title = if draft.editing.is_some() {
         t!("schedule.edit")
     } else {
         t!("schedule.create")
     };
-    let mode_hint = if draft.mode.uses_profile() {
+    // NOADMIN §0: the TUN needs the app started as administrator; said, never hidden.
+    let capture_hint = if draft.capture == Capture::Tun && !tun_available {
+        t!("schedule.tunUnavailable")
+    } else {
+        t!("schedule.captureHint")
+    };
+    let upstream_hint = if draft.upstream.uses_profile() {
         t!("schedule.serverHint")
     } else {
-        t!("schedule.modeHint")
+        t!("schedule.localHint")
     };
     rsx! {
         Panel { title,
@@ -142,20 +156,34 @@ pub(super) fn FormPanel(form: Signal<Option<ScheduleForm>>, servers: Vec<ServerC
                     }
                 }
                 div { class: "sched-field",
-                    span { class: "w-field-label", {t!("schedule.mode")} }
+                    span { class: "w-field-label", {t!("schedule.capture")} }
                     Segmented {
-                        options: modes,
-                        value: draft.mode,
-                        label: t!("schedule.mode"),
-                        on_change: move |m| {
+                        options: captures,
+                        value: draft.capture,
+                        label: t!("schedule.capture"),
+                        on_change: move |c| {
                             if let Some(f) = form.write().as_mut() {
-                                f.mode = m;
+                                f.capture = c;
                             }
                         },
                     }
-                    p { class: "w-field-hint", "{mode_hint}" }
+                    p { class: "w-field-hint", "{capture_hint}" }
                 }
-                if draft.mode.uses_profile() {
+                div { class: "sched-field",
+                    span { class: "w-field-label", {t!("schedule.upstream")} }
+                    Segmented {
+                        options: upstreams,
+                        value: draft.upstream,
+                        label: t!("schedule.upstream"),
+                        on_change: move |u| {
+                            if let Some(f) = form.write().as_mut() {
+                                f.upstream = u;
+                            }
+                        },
+                    }
+                    p { class: "w-field-hint", "{upstream_hint}" }
+                }
+                if draft.upstream.uses_profile() {
                     Field { label: t!("schedule.server"),
                         Select {
                             options: server_options,

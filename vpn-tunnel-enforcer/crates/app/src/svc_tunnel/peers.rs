@@ -13,6 +13,7 @@ use vpnte_tunnel::lifecycle::{ExternalProxies, Lifecycle, ProfileSource, ServerC
 use vpnte_tunnel::runtime::TunnelHandle;
 
 use crate::services::Backend;
+use crate::svc_auto::Fingerprints;
 use crate::svc_live::{self, AppLiveEnv};
 use crate::svc_proxies::{ProbeCtxFn, Proxies, ServerProfiles};
 
@@ -56,8 +57,12 @@ pub(super) fn live_checks(
     svc_live::start(Arc::new(env), &b.dirs.root, &b.servers)
 }
 
-/// [`ProfileSource`] over the server list (single source of truth for server sessions).
-pub(super) struct ServerSource(pub Arc<Servers>);
+/// [`ProfileSource`] over the server list (single source of truth for server sessions), with
+/// the uTLS fingerprints the check-verdict reactions set for this app run.
+pub(super) struct ServerSource {
+    pub servers: Arc<Servers>,
+    pub fingerprints: Fingerprints,
+}
 
 impl ProfileSource for ServerSource {
     fn resolve(&self, id: Option<&str>) -> Option<ServerChoice> {
@@ -65,32 +70,39 @@ impl ProfileSource for ServerSource {
             // A row the user removed is gone for connects; a provider-archived one may still be
             // picked by the user (servers `SelectBy::User`).
             Some(id) => self
-                .0
+                .servers
                 .get(&ProfileId::from(id))
                 .filter(|r| !r.archived_for(ArchiveReason::User))?,
-            None => self.0.active()?.row,
+            None => self.servers.active()?.row,
         };
-        choice(row)
+        let country = row.display_country().map(|c| c.as_str().to_owned());
+        Some(ServerChoice {
+            country,
+            server: vpn_profile(row, &self.fingerprints)?,
+        })
     }
 }
 
-fn choice(row: ServerRow) -> Option<ServerChoice> {
-    let profile = match row.profile() {
+/// The engine's view of a row; a fingerprint override (never stored) replaces the profile's own
+/// for this app run. `None` when the profile is locked (another PC / account) or unreadable.
+pub(crate) fn vpn_profile(row: ServerRow, fingerprints: &Fingerprints) -> Option<VpnProfile> {
+    let mut profile = match row.profile() {
         Ok(profile) => profile,
         Err(e) => {
-            // Locked (another PC / account) or unreadable: the lifecycle reports "no server".
+            // Locked or unreadable: the lifecycle reports "no server".
             tracing::warn!(error = %e, "server profile not usable");
             return None;
         }
     };
-    Some(ServerChoice {
-        country: row.display_country().map(|c| c.as_str().to_owned()),
-        server: VpnProfile {
-            id: row.id.0,
-            profile: Arc::new(profile),
-            device: Some(row.device),
-            engine: row.engine,
-        },
+    let forced = fingerprints.lock().get(row.id.as_str()).copied();
+    if let (Some(fp), Some(tls)) = (forced, profile.tls.as_mut()) {
+        tls.fingerprint = Some(fp.to_owned());
+    }
+    Some(VpnProfile {
+        id: row.id.0,
+        profile: Arc::new(profile),
+        device: Some(row.device),
+        engine: row.engine,
     })
 }
 

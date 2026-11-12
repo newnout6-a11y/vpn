@@ -1,6 +1,11 @@
 //! Runtime events and statuses: native reconnects, unexpected ends, lag resync.
 use super::*;
 
+/// The longest crash-restart wait a Soft session with the kill switch `off` keeps its tweaks on
+/// the dead port: the plain backoff (2 / 5 / 10 s, recorded deviation noadmin-tunnel 8). A frozen
+/// server's quiet window (`Timings::freeze`, 130 s) is far longer.
+const SOFT_HOLD_MAX: Duration = Duration::from_secs(10);
+
 /// Runtime events (old `index.ts` fan-out, lifecycle-app §3.8, §3.12b, §6.4).
 impl Actor {
     pub(super) async fn on_runtime(&mut self, event: TunnelEvent) {
@@ -10,6 +15,11 @@ impl Actor {
                 let _ = self.fsm.native_start_began(generation);
             }
             TunnelEvent::StartFinished { generation, ok } => {
+                if ok {
+                    // Before the state machine judges the run: Soft needs the tweaks back too.
+                    self.resume_soft().await;
+                }
+                let e = self.evidence();
                 let accepted = self.fsm.native_start_finished(generation, ok, e).is_ok();
                 if accepted && self.fsm.snapshot().state == TunnelState::Connected {
                     self.native_reconnected(generation);
@@ -47,6 +57,68 @@ impl Actor {
             TunnelEvent::Warning(warning) => {
                 tracing::info!(warning = %warning.msg().key, "runtime warning");
             }
+            TunnelEvent::RestartScheduled { delay } => self.pause_soft(delay).await,
+        }
+    }
+
+    /// Soft with the kill switch `off` (NOADMIN §2): the tweaks may stay on the dead port only
+    /// for a short backoff; a longer wait (a frozen server's quiet window) rolls them back now,
+    /// so programs connect directly meanwhile, and the next run brings them back
+    /// ([`Actor::resume_soft`]). `standard` keeps them: that is its blocking.
+    async fn pause_soft(&mut self, delay: Duration) {
+        let paused = self.session.as_ref().is_none_or(|s| s.soft_paused);
+        if delay <= SOFT_HOLD_MAX
+            || paused
+            || !self.lane_idle()
+            || !self.soft_session()
+            || self.deps.settings.read(|s| s.kill_switch) != KillSwitchLevel::Off
+        {
+            return;
+        }
+        match self.deps.soft.rollback().await {
+            Ok(()) => {
+                if let Some(live) = self.session.as_mut() {
+                    live.soft_paused = true;
+                }
+                let body =
+                    Msg::new(notice_key("softPaused", "body")).arg("seconds", delay.as_secs());
+                self.notify(
+                    Level::Warn,
+                    "softPaused",
+                    NoticeKind::ConnectionError,
+                    Some(body),
+                );
+            }
+            Err(e) => tracing::warn!(error = %e, "soft rollback before a long restart wait failed"),
+        }
+    }
+
+    /// The run is back after [`Actor::pause_soft`]: the tweaks point at its mixed port again and
+    /// are read back. A failure rolls back what was applied (nothing half-set), so the state
+    /// machine sees an engine without its proxy and does not call it connected.
+    async fn resume_soft(&mut self) {
+        if !self.session.as_ref().is_some_and(|s| s.soft_paused) {
+            return;
+        }
+        let resumed = match effects::session_port(&self.deps) {
+            Some(port) => effects::apply_and_read_back(&self.deps, &effects::soft_addr(port)).await,
+            None => Err(vpnte_base::AppError::new(ErrorKind::Internal)),
+        };
+        if let Err(e) = resumed {
+            tracing::warn!(error = %e, "soft tweaks not re-applied after the restart");
+            if let Err(e) = self.deps.soft.rollback().await {
+                tracing::warn!(error = %e, "soft rollback after a failed re-apply failed");
+            }
+            self.notify(
+                Level::Error,
+                "softResumeFailed",
+                NoticeKind::ConnectionError,
+                None,
+            );
+            return;
+        }
+        if let Some(live) = self.session.as_mut() {
+            live.soft_paused = false;
         }
     }
 
@@ -119,7 +191,10 @@ impl Actor {
     /// directly again (with a notice); otherwise they keep pointing at the dead port and
     /// programs that honour the system proxy stay blocked until reconnect or disconnect.
     async fn soft_engine_lost(&mut self) {
-        let keep = self.deps.settings.read(|s| s.kill_switch) != KillSwitchLevel::Off;
+        // Paused tweaks are rolled back already: nothing is left to block with, and the pause
+        // notice told the user that programs connect directly.
+        let paused = self.session.as_ref().is_some_and(|s| s.soft_paused);
+        let keep = !paused && self.deps.settings.read(|s| s.kill_switch) != KillSwitchLevel::Off;
         self.unexpected_end(keep).await;
         if keep {
             let e = self.evidence();
@@ -130,6 +205,7 @@ impl Actor {
             return;
         }
         match self.deps.soft.rollback().await {
+            Ok(()) if paused => {}
             Ok(()) => {
                 let kind = NoticeKind::ConnectionError;
                 self.notify(Level::Warn, "softRestored", kind, None);

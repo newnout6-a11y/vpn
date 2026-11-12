@@ -280,6 +280,14 @@ pub struct SessionView {
     pub engine: Option<EngineRun>,
 }
 
+impl SessionView {
+    /// The server-list id when the session runs over a server of the list (Hard or Soft);
+    /// `None` for a local proxy.
+    pub fn server_id(&self) -> Option<&str> {
+        session::server_id(self.mode, &self.profile_id)
+    }
+}
+
 /// Session changes, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
+use vpnte_automation::coordinator::Coordinator;
 use vpnte_base::ErrorKind;
 use vpnte_base::types::KillSwitchLevel;
 use vpnte_core::ops::{OperationRegistry, Source};
@@ -102,7 +103,16 @@ async fn unelevated_service_refuses_privileged_operations() {
     b.settings
         .update(|s| s.routing_mode = RoutingMode::Hard)
         .unwrap();
-    let t = super::build(&b).unwrap();
+    let built = super::build(&b).unwrap();
+    let t = built.tunnel.clone();
+    // NOADMIN §0: browser policies (HKLM) only from an elevated process, refused before anything
+    // is read or written (also on an elevated runner: the backend says unelevated).
+    let browsers = built.automation.browser_policies(true).await.unwrap_err();
+    assert_eq!(
+        (browsers.kind, browsers.user_msg().key.as_ref()),
+        (ErrorKind::Permission, "automation.hardening.needsAdmin")
+    );
+    assert!(built.automation.coord.session().is_none());
 
     assert!(!t.tun_available());
     assert!(t.kill_switch().await.wfp.is_none());

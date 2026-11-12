@@ -17,8 +17,9 @@ working.
    registry, engine paths, notifier. No network activity, no system change. A first start without
    legacy import writes `routing_mode = Soft` unless the process is elevated. `build` installs
    the global log subscriber and its panic hook: never call `logging::init` again.
-3. Inside the tokio runtime: `let tunnel = svc_tunnel::build(&backend)?;`
-   `let _ = backend.tunnel.set(tunnel);` (`Backend::tunnel()` returns `Internal`
+3. Inside the tokio runtime: `let built = svc_tunnel::build(&backend)?;` (`Built { tunnel,
+   automation }`)
+   `let _ = backend.tunnel.set(built.tunnel);` (`Backend::tunnel()` returns `Internal`
    `app.base.tunnelMissing` until then).
 4. `vpnte_ui::lang::init_locales(&svc_core::locale_layers())` before `vpnte_ui::launch`; the
    initial theme is `backend.themes.read(|t| t.theme(&settings.active_theme_id))`, the language
@@ -129,3 +130,15 @@ The root shows `popup` notices as in-app toasts; a list view may show all.
 profiles, view, servers, engine, forensics, automation, probes, tunnel, proxies, cleanup, and the
 app's fragments: one pair per app package. **Every app package ships `crates/app/locales/<package>.{ru,en}.json`**
 (top-level key `app`) and adds it to `svc_core::APP`.
+
+## Automation (`svc_auto`, package w3-automation)
+`svc_tunnel::build` builds the automation over its own lifecycle and the one tweak journal
+(`crates/automation/API.md`, "Wiring in the app"): `AppCoordinator` (owner order on top of the
+lane; `TunnelOps::connect` starts through `AppCoordinator::start`, so the adaptive bypass picks the
+mode of the user's starts too), one `Scheduler` (its store `schedules.json` is opened only there),
+`Reactions` + the verdict feed, `Rotation`, `Adaptive`, the AutoPilot launch run, the runtime's
+`Failover`, `Browsers` (an elevated process only) and location privacy. The forwarder runs from
+the start; the long tasks start after the start-up recovery, each under a child of
+`backend.shutdown`. The root hands `built.automation` to `api_lists::contexts` (Schedule page) and
+`api_settings::contexts` (rotation, adaptive, location privacy, browser hardening).
+`TunnelOps::resumed` wakes the scheduler; `TunnelOps::shutdown` rolls location privacy back.

@@ -3,10 +3,7 @@
     "settings": {
       "hardNeedsAdmin": "Tunnel mode is available only when the app is started as administrator. Choose Proxy mode: it works without administrator rights.",
       "captureUnavailable": "Deep packet capture is not available in this version of the app.",
-      "locationUnavailable": "Hiding the Windows location is not available in this version of the app.",
-      "browserUnavailable": "Browser WebRTC protection is not available in this version of the app.",
-      "adaptiveUnavailable": "Adaptive bypass status and controls are not available in this version of the app.",
-      "rotationUnavailable": "Server rotation is not available in this version of the app.",
+      "automationUnavailable": "This feature is not available right now: the automation of the app did not start.",
       "transferUnavailable": "Configuration import and export are not available in this version of the app.",
       "diagnosticsUnavailable": "The diagnostics ZIP export is not available in this version of the app.",
       "themeUnknown": "This theme no longer exists.",

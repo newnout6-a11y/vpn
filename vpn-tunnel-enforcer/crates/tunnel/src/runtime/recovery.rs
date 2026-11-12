@@ -12,7 +12,7 @@ use vpnte_engine::xray_process::XrayEvent;
 use super::MAX_RESTARTS;
 use super::actor::{Actor, Crashed, Phase, Retained, Session};
 use super::crash::{CrashAction, CrashFacts, decide, frozen_server};
-use crate::api::{Mode, Origin, StartRequest, TunStatusKind};
+use crate::api::{Mode, Origin, StartRequest, TunStatusKind, TunnelEvent};
 
 /// Xray slot restarts: backoff per attempt, at most three in this window (xray-engine §3).
 const SLOT_BACKOFF: [Duration; 3] = [
@@ -94,6 +94,7 @@ impl Actor {
                     attempt,
                     max: MAX_RESTARTS,
                 });
+                self.emit(TunnelEvent::RestartScheduled { delay });
                 self.restart_due = Some(Instant::now() + delay);
             }
             CrashAction::Failover => {
@@ -366,5 +367,47 @@ impl Actor {
             st.warning = None;
         });
         self.announce(TunStatusKind::Running);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio_util::sync::CancellationToken;
+    use vpnte_base::types::EnginePref;
+
+    use crate::api::{Runtime, TunStatusKind, TunnelEvent};
+    use crate::runtime::TunnelHandle;
+    use crate::runtime::tests::{NATIVE_KEY, World, deps, drain, until, vpn_req};
+
+    /// The crash restart's wait follows `Restarting` as its own event: the freeze window of a
+    /// faulted server here (the fake core reports a fault), not the short backoff. A Soft
+    /// session with the kill switch off acts on it (NOADMIN §2).
+    #[tokio::test]
+    async fn the_restart_wait_is_announced() {
+        let w = World::new();
+        let mut d = deps(&w);
+        d.timings.freeze = Duration::from_millis(700);
+        let h = TunnelHandle::spawn(d);
+        let mut events = h.subscribe();
+        let req = vpn_req(NATIVE_KEY, EnginePref::Auto);
+        h.start(req, CancellationToken::new()).await.unwrap();
+        drain(&mut events);
+        w.core(0).crash();
+        let seen = until(&mut events, |e| {
+            matches!(e, TunnelEvent::RestartScheduled { .. })
+        })
+        .await;
+        let restarting = TunnelEvent::Status(TunStatusKind::Restarting { attempt: 1, max: 3 });
+        let at = seen.iter().position(|e| *e == restarting);
+        assert_eq!(at, Some(seen.len() - 2), "{seen:?}");
+        let Some(TunnelEvent::RestartScheduled { delay }) = seen.last() else {
+            unreachable!("until() ends on the event");
+        };
+        assert!(
+            *delay > Duration::from_millis(500) && *delay <= Duration::from_millis(700),
+            "{delay:?}"
+        );
     }
 }

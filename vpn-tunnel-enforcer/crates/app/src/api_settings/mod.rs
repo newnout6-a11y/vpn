@@ -5,10 +5,12 @@
 //! The page renders pushed snapshots only: one task re-projects every section whenever a
 //! store or the tunnel changes (`pump`). Actions run as backend tasks, so a page that unmounts
 //! mid-call never leaves a half-done change behind. Privileged features exist only when the
-//! process is elevated (NOADMIN §0); features this build does not wire (rotation, browser
-//! hardening, location privacy, config transfer, packet capture, diagnostics export) answer
+//! process is elevated (NOADMIN §0): browser hardening answers `Permission` otherwise. Rotation,
+//! adaptive bypass, location privacy and browser hardening act through the automation (`auto`);
+//! features this build does not wire (config transfer, packet capture, diagnostics export) answer
 //! with an honest "not available" error and never pretend to work.
 mod actions;
+mod auto;
 mod project;
 mod pump;
 mod rules;
@@ -37,19 +39,21 @@ use vpnte_ui::wizard::{WizardApi, WizardState};
 use vpnte_winnet::autostart::{AutostartOs, RunValue};
 
 use crate::services::Backend;
+use crate::svc_auto::Automation;
 pub use wizard::WizardService;
 
 /// The UI contexts of this package for `vpnte_ui::launch`: `Rc<dyn SettingsApi>`,
 /// `Rc<dyn WizardApi>` and `Rc<dyn LogsApi>`. Call it inside the tokio runtime (the projection
 /// tasks start here, stopped by `backend.shutdown`) after `backend.tunnel` was set.
-pub fn contexts(backend: &Arc<Backend>) -> Vec<Box<dyn Any>> {
+pub fn contexts(backend: &Arc<Backend>, automation: &Arc<Automation>) -> Vec<Box<dyn Any>> {
     // Never fails on Windows in practice; an unknown path makes the autostart read-back fail
     // honestly instead of writing a broken value silently.
     let exe = std::env::current_exe().unwrap_or_else(|err| {
         tracing::warn!(%err, "own executable path unknown");
         std::path::PathBuf::new()
     });
-    let shared = Shared::start(backend.clone(), Arc::new(RunValue { exe }));
+    let autostart = Arc::new(RunValue { exe });
+    let shared = Shared::start(backend.clone(), autostart, Some(automation.clone()));
     let settings: Rc<dyn SettingsApi> = Rc::new(SettingsService(shared.clone()));
     let wizard: Rc<dyn WizardApi> = Rc::new(WizardService(shared));
     let logs: Rc<dyn LogsApi> = Rc::new(crate::api_logs::LogsService::start(backend.clone()));
@@ -66,6 +70,8 @@ pub struct SettingsService(Arc<Shared>);
 pub(crate) struct Shared {
     pub backend: Arc<Backend>,
     pub autostart: Autostart,
+    /// Rotation, adaptive bypass, location privacy, browser hardening (`None` in page tests).
+    pub automation: Option<Arc<Automation>>,
     pub state: watch::Sender<SettingsState>,
     pub kill: watch::Sender<KillSwitchView>,
     pub rotation: watch::Sender<RotationView>,
@@ -94,14 +100,21 @@ pub(crate) struct Local {
     pub rule_sets_error: Option<Msg>,
     /// The domain list picked for import, waiting for the user's action choice.
     pub domain_list: Option<rules::PickedList>,
+    /// The browsers as the last status read or action reported (`None`: not read yet).
+    pub browser: Option<vpnte_ui::settings::BrowserView>,
 }
 
 impl Shared {
     /// Publishes the first snapshots and starts the projection task.
-    pub fn start(backend: Arc<Backend>, autostart: Autostart) -> Arc<Self> {
+    pub fn start(
+        backend: Arc<Backend>,
+        autostart: Autostart,
+        automation: Option<Arc<Automation>>,
+    ) -> Arc<Self> {
         let shared = Arc::new(Self {
             backend,
             autostart,
+            automation,
             state: watch::Sender::new(SettingsState::default()),
             kill: watch::Sender::new(KillSwitchView::default()),
             rotation: watch::Sender::new(RotationView::default()),

@@ -64,7 +64,8 @@ impl TunWarning { pub fn msg(&self) -> Msg; pub fn from_msg(msg: Msg) -> Self } 
 pub enum TunnelEvent { StartBegan { generation: u64 }, StartFinished { generation: u64, ok: bool },
     StopFinished { generation: u64, preserved: bool, receipt: StopReceipt },
     SwitchBegan { generation: u64 }, SwitchFinished { generation: u64, verified: bool },
-    ProtectedRestart { reason: String }, Status(TunStatusKind), Warning(TunWarning) }
+    ProtectedRestart { reason: String }, Status(TunStatusKind), Warning(TunWarning),
+    RestartScheduled { delay: Duration } }                            // right after Status(Restarting): the wait
 pub const TUN_SETUP_KEY_PREFIX: &str = "tunnel.runtime.tunSetup";  // TUN bring-up failures (history: tun-setup-failed)
 pub struct TunError { pub error: AppError, pub warnings: Vec<Msg> }  // From<AppError>, Into<AppError>
 impl TunError { pub fn new(kind: ErrorKind, msg: Msg) -> Self; pub fn kind(&self) -> ErrorKind;
@@ -256,6 +257,7 @@ impl ConnError { pub fn kind(&self) -> ErrorKind /* Refused|NoServer = Conflict 
 pub struct SessionView { pub owner: Owner /* holder */, pub profile_id: String, pub profile_name: String,
     pub mode: SessionMode, pub generation: Option<u64>, pub adaptive: AdaptiveMode, pub started_at: UnixMs,
     pub engine: Option<EngineRun> }                                  // history evidence: proxy_engine
+impl SessionView { pub fn server_id(&self) -> Option<&str> }      // list id (Hard or Soft); None = local proxy
 pub enum SessionEvent { Up(SessionView), Ended { session: SessionView, outcome: OutcomeKind } }
 pub struct ShutdownReport { pub engines_stopped: bool, pub soft_restored: bool, pub capture_stopped: bool,
     pub timed_out: bool }
@@ -321,7 +323,11 @@ full stop. Switch / restarts keep the capture; after a new run the tweaks follow
 unchanged: kept, read back). Engine lost for good (runtime `Stopped` / `KillSwitchActive` outside an
 operation): the session ends; kill switch `off` -> tweaks rolled back at once + notice `softRestored`;
 `standard` -> tweaks stay on the dead port, state `blocked`, notice `crashBlocked`, until reconnect /
-disconnect.
+disconnect. Crash restart (w3-automation): with kill switch `off` a wait longer than the plain
+backoff (`RestartScheduled { delay }` > 10 s, i.e. a frozen server's quiet window) rolls the tweaks
+back at once (notice `softPaused` {seconds}) and the next run re-applies them before the state machine
+judges it (read-back failed: rolled back again, not connected, notice `softResumeFailed`); a short
+backoff or `standard` keeps them on the port.
 
 ## `runtime` — the actor and its seams
 ```rust

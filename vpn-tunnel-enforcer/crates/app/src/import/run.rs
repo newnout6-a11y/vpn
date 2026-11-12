@@ -4,6 +4,7 @@ use std::path::Path;
 
 use serde::Serialize;
 use serde_json::Value;
+use vpnte_automation::hardening;
 use vpnte_automation::tweaks::{self, legacy::LegacySources};
 use vpnte_base::Msg;
 use vpnte_base::types::{UnixMs, now_ms};
@@ -24,6 +25,12 @@ pub(super) struct Host<'a> {
     /// Where the old app kept its Soft-mode receipts and how to read the current values;
     /// `None` skips their adoption.
     pub tweaks: Option<(&'a LegacySources, &'a dyn tweaks::Backend)>,
+    /// Where the old app kept its browser-policy and location receipts and how to read the
+    /// registry; `None` skips their adoption (adopted second, after the Soft receipts).
+    pub hardening: Option<(
+        &'a hardening::legacy::LegacySources,
+        &'a dyn hardening::System,
+    )>,
 }
 
 /// Imports the old data once, before any store is opened. `None` = nothing to import (or done
@@ -37,11 +44,16 @@ pub fn import_if_needed(dirs: &DataDirs) -> Option<ImportReport> {
     let own_install = std::env::var_os(ENV_LEGACY_DIR).is_none_or(|v| v.is_empty());
     let sources = LegacySources::current_user();
     let system = own_install.then(tweaks::SoftSystem::current_user);
+    let marks = hardening::legacy::LegacySources::new(&dirs.legacy_electron);
+    let registry = own_install.then(hardening::WinSystem::new);
     let host = Host {
         elevated: vpnte_winnet::elevation::is_elevated(),
         tweaks: system
             .as_ref()
             .map(|system| (&sources, system as &dyn tweaks::Backend)),
+        hardening: registry
+            .as_ref()
+            .map(|sys| (&marks, sys as &dyn hardening::System)),
     };
     run(dirs, &host)
 }
@@ -56,6 +68,9 @@ pub(super) fn run(dirs: &DataDirs, host: &Host<'_>) -> Option<ImportReport> {
     let mut adopted = ImportReport::default();
     if let Some((sources, system)) = host.tweaks {
         steps::tweaks(&mut adopted, &dirs.root, sources, system);
+    }
+    if let Some((sources, system)) = host.hardening {
+        steps::hardening(&mut adopted, &dirs.root, sources, system);
     }
     let legacy = LegacyDir::at(&dirs.legacy_electron);
     let present = match legacy.stores_present() {

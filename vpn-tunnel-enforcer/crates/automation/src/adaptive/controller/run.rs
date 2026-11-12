@@ -344,8 +344,8 @@ impl<C: Coordinator, H: AdaptiveHost> Run<'_, C, H> {
     /// Up to [`MAX_SIBLINGS`] servers of the same group, started in the mode the chain reached; a
     /// sibling is committed only after its own window passed.
     async fn fallback(&mut self, reason: Msg) -> Result<(), Stop> {
-        let allowed = self.ctx.kind == SessionKind::Direct
-            && self.a.settings.read(|s| s.adaptive_bypass_server_fallback);
+        let allowed =
+            self.ctx.kind.server() && self.a.settings.read(|s| s.adaptive_bypass_server_fallback);
         let Some(active) = self.ctx.profile.clone().filter(|_| allowed) else {
             return self.fail(reason);
         };
@@ -371,7 +371,7 @@ impl<C: Coordinator, H: AdaptiveHost> Run<'_, C, H> {
             }
             provisional = true;
             // A different server: its own capabilities, and nothing learned for it here.
-            self.ctx.caps = capabilities(SessionKind::Direct, Some(&sibling.profile));
+            self.ctx.caps = capabilities(self.ctx.kind, Some(&sibling.profile));
             self.ctx.profile = Some(sibling.profile.clone());
             self.ctx.key = None;
             self.ctx.reused = false;

@@ -6,7 +6,7 @@ use tokio::sync::watch;
 use vpnte_base::AppResult;
 use vpnte_ui::settings::*;
 
-use super::{SettingsService, Shared, actions, rules, save, wizard};
+use super::{SettingsService, Shared, actions, auto, rules, save, wizard};
 use crate::services::Backend;
 use crate::support::files::pick_program;
 use crate::support::{blocking, detached, unavailable};
@@ -66,24 +66,24 @@ impl SettingsApi for SettingsService {
         actions::set_autostart(self.shared(), on).await
     }
 
-    async fn set_location_privacy(&self, _on: bool) -> AppResult<LocationOutcome> {
-        Err(unavailable("app.settings.locationUnavailable"))
+    async fn set_location_privacy(&self, on: bool) -> AppResult<LocationOutcome> {
+        auto::set_location_privacy(self.shared(), on).await
     }
 
     async fn apply_browser_protection(&self) -> AppResult<BrowserView> {
-        Err(unavailable("app.settings.browserUnavailable"))
+        auto::browsers(self.shared(), true).await
     }
 
     async fn rollback_browser_protection(&self) -> AppResult<BrowserView> {
-        Err(unavailable("app.settings.browserUnavailable"))
+        auto::browsers(self.shared(), false).await
     }
 
     async fn retry_adaptive(&self) -> AppResult<bool> {
-        Err(unavailable("app.settings.adaptiveUnavailable"))
+        auto::retry_adaptive(self.shared())
     }
 
     async fn reset_adaptive_learning(&self) -> AppResult<()> {
-        Err(unavailable("app.settings.adaptiveUnavailable"))
+        auto::reset_adaptive(self.shared()).await
     }
 
     async fn refresh_rule_sets(&self) -> AppResult<()> {
@@ -135,16 +135,16 @@ impl SettingsApi for SettingsService {
         }))
     }
 
-    async fn set_rotation(&self, _patch: RotationPatch) -> AppResult<()> {
-        Err(unavailable("app.settings.rotationUnavailable"))
+    async fn set_rotation(&self, patch: RotationPatch) -> AppResult<()> {
+        auto::set_rotation(self.shared(), patch).await
     }
 
-    async fn set_rotation_profile(&self, _id: String, _included: bool) -> AppResult<()> {
-        Err(unavailable("app.settings.rotationUnavailable"))
+    async fn set_rotation_profile(&self, id: String, included: bool) -> AppResult<()> {
+        auto::set_rotation_profile(self.shared(), id, included).await
     }
 
     async fn rotate_now(&self) -> AppResult<RotationOutcome> {
-        Err(unavailable("app.settings.rotationUnavailable"))
+        auto::rotate_now(self.shared()).await
     }
 
     async fn validate_dns(&self, address: String) -> AppResult<DnsKind> {

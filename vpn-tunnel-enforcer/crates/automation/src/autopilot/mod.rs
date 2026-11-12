@@ -323,7 +323,7 @@ impl<C: Coordinator, E: AutoPilotEnv> AutoPilot<C, E> {
     fn session_mode(&self) -> AutoPilotMode {
         match self.coord.session().map(|s| s.kind) {
             None => AutoPilotMode::Off,
-            Some(crate::coordinator::SessionKind::Soft) => AutoPilotMode::Soft,
+            Some(kind) if !kind.tun() => AutoPilotMode::Soft,
             Some(_) => AutoPilotMode::Hard,
         }
     }

@@ -46,13 +46,15 @@ use vpnte_automation::coordinator::*;
 
 pub struct RuntimeId(pub u64);                         // Copy + Ord + Hash; new on every engine (re)start
 pub struct ProxyEndpoint { pub addr: HostPort, pub kind: ProxyKind, pub creds: Option<Creds> }
-pub enum ConnectRequest {
-    Direct { profile_id: String },
+pub enum ConnectRequest {                              // capture (TUN / system proxy) x upstream (server / local proxy)
+    Direct { profile_id: String },                     // TUN through a list server (elevated only)
+    SoftDirect { profile_id: String },                 // system proxy through a list server (NOADMIN §2: the main no-admin mode)
     LocalProxyHard { endpoint: Option<ProxyEndpoint> },  // None: resolve like a manual connect
     Soft { endpoint: Option<ProxyEndpoint> },            // (settings override, else detection)
 }
-impl ConnectRequest { pub fn kind(&self) -> SessionKind; }
-pub enum SessionKind { Direct, LocalProxyHard, Soft }
+impl ConnectRequest { pub fn kind(&self) -> SessionKind; pub fn profile_id(&self) -> Option<&str>; }
+pub enum SessionKind { Direct, SoftDirect, LocalProxyHard, Soft }
+impl SessionKind { pub fn server(self) -> bool /* Direct | SoftDirect */; pub fn tun(self) -> bool /* Direct | LocalProxyHard */ }
 pub struct SessionInfo { pub kind: SessionKind, pub owner: Owner, pub profile_id: Option<String>,
                          pub runtime_id: RuntimeId, pub mode: AdaptiveMode }
 pub enum ConnectOutcome { Connected, AlreadyConnected }
@@ -88,7 +90,8 @@ The contract automation relies on (implement it exactly):
 - `connect`: an equal session → `AlreadyConnected` and a higher caller takes the session over; a
   different session is switched only if `owner >= session.owner`. `disconnect` without a session →
   `Ok`; with a higher-owned session → `Conflict`.
-- `switch_profile`: protected restart, egress + tunnel proof, selection committed only on success,
+- `switch_profile` (a session over the server list, either capture, kept): protected restart,
+  egress + tunnel proof, selection committed only on success,
   owner kept; failure → previous profile restarted (`Failed { restored_previous: true }`); double
   failure → full stop with protection rolled back (`false`); refused or failed before the tunnel was
   touched → `NotStarted` (previous session intact).
@@ -115,13 +118,15 @@ impl HhMm {
 }
 impl FromStr for HhMm { type Err = InvalidTime; }      // strict UI input ^([01]?\d|2[0-3]):([0-5]\d)$
 pub struct InvalidTime;                                // thiserror
-pub enum ScheduleMode { Hard, Soft, Direct }           // serde "hard" | "soft" | "direct"
+pub enum Capture { Tun, Proxy }                         // serde "tun" | "proxy" (NOADMIN §2)
+pub enum Upstream { LocalProxy, Server }               // serde "local-proxy" | "server"
+pub enum ScheduleMode { Hard, Soft, Direct }           // the old one-word mode (read only): split() -> (Capture, Upstream)
 pub struct ScheduleEntry {                             // serde camelCase
     pub id: String, pub name: String, pub enabled: bool,
     pub days: Vec<u8>,                                 // weekday of the window START, 0 = Sunday … 6
     pub start_time: HhMm, pub end_time: HhMm,          // end < start: overnight; end == start: 24 h
-    pub profile_id: String,                            // Direct only
-    pub mode: ScheduleMode,
+    pub profile_id: String,                            // Upstream::Server only
+    pub capture: Capture, pub upstream: Upstream,      // stored apart; a record with only `mode` reads 1:1
 }
 pub struct Window { pub start: Timestamp, pub stop: Timestamp, pub entry: usize }      // [start, stop)
 pub struct Run { pub start: Timestamp, pub stop: Timestamp, pub first: usize, pub last: usize } // merged windows
@@ -145,7 +150,7 @@ pub struct Schedules { pub schedules: Vec<ScheduleEntry>, pub suppressed_at: Opt
 impl Schedules { pub fn from_legacy(legacy: &Value) -> (Schedules, Vec<Msg>); } // old scheduler.json;
                                                        // Msg = automation.scheduler.importSkipped {name}
 pub struct ScheduleDraft { pub name: String, pub enabled: bool, pub days: Vec<u8>, pub start_time: HhMm,
-                           pub end_time: HhMm, pub profile_id: String, pub mode: ScheduleMode }
+                           pub end_time: HhMm, pub profile_id: String, pub capture: Capture, pub upstream: Upstream }
 impl From<ScheduleEntry> for ScheduleDraft;            // edit form prefill
 pub enum Wake { Edited, Resume, TimeChanged }
 pub enum BoundaryKind { Start, Stop }
@@ -170,8 +175,9 @@ impl<C: Coordinator> Scheduler<C> {
 }
 ```
 Behaviour the app and UI see:
-- Connects as `Owner::Schedule`: `Direct` → `ConnectRequest::Direct`, `Hard` / `Soft` →
-  `LocalProxyHard` / `Soft { endpoint: None }` (the profile id is not used). A run whose session is
+- Connects as `Owner::Schedule`: (Tun, Server) → `Direct`, (Proxy, Server) → `SoftDirect`, (Tun,
+  LocalProxy) → `LocalProxyHard { endpoint: None }`, (Proxy, LocalProxy) → `Soft { endpoint: None }`
+  (a local-proxy schedule never uses the profile id). A run whose session is
   held by `Manual` / `Recovery` is left alone; a manual start / stop inside a run suppresses it (also
   across restarts) until it ends. Only its own session is stopped at the run's end.
 - Failed connects retry after 60 / 120 / 300 / 600 / 600 … s (`retry_at`); `Conflict` retries quietly.
@@ -183,7 +189,7 @@ Behaviour the app and UI see:
   clock change if the app learns of one (the 60 s re-check covers it otherwise; a zone change
   applies within ≤ 5 min, jiff's system-zone cache).
 - `create` / `update` errors (`Validation`): `automation.scheduler.invalidName` (empty or > 200
-  chars), `.invalidDays` (a day > 6), `.profileRequired` (Direct without profile), `.notFound`.
+  chars), `.invalidDays` (a day > 6), `.profileRequired` (server upstream without profile), `.notFound`.
   Empty `days` is allowed (never active); days are stored sorted without duplicates.
 
 ## `rotation` — `rotation.json`, candidate pick, timer, "rotate now"
@@ -231,8 +237,9 @@ impl<C: Coordinator, P: RotationProfiles> Rotation<C, P> {
     pub async fn run(&self, cancel: CancellationToken); // the timer task
 }
 ```
-- A live rotation moves a **Direct** session through `Coordinator::switch_profile(Owner::Rotation, ..)`
-  under a 120 s deadline; Local-proxy / Soft sessions are never converted (`NotDirect`). Without a
+- A live rotation moves a session **over the server list** (`Direct` or `SoftDirect`: either capture)
+  through `Coordinator::switch_profile(Owner::Rotation, ..)`
+  under a 120 s deadline; local-proxy sessions are never converted (`NotDirect`). Without a
   session "rotate now" only calls `RotationProfiles::select` (after an offline `reachable` probe;
   an "online" status younger than 2 min skips the probe).
 - A real config change restarts the countdown and cancels a rotation in flight; an unchanged patch is
@@ -309,8 +316,9 @@ pub async fn read() -> Option<NetworkSnapshot>;       // Win32 on the blocking p
 ```
 - Settings read: `adaptive_bypass` (off → `Baseline`, no learning, no escalation),
   `adaptive_bypass_server_fallback` (siblings), `stealth_mode` (seeds the first mode).
-- Per tunnel start (Direct and local-proxy Hard; Soft is never verified): 20 s settle, then 2 of 3
-  probes; on failure TLS compatibility → MTU 1280 (≤ 2 mode restarts) → up to 2 siblings; what
+- Per tunnel start (sessions over a server, either capture, and local-proxy Hard; a local proxy
+  behind the system proxy is never verified): 20 s settle, then 2 of 3
+  probes; on failure TLS compatibility → MTU 1280 (TUN only; ≤ 2 mode restarts) → up to 2 siblings; what
   worked is learned per (network, profile) for 30 days. A terminal failure is status `Failed` plus
   one `ConnectionError` Warn notice; the tunnel stays up unless a provisional sibling failed (then
   `abandon`). A `Started` the task did not ask for (user, switch, crash restart) supersedes the run.
@@ -356,7 +364,8 @@ impl<C: Coordinator, H: ReactionHost> Reactions<C, H> {
   key-rejected / handshake-failed (not a hang) the profile; udp-blocked sets `udp_blocked`;
   healthy lifts the profile and a ban of its host. Stalled, deferred, not-verified and a
   handshake hang (`retry-later`) change nothing.
-- Only a report about the running **Direct** session's profile restarts anything: ip-banned /
+- Only a report about the profile of the running session **over the server list** (`Direct` or
+  `SoftDirect`) restarts anything: ip-banned /
   offline / key-rejected → switch (never to the banned host); frozen → switch, XHTTP first, then
   another site, never the same transport on the same site; handshake-failed + try-another-
   fingerprint on REALITY → once the next of `ALLOWED_FINGERPRINTS` (none counts as chrome)
@@ -673,6 +682,22 @@ let mode = adaptive.begin(kind, profile_view).await;  // before a Direct / local
 //   reactions.report(Report { profile_id, verdict, reaction })  (map the probes' Classification by wire name)
 // shutdown: cancel.cancel() (tasks return; nothing is rolled back by them)
 ```
+
+How `vpnte-app` does it (w3-automation, `crates/app/src/svc_auto/`): `svc_tunnel::build` builds the
+`AppCoordinator` over the lifecycle (owner rules on top of the lane; every start — the user's too —
+goes through it, so `Adaptive::begin` picks the mode), `ServerHost` (`RotationProfiles`,
+`AdaptiveHost` with the probe through the session's own exit behind the handshake budget,
+`ReactionHost` with fingerprint overrides applied by the tunnel's profile source), `PilotEnv`, the
+runtime `Failover` (next live sibling of the same group, never one ruled out on this network), and
+`Automation` with the one journal; it returns them to the root, which hands the automation to the
+Schedule and Settings pages. A forwarder maps the lane's session events to `LifecycleEvent`s
+(a switch row emits only `Started`, a stop the coordinator asked for names its owner), engine
+faults, and `NetworkChanged` (winnet's watch plus a changed physical identity); location privacy
+follows the session events (applied on `Up` with the setting on, rolled back on `Ended`, at
+shutdown and in start-up recovery; a rollback failure is a Warn notice). The tasks start after the
+start-up recovery; the verdict feed reports stored verdicts ≤ 24 h old, each new `Servers`
+verdict, and live checks (handshake ok → healthy, auth → key-rejected, Hysteria2 UDP cut →
+udp-blocked).
 
 ## Events, snapshots and texts the app / UI handles
 - `Coordinator::notify(category, Notice)`: `ScheduleTriggered` (scheduler start / stop),

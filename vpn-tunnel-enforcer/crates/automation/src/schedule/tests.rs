@@ -27,7 +27,8 @@ fn entry(id: &str, days: &[u8], start: &str, end: &str) -> ScheduleEntry {
         start_time: start.parse().unwrap(),
         end_time: end.parse().unwrap(),
         profile_id: String::new(),
-        mode: ScheduleMode::Hard,
+        capture: Capture::Tun,
+        upstream: Upstream::LocalProxy,
     }
 }
 

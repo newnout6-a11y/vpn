@@ -13,6 +13,9 @@ use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+mod entry;
+pub use entry::{Capture, ScheduleEntry, ScheduleMode, Upstream};
+
 /// Local time of day, minutes since midnight (`0..=1439`); text form `HH:MM`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct HhMm(u16);
@@ -114,36 +117,6 @@ impl<'de> Deserialize<'de> for HhMm {
         HhMm::parse_lenient(&text)
             .ok_or_else(|| serde::de::Error::custom(format!("invalid time of day {text:?}")))
     }
-}
-
-/// What a schedule turns on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ScheduleMode {
-    /// Hard TUN through the local proxy.
-    Hard,
-    /// Soft mode (user-level proxy variables).
-    Soft,
-    /// Direct VPN through `profile_id`.
-    Direct,
-}
-
-/// One weekly window: on each of `days` from `start_time` to `end_time` (overnight when
-/// `end_time < start_time`, 24 hours when they are equal).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ScheduleEntry {
-    pub id: String,
-    pub name: String,
-    pub enabled: bool,
-    /// Weekdays of the window's START, 0 = Sunday … 6 = Saturday; sorted, no duplicates.
-    pub days: Vec<u8>,
-    pub start_time: HhMm,
-    pub end_time: HhMm,
-    /// Server profile; used only by `Direct` schedules (fix S6).
-    #[serde(default)]
-    pub profile_id: String,
-    pub mode: ScheduleMode,
 }
 
 /// One concrete occurrence of an entry: `[start, stop)`.

@@ -4,6 +4,7 @@ use serde_json::json;
 use tokio::sync::Notify;
 
 use super::*;
+use crate::coordinator::SessionKind;
 use crate::coordinator::testing::{Call, FakeCoordinator};
 use crate::test_support::TempDir;
 
@@ -393,27 +394,40 @@ async fn unavailable_then_available() {
     assert!(fx.switches().is_empty(), "idle: selection only");
 }
 
-/// R2 / R8: Local-proxy and Soft sessions are never rotated; the timer needs a Direct session.
+/// R2 / R8: local-proxy sessions are never rotated; the timer needs a session over a server.
+/// Sessions over the server list rotate whatever their capture (NOADMIN §2: the system
+/// proxy over a list server is the main mode without administrator rights).
 #[tokio::test]
-async fn only_direct_sessions_rotate() {
+async fn only_sessions_over_a_server_rotate() {
     let fx = fixture(&["a", "b"], 0, RotationOrder::Sequential);
     fx.reachable(&["a", "b"]);
     assert_eq!(
         fx.rotation.rotate(RotationTrigger::Timer).await,
         RotationOutcome::NotDirect
     );
-    fx.coord
-        .set_session(SessionKind::LocalProxyHard, Owner::Manual, None);
-    for trigger in [RotationTrigger::Timer, RotationTrigger::User] {
-        assert_eq!(
-            fx.rotation.rotate(trigger).await,
-            RotationOutcome::NotDirect
-        );
+    for kind in [SessionKind::LocalProxyHard, SessionKind::Soft] {
+        fx.coord.set_session(kind, Owner::Manual, None);
+        for trigger in [RotationTrigger::Timer, RotationTrigger::User] {
+            assert_eq!(
+                fx.rotation.rotate(trigger).await,
+                RotationOutcome::NotDirect
+            );
+        }
     }
     assert!(fx.coord.calls().is_empty());
     assert!(
         fx.profiles.probes.lock().is_empty(),
         "the idle timer pings nothing (R8)"
+    );
+    fx.coord
+        .set_session(SessionKind::SoftDirect, Owner::Manual, Some("a"));
+    assert_eq!(
+        fx.rotation.rotate(RotationTrigger::Timer).await,
+        rotated("b")
+    );
+    assert_eq!(
+        fx.coord.calls(),
+        vec![Call::Switch(Owner::Rotation, "b".into())]
     );
 }
 

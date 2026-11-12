@@ -64,7 +64,11 @@ pub fn SchedulePage() -> Element {
                 NextEventStrip { event: next }
             }
             if form.read().is_some() {
-                FormPanel { form, servers: snapshot.servers.clone() }
+                FormPanel {
+                    form,
+                    servers: snapshot.servers.clone(),
+                    tun_available: snapshot.tun_available,
+                }
             }
             match snapshot.schedules {
                 Load::Loading => rsx! {
@@ -159,8 +163,9 @@ fn NextEventStrip(event: NextEvent) -> Element {
     }
 }
 
-/// One schedule: on/off switch, name, days (Monday first), window, mode; edit and delete (one
-/// click, no confirmation: a single row, U-29). Failures are toasts with the canonical text.
+/// One schedule: on/off switch, name, days (Monday first), window, capture and upstream; edit
+/// and delete (one click, no confirmation: a single row, U-29). Failures are toasts with the
+/// canonical text.
 #[component]
 fn ScheduleCard(
     entry: ScheduleEntry,
@@ -174,8 +179,10 @@ fn ScheduleCard(
     let days: Vec<String> = days_keys(&entry.days).into_iter().map(|k| t!(k)).collect();
     let days = days.join(", ");
     let hint = window_hint(entry.start, entry.end).map(|m| tr(&m));
-    let mode = t!(entry.mode.label_key());
-    // The server is a name, not a mode: plain text next to the badge (the badge sets its text in
+    // Two separate choices (NOADMIN §2): how the traffic is taken, and where it goes.
+    let capture = t!(entry.capture.label_key());
+    let upstream = t!(entry.upstream.label_key());
+    // The server is a name, not a choice: plain text next to the badges (a badge sets its text in
     // upper case); a deleted server is marked.
     let server = server_label(&entry, &servers);
     let editing = form.read().as_ref().and_then(|f| f.editing.clone()) == Some(entry.id.clone());
@@ -234,7 +241,8 @@ fn ScheduleCard(
                     if let Some(hint) = hint {
                         span { class: "sched-item-hint", "{hint}" }
                     }
-                    Badge { "{mode}" }
+                    Badge { "{capture}" }
+                    Badge { "{upstream}" }
                     match server {
                         Some(Ok(name)) => rsx! {
                             span { class: "sched-item-server", "{name}" }

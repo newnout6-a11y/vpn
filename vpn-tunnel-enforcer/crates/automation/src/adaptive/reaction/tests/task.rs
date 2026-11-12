@@ -231,6 +231,17 @@ async fn proxy_sessions_are_left_alone() {
     assert!(rig.reactions.verdicts().avoided("a-ws"));
 }
 
+/// NOADMIN §2: the system proxy over a list server is a session over a server like the TUN one,
+/// so a banned server moves it the same way.
+#[tokio::test]
+async fn system_proxy_sessions_over_a_server_react() {
+    let rig = Rig::new(pool());
+    rig.coord
+        .set_session(SessionKind::SoftDirect, Owner::Manual, Some("a"));
+    rig.feed("a", BANNED.0, BANNED.1).await;
+    assert_eq!(switches(&rig), ["x"]);
+}
+
 /// The task end to end: reports through the inbox, a network change through the events, and
 /// a prompt return on cancel.
 #[tokio::test]

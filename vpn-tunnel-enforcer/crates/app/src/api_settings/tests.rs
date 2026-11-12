@@ -141,3 +141,34 @@ fn next_connect_follows_the_spec_fields() {
         ..SettingsPatch::default()
     }));
 }
+
+/// Browser states never read as protected unless they are; unverified ones are «Не проверено»;
+/// browsers that are not installed are left out of the list.
+#[test]
+fn browser_states_are_shown_honestly() {
+    use vpnte_automation::hardening::{Browser, BrowserEntry, BrowserReport, BrowserState};
+    let entry = |browser, state| BrowserEntry { browser, state };
+    let report = BrowserReport {
+        browsers: vec![
+            entry(Browser::Chrome, BrowserState::Protected),
+            entry(Browser::Edge, BrowserState::Drifted),
+            entry(Browser::Firefox, BrowserState::NotVerified),
+            entry(Browser::Opera, BrowserState::NotInstalled),
+        ],
+        restart_required: true,
+        success: true,
+        message: None,
+        notes: Vec::new(),
+    };
+    let view = super::auto::browser_view(&report);
+    let statuses: Vec<_> = view.browsers.iter().map(|b| b.status.clone()).collect();
+    assert_eq!(
+        statuses,
+        [
+            ui::BrowserStatus::Protected,
+            ui::BrowserStatus::NotProtected,
+            ui::BrowserStatus::NotChecked,
+        ]
+    );
+    assert!(view.restart_required);
+}

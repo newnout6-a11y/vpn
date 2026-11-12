@@ -5,7 +5,7 @@ use vpnte_base::types::UnixMs;
 use vpnte_base::{AppError, AppResult, Msg};
 use vpnte_core::store::Document;
 
-use crate::schedule::{HhMm, ScheduleEntry, ScheduleMode};
+use crate::schedule::{Capture, HhMm, ScheduleEntry, ScheduleMode, Upstream};
 
 /// The `schedules.json` document.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,9 +48,11 @@ pub struct ScheduleDraft {
     pub days: Vec<u8>,
     pub start_time: HhMm,
     pub end_time: HhMm,
-    /// Required for `Direct`, ignored by `Hard` / `Soft` (kept so the form can switch back).
+    /// Required with `Upstream::Server`, ignored with a local proxy (kept so the form can switch
+    /// back).
     pub profile_id: String,
-    pub mode: ScheduleMode,
+    pub capture: Capture,
+    pub upstream: Upstream,
 }
 
 impl ScheduleDraft {
@@ -67,7 +69,7 @@ impl ScheduleDraft {
             )));
         }
         let profile_id = self.profile_id.trim();
-        if self.mode == ScheduleMode::Direct && profile_id.is_empty() {
+        if self.upstream == Upstream::Server && profile_id.is_empty() {
             return Err(AppError::validation(Msg::new(
                 "automation.scheduler.profileRequired",
             )));
@@ -85,7 +87,8 @@ impl ScheduleDraft {
             start_time: self.start_time,
             end_time: self.end_time,
             profile_id: profile_id.to_owned(),
-            mode: self.mode,
+            capture: self.capture,
+            upstream: self.upstream,
         })
     }
 }
@@ -99,7 +102,8 @@ impl From<ScheduleEntry> for ScheduleDraft {
             start_time: e.start_time,
             end_time: e.end_time,
             profile_id: e.profile_id,
-            mode: e.mode,
+            capture: e.capture,
+            upstream: e.upstream,
         }
     }
 }
@@ -138,12 +142,13 @@ impl Schedules {
 fn legacy_entry(v: &Value) -> Option<ScheduleEntry> {
     let text = |key: &str| v.get(key).and_then(Value::as_str);
     let name = text("name")?.trim();
-    let mode = match text("mode")? {
+    let (capture, upstream) = match text("mode")? {
         "hard" => ScheduleMode::Hard,
         "soft" => ScheduleMode::Soft,
         "direct" => ScheduleMode::Direct,
         _ => return None,
-    };
+    }
+    .split();
     let mut days: Vec<u8> = (v.get("days")?.as_array()?.iter())
         .filter_map(|d| d.as_u64().and_then(|d| u8::try_from(d).ok()))
         .collect();
@@ -158,7 +163,8 @@ fn legacy_entry(v: &Value) -> Option<ScheduleEntry> {
         start_time: HhMm::parse_lenient(text("startTime")?)?,
         end_time: HhMm::parse_lenient(text("endTime")?)?,
         profile_id: text("profileId").unwrap_or_default().trim().to_owned(),
-        mode,
+        capture,
+        upstream,
     };
     (!entry.name.is_empty()).then_some(entry)
 }

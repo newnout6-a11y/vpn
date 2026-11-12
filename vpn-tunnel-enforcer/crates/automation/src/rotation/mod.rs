@@ -1,11 +1,11 @@
 //! Profile rotation: the `rotation.json` document, the candidate pick, the timer and "rotate now".
 //!
-//! Rotation moves a running Direct-VPN session to the next eligible server of the user's list
-//! through [`Coordinator::switch_profile`] (protected restart, verify, commit; the previous server
-//! is restored on failure — owner decision 10.1-A). The index advances only on success and the
-//! announcement follows the commit (fix R1). Local-proxy / Soft sessions are never converted (R2);
-//! the timer acts only while a Direct session runs (R8); without a session "rotate now" only
-//! changes the selected profile.
+//! Rotation moves a running session over the server list (TUN or system proxy, NOADMIN §2) to the
+//! next eligible server of the user's list through [`Coordinator::switch_profile`] (protected
+//! restart, verify, commit; the previous server is restored on failure — owner decision 10.1-A).
+//! The index advances only on success and the announcement follows the commit (fix R1).
+//! Local-proxy sessions are never converted (R2); the timer acts only while a session over a
+//! server runs (R8); without a session "rotate now" only changes the selected profile.
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,7 +18,7 @@ use vpnte_base::{AppResult, Msg};
 use vpnte_core::store::Store;
 
 use crate::adaptive::reaction::Verdicts;
-use crate::coordinator::{Coordinator, NoticeCategory, OpError, SessionKind, SwitchError};
+use crate::coordinator::{Coordinator, NoticeCategory, OpError, SwitchError};
 
 mod config;
 #[cfg(test)]
@@ -114,7 +114,7 @@ pub enum RotationOutcome {
     Rotated { profile_id: String },
     /// No other eligible profile; the current one stays (fix R5: never a restart onto itself).
     NothingToRotate,
-    /// A Local-proxy / Soft session runs, or the timer fired without a Direct session (R2, R8).
+    /// A local-proxy session runs, or the timer fired without a session over a server (R2, R8).
     NotDirect,
     /// The list is empty.
     NoProfiles,
@@ -310,7 +310,7 @@ impl<C: Coordinator, P: RotationProfiles> Rotation<C, P> {
             return RotationOutcome::NoProfiles;
         }
         let session = self.coord.session();
-        let running = session.as_ref().filter(|s| s.kind == SessionKind::Direct);
+        let running = session.as_ref().filter(|s| s.kind.server());
         let live = running.is_some();
         if !live && (trigger == RotationTrigger::Timer || session.is_some()) {
             return RotationOutcome::NotDirect;

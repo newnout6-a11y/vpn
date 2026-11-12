@@ -239,6 +239,12 @@ pub enum TunnelEvent {
     },
     Status(TunStatusKind),
     Warning(TunWarning),
+    /// Right after `Status(Restarting)`: the crash restart waits `delay` first (the backoff, or
+    /// what is left of a frozen server's quiet window). A Soft session with the kill switch off
+    /// must not leave the system proxy on a dead port for long (NOADMIN §2).
+    RestartScheduled {
+        delay: Duration,
+    },
 }
 
 /// Key prefix of the runtime's TUN bring-up failures (`.adapter`, `.protection`, `.routes`):

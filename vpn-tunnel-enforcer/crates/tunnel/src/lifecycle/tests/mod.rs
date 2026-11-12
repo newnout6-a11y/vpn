@@ -69,6 +69,8 @@ fn notices_are_localized() {
         ("softRestored", true),
         ("softConnected", true),
         ("softBlocked", true),
+        ("softPaused", true),
+        ("softResumeFailed", true),
     ] {
         let title = format!("tunnel.lifecycle.notice.{name}.title");
         let body = format!("tunnel.lifecycle.notice.{name}.body");

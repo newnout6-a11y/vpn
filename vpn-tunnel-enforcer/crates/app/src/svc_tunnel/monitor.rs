@@ -95,6 +95,12 @@ impl IpWatch {
     }
 }
 
+/// Where the running session's traffic leaves: the TUN, or the mixed inbound of a proxy
+/// capture (the adaptive bypass probes through it); `None` without a running session.
+pub(crate) fn exit_route(status: &TunStatus) -> Option<IpRoute> {
+    routes(status).map(|(exit, _)| exit)
+}
+
 /// Where this session's traffic leaves (the monitored route) and where the user's own traffic
 /// leaves (the engine's authenticated direct-out); `None` without a running session.
 fn routes(status: &TunStatus) -> Option<(IpRoute, IpRoute)> {

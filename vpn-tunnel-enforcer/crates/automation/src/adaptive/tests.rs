@@ -286,6 +286,15 @@ fn capability_matrix_and_chain() {
     let plain = profile("p", json!({"type": "vless", "tls": {"enabled": false}}));
     assert!(!capabilities(SessionKind::Direct, Some(&plain)).tls);
     assert!(!capabilities(SessionKind::Direct, None).tls);
+
+    // NOADMIN §2: the system proxy over a server has the TLS knob, but no adapter to shrink.
+    let proxy = capabilities(
+        SessionKind::SoftDirect,
+        Some(&profile("a", json!({"tls": {"enabled": true}}))),
+    );
+    assert!(proxy.tls && !proxy.mtu && !proxy.external);
+    assert_eq!(next_mode(TlsCompatibility, &proxy), None);
+    assert!(capabilities(SessionKind::Soft, None).external);
 }
 
 /// A5: another protocol family first, then the lowest latency, then store order.

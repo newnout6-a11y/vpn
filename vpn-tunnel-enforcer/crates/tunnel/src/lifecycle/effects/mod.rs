@@ -396,7 +396,7 @@ async fn run_start(
 }
 
 /// `127.0.0.1:<port>`: where the Soft tweaks point.
-fn soft_addr(port: u16) -> String {
+pub(super) fn soft_addr(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
 
@@ -444,7 +444,7 @@ async fn point_tweaks(ctx: &Ctx, applied: Option<u16>) -> Result<(), Failure> {
 }
 
 /// Applies the tweaks for `addr`; Soft counts as applied only once the system reads back `addr`.
-async fn apply_and_read_back(deps: &LifecycleDeps, addr: &str) -> Result<(), AppError> {
+pub(super) async fn apply_and_read_back(deps: &LifecycleDeps, addr: &str) -> Result<(), AppError> {
     deps.soft.apply(addr, ProxyKind::Http).await?;
     if deps.soft.is_configured(addr, ProxyKind::Http).await? {
         Ok(())

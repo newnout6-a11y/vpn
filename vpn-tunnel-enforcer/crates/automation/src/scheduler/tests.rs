@@ -13,7 +13,7 @@ use crate::coordinator::{
     ConnectOutcome, ConnectRequest as Req, LifecycleEvent, OpError, RuntimeId, SessionKind,
     StopCause,
 };
-use crate::schedule::ScheduleMode;
+use crate::schedule::{Capture, ScheduleMode, Upstream};
 use crate::test_support::TempDir;
 
 struct Fixture {
@@ -61,7 +61,8 @@ fn entry(
         start_time: start.parse().unwrap(),
         end_time: end.parse().unwrap(),
         profile_id: profile.into(),
-        mode,
+        capture: mode.split().0,
+        upstream: mode.split().1,
     }
 }
 
@@ -84,7 +85,8 @@ fn draft(name: &str, days: &[u8], mode: ScheduleMode, profile: &str) -> Schedule
         start_time: "09:00".parse().unwrap(),
         end_time: "17:00".parse().unwrap(),
         profile_id: profile.into(),
-        mode,
+        capture: mode.split().0,
+        upstream: mode.split().1,
     }
 }
 
@@ -381,20 +383,39 @@ async fn manual_action_fences_a_pending_fallback() {
     assert!(fx.sched.status().borrow().suppressed);
 }
 
-/// Fix S6: Hard / Soft schedules use the local proxy and never touch the profile id.
+/// Fix S6 and NOADMIN §2: capture and upstream decide the request apart; a local-proxy schedule
+/// never touches the profile id, a server schedule runs over either capture.
 #[tokio::test]
-async fn only_direct_schedules_use_the_profile() {
-    for (mode, expected) in [
-        (ScheduleMode::Hard, Req::LocalProxyHard { endpoint: None }),
-        (ScheduleMode::Soft, Req::Soft { endpoint: None }),
+async fn capture_and_upstream_pick_the_request() {
+    for (capture, upstream, expected) in [
         (
-            ScheduleMode::Direct,
+            Capture::Tun,
+            Upstream::LocalProxy,
+            Req::LocalProxyHard { endpoint: None },
+        ),
+        (
+            Capture::Proxy,
+            Upstream::LocalProxy,
+            Req::Soft { endpoint: None },
+        ),
+        (
+            Capture::Tun,
+            Upstream::Server,
             Req::Direct {
                 profile_id: "p1".into(),
             },
         ),
+        (
+            Capture::Proxy,
+            Upstream::Server,
+            Req::SoftDirect {
+                profile_id: "p1".into(),
+            },
+        ),
     ] {
-        let fx = fixture(vec![entry("a", &[WED], "09:00", "17:00", mode, "p1")]);
+        let mut e = hard("a", &[WED], "09:00", "17:00");
+        (e.capture, e.upstream, e.profile_id) = (capture, upstream, "p1".into());
+        let fx = fixture(vec![e]);
         Reconciler::new(&fx.sched)
             .pass(at(&fx.tz, 10, 9, 0), &fx.tz)
             .await;
@@ -403,6 +424,48 @@ async fn only_direct_schedules_use_the_profile() {
             vec![Call::Connect(Owner::Schedule, expected)]
         );
     }
+}
+
+/// Records written before capture / upstream were stored apart keep their meaning 1:1; new
+/// records store the pair; a record with neither is skipped, not the whole file.
+#[test]
+fn stored_entries_read_the_old_mode_and_the_pair() {
+    let doc: Schedules = serde_json::from_value(json!({"schedules": [
+        {"id": "h", "name": "h", "enabled": true, "days": [1], "startTime": "09:00",
+         "endTime": "10:00", "mode": "hard"},
+        {"id": "s", "name": "s", "enabled": true, "days": [1], "startTime": "09:00",
+         "endTime": "10:00", "mode": "soft"},
+        {"id": "d", "name": "d", "enabled": true, "days": [1], "startTime": "09:00",
+         "endTime": "10:00", "mode": "direct", "profileId": "p"},
+        {"id": "n", "name": "n", "enabled": true, "days": [1], "startTime": "09:00",
+         "endTime": "10:00", "capture": "proxy", "upstream": "server", "profileId": "p"},
+        {"id": "x", "name": "x", "enabled": true, "days": [1], "startTime": "09:00",
+         "endTime": "10:00"},
+    ]}))
+    .unwrap();
+    let pairs: Vec<_> = doc
+        .schedules
+        .iter()
+        .map(|e| (e.id.as_str(), e.capture, e.upstream))
+        .collect();
+    assert_eq!(
+        pairs,
+        [
+            ("h", Capture::Tun, Upstream::LocalProxy),
+            ("s", Capture::Proxy, Upstream::LocalProxy),
+            ("d", Capture::Tun, Upstream::Server),
+            ("n", Capture::Proxy, Upstream::Server),
+        ]
+    );
+    let written = serde_json::to_value(&doc.schedules[3]).unwrap();
+    assert_eq!(
+        (
+            &written["capture"],
+            &written["upstream"],
+            written.get("mode")
+        ),
+        (&json!("proxy"), &json!("server"), None)
+    );
 }
 
 /// S1: asleep 09:30–11:00 across A 09–10 and B 10:30–12 → on wake the task connects for B

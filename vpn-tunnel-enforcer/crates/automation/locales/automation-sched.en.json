@@ -24,7 +24,7 @@
       "failedUnprotected": "Rotation to “{{name}}” failed. Protection after the restart is not confirmed — traffic may be going over the regular route.",
       "failedNotStarted": "Rotation to “{{name}}” failed. Check the protection status.",
       "nothingToRotate": "No other suitable profile — staying on the current one",
-      "notDirect": "Rotation only switches a direct VPN session",
+      "notDirect": "Rotation only switches a session through a server from the list",
       "noProfiles": "No profiles are selected for rotation. Select profiles in the settings and try again.",
       "noneAvailable": "No profiles are available for rotation. Check that the VPN servers are reachable and try again.",
       "busy": "A rotation is already running"

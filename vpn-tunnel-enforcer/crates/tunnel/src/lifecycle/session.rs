@@ -9,6 +9,19 @@ use crate::api::{EngineRun, VpnProfile};
 use crate::history::{History, NewEntry, Route, SessionMode};
 use crate::outcome::{AdaptiveContext, Evidence, NetworkTransition, SessionOutcome};
 
+/// Synthetic profile ids of sessions that do not run over a server of the list.
+const LOCAL_PROXY_ID: &str = "local-proxy";
+const SOFT_PROXY_PREFIX: &str = "local-proxy-soft-";
+const DIRECT_UNKNOWN_ID: &str = "direct-vpn";
+
+/// The server-list id of a session's profile; `None` for the synthetic ids (a local proxy, or a
+/// Direct VPN start that failed before a server was known).
+pub(super) fn server_id(mode: SessionMode, id: &str) -> Option<&str> {
+    let synthetic =
+        id == LOCAL_PROXY_ID || id == DIRECT_UNKNOWN_ID || id.starts_with(SOFT_PROXY_PREFIX);
+    (mode != SessionMode::Hard && !synthetic).then_some(id)
+}
+
 /// Which profile a session runs: what history stores and what decides "same session".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SessionProfile {
@@ -23,7 +36,7 @@ impl SessionProfile {
     /// upstream only: the history row's mode carries the mode name («Туннель» / «Прокси»).
     pub fn local_proxy(addr: &str) -> Self {
         Self {
-            id: "local-proxy".into(),
+            id: LOCAL_PROXY_ID.into(),
             name: format!("Proxy {addr}"),
             mode: SessionMode::Hard,
         }
@@ -37,7 +50,7 @@ impl SessionProfile {
             ProxyKind::Http => "http",
         };
         Self {
-            id: format!("local-proxy-soft-{kind}"),
+            id: format!("{SOFT_PROXY_PREFIX}{kind}"),
             mode: SessionMode::Soft,
             ..Self::local_proxy(addr)
         }
@@ -68,7 +81,7 @@ impl SessionProfile {
     /// A Direct VPN start that failed before a server was known.
     pub fn direct_unknown() -> Self {
         Self {
-            id: "direct-vpn".into(),
+            id: DIRECT_UNKNOWN_ID.into(),
             name: "Direct VPN".into(),
             mode: SessionMode::Direct,
         }
@@ -105,6 +118,9 @@ pub(super) struct LiveSession {
     pub transition: Option<NetworkTransition>,
     /// The runtime reported the upstream down and it has not recovered since.
     pub proxy_down: bool,
+    /// Soft, kill switch `off`: a long crash-restart wait rolled the tweaks back; they return
+    /// with the next run (NOADMIN §2: never a system proxy on a dead port for long).
+    pub soft_paused: bool,
 }
 
 impl LiveSession {
@@ -125,6 +141,7 @@ impl LiveSession {
             leak_detected: false,
             transition: None,
             proxy_down: false,
+            soft_paused: false,
         }
     }
 

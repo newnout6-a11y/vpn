@@ -7,7 +7,7 @@ use jiff::tz::TimeZone;
 use vpnte_base::Msg;
 use vpnte_base::types::UnixMs;
 
-use super::model::{HhMm, ScheduleEntry, ScheduleInput, ScheduleMode, ServerChoice};
+use super::model::{Capture, HhMm, ScheduleEntry, ScheduleInput, ServerChoice, Upstream};
 
 /// Stored day numbers (0 = Sunday) in display order: Monday first, everywhere (U-25).
 pub const DISPLAY_ORDER: [u8; 7] = [1, 2, 3, 4, 5, 6, 0];
@@ -81,11 +81,13 @@ pub struct ScheduleForm {
     pub start: String,
     pub end: String,
     pub profile_id: String,
-    pub mode: ScheduleMode,
+    pub capture: Capture,
+    pub upstream: Upstream,
 }
 
 impl Default for ScheduleForm {
-    /// The empty form of the old page: no name, on, no days, 09:00–18:00, Hard.
+    /// The empty form: no name, on, no days, 09:00–18:00, the system proxy over the server
+    /// selected at the start (the mode that needs no administrator rights, NOADMIN §2).
     fn default() -> Self {
         Self {
             editing: None,
@@ -95,7 +97,8 @@ impl Default for ScheduleForm {
             start: "09:00".into(),
             end: "18:00".into(),
             profile_id: String::new(),
-            mode: ScheduleMode::Hard,
+            capture: Capture::Proxy,
+            upstream: Upstream::Server,
         }
     }
 }
@@ -117,7 +120,8 @@ impl ScheduleForm {
             start: entry.start.to_string(),
             end: entry.end.to_string(),
             profile_id: entry.profile_id.clone(),
-            mode: entry.mode,
+            capture: entry.capture,
+            upstream: entry.upstream,
         }
     }
 
@@ -127,7 +131,8 @@ impl ScheduleForm {
         }
     }
 
-    /// The validated input, or the first thing to fix. The server matters only for Direct:
+    /// The validated input, or the first thing to fix. The server matters only with a server
+    /// upstream:
     /// empty = keep the current server, an unknown id is refused.
     pub fn input(&self, servers: &[ServerChoice]) -> Result<ScheduleInput, FormProblem> {
         let name = self.name.trim();
@@ -140,7 +145,7 @@ impl ScheduleForm {
         }
         let start = HhMm::parse(self.start.trim()).ok_or(FormProblem::Start)?;
         let end = HhMm::parse(self.end.trim()).ok_or(FormProblem::End)?;
-        let profile_id = if self.mode.uses_profile() {
+        let profile_id = if self.upstream.uses_profile() {
             self.profile_id.clone()
         } else {
             String::new()
@@ -155,7 +160,8 @@ impl ScheduleForm {
             start,
             end,
             profile_id,
-            mode: self.mode,
+            capture: self.capture,
+            upstream: self.upstream,
         })
     }
 
@@ -205,13 +211,13 @@ pub fn local_hhmm(at: UnixMs, tz: &TimeZone) -> Option<String> {
     Some(format!("{:02}:{:02}", zoned.hour(), zoned.minute()))
 }
 
-/// The server part of a schedule card: the server name of a Direct schedule, «сервер не
-/// найден» when it was deleted, nothing for the current server or another mode.
+/// The server part of a schedule card: the server name of a server schedule, «сервер не
+/// найден» when it was deleted, nothing for the current server or a local proxy.
 pub fn server_label(
     entry: &ScheduleEntry,
     servers: &[ServerChoice],
 ) -> Option<Result<String, Msg>> {
-    if !entry.mode.uses_profile() || entry.profile_id.is_empty() {
+    if !entry.upstream.uses_profile() || entry.profile_id.is_empty() {
         return None;
     }
     Some(

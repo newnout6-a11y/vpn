@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use vpnte_automation::scheduler::Wake;
 use vpnte_base::types::{ClientDevice, KillSwitchLevel, Owner};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::ops::Source;
@@ -20,7 +21,7 @@ use vpnte_servers::store::SelectBy;
 use vpnte_tunnel::api::{CaptureKind, ModeKind, Runtime, TunError, TunStatus};
 use vpnte_tunnel::fsm::TunnelSnapshot;
 use vpnte_tunnel::lifecycle::{
-    ConnError, ConnectReq, DisconnectReq, Done, SessionView, ShutdownReport, StopCause, SwitchReq,
+    ConnError, DisconnectReq, Done, SessionView, ShutdownReport, StopCause, SwitchReq,
 };
 use vpnte_winnet::wfp::{ExceptionKind, KillSwitchException, RemoveReport, Toggles};
 
@@ -89,9 +90,8 @@ impl TunnelOps for TunnelService {
         };
         let target = decide::connect_target(s.connection_mode, s.routing_mode, upstream)
             .ok_or_else(|| ConnError::NoServer(Msg::new("app.tunnel.noLocalProxy")))?;
-        self.lifecycle
-            .connect(ConnectReq::new(target, Owner::Manual, source))
-            .await
+        // Through the coordinator: the adaptive bypass picks the mode of every start.
+        self.coord.start(target, Owner::Manual, source).await
     }
 
     async fn disconnect(&self, source: Source) -> Result<Done, ConnError> {
@@ -140,9 +140,26 @@ impl TunnelOps for TunnelService {
             Ok(Done::default())
         } else {
             let reason = format!("settings changed: {}", change.restart.join(", "));
-            self.lifecycle
-                .restart_with_last(reason, Owner::Manual, Source::Ui)
-                .await
+            // The adaptive bypass decides the mode of a settings restart (off → baseline).
+            let running = self
+                .lifecycle
+                .session()
+                .borrow()
+                .as_ref()
+                .map(|s| s.adaptive);
+            let mode = running.map(|m| self.automation.adaptive.restart_mode(m));
+            match (running, mode) {
+                (Some(running), Some(mode)) if mode != running => {
+                    self.lifecycle
+                        .restart_adaptive(mode, None, Owner::Manual)
+                        .await
+                }
+                _ => {
+                    self.lifecycle
+                        .restart_with_last(reason, Owner::Manual, Source::Ui)
+                        .await
+                }
+            }
         };
         level.map_err(failed)?;
         done
@@ -261,6 +278,12 @@ impl TunnelOps for TunnelService {
         self.guard.wfp.is_some()
     }
 
+    fn resumed(&self) {
+        self.lifecycle.resumed();
+        // A schedule boundary may have passed while the machine slept.
+        self.automation.scheduler.wake(Wake::Resume);
+    }
+
     fn proxies(&self) -> Option<crate::svc_proxies::ProxySlots> {
         Some(self.proxies.slots())
     }
@@ -277,6 +300,12 @@ impl TunnelOps for TunnelService {
                 .max(Duration::from_millis(500))
         };
         let mut report = self.lifecycle.shutdown(budget).await;
+        if tokio::time::timeout(left(), self.automation.privacy.session_down())
+            .await
+            .is_err()
+        {
+            tracing::warn!("location privacy rollback timed out");
+        }
         // On exit the tweaks are always rolled back (NOADMIN §2), also when the lane ran out of
         // time; the journal is serialised, so a rollback still running in the lane is harmless.
         if self.soft.soft.is_applied() {

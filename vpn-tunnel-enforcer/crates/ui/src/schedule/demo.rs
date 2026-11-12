@@ -14,8 +14,8 @@ use vpnte_base::types::{UnixMs, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind};
 
 use super::model::{
-    HhMm, NextAction, NextEvent, ScheduleApi, ScheduleEntry, ScheduleInput, ScheduleMode,
-    ScheduleSnapshot, ServerChoice,
+    Capture, HhMm, NextAction, NextEvent, ScheduleApi, ScheduleEntry, ScheduleInput,
+    ScheduleSnapshot, ServerChoice, Upstream,
 };
 use crate::widgets::{Load, UiError};
 
@@ -39,7 +39,7 @@ fn entry(
     enabled: bool,
     days: &[u8],
     window: (HhMm, HhMm),
-    mode: ScheduleMode,
+    (capture, upstream): (Capture, Upstream),
     profile: &str,
 ) -> ScheduleEntry {
     ScheduleEntry {
@@ -50,7 +50,8 @@ fn entry(
         start: window.0,
         end: window.1,
         profile_id: profile.into(),
-        mode,
+        capture,
+        upstream,
     }
 }
 
@@ -79,7 +80,7 @@ impl DemoSchedule {
                     true,
                     &[1, 2, 3, 4, 5],
                     (hm(9, 0), hm(19, 0)),
-                    ScheduleMode::Hard,
+                    (Capture::Proxy, Upstream::Server),
                     "",
                 ),
                 entry(
@@ -88,7 +89,7 @@ impl DemoSchedule {
                     false,
                     &[6, 0],
                     (hm(18, 0), hm(23, 30)),
-                    ScheduleMode::Soft,
+                    (Capture::Proxy, Upstream::LocalProxy),
                     "",
                 ),
                 entry(
@@ -97,7 +98,7 @@ impl DemoSchedule {
                     true,
                     &[0, 1, 2, 3, 4, 5, 6],
                     (hm(23, 0), hm(4, 0)),
-                    ScheduleMode::Direct,
+                    (Capture::Tun, Upstream::Server),
                     "srv-de",
                 ),
             ]
@@ -136,6 +137,7 @@ impl DemoSchedule {
             schedules: Load::Ready(entries),
             next,
             servers: self.servers.clone(),
+            tun_available: false,
         });
     }
 
@@ -166,7 +168,8 @@ impl DemoSchedule {
             start: input.start,
             end: input.end,
             profile_id: input.profile_id,
-            mode: input.mode,
+            capture: input.capture,
+            upstream: input.upstream,
         }
     }
 }

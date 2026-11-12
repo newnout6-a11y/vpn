@@ -2,6 +2,7 @@
 //! and the real engines, the lifecycle with its collaborators over the backend, the kill switch,
 //! and the [`TunnelOps`] the API packages call (`ops.rs`). Privileged parts (TUN capture, WFP)
 //! exist only when the process itself is elevated (NOADMIN §0); everything else runs unelevated.
+mod auto;
 mod decide;
 mod gate;
 mod guard;
@@ -42,11 +43,25 @@ use vpnte_tunnel::runtime::{
 };
 
 use crate::services::{Backend, Engines, TunnelOps};
+use crate::svc_auto::{AppCoordinator, Automation, Fingerprints, ServerFailover};
 use crate::svc_core::notify::{NoticeCategory, Notifier};
 
-/// Builds the tunnel service; the caller stores it in `backend.tunnel`. Runs inside the tokio
-/// runtime (it spawns the actors and the background tasks under `backend.shutdown`).
-pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
+pub(crate) use gate::BudgetGate;
+pub(crate) use monitor::exit_route;
+pub(crate) use peers::vpn_profile;
+
+/// The tunnel service and the automation over it, built together: automation drives this
+/// tunnel's lifecycle and shares its one tweak journal.
+pub struct Built {
+    /// The caller stores it in `backend.tunnel`.
+    pub tunnel: Arc<dyn TunnelOps>,
+    /// For the pages that edit automation (Schedule, Settings).
+    pub automation: Arc<Automation>,
+}
+
+/// Builds the tunnel service and its automation. Runs inside the tokio runtime (it spawns the
+/// actors and the background tasks under `backend.shutdown`).
+pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
     let b = backend;
     let guard = Arc::new(guard::Guard::new(
         b.elevated,
@@ -56,6 +71,8 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
         b.notifier.clone(),
     ));
     let reader = Arc::new(IpReader::new());
+    let fingerprints = Fingerprints::default();
+    let failover = Arc::new(ServerFailover::new(b.servers.clone(), fingerprints.clone()));
     let ip = IpMonitor::new(reader.clone());
     // One Soft capture for the whole process: the runtime writes its mixed port, the local-proxy
     // detector reads it so a scan can never pick our own inbound as the upstream.
@@ -82,7 +99,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
             rules: b.rules.clone(),
             rule_sets: b.rule_sets.clone(),
         }),
-        failover: None,
+        failover: Some(failover.clone()),
         confirmations: Some(Arc::new(monitor::Alive(ip.clone()))),
         timings: Timings::default(),
     });
@@ -94,7 +111,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
     }
     let soft = Arc::new(soft::SoftTweaks {
         soft: tweaks::Soft::new(journal.clone(), tweaks::SoftSystem::current_user()),
-        journal,
+        journal: journal.clone(),
         doc: b.soft.clone(),
         notifier: b.notifier.clone(),
     });
@@ -103,6 +120,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
         .wfp
         .is_some()
         .then(|| leaks::Leaks::spawn(status.clone(), b.settings.clone()));
+    let auto_reader = reader.clone();
     let ip = Arc::new(monitor::IpWatch::new(
         ip,
         reader,
@@ -127,7 +145,10 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
     let proxies = peers::proxies(b, runtime.status());
     let lifecycle = Lifecycle::spawn(LifecycleDeps {
         runtime: Arc::new(runtime.clone()),
-        profiles: Arc::new(peers::ServerSource(b.servers.clone())),
+        profiles: Arc::new(peers::ServerSource {
+            servers: b.servers.clone(),
+            fingerprints: fingerprints.clone(),
+        }),
         soft: soft.clone(),
         monitor: ip.clone(),
         forensics: forensics.clone(),
@@ -153,12 +174,32 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
             b.shutdown.child_token(),
         ));
     }
-    tokio::spawn(recover(
-        b.clone(),
-        lifecycle.clone(),
-        guard.clone(),
-        soft.clone(),
-    ));
+    let automation = auto::build(
+        b,
+        auto::Inputs {
+            lifecycle: &lifecycle,
+            runtime: &runtime,
+            journal,
+            capture: Arc::clone(&proxy_capture),
+            reader: auto_reader,
+            fingerprints,
+            failover,
+            tun: guard.wfp.is_some(),
+        },
+    );
+    automation.spawn_forwarder(Arc::new(runtime.clone()), b.shutdown.child_token());
+    tokio::spawn({
+        let (b, lifecycle, guard, soft) =
+            (b.clone(), lifecycle.clone(), guard.clone(), soft.clone());
+        let (automation, live) = (automation.clone(), live.clone());
+        async move {
+            recover(b.clone(), lifecycle, guard, soft, automation.clone()).await;
+            let (servers, notifier) = (b.servers.clone(), b.notifier.clone());
+            automation
+                .run_tasks(servers, live, notifier, b.shutdown.child_token())
+                .await;
+        }
+    });
     let rule_sets = Arc::new(Notify::new());
     tokio::spawn(probe::refresh_rule_sets(
         b.rule_sets.clone(),
@@ -168,7 +209,9 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
         b.shutdown.child_token(),
     ));
 
-    Ok(Arc::new(TunnelService {
+    let tunnel: Arc<dyn TunnelOps> = Arc::new(TunnelService {
+        coord: automation.coord.clone(),
+        automation: automation.clone(),
         lifecycle,
         runtime,
         guard,
@@ -183,7 +226,8 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
         rule_sets,
         proxies,
         live,
-    }))
+    });
+    Ok(Built { tunnel, automation })
 }
 
 /// The local-proxy detector for one scan. Our own mixed inbound is always skipped (NOADMIN §2):
@@ -198,6 +242,10 @@ fn make_detector(proxy: &ProxyCapture) -> LocalProxyDetector {
 
 /// The [`TunnelOps`] implementation (methods in `ops.rs`).
 struct TunnelService {
+    /// Every start goes through the coordinator (owner order, the adaptive bypass's mode).
+    coord: Arc<AppCoordinator>,
+    /// Automation of this process (scheduler, rotation, hardening, …).
+    automation: Arc<Automation>,
     lifecycle: Lifecycle,
     runtime: TunnelHandle,
     guard: Arc<guard::Guard>,
@@ -221,13 +269,15 @@ struct TunnelService {
 
 /// Start-up recovery with the lane held (no connect can interleave): WFP leftovers of a crashed
 /// run (elevated only), the old version's network cleanup (elevated only, after the WFP start-up),
-/// then the Soft tweaks a crashed run left pointing at its dead engine (NOADMIN §2). Anything
+/// then the Soft tweaks a crashed run left pointing at its dead engine (NOADMIN §2) and the
+/// location privacy of a session that never ended (automation API). Anything
 /// unconfirmed leaves the state `unknown`, never "disconnected".
 async fn recover(
     backend: Arc<Backend>,
     lifecycle: Lifecycle,
     guard: Arc<guard::Guard>,
     soft: Arc<soft::SoftTweaks>,
+    automation: Arc<Automation>,
 ) {
     let outcome = lifecycle
         .maintenance(move || async move {
@@ -245,6 +295,8 @@ async fn recover(
             } else {
                 Ok(())
             };
+            // Location privacy is session-scoped: a crashed run's denial goes back.
+            automation.privacy.session_down().await;
             (wfp, tweaks)
         })
         .await;

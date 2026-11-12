@@ -32,8 +32,11 @@ pub struct ScheduleSnapshot {
     pub schedules: Load<Vec<ScheduleEntry>>,
     /// The next start or stop of an enabled schedule within the look-ahead, if any.
     pub next: Option<NextEvent>,
-    /// Servers a Direct schedule may pick (name and protocol only).
+    /// Servers a server schedule may pick (name and protocol only).
     pub servers: Vec<ServerChoice>,
+    /// The TUN exists in this process (started as administrator): otherwise a TUN schedule is
+    /// offered as unavailable, never as working.
+    pub tun_available: bool,
 }
 
 impl Default for ScheduleSnapshot {
@@ -42,36 +45,54 @@ impl Default for ScheduleSnapshot {
             schedules: Load::Loading,
             next: None,
             servers: Vec::new(),
+            tun_available: false,
         }
     }
 }
 
-/// How a schedule connects.
+/// How a schedule takes the traffic (NOADMIN §2): the per-user system proxy (no rights needed)
+/// or the TUN adapter (the app must run as administrator).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum ScheduleMode {
+pub enum Capture {
     #[default]
-    Hard,
-    Soft,
-    Direct,
+    Proxy,
+    Tun,
 }
 
-impl ScheduleMode {
-    pub const ALL: [ScheduleMode; 3] =
-        [ScheduleMode::Hard, ScheduleMode::Soft, ScheduleMode::Direct];
+impl Capture {
+    pub const ALL: [Capture; 2] = [Capture::Proxy, Capture::Tun];
 
-    /// Catalog key of the mode name («Hard (TUN)», …).
+    /// Catalog key of the name.
     pub const fn label_key(self) -> &'static str {
         match self {
-            ScheduleMode::Hard => "modes.hard",
-            ScheduleMode::Soft => "modes.soft",
-            ScheduleMode::Direct => "modes.direct",
+            Capture::Proxy => "schedule.captureProxy",
+            Capture::Tun => "schedule.captureTun",
+        }
+    }
+}
+
+/// Where a schedule's traffic goes: a server of the list, or the local proxy (Happ & co.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Upstream {
+    #[default]
+    Server,
+    LocalProxy,
+}
+
+impl Upstream {
+    pub const ALL: [Upstream; 2] = [Upstream::Server, Upstream::LocalProxy];
+
+    /// Catalog key of the name.
+    pub const fn label_key(self) -> &'static str {
+        match self {
+            Upstream::Server => "schedule.upstreamServer",
+            Upstream::LocalProxy => "schedule.upstreamLocal",
         }
     }
 
-    /// Only Direct sessions pick a server; Hard and Soft go through the local proxy
-    /// (automation S6, ui-pages U-25).
+    /// Only a server upstream picks a server; the local proxy decides its own (automation S6).
     pub const fn uses_profile(self) -> bool {
-        matches!(self, ScheduleMode::Direct)
+        matches!(self, Upstream::Server)
     }
 }
 
@@ -120,13 +141,14 @@ pub struct ScheduleEntry {
     pub days: Vec<u8>,
     pub start: HhMm,
     pub end: HhMm,
-    /// Server of a Direct schedule; empty = keep the current server.
+    /// Server of a server schedule; empty = the server selected at the start.
     pub profile_id: String,
-    pub mode: ScheduleMode,
+    pub capture: Capture,
+    pub upstream: Upstream,
 }
 
 /// What `create` / `update` take: a validated form (name trimmed, days sorted and unique,
-/// `profile_id` empty unless the mode is Direct).
+/// `profile_id` empty unless the upstream is a server).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduleInput {
     pub name: String,
@@ -135,7 +157,8 @@ pub struct ScheduleInput {
     pub start: HhMm,
     pub end: HhMm,
     pub profile_id: String,
-    pub mode: ScheduleMode,
+    pub capture: Capture,
+    pub upstream: Upstream,
 }
 
 /// Whether the next event connects or disconnects.
@@ -154,7 +177,7 @@ pub struct NextEvent {
     pub name: String,
 }
 
-/// A server a Direct schedule can use.
+/// A server a server schedule can use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerChoice {
     pub id: String,

@@ -5,9 +5,9 @@
 //! source changes; actions run as backend tasks and publish before they answer, so leaving a
 //! page mid-call never leaves a half-done change. Nothing here needs administrator rights
 //! (NOADMIN). What this build cannot do is refused with its own sentence, never shown as working:
-//! - the scheduler's reconcile task needs an automation `Coordinator` over the tunnel lifecycle,
-//!   which `svc_tunnel` does not expose: the list is edited, but enabling a schedule is refused
-//!   and no next event is shown until that task runs (`schedule`);
+//! - the schedule list belongs to the process's one automation scheduler (built with the tunnel:
+//!   `svc_tunnel::build`), whose reconcile task starts and stops the VPN; the page edits it
+//!   and shows the next event that task reports (`schedule`);
 //! - the domain history service lives inside `svc_tunnel` (not on `Backend`): the page reads the
 //!   file that service persists and clears through `TunnelOps::clear_traffic_history`
 //!   (`traffic`).
@@ -28,6 +28,7 @@ use vpnte_ui::split_tunnel::SplitTunnelApi;
 use vpnte_ui::traffic_history::TrafficHistoryApi;
 
 use crate::services::Backend;
+use crate::svc_auto::Automation;
 pub use schedule::ScheduleService;
 pub use split::SplitService;
 pub use traffic::TrafficService;
@@ -36,8 +37,18 @@ pub use traffic::TrafficService;
 /// `Rc<dyn SplitTunnelApi>` and `Rc<dyn TrafficHistoryApi>`. Call it inside the tokio runtime
 /// after `backend.tunnel` was set (the projection tasks start here and stop with
 /// `backend.shutdown`).
-pub fn contexts(backend: &Arc<Backend>) -> Vec<Box<dyn Any>> {
-    let schedule: Rc<dyn ScheduleApi> = Rc::new(ScheduleService::start(backend.clone()));
+pub fn contexts(backend: &Arc<Backend>, automation: &Automation) -> Vec<Box<dyn Any>> {
+    let schedule: Rc<dyn ScheduleApi> = Rc::new(ScheduleService::start(
+        backend.clone(),
+        automation.schedules.clone(),
+        automation.scheduler.clone(),
+        backend.tunnel().is_ok_and(|t| t.tun_available()),
+    ));
+    with_schedule(backend, schedule)
+}
+
+/// The contexts around the given Schedule page API.
+fn with_schedule(backend: &Arc<Backend>, schedule: Rc<dyn ScheduleApi>) -> Vec<Box<dyn Any>> {
     let split: Rc<dyn SplitTunnelApi> = Rc::new(SplitService::start(backend.clone()));
     let traffic: Rc<dyn TrafficHistoryApi> = Rc::new(TrafficService::start(backend.clone()));
     vec![Box::new(schedule), Box::new(split), Box::new(traffic)]

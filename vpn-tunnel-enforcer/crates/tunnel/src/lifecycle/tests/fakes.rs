@@ -181,6 +181,32 @@ impl FakeRuntime {
         self.emit(TunnelEvent::Status(TunStatusKind::Stopped));
     }
 
+    /// The engine died and the runtime restarts it after `delay` (attempt 1 of 3); the session
+    /// keeps its mixed port, as the runtime does. [`FakeRuntime::come_back`] ends the wait.
+    pub fn crash_with_restart_in(&self, delay: Duration) {
+        self.status.send_modify(|s| {
+            s.running = false;
+            s.pid = None;
+        });
+        self.emit(TunnelEvent::Status(TunStatusKind::Restarting {
+            attempt: 1,
+            max: 3,
+        }));
+        self.emit(TunnelEvent::RestartScheduled { delay });
+    }
+
+    /// The delayed restart of [`FakeRuntime::crash_with_restart_in`] succeeded.
+    pub fn come_back(&self) -> u64 {
+        let generation = self.generation.load(Ordering::SeqCst) + 1;
+        self.emit(TunnelEvent::StartBegan { generation });
+        self.bring_up(None, true);
+        self.emit(TunnelEvent::StartFinished {
+            generation,
+            ok: true,
+        });
+        generation
+    }
+
     /// The runtime restarts a crashed engine by itself (attempt 1 of 3).
     pub fn auto_restart(&self) -> u64 {
         self.emit(TunnelEvent::Status(TunStatusKind::Restarting {

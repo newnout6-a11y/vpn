@@ -199,12 +199,15 @@ fn form_validation() {
         Some("до 06:00 следующего дня".into())
     );
 
+    form.upstream = Upstream::LocalProxy;
     form.profile_id = "srv-gone".into();
     assert_eq!(
-        form.input(&servers()).expect("hard ignores it").profile_id,
+        form.input(&servers())
+            .expect("a local proxy ignores it")
+            .profile_id,
         ""
     );
-    form.mode = ScheduleMode::Direct;
+    form.upstream = Upstream::Server;
     assert_eq!(form.input(&servers()), Err(FormProblem::Server));
     form.profile_id = "srv-1".into();
     assert_eq!(
@@ -226,8 +229,13 @@ fn form_validation() {
         assert!(lookup(Lang::Ru, problem.msg_key()).is_some(), "{problem:?}");
         assert!(lookup(Lang::En, problem.msg_key()).is_some(), "{problem:?}");
     }
-    for mode in ScheduleMode::ALL {
-        assert!(lookup(Lang::En, mode.label_key()).is_some());
+    for key in Capture::ALL
+        .map(Capture::label_key)
+        .into_iter()
+        .chain(Upstream::ALL.map(Upstream::label_key))
+    {
+        assert!(lookup(Lang::En, key).is_some(), "{key}");
+        assert!(lookup(Lang::Ru, key).is_some(), "{key}");
     }
 }
 
@@ -242,7 +250,8 @@ fn edit_round_trip() {
         start: hm("23:00"),
         end: hm("04:00"),
         profile_id: "srv-1".into(),
-        mode: ScheduleMode::Direct,
+        capture: Capture::Proxy,
+        upstream: Upstream::Server,
     };
     let form = ScheduleForm::edit(&entry);
     assert_eq!(form.editing.as_deref(), Some("s-1"));
@@ -261,11 +270,11 @@ fn edit_round_trip() {
         server_label(&gone, &servers()).map(|r| r.map_err(|m| ru(&m))),
         Some(Err("сервер не найден".into()))
     );
-    let hard = ScheduleEntry {
-        mode: ScheduleMode::Hard,
+    let local = ScheduleEntry {
+        upstream: Upstream::LocalProxy,
         ..entry
     };
-    assert_eq!(server_label(&hard, &servers()), None);
+    assert_eq!(server_label(&local, &servers()), None);
 }
 
 /// The demo's next event (fixed zone and clock): inside a weekday window the next event is
@@ -287,7 +296,8 @@ fn demo_next_event() {
         start: hm("09:00"),
         end: hm("19:00"),
         profile_id: String::new(),
-        mode: ScheduleMode::Hard,
+        capture: Capture::Tun,
+        upstream: Upstream::LocalProxy,
     };
     // 2026-11-11 is a Wednesday.
     let noon = ms(date(2026, 11, 11).at(12, 0, 0, 0));
