@@ -11,7 +11,7 @@ legacy}` plus `vpnte_core::LOCALES`. Shared types used below come from `vpnte_ba
 `AppError` / `ErrorKind` / `AppResult`, `Msg`, `types::{UnixMs, now_ms, Owner, ProxyKind, Creds,
 KillSwitchLevel, EnginePref}`, `i18n::Lang`. The crate has no cargo features.
 
-**Elevation: nothing here needs it** (everything works in `--no-elevate` mode). DPAPI runs as the
+**Elevation: nothing here needs it** (everything works without administrator rights). DPAPI runs as the
 current user; files are written only where the caller points (the app: under the data dir), the
 legacy dir is only read, and nothing touches the registry, firewall, routes or services. Tests use
 temp dirs only; the one test that needs the internet (`resolve::tests::live_resolvers`) is
@@ -97,7 +97,7 @@ impl<T: Document> Store<T> {
                                         // problems become a read-only Mode or a notice; removes the
                                         // <name>.<16 hex>.tmp leftovers of a write that crashed before its rename
     pub fn path(&self) -> &Path;
-    pub fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R;   // lock held only during f
+    pub fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R;   // lock held only during f (no update inside f)
     pub fn snapshot(&self) -> T;
     pub fn update<R>(&self, f: impl FnOnce(&mut T) -> R) -> AppResult<R>; // copy → f → equal? no write :
                                         // write_atomic → swap → notify; f must not call update on the same store
@@ -149,7 +149,8 @@ pub const CHECK_INTERVAL_MS: (u32, u32) = (5_000, 300_000);     // clamp ranges
 pub const DEEP_INSPECTION_MAX_MB: (u32, u32) = (128, 2_048);
 pub const RULE_SET_UPDATE_HOURS: (u32, u32) = (1, 720);
 pub enum ConnectionMode { LocalProxy /*default*/, DirectVpn }   // JSON "localProxy" / "directVpn"
-pub enum RoutingMode { Hard /*default*/, Soft }
+pub enum RoutingMode { Hard /*default*/, Soft }                 // Hard = TUN (needs elevation); Soft = loopback
+                                        // proxy + per-user system proxy (no admin); the wizard picks Soft unelevated
 pub enum BootstrapRouteMode { Auto /*default*/, Direct, LocalProxy }
 pub enum RuleSetMode { Bundled /*default*/, Managed }
 pub enum NotifyMethod { System /*default*/, InApp, Both }       // "system" / "inapp" / "both"
@@ -180,7 +181,7 @@ pub struct Settings {                            // JSON camelCase; Document FIL
     pub smart_ru_rule_set_update_hours: u32,     // 24
     pub proxy_engine: EnginePref,                // Auto
     pub locale: Option<Lang>,                    // None = follow Windows
-    pub active_theme_id: String,                 // "builtin-system"
+    pub active_theme_id: String,                 // "builtin-dark" (the design's reference is dark)
     pub notifications: NotificationPrefs,        // every switch on, method System, sound on
     pub ui: UiPrefs,
     pub log_key: Option<Secret>,                 // log pseudonym key (ensure_log_key); never export it
@@ -387,7 +388,9 @@ Poisoned (NXDOMAIN with AA, or only block-page addresses: unspecified, loopback,
 link-local, multicast, class E) counts as a failure and moves on; block-page addresses are
 dropped next to real ones (private and CGNAT stay). All upstreams missing = the most telling
 error (`Filtered` > `NotFound` > `Poisoned` > `Failed`), never an empty success.
-`keep = net::is_public_ip` refuses private answers too (subscriptions).
+`keep = net::is_public_ip` refuses private answers too (subscriptions). Debug log lines name an
+upstream by its index in that order (`upstream = 0..8`; the log masks URLs and public IPs) with
+the transport's cause chain (`resolver unreachable`) or the verdict (`no usable address`).
 
 `resolve_server` (before an engine dials a server name): the chain, then the OS resolver
 (mobile whitelists may leave only the ISP's DNS; a block-page-only OS answer = `Poisoned`; the

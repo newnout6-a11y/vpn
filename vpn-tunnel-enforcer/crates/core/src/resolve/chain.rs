@@ -34,7 +34,8 @@ const fn tcp53(a: u8, b: u8, c: u8, d: u8) -> Upstream {
 /// Production order. IP-literal DoH first: it needs no DNS of its own and sends no SNI to filter
 /// on (each certificate carries the address; Quad9 answers over HTTP/2 only). DoH by name next:
 /// other addresses, and Yandex stays reachable from RU networks. TCP/53 last: plaintext, but
-/// left alone by the 2026 redirect.
+/// left alone by the 2026 redirect. Log lines name an upstream by its index here (`upstream`):
+/// the log masks URLs and public addresses, which would make every upstream look the same.
 pub(super) const UPSTREAMS: [Upstream; 9] = [
     Upstream::Doh("https://1.1.1.1/dns-query"),
     Upstream::Doh("https://9.9.9.9/dns-query"),
@@ -53,14 +54,14 @@ pub(super) const UPSTREAM_LIMIT: Duration = Duration::from_secs(3);
 /// How long the second record type may lag once the first one brought addresses.
 const GRACE: Duration = Duration::from_millis(300);
 
-/// Sends one wire-format question; the raw reply, or `None` on any transport failure (the
-/// transport logs why).
+/// Sends one wire-format question and returns the raw reply; the error says why the upstream
+/// could not be reached (the chain logs it).
 pub(super) trait Transport: Sync {
     fn exchange(
         &self,
         upstream: Upstream,
         query: &[u8],
-    ) -> impl Future<Output = Option<Vec<u8>>> + Send;
+    ) -> impl Future<Output = anyhow::Result<Vec<u8>>> + Send;
 }
 
 /// Upstreams in order, the transport that reaches them and the remembered winner.
@@ -148,9 +149,9 @@ impl<T: Transport> Chain<T> {
         let Some(&upstream) = self.upstreams.get(index) else {
             return (index, Err(ResolveError::Failed));
         };
-        let verdict = judge(self.both(upstream, name).await, keep);
+        let verdict = judge(self.both(index, upstream, name).await, keep);
         if let Err(miss) = verdict {
-            tracing::debug!(?upstream, ?miss, "resolver gave no usable address");
+            tracing::debug!(upstream = index, ?miss, "resolver gave no usable address");
         }
         (index, verdict)
     }
@@ -158,10 +159,10 @@ impl<T: Transport> Chain<T> {
     /// `[A, AAAA]` asked at once. Once one family brought addresses the other gets only a short
     /// grace (RFC 8305 §3): paths that drop AAAA (seen on a VPN client's DNS interception) must
     /// not stall the lookup, nor cost the answer already in hand.
-    async fn both(&self, upstream: Upstream, name: &str) -> [Option<Reply>; 2] {
+    async fn both(&self, index: usize, upstream: Upstream, name: &str) -> [Option<Reply>; 2] {
         let deadline = Instant::now() + self.limit;
-        let a = self.question(upstream, name, Record::A);
-        let aaaa = self.question(upstream, name, Record::Aaaa);
+        let a = self.question(index, upstream, name, Record::A);
+        let aaaa = self.question(index, upstream, name, Record::Aaaa);
         tokio::pin!(a, aaaa);
         let first = timeout_at(deadline, async {
             tokio::select! {
@@ -183,13 +184,26 @@ impl<T: Transport> Chain<T> {
         }
     }
 
-    async fn question(&self, upstream: Upstream, name: &str, record: Record) -> Option<Reply> {
+    async fn question(
+        &self,
+        index: usize,
+        upstream: Upstream,
+        name: &str,
+        record: Record,
+    ) -> Option<Reply> {
         // A fresh id per question: on plaintext TCP/53 the reply must answer this very query.
         let query = wire::query(fastrand::u16(..), name, record)?;
-        let raw = self.transport.exchange(upstream, &query).await?;
+        let raw = match self.transport.exchange(upstream, &query).await {
+            Ok(raw) => raw,
+            Err(err) => {
+                // `{:#}`: the cause chain (TLS reset, connect timeout), not just "error sending".
+                tracing::debug!(upstream = index, ?record, error = %format_args!("{err:#}"), "resolver unreachable");
+                return None;
+            }
+        };
         let reply = wire::parse(&raw, &query, record);
         if reply.is_none() {
-            tracing::debug!(?upstream, "not a DNS reply to our question");
+            tracing::debug!(upstream = index, "not a DNS reply to our question");
         }
         reply
     }

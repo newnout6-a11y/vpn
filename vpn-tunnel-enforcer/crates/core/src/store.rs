@@ -102,7 +102,8 @@ impl<T: Document> Store<T> {
         &self.path
     }
 
-    /// Runs `f` on the current document (the lock is held only for the duration of `f`).
+    /// Runs `f` on the current document (the lock is held only for the duration of `f`, so `f`
+    /// must not call [`Store::update`] on the same store: that would deadlock).
     pub fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {
         f(&self.state.read())
     }

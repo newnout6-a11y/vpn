@@ -150,6 +150,32 @@ mod tests {
         assert_eq!(e.kind, ErrorKind::Internal);
     }
 
+    /// The canonical sentence of every kind exists in both of this crate's locale fragments.
+    #[test]
+    fn every_kind_has_a_canonical_sentence() {
+        let kinds = [
+            ErrorKind::Validation,
+            ErrorKind::Permission,
+            ErrorKind::Network,
+            ErrorKind::Conflict,
+            ErrorKind::Internal,
+            ErrorKind::Cancelled,
+            ErrorKind::Timeout,
+        ];
+        for json in [
+            include_str!("../locales/base.ru.json"),
+            include_str!("../locales/base.en.json"),
+        ] {
+            let doc: serde_json::Value = serde_json::from_str(json).unwrap();
+            let errors = doc["errors"].as_object().unwrap();
+            assert_eq!(errors.len(), kinds.len());
+            for kind in kinds {
+                let leaf = kind.i18n_key().trim_start_matches("errors.");
+                assert!(errors[leaf].is_string(), "{kind:?}");
+            }
+        }
+    }
+
     #[test]
     fn user_message_falls_back_to_the_kind() {
         assert_eq!(AppError::timeout().user_msg().key, "errors.timeout");

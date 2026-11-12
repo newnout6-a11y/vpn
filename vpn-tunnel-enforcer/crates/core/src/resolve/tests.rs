@@ -58,20 +58,21 @@ impl Fake {
 }
 
 impl Transport for Fake {
-    async fn exchange(&self, upstream: Upstream, query: &[u8]) -> Option<Vec<u8>> {
+    async fn exchange(&self, upstream: Upstream, query: &[u8]) -> anyhow::Result<Vec<u8>> {
         self.asked.lock().push(upstream);
-        match self.acts.get(&upstream)?.clone() {
-            Act::Answer { rcode, aa, addrs } => Some(answer(query, rcode, aa, &addrs)),
-            Act::Fail => None,
+        let act = self.acts.get(&upstream).cloned();
+        match act.ok_or_else(|| anyhow::anyhow!("unknown fake upstream"))? {
+            Act::Answer { rcode, aa, addrs } => Ok(answer(query, rcode, aa, &addrs)),
+            Act::Fail => anyhow::bail!("fake transport failure"),
             Act::Hang => std::future::pending().await,
             Act::DropsAaaa(addrs) => match query[query.len() - 3] {
                 28 => std::future::pending().await,
-                _ => Some(answer(query, wire::NOERROR, false, &addrs)),
+                _ => Ok(answer(query, wire::NOERROR, false, &addrs)),
             },
             Act::Stray => {
                 let mut reply = answer(query, 0, false, &addrs_of(&["203.0.113.66"]));
                 reply[0] ^= 0xff;
-                Some(reply)
+                Ok(reply)
             }
         }
     }

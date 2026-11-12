@@ -10,8 +10,9 @@ pub fn init_tls() {
 
 /// Client builder with the app defaults: no system proxy, no redirects, bounded timeouts.
 ///
-/// WHY no system proxy: in soft mode the app itself sets the user's proxy environment; our own
-/// requests must not loop through it unless a caller routes them explicitly.
+/// WHY no system proxy: in Soft mode the app points the per-user system proxy and the proxy
+/// environment variables at its own engine; our own requests must not loop through it unless a
+/// caller routes them explicitly.
 pub fn client_builder(timeout: Duration) -> reqwest::ClientBuilder {
     init_tls();
     reqwest::Client::builder()

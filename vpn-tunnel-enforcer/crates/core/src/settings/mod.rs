@@ -43,14 +43,15 @@ pub enum ConnectionMode {
     DirectVpn,
 }
 
-/// How traffic is captured.
+/// How traffic is captured (no-admin model: `Hard` = `Capture::Tun`, `Soft` = `Capture::Proxy`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RoutingMode {
-    /// Full TUN: every app goes through the tunnel.
+    /// TUN: every app goes through the tunnel; needs the app to run elevated.
     #[default]
     Hard,
-    /// No TUN: apps are pointed at the local proxy.
+    /// No TUN: the engine listens on a loopback proxy and the per-user system proxy points at it;
+    /// works without administrator rights, programs that ignore the system proxy go direct.
     Soft,
 }
 
@@ -143,6 +144,7 @@ pub struct Settings {
     /// Opt-in proxy baseline: clear system / environment proxies while connected.
     pub auto_network_baseline: bool,
     /// Kill-switch level; replaces the old boolean mirror `firewallKillSwitch` (owner decision D-16).
+    /// WFP filters in Hard; in Soft it acts through the system proxy and `Strict` is unavailable.
     pub kill_switch: KillSwitchLevel,
     /// Show destructive maintenance options.
     pub advanced_mode: bool,
@@ -154,7 +156,7 @@ pub struct Settings {
     pub desktop_notifications: bool,
     /// Safer TUN MTU (1380) for networks that drop large packets.
     pub public_wifi_compatibility: bool,
-    /// Packet capture to disk; explicit opt-in only.
+    /// Packet capture to disk; explicit opt-in only, and only while the app runs elevated.
     pub deep_inspection: bool,
     /// Capture size limit in MB, [`DEEP_INSPECTION_MAX_MB`].
     pub deep_inspection_max_mb: u32,

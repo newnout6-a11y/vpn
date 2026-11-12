@@ -5,6 +5,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -42,45 +43,34 @@ impl Net {
 }
 
 impl Transport for Net {
-    async fn exchange(&self, upstream: Upstream, query: &[u8]) -> Option<Vec<u8>> {
+    async fn exchange(&self, upstream: Upstream, query: &[u8]) -> anyhow::Result<Vec<u8>> {
         match upstream {
-            Upstream::Doh(url) => doh(self.client.as_ref()?, url, query).await,
-            Upstream::Tcp(server) => match tcp(server, query).await {
-                Ok(reply) => Some(reply),
-                Err(err) => {
-                    tracing::debug!(%server, error = %err, "DNS over TCP failed");
-                    None
-                }
-            },
+            Upstream::Doh(url) => {
+                let client = self.client.as_ref().context("no DoH client")?;
+                doh(client, url, query).await
+            }
+            Upstream::Tcp(server) => Ok(tcp(server, query).await?),
         }
     }
 }
 
 /// One RFC 8484 POST.
-pub(super) async fn doh(client: &reqwest::Client, url: &str, query: &[u8]) -> Option<Vec<u8>> {
-    let sent = client
+pub(super) async fn doh(
+    client: &reqwest::Client,
+    url: &str,
+    query: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let response = client
         .post(url)
         .header(ACCEPT, MESSAGE)
         .header(CONTENT_TYPE, MESSAGE)
         .body(query.to_vec())
         .send()
-        .await;
-    let response = match sent {
-        Ok(response) => response,
-        Err(err) => {
-            tracing::debug!(url, error = %err.without_url(), "DoH request failed");
-            return None;
-        }
-    };
-    if !response.status().is_success() {
-        tracing::debug!(url, status = %response.status(), "DoH request refused");
-        return None;
-    }
-    let body = read_capped(response, BODY_CAP).await;
-    if body.is_none() {
-        tracing::debug!(url, "DoH body unreadable or too large");
-    }
-    body
+        .await
+        .map_err(reqwest::Error::without_url)?;
+    let status = response.status();
+    anyhow::ensure!(status.is_success(), "DoH refused with HTTP {status}");
+    read_capped(response, BODY_CAP).await
 }
 
 /// One question over a fresh TCP connection.
@@ -101,16 +91,18 @@ pub(super) async fn tcp(server: SocketAddr, query: &[u8]) -> io::Result<Vec<u8>>
     Ok(reply)
 }
 
-/// The body, or `None` when reading fails or it exceeds `cap` bytes.
-async fn read_capped(mut response: reqwest::Response, cap: usize) -> Option<Vec<u8>> {
+/// The body; refused when it exceeds `cap` bytes.
+async fn read_capped(mut response: reqwest::Response, cap: usize) -> anyhow::Result<Vec<u8>> {
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.ok()? {
-        if body.len() + chunk.len() > cap {
-            return None;
-        }
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(reqwest::Error::without_url)?
+    {
+        anyhow::ensure!(body.len() + chunk.len() <= cap, "DoH body over {cap} bytes");
         body.extend_from_slice(&chunk);
     }
-    Some(body)
+    Ok(body)
 }
 
 #[cfg(test)]

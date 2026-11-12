@@ -61,8 +61,8 @@ fn client() -> reqwest::Client {
 #[tokio::test]
 async fn doh_posts_the_wire_question() {
     let (url, seen) = doh_server(200, b"\x12\x34reply".to_vec()).await;
-    let reply = doh(&client(), &url, b"\x12\x34question").await;
-    assert_eq!(reply.as_deref(), Some(&b"\x12\x34reply"[..]));
+    let reply = doh(&client(), &url, b"\x12\x34question").await.unwrap();
+    assert_eq!(reply, b"\x12\x34reply");
     let seen = seen.lock();
     assert!(
         seen.head.starts_with("post /dns-query http/1.1"),
@@ -82,17 +82,24 @@ async fn doh_posts_the_wire_question() {
     assert_eq!(seen.body, b"\x12\x34question");
 }
 
+/// Every refusal is an error that says why, with the cause chain (what the debug log shows).
 #[tokio::test]
 async fn doh_refuses_errors_and_oversized_bodies() {
+    let why = |r: anyhow::Result<Vec<u8>>| format!("{:#}", r.unwrap_err());
     let (url, _) = doh_server(502, b"busy".to_vec()).await;
-    assert_eq!(doh(&client(), &url, b"q").await, None);
+    assert!(why(doh(&client(), &url, b"q").await).contains("HTTP 502"));
     let (url, _) = doh_server(200, vec![0u8; BODY_CAP + 1]).await;
-    assert_eq!(doh(&client(), &url, b"q").await, None);
+    assert!(why(doh(&client(), &url, b"q").await).contains("over 65536 bytes"));
     let closed = {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         format!("http://{}/dns-query", listener.local_addr().unwrap())
     };
-    assert_eq!(doh(&client(), &closed, b"q").await, None);
+    let refused = why(doh(&client(), &closed, b"q").await);
+    assert!(refused.starts_with("error sending request: "), "{refused}");
+    assert!(
+        !refused.contains("127.0.0.1"),
+        "no URL in the error: {refused}"
+    );
 }
 
 /// RFC 1035 §4.2.2: two-byte length prefix both ways.

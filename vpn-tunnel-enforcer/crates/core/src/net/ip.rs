@@ -4,10 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Strips the IPv4-mapped form: `::ffff:a.b.c.d` → `a.b.c.d`; anything else is returned as is.
 pub fn unmap(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
-        IpAddr::V4(_) => ip,
-    }
+    ip.to_canonical()
 }
 
 /// True when `ip` is a globally routable unicast address. IPv6 forms that carry an IPv4
