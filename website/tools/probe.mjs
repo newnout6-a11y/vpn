@@ -25,6 +25,6 @@ await new Promise((r) => srv.listen(0, '127.0.0.1', r))
 const [, , path = '/', expr = 'document.title', w = '1440'] = process.argv
 const b = await puppeteer.launch({ executablePath: process.env.CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', headless: true, args: ['--no-sandbox'] })
 const p = await b.newPage(); await p.setViewport({ width: +w, height: 900 })
-await p.goto(`http://localhost:${srv.address().port}${path}`, { waitUntil: 'networkidle0' }); await new Promise((r) => setTimeout(r, 1500))
+await p.goto(`http://127.0.0.1:${srv.address().port}${path}`, { waitUntil: 'networkidle0' }); await new Promise((r) => setTimeout(r, 1500))
 console.log(JSON.stringify(await p.evaluate(expr), null, 1))
 await b.close(); srv.close()

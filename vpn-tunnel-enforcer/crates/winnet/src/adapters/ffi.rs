@@ -234,7 +234,8 @@ pub(super) fn inet_ip(s: &SOCKADDR_INET) -> Option<IpAddr> {
     }
 }
 
-/// An address as `SOCKADDR_INET` with port, flow info, scope and padding zero (GetBestRoute2 input).
+/// An address as `SOCKADDR_INET` with port, flow info, scope and padding zero (GetBestRoute2
+/// input).
 pub(super) fn inet_from(ip: IpAddr) -> SOCKADDR_INET {
     let mut s = SOCKADDR_INET::default();
     match ip {
@@ -422,7 +423,8 @@ pub(super) fn luid_alias(luid: u64) -> windows::core::Result<String> {
     let id = NET_LUID_LH { Value: luid };
     // NDIS_IF_MAX_STRING_SIZE + 1.
     let mut buf = [0u16; 257];
-    // SAFETY: `id` is a valid LUID value and `buf` is a writable UTF-16 buffer of its stated length.
+    // SAFETY: `id` is a valid LUID value and `buf` is a writable UTF-16 buffer of its stated
+    // length.
     unsafe { ConvertInterfaceLuidToAlias(&id, &mut buf) }.ok()?;
     Ok(from_wide(&buf))
 }
