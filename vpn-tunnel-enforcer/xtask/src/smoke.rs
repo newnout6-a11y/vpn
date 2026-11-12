@@ -335,41 +335,33 @@ fn check_engines(root: &Path, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `--no-elevate --smoke` must exit 0 after one line; without that flag (yet), `--version` must answer.
+/// `--no-elevate --smoke` must exit 0 within the deadline after exactly one line naming the
+/// version: a hang is a failure, never a fallback to something weaker.
 fn check_app(dir: &Path, version: &str) -> Result<()> {
     let exe = dir.join(EXE);
     let data = env::temp_dir().join("vpnte-smoke-data");
     let data = data.to_string_lossy();
     let envs = [("VPNTE_NO_ELEVATE", "1"), ("VPNTE_DATA_DIR", data.as_ref())];
-    match run_bounded(
+    let result = run_bounded(
         &exe,
         &["--no-elevate", "--smoke"],
         &envs,
         Duration::from_secs(60),
-    )? {
+    )?;
+    let _ = fs::remove_dir_all(env::temp_dir().join("vpnte-smoke-data"));
+    match result {
         Some((0, out)) => {
             let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
             ensure!(
-                lines.len() == 1,
-                "--smoke must print exactly one line, printed {lines:?}"
+                lines.len() == 1 && lines[0].contains(version),
+                "--smoke must print exactly one line with version {version}, printed {lines:?}"
             );
             println!("  app --smoke: {}", lines[0]);
+            Ok(())
         }
-        Some((code, _)) => bail!("--no-elevate --smoke exited with {code}"),
-        None => {
-            println!(
-                "  --smoke did not exit within 60 s (not implemented yet?): falling back to --version"
-            );
-            match run_bounded(&exe, &["--version"], &envs, Duration::from_secs(30))? {
-                Some((0, out)) if out.contains(version) => {
-                    println!("  app --version: {}", out.trim())
-                }
-                other => bail!("--version: unexpected result {other:?}"),
-            }
-        }
+        Some((code, out)) => bail!("--no-elevate --smoke exited with {code}: {}", out.trim()),
+        None => bail!("--no-elevate --smoke did not exit within 60 s"),
     }
-    let _ = fs::remove_dir_all(env::temp_dir().join("vpnte-smoke-data"));
-    Ok(())
 }
 
 /// Nothing of the product is left: install dir, both HKCU keys, both shortcuts; and nothing machine-wide appeared.
