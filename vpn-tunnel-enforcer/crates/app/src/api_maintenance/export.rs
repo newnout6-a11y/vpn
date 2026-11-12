@@ -107,11 +107,23 @@ pub(crate) async fn run(
         .map(Some)
 }
 
-async fn pack(
+pub(crate) async fn pack(
     shared: Arc<Shared>,
     dest: PathBuf,
     cancel: CancellationToken,
 ) -> AppResult<ExportDone> {
+    // Running from the first moment, and Cancel works from it: gathering the inputs runs the
+    // engines' `version` (each bounded, sing-box 10 s and Xray 5 s, in parallel).
+    publish(&shared, Some(ExportProgress::default()));
+    let inputs = tokio::select! {
+        biased;
+        () = cancel.cancelled() => None,
+        inputs = inputs(&shared) => Some(inputs),
+    };
+    let Some(inputs) = inputs else {
+        publish(&shared, None);
+        return Err(AppError::cancelled());
+    };
     let (progress, mut stages) = watch::channel(ExportProgress::default());
     // The only notice the export sends: its temporary files could not be removed.
     let cleanup_failed = Arc::new(AtomicBool::new(false));
@@ -119,12 +131,11 @@ async fn pack(
     let notices: NoticeSink = Arc::new(move |_| flag.store(true, Ordering::Relaxed));
     let request = ExportRequest {
         dest,
-        inputs: inputs(&shared).await,
+        inputs,
         source: Source::Ui,
         progress,
         notices: Some(notices),
     };
-    publish(&shared, Some(ExportProgress::default()));
     let state = shared.clone();
     let forward = tokio::spawn(async move {
         while stages.changed().await.is_ok() {

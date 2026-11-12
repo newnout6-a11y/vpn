@@ -405,3 +405,19 @@ async fn the_export_claim_lives_as_long_as_the_detached_pack() {
     }
     panic!("the claim outlived the pack");
 }
+
+/// Cancel works from the first moment of the pack, while the engines' `version` runs are still
+/// gathered: the export ends Cancelled, writes nothing, and the page shows it idle again.
+#[tokio::test]
+async fn an_export_cancelled_while_gathering_writes_nothing() {
+    let r = rig("export-cancel-early");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let dest = r._dir.0.join("diag.zip");
+    let err = crate::api_maintenance::export::pack(r.shared.clone(), dest.clone(), cancel)
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Cancelled);
+    assert!(!dest.exists(), "nothing written");
+    assert!(!r.shared.state.borrow().export.running, "idle again");
+}
