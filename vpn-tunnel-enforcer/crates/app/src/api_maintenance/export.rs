@@ -61,6 +61,21 @@ impl Drop for ExportClaim {
     }
 }
 
+/// Runs `work` in its own task that holds `claim` until the work ends: a page that goes away
+/// without cancelling stops neither the archive nor the claim, so a second export stays refused
+/// until this one is done (before the pack registers its operation, nothing else marks it busy).
+pub(crate) async fn in_background<T, Fut>(claim: ExportClaim, work: Fut) -> AppResult<T>
+where
+    T: Send + 'static,
+    Fut: Future<Output = AppResult<T>> + Send + 'static,
+{
+    detached(async move {
+        let _claim = claim;
+        work.await
+    })
+    .await
+}
+
 /// Asks for the destination and packs the archive; `Ok(None)` = the dialog was dismissed.
 pub(crate) async fn run(
     shared: Arc<Shared>,
@@ -72,7 +87,7 @@ pub(crate) async fn run(
     if shared.backend.ops.is_busy(RESOURCE) || shared.state.borrow().export.running {
         return Err(refused("core.ops.busy"));
     }
-    let Some(_claim) = ExportClaim::take(shared.clone()) else {
+    let Some(claim) = ExportClaim::take(shared.clone()) else {
         return Err(refused("core.ops.busy"));
     };
     let backend = &shared.backend;
@@ -87,8 +102,9 @@ pub(crate) async fn run(
     let Some(dest) = save_file(file, lang).await? else {
         return Ok(None);
     };
-    // Its own task: a page that goes away without cancelling does not stop the archive.
-    detached(pack(shared, dest, cancel)).await.map(Some)
+    in_background(claim, pack(shared, dest, cancel))
+        .await
+        .map(Some)
 }
 
 async fn pack(

@@ -456,6 +456,8 @@ mod archive {
         let proxy = "socks5://user:FAKE-SECRET@203.0.113.5:1080";
         let proxy = vpnte_core::settings::ProxyOverride::parse(proxy).unwrap().0;
         settings.proxy_override = Some(proxy);
+        // A real install has a pseudonym key: the archive must leave it out, not seal it.
+        settings.log_key = Some(vpnte_core::secret::Secret::new("ab".repeat(32)));
         let config = json!({"outbounds":[{"server":"203.0.113.5","password":"FAKE-SECRET"}]});
         let inputs = ExportInputs {
             app_version: "2.0.0".into(),

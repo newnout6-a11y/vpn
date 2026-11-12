@@ -394,8 +394,18 @@ fn the_pipe_admits_the_user_at_medium_integrity() {
         LocalFree(Some(HLOCAL(text.0.cast())));
         sddl
     };
-    let owner = sddl[2..].split(['D', ':']).next().unwrap().to_owned();
-    assert!(owner.starts_with("S-1-5-"), "{sddl}");
+    let owner = sddl
+        .strip_prefix("O:")
+        .and_then(|rest| rest.split_once("D:"))
+        .map(|(owner, _)| owner.to_owned())
+        .unwrap_or_default();
+    // SDDL writes well-known accounts by alias (the built-in Administrator, which CI runners use,
+    // as `LA`): compare the SIDs, not their spellings.
+    assert_eq!(
+        sid_text(&owner),
+        security::user_sid().unwrap(),
+        "the owner is this user: {sddl}"
+    );
     assert!(
         sddl.contains(&format!(";;;{owner})")),
         "no grant for the user: {sddl}"
@@ -412,6 +422,26 @@ fn the_pipe_admits_the_user_at_medium_integrity() {
     let mut commands = first.take_commands().unwrap();
     send(&names.pipe, Command::ShutdownForUpdate, WAIT).unwrap();
     assert_eq!(commands.try_recv().unwrap(), Command::ShutdownForUpdate);
+}
+
+/// A SID in SDDL text (`S-1-5-…` or an alias such as `LA`) as its `S-1-5-…` form.
+fn sid_text(sid: &str) -> String {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW};
+    use windows::Win32::Security::PSID;
+    use windows::core::{HSTRING, PWSTR};
+
+    let mut psid = PSID::default();
+    let mut text = PWSTR::null();
+    // SAFETY: valid strings and out pointers; both buffers are freed once after reading.
+    unsafe {
+        ConvertStringSidToSidW(&HSTRING::from(sid), &mut psid).unwrap();
+        ConvertSidToStringSidW(psid, &mut text).unwrap();
+        let out = text.to_string().unwrap();
+        LocalFree(Some(HLOCAL(text.0.cast())));
+        LocalFree(Some(HLOCAL(psid.0)));
+        out
+    }
 }
 
 /// phones-a7 / b4: Windows starts a clicked link's launch unelevated. With the primary running as

@@ -233,8 +233,8 @@ impl Default for Settings {
             smart_ru_rule_set_update_hours: 24,
             proxy_engine: EnginePref::Auto,
             locale: None,
-            // The design and its reference capture are dark; "system" opened light on a light Windows.
-            active_theme_id: "builtin-dark".to_owned(),
+            // Follows the Windows light / dark setting (owner answer 11, 12.11.2026).
+            active_theme_id: "builtin-system".to_owned(),
             notifications: NotificationPrefs::default(),
             ui: UiPrefs::default(),
             log_key: None,

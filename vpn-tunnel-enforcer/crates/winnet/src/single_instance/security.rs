@@ -85,7 +85,7 @@ fn token_info(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> windows::core::R
 }
 
 /// This process's user as an SDDL SID string (`S-1-5-21-…`).
-fn user_sid() -> windows::core::Result<String> {
+pub(super) fn user_sid() -> windows::core::Result<String> {
     let token = win::process_token()?;
     let buf = token_info(*token, TokenUser)?;
     // SAFETY: GetTokenInformation(TokenUser) filled `buf` starting with a TOKEN_USER whose SID

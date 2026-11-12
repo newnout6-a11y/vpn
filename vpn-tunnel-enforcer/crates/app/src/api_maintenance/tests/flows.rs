@@ -375,3 +375,33 @@ async fn a_second_export_is_refused_while_the_first_asks_where_to_save() {
         "the claim is released with its holder"
     );
 }
+
+/// The claim goes with the detached pack: a page that goes away mid-export (its future dropped)
+/// does not free it, since nothing else marks the export busy before the pack registers.
+#[tokio::test]
+async fn the_export_claim_lives_as_long_as_the_detached_pack() {
+    use crate::api_maintenance::export::{ExportClaim, in_background};
+
+    let r = rig("export-detached");
+    let claim = ExportClaim::take(r.shared.clone()).expect("the export claims it");
+    let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+    let mut page = Box::pin(in_background(claim, async move {
+        let _ = finished.await;
+        Ok(())
+    }));
+    // The page polls once (the pack task starts), then goes away.
+    let _ = tokio::time::timeout(Duration::ZERO, &mut page).await;
+    drop(page);
+    assert!(
+        ExportClaim::take(r.shared.clone()).is_none(),
+        "the running pack still holds the claim"
+    );
+    let _ = finish.send(());
+    for _ in 0..200 {
+        if ExportClaim::take(r.shared.clone()).is_some() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the claim outlived the pack");
+}
