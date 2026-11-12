@@ -154,15 +154,26 @@ fn elevated_the_restart_queue_gets_the_tombstone_not_the_exe() {
     let (dir, exe, image) = in_use("queue");
     remove_or_schedule(&dir, &mut schedule);
     let queue = restart_queue();
+    // Windows stores the long path; the temp folder may be named in 8.3 form (`RUNNER~1` on the
+    // CI runner): compare the resolved long paths (resolved while the folder exists), ignoring
+    // case as Windows does.
+    let real = std::fs::canonicalize(&dir)
+        .expect("the folder exists")
+        .display()
+        .to_string();
+    let real = real.strip_prefix(r"\\?\").unwrap_or(&real).to_owned();
     free(&dir, image);
-    let nt = |p: &Path| format!(r"\??\{}", p.display());
-    let tombstone_prefix = nt(&dir.join(format!("{EXE_NAME}.")));
+    let nt = |p: &str| format!(r"\??\{p}").to_lowercase();
+    let queue: Vec<String> = queue.iter().map(|e| e.to_lowercase()).collect();
+    let (dir_nt, exe_nt) = (nt(&real), nt(&format!(r"{real}\{EXE_NAME}")));
+    let tombstone_prefix = format!("{exe_nt}.");
     assert!(
         queue
             .iter()
             .any(|e| e.starts_with(&tombstone_prefix) && e.ends_with(".deleted")),
         "no tombstone queued: {queue:?}"
     );
-    assert!(queue.contains(&nt(&dir)), "folder not queued");
-    assert!(!queue.contains(&nt(&exe)), "the exe's path was queued");
+    assert!(queue.contains(&dir_nt), "folder not queued");
+    assert!(!queue.contains(&exe_nt), "the exe's path was queued");
+    let _ = exe;
 }
