@@ -19,6 +19,14 @@ fn level_desc(level: KillSwitchLevel) -> String {
     }
 }
 
+/// Short badge of an exception's kind.
+fn kind_label(kind: ExceptionKind) -> String {
+    match kind {
+        ExceptionKind::App => t!("ui.settings.killSwitch.kindApp"),
+        ExceptionKind::Ip => t!("ui.settings.killSwitch.kindIp"),
+    }
+}
+
 /// Badge of the verified protection state.
 fn status_badge(status: &ProtectionStatus) -> (Tone, String) {
     match status {
@@ -125,13 +133,7 @@ fn Exceptions() -> Element {
                 ul { class: "set-list",
                     for item in exceptions {
                         li { key: "{item.id}", class: "set-list-row",
-                            Badge {
-                                tone: Tone::Neutral,
-                                match item.kind {
-                                    ExceptionKind::App => "APP",
-                                    ExceptionKind::Ip => "IP",
-                                }
-                            }
+                            Badge { tone: Tone::Neutral, {kind_label(item.kind)} }
                             div { class: "set-list-text",
                                 span { class: "set-list-title", "{item.label}" }
                                 span { class: "set-list-sub swiss-mono", title: "{item.value}", "{item.value}" }

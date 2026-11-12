@@ -57,7 +57,8 @@
         "intervalFailed": "Не удалось изменить частоту обновления",
         "renameFailed": "Не удалось переименовать группу",
         "deleteFailed": "Не удалось удалить группу «{{name}}»",
-        "deleteBody": "Что сделать с её серверами?"
+        "deleteBody": "Что сделать с её серверами?",
+        "panelFailed": "Не удалось открыть панель провайдера"
       },
       "live": {
         "route": {
@@ -227,17 +228,44 @@
         "tpStallsGap": "Stalls / макс. пауза:",
         "tpRoute": "Путь пробы:",
         "tpTtfb": "TTFB по пробам:",
-        "tpPause": "Пауза",
         "tpSpread": "Порог разброса < 40%",
         "tpStalls": "Stalls = 0",
         "tpGap": "Пауза < 750 ms",
         "tpComplete": "Полнота проб",
+        "latMin": "мин",
+        "latAvg": "сред",
+        "latMedian": "медиана",
+        "latMax": "макс",
+        "jitter": "Джиттер:",
+        "tpColProbe": "Проба",
+        "tpColMbps": "Mbps",
+        "tpColSize": "MiB",
+        "tpColTime": "Время",
+        "tpColTtfb": "TTFB",
+        "tpColStalls": "Stall",
+        "tpColPause": "Пауза",
+        "tpOk": "норма",
+        "tpWarn": "нестабильно",
+        "tpErr": "ошибка",
         "yes": "да",
         "no": "нет",
         "splitState": "Состояние:",
         "on": "включён",
         "off": "выключен",
-        "duplicates": "Повторяются: {{list}}"
+        "duplicates": "Повторяются: {{list}}",
+        "dot": {
+          "ok": "в порядке",
+          "warn": "есть замечания",
+          "fail": "ошибка",
+          "muted": "не проверялось"
+        },
+        "port": {
+          "open": "открыт",
+          "closed": "закрыт",
+          "filtered": "фильтруется",
+          "timeout": "таймаут"
+        },
+        "diffBadge": "Изменения"
       },
       "batch": {
         "label": {
@@ -271,6 +299,7 @@
         "colServer": "Сервер",
         "colMedian": "Медиана",
         "colSpread": "Разброс",
+        "colStalls": "Stalls",
         "colPath": "Путь",
         "colStatus": "Статус",
         "errors": "Не удалось проверить профилей: {{count}}. Причины доступны в логах и истории конкретного профиля.",

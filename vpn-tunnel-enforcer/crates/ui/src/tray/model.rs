@@ -382,8 +382,7 @@ pub enum CloseAction {
 
 impl TrayState {
     /// Protection counts as on for the close prompt: an engine of ours runs, the tunnel is
-    /// connected in any mode (Soft has no engine; the old app quit it without asking, §3.7) or an
-    /// operation is in flight.
+    /// connected (also while its engine is between restarts) or an operation is in flight.
     pub fn protection_on(&self) -> bool {
         self.engine_running || self.tunnel == TunnelState::Connected || self.transition.is_some()
     }

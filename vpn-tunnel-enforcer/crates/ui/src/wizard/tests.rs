@@ -150,7 +150,7 @@ fn walking_through_keeps_the_defaults() {
     assert!(!c.autostart);
     assert_eq!(c.kill_switch, KillSwitchLevel::Off);
     assert_eq!(c.connection, Connection::LocalProxy);
-    assert_eq!(c.routing, Routing::Hard);
+    assert_eq!(c.routing, Routing::Soft, "NOADMIN §0: Proxy mode unless elevated");
     assert_eq!(c.lang, Lang::Ru);
 }
 
@@ -171,25 +171,18 @@ fn the_kill_switch_level_is_sent_as_picked() {
     );
 }
 
-/// §3.19 mapping: Soft needs the local proxy (routingMode kept for hard/soft; a key session is
-/// always Hard); the Soft pick comes back when the user returns to the local proxy.
+/// NOADMIN §2: Proxy mode works with a key from the list as well as with a local proxy, so the
+/// pick is sent as made whatever the connection (the old wizard forced Tunnel with a key).
 #[test]
-fn soft_routing_needs_a_local_proxy() {
+fn either_routing_goes_with_either_connection() {
     let mut m = at(Step::Routing);
-    m.set_routing(Routing::Soft);
-    assert_eq!(m.choices().routing, Routing::Soft);
-    m.connection = Connection::Key;
-    assert!(!m.soft_allowed());
-    assert_eq!(m.routing(), Routing::Hard);
-    assert_eq!(m.choices().routing, Routing::Hard);
-    m.set_routing(Routing::Soft);
-    assert_eq!(
-        m.routing(),
-        Routing::Hard,
-        "Soft cannot be picked with a key"
-    );
-    m.connection = Connection::LocalProxy;
-    assert_eq!(m.routing(), Routing::Soft);
+    for connection in [Connection::Key, Connection::LocalProxy] {
+        m.connection = connection;
+        for routing in [Routing::Hard, Routing::Soft] {
+            m.routing = routing;
+            assert_eq!(m.choices().routing, routing, "{connection:?}");
+        }
+    }
 }
 
 /// W-8: detection runs once per wizard session (Back / Next does not rescan); «Искать снова»
@@ -308,7 +301,7 @@ async fn demo_finish_applies_only_changes_and_closes() {
     assert!(!state.open);
     assert_eq!(
         *api.log().borrow(),
-        ["settings: lang=en connection=local-proxy routing=hard kill=off first_run_complete"]
+        ["settings: lang=en connection=local-proxy routing=soft kill=off first_run_complete"]
     );
     api.reopen();
     assert!(api.state().borrow().open);

@@ -146,7 +146,7 @@ fn Sidebar(version: String) -> Element {
                 br {}
                 "Enforcer"
             }
-            div { class: "swiss-mono mt-2 text-[10px] text-[var(--mute)]",
+            div { class: "swiss-mono mt-1.5 text-[10px] text-[var(--mute)]",
                 "v{version} / {platform}"
             }
             nav { class: "mt-10 flex flex-col",
@@ -192,15 +192,17 @@ struct ClockTime {
 }
 
 impl ClockTime {
-    /// Now, in the Windows time zone (what the old renderer's `new Date()` showed).
+    /// Now, in the local zone through jiff (CONTRACT §3.6): the same zone source as the mascot's
+    /// greeting and the timestamps of the Logs page, so the sidebar never disagrees with them.
     fn now() -> ClockTime {
-        // SAFETY: no arguments; the function fills and returns a plain struct.
-        let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+        let t = jiff::Zoned::now().time();
+        // jiff's civil fields are bounded (hour < 24, minute and second < 60, ms < 1000).
+        let field = |v: i16| u16::try_from(v).unwrap_or_default();
         ClockTime {
-            hour: t.wHour,
-            minute: t.wMinute,
-            second: t.wSecond,
-            millis: t.wMilliseconds,
+            hour: field(t.hour().into()),
+            minute: field(t.minute().into()),
+            second: field(t.second().into()),
+            millis: field(t.millisecond()),
         }
     }
 

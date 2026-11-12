@@ -57,12 +57,16 @@ pub(super) fn Notifications() -> Element {
         _ => None,
     };
     let off = !view.enabled;
+    // One change at a time (single-flight slot): a click during a save would be dropped.
+    let saving = set_job.running();
+    let master_off = off.then(|| t!("ui.settings.notifications.masterOff"));
     rsx! {
         Panel { title: t!("notifications.title"), id: "set-notifications",
             Switch {
                 label: t!("ui.settings.notifications.master"),
                 hint: t!("ui.settings.notifications.masterHint"),
                 checked: view.enabled,
+                disabled: saving,
                 on_change: move |on| change.call(NotificationChange::Enabled(on)),
             }
             OsState { method: view.method }
@@ -73,8 +77,8 @@ pub(super) fn Notifications() -> Element {
                         key: "{event.key()}",
                         label: t!(&format!("notifications.{}", event.key())),
                         checked: view.event(event),
-                        disabled: off,
-                        disabled_reason: t!("ui.settings.notifications.masterOff"),
+                        disabled: off || saving,
+                        disabled_reason: master_off.clone(),
                         on_change: move |on| change.call(NotificationChange::Event(event, on)),
                     }
                 }
@@ -88,15 +92,15 @@ pub(super) fn Notifications() -> Element {
                         (NotifyMethod::Both, t!("notifications.methodBoth")),
                     ],
                     value: view.method,
-                    disabled: off,
+                    disabled: off || saving,
                     on_change: move |m| change.call(NotificationChange::Method(m)),
                 }
             }
             Switch {
                 label: t!("notifications.soundEnabled"),
                 checked: view.sound,
-                disabled: off,
-                disabled_reason: t!("ui.settings.notifications.masterOff"),
+                disabled: off || saving,
+                disabled_reason: master_off,
                 on_change: move |on| change.call(NotificationChange::Sound(on)),
             }
             ActionError { error }

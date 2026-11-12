@@ -22,9 +22,13 @@ pub(super) fn FormPanel(form: Signal<Option<ScheduleForm>>, servers: Vec<ServerC
     let days_label = use_dom_id("sched-days");
     // The form is drawn above the list: on open (and on switching to another schedule) move the
     // focus, and with it the view, to the name field. `initial_focus` alone acts in dialogs only.
+    // Switching also forgets the previous schedule's save: its late success must not close the
+    // form now open for another one, nor its error show there.
     let editing_id = use_memo(move || form.read().as_ref().and_then(|f| f.editing.clone()));
     use_effect(move || {
         editing_id.read();
+        save_job.cancel();
+        failure.set(None);
         let _ = document::eval("document.querySelector('.sched-form [data-w-autofocus]')?.focus()");
     });
     let Some(draft) = form.read().clone() else {

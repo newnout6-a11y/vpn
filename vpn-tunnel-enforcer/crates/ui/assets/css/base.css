@@ -359,10 +359,9 @@ body {
 /* theme tokens */
 :root {
   /* Light theme. Cards read as cards by being LIGHTER than the canvas, so the
-     canvas is tinted down and cards go near-white. Must stay numerically equal
-     to LIGHT_THEME in src/main/themeManager.ts — these are the values painted on
-     the first frame, before the theme IPC round-trip lands, and any drift shows
-     up as a colour flash at startup. */
+     canvas is tinted down and cards go near-white. Must stay equal to
+     Palette::LIGHT in theme.rs (tested, ui-dashboard §7.9), which the app writes
+     over these levels (<style id="theme-vars">) from the first frame on. */
   --rgb-bg: 230 233 240;
   --rgb-sidebar: 221 225 235;
   --rgb-card: 251 252 254;
@@ -377,36 +376,29 @@ body {
   --rgb-success: 30 155 60;
   --rgb-warning: 184 114 0;
   --rgb-danger: 198 45 35;
-  /* Distinct operation colour, independent of blue/green/warning states. */
-  --rgb-cancellation: 109 40 217;
 
   /* CSS-ready aliases */
   --color-bg: rgb(var(--rgb-bg));
   --color-card: rgb(var(--rgb-card));
-  --color-card-elevated: rgb(var(--rgb-card-elevated));
   --color-accent: rgb(var(--rgb-accent));
   --color-accent-hover: rgb(var(--rgb-accent-hover));
   --color-text: rgb(var(--rgb-text));
   --color-text-secondary: rgb(var(--rgb-text-secondary));
   --color-text-muted: rgb(var(--rgb-text-muted));
-  --color-sidebar: rgb(var(--rgb-sidebar));
   --color-border: rgb(var(--rgb-border));
   --color-border-strong: rgb(var(--rgb-border-strong));
   --color-success: rgb(var(--rgb-success));
   --color-warning: rgb(var(--rgb-warning));
   --color-danger: rgb(var(--rgb-danger));
-  --color-cancellation: rgb(var(--rgb-cancellation));
 
   /* Shared radius tokens */
   --radius-sm: 8px;
   --radius-md: 12px;
-  --radius-lg: 16px;
 
   /* Shared shadow tokens — soft, layered */
   --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.06), 0 4px 12px rgba(15, 23, 42, 0.07);
   --shadow-card-hover: 0 2px 6px rgba(15, 23, 42, 0.08), 0 12px 28px rgba(15, 23, 42, 0.11);
   --shadow-modal: 0 8px 32px rgba(15, 23, 42, 0.16);
-  --shadow-toast: 0 4px 16px rgba(15, 23, 42, 0.12);
   --shadow-button: 0 1px 0 rgba(255, 255, 255, 0.5) inset, 0 1px 2px rgba(15, 23, 42, 0.08);
   --shadow-button-hover: 0 1px 0 rgba(255, 255, 255, 0.6) inset, 0 4px 10px rgba(15, 23, 42, 0.12);
 
@@ -417,11 +409,6 @@ body {
   --glass-bg: rgb(var(--rgb-card));
   --glass-border: rgb(var(--rgb-border));
 
-  /* Accent glow — lighter in light mode */
-  --glow-accent: 0 0 20px rgb(var(--rgb-accent) / 0.15);
-  --glow-success: 0 0 20px rgb(var(--rgb-success) / 0.15);
-  --glow-danger: 0 0 20px rgb(var(--rgb-danger) / 0.15);
-
   /* Subtle gradient background for depth */
   --gradient-bg: radial-gradient(ellipse 70% 50% at 50% -10%, rgb(var(--rgb-accent) / 0.04), transparent),
                  radial-gradient(ellipse 50% 40% at 80% 110%, rgb(var(--rgb-success) / 0.03), transparent);
@@ -429,15 +416,13 @@ body {
   /* Shared transition tokens */
   --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
   --transition-normal: 200ms cubic-bezier(0.4, 0, 0.2, 1);
-  --transition-slow: 300ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* theme tokens */
 [data-theme="dark"] {
   /* Dark Modern (VS Code) surfaces, text and accent — neutral greys, no blue
-     cast, and a rail that sits genuinely darker than the canvas. Must stay
-     numerically equal to DARK_THEME in src/main/themeManager.ts, which carries
-     the mapping back to the original theme keys. */
+     cast, and a rail that sits genuinely darker than the canvas. Must stay equal
+     to Palette::DARK in theme.rs (tested, like the light levels). */
   --rgb-bg: 31 31 31;
   --rgb-sidebar: 24 24 24;
   --rgb-card: 45 45 45;
@@ -456,7 +441,6 @@ body {
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 12px rgba(0, 0, 0, 0.4);
   --shadow-card-hover: 0 2px 8px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.5);
   --shadow-modal: 0 12px 40px rgba(0, 0, 0, 0.6);
-  --shadow-toast: 0 6px 20px rgba(0, 0, 0, 0.5);
   --shadow-button: 0 1px 0 rgba(255, 255, 255, 0.08) inset, 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-button-hover: 0 1px 0 rgba(255, 255, 255, 0.12) inset, 0 4px 12px rgba(0, 0, 0, 0.5);
 
@@ -466,11 +450,6 @@ body {
      because there is nothing lighter for it to darken. */
   --glass-bg: rgb(var(--rgb-card));
   --glass-border: rgb(var(--rgb-border));
-
-  /* Accent glow for connected/active states */
-  --glow-accent: 0 0 24px rgb(var(--rgb-accent) / 0.35);
-  --glow-success: 0 0 24px rgb(var(--rgb-success) / 0.3);
-  --glow-danger: 0 0 24px rgb(var(--rgb-danger) / 0.3);
 
   /* Animated gradient for background depth */
   --gradient-bg: radial-gradient(ellipse 80% 60% at 50% -10%, rgb(var(--rgb-accent) / 0.06), transparent),

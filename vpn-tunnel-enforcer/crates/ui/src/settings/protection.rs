@@ -2,7 +2,7 @@
 //! (instant: retry / reset) and the privacy actions ([`super::privacy`]).
 use dioxus::prelude::*;
 
-use super::model::AdaptivePhase;
+use super::model::{AdaptivePhase, RoutingMode};
 use super::privacy::{BrowserProtection, LocationPrivacy};
 use super::{ActionError, use_api, use_ctx};
 use crate::lang::tr;
@@ -13,6 +13,14 @@ use crate::widgets::{Button, ButtonKind, Panel, Switch, use_job};
 pub(super) fn Protection() -> Element {
     let ctx = use_ctx();
     let view = ctx.view();
+    // Proxy capture puts no WFP filters in place (NOADMIN §2): the switch is kept for Tunnel mode
+    // and says so instead of looking like it protects now.
+    let proxy_mode = view.routing_mode == RoutingMode::Soft;
+    let leak_hint = if proxy_mode {
+        t!("ui.settings.protection.leakTunnelOnly")
+    } else {
+        t!("ui.settings.protection.leakHint")
+    };
     rsx! {
         Panel { title: t!("ui.settings.protection.title"), id: "set-protection",
             div { class: "set-note",
@@ -23,8 +31,9 @@ pub(super) fn Protection() -> Element {
             }
             Switch {
                 label: t!("ui.settings.protection.leak"),
-                hint: t!("ui.settings.protection.leakHint"),
+                hint: leak_hint,
                 checked: view.leak_protection,
+                disabled: proxy_mode,
                 on_change: move |on| ctx.edit(|p| p.leak_protection = Some(on)),
             }
             Switch {

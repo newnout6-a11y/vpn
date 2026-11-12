@@ -10,8 +10,6 @@
         "hoursMinutes": "{{h}} h {{m}} min",
         "minutesSeconds": "{{m}} min {{s}} s",
         "seconds": "{{s}} s",
-        "mb": "{{n}} MB",
-        "gb": "{{n}} GB",
         "mbShort": "MB",
         "min": "min",
         "sec": "s"
@@ -70,6 +68,7 @@
         "disguiseAuto": "Works automatically every time protection is on — no separate switch needed.",
         "leak": "Leak protection (recommended)",
         "leakHint": "While protection is on, IPv6 and DNS outside the tunnel are blocked by Windows filters. Network adapters are not changed.",
+        "leakTunnelOnly": "Tunnel mode only: Proxy mode sets no Windows filters, and programs that ignore the proxy go direct.",
         "wifi": "Public Wi-Fi compatibility (breaks less)",
         "wifiHint": "Until the tunnel is up, the router's DNS stays reachable (captive portals), and a safe MTU is used for hotspots.",
         "autoRestart": "Restart the engine after a crash",
@@ -143,7 +142,9 @@
         "statusUnconfirmed": "Protection not confirmed",
         "firewallBlock": "Windows Firewall blocks outgoing connections by default: allow the VPN engines in Windows Firewall or set outbound connections to «Allow».",
         "broad": "Wide network",
-        "broadHint": "A very wide address range: a large part of the internet bypasses the kill switch."
+        "broadHint": "A very wide address range: a large part of the internet bypasses the kill switch.",
+        "kindApp": "App",
+        "kindIp": "IP"
       },
       "behaviour": {
         "title": "Behaviour",

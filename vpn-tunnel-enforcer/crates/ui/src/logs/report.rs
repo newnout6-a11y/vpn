@@ -1,8 +1,8 @@
 //! Texts built from history data: evidence lines, the copied diagnostics, the cleanup summary,
 //! the export file name (ui-pages §3.9).
 use jiff::civil::Date;
-use vpnte_base::types::{Engine, OutboundFault};
-use vpnte_base::{ErrorKind, Msg};
+use vpnte_base::Msg;
+use vpnte_base::types::OutboundFault;
 
 use super::format::iso_utc;
 use super::history::{non_empty, shown_headline};
@@ -22,14 +22,6 @@ pub fn fault_key(fault: OutboundFault) -> &'static str {
 /// Label of a fault: `logs.outboundFault.<fault>`.
 pub fn fault_label(fault: OutboundFault) -> Msg {
     Msg::new(format!("logs.outboundFault.{}", fault_key(fault)))
-}
-
-/// Engine name as the product spells it.
-pub fn engine_name(engine: Engine) -> &'static str {
-    match engine {
-        Engine::SingBox => "sing-box",
-        Engine::Xray => "xray",
-    }
 }
 
 /// The present evidence values in display order (absent and blank ones are skipped; `false`
@@ -83,7 +75,7 @@ pub fn evidence_text(value: &EvidenceValue, tr: &dyn Fn(&Msg) -> String) -> Stri
         EvidenceValue::Flag(true) => "✓".to_owned(),
         EvidenceValue::Flag(false) => "—".to_owned(),
         EvidenceValue::Fault(fault) => tr(&fault_label(*fault)),
-        EvidenceValue::Engine(engine) => engine_name(*engine).to_owned(),
+        EvidenceValue::Engine(engine) => crate::servers::engine_name(*engine).to_owned(),
         EvidenceValue::Text(text) => text.render_with(tr),
     }
 }
@@ -126,7 +118,8 @@ pub fn diagnostics_text(row: &SessionRow, tr: &dyn Fn(&Msg) -> String) -> String
                     .map(|(key, value)| format!("  {}: {}", key.name(), evidence_raw(value, tr))),
             );
         }
-    } else {
+    } else if row.ended_at.is_some() {
+        // a running session has no disconnect reason yet (the stored default would say «user»)
         lines.push(tr(
             &Msg::new("logs.copy.reason").arg("reason", row.reason.key())
         ));
@@ -151,10 +144,6 @@ pub struct ClearSummary {
     pub failed: usize,
     /// Distinct reasons, first occurrence first.
     pub reasons: Vec<Msg>,
-    /// The artifacts part deleted the app log (the journal pane reloads).
-    pub app_log_cleared: bool,
-    /// The connection history is gone.
-    pub history_cleared: bool,
 }
 
 impl ClearSummary {
@@ -169,7 +158,6 @@ impl ClearSummary {
         };
         let mut cleared = 0;
         let mut absent = 0;
-        let mut app_log_cleared = false;
         for part in [&report.history, &report.traffic] {
             match part {
                 Ok(()) => cleared += 1,
@@ -180,9 +168,8 @@ impl ClearSummary {
             Ok(artifacts) => {
                 cleared += artifacts.cleared.len();
                 absent = artifacts.absent.len();
-                app_log_cleared = artifacts.cleared.iter().any(|a| a == "app-log");
                 for (_, kind) in &artifacts.failed {
-                    fail(canonical(*kind));
+                    fail(Msg::new(kind.i18n_key()));
                 }
             }
             Err(err) => fail(err.msg.clone()),
@@ -192,8 +179,6 @@ impl ClearSummary {
             absent,
             failed,
             reasons,
-            app_log_cleared,
-            history_cleared: report.history.is_ok(),
         }
     }
 
@@ -217,11 +202,6 @@ impl ClearSummary {
             .arg("reason", reason);
         (tr(&Msg::new("logs.cleanup.partialTitle")), tr(&body))
     }
-}
-
-/// The canonical sentence of an error category (`errors.<kind>`).
-fn canonical(kind: ErrorKind) -> Msg {
-    Msg::new(kind.i18n_key())
 }
 
 /// `connection-history-2026-11-11.csv` (the local date: the user's day, not UTC's).

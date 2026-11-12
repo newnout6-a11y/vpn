@@ -179,7 +179,8 @@ fn ImportBox(
     let discard_api = api.clone();
     let cancel = move |_| {
         let api = discard_api.clone();
-        spawn(async move { api.discard_config_import().await });
+        // The box unmounts right away: a task of its own scope would be dropped unpolled.
+        dioxus::core::spawn_forever(async move { api.discard_config_import().await });
         panel.set(None);
     };
     let apply = move |_| {

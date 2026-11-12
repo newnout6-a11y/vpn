@@ -129,7 +129,8 @@ pub(super) fn Rotation() -> Element {
                     min: ROTATION_INTERVAL_MIN.0,
                     max: ROTATION_INTERVAL_MIN.1,
                     unit: t!("ui.settings.units.min"),
-                    disabled: !rot.enabled,
+                    // one change at a time: a commit during a save would be dropped
+                    disabled: !rot.enabled || set_job.running(),
                     on_commit: move |v: i64| {
                         let minutes = u32::try_from(v).unwrap_or(30);
                         set_interval(RotationPatch { interval_minutes: Some(minutes), ..RotationPatch::default() });
@@ -144,6 +145,7 @@ pub(super) fn Rotation() -> Element {
                         (RotationOrder::Random, t!("settings.rotationRandom")),
                     ],
                     value: rot.order,
+                    disabled: set_job.running(),
                     on_change: move |order| set(RotationPatch { order: Some(order), ..RotationPatch::default() }),
                 }
             }
@@ -216,7 +218,8 @@ fn ProfileChecklist(enabled: bool) -> Element {
                                 None => server.protocol.clone(),
                             },
                             checked: rot.profile_ids.contains(&server.id),
-                            disabled: !enabled,
+                            // one change at a time: a click during the save would be dropped
+                            disabled: !enabled || job.running(),
                             on_change: {
                                 let api = api.clone();
                                 let id = server.id.clone();

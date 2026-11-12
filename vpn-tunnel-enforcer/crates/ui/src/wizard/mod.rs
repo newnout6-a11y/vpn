@@ -34,14 +34,15 @@ pub enum Connection {
     LocalProxy,
 }
 
-/// How traffic reaches the tunnel.
+/// How traffic reaches the tunnel; both work with either [`Connection`] (NOADMIN §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Routing {
-    /// TUN: every program on the computer goes through the tunnel.
-    #[default]
+    /// «Туннель»: TUN capture of every program; needs the app started as administrator.
     Hard,
-    /// No TUN: programs are pointed at the local proxy (user environment variables). Only with
-    /// [`Connection::LocalProxy`].
+    /// «Прокси»: the engine behind a loopback proxy and the per-user system proxy pointed at it;
+    /// programs that ignore the system proxy go direct. The first-run default without
+    /// administrator rights (NOADMIN §0).
+    #[default]
     Soft,
 }
 
@@ -100,7 +101,6 @@ impl fmt::Debug for KeyText {
 pub struct WizardChoices {
     pub lang: Lang,
     pub connection: Connection,
-    /// Always [`Routing::Hard`] with [`Connection::Key`].
     pub routing: Routing,
     /// The checked key (trimmed), only with [`Connection::Key`] and only after the backend found
     /// servers in exactly this text; to be imported like the Servers page «Добавить».

@@ -1,6 +1,6 @@
 //! Pure rules of the start page that are not already in `vpnte_view`: the power-button click
 //! rule, the disconnect confirmation's timer generations (D-01), which banners show, the node
-//! line of the identity column and the ruler's cell labels. No Dioxus, no clock reads.
+//! line of the identity column and its engine caption. No Dioxus, no clock reads.
 use vpnte_base::Msg;
 use vpnte_view::identity::{ping_of, visible_leak};
 use vpnte_view::labels::{
@@ -167,11 +167,6 @@ pub fn node_line(servers: &ServersView, local: &LocalPings) -> Option<NodeLine> 
         country: row.country.clone(),
         meta: node_meta(row.protocol.as_deref(), ping, row.health),
     })
-}
-
-/// Label of ruler cell `index` (0-based): «01» … «10».
-pub fn cell_label(index: u8) -> String {
-    format!("{:02}", index + 1)
 }
 
 /// The engine caption under the node: the product name, then the reason when one was given

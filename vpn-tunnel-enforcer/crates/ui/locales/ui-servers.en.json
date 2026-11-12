@@ -57,7 +57,8 @@
         "intervalFailed": "Could not change the refresh interval",
         "renameFailed": "Could not rename the group",
         "deleteFailed": "Could not delete the group «{{name}}»",
-        "deleteBody": "What should happen to its servers?"
+        "deleteBody": "What should happen to its servers?",
+        "panelFailed": "Could not open the provider panel"
       },
       "live": {
         "route": {
@@ -227,17 +228,44 @@
         "tpStallsGap": "Stalls / longest pause:",
         "tpRoute": "Probe path:",
         "tpTtfb": "TTFB per sample:",
-        "tpPause": "Pause",
         "tpSpread": "Spread under 40%",
         "tpStalls": "Stalls = 0",
         "tpGap": "Pause under 750 ms",
         "tpComplete": "All samples complete",
+        "latMin": "min",
+        "latAvg": "avg",
+        "latMedian": "median",
+        "latMax": "max",
+        "jitter": "Jitter:",
+        "tpColProbe": "Probe",
+        "tpColMbps": "Mbps",
+        "tpColSize": "MiB",
+        "tpColTime": "Time",
+        "tpColTtfb": "TTFB",
+        "tpColStalls": "Stalls",
+        "tpColPause": "Pause",
+        "tpOk": "ok",
+        "tpWarn": "unstable",
+        "tpErr": "error",
         "yes": "yes",
         "no": "no",
         "splitState": "State:",
         "on": "on",
         "off": "off",
-        "duplicates": "Listed twice: {{list}}"
+        "duplicates": "Listed twice: {{list}}",
+        "dot": {
+          "ok": "OK",
+          "warn": "warning",
+          "fail": "failed",
+          "muted": "not checked"
+        },
+        "port": {
+          "open": "open",
+          "closed": "closed",
+          "filtered": "filtered",
+          "timeout": "timeout"
+        },
+        "diffBadge": "Changed"
       },
       "batch": {
         "label": {
@@ -271,6 +299,7 @@
         "colServer": "Server",
         "colMedian": "Median",
         "colSpread": "Spread",
+        "colStalls": "Stalls",
         "colPath": "Path",
         "colStatus": "Status",
         "errors": "Profiles that could not be checked: {{count}}. The reasons are in the logs and in each profile's history.",

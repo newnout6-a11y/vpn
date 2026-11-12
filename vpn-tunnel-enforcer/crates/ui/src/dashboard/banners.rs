@@ -4,9 +4,9 @@
 use dioxus::prelude::*;
 
 use super::Dash;
-use super::icons::{Lock, ShieldOff, Spinner};
 use super::model::banners;
 use crate::lang::tr;
+use crate::panels::icons::{Lock, ShieldOff, Spinner};
 use crate::t;
 
 /// Every notice the snapshot calls for.

@@ -7,7 +7,7 @@ use std::num::NonZeroU32;
 use dioxus::prelude::*;
 use vpnte_base::types::UnixMs;
 
-use super::actions::{Actions, fetch_error_text};
+use super::actions::{Actions, fetch_error_text, toast_error};
 use super::model::{GroupSource, GroupStatus, GroupView};
 use super::present::{
     BucketKind, GROUP_NAME_MAX, GroupBucket, group_status_key, group_status_tone, is_deleted,
@@ -16,7 +16,7 @@ use super::present::{
 };
 use super::row::ServerRow;
 use super::state::Confirm;
-use crate::lang::LANG;
+use crate::lang::{LANG, translate_now};
 use crate::t;
 use crate::units::format_bytes;
 use crate::widgets::{
@@ -329,10 +329,11 @@ fn GroupFacts(group: GroupView) -> Element {
                         small: true,
                         title: t!("ui.servers.group.panelTitle"),
                         onclick: move |_| {
-                            let (api, url) = (a_open.api.clone(), url.clone());
+                            let (api, toasts, url) = (a_open.api.clone(), a_open.toasts, url.clone());
                             a_open.spawn(async move {
                                 if let Err(err) = api.open_url(url).await {
-                                    tracing::debug!(error = %err, "opening the provider panel failed");
+                                    let title = translate_now("ui.servers.group.panelFailed", &[]);
+                                    toast_error(toasts, title, &err);
                                 }
                             });
                         },

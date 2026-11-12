@@ -306,6 +306,13 @@ fn batch_rows_label_sort_and_summarise() {
     assert_eq!(batch_label(&shaky), BatchLabel::Unstable);
     assert_eq!(batch_label(&reachable), BatchLabel::Reachable);
     assert_eq!(batch_label(&dead), BatchLabel::Failed);
+    // a handshake alone is not shown as working; a stalled body is a probe error, not «reachable»
+    assert_eq!(BatchLabel::Reachable.tone(), Tone::Neutral);
+    let stalled = LiveCheck {
+        handshake: reachable.handshake.clone(),
+        ..with_throughput("f", StageStatus::Timeout, None)
+    };
+    assert_eq!(batch_label(&stalled), BatchLabel::ProbeError);
     let mut rows = vec![&dead, &shaky, &stable, &reachable, &fast];
     batch_sort(&mut rows);
     let ids: Vec<&str> = rows.iter().map(|c| c.id.as_str()).collect();

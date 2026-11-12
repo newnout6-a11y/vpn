@@ -6,7 +6,7 @@ use vpnte_base::types::EnginePref;
 
 use super::actions::Actions;
 use super::menu::{MenuItem, OverflowMenu};
-use super::model::{EnginePlan, GroupView, ServerView};
+use super::model::{EnginePlan, GroupView, ServerView, ServersView};
 use super::present::{
     ENGINE_ITEMS, RowSignal, Unusable, device_label, displayed_ping, engine_name, engine_of_item,
     happ_type, has_flag, is_removed_from_subscription, proxy_ready, relative_time, row_signal,
@@ -85,25 +85,55 @@ fn SignalMark(signal: RowSignal) -> Element {
     }
 }
 
+/// What a row shows of the page state besides its own server.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RowMarks {
+    active: bool,
+    switching: bool,
+    /// A switch to this row runs (the backend's or this page's `select`).
+    pending: bool,
+    /// Some switch runs: every Select waits.
+    locked: bool,
+    connected: bool,
+}
+
+impl RowMarks {
+    fn of(view: &ServersView, selecting: Option<&str>, id: &str) -> Self {
+        let active = view.active_id.as_deref() == Some(id);
+        let switching = view.switching_to.as_deref() == Some(id);
+        Self {
+            active,
+            switching,
+            pending: switching || selecting == Some(id),
+            locked: view.switching_to.is_some() || selecting.is_some() || view.tunnel_busy,
+            connected: active && view.tunnel_running,
+        }
+    }
+}
+
 #[component]
 pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element {
     let actions = use_context::<Actions>();
     let store = actions.store;
-    let view = store.view.read();
-    let rt = store
-        .rows
-        .read()
-        .get(&server.id)
-        .cloned()
-        .unwrap_or_default();
-    let selecting = store.selecting.read().clone();
+    // Memos, not reads: a row redraws only when its own marks change. Reading the whole rows map
+    // and snapshot here made every answer of a ping-all redraw every row.
+    let rt = use_memo({
+        let id = server.id.clone();
+        move || store.rows.read().get(&id).cloned().unwrap_or_default()
+    });
+    let marks = use_memo({
+        let id = server.id.clone();
+        move || RowMarks::of(&store.view.read(), store.selecting.read().as_deref(), &id)
+    });
+    let rt = rt();
+    let RowMarks {
+        active,
+        switching,
+        pending,
+        locked,
+        connected,
+    } = marks();
     let id = server.id.clone();
-    let active = view.active_id.as_deref() == Some(id.as_str());
-    let switching = view.switching_to.as_deref() == Some(id.as_str());
-    let pending = switching || selecting.as_deref() == Some(id.as_str());
-    let locked = view.switching_to.is_some() || selecting.is_some() || view.tunnel_busy;
-    let connected = active && view.tunnel_running;
-    drop(view);
     let blocked = unusable(&server);
     let dropped = is_removed_from_subscription(&server, group.as_ref());
     let purge_when = server

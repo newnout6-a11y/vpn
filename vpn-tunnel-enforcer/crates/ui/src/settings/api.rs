@@ -32,7 +32,7 @@ pub trait SettingsApi: 'static {
     async fn set_language(&self, lang: Lang) -> AppResult<()>;
     /// Activates a theme by id (and switches the window to it).
     async fn set_theme(&self, id: String) -> AppResult<()>;
-    /// Creates or deletes the logon task; returns the state read back from Windows.
+    /// Writes or removes the per-user `Run` value; returns the state read back from Windows.
     async fn set_autostart(&self, on: bool) -> AppResult<bool>;
     async fn set_location_privacy(&self, on: bool) -> AppResult<LocationOutcome>;
     async fn apply_browser_protection(&self) -> AppResult<BrowserView>;

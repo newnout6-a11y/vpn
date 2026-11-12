@@ -1,14 +1,16 @@
 //! Pure presentation rules of the Servers page (no Dioxus): badges, ping / health precedence,
 //! removed-from-subscription, grouping and sorting, byte and relative-time formatting.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
+use std::sync::LazyLock;
 
+use jiff::tz::TimeZone;
 use vpnte_base::i18n::{Lang, lookup};
 use vpnte_base::types::{ClientDevice, Engine, EnginePref, UnixMs};
 
 use super::model::{
-    ArchiveReason, GroupSource, GroupStatus, GroupView, KeyHealth, KeyHealthReason, OnlineStatus,
-    ServerView, ServersView, Stealth, VIRTUAL_ALL_GROUP,
+    ArchiveReason, EnginePlan, GroupSource, GroupStatus, GroupView, KeyHealth, KeyHealthReason,
+    OnlineStatus, ServerView, ServersView, Stealth, VIRTUAL_ALL_GROUP,
 };
 use crate::widgets::Tone;
 
@@ -61,14 +63,37 @@ pub fn engine_of_item(id: &str) -> Option<EnginePref> {
         .map(|&(_, pref)| pref)
 }
 
-/// uTLS fingerprint the engine uses for a device when the profile pins none.
-pub fn default_fingerprint(device: ClientDevice) -> &'static str {
-    match device {
+/// The uTLS fingerprint a connect sends for `server` («—» for a key without TLS): the provider's
+/// pin, else the emitters' default. REALITY servers since Xray 26.9.8 refuse the `android` /
+/// `ios` hellos (RU 2026 plan fact 2), so sing-box sends `chrome` for REALITY keys and Xray never
+/// sends those two; otherwise the device persona's own browser.
+pub fn fingerprint(server: &ServerView) -> String {
+    if let Some(pin) = &server.fingerprint {
+        return pin.clone();
+    }
+    if server.stealth == Some(Stealth::Plain) {
+        return "—".to_owned();
+    }
+    let device = match server.device {
         ClientDevice::Android => "android",
         ClientDevice::Ios => "ios",
         ClientDevice::Mac => "safari",
         ClientDevice::Pc => "chrome",
-    }
+    };
+    let refused = matches!(server.device, ClientDevice::Android | ClientDevice::Ios);
+    let xray = matches!(
+        server.engine_plan,
+        Some(EnginePlan::Runs {
+            engine: Engine::Xray,
+            ..
+        })
+    );
+    let chrome = if xray {
+        refused
+    } else {
+        server.stealth == Some(Stealth::Reality)
+    };
+    if chrome { "chrome" } else { device }.to_owned()
 }
 
 /// Badge of a transport camouflage: fixed label, `ui.servers.stealth.*` key of its explanation,
@@ -444,52 +469,40 @@ pub fn group_of<'a>(view: &'a ServersView, server: &ServerView) -> Option<&'a Gr
     view.groups.iter().find(|g| g.id == id)
 }
 
-/// Flag coins the shared stylesheet ships (`.fi-xx` in utilities.css); other countries get a
-/// mono code mark of the same size.
+/// Whether the shared stylesheet ships a flag coin for `country` (a `.fi-xx.fis` rule in
+/// utilities.css); other countries get a mono code mark of the same size. Read from the
+/// embedded sheet, so the list never falls behind the flags that are actually there.
 pub fn has_flag(country: &str) -> bool {
-    const FLAGS: [&str; 6] = ["DE", "FI", "NL", "PL", "SE", "US"];
-    FLAGS.contains(&country)
+    static FLAGS: LazyLock<HashSet<String>> = LazyLock::new(|| {
+        let css = crate::assets::file("css/utilities.css")
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .unwrap_or_default();
+        css.split(".fi-")
+            .skip(1)
+            .filter_map(|rule| rule.split_once(".fis"))
+            .map(|(code, _)| code)
+            .filter(|code| code.len() == 2 && code.bytes().all(|b| b.is_ascii_lowercase()))
+            .map(str::to_ascii_uppercase)
+            .collect()
+    });
+    FLAGS.contains(country)
 }
 
-/// Date and time of `ts` in the Windows time zone: `11.11.2026 09:12` (ru), `2026-11-11 09:12`
-/// (en); «—» when Windows cannot convert it.
+/// Date and time of `ts` in the system time zone: `11.11.2026 09:12` (ru), `2026-11-11 09:12`
+/// (en); «—» when the timestamp is out of range.
 pub fn local_stamp(ts: UnixMs, lang: Lang) -> String {
-    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
-    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-    // FILETIME counts 100 ns since 1601-01-01; Unix ms start 11 644 473 600 000 ms later.
-    let Some(ticks) = ts
-        .checked_add(11_644_473_600_000)
-        .and_then(|ms| u64::try_from(ms).ok())
-        .and_then(|ms| ms.checked_mul(10_000))
-    else {
-        return "—".to_owned();
+    stamp_in(ts, lang, &TimeZone::system())
+}
+
+fn stamp_in(ts: UnixMs, lang: Lang, tz: &TimeZone) -> String {
+    let pattern = match lang {
+        Lang::Ru => "%d.%m.%Y %H:%M",
+        Lang::En => "%Y-%m-%d %H:%M",
     };
-    let ft = FILETIME {
-        dwLowDateTime: ticks as u32,
-        dwHighDateTime: (ticks >> 32) as u32,
-    };
-    let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
-    // SAFETY: both calls only read `ft` / `utc` and write the SYSTEMTIME out-parameters, which
-    // are valid stack values; `None` selects the current Windows time zone.
-    let ok = unsafe {
-        FileTimeToSystemTime(&ft, &mut utc).is_ok()
-            && SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).is_ok()
-    };
-    if !ok {
-        return "—".to_owned();
-    }
-    let SYSTEMTIME {
-        wYear: y,
-        wMonth: mo,
-        wDay: d,
-        wHour: h,
-        wMinute: mi,
-        ..
-    } = local;
-    match lang {
-        Lang::Ru => format!("{d:02}.{mo:02}.{y} {h:02}:{mi:02}"),
-        Lang::En => format!("{y}-{mo:02}-{d:02} {h:02}:{mi:02}"),
-    }
+    jiff::Timestamp::from_millisecond(ts).map_or_else(
+        |_| "—".to_owned(),
+        |at| at.to_zoned(tz.clone()).strftime(pattern).to_string(),
+    )
 }
 
 #[cfg(test)]

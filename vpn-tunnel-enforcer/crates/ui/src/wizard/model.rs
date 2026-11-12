@@ -82,8 +82,7 @@ pub struct Model {
     pub step: Step,
     pub lang: Lang,
     pub connection: Connection,
-    /// The user's pick; [`Model::routing`] is the mode that applies.
-    routing: Routing,
+    pub routing: Routing,
     pub kill_switch: KillSwitchLevel,
     pub autostart: bool,
     /// Servers already in the list.
@@ -121,26 +120,6 @@ impl Model {
     /// Moves back; `false` on the first screen.
     pub fn backward(&mut self) -> bool {
         self.step.prev().map(|s| self.step = s).is_some()
-    }
-
-    /// The routing mode that applies: Soft needs a local proxy.
-    pub fn routing(&self) -> Routing {
-        if self.soft_allowed() {
-            self.routing
-        } else {
-            Routing::Hard
-        }
-    }
-
-    pub fn soft_allowed(&self) -> bool {
-        self.connection == Connection::LocalProxy
-    }
-
-    /// Picks a routing mode; Soft is ignored while it is not allowed.
-    pub fn set_routing(&mut self, routing: Routing) {
-        if routing == Routing::Hard || self.soft_allowed() {
-            self.routing = routing;
-        }
     }
 
     /// Detection runs once per wizard session, on the first visit of the Connect screen.
@@ -226,7 +205,7 @@ impl Model {
         WizardChoices {
             lang: self.lang,
             connection: self.connection,
-            routing: self.routing(),
+            routing: self.routing,
             key,
             kill_switch: self.kill_switch,
             autostart: self.autostart,

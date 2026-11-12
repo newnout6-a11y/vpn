@@ -323,7 +323,7 @@ pub trait TrayApi: 'static {
     async fn check_route(&self) -> AppResult<()>;  // leak check as a registry operation; verdict = a notice
     async fn open_logs(&self) -> AppResult<()>;    // the log folder in Explorer
     async fn quit(&self, mode: QuitMode) -> AppResult<()>; // bounded shutdown cleanup; Ok = exit now,
-}                                                  // Err = exit refused (failed Soft env rollback under Restore)
+}                                                  // Err = exit refused (failed Proxy-mode rollback under Restore)
 pub enum QuitMode { Restore, SkipRestore /*«Выйти без восстановления»*/ }
 pub struct TrayState {
     pub tunnel: TunnelState, pub transition: Option<Transition>, pub degraded: bool,
@@ -361,18 +361,19 @@ pub trait WizardApi: 'static {
 }
 pub struct WizardState { pub open: bool, pub current: WizardDefaults }
 pub struct WizardDefaults { connection: Connection, routing: Routing, kill_switch: KillSwitchLevel, autostart: bool, servers: usize }
-pub enum Connection { Key, LocalProxy }   pub enum Routing { Hard, Soft }
+pub enum Connection { Key, LocalProxy }   pub enum Routing { Hard, Soft /* default */ }
 pub struct LocalProxy { host: String, port: u16, kind: ProxyKind }   pub struct KeyCheck { servers: usize, subscription: bool }
 pub struct KeyText(pub String);           // Debug prints `KeyText(..)`: the key never reaches a log
 pub struct WizardChoices { lang, connection, routing, key: Option<KeyText>, kill_switch: KillSwitchLevel, autostart: bool }
 #[component] pub fn Wizard() -> Element;  // into Shell { overlays }; a modal shown while state.open
 pub use demo::{DemoScene, DemoWizardApi};
 ```
+Both routing modes are offered with either connection (NOADMIN §2): `routing` is sent as picked.
 `finish` order: import the key through the normal profile import (dedupe; it stays if a later step
 fails) → autostart if changed → kill-switch level if changed → one atomic settings write (`language`,
 `connection_mode`, `routing_mode`, `kill_switch`, `first_run_complete = true`); on failure undo the
-level, then autostart, and return the failing step's `Msg` (or the `*NotRestored` key when an undo
-failed). Push `open: false` after `finish` / `skip`; push `open: true` for `SettingsApi::open_wizard`.
+level, then autostart, and return the failing step's `Msg` (a failed undo is the app's own notice).
+Push `open: false` after `finish` / `skip`; push `open: true` for `SettingsApi::open_wizard`.
 
 ## Servers page: `servers`
 
@@ -433,7 +434,10 @@ signal colour only for `Frozen` / `IpBanned`; the app sends none older than `hea
 `LiveCheck::deferred` = the rendered note naming the requests the handshake budget left out, a strip
 at the top of the receipt and a line under the batch table),
 `BatchProgress`, `BatchResult`. Pure helpers: `buckets`, `sort_groups`, `displayed_ping`,
-`row_signal`, `unusable`, `stealth_badge`, `relative_time`, `device_label`, `DEVICES`.
+`row_signal`, `unusable`, `stealth_badge`, `relative_time`, `local_stamp`, `device_label`, `DEVICES`,
+`engine_name` (product spelling, shared by every page), `fingerprint(&ServerView)` (the uTLS hello a
+connect sends: the provider's pin, else the emitters' default — `chrome` for REALITY under sing-box,
+never `android` / `ios` under Xray; replaces `default_fingerprint(device)`).
 Demo: `DemoServersApi` with `DemoScene`.
 
 App duties: `ServerView.stealth` from `vpnte_profiles::caps`; finding titles / details and skipped-line

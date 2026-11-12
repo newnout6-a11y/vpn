@@ -76,6 +76,8 @@ pub(super) fn General() -> Element {
                         (Lang::En, t!("ui.settings.general.langEn")),
                     ],
                     value: *LANG.read(),
+                    // a switch while the previous one persists would show but never be saved
+                    disabled: lang_job.running(),
                     on_change: pick_lang,
                 }
             }
@@ -103,6 +105,7 @@ pub(super) fn General() -> Element {
                             kind: if theme.id == active { ButtonKind::Primary } else { ButtonKind::Ghost },
                             small: true,
                             title: t!("themes.custom"),
+                            disabled: theme_job.running(),
                             onclick: {
                                 let set_theme = set_theme.clone();
                                 let id = theme.id.clone();

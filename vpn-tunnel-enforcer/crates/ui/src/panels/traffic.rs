@@ -43,7 +43,7 @@ pub(super) fn TrafficPanel(
     rsx! {
         section { class: "swiss-panel",
             PanelHead { title: t!("swiss.traffic"), perch: "traffic",
-                span { class: "swiss-label flex items-center gap-2",
+                span { class: "swiss-label flex items-center gap-1.5",
                     if let Some(msg) = hovered {
                         span { class: "swiss-label-ink", {tr(&msg)} }
                     } else if running {

@@ -221,6 +221,8 @@ fn CreateDns() -> Element {
                             value: address(),
                             oninput: move |v| {
                                 address.set(v);
+                                // A check of the previous text must not land on the new one.
+                                check_job.cancel();
                                 check_job.clear();
                             },
                             placeholder: t!("settings.dnsPrimaryPlaceholder"),

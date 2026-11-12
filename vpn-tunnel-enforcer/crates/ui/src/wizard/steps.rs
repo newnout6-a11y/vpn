@@ -56,8 +56,6 @@ struct Card<T> {
     text: Option<String>,
     /// Mono status line under the text (detection result, servers in the list).
     meta: Option<String>,
-    /// Why the card cannot be picked now.
-    disabled: Option<String>,
     /// Language of the title when it differs from the UI (`ru` / `en` endonyms).
     lang: Option<&'static str>,
 }
@@ -69,7 +67,6 @@ impl<T> Card<T> {
             title,
             text: None,
             meta: None,
-            disabled: None,
             lang: None,
         }
     }
@@ -77,25 +74,6 @@ impl<T> Card<T> {
         self.text = Some(text);
         self
     }
-}
-
-/// Where the arrow keys go in a radio group, skipping cards that cannot be picked.
-pub(super) fn next_enabled(enabled: &[bool], current: usize, key: &Key) -> Option<usize> {
-    let mut at = current;
-    for _ in 0..enabled.len() {
-        at = roving_index(enabled.len(), at, key)?;
-        if enabled[at] {
-            return Some(at);
-        }
-        // Home / End landed on a disabled card: keep walking inwards
-        let inward = match key {
-            Key::Home => Key::ArrowRight,
-            Key::End => Key::ArrowLeft,
-            _ => continue,
-        };
-        return next_enabled(enabled, at, &inward);
-    }
-    None
 }
 
 /// `aria-describedby` of a card: its text and its status line.
@@ -120,9 +98,8 @@ fn Cards<T: Clone + PartialEq + 'static>(
     let base = use_dom_id("wz-card");
     let mut handles = use_signal(Vec::<Option<Rc<MountedData>>>::new);
     let selected = cards.iter().position(|c| c.value == value);
-    let enabled: Vec<bool> = cards.iter().map(|c| c.disabled.is_none()).collect();
     let values: Vec<T> = cards.iter().map(|c| c.value.clone()).collect();
-    let tab_stop = selected.or_else(|| enabled.iter().position(|e| *e));
+    let tab_stop = selected.unwrap_or(0);
     rsx! {
         div {
             class: "wz-cards",
@@ -130,7 +107,7 @@ fn Cards<T: Clone + PartialEq + 'static>(
             role: "radiogroup",
             aria_label: "{label}",
             onkeydown: move |evt| {
-                let Some(next) = next_enabled(&enabled, tab_stop.unwrap_or(0), &evt.key()) else {
+                let Some(next) = roving_index(values.len(), tab_stop, &evt.key()) else {
                     return;
                 };
                 evt.prevent_default();
@@ -154,9 +131,7 @@ fn Cards<T: Clone + PartialEq + 'static>(
                     aria_checked: if Some(i) == selected { "true" } else { "false" },
                     aria_labelledby: "{base}-{i}-t",
                     aria_describedby: described_by(&base, i, &card),
-                    tabindex: if Some(i) == tab_stop { "0" } else { "-1" },
-                    disabled: card.disabled.is_some(),
-                    title: card.disabled.clone(),
+                    tabindex: if i == tab_stop { "0" } else { "-1" },
                     onmounted: move |evt| {
                         let mut list = handles.write();
                         if list.len() <= i {
@@ -398,21 +373,16 @@ fn ProxyPanel(ctx: Ctx) -> Element {
     }
 }
 
-/// Step 3: Hard (TUN) or Soft; Soft needs the local proxy.
+/// Step 3: Tunnel (TUN, needs administrator rights) or Proxy; both work with either upstream
+/// (NOADMIN §2).
 #[component]
 fn RoutingStep(ctx: Ctx, title_id: String) -> Element {
     let mut model = ctx.model;
-    let (routing, soft_allowed) = {
-        let m = model.read();
-        (m.routing(), m.soft_allowed())
-    };
+    let routing = model.read().routing;
     let hard = Card::new(Routing::Hard, t!("ui.wizard.routing.hard"))
         .text(t!("ui.wizard.routing.hardText"));
-    let mut soft = Card::new(Routing::Soft, t!("ui.wizard.routing.soft"))
+    let soft = Card::new(Routing::Soft, t!("ui.wizard.routing.soft"))
         .text(t!("ui.wizard.routing.softText"));
-    if !soft_allowed {
-        soft.disabled = Some(t!("ui.wizard.routing.softNeedsProxy"));
-    }
     rsx! {
         StepHead {
             step: Step::Routing,
@@ -424,10 +394,7 @@ fn RoutingStep(ctx: Ctx, title_id: String) -> Element {
             label: t!("ui.wizard.routing.title"),
             cards: vec![hard, soft],
             value: routing,
-            on_change: move |r| model.write().set_routing(r),
-        }
-        if !soft_allowed {
-            p { class: "wz-note", {t!("ui.wizard.routing.softNeedsProxy")} }
+            on_change: move |r| model.write().routing = r,
         }
     }
 }
@@ -507,7 +474,7 @@ fn Done(ctx: Ctx, title_id: String) -> Element {
         }
         (Connection::LocalProxy, ..) => t!("ui.wizard.done.proxyNotFound"),
     };
-    let routing = match m.routing() {
+    let routing = match m.routing {
         Routing::Hard => t!("ui.wizard.routing.hard"),
         Routing::Soft => t!("ui.wizard.routing.soft"),
     };

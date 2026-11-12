@@ -6,11 +6,12 @@ use dioxus::prelude::*;
 use vpnte_base::types::UnixMs;
 
 use super::AvailabilityApi;
-use super::ctl::{use_controller, use_now, use_state_pump};
+use super::ctl::{use_controller, use_now};
 use super::format::{
     HISTORY_ROWS, format_age, path_status, routing_look, stage_rows, text, text_with, verdict_look,
 };
 use super::model::{AvailabilityState, PathReport, PathSource, RoutingReport, UrlCheck};
+use crate::hooks::use_watch;
 use crate::lang::LANG;
 use crate::pages::{Page, nav_number};
 use crate::widgets::{
@@ -24,7 +25,7 @@ use crate::widgets::{
 #[component]
 pub fn AvailabilityPage() -> Element {
     let api = use_context::<Rc<dyn AvailabilityApi>>();
-    let state = use_state_pump(api.clone());
+    let state = use_watch(|| api.state());
     let ctl = use_controller(api);
     let now = use_now();
     let lang = *LANG.read();

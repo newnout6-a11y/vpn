@@ -18,14 +18,17 @@ use vpnte_base::{AppResult, Msg};
 
 use super::model::{CloseAction, TrayItemId, TrayModel, TrayState};
 use super::native::{NativeReport, NativeTray, SPEED_REFRESH};
-use crate::lang::LANG;
+use crate::hooks::use_watch;
+use crate::lang::{LANG, tr, translate};
+use crate::t;
+use crate::widgets::{Button, ButtonKind, Modal, ModalSize};
 
-/// How the quit cleanup treats a failed rollback of the Soft-mode system proxy.
+/// How the quit cleanup treats a failed rollback of the Proxy-mode tweaks (system proxy, variables).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuitMode {
-    /// Restore everything; a failed Soft env rollback refuses the exit and the user is asked.
+    /// Restore everything; a failed rollback refuses the exit and the user is asked.
     Restore,
-    /// «Выйти без восстановления»: exit anyway; the env backup is restored at the next start.
+    /// «Выйти без восстановления»: exit anyway; the tweak journal rolls back at the next start.
     SkipRestore,
 }
 
@@ -43,7 +46,7 @@ pub trait TrayApi: 'static {
     /// «Открыть логи»: the log folder in Explorer.
     async fn open_logs(&self) -> AppResult<()>;
     /// The bounded shutdown cleanup. `Ok`: the process may exit now. `Err`: the exit is refused
-    /// (a failed Soft env rollback under [`QuitMode::Restore`]); its message is shown to the user.
+    /// (a failed Proxy-mode rollback under [`QuitMode::Restore`]); its message is shown to the user.
     async fn quit(&self, mode: QuitMode) -> AppResult<()>;
 }
 
@@ -150,24 +153,7 @@ fn debug_equals(value: &impl std::fmt::Debug, expected: &str) -> bool {
 pub fn TrayHost(children: Element) -> Element {
     let api = use_context::<Rc<dyn TrayApi>>();
     let desktop = use_window();
-    let mut state = use_signal({
-        let rx = api.state();
-        move || rx.borrow().clone()
-    });
-    use_future({
-        let api = api.clone();
-        move || {
-            let mut rx = api.state();
-            async move {
-                while rx.changed().await.is_ok() {
-                    let next = rx.borrow_and_update().clone();
-                    if *state.peek() != next {
-                        state.set(next);
-                    }
-                }
-            }
-        }
-    });
+    let state = use_watch(|| api.state());
     let mut quitting = use_signal(|| false);
     let mut dialog = use_signal(|| None::<TrayDialog>);
     let model = use_memo(move || TrayModel::build(&state.read(), quitting()));
@@ -327,11 +313,10 @@ pub fn TrayHost(children: Element) -> Element {
             Choice::Cancel => dialog.set(None),
         }
     };
+    let open = use_memo(move || dialog.read().is_some());
     rsx! {
         {children}
-        if let Some(open) = dialog() {
-            DialogView { dialog: open, on_choice }
-        }
+        Question { open, dialog, on_choice }
     }
 }
 
@@ -358,10 +343,10 @@ async fn run_action(api: &dyn TrayApi, id: TrayItemId, desktop: &DesktopContext)
 }
 
 /// Texts and buttons of a dialog: `(title, message, detail, [(choice, label key)])`; the first
-/// button is the default one, Esc is «Отмена» (or dismisses the refused-quit question, which
-/// keeps the app open as the old «Оставить открытым» did).
-fn dialog_content(dialog: &TrayDialog) -> (String, String, String, Vec<(Choice, &'static str)>) {
-    use crate::t;
+/// button is the default one.
+type Content = (String, String, String, Vec<(Choice, &'static str)>);
+
+fn dialog_content(dialog: &TrayDialog) -> Content {
     match dialog {
         TrayDialog::CloseProtected { offer_tray } => {
             let mut buttons = Vec::new();
@@ -384,7 +369,7 @@ fn dialog_content(dialog: &TrayDialog) -> (String, String, String, Vec<(Choice, 
         }
         TrayDialog::QuitFailed { reason } => (
             t!("ui.tray.quitFailed.title"),
-            crate::lang::tr(reason),
+            tr(reason),
             t!("ui.tray.quitFailed.note"),
             vec![
                 (Choice::Retry, "ui.tray.quitFailed.retry"),
@@ -394,46 +379,42 @@ fn dialog_content(dialog: &TrayDialog) -> (String, String, String, Vec<(Choice, 
     }
 }
 
-/// The modal card over the page: paper, hairline frame, mono caption, square buttons.
+/// The open question as a [`Modal`]: the page behind is inert, Tab stays inside, the focus starts
+/// on the default (first) button and returns afterwards. Escape is «Отмена»; on the refused quit it
+/// dismisses the question and keeps the app open, as the old «Оставить открытым» did.
 #[component]
-fn DialogView(dialog: TrayDialog, on_choice: EventHandler<Choice>) -> Element {
-    let (title, message, detail, buttons) = dialog_content(&dialog);
+fn Question(
+    open: ReadSignal<bool>,
+    dialog: ReadSignal<Option<TrayDialog>>,
+    on_choice: EventHandler<Choice>,
+) -> Element {
+    let (title, message, detail, buttons) = dialog
+        .read()
+        .as_ref()
+        .map(dialog_content)
+        .unwrap_or_default();
     rsx! {
-        div { class: "c-swiss tray-dialog-backdrop",
-            div {
-                class: "tray-dialog",
-                id: "tray-dialog",
-                role: "alertdialog",
-                aria_modal: "true",
-                aria_labelledby: "tray-dialog-title",
-                aria_describedby: "tray-dialog-message",
-                onkeydown: move |evt| {
-                    if evt.key() == Key::Escape {
-                        on_choice.call(Choice::Cancel);
-                    }
-                },
-                span { class: "swiss-label", {crate::launch::APP_NAME} }
-                h2 { class: "tray-dialog-title", id: "tray-dialog-title", {title} }
-                p { class: "tray-dialog-message", id: "tray-dialog-message", {message} }
-                p { class: "tray-dialog-detail swiss-mono", {detail} }
-                div { class: "tray-dialog-actions",
-                    for (i , (choice , key)) in buttons.into_iter().enumerate() {
-                        button {
-                            key: "{key}",
-                            r#type: "button",
-                            class: if i == 0 { "tray-dialog-btn is-default" } else { "tray-dialog-btn" },
-                            "data-choice": "{choice:?}",
-                            onmounted: move |evt| async move {
-                                if i == 0 {
-                                    let _ = evt.set_focus(true).await;
-                                }
-                            },
-                            onclick: move |_| on_choice.call(choice),
-                            {crate::lang::translate(key, &[], None)}
-                        }
+        Modal {
+            open,
+            title,
+            description: message,
+            on_close: move |()| on_choice.call(Choice::Cancel),
+            close_label: t!("ui.tray.close.cancel"),
+            show_close: false,
+            // three buttons with these labels overflow the 420 px confirmation width
+            size: ModalSize::Md,
+            footer: rsx! {
+                for (i , (choice , key)) in buttons.into_iter().enumerate() {
+                    Button {
+                        key: "{key}",
+                        kind: if i == 0 { ButtonKind::Primary } else { ButtonKind::Ghost },
+                        initial_focus: i == 0,
+                        onclick: move |_| on_choice.call(choice),
+                        {translate(key, &[], None)}
                     }
                 }
-            }
+            },
+            p { class: "w-confirm-text", "{detail}" }
         }
     }
 }

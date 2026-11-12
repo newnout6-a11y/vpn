@@ -136,6 +136,58 @@ fn engine_verdict_and_menu_ids() {
     assert_eq!(ENGINE_ITEMS[0].1, EnginePref::Auto);
 }
 
+/// The fingerprint line follows the emitters (RU 2026 plan fact 2): REALITY keys go out as
+/// `chrome` under sing-box whatever the persona, Xray never sends `android` / `ios`, a provider
+/// pin wins, a key without TLS has none.
+#[test]
+fn fingerprint_follows_the_engines() {
+    use crate::servers::model::EnginePlan;
+    use vpnte_base::Msg;
+    use vpnte_base::types::{ClientDevice, Engine};
+    let key = |device, stealth, engine: Option<Engine>| ServerView {
+        device,
+        stealth,
+        engine_plan: engine.map(|engine| EnginePlan::Runs {
+            engine,
+            reason: Msg::new("x"),
+        }),
+        ..server("s", "vless", None)
+    };
+    let reality = Some(Stealth::Reality);
+    let tls = Some(Stealth::Tls);
+    let (sing, xray) = (Some(Engine::SingBox), Some(Engine::Xray));
+    assert_eq!(
+        fingerprint(&key(ClientDevice::Android, tls, sing)),
+        "android"
+    );
+    assert_eq!(
+        fingerprint(&key(ClientDevice::Android, reality, sing)),
+        "chrome"
+    );
+    assert_eq!(
+        fingerprint(&key(ClientDevice::Mac, reality, sing)),
+        "chrome"
+    );
+    assert_eq!(fingerprint(&key(ClientDevice::Mac, tls, sing)), "safari");
+    assert_eq!(fingerprint(&key(ClientDevice::Ios, tls, xray)), "chrome");
+    assert_eq!(
+        fingerprint(&key(ClientDevice::Mac, reality, xray)),
+        "safari"
+    );
+    assert_eq!(fingerprint(&key(ClientDevice::Pc, tls, None)), "chrome");
+    assert_eq!(
+        fingerprint(&key(ClientDevice::Ios, reality, None)),
+        "chrome"
+    );
+    let pinned = ServerView {
+        fingerprint: Some("firefox".into()),
+        ..key(ClientDevice::Android, reality, sing)
+    };
+    assert_eq!(fingerprint(&pinned), "firefox");
+    let plain = key(ClientDevice::Pc, Some(Stealth::Plain), sing);
+    assert_eq!(fingerprint(&plain), "—");
+}
+
 #[test]
 fn health_reason_codes_round_trip() {
     for code in ["auth-failed", "hy2-udp-blocked", "no-outbound", "timeout"] {
@@ -363,12 +415,29 @@ fn relative_time_in_both_languages() {
 
 #[test]
 fn local_stamp_formats_per_language() {
-    // 2026-11-11 12:00 UTC: the hour depends on the machine's zone, the shape does not.
-    let ts = 1_794_398_400_000;
-    let ru = local_stamp(ts, Lang::Ru);
-    let en = local_stamp(ts, Lang::En);
-    assert_eq!(ru.len(), 16, "{ru}");
-    assert!(ru.contains(".11.2026 ") || ru.contains(".11.2026"), "{ru}");
-    assert!(en.starts_with("2026-11-1"), "{en}");
+    // 2026-11-11 06:12 UTC = 09:12 in Moscow; the system zone only changes the hour.
+    let ts = 1_794_377_520_000;
+    let moscow = TimeZone::get("Europe/Moscow").expect("bundled tzdb");
+    assert_eq!(stamp_in(ts, Lang::Ru, &moscow), "11.11.2026 09:12");
+    assert_eq!(stamp_in(ts, Lang::En, &moscow), "2026-11-11 09:12");
+    assert_eq!(local_stamp(ts, Lang::Ru).len(), 16);
     assert_eq!(local_stamp(i64::MIN, Lang::En), "—");
+}
+
+/// The flag coins follow the shared stylesheet: every detector country has one (the panels'
+/// 65), anything else gets the code mark.
+#[test]
+fn flags_come_from_the_shared_stylesheet() {
+    let panels: serde_json::Value =
+        serde_json::from_str(include_str!("../../../locales/ui-panels.en.json")).expect("json");
+    let countries = panels["ui"]["panels"]["country"]
+        .as_object()
+        .expect("countries");
+    assert!(countries.len() >= 65);
+    for code in countries.keys() {
+        assert!(has_flag(code), "{code}");
+    }
+    for code in ["ZZ", "de", "", "DEU"] {
+        assert!(!has_flag(code), "{code}");
+    }
 }

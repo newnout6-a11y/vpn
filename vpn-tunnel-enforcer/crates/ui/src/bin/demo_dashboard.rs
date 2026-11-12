@@ -44,8 +44,20 @@ fn main() {
         .as_deref()
         .and_then(DashScene::from_name)
         .unwrap_or(DashScene::Connected);
-    // the page renders view.* keys (labels, traffic read-out)
-    vpnte_ui::lang::init_locales(vpnte_view::LOCALES);
+    // The page renders view.* keys (labels, traffic read-out), the engine's reasons (the identity
+    // column's «Xray · REALITY») and the canonical errors.* texts: the app registers the same layers.
+    let mut layers = vec![
+        (
+            include_str!("../../../base/locales/base.ru.json"),
+            include_str!("../../../base/locales/base.en.json"),
+        ),
+        (
+            include_str!("../../../engine/locales/engine-xray-config.ru.json"),
+            include_str!("../../../engine/locales/engine-xray-config.en.json"),
+        ),
+    ];
+    layers.extend_from_slice(vpnte_view::LOCALES);
+    vpnte_ui::lang::init_locales(&layers);
     let options = LaunchOptions::demo("demo_dashboard", &args);
     launch(options, App, move || {
         let (api, panels, start) = DemoDashboard::handle(scene);

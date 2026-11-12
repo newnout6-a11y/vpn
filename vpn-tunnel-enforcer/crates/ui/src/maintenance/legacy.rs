@@ -54,7 +54,7 @@ pub(crate) fn LegacyPanel(ctl: Controller, on_delete: EventHandler<()>) -> Eleme
                         Button {
                             kind: ButtonKind::Danger,
                             disabled: busy || legacy.secrets_pending,
-                            disabled_reason: t!("ui.maintenance.legacy.deleteBlocked"),
+                            disabled_reason: legacy.secrets_pending.then(|| t!("ui.maintenance.legacy.deleteBlocked")),
                             onclick: move |_| on_delete.call(()),
                             {t!("ui.maintenance.legacy.delete")}
                         }

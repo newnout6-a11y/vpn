@@ -230,11 +230,13 @@ impl Actions {
                     f.input.clear();
                     // The next paste creates its own group again unless the user picks one.
                     f.target = AddTarget::Auto;
-                    if !open {
+                    // A closed dialog got its toast; reopening it starts with an empty form.
+                    if open {
+                        f.report = Some(report);
+                    } else {
                         let title = translate_now("ui.servers.add.doneTitle", &[]);
                         toasts.success(title, Some(import_summary(&report)));
                     }
-                    f.report = Some(report);
                     actions.resolve_ips();
                 }
                 Err(err) if err.kind == ErrorKind::Cancelled => {}

@@ -324,7 +324,7 @@ fn node_line_without_an_active_server() {
 #[test]
 fn ruler_cells_are_numbered_from_01() {
     let labels: Vec<String> = (0..vpnte_view::swiss::RULER_CELLS)
-        .map(cell_label)
+        .map(|i| crate::pages::nav_number(usize::from(i)))
         .collect();
     assert_eq!(labels.first().map(String::as_str), Some("01"));
     assert_eq!(labels.last().map(String::as_str), Some("10"));

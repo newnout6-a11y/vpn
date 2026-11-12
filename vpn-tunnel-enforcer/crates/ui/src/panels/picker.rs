@@ -1,4 +1,5 @@
-//! The proxy picker: a small ARIA combobox with the old MacSelect's markup and keyboard rules.
+//! The proxy picker: a small ARIA combobox with the old MacSelect's markup; its keyboard rules are
+//! the shared MacSelect model of [`crate::widgets::select_key`].
 //!
 //! Focus stays on the trigger while the list is open (`aria-activedescendant`); mousedown in
 //! the list keeps it there, so leaving the trigger (click elsewhere, Tab) closes the list. The
@@ -9,6 +10,7 @@ use dioxus::prelude::*;
 
 use super::icons::Chevron;
 use super::rules::Indicator;
+use crate::widgets::{SelectKey, SelectState, initial_active, select_key};
 
 /// One option of the picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,35 +20,6 @@ pub(super) struct PickerOption {
     pub indicator: Indicator,
     pub indicator_label: String,
     pub disabled: bool,
-}
-
-/// Where the active option moves on a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Move {
-    Next,
-    Prev,
-    First,
-    Last,
-}
-
-/// The active option after `mv`, among enabled options only; next / previous wrap around.
-fn step(enabled: &[bool], from: Option<usize>, mv: Move) -> Option<usize> {
-    let on: Vec<usize> = (0..enabled.len()).filter(|&i| enabled[i]).collect();
-    let (first, last) = (*on.first()?, *on.last()?);
-    let at = from.and_then(|f| on.iter().position(|&i| i == f));
-    Some(match (mv, at) {
-        (Move::First, _) | (Move::Next, None) => first,
-        (Move::Last, _) | (Move::Prev, None) => last,
-        (Move::Next, Some(p)) => on.get(p + 1).copied().unwrap_or(first),
-        (Move::Prev, Some(p)) => p.checked_sub(1).map_or(last, |q| on[q]),
-    })
-}
-
-/// The active option when the list opens: the selected one if enabled, else the first enabled.
-fn initial_active(enabled: &[bool], selected: Option<usize>) -> Option<usize> {
-    selected
-        .filter(|&i| enabled.get(i) == Some(&true))
-        .or_else(|| step(enabled, None, Move::First))
 }
 
 fn indicator_class(indicator: Indicator) -> &'static str {
@@ -145,37 +118,28 @@ pub(super) fn Picker(
         let enabled = enabled.clone();
         let mut show = show.clone();
         move |evt: KeyboardEvent| {
-            let mv = match evt.key() {
-                Key::ArrowDown => Some(Move::Next),
-                Key::ArrowUp => Some(Move::Prev),
-                Key::Home => Some(Move::First),
-                Key::End => Some(Move::Last),
-                _ => None,
+            let Some(key) = SelectKey::from_key(&evt.key()) else {
+                return;
             };
-            if let Some(mv) = mv {
+            let state = SelectState {
+                open: is_open,
+                active: active(),
+            };
+            let Some(action) = select_key(state, key, &enabled, selected) else {
+                return;
+            };
+            if action.consume {
                 evt.prevent_default();
-                if !can_open {
-                    return;
-                }
-                let opened = open();
-                let at = match mv {
-                    Move::Next | Move::Prev if !opened => initial_active(&enabled, selected),
-                    _ => step(&enabled, active(), mv),
-                };
-                show(at);
+            }
+            if !can_open {
                 return;
             }
-            let commit = evt.key() == Key::Enter || evt.key() == Key::Character(" ".into());
-            if commit && is_open {
-                evt.prevent_default();
-                if let Some(o) = active().and_then(|i| options_for_keys.get(i))
-                    && !o.disabled
-                {
-                    on_change.call(o.id.clone());
-                }
-                open.set(false);
-            } else if evt.key() == Key::Escape && is_open {
-                evt.prevent_default();
+            if let Some(o) = action.choose.and_then(|i| options_for_keys.get(i)) {
+                on_change.call(o.id.clone());
+            }
+            if action.state.open {
+                show(action.state.active);
+            } else {
                 open.set(false);
             }
         }
@@ -189,7 +153,7 @@ pub(super) fn Picker(
     let activedescendant = active_now.map(|i| format!("{id}-listbox-option-{i}"));
     rsx! {
         div {
-            class: "relative flex flex-col gap-2",
+            class: "relative flex flex-col gap-1.5",
             class: if is_open { "z-[120]" },
             class: "swiss-proxy-select",
             onfocusout: move |_| open.set(false),
@@ -272,25 +236,35 @@ pub(super) fn Picker(
 mod tests {
     use super::*;
 
-    /// MacSelect keyboard rules (`MacSelect.tsx:136-159`): moves skip disabled options and wrap;
-    /// Home / End jump to the first / last enabled one.
+    /// The active option after `key` with the list open on `from`.
+    fn moved(enabled: &[bool], from: Option<usize>, key: SelectKey) -> Option<usize> {
+        let open = SelectState {
+            open: true,
+            active: from,
+        };
+        select_key(open, key, enabled, None).and_then(|a| a.state.active)
+    }
+
+    /// MacSelect keyboard rules (`MacSelect.tsx:136-159`) on the reference picker: moves skip
+    /// disabled options and wrap; Home / End jump to the first / last enabled one.
     #[test]
     fn keys_move_among_enabled_options() {
         // the reference picker: three taken servers, then three free ones
         let on = [false, false, false, true, true, true];
-        assert_eq!(step(&on, Some(3), Move::Next), Some(4));
-        assert_eq!(step(&on, Some(5), Move::Next), Some(3));
-        assert_eq!(step(&on, Some(3), Move::Prev), Some(5));
-        assert_eq!(step(&on, Some(4), Move::First), Some(3));
-        assert_eq!(step(&on, None, Move::Last), Some(5));
-        assert_eq!(step(&on, None, Move::Next), Some(3));
-        assert_eq!(step(&on, Some(1), Move::Next), Some(3));
-        assert_eq!(step(&[false, false], None, Move::Next), None);
-        assert_eq!(step(&[], Some(0), Move::First), None);
+        assert_eq!(moved(&on, Some(3), SelectKey::Down), Some(4));
+        assert_eq!(moved(&on, Some(5), SelectKey::Down), Some(3));
+        assert_eq!(moved(&on, Some(3), SelectKey::Up), Some(5));
+        assert_eq!(moved(&on, Some(4), SelectKey::Home), Some(3));
+        assert_eq!(moved(&on, None, SelectKey::End), Some(5));
+        assert_eq!(moved(&on, None, SelectKey::Down), Some(3));
+        assert_eq!(moved(&on, Some(1), SelectKey::Down), Some(3));
+        assert_eq!(moved(&[false, false], None, SelectKey::Down), None);
+        assert_eq!(moved(&[], Some(0), SelectKey::Home), None);
     }
 
     /// On open the active option is the selected one if enabled, else the first enabled
-    /// (`proxy-picker-open`: `aria-activedescendant` = option 3, Poland).
+    /// (`proxy-picker-open`: `aria-activedescendant` = option 3, Poland); arrows on the closed
+    /// picker open it there.
     #[test]
     fn opening_activates_the_selection() {
         let on = [false, false, false, true, true, true];
@@ -298,6 +272,15 @@ mod tests {
         assert_eq!(initial_active(&on, Some(1)), Some(3));
         assert_eq!(initial_active(&on, None), Some(3));
         assert_eq!(initial_active(&on, Some(9)), Some(3));
+        let closed = SelectState::default();
+        let opened = select_key(closed, SelectKey::Down, &on, Some(4)).map(|a| a.state);
+        assert_eq!(
+            opened,
+            Some(SelectState {
+                open: true,
+                active: Some(4)
+            })
+        );
     }
 
     /// Option classes as `cn()` / tailwind-merge produced them in `proxy-picker-open`.

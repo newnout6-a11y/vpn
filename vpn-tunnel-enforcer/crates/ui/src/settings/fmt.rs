@@ -1,9 +1,7 @@
-//! Text helpers of the Settings page. Unit words come from the catalog (the old page printed
-//! English `h/m/s` in the Russian UI, U-14); the arithmetic is pure and tested.
-use dioxus::prelude::*;
+//! The rotation countdown. Unit words come from the catalog (the old page printed English
+//! `h/m/s` in the Russian UI, U-14); the arithmetic is pure and tested.
 use vpnte_base::types::UnixMs;
 
-use crate::lang::{LANG, Lang};
 use crate::t;
 
 /// Time left until the next rotation, in the old `formatCountdown` shape (§3.18).
@@ -42,36 +40,6 @@ pub fn countdown_text(value: Countdown) -> String {
         Countdown::MinutesSeconds(m, s) => t!("ui.settings.units.minutesSeconds", m = m, s = s),
         Countdown::Seconds(s) => t!("ui.settings.units.seconds", s = s),
     }
-}
-
-/// Disk size as «N МБ» below 1 GiB, else «N,N ГБ» (one decimal; comma in Russian).
-pub fn size_text(bytes: u64) -> String {
-    const MIB: u64 = 1024 * 1024;
-    if bytes < 1024 * MIB {
-        let mb = bytes.div_ceil(MIB);
-        return t!("ui.settings.units.mb", n = mb);
-    }
-    let tenths = (bytes * 10 + 512 * MIB) / (1024 * MIB);
-    let text = format!("{}.{}", tenths / 10, tenths % 10);
-    let text = if *LANG.read() == Lang::Ru {
-        text.replace('.', ",")
-    } else {
-        text
-    };
-    t!("ui.settings.units.gb", n = text)
-}
-
-/// Local date and time of a timestamp («11.11.2026 14:05» / «Nov 11, 2026 14:05»).
-pub fn datetime_text(at: UnixMs) -> String {
-    let Ok(ts) = jiff::Timestamp::from_millisecond(at) else {
-        return "—".to_owned();
-    };
-    let local = ts.to_zoned(jiff::tz::TimeZone::system());
-    let pattern = match *LANG.read() {
-        Lang::Ru => "%d.%m.%Y %H:%M",
-        Lang::En => "%b %-d, %Y %H:%M",
-    };
-    local.strftime(pattern).to_string()
 }
 
 #[cfg(test)]

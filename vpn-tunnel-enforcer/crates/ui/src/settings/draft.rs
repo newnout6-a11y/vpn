@@ -30,11 +30,6 @@ impl SettingsDraft {
         self.edits.changed(live)
     }
 
-    /// The save bar is shown iff this holds.
-    pub fn is_dirty(&self, live: &SettingsView) -> bool {
-        !self.changed(live).is_empty()
-    }
-
     /// Drops edits that equal the live value (after the live settings changed).
     pub fn prune(&mut self, live: &SettingsView) {
         self.edits.prune(live);
@@ -55,10 +50,6 @@ impl SettingsDraft {
     /// After a successful save of `sent`: those edits are now live.
     pub fn saved(&mut self, sent: &SettingsPatch) {
         self.edits.forget(sent);
-    }
-
-    pub fn edits(&self) -> &SettingsPatch {
-        &self.edits
     }
 }
 
@@ -119,9 +110,9 @@ mod tests {
     fn starts_clean_and_flips_dirty_on_an_edit() {
         let live = base();
         let mut draft = SettingsDraft::default();
-        assert!(!draft.is_dirty(&live));
+        assert!(draft.changed(&live).is_empty());
         draft.edit(&live, |p| p.leak_protection = Some(true));
-        assert!(draft.is_dirty(&live));
+        assert!(!draft.changed(&live).is_empty());
         assert_eq!(draft.changed(&live), ["leak_protection"]);
         assert!(draft.view(&live).leak_protection);
     }
@@ -134,7 +125,7 @@ mod tests {
         draft.edit(&live, |p| p.leak_protection = Some(true));
         draft.edit(&live, |p| p.stealth_mode = Some(true));
         draft.reset();
-        assert!(!draft.is_dirty(&live));
+        assert!(draft.changed(&live).is_empty());
         assert_eq!(draft.view(&live), live);
     }
 
@@ -185,7 +176,7 @@ mod tests {
         let draft = SettingsDraft::default();
         live.check_interval_ms = 45_000;
         assert_eq!(draft.view(&live).check_interval_ms, 45_000);
-        assert!(!draft.is_dirty(&live));
+        assert!(draft.changed(&live).is_empty());
     }
 
     /// §7.1 'keeps the user's edit when an external store change lands mid-edit'.
@@ -196,7 +187,7 @@ mod tests {
         draft.edit(&live, |p| p.check_interval_ms = Some(60_000));
         live.check_interval_ms = 45_000;
         assert_eq!(draft.view(&live).check_interval_ms, 60_000);
-        assert!(draft.is_dirty(&live));
+        assert!(!draft.changed(&live).is_empty());
     }
 
     /// §7.1 new: an edit put back to the live value is not a change.
@@ -205,10 +196,10 @@ mod tests {
         let live = base();
         let mut draft = SettingsDraft::default();
         draft.edit(&live, |p| p.public_wifi_compatibility = Some(false));
-        assert!(draft.is_dirty(&live));
+        assert!(!draft.changed(&live).is_empty());
         draft.edit(&live, |p| p.public_wifi_compatibility = Some(true));
-        assert!(!draft.is_dirty(&live));
-        assert!(draft.edits().is_empty());
+        assert!(draft.changed(&live).is_empty());
+        assert_eq!(draft, SettingsDraft::default());
     }
 
     /// The live value catching up with an edit (made elsewhere) also cleans it.
@@ -219,6 +210,6 @@ mod tests {
         draft.edit(&live, |p| p.autopilot = Some(false));
         live.autopilot = false;
         draft.prune(&live);
-        assert!(draft.edits().is_empty());
+        assert_eq!(draft, SettingsDraft::default());
     }
 }

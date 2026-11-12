@@ -26,10 +26,11 @@ pub enum ConnectionMode {
 /// How traffic is captured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RoutingMode {
-    /// TUN: all traffic goes through the tunnel.
+    /// TUN: all traffic goes through the tunnel (needs administrator rights).
     #[default]
     Hard,
-    /// Applications are pointed at the proxy (environment variables, opt-in dev tools).
+    /// Proxy: the per-user system proxy (and the opted-in dev tools) point at the engine's
+    /// loopback port; programs that ignore it go direct. No administrator rights.
     Soft,
 }
 
@@ -162,7 +163,7 @@ pub struct SettingsState {
     pub active_theme_id: String,
     /// Built-in themes first, then the user's.
     pub themes: Vec<ThemeChoice>,
-    /// Autostart as the OS task really is.
+    /// Autostart as the per-user `Run` value reads back.
     pub autostart: bool,
     pub location_privacy: bool,
     /// The manual proxy address has saved credentials (never shown).

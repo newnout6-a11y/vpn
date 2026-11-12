@@ -381,7 +381,7 @@ fn Results(result: BatchResult, selected: Vec<String>, servers: Vec<ServerView>)
                         HeadCell { label: t!("ui.servers.batch.colServer") }
                         HeadCell { label: t!("ui.servers.batch.colMedian"), align: Align::End }
                         HeadCell { label: t!("ui.servers.batch.colSpread"), align: Align::End }
-                        HeadCell { label: "Stalls".to_owned(), align: Align::End }
+                        HeadCell { label: t!("ui.servers.batch.colStalls"), align: Align::End }
                         HeadCell { label: t!("ui.servers.batch.colPath") }
                         HeadCell { label: t!("ui.servers.batch.colStatus") }
                     }

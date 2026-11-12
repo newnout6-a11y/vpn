@@ -208,6 +208,17 @@ pub(super) fn MediaBox(check: LiveCheck) -> Element {
     }
 }
 
+/// Header keys of the throughput samples table.
+const SAMPLE_COLUMNS: [&str; 7] = [
+    "ui.servers.live.tpColProbe",
+    "ui.servers.live.tpColMbps",
+    "ui.servers.live.tpColSize",
+    "ui.servers.live.tpColTime",
+    "ui.servers.live.tpColTtfb",
+    "ui.servers.live.tpColStalls",
+    "ui.servers.live.tpColPause",
+];
+
 #[component]
 pub(super) fn ThroughputBox(check: LiveCheck) -> Element {
     let Some(t) = check.throughput else {
@@ -248,8 +259,8 @@ pub(super) fn ThroughputBox(check: LiveCheck) -> Element {
                 table { class: "srv-samples swiss-mono",
                     thead {
                         tr {
-                            for h in ["#", "Mbps", "MiB", "ms", "TTFB", "Stall", t!("ui.servers.live.tpPause").as_str()] {
-                                th { key: "{h}", "{h}" }
+                            for key in SAMPLE_COLUMNS {
+                                th { key: "{key}", {t!(key)} }
                             }
                         }
                     }

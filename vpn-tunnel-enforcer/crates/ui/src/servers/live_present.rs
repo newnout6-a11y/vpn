@@ -314,13 +314,14 @@ pub fn throughput_checklist(t: &Throughput) -> [Option<bool>; 4] {
     ]
 }
 
-/// Mono badge of a receipt's throughput status in the history list.
-pub fn throughput_badge(status: StageStatus) -> (&'static str, Tone) {
+/// Badge of a receipt's throughput status in the history list: label key (`None` = not
+/// measured, «—») and tone.
+pub fn throughput_badge(status: StageStatus) -> (Option<&'static str>, Tone) {
     match status {
-        StageStatus::Ok => ("OK", Tone::Ok),
-        StageStatus::Warning => ("WARN", Tone::Warn),
-        StageStatus::Error | StageStatus::Timeout => ("ERR", Tone::Fail),
-        StageStatus::Skipped | StageStatus::NotChecked => ("—", Tone::Unknown),
+        StageStatus::Ok => (Some("ui.servers.live.tpOk"), Tone::Ok),
+        StageStatus::Warning => (Some("ui.servers.live.tpWarn"), Tone::Warn),
+        StageStatus::Error | StageStatus::Timeout => (Some("ui.servers.live.tpErr"), Tone::Fail),
+        StageStatus::Skipped | StageStatus::NotChecked => (None, Tone::Unknown),
     }
 }
 
@@ -368,17 +369,21 @@ impl BatchLabel {
 
     pub fn tone(self) -> Tone {
         match self {
-            BatchLabel::Stable | BatchLabel::Reachable => Tone::Ok,
+            BatchLabel::Stable => Tone::Ok,
+            // An open handshake does not prove the server carries traffic (RU 2026: links that
+            // stall after ~16 KB): neutral, not green.
+            BatchLabel::Reachable => Tone::Neutral,
             BatchLabel::Unstable => Tone::Warn,
             BatchLabel::ProbeError | BatchLabel::Failed => Tone::Fail,
         }
     }
 }
 
-/// See [`BatchLabel`].
+/// See [`BatchLabel`]. A timed-out throughput probe is a probe error: the connection opened but
+/// the body did not flow, which must never read as «reachable».
 pub fn batch_label(check: &LiveCheck) -> BatchLabel {
     match check.throughput.as_ref().map(|t| t.status) {
-        Some(StageStatus::Error) => BatchLabel::ProbeError,
+        Some(StageStatus::Error | StageStatus::Timeout) => BatchLabel::ProbeError,
         Some(StageStatus::Warning) => BatchLabel::Unstable,
         Some(StageStatus::Ok) => BatchLabel::Stable,
         _ if check.handshake.as_ref().map(|h| h.status) == Some(HandshakeStatus::Ok) => {

@@ -305,13 +305,16 @@ fn HistoryEntry(
                 if let Some(v) = t.variability_pct {
                     span { class: "swiss-mono srv-history-muted", title: t!("ui.servers.live.spreadTitle"), "±{v:.0}%" }
                 }
-                Badge { tone: throughput_badge(t.status).1, {throughput_badge(t.status).0} }
+                {
+                    let (key, tone) = throughput_badge(t.status);
+                    rsx! { Badge { tone, {key.map_or_else(|| "—".to_owned(), |k| t!(k))} } }
+                }
             }
             if let Some(ms) = latency {
                 span { class: "swiss-mono", {t!("ui.servers.row.ms", ms = ms)} }
             }
             if diff {
-                Badge { tone: Tone::Warn, title: t!("ui.servers.live.diffTitle"), "Diff" }
+                Badge { tone: Tone::Warn, title: t!("ui.servers.live.diffTitle"), {t!("ui.servers.live.diffBadge")} }
             }
             Badge { tone: findings_mark, {t!("ui.servers.live.findingsCount", count = findings)} }
         }

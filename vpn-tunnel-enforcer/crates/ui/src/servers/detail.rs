@@ -12,7 +12,7 @@ use super::actions::Actions;
 use super::live::LiveCheckPanel;
 use super::model::{ArchiveReason, GeoInfo, GroupSource, GroupStatus, LatencyStats, ProbeReport};
 use super::present::{
-    DEVICES, default_fingerprint, device_label, displayed_ping, group_of, group_status_key,
+    DEVICES, device_label, displayed_ping, fingerprint, group_of, group_status_key,
     group_status_tone, is_removed_from_subscription, relative_time,
 };
 use super::row::Flag;
@@ -51,19 +51,6 @@ pub(crate) fn ServerDetail() -> Element {
     let mut detail = actions.store.detail;
     let open = use_memo(move || detail.read().is_some());
     let id = detail();
-    let title = id
-        .as_ref()
-        .and_then(|id| {
-            actions
-                .store
-                .view
-                .read()
-                .servers
-                .iter()
-                .find(|s| &s.id == id)
-                .map(|s| s.name.clone())
-        })
-        .unwrap_or_default();
     let server = id.as_ref().and_then(|id| {
         actions
             .store
@@ -74,6 +61,7 @@ pub(crate) fn ServerDetail() -> Element {
             .find(|s| &s.id == id)
             .cloned()
     });
+    let title = server.as_ref().map(|s| s.name.clone()).unwrap_or_default();
     let exporting = id.as_ref().is_some_and(|id| {
         actions
             .store
@@ -174,10 +162,7 @@ fn DetailBody(id: String) -> Element {
         .unwrap_or_default();
     let ping = displayed_ping(server.ping_ms, live_ping);
 
-    let fingerprint = server
-        .fingerprint
-        .clone()
-        .unwrap_or_else(|| default_fingerprint(server.device).to_owned());
+    let fingerprint = fingerprint(&server);
     let removed = is_removed_from_subscription(&server, group.as_ref());
     let purge_when = server
         .archived

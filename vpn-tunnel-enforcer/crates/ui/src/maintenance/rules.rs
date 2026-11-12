@@ -126,21 +126,25 @@ pub fn protection_lines(p: &ProtectionView) -> Vec<ProtectionLine> {
     } else {
         line(Verdict::Fail, "ui.maintenance.protection.bfeStopped")
     });
-    lines.push(match (p.level, p.persistent_filters) {
-        (KillSwitchLevel::Strict, 0) => {
-            line(Verdict::Fail, "ui.maintenance.protection.strictMissing")
-        }
-        (KillSwitchLevel::Strict, _) | (_, 0) => ProtectionLine {
-            verdict: Verdict::Ok,
-            text: Msg::new("ui.maintenance.protection.filters")
-                .arg("dynamic", p.dynamic_filters)
-                .arg("persistent", p.persistent_filters),
-        },
-        (_, n) => ProtectionLine {
-            verdict: Verdict::Warn,
-            text: Msg::new("ui.maintenance.protection.leftoverFilters").arg("n", n),
-        },
-    });
+    // Counts that were not read back (unelevated: BFE lets only administrators enumerate
+    // filters) are not shown: «0 / 0» would read as a verified clean state.
+    if p.last_verified.is_some() {
+        lines.push(match (p.level, p.persistent_filters) {
+            (KillSwitchLevel::Strict, 0) => {
+                line(Verdict::Fail, "ui.maintenance.protection.strictMissing")
+            }
+            (KillSwitchLevel::Strict, _) | (_, 0) => ProtectionLine {
+                verdict: Verdict::Ok,
+                text: Msg::new("ui.maintenance.protection.filters")
+                    .arg("dynamic", p.dynamic_filters)
+                    .arg("persistent", p.persistent_filters),
+            },
+            (_, n) => ProtectionLine {
+                verdict: Verdict::Warn,
+                text: Msg::new("ui.maintenance.protection.leftoverFilters").arg("n", n),
+            },
+        });
+    }
     for block in &p.firewall_blocks {
         let (verdict, family) = if block.active {
             (Verdict::Warn, "ui.maintenance.protection.fwBlockActive")

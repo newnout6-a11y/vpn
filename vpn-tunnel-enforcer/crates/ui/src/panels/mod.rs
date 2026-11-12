@@ -5,7 +5,7 @@
 //! [`PanelsApi`] in context (`Rc<dyn PanelsApi>`); the app implements it over the backend,
 //! [`demo::DemoPanels`] fakes it with the reference fixtures.
 pub mod demo;
-mod icons;
+pub(crate) mod icons;
 mod model;
 mod picker;
 mod proxies;

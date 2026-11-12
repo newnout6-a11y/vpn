@@ -47,11 +47,17 @@ pub(super) fn Domains() -> Element {
     let mut editing = use_signal(|| None::<String>);
     let row_job = use_job::<()>();
     let import_job = use_job::<Option<DomainImportPreview>>();
+    // Each pick gets a fresh preview box: the previous box's import report must not stay over it.
+    let mut picks = use_signal(|| 0u32);
     let view = ctx.domains.read().clone();
     let pick_api = api.clone();
     let pick = move |_| {
         let api = pick_api.clone();
-        import_job.start(move |_| async move { api.pick_domain_list().await });
+        import_job.start(move |_| async move {
+            let picked = api.pick_domain_list().await?;
+            picks += 1;
+            Ok(picked)
+        });
     };
     let row_error = match row_job.last() {
         Some(Err(err)) => Some(err),
@@ -82,7 +88,7 @@ pub(super) fn Domains() -> Element {
             p { class: "set-hint", {t!("domainRouting.description")} }
             RuleOrder { smart_ru: view.smart_ru }
             if let Some(preview) = preview {
-                ImportPreviewBox { preview, on_close: move |()| import_job.clear() }
+                ImportPreviewBox { key: "{picks}", preview, on_close: move |()| import_job.clear() }
             }
             ActionError { error: import_error }
             if adding() {
@@ -318,7 +324,8 @@ fn ImportPreviewBox(preview: DomainImportPreview, on_close: EventHandler<()>) ->
     let discard_api = api.clone();
     let close = move |_| {
         let api = discard_api.clone();
-        spawn(async move { api.discard_domain_list().await });
+        // The box unmounts right away: a task of its own scope would be dropped unpolled.
+        dioxus::core::spawn_forever(async move { api.discard_domain_list().await });
         on_close.call(());
     };
     let import = move |_| {

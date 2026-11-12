@@ -118,12 +118,19 @@ fn legacy_rows() {
         extra_message(&with_message, "sing-box exited with code 1"),
         None
     );
-    // a running session has no chip yet (the old table said «Вы отключили»)
+    // a running session has no chip yet (the old table said «Вы отключили»), and its detail does
+    // not claim an end either
     let running = SessionRow {
         ended_at: None,
         ..row("live")
     };
     assert_eq!(chip_kind(&running), None);
+    assert_eq!(shown_headline(&running).render_with(&ru), "Сессия ещё идёт");
+    assert_eq!(
+        shown_headline(&running).render_with(&en),
+        "The session is still running"
+    );
+    assert!(!diagnostics_text(&running, &en).contains("user"));
 }
 
 /// ui-pages §7.4 "splits real sessions from start failures" and AT-00-005 "shows elapsed
@@ -194,6 +201,32 @@ fn date_bounds_are_local_days() {
     assert!(query.matches(&at(to)));
     assert!(!query.matches(&at(from - 1)));
     assert!(!query.matches(&at(to + 1)));
+}
+
+/// Decision 6 (search covers what is shown): the mode column shows «Туннель» / «Tunnel», so the
+/// search finds a Hard session by that word in either language (it matched only `hard` before).
+#[test]
+fn search_finds_the_shown_mode_label() {
+    crate::test_locales::init_locales();
+    let tz = TimeZone::UTC;
+    let hard = SessionRow {
+        mode: Mode::Hard,
+        ..row("h")
+    };
+    let search = |text: &str, lang| {
+        Query::new(
+            &Filters {
+                text: text.into(),
+                ..Filters::default()
+            },
+            &tz,
+            lang,
+        )
+    };
+    assert!(search("туннель", Lang::Ru).matches(&hard));
+    assert!(search("tunnel", Lang::En).matches(&hard));
+    assert!(search("hard", Lang::En).matches(&hard));
+    assert!(!search("прокси", Lang::Ru).matches(&hard));
 }
 
 /// ui-pages §3.9 history query: AND of reasons, days and a case-insensitive text match over
@@ -441,13 +474,20 @@ fn diagnostics_text_of_rows() {
          Детали:\n  singboxExitCode: 0\n  outboundFault: reality-key-mismatch\n  autoRestartAttempts: 3\n  killSwitchEngaged: false\n  \
          leakDetectedDuringSession: true\n  proxyEngine: sing-box\nСообщение: exit status 0"
     );
-    let legacy = SessionRow {
-        ended_at: None,
-        ..row("y")
-    };
+    let legacy = row("y");
     assert_eq!(
         diagnostics_text(&legacy, &en),
-        "Profile: retained-history (direct)\nStarted: 1970-01-01T00:00:01.000Z\nTraffic: ↓0 / ↑0 bytes\nReason: user"
+        "Profile: retained-history (direct)\nStarted: 1970-01-01T00:00:01.000Z\nEnded: 1970-01-01T00:00:02.000Z\n\
+         Traffic: ↓0 / ↑0 bytes\nReason: user"
+    );
+    // a session still running has no disconnect reason to copy
+    let running = SessionRow {
+        ended_at: None,
+        ..row("z")
+    };
+    assert_eq!(
+        diagnostics_text(&running, &en),
+        "Profile: retained-history (direct)\nStarted: 1970-01-01T00:00:01.000Z\nTraffic: ↓0 / ↑0 bytes"
     );
 }
 
@@ -482,7 +522,6 @@ fn cleanup_summary() {
     );
     let summary = ClearSummary::of(&partial);
     assert!(!summary.is_success());
-    assert!(summary.history_cleared && summary.app_log_cleared);
     let (title, body) = summary.toast(&ru);
     assert_eq!(title, "Очистка выполнена частично");
     assert_eq!(
@@ -519,7 +558,7 @@ fn cleanup_summary() {
         Err(ErrorKind::Conflict),
     );
     let summary = ClearSummary::of(&failed);
-    assert!(!summary.is_success() && !summary.history_cleared && !summary.app_log_cleared);
+    assert!(!summary.is_success());
     assert_eq!((summary.cleared, summary.absent, summary.failed), (0, 0, 3));
     assert_eq!(
         summary.toast(&ru).1,

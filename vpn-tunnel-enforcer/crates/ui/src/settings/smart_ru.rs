@@ -2,10 +2,10 @@
 //! status and «Обновить сейчас» (instant, with the SAVED settings: never saves the draft, U-02).
 use dioxus::prelude::*;
 
-use super::fmt::datetime_text;
 use super::model::RuleSource;
 use super::{ActionError, use_api, use_ctx};
-use crate::lang::tr;
+use crate::lang::{LANG, tr};
+use crate::servers::local_stamp;
 use crate::t;
 use crate::widgets::{Button, ButtonKind, Panel, Switch, use_job};
 
@@ -51,7 +51,10 @@ fn RuleLists() -> Element {
     } else {
         match (lists.active_source, lists.managed_at) {
             (RuleSource::Managed, Some(at)) => {
-                t!("ui.settings.smartRu.usingManaged", when = datetime_text(at))
+                t!(
+                    "ui.settings.smartRu.usingManaged",
+                    when = local_stamp(at, *LANG.read())
+                )
             }
             (RuleSource::Managed, None) => t!("ui.settings.smartRu.usingManagedUndated"),
             (RuleSource::Bundled, _) => t!("ui.settings.smartRu.usingBundled"),

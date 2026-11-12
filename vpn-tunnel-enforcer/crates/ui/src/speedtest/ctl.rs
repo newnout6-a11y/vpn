@@ -9,7 +9,7 @@ use tokio::sync::watch;
 use vpnte_base::Msg;
 
 use super::SpeedTestApi;
-use super::model::{SpeedProgress, SpeedResult, SpeedTestState};
+use super::model::{SpeedProgress, SpeedResult};
 use crate::widgets::JobSlot;
 
 /// The run slot and its live progress (Copy handles owned by the page root).
@@ -92,26 +92,6 @@ impl Controller {
     }
 }
 
-/// Mirrors the pushed state into a signal (one pump task owned by the page).
-pub(crate) fn use_state_pump(api: Rc<dyn SpeedTestApi>) -> Signal<SpeedTestState> {
-    let mut state = use_signal(|| api.state().borrow().clone());
-    use_future(move || {
-        let mut rx = api.state();
-        async move {
-            loop {
-                let next = rx.borrow_and_update().clone();
-                if *state.peek() != next {
-                    state.set(next);
-                }
-                if rx.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
-    });
-    state
-}
-
 #[cfg(test)]
 mod tests {
     //! Port of `SpeedTest.lifecycle.test.tsx` (ui-pages §7.7, AT-00-003 / AT-00-008). Request ids
@@ -126,7 +106,7 @@ mod tests {
     use vpnte_base::{AppError, AppResult, ErrorKind};
 
     use super::*;
-    use crate::speedtest::model::{Egress, SpeedPhase};
+    use crate::speedtest::model::{Egress, SpeedPhase, SpeedTestState};
 
     /// The Russian catalog text of `key`.
     fn ru_text(key: &str) -> String {

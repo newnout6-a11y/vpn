@@ -13,7 +13,6 @@ mod actions;
 mod banners;
 pub mod demo;
 mod facts;
-mod icons;
 mod model;
 mod slab;
 #[cfg(test)]

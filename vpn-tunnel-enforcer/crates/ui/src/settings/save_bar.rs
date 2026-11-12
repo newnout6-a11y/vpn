@@ -1,6 +1,7 @@
 //! The save bar: shown while the draft differs from the live settings (ui-pages §3.1.2, §6.4).
 //! «Сохранить и применить» sends only the changed fields; «Сбросить» forgets the edits.
 use dioxus::prelude::*;
+use vpnte_base::ErrorKind;
 
 use super::{ActionError, toast, use_api, use_ctx};
 use crate::lang::tr;
@@ -56,12 +57,15 @@ pub(super) fn SaveBar() -> Element {
                     Ok(())
                 }
                 Err(err) => {
-                    tracing::error!(target: "ui", error = %err, "settings save failed");
-                    toast(
-                        ToastKind::Error,
-                        t!("ui.settings.save.failed"),
-                        Some(tr(&err.user_msg())),
-                    );
+                    // A cancelled save is silent like every cancellation.
+                    if err.kind != ErrorKind::Cancelled {
+                        tracing::error!(target: "ui", error = %err, "settings save failed");
+                        toast(
+                            ToastKind::Error,
+                            t!("ui.settings.save.failed"),
+                            Some(tr(&err.user_msg())),
+                        );
+                    }
                     Err(err)
                 }
             }

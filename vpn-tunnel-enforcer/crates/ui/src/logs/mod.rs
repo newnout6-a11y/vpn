@@ -40,8 +40,8 @@ pub use model::{
 };
 pub use page::LogsPage;
 pub use report::{
-    ClearSummary, diagnostics_text, engine_name, evidence_items, evidence_text, export_file_name,
-    fault_key, fault_label, headline_text,
+    ClearSummary, diagnostics_text, evidence_items, evidence_text, export_file_name, fault_key,
+    fault_label, headline_text,
 };
 
 /// Auto-refresh period of the journal while the page is visible and «Следить» is on (the old

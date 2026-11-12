@@ -413,6 +413,32 @@ fn protection_read_back_vectors() {
     );
 }
 
+/// Unelevated, our filters cannot be enumerated (`last_verified: None`): no «0 / 0» count line
+/// that would read as a verified clean state; the state line says why.
+#[test]
+fn unread_filter_counts_are_not_shown() {
+    let unread = ProtectionView {
+        kill_switch: KillSwitchState::Failed(Msg::new("app.base.needsAdmin")),
+        last_verified: None,
+        ..healthy()
+    };
+    let lines = protection_lines(&unread);
+    assert!(
+        lines
+            .iter()
+            .all(|l| !l.text.key.starts_with("ui.maintenance.protection.filters")
+                && l.text.key != "ui.maintenance.protection.strictMissing"),
+        "{lines:?}"
+    );
+    assert!(lines.iter().any(|l| l.text.key == "app.base.needsAdmin"));
+    let counted = protection_lines(&healthy());
+    assert!(
+        counted
+            .iter()
+            .any(|l| l.text.key == "ui.maintenance.protection.filters")
+    );
+}
+
 /// The badge stays «not checked» until a report exists, and nothing unverified reads as Ok.
 #[test]
 fn health_summary_needs_a_report() {

@@ -83,8 +83,7 @@
   font-size: 22px;
   font-weight: 900;
   text-transform: uppercase;
-  /* 20px a line: the two-line wordmark is 40px, on the 4px grid (0.9 gave 39.6px) */
-  line-height: 20px;
+  line-height: 0.9;
   letter-spacing: -0.03em;
 }
 .c-swiss .swiss-nav-item {
@@ -207,7 +206,6 @@
   gap: 12px;
   padding: 0 20px;
 }
-.c-swiss .swiss-chip { border-radius: 0; }
 /* ── Micro-motion ────────────────────────────────────── */
 .c-swiss .roll { display: inline-block; animation: swiss-roll 0.32s cubic-bezier(0.2, 0.9, 0.3, 1) both; }
 @keyframes swiss-roll { from { transform: translateY(-0.45em); opacity: 0; } to { transform: none; opacity: 1; } }
@@ -307,13 +305,11 @@
   --rgb-danger: 255 79 0;
   --color-bg: rgb(var(--rgb-bg));
   --color-card: rgb(var(--rgb-card));
-  --color-card-elevated: rgb(var(--rgb-card-elevated));
   --color-accent: rgb(var(--rgb-accent));
   --color-accent-hover: rgb(var(--rgb-accent-hover));
   --color-text: rgb(var(--rgb-text));
   --color-text-secondary: rgb(var(--rgb-text-secondary));
   --color-text-muted: rgb(var(--rgb-text-muted));
-  --color-sidebar: rgb(var(--rgb-sidebar));
   --color-border: rgb(var(--rgb-border));
   --color-border-strong: rgb(var(--rgb-border-strong));
   --color-success: rgb(var(--rgb-success));
@@ -321,16 +317,12 @@
   --color-danger: rgb(var(--rgb-danger));
   --radius-sm: 0px;
   --radius-md: 0px;
-  --radius-lg: 0px;
   --shadow-card: none;
   --shadow-card-hover: none;
   --shadow-button: none;
   --shadow-button-hover: none;
   --glass-bg: rgb(var(--rgb-card));
   --glass-border: rgb(var(--rgb-border));
-  --glow-accent: none;
-  --glow-success: none;
-  --glow-danger: none;
   /* Fill the page area (the page container has p-6) with paper */
   margin: -24px;
   padding: 24px;
@@ -450,7 +442,6 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .swiss-panels > * { min-width: 0; margin: 0 -1px -1px 0; }
-.swiss-panels-wide { grid-column: 1 / -1; }
 @media (max-width: 1100px) {
   .swiss-panels { grid-template-columns: minmax(0, 1fr); }
 }
@@ -472,23 +463,7 @@
 }
 .c-swiss .swiss-label-ink { color: var(--ink); }
 .swiss-panel-body { max-height: 260px; overflow: auto; }
-.swiss-log-row {
-  display: grid;
-  grid-template-columns: 62px minmax(0, 1fr);
-  gap: 8px;
-  border-bottom: 1px solid var(--rule);
-  padding: 8px 20px;
-}
-.swiss-log-time { font-size: 11px; color: var(--mute); font-variant-numeric: tabular-nums; }
-.swiss-log-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.swiss-log-msg.is-warn { color: var(--signal); }
 .swiss-empty { padding: 16px 20px; font-size: 13px; color: var(--mute); }
-.c-swiss .row-in { animation: swiss-row-in 1.6s ease-out both; }
-@keyframes swiss-row-in {
-  0% { background: var(--signal); color: var(--on-signal); transform: translateX(-6px); }
-  18% { transform: none; }
-  100% { background: transparent; }
-}
 /* ── Stage 3: slab identity column and panel internals (mockup layout) ── */
 .swiss-slab.is-on { background: var(--signal); color: var(--on-signal); }
 .swiss-slab.is-on .swiss-label { color: var(--on-signal); }
@@ -497,22 +472,7 @@
 .swiss-slab.is-on .swiss-progress-cell { border-color: var(--on-rule); }
 .swiss-slab.is-on .swiss-progress-cell { color: var(--on-signal); }
 .swiss-identity { display: flex; flex: 1; flex-direction: column; gap: 20px; padding: 20px; }
-.swiss-slab-side > .swiss-transient { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 0 20px 16px; }
-.swiss-head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.swiss-kbd-row { display: flex; align-items: center; gap: 4px; color: var(--mute); }
-.swiss-slab.is-on .swiss-kbd-row { color: var(--on-signal); opacity: 0.7; }
-.c-swiss .swiss-kbd {
-  display: inline-flex;
-  height: 20px;
-  min-width: 20px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--rule);
-  padding: 0 4px;
-  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
-  font-size: 10px;
-}
-.swiss-slab.is-on .swiss-kbd { border-color: var(--on-rule); }
+.swiss-slab-side > .swiss-transient { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 0 20px 14px; }
 .c-swiss .swiss-confirm-text { font-size: 13px; font-weight: 600; }
 .swiss-confirm-actions { display: flex; gap: 8px; }
 .c-swiss .swiss-confirm-yes { padding: 6px 14px; background: var(--ink); color: var(--paper); font-size: 13px; font-weight: 600; }
@@ -574,9 +534,9 @@
 .swiss-slab.is-on .swiss-power:hover:not(:disabled) { color: var(--ink); }
 /* Traffic panel */
 .swiss-traffic-figures { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 16px; padding: 16px 20px 0; }
-.c-swiss .swiss-traffic-big { margin-top: 8px; font-size: 48px; font-weight: 600; line-height: 1; letter-spacing: -0.05em; font-variant-numeric: tabular-nums; }
+.c-swiss .swiss-traffic-big { margin-top: 6px; font-size: 48px; font-weight: 600; line-height: 1; letter-spacing: -0.05em; font-variant-numeric: tabular-nums; }
 .c-swiss .swiss-traffic-big.is-dim { color: var(--mute); }
-.swiss-traffic-small { display: flex; flex-direction: column; gap: 8px; padding-bottom: 2px; }
+.swiss-traffic-small { display: flex; flex-direction: column; gap: 6px; padding-bottom: 2px; }
 .swiss-traffic-small > div { display: flex; align-items: baseline; justify-content: flex-end; gap: 12px; }
 .swiss-traffic-small .swiss-mono { width: 96px; text-align: right; font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .swiss-bars { display: flex; height: 72px; align-items: flex-end; gap: 2px; margin-top: auto; padding: 16px 20px; }
@@ -592,7 +552,7 @@
   align-items: center;
   gap: 8px;
   border-bottom: 1px solid var(--rule);
-  padding: 8px 20px;
+  padding: 7px 20px;
   font-size: 12px;
 }
 .swiss-server-row:hover { background: var(--rule); }
@@ -600,17 +560,12 @@
 .swiss-server-row.is-offline { color: var(--mute); }
 .swiss-server-flag { display: flex; align-items: center; }
 .c-swiss .swiss-server-name { display: flex; min-width: 0; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; text-align: left; }
-.c-swiss .swiss-best { flex-shrink: 0; background: var(--signal); padding: 0 4px; color: var(--on-signal); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; }
 .swiss-server-ping { text-align: right; font-variant-numeric: tabular-nums; }
 .swiss-server-health { display: flex; align-items: center; justify-content: flex-end; gap: 6px; font-size: 10px; opacity: 0.8; }
 .swiss-server-health.is-offline { color: var(--signal); opacity: 1; text-transform: uppercase; }
 .swiss-health-dot { width: 8px; height: 8px; background: currentColor; }
 .swiss-health-dot.is-offline { background: var(--signal); }
 .swiss-health-dot.is-unknown { background: transparent; border: 1px solid currentColor; }
-.c-swiss .swiss-server-ping-btn { opacity: 0; color: inherit; transition: opacity 0.15s; }
-.swiss-server-row:hover .swiss-server-ping-btn,
-.c-swiss .swiss-server-ping-btn:focus-visible { opacity: 0.7; }
-.c-swiss .swiss-server-ping-btn:hover { opacity: 1; color: var(--signal); }
 /* ── Title bar (TitleBar.tsx): drag strip under the native caption buttons ── */
 .swiss-titlebar {
   position: fixed;
@@ -722,7 +677,6 @@
 .c-swiss .swiss-nav-item[aria-current='page'] .swiss-nav-num { color: var(--signal-ink); }
 .c-swiss .swiss-fact-value.is-alert { color: var(--signal-ink); }
 .c-swiss .swiss-fact-action:hover:not(:disabled) { color: var(--signal-ink); }
-.swiss-log-msg.is-warn { color: var(--signal-ink); }
 .c-swiss .swiss-sub.is-alert { color: var(--signal-ink); }
 .swiss-server-health.is-offline { color: var(--signal-ink); }
 .c-swiss .swiss-toast.is-error .swiss-toast-title { color: var(--signal-ink); }
@@ -756,11 +710,11 @@
 .swiss-identity { gap: clamp(8px, 1.8vh, 20px); padding-top: clamp(12px, 1.8vh, 20px); padding-bottom: clamp(12px, 1.8vh, 20px); }
 .c-swiss .swiss-slab-side .swiss-power { height: clamp(52px, 7.5vh, 68px); }
 /* External proxies column */
-.swiss-proxy-top { display: flex; flex-shrink: 0; flex-direction: column; gap: 12px; padding: 12px 20px; }
+.swiss-proxy-top { display: flex; flex-shrink: 0; flex-direction: column; gap: 10px; padding: 12px 20px; }
 .swiss-proxy-summary { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
 .c-swiss .swiss-proxy-count { font-size: 32px; font-weight: 600; line-height: 1; letter-spacing: -0.05em; font-variant-numeric: tabular-nums; }
 .c-swiss .swiss-proxy-countries { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--mute); }
-.swiss-proxy-add { display: flex; align-items: flex-end; gap: 8px; }
+.swiss-proxy-add { display: flex; align-items: flex-end; gap: 6px; }
 .swiss-proxy-add > .swiss-proxy-select { min-width: 0; flex: 1 1 auto; }
 .c-swiss .swiss-proxy-select label { font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace; font-size: 10px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--mute); }
 .c-swiss .swiss-proxy-start { display: flex; height: 32px; width: 32px; flex-shrink: 0; align-items: center; justify-content: center; background: var(--ink); color: var(--paper); transition: background-color 0.15s, color 0.15s; }
@@ -769,7 +723,7 @@
 .c-swiss .swiss-proxy-start:disabled { cursor: default; background: transparent; box-shadow: inset 0 0 0 1px var(--rule); color: var(--mute); }
 .c-swiss .swiss-proxy-start:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
 .c-swiss .swiss-proxy-empty { border-top: 1px solid var(--rule); }
-.swiss-proxy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; border-top: 1px solid var(--rule); padding: 8px 20px; }
+.swiss-proxy-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; border-top: 1px solid var(--rule); padding: 7px 20px; }
 .c-swiss .swiss-proxy-name { display: flex; min-width: 0; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; }
 .c-swiss .swiss-proxy-cc { flex-shrink: 0; font-size: 10px; color: var(--mute); }
 .c-swiss .swiss-proxy-meta { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--mute); }

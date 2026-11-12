@@ -59,12 +59,14 @@ pub(super) fn LocationPrivacy() -> Element {
                     Ok(())
                 }
                 Err(err) => {
-                    tracing::error!(target: "ui", error = %err, "location privacy switch failed");
-                    toast(
-                        ToastKind::Error,
-                        t!("ui.settings.location.failed"),
-                        Some(tr(&err.user_msg())),
-                    );
+                    if err.kind != vpnte_base::ErrorKind::Cancelled {
+                        tracing::error!(target: "ui", error = %err, "location privacy switch failed");
+                        toast(
+                            ToastKind::Error,
+                            t!("ui.settings.location.failed"),
+                            Some(tr(&err.user_msg())),
+                        );
+                    }
                     Err(err)
                 }
             }

@@ -84,14 +84,19 @@ pub(super) fn LatencyBox(check: LiveCheck) -> Element {
         DiagBox { title: t!("ui.servers.live.box.latency"), dot: Dot::from(reach.status), duration_ms: reach.duration_ms,
             if let Some(l) = check.latency {
                 div { class: "srv-latency",
-                    for (label , value , main) in [("MIN", l.min, false), ("AVG", l.avg, true), ("MEDIAN", l.median, false), ("MAX", l.max, false)] {
+                    for (label , value , main) in [
+                        (t!("ui.servers.live.latMin"), l.min, false),
+                        (t!("ui.servers.live.latAvg"), l.avg, true),
+                        (t!("ui.servers.live.latMedian"), l.median, false),
+                        (t!("ui.servers.live.latMax"), l.max, false),
+                    ] {
                         div { key: "{label}", class: "srv-latency-stat", class: if main { "is-main" },
                             span { class: "swiss-label", "{label}" }
                             span { class: "swiss-mono", "{value} ms" }
                         }
                     }
                 }
-                Kv { label: "Jitter:".to_owned(), mono: true, "{l.jitter} ms" }
+                Kv { label: t!("ui.servers.live.jitter"), mono: true, "{l.jitter} ms" }
                 div { class: "srv-kv-line",
                     span { class: "srv-kv-label", {t!("ui.servers.live.tcpFailures")} }
                     span { class: "srv-kv-value swiss-mono", class: if l.loss > 0.0 { "is-alert" }, {loss_text(&l)} }
@@ -206,12 +211,12 @@ pub(super) fn PortsBox(check: LiveCheck) -> Element {
 }
 
 fn port_text(port: u16, service: Option<&str>, state: PortStatus) -> String {
-    let state = match state {
-        PortStatus::Open => "open",
-        PortStatus::Closed => "closed",
-        PortStatus::Filtered => "filtered",
-        PortStatus::Timeout => "timeout",
-    };
+    let state = t!(match state {
+        PortStatus::Open => "ui.servers.live.port.open",
+        PortStatus::Closed => "ui.servers.live.port.closed",
+        PortStatus::Filtered => "ui.servers.live.port.filtered",
+        PortStatus::Timeout => "ui.servers.live.port.timeout",
+    });
     match service {
         Some(s) => format!("{port} ({s}): {state}"),
         None => format!("{port}: {state}"),

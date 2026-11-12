@@ -2,7 +2,6 @@
 //! (only while the draft has advanced mode on) and «Логи и диагностика».
 use dioxus::prelude::*;
 
-use super::fmt::size_text;
 use super::model::{
     BootstrapRouteMode, CAPTURE_MAX_MB, CAPTURE_QUOTA_MB, CHECK_INTERVAL_SECS, DiagnosticsExport,
     ProxyKind,
@@ -10,6 +9,7 @@ use super::model::{
 use super::{ActionError, toast, use_api, use_ctx};
 use crate::lang::tr;
 use crate::t;
+use crate::units::format_bytes;
 use crate::widgets::{
     Button, ButtonKind, ConfirmDialog, NumberInput, Panel, Row, Select, SelectOption, Switch,
     TextInput, ToastKind, UiError, use_job,
@@ -206,7 +206,7 @@ fn Capture() -> Element {
             div { class: "set-status-line",
                 p { class: "set-status-text", role: "status",
                     match used {
-                        Some(bytes) => t!("ui.settings.capture.used", size = size_text(bytes)),
+                        Some(bytes) => t!("ui.settings.capture.used", size = format_bytes(bytes)),
                         None => t!("ui.settings.capture.usedUnknown"),
                     }
                 }

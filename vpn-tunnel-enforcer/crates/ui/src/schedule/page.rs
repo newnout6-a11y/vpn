@@ -130,10 +130,14 @@ fn NextEventStrip(event: NextEvent) -> Element {
                 None
             };
             tokio::time::sleep(wait.unwrap_or(Duration::from_secs(30))).await;
-            tick += 1;
+            // a hidden page is not re-rendered; showing it again re-renders (`active` below)
+            if *active.peek() {
+                tick += 1;
+            }
         }
     });
     tick.read();
+    active.read();
     let at = event.at;
     let (action_key, mark) = match event.action {
         NextAction::Start => ("dashboardWidgets.scheduleConnect", "is-start"),

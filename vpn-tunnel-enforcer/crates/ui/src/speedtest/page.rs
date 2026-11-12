@@ -7,10 +7,11 @@ use jiff::tz::TimeZone;
 use vpnte_base::i18n::Lang;
 
 use super::SpeedTestApi;
-use super::ctl::{use_controller, use_state_pump};
+use super::ctl::use_controller;
 use super::format::{egress_look, fmt_mbps, format_date_time, phase_key};
 use super::model::{Egress, SpeedResult, SpeedTestState};
 use crate::availability::{text, text_with};
+use crate::hooks::use_watch;
 use crate::lang::LANG;
 use crate::pages::{Page, nav_number};
 use crate::widgets::{
@@ -24,7 +25,7 @@ use crate::widgets::{
 #[component]
 pub fn SpeedTestPage() -> Element {
     let api = use_context::<Rc<dyn SpeedTestApi>>();
-    let state = use_state_pump(api.clone());
+    let state = use_watch(|| api.state());
     let ctl = use_controller(api);
     let lang = *LANG.read();
     let snapshot = state.read();
@@ -220,7 +221,7 @@ fn HistoryRow(row: SpeedResult, lang: Lang, tz: TimeZone, mbps: String, ms: Stri
     let upload = row
         .upload_mbps
         .map_or_else(|| "—".to_owned(), |v| format!("{} {mbps}", fmt_mbps(v)));
-    let mark = egress_look(row.egress).filter(|_| row.egress != Egress::Match);
+    let mark = egress_look(row.egress);
     rsx! {
         tr { class: "st-row",
             Cell { mono: true, muted: true, {format_date_time(lang, row.timestamp, &tz)} }

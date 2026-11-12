@@ -32,12 +32,27 @@ fn DiagBox(
                     span { class: "swiss-mono srv-diag-ms", "{ms} ms" }
                 }
                 if let Some(dot) = dot {
-                    span { class: "srv-dot is-{dot.name()}", role: "img", aria_label: "{dot.name()}", title: "{dot.name()}" }
+                    {
+                        let label = dot_label(dot);
+                        rsx! {
+                            span { class: "srv-dot is-{dot.name()}", role: "img", aria_label: "{label}", title: "{label}" }
+                        }
+                    }
                 }
             }
             div { class: "srv-diag-body", {children} }
         }
     }
+}
+
+/// The spoken and hover name of a status dot (its class name is not a word for people).
+fn dot_label(dot: Dot) -> String {
+    t!(match dot {
+        Dot::Ok => "ui.servers.live.dot.ok",
+        Dot::Warn => "ui.servers.live.dot.warn",
+        Dot::Fail => "ui.servers.live.dot.fail",
+        Dot::Muted => "ui.servers.live.dot.muted",
+    })
 }
 
 /// One label / value line of a box.

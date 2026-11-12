@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
+use vpnte_base::Msg;
 use vpnte_base::types::UnixMs;
 
 use super::model::{DisconnectReason, OutcomeKind, SessionRow, Text};
@@ -61,13 +62,15 @@ pub fn chip_kind(row: &SessionRow) -> Option<OutcomeKind> {
     (row.ended_at.is_some() || row.outcome.is_some()).then(|| shown_kind(row))
 }
 
-/// The headline: the outcome's, else the stored message, else the chip label.
+/// The headline: the outcome's, else the stored message, else the chip label. A session that
+/// still runs without an outcome has no end to explain: it says so instead of «Вы отключили».
 pub fn shown_headline(row: &SessionRow) -> Text {
     if let Some(outcome) = &row.outcome {
         return outcome.headline.clone();
     }
     match non_empty(row.error_message.as_deref()) {
         Some(message) => Text::Plain(message.to_owned()),
+        None if row.ended_at.is_none() => Text::Msg(Msg::new("logs.running")),
         None => Text::Msg(legacy_kind(row.reason).label()),
     }
 }
@@ -145,7 +148,8 @@ impl Query {
     }
 
     /// AND of reason ∈ reasons, start ≥ from, start ≤ to, and the text found in what the row
-    /// shows: profile, mode, reason, stored message, outcome kind, chip label, headline.
+    /// shows: profile, mode (wire name and label), reason, stored message, outcome kind, chip
+    /// label, headline.
     pub fn matches(&self, row: &SessionRow) -> bool {
         if !self.reasons.is_empty() && !self.reasons.contains(&row.reason) {
             return false;
@@ -166,9 +170,11 @@ impl Query {
             ),
             None => ("", String::new(), String::new()),
         };
+        let mode = Msg::new(row.mode.label_key()).render(self.lang);
         let haystack = [
             row.profile_name.as_str(),
             row.mode.key(),
+            &mode,
             row.reason.key(),
             row.error_message.as_deref().unwrap_or(""),
             kind,

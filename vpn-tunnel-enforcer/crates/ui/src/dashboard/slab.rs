@@ -12,12 +12,12 @@ use vpnte_view::labels::{
 use vpnte_view::mascot::MascotEvent;
 use vpnte_view::swiss::{self, OpWindow, RULER_CELLS, SwissInput};
 
-use super::icons::{ArrowRight, Spinner, Square};
-use super::model::{Hold, NodeLine, cell_label, engine_caption, node_line};
+use super::model::{Hold, NodeLine, engine_caption, node_line};
 use super::{Dash, EngineLine};
 use crate::lang::tr;
 use crate::mascot::MascotHost;
-use crate::pages::use_page_active;
+use crate::pages::{nav_number, use_page_active};
+use crate::panels::icons::{ArrowRight, Spinner, Square};
 use crate::panels::{Flag, LocalPings, ServersView};
 use crate::t;
 
@@ -111,18 +111,24 @@ fn FitWord(text: String, busy_dot: bool) -> Element {
     }
 }
 
-/// «· 00:12:34 в туннеле»: its own second ticker, paused while the page is not shown.
+/// «· 00:12:34 в туннеле»: its own second ticker. Like the sidebar clock (D-14) the loop ends
+/// while the page is not shown (another page, the window in the tray) and restarts, correct at
+/// once, when it is shown again.
 #[component]
 fn Uptime(since: UnixMs) -> Element {
     let active = use_page_active();
     let mut now = use_signal(now_ms);
-    use_future(move || async move {
-        loop {
-            // wake on the next whole second of the session clock
-            let ms = 1_000 - (now_ms() - since).rem_euclid(1_000);
-            tokio::time::sleep(Duration::from_millis(ms as u64 + 5)).await;
-            if *active.peek() {
+    use_resource(move || {
+        let shown = active();
+        async move {
+            if !shown {
+                return;
+            }
+            loop {
                 now.set(now_ms());
+                // wake on the next whole second of the session clock
+                let ms = 1_000 - (now_ms() - since).rem_euclid(1_000);
+                tokio::time::sleep(Duration::from_millis(ms as u64 + 5)).await;
             }
         }
     });
@@ -258,13 +264,17 @@ fn RealBlock(line: RealLine) -> Element {
 }
 
 /// «Узел»: the active server with its flag, protocol and ping, and the engine that carries the
-/// running session (a quiet mono caption: the choice is never hidden).
+/// running session (the choice is never hidden). The engine joins the node's meta line («VLESS ·
+/// 38 мс · Xray · REALITY», cut with an ellipsis, the whole line in its title): a line of its own
+/// made the slab 20 px taller than the reference and the panel row below clipped its lists at the
+/// default window size.
 #[component]
 fn NodeBlock(node: Option<NodeLine>, engine: Option<EngineLine>) -> Element {
     let engine = engine.map(|line| {
         let reason = line.reason.as_ref().map(tr);
         engine_caption(&line, reason)
     });
+    let engine_title = t!("ui.dashboard.engineTitle");
     rsx! {
         div {
             div { class: "swiss-label", {t!("dashboard.swissNode")} }
@@ -275,12 +285,30 @@ fn NodeBlock(node: Option<NodeLine>, engine: Option<EngineLine>) -> Element {
                     }
                     span { class: "truncate", "{node.name}" }
                 }
-                div { class: "swiss-sub", {tr(&node.meta)} }
+                NodeMeta { meta: tr(&node.meta), engine, engine_title }
             } else {
                 div { class: "swiss-node is-dim", {t!("dashboard.swissNoServer")} }
+                if let Some(caption) = engine {
+                    div { class: "swiss-sub", "data-engine": "", title: engine_title, "{caption}" }
+                }
             }
+        }
+    }
+}
+
+/// The node's meta line, with the engine caption appended when one runs.
+#[component]
+fn NodeMeta(meta: String, engine: Option<String>, engine_title: String) -> Element {
+    // the whole line as the title only when the engine may push it past the column
+    let title = engine.as_ref().map(|caption| format!("{meta} · {caption}"));
+    rsx! {
+        div {
+            class: "swiss-sub",
+            class: if title.is_some() { "truncate" },
+            title,
+            "{meta}"
             if let Some(caption) = engine {
-                div { class: "swiss-sub", "data-engine": "", title: t!("ui.dashboard.engineTitle"), "{caption}" }
+                span { "data-engine": "", title: engine_title, " · {caption}" }
             }
         }
     }
@@ -441,7 +469,7 @@ fn Cells(ruler: swiss::Ruler, busy: bool) -> Element {
                     key: "{i}",
                     class: "swiss-progress-cell",
                     class: if i < ruler.lit { "is-done" },
-                    span { class: "swiss-mono", {cell_label(i)} }
+                    span { class: "swiss-mono", {nav_number(usize::from(i))} }
                 }
             }
         }

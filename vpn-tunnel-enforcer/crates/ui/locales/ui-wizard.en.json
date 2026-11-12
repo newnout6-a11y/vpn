@@ -58,8 +58,7 @@
         "hard": "Tunnel",
         "hardText": "All Windows traffic goes through the tunnel: browsers, games, updates, any program. Needs the app to be started as administrator.",
         "soft": "Proxy",
-        "softText": "No administrator rights needed: the app points the Windows system proxy at its own engine. Programs that honour the system proxy go through the VPN, the others go direct.",
-        "softNeedsProxy": "With a key the app picks the mode itself: Tunnel when started as administrator, otherwise Proxy — a server from the list works in Proxy mode too, without administrator rights. You can change the mode in Settings."
+        "softText": "No administrator rights needed: the app points the Windows system proxy at its own engine. Programs that honour the system proxy go through the VPN, the others go direct."
       },
       "protection": {
         "title": "Protection",
@@ -87,8 +86,7 @@
         "waitCheck": "Wait until the key check is over"
       },
       "error": {
-        "autostartNotRestored": "Setup was not completed, and autostart could not be put back as it was. Check autostart in Settings.",
-        "killSwitchNotRestored": "Setup was not completed, and the previous Kill-Switch level could not be put back. Check it in Settings."
+        "autostartNotRestored": "Setup was not completed, and autostart could not be put back as it was. Check autostart in Settings."
       },
       "demo": {
         "power": "Turn protection on",
