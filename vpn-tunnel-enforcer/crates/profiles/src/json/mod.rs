@@ -13,6 +13,7 @@ mod tests;
 mod values;
 mod wireguard;
 mod xray;
+mod xray_hysteria;
 mod xray_plain;
 mod xray_proxy;
 mod xray_stream;

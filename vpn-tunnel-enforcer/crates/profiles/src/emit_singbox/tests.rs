@@ -673,7 +673,7 @@ fn ech_config_is_wrapped_in_pem() {
     );
 }
 
-/// profiles §6.3 engine_need: Xray-only features never reach sing-box.
+/// Xray-only features (profiles §6.3) never reach sing-box.
 #[test]
 fn xray_only_features_are_refused() {
     let mut p = vless("v.example.com");
@@ -729,7 +729,7 @@ fn xray_only_features_are_refused() {
         );
     }
     // An explicit gun mode is what sing-box's gRPC transport speaks (engine selection lets
-    // sing-box run it, `identity::engine_need` = PreferXray("grpc-gun")).
+    // sing-box run it; Auto still prefers Xray for it).
     p.transport = Some(Transport::Grpc {
         service_name: "s".into(),
         multi_mode: Some(false),

@@ -387,6 +387,7 @@ fn vmess_alter_id_note() {
 }
 
 /// Unencrypted and naive-insecure facts are Notes; unsupported plugins / transports are skipped.
+/// A SOCKS4 choice is reported: the emitter speaks SOCKS5 only and used to drop it silently.
 #[test]
 fn notes_and_typed_refusals() {
     let r = parse(json!({ "outbounds": [
@@ -397,7 +398,8 @@ fn notes_and_typed_refusals() {
           "password": "p", "plugin": "kcptun" },
         { "type": "vless", "tag": "x", "server": "v.example", "server_port": 443, "uuid": UUID,
           "transport": { "type": "mkcp" } },
-        { "type": "trojan", "tag": "t", "server": "t.example", "server_port": 443, "password": "" }
+        { "type": "trojan", "tag": "t", "server": "t.example", "server_port": 443, "password": "" },
+        { "type": "socks", "tag": "s4", "server": "127.0.0.1", "server_port": 1080, "version": "4a" }
     ] }));
     assert_eq!(r.profiles[0].notes, [Note::Unencrypted]);
     assert_eq!(r.profiles[1].notes, [Note::NaiveInsecureIgnored]);
@@ -405,6 +407,11 @@ fn notes_and_typed_refusals() {
         r.profiles[1].tls.as_ref().is_some_and(|t| t.insecure),
         "stored, not applied"
     );
+    assert_eq!(
+        r.profiles[2].notes,
+        [Note::UnsupportedField("version".into()), Note::Unencrypted]
+    );
+    assert!(r.profiles[2].singbox_extra.is_empty());
     let reasons: Vec<&SkipReason> = r.skipped.iter().map(|s| &s.reason).collect();
     assert_eq!(
         reasons,

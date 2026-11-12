@@ -263,9 +263,15 @@ fn plain_outbounds_are_typed_xray_only_ones_keep_the_graph() {
             "one-pin",
             json!({ "serverName": "v.example", "pinnedPeerCertSha256": "ab".repeat(32) })
         ),
+        // A pin the model cannot read is not dropped (that would leave an unverified key).
+        pinned(
+            "bad-pin",
+            json!({ "serverName": "v.example", "allowInsecure": true,
+                                   "pinnedPeerCertSha256": "abc" })
+        ),
     ]));
     let graphs: Vec<bool> = r.profiles.iter().map(|p| p.native_xray.is_some()).collect();
-    assert_eq!(graphs, [true, true, false], "{:?}", r.skipped);
+    assert_eq!(graphs, [true, true, false, true], "{:?}", r.skipped);
     assert_eq!(r.profiles[2].notes, [Note::CertPinNotEnforced]);
 }
 

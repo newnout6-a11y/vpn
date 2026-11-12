@@ -10,9 +10,11 @@ use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 
 use crate::clash::parse_u32;
-use crate::common::fields::{parse_host, parse_port};
-use crate::common::wg::{amnezia_note, interface_address, is_amnezia_key, reserved, unrouted_peer};
-use crate::model::{DialPrefs, Host, Kind, Note, Profile, SkipReason, Source, WgPeer, WireGuard};
+use crate::common::wg::{
+    amnezia_note, endpoint as wg_endpoint, interface_address, is_amnezia_key, reserved,
+    unrouted_peer,
+};
+use crate::model::{DialPrefs, Kind, Note, Profile, SkipReason, Source, WgPeer, WireGuard};
 
 /// Keys that only matter to wg-quick on Linux or to a server; dropping them changes nothing here.
 const SILENT_KEYS: &[&str] = &["listenport", "saveconfig"];
@@ -158,7 +160,7 @@ fn peer<'a>(
                 }
             }
             "endpoint" => {
-                endpoint = Some(parse_endpoint(value).ok_or_else(|| invalid("invalid Endpoint"))?)
+                endpoint = Some(wg_endpoint(value).ok_or_else(|| invalid("invalid Endpoint"))?)
             }
             "persistentkeepalive" => keepalive_s = keepalive(value),
             // Not wg-quick, but WARP exporters write it next to the peer.
@@ -216,15 +218,6 @@ pub(crate) fn keepalive(raw: &str) -> Option<u16> {
     parse_u32(raw)
         .and_then(|n| u16::try_from(n).ok())
         .filter(|&n| n > 0)
-}
-
-/// `host:port` or `[v6]:port`.
-fn parse_endpoint(raw: &str) -> Option<(Host, u16)> {
-    let (host, port) = raw.trim().rsplit_once(':')?;
-    if host.contains(':') && !host.starts_with('[') {
-        return None;
-    }
-    Some((parse_host(host.trim())?, parse_port(port.trim())?))
 }
 
 #[cfg(test)]

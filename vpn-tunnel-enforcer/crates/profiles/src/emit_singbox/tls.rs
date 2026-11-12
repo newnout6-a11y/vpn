@@ -47,8 +47,9 @@ pub(super) fn family(p: &Profile) -> Option<Family> {
     }
 }
 
-/// Protocols sing-box refuses to run without TLS (`C.ErrTLSRequired`).
-fn tls_required(kind: &Kind) -> bool {
+/// Protocols sing-box refuses to run without TLS (`C.ErrTLSRequired`): the emitter adds TLS when
+/// a pasted or legacy outbound has no `tls` block.
+pub(crate) fn tls_required(kind: &Kind) -> bool {
     matches!(
         kind,
         Kind::Hysteria2 { .. } | Kind::Tuic { .. } | Kind::Naive { .. } | Kind::Anytls { .. }

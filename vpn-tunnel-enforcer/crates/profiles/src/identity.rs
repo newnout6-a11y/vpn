@@ -1,15 +1,13 @@
-//! Identity of a server key and the engine it needs.
+//! Identity of a server key (the engine choice is `vpnte_engine::select_engine`'s alone).
 //!
 //! The identity hashes what makes two keys the same server account (protocol, address,
 //! credential, SNI, REALITY key, transport path, port-hopping ranges, Shadowsocks method,
 //! provider graph) and never the display name, notes, mux, dial options or uTLS fingerprint:
 //! a provider renaming a node or tuning client options must not turn it into a new server on
 //! refresh, and the same key pasted twice under two names is one server.
-use std::net::IpAddr;
-
 use sha2::{Digest, Sha256};
 
-use crate::model::{EngineNeed, Host, Kind, NativeXray, Profile, Tls, Transport};
+use crate::model::{Host, Kind, NativeXray, Profile, Tls, Transport};
 
 /// Bumped only together with a migration of stored identities.
 const IDENTITY_VERSION: &str = "v1";
@@ -44,110 +42,6 @@ impl Profile {
         let mut id = [0u8; 16];
         id.copy_from_slice(&digest[..16]);
         id
-    }
-
-    /// Which engine can run the profile. Mirrors the facts of `engine::select_engine` (xray-engine
-    /// spec §3.1), which makes the final choice from the user's engine preference.
-    ///
-    /// A profile with an Xray-only feature and a sing-box-only one at the same time reports the
-    /// Xray-only fact; the engine selection rejects such a profile as a conflict.
-    pub fn engine_need(&self) -> EngineNeed {
-        if self.native_xray.is_some() {
-            return EngineNeed::XrayOnly("native-graph");
-        }
-        if !matches!(
-            self.kind,
-            Kind::Vless { .. }
-                | Kind::Vmess { .. }
-                | Kind::Trojan { .. }
-                | Kind::Shadowsocks { .. }
-        ) {
-            return EngineNeed::SingBoxOnly(self.kind.label());
-        }
-        if let Some(tag) = self.xray_only() {
-            return EngineNeed::XrayOnly(tag);
-        }
-        if let Some(tag) = self.singbox_only() {
-            return EngineNeed::SingBoxOnly(tag);
-        }
-        // gRPC "gun" runs on both; Xray stays preferred in Auto for parity with the old app.
-        if matches!(
-            self.transport,
-            Some(Transport::Grpc {
-                multi_mode: Some(false),
-                ..
-            })
-        ) {
-            return EngineNeed::PreferXray("grpc-gun");
-        }
-        if self.tls.as_ref().is_some_and(|t| t.reality.is_some()) {
-            // Current Xray REALITY servers reject the sing-box client hello.
-            return EngineNeed::PreferXray("reality");
-        }
-        EngineNeed::Any
-    }
-
-    /// Xray-only feature tag: XHTTP, gRPC multi mode, TCP HTTP header mask, VLESS Encryption.
-    fn xray_only(&self) -> Option<&'static str> {
-        match &self.transport {
-            Some(Transport::Xhttp { .. }) => return Some("xhttp"),
-            Some(Transport::Grpc {
-                multi_mode: Some(true),
-                ..
-            }) => return Some("grpc-multi"),
-            Some(Transport::TcpHttpHeader { .. }) => return Some("tcp-http-header"),
-            _ => {}
-        }
-        vless_encryption(&self.kind).then_some("vless-encryption")
-    }
-
-    /// sing-box-only feature tag (Xray v26.11 removed or never had these).
-    fn singbox_only(&self) -> Option<&'static str> {
-        match &self.transport {
-            Some(Transport::Http { .. }) => return Some("h2-transport"),
-            Some(Transport::Quic) => return Some("quic-transport"),
-            _ => {}
-        }
-        let tls = self.tls.as_ref();
-        if tls.is_some_and(|t| t.insecure && t.reality.is_none() && t.cert_pin_sha256.is_none()) {
-            return Some("insecure-without-pin");
-        }
-        if tls.is_some_and(|t| t.ech.is_some()) {
-            return Some("ech");
-        }
-        if let Kind::Shadowsocks {
-            plugin,
-            shadowtls,
-            uot,
-            ..
-        } = &self.kind
-        {
-            if shadowtls.is_some() {
-                return Some("shadowtls");
-            }
-            if plugin.is_some() {
-                return Some("shadowsocks-plugin");
-            }
-            if uot.is_some() {
-                return Some("shadowsocks-uot");
-            }
-        }
-        let reality = tls.is_some_and(|t| t.reality.is_some());
-        if reality
-            && matches!(
-                self.transport,
-                Some(Transport::Ws { .. } | Transport::HttpUpgrade { .. })
-            )
-        {
-            return Some("reality-transport");
-        }
-        // Xray refuses VLESS without encryption and Trojan without TLS unless the server is private.
-        let bare = matches!(self.kind, Kind::Vless { .. } | Kind::Trojan { .. })
-            && !vless_encryption(&self.kind);
-        if bare && tls.is_none() && !private_literal(&self.server) {
-            return Some("plaintext");
-        }
-        None
     }
 }
 
@@ -286,17 +180,6 @@ fn port_ranges(ports: &[(u16, u16)]) -> String {
 /// VLESS Encryption is on: `encryption` set and not `none`.
 fn vless_encryption(kind: &Kind) -> bool {
     matches!(kind, Kind::Vless { encryption: Some(e), .. } if !e.is_empty() && !e.eq_ignore_ascii_case("none"))
-}
-
-/// A private, loopback or link-local IP literal (Xray's exemption for unencrypted VLESS/Trojan).
-fn private_literal(host: &Host) -> bool {
-    match host {
-        Host::Ip(IpAddr::V4(ip)) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
-        Host::Ip(IpAddr::V6(ip)) => {
-            ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
-        }
-        Host::Domain(_) => false,
-    }
 }
 
 #[cfg(test)]

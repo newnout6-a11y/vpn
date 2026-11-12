@@ -25,6 +25,7 @@ use vpnte_base::{AppError, Msg};
 
 use crate::model::{Kind, Profile, Transport};
 
+pub(crate) use tls::tls_required;
 pub use tls::{effective_fingerprint, stealth_fingerprint};
 pub use udp::{block_quic, udp_capable};
 

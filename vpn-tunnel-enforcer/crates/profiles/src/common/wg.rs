@@ -5,7 +5,8 @@ use std::net::IpAddr;
 use ipnet::IpNet;
 
 use super::b64::base64_bytes;
-use crate::model::{Note, WgPeer};
+use super::fields::{parse_host, parse_port};
+use crate::model::{Host, Note, WgPeer};
 
 /// Note key: AmneziaWG handshake obfuscation (`S1`-`S4`, `H1`-`H4`) the server requires.
 pub const NOTE_AMNEZIA_INCOMPATIBLE: &str = "profiles.wgIni.amneziaIncompatible";
@@ -18,6 +19,15 @@ pub const NOTE_AMNEZIA_JUNK: &str = "profiles.wgIni.amneziaJunkDropped";
 /// A lone peer without routes carries everything (K21).
 pub fn unrouted_peer(peers: &[WgPeer]) -> bool {
     peers.len() > 1 && peers.iter().any(|peer| peer.allowed_ips.is_empty())
+}
+
+/// Peer endpoint `host:port` or `[v6]:port` (`.conf` `Endpoint`, Xray `peers[].endpoint`).
+pub fn endpoint(raw: &str) -> Option<(Host, u16)> {
+    let (host, port) = raw.trim().rsplit_once(':')?;
+    if host.contains(':') && !host.starts_with('[') {
+        return None;
+    }
+    Some((parse_host(host.trim())?, parse_port(port.trim())?))
 }
 
 /// `10.0.0.2` -> `10.0.0.2/32`, `fd00::2` -> `/128` (WARP links and old imports give bare
@@ -97,6 +107,22 @@ pub fn amnezia_note<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endpoints() {
+        let host = |h: &str| crate::common::fields::parse_host(h).unwrap();
+        assert_eq!(
+            endpoint("wg.example:51820"),
+            Some((host("wg.example"), 51820))
+        );
+        assert_eq!(
+            endpoint(" [2001:db8::1]:443 "),
+            Some((host("2001:db8::1"), 443))
+        );
+        for bad in ["wg.example", "2001:db8::1:443", "wg.example:0", ":51820"] {
+            assert_eq!(endpoint(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn addresses_get_a_host_prefix() {

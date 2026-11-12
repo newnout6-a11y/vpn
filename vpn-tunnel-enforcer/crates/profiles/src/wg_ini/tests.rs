@@ -1,5 +1,6 @@
 use super::*;
 use crate::common::wg::{NOTE_AMNEZIA_INCOMPATIBLE, NOTE_AMNEZIA_JUNK};
+use crate::model::Host;
 
 const PRIV: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
 const PUB: &str = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=";

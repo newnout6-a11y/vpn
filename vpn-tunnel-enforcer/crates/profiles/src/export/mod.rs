@@ -63,7 +63,7 @@ const SHARE_TAG: &str = "proxy";
 /// The imported line is returned unchanged while it still reads back as this very profile, so
 /// provider parameters the model does not keep survive a copy.
 pub fn export_uri(p: &Profile) -> Option<String> {
-    if let Some(line) = faithful_line(p, reparse) {
+    if let Some(line) = faithful_line(p, |line| crate::uri::parse_uri(line).ok()) {
         return Some(line.to_owned());
     }
     schemes::link(p)
@@ -78,14 +78,10 @@ pub fn export_share(p: &Profile) -> Option<Shared> {
         return Some(Shared::Uri(uri));
     }
     let doc = match &p.native_xray {
-        Some(graph) => xray_document(graph, &p.name)?,
+        Some(graph) => crate::xray_native::export_document(graph, &p.name).ok()?,
         None => singbox_document(p)?,
     };
     Some(Shared::Json(doc))
-}
-
-fn xray_document(graph: &crate::model::NativeXray, name: &str) -> Option<Value> {
-    crate::xray_native::export_document(graph, name).ok()
 }
 
 fn singbox_document(p: &Profile) -> Option<Value> {
@@ -155,8 +151,4 @@ fn faithful_line(p: &Profile, reparse: impl FnOnce(&str) -> Option<Profile>) -> 
             again == *p
         })
         .then_some(line.as_str())
-}
-
-fn reparse(line: &str) -> Option<Profile> {
-    crate::uri::parse_uri(line).ok()
 }

@@ -901,6 +901,19 @@ fn more_linkable() -> Vec<Profile> {
         ..Tls::default()
     });
     out.push(p);
+    let mut p = profile(
+        "Pinned VLESS",
+        "h.example",
+        443,
+        vless_kind("00000000-0000-4000-8000-000000000004"),
+    );
+    p.tls = Some(Tls {
+        server_name: Some("front.example.com".into()),
+        cert_pin_sha256: Some("cd".repeat(32)),
+        insecure: true,
+        ..Tls::default()
+    });
+    out.push(p);
     let uuid = "00000000-0000-4000-8000-000000000003";
     let reality = Reality {
         public_key: "PBK".into(),
@@ -1012,6 +1025,23 @@ fn links_read_back_as_the_same_profile() {
         let back = crate::uri::parse_uri(&link).unwrap_or_else(|e| panic!("{link}: {e:?}"));
         assert_eq!(comparable(back), comparable(p), "{link}");
     }
+}
+
+/// A V2Ray-family link carries the certificate pin as Xray's `pcs` (an Xray client would drop
+/// `pinSHA256` and, next to `allowInsecure`, dial unverified); Hysteria2 keeps `pinSHA256`.
+#[test]
+fn certificate_pins_use_the_scheme_s_parameter() {
+    let links: Vec<String> = more_linkable()
+        .iter()
+        .filter(|p| p.name.starts_with("Pinned"))
+        .filter_map(export_uri)
+        .collect();
+    assert_eq!(links.len(), 2, "{links:?}");
+    assert!(links[0].starts_with("hysteria2://") && links[0].contains("pinSHA256="));
+    assert!(
+        links[1].starts_with("vless://") && links[1].contains(&format!("pcs={}", "cd".repeat(32)))
+    );
+    assert!(!links[1].contains("pinSHA256"));
 }
 
 /// The provider's line comes back byte for byte, unmodelled parameters included, until the

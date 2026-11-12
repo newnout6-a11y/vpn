@@ -219,7 +219,14 @@ fn tls_params(
         if !canonical {
             return None;
         }
-        q.set("pinSHA256", pin.as_str());
+        // Xray clients read a V2Ray-family pin as `pcs` only: under `pinSHA256` they would drop
+        // it and, next to `allowInsecure`, dial unverified. Hysteria2 links name it `pinSHA256`.
+        let key = if insecure_key == "allowInsecure" {
+            "pcs"
+        } else {
+            "pinSHA256"
+        };
+        q.set(key, pin.as_str());
     }
     Some(())
 }

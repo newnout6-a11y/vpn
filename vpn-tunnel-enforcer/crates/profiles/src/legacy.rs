@@ -53,7 +53,7 @@ pub fn from_legacy(
     source_uri: Option<&str>,
 ) -> Result<Profile, LegacyError> {
     let obj = outbound.as_object().ok_or(LegacyError::NotAnObject)?;
-    let native = match obj.get("vpnte_xray") {
+    let native = match obj.get(crate::xray_native::FIELD) {
         None | Some(Value::Null) => None,
         Some(graph) => Some(native_graph(graph)?),
     };

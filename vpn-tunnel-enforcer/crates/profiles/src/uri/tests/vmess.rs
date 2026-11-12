@@ -87,7 +87,7 @@ fn vmess_json_errors() {
 }
 
 /// AT-04-002, K14: v2rayN / 3x-ui keep the gRPC and XHTTP mode in `type`; an explicit `mode`
-/// wins, `none` means unset. Their `pcs` / `vcn` pins are noted, not dropped silently.
+/// wins, `none` means unset. Their `pcs` pin is read, `vcn` is noted (not dropped silently).
 #[test]
 fn vmess_json_mode_in_type() {
     let doc = |net: &str, extra: serde_json::Value| {
@@ -114,15 +114,40 @@ fn vmess_json_mode_in_type() {
     assert!(
         matches!(&xhttp.transport, Some(Transport::Xhttp { mode: Some(m), .. }) if m == "packet-up")
     );
+    let pin = "ab".repeat(32);
     let pinned = doc(
         "ws",
-        json!({"type": "none", "pcs": "ab", "vcn": "n.example"}),
+        json!({"type": "none", "pcs": pin, "vcn": "n.example"}),
     );
     let expected = vec![
-        Note::UnsupportedField("pcs".into()),
+        Note::CertPinNotEnforced,
         Note::UnsupportedField("vcn".into()),
     ];
     assert_eq!(pinned.notes, expected);
+    assert_eq!(
+        pinned.tls.and_then(|t| t.cert_pin_sha256),
+        Some(pin),
+        "pcs is Xray's pinnedPeerCertSha256"
+    );
+}
+
+/// Xray `pcs` (`pinnedPeerCertSha256`) is the key's certificate pin in every V2Ray-family link,
+/// as in Xray JSON: next to `allowInsecure` the emitter refuses it on sing-box (Xray enforces
+/// it) instead of dialing unverified. A pin that is no SHA-256 fails the link.
+#[test]
+fn xray_certificate_pin() {
+    let pin = "cd".repeat(32);
+    let p = ok(&format!(
+        "vless://{ID1}@h.example:443?security=tls&allowInsecure=1&pcs={pin}%2C{}#P",
+        "ef".repeat(32)
+    ));
+    let tls = p.tls.as_ref().expect("tls");
+    assert!(tls.insecure);
+    assert_eq!(tls.cert_pin_sha256, Some(pin), "first of the list");
+    assert_eq!(p.notes, vec![Note::CertPinNotEnforced]);
+    assert!(is_invalid(&err(
+        "trojan://pw@h.example:443?allowInsecure=1&pcs=abc#P"
+    )));
 }
 
 /// §7.3 new schemes: the Xray VMess URI form (`encryption` is the cipher).

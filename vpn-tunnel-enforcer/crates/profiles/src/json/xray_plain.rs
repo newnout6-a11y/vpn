@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 
 use super::scan::join;
 use super::values::flag;
+use crate::common::fields::sha256_pin;
 
 /// Keys the importer reads in full, per object (dotted path from the outbound, array items
 /// transparent). An object path listed here is walked; any other key is left over.
@@ -122,8 +123,13 @@ fn walk(o: &Map<String, Value>, prefix: &str, out: &mut Vec<String>) {
                     out.push(path);
                 }
             }
-            // The model keeps the first pin; Xray accepts any of a comma-joined list.
-            "pinnedPeerCertSha256" if value.as_str().is_some_and(|v| v.contains(',')) => {
+            // The model keeps the first pin; Xray accepts any of a comma-joined list. A pin the
+            // model cannot read stays with the graph: dropping it would leave an unverified key.
+            "pinnedPeerCertSha256"
+                if value
+                    .as_str()
+                    .is_none_or(|v| v.contains(',') || sha256_pin(v).is_none()) =>
+            {
                 out.push(path);
             }
             // The HTTP header mask keeps only host and path in the model.

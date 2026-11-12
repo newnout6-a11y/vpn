@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use super::yaml::Node;
 use super::{Obj, Proto, TlsMode, invalid, parse_u32};
-use crate::common::fields::{UTLS_FINGERPRINTS, XHTTP_MODES};
+use crate::common::fields::{UTLS_FINGERPRINTS, XHTTP_MODES, sha256_pin};
 use crate::model::{Ech, Host, Note, Reality, SkipReason, Tls, Transport};
 
 /// Keys that only describe TLS; read (and ignored) even when TLS ends up off.
@@ -74,12 +74,15 @@ pub(super) fn read_tls(
     };
     if let Some(raw) = obj.str("fingerprint") {
         let lower = raw.to_ascii_lowercase();
-        if let Some(pin) = cert_pin(raw) {
+        if let Some(pin) = sha256_pin(raw) {
             tls.cert_pin_sha256 = Some(pin);
             notes.push(Note::CertPinNotEnforced);
         } else if UTLS_FINGERPRINTS.contains(&lower.as_str()) {
             // Old converters wrote uTLS names into `fingerprint` instead of a pin.
             tls.fingerprint.get_or_insert(lower);
+        } else if tls.insecure {
+            // Dropping the pin would leave a key that verifies nothing (mihomo refuses it too).
+            return Err(invalid("fingerprint is not a SHA-256 certificate pin"));
         } else {
             notes.push(Note::UnsupportedField("fingerprint".to_owned()));
         }
@@ -124,13 +127,6 @@ pub(super) fn read_tls(
     }
     notes.extend(Note::for_tls(Some(&tls)));
     Ok(Some(tls))
-}
-
-/// SHA-256 certificate pin: 64 hex digits, `:` separators allowed; lower-case hex out.
-fn cert_pin(raw: &str) -> Option<String> {
-    let hex: String = raw.chars().filter(|&c| c != ':').collect();
-    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| hex.to_ascii_lowercase())
 }
 
 /// mihomo gives one base64 ECHConfigList; drop PEM armour and whitespace if a provider added them.

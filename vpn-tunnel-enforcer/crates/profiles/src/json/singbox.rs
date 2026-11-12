@@ -95,7 +95,7 @@ pub(crate) fn import(input: Input<'_>) -> Result<Profile, SkipReason> {
             .flatten(),
     );
     if origin == Origin::Legacy {
-        typed.push("vpnte_xray");
+        typed.push(crate::xray_native::FIELD);
     }
     let tls_source = match shadowtls {
         Some(chain) => {
@@ -563,9 +563,10 @@ fn anytls(o: &Map<String, Value>, typed: &mut Vec<&str>) -> Result<Kind, SkipRea
 
 fn socks(o: &Map<String, Value>, typed: &mut Vec<&str>, scan: &mut Scan) -> Kind {
     typed.extend(["username", "password", "version"]);
-    // The model is SOCKS5; an explicit SOCKS4 choice is kept for the emitter.
-    if let Some(version) = text_or_number(o, &["version"]).filter(|v| v != "5") {
-        scan.extra.insert("version".into(), Value::String(version));
+    // The model and the emitter speak SOCKS5 only: a SOCKS4 choice is reported, not kept
+    // (the emitter's typed `version` would override it anyway).
+    if text_or_number(o, &["version"]).is_some_and(|v| v != "5") {
+        scan.unsupported("version");
     }
     Kind::Socks {
         username: text_or_number(o, &["username"]),

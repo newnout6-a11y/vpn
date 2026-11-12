@@ -128,6 +128,20 @@ pub fn port_range(item: &str) -> Option<(u16, u16)> {
     (start <= end).then_some((start, end))
 }
 
+/// Whole-certificate SHA-256 pin (Hysteria2 `pinSHA256`, Xray `pinnedPeerCertSha256` / `pcs`):
+/// 64 hex digits, `:` separators allowed, lower-cased; of a comma-joined list the first.
+pub fn sha256_pin(raw: &str) -> Option<String> {
+    let hex: String = raw
+        .split(',')
+        .next()?
+        .trim()
+        .chars()
+        .filter(|c| *c != ':')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hex)
+}
+
 /// Milliseconds of a Go duration with units (`30s`, `1m30s`, `1.5s`, `500ms`, `2h`); bare numbers
 /// are the caller's call (providers mean seconds or milliseconds).
 pub fn go_duration_ms(raw: &str) -> Option<f64> {
@@ -211,6 +225,20 @@ mod tests {
         assert_eq!(port_range("20000:30000"), Some((20000, 30000)));
         assert_eq!(port_range("30000-20000"), None);
         assert_eq!(port_range("1-"), None);
+    }
+
+    #[test]
+    fn certificate_pins() {
+        let pin = "ab".repeat(32);
+        assert_eq!(sha256_pin(&pin.to_uppercase()), Some(pin.clone()));
+        let colons = vec!["AB"; 32].join(":");
+        assert_eq!(
+            sha256_pin(&format!("{colons},{}", "cd".repeat(32))),
+            Some(pin)
+        );
+        for bad in ["", "ab", &"zz".repeat(32), &"ab".repeat(33)] {
+            assert_eq!(sha256_pin(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

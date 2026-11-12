@@ -171,8 +171,9 @@ fn prefixes(v: &Value) -> Result<Vec<IpNet>, String> {
         .collect()
 }
 
-/// Exactly three bytes, as a list (`[1, 22, 33]`) or base64 (Go encodes `[]uint8` that way).
-fn reserved(v: &Value) -> Option<[u8; 3]> {
+/// Exactly three bytes, as a list (`[1, 22, 33]`, Xray's form too) or base64 (Go encodes
+/// `[]uint8` that way).
+pub(super) fn reserved(v: &Value) -> Option<[u8; 3]> {
     let bytes: Vec<u8> = match v {
         Value::Array(a) => a
             .iter()

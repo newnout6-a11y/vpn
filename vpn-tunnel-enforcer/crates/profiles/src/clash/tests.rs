@@ -95,6 +95,24 @@ fn scalars_lists_pins_ports_and_bandwidth() {
     assert_eq!(p.notes, [Note::CertPinNotEnforced]);
 }
 
+/// A `fingerprint` that is neither a pin nor a uTLS name: noted while the CA check runs, but next
+/// to `skip-cert-verify` dropping it would leave a key that verifies nothing, so it is skipped.
+#[test]
+fn unreadable_pin_with_checks_off_is_skipped() {
+    let entry = |verify: &str| {
+        format!(
+            "proxies:\n- {{name: t, type: trojan, server: t.example, port: 443, password: p, fingerprint: abc{verify}}}\n"
+        )
+    };
+    let noted = one(&entry(""));
+    assert_eq!(noted.notes, [Note::UnsupportedField("fingerprint".into())]);
+    let r = report(&entry(", skip-cert-verify: true"));
+    assert!(r.profiles.is_empty());
+    assert!(
+        matches!(&r.skipped[0].reason, SkipReason::Invalid { detail, .. } if detail.contains("pin"))
+    );
+}
+
 /// Smoke vector: a Clash VLESS REALITY block; `short-id` keeps its leading zero (P-23).
 #[test]
 fn vless_reality_block() {

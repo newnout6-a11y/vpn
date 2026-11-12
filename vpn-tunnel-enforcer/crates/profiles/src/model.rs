@@ -451,16 +451,6 @@ pub struct SubscriptionMeta {
     pub announce: Option<String>,
 }
 
-/// Which engine can run a profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EngineNeed {
-    Any,
-    /// Both can; Xray is preferred (the reason is a short English tag, e.g. `reality`).
-    PreferXray(&'static str),
-    XrayOnly(&'static str),
-    SingBoxOnly(&'static str),
-}
-
 /// The pasted input was larger than the import limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("input is too large")]

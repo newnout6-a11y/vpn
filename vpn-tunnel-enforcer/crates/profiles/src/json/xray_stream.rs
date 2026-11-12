@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 
 use super::parts::{header_host, leading_slash, xhttp};
 use super::values::{boolean, list, text};
+use crate::common::fields::sha256_pin;
 use crate::model::{Ech, Reality, SkipReason, Tls, Transport};
 
 /// Sub-object `key` of `o`, or an empty map.
@@ -39,7 +40,7 @@ pub(crate) fn tls(stream: &Map<String, Value>) -> Result<Option<Tls>, &'static s
         fingerprint: owned(&["fingerprint", "fp"]).filter(|f| !f.eq_ignore_ascii_case("none")),
         min_version: owned(&["minVersion"]),
         max_version: owned(&["maxVersion"]),
-        cert_pin_sha256: text(src, &["pinnedPeerCertSha256"]).and_then(first_pin),
+        cert_pin_sha256: text(src, &["pinnedPeerCertSha256"]).and_then(sha256_pin),
         ech: text(src, &["echConfigList"]).map(ech),
         ..Tls::default()
     };
@@ -53,18 +54,6 @@ pub(crate) fn tls(stream: &Map<String, Value>) -> Result<Option<Tls>, &'static s
         });
     }
     Ok(Some(tls))
-}
-
-/// First SHA-256 of a comma-joined `pinnedPeerCertSha256` (hex, colons allowed), lower-case.
-fn first_pin(raw: &str) -> Option<String> {
-    let hex: String = raw
-        .split(',')
-        .next()?
-        .chars()
-        .filter(|c| *c != ':')
-        .collect::<String>()
-        .to_ascii_lowercase();
-    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hex)
 }
 
 /// `echConfigList`: a base64 ECHConfigList, or a DNS query (`[domain+]udp://…`, `https://…`), which

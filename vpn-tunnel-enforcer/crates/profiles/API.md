@@ -12,7 +12,7 @@ vpnte-profiles.workspace = true
 
 | module | what |
 | --- | --- |
-| `model` | `Profile` and its parts, `ParseReport`, `Skipped`/`SkipReason`, `SubscriptionMeta`, `EngineNeed`, `TooLarge` |
+| `model` | `Profile` and its parts, `ParseReport`, `Skipped`/`SkipReason`, `SubscriptionMeta`, `TooLarge` |
 | `uri` | one share link -> `Profile` |
 | `json` | sing-box / Xray / wrapped JSON -> `ParseReport` |
 | `clash`, `wg_ini` | Clash (mihomo) YAML, WireGuard `.conf` |
@@ -21,7 +21,7 @@ vpnte-profiles.workspace = true
 | `text` | limits, body decoding, base64 layers, JSON spans, link candidates, subscription metadata |
 | `device`, `countries` | subscription UA / HWID headers, uTLS default per device; ISO country guess |
 | `caps` | capability summary + i18n of `Note` / `SkipReason` |
-| `identity` | `Profile::identity()`, `Profile::engine_need()` |
+| `identity` | `Profile::identity()` (the engine choice is `vpnte_engine::select_engine`) |
 | `emit_singbox` | the only producer of sing-box JSON (`Profile` -> outbound / endpoint / chain) |
 | `xray_native` | provider Xray graphs: import, validate, compile for the engine, export |
 | `export` | share link, share document (link or JSON), proxy-list line |
@@ -69,7 +69,6 @@ pub enum SkipReason { UnknownScheme(String), Invalid{scheme, detail /* English *
     NativeGraphRejected(String) }
 pub struct SubscriptionMeta { upload, download, total: Option<u64>, expires_at: Option<UnixMs>,
     refresh_hours: Option<u32>, title, web_page_url, support_url, announce: Option<String> }
-pub enum EngineNeed { Any, PreferXray(&'static str), XrayOnly(&'static str), SingBoxOnly(&'static str) }
 pub struct TooLarge;                      // input over a limit
 ```
 `Profile` is `Serialize + Deserialize` (the stored form; serde shapes are part of the stored data —
@@ -163,6 +162,11 @@ pub fn from_legacy(name: &str, protocol: &str, outbound: &Value, source_uri: Opt
   `blackhole`, `dns`, `loopback` and stray inbounds stay silent.
 - Every importer adds `Note::for_tls` (REALITY with `edge ios qq random android 360`: servers since
   Xray 26.9.8 refuse those hellos; the provider's choice is kept).
+- Whole-certificate pins (`Tls::cert_pin_sha256`, lower-case hex) come from Hysteria2 `pinSHA256`,
+  Xray `pinnedPeerCertSha256` and its link name `pcs` (first of a comma list), and Clash
+  `fingerprint`. A pin that cannot be read is never dropped silently, since that would leave an
+  unverified key: a link is skipped, Xray JSON keeps its graph, a Clash entry with
+  `skip-cert-verify` is skipped (without it: a Note).
 - `parse_clash` streams only the first root `proxies` list (limits: 5000 entries, nesting 32,
   64 MiB of approximate materialised bytes, alias copies included); every unread key becomes
   `Note::UnsupportedField`, so do unread sub-keys of the transport's `*-opts` map and of
@@ -235,20 +239,17 @@ pub struct Capabilities { pub protocol: &'static str, pub stealth: Stealth, pub 
 pub fn capabilities(p: &Profile) -> Capabilities;
 pub fn note_msg(note: &Note) -> Msg;           // every Note; Note::Other carries its own key
 pub fn skip_msg(reason: &SkipReason) -> Msg;   // every SkipReason (profiles.caps.skip.*)
-// identity (inherent methods)
+// identity (inherent method)
 impl Profile {
     pub fn identity(&self) -> [u8; 16];        // stable key identity (golden-tested, version "v1")
-    pub fn engine_need(&self) -> EngineNeed;
 }
 ```
 `identity` hashes protocol, lower-case host, port, credential, SNI, TLS mode, Reality public key,
 transport kind + path / service, HY2 ports, SS method, VLESS encryption, ShadowTLS password, WG
 peers, native graph; it ignores name, notes, mux, dial options and fingerprint. Use it for
 de-duplication and to match rows across subscription refreshes; never change its inputs.
-`engine_need` reasons: `XrayOnly`: `native-graph xhttp grpc-multi tcp-http-header vless-encryption`;
-`SingBoxOnly`: `hysteria2 tuic naive anytls wireguard socks http h2-transport quic-transport
-insecure-without-pin ech shadowtls shadowsocks-plugin shadowsocks-uot reality-transport plaintext`;
-`PreferXray`: `grpc-gun reality`. The engine crate makes the choice (`select_engine`).
+Which engine runs a profile is decided by `vpnte_engine::select_engine` only (this crate keeps
+no second copy of that table).
 
 ## emit_singbox (sing-box 1.14 JSON; the only place outbound normalisation happens)
 

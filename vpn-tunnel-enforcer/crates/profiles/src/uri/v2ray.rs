@@ -139,8 +139,8 @@ fn vmess_profile(
 }
 
 /// Xray link parameters the profile model cannot carry (TLS fragmentation, UDP noise, REALITY
-/// ML-DSA key, certificate pins, gRPC authority): noted so the loss is visible, not silent.
-const UNMODELED: &[&str] = &["fragment", "noises", "pqv", "pcs", "vcn", "authority"];
+/// ML-DSA key, certificate name override, gRPC authority): noted so the loss is visible.
+const UNMODELED: &[&str] = &["fragment", "noises", "pqv", "vcn", "authority"];
 
 /// TLS, transport and mux of the V2Ray-family schemes.
 fn stream(profile: &mut Profile, p: &Params, mode: TlsMode) -> Res<()> {

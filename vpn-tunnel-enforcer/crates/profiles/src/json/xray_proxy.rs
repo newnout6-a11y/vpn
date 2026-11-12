@@ -6,9 +6,9 @@ use ipnet::IpNet;
 use serde_json::{Map, Value};
 
 use super::values::{list, positive_u32, text, text_or_number};
-use crate::common::fields::{parse_host, parse_port};
-use crate::common::wg::{interface_address, unrouted_peer};
-use crate::model::{DialPrefs, Host, Kind, Note, Profile, SkipReason, Source, WgPeer, WireGuard};
+use super::wireguard::reserved;
+use crate::common::wg::{endpoint, interface_address, unrouted_peer};
+use crate::model::{DialPrefs, Kind, Note, Profile, SkipReason, Source, WgPeer, WireGuard};
 
 /// Xray's interface addresses when a WireGuard outbound names none (`infra/conf/wireguard.go`).
 const WG_DEFAULT_ADDRESS: [&str; 2] = ["10.0.0.1", "fd59:7153:2388:b5fd:0000:0000:0000:0001"];
@@ -156,23 +156,4 @@ pub(super) fn wireguard(
         source: Source::Json,
         notes,
     })
-}
-
-/// `host:port` or `[v6]:port`.
-fn endpoint(raw: &str) -> Option<(Host, u16)> {
-    let (host, port) = raw.trim().rsplit_once(':')?;
-    if host.contains(':') && !host.starts_with('[') {
-        return None;
-    }
-    Some((parse_host(host.trim())?, parse_port(port.trim())?))
-}
-
-/// Exactly three bytes, as Xray writes them (`[0, 0, 0]`).
-fn reserved(v: &Value) -> Option<[u8; 3]> {
-    let bytes: Vec<u8> = v
-        .as_array()?
-        .iter()
-        .map(|b| b.as_u64().and_then(|b| u8::try_from(b).ok()))
-        .collect::<Option<_>>()?;
-    bytes.try_into().ok()
 }

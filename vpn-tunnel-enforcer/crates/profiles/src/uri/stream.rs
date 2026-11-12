@@ -4,7 +4,7 @@ use serde_json::Value;
 use super::parts::{Params, falsy, truthy};
 use super::{Fail, Res, bad};
 use crate::common::b64::base64_bytes;
-use crate::common::fields::XHTTP_MODES;
+use crate::common::fields::{XHTTP_MODES, sha256_pin};
 use crate::model::{Ech, Mux, Note, Reality, SkipReason, Tls, Transport};
 
 const SNI: &[&str] = &["sni", "serverName", "peer", "host"];
@@ -99,16 +99,16 @@ fn reality(p: &Params) -> Res<Reality> {
     })
 }
 
-/// Hysteria2 `pinSHA256`: 64 hex digits, `:` separators allowed -> lower-case hex.
+/// Certificate pin: Hysteria2 `pinSHA256` or Xray `pcs` (`pinnedPeerCertSha256`; of a comma list
+/// the first). A malformed pin fails the link: dropping it would leave an unverified key.
 fn cert_pin(p: &Params) -> Res<Option<String>> {
-    let Some(raw) = p.get(&["pinSHA256", "pin-sha256", "pin_sha256"]) else {
+    let Some(raw) = p.get(&["pinSHA256", "pin-sha256", "pin_sha256", "pcs"]) else {
         return Ok(None);
     };
-    let hex: String = raw.chars().filter(|c| *c != ':').collect();
-    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return bad("pinSHA256 is not a SHA-256 hex digest");
+    match sha256_pin(raw) {
+        Some(pin) => Ok(Some(pin)),
+        None => bad("certificate pin is not a SHA-256 hex digest"),
     }
-    Ok(Some(hex.to_ascii_lowercase()))
 }
 
 /// ECH settings. A local `echConfigPath` is dropped with a note: a link from a subscription must

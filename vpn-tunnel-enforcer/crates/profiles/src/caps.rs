@@ -5,6 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 use vpnte_base::Msg;
 
+use crate::emit_singbox::tls_required;
 use crate::model::{Kind, Note, Profile, SkipReason, Transport};
 
 /// How a profile disguises its traffic, strongest first.
@@ -192,21 +193,9 @@ fn stealth(p: &Profile) -> Stealth {
     }
 }
 
-/// TLS on the wire. sing-box refuses these protocols without TLS, so the emitter adds it when a
-/// pasted or legacy outbound has no `tls` block.
+/// TLS on the wire, also where the emitter adds it ([`tls_required`]).
 fn has_tls(p: &Profile) -> bool {
-    p.tls.is_some()
-        || matches!(
-            p.kind,
-            Kind::Hysteria2 { .. }
-                | Kind::Tuic { .. }
-                | Kind::Naive { .. }
-                | Kind::Anytls { .. }
-                | Kind::Shadowsocks {
-                    shadowtls: Some(_),
-                    ..
-                }
-        )
+    p.tls.is_some() || tls_required(&p.kind)
 }
 
 /// QUIC underneath: uTLS cannot apply (with it every sing-box 1.14 Hysteria2 dial failed, P-01).
