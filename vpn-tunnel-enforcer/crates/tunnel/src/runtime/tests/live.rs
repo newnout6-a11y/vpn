@@ -186,3 +186,142 @@ async fn live_proxy_capture_through_a_local_upstream() {
         "the mixed port is free after the stop"
     );
 }
+
+/// Shadowsocks 2022 PSK of the local test server (16 fixed bytes, not a secret).
+const SS_KEY: &str = "AQIDBAUGBwgJCgsMDQ4PEA==";
+const SS_METHOD: &str = "2022-blake3-aes-128-gcm";
+/// SIP002 userinfo: base64url of `SS_METHOD:SS_KEY`.
+const SS_USERINFO: &str = "MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206QVFJREJBVUdCd2dKQ2dzTURRNFBFQT09";
+
+/// The "VPN server": a Shadowsocks 2022 inbound straight out. `upstream.test` is known only to
+/// it (its own hosts DNS); every other name goes through the system resolver, which the Xray
+/// slot's egress proof needs.
+fn server_config(port: u16) -> Vec<u8> {
+    serde_json::json!({
+        "log": { "level": "info" },
+        "dns": { "servers": [
+            { "type": "hosts", "tag": "hosts", "predefined": { "upstream.test": "127.0.0.1" } },
+            { "type": "local", "tag": "local" }
+        ] },
+        "inbounds": [{
+            "type": "shadowsocks", "tag": "in", "listen": "127.0.0.1", "listen_port": port,
+            "method": SS_METHOD, "password": SS_KEY
+        }],
+        "outbounds": [
+            { "type": "direct", "tag": "to-test", "domain_resolver": "hosts" },
+            { "type": "direct", "tag": "direct", "domain_resolver": "local" }
+        ],
+        "route": {
+            "rules": [{ "domain": ["upstream.test"], "outbound": "to-test" }],
+            "final": "direct"
+        }
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// NOADMIN.md §2, the main no-admin mode: a server from the list in proxy capture. The
+/// destination name is known only to the server, so a 200 proves mixed inbound -> our engine
+/// -> the server's protocol -> destination; the session reports the engine that ran.
+async fn proxy_capture_over_a_server(pref: EnginePref, expected: vpnte_base::types::Engine) {
+    let (Some(singbox), Some(xray)) = (
+        canonical(&Path::new(RESOURCES).join("sing-box.exe")),
+        canonical(&Path::new(RESOURCES).join("xray.exe")),
+    ) else {
+        eprintln!("skipped: engine binaries missing under {RESOURCES}");
+        return;
+    };
+    vpnte_base::http::init_tls();
+    let mut guard = Guard {
+        runtime: None,
+        helper: None,
+    };
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let http_port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    tokio::spawn(http_server(listener, seen.clone()));
+
+    let server_port = vpnte_engine::ports::alloc_port(false, &[]).expect("free port");
+    let server =
+        SingBoxProcess::spawn(&singbox, &server_config(server_port), None).expect("server spawn");
+    let ready = server
+        .wait_ready(Duration::from_secs(20), &CancellationToken::new())
+        .await;
+    guard.helper = Some(server);
+    ready.expect("server ready");
+
+    let uri = format!("ss://{SS_USERINFO}@127.0.0.1:{server_port}#Local%20SS");
+    let profile = vpnte_profiles::uri::parse_uri(&uri).expect("test key parses");
+    let runtime = TunnelHandle::spawn(RuntimeDeps {
+        engines: Arc::new(RealEngines::new(singbox, xray, None)),
+        tun: None,
+        proxy: Arc::new(ProxyCapture::new()),
+        inputs: Arc::new(FakeInputs(World::new())),
+        failover: None,
+        confirmations: None,
+        timings: Timings::default(),
+    });
+    guard.runtime = Some(runtime.clone());
+    let req = StartRequest {
+        mode: Mode::DirectVpn {
+            profile: crate::api::VpnProfile {
+                id: "local-ss".into(),
+                profile: Arc::new(profile),
+                device: None,
+                engine: pref,
+            },
+        },
+        capture: CaptureKind::Proxy,
+        kill_switch: KillSwitchLevel::Off,
+        public_wifi: false,
+        stealth: false,
+        adaptive: AdaptiveMode::Baseline,
+        engine: pref,
+        origin: Origin::User,
+    };
+    runtime
+        .start(req, CancellationToken::new())
+        .await
+        .expect("unelevated start over a server");
+    let status = runtime.status().borrow().clone();
+    assert_eq!(status.capture, Some(CaptureKind::Proxy));
+    assert_eq!(status.engine.map(|e| e.kind), Some(expected));
+    let mixed = status
+        .session
+        .and_then(|s| s.proxy_port)
+        .expect("mixed port published");
+
+    let response = tokio::time::timeout(Duration::from_secs(15), fetch_via(mixed, http_port))
+        .await
+        .expect("fetch in time")
+        .expect("fetch through the mixed port");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with(BODY), "{response}");
+    assert!(
+        seen.lock().iter().any(|h| h.contains("upstream.test")),
+        "the destination saw the request by the name only the server resolves"
+    );
+
+    let receipt = runtime.stop(StopOptions::default()).await;
+    assert!(receipt.ok && receipt.runtime_stopped, "{receipt:?}");
+    guard.runtime = None;
+    assert!(
+        StdListener::bind((Ipv4Addr::LOCALHOST, mixed)).is_ok(),
+        "the mixed port is free after the stop"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_proxy_capture_over_a_server_with_singbox() {
+    proxy_capture_over_a_server(EnginePref::SingBox, vpnte_base::types::Engine::SingBox).await;
+}
+
+/// The Xray slot proves its egress through public IP echo services before the session counts
+/// as started, so the server needs a plain way out: CI runs ignored tests with direct internet.
+/// Behind another VPN's TUN the server's direct dial leaves by the physical interface and may
+/// be dropped (seen on the development machine).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs internet: the Xray slot proves its egress through public echo services"]
+async fn live_proxy_capture_over_a_server_with_xray() {
+    proxy_capture_over_a_server(EnginePref::Xray, vpnte_base::types::Engine::Xray).await;
+}
