@@ -2,10 +2,9 @@
 //! ("Ethernet 5") so anti-VPN software scanning adapter names sees nothing unusual. A name that
 //! is already taken is never reused: a duplicate connection name is either refused at adapter
 //! creation or taken over from its holder by renaming it — a user's NIC must never be renamed.
-use std::collections::HashSet;
-
 use vpnte_base::{AppError, Msg};
 
+use super::tun::same_alias;
 use super::{ffi, reg};
 
 /// Candidates in order of preference.
@@ -56,11 +55,10 @@ pub fn connection_names() -> windows::core::Result<Vec<String>> {
 
 /// The first candidate not in `taken` (case-insensitive), else [`FALLBACK`], else an error.
 pub fn choose(taken: &[String]) -> Result<String, AliasError> {
-    let taken: HashSet<String> = taken.iter().map(|name| name.to_lowercase()).collect();
     CANDIDATES
         .iter()
         .chain([&FALLBACK])
-        .find(|candidate| !taken.contains(&candidate.to_lowercase()))
+        .find(|candidate| !taken.iter().any(|name| same_alias(name, candidate)))
         .map(|candidate| (*candidate).to_owned())
         .ok_or(AliasError::Exhausted)
 }

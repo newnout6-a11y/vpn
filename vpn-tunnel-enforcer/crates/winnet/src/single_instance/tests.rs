@@ -31,19 +31,6 @@ fn primary(names: &InstanceNames) -> Primary {
 const WAIT: Duration = Duration::from_secs(5);
 
 #[test]
-fn command_follows_the_installer_flag() {
-    assert_eq!(Command::from_args(["app.exe"]), Command::Activate);
-    assert_eq!(
-        Command::from_args(["app.exe", "--autostart"]),
-        Command::Activate
-    );
-    assert_eq!(
-        Command::from_args(["app.exe", "--shutdown-for-update"]),
-        Command::ShutdownForUpdate
-    );
-}
-
-#[test]
 fn wire_lines_round_trip() {
     for cmd in [Command::Activate, Command::ShutdownForUpdate] {
         assert_eq!(

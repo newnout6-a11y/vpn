@@ -1,9 +1,5 @@
 {
   "winnet": {
-    "elevation": {
-      "declined": "VPN Tunnel Enforcer needs administrator rights to work.",
-      "relaunchFailed": "Could not restart VPN Tunnel Enforcer with administrator rights."
-    },
     "singleInstance": {
       "noAnswer": "VPN Tunnel Enforcer is already running but did not respond. Open its window from the tray."
     },

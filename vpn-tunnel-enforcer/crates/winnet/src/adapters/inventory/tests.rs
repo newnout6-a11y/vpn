@@ -116,6 +116,7 @@ fn characteristics_from_class_key() {
         if_index: 17,
         guid: wifi().guid,
         alias: "Wi-Fi".into(),
+        description: wifi().description,
         oper_status: OPER_UP,
         media_disconnected: false,
         permanent_mac: wifi().mac,
@@ -353,4 +354,38 @@ fn live_inventory() {
         );
         println!("physical DNS v4: {:?}", physical_dns_v4().expect("dns"));
     }
+}
+
+/// Review D3: a Hyper-V host vNIC (by alias or description) marks a switch; other NICs do not.
+#[test]
+fn hyperv_vnics_are_recognised() {
+    let row = |alias: &str, description: &str| IfRow {
+        luid: 1,
+        if_index: 1,
+        guid: GUID::zeroed(),
+        alias: alias.into(),
+        description: description.into(),
+        oper_status: OPER_UP,
+        media_disconnected: false,
+        permanent_mac: Vec::new(),
+        hardware: false,
+        filter: false,
+    };
+    assert!(is_hyperv_vnic(&row(
+        "vEthernet (WSL)",
+        "Hyper-V Virtual Ethernet Adapter"
+    )));
+    assert!(is_hyperv_vnic(&row(
+        "Ethernet 3",
+        "Hyper-V Virtual Ethernet Adapter #2"
+    )));
+    assert!(!is_hyperv_vnic(&row(
+        "Ethernet",
+        "Microsoft Hyper-V Network Adapter"
+    )));
+    assert!(!is_hyperv_vnic(&row("Wi-Fi", "MediaTek Wi-Fi 6E MT7922")));
+    assert!(
+        hyperv_switch_present().is_ok(),
+        "the live interface table reads unelevated"
+    );
 }

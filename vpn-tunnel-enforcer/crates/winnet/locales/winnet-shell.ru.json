@@ -1,9 +1,5 @@
 {
   "winnet": {
-    "elevation": {
-      "declined": "Для работы VPN Tunnel Enforcer нужны права администратора.",
-      "relaunchFailed": "Не удалось перезапустить VPN Tunnel Enforcer с правами администратора."
-    },
     "singleInstance": {
       "noAnswer": "VPN Tunnel Enforcer уже запущен, но не ответил. Откройте его окно из трея."
     },

@@ -1,17 +1,13 @@
 //! Status for the UI and the watchdog that re-checks our filters.
-use std::ptr;
 use std::sync::Arc;
 
 use vpnte_base::types::{KillSwitchLevel, Level, Notice, now_ms};
-use windows::Win32::NetworkManagement::IpHelper::{
-    FreeMibTable, GetIfTable2, MIB_IF_ROW2, MIB_IF_TABLE2,
-};
 
 use super::{Inner, Protection, WATCHDOG_PERIOD, same_ids};
+use crate::adapters;
 use crate::wfp::backend::Census;
 use crate::wfp::fwpolicy;
 use crate::wfp::model::{Conn, KillSwitchState, ProtectionError, ProtectionStatus};
-use crate::win::from_wide;
 
 impl Inner {
     /// A fresh enumeration shows exactly the filters we installed, and nothing is in doubt.
@@ -23,30 +19,6 @@ impl Inner {
                 .as_ref()
                 .is_some_and(|p| same_ids(&c.persistent, p))
     }
-}
-
-/// A Hyper-V virtual switch exists (a `vEthernet (…)` / Hyper-V virtual adapter): WSL 2,
-/// Windows Sandbox, Docker and Hyper-V guests are NATed below the ALE layers our filters use,
-/// so their traffic is not covered (review D3). `None` = the interfaces could not be read.
-fn hyperv_switch_present() -> Option<bool> {
-    let mut table: *mut MIB_IF_TABLE2 = ptr::null_mut();
-    // SAFETY: valid out pointer; on success the table is freed below, exactly once.
-    if unsafe { GetIfTable2(&mut table) }.is_err() {
-        return None;
-    }
-    // SAFETY: on success `table` holds `NumEntries` rows from `Table` on (the array is declared
-    // with one element; the pointer is taken without a reference so it covers all of them).
-    let rows = unsafe {
-        let first = (&raw const (*table).Table).cast::<MIB_IF_ROW2>();
-        std::slice::from_raw_parts(first, (*table).NumEntries as usize)
-    };
-    let found = rows.iter().any(|r| {
-        from_wide(&r.Alias).starts_with("vEthernet (")
-            || from_wide(&r.Description).starts_with("Hyper-V Virtual Ethernet Adapter")
-    });
-    // SAFETY: the table came from GetIfTable2; `rows` is not used after this.
-    unsafe { FreeMibTable(table.cast()) };
-    Some(found)
 }
 
 impl Protection {
@@ -97,7 +69,9 @@ impl Protection {
         status.windows_firewall_outbound_block = fwpolicy::outbound_block_profiles()
             .inspect_err(|e| tracing::debug!(error = %e, "Windows Firewall policy not readable"))
             .ok();
-        status.hyperv_switch_present = hyperv_switch_present();
+        status.hyperv_switch_present = adapters::hyperv_switch_present()
+            .inspect_err(|e| tracing::debug!(error = %e, "interface table not readable"))
+            .ok();
         status
     }
 

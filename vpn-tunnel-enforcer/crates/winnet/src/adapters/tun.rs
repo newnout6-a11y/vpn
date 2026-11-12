@@ -73,7 +73,7 @@ pub enum Release {
 }
 
 /// Case-insensitive like Windows connection names; `to_lowercase` also folds Cyrillic aliases.
-fn same_alias(a: &str, b: &str) -> bool {
+pub(super) fn same_alias(a: &str, b: &str) -> bool {
     a == b || a.to_lowercase() == b.to_lowercase()
 }
 

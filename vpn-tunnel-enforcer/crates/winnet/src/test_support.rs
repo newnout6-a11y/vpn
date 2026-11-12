@@ -124,7 +124,7 @@ fn literal_keys() -> BTreeSet<String> {
     out
 }
 
-/// Every key the code names literally exists in the fragments.
+/// Every key the code names literally exists in the fragments, and every fragment key is named.
 #[test]
 fn literal_keys_exist() {
     let all: BTreeSet<String> = fragments()
@@ -135,6 +135,9 @@ fn literal_keys_exist() {
     assert!(keys.len() > 40, "the scan found the keys: {keys:?}");
     let missing: Vec<&String> = keys.iter().filter(|k| !all.contains(*k)).collect();
     assert!(missing.is_empty(), "missing locale keys: {missing:?}");
+    // The other direction: a key no code names any more is dead text.
+    let unused: Vec<&String> = all.iter().filter(|k| !keys.contains(*k)).collect();
+    assert!(unused.is_empty(), "locale keys no code names: {unused:?}");
 }
 
 /// Every fragment is valid JSON with identical ru / en keys and placeholders, all under `winnet`;

@@ -302,5 +302,18 @@ fn dns_sources(physical: &[Adapter]) -> Vec<Ipv4Addr> {
     out
 }
 
+/// A Hyper-V virtual switch exists (a `vEthernet (…)` host vNIC): WSL 2, Windows Sandbox, Docker
+/// and Hyper-V guests are NATed below the ALE layers the kill switch filters (WFP review D3).
+pub(crate) fn hyperv_switch_present() -> windows::core::Result<bool> {
+    Ok(ffi::if_rows()?.iter().any(is_hyperv_vnic))
+}
+
+fn is_hyperv_vnic(row: &IfRow) -> bool {
+    row.alias.starts_with("vEthernet (")
+        || row
+            .description
+            .starts_with("Hyper-V Virtual Ethernet Adapter")
+}
+
 #[cfg(test)]
 mod tests;

@@ -6,6 +6,7 @@ use std::net::IpAddr;
 
 use vpnte_base::{AppError, AppResult, Msg};
 
+use super::tun::same_alias;
 use super::{Adapter, Family, Route, TUN_V4, inventory, routes};
 
 /// Tunnel-like words in an alias or description (old `TUNNEL_RX`), plus the word `tun` and
@@ -121,9 +122,7 @@ fn classify(
 
 fn is_ours(a: &Adapter, own_luid: Option<u64>, own_aliases: &[&str]) -> bool {
     own_luid == Some(a.luid)
-        || (own_aliases
-            .iter()
-            .any(|own| own.to_lowercase() == a.alias.to_lowercase())
+        || (own_aliases.iter().any(|own| same_alias(own, &a.alias))
             && a.addresses
                 .iter()
                 .any(|u| u.ip == IpAddr::V4(TUN_V4.addr())))

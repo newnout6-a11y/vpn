@@ -10,7 +10,6 @@
 //! elevated primary's pipe only accepts writers that are SYSTEM, administrators or the owner, so
 //! a non-elevated process cannot make it quit. A non-elevated launch that cannot even open the
 //! mutex still learns that it exists (access denied) and backs off.
-use std::ffi::OsStr;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -88,22 +87,6 @@ pub enum Command {
 }
 
 impl Command {
-    /// The command a launch with these arguments forwards.
-    pub fn from_args<I, S>(args: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        if args
-            .into_iter()
-            .any(|a| a.as_ref() == OsStr::new("--shutdown-for-update"))
-        {
-            Command::ShutdownForUpdate
-        } else {
-            Command::Activate
-        }
-    }
-
     fn wire(self) -> &'static str {
         match self {
             Command::Activate => "activate",

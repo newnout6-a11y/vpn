@@ -23,10 +23,12 @@ clipboard, elevation, single_instance, shell, toast, power}` plus `vpnte_winnet:
   are *blocking*: 7-20 ms on a machine with dozens of NDIS filter interfaces (measured here); the
   `adapters` async waits already read on the blocking pool. `async fn`s and the functions marked
   *runtime* must run inside a tokio runtime (they spawn or use tokio types).
-- **Elevation.** The app normally runs elevated (CONTRACT §1). Unelevated (`--no-elevate`) these
-  fail with access denied / `ErrorKind::Permission`: every WFP change and enumeration
-  (`wfp::Protection` ops → `ProtectionError::AccessDenied`, `wfp::remove_all`, `wfp::Engine`),
-  deleting the 1.x logon task (`autostart::delete_task`; `sync` then keeps it and carries on),
+- **Elevation.** The app runs unelevated (NOADMIN: manifest `asInvoker`, never a UAC prompt of
+  its own); a privileged feature is available exactly when `elevation::is_elevated()` is true.
+  Unelevated these fail with access denied / `ErrorKind::Permission`: every WFP change and
+  enumeration (`wfp::Protection` ops → `ProtectionError::AccessDenied`, `wfp::remove_all`,
+  `wfp::Engine`; the app creates no `Protection` unelevated), deleting the 1.x logon task
+  (`autostart::delete_task`; `sync` then keeps it and carries on),
   writing the installer's all-users Start-menu link (`toast::ensure_shortcut` under
   `toast::common_programs_dir()`), terminating an elevated orphan in
   `process::sweep_orphans` (reported as `survived`). Everything else works unelevated, including
@@ -60,15 +62,14 @@ vpnte_ui::lang::init_locales(&layers);
 | `winnet.wfp.status.hypervUnfiltered` | — | `ProtectionStatus::hyperv_warning` |
 | `winnet.autostart.{failed,denied,stateUnknown}` | — | `AutostartError` |
 | `winnet.autostart.disabledByUser` | — | `AutostartState::hint` |
-| `winnet.autostart.{needsAdmin,unknown}` | — | not emitted any more (logon-task texts; the `Run` value needs no elevation) |
 | `winnet.clipboard.{busy,failed}` | — | `SecretClipboard::copy` |
-| `winnet.elevation.{declined,relaunchFailed}` | — | `relaunch_elevated` |
 | `winnet.singleInstance.noAnswer` | — | `single_instance::send` |
 | `winnet.shell.{badUrl,noFolder,openFailed}` | — | `shell::*` |
 | `winnet.toast.productionAumid` | — | `toast::ensure_shortcut` (debug builds) |
 
 Tests pin that every fragment is valid JSON with equal ru / en keys and placeholders, that every
-key literal in the code exists, and that `LOCALES` equals the files.
+key literal in the code exists and every fragment key is named by the code, and that `LOCALES`
+equals the files.
 
 ## `adapters` — inventory, routes, our TUN, foreign tunnels, change watch (read-only, unelevated)
 ```rust
@@ -544,14 +545,13 @@ must not claim that Windows history / sync may keep a copy (B18).
 ## `elevation`, `single_instance` — process start
 ```rust
 pub fn is_elevated() -> bool;                                        // TokenElevation, read once
-pub fn relaunch_elevated<S: AsRef<OsStr>>(args: &[S]) -> AppResult<()>;  // ShellExecuteExW "runas"; blocks until started
-    // UAC "No" = Permission + winnet.elevation.declined; other = Internal + winnet.elevation.relaunchFailed
+    // nothing here elevates (NOADMIN §0): privileged features exist exactly while this is true
 
 pub const MUTEX_NAME: &str = r"Local\VpnTunnelEnforcer.Instance";  // per Windows session
 pub const PIPE_PREFIX: &str = r"\\.\pipe\VpnTunnelEnforcer";        // + ".<session id>"
 pub struct InstanceNames { pub mutex: String, pub pipe: String }     // tests use random names
 impl InstanceNames { pub fn production() -> AppResult<Self>; }      // this process's session
-pub enum Command { Activate, ShutdownForUpdate }                     // ::from_args(argv): --shutdown-for-update
+pub enum Command { Activate, ShutdownForUpdate }                     // the caller maps its own argv
 pub enum Acquire { Primary(Primary), Secondary }
 pub fn acquire(names: &InstanceNames) -> AppResult<Acquire>;        // Err only for unexpected mutex failures
 impl Primary {                                                       // drop = stop listener + release mutex
@@ -564,17 +564,17 @@ pub fn send(pipe: &str, cmd: Command, timeout: Duration) -> AppResult<()>;   // 
 ```
 Per session (owner decision 12): every signed-in user runs their own copy; the installer's
 `--shutdown-for-update` launch runs in the installing user's session and reaches that user's copy.
-`main()`:
+`main()` (`update` = the app's own `--shutdown-for-update` flag):
 ```rust
-let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+let command = if update { Command::ShutdownForUpdate } else { Command::Activate };
 let names = InstanceNames::production()?;
 match single_instance::acquire(&names)? {
     Acquire::Secondary => {
-        let _ = single_instance::send(&names.pipe, Command::from_args(&args), Duration::from_secs(5));
+        let _ = single_instance::send(&names.pipe, command, Duration::from_secs(5));
         return Ok(());
     }
     Acquire::Primary(mut primary) => {           // keep `primary` alive for the process lifetime
-        if Command::from_args(&args) == Command::ShutdownForUpdate { return Ok(()); }
+        if command == Command::ShutdownForUpdate { return Ok(()); }
         let commands = primary.take_commands();  // Activate -> show window; ShutdownForUpdate -> quit
         /* … */
     }
@@ -658,20 +658,21 @@ re-check the tunnel) and the theme service.
 
 ## Not verified on this machine (needs elevation, internet or a desktop session)
 - WFP filter add / transactions / provider + sublayer creation / persistent filters
-  (`cargo test -p vpnte-winnet -- --ignored`, 5 tests, elevated), the §7.10 manual checklist,
-  traffic of Hyper-V guests and Mobile Hotspot clients (not local sockets, so ALE filters do not
-  see it; only the Hyper-V switch is detected and warned about).
-- Writing the real `Run` key (`system_run_value_round_trip`, throw-away value name) and the real
-  system proxy (`sysproxy::system_write_reads_back_and_restores`): both `#[ignore = "changes system
-  state"]`, never run here (this machine's network depends on its proxy settings); the registry
-  code runs on throw-away keys and `sysproxy::read` read-only. Deleting a real 1.x logon task
-  (`RunValue::remove_legacy_task`) was never called; `relaunch_elevated` (UAC).
+  (`cargo test -p vpnte-winnet -- --ignored elevated_`, 5 tests, elevated), the §7.10 manual
+  checklist, traffic of Hyper-V guests and Mobile Hotspot clients (not local sockets, so ALE
+  filters do not see it; only the Hyper-V switch is detected and warned about).
+- Writing the real `Run` key (`system_run_value_round_trip`, throw-away value name), the real
+  system proxy (`sysproxy::system_write_reads_back_and_restores`) and the real clipboard
+  (`clipboard::system_clipboard_round_trip`; skips where `OpenClipboard` is denied, as in this
+  sandboxed shell): all `#[ignore = "changes system state"]`, never run here (this machine's
+  network depends on its proxy settings); the registry code runs on throw-away keys and
+  `sysproxy::read` read-only. Deleting a real 1.x logon task (`RunValue::remove_legacy_task`)
+  was never called.
 - A real sing-box TUN for `wait_owned_tun` / `route_proof` success paths (unit vectors only);
   `watch_network` with real network changes (its loop is tested with a fake reader).
 - `ctrl_break` from the real GUI app (tests detach the test process from its inherited console
   first) and the TUN interface's removal after a graceful sing-box stop (elevated `e2e_tun` in CI).
-- The real clipboard write / clear (`OpenClipboard` is denied in this sandboxed shell), including
-  the private owner window used across threads.
+- The private clipboard owner window used across threads (see the clipboard test above).
 - `icmp` TTL-expired / packet-too-big replies: the local VPN answers echo itself, and GitHub-hosted
   runners drop ICMP to the internet, so `ttl_one_expires_at_the_first_hop` is opt-in
   (`VPNTE_ICMP_TESTS=1`); IPv6 `df` on a link with MTU < 1500.

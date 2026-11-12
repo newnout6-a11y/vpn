@@ -24,6 +24,7 @@ mod route;
 mod tun;
 mod watch;
 
+pub(crate) use inventory::hyperv_switch_present;
 pub use inventory::{
     Adapter, AdapterStatus, UnicastAddress, inventory, physical_adapters, physical_dns_v4,
 };
