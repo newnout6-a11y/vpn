@@ -21,14 +21,5 @@ windows = { workspace = true, features = ["Win32_Networking_WinInet", "Win32_Sys
 [dev-dependencies]
 serde_json.workspace = true
 
-[features]
-# Build scaffolding: one flag per work package while they are written in parallel.
-default = ["winnet-wfp", "winnet-adapters", "winnet-process", "winnet-system", "winnet-shell"]
-winnet-wfp = []
-winnet-adapters = []
-winnet-process = []
-winnet-system = []
-winnet-shell = []
-
 [lints]
 workspace = true

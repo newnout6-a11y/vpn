@@ -27,7 +27,6 @@ impl Drop for TempDir {
 }
 
 /// Polls `done` every 10 ms for up to 5 s; panics when it never holds.
-#[cfg(feature = "forensics-traffic")]
 pub(crate) async fn eventually(mut done: impl FnMut() -> bool) {
     for _ in 0..500 {
         if done() {

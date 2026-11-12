@@ -8,7 +8,7 @@ Paths: `vpnte_forensics::{traffic, connections, domains, enrichment, etw, captur
 plus `vpnte_forensics::LOCALES`. Shared types from `vpnte_base`: `AppError` / `ErrorKind` /
 `AppResult`, `Msg`, `types::{UnixMs, now_ms, ProxyKind, Level, Notice}`; from `vpnte_core`:
 `store::{Store, Document}`, `settings::{Settings, ConnectionMode}`, `net::Route`,
-`ops::{OperationRegistry, Source}`. Build with default features (all packages).
+`ops::{OperationRegistry, Source}`. The crate has no cargo features.
 
 **Elevation.** Needs it: the packet capture (`pktmon start/stop/counters/etl2pcap`, writing session
 dirs under the protected root), `Capture::recover_on_boot`'s `pktmon stop`, and the ETW consumer

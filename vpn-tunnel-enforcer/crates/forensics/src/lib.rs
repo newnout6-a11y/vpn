@@ -1,25 +1,12 @@
 //! Traffic statistics, domain history, packet capture, ETW events and the diagnostics export.
 
-// --- work package `forensics-capture` ---
-#[cfg(feature = "forensics-capture")]
 pub mod capture;
-#[cfg(feature = "forensics-capture")]
-pub mod etw;
-
-// --- work package `forensics-export` ---
-#[cfg(feature = "forensics-export")]
-pub mod export;
-#[cfg(feature = "forensics-export")]
-pub mod summary;
-
-// --- work package `forensics-traffic` ---
-#[cfg(feature = "forensics-traffic")]
 pub mod connections;
-#[cfg(feature = "forensics-traffic")]
 pub mod domains;
-#[cfg(feature = "forensics-traffic")]
 pub mod enrichment;
-#[cfg(feature = "forensics-traffic")]
+pub mod etw;
+pub mod export;
+pub mod summary;
 pub mod traffic;
 
 #[cfg(test)]
@@ -43,7 +30,6 @@ pub const LOCALES: &[(&str, &str)] = &[
 ];
 
 /// Pretty JSON plus a trailing newline: the on-disk form of every document this crate writes.
-#[cfg(feature = "forensics-capture")]
 pub(crate) fn pretty_json<T: serde::Serialize + ?Sized>(value: &T) -> serde_json::Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
@@ -51,7 +37,6 @@ pub(crate) fn pretty_json<T: serde::Serialize + ?Sized>(value: &T) -> serde_json
 }
 
 /// `bytes` without a leading UTF-8 BOM (Windows PowerShell 5.1 and some tools write one, B-05).
-#[cfg(feature = "forensics-capture")]
 pub(crate) fn strip_bom(bytes: &[u8]) -> &[u8] {
     bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes)
 }

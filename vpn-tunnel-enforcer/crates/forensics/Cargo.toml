@@ -35,12 +35,5 @@ windows-etw = { package = "windows", version = "0.57", features = ["Win32_Founda
 # The diagnostics ZIP: Deflate through flate2's pure-Rust zlib-rs backend (no C build).
 zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
-[features]
-# Build scaffolding: one flag per work package while they are written in parallel.
-default = ["forensics-traffic", "forensics-capture", "forensics-export"]
-forensics-traffic = []
-forensics-capture = []
-forensics-export = ["forensics-traffic", "forensics-capture"]
-
 [lints]
 workspace = true

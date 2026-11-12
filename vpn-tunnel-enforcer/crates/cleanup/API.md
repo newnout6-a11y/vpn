@@ -1,7 +1,7 @@
 # vpnte-cleanup — API map for dependent crates
 
-One-shot removal of what the old Electron app left in the system. One module, `legacy` (behind the
-default cargo feature `cleanup-legacy`), plus the crate's locale layer (always built). The only
+One-shot removal of what the old Electron app left in the system. One module, `legacy`, plus the
+crate's locale layer; the crate has no cargo features. The only
 consumer is `vpnte-app` (start-up, `--cleanup`, maintenance page).
 
 - **`run` / `uninstall` are blocking** (COM, BFE, INetCfg, Toolhelp, process waits up to ~3 s per

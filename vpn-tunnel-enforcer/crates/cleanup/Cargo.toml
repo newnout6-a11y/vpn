@@ -20,10 +20,5 @@ windows.workspace = true
 # (same windows-core version the `windows` crate already builds).
 windows-core = "0.62"
 
-[features]
-# Build scaffolding: one flag per work package while they are written in parallel.
-default = ["cleanup-legacy"]
-cleanup-legacy = []
-
 [lints]
 workspace = true

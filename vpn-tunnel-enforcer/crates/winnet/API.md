@@ -34,9 +34,7 @@ clipboard, elevation, single_instance, shell, toast, power}` plus `vpnte_winnet:
   validation functions, `Protection::settings` / `session_guarded`, all adapter / route / counter
   reads, `icmp::echo`, `env`, `sysproxy`, `autostart` (the `Run` value), HKCU `registry` access
   and the per-user `toast` paths.
-- **Feature flags** `winnet-wfp`, `winnet-adapters`, `winnet-process`, `winnet-system`,
-  `winnet-shell` are build scaffolding (all on by default; depend on the crate with default
-  features). Do not name them.
+- **No cargo features**: the crate always builds whole.
 
 ## Locales
 ```rust
