@@ -5381,6 +5381,7 @@ dependencies = [
  "futures-util",
  "jiff",
  "parking_lot 0.13.0",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -5493,6 +5494,7 @@ dependencies = [
 name = "vpnte-engine"
 version = "2.0.0"
 dependencies = [
+ "base64 0.23.1",
  "futures-util",
  "getrandom 0.3.4",
  "hex",
@@ -5550,7 +5552,6 @@ dependencies = [
  "fastrand",
  "futures-util",
  "httparse",
- "ipnet",
  "jiff",
  "parking_lot 0.13.0",
  "regex",
@@ -5607,7 +5608,6 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hex",
- "ipnet",
  "jiff",
  "parking_lot 0.13.0",
  "reqwest",
@@ -5622,7 +5622,6 @@ dependencies = [
  "vpnte-core",
  "vpnte-engine",
  "vpnte-profiles",
- "vpnte-winnet",
  "windows 0.62.2",
 ]
 

@@ -8,12 +8,12 @@
 //! and DPAPI runs as the user.
 use vpnte_base::Msg;
 
-#[cfg(feature = "app-import")]
 mod run;
-#[cfg(feature = "app-import")]
 mod steps;
-#[cfg(all(test, feature = "app-import"))]
+#[cfg(test)]
 mod tests;
+
+pub use run::import_if_needed;
 
 /// What the import did, for the first-run notice and the maintenance page.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -30,13 +30,4 @@ pub struct ImportReport {
     /// Notes for the user: the owning crates' warnings, settings adapted to an unelevated app,
     /// plaintext leftovers of the old app (by file name), files to retry.
     pub notes: Vec<Msg>,
-}
-
-#[cfg(feature = "app-import")]
-pub use run::import_if_needed;
-
-/// Build scaffolding: without the `app-import` feature there is never anything to import.
-#[cfg(not(feature = "app-import"))]
-pub fn import_if_needed(_dirs: &vpnte_core::paths::DataDirs) -> Option<ImportReport> {
-    None
 }

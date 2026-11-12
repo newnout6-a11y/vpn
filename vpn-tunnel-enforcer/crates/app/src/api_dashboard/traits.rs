@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 use vpnte_base::types::Verdict;
-use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
+use vpnte_base::{AppResult, Msg};
 use vpnte_core::ops::Source;
 use vpnte_servers::model::ProfileId;
 use vpnte_ui::dashboard::{DashboardApi, DashboardView};
@@ -12,6 +12,7 @@ use vpnte_ui::panels::{PanelsApi, ProxiesView, Selected, ServersView};
 use vpnte_ui::tray::{QuitMode, TrayApi, TrayState};
 use vpnte_view::traffic::TrafficSample;
 
+use super::proxies::ProxyAction;
 use super::{Hub, project};
 
 /// [`DashboardApi`] over the hub.
@@ -68,15 +69,6 @@ impl DashboardApi for Dashboard {
     }
 }
 
-/// The external-proxy backend is not wired into this build: the column shows nothing running
-/// and nothing to start, and its actions say so.
-fn proxies_unavailable() -> AppError {
-    AppError::msg(
-        ErrorKind::Conflict,
-        Msg::new("app.dashboard.proxiesUnavailable"),
-    )
-}
-
 #[async_trait::async_trait(?Send)]
 impl PanelsApi for Panels {
     fn traffic(&self) -> watch::Receiver<TrafficSample> {
@@ -117,23 +109,27 @@ impl PanelsApi for Panels {
         self.0.select(id.to_owned()).await
     }
 
-    async fn proxy_start(&self, _slot: u16, _profile_id: &str) -> AppResult<ProxiesView> {
-        Err(proxies_unavailable())
+    async fn proxy_start(&self, slot: u16, profile_id: &str) -> AppResult<ProxiesView> {
+        let profile_id = profile_id.to_owned();
+        self.0.proxy(ProxyAction::Start { slot, profile_id }).await
     }
 
-    async fn proxy_stop(&self, _slot: u16) -> AppResult<ProxiesView> {
-        Err(proxies_unavailable())
+    async fn proxy_stop(&self, slot: u16) -> AppResult<ProxiesView> {
+        self.0.proxy(ProxyAction::Stop(slot)).await
     }
 
-    async fn proxy_rotate(&self, _slot: u16) -> AppResult<ProxiesView> {
-        Err(proxies_unavailable())
+    async fn proxy_rotate(&self, slot: u16) -> AppResult<ProxiesView> {
+        self.0.proxy(ProxyAction::Rotate(slot)).await
     }
 
     async fn proxy_stop_all(&self) -> AppResult<ProxiesView> {
-        Err(proxies_unavailable())
+        self.0.proxy(ProxyAction::StopAll).await
     }
 
+    /// The manager pushes every visible change; readiness alone expires with the clock, so the
+    /// page's cadence re-projects it.
     async fn proxy_refresh(&self) -> AppResult<()> {
+        self.0.publish_proxies();
         Ok(())
     }
 }

@@ -5,13 +5,17 @@
 //! Nothing here needs administrator rights (NOADMIN §0): stores live under the user's data dir,
 //! keys are sealed with the user's DPAPI key, probe engines listen on loopback only, pings use
 //! ICMP helpers / plain sockets, the clipboard and the Save dialog belong to the user's session.
-//! The live check and external proxies are not wired in this build and say so.
+//! The live check and «start as proxies» run on the runner and the slots the tunnel hosts
+//! (`TunnelOps::live_checks` / `proxies`); without them they answer `Conflict`, never a fake result.
 mod checks;
 mod detail;
 mod dialog;
 mod export;
 mod import;
+mod live;
+mod live_view;
 mod project;
+mod proxies;
 #[cfg(test)]
 mod tests;
 
@@ -29,6 +33,7 @@ use vpnte_base::i18n::Lang;
 use vpnte_base::types::{ClientDevice, Level, Notice};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::ops::Source;
+use vpnte_probes::live::LiveCheckService;
 use vpnte_servers::model::{GroupId, ProfileId};
 use vpnte_servers::store::Servers;
 use vpnte_tunnel::lifecycle::ConnError;
@@ -313,8 +318,14 @@ impl ServersApi for ServersBackend {
         cancellable(shutdown, |token| export::proxy_list(shared, token)).await
     }
 
-    async fn start_proxies(&self, _ids: Vec<String>) -> AppResult<ProxyStartReport> {
-        Err(unavailable("app.servers.proxiesUnavailable"))
+    async fn start_proxies(&self, ids: Vec<String>) -> AppResult<ProxyStartReport> {
+        let slots = self
+            .shared
+            .backend
+            .tunnel()?
+            .proxies()
+            .ok_or_else(|| unavailable("app.servers.proxiesUnavailable"))?;
+        job(async move { Ok(proxies::report(slots.ops.start_profiles(ids).await)) }).await
     }
 
     async fn refresh_group(&self, id: &str) -> AppResult<RefreshOutcome> {
@@ -366,24 +377,35 @@ impl ServersApi for ServersBackend {
 
     async fn live_check(
         &self,
-        _id: &str,
-        _mode: LiveMode,
-        _progress: mpsc::UnboundedSender<LiveProgress>,
+        id: &str,
+        mode: LiveMode,
+        progress: mpsc::UnboundedSender<LiveProgress>,
     ) -> AppResult<LiveCheck> {
-        Err(unavailable("app.servers.liveUnavailable"))
+        let (service, id, lang) = (self.live()?, id.to_owned(), self.shared.lang());
+        let shutdown = &self.shared.backend.shutdown;
+        cancellable(shutdown, |token| {
+            live::single(service, id, mode, lang, progress, token)
+        })
+        .await
     }
 
-    async fn live_history(&self, _id: &str) -> AppResult<Vec<LiveCheck>> {
-        Err(unavailable("app.servers.liveUnavailable"))
+    async fn live_history(&self, id: &str) -> AppResult<Vec<LiveCheck>> {
+        let service = self.live()?;
+        Ok(live::history(&service, id, self.shared.lang()))
     }
 
     async fn live_batch(
         &self,
-        _ids: Vec<String>,
-        _stop: CancellationToken,
-        _progress: mpsc::UnboundedSender<BatchProgress>,
+        ids: Vec<String>,
+        stop: CancellationToken,
+        progress: mpsc::UnboundedSender<BatchProgress>,
     ) -> AppResult<BatchResult> {
-        Err(unavailable("app.servers.liveUnavailable"))
+        let (service, lang) = (self.live()?, self.shared.lang());
+        let shutdown = &self.shared.backend.shutdown;
+        cancellable(shutdown, |token| {
+            live::batch(service, ids, stop, lang, progress, token)
+        })
+        .await
     }
 
     async fn open_url(&self, url: String) -> AppResult<()> {
@@ -392,6 +414,15 @@ impl ServersApi for ServersBackend {
 }
 
 impl ServersBackend {
+    /// The live-check runner the tunnel hosts; `Conflict` when it hosts none.
+    fn live(&self) -> AppResult<Arc<LiveCheckService>> {
+        self.shared
+            .backend
+            .tunnel()?
+            .live_checks()
+            .ok_or_else(|| unavailable("app.servers.liveUnavailable"))
+    }
+
     /// A row change on the blocking pool, published before it answers.
     async fn edit<F>(&self, id: &str, change: F) -> AppResult<()>
     where

@@ -147,6 +147,23 @@ impl<'a> Ctx<'a> {
         self.report.notes.push(msg);
     }
 
+    /// The rolling backup `<store>.json.bak` (only the live-check history had one); `None` when
+    /// absent or not importable, and while the main file waits for a retry (held by another
+    /// program: the next start imports the main file itself). Plain JSON: nothing is sealed.
+    pub fn open_backup(&mut self, store: &str) -> Option<Value> {
+        let main = format!("{store}.json");
+        if self.retry.contains(&main) {
+            return None;
+        }
+        match self.legacy.read_backup(store) {
+            Ok(doc) => doc.map(|doc| doc.open(self.key.as_ref()).value),
+            Err(err) => {
+                tracing::warn!(%err, store, "old backup not imported");
+                None
+            }
+        }
+    }
+
     /// Records `(file, rows)` as imported.
     pub fn imported(&mut self, file: &str, rows: usize) {
         self.report.imported.push((file.to_owned(), rows));

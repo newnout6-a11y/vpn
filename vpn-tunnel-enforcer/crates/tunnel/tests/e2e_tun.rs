@@ -3,7 +3,6 @@
 //! at `standard`, and the machine is checked before and after the stop. No secrets, no VPN
 //! server. Skips quietly when not elevated or the engines are missing. A guard restores the
 //! machine (full stop, dynamic WFP session closed, helper killed) even when an assertion fails.
-#![cfg(feature = "tunnel-runtime")]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};

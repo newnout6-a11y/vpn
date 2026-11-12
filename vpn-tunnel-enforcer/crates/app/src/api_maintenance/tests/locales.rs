@@ -102,11 +102,21 @@ fn borrowed_keys_exist() {
     }
 }
 
-/// The fragments are part of the app's single locale registration (`svc_core::locale_layers`).
+/// The fragments of this package and of `app-clickjack` (its Save dialog) are part of the app's
+/// single locale registration (`svc_core::locale_layers`).
 #[test]
 fn fragment_is_a_locale_layer() {
     let layers = crate::svc_core::locale_layers();
-    for pair in crate::api_maintenance::LOCALES {
-        assert_eq!(layers.iter().filter(|p| *p == pair).count(), 1, "{}", pair.0.len());
+    let clickjack = (
+        include_str!("../../../locales/app-clickjack.ru.json"),
+        include_str!("../../../locales/app-clickjack.en.json"),
+    );
+    for pair in [clickjack, (RU, EN)] {
+        assert_eq!(
+            layers.iter().filter(|p| **p == pair).count(),
+            1,
+            "{}",
+            pair.0.len()
+        );
     }
 }

@@ -11,6 +11,7 @@ use super::run::{Host, MARKER, run};
 use fixture::Fixture;
 
 mod fixture;
+mod live;
 
 const UUID: &str = "11111111-2222-4333-8444-555555555555";
 const PASS: &str = "FAKE-PASS-0001";

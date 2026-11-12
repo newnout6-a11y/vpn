@@ -1,23 +1,8 @@
 //! Connection runtime and lifecycle: start, stop, switch, state machine and session history.
 
-// --- shared by the work packages ---
-// A build with only some package features leaves parts of the test helpers unused.
 #[cfg(test)]
-#[cfg_attr(
-    not(all(
-        feature = "tunnel-fsm",
-        feature = "tunnel-history",
-        feature = "tunnel-lifecycle",
-        feature = "tunnel-runtime"
-    )),
-    allow(dead_code)
-)]
 mod test_locales;
 #[cfg(test)]
-#[cfg_attr(
-    not(all(feature = "tunnel-history", feature = "tunnel-lifecycle")),
-    allow(dead_code)
-)]
 mod test_support;
 
 /// This crate's locale fragments as `(ru_json, en_json)` layers, one per work package in file-name
@@ -45,24 +30,10 @@ pub const LOCALES: &[(&str, &str)] = &[
     ),
 ];
 
-// --- work package `tunnel-fsm` ---
-#[cfg(feature = "tunnel-fsm")]
 pub mod api;
-#[cfg(feature = "tunnel-fsm")]
 pub mod fsm;
-
-// --- work package `tunnel-history` ---
-#[cfg(feature = "tunnel-history")]
 pub mod history;
-#[cfg(feature = "tunnel-history")]
-pub mod outcome;
-
-// --- work package `tunnel-lifecycle` ---
-#[cfg(feature = "tunnel-lifecycle")]
 pub mod lifecycle;
-
-// --- work package `tunnel-runtime` ---
-#[cfg(feature = "tunnel-runtime")]
+pub mod outcome;
 pub mod runtime;
-#[cfg(feature = "tunnel-runtime")]
 pub mod switch;

@@ -70,6 +70,8 @@ pub trait Engines: Send + Sync {
     fn spawn_core(&self, config: &[u8]) -> io::Result<Arc<dyn CoreProc>>;
     /// A fresh slot pair for one session; exits of running slots arrive on `events`.
     fn slots(&self, events: mpsc::Sender<XrayEvent>) -> Box<dyn Slots>;
+    /// The sing-box binary (other processes of it: external proxy slots, probe engines).
+    fn singbox_exe(&self) -> PathBuf;
     /// The Xray binary (its own traffic leaves the machine directly).
     fn xray_exe(&self) -> PathBuf;
     /// Engine log files of a session (with or without the Xray slots).
@@ -214,6 +216,10 @@ impl Engines for RealEngines {
             self.logs.clone(),
             events,
         ))
+    }
+
+    fn singbox_exe(&self) -> PathBuf {
+        self.singbox.clone()
     }
 
     fn xray_exe(&self) -> PathBuf {

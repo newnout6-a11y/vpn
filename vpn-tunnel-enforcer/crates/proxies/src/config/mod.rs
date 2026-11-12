@@ -219,7 +219,7 @@ pub fn preferred_address(addrs: &[IpAddr]) -> Option<IpAddr> {
         .copied()
 }
 
-#[cfg(all(test, feature = "proxies-manager"))]
+#[cfg(test)]
 mod check;
 #[cfg(test)]
 mod tests;

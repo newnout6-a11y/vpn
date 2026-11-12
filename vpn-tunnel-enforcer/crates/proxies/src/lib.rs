@@ -1,13 +1,9 @@
 //! External loopback proxy slots and their local control API.
 
-// --- shared by the work packages ---
 #[cfg(test)]
 mod test_locales;
-#[cfg(all(test, feature = "proxies-model"))]
-// A build without the manager leaves its fixtures unused.
-#[cfg_attr(not(feature = "proxies-manager"), allow(dead_code))]
+#[cfg(test)]
 mod test_support;
-#[cfg(feature = "proxies-model")]
 mod token;
 
 /// This crate's locale fragments as `(ru_json, en_json)` layers, one per work package in file-name
@@ -27,24 +23,11 @@ pub const LOCALES: &[(&str, &str)] = &[
     ),
 ];
 
-// --- work package `proxies-control` ---
-#[cfg(feature = "proxies-control")]
-pub mod control;
-
-// --- work package `proxies-manager` ---
-#[cfg(feature = "proxies-manager")]
-pub mod health;
-#[cfg(feature = "proxies-manager")]
-pub mod manager;
-#[cfg(feature = "proxies-manager")]
-pub mod probe;
-
-// --- work package `proxies-model` ---
-#[cfg(feature = "proxies-model")]
 pub mod config;
-#[cfg(feature = "proxies-model")]
+pub mod control;
+pub mod health;
 pub mod lease;
-#[cfg(feature = "proxies-model")]
+pub mod manager;
 pub mod model;
-#[cfg(feature = "proxies-model")]
+pub mod probe;
 pub mod slot;

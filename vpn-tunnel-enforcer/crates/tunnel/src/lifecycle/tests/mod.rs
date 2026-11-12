@@ -6,12 +6,10 @@ use vpnte_core::ops::Source;
 use super::{ConnectReq, ConnectTarget, DisconnectReq, StopCause};
 
 mod fakes;
+mod joint;
 mod lane;
 mod orchestration;
 mod sessions;
-// The lane over the real runtime actor needs the runtime package.
-#[cfg(feature = "tunnel-runtime")]
-mod joint;
 
 const PROXY: &str = "127.0.0.1:10808";
 

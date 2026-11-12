@@ -43,31 +43,6 @@ pub fn contexts(backend: &Arc<Backend>) -> Vec<Box<dyn Any>> {
     vec![Box::new(schedule), Box::new(split), Box::new(traffic)]
 }
 
-/// The fragments of this package: `svc_core`'s list names only the packages wired before it.
-const LOCALES: &[(&str, &str)] = &[(
-    include_str!("../../locales/app-lists.ru.json"),
-    include_str!("../../locales/app-lists.en.json"),
-)];
-
-/// Every locale layer of this build plus [`LOCALES`] (each once), for the one
-/// `vpnte_ui::lang::init_locales` call at start. The first call wins and `root::run` makes this
-/// one first, so the list starts from the Tools pages' list (which holds the Maintenance page's)
-/// when those are built in. `api_tools` must therefore never build on this list (a cycle).
-pub fn locale_layers() -> Vec<(&'static str, &'static str)> {
-    #[cfg(feature = "app-tools")]
-    let mut layers = crate::api_tools::locale_layers();
-    #[cfg(all(not(feature = "app-tools"), feature = "app-maintenance"))]
-    let mut layers = crate::api_maintenance::locale_layers();
-    #[cfg(not(any(feature = "app-tools", feature = "app-maintenance")))]
-    let mut layers = crate::svc_core::locale_layers();
-    for pair in LOCALES {
-        if !layers.contains(pair) {
-            layers.push(*pair);
-        }
-    }
-    layers
-}
-
 /// A refusal of these pages: `Conflict` with its own sentence (shown as a warning).
 fn refused(key: &'static str) -> AppError {
     AppError::msg(ErrorKind::Conflict, Msg::new(key))

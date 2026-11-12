@@ -1371,7 +1371,6 @@ fn reply_parsing() {
 /// The app's wiring (API.md): the real manager behind the real control server. The bound port
 /// reaches the manager's statuses and snapshot, and the answers come from the manager (its own
 /// validation, the lease book, the group-health mapping). No engine starts: there are no servers.
-#[cfg(feature = "proxies-manager")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_manager_behind_the_control_server() {
     use crate::manager::{EngineChoice, ProfileSource, ProxyManager, ProxyProfile};

@@ -18,7 +18,7 @@ use vpnte_ui::traffic_history::{DomainRow, SiteInfo, TrafficHistoryApi, TrafficS
 use vpnte_ui::widgets::Load;
 
 use super::traffic::{history_path, read_if_changed};
-use super::{LOCALES, ScheduleService, SplitService, TrafficService, locale_layers};
+use super::{ScheduleService, SplitService, TrafficService};
 use crate::api_settings::test_support::{FakeTunnel, TempDir, backend};
 use crate::services::Backend;
 
@@ -73,11 +73,14 @@ fn keys_of(json: &str) -> BTreeSet<String> {
 }
 
 /// AT-09-011: the fragments are valid JSON with the same keys in ru and en, all under
-/// `app.lists`; every `app.lists.*` key the sources name exists, and the keys reused from other
-/// layers are registered by `locale_layers`.
+/// `app.lists`; every `app.lists.*` key the sources name exists, and the fragment and the keys
+/// reused from other layers are registered by `svc_core::locale_layers`.
 #[test]
 fn locales_paired_and_complete() {
-    let (ru, en) = LOCALES[0];
+    let (ru, en) = (
+        include_str!("../../locales/app-lists.ru.json"),
+        include_str!("../../locales/app-lists.en.json"),
+    );
     let (ru_keys, en_keys) = (keys_of(ru), keys_of(en));
     assert_eq!(ru_keys, en_keys);
     assert!(ru_keys.iter().all(|k| k.starts_with("app.lists.")));
@@ -96,8 +99,8 @@ fn locales_paired_and_complete() {
     for key in &named {
         assert!(ru_keys.contains(*key), "missing {key}");
     }
-    let layers = locale_layers();
-    assert!(layers.contains(&LOCALES[0]));
+    let layers = crate::svc_core::locale_layers();
+    assert!(layers.contains(&(ru, en)));
     let (mut all_ru, mut all_en) = (BTreeSet::new(), BTreeSet::new());
     for (ru, en) in &layers {
         all_ru.extend(keys_of(ru));

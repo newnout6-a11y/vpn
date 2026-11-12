@@ -15,6 +15,7 @@ use vpnte_engine::routing::RulesDoc;
 use vpnte_forensics::domains::DomainsDoc;
 use vpnte_forensics::enrichment::EnrichmentDoc;
 use vpnte_probes::availability::UrlChecks;
+use vpnte_probes::live::LiveHistory;
 use vpnte_probes::speedtest::SpeedTests;
 use vpnte_tunnel::history::History;
 
@@ -27,8 +28,7 @@ mod servers;
 /// Every document of the old directory, in an order where nothing depends on a later step.
 /// Not imported (storage §6.6, with this build's owners): `smart-route-rule-sets` (bundled /
 /// downloaded again), `external-proxy-leases` (regenerated), `adaptive-bypass` (a learning cache
-/// its crate has no importer for; the install secret is generated anew), `live-server-checks`
-/// (no owner yet: `vpnte_probes::live` is a placeholder).
+/// its crate has no importer for; the install secret is generated anew).
 pub(super) fn all(cx: &mut Ctx<'_>) {
     let settings = cx.open("settings");
     settings_docs(cx, settings.as_ref());
@@ -37,6 +37,7 @@ pub(super) fn all(cx: &mut Ctx<'_>) {
     history(cx);
     automation(cx);
     probes(cx);
+    live_checks(cx);
     forensics(cx);
 }
 
@@ -177,6 +178,19 @@ fn probes(cx: &mut Ctx<'_>) {
         cx.report.dropped += list_len(old.get("history")).saturating_sub(rows);
         cx.write_new(doc, rows);
     }
+}
+
+/// `history/live-checks.json`: the old live-check history, else its rolling `.bak` when the main
+/// file is missing or undecodable (the old loader's rule). The owning crate keeps valid,
+/// finished rows only and re-sanitises them.
+fn live_checks(cx: &mut Ctx<'_>) {
+    const STORE: &str = "live-server-checks";
+    let Some(old) = cx.open(STORE).or_else(|| cx.open_backup(STORE)) else {
+        return;
+    };
+    let doc = LiveHistory::from_legacy(&old);
+    let rows = doc.targets.values().map(Vec::len).sum();
+    cx.write_new(doc, rows);
 }
 
 /// `history/traffic-domains.json` and `cache/domain-info.json`. What these leave out is policy

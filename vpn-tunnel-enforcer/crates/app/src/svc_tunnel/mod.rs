@@ -117,17 +117,19 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
         b.servers.clone(),
         b.shutdown.clone(),
     ));
+    let proxies = peers::proxies(b, runtime.status());
     let lifecycle = Lifecycle::spawn(LifecycleDeps {
         runtime: Arc::new(runtime.clone()),
         profiles: Arc::new(peers::ServerSource(b.servers.clone())),
         soft: soft.clone(),
         monitor: ip.clone(),
         forensics: forensics.clone(),
-        proxies: Arc::new(peers::NoProxies),
+        proxies: Arc::new(peers::Slots(proxies.clone())),
         notifier: b.notifier.clone(),
         history: b.history.clone(),
         settings: b.settings.clone(),
     });
+    let live = peers::live_checks(b, &runtime, &lifecycle);
 
     if let Some(leaks) = &ip.leaks {
         leaks.forward(
@@ -167,6 +169,8 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
         detector: Arc::clone(&proxy_capture),
         pending: Mutex::new(None),
         rule_sets,
+        proxies,
+        live,
     }))
 }
 
@@ -197,6 +201,10 @@ struct TunnelService {
     pending: Mutex<Option<CancellationToken>>,
     /// Wakes the rule-set refresh task (a Smart RU / rule-set setting changed).
     rule_sets: Arc<Notify>,
+    /// External proxy slots (stopped by the lifecycle with the VPN, and at exit).
+    proxies: Arc<crate::svc_proxies::Proxies>,
+    /// The live server check; `None` when its runner could not start.
+    live: Option<Arc<vpnte_probes::live::LiveCheckService>>,
 }
 
 /// Start-up recovery with the lane held (no connect can interleave): WFP leftovers of a crashed

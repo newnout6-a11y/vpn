@@ -48,31 +48,6 @@ pub fn contexts(backend: &Arc<Backend>) -> Vec<Box<dyn Any>> {
     vec![Box::new(api)]
 }
 
-/// The fragments of this package and of `app-clickjack` (its Save dialog): `svc_core`'s list
-/// names only the packages wired before them.
-const LOCALES: &[(&str, &str)] = &[
-    (
-        include_str!("../../locales/app-clickjack.ru.json"),
-        include_str!("../../locales/app-clickjack.en.json"),
-    ),
-    (
-        include_str!("../../locales/app-maintenance.ru.json"),
-        include_str!("../../locales/app-maintenance.en.json"),
-    ),
-];
-
-/// Every locale layer of the app plus [`LOCALES`] (each once), for the one
-/// `vpnte_ui::lang::init_locales` call at start.
-pub fn locale_layers() -> Vec<(&'static str, &'static str)> {
-    let mut layers = crate::svc_core::locale_layers();
-    for pair in LOCALES {
-        if !layers.contains(pair) {
-            layers.push(*pair);
-        }
-    }
-    layers
-}
-
 /// [`MaintenanceApi`] over the backend.
 pub struct MaintenanceService(Arc<Shared>);
 

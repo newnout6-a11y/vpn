@@ -190,3 +190,48 @@ async fn a_strategy_change_releases_the_previous_protection() {
     assert!(w.at("release") < w.at("spawn:4101"), "{:?}", w.log());
     assert_eq!(h.status().borrow().capture, Some(CaptureKind::Proxy));
 }
+
+/// The outbound of the route rule whose `process_path_regex` lists the bundled `exe` image.
+fn engine_rule(config: &Value, exe: &str) -> Option<String> {
+    let path = format!(r"C:\Program Files\VPN Tunnel Enforcer\resources\{exe}");
+    let regex = vpnte_engine::routing::process::AppPath::parse(&path)
+        .expect("bundled path parses")
+        .regex();
+    config["route"]["rules"]
+        .as_array()?
+        .iter()
+        .find(|r| {
+            r["process_path_regex"]
+                .as_array()
+                .is_some_and(|list| list.iter().any(|v| *v == *regex))
+        })
+        .and_then(|r| r["outbound"].as_str().map(str::to_owned))
+}
+
+/// Spec external-proxy §3.28 (decision 5): under the TUN the bundled sing-box and Xray images
+/// (external proxy slots, probe engines) leave through `direct-out`, so slot traffic does not
+/// loop through the tunnel; the proxy capture captures nothing and needs no such rule.
+#[tokio::test]
+async fn bundled_engines_go_direct_only_under_the_tun() {
+    let w = World::new();
+    let h = TunnelHandle::spawn(deps(&w));
+    h.start(local_req(), CancellationToken::new())
+        .await
+        .expect("tun start");
+    let tun = config(&w, 0);
+    for exe in ["sing-box.exe", "xray.exe"] {
+        assert_eq!(
+            engine_rule(&tun, exe).as_deref(),
+            Some("direct-out"),
+            "{exe}"
+        );
+    }
+    assert!(h.stop(StopOptions::default()).await.ok);
+    h.start(proxy_req(), CancellationToken::new())
+        .await
+        .expect("proxy start");
+    let proxy = config(&w, 1);
+    for exe in ["sing-box.exe", "xray.exe"] {
+        assert_eq!(engine_rule(&proxy, exe), None, "{exe}");
+    }
+}

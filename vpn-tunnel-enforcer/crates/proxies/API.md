@@ -4,8 +4,7 @@ External loopback proxies: numbered **slots**, each an unauthenticated `mixed` (
 on `127.0.0.1:<port>` backed by its own sing-box child (plus an Xray child for profiles that run on Xray),
 probed through its data plane, rotated between servers and leased to automation clients; plus the local
 **control API** (HTTP on `127.0.0.1:17873`, token-guarded) and its console client `vpnte_proxy.exe`.
-Depends on `base`, `core`, `profiles`, `engine` (`winnet` is listed but unused). Default features = the whole
-crate (the `proxies-*` features are build scaffolding; build with defaults).
+Depends on `base`, `core`, `profiles`, `engine`.
 
 ```rust
 pub const LOCALES: &[(&str, &str)];   // (ru_json, en_json) per fragment, file-name order:

@@ -47,26 +47,6 @@ pub fn contexts(backend: &Arc<Backend>) -> Vec<Box<dyn Any>> {
     ]
 }
 
-/// This package's fragment.
-const LOCALES: (&str, &str) = (
-    include_str!("../../locales/app-tools.ru.json"),
-    include_str!("../../locales/app-tools.en.json"),
-);
-
-/// Every locale layer of this build plus [`LOCALES`] (each once), for the one
-/// `vpnte_ui::lang::init_locales` call at start. The first registration wins, so `root::run`
-/// registers this list first; with the Maintenance page built in, its list is the base.
-pub fn locale_layers() -> Vec<(&'static str, &'static str)> {
-    #[cfg(feature = "app-maintenance")]
-    let mut layers = crate::api_maintenance::locale_layers();
-    #[cfg(not(feature = "app-maintenance"))]
-    let mut layers = crate::svc_core::locale_layers();
-    if !layers.contains(&LOCALES) {
-        layers.push(LOCALES);
-    }
-    layers
-}
-
 /// State shared by both pages, their actions and the projection task.
 pub(crate) struct Shared {
     pub backend: Arc<Backend>,

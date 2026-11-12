@@ -4,7 +4,7 @@ use std::net::IpAddr;
 use std::time::Instant;
 
 use vpnte_base::i18n::Lang;
-use vpnte_base::types::{UnixMs, Verdict};
+use vpnte_base::types::{KillSwitchLevel, UnixMs, Verdict};
 use vpnte_core::ops::OpStatus;
 use vpnte_forensics::traffic::TrafficStats;
 use vpnte_probes::ip_monitor::{IpEvidence, IpVerdict};
@@ -175,11 +175,17 @@ pub(super) fn geo_target(snap: &TunnelSnapshot, ev: &IpEvidence) -> Option<IpAdd
 }
 
 /// The kill-switch fact from a read-back. Without WFP in this process (not elevated) nothing of
-/// ours can be installed by it: the fact reads «Снят», never «Держит» (Soft's proxy hold is not
-/// a kill switch that can be read back).
+/// ours can be installed, so the saved level decides what can hold: off reads «Снят», standard
+/// is Soft's system-proxy hold «Через прокси» (never «Держит»: it cannot be read back), strict
+/// needs WFP and reads «Нужны права администратора». The view turns the proxy hold into the
+/// latter in Hard mode (`FirewallStatus::in_mode`).
 pub(super) fn firewall(ks: &KillSwitchStatus) -> FirewallStatus {
     let state = match &ks.wfp {
-        None => FwState::Inactive,
+        None => match ks.settings.level {
+            KillSwitchLevel::Off => FwState::Inactive,
+            KillSwitchLevel::Standard => FwState::ProxyHold,
+            KillSwitchLevel::Strict => FwState::NeedsAdmin,
+        },
         Some(status) => match status.kill_switch {
             KillSwitchState::Off | KillSwitchState::Armed => FwState::Inactive,
             KillSwitchState::Engaged | KillSwitchState::Blocking if status.last_error.is_none() => {

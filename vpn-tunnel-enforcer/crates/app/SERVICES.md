@@ -85,6 +85,8 @@ messages to show.
 | `probe_ctx(device)` | Servers `check_group_health` (`key_health::check_many`), and anyone pinging by hand (`.net`) |
 | `tun_available()` | Settings routing-mode choice, Wizard `Routing::Hard` option: shown unavailable with `app.base.needsAdmin` |
 | `shutdown(budget)` | app-main (Tray `quit`) |
+| `proxies()` | Panels proxy column and actions (`api_dashboard/proxies.rs`), Servers `start_proxies`; `None` = the column stays empty, actions answer `Conflict` |
+| `live_checks()` | Servers `live_check` / `live_history` / `live_batch` (`api_servers/live.rs`); `None` = `Conflict` `app.servers.liveUnavailable` |
 
 ## What `app-tunnel` must provide (`svc_tunnel::build(&Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>>`)
 - Every method above, exactly as documented on the trait. Runs inside the tokio runtime.
@@ -97,10 +99,15 @@ messages to show.
   and `ProtectionDoc::settings.level` (the WFP model); `apply_settings_change` hands a changed
   `kill_switch` to the protection (or refuses it with `needs_admin()` when it cannot be enforced).
 - The lifecycle's collaborators: `ProfileSource` over `backend.servers`, `SoftProxy`,
-  `Monitor` (public-IP monitor), `Forensics` (traffic sampler + domain history, no capture), a
-  no-op `ExternalProxies`, and `backend.notifier` as the lifecycle `Notifier` (it implements
+  `Monitor` (public-IP monitor), `Forensics` (traffic sampler + domain history, no capture), the
+  external proxy slots as `ExternalProxies` (`svc_proxies`, built in `build`: a VPN stop stops
+  the unleased slots), and `backend.notifier` as the lifecycle `Notifier` (it implements
   `vpnte_tunnel::lifecycle::Notifier`). The tweak journal (`tweaks::Journal`) and the domain
   history (`forensics::domains::HistoryService`, needs a runtime) are opened by app-tunnel, once.
+- The tunnel's peers (package wire-proxies-live): `build` also starts the slots' manager with the
+  control API on 127.0.0.1 (`svc_proxies`) and the live-check runner over the tunnel's state
+  (`svc_live`, history pruned at start); `shutdown` stops every slot and the runner after the
+  lifecycle stop, within the same budget.
 - Hard without TUN capture: `connect` fails with `Permission` and a message that offers Soft;
   never falls back to Soft silently.
 - `ping` records every result with `backend.servers.record_ping` (memory only).
@@ -117,8 +124,6 @@ The root shows `popup` notices as in-app toasts; a list view may show all.
 
 ## Locale layers
 `svc_core::locale_layers()`: `crates/base/locales/base.*`, then the `LOCALES` of core, winnet,
-profiles, view, servers, engine, forensics, automation, the probes fragment files (no constant
-yet), tunnel, the proxies fragment files (no constant yet), cleanup, and the app's fragments:
-`app-base` always, every other app package's pair under its cargo feature. **Every app package
-must ship `crates/app/locales/<package>.{ru,en}.json`** (top-level key `app`), or its feature does
-not build.
+profiles, view, servers, engine, forensics, automation, probes, tunnel, proxies, cleanup, and the
+app's fragments: one pair per app package. **Every app package ships `crates/app/locales/<package>.{ru,en}.json`**
+(top-level key `app`) and adds it to `svc_core::APP`.

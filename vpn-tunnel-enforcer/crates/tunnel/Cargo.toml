@@ -19,18 +19,10 @@ tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 vpnte-base.workspace = true
-vpnte-core = { workspace = true, optional = true }
-vpnte-engine = { workspace = true, optional = true }
-vpnte-profiles = { workspace = true, optional = true }
-vpnte-winnet = { workspace = true, optional = true }
-
-[features]
-# Build scaffolding: one flag per work package while they are written in parallel.
-default = ["tunnel-fsm", "tunnel-history", "tunnel-lifecycle", "tunnel-runtime"]
-tunnel-fsm = ["dep:vpnte-core", "dep:vpnte-profiles"]
-tunnel-history = ["dep:vpnte-core"]
-tunnel-lifecycle = ["tunnel-fsm", "tunnel-history", "dep:vpnte-core", "dep:vpnte-profiles"]
-tunnel-runtime = ["tunnel-fsm", "dep:vpnte-core", "dep:vpnte-winnet", "dep:vpnte-profiles", "dep:vpnte-engine"]
+vpnte-core.workspace = true
+vpnte-engine.workspace = true
+vpnte-profiles.workspace = true
+vpnte-winnet.workspace = true
 
 [lints]
 workspace = true

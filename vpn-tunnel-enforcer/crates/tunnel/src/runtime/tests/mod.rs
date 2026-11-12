@@ -305,6 +305,9 @@ impl Engines for FakeEngines {
         *self.0.xray_events.lock() = Some(events);
         Box::new(FakeSlots(self.0.clone()))
     }
+    fn singbox_exe(&self) -> PathBuf {
+        PathBuf::from(r"C:\Program Files\VPN Tunnel Enforcer\resources\sing-box.exe")
+    }
     fn xray_exe(&self) -> PathBuf {
         PathBuf::from(r"C:\Program Files\VPN Tunnel Enforcer\resources\xray.exe")
     }

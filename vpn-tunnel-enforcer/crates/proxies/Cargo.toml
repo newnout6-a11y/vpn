@@ -23,24 +23,14 @@ tokio-util.workspace = true
 tracing.workspace = true
 url.workspace = true
 vpnte-base.workspace = true
-vpnte-core = { workspace = true, optional = true }
-vpnte-engine = { workspace = true, optional = true }
-vpnte-profiles = { workspace = true, optional = true }
-# Unused by the code: kept only because the `proxies-manager` scaffolding feature names it.
-vpnte-winnet = { workspace = true, optional = true }
+vpnte-core.workspace = true
+vpnte-engine.workspace = true
+vpnte-profiles.workspace = true
 windows.workspace = true
-
-[features]
-# Build scaffolding: one flag per work package while they are written in parallel.
-default = ["proxies-model", "proxies-manager", "proxies-control"]
-proxies-model = ["dep:vpnte-core", "dep:vpnte-profiles"]
-proxies-manager = ["proxies-model", "dep:vpnte-core", "dep:vpnte-winnet", "dep:vpnte-profiles", "dep:vpnte-engine"]
-proxies-control = ["proxies-model", "dep:vpnte-core"]
 
 [[bin]]
 name = "vpnte_proxy"
 path = "src/bin/vpnte_proxy/main.rs"
-required-features = ["proxies-control"]
 
 [lints]
 workspace = true

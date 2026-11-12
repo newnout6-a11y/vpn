@@ -4,8 +4,7 @@ Connection runtime and lifecycle: the runtime actor that starts / supervises / s
 the engines (`runtime`, `switch`), the lane that decides who may change the tunnel (`lifecycle`),
 the pure state machine (`fsm`), session outcomes and the connection history (`outcome`,
 `history`), and the shared vocabulary of all of them (`api`). Depends on `vpnte-base`, `-core`,
-`-winnet`, `-profiles`, `-engine`. Cargo features (`tunnel-fsm`, `tunnel-history`,
-`tunnel-lifecycle`, `tunnel-runtime`) are build scaffolding; the default enables all.
+`-winnet`, `-profiles`, `-engine`.
 
 ```rust
 pub const LOCALES: &[(&str, &str)];   // (ru, en) per fragment, file-name order: noadmin-tunnel, fsm, history, lifecycle, runtime

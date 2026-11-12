@@ -261,6 +261,14 @@ impl TunnelOps for TunnelService {
         self.guard.wfp.is_some()
     }
 
+    fn proxies(&self) -> Option<crate::svc_proxies::ProxySlots> {
+        Some(self.proxies.slots())
+    }
+
+    fn live_checks(&self) -> Option<std::sync::Arc<vpnte_probes::live::LiveCheckService>> {
+        self.live.clone()
+    }
+
     async fn shutdown(&self, budget: Duration) -> ShutdownReport {
         let deadline = Instant::now() + budget;
         let left = || {
@@ -282,6 +290,19 @@ impl TunnelOps for TunnelService {
             .is_err()
         {
             tracing::warn!("domain history flush timed out");
+        }
+        // Slots stop with the app, leases notwithstanding (their engines would die with the
+        // kill-on-close job anyway; this ends them cleanly and closes the control API).
+        if tokio::time::timeout(left(), self.proxies.shutdown())
+            .await
+            .is_err()
+        {
+            tracing::warn!("external proxies shutdown timed out");
+        }
+        if let Some(live) = &self.live
+            && tokio::time::timeout(left(), live.shutdown()).await.is_err()
+        {
+            tracing::warn!("live check shutdown timed out");
         }
         let guard = self.guard.clone();
         let closing = tokio::task::spawn_blocking(move || guard.shutdown());

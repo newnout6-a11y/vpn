@@ -24,6 +24,7 @@ use vpnte_probes::geo::Geo;
 use vpnte_probes::ip_monitor::IpEvidence;
 use vpnte_probes::key_health::ProbeCtx;
 use vpnte_probes::leak::CheckReport;
+use vpnte_probes::live::LiveCheckService;
 use vpnte_probes::ping::PingSample;
 use vpnte_servers::model::ProfileId;
 use vpnte_servers::refresh::RefreshCtx;
@@ -40,6 +41,7 @@ use vpnte_winnet::wfp::{
 use crate::import::ImportReport;
 use crate::svc_core::docs::{ProtectionDoc, SoftDoc, ThemesDoc};
 use crate::svc_core::notify::Notifier;
+use crate::svc_proxies::ProxySlots;
 
 /// Everything the application shares, built once by `svc_core::build` and handed around as
 /// `Arc<Backend>`. Stores are the single in-process copy of each document: never open a second
@@ -195,4 +197,14 @@ pub trait TunnelOps: Send + Sync + 'static {
     /// (`Lifecycle::resumed`). Added by app-main; the default ignores it, so an implementation
     /// without a lifecycle stays correct.
     fn resumed(&self) {}
+    /// The external proxy slots this tunnel hosts (built with it: the lifecycle stops them with
+    /// the VPN). The default hosts none: the proxy column stays empty and its actions say so.
+    fn proxies(&self) -> Option<ProxySlots> {
+        None
+    }
+    /// The live server check this tunnel hosts (it reads the tunnel's state). The default hosts
+    /// none: the Servers page reports the check as unavailable.
+    fn live_checks(&self) -> Option<Arc<LiveCheckService>> {
+        None
+    }
 }

@@ -454,6 +454,35 @@ fn unelevated_kill_switch_is_off_without_a_banner() {
     assert!(labels::kill_switch_banner(&swiss::ConnView::default(), &fw).is_none());
 }
 
+/// NOADMIN §2 (ui-unslop): unelevated, the saved level decides what can hold: standard is Soft's
+/// proxy hold («Через прокси», a needs-admin alert in Hard mode), strict needs administrator
+/// rights; neither raises the WFP banner.
+#[test]
+fn unelevated_kill_switch_names_what_can_hold() {
+    let at = |level| {
+        let mut status = ks(None);
+        status.settings.level = level;
+        project::firewall(&status)
+    };
+    let proxy = at(KillSwitchLevel::Standard);
+    assert_eq!(proxy.state, FwState::ProxyHold);
+    assert_eq!(
+        labels::kill_switch_fact(&proxy.in_mode(true)).text.key,
+        "view.fact.ksProxy"
+    );
+    assert_eq!(proxy.in_mode(false).state, FwState::NeedsAdmin);
+    let strict = at(KillSwitchLevel::Strict);
+    assert_eq!(strict.state, FwState::NeedsAdmin);
+    let fact = labels::kill_switch_fact(&strict.in_mode(true));
+    assert_eq!(
+        (&*fact.text.key, fact.alert),
+        ("view.fact.ksNeedsAdmin", true)
+    );
+    for fw in [proxy, strict] {
+        assert!(labels::kill_switch_banner(&swiss::ConnView::default(), &fw).is_none());
+    }
+}
+
 fn summary(id: &str, archived: Option<ArchiveReason>) -> ServerSummary {
     ServerSummary {
         id: ProfileId::from(id),

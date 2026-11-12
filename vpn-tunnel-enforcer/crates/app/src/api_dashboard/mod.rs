@@ -11,6 +11,7 @@ mod feeds;
 #[cfg(test)]
 mod flows;
 mod project;
+mod proxies;
 #[cfg(test)]
 mod tests;
 mod traits;
@@ -40,6 +41,7 @@ use vpnte_view::labels::FirewallStatus;
 use vpnte_view::traffic::TrafficSample;
 
 use crate::services::{Backend, TunnelOps};
+use crate::svc_proxies::ProxySlots;
 use project::{Clock, ConnLocal};
 
 /// The start page's and the tray's API objects as root contexts for `vpnte_ui::launch`:
@@ -49,6 +51,7 @@ use project::{Clock, ConnLocal};
 pub fn contexts(backend: &Arc<Backend>) -> Vec<Box<dyn Any>> {
     let hub = Hub::new(backend.clone());
     feeds::spawn(&hub);
+    proxies::spawn_feed(&hub);
     vec![
         Box::new(Rc::new(traits::Dashboard(hub.clone())) as Rc<dyn DashboardApi>),
         Box::new(Rc::new(traits::Panels(hub.clone())) as Rc<dyn PanelsApi>),
@@ -62,6 +65,8 @@ pub(crate) struct Hub {
     /// The tunnel's published state; `None` when the tunnel was not built (a start-order bug:
     /// the views then show settings only and every lane action fails with `tunnelMissing`).
     watches: Option<Watches>,
+    /// The external proxy slots the tunnel hosts (`None`: the column stays empty).
+    slots: Option<ProxySlots>,
     local: Mutex<Local>,
     dash: watch::Sender<DashboardView>,
     servers: watch::Sender<ServersView>,
@@ -161,6 +166,7 @@ impl Hub {
             };
         }
         let hub = Arc::new(Self {
+            slots: watches.as_ref().and_then(|w| w.tunnel.proxies()),
             backend,
             watches,
             local: Mutex::new(local),
@@ -173,6 +179,7 @@ impl Hub {
         });
         hub.publish_all();
         hub.publish_traffic();
+        hub.publish_proxies();
         hub
     }
 

@@ -220,7 +220,12 @@ impl Actor {
         };
         let phys_dns = self.deps.engines.physical_dns().await;
         let hostname = config::endpoint_is_hostname(&profile.profile);
-        let engines = [self.deps.engines.xray_exe()];
+        // The start's engine rules exactly, or the compat key never matches.
+        let engines = super::start::direct_engines(
+            &*self.deps.engines,
+            next.capture,
+            vec![self.deps.engines.xray_exe()],
+        );
         let (routing, _) = config::routing(&user, &engines, false, &phys_dns, hostname);
         let mut plan = s.plan.clone();
         plan.mtu = select_mtu(next.stealth, next.adaptive, next.public_wifi);

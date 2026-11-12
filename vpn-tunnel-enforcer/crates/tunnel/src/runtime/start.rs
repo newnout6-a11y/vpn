@@ -20,7 +20,7 @@ use vpnte_profiles::emit_singbox::EmitPolicy;
 use super::actor::{Actor, Phase, Retained, Session, SlotSession};
 use super::capture::CapturePlan;
 use super::config;
-use super::engines::CoreProc;
+use super::engines::{CoreProc, Engines};
 use super::spawn::Parts;
 use crate::api::{
     CaptureKind, Mode, Origin, StartReceipt, StartRequest, TunError, TunStatusKind, TunnelEvent,
@@ -319,7 +319,7 @@ impl Actor {
         let phys_dns = self.deps.engines.physical_dns().await;
         let planned = self.plan_upstream(req, &phys_dns, op, work).await?;
         cancelled_if(op)?;
-        let (programs, engine_paths): (Vec<PathBuf>, Vec<PathBuf>) = match &planned {
+        let (programs, own): (Vec<PathBuf>, Vec<PathBuf>) = match &planned {
             Planned::Local { owner, .. } => (
                 owner.iter().cloned().collect(),
                 owner.iter().cloned().collect(),
@@ -327,6 +327,7 @@ impl Actor {
             Planned::Native(_) => (Vec::new(), Vec::new()),
             Planned::Xray { .. } => (Vec::new(), vec![self.deps.engines.xray_exe()]),
         };
+        let engine_paths = direct_engines(&*self.deps.engines, req.capture, own);
         let hostname = match &req.mode {
             Mode::DirectVpn { profile } => config::endpoint_is_hostname(&profile.profile),
             Mode::LocalProxy { .. } => false,
@@ -436,4 +437,20 @@ impl Actor {
         }
         Ok(())
     }
+}
+
+/// Engines whose own traffic leaves directly: `own` (the session's Xray or local-proxy owner)
+/// and, while our TUN captures the machine, the bundled sing-box and Xray images. The main
+/// sing-box dials from the physical interface and never enters its own TUN, so that rule matches
+/// only the other processes of these images: external proxy slots and probe engines, whose
+/// traffic would otherwise loop through the tunnel (spec external-proxy §3.28, decision 5).
+pub(super) fn direct_engines(
+    engines: &dyn Engines,
+    capture: CaptureKind,
+    mut own: Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    if capture == CaptureKind::Tun {
+        own.extend([engines.singbox_exe(), engines.xray_exe()]);
+    }
+    own
 }

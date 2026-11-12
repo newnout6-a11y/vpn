@@ -201,7 +201,6 @@ fn assert_renders(msg: &vpnte_base::Msg) {
 /// The messages the backend hands out fill exactly the placeholders of their texts.
 #[test]
 fn messages_fill_their_placeholders() {
-    #[cfg(feature = "proxies-model")]
     {
         use crate::model::ProxyError;
         let detail = || "detail".to_owned();
@@ -217,7 +216,6 @@ fn messages_fill_their_placeholders() {
             assert_renders(&vpnte_base::AppError::from(err).user_msg());
         }
     }
-    #[cfg(feature = "proxies-manager")]
     {
         use crate::manager::{degradation_msg, health_msg};
         use crate::model::{Degradation, Health};
@@ -244,7 +242,6 @@ fn messages_fill_their_placeholders() {
             assert_renders(&health_msg(health));
         }
     }
-    #[cfg(feature = "proxies-control")]
     {
         use crate::control::ServeError;
         let io = || std::io::Error::other("x");

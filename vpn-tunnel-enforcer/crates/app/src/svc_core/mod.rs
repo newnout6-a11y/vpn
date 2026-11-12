@@ -124,9 +124,9 @@ pub fn locale_layers() -> Vec<(&'static str, &'static str)> {
         vpnte_engine::LOCALES,
         vpnte_forensics::LOCALES,
         vpnte_automation::LOCALES,
-        PROBES,
+        vpnte_probes::LOCALES,
         vpnte_tunnel::LOCALES,
-        PROXIES,
+        vpnte_proxies::LOCALES,
         vpnte_cleanup::LOCALES,
         APP,
     ] {
@@ -135,107 +135,60 @@ pub fn locale_layers() -> Vec<(&'static str, &'static str)> {
     layers
 }
 
-/// `vpnte-probes` has no `LOCALES` constant: its fragment files, package order.
-const PROBES: &[(&str, &str)] = &[
-    (
-        include_str!("../../../probes/locales/probes-diag.ru.json"),
-        include_str!("../../../probes/locales/probes-diag.en.json"),
-    ),
-    (
-        include_str!("../../../probes/locales/probes-ip.ru.json"),
-        include_str!("../../../probes/locales/probes-ip.en.json"),
-    ),
-    (
-        include_str!("../../../probes/locales/probes-live-stages.ru.json"),
-        include_str!("../../../probes/locales/probes-live-stages.en.json"),
-    ),
-    (
-        include_str!("../../../probes/locales/probes-servers.ru.json"),
-        include_str!("../../../probes/locales/probes-servers.en.json"),
-    ),
-    (
-        include_str!("../../../probes/locales/probes-web.ru.json"),
-        include_str!("../../../probes/locales/probes-web.en.json"),
-    ),
-];
-
-/// `vpnte-proxies` has no `LOCALES` constant: its fragment files, package order.
-const PROXIES: &[(&str, &str)] = &[
-    (
-        include_str!("../../../proxies/locales/proxies-control.ru.json"),
-        include_str!("../../../proxies/locales/proxies-control.en.json"),
-    ),
-    (
-        include_str!("../../../proxies/locales/proxies-manager.ru.json"),
-        include_str!("../../../proxies/locales/proxies-manager.en.json"),
-    ),
-    (
-        include_str!("../../../proxies/locales/proxies-model.ru.json"),
-        include_str!("../../../proxies/locales/proxies-model.en.json"),
-    ),
-];
-
-/// The app's own fragments: one pair per work package, compiled in with its feature (every app
-/// package ships `crates/app/locales/<package>.{ru,en}.json`).
+/// The app's own fragments: one pair per work package (every app package ships
+/// `crates/app/locales/<package>.{ru,en}.json`).
 const APP: &[(&str, &str)] = &[
     (
         include_str!("../../locales/app-base.ru.json"),
         include_str!("../../locales/app-base.en.json"),
     ),
-    #[cfg(feature = "app-dashboard")]
     (
         include_str!("../../locales/app-dashboard.ru.json"),
         include_str!("../../locales/app-dashboard.en.json"),
     ),
-    #[cfg(feature = "app-servers")]
     (
         include_str!("../../locales/app-servers.ru.json"),
         include_str!("../../locales/app-servers.en.json"),
     ),
-    #[cfg(feature = "app-settings")]
     (
         include_str!("../../locales/app-settings.ru.json"),
         include_str!("../../locales/app-settings.en.json"),
     ),
-    #[cfg(feature = "app-tunnel")]
     (
         include_str!("../../locales/app-tunnel.ru.json"),
         include_str!("../../locales/app-tunnel.en.json"),
     ),
-    #[cfg(feature = "app-main")]
     (
         include_str!("../../locales/app-main.ru.json"),
         include_str!("../../locales/app-main.en.json"),
     ),
-    #[cfg(feature = "app-import")]
     (
         include_str!("../../locales/app-import.ru.json"),
         include_str!("../../locales/app-import.en.json"),
     ),
-    #[cfg(feature = "app-setup")]
     (
         include_str!("../../locales/app-setup.ru.json"),
         include_str!("../../locales/app-setup.en.json"),
     ),
-    #[cfg(feature = "app-clickjack")]
     (
         include_str!("../../locales/app-clickjack.ru.json"),
         include_str!("../../locales/app-clickjack.en.json"),
     ),
-    #[cfg(feature = "app-maintenance")]
     (
         include_str!("../../locales/app-maintenance.ru.json"),
         include_str!("../../locales/app-maintenance.en.json"),
     ),
-    #[cfg(feature = "app-tools")]
     (
         include_str!("../../locales/app-tools.ru.json"),
         include_str!("../../locales/app-tools.en.json"),
     ),
-    #[cfg(feature = "app-lists")]
     (
         include_str!("../../locales/app-lists.ru.json"),
         include_str!("../../locales/app-lists.en.json"),
+    ),
+    (
+        include_str!("../../locales/wire-proxies-live.ru.json"),
+        include_str!("../../locales/wire-proxies-live.en.json"),
     ),
 ];
 
