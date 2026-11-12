@@ -28,6 +28,7 @@ vpnte-tunnel = { path = "crates/tunnel" }
 vpnte-proxies = { path = "crates/proxies" }
 vpnte-automation = { path = "crates/automation" }
 vpnte-cleanup = { path = "crates/cleanup" }
+vpnte-service = { path = "crates/service" }
 
 async-trait = "0.1"
 

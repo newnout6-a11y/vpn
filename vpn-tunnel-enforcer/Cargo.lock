@@ -5715,6 +5715,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "vpnte-service"
+version = "2.0.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "hex",
+ "ipnet",
+ "parking_lot 0.13.0",
+ "regex",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "vpnte-base",
+ "vpnte-engine",
+ "vpnte-profiles",
+ "vpnte-tunnel",
+ "vpnte-winnet",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "vpnte-tunnel"
 version = "2.0.0"
 dependencies = [

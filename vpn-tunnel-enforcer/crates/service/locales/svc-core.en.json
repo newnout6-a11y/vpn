@@ -1,0 +1,31 @@
+{
+  "service": {
+    "pipe": {
+      "busy": "Tunnel mode is in use by another Windows user on this PC.",
+      "version": "The app and the Tunnel mode service are of incompatible versions. Update the app.",
+      "helloFirst": "The Tunnel mode service expected a greeting first.",
+      "badRequest": "The Tunnel mode service did not understand the request. Update the app.",
+      "unavailable": "The Tunnel mode service is not running.",
+      "notOurs": "The program answering for the Tunnel mode service is not the installed service."
+    },
+    "refused": {
+      "tooLong": "{{field}} is too long.",
+      "tooMany": "{{field}} has too many entries.",
+      "text": "{{field}} contains characters that are not allowed.",
+      "localProxy": "The local proxy must run on this computer (127.0.0.1)."
+    },
+    "folder": {
+      "untrusted": "Ordinary users can change the service's files, so it does not start the tunnel. Reinstall the service."
+    },
+    "update": {
+      "keyNotSet": "Service updates are not set up in this build.",
+      "badSignature": "The update package is not signed by the developer."
+    },
+    "install": {
+      "notElevated": "Installing the service needs administrator rights.",
+      "fileMissing": "{{file}} is missing from the package.",
+      "fileMismatch": "{{file}} differs from the file shipped with the app.",
+      "failed": "The Tunnel mode service could not be installed."
+    }
+  }
+}
