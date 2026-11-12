@@ -1,7 +1,6 @@
 node_modules/
 dist/
 out/
-vpn-tunnel-enforcer/build/shutdown-for-update.base64
 .env
 *.log
 .DS_Store
@@ -13,7 +12,7 @@ vpn-tunnel-enforcer/build/shutdown-for-update.base64
 #   troubleshooting are large, contain timestamps and PII-ish hostnames,
 #   and have no value in source control.
 # - Editor / agent state directories.
-# - Throwaway scripts under _diag_temp and ad-hoc probe scripts.
+# - Throwaway scripts under _diag_temp.
 diag-extract/
 diag-extract-new/
 _diag*/
@@ -22,9 +21,6 @@ _diag*/
 zips/
 .kiro/
 .vscode/
-vpn-tunnel-enforcer/scripts/probe-subscription.mjs
-vpn-tunnel-enforcer/scripts/inspect-bundle.mjs
-
 
 # Russian-named developer drafts in the repo root.
 Диагностика маршрутизации*.txt

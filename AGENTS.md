@@ -4,7 +4,7 @@
 
 ## Что это
 
-VPN Tunnel Enforcer — Windows-клиент (Electron 44 + React + TypeScript, sing-box + Wintun) для изоляции трафика и обхода блокировок. Код — в `vpn-tunnel-enforcer/`; среда разработки требует Node.js >=24.21.0.
+VPN Tunnel Enforcer — Windows-клиент (Rust + Dioxus, sing-box + Xray) для изоляции трафика и обхода блокировок. Код — в `vpn-tunnel-enforcer/`; сборка требует Rust 1.99 (Node.js >=24.21.0 — только для `website/`).
 
 ## Иерархия источников истины (сверху вниз)
 
@@ -22,14 +22,16 @@ VPN Tunnel Enforcer — Windows-клиент (Electron 44 + React + TypeScript, 
 - Нормативные документы (`docs/`) не править без явного запроса в задаче.
 - Плановые функции (mihomo, AmneziaWG, процессный монитор, изоляция аккаунтов) — только WP-12, за фичефлагами, лабораторные критерии в `13-WP-12-плановые-функции.md`. Не включать в production.
 - Безопасность важнее доступности: не доказано безопасным → блокировать/пометить «не проверено», не сообщать об успехе.
+- Приложение обязано работать без прав администратора (режим «Прокси»); привилегированные функции (TUN, WFP, политики браузеров, захват пакетов) — только когда оно запущено от имени администратора, без самоповышения и UAC.
 - Коммитить осмысленными атомарными коммитами на русском/английском по принятому стилю (`docs:`, `fix:`, `chore:`…). Автор: Vladimir Sakharov <newnout6@gmail.com>.
 
 ## Definition of Done (перед коммитом)
 
 ```bash
 cd vpn-tunnel-enforcer
-npm run typecheck        # без ошибок
-npm test                 # 100% зелёные
+cargo fmt --all --check                                  # без расхождений
+cargo clippy --workspace --all-targets -- -D warnings    # без предупреждений
+cargo test --workspace                                   # 100% зелёные
 python3 ../docs/04-приёмочные-тесты/traceability/check-coverage.py   # exit 0
 ```
 
@@ -39,7 +41,9 @@ python3 ../docs/04-приёмочные-тесты/traceability/check-coverage.p
 
 | Куда смотреть | Зачем |
 | --- | --- |
-| `README.md` (корень) | фактическое состояние кода, «что пока не реализовано» |
+| `README.md` (корень) | фактическое состояние кода, что проверено и что нет |
 | `progress.md` | журнал прогресса сессий |
 | `docs/README.md` | индекс ТЗ и приёмочных тестов |
-| `vpn-tunnel-enforcer/src/` | код: `main/`, `preload/`, `renderer/`, `shared/` |
+| `vpn-tunnel-enforcer/crates/<имя>/` | код: крейты `vpnte-<имя>`, у каждого `API.md`; общие правила — `crates/CONTRACT.md` |
+| `vpn-tunnel-enforcer/xtask/` | сборка: закреплённые движки, `cargo xtask dist` |
+| `vpn-tunnel-enforcer/installer/` | установщик NSIS (на пользователя) |
