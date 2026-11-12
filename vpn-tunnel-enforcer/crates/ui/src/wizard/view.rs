@@ -147,6 +147,13 @@ pub fn Wizard() -> Element {
     let busy = apply.running();
     let finishing = busy && applying() == Apply::Finish;
     let skipping = busy && applying() == Apply::Skip;
+    let finish_blocked = if check.running() {
+        Some(t!("ui.wizard.done.waitCheck"))
+    } else if model.read().strict_needs_tunnel() {
+        Some(t!("ui.wizard.protection.strictNeedsTunnel"))
+    } else {
+        None
+    };
     let error = match apply.last() {
         Some(Err(e)) => Some(tr(&e.msg)),
         _ => None,
@@ -201,8 +208,8 @@ pub fn Wizard() -> Element {
                             Button {
                                 kind: ButtonKind::Primary,
                                 busy: finishing,
-                                disabled: check.running() || skipping,
-                                disabled_reason: check.running().then(|| t!("ui.wizard.done.waitCheck")),
+                                disabled: finish_blocked.is_some() || skipping,
+                                disabled_reason: finish_blocked,
                                 onclick: finish,
                                 {t!("onboarding.finish")}
                             }

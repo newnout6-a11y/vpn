@@ -408,21 +408,34 @@ fn level_key(level: KillSwitchLevel) -> &'static str {
     }
 }
 
-/// Step 4: kill-switch level (Off unless picked, D-15) and autostart.
+/// Step 4: kill-switch level (Off unless picked, D-15) and autostart. In Proxy mode the level texts
+/// say what the system proxy can hold, and Strict says it needs the Tunnel mode.
 #[component]
 fn Protection(ctx: Ctx, title_id: String) -> Element {
     let mut model = ctx.model;
-    let (level, autostart) = {
+    let (level, autostart, soft, strict_blocked) = {
         let m = model.read();
-        (m.kill_switch, m.autostart)
+        let soft = m.routing == Routing::Soft;
+        (m.kill_switch, m.autostart, soft, m.strict_needs_tunnel())
     };
     let cards = [
         (KillSwitchLevel::Off, "onboarding.killSwitchOffDesc"),
         (
             KillSwitchLevel::Standard,
-            "onboarding.killSwitchStandardDesc",
+            if soft {
+                "ui.wizard.protection.standardSoft"
+            } else {
+                "onboarding.killSwitchStandardDesc"
+            },
         ),
-        (KillSwitchLevel::Strict, "onboarding.killSwitchStrictDesc"),
+        (
+            KillSwitchLevel::Strict,
+            if soft {
+                "ui.wizard.protection.strictSoft"
+            } else {
+                "onboarding.killSwitchStrictDesc"
+            },
+        ),
     ]
     .into_iter()
     .map(|(l, desc)| Card::new(l, t!(level_key(l))).text(t!(desc)))
@@ -442,13 +455,27 @@ fn Protection(ctx: Ctx, title_id: String) -> Element {
             columns: 3,
             on_change: move |l| model.write().kill_switch = l,
         }
+        if strict_blocked {
+            StrictWarning {}
+        }
         div { class: "wz-autostart",
             Checkbox {
                 label: t!("onboarding.autostartEnable"),
-                hint: t!("onboarding.autostartAdmin"),
+                hint: t!("ui.wizard.protection.autostartHint"),
                 checked: autostart,
                 on_change: move |on| model.write().autostart = on,
             }
+        }
+    }
+}
+
+/// Strict with Proxy mode: shown where the level is picked and on the summary.
+#[component]
+fn StrictWarning() -> Element {
+    rsx! {
+        p { class: "wz-status is-warn", role: "status",
+            span { class: "wz-status-mark" }
+            {t!("ui.wizard.protection.strictNeedsTunnel")}
         }
     }
 }
@@ -512,6 +539,9 @@ fn Done(ctx: Ctx, title_id: String) -> Element {
                 span { class: "wz-status-mark" }
                 {t!("ui.wizard.done.keyUnchecked")}
             }
+        }
+        if m.strict_needs_tunnel() {
+            StrictWarning {}
         }
     }
 }

@@ -20,7 +20,7 @@ use crate::widgets::{
     SectionHeader, Switch, Toasts, use_job,
 };
 
-/// The time zone the page shows local times in (read once per visit of the page).
+/// The time zone the page shows local times in (read when the page mounts; it stays mounted).
 #[derive(Clone)]
 struct PageTz(TimeZone);
 
@@ -175,11 +175,9 @@ fn ScheduleCard(
     let days = days.join(", ");
     let hint = window_hint(entry.start, entry.end).map(|m| tr(&m));
     let mode = t!(entry.mode.label_key());
-    let mode = match server_label(&entry, &servers) {
-        None => mode,
-        Some(Ok(server)) => format!("{mode} · {server}"),
-        Some(Err(missing)) => format!("{mode} · {}", tr(&missing)),
-    };
+    // The server is a name, not a mode: plain text next to the badge (the badge sets its text in
+    // upper case); a deleted server is marked.
+    let server = server_label(&entry, &servers);
     let editing = form.read().as_ref().and_then(|f| f.editing.clone()) == Some(entry.id.clone());
 
     let toggle = {
@@ -237,6 +235,15 @@ fn ScheduleCard(
                         span { class: "sched-item-hint", "{hint}" }
                     }
                     Badge { "{mode}" }
+                    match server {
+                        Some(Ok(name)) => rsx! {
+                            span { class: "sched-item-server", "{name}" }
+                        },
+                        Some(Err(missing)) => rsx! {
+                            span { class: "sched-item-server is-missing", {tr(&missing)} }
+                        },
+                        None => rsx! {},
+                    }
                 }
             }
             div { class: "sched-item-actions",

@@ -18,7 +18,7 @@
   width: min(760px, calc(100% - 64px));
   min-height: 100%;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   margin: 0 auto;
   padding: 24px 0 0;
 }
@@ -41,7 +41,7 @@
   align-items: baseline;
   gap: 8px;
   border-left: 1px solid var(--rule);
-  padding: 9px 12px;
+  padding: 8px 12px;
   color: var(--mute);
 }
 .wz-ruler-item:first-child { border-left: 0; }
@@ -57,7 +57,7 @@
   min-height: 0;
   flex: 1 0 auto;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   border: 1px solid var(--rule);
   padding: 24px 28px 28px;
 }
@@ -112,7 +112,7 @@
 .wz-card:focus-visible { border-radius: 0; outline: 2px solid var(--signal); outline-offset: 2px; }
 .wz-card-mark { position: absolute; top: 16px; left: 16px; width: 12px; height: 12px; border: 1px solid currentColor; }
 .wz-card.is-on .wz-card-mark { border-color: var(--signal); background: var(--signal); }
-.wz-card-title { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+.wz-card-title { font-size: 16px; font-weight: 600; }
 .wz-card-text { font-size: 13px; line-height: 1.45; color: var(--mute); }
 .wz-card-meta { margin-top: 4px; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--mute); }
 .wz-card.is-on :is(.wz-card-text, .wz-card-meta) { color: color-mix(in srgb, var(--paper) 74%, transparent); }
@@ -122,14 +122,15 @@
 .wz-check-row { display: flex; min-height: 28px; align-items: center; gap: 16px; }
 .wz-status-slot { min-width: 0; }
 .wz-status { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; line-height: 1.45; color: var(--mute); }
-.wz-status-mark { width: 8px; height: 8px; flex-shrink: 0; background: var(--ink); }
+/* the mark sits on the first line of a status that wraps (5px centres it on the 13 / 1.45 line) */
+.wz-status-mark { width: 8px; height: 8px; flex-shrink: 0; align-self: flex-start; margin-top: 5px; background: var(--ink); }
 .wz-status.is-ok { font-weight: 500; color: var(--ink); }
 .wz-status.is-fail { font-weight: 500; color: var(--signal-ink); }
 .wz-status.is-warn { font-weight: 500; color: var(--ink); }
 .wz-status:is(.is-fail, .is-warn) .wz-status-mark { background: var(--signal); }
 .wz-sub > .w-btn { align-self: flex-start; }
 .wz-sub .w-textarea { min-height: 0; }
-.wz-autostart { border-top: 1px solid var(--rule); padding-top: 10px; }
+.wz-autostart { border-top: 1px solid var(--rule); padding-top: 12px; }
 
 /* ── Summary ── */
 .wz-summary { margin: 0; border-top: 1px solid var(--rule); }
@@ -139,12 +140,12 @@
   align-items: baseline;
   gap: 16px;
   border-bottom: 1px solid var(--rule);
-  padding: 11px 0;
+  padding: 12px 0;
 }
-.wz-summary-row dd { margin: 0; font-size: 15px; font-weight: 500; letter-spacing: -0.01em; }
+.wz-summary-row dd { margin: 0; font-size: 15px; font-weight: 500; }
 
 /* ── Failed finish / skip ── */
-.wz-error { display: flex; align-items: center; gap: 12px; border: 1px solid var(--signal); padding: 8px 8px 8px 14px; }
+.wz-error { display: flex; align-items: center; gap: 12px; border: 1px solid var(--signal); padding: 8px 8px 8px 16px; }
 .wz-error-mark { width: 8px; height: 8px; flex-shrink: 0; background: var(--signal); }
 .wz-error-text { min-width: 0; flex: 1 1 auto; margin: 0; font-size: 13px; font-weight: 500; line-height: 1.45; color: var(--signal-ink); }
 
@@ -159,7 +160,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 10px 0 20px;
+  padding: 12px 0 20px;
   background: var(--paper);
 }
 .wz-foot-main { display: flex; gap: 8px; margin-left: auto; }

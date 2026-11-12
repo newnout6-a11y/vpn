@@ -5,9 +5,10 @@ use dioxus::prelude::*;
 
 use super::ctl::Controller;
 use super::model::LegacyView;
-use super::view::{Mark, OutcomeLine, fmt_bytes};
+use super::view::{Mark, OutcomeLine};
 use crate::lang::tr;
 use crate::t;
+use crate::units::format_bytes;
 use crate::widgets::{Button, ButtonKind, Panel};
 use vpnte_base::types::Verdict;
 
@@ -35,7 +36,7 @@ pub(crate) fn LegacyPanel(ctl: Controller, on_delete: EventHandler<()>) -> Eleme
                             span { class: "swiss-mono mt-path", "{dir.path}" }
                             if let Some(bytes) = dir.bytes {
                                 " · "
-                                {tr(&fmt_bytes(bytes))}
+                                {format_bytes(bytes)}
                             }
                         }
                     }

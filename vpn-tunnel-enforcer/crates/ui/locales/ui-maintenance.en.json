@@ -15,9 +15,9 @@
       },
       "verdict": {
         "ok": "OK",
-        "warn": "ATTENTION",
-        "fail": "FAILURE",
-        "notChecked": "NOT CHECKED"
+        "warn": "Attention",
+        "fail": "Failure",
+        "notChecked": "Not checked"
       },
       "health": {
         "ok": "No critical recovery problems found",
@@ -117,11 +117,6 @@
         "logs": "Logs",
         "routing": "Routing",
         "profile": "Profile"
-      },
-      "units": {
-        "kb": "{{n}} KB",
-        "mb": "{{n}} MB",
-        "gb": "{{n}} GB"
       },
       "capture": {
         "title": "Traffic capture",

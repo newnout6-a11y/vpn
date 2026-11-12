@@ -5,9 +5,10 @@ use dioxus::prelude::*;
 use super::ctl::Controller;
 use super::model::{CaptureView, Counted, EtwView, FaultView};
 use super::rules;
-use super::view::{OutcomeLine, fmt_bytes, fmt_time};
+use super::view::{OutcomeLine, fmt_time};
 use crate::lang::tr;
 use crate::t;
+use crate::units::format_bytes;
 use crate::widgets::{Badge, Button, ButtonKind, Panel};
 
 /// The capture panel: badge, alert or first warning, tiles, ETW detail, actions.
@@ -74,7 +75,7 @@ fn Tiles(capture: CaptureView) -> Element {
     };
     let size = capture
         .etl_bytes
-        .map_or_else(|| "—".to_owned(), |b| tr(&fmt_bytes(b)));
+        .map_or_else(|| "—".to_owned(), format_bytes);
     let snapshot = capture
         .live_snapshot_at
         .map_or_else(|| "—".to_owned(), fmt_time);

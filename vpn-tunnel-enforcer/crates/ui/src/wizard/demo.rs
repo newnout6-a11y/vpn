@@ -216,7 +216,7 @@ impl WizardApi for DemoWizardApi {
                 self.note("undo autostart: failed".into());
                 return Err(AppError::msg(
                     ErrorKind::Internal,
-                    Msg::new("ui.wizard.error.autostartNotRestored"),
+                    Msg::new("ui.wizard.demo.autostartNotRestored"),
                 ));
             }
             if autostart_changed {

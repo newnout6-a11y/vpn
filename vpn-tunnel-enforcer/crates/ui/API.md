@@ -369,6 +369,8 @@ pub struct WizardChoices { lang, connection, routing, key: Option<KeyText>, kill
 pub use demo::{DemoScene, DemoWizardApi};
 ```
 Both routing modes are offered with either connection (NOADMIN §2): `routing` is sent as picked.
+The page never sends `Soft` with `KillSwitchLevel::Strict` (it explains and holds «Завершить»);
+the app still refuses that pair itself (`tunnel.lifecycle.soft.strictUnavailable`).
 `finish` order: import the key through the normal profile import (dedupe; it stays if a later step
 fails) → autostart if changed → kill-switch level if changed → one atomic settings write (`language`,
 `connection_mode`, `routing_mode`, `kill_switch`, `first_run_complete = true`); on failure undo the

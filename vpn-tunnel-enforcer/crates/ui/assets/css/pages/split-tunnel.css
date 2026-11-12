@@ -13,7 +13,7 @@
 .apps-cmd-row { display: flex; gap: 8px; }
 .apps-cmd-row .w-input { min-width: 0; flex: 1 1 auto; }
 .apps-cmd-row .w-btn { flex-shrink: 0; }
-.apps-cmd-result { margin: 0; border-left: 2px solid var(--ink); padding-left: 10px; font-size: 13px; overflow-wrap: anywhere; }
+.apps-cmd-result { margin: 0; border-left: 2px solid var(--ink); padding-left: 12px; font-size: 13px; overflow-wrap: anywhere; }
 .apps-cmd-result.is-error { border-left-color: var(--signal); font-weight: 500; color: var(--signal-ink); }
 
 /* ── Table ───────────────────────────────────────────────────────────── */
@@ -41,7 +41,7 @@
 .apps-icon.is-process { border: 1px solid var(--ink); color: var(--ink); }
 .apps-app-text { min-width: 0; flex: 1 1 auto; }
 .apps-app-name { display: flex; min-width: 0; align-items: center; gap: 8px; margin: 0; }
-.apps-app-title { min-width: 0; overflow: hidden; font-size: 14px; font-weight: 600; letter-spacing: -0.01em; text-overflow: ellipsis; white-space: nowrap; }
+.apps-app-title { min-width: 0; overflow: hidden; font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .apps-app-path {
   margin: 4px 0 0;
   overflow: hidden;
@@ -61,7 +61,7 @@
   flex: 1 1 0;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 8px;
   padding: 0 8px;
   font-size: 12px;
   font-weight: 600;

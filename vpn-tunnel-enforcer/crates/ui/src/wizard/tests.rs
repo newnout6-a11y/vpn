@@ -189,6 +189,21 @@ fn either_routing_goes_with_either_connection() {
     }
 }
 
+/// NOADMIN §2: the strict kill switch needs WFP, so with Proxy mode the app refuses it; the
+/// wizard says so and holds «Завершить» until the level or the mode changes.
+#[test]
+fn strict_needs_the_tunnel_mode() {
+    let mut m = at(Step::Protection);
+    m.kill_switch = KillSwitchLevel::Strict;
+    m.routing = Routing::Soft;
+    assert!(m.strict_needs_tunnel());
+    m.routing = Routing::Hard;
+    assert!(!m.strict_needs_tunnel());
+    m.routing = Routing::Soft;
+    m.kill_switch = KillSwitchLevel::Standard;
+    assert!(!m.strict_needs_tunnel());
+}
+
 /// W-8: detection runs once per wizard session (Back / Next does not rescan); «Искать снова»
 /// runs it again; a second start while one runs is refused.
 #[test]

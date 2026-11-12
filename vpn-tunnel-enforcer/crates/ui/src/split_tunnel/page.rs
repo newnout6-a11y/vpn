@@ -397,7 +397,7 @@ fn app_icon(app: &SplitApp) -> Element {
                     view_box: "0 0 16 16",
                     fill: "none",
                     stroke: "currentColor",
-                    stroke_width: "1.4",
+                    stroke_width: "1.5",
                     rect { x: "1.5", y: "2.5", width: "13", height: "11" }
                     polyline { points: "4.5,6 6.5,8 4.5,10" }
                     line { x1: "8", y1: "10.5", x2: "11.5", y2: "10.5" }

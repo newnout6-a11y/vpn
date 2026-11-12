@@ -97,7 +97,7 @@
           "ok": "The tunnel works: {{vpn}} is seen through the VPN, {{direct}} directly. The external address really changes.",
           "okSmart": "Everything works as it should: foreign sites go through the VPN ({{vpn}}) and Russian sites go directly with your real IP ({{direct}}). The Smart RU mode really splits the traffic.",
           "partial": "The tunnel works, but the Russian host went out through the VPN ({{ru}}) instead of directly ({{direct}}). The Russian domain lists may still be downloading; check again in a minute.",
-          "leak": "The SAME IP ({{vpn}}) is seen through the VPN and directly. The tunnel does not change the external address: this is a leak, or the proxy goes direct.",
+          "leak": "The same IP ({{vpn}}) is seen through the VPN and directly. The tunnel does not change the external address: this is a leak, or the proxy goes direct.",
           "tunnelOff": "Protection is off: there is no routing to check.",
           "inconclusive": "Could not measure both IPs (some echo servers did not answer). Check again."
         },

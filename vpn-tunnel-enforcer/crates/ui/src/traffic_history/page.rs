@@ -18,7 +18,7 @@ use crate::t;
 use crate::units::format_bytes;
 use crate::widgets::{
     Badge, Button, ButtonKind, ConfirmDialog, EmptyState, IconButton, IconGlyph, Load, LoadError,
-    Loading, Panel, SectionHeader, Spinner, TextInput, TextKind, Toasts, Tone, use_job,
+    Loading, Panel, SectionHeader, Spinner, TextInput, TextKind, Toasts, use_job,
 };
 
 /// The time zone of the visit (the page is active-only: read again on every visit).
@@ -223,6 +223,7 @@ fn DomainItem(row: DomainRow) -> Element {
     let tz = use_context::<PageTz>().0;
     let line = seen_line(&row, |ms| when(ms, &tz));
     let url = site_url(&row.domain);
+    let has_site = url.is_some();
     let bytes = row.bytes_down.saturating_add(row.bytes_up) > 0;
     let open = move |_| {
         let Some(url) = url.clone() else {
@@ -252,7 +253,8 @@ fn DomainItem(row: DomainRow) -> Element {
                             }
                         },
                         SiteInfo::Ready { name: Some(name), .. } if !name.trim().is_empty() => rsx! {
-                            Badge { tone: Tone::Ok, "{name}" }
+                            // a name, not a status: plain text (the badge would set it in upper case)
+                            span { class: "traffic-site", "{name}" }
                         },
                         SiteInfo::Unavailable => rsx! {
                             Badge { {t!("trafficHistory.siteUnavailable")} }
@@ -267,7 +269,7 @@ fn DomainItem(row: DomainRow) -> Element {
                     "↓ {format_bytes(row.bytes_down)} · ↑ {format_bytes(row.bytes_up)}"
                 }
             }
-            if site_url(&row.domain).is_some() {
+            if has_site {
                 IconButton {
                     glyph: IconGlyph::ArrowRight,
                     label: t!("trafficHistory.openSite", host = row.domain),

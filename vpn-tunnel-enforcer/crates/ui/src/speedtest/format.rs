@@ -7,8 +7,9 @@ use super::model::{Egress, SpeedPhase};
 use crate::availability::{text, text_with};
 use crate::widgets::Tone;
 
-/// A speed for display: two decimals below 10 Mbit/s, one below 100, none above; trailing
-/// zeros dropped («5.1», «87.4», «76», «412»). Not finite or negative reads as «0».
+/// A speed for display, three significant figures: two decimals below 10 Mbit/s, one below 100,
+/// none above, trailing zeros kept so a column of results reads in one format («5.10», «76.0»,
+/// «87.4», «413»). Not finite or negative reads as «0».
 pub fn fmt_mbps(mbps: f64) -> String {
     if !mbps.is_finite() || mbps <= 0.0 {
         return "0".to_owned();
@@ -20,12 +21,7 @@ pub fn fmt_mbps(mbps: f64) -> String {
     } else {
         0
     };
-    let text = format!("{mbps:.decimals$}");
-    if text.contains('.') {
-        text.trim_end_matches('0').trim_end_matches('.').to_owned()
-    } else {
-        text
-    }
+    format!("{mbps:.decimals$}")
 }
 
 /// «11 нояб., 12:09» / «Nov 11, 12:09» in `tz` (the old `toLocaleString` with month short, day,
@@ -90,12 +86,13 @@ pub fn egress_look(egress: Egress) -> Option<(&'static str, &'static str, Tone)>
 mod tests {
     use super::*;
 
+    /// One format per magnitude (unslop: numbers in one format): «76.0» next to «87.4», not «76».
     #[test]
     fn speeds_keep_meaningful_digits() {
         assert_eq!(fmt_mbps(87.4), "87.4");
-        assert_eq!(fmt_mbps(76.0), "76");
+        assert_eq!(fmt_mbps(76.0), "76.0");
         assert_eq!(fmt_mbps(92.13), "92.1");
-        assert_eq!(fmt_mbps(5.10), "5.1");
+        assert_eq!(fmt_mbps(5.10), "5.10");
         assert_eq!(fmt_mbps(0.456), "0.46");
         assert_eq!(fmt_mbps(412.7), "413");
         assert_eq!(fmt_mbps(f64::NAN), "0");

@@ -62,7 +62,11 @@
       },
       "protection": {
         "title": "Protection",
-        "lead": "Optional. The Kill-Switch is off by default: turn it on if traffic outside the VPN is unacceptable even for a minute."
+        "lead": "Optional. The Kill-Switch is off by default: turn it on if traffic outside the VPN is unacceptable even for a minute.",
+        "standardSoft": "If the VPN drops, the system proxy stays pointed at the engine: programs that use it stay offline until the VPN reconnects.",
+        "strictSoft": "Tunnel mode only: strict blocking needs Windows filters (WFP) and the app started as administrator.",
+        "strictNeedsTunnel": "The strict Kill-Switch is not available in Proxy mode. Choose Standard or Off, or go back to step 3 and choose Tunnel.",
+        "autostartHint": "An entry in your Windows account's startup list, no administrator rights needed."
       },
       "done": {
         "title": "All set",
@@ -85,15 +89,13 @@
         "keyUnchecked": "The pasted key was not checked and will not be added. Go back to step 2 and press «Check».",
         "waitCheck": "Wait until the key check is over"
       },
-      "error": {
-        "autostartNotRestored": "Setup was not completed, and autostart could not be put back as it was. Check autostart in Settings."
-      },
       "demo": {
         "power": "Turn protection on",
         "presses": "Presses: {{count}}",
         "reopen": "Run the wizard again",
         "diskFull": "Settings could not be saved: the disk is full.",
-        "subscriptionDown": "The subscription server did not answer. Check the link and your internet connection."
+        "subscriptionDown": "The subscription server did not answer. Check the link and your internet connection.",
+        "autostartNotRestored": "Setup was not completed, and autostart could not be put back as it was. Check autostart in Settings."
       }
     }
   }

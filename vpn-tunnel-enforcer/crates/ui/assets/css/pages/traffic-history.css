@@ -23,12 +23,13 @@
 
 /* ── Day groups ──────────────────────────────────────────────────────── */
 .traffic-list { margin: 0; padding: 0; list-style: none; }
-.traffic-item { display: flex; align-items: center; gap: 16px; border-top: 1px solid var(--rule); padding: 10px 12px 10px 20px; }
+.traffic-item { display: flex; align-items: center; gap: 16px; border-top: 1px solid var(--rule); padding: 12px 12px 12px 20px; }
 .traffic-item:first-child { border-top: 0; }
 .traffic-item-text { min-width: 0; flex: 1 1 auto; }
-.traffic-item-head { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0; }
-.traffic-domain { min-width: 0; font-size: 14px; font-weight: 600; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.traffic-item-head { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 0; }
+.traffic-domain { min-width: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
 .traffic-item-head .w-badge { font-variant-numeric: tabular-nums; }
+.traffic-site { min-width: 0; font-size: 13px; color: var(--mute); overflow-wrap: anywhere; }
 .traffic-pending { display: inline-flex; color: var(--mute); }
 .traffic-item-seen {
   margin: 4px 0 0;

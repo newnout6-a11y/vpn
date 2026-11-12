@@ -1,6 +1,5 @@
 //! Markup of the state, steps, results and leak result panels.
 use dioxus::prelude::*;
-use vpnte_base::Msg;
 use vpnte_base::types::{UnixMs, Verdict};
 
 use super::ctl::{Controller, render};
@@ -26,25 +25,6 @@ pub(crate) fn fmt_time(ms: UnixMs) -> String {
     } else {
         at.strftime("%d.%m.%Y %H:%M").to_string()
     }
-}
-
-/// A byte count in KB / MB / GB.
-pub(crate) fn fmt_bytes(bytes: u64) -> Msg {
-    const KB: f64 = 1024.0;
-    let b = bytes as f64;
-    let (key, n) = if b < KB * KB {
-        ("ui.maintenance.units.kb", b / KB)
-    } else if b < KB * KB * KB {
-        ("ui.maintenance.units.mb", b / (KB * KB))
-    } else {
-        ("ui.maintenance.units.gb", b / (KB * KB * KB))
-    };
-    let n = if n < 10.0 {
-        format!("{n:.1}")
-    } else {
-        format!("{n:.0}")
-    };
-    Msg::new(key).arg("n", n)
 }
 
 /// Badge text of a verdict.
