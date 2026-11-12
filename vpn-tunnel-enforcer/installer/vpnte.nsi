@@ -1,7 +1,10 @@
 ﻿; VPN Tunnel Enforcer: per-user installer and uninstaller (NSIS 3.13, built by `cargo xtask dist`).
 ;
 ; No administrator rights anywhere (owner requirement 2026-11-11, NOADMIN.md): both run with the user's own
-; token, install into $LOCALAPPDATA\Programs, write only HKCU and the user's own links, and never show UAC.
+; token, install into $LOCALAPPDATA\Programs, write only HKCU and the user's own links, and never elevate.
+; The one exception is the helper service (owner decision 12.11.2026): setup installs it without asking by
+; running `vpnte-service.exe request-install`, which asks Windows to run the service's own install verb
+; elevated (Windows shows its one prompt). Declined or failed, setup goes on and the app works in proxy mode.
 ; Identity is the Electron installer's (electron-builder, last version 1.1.24): the same GUID registry keys
 ; (now under HKCU), exe and uninstaller names, shortcut name and AUMID.
 ; The old per-machine installation (Electron 1.x, HKLM + Program Files) cannot be removed without
@@ -164,6 +167,7 @@ Section "Install"
 
   SetOutPath "$INSTDIR"
   File "${STAGE}\${EXE}"
+  File "${STAGE}\vpnte-service.exe"
   File "${STAGE}\vpnte-proxy.exe"
   File "${STAGE}\vpnte-proxy.cmd"
   File "${STAGE}\vpnte-proxy.ps1"
@@ -176,6 +180,7 @@ Section "Install"
   Call WriteRegistry
   Call CreateShortcuts
   Call RegisterLinks
+  Call InstallService
   Call CheckWebView2
   Call MachineWideNotice
   ${If} ${Silent}
@@ -183,6 +188,21 @@ Section "Install"
     Call RunApp
   ${EndIf}
 SectionEnd
+
+; The helper service, installed or updated without asking (owner decision 12.11.2026). The service exe asks
+; Windows to run its own `install` elevated and waits: one Windows prompt, none when the installed service is
+; already this build. Exit codes: 0 done, 5 the prompt was declined (or nobody can approve it), 4 an update
+; failed and the service is stopped until Windows starts it (the one case that gets a line), else failed. In
+; every case setup goes on; without the service the app works in proxy mode and offers the install in Settings.
+Function InstallService
+  nsExec::ExecToStack /TIMEOUT=600000 '"$INSTDIR\vpnte-service.exe" request-install'
+  Pop $0
+  Pop $1
+  DetailPrint "$1"
+  ${If} $0 == 4
+    MessageBox MB_OK|MB_ICONINFORMATION "$(ServiceStopped)" /SD IDOK
+  ${EndIf}
+FunctionEnd
 
 ; Link schemes (vless://, hiddify://import/ ...) for this user, under HKCU\Software\Classes: the helper takes
 ; the free ones on the first installation and later only points ours at this installation, so a scheme the user
@@ -364,6 +384,17 @@ Section "Uninstall"
         SetErrorLevel 1
         Abort
       ${EndIf}
+      ; This Windows user leaves the helper service (no prompt); the last user's leave removes it. Exit code
+      ; 3: it stays to remove its network filters later (one calm line); the per-user part goes on regardless.
+      ${If} ${FileExists} "$INSTDIR\vpnte-service.exe"
+        nsExec::ExecToStack /TIMEOUT=120000 '"$INSTDIR\vpnte-service.exe" forget-me'
+        Pop $0
+        Pop $1
+        DetailPrint "$1"
+        ${If} $0 == 3
+          MessageBox MB_OK|MB_ICONINFORMATION "$(ServiceKept)" /SD IDOK
+        ${EndIf}
+      ${EndIf}
     ${EndIf}
   ${ElseIf} $Updated != 1
     MessageBox MB_OK|MB_ICONSTOP "$(AppMissing)" /SD IDOK
@@ -376,6 +407,7 @@ Section "Uninstall"
   ${EndIf}
 
   Delete "$INSTDIR\${EXE}"
+  Delete "$INSTDIR\vpnte-service.exe"
   Delete "$INSTDIR\vpnte-proxy.exe"
   Delete "$INSTDIR\vpnte-proxy.cmd"
   Delete "$INSTDIR\vpnte-proxy.ps1"

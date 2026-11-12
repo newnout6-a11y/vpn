@@ -1,17 +1,28 @@
 //! `vpnte-service.exe`.
 //!
 //! - `run`: started by the SCM (the registered command line); runs the service.
-//! - `install [--resources <dir>]`: run elevated by the installer; copies this exe and the pinned
-//!   engine files into Program Files, registers and starts the service.
-//! - `uninstall`: run elevated by the installer; stops and removes the service and its folders.
+//! - `install [--resources <dir>]`: elevated; copies this exe and the pinned engine files into
+//!   Program Files, registers and starts the service.
+//! - `uninstall`: elevated; stops and removes the service and its folders.
+//! - `request-install [--resources <dir>]`: unelevated (the per-user installer); asks Windows to
+//!   run `install` elevated (Windows shows its one prompt) and returns that run's exit code.
+//! - `forget-me`: unelevated (the per-user uninstaller); tells the service this user is gone.
+//! - `status`: unelevated; the installed service answers over its pipe (CI's smoke run).
 //!
-//! Exit codes: 0 done, 1 failed (reason on stderr, English log text), 2 bad arguments.
+//! Exit codes: 0 done, 1 failed (reason on stderr, English log text), 2 bad arguments,
+//! 3 the service stays to remove its network filters later (`service.uninstall.filtersKept`),
+//! 4 an upgrade failed and the service is stopped until Windows starts it
+//! (`service.install.notRestarted`), 5 nobody approved the prompt (`request-install`).
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use vpnte_service::install::flow::{FILTERS_KEPT, NOT_RESTARTED};
+use vpnte_service::per_user::{self, Elevated};
+use vpnte_service::pipe::client::CallError;
 use vpnte_service::{install, scm, service};
 
-const USAGE: &str = "usage: vpnte-service (run | install [--resources <dir>] | uninstall)";
+const USAGE: &str = "usage: vpnte-service (run | install [--resources <dir>] | uninstall | \
+request-install [--resources <dir>] | forget-me | status)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -25,10 +36,8 @@ fn main() -> ExitCode {
             }
         },
         ["install", rest @ ..] => {
-            let resources = match rest {
-                [] => None,
-                ["--resources", dir] => Some(PathBuf::from(dir)),
-                _ => return usage(),
+            let Some(resources) = resources(rest) else {
+                return usage();
             };
             // First, before anything slow: this exe runs from the per-user app folder, so its
             // bytes are taken now through a locked handle, and later DLLs only from System32.
@@ -43,7 +52,24 @@ fn main() -> ExitCode {
             console_log();
             report(install::uninstall().map(|()| eprintln!("uninstalled")))
         }
+        ["request-install", rest @ ..] => {
+            let Some(resources) = resources(rest) else {
+                return usage();
+            };
+            request_install(resources)
+        }
+        ["forget-me"] => forget_me(),
+        ["status"] => status(),
         _ => usage(),
+    }
+}
+
+/// `[]` or `["--resources", dir]`; `None` = bad arguments.
+fn resources(rest: &[&str]) -> Option<Option<PathBuf>> {
+    match rest {
+        [] => Some(None),
+        ["--resources", dir] => Some(Some(PathBuf::from(dir))),
+        _ => None,
     }
 }
 
@@ -60,11 +86,103 @@ fn console_log() {
         .try_init();
 }
 
+/// The exit code of a result: the two "kept" outcomes have their own codes.
+fn code_of(key: &str) -> ExitCode {
+    match key {
+        FILTERS_KEPT => ExitCode::from(3),
+        NOT_RESTARTED => ExitCode::from(4),
+        _ => ExitCode::FAILURE,
+    }
+}
+
 fn report(result: vpnte_base::AppResult<()>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("failed: {} ({:?})", err.user_msg().key, err.source);
+            let key = err.user_msg().key;
+            eprintln!("failed: {key} ({:?})", err.source);
+            code_of(&key)
+        }
+    }
+}
+
+fn request_install(resources: Option<PathBuf>) -> ExitCode {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => {
+            eprintln!("failed: own path unknown ({err})");
+            return ExitCode::FAILURE;
+        }
+    };
+    if per_user::is_current(&exe) {
+        eprintln!("the installed service is this build");
+        return ExitCode::SUCCESS;
+    }
+    match per_user::request_install(&exe, resources.as_deref()) {
+        Ok(Elevated::Exited(code)) => {
+            eprintln!("install exited with {code}");
+            ExitCode::from(u8::try_from(code).unwrap_or(1))
+        }
+        Ok(Elevated::Declined) => {
+            eprintln!("not approved: the app works in proxy mode");
+            ExitCode::from(5)
+        }
+        Err(err) => {
+            eprintln!("failed: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn block_on<T>(f: impl Future<Output = T>) -> Result<T, ExitCode> {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => Ok(runtime.block_on(f)),
+        Err(err) => {
+            eprintln!("failed: {err}");
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+fn status() -> ExitCode {
+    match block_on(per_user::status()) {
+        Ok(Ok(state)) => {
+            eprintln!("{state}");
+            ExitCode::SUCCESS
+        }
+        Ok(Err(err)) => {
+            eprintln!("failed: {err}");
+            ExitCode::FAILURE
+        }
+        Err(code) => code,
+    }
+}
+
+fn forget_me() -> ExitCode {
+    let forgotten = match block_on(per_user::forget_me()) {
+        Ok(forgotten) => forgotten,
+        Err(code) => return code,
+    };
+    match forgotten {
+        Ok(None) => {
+            eprintln!("no service installed");
+            ExitCode::SUCCESS
+        }
+        Ok(Some(removing)) => {
+            eprintln!("forgotten (service removing itself: {removing})");
+            ExitCode::SUCCESS
+        }
+        Err(CallError::Service(error)) => {
+            eprintln!("failed: {}", error.msg.key);
+            code_of(&error.msg.key)
+        }
+        Err(CallError::Pipe(err)) => {
+            // The service is installed but not reachable (stopped, or another build's pipe):
+            // nothing to tell it now; an administrator can still remove it.
+            eprintln!("service not reachable: {}", err.user_msg().key);
             ExitCode::FAILURE
         }
     }

@@ -107,6 +107,17 @@ impl SettingsApi for SettingsService {
         Err(unavailable("app.settings.captureUnavailable"))
     }
 
+    async fn install_service(&self) -> AppResult<bool> {
+        // The one elevated step the app may ask for: Windows runs the service's own install verb
+        // after its prompt (svc-wire, owner decision 12.11.2026).
+        let installed = blocking(crate::boot::service::request_install).await?;
+        let shared = self.shared();
+        let ready = installed && shared.backend.tunnel().is_ok_and(|t| t.service_installed());
+        // The page shows Tunnel mode (and "Always") as available from now on.
+        shared.dirty.notify_one();
+        Ok(ready)
+    }
+
     async fn set_kill_switch_level(&self, level: KillSwitchLevel) -> AppResult<()> {
         actions::set_kill_switch_level(self.shared(), level).await
     }

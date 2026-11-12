@@ -1,10 +1,11 @@
-//! The kill switch. WFP [`Protection`] exists only when this process is elevated (NOADMIN §0);
-//! otherwise the level keeps its proxy-mode meaning (off / "If the VPN drops" act through the
-//! system proxy) and every WFP-only operation answers `needs_admin()`. "Always" (stored
-//! `strict`) is offered only where the helper service keeps it safe: until the service wiring
-//! sets [`Guard::always`], a stored `strict` works as "If the VPN drops" and choosing it is
-//! refused with one calm line (owner decision 12.11.2026). Every method blocks (WFP calls, store
-//! writes): call them from `spawn_blocking`.
+//! The kill switch. With the helper service installed it applies the filters (`remote`, owner
+//! decision 12.11.2026) and "Always" (stored `strict`) is offered: the service keeps it across
+//! app exits and reboots. Without the service, WFP [`Protection`] exists only when this process
+//! is elevated; otherwise the level keeps its proxy-mode meaning (off / "If the VPN drops" act
+//! through the system proxy) and every WFP-only operation answers `needs_admin()`. Where nothing
+//! keeps "Always" safe, a stored `strict` works as "If the VPN drops" and choosing it is refused
+//! with one calm line. Every method blocks (WFP calls, pipe calls, store writes): call them from
+//! `spawn_blocking`.
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +19,7 @@ use vpnte_winnet::wfp::{
     RemoveReport, Toggles,
 };
 
+use super::remote::Remote;
 use crate::services::{Engines, KillSwitchStatus};
 use crate::svc_core::docs::ProtectionDoc;
 use crate::svc_core::needs_admin;
@@ -36,8 +38,10 @@ pub(super) struct Guard {
     settings: Arc<Store<Settings>>,
     doc: Arc<Store<ProtectionDoc>>,
     /// "Always" can be kept safe (the helper service holds it); the lifecycle reads the same
-    /// flag. False until the service wiring sets it.
+    /// flag.
     pub always: Arc<AtomicBool>,
+    /// The helper service: while it is installed the filters are its.
+    remote: Remote,
 }
 
 impl Guard {
@@ -50,6 +54,7 @@ impl Guard {
         engines: &Engines,
         settings: Arc<Store<Settings>>,
         doc: Arc<Store<ProtectionDoc>>,
+        remote: Remote,
     ) -> Self {
         let saved = doc.read(|d| d.settings.clone());
         if settings.read(|s| s.kill_switch) != saved.level
@@ -57,7 +62,9 @@ impl Guard {
         {
             tracing::warn!(error = %e, "kill-switch level not synced into settings");
         }
-        let wfp = if elevated {
+        // One owner of our WFP objects: with the service installed it is the service, also when
+        // this process happens to be elevated.
+        let wfp = if elevated && !remote.installed() {
             match self_exe() {
                 Ok(exe) => {
                     let paths = EnginePaths {
@@ -79,13 +86,35 @@ impl Guard {
             wfp,
             settings,
             doc,
-            always: Arc::default(),
+            always: Arc::new(AtomicBool::new(remote.installed())),
+            remote,
         }
     }
 
     /// "Always" can be kept safe in this process (see the module doc).
     pub fn always_available(&self) -> bool {
         self.always.load(Ordering::Relaxed)
+    }
+
+    /// Tunnel mode can run: through the service, or in this elevated process.
+    pub fn tun_available(&self) -> bool {
+        self.wfp.is_some() || self.remote.installed()
+    }
+
+    /// The service was installed from Settings: "Always" is kept safe from now on.
+    pub fn service_installed(&self) {
+        self.always.store(true, Ordering::Relaxed);
+    }
+
+    /// The service's filters, when it is installed.
+    fn service(&self) -> Option<&Remote> {
+        (self.wfp.is_none() && self.remote.installed()).then_some(&self.remote)
+    }
+
+    /// Applies `next` where the filters live (the service) and saves it.
+    fn apply_remote(&self, remote: &Remote, next: &ProtectionSettings) -> AppResult<()> {
+        remote.apply_protection(next.clone())?;
+        self.persist(next)
     }
 
     /// Writes what the protection decided into both stores (runs under the protection lock).
@@ -114,11 +143,18 @@ impl Guard {
         }
     }
 
-    /// Saved settings plus, with WFP, a fresh read-back.
+    /// Saved settings plus, with WFP (here or in the service), a fresh read-back.
     pub fn status(&self) -> KillSwitchStatus {
+        let wfp = match self.service() {
+            Some(remote) => remote
+                .protection_status()
+                .inspect_err(|e| tracing::warn!(error = %e, "service kill-switch read failed"))
+                .ok(),
+            None => self.wfp.as_ref().map(|p| p.status()),
+        };
         KillSwitchStatus {
             settings: self.doc.read(|d| d.settings.clone()),
-            wfp: self.wfp.as_ref().map(|p| p.status()),
+            wfp,
         }
     }
 
@@ -133,6 +169,11 @@ impl Guard {
             Some(p) => p
                 .set_level(level, &|s| self.persist(s))
                 .map_err(AppError::from),
+            None if self.service().is_some() => {
+                let mut next = self.doc.read(|d| d.settings.clone());
+                next.level = level;
+                self.apply_remote(&self.remote, &next)
+            }
             None => {
                 let mut next = self.doc.read(|d| d.settings.clone());
                 next.level = level;
@@ -151,8 +192,16 @@ impl Guard {
     /// Applies and persists the protection switches; `true` when leak protection changed (the
     /// TUN form follows it, so a running TUN session must restart).
     pub fn set_toggles(&self, toggles: Toggles) -> AppResult<bool> {
-        let p = self.wfp()?;
         let before = self.doc.read(|d| d.settings.leak_protection);
+        if let Some(remote) = self.service() {
+            let mut next = self.doc.read(|d| d.settings.clone());
+            next.leak_protection = toggles.leak_protection;
+            next.public_wifi_compat = toggles.public_wifi_compat;
+            next.allow_lan = toggles.allow_lan;
+            self.apply_remote(remote, &next)?;
+            return Ok(before != toggles.leak_protection);
+        }
+        let p = self.wfp()?;
         p.update_settings(toggles)?;
         self.doc.update(|d| {
             d.settings.leak_protection = toggles.leak_protection;
@@ -170,25 +219,53 @@ impl Guard {
         value: &str,
         label: &str,
     ) -> AppResult<KillSwitchException> {
-        let p = self.wfp()?;
+        let remote = self.service();
+        let local = match remote {
+            Some(_) => None,
+            None => Some(self.wfp()?),
+        };
         let (target, label) = wfp::validate_exception(kind, value, label)?;
         let exception = KillSwitchException {
             id: uuid::Uuid::new_v4().simple().to_string(),
             target,
             label,
         };
-        p.add_exception(exception.clone(), &|s| self.persist(s))?;
+        match (remote, local) {
+            (Some(remote), _) => {
+                let mut next = self.doc.read(|d| d.settings.clone());
+                next.exceptions.push(exception.clone());
+                self.apply_remote(remote, &next)?;
+            }
+            (None, Some(p)) => p.add_exception(exception.clone(), &|s| self.persist(s))?,
+            (None, None) => return Err(needs_admin()),
+        }
         Ok(exception)
     }
 
     /// Removes the exception `id`, applies and persists the list.
     pub fn remove_exception(&self, id: &str) -> AppResult<()> {
+        if let Some(remote) = self.service() {
+            let mut next = self.doc.read(|d| d.settings.clone());
+            next.exceptions.retain(|e| e.id != id);
+            return self.apply_remote(remote, &next);
+        }
         let p = self.wfp()?;
         Ok(p.remove_exception(id, &|s| self.persist(s))?)
     }
 
-    /// Removes every filter of ours (outside a session: `Conflict` during one).
+    /// Removes every filter of ours (outside a session: `Conflict` during one). An "Always" in
+    /// force goes off with its filters; the saved level follows what now holds.
     pub fn release(&self) -> AppResult<RemoveReport> {
+        if let Some(remote) = self.service() {
+            let report = remote.cleanup()?;
+            let level = remote.protection_status()?.level;
+            if self.doc.read(|d| d.settings.level) != level {
+                let mut next = self.doc.read(|d| d.settings.clone());
+                next.level = level;
+                self.persist(&next)?;
+            }
+            return Ok(report);
+        }
         let p = self.wfp()?;
         Ok(p.reset(&|s| self.persist(s))?)
     }

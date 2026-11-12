@@ -11,8 +11,11 @@ use crate::manifest::{self, Manifest, Sha256Hex};
 use crate::{fetch, notices, tools};
 
 /// Stage files produced by the build, not pinned: (path in the stage, file name in the build output dir).
-pub const BUILT: [(&str, &str); 3] = [
+/// `vpnte-service.exe` sits next to the app: its `install` verb copies itself and the pinned engine files of
+/// `resources\` into Program Files (installer, Settings button, portable archive alike).
+pub const BUILT: [(&str, &str); 4] = [
     ("VPN Tunnel Enforcer.exe", "vpn-tunnel-enforcer.exe"),
+    ("vpnte-service.exe", "vpnte-service.exe"),
     ("vpnte-proxy.exe", "vpnte_proxy.exe"),
     (
         "licenses/THIRD-PARTY-NOTICES.txt",
@@ -134,11 +137,14 @@ fn build(root: &Path, manifest: &Manifest, version: &str, lab: bool) -> Result<P
         "vpnte-app",
         "-p",
         "vpnte-proxies",
+        "-p",
+        "vpnte-service",
     ];
     run_tool(
         Command::new(cargo())
             .args(args)
             .args(["--bin", "vpn-tunnel-enforcer", "--bin", "vpnte_proxy"])
+            .args(["--bin", "vpnte-service"])
             .args(
                 lab.then_some(["--features", "vpnte-app/lab"])
                     .into_iter()
@@ -349,6 +355,8 @@ mod tests {
     /// NOADMIN: installer and uninstaller run with the user's own token. User level, the user's program folder
     /// and shell context, every registry write under HKCU (HKLM is only read: the old per-machine installation),
     /// no elevation verb, and the previous uninstaller is looked up in HKCU only (never the per-machine one).
+    /// The helper service's one elevated step is not the script's: `vpnte-service.exe request-install` asks
+    /// Windows for it (NOADMIN §0).
     #[test]
     fn script_needs_no_administrator_rights() {
         let script = fs::read_to_string(root().join(SCRIPT)).unwrap();

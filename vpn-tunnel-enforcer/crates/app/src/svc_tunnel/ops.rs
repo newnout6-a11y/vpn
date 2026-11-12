@@ -311,7 +311,15 @@ impl TunnelOps for TunnelService {
     }
 
     fn tun_available(&self) -> bool {
-        self.guard.wfp.is_some()
+        self.guard.tun_available()
+    }
+
+    fn service_installed(&self) -> bool {
+        let installed = self.runtime.remote().recheck();
+        if installed {
+            self.guard.service_installed();
+        }
+        installed
     }
 
     fn resumed(&self) {

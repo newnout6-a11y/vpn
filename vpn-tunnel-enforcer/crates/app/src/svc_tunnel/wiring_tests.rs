@@ -204,8 +204,14 @@ fn elevated_guard_levels_follow_the_protection() {
     );
     let _ = std::fs::remove_dir_all(&root.0);
     let b = backend(&root);
-    let guard =
-        super::guard::Guard::new(true, &b.engines, b.settings.clone(), b.protection.clone());
+    let remote = super::remote::Remote::absent(b.protection.clone());
+    let guard = super::guard::Guard::new(
+        true,
+        &b.engines,
+        b.settings.clone(),
+        b.protection.clone(),
+        remote,
+    );
     guard.startup().unwrap();
     guard.set_level(KillSwitchLevel::Standard).unwrap();
     assert_eq!(

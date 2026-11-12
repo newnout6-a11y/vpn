@@ -135,6 +135,12 @@ async fn serve(control: Control) -> u32 {
         exe.clone(),
         host::load_settings(&files.protection),
     ));
+    // "Always" is kept safe here: this service owns its persistent filters across app exits and
+    // reboots (owner decision 12.11.2026). Set before the start-up, which applies them at once (a
+    // failed sync here still leaves the flag set for the start-up's own transition).
+    if let Err(err) = protection.set_always_available(true) {
+        tracing::warn!(error = %err, "always-available not synced before start-up");
+    }
     // Strict filters from the last run are re-applied, leftovers of a crashed session removed.
     if let Err(err) = protection.startup() {
         tracing::error!(error = %err, "kill switch start-up failed");

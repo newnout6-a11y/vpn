@@ -1,7 +1,9 @@
 //! The session host: one runtime and one kill switch for the machine, driven by one
-//! controlling client at a time over the pipe. A session belongs to its connection: when the
-//! controlling client goes away the tunnel stops (a `strict` kill switch keeps blocking, as its
-//! filters are persistent by design).
+//! controlling client at a time over the pipe. A session outlives a connection that drops without
+//! a `Stop` (owner question 23: the app window crashed): it keeps running, and the same Windows
+//! user's app takes it over at its next start; another user's app ends it first (its secrets and
+//! its last exit are its user's). Quit and Disconnect send a `Stop`.
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -10,7 +12,8 @@ use parking_lot::Mutex;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::Msg;
-use vpnte_tunnel::api::Runtime;
+use vpnte_base::types::KillSwitchLevel;
+use vpnte_tunnel::api::{Runtime, StopOptions, TunnelEvent};
 
 use crate::pipe::{ClientCheck, Listener};
 use crate::users::Users;
@@ -62,6 +65,10 @@ pub struct Host {
     unidentified: Arc<Semaphore>,
     /// The user whose start the runtime's last exit and fault belong to: nobody else reads them.
     session_user: Mutex<Option<String>>,
+    /// The upstream of the last start: `(server id, local proxy)`, for a take-over.
+    upstream: Mutex<Option<(Option<String>, Option<SocketAddr>)>>,
+    /// The runtime's current native generation (its last `StartBegan`), for a take-over.
+    generation: Arc<AtomicU64>,
 }
 
 impl Host {
@@ -73,11 +80,18 @@ impl Host {
             state: Arc::default(),
             unidentified: Arc::new(Semaphore::new(MAX_UNIDENTIFIED)),
             session_user: Mutex::new(None),
+            upstream: Mutex::new(None),
+            generation: Arc::default(),
         })
     }
 
     /// Accepts connections until `cancel`; each runs on its own task.
     pub async fn serve(self: Arc<Self>, mut listener: Listener, cancel: CancellationToken) {
+        tokio::spawn(track_generation(
+            self.deps.runtime.subscribe(),
+            self.generation.clone(),
+            cancel.clone(),
+        ));
         loop {
             let accepted = tokio::select! {
                 () = cancel.cancelled() => break,
@@ -117,10 +131,57 @@ impl Host {
         }
     }
 
+    /// A new controller: a session kept for another Windows user ends first ("Always" in force
+    /// keeps its block); the same user's app takes his over.
+    async fn admit(&self, user: &str) {
+        let other = self.session_user.lock().clone();
+        if other.is_none_or(|u| u == user) {
+            return;
+        }
+        let keep_block = self.deps.kill_switch.level_in_force() == KillSwitchLevel::Strict;
+        let receipt = self
+            .deps
+            .runtime
+            .stop(StopOptions {
+                preserve_protection: keep_block,
+                preserve_last: false,
+            })
+            .await;
+        tracing::info!(
+            ok = receipt.ok,
+            keep_block,
+            "another user's kept session ended"
+        );
+        *self.session_user.lock() = None;
+        *self.upstream.lock() = None;
+    }
+
     fn release(&self, conn: u64) {
         let mut slot = self.controller.lock();
         if slot.as_ref().is_some_and(|(id, _)| *id == conn) {
             *slot = None;
+        }
+    }
+}
+
+/// Follows the runtime's native generation while the service runs. Waits on the event stream
+/// only: no timer, nothing to do while idle.
+async fn track_generation(
+    mut events: tokio::sync::broadcast::Receiver<TunnelEvent>,
+    generation: Arc<AtomicU64>,
+    cancel: CancellationToken,
+) {
+    loop {
+        let event = tokio::select! {
+            () = cancel.cancelled() => return,
+            event = events.recv() => event,
+        };
+        match event {
+            Ok(TunnelEvent::StartBegan { generation: g }) => {
+                generation.fetch_max(g, Ordering::Relaxed);
+            }
+            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
         }
     }
 }

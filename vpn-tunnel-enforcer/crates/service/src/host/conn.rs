@@ -12,14 +12,12 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::sync::{OwnedSemaphorePermit, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::ErrorKind;
-use vpnte_base::types::KillSwitchLevel;
-use vpnte_tunnel::api::StopOptions;
 
 use super::{HELLO_TIMEOUT, Host};
 use crate::pipe::{ClientInfo, ident};
 use crate::proto::frame::{self, FrameError};
 use crate::proto::{
-    ClientFrame, ErrorCode, Event, PROTOCOL, Reply, Request, ServerFrame, StatusWire,
+    ClientFrame, ErrorCode, Event, ExitWire, PROTOCOL, Reply, Request, ServerFrame, StatusWire,
     TunnelEventWire, WireError, negotiate,
 };
 
@@ -91,6 +89,7 @@ pub(super) async fn run(
         return refuse_with(pipe, fid, ErrorCode::Busy, key).await;
     }
     drop(unidentified);
+    host.admit(&client.user).await;
     if let Err(err) = host.deps.users.add(&client.user) {
         tracing::warn!(error = %err, "users list not saved");
     }
@@ -105,21 +104,13 @@ pub(super) async fn run(
     if frame::write_frame(&mut writer, &welcome).await.is_ok() {
         serve(&host, &client, reader, writer, cancel.clone()).await;
     }
-    // The session belongs to this connection: in-flight work is cancelled, kill-switch changes
-    // already asked for finish, then the tunnel stops. Only "Always" in force keeps its block.
+    // Gone without a stop (Quit and Disconnect send one): a start or switch in flight is
+    // cancelled, kill-switch changes already asked for finish, and a running session stays for
+    // its user's app to take over at its next start (owner question 23).
     cancel.cancel();
-    let settled = host.settled().await;
-    let keep_block = host.deps.kill_switch.level_in_force() == KillSwitchLevel::Strict;
-    let receipt = host
-        .deps
-        .runtime
-        .stop(StopOptions {
-            preserve_protection: keep_block,
-            preserve_last: false,
-        })
-        .await;
-    drop(settled);
-    tracing::info!(ok = receipt.ok, keep_block, "client gone; session stopped");
+    drop(host.settled().await);
+    let running = host.deps.runtime.status().borrow().running;
+    tracing::info!(running, "client gone; the session stays as it is");
     host.release(id);
 }
 
@@ -164,7 +155,7 @@ async fn forget(host: &Arc<Host>, pipe: NamedPipeServer, id: u64) {
     if !(host.deps.check)(&client) {
         return refuse(pipe, id, ErrorCode::Refused).await;
     }
-    let (frame, removing) = match host.forget(&client) {
+    let (frame, removing) = match host.forget(&client).await {
         Ok(reply) => {
             let removing = reply == Reply::Done { removing: true };
             let reply = Box::new(reply);
@@ -214,7 +205,7 @@ fn event(event: Event) -> ServerFrame {
 
 /// Pushes the status watch's current value (marks it seen).
 async fn push_status<W: AsyncWrite + Unpin>(w: &mut W, status: &mut Status) -> bool {
-    let wire = StatusWire::from(&*status.borrow_and_update());
+    let wire = status.take();
     send(w, &event(Event::Status(Box::new(wire)))).await
 }
 
@@ -250,7 +241,33 @@ async fn drain<W: AsyncWrite + Unpin>(
     !status.has_changed().unwrap_or(false) || push_status(w, status).await
 }
 
-type Status = tokio::sync::watch::Receiver<vpnte_tunnel::api::TunStatus>;
+/// The runtime's status as this connection pushes it: with the last exit and fault when the
+/// session is this client's (review service-b2), so the app reads them with the status of a crash.
+struct Status {
+    rx: tokio::sync::watch::Receiver<vpnte_tunnel::api::TunStatus>,
+    host: Arc<Host>,
+    user: String,
+}
+
+impl Status {
+    fn has_changed(&self) -> Result<bool, tokio::sync::watch::error::RecvError> {
+        self.rx.has_changed()
+    }
+
+    async fn changed(&mut self) -> Result<(), tokio::sync::watch::error::RecvError> {
+        self.rx.changed().await
+    }
+
+    fn take(&mut self) -> StatusWire {
+        let mut wire = StatusWire::from(&*self.rx.borrow_and_update());
+        if self.host.session_user.lock().as_deref() == Some(self.user.as_str()) {
+            let runtime = &self.host.deps.runtime;
+            wire.last_exit = runtime.last_exit().as_ref().map(ExitWire::from);
+            wire.recent_fault = runtime.recent_fault();
+        }
+        wire
+    }
+}
 
 /// The controlling client's loop: requests run concurrently (a stop may cancel a start in
 /// flight), replies and events share this one writer.
@@ -262,7 +279,11 @@ async fn serve<W: AsyncWrite + Unpin>(
     cancel: CancellationToken,
 ) {
     let runtime = host.deps.runtime.clone();
-    let mut status = runtime.status();
+    let mut status = Status {
+        rx: runtime.status(),
+        host: host.clone(),
+        user: client.user.clone(),
+    };
     let mut events = runtime.subscribe();
     let mut notices = host.deps.kill_switch.notices();
     let (mut status_open, mut events_open, mut notices_open) = (true, true, true);

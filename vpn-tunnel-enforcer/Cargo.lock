@@ -5462,6 +5462,7 @@ dependencies = [
  "vpnte-profiles",
  "vpnte-proxies",
  "vpnte-servers",
+ "vpnte-service",
  "vpnte-tunnel",
  "vpnte-ui",
  "vpnte-view",

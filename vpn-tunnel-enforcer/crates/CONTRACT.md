@@ -14,24 +14,22 @@ this file says HOW the pieces fit and overrides a spec wherever they disagree.
 - sing-box owns routes and DNS hijack (TUN `auto_route` + `strict_route`, dual stack). The app never rewrites
   physical adapter settings. Kill switch / leak protection = WFP filters in our own provider + sublayer:
   dynamic session for `standard` (gone when the process dies), persistent only for `strict`. Default: Off.
-- **Privilege model (owner requirement of 2026-11-11, replaces "the process runs elevated").** The application
-  never runs elevated and never triggers UAC on its own (manifest `asInvoker`, no self-relaunch). Unprivileged
-  by itself: UI, storage, probes, external proxies, soft-mode tweaks, autostart, and **proxy capture**: the
-  engine listens on a loopback mixed inbound and the app points the per-user system proxy at it. Privileged
-  operations (TUN capture, the WFP kill switch and leak protection, browser policies, packet capture / ETW,
-  removal of the old version's system leftovers) run in the optional helper service `vpnte-service`
-  (LocalSystem, installed once by the per-machine installer), which the app drives over a named pipe; when the
-  process happens to be elevated (development, CI) the app hosts the same code in-process. Without service and
-  without elevation those operations return `ErrorKind::Permission` and the UI shows them as unavailable, never
-  as working. Libraries therefore never self-elevate, privileged modules take everything through parameters
-  and return plain data (they may live in another process than the UI), and "not available" is reported
-  honestly. Work finished under the old assumption is adapted by dedicated follow-up packages (`noadmin-*`):
-  if you are reviewing or integrating something else, do NOT redesign for this yourself; keep the code as its
-  brief says and just add no new dependency on running elevated. `--no-elevate` / `VPNTE_NO_ELEVATE=1` are
-  accepted and mean nothing any more.
-  **Current phase:** the helper service is NOT built yet. A privileged operation is available only when the
-  process itself is elevated (the user started it as administrator, or CI); the details and the Soft / proxy
-  capture design are in `.tmp/rewrite/NOADMIN.md` (binding for `noadmin-*` and `app-*` packages).
+- **Privilege model (owner requirements of 2026-11-11 and 12.11.2026, replaces "the process runs
+  elevated").** The application never runs elevated and never elevates itself (manifest `asInvoker`, no
+  self-relaunch). Unprivileged by itself: UI, storage, probes, external proxies, soft-mode tweaks, autostart,
+  and **proxy capture**: the engine listens on a loopback mixed inbound and the app points the per-user system
+  proxy at it. Privileged operations (TUN capture with its engine, the WFP kill switch and leak protection;
+  later browser policies, packet capture / ETW) run in the helper service `vpnte-service` (LocalSystem,
+  automatic start, `%ProgramFiles%\VPN Tunnel Enforcer Service\`), which the app drives over a named pipe
+  (`crates/service/API.md`). The per-user installer installs it without asking: Windows shows its one prompt
+  for the service's own `install` verb, the only elevated step of the product; declined or failed, the app
+  works in proxy mode and Settings offer the same install later. When no service is installed and the process
+  happens to be elevated (development, CI) the app hosts the same code in-process; with neither, those
+  operations return `ErrorKind::Permission` and the UI shows them as unavailable, never as working. Libraries
+  never self-elevate, privileged modules take everything through parameters and return plain data (they live
+  in another process than the UI), and "not available" is reported honestly. `--no-elevate` /
+  `VPNTE_NO_ELEVATE=1` are accepted and mean nothing any more. Details and the Soft / proxy capture design:
+  `.tmp/rewrite/NOADMIN.md` (§0: the service phase).
 - Data dir `%APPDATA%\VPN Tunnel Enforcer\` (override: env `VPNTE_DATA_DIR`). JSON documents, atomic writes,
   secrets wrapped with DPAPI. One-time non-destructive import from the Electron dir
   `%APPDATA%\vpn-tunnel-enforcer\` (override: env `VPNTE_LEGACY_DIR`).

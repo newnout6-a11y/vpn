@@ -19,6 +19,7 @@ pub const LOCALES: &[(&str, &str)] = &[(
 pub mod host;
 pub mod install;
 pub mod paths;
+pub mod per_user;
 pub mod pipe;
 pub mod proto;
 pub mod sandbox;

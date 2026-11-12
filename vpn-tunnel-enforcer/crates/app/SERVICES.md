@@ -91,7 +91,8 @@ messages to show.
 | `traffic()` | Panels `traffic`, Tray speeds |
 | `ping(ids, cancel)` | Panels `ping_one` / `ping_all`, Servers `ping_one` / `ping_many` |
 | `probe_ctx(device)` | Servers `check_group_health` (`key_health::check_many`), and anyone pinging by hand (`.net`) |
-| `tun_available()` | Settings routing-mode choice, Wizard `Routing::Hard` option: shown unavailable with `app.base.needsAdmin` |
+| `tun_available()` | Settings routing-mode choice, Wizard `Routing::Hard` option: true with the helper service installed (or in an elevated process without it); otherwise shown unavailable with «Для туннеля нужна служба-помощник.» and the install button |
+| `service_installed()` | svc-wire: Settings «Установить службу-помощник» after Windows ran the service's install verb: Tunnel mode and "Always" go through the service from now on (`true` when it is there; default `false`) |
 | `shutdown(budget)` | app-main (Tray `quit`) |
 | `proxies()` | Panels proxy column and actions (`api_dashboard/proxies.rs`), Servers `start_proxies`; `None` = the column stays empty, actions answer `Conflict` |
 | `live_checks()` | Servers `live_check` / `live_history` / `live_batch` (`api_servers/live.rs`); `None` = `Conflict` `app.servers.liveUnavailable` |
@@ -108,6 +109,12 @@ messages to show.
   `NoticeCategory::ConnectionError`). Unelevated: `kill_switch().wfp == None`; strict, leak
   protection and exceptions return `needs_admin()`; off / standard are Soft-mode behaviour
   (NOADMIN §2) and are persisted in both `Settings::kill_switch` and `protection.json`.
+- The choice at start (svc-wire, owner decision 12.11.2026, `svc_tunnel/mod.rs`): with the helper
+  service installed, the lifecycle's runtime is `svc_tunnel::remote::Split` — Tunnel-mode starts go
+  to the service over its pipe (`remote::Remote`; the pipe's server must be the installed exe),
+  proxy mode stays in-process — and the kill switch is applied by the service (no in-process WFP,
+  also when elevated); "Always" is offered. A session the service kept after the window crashed is
+  taken over by a connect of the same upstream once start-up recovery ran (`take_over`).
 - Keep the two copies of the level in sync: `Settings::kill_switch` (read by the lifecycle at start)
   and `ProtectionDoc::settings.level` (the WFP model); `apply_settings_change` hands a changed
   `kill_switch` to the protection (or refuses it with `needs_admin()` when it cannot be enforced).

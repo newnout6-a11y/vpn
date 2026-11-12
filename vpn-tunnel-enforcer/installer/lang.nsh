@@ -33,3 +33,10 @@ LangString NeedsWin10 ${LANG_RUSSIAN} "Для VPN Tunnel Enforcer нужна Win
 
 LangString AlreadyRunning ${LANG_ENGLISH} "Another VPN Tunnel Enforcer setup is already running."
 LangString AlreadyRunning ${LANG_RUSSIAN} "Уже запущена другая установка VPN Tunnel Enforcer."
+
+; The helper service (svc-wire): one calm line where something stays for later; nothing is shown
+; when the service was installed, updated or removed, or when the Windows prompt was declined.
+LangString ServiceStopped ${LANG_ENGLISH} "The helper service could not be updated and is stopped for now: Windows starts it again the next time the PC starts. Tunnel mode works again then."
+LangString ServiceStopped ${LANG_RUSSIAN} "Службу-помощник не удалось обновить, пока она остановлена: Windows запустит её снова при следующем включении компьютера. Тогда режим «Туннель» снова заработает."
+LangString ServiceKept ${LANG_ENGLISH} "The helper service stays for now: it removes its network filters later. Everything else is removed."
+LangString ServiceKept ${LANG_RUSSIAN} "Служба-помощник пока остаётся: она уберёт свои сетевые фильтры позже. Остальное удалено."

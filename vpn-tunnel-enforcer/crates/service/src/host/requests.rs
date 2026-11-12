@@ -1,6 +1,7 @@
 //! One request of the controlling client -> one call into the runtime / kill switch.
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::KillSwitchLevel;
@@ -12,8 +13,8 @@ use vpnte_tunnel::api::{
 use super::Host;
 use crate::pipe::ClientInfo;
 use crate::proto::{
-    ErrorCode, ExitWire, Reply, Request, ServerUpstream, StartReceiptWire, StatusReply, StatusWire,
-    StopReceiptWire, SwitchReceiptWire, TunnelStart, Upstream, WireError,
+    ErrorCode, ExitWire, KeptSession, Reply, Request, ServerUpstream, StartReceiptWire,
+    StatusReply, StatusWire, StopReceiptWire, SwitchReceiptWire, TunnelStart, Upstream, WireError,
 };
 use crate::validate;
 
@@ -125,14 +126,14 @@ impl Host {
             )),
             Request::Start(start) => {
                 let req = self.prepare(&start).await?;
-                self.owns_session(client);
+                self.owns_session(client, &start);
                 let receipt = runtime.start(req, cancel.clone()).await;
                 let receipt = receipt.map_err(tunnel_failed)?;
                 Ok(Reply::Started(Some(StartReceiptWire::from(&receipt))))
             }
             Request::Restart(start) => {
                 let req = self.prepare(&start).await?;
-                self.owns_session(client);
+                self.owns_session(client, &start);
                 let reason = "restart requested by the app".to_owned();
                 let opts = RestartOptions {
                     cancel: cancel.child_token(),
@@ -162,7 +163,7 @@ impl Host {
             }
             Request::Switch(start) => {
                 let req = self.prepare(&start).await?;
-                self.owns_session(client);
+                self.owns_session(client, &start);
                 let owner = cancel.clone();
                 let is_owner = Arc::new(move || !owner.is_cancelled());
                 let receipt = runtime.switch_upstream(req, cancel.clone(), is_owner).await;
@@ -214,12 +215,25 @@ impl Host {
                     provider: report.provider,
                 })
             }
-            Request::ForgetMe => self.forget(client),
+            Request::ForgetMe => self.forget(client).await,
         }
     }
 
-    /// Removes the caller's SID; `removing` when he was the last user.
-    pub(super) fn forget(&self, client: &ClientInfo) -> Result<Reply, WireError> {
+    /// Removes the caller's SID; `removing` when he was the last user. The last user's leave first
+    /// stops the tunnel and removes our WFP objects; when that fails nothing else changes (he
+    /// stays recorded, so his retry repeats it) and the uninstaller is told so: strict filters
+    /// must never outlive the service that can remove them (review 4555679938).
+    pub(super) async fn forget(&self, client: &ClientInfo) -> Result<Reply, WireError> {
+        if self.deps.users.is_last(&client.user) {
+            let receipt = self.deps.runtime.stop(StopOptions::default()).await;
+            tracing::info!(ok = receipt.ok, "the last user leaves: tunnel stopped");
+            let kill_switch = self.deps.kill_switch.clone();
+            self.serialized(async move {
+                let removed = kill_switch.remove_all().await;
+                removed.map_err(crate::install::flow::filters_kept)
+            })
+            .await?;
+        }
         let removing = self
             .deps
             .users
@@ -234,6 +248,7 @@ impl Host {
         let runtime = &self.deps.runtime;
         let tunnel = StatusWire::from(&*runtime.status().borrow());
         let own = self.session_user.lock().as_deref() == Some(client.user.as_str());
+        let kept = own.then(|| self.kept(&tunnel)).flatten();
         StatusReply {
             tunnel,
             last_exit: own
@@ -241,12 +256,36 @@ impl Host {
                 .flatten(),
             recent_fault: own.then(|| runtime.recent_fault()).flatten(),
             protection: self.deps.kill_switch.status().await,
+            kept,
         }
     }
 
-    /// `client` now owns what the runtime reports about its session.
-    fn owns_session(&self, client: &ClientInfo) {
+    /// The running session as a take-over: its current generation, pid, start and engine.
+    fn kept(&self, tunnel: &StatusWire) -> Option<KeptSession> {
+        let (server_id, local_proxy) = self.upstream.lock().clone()?;
+        if !tunnel.running {
+            return None;
+        }
+        Some(KeptSession {
+            receipt: StartReceiptWire {
+                generation: self.generation.load(Ordering::Relaxed),
+                pid: tunnel.pid?,
+                started_at: tunnel.started_at?,
+                engine: tunnel.engine.clone()?,
+                warnings: Vec::new(),
+            },
+            server_id,
+            local_proxy,
+        })
+    }
+
+    /// `client` now owns what the runtime reports about its session, started for `start`.
+    fn owns_session(&self, client: &ClientInfo, start: &TunnelStart) {
         *self.session_user.lock() = Some(client.user.clone());
+        *self.upstream.lock() = Some(match &start.upstream {
+            Upstream::Server(server) => (Some(server.id.clone()), None),
+            Upstream::LocalProxy { addr, .. } => (None, Some(*addr)),
+        });
     }
 }
 

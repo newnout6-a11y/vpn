@@ -54,7 +54,13 @@ pub fn build(args: &Args) -> AppResult<Arc<Backend>> {
     let import = crate::import::import_if_needed(&dirs);
     let fresh = !dirs.root.join(Settings::FILE).exists();
     let settings = Arc::new(Store::<Settings>::open(&dirs.root));
-    first_start(&settings, fresh, elevated);
+    // Tunnel mode can run from the first start: the helper service is installed (NOADMIN §0, the
+    // installer adds it) or this process is elevated.
+    first_start(
+        &settings,
+        fresh,
+        elevated || crate::boot::service::installed(),
+    );
     logging::set_debug(settings.read(|s| s.ui.debug_log));
 
     let ops = OperationRegistry::new();
@@ -139,6 +145,7 @@ pub fn locale_layers() -> Vec<(&'static str, &'static str)> {
         vpnte_tunnel::LOCALES,
         vpnte_proxies::LOCALES,
         vpnte_cleanup::LOCALES,
+        vpnte_service::LOCALES,
         APP,
     ] {
         layers.extend_from_slice(crate_layers);
@@ -205,6 +212,10 @@ const APP: &[(&str, &str)] = &[
         include_str!("../../locales/w7-phones.ru.json"),
         include_str!("../../locales/w7-phones.en.json"),
     ),
+    (
+        include_str!("../../locales/svc-wire.ru.json"),
+        include_str!("../../locales/svc-wire.en.json"),
+    ),
 ];
 
 /// First-start settings and the log pseudonym key. A read-only `settings.json` (newer version,
@@ -212,7 +223,8 @@ const APP: &[(&str, &str)] = &[
 fn first_start(settings: &Store<Settings>, fresh: bool, elevated: bool) {
     let key = settings
         .update(|s| {
-            // NOADMIN §0: without elevation the TUN cannot exist, so a new install starts in Soft.
+            // NOADMIN §2: without the service (or elevation) the TUN cannot exist, so a new
+            // install starts in Soft.
             if fresh && !elevated {
                 s.routing_mode = RoutingMode::Soft;
             }

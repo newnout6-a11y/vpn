@@ -53,6 +53,7 @@
         "hardHint": "Tunnel (TUN) — all traffic goes through the tunnel; needs the helper service",
         "softHint": "Proxy — the Windows system proxy points at the app's engine; programs that ignore it go direct",
         "tunUnavailable": "Tunnel mode needs the helper service.",
+        "installService": "Install the helper service",
         "softTargets": "Developer tools in Proxy mode",
         "softTargetsHint": "While Proxy mode is on, the chosen tools use the proxy too; their settings are restored when it stops.",
         "engine": "Connection engine (Proxy Core)",

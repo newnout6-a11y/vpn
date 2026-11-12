@@ -28,6 +28,10 @@ pub trait KillSwitch: Send + Sync {
     fn notices(&self) -> broadcast::Receiver<Notice>;
     /// Removes every object of our provider (refused while a session runs).
     async fn cleanup(&self) -> AppResult<RemoveReport>;
+    /// The last user leaves: the level goes to off (saved, so a later start-up removes leftovers
+    /// instead of applying them again), then every WFP object of ours goes. An error keeps the
+    /// service and its user (review 4555679938).
+    async fn remove_all(&self) -> AppResult<()>;
 }
 
 /// The real kill switch.
@@ -123,6 +127,18 @@ impl KillSwitch for WfpKillSwitch {
         blocking(move || {
             let persist = |s: &ProtectionSettings| save_settings(&store, s);
             protection.reset(&persist).map_err(AppError::from)
+        })
+        .await?
+    }
+
+    async fn remove_all(&self) -> AppResult<()> {
+        let (protection, store) = (self.protection.clone(), self.store.clone());
+        blocking(move || {
+            let persist = |s: &ProtectionSettings| save_settings(&store, s);
+            protection.set_level(KillSwitchLevel::Off, &persist)?;
+            vpnte_winnet::wfp::remove_all()
+                .map(drop)
+                .map_err(AppError::from)
         })
         .await?
     }

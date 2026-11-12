@@ -23,6 +23,7 @@ use vpnte_profiles::model::Profile;
 use vpnte_tunnel::api::Origin;
 use vpnte_winnet::wfp::ProtectionSettings;
 
+mod back;
 pub mod frame;
 mod wire;
 
@@ -222,6 +223,24 @@ pub struct StatusReply {
     #[serde(default)]
     pub recent_fault: Option<vpnte_base::types::OutboundFault>,
     pub protection: ProtectionWire,
+    /// The session the service kept running for this user after his app's connection dropped
+    /// without a stop (owner question 23); `None` for anyone else and while nothing runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept: Option<KeptSession>,
+}
+
+/// A running session as its own user's app takes it over at its next start.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KeptSession {
+    /// The run as a start receipt: the current native generation, pid, start time, engine.
+    pub receipt: StartReceiptWire,
+    /// The server list id of the upstream (`None`: a local proxy).
+    #[serde(default)]
+    pub server_id: Option<String>,
+    /// The local proxy upstream (`None`: a server).
+    #[serde(default)]
+    pub local_proxy: Option<std::net::SocketAddr>,
 }
 
 /// Pushed to the controlling client.

@@ -2,10 +2,12 @@
 use dioxus::prelude::*;
 
 use super::model::{ConnectionMode, EnginePref, RoutingMode};
-use super::{Line, use_ctx};
+use super::{ActionError, Line, use_api, use_ctx};
 use crate::pages::{Page, use_nav};
 use crate::t;
-use crate::widgets::{Button, ButtonKind, Checkbox, Panel, Row, Segmented, Select, SelectOption};
+use crate::widgets::{
+    Button, ButtonKind, Checkbox, Panel, Row, Segmented, Select, SelectOption, use_job,
+};
 
 #[component]
 pub(super) fn Connection() -> Element {
@@ -41,6 +43,17 @@ pub(super) fn Connection() -> Element {
         if mode == RoutingMode::Soft || tun_available {
             ctx.edit(|p| p.routing_mode = Some(mode));
         }
+    };
+    // «Установить службу-помощник»: Windows asks once; a declined prompt changes nothing.
+    let api = use_api();
+    let install = use_job::<bool>();
+    let install_service = move |_| {
+        let api = api.clone();
+        install.start(move |_| async move { api.install_service().await });
+    };
+    let install_error = match install.last() {
+        Some(Err(err)) => Some(err),
+        _ => None,
     };
     rsx! {
         Panel { title: t!("ui.settings.connection.title"), id: "set-connection",
@@ -78,6 +91,10 @@ pub(super) fn Connection() -> Element {
             }
             if !tun_available {
                 p { class: "set-hint", "data-unavailable": "tun", {t!("ui.settings.connection.tunUnavailable")} }
+                Button { kind: ButtonKind::Ghost, small: true, busy: install.running(), onclick: install_service,
+                    {t!("ui.settings.connection.installService")}
+                }
+                ActionError { error: install_error }
             }
             if view.routing_mode == RoutingMode::Soft {
                 div { class: "set-subgroup", role: "group", aria_label: t!("ui.settings.connection.softTargets"),

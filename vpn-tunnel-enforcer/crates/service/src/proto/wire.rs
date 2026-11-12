@@ -34,6 +34,13 @@ pub struct StatusWire {
     pub capture: Option<CaptureKind>,
     pub engine: Option<EngineRunWire>,
     pub session: Option<SessionWire>,
+    /// The runtime's last engine exit, pushed to the session's own user only (the app's
+    /// `Runtime::last_exit` reads it right after the status that goes with a crash).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_exit: Option<ExitWire>,
+    /// The runtime's recent outbound fault, to the session's own user only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent_fault: Option<vpnte_base::types::OutboundFault>,
 }
 
 /// Which engine runs and why (`reason` is the engine crate's serialized `SelectReason`, for
@@ -105,6 +112,8 @@ impl From<&TunStatus> for StatusWire {
             capture: s.capture,
             engine: s.engine.map(EngineRunWire::from),
             session: s.session.as_ref().map(SessionWire::from),
+            last_exit: None,
+            recent_fault: None,
         }
     }
 }

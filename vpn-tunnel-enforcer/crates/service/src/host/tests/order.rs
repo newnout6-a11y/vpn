@@ -72,9 +72,10 @@ async fn a_stop_cancels_a_start_still_applying_its_settings() {
 }
 
 /// Review service-a10: the client leaves while a change from "Always" to "If the VPN drops" is
-/// applied; the stop waits for it and keeps no block.
+/// applied; the change finishes before the slot is free again (the next controller sees it), and
+/// leaving stops nothing (owner question 23).
 #[tokio::test]
-async fn the_stop_after_the_client_left_waits_for_a_kill_switch_change() {
+async fn a_change_in_flight_finishes_before_the_slot_is_free() {
     let h = harness();
     h.kill.always.store(true, Ordering::SeqCst);
     *h.kill.level.lock() = KillSwitchLevel::Strict;
@@ -87,11 +88,18 @@ async fn the_stop_after_the_client_left_waits_for_a_kill_switch_change() {
     .await;
     drop(c);
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        h.runtime.stops.lock().is_empty(),
-        "the stop waits for the change in flight"
-    );
+    let mut next = crate::pipe::client::Client::connect(
+        &h.name,
+        &crate::pipe::client::ServerCheck::Any,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("connect");
+    assert!(next.hello("2.0.0").await.is_err(), "still settling");
     h.kill.gate.send_replace(true);
-    wait_for("the stop", || !h.runtime.stops.lock().is_empty()).await;
-    assert!(!h.runtime.stops.lock()[0].preserve_protection);
+    wait_for("the change", || {
+        *h.kill.level.lock() == KillSwitchLevel::Standard
+    })
+    .await;
+    assert!(h.runtime.stops.lock().is_empty(), "leaving stops nothing");
 }

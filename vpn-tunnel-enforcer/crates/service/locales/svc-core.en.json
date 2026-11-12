@@ -33,7 +33,11 @@
       "fileMissing": "{{file}} is missing from the package.",
       "fileMismatch": "{{file}} differs from the file shipped with the app.",
       "imageChanged": "The program file changed during installation. Run the installation again.",
-      "failed": "The Tunnel mode service could not be installed."
+      "failed": "The Tunnel mode service could not be installed.",
+      "notRestarted": "The helper service could not be updated and is stopped. Windows starts it again the next time the PC starts."
+    },
+    "uninstall": {
+      "filtersKept": "The helper service stays for now: it removes its network filters later. Everything else is removed."
     }
   }
 }

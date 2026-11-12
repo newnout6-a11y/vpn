@@ -66,6 +66,14 @@ impl Runtime for FakeRuntime {
         }
         self.starts.lock().push(req);
         let _ = self.events.send(TunnelEvent::StartBegan { generation: 1 });
+        self.status.send_modify(|s| {
+            s.pid = Some(4242);
+            s.started_at = Some(1);
+            s.engine = Some(EngineRun {
+                kind: Engine::SingBox,
+                reason: None,
+            });
+        });
         self.emit(TunStatusKind::Running, true);
         let _ = self.events.send(TunnelEvent::StartFinished {
             generation: 1,
@@ -159,6 +167,8 @@ struct FakeKillSwitch {
     gate: watch::Sender<bool>,
     applying: AtomicU32,
     asking: AtomicU32,
+    /// `remove_all` fails (WFP objects could not be removed).
+    stuck: AtomicBool,
 }
 
 #[async_trait]
@@ -189,6 +199,13 @@ impl KillSwitch for FakeKillSwitch {
             sublayer: false,
             provider: false,
         })
+    }
+    async fn remove_all(&self) -> AppResult<()> {
+        if self.stuck.load(Ordering::SeqCst) {
+            return Err(vpnte_base::AppError::new(ErrorKind::Internal));
+        }
+        *self.level.lock() = KillSwitchLevel::Off;
+        Ok(())
     }
 }
 
@@ -233,6 +250,7 @@ fn harness() -> Harness {
         gate: watch::channel(true).0,
         applying: AtomicU32::new(0),
         asking: AtomicU32::new(0),
+        stuck: AtomicBool::new(false),
     });
     let inputs = Arc::new(SharedInputs::new(None));
     let removed = Arc::new(AtomicU32::new(0));
@@ -409,10 +427,6 @@ async fn a_second_client_gets_busy_until_the_first_leaves() {
         ErrorCode::Busy
     );
     drop(first);
-    wait_for("the first session stopped", || {
-        !h.runtime.stops.lock().is_empty()
-    })
-    .await;
     let mut third = connect(&h).await;
     let mut ok = third.hello("2.0.0").await;
     for _ in 0..50 {
@@ -424,6 +438,7 @@ async fn a_second_client_gets_busy_until_the_first_leaves() {
         ok = third.hello("2.0.0").await;
     }
     assert!(ok.is_ok(), "the slot is free again");
+    assert!(h.runtime.stops.lock().is_empty(), "leaving stops nothing");
 }
 
 #[tokio::test]
@@ -445,32 +460,105 @@ async fn hello_comes_first_and_versions_must_be_close() {
     );
 }
 
+/// Owner question 23: a connection that drops without a stop (the app window crashed) leaves the
+/// session running; the same user's next app takes it over with its upstream and generation.
 #[tokio::test]
-async fn the_client_going_away_stops_the_session() {
-    // Only "Always" in force keeps a block: a stored strict works as "If the VPN drops" until the
-    // service can keep it safe (ks-a: `level_in_force`, not the stored level).
+async fn a_dropped_connection_keeps_the_session_for_its_user() {
+    let h = harness();
+    let mut c = connect(&h).await;
+    c.hello("2.0.0").await.expect("hello");
+    c.call(local_start(KillSwitchLevel::Standard))
+        .await
+        .expect("start");
+    drop(c);
+    // The slot frees once the old connection ended; then the same user is admitted again.
+    let mut c = loop {
+        let mut c = connect(&h).await;
+        match c.hello("2.0.0").await {
+            Ok(_) => break c,
+            Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    };
+    assert!(h.runtime.stops.lock().is_empty(), "nothing stopped");
+    let Ok(Reply::Status(status)) = c.call(Request::Status).await else {
+        panic!("status");
+    };
+    let kept = status.kept.expect("the running session, for a take-over");
+    assert_eq!(kept.receipt.generation, 1);
+    assert_eq!(kept.receipt.pid, 4242);
+    assert_eq!(kept.server_id, None);
+    assert_eq!(
+        kept.local_proxy,
+        Some("127.0.0.1:10808".parse().expect("addr"))
+    );
+}
+
+/// Another Windows user who takes the free slot ends a session kept for someone else first (its
+/// secrets and last exit are its user's); only "Always" in force keeps a block (ks-a).
+#[tokio::test]
+async fn another_user_ends_a_kept_session_first() {
     for (level, always, keep_block) in [
         (KillSwitchLevel::Standard, false, false),
         (KillSwitchLevel::Strict, false, false),
         (KillSwitchLevel::Strict, true, true),
     ] {
-        let h = harness();
-        h.kill.always.store(always, Ordering::SeqCst);
-        let mut c = connect(&h).await;
-        c.hello("2.0.0").await.expect("hello");
-        c.call(local_start(level)).await.expect("start");
-        drop(c);
-        wait_for("stop after the client left", || {
-            !h.runtime.stops.lock().is_empty()
-        })
-        .await;
-        let stop = h.runtime.stops.lock()[0];
+        let kill = Arc::new(FakeKillSwitch {
+            level: Mutex::new(level),
+            always: AtomicBool::new(always),
+            notices: broadcast::channel(8).0,
+            gate: watch::channel(true).0,
+            applying: AtomicU32::new(0),
+            asking: AtomicU32::new(0),
+            stuck: AtomicBool::new(false),
+        });
+        let runtime = FakeRuntime::new();
+        let dir = std::env::temp_dir().join(format!("vpnte-svc-admit-{}", std::process::id()));
+        let host = Host::new(HostDeps {
+            runtime: runtime.clone(),
+            kill_switch: kill,
+            inputs: Arc::new(SharedInputs::new(None)),
+            users: Arc::new(Users::open(&dir.join("users.json"))),
+            check: admit_all(),
+            on_last_user: Arc::new(|| {}),
+            service_version: "2.0.0-test".into(),
+            refuse_tunnel: None,
+        });
+        *host.session_user.lock() = Some("S-1-5-21-1-2-3-1001".into());
+        host.admit("S-1-5-21-1-2-3-1001").await;
+        assert!(runtime.stops.lock().is_empty(), "his own session is his");
+        host.admit("S-1-5-21-1-2-3-1002").await;
+        let stops = runtime.stops.lock().clone();
+        assert_eq!(stops.len(), 1, "{level:?}");
         assert_eq!(
-            stop.preserve_protection, keep_block,
-            "{level:?} always={always}"
+            stops[0].preserve_protection, keep_block,
+            "{level:?} {always}"
         );
-        assert!(!stop.preserve_last);
+        assert!(host.session_user.lock().is_none());
     }
+}
+
+/// Review 4555679938: the last user's leave removes the WFP objects before the answer; when that
+/// fails he stays recorded, the uninstaller hears so, and his retry repeats it.
+#[tokio::test]
+async fn a_last_leave_whose_filters_stay_keeps_the_service() {
+    let h = harness();
+    let mut c = connect(&h).await;
+    c.hello("2.0.0").await.expect("hello records the user");
+    drop(c);
+    h.kill.stuck.store(true, Ordering::SeqCst);
+    let mut c = connect(&h).await;
+    let err = match c.call(Request::ForgetMe).await {
+        Err(CallError::Service(e)) => e,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(err.msg.key, crate::install::flow::FILTERS_KEPT);
+    assert_eq!(h.removed.load(Ordering::SeqCst), 0, "the service stays");
+    h.kill.stuck.store(false, Ordering::SeqCst);
+    let mut c = connect(&h).await;
+    let reply = c.call(Request::ForgetMe).await.expect("retry");
+    assert_eq!(reply, Reply::Done { removing: true });
+    assert_eq!(*h.kill.level.lock(), KillSwitchLevel::Off);
+    wait_for("removal", || h.removed.load(Ordering::SeqCst) == 1).await;
 }
 
 #[tokio::test]

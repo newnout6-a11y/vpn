@@ -14,6 +14,7 @@ use crate::paths::{self, DataFiles, EXE_NAME};
 use crate::scm::manage;
 use crate::users::Users;
 
+pub mod flow;
 pub mod image;
 pub mod pins;
 
@@ -84,33 +85,90 @@ pub fn system_dlls_only() {
 
 /// Installs or upgrades: stops a running service, copies the exe and the pinned engine files into
 /// the admin-only Program Files folder, secures the data folder, registers the service
-/// (LocalSystem, automatic start, service SID, restricted DACL, recovery) and starts it.
+/// (LocalSystem, automatic start, service SID, restricted DACL, recovery) and starts it. A failure
+/// after the stop starts the service again ([`flow::install`]).
 pub fn install(source: &Source) -> AppResult<PathBuf> {
     require_elevation()?;
-    let dir = paths::install_dir().map_err(failed)?;
     // Everything is read and checked before anything changes: a missing or changed file fails the
     // install while the old service still runs on its own, untouched files.
     let files = pins::read_all(&source.resources)?;
-    // Disabled while its files change: the SCM's recovery cannot start the old exe in between.
-    manage::set_enabled(false).map_err(failed)?;
-    let replaced = replace(&dir, &files, &source.exe);
-    if replaced.is_err() {
-        // The old registration comes back as it was (automatic start).
-        let _ = manage::set_enabled(true);
-    }
-    let exe = replaced?;
-    if !manage::start(SCM_WAIT).map_err(failed)? {
-        return Err(failed(std::io::Error::other(
-            "the service did not reach RUNNING",
-        )));
-    }
-    Ok(exe)
+    flow::install(&System {
+        files: &files,
+        exe: &source.exe,
+    })
 }
 
-/// The old service stopped for good, the files in place, the data folder and the installing user
-/// ready, the service registered (automatic start again).
-fn replace(dir: &Path, files: &[(&str, Vec<u8>)], service_exe: &[u8]) -> AppResult<PathBuf> {
-    stopped(manage::stop(SCM_WAIT))?;
+/// Stops and deletes the service, removes every WFP object of ours (strict filters included) and
+/// deletes the program and data folders ([`flow::uninstall`]: a failed WFP clean-up keeps the
+/// service, every other step is tried even when one before it failed).
+pub fn uninstall() -> AppResult<()> {
+    require_elevation()?;
+    flow::uninstall(&System {
+        files: &[],
+        exe: &[],
+    })
+}
+
+/// The real machine: the SCM, the files and WFP. `files` / `exe` are what an install copies.
+struct System<'a> {
+    files: &'a [(&'static str, Vec<u8>)],
+    exe: &'a [u8],
+}
+
+impl flow::Machine for System<'_> {
+    fn set_enabled(&self, on: bool) -> AppResult<()> {
+        manage::set_enabled(on).map_err(failed)
+    }
+
+    fn stop(&self) -> AppResult<()> {
+        stopped(manage::stop(SCM_WAIT))
+    }
+
+    fn start(&self) -> AppResult<()> {
+        match manage::start(SCM_WAIT) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(failed(std::io::Error::other(
+                "the service did not reach RUNNING",
+            ))),
+            Err(e) => Err(failed(e)),
+        }
+    }
+
+    fn place(&self) -> AppResult<PathBuf> {
+        place(self.files, self.exe)
+    }
+
+    fn remove_wfp(&self) -> AppResult<()> {
+        vpnte_winnet::wfp::remove_all().map(drop).map_err(failed)
+    }
+
+    fn delete(&self) -> AppResult<()> {
+        manage::delete().map_err(failed)
+    }
+
+    fn remove_folders(&self) -> AppResult<()> {
+        let mut first = Ok(());
+        for dir in [paths::install_dir(), paths::data_dir()] {
+            let removed = dir.map_err(failed).and_then(|dir| {
+                if dir.exists() {
+                    retry(|| std::fs::remove_dir_all(&dir).map_err(AppError::internal))
+                } else {
+                    Ok(())
+                }
+            });
+            if first.is_ok() {
+                first = removed;
+            }
+        }
+        first
+    }
+}
+
+/// The files in place, the data folder and the installing user ready, the service registered
+/// (automatic start again). Runs after the old service stopped for good.
+fn place(files: &[(&str, Vec<u8>)], service_exe: &[u8]) -> AppResult<PathBuf> {
+    let dir = paths::install_dir().map_err(failed)?;
+    let dir = dir.as_path();
     paths::secure_dir(dir).map_err(failed)?;
     // The stopped service's process and its engines may still be exiting for a moment: every
     // replace is retried.
@@ -148,36 +206,6 @@ fn stopped(stop: windows::core::Result<bool>) -> AppResult<()> {
         ))),
         Err(e) => Err(failed(e)),
     }
-}
-
-/// Stops and deletes the service, removes every WFP object of ours (strict filters included) and
-/// deletes the program and data folders. Every step is tried even when one before it failed; the
-/// first failure is returned (review service-a13).
-pub fn uninstall() -> AppResult<()> {
-    require_elevation()?;
-    let mut first = None;
-    let mut step = |done: AppResult<()>| {
-        if let Err(err) = done {
-            tracing::warn!(error = ?err.source, key = %err.user_msg().key, "uninstall step failed");
-            first.get_or_insert(err);
-        }
-    };
-    step(manage::set_enabled(false).map_err(failed));
-    step(stopped(manage::stop(SCM_WAIT)));
-    step(manage::delete().map_err(failed));
-    if let Err(err) = vpnte_winnet::wfp::remove_all() {
-        tracing::warn!(error = %err, "WFP objects not removed");
-    }
-    for dir in [paths::install_dir(), paths::data_dir()] {
-        step(dir.map_err(failed).and_then(|dir| {
-            if dir.exists() {
-                retry(|| std::fs::remove_dir_all(&dir).map_err(AppError::internal))
-            } else {
-                Ok(())
-            }
-        }));
-    }
-    first.map_or(Ok(()), Err)
 }
 
 fn retry(mut op: impl FnMut() -> AppResult<()>) -> AppResult<()> {

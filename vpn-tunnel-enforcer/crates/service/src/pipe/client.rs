@@ -10,6 +10,10 @@ use vpnte_base::{AppError, ErrorKind, Msg};
 use crate::proto::frame::{self, FrameError};
 use crate::proto::{ClientFrame, Event, Hello, PROTOCOL, Reply, Request, ServerFrame, WireError};
 
+mod split;
+
+pub use split::{Frames, Incoming, Requests};
+
 /// `ERROR_ACCESS_DENIED`: the pipe's DACL does not admit this account.
 const ERROR_ACCESS_DENIED: i32 = 5;
 /// `ERROR_PIPE_BUSY`: every instance is taken for a moment; retry.
@@ -168,16 +172,24 @@ impl Client {
 
     /// The next frame; each `read` is cancel-safe, and what it read stays in the inbox.
     async fn read(&mut self) -> Result<ServerFrame, CallError> {
-        let mut chunk = [0u8; 8192];
-        loop {
-            if let Some(body) = frame::take_frame(&mut self.inbox).map_err(read_failed)? {
-                return frame::decode(&body).map_err(read_failed);
-            }
-            match self.reader.read(&mut chunk).await {
-                Ok(0) => return Err(read_failed(FrameError::Closed)),
-                Ok(n) => self.inbox.extend_from_slice(&chunk[..n]),
-                Err(e) => return Err(read_failed(FrameError::Io(e))),
-            }
+        read_from(&mut self.reader, &mut self.inbox).await
+    }
+}
+
+/// The next frame from `reader`, cancel-safe: what was read stays in `inbox`.
+async fn read_from(
+    reader: &mut ReadHalf<NamedPipeClient>,
+    inbox: &mut Vec<u8>,
+) -> Result<ServerFrame, CallError> {
+    let mut chunk = [0u8; 8192];
+    loop {
+        if let Some(body) = frame::take_frame(inbox).map_err(read_failed)? {
+            return frame::decode(&body).map_err(read_failed);
+        }
+        match reader.read(&mut chunk).await {
+            Ok(0) => return Err(read_failed(FrameError::Closed)),
+            Ok(n) => inbox.extend_from_slice(&chunk[..n]),
+            Err(e) => return Err(read_failed(FrameError::Io(e))),
         }
     }
 }

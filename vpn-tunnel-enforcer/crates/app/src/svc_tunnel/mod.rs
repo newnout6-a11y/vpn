@@ -1,7 +1,11 @@
 //! The tunnel service (work package `app-tunnel`): the runtime actor with both capture strategies
 //! and the real engines, the lifecycle with its collaborators over the backend, the kill switch,
-//! and the [`TunnelOps`] the API packages call (`ops.rs`). Privileged parts (TUN capture, WFP)
-//! exist only when the process itself is elevated (NOADMIN §0); everything else runs unelevated.
+//! and the [`TunnelOps`] the API packages call (`ops.rs`).
+//!
+//! The choice at start (package svc-wire, owner decision 12.11.2026): the helper service is
+//! installed -> Tunnel mode and the WFP kill switch go through it (`remote`; the pipe's server
+//! must be its exe) and "Always" is offered; else the app runs elevated -> TUN and WFP in this
+//! process, as before; neither -> proxy mode, and Settings offer to install the service.
 mod auto;
 mod decide;
 mod domains;
@@ -16,6 +20,7 @@ mod monitor;
 mod ops;
 mod peers;
 mod probe;
+mod remote;
 mod soft;
 #[cfg(test)]
 mod tests;
@@ -30,7 +35,8 @@ use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 use vpnte_automation::{hardening, tweaks};
 use vpnte_base::AppResult;
-use vpnte_base::types::{Level, Notice};
+use vpnte_base::types::{Level, Notice, Owner, ProxyKind};
+use vpnte_core::ops::Source;
 use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
 use vpnte_probes::diagnostics::{SnapshotReason, Snapshotter};
@@ -39,8 +45,9 @@ use vpnte_probes::local_proxy::{LocalProxyDetector, ScanOptions};
 use vpnte_probes::public_ip::IpReader;
 use vpnte_servers::store::Servers;
 use vpnte_tunnel::api::Runtime;
+use vpnte_tunnel::api::StopOptions;
 use vpnte_tunnel::fsm::FaultState;
-use vpnte_tunnel::lifecycle::{Lifecycle, LifecycleDeps, SystemForeignVpn};
+use vpnte_tunnel::lifecycle::{ConnectTarget, Lifecycle, LifecycleDeps, SystemForeignVpn};
 use vpnte_tunnel::runtime::{
     Capture, EngineFeed, ProxyCapture, RealEngines, RuntimeDeps, Timings, TunCapture, TunnelHandle,
 };
@@ -73,11 +80,26 @@ pub struct Built {
 /// actors and the background tasks under `backend.shutdown`).
 pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
     let b = backend;
+    let store_inputs = |always| {
+        Arc::new(inputs::StoreInputs {
+            settings: b.settings.clone(),
+            rules: b.rules.clone(),
+            rule_sets: b.rule_sets.clone(),
+            always,
+        })
+    };
+    // The service gets the routing inputs only (its level comes with each start).
+    let remote = remote::Remote::new(
+        store_inputs(Arc::default()),
+        b.protection.clone(),
+        b.shutdown.clone(),
+    );
     let guard = Arc::new(guard::Guard::new(
         b.elevated,
         &b.engines,
         b.settings.clone(),
         b.protection.clone(),
+        remote.clone(),
     ));
     let reader = Arc::new(IpReader::new());
     let fingerprints = Fingerprints::default();
@@ -100,7 +122,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         None => engines,
     };
     let feed = engines.feed();
-    let runtime = TunnelHandle::spawn(RuntimeDeps {
+    let local = TunnelHandle::spawn(RuntimeDeps {
         engines: Arc::new(engines),
         // No TUN without the protection, i.e. without elevation: a Hard start answers
         // `Permission` up front instead of failing halfway (tunnel API, privilege model).
@@ -109,16 +131,13 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
             .as_ref()
             .map(|p| Arc::new(TunCapture::new(p.clone())) as Arc<dyn Capture>),
         proxy: Arc::clone(&proxy_capture) as Arc<dyn Capture>,
-        inputs: Arc::new(inputs::StoreInputs {
-            settings: b.settings.clone(),
-            rules: b.rules.clone(),
-            rule_sets: b.rule_sets.clone(),
-            always: guard.always.clone(),
-        }),
+        inputs: store_inputs(guard.always.clone()),
         failover: Some(failover.clone()),
         confirmations: Some(Arc::new(monitor::Alive(ip.clone()))),
         timings: Timings::default(),
     });
+    // Tunnel mode in the service while it is installed, everything else here.
+    let runtime = remote::Split::spawn(Arc::new(local), remote.clone(), b.shutdown.child_token());
     let status = runtime.status();
 
     let journal = Arc::new(tweaks::Journal::open(&b.dirs.root, hardening::admit));
@@ -202,6 +221,11 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
             b.shutdown.child_token(),
         ));
     }
+    tokio::spawn(forward(
+        remote.notices(),
+        b.notifier.clone(),
+        b.shutdown.child_token(),
+    ));
     let automation = auto::build(
         b,
         auto::Inputs {
@@ -212,7 +236,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
             reader: auto_reader,
             fingerprints,
             failover,
-            tun: guard.wfp.is_some(),
+            tun: guard.tun_available(),
         },
     );
     automation.spawn_forwarder(Arc::new(runtime.clone()), b.shutdown.child_token());
@@ -220,8 +244,14 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         let (b, lifecycle, guard, soft) =
             (b.clone(), lifecycle.clone(), guard.clone(), soft.clone());
         let (automation, live) = (automation.clone(), live.clone());
+        let remote = remote.clone();
         async move {
             recover(b.clone(), lifecycle, guard, soft, automation.clone()).await;
+            // On its own task: a service still starting with Windows must not hold the rest up.
+            tokio::spawn({
+                let automation = automation.clone();
+                async move { take_over(&remote, &automation).await }
+            });
             let (servers, notifier) = (b.servers.clone(), b.notifier.clone());
             automation
                 .run_tasks(servers, live, notifier, b.shutdown.child_token())
@@ -282,7 +312,7 @@ struct TunnelService {
     /// Automation of this process (scheduler, rotation, hardening, …).
     automation: Arc<Automation>,
     lifecycle: Lifecycle,
-    runtime: TunnelHandle,
+    runtime: remote::Split,
     guard: Arc<guard::Guard>,
     soft: Arc<soft::SoftTweaks>,
     ip: Arc<monitor::IpWatch>,
@@ -350,6 +380,37 @@ async fn recover(
         Err(e) => tracing::error!(error = %e, "startup recovery did not run"),
     }
     lifecycle.fault(FaultState::Unknown);
+}
+
+/// A session the service kept after this app's window crashed (owner question 23) is taken over
+/// by the lifecycle's own connect of the same upstream: it shows as connected again, with its
+/// history and notices. If that connect fails, the session is stopped rather than left running
+/// unseen.
+async fn take_over(remote: &remote::Remote, automation: &Automation) {
+    let Some(kept) = remote.attach().await else {
+        return;
+    };
+    let target = match (kept.server_id, kept.local_proxy) {
+        (Some(id), _) => ConnectTarget::DirectVpn {
+            profile_id: Some(id),
+        },
+        (None, Some(addr)) => ConnectTarget::LocalProxy {
+            addr: addr.to_string(),
+            kind: (remote.parked().and_then(|s| s.proxy_type)).unwrap_or(ProxyKind::Socks5),
+        },
+        (None, None) => return,
+    };
+    let taken = automation
+        .coord
+        .start(target, Owner::Manual, Source::Lifecycle)
+        .await;
+    if let Err(err) = taken {
+        tracing::warn!(error = %err.user_msg().key, "kept session not taken over: stopped");
+        if remote.parked().is_some() {
+            let receipt = vpnte_tunnel::api::Runtime::stop(remote, StopOptions::default()).await;
+            tracing::info!(ok = receipt.ok, "kept session stopped");
+        }
+    }
 }
 
 /// Protection notices (blocked traffic, skipped exceptions, unconfirmed protection) as toasts.

@@ -21,7 +21,8 @@ vpnte-service.workspace = true
 | `host` | the session host: one runtime + kill switch, one controlling client, state changes in arrival order, events, client-gone stop |
 | `users` | Windows users (SIDs) of the service: the installing user and each user's first `Hello`; the last `ForgetMe` removes the service |
 | `scm` | `scm::manage` (create / configure / start / stop / delete, installed binary path), `scm::dispatch` (running under the SCM) |
-| `install` | `install` / `uninstall` (elevated verbs), `remove_self`, `install::image` (the running exe through a locked handle), `install::pins` (SHA-256 against `resources/engines.toml`) |
+| `install` | `install` / `uninstall` (elevated verbs), `remove_self`, `install::flow` (the order of their steps and what follows a failed one, over a `Machine` seam), `install::image` (the running exe through a locked handle), `install::pins` (SHA-256 against `resources/engines.toml`) |
+| `per_user` | what the per-user side runs: `request_install` (the one elevated step, asked of Windows with `runas`), `is_current`, `forget_me`, `status` |
 | `paths` | service name, `%ProgramFiles%\VPN Tunnel Enforcer Service\`, `%ProgramData%\VPN Tunnel Enforcer\` with its private `service\` part (`DataFiles`), `secure_dir` |
 | `service` | the service body (`run`): logging, WFP start-up, runtime, host, sandbox, graceful stop; `trusted_install` / `FolderFault` |
 | `watchdog` | `Engaged` (a capture that records whether a session's filters are held) and `run` (the WFP watchdog exactly while they are) |
@@ -33,9 +34,17 @@ vpnte-service.workspace = true
 ```
 vpnte-service run                          # the SCM's command line ("<exe>" run); not for people
 vpnte-service install [--resources <dir>]  # elevated: copy + pin-check + register + start
-vpnte-service uninstall                    # elevated: stop + delete + WFP objects + folders
+vpnte-service uninstall                    # elevated: stop + WFP objects + delete + folders
+vpnte-service request-install [--resources <dir>]  # per-user: asks Windows to run `install` elevated
+vpnte-service forget-me                    # per-user uninstaller: this Windows user leaves (no prompt)
+vpnte-service status                       # the installed service answers over its pipe (CI smoke)
 ```
-Exit codes 0 / 1 (reason on stderr, English) / 2 (usage). `install` copies this exe and
+Exit codes 0 / 1 (reason on stderr, English) / 2 (usage) / 3 the service stays to remove its
+network filters later (`service.uninstall.filtersKept`: `uninstall`, `forget-me`) / 4 an upgrade
+failed and the service is stopped until Windows starts it (`service.install.notRestarted`) / 5
+nobody approved the prompt (`request-install`; the installer and the app then go on in proxy
+mode). `request-install` asks nothing when the installed service exe is this build byte for byte
+(`per_user::is_current`) and otherwise returns the elevated `install`'s own exit code. `install` copies this exe and
 `sing-box.exe`, `libcronet.dll`, `wintun.dll`, `xray.exe`, `geoip-ru.srs`,
 `geosite-category-gov-ru.srs` (default source `<exe dir>\resources`) into
 `%ProgramFiles%\VPN Tunnel Enforcer Service\`. Everything is read and checked before anything
@@ -51,9 +60,16 @@ the reason), the data folder is secured, the user of the installing Windows sess
 (also when an administrator's credentials elevated the verb), and the service is created or
 updated (LocalSystem, `SERVICE_AUTO_START` again, quoted command line, unrestricted service SID,
 `SERVICE_SDDL`, recovery restart 5 s / 10 s / 60 s reset after a day, also on non-crash
-failures) and started. `uninstall` disables, stops, deletes (a service already marked for
-deletion counts as deleted), removes our WFP objects and both folders; it tries every step and
-reports the first failure, so a rerun finishes what is left. Folders come from
+failures) and started. Any failure after the stop (files, trusted-folder check, data folder,
+registration) gives the service its automatic start back and starts it again — the old files if
+nothing was replaced yet, otherwise what is there, which refuses Tunnel mode with its own reason —
+so an "Always" block it kept stays managed; the original error is returned, or
+`service.install.notRestarted` when even that start failed (review 4555679947, `install::flow`).
+`uninstall` disables, stops, removes our WFP objects, deletes (a service already marked for
+deletion counts as deleted) and removes both folders; it tries every step and reports the first
+failure, so a rerun finishes what is left — except a failed WFP clean-up: then the registration
+and the files stay, the service runs again (its start-up removes leftovers of a level no longer in
+force) and `service.uninstall.filtersKept` is returned (review 4555679938). Folders come from
 `SHGetKnownFolderPath`, never from environment variables.
 
 Threat model of the elevated verbs (review service-a5). They run from the per-user app folder,
@@ -96,13 +112,19 @@ pub enum Reply { Welcome { protocol, service_version }, Started(Option<StartRece
     Stopped(StopReceiptWire), Switched(Option<SwitchReceiptWire>), Status(Box<StatusReply>),
     Done { removing: bool }, Cleaned { filters, sublayer, provider } }
 pub struct StatusReply { pub tunnel: StatusWire /* with SessionWire: Clash secret, proxy creds */,
-    pub last_exit: Option<ExitWire>, pub recent_fault: Option<OutboundFault>, pub protection: ProtectionWire }
+    pub last_exit: Option<ExitWire>, pub recent_fault: Option<OutboundFault>, pub protection: ProtectionWire,
+    pub kept: Option<KeptSession> }   // the running session, for its own user's take-over
+pub struct KeptSession { pub receipt: StartReceiptWire /* current generation, pid, start, engine */,
+    pub server_id: Option<String>, pub local_proxy: Option<SocketAddr> }
 pub enum Event { Status(Box<StatusWire>), Tunnel(TunnelEventWire), Notice(Notice) }
 pub struct WireError { pub code: ErrorCode, pub kind: ErrorKind, pub msg: Msg, pub warnings: Vec<Msg> }
 pub enum ErrorCode { Busy, Version, HelloFirst, BadRequest, Refused, Failed }
 ```
 Wire mirrors convert from the runtime's types and back where the app needs them
-(`TunnelEvent`, `TunStatusKind`, `StopReceipt`, `ExitInfo`, `ProxyEndpoint`).
+(`TunnelEvent`, `TunStatusKind`, `StopReceipt`, `ExitInfo`, `ProxyEndpoint`; `proto::back`:
+`TunStatus` with its `SessionEndpoints`, `StartReceipt`, `SwitchReceipt`, `EngineRun` (a reason of
+the "sing-box only" shape reads as none), `KillSwitchState`, `ProtectionWire::to_status`). A pushed
+`StatusWire` also carries `last_exit` / `recent_fault`, for the session's own user only.
 Request -> runtime call: `Start` = `start`, `Restart` = `restart_protected`, `RestartWithLast`,
 `RestartAdaptive`, `Switch` = `switch_upstream` (owner = this connection alive), `Stop` = `stop`.
 Every start-like request first validates, applies its kill-switch settings (`Protection` level,
@@ -124,6 +146,12 @@ let (protocol, service_version) = c.hello(env!("CARGO_PKG_VERSION")).await?;   /
 let reply = c.call(Request::Start(Box::new(start))).await;  // Err(CallError::Service(WireError))
 let event = c.next_event().await?;              // events queued while a call waited come first
 ```
+A long-lived controller splits the client after its `Hello` (`Client::split` -> `Requests` +
+`Frames`): requests in flight at once (`Requests::id`, then `send`, written on a task of its own so
+a dropped caller never leaves half a frame) and one ordered stream (`Frames::next` ->
+`Incoming::{Event, Answer}`), so a reader that publishes events before completing answers keeps
+"events before the reply". The app's remote runtime (`crates/app/src/svc_tunnel/remote.rs`) is
+built that way.
 `ServerCheck::Image` compares the pipe server's process image (`GetNamedPipeServerProcessId`) with
 the SCM's binary path: a pipe someone else created is refused before anything is sent
 (`service.pipe.notOurs`). A missing service reads as `service.pipe.unavailable`; the other
@@ -148,12 +176,17 @@ is dropped when it comes. A per-user uninstaller sends `ForgetMe` as its first f
   every account and service on the PC: NOADMIN §4 (binding, as with Mullvad). His own server as
   the upstream gives the same reach, so a local proxy or a custom DNS is not restricted further;
   another user's app shows `Busy`, never a silent takeover (review service-b3).
-- The session belongs to the connection: client gone -> start / switch in flight cancelled,
-  kill-switch changes already asked for finished, then `stop(preserve_protection = level in
-  force == strict)`: only "Always" in force keeps its block. A stored `strict` works as "If the
-  VPN drops" until `Protection::set_always_available(true)` (package ks-d; false today). Service
-  STOP / shutdown -> the same stop, the dynamic WFP session closed. The runtime's last exit and
-  recent fault go only to the user whose start they came from.
+- A session outlives a connection that drops without a `Stop` (owner question 23, default: the
+  app's window crashed): a start / switch in flight is cancelled, kill-switch changes already
+  asked for finish, and a running session keeps running. The same Windows user's next app takes
+  it over (`StatusReply::kept`, then a start of the same upstream answered without a second
+  start); a session nobody takes over keeps running until a `Stop` (the user can stop it from the
+  app at any time). Another user's `Hello` ends a kept session of someone else first
+  (`stop(preserve_protection = level in force == strict)`): its secrets and last exit are its
+  user's. Quit and Disconnect send a `Stop`. The service keeps "Always" safe
+  (`Protection::set_always_available(true)` before its start-up). Service STOP / shutdown -> the
+  stop above, the dynamic WFP session closed. The runtime's last exit and recent fault go only to
+  the user whose start they came from.
 - Typed input only (`validate`). Provider JSON (the values of sing-box keys, an XHTTP `extra`, a
   native Xray graph's outbounds, rules, balancers, observatories and policy) may use only keys of
   printable ASCII, no two of one object equal ignoring ASCII case, at any depth: Go's decoder
@@ -179,8 +212,11 @@ is dropped when it comes. A per-user uninstaller sends `ForgetMe` as its first f
   at his first `Hello` (he may use a service another account installed). `ForgetMe` (per-user
   uninstaller; first frame or after `Hello`, no controller slot needed) removes the caller's SID
   and every account Windows no longer knows; a failed save changes nothing (a retry repeats it).
-  The last user leaving makes the service delete its registration, our WFP objects, its engine
-  files and data, then stop. What is in use (the running exe, the open service log) is renamed
+  The last user's leave first stops the tunnel, sets the kill switch off (saved) and removes our
+  WFP objects, before the answer: when that fails he stays recorded and hears
+  `service.uninstall.filtersKept` (the service stays; its start-up removes the leftovers of the
+  now-off level, and his retry repeats the leave). Then the service deletes its registration, its
+  engine files and data, and stops. What is in use (the running exe, the open service log) is renamed
   to `<name>.<time>.deleted`, and only that tombstone, then the emptied folders, are queued for
   deletion at the next restart (`MOVEFILE_DELAY_UNTIL_REBOOT`): a reinstall before that restart
   keeps its files (Windows never deletes a folder that is not empty).
@@ -213,6 +249,7 @@ elevation) — it adds the WFP engine handle and the SCM thread, no timer.
 | `service.folder.untrusted` / `service.folder.fileMissing` | — / `file` | `service::FolderFault::msg` (refused starts) |
 | `service.update.{keyNotSet,badSignature}` | — | `update::UpdateError` |
 | `service.install.{notElevated,imageChanged,failed}`, `service.install.{fileMissing,fileMismatch}` | — / `file` | `install` |
+| `service.install.notRestarted`, `service.uninstall.filtersKept` | — | `install::flow` (exit codes 4 / 3), the last user's `ForgetMe` |
 
 ## Not implemented / not run
 - Not run here (the shell is not elevated): the SCM paths, `install` / `uninstall`, WFP and the
@@ -223,8 +260,14 @@ elevation) — it adds the WFP engine handle and the SCM thread, no timer.
   `sddl::tests::elevated_the_private_folder_grants_users_nothing`,
   `sddl::tests::elevated_installed_files_pass_the_trusted_folder_check`. Never run anywhere: the
   watchdog re-applying filters after a real BFE restart (the gate is unit-tested).
-- Not built (phase 2 / later): the app's `RemoteRuntime` over `Client`, installer verbs and the
-  HKLM uninstall entry, the persistent Wintun adapter (research §5), the signed-update flow
-  beyond the hook, failover / confirmation seams over the pipe (`None` in the service), a
-  non-admin squatting test (the DACL mask is unit-tested).
+- Phase 2 (package svc-wire, 13.11.2026): the app's remote runtime, the installer steps
+  (`request-install` after install / upgrade, `forget-me` on uninstall), `xtask dist` bundling,
+  the smoke-install checks and the CI steps are built. Elevated, CI only (`-- --ignored
+  elevated_`): `tests/elevated_review.rs` (a failed upgrade starts the service again; "Always"
+  filters go before the service, by `uninstall` and by the last user's leave) and the app's
+  `svc_tunnel::remote::elevated::elevated_remote_tun_session_through_the_installed_service`.
+  The filters-kept branch runs only against fakes: a real BFE failure cannot be forced.
+- Not built (later): the HKLM uninstall entry, the persistent Wintun adapter (research §5), the
+  signed-update flow beyond the hook, failover / confirmation seams over the pipe (`None` in the
+  service), a non-admin squatting test (the DACL mask is unit-tested).
 - Smart RU in the service uses the bundled, pinned rule sets, not the app's refreshed copies.

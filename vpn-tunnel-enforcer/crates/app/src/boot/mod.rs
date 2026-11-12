@@ -272,5 +272,6 @@ fn message_box(
     unsafe { MessageBoxW(None, &text, &caption, MB_OK | icon | MB_SETFOREGROUND) };
 }
 
+pub mod service;
 #[cfg(test)]
 mod tests;

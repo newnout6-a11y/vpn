@@ -236,4 +236,9 @@ pub trait TunnelOps: Send + Sync + 'static {
     async fn reclaim_proxy(&self) -> AppResult<()> {
         Ok(())
     }
+    /// The helper service was just installed from Settings: Tunnel mode and "Always" go through
+    /// it from now on (added by svc-wire). `true` when it is there. The default: not available.
+    fn service_installed(&self) -> bool {
+        false
+    }
 }

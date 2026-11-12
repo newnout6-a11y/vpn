@@ -10,7 +10,6 @@ use vpnte_servers::model::{ArchiveReason, ProfileId, ServerRow};
 use vpnte_servers::store::Servers;
 use vpnte_tunnel::api::{Runtime, TunStatus, VpnProfile};
 use vpnte_tunnel::lifecycle::{ExternalProxies, Lifecycle, ProfileSource, ServerChoice};
-use vpnte_tunnel::runtime::TunnelHandle;
 
 use crate::services::Backend;
 use crate::svc_auto::Fingerprints;
@@ -42,7 +41,7 @@ pub(super) fn proxies(b: &Backend, status: watch::Receiver<TunStatus>) -> Arc<Pr
 /// The live check over the backend and this tunnel's published state.
 pub(super) fn live_checks(
     b: &Backend,
-    runtime: &TunnelHandle,
+    runtime: &dyn Runtime,
     lifecycle: &Lifecycle,
 ) -> Option<Arc<LiveCheckService>> {
     let env = AppLiveEnv {

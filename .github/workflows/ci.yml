@@ -152,6 +152,13 @@ jobs:
         run: cargo test -p vpnte-winnet
       - name: 'winnet: real WFP objects and the autostart task'
         run: cargo test -p vpnte-winnet -- --ignored elevated_ --test-threads=1 --nocapture
+      # The helper service: install, pipe, TUN session, upgrade over the running service, the review
+      # fixes (a failed upgrade starts the service again; "Always" filters go before the service),
+      # uninstall. It also builds the service exe the app's end-to-end test installs next.
+      - name: 'service: install, pipe, TUN session, upgrade, uninstall'
+        run: cargo test -p vpnte-service --locked -- --ignored elevated_ --test-threads=1 --nocapture
+      - name: 'app: Tunnel mode through the installed service (end to end)'
+        run: cargo test -p vpnte-app --lib --locked -- --ignored elevated_remote --test-threads=1 --nocapture
       - name: Tests that need elevation
         run: cargo test --workspace --locked --no-fail-fast -- --ignored --test-threads=1
 
@@ -191,7 +198,9 @@ jobs:
         run: cargo xtask dist
       # GitHub sets CI=true; smoke-install refuses to run anywhere else. The installer is per-user (no
       # administrator rights); the runner is elevated, so smoke-install also checks that nothing machine-wide
-      # (HKLM keys, all-users links) was written.
+      # (HKLM keys, all-users links) was written, apart from the helper service it installs on purpose (one
+      # Windows prompt for people, none here): installed, running and answering after the install and the
+      # upgrade, gone with its folder and WFP objects after the uninstall.
       - name: Silent per-user install, upgrade over itself, uninstall
         run: cargo xtask smoke-install
       # The repository is public: only the installer and its checksums, never logs or user data.

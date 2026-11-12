@@ -2,7 +2,9 @@
 //! install into `%LOCALAPPDATA%\Programs`, installed files equal the verified stage, the HKCU registry identity,
 //! the user's shortcuts with the AUMID, nothing machine-wide written (no HKLM key, no all-users link), the
 //! installed engines and app start, an upgrade over itself (chains the installed uninstaller with `--updated`),
-//! silent uninstall, and nothing left behind. Never run it on a machine that matters.
+//! silent uninstall, and nothing left behind. The helper service the installer adds (one Windows prompt; none on
+//! CI's elevated runner) is installed, running and answering after the install and after the upgrade, and gone
+//! after the uninstall with its folder and WFP objects (`service`). Never run it on a machine that matters.
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -16,6 +18,8 @@ use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
 
 use crate::dist;
 use crate::manifest::{self, Expect};
+
+mod service;
 
 const PRODUCT: &str = "VPN Tunnel Enforcer";
 const EXE: &str = "VPN Tunnel Enforcer.exe";
@@ -57,14 +61,17 @@ pub fn run(root: &Path) -> Result<()> {
     check_links_registered(&dir, &free)?;
     check_engines(root, &dir)?;
     check_app(&dir, &version)?;
+    service::check_running(&dir)?;
     // Same version again: the installer must chain the installed uninstaller with --updated and keep shortcuts.
     step("upgrade over itself", || {
         expect_exit(&installer, &["/S"], 0)
     })?;
     check_installed(&dir, &stage, &version)?;
     check_links_registered(&dir, &free)?;
+    service::check_running(&dir)?;
     step("uninstall", || uninstall(&dir))?;
     check_removed(&dir)?;
+    service::check_removed()?;
     check_links_removed(&dir, &free)?;
     println!("smoke-install: OK");
     Ok(())

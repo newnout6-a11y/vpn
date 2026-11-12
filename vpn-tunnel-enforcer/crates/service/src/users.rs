@@ -72,6 +72,12 @@ impl Users {
         Ok(was_known && list.is_empty())
     }
 
+    /// `sid` is recorded and nobody else Windows still knows is: his leave removes the service.
+    pub fn is_last(&self, sid: &str) -> bool {
+        let list = self.list.lock();
+        list.contains(sid) && list.iter().all(|s| s == sid || !(self.exists)(s))
+    }
+
     /// How many users are recorded.
     pub fn len(&self) -> usize {
         self.list.lock().len()

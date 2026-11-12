@@ -1,0 +1,8 @@
+{
+  "app": {
+    "service": {
+      "notShipped": "The helper service is not next to the app. Reinstall the app to get it.",
+      "installFailed": "The helper service could not be installed. The app works in proxy mode."
+    }
+  }
+}

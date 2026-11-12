@@ -11,7 +11,7 @@ use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
 use vpnte_probes::public_ip::IpReader;
 use vpnte_tunnel::lifecycle::Lifecycle;
-use vpnte_tunnel::runtime::{ProxyCapture, TunnelHandle};
+use vpnte_tunnel::runtime::ProxyCapture;
 
 use super::{decide, make_detector};
 use crate::services::Backend;
@@ -47,7 +47,7 @@ pub(super) fn detect(settings: Arc<Store<Settings>>, capture: Arc<ProxyCapture>)
 /// What [`build`] needs from `svc_tunnel::build`.
 pub(super) struct Inputs<'a> {
     pub lifecycle: &'a Lifecycle,
-    pub runtime: &'a TunnelHandle,
+    pub runtime: &'a dyn vpnte_tunnel::api::Runtime,
     pub journal: Arc<Journal>,
     pub capture: Arc<ProxyCapture>,
     pub reader: Arc<IpReader>,

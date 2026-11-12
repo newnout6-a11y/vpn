@@ -31,6 +31,7 @@ vpnte-automation.workspace = true
 vpnte-cleanup.workspace = true
 vpnte-view.workspace = true
 vpnte-ui.workspace = true
+vpnte-service.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 dioxus.workspace = true
