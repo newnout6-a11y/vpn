@@ -212,20 +212,18 @@ impl IpMonitor {
     pub fn stop(&self);  pub fn set_interval(&self, every: Duration) -> bool;   // clamped; true = rescheduled
     pub async fn refresh(&self, conn: ConnId) -> IpEvidence;              // UI refresh, never adopts
     pub async fn adopt_baseline(&self, conn: ConnId, expected: Option<IpAddr>, cancel: &CancellationToken) -> Result<IpAddr, AdoptError>;
-    pub async fn adopt_after_transition(&self, conn: ConnId, routes_active: impl Fn() -> bool, cancel: &CancellationToken) -> Result<IpAddr, AdoptError>;
-    pub async fn auto_verify(&self, conn: ConnId, env: &dyn VerifyEnv, cancel: &CancellationToken) -> VerifyOutcome;
     pub fn set_real_ip(&self, ip: Option<IpAddr>);  pub fn invalidate_baseline(&self);
     pub fn suspend(&self) -> SuspendGuard;  pub fn is_suspended(&self) -> bool;   // guards nest; Drop resumes
     pub fn evidence(&self) -> IpEvidence;   pub fn subscribe(&self) -> watch::Receiver<IpEvidence>;
     pub fn last_alive(&self) -> Option<Instant>;   // TUN-bound read showed the baseline (watchdog liveness)
 }
-pub trait VerifyEnv: Send + Sync { fn is_current(&self, conn: ConnId) -> bool; fn routes_active(&self) -> bool;
-                                   fn self_test(&self) -> BoxFuture<'_, SelfTestResult>; }
-pub enum VerifyOutcome { Adopted(IpAddr), Busy, NotNeeded, RoutesInactive, SafetyGate(SelfTestVerdict), Rejected, Stale, Cancelled }
 ```
 An unknown result is never "passed": no sample → `NotChecked`; a different exit stays
-`Indeterminate` until `auto_verify` adopts it behind a clean leak self-test. Lifecycle: profile swap /
-stop → hold `suspend()`; server swap → `invalidate_baseline()`, restart, `adopt_after_transition`.
+`Indeterminate` until a new session adopts its exit. Lifecycle: profile swap / stop → hold
+`suspend()`; every session start (protected swaps included) → `start(conn, ..)` + `adopt_baseline`.
+Dropped in w3-app-extras (2026-11-12): `adopt_after_transition` (the app re-adopts on every
+session start, a second path would race it) and `auto_verify` / `VerifyEnv` / `VerifyOutcome`
+(its leak self-test gate can pass only in an elevated Hard session with the WFP kill switch on).
 
 ## leak (`vpnte_probes::leak`, items re-exported from `probe`, `self_test`, `watch`, `check`)
 

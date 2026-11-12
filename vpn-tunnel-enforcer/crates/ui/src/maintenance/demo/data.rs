@@ -60,6 +60,7 @@ pub(super) fn capture(scene: Scene) -> CaptureView {
     let now = now_ms();
     match scene {
         Scene::Problems => CaptureView {
+            available: true,
             enabled: true,
             cleanup_pending: true,
             last_error: Some(demo("captureStopError")),
@@ -68,6 +69,7 @@ pub(super) fn capture(scene: Scene) -> CaptureView {
             ..CaptureView::default()
         },
         _ if scene.connected() => CaptureView {
+            available: true,
             enabled: true,
             running: true,
             engine: Some("pktmon".into()),
@@ -104,6 +106,7 @@ pub(super) fn capture(scene: Scene) -> CaptureView {
             ..CaptureView::default()
         },
         _ => CaptureView {
+            available: true,
             enabled: true,
             artifact_count: 3,
             etl_bytes: Some(12_800_000),

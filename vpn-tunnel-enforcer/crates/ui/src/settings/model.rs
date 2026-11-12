@@ -181,6 +181,12 @@ pub struct SettingsState {
     pub browser: BrowserView,
     /// The diagnostics ZIP export (single-flight app-wide) is running.
     pub diagnostics_export_running: bool,
+    /// Tunnel mode (TUN capture) can run in this process (elevated, this phase); otherwise the
+    /// page offers Proxy only and says why, instead of letting a save fail.
+    pub tun_available: bool,
+    /// Packet capture can run in this process; otherwise the switch is greyed out with the
+    /// reason.
+    pub capture_available: bool,
 }
 
 /// A theme the user can pick.

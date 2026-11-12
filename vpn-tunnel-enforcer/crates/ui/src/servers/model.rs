@@ -189,6 +189,9 @@ pub struct ServerView {
     pub engine_plan: Option<EnginePlan>,
     /// uTLS fingerprint the stored profile pins (`None`: the device default applies).
     pub fingerprint: Option<String>,
+    /// What is wrong with the pinned fingerprint (current REALITY servers refuse it, it fails
+    /// everywhere, the engine does not know it); `None` = nothing to say.
+    pub fingerprint_warning: Option<Msg>,
     /// The profile carries a full engine outbound (the «| JSON» suffix of Happ-style labels).
     pub has_outbound: bool,
     pub stealth: Option<Stealth>,

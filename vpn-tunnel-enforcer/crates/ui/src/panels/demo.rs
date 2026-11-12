@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{Notify, watch};
-use vpnte_base::types::{UnixMs, now_ms};
+use vpnte_base::types::{Engine, UnixMs, now_ms};
 use vpnte_base::{AppError, AppResult, Msg};
 use vpnte_view::identity::ServerHealth;
 use vpnte_view::traffic::{HISTORY, TrafficSample};
@@ -192,6 +192,12 @@ fn proxy_row(
         proxy_url: Some(format!("socks5://127.0.0.1:{port}")),
         latency_ms: latency,
         last_error: None,
+        // The demo's VLESS keys are REALITY ones: Xray carries them.
+        engine: Some(if server.protocol.as_deref() == Some("vless") {
+            Engine::Xray
+        } else {
+            Engine::SingBox
+        }),
     }
 }
 

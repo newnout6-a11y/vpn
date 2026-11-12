@@ -118,3 +118,27 @@ fn no_planned_feature_text() {
         }
     }
 }
+
+/// In Proxy mode the kill-switch levels describe the system-proxy hold and strict's need for
+/// the Tunnel (the wizard's texts); in Tunnel mode the WFP descriptions stay.
+#[test]
+fn kill_switch_texts_follow_the_routing_mode() {
+    use super::kill_switch::level_desc_key;
+    use super::model::{KillSwitchLevel as L, RoutingMode as R};
+    assert_eq!(
+        level_desc_key(L::Standard, R::Hard),
+        "onboarding.killSwitchStandardDesc"
+    );
+    assert_eq!(
+        level_desc_key(L::Standard, R::Soft),
+        "ui.wizard.protection.standardSoft"
+    );
+    assert_eq!(
+        level_desc_key(L::Strict, R::Soft),
+        "ui.wizard.protection.strictSoft"
+    );
+    assert_eq!(
+        level_desc_key(L::Off, R::Soft),
+        level_desc_key(L::Off, R::Hard)
+    );
+}

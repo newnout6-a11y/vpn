@@ -3,7 +3,7 @@
     "ip": {
       "verdict": {
         "passed": "VPN exit confirmed",
-        "indeterminate": "Exit IP changed — verifying",
+        "indeterminate": "Exit IP changed — not verified",
         "notChecked": "Not checked",
         "failed": "Your real IP is visible"
       },
@@ -92,7 +92,7 @@
           "realIp": "Your real IP is visible: traffic bypasses the VPN",
           "vpnExit": "Matches the VPN exit",
           "noBaseline": "The VPN exit is not confirmed yet — nothing to compare with",
-          "otherExit": "Differs from the confirmed VPN exit (the server may have changed its IP) — verifying"
+          "otherExit": "Differs from the confirmed VPN exit (the server may have changed its IP) — the new exit is not verified"
         },
         "ipv6": {
           "none": "None",

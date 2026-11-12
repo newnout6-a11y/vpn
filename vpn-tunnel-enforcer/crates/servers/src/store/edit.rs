@@ -1,5 +1,7 @@
 //! Changing the list: soft delete, restore and purge of rows; renaming, deleting and re-pointing
 //! groups; per-row and per-group devices; the per-row engine.
+use std::collections::HashMap;
+
 use vpnte_base::types::{ClientDevice, EnginePref, UnixMs, now_ms};
 use vpnte_base::{AppError, AppResult, Msg};
 
@@ -125,10 +127,37 @@ impl Servers {
                     return Err(AppError::validation(Msg::new("servers.group.keepManual")));
                 }
                 let target = doc.ensure_manual_group(now);
-                for row in doc.profiles.iter_mut().filter(|r| &r.group_id == id) {
+                // Duplicates are kept apart only within a group: a key the manual group already
+                // holds stays there once, and the copy of the deleted group goes with it.
+                let mut held: HashMap<[u8; 16], ProfileId> = doc
+                    .profiles
+                    .iter()
+                    .filter(|r| r.group_id == target)
+                    .filter_map(|r| Some((r.identity()?, r.id.clone())))
+                    .collect();
+                let mut replaced = Vec::new();
+                doc.profiles.retain_mut(|row| {
+                    if &row.group_id != id {
+                        return true;
+                    }
+                    if let Some(identity) = row.identity() {
+                        if let Some(kept) = held.get(&identity) {
+                            dropped.push(row.id.clone());
+                            replaced.push((row.id.clone(), kept.clone()));
+                            return false;
+                        }
+                        held.insert(identity, row.id.clone());
+                    }
                     row.group_id = target.clone();
                     row.origin = Origin::Manual;
                     row.missing_since = None;
+                    true
+                });
+                // The selection follows its key to the copy the manual group keeps.
+                if let Some(active) = &doc.active_profile_id
+                    && let Some((_, kept)) = replaced.iter().find(|(gone, _)| gone == active)
+                {
+                    doc.active_profile_id = Some(kept.clone());
                 }
             }
             doc.groups.retain(|g| &g.id != id);

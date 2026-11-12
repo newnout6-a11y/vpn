@@ -5,12 +5,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::Verdict;
-use vpnte_probes::geo::{LookupOwner, geo_routes};
+use vpnte_base::types::{Verdict, now_ms};
+use vpnte_probes::geo::LookupOwner;
+use vpnte_servers::model::{CountrySource, ProfileId, VerifiedCountry};
+use vpnte_servers::store::Servers;
+use vpnte_tunnel::fsm::TunnelSnapshot;
 use vpnte_winnet::adapters;
 
 use super::{Hub, project};
+use crate::support::blocking;
 
 /// Debounce of the network-change watch (adapter added / removed, address changed).
 const NET_SETTLE: Duration = Duration::from_millis(1500);
@@ -149,15 +154,6 @@ fn scan_foreign() -> Option<String> {
     }
 }
 
-/// A lookup owner that wants its answer until the token is cancelled.
-struct Wanted(CancellationToken);
-
-impl LookupOwner for Wanted {
-    fn is_current(&self) -> bool {
-        !self.0.is_cancelled()
-    }
-}
-
 impl Hub {
     /// A new snapshot: every transition clears the leak verdict (a check in flight then lands
     /// nowhere), a settled one re-reads the kill switch, and the exit's country follows.
@@ -185,22 +181,32 @@ impl Hub {
         self.update_geo();
     }
 
-    /// Starts or abandons the country lookup of the exit address: one per adopted exit of our
-    /// running TUN; a lookup whose address is no longer the one to show is cancelled.
+    /// Starts or abandons the verification of the exit's country: one per adopted exit of our
+    /// running session; a lookup whose address is no longer the one to show is cancelled. A
+    /// verified country names the exit line and is recorded on the session's server row, so the
+    /// start page's node shows the country the server really exits in.
     fn update_geo(self: &Arc<Self>) {
         let Some(w) = &self.watches else {
             return;
         };
-        let target = project::geo_target(&w.snapshot.borrow(), &w.evidence.borrow());
+        let target = {
+            let snap = w.snapshot.borrow();
+            let settings = self.backend.settings.snapshot();
+            project::geo_target(&snap, &w.evidence.borrow()).zip(project::geo_route(
+                &snap,
+                &w.status.borrow(),
+                &settings,
+            ))
+        };
         let mut local = self.local.lock();
         if let Some((ip, job)) = &local.geo_job {
-            if Some(*ip) == target {
+            if Some(*ip) == target.as_ref().map(|(ip, _)| *ip) {
                 return;
             }
             job.cancel();
         }
         local.geo_job = None;
-        let Some(ip) = target else {
+        let Some((ip, routes)) = target else {
             return;
         };
         if local.geo.is_some_and(|(at, _)| at == ip) {
@@ -209,22 +215,67 @@ impl Hub {
         let token = self.backend.shutdown.child_token();
         local.geo_job = Some((ip, token.clone()));
         drop(local);
-        let routes = self.backend.settings.read(|s| geo_routes(s, true));
+        let server = w
+            .tunnel
+            .session()
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.server_id().map(ProfileId::from));
+        let owner = Arc::new(ExitOwner {
+            token: token.clone(),
+            generation: self.backend.servers.geo_generation(),
+            servers: self.backend.servers.clone(),
+            snapshot: w.snapshot.clone(),
+        });
         let hub = self.clone();
         tokio::spawn(async move {
-            let owner = Arc::new(Wanted(token.clone()));
-            let found = hub.backend.geo.country(ip, routes, owner).await;
+            let generation = owner.generation;
+            let verified = hub.backend.geo.verify_exit(ip, routes, owner).await;
             {
                 let mut local = hub.local.lock();
                 if token.is_cancelled() {
                     return;
                 }
                 local.geo_job = None;
-                if let Some(code) = found {
-                    local.geo = Some((ip, code));
+                match verified {
+                    Ok(code) => local.geo = Some((ip, code)),
+                    Err(reason) => tracing::debug!(?reason, "exit country not verified"),
                 }
             }
             hub.publish_dashboard();
+            if let (Ok(iso2), Some(id)) = (verified, server) {
+                let servers = hub.backend.servers.clone();
+                let country = VerifiedCountry {
+                    iso2,
+                    at: now_ms(),
+                    ip: Some(ip),
+                    source: CountrySource::ExitIp,
+                };
+                let recorded =
+                    blocking(move || servers.record_country(&id, country, generation)).await;
+                if let Err(e) = recorded {
+                    tracing::warn!(error = %e, "verified exit country not recorded");
+                }
+            }
         });
+    }
+}
+
+/// The owner of one exit verification: current while its job is wanted and no server was
+/// selected since it began; a tunnel transition in flight makes the exit meaningless.
+struct ExitOwner {
+    token: CancellationToken,
+    generation: u64,
+    servers: Arc<Servers>,
+    snapshot: watch::Receiver<TunnelSnapshot>,
+}
+
+impl LookupOwner for ExitOwner {
+    fn is_current(&self) -> bool {
+        !self.token.is_cancelled() && self.servers.geo_generation() == self.generation
+    }
+
+    fn switching(&self) -> bool {
+        self.snapshot.borrow().transition.is_some()
     }
 }

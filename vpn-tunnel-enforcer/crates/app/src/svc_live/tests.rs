@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 use tokio::sync::watch;
-use vpnte_base::types::{ClientDevice, Owner, now_ms};
+use vpnte_base::types::{ClientDevice, EnginePref, Owner, now_ms};
 use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
 use vpnte_engine::routing::RulesDoc;
@@ -249,4 +249,24 @@ fn live_check_texts_are_registered() {
         .find(|(_, en)| en.contains("\"profileNotFound\""))
         .expect("probes-live fragment");
     assert!(layers.contains(&(*ru, *en)));
+}
+
+/// The check runs a server on the engine the row chose (an Xray-only server must not be probed
+/// with sing-box); a row without a choice, or one gone since, follows the setting (`Auto`).
+#[test]
+fn the_check_uses_the_rows_engine() {
+    use vpnte_probes::live::LiveEnv;
+    let dir = TempDir::new("engine");
+    let servers = Arc::new(Servers::open(&dir.0));
+    let profile = vpnte_profiles::uri::parse_uri(KEY).unwrap();
+    let target = AddTarget::Keys {
+        group: None,
+        device: ClientDevice::default(),
+    };
+    let id = servers.add(vec![profile], target).unwrap().added[0].clone();
+    let env = env(&dir, &servers);
+    assert_eq!(env.server_engine(id.as_str()), EnginePref::Auto);
+    servers.set_profile_engine(&id, EnginePref::Xray).unwrap();
+    assert_eq!(env.server_engine(id.as_str()), EnginePref::Xray);
+    assert_eq!(env.server_engine("gone"), EnginePref::Auto);
 }

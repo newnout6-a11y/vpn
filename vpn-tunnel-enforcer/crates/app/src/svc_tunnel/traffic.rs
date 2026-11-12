@@ -1,4 +1,5 @@
-//! [`Forensics`] of a session: traffic counters and the domain history (no packet capture).
+//! [`Forensics`] of a session: traffic counters, the domain history and the system snapshots
+//! around it (no packet capture).
 //!
 //! Counters come from the engine's Clash API totals for both captures: the forensics
 //! `RateSampler` reads a TUN adapter by LUID, and a Soft (proxy capture) session has no adapter.
@@ -7,20 +8,47 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use serde_json::{Map, Value};
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{UnixMs, now_ms};
+use vpnte_core::settings::Settings;
+use vpnte_core::store::Store;
 use vpnte_engine::clash_api::{ClashApi, ClashEndpoint as EngineEndpoint};
 use vpnte_forensics::connections::ClashEndpoint;
 use vpnte_forensics::domains::HistoryService;
 use vpnte_forensics::traffic::{
     BURSTINESS_WINDOW, SAMPLE_INTERVAL, SMOOTHING_ALPHA, TrafficStats, burstiness, smooth,
 };
+use vpnte_probes::diagnostics::snapshot::AppState;
+use vpnte_probes::diagnostics::{SnapshotReason, Snapshotter};
 use vpnte_servers::store::Servers;
 use vpnte_tunnel::api::TunStatus;
 use vpnte_tunnel::history::SessionMode;
 use vpnte_tunnel::lifecycle::Forensics;
+
+/// What a system snapshot records of the app: the runtime status (its session endpoints, which
+/// hold secrets, are never serialized) and the protection settings in force.
+pub(super) fn app_state(
+    status: watch::Receiver<TunStatus>,
+    settings: Arc<Store<Settings>>,
+) -> AppState {
+    Arc::new(move || {
+        let mut state = Map::new();
+        let tunnel = serde_json::to_value(&*status.borrow()).unwrap_or(Value::Null);
+        state.insert("tunnel".into(), tunnel);
+        let (routing, kill_switch) = settings.read(|s| {
+            (
+                serde_json::to_value(s.routing_mode).unwrap_or(Value::Null),
+                serde_json::to_value(s.kill_switch).unwrap_or(Value::Null),
+            )
+        });
+        state.insert("routingMode".into(), routing);
+        state.insert("killSwitch".into(), kill_switch);
+        state
+    })
+}
 
 /// Counters and domain history of the running session.
 pub(super) struct SessionForensics {
@@ -28,6 +56,8 @@ pub(super) struct SessionForensics {
     status: watch::Receiver<TunStatus>,
     domains: Arc<HistoryService>,
     servers: Arc<Servers>,
+    /// System snapshots around each session (support reads them in the diagnostics archive).
+    snapshots: Arc<Snapshotter>,
     sampling: Mutex<Option<CancellationToken>>,
     shutdown: CancellationToken,
 }
@@ -37,6 +67,7 @@ impl SessionForensics {
         status: watch::Receiver<TunStatus>,
         domains: Arc<HistoryService>,
         servers: Arc<Servers>,
+        snapshots: Arc<Snapshotter>,
         shutdown: CancellationToken,
     ) -> Self {
         Self {
@@ -44,6 +75,7 @@ impl SessionForensics {
             status,
             domains,
             servers,
+            snapshots,
             sampling: Mutex::new(None),
             shutdown,
         }
@@ -59,6 +91,12 @@ impl SessionForensics {
         if let Err(e) = self.domains.flush().await {
             tracing::warn!(error = %e, "domain history not flushed");
         }
+    }
+
+    /// A snapshot in the background: the session's start or stop never waits for it.
+    fn snapshot(&self, reason: SnapshotReason) {
+        let snapshots = self.snapshots.clone();
+        tokio::spawn(async move { snapshots.capture(reason).await });
     }
 }
 
@@ -78,6 +116,7 @@ impl Forensics for SessionForensics {
             self.domains.clone(),
             token,
         ));
+        self.snapshot(SnapshotReason::TunPostStart);
     }
 
     async fn stop_session(&self, _reason: &str) -> bool {
@@ -88,6 +127,7 @@ impl Forensics for SessionForensics {
             tracing::warn!(error = %e, "domain history polling did not stop cleanly");
         }
         self.tx.send_replace(TrafficStats::empty("", now_ms()));
+        self.snapshot(SnapshotReason::TunPostStop);
         // No packet capture in this build: nothing whose stop could be unconfirmed.
         true
     }

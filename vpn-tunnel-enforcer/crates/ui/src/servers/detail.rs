@@ -194,6 +194,9 @@ fn DetailBody(id: String) -> Element {
                 p { class: "srv-strip is-warn", {t!("ui.servers.detail.deleted", when = when)} }
             }
             DeviceRow { id: id.clone(), device: server.device, fingerprint, connected }
+            if let Some(warning) = &server.fingerprint_warning {
+                p { class: "srv-strip is-warn", "data-fingerprint-warning": "", {crate::lang::tr(warning)} }
+            }
             if let Some(group) = group {
                 section { class: "srv-detail-card",
                     h3 { class: "swiss-label", {t!("serverDetail.group")} }

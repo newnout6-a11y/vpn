@@ -5,7 +5,9 @@
 use vpnte_base::Msg;
 use vpnte_base::i18n::Lang;
 use vpnte_probes::live::{self as live, CheckMode, EngineRoute, TunnelState};
-use vpnte_probes::live_stages::dns::{DnsRecordType, DnsResolverComparison, ResolverStatus};
+use vpnte_probes::live_stages::dns::{
+    DnsRecordType, DnsResolverComparison, ResolverStatus, resolver_label,
+};
 use vpnte_probes::live_stages::tcp::PortState;
 use vpnte_probes::live_stages::{self as stages, Text, TimedStatus};
 use vpnte_ui::servers as ui;
@@ -132,14 +134,14 @@ fn dns(d: &stages::DnsDiagnostics, reverse: &[String], lang: Lang) -> ui::DnsDia
         cname_chain: d.cname_chain.clone(),
         ttl: d.ttl,
         reverse_dns: reverse.to_vec(),
-        resolvers: d.resolvers.iter().map(resolver).collect(),
+        resolvers: d.resolvers.iter().map(|r| resolver(r, lang)).collect(),
         discrepancies: d.discrepancies.iter().map(|t| text(t, lang)).collect(),
     }
 }
 
-fn resolver(r: &DnsResolverComparison) -> ui::ResolverAnswer {
+fn resolver(r: &DnsResolverComparison, lang: Lang) -> ui::ResolverAnswer {
     ui::ResolverAnswer {
-        name: r.resolver_id.clone(),
+        name: text(&resolver_label(&r.resolver_id), lang),
         status: match r.status {
             ResolverStatus::Ok => ui::StageStatus::Ok,
             ResolverStatus::Partial => ui::StageStatus::Warning,

@@ -3,23 +3,43 @@
 //! one operation of the registry (single flight app-wide, resource `diagnostics:export`) while
 //! its stages are published in `state.export`. The archive is written next to the destination
 //! and renamed over it only when complete; the token stops it (`Cancelled`, shown silently).
-use std::path::PathBuf;
+use std::future::Future;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use serde::Serialize;
+use serde_json::{Value, json};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use vpnte_automation::tweaks::{self, Feature};
 use vpnte_base::types::now_ms;
 use vpnte_base::{AppError, AppResult, Msg};
 use vpnte_core::ops::Source;
+use vpnte_core::settings::Settings;
+use vpnte_core::store::{Document, Mode, Store};
+use vpnte_engine::{singbox_process, xray_process};
+use vpnte_forensics::capture::{
+    Capture, CaptureConfig, CapturePrefs, WindowsSystem, store as capture_store,
+};
 use vpnte_forensics::export::{
     self, ExportInputs, ExportProgress, ExportRequest, ExportStage, NoticeSink, RESOURCE,
+    RecoveryArtifact, RecoveryRead,
 };
+use vpnte_tunnel::runtime::EngineFeed;
 use vpnte_ui::maintenance::{ExportDone, ExportView};
 
 use super::{Shared, refused};
+use crate::services::Engines;
 use crate::support::detached;
 use crate::support::files::{SaveFile, StartFolder, save_file};
+
+/// What only the tunnel side holds for the archive (pages built without a tunnel have none).
+pub(crate) struct ExportSources {
+    pub feed: EngineFeed,
+    pub journal: Arc<tweaks::Journal>,
+}
 
 /// Asks for the destination and packs the archive; `Ok(None)` = the dialog was dismissed.
 pub(crate) async fn run(
@@ -58,7 +78,7 @@ async fn pack(
     let notices: NoticeSink = Arc::new(move |_| flag.store(true, Ordering::Relaxed));
     let request = ExportRequest {
         dest,
-        inputs: inputs(&shared),
+        inputs: inputs(&shared).await,
         source: Source::Ui,
         progress,
         notices: Some(notices),
@@ -90,17 +110,129 @@ async fn pack(
     })
 }
 
-/// What goes into the archive besides the logs: settings, the last system report, snapshots.
-fn inputs(shared: &Shared) -> ExportInputs {
+/// What goes into the archive besides the logs: settings, the last system report, the engines'
+/// versions and the last engine config (redacted by the export's config policy), the recovery
+/// state, snapshots, and the newest stored capture session if an earlier run left one.
+async fn inputs(shared: &Shared) -> ExportInputs {
     let backend = &shared.backend;
+    let settings = backend.settings.snapshot();
+    let sources = shared.sources.as_ref();
+    let mut recovery = vec![
+        stored("protection", &backend.protection),
+        stored("legacy-network-cleanup", &backend.cleanup),
+    ];
+    recovery.extend(sources.map(|s| journal(&s.journal)));
     ExportInputs {
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
-        settings: backend.settings.snapshot(),
+        engine_versions: engine_versions(&backend.engines).await,
+        capture: capture(&settings),
+        settings,
         logs_dir: Some(backend.dirs.logs.clone()),
         system_diagnostics: shared.last_report.lock().clone(),
+        engine_configs: sources.map(|s| engine_configs(&s.feed)).unwrap_or_default(),
+        recovery,
         snapshots_dir: Some(vpnte_probes::diagnostics::snapshot::dir(&backend.dirs.root)),
         ..ExportInputs::default()
     }
+}
+
+/// `1.14.4` per engine, through the engine crate's pinned one-shot `version` runs; `missing`
+/// without the file, `failed (<why>)` when the run did not answer.
+pub(crate) async fn engine_versions(engines: &Engines) -> Vec<(String, String)> {
+    let (singbox, xray) = tokio::join!(
+        version_of(
+            &engines.singbox,
+            singbox_process::engine_version(&engines.singbox)
+        ),
+        version_of(&engines.xray, xray_process::engine_version(&engines.xray)),
+    );
+    vec![("sing-box".into(), singbox), ("xray".into(), xray)]
+}
+
+async fn version_of(exe: &Path, run: impl Future<Output = io::Result<(u16, u16, u16)>>) -> String {
+    if !exe.is_file() {
+        return "missing".into();
+    }
+    match run.await {
+        Ok((major, minor, patch)) => format!("{major}.{minor}.{patch}"),
+        Err(e) => format!("failed ({e})"),
+    }
+}
+
+/// The config of the last core started in this run (held in memory only).
+pub(crate) fn engine_configs(feed: &EngineFeed) -> Vec<(String, Value)> {
+    let Some(bytes) = feed.last_config() else {
+        return Vec::new();
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(config) => vec![("sing-box".into(), config)],
+        Err(e) => {
+            tracing::warn!(error = %e, "diagnostics export: engine config not JSON, skipped");
+            Vec::new()
+        }
+    }
+}
+
+/// A recovery document as its store holds it: a read-only store (newer, corrupt, unreadable)
+/// is not trusted, a file never written is absent.
+pub(crate) fn stored<T: Document + Serialize>(
+    artifact: &str,
+    store: &Store<T>,
+) -> RecoveryArtifact {
+    let read = match store.mode() {
+        Mode::ReadOnly(_) => RecoveryRead::Untrusted,
+        Mode::Writable if !store.path().is_file() => RecoveryRead::Absent,
+        Mode::Writable => store
+            .read(|doc| serde_json::to_value(doc))
+            .map_or(RecoveryRead::Untrusted, RecoveryRead::Trusted),
+    };
+    RecoveryArtifact {
+        artifact: artifact.into(),
+        file: T::FILE.rsplit('/').next().unwrap_or(T::FILE).into(),
+        read,
+    }
+}
+
+/// Which system tweaks are still held and how many changes each holds. No values or targets:
+/// a baseline can be the user's own proxy with its credentials.
+pub(crate) fn journal(journal: &tweaks::Journal) -> RecoveryArtifact {
+    const FEATURES: [Feature; 7] = [
+        Feature::SoftProxy,
+        Feature::SoftEnv,
+        Feature::DevGit,
+        Feature::DevGradle,
+        Feature::DevStudio,
+        Feature::BrowserWebRtc,
+        Feature::LocationPrivacy,
+    ];
+    let read = if journal.notice().is_some() {
+        RecoveryRead::Untrusted
+    } else {
+        let held: Vec<Value> = FEATURES
+            .iter()
+            .map(|&feature| (feature, journal.records(feature).len()))
+            .filter(|(_, n)| *n > 0)
+            .map(|(feature, n)| json!({ "feature": feature, "records": n }))
+            .collect();
+        RecoveryRead::Trusted(json!({ "held": held }))
+    };
+    RecoveryArtifact {
+        artifact: "tweak-journal".into(),
+        file: "tweaks.json".into(),
+        read,
+    }
+}
+
+/// The capture root as an idle capture: this build starts no capture (a service-hosted
+/// feature), but a session an earlier run stored there is packed with its summary.
+fn capture(settings: &Settings) -> Option<Capture> {
+    let root = capture_store::default_root()?;
+    let config = CaptureConfig::new(settings, &CapturePrefs::default());
+    Some(Capture::new(
+        root,
+        watch::channel(config).1,
+        Arc::new(WindowsSystem),
+    ))
 }
 
 fn publish(shared: &Shared, progress: Option<ExportProgress>) {

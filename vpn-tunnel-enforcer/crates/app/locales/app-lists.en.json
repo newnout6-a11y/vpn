@@ -6,7 +6,6 @@
         "fileMissing": "The program file was not found: choose it again."
       },
       "traffic": {
-        "readFailed": "Could not read the traffic history.",
         "badLink": "This link cannot be opened."
       }
     }

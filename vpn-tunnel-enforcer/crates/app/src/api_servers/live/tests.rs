@@ -48,7 +48,9 @@ fn stored() -> LiveCheck {
         "host": "203.0.113.20", "port": 443, "mode": "extended",
         "startedAt": 1_700_000_000_000_u64, "finishedAt": 1_700_000_005_000_u64, "durationMs": 5000,
         "tunnel": {"state": "up"},
-        "dns": {"status": "ok", "durationMs": 12, "a": ["203.0.113.20"]},
+        "dns": {"status": "ok", "durationMs": 12, "a": ["203.0.113.20"],
+                "resolvers": [{"resolverId": "google-doh", "status": "ok"},
+                              {"resolverId": "quad9-doh", "status": "ok"}]},
         "reachability": {"status": "ok", "durationMs": 30, "tcpReachable": true, "port": 443},
         "latency": {"min": 20, "avg": 25, "median": 24, "max": 40, "jitter": 5, "loss": 0.25,
                     "samples": [20, 24, 40], "samplesAttempted": 4},
@@ -84,6 +86,10 @@ fn a_stored_row_becomes_the_page_receipt() {
         (ui::LiveMode::Extended, Some(true))
     );
     assert_eq!((c.duration_ms, c.dns.a.len()), (5000, 1));
+    // Known resolvers by their label, one this build does not know by its stored id.
+    let names: Vec<&str> = c.dns.resolvers.iter().map(|r| r.name.as_str()).collect();
+    let google = Msg::new("probes.liveStages.dns.resolver.googleDoh").render(Lang::En);
+    assert_eq!(names, [google.as_str(), "quad9-doh"]);
     let latency = c.latency.expect("latency");
     assert_eq!((latency.attempted, latency.succeeded), (Some(4), Some(3)));
     let infra = c.infrastructure.expect("infrastructure");

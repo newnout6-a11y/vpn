@@ -6,9 +6,10 @@ use std::num::NonZeroU32;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use vpnte_base::Msg;
 use vpnte_base::i18n::Lang;
-use vpnte_base::types::{EnginePref, UnixMs};
-use vpnte_engine::xray_config::{Decision, select_engine, server_pref};
+use vpnte_base::types::{Engine, EnginePref, UnixMs};
+use vpnte_engine::xray_config::{self, Decision, select_engine, server_pref};
 use vpnte_profiles::caps;
 use vpnte_profiles::model::{Profile, Source as ProfileSource};
 use vpnte_servers::model::{
@@ -27,6 +28,8 @@ pub(super) struct RowExtras {
     pub last_seen_at: Option<UnixMs>,
     pub stealth: Option<ui::Stealth>,
     pub fingerprint: Option<String>,
+    /// The engine's warning about that fingerprint (see [`fingerprint_warning`]).
+    pub fingerprint_warning: Option<Msg>,
     pub has_outbound: bool,
     /// What a connect would run under the current setting and the row's own choice.
     pub engine_plan: Option<ui::EnginePlan>,
@@ -39,6 +42,9 @@ impl RowExtras {
     /// none of the profile facts.
     pub(super) fn of(row: &ServerRow, setting: EnginePref) -> Self {
         let profile = row.profile().ok();
+        let plan = profile
+            .as_ref()
+            .map(|p| engine_plan(p, server_pref(setting, row.engine)));
         Self {
             exit_ip: exit_ip(row),
             last_seen_at: row.last_seen_at,
@@ -48,16 +54,34 @@ impl RowExtras {
             fingerprint: profile
                 .as_ref()
                 .and_then(|p| p.tls.as_ref()?.fingerprint.clone()),
-            has_outbound: profile.as_ref().is_some_and(has_outbound),
-            engine_plan: profile
+            fingerprint_warning: profile
                 .as_ref()
-                .map(|p| engine_plan(p, server_pref(setting, row.engine))),
+                .and_then(|p| fingerprint_warning(p, plan.as_ref())),
+            has_outbound: profile.as_ref().is_some_and(has_outbound),
+            engine_plan: plan,
             verdict: row
                 .verdict
                 .as_ref()
                 .and_then(|v| verdict::view(v, row.health.as_ref())),
         }
     }
+}
+
+/// The engine's warning about the provider-pinned uTLS fingerprint. A fingerprint current
+/// REALITY servers refuse, or one that fails everywhere, matters on both engines (sing-box
+/// sends a known provider fingerprint as is); "unknown to Xray, replaced" only when Xray runs.
+pub(super) fn fingerprint_warning(p: &Profile, plan: Option<&ui::EnginePlan>) -> Option<Msg> {
+    let xray = matches!(
+        plan,
+        Some(ui::EnginePlan::Runs {
+            engine: Engine::Xray,
+            ..
+        })
+    );
+    xray_config::warnings(p, false).into_iter().find(|m| {
+        m.key.starts_with("engine.xray.warn.fingerprint")
+            && (xray || m.key != "engine.xray.warn.fingerprintUnknown")
+    })
 }
 
 /// The tunnel's own selection rule for `p` (the same function the start runs).
@@ -158,6 +182,7 @@ fn server(s: &ServerSummary, x: &RowExtras, ips: &HashMap<String, IpAddr>) -> ui
         engine: s.engine,
         engine_plan: x.engine_plan.clone(),
         fingerprint: x.fingerprint.clone(),
+        fingerprint_warning: x.fingerprint_warning.clone(),
         has_outbound: x.has_outbound,
         stealth: x.stealth,
         ping_ms: s.ping.and_then(|p| p.rtt_ms),

@@ -212,7 +212,9 @@ pub struct Toasts;                               // Copy handle of the app-wide 
 impl Toasts { fn use_provider() -> Self /*app root, once*/; fn use_context() -> Self;
     fn success/error/warning/info(&self, title: impl Into<String>, description: Option<String>) -> u64;
     fn push(&self, kind: ToastKind, title, description) -> u64; fn dismiss(&self, id: u64);
-    fn list(&self) -> Vec<Toast> /*oldest first, subscribes*/; }
+    fn list(&self) -> Vec<Toast> /*oldest first, subscribes*/;
+    fn failed(&self, title: &Msg, err: &AppError); }   // an action's failure: silent when Cancelled, else a
+                                                    // warn log + error toast `title` / `err.user_msg()`
 #[component] pub fn ToastHost(close_label: String) -> Element;      // into Shell { toasts }
 pub const TOAST_TTL: Duration /*4 s*/; pub const TOAST_LIMIT: usize /*20*/;
 
@@ -287,7 +289,8 @@ pub struct ServerRowView { id, name, country: Option<String>, protocol: Option<S
     health: vpnte_view::identity::ServerHealth, checked_at: Option<UnixMs> }
 pub struct ProxiesView { pub rows: Vec<ProxyRowView>, pub choices: Vec<ProxyChoice> }
 pub struct ProxyRowView { slot: u16, process_running, ready: bool, health: ProxyHealth, profile_name, country,
-    proxy_url: Option<String>, port: Option<u16>, latency_ms: Option<u32>, last_error: Option<Msg> }
+    proxy_url: Option<String>, port: Option<u16>, latency_ms: Option<u32>, last_error: Option<Msg>,
+    engine: Option<Engine> /* while running; the meta line names it: «:18001 · Xray · 46 мс» */ }
 pub enum ProxyHealth { Stopped, Starting, Healthy, Degraded, Rotating, Quarantined, Failed }
 pub struct ProxyChoice { id, name, country, protocol, health: ServerHealth, in_proxy: bool, vpn_server: bool }
 pub enum Selected { Done, Cancelled }
@@ -440,6 +443,9 @@ at the top of the receipt and a line under the batch table),
 `engine_name` (product spelling, shared by every page), `fingerprint(&ServerView)` (the uTLS hello a
 connect sends: the provider's pin, else the emitters' default — `chrome` for REALITY under sing-box,
 never `android` / `ios` under Xray; replaces `default_fingerprint(device)`).
+`ServerView::fingerprint_warning: Option<Msg>`: the engine's `engine.xray.warn.fingerprint*` about a
+provider-pinned fingerprint (current REALITY servers refuse it, it fails everywhere, Xray does not
+know it), shown as a warning strip in the server detail.
 Demo: `DemoServersApi` with `DemoScene`.
 
 App duties: `ServerView.stealth` from `vpnte_profiles::caps`; finding titles / details and skipped-line
@@ -503,7 +509,9 @@ pub trait SettingsApi: 'static {     // root component SettingsPage; a dismissed
 pub struct SettingsState { settings: SettingsView, locale: Option<Lang>, active_theme_id: String,
     themes: Vec<ThemeChoice>, autostart, location_privacy, proxy_credentials_saved, capture_consent_given: bool,
     capture_used_bytes: Option<u64>, connected, direct_session: bool, adaptive: AdaptiveView,
-    rule_sets: RuleSetView, browser: BrowserView, diagnostics_export_running: bool }
+    rule_sets: RuleSetView, browser: BrowserView, diagnostics_export_running: bool,
+    tun_available: bool /* false: Proxy only, the reason under the routing choice */,
+    capture_available: bool /* false: the capture switch greyed out with the reason */ }
 ```
 `SettingsView` (live values) and `SettingsPatch` (one `Option` per field, `apply_to`) are generated
 from one field list: `connection_mode, routing_mode, soft_git, soft_gradle, soft_studio, proxy_engine,
@@ -537,7 +545,8 @@ pub trait LogsApi: 'static {         // root component LogsPage (active-only: mo
 pub struct LogsSnapshot { pub history: Load<Arc<[SessionRow]>> }
 ```
 Types: `SessionRow`, `Outcome { kind: OutcomeKind, headline: Text, evidence }`, `Text` (a `Msg` or
-plain imported text), `Evidence` / `EvidenceKey` / `EvidenceValue`, `DisconnectReason`, `Mode`,
+plain imported text), `Evidence` (with `proxy_engine_reason: Option<Text>`, key `proxyEngineReason`) /
+`EvidenceKey` / `EvidenceValue`, `DisconnectReason`, `Mode`,
 `ExportFormat { Csv, Json }`, `LogSource { App, SingBox, Xray }`, `LogTail`, `ClearReport` /
 `ArtifactReport`; history rules `Filters`, `Query`, `Period`, `SortState`, `Stats`, `split`, `stats`,
 `sort_rows`; journal parsing `JournalLine`, `LineLevel`, `LevelFilter`, `parse_line`, `journal`;
@@ -634,7 +643,8 @@ pub struct MaintenanceState { tunnel: TunnelPhase, protection: Option<Protection
 Types: `SystemReport` / `DiagItem` / `DiagCategory`, `ProtectionView` (+ `KillSwitchState`,
 `FirewallBlock`, `FwProfile`, `ProtectionTest`), `RepairStep` (`ALL`, run in order, each independent),
 `StepOutcome` (`done` / `failed(msg)` / `blocked(msg)`), `StepState`, `RepairView`, `LeakTestView`
-(+ `LeakVerdict`, `AdapterProbe`, `ProbeReach`), `RouteTestView` / `RouteVerdict`, `CaptureView`,
+(+ `LeakVerdict`, `AdapterProbe`, `ProbeReach`), `RouteTestView` / `RouteVerdict`, `CaptureView` (`available:
+false` disables «restart» up front, the first warning says why),
 `EtwView`, `Counted`, `FaultView`, `ExportView`, `ExportDone`, `LegacyView` (+ `LegacyDir`,
 `CorruptStore`), `SecretsImport`, `rules::Outcome` (`vpnte_ui::maintenance::Outcome`). Demo:
 `maintenance::demo::DemoMaintenanceApi` (scenes `default`, `off`, `problems`, `leak`, `inconclusive`).

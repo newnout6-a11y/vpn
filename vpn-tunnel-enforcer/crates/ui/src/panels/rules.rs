@@ -171,12 +171,18 @@ pub fn proxy_dot_title(row: &ProxyRowView) -> Msg {
 }
 
 /// The meta line of a proxy row as the two text nodes the reference renders: the address
-/// (`:18001`, else the URL, else «—») and, when there is one, « · запуск…» or « · 46 мс».
+/// (`:18001`, else the URL, else «—», then « · Xray» while an engine runs) and, when there is
+/// one, « · запуск…» or « · 46 мс».
 pub fn proxy_meta(row: &ProxyRowView, render: impl Fn(&Msg) -> String) -> (String, Option<String>) {
     let head = match (row.port, &row.proxy_url) {
         (Some(port), _) => format!(":{port}"),
         (None, Some(url)) => url.clone(),
         (None, None) => DASH.to_owned(),
+    };
+    // The engine is never hidden: a slot on Xray behaves differently from one on sing-box.
+    let head = match row.engine {
+        Some(engine) => format!("{head}{DOT}{}", crate::servers::engine_name(engine)),
+        None => head,
     };
     let tail = if row.starting() {
         Some(render(&Msg::new("ui.panels.proxy.metaStarting")))

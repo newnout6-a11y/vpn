@@ -3,7 +3,7 @@
 //!
 //! Field lessons kept from the old monitor:
 //! - a different exit than the baseline is NOT a leak (rotation, anycast, split routes): it is
-//!   `Indeterminate` and gets verified independently (leak self-test + family-pinned rebaseline);
+//!   `Indeterminate` (a warning, never "passed") until a new session adopts its exit;
 //! - the one thing a public-IP read can prove is the user's real ISP address showing up while
 //!   connected: that is `Failed` (B-IP-1), and such a sample is never adopted as baseline (B-IP-2);
 //! - a read that fails is `NotChecked`, never a reused cached verdict (B-IP-7);
@@ -25,7 +25,7 @@ use vpnte_base::{AppError, ErrorKind, Msg};
 
 use crate::public_ip::{Family, IpReader, IpRoute, IpSample, WAVE_BUDGET};
 
-pub use monitor::{IpMonitor, SuspendGuard, VerifyEnv, VerifyOutcome};
+pub use monitor::{IpMonitor, SuspendGuard};
 
 /// Identifies one tunnel connection (any value the tunnel never reuses).
 pub type ConnId = u64;

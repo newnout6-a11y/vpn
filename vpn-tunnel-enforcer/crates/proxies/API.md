@@ -110,7 +110,9 @@ pub struct InstanceStatus { pub slot: Slot, pub running: bool /* process_running
     pub last_error: Option<String>, pub last_error_at: Option<UnixMs>, pub degradation_reason: Option<Degradation>,
     pub consecutive_failures: u32, pub next_check_at: Option<UnixMs>, pub last_rotate_reason: Option<String>,
     pub auto_disabled: bool, pub host: String, pub port: Option<u16>, pub proxy_url: Option<String>,
-    pub profile_id, pub profile_name, pub country: Option<String>, pub pid: Option<u32>, pub started_at: Option<UnixMs> }
+    pub profile_id, pub profile_name, pub country: Option<String>, pub pid: Option<u32>, pub started_at: Option<UnixMs>,
+    pub engine: Option<Engine> /* while running: Xray when the slot has an Xray child, else sing-box;
+                                  JSON "engine": "sing-box" | "xray", omitted when None */ }
 impl InstanceStatus { pub fn stopped(slot: Slot) -> Self }   // a never-started slot (no 404 for unknown slots)
 pub struct Aggregate { pub total, running, ready, healthy, unique_egress, duplicate_egress, starting,
     degraded, quarantined: u32 }

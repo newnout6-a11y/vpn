@@ -292,6 +292,10 @@ impl TunnelOps for TunnelService {
         self.live.clone()
     }
 
+    async fn clear_traffic_history(&self) -> vpnte_base::AppResult<()> {
+        self.domains.clear().await
+    }
+
     async fn shutdown(&self, budget: Duration) -> ShutdownReport {
         let deadline = Instant::now() + budget;
         let left = || {

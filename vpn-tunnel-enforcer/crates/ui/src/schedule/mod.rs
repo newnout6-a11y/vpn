@@ -17,7 +17,6 @@ pub(crate) mod tests;
 use std::rc::Rc;
 
 use crate::hooks::use_watch;
-use crate::lang::tr_now;
 use dioxus::prelude::*;
 
 pub use form::{

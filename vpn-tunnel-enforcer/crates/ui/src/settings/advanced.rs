@@ -143,9 +143,13 @@ fn Capture() -> Element {
     let clear_job = use_job::<()>();
     let mut consent_open = use_signal(|| false);
     let mut clear_open = use_signal(|| false);
-    let (consented, used) = {
+    let (consented, used, available) = {
         let state = ctx.state.read();
-        (state.capture_consent_given, state.capture_used_bytes)
+        (
+            state.capture_consent_given,
+            state.capture_used_bytes,
+            state.capture_available,
+        )
     };
     let toggle = move |on: bool| {
         if on && !consented {
@@ -166,14 +170,20 @@ fn Capture() -> Element {
         Some(Err(err)) => Some(err),
         _ => None,
     };
-    let off = !view.deep_inspection;
+    // Unavailable, the stored values are shown but cannot be edited (a save would be refused).
+    let off = !view.deep_inspection || !available;
     rsx! {
         div { class: "set-subgroup", role: "group", aria_label: t!("ui.settings.capture.title"),
             Switch {
                 label: t!("ui.settings.capture.title"),
                 hint: t!("ui.settings.capture.hint"),
                 checked: view.deep_inspection,
+                disabled: !available,
+                disabled_reason: (!available).then(|| t!("ui.settings.capture.unavailable")),
                 on_change: toggle,
+            }
+            if !available {
+                p { class: "set-hint", "data-unavailable": "capture", {t!("ui.settings.capture.unavailable")} }
             }
             Row { label: t!("ui.settings.capture.maxSize"), hint: t!("ui.settings.capture.maxSizeHint"),
                 NumberInput {

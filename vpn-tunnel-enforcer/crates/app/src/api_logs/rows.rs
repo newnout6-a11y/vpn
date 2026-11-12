@@ -56,6 +56,7 @@ fn session_outcome(o: &SessionOutcome) -> Outcome {
             egress_country: e.egress_country.clone(),
             egress_ip: e.egress_ip.clone(),
             proxy_engine: e.proxy_engine,
+            proxy_engine_reason: e.proxy_engine_reason.as_ref().map(text),
             hint: e.hint.as_ref().map(text),
         },
     }

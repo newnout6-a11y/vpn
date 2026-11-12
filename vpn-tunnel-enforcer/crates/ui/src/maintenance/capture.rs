@@ -17,6 +17,13 @@ pub(crate) fn CapturePanel(ctl: Controller) -> Element {
     let capture = ctl.state.read().capture.clone();
     let badge = rules::capture_badge(&capture);
     let busy = ctl.capture.running();
+    // Unavailable here: the restart is refused before it is offered (the warning says why).
+    let unavailable = (!capture.available).then(|| {
+        capture
+            .warnings
+            .first()
+            .map_or_else(|| t!("ui.maintenance.capture.unavailable"), tr)
+    });
     rsx! {
         Panel {
             title: t!("ui.maintenance.capture.title"),
@@ -29,7 +36,8 @@ pub(crate) fn CapturePanel(ctl: Controller) -> Element {
             } else if let Some(warning) = capture.warnings.first() {
                 p { class: "mt-warning", {tr(warning)} }
             }
-            if !capture.enabled {
+            // «Switch it on in Settings» would point at a switch that cannot be switched on.
+            if capture.available && !capture.enabled {
                 p { class: "mt-quiet", {t!("ui.maintenance.capture.disabled")} }
             }
             Tiles { capture: capture.clone() }
@@ -40,6 +48,8 @@ pub(crate) fn CapturePanel(ctl: Controller) -> Element {
                 Button {
                     kind: ButtonKind::Ghost,
                     busy,
+                    disabled: unavailable.is_some(),
+                    disabled_reason: unavailable.clone(),
                     onclick: move |_| ctl.restart_capture(),
                     {t!("ui.maintenance.capture.restart")}
                 }

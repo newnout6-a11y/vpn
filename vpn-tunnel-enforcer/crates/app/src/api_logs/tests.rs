@@ -2,9 +2,9 @@
 //! cleanup with its per-part report and the log tails.
 use std::time::Duration;
 
-use vpnte_base::ErrorKind;
 use vpnte_base::i18n::Lang;
 use vpnte_base::types::Owner;
+use vpnte_base::{ErrorKind, Msg};
 use vpnte_core::ops::Source;
 use vpnte_tunnel::history::{Entry, NewEntry, Route, SessionMode};
 use vpnte_tunnel::outcome::{
@@ -47,6 +47,8 @@ fn rows_carry_outcomes_and_evidence() {
         auto_restart_attempts: Some(2),
         network_transition: Some(NetworkTransition::AdapterRemoved),
         hint: Some(verbatim("Restart the app")),
+        proxy_engine: Some(vpnte_base::types::Engine::Xray),
+        proxy_engine_reason: Some(Msg::new("engine.xray.reason.reality")),
         ..Evidence::default()
     };
     let outcome =
@@ -69,6 +71,12 @@ fn rows_carry_outcomes_and_evidence() {
     assert_eq!(e.auto_restart_attempts, Some(2));
     assert_eq!(e.network_transition.as_deref(), Some("adapter-removed"));
     assert_eq!(e.hint, Some(Text::Plain("Restart the app".into())));
+    assert_eq!(e.proxy_engine, Some(vpnte_base::types::Engine::Xray));
+    // The engine's reason stays a message: the page renders it in the user's language.
+    assert_eq!(
+        e.proxy_engine_reason,
+        Some(Text::Msg(Msg::new("engine.xray.reason.reality")))
+    );
     assert_eq!(e.kill_switch_engaged, None, "absent facts stay absent");
 }
 

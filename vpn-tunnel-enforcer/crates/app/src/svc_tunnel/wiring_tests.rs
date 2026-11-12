@@ -105,6 +105,13 @@ async fn unelevated_service_refuses_privileged_operations() {
         .unwrap();
     let built = super::build(&b).unwrap();
     let t = built.tunnel.clone();
+    // The domain history is hosted here: «clear» works (it was "not available" before), and no
+    // engine ran yet, so the export has no engine config to pack.
+    t.clear_traffic_history()
+        .await
+        .expect("traffic history cleared");
+    assert!(built.domains.history.list().is_empty());
+    assert!(built.feed.last_config().is_none());
     // NOADMIN §0: browser policies (HKLM) only from an elevated process, refused before anything
     // is read or written (also on an elevated runner: the backend says unelevated).
     let browsers = built.automation.browser_policies(true).await.unwrap_err();

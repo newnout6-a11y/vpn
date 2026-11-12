@@ -432,3 +432,18 @@ fn start_failures() {
     assert_eq!(text(&bare.headline, Lang::En), "Could not start protection");
     assert!(bare.evidence.is_empty());
 }
+
+/// Why the engine ran the server is kept next to the engine and survives the history file as
+/// a message the Logs page renders in the user's language.
+#[test]
+fn engine_reason_survives_the_history_file() {
+    let evidence = Evidence {
+        proxy_engine: Some(Engine::Xray),
+        proxy_engine_reason: Some(vpnte_base::Msg::new("engine.xray.reason.reality")),
+        ..Evidence::default()
+    };
+    let json = serde_json::to_value(&evidence).unwrap();
+    assert_eq!(json["proxyEngine"], "xray");
+    let back: Evidence = serde_json::from_value(json).unwrap();
+    assert_eq!(back, evidence);
+}

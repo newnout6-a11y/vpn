@@ -301,6 +301,8 @@ pub struct Evidence {
     pub egress_country: Option<String>,
     pub egress_ip: Option<String>,
     pub proxy_engine: Option<Engine>,
+    /// Why that engine ran the server (REALITY, chosen by the user, …).
+    pub proxy_engine_reason: Option<Text>,
     /// What to do (start failures).
     pub hint: Option<Text>,
 }
@@ -320,11 +322,12 @@ pub enum EvidenceKey {
     EgressCountry,
     EgressIp,
     ProxyEngine,
+    ProxyEngineReason,
     Hint,
 }
 
 impl EvidenceKey {
-    pub const ALL: [EvidenceKey; 13] = [
+    pub const ALL: [EvidenceKey; 14] = [
         EvidenceKey::SingboxExitCode,
         EvidenceKey::SingboxStderrTail,
         EvidenceKey::OutboundFault,
@@ -337,6 +340,7 @@ impl EvidenceKey {
         EvidenceKey::EgressCountry,
         EvidenceKey::EgressIp,
         EvidenceKey::ProxyEngine,
+        EvidenceKey::ProxyEngineReason,
         EvidenceKey::Hint,
     ];
 
@@ -355,6 +359,7 @@ impl EvidenceKey {
             EvidenceKey::EgressCountry => "egressCountry",
             EvidenceKey::EgressIp => "egressIp",
             EvidenceKey::ProxyEngine => "proxyEngine",
+            EvidenceKey::ProxyEngineReason => "proxyEngineReason",
             EvidenceKey::Hint => "hint",
         }
     }

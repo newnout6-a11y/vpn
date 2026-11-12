@@ -373,6 +373,30 @@ fn delete_group_moves_or_drops_rows() {
     );
 }
 
+/// "Keep servers" never doubles a key: one the manual group already holds stays there once,
+/// the subscription's copy goes, and a selection of that copy follows its key.
+#[test]
+fn keeping_servers_skips_keys_the_manual_group_has() {
+    let (_dir, s) = open();
+    let mine = s
+        .add(three()[..1].to_vec(), keys(ClientDevice::Pc))
+        .unwrap();
+    let feed = s
+        .add(three()[..2].to_vec(), sub(FEED, ClientDevice::Android))
+        .unwrap();
+    s.select(&feed.added[0], SelectBy::User).unwrap();
+    s.delete_group(&feed.group, false).unwrap();
+    s.read(|doc| {
+        let ids: Vec<&ProfileId> = doc.profiles.iter().map(|r| &r.id).collect();
+        assert_eq!(
+            ids,
+            [&mine.added[0], &feed.added[1]],
+            "one copy of each key"
+        );
+        assert_eq!(doc.active_profile_id.as_ref(), Some(&mine.added[0]));
+    });
+}
+
 /// Servers spec §3.5 and §7 #11 (override part): rename trims and caps, an empty name changes
 /// nothing; the override is 1..=1440 minutes or `None`; manual groups have none.
 #[test]

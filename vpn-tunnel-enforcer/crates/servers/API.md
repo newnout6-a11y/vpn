@@ -172,6 +172,7 @@ impl Servers {
     pub fn purge_expired(&self, now: UnixMs) -> AppResult<usize>;
     pub fn rename_group(&self, &GroupId, &str) -> AppResult<()>;          // empty name: no change
     pub fn delete_group(&self, &GroupId, delete_servers: bool) -> AppResult<()>;  // false: rows -> manual group
+                                        // (a key it already holds is not doubled: that copy goes, a selection follows)
     pub fn set_refresh_override(&self, &GroupId, Option<u16>) -> AppResult<()>;   // minutes 1..=1440 / None
     pub fn set_group_device(&self, &GroupId, ClientDevice) -> AppResult<()>;      // feed rows follow; refresh next
     pub fn set_profile_device(&self, &ProfileId, ClientDevice) -> AppResult<()>;  // manual rows only

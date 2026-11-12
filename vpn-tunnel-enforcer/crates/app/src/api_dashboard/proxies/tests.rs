@@ -77,6 +77,7 @@ fn the_column_projects_slots_and_choices() {
         proxy_url: Some("http://127.0.0.1:17991".into()),
         profile_id: Some(a.clone()),
         profile_name: Some("Fake A".into()),
+        engine: Some(vpnte_base::types::Engine::Xray),
         ..InstanceStatus::stopped(Slot::new(2).unwrap())
     };
     let failed = InstanceStatus {
@@ -100,6 +101,12 @@ fn the_column_projects_slots_and_choices() {
     let row = &column.rows[1];
     assert!(row.process_running && row.ready, "{row:?}");
     assert_eq!((row.port, row.latency_ms), (Some(17991), Some(120)));
+    assert_eq!(
+        row.engine,
+        Some(vpnte_base::types::Engine::Xray),
+        "the slot names its engine"
+    );
+    assert_eq!(column.rows[0].engine, None, "a failed slot runs no engine");
     assert_eq!(column.choices.len(), 1, "the removed server is not offered");
     let choice = &column.choices[0];
     assert_eq!(choice.id, a);

@@ -4,9 +4,12 @@ use std::net::IpAddr;
 use std::time::Instant;
 
 use vpnte_base::i18n::Lang;
-use vpnte_base::types::{KillSwitchLevel, UnixMs, Verdict};
+use vpnte_base::types::{KillSwitchLevel, ProxyKind, UnixMs, Verdict};
+use vpnte_core::net::{HostPort, Route};
 use vpnte_core::ops::OpStatus;
+use vpnte_core::settings::Settings;
 use vpnte_forensics::traffic::TrafficStats;
+use vpnte_probes::geo::geo_routes;
 use vpnte_probes::ip_monitor::{IpEvidence, IpVerdict};
 use vpnte_probes::leak::{CheckReport, CheckStatus};
 use vpnte_profiles::countries::{self, Iso2};
@@ -177,12 +180,31 @@ pub(super) fn exit_ip(
     (exit, geo.map(|(_, code)| code.as_str().to_owned()))
 }
 
-/// The exit address worth a country lookup: a passed check of the adopted exit of our running
-/// TUN, never while a leak shows (the lookup must not geolocate the user's real address).
-/// Soft sessions get none: their requests would leave over the physical route.
+/// The exit address worth a country lookup: a passed check of the adopted exit of our running,
+/// settled session, never while a leak shows (the lookup must not geolocate the user's real
+/// address).
 pub(super) fn geo_target(snap: &TunnelSnapshot, ev: &IpEvidence) -> Option<IpAddr> {
     let ip = ev.last.map(|s| s.ip)?;
-    (tun_running(snap) && ev.verdict == IpVerdict::Passed && ev.baseline == Some(ip)).then_some(ip)
+    let settled_on = snap.state == fsm::TunnelState::Connected && snap.transition.is_none();
+    (settled_on && ev.verdict == IpVerdict::Passed && ev.baseline == Some(ip)).then_some(ip)
+}
+
+/// Where the exit's lookup leaves: under the TUN the configured geo routes (they ride it);
+/// under the proxy capture only the session's mixed inbound, because the app's requests never
+/// take the system proxy and the physical route would tie the user's own address to the exit.
+pub(super) fn geo_route(
+    snap: &TunnelSnapshot,
+    status: &TunStatus,
+    settings: &Settings,
+) -> Option<Vec<Route>> {
+    match snap.mode? {
+        TunnelMode::Tun => Some(geo_routes(settings, true)),
+        TunnelMode::Soft => {
+            let port = status.session.as_ref()?.proxy_port?;
+            let addr = HostPort::new("127.0.0.1", port).ok()?;
+            Some(vec![Route::proxy(ProxyKind::Socks5, &addr, None)])
+        }
+    }
 }
 
 /// The kill-switch fact from a read-back. Without WFP in this process (not elevated) nothing of

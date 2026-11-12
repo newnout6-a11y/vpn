@@ -8,8 +8,8 @@
 //! - the schedule list belongs to the process's one automation scheduler (built with the tunnel:
 //!   `svc_tunnel::build`), whose reconcile task starts and stops the VPN; the page edits it
 //!   and shows the next event that task reports (`schedule`);
-//! - the domain history service lives inside `svc_tunnel` (not on `Backend`): the page reads the
-//!   file that service persists and clears through `TunnelOps::clear_traffic_history`
+//! - the domain history is the process's one `HistoryService` (opened with the tunnel,
+//!   `svc_tunnel::DomainHistory`): the page lists it with the site names of the opt-in lookups
 //!   (`traffic`).
 mod schedule;
 mod split;
@@ -28,7 +28,7 @@ use vpnte_ui::split_tunnel::SplitTunnelApi;
 use vpnte_ui::traffic_history::TrafficHistoryApi;
 
 use crate::services::Backend;
-use crate::svc_auto::Automation;
+use crate::svc_tunnel::{Built, DomainHistory};
 pub use schedule::ScheduleService;
 pub use split::SplitService;
 pub use traffic::TrafficService;
@@ -37,20 +37,26 @@ pub use traffic::TrafficService;
 /// `Rc<dyn SplitTunnelApi>` and `Rc<dyn TrafficHistoryApi>`. Call it inside the tokio runtime
 /// after `backend.tunnel` was set (the projection tasks start here and stop with
 /// `backend.shutdown`).
-pub fn contexts(backend: &Arc<Backend>, automation: &Automation) -> Vec<Box<dyn Any>> {
+pub fn contexts(backend: &Arc<Backend>, built: &Built) -> Vec<Box<dyn Any>> {
+    let automation = &built.automation;
     let schedule: Rc<dyn ScheduleApi> = Rc::new(ScheduleService::start(
         backend.clone(),
         automation.schedules.clone(),
         automation.scheduler.clone(),
         backend.tunnel().is_ok_and(|t| t.tun_available()),
     ));
-    with_schedule(backend, schedule)
+    with_schedule(backend, schedule, built.domains.clone())
 }
 
 /// The contexts around the given Schedule page API.
-fn with_schedule(backend: &Arc<Backend>, schedule: Rc<dyn ScheduleApi>) -> Vec<Box<dyn Any>> {
+fn with_schedule(
+    backend: &Arc<Backend>,
+    schedule: Rc<dyn ScheduleApi>,
+    domains: Arc<DomainHistory>,
+) -> Vec<Box<dyn Any>> {
     let split: Rc<dyn SplitTunnelApi> = Rc::new(SplitService::start(backend.clone()));
-    let traffic: Rc<dyn TrafficHistoryApi> = Rc::new(TrafficService::start(backend.clone()));
+    let traffic: Rc<dyn TrafficHistoryApi> =
+        Rc::new(TrafficService::start(backend.clone(), domains));
     vec![Box::new(schedule), Box::new(split), Box::new(traffic)]
 }
 

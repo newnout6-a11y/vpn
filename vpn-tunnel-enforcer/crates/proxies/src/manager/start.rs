@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio::sync::oneshot;
-use vpnte_base::types::now_ms;
+use vpnte_base::types::{Engine as EngineKind, now_ms};
 
 use super::launch::{self, STOP_TIMEOUT};
 use super::pick::{Want, matches_country, pick};
@@ -123,7 +123,16 @@ impl Inner {
             self.terminate(slot, &old, "replace").await;
         }
         let started = match prepared {
-            Ok(plan) => self.launcher.start(plan, &self.closing).await,
+            Ok(plan) => {
+                // An Xray child carries the server; sing-box then only bridges to it.
+                let kind = if plan.xray.is_some() {
+                    EngineKind::Xray
+                } else {
+                    EngineKind::SingBox
+                };
+                let started = self.launcher.start(plan, &self.closing).await;
+                started.map(|engine| (engine, kind))
+            }
             Err(err) => Err(err),
         };
         let stale = {
@@ -134,9 +143,9 @@ impl Inner {
                     .get(&slot)
                     .is_some_and(|s| s.generation == generation && s.configured);
             match started {
-                Ok(engine) if current => {
+                Ok((engine, kind)) if current => {
                     let pid = engine.pid();
-                    let live = self.go_live(slot, generation, port, engine);
+                    let live = self.go_live(slot, generation, port, engine, kind);
                     let now = now_ms();
                     let state = reg.slots.entry(slot).or_default();
                     state.live = Some(live);
@@ -148,7 +157,7 @@ impl Inner {
                         "instance started");
                     None
                 }
-                Ok(engine) => Some(engine),
+                Ok((engine, _)) => Some(engine),
                 Err(err) => {
                     if current && let Some(state) = reg.slots.get_mut(&slot) {
                         state

@@ -404,6 +404,7 @@ fn crash_evidence() -> Evidence {
         leak_detected_during_session: Some(true),
         egress_ip: Some(String::new()),
         proxy_engine: Some(vpnte_base::types::Engine::SingBox),
+        proxy_engine_reason: Some(Text::Plain("REALITY".into())),
         ..Evidence::default()
     }
 }
@@ -423,13 +424,22 @@ fn evidence_grid() {
             "autoRestartAttempts",
             "killSwitchEngaged",
             "leakDetectedDuringSession",
-            "proxyEngine"
+            "proxyEngine",
+            "proxyEngineReason"
         ]
     );
     let shown: Vec<String> = items.iter().map(|(_, v)| evidence_text(v, &ru)).collect();
     assert_eq!(
         shown,
-        ["0", "REALITY-ключ отклонён", "3", "—", "✓", "sing-box"]
+        [
+            "0",
+            "REALITY-ключ отклонён",
+            "3",
+            "—",
+            "✓",
+            "sing-box",
+            "REALITY"
+        ]
     );
     assert_eq!(
         ru(&EvidenceKey::AutoRestartAttempts.label()),
@@ -438,6 +448,10 @@ fn evidence_grid() {
     assert_eq!(
         en(&EvidenceKey::SingboxExitCode.label()),
         "sing-box exit code"
+    );
+    assert_eq!(
+        en(&EvidenceKey::ProxyEngineReason.label()),
+        "Why this engine"
     );
     let hint = Evidence {
         hint: Some(Text::Plain(" ".into())),
@@ -472,7 +486,7 @@ fn diagnostics_text_of_rows() {
          Трафик: ↓2048 / ↑512 байт\n\
          Итог: singbox-crash — Ядро VPN (sing-box) неожиданно завершилось (код 0) после 3 попыток авто-перезапуска. Последняя ошибка: сервер оборвал TLS-рукопожатие\n\
          Детали:\n  singboxExitCode: 0\n  outboundFault: reality-key-mismatch\n  autoRestartAttempts: 3\n  killSwitchEngaged: false\n  \
-         leakDetectedDuringSession: true\n  proxyEngine: sing-box\nСообщение: exit status 0"
+         leakDetectedDuringSession: true\n  proxyEngine: sing-box\n  proxyEngineReason: REALITY\nСообщение: exit status 0"
     );
     let legacy = row("y");
     assert_eq!(

@@ -284,6 +284,14 @@ pub struct Evidence {
     pub egress_ip: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_engine: Option<Engine>,
+    /// Why `proxy_engine` ran the server (REALITY, chosen by the user, …); `None` for a local
+    /// upstream proxy, where no engine was chosen.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de::opt_msg_or_text"
+    )]
+    pub proxy_engine_reason: Option<Msg>,
     /// What the user can do about a failed start.
     #[serde(
         default,

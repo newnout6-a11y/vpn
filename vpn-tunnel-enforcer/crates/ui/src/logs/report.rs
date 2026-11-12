@@ -56,6 +56,12 @@ pub fn evidence_items(evidence: &Evidence) -> Vec<(EvidenceKey, EvidenceValue)> 
                 EvidenceKey::EgressCountry => text(&evidence.egress_country),
                 EvidenceKey::EgressIp => text(&evidence.egress_ip),
                 EvidenceKey::ProxyEngine => evidence.proxy_engine.map(EvidenceValue::Engine),
+                EvidenceKey::ProxyEngineReason => evidence
+                    .proxy_engine_reason
+                    .as_ref()
+                    .filter(|r| !matches!(r, Text::Plain(p) if p.trim().is_empty()))
+                    .cloned()
+                    .map(EvidenceValue::Text),
                 EvidenceKey::Hint => evidence
                     .hint
                     .as_ref()

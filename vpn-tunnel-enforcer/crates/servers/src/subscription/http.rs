@@ -248,7 +248,7 @@ pub(super) fn classify(err: &reqwest::Error, proxied: bool) -> FetchOutcome {
 
 /// Class of one error in the chain; `io::Error` wrappers are opened (their `source` skips the
 /// wrapped error, where rustls and the resolver put the reason).
-fn class_of(e: &(dyn std::error::Error + 'static)) -> Option<FetchOutcome> {
+pub(super) fn class_of(e: &(dyn std::error::Error + 'static)) -> Option<FetchOutcome> {
     if let Some(io) = e.downcast_ref::<io::Error>() {
         // WSAHOST_NOT_FOUND, WSATRY_AGAIN, WSANO_RECOVERY, WSANO_DATA.
         if io
@@ -272,6 +272,11 @@ fn class_of(e: &(dyn std::error::Error + 'static)) -> Option<FetchOutcome> {
         }
     }
     let text = e.to_string().to_ascii_lowercase();
+    // hyper-util's SOCKS errors read "SOCKS error: io error during SOCKS handshake" (no source):
+    // the proxy failed, not TLS to the subscription host.
+    if text.contains("socks") {
+        return Some(FetchOutcome::Network(NetFail::Proxy));
+    }
     if text.contains("dns error") || text.contains("failed to lookup address") {
         return Some(FetchOutcome::Network(NetFail::Dns));
     }

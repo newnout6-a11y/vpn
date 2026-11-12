@@ -35,13 +35,19 @@ use vpnte_ui::maintenance::{
 };
 
 use crate::services::Backend;
+use crate::svc_tunnel::Built;
+pub(crate) use export::ExportSources;
 pub(crate) use repair::{RepairHost, WindowsHost};
 
 /// The UI context of this package for `vpnte_ui::launch`: `Rc<dyn MaintenanceApi>`. Call it
 /// inside the tokio runtime after `backend.tunnel` was set (the projection task starts here
 /// and stops with `backend.shutdown`).
-pub fn contexts(backend: &Arc<Backend>) -> Vec<Box<dyn Any>> {
-    let shared = Shared::start(backend.clone(), Arc::new(WindowsHost));
+pub fn contexts(backend: &Arc<Backend>, built: &Built) -> Vec<Box<dyn Any>> {
+    let sources = ExportSources {
+        feed: built.feed.clone(),
+        journal: built.journal.clone(),
+    };
+    let shared = Shared::start(backend.clone(), Arc::new(WindowsHost), Some(sources));
     let api: Rc<dyn MaintenanceApi> = Rc::new(MaintenanceService(shared));
     vec![Box::new(api)]
 }
@@ -57,18 +63,25 @@ pub(crate) struct Shared {
     pub host: Arc<dyn RepairHost>,
     /// The last system report as JSON, for the diagnostics export.
     pub last_report: Mutex<Option<serde_json::Value>>,
+    /// The tunnel side's part of the diagnostics export (`None` in page tests).
+    pub sources: Option<ExportSources>,
     /// Wakes the projection for a change no store event announces (an action of this page).
     pub dirty: Notify,
 }
 
 impl Shared {
     /// Publishes the first snapshot and starts the projection task.
-    pub fn start(backend: Arc<Backend>, host: Arc<dyn RepairHost>) -> Arc<Self> {
+    pub fn start(
+        backend: Arc<Backend>,
+        host: Arc<dyn RepairHost>,
+        sources: Option<ExportSources>,
+    ) -> Arc<Self> {
         let shared = Arc::new(Self {
             backend,
             state: watch::Sender::new(MaintenanceState::default()),
             host,
             last_report: Mutex::new(None),
+            sources,
             dirty: Notify::new(),
         });
         project::spawn(&shared);

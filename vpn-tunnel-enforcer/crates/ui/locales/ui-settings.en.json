@@ -52,6 +52,7 @@
         "soft": "Proxy",
         "hardHint": "Tunnel (TUN) — all traffic goes through the tunnel; needs the app started as administrator",
         "softHint": "Proxy — the Windows system proxy points at the app's engine; programs that ignore it go direct. No administrator rights needed",
+        "tunUnavailable": "Tunnel mode is available only when the app is started as administrator.",
         "softTargets": "Developer tools in Proxy mode",
         "softTargetsHint": "While Proxy mode is on, the chosen tools use the proxy too; their settings are restored when it stops.",
         "engine": "Connection engine (Proxy Core)",
@@ -248,7 +249,8 @@
         "clearText": "All stored capture sessions will be deleted from this computer.",
         "consentTitle": "Turn on traffic capture?",
         "consentText": "The capture records whole packets; unencrypted data (for example HTTP) may end up in files on this computer.",
-        "consentOk": "Turn on capture"
+        "consentOk": "Turn on capture",
+        "unavailable": "Deep traffic capture is not available in this version."
       },
       "tools": {
         "title": "Logs and diagnostics",

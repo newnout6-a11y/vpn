@@ -189,6 +189,7 @@ impl Seed {
             engine: EnginePref::Auto,
             engine_plan: Some(demo_plan(self.protocol)),
             fingerprint: None,
+            fingerprint_warning: None,
             has_outbound: true,
             stealth: self.stealth,
             ping_ms: self.ping,

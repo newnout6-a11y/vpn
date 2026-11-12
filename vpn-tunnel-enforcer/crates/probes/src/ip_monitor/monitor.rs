@@ -1,17 +1,13 @@
 //! The running monitor: one state behind a lock, the periodic read task, rebaselines and the
 //! suspend guard of protected transitions.
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use vpnte_core::redact;
 
-use crate::leak::{SelfTestResult, SelfTestVerdict};
 use crate::public_ip::{Family, IpRoute, IpSample};
 
 use super::{
@@ -57,7 +53,6 @@ pub(super) struct Inner {
     tx: watch::Sender<IpEvidence>,
     pub(super) interval: watch::Sender<Duration>,
     adopt: tokio::sync::Mutex<()>,
-    pub(super) verifying: AtomicBool,
 }
 
 /// Outcome of one read attempt as seen by the monitor.
@@ -195,7 +190,6 @@ impl IpMonitor {
                 tx: watch::Sender::new(IpEvidence::default()),
                 interval: watch::Sender::new(DEFAULT_INTERVAL),
                 adopt: tokio::sync::Mutex::new(()),
-                verifying: AtomicBool::new(false),
             }),
         }
     }
@@ -378,132 +372,6 @@ impl IpMonitor {
     /// evidence the watchdog may count as "the tunnel carries traffic" (B-IP-4).
     pub fn last_alive(&self) -> Option<Instant> {
         self.inner.state.lock().last_alive
-    }
-
-    /// After a protected restart (server swap): up to 3 rounds of "routes proven? adopt a fresh
-    /// sample (no expected IP: never wait for the dead old exit, never adopt a cached one)",
-    /// 500 ms apart while the routes are not proven. Gives up with the baseline invalidated
-    /// (`NotChecked`). `routes_active` errors must read as false.
-    pub async fn adopt_after_transition(
-        &self,
-        conn: ConnId,
-        routes_active: impl Fn() -> bool,
-        cancel: &CancellationToken,
-    ) -> Result<IpAddr, AdoptError> {
-        let mut last = AdoptError::NoSample;
-        for _ in 0..3 {
-            if routes_active() {
-                match self.adopt_baseline(conn, None, cancel).await {
-                    Ok(ip) => return Ok(ip),
-                    Err(err @ (AdoptError::Cancelled | AdoptError::Stale | AdoptError::RealIp)) => {
-                        return Err(err);
-                    }
-                    Err(err) => last = err,
-                }
-            } else {
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => return Err(AdoptError::Cancelled),
-                    _ = tokio::time::sleep(Duration::from_millis(500)) => {}
-                }
-            }
-        }
-        tracing::warn!("protected transition IP baseline not checked");
-        self.invalidate_baseline();
-        Err(last)
-    }
-
-    /// Indeterminate-exit verification (exit changed: rotation, anycast): adopts the new exit
-    /// only with independent evidence that the physical adapters cannot reach the Internet.
-    /// Every step is bound to connection `conn` (after a restart the tunnel runs again, but its
-    /// exit belongs to another connection). The adopted address is the one the self-test saw
-    /// through the default route, confirmed by a fresh sample pinned to its family — never the
-    /// candidate the monitor saw. One verification at a time; early returns do not latch.
-    pub async fn auto_verify(
-        &self,
-        conn: ConnId,
-        env: &dyn VerifyEnv,
-        cancel: &CancellationToken,
-    ) -> VerifyOutcome {
-        if self.inner.verifying.swap(true, Ordering::AcqRel) {
-            return VerifyOutcome::Busy;
-        }
-        let _reset = ResetOnDrop(&self.inner.verifying);
-        if !env.is_current(conn) || self.evidence().verdict != IpVerdict::Indeterminate {
-            return VerifyOutcome::NotNeeded;
-        }
-        if !env.routes_active() || !env.is_current(conn) {
-            return VerifyOutcome::RoutesInactive;
-        }
-        let leak = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return VerifyOutcome::Cancelled,
-            result = env.self_test() => result,
-        };
-        if !env.is_current(conn) {
-            return VerifyOutcome::Stale;
-        }
-        let gate = crate::leak::verdict(&leak);
-        let Some(verified) = leak.default_v4.filter(|_| gate == SelfTestVerdict::Ok) else {
-            tracing::warn!(verdict = ?gate, complete = leak.inspection_complete,
-                "indeterminate IP failed the leak self-test safety gate");
-            return VerifyOutcome::SafetyGate(gate);
-        };
-        if !env.routes_active() || !env.is_current(conn) {
-            tracing::warn!("TUN routes no longer active after leak self-test; aborting rebaseline");
-            return VerifyOutcome::RoutesInactive;
-        }
-        let verified = IpAddr::V4(verified);
-        match self.adopt_baseline(conn, Some(verified), cancel).await {
-            Ok(ip) if ip == verified && env.is_current(conn) => {
-                tracing::info!(verified = %redact::ip_pseudonym(ip), "indeterminate IP verified and adopted");
-                VerifyOutcome::Adopted(ip)
-            }
-            Ok(_) | Err(AdoptError::Stale) => VerifyOutcome::Stale,
-            Err(AdoptError::Cancelled) => VerifyOutcome::Cancelled,
-            Err(err) => {
-                tracing::warn!(reason = %err, "indeterminate IP sample mismatch; rejecting adoption");
-                VerifyOutcome::Rejected
-            }
-        }
-    }
-}
-
-/// What auto-verification needs from the tunnel runtime (the app implements it).
-pub trait VerifyEnv: Send + Sync {
-    /// True while connection `conn` is the running one.
-    fn is_current(&self, conn: ConnId) -> bool;
-    /// True when the TUN routes are proven active (errors read as false).
-    fn routes_active(&self) -> bool;
-    /// One leak self-test run (normally [`crate::leak::SelfTester::run`]).
-    fn self_test(&self) -> BoxFuture<'_, SelfTestResult>;
-}
-
-/// How an auto-verification ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VerifyOutcome {
-    /// The self-test's default-route exit was confirmed by a fresh sample and adopted.
-    Adopted(IpAddr),
-    /// Another verification is running.
-    Busy,
-    /// Nothing to verify (verdict not indeterminate) or the connection is not running.
-    NotNeeded,
-    /// TUN routes not proven, before or after the self-test.
-    RoutesInactive,
-    /// The self-test did not prove the physical adapters blocked (or the exit unknown).
-    SafetyGate(SelfTestVerdict),
-    /// The fresh sample did not confirm the measured exit.
-    Rejected,
-    /// The connection changed meanwhile.
-    Stale,
-    Cancelled,
-}
-
-struct ResetOnDrop<'a>(&'a AtomicBool);
-
-impl Drop for ResetOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
     }
 }
 

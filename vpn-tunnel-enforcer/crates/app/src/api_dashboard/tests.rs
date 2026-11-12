@@ -314,8 +314,8 @@ fn monitor_verdicts_reach_the_exit_line() {
     }
 }
 
-/// The country is looked up only for the adopted exit of a running TUN after a passed check:
-/// never for a leak (the real address), a Soft session, or mid-transition.
+/// The country is verified only for the adopted exit of a settled session (TUN or proxy
+/// capture) after a passed check: never for a leak (the real address) or mid-transition.
 #[test]
 fn geo_lookup_gate() {
     let on = snap(TunnelState::Connected);
@@ -329,13 +329,56 @@ fn geo_lookup_gate() {
 
     let mut soft = on.clone();
     soft.mode = Some(TunnelMode::Soft);
-    assert_eq!(project::geo_target(&soft, &passed), None);
+    assert_eq!(project::geo_target(&soft, &passed), Some(EXIT));
     let mut switching = on.clone();
     switching.transition = Some(Transition::Reconnecting);
     assert_eq!(project::geo_target(&switching, &passed), None);
     assert_eq!(
         project::geo_target(&snap(TunnelState::Disconnected), &passed),
         None
+    );
+}
+
+/// The exit's lookup rides the session: the configured routes under the TUN, the mixed inbound
+/// (SOCKS5, no credentials) under the proxy capture, nothing while that port is unknown.
+#[test]
+fn geo_lookup_route_follows_the_capture() {
+    use vpnte_core::net::Route;
+    use vpnte_core::settings::Settings;
+    use vpnte_tunnel::api::{ProxyEndpoint, SessionEndpoints};
+
+    let settings = Settings::default();
+    let on = snap(TunnelState::Connected);
+    let none = TunStatus::default();
+    assert_eq!(
+        project::geo_route(&on, &none, &settings),
+        Some(vpnte_probes::geo::geo_routes(&settings, true))
+    );
+    let mut soft = on.clone();
+    soft.mode = Some(TunnelMode::Soft);
+    assert_eq!(project::geo_route(&soft, &none, &settings), None);
+    let endpoint = ProxyEndpoint {
+        port: 20001,
+        user: "u".into(),
+        pass: "p".into(),
+    };
+    let status = TunStatus {
+        session: Some(SessionEndpoints {
+            clash_port: 1,
+            clash_secret: "0".repeat(32),
+            direct: endpoint,
+            probe: None,
+            tun_luid: None,
+            tun_alias: None,
+            proxy_port: Some(20808),
+            logs: Vec::new(),
+        }),
+        ..TunStatus::default()
+    };
+    let routes = project::geo_route(&soft, &status, &settings).expect("mixed inbound");
+    assert!(
+        matches!(&routes[..], [Route::Proxy { url }] if url.as_str() == "socks5h://127.0.0.1:20808"),
+        "{routes:?}"
     );
 }
 

@@ -364,6 +364,8 @@ fn capture_view_says_why_nothing_captures() {
     use crate::api_maintenance::project::{capture_refusal, capture_view};
     let user = capture_view(false);
     assert!(!user.running && !user.enabled && !user.status_unavailable && !user.cleanup_pending);
+    // The page disables «restart» up front, elevated or not.
+    assert!(!user.available && !capture_view(true).available);
     assert_eq!(user.warnings, vec![Msg::new("app.base.needsAdmin")]);
     assert_eq!(user.last_error, Some(Msg::new("app.base.needsAdmin")));
     assert_eq!(capture_refusal(false).kind, ErrorKind::Permission);
@@ -485,4 +487,73 @@ fn engine_sweep_covers_each_engine_folder_once() {
             PathBuf::from(r"D:\Engines")
         ]
     );
+}
+
+/// The archive's recovery state: a document never written is absent, a written one is packed
+/// as its store holds it; the tweak journal says which features still hold changes (no values).
+#[test]
+fn recovery_state_for_the_archive() {
+    use vpnte_automation::{hardening, tweaks};
+    use vpnte_core::store::Store;
+    use vpnte_forensics::export::RecoveryRead;
+
+    use crate::api_maintenance::export::{journal, stored};
+    use crate::api_settings::test_support::TempDir;
+    use crate::svc_core::docs::ProtectionDoc;
+
+    let dir = TempDir::new("maint-recovery");
+    let store = Store::<ProtectionDoc>::open(&dir.0);
+    let absent = stored("protection", &store);
+    assert_eq!(absent.file, "protection.json");
+    assert!(matches!(absent.read, RecoveryRead::Absent));
+    store
+        .update(|d| d.settings.level = KillSwitchLevel::Standard)
+        .expect("written");
+    let RecoveryRead::Trusted(doc) = stored("protection", &store).read else {
+        panic!("a written document is packed");
+    };
+    assert_eq!(doc["level"], "standard");
+
+    let tweaks = journal(&tweaks::Journal::open(&dir.0, hardening::admit));
+    let RecoveryRead::Trusted(held) = tweaks.read else {
+        panic!("an empty journal is a fact too");
+    };
+    assert_eq!(held, serde_json::json!({ "held": [] }));
+}
+
+/// Engine versions come from the engines' own one-shot `version` runs; a missing binary is named
+/// so without starting anything. The last config is absent before any core ran.
+#[tokio::test]
+async fn engine_facts_for_the_archive() {
+    use crate::api_maintenance::export::{engine_configs, engine_versions};
+    use crate::services::Engines;
+
+    let missing = Engines {
+        singbox: PathBuf::from(r"C:\nowhere\sing-box.exe"),
+        xray: PathBuf::from(r"C:\nowhere\xray.exe"),
+    };
+    let versions = engine_versions(&missing).await;
+    assert_eq!(
+        versions,
+        [
+            ("sing-box".to_owned(), "missing".to_owned()),
+            ("xray".to_owned(), "missing".to_owned())
+        ]
+    );
+    let resources = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources"));
+    let bundled = Engines {
+        singbox: resources.join("sing-box.exe"),
+        xray: resources.join("xray.exe"),
+    };
+    if bundled.singbox.is_file() {
+        let versions = engine_versions(&bundled).await;
+        assert!(versions[0].1.starts_with("1.14."), "{versions:?}");
+    }
+    let feed = vpnte_tunnel::runtime::RealEngines::new(
+        bundled.singbox.clone(),
+        bundled.xray.clone(),
+        None,
+    )
+    .feed();
+    assert!(engine_configs(&feed).is_empty());
 }

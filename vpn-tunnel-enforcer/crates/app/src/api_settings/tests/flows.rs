@@ -73,6 +73,19 @@ async fn save_writes_and_reports_next_connect() {
     until(&api.domains(), |d| d.smart_ru).await;
 }
 
+/// The page knows up front what this process can offer: Tunnel mode only with the TUN
+/// (elevated), packet capture never in this build (a save of either would be refused).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_page_is_told_what_can_be_offered() {
+    for tun in [false, true] {
+        let (shared, _, _, _dir) = setup(&format!("offer-{tun}"), tun, FakeAutostart::default());
+        // Built-in themes are listed once the first projection was published.
+        let published = |s: &ui::SettingsState| !s.themes.is_empty() && s.tun_available == tun;
+        let state = until(&shared.state.subscribe(), published).await;
+        assert!(!state.capture_available);
+    }
+}
+
 /// Refusals come before any write: Hard without TUN, leak protection without WFP.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refused_saves_write_nothing() {

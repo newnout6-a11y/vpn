@@ -4,6 +4,7 @@
 //! exist only when the process itself is elevated (NOADMIN §0); everything else runs unelevated.
 mod auto;
 mod decide;
+mod domains;
 mod gate;
 mod guard;
 mod inputs;
@@ -30,7 +31,7 @@ use vpnte_base::AppResult;
 use vpnte_base::types::{Level, Notice};
 use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
-use vpnte_forensics::domains::{DomainsDoc, HistoryService};
+use vpnte_probes::diagnostics::{SnapshotReason, Snapshotter};
 use vpnte_probes::ip_monitor::IpMonitor;
 use vpnte_probes::local_proxy::{LocalProxyDetector, ScanOptions};
 use vpnte_probes::public_ip::IpReader;
@@ -39,13 +40,14 @@ use vpnte_tunnel::api::Runtime;
 use vpnte_tunnel::fsm::FaultState;
 use vpnte_tunnel::lifecycle::{Lifecycle, LifecycleDeps};
 use vpnte_tunnel::runtime::{
-    Capture, ProxyCapture, RealEngines, RuntimeDeps, Timings, TunCapture, TunnelHandle,
+    Capture, EngineFeed, ProxyCapture, RealEngines, RuntimeDeps, Timings, TunCapture, TunnelHandle,
 };
 
 use crate::services::{Backend, Engines, TunnelOps};
 use crate::svc_auto::{AppCoordinator, Automation, Fingerprints, ServerFailover};
 use crate::svc_core::notify::{NoticeCategory, Notifier};
 
+pub use domains::DomainHistory;
 pub(crate) use gate::BudgetGate;
 pub(crate) use monitor::exit_route;
 pub(crate) use peers::vpn_profile;
@@ -57,6 +59,12 @@ pub struct Built {
     pub tunnel: Arc<dyn TunnelOps>,
     /// For the pages that edit automation (Schedule, Settings).
     pub automation: Arc<Automation>,
+    /// The domain history and its site names (Traffic page).
+    pub domains: Arc<DomainHistory>,
+    /// The engine cores' lines and last config (diagnostics export).
+    pub feed: EngineFeed,
+    /// The one tweak journal (its records are recovery state in the diagnostics export).
+    pub journal: Arc<tweaks::Journal>,
 }
 
 /// Builds the tunnel service and its automation. Runs inside the tokio runtime (it spawns the
@@ -77,16 +85,16 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
     // One Soft capture for the whole process: the runtime writes its mixed port, the local-proxy
     // detector reads it so a scan can never pick our own inbound as the upstream.
     let proxy_capture = Arc::new(ProxyCapture::new());
+    // The slot egress probe takes a slot of the handshake budget every check shares.
+    let engines = RealEngines::new(
+        b.engines.singbox.clone(),
+        b.engines.xray.clone(),
+        Some(b.dirs.logs.clone()),
+    )
+    .with_gate(Arc::new(gate::BudgetGate));
+    let feed = engines.feed();
     let runtime = TunnelHandle::spawn(RuntimeDeps {
-        // The slot egress probe takes a slot of the handshake budget every check shares.
-        engines: Arc::new(
-            RealEngines::new(
-                b.engines.singbox.clone(),
-                b.engines.xray.clone(),
-                Some(b.dirs.logs.clone()),
-            )
-            .with_gate(Arc::new(gate::BudgetGate)),
-        ),
+        engines: Arc::new(engines),
         // No TUN without the protection, i.e. without elevation: a Hard start answers
         // `Permission` up front instead of failing halfway (tunnel API, privilege model).
         tun: guard
@@ -132,14 +140,23 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
     ip.ip
         .set_interval(decide::check_interval(&b.settings.snapshot()));
     ip.spawn_home_reads(b.geo.clone(), b.shutdown.child_token());
-    let domains = Arc::new(HistoryService::open(
-        Arc::new(Store::<DomainsDoc>::open(&b.dirs.root)),
-        None,
-    ));
+    let domains = DomainHistory::open(b, status.clone(), feed.subscribe_lines());
+    let snapshots = Snapshotter::new(
+        &b.dirs.root,
+        env!("CARGO_PKG_VERSION").to_owned(),
+        traffic::app_state(status.clone(), b.settings.clone()),
+    );
+    // The network as the app found it, then every 5 minutes: a drop mid-session shows between two.
+    snapshots.start_periodic();
+    tokio::spawn({
+        let snapshots = snapshots.clone();
+        async move { snapshots.capture(SnapshotReason::AppStart).await }
+    });
     let forensics = Arc::new(traffic::SessionForensics::new(
         status,
-        domains,
+        domains.history.clone(),
         b.servers.clone(),
+        snapshots,
         b.shutdown.clone(),
     ));
     let proxies = peers::proxies(b, runtime.status());
@@ -179,7 +196,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         auto::Inputs {
             lifecycle: &lifecycle,
             runtime: &runtime,
-            journal,
+            journal: journal.clone(),
             capture: Arc::clone(&proxy_capture),
             reader: auto_reader,
             fingerprints,
@@ -218,6 +235,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         soft,
         ip,
         forensics,
+        domains: domains.clone(),
         settings: b.settings.clone(),
         servers: b.servers.clone(),
         engines: b.engines.clone(),
@@ -227,7 +245,13 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         proxies,
         live,
     });
-    Ok(Built { tunnel, automation })
+    Ok(Built {
+        tunnel,
+        automation,
+        domains,
+        feed,
+        journal,
+    })
 }
 
 /// The local-proxy detector for one scan. Our own mixed inbound is always skipped (NOADMIN §2):
@@ -252,6 +276,8 @@ struct TunnelService {
     soft: Arc<soft::SoftTweaks>,
     ip: Arc<monitor::IpWatch>,
     forensics: Arc<traffic::SessionForensics>,
+    /// The domain history and its site-name cache («clear all» empties both).
+    domains: Arc<DomainHistory>,
     settings: Arc<Store<Settings>>,
     servers: Arc<Servers>,
     engines: Engines,

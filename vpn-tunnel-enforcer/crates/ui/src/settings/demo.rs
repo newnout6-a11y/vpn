@@ -165,6 +165,9 @@ impl DemoSettingsApi {
                 restart_required: false,
             },
             diagnostics_export_running: false,
+            // The demo plays an elevated process: every choice is on offer.
+            tun_available: true,
+            capture_available: true,
         };
         let kill = KillSwitchView {
             level: if fresh {

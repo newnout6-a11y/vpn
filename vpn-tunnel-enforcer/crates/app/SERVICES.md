@@ -18,9 +18,12 @@ working.
    legacy import writes `routing_mode = Soft` unless the process is elevated. `build` installs
    the global log subscriber and its panic hook: never call `logging::init` again.
 3. Inside the tokio runtime: `let built = svc_tunnel::build(&backend)?;` (`Built { tunnel,
-   automation }`)
+   automation, domains, feed, journal }`)
    `let _ = backend.tunnel.set(built.tunnel);` (`Backend::tunnel()` returns `Internal`
-   `app.base.tunnelMissing` until then).
+   `app.base.tunnelMissing` until then). `built.domains` (the one domain history + site-name
+   enricher, `svc_tunnel::DomainHistory`) goes to `api_lists` (Traffic page); `built.feed` (the
+   engine cores' lines and last config) and `built.journal` (the tweak journal) go to
+   `api_maintenance` (diagnostics export).
 4. `vpnte_ui::lang::init_locales(&svc_core::locale_layers())` before `vpnte_ui::launch`; the
    initial theme is `backend.themes.read(|t| t.theme(&settings.active_theme_id))`, the language
    `settings.locale.unwrap_or_else(vpnte_ui::lang::os_lang)`.

@@ -9,7 +9,8 @@ use std::time::Duration;
 use std::{io, iter};
 
 use async_trait::async_trait;
-use tokio::sync::{mpsc, watch};
+use parking_lot::Mutex;
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{Creds, OutboundFault, ProxyKind};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
@@ -196,6 +197,7 @@ pub struct RealEngines {
     xray: PathBuf,
     logs: Option<PathBuf>,
     gate: Option<Arc<dyn HandshakeGate>>,
+    feed: EngineFeed,
 }
 
 impl RealEngines {
@@ -206,6 +208,7 @@ impl RealEngines {
             xray,
             logs,
             gate: None,
+            feed: EngineFeed::default(),
         }
     }
 
@@ -214,6 +217,67 @@ impl RealEngines {
     pub fn with_gate(mut self, gate: Arc<dyn HandshakeGate>) -> Self {
         self.gate = Some(gate);
         self
+    }
+
+    /// What the cores this runtime starts hand to in-process consumers (take it before the
+    /// engines move into the runtime).
+    pub fn feed(&self) -> EngineFeed {
+        self.feed.clone()
+    }
+}
+
+/// Lines a subscriber may fall behind before it loses the oldest ones.
+const FEED_BACKLOG: usize = 1024;
+
+/// The sing-box cores of one runtime as in-process consumers see them: their raw output lines
+/// in one stream that outlives crash restarts (the traffic history parses DNS answers from it),
+/// and the config of the last core started (the diagnostics export redacts it). Both hold
+/// secrets: never log them; the config stays in memory only.
+#[derive(Clone)]
+pub struct EngineFeed {
+    lines: broadcast::Sender<Arc<str>>,
+    config: Arc<Mutex<Option<Arc<[u8]>>>>,
+}
+
+impl Default for EngineFeed {
+    fn default() -> Self {
+        Self {
+            lines: broadcast::channel(FEED_BACKLOG).0,
+            config: Arc::default(),
+        }
+    }
+}
+
+impl EngineFeed {
+    /// Raw lines of every core started from now on (a slow reader loses the oldest lines).
+    pub fn subscribe_lines(&self) -> broadcast::Receiver<Arc<str>> {
+        self.lines.subscribe()
+    }
+
+    /// The config the last core was started with (JSON bytes); `None` before the first start.
+    pub fn last_config(&self) -> Option<Arc<[u8]>> {
+        self.config.lock().clone()
+    }
+
+    /// Keeps `config` and forwards `lines` until the core's output ends. Without a runtime (no
+    /// subscriber could exist) nothing is forwarded.
+    fn attach(&self, config: &[u8], mut lines: broadcast::Receiver<Arc<str>>) {
+        *self.config.lock() = Some(Arc::from(config));
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let out = self.lines.clone();
+        runtime.spawn(async move {
+            loop {
+                match lines.recv().await {
+                    // No subscriber right now: the line is simply not wanted.
+                    Ok(line) => drop(out.send(line)),
+                    // Lost lines are lost for every consumer alike; the engine never waits.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
     }
 }
 
@@ -255,6 +319,7 @@ async fn echo(
 impl Engines for RealEngines {
     fn spawn_core(&self, config: &[u8]) -> io::Result<Arc<dyn CoreProc>> {
         let core = SingBoxProcess::spawn(&self.singbox, config, self.logs.as_deref())?;
+        self.feed.attach(config, core.subscribe_lines());
         Ok(Arc::new(core))
     }
 
@@ -393,5 +458,33 @@ impl Engines for RealEngines {
                 Vec::new()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod feed_tests {
+    use super::*;
+
+    /// The feed keeps the last config and forwards a core's lines until its output ends; a
+    /// subscriber taken before the core started sees every line of every core.
+    #[tokio::test]
+    async fn the_feed_forwards_lines_of_every_core_and_keeps_the_last_config() {
+        let feed = EngineFeed::default();
+        assert!(feed.last_config().is_none());
+        let mut rx = feed.subscribe_lines();
+        for (config, line) in [(&b"{\"a\":1}"[..], "first"), (&b"{\"b\":2}"[..], "second")] {
+            let (core, core_rx) = broadcast::channel::<Arc<str>>(8);
+            feed.attach(config, core_rx);
+            core.send(Arc::from(line)).unwrap();
+            let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("forwarded")
+                .unwrap();
+            assert_eq!(&*got, line);
+            assert_eq!(feed.last_config().as_deref(), Some(config));
+            // The core's output ended: its forwarder ends, the feed stays open.
+            drop(core);
+        }
+        assert!(rx.try_recv().is_err());
     }
 }

@@ -4,7 +4,7 @@
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
-use vpnte_base::types::UnixMs;
+use vpnte_base::types::{Engine, UnixMs};
 
 use super::{Degradation, Health, Lifecycle};
 use crate::slot::{CONTROL_HOST, Slot};
@@ -103,6 +103,10 @@ pub struct InstanceStatus {
     pub pid: Option<u32>,
     #[serde(with = "iso_ms")]
     pub started_at: Option<UnixMs>,
+    /// The engine that carries the server while the slot runs: Xray when the slot has an Xray
+    /// child (sing-box only bridges to it), else sing-box; `None` while nothing runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<Engine>,
 }
 
 impl InstanceStatus {
@@ -137,6 +141,7 @@ impl InstanceStatus {
             country: None,
             pid: None,
             started_at: None,
+            engine: None,
         }
     }
 }

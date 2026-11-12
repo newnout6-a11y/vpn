@@ -209,6 +209,15 @@ fn proxy_rows_read_out_address_and_state() {
         ..failed
     };
     assert_eq!(proxy_meta(&url_only, render).0, "http://127.0.0.1:8080");
+    // A running slot names its engine right after the address.
+    let on_xray = ProxyRowView {
+        engine: Some(vpnte_base::types::Engine::Xray),
+        ..url_only
+    };
+    assert_eq!(
+        proxy_meta(&on_xray, render).0,
+        "http://127.0.0.1:8080 · Xray"
+    );
 }
 
 const MIN: UnixMs = 60_000;

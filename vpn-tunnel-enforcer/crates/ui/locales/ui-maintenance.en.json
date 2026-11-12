@@ -121,6 +121,7 @@
       "capture": {
         "title": "Traffic capture",
         "disabled": "Deep inspection is off in Settings: no new capture sessions start.",
+        "unavailable": "Traffic capture is not available in this version.",
         "tileCapture": "Capture",
         "tileSnapshot": "Snapshot",
         "tileEtw": "ETW",

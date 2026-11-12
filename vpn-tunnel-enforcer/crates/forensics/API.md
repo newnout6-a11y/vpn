@@ -397,6 +397,10 @@ true`, output on the pipe; Clash API on 127.0.0.1 with a per-run secret.
   once by hand unelevated as a Performance Log User); the real `pktmon counters --json` layout
   (TUN-path search is structural); Clash polling against a real sing-box (mock server used).
   `enrichment::tests::live_lookup_of_example_com` needs internet (ignored).
-- Not wired by the app in this build: `Capture` / `etw` / `summary` (no packet capture), `Enricher`
-  (the setting exists, no lookups run), `HistoryService::observe_log_line` (the runtime exposes no
-  engine lines).
+- Not wired by the app in this build: `Capture` start / stop / `etw` / `summary` after a stop (no
+  packet capture). Wired (w3-app-extras, 2026-11-12): `Enricher` (its tick runs only while the
+  `domain_enrichment` setting is on; route Direct under the TUN, the session's mixed inbound in
+  Soft, none idle), `HistoryService::observe_log_line` (every line of every sing-box core, through
+  the tunnel runtime's `EngineFeed`), the Traffic page reads `HistoryService` (no file polling),
+  and the export gets engine versions, the last engine config, the recovery state (protection,
+  cleanup marker, tweak-journal summary) and an idle `Capture` over the default root.

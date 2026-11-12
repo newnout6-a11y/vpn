@@ -34,6 +34,14 @@ pub(super) fn Connection() -> Element {
         RoutingMode::Hard => t!("ui.settings.connection.hardHint"),
         RoutingMode::Soft => t!("ui.settings.connection.softHint"),
     };
+    // Without the TUN only Proxy can be saved: a stored Tunnel choice can still move to Proxy,
+    // a Tunnel choice is ignored, and the reason stays on screen.
+    let tun_available = ctx.state.read().tun_available;
+    let pick_routing = move |mode: RoutingMode| {
+        if mode == RoutingMode::Soft || tun_available {
+            ctx.edit(|p| p.routing_mode = Some(mode));
+        }
+    };
     rsx! {
         Panel { title: t!("ui.settings.connection.title"), id: "set-connection",
             Row {
@@ -64,8 +72,12 @@ pub(super) fn Connection() -> Element {
                         (RoutingMode::Soft, t!("ui.settings.connection.soft")),
                     ],
                     value: view.routing_mode,
-                    on_change: move |mode| ctx.edit(|p| p.routing_mode = Some(mode)),
+                    disabled: !tun_available && view.routing_mode == RoutingMode::Soft,
+                    on_change: pick_routing,
                 }
+            }
+            if !tun_available {
+                p { class: "set-hint", "data-unavailable": "tun", {t!("ui.settings.connection.tunUnavailable")} }
             }
             if view.routing_mode == RoutingMode::Soft {
                 div { class: "set-subgroup", role: "group", aria_label: t!("ui.settings.connection.softTargets"),

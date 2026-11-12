@@ -392,6 +392,9 @@ pub struct EtwView {
 /// Packet capture / forensics status («Сбор пакетов»).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CaptureView {
+    /// Capture can run in this process; otherwise «restart» is disabled up front and the first
+    /// warning says why.
+    pub available: bool,
     /// Deep inspection is switched on in Settings.
     pub enabled: bool,
     pub running: bool,

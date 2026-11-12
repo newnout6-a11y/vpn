@@ -168,6 +168,7 @@ impl LiveSession {
             egress_ip,
             egress_country: self.country.clone(),
             proxy_engine: self.engine.map(|run| run.kind),
+            proxy_engine_reason: self.engine.and_then(|run| run.reason).map(|r| r.msg()),
             ..Evidence::default()
         }
     }

@@ -1,7 +1,7 @@
 //! The page: header actions (rescan, add a program), search, the bypass-command card and the app
 //! table with a rule control per row.
 use dioxus::prelude::*;
-use vpnte_base::{AppError, ErrorKind, Msg};
+use vpnte_base::{ErrorKind, Msg};
 
 use super::model::{AppKind, AppRule, SplitApp, display_path, icon_src, initial, matches};
 use super::{tr_now, use_api, use_watch};
@@ -12,15 +12,6 @@ use crate::widgets::{
     Badge, Button, ButtonKind, Cell, EmptyState, HeadCell, IconButton, IconGlyph, Load, LoadError,
     Loading, Panel, SectionHeader, Spinner, Table, TextInput, TextKind, Toasts, use_job,
 };
-
-/// Error toast of an action; cancellation is silent.
-fn fail(toasts: Toasts, title_key: &'static str, err: &AppError) {
-    if err.kind == ErrorKind::Cancelled {
-        return;
-    }
-    tracing::warn!(error = %err, action = title_key, "split-tunnel action failed");
-    toasts.error(tr_now(&Msg::new(title_key)), Some(tr_now(&err.user_msg())));
-}
 
 /// The Apps page (register as `Page::Apps`). Needs `Rc<dyn SplitTunnelApi>` and the [`Toasts`]
 /// provider in context.
@@ -54,7 +45,7 @@ pub fn SplitTunnelPage() -> Element {
                             Some(tr_now(&detail)),
                         );
                     }
-                    Err(err) => fail(toasts, "splitTunneling.refreshFailed", &err),
+                    Err(err) => toasts.failed(&Msg::new("splitTunneling.refreshFailed"), &err),
                 }
                 Ok(())
             });
@@ -69,7 +60,7 @@ pub fn SplitTunnelPage() -> Element {
                     // A new row the search would hide: clear the search so it is seen.
                     Ok(Some(app)) if !matches(&app, &query.peek()) => query.set(String::new()),
                     Ok(_) => {}
-                    Err(err) => fail(toasts, "splitTunneling.addFailed", &err),
+                    Err(err) => toasts.failed(&Msg::new("splitTunneling.addFailed"), &err),
                 }
                 Ok(())
             });
@@ -280,7 +271,7 @@ fn AppRow(app: SplitApp) -> Element {
                 let result = api.set_rule(id, rule).await;
                 pending.set(None);
                 if let Err(err) = result {
-                    fail(toasts, "splitTunneling.ruleFailed", &err);
+                    toasts.failed(&Msg::new("splitTunneling.ruleFailed"), &err);
                 }
                 Ok(())
             });
@@ -292,7 +283,7 @@ fn AppRow(app: SplitApp) -> Element {
             let (api, id) = (api.clone(), id.clone());
             remove_job.start(move |_| async move {
                 if let Err(err) = api.remove(id).await {
-                    fail(toasts, "splitTunneling.removeFailed", &err);
+                    toasts.failed(&Msg::new("splitTunneling.removeFailed"), &err);
                 }
                 Ok(())
             });

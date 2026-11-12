@@ -69,6 +69,8 @@ pub(crate) fn capture_refusal(elevated: bool) -> AppError {
 pub(crate) fn capture_view(elevated: bool) -> CaptureView {
     let why = capture_refusal(elevated).user_msg();
     CaptureView {
+        // The page disables «restart» up front instead of letting it fail.
+        available: false,
         last_error: Some(why.clone()),
         warnings: vec![why],
         ..CaptureView::default()

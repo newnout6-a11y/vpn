@@ -1274,3 +1274,22 @@ fn server_choice_wins_for_slots() {
     };
     assert_eq!(source.for_profile(&own), expected);
 }
+
+/// A slot names the engine that carries its server while it runs: sing-box for a native
+/// profile, Xray when the plan has an Xray child; a stopped slot names none.
+#[tokio::test]
+async fn slots_name_their_engine() {
+    use vpnte_base::types::Engine as EngineKind;
+
+    let xray = ProxyProfile {
+        id: "profile-x".into(),
+        engine: EnginePref::Xray,
+        ..sample(2)
+    };
+    let r = rig(vec![sample(1), xray], slow_timing());
+    let native = r.manager.start(connect(1, "profile-1")).await.unwrap();
+    assert_eq!(native.instance.engine, Some(EngineKind::SingBox));
+    let carried = r.manager.start(connect(2, "profile-x")).await.unwrap();
+    assert_eq!(carried.instance.engine, Some(EngineKind::Xray));
+    assert_eq!(InstanceStatus::stopped(slot(3)).engine, None);
+}

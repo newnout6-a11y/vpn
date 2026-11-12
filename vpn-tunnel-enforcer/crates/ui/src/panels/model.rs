@@ -2,7 +2,7 @@
 //! proxies column. Display data only (no credentials, no full configs); traffic uses
 //! [`vpnte_view::traffic::TrafficSample`] as it is.
 use vpnte_base::Msg;
-use vpnte_base::types::UnixMs;
+use vpnte_base::types::{Engine, UnixMs};
 use vpnte_view::identity::ServerHealth;
 
 /// The servers panel's state.
@@ -96,6 +96,8 @@ pub struct ProxyRowView {
     pub latency_ms: Option<u32>,
     /// Why the last start or probe failed.
     pub last_error: Option<Msg>,
+    /// The engine that carries the server while the slot runs (an Xray child = Xray).
+    pub engine: Option<Engine>,
 }
 
 impl ProxyRowView {

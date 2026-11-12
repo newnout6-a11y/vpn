@@ -147,6 +147,7 @@ fn projection_maps_rows_and_groups() {
             last_seen_at: Some(3),
             stealth: Some(ui::Stealth::Reality),
             fingerprint: Some("chrome".into()),
+            fingerprint_warning: Some(Msg::new("engine.xray.warn.fingerprintBroken")),
             has_outbound: true,
             engine_plan: None,
             verdict: None,
@@ -168,6 +169,11 @@ fn projection_maps_rows_and_groups() {
     );
     assert_eq!(a.stealth, Some(ui::Stealth::Reality));
     assert_eq!(a.fingerprint.as_deref(), Some("chrome"));
+    assert_eq!(
+        a.fingerprint_warning.as_ref().map(|m| m.key.as_ref()),
+        Some("engine.xray.warn.fingerprintBroken"),
+        "the warning reaches the server view"
+    );
     assert!(a.has_outbound && a.enabled && a.archived.is_none());
     assert_eq!(a.country.as_deref(), Some("DE"));
     assert_eq!(a.group_id.as_deref(), Some("keys"));
@@ -304,4 +310,38 @@ fn locale_fragments_pair_up_and_match_the_code() {
     used.sort();
     used.dedup();
     assert_eq!(used, ru, "keys of the code = keys of the fragments");
+}
+
+/// A provider-pinned fingerprint current REALITY servers refuse is flagged on either engine
+/// (both send it); one only Xray does not know is flagged only when Xray would run the server.
+#[test]
+fn pinned_fingerprints_are_flagged_where_they_matter() {
+    use vpnte_base::types::Engine;
+
+    use super::project::fingerprint_warning;
+
+    let reality = |fp: &str| {
+        vpnte_profiles::uri::parse_uri(&format!(
+            "vless://00000000-0000-4000-8000-00000000000a@203.0.113.20:443?security=reality\
+             &sni=example.com&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=ab&fp={fp}\
+             &type=tcp#Fake"
+        ))
+        .expect("fake REALITY key")
+    };
+    let runs = |engine| ui::EnginePlan::Runs {
+        engine,
+        reason: Msg::new("x"),
+    };
+    let (singbox, xray) = (runs(Engine::SingBox), runs(Engine::Xray));
+    for plan in [Some(&singbox), Some(&xray), None] {
+        let refused = fingerprint_warning(&reality("edge"), plan).expect("edge is refused");
+        assert_eq!(refused.key, "engine.xray.warn.fingerprintRejected");
+    }
+    assert_eq!(fingerprint_warning(&reality("chrome"), Some(&xray)), None);
+    let unknown = reality("netscape");
+    assert_eq!(fingerprint_warning(&unknown, Some(&singbox)), None);
+    assert_eq!(
+        fingerprint_warning(&unknown, Some(&xray)).map(|m| m.key),
+        Some("engine.xray.warn.fingerprintUnknown".into())
+    );
 }

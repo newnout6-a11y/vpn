@@ -176,6 +176,7 @@ fn row(i: &InstanceStatus) -> ProxyRowView {
                 .as_ref()
                 .map(|e| Msg::new("app.proxies.detail").arg("detail", e))
         }),
+        engine: i.engine,
     }
 }
 

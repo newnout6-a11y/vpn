@@ -4,7 +4,7 @@
 mod block;
 mod shortcut;
 
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 
 pub use block::{LEGACY_AUMIDS, ResetReport, reset_os_block};
 pub use shortcut::{
@@ -18,7 +18,7 @@ use windows::UI::Notifications::{
     NotificationSetting, ToastNotification, ToastNotificationManager,
 };
 use windows::Win32::Foundation::ERROR_NOT_FOUND;
-use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Com::{CoIncrementMTAUsage, CoTaskMemFree};
 use windows::Win32::UI::Shell::{
     GetCurrentProcessExplicitAppUserModelID, SetCurrentProcessExplicitAppUserModelID,
 };
@@ -73,7 +73,24 @@ pub type OnActivate = Arc<dyn Fn() + Send + Sync>;
 
 /// Shows `toast` attributed to `aumid`. Blocking WinRT calls: run it off the UI thread.
 pub fn show(aumid: &str, toast: &Toast, on_activate: Option<OnActivate>) -> AppResult<()> {
+    hold_mta();
     show_inner(aumid, toast, on_activate).map_err(AppError::internal)
+}
+
+/// Holds one usage of the COM multithreaded apartment for the life of the process (once), before
+/// any WinRT toast call. Callers reach these functions from threads that never initialise COM
+/// (a toast thread, the blocking pool): they run in the implicit MTA, and windows-rs caches each
+/// activation factory. When other code that joined the MTA explicitly leaves it last, COM tears
+/// the MTA down and unloads the toast DLL under the cached factory, and the next toast jumps into
+/// unmapped code (an access violation in `wpnapps.dll`, seen in the app review).
+fn hold_mta() {
+    static HELD: Once = Once::new();
+    HELD.call_once(|| {
+        // SAFETY: no arguments; the cookie is deliberately never released.
+        if let Err(err) = unsafe { CoIncrementMTAUsage() } {
+            tracing::warn!(%err, "COM multithreaded apartment not held");
+        }
+    });
 }
 
 fn show_inner(
@@ -150,6 +167,7 @@ impl NotifySetting {
 
 /// The toast setting for `aumid`, read from `ToastNotifier::Setting` (the exact OS view).
 pub fn notification_setting(aumid: &str) -> AppResult<NotifySetting> {
+    hold_mta();
     setting_from(
         ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(aumid))
             .and_then(|notifier| notifier.Setting()),

@@ -4,14 +4,14 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 use jiff::tz::TimeZone;
+use vpnte_base::Msg;
 use vpnte_base::types::UnixMs;
-use vpnte_base::{AppError, ErrorKind, Msg};
 
 use super::model::{
     DomainRow, MAX_RENDERED, SiteInfo, by_day, day_heading, filter, moment, month_key, seen_line,
     site_url, totals,
 };
-use super::{tr_now, use_api, use_coalesced};
+use super::{use_api, use_coalesced};
 use crate::lang::tr;
 use crate::pages::{Page, nav_number};
 use crate::t;
@@ -24,15 +24,6 @@ use crate::widgets::{
 /// The time zone of the visit (the page is active-only: read again on every visit).
 #[derive(Clone)]
 struct PageTz(TimeZone);
-
-/// Error toast of an action; cancellation is silent.
-fn fail(toasts: Toasts, title_key: &'static str, err: &AppError) {
-    if err.kind == ErrorKind::Cancelled {
-        return;
-    }
-    tracing::warn!(error = %err, action = title_key, "traffic history action failed");
-    toasts.error(tr_now(&Msg::new(title_key)), Some(tr_now(&err.user_msg())));
-}
 
 /// The Traffic page (register as `Page::TrafficHistory`). Needs `Rc<dyn TrafficHistoryApi>`
 /// and the [`Toasts`] provider in context.
@@ -56,7 +47,7 @@ pub fn TrafficHistoryPage() -> Element {
             let api = api.clone();
             reload_job.start(move |_| async move {
                 if let Err(err) = api.reload().await {
-                    fail(toasts, "trafficHistory.refreshFailed", &err);
+                    toasts.failed(&Msg::new("trafficHistory.refreshFailed"), &err);
                 }
                 Ok(())
             });
@@ -70,7 +61,7 @@ pub fn TrafficHistoryPage() -> Element {
                 let result = api.clear().await;
                 confirm_open.set(false);
                 if let Err(err) = result {
-                    fail(toasts, "trafficHistory.clearFailed", &err);
+                    toasts.failed(&Msg::new("trafficHistory.clearFailed"), &err);
                 }
                 Ok(())
             });
@@ -232,7 +223,7 @@ fn DomainItem(row: DomainRow) -> Element {
         let api = api.clone();
         spawn(async move {
             if let Err(err) = api.open_site(url).await {
-                fail(toasts, "trafficHistory.openFailed", &err);
+                toasts.failed(&Msg::new("trafficHistory.openFailed"), &err);
             }
         });
     };

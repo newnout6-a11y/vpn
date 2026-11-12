@@ -24,10 +24,11 @@ use vpnte_ui::split_tunnel::{AppKind, AppRule, SplitApp, SplitSnapshot, SplitTun
 use vpnte_ui::traffic_history::{DomainRow, SiteInfo, TrafficHistoryApi, TrafficSnapshot};
 use vpnte_ui::widgets::Load;
 
-use super::traffic::{history_path, read_if_changed};
 use super::{ScheduleService, SplitService, TrafficService};
 use crate::api_settings::test_support::{FakeTunnel, TempDir, backend};
 use crate::services::Backend;
+use crate::svc_tunnel::DomainHistory;
+use vpnte_tunnel::api::TunStatus;
 
 /// Waits (at most 10 s) until the pushed state satisfies `what` and returns it.
 async fn until<T: Clone>(rx: &mut watch::Receiver<T>, what: impl Fn(&T) -> bool) -> T {
@@ -102,7 +103,8 @@ fn locales_paired_and_complete() {
         .flat_map(|src| src.split('"').skip(1).step_by(2))
         .filter(|s| s.starts_with("app.lists."))
         .collect();
-    assert!(named.len() >= 4, "{named:?}");
+    // Every key of the fragment is named in the sources (no dead keys) and the reverse below.
+    assert_eq!(named.len(), ru_keys.len(), "{named:?}");
     for key in &named {
         assert!(ru_keys.contains(*key), "missing {key}");
     }
@@ -498,9 +500,20 @@ const HISTORY: &str = r#"{
 }"#;
 
 fn write_history(backend: &Backend, body: &str) {
-    let path = history_path(&backend.dirs.root);
+    let path = backend
+        .dirs
+        .root
+        .join("history")
+        .join("traffic-domains.json");
     std::fs::create_dir_all(path.parent().expect("parent")).expect("history dir");
     std::fs::write(path, body).expect("history");
+}
+
+/// The process's domain history over `backend`'s data dir (what was written before is its
+/// content); no engine runs, so no line and no session ever arrive.
+fn domain_history(backend: &Backend) -> Arc<DomainHistory> {
+    let status = watch::channel(TunStatus::default()).1;
+    DomainHistory::open(backend, status, broadcast::channel(8).1)
 }
 
 fn domains(snapshot: &TrafficSnapshot) -> Vec<DomainRow> {
@@ -510,16 +523,16 @@ fn domains(snapshot: &TrafficSnapshot) -> Vec<DomainRow> {
     }
 }
 
-/// U-18: the rows are what the history service persisted (a BOM tolerated), newest first,
+/// U-18: the rows are what the history service holds (its file read with a BOM), newest first,
 /// `count` by the forensics visits rule (connections, else DNS lookups), no IP, no site names
-/// (enrichment is not wired); `tunnel_up` follows the tunnel while the page looks.
+/// while the lookups are off; `tunnel_up` follows the tunnel while the page looks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn history_rows_come_from_the_persisted_file() {
+async fn history_rows_come_from_the_history_service() {
     let dir = TempDir::new("lists-traffic-rows");
     let tunnel = FakeTunnel::new(false);
     let backend = backend(&dir, tunnel.clone());
     write_history(&backend, &format!("\u{feff}{HISTORY}"));
-    let api = TrafficService::start(backend);
+    let api = TrafficService::start(backend.clone(), domain_history(&backend));
     let mut state = api.state();
     let snapshot = until(&mut state, |s| matches!(s.domains, Load::Ready(_))).await;
     let rows = domains(&snapshot);
@@ -540,76 +553,88 @@ async fn history_rows_come_from_the_persisted_file() {
     until(&mut state, |s| s.tunnel_up).await;
 }
 
-/// The file is read again only when its time or length changed; no file is an empty history.
+/// A domain the engine's DNS answers name reaches the open page without a reload; «clear»
+/// empties the list and saves the empty history at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engine_lines_and_clear_reach_the_page() {
+    let dir = TempDir::new("lists-traffic-live");
+    let backend = backend(&dir, FakeTunnel::new(false));
+    write_history(&backend, HISTORY);
+    let history = domain_history(&backend);
+    let api = TrafficService::start(backend.clone(), history.clone());
+    let mut state = api.state();
+    history.history.observe_log_line(
+        "+0300 2026-09-25 17:17:06 INFO [42 1ms] dns: exchanged A news.example.org. 60 IN A 198.51.100.7",
+    );
+    let rows = domains(&until(&mut state, |s| domains(s).len() == 4).await);
+    assert!(rows.iter().any(|r| r.domain == "news.example.org"));
+
+    api.clear().await.expect("cleared");
+    assert!(domains(&state.borrow()).is_empty());
+    let saved = std::fs::read_to_string(
+        backend
+            .dirs
+            .root
+            .join("history")
+            .join("traffic-domains.json"),
+    )
+    .expect("saved");
+    assert!(!saved.contains("example"), "{saved}");
+}
+
+/// Site info follows the lookup state of each entry; without one a row has none.
 #[test]
-fn unchanged_file_is_not_read_again() {
-    let dir = TempDir::new("lists-traffic-stamp");
-    let path = history_path(&dir.0);
-    let (absent, rows) = read_if_changed(&path, None)
-        .expect("no file")
-        .expect("first read");
-    assert_eq!((absent, rows.len()), (None, 0));
-    assert!(
-        read_if_changed(&path, Some(None))
-            .expect("no file")
-            .is_none()
-    );
-    std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
-    std::fs::write(&path, HISTORY).expect("write");
-    let (stamp, rows) = read_if_changed(&path, Some(None))
-        .expect("read")
-        .expect("changed");
-    assert!(stamp.is_some());
-    assert_eq!(rows.len(), 3);
-    assert!(read_if_changed(&path, Some(stamp)).expect("read").is_none());
-}
-
-/// U-06: a first read that fails is published as `Failed` (never "empty"); a later failure
-/// keeps the last good list and only answers with the error (the page toasts it).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn failed_reads_keep_a_published_list() {
-    let dir = TempDir::new("lists-traffic-failed");
-    let backend = backend(&dir, FakeTunnel::new(false));
-    write_history(&backend, "{ not json");
-    let api = TrafficService::start(backend.clone());
-    let mut state = api.state();
-    let err = api.reload().await.expect_err("corrupt");
+fn site_info_follows_the_enrichment_state() {
+    use vpnte_forensics::domains::DomainRecord;
+    use vpnte_forensics::enrichment::{DomainEnrichment, EnrichStatus, HistoryEntry};
+    let entry = |domain: &str, status: Option<EnrichStatus>| HistoryEntry {
+        record: DomainRecord {
+            domain: domain.into(),
+            first_seen: 1,
+            last_seen: 2,
+            connections: 1,
+            lookups: 0,
+            bytes_up: 0,
+            bytes_down: 0,
+            outbound: None,
+        },
+        enrichment: status.map(|status| DomainEnrichment {
+            status,
+            site_name: Some("Example".into()),
+            title: Some("Example site".into()),
+            description: None,
+            canonical_url: None,
+            favicon_url: None,
+            fetched_at: 1,
+        }),
+    };
+    let rows = super::traffic::rows(vec![
+        entry("a.example", None),
+        entry("b.example", Some(EnrichStatus::Pending)),
+        entry("c.example", Some(EnrichStatus::Ready)),
+        entry("d.example", Some(EnrichStatus::Unavailable)),
+    ]);
+    let sites: Vec<SiteInfo> = rows.into_iter().map(|r| r.site).collect();
     assert_eq!(
-        refusal(&err),
-        (ErrorKind::Internal, "app.lists.traffic.readFailed".into())
-    );
-    assert!(matches!(state.borrow().domains, Load::Failed(_)));
-
-    write_history(&backend, HISTORY);
-    api.reload().await.expect("repaired");
-    assert_eq!(domains(&state.borrow_and_update()).len(), 3);
-    write_history(&backend, "[]");
-    api.reload().await.expect_err("not an object");
-    assert_eq!(
-        domains(&state.borrow()).len(),
-        3,
-        "the last good list stays"
+        sites,
+        [
+            SiteInfo::None,
+            SiteInfo::Pending,
+            SiteInfo::Ready {
+                name: Some("Example".into()),
+                title: Some("Example site".into()),
+            },
+            SiteInfo::Unavailable,
+        ]
     );
 }
 
-/// Clearing belongs to the history service's owner: while it does not offer it, the page gets
-/// its refusal and the list stays. Only `https://<plain host>` links are opened (nothing here
-/// reaches the browser).
+/// Only `https://<plain host>` links are opened (nothing here reaches the browser).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn clear_and_links_are_refused_honestly() {
-    let dir = TempDir::new("lists-traffic-clear");
+async fn only_plain_site_links_are_opened() {
+    let dir = TempDir::new("lists-traffic-links");
     let backend = backend(&dir, FakeTunnel::new(false));
-    write_history(&backend, HISTORY);
-    let api = TrafficService::start(backend);
-    let mut state = api.state();
-    until(&mut state, |s| matches!(s.domains, Load::Ready(_))).await;
-    let err = api.clear().await.expect_err("not offered");
-    assert_eq!(
-        refusal(&err),
-        (ErrorKind::Conflict, "app.logs.trafficUnavailable".into())
-    );
-    assert_eq!(domains(&state.borrow()).len(), 3);
-
+    let api = TrafficService::start(backend.clone(), domain_history(&backend));
     for url in [
         "",
         "http://example.com",
@@ -657,7 +682,7 @@ async fn the_pages_render_over_the_package_contexts() {
     let backend = backend(&dir, FakeTunnel::new(false));
     write_history(&backend, HISTORY);
     let schedule: Rc<dyn ScheduleApi> = Rc::new(schedule_api(&backend));
-    let contexts = super::with_schedule(&backend, schedule);
+    let contexts = super::with_schedule(&backend, schedule, domain_history(&backend));
     // `use_context` finds a root context by its exact type: these are the types the pages ask
     // for (a missing one does not fail the render below, so check them here).
     assert_eq!(contexts.len(), 3);

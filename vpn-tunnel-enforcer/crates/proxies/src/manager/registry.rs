@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::UnixMs;
+use vpnte_base::types::{Engine as EngineKind, UnixMs};
 
 use super::launch::Engine;
 use super::run::LoopCmd;
@@ -32,6 +32,8 @@ pub(super) struct Assigned {
 /// The live engine of a slot and the handles of the tasks watching it.
 pub(super) struct Live {
     pub engine: Arc<dyn Engine>,
+    /// Which engine carries the server (an Xray child = Xray).
+    pub kind: EngineKind,
     pub pid: u32,
     /// Ends the slot's health loop, exit watcher and output pump.
     pub cancel: CancellationToken,
@@ -96,6 +98,7 @@ impl SlotState {
             country: profile.and_then(|p| p.country.clone()),
             pid: self.live.as_ref().map(|l| l.pid),
             started_at: self.started_at.filter(|_| running),
+            engine: self.live.as_ref().map(|l| l.kind),
         }
     }
 

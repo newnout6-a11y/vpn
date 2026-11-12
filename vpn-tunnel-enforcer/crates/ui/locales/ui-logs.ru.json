@@ -89,6 +89,9 @@
         "noServer": "Нет выбранного сервера"
       }
     },
-    "running": "Сессия ещё идёт"
+    "running": "Сессия ещё идёт",
+    "outcomeEvidence": {
+      "proxyEngineReason": "Почему этот движок"
+    }
   }
 }

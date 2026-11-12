@@ -772,3 +772,34 @@ async fn limits_and_invalid_urls() {
         FetchError::InvalidUrl
     );
 }
+
+/// A failed SOCKS handshake is the proxy's fault: hyper-util names it "SOCKS error: io error
+/// during SOCKS handshake" (no source), which must not read as a TLS failure of the host.
+#[test]
+fn socks_handshake_failures_blame_the_proxy() {
+    #[derive(Debug)]
+    struct Socks(&'static str);
+    impl fmt::Display for Socks {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+    impl std::error::Error for Socks {}
+
+    for text in [
+        "SOCKS error: io error during SOCKS handshake",
+        "SOCKS error: failed parsing server response",
+        "SOCKS error: could not resolve to acceptable address type",
+    ] {
+        assert_eq!(
+            super::http::class_of(&Socks(text)),
+            Some(FetchOutcome::Network(NetFail::Proxy)),
+            "{text}"
+        );
+    }
+    let tls = Socks("received fatal alert: HandshakeFailure");
+    assert_eq!(
+        super::http::class_of(&tls),
+        Some(FetchOutcome::Network(NetFail::Tls))
+    );
+}

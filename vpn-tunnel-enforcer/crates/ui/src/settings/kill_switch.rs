@@ -2,7 +2,7 @@
 //! the failure reason and an unconfirmed state) and the exceptions editor.
 use dioxus::prelude::*;
 
-use super::model::{ExceptionKind, KillSwitchLevel, ProtectionStatus};
+use super::model::{ExceptionKind, KillSwitchLevel, ProtectionStatus, RoutingMode};
 use super::{ActionError, use_api, use_ctx};
 use crate::lang::tr;
 use crate::t;
@@ -11,11 +11,15 @@ use crate::widgets::{
     Tone, UiError, use_job,
 };
 
-fn level_desc(level: KillSwitchLevel) -> String {
-    match level {
-        KillSwitchLevel::Off => t!("onboarding.killSwitchOffDesc"),
-        KillSwitchLevel::Standard => t!("onboarding.killSwitchStandardDesc"),
-        KillSwitchLevel::Strict => t!("onboarding.killSwitchStrictDesc"),
+/// What `level` does in `routing`: in Proxy mode the hold is the system proxy left on the
+/// engine's port, and strict needs the Tunnel (WFP), so the Tunnel texts would promise too much.
+pub(super) fn level_desc_key(level: KillSwitchLevel, routing: RoutingMode) -> &'static str {
+    match (level, routing) {
+        (KillSwitchLevel::Off, _) => "onboarding.killSwitchOffDesc",
+        (KillSwitchLevel::Standard, RoutingMode::Hard) => "onboarding.killSwitchStandardDesc",
+        (KillSwitchLevel::Strict, RoutingMode::Hard) => "onboarding.killSwitchStrictDesc",
+        (KillSwitchLevel::Standard, RoutingMode::Soft) => "ui.wizard.protection.standardSoft",
+        (KillSwitchLevel::Strict, RoutingMode::Soft) => "ui.wizard.protection.strictSoft",
     }
 }
 
@@ -78,7 +82,7 @@ pub(super) fn KillSwitch() -> Element {
             div { class: "w-row",
                 div { class: "w-row-text",
                     span { class: "w-row-label", {t!("settings.killSwitchDescription")} }
-                    p { class: "w-row-hint", {level_desc(shown)} }
+                    p { class: "w-row-hint", {t!(level_desc_key(shown, ctx.view().routing_mode))} }
                 }
                 div { class: "w-row-control",
                     if applying {

@@ -6,8 +6,10 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use tokio::time::Instant;
 use vpnte_base::types::Level;
+use vpnte_base::{AppError, ErrorKind, Msg};
 
 use super::buttons::{Icon, IconGlyph};
+use crate::lang::tr_now;
 
 /// How long a toast stays (old global toasts: 4000 ms).
 pub const TOAST_TTL: Duration = Duration::from_millis(4000);
@@ -121,6 +123,17 @@ impl Toasts {
     }
     pub fn info(&self, title: impl Into<String>, description: Option<String>) -> u64 {
         self.push(ToastKind::Info, title, description)
+    }
+
+    /// The toast of a failed action, the same on every page: nothing for a cancelled one (the
+    /// user asked for it), otherwise a warning in the log and an error toast titled `title` with
+    /// the error's own sentence.
+    pub fn failed(&self, title: &Msg, err: &AppError) {
+        if err.kind == ErrorKind::Cancelled {
+            return;
+        }
+        tracing::warn!(target: "ui", error = %err, action = %title.key, "action failed");
+        self.error(tr_now(title), Some(tr_now(&err.user_msg())));
     }
 
     /// Removes a toast (its close button).

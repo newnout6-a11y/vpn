@@ -192,3 +192,50 @@ fn locale_fragments_match_the_code() {
     defined.sort();
     assert_eq!(used, defined);
 }
+
+/// Site-name lookups leave only through a running session: plain requests under the TUN, the
+/// mixed inbound (SOCKS5, no credentials) under the proxy capture; idle, nowhere. The setting
+/// is carried as is (off = the tick is not running at all).
+#[test]
+fn site_name_lookups_follow_the_session() {
+    use vpnte_core::net::Route;
+    use vpnte_tunnel::api::{CaptureKind, ProxyEndpoint, SessionEndpoints, TunStatus};
+
+    use super::domains::enrich_inputs;
+
+    let endpoint = |port| ProxyEndpoint {
+        port,
+        user: "u".into(),
+        pass: "p".into(),
+    };
+    let running = |capture, proxy_port| TunStatus {
+        running: true,
+        capture: Some(capture),
+        session: Some(SessionEndpoints {
+            clash_port: 1,
+            clash_secret: "0".repeat(32),
+            direct: endpoint(20001),
+            probe: None,
+            tun_luid: None,
+            tun_alias: None,
+            proxy_port,
+            logs: Vec::new(),
+        }),
+        ..TunStatus::default()
+    };
+    let idle = enrich_inputs(true, &TunStatus::default());
+    assert!(idle.enabled && idle.route.is_none());
+    let tun = enrich_inputs(true, &running(CaptureKind::Tun, None));
+    assert_eq!(tun.route, Some(Route::Direct));
+    let soft = enrich_inputs(false, &running(CaptureKind::Proxy, Some(20808)));
+    assert!(!soft.enabled);
+    let Some(Route::Proxy { url }) = soft.route else {
+        panic!("the mixed inbound");
+    };
+    assert_eq!(url.as_str(), "socks5h://127.0.0.1:20808");
+    // A proxy capture whose port is not known yet has nowhere to send a lookup.
+    assert_eq!(
+        enrich_inputs(true, &running(CaptureKind::Proxy, None)).route,
+        None
+    );
+}

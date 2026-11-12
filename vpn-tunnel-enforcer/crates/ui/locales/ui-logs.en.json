@@ -89,6 +89,9 @@
         "noServer": "No server selected"
       }
     },
-    "running": "The session is still running"
+    "running": "The session is still running",
+    "outcomeEvidence": {
+      "proxyEngineReason": "Why this engine"
+    }
   }
 }

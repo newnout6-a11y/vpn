@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{UnixMs, now_ms};
+use vpnte_base::types::{Engine as EngineKind, UnixMs, now_ms};
 use vpnte_core::redact;
 
 use super::Inner;
@@ -54,6 +54,7 @@ impl Inner {
         generation: u64,
         port: u16,
         engine: Arc<dyn Engine>,
+        kind: EngineKind,
     ) -> Live {
         let cancel = self.closing.child_token();
         let (probes, commands) = mpsc::unbounded_channel();
@@ -77,6 +78,7 @@ impl Inner {
         tokio::spawn(pump_output(weak, slot, engine.lines(), cancel.clone()));
         Live {
             pid: engine.pid(),
+            kind,
             engine,
             cancel,
             probes,

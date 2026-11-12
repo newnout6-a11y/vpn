@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use tokio::sync::watch;
-use vpnte_base::types::{Creds, Loopback};
+use vpnte_base::types::{Creds, EnginePref, Loopback};
 use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
 use vpnte_engine::routing::RulesDoc;
@@ -85,6 +85,13 @@ impl LiveEnv for AppLiveEnv {
             // The runtime publishes no DNS bootstrap listener: probe engines resolve on their own.
             dns_bootstrap_in: None,
         }
+    }
+
+    fn server_engine(&self, id: &str) -> EnginePref {
+        // A row gone since the check was queued has no choice of its own left: the setting rules.
+        self.servers
+            .get(&ProfileId::from(id))
+            .map_or(EnginePref::Auto, |row| row.engine)
     }
 
     fn geo_enabled(&self) -> bool {

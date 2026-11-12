@@ -14,7 +14,6 @@ use vpnte_core::settings::{NotificationPrefs, NotifyMethod, Settings};
 use vpnte_core::store::Store;
 use vpnte_tunnel::lifecycle::NoticeKind;
 use vpnte_winnet::toast::{self, NotifySetting, OnActivate, Toast};
-use windows::Win32::System::Com::CoIncrementMTAUsage;
 
 /// Identical title + body within this window are delivered once: a crash-looping engine must
 /// not stack five identical toasts.
@@ -85,7 +84,6 @@ pub struct Notifier {
 impl Notifier {
     /// Starts the toast thread (it ends when the notifier is dropped).
     pub fn new(settings: Arc<Store<Settings>>) -> AppResult<Self> {
-        hold_mta();
         let (inapp, _) = broadcast::channel(INAPP_CAPACITY);
         let (jobs, rx) = mpsc::channel();
         let activate = Arc::new(OnceLock::new());
@@ -168,24 +166,6 @@ impl vpnte_tunnel::lifecycle::Notifier for Notifier {
     fn notify(&self, notice: Notice, kind: NoticeKind) {
         Notifier::notify(self, notice, Some(kind.into()));
     }
-}
-
-/// Holds one usage of the COM multithreaded apartment for the life of the process (once).
-/// Toast and notification-setting reads are WinRT calls from threads that never call
-/// `CoInitializeEx` (the toast thread, blocking-pool threads): they run in the implicit MTA, and
-/// windows-rs caches each activation factory. Other code joins and leaves the MTA explicitly
-/// (firewall reads); when the last of them leaves, COM tears the MTA down and unloads the toast
-/// DLL under the cached factory, and the next toast call jumps into unmapped code (seen as an
-/// access violation in `wpnapps.dll`). windows-rs takes a usage itself only when no MTA exists at
-/// the first call, so the outcome depended on timing.
-fn hold_mta() {
-    static HELD: std::sync::Once = std::sync::Once::new();
-    HELD.call_once(|| {
-        // SAFETY: no arguments; the cookie is deliberately never released.
-        if let Err(err) = unsafe { CoIncrementMTAUsage() } {
-            tracing::warn!(%err, "COM multithreaded apartment not held");
-        }
-    });
 }
 
 /// A notice on its way to Windows.

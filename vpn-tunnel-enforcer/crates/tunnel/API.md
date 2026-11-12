@@ -165,7 +165,9 @@ pub struct Evidence { pub singbox_exit_code: Option<i64>, pub singbox_stderr_tai
     pub adaptive_attempts: Option<u32>, pub auto_restart_attempts: Option<u32>,
     pub kill_switch_engaged: Option<bool>, pub leak_detected_during_session: Option<bool>,
     pub network_transition: Option<NetworkTransition>, pub egress_country: Option<String>,
-    pub egress_ip: Option<String>, pub proxy_engine: Option<Engine>, pub hint: Option<Msg> }
+    pub egress_ip: Option<String>, pub proxy_engine: Option<Engine>,
+    pub proxy_engine_reason: Option<Msg> /* EngineRun::reason as its message; None for a local proxy */,
+    pub hint: Option<Msg> }
 impl Evidence { pub fn is_empty(&self) -> bool; pub fn normalized(self) -> Self }
 pub struct SessionOutcome { pub kind: OutcomeKind, pub headline: Msg, pub evidence: Evidence }
 impl SessionOutcome { pub fn new(kind, evidence) -> Self; pub fn with_headline(kind, evidence, headline: Msg) -> Self;
@@ -256,7 +258,7 @@ impl ConnError { pub fn kind(&self) -> ErrorKind /* Refused|NoServer = Conflict 
     pub fn warnings(&self) -> &[Msg] }                               // From<ConnError> for AppError
 pub struct SessionView { pub owner: Owner /* holder */, pub profile_id: String, pub profile_name: String,
     pub mode: SessionMode, pub generation: Option<u64>, pub adaptive: AdaptiveMode, pub started_at: UnixMs,
-    pub engine: Option<EngineRun> }                                  // history evidence: proxy_engine
+    pub engine: Option<EngineRun> }              // history evidence: proxy_engine + proxy_engine_reason
 impl SessionView { pub fn server_id(&self) -> Option<&str> }      // list id (Hard or Soft); None = local proxy
 pub enum SessionEvent { Up(SessionView), Ended { session: SessionView, outcome: OutcomeKind } }
 pub struct ShutdownReport { pub engines_stopped: bool, pub soft_restored: bool, pub capture_stopped: bool,
@@ -412,7 +414,12 @@ pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self;   // + Defau
     async fn admit(&self, server: &Profile, cancel: &CancellationToken) -> AppResult<()>; }  // Err: deferred / cancelled
 pub struct RealEngines;
 impl RealEngines { pub fn new(singbox: PathBuf, xray: PathBuf, logs: Option<PathBuf>) -> Self   // canonical paths
-    pub fn with_gate(self, gate: Arc<dyn HandshakeGate>) -> Self }   // every slot echo request waits for a slot
+    pub fn with_gate(self, gate: Arc<dyn HandshakeGate>) -> Self     // every slot echo request waits for a slot
+    pub fn feed(&self) -> EngineFeed }   // take it before the engines move into RuntimeDeps
+#[derive(Clone)] pub struct EngineFeed;  // the sing-box cores of this runtime, for in-process consumers
+impl EngineFeed { pub fn subscribe_lines(&self) -> broadcast::Receiver<Arc<str>>;  // RAW lines of every core
+                                         // (crash restarts included; backlog 1024): never log them
+    pub fn last_config(&self) -> Option<Arc<[u8]>>; }   // JSON of the last core started (memory only)
 ```
 Behaviour the caller can rely on: one task serialises every operation (a start waits for the one in
 flight); `stop()` cancels a start / switch / restart in flight and waits for its compensation;

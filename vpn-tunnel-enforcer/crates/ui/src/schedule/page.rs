@@ -3,15 +3,15 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use jiff::tz::TimeZone;
+use vpnte_base::Msg;
 use vpnte_base::types::now_ms;
-use vpnte_base::{ErrorKind, Msg};
 
 use super::editor::FormPanel;
 use super::form::{
     ScheduleForm, days_keys, local_hhmm, server_label, time_until, until_next_change, window_hint,
 };
 use super::model::{NextAction, NextEvent, ScheduleEntry, ServerChoice};
-use super::{tr_now, use_api, use_watch};
+use super::{use_api, use_watch};
 use crate::lang::tr;
 use crate::pages::{Page, nav_number, use_page_active};
 use crate::t;
@@ -193,7 +193,7 @@ fn ScheduleCard(
             let (api, id) = (api.clone(), id.clone());
             toggle_job.start(move |_| async move {
                 if let Err(err) = api.set_enabled(id, on).await {
-                    fail(toasts, "schedule.toggleFailed", &err);
+                    toasts.failed(&Msg::new("schedule.toggleFailed"), &err);
                 }
                 Ok(())
             });
@@ -211,7 +211,7 @@ fn ScheduleCard(
                             form.set(None);
                         }
                     }
-                    Err(err) => fail(toasts, "schedule.deleteFailed", &err),
+                    Err(err) => toasts.failed(&Msg::new("schedule.deleteFailed"), &err),
                 }
                 Ok(())
             });
@@ -271,13 +271,4 @@ fn ScheduleCard(
             }
         }
     }
-}
-
-/// Error toast of a row action; cancellation is silent.
-fn fail(toasts: Toasts, title_key: &'static str, err: &vpnte_base::AppError) {
-    if err.kind == ErrorKind::Cancelled {
-        return;
-    }
-    tracing::warn!(error = %err, action = title_key, "schedule action failed");
-    toasts.error(tr_now(&Msg::new(title_key)), Some(tr_now(&err.user_msg())));
 }

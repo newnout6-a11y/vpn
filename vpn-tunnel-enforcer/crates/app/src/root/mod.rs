@@ -98,11 +98,11 @@ impl Wiring {
 /// the root's own wiring.
 fn contexts(wiring: Wiring) -> Vec<Box<dyn Any>> {
     let backend = wiring.backend.clone();
-    let automation = match svc_tunnel::build(&backend) {
+    let built = match svc_tunnel::build(&backend) {
         Ok(built) => {
             let _ = backend.tunnel.set(built.tunnel.clone());
-            boot::spawn_power_events(built.tunnel, backend.shutdown.child_token());
-            built.automation
+            boot::spawn_power_events(built.tunnel.clone(), backend.shutdown.child_token());
+            built
         }
         Err(err) => {
             boot::start_failed(&err, vpnte_ui::lang::os_lang());
@@ -121,10 +121,10 @@ fn contexts(wiring: Wiring) -> Vec<Box<dyn Any>> {
     ));
     let mut out = api_dashboard::contexts(&backend);
     out.extend(api_servers::contexts(&backend));
-    out.extend(api_settings::contexts(&backend, &automation));
-    out.extend(api_maintenance::contexts(&backend));
+    out.extend(api_settings::contexts(&backend, &built.automation));
+    out.extend(api_maintenance::contexts(&backend, &built));
     out.extend(api_tools::contexts(&backend));
-    out.extend(api_lists::contexts(&backend, &automation));
+    out.extend(api_lists::contexts(&backend, &built));
     out.push(Box::new(Rc::new(wiring)));
     out
 }
