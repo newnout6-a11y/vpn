@@ -1,11 +1,11 @@
-<!--{"path":"/roadmap/","title":"Дорожная карта — VPN Tunnel Enforcer","description":"Что готово, что в работе и что только запланировано. Статусы взяты из рабочих документов проекта, без приукрашивания.","nav":"roadmap"}-->
+<!--{"path":"/roadmap/","title":"Дорожная карта — VPN Tunnel Enforcer","description":"Что готово, что проверено только частично и что запланировано: от клиента 1.x на Electron до версии 2.0.0 на Rust. Без приукрашивания.","nav":"roadmap"}-->
 <section class="page-hero">
   <div class="bg-grid" aria-hidden="true"></div>
   <div class="wrap">
     <nav class="crumbs" aria-label="Хлебные крошки"><a href="{{base}}./">Главная</a><span>/</span><span>Дорожная карта</span></nav>
     <h1 class="h1 split-words">Куда мы идём — <span class="grad">и где сейчас</span></h1>
-    <p class="lead" data-reveal style="--d:.2s">Проект ведётся по рабочим пакетам (WP) с приёмочными тестами. Статусы ниже взяты из внутренних документов на 10.10.2026.</p>
-    <div class="tags" data-reveal style="--d:.3s"><span class="tag tag--g">● готово</span><span class="tag tag--a">● частично / в фокусе</span><span class="tag tag--v">● запланировано</span></div>
+    <p class="lead" data-reveal style="--d:.2s">Статусы ниже взяты из README и журнала работ на 12.11.2026. Сверху — история версии 1.x на Electron, ниже — переписывание на Rust и то, что осталось до релиза.</p>
+    <div class="tags" data-reveal style="--d:.3s"><span class="tag tag--g">● готово</span><span class="tag tag--a">● частично</span><span class="tag tag--v">● запланировано</span></div>
   </div>
 </section>
 
@@ -13,42 +13,45 @@
   <div class="wrap" style="max-width:calc(900px + var(--gut)*2)">
     <div class="timeline" data-stagger>
       <article class="tl" data-s="done" data-reveal>
-        <div class="card"><div class="tl__head"><h3>Миграция на Electron 44</h3><span class="mono muted" style="font-size:12px">WP-11 · часть 1</span><span class="tag tag--g">готово · 30.09.2026</span></div>
-        <p>Переход на Electron 44.4.3, electron-vite 5 и electron-builder 26. Нативный smoke-тест проверяет изоляцию sandbox, мост IPC и хранилище секретов в реальном окружении. Выполнено заранее: срок окончания поддержки Electron 42 — 20.10.2026.</p></div>
+        <div class="card"><div class="tl__head"><h3>Миграция на Electron 44</h3><span class="mono muted" style="font-size:12px">1.x · WP-11 · часть 1</span><span class="tag tag--g">готово · 30.09.2026</span></div>
+        <p>Переход на Electron 44.4.3, electron-vite 5 и electron-builder 26, выполнен заранее: поддержка Electron 42 заканчивалась 20.10.2026. Последняя версия клиента 1.x — 1.1.24.</p></div>
       </article>
       <article class="tl" data-s="done" data-reveal>
-        <div class="card"><div class="tl__head"><h3>Секреты, IPC и доверенная граница</h3><span class="mono muted" style="font-size:12px">WP-1</span><span class="tag tag--g">завершён · 07.10.2026</span></div>
-        <p>Шифрование секретов через DPAPI, безопасный экспорт, строгая проверка IPC, доверенный runtime с ACL и SHA-256. Завершение подтверждено владельцем проекта. Результаты отдельных проверок и непроверенные сценарии записаны в отчёте.</p></div>
+        <div class="card"><div class="tl__head"><h3>Секреты, IPC и доверенная граница</h3><span class="mono muted" style="font-size:12px">1.x · WP-1</span><span class="tag tag--g">завершён · 07.10.2026</span></div>
+        <p>Шифрование секретов через DPAPI, безопасный экспорт, строгая проверка IPC и доверенный runtime в клиенте на Electron. Завершение подтвердил владелец проекта.</p></div>
+      </article>
+      <article class="tl" data-s="done" data-reveal>
+        <div class="card"><div class="tl__head"><h3>Переписывание на Rust: клиент 2.0.0</h3><span class="mono muted" style="font-size:12px">2.0.0</span><span class="tag tag--g">в коде · 12.11.2026</span></div>
+        <p>Один исполняемый файл на Rust (редакция 2024, rustc 1.99) с интерфейсом Dioxus 0.7.10 в WebView2: без IPC-слоя, Node.js, PowerShell и вспомогательных скриптов. Движки sing-box 1.14.4 и Xray 26.11.9 — дочерние процессы. Код старого клиента удалён, его данные импортируются один раз.</p>
+        <ul class="tl__list"><li>15 крейтов, у каждого свой <code class="mono">API.md</code></li><li>2751 тест пройден локально, 0 упало, 31 пропущен (12.11.2026)</li><li>Движок выбирается явно: «авто», sing-box или Xray</li></ul></div>
+      </article>
+      <article class="tl" data-s="done" data-reveal>
+        <div class="card"><div class="tl__head"><h3>Работа без прав администратора</h3><span class="mono muted" style="font-size:12px">решение владельца · 11.11.2026</span><span class="tag tag--g">в коде</span></div>
+        <p>«Прокси» — режим по умолчанию и без прав. «Туннель» и kill switch на WFP — только когда приложение запущено от имени администратора, без самоповышения и UAC. Установщик на пользователя и переносной архив тоже обходятся без прав.</p></div>
       </article>
       <article class="tl" data-s="part" data-reveal>
-        <div class="card"><div class="tl__head"><h3>Firewall, baseline и восстановление</h3><span class="mono muted" style="font-size:12px">WP-3</span><span class="tag tag--a">частично · текущий фокус</span></div>
-        <p>Код и локальные проверки готовы: транзакционный откат, Boot Recovery, отдельная IPv6 WFP-политика. Осталась приёмка на реальных системах.</p>
-        <ul class="tl__list"><li>Фактическая установка WFP-фильтров и packet oracle</li><li>Перезагрузка в SYSTEM-контексте</li><li>NAT64, hot-plug адаптеров и матрица ОС</li></ul></div>
-      </article>
-      <article class="tl" data-s="plan" data-reveal>
-        <div class="card"><div class="tl__head"><h3>Контракты, FSM и наблюдаемость</h3><span class="mono muted" style="font-size:12px">WP-0</span><span class="tag tag--v">дальше</span></div>
-        <p>Единый автомат состояний, идентификатор операции и отмена. Фундамент для следующих двух пакетов.</p></div>
-      </article>
-      <article class="tl" data-s="plan" data-reveal>
-        <div class="card"><div class="tl__head"><h3>Процессы и жизненный цикл туннеля</h3><span class="mono muted" style="font-size:12px">WP-2</span><span class="tag tag--v">запланировано</span></div>
-        <p>Зомби-процессы, гонки таймаутов и порядок запуска xray.</p></div>
-      </article>
-      <article class="tl" data-s="plan" data-reveal>
-        <div class="card"><div class="tl__head"><h3>Планировщик, ротация и адаптивный обход</h3><span class="mono muted" style="font-size:12px">WP-10</span><span class="tag tag--v">запланировано</span></div>
-        <p>Ротация серверов по принципу «сначала проверка, потом фиксация» и исправление окон, переходящих через полночь.</p></div>
-      </article>
-      <article class="tl" data-s="plan" data-reveal>
-        <div class="card"><div class="tl__head"><h3>Маршрутизация, импорт, мониторинг и интерфейс</h3><span class="mono muted" style="font-size:12px">WP-4…9</span><span class="tag tag--v">запланировано</span></div>
-        <ul class="tl__list"><li>Целостность rule-sets и split tunneling по абсолютному пути процесса</li><li>Честные статусы проверок и защита форензики от нехватки памяти</li><li>Доступность интерфейса и декомпозиция крупных экранов</li></ul></div>
+        <div class="card"><div class="tl__head"><h3>Обход блокировок, ноябрь 2026</h3><span class="mono muted" style="font-size:12px">2.0.0</span><span class="tag tag--a">в коде, в сетях не проверено</span></div>
+        <p>По двум исследованиям о блокировках в России: бюджет рукопожатий, проверка на 64 КиБ, вердикты с реакциями автоматики, отпечаток chrome по умолчанию, DNS через DoH по IP.</p>
+        <ul class="tl__list"><li>Работа в реальных российских сетях не проверялась ни разу</li></ul></div>
       </article>
       <article class="tl" data-s="part" data-reveal>
-        <div class="card"><div class="tl__head"><h3>Установка, обновление и целостность релиза</h3><span class="mono muted" style="font-size:12px">WP-11 · часть 2</span><span class="tag tag--a">до публичного релиза</span></div>
-        <p>Установка поверх старой версии, удаление, публикация контрольных сумм и автообновление. Это условие первого публичного релиза.</p></div>
+        <div class="card"><div class="tl__head"><h3>Проверка с правами администратора</h3><span class="mono muted" style="font-size:12px">CI · PR #137</span><span class="tag tag--a">частично</span></div>
+        <p>TUN, фильтры WFP, тесты <code class="mono">system_*</code> и установщик проверяются только в CI на одноразовом раннере с правами администратора.</p>
+        <ul class="tl__list"><li>Тесты WFP пройдены</li><li>Сквозной тест TUN и проверка удаления установщиком — не пройдены</li><li>«Туннель» на машине владельца не запускался</li></ul></div>
+      </article>
+      <article class="tl" data-s="part" data-reveal>
+        <div class="card"><div class="tl__head"><h3>Публичный релиз</h3><span class="mono muted" style="font-size:12px">2.0.0</span><span class="tag tag--a">до релиза</span></div>
+        <p>Сборка уже даёт установщик <code class="mono">VPN-Tunnel-Enforcer-Setup-2.0.0.exe</code>, переносной архив и <code class="mono">checksums.txt</code>. Что не закрыто:</p>
+        <ul class="tl__list"><li>Решить вопрос подписи кода — он открыт</li><li>Пройти сквозной тест TUN и проверку удаления</li><li>Проверить обновление поверх версии 1.1.24</li></ul></div>
       </article>
       <article class="tl" data-s="plan" data-reveal>
-        <div class="card"><div class="tl__head"><h3>Плановые функции</h3><span class="mono muted" style="font-size:12px">WP-12</span><span class="tag tag--v">после всего остального</span></div>
-        <p>Выпускаются отдельными релизами за флагами и не включены в production.</p>
-        <ul class="tl__list"><li><b style="color:var(--text)">AmneziaWG</b> — устойчивость к блокировкам на уровне WireGuard</li><li><b style="color:var(--text)">Ядро mihomo</b> — альтернативный движок</li><li><b style="color:var(--text)">Изолированные браузеры</b> — отдельные инстансы Chromium</li><li><b style="color:var(--text)">Монитор процессов</b> на ETW</li></ul></div>
+        <div class="card"><div class="tl__head"><h3>Служба-помощник</h3><span class="mono muted" style="font-size:12px">вопрос владельцу</span><span class="tag tag--v">не начато</span></div>
+        <p>Служба дала бы «Туннель» без запуска от имени администратора. В этой фазе её нет, и нужна ли она, решает владелец проекта.</p></div>
+      </article>
+      <article class="tl" data-s="plan" data-reveal>
+        <div class="card"><div class="tl__head"><h3>Плановые функции</h3><span class="mono muted" style="font-size:12px">WP-12</span><span class="tag tag--v">за флагами</span></div>
+        <p>Только за флагами и с лабораторными критериями, не в обычной сборке.</p>
+        <ul class="tl__list"><li><b style="color:var(--text)">AmneziaWG</b> через третий движок mihomo — сначала в лабораторной сборке; попадёт ли в обычную после лабораторных критериев, решает владелец</li><li><b style="color:var(--text)">Процессный монитор</b> — не реализован</li><li><b style="color:var(--text)">Изоляция аккаунтов</b> — не реализована</li></ul></div>
       </article>
     </div>
   </div>
@@ -56,7 +59,7 @@
 
 <section class="section">
   <div class="wrap">
-    <div class="callout" data-reveal>{{icon:scale|icon}}<div><b>Почему мы показываем это.</b> Продукт про доверие. Лучше честно сказать «частично», чем объявить «готово» и получить утечку у пользователя. Порядок работ определён необходимостью, а не маркетингом: безопасность важнее скорости выхода новых функций.</div></div>
+    <div class="callout" data-reveal>{{icon:scale|icon}}<div><b>Почему мы показываем это.</b> Продукт про доверие. Лучше честно сказать «частично», чем объявить «готово» и получить утечку у пользователя. План работ WP-0…WP-12 писался для версии на Electron; где он расходится с решениями переписывания, действует <code class="mono">crates/CONTRACT.md</code>.</div></div>
   </div>
 </section>
-<section class="section"><div class="wrap"><div class="cta" data-reveal="scale"><h2 class="h2">Следите за <span class="grad">первым релизом</span></h2><p class="lead">Нажмите Watch → Custom → Releases в репозитории, и GitHub напишет вам, когда выйдет установщик.</p><div class="hero__actions"><a class="btn btn--primary btn--lg" href="https://github.com/newnout6-a11y/vpn" rel="noopener">{{icon:github|icon}} Репозиторий</a><a class="btn btn--ghost btn--lg" href="{{base}}download/">Как установить сейчас</a></div></div></div></section>
+<section class="section"><div class="wrap"><div class="cta" data-reveal="scale"><h2 class="h2">Следите за <span class="grad">первым релизом</span></h2><p class="lead">Нажмите Watch → Custom → Releases в репозитории, и GitHub напишет вам, когда выйдет установщик.</p><div class="hero__actions"><a class="btn btn--primary btn--lg" href="https://github.com/newnout6-a11y/vpn" rel="noopener">{{icon:github|icon}} Репозиторий</a><a class="btn btn--ghost btn--lg" href="{{base}}download/">Как собрать сейчас</a></div></div></div></section>

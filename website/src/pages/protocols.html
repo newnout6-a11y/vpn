@@ -1,10 +1,10 @@
-<!--{"path":"/protocols/","title":"Протоколы — VPN Tunnel Enforcer","description":"VLESS-REALITY, WireGuard, Hysteria2, TUIC, Shadowsocks 2022, VMess, Trojan, Naive, AnyTLS и ShadowTLS: что поддерживается и как это работает.","nav":"protocols"}-->
+<!--{"path":"/protocols/","title":"Протоколы — VPN Tunnel Enforcer","description":"VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, NaïveProxy, AnyTLS, WireGuard, SOCKS и HTTP: что поддерживается, каким движком и что клиент делает против блокировок.","nav":"protocols"}-->
 <section class="page-hero">
   <div class="bg-grid" aria-hidden="true"></div>
   <div class="wrap">
     <nav class="crumbs" aria-label="Хлебные крошки"><a href="{{base}}./">Главная</a><span>/</span><span>Протоколы</span></nav>
-    <h1 class="h1 split-words">Десять протоколов, <span class="grad">один интерфейс</span></h1>
-    <p class="lead" data-reveal style="--d:.2s">Парсер разбирает подписки, ключи и URI-ссылки, а затем собирает конфигурацию для sing-box или xray-core. Сменить протокол можно, не меняя привычек.</p>
+    <h1 class="h1 split-words">Одиннадцать видов ключей, <span class="grad">два движка</span></h1>
+    <p class="lead" data-reveal style="--d:.2s">Клиент разбирает подписки, ключи и ссылки и собирает конфигурацию для sing-box 1.14.4 или Xray 26.11.9. Каким движком пойдёт сервер и почему, видно в интерфейсе.</p>
   </div>
 </section>
 
@@ -17,16 +17,17 @@
       <button data-pf="stealth" aria-pressed="false">Маскировка под HTTPS</button>
     </div>
     <div class="grid grid--3" id="proto-grid" data-stagger>
-      <article class="card proto" data-reveal data-pt="tcp stealth"><div class="proto__top"><h3>VLESS</h3><span class="tag tag--g">REALITY</span></div><p>XTLS-Reality работает через сателлит xray-core. Vision, gRPC и WebSocket — через sing-box. Основной вариант для сетей с цензурой.</p><div class="tags"><span class="tag">TCP</span><span class="tag">uTLS chrome</span></div></article>
-      <article class="card proto" data-reveal data-pt="udp"><div class="proto__top"><h3>WireGuard</h3><span class="tag tag--v">UDP</span></div><p>Современный и компактный протокол. Поддерживается разбор и экспорт конфигурации.</p><div class="tags"><span class="tag">UDP</span><span class="tag">импорт/экспорт URI</span></div></article>
-      <article class="card proto" data-reveal data-pt="udp stealth"><div class="proto__top"><h3>Hysteria2</h3><span class="tag tag--v">QUIC</span></div><p>Работает поверх QUIC и рассчитан на каналы с потерями.</p><div class="tags"><span class="tag">UDP / QUIC</span></div></article>
-      <article class="card proto" data-reveal data-pt="udp"><div class="proto__top"><h3>TUIC</h3><span class="tag tag--v">QUIC</span></div><p>Ещё один QUIC-протокол с мультиплексированием соединений.</p><div class="tags"><span class="tag">UDP / QUIC</span></div></article>
-      <article class="card proto" data-reveal data-pt="tcp"><div class="proto__top"><h3>Shadowsocks</h3><span class="tag">2022 AEAD</span></div><p>Включая SIP002 и современный Shadowsocks 2022 с AEAD-шифрованием.</p><div class="tags"><span class="tag">TCP</span><span class="tag">SIP002</span></div></article>
-      <article class="card proto" data-reveal data-pt="tcp stealth"><div class="proto__top"><h3>Trojan</h3><span class="tag">TLS</span></div><p>Трафик выглядит как обычный HTTPS-сеанс.</p><div class="tags"><span class="tag">TCP</span><span class="tag">TLS</span></div></article>
-      <article class="card proto" data-reveal data-pt="tcp"><div class="proto__top"><h3>VMess</h3><span class="tag">AEAD</span></div><p>Только современный вариант: AEAD и <code class="mono">alterId: 0</code>. Устаревший режим не используется.</p><div class="tags"><span class="tag">TCP</span></div></article>
-      <article class="card proto" data-reveal data-pt="tcp stealth"><div class="proto__top"><h3>Naive</h3><span class="tag">HTTP/2</span></div><p>Использует сетевой стек Chromium, поэтому отпечаток соединения совпадает с браузерным.</p><div class="tags"><span class="tag">TCP</span><span class="tag">Chromium stack</span></div></article>
-      <article class="card proto" data-reveal data-pt="tcp stealth"><div class="proto__top"><h3>AnyTLS</h3><span class="tag">TLS</span></div><p>Протокол с настраиваемым выравниванием пакетов для снижения заметности.</p><div class="tags"><span class="tag">TCP</span></div></article>
-      <article class="card proto" data-reveal data-pt="tcp stealth"><div class="proto__top"><h3>ShadowTLS</h3><span class="tag">TLS</span></div><p>Подставляет настоящий TLS-рукопожатие реального сайта, а полезную нагрузку несёт внутри.</p><div class="tags"><span class="tag">TCP</span></div></article>
+      <article class="card proto" data-reveal data-pt="tcp stealth"><div class="proto__top"><h3>VLESS</h3><span class="tag tag--g">REALITY</span></div><p>REALITY, Vision, XHTTP, gRPC, WebSocket. В «авто» REALITY и XHTTP идут через Xray: sing-box 1.14.4 к серверам Xray 26.9.8 и новее по REALITY не подключается, а XHTTP у него нет.</p><div class="tags"><span class="tag">sing-box</span><span class="tag">Xray</span></div></article>
+      <article class="card proto" data-reveal data-pt="tcp"><div class="proto__top"><h3>VMess</h3><span class="tag">TCP</span></div><p>С транспортами WebSocket, gRPC и HTTP. Работает в обоих движках.</p><div class="tags"><span class="tag">sing-box</span><span class="tag">Xray</span></div></article>
+      <article class="card proto" data-reveal data-pt="tcp stealth"><div class="proto__top"><h3>Trojan</h3><span class="tag">TLS</span></div><p>Трафик выглядит как обычный сеанс HTTPS. Работает в обоих движках.</p><div class="tags"><span class="tag">sing-box</span><span class="tag">Xray</span></div></article>
+      <article class="card proto" data-reveal data-pt="tcp"><div class="proto__top"><h3>Shadowsocks</h3><span class="tag">TCP</span></div><p>Ссылки, плагины и цепочка Shadowsocks с ShadowTLS из JSON sing-box.</p><div class="tags"><span class="tag">sing-box</span><span class="tag">Xray</span></div></article>
+      <article class="card proto" data-reveal data-pt="udp stealth"><div class="proto__top"><h3>Hysteria2</h3><span class="tag tag--v">QUIC</span></div><p>Поверх QUIC, с диапазонами портов для их смены на лету. С версии 26.11.9 его умеет и Xray.</p><div class="tags"><span class="tag">sing-box</span><span class="tag">Xray</span></div></article>
+      <article class="card proto" data-reveal data-pt="udp"><div class="proto__top"><h3>TUIC</h3><span class="tag tag--v">QUIC</span></div><p>Ещё один протокол поверх QUIC. В Xray его нет, поэтому только sing-box, и интерфейс об этом говорит.</p><div class="tags"><span class="tag">sing-box</span></div></article>
+      <article class="card proto" data-reveal data-pt="tcp stealth"><div class="proto__top"><h3>NaïveProxy</h3><span class="tag">HTTP/2</span></div><p>Работает через сетевой стек Chromium: <code class="mono">libcronet.dll</code> лежит рядом с sing-box. В Xray его нет.</p><div class="tags"><span class="tag">sing-box</span></div></article>
+      <article class="card proto" data-reveal data-pt="tcp stealth"><div class="proto__top"><h3>AnyTLS</h3><span class="tag">TLS</span></div><p>Протокол поверх TLS. В Xray его нет, поэтому только sing-box.</p><div class="tags"><span class="tag">sing-box</span></div></article>
+      <article class="card proto" data-reveal data-pt="udp"><div class="proto__top"><h3>WireGuard</h3><span class="tag tag--v">UDP</span></div><p>Ссылки и файлы <code class="mono">.conf</code>, импорт и экспорт. Работает в обоих движках.</p><div class="tags"><span class="tag">sing-box</span><span class="tag">Xray</span></div></article>
+      <article class="card proto" data-reveal data-pt="tcp"><div class="proto__top"><h3>SOCKS</h3><span class="tag">SOCKS5</span></div><p>Сервер из списка или локальный прокси другого клиента: маршрутизация и Smart RU работают поверх него так же.</p><div class="tags"><span class="tag">sing-box</span><span class="tag">Xray</span></div></article>
+      <article class="card proto" data-reveal data-pt="tcp"><div class="proto__top"><h3>HTTP</h3><span class="tag">HTTP</span></div><p>Обычный HTTP-прокси как вышестоящий сервер. Работает в обоих движках.</p><div class="tags"><span class="tag">sing-box</span><span class="tag">Xray</span></div></article>
     </div>
     <p class="muted" id="proto-empty" hidden style="text-align:center;margin-top:24px">Ничего не найдено.</p>
   </div>
@@ -35,25 +36,26 @@
 <section class="section">
   <div class="wrap split split--top">
     <div data-reveal="left">
-      <span class="eyebrow">Anti-DPI</span>
-      <h2 class="h2" style="margin:18px 0 20px">Что делает клиент, <span class="grad">чтобы не выделяться</span></h2>
-      <p class="lead">Помимо самих протоколов клиент настраивает детали рукопожатия, по которым трафик чаще всего опознают.</p>
+      <span class="eyebrow">Блокировки, ноябрь 2026</span>
+      <h2 class="h2" style="margin:20px 0">Что клиент делает, <span class="grad">чтобы не выделяться</span></h2>
+      <p class="lead">Кроме самих протоколов клиент следит за деталями, по которым соединение замечают или замораживают. Насколько это помогает в реальных российских сетях, пока не проверялось.</p>
     </div>
     <ul class="checks" data-reveal="right" style="gap:20px">
-      <li>{{icon:check|icon}}<span><b>uTLS-отпечаток chrome.</b> Клиентское приветствие TLS совпадает с обычным браузером.</span></li>
-      <li>{{icon:check|icon}}<span><b>record_fragment.</b> В режиме stealth для протоколов без Reality TLS-записи дробятся, чтобы пройти простые фильтры.</span></li>
-      <li>{{icon:check|icon}}<span><b>UDP/443 отклоняется.</b> QUIC от браузеров принудительно откатывается на TCP, который контролируется туннелем.</span></li>
-      <li>{{icon:check|icon}}<span><b>Окно стабильности и проверки.</b> Адаптивный обход оценивает связь по нескольким пробам, а не по одной.</span></li>
+      <li>{{icon:check|icon}}<span><b>Отпечаток TLS chrome по умолчанию.</b> Серверы Xray 26.9.8 и новее принимают по REALITY только chrome, firefox и safari, поэтому для edge, ios, qq и random интерфейс предупреждает.</span></li>
+      <li>{{icon:check|icon}}<span><b>Не больше трёх рукопожатий в минуту.</b> Проверки ходят к одному серверу через общий бюджет: по наблюдениям сообщества, частые TLS-рукопожатия к одному имени ведут к тихой заморозке.</span></li>
+      <li>{{icon:check|icon}}<span><b>64 КиБ вместо «соединение открылось».</b> Соединение с зарубежным сервером может замёрзнуть после 16–20 КБ, поэтому живость доказывает только полная передача.</span></li>
+      <li>{{icon:check|icon}}<span><b>Дробление TLS-записей.</b> В режиме stealth и при адаптивном обходе включаются <code class="mono">record_fragment</code> и смена отпечатка.</span></li>
+      <li>{{icon:check|icon}}<span><b>UDP/443 отклоняется</b> для профилей без надёжного UDP: браузер сразу переходит на TCP.</span></li>
     </ul>
   </div>
 </section>
 
 <section class="section">
   <div class="wrap">
-    <div class="callout" data-reveal>{{icon:triangle-alert|icon}}<div><b>Чего пока нет.</b> AmneziaWG, FakeIP и DoQ находятся в плане (WP-12) и в коде отсутствуют. Ядро mihomo в клиенте только определяется как конкурирующее, но не используется. <a href="{{base}}roadmap/" style="text-decoration:underline">Дорожная карта →</a></div></div>
+    <div class="callout" data-reveal>{{icon:triangle-alert|icon}}<div><b>Чего пока нет.</b> AmneziaWG ни sing-box, ни Xray не умеют, его умеет третий движок mihomo. Это плановая функция WP-12, и она есть только в лабораторной сборке. Обычная сборка ключи AmneziaWG импортирует и честно помечает «нужен движок mihomo», но не запускает. <a href="{{base}}roadmap/" style="text-decoration:underline">Дорожная карта →</a></div></div>
   </div>
 </section>
 
 <section class="section">
-  <div class="wrap"><div class="cta" data-reveal="scale"><h2 class="h2">Ваш протокол <span class="grad">уже поддерживается</span></h2><p class="lead">Импортируйте подписку или ключ — клиент разберётся сам.</p><div class="hero__actions"><a class="btn btn--primary btn--lg" href="{{base}}download/" data-magnet>Как собрать {{icon:terminal|icon}}</a></div></div></div>
+  <div class="wrap"><div class="cta" data-reveal="scale"><h2 class="h2">Ключ <span class="grad">и его движок</span></h2><p class="lead">Импортируйте подписку или ключ: клиент разберёт его и покажет, каким движком он пойдёт.</p><div class="hero__actions"><a class="btn btn--primary btn--lg" href="{{base}}download/" data-magnet>Как собрать {{icon:terminal|icon}}</a></div></div></div>
 </section>
