@@ -46,6 +46,15 @@ fn refused(key: &'static str, name: &str) -> AppError {
     )
 }
 
+/// Every file of [`FILES`] from `from`, each checked against its pin; the first missing or
+/// changed one fails the whole set, before anything is written.
+pub fn read_all(from: &Path) -> AppResult<Vec<(&'static str, Vec<u8>)>> {
+    FILES
+        .iter()
+        .map(|&name| Ok((name, read_verified(from, name)?)))
+        .collect()
+}
+
 /// The bytes of `name` in `from`, when they match its release pin. Read once and written from the
 /// same buffer ([`write_replacing`]): the source folder is user-writable, so a file swapped after a
 /// separate check would never reach the admin-only folder.
@@ -123,15 +132,43 @@ mod tests {
     fn a_pinned_file_is_read_and_a_changed_or_missing_one_is_refused() {
         let from = temp("from");
         let resources = Path::new(RESOURCES);
-        if resources.join("wintun.dll").exists() {
-            read_verified(resources, "wintun.dll").expect("pinned wintun.dll");
-        }
+        // `cargo xtask engines` fills resources/ (CI runs it before the tests): the pinned read is
+        // always exercised, never skipped (review 4555615955).
+        assert!(
+            resources.join("wintun.dll").exists(),
+            "run `cargo xtask engines` first"
+        );
+        let bytes = read_verified(resources, "wintun.dll").expect("pinned wintun.dll");
+        let sha: [u8; 32] = Sha256::digest(&bytes).into();
+        assert_eq!(Some(sha), pin("wintun.dll"));
         std::fs::write(from.join("sing-box.exe"), b"not the release").expect("fake");
         let err = read_verified(&from, "sing-box.exe").expect_err("changed");
         assert_eq!(err.user_msg().key, "service.install.fileMismatch");
         let err = read_verified(&from, "xray.exe").expect_err("missing");
         assert_eq!(err.user_msg().key, "service.install.fileMissing");
         let _ = std::fs::remove_dir_all(&from);
+    }
+
+    /// Review 4555615944: the whole set is checked before the install writes anything; a changed
+    /// last file fails it, naming that file (the first five are hard links to the real pins).
+    #[test]
+    fn the_whole_set_is_checked_before_anything_is_written() {
+        let resources = Path::new(RESOURCES);
+        let all = read_all(resources).expect("the pinned set");
+        assert_eq!(all.iter().map(|(name, _)| *name).collect::<Vec<_>>(), FILES);
+        let set = temp("set");
+        let (last, first) = FILES.split_last().expect("files");
+        for name in first {
+            std::fs::hard_link(resources.join(name), set.join(name)).expect("hard link");
+        }
+        std::fs::write(set.join(last), b"not the release").expect("fake");
+        let err = read_all(&set).expect_err("the last file changed");
+        assert_eq!(err.user_msg().key, "service.install.fileMismatch");
+        assert_eq!(
+            err.user_msg().args.first().map(|(_, v)| v.as_str()),
+            Some(*last)
+        );
+        let _ = std::fs::remove_dir_all(&set);
     }
 
     /// Review 4555370688: a temp file left by an earlier failed write does not block the next

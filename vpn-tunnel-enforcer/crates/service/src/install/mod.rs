@@ -64,18 +64,20 @@ fn failed(err: impl std::error::Error + Send + Sync + 'static) -> AppError {
 pub fn install(source: &Source) -> AppResult<PathBuf> {
     require_elevation()?;
     let dir = paths::install_dir().map_err(failed)?;
+    // Everything is read and checked before anything changes: a missing or changed file fails the
+    // install while the old service still runs on its own, untouched files.
+    let files = pins::read_all(&source.resources)?;
+    let service_exe = std::fs::read(&source.exe).map_err(failed)?;
     manage::stop(SCM_WAIT).map_err(failed)?;
     paths::secure_dir(&dir).map_err(failed)?;
     // The stopped service's process and its engines may still be exiting for a moment: every
-    // replace is retried (the pins are checked once, before the retries).
-    for name in pins::FILES {
-        let bytes = pins::read_verified(&source.resources, name)?;
+    // replace is retried.
+    for (name, bytes) in &files {
         let to = dir.join(name);
-        retry(|| pins::write_replacing(&to, &bytes))?;
+        retry(|| pins::write_replacing(&to, bytes))?;
     }
     let exe = dir.join(EXE_NAME);
-    let bytes = std::fs::read(&source.exe).map_err(failed)?;
-    retry(|| pins::write_replacing(&exe, &bytes))?;
+    retry(|| pins::write_replacing(&exe, &service_exe))?;
     // The service runs Tunnel mode only from a folder users cannot change: checked here too, so a
     // folder it would refuse fails the install with the file and the reason.
     crate::service::trusted_install(&dir, &exe)
