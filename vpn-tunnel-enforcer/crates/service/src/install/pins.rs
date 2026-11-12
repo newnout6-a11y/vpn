@@ -150,7 +150,7 @@ mod tests {
     }
 
     /// Review 4555615944: the whole set is checked before the install writes anything; a changed
-    /// last file fails it, naming that file (the first five are hard links to the real pins).
+    /// last file fails it, naming that file (the first five are the real pinned files).
     #[test]
     fn the_whole_set_is_checked_before_anything_is_written() {
         let resources = Path::new(RESOURCES);
@@ -159,7 +159,12 @@ mod tests {
         let set = temp("set");
         let (last, first) = FILES.split_last().expect("files");
         for name in first {
-            std::fs::hard_link(resources.join(name), set.join(name)).expect("hard link");
+            // A hard link when the temp folder shares the volume, a copy otherwise (CI checks out
+            // on D: while its temp folder is on C:).
+            let (from, to) = (resources.join(name), set.join(name));
+            std::fs::hard_link(&from, &to)
+                .or_else(|_| std::fs::copy(&from, &to).map(drop))
+                .expect("linked or copied");
         }
         std::fs::write(set.join(last), b"not the release").expect("fake");
         let err = read_all(&set).expect_err("the last file changed");
