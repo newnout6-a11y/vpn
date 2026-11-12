@@ -333,6 +333,7 @@ impl TunnelHandle { pub fn spawn(deps: RuntimeDeps) -> Self }        // inside a
     pub failover: Option<Arc<dyn Failover>>,
     pub confirmations: Option<Arc<dyn Confirmations>>, pub timings: Timings }
 pub struct Timings { pub ready, capture_ready, exit, release: Duration, pub backoff: [Duration; 3] /* 2/5/10 s */,
+    pub freeze /* 130 s: crashed server with a fault stays quiet */,
     pub stable /* 30 s */, proxy_watch /* 5 s */, proxy_probe, proxy_listen, egress_watch /* 15 s */,
     evidence_age /* 45 s */, capture_watch /* 15 s */, confirm_candidate, confirm_previous: Duration } // Default
     // exit = wait after the kill; an engine stop first waits up to engine GRACEFUL_STOP (3 s)
@@ -383,7 +384,8 @@ pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self;   // + Defau
         -> Result<(), XrayError>;
     async fn restart(&mut self, slot: Slot, cancel: &CancellationToken) -> Result<(), XrayError>;
     async fn stop(&mut self, slot: Slot) -> Result<(), XrayError>; async fn stop_all(&mut self) -> Result<(), XrayError>;
-    fn activate(&mut self, slot: Slot) -> Result<(), XrayError>; fn running(&self, slot: Slot) -> bool; }
+    fn activate(&mut self, slot: Slot) -> Result<(), XrayError>; fn running(&self, slot: Slot) -> bool;
+    fn recent_fault(&self, slot: Slot) -> Option<OutboundFault>; }   // Xray's log, last 2 min
 #[async_trait] pub trait Engines: Send + Sync {
     fn spawn_core(&self, config: &[u8]) -> io::Result<Arc<dyn CoreProc>>;   // config on stdin
     fn slots(&self, events: mpsc::Sender<XrayEvent>) -> Box<dyn Slots>;
@@ -412,7 +414,12 @@ concurrent stops share one receipt.
 Crash policy: auto-restart (origin `Recovery`, `Restarting{n,3}` first, backoff 2 / 5 / 10 s, budget
 reset after 30 s stable), then failover once (when a `Failover` is given), then terminal: kill
 switch off -> release + `Stopped`; strict, or standard with auto-restart off -> keep blocking
-(`KillSwitchActive`); standard + budget exhausted -> release + `Stopped`. Watchdogs never stop the
+(`KillSwitchActive`); standard + budget exhausted -> release + `Stopped`. Freeze window (RU
+discipline): when a Direct VPN session crashes with an outbound fault on record (sing-box's
+`recent_fault`, in a slot session the active slot's `Slots::recent_fault`), restarts of that same
+server wait at least `Timings::freeze` (130 s) from the crash instead of the plain backoff, and the
+failover (a fresh server) is tried first while that window lasts; a local proxy's server is never
+held back (its handshakes are another client's). Watchdogs never stop the
 tunnel (`ProxyDown` / `Running`). Proxy capture: the plan guard is the request's kill switch (`off` /
 `standard`; `strict` -> `Validation`, `tunnel.runtime.proxy.strictUnavailable`), nothing to engage or
 release; the mixed port is kept from the first start until a full stop / failed start (crash
@@ -562,6 +569,10 @@ is not done here.
 - Not exercised by tests: the lifecycle's session rule "wall-clock end, monotonic duration" under a
   moved system clock (§7.11 calendar correction); the race "stop queued while the crash backoff fires"
   (`select!` picks among ready branches; covered by reasoning and `stop_cancels_a_pending_restart`).
+- Freeze window limits: sing-box's `recent_fault` reads its last 500 lines without an age limit,
+  so an old fault can still hold a restart back (at most `freeze`); the active Xray slot's own
+  restarts (0.5 / 2 / 5 s, sing-box still up) do not consult the window: a restarted Xray dials
+  nothing by itself, and a slot that keeps dying ends as a crash, whose restart does.
 - Open risk, not verified (needs an elevated start / stop / start): winnet's
   `alias::connection_names` counts registry names of absent adapters, so a TUN that leaves its
   `Connection` key behind makes every connect pick the next alias until `aliasExhausted` (fix

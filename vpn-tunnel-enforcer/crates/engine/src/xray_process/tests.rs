@@ -477,4 +477,34 @@ fn types_and_futures_are_send() {
     send(&sup.restart(Slot::A, &cancel));
     send(&sup.stop_all());
     send(&check_config(Path::new("xray.exe"), b"{}"));
+    send(&engine_version(Path::new("xray.exe")));
+}
+
+#[test]
+fn version_parsing() {
+    let full = "Xray 26.11.9 (Xray, Penetrates Everything.) 676eaf6 (go1.27.3 windows/amd64)\n\
+                A unified platform for anti-censorship.\n";
+    assert_eq!(parse_version(full), Some((26, 11, 9)));
+    assert_eq!(
+        parse_version("Xray 26.12.0-beta (Xray)\n"),
+        Some((26, 12, 0))
+    );
+    assert_eq!(parse_version("26.11.9\n"), None);
+    assert_eq!(parse_version("sing-box version 1.14.4\n"), None);
+    assert_eq!(parse_version("Xray x.y\n"), None);
+    assert_eq!(parse_version(""), None);
+}
+
+/// The bundled engine answers through the pinned one-shot path (skips without the binary).
+#[tokio::test]
+async fn bundled_engine_version() {
+    let Some(exe) = xray_exe() else { return };
+    let version = engine_version(&exe).await.unwrap();
+    assert!(version >= (26, 9, 8), "{version:?}");
+}
+
+#[tokio::test]
+async fn missing_exe_has_no_version() {
+    let missing = std::env::temp_dir().join("vpnte-no-xray.exe");
+    assert!(engine_version(&missing).await.is_err());
 }

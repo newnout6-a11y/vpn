@@ -63,6 +63,9 @@ pub trait Slots: Send + Sync {
     fn activate(&mut self, slot: Slot) -> Result<(), XrayError>;
     /// `slot` has a live process.
     fn running(&self, slot: Slot) -> bool;
+    /// Upstream fault in the slot's output of the last two minutes: in a slot session sing-box
+    /// only dials loopback, so the server's refusals show in Xray's log alone.
+    fn recent_fault(&self, slot: Slot) -> Option<OutboundFault>;
 }
 
 /// Engine binaries and the network reads the actor needs around them.
@@ -175,6 +178,9 @@ impl Slots for XraySupervisor {
     }
     fn running(&self, slot: Slot) -> bool {
         self.status(slot).running
+    }
+    fn recent_fault(&self, slot: Slot) -> Option<OutboundFault> {
+        XraySupervisor::recent_fault(self, slot)
     }
 }
 

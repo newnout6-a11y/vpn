@@ -114,7 +114,7 @@ impl IpEvidence {
     }
 }
 
-/// Source of public-IP samples: the provider race in production, a script in tests.
+/// Source of public-IP samples: the sequential provider wave in production, a script in tests.
 pub trait Sampler: Send + Sync + 'static {
     /// One read of `family` over `route` (see [`IpReader::wave`]).
     fn sample<'a>(

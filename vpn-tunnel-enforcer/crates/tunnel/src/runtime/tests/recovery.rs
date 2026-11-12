@@ -175,6 +175,39 @@ async fn crash_restarts_after_the_backoff() {
     assert_eq!(h.last_exit().map(|e| e.user_initiated), Some(false));
 }
 
+/// Time from a crash of `req`'s session to the end of its recovery start (generation 2).
+async fn crash_to_restart(req: StartRequest) -> Duration {
+    let w = World::new();
+    let mut d = deps(&w);
+    d.timings.freeze = Duration::from_millis(700);
+    let h = TunnelHandle::spawn(d);
+    let mut events = h.subscribe();
+    h.start(req, CancellationToken::new()).await.unwrap();
+    drain(&mut events);
+    let crashed = tokio::time::Instant::now();
+    w.core(0).crash();
+    let seen = until(&mut events, |e| {
+        matches!(e, TunnelEvent::StartFinished { generation: 2, .. })
+    })
+    .await;
+    let restarting = TunnelEvent::Status(TunStatusKind::Restarting { attempt: 1, max: 3 });
+    assert!(seen.contains(&restarting), "{seen:?}");
+    crashed.elapsed()
+}
+
+/// RU discipline: a crash with an outbound fault on record (the fake core reports one) does not
+/// bring the same server back inside the freeze window, while the backoff is 20 ms; a slot
+/// session is judged by Xray's log (clean here) and a local proxy's server is not ours.
+#[tokio::test]
+async fn a_faulted_server_waits_out_the_freeze_window() {
+    let native = crash_to_restart(vpn_req(NATIVE_KEY, EnginePref::Auto)).await;
+    assert!(native >= Duration::from_millis(700), "{native:?}");
+    let slots = crash_to_restart(vpn_req(XRAY_KEY, EnginePref::Xray)).await;
+    assert!(slots < Duration::from_millis(700), "{slots:?}");
+    let local = crash_to_restart(local_req()).await;
+    assert!(local < Duration::from_millis(700), "{local:?}");
+}
+
 /// A stop during the backoff cancels the pending restart.
 #[tokio::test]
 async fn stop_cancels_a_pending_restart() {

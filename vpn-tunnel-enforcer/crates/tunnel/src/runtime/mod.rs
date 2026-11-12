@@ -158,6 +158,9 @@ pub struct Timings {
     pub release: Duration,
     /// Crash backoff before restart attempt 1, 2, 3.
     pub backoff: [Duration; 3],
+    /// Quiet time of a crashed server with an outbound fault on record before a restart dials it
+    /// again (RU freeze window ~120 s; the same value as the probes' `FREEZE_BACKOFF`).
+    pub freeze: Duration,
     /// A run this long resets the crash-restart budget.
     pub stable: Duration,
     /// Local-proxy watchdog period and TCP probe budget.
@@ -183,6 +186,7 @@ impl Default for Timings {
             exit: vpnte_engine::singbox_process::STOP_TIMEOUT,
             release: Duration::from_secs(2),
             backoff: [2_000, 5_000, 10_000].map(Duration::from_millis),
+            freeze: Duration::from_secs(130),
             stable: Duration::from_secs(30),
             proxy_watch: Duration::from_secs(5),
             proxy_probe: Duration::from_millis(1500),

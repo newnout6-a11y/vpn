@@ -33,7 +33,7 @@ pub const READY_TIMEOUT: Duration = Duration::from_millis(3500);
 /// Exit confirmation after the kill (a stop first waits up to
 /// [`crate::singbox_process::GRACEFUL_STOP`] for Xray's own exit after CTRL_BREAK).
 pub const STOP_TIMEOUT: Duration = Duration::from_millis(1000);
-/// Deadline of `check_config`.
+/// Deadline of the one-shot runs (`check_config`, `engine_version`).
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Xray exit code for a config it refused to build.
 pub const EXIT_CONFIG_REJECTED: i32 = 23;
@@ -570,4 +570,27 @@ pub async fn check_config(exe: &Path, config: &[u8]) -> Result<(), XrayError> {
         code,
         tail: scrub.tail(&lines),
     })
+}
+
+/// `exe version` → `(major, minor, patch)` (diagnostics). Runs like every other engine command:
+/// pin check first while elevated, then the one-shot run in the app job.
+pub async fn engine_version(exe: &Path) -> io::Result<(u16, u16, u16)> {
+    let out = child::run_once(Engine::Xray, exe, &["version"], None, CHECK_TIMEOUT).await?;
+    parse_version(&String::from_utf8_lossy(&out.stdout)).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unrecognised Xray version output",
+        )
+    })
+}
+
+/// Parses `Xray 26.11.9 (Xray, Penetrates Everything.) 676eaf6 (go1.27.3 windows/amd64)`, the
+/// first line of `xray version`; a pre-release suffix is ignored.
+fn parse_version(text: &str) -> Option<(u16, u16, u16)> {
+    let rest = text.lines().next()?.trim().strip_prefix("Xray ")?;
+    let mut parts = rest.split(['.', '-', '+', ' ']);
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    Some((major, minor, patch))
 }

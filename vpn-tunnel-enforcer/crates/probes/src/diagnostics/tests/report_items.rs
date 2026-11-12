@@ -390,10 +390,7 @@ fn binaries_item() {
             ("wintun.dll", Some(427_552)),
             ("libcronet.dll", Some(1)),
         ],
-        &[
-            ("sing-box.exe", Some("sing-box version 1.14.4".into())),
-            ("xray.exe", None),
-        ],
+        &[("sing-box.exe", Some("1.14.4".into())), ("xray.exe", None)],
     );
     assert_eq!(item.verdict, Some(Verdict::Fail));
     assert!(
@@ -403,6 +400,50 @@ fn binaries_item() {
             .any(|(k, v)| k == "files" && v == "xray.exe")
     );
     assert!(item.details.contains(&"sing-box.exe: 80151 KB".to_owned()));
+    assert!(
+        item.details
+            .contains(&"sing-box.exe version: 1.14.4".to_owned())
+    );
+    assert!(
+        item.details
+            .contains(&"xray.exe version: not run".to_owned())
+    );
+}
+
+/// Both versions come through the engine crate's pinned one-shot runs (bundled binaries; skips
+/// quietly without them); a missing folder runs nothing.
+#[tokio::test]
+async fn binaries_read_versions_through_the_engine_crate() {
+    let resources = crate::test_support::resources();
+    let bundled = ["sing-box.exe", "xray.exe"]
+        .iter()
+        .all(|exe| resources.join(exe).is_file());
+    if bundled {
+        let item = crate::diagnostics::report::binaries(&resources).await;
+        let row = |name: &str| {
+            item.details
+                .iter()
+                .find_map(|d| d.strip_prefix(&format!("{name} version: ")))
+                .map(str::to_owned)
+        };
+        assert!(
+            row("sing-box.exe").is_some_and(|v| v.starts_with("1.14.")),
+            "{:?}",
+            item.details
+        );
+        assert!(
+            row("xray.exe").is_some_and(|v| v.starts_with("26.")),
+            "{:?}",
+            item.details
+        );
+    }
+    let none = std::env::temp_dir().join("vpnte-probes-no-resources");
+    let item = crate::diagnostics::report::binaries(&none).await;
+    assert_eq!(item.verdict, Some(Verdict::Fail));
+    assert!(
+        item.details
+            .contains(&"sing-box.exe version: not run".to_owned())
+    );
     assert!(
         item.details
             .contains(&"xray.exe version: not run".to_owned())

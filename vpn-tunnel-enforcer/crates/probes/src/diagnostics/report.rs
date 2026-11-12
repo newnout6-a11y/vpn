@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::now_ms;
+use vpnte_base::types::{Engine, now_ms};
 use vpnte_base::{AppError, AppResult, Msg};
 use vpnte_core::paths::DataDirs;
 use vpnte_core::settings::{ConnectionMode, Settings};
@@ -54,7 +54,6 @@ pub const ENGINE_FILES: [&str; 4] = ["sing-box.exe", "xray.exe", "wintun.dll", "
 /// Name the DNS check resolves.
 pub const DNS_PROBE_HOST: &str = "example.com";
 const DNS_TIMEOUT: Duration = Duration::from_secs(10);
-const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const PROXY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Machine state read on a blocking thread.
@@ -122,23 +121,20 @@ async fn resolve_probe() -> Result<Vec<IpAddr>, String> {
     Ok(ips)
 }
 
-async fn engine_version(exe: &Path) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(exe);
-    cmd.arg("version");
-    let job = vpnte_winnet::process::app_job().ok()?;
-    let child = vpnte_winnet::process::spawn_hidden(&mut cmd, job).ok()?;
-    let out = tokio::time::timeout(VERSION_TIMEOUT, child.wait_with_output())
-        .await
-        .ok()?
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map(str::to_owned)
+/// `<engine> version` through the engine crate, so an elevated app checks the release pins first
+/// like for every other engine run. A refusal or failure is shown as such, never as "not run".
+async fn engine_version(engine: Engine, exe: &Path) -> String {
+    let version = match engine {
+        Engine::SingBox => vpnte_engine::singbox_process::engine_version(exe).await,
+        Engine::Xray => vpnte_engine::xray_process::engine_version(exe).await,
+    };
+    match version {
+        Ok((major, minor, patch)) => format!("{major}.{minor}.{patch}"),
+        Err(err) => format!("failed ({err})"),
+    }
 }
 
-async fn binaries(resources: &Path) -> CheckItem {
+pub(super) async fn binaries(resources: &Path) -> CheckItem {
     let files: Vec<(&str, Option<u64>)> = ENGINE_FILES
         .iter()
         .map(|name| {
@@ -152,10 +148,13 @@ async fn binaries(resources: &Path) -> CheckItem {
         })
         .collect();
     let mut versions = Vec::new();
-    for exe in ["sing-box.exe", "xray.exe"] {
+    for (exe, engine) in [
+        ("sing-box.exe", Engine::SingBox),
+        ("xray.exe", Engine::Xray),
+    ] {
         let path = resources.join(exe);
         let version = match path.is_file() {
-            true => engine_version(&path).await,
+            true => Some(engine_version(engine, &path).await),
             false => None,
         };
         versions.push((exe, version));

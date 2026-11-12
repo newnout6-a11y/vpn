@@ -1,17 +1,27 @@
-//! Public-IP provider race: one read ("wave") asks every provider of one address family in
-//! parallel through a chosen route and takes the first valid answer.
+//! Public-IP reads: one read ("wave") asks the providers of one address family one after
+//! another through a chosen route and stops at the first valid answer.
 //!
-//! Field lessons kept from the old monitor: the IP-literal Cloudflare trace comes first (the
-//! only provider that needs no DNS), requests never use the system proxy, never follow
+//! Sequential, not a race (RU discipline, Nov 2026): through a running tunnel every provider
+//! connection is a new connection to the VPN server, a TLS handshake with its name that the
+//! handshake budget never sees. Four parallel requests were four handshakes inside a few ms,
+//! the burst that freezes a server for ~120 s. A wave now costs one connection while its first
+//! provider answers; after a failure the next provider starts no sooner than
+//! [`MIN_GAP`](crate::discipline::MIN_GAP) after the previous one. A provider that hangs (its
+//! request timeout or the wave's budget) uses up the wave: into a frozen tunnel a second
+//! connection only extends the freeze. It hands the first turn of the next wave to the provider
+//! after it; otherwise the provider that answered last goes first.
+//!
+//! Field lessons kept from the old monitor: the IP-literal Cloudflare trace is the default first
+//! provider (the only one that needs no DNS), requests never use the system proxy, never follow
 //! redirects and never reuse a pooled socket across waves (a socket opened before a network
 //! transition must not answer for the new route), and a provider that answers 429 is skipped
 //! until its `Retry-After` passes. Answers outside the public range (a captive portal or a
 //! transparent proxy saying `10.x`) are rejected, never sampled.
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use futures_util::stream::{FuturesUnordered, StreamExt};
 use parking_lot::Mutex;
 use reqwest::header::{CACHE_CONTROL, CONNECTION, HeaderMap, RETRY_AFTER};
 use serde::{Deserialize, Serialize};
@@ -19,11 +29,13 @@ use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{Loopback, ProxyKind, UnixMs, now_ms};
 use vpnte_core::net::{self, HostPort, Route};
 
+use crate::discipline::MIN_GAP;
 pub use crate::ip_echo::parse_provider_body;
 
 /// Hard ceiling of one wave; callers can only shorten it.
 pub const WAVE_BUDGET: Duration = Duration::from_millis(2000);
-/// Part of the budget left for the dropped losers' sockets to close (old `IP_SOCKET_DRAIN_MS`).
+/// Part of the budget left for the socket of an attempt cut at the deadline to close (old
+/// `IP_SOCKET_DRAIN_MS`).
 const DRAIN: Duration = Duration::from_millis(200);
 /// Provider answers are a few dozen bytes; anything larger is not an IP service.
 const MAX_BODY: usize = 4096;
@@ -69,7 +81,7 @@ impl Provider {
     }
 }
 
-/// The providers in race order. Family-specific endpoints pin the family on every route, also
+/// The providers in default order. Family-specific endpoints pin the family on every route, also
 /// through a SOCKS proxy that resolves names itself (`socks5h`).
 pub const PROVIDERS: [Provider; 4] = [
     // IP literals: no DNS needed; Cloudflare's certificate carries both IP SANs.
@@ -116,7 +128,7 @@ impl IpRoute {
 #[serde(rename_all = "camelCase")]
 pub struct IpSample {
     pub ip: IpAddr,
-    /// Index into [`PROVIDERS`] of the provider that answered first.
+    /// Index into [`PROVIDERS`] of the provider that answered.
     pub provider: u8,
     pub at: UnixMs,
 }
@@ -204,10 +216,24 @@ fn clamp_budget(budget: Duration) -> Duration {
     }
 }
 
-/// Runs waves and keeps the per-provider 429 backoff between them. Share one per app (`Arc`).
+/// Runs waves and keeps between them the per-provider 429 backoff and which provider goes first.
+/// Share one per app (`Arc`).
 #[derive(Debug, Default)]
 pub struct IpReader {
     backoff: Mutex<HashMap<&'static str, Instant>>,
+    /// Index into [`PROVIDERS`] of the provider that opens the next wave.
+    first: AtomicUsize,
+}
+
+/// How a sequential wave ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    Answer(usize, IpAddr),
+    /// Every provider asked failed (or none could be asked in time).
+    Failed,
+    /// The provider at this index was still being asked when the budget ran out.
+    Hung(usize),
+    Cancelled,
 }
 
 impl IpReader {
@@ -216,10 +242,11 @@ impl IpReader {
         Self::default()
     }
 
-    /// One wave: every provider of `family` not in backoff, in parallel, over `route`; the first
-    /// valid answer wins and the others are dropped (which closes their sockets). `budget` is
-    /// capped at [`WAVE_BUDGET`] (zero = the cap). `None` when nothing valid arrived in time, the
-    /// route has no path for `family`, or `cancel` fired. Never returns a cached value.
+    /// One wave: the providers of `family` not in backoff, one after another over `route`, each
+    /// on its own connection; the first valid answer ends it (normally one connection per
+    /// wave). `budget` is capped at [`WAVE_BUDGET`] (zero = the cap). `None` when nothing valid
+    /// arrived in time, the route has no path for `family`, or `cancel` fired. Never returns a
+    /// cached value.
     pub async fn wave(
         &self,
         route: &IpRoute,
@@ -239,30 +266,52 @@ impl IpReader {
                 return None;
             }
         };
-        let now = Instant::now();
-        let fetches: FuturesUnordered<_> = PROVIDERS
-            .iter()
-            .enumerate()
-            .filter_map(|(index, provider)| {
-                let url = provider.url(family)?;
-                if self
-                    .backoff
-                    .lock()
-                    .get(url)
-                    .is_some_and(|until| *until > now)
-                {
-                    tracing::debug!(provider = index, outcome = "backoff", "public ip provider");
-                    return None;
-                }
-                Some(self.fetch(index, &client, url, family))
-            })
-            .collect();
-        let (index, ip) = race(fetches, budget, cancel).await?;
+        let providers = self.order(family);
+        let ask = |index, url| self.fetch(index, &client, url, family);
+        let ended = first_answer(providers, ask, budget, cancel).await;
+        let (index, ip) = self.settle(ended)?;
         Some(IpSample {
             ip,
             provider: index as u8,
             at: now_ms(),
         })
+    }
+
+    /// Keeps the first turn with the provider that answered, or passes it on from one that hung.
+    fn settle(&self, ended: Ended) -> Option<(usize, IpAddr)> {
+        match ended {
+            Ended::Answer(index, ip) => {
+                self.first.store(index, Ordering::Relaxed);
+                Some((index, ip))
+            }
+            Ended::Hung(index) => {
+                tracing::debug!(
+                    provider = index,
+                    "public ip provider hung; next wave starts after it"
+                );
+                self.first
+                    .store((index + 1) % PROVIDERS.len(), Ordering::Relaxed);
+                None
+            }
+            Ended::Failed | Ended::Cancelled => None,
+        }
+    }
+
+    /// The providers of `family` not in backoff, starting with the one that opens the wave.
+    fn order(&self, family: Family) -> Vec<(usize, &'static str)> {
+        let (first, now) = (self.first.load(Ordering::Relaxed), Instant::now());
+        let backoff = self.backoff.lock();
+        (0..PROVIDERS.len())
+            .map(|k| (first + k) % PROVIDERS.len())
+            .filter_map(|index| {
+                let url = PROVIDERS[index].url(family)?;
+                if backoff.get(url).is_some_and(|until| *until > now) {
+                    tracing::debug!(provider = index, outcome = "backoff", "public ip provider");
+                    return None;
+                }
+                Some((index, url))
+            })
+            .collect()
     }
 
     async fn fetch(
@@ -271,7 +320,7 @@ impl IpReader {
         client: &reqwest::Client,
         url: &'static str,
         family: Family,
-    ) -> (usize, Result<IpAddr, Fault>) {
+    ) -> Result<IpAddr, Fault> {
         let started = Instant::now();
         let result = fetch_one(client, url, family).await;
         if let Err(Fault::RateLimited(wait)) = result {
@@ -294,33 +343,48 @@ impl IpReader {
             ms = started.elapsed().as_millis() as u64,
             "public ip provider"
         );
-        (index, result)
+        result
     }
 }
 
-/// First `Ok` of `fetches` within `budget`, unless `cancel` fires first. Returning drops the
-/// remaining requests.
-async fn race<F>(
-    mut fetches: FuturesUnordered<F>,
+/// Asks `providers` in order until one gives a valid answer, within `budget` and unless `cancel`
+/// fires; a provider is only asked once the one before it failed. Starts keep [`MIN_GAP`]
+/// between them: through a tunnel each attempt is a handshake with the VPN server, and
+/// handshakes closer than ~350 ms are the burst the freeze heuristic punishes. A provider that
+/// runs into its own request timeout hung like one cut by the budget: the wave ends there.
+async fn first_answer<F, Fut>(
+    providers: Vec<(usize, &'static str)>,
+    mut ask: F,
     budget: Duration,
     cancel: &CancellationToken,
-) -> Option<(usize, IpAddr)>
+) -> Ended
 where
-    F: Future<Output = (usize, Result<IpAddr, Fault>)>,
+    F: FnMut(usize, &'static str) -> Fut,
+    Fut: Future<Output = Result<IpAddr, Fault>>,
 {
-    let first = async {
-        while let Some((index, result)) = fetches.next().await {
-            if let Ok(ip) = result {
-                return Some((index, ip));
-            }
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut start = tokio::time::Instant::now();
+    for (index, url) in providers {
+        if start >= deadline {
+            break;
         }
-        None
-    };
-    tokio::select! {
-        biased;
-        _ = cancel.cancelled() => None,
-        found = tokio::time::timeout(budget, first) => found.ok().flatten(),
+        let attempt = async {
+            tokio::time::sleep_until(start).await;
+            let began = tokio::time::Instant::now();
+            (began, ask(index, url).await)
+        };
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ended::Cancelled,
+            result = tokio::time::timeout_at(deadline, attempt) => result,
+        };
+        match result {
+            Ok((_, Ok(ip))) => return Ended::Answer(index, ip),
+            Ok((_, Err(Fault::Timeout))) | Err(_) => return Ended::Hung(index),
+            Ok((began, Err(_))) => start = began + MIN_GAP,
+        }
     }
+    Ended::Failed
 }
 
 async fn fetch_one(client: &reqwest::Client, url: &str, family: Family) -> Result<IpAddr, Fault> {

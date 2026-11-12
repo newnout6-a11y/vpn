@@ -283,6 +283,10 @@ impl Slots for FakeSlots {
     fn running(&self, slot: Slot) -> bool {
         self.0.running.lock()[slot.index()]
     }
+    /// Clean, unlike `FakeCore`: a slot session's crash is judged by Xray's log, not the core's.
+    fn recent_fault(&self, _slot: Slot) -> Option<OutboundFault> {
+        None
+    }
 }
 
 pub struct FakeEngines(pub Arc<World>);

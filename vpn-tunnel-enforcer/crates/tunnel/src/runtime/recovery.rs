@@ -11,7 +11,7 @@ use vpnte_engine::xray_process::XrayEvent;
 
 use super::MAX_RESTARTS;
 use super::actor::{Actor, Crashed, Phase, Retained, Session};
-use super::crash::{CrashAction, CrashFacts, decide};
+use super::crash::{CrashAction, CrashFacts, decide, frozen_server};
 use crate::api::{Mode, Origin, StartRequest, TunStatusKind};
 
 /// Xray slot restarts: backoff per attempt, at most three in this window (xray-engine §3).
@@ -43,6 +43,17 @@ impl Actor {
         self.stable_at = None;
         self.slot_due = None;
         self.xray_rx = None;
+        let fault = match &session.slots {
+            Some(s) => s.slots.recent_fault(s.active),
+            None => session.core.recent_fault(),
+        };
+        if let Some(id) = frozen_server(&session.req, fault) {
+            tracing::warn!(
+                ?fault,
+                "crash with an outbound fault: the server stays quiet"
+            );
+            self.quiet = Some((id.to_owned(), Instant::now() + self.deps.timings.freeze));
+        }
         // Removing the block here would defeat the kill switch: it exists for this moment.
         if let Err(e) = self.capture.lost().await {
             tracing::error!(error = %e, "protection did not follow the lost capture");
@@ -73,6 +84,7 @@ impl Actor {
             auto_restart: auto_restart && self.last.is_some(),
             guard,
             failover_available: self.deps.failover.is_some() && !self.failover_tried,
+            quiet: self.quiet_left(),
         };
         match decide(facts, &self.deps.timings.backoff) {
             CrashAction::Restart { attempt, delay } => {
@@ -92,6 +104,19 @@ impl Actor {
             }
             CrashAction::Block => self.terminal(false).await,
             CrashAction::Release => self.terminal(true).await,
+        }
+    }
+
+    /// What is left of the freeze window of the server a restart of the last start would dial.
+    fn quiet_left(&self) -> Duration {
+        let Some((id, until)) = &self.quiet else {
+            return Duration::ZERO;
+        };
+        match self.last.as_ref().map(|last| &last.mode) {
+            Some(Mode::DirectVpn { profile }) if profile.id == *id => {
+                until.saturating_duration_since(Instant::now())
+            }
+            _ => Duration::ZERO,
         }
     }
 

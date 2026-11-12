@@ -283,6 +283,7 @@ impl XraySupervisor {
 }
 pub fn classify_xray_fault<'a>(lines: impl IntoIterator<Item = &'a str>) -> Option<OutboundFault>;
 pub async fn check_config(exe: &Path, config: &[u8]) -> Result<(), XrayError>;  // `run -test -config stdin:`
+pub async fn engine_version(exe: &Path) -> io::Result<(u16, u16, u16)>;         // `version`, CHECK_TIMEOUT
 ```
 Events: `XrayEvent::Exited` only for slots that reached readiness; `expected` = we stopped it;
 `graceful` = it ended by itself after our CTRL_BREAK. `stop` / `stop_all` / `restart` / a failed

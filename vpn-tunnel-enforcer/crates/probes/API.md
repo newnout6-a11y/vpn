@@ -16,7 +16,7 @@ vpnte-probes.workspace = true
 | `geo` | `Geo`: country of an IP (3 providers, vote, 429 back-off, cache), exit / entry verification, ASN |
 | `key_health` | `check_profile[_verdict]` / `check_many[_verdicts]`: temporary probe engine, one budgeted transfer, verdict + `HealthReason` + classification |
 | `discipline` | RU discipline: per-endpoint handshake budget, 64 KiB transfer check (freeze), reach probe (ICMP + TCP), classifier |
-| `public_ip` | `IpReader`: provider race per family through a route (TUN-bound, loopback proxy, direct) |
+| `public_ip` | `IpReader`: sequential provider reads per family through a route (TUN-bound, loopback proxy, direct) |
 | `ip_monitor` | `IpMonitor`: evidence store + periodic task, baseline adoption, verdicts, auto-verify |
 | `leak` | adapter-bound leak self-test (curl.exe), `LeakWatch` scheduler, leak check card, direct-out audit |
 | `diagnostics` | system report (checklist), routing self-test, snapshots |
@@ -182,10 +182,16 @@ pub const PROVIDERS: [Provider; 4];          // Cloudflare trace, ipify, icanhaz
 pub enum IpRoute { Tun { v4: Ipv4Addr, v6: Option<Ipv6Addr> }, Loopback(Loopback), Direct }   // is_tun()
 pub struct IpSample { pub ip: IpAddr, pub provider: u8, pub at: UnixMs }   // camelCase
 pub fn parse_provider_body(body: &str) -> Option<IpAddr>;
-pub struct IpReader;                                           // Default; share one via Arc (429 back-off)
+pub struct IpReader;                                           // Default; share one via Arc (429 back-off, first provider)
 impl IpReader { pub fn new() -> Self;
     pub async fn wave(&self, route: &IpRoute, family: Family, budget: Duration, cancel: &CancellationToken) -> Option<IpSample>; }
 ```
+A wave asks one provider at a time and stops at the first valid answer (RU discipline: through a
+running tunnel every provider connection is a new handshake with the VPN server; the old race of 4
+was a burst). After a failure the next provider starts no sooner than `discipline::MIN_GAP` after
+the previous start; a provider that hangs uses up the wave (no second connection into a frozen
+tunnel) and the next wave starts after it; otherwise the provider that answered last opens the
+next wave (Cloudflare's IP literal by default). Budget (2 s ceiling) and callers' cadence unchanged.
 
 ## ip_monitor (`vpnte_probes::ip_monitor`)
 
@@ -282,7 +288,8 @@ pub struct CheckItem { pub id: String, pub category: Category, pub label: Msg,
 pub struct SystemReport { pub ran_at: UnixMs, pub summary: Verdict, pub items: Vec<CheckItem> }
 pub fn summarize(items: &[CheckItem]) -> Verdict;
 impl From<&leak::CheckItem> for CheckItem;   // leak card row → ReportInputs::routing (Info → None, details → notes)
-// report: the system report (native reads + curl endpoint checks + `sing-box version`)
+// report: the system report (native reads + curl endpoint checks + engine versions through
+// vpnte_engine's pinned one-shot runs: `singbox_process::engine_version`, `xray_process::engine_version`)
 pub struct ReportInputs { pub app_version: String, pub dirs: DataDirs, pub settings: Settings, pub tunnel: TunnelFacts,
     pub proxy: Option<LocalProxy>, pub engine_log: Vec<String>, pub profile: Option<ProfileFacts>,
     pub routing: Vec<CheckItem> /* leak-check items, become "routing-<id>" */, pub extra: Vec<CheckItem>, pub own_pids: Vec<u32> }
@@ -310,6 +317,8 @@ pub fn snapshot::dir(data_root: &Path) -> PathBuf;   // maintenance «clear diag
 `proxy-current`, `adapters`, `ip-config`, `routes`, `dns-resolve`, `proxy-listeners`,
 `proxy-processes`, `endpoint-{ipv4,cloudflare,google,msft,store}`, `services-core`, `services`,
 `app-log`, `tun-log`, `routing-*`, `active-profile-capabilities`, then `extra` (rule sets, capture).
+`binaries` details carry each engine's version (`1.14.4`), `failed (<reason>)` (e.g. elevated and
+the file differs from its release pin: the engine crate refuses the run) or `not run` (missing).
 
 ## local_proxy (`vpnte_probes::local_proxy`)
 
@@ -650,4 +659,7 @@ change notification from the store.
   frozen / banned / UDP-blocked server, ICMP / TCP reach of real servers (tests use loopback,
   where `reach` reports `NotRun` by design). Mobile white-list detection is the
   `ru-network-matrix` package's; the budget does not count the tunnel's own reconnects (engine
-  crate).
+  crate); the tunnel keeps a crashed server quiet for its own freeze window (`Timings::freeze`,
+  130 s, same value as `FREEZE_BACKOFF`). Public-IP waves are not budgeted (no server identity in
+  `IpReader`): they are sequential instead, one connection while the first provider answers. The
+  live public-IP wave ran once by hand (2026-11-12, direct route, 0.19 s).

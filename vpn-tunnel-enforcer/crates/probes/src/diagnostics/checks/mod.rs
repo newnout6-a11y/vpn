@@ -80,7 +80,8 @@ pub fn tun_item(running: bool, upstream: Option<&str>) -> CheckItem {
     )
 }
 
-/// `binaries`: every bundled engine file present (sizes) plus the engines' own version lines.
+/// `binaries`: every bundled engine file present (sizes) plus each engine's version (or why it
+/// could not be read; `None` = not run because the file is missing).
 pub fn binaries_item(
     files: &[(&str, Option<u64>)],
     versions: &[(&str, Option<String>)],

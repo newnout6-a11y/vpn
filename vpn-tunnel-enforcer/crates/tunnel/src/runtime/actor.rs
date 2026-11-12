@@ -128,6 +128,9 @@ pub(super) struct Actor {
     pub attempt: u8,
     pub failover_tried: bool,
     pub restart_due: Option<Instant>,
+    /// The server (profile id) whose crash showed an outbound fault, and until when crash
+    /// restarts keep away from it (freeze window, `crash` module).
+    pub quiet: Option<(String, Instant)>,
     pub stable_at: Option<Instant>,
     pub slot_due: Option<Instant>,
     pub exit: Option<watch::Receiver<Option<EngineExit>>>,
@@ -186,6 +189,7 @@ impl Actor {
             attempt: 0,
             failover_tried: false,
             restart_due: None,
+            quiet: None,
             stable_at: None,
             slot_due: None,
             exit: None,

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use futures_util::future::BoxFuture;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -116,79 +117,136 @@ fn budget_is_capped() {
     assert_eq!(PROVIDERS[3].url(Family::V6), None);
 }
 
-/// Drop guard that counts how many losing requests were aborted.
-struct Aborted(Arc<AtomicUsize>);
-impl Drop for Aborted {
-    fn drop(&mut self) {
-        self.0.fetch_add(1, Ordering::SeqCst);
+type Asked = Arc<parking_lot::Mutex<Vec<(usize, tokio::time::Instant)>>>;
+
+/// Scripted providers by index: `(delay ms, result)`; every start is recorded with its time.
+fn scripted(
+    plan: Vec<(u64, Result<IpAddr, Fault>)>,
+) -> (
+    impl FnMut(usize, &'static str) -> BoxFuture<'static, Result<IpAddr, Fault>>,
+    Asked,
+) {
+    let asked = Asked::default();
+    let record = asked.clone();
+    let ask =
+        move |index: usize, _url: &'static str| -> BoxFuture<'static, Result<IpAddr, Fault>> {
+            record.lock().push((index, tokio::time::Instant::now()));
+            let (delay, result) = plan[index];
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                result
+            })
+        };
+    (ask, asked)
+}
+
+fn providers(n: usize) -> Vec<(usize, &'static str)> {
+    (0..n).map(|i| (i, "https://provider.invalid/")).collect()
+}
+
+fn indices(asked: &Asked) -> Vec<usize> {
+    asked.lock().iter().map(|(i, _)| *i).collect()
+}
+
+/// Consecutive starts keep the discipline's gap (no handshake burst through a tunnel).
+fn assert_spaced(asked: &Asked) {
+    for pair in asked.lock().windows(2) {
+        assert!(
+            pair[1].1 - pair[0].1 >= MIN_GAP,
+            "{:?}",
+            pair[1].1 - pair[0].1
+        );
     }
 }
 
-fn fake(
-    index: usize,
-    delay_ms: u64,
-    result: Result<IpAddr, Fault>,
-    aborted: &Arc<AtomicUsize>,
-) -> impl Future<Output = (usize, Result<IpAddr, Fault>)> {
-    let guard = Aborted(aborted.clone());
-    async move {
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        std::mem::forget(guard);
-        (index, result)
-    }
+/// AT-07-007 / AT-00-005: one provider rate-limited, the next answers; providers after the
+/// answer are never asked (one connection at a time); all failing gives nothing.
+#[tokio::test]
+async fn a_wave_asks_one_provider_at_a_time_and_stops_at_the_first_answer() {
+    let cancel = CancellationToken::new();
+    let (ask, asked) = scripted(vec![
+        (10, Err(Fault::RateLimited(BACKOFF_DEFAULT))),
+        (50, Ok(ip("198.51.100.1"))),
+        (5, Ok(ip("198.51.100.2"))),
+        (5, Err(Fault::Timeout)),
+    ]);
+    let ended = first_answer(providers(4), ask, WAVE_BUDGET, &cancel).await;
+    assert_eq!(ended, Ended::Answer(1, ip("198.51.100.1")));
+    assert_eq!(indices(&asked), [0, 1]);
+    assert_spaced(&asked);
+
+    let (failing, asked) = scripted(vec![(5, Err(Fault::Network)); 4]);
+    let ended = first_answer(providers(4), failing, WAVE_BUDGET, &cancel).await;
+    assert_eq!(ended, Ended::Failed);
+    assert_eq!(indices(&asked), [0, 1, 2, 3]);
+    assert_spaced(&asked);
 }
 
-/// AT-07-007 / AT-00-005: one provider rate-limited, another answers; the first valid answer
-/// aborts the other requests; all failing gives nothing.
+/// AT-07-007: a provider that hangs uses up the wave (no second connection) and cannot
+/// stretch it; a gap that would end past the budget asks nobody; cancel ends it at once.
 #[tokio::test]
-async fn race_takes_the_first_valid_answer_and_drops_the_rest() {
-    let aborted = Arc::new(AtomicUsize::new(0));
+async fn a_wave_respects_budget_and_cancel() {
     let cancel = CancellationToken::new();
-    let fetches: FuturesUnordered<_> = [
-        fake(0, 10, Err(Fault::RateLimited(BACKOFF_DEFAULT)), &aborted),
-        fake(1, 50, Ok(ip("198.51.100.1")), &aborted),
-        fake(2, 900, Ok(ip("198.51.100.2")), &aborted),
-        fake(3, 1500, Err(Fault::Timeout), &aborted),
-    ]
-    .into_iter()
-    .collect();
-    let won = race(fetches, WAVE_BUDGET, &cancel).await;
-    assert_eq!(won, Some((1, ip("198.51.100.1"))));
-    assert_eq!(
-        aborted.load(Ordering::SeqCst),
-        2,
-        "the two slower requests were dropped"
-    );
-
-    let failing: FuturesUnordered<_> = (0..4)
-        .map(|i| fake(i, 5, Err(Fault::Network), &aborted))
-        .collect();
-    assert_eq!(race(failing, WAVE_BUDGET, &cancel).await, None);
-}
-
-/// AT-07-007: a provider that ignores the deadline cannot stretch the wave.
-#[tokio::test]
-async fn race_respects_budget_and_cancel() {
-    let aborted = Arc::new(AtomicUsize::new(0));
-    let cancel = CancellationToken::new();
-    let slow: FuturesUnordered<_> = [fake(0, 5_000, Ok(ip("1.1.1.1")), &aborted)]
-        .into_iter()
-        .collect();
+    let (hang, asked) = scripted(vec![(5_000, Ok(ip("1.1.1.1"))), (5, Ok(ip("8.8.8.8")))]);
     let started = Instant::now();
-    assert_eq!(race(slow, Duration::from_millis(300), &cancel).await, None);
+    let ended = first_answer(providers(2), hang, Duration::from_millis(300), &cancel).await;
+    assert_eq!(ended, Ended::Hung(0));
+    assert_eq!(indices(&asked), [0]);
     assert!(started.elapsed() < Duration::from_millis(1000));
 
+    let (fail_fast, asked) = scripted(vec![(5, Err(Fault::Connect)), (5, Ok(ip("8.8.8.8")))]);
+    let ended = first_answer(providers(2), fail_fast, Duration::from_millis(300), &cancel).await;
+    assert_eq!(ended, Ended::Failed);
+    assert_eq!(indices(&asked), [0]);
+
+    // The request's own timeout fires DRAIN before the wave's: still a hang, nobody else asked.
+    let (timed_out, asked) = scripted(vec![(5, Err(Fault::Timeout)), (5, Ok(ip("8.8.8.8")))]);
+    let ended = first_answer(providers(2), timed_out, WAVE_BUDGET, &cancel).await;
+    assert_eq!(ended, Ended::Hung(0));
+    assert_eq!(indices(&asked), [0]);
+
     let child = cancel.child_token();
-    let pending: FuturesUnordered<_> = [fake(0, 500, Ok(ip("1.1.1.1")), &aborted)]
-        .into_iter()
-        .collect();
     let cancel_later = child.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
         cancel_later.cancel();
     });
-    assert_eq!(race(pending, WAVE_BUDGET, &child).await, None);
-    assert_eq!(aborted.load(Ordering::SeqCst), 2);
+    let (pending, _) = scripted(vec![(500, Ok(ip("1.1.1.1")))]);
+    let started = Instant::now();
+    assert_eq!(
+        first_answer(providers(1), pending, WAVE_BUDGET, &child).await,
+        Ended::Cancelled
+    );
+    assert!(started.elapsed() < Duration::from_millis(400));
+}
+
+/// The provider that answered opens the next wave; one that hung hands the first turn on;
+/// failures and cancels change nothing; providers in backoff are left out.
+#[test]
+fn the_last_answer_opens_the_next_wave() {
+    let order = |reader: &IpReader, family| -> Vec<usize> {
+        reader.order(family).iter().map(|(i, _)| *i).collect()
+    };
+    let reader = IpReader::new();
+    assert_eq!(order(&reader, Family::V4), [0, 1, 2, 3]);
+    assert_eq!(
+        reader.settle(Ended::Answer(2, ip("198.51.100.7"))),
+        Some((2, ip("198.51.100.7")))
+    );
+    assert_eq!(order(&reader, Family::V4), [2, 3, 0, 1]);
+    assert_eq!(order(&reader, Family::V6), [2, 0, 1]);
+    assert_eq!(reader.settle(Ended::Hung(3)), None);
+    assert_eq!(order(&reader, Family::V4), [0, 1, 2, 3]);
+    assert_eq!(reader.settle(Ended::Hung(0)), None);
+    assert_eq!(order(&reader, Family::V4), [1, 2, 3, 0]);
+    assert_eq!(reader.settle(Ended::Failed), None);
+    assert_eq!(reader.settle(Ended::Cancelled), None);
+    assert_eq!(order(&reader, Family::V4), [1, 2, 3, 0]);
+    reader
+        .backoff
+        .lock()
+        .insert(PROVIDERS[2].v4, Instant::now() + Duration::from_secs(60));
+    assert_eq!(order(&reader, Family::V4), [1, 3, 0]);
 }
 
 /// A one-shot HTTP/1.1 server on loopback that answers every request with `response`.
@@ -221,7 +279,7 @@ fn direct_client() -> reqwest::Client {
 async fn rate_limit_sets_backoff() {
     let (url, _) = serve("HTTP/1.1 429 Too Many Requests\r\nretry-after: 120\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
     let reader = IpReader::new();
-    let (_, result) = reader.fetch(0, &direct_client(), url, Family::V4).await;
+    let result = reader.fetch(0, &direct_client(), url, Family::V4).await;
     assert_eq!(result, Err(Fault::RateLimited(Duration::from_secs(120))));
     let until = *reader.backoff.lock().get(url).unwrap();
     assert!(until > Instant::now() + Duration::from_secs(110));
@@ -234,13 +292,13 @@ async fn fetch_parses_and_filters_answers() {
     let client = direct_client();
     let (ok, _) = serve("HTTP/1.1 200 OK\r\ncontent-length: 22\r\nconnection: close\r\n\r\n{\"ip\":\"8.8.4.4\",\"x\":1}").await;
     assert_eq!(
-        reader.fetch(1, &client, ok, Family::V4).await.1,
+        reader.fetch(1, &client, ok, Family::V4).await,
         Ok(ip("8.8.4.4"))
     );
     let (private, _) =
         serve("HTTP/1.1 200 OK\r\ncontent-length: 9\r\nconnection: close\r\n\r\n10.0.0.1\n").await;
     assert_eq!(
-        reader.fetch(1, &client, private, Family::V4).await.1,
+        reader.fetch(1, &client, private, Family::V4).await,
         Err(Fault::NotPublic)
     );
     let big: &'static str = Box::leak(
@@ -252,13 +310,13 @@ async fn fetch_parses_and_filters_answers() {
     );
     let (large, _) = serve(big).await;
     assert_eq!(
-        reader.fetch(1, &client, large, Family::V4).await.1,
+        reader.fetch(1, &client, large, Family::V4).await,
         Err(Fault::TooLarge)
     );
     let (status, _) =
         serve("HTTP/1.1 503 Busy\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
     assert_eq!(
-        reader.fetch(1, &client, status, Family::V4).await.1,
+        reader.fetch(1, &client, status, Family::V4).await,
         Err(Fault::Status(503))
     );
 }
