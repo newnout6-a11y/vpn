@@ -357,6 +357,30 @@ async fn a_stop_of_another_run_is_ignored() {
     cancel.cancel();
 }
 
+/// Rule 3 in production's order: the coordinator's session is gone before its `Stopped`
+/// arrives, and a traffic sample runs in between. The sample must not forget the tracked run,
+/// or the fault looks stale and nobody repairs it (CI caught it when a sample and the event came
+/// due at the same instant).
+#[tokio::test(start_paused = true)]
+async fn a_sample_between_the_end_and_its_event_keeps_the_run() {
+    let rig = rig(vec![server("a", "g"), server("b", "h")]);
+    let cancel = watching(&rig).await;
+    let run = rig
+        .coord
+        .start(SessionKind::SoftDirect, Some("a"), AdaptiveMode::Baseline);
+    tokio::task::yield_now().await;
+    let owner = rig.coord.session.lock().take().map(|s| s.owner).unwrap();
+    tokio::time::sleep(super::super::stall::SAMPLE * 2).await;
+    rig.coord.emit(LifecycleEvent::Stopped {
+        owner,
+        runtime_id: run,
+        cause: StopCause::Fault,
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(*rig.host.refreshes.lock(), ["a"]);
+    cancel.cancel();
+}
+
 /// The automatic paths never act against the user: an action ends the retries, and a strip that
 /// gave up is cleared by the next one.
 #[tokio::test(start_paused = true)]

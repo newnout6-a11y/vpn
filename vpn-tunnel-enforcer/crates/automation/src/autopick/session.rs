@@ -139,10 +139,10 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
     /// One sample of the session's VPN traffic; a suspicion is confirmed by one transfer through
     /// the session. `Some` = the stall stayed past the reactions' grace: the retries take it.
     async fn sample(&self, w: &mut Watch, cancel: &CancellationToken) -> Option<(String, Trigger)> {
-        let Some(s) = self.coord.session().filter(|s| s.kind.server()) else {
-            *w = Watch::default();
-            return None;
-        };
+        // No server session: the tracked run's `Stopped`, still on its way, decides its end. The
+        // coordinator's session goes before its event does, so forgetting the run here would make
+        // that event look stale and lose the fault.
+        let s = self.coord.session().filter(|s| s.kind.server())?;
         let id = s.profile_id.clone()?;
         if w.run != Some(s.runtime_id) || w.server.as_deref() != Some(id.as_str()) {
             *w = Watch::of(s.runtime_id, Some(id.clone()));
