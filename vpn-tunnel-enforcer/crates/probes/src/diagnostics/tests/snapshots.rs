@@ -152,6 +152,22 @@ async fn captures_are_serialized_and_periodic_is_skipped_when_busy() {
 }
 
 /// A failed capture returns nothing but releases the queue.
+/// The periodic timer holds its snapshotter weakly: dropping the last handle without
+/// `stop_periodic` leaves no task keeping it (and its collector) alive.
+#[tokio::test]
+async fn periodic_timer_holds_no_strong_handle() {
+    let collector: Collector = Arc::new(|_, _| json!({}));
+    let dir = temp_dir("periodic");
+    let snapshots = Snapshotter::with_collector(dir.clone(), collector);
+    snapshots.start_periodic();
+    tokio::task::yield_now().await;
+    assert_eq!(Arc::strong_count(&snapshots), 1);
+    let weak = Arc::downgrade(&snapshots);
+    drop(snapshots);
+    assert!(weak.upgrade().is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_capture_releases_the_queue() {
     let dir = temp_dir("snapfail");

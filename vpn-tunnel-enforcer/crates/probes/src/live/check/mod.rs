@@ -13,10 +13,11 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::now_ms;
 use vpnte_base::{AppError, AppResult, Msg};
+use vpnte_engine::xray_config::server_pref;
 
 use super::diff::diff;
-use super::engine_probe::{EngineInput, EngineStage, run_engine_probe};
-use super::env::{LiveEnv, ProfileTarget, TunnelState, TunnelView};
+use super::engine_probe::{EngineInput, EngineStage, Gate, run_engine_probe};
+use super::env::{EngineSetup, LiveEnv, ProfileTarget, TunnelState, TunnelView};
 use super::findings::evaluate_findings;
 use super::history::HistoryStore;
 use super::model::{LiveCheck, TunnelContext};
@@ -32,6 +33,8 @@ use crate::live_stages::target::{
     TargetClass, classify_target, normalize_host_port, refused_error, require_host, tls_applicable,
 };
 use crate::live_stages::{CANCELLED, NotCheckedReason, ProbePath, Timed};
+#[cfg(test)]
+pub(crate) use direct::hello_skip;
 use direct::{Direct, DirectPlan, InfraInput, direct_stages, report_direct};
 use progress::{engine_progress, timed_progress};
 
@@ -192,6 +195,14 @@ pub(crate) fn resolve_target(
     }
 }
 
+/// The probe engine's setup for one saved server: its own engine choice wins over the app
+/// setting, as at tunnel start (a REALITY server forced to Xray must be probed through Xray).
+pub(crate) fn engine_setup(env: &dyn LiveEnv, id: &str) -> EngineSetup {
+    let mut setup = env.engine_setup();
+    setup.engine_pref = server_pref(setup.engine_pref, env.server_engine(id));
+    setup
+}
+
 /// Runs one check and stores it. `cancel` is the job's token; the deadline of the mode cancels a
 /// child token, so stages wind down (and the engine is reaped) in both cases.
 pub(crate) async fn run_check<B: DnsBackend>(
@@ -302,6 +313,7 @@ async fn measure_all<B: DnsBackend>(
     {
         return Err(refused_error(ip));
     }
+    let gate = profile.and_then(|t| Gate::new(&t.profile, Some(deadline)));
     let direct = match (&path, ip) {
         (Some(path), Some(ip)) if !token.is_cancelled() => {
             let infra = InfraInput {
@@ -316,6 +328,7 @@ async fn measure_all<B: DnsBackend>(
                 path,
                 tun_luid: tunnel.tun_luid,
                 infra,
+                gate: gate.as_ref(),
             };
             direct_stages(stages, plan, token, report).await
         }
@@ -347,7 +360,7 @@ async fn measure_all<B: DnsBackend>(
             req.throughput,
         ),
         (Some(t), Some(_)) => {
-            let setup = env.engine_setup();
+            let setup = engine_setup(env, &t.id);
             let input = EngineInput {
                 target: t,
                 tunnel: &tunnel,

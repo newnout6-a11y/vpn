@@ -1,12 +1,14 @@
 //! The direct stages of one check (no engine): reachability, ports, TLS, HTTP, infrastructure,
 //! path and PMTU, run concurrently under the check's token.
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
 use super::progress::{path_progress, pmtu_progress, timed_progress};
 use super::{Facts, Reporter, Stages};
 use crate::live::CheckMode;
+use crate::live::engine_probe::Gate;
 use crate::live::runner::{ProgressStatus, StageId};
 use crate::live_stages::dns::DnsBackend;
 use crate::live_stages::geo::{Infrastructure, OtherProfile, infrastructure};
@@ -85,6 +87,29 @@ pub(crate) struct DirectPlan<'a> {
     pub path: &'a ProbePath,
     pub tun_luid: Option<u64>,
     pub infra: InfraInput,
+    /// The checked server's handshake budget: the direct TLS and HTTPS probes are ClientHellos
+    /// with its server name like the engine's dials. `None` = ungated (an endpoint check).
+    pub gate: Option<&'a Gate>,
+}
+
+/// How long a direct ClientHello waits for its slot: enough for the budget's spacing, never the
+/// minute a used-up budget needs (the engine stage's proof is worth more than a certificate).
+const HELLO_WAIT: Duration = Duration::from_secs(2);
+
+/// Why a direct ClientHello does not go out: the mode's / profile's `skip` reason, else the
+/// handshake budget's when it has no slot soon. `None` = send it (the slot is taken).
+pub(crate) async fn hello_skip(
+    skip: Option<NotCheckedReason>,
+    gate: Option<&Gate>,
+    token: &CancellationToken,
+) -> Option<NotCheckedReason> {
+    match (skip, gate) {
+        (Some(reason), _) => Some(reason),
+        (None, Some(gate)) if !gate.admit_within(HELLO_WAIT, token).await => {
+            Some(NotCheckedReason::HandshakeBudget)
+        }
+        (None, _) => None,
+    }
 }
 
 /// The direct stages against `ip`, concurrently (§6.3 stage 2), each reporting when it ends.
@@ -102,6 +127,7 @@ pub(super) async fn direct_stages<B: DnsBackend>(
         path,
         tun_luid,
         infra,
+        gate,
     } = plan;
     let extended = mode.extended();
     let addr = SocketAddr::new(ip, facts.port);
@@ -146,13 +172,16 @@ pub(super) async fn direct_stages<B: DnsBackend>(
         r
     };
     let tls = async {
-        let r = match (facts.tls_applicable, skip) {
-            (false, _) => None,
-            (true, Some(reason)) => Some(TlsInfo {
-                timed: Timed::not_checked(reason),
-                ..TlsInfo::default()
-            }),
-            (true, None) => Some(inspect_tls(addr, &identity, path, token).await),
+        let r = if facts.tls_applicable {
+            Some(match hello_skip(skip, gate, token).await {
+                Some(reason) => TlsInfo {
+                    timed: Timed::not_checked(reason),
+                    ..TlsInfo::default()
+                },
+                None => inspect_tls(addr, &identity, path, token).await,
+            })
+        } else {
+            None
         };
         report.set(
             S::Tls,
@@ -162,7 +191,13 @@ pub(super) async fn direct_stages<B: DnsBackend>(
         r
     };
     let http = async {
-        let r = match skip {
+        // Plain HTTP opens no TLS session: only an HTTPS probe spends a slot.
+        let reason = if facts.tls_applicable {
+            hello_skip(skip, gate, token).await
+        } else {
+            skip
+        };
+        let r = match reason {
             Some(reason) => HttpInfo {
                 timed: Timed::not_checked(reason),
                 target_port: facts.port,

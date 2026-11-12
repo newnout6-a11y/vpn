@@ -1,9 +1,8 @@
 //! System diagnostics: the health-check report (a checklist of items judged with [`Verdict`]),
-//! the Hard-mode routing plan, the routing self-test ("is the split real?") and system
-//! snapshots for support. Native Win32 reads only; no PowerShell, netsh or tasklist.
+//! the routing self-test ("is the split real?") and system snapshots for support. Native Win32 reads only; no PowerShell, netsh or tasklist.
 mod checks;
 mod endpoints;
-pub mod plan;
+mod listeners;
 pub mod report;
 pub mod routing;
 pub mod snapshot;
@@ -13,10 +12,7 @@ use serde::Serialize;
 use vpnte_base::Msg;
 use vpnte_base::types::{UnixMs, Verdict};
 
-pub use plan::{
-    ListenerInfo, PlanContext, PlanInputs, PlanStatus, PlanStep, RecommendedMode, RoutingPlan,
-    TunnelInfo, plan_now, proxy_listeners, routing_plan,
-};
+pub use listeners::{ListenerInfo, proxy_listeners};
 pub use report::{Hy2Facts, ProfileFacts, ReportInputs, TunnelFacts, system_report};
 pub use routing::{
     RoutingInputs, RoutingResult, RoutingVerdict, SmartRuCheck, derive_routing_verdict,

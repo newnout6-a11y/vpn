@@ -253,7 +253,7 @@ where
                 break;
             };
             let outcome = tokio::select! {
-            biased;
+                biased;
                 _ = cancel.cancelled() => Err(CANCELLED.to_owned()),
                 r = probe(port) => r,
             };

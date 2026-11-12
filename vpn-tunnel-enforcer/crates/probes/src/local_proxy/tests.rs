@@ -436,22 +436,3 @@ fn config_scan_reads_top_level_small_files_of_known_dirs() {
         )]
     );
 }
-
-/// A manual proxy is handshaken in its configured protocol; a fake that cannot forward is found
-/// but not verified; a closed port is found and not verified.
-#[tokio::test]
-async fn manual_proxy_probe() {
-    let http = fake(Fake::Http).await;
-    let p = probe_manual("127.0.0.1", http.port(), ProxyKind::Http)
-        .await
-        .unwrap();
-    assert_eq!(
-        (p.addr, p.kind, p.source, p.verified),
-        (http, ProxyKind::Http, Source::Manual, false)
-    );
-    let closed = closed_port().await;
-    let p = probe_manual("127.0.0.1", closed.port(), ProxyKind::Socks5)
-        .await
-        .unwrap();
-    assert!(!p.verified && p.public_ip.is_none());
-}

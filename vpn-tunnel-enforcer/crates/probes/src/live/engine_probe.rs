@@ -81,7 +81,15 @@ impl Gate {
 
     /// Takes the next slot (waiting for it); `false` = deferred, do not dial.
     pub(crate) async fn admit(&self, cancel: &CancellationToken) -> bool {
-        let wait = self.until.saturating_duration_since(Instant::now());
+        self.admit_within(Duration::MAX, cancel).await
+    }
+
+    /// [`Gate::admit`], waiting at most `max` for the slot.
+    pub(crate) async fn admit_within(&self, max: Duration, cancel: &CancellationToken) -> bool {
+        let wait = self
+            .until
+            .saturating_duration_since(Instant::now())
+            .min(max);
         discipline::budget()
             .acquire(&self.endpoint, wait, cancel)
             .await
@@ -323,7 +331,6 @@ pub(crate) fn assemble(
         // Nothing was dialled: the budget deferred every attempt. Not a failure of the server.
         handshake.status = HandshakeStatus::Skipped;
         handshake.duration_ms = m.total_ms;
-        handshake.note = Some(deferred_note(m.deferred));
     } else if proof_ms.is_none() && !body_seen {
         let err = attempts
             .iter()
@@ -334,15 +341,27 @@ pub(crate) fn assemble(
         handshake.duration_ms = m.total_ms;
         handshake.error = Some(err);
         evidence.detail = Some(code(reason));
-    } else if m.deferred > 0 {
+    }
+    // Every outcome names the skipped dials: a failed verdict rests on fewer attempts too.
+    if m.deferred > 0 {
         handshake.note = Some(deferred_note(m.deferred));
     }
     handshake.evidence = Some(evidence);
-    let egress = aggregate_egress(
-        m.reflectors.into_iter().map(|(r, _)| r).collect(),
-        endpoint_ip,
-        m.probes_ms,
-    );
+    let egress = if m.reflectors.is_empty() && m.deferred > 0 {
+        // No reflector was dialled: the exit is unknown, not broken (like handshake and media).
+        Egress {
+            status: EgressStatus::Skipped,
+            duration_ms: m.probes_ms,
+            note: Some(deferred_note(m.deferred)),
+            ..Egress::default()
+        }
+    } else {
+        aggregate_egress(
+            m.reflectors.into_iter().map(|(r, _)| r).collect(),
+            endpoint_ip,
+            m.probes_ms,
+        )
+    };
     let media = if m.media.is_empty() && m.deferred > 0 {
         MediaStream {
             status: MediaStatus::Skipped,
@@ -366,7 +385,7 @@ pub(crate) fn assemble(
 }
 
 /// "N dials were left out: the server's handshake budget is used up" (`probes.discipline.liveDeferred`).
-fn deferred_note(count: u32) -> Text {
+pub(crate) fn deferred_note(count: u32) -> Text {
     Msg::new("probes.discipline.liveDeferred")
         .arg("count", count)
         .into()
@@ -418,6 +437,19 @@ pub(crate) async fn run_engine_probe(
     let ctx = input.setup.ctx(input.target.device, tunnel);
     let engine = match start_probe_engine(profile, &ctx, cancel).await {
         Ok(Started::Ready(engine)) => engine,
+        // The engine setting (the app's or the server's own) does not run this key: the key was
+        // never tried, so no handshake verdict.
+        Ok(Started::Offline(health)) if health.reason == Some(HealthReason::EngineSetting) => {
+            let note = HealthReason::EngineSetting.msg();
+            return EngineStage::not_run(
+                protocol,
+                Some(route),
+                Some(note),
+                None,
+                None,
+                input.throughput,
+            );
+        }
         Ok(Started::Offline(health)) => {
             // The engine refused the profile or died before serving its port: a verdict.
             let reason = health.reason.unwrap_or(HealthReason::HandshakeFailed);

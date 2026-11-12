@@ -138,8 +138,7 @@ impl Classification {
 pub fn real_certificate(log: &str) -> bool {
     static REAL: LazyLock<Regex> = LazyLock::new(|| {
         // Constant pattern, compiled by the tests.
-        Regex::new(r"(?i)received real certificate|reality verification failed|real certificate")
-            .expect("static regex")
+        Regex::new(r"(?i)real certificate|reality verification failed").expect("static regex")
     });
     REAL.is_match(log)
 }

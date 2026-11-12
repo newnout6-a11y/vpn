@@ -14,7 +14,7 @@ use vpnte_winnet::adapters::{self, Adapter, Family, Route};
 
 use super::checks::{self, ProxyState};
 pub use super::checks::{Hy2Facts, ProfileFacts};
-use super::plan::{CLIENT_PROCESS, proxy_listeners};
+use super::listeners::{CLIENT_PROCESS, proxy_listeners};
 use super::sysinfo::{self, OsInfo, ProcessRow, ServiceRow};
 use super::{CheckItem, SystemReport, endpoints, summarize};
 use crate::local_proxy::{ListenerRow, LocalProxy, SystemProxy, listener_rows};

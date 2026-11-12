@@ -22,10 +22,6 @@ pub struct NormalizedTarget {
 }
 
 impl NormalizedTarget {
-    /// The host is an IP literal.
-    pub fn is_ip(&self) -> bool {
-        self.ip.is_some()
-    }
     /// The host is an IPv6 literal.
     pub fn is_ipv6(&self) -> bool {
         matches!(self.ip, Some(IpAddr::V6(_)))
@@ -150,7 +146,7 @@ mod tests {
 
     fn norm(host: &str, port: Option<u16>) -> (String, u16, bool, bool) {
         let t = normalize_host_port(host, port);
-        (t.host.clone(), t.port, t.is_ip(), t.is_ipv6())
+        (t.host.clone(), t.port, t.ip.is_some(), t.is_ipv6())
     }
 
     /// AT-05-001: normalizeHostAndPort vectors (live-probe §7.1).

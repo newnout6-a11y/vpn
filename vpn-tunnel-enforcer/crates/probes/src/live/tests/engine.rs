@@ -7,6 +7,7 @@ use vpnte_base::types::{ClientDevice, EnginePref, Loopback};
 use vpnte_profiles::model::{DialPrefs, Host, Kind, Profile, Source, Tls};
 
 use super::socks::{Reply, fake_socks, http};
+use crate::key_health::HealthReason;
 use crate::live::engine_probe::{EngineInput, EngineStage, assemble, measure, run_engine_probe};
 use crate::live::model::{
     EgressStatus, EngineRoute, HandshakeStatus, Ipv6Status, MediaStatus, ReflectorStatus,
@@ -190,6 +191,34 @@ async fn self_probe_without_inbound_is_skipped() {
         (ThroughputStatus::Skipped, 0, 0)
     );
     assert_eq!(t.route, Some(EngineRoute::ActiveTunnel));
+}
+
+/// A key the engine setting does not run (forced Xray, TUIC: Xray has no client) was never
+/// tried: the stage is skipped with the engine-setting note, never a failed handshake.
+#[tokio::test]
+async fn an_engine_setting_refusal_is_no_handshake_verdict() {
+    let uri = "tuic://00000000-0000-4000-8000-000000000001:fake-pass@tuic.example.test:443\
+               ?sni=tuic.example.test#T";
+    let t = target(vpnte_profiles::uri::parse_uri(uri).unwrap());
+    let setup = EngineSetup {
+        engine_pref: EnginePref::Xray,
+        ..no_engines()
+    };
+    let input = EngineInput {
+        target: &t,
+        tunnel: &TunnelView::down(),
+        setup: &setup,
+        wire: &Wire::plain(),
+        endpoint_ip: None,
+        throughput: false,
+        deadline: None,
+    };
+    let stage = run_engine_probe(input, &CancellationToken::new()).await;
+    assert_eq!(stage.handshake.status, HandshakeStatus::Skipped);
+    assert!(stage.handshake.error.is_none(), "nothing was tried");
+    let note = Some(HealthReason::EngineSetting.msg().into());
+    assert_eq!(stage.handshake.note, note);
+    assert_eq!(stage.egress.status, EgressStatus::Skipped);
 }
 
 /// B-04: CONNECTs that succeed without a status line coming back prove nothing; the verdict

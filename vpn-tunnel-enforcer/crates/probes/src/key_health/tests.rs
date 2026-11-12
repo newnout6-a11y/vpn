@@ -602,7 +602,6 @@ async fn live_key_online_and_scrambled_offline() {
 /// package returns exists in both.
 #[test]
 fn locale_fragments_cover_every_key() {
-    use crate::egress::EgressError;
     use crate::geo::VerifyReject;
     let mut keys = Vec::new();
     for text in [
@@ -643,9 +642,6 @@ fn locale_fragments_cover_every_key() {
         VerifyReject::LookupFailed,
     ] {
         used.push(reject.msg().key.into_owned());
-    }
-    for err in [EgressError::Validation, EgressError::Network] {
-        used.push(vpnte_base::AppError::from(err).user_msg().key.into_owned());
     }
     used.push(
         vpnte_base::AppError::from(HealthError::GroupNotFoundOrEmpty)

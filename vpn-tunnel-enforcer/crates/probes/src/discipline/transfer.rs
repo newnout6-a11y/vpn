@@ -19,9 +19,9 @@ use vpnte_base::AppError;
 use vpnte_base::types::Loopback;
 use vpnte_profiles::countries::Iso2;
 
-use crate::egress::rtt_ms;
 use crate::key_health::parse_trace;
 use crate::live::wire::{HeadError, Stream, Wire, exchange_head, io_text, read_body};
+use crate::ping::rtt_ms;
 
 /// Host of the transfer and trace requests.
 pub const TRANSFER_HOST: &str = "speed.cloudflare.com";

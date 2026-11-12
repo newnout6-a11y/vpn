@@ -295,7 +295,7 @@ pub fn dns_item(answer: &Result<Vec<IpAddr>, String>) -> CheckItem {
 /// `proxy-listeners` / `proxy-processes`: clients found on this machine. Expected in local-proxy
 /// mode (none = warning); informational in Direct VPN mode, where none is normal.
 pub fn client_items(
-    listeners: &[crate::diagnostics::plan::ListenerInfo],
+    listeners: &[crate::diagnostics::ListenerInfo],
     processes: &[ProcessRow],
     direct_vpn: bool,
 ) -> [CheckItem; 2] {

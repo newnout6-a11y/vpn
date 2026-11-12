@@ -199,7 +199,8 @@ impl HandshakeBudget {
     }
 
     /// How long a new handshake to `endpoint` would wait right now (zero = free).
-    pub fn wait_for(&self, endpoint: &Endpoint) -> Duration {
+    #[cfg(test)]
+    pub(crate) fn wait_for(&self, endpoint: &Endpoint) -> Duration {
         let now = Instant::now();
         let map = self.slots.lock();
         map.get(endpoint).map_or(Duration::ZERO, |s| {

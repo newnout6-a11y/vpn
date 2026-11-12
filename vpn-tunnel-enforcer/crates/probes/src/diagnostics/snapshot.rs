@@ -325,7 +325,8 @@ impl Snapshotter {
         }
     }
 
-    /// Starts the 5-minute periodic capture (runtime; a second call is a no-op).
+    /// Starts the 5-minute periodic capture (runtime; a second call is a no-op). The timer holds
+    /// the snapshotter weakly: dropping the last handle ends it even without `stop_periodic`.
     pub fn start_periodic(self: &Arc<Self>) {
         let mut slot = self.periodic.lock();
         if slot.is_some() {
@@ -333,7 +334,7 @@ impl Snapshotter {
         }
         let cancel = CancellationToken::new();
         *slot = Some(cancel.clone());
-        let this = Arc::clone(self);
+        let this = Arc::downgrade(self);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval_at(
                 tokio::time::Instant::now() + PERIODIC_INTERVAL,
@@ -344,6 +345,7 @@ impl Snapshotter {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = tick.tick() => {
+                        let Some(this) = this.upgrade() else { break };
                         this.capture(SnapshotReason::Periodic).await;
                     }
                 }

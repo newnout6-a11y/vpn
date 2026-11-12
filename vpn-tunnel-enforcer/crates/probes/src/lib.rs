@@ -45,7 +45,6 @@ pub mod availability;
 pub mod curl;
 pub mod diagnostics;
 pub mod discipline;
-pub mod egress;
 pub mod geo;
 pub mod ip_monitor;
 pub mod key_health;

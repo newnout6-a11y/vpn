@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use vpnte_base::Msg;
 use vpnte_base::types::{Loopback, now_ms};
 
-use super::engine_probe::Gate;
+use super::engine_probe::{Gate, deferred_note};
 use super::model::{EngineRoute, Throughput, ThroughputSample, ThroughputStatus};
 use super::ms;
 use super::wire::{Wire, exchange_head};
@@ -287,6 +287,18 @@ pub(crate) async fn probe_throughput(
         if error.is_some() {
             last_error = error;
         }
+    }
+    if samples.is_empty() && deferred > 0 {
+        // Nothing measured because the budget said no: not a failure of the server.
+        let t = Throughput {
+            status: ThroughputStatus::Skipped,
+            duration_ms: ms(start.elapsed()),
+            endpoint: Some(ENDPOINT.to_owned()),
+            route: Some(route),
+            detail: Some(deferred_note(deferred)),
+            ..Throughput::default()
+        };
+        return (t, deferred);
     }
     let mut t = summarize_throughput(samples, ENDPOINT, ms(start.elapsed()), last_error);
     t.route = Some(route);

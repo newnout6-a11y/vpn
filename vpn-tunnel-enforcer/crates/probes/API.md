@@ -1,8 +1,8 @@
 # vpnte-probes — API for dependent crates
 
-Measurements: public IP monitor and leak checks, system diagnostics and the routing plan, local
-upstream-proxy detection, URL availability, speed test, server pings, country / ASN lookups, egress
-IP and SOCKS latency, key health (temporary probe engine), the stages of the live server check and
+Measurements: public IP monitor and leak checks, system diagnostics and the routing self-test, local
+upstream-proxy detection, URL availability, speed test, server pings (with SOCKS connect latency),
+country / ASN lookups, key health (temporary probe engine), the stages of the live server check and
 the live check runner. Depends on `vpnte-base`, `vpnte-core`, `vpnte-winnet`, `vpnte-profiles`,
 `vpnte-engine`. No cargo features.
 
@@ -12,15 +12,14 @@ vpnte-probes.workspace = true
 
 | module | what |
 | --- | --- |
-| `ping` | server latency ladder (direct-out SOCKS / physical-bound TCP + ICMP / unbound), `ping_all` stream |
+| `ping` | server latency ladder (direct-out SOCKS / physical-bound TCP + ICMP / unbound), `ping_all` stream, SOCKS connect latency |
 | `geo` | `Geo`: country of an IP (3 providers, vote, 429 back-off, cache), exit / entry verification, ASN |
-| `egress` | SOCKS connect latency, public egress IPv4 through a loopback SOCKS endpoint |
 | `key_health` | `check_profile[_verdict]` / `check_many[_verdicts]`: temporary probe engine, one budgeted transfer, verdict + `HealthReason` + classification |
 | `discipline` | RU discipline: per-endpoint handshake budget, 64 KiB transfer check (freeze), reach probe (ICMP + TCP), classifier |
 | `public_ip` | `IpReader`: provider race per family through a route (TUN-bound, loopback proxy, direct) |
 | `ip_monitor` | `IpMonitor`: evidence store + periodic task, baseline adoption, verdicts, auto-verify |
 | `leak` | adapter-bound leak self-test (curl.exe), `LeakWatch` scheduler, leak check card, direct-out audit |
-| `diagnostics` | system report (checklist), routing plan (decision table), routing self-test, snapshots |
+| `diagnostics` | system report (checklist), routing self-test, snapshots |
 | `local_proxy` | detect + protocol-verify a local upstream proxy (Happ and other clients), single flight |
 | `availability` | URL check tunnel vs direct (DNS / TCP / TLS / HTTP stages), verdict, geo-block scoring, history |
 | `speedtest` | multi-stream download / upload / latency, progress, egress check, history |
@@ -76,7 +75,7 @@ Typical calls: connect → `reader.wave(&IpRoute::Direct, Family::V4, ..)` → `
 after start `monitor.start(conn, IpRoute::Tun { v4, v6 }, interval)` and, once routes are proven,
 `monitor.adopt_baseline(conn, None, ..)`; server list «Ping» → `ping_all`; «Check keys» →
 `key_health::check_many` (commit with `Servers::record_health`); diagnostics page →
-`diagnostics::report::system_report`; start gate → `diagnostics::plan::plan_now(..).gate()`.
+`diagnostics::report::system_report`.
 
 ## ping (`vpnte_probes::ping`)
 
@@ -94,7 +93,11 @@ pub fn median(samples: &[Option<u32>]) -> Option<u32>;  pub fn plausible(ms: u32
 pub async fn ping(target: &PingTarget, net: &NetPath, cancel: &CancellationToken) -> Option<PingSample>;
 pub fn ping_all<K: Send + 'static>(targets: Vec<(K, PingTarget)>, net: NetPath, cancel: CancellationToken)
     -> impl Stream<Item = (K, Option<PingSample>)> + Send;   // 6 at a time, results as they finish
+pub async fn socks_connect_latency(proxy: &Loopback, host: &str, port: u16, limit: Duration) -> Option<u32>;
+pub async fn reliable_socks_latency(proxy: &Loopback, host: &str, port: u16, limit: Duration, attempts: usize) -> Option<u32>;
 ```
+SOCKS latency = socket creation to the full CONNECT reply through a loopback SOCKS5 endpoint,
+`max(1, round(ms))`; `reliable_*` = the median of parallel samples.
 Ladder (DPI-safe): TUN up → direct-out SOCKS (TCP protocols), then physical-source TCP + ICMP, never
 an unbound socket; TUN down → physical sources, then unbound TCP, then unbound ICMP. Results are
 memory-only: the app records them (`Servers::record_ping`).
@@ -121,18 +124,6 @@ geojs + ipinfo.io + ipwho.is in parallel, vote (priority geojs), 6 s read deadli
 back-off (`Retry-After` honoured, ≤ 1 h), cache 256 entries 5 min (empty results 5 s), non-public IPs
 refused without a request, disabled → zero requests. The app implements `LookupOwner` (generation /
 active id / tunnel session snapshot) and records countries with `Servers::record_country`.
-
-## egress (`vpnte_probes::egress`)
-
-```rust
-pub const EGRESS_DEADLINE: Duration;                         // 4 s for the whole provider race
-pub enum EgressError { Validation, Cancelled, Timeout, Network }   // Copy; From for AppError (probes.egress.*)
-pub async fn socks_connect_latency(proxy: &Loopback, host: &str, port: u16, limit: Duration) -> Option<u32>;
-pub async fn reliable_socks_latency(proxy: &Loopback, host: &str, port: u16, limit: Duration, attempts: usize) -> Option<u32>;
-pub async fn probe_egress_ipv4(ep: &Loopback, cancel: &CancellationToken) -> Result<Ipv4Addr, EgressError>;
-```
-Latency = socket creation to the full CONNECT reply, `max(1, round(ms))`. Egress: 4 providers
-(Cloudflare trace, ipify, icanhazip, myip) over SOCKS domain CONNECT :443 + rustls, public IPv4 only.
 
 ## key_health (`vpnte_probes::key_health`)
 
@@ -281,7 +272,7 @@ curl, not our sockets, because the kill switch permits our own exe: curl measure
 Hidden child in the app's kill-on-close job, proxy variables removed (callers also pass `--noproxy *`).
 Used by the leak self-test (adapter-bound probes) and the diagnostics endpoint items.
 
-## diagnostics (`vpnte_probes::diagnostics`, submodules `plan`, `report`, `routing`, `snapshot` public)
+## diagnostics (`vpnte_probes::diagnostics`, submodules `report`, `routing`, `snapshot` public)
 
 ```rust
 // report model (diagnostics::*)
@@ -299,18 +290,8 @@ pub struct TunnelFacts { pub running: bool, pub upstream: Option<String>, pub lu
 pub struct ProfileFacts { pub name: String, pub protocol: String, pub stealth: String, pub tls: bool, pub ech: bool,
     pub hy2: Option<Hy2Facts>, pub warnings: Vec<Msg> }        // fill from vpnte_profiles caps
 pub async fn system_report(inputs: ReportInputs, cancel: CancellationToken) -> AppResult<SystemReport>;
-// plan: may the tunnel start, and in which mode
-pub enum PlanStatus { Ready, Protected, Blocked, Broken }   pub enum RecommendedMode { Hard, External, Off }
-pub struct RoutingPlan { pub ran_at: UnixMs, pub status: PlanStatus, pub recommended_mode: RecommendedMode, pub title: Msg,
-    pub note: Option<Msg>, pub explanation: Msg, pub before: Msg, pub after: Msg, pub can_start_hard: bool,
-    pub proxy: Option<LocalProxy>, pub tunnels: Vec<TunnelInfo>, pub tunnels_verified: bool,
-    pub listeners: Vec<ListenerInfo>, pub blockers: Vec<Msg>, pub steps: Vec<PlanStep> }
-impl RoutingPlan { pub fn gate(&self) -> AppResult<()> }    // Conflict + probes.plan.<kind>.gate
-pub fn routing_plan(inputs: &PlanInputs) -> RoutingPlan;    // pure decision table
-pub struct PlanContext<'a> { pub tun_running: bool, pub tun_luid: Option<u64>, pub tun_alias: Option<String>, pub direct_vpn: bool,
-    pub active_profile: Option<String>, pub proxy_override: Option<(String, u16, ProxyKind)>,
-    pub detector: &'a LocalProxyDetector, pub skip_pids: Vec<u32> }
-pub async fn plan_now(ctx: PlanContext<'_>) -> RoutingPlan; // reads foreign tunnels + listeners, then routing_plan
+pub struct ListenerInfo { pub process: String, pub addr: SocketAddr, pub pid: u32 }   // a client-looking listener
+pub fn proxy_listeners(rows: &[ListenerRow], skip_pids: &[u32]) -> Vec<ListenerInfo>;  // loopback, by name / port
 // routing: is traffic split as configured (echo services through the TUN and mixed-direct-in)
 pub enum RoutingVerdict { Ok, Partial, Leak, TunnelOff, Inconclusive }
 pub struct RoutingInputs { pub tunnel_active: bool, pub direct: Option<Loopback>, pub tun_source: Option<IpAddr>,
@@ -335,7 +316,7 @@ pub fn snapshot::dir(data_root: &Path) -> PathBuf;   // maintenance «clear diag
 ```rust
 pub struct LocalProxy { pub addr: SocketAddr, pub kind: ProxyKind, pub source: Source,
     pub verified: bool /* an IP echo answered through it */, pub public_ip: Option<IpAddr> }   // label()
-pub enum Source { Config(String), System(String), Listener(String), TypicalPort, Manual }
+pub enum Source { Config(String), System(String), Listener(String), TypicalPort }
 pub struct ScanOptions { pub skip_ports: Vec<u16>, pub skip_pids: Vec<u32> }   // our own inbounds / engines
 pub struct LocalProxyDetector;
 impl LocalProxyDetector {
@@ -344,14 +325,13 @@ impl LocalProxyDetector {
     pub async fn recheck(&self, known: &LocalProxy) -> bool;   // cheap local re-handshake
 }
 pub async fn scan(options: ScanOptions) -> Option<LocalProxy>;                       // ≤ 6 s
-pub async fn probe_manual(host: &str, port: u16, kind: ProxyKind) -> Option<LocalProxy>;   // settings override
 pub struct SystemProxy { pub wininet: Option<WinInet>, pub winhttp: Option<Option<String>>, pub env: Vec<(String, String)> }
 impl SystemProxy { pub fn read() -> Self /* blocking */; pub fn candidates(&self) -> Vec<Candidate> }
 ```
 Candidates: client config files (14 dirs), WinINet / WinHTTP / env proxy, loopback listeners (minus
 system processes, ports < 1024 except 443, excluded ports and our own `ScanOptions`), 20 typical ports;
 each is protocol-verified (SOCKS5 greeting / HTTP CONNECT) before it counts. Building blocks (`config_candidates`, `listener_candidates`, `attempt`, `verify`,
-`pick`, …) are public for tests and the routing plan. `scan` dials the typical ports on loopback.
+`pick`, …) are public for tests. `scan` dials the typical ports on loopback.
 
 ## availability (`vpnte_probes::availability`)
 
@@ -410,7 +390,8 @@ format of `live-server-checks.json` (old camelCase names, unknown legacy fields 
 ```rust
 pub enum Text { Msg(Msg), Legacy(String) }             // new rows store a Msg, imported rows a string
 pub enum TimedStatus { Ok, Error, Skipped, NotChecked } // legacy "unavailable" reads as NotChecked
-pub enum NotCheckedReason { UdpTransport, Reality, BasicMode, TunnelTransition, GeoDisabled } // msg(); serde kebab-case
+pub enum NotCheckedReason { UdpTransport, Reality, BasicMode, TunnelTransition, GeoDisabled,
+    HandshakeBudget }                                     // msg(); serde kebab-case
 pub struct Timed { pub status: TimedStatus, pub duration_ms: u64, pub error: Option<String>,
                    pub reason: Option<NotCheckedReason>, pub route: Option<ProbeRoute> }   // not_checked(r), cancelled()
 pub enum ProbeRoute { Os, Physical }                   // which way a stage's packets went (stored)
@@ -457,7 +438,6 @@ pub fn budget() -> &'static HandshakeBudget;                    // the one proce
 impl HandshakeBudget {
     pub async fn acquire(&self, e: &Endpoint, max_wait: Duration, cancel: &CancellationToken) -> Result<(), BudgetError>;
     pub fn hold(&self, e: &Endpoint, quiet: Duration);   // after a freeze: no handshake before `quiet` passed
-    pub fn wait_for(&self, e: &Endpoint) -> Duration;    // zero = a slot is free now
 }
 // transfer check (one connection = one handshake): GET /cdn-cgi/trace (keep-alive), then
 // GET /__down?bytes=65536 on https://speed.cloudflare.com (exact byte count, no per-client cap)
@@ -467,8 +447,6 @@ pub enum Transfer { Complete { bytes, ms }, Stalled { bytes }, NoData, Failed { 
 impl Transfer { pub fn frozen(&self) -> bool /* stall inside FREEZE_BAND */; pub fn complete(&self) -> bool }
 pub struct TransferReport { pub transfer: Transfer, pub trace: Option<Trace>, pub answer_ms: Option<u32> }
 pub type Trace = (Option<IpAddr>, Option<Iso2>);
-pub async fn transfer_through(proxy: &Loopback, endpoint: Option<&Endpoint>, max_wait: Duration,
-    cancel: &CancellationToken) -> AppResult<TransferReport>;   // through an engine that already runs
 // reach probe (not budgeted): ICMP echo + one TCP connect to the server's own port, physical source
 pub enum Seen { NotRun, Answered, Refused, Silent }
 pub struct Reach { pub icmp: Seen, pub tcp: Seen }
@@ -481,7 +459,7 @@ pub enum Verdict { Healthy, Frozen, Stalled, HandshakeFailed, KeyRejected, IpBan
 pub enum Reaction { None, SwitchServer, TryAnotherFingerprint, PreferTcpTransport, RetryLater }  // msg() -> probes.reaction.*
 pub struct Classification { pub verdict: Verdict, pub reaction: Reaction }   // camelCase
 pub fn classify(o: &Observations) -> Classification;
-pub fn real_certificate(engine_log: &str) -> bool;            // "received real certificate", REALITY verification
+pub fn real_certificate(engine_log: &str) -> bool;            // "real certificate", "reality verification failed"
 ```
 Bytes are counted below the inner TLS (what the proxy delivered), the closest observable to what
 the server sent; a stall = first bytes, then `gap` of silence (no FIN / RST). Classifier order:
@@ -496,9 +474,9 @@ another fingerprint, + a hang = handshake-failed / retry later (changing the fin
 freeze is reported to extend it); no evidence = not-verified. `Verdict` / `Reaction` share their
 wire names with `vpnte_servers::model::{ServerVerdict, ServerReaction}`: store them with
 `Servers::record_verdicts` (map 1:1 like `HealthReason`).
-Not wired by this crate (no dependency): the tunnel's post-connect egress probe
-(`vpnte_tunnel` `egress_via`) and the automation; the app should route the former through
-`transfer_through` or `budget().acquire` and feed `Classification` to the latter.
+Not wired by this crate (no dependency): the tunnel's post-connect egress probe takes its slot
+through the app's `HandshakeGate` over `budget().acquire`; the automation gets `Classification`
+as plain data from the app.
 
 ## live (`vpnte_probes::live`)
 
@@ -512,7 +490,11 @@ host → ipify6 → second media host, none later than 8 s before the check's de
 budget refuses is left out of the rows and named in the handshake note
 (`probes.discipline.liveDeferred`); nothing dialled → handshake / media `skipped`, never failed.
 In practice a check gets three dials per minute per server name (the rest of a basic check is
-left out; a second check within the minute is mostly left out).
+left out; a second check within the minute is mostly left out). The direct TLS and HTTPS probes
+of an extended check are ClientHellos with the same server name and take their slots first,
+waiting at most 2 s (`not_checked` / `handshake-budget` otherwise); a key the engine setting refuses
+is `skipped` with the `engineSetting` note (never tried, no verdict). The probe engine runs on
+`server_pref(engine_setup().engine_pref, LiveEnv::server_engine(id))`.
 ```rust
 pub const MAX_BATCH: usize /*12*/;  pub const HISTORY_PER_TARGET: usize /*20*/;
 pub const BASIC_DEADLINE /*25 s*/, EXTENDED_DEADLINE /*60 s*/: Duration;   // throughput → extended budget in any mode
@@ -527,6 +509,8 @@ pub trait LiveEnv: Send + Sync + 'static {
     fn other_profiles(&self, except_id: Option<&str>) -> Vec<OtherProfile>;   // shared-/24 hint
     fn split_tunnel(&self) -> Result<SplitTunnelRules, String>;
     fn engine_setup(&self) -> EngineSetup;
+    fn server_engine(&self, id: &str) -> EnginePref { EnginePref::Auto }      // the row's own engine;
+        // the probe engine runs on server_pref(setup.engine_pref, server_engine(id)) as at tunnel start
     fn geo_enabled(&self) -> bool;                                            // !settings.disable_geo_lookup
 }
 pub struct ProfileTarget { pub id: String, pub profile: Profile, pub country: Option<String>,
@@ -604,9 +588,9 @@ UI flow: `submit` → pump `progress` into a signal → await `done`; tie `cance
 ## Errors and i18n keys
 
 User-facing text is `Msg` with keys under `probes.` (fragments `locales/<package>.{ru,en}.json`,
-registered through `LOCALES`): `probes.egress.*`, `probes.geo.reject.*`,
+registered through `LOCALES`): `probes.geo.reject.*`,
 `probes.keyHealth.{groupEmpty,reason.*}` (servers package); `probes.ip.{verdict,adopt}.*`,
-`probes.leak.{why,probe,selfTest,check}.*`; `probes.diag.*`, `probes.routing.*`, `probes.plan.*`;
+`probes.leak.{why,probe,selfTest,check}.*`; `probes.diag.*`, `probes.routing.*`;
 `probes.availability.*`, `probes.speed.*`; `probes.liveStages.*`; `probes.live.{profileNotFound,
 shuttingDown,batch,history,engine,egress,media,throughput,split,finding}.*` (findings:
 `probes.live.finding.<rule>.{title,detail}`); `probes.discipline.{deferred,liveDeferred}`,
@@ -622,18 +606,27 @@ change notification from the store.
 
 ## Not implemented / not run
 
-- Two ASN lookups on purpose (different specs, routes and stored shapes): `geo::Geo::asn`
-  (geojs / ipinfo / ipwho vote over the bootstrap routes; `geo::AsnInfo` with optional fields, server
-  details) and `live_stages::lookup_asn` (ipapi.co → ipwho.is over the OS route; `live_stages::AsnInfo`
-  is the persisted live-check row shape with `countryCode`). Two endpoint tables of IP echo services
-  likewise: `public_ip::PROVIDERS` (family-pinned endpoints, direct / bound / loopback routes) and
-  `egress`'s (domain names CONNECTed through SOCKS, IPv4 only).
+- Two ASN lookups on purpose (different specs, routes and stored shapes), both ipapi.co → ipwho.is:
+  `geo::Geo::asn` (over the bootstrap routes, sharing `Geo`'s on/off switch and 429 back-off;
+  `geo::AsnInfo` with optional fields, server details) and `live_stages::lookup_asn` (over the OS
+  route, own 10 min cache; `live_stages::AsnInfo` is the persisted live-check row shape with
+  `countryCode` and "unknown" fillers).
+- Removed in review (2026-11-12): the spec's `probe_egress_ipv4` (4 IP-echo providers raced through
+  a loopback SOCKS endpoint). Nothing called it (the tunnel's slot probe and the proxies' health
+  probe have their own, budget-gated echo), and its four parallel connections through one server
+  are the handshake burst the RU discipline forbids. SOCKS connect latency moved to `ping`.
 - `live`: no engine queue (one runner serialises the probe engines), so the spec's `queued-timeout`
   / `engine-busy` reasons do not exist; no request ids / IPC admission caps (no IPC).
 - Not in this crate (never assigned to a package): `server_info` (servers §2.11, the server detail
   probe; the app composes it from `ping` + `geo`) and `tunnel_http_probe` /
   `recent_tunnel_confirmation` (servers §6; the tunnel's `Confirmations` takes outside evidence, the
   app answers it with `IpMonitor::last_alive`).
+- Removed in review (2026-11-12): the Hard-mode routing plan (`diagnostics::plan`: decision table,
+  `plan_now`, start gate, `probes.plan.*` texts) and `local_proxy::probe_manual` that only it
+  used. Nothing called them (no app wiring, no UI), the tunnel start refuses a default-route TUN
+  itself (D-7 / B-22), and the table predates the no-admin model (it knows only TUN capture and
+  never asks about elevation). The client-listener list the report uses stays
+  (`diagnostics::{ListenerInfo, proxy_listeners}`).
 - Dropped by decision: the diagnostics event-log items, `runtime-acl` / `runtime-paths` /
   `tun-prev-log` / boot-recovery items (no ACL staging or boot task in this design), smart-route
   rule-set and forensics items (they arrive through `ReportInputs::extra`); the leak card's DNS
@@ -641,7 +634,7 @@ change notification from the store.
   caller captures `SnapshotReason::LeakDetected`); tracert / PowerShell paths of the live stages
   (native ICMP instead).
 - Not run here (tests use loopback fakes, the bundled engines on loopback and `sing-box check`):
-  real geo / ASN / egress / public-IP providers, key probes of real servers, remote pings, real
+  real geo / ASN / public-IP providers, key probes of real servers, remote pings, real
   speed-test transfers and sites, physical-adapter binding while our TUN is up, `local_proxy::scan`
   against this machine (it would dial the user's running client), `SystemEnv` curl probes, the
   routing self-test through a real `mixed-direct-in`; for `live`: real reflectors / Twitch hosts /
@@ -657,5 +650,4 @@ change notification from the store.
   frozen / banned / UDP-blocked server, ICMP / TCP reach of real servers (tests use loopback,
   where `reach` reports `NotRun` by design). Mobile white-list detection is the
   `ru-network-matrix` package's; the budget does not count the tunnel's own reconnects (engine
-  crate) nor the tunnel's post-connect egress probe (tunnel crate) until the app routes them
-  through `discipline`.
+  crate).

@@ -24,6 +24,12 @@ pub trait LiveEnv: Send + Sync + 'static {
     fn split_tunnel(&self) -> Result<SplitTunnelRules, String>;
     /// Engines and settings for a temporary probe engine.
     fn engine_setup(&self) -> EngineSetup;
+    /// The server's own engine choice (`ServerRow::engine`): sing-box / Xray force it, `Auto`
+    /// follows [`EngineSetup::engine_pref`] (`server_pref`, as at tunnel start and in key health).
+    /// The default keeps every server on the app setting until the app reports the row's choice.
+    fn server_engine(&self, _id: &str) -> EnginePref {
+        EnginePref::Auto
+    }
     /// `!settings.disable_geo_lookup`.
     fn geo_enabled(&self) -> bool;
 }

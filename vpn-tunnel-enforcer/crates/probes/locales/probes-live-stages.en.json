@@ -10,7 +10,8 @@
         "reality": "Not checked: REALITY front (a direct TLS probe tells nothing and risks a block)",
         "basicMode": "Not checked: extended check only",
         "tunnelTransition": "Not checked: the tunnel is connecting or switching",
-        "geoDisabled": "Not checked: geolocation lookups are turned off"
+        "geoDisabled": "Not checked: geolocation lookups are turned off",
+        "handshakeBudget": "Not checked: the server's TLS handshake budget is used up (freeze protection)"
       },
       "dns": {
         "resolver": {

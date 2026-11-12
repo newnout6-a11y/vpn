@@ -13,8 +13,7 @@ use tokio_util::sync::CancellationToken;
 use vpnte_winnet::icmp::{self, EchoRequest, EchoStatus};
 
 use super::classify::Seen;
-use crate::egress::rtt_ms;
-use crate::ping::{self, NetPath, icmp_rtt, physical_sources, plausible, resolve_target};
+use crate::ping::{self, NetPath, icmp_rtt, physical_sources, plausible, resolve_target, rtt_ms};
 
 /// TCP connect limit: longer than a ping's, a slow mobile link must not read as "silent".
 pub const TCP_LIMIT: Duration = Duration::from_secs(3);

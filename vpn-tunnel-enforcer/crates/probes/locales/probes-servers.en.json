@@ -1,9 +1,5 @@
 {
   "probes": {
-    "egress": {
-      "invalid": "Invalid local SOCKS port or credentials",
-      "failed": "Could not determine the public IPv4 address through the local SOCKS port"
-    },
     "geo": {
       "reject": {
         "geoDisabled": "IP country lookup is turned off in the settings",

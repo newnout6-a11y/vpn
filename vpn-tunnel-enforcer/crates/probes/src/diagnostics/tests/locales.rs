@@ -4,11 +4,10 @@ use vpnte_base::Msg;
 
 use crate::diagnostics::checks::{self, ProfileFacts, ProxyState};
 use crate::diagnostics::endpoints::{ENDPOINTS, endpoint_item, parse_write_out};
-use crate::diagnostics::plan::{PlanInputs, TunnelInfo, routing_plan};
 use crate::diagnostics::routing::derive_routing_verdict;
 use crate::diagnostics::sysinfo::OsInfo;
 use crate::diagnostics::{Category, CheckItem};
-use crate::local_proxy::{LocalProxy, Source, SystemProxy};
+use crate::local_proxy::SystemProxy;
 use crate::test_support::{flatten, placeholders};
 
 const RU: &str = include_str!("../../../locales/probes-diag.ru.json");
@@ -22,75 +21,6 @@ fn ru_and_en_match() {
         assert_eq!(placeholders(v), placeholders(&en[k]), "placeholders of {k}");
         assert!(k.starts_with("probes."), "{k}");
     }
-}
-
-fn plan_msgs() -> Vec<Msg> {
-    let proxy = |verified| {
-        Some(LocalProxy {
-            addr: "127.0.0.1:1080".parse().unwrap(),
-            kind: Default::default(),
-            source: Source::TypicalPort,
-            verified,
-            public_ip: None,
-        })
-    };
-    let tun = |conflict| TunnelInfo {
-        name: "wg".into(),
-        description: "WireGuard".into(),
-        address: "10.0.0.2".parse().unwrap(),
-        conflict,
-    };
-    let base = PlanInputs {
-        tunnels: Some(Vec::new()),
-        ..PlanInputs::default()
-    };
-    let cases = [
-        PlanInputs {
-            tun_running: true,
-            tunnels: Some(vec![tun(true)]),
-            ..base.clone()
-        },
-        PlanInputs {
-            tunnels: Some(vec![tun(true)]),
-            proxy: proxy(true),
-            ..base.clone()
-        },
-        PlanInputs {
-            direct_vpn: true,
-            ..base.clone()
-        },
-        PlanInputs {
-            direct_vpn: true,
-            active_profile: Some("p".into()),
-            tunnels: None,
-            ..base.clone()
-        },
-        base.clone(),
-        PlanInputs {
-            proxy: proxy(false),
-            ..base.clone()
-        },
-        PlanInputs {
-            proxy: proxy(true),
-            ..base
-        },
-    ];
-    let mut out = Vec::new();
-    for inputs in cases {
-        let plan = routing_plan(&inputs);
-        if let Err(e) = plan.gate() {
-            out.push(e.user_msg());
-        }
-        out.extend([plan.title, plan.explanation, plan.before, plan.after]);
-        out.extend(plan.note);
-        out.extend(plan.blockers);
-        out.extend(
-            plan.steps
-                .into_iter()
-                .flat_map(|s| [s.label, s.before, s.after]),
-        );
-    }
-    out
 }
 
 fn report_items() -> Vec<CheckItem> {
@@ -179,7 +109,7 @@ fn report_items() -> Vec<CheckItem> {
 #[test]
 fn every_emitted_key_exists() {
     let (ru, en) = (flatten(RU), flatten(EN));
-    let mut msgs = plan_msgs();
+    let mut msgs: Vec<Msg> = Vec::new();
     for (t, vpn, direct, smart, ru_ip) in [
         (false, None, None, false, None),
         (true, None, None, false, None),

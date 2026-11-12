@@ -20,10 +20,12 @@ use vpnte_core::resolve::{self, How};
 use vpnte_profiles::model::{Host, Profile};
 use vpnte_winnet::icmp::{self, EchoReply, EchoRequest, EchoStatus};
 
-use crate::egress::{reliable_socks_latency, rtt_ms};
-
+mod socks;
 #[cfg(test)]
 mod tests;
+
+pub(crate) use socks::rtt_ms;
+pub use socks::{reliable_socks_latency, socks_connect_latency};
 
 /// Per TCP sample (SOCKS or plain connect).
 pub const TCP_TIMEOUT: Duration = Duration::from_millis(1800);

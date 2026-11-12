@@ -20,8 +20,6 @@ pub enum Source {
     Listener(String),
     /// One of the ports popular clients use by default.
     TypicalPort,
-    /// The proxy the user set in the settings (probed, never scanned).
-    Manual,
 }
 
 /// One address to classify, in priority order of the scan.

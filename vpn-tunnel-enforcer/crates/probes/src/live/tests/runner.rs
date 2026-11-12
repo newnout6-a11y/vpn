@@ -7,11 +7,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use vpnte_base::types::EnginePref;
 use vpnte_base::{AppResult, ErrorKind};
 
 use super::Root;
 use super::engine::{hysteria2, no_engines, target, vless};
-use crate::live::check::{Budget, Stages};
+use crate::live::check::{Budget, Stages, engine_setup};
 use crate::live::wire::Wire;
 use crate::live::{
     CheckMode, CheckRequest, CheckTarget, EngineSetup, FindingCode, HistoryStore, ItemState,
@@ -92,9 +93,29 @@ impl LiveEnv for FakeEnv {
     fn engine_setup(&self) -> EngineSetup {
         no_engines()
     }
+    fn server_engine(&self, id: &str) -> EnginePref {
+        if id == "forced-xray" {
+            EnginePref::Xray
+        } else {
+            EnginePref::Auto
+        }
+    }
     fn geo_enabled(&self) -> bool {
         false
     }
+}
+
+/// A server's own engine choice wins over the app setting; `Auto` follows it
+/// (engine-choice-visible: one rule for tunnel, key health and the live check).
+#[test]
+fn the_server_engine_choice_wins_over_the_setting() {
+    let setting = no_engines().engine_pref;
+    assert_eq!(setting, EnginePref::Auto);
+    assert_eq!(
+        engine_setup(&FakeEnv, "forced-xray").engine_pref,
+        EnginePref::Xray
+    );
+    assert_eq!(engine_setup(&FakeEnv, "p1").engine_pref, setting);
 }
 
 fn service(dns: FakeDns, budget: Budget, root: &Root) -> LiveCheckService<FakeDns> {

@@ -123,6 +123,8 @@ pub enum NotCheckedReason {
     TunnelTransition,
     /// The user turned geo lookups off.
     GeoDisabled,
+    /// The server's TLS handshake budget had no slot before the deadline (RU freeze discipline).
+    HandshakeBudget,
 }
 
 impl NotCheckedReason {
@@ -134,6 +136,7 @@ impl NotCheckedReason {
             NotCheckedReason::BasicMode => "probes.liveStages.notChecked.basicMode",
             NotCheckedReason::TunnelTransition => "probes.liveStages.notChecked.tunnelTransition",
             NotCheckedReason::GeoDisabled => "probes.liveStages.notChecked.geoDisabled",
+            NotCheckedReason::HandshakeBudget => "probes.liveStages.notChecked.handshakeBudget",
         })
     }
 }
@@ -282,6 +285,7 @@ mod tests {
             NotCheckedReason::BasicMode,
             NotCheckedReason::TunnelTransition,
             NotCheckedReason::GeoDisabled,
+            NotCheckedReason::HandshakeBudget,
         ]
         .map(NotCheckedReason::msg)
         .to_vec();

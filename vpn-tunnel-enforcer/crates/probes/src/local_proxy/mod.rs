@@ -110,31 +110,6 @@ pub async fn scan(options: ScanOptions) -> Option<LocalProxy> {
     Some(found)
 }
 
-/// Budget of the handshake with a manually set proxy.
-pub const MANUAL_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
-
-/// The proxy the user set in the settings: resolved, spoken to in its configured protocol and,
-/// when it answers, verified like a detected one. `None` when the name does not resolve.
-pub async fn probe_manual(host: &str, port: u16, kind: ProxyKind) -> Option<LocalProxy> {
-    let addr = tokio::time::timeout(MANUAL_PROBE_TIMEOUT, tokio::net::lookup_host((host, port)))
-        .await
-        .ok()?
-        .ok()?
-        .next()?;
-    let speaks = attempt(addr, kind, MANUAL_PROBE_TIMEOUT).await == Attempt::Speaks;
-    let public_ip = match speaks {
-        true => verify(addr, kind, VERIFY_TIMEOUT).await,
-        false => None,
-    };
-    Some(LocalProxy {
-        addr,
-        kind,
-        source: Source::Manual,
-        verified: public_ip.is_some(),
-        public_ip,
-    })
-}
-
 /// A scan run by the detector (the real one is [`scan`]).
 pub type ScanFn = Arc<dyn Fn() -> BoxFuture<'static, Option<LocalProxy>> + Send + Sync>;
 /// Monotonic clock of the detector's cache.
