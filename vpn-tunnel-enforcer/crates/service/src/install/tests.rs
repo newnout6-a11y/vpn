@@ -75,7 +75,9 @@ fn an_exe_in_use_goes_to_a_tombstone_and_its_path_is_never_queued() {
 }
 
 /// What Windows will do at the next restart: NT paths in pairs of source and target (an empty
-/// target means "delete"), from both values the session manager reads at boot.
+/// target means "delete"), from both values the session manager reads at boot. Windows Server
+/// 2025 (the CI runner) writes each source with a `*1` flag prefix, Windows 11 without one: the
+/// flag is dropped so both read the same.
 fn restart_queue() -> Vec<String> {
     [
         "PendingFileRenameOperations",
@@ -83,7 +85,22 @@ fn restart_queue() -> Vec<String> {
     ]
     .into_iter()
     .flat_map(session_manager_strings)
+    .map(|entry| without_flags(&entry).to_owned())
     .collect()
+}
+
+/// `entry` without a leading `*<digits>` flag.
+fn without_flags(entry: &str) -> &str {
+    entry.strip_prefix('*').map_or(entry, |rest| {
+        rest.trim_start_matches(|c: char| c.is_ascii_digit())
+    })
+}
+
+#[test]
+fn queue_entries_read_the_same_with_and_without_the_flag_prefix() {
+    assert_eq!(without_flags(r"*1\??\C:\x"), r"\??\C:\x");
+    assert_eq!(without_flags(r"\??\C:\x"), r"\??\C:\x");
+    assert_eq!(without_flags(""), "");
 }
 
 fn session_manager_strings(name: &str) -> Vec<String> {
