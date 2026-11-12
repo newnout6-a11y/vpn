@@ -33,6 +33,13 @@ blocking file / registry I/O (`apps::discover`, `routing::process::probe_fs`,
 exits during start-up (`StartError::Exited`, reason in `ExitInfo::stderr_tail`). The proxy
 capture (`Capture::Proxy`, NOADMIN.md §2), `check` / `-test` runs and Xray never need it. Not
 executed here: a real TUN start (all engine tests are loopback-only).
+**Pinned engines:** in an elevated process every engine run (`run`, `check`, `version`,
+`rule-set match`) first verifies the exe — for sing-box also `libcronet.dll` and `wintun.dll`
+next to it — against the SHA-256 pins of `resources/engines.toml` (compiled in): the per-user
+install folder is user-writable. Verified files stay open without write / delete sharing until
+the process ends (the first run hashes them once). A missing, different or relative-path file is
+refused before the spawn: `io::ErrorKind::InvalidData`, rendered as `engine.process.notPinned(file)`
+by the `From<…> for AppError` impls. Unelevated nothing is checked.
 **Errors:** every error enum has `From<_> for vpnte_base::AppError` with an `engine.*` message;
 callers bubble them with `?` and render `AppError::user_msg()`.
 **Children:** every engine runs hidden (CREATE_NO_WINDOW) in its own kill-on-close Job: dropping
@@ -44,6 +51,7 @@ the owning value kills exactly that process. Config always goes over stdin.
 pub const PROXY_OUT: &str = "proxy-out";        // final outbound; Clash selector group in slot mode
 pub const DIRECT_OUT: &str = "direct-out";
 pub const TUN_IN: &str = "tun-in";
+pub const PROXY_IN: &str = "proxy-in";          // unauthenticated loopback mixed inbound (proxy capture)
 pub const DIRECT_IN: &str = "mixed-direct-in";  // authenticated loopback mixed inbound -> direct
 pub const PROBE_IN: &str = "live-check-in";     // authenticated loopback mixed inbound -> proxy-out
 pub const DNS_BOOTSTRAP_IN: &str = "dns-bootstrap-in";
@@ -51,6 +59,8 @@ pub const SLOT_TAGS: [&str; 2] = ["vpnte-upstream-a", "vpnte-upstream-b"];
 pub const DNS_REMOTE: &str = "dns-remote";      // dns.final, through proxy-out
 pub const DNS_RESOLVER: &str = "dns-resolver";  // resolves hostname DoH/DoT servers, through proxy-out
 pub const DNS_BOOTSTRAP: &str = "dns-bootstrap";// direct, for upstream server names
+pub const DNS_BOOTSTRAP_QUAD9, DNS_BOOTSTRAP_GOOGLE, DNS_BOOTSTRAP_TCP, DNS_BOOTSTRAP_ISP: &str;
+                                                // the rest of the slot mode's bootstrap order
 pub const DNS_DIRECT: &str = "dns-direct";      // direct, for Smart RU / user "direct" domains
 ```
 Clash `chains` of a connection end in `PROXY_OUT` / `DIRECT_OUT` (or a slot tag).
@@ -83,12 +93,10 @@ One `SlotEndpoint` per slot flows from allocation into `xray_config::build_confi
 ## `ports`
 
 ```rust
-pub const PORT_RANGE: Range<u16> = 20000..45000;  pub const RESERVED: RangeInclusive<u16> = 17990..=17999;
-pub const TRIES: usize = 16;
+pub const PORT_RANGE: Range<u16> = 20000..45000;    // clear of the External Proxy API's 17990..=17999
 pub struct PortsExhausted;                          // -> Network, "engine.ports.exhausted"
-pub fn alloc_listeners(tcp: usize, tcp_udp: usize) -> Result<Vec<u16>, PortsExhausted>; // distinct; the
-                                                    // last `tcp_udp` are also UDP-tested (dns-bootstrap-in)
-pub fn alloc_port(udp: bool, taken: &[u16]) -> Result<u16, PortsExhausted>;
+pub fn alloc_port(udp: bool, taken: &[u16]) -> Result<u16, PortsExhausted>; // 16 random picks;
+                                                    // udp: also UDP-tested (dns-bootstrap-in)
 pub fn secret() -> String;                          // 16 CSPRNG bytes as 32 lowercase hex
 pub fn creds() -> Creds;                            // user + pass, 32 hex each
 ```
@@ -101,9 +109,8 @@ pub struct ConfigInputs { pub upstream: Upstream, pub capture: Capture, pub list
     pub routing: RoutingParts, pub phys_dns: Vec<Ipv4Addr> /* physical adapters' resolvers */ }
 pub enum Capture {               // NOADMIN.md §2: routing_mode Hard = Tun, Soft = Proxy
     Tun(TunParams),              // `tun-in`; needs an elevated process
-    Proxy { port: u16 },         // `proxy-in`: mixed (HTTP + SOCKS) on 127.0.0.1:port, no users,
-}                                // no set_system_proxy (the app sets the system proxy itself)
-pub const PROXY_IN: &str = "proxy-in";
+    Proxy { port: u16 },         // `tags::PROXY_IN`: mixed (HTTP + SOCKS) on 127.0.0.1:port, no
+}                                // users, no set_system_proxy (the app sets the system proxy)
 pub enum Upstream {
     LocalProxy { addr: vpnte_core::net::HostPort, kind: ProxyKind, creds: Option<Creds> }, // "hard mode"
     Native { fragment: vpnte_profiles::emit_singbox::SingBoxFragment, udp: UdpPolicy },
@@ -132,8 +139,6 @@ pub fn compat_key(i: &ConfigInputs) -> [u8; 32];   // equal keys: a running conf
                                                    // upstream (ignores profile, slots, listener ports,
                                                    // secrets, alias; the capture and its proxy port count)
 pub fn usable_physical_dns(physical: &[Ipv4Addr]) -> Option<Ipv4Addr>;  // not TUN /30, loopback, 0.0.0.0
-pub fn bootstrap_resolver(physical: &[Ipv4Addr]) -> Ipv4Addr;           // usable one, else 1.1.1.1; unused
-                                                   // since xray_config dropped its UDP retry (dns-wiring)
 ```
 Rules the caller must keep (review of the WFP / TUN design):
 - `tun.ipv6 = !tun.dns_hijack = Protection::session_guarded()` (kill switch != Off or leak
@@ -143,8 +148,9 @@ Rules the caller must keep (review of the WFP / TUN design):
   1..=255 bytes; secret without spaces. Keep the proxy-capture port for the whole session.
 - Generated route order: loopback inbounds -> `routing.process_rules` -> QUIC reject (when
   `udp.block_quic`) -> IPv6 reject (dual-stack TUN, always in proxy form) -> sniff -> hijack-dns
-  (TUN only) -> private direct -> all-UDP drop (when `!udp.udp`) -> STUN pin ->
-  `routing.domain_rules`; final `proxy-out`; `auto_detect_interface` only with the TUN.
+  (TUN only) -> private direct -> all-UDP drop (when `!udp.udp`) -> STUN pins (sniffed `stun`,
+  then UDP 3478 / 3479 / 5349 / 19302-19309, routing-dns B-X-1) -> `routing.domain_rules`;
+  final `proxy-out`; `auto_detect_interface` only with the TUN.
 - Proxy form = the TUN form minus the TUN inbound, the DNS hijack rule and
   `auto_detect_interface`; upstreams, selector, DNS, rule sets, sniffing, the UDP / QUIC / IPv6
   policy, process rules, loopback inbounds and the Clash API are the same. Process rules keep
@@ -227,7 +233,8 @@ Secrets of the config (and slot credentials) are masked in every logged / return
 DNS server tags (`dns-remote`, `dns-resolver`, `dns-direct`, `dns-bootstrap` and its
 `-quad9` / `-google` / `-tcp` / `-isp` steps) stay readable.
 `StartError` -> `engine.process.singboxExited(code)` / `singboxNotReady` (Timeout) /
-`spawnFailed(engine)` (kind Permission when access is denied); `StopError` -> `stopUnconfirmed`.
+`spawnFailed(engine)` (kind Permission when access is denied) / `notPinned(file)` (elevated, an
+engine file differs from its pin); `StopError` -> `stopUnconfirmed`.
 
 ## `xray_process` — the two Xray slots
 
@@ -245,7 +252,7 @@ pub enum XrayError { Spawn(io::Error), ConfigRejected(String), ExitedEarly { cod
 pub struct XraySupervisor;                             // owned by the tunnel actor (&mut self)
 impl XraySupervisor {
     pub fn new(exe: PathBuf, logs: Option<PathBuf>, events: mpsc::Sender<XrayEvent>) -> Self;
-    pub fn exe_path(&self) -> &Path;                   // -> RoutingInputs::engine_paths
+                                                       // exe also -> RoutingInputs::engine_paths
     // `run -config stdin:`; ready = authenticated SOCKS handshake raced with exit / cancel;
     // any failure stops the candidate before returning
     pub async fn start(&mut self, slot: Slot, ep: SlotEndpoint, launch: SlotLaunch,
@@ -376,7 +383,8 @@ sentences (render `reject.msg()`). `hosts()` / `substitute()` also cover WireGua
 DNS blocking, the OS resolver (2.5 s), then the address the name had last time in this process
 (`warning` set; it is never silent); no plain UDP to any resolver; bounded by `resolve_server`
 itself (worst case about 11 s, typically under 1 s). `ViaSingBox(addr)` = UDP DNS to the
-running sing-box's loopback `dns-bootstrap-in` (TUN up; the socket binds loopback), A, else
+running sing-box's loopback `dns-bootstrap-in` (TUN up; the socket binds loopback, so a
+non-loopback address fails as `Failed` without sending), A, else
 AAAA, 4 s per name. IP literals are answered in place. <= 4 lookups in flight; the first
 failure fails the plan (no partial map); block-page answers (loopback, 0.0.0.0/8, link-local,
 multicast, broadcast) -> `Sinkhole`; forged answers with no trustworthy resolver (NXDOMAIN with
@@ -397,7 +405,7 @@ let launch = SlotLaunch { config: build_config(&graph, &ep_a).to_string().into_b
                           dial_target: resolved.addrs.values().next().map(|ip| (*ip, profile.port).into()) };
 sup.start(Slot::A, ep_a.clone(), launch, &cancel).await?;
 // sing-box: Upstream::XraySlots { slots: [ep_a, ep_b], active: Slot::A, udp: UdpPolicy::of(&profile) },
-// listeners.dns_bootstrap = Some(port), RoutingInputs::engine_paths = [sup.exe_path()].
+// listeners.dns_bootstrap = Some(port), RoutingInputs::engine_paths = [the Xray exe].
 ```
 
 ## `routing` — the user's rules and the route / DNS fragments
@@ -559,7 +567,7 @@ let active = rulesets.active(settings.managed);                   // after rules
 let doc = rules_store.snapshot();                                  // Store<RulesDoc>
 let split = doc.resolve_split(probe_fs);                           // blocking
 let dns = doc.active_dns().map(|p| p.primary);
-let engines = [AppPath::parse(&xray_sup.exe_path().to_string_lossy())?]; // slot mode / external proxy
+let engines = [AppPath::parse(&xray_exe.to_string_lossy())?];   // slot mode / external proxy
 let routing = routing::build(&RoutingInputs { smart, rule_set_dir: active.as_ref().map(|(_, d)| d.as_path()),
     domain_rules: &doc.domain_rules, split: &split, engine_paths: &engines,
     third_party_cores: local_proxy_mode, dns: dns.as_ref(), physical_dns: &phys_dns,

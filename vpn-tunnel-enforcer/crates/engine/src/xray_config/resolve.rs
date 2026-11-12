@@ -278,8 +278,15 @@ async fn exchange(server: SocketAddr, name: &str, qtype: u16) -> io::Result<Vec<
     let id = getrandom::u32().map_or(0x5a5a, |r| r as u16);
     let q = query(name, qtype, id)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a DNS name"))?;
-    // `dns-bootstrap-in` is a loopback inbound: a wildcard bind would make Windows Firewall
-    // ask the user about every build of the app.
+    // `dns-bootstrap-in` is a loopback inbound and the socket binds loopback too: a wildcard
+    // bind (0.0.0.0 / [::]) would make Windows Firewall ask the user about every build of the
+    // app. A loopback socket cannot reach any other resolver, so anything else is a caller bug.
+    if !server.ip().is_loopback() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not the loopback bootstrap inbound",
+        ));
+    }
     let local = match server {
         SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),

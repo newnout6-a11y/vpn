@@ -10,19 +10,16 @@ use vpnte_winnet::adapters::TUN_V4;
 
 use super::outbounds::UpstreamParts;
 use super::{ConfigError, ConfigInputs, require_objects};
-use crate::tags::{DNS_BOOTSTRAP, DNS_BOOTSTRAP_IN, DNS_REMOTE, DNS_RESOLVER, PROXY_OUT};
+use crate::tags::{
+    DNS_BOOTSTRAP, DNS_BOOTSTRAP_GOOGLE, DNS_BOOTSTRAP_IN, DNS_BOOTSTRAP_ISP, DNS_BOOTSTRAP_QUAD9,
+    DNS_BOOTSTRAP_TCP, DNS_REMOTE, DNS_RESOLVER, PROXY_OUT,
+};
 
-/// Public resolver of last resort for the UDP retry of `xray_config::resolve_hosts` when no
-/// physical resolver is known.
-const FALLBACK_BOOTSTRAP: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
-/// DoH by IP literal after `dns-bootstrap` (1.1.1.1), then DNS over TCP: the rest of the
-/// bootstrap order for queries of `dns-bootstrap-in`.
-const BOOTSTRAP_QUAD9: (&str, &str) = ("dns-bootstrap-quad9", "9.9.9.9");
-const BOOTSTRAP_GOOGLE: (&str, &str) = ("dns-bootstrap-google", "8.8.8.8");
-const BOOTSTRAP_TCP: (&str, &str) = ("dns-bootstrap-tcp", "8.8.8.8");
-/// The physical adapter's resolver: last, it answers unblocked names when every public
-/// resolver is cut off (mobile whitelists).
-const BOOTSTRAP_ISP: &str = "dns-bootstrap-isp";
+/// Resolvers of the bootstrap order after `dns-bootstrap` (1.1.1.1): DoH by IP literal to Quad9
+/// and Google, then DNS over TCP to Google; the physical adapter's resolver comes last, it
+/// answers unblocked names when every public resolver is cut off (mobile whitelists).
+const QUAD9: &str = "9.9.9.9";
+const GOOGLE: &str = "8.8.8.8";
 /// Budget of one step of the bootstrap order: Xray gives a whole lookup 4 s, so two blackholed
 /// steps must still leave room for the third.
 const STEP_TIMEOUT: &str = "1500ms";
@@ -30,10 +27,10 @@ const STEP_TIMEOUT: &str = "1500ms";
 const RESERVED: [&str; 6] = [
     DNS_RESOLVER,
     DNS_BOOTSTRAP,
-    BOOTSTRAP_QUAD9.0,
-    BOOTSTRAP_GOOGLE.0,
-    BOOTSTRAP_TCP.0,
-    BOOTSTRAP_ISP,
+    DNS_BOOTSTRAP_QUAD9,
+    DNS_BOOTSTRAP_GOOGLE,
+    DNS_BOOTSTRAP_TCP,
+    DNS_BOOTSTRAP_ISP,
 ];
 
 pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, ConfigError> {
@@ -94,14 +91,13 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
 /// The bootstrap order after `dns-bootstrap`: all direct (no detour: the server's own dialer;
 /// `type: local` would recurse into the TUN resolver, `detour: direct-out` is refused).
 fn bootstrap_servers(isp: Option<Ipv4Addr>) -> Vec<Value> {
-    let (tcp_tag, tcp_ip) = BOOTSTRAP_TCP;
     let mut servers = vec![
-        doh_direct(BOOTSTRAP_QUAD9.0, BOOTSTRAP_QUAD9.1),
-        doh_direct(BOOTSTRAP_GOOGLE.0, BOOTSTRAP_GOOGLE.1),
-        json!({ "type": "tcp", "tag": tcp_tag, "server": tcp_ip }),
+        doh_direct(DNS_BOOTSTRAP_QUAD9, QUAD9),
+        doh_direct(DNS_BOOTSTRAP_GOOGLE, GOOGLE),
+        json!({ "type": "tcp", "tag": DNS_BOOTSTRAP_TCP, "server": GOOGLE }),
     ];
     servers.extend(
-        isp.map(|ip| json!({ "type": "udp", "tag": BOOTSTRAP_ISP, "server": ip.to_string() })),
+        isp.map(|ip| json!({ "type": "udp", "tag": DNS_BOOTSTRAP_ISP, "server": ip.to_string() })),
     );
     servers
 }
@@ -121,7 +117,7 @@ fn bootstrap_rules(isp: bool) -> Vec<Value> {
         "action": "respond",
     });
     let mut rules = Vec::new();
-    for doh in [DNS_BOOTSTRAP, BOOTSTRAP_QUAD9.0, BOOTSTRAP_GOOGLE.0] {
+    for doh in [DNS_BOOTSTRAP, DNS_BOOTSTRAP_QUAD9, DNS_BOOTSTRAP_GOOGLE] {
         rules.extend([
             step("evaluate", doh),
             has_address.clone(),
@@ -129,10 +125,10 @@ fn bootstrap_rules(isp: bool) -> Vec<Value> {
         ]);
     }
     if isp {
-        rules.extend([step("evaluate", BOOTSTRAP_TCP.0), has_address]);
-        rules.push(step("route", BOOTSTRAP_ISP));
+        rules.extend([step("evaluate", DNS_BOOTSTRAP_TCP), has_address]);
+        rules.push(step("route", DNS_BOOTSTRAP_ISP));
     } else {
-        rules.push(step("route", BOOTSTRAP_TCP.0));
+        rules.push(step("route", DNS_BOOTSTRAP_TCP));
     }
     rules
 }
@@ -145,12 +141,6 @@ pub fn usable_physical_dns(physical: &[Ipv4Addr]) -> Option<Ipv4Addr> {
         .iter()
         .copied()
         .find(|ip| !TUN_V4.contains(ip) && !ip.is_loopback() && !ip.is_unspecified())
-}
-
-/// The UDP resolver of the retry in `xray_config::resolve_hosts` (TUN down): the usable
-/// physical resolver, else 1.1.1.1. sing-box's own `dns-bootstrap` does not use it.
-pub fn bootstrap_resolver(physical: &[Ipv4Addr]) -> Ipv4Addr {
-    usable_physical_dns(physical).unwrap_or(FALLBACK_BOOTSTRAP)
 }
 
 /// A tunnelled (`detour`) server named by host name without its own resolver.

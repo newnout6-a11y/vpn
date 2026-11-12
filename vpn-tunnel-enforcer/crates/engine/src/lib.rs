@@ -28,6 +28,7 @@ pub const LOCALES: &[(&str, &str)] = &[
 
 pub mod apps;
 pub mod clash_api;
+mod pin;
 pub mod ports;
 pub mod routing;
 pub mod singbox_config;

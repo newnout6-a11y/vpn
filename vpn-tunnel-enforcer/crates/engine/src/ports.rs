@@ -4,21 +4,20 @@
 //! WHY [20000, 45000): outgoing loopback sockets (sing-box <-> Xray traffic itself) draw their
 //! source ports from Windows' dynamic range 49152-65535, so a port picked there can be taken
 //! before the engine binds it; Hyper-V / WSL "excluded port ranges" are caught by the bind test
-//! (binding into one fails with WSAEACCES, which used to kill sing-box at start).
+//! (binding into one fails with WSAEACCES, which used to kill sing-box at start). The range also
+//! stays clear of the External Proxy API's 17990-17999.
 use std::net::{Ipv4Addr, TcpListener, UdpSocket};
-use std::ops::{Range, RangeInclusive};
+use std::ops::Range;
 
 use vpnte_base::types::Creds;
 use vpnte_base::{AppError, ErrorKind, Msg};
 
-/// Ports handed out by [`alloc_listeners`] / [`alloc_port`].
+/// Ports handed out by [`alloc_port`].
 pub const PORT_RANGE: Range<u16> = 20000..45000;
-/// The External Proxy API range: never handed to an engine listener.
-pub const RESERVED: RangeInclusive<u16> = 17990..=17999;
 /// Random picks per port before giving up.
-pub const TRIES: usize = 16;
+const TRIES: usize = 16;
 
-/// No free loopback port was found within [`TRIES`] random picks.
+/// No free loopback port was found within 16 random picks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("no free loopback port in 20000..45000 after 16 tries")]
 pub struct PortsExhausted;
@@ -29,19 +28,9 @@ impl From<PortsExhausted> for AppError {
     }
 }
 
-/// `tcp` ports that bind on TCP, then `tcp_udp` ports that bind on TCP and UDP (DNS listeners);
-/// all distinct, in that order.
-pub fn alloc_listeners(tcp: usize, tcp_udp: usize) -> Result<Vec<u16>, PortsExhausted> {
-    let mut ports = Vec::with_capacity(tcp + tcp_udp);
-    for i in 0..tcp + tcp_udp {
-        let port = alloc_port(i >= tcp, &ports)?;
-        ports.push(port);
-    }
-    Ok(ports)
-}
-
 /// One random port of [`PORT_RANGE`] that is not in `taken` and binds on `127.0.0.1` right now
-/// (also on UDP when `udp`). The test socket is closed again: the engine binds it moments later.
+/// (also on UDP when `udp`: DNS listeners). The test socket is closed again: the engine binds it
+/// moments later.
 pub fn alloc_port(udp: bool, taken: &[u16]) -> Result<u16, PortsExhausted> {
     let span = u32::from(PORT_RANGE.end - PORT_RANGE.start);
     for _ in 0..TRIES {
@@ -49,10 +38,7 @@ pub fn alloc_port(udp: bool, taken: &[u16]) -> Result<u16, PortsExhausted> {
             return Err(PortsExhausted);
         };
         let port = PORT_RANGE.start + (r % span) as u16;
-        if taken.contains(&port) || RESERVED.contains(&port) {
-            continue;
-        }
-        if binds(port, udp) {
+        if !taken.contains(&port) && binds(port, udp) {
             return Ok(port);
         }
     }
@@ -93,15 +79,20 @@ mod tests {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     }
 
-    /// AT-02-005 (tunnel-core 7.2): every port in [20000,45000), distinct, none in 17990..17999.
+    /// AT-02-005 (tunnel-core 7.2): every port in [20000,45000), distinct when each allocation
+    /// passes the earlier ones as `taken` (the tunnel's pattern; the last one also binds UDP),
+    /// none in the External Proxy API's 17990..=17999.
     #[test]
     fn listeners_are_distinct_and_in_range() {
         for _ in 0..20 {
-            let ports = alloc_listeners(5, 1).unwrap();
-            assert_eq!(ports.len(), 6);
+            let mut ports = Vec::new();
+            for i in 0..6 {
+                let port = alloc_port(i == 5, &ports).unwrap();
+                ports.push(port);
+            }
             for (i, p) in ports.iter().enumerate() {
                 assert!(PORT_RANGE.contains(p), "{p}");
-                assert!(!RESERVED.contains(p));
+                assert!(!(17990..=17999).contains(p));
                 assert!(!ports[..i].contains(p), "duplicate {p}");
             }
         }

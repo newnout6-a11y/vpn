@@ -4,6 +4,7 @@
 //! the optional readiness marker.
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::io;
 use std::net::IpAddr;
 use std::path::Path;
@@ -18,11 +19,16 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Notify, broadcast, watch};
 use tokio::task::JoinHandle;
+use vpnte_base::types::Engine;
 use vpnte_core::logging::RotatingFile;
 use vpnte_core::{net, redact};
 use vpnte_winnet::process::{Job, app_job, spawn_hidden};
 
-use crate::tags::{DNS_BOOTSTRAP, DNS_DIRECT, DNS_REMOTE, DNS_RESOLVER};
+use crate::pin;
+use crate::tags::{
+    DNS_BOOTSTRAP, DNS_BOOTSTRAP_GOOGLE, DNS_BOOTSTRAP_ISP, DNS_BOOTSTRAP_QUAD9, DNS_BOOTSTRAP_TCP,
+    DNS_DIRECT, DNS_REMOTE, DNS_RESOLVER,
+};
 
 /// Raw output lines kept per process: fault window, exit tail, live view.
 pub(crate) const RING_LINES: usize = 500;
@@ -162,18 +168,17 @@ fn collect_secrets(v: &Value, secret: bool, out: &mut Vec<String>) {
 }
 
 /// Our DNS server tags: what the secret-named `server` key holds in DNS rules and resolvers. A
-/// reference, not a secret, and the name engine lines carry (`dns/https[dns-remote]`). The
-/// bootstrap order's steps (`singbox_config::dns`, private there) are spelled out: a test
+/// reference, not a secret, and the name engine lines carry (`dns/https[dns-remote]`). A test
 /// checks this list against every server tag a generated config carries.
 const DNS_TAGS: [&str; 8] = [
     DNS_REMOTE,
     DNS_RESOLVER,
     DNS_BOOTSTRAP,
     DNS_DIRECT,
-    "dns-bootstrap-quad9",
-    "dns-bootstrap-google",
-    "dns-bootstrap-tcp",
-    "dns-bootstrap-isp",
+    DNS_BOOTSTRAP_QUAD9,
+    DNS_BOOTSTRAP_GOOGLE,
+    DNS_BOOTSTRAP_TCP,
+    DNS_BOOTSTRAP_ISP,
 ];
 
 /// Long enough, not one of our DNS tags, and not a private / loopback address (`127.0.0.1`, the
@@ -318,6 +323,7 @@ fn open_session_log(dir: &Path, stem: &str) -> Option<RotatingFile> {
 
 /// How to start one engine process.
 pub(crate) struct Spec<'a> {
+    pub engine: Engine,
     pub exe: &'a Path,
     pub args: &'a [&'a str],
     /// Written to stdin, which is then closed (the engines read it to EOF).
@@ -342,8 +348,10 @@ pub(crate) struct EngineChild {
 
 impl EngineChild {
     /// Spawns the engine (runtime). Errors only when the process cannot be created or put into
-    /// its job; everything later (bad config, early exit) shows up on the exit watch.
+    /// its job, or (elevated) when an engine file differs from its pin; everything later (bad
+    /// config, early exit) shows up on the exit watch.
     pub(crate) fn spawn(spec: Spec<'_>) -> io::Result<Self> {
+        pin::check(spec.engine, spec.exe)?;
         let job = Job::kill_on_close()?;
         let mut cmd = Command::new(spec.exe);
         cmd.args(spec.args);
@@ -524,14 +532,16 @@ async fn wait_exit(
     tx.send_replace(Some(out.exit_info(at, status.code(), user)));
 }
 
-/// Runs a one-shot engine command (`version`, config check) in the app job: optional stdin
-/// (then closed), all output collected, killed when `within` passes.
-pub(crate) async fn run_once(
+/// Runs a one-shot engine command (`version`, config check, `rule-set match`) in the app job:
+/// optional stdin (then closed), all output collected, killed when `within` passes.
+pub(crate) async fn run_once<S: AsRef<OsStr>>(
+    engine: Engine,
     exe: &Path,
-    args: &[&str],
+    args: &[S],
     stdin: Option<&[u8]>,
     within: Duration,
 ) -> io::Result<std::process::Output> {
+    pin::check(engine, exe)?;
     let mut cmd = Command::new(exe);
     cmd.args(args);
     if let Some(dir) = exe.parent().filter(|d| !d.as_os_str().is_empty()) {

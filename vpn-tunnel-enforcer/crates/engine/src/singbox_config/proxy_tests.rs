@@ -71,7 +71,8 @@ fn proxy_form_keeps_everything_but_the_tun() {
         ipv6_reject_rule(),
         json!({ "action": "sniff" }),
         json!({ "ip_is_private": true, "outbound": DIRECT_OUT }),
-        json!({ "network": "udp", "port": [19302, 3478], "outbound": PROXY_OUT }),
+        stun_pins()[0].clone(),
+        stun_pins()[1].clone(),
         i.routing.domain_rules[0].clone(),
     ];
     let at: Vec<usize> = order.iter().map(|r| index_of(&c, r).unwrap()).collect();

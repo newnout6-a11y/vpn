@@ -9,7 +9,7 @@ use vpnte_core::net::HostPort;
 
 use super::tests::*;
 use super::*;
-use crate::tags::{DIRECT_OUT, PROXY_OUT};
+use crate::tags::{DIRECT_OUT, PROXY_IN, PROXY_OUT};
 use crate::test_support::{resources, singbox_check};
 
 /// The Smart RU fragments with the bundled rule sets (forward slashes, as routing emits them).

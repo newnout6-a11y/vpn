@@ -17,12 +17,12 @@ use std::time::{Duration, Instant, SystemTime};
 use regex::Regex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{Creds, OutboundFault};
+use vpnte_base::types::{Creds, Engine, OutboundFault};
 use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::socks5::{self, SocksError};
 
 use crate::singbox_process::child::{self, EngineChild, Scrubber, Spec, exited};
-use crate::singbox_process::{code_text, re, spawn_kind, spawn_msg};
+use crate::singbox_process::{code_text, re, spawn_error};
 use crate::slot::{Slot, SlotEndpoint};
 
 #[cfg(test)]
@@ -114,7 +114,7 @@ impl From<XrayError> for AppError {
     fn from(err: XrayError) -> Self {
         let (kind, msg) = match &err {
             XrayError::Cancelled => return AppError::cancelled(),
-            XrayError::Spawn(io) => (spawn_kind(io), spawn_msg("Xray")),
+            XrayError::Spawn(io) => spawn_error("Xray", io),
             XrayError::ConfigRejected(_) => (
                 ErrorKind::Validation,
                 Msg::new("engine.process.configRejected").arg("engine", "Xray"),
@@ -192,7 +192,8 @@ pub struct XraySupervisor {
 }
 
 impl XraySupervisor {
-    /// `exe` = the bundled Xray; `logs` = the logs dir for `xray-a.log` / `xray-b.log`.
+    /// `exe` = the bundled Xray (also the path routing sends direct: `RoutingInputs::engine_paths`);
+    /// `logs` = the logs dir for `xray-a.log` / `xray-b.log`.
     pub fn new(exe: PathBuf, logs: Option<PathBuf>, events: mpsc::Sender<XrayEvent>) -> Self {
         Self {
             exe,
@@ -202,11 +203,6 @@ impl XraySupervisor {
             active: None,
             events,
         }
-    }
-
-    /// The Xray binary: sing-box routes exactly this path direct (`process_path_regex`).
-    pub fn exe_path(&self) -> &Path {
-        &self.exe
     }
 
     /// Starts `slot` and waits for its authenticated SOCKS readiness (runtime). A slot whose
@@ -232,6 +228,7 @@ impl XraySupervisor {
         // Recorded before the spawn: `restart` retries what the caller asked for last.
         let launch = &self.launches[i].insert((ep, launch)).1;
         let child = EngineChild::spawn(Spec {
+            engine: Engine::Xray,
             exe: &self.exe,
             args: &["run", "-config", "stdin:"],
             config: &launch.config,
@@ -512,7 +509,7 @@ pub fn classify_xray_fault<'a>(lines: impl IntoIterator<Item = &'a str>) -> Opti
 /// starting it and prints `Configuration OK.` with exit 0; a refused config exits 23.
 pub async fn check_config(exe: &Path, config: &[u8]) -> Result<(), XrayError> {
     let args = ["run", "-test", "-config", "stdin:"];
-    let out = child::run_once(exe, &args, Some(config), CHECK_TIMEOUT)
+    let out = child::run_once(Engine::Xray, exe, &args, Some(config), CHECK_TIMEOUT)
         .await
         .map_err(XrayError::Spawn)?;
     if out.status.success() {

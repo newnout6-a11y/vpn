@@ -6,7 +6,7 @@
 //! the app points the system proxy at), loopback listeners and the route / DNS fragments
 //! built by `routing` (which also owns every process rule: own engines, third-party cores and
 //! split-tunnel apps). Key order is stable (`serde_json` `preserve_order`), so the same inputs
-//! always give the same text. Tags: [`crate::tags`] and [`PROXY_IN`].
+//! always give the same text. Tags: [`crate::tags`].
 mod dns;
 mod inbounds;
 mod outbounds;
@@ -34,13 +34,10 @@ use vpnte_profiles::emit_singbox::{
 };
 use vpnte_profiles::model::Profile;
 
-pub use dns::{bootstrap_resolver, usable_physical_dns};
+pub use dns::usable_physical_dns;
 
 use crate::slot::{Slot, SlotEndpoint};
 use crate::tags::{DIRECT_OUT, DNS_BOOTSTRAP, PROXY_OUT};
-
-/// Tag of the proxy-capture inbound ([`Capture::Proxy`]).
-pub const PROXY_IN: &str = "proxy-in";
 
 /// Everything that shapes the generated JSON.
 #[derive(Debug, Clone)]
@@ -50,7 +47,7 @@ pub struct ConfigInputs {
     pub listeners: Listeners,
     pub routing: RoutingParts,
     /// Physical adapters' IPv4 resolvers in priority order (`winnet::adapters::physical_dns_v4`);
-    /// the first usable one serves `dns-bootstrap`, 1.1.1.1 when none is.
+    /// the first usable one is the last step of the slot mode's bootstrap order.
     pub phys_dns: Vec<Ipv4Addr>,
 }
 
@@ -140,7 +137,7 @@ impl UdpPolicy {
 pub enum Capture {
     /// The TUN inbound (`tun-in`); creating the adapter needs administrator rights.
     Tun(TunParams),
-    /// A loopback `mixed` inbound ([`PROXY_IN`], HTTP + SOCKS on `127.0.0.1:port`, no
+    /// A loopback `mixed` inbound (`proxy-in`, HTTP + SOCKS on `127.0.0.1:port`, no
     /// authentication) that needs no privileges. The app points the system proxy at it itself,
     /// reversibly: sing-box's `set_system_proxy` is never used. Nothing that exists only for the
     /// TUN is generated: no TUN DNS hijack and no physical interface binding.

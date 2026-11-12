@@ -12,7 +12,7 @@ use std::time::Duration;
 use regex::Regex;
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::OutboundFault;
+use vpnte_base::types::{Engine, OutboundFault};
 use vpnte_base::{AppError, ErrorKind, Msg};
 
 pub(crate) mod child;
@@ -21,6 +21,7 @@ pub(crate) mod testkit;
 #[cfg(test)]
 mod tests;
 
+use crate::pin::NotPinned;
 use child::{EngineChild, Scrubber, Spec, exited};
 pub use child::{ExitInfo, KILL_CODE};
 
@@ -88,7 +89,7 @@ impl From<StartError> for AppError {
                 ErrorKind::Timeout,
                 Msg::new("engine.process.singboxNotReady"),
             ),
-            StartError::Spawn(io) => (spawn_kind(io), spawn_msg("sing-box")),
+            StartError::Spawn(io) => spawn_error("sing-box", io),
         };
         AppError::msg(kind, msg).with_source(err)
     }
@@ -108,22 +109,27 @@ impl From<CheckError> for AppError {
                 ErrorKind::Validation,
                 Msg::new("engine.process.configRejected").arg("engine", "sing-box"),
             ),
-            CheckError::Run(io) => (spawn_kind(io), spawn_msg("sing-box")),
+            CheckError::Run(io) => spawn_error("sing-box", io),
         };
         AppError::msg(kind, msg).with_source(err)
     }
 }
 
-/// Kind of a process that could not be created (missing exe, access denied, job failure).
-pub(crate) fn spawn_kind(err: &io::Error) -> ErrorKind {
-    match err.kind() {
+/// Kind and message of an engine process that could not be created: an engine file that differs
+/// from its release pin (elevated only, `crate::pin`), access denied, a missing exe, a job failure.
+pub(crate) fn spawn_error(engine: &'static str, err: &io::Error) -> (ErrorKind, Msg) {
+    if let Some(refused) = err.get_ref().and_then(|e| e.downcast_ref::<NotPinned>()) {
+        let msg = Msg::new("engine.process.notPinned").arg("file", &refused.file);
+        return (ErrorKind::Internal, msg);
+    }
+    let kind = match err.kind() {
         io::ErrorKind::PermissionDenied => ErrorKind::Permission,
         _ => ErrorKind::Internal,
-    }
-}
-
-pub(crate) fn spawn_msg(engine: &'static str) -> Msg {
-    Msg::new("engine.process.spawnFailed").arg("engine", engine)
+    };
+    (
+        kind,
+        Msg::new("engine.process.spawnFailed").arg("engine", engine),
+    )
 }
 
 /// An exit code for a message argument (`?` when Windows reported none).
@@ -139,9 +145,11 @@ pub struct SingBoxProcess {
 impl SingBoxProcess {
     /// Starts `exe run -c stdin --disable-color` with `config` on stdin (runtime). `logs` = the
     /// logs dir for `sing-box.log`; the previous session's file becomes `sing-box.1.log`.
-    /// Errors only when the process cannot be created; a bad config shows up as an early exit.
+    /// Errors only when the process cannot be created (elevated: also when an engine file
+    /// differs from its release pin); a bad config shows up as an early exit.
     pub fn spawn(exe: &Path, config: &[u8], logs: Option<&Path>) -> io::Result<Self> {
         let child = EngineChild::spawn(Spec {
+            engine: Engine::SingBox,
             exe,
             args: &["run", "-c", "stdin", "--disable-color"],
             config,
@@ -263,7 +271,7 @@ pub fn classify_fault<'a>(lines: impl IntoIterator<Item = &'a str>) -> Option<Ou
 /// `exe version` → `(major, minor, patch)` (run once per app process; gate with
 /// [`version_supported`]).
 pub async fn engine_version(exe: &Path) -> io::Result<(u16, u16, u16)> {
-    let out = child::run_once(exe, &["version"], None, TOOL_TIMEOUT).await?;
+    let out = child::run_once(Engine::SingBox, exe, &["version"], None, TOOL_TIMEOUT).await?;
     parse_version(&String::from_utf8_lossy(&out.stdout)).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -297,7 +305,7 @@ pub fn version_supported(version: (u16, u16, u16)) -> bool {
 /// (no TUN, no listeners). For tests and diagnostics; the runtime relies on `run` failing fast.
 pub async fn check_config(exe: &Path, config: &[u8]) -> Result<(), CheckError> {
     let args = ["check", "-c", "stdin", "--disable-color"];
-    let out = child::run_once(exe, &args, Some(config), TOOL_TIMEOUT)
+    let out = child::run_once(Engine::SingBox, exe, &args, Some(config), TOOL_TIMEOUT)
         .await
         .map_err(CheckError::Run)?;
     if out.status.success() {

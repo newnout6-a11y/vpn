@@ -16,6 +16,7 @@ use vpnte_core::net::HostPort;
 
 use super::tests::{inputs, lb};
 use super::*;
+use crate::tags::PROXY_IN;
 use crate::test_support::{TempDir, hidden, singbox_exe};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);

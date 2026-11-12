@@ -16,7 +16,8 @@ use crate::tags::{DIRECT_IN, DIRECT_OUT, DNS_BOOTSTRAP_IN, DNS_REMOTE, PROBE_IN,
 ///    to an off-link private resolver is still answered by sing-box; on-link subnets never enter
 ///    the TUN, their resolvers are blocked by the WFP layers instead: review E-D5);
 /// 5. the all-UDP drop (after the hijack: Windows' DNS probes must reach the resolver), the
-///    STUN pin, then routing's domain rules; `final` is `proxy-out`.
+///    STUN pins (sniffed protocol, then ports), then routing's domain rules; `final` is
+///    `proxy-out`.
 pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, ConfigError> {
     let r = &i.routing;
     require_objects(&r.process_rules, "process rule")?;
@@ -65,8 +66,14 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
     if up.drop_udp {
         rules.push(json!({ "network": "udp", "action": "reject", "method": "drop" }));
     }
-    // STUN is pinned to the tunnel so WebRTC never learns the real address through direct-out.
-    rules.push(json!({ "network": "udp", "port": [19302, 3478], "outbound": PROXY_OUT }));
+    // STUN is pinned to the tunnel so WebRTC never learns the real address through direct-out
+    // (an RU address or a user "direct" domain): by the sniffed protocol on any port, and by the
+    // STUN / TURN ports for flows the sniffer did not classify (routing-dns B-X-1).
+    rules.push(json!({ "protocol": "stun", "outbound": PROXY_OUT }));
+    rules.push(json!({
+        "network": "udp", "port": [3478, 3479, 5349], "port_range": ["19302:19309"],
+        "outbound": PROXY_OUT,
+    }));
     rules.extend(r.domain_rules.iter().cloned());
     let mut route = json!({ "rules": rules });
     if !r.rule_sets.is_empty() {

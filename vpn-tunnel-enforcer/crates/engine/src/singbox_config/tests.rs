@@ -358,18 +358,21 @@ fn bootstrap_dns_only_for_hostname_endpoints() {
     assert_eq!(c["dns"]["final"], DNS_REMOTE);
 }
 
-/// B-DNS-8 fallback of Xray's UDP retry: no usable physical resolver -> 1.1.1.1 (routing
-/// reports the warning); sing-box's own bootstrap does not depend on it.
+/// The TUN's own /30, loopback and unspecified resolvers are never used direct (routing reports
+/// the missing one); sing-box's DoH bootstrap does not depend on them.
 #[test]
-fn xray_retry_resolver_falls_back_to_cloudflare() {
+fn unusable_physical_resolvers_are_skipped() {
     let none = [
         Ipv4Addr::LOCALHOST,
         Ipv4Addr::UNSPECIFIED,
         Ipv4Addr::new(192, 168, 250, 254),
     ];
-    assert_eq!(bootstrap_resolver(&none), Ipv4Addr::new(1, 1, 1, 1));
+    assert_eq!(usable_physical_dns(&none), None);
     let phys = [Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 168, 1, 1)];
-    assert_eq!(bootstrap_resolver(&phys), Ipv4Addr::new(192, 168, 1, 1));
+    assert_eq!(
+        usable_physical_dns(&phys),
+        Some(Ipv4Addr::new(192, 168, 1, 1))
+    );
     let mut i = inputs(native(&vless("sub.example.com", None)));
     i.phys_dns = none.to_vec();
     let c = build(&i).unwrap();
@@ -504,6 +507,35 @@ fn hijack_dns() -> Value {
     json!({ "protocol": "dns", "action": "hijack-dns" })
 }
 
+/// The STUN pins (routing-dns B-X-1): sniffed protocol first, then the STUN / TURN ports.
+pub(super) fn stun_pins() -> [Value; 2] {
+    [
+        json!({ "protocol": "stun", "outbound": PROXY_OUT }),
+        json!({
+            "network": "udp", "port": [3478, 3479, 5349], "port_range": ["19302:19309"],
+            "outbound": PROXY_OUT,
+        }),
+    ]
+}
+
+/// B-X-1: WebRTC to any port reaches STUN servers through the tunnel, never through
+/// direct-out; both pins sit right after the private-destination rule, before routing's rules.
+#[test]
+fn stun_is_pinned_by_protocol_and_ports() {
+    let mut i = inputs(native(&vless("1.2.3.4", None)));
+    i.routing.domain_rules = smart_ru_parts("C:/rt").domain_rules;
+    let c = build(&i).unwrap();
+    let private = index_of(
+        &c,
+        &json!({ "ip_is_private": true, "outbound": DIRECT_OUT }),
+    );
+    let [sniffed, ports] = stun_pins();
+    let at = (index_of(&c, &sniffed), index_of(&c, &ports));
+    assert_eq!(at, (private.map(|p| p + 1), private.map(|p| p + 2)));
+    assert!(index_of(&c, &json!({ "action": "sniff" })) < at.0);
+    assert_eq!(rules(&c)[private.unwrap() + 3], i.routing.domain_rules[0]);
+}
+
 /// AT-02-008 / AT-06-001: the UDP policy of the profile as the emitter sees it.
 #[test]
 fn udp_policy_of_profiles() {
@@ -626,7 +658,7 @@ fn inbound_rules_and_exclusions() {
     }
     let private = json!({ "ip_is_private": true, "outbound": DIRECT_OUT });
     assert!(index_of(&c, &hijack_dns()).unwrap() < index_of(&c, &private).unwrap());
-    let stun = json!({ "network": "udp", "port": [19302, 3478], "outbound": PROXY_OUT });
+    let [stun, _] = stun_pins();
     assert!(index_of(&c, &private).unwrap() < index_of(&c, &stun).unwrap());
 }
 
@@ -706,7 +738,7 @@ fn routing_rules_placement() {
     i.routing.domain_rules = vec![domain.clone()];
     i.routing.process_rules = vec![direct_app.clone(), vpn_app.clone()];
     let c = build(&i).unwrap();
-    let stun = json!({ "network": "udp", "port": [19302, 3478], "outbound": PROXY_OUT });
+    let [_, stun] = stun_pins();
     assert_eq!(
         index_of(&c, &domain),
         Some(index_of(&c, &stun).unwrap() + 1)
@@ -1036,8 +1068,8 @@ fn smart_ru_fragments_placement() {
         assert!(s["path"].as_str().unwrap().ends_with(".srs"));
     }
     // The order inside the fragment (owner order: Smart RU gov rule set above user rules) is
-    // routing's; the builder keeps it verbatim, right after the STUN pin.
-    let stun = json!({ "network": "udp", "port": [19302, 3478], "outbound": PROXY_OUT });
+    // routing's; the builder keeps it verbatim, right after the STUN pins.
+    let [_, stun] = stun_pins();
     let after_stun = &rules(&c)[index_of(&c, &stun).unwrap() + 1..];
     assert_eq!(after_stun, smart_ru_parts("C:/rt").domain_rules.as_slice());
     assert!(

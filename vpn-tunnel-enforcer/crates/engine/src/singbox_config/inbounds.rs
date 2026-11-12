@@ -5,8 +5,8 @@ use serde_json::{Value, json};
 use vpnte_base::types::Loopback;
 use vpnte_winnet::adapters::{TUN_V4, TUN_V6};
 
-use super::{Capture, ConfigError, ConfigInputs, PROXY_IN, TunParams, Upstream};
-use crate::tags::{DIRECT_IN, DNS_BOOTSTRAP_IN, PROBE_IN, TUN_IN};
+use super::{Capture, ConfigError, ConfigInputs, TunParams, Upstream};
+use crate::tags::{DIRECT_IN, DNS_BOOTSTRAP_IN, PROBE_IN, PROXY_IN, TUN_IN};
 
 /// Never routed into the TUN: loopback, link-local, multicast. RFC 1918 stays in the TUN on
 /// purpose: private destinations reach `ip_is_private -> direct-out` only after DNS hijack.

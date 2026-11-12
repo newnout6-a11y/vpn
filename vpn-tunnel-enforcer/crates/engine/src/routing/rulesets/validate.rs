@@ -1,9 +1,13 @@
 //! Engine validation of a downloaded rule set: the bundled sing-box must parse it and classify
 //! known canaries the right way.
+use std::ffi::OsStr;
 use std::path::Path;
 use std::time::Duration;
 
+use vpnte_base::types::Engine;
+
 use super::GEOIP_RU;
+use crate::singbox_process::child::run_once;
 
 /// Budget of one `sing-box rule-set match` run.
 const MATCH_TIMEOUT: Duration = Duration::from_secs(20);
@@ -33,28 +37,17 @@ pub(super) async fn validate(engine: &Path, file: &Path, tag: &str) -> Option<bo
 /// `match rules.[i]: …`; an unreadable file exits non-zero. Outer `None` = the engine could
 /// not run; inner `None` = the engine rejected the file.
 async fn rule_set_match(engine: &Path, file: &Path, probe: &str) -> Option<Option<bool>> {
-    let mut cmd = tokio::process::Command::new(engine);
-    cmd.args(["rule-set", "match", "--disable-color", "-f", "binary"])
-        .arg(file)
-        .arg(probe);
-    let job = vpnte_winnet::process::app_job()
-        .map_err(|err| tracing::warn!(%err, "no job object for sing-box"))
+    // The engine runs in its own folder: a relative file name would point there.
+    let file = std::path::absolute(file).ok()?;
+    let args = ["rule-set", "match", "--disable-color", "-f", "binary"]
+        .map(OsStr::new)
+        .into_iter()
+        .chain([file.as_os_str(), OsStr::new(probe)])
+        .collect::<Vec<_>>();
+    let out = run_once(Engine::SingBox, engine, &args, None, MATCH_TIMEOUT)
+        .await
+        .map_err(|err| tracing::warn!(%err, "sing-box rule-set match did not run"))
         .ok()?;
-    let child = vpnte_winnet::process::spawn_hidden(&mut cmd, job)
-        .map_err(|err| tracing::warn!(%err, "sing-box rule-set match did not start"))
-        .ok()?;
-    // On timeout the child is dropped and killed (`kill_on_drop`).
-    let out = match tokio::time::timeout(MATCH_TIMEOUT, child.wait_with_output()).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(err)) => {
-            tracing::warn!(%err, "sing-box rule-set match failed");
-            return None;
-        }
-        Err(_) => {
-            tracing::warn!("sing-box rule-set match timed out");
-            return None;
-        }
-    };
     Some(
         out.status
             .success()

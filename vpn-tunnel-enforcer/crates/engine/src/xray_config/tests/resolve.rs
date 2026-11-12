@@ -184,6 +184,23 @@ async fn failures_fail_the_whole_plan() {
     );
 }
 
+/// The socket binds loopback only (no firewall prompt), so `ViaSingBox` accepts only a loopback
+/// resolver: anything else fails at once, nothing is sent.
+#[tokio::test]
+async fn via_sing_box_takes_only_a_loopback_resolver() {
+    let cancel = CancellationToken::new();
+    let lan: SocketAddr = "192.0.2.53:53".parse().unwrap();
+    let started = Instant::now();
+    let r = resolve_hosts(
+        &["a.example".to_owned()],
+        ResolvePath::ViaSingBox(lan),
+        &cancel,
+    )
+    .await;
+    assert_eq!(r, Err(ResolveFault::Failed));
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
 /// Spec §7 "Endpoint plan": at most 4 lookups in flight; a cancelled plan returns at once and
 /// admits nothing more. The fake resolver answers only after 150 ms without a new query, so it
 /// sees each wave of concurrent lookups whole.
