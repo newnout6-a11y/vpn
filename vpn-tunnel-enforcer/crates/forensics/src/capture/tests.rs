@@ -27,6 +27,8 @@ struct Fake {
     reclaim: AtomicBool,
     /// When set, `pktmon stop` waits for a permit.
     gate: Mutex<Option<Arc<Semaphore>>>,
+    /// When set, the start snapshot turns the manifest path into a directory: later writes fail.
+    break_manifest: AtomicBool,
 }
 
 impl Fake {
@@ -123,8 +125,13 @@ impl System for Fake {
         self.reclaim.swap(false, Ordering::SeqCst)
     }
 
-    fn snapshot(&self, _dir: PathBuf, phase: &'static str) -> BoxFuture<'static, ()> {
+    fn snapshot(&self, dir: PathBuf, phase: &'static str) -> BoxFuture<'static, ()> {
         self.calls.lock().push(format!("snapshot-{phase}"));
+        if phase == "start" && self.break_manifest.load(Ordering::SeqCst) {
+            let path = dir.join(manifest::MANIFEST_FILE);
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+        }
         Box::pin(ready(()))
     }
 }
@@ -246,6 +253,24 @@ async fn unconfirmed_stop_keeps_ownership_and_retries() {
     let m = manifest::read_manifest(&dir).unwrap();
     assert!(!m.running && m.last_error.is_none());
     assert_eq!(m.stop_reason.as_deref(), Some("vpn-stop"));
+}
+
+/// Review regression: a manifest write that fails after pktmon and ETW started must not drop
+/// the session (it returned `Err` and left both running with nothing that would stop them).
+#[tokio::test]
+async fn failed_manifest_write_keeps_the_running_session() {
+    let r = rig(config());
+    r.fake.break_manifest.store(true, Ordering::SeqCst);
+    let st = r.capture.start(ctx("a")).await.unwrap();
+    assert!(st.running && st.pktmon == PktmonState::Running);
+    // The manifest write really failed: its path is still the directory the fake put there.
+    let dir = st.session_dir.unwrap();
+    assert!(dir.join(manifest::MANIFEST_FILE).is_dir());
+    assert!(r.fake.etw_alive.load(Ordering::SeqCst));
+    let st = r.capture.stop(StopReason::VpnStop).await.unwrap();
+    assert!(!st.running && st.pktmon == PktmonState::Stopped);
+    assert_eq!(r.fake.calls("stop"), 1);
+    assert!(!marker_exists(&r));
 }
 
 /// trafficForensicsStopNative (AT-01-009/AT-08-005): the mandatory provider stop precedes the
@@ -612,19 +637,23 @@ async fn visibility_and_clear() {
     assert_eq!(r.capture.status().borrow().total_bytes, 0);
 }
 
-/// Real pktmon + ETW: start and a confirmed stop with the artefacts in place.
+/// Real pktmon + ETW: start and a confirmed stop with the artefacts in place. CI runs it on its
+/// elevated runner (`--ignored elevated_`); the stop comes before every check, so a failed check
+/// never leaves pktmon capturing.
 #[tokio::test]
-#[ignore = "needs elevation; starts a real pktmon capture (stopped by the test)"]
-async fn live_capture_start_and_stop() {
-    let root = TempDir::new("capture-live");
+#[ignore = "needs elevation"]
+async fn elevated_capture_start_and_stop() {
+    let root = TempDir::new("capture-elevated");
     let (_tx, rx) = watch::channel(config());
     let capture = Capture::new(root.path().to_path_buf(), rx, Arc::new(WindowsSystem));
-    let st = capture.start(ctx("127.0.0.1:1080")).await.unwrap();
+    let started = capture.start(ctx("127.0.0.1:1080")).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let stopped = capture.stop(StopReason::VpnStop).await;
+    let st = started.unwrap();
     assert!(st.running);
     assert_eq!(st.pktmon, PktmonState::Running, "{st:?}");
     assert_eq!(st.etw, EtwState::Running, "{st:?}");
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    let st = capture.stop(StopReason::VpnStop).await.unwrap();
+    let st = stopped.unwrap();
     assert!(!st.running && !st.cleanup_pending);
     let dir = st.session_dir.unwrap();
     for f in [

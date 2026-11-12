@@ -1,6 +1,6 @@
 # vpnte-forensics — API
 
-Traffic statistics of the TUN, the domain history («История трафика») with opt-in site names, the
+The traffic sample type and its maths, the domain history («История трафика») with opt-in site names, the
 opt-in deep packet capture (pktmon + in-process ETW consumer), the forensic session summary and the
 diagnostics ZIP («Отправить логи разработчику»). Depends on `vpnte-base`, `vpnte-core`, `vpnte-winnet`.
 
@@ -14,14 +14,18 @@ plus `vpnte_forensics::LOCALES`. Shared types from `vpnte_base`: `AppError` / `E
 dirs under the protected root), `Capture::recover_on_boot`'s `pktmon stop`, and the ETW consumer
 (`etw::EtwConsumer::start`, `reclaim_orphan`: admin or membership in «Performance Log Users»).
 Unelevated, `Capture::start` fails with `ErrorKind::Permission` (`forensics.capture.error.storage`):
-session dirs cannot be created under the protected root. Elevated, a pktmon refusal leaves the
-session ETW-only (not an error). Works without elevation: the traffic sampler (`GetIfEntry2`),
-Clash polling, the domain history, enrichment lookups, the summary (reads only) and the export
-(reads the forensics root: the user has read access, never write).
-**Runtime.** `RateSampler::start`, `ClashPoller::spawn`, `HistoryService::open`, `Enricher::{queue,
+session dirs cannot be created under the protected root (a root someone made user-writable is
+accepted as is: then pktmon refuses and the session is ETW-only or `StartFailed`). Elevated, a
+pktmon refusal leaves the session ETW-only (not an error). This build does not wire the capture
+(NOADMIN: a later, service-hosted feature). Works without elevation: Clash polling, the domain
+history, enrichment lookups, the summary (reads only) and the export (reads the forensics root:
+the user has read access, never write).
+**Runtime.** `ClashPoller::spawn`, `HistoryService::open`, `Enricher::{queue,
 spawn_tick}`, `Capture` (its ticker) and `export::export` need a tokio runtime. Blocking calls (put
 them on `spawn_blocking`): `EtwConsumer::{start, stop}`, `summary::{summarize, write,
-summarize_and_write}`, `Capture::sessions`, everything in `capture::{store, manifest}`.
+summarize_and_write}`, `Capture::sessions`, everything in `capture::{store, manifest}`. `Capture`
+itself moves the heavy work (ETW start / stop, snapshots, «clear») to blocking threads; its
+transitions still write manifests and list session dirs on the runtime (small files, rare).
 **Files.** Data dir (through `Store`): `history/traffic-domains.json` (`DomainsDoc`),
 `cache/domain-info.json` (`EnrichmentDoc`), `forensics.json` (`CapturePrefs`). Capture root:
 `%ProgramData%\VPN Tunnel Enforcer\forensics\` (`capture.owned` marker, `sessions\<id>\`).
@@ -37,54 +41,40 @@ ru/en parity, placeholders and that every key named in the code exists):
 
 | Keys | Args | Returned by |
 | --- | --- | --- |
-| `forensics.traffic.invalidAdapter` | — | `TunIf::new` (`Validation`) |
 | `forensics.history.sourceUnavailable` | — | `SourceHealth::warning()` (history page banner) |
 | `forensics.capture.error.{consentRequired,stopUnconfirmed,startFailed,storage}` | — | `From<CaptureError> for AppError`; `stopUnconfirmed` / `startFailed` also as `CaptureStatus::last_error` |
 | `forensics.capture.warn.{onlyLifecycle,etlEmpty,etwFailed,quota,pktmonUnavailable}` | — | `CaptureStatus::warnings` |
 | `forensics.capture.warn.{eventsLost,unparsed}` | `count` | `CaptureStatus::warnings` |
-| `forensics.capture.engine.{etw,poller}` | — | `capture::status::engine_label` |
 | `forensics.summary.check.<camelCase check>` | — | `summary::Check::label` |
 | `forensics.summary.finding.{detected,notDetected,unknown}` | — | `summary::Finding::label` |
 | `forensics.summary.warning.<camelCase warning>` | — | `summary::SummaryWarning::label` |
 | `forensics.export.stage.{preparing,settings,logs,system,runtime,recovery,snapshots,forensics,finishing}` | — | `export::ExportStage::label` |
-| `forensics.export.saved` | `name` | `ExportResult::saved_msg` («Диагностика сохранена: …») |
 | `forensics.export.cleanupFailed.{title,body}` | — | the `Notice` sent to `ExportRequest::notices` |
 | `forensics.export.{dialogTitle,zipFilter}` | — | not returned: for the UI's save dialog |
 
 **Pushed state the app must forward** (all `tokio::sync::watch`, no broadcast events):
-`RateSampler::subscribe()` (`TrafficStats`, 1 Hz), `HistoryService::{health(), changes()}`,
+`HistoryService::{health(), changes()}`,
 `Enricher::changes()`, `Capture::status()` (on transitions + every 5 s while running), the export's
 `ExportRequest::progress` sender, plus `NoticeSink` notices of a failed export cleanup.
 
-## traffic — 1 Hz TUN speed sampler
+## traffic — the published traffic sample and its maths
 ```rust
-pub const SAMPLE_INTERVAL: Duration;   // 1 s after the previous read settled (reads never overlap)
+pub const SAMPLE_INTERVAL: Duration;   // 1 s between samples
 pub const SMOOTHING_ALPHA: f64;        // 0.35          pub const BURSTINESS_WINDOW: usize;   // 5
-pub const LIVE_TRAFFIC_BPS: f64;       // 1024 B/s: "live traffic" threshold
-pub struct TunIf { pub alias: String, pub luid: u64 }              // read by LUID; alias is display only
-impl TunIf { pub fn new(alias: &str, luid: u64) -> AppResult<Self>; } // Validation forensics.traffic.invalidAdapter
 #[derive(Clone, Default, PartialEq, Serialize)] #[serde(rename_all = "camelCase")]
 pub struct TrafficStats { pub ts_ms: UnixMs, pub running: bool, pub adapter: String, pub adapter_found: bool,
     pub down_bps: f64, pub up_bps: f64, pub smooth_down_bps: f64, pub smooth_up_bps: f64,
     pub down_burst_pct: u16, pub up_burst_pct: u16,          // 0..=999 %
-    pub total_down: u64, pub total_up: u64,                  // adapter counters
-    pub session_down: u64, pub session_up: u64,              // since start(); survive an adapter reset
+    pub total_down: u64, pub total_up: u64,                  // totals of the current source (engine run)
+    pub session_down: u64, pub session_up: u64,              // since the session start; survive restarts
     pub peak_down_bps: f64, pub peak_up_bps: f64, pub started_at_ms: Option<UnixMs> }
-impl TrafficStats { pub fn empty(adapter: &str, now: UnixMs) -> Self;
-                    pub fn shows_live_traffic(&self) -> bool; }   // proxy-down recovery rule
-pub fn recent_traffic(stats: &TrafficStats, last_traffic_ms: UnixMs, now: UnixMs, max_age_ms: i64) -> bool; // watchdog, traffic part
+impl TrafficStats { pub fn empty(adapter: &str, now: UnixMs) -> Self; }
 pub fn smooth(prev: f64, cur: f64, alpha: f64) -> f64;   pub fn burstiness(xs: &[f64]) -> u16;
-pub struct RateSampler;   // Default
-impl RateSampler {
-    pub fn new() -> Self;                                       // stopped; GetIfEntry2 via vpnte_winnet::counters
-    pub fn subscribe(&self) -> watch::Receiver<TrafficStats>;
-    pub fn current(&self) -> TrafficStats;                      // read the ending session BEFORE stop()
-    pub fn is_running(&self) -> bool;
-    pub fn last_traffic_ms(&self) -> UnixMs;                    // 0 = no bytes since start
-    pub fn start(&self, tun: watch::Receiver<Option<TunIf>>);   // idempotent; follows the published TUN
-    pub fn stop(&self);                                         // resets, publishes TrafficStats::empty
-}
 ```
+The sampler itself lives in the app (`svc_tunnel::traffic::Meter`, engine Clash API totals for both
+captures). The TUN-counter `RateSampler` / `TunIf` / `recent_traffic` /
+`TrafficStats::shows_live_traffic` / `LIVE_TRAFFIC_BPS` were removed in the crate review
+(2026-11-12): nothing used them, and a Soft session has no TUN adapter to read.
 
 ## connections — Clash API `/connections` client
 ```rust
@@ -282,7 +272,7 @@ pub mod store { DEFAULT_QUOTA_MB /* 8192 */, QUOTA_MB /* (1024, 65536) */, fn de
 pub mod pktmon { ETL_FILE, PCAPNG_FILE, COUNTERS_FILE, DROP_COUNTERS_FILE, START/STOP/COLLECT_TIMEOUT, TRACE_PROVIDERS,
     start_args, stop_args, counters_args, etl2pcap_args, exe(), run(args, timeout), etl_released,
     Outcome { code: Option<i32>, stdout, stderr } + success() / detail() }
-pub mod status { WARM_UP_MS, HealthInput, liveness_and_warnings, engine_label }
+pub mod status { WARM_UP_MS, HealthInput, liveness_and_warnings }   // engine names are labelled by the UI
 ```
 Session dir: `session-manifest.json`, `pktmon.etl` (whole packets, never exported), `events.ndjson`
 (+ `.prev`), `network-{start,stop,live}.json`, `sockets-{start,stop,live}.json`, `app-events.ndjson`,
@@ -342,7 +332,6 @@ pub struct RecoveryArtifact { pub artifact: String, pub file: String, pub read: 
 pub struct ExportRequest { pub dest: PathBuf, pub inputs: ExportInputs, pub source: Source,
     pub progress: watch::Sender<ExportProgress>, pub notices: Option<NoticeSink> }
 pub struct ExportResult { pub path: PathBuf, pub entries: usize, pub excluded: Vec<String>, pub forensics_session: Option<String> }
-impl ExportResult { pub fn saved_msg(&self) -> Msg; }
 pub fn default_file_name(now: UnixMs) -> String;   // vpn-tunnel-enforcer-diagnostics-2026-11-11T07-20-30-123Z.zip
 pub async fn export(ops: &OperationRegistry, request: ExportRequest) -> AppResult<ExportResult>;
 ```
@@ -360,7 +349,6 @@ name becomes `<user>`.
 ## Main flows (app wiring)
 ```rust
 // start-up (inside the runtime)
-let sampler = Arc::new(RateSampler::new());
 let history = Arc::new(HistoryService::open(Arc::new(Store::<DomainsDoc>::open(&dirs.root)), Some(rule_hit_hook)));
 let enricher = Enricher::open(Arc::new(Store::<EnrichmentDoc>::open(&dirs.root)));
 enricher.spawn_tick(history.clone(), enrich_inputs_rx, app_cancel.clone()); // inputs: setting + route (see enrichment)
@@ -372,7 +360,6 @@ if elevated { capture.recover_on_boot(Some(&dirs.legacy_electron)).await; }   //
 // legacy import (once, by the app): DomainsDoc::from_legacy(&old_traffic_domains), EnrichmentDoc::from_legacy(&old_domain_intelligence)
 
 // protection established (not on engine auto-restarts)
-sampler.start(tun_rx);                                   // tunnel publishes Some(TunIf::new(&alias, luid)?) per wait_owned_tun
 history.set_server_hosts(all_server_hosts);              // also whenever the server list changes
 history.start_polling(&ClashEndpoint { port, secret })?; // each sing-box run; feed every engine line:
 history.observe_log_line(line);
@@ -380,7 +367,6 @@ capture.start(SessionCtx { mode, target }).await?;       // Ok(enabled: false) w
 capture.record(ForensicEvent { kind: ForensicEventKind::TunStarted, details: json!({ /* … */ }) });
 
 // protection ends
-let session_stats = sampler.current(); sampler.stop();
 let st = capture.stop(StopReason::VpnStop).await?;       // BEFORE engine teardown; StopUnconfirmed → retry later
 history.stop_polling().await?;
 if let Some(dir) = st.session_dir.filter(|_| !st.running) {
@@ -395,7 +381,6 @@ if let Some(dir) = st.session_dir.filter(|_| !st.running) {
 let (progress, progress_rx) = watch::channel(ExportProgress::default());
 let req = ExportRequest { dest, inputs, source: Source::Ui, progress, notices: Some(notice_sink) };
 let done = export::export(&ops, req).await?;             // UI: stage.label(), step()/ExportStage::COUNT
-notify(done.saved_msg());
 ```
 Engine requirement (engine crate): sing-box `log.level = "info"`, `timestamp: true`, `disable_color:
 true`, output on the pipe; Clash API on 127.0.0.1 with a per-run secret.
@@ -407,8 +392,11 @@ true`, output on the pipe; Clash API on 127.0.0.1 with a per-run secret.
   (timeline / flows / tcp-health), retention auto-prune (quota → ETW-only; the user clears),
   `vpnIp` / `sniffHost` per history entry, log-file tailing. `CaptureStatus` carries no summary: the
   app runs `summarize_and_write` after a stop.
-- Not run here (need elevation): `capture::tests::live_capture_start_and_stop` (real pktmon),
-  `etw::tests::live_*` (ignored in CI; run once by hand unelevated as a Performance Log User);
-  the real `pktmon counters --json` layout (TUN-path search is structural); `RateSampler` against a
-  real TUN; Clash polling against a real sing-box (mock server used). `enrichment::tests::
-  live_lookup_of_example_com` needs internet (ignored).
+- Not run here (need elevation; CI runs them with `-- --ignored elevated_`):
+  `capture::tests::elevated_capture_start_and_stop` (real pktmon), `etw::tests::elevated_*` (run
+  once by hand unelevated as a Performance Log User); the real `pktmon counters --json` layout
+  (TUN-path search is structural); Clash polling against a real sing-box (mock server used).
+  `enrichment::tests::live_lookup_of_example_com` needs internet (ignored).
+- Not wired by the app in this build: `Capture` / `etw` / `summary` (no packet capture), `Enricher`
+  (the setting exists, no lookups run), `HistoryService::observe_log_line` (the runtime exposes no
+  engine lines).

@@ -34,7 +34,6 @@
     "export": {
       "dialogTitle": "Save diagnostics",
       "zipFilter": "ZIP archive",
-      "saved": "Diagnostics saved: {{name}}",
       "cleanupFailed": {
         "title": "Diagnostics cleanup not finished",
         "body": "Temporary files of the diagnostics archive may have been left on disk."

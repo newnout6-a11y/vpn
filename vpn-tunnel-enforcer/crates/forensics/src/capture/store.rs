@@ -169,20 +169,25 @@ pub fn list_artifacts(dir: &Path) -> Vec<ArtifactFile> {
         .flatten()
         .filter_map(|e| {
             let meta = e.metadata().ok().filter(|m| m.is_file())?;
-            let mtime_ms = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as UnixMs);
             Some(ArtifactFile {
                 name: e.file_name().to_string_lossy().into_owned(),
                 size: meta.len(),
-                mtime_ms,
+                mtime_ms: mtime_ms(&meta),
             })
         })
         .collect();
     files.sort_by(|a, b| a.name.cmp(&b.name));
     files
+}
+
+/// Modification time in Unix milliseconds.
+pub(crate) fn mtime_ms(meta: &std::fs::Metadata) -> Option<UnixMs> {
+    let since = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    UnixMs::try_from(since.as_millis()).ok()
 }
 
 /// `(id, dir)` of every session directory with a valid id, in directory order.

@@ -633,8 +633,6 @@ mod ops {
         assert_eq!(progress.entries as usize, entries.len());
         assert!(progress.bytes > 0);
         assert_eq!(partials(tmp.path()), 0);
-        let saved = Msg::new("forensics.export.saved").arg("name", "diag.zip");
-        assert_eq!(result.saved_msg(), saved);
         assert!(!ops.is_busy(RESOURCE));
     }
 

@@ -245,14 +245,8 @@ fn snapshots(a: &mut Archive, dir: &Path, now: UnixMs) -> AppResult<()> {
         .filter_map(|e| {
             let meta = e.metadata().ok().filter(|m| m.is_file())?;
             let name = e.file_name().to_str()?.to_string();
-            name.to_ascii_lowercase().ends_with(".json").then(|| {
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as UnixMs);
-                (name, mtime)
-            })
+            let json = name.to_ascii_lowercase().ends_with(".json");
+            json.then(|| (name, store::mtime_ms(&meta)))
         })
         .collect();
     for name in select_snapshots(&found, now) {

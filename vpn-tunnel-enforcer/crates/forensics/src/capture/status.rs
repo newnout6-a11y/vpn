@@ -117,16 +117,6 @@ pub fn liveness_and_warnings(i: &HealthInput) -> (bool, bool, Vec<Msg>) {
     (warming_up, only_lifecycle, warnings)
 }
 
-/// UI label key of an ETW engine name (old imported sessions keep their labels, DC:154-160).
-pub fn engine_label(engine: &str) -> Option<Msg> {
-    let key = match engine {
-        crate::etw::ENGINE | "ferrisetw-realtime" => "forensics.capture.engine.etw",
-        "powershell-poller" => "forensics.capture.engine.poller",
-        _ => return None,
-    };
-    Some(Msg::new(key))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,14 +218,5 @@ mod tests {
             .map(|m| m.key.into())
             .collect();
         assert_eq!(keys, ["forensics.capture.warn.quota"]);
-        assert_eq!(
-            engine_label("etw-inproc").unwrap().key,
-            "forensics.capture.engine.etw"
-        );
-        assert_eq!(
-            engine_label("powershell-poller").unwrap().key,
-            "forensics.capture.engine.poller"
-        );
-        assert_eq!(engine_label("x"), None);
     }
 }

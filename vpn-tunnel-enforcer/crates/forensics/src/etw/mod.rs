@@ -186,16 +186,18 @@ mod tests {
     }
 
     /// AT-08-003: graceful stop; the final `stopped` row is written after the trace stopped.
+    /// Stops before any check, so a failed check never leaves the session behind.
     #[test]
     #[ignore = "needs elevation"]
-    fn live_consumer_writes_rows_and_stops_gracefully() {
-        let dir = TempDir::new("etw-live");
+    fn elevated_consumer_writes_rows_and_stops_gracefully() {
+        let dir = TempDir::new("etw-elevated");
         let consumer = EtwConsumer::start(dir.path(), "live-test").unwrap();
         // Some DNS traffic for the DNS-Client provider.
         let _ = std::net::ToSocketAddrs::to_socket_addrs(&("example.com", 443));
         std::thread::sleep(Duration::from_secs(3));
-        assert!(consumer.is_running());
+        let was_running = consumer.is_running();
         let stats = consumer.stop("test");
+        assert!(was_running);
         assert!(stats.clean);
         // ControlTraceW QUERY answered for the live session (F-106 counters present).
         assert!(stats.loss.is_some(), "{stats:?}");
@@ -212,7 +214,7 @@ mod tests {
     /// AT-08-004: a session left behind by a killed consumer is reclaimed (and logged) by name.
     #[test]
     #[ignore = "needs elevation"]
-    fn live_orphan_is_reclaimed() {
+    fn elevated_orphan_is_reclaimed() {
         let dir = TempDir::new("etw-orphan");
         let digest = Arc::new(LiveDigest::default());
         let w = RowWriter::spawn(

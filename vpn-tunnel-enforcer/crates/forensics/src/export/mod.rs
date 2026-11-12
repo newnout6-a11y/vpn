@@ -154,18 +154,6 @@ pub struct ExportResult {
     pub forensics_session: Option<String>,
 }
 
-impl ExportResult {
-    /// «Диагностика сохранена: <file>».
-    pub fn saved_msg(&self) -> Msg {
-        let name = self
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        Msg::new("forensics.export.saved").arg("name", name)
-    }
-}
-
 /// Default file name: `vpn-tunnel-enforcer-diagnostics-<UTC ISO, ':' and '.' → '-'>.zip`.
 pub fn default_file_name(now: UnixMs) -> String {
     let iso = crate::etw::writer::rfc3339_ms(now).replace([':', '.'], "-");

@@ -104,27 +104,28 @@ impl Shared {
             }
         }
         self.system.snapshot(dir.clone(), "start").await;
+        // From here on a capture may be running: a failed manifest write is only logged, an early
+        // return would drop the session and leave pktmon / ETW running with nothing to stop them.
         if session.manifest.pktmon != PktmonState::Running && session.etw.is_none() {
             let detail = format!(
                 "pktmon: {:?} | etw: {:?}",
                 session.manifest.pktmon, session.manifest.etw
             );
             session.manifest.last_error = Some(detail.clone());
+            session.manifest.stop_reason = Some(START_FAILED.into());
             if session.owns_pktmon {
                 // A timed-out pktmon start may still be capturing: keep it stoppable.
-                session.manifest.stop_reason = Some(START_FAILED.into());
-                manifest::write_manifest(&dir, &session.manifest)?;
+                self.save(&session);
                 inner.state = State::StopUnconfirmed(session);
             } else {
                 session.manifest.running = false;
                 session.manifest.stopped_at = Some(now_ms());
-                session.manifest.stop_reason = Some(START_FAILED.into());
-                manifest::write_manifest(&dir, &session.manifest)?;
+                self.save(&session);
                 inner.state = State::Stopped(session);
             }
             return Err(CaptureError::StartFailed(detail));
         }
-        manifest::write_manifest(&dir, &session.manifest)?;
+        self.save(&session);
         self.open_app_events(&dir);
         inner.state = State::Running(session);
         Ok(())

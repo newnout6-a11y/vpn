@@ -15,10 +15,6 @@
         "unparsed": "Events without a schema: {{count}}.",
         "quota": "Capture storage limit reached: recording events only. Clear diagnostics to capture packets again.",
         "pktmonUnavailable": "pktmon did not start: recording ETW events only."
-      },
-      "engine": {
-        "etw": "ETW real-time",
-        "poller": "poller (fallback)"
       }
     }
   }

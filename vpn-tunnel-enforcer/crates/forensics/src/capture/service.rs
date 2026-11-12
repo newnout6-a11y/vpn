@@ -1,6 +1,6 @@
 //! The capture service: every transition runs under one async mutex, the status is pushed on a
 //! `watch` channel, app events go to the running session's `app-events.ndjson`.
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -229,10 +229,17 @@ impl Capture {
             let mut inner = shared.inner.lock().await;
             let reason = StopReason::ManualClear;
             let result = shared.stop_locked(&mut inner, reason.as_str()).await;
-            let report = result.map(|()| {
-                inner.state = State::Idle;
-                store::remove_sessions(&shared.root)
-            });
+            let report = match result {
+                Ok(()) => {
+                    inner.state = State::Idle;
+                    // Gigabytes of captures: deleting them is no work for a runtime thread.
+                    let root = shared.root.clone();
+                    tokio::task::spawn_blocking(move || store::remove_sessions(&root))
+                        .await
+                        .map_err(|e| CaptureError::Io(io::Error::other(e)))
+                }
+                Err(e) => Err(e),
+            };
             shared.publish(&mut inner);
             report
         })
