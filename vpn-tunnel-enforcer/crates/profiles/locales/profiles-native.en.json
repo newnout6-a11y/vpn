@@ -1,7 +1,7 @@
 {
   "profiles": {
     "deeplink": {
-      "encryptedHapp": "This is an encrypted Happ subscription ({{variant}}). VPNTE cannot decrypt it — ask your provider for a regular subscription URL (https://…) or a vless:// link.",
+      "encryptedHapp": "This is an encrypted Happ link ({{variant}}): only Happ opens it. Your provider has the plain subscription link. Open the subscription page you took this link from in a browser: with Remnawave panels the address of that page is the subscription link, so copy it here. The https link is also often in the provider's account page or bot. If it is nowhere, ask the provider for the plain link.",
       "encryptedMantaray": "This is an encrypted MantaRay subscription (mantaray://{{variant}}/...). VPNTE cannot decrypt it without the MantaRay app's keys. Ask your provider for a regular subscription URL (https://...) or a direct key link (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
       "encrypted": "This is an encrypted {{app}} link ({{variant}}). VPNTE cannot decrypt it — ask your provider for a regular subscription URL (https://…) or a protocol key (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
       "routingProfile": "This is a Happ routing rule (happ://routing/…), not a VPN subscription. Paste a subscription link or a protocol key (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",

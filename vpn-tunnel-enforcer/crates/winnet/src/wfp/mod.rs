@@ -102,9 +102,6 @@ mod tests {
         let ip = ExceptionTarget::Ip(parse_ip_or_cidr("1.0.0.0/1").unwrap());
         used.extend(broad_warning(&ip).map(|m| m.key.into_owned()));
         for key in [
-            "blockedTitle",
-            "blockedStrict",
-            "blockedStandard",
             "exceptionSkippedTitle",
             "exceptionSkipped",
             "unverifiedTitle",

@@ -214,6 +214,9 @@ impl DemoSettingsApi {
                 ]
             },
             firewall_blocks_outbound: failures,
+            hyperv_unfiltered: failures,
+            // The demo has no helper service: "Always" shows as unavailable.
+            always_available: false,
         };
         let servers = vec![
             server(

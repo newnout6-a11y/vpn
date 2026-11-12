@@ -47,6 +47,8 @@ struct Target {
     tun_luid: Option<u64>,
     session: Vec<PathBuf>,
     tun_addrs: Vec<IpAddr>,
+    /// The session's TUN was up once: "If the VPN drops" blocks from here until `disconnected()`.
+    armed: bool,
 }
 
 struct Inner {
@@ -57,6 +59,10 @@ struct Inner {
     tun_luid: Option<u64>,
     session: Vec<PathBuf>,
     tun_addrs: Vec<IpAddr>,
+    armed: bool,
+    /// "Always" can be kept safe (the helper service owns the filters); otherwise a stored
+    /// `strict` works as `standard` and nothing persistent is installed.
+    always_available: bool,
     /// Our filters in the dynamic session.
     dynamic: Installed,
     /// The last dynamic change failed or the read-back differed: `dynamic` is in doubt.
@@ -79,10 +85,6 @@ fn same_ids(seen: &[u64], installed: &[(FilterSpec, u64)]) -> bool {
     seen.sort_unstable();
     ours.sort_unstable();
     seen == ours
-}
-
-fn blocked(body: &'static str) -> Notice {
-    Notice::new(Level::Warn, "winnet.wfp.notice.blockedTitle").body(body)
 }
 
 fn persist_failed(e: vpnte_base::AppError) -> ProtectionError {
@@ -111,6 +113,8 @@ impl Protection {
             tun_luid: None,
             session: Vec::new(),
             tun_addrs: Vec::new(),
+            armed: false,
+            always_available: false,
             dynamic: Vec::new(),
             dynamic_dirty: false,
             persistent: None,
@@ -139,12 +143,35 @@ impl Protection {
     }
 
     /// Whether a TUN session under the current settings has IPv6 and DNS outside the TUN
-    /// blocked by our filters (kill switch standard / strict, or leak protection). The tunnel
-    /// builds a dual-stack TUN with `dns_mode: native` exactly then, otherwise an IPv4-only TUN
-    /// with `hijack` (review D1 / D2); read it at connect, a change applies from the next one.
+    /// blocked by our filters (kill switch on, or leak protection). The tunnel builds a
+    /// dual-stack TUN with `dns_mode: native` exactly then, otherwise an IPv4-only TUN with
+    /// `hijack` (review D1 / D2); read it at connect, a change applies from the next one.
     pub fn session_guarded(&self) -> bool {
         let g = self.inner.lock();
-        g.settings.level != KillSwitchLevel::Off || g.settings.leak_protection
+        g.level_in_force() != KillSwitchLevel::Off || g.settings.leak_protection
+    }
+
+    /// The level the filters enforce: a stored `strict` works as `standard` until
+    /// [`Protection::set_always_available`] says "Always" can be kept safe.
+    pub fn level_in_force(&self) -> KillSwitchLevel {
+        self.inner.lock().level_in_force()
+    }
+
+    /// Set by the helper-service wiring: "Always" (persistent filters) is enforced only while
+    /// something owns them across exit and reboot. Off by default: an app run as administrator
+    /// creates no persistent filters, and leftovers of an earlier strict run are removed.
+    pub fn set_always_available(&self, available: bool) -> Result<(), ProtectionError> {
+        let mut g = self.inner.lock();
+        if g.always_available == available {
+            return Ok(());
+        }
+        g.always_available = available;
+        let t = g.target();
+        let persistent_first = g.level_in_force() == KillSwitchLevel::Strict;
+        let (d, skipped) = g.plan(&t)?;
+        g.sync(&d, persistent_first)?;
+        self.note_skipped(&mut g, skipped);
+        Ok(())
     }
 
     fn notify(&self, notice: Notice) {
@@ -166,8 +193,9 @@ impl Protection {
         g.skipped = skipped;
     }
 
-    /// At app start, after the settings import and the legacy cleanup: installs the strict set,
-    /// or removes persistent leftovers when the level is not strict.
+    /// At app start, after the settings import and the legacy cleanup: installs the "Always"
+    /// set where it is in force, otherwise removes persistent leftovers (an earlier strict run,
+    /// a crash). Quiet: the start page shows what the kill switch does.
     pub fn startup(&self) -> Result<(), ProtectionError> {
         let mut g = self.inner.lock();
         let mut t = g.target();
@@ -175,20 +203,20 @@ impl Protection {
         t.tun_luid = None;
         t.session.clear();
         t.tun_addrs.clear();
+        t.armed = false;
         let skipped = g.transition(t, true)?;
         self.note_skipped(&mut g, skipped);
-        if g.settings.level == KillSwitchLevel::Strict {
-            self.notify(blocked("winnet.wfp.notice.blockedStrict"));
-        }
         Ok(())
     }
 
-    /// Before any engine is spawned (TUN sessions only; Soft mode never calls it): engages the
-    /// kill switch or leak protection (DNS outside the TUN blocked from here on), permits the
-    /// per-session programs (canonical paths of the local-proxy owner executables) and the TUN's
-    /// fixed local addresses (`adapters::TUN_V4`, plus `TUN_V6` when dual-stack), so traffic
-    /// routed into the TUN before [`Protection::tun_up`] is not refused. An error means the
-    /// connect must be refused.
+    /// Before any engine is spawned (TUN sessions only; Soft mode never calls it): engages leak
+    /// protection (DNS outside the TUN blocked from here on), permits the per-session programs
+    /// (canonical paths of the local-proxy owner executables) and the TUN's fixed local
+    /// addresses (`adapters::TUN_V4`, plus `TUN_V6` when dual-stack), so traffic routed into the
+    /// TUN before [`Protection::tun_up`] is not refused. "If the VPN drops" blocks everything
+    /// only once a TUN of this session was up: a first connect that never comes up leaves the
+    /// internet alone, a reconnect (planned or after a drop) keeps the block with no gap. An
+    /// error means the connect must be refused.
     pub fn connect_begin(
         &self,
         session_programs: &[PathBuf],
@@ -206,19 +234,21 @@ impl Protection {
     }
 
     /// The TUN is up (`luid` = `adapters::OwnedTun::luid` from `wait_owned_tun`); a new
-    /// LUID after an engine restart replaces the old permit. An error means the connect must be
-    /// aborted.
+    /// LUID after an engine restart replaces the old permit. Arms "If the VPN drops". An error
+    /// means the connect must be aborted.
     pub fn tun_up(&self, luid: u64) -> Result<(), ProtectionError> {
         let mut g = self.inner.lock();
         let mut t = g.target();
         t.conn = Conn::Up;
         t.tun_luid = Some(luid);
+        t.armed = true;
         let skipped = g.transition(t, false)?;
         self.note_skipped(&mut g, skipped);
         Ok(())
     }
 
-    /// The TUN went away unexpectedly: the blocks stay until the user disconnects.
+    /// The TUN went away unexpectedly: an armed block stays until the user disconnects (the
+    /// tunnel's paused state tells the user; no notice from here).
     pub fn tun_lost(&self) -> Result<(), ProtectionError> {
         let mut g = self.inner.lock();
         if !g.conn.in_session() {
@@ -227,17 +257,13 @@ impl Protection {
         let mut t = g.target();
         t.conn = Conn::Dropped;
         t.tun_luid = None;
-        let result = g.transition(t, true);
-        if g.settings.level == KillSwitchLevel::Standard {
-            self.notify(blocked("winnet.wfp.notice.blockedStandard"));
-        }
-        let skipped = result?;
+        let skipped = g.transition(t, true)?;
         self.note_skipped(&mut g, skipped);
         Ok(())
     }
 
-    /// The session ended (user stop, failed start, or "Disable protection" after a drop): the
-    /// dynamic set goes; a strict set stays and says so.
+    /// The session ended (user stop, failed start, or "Continue without VPN" after a drop): the
+    /// dynamic set goes; an "Always" set stays.
     pub fn disconnected(&self) -> Result<(), ProtectionError> {
         let mut g = self.inner.lock();
         let mut t = g.target();
@@ -245,17 +271,13 @@ impl Protection {
         t.tun_luid = None;
         t.session.clear();
         t.tun_addrs.clear();
-        let result = g.transition(t, true);
-        let strict_on = g.persistent.as_ref().is_some_and(|p| !p.is_empty());
-        if g.settings.level == KillSwitchLevel::Strict && strict_on {
-            self.notify(blocked("winnet.wfp.notice.blockedStrict"));
-        }
-        let skipped = result?;
+        t.armed = false;
+        let skipped = g.transition(t, true)?;
         self.note_skipped(&mut g, skipped);
         Ok(())
     }
 
-    /// App exit: closes the dynamic session, so BFE removes its filters; strict stays.
+    /// App exit: closes the dynamic session, so BFE removes its filters; "Always" stays.
     pub fn shutdown(&self) {
         let mut g = self.inner.lock();
         g.drop_dynamic();
@@ -263,6 +285,7 @@ impl Protection {
         g.tun_luid = None;
         g.session.clear();
         g.tun_addrs.clear();
+        g.armed = false;
     }
 }
 

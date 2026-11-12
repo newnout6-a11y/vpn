@@ -93,6 +93,9 @@ messages to show.
 | `shutdown(budget)` | app-main (Tray `quit`) |
 | `proxies()` | Panels proxy column and actions (`api_dashboard/proxies.rs`), Servers `start_proxies`; `None` = the column stays empty, actions answer `Conflict` |
 | `live_checks()` | Servers `live_check` / `live_history` / `live_batch` (`api_servers/live.rs`); `None` = `Conflict` `app.servers.liveUnavailable` |
+| `kill_switch_view()` | ks-a: Dashboard `pause` / `no_pause_vpn` strips, Tray `paused` (default: never paused) |
+| `retry_now()` | ks-a: Dashboard / Tray «Подключить» in the paused state; `false` = nothing paused, then a plain connect |
+| `always_available()` | ks-a: Settings kill switch ("Always" offered only with the helper service), maintenance repair (default `false`) |
 
 ## What `app-tunnel` must provide (`svc_tunnel::build(&Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>>`)
 - Every method above, exactly as documented on the trait. Runs inside the tokio runtime.
@@ -107,7 +110,7 @@ messages to show.
 - The lifecycle's collaborators: `ProfileSource` over `backend.servers`, `SoftProxy`,
   `Monitor` (public-IP monitor), `Forensics` (traffic sampler + domain history, no capture), the
   external proxy slots as `ExternalProxies` (`svc_proxies`, built in `build`: a VPN stop stops
-  the unleased slots), and `backend.notifier` as the lifecycle `Notifier` (it implements
+  every slot), and `backend.notifier` as the lifecycle `Notifier` (it implements
   `vpnte_tunnel::lifecycle::Notifier`). The tweak journal (`tweaks::Journal`) and the domain
   history (`forensics::domains::HistoryService`, needs a runtime) are opened by app-tunnel, once.
 - The tunnel's peers (package wire-proxies-live): `build` also starts the slots' manager with the

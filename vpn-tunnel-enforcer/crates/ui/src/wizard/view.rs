@@ -149,8 +149,6 @@ pub fn Wizard() -> Element {
     let skipping = busy && applying() == Apply::Skip;
     let finish_blocked = if check.running() {
         Some(t!("ui.wizard.done.waitCheck"))
-    } else if model.read().strict_needs_tunnel() {
-        Some(t!("ui.wizard.protection.strictNeedsTunnel"))
     } else {
         None
     };

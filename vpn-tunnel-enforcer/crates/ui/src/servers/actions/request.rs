@@ -51,6 +51,28 @@ impl Actions {
         });
     }
 
+    /// A fresh device ID for subscription `id` (`own`), or this PC's again; the next refresh
+    /// sends it.
+    pub fn set_own_device_id(&self, id: &str, own: bool) {
+        let (store, toasts, api) = (self.store, self.toasts, self.api.clone());
+        if store.busy.peek().get(id).is_some_and(|b| b.policy) {
+            return;
+        }
+        let id = id.to_owned();
+        store.group_busy(&id, |b| b.policy = true);
+        self.spawn(async move {
+            let result = api.set_own_device_id(&id, own).await;
+            store.group_busy(&id, |b| b.policy = false);
+            if let Err(err) = result {
+                toast_error(
+                    toasts,
+                    translate_now("ui.servers.request.failed", &[]),
+                    &err,
+                );
+            }
+        });
+    }
+
     /// Saves the dialog's header draft (`clear`: removes every header instead); the dialog stays
     /// open with the names now set, or shows the field error.
     pub fn save_headers(&self, clear: bool) {

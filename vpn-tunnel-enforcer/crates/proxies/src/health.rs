@@ -30,8 +30,6 @@ pub struct Timing {
     pub cooldowns: [Duration; 3],
     /// Re-probe after a failure that does not count (the route answered).
     pub recheck: Duration,
-    /// Re-probe of a leased slot whose automatic stop is blocked.
-    pub leased_recheck: Duration,
     /// A transport hint in the engine log pulls the next probe this close...
     pub hint_delay: Duration,
     /// ...at most once per this interval, so a noisy client app cannot cause probe storms.
@@ -50,7 +48,6 @@ impl Default for Timing {
             success_stagger: ms(250),
             cooldowns: [s(15), s(30), s(60)],
             recheck: s(60),
-            leased_recheck: s(300),
             hint_delay: s(15),
             hint_spacing: s(30),
         }
@@ -83,33 +80,10 @@ pub enum Next {
     /// No scheduled probe: a degraded identity waits for a rotate, a start or a probe someone
     /// asks for (`check_health`, prewarm, the stale-probe side effect of `instances`).
     Park,
-    /// The failure budget is spent: stop the slot (a leased one is blocked instead).
+    /// The failure budget is spent: stop the slot.
     Disable,
     /// The slot's own listener refused: kill the engine (it may hang while holding the port).
     Kill,
-}
-
-/// How a duplicate egress IP is resolved (spec 3.17): a leased route is never taken away from
-/// its consumer; otherwise the lowest-numbered slot keeps the IP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Duplicate {
-    /// This slot is quarantined; `keeper` holds the IP.
-    Quarantine { keeper: Slot },
-    /// This slot is leased and keeps the IP; the unleased `peer` is quarantined.
-    QuarantinePeer(Slot),
-}
-
-/// Picks who keeps a duplicate IP. `dups` = the other healthy slots on the same IP, in slot
-/// order, with whether each is leased.
-pub fn resolve_duplicate(self_leased: bool, dups: &[(Slot, bool)]) -> Option<Duplicate> {
-    let lowest = dups.iter().map(|(slot, _)| *slot).min()?;
-    let leased_peer = dups.iter().find(|(_, leased)| *leased).map(|(s, _)| *s);
-    Some(match leased_peer {
-        None if self_leased => Duplicate::QuarantinePeer(lowest),
-        peer => Duplicate::Quarantine {
-            keeper: peer.unwrap_or(lowest),
-        },
-    })
 }
 
 /// Engine output that hints at a dying route (old `recordExternalProxyTransportSignal` regex).
@@ -282,18 +256,6 @@ impl Route {
         self.last_error_at = Some(now);
         self.degradation = Some(Degradation::ProcessFailed);
         self.next_check_at = None;
-    }
-
-    /// The failure budget is spent but a lease forbids stopping: never yank a route from under
-    /// its consumer; stay degraded and re-probe at `leased_recheck` (3.16).
-    pub fn disable_blocked(&mut self, now: UnixMs) {
-        self.lifecycle = Lifecycle::Degraded;
-        self.health = Health::Degraded;
-        self.degradation = Some(Degradation::LeasedRouteRecoveryBlocked);
-        self.last_error.get_or_insert_with(|| {
-            "Automatic stop is blocked while a Buyer Search lease is active".into()
-        });
-        self.last_error_at = Some(now);
     }
 
     /// The failure budget is spent and the slot is stopped (3.16). Restarting the same config

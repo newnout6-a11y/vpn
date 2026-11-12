@@ -259,6 +259,10 @@ pub enum FetchError {
     /// Not requested: a Mihomo provider URL that is `http` under an `https` subscription, or
     /// points into a private network.
     Refused,
+    /// The provider serves the subscription only to devices that send their HWID.
+    HwidRequired,
+    /// Every device slot of the subscription is taken.
+    DeviceLimit,
 }
 
 /// One server group (a subscription or the manual key ring).
@@ -290,6 +294,11 @@ pub struct GroupView {
     pub provider_refresh_hours: Option<u32>,
     /// The subscription sends the device HWID.
     pub send_hwid: bool,
+    /// The device ID (HWID) the subscription sends when the HWID is on (`None`: manual group).
+    /// An identifier the user may give the provider's support, not a credential.
+    pub device_id: Option<String>,
+    /// `device_id` is the subscription's own (the user reset it), not this PC's.
+    pub own_device_id: bool,
     /// Names of the user's extra request headers (values are never sent to the page).
     pub header_names: Vec<String>,
     /// When the provider moved the subscription to a new address.
@@ -364,6 +373,9 @@ pub struct SubscriptionRequest {
     pub send_hwid: bool,
     /// Extra request headers, one `Name: value` per line.
     pub headers: String,
+    /// The text came from outside (a link Windows handed over, a QR code) and the user did not
+    /// edit it: a subscription it names must not lead into the local network.
+    pub from_outside: bool,
 }
 
 /// One input line that was not imported.

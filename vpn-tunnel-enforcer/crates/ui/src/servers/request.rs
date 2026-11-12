@@ -66,6 +66,9 @@ pub(crate) fn RequestDialog() -> Element {
                     busy: switching,
                     on_change: move |on| a_hwid.set_send_hwid(&id, on, false),
                 }
+                if let Some(device_id) = group.device_id.clone().filter(|_| group.send_hwid) {
+                    DeviceId { group: group.id.clone(), device_id, own: group.own_device_id, busy: switching }
+                }
                 Field { label: t!("ui.servers.request.headers"), hint: names, error,
                     TextArea {
                         value: form.headers.clone(),
@@ -83,6 +86,37 @@ pub(crate) fn RequestDialog() -> Element {
                     }
                 }
                 p { class: "w-field-hint", {t!("ui.servers.request.headersHint")} }
+            }
+        }
+    }
+}
+
+/// The device ID the subscription sends (the user may name it to the provider's support), a new
+/// one on request, and the way back to this PC's ID.
+#[component]
+fn DeviceId(group: String, device_id: String, own: bool, busy: bool) -> Element {
+    let actions = use_context::<Actions>();
+    let (a_new, a_back, g_new) = (actions.clone(), actions, group.clone());
+    rsx! {
+        div { class: "srv-add-device",
+            span { class: "w-field-label", {t!("ui.servers.request.deviceId")} }
+            span { class: "swiss-mono", "{device_id}" }
+            Button { kind: ButtonKind::Link, small: true, disabled: busy,
+                onclick: move |_| a_new.set_own_device_id(&g_new, true),
+                {t!("ui.servers.request.newId")}
+            }
+            if own {
+                Button { kind: ButtonKind::Link, small: true, disabled: busy,
+                    onclick: move |_| a_back.set_own_device_id(&group, false),
+                    {t!("ui.servers.request.pcId")}
+                }
+            }
+            p { class: "w-field-hint",
+                if own {
+                    {t!("ui.servers.request.ownIdHint")}
+                } else {
+                    {t!("ui.servers.request.pcIdHint")}
+                }
             }
         }
     }

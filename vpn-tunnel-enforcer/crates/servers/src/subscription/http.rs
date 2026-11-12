@@ -14,6 +14,7 @@ use vpnte_core::net::is_public_ip;
 use vpnte_profiles::{deeplink, text};
 
 use super::MAX_REQUESTS;
+use super::hwid::BODY_PREFIX;
 use super::policy::{self, Refusal};
 use crate::common::http_url;
 use crate::model::{FetchOutcome, NetFail};
@@ -34,8 +35,13 @@ pub(super) enum Answer {
         /// address (a 302 / 307 after it is temporary and does not count).
         moved: Option<Url>,
     },
-    /// HTTP status >= 400.
-    Status(u16),
+    /// HTTP status >= 400, with its headers and (403 only) the start of its body: the panel may
+    /// say there why it refused this device (see `hwid::refusal`).
+    Status {
+        code: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    },
     /// The panel answered, but nothing usable can come of it (the reason is for the log).
     Unusable(&'static str),
 }
@@ -100,7 +106,17 @@ pub(super) async fn get(
         let status = response.status().as_u16();
         if !(300..400).contains(&status) {
             if status >= 400 {
-                return Ok(Answer::Status(status));
+                let headers = header_pairs(response.headers());
+                // Only a 403 may carry the reason in its body; a short prefix is enough.
+                let body = match status {
+                    403 => read_prefix(response, BODY_PREFIX, cancel).await?,
+                    _ => Vec::new(),
+                };
+                return Ok(Answer::Status {
+                    code: status,
+                    headers,
+                    body,
+                });
             }
             let headers = header_pairs(response.headers());
             return Ok(match read_body(response, cancel, proxied).await? {
@@ -223,6 +239,23 @@ async fn read_body(
     Ok(Some(body))
 }
 
+/// Up to `cap` bytes of the body; a transport failure while reading ends it early (the status
+/// already said the panel refused, the prefix only adds the reason).
+async fn read_prefix(
+    mut response: reqwest::Response,
+    cap: usize,
+    cancel: &CancellationToken,
+) -> Result<Vec<u8>, Abort> {
+    let mut body = Vec::new();
+    while body.len() < cap {
+        match cancellable(cancel, response.chunk()).await? {
+            Ok(Some(chunk)) => body.extend_from_slice(&chunk[..chunk.len().min(cap - body.len())]),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    Ok(body)
+}
+
 /// Runs `fut` unless `cancel` fires first.
 async fn cancellable<T>(
     cancel: &CancellationToken,
@@ -265,7 +298,7 @@ async fn target_addrs(url: &Url, resolve: bool) -> Vec<IpAddr> {
 
 /// System lookup of the URL host; empty on failure or after [`HOP_LOOKUP`] (the request itself
 /// will then fail or succeed on its own).
-async fn lookup(url: &Url) -> Vec<IpAddr> {
+pub(super) async fn lookup(url: &Url) -> Vec<IpAddr> {
     let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
         return Vec::new();
     };

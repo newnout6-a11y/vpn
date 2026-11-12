@@ -29,7 +29,7 @@ impl Servers {
             }
             let key = source_of(group)
                 .ok_or_else(|| AppError::validation(Msg::new("servers.refresh.unusableUrl")))?;
-            Ok((key.clone(), request_of(group, key)))
+            Ok((key.clone(), request_of(group, key, doc.device_id(id))))
         })
     }
 
@@ -116,10 +116,16 @@ impl Servers {
     }
 }
 
-/// What a fetch of `group` sends: its HWID choice, its extra headers, its fallback URL.
-pub(super) fn request_of(group: &ServerGroup, (url, device): Key) -> FetchRequest {
+/// What a fetch of `group` sends: its HWID choice (with its own ID when the user reset it), its
+/// extra headers, its fallback URL.
+pub(super) fn request_of(
+    group: &ServerGroup,
+    (url, device): Key,
+    own_hwid: Option<&str>,
+) -> FetchRequest {
     let mut req = FetchRequest::new(url, device);
     req.send_hwid = group.send_hwid;
+    req.hwid = own_hwid.map(str::to_owned);
     req.headers = group
         .headers
         .as_ref()

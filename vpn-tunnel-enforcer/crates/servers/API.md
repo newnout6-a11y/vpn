@@ -69,9 +69,12 @@ pub struct ProfileId(pub String);  pub struct GroupId(pub String);   // serde tr
 impl ProfileId / GroupId { pub fn random() -> Self; pub fn as_str(&self) -> &str }  // + Display, From<&str>, From<String>
 
 pub struct ServersDoc { pub active_profile_id: Option<ProfileId>, pub groups: Vec<ServerGroup>,
-                        pub profiles: Vec<ServerRow> }     // Document: "profiles.json", v1, holds secrets
+                        pub profiles: Vec<ServerRow>,
+                        pub device_ids: BTreeMap<GroupId, String> /* reset device IDs (p-subs) */ }
+                        // Document: "profiles.json", v1, holds secrets
 impl ServersDoc {
     pub fn group(&self, &GroupId) -> Option<&ServerGroup>;     pub fn group_mut(..) -> Option<&mut ServerGroup>;
+    pub fn device_id(&self, &GroupId) -> Option<&str>;         // the group's own HWID (None: this PC's)
     pub fn row(&self, &ProfileId) -> Option<&ServerRow>;       pub fn row_mut(..) -> Option<&mut ServerRow>;
     pub fn hides(&self, &ServerRow) -> bool;   // row.hidden, or its group hides_settings()
     pub fn manual_group(&self) -> Option<&ServerGroup>;        // by kind, never by name
@@ -99,11 +102,13 @@ impl ServerGroup {
 }
 pub struct FetchState { pub last_attempt_at, pub last_success_at: Option<UnixMs>,
                         pub last_outcome: Option<FetchOutcome>, pub last_count: Option<u32> }
-pub enum FetchOutcome { Ok { partial: bool }, EmptyList, Unparseable(BodyKind), Http(u16), Network(NetFail), Timeout }
+pub enum FetchOutcome { Ok { partial: bool }, EmptyList, HwidRequired, DeviceLimit, Unparseable(BodyKind),
+                        Http(u16), Network(NetFail), Timeout }   // wire: "hwid-required", "device-limit"
 pub enum BodyKind { Html, Json, Base64, Uris, Other }      pub enum NetFail { Dns, Connect, Tls, Proxy, Reset }
 pub enum GroupStatus { Unknown, Active, Expired, Unreachable, Failed }
 // Unknown: manual / never fetched; Expired: plan date passed, empty list, HTTP 404/410;
-// Failed: other HTTP or unusable body; Unreachable: network or timeout.
+// Failed: other HTTP, unusable body, a refused device (HWID required / device limit);
+// Unreachable: network or timeout.
 pub fn clean_group_name(name: &str) -> String;            // trim, collapse whitespace, <= 60 chars
 
 pub enum Origin { Feed, Manual }        // only Feed rows are reconciled; keys pasted into a group are Manual
@@ -154,7 +159,7 @@ pub struct GroupSummary { id, name, title: Msg, manual: bool, device: Option<Cli
     host: Option<String> /* never the URL */, url_locked: bool, status: GroupStatus, imported_at,
     fetch: FetchState, info: SubscriptionMeta, refresh_override_min, servers: usize, archived: usize,
     send_hwid: bool, header_names: Vec<String> /* never values */, moved_at: Option<UnixMs>,
-    controls: Controls }
+    controls: Controls, own_hwid: Option<String> /* the group's reset ID; None = this PC's */ }
 pub struct ServersView { pub groups: Vec<GroupSummary>, pub servers: Vec<ServerSummary>,
     pub active: Option<ProfileId>, pub fallback: bool, pub notice: Option<Msg> }
 impl ServerSummary { pub fn of(&ServerRow, Option<Ping>, selected: bool) -> Self }
@@ -205,6 +210,8 @@ impl Servers {
     pub fn record_ping(&self, &ProfileId, rtt_ms: Option<u32>);          // memory only
     // a subscription's request settings and the provider's hide-settings guard
     pub fn set_group_send_hwid(&self, &GroupId, bool) -> AppResult<()>;  // next refresh sends accordingly
+    pub fn set_own_device_id(&self, &GroupId, own: bool) -> AppResult<()>; // own: fresh random HWID
+                                     // (16 hex, Remnawave v3 rule); false: back to this PC's ID
     pub fn set_group_headers(&self, &GroupId, lines: &str) -> AppResult<Vec<String>>; // blank = none; names
     pub fn shareable_profile(&self, &ProfileId) -> AppResult<Profile>;   // every key export (copy, save,
                                                                         // QR): refused when hidden
@@ -284,8 +291,10 @@ pub trait Relays: Send + Sync {                        // the app lends these (i
 }
 pub struct Spare;                                      // Spare::new(route, release); drop = release once
 pub struct FetchRequest { pub url: Url, pub device: ClientDevice, pub send_hwid: bool,
-    pub headers: Vec<(String, String)>, pub fallback: Option<Url> }   // Debug: host only
-impl FetchRequest { pub fn new(url: Url, device: ClientDevice) -> Self }  // no HWID / headers / fallback
+    pub hwid: Option<String> /* the group's own ID; None = this PC's */,
+    pub headers: Vec<(String, String)>, pub fallback: Option<Url>,
+    pub from_link: bool /* came from outside: never into the LAN (phones-a11) */ }  // Debug: host only
+impl FetchRequest { pub fn new(url: Url, device: ClientDevice) -> Self }  // no HWID / headers / fallback, typed
 pub struct Fetched { pub report: ParseReport, pub controls: Controls, pub moved_to: Option<Url>,
     pub fallback: Option<Url>, pub via_fallback: bool, pub providers: Vec<ProviderFetch> } // Debug hides URLs
 impl Fetched { pub fn complete(&self) -> bool }        // only duplicates skipped, every provider answered
@@ -297,12 +306,13 @@ impl SubscriptionFetcher {
     pub fn with_plan(hwids: Hwids, plan: RoutePlan) -> Self;           // fixed routes (probes, tests)
     pub fn set_relays(&self, relays: Arc<dyn Relays>);                 // once; later calls are ignored
     pub fn plan(&self) -> RoutePlan;                                   // with the session route
+    pub fn hwids(&self) -> &Hwids;                                     // this PC's IDs (shown on the page)
     pub async fn fetch_request(&self, req: &FetchRequest, cancel: &CancellationToken)
         -> Result<Fetched, FetchError>;
     pub async fn fetch(&self, url: &Url, device: ClientDevice, cancel: &CancellationToken)
         -> Result<ParseReport, FetchError>;   // = fetch_request of FetchRequest::new (a new group)
 }
-pub enum FetchError { Failed(FetchOutcome), InvalidUrl, Cancelled }   // Copy; From<FetchError> for AppError
+pub enum FetchError { Failed(FetchOutcome), InvalidUrl, LocalTarget, Cancelled }   // Copy; From<FetchError> for AppError
 impl FetchError { pub fn for_group(self, send_hwid: bool) -> AppError } // EmptyList without HWID -> hint
 pub fn parse_headers(lines: &str) -> AppResult<Vec<(String, String)>>; // servers.headers.* errors
 pub fn stored_headers(&[(String, String)]) -> Option<String>;  pub fn header_names(stored: &str) -> Vec<String>;
@@ -337,6 +347,17 @@ private network; names resolved by the system only when the answer came direct) 
 the URL. Redirects are followed by hand: `https -> http` and public -> private hops are refused.
 Failure = strongest evidence: empty list > unusable body > HTTP 4xx > other HTTP > network > timeout.
 Logs carry host, route label and agent family only (never path, query, HWID or headers).
+Device refusals (Remnawave's open HWID scheme, p-subs): an answer without servers whose headers
+carry `x-hwid-max-devices-reached` / `x-hwid-limit` is `DeviceLimit`; `x-hwid-not-supported`, a
+404 with `x-hwid-active` to a request without the HWID, or a 403 whose body says "Device
+fingerprint required" is `HwidRequired`. Both stop the plan (no other agent, route or spare slot;
+an anonymous request's "send the HWID" is ignored when the plan sends it) and rank above every
+other failure. A `from_link` URL (phones-a11): a non-public IP literal or `localhost` is refused
+with `LocalTarget` on every route; on the direct route a name is resolved first and any
+non-public address ends the whole fetch with `LocalTarget` before anything is sent; otherwise
+the request is pinned to the checked addresses (an unresolvable name skips the direct route).
+Proxy routes resolve on their own (no local lookup behind a proxy); the DoH retry takes public
+addresses only.
 
 ## refresh (`vpnte_servers::refresh`)
 
@@ -359,8 +380,9 @@ pub enum AddOutcome { Added { report: AddReport, skipped: Vec<Skipped>,
                               providers: Vec<ProviderFetch> /* Mihomo providers, import report */ },
                       Refreshed { group: GroupId, report: RefreshReport } }
 pub struct AddOptions { pub into: Option<GroupId>, pub device: ClientDevice,
-                        pub send_hwid: bool, pub headers: Vec<(String, String)> /* checked */ }
-impl AddOptions { pub fn new(into: Option<GroupId>, device: ClientDevice) -> Self }  // HWID off
+                        pub send_hwid: bool, pub headers: Vec<(String, String)> /* checked */,
+                        pub from_link: bool /* a handed-over link or a QR code */ }
+impl AddOptions { pub fn new(into: Option<GroupId>, device: ClientDevice) -> Self }  // HWID off, typed
 pub struct SweepReport { pub refreshed: usize, pub failed: usize }
 impl Servers {
     pub async fn add_from_input(self: &Arc<Self>, ctx: &RefreshCtx, input: &str, into: Option<GroupId>,
@@ -382,7 +404,10 @@ manual rows (marked `hidden` when the answer sent `hide-settings`); else a new s
 answer's controls and fallback URL, and (when the answer moved it) the new URL plus `moved_at`.
 Any other text is parsed and added to `into` or the manual group; `skipped` lists entries that were
 not imported. A failed fetch without the HWID that saw an empty list answers
-`servers.fetch.emptyListNoHwid` (turn the switch on), as `refresh_group` does.
+`servers.fetch.emptyListNoHwid` (turn the switch on), as `refresh_group` does. A subscription URL
+carried by a deep link, or with `from_link` set, is fetched as `FetchRequest::from_link` (never
+into the local network, also through a name: `profiles.deeplink.localTarget`); one the user typed
+may live in the LAN.
 `refresh_group` runs as operation `refresh:<id>` (`FeatureKind::Refresh`, 120 s; `Owner::Manual`
 pre-empts a scheduled run, an equal owner gets `core.ops.busy`). A failure stores its typed outcome
 and changes no row; a cancel stores nothing more; the deadline stores `Timeout`. After a success the
@@ -453,6 +478,9 @@ timeout the base `errors.*`). Every `Msg` this crate returns has its key under `
 | `servers.refresh.groupChanged` | — | `Conflict`: group deleted or re-pointed while its fetch ran |
 | `servers.refresh.unusableUrl` | — | `Validation`: subscription URL locked or not `http(s)://host` |
 | `servers.fetch.emptyListNoHwid` | — | `Validation`: `FetchError::for_group` — an empty list fetched without the HWID |
+| `servers.fetch.hwidRequired` | — | `outcome_msg(HwidRequired)`; `Validation`: the panel serves only devices with an HWID |
+| `servers.fetch.deviceLimit` | — | `outcome_msg(DeviceLimit)`; `Validation`: every device slot is taken |
+| `profiles.deeplink.localTarget` | — | `Validation`: `FetchError::LocalTarget` (a linked subscription resolves into the LAN) |
 | `servers.headers.{invalid,reserved,tooMany}` | `line` / `name` / `max` | `Validation`: `parse_headers`, `set_group_headers` |
 | `servers.group.manualNoRequest` | — | `Validation`: HWID switch / headers of the manual group |
 | `servers.hidden.refused` | — | `Validation`: `shareable_profile` of a provider-hidden server (`hidden_refused`) |

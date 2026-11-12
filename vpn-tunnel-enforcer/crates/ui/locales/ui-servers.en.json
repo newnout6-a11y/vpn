@@ -324,7 +324,9 @@
         "support": "Support",
         "supportTitle": "Open the provider's support link in the browser",
         "supportFailed": "The support link did not open",
-        "hwidHint": "The list came back empty. Panels that bind a subscription to a device serve servers only with the device ID (HWID)."
+        "hwidHint": "The list came back empty. Panels that bind a subscription to a device serve servers only with the device ID (HWID).",
+        "hwidRequired": "The provider serves this subscription only to devices that send their ID (HWID).",
+        "deviceLimit": "Every device slot of this subscription is taken: the provider can free one."
       },
       "export": {
         "proxyList": "Proxy list",
@@ -366,7 +368,12 @@
         "providerServers_one": "{{count}} server",
         "providerServers_few": "{{count}} servers",
         "providerServers_many": "{{count}} servers",
-        "providerServers_other": "{{count}} servers"
+        "providerServers_other": "{{count}} servers",
+        "hwidRetry": "Turn on HWID and add",
+        "copyRequest": "Copy a request for the provider",
+        "requestText": "Hello! Please send me the plain link to my subscription (https://…), not an encrypted app link: my app opens plain links only. Thank you!",
+        "requestCopied": "Copied: paste it into the chat with your provider",
+        "copyFailed": "The request was not copied"
       },
       "country": {
         "verified": "Exit country: {{country}}",
@@ -378,7 +385,9 @@
         "network": "the subscription server is unreachable — check your connection",
         "tls": "could not establish TLS with the subscription server",
         "timeout": "the subscription server did not answer in time",
-        "refused": "not requested: its address is http under an https subscription or points into a local network"
+        "refused": "not requested: its address is http under an https subscription or points into a local network",
+        "hwidRequired": "the provider serves it only to devices that send their ID (HWID)",
+        "deviceLimit": "every device slot of the subscription is taken"
       },
       "key": {
         "copied": "Key copied. It is an access secret: the clipboard clears itself in {{seconds}} s.",
@@ -534,6 +543,11 @@
         "description": "What the app sends to the provider when it refreshes the subscription.",
         "hwid": "Send HWID",
         "hwidHint": "Panels with a device limit need it: without it they send an empty list. Turning it on takes a device slot at the provider.",
+        "deviceId": "Device ID",
+        "newId": "New ID",
+        "pcId": "This PC's ID",
+        "pcIdHint": "This computer's ID. With a new one the provider counts it as another device.",
+        "ownIdHint": "This subscription's own ID. «This PC's ID» brings the previous one back.",
         "headers": "Extra headers",
         "headersNone": "No extra headers",
         "headersSet": "Set: {{names}}. A new list replaces them.",

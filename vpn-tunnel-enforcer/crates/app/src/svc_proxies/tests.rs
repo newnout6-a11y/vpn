@@ -236,7 +236,7 @@ fn free_port() -> u16 {
 }
 
 /// A server of the list runs as a real slot (bundled sing-box) on a loopback port and shows in
-/// the pushed state; a VPN stop ends the unleased slot. Skipped quietly without the engine.
+/// the pushed state; a VPN stop ends the slot. Skipped quietly without the engine.
 #[tokio::test]
 async fn a_list_row_runs_as_a_slot_until_the_vpn_stops() {
     if !Path::new(RESOURCES).join("sing-box.exe").exists() {

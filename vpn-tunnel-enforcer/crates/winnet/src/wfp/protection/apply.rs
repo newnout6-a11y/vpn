@@ -19,6 +19,7 @@ impl Inner {
             tun_luid: self.tun_luid,
             session: self.session.clone(),
             tun_addrs: self.tun_addrs.clone(),
+            armed: self.armed,
         }
     }
 
@@ -27,19 +28,28 @@ impl Inner {
         self.tun_luid = t.tun_luid;
         self.session.clone_from(&t.session);
         self.tun_addrs.clone_from(&t.tun_addrs);
+        self.armed = t.armed;
+    }
+
+    /// The stored level as the filters enforce it ([`KillSwitchLevel::effective`]).
+    pub(super) fn level_in_force(&self) -> KillSwitchLevel {
+        self.settings.level.effective(self.always_available)
     }
 
     /// Resolves app IDs and computes the filter sets of `t`, plus the ids of app exceptions
     /// skipped because their file is missing (less is allowed: the safe direction).
     pub(super) fn plan(&mut self, t: &Target) -> Result<(Desired, Vec<String>), ProtectionError> {
         let s = &t.settings;
-        let strict = s.level == KillSwitchLevel::Strict;
+        let level = s.level.effective(self.always_available);
+        let strict = level == KillSwitchLevel::Strict;
         let session = t.conn.in_session();
-        if !strict && !(session && (s.level == KillSwitchLevel::Standard || s.leak_protection)) {
+        let on_drop = level == KillSwitchLevel::Standard && t.armed;
+        if !strict && !(session && (on_drop || s.leak_protection)) {
             return Ok((Desired::default(), Vec::new()));
         }
         let mut plan = Plan {
-            level: s.level,
+            level,
+            armed: t.armed,
             leak_protection: s.leak_protection,
             public_wifi_compat: s.public_wifi_compat,
             allow_lan: s.allow_lan,
@@ -235,7 +245,9 @@ impl Inner {
     /// protection could not be restored either.
     pub(super) fn restore(&mut self, prev: &Target) -> Result<(), ProtectionError> {
         let (d, _) = self.plan(prev)?;
-        self.sync(&d, prev.settings.level == KillSwitchLevel::Strict)
+        let strict =
+            prev.settings.level.effective(self.always_available) == KillSwitchLevel::Strict;
+        self.sync(&d, strict)
     }
 
     /// A transition of the connection state; `always` commits it even when applying fails

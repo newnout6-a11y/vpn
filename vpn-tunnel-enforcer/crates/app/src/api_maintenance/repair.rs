@@ -133,7 +133,8 @@ pub(crate) async fn filters_step(elevated: bool, tunnel: &dyn TunnelOps) -> Step
     if !elevated {
         return StepOutcome::blocked(project::needs_admin_msg());
     }
-    if tunnel.kill_switch().await.settings.level == KillSwitchLevel::Strict {
+    let level = tunnel.kill_switch().await.settings.level;
+    if level.effective(tunnel.always_available()) == KillSwitchLevel::Strict {
         return StepOutcome::blocked(Msg::new("app.maintenance.repair.strictKept"));
     }
     filters_outcome(tunnel.release_kill_switch().await)
@@ -166,7 +167,10 @@ async fn legacy_again(shared: &Arc<Shared>) -> StepOutcome {
         return StepOutcome::blocked(project::needs_admin_msg());
     }
     let ctx = match shared.backend.tunnel() {
-        Ok(tunnel) => cleanup_context(shared, &tunnel.kill_switch().await),
+        Ok(tunnel) => {
+            let always = tunnel.always_available();
+            cleanup_context(shared, &tunnel.kill_switch().await, always)
+        }
         Err(err) => return StepOutcome::failed(err.user_msg()),
     };
     let (host, marker) = (shared.host.clone(), shared.backend.cleanup.clone());
@@ -175,8 +179,9 @@ async fn legacy_again(shared: &Arc<Shared>) -> StepOutcome {
 
 /// `strict_ready`: the persistent strict set is in place, so the old blocks may go (spec
 /// firewall-recovery §6.6 step 0); for the other levels it does not matter.
-fn cleanup_context(shared: &Shared, status: &KillSwitchStatus) -> Context {
-    let level = status.settings.level;
+/// `always`: "Always" is in force here; otherwise a stored `strict` counts as `standard`.
+fn cleanup_context(shared: &Shared, status: &KillSwitchStatus, always: bool) -> Context {
+    let level = status.settings.level.effective(always);
     let strict_ready = status.wfp.as_ref().is_some_and(|w| {
         w.kill_switch != WfpState::Failed && w.persistent_filters.unwrap_or(0) > 0
     });

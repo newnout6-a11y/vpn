@@ -120,6 +120,8 @@ pub struct FakeTunnel {
     pub applied: Mutex<Vec<(Settings, Settings)>>,
     /// What the next `apply_settings_change` does with an open session.
     pub restart: Mutex<Restart>,
+    /// "Always" can be kept safe (the helper service of a later phase).
+    pub always: std::sync::atomic::AtomicBool,
 }
 
 /// Behaviour of `apply_settings_change` while a session is open.
@@ -145,6 +147,7 @@ impl FakeTunnel {
             level: Mutex::new(KillSwitchLevel::Off),
             applied: Mutex::new(Vec::new()),
             restart: Mutex::new(Restart::Keeps),
+            always: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -214,12 +217,18 @@ impl TunnelOps for FakeTunnel {
         }
     }
     async fn set_kill_switch_level(&self, level: KillSwitchLevel) -> AppResult<()> {
-        // Soft behaviour without WFP: off / standard only (SERVICES.md, app-tunnel).
-        if level == KillSwitchLevel::Strict && !self.tun {
-            return Err(needs_admin());
+        // ks-a: "Always" only with the helper service (`always`).
+        if level == KillSwitchLevel::Strict && !self.always_available() {
+            return Err(vpnte_base::AppError::msg(
+                vpnte_base::ErrorKind::Permission,
+                vpnte_base::Msg::new("app.tunnel.alwaysNeedsService"),
+            ));
         }
         *self.level.lock() = level;
         Ok(())
+    }
+    fn always_available(&self) -> bool {
+        self.always.load(std::sync::atomic::Ordering::Relaxed)
     }
     async fn set_protection_toggles(&self, _toggles: Toggles) -> AppResult<()> {
         Err(needs_admin())

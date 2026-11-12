@@ -1,6 +1,5 @@
 //! Request pipeline of the control API (old order kept: Host guard, OPTIONS, method, token,
 //! body) and the endpoints over [`ProxyOps`].
-use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,8 +9,8 @@ use serde_json::{Map, Value};
 use super::files::ControlToken;
 use super::http::{Head, Response};
 use crate::model::{
-    Action, ControlError, ProfileList, ProfileRow, ProxyError, ProxyOps, ReserveRequest,
-    StartRequest, StopReason, prewarm_count,
+    Action, ControlError, ProfileList, ProfileRow, ProxyError, ProxyOps, StartRequest, StopReason,
+    prewarm_count,
 };
 use crate::slot::{CONTROL_HOST, CONTROL_PORT, Slot, loopback_url, parse_port};
 
@@ -20,7 +19,7 @@ pub const TOKEN_HEADER: &str = "x-vpnte-control-token";
 /// Optional prefix of every path (`/api/external-proxy/status` = `/status`).
 const PATH_PREFIX: &str = "/api/external-proxy";
 /// Paths that change state: POST only.
-const MUTATION_PATHS: [&str; 13] = [
+const MUTATION_PATHS: [&str; 10] = [
     "/start",
     "/rotate",
     "/connect",
@@ -31,9 +30,6 @@ const MUTATION_PATHS: [&str; 13] = [
     "/profiles/healthcheck",
     "/instances/prewarm",
     "/instances/status-batch",
-    "/instances/reserve",
-    "/instances/renew",
-    "/instances/release",
 ];
 /// Read-only paths: GET only, but authenticated like everything else.
 const READ_PATHS: [&str; 4] = ["/status", "/", "/instances", "/list"];
@@ -249,17 +245,6 @@ impl Params<'_> {
             _ => Ok(Slot::DEFAULT),
         }
     }
-
-    /// An optional slot that must be valid when present (reserve's `slot` / `preferredSlot`).
-    fn optional_slot(&self, name: &str) -> Result<Option<Slot>, ProxyError> {
-        self.get(name).map(|raw| Slot::parse(&raw)).transpose()
-    }
-
-    /// `ttlSeconds` as the raw number the lease book validates (unparsable text = NaN, which it
-    /// rejects with its own message after the token check, as before).
-    fn ttl(&self) -> Option<f64> {
-        self.get("ttlSeconds").map(|raw| js_number(&raw))
-    }
 }
 
 /// JSON number as JavaScript's `String(n)` would print it (integers without a fraction).
@@ -424,21 +409,6 @@ async fn endpoint(
             let r = ops.status_batch(slots).await;
             Reply::new(&r, r.aggregate.ready.to_string())
         }
-        "/instances/reserve" => {
-            let r = ops.reserve(reserve_request(p, body)?).await?;
-            let text = r.instance.proxy_url.clone().unwrap_or_default();
-            Reply::new(&r, text)
-        }
-        "/instances/renew" => {
-            let token = p.get("leaseToken").unwrap_or_default();
-            let r = ops.renew(token, p.ttl()).await?;
-            let text = r.instance.proxy_url.clone().unwrap_or_default();
-            Reply::new(&r, text)
-        }
-        "/instances/release" => {
-            let r = ops.release(p.get("leaseToken").unwrap_or_default()).await?;
-            Reply::new(&r, "released")
-        }
         "/start" | "/rotate" | "/connect" | "/trigger" => {
             let s = ops.start(start_request(path, p)?).await?;
             let text = s.instance.proxy_url.clone().unwrap_or_default();
@@ -473,40 +443,6 @@ fn start_request(path: &str, p: &Params<'_>) -> Result<StartRequest, ProxyError>
         action: Action::parse(path.trim_start_matches('/')).unwrap_or_default(),
         idempotency_key: p.text("idempotencyKey"),
         rotate_reason: p.text("reason"),
-    })
-}
-
-/// `/instances/reserve`. `allowFallback` is read from the body first, then as a parameter, and
-/// is off only for `false` / `"false"` (any case), as before.
-fn reserve_request(
-    p: &Params<'_>,
-    body: &Map<String, Value>,
-) -> Result<ReserveRequest, ProxyError> {
-    let fallback = body
-        .get("allowFallback")
-        .filter(|v| !v.is_null())
-        .cloned()
-        .or_else(|| p.get("allowFallback").map(Value::String));
-    let allow_fallback = match &fallback {
-        Some(Value::Bool(b)) => *b,
-        Some(Value::String(s)) => !s.eq_ignore_ascii_case("false"),
-        _ => true,
-    };
-    let preferred_egress_ip = p
-        .text("preferredEgressIp")
-        .map(|ip| {
-            ip.parse::<IpAddr>().map_err(|_| {
-                ProxyError::BadRequest("preferredEgressIp must be an IP address".into())
-            })
-        })
-        .transpose()?;
-    Ok(ReserveRequest {
-        owner: p.get("owner").unwrap_or_default(),
-        ttl_secs: p.ttl(),
-        preferred_egress_ip,
-        preferred_slot: p.optional_slot("preferredSlot")?,
-        slot: p.optional_slot("slot")?,
-        allow_fallback,
     })
 }
 

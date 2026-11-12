@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use super::*;
-use crate::model::{Action, ProxyError, ReserveRequest, StopReason, prewarm_count};
+use crate::model::{Action, ProxyError, StopReason, prewarm_count};
 use crate::test_support::healthy_instance;
 
 const NOW: UnixMs = 1_762_800_000_123;
@@ -99,26 +99,11 @@ fn proxy_status_flattens_the_instance() {
 }
 
 #[test]
-fn reservation_errors_and_small_shapes() {
-    let instance = healthy_instance(1, "198.51.100.1", NOW);
-    let r = Reservation {
-        lease_token: "ab".repeat(32),
-        owner: "buyer-worker-1".into(),
-        expires_at: NOW,
-        slot: instance.slot,
-        proxy_url: instance.proxy_url.clone(),
-        egress_ip: instance.egress_ip,
-        generation: 1,
-        instance,
-    };
-    let v = serde_json::to_value(&r).unwrap();
-    assert_eq!(v["expiresAt"], "2025-11-10T18:40:00.123Z");
-    assert_eq!(v["leaseToken"], "ab".repeat(32));
-    assert!(!format!("{r:?}").contains(&"ab".repeat(32)));
-    let err = ControlError::from(&ProxyError::Conflict("Slot 2 is already leased".into()));
+fn errors_and_small_shapes() {
+    let err = ControlError::from(&ProxyError::Conflict("Slot 2 is busy".into()));
     assert_eq!(
         serde_json::to_value(err).unwrap(),
-        json!({ "ok": false, "error": "conflict", "detail": "Slot 2 is already leased" })
+        json!({ "ok": false, "error": "conflict", "detail": "Slot 2 is busy" })
     );
     let skip = BatchSkip {
         profile_id: "profile-1".into(),
@@ -131,14 +116,6 @@ fn reservation_errors_and_small_shapes() {
     assert_eq!(
         serde_json::to_value(ServerStatus::Offline).unwrap(),
         "offline"
-    );
-    let released = Released {
-        released: true,
-        slot: crate::slot::Slot::DEFAULT,
-    };
-    assert_eq!(
-        serde_json::to_value(released).unwrap(),
-        json!({ "released": true, "slot": 1 })
     );
     let health = GroupHealth {
         ok: true,
@@ -165,7 +142,6 @@ fn request_helpers() {
     assert_eq!(Action::parse("connect"), Some(Action::Connect));
     assert_eq!(Action::parse(" TRIGGER "), Some(Action::Connect));
     assert_eq!(Action::parse("stop"), None);
-    assert!(ReserveRequest::new("o").allow_fallback);
     assert_eq!(StopReason::VpnStop.as_str(), "vpn-stop");
     assert_eq!(prewarm_count(30).unwrap(), 30);
     for bad in [0, 47547] {

@@ -194,12 +194,6 @@ impl Model {
             && !matches!(self.key, KeyStatus::Valid(_))
     }
 
-    /// Strict kill switch with Proxy mode: it needs WFP, so the app refuses it (NOADMIN §2) and
-    /// «Завершить» stays disabled until one of the two changes.
-    pub fn strict_needs_tunnel(&self) -> bool {
-        self.routing == Routing::Soft && self.kill_switch == KillSwitchLevel::Strict
-    }
-
     /// What «Завершить» applies.
     pub fn choices(&self) -> WizardChoices {
         let key = match (self.connection, &self.key) {

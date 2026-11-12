@@ -1,13 +1,17 @@
-//! The notices above the facts strip, in the reference markup: auto-restart, a second TUN, the
-//! kill-switch banner, the leak card, the foreign-VPN notice strip, the automatic server choice's
-//! strip and the network-mode strip.
+//! The notices above the facts strip, in the reference markup: the paused kill switch, auto-
+//! restart, a second TUN, the kill-switch banner, the leak card, the foreign-VPN notice strip,
+//! the automatic server choice's strip and the network-mode strip.
 //! The old Tailwind classes are kept (utilities.css draws them; the inert `…/NN` tint classes
 //! stay inert, as shipped).
-use dioxus::prelude::*;
+use std::time::Duration;
 
-use super::Dash;
-use super::model::banners;
+use dioxus::prelude::*;
+use vpnte_base::types::now_ms;
+
+use super::model::{banners, countdown};
+use super::{Dash, PauseLine};
 use crate::lang::tr;
+use crate::pages::use_page_active;
 use crate::panels::icons::{Lock, ShieldOff, Spinner};
 use crate::t;
 
@@ -17,6 +21,9 @@ pub(super) fn Banners() -> Element {
     let dash = use_context::<Dash>();
     let shown = banners(&dash.snapshot());
     rsx! {
+        if let Some(line) = shown.pause {
+            PauseStrip { line }
+        }
         if let Some(progress) = shown.restart {
             RestartBanner { progress }
         }
@@ -32,10 +39,83 @@ pub(super) fn Banners() -> Element {
         if let Some(name) = shown.foreign_vpn {
             ForeignVpnNotice { name }
         }
+        if let Some(name) = shown.no_pause_vpn {
+            NoPauseNotice { name }
+        }
         if let Some(line) = dash.snapshot().autopick {
             PickStrip { title: tr(&line.title), body: line.body.as_ref().map(tr) }
         }
         super::netmode::NetBanner {}
+    }
+}
+
+/// «Интернет на паузе: VPN переподключается… следующая попытка через 0:40» with «Подключить»
+/// and «Продолжить без VPN» (research killswitch 5.2): calm, in the start page's own notice
+/// style; the countdown ticks only while the page is shown.
+#[component]
+fn PauseStrip(line: PauseLine) -> Element {
+    let dash = use_context::<Dash>();
+    let active = use_page_active();
+    let mut now = use_signal(now_ms);
+    let next = line.next_attempt;
+    use_resource(move || {
+        let shown = active();
+        async move {
+            while shown && next.is_some() {
+                now.set(now_ms());
+                tokio::time::sleep(Duration::from_millis(1_000)).await;
+            }
+        }
+    });
+    let body = match (line.key_rejected, next) {
+        (true, _) => t!("ui.dashboard.pause.keyRejected"),
+        (false, Some(at)) => t!(
+            "ui.dashboard.pause.nextAttempt",
+            wait = countdown(at, now())
+        ),
+        (false, None) => t!("ui.dashboard.pause.reconnecting"),
+    };
+    let busy = dash.command.running();
+    let (retry, leave) = (dash.clone(), dash.clone());
+    rsx! {
+        div { class: "overflow-hidden",
+            div { class: "c-swiss swiss-notice", role: "status", aria_live: "polite",
+                span { class: "swiss-label swiss-notice-tag", {t!("ui.dashboard.pause.title")} }
+                p { class: "swiss-notice-body", "{body}" }
+                div { class: "swiss-confirm-actions",
+                    button {
+                        r#type: "button",
+                        class: "swiss-confirm-yes",
+                        disabled: busy,
+                        onclick: move |_| retry.retry_now(),
+                        {t!("ui.dashboard.pause.connect")}
+                    }
+                    button {
+                        r#type: "button",
+                        class: "swiss-confirm-no",
+                        disabled: busy,
+                        onclick: move |_| leave.continue_without_vpn(),
+                        {t!("ui.dashboard.pause.continue")}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Another VPN carries all traffic while ours runs: a drop of ours pauses nothing.
+#[component]
+fn NoPauseNotice(name: String) -> Element {
+    rsx! {
+        div { class: "overflow-hidden",
+            div { class: "c-swiss swiss-notice", role: "note",
+                span { class: "swiss-label swiss-notice-tag",
+                    {t!("ui.dashboard.noPause.title")}
+                    ": {name}"
+                }
+                p { class: "swiss-notice-body", {t!("ui.dashboard.noPause.body")} }
+            }
+        }
     }
 }
 

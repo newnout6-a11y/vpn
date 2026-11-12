@@ -15,8 +15,8 @@ use super::router::{self, Gate};
 use super::*;
 use crate::model::{
     Aggregate, BatchStartResult, GroupHealth, Health, InstanceStatus, Instances, InstancesBatch,
-    KeyHealth, PrewarmResult, ProfileRow, ProxyError, ProxyStatus, Released, Reservation,
-    ReserveRequest, ServerStatus, StartRequest, StopReason, StopScope, Unlimited,
+    KeyHealth, PrewarmResult, ProfileRow, ProxyError, ProxyStatus, ServerStatus, StartRequest,
+    StopReason, Unlimited,
 };
 use crate::slot::{Slot, loopback_url};
 
@@ -35,9 +35,6 @@ enum Call {
     StartProfiles(Vec<String>),
     Prewarm(u64, Option<String>),
     Stop(Slot, StopReason),
-    Reserve(ReserveRequest),
-    Renew(String, Option<f64>),
-    Release(String),
 }
 
 /// Records calls and answers with canned data; `error` makes fallible operations fail.
@@ -89,20 +86,6 @@ fn status_of(instance: InstanceStatus) -> ProxyStatus {
         max_instances: Unlimited,
         instances: vec![instance],
         aggregate: Aggregate::default(),
-    }
-}
-
-fn reservation(token: &str) -> Reservation {
-    let instance = running(Slot::DEFAULT);
-    Reservation {
-        lease_token: token.into(),
-        owner: "buyer-worker-1".into(),
-        expires_at: 1_762_800_000_000,
-        slot: Slot::DEFAULT,
-        proxy_url: instance.proxy_url.clone(),
-        egress_ip: Some("198.51.100.2".parse().unwrap()),
-        generation: 1,
-        instance,
     }
 }
 
@@ -191,9 +174,6 @@ impl ProxyOps for Fake {
     async fn add(&self, _profile_id: String) -> Result<ProxyStatus, ProxyError> {
         unreachable!("the control API has no add endpoint")
     }
-    async fn borrow(&self, _profile_id: String) -> Result<ProxyStatus, ProxyError> {
-        unreachable!("the control API never borrows")
-    }
     async fn start_profiles(&self, profile_ids: Vec<String>) -> BatchStartResult {
         self.record(Call::StartProfiles(profile_ids.clone()));
         BatchStartResult {
@@ -225,26 +205,8 @@ impl ProxyOps for Fake {
         self.outcome()?;
         Ok(status_of(InstanceStatus::stopped(slot)))
     }
-    async fn stop_all(&self, _scope: StopScope, _reason: StopReason) -> ProxyStatus {
+    async fn stop_all(&self, _reason: StopReason) -> ProxyStatus {
         unreachable!("the control API has no stop-all endpoint")
-    }
-    async fn reserve(&self, req: ReserveRequest) -> Result<Reservation, ProxyError> {
-        self.record(Call::Reserve(req));
-        self.outcome()?;
-        Ok(reservation("lease-token-1"))
-    }
-    async fn renew(&self, token: String, ttl: Option<f64>) -> Result<Reservation, ProxyError> {
-        self.record(Call::Renew(token.clone(), ttl));
-        self.outcome()?;
-        Ok(reservation(&token))
-    }
-    async fn release(&self, token: String) -> Result<Released, ProxyError> {
-        self.record(Call::Release(token));
-        self.outcome()?;
-        Ok(Released {
-            released: true,
-            slot: Slot::DEFAULT,
-        })
     }
 }
 
@@ -321,13 +283,10 @@ fn mutation_paths() {
         "/profiles/healthcheck",
         "/instances/prewarm",
         "/instances/status-batch",
-        "/instances/reserve",
-        "/instances/renew",
-        "/instances/release",
     ] {
         assert!(is_mutation_path(path), "{path}");
     }
-    for path in ["/status", "/list", "/", "/instances"] {
+    for path in ["/status", "/list", "/", "/instances", "/instances/reserve"] {
         assert!(!is_mutation_path(path), "{path}");
     }
 }
@@ -473,6 +432,15 @@ async fn methods_tokens_and_unknown_paths() {
     assert_eq!(call(&shared, "GET", "/healthcheck", "").await.status, 405);
     assert_eq!(call(&shared, "POST", "/status", "").await.status, 405);
     assert_eq!(call(&shared, "POST", "/nope", "").await.status, 405);
+    // The removed lease endpoints (owner decision of 12.11.2026) answer like any unknown path.
+    for path in [
+        "/instances/reserve",
+        "/instances/renew",
+        "/instances/release",
+    ] {
+        assert_eq!(call(&shared, "POST", path, "").await.status, 405, "{path}");
+        assert_eq!(call(&shared, "GET", path, "").await.status, 404, "{path}");
+    }
     let r = call(&shared, "GET", "/nope?format=text", "").await;
     assert_eq!(
         (r.status, r.text, json_of(&r)),
@@ -615,10 +583,10 @@ async fn bad_input_is_400() {
     );
     let r = call(&shared, "POST", "/start?port=0&format=text", "").await;
     assert_eq!((r.status, r.body.as_str()), (400, "invalid port"));
-    let r = call(&shared, "POST", "/instances/reserve", "{owner").await;
+    let r = call(&shared, "POST", "/start", "{profileId").await;
     assert_eq!((r.status, detail(&r).as_str()), (400, "invalid JSON body"));
     for body in ["null", "[1]", "\"x\""] {
-        let r = call(&shared, "POST", "/instances/reserve", body).await;
+        let r = call(&shared, "POST", "/start", body).await;
         assert_eq!(
             (r.status, detail(&r).as_str()),
             (400, "JSON body must be an object")
@@ -640,19 +608,6 @@ async fn bad_input_is_400() {
             "{count}"
         );
     }
-    let r = call(
-        &shared,
-        "POST",
-        "/instances/reserve?owner=w&preferredEgressIp=not-an-ip",
-        "",
-    )
-    .await;
-    assert_eq!(
-        (r.status, detail(&r).as_str()),
-        (400, "preferredEgressIp must be an IP address")
-    );
-    let r = call(&shared, "POST", "/instances/reserve?owner=w&slot=", "").await;
-    assert_eq!(r.status, 400);
     assert!(fake.calls().is_empty(), "{:?}", fake.calls());
 }
 
@@ -801,115 +756,14 @@ async fn prewarm_and_status_batch() {
     );
 }
 
-/// Reserve parameters; `allowFallback` is off only for `false` / `"false"`, body first.
+/// Operation errors keep their status and code; text mode answers with the bare detail.
 #[tokio::test]
-async fn reserve_parameters() {
+async fn operation_errors_keep_their_codes() {
     let fake = fake();
     let shared = shared(&fake);
-    let query = "/instances/reserve?format=text&owner=w1&ttlSeconds=120&preferredEgressIp=198.51.100.2&preferredSlot=2&slot=3";
-    let r = call(&shared, "POST", query, "").await;
-    assert_eq!((r.status, r.body.as_str()), (200, "http://127.0.0.1:17990"));
-    let fallback = [
-        ("", r#"{"owner": "w"}"#, true),
-        ("", r#"{"owner": "w", "allowFallback": false}"#, false),
-        ("", r#"{"owner": "w", "allowFallback": "FALSE"}"#, false),
-        ("&allowFallback=false", "", false),
-        ("&allowFallback=false", r#"{"allowFallback": null}"#, false),
-        ("&allowFallback=false", r#"{"allowFallback": true}"#, true),
-        ("", r#"{"owner": "w", "allowFallback": 0}"#, true),
-    ];
-    for (q, body, _) in fallback {
-        let r = call(
-            &shared,
-            "POST",
-            &format!("/instances/reserve?owner=w{q}"),
-            body,
-        )
-        .await;
-        assert_eq!(r.status, 200);
-    }
-    let calls = fake.calls();
-    assert_eq!(
-        calls[0],
-        Call::Reserve(ReserveRequest {
-            owner: "w1".into(),
-            ttl_secs: Some(120.0),
-            preferred_egress_ip: Some("198.51.100.2".parse().unwrap()),
-            preferred_slot: Some(Slot::new(2).unwrap()),
-            slot: Some(Slot::new(3).unwrap()),
-            allow_fallback: true,
-        })
-    );
-    for (call, (q, body, expected)) in calls[1..].iter().zip(fallback) {
-        let Call::Reserve(req) = call else {
-            panic!("{call:?}")
-        };
-        assert_eq!(req.allow_fallback, expected, "{q} {body}");
-        assert_eq!(
-            (req.owner.as_str(), req.ttl_secs, req.preferred_egress_ip),
-            ("w", None, None)
-        );
-    }
-    let r = call(
-        &shared,
-        "POST",
-        "/instances/reserve",
-        r#"{"owner": "w", "ttlSeconds": "abc"}"#,
-    )
-    .await;
-    assert_eq!(r.status, 200);
-    let Some(Call::Reserve(req)) = fake.calls().pop() else {
-        panic!()
-    };
-    assert!(
-        req.ttl_secs.is_some_and(f64::is_nan),
-        "unparsable TTL goes to the lease book as NaN"
-    );
-}
-
-/// Renew / release take the lease token from the query or the body; lease errors keep codes.
-#[tokio::test]
-async fn renew_and_release() {
-    let fake = fake();
-    let shared = shared(&fake);
-    let r = call(
-        &shared,
-        "POST",
-        "/instances/renew",
-        r#"{"leaseToken": "t1", "ttlSeconds": 60}"#,
-    )
-    .await;
-    assert_eq!(
-        (r.status, json_of(&r)["leaseToken"].as_str()),
-        (200, Some("t1"))
-    );
-    let r = call(
-        &shared,
-        "POST",
-        "/instances/release?leaseToken=t1&format=text",
-        "",
-    )
-    .await;
-    assert_eq!((r.status, r.body.as_str()), (200, "released"));
-    let r = call(&shared, "POST", "/instances/release", "").await;
-    assert_eq!(json_of(&r), json!({"released": true, "slot": 1}));
-    fake.fail_with(ProxyError::Forbidden(
-        "Unknown or expired lease token".into(),
-    ));
-    let r = call(&shared, "POST", "/instances/release?leaseToken=wrong", "").await;
-    assert_eq!(
-        (r.status, json_of(&r)["error"].as_str()),
-        (403, Some("forbidden"))
-    );
-    fake.fail_with(ProxyError::Conflict("Leased route is down".into()));
-    let r = call(
-        &shared,
-        "POST",
-        "/instances/renew?leaseToken=t1&format=text",
-        "",
-    )
-    .await;
-    assert_eq!((r.status, r.body.as_str()), (409, "Leased route is down"));
+    fake.fail_with(ProxyError::Conflict("Slot 1 is busy".into()));
+    let r = call(&shared, "POST", "/start?format=text", "").await;
+    assert_eq!((r.status, r.body.as_str()), (409, "Slot 1 is busy"));
     let r = call(&shared, "POST", "/start", "").await;
     assert_eq!(
         (r.status, json_of(&r)["error"].as_str()),
@@ -920,14 +774,6 @@ async fn renew_and_release() {
     assert_eq!(
         (r.status, json_of(&r)["error"].as_str()),
         (500, Some("external-proxy-error"))
-    );
-    assert_eq!(
-        &fake.calls()[..3],
-        [
-            Call::Renew("t1".into(), Some(60.0)),
-            Call::Release("t1".into()),
-            Call::Release(String::new()),
-        ]
     );
 }
 
@@ -1197,7 +1043,7 @@ async fn request_bodies_over_http() {
     let port = server.port();
     let head = |extra: &str| {
         format!(
-            "POST /instances/reserve HTTP/1.1\r\nHost: localhost:{port}\r\n{TOKEN_HEADER}: {}\r\n{extra}\r\n",
+            "POST /start HTTP/1.1\r\nHost: localhost:{port}\r\n{TOKEN_HEADER}: {}\r\n{extra}\r\n",
             read_token(server.token_file()).unwrap()
         )
     };
@@ -1207,7 +1053,7 @@ async fn request_bodies_over_http() {
     assert_eq!(reply.status, 413);
     assert!(reply.body.contains("payload-too-large"));
 
-    let body = r#"{"owner": "chunky"}"#;
+    let body = r#"{"profileId": "chunky"}"#;
     let chunked = format!(
         "{}{:x}\r\n{}\r\n{:x}\r\n{}\r\n0\r\n\r\n",
         head("Transfer-Encoding: chunked\r\n"),
@@ -1235,15 +1081,15 @@ async fn request_bodies_over_http() {
     );
     assert_eq!(send(port, smuggle.into_bytes()).await.status, 400);
     assert_eq!(send(port, b"NONSENSE\r\n\r\n".to_vec()).await.status, 400);
-    let owners: Vec<String> = fake
+    let profiles: Vec<String> = fake
         .calls()
         .into_iter()
         .filter_map(|c| match c {
-            Call::Reserve(req) => Some(req.owner),
+            Call::Start(req) => req.profile_id,
             _ => None,
         })
         .collect();
-    assert_eq!(owners, ["chunky", "chunky"]);
+    assert_eq!(profiles, ["chunky", "chunky"]);
     cancel.cancel();
 }
 
@@ -1382,7 +1228,7 @@ fn reply_parsing() {
 
 /// The app's wiring (API.md): the real manager behind the real control server. The bound port
 /// reaches the manager's statuses and snapshot, and the answers come from the manager (its own
-/// validation, the lease book, the group-health mapping). No engine starts: there are no servers.
+/// validation, the group-health mapping). No engine starts: there are no servers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_manager_behind_the_control_server() {
     use crate::manager::{EngineChoice, ProfileSource, ProxyManager, ProxyProfile};
@@ -1438,8 +1284,6 @@ async fn real_manager_behind_the_control_server() {
         (connect.status, connect.body.trim()),
         (400, "profileId is required for connect/trigger")
     );
-    let reserve = call("POST", "/instances/reserve?owner=bot").await.unwrap();
-    assert_eq!(reserve.status, 503);
     let group = call("POST", "/profiles/healthcheck?groupId=g")
         .await
         .unwrap();

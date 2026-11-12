@@ -8,16 +8,13 @@ pub enum ProxyError {
     /// 400: bad input (the old `RangeError`).
     #[error("{0}")]
     BadRequest(String),
-    /// 403: unknown or expired lease token.
-    #[error("{0}")]
-    Forbidden(String),
     /// 404.
     #[error("{0}")]
     NotFound(String),
-    /// 409: a lease, a busy slot or port.
+    /// 409: a busy slot or port.
     #[error("{0}")]
     Conflict(String),
-    /// 503: no free healthy route.
+    /// 503: the manager is shutting down.
     #[error("{0}")]
     Unavailable(String),
     /// A failed server-group health check, with the status of its category.
@@ -40,7 +37,6 @@ impl ProxyError {
     pub fn http_status(&self) -> u16 {
         match self {
             ProxyError::BadRequest(_) => 400,
-            ProxyError::Forbidden(_) => 403,
             ProxyError::NotFound(_) => 404,
             ProxyError::Conflict(_) => 409,
             ProxyError::Unavailable(_) => 503,
@@ -63,7 +59,6 @@ impl ProxyError {
     pub fn detail(&self) -> &str {
         match self {
             ProxyError::BadRequest(d)
-            | ProxyError::Forbidden(d)
             | ProxyError::NotFound(d)
             | ProxyError::Conflict(d)
             | ProxyError::Unavailable(d)
@@ -105,7 +100,6 @@ impl ProxyError {
         let key = match self {
             ProxyError::Refused(msg) => return msg.clone(),
             ProxyError::BadRequest(_) => "proxies.error.badRequest",
-            ProxyError::Forbidden(_) => "proxies.error.forbidden",
             ProxyError::NotFound(_) => "proxies.error.notFound",
             ProxyError::Conflict(_) => "proxies.error.conflict",
             ProxyError::Unavailable(_) => "proxies.error.unavailable",
@@ -161,7 +155,6 @@ mod tests {
                 400,
                 "external-proxy-error",
             ),
-            (ProxyError::Forbidden("f".into()), 403, "forbidden"),
             (
                 ProxyError::NotFound("n".into()),
                 404,
@@ -178,11 +171,11 @@ mod tests {
         for (err, status, code) in cases {
             assert_eq!((err.http_status(), err.code()), (status, code));
         }
-        let app: AppError = ProxyError::Conflict("Slot 2 is already leased".into()).into();
+        let app: AppError = ProxyError::Conflict("Slot 2 is busy".into()).into();
         assert_eq!(app.kind, ErrorKind::Conflict);
         let msg = app.user_msg();
         assert_eq!(msg.key, "proxies.error.conflict");
-        assert_eq!(msg.args[0].1, "Slot 2 is already leased");
+        assert_eq!(msg.args[0].1, "Slot 2 is busy");
         let app: AppError = ProxyError::Engine("x".into()).into();
         assert_eq!(app.kind, ErrorKind::Internal);
         assert_eq!(ProxyError::Upstream(504, "t".into()).to_string(), "t");

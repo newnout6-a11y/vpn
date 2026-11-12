@@ -1,5 +1,8 @@
-//! «Kill switch»: level (instant, applied and verified by the backend; U-04 shows «Применяем…»,
-//! the failure reason and an unconfirmed state) and the exceptions editor.
+//! «Kill switch»: three choices with one line each (research killswitch 5.2), applied and
+//! verified by the backend (U-04 shows «Применяем…», the failure reason and an unconfirmed
+//! state), a Details panel for what concerns few people, and the exceptions editor. "Always" is
+//! offered only where the helper service keeps it safe; until then it shows disabled with one
+//! calm line and a stored "Always" works as "If the VPN drops" (owner decision 12.11.2026).
 use dioxus::prelude::*;
 
 use super::model::{ExceptionKind, KillSwitchLevel, ProtectionStatus, RoutingMode};
@@ -11,15 +14,35 @@ use crate::widgets::{
     Tone, UiError, use_job,
 };
 
-/// What `level` does in `routing`: in Proxy mode the hold is the system proxy left on the
-/// engine's port, and strict needs the Tunnel (WFP), so the Tunnel texts would promise too much.
-pub(super) fn level_desc_key(level: KillSwitchLevel, routing: RoutingMode) -> &'static str {
-    match (level, routing) {
-        (KillSwitchLevel::Off, _) => "onboarding.killSwitchOffDesc",
-        (KillSwitchLevel::Standard, RoutingMode::Hard) => "onboarding.killSwitchStandardDesc",
-        (KillSwitchLevel::Strict, RoutingMode::Hard) => "onboarding.killSwitchStrictDesc",
-        (KillSwitchLevel::Standard, RoutingMode::Soft) => "ui.wizard.protection.standardSoft",
-        (KillSwitchLevel::Strict, RoutingMode::Soft) => "ui.wizard.protection.strictSoft",
+/// The choices in page order.
+const LEVELS: [KillSwitchLevel; 3] = [
+    KillSwitchLevel::Off,
+    KillSwitchLevel::Standard,
+    KillSwitchLevel::Strict,
+];
+
+/// Name and one line of a choice. In proxy mode "If the VPN drops" gets its one neutral
+/// addition (the hold is the system proxy), nothing else.
+pub(super) fn choice_keys(
+    level: KillSwitchLevel,
+    routing: RoutingMode,
+) -> [Option<&'static str>; 3] {
+    match level {
+        KillSwitchLevel::Off => [
+            Some("ui.settings.killSwitch.off"),
+            Some("ui.settings.killSwitch.offLine"),
+            None,
+        ],
+        KillSwitchLevel::Standard => [
+            Some("ui.settings.killSwitch.onDrop"),
+            Some("ui.settings.killSwitch.onDropLine"),
+            (routing == RoutingMode::Soft).then_some("ui.settings.killSwitch.onDropProxy"),
+        ],
+        KillSwitchLevel::Strict => [
+            Some("ui.settings.killSwitch.always"),
+            Some("ui.settings.killSwitch.alwaysLine"),
+            None,
+        ],
     }
 }
 
@@ -51,9 +74,10 @@ pub(super) fn KillSwitch() -> Element {
     let job = use_job::<()>();
     let mut pending = use_signal(|| None::<KillSwitchLevel>);
     let kill = ctx.kill.read().clone();
+    let routing = ctx.view().routing_mode;
     let applying = job.running();
     let shown = pending().filter(|_| applying).unwrap_or(kill.level);
-    let set_level = move |level: KillSwitchLevel| {
+    let set_level = use_callback(move |level: KillSwitchLevel| {
         if level == ctx.kill.peek().level {
             return;
         }
@@ -67,7 +91,7 @@ pub(super) fn KillSwitch() -> Element {
             }
             result
         });
-    };
+    });
     let error = match job.last() {
         Some(Err(err)) => Some(UiError {
             kind: err.kind,
@@ -77,28 +101,24 @@ pub(super) fn KillSwitch() -> Element {
         _ => None,
     };
     let (tone, status_text) = status_badge(&kill.status);
+    let details = kill.firewall_blocks_outbound || kill.hyperv_unfiltered;
     rsx! {
         Panel { title: t!("settings.killSwitch"), id: "set-kill-switch",
-            div { class: "w-row",
-                div { class: "w-row-text",
-                    span { class: "w-row-label", {t!("settings.killSwitchDescription")} }
-                    p { class: "w-row-hint", {t!(level_desc_key(shown, ctx.view().routing_mode))} }
-                }
-                div { class: "w-row-control",
-                    if applying {
-                        span { class: "set-applying", role: "status", Spinner {} {t!("ui.settings.killSwitch.applying")} }
-                    }
-                    Segmented {
-                        label: t!("settings.killSwitch"),
-                        options: vec![
-                            (KillSwitchLevel::Off, t!("settings.killSwitchOff")),
-                            (KillSwitchLevel::Standard, t!("settings.killSwitchStandard")),
-                            (KillSwitchLevel::Strict, t!("settings.killSwitchStrict")),
-                        ],
-                        value: shown,
+            div { class: "set-choices", role: "radiogroup", aria_label: t!("settings.killSwitch"),
+                for level in LEVELS {
+                    Choice {
+                        key: "{level:?}",
+                        level,
+                        routing,
+                        checked: shown == level,
+                        // Never offered where it cannot be kept safe; a stored one stays shown.
+                        unavailable: level == KillSwitchLevel::Strict && !kill.always_available,
                         disabled: applying,
-                        on_change: set_level,
+                        on_pick: set_level,
                     }
+                }
+                if applying {
+                    span { class: "set-applying", role: "status", Spinner {} {t!("ui.settings.killSwitch.applying")} }
                 }
             }
             ActionError { error }
@@ -109,10 +129,60 @@ pub(super) fn KillSwitch() -> Element {
                     span { class: "set-hint", {tr(reason)} }
                 }
             }
-            if kill.firewall_blocks_outbound {
-                p { class: "set-result is-warn", role: "alert", {t!("ui.settings.killSwitch.firewallBlock")} }
+            if details {
+                details { class: "set-details",
+                    summary { {t!("ui.settings.killSwitch.details")} }
+                    if kill.firewall_blocks_outbound {
+                        p { class: "set-hint", {t!("ui.settings.killSwitch.firewallBlock")} }
+                    }
+                    if kill.hyperv_unfiltered {
+                        p { class: "set-hint", {t!("ui.settings.killSwitch.hyperv")} }
+                    }
+                }
             }
             Exceptions {}
+        }
+    }
+}
+
+/// One choice: a native radio (keyboard and screen readers for free), its name and line.
+#[component]
+fn Choice(
+    level: KillSwitchLevel,
+    routing: RoutingMode,
+    checked: bool,
+    unavailable: bool,
+    disabled: bool,
+    on_pick: EventHandler<KillSwitchLevel>,
+) -> Element {
+    let [name, line, extra] = choice_keys(level, routing);
+    // A stored "Always" without the service: it runs as "If the VPN drops" meanwhile.
+    let note = match (unavailable, checked) {
+        (true, true) => Some("ui.settings.killSwitch.alwaysAsOnDrop"),
+        (true, false) => Some("ui.settings.killSwitch.needsService"),
+        _ => None,
+    };
+    rsx! {
+        label { class: "set-choice", class: if unavailable { "is-unavailable" },
+            input {
+                r#type: "radio",
+                name: "kill-switch-level",
+                checked,
+                disabled: disabled || unavailable,
+                onchange: move |_| on_pick.call(level),
+            }
+            span { class: "set-choice-text",
+                span { class: "set-choice-name", {name.map(|k| t!(k))} }
+                span { class: "set-choice-line",
+                    {line.map(|k| t!(k))}
+                    if let Some(extra) = extra {
+                        {format!(" {}", t!(extra))}
+                    }
+                }
+                if let Some(note) = note {
+                    span { class: "set-choice-note", {t!(note)} }
+                }
+            }
         }
     }
 }
@@ -141,10 +211,9 @@ fn Exceptions() -> Element {
                             div { class: "set-list-text",
                                 span { class: "set-list-title", "{item.label}" }
                                 span { class: "set-list-sub swiss-mono", title: "{item.value}", "{item.value}" }
-                            }
-                            if item.broad {
-                                Badge { tone: Tone::Warn, title: t!("ui.settings.killSwitch.broadHint"),
-                                    {t!("ui.settings.killSwitch.broad")}
+                                // A broad network is allowed: a quiet hint, no dialog (research 5.8).
+                                if item.broad {
+                                    span { class: "set-hint", {t!("ui.settings.killSwitch.broadHint")} }
                                 }
                             }
                             IconButton {

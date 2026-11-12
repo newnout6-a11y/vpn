@@ -101,6 +101,7 @@ pub type OwnerCheck = Arc<dyn Fn() -> bool + Send + Sync>;
         -> Result<StartReceipt, TunError>;
     async fn switch_upstream(&self, next: StartRequest, cancel: CancellationToken, is_owner: OwnerCheck)
         -> Option<SwitchReceipt>;                                    // None = not in place: restart_protected
+    async fn retry_now(&self) -> bool { false }                       // ks-a: the paused session retries now
     fn status(&self) -> watch::Receiver<TunStatus>;
     fn subscribe(&self) -> broadcast::Receiver<TunnelEvent>;         // on Lagged: resync from status()
     fn last_exit(&self) -> Option<ExitInfo>;
@@ -140,7 +141,7 @@ impl Fsm { new, snapshot, can_start, can_rotate,
     op_changed(&OpMeta, ..), fault(FaultState, ..), keep_previous(OpId, ..), runtime(&TunStatusKind, ..),
     native_start_began(u64), native_start_finished(u64, bool, ..), native_failover(u64, ..),
     upstream_began(u64, ..), upstream_finished(u64, bool, ..),
-    native_stop_finished(u64, bool, &StopReceipt, ..) }
+    native_stop_finished(u64, bool, &StopReceipt, ..), paused(..) /* ks-a: Blocked + reconnecting */ }
                                        // `..` = the current Option<Evidence>; mutators return Result<(), Invalid>
                                        // except `fault` (always accepted); native_failover: outside an operation
                                        // the failover's run (current generation) may confirm on its own evidence,
@@ -322,8 +323,34 @@ pub trait Notifier: Send + Sync { fn notify(&self, notice: Notice, kind: NoticeK
 #[derive(Clone)] pub struct LifecycleDeps { pub runtime: Arc<dyn Runtime>, pub profiles: Arc<dyn ProfileSource>,
     pub soft: Arc<dyn SoftProxy>, pub monitor: Arc<dyn Monitor>, pub forensics: Arc<dyn Forensics>,
     pub proxies: Arc<dyn ExternalProxies>, pub notifier: Arc<dyn Notifier>, pub history: History,
-    pub settings: Arc<Store<Settings>> }
+    pub settings: Arc<Store<Settings>>,
+    pub always_available: Arc<AtomicBool> /* "Always" kept safe (helper service); false today */,
+    pub foreign_vpn: Arc<dyn ForeignVpn> }
+impl LifecycleDeps { pub fn kill_switch(&self) -> KillSwitchLevel }   // stored level, effective
+pub trait ForeignVpn: Send + Sync { fn full_tunnel(&self) -> Option<String>; }  // blocking adapter walk
+pub struct SystemForeignVpn;                                         // winnet foreign_tun, severity Conflict
+// ks-a: the kill switch of the running session and its paused state
+pub struct SessionGuard { pub level: KillSwitchLevel, pub foreign_vpn: Option<String> }
+impl SessionGuard { pub fn new(level, soft: bool, foreign_vpn: Option<String>) -> Self; pub fn pauses(&self) -> bool }
+pub struct Pause { pub since: UnixMs, pub next_attempt: Option<UnixMs>, pub key_rejected: bool }
+pub struct KillSwitchView { pub pause: Option<Pause>, pub foreign_vpn: Option<String> }  // Default
+impl Lifecycle { pub fn kill_switch(&self) -> watch::Receiver<KillSwitchView>;
+    pub async fn retry_now(&self) -> bool }                          // «Подключить»: false = nothing paused
 ```
+Kill switch (ks-a, research killswitch §5): a connect decides the session's guard: the level in
+force (`LifecycleDeps::kill_switch`; proxy capture never holds "Always": it acts as "If the VPN
+drops"), `Off` when another full-tunnel VPN carries the default route (proxy capture only: a
+Tunnel connect is refused then; `KillSwitchView::foreign_vpn` names it while the session lives).
+The request carries that level. A drop of a session whose guard pauses (runtime `Restarting`
+or `KillSwitchActive` outside an operation; `KillSwitchActive` always counts as held) keeps the
+session open and paused: FSM `paused` (`Blocked` + reconnecting, a later native success confirms
+on evidence), `KillSwitchView::pause` with the next attempt (`RestartScheduled`) and
+`key_rejected` (outbound fault `RealityKeyMismatch`), Soft tweaks stay on the port. A planned
+reconnect that fails while the runtime holds (its last status `Restarting` / `KillSwitchActive`)
+pauses too, without the recovery stop. The pause ends with a native reconnect (`restored` only
+when the user was told), the sibling of a failover, a stop (row `user-stop` etc.) or quit. One
+notice per outage after 10 s (`paused`, `keyRejected` when the key was rejected, `reconnecting`
+when the guard does not pause), a second one only for a key rejected later.
 Admission: a strictly higher `Owner` pre-empts a running start; stops coalesce and win over
 everything except a strictly higher start; refusals are `Refused` with a `tunnel.lifecycle.lane.*`
 message. Engine / kill switch / stealth / public Wi-Fi come from `settings` at start time; the
@@ -342,19 +369,19 @@ then names the sibling); a stop drops it (the stop ended the sibling's run).
 Soft (NOADMIN.md §2): a Soft connect starts the runtime with `CaptureKind::Proxy` for either upstream,
 then `SoftProxy::apply("127.0.0.1:<SessionEndpoints::proxy_port>", Http)` and `is_configured` must read
 it back; only then is it published (FSM: engine + tweaks). A failed apply / read-back is a failed start
-with a row; the recovery stop rolls back what was applied and stops the engine. `strict` in Soft is
-`ConnError::Failed(Validation, tunnel.lifecycle.soft.strictUnavailable)` before anything is touched.
+with a row; the recovery stop rolls back what was applied and stops the engine. A stored
+`strict` runs as "If the VPN drops" in Soft (ks-a; no refusal).
 Disconnect / shutdown roll the tweaks back FIRST, then stop the engines. A Hard start rolls leftover
 tweaks back first (refused rollback = failed start, L-15); a running engine of an earlier run gets the
 full stop. Switch / restarts keep the capture; after a new run the tweaks follow its port (normally
-unchanged: kept, read back). Engine lost for good (runtime `Stopped` / `KillSwitchActive` outside an
-operation): the session ends; kill switch `off` -> tweaks rolled back at once + notice `softRestored`;
-`standard` -> tweaks stay on the dead port, state `blocked`, notice `crashBlocked`, until reconnect /
-disconnect. Crash restart (w3-automation): with kill switch `off` a wait longer than the plain
-backoff (`RestartScheduled { delay }` > 10 s, i.e. a frozen server's quiet window) rolls the tweaks
-back at once (notice `softPaused` {seconds}) and the next run re-applies them before the state machine
-judges it (read-back failed: rolled back again, not connected, notice `softResumeFailed`); a short
-backoff or `standard` keeps them on the port.
+unchanged: kept, read back). Engine lost for good (runtime `Stopped` outside an operation, i.e. the
+guard does not pause): the session ends, the tweaks are rolled back at once with one notice
+`softRestored`; a held drop is the pause above (tweaks stay on the port). Crash restart
+(w3-automation): with a guard that does not pause a wait longer than the plain backoff
+(`RestartScheduled { delay }` > 10 s, i.e. a frozen server's quiet window) rolls the tweaks back
+at once and the next run re-applies them before the state machine judges it (read-back failed:
+rolled back again, not connected, notice `softResumeFailed`); a short backoff or a pausing
+guard keeps them on the port.
 
 ## `runtime` — the actor and its seams
 ```rust
@@ -366,6 +393,7 @@ impl TunnelHandle { pub fn spawn(deps: RuntimeDeps) -> Self }        // inside a
     pub failover: Option<Arc<dyn Failover>>,
     pub confirmations: Option<Arc<dyn Confirmations>>, pub timings: Timings }
 pub struct Timings { pub ready, capture_ready, exit, release: Duration, pub backoff: [Duration; 3] /* 2/5/10 s */,
+    pub slow_retry: [Duration; 3] /* 60/120/300 s, then the last: paused kill switch (ks-a) */,
     pub freeze /* 130 s: crashed server with a fault stays quiet */,
     pub stable /* 30 s */, proxy_watch /* 5 s */, proxy_probe, proxy_listen, egress_watch /* 15 s */,
     evidence_age /* 45 s */, capture_watch /* 15 s */, confirm_candidate, confirm_previous: Duration } // Default
@@ -450,9 +478,17 @@ Behaviour the caller can rely on: one task serialises every operation (a start w
 flight); `stop()` cancels a start / switch / restart in flight and waits for its compensation;
 concurrent stops share one receipt.
 Crash policy: auto-restart (origin `Recovery`, `Restarting{n,3}` first, backoff 2 / 5 / 10 s, budget
-reset after 30 s stable), then failover once (when a `Failover` is given), then terminal: kill
-switch off -> release + `Stopped`; strict, or standard with auto-restart off -> keep blocking
-(`KillSwitchActive`); standard + budget exhausted -> release + `Stopped`. Freeze window (RU
+reset after 30 s stable), then failover once (when a `Failover` is given), then: kill switch off
+-> release + `Stopped`; on (`standard` / `strict` as in force) with auto-restart off -> keep
+blocking (`KillSwitchActive`, no retry); on + budget spent -> keep blocking and retry slowly
+(ks-a, no silent release): `KillSwitchActive`, then `RestartScheduled { delay }` with
+`Timings::slow_retry` 60 / 120 / 300 s, then every 300 s, never shorter than the freeze window;
+each failed slow retry announces `KillSwitchActive` + `RestartScheduled` again. A protected
+restart / restart with last / adaptive restart whose start fails while the kill switch holds the
+protection (`Adapting`, guard != Off) counts as a drop: no full stop, the crash policy above
+runs (the call still answers its error). `Runtime::retry_now` (default `false`; `TunnelHandle`:
+`true` when a crashed or held session with a last start exists and no operation runs) runs that
+recovery start at once, whatever the auto-restart setting. Freeze window (RU
 discipline): when a Direct VPN session crashes with an outbound fault on record (sing-box's
 `recent_fault`, in a slot session the active slot's `Slots::recent_fault`), restarts of that same
 server wait at least `Timings::freeze` (130 s) from the crash instead of the plain backoff, and the
@@ -526,21 +562,20 @@ cleaning up in the background. `Done::warnings` / `ConnError::warnings` are extr
 
 ## What callers must handle
 - **Notices** arrive only through `Notifier::notify(notice, kind)` (title / body are `Msg`s under
-  `tunnel.lifecycle.notice.<name>`): `connected`, `restored` (runtime reconnect), `disconnected`,
-  `stopFailed`, `stopped` (unexpected end; body = outcome headline), `crashRestarting`
-  (`attempt`, `max`), `crashBlocked`, `failover` (`name`: the sibling that started, `from`: the
+  `tunnel.lifecycle.notice.<name>`): `connected`, `restored` (a runtime reconnect after an outage
+  the user was told about), `disconnected`, `stopFailed`, `stopped` (unexpected end; body =
+  outcome headline), `paused` / `keyRejected` / `reconnecting` (one per outage, after 10 s; see
+  the kill-switch paragraph), `failover` (`name`: the sibling that started, `from`: the
   crashed server; once per failover, when the session follows the sibling; body `body` = outbound
   faults on record, `bodyRestarts` = the restart budget spent, `bodySwitched` = no session named
   the crashed server any more; "switched to", never "connected": the state confirms the run),
   `keptBlocked` / `keptSoftBlocked` (a `keep_protection` stop left the
   kill switch blocking), `restartFailed` (body = runtime warning),
   `internalError` (a lane effect panicked: the lane is released, A-01; whatever the start brought
-  up is stopped by the recovery stop), `softRestored` (a Soft engine was lost for good with the kill
-  switch off: the tweaks were rolled back, programs connect directly). Proxy mode never claims
-  more than it does: a Soft connect sends `softConnected` instead of `connected` (only programs
-  that use the system proxy go through the VPN), a Soft engine lost with the kill switch
-  `standard` sends `softBlocked` instead of `crashBlocked` (no firewall: the system proxy points
-  at the dead port). Rotation, schedule and tray toasts are their owners'. The notifier applies the user's
+  up is stopped by the recovery stop), `softRestored` (a Soft engine was lost for good and the
+  runtime let it go: the tweaks were rolled back, programs connect directly; the only notice of
+  that end). A Soft connect sends `softConnected` instead of `connected`. Rotation, schedule and
+  tray toasts are their owners'. The notifier applies the user's
   `NoticeKind` switches; the lifecycle does not.
 - **`maintenance`** past the 120 s lane budget: the action is dropped, the caller gets
   `ConnError::Timeout` (`tunnel.lifecycle.lane.maintenanceTimeout`) and the state reads `unknown`

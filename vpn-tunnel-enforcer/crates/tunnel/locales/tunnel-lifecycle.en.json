@@ -43,8 +43,8 @@
           "body": "All traffic goes through the VPN."
         },
         "restored": {
-          "title": "Protection restored",
-          "body": "The VPN connection was restored after attempt {{attempt}}."
+          "title": "VPN is back",
+          "body": "The internet goes through the VPN again."
         },
         "disconnected": {
           "title": "Protection off",
@@ -64,13 +64,17 @@
           "title": "Connection stopped — programs stay blocked",
           "body": "The server did not pass the connection check. The system proxy still points at the stopped engine: programs that use it get no connection until you turn protection on again or off. Other programs connect directly."
         },
-        "crashBlocked": {
-          "title": "sing-box crashed",
-          "body": "The firewall blocks traffic so your IP does not leak. Turn protection on again."
+        "paused": {
+          "title": "Internet paused",
+          "body": "The VPN is reconnecting. Programs wait for it, or choose Continue without VPN."
         },
-        "crashRestarting": {
-          "title": "sing-box crashed",
-          "body": "Restarting (attempt {{attempt}}/{{max}})."
+        "keyRejected": {
+          "title": "The server rejects the key",
+          "body": "The internet is paused. Update the key or the subscription, or choose Continue without VPN."
+        },
+        "reconnecting": {
+          "title": "The VPN is reconnecting",
+          "body": "Meanwhile programs connect directly, without the VPN."
         },
         "failover": {
           "title": "Server changed",

@@ -6,8 +6,8 @@ use super::run::LoopCmd;
 use super::{ProxyManager, ProxyProfile};
 use crate::model::{
     Aggregate, BatchStartResult, FRESH_WINDOW_MS, GroupHealth, InstanceStatus, Instances,
-    InstancesBatch, PrewarmResult, ProfileRow, ProxyError, ProxyOps, ProxyStatus, Released,
-    Reservation, ReserveRequest, StartRequest, StopReason, StopScope, Unlimited, prewarm_count,
+    InstancesBatch, PrewarmResult, ProfileRow, ProxyError, ProxyOps, ProxyStatus, StartRequest,
+    StopReason, Unlimited, prewarm_count,
 };
 use crate::slot::Slot;
 
@@ -22,7 +22,6 @@ impl ProxyOps for ProxyManager {
     }
 
     async fn status(&self, slot: Slot) -> ProxyStatus {
-        self.inner.reg.lock().leases.sweep(now_ms());
         self.inner.proxy_status(slot)
     }
 
@@ -30,8 +29,7 @@ impl ProxyOps for ProxyManager {
         let inner = &self.inner;
         let now = now_ms();
         let instances = {
-            let mut reg = inner.reg.lock();
-            reg.leases.sweep(now);
+            let reg = inner.reg.lock();
             // Kept from the old API: reading the list re-probes running slots not checked for
             // a minute (it is also what heals a parked slot whose exit came back).
             for state in reg.slots.values() {
@@ -111,12 +109,7 @@ impl ProxyOps for ProxyManager {
     }
 
     async fn add(&self, profile_id: String) -> Result<ProxyStatus, ProxyError> {
-        let slot = self.inner.add_op(profile_id, false).await?;
-        Ok(self.inner.proxy_status(slot))
-    }
-
-    async fn borrow(&self, profile_id: String) -> Result<ProxyStatus, ProxyError> {
-        let slot = self.inner.add_op(profile_id, true).await?;
+        let slot = self.inner.add_op(profile_id).await?;
         Ok(self.inner.proxy_status(slot))
     }
 
@@ -138,41 +131,9 @@ impl ProxyOps for ProxyManager {
         Ok(self.inner.proxy_status(slot))
     }
 
-    async fn stop_all(&self, scope: StopScope, reason: StopReason) -> ProxyStatus {
-        self.inner.stop_all_op(scope, reason).await;
+    async fn stop_all(&self, reason: StopReason) -> ProxyStatus {
+        self.inner.stop_all_op(reason).await;
         self.inner.proxy_status(Slot::DEFAULT)
-    }
-
-    async fn reserve(&self, req: ReserveRequest) -> Result<Reservation, ProxyError> {
-        let now = now_ms();
-        let reservation = {
-            let mut reg = self.inner.reg.lock();
-            let routes = reg.leasable(now);
-            reg.leases.reserve(&req, &routes, now)?
-        };
-        self.inner.lease_wake.notify_one();
-        Ok(reservation)
-    }
-
-    async fn renew(
-        &self,
-        lease_token: String,
-        ttl_secs: Option<f64>,
-    ) -> Result<Reservation, ProxyError> {
-        let now = now_ms();
-        let renewed = {
-            let mut reg = self.inner.reg.lock();
-            let routes = reg.instances(now);
-            reg.leases.renew(&lease_token, ttl_secs, &routes, now)
-        };
-        self.inner.lease_wake.notify_one();
-        renewed
-    }
-
-    async fn release(&self, lease_token: String) -> Result<Released, ProxyError> {
-        let released = self.inner.reg.lock().leases.release(&lease_token, now_ms());
-        self.inner.lease_wake.notify_one();
-        released
     }
 }
 

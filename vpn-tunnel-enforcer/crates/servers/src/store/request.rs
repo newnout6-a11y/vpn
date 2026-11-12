@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use vpnte_base::{AppError, AppResult, Msg};
 use vpnte_core::secret::Secret;
+use vpnte_profiles::device;
 use vpnte_profiles::model::Profile;
 
 use super::{Servers, group_not_found, server_not_found};
@@ -19,6 +20,24 @@ impl Servers {
                 return Err(manual_no_request());
             }
             group.send_hwid = on;
+            Ok(())
+        })
+    }
+
+    /// Gives a subscription group its own fresh device ID (`own`; the provider then counts this
+    /// PC as a new device) or takes it back to this PC's ID (undo). Off-switch groups keep the
+    /// choice for when the HWID is turned on.
+    pub fn set_own_device_id(&self, id: &GroupId, own: bool) -> AppResult<()> {
+        self.update(|doc| {
+            let group = doc.group(id).ok_or_else(group_not_found)?;
+            if group.is_manual() {
+                return Err(manual_no_request());
+            }
+            if own {
+                doc.device_ids.insert(id.clone(), device::random_hwid());
+            } else {
+                doc.device_ids.remove(id);
+            }
             Ok(())
         })
     }

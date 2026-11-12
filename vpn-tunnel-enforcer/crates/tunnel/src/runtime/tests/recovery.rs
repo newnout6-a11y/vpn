@@ -85,7 +85,8 @@ async fn unverified_release_continues_on_a_fresh_identity() {
 }
 
 /// A pre-cancelled restart has no effect; a failed start after the preserved stop ends in a
-/// full stop that releases the protection.
+/// full stop that releases the protection when the kill switch is off, and counts as a drop
+/// when it pauses (ks-a, research 5.3): nothing released, the crash policy restarts.
 #[tokio::test]
 async fn cancelled_or_failed_restart() {
     let w = World::new();
@@ -103,6 +104,29 @@ async fn cancelled_or_failed_restart() {
     assert_eq!(err.user_msg().key, "tunnel.runtime.restartCancelled");
     assert_eq!(w.log().len(), before);
 
+    let mut events = h.subscribe();
+    w.ready_fail.store(true, Ordering::SeqCst);
+    let err = h
+        .restart_protected("x".into(), local_req(), RestartOptions::default())
+        .await
+        .unwrap_err();
+    assert!(err.user_msg().key.starts_with("tunnel.runtime.tunSetup"));
+    assert_eq!(
+        w.count("release"),
+        0,
+        "a planned reconnect that fails is a drop"
+    );
+    let restarting = TunnelEvent::Status(TunStatusKind::Restarting { attempt: 1, max: 3 });
+    until(&mut events, |e| *e == restarting).await;
+    assert!(!h.status().borrow().running);
+    h.stop(StopOptions::default()).await;
+
+    let w = World::new();
+    *w.guard.lock() = vpnte_base::types::KillSwitchLevel::Off;
+    let h = spawn(&w);
+    h.start(local_req(), CancellationToken::new())
+        .await
+        .unwrap();
     w.ready_fail.store(true, Ordering::SeqCst);
     let err = h
         .restart_protected("x".into(), local_req(), RestartOptions::default())
@@ -251,10 +275,11 @@ async fn stop_cancels_a_pending_restart() {
 }
 
 /// Failed recovery starts consume the budget (B-43 fixed: the chain does not silently end);
-/// exhausted with a standard kill switch: protection released, `Stopped`.
+/// exhausted with the kill switch off: protection released, `Stopped`.
 #[tokio::test]
-async fn exhausted_budget_releases_a_standard_kill_switch() {
+async fn exhausted_budget_releases_with_the_kill_switch_off() {
     let w = World::new();
+    *w.guard.lock() = vpnte_base::types::KillSwitchLevel::Off;
     let h = spawn(&w);
     let mut events = h.subscribe();
     h.start(local_req(), CancellationToken::new())
@@ -271,6 +296,65 @@ async fn exhausted_budget_releases_a_standard_kill_switch() {
     }
     assert!(w.count("release") >= 1);
     assert!(!h.status().borrow().running);
+}
+
+/// ks-a (research 5.4 "no silent release"): with "If the VPN drops" a spent budget keeps the
+/// block (`KillSwitchActive`) and schedules slow retries; the first one that works runs again,
+/// and nothing was released on the way.
+#[tokio::test]
+async fn exhausted_budget_keeps_the_pause_and_retries_slowly() {
+    let w = World::new();
+    let mut d = deps(&w);
+    d.timings.slow_retry = [100, 200, 300].map(Duration::from_millis);
+    let h = TunnelHandle::spawn(d);
+    let mut events = h.subscribe();
+    h.start(local_req(), CancellationToken::new())
+        .await
+        .unwrap();
+    w.ready_fail.store(true, Ordering::SeqCst);
+    w.core(0).crash();
+    let held = TunnelEvent::Status(TunStatusKind::KillSwitchActive);
+    until(&mut events, |e| *e == held).await;
+    let slow = TunnelEvent::RestartScheduled {
+        delay: Duration::from_millis(100),
+    };
+    until(&mut events, |e| *e == slow).await;
+    let second = TunnelEvent::RestartScheduled {
+        delay: Duration::from_millis(200),
+    };
+    until(&mut events, |e| *e == second).await;
+    assert_eq!(w.count("release"), 0, "never released silently");
+    w.ready_fail.store(false, Ordering::SeqCst);
+    until(&mut events, |e| {
+        matches!(e, TunnelEvent::StartFinished { ok: true, .. })
+    })
+    .await;
+    assert!(h.status().borrow().running);
+    assert_eq!(w.count("release"), 0);
+}
+
+/// ks-a «Подключить»: a paused session retries at once, whatever the auto-restart setting; with
+/// nothing paused there is nothing to retry.
+#[tokio::test]
+async fn retry_now_runs_the_paused_session_at_once() {
+    let w = World::new();
+    w.auto_restart.store(false, Ordering::SeqCst);
+    let h = spawn(&w);
+    assert!(!h.retry_now().await, "idle");
+    let mut events = h.subscribe();
+    h.start(local_req(), CancellationToken::new())
+        .await
+        .unwrap();
+    w.core(0).crash();
+    let held = TunnelEvent::Status(TunStatusKind::KillSwitchActive);
+    until(&mut events, |e| *e == held).await;
+    assert!(h.retry_now().await);
+    until(&mut events, |e| {
+        matches!(e, TunnelEvent::StartFinished { ok: true, .. })
+    })
+    .await;
+    assert!(h.status().borrow().running);
+    assert_eq!(w.count("release"), 0);
 }
 
 /// Auto-restart off: the kill switch keeps blocking (`KillSwitchActive`), nothing released

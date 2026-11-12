@@ -247,6 +247,7 @@ impl Actor {
             self.restart_due = None;
             self.attempt = 0;
             self.failover_tried = false;
+            self.slow = 0;
         }
         let prior = match &self.phase {
             Phase::Adapting(plan) => Some(plan.clone()),

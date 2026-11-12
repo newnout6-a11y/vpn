@@ -28,7 +28,8 @@ pub fn spawn(shared: &Arc<Shared>) {
         settings: shared.backend.protection.read(|d| d.settings.clone()),
         wfp: None,
     };
-    publish(&shared.kill, kill_switch_view(&status, &snapshot));
+    let always = tunnel.as_deref().is_some_and(|t| t.always_available());
+    publish(&shared.kill, kill_switch_view(&status, &snapshot, always));
     tokio::spawn(run(shared.clone(), tunnel));
 }
 
@@ -68,7 +69,10 @@ async fn run(shared: Arc<Shared>, tunnel: Option<Arc<dyn TunnelOps>>) {
         publish_stores(&shared, &snap, sess.as_ref());
         if kill_dirty && let Some(tunnel) = &tunnel {
             let status = tunnel.kill_switch().await;
-            publish(&shared.kill, kill_switch_view(&status, &snap));
+            publish(
+                &shared.kill,
+                kill_switch_view(&status, &snap, tunnel.always_available()),
+            );
         }
         kill_dirty = tokio::select! {
             () = backend.shutdown.cancelled() => break,

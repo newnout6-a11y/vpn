@@ -363,6 +363,13 @@ pub trait Runtime: Send + Sync {
         is_owner: OwnerCheck,
     ) -> Option<SwitchReceipt>;
 
+    /// A paused session (its kill switch holds after a drop) retries its last start now instead
+    /// of after the scheduled wait («Подключить» in the paused state). `false`: nothing to retry
+    /// (no paused session, or an operation is in flight).
+    async fn retry_now(&self) -> bool {
+        false
+    }
+
     /// Status watch (current value via `borrow()`).
     fn status(&self) -> watch::Receiver<TunStatus>;
 

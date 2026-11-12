@@ -8,11 +8,12 @@ use futures_util::future::BoxFuture;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{AdaptiveMode, KillSwitchLevel, Level, Notice, Owner, UnixMs, now_ms};
+use vpnte_base::types::{AdaptiveMode, Level, Notice, Owner, UnixMs, now_ms};
 use vpnte_base::{ErrorKind, Msg};
 use vpnte_core::ops::{CorrelationId, OpId, OpKind, OpMeta, OpStatus, Source};
 
 use super::effects::{self, Captured, Ctx, Keep, StartReport, StopReport, Target, Up, Want};
+use super::pause::{KillSwitchView, Pause, SessionGuard};
 use super::session::{self, LiveSession, Provenance, SessionProfile, start_failure_row};
 use super::{
     ConnError, ConnectTarget, DEFAULT_TIMEOUT, DisconnectReq, Done, Lifecycle, LifecycleDeps,
@@ -26,6 +27,7 @@ use crate::outcome::{
 
 mod connected;
 mod events;
+mod paused;
 mod start;
 mod stop;
 
@@ -147,6 +149,14 @@ pub(super) enum Cmd {
     MaintenanceDone,
     /// A supervised effect panicked: nothing about the tunnel is proven any more (A-01).
     EffectPanicked,
+    /// «Подключить» in the paused state.
+    RetryNow {
+        reply: oneshot::Sender<bool>,
+    },
+    /// The pause that began at `since` lasted long enough to be worth one notice.
+    PauseNotice {
+        since: UnixMs,
+    },
     /// Answers once everything queued before it was handled.
     #[cfg(test)]
     Barrier(oneshot::Sender<()>),
@@ -204,6 +214,14 @@ struct Actor {
     /// A shutdown waits for the operation in flight before its own stop.
     shutdown: Option<oneshot::Sender<ShutdownReport>>,
     session: Option<LiveSession>,
+    /// What a drop does to the live session (decided at its connect).
+    guard: SessionGuard,
+    /// The internet is paused (the session's kill switch holds a drop).
+    paused: Option<paused::Paused>,
+    kill_switch: watch::Sender<KillSwitchView>,
+    /// The runtime's last status kind, also while an operation owned the lane (a failed planned
+    /// reconnect hands the session to the runtime's recovery).
+    last_kind: Option<TunStatusKind>,
     /// The runtime's failover run, from its `FailedOver` until the session follows it.
     failover: Option<events::Failover>,
     last_resume: Option<Instant>,
@@ -218,6 +236,7 @@ pub(super) fn spawn(deps: LifecycleDeps) -> Lifecycle {
     let (events, _) = broadcast::channel(64);
     let (busy, idle) = watch::channel(false);
     let (kept_by, kept) = watch::channel(None);
+    let (kill_switch, kill_switch_rx) = watch::channel(KillSwitchView::default());
     // Subscribe before the first command so no runtime event is missed.
     let runtime_events = deps.runtime.subscribe();
     let actor = Actor {
@@ -236,6 +255,10 @@ pub(super) fn spawn(deps: LifecycleDeps) -> Lifecycle {
         closed: false,
         shutdown: None,
         session: None,
+        guard: SessionGuard::default(),
+        paused: None,
+        kill_switch,
+        last_kind: None,
         failover: None,
         last_resume: None,
         last_network_change: None,
@@ -248,6 +271,7 @@ pub(super) fn spawn(deps: LifecycleDeps) -> Lifecycle {
         events,
         busy: idle,
         kept_by: kept,
+        kill_switch: kill_switch_rx,
     }
 }
 
@@ -384,6 +408,19 @@ impl Actor {
                 let kind = NoticeKind::ConnectionError;
                 self.notify(Level::Error, "internalError", kind, None);
             }
+            Cmd::RetryNow { reply } => {
+                if self.paused.is_none() || !self.lane_idle() {
+                    let _ = reply.send(false);
+                    return;
+                }
+                // The runtime answers once its command is taken; a run of its own in flight
+                // must not hold this actor (events keep flowing meanwhile).
+                let runtime = self.deps.runtime.clone();
+                tokio::spawn(async move {
+                    let _ = reply.send(runtime.retry_now().await);
+                });
+            }
+            Cmd::PauseNotice { since } => self.pause_notice(since),
             #[cfg(test)]
             Cmd::Barrier(done) => {
                 let _ = done.send(());

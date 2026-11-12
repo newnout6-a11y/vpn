@@ -83,9 +83,11 @@ async fn failed_finish_undoes_autostart_and_kill_switch() {
     assert!(!shared.backend.settings.read(|s| s.first_run_complete));
 }
 
-/// Strict cannot work in Soft: refused before anything is applied.
+/// ks-a: the wizard itself refuses nothing about the kill switch any more ("Always" is not a
+/// first-run choice); a picked "Always" is the tunnel's call, which without the helper service
+/// says so in one line, and nothing stays applied.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn strict_with_soft_is_refused() {
+async fn always_without_the_service_is_refused_by_the_tunnel() {
     let (shared, fake, _, _dir) = setup("wizard-strict", true, FakeAutostart::default());
     let mut strict = choices(Connection::LocalProxy, Routing::Soft);
     strict.kill_switch = KillSwitchLevel::Strict;
@@ -93,7 +95,8 @@ async fn strict_with_soft_is_refused() {
         .finish(strict)
         .await
         .expect_err("refused");
-    assert_eq!(err.kind, ErrorKind::Validation);
+    assert_eq!(err.kind, ErrorKind::Permission);
+    assert_eq!(err.user_msg().key, "app.tunnel.alwaysNeedsService");
     assert_eq!(*fake.level.lock(), KillSwitchLevel::Off);
 }
 

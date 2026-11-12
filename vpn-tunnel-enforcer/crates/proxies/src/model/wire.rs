@@ -40,22 +40,6 @@ pub mod iso_ms {
         let ts: jiff::Timestamp = text.parse().map_err(D::Error::custom)?;
         Ok(Some(ts.as_millisecond()))
     }
-
-    /// The same encoding for a timestamp that is always present.
-    pub mod required {
-        use serde::{Deserializer, Serializer, de::Error as _};
-        use vpnte_base::types::UnixMs;
-
-        /// Writes the timestamp as an ISO string.
-        pub fn serialize<S: Serializer>(value: &UnixMs, s: S) -> Result<S::Ok, S::Error> {
-            super::serialize(&Some(*value), s)
-        }
-
-        /// Reads an ISO string; `null` is an error.
-        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<UnixMs, D::Error> {
-            super::deserialize(d)?.ok_or_else(|| D::Error::custom("missing timestamp"))
-        }
-    }
 }
 
 /// The old `maxInstances` field: always `null` (no product limit). Serialized as `null`.
@@ -201,41 +185,6 @@ pub struct Instances {
 pub struct InstancesBatch {
     pub instances: Vec<InstanceStatus>,
     pub aggregate: Aggregate,
-}
-
-/// A granted lease (`/instances/reserve` and `/instances/renew`).
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Reservation {
-    /// Bearer secret of the lease (64 hex chars); never logged.
-    pub lease_token: String,
-    pub owner: String,
-    #[serde(with = "iso_ms::required")]
-    pub expires_at: UnixMs,
-    pub slot: Slot,
-    pub proxy_url: Option<String>,
-    pub egress_ip: Option<IpAddr>,
-    pub generation: u64,
-    pub instance: InstanceStatus,
-}
-
-impl std::fmt::Debug for Reservation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Reservation")
-            .field("owner", &self.owner)
-            .field("slot", &self.slot)
-            .field("expires_at", &self.expires_at)
-            .field("generation", &self.generation)
-            .finish_non_exhaustive()
-    }
-}
-
-/// `POST /instances/release`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Released {
-    /// Always `true`.
-    pub released: bool,
-    pub slot: Slot,
 }
 
 /// Persisted key health of a server, as the servers crate reports it.

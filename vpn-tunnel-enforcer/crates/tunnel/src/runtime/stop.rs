@@ -1,6 +1,7 @@
 //! Stop (tunnel-core §3.6) and protected restart (§3.7): the exit is proven by the process
 //! handle before anything is released; every cleanup step is independent and reported.
 use tokio_util::sync::CancellationToken;
+use vpnte_base::types::KillSwitchLevel;
 use vpnte_base::{AppError, ErrorKind, Msg};
 
 use std::sync::atomic::Ordering;
@@ -295,6 +296,13 @@ impl Actor {
                 Ok(receipt)
             }
             Ok(_) => Err(self.cancel_restart().await),
+            Err(err) if !op.is_cancelled() && self.held_by_kill_switch() => {
+                // A planned reconnect that fails counts as a drop (ks-a, research 5.3): the
+                // kill switch keeps the pause and the crash policy takes over.
+                tracing::warn!(error = %err, "planned reconnect failed: kept as a drop");
+                self.after_crash().await;
+                Err(err)
+            }
             Err(mut err) => {
                 let cancelled = op.is_cancelled();
                 let full = self.stop(StopOptions::default()).await;
@@ -310,6 +318,11 @@ impl Actor {
     async fn cancel_restart(&mut self) -> TunError {
         let full = self.stop(StopOptions::default()).await;
         cancelled_restart(full.warnings)
+    }
+
+    /// The failed start left the protection held (`Adapting`) under a kill switch that pauses.
+    fn held_by_kill_switch(&self) -> bool {
+        matches!(&self.phase, Phase::Adapting(plan) if plan.guard != KillSwitchLevel::Off)
     }
 }
 

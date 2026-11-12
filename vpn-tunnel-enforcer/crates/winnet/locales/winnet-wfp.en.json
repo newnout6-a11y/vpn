@@ -24,17 +24,14 @@
         "exceptionsUnconfirmed": "The exception update and its rollback were not confirmed. Core protection is kept. Check the firewall and try again."
       },
       "notice": {
-        "blockedTitle": "Kill switch: traffic blocked",
-        "blockedStrict": "Strict mode: all traffic outside the VPN is blocked. Connect the VPN or switch the kill switch to standard or off.",
-        "blockedStandard": "Standard mode: traffic is blocked because the VPN dropped. Reconnect the VPN or turn the kill switch off.",
         "exceptionSkippedTitle": "Kill-switch exception skipped",
         "exceptionSkipped": "“{{label}}”: file not found.",
         "unverifiedTitle": "VPNTE: protection not confirmed",
         "unverified": "Protection is not confirmed; traffic may go out directly."
       },
       "status": {
-        "firewallOutboundBlock": "Windows Firewall blocks outgoing connections by default: allow the VPN engines in Windows Firewall or set outbound connections to Allow.",
-        "hypervUnfiltered": "Virtual machines on a Hyper-V switch (WSL 2, Windows Sandbox, Docker, Hyper-V) are not covered by the kill switch: their traffic can go out directly while the VPN is down."
+        "firewallOutboundBlock": "Windows Firewall blocks outgoing connections by default. If the VPN does not connect, allow the VPN engines in the firewall.",
+        "hypervUnfiltered": "Virtual machines and WSL use their own network: the kill switch does not cover them."
       }
     }
   }

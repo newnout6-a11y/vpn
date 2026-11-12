@@ -10,7 +10,7 @@ use vpnte_base::types::{UnixMs, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_proxies::manager::{ProxySnapshot, degradation_msg};
 use vpnte_proxies::model::{
-    Action, Health, InstanceStatus, ProxyError, ProxyOps, StartRequest, StopReason, StopScope,
+    Action, Health, InstanceStatus, ProxyError, ProxyOps, StartRequest, StopReason,
 };
 use vpnte_proxies::slot::Slot;
 use vpnte_servers::model::{ServerSummary, ServersView};
@@ -33,7 +33,7 @@ pub(super) enum ProxyAction {
     },
     Stop(u16),
     Rotate(u16),
-    /// «стоп все»: every slot without a lease (leased slots serve automation clients).
+    /// «стоп все»: every slot.
     StopAll,
 }
 
@@ -93,7 +93,7 @@ async fn apply(ops: &dyn ProxyOps, action: ProxyAction) -> Result<(), ProxyError
         ProxyAction::Stop(n) => ops.stop(slot(n)?, StopReason::Ui).await.map(drop),
         ProxyAction::Rotate(n) => ops.rotate(slot(n)?, Some("ui".into())).await.map(drop),
         ProxyAction::StopAll => {
-            ops.stop_all(StopScope::Unleased, StopReason::Ui).await;
+            ops.stop_all(StopReason::Ui).await;
             Ok(())
         }
     }

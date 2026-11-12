@@ -135,11 +135,14 @@ async fn unelevated_service_refuses_privileged_operations() {
         assert_eq!(e.kind, ErrorKind::Permission);
         assert_eq!(e.user_msg().key, "app.base.needsAdmin");
     };
-    permission(
-        t.set_kill_switch_level(KillSwitchLevel::Strict)
-            .await
-            .unwrap_err(),
-    );
+    // ks-a: "Always" is refused with one calm line until the helper service keeps it safe.
+    let always = t
+        .set_kill_switch_level(KillSwitchLevel::Strict)
+        .await
+        .unwrap_err();
+    assert_eq!(always.kind, ErrorKind::Permission);
+    assert_eq!(always.user_msg().key, "app.tunnel.alwaysNeedsService");
+    assert!(!t.always_available());
     assert_eq!(level(&b), (KillSwitchLevel::Off, KillSwitchLevel::Off));
     t.set_kill_switch_level(KillSwitchLevel::Standard)
         .await
@@ -201,13 +204,8 @@ fn elevated_guard_levels_follow_the_protection() {
     );
     let _ = std::fs::remove_dir_all(&root.0);
     let b = backend(&root);
-    let guard = super::guard::Guard::new(
-        true,
-        &b.engines,
-        b.settings.clone(),
-        b.protection.clone(),
-        b.notifier.clone(),
-    );
+    let guard =
+        super::guard::Guard::new(true, &b.engines, b.settings.clone(), b.protection.clone());
     guard.startup().unwrap();
     guard.set_level(KillSwitchLevel::Standard).unwrap();
     assert_eq!(

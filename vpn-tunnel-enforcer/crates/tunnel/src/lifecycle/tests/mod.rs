@@ -8,6 +8,7 @@ use super::{ConnectReq, ConnectTarget, DisconnectReq, StopCause};
 mod automation;
 mod fakes;
 mod joint;
+mod killswitch;
 mod lane;
 mod orchestration;
 mod sessions;
@@ -62,17 +63,16 @@ fn notices_are_localized() {
         ("disconnected", true),
         ("stopFailed", false),
         ("stopped", false),
-        ("crashBlocked", true),
         ("keptBlocked", true),
         ("keptSoftBlocked", true),
-        ("crashRestarting", true),
+        ("paused", true),
+        ("keyRejected", true),
+        ("reconnecting", true),
         ("failover", true),
         ("restartFailed", false),
         ("internalError", true),
         ("softRestored", true),
         ("softConnected", true),
-        ("softBlocked", true),
-        ("softPaused", true),
         ("softResumeFailed", true),
     ] {
         let title = format!("tunnel.lifecycle.notice.{name}.title");

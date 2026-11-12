@@ -1,7 +1,9 @@
 {
   "servers": {
     "fetch": {
-      "emptyListNoHwid": "The subscription returned an empty list. Some panels serve servers only to a device that sends its ID (HWID): turn on “Send HWID” for this subscription"
+      "emptyListNoHwid": "The subscription returned an empty list. Some panels serve servers only to a device that sends its ID (HWID): turn on “Send HWID” for this subscription",
+      "hwidRequired": "The provider serves this subscription only to devices that send their ID (HWID)",
+      "deviceLimit": "Every device slot of this subscription is taken: the provider can free one"
     },
     "headers": {
       "invalid": "Line {{line}}: a header must look like “Name: value” (ASCII, one line)",

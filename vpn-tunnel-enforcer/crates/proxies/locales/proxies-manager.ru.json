@@ -2,7 +2,6 @@
   "proxies": {
     "degradation": {
       "processFailed": "Прокси не запустился или его процесс завершился",
-      "leasedRouteRecoveryBlocked": "Маршрут сбоит, но он в аренде: автоматическая остановка отложена",
       "healthFailureBudgetExhausted": "Отключён после повторных сбоев проверки",
       "egressIpChangedWithoutRotation": "Внешний IP сменился без смены профиля",
       "rotationDidNotChangeEgressIp": "После смены профиля внешний IP остался прежним",

@@ -147,9 +147,14 @@ pub fn wfp_exception_kind(k: ui::ExceptionKind) -> wfp::ExceptionKind {
 }
 
 /// The kill switch section. With a WFP read-back (elevated) the filters' own state; without
-/// one only what the level means for Soft (NOADMIN §2): `standard` holds programs that honour
-/// the system proxy once the engine is lost (`Blocked`), and `strict` cannot be confirmed.
-pub fn kill_switch_view(ks: &KillSwitchStatus, tunnel: &TunnelSnapshot) -> ui::KillSwitchView {
+/// one only what the level means in proxy mode (NOADMIN §2): "If the VPN drops" holds programs
+/// that honour the system proxy once the engine is lost (`Blocked`). A stored "Always" works as
+/// "If the VPN drops" until `always` (the helper service keeps it safe).
+pub fn kill_switch_view(
+    ks: &KillSwitchStatus,
+    tunnel: &TunnelSnapshot,
+    always: bool,
+) -> ui::KillSwitchView {
     let level = ks.settings.level;
     let status = match &ks.wfp {
         Some(wfp) => match wfp.kill_switch {
@@ -164,15 +169,10 @@ pub fn kill_switch_view(ks: &KillSwitchStatus, tunnel: &TunnelSnapshot) -> ui::K
                 ))
             }
         },
-        None => match level {
+        None => match level.effective(always) {
             KillSwitchLevel::Off => ui::ProtectionStatus::Off,
-            KillSwitchLevel::Standard if tunnel.state == TunnelState::Blocked => {
-                ui::ProtectionStatus::Blocking
-            }
-            KillSwitchLevel::Standard => ui::ProtectionStatus::Armed,
-            KillSwitchLevel::Strict => ui::ProtectionStatus::Unconfirmed(Msg::new(
-                "app.settings.killSwitch.strictUnverified",
-            )),
+            _ if tunnel.state == TunnelState::Blocked => ui::ProtectionStatus::Blocking,
+            _ => ui::ProtectionStatus::Armed,
         },
     };
     let exceptions = ks
@@ -195,6 +195,11 @@ pub fn kill_switch_view(ks: &KillSwitchStatus, tunnel: &TunnelSnapshot) -> ui::K
             .wfp
             .as_ref()
             .is_some_and(|w| w.firewall_warning().is_some()),
+        hyperv_unfiltered: ks
+            .wfp
+            .as_ref()
+            .is_some_and(|w| w.hyperv_warning().is_some()),
+        always_available: always,
     }
 }
 

@@ -2,6 +2,7 @@
 //! renders. A row keeps its typed [`Profile`](vpnte_profiles::model::Profile) as JSON inside a
 //! DPAPI [`Secret`]; the few fields a list or a ping needs (name, protocol, host, port) are plain
 //! copies, so a view never opens keys.
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -87,6 +88,10 @@ pub struct ServersDoc {
     pub groups: Vec<ServerGroup>,
     #[serde(default)]
     pub profiles: Vec<ServerRow>,
+    /// Device IDs (HWIDs) the user reset, per subscription group: a group without one sends
+    /// this PC's ID. Kept here, not on the group, so a reset never changes the group's shape.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub device_ids: BTreeMap<GroupId, String>,
 }
 
 impl Document for ServersDoc {
@@ -103,6 +108,10 @@ impl ServersDoc {
     /// Mutable access to the group with `id`.
     pub fn group_mut(&mut self, id: &GroupId) -> Option<&mut ServerGroup> {
         self.groups.iter_mut().find(|g| &g.id == id)
+    }
+    /// The device ID the user reset for the group `id` (`None`: it sends this PC's ID).
+    pub fn device_id(&self, id: &GroupId) -> Option<&str> {
+        self.device_ids.get(id).map(String::as_str)
     }
     /// The row with `id`.
     pub fn row(&self, id: &ProfileId) -> Option<&ServerRow> {
@@ -241,6 +250,12 @@ pub enum FetchOutcome {
     },
     /// The provider answered with an empty list (the classic "trial over" signal).
     EmptyList,
+    /// The panel serves this subscription only to devices that send their HWID (Remnawave's
+    /// open scheme: 404 with `x-hwid-not-supported` / `x-hwid-active`, or 403 "Device
+    /// fingerprint required").
+    HwidRequired,
+    /// Every device slot of the subscription is taken (`x-hwid-max-devices-reached`).
+    DeviceLimit,
     Unparseable(BodyKind),
     Http(u16),
     Network(NetFail),
@@ -362,7 +377,13 @@ impl ServerGroup {
             None => GroupStatus::Unknown,
             Some(FetchOutcome::Ok { .. }) => GroupStatus::Active,
             Some(FetchOutcome::EmptyList | FetchOutcome::Http(404 | 410)) => GroupStatus::Expired,
-            Some(FetchOutcome::Unparseable(_) | FetchOutcome::Http(_)) => GroupStatus::Failed,
+            // Not expired: the panel refused this device and said why.
+            Some(
+                FetchOutcome::HwidRequired
+                | FetchOutcome::DeviceLimit
+                | FetchOutcome::Unparseable(_)
+                | FetchOutcome::Http(_),
+            ) => GroupStatus::Failed,
             Some(FetchOutcome::Network(_) | FetchOutcome::Timeout) => GroupStatus::Unreachable,
         }
     }

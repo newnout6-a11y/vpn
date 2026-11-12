@@ -15,6 +15,18 @@
       "foreignVpn": {
         "title": "Another VPN detected",
         "body": "While it runs, pings are unreliable: its adapter intercepts the checks and answers for every server (hence the identical ~1–40 ms). Quit the other VPN completely (exit it from the tray) to see the real latencies."
+      },
+      "pause": {
+        "title": "Internet paused",
+        "reconnecting": "The VPN is reconnecting…",
+        "nextAttempt": "The VPN is reconnecting… next attempt in {{wait}}",
+        "keyRejected": "The server rejects the key: update the key or the subscription.",
+        "connect": "Connect",
+        "continue": "Continue without VPN"
+      },
+      "noPause": {
+        "title": "Another VPN",
+        "body": "All traffic already goes through it, so the internet does not pause if our VPN drops."
       }
     }
   }

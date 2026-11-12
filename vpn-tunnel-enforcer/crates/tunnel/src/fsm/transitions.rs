@@ -97,6 +97,31 @@ impl Fsm {
         });
     }
 
+    /// The kill switch holds a dropped session ("Интернет на паузе") while the runtime keeps
+    /// recovering it: `Blocked`, reconnecting, and a native start that succeeds later confirms
+    /// the tunnel again on its own evidence, however many attempts failed before (ks-a). Outside
+    /// a lane operation only.
+    pub fn paused(&mut self, e: Option<Evidence>) -> Result<(), Invalid> {
+        if self.running_op().is_some() {
+            return Err(Invalid);
+        }
+        self.upstream = None;
+        self.kept = None;
+        self.fault = false;
+        self.reconnect_eligible = true;
+        if self.snap.transition != Some(Transition::Reconnecting) {
+            self.expected_native_gen = None;
+        }
+        self.commit(e, |s| {
+            s.state = TunnelState::Blocked;
+            s.transition = Some(Transition::Reconnecting);
+            s.mode = None;
+            s.cleanup_required = true;
+            s.proxy_status = ProxyStatus::Stopped;
+        });
+        Ok(())
+    }
+
     /// The running rotation's effect failed but read back the previous protection unchanged.
     /// Accepted only while that operation runs and the evidence still proves the old state.
     pub fn keep_previous(&mut self, op: OpId, e: Option<Evidence>) -> Result<(), Invalid> {

@@ -33,7 +33,7 @@ use vpnte_servers::store::Servers;
 use vpnte_tunnel::api::TunStatus;
 use vpnte_tunnel::fsm::TunnelSnapshot;
 use vpnte_tunnel::history::History;
-use vpnte_tunnel::lifecycle::{ConnError, Done, SessionView, ShutdownReport};
+use vpnte_tunnel::lifecycle::{ConnError, Done, KillSwitchView, SessionView, ShutdownReport};
 use vpnte_winnet::clipboard::SecretClipboard;
 use vpnte_winnet::wfp::{
     ExceptionKind, KillSwitchException, ProtectionSettings, ProtectionStatus, RemoveReport, Toggles,
@@ -210,5 +210,20 @@ pub trait TunnelOps: Send + Sync + 'static {
     /// none: the Servers page reports the check as unavailable.
     fn live_checks(&self) -> Option<Arc<LiveCheckService>> {
         None
+    }
+    /// The kill switch of the running session for the start page and the tray: the paused
+    /// state and the "another VPN" line (added by ks-a). The default: never paused.
+    fn kill_switch_view(&self) -> watch::Receiver<KillSwitchView> {
+        watch::channel(KillSwitchView::default()).1
+    }
+    /// «Подключить» in the paused state: the paused session retries at once; `false` when
+    /// nothing is paused (added by ks-a). The default: nothing to retry.
+    async fn retry_now(&self) -> bool {
+        false
+    }
+    /// "Always" can be kept safe here (the helper service holds it); until the service wiring
+    /// sets it, a stored "strict" works as "If the VPN drops" (added by ks-a). Default: no.
+    fn always_available(&self) -> bool {
+        false
     }
 }

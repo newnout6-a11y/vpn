@@ -402,44 +402,39 @@ fn RoutingStep(ctx: Ctx, title_id: String) -> Element {
 /// Catalog key of a kill-switch level's name.
 fn level_key(level: KillSwitchLevel) -> &'static str {
     match level {
-        KillSwitchLevel::Off => "settings.killSwitchOff",
-        KillSwitchLevel::Standard => "settings.killSwitchStandard",
-        KillSwitchLevel::Strict => "settings.killSwitchStrict",
+        KillSwitchLevel::Off => "ui.settings.killSwitch.off",
+        KillSwitchLevel::Standard => "ui.settings.killSwitch.onDrop",
+        KillSwitchLevel::Strict => "ui.settings.killSwitch.always",
     }
 }
 
-/// Step 4: kill-switch level (Off unless picked, D-15) and autostart. In Proxy mode the level texts
-/// say what the system proxy can hold, and Strict says it needs the Tunnel mode.
+/// Step 4: kill-switch level (Off unless picked, D-15) and autostart. Two choices with one line
+/// each (research killswitch 5.2); "Always" needs the helper service and lives in Settings, so a
+/// first run never picks it. In Proxy mode "If the VPN drops" adds its one neutral sentence.
 #[component]
 fn Protection(ctx: Ctx, title_id: String) -> Element {
     let mut model = ctx.model;
-    let (level, autostart, soft, strict_blocked) = {
+    let (level, autostart, soft) = {
         let m = model.read();
-        let soft = m.routing == Routing::Soft;
-        (m.kill_switch, m.autostart, soft, m.strict_needs_tunnel())
+        (m.kill_switch, m.autostart, m.routing == Routing::Soft)
     };
-    let cards = [
-        (KillSwitchLevel::Off, "onboarding.killSwitchOffDesc"),
-        (
+    let on_drop = match soft {
+        true => format!(
+            "{} {}",
+            t!("ui.settings.killSwitch.onDropLine"),
+            t!("ui.settings.killSwitch.onDropProxy")
+        ),
+        false => t!("ui.settings.killSwitch.onDropLine"),
+    };
+    let cards = vec![
+        Card::new(KillSwitchLevel::Off, t!(level_key(KillSwitchLevel::Off)))
+            .text(t!("ui.settings.killSwitch.offLine")),
+        Card::new(
             KillSwitchLevel::Standard,
-            if soft {
-                "ui.wizard.protection.standardSoft"
-            } else {
-                "onboarding.killSwitchStandardDesc"
-            },
-        ),
-        (
-            KillSwitchLevel::Strict,
-            if soft {
-                "ui.wizard.protection.strictSoft"
-            } else {
-                "onboarding.killSwitchStrictDesc"
-            },
-        ),
-    ]
-    .into_iter()
-    .map(|(l, desc)| Card::new(l, t!(level_key(l))).text(t!(desc)))
-    .collect::<Vec<_>>();
+            t!(level_key(KillSwitchLevel::Standard)),
+        )
+        .text(on_drop),
+    ];
     rsx! {
         StepHead {
             step: Step::Protection,
@@ -452,11 +447,7 @@ fn Protection(ctx: Ctx, title_id: String) -> Element {
             label: t!("settings.killSwitch"),
             cards,
             value: level,
-            columns: 3,
             on_change: move |l| model.write().kill_switch = l,
-        }
-        if strict_blocked {
-            StrictWarning {}
         }
         div { class: "wz-autostart",
             Checkbox {
@@ -465,17 +456,6 @@ fn Protection(ctx: Ctx, title_id: String) -> Element {
                 checked: autostart,
                 on_change: move |on| model.write().autostart = on,
             }
-        }
-    }
-}
-
-/// Strict with Proxy mode: shown where the level is picked and on the summary.
-#[component]
-fn StrictWarning() -> Element {
-    rsx! {
-        p { class: "wz-status is-warn", role: "status",
-            span { class: "wz-status-mark" }
-            {t!("ui.wizard.protection.strictNeedsTunnel")}
         }
     }
 }
@@ -539,9 +519,6 @@ fn Done(ctx: Ctx, title_id: String) -> Element {
                 span { class: "wz-status-mark" }
                 {t!("ui.wizard.done.keyUnchecked")}
             }
-        }
-        if m.strict_needs_tunnel() {
-            StrictWarning {}
         }
     }
 }

@@ -16,8 +16,9 @@ use vpnte_profiles::countries::{self, Iso2};
 use vpnte_servers::model::ServerSummary;
 use vpnte_tunnel::api::TunStatus;
 use vpnte_tunnel::fsm::{self, Health, ProcessState, TunnelMode, TunnelSnapshot};
+use vpnte_tunnel::lifecycle::KillSwitchView;
 use vpnte_tunnel::runtime::MAX_RESTARTS;
-use vpnte_ui::dashboard::{EngineLine, PickLine};
+use vpnte_ui::dashboard::{EngineLine, PauseLine, PickLine};
 use vpnte_ui::panels::ServerRowView;
 use vpnte_ui::tray;
 use vpnte_view::identity::{ExitIp, Geo, ServerHealth};
@@ -133,6 +134,14 @@ pub(super) fn foreign_vpn(conn: &ConnView, found: Option<&str>) -> Option<String
     found.filter(|_| !conn.tun_running()).map(str::to_owned)
 }
 
+/// The paused kill switch's line (ks-a): the next automatic attempt and the key reason.
+pub(super) fn pause_line(view: &KillSwitchView) -> Option<PauseLine> {
+    view.pause.as_ref().map(|p| PauseLine {
+        next_attempt: p.next_attempt,
+        key_rejected: p.key_rejected,
+    })
+}
+
 /// The engine of the running session and why it was chosen, for the identity column (nothing
 /// while no engine runs: the caption never outlives the session).
 pub(super) fn engine_line(status: &TunStatus) -> Option<EngineLine> {
@@ -208,16 +217,15 @@ pub(super) fn geo_route(
 }
 
 /// The kill-switch fact from a read-back. Without WFP in this process (not elevated) nothing of
-/// ours can be installed, so the saved level decides what can hold: off reads «Снят», standard
-/// is Soft's system-proxy hold «Через прокси» (never «Держит»: it cannot be read back), strict
-/// needs WFP and reads «Нужны права администратора». The view turns the proxy hold into the
-/// latter in Hard mode (`FirewallStatus::in_mode`).
+/// ours can be installed, so the saved level decides what can hold: off reads «Снят», "If the
+/// VPN drops" is the proxy mode's system-proxy hold «Через прокси» (never «Держит»: it cannot
+/// be read back), and so is a stored "Always" until the helper service keeps it (ks-a). The
+/// view turns the proxy hold into the latter in Hard mode (`FirewallStatus::in_mode`).
 pub(super) fn firewall(ks: &KillSwitchStatus) -> FirewallStatus {
     let state = match &ks.wfp {
         None => match ks.settings.level {
             KillSwitchLevel::Off => FwState::Inactive,
-            KillSwitchLevel::Standard => FwState::ProxyHold,
-            KillSwitchLevel::Strict => FwState::NeedsAdmin,
+            KillSwitchLevel::Standard | KillSwitchLevel::Strict => FwState::ProxyHold,
         },
         Some(status) => match status.kill_switch {
             KillSwitchState::Off | KillSwitchState::Armed => FwState::Inactive,
@@ -348,6 +356,8 @@ pub(super) fn tray_state(
         down_bps: if running { rate(sample.down_bps()) } else { 0 },
         up_bps: if running { rate(sample.up_bps()) } else { 0 },
         minimize_to_tray,
+        // The lifecycle's pause is a separate watch: the caller fills it in.
+        paused: false,
     }
 }
 

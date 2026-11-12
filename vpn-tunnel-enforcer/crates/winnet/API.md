@@ -266,8 +266,12 @@ is unverified, so on a link with MTU < 1500 (PPPoE 1492) an IPv6 rung above it m
 
 ## `wfp` — kill switch and leak protection (our provider + sublayer; needs elevation)
 Items are re-exported at `vpnte_winnet::wfp::*` (submodules `engine`, `fwpolicy`, `model`,
-`protection`, `spec`, `validate` are public too). Dynamic session for `standard` / leak protection
-(gone when the process dies), persistent filters only for `strict`.
+`protection`, `spec`, `validate` are public too). Dynamic session for `standard` («При обрыве») /
+leak protection (gone when the process dies), persistent filters only for `strict` («Всегда») and
+only while [`Protection::set_always_available`] says the helper service keeps it safe (ks-a,
+owner decision 12.11.2026): otherwise a stored `strict` is enforced as `standard`
+(`KillSwitchLevel::effective`), the stored value stays, and `startup()` removes persistent
+leftovers of an earlier strict run.
 ```rust
 pub const PROVIDER_KEY: GUID;  pub const SUBLAYER_KEY: GUID;
 pub const LEGACY_IPV6_SUBLAYER: GUID;   // old app's sublayer: delete only (cleanup-legacy)
@@ -286,7 +290,7 @@ pub enum ExceptionTarget { App(PathBuf), Ip(IpNet) }   // kind() -> ExceptionKin
 pub enum ExceptionKind { App, Ip }                      // serde "app" | "ip"
 pub struct EnginePaths { pub singbox: PathBuf, pub xray: Option<PathBuf>, pub external_proxy: Option<PathBuf> }
 pub enum Conn { Disconnected, Connecting, Up, Dropped }
-pub enum KillSwitchState { Off, Armed /* standard, no session */, Engaged, Blocking /* no tunnel */, Failed }
+pub enum KillSwitchState { Off, Armed /* "If the VPN drops", no tunnel up yet */, Engaged, Blocking /* no tunnel */, Failed }
 pub struct ProtectionStatus { pub level: KillSwitchLevel, pub conn: Conn,
     pub kill_switch: KillSwitchState, pub last_error: Option<ProtectionError>,
     pub leak_protection_active: bool, pub dynamic_filters: Option<u32>,
@@ -311,12 +315,14 @@ impl Protection {
     pub fn new(engines: EnginePaths, self_exe: PathBuf, settings: ProtectionSettings) -> Self;
     pub fn notices(&self) -> broadcast::Receiver<Notice>;   // all in category `connectionError`
     pub fn settings(&self) -> ProtectionSettings;
-    pub fn session_guarded(&self) -> bool;  // level != Off || leak protection: dual-stack TUN + dns_mode native
-    pub fn startup(&self) -> Result<(), ProtectionError>;   // strict set or leftover removal
+    pub fn session_guarded(&self) -> bool;  // level in force != Off || leak protection: dual-stack TUN + dns_mode native
+    pub fn level_in_force(&self) -> KillSwitchLevel;        // stored level as enforced (strict -> standard without the service)
+    pub fn set_always_available(&self, available: bool) -> Result<(), ProtectionError>; // helper-service wiring; default false
+    pub fn startup(&self) -> Result<(), ProtectionError>;   // "Always" set where in force, else persistent leftovers removed
     pub fn connect_begin(&self, session_programs: &[PathBuf], tun_addresses: &[IpAddr])
         -> Result<(), ProtectionError>;                     // TUN_V4 (+ TUN_V6 when dual-stack)
-    pub fn tun_up(&self, luid: u64) -> Result<(), ProtectionError>;
-    pub fn tun_lost(&self) -> Result<(), ProtectionError>;  // ignored without a session
+    pub fn tun_up(&self, luid: u64) -> Result<(), ProtectionError>;   // arms "If the VPN drops"
+    pub fn tun_lost(&self) -> Result<(), ProtectionError>;  // ignored without a session; an armed block stays
     pub fn disconnected(&self) -> Result<(), ProtectionError>;
     pub fn set_level(&self, level: KillSwitchLevel, persist: Persist) -> Result<(), ProtectionError>;
     pub fn set_exceptions(&self, list: Vec<KillSwitchException>, persist: Persist) -> Result<(), ProtectionError>;
@@ -405,10 +411,12 @@ canonicalises them (8.3 names, links), so launch engines from their canonical pa
 static engine is skipped with a warning, a missing session program refuses `connect_begin`
 (`EngineMissing`). From `connect_begin` until `disconnected()` every guarded session blocks DNS
 (53 / 853) outside the TUN for everything but engines, our exe, session programs and exceptions,
-the Windows DNS client included: engines resolve server names themselves. Notices go out only
-when traffic is actually blocked (strict at startup / disconnect, standard drop), for a skipped
-app exception (once per id) and when the watchdog cannot confirm protection (once per failure
-streak).
+the Windows DNS client included: engines resolve server names themselves. Arming (ks-a): the
+`standard` block-all set exists only once a TUN of the session was up (`tun_up`), and stays
+through `tun_lost` and the next `connect_begin` (crash restarts and planned reconnects: no gap)
+until `disconnected()`; a first connect that never came up gets leak protection's set only.
+Notices go out only for a skipped app exception (once per id) and when the watchdog cannot
+confirm protection (once per failure streak); a held block is told by the tunnel's paused state.
 
 ## `registry` — typed Reg* access (`windows::core::Result`; blocking but fast)
 ```rust

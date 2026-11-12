@@ -178,7 +178,12 @@ fn locale_fragments_match_the_code() {
     let ru = keys(include_str!("../../locales/app-tunnel.ru.json"));
     let en = keys(include_str!("../../locales/app-tunnel.en.json"));
     assert_eq!(ru, en);
-    let code = [include_str!("ops.rs"), include_str!("leaks.rs")].concat();
+    let code = [
+        include_str!("ops.rs"),
+        include_str!("leaks.rs"),
+        include_str!("guard.rs"),
+    ]
+    .concat();
     let mut used: Vec<String> = code
         .match_indices("\"app.tunnel.")
         .map(|(at, _)| {

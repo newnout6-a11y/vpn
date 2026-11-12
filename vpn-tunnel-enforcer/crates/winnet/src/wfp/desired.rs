@@ -18,7 +18,10 @@ use super::spec::{self, AppId, FilterSpec};
 /// Everything [`desired`] depends on, with app IDs already resolved.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Plan {
+    /// The level in force (a stored `strict` already reads as `standard` without the service).
     pub level: KillSwitchLevel,
+    /// A TUN of this session was up: only then does `standard` block everything (ks-a).
+    pub armed: bool,
     pub leak_protection: bool,
     pub public_wifi_compat: bool,
     pub allow_lan: bool,
@@ -99,7 +102,9 @@ impl Change {
 pub(crate) fn desired(p: &Plan) -> Desired {
     let session = p.conn.in_session();
     let strict = p.level == KillSwitchLevel::Strict;
-    let ks = p.level == KillSwitchLevel::Standard && session;
+    // "If the VPN drops" pauses a session that has started: a first connect that never came
+    // up leaves the internet alone (owner decision 12.11.2026, research killswitch §5.3).
+    let ks = p.level == KillSwitchLevel::Standard && session && p.armed;
     let lp = p.leak_protection && session && !ks && !strict;
 
     // The TUN-address permit is provisional: from `connect_begin` until `tun_up` brings the

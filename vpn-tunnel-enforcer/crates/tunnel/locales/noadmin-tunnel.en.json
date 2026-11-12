@@ -3,7 +3,7 @@
     "runtime": {
       "tunUnavailable": "Tunnel mode is unavailable: it needs the app to be started as administrator. Use Proxy mode instead.",
       "proxy": {
-        "strictUnavailable": "The strict kill switch is not available in Proxy mode: it needs WFP filters (Tunnel mode, started as administrator).",
+        "strictUnavailable": "“Always” works in Tunnel mode only: in Proxy mode the kill switch pauses on a drop.",
         "notAccepting": "The engine's local proxy does not accept connections on port {{port}}."
       },
       "watchdog": {
@@ -15,29 +15,18 @@
       }
     },
     "lifecycle": {
-      "soft": {
-        "strictUnavailable": "The strict kill switch is not available in Proxy mode. Choose Standard or Off, or Tunnel mode."
-      },
       "notice": {
         "softConnected": {
-          "title": "Proxy mode on",
-          "body": "Programs that use the Windows system proxy go through the VPN; other programs connect directly."
-        },
-        "softBlocked": {
-          "title": "The VPN engine stopped",
-          "body": "The system proxy still points at the stopped engine: programs that use it get no connection until you turn protection on again or off. Other programs connect directly."
-        },
-        "softPaused": {
-          "title": "System proxy paused",
-          "body": "The VPN engine restarts in {{seconds}} s: the server has to wait out a block. Until then programs connect directly, without the VPN; the proxy comes back with the connection."
+          "title": "VPN connected (Proxy mode)",
+          "body": "Browsers and most programs go through the VPN."
         },
         "softResumeFailed": {
           "title": "System proxy not restored",
           "body": "The VPN engine runs again, but the system proxy could not be pointed at it: programs connect directly, without the VPN. Turn protection off and on again."
         },
         "softRestored": {
-          "title": "Proxy mode stopped",
-          "body": "The VPN engine stopped. The system proxy was restored: programs connect directly, without the VPN."
+          "title": "The VPN stopped",
+          "body": "Programs connect directly, without the VPN."
         }
       }
     }

@@ -81,12 +81,14 @@ impl Actor {
         };
         let facts = CrashFacts {
             attempt: self.attempt,
+            slow: self.slow,
             auto_restart: auto_restart && self.last.is_some(),
             guard,
             failover_available: self.deps.failover.is_some() && !self.failover_tried,
             quiet: self.quiet_left(),
         };
-        match decide(facts, &self.deps.timings.backoff) {
+        let timings = &self.deps.timings;
+        match decide(facts, &timings.backoff, &timings.slow_retry) {
             CrashAction::Restart { attempt, delay } => {
                 self.attempt = attempt;
                 self.publish(|s| s.restart_attempt = attempt);
@@ -110,6 +112,16 @@ impl Actor {
                     Box::pin(self.after_crash()).await;
                 }
             }
+            CrashAction::SlowRetry { delay } => {
+                self.slow = self.slow.saturating_add(1);
+                // Held like a terminal block (Xray stopped, `KillSwitchActive`), then retried.
+                self.terminal(false).await;
+                if matches!(self.phase, Phase::Adapting(_)) {
+                    tracing::info!(?delay, "kill switch holds the pause: slow retry scheduled");
+                    self.emit(TunnelEvent::RestartScheduled { delay });
+                    self.restart_due = Some(Instant::now() + delay);
+                }
+            }
             CrashAction::Block => self.terminal(false).await,
             CrashAction::Release => self.terminal(true).await,
         }
@@ -130,16 +142,23 @@ impl Actor {
 
     /// The backoff elapsed: restart the last start through the normal start path.
     pub(super) async fn recover(&mut self) {
+        self.retry(false).await;
+    }
+
+    /// Restarts the last start (origin `Recovery`); `asked` = the user's «Подключить» in the
+    /// paused state, which runs whatever the auto-restart setting says.
+    pub(super) async fn retry(&mut self, asked: bool) {
         self.restart_due = None;
         let Some(last) = self.last.clone() else {
             return self.terminal(true).await;
         };
-        let auto_restart = self
-            .deps
-            .inputs
-            .snapshot()
-            .await
-            .is_ok_and(|u| u.auto_restart_on_crash);
+        let auto_restart = asked
+            || self
+                .deps
+                .inputs
+                .snapshot()
+                .await
+                .is_ok_and(|u| u.auto_restart_on_crash);
         if !auto_restart {
             // Turned off during the backoff (re-read at fire time): the terminal table decides.
             return self.after_crash().await;

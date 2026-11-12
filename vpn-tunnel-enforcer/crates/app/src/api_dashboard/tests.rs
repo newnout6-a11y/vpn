@@ -539,13 +539,11 @@ fn unelevated_kill_switch_names_what_can_hold() {
         "view.fact.ksProxy"
     );
     assert_eq!(proxy.in_mode(false).state, FwState::NeedsAdmin);
+    // ks-a: a stored "Always" works as "If the VPN drops" until the helper service.
     let strict = at(KillSwitchLevel::Strict);
-    assert_eq!(strict.state, FwState::NeedsAdmin);
+    assert_eq!(strict.state, FwState::ProxyHold);
     let fact = labels::kill_switch_fact(&strict.in_mode(true));
-    assert_eq!(
-        (&*fact.text.key, fact.alert),
-        ("view.fact.ksNeedsAdmin", true)
-    );
+    assert_eq!(fact.text.key, "view.fact.ksProxy");
     for fw in [proxy, strict] {
         assert!(labels::kill_switch_banner(&swiss::ConnView::default(), &fw).is_none());
     }

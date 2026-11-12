@@ -14,7 +14,6 @@ use super::registry::{Assigned, Registry};
 use super::run::LoopCmd;
 use super::{Inner, ProxyProfile};
 use crate::health::ms;
-use crate::lease::Guarded;
 use crate::model::{Action, ProxyError, StartRequest};
 use crate::slot::Slot;
 
@@ -59,13 +58,9 @@ impl Inner {
             let own_port = state.filter(|s| s.configured).and_then(|s| s.port);
             let sticky = state.and_then(|s| s.country_query.clone());
             let current = state.and_then(|s| s.profile.as_ref()).map(|p| p.id.clone());
-            if action == Action::Start && configured {
-                if state.is_some_and(|s| s.live.is_some()) {
-                    return Ok(());
-                }
-                reg.leases.guard(slot, Guarded::Restart, now)?;
+            if action == Action::Start && configured && state.is_some_and(|s| s.live.is_some()) {
+                return Ok(());
             }
-            reg.leases.guard(slot, Guarded::ChangeRoute, now)?;
             let port = req.port.or(own_port).unwrap_or_else(|| slot.default_port());
             self.check_port(reg, slot, port, own_port)?;
             // An explicit (even empty) country replaces the sticky filter.

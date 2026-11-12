@@ -22,6 +22,8 @@ use crate::subscription::{FetchError, Fetched, ProviderFetch, SubscriptionFetche
 
 mod add;
 mod apply;
+#[cfg(test)]
+mod device_tests;
 mod reconcile;
 #[cfg(test)]
 mod relocation_tests;
@@ -138,16 +140,20 @@ pub struct AddOptions {
     pub send_hwid: bool,
     /// Extra request headers of a new subscription group (checked).
     pub headers: Vec<(String, String)>,
+    /// The input came from outside (a link Windows handed over, a QR code): a subscription it
+    /// names must not lead into the local network. A deep link counts as such by its form.
+    pub from_link: bool,
 }
 
 impl AddOptions {
-    /// `into` as `device`, without the HWID or extra headers.
+    /// `into` as `device`, without the HWID or extra headers, typed by the user.
     pub fn new(into: Option<GroupId>, device: ClientDevice) -> Self {
         Self {
             into,
             device,
             send_hwid: false,
             headers: Vec::new(),
+            from_link: false,
         }
     }
 }

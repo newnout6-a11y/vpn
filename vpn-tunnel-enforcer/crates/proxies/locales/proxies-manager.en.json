@@ -2,7 +2,6 @@
   "proxies": {
     "degradation": {
       "processFailed": "The proxy did not start or its process ended",
-      "leasedRouteRecoveryBlocked": "The route keeps failing, but it is leased: the automatic stop is on hold",
       "healthFailureBudgetExhausted": "Disabled after repeated failed checks",
       "egressIpChangedWithoutRotation": "The exit IP changed without a profile change",
       "rotationDidNotChangeEgressIp": "The profile changed, but the exit IP stayed the same",

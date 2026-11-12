@@ -56,7 +56,8 @@ async fn direct_connect_uses_settings_and_starts_services() {
             sent.origin
         ),
         (
-            KillSwitchLevel::Strict,
+            // ks-a: a stored "strict" works as "If the VPN drops" until the helper service.
+            KillSwitchLevel::Standard,
             true,
             false,
             EnginePref::Xray,
@@ -356,7 +357,8 @@ async fn adaptive_restarts() {
 }
 
 /// H-05: the runtime's own crash restart goes through the same hook: the session continues on
-/// the new engine run, monitoring restarts, the user is told; nothing is recorded.
+/// the new engine run, monitoring restarts; nothing is recorded, and a short restart stays
+/// silent (ks-a: one notice only for an outage that lasts).
 #[tokio::test]
 async fn native_auto_restart_continues_the_session() {
     let h = Harness::new();
@@ -373,12 +375,8 @@ async fn native_auto_restart_continues_the_session() {
     );
     assert!(h.rows().is_empty());
     assert_eq!(h.services.counters.lock().monitor_starts, 2);
-    let (n, kind) = notice(&h, "restored").expect("restored notice");
-    assert_eq!(kind, NoticeKind::VpnConnect);
-    let body = n.body.unwrap();
-    assert_eq!(body.args[0].1, "1");
-    let (_, kind) = notice(&h, "crashRestarting").expect("restart notice");
-    assert_eq!(kind, NoticeKind::ConnectionError);
+    assert!(notice(&h, "restored").is_none());
+    assert!(notice(&h, "reconnecting").is_none());
     assert!(matches!(
         events.recv().await,
         Ok(crate::lifecycle::SessionEvent::Up(_))

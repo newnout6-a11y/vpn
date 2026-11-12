@@ -46,7 +46,7 @@ app         бинарник: запуск, Backend, реализации XxxApi
 | `automation` | `scheduler`, `schedule`, `rotation`, `autopilot`, `adaptive`, `coordinator`, `tweaks`, `hardening` |
 | `probes` | `public_ip`, `ip_monitor`, `leak`, `diagnostics`, `local_proxy`, `availability`, `speedtest`, `ping`, `geo`, `egress`, `key_health`, `live`, `live_stages`, `curl`, `tls_client` |
 | `tunnel` | `api`, `fsm`, `lifecycle`, `runtime` (`actor`, `capture/{tun,proxy}`, `engines`, `watchdog`, `recovery`), `switch`, `outcome`, `history` |
-| `proxies` | `slot`, `manager`, `config`, `probe`, `health`, `lease`, `control`, `token`, `model`; `src/bin/vpnte_proxy` |
+| `proxies` | `slot`, `manager`, `config`, `probe`, `health`, `control`, `token`, `model`; `src/bin/vpnte_proxy` |
 | `cleanup` | `legacy` |
 | `app` | `main`, `args`, `boot`, `root`, `setup`, `import`, `services`, `svc_core`, `svc_tunnel`, `svc_live`, `svc_proxies`, `api_*` (реализации `XxxApi`), `support` |
 

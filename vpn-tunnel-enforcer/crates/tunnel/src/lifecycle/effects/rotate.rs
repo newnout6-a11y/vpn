@@ -70,7 +70,7 @@ pub(in crate::lifecycle) async fn switch(
     let mode = Mode::DirectVpn {
         profile: choice.server.clone(),
     };
-    let req = start_request(deps, mode, capture, adaptive, ctx.owner);
+    let req = start_request(deps, mode, capture, adaptive, ctx.owner, ctx.guard.level);
     let token = ctx.token.clone();
     let is_owner: OwnerCheck = Arc::new(move || !token.is_cancelled());
     let in_place = deps
@@ -85,6 +85,7 @@ pub(in crate::lifecycle) async fn switch(
             engine: receipt.engine,
             adaptive,
             warnings: std::mem::take(&mut receipt.warnings),
+            guard: None,
         };
         return StartReport::done(switched_in_place(&ctx, receipt, up).await);
     }
@@ -107,6 +108,7 @@ pub(in crate::lifecycle) async fn switch(
                 engine: Some(receipt.engine),
                 adaptive,
                 warnings: receipt.warnings,
+                guard: None,
             };
             confirm_restart(&ctx, up, port).await
         }
@@ -198,6 +200,7 @@ pub(in crate::lifecycle) async fn restart_adaptive(
                     engine: Some(receipt.engine),
                     adaptive: mode,
                     warnings: receipt.warnings,
+                    guard: None,
                 },
                 None => Up::Restarted {
                     generation: receipt.generation,

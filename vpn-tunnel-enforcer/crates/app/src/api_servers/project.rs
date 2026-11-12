@@ -16,6 +16,7 @@ use vpnte_servers::model::{
     self as sm, ARCHIVE_TTL_MS, CountrySource, FetchOutcome, GroupSummary, HealthRecord, NetFail,
     ProfileId, ServerRow, ServerSummary,
 };
+use vpnte_servers::subscription::Hwids;
 use vpnte_tunnel::fsm::{TunnelSnapshot, TunnelState};
 use vpnte_ui::servers as ui;
 
@@ -111,6 +112,8 @@ pub(super) struct Inputs<'a> {
     pub switching: Option<&'a str>,
     pub geo_disabled: bool,
     pub lang: Lang,
+    /// This PC's device IDs (a subscription without its own ID sends these).
+    pub hwids: &'a Hwids,
 }
 
 /// Reads the backend and projects it.
@@ -137,6 +140,7 @@ pub(super) fn current(shared: &Shared) -> ui::ServersView {
         switching: switching.as_deref(),
         geo_disabled: backend.settings.read(|s| s.disable_geo_lookup),
         lang: shared.backend.lang(),
+        hwids: backend.refresh.fetcher.hwids(),
     })
 }
 
@@ -168,7 +172,12 @@ pub(super) fn project(i: &Inputs) -> ui::ServersView {
                 server(s, extras, i.ips, config_hidden)
             })
             .collect(),
-        groups: i.list.groups.iter().map(|g| group(g, i.lang)).collect(),
+        groups: i
+            .list
+            .groups
+            .iter()
+            .map(|g| group(g, i.lang, i.hwids))
+            .collect(),
         active_id: on_server
             .map(str::to_owned)
             .or_else(|| i.list.active.as_ref().map(|id| id.to_string())),
@@ -231,8 +240,13 @@ fn server(
     }
 }
 
-fn group(g: &GroupSummary, lang: Lang) -> ui::GroupView {
+fn group(g: &GroupSummary, lang: Lang, hwids: &Hwids) -> ui::GroupView {
     let info = &g.info;
+    // The ID the subscription sends: its own after a reset, else this PC's for its device.
+    let device_id = g
+        .own_hwid
+        .clone()
+        .or_else(|| g.device.map(|d| hwids.get(d).to_owned()));
     ui::GroupView {
         id: g.id.to_string(),
         name: g.title.render(lang),
@@ -267,6 +281,8 @@ fn group(g: &GroupSummary, lang: Lang) -> ui::GroupView {
         announce: info.announce.clone(),
         provider_refresh_hours: info.refresh_hours,
         send_hwid: g.send_hwid,
+        device_id: device_id.filter(|_| !g.manual),
+        own_device_id: g.own_hwid.is_some(),
         header_names: g.header_names.clone(),
         moved_at: g.moved_at,
         host: g.host.clone(),
@@ -279,6 +295,8 @@ pub(super) fn fetch_error(outcome: FetchOutcome) -> Option<ui::FetchError> {
     Some(match outcome {
         FetchOutcome::Ok { .. } => return None,
         FetchOutcome::EmptyList => ui::FetchError::Empty,
+        FetchOutcome::HwidRequired => ui::FetchError::HwidRequired,
+        FetchOutcome::DeviceLimit => ui::FetchError::DeviceLimit,
         FetchOutcome::Unparseable(_) => ui::FetchError::Invalid,
         FetchOutcome::Http(code) => ui::FetchError::Http(code),
         FetchOutcome::Network(NetFail::Tls) => ui::FetchError::Tls,

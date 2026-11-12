@@ -236,7 +236,10 @@ impl Servers {
                 groups: doc
                     .groups
                     .iter()
-                    .map(|g| GroupSummary::of(g, &doc.profiles, now))
+                    .map(|g| GroupSummary {
+                        own_hwid: doc.device_id(&g.id).map(str::to_owned),
+                        ..GroupSummary::of(g, &doc.profiles, now)
+                    })
                     .collect(),
                 servers: doc
                     .profiles

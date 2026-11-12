@@ -1,8 +1,6 @@
 //! What the external-proxy feature talks in: route states, wire DTOs (field names and time
 //! encodings of the old control API, kept for its CLI and automation clients), requests, the
 //! error type and [`ProxyOps`], the operations the control API and the UI call.
-use std::net::IpAddr;
-
 use serde::{Deserialize, Serialize};
 
 use crate::slot::Slot;
@@ -18,7 +16,7 @@ pub use ready::{FRESH_WINDOW_MS, derive_readiness};
 pub use wire::{
     Aggregate, BatchFailure, BatchSkip, BatchSkipReason, BatchStartResult, ControlError,
     GroupHealth, InstanceStatus, Instances, InstancesBatch, KeyHealth, PrewarmResult, ProfileList,
-    ProfileRow, ProxyStatus, Released, Reservation, ServerStatus, Unlimited, iso_ms,
+    ProfileRow, ProxyStatus, ServerStatus, Unlimited, iso_ms,
 };
 
 /// Route health as the data-plane probe sees it (not a child-process flag). A consumer may use
@@ -55,7 +53,6 @@ pub enum Lifecycle {
 #[serde(rename_all = "kebab-case")]
 pub enum Degradation {
     ProcessFailed,
-    LeasedRouteRecoveryBlocked,
     HealthFailureBudgetExhausted,
     EgressIpChangedWithoutRotation,
     RotationDidNotChangeEgressIp,
@@ -103,46 +100,6 @@ pub struct StartRequest {
     /// Retried rotate requests with the same key do not rotate twice.
     pub idempotency_key: Option<String>,
     pub rotate_reason: Option<String>,
-}
-
-/// Reserve a ready route for an automation client.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReserveRequest {
-    /// Who holds the lease (trimmed; required). An owner holds at most one lease.
-    pub owner: String,
-    /// Lease length as the client sent it; `None` = 120 s. Validated by the lease book.
-    pub ttl_secs: Option<f64>,
-    /// Prefer the route exiting through this IP. (The old API compared any text; a non-IP
-    /// value is now a 400 from the request parser.)
-    pub preferred_egress_ip: Option<IpAddr>,
-    pub preferred_slot: Option<Slot>,
-    /// Exactly this slot. A leased one is always 409; a not-ready one is 409 only without fallback.
-    pub slot: Option<Slot>,
-    /// Default `true`: may hand out another ready route.
-    pub allow_fallback: bool,
-}
-
-impl ReserveRequest {
-    /// A request with the defaults of the old API (fallback allowed, default TTL).
-    pub fn new(owner: impl Into<String>) -> Self {
-        Self {
-            owner: owner.into(),
-            ttl_secs: None,
-            preferred_egress_ip: None,
-            preferred_slot: None,
-            slot: None,
-            allow_fallback: true,
-        }
-    }
-}
-
-/// Which slots "stop all" stops.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum StopScope {
-    /// Every slot without a lease (UI "stop all", main VPN disconnect); leased ones keep running.
-    Unleased,
-    /// Every slot, leases notwithstanding.
-    All,
 }
 
 /// Who stopped a slot (for logs). The app exit is `ProxyManager::shutdown`, not a stop.

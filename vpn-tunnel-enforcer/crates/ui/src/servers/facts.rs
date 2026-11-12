@@ -24,8 +24,19 @@ pub(crate) fn GroupFacts(group: GroupView) -> Element {
         .map(|total| (group.traffic_used.unwrap_or(0), total));
     let link = |url: &Option<String>| url.as_deref().and_then(safe_http_url).map(str::to_owned);
     let (panel, support) = (link(&group.web_page_url), link(&group.support_url));
-    // HWID-bound panels answer an unknown device with an empty list (ru-2026 item 1).
-    let hwid_hint = group.last_fetch_error == Some(FetchError::Empty) && !group.send_hwid;
+    // HWID-bound panels answer an unknown device with an empty list (ru-2026 item 1) or say so
+    // (Remnawave's scheme): one line with the switch at hand. A full device limit is a plain line.
+    let (failure, hwid_hint) = match group.last_fetch_error {
+        Some(FetchError::HwidRequired) if !group.send_hwid => {
+            (None, Some("ui.servers.facts.hwidRequired"))
+        }
+        Some(FetchError::Empty) if !group.send_hwid => {
+            (group.last_fetch_error, Some("ui.servers.facts.hwidHint"))
+        }
+        Some(FetchError::DeviceLimit) => (None, None),
+        other => (other, None),
+    };
+    let device_limit = group.last_fetch_error == Some(FetchError::DeviceLimit);
     let anything = group.last_fetch_error.is_some()
         || group.status == GroupStatus::Expired
         || group.expires_at.is_some()
@@ -42,7 +53,7 @@ pub(crate) fn GroupFacts(group: GroupView) -> Element {
     }
     rsx! {
         div { class: "srv-facts-block",
-            if let Some(why) = group.last_fetch_error {
+            if let Some(why) = failure {
                 p { class: "srv-strip is-fail", role: "alert",
                     {t!(
                         "servers.groups.refreshFailedDetail",
@@ -51,8 +62,11 @@ pub(crate) fn GroupFacts(group: GroupView) -> Element {
                     )}
                 }
             }
-            if hwid_hint {
-                HwidHint { id: group.id.clone() }
+            if let Some(key) = hwid_hint {
+                HwidHint { id: group.id.clone(), text: translate_now(key, &[]) }
+            }
+            if device_limit {
+                p { class: "srv-strip is-warn", role: "status", {t!("ui.servers.facts.deviceLimit")} }
             }
             if group.status == GroupStatus::Expired {
                 p { class: "srv-strip is-warn", {t!("ui.servers.group.expiredBanner")} }
@@ -131,13 +145,13 @@ fn OpenLink(url: String, label: String, title: String, failed: &'static str) -> 
     }
 }
 
-/// The empty-list hint of a subscription that does not send its HWID, with the switch at hand.
+/// Why the panel wants the HWID, with the switch at hand: it turns the HWID on and refreshes.
 #[component]
-fn HwidHint(id: String) -> Element {
+fn HwidHint(id: String, text: String) -> Element {
     let actions = use_context::<Actions>();
     rsx! {
         div { class: "srv-strip is-warn",
-            p { {t!("ui.servers.facts.hwidHint")} }
+            p { "{text}" }
             Button {
                 kind: ButtonKind::Link,
                 small: true,

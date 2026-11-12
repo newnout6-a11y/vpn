@@ -17,6 +17,7 @@
         "stopping": "VPN Tunnel Enforcer — Stopping protection",
         "error": "VPN Tunnel Enforcer — Protection error, retry recovery",
         "unknown": "VPN Tunnel Enforcer — Protection state not confirmed",
+        "paused": "VPN Tunnel Enforcer — Internet paused: the VPN is reconnecting",
         "speed": "↓ {{down}} / ↑ {{up}}"
       },
       "menu": {
@@ -31,12 +32,15 @@
           "restartingProgress": "Status: Restarting {{n}}/{{max}}",
           "stopping": "Status: Stopping protection",
           "error": "Status: Protection error, retry recovery",
-          "unknown": "Status: Protection state not confirmed"
+          "unknown": "Status: Protection state not confirmed",
+          "paused": "Status: Internet paused — the VPN is reconnecting"
         },
         "speed": "Speed: ↓ {{down}} / ↑ {{up}}",
         "show": "Show window",
         "start": "Turn protection on",
         "stop": "Turn protection off",
+        "reconnectNow": "Connect",
+        "continueWithoutVpn": "Continue without VPN",
         "checkRoute": "Check route",
         "openLogs": "Open logs",
         "quit": "Exit"
@@ -82,7 +86,8 @@
           "restarting": "Restarting",
           "stopping": "Stopping",
           "error": "Error",
-          "unknown": "Not confirmed"
+          "unknown": "Not confirmed",
+          "paused": "Paused"
         }
       }
     }

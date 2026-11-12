@@ -580,6 +580,42 @@ fn soft_switch_and_native_reconnect_keep_the_mode() {
     assert_eq!(h.snap().state, TunnelState::Unknown);
 }
 
+/// ks-a (research 5.3 "VPN dropped by itself", "If the VPN drops"): a paused session stays
+/// blocked and reconnecting through failed attempts, and the first native start that succeeds
+/// confirms it again on its own evidence, in both modes; a lane operation is refused nothing.
+#[test]
+fn a_paused_session_reconnects_after_failed_attempts() {
+    for soft in [false, true] {
+        let mut h = H::new();
+        assert!(if soft { h.connect_soft() } else { h.connect() });
+        h.native_down();
+        h.fsm.paused(h.e()).unwrap();
+        let s = h.snap();
+        let paused = (TunnelState::Blocked, Some(Transition::Reconnecting));
+        assert_eq!((s.state, s.transition), paused);
+        for generation in 1..=2 {
+            h.fsm.native_start_began(generation).unwrap();
+            h.fsm
+                .native_start_finished(generation, false, h.e())
+                .unwrap();
+            h.fsm.paused(h.e()).unwrap();
+        }
+        h.fsm.native_start_began(3).unwrap();
+        h.native_up(789);
+        h.fsm.native_start_finished(3, true, h.e()).unwrap();
+        let s = h.snap();
+        assert_eq!(
+            (s.state, s.pid),
+            (TunnelState::Connected, Some(789)),
+            "soft: {soft}"
+        );
+        h.native_down();
+        h.fsm.paused(h.e()).unwrap();
+        assert!(h.stop(), "«Продолжить без VPN» ends the pause");
+        assert_eq!(h.snap().state, TunnelState::Disconnected);
+    }
+}
+
 /// AT-00-002: a running native process is not "connected" until every effect of the start
 /// finished and the lane confirmed it.
 #[test]

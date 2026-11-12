@@ -40,7 +40,7 @@ use vpnte_probes::public_ip::IpReader;
 use vpnte_servers::store::Servers;
 use vpnte_tunnel::api::Runtime;
 use vpnte_tunnel::fsm::FaultState;
-use vpnte_tunnel::lifecycle::{Lifecycle, LifecycleDeps};
+use vpnte_tunnel::lifecycle::{Lifecycle, LifecycleDeps, SystemForeignVpn};
 use vpnte_tunnel::runtime::{
     Capture, EngineFeed, ProxyCapture, RealEngines, RuntimeDeps, Timings, TunCapture, TunnelHandle,
 };
@@ -78,7 +78,6 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         &b.engines,
         b.settings.clone(),
         b.protection.clone(),
-        b.notifier.clone(),
     ));
     let reader = Arc::new(IpReader::new());
     let fingerprints = Fingerprints::default();
@@ -114,6 +113,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
             settings: b.settings.clone(),
             rules: b.rules.clone(),
             rule_sets: b.rule_sets.clone(),
+            always: guard.always.clone(),
         }),
         failover: Some(failover.clone()),
         confirmations: Some(Arc::new(monitor::Alive(ip.clone()))),
@@ -181,6 +181,8 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         notifier: b.notifier.clone(),
         history: b.history.clone(),
         settings: b.settings.clone(),
+        always_available: guard.always.clone(),
+        foreign_vpn: Arc::new(SystemForeignVpn),
     });
     let live = peers::live_checks(b, &runtime, &lifecycle);
 

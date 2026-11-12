@@ -22,6 +22,7 @@ impl Actor {
                 generation,
                 engine,
                 adaptive,
+                guard,
                 ..
             } => {
                 // An in-place switch keeps the engine run of the session it replaces.
@@ -43,6 +44,9 @@ impl Actor {
                     live.adaptive = adaptive;
                     live.proxy_down = false;
                 }
+                if let Some(guard) = guard {
+                    self.guard = guard;
+                }
             }
             Up::Restarted {
                 generation,
@@ -59,8 +63,9 @@ impl Actor {
         }
         let generation = self.session.as_ref().and_then(|s| s.generation);
         self.deps.monitor.start(generation);
+        // A run of this operation is up: whatever outage there was is over.
+        self.end_pause();
         if matches!(job, Job::Connect { .. }) && generation.is_some() {
-            // Proxy mode never claims "all traffic": programs ignoring the system proxy go direct.
             let soft = self.session.as_ref().is_some_and(LiveSession::is_soft);
             let name = if soft { "softConnected" } else { "connected" };
             self.notify(Level::Info, name, NoticeKind::VpnConnect, None);
@@ -68,15 +73,16 @@ impl Actor {
         self.announce_up();
     }
 
-    /// The runtime brought a connected tunnel back by itself (crash auto-restart).
+    /// The runtime brought a connected tunnel back by itself (crash auto-restart, a slow retry
+    /// or «Подключить» in the paused state). Quiet unless the user was told about the outage.
     pub(super) fn native_reconnected(&mut self, generation: u64) {
-        let attempt = self.status.borrow().restart_attempt;
         let live = self.ensure_session(Owner::Recovery);
         live.generation = Some(generation);
         live.proxy_down = false;
         self.deps.monitor.start(Some(generation));
-        let body = Msg::new(notice_key("restored", "body")).arg("attempt", attempt);
-        self.notify(Level::Info, "restored", NoticeKind::VpnConnect, Some(body));
+        if self.end_pause() {
+            self.notify(Level::Info, "restored", NoticeKind::VpnConnect, None);
+        }
         self.announce_up();
     }
 
@@ -92,6 +98,11 @@ impl Actor {
     /// mode from the running capture (a proxy-capture run is a Soft session).
     pub(super) fn ensure_session(&mut self, holder: Owner) -> &mut LiveSession {
         let status = self.status.borrow().clone();
+        if self.session.is_none() {
+            // A run nobody connected in this lane: the kill switch as it is set now.
+            let soft = status.capture == Some(CaptureKind::Proxy);
+            self.guard = SessionGuard::new(self.deps.kill_switch(), soft, None);
+        }
         let profiles = &self.deps.profiles;
         self.session.get_or_insert_with(|| {
             let soft = status.capture == Some(CaptureKind::Proxy);

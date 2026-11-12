@@ -325,6 +325,11 @@ impl ServersApi for ServersBackend {
             .await
     }
 
+    async fn set_own_device_id(&self, id: &str, own: bool) -> AppResult<()> {
+        self.edit_group(id, move |servers, id| servers.set_own_device_id(id, own))
+            .await
+    }
+
     async fn set_request_headers(&self, id: &str, lines: String) -> AppResult<Vec<String>> {
         let (shared, id) = (self.shared.clone(), GroupId::from(id));
         blocking(move || {
@@ -403,6 +408,12 @@ impl ServersApi for ServersBackend {
 
     async fn open_url(&self, url: String) -> AppResult<()> {
         detached(async move { vpnte_winnet::shell::open_url(&url).await }).await
+    }
+
+    async fn copy_text(&self, text: String) -> AppResult<()> {
+        let backend = self.shared.backend.clone();
+        // The blocking pool runs inside the runtime, which the clipboard's first start needs.
+        blocking(move || backend.clipboard().copy(&text).map(drop)).await
     }
 
     fn link_arrivals(&self) -> watch::Receiver<u64> {

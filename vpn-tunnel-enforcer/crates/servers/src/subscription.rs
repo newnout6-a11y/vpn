@@ -12,6 +12,7 @@ use vpnte_base::types::{ClientDevice, ProxyKind};
 use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::net::{HostPort, Route};
 use vpnte_core::settings::{BootstrapRouteMode, Settings};
+use vpnte_profiles::deeplink::DeepLinkError;
 use vpnte_profiles::device::{self, MachineIdentity};
 use vpnte_profiles::model::{ParseReport, SkipReason};
 
@@ -21,7 +22,10 @@ mod fallback;
 mod fetch;
 mod headers;
 mod http;
+mod hwid;
 mod policy;
+#[cfg(test)]
+mod refusal_tests;
 mod relay;
 mod request;
 #[cfg(test)]
@@ -165,6 +169,10 @@ pub enum FetchError {
     /// Not a single-line `http(s)://host` URL.
     #[error("not a subscription URL")]
     InvalidUrl,
+    /// A subscription that came from outside (a deep link, a QR code) resolves into the local
+    /// network: nothing was sent (phones-a11).
+    #[error("subscription link into a local network")]
+    LocalTarget,
     /// The caller cancelled; nothing is recorded.
     #[error("subscription fetch cancelled")]
     Cancelled,
@@ -175,7 +183,10 @@ impl From<FetchError> for AppError {
         match err {
             FetchError::Failed(outcome) => {
                 let kind = match outcome {
-                    FetchOutcome::EmptyList | FetchOutcome::Unparseable(_) => ErrorKind::Validation,
+                    FetchOutcome::EmptyList
+                    | FetchOutcome::HwidRequired
+                    | FetchOutcome::DeviceLimit
+                    | FetchOutcome::Unparseable(_) => ErrorKind::Validation,
                     FetchOutcome::Timeout => ErrorKind::Timeout,
                     _ => ErrorKind::Network,
                 };
@@ -183,6 +194,9 @@ impl From<FetchError> for AppError {
             }
             FetchError::InvalidUrl => {
                 AppError::validation(Msg::new("servers.fetch.invalidUrl")).with_source(err)
+            }
+            FetchError::LocalTarget => {
+                AppError::validation(DeepLinkError::LocalTarget.msg()).with_source(err)
             }
             FetchError::Cancelled => AppError::cancelled(),
         }
@@ -208,6 +222,8 @@ pub fn outcome_msg(outcome: FetchOutcome) -> Msg {
         FetchOutcome::Ok { partial: false } => Msg::new("servers.fetch.ok"),
         FetchOutcome::Ok { partial: true } => Msg::new("servers.fetch.partial"),
         FetchOutcome::EmptyList => Msg::new("servers.fetch.emptyList"),
+        FetchOutcome::HwidRequired => Msg::new("servers.fetch.hwidRequired"),
+        FetchOutcome::DeviceLimit => Msg::new("servers.fetch.deviceLimit"),
         FetchOutcome::Unparseable(kind) => Msg::new(match kind {
             BodyKind::Html => "servers.fetch.body.html",
             BodyKind::Json => "servers.fetch.body.json",
@@ -287,6 +303,11 @@ impl SubscriptionFetcher {
             Plans::Fixed(plan) => plan.clone(),
         };
         plan.with_session(self.relays.get().and_then(|r| r.session_route()))
+    }
+
+    /// This PC's HWIDs: what a subscription without its own ID sends.
+    pub fn hwids(&self) -> &Hwids {
+        &self.hwids
     }
 
     #[cfg(test)]

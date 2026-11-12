@@ -17,7 +17,11 @@ pub(crate) async fn verify(shared: &Shared) -> AppResult<ProtectionView> {
     let machine = blocking(|| Ok(read_machine())).await?;
     let view = match &status.wfp {
         Some(wfp) => from_status(wfp, &machine),
-        None => unelevated(status.settings.level, &machine),
+        // A stored "Always" works as "If the VPN drops" until the helper service (ks-a).
+        None => unelevated(
+            status.settings.level.effective(tunnel.always_available()),
+            &machine,
+        ),
     };
     tracing::info!(
         level = ?view.level,

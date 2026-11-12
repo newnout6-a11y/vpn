@@ -136,6 +136,7 @@ fn provider_facts_and_hidden_rows_are_projected() {
         switching: None,
         geo_disabled: false,
         lang: Lang::En,
+        hwids: &HWIDS,
     });
     let g = &view.groups[0];
     assert_eq!(

@@ -194,7 +194,7 @@ impl Conn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KillSwitchState {
     Off,
-    /// `standard`, no session: filters go up at the next connect.
+    /// "If the VPN drops", nothing blocked yet: the block goes up once a tunnel is up.
     Armed,
     /// Filters and a tunnel.
     Engaged,

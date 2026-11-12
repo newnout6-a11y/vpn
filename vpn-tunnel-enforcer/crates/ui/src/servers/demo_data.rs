@@ -12,6 +12,8 @@ use super::model::*;
 const MIN: i64 = 60_000;
 const DAY: i64 = 24 * 60 * MIN;
 const GB: u64 = 1024 * 1024 * 1024;
+/// The demo PC's device ID (the legacy hash of a synthetic machine).
+pub(crate) const DEMO_PC_ID: &str = "a7d341199a33fa78";
 
 /// A test-net address `198.51.100.n` (RFC 5737).
 pub(crate) fn test_ip(n: u8) -> IpAddr {
@@ -323,6 +325,8 @@ fn demo_groups(now: UnixMs) -> Vec<GroupView> {
             announce: Some("Плановые работы 20 ноября с 03:00 до 04:00 МСК".into()),
             provider_refresh_hours: Some(6),
             send_hwid: true,
+            device_id: Some(DEMO_PC_ID.into()),
+            own_device_id: false,
             header_names: vec!["X-Panel-Client".into()],
             moved_at: Some(now - 3 * DAY),
             host: Some("sub.example-provider.net".into()),
@@ -336,7 +340,9 @@ fn demo_groups(now: UnixMs) -> Vec<GroupView> {
             imported_at: now - 9 * DAY,
             last_fetched_at: Some(now - 2 * DAY),
             last_fetch_attempt_at: Some(now - 2 * 60 * MIN),
-            last_fetch_error: Some(FetchError::Empty),
+            // Remnawave's answer to a device without the HWID: one line and the switch.
+            last_fetch_error: Some(FetchError::HwidRequired),
+            device_id: Some(DEMO_PC_ID.into()),
             traffic_used: Some(11 * GB),
             traffic_total: Some(10 * GB),
             expires_at: Some(now - 2 * DAY),

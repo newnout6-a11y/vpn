@@ -183,6 +183,13 @@ fn protection(level: KillSwitchLevel) -> (Protection, Fake) {
     (p, fake)
 }
 
+/// A protection where "Always" is in force (the helper service owns it).
+fn with_service(level: KillSwitchLevel) -> (Protection, Fake) {
+    let (p, fake) = protection(level);
+    p.set_always_available(true).unwrap();
+    (p, fake)
+}
+
 /// Persist callback that records every saved level.
 #[derive(Clone, Default)]
 struct Store {
@@ -226,9 +233,10 @@ fn ip(id: &str, value: &str) -> KillSwitchException {
     }
 }
 
-/// AT-03-001 / AT-03-003: standard engages before engines start (with the DNS block and the
-/// TUN address permit, review D1 / R1), gains the TUN permit, keeps the blocks after a drop
-/// (with the notice) and goes away on disconnect; B20 no notice on engage.
+/// AT-03-001 / AT-03-003 (ks-a arming): "If the VPN drops" leaves a first connect alone (only
+/// leak protection's DNS / IPv6 block and the TUN address permit, review D1 / R1), blocks
+/// everything once the TUN is up, keeps the block after a drop (quietly: the tunnel's paused
+/// state tells the user) and goes away on disconnect.
 #[test]
 fn standard_session_lifecycle() {
     let (p, fake) = protection(KillSwitchLevel::Standard);
@@ -239,29 +247,77 @@ fn standard_session_lifecycle() {
     assert!(p.session_guarded());
 
     p.connect_begin(&[], &[TUN_V4.into()]).unwrap();
-    assert!(fake.has(false, "block4") && fake.has(false, "dns") && !fake.has(false, "tun"));
-    assert!(fake.has(false, "tun_addr"));
-    assert_eq!(p.status().kill_switch, KillSwitchState::Blocking);
-    p.tun_up(7).unwrap();
-    assert!(fake.has(false, "tun") && fake.has(false, "dns") && !fake.has(false, "tun_addr"));
-    assert_eq!(p.status().kill_switch, KillSwitchState::Engaged);
     assert!(
-        drain(&mut rx).is_empty(),
-        "engaging is not blocking: no notice"
+        !fake.has(false, "block4"),
+        "not armed before the first tunnel-up"
     );
+    assert!(fake.has(false, "dns") && fake.has(false, "tun_addr"));
+    assert_eq!(p.status().kill_switch, KillSwitchState::Armed);
+    p.tun_up(7).unwrap();
+    assert!(fake.has(false, "block4") && fake.has(false, "tun") && fake.has(false, "dns"));
+    assert!(!fake.has(false, "tun_addr"));
+    assert_eq!(p.status().kill_switch, KillSwitchState::Engaged);
 
     p.tun_lost().unwrap();
     assert!(fake.has(false, "block4") && fake.has(false, "dns") && !fake.has(false, "tun"));
-    assert_eq!(drain(&mut rx), ["winnet.wfp.notice.blockedStandard"]);
     let status = p.status();
     assert_eq!(
         (status.conn, status.kill_switch),
         (Conn::Dropped, KillSwitchState::Blocking)
     );
+    assert!(drain(&mut rx).is_empty(), "no notice of its own");
 
     p.disconnected().unwrap();
     assert!(fake.groups(false).is_empty());
     assert_eq!(p.status().dynamic_filters, Some(0));
+    assert_eq!(p.status().kill_switch, KillSwitchState::Armed);
+}
+
+/// ks-a (research 5.3 "first connect fails", tunnel capture): a connect that never came up
+/// leaves the internet alone; with leak protection off nothing is installed at all.
+#[test]
+fn first_connect_that_never_came_up_leaves_the_internet_alone() {
+    let (p, fake) = protection(KillSwitchLevel::Standard);
+    let mut toggles = p.settings().toggles();
+    toggles.leak_protection = false;
+    p.update_settings(toggles).unwrap();
+    p.startup().unwrap();
+    p.connect_begin(&[], &[TUN_V4.into()]).unwrap();
+    assert!(fake.groups(false).is_empty());
+    p.tun_lost().unwrap();
+    assert!(
+        fake.groups(false).is_empty(),
+        "a TUN that never came up arms nothing"
+    );
+    p.disconnected().unwrap();
+    assert!(fake.groups(false).is_empty());
+}
+
+/// ks-a (research 5.3 "planned reconnect", tunnel capture): a server switch or settings restart
+/// (preserved stop, then a new `connect_begin` / `tun_up`) keeps the block with no gap; the new
+/// TUN's permit replaces the old one.
+#[test]
+fn planned_reconnect_keeps_the_block_without_a_gap() {
+    let (p, fake) = protection(KillSwitchLevel::Standard);
+    p.startup().unwrap();
+    p.connect_begin(&[], &[TUN_V4.into()]).unwrap();
+    p.tun_up(7).unwrap();
+    let blocks = |f: &Fake| -> Vec<u64> {
+        let w = f.0.lock();
+        let ids = w
+            .dynamic
+            .iter()
+            .filter(|(_, s)| s.name.starts_with("block"));
+        ids.map(|(id, _)| *id).collect()
+    };
+    let before = blocks(&fake);
+    assert!(!before.is_empty());
+    p.connect_begin(&[], &[TUN_V4.into()]).unwrap();
+    assert_eq!(blocks(&fake), before, "held through the gap");
+    assert_eq!(p.status().kill_switch, KillSwitchState::Blocking);
+    p.tun_up(8).unwrap();
+    assert_eq!(blocks(&fake), before, "the same filters, never re-created");
+    assert!(fake.has(false, "tun"));
 }
 
 const TUN_V4: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 168, 250, 253);
@@ -280,31 +336,52 @@ fn session_guard_follows_the_settings() {
     assert!(p.session_guarded());
 }
 
-/// B2 / AT-03-010: strict is persistent from startup, survives disconnect and shutdown, and
-/// says once per disconnect that traffic is blocked.
+/// B2 / AT-03-010 with the helper service: "Always" is persistent from startup and survives
+/// disconnect and shutdown, quietly (the tunnel's state tells the user).
 #[test]
 fn strict_survives_disconnect_and_shutdown() {
-    let (p, fake) = protection(KillSwitchLevel::Strict);
+    let (p, fake) = with_service(KillSwitchLevel::Strict);
     let mut rx = p.notices();
     p.startup().unwrap();
     assert!(fake.has(true, "block4") && fake.has(true, "engine") && fake.groups(false).is_empty());
-    assert_eq!(drain(&mut rx), ["winnet.wfp.notice.blockedStrict"]);
     p.connect_begin(&[PathBuf::from(r"C:\Happ\core\xray.exe")], &[])
         .unwrap();
     assert_eq!(fake.groups(false), ["dns", "session"]);
     p.tun_up(9).unwrap();
     assert_eq!(fake.groups(false), ["dns", "session", "tun"]);
     p.disconnected().unwrap();
-    assert_eq!(drain(&mut rx), ["winnet.wfp.notice.blockedStrict"]);
     p.shutdown();
     assert!(fake.has(true, "block6") && fake.groups(false).is_empty());
     assert_eq!(p.status().kill_switch, KillSwitchState::Blocking);
+    assert!(drain(&mut rx).is_empty());
 }
 
-/// §6.5: entering strict saves the choice before any effect; leaving strict saves last.
+/// ks-a / F-190 departure: without the helper service a stored "strict" works as "If the VPN
+/// drops": persistent leftovers of an earlier strict run go at startup, nothing persistent is
+/// installed, the stored value stays, and the service flag brings "Always" back.
+#[test]
+fn strict_without_the_service_works_as_on_drop() {
+    let (p, fake) = protection(KillSwitchLevel::Strict);
+    let leftover = crate::wfp::spec::block4();
+    fake.0.lock().apply(true, &[], &leftover);
+    p.startup().unwrap();
+    assert!(fake.groups(true).is_empty(), "leftovers removed");
+    assert_eq!(p.settings().level, KillSwitchLevel::Strict);
+    assert_eq!(p.level_in_force(), KillSwitchLevel::Standard);
+    p.connect_begin(&[], &[TUN_V4.into()]).unwrap();
+    assert!(!fake.has(false, "block4"));
+    p.tun_up(5).unwrap();
+    assert!(fake.has(false, "block4") && fake.groups(true).is_empty());
+    p.disconnected().unwrap();
+    assert!(fake.groups(false).is_empty() && fake.groups(true).is_empty());
+    p.set_always_available(true).unwrap();
+    assert!(fake.has(true, "block4"));
+}
+
+/// §6.5: entering "Always" saves the choice before any effect; leaving it saves last.
 #[test]
 fn strict_persistence_order() {
-    let (p, fake) = protection(KillSwitchLevel::Off);
+    let (p, fake) = with_service(KillSwitchLevel::Off);
     p.startup().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let (f, s) = (fake.clone(), seen.clone());
@@ -326,7 +403,7 @@ fn strict_persistence_order() {
 /// failure while leaving strict keeps strict, nothing is saved, the blocks stay.
 #[test]
 fn leaving_strict_fails_closed() {
-    let (p, fake) = protection(KillSwitchLevel::Strict);
+    let (p, fake) = with_service(KillSwitchLevel::Strict);
     p.startup().unwrap();
     fake.0.lock().fail_persistent = true;
     let store = Store::default();
@@ -348,13 +425,14 @@ fn leaving_strict_fails_closed() {
     assert!(fake.has(true, "block4"), "a failed save re-installs strict");
 }
 
-/// AT-03-003 (§7.2): an engage failure leaves the level `off` and stores nothing; standard set
-/// while connected stays engaged (no disable call).
+/// AT-03-003 (§7.2): an engage failure leaves the level `off` and stores nothing; "If the VPN
+/// drops" set while connected engages at once (the tunnel is up: the session is armed).
 #[test]
 fn level_switch_while_connected() {
     let (p, fake) = protection(KillSwitchLevel::Off);
     p.startup().unwrap();
     p.connect_begin(&[], &[]).unwrap();
+    p.tun_up(3).unwrap();
     assert!(
         fake.has(false, "block6") && !fake.has(false, "block4"),
         "leak protection only"
@@ -373,7 +451,6 @@ fn level_switch_while_connected() {
     p.set_level(KillSwitchLevel::Standard, &|s| store.persist(s))
         .unwrap();
     assert_eq!(store.levels(), [KillSwitchLevel::Standard]);
-    p.tun_up(3).unwrap();
     assert!(fake.has(false, "block4") && fake.has(false, "tun"));
     assert_eq!(p.status().kill_switch, KillSwitchState::Engaged);
 }
@@ -549,7 +626,7 @@ fn watchdog_reapplies_after_bfe_restart() {
 /// switches the level off.
 #[test]
 fn reset_network_protection() {
-    let (p, fake) = protection(KillSwitchLevel::Strict);
+    let (p, fake) = with_service(KillSwitchLevel::Strict);
     p.startup().unwrap();
     p.connect_begin(&[], &[]).unwrap();
     let store = Store::default();
@@ -571,7 +648,7 @@ fn reset_network_protection() {
 /// outside a session; a failed apply keeps the previous switches.
 #[test]
 fn switches_apply_or_stay() {
-    let (p, fake) = protection(KillSwitchLevel::Strict);
+    let (p, fake) = with_service(KillSwitchLevel::Strict);
     p.startup().unwrap();
     assert!(!fake.has(true, "dns"), "LAN resolvers stay reachable");
     let mut toggles = p.settings().toggles();

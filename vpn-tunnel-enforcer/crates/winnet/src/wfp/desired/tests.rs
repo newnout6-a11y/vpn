@@ -7,9 +7,11 @@ fn id(name: &str) -> Arc<AppId> {
     Arc::new(AppId::from_bytes(name.as_bytes().to_vec()))
 }
 
+/// A plan of a session that was up once (armed) whenever it is in a session at all.
 fn plan(level: KillSwitchLevel, conn: Conn, pwc: bool) -> Plan {
     Plan {
         level,
+        armed: conn.in_session(),
         leak_protection: true,
         public_wifi_compat: pwc,
         allow_lan: true,
@@ -125,6 +127,19 @@ fn standard_level() {
         groups(&desired(&p).dynamic),
         plus(&FULL, &["session", "dns"])
     );
+}
+
+/// ks-a: before the session's first tunnel-up "If the VPN drops" adds nothing of its own (leak
+/// protection's IPv6 / DNS block only, or nothing at all without it).
+#[test]
+fn standard_waits_for_the_first_tunnel_up() {
+    for conn in [Conn::Connecting, Conn::Dropped] {
+        let mut p = plan(KillSwitchLevel::Standard, conn, true);
+        p.armed = false;
+        assert_eq!(groups(&desired(&p).dynamic), plus(&V6ONLY, &["dns"]));
+        p.leak_protection = false;
+        assert_eq!(desired(&p), Desired::default());
+    }
 }
 
 /// AT-03-010 / AT-03-012 (§7.10, review D1): strict is persistent; a session adds only dynamic

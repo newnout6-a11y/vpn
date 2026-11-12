@@ -13,7 +13,6 @@ use vpnte_base::types::{Engine as EngineKind, UnixMs};
 use super::launch::Engine;
 use super::run::LoopCmd;
 use crate::health::Route;
-use crate::lease::LeaseBook;
 use crate::model::{InstanceStatus, Lifecycle, derive_readiness};
 use crate::slot::{self, CONTROL_HOST, Slot};
 
@@ -59,9 +58,6 @@ pub(super) struct SlotState {
     pub last_rotate_reason: Option<String>,
     /// Stopped after its failure budget; keeps showing which profile died.
     pub auto_disabled: bool,
-    /// Lent to the app's own short-lived use ([`crate::model::ProxyOps::borrow`]): never leased,
-    /// so the borrower can always stop it. Cleared when the slot stops.
-    pub borrowed: bool,
     pub route: Route,
     pub live: Option<Live>,
     rotations: VecDeque<(String, Instant)>,
@@ -165,11 +161,10 @@ impl SlotState {
     }
 }
 
-/// Every slot plus the lease book.
+/// Every slot.
 #[derive(Default)]
 pub(super) struct Registry {
     pub slots: BTreeMap<Slot, SlotState>,
-    pub leases: LeaseBook,
     /// Set by `shutdown`: no new start.
     pub closed: bool,
 }
@@ -184,13 +179,6 @@ impl Registry {
             .map(|(slot, s)| s.instance(*slot))
             .collect();
         derive_readiness(&mut list, now);
-        list
-    }
-
-    /// The routes a lease may take: [`Registry::instances`] without the borrowed slots.
-    pub fn leasable(&self, now: UnixMs) -> Vec<InstanceStatus> {
-        let mut list = self.instances(now);
-        list.retain(|i| !self.slots.get(&i.slot).is_some_and(|s| s.borrowed));
         list
     }
 
@@ -222,18 +210,17 @@ impl Registry {
             .map(|(slot, _)| *slot)
     }
 
-    /// Other slots that are healthy routes on `ip` at `now`, in slot order, with whether each
-    /// is leased (the duplicate check of a successful probe).
-    pub fn healthy_peers(&self, slot: Slot, ip: IpAddr, now: UnixMs) -> Vec<(Slot, bool)> {
+    /// The lowest other slot that is a healthy route on `ip` at `now`: it keeps the IP and the
+    /// slot whose probe found the duplicate is quarantined (spec 3.17).
+    pub fn duplicate_keeper(&self, slot: Slot, ip: IpAddr, now: UnixMs) -> Option<Slot> {
         self.slots
             .iter()
-            .filter(|(other, s)| {
+            .find(|(other, s)| {
                 **other != slot
                     && s.route.egress_ip == Some(ip)
                     && s.route.is_healthy(s.live.is_some(), now)
             })
-            .map(|(other, _)| (*other, self.leases.lease(*other, now).is_some()))
-            .collect()
+            .map(|(other, _)| *other)
     }
 
     /// Whether a new route may be allocated on `slot` (3.23): nothing configured or running

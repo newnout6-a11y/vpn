@@ -2,17 +2,20 @@
 //! a real backend (throw-away data dir, fake tunnel) in `backend`.
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::LazyLock;
 
 use vpnte_base::Msg;
 use vpnte_base::i18n::Lang;
 use vpnte_base::types::ClientDevice;
 use vpnte_profiles::countries::Iso2;
+use vpnte_profiles::device::MachineIdentity;
 use vpnte_profiles::model::SubscriptionMeta;
 use vpnte_servers::model::{
     self as sm, ARCHIVE_TTL_MS, ArchiveReason, Archived, FetchOutcome, FetchState, GroupId,
     GroupStatus, GroupSummary, HealthReason, HealthRecord, NetFail, Origin, Ping, ProfileId,
     ServerSummary,
 };
+use vpnte_servers::subscription::Hwids;
 use vpnte_tunnel::fsm::{Transition, TunnelSnapshot, TunnelState};
 use vpnte_ui::servers as ui;
 
@@ -78,6 +81,7 @@ fn group(id: &str, manual: bool) -> GroupSummary {
         header_names: Vec::new(),
         moved_at: None,
         controls: Default::default(),
+        own_hwid: None,
     }
 }
 
@@ -124,6 +128,10 @@ fn list() -> sm::ServersView {
     }
 }
 
+/// This PC's device IDs in the projections (one fixed value for every device).
+static HWIDS: LazyLock<Hwids> =
+    LazyLock::new(|| Hwids::of(&MachineIdentity::default(), Some("test-pc-id-0001".into())));
+
 fn inputs<'a>(
     list: &'a sm::ServersView,
     extras: &'a HashMap<ProfileId, RowExtras>,
@@ -138,7 +146,36 @@ fn inputs<'a>(
         switching: None,
         geo_disabled: true,
         lang: Lang::En,
+        hwids: &HWIDS,
     }
+}
+
+/// p-subs: a subscription shows the device ID it sends (this PC's, or its own after a reset);
+/// the manual group has none.
+#[test]
+fn groups_show_the_device_id_they_send() {
+    let mut list = list();
+    let (empty, ips) = (HashMap::new(), HashMap::new());
+    let view = project(&inputs(&list, &empty, &ips));
+    let ids: Vec<_> = view
+        .groups
+        .iter()
+        .map(|g| (g.id.as_str(), g.device_id.as_deref(), g.own_device_id))
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            ("keys", None, false),
+            ("sub", Some("test-pc-id-0001"), false)
+        ]
+    );
+    list.groups[1].own_hwid = Some("0123456789abcdef".into());
+    let view = project(&inputs(&list, &empty, &ips));
+    let sub = &view.groups[1];
+    assert_eq!(
+        (sub.device_id.as_deref(), sub.own_device_id),
+        (Some("0123456789abcdef"), true)
+    );
 }
 
 #[test]
@@ -256,6 +293,11 @@ fn fetch_outcomes_map_to_the_page_errors() {
     let cases = [
         (FetchOutcome::Ok { partial: true }, None),
         (FetchOutcome::EmptyList, Some(ui::FetchError::Empty)),
+        (
+            FetchOutcome::HwidRequired,
+            Some(ui::FetchError::HwidRequired),
+        ),
+        (FetchOutcome::DeviceLimit, Some(ui::FetchError::DeviceLimit)),
         (
             FetchOutcome::Unparseable(sm::BodyKind::Html),
             Some(ui::FetchError::Invalid),

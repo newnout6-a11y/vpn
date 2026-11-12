@@ -1,8 +1,8 @@
 //! External loopback proxy slots (`vpnte-proxies`) in the app: the manager over the server list,
 //! the local control API on 127.0.0.1, the main-VPN stop hook and the stop at app exit (spec
-//! external-proxy §3.28: the control API runs while the app runs; a VPN disconnect stops the
-//! unleased slots; app exit stops every slot). Nothing here needs elevation: slots and the API
-//! listen on loopback and the engines run as the user.
+//! external-proxy §3.28: the control API runs while the app runs; a VPN disconnect and the app
+//! exit stop every slot). Nothing here needs elevation: slots and the API listen on loopback
+//! and the engines run as the user.
 mod health;
 mod source;
 #[cfg(test)]
@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use vpnte_proxies::control::{ControlConfig, ControlServer};
 use vpnte_proxies::manager::{ProfileSource, ProxyManager, ProxySnapshot};
-use vpnte_proxies::model::{ProxyOps, StopReason, StopScope};
+use vpnte_proxies::model::{ProxyOps, StopReason};
 
 pub(crate) use source::{ProbeCtxFn, ServerProfiles};
 
@@ -39,8 +39,7 @@ pub struct Proxies {
 
 impl Proxies {
     /// Builds the manager over `source` and starts the control server described by `config`
-    /// under a child of `shutdown`. Call it inside the tokio runtime (the manager starts its
-    /// lease-expiry timer there).
+    /// under a child of `shutdown`. Call it inside the tokio runtime.
     pub fn start(
         source: Arc<dyn ProfileSource>,
         resources: &Path,
@@ -79,14 +78,12 @@ impl Proxies {
         }
     }
 
-    /// The main VPN stopped: every slot without a lease stops, leased slots keep serving.
+    /// The main VPN stopped: every slot stops.
     pub async fn vpn_stopped(&self) {
-        self.manager
-            .stop_all(StopScope::Unleased, StopReason::VpnStop)
-            .await;
+        self.manager.stop_all(StopReason::VpnStop).await;
     }
 
-    /// App exit: every slot stops (leases notwithstanding) and the control server closes.
+    /// App exit: every slot stops and the control server closes.
     /// Idempotent.
     pub async fn shutdown(&self) {
         self.manager.shutdown().await;

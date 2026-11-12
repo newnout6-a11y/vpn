@@ -57,6 +57,9 @@ pub struct TrayState {
     pub up_bps: u64,
     /// Setting «Сворачивать в трей»: the close button hides the window to the tray.
     pub minimize_to_tray: bool,
+    /// «Интернет на паузе»: the VPN dropped by itself and the kill switch holds (ks-a); the menu
+    /// then offers «Подключить» and «Продолжить без VPN».
+    pub paused: bool,
 }
 
 /// What the tray says about protection.
@@ -72,6 +75,7 @@ pub enum TrayStatus {
     Stopping,
     Error,
     Unknown,
+    Paused,
 }
 
 /// Colour family of the tray icon: a badge on the app icon, or the greyed icon when off.
@@ -85,7 +89,7 @@ pub enum Badge {
 
 impl TrayStatus {
     /// Every status, in declaration order.
-    pub const ALL: [TrayStatus; 10] = [
+    pub const ALL: [TrayStatus; 11] = [
         TrayStatus::Protected,
         TrayStatus::Leak,
         TrayStatus::Off,
@@ -96,11 +100,16 @@ impl TrayStatus {
         TrayStatus::Stopping,
         TrayStatus::Error,
         TrayStatus::Unknown,
+        TrayStatus::Paused,
     ];
 
     /// The canonical mapping (`trayStatusForTunnel`). A pure function of the snapshot and the two
-    /// flags: the old app also accepted explicit statuses and silently dropped them (L-01).
+    /// flags: the old app also accepted explicit statuses and silently dropped them (L-01). A
+    /// pause wins: it is reconnecting under a held kill switch, with its own two actions.
     pub fn of(state: &TrayState) -> TrayStatus {
+        if state.paused && state.transition != Some(Transition::Disconnecting) {
+            return TrayStatus::Paused;
+        }
         if let Some(transition) = state.transition {
             return match transition {
                 Transition::Connecting => TrayStatus::Starting,
@@ -140,6 +149,7 @@ impl TrayStatus {
             TrayStatus::Stopping => "stopping",
             TrayStatus::Error => "error",
             TrayStatus::Unknown => "unknown",
+            TrayStatus::Paused => "paused",
         }
     }
 
@@ -163,6 +173,7 @@ impl TrayStatus {
                 | TrayStatus::KillSwitch
                 | TrayStatus::Error
                 | TrayStatus::Unknown
+                | TrayStatus::Paused
         )
     }
 
@@ -271,6 +282,17 @@ impl TrayModel {
             None => Msg::new("ui.tray.proxyNone"),
         };
         let (down, up) = (format_speed(state.down_bps), format_speed(state.up_bps));
+        let paused = status == TrayStatus::Paused;
+        // The paused state's two buttons (research 5.2): «Подключить» retries now,
+        // «Продолжить без VPN» is the disconnect.
+        let (start, stop) = match paused {
+            true => (
+                "ui.tray.menu.reconnectNow",
+                "ui.tray.menu.continueWithoutVpn",
+            ),
+            false => ("ui.tray.menu.start", "ui.tray.menu.stop"),
+        };
+        let can_start = can_start || paused;
         let mut tooltip = vec![status_msg("tip", status, state.restart)];
         tooltip.extend(state.public_ip.is_some().then(|| ip.clone()));
         tooltip.extend(state.proxy_addr.is_some().then(|| proxy.clone()));
@@ -293,8 +315,8 @@ impl TrayModel {
                         false,
                     ),
                     TrayItemId::Show => (Msg::new("ui.tray.menu.show"), true),
-                    TrayItemId::Start => (Msg::new("ui.tray.menu.start"), can_start && !quitting),
-                    TrayItemId::Stop => (Msg::new("ui.tray.menu.stop"), can_stop && !quitting),
+                    TrayItemId::Start => (Msg::new(start), can_start && !quitting),
+                    TrayItemId::Stop => (Msg::new(stop), can_stop && !quitting),
                     TrayItemId::CheckRoute => (Msg::new("ui.tray.menu.checkRoute"), !quitting),
                     TrayItemId::OpenLogs => (Msg::new("ui.tray.menu.openLogs"), !quitting),
                     TrayItemId::Quit => (Msg::new("ui.tray.menu.quit"), !quitting),

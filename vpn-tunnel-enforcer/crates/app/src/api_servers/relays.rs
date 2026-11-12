@@ -91,10 +91,10 @@ pub(super) async fn lend(
     rx.await.ok()
 }
 
-/// Borrows a slot for `profile` ([`ProxyOps::borrow`]: never leased to a control API client, so
-/// the stop of the spare's release cannot be refused).
+/// Starts a slot for `profile` on the lowest free slot ([`ProxyOps::add`]); the spare's release
+/// stops it again.
 async fn start_spare(ops: Arc<dyn ProxyOps>, profile: String) -> Option<Spare> {
-    let started = match ops.borrow(profile.clone()).await {
+    let started = match ops.add(profile.clone()).await {
         Ok(status) => status.instance,
         Err(err) => {
             tracing::info!(server = %profile, "subscription spare slot not started: {err}");

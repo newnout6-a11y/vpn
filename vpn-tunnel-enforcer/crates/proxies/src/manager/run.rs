@@ -1,13 +1,13 @@
 //! The tasks of a running slot (spec 3.12–3.19, 6.4): the health loop (one per slot; probes run
 //! under the global permits), the exit watcher (it owns the exit from the moment of the spawn,
 //! so an engine dying early is never missed, B-29) and the output pump (rate-limited warnings,
-//! transport hints), plus the lease-expiry timer.
+//! transport hints).
 use std::future::pending;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot};
+use tokio::sync::{Semaphore, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::Msg;
 use vpnte_base::types::{Engine as EngineKind, UnixMs, now_ms};
@@ -16,7 +16,7 @@ use vpnte_core::redact;
 use super::Inner;
 use super::launch::{Engine, Exit, STOP_TIMEOUT, code_text};
 use super::registry::{Live, Registry};
-use crate::health::{Duplicate, Next, ms, resolve_duplicate};
+use crate::health::{Next, ms};
 use crate::model::Degradation;
 use crate::probe::{ProbeError, ProbeOk, Prober};
 use crate::slot::Slot;
@@ -99,7 +99,6 @@ impl Inner {
         let now = now_ms();
         let mut guard = self.reg.lock();
         let reg = &mut *guard;
-        let leased = reg.leases.lease(slot, now).is_some();
         let state = reg.slots.get_mut(&slot)?;
         state.live_of(generation)?;
         let profile = state.profile.as_ref().map(|p| p.id.clone());
@@ -113,14 +112,9 @@ impl Inner {
             }
         };
         let next = match outcome {
-            Ok((ip, true)) => match resolve_duplicate(leased, &reg.healthy_peers(slot, ip, now)) {
+            Ok((ip, true)) => match reg.duplicate_keeper(slot, ip, now) {
                 None => Next::In(self.timing.after_success(slot)),
-                Some(Duplicate::QuarantinePeer(peer)) => {
-                    let text = format!("Duplicate egress IP {ip} also reported by slot {slot}");
-                    quarantine(reg, peer, text, now);
-                    Next::In(self.timing.after_success(slot))
-                }
-                Some(Duplicate::Quarantine { keeper }) => {
+                Some(keeper) => {
                     let text = format!("Duplicate egress IP {ip} already belongs to slot {keeper}");
                     quarantine(reg, slot, text, now);
                     Next::Park
@@ -339,36 +333,5 @@ async fn pump_output(
         tracing::warn!(slot = %slot, suppressed, line = %text, "external proxy engine output");
         last_logged = Some(Instant::now());
         suppressed = 0;
-    }
-}
-
-/// Sweeps expired leases when they expire (the lease book also ignores them lazily); re-armed
-/// through `wake` whenever a lease is granted or renewed.
-pub(super) async fn lease_timer(inner: Weak<Inner>, wake: Arc<Notify>, cancel: CancellationToken) {
-    loop {
-        let next = match inner.upgrade() {
-            Some(inner) => inner.reg.lock().leases.next_expiry(),
-            None => return,
-        };
-        let due = async {
-            match next {
-                Some(at) => {
-                    let wait = u64::try_from(at - now_ms()).unwrap_or(0);
-                    tokio::time::sleep(Duration::from_millis(wait)).await;
-                }
-                None => pending().await,
-            }
-        };
-        tokio::select! {
-            () = cancel.cancelled() => return,
-            () = wake.notified() => continue,
-            () = due => {}
-        }
-        match inner.upgrade() {
-            Some(inner) => {
-                inner.reg.lock().leases.sweep(now_ms());
-            }
-            None => return,
-        }
     }
 }

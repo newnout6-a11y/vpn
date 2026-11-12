@@ -48,11 +48,15 @@ impl Servers {
             device,
             send_hwid,
             headers,
+            from_link,
         } = options;
         let input = input.trim();
-        if let Err(err) = deeplink::unwrap_deeplink(input) {
-            return Err(AppError::validation(err.msg()));
-        }
+        // A deep link names an internet host (checked here, before any request); one that
+        // names a public host is still checked by its addresses at the first request.
+        let wrapped = match deeplink::unwrap_deeplink(input) {
+            Ok(inner) => inner.is_some(),
+            Err(err) => return Err(AppError::validation(err.msg())),
+        };
         let Some(url) = canonical_source(input) else {
             // Up to 1 MiB of text is CPU work: the blocking pool, as for a fetched body.
             let pasted = input.to_owned();
@@ -93,6 +97,7 @@ impl Servers {
         let mut request = FetchRequest::new(url.clone(), device);
         request.send_hwid = send_hwid;
         request.headers = headers;
+        request.from_link = from_link || wrapped;
         ctx.ops
             .run(FeatureKind::Import, opts, move |lease| async move {
                 let fetched = match fetcher.fetch_request(&request, lease.token()).await {

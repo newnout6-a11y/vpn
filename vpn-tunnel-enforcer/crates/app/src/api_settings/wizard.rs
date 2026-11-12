@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use vpnte_base::i18n::Lang;
 use vpnte_base::types::Notice;
 use vpnte_base::types::{ClientDevice, KillSwitchLevel, Level};
-use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
+use vpnte_base::{AppResult, ErrorKind, Msg};
 use vpnte_core::settings::{ConnectionMode, RoutingMode};
 use vpnte_probes::local_proxy::{self, ScanOptions};
 use vpnte_servers::subscription::canonical_source;
@@ -164,11 +164,6 @@ async fn finish(shared: Arc<Shared>, choices: WizardChoices) -> AppResult<()> {
     let backend = shared.backend.clone();
     let tunnel = backend.tunnel()?.clone();
     let (routing, adjusted) = routing_for(&choices, tunnel.tun_available())?;
-    if routing == RoutingMode::Soft && choices.kill_switch == KillSwitchLevel::Strict {
-        return Err(AppError::validation(Msg::new(
-            "tunnel.lifecycle.soft.strictUnavailable",
-        )));
-    }
     let mut applied = Applied::default();
     let result = apply(&shared, &choices, routing, &mut applied).await;
     if let Err(err) = result {

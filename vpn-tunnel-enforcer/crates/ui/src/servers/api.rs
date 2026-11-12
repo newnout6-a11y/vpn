@@ -81,6 +81,9 @@ pub trait ServersApi: 'static {
     async fn rename_group(&self, id: &str, name: String) -> AppResult<()>;
     /// Turns the subscription's device HWID on or off (the next refresh uses it).
     async fn set_send_hwid(&self, id: &str, on: bool) -> AppResult<()>;
+    /// Gives the subscription its own fresh device ID (`own`: the provider then counts this PC
+    /// as a new device) or takes it back to this PC's ID.
+    async fn set_own_device_id(&self, id: &str, own: bool) -> AppResult<()>;
     /// Replaces the subscription's extra request headers (`Name: value` lines; blank = none);
     /// answers the header names now set.
     async fn set_request_headers(&self, id: &str, lines: String) -> AppResult<Vec<String>>;
@@ -120,6 +123,8 @@ pub trait ServersApi: 'static {
 
     /// Opens an `http(s)` link in the user's browser.
     async fn open_url(&self, url: String) -> AppResult<()>;
+    /// Puts plain text (a request for the provider) on the clipboard.
+    async fn copy_text(&self, text: String) -> AppResult<()>;
 
     /// Bumped each time Windows hands the app a link (a browser or a messenger opened
     /// `vless://…`, `hiddify://import/…`); [`ServersApi::take_link`] then yields it.

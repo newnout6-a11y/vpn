@@ -108,6 +108,22 @@ pub fn legacy_hwid(device: ClientDevice, id: &MachineIdentity) -> String {
     hex
 }
 
+/// Remnawave's HWID rule (panel v3.0.0): 10 to 64 of `[a-zA-Z0-9=-]`. A panel ignores any other
+/// value as if no HWID had been sent, which on a device-limited plan reads as "not supported".
+pub fn is_valid_hwid(hwid: &str) -> bool {
+    (10..=64).contains(&hwid.len())
+        && hwid
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'=' | b'-'))
+}
+
+/// A fresh random HWID in the legacy shape (16 lowercase hex digits, as Android IDs and the old
+/// app's hash look): what a panel sees as a new device after the user resets the ID.
+pub fn random_hwid() -> String {
+    // The last 8 bytes of a v4 UUID: 62 random bits (only the variant bits are fixed).
+    hex::encode(&uuid::Uuid::new_v4().as_bytes()[8..])
+}
+
 /// `VPNTE_SUBSCRIPTION_HWID`, trimmed, when set and not blank. It replaces the HWID in the header
 /// and in the User-Agent alike.
 pub fn hwid_override() -> Option<String> {
@@ -208,6 +224,28 @@ mod tests {
                 "887fdec7a9d12def"
             ]
         );
+    }
+
+    /// p-subs (Remnawave v3.0.0 HWID rule): the legacy hash and a reset ID pass; other values a
+    /// panel would ignore do not.
+    #[test]
+    fn hwids_follow_the_remnawave_rule() {
+        for d in ALL {
+            assert!(is_valid_hwid(&legacy_hwid(
+                d,
+                &id("HOST-1", "alice", "WORKGROUP")
+            )));
+        }
+        let fresh = random_hwid();
+        assert!(is_valid_hwid(&fresh), "{fresh}");
+        assert_eq!(fresh.len(), 16);
+        assert_ne!(fresh, random_hwid());
+        assert!(is_valid_hwid("Ab-0=Ab-0="));
+        assert!(is_valid_hwid(&"a".repeat(64)));
+        for bad in ["short1234", "", "has space1", "under_score1", "кириллица12"] {
+            assert!(!is_valid_hwid(bad), "{bad}");
+        }
+        assert!(!is_valid_hwid(&"a".repeat(65)));
     }
 
     /// §7.2 "UA format": the Happ agent first, per device.

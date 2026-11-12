@@ -16,6 +16,11 @@ pub struct KillSwitchView {
     pub exceptions: Vec<ExceptionView>,
     /// Windows Firewall blocks outgoing connections by default on an active profile.
     pub firewall_blocks_outbound: bool,
+    /// A Hyper-V switch exists: virtual machines and WSL are not covered (a Details line).
+    pub hyperv_unfiltered: bool,
+    /// "Always" can be kept safe here (the helper service); otherwise it is shown disabled and a
+    /// stored "Always" works as "If the VPN drops".
+    pub always_available: bool,
 }
 
 /// What the WFP filters are doing now.
@@ -23,7 +28,7 @@ pub struct KillSwitchView {
 pub enum ProtectionStatus {
     #[default]
     Off,
-    /// Standard level, not connected: filters arrive with the next connect.
+    /// "If the VPN drops", nothing to hold yet: the block goes up once the tunnel is up.
     Armed,
     /// Filters and tunnel are up.
     Engaged,

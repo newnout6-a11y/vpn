@@ -10,7 +10,7 @@ use vpnte_core::ops::Source;
 use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
 
-use super::fakes::{FakeNotifier, FakeProfiles, FakeSoft, Services, eventually};
+use super::fakes::{FakeForeignVpn, FakeNotifier, FakeProfiles, FakeSoft, Services, eventually};
 use super::user_stop;
 use crate::api::VpnProfile;
 use crate::fsm::TunnelState;
@@ -39,9 +39,16 @@ struct Joint {
 
 impl Joint {
     fn new() -> Self {
+        Self::new_with(|_| {})
+    }
+
+    /// A joint lane whose runtime runs with `timings` adjusted.
+    fn new_with(timings: impl FnOnce(&mut crate::runtime::Timings)) -> Self {
         let dir = TempDir::new("joint");
         let world = World::new();
-        let runtime = TunnelHandle::spawn(crate::runtime::tests::deps(&world));
+        let mut runtime_deps = crate::runtime::tests::deps(&world);
+        timings(&mut runtime_deps.timings);
+        let runtime = TunnelHandle::spawn(runtime_deps);
         let profiles = Arc::new(FakeProfiles::default());
         let settings = Arc::new(Store::<Settings>::open(&dir.0));
         let services = Arc::new(Services::default());
@@ -57,6 +64,8 @@ impl Joint {
             notifier: notifier.clone(),
             history: history.clone(),
             settings: settings.clone(),
+            always_available: Arc::default(),
+            foreign_vpn: Arc::new(FakeForeignVpn::default()),
         };
         Self {
             lc: Lifecycle::spawn(deps),
@@ -143,40 +152,70 @@ async fn tun_setup_failure_is_recorded_as_such() {
 }
 
 /// H-05 across the seam: the runtime restarts a crashed engine itself (native generation 2);
-/// the lane keeps the session, tells the user once per step and records nothing.
+/// the lane keeps the session and records nothing; a short restart stays silent (ks-a).
 #[tokio::test]
 async fn crash_restart_continues_the_session() {
     let j = Joint::new();
     j.lc.connect(proxy()).await.expect("connect");
     j.world.core(0).crash();
-    eventually("restored notice", || j.noticed("restored")).await;
-    assert!(j.noticed("crashRestarting"));
-    assert_eq!(j.state(), TunnelState::Connected);
-    let session = j.lc.session().borrow().clone().expect("session");
-    assert_eq!(session.generation, Some(2));
+    let generation = || j.lc.session().borrow().as_ref().and_then(|s| s.generation);
+    eventually("native restart", || generation() == Some(2)).await;
+    eventually("connected", || j.state() == TunnelState::Connected).await;
+    assert!(!j.noticed("restored") && !j.noticed("reconnecting"));
     assert!(j.kinds().is_empty());
     j.lc.disconnect(user_stop()).await.expect("disconnect");
     assert_eq!(j.kinds(), [OutcomeKind::UserStop]);
 }
 
-/// Crash table across the seam: auto-restart off + standard kill switch keeps blocking; the
-/// lane ends the session (the fake engine reports an unreachable upstream, which the end
-/// classification puts first: `server-down`) and warns; a user stop then releases protection.
+/// ks-a across the seam (research 5.3 "engine crash", auto-restart off): the runtime keeps the
+/// block, the lane keeps the session open and paused (no row, nothing released) until
+/// «Продолжить без VPN» (a user stop) releases it and writes the one row.
 #[tokio::test]
-async fn crash_without_restart_keeps_blocking_until_stopped() {
+async fn crash_without_restart_pauses_until_stopped() {
     let j = Joint::new();
     j.world.auto_restart.store(false, Ordering::SeqCst);
     j.lc.connect(proxy()).await.expect("connect");
     j.world.core(0).crash();
-    eventually("session row", || !j.kinds().is_empty()).await;
-    assert_eq!(j.kinds(), [OutcomeKind::ServerDown]);
-    eventually("blocked notice", || j.noticed("crashBlocked")).await;
+    eventually("paused", || j.lc.kill_switch().borrow().pause.is_some()).await;
+    assert!(j.kinds().is_empty(), "the session stays open while paused");
     assert!(!j.ran("release"), "protection kept: {:?}", j.world.log());
-    assert_ne!(j.state(), TunnelState::Connected);
+    assert_eq!(j.state(), TunnelState::Blocked);
     j.lc.disconnect(user_stop()).await.expect("disconnect");
     assert!(j.ran("release"));
     assert_eq!(j.state(), TunnelState::Disconnected);
-    assert_eq!(j.kinds().len(), 1, "no second row for the stop");
+    assert_eq!(j.kinds(), [OutcomeKind::UserStop]);
+    assert!(j.lc.kill_switch().borrow().pause.is_none());
+}
+
+/// ks-a across the seam (research 5.4 "no silent release"): the restart budget is spent while
+/// the server stays unreachable; the block stays, the paused state shows the next slow retry,
+/// and the first retry that works confirms the session again.
+#[tokio::test]
+async fn spent_budget_keeps_the_pause_and_retries_slowly() {
+    let j = Joint::new_with(|t| t.slow_retry = [150, 150, 150].map(Duration::from_millis));
+    j.settings
+        .update(|s| s.kill_switch = vpnte_base::types::KillSwitchLevel::Standard)
+        .expect("settings");
+    j.lc.connect(proxy()).await.expect("connect");
+    j.world.ready_fail.store(true, Ordering::SeqCst);
+    j.world.core(0).crash();
+    // The first run, three restarts within the budget, then slow retries.
+    let spawns = || {
+        j.world
+            .log()
+            .iter()
+            .filter(|l| l.starts_with("spawn:"))
+            .count()
+    };
+    eventually("slow retries", || spawns() >= 6).await;
+    let view = j.lc.kill_switch().borrow().clone();
+    assert!(view.pause.is_some(), "still paused: {view:?}");
+    assert!(!j.ran("release"), "never released: {:?}", j.world.log());
+    assert!(j.kinds().is_empty());
+    j.world.ready_fail.store(false, Ordering::SeqCst);
+    eventually("reconnected", || j.state() == TunnelState::Connected).await;
+    assert!(j.lc.kill_switch().borrow().pause.is_none());
+    assert!(!j.ran("release"));
 }
 
 /// A-06 across the seam: shutdown stops the real runtime within its budget, `app-quit` row.

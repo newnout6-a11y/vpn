@@ -145,6 +145,9 @@ impl ServersApi for FakeApi {
     async fn set_send_hwid(&self, _: &str, _: bool) -> AppResult<()> {
         unused()
     }
+    async fn set_own_device_id(&self, _: &str, _: bool) -> AppResult<()> {
+        unused()
+    }
     async fn set_request_headers(&self, _: &str, _: String) -> AppResult<Vec<String>> {
         unused()
     }
@@ -193,6 +196,9 @@ impl ServersApi for FakeApi {
         held(reply, self.dropped.clone()).await
     }
     async fn open_url(&self, _: String) -> AppResult<()> {
+        Ok(())
+    }
+    async fn copy_text(&self, _: String) -> AppResult<()> {
         Ok(())
     }
     fn link_arrivals(&self) -> watch::Receiver<u64> {
@@ -528,6 +534,7 @@ fn every_key_the_page_uses_exists() {
     let sources = [
         include_str!("actions.rs"),
         include_str!("actions/group.rs"),
+        include_str!("actions/request.rs"),
         include_str!("actions/server.rs"),
         include_str!("add.rs"),
         include_str!("batch.rs"),
@@ -536,6 +543,7 @@ fn every_key_the_page_uses_exists() {
         include_str!("demo/live.rs"),
         include_str!("demo_data.rs"),
         include_str!("detail.rs"),
+        include_str!("facts.rs"),
         include_str!("group.rs"),
         include_str!("links.rs"),
         include_str!("live.rs"),
@@ -549,11 +557,14 @@ fn every_key_the_page_uses_exists() {
         include_str!("report.rs"),
         include_str!("report/endpoint.rs"),
         include_str!("report/tunnel.rs"),
+        include_str!("request.rs"),
         include_str!("row.rs"),
         include_str!("schemes.rs"),
         include_str!("verdict.rs"),
     ];
     let mut keys: Vec<String> = sources.iter().flat_map(|s| literal_keys(s)).collect();
+    // Backend message keys the add dialog compares against (the app registers their text).
+    keys.retain(|k| !super::add::NEEDS_HWID.contains(&k.as_str()));
     let stages = [
         Stage::Dns,
         Stage::Reachability,
@@ -605,6 +616,7 @@ fn the_add_form_forgets_the_request_settings() {
         request: SubscriptionRequest {
             send_hwid: true,
             headers: "X-Panel-Token: a-secret".into(),
+            from_outside: false,
         },
         ..AddForm::default()
     };
@@ -639,6 +651,38 @@ fn a_handed_over_link_note_ends_with_the_import_or_the_dialog() {
     f.closed();
     assert!(!f.from_link);
     assert_eq!(f.input, "hiddify://import/https://sub.example/s");
+}
+
+/// phones-a11 (p-subs): a handed-over link is marked as coming from outside until the import;
+/// closing the dialog keeps the mark with the draft.
+#[test]
+fn a_handed_over_link_is_marked_from_outside() {
+    use super::state::AddForm;
+
+    let mut f = AddForm::default();
+    f.linked("hiddify://import/https://sub.example/s".into());
+    assert!(f.request.from_outside);
+    f.closed();
+    assert!(f.request.from_outside, "the draft is still the link");
+    f.imported();
+    assert!(!f.request.from_outside);
+}
+
+/// p-subs: an encrypted app link offers the request for the provider; a panel that wants the
+/// HWID offers the switch, only while it is off; other errors offer nothing.
+#[test]
+fn add_errors_offer_the_way_out() {
+    use super::add::{ENCRYPTED_LINK, Help, NEEDS_HWID, help_for};
+
+    for key in ENCRYPTED_LINK {
+        assert_eq!(help_for(key, false), Some(Help::CopyRequest), "{key}");
+    }
+    for key in NEEDS_HWID {
+        assert_eq!(help_for(key, false), Some(Help::HwidRetry), "{key}");
+        assert_eq!(help_for(key, true), None, "{key}");
+    }
+    assert_eq!(help_for("servers.fetch.deviceLimit", false), None);
+    assert_eq!(help_for("profiles.deeplink.localTarget", false), None);
 }
 
 /// The page's state and actions over a [`FakeApi`], with the link intake mounted as the page
@@ -705,7 +749,14 @@ async fn a_handed_over_link_starts_from_the_new_group_defaults() {
     });
     assert!(open, "the add dialog opened");
     assert_eq!((f.input.as_str(), f.from_link), (LINK, true));
-    assert_eq!(f.request, SubscriptionRequest::default());
+    let outside = SubscriptionRequest {
+        from_outside: true,
+        ..SubscriptionRequest::default()
+    };
+    assert_eq!(
+        f.request, outside,
+        "new-group defaults, marked as from outside"
+    );
     assert_eq!(f.target, AddTarget::Auto);
     assert_eq!(api.adds.get(), 0, "nothing imported without the user");
     assert!(api.link.borrow().is_none(), "taken once");

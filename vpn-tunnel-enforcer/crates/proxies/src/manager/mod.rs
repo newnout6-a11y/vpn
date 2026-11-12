@@ -1,9 +1,8 @@
 //! The external proxy manager (spec 6.2–6.4): a registry of slots, each an unauthenticated
 //! `mixed` listener on 127.0.0.1 backed by its own sing-box child (plus an Xray child for
-//! profiles that run on Xray), health-probed through its data plane, rotated between servers and
-//! leased to automation clients. [`ProxyManager`] implements
-//! [`ProxyOps`](crate::model::ProxyOps) for the control API and the UI, and pushes a
-//! [`ProxySnapshot`] on every change.
+//! profiles that run on Xray), health-probed through its data plane and rotated between servers.
+//! [`ProxyManager`] implements [`ProxyOps`](crate::model::ProxyOps) for the control API and the
+//! UI, and pushes a [`ProxySnapshot`] on every change.
 //!
 //! Locking: the registry sits behind one `parking_lot` mutex held only for validation and state
 //! changes, never across an await. Engine starts, readiness waits, DNS and probes run outside it,
@@ -16,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 
 use parking_lot::Mutex;
-use tokio::sync::{Notify, OwnedMutexGuard, Semaphore, watch};
+use tokio::sync::{OwnedMutexGuard, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{ClientDevice, EnginePref, UnixMs, now_ms};
 use vpnte_base::{AppResult, Msg};
@@ -154,7 +153,7 @@ impl std::fmt::Debug for ProxyManager {
 
 impl ProxyManager {
     /// A manager that runs the bundled engines of `resources` (`DataDirs::resources`). Create
-    /// it inside the tokio runtime (it starts the lease-expiry timer).
+    /// it inside the tokio runtime.
     pub fn new(source: Arc<dyn ProfileSource>, resources: &Path) -> Self {
         Self::with_parts(
             source,
@@ -183,16 +182,8 @@ impl ProxyManager {
             control_port: AtomicU16::new(0),
             guards: Mutex::new(HashMap::new()),
             batch: tokio::sync::Mutex::new(()),
-            lease_wake: Arc::new(Notify::new()),
             closing: CancellationToken::new(),
         });
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::spawn(run::lease_timer(
-                Arc::downgrade(&inner),
-                inner.lease_wake.clone(),
-                inner.closing.clone(),
-            ));
-        }
         Self { inner }
     }
 
@@ -202,7 +193,7 @@ impl ProxyManager {
         self.inner.snapshot.subscribe()
     }
 
-    /// App exit: stops every slot, leases notwithstanding, and refuses new starts. (The engines'
+    /// App exit: stops every slot and refuses new starts. (The engines'
     /// kill-on-close Jobs end them anyway if the process dies first.)
     pub async fn shutdown(&self) {
         self.inner.shutdown().await;
@@ -225,7 +216,6 @@ struct Inner {
     guards: Mutex<HashMap<Slot, Arc<tokio::sync::Mutex<()>>>>,
     /// Serialises the allocating operations (add, batch start, prewarm) among themselves.
     batch: tokio::sync::Mutex<()>,
-    lease_wake: Arc<Notify>,
     /// Parent of every slot task and start: cancelled by `shutdown` and on drop.
     closing: CancellationToken,
 }
@@ -303,7 +293,6 @@ impl Inner {
 pub fn degradation_msg(reason: Degradation) -> Msg {
     Msg::new(match reason {
         Degradation::ProcessFailed => "proxies.degradation.processFailed",
-        Degradation::LeasedRouteRecoveryBlocked => "proxies.degradation.leasedRouteRecoveryBlocked",
         Degradation::HealthFailureBudgetExhausted => {
             "proxies.degradation.healthFailureBudgetExhausted"
         }

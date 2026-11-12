@@ -24,6 +24,10 @@ impl Actor {
         match event {
             TunnelEvent::StartBegan { generation } => {
                 let _ = self.fsm.native_start_began(generation);
+                if self.lane_idle() {
+                    // A recovery attempt runs now: no countdown in the paused state.
+                    self.pause_next(None);
+                }
             }
             TunnelEvent::StartFinished { generation, ok } => {
                 if ok {
@@ -90,21 +94,26 @@ impl Actor {
             TunnelEvent::Warning(warning) => {
                 tracing::info!(warning = %warning.msg().key, "runtime warning");
             }
-            TunnelEvent::RestartScheduled { delay } => self.pause_soft(delay).await,
+            TunnelEvent::RestartScheduled { delay } => {
+                self.pause_soft(delay).await;
+                let wait = UnixMs::try_from(delay.as_millis()).unwrap_or(UnixMs::MAX);
+                self.pause_next(Some(now_ms().saturating_add(wait)));
+            }
         }
     }
 
-    /// Soft with the kill switch `off` (NOADMIN §2): the tweaks may stay on the dead port only
-    /// for a short backoff; a longer wait (a frozen server's quiet window) rolls them back now,
-    /// so programs connect directly meanwhile, and the next run brings them back
-    /// ([`Actor::resume_soft`]). `standard` keeps them: that is its blocking.
+    /// Soft with a kill switch that does not hold (NOADMIN §2): the tweaks may stay on the dead
+    /// port only for a short backoff; a longer wait (a frozen server's quiet window) rolls them
+    /// back now, so programs connect directly meanwhile, and the next run brings them back
+    /// ([`Actor::resume_soft`]). A holding kill switch keeps them: that is its pause. The
+    /// outage's one notice tells the user.
     async fn pause_soft(&mut self, delay: Duration) {
         let paused = self.session.as_ref().is_none_or(|s| s.soft_paused);
         if delay <= SOFT_HOLD_MAX
             || paused
             || !self.lane_idle()
             || !self.soft_session()
-            || self.deps.settings.read(|s| s.kill_switch) != KillSwitchLevel::Off
+            || self.guard.pauses()
         {
             return;
         }
@@ -113,14 +122,6 @@ impl Actor {
                 if let Some(live) = self.session.as_mut() {
                     live.soft_paused = true;
                 }
-                let body =
-                    Msg::new(notice_key("softPaused", "body")).arg("seconds", delay.as_secs());
-                self.notify(
-                    Level::Warn,
-                    "softPaused",
-                    NoticeKind::ConnectionError,
-                    Some(body),
-                );
             }
             Err(e) => tracing::warn!(error = %e, "soft rollback before a long restart wait failed"),
         }
@@ -167,35 +168,29 @@ impl Actor {
                 _ => {}
             }
         }
+        self.last_kind = Some(kind.clone());
+        let lost = matches!(
+            kind,
+            TunStatusKind::Restarting { .. } | TunStatusKind::KillSwitchActive
+        );
+        if lost && self.session.is_some() && self.lane_idle() {
+            // The session stays open while the runtime recovers it. The runtime holding the
+            // block is the authority on a pause, whatever this session's guard says.
+            let held = self.guard.pauses() || kind == TunStatusKind::KillSwitchActive;
+            if !held {
+                let _ = self.fsm.runtime(&kind, e);
+            }
+            return self.enter_pause(e, held);
+        }
         let _ = self.fsm.runtime(&kind, e);
         if !self.lane_idle() {
             return; // the operation in flight owns the session and the user's attention
         }
+        // A held block (`KillSwitchActive`) with a session is a pause (above); without one there
+        // is nothing to end. What is left: the runtime let the session go.
         match kind {
-            TunStatusKind::Stopped | TunStatusKind::KillSwitchActive if self.soft_session() => {
-                self.soft_engine_lost().await;
-            }
-            TunStatusKind::Stopped | TunStatusKind::KillSwitchActive => {
-                if self.session.is_some() {
-                    let blocked = kind == TunStatusKind::KillSwitchActive;
-                    self.unexpected_end(blocked).await;
-                    if blocked {
-                        self.notify(
-                            Level::Warn,
-                            "crashBlocked",
-                            NoticeKind::ConnectionError,
-                            None,
-                        );
-                    }
-                }
-            }
-            TunStatusKind::Restarting { attempt, max } => {
-                let body = Msg::new(notice_key("crashRestarting", "body"))
-                    .arg("attempt", attempt)
-                    .arg("max", max);
-                let kind = NoticeKind::ConnectionError;
-                self.notify(Level::Warn, "crashRestarting", kind, Some(body));
-            }
+            TunStatusKind::Stopped if self.soft_session() => self.soft_engine_lost().await,
+            TunStatusKind::Stopped if self.session.is_some() => self.unexpected_end(true).await,
             // `PostTrialFailover` is no notice of its own: the user hears of a failover only
             // once the session follows the sibling ([`Actor::failed_over`]).
             TunStatusKind::Error { warning } => {
@@ -203,7 +198,7 @@ impl Actor {
                 if !self.runtime_running() && self.soft_session() {
                     self.soft_engine_lost().await;
                 } else if !self.runtime_running() && self.session.is_some() {
-                    self.unexpected_end(false).await;
+                    self.unexpected_end(true).await;
                 }
                 let kind = NoticeKind::ConnectionError;
                 self.notify(Level::Error, "restartFailed", kind, Some(warning));
@@ -288,6 +283,8 @@ impl Actor {
         live.adaptive = adaptive.unwrap_or(live.adaptive);
         self.session = Some(live);
         self.deps.monitor.start(Some(generation));
+        // The sibling carries the session: the outage is over (the failover notice says so).
+        self.end_pause();
         // "Switched to", not "connected": the state machine confirms the run on its own.
         let body = match (from, cause) {
             (Some(from), FailoverCause::ServerFault) => {
@@ -309,26 +306,12 @@ impl Actor {
         self.announce_up();
     }
 
-    /// The engine of a Soft session is gone for good (NOADMIN.md §2): the session ends, and the
-    /// kill switch decides about the tweaks. `off`: rolled back at once, so programs connect
-    /// directly again (with a notice); otherwise they keep pointing at the dead port and
-    /// programs that honour the system proxy stay blocked until reconnect or disconnect.
+    /// The engine of a Soft session is gone for good and the runtime let it go (its kill switch
+    /// does not hold): the session ends and the tweaks are rolled back at once, so programs
+    /// connect directly again, with one notice (NOADMIN.md §2).
     async fn soft_engine_lost(&mut self) {
-        // Paused tweaks are rolled back already: nothing is left to block with, and the pause
-        // notice told the user that programs connect directly.
-        let paused = self.session.as_ref().is_some_and(|s| s.soft_paused);
-        let keep = !paused && self.deps.settings.read(|s| s.kill_switch) != KillSwitchLevel::Off;
-        self.unexpected_end(keep).await;
-        if keep {
-            let e = self.evidence();
-            self.fsm.fault(FaultState::Blocked, e);
-            // Not `crashBlocked`: no firewall holds anything here, only the system proxy does.
-            let kind = NoticeKind::ConnectionError;
-            self.notify(Level::Warn, "softBlocked", kind, None);
-            return;
-        }
+        self.unexpected_end(false).await;
         match self.deps.soft.rollback().await {
-            Ok(()) if paused => {}
             Ok(()) => {
                 let kind = NoticeKind::ConnectionError;
                 self.notify(Level::Warn, "softRestored", kind, None);
@@ -344,10 +327,11 @@ impl Actor {
         let _ = self.fsm.runtime(&TunStatusKind::Stopped, e);
     }
 
-    /// The TUN session ended without being asked to: classify it from what is known now
-    /// (lifecycle-app §3.5), write its row, end forensics. Monitoring stays: a down TUN is
-    /// exactly when a broken kill switch would leak.
-    pub(super) async fn unexpected_end(&mut self, kill_switch_active: bool) {
+    /// The session ended without being asked to: classify it from what is known now
+    /// (lifecycle-app §3.5), write its row, end forensics; `notify`: say so (a Soft session's
+    /// own notice says it instead). Monitoring stays: a down TUN is exactly when a broken kill
+    /// switch would leak.
+    pub(super) async fn unexpected_end(&mut self, notify: bool) {
         let Some(live) = self.session.as_ref() else {
             return;
         };
@@ -369,7 +353,8 @@ impl Actor {
             since_resume: self.last_resume.map(|t| t.elapsed()),
             since_network_change: self.last_network_change.map(|t| t.elapsed()),
             outbound_fault: self.deps.runtime.recent_fault(),
-            kill_switch_active,
+            // A held block is a pause: no session ends under it any more (ks-a).
+            kill_switch_active: false,
             proxy_unreachable: live.proxy_down,
             warning: status.warning,
             restart_attempts: u32::from(status.restart_attempt),
@@ -383,12 +368,10 @@ impl Actor {
         tokio::spawn(async move {
             forensics.stop_session("status:stopped").await;
         });
-        self.notify(
-            Level::Warn,
-            "stopped",
-            NoticeKind::VpnDisconnect,
-            Some(headline),
-        );
+        if notify {
+            let kind = NoticeKind::VpnDisconnect;
+            self.notify(Level::Warn, "stopped", kind, Some(headline));
+        }
     }
 
     /// Events were lost: re-read the status and treat it as the latest one.

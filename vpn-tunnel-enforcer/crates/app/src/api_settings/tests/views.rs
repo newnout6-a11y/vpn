@@ -26,8 +26,9 @@ fn status(level: KillSwitchLevel) -> KillSwitchStatus {
     }
 }
 
-/// Without a WFP read-back only what the level means for Soft is shown: standard waits for a
-/// lost engine (`Blocked`), strict cannot be confirmed; never "engaged".
+/// Without a WFP read-back only what the level means in proxy mode is shown: "If the VPN
+/// drops" waits for a lost engine (`Blocked`); a stored "Always" works as "If the VPN drops"
+/// without the helper service (ks-a); never "engaged".
 #[test]
 fn kill_switch_view_without_wfp_is_honest() {
     let idle = TunnelSnapshot::default();
@@ -35,7 +36,7 @@ fn kill_switch_view_without_wfp_is_honest() {
         state: TunnelState::Blocked,
         ..TunnelSnapshot::default()
     };
-    let view = |level, snap: &TunnelSnapshot| kill_switch_view(&status(level), snap).status;
+    let view = |level, snap: &TunnelSnapshot| kill_switch_view(&status(level), snap, false).status;
     assert_eq!(view(KillSwitchLevel::Off, &idle), ui::ProtectionStatus::Off);
     assert_eq!(
         view(KillSwitchLevel::Standard, &idle),
@@ -45,11 +46,19 @@ fn kill_switch_view_without_wfp_is_honest() {
         view(KillSwitchLevel::Standard, &blocked),
         ui::ProtectionStatus::Blocking
     );
-    assert!(matches!(
+    assert_eq!(
         view(KillSwitchLevel::Strict, &idle),
-        ui::ProtectionStatus::Unconfirmed(_)
-    ));
-    assert!(!kill_switch_view(&status(KillSwitchLevel::Strict), &idle).firewall_blocks_outbound);
+        ui::ProtectionStatus::Armed
+    );
+    let strict = kill_switch_view(&status(KillSwitchLevel::Strict), &idle, false);
+    assert!(!strict.firewall_blocks_outbound && !strict.hyperv_unfiltered);
+    assert!(!strict.always_available);
+    assert_eq!(
+        strict.level,
+        KillSwitchLevel::Strict,
+        "the stored value stays"
+    );
+    assert!(kill_switch_view(&status(KillSwitchLevel::Strict), &idle, true).always_available);
 }
 
 /// Exceptions show their canonical value and the wide-network warning.
@@ -65,7 +74,7 @@ fn kill_switch_exceptions_are_listed() {
         exception("e1", "16.0.0.0/4"),
         exception("e2", "192.0.2.0/24"),
     ];
-    let view = kill_switch_view(&st, &TunnelSnapshot::default());
+    let view = kill_switch_view(&st, &TunnelSnapshot::default(), false);
     assert_eq!(view.exceptions.len(), 2);
     assert_eq!(view.exceptions[0].kind, ui::ExceptionKind::Ip);
     assert!(view.exceptions[0].broad);

@@ -7,10 +7,11 @@ use crate::wfp::model::{KillSwitchException, ProtectionError, Toggles, Unconfirm
 use crate::wfp::validate;
 
 impl Protection {
-    /// Changes the level. Entering strict saves the choice before any effect; leaving strict
-    /// installs the new set, then removes the persistent one, then saves, and any failure on
-    /// the way stays strict (fail closed). Off / standard switches apply, then save; a failed
-    /// save re-applies the previous level.
+    /// Changes the level. Entering "Always" (where it is in force) saves the choice before any
+    /// effect; leaving it installs the new set, then removes the persistent one, then saves, and
+    /// any failure on the way stays "Always" (fail closed). Other switches apply, then save; a
+    /// failed save re-applies the previous level. A stored `strict` without the service works
+    /// as `standard` ([`Protection::set_always_available`]).
     pub fn set_level(
         &self,
         level: KillSwitchLevel,
@@ -23,7 +24,7 @@ impl Protection {
         let prev = g.target();
         let mut next = prev.clone();
         next.settings.level = level;
-        if level == KillSwitchLevel::Strict {
+        if level.effective(g.always_available) == KillSwitchLevel::Strict {
             persist(&next.settings).map_err(persist_failed)?;
             g.settings.level = level;
             let (d, skipped) = g.plan(&next)?;
@@ -124,8 +125,8 @@ impl Protection {
     }
 
     /// "Reset network protection" (maintenance, `--cleanup` equivalent): deletes every object
-    /// of ours; refused while a TUN session exists. A strict level is switched off and saved,
-    /// since its filters are gone; if saving fails the level stays strict and the watchdog
+    /// of ours; refused while a TUN session exists. An "Always" level in force is switched off
+    /// and saved, since its filters are gone; if saving fails the level stays and the watchdog
     /// re-installs it (fail closed).
     pub fn reset(&self, persist: Persist) -> Result<RemoveReport, ProtectionError> {
         let mut g = self.inner.lock();
@@ -141,7 +142,7 @@ impl Protection {
         };
         g.persistent = Some(Vec::new());
         g.last_error = None;
-        if g.settings.level == KillSwitchLevel::Strict {
+        if g.level_in_force() == KillSwitchLevel::Strict {
             let mut next = g.settings.clone();
             next.level = KillSwitchLevel::Off;
             persist(&next).map_err(persist_failed)?;

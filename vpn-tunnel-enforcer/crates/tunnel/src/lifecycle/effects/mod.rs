@@ -11,6 +11,7 @@ use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::ops::OpId;
 
 use super::actor::Cmd;
+use super::pause::SessionGuard;
 use super::session::SessionProfile;
 use super::{ConnError, LifecycleDeps, ServerChoice, key};
 use crate::api::{
@@ -65,6 +66,8 @@ pub(super) struct Ctx {
     pub token: CancellationToken,
     pub confirm: Confirmer,
     pub owner: Owner,
+    /// The live session's kill switch: switches and restarts keep it.
+    pub guard: SessionGuard,
 }
 
 /// Protection a start brought up.
@@ -80,6 +83,8 @@ pub(super) enum Up {
         engine: Option<EngineRun>,
         adaptive: AdaptiveMode,
         warnings: Vec<Msg>,
+        /// A connect decides the session's kill switch; `None` = unchanged.
+        guard: Option<SessionGuard>,
     },
     /// The same profile on a new engine run (settings or adaptive restart).
     Restarted {
@@ -260,13 +265,6 @@ pub(super) async fn connect(
 ) -> StartReport {
     let deps = &ctx.deps;
     let soft = capture == CaptureKind::Proxy;
-    if soft && deps.settings.read(|s| s.kill_switch) == KillSwitchLevel::Strict {
-        // Refused before anything is touched: strict needs WFP, Soft has none.
-        let msg = Msg::new(key::SOFT_STRICT);
-        let error = ConnError::Failed(TunError::new(ErrorKind::Validation, msg.clone()));
-        let row = (target.profile(None, capture), refused_outcome(msg));
-        return StartReport::done(Err(Failure::new(error).row(row.0, row.1)));
-    }
     let mut mode_switch = None;
     if !soft && deps.soft.applied() != Some(false) {
         let ending = Captured::now(deps);
@@ -321,11 +319,31 @@ pub(super) async fn connect(
         },
     };
     let profile = target.profile(choice.as_ref().map(|c| &c.server), capture);
-    let req = start_request(deps, mode, capture, adaptive, ctx.owner);
+    let guard = session_guard(deps, soft).await;
+    let req = start_request(deps, mode, capture, adaptive, ctx.owner, guard.level);
     StartReport {
-        result: run_start(&ctx, req, profile, choice, adaptive).await,
+        result: run_start(&ctx, req, profile, choice, adaptive, guard).await,
         mode_switch,
     }
+}
+
+/// The kill switch of a new session. Proxy mode is where another VPN may carry the default
+/// route (Tunnel mode refuses such a connect): then nothing pauses this session.
+async fn session_guard(deps: &LifecycleDeps, soft: bool) -> SessionGuard {
+    let level = deps.kill_switch();
+    let foreign = match soft && level != KillSwitchLevel::Off {
+        true => {
+            let check = deps.foreign_vpn.clone();
+            tokio::task::spawn_blocking(move || check.full_tunnel())
+                .await
+                .unwrap_or_default()
+        }
+        false => None,
+    };
+    if let Some(name) = &foreign {
+        tracing::info!(%name, "another VPN carries the default route: no pause on a drop");
+    }
+    SessionGuard::new(level, soft, foreign)
 }
 
 /// No server selected, or the requested one is not in the list (old Conflict + start-failed row).
@@ -338,18 +356,19 @@ fn no_server(target: &Target, capture: CaptureKind) -> Failure {
     Failure::new(ConnError::NoServer(msg.clone())).row(profile, refused_outcome(msg))
 }
 
-/// The start request for `mode` with the current settings.
-fn start_request(
+/// The start request for `mode` with the current settings and the session's kill switch.
+pub(super) fn start_request(
     deps: &LifecycleDeps,
     mode: Mode,
     capture: CaptureKind,
     adaptive: AdaptiveMode,
     owner: Owner,
+    kill_switch: KillSwitchLevel,
 ) -> StartRequest {
     deps.settings.read(|s| StartRequest {
         mode,
         capture,
-        kill_switch: s.kill_switch,
+        kill_switch,
         public_wifi: s.public_wifi_compatibility,
         stealth: s.stealth_mode,
         adaptive,
@@ -366,6 +385,7 @@ async fn run_start(
     profile: SessionProfile,
     choice: Option<ServerChoice>,
     adaptive: AdaptiveMode,
+    guard: SessionGuard,
 ) -> Result<Up, Failure> {
     let deps = &ctx.deps;
     if ctx.token.is_cancelled() {
@@ -387,6 +407,7 @@ async fn run_start(
                 engine: Some(receipt.engine),
                 adaptive,
                 warnings: receipt.warnings,
+                guard: Some(guard),
             };
             confirm(ctx, up).await
         }

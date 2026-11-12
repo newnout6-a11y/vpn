@@ -160,6 +160,7 @@ fn elevated_catalogue_round_trip_in_a_dynamic_session() {
     let me = own_id();
     let plan = Plan {
         level: KillSwitchLevel::Standard,
+        armed: true,
         leak_protection: true,
         public_wifi_compat: true,
         allow_lan: true,

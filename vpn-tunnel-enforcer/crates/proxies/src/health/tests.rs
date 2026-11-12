@@ -130,28 +130,6 @@ fn drift_and_failed_rotation_degrade() {
     assert_eq!(route.rotation_prev_egress, None);
 }
 
-/// Spec external-proxy §3.17 / §7.9: who keeps a duplicate IP.
-#[test]
-fn duplicate_resolution_protects_leases() {
-    assert_eq!(resolve_duplicate(false, &[]), None);
-    assert_eq!(
-        resolve_duplicate(false, &[(slot(1), false)]),
-        Some(Duplicate::Quarantine { keeper: slot(1) })
-    );
-    assert_eq!(
-        resolve_duplicate(true, &[(slot(3), false), (slot(1), false)]),
-        Some(Duplicate::QuarantinePeer(slot(1)))
-    );
-    assert_eq!(
-        resolve_duplicate(true, &[(slot(1), false), (slot(4), true)]),
-        Some(Duplicate::Quarantine { keeper: slot(4) })
-    );
-    assert_eq!(
-        resolve_duplicate(false, &[(slot(2), true), (slot(5), true)]),
-        Some(Duplicate::Quarantine { keeper: slot(2) })
-    );
-}
-
 /// B-30: every slot's success re-probe lands inside the 60 s freshness window; first probes
 /// of a batch are spread by slot.
 #[test]
@@ -167,11 +145,6 @@ fn schedule_keeps_routes_fresh() {
     assert_eq!(
         (route.health, route.degradation),
         (Health::Failed, Some(Degradation::ProcessFailed))
-    );
-    route.disable_blocked(NOW);
-    assert_eq!(
-        route.last_error.as_deref(),
-        Some("External proxy instance exited (1)")
     );
     assert_eq!(Route::stopped(NOW).last_checked_at, Some(NOW));
 }

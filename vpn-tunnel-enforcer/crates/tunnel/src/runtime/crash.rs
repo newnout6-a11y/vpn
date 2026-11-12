@@ -23,6 +23,9 @@ pub(super) enum CrashAction {
     /// Try the post-trial failover once before the terminal outcome (budget exhausted), or at
     /// once while the crashed server must stay quiet.
     Failover,
+    /// The kill switch keeps the internet paused (`KillSwitchActive`) and the last start is
+    /// retried slowly after `delay`: a paused session is never released silently (ks-a).
+    SlowRetry { delay: Duration },
     /// Terminal: protection keeps blocking (`KillSwitchActive`; the lifecycle tells the user).
     Block,
     /// Terminal: protection released, `Stopped` (`restart_attempt` in the status tells whether
@@ -35,6 +38,8 @@ pub(super) enum CrashAction {
 pub(super) struct CrashFacts {
     /// Restarts already made in this crash window.
     pub attempt: u8,
+    /// Slow retries already made in this pause.
+    pub slow: u8,
     /// The setting, re-read now.
     pub auto_restart: bool,
     /// Kill-switch level the session's protection enforces.
@@ -45,8 +50,10 @@ pub(super) struct CrashFacts {
     pub quiet: Duration,
 }
 
-/// First match wins (tunnel-core §3.5 "New (decided)"), with the freeze window on top.
-pub(super) fn decide(f: CrashFacts, backoff: &[Duration; 3]) -> CrashAction {
+/// First match wins (tunnel-core §3.5 "New (decided)"), with the freeze window on top. A
+/// kill switch that pauses the internet keeps it paused once the budget is spent and retries
+/// slowly; with auto-restart off it keeps the pause without retrying (no automatic action).
+pub(super) fn decide(f: CrashFacts, backoff: &[Duration; 3], slow: &[Duration; 3]) -> CrashAction {
     if f.auto_restart && f.attempt < MAX_RESTARTS {
         if !f.quiet.is_zero() && f.failover_available {
             return CrashAction::Failover;
@@ -63,9 +70,10 @@ pub(super) fn decide(f: CrashFacts, backoff: &[Duration; 3]) -> CrashAction {
     }
     match f.guard {
         KillSwitchLevel::Off => CrashAction::Release,
-        KillSwitchLevel::Strict => CrashAction::Block,
-        KillSwitchLevel::Standard if !exhausted => CrashAction::Block,
-        KillSwitchLevel::Standard => CrashAction::Release,
+        _ if !exhausted => CrashAction::Block,
+        _ => CrashAction::SlowRetry {
+            delay: slow[usize::from(f.slow).min(slow.len() - 1)].max(f.quiet),
+        },
     }
 }
 
@@ -88,6 +96,7 @@ mod tests {
     fn facts(attempt: u8, auto_restart: bool, guard: KillSwitchLevel) -> CrashFacts {
         CrashFacts {
             attempt,
+            slow: 0,
             auto_restart,
             guard,
             failover_available: false,
@@ -95,12 +104,16 @@ mod tests {
         }
     }
 
+    fn decide_now(f: CrashFacts) -> CrashAction {
+        let t = Timings::default();
+        decide(f, &t.backoff, &t.slow_retry)
+    }
+
     /// AT-02-005 (§2.10 / §7.20): restarts after 2 s, 5 s, 10 s, at most three per window.
     #[test]
     fn backoff_schedule() {
-        let backoff = Timings::default().backoff;
         let delays: Vec<_> = (0..3)
-            .map(|n| decide(facts(n, true, KillSwitchLevel::Off), &backoff))
+            .map(|n| decide_now(facts(n, true, KillSwitchLevel::Off)))
             .collect();
         let want = [(1, 2), (2, 5), (3, 10)].map(|(attempt, s)| CrashAction::Restart {
             attempt,
@@ -109,39 +122,66 @@ mod tests {
         assert_eq!(delays, want);
     }
 
-    /// The terminal table, first match wins: no protection → stopped; strict → keep blocking;
-    /// auto-restart off → keep blocking and say so; exhausted standard → release.
+    /// The terminal table, first match wins: no protection → stopped; auto-restart off → keep
+    /// the pause without retrying; a spent budget with the kill switch on → keep the pause and
+    /// retry slowly (ks-a: never released silently).
     #[test]
     fn terminal_outcomes() {
         use KillSwitchLevel::{Off, Standard, Strict};
-        let b = Timings::default().backoff;
+        let slow = CrashAction::SlowRetry {
+            delay: Duration::from_secs(60),
+        };
         let cases = [
             (3, true, Off, CrashAction::Release),
             (0, false, Off, CrashAction::Release),
-            (3, true, Strict, CrashAction::Block),
+            (3, true, Strict, slow),
             (0, false, Strict, CrashAction::Block),
             (0, false, Standard, CrashAction::Block),
-            (3, true, Standard, CrashAction::Release),
+            (3, true, Standard, slow),
         ];
         for (attempt, auto, guard, want) in cases {
-            assert_eq!(decide(facts(attempt, auto, guard), &b), want, "{guard:?}");
+            assert_eq!(decide_now(facts(attempt, auto, guard)), want, "{guard:?}");
         }
+    }
+
+    /// ks-a (research 5.4): slow retries after 1, 2, 5 minutes, then every 5 minutes, never
+    /// inside the freeze window of the server they would dial.
+    #[test]
+    fn slow_retries_back_off_to_five_minutes() {
+        let mut f = facts(3, true, KillSwitchLevel::Standard);
+        let delays: Vec<u64> = (0..5)
+            .map(|n| {
+                f.slow = n;
+                match decide_now(f) {
+                    CrashAction::SlowRetry { delay } => delay.as_secs(),
+                    other => panic!("{other:?}"),
+                }
+            })
+            .collect();
+        assert_eq!(delays, [60, 120, 300, 300, 300]);
+        f.slow = 0;
+        f.quiet = Duration::from_secs(130);
+        assert_eq!(
+            decide_now(f),
+            CrashAction::SlowRetry {
+                delay: Duration::from_secs(130)
+            }
+        );
     }
 
     /// The failover is tried once, only after the budget is exhausted (never with auto-restart
     /// off: the user asked for no automatic action).
     #[test]
     fn failover_only_after_exhaustion() {
-        let b = Timings::default().backoff;
         let mut f = facts(3, true, KillSwitchLevel::Standard);
         f.failover_available = true;
-        assert_eq!(decide(f, &b), CrashAction::Failover);
+        assert_eq!(decide_now(f), CrashAction::Failover);
         f.auto_restart = false;
-        assert_eq!(decide(f, &b), CrashAction::Block);
+        assert_eq!(decide_now(f), CrashAction::Block);
         f = facts(1, true, KillSwitchLevel::Off);
         f.failover_available = true;
         assert!(matches!(
-            decide(f, &b),
+            decide_now(f),
             CrashAction::Restart { attempt: 2, .. }
         ));
     }
@@ -150,7 +190,6 @@ mod tests {
     /// backoff still applies once the window is shorter; a fresh server (failover) at once.
     #[test]
     fn the_same_server_waits_out_the_freeze_window() {
-        let b = Timings::default().backoff;
         let window = Timings::default().freeze;
         assert_eq!(window, Duration::from_secs(130));
         let mut f = facts(0, true, KillSwitchLevel::Strict);
@@ -158,7 +197,7 @@ mod tests {
         for attempt in 0..3 {
             f.attempt = attempt;
             assert_eq!(
-                decide(f, &b),
+                decide_now(f),
                 CrashAction::Restart {
                     attempt: attempt + 1,
                     delay: window
@@ -168,7 +207,7 @@ mod tests {
         f.attempt = 2;
         f.quiet = Duration::from_secs(4);
         assert_eq!(
-            decide(f, &b),
+            decide_now(f),
             CrashAction::Restart {
                 attempt: 3,
                 delay: Duration::from_secs(10)
@@ -176,9 +215,9 @@ mod tests {
         );
         f.attempt = 0;
         f.failover_available = true;
-        assert_eq!(decide(f, &b), CrashAction::Failover);
+        assert_eq!(decide_now(f), CrashAction::Failover);
         f.auto_restart = false;
-        assert_eq!(decide(f, &b), CrashAction::Block, "no automatic action");
+        assert_eq!(decide_now(f), CrashAction::Block, "no automatic action");
     }
 
     /// Only a server our engines dialled, and only with a fault on record, is held back.

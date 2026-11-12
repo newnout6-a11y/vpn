@@ -206,7 +206,6 @@ fn messages_fill_their_placeholders() {
         let detail = || "detail".to_owned();
         for err in [
             ProxyError::BadRequest(detail()),
-            ProxyError::Forbidden(detail()),
             ProxyError::NotFound(detail()),
             ProxyError::Conflict(detail()),
             ProxyError::Unavailable(detail()),
@@ -221,7 +220,6 @@ fn messages_fill_their_placeholders() {
         use crate::model::Degradation;
         for reason in [
             Degradation::ProcessFailed,
-            Degradation::LeasedRouteRecoveryBlocked,
             Degradation::HealthFailureBudgetExhausted,
             Degradation::EgressIpChangedWithoutRotation,
             Degradation::RotationDidNotChangeEgressIp,

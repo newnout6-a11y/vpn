@@ -68,6 +68,9 @@ fn group_status_is_derived() {
         (FetchOutcome::Http(404), GroupStatus::Expired),
         (FetchOutcome::Http(410), GroupStatus::Expired),
         (FetchOutcome::Http(500), GroupStatus::Failed),
+        // p-subs: a refused device is not an expired plan.
+        (FetchOutcome::HwidRequired, GroupStatus::Failed),
+        (FetchOutcome::DeviceLimit, GroupStatus::Failed),
         (
             FetchOutcome::Unparseable(BodyKind::Html),
             GroupStatus::Failed,
@@ -105,6 +108,8 @@ fn fetch_outcome_wire_names() {
             r#"{"ok":{"partial":true}}"#,
         ),
         (FetchOutcome::EmptyList, r#""empty-list""#),
+        (FetchOutcome::HwidRequired, r#""hwid-required""#),
+        (FetchOutcome::DeviceLimit, r#""device-limit""#),
         (
             FetchOutcome::Unparseable(BodyKind::Html),
             r#"{"unparseable":"html"}"#,

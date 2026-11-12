@@ -21,7 +21,7 @@ use vpnte_engine::routing::dns::DnsAddr;
 use vpnte_engine::routing::domain::DomainRule;
 use vpnte_engine::routing::process::{InactiveApp, InactiveReason, ResolvedSplit};
 
-use crate::api::{StartRequest, VpnProfile};
+use crate::api::{CaptureKind, StartRequest, VpnProfile};
 
 mod actor;
 mod capture;
@@ -160,6 +160,10 @@ pub struct Timings {
     pub release: Duration,
     /// Crash backoff before restart attempt 1, 2, 3.
     pub backoff: [Duration; 3],
+    /// Paused kill switch after the budget (and the failover) are spent: the slow retries
+    /// 1, 2, 5 minutes, then every 5 minutes (ks-a: no silent release; RU discipline: far
+    /// below 3 handshakes a minute per server, never inside the freeze window).
+    pub slow_retry: [Duration; 3],
     /// Quiet time of a crashed server with an outbound fault on record before a restart dials it
     /// again (RU freeze window ~120 s; the same value as the probes' `FREEZE_BACKOFF`).
     pub freeze: Duration,
@@ -188,6 +192,7 @@ impl Default for Timings {
             exit: vpnte_engine::singbox_process::STOP_TIMEOUT,
             release: Duration::from_secs(2),
             backoff: [2_000, 5_000, 10_000].map(Duration::from_millis),
+            slow_retry: [60, 120, 300].map(Duration::from_secs),
             freeze: Duration::from_secs(130),
             stable: Duration::from_secs(30),
             proxy_watch: Duration::from_secs(5),
@@ -205,10 +210,15 @@ impl Default for Timings {
 /// Maximum number of automatic restarts after crashes (`restarting:n/3`).
 pub const MAX_RESTARTS: u8 = 3;
 
-/// The start request the next attempt uses: `restart_with_last` applies current settings.
+/// The start request the next attempt uses: `restart_with_last` applies current settings. A
+/// proxy capture holds only through the system proxy: "Always" acts there as "If the VPN drops".
 pub(crate) fn with_current_settings(last: &StartRequest, now: &UserInputs) -> StartRequest {
+    let kill_switch = match (now.kill_switch, last.capture) {
+        (KillSwitchLevel::Strict, CaptureKind::Proxy) => KillSwitchLevel::Standard,
+        (level, _) => level,
+    };
     StartRequest {
-        kill_switch: now.kill_switch,
+        kill_switch,
         public_wifi: now.public_wifi,
         stealth: now.stealth,
         ..last.clone()

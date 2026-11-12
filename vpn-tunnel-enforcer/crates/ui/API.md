@@ -246,9 +246,12 @@ pub struct DashboardView {
     pub foreign_vpn: Option<String>,                  // another VPN's adapter, only while ours is down
     pub engine: Option<EngineLine>,                   // running engine + reason (identity column caption)
     pub autopick: Option<PickLine>,                   // the automatic server choice's step (one strip)
+    pub pause: Option<PauseLine>,                     // ks-a: «Интернет на паузе» (strip with two buttons)
+    pub no_pause_vpn: Option<String>,                 // ks-a: another VPN carries all traffic: no pause
 }
 pub struct EngineLine { pub engine: Engine, pub reason: Option<Msg> }  // «Xray · REALITY» under the node
 pub struct PickLine { pub title: Msg, pub body: Option<Msg> }  // step; during retries what traffic does
+pub struct PauseLine { pub next_attempt: Option<UnixMs>, pub key_rejected: bool }  // countdown target, the key reason
 pub trait DashboardApi: 'static {
     fn state(&self) -> watch::Receiver<DashboardView>;
     async fn connect(&self) -> AppResult<()>;                     // returns when the attempt is over
@@ -259,6 +262,7 @@ pub trait DashboardApi: 'static {
     async fn copy_ip(&self, ip: IpAddr) -> AppResult<()>;
     async fn recheck_firewall(&self) -> AppResult<()>;            // result via `firewall`
     async fn release_kill_switch(&self) -> AppResult<()>;         // remove our filters after a session
+    async fn retry_now(&self) -> AppResult<()>;                   // ks-a: «Подключить» in the paused state
 }
 pub mod demo { pub enum DashScene { Disconnected, Connecting, Connected, …21 scenes };
     pub struct DemoDashboard; impl DemoDashboard {
@@ -337,8 +341,9 @@ pub struct TrayState {
     pub restart: Option<(u32, u32)> /*watchdog attempt (n, max)*/, pub public_ip: Option<String>,
     pub proxy_addr: Option<String> /*host:port, never credentials*/, pub down_bps: u64, pub up_bps: u64,
     pub minimize_to_tray: bool /*setting «Сворачивать в трей»*/,
+    pub paused: bool /*ks-a: the kill switch holds a drop: menu «Подключить» / «Продолжить без VPN»*/,
 }
-pub enum TrayStatus { Protected, Leak, Off, Starting, ProxyDown, KillSwitch, Restarting, Stopping, Error, Unknown }
+pub enum TrayStatus { Protected, Leak, Off, Starting, ProxyDown, KillSwitch, Restarting, Stopping, Error, Unknown, Paused }
 pub struct TrayModel { status, tooltip: Vec<Msg>, tooltip_speed: Option<Msg>, items: Vec<TrayItem> } // build(&state, quitting)
 pub enum CloseAction { Hide, Quit, Ask { offer_tray: bool } }    // TrayState::close_action()
 #[component] pub fn TrayHost(children: Element) -> Element;      // wraps the Shell; provides TrayContext
@@ -563,7 +568,10 @@ leak_protection, public_wifi_compatibility, auto_restart_on_crash, stealth_mode,
 disable_geo_lookup, smart_ru_split, smart_ru_maps_direct, smart_ru_auto_update, minimize_to_tray,
 autopilot, domain_enrichment, advanced_mode, proxy_override, proxy_type, bootstrap_route_mode,
 check_interval_ms, adaptive_bypass_server_fallback, deep_inspection, deep_inspection_max_mb,
-capture_quota_mb`. `SettingsDraft` holds the page's unsaved edits. Section views: `KillSwitchView`,
+capture_quota_mb`. `SettingsDraft` holds the page's unsaved edits. Section views: `KillSwitchView`
+(ks-a: `level`, `status`, `exceptions` (`broad` = an inline hint), `firewall_blocks_outbound` /
+`hyperv_unfiltered` (lines in a closed Details panel), `always_available` ("Always" disabled with
+«Нужна служба-помощник» when false; a stored "Always" stays shown)),
 `RotationView` (+ `RotationPatch`, `RotationOutcome`), `SettingsState::launch` = `LaunchView
 { effective: LaunchChoice /* Off, LastUsed, LowestDelay, Random (provider) */, source: LaunchSource
 /* Default, User, Provider */, server_mode }` («Поведение»; the segments show only the user's own

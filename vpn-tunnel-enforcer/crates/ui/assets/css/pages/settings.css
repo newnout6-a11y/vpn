@@ -203,3 +203,24 @@
   .set-savebar { flex-direction: column; align-items: stretch; }
   .set-rule-fields { flex-wrap: wrap; }
 }
+
+/* kill switch: three choices, one line each; the unavailable one stays readable (ks-a) */
+.set-choices { display: flex; flex-direction: column; gap: 0; margin: 4px 0 8px; border-top: 1px solid var(--rule); }
+.set-choice { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--rule); cursor: pointer; }
+.set-choice input { margin: 3px 0 0; accent-color: var(--ink); flex-shrink: 0; }
+.set-choice.is-unavailable { cursor: default; }
+.set-choice.is-unavailable .set-choice-name { color: var(--mute); }
+.set-choice-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.set-choice-name { font-size: 13px; font-weight: 600; color: var(--ink); }
+.set-choice-line { font-size: 12px; line-height: 1.45; color: var(--mute); max-width: 72ch; }
+.set-choice-note { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; color: var(--mute); }
+.set-choices > .set-applying { padding: 8px 0 0; }
+/* details few people need: closed by default, calm lines inside */
+.set-details { margin: 0 0 8px; font-size: 12px; color: var(--mute); }
+.set-details > summary {
+  cursor: pointer;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}

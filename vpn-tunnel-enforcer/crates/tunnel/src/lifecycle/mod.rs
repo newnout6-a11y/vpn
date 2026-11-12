@@ -23,15 +23,17 @@ use crate::outcome::{NetworkTransition, OutcomeKind};
 mod actor;
 mod deps;
 mod effects;
+mod pause;
 mod session;
 #[cfg(test)]
 mod tests;
 
 pub use crate::api::TUN_SETUP_KEY_PREFIX;
 pub use deps::{
-    ExternalProxies, Forensics, LifecycleDeps, Monitor, NoticeKind, Notifier, ProfileSource,
-    ServerChoice, SoftProxy,
+    ExternalProxies, ForeignVpn, Forensics, LifecycleDeps, Monitor, NoticeKind, Notifier,
+    ProfileSource, ServerChoice, SoftProxy, SystemForeignVpn,
 };
+pub use pause::{KillSwitchView, Pause, SessionGuard};
 
 /// Message keys of this package (fragment `locales/tunnel-lifecycle.{ru,en}.json`).
 mod key {
@@ -56,7 +58,6 @@ mod key {
     pub const SOFT_ROLLBACK_BEFORE_START: &str = "tunnel.lifecycle.soft.rollbackBeforeStart";
     pub const SOFT_APPLY_FAILED: &str = "tunnel.lifecycle.soft.applyFailed";
     pub const SOFT_ENV_ROLLBACK_FAILED: &str = "tunnel.lifecycle.soft.envRollbackFailed";
-    pub const SOFT_STRICT: &str = "tunnel.lifecycle.soft.strictUnavailable";
     pub const OUTCOME_SOFT_MODE_SWITCH: &str = "tunnel.lifecycle.outcome.softModeSwitch";
     pub const OUTCOME_CANCELLED: &str = "tunnel.lifecycle.outcome.cancelled";
     pub const OUTCOME_TIMEOUT: &str = "tunnel.lifecycle.outcome.timeout";
@@ -332,6 +333,7 @@ pub struct Lifecycle {
     events: broadcast::Sender<SessionEvent>,
     busy: watch::Receiver<bool>,
     kept_by: watch::Receiver<Option<Owner>>,
+    kill_switch: watch::Receiver<KillSwitchView>,
 }
 
 impl Lifecycle {
@@ -345,9 +347,22 @@ impl Lifecycle {
         let _ = self.tx.send(cmd);
     }
 
+    /// The kill switch of the session: the paused state and the "another VPN" line.
+    pub fn kill_switch(&self) -> watch::Receiver<KillSwitchView> {
+        self.kill_switch.clone()
+    }
+
+    /// «Подключить» in the paused state: the paused session retries now instead of after its
+    /// wait. `false`: nothing paused to retry (then a plain connect is the answer).
+    pub async fn retry_now(&self) -> bool {
+        let (reply, rx) = oneshot::channel();
+        self.send(actor::Cmd::RetryNow { reply });
+        rx.await.unwrap_or(false)
+    }
+
     /// Connects. Refused while another operation runs (a strictly higher owner pre-empts a
     /// running start), while the state does not allow a start (connected: in either mode), and
-    /// while closing. Soft with the kill switch `strict` fails before anything is touched.
+    /// while closing.
     pub async fn connect(&self, req: ConnectReq) -> Result<Done, ConnError> {
         let job = actor::Job::Connect {
             target: req.target,

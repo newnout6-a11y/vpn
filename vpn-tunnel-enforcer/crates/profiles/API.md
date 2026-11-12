@@ -334,6 +334,8 @@ pub fn device_headers(device: ClientDevice, hwid: &str) -> [(&'static str, Strin
 pub struct MachineIdentity { pub host_name: String, pub user_name: String, pub user_domain: String }
 impl MachineIdentity { pub fn current() -> Self }
 pub fn legacy_hwid(device: ClientDevice, id: &MachineIdentity) -> String;  // Electron HWID, bit-exact
+pub fn is_valid_hwid(hwid: &str) -> bool;   // Remnawave v3.0.0: 10-64 of [a-zA-Z0-9=-]
+pub fn random_hwid() -> String;             // a reset ID: 16 random lowercase hex digits
 pub fn hwid_override() -> Option<String>;                        // env VPNTE_SUBSCRIPTION_HWID
 // countries
 pub struct Iso2;                 // Copy + Ord + Hash + Display; serde as "DE"

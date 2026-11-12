@@ -68,6 +68,11 @@ pub struct RtScript {
     pub exit: Option<ExitInfo>,
     /// Mixed port of the next proxy-capture run (default [`SOFT_PORT`]).
     pub soft_port: Option<u16>,
+    /// The next failed restart is kept as a drop (a kill switch that holds): the runtime holds
+    /// the block and schedules a crash restart instead of the full stop.
+    pub restart_held: bool,
+    /// «Подключить» calls that reached the runtime.
+    pub retries_now: u32,
 }
 
 /// Mixed port of a proxy-capture run of the fake runtime.
@@ -427,6 +432,22 @@ impl Runtime for FakeRuntime {
         }
         self.emit(TunnelEvent::ProtectedRestart { reason });
         self.emit(TunnelEvent::Status(TunStatusKind::Adapting));
+        if fail && std::mem::take(&mut self.script.lock().restart_held) {
+            // The runtime's `restart_inner` under a kill switch that holds: block kept, the
+            // crash policy schedules the first restart.
+            self.bring_down();
+            self.emit(TunnelEvent::Status(TunStatusKind::Restarting {
+                attempt: 1,
+                max: 3,
+            }));
+            self.emit(TunnelEvent::RestartScheduled {
+                delay: Duration::from_secs(2),
+            });
+            return Err(TunError::new(
+                ErrorKind::Network,
+                Msg::new("test.restartFailed"),
+            ));
+        }
         if fail {
             self.bring_down();
             self.emit(TunnelEvent::Status(TunStatusKind::Stopped));
@@ -514,6 +535,36 @@ impl Runtime for FakeRuntime {
 
     fn recent_fault(&self) -> Option<OutboundFault> {
         self.script.lock().fault
+    }
+
+    async fn retry_now(&self) -> bool {
+        self.script.lock().retries_now += 1;
+        true
+    }
+}
+
+impl FakeRuntime {
+    /// The engine died and the restart budget is spent under a kill switch that holds: the
+    /// runtime keeps the block (`KillSwitchActive`) and retries slowly after `delay`.
+    pub fn crash_held(&self, delay: Duration) {
+        self.status.send_modify(|s| {
+            s.running = false;
+            s.pid = None;
+        });
+        self.emit(TunnelEvent::Status(TunStatusKind::KillSwitchActive));
+        self.emit(TunnelEvent::RestartScheduled { delay });
+    }
+}
+
+/// Another VPN that may carry the default route.
+#[derive(Default)]
+pub struct FakeForeignVpn {
+    pub name: Mutex<Option<String>>,
+}
+
+impl super::super::ForeignVpn for FakeForeignVpn {
+    fn full_tunnel(&self) -> Option<String> {
+        self.name.lock().clone()
     }
 }
 
@@ -738,6 +789,7 @@ pub struct Harness {
     pub notifier: Arc<FakeNotifier>,
     pub history: crate::history::History,
     pub settings: Arc<vpnte_core::store::Store<vpnte_core::settings::Settings>>,
+    pub foreign: Arc<FakeForeignVpn>,
     _dir: TempDir,
 }
 
@@ -753,6 +805,7 @@ impl Harness {
         let notifier = Arc::new(FakeNotifier::default());
         let history = crate::history::History::open(&dir.0);
         let settings = Arc::new(Store::<Settings>::open(&dir.0));
+        let foreign = Arc::new(FakeForeignVpn::default());
         let deps = super::super::LifecycleDeps {
             runtime: rt.clone(),
             profiles: profiles.clone(),
@@ -763,6 +816,8 @@ impl Harness {
             notifier: notifier.clone(),
             history: history.clone(),
             settings: settings.clone(),
+            always_available: Arc::default(),
+            foreign_vpn: foreign.clone(),
         };
         Self {
             lc: super::super::Lifecycle::spawn(deps),
@@ -773,6 +828,7 @@ impl Harness {
             notifier,
             history,
             settings,
+            foreign,
             _dir: dir,
         }
     }

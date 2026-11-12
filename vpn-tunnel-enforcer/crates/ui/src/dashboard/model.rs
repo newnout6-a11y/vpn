@@ -2,13 +2,14 @@
 //! rule, the disconnect confirmation's timer generations (D-01), which banners show, the node
 //! line of the identity column and its engine caption. No Dioxus, no clock reads.
 use vpnte_base::Msg;
+use vpnte_base::types::UnixMs;
 use vpnte_view::identity::{ping_of, visible_leak};
 use vpnte_view::labels::{
     KillSwitchBanner, foreign_vpn_friendly_name, kill_switch_banner, node_meta,
 };
 use vpnte_view::swiss::ConnView;
 
-use super::{DashboardView, EngineLine};
+use super::{DashboardView, EngineLine, PauseLine};
 use crate::panels::{LocalPings, ServersView};
 
 /// What a press of the power button (click or Ctrl+Enter) does.
@@ -120,6 +121,9 @@ impl Confirm {
 /// The notices above the facts strip, in page order.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Banners {
+    /// «Интернет на паузе» with «Подключить» / «Продолжить без VPN» (ks-a): it replaces the
+    /// restart and kill-switch banners while it lasts.
+    pub pause: Option<PauseLine>,
     /// Automatic restart after an engine crash: «1/3».
     pub restart: Option<String>,
     /// Adapter description of a second TUN while ours runs.
@@ -129,21 +133,33 @@ pub struct Banners {
     pub leak: bool,
     /// Another VPN while ours is down: its product name (`Happ`), shown in the notice strip.
     pub foreign_vpn: Option<String>,
+    /// Another VPN carries all traffic while ours runs: no pause on a drop (one calm line).
+    pub no_pause_vpn: Option<String>,
 }
 
 /// Which notices the snapshot calls for.
 pub fn banners(view: &DashboardView) -> Banners {
     let conn = &view.conn;
     let foreign = view.foreign_vpn.as_deref().filter(|_| !conn.tun_running());
+    let paused = view.pause.is_some();
     Banners {
+        pause: view.pause.clone(),
         restart: conn
             .restarting
+            .filter(|_| !paused)
             .map(|(attempt, max)| format!("{attempt}/{max}")),
         competing_tun: conn.competing_tun_banner().map(str::to_owned),
-        kill_switch: kill_switch_banner(conn, &view.firewall),
+        kill_switch: kill_switch_banner(conn, &view.firewall).filter(|_| !paused),
         leak: visible_leak(conn, &view.exit),
         foreign_vpn: foreign_vpn_friendly_name(foreign),
+        no_pause_vpn: view.no_pause_vpn.clone().filter(|_| !paused),
     }
+}
+
+/// «следующая попытка через 0:40»: the wait left until `at`, as m:ss (never negative).
+pub fn countdown(at: UnixMs, now: UnixMs) -> String {
+    let secs = ((at - now).max(0) + 999) / 1_000;
+    format!("{}:{:02}", secs / 60, secs % 60)
 }
 
 /// The «Узел» block: the active server.

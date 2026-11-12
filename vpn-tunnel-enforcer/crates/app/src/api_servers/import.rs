@@ -37,6 +37,7 @@ pub(super) async fn add(
     let options = AddOptions {
         send_hwid: request.send_hwid,
         headers: parse_headers(&request.headers)?,
+        from_link: request.from_outside,
         ..AddOptions::new(into, device)
     };
     let cancel = backend.shutdown.child_token();

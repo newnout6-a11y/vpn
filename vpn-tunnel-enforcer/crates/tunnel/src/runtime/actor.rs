@@ -127,6 +127,8 @@ pub(super) struct Actor {
     /// Crash restarts made in the current window and whether the failover was tried.
     pub attempt: u8,
     pub failover_tried: bool,
+    /// Slow retries made in the current pause (the kill switch holds, the budget is spent).
+    pub slow: u8,
     /// The failover candidate (profile id) the start in flight dials and why the runtime
     /// failed over: its success is announced as [`TunnelEvent::FailedOver`] before its
     /// `StartFinished`.
@@ -192,6 +194,7 @@ impl Actor {
             last: None,
             attempt: 0,
             failover_tried: false,
+            slow: 0,
             failing_over: None,
             restart_due: None,
             quiet: None,
@@ -259,6 +262,13 @@ impl Actor {
                 let receipt = self.cmd_switch(next, cancel, is_owner, stops).await;
                 let _ = reply.send(receipt);
             }
+            Cmd::RetryNow { reply } => {
+                let due = self.retry_due_now();
+                let _ = reply.send(due);
+                if due {
+                    self.retry(true).await;
+                }
+            }
         }
     }
 
@@ -293,7 +303,15 @@ impl Actor {
         }
         self.attempt = 0;
         self.failover_tried = false;
+        self.slow = 0;
         self.publish(|s| s.restart_attempt = 0);
+    }
+
+    /// A paused session (crashed, or held by its kill switch after a failed start) with a last
+    /// start to retry: the user's «Подключить» runs that retry now.
+    fn retry_due_now(&self) -> bool {
+        let paused = matches!(self.phase, Phase::Crashed(_) | Phase::Adapting(_));
+        paused && self.last.is_some() && self.shared.op.lock().is_none()
     }
 
     pub(super) fn publish(&self, f: impl FnOnce(&mut TunStatus)) {

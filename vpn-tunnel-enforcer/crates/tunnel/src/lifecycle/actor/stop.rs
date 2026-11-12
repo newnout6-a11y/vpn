@@ -41,8 +41,7 @@ impl Actor {
         if self.start.as_ref().is_some_and(|s| req.owner < s.op.owner) {
             return refuse(reply, key::HIGHER_PRIORITY);
         }
-        let keep = req.keep_protection
-            && self.deps.settings.read(|s| s.kill_switch) != KillSwitchLevel::Off;
+        let keep = req.keep_protection && self.guard.pauses();
         let head = Head::new(req.owner, req.source, req.correlation, req.timeout);
         self.begin_stop_as(req.cause, head, vec![reply], keep);
     }

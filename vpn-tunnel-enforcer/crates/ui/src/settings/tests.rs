@@ -119,26 +119,23 @@ fn no_planned_feature_text() {
     }
 }
 
-/// In Proxy mode the kill-switch levels describe the system-proxy hold and strict's need for
-/// the Tunnel (the wizard's texts); in Tunnel mode the WFP descriptions stay.
+/// ks-a (research 5.2): one name and one line per choice; in Proxy mode only "If the VPN drops"
+/// gets its one neutral addition (the hold is the system proxy).
 #[test]
-fn kill_switch_texts_follow_the_routing_mode() {
-    use super::kill_switch::level_desc_key;
+fn kill_switch_choices_say_one_line_each() {
+    use super::kill_switch::choice_keys;
     use super::model::{KillSwitchLevel as L, RoutingMode as R};
+    for level in [L::Off, L::Standard, L::Strict] {
+        let [name, line, extra] = choice_keys(level, R::Hard);
+        assert!(
+            name.is_some() && line.is_some() && extra.is_none(),
+            "{level:?}"
+        );
+        let soft = choice_keys(level, R::Soft);
+        assert_eq!(soft[2].is_some(), level == L::Standard, "{level:?}");
+    }
     assert_eq!(
-        level_desc_key(L::Standard, R::Hard),
-        "onboarding.killSwitchStandardDesc"
-    );
-    assert_eq!(
-        level_desc_key(L::Standard, R::Soft),
-        "ui.wizard.protection.standardSoft"
-    );
-    assert_eq!(
-        level_desc_key(L::Strict, R::Soft),
-        "ui.wizard.protection.strictSoft"
-    );
-    assert_eq!(
-        level_desc_key(L::Off, R::Soft),
-        level_desc_key(L::Off, R::Hard)
+        choice_keys(L::Standard, R::Soft)[2],
+        Some("ui.settings.killSwitch.onDropProxy")
     );
 }

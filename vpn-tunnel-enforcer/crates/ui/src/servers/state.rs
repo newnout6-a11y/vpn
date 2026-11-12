@@ -117,22 +117,29 @@ impl AddForm {
 
     /// A link Windows handed over becomes the draft, with the new-group defaults: whatever the
     /// user set up for the previous provider (headers that may be tokens, HWID, a target group)
-    /// never reaches the provider the link names.
+    /// never reaches the provider the link names. It came from outside until the user edits it.
     pub(crate) fn linked(&mut self, link: String) {
         self.input = link;
         self.error = None;
         self.report = None;
         self.from_link = true;
         self.target = AddTarget::Auto;
-        self.request = SubscriptionRequest::default();
+        self.request = SubscriptionRequest {
+            from_outside: true,
+            ..SubscriptionRequest::default()
+        };
     }
 
     /// The dialog closed: the report goes, and so do the request settings (header values may be
-    /// tokens, and the hint promises they are never shown again); the pasted text stays a draft.
+    /// tokens, and the hint promises they are never shown again); the pasted text stays a draft,
+    /// still marked when it came from outside.
     pub(crate) fn closed(&mut self) {
         self.report = None;
         self.from_link = false;
-        self.request = SubscriptionRequest::default();
+        self.request = SubscriptionRequest {
+            from_outside: self.request.from_outside,
+            ..SubscriptionRequest::default()
+        };
     }
 }
 

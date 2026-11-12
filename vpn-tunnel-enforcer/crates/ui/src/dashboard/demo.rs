@@ -522,4 +522,11 @@ impl DashboardApi for DemoDashboard {
         }
         Ok(())
     }
+
+    /// The demo's paused session comes back at once.
+    async fn retry_now(&self) -> AppResult<()> {
+        pause(600).await;
+        self.tx.send_modify(|view| view.pause = None);
+        Ok(())
+    }
 }

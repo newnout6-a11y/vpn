@@ -66,6 +66,7 @@ impl Actor {
                 op: op.id,
             },
             owner: op.owner,
+            guard: self.guard.clone(),
         };
         let adaptive = self
             .session
@@ -301,6 +302,14 @@ impl Actor {
             }
         }
         self.publish(&terminal(&start.op, Some(error.kind())));
+        if !is_connect && touched && self.runtime_recovers() {
+            // A planned reconnect that failed under a kill switch that holds counts as a drop
+            // (ks-a, research 5.3): the runtime keeps the block and retries, the session stays
+            // open and paused; no recovery stop.
+            let e = self.evidence();
+            self.enter_pause(e, true);
+            touched = false;
+        }
         if touched {
             if !is_connect {
                 self.close_switched(&start.job, error.user_msg()).await;
@@ -397,6 +406,11 @@ impl Actor {
             outcome: kind,
             continues,
         });
+        if !continues {
+            // Nothing runs on: no pause, no guard (the next connect decides anew).
+            self.guard = SessionGuard::default();
+            self.end_pause();
+        }
         self.push_session();
     }
 }

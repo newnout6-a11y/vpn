@@ -35,6 +35,7 @@ use vpnte_probes::ip_monitor::IpEvidence;
 use vpnte_profiles::countries::Iso2;
 use vpnte_tunnel::api::{CaptureKind, TunStatus};
 use vpnte_tunnel::fsm::{Transition, TunnelSnapshot, TunnelState};
+use vpnte_tunnel::lifecycle::KillSwitchView;
 use vpnte_ui::dashboard::{DashboardApi, DashboardView};
 use vpnte_ui::panels::{PanelsApi, ProxiesView, ServersView};
 use vpnte_ui::tray::{TrayApi, TrayState};
@@ -89,6 +90,8 @@ struct Watches {
     status: watch::Receiver<TunStatus>,
     evidence: watch::Receiver<IpEvidence>,
     traffic: watch::Receiver<TrafficStats>,
+    /// The paused kill switch and the "another VPN" line.
+    kill_switch: watch::Receiver<KillSwitchView>,
 }
 
 /// App-side facts the backend does not publish itself.
@@ -157,6 +160,7 @@ impl Hub {
                 status: tunnel.runtime_status(),
                 evidence: tunnel.ip_evidence(),
                 traffic: tunnel.traffic(),
+                kill_switch: tunnel.kill_switch_view(),
             }),
             Err(err) => {
                 tracing::error!(%err, "start page built without a tunnel");
@@ -224,6 +228,7 @@ impl Hub {
                 let conn = project::conn_view(&snap, &status, &local.conn, &clock);
                 let (exit, exit_country) =
                     project::exit_ip(&snap, &w.evidence.borrow(), local.geo, prefs.lang);
+                let kill_switch = w.kill_switch.borrow();
                 DashboardView {
                     foreign_vpn: project::foreign_vpn(&conn, local.foreign.as_deref()),
                     engine: project::engine_line(&status),
@@ -235,6 +240,8 @@ impl Hub {
                     soft_mode: prefs.soft_mode,
                     smart_ru: prefs.smart_ru,
                     autopick,
+                    pause: project::pause_line(&kill_switch),
+                    no_pause_vpn: kill_switch.foreign_vpn.clone(),
                 }
             }
             None => DashboardView {
@@ -289,7 +296,7 @@ impl Hub {
         let status = w.status.borrow();
         let clock = local.clock_for(&snap);
         let conn = project::conn_view(&snap, &status, &local.conn, &clock);
-        let state = project::tray_state(
+        let mut state = project::tray_state(
             &snap,
             &status,
             &w.evidence.borrow(),
@@ -298,6 +305,7 @@ impl Hub {
             &w.traffic.borrow(),
             prefs.minimize_to_tray,
         );
+        state.paused = w.kill_switch.borrow().pause.is_some();
         drop((snap, status, local));
         set(&self.tray, state);
     }

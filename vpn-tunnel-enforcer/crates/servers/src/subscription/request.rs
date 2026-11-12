@@ -24,22 +24,29 @@ pub struct FetchRequest {
     pub device: ClientDevice,
     /// Send the device HWID headers and the HWID in the Happ User-Agent.
     pub send_hwid: bool,
+    /// The subscription's own HWID (the user reset it); `None` sends this PC's.
+    pub hwid: Option<String>,
     /// The user's extra headers (checked by [`super::parse_headers`]), applied last.
     pub headers: Vec<(String, String)>,
     /// The provider's fallback URL from an earlier answer.
     pub fallback: Option<Url>,
+    /// The URL came from outside (a deep link, a QR code): it must not lead into the local
+    /// network, also through a public name (phones-a11). A URL the user typed may.
+    pub from_link: bool,
 }
 
 impl FetchRequest {
     /// `url` as `device` and nothing else: no HWID (a new group's default), no extra headers, no
-    /// fallback.
+    /// fallback, typed by the user.
     pub fn new(url: Url, device: ClientDevice) -> Self {
         Self {
             url,
             device,
             send_hwid: false,
+            hwid: None,
             headers: Vec::new(),
             fallback: None,
+            from_link: false,
         }
     }
 }
@@ -50,8 +57,10 @@ impl fmt::Debug for FetchRequest {
             .field("host", &self.url.host_str())
             .field("device", &self.device)
             .field("send_hwid", &self.send_hwid)
+            .field("own_hwid", &self.hwid.is_some())
             .field("headers", &self.headers.len())
             .field("fallback", &self.fallback.is_some())
+            .field("from_link", &self.from_link)
             .finish()
     }
 }
@@ -146,8 +155,11 @@ impl SubscriptionFetcher {
             .and_then(|f| http_url(f.as_str()))
             .filter(|f| *f != url);
         let plan = self.plan();
-        let hwid = req.send_hwid.then(|| self.hwids.get(req.device));
-        let ctx = Ctx::new(self, req.device, hwid, &req.headers);
+        let hwid = req
+            .send_hwid
+            .then(|| req.hwid.as_deref().unwrap_or(self.hwids.get(req.device)));
+        let linked = req.from_link.then(|| url.clone());
+        let ctx = Ctx::new(self, req.device, hwid, &req.headers, linked);
         let tried = with_fallback(
             ctx.fetch_url(&url, &ctx.own, &plan.routes, plan.doh, cancel),
             fallback

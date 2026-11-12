@@ -99,10 +99,13 @@ pub struct GroupSummary {
     pub moved_at: Option<UnixMs>,
     /// The provider's controls (`hide-settings`, `routing`, autoconnect).
     pub controls: Controls,
+    /// The group's own device ID (the user reset it); `None` = this PC's ID. Not a credential.
+    pub own_hwid: Option<String>,
 }
 
 impl GroupSummary {
-    /// The summary of `group` at `now`; `rows` are the rows of the document.
+    /// The summary of `group` at `now`; `rows` are the rows of the document. `own_hwid` comes
+    /// from the document ([`crate::model::ServersDoc::device_id`]), `None` here.
     pub fn of(group: &ServerGroup, rows: &[ServerRow], now: UnixMs) -> Self {
         let mine = || rows.iter().filter(|r| r.group_id == group.id);
         let archived = mine().filter(|r| r.archived.is_some()).count();
@@ -131,6 +134,7 @@ impl GroupSummary {
             header_names,
             moved_at: group.moved_at,
             controls: group.controls.clone(),
+            own_hwid: None,
         }
     }
 }

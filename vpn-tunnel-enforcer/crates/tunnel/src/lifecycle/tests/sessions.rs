@@ -186,30 +186,26 @@ async fn failed_tweaks_leave_nothing_behind() {
     }
 }
 
-/// NOADMIN.md §2: the strict kill switch is refused in Soft before anything is touched.
+/// ks-a (owner decision 12.11.2026): "Always" is not offered in proxy mode; a stored `strict`
+/// connects there as "If the VPN drops" instead of being refused.
 #[tokio::test]
-async fn strict_is_refused_in_soft() {
+async fn strict_works_as_on_drop_in_soft() {
     let h = Harness::new();
     h.settings
         .update(|s| s.kill_switch = KillSwitchLevel::Strict)
         .unwrap();
-    let err =
-        h.lc.connect(soft(10808, ProxyKind::Socks5, Owner::Manual))
-            .await
-            .unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Validation);
-    assert_eq!(
-        err.user_msg().key,
-        "tunnel.lifecycle.soft.strictUnavailable"
-    );
-    assert_eq!(h.rt.script.lock().starts, 0);
-    assert_eq!(h.soft.state.lock().applies, 0);
-    assert_eq!(kinds(&h.rows()), [OutcomeKind::StartFailed]);
+    h.lc.connect(soft(10808, ProxyKind::Socks5, Owner::Manual))
+        .await
+        .expect("connect");
+    let req = h.rt.script.lock().requests.last().cloned().expect("start");
+    assert_eq!(req.kill_switch, KillSwitchLevel::Standard);
+    assert_eq!(h.snap().state, TunnelState::Connected);
 }
 
-/// NOADMIN.md §2: a Soft session whose engine is lost for good ends; kill switch `off` rolls
-/// the tweaks back at once with a notice, `standard` keeps them on the dead port (state
-/// "blocked") until the disconnect rolls them back.
+/// NOADMIN.md §2 with ks-a: a Soft engine the runtime lets go (kill switch `off`) ends the
+/// session and rolls the tweaks back at once with one notice; with "If the VPN drops" the
+/// runtime holds and so does the session: the tweaks stay on the port (paused), no row, until
+/// the disconnect rolls them back.
 #[tokio::test]
 async fn soft_engine_loss_follows_the_kill_switch() {
     for level in [KillSwitchLevel::Off, KillSwitchLevel::Standard] {
@@ -218,37 +214,40 @@ async fn soft_engine_loss_follows_the_kill_switch() {
         h.lc.connect(soft(10808, ProxyKind::Socks5, Owner::Manual))
             .await
             .unwrap();
-        h.rt.crash(1);
-        eventually("session ended", || h.rows().len() == 1).await;
-        h.settle().await;
-        let applied = h.soft.state.lock().applied.clone();
-        let titles = h.notifier.titles();
+        let titles = || h.notifier.titles();
         let noticed = |name: &str| {
             let title = format!("tunnel.lifecycle.notice.{name}.title");
-            titles.contains(&title)
+            titles().contains(&title)
         };
         if level == KillSwitchLevel::Off {
-            assert_eq!(applied, None);
-            assert!(noticed("softRestored"), "{titles:?}");
+            h.rt.crash(1);
+            eventually("session ended", || h.rows().len() == 1).await;
+            h.settle().await;
+            assert_eq!(h.soft.state.lock().applied, None);
+            assert!(noticed("softRestored"), "{:?}", titles());
+            assert!(!noticed("stopped"), "one notice: {:?}", titles());
             assert_eq!(h.snap().state, TunnelState::Unknown);
+            assert_eq!(h.rows()[0].mode, SessionMode::Soft);
         } else {
-            assert_eq!(applied, Some((soft_addr(SOFT_PORT), ProxyKind::Http)));
-            // No firewall holds anything in Soft: never the TUN's "firewall blocks" notice.
-            assert!(noticed("softBlocked"), "{titles:?}");
-            assert!(!noticed("crashBlocked"), "{titles:?}");
+            h.rt.crash_held(Duration::from_secs(60));
+            h.settle().await;
+            let tweaks = Some((soft_addr(SOFT_PORT), ProxyKind::Http));
+            assert_eq!(h.soft.state.lock().applied, tweaks);
             assert_eq!(h.snap().state, TunnelState::Blocked);
+            assert!(h.lc.kill_switch().borrow().pause.is_some());
+            assert!(h.rows().is_empty(), "the paused session stays open");
             h.lc.disconnect(user_stop()).await.expect("stop");
             assert_eq!(h.soft.state.lock().applied, None);
             assert_eq!(h.snap().state, TunnelState::Disconnected);
+            assert_eq!(kinds(&h.rows()), [OutcomeKind::UserStop]);
         }
-        assert_eq!(h.rows()[0].mode, SessionMode::Soft);
     }
 }
 
 /// NOADMIN §2 with the RU freeze window: kill switch `off` → a crash restart that must wait
-/// longer than the plain backoff rolls the tweaks back at once (programs connect directly, with a
-/// notice) and points them at the run again when it is back; a short backoff or `standard`
-/// (its blocking) keeps them. The session continues either way.
+/// longer than the plain backoff rolls the tweaks back at once (programs connect directly) and
+/// points them at the run again when it is back; a short backoff or "If the VPN drops" (its
+/// pause) keeps them. The session continues either way; nothing is told within 10 s.
 #[tokio::test]
 async fn long_restart_wait_pauses_the_soft_tweaks_with_the_kill_switch_off() {
     for (level, wait, paused) in [
@@ -265,12 +264,18 @@ async fn long_restart_wait_pauses_the_soft_tweaks_with_the_kill_switch_off() {
         h.settle().await;
         let during = h.soft.state.lock().applied.clone();
         assert_eq!(during.is_none(), paused, "{level:?} {wait:?}");
+        let held = h.lc.kill_switch().borrow().pause.is_some();
+        assert_eq!(held, level == KillSwitchLevel::Standard, "{level:?}");
         h.rt.come_back();
         h.settle().await;
         assert_eq!(h.soft.state.lock().applied, tweaks, "{level:?} {wait:?}");
         assert_eq!(h.snap().state, TunnelState::Connected, "{level:?} {wait:?}");
-        let pause = "tunnel.lifecycle.notice.softPaused.title".to_owned();
-        assert_eq!(h.notifier.titles().contains(&pause), paused);
+        assert!(h.lc.kill_switch().borrow().pause.is_none());
+        let told = |n: &str| {
+            let title = format!("tunnel.lifecycle.notice.{n}.title");
+            h.notifier.titles().contains(&title)
+        };
+        assert!(!told("reconnecting") && !told("paused") && !told("restored"));
         assert!(h.rows().is_empty(), "the session continues");
         assert_eq!(
             h.lc.session().borrow().as_ref().map(|s| s.owner),
@@ -575,13 +580,14 @@ async fn unexpected_ends_are_classified() {
     use crate::outcome::NetworkTransition;
     use vpnte_base::Msg;
     use vpnte_base::types::OutboundFault;
-    let cases: [(&str, OutcomeKind); 6] = [
+    // ks-a: a held block (`KillSwitchActive`) no longer ends the session: it pauses it
+    // (`killswitch::ks_row_3_*`), so no "killswitch" row comes from the lane.
+    let cases: [(&str, OutcomeKind); 5] = [
         ("crash", OutcomeKind::SingboxCrash),
         ("sleep", OutcomeKind::SystemSleep),
         ("network", OutcomeKind::NetworkLost),
         ("fault", OutcomeKind::ServerDown),
         ("proxy", OutcomeKind::ProxyUnreachable),
-        ("killswitch", OutcomeKind::Killswitch),
     ];
     for (case, expected) in cases {
         let h = Harness::new();
@@ -597,12 +603,7 @@ async fn unexpected_ends_are_classified() {
         }
         // Inputs and runtime events come from different sources: let the input land first.
         h.settle().await;
-        if case == "killswitch" {
-            h.rt.bring_down();
-            h.rt.emit(TunnelEvent::Status(TunStatusKind::KillSwitchActive));
-        } else {
-            h.rt.crash(3);
-        }
+        h.rt.crash(3);
         h.settle().await;
         let rows = h.rows();
         assert_eq!(kinds(&rows), [expected], "{case}");

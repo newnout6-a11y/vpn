@@ -37,7 +37,10 @@ pub enum ClientDevice {
     Mac,
 }
 
-/// Kill-switch level. `Standard` lives as long as the app process; `Strict` survives exit and reboot.
+/// Kill-switch level. Stored names stay `off` / `standard` / `strict` (settings and the 1.x
+/// import need no migration). `Standard` = «При обрыве»: the internet pauses only when the VPN
+/// drops by itself. `Strict` = «Всегда»: no internet without the VPN, even after exit or a reboot
+/// (offered only where the helper service keeps it safe).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KillSwitchLevel {
@@ -45,6 +48,17 @@ pub enum KillSwitchLevel {
     Off,
     Standard,
     Strict,
+}
+
+impl KillSwitchLevel {
+    /// The level in force: a stored `Strict` works as `Standard` where "Always" cannot be kept
+    /// safe (no helper service), so nothing outlives its owner (owner decision 12.11.2026).
+    pub fn effective(self, always_available: bool) -> Self {
+        match self {
+            Self::Strict if !always_available => Self::Standard,
+            level => level,
+        }
+    }
 }
 
 /// Proxy engine selection (setting) and the engine actually used.
@@ -180,6 +194,22 @@ mod tests {
         assert!(Owner::Schedule > Owner::Rotation);
         assert!(Owner::Rotation > Owner::Autopilot);
         assert!(Owner::Autopilot > Owner::AdaptiveRetry);
+    }
+
+    /// ks-a: stored names unchanged; "Always" works as "If the VPN drops" without the service.
+    #[test]
+    fn strict_works_as_standard_until_always_is_available() {
+        use KillSwitchLevel::{Off, Standard, Strict};
+        for (stored, name) in [(Off, "off"), (Standard, "standard"), (Strict, "strict")] {
+            assert_eq!(
+                serde_json::to_string(&stored).unwrap(),
+                format!("\"{name}\"")
+            );
+        }
+        assert_eq!(Strict.effective(false), Standard);
+        assert_eq!(Strict.effective(true), Strict);
+        assert_eq!(Standard.effective(false), Standard);
+        assert_eq!(Off.effective(true), Off);
     }
 
     /// AT-12-002: a lab build's stored per-server choice loads as `Auto` without the lab feature.

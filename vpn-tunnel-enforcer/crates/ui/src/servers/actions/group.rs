@@ -252,6 +252,27 @@ impl Actions {
             }
         });
     }
+
+    /// Copies a short ready-made request for the plain subscription link (the answer to an
+    /// encrypted app link) in the page's language.
+    pub fn copy_provider_request(&self) {
+        let (toasts, api) = (self.toasts, self.api.clone());
+        let text = translate_now("ui.servers.add.requestText", &[]);
+        self.spawn(async move {
+            match api.copy_text(text).await {
+                Ok(()) => {
+                    toasts.success(translate_now("ui.servers.add.requestCopied", &[]), None);
+                }
+                Err(err) => {
+                    toast_error(
+                        toasts,
+                        translate_now("ui.servers.add.copyFailed", &[]),
+                        &err,
+                    );
+                }
+            }
+        });
+    }
 }
 
 /// The people's wording of a failed subscription refresh (typed, S-4).
@@ -266,6 +287,8 @@ pub(crate) fn fetch_error_text(why: FetchError) -> String {
         FetchError::Tls => translate_now("ui.servers.fetch.tls", &[]),
         FetchError::Timeout => translate_now("ui.servers.fetch.timeout", &[]),
         FetchError::Refused => translate_now("ui.servers.fetch.refused", &[]),
+        FetchError::HwidRequired => translate_now("ui.servers.fetch.hwidRequired", &[]),
+        FetchError::DeviceLimit => translate_now("ui.servers.fetch.deviceLimit", &[]),
     }
 }
 

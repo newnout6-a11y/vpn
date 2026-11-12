@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use futures_util::future::join_all;
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,8 +21,7 @@ use super::{EngineChoice, ProfileSource, ProxyManager, ProxyProfile};
 use crate::health::Timing;
 use crate::model::{
     Action, Aggregate, BatchSkip, BatchSkipReason, Degradation, GroupHealth, Health,
-    InstanceStatus, Lifecycle, ProxyError, ProxyOps, Reservation, ReserveRequest, ServerStatus,
-    StartRequest, StopReason, StopScope,
+    InstanceStatus, Lifecycle, ProxyError, ProxyOps, ServerStatus, StartRequest, StopReason,
 };
 use crate::probe::{ProbeError, ProbeOk, Prober};
 use crate::slot::Slot;
@@ -214,7 +212,6 @@ pub(super) fn slow_timing() -> Timing {
         success: long,
         cooldowns: [long; 3],
         recheck: long,
-        leased_recheck: long,
         ..Timing::default()
     }
 }
@@ -613,16 +610,12 @@ async fn stop_all_stops_every_slot() {
     let r = rig(samples(3), slow_timing());
     let ids = (1..=3).map(|n| format!("profile-{n}")).collect();
     assert_eq!(r.manager.start_profiles(ids).await.started.len(), 3);
-    let status = r
-        .manager
-        .stop_all(StopScope::Unleased, StopReason::Ui)
-        .await;
+    let status = r.manager.stop_all(StopReason::Ui).await;
     assert!(status.instances.is_empty() && !status.instance.running);
     assert!(r.manager.instances().await.instances.is_empty());
 }
 
-/// Spec external-proxy §7.7: 30 routes with distinct fresh egress IPs make prewarm ready, and
-/// 30 concurrent clients lease 30 distinct routes.
+/// Spec external-proxy §7.7: 30 routes with distinct fresh egress IPs make prewarm ready.
 #[tokio::test]
 async fn capacity_of_thirty_distinct_routes() {
     let r = rig(samples(30), slow_timing());
@@ -651,23 +644,6 @@ async fn capacity_of_thirty_distinct_routes() {
             .iter()
             .all(|i| i.ready && i.health == Health::Healthy && i.egress_checked_at.is_some())
     );
-
-    let asks = (1..=30).map(|i| {
-        let mut req = ReserveRequest::new(format!("buyer-worker-{i}"));
-        req.ttl_secs = Some(120.0);
-        r.manager.reserve(req)
-    });
-    let leases: Vec<Reservation> = join_all(asks)
-        .await
-        .into_iter()
-        .map(Result::unwrap)
-        .collect();
-    let slots: HashSet<_> = leases.iter().map(|l| l.slot).collect();
-    let tokens: HashSet<_> = leases.iter().map(|l| l.lease_token.clone()).collect();
-    assert_eq!((slots.len(), tokens.len()), (30, 30));
-    for lease in leases {
-        assert!(r.manager.release(lease.lease_token).await.unwrap().released);
-    }
     // Prewarm tops up: 30 instances exist, so nothing more starts.
     let again = r.manager.prewarm(30, None).await.unwrap();
     assert!(again.started.is_empty() && again.ready);
@@ -771,181 +747,6 @@ async fn three_ready_routes() -> Rig {
         .set(|port| egress(&format!("198.51.100.{}", port - 17989)));
     assert!(r.manager.prewarm(3, None).await.unwrap().ready);
     r
-}
-
-fn ask(owner: &str) -> ReserveRequest {
-    ReserveRequest {
-        ttl_secs: Some(120.0),
-        ..ReserveRequest::new(owner)
-    }
-}
-
-/// Spec external-proxy §7.8: a client falls back from an occupied egress IP, a leased route
-/// cannot be rotated or stopped, tokens are enforced, and a returning owner gets its route.
-#[tokio::test]
-async fn leases_guard_routes() {
-    let r = three_ready_routes().await;
-    let ip2 = "198.51.100.2".parse().unwrap();
-    let first = r
-        .manager
-        .reserve(ReserveRequest {
-            preferred_egress_ip: Some(ip2),
-            ..ask("buyer-worker-1")
-        })
-        .await
-        .unwrap();
-    assert_eq!(first.instance.egress_ip, Some(ip2));
-    let leased = first.slot;
-    let rotate = StartRequest {
-        slot: Some(leased),
-        action: Action::Rotate,
-        idempotency_key: Some("leased-rotation".into()),
-        ..StartRequest::default()
-    };
-    let err = r.manager.start(rotate).await.unwrap_err();
-    assert_eq!(err.http_status(), 409);
-    let now = r.manager.status(leased).await.instance;
-    assert_eq!(
-        (now.generation, now.proxy_url.clone(), now.egress_ip),
-        (first.generation, first.proxy_url.clone(), Some(ip2))
-    );
-    let err = r.manager.stop(leased, StopReason::Api).await.unwrap_err();
-    let text = format!("Slot {leased} cannot stop while a Buyer Search lease is active");
-    assert_eq!(err, ProxyError::Conflict(text));
-
-    let other = r
-        .manager
-        .reserve(ReserveRequest {
-            preferred_egress_ip: Some(ip2),
-            preferred_slot: Some(leased),
-            ..ask("buyer-worker-2")
-        })
-        .await
-        .unwrap();
-    assert_ne!(other.slot, leased);
-    assert_ne!(other.instance.egress_ip, Some(ip2));
-    let strict = ReserveRequest {
-        slot: Some(leased),
-        allow_fallback: false,
-        ..ask("buyer-worker-3")
-    };
-    assert_eq!(
-        r.manager.reserve(strict).await.unwrap_err().http_status(),
-        409
-    );
-    let wrong = r.manager.release("wrong-token".into()).await.unwrap_err();
-    assert_eq!(wrong.http_status(), 403);
-    let renewed = r
-        .manager
-        .renew(first.lease_token.clone(), Some(120.0))
-        .await
-        .unwrap();
-    assert_eq!(renewed.lease_token, first.lease_token);
-
-    // UI "stop all" and a main VPN disconnect keep the leased routes (B-9).
-    r.manager
-        .stop_all(StopScope::Unleased, StopReason::VpnStop)
-        .await;
-    let left: Vec<Slot> = r
-        .manager
-        .instances()
-        .await
-        .instances
-        .iter()
-        .map(|i| i.slot)
-        .collect();
-    let mut kept = vec![leased, other.slot];
-    kept.sort();
-    assert_eq!(left, kept);
-    r.manager.release(first.lease_token).await.unwrap();
-    let back = r.manager.reserve(ask("buyer-worker-1")).await.unwrap();
-    assert_eq!(back.slot, leased);
-}
-
-/// Spec external-proxy §7.8: an expired lease is freed before the next reservation.
-#[tokio::test]
-async fn expired_lease_is_freed() {
-    let r = rig(samples(1), slow_timing());
-    r.prober.set(|_| egress("198.51.100.50"));
-    r.manager.start(connect(1, "profile-1")).await.unwrap();
-    assert!(r.manager.check_health(Slot::DEFAULT).await.ready);
-    let short = ReserveRequest {
-        slot: Some(Slot::DEFAULT),
-        ttl_secs: Some(1.0),
-        allow_fallback: false,
-        ..ReserveRequest::new("expiry-owner")
-    };
-    r.manager.reserve(short).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(1_050)).await;
-    let next = ReserveRequest {
-        slot: Some(Slot::DEFAULT),
-        allow_fallback: false,
-        ..ask("next-owner")
-    };
-    assert_eq!(r.manager.reserve(next).await.unwrap().slot, Slot::DEFAULT);
-}
-
-/// B-31: a leased route whose engine died cannot be renewed; the lease is dropped, so the slot
-/// can be stopped or restarted again.
-#[tokio::test]
-async fn dead_leased_route_cannot_be_renewed() {
-    let r = three_ready_routes().await;
-    let lease = r.manager.reserve(ask("buyer-worker-1")).await.unwrap();
-    let index = usize::from(lease.slot.get()) - 1;
-    r.launch.engine(index).crash(1);
-    let m = r.manager.clone();
-    assert!(eventually(|| !m.inner.instance(lease.slot).process_running).await);
-    let err = r.manager.renew(lease.lease_token, None).await.unwrap_err();
-    assert_eq!(err, ProxyError::Conflict("Leased route is down".into()));
-    assert!(r.manager.stop(lease.slot, StopReason::Api).await.is_ok());
-}
-
-/// Spec external-proxy §3.17: when a leased route meets a duplicate, the unleased peer is
-/// quarantined and the leased one stays ready.
-#[tokio::test]
-async fn duplicate_quarantines_the_unleased_peer() {
-    let r = three_ready_routes().await;
-    let lease = r
-        .manager
-        .reserve(ReserveRequest {
-            slot: Some(slot(3)),
-            ..ask("buyer-worker-1")
-        })
-        .await
-        .unwrap();
-    assert_eq!(lease.slot, slot(3));
-    // Slot 3's exit moves to the IP of slot 1 after a failed probe (no drift check then).
-    r.prober.set(|_| timeout_error());
-    r.manager.check_health(slot(3)).await;
-    r.prober.set(|_| egress("198.51.100.1"));
-    let leased = r.manager.check_health(slot(3)).await;
-    assert!(leased.ready);
-    let peer = r.manager.status(slot(1)).await.instance;
-    assert_eq!(peer.health, Health::Quarantined);
-    assert_eq!(
-        peer.last_error.as_deref(),
-        Some("Duplicate egress IP 198.51.100.1 also reported by slot 3")
-    );
-}
-
-/// Spec external-proxy §3.16: a spent failure budget never stops a leased route; it stays
-/// degraded (recovery blocked) with the probe's error and keeps running.
-#[tokio::test]
-async fn leased_route_is_not_auto_disabled() {
-    let r = three_ready_routes().await;
-    let lease = r.manager.reserve(ask("buyer-worker-1")).await.unwrap();
-    r.prober.set(|_| Err(ProbeError::Transport("EOF".into())));
-    for _ in 0..4 {
-        r.manager.check_health(lease.slot).await;
-    }
-    let m = r.manager.clone();
-    let blocked =
-        |i: &InstanceStatus| i.degradation_reason == Some(Degradation::LeasedRouteRecoveryBlocked);
-    assert!(eventually(|| blocked(&m.inner.instance(lease.slot))).await);
-    let status = r.manager.status(lease.slot).await.instance;
-    assert!(status.process_running && !status.auto_disabled);
-    assert_eq!(status.health, Health::Degraded);
-    assert_eq!(status.last_error.as_deref(), Some("EOF"));
 }
 
 /// Spec external-proxy §3.16: the automatic stop re-checks the budget once it holds the slot,
@@ -1073,11 +874,10 @@ async fn add_allocates_and_reports_the_control_url() {
     assert_eq!(err.detail(), "VPN profile not found or unusable: missing");
 }
 
-/// B-9 / spec 3.28: app exit stops every slot, leases notwithstanding, and refuses new starts.
+/// B-9 / spec 3.28: app exit stops every slot and refuses new starts.
 #[tokio::test]
 async fn shutdown_stops_everything() {
     let r = three_ready_routes().await;
-    r.manager.reserve(ask("buyer-worker-1")).await.unwrap();
     r.manager.shutdown().await;
     assert!(r.manager.instances().await.instances.is_empty());
     let err = r.manager.start(connect(1, "profile-1")).await.unwrap_err();
@@ -1292,44 +1092,6 @@ async fn slots_name_their_engine() {
     let carried = r.manager.start(connect(2, "profile-x")).await.unwrap();
     assert_eq!(carried.instance.engine, Some(EngineKind::Xray));
     assert_eq!(InstanceStatus::stopped(slot(3)).engine, None);
-}
-
-/// subs-a6: a borrowed slot (the app's own spare route for a subscription fetch) is never
-/// leased, so the borrower's stop cannot be refused by a lease; a stop clears the mark and the
-/// same slot started with "+" is leasable again.
-#[tokio::test]
-async fn borrowed_slots_are_never_leased() {
-    let r = rig(samples(1), slow_timing());
-    let borrowed = r
-        .manager
-        .borrow("profile-1".into())
-        .await
-        .unwrap()
-        .instance
-        .slot;
-    assert!(r.manager.check_health(borrowed).await.ready);
-    let err = r.manager.reserve(ask("buyer-worker-1")).await.unwrap_err();
-    assert_eq!(err.http_status(), 503);
-    let strict = ReserveRequest {
-        slot: Some(borrowed),
-        ..ask("buyer-worker-1")
-    };
-    assert!(r.manager.reserve(strict).await.is_err());
-    r.manager.stop(borrowed, StopReason::Api).await.unwrap();
-
-    let added = r
-        .manager
-        .add("profile-1".into())
-        .await
-        .unwrap()
-        .instance
-        .slot;
-    assert_eq!(added, borrowed);
-    assert!(r.manager.check_health(added).await.ready);
-    assert_eq!(
-        r.manager.reserve(ask("buyer-worker-1")).await.unwrap().slot,
-        added
-    );
 }
 
 /// Audit item 18: an unelevated slot runs a provider's TLS spoof without it, and its row says so

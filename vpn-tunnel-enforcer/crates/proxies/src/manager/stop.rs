@@ -1,6 +1,6 @@
-//! Stopping (spec 3.16, 3.20, 3.28 with B-9, B-18): one slot, every slot of a scope, the
-//! automatic stop after the failure budget, and the app exit. A slot is released only once its
-//! engine's exit is confirmed.
+//! Stopping (spec 3.16, 3.20, 3.28 with B-9, B-18): one slot, every slot, the automatic stop
+//! after the failure budget, and the app exit. A slot is released only once its engine's exit
+//! is confirmed.
 use std::sync::Arc;
 
 use futures_util::future::join_all;
@@ -9,10 +9,8 @@ use vpnte_base::types::now_ms;
 use super::Inner;
 use super::launch::STOP_TIMEOUT;
 use super::registry::Live;
-use super::run::LoopCmd;
 use crate::health::{FAILURE_BUDGET, Route};
-use crate::lease::Guarded;
-use crate::model::{ProxyError, StopReason, StopScope};
+use crate::model::{ProxyError, StopReason};
 use crate::slot::Slot;
 
 impl Inner {
@@ -27,28 +25,20 @@ impl Inner {
         confirmed
     }
 
-    /// Stops `slot` (3.20); the caller holds the slot guard. `leased_ok` skips the lease check
-    /// (the caller decided); `preserve` keeps the profile and the health (auto-disable). The
-    /// slot is released only once the engine's exit is confirmed (B-18): an engine that does
-    /// not exit keeps the slot `failed` and its port reserved; a retry stops it again.
-    async fn stop_held(
-        &self,
-        slot: Slot,
-        reason: &str,
-        preserve: bool,
-        leased_ok: bool,
-    ) -> Result<(), ProxyError> {
+    /// Stops `slot` (3.20); the caller holds the slot guard. `preserve` keeps the profile and
+    /// the health (auto-disable). The slot is released only once the engine's exit is
+    /// confirmed (B-18): an engine that does not exit keeps the slot `failed` and its port
+    /// reserved; a retry stops it again.
+    async fn stop_held(&self, slot: Slot, reason: &str, preserve: bool) -> Result<(), ProxyError> {
         let now = now_ms();
         let engine = {
             let mut reg = self.reg.lock();
-            if !leased_ok {
-                reg.leases.guard(slot, Guarded::Stop, now)?;
-            }
             let Some(state) = reg.slots.get_mut(&slot) else {
                 return Ok(());
             };
             if !preserve {
-                // Not ready from this moment, so no lease can catch the route while it stops.
+                // Not ready from this moment: a status read while the engine stops must not
+                // offer the route.
                 state.route = Route::stopped(now);
             }
             state.live.as_ref().map(|live| {
@@ -76,7 +66,6 @@ impl Inner {
             state.take_live();
             state.configured = false;
             state.port = None;
-            state.borrowed = false;
             if !preserve {
                 state.profile = None;
                 state.auto_disabled = false;
@@ -85,20 +74,19 @@ impl Inner {
             }
             state.updated_at = Some(now_ms());
         }
-        reg.leases.forget_slot(slot);
         self.publish(reg);
         tracing::info!(slot = %slot, reason, "slot stopped");
         Ok(())
     }
 
-    /// `POST /stop`, the UI stop button: a leased slot is a 409.
+    /// `POST /stop`, the UI stop button.
     pub(super) async fn stop_op(&self, slot: Slot, reason: StopReason) -> Result<(), ProxyError> {
         let _guard = self.lock_slot(slot).await;
-        self.stop_held(slot, reason.as_str(), false, false).await
+        self.stop_held(slot, reason.as_str(), false).await
     }
 
-    /// Stops every slot in `scope` (B-9): leased slots survive `Unleased`; `All` ends leases.
-    pub(super) async fn stop_all_op(&self, scope: StopScope, reason: StopReason) {
+    /// Stops every slot (B-9): UI "stop all", main VPN disconnect.
+    pub(super) async fn stop_all_op(&self, reason: StopReason) {
         let slots: Vec<Slot> = {
             let reg = self.reg.lock();
             let listed = reg.slots.iter().filter(|(_, s)| s.is_listed());
@@ -106,18 +94,8 @@ impl Inner {
         };
         for slot in slots {
             let _guard = self.lock_slot(slot).await;
-            let leased_ok = scope == StopScope::All;
-            match self
-                .stop_held(slot, reason.as_str(), false, leased_ok)
-                .await
-            {
-                Err(ProxyError::Conflict(_)) => {
-                    tracing::info!(slot = %slot, "kept leased external proxy slot {slot}");
-                }
-                Err(err) => {
-                    tracing::warn!(slot = %slot, error = %err, "external proxy not stopped")
-                }
-                Ok(()) => {}
+            if let Err(err) = self.stop_held(slot, reason.as_str(), false).await {
+                tracing::warn!(slot = %slot, error = %err, "external proxy not stopped");
             }
         }
         tracing::info!(
@@ -126,29 +104,20 @@ impl Inner {
         );
     }
 
-    /// The failure budget of `generation` is spent (3.16). A leased slot is never taken away
-    /// from its consumer: it stays degraded and is re-probed every few minutes instead.
+    /// The failure budget of `generation` is spent (3.16): the slot is stopped and marked
+    /// auto-disabled, keeping its profile for the UI.
     pub(super) async fn auto_disable(self: Arc<Self>, slot: Slot, generation: u64) {
         let _guard = self.lock_slot(slot).await;
         let now = now_ms();
         {
             let mut guard = self.reg.lock();
             let reg = &mut *guard;
-            let leased = reg.leases.lease(slot, now).is_some();
             let Some(state) = reg.slots.get_mut(&slot) else {
                 return;
             };
             // A forced probe may have healed the route while this waited for the guard.
             let spent = state.route.consecutive_failures >= FAILURE_BUDGET;
             if !spent || state.live_of(generation).is_none() {
-                return;
-            }
-            if leased {
-                state.route.disable_blocked(now);
-                if let Some(live) = &state.live {
-                    let _ = live.probes.send(LoopCmd::Soon(self.timing.leased_recheck));
-                }
-                self.publish(reg);
                 return;
             }
             state.route.disabled(now);
@@ -164,19 +133,18 @@ impl Inner {
             self.publish(reg);
         }
         let reason = "health failure budget exhausted";
-        if let Err(err) = self.stop_held(slot, reason, true, true).await {
+        if let Err(err) = self.stop_held(slot, reason, true).await {
             tracing::warn!(slot = %slot, error = %err, "auto-disabled slot not stopped");
         }
     }
 
-    /// App exit: no new start, every engine stopped, every lease dropped.
+    /// App exit: no new start, every engine stopped.
     pub(super) async fn shutdown(&self) {
         self.closing.cancel();
         let lives: Vec<(Slot, Live)> = {
             let mut guard = self.reg.lock();
             let reg = &mut *guard;
             reg.closed = true;
-            reg.leases.clear();
             let now = now_ms();
             let lives = reg
                 .slots

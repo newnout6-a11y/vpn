@@ -157,6 +157,8 @@ fn fill(actions: &Actions, desktop: DesktopContext, source: Source) {
                 f.input = text;
                 f.error = None;
                 f.from_link = false;
+                // A QR code came from outside; the clipboard and a file are like typing.
+                f.request.from_outside = matches!(source, Source::QrFile | Source::QrScreen);
             }
             Ok(None) => {}
             Err(err) if err.kind == ErrorKind::Cancelled => {}

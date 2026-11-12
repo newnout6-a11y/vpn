@@ -21,7 +21,8 @@ use vpnte_servers::store::SelectBy;
 use vpnte_tunnel::api::{CaptureKind, ModeKind, Runtime, TunError, TunStatus};
 use vpnte_tunnel::fsm::TunnelSnapshot;
 use vpnte_tunnel::lifecycle::{
-    ConnError, DisconnectReq, Done, SessionView, ShutdownReport, StopCause, SwitchReq,
+    ConnError, DisconnectReq, Done, KillSwitchView, SessionView, ShutdownReport, StopCause,
+    SwitchReq,
 };
 use vpnte_winnet::wfp::{ExceptionKind, KillSwitchException, RemoveReport, Toggles};
 
@@ -208,7 +209,20 @@ impl TunnelOps for TunnelService {
 
     async fn set_kill_switch_level(&self, level: KillSwitchLevel) -> AppResult<()> {
         self.coord.user_acted(UserAct::Change);
-        self.guarded(move |g| g.set_level(level)).await
+        self.guarded(move |g| g.set_level(level)).await?;
+        // A level change ends a pause (research 5.2): with the kill switch off nothing should
+        // hold the internet any more, so the paused session ends like «Продолжить без VPN».
+        let paused = self.lifecycle.kill_switch().borrow().pause.is_some();
+        if level == KillSwitchLevel::Off && paused {
+            self.lifecycle
+                .disconnect(DisconnectReq::new(
+                    StopCause::User,
+                    Owner::Manual,
+                    Source::Ui,
+                ))
+                .await?;
+        }
+        Ok(())
     }
 
     async fn set_protection_toggles(&self, toggles: Toggles) -> AppResult<()> {
@@ -316,6 +330,19 @@ impl TunnelOps for TunnelService {
         self.live.clone()
     }
 
+    fn kill_switch_view(&self) -> watch::Receiver<KillSwitchView> {
+        self.lifecycle.kill_switch()
+    }
+
+    async fn retry_now(&self) -> bool {
+        self.coord.user_acted(UserAct::Change);
+        self.lifecycle.retry_now().await
+    }
+
+    fn always_available(&self) -> bool {
+        self.guard.always_available()
+    }
+
     async fn clear_traffic_history(&self) -> vpnte_base::AppResult<()> {
         self.domains.clear().await
     }
@@ -348,8 +375,8 @@ impl TunnelOps for TunnelService {
         {
             tracing::warn!("domain history flush timed out");
         }
-        // Slots stop with the app, leases notwithstanding (their engines would die with the
-        // kill-on-close job anyway; this ends them cleanly and closes the control API).
+        // Slots stop with the app (their engines would die with the kill-on-close job anyway;
+        // this ends them cleanly and closes the control API).
         if tokio::time::timeout(left(), self.proxies.shutdown())
             .await
             .is_err()

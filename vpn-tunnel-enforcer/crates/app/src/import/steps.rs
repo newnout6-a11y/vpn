@@ -27,8 +27,8 @@ mod servers;
 
 /// Every document of the old directory, in an order where nothing depends on a later step.
 /// Not imported (storage §6.6, with this build's owners): `smart-route-rule-sets` (bundled /
-/// downloaded again), `external-proxy-leases` (regenerated), `adaptive-bypass` (a learning cache
-/// its crate has no importer for; the install secret is generated anew).
+/// downloaded again), `external-proxy-leases` (the lease API is gone), `adaptive-bypass` (a
+/// learning cache its crate has no importer for; the install secret is generated anew).
 pub(super) fn all(cx: &mut Ctx<'_>) {
     let settings = cx.open("settings");
     settings_docs(cx, settings.as_ref());

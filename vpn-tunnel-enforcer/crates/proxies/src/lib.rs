@@ -26,7 +26,6 @@ pub const LOCALES: &[(&str, &str)] = &[
 pub mod config;
 pub mod control;
 pub mod health;
-pub mod lease;
 pub mod manager;
 pub mod model;
 pub mod probe;

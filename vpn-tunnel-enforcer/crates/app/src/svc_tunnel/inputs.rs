@@ -1,5 +1,6 @@
 //! [`InputsSource`] over the user's stores: settings, routing rules and the Smart RU rule sets.
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use vpnte_base::{AppError, AppResult};
@@ -15,6 +16,8 @@ pub(super) struct StoreInputs {
     pub settings: Arc<Store<Settings>>,
     pub rules: Arc<Store<RulesDoc>>,
     pub rule_sets: Arc<RuleSetService>,
+    /// "Always" can be kept safe (the guard's flag): otherwise `strict` runs as `standard`.
+    pub always: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -54,7 +57,7 @@ impl InputsSource for StoreInputs {
                     missing: a.reason == InactiveReason::FileMissing,
                 })
                 .collect(),
-            kill_switch: s.kill_switch,
+            kill_switch: s.kill_switch.effective(self.always.load(Ordering::Relaxed)),
             public_wifi: s.public_wifi_compatibility,
             stealth: s.stealth_mode,
             auto_restart_on_crash: s.auto_restart_on_crash,

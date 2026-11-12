@@ -209,14 +209,22 @@ async fn engine_sweep_waits_for_a_server_check() {
 }
 
 /// Elevated, the strict level keeps its persistent filters; other levels release them
-/// through the tunnel (whose refusal is reported as a refusal).
+/// through the tunnel (whose refusal is reported as a refusal). ks-a: only an "Always" in force
+/// (the helper service) is kept; a stored strict without it is released like the others.
 #[tokio::test]
 async fn strict_filters_are_kept_by_the_repair() {
     let tunnel = FakeTunnel::new(false);
     *tunnel.level.lock() = KillSwitchLevel::Strict;
+    tunnel.always.store(true, Ordering::Relaxed);
     assert_eq!(
         filters_step(true, tunnel.as_ref()).await,
         StepOutcome::blocked(Msg::new("app.maintenance.repair.strictKept"))
+    );
+    tunnel.always.store(false, Ordering::Relaxed);
+    assert_eq!(
+        filters_step(true, tunnel.as_ref()).await,
+        StepOutcome::blocked(Msg::new("app.base.needsAdmin")),
+        "released through the tunnel (the fake has no WFP)"
     );
     *tunnel.level.lock() = KillSwitchLevel::Standard;
     assert!(

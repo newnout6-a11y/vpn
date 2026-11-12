@@ -104,6 +104,11 @@ impl DashboardApi for GateApi {
         self.log("release");
         Err(AppError::new(ErrorKind::Permission))
     }
+
+    async fn retry_now(&self) -> AppResult<()> {
+        self.log("retry");
+        Ok(())
+    }
 }
 
 #[derive(Clone)]

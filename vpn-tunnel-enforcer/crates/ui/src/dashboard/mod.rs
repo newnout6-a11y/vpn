@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use dioxus::prelude::*;
 use tokio::sync::watch;
-use vpnte_base::types::{Engine, Notice, Verdict};
+use vpnte_base::types::{Engine, Notice, UnixMs, Verdict};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_view::identity::{ExitIp, HomeIp};
 use vpnte_view::labels::FirewallStatus;
@@ -66,6 +66,21 @@ pub struct DashboardView {
     pub engine: Option<EngineLine>,
     /// What the automatic server choice is doing (`None` while it does nothing).
     pub autopick: Option<PickLine>,
+    /// «Интернет на паузе»: the VPN dropped by itself and the kill switch holds (`None`: not
+    /// paused).
+    pub pause: Option<PauseLine>,
+    /// Another VPN carries the default route (its label): the kill switch does not pause the
+    /// running session.
+    pub no_pause_vpn: Option<String>,
+}
+
+/// The paused state's line: the next automatic attempt and whether the user must act.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PauseLine {
+    /// Unix ms of the next automatic attempt; `None` while one runs or none is scheduled.
+    pub next_attempt: Option<UnixMs>,
+    /// The server rejected the key: reconnecting will not help until the user acts.
+    pub key_rejected: bool,
 }
 
 /// The automatic server choice's step (connecting at start, checking a stalled session, the
@@ -110,6 +125,8 @@ pub trait DashboardApi: 'static {
     async fn recheck_firewall(&self) -> AppResult<()>;
     /// Removes our kill-switch filters after a failed or ended session.
     async fn release_kill_switch(&self) -> AppResult<()>;
+    /// «Подключить» in the paused state: the paused session retries at once.
+    async fn retry_now(&self) -> AppResult<()>;
 }
 
 thread_local! {

@@ -42,12 +42,17 @@ pub(crate) fn AddDialog() -> Element {
         .map(|&d| (d, device_label(d).to_owned()))
         .collect();
     let error = f.error.as_ref().map(|e| tr(&e.msg));
+    let help = f
+        .error
+        .as_ref()
+        .and_then(|e| help_for(&e.msg.key, f.request.send_hwid));
     let blank = f.input.trim().is_empty();
     let mut close = move || {
         open.set(false);
         form.write().closed();
     };
     let (a_submit, a_enter) = (actions.clone(), actions.clone());
+    let (a_copy, a_retry) = (actions.clone(), actions.clone());
     let footer = if f.report.is_some() {
         rsx! {
             Button { kind: ButtonKind::Ghost, onclick: move |_| form.write().report = None,
@@ -91,6 +96,8 @@ pub(crate) fn AddDialog() -> Element {
                                 f.input = text;
                                 f.error = None;
                                 f.from_link = false;
+                                // Edited by hand: the user vouches for the address now.
+                                f.request.from_outside = false;
                             },
                             rows: 4,
                             placeholder: t!("servers.addPlaceholder"),
@@ -99,6 +106,24 @@ pub(crate) fn AddDialog() -> Element {
                             mono: true,
                             on_submit: move |_| a_enter.add(),
                         }
+                    }
+                    match help {
+                        Some(Help::CopyRequest) => rsx! {
+                            Button { kind: ButtonKind::Ghost, small: true,
+                                onclick: move |_| a_copy.copy_provider_request(),
+                                {t!("ui.servers.add.copyRequest")}
+                            }
+                        },
+                        Some(Help::HwidRetry) => rsx! {
+                            Button { kind: ButtonKind::Ghost, small: true,
+                                onclick: move |_| {
+                                    form.write().request.send_hwid = true;
+                                    a_retry.add();
+                                },
+                                {t!("ui.servers.add.hwidRetry")}
+                            }
+                        },
+                        None => rsx! {},
                     }
                     Field { label: t!("servers.add.selectGroup"),
                         Select {
@@ -147,6 +172,37 @@ pub(crate) fn AddDialog() -> Element {
             }
         }
     }
+}
+
+/// What the add dialog offers under an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Help {
+    /// An encrypted app link: the provider has the plain link; a request for it is copied.
+    CopyRequest,
+    /// The panel serves only devices with an HWID: turn the switch on and add again.
+    HwidRetry,
+}
+
+/// Backend message keys of an encrypted app link's refusal (`profiles.deeplink.*`). Compared
+/// only: the app registers their text.
+pub(crate) const ENCRYPTED_LINK: [&str; 3] = [
+    "profiles.deeplink.encryptedHapp",
+    "profiles.deeplink.encryptedMantaray",
+    "profiles.deeplink.encrypted",
+];
+/// Backend message keys of a panel that serves only devices with an HWID (`servers.fetch.*`).
+/// Compared only: the app registers their text.
+pub(crate) const NEEDS_HWID: [&str; 2] = [
+    "servers.fetch.hwidRequired",
+    "servers.fetch.emptyListNoHwid",
+];
+
+/// The help for the error `key`; the HWID retry only while the switch is off.
+pub(crate) fn help_for(key: &str, send_hwid: bool) -> Option<Help> {
+    if ENCRYPTED_LINK.contains(&key) {
+        return Some(Help::CopyRequest);
+    }
+    (NEEDS_HWID.contains(&key) && !send_hwid).then_some(Help::HwidRetry)
 }
 
 /// What an import did: target group, counts, and the lines that were skipped (by number only:

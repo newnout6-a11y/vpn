@@ -93,6 +93,13 @@ impl DemoTray {
                 degraded: true,
                 ..protected
             },
+            TrayStatus::Paused => TrayState {
+                tunnel: TunnelState::Blocked,
+                transition: Some(Transition::Reconnecting),
+                kill_switch: true,
+                paused: true,
+                ..off
+            },
         }
     }
 

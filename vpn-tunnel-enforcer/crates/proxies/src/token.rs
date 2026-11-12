@@ -1,5 +1,5 @@
-//! Bearer secrets of the crate: the lease tokens and the control API token. Both are 32 bytes
-//! from the OS random source as hex and are compared in constant time.
+//! The bearer secret of the control API: 32 bytes from the OS random source as hex, compared
+//! in constant time.
 
 /// 32 random bytes as 64 lower-case hex characters.
 pub(crate) fn generate() -> Result<String, getrandom::Error> {

@@ -20,6 +20,7 @@ use vpnte_profiles::{clash, device};
 
 use super::headers::header_map;
 use super::http::{self, Abort, Answer, Hops};
+use super::hwid;
 use super::{DOH_MAX_IPS, FetchError, ProviderFailure, ProviderFetch, SubscriptionFetcher, policy};
 use crate::common::http_url;
 use crate::model::{BodyKind, FetchOutcome, NetFail};
@@ -141,16 +142,19 @@ impl Failures {
     }
 }
 
-/// Evidence order of servers §6: a received but unusable answer beats a later network failure.
+/// Evidence order of servers §6: a received but unusable answer beats a later network failure;
+/// a panel that named its reason for refusing the device beats everything.
 pub(super) fn rank(outcome: FetchOutcome) -> u8 {
     match outcome {
-        FetchOutcome::EmptyList => 0,
-        FetchOutcome::Unparseable(_) => 1,
-        FetchOutcome::Http(400..=499) => 2,
-        FetchOutcome::Http(_) => 3,
-        FetchOutcome::Network(_) => 4,
-        FetchOutcome::Timeout => 5,
-        FetchOutcome::Ok { .. } => 6,
+        FetchOutcome::DeviceLimit => 0,
+        FetchOutcome::HwidRequired => 1,
+        FetchOutcome::EmptyList => 2,
+        FetchOutcome::Unparseable(_) => 3,
+        FetchOutcome::Http(400..=499) => 4,
+        FetchOutcome::Http(_) => 5,
+        FetchOutcome::Network(_) => 6,
+        FetchOutcome::Timeout => 7,
+        FetchOutcome::Ok { .. } => 8,
     }
 }
 
@@ -234,21 +238,27 @@ pub(super) struct Ctx<'a> {
     pub public: Vec<Variant>,
     /// URLs whose plan stopped on purpose (429, or 404 / 410 to every identified request).
     stopped: Mutex<Vec<Url>>,
+    /// The subscription URL when it came from outside (a deep link, a QR code): its first
+    /// request must not reach the local network (see [`Ctx::linked_client`]).
+    linked: Option<Url>,
 }
 
 impl<'a> Ctx<'a> {
-    /// The requests of one fetch as `device`, with the HWID when `hwid` is set and `headers`.
+    /// The requests of one fetch as `device`, with the HWID when `hwid` is set and `headers`;
+    /// `linked`: the subscription URL came from outside.
     pub(super) fn new(
         fetcher: &'a SubscriptionFetcher,
         device: ClientDevice,
         hwid: Option<&str>,
         headers: &[(String, String)],
+        linked: Option<Url>,
     ) -> Self {
         Self {
             fetcher,
             own: variants(device, hwid, headers),
             public: variants(device, None, &[]),
             stopped: Mutex::new(Vec::new()),
+            linked,
         }
     }
 
@@ -270,17 +280,33 @@ impl<'a> Ctx<'a> {
     ) -> Result<Got, FetchError> {
         let host = url.host_str().unwrap_or_default().to_owned();
         let mut failures = Failures::default();
+        let linked = self.linked.as_ref() == Some(url);
+        // A link's local name or non-public IP literal needs no lookup: refused on every route.
+        if linked
+            && (policy::is_local_name(url)
+                || policy::literal_ip(url).is_some_and(|ip| !is_public_ip(ip)))
+        {
+            tracing::info!(%host, "subscription: a link into the local network was refused");
+            return Err(FetchError::LocalTarget);
+        }
         for route in routes {
-            let client = match self.fetcher.client(route) {
-                Ok(client) => client,
-                Err(err) => {
-                    tracing::warn!(route = %route.label(), "subscription: no HTTP client: {err}");
-                    continue;
+            let direct = *route == Route::Direct;
+            let client = if linked && direct {
+                self.linked_client(url, cancel).await?
+            } else {
+                match self.fetcher.client(route) {
+                    Ok(client) => Some(client),
+                    Err(err) => {
+                        tracing::warn!(route = %route.label(), "subscription: no HTTP client: {err}");
+                        None
+                    }
                 }
             };
+            let Some(client) = client else { continue };
             let hops = Hops {
-                local_dns: *route == Route::Direct,
-                origin_public: None,
+                local_dns: direct,
+                // A linked URL's direct client is pinned to addresses checked public.
+                origin_public: (linked && direct).then_some(true),
             };
             let attempt = Attempt {
                 client: &client,
@@ -346,6 +372,48 @@ impl<'a> Ctx<'a> {
     fn stop(&self, url: &Url, failures: Failures) -> FetchError {
         self.stopped.lock().push(url.clone());
         failures.into_error()
+    }
+
+    /// The direct client for a URL that came from outside (phones-a11): a name is resolved here
+    /// and the request is pinned to those addresses, so no second lookup can answer otherwise
+    /// (DNS rebinding). Any loopback, private, link-local or otherwise non-public address refuses
+    /// the URL before anything is sent (literals and local names were refused by `fetch_url`). A
+    /// name the system cannot resolve skips the direct route (`None`): an unchecked lookup is not
+    /// left to the request.
+    async fn linked_client(
+        &self,
+        url: &Url,
+        cancel: &CancellationToken,
+    ) -> Result<Option<reqwest::Client>, FetchError> {
+        let host = url.host_str().unwrap_or_default();
+        let addrs = match policy::literal_ip(url) {
+            Some(ip) => vec![ip],
+            None => tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(FetchError::Cancelled),
+                addrs = http::lookup(url) => addrs,
+            },
+        };
+        if addrs.iter().any(|ip| !is_public_ip(*ip)) {
+            tracing::info!(%host, "subscription: a link into the local network was refused");
+            return Err(FetchError::LocalTarget);
+        }
+        if addrs.is_empty() {
+            tracing::info!(%host, "subscription: a link's name did not resolve; no direct try");
+            return Ok(None);
+        }
+        let port = url.port_or_known_default().unwrap_or(443);
+        let pinned: Vec<SocketAddr> = addrs.iter().map(|ip| SocketAddr::new(*ip, port)).collect();
+        let built = self.fetcher.builder(&Route::Direct).and_then(|b| {
+            let b = match url.host() {
+                Some(url::Host::Domain(name)) => b.resolve_to_addrs(name, &pinned),
+                _ => b,
+            };
+            b.build().map_err(|e| AppError::internal(e.without_url()))
+        });
+        Ok(built
+            .map_err(|err| tracing::warn!("subscription: no HTTP client: {err}"))
+            .ok())
     }
 
     /// Fetches each Mihomo provider over `order` and merges new keys into `report`, at most
@@ -449,6 +517,13 @@ impl Attempt<'_> {
                 own: &variant.headers,
                 elsewhere: &variant.elsewhere,
             };
+            // When the plan sends the HWID, its anonymous requests are only the fallback: the
+            // panel's "send the HWID" to them is expected and says nothing new.
+            let refusal = |code: u16, headers: &[(String, String)], body: &[u8]| {
+                hwid::refusal(code, headers, body, variant.with_ids).filter(|r| {
+                    variant.with_ids || identified == 0 || *r != FetchOutcome::HwidRequired
+                })
+            };
             let answer = http::get(self.client, self.url, sends, self.hops, cancel).await;
             let outcome = match answer {
                 Err(Abort::Cancelled) => return Err(FetchError::Cancelled),
@@ -457,6 +532,8 @@ impl Attempt<'_> {
                     body,
                     moved,
                 }) => {
+                    // A device-limited panel may send an empty list with the reason in headers.
+                    let refused = refusal(200, &headers, b"");
                     let parsed = tokio::select! {
                         biased;
                         () = cancel.cancelled() => return Err(FetchError::Cancelled),
@@ -475,10 +552,14 @@ impl Attempt<'_> {
                                 route: self.route.cloned(),
                             })));
                         }
-                        Err(outcome) => outcome,
+                        Err(outcome) => refused.unwrap_or(outcome),
                     }
                 }
-                Ok(Answer::Status(code)) => FetchOutcome::Http(code),
+                Ok(Answer::Status {
+                    code,
+                    headers,
+                    body,
+                }) => refusal(code, &headers, &body).unwrap_or(FetchOutcome::Http(code)),
                 Ok(Answer::Unusable(reason)) => {
                     tracing::info!(host = %self.host, route = %self.label, ua = %variant.label,
                         "subscription: {reason}");
@@ -498,7 +579,11 @@ impl Attempt<'_> {
             match outcome {
                 // Rate limited: hammering other routes or agents would only make it worse.
                 FetchOutcome::Http(429) => return Ok(Step::Stop),
-                FetchOutcome::Http(404 | 410) if variant.with_ids => {
+                // The panel said why it refuses this device: other agents, routes or a spare
+                // slot change nothing (only the HWID switch or the provider can).
+                FetchOutcome::DeviceLimit => return Ok(Step::Stop),
+                FetchOutcome::HwidRequired if !variant.with_ids => return Ok(Step::Stop),
+                FetchOutcome::Http(404 | 410) | FetchOutcome::HwidRequired if variant.with_ids => {
                     gone += 1;
                     if gone == identified {
                         return Ok(Step::Stop);

@@ -10,7 +10,7 @@ use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 
 use super::*;
 use crate::servers::api::ServersApi;
-use crate::servers::demo_data::{demo_verdict, test_ip};
+use crate::servers::demo_data::{DEMO_PC_ID, demo_verdict, test_ip};
 use crate::servers::links_model::{LinkSchemes, QrCode};
 
 #[async_trait::async_trait(?Send)]
@@ -77,6 +77,7 @@ impl ServersApi for DemoServersApi {
                     last_fetched_at: Some(now),
                     last_fetch_attempt_at: Some(now),
                     send_hwid: request.send_hwid,
+                    device_id: Some(DEMO_PC_ID.into()),
                     header_names: header_names(&request.headers),
                     ..GroupView::default()
                 });
@@ -445,6 +446,18 @@ impl ServersApi for DemoServersApi {
         Ok(())
     }
 
+    async fn set_own_device_id(&self, id: &str, own: bool) -> AppResult<()> {
+        delay(200).await;
+        let fresh = format!("{:016x}", 0x3f9c_0b7e_5d2a_4c81_u64 ^ self.next_run());
+        self.edit(|v| {
+            if let Some(g) = v.groups.iter_mut().find(|g| g.id == id) {
+                g.own_device_id = own;
+                g.device_id = Some(if own { fresh } else { DEMO_PC_ID.into() });
+            }
+        });
+        Ok(())
+    }
+
     async fn set_request_headers(&self, id: &str, lines: String) -> AppResult<Vec<String>> {
         delay(300).await;
         let names = header_names(&lines);
@@ -587,6 +600,12 @@ impl ServersApi for DemoServersApi {
         // The demo never starts a browser (unattended machine); the link text is not logged
         // either: a provider panel URL can carry an account token.
         tracing::info!("demo: provider link requested");
+        Ok(())
+    }
+
+    async fn copy_text(&self, _text: String) -> AppResult<()> {
+        // The demo leaves the user's clipboard alone.
+        tracing::info!("demo: a request for the provider was copied");
         Ok(())
     }
 

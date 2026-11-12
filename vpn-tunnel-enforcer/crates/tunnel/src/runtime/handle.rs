@@ -60,6 +60,8 @@ pub(super) enum Cmd {
         stops: u64,
         reply: Reply<Option<SwitchReceipt>>,
     },
+    /// The paused session's recovery start, now instead of after its wait.
+    RetryNow { reply: Reply<bool> },
 }
 
 /// State shared between the handle and the actor (short locks, never across `.await`).
@@ -219,6 +221,12 @@ impl Runtime for TunnelHandle {
         })
         .await
         .flatten()
+    }
+
+    async fn retry_now(&self) -> bool {
+        self.ask(|reply| Cmd::RetryNow { reply })
+            .await
+            .unwrap_or(false)
     }
 
     fn status(&self) -> watch::Receiver<TunStatus> {

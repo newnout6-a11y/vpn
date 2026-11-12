@@ -94,6 +94,7 @@ async fn tunnel_feed(hub: Arc<Hub>, cancel: CancellationToken) {
     let mut status = w.status.clone();
     let mut evidence = w.evidence.clone();
     let mut traffic = w.traffic.clone();
+    let mut kill_switch = w.kill_switch.clone();
     hub.on_snapshot();
     loop {
         tokio::select! {
@@ -109,6 +110,12 @@ async fn tunnel_feed(hub: Arc<Hub>, cancel: CancellationToken) {
                 if changed.is_err() {
                     return;
                 }
+                hub.publish_dashboard();
+                hub.publish_tray();
+            }
+            // The paused state and its countdown target (ks-a). A tunnel without a lifecycle
+            // pause (its sender gone) simply never wakes this branch.
+            () = crate::support::changed(&mut kill_switch) => {
                 hub.publish_dashboard();
                 hub.publish_tray();
             }

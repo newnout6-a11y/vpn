@@ -2,8 +2,8 @@
 
 External loopback proxies: numbered **slots**, each an unauthenticated `mixed` (HTTP + SOCKS5) listener
 on `127.0.0.1:<port>` backed by its own sing-box child (plus an Xray child for profiles that run on Xray),
-probed through its data plane, rotated between servers and leased to automation clients; plus the local
-**control API** (HTTP on `127.0.0.1:17873`, token-guarded) and its console client `vpnte_proxy.exe`.
+probed through its data plane and rotated between servers; plus the local **control API** (HTTP on
+`127.0.0.1:17873`, token-guarded) and its console client `vpnte_proxy.exe`.
 Depends on `base`, `core`, `profiles`, `engine`.
 
 ```rust
@@ -17,7 +17,7 @@ pub const LOCALES: &[(&str, &str)];   // (ru_json, en_json) per fragment, file-n
 use std::sync::Arc;
 use vpnte_proxies::control::{ControlConfig, ControlServer};
 use vpnte_proxies::manager::{EngineChoice, ProfileSource, ProxyManager, ProxyProfile};
-use vpnte_proxies::model::{GroupHealth, ProxyOps, StopReason, StopScope};
+use vpnte_proxies::model::{GroupHealth, ProxyOps, StopReason};
 
 struct Servers { /* the app's server list, settings, probes */ }
 
@@ -30,7 +30,7 @@ impl ProfileSource for Servers {
     async fn check_group_health(&self, group_id: &str) -> vpnte_base::AppResult<GroupHealth> { /* probes */ }
 }
 
-// inside the tokio runtime (`new` starts the lease-expiry timer)
+// inside the tokio runtime
 let manager = ProxyManager::new(Arc::new(servers), &dirs.resources);
 let ops: Arc<dyn ProxyOps> = Arc::new(manager.clone());
 match ControlServer::start(ops.clone(), ControlConfig::from_env(&dirs.root), shutdown.child_token()).await {
@@ -40,8 +40,8 @@ match ControlServer::start(ops.clone(), ControlConfig::from_env(&dirs.root), shu
 let mut rx = manager.snapshot();               // UI state (watch), see `ProxySnapshot`
 ops.add("profile-id".into()).await?;           // UI "+": lowest free slot
 ops.rotate(slot, None).await?;                 // UI rotate button
-ops.stop_all(StopScope::Unleased, StopReason::VpnStop).await; // main VPN disconnected (leases survive)
-manager.shutdown().await;                      // app exit: every slot stopped, leases dropped
+ops.stop_all(StopReason::VpnStop).await;      // main VPN disconnected: every slot stops
+manager.shutdown().await;                      // app exit: every slot stopped, later starts refused
 ```
 
 Every `ProxyOps` error is a `ProxyError`; `AppError::from(err)` gives the UI message.
@@ -67,16 +67,12 @@ pub fn loopback_url(port: u16) -> String;                 // "http://127.0.0.1:<
 ```rust
 pub enum Health { Stopped /*default*/, Starting, Healthy, Degraded, Rotating, Quarantined, Failed } // lowercase
 pub enum Lifecycle { Stopped /*default*/, Starting, Ready, Degraded, Rotating, Quarantined, Failed } // lowercase
-pub enum Degradation { ProcessFailed, LeasedRouteRecoveryBlocked, HealthFailureBudgetExhausted,
-    EgressIpChangedWithoutRotation, RotationDidNotChangeEgressIp, DuplicateEgressIp, EgressProbeFailed } // kebab
+pub enum Degradation { ProcessFailed, HealthFailureBudgetExhausted, EgressIpChangedWithoutRotation,
+    RotationDidNotChangeEgressIp, DuplicateEgressIp, EgressProbeFailed } // kebab
 pub enum Action { Start /*default*/, Rotate, Connect }  impl Action { pub fn parse(&str) -> Option<Action> } // "trigger" = Connect
 pub struct StartRequest { pub slot: Option<Slot> /* None = 1 */, pub country: Option<String> /* sticky */,
     pub profile_id: Option<String>, pub port: Option<u16> /* None = keep / default */, pub action: Action,
     pub idempotency_key: Option<String> /* rotate */, pub rotate_reason: Option<String> }   // Default
-pub struct ReserveRequest { pub owner: String, pub ttl_secs: Option<f64>, pub preferred_egress_ip: Option<IpAddr>,
-    pub preferred_slot: Option<Slot>, pub slot: Option<Slot>, pub allow_fallback: bool }
-impl ReserveRequest { pub fn new(owner: impl Into<String>) -> Self }   // fallback on, TTL 120 s
-pub enum StopScope { Unleased, All }
 pub enum StopReason { Api, Ui, VpnStop }  impl StopReason { pub fn as_str(self) -> &'static str } // app exit = shutdown()
 pub fn prewarm_count(count: u64) -> Result<u16, ProxyError>;   // 1..=47546, else 400
 pub const FRESH_WINDOW_MS: UnixMs = 60_000;
@@ -86,11 +82,12 @@ pub fn derive_readiness(instances: &mut [InstanceStatus], now: UnixMs);  // sets
 `ProxyError` (`Clone + Eq + Error`; the `String` is the English wire `detail`, never a secret):
 
 ```rust
-pub enum ProxyError { BadRequest(String) /*400*/, Forbidden(String) /*403*/, NotFound(String) /*404*/,
-    Conflict(String) /*409*/, Unavailable(String) /*503*/, Upstream(u16, String) /*status*/, Engine(String) /*500*/,
+pub enum ProxyError { BadRequest(String) /*400*/, NotFound(String) /*404*/, Conflict(String) /*409*/,
+    Unavailable(String) /*503: shutting down*/, Upstream(u16, String) /*status*/, Engine(String) /*500*/,
     Refused(Msg) /*422: the engine setting cannot run the profile; wire detail fixed English*/ }
 impl ProxyError {
-    pub fn http_status(&self) -> u16;  pub fn code(&self) -> &'static str; // "conflict" | "forbidden" | "external-proxy-error"
+    pub fn http_status(&self) -> u16;  pub fn code(&self) -> &'static str; // "conflict" | "forbidden" (403 of a
+                                                                           // group check) | "external-proxy-error"
     pub fn detail(&self) -> &str;
     pub fn group_health(kind: ErrorKind) -> Self;   // old /profiles/healthcheck mapping, generic Russian wire texts
 }
@@ -125,10 +122,6 @@ pub struct ProxyStatus { #[serde(flatten)] pub instance: InstanceStatus, pub con
     pub instances: Vec<InstanceStatus>, pub aggregate: Aggregate }      // GET /status, start / stop results
 pub struct Instances { pub max_instances: Unlimited, pub instances, pub aggregate, pub control_url }  // GET /instances
 pub struct InstancesBatch { pub instances: Vec<InstanceStatus>, pub aggregate: Aggregate }
-pub struct Reservation { pub lease_token: String /* secret; Debug hides it */, pub owner: String,
-    pub expires_at: UnixMs, pub slot: Slot, pub proxy_url: Option<String>, pub egress_ip: Option<IpAddr>,
-    pub generation: u64, pub instance: InstanceStatus }
-pub struct Released { pub released: bool /* true */, pub slot: Slot }
 pub enum ServerStatus { Online, Offline, Unknown /*default*/ }
 pub struct ProfileRow { pub id, pub name: String, pub country: Option<String>, pub protocol: String,
     pub server: String, pub port: u16, pub group_id: Option<String>, pub status: ServerStatus,
@@ -152,13 +145,11 @@ pub mod iso_ms {   // serde `with` module: Option<UnixMs> <-> "2026-11-11T05:19:
     pub fn format(ms: UnixMs) -> Option<String>;                 // None outside the calendar range
     pub fn serialize<S: Serializer>(value: &Option<UnixMs>, s: S) -> Result<S::Ok, S::Error>;  // None = null
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<UnixMs>, D::Error>;
-    pub mod required { /* the same pair for a `UnixMs` that is always present; null is an error */ }
 }
 ```
 
-`ProxyOps` — one method per control endpoint plus the UI's actions (statuses are derived at call time;
-every lease-reading call first drops expired leases). The manager implements it; the control server holds
-`Arc<dyn ProxyOps>`.
+`ProxyOps` — one method per control endpoint plus the UI's actions (statuses are derived at call time).
+The manager implements it; the control server holds `Arc<dyn ProxyOps>`.
 
 ```rust
 #[async_trait::async_trait]
@@ -172,21 +163,16 @@ pub trait ProxyOps: Send + Sync {
     async fn check_group_health(&self, group_id: String) -> Result<GroupHealth, ProxyError>;
     async fn start(&self, req: StartRequest) -> Result<ProxyStatus, ProxyError>;  // start / rotate / connect
     async fn rotate(&self, slot: Slot, reason: Option<String>) -> Result<ProxyStatus, ProxyError>; // provided
-    async fn add(&self, profile_id: String) -> Result<ProxyStatus, ProxyError>;   // UI "+": lowest free slot
-    async fn borrow(&self, profile_id: String) -> Result<ProxyStatus, ProxyError>; // = add, for the app's own
-        // short-lived use (a subscription fetch's spare route): never leased, so its stop is never a 409
+    async fn add(&self, profile_id: String) -> Result<ProxyStatus, ProxyError>;   // UI "+", a subscription
+                                                                                  // fetch's spare route
     async fn start_profiles(&self, profile_ids: Vec<String>) -> BatchStartResult; // Servers page, never the VPN's
     async fn prewarm(&self, count: u64, country: Option<String>) -> Result<PrewarmResult, ProxyError>;
-    async fn stop(&self, slot: Slot, reason: StopReason) -> Result<ProxyStatus, ProxyError>; // leased = 409
-    async fn stop_all(&self, scope: StopScope, reason: StopReason) -> ProxyStatus;           // slot 1's status
-    async fn reserve(&self, req: ReserveRequest) -> Result<Reservation, ProxyError>;
-    async fn renew(&self, lease_token: String, ttl_secs: Option<f64>) -> Result<Reservation, ProxyError>;
-    async fn release(&self, lease_token: String) -> Result<Released, ProxyError>;
+    async fn stop(&self, slot: Slot, reason: StopReason) -> Result<ProxyStatus, ProxyError>;
+    async fn stop_all(&self, reason: StopReason) -> ProxyStatus;                  // every slot; slot 1's status
 }
 ```
 
-Rules worth knowing: a `start` of a configured running slot returns it unchanged; a leased slot cannot
-stop / restart / change route (409 "Slot N cannot … while a Buyer Search lease is active"); `connect`
+Rules worth knowing: a `start` of a configured running slot returns it unchanged; `connect`
 without a profile is 400; a failed start leaves the slot `failed` and configured until an explicit stop;
 an explicit stop clears the profile, the sticky country and the rotation keys. A rotate answers after its first
 probe; a repeated `idempotency_key` (per slot, last 64 keys, 10 min) returns the current status without rotating.
@@ -194,33 +180,6 @@ A start's port must not be the control API's or another slot's and must be binda
 stop asks the engines to end (CTRL_BREAK; sing-box and the Xray child at once), kills them after 3 s and waits
 up to 3 s more; an exit that is still not confirmed fails with 500 "engine did not exit": the slot stays `failed` with its
 port reserved, a plain `start` of it is then the idempotent no-op, and `stop` or `rotate` retries (B-18).
-
-## `lease` — the pure lease book (the manager owns one; leases live in memory only)
-
-```rust
-pub const DEFAULT_TTL_SECS: u32 = 120;  pub const MAX_TTL_SECS: u32 = 3600;
-pub struct Lease { pub slot: Slot, pub owner: String, pub expires_at: UnixMs, /* token private */ }
-pub enum Guarded { Stop, Restart, ChangeRoute }
-#[derive(Default)] pub struct LeaseBook;
-impl LeaseBook {
-    pub fn sweep(&mut self, now: UnixMs) -> Vec<Slot>;                  // drop expired, return their slots
-    pub fn lease(&self, slot: Slot, now: UnixMs) -> Option<&Lease>;
-    pub fn next_expiry(&self) -> Option<UnixMs>;
-    pub fn guard(&self, slot: Slot, op: Guarded, now: UnixMs) -> Result<(), ProxyError>;  // 409 when leased
-    pub fn forget_slot(&mut self, slot: Slot) -> Option<Lease>;          // slot stopped
-    pub fn clear(&mut self);
-    pub fn reserve(&mut self, req: &ReserveRequest, routes: &[InstanceStatus], now: UnixMs) -> Result<Reservation, ProxyError>;
-    pub fn renew(&mut self, token: &str, ttl: Option<f64>, routes: &[InstanceStatus], now: UnixMs) -> Result<Reservation, ProxyError>;
-    pub fn release(&mut self, token: &str, now: UnixMs) -> Result<Released, ProxyError>;
-}
-pub fn ttl_secs(raw: Option<f64>) -> Result<u32, ProxyError>;   // None 120; 1..=3600 floored; else 400
-```
-
-`routes` must carry readiness derived at `now`; the manager passes no borrowed slot (`ProxyOps::borrow`).
-Reserve order: strict `slot`, the owner's previous route (same
-generation + egress), `preferred_egress_ip`, `preferred_slot`, then (with fallback) the first ready slot; 503
-"No free healthy route with a fresh unique egress IP is available". Unknown token = 403 (checked before the
-TTL); renewing a route whose engine is down = 409 "Leased route is down" and the lease is dropped.
 
 ## `config` — sing-box config of one slot
 
@@ -262,13 +221,11 @@ wins; otherwise the probe is `Transport` only when no service answered at all, e
 ```rust
 pub const FAILURE_BUDGET: u32 = 4;
 pub struct Timing { pub first_probe, pub first_stagger, pub success, pub success_stagger,
-    pub cooldowns: [Duration; 3], pub recheck, pub leased_recheck, pub hint_delay, pub hint_spacing: Duration }
-impl Default for Timing;   // 0 ms + slot%5*100 ms; 45 s + slot%5*250 ms; 15/30/60 s; 60 s; 300 s; 15 s; 30 s
+    pub cooldowns: [Duration; 3], pub recheck, pub hint_delay, pub hint_spacing: Duration }
+impl Default for Timing;   // 0 ms + slot%5*100 ms; 45 s + slot%5*250 ms; 15/30/60 s; 60 s; 15 s; 30 s
 impl Timing { pub fn first(&self, Slot) -> Duration; pub fn after_success(&self, Slot) -> Duration;
               pub fn cooldown(&self, failures: u32) -> Duration }
 pub enum Next { In(Duration), Park, Disable, Kill }
-pub enum Duplicate { Quarantine { keeper: Slot }, QuarantinePeer(Slot) }
-pub fn resolve_duplicate(self_leased: bool, dups: &[(Slot, bool)]) -> Option<Duplicate>;
 pub fn is_transport_hint(line: &str) -> bool;
 pub struct Route { pub lifecycle: Lifecycle, pub health: Health, pub egress_ip: Option<IpAddr>,
     pub latency_ms: Option<u32>, pub last_checked_at, pub last_success_at: Option<UnixMs>,
@@ -282,7 +239,7 @@ impl Route {
     pub fn failed(&mut self, err: &ProbeError, now: UnixMs, timing: &Timing) -> Next;
     pub fn degrade(&mut self, reason: Degradation, message: String, quarantined: bool, now: UnixMs);
     pub fn process_failed(&mut self, message: String, now: UnixMs);
-    pub fn disable_blocked(&mut self, now: UnixMs);  pub fn disabled(&mut self, now: UnixMs);
+    pub fn disabled(&mut self, now: UnixMs);
     pub fn hint(&mut self, line: &str, now: UnixMs, timing: &Timing) -> Option<Duration>;
 }
 pub fn ms(d: Duration) -> UnixMs;
@@ -314,10 +271,9 @@ pub struct ProxySnapshot { pub instances: Vec<InstanceStatus>, pub aggregate: Ag
 impl ProxySnapshot { pub fn refreshed(&self, now: UnixMs) -> ProxySnapshot }  // readiness re-derived at `now`
 #[derive(Clone)] pub struct ProxyManager;              // cheap clone (Arc inside); Debug shows no internals
 impl ProxyManager {
-    pub fn new(source: Arc<dyn ProfileSource>, resources: &Path) -> Self; // `resources` = DataDirs::resources;
-                                               // outside a tokio runtime no lease-expiry timer is started
+    pub fn new(source: Arc<dyn ProfileSource>, resources: &Path) -> Self; // `resources` = DataDirs::resources
     pub fn snapshot(&self) -> watch::Receiver<ProxySnapshot>;
-    pub async fn shutdown(&self);              // every slot stopped, leases dropped; later starts are 503
+    pub async fn shutdown(&self);              // every slot stopped; later starts are 503
 }
 pub fn degradation_msg(reason: Degradation) -> Msg;   // proxies.degradation.<camelCase>  (row tooltip)
 ```
@@ -331,10 +287,10 @@ Xray child behind a SOCKS5 bridge (either child exiting fails the slot); engine 
 `vpnte_engine::xray_config::select_engine(profile, pref)` like the main tunnel. Probes: first right after
 readiness (+ slot%5 × 100 ms), then every ~45 s; `Transport` failures retry after 15/30/60 s and the 4th
 auto-disables the slot (re-checked under the slot guard, so a forced probe that healed the route in between
-keeps it; a leased slot stays degraded and is re-probed every 5 min instead); a `Service` failure does not
+keeps it); a `Service` failure does not
 count, resets the counter and re-probes after 60 s; a refused listener kills the engine; drift, a rotation that
-kept its exit, or a duplicate exit (the leased / lowest slot keeps it) park the slot until a start, rotate or
-forced probe. Results that land after a stop or restart of the slot are dropped. At most 3 probes run at once.
+kept its exit, or a duplicate exit (the lowest other slot on that IP keeps it) park the slot until a start,
+rotate or forced probe. Results that land after a stop or restart of the slot are dropped. At most 3 probes run at once.
 Engine exits are not restarted. Auto-picks: country by ISO code / alias / name (whole words, never
 substrings); among the matches the first in list order of the best rank, ranked by: not used by another slot,
 then not the main VPN's server, then online < unknown < offline (so the main VPN's server still beats a server
@@ -367,14 +323,15 @@ impl ControlToken { pub fn generate() -> io::Result<Self>; pub fn as_str(&self) 
 pub struct Endpoint { pub host: String, pub port: u16, pub url: String, pub token_file: PathBuf, pub updated_at: UnixMs }
 impl Endpoint { pub fn new(dir: &Path, port: u16) -> Self }
 pub fn read_token(path: &Path) -> Option<String>;              // trimmed; None when missing / blank
-pub fn is_mutation_path(path: &str) -> bool;                   // the 13 POST-only paths
+pub fn is_mutation_path(path: &str) -> bool;                   // the 10 POST-only paths
 pub fn is_trusted_host(host: Option<&str>, port: u16) -> bool; // "127.0.0.1:<p>" | "localhost:<p>"
 ```
 
 Endpoints (optional prefix `/api/external-proxy`; `?format=text` or `?text=1` = plain-text answers): GET
 `/status` `/` `/instances` `/list`; POST `/start` `/rotate` `/connect` `/trigger` `/stop` `/connect-profiles`
-`/healthcheck` `/profiles/healthcheck` `/instances/prewarm` `/instances/status-batch` `/instances/reserve`
-`/instances/renew` `/instances/release`. Pipeline: Host guard (421) → OPTIONS 204 → method (405) → token
+`/healthcheck` `/profiles/healthcheck` `/instances/prewarm` `/instances/status-batch`. The lease endpoints
+`/instances/reserve|renew|release` are gone (owner decision of 12.11.2026): like any unknown path they answer
+405 to POST and 404 to GET. Pipeline: Host guard (421) → OPTIONS 204 → method (405) → token
 (401) → body (≤ 64 KiB, else 413; JSON object or blank) → endpoint; errors are
 `{"ok":false,"error":<code>,"detail":<text>}`. A path that is not an endpoint is 405 for any method but GET and
 a JSON 404 `not-found` for GET (no token needed: nothing is served there); a malformed request is 400
@@ -415,7 +372,7 @@ starts the app as the current user and never relaunches it on a 401. Tests: none
 
 ## i18n keys and events
 
-- `proxies.error.{badRequest,forbidden,notFound,conflict,unavailable,upstream,engine}` `{{detail}}` —
+- `proxies.error.{badRequest,notFound,conflict,unavailable,upstream,engine}` `{{detail}}` —
   `AppError::from(ProxyError)`.
 - `proxies.control.tokenFailed`, `proxies.control.bindFailed` `{{port}}` — `AppError::from(ServeError)`.
 - `proxies.degradation.<camelCase Degradation>` — `degradation_msg` (the UI names `Health` states
@@ -425,13 +382,16 @@ starts the app as the current user and never relaunches it on a 401. Tests: none
 - Register `vpnte_proxies::LOCALES` at start.
 - State is pushed only through `ProxyManager::snapshot()` (a `watch`, sent when something visible changed).
   Readiness also expires with the clock: call `ProxySnapshot::refreshed(now)` on a UI timer (≤ 60 s) instead
-  of trusting an old `ready`. There are no other events; lease expiry changes no visible field.
+  of trusting an old `ready`. There are no other events.
 
 ## Not implemented / dropped
 
 - PID files, orphan cleanup, staged engine copies, per-exe firewall rules (children run in kill-on-close Jobs,
   configs go over stdin); `sing-box check` before a start; HTTP keep-alive.
-- Lease persistence (leases live in memory); compatibility copies of the control files in the Electron dir.
+- The lease API (`/instances/reserve|renew|release`, "Buyer Search" / "PSR client" leases with their 409
+  guards and the lease-only degradation): removed by the owner's decision of 12.11.2026 (owner question 6,
+  package p-lease).
+- Compatibility copies of the control files in the Electron dir.
 - Automatic restart of an exited engine (a manual start or rotate is the recovery).
 - Not exercised by tests: a real Xray child as a slot (its config passed `xray run -test`), real public IP
   services and DoH servers (stubs only; the tunnelled-5xx rule is covered by the pure classifier test), the CLI
@@ -445,7 +405,7 @@ to `VPN Tunnel Enforcer.exe`, and the installer ships the `vpnte-proxy.cmd` / `.
 ## Needs from other crates
 
 - app: implement `ProfileSource` over the server list; build `ProxyManager` and start `ControlServer` at boot
-  (see Wiring); `stop_all(StopScope::Unleased, StopReason::VpnStop)` when the main VPN disconnects;
+  (see Wiring); `stop_all(StopReason::VpnStop)` when the main VPN disconnects;
   `shutdown()` on exit; register `LOCALES` (today `crates/app/src/svc_core` lists the fragment files itself).
 - tunnel (main TUN config): route the bundled `sing-box.exe` / `xray.exe` processes to `direct-out`, else slot
   traffic hops through the main VPN server.

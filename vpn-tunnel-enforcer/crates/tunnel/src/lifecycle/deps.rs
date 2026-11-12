@@ -2,11 +2,12 @@
 //! Every method is cheap or async; none may call back into the lifecycle (it would deadlock the
 //! actor that is waiting for it).
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use vpnte_base::AppResult;
-use vpnte_base::types::{Notice, ProxyKind};
+use vpnte_base::types::{KillSwitchLevel, Notice, ProxyKind};
 use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
 
@@ -89,6 +90,32 @@ pub trait Notifier: Send + Sync {
     fn notify(&self, notice: Notice, kind: NoticeKind);
 }
 
+/// Another VPN whose tunnel carries the default route: "If the VPN drops" does not pause a
+/// session against it (two kill switches fighting = no internet for anyone; research §2.3).
+pub trait ForeignVpn: Send + Sync {
+    /// That VPN's display label, read now (blocking: an adapter-table walk).
+    fn full_tunnel(&self) -> Option<String>;
+}
+
+/// [`ForeignVpn`] over the live adapter table (winnet `foreign_tun`, severity `Conflict`). An
+/// unreadable table reads as "none": the kill switch then pauses as usual (the safe side).
+pub struct SystemForeignVpn;
+
+impl ForeignVpn for SystemForeignVpn {
+    fn full_tunnel(&self) -> Option<String> {
+        use vpnte_winnet::adapters::{alias, foreign_tun};
+        let own = alias::all_aliases();
+        let own: Vec<&str> = own.iter().map(String::as_str).collect();
+        let found = foreign_tun::detect(None, &own)
+            .inspect_err(|e| tracing::debug!(error = %e, "foreign VPN check failed"))
+            .ok()?;
+        let full = found
+            .into_iter()
+            .find(|f| f.severity == foreign_tun::Severity::Conflict);
+        full.map(|f| f.label())
+    }
+}
+
 /// Everything the lifecycle actor talks to.
 #[derive(Clone)]
 pub struct LifecycleDeps {
@@ -101,4 +128,16 @@ pub struct LifecycleDeps {
     pub notifier: Arc<dyn Notifier>,
     pub history: History,
     pub settings: Arc<Store<Settings>>,
+    /// "Always" can be kept safe (the helper service holds it); until the service wiring sets
+    /// it, a stored `strict` works as `standard` ([`KillSwitchLevel::effective`]).
+    pub always_available: Arc<AtomicBool>,
+    pub foreign_vpn: Arc<dyn ForeignVpn>,
+}
+
+impl LifecycleDeps {
+    /// The kill-switch level in force now (the stored one, as far as it can be kept safe).
+    pub fn kill_switch(&self) -> KillSwitchLevel {
+        let always = self.always_available.load(Ordering::Relaxed);
+        self.settings.read(|s| s.kill_switch).effective(always)
+    }
 }

@@ -330,6 +330,13 @@ impl Hub {
         .await
     }
 
+    /// «Подключить» in the paused state: the paused session retries at once; `false` when nothing
+    /// is paused any more (it just came back, or the user ended it).
+    pub(super) async fn retry_now(self: &Arc<Self>) -> AppResult<bool> {
+        let tunnel = self.tunnel()?;
+        detached(async move { Ok(tunnel.retry_now().await) }).await
+    }
+
     /// Puts the exit address on the secret clipboard (cleared after a minute).
     pub(super) async fn copy_ip(&self, ip: IpAddr) -> AppResult<()> {
         let backend = self.backend.clone();

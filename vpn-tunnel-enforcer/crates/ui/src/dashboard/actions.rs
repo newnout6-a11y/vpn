@@ -207,4 +207,20 @@ impl Dash {
             Ok(())
         });
     }
+
+    /// «Подключить» in the paused state: the paused session retries at once.
+    pub(super) fn retry_now(&self) {
+        let (api, dash) = (self.api.clone(), self.clone());
+        self.command.start(move |_| async move {
+            if let Err(err) = api.retry_now().await {
+                dash.fail(t!("dashboard.connectionError"), &err);
+            }
+            Ok(())
+        });
+    }
+
+    /// «Продолжить без VPN» in the paused state: a disconnect, the internet is back at once.
+    pub(super) fn continue_without_vpn(&self) {
+        self.disconnect();
+    }
 }

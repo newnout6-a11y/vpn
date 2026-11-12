@@ -38,11 +38,11 @@ impl Protection {
                 Err(e) if e.is_rpc_failure() => g.bfe_running = Some(false),
                 Err(e) => tracing::debug!(error = %e, "status: filters not readable"),
             }
-            let level = g.settings.level;
+            let level = g.level_in_force();
             let kill_switch = match (level, g.conn) {
                 (KillSwitchLevel::Off, _) => KillSwitchState::Off,
                 _ if g.last_error.is_some() => KillSwitchState::Failed,
-                (KillSwitchLevel::Standard, Conn::Disconnected) => KillSwitchState::Armed,
+                (KillSwitchLevel::Standard, _) if !g.armed => KillSwitchState::Armed,
                 (_, Conn::Up) => KillSwitchState::Engaged,
                 _ => KillSwitchState::Blocking,
             };
@@ -121,7 +121,8 @@ impl Protection {
                 return;
             }
         }
-        match g.sync(&d, t.settings.level == KillSwitchLevel::Strict) {
+        let persistent_first = g.level_in_force() == KillSwitchLevel::Strict;
+        match g.sync(&d, persistent_first) {
             Ok(()) => {
                 g.watchdog_failed = false;
                 self.note_skipped(&mut g, skipped);

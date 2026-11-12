@@ -8,8 +8,7 @@
       "diagnosticsUnavailable": "The diagnostics ZIP export is not available in this version of the app.",
       "themeUnknown": "This theme no longer exists.",
       "killSwitch": {
-        "unconfirmed": "The Windows filters could not be verified.",
-        "strictUnverified": "Strict mode cannot be checked: available only when the app is started as administrator."
+        "unconfirmed": "The Windows filters could not be verified."
       },
       "domains": {
         "ruleGone": "This rule no longer exists.",

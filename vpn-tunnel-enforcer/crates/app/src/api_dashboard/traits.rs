@@ -68,6 +68,14 @@ impl DashboardApi for Dashboard {
     async fn release_kill_switch(&self) -> AppResult<()> {
         self.0.release_kill_switch().await
     }
+
+    async fn retry_now(&self) -> AppResult<()> {
+        if self.0.retry_now().await? {
+            return Ok(());
+        }
+        // Nothing paused any more: «Подключить» is a plain connect.
+        self.connect().await
+    }
 }
 
 #[async_trait::async_trait(?Send)]
@@ -142,6 +150,10 @@ impl TrayApi for Tray {
     }
 
     async fn start(&self) -> AppResult<()> {
+        // In the paused state the menu's «Подключить» retries the paused session now.
+        if self.0.tray.borrow().paused && self.0.retry_now().await? {
+            return Ok(());
+        }
         let call =
             |t: Arc<dyn crate::services::TunnelOps>| async move { t.connect(Source::Tray).await };
         self.0.lane(Shows::Notices, call).await.map(|_| ())

@@ -1,7 +1,7 @@
 {
   "profiles": {
     "deeplink": {
-      "encryptedHapp": "Это зашифрованная подписка Happ ({{variant}}). VPNTE не умеет её расшифровать — попросите у вашего провайдера обычный subscription URL (https://…) или vless://-ссылку.",
+      "encryptedHapp": "Это зашифрованная ссылка Happ ({{variant}}): её открывает только Happ. Обычная ссылка подписки есть у поставщика. Откройте в браузере страницу подписки, где вы взяли эту ссылку: у панелей Remnawave адрес этой страницы и есть ссылка подписки — скопируйте его сюда. Ещё https-ссылка бывает в личном кабинете или боте поставщика. Если её нигде нет, попросите у поставщика обычную ссылку.",
       "encryptedMantaray": "Это зашифрованная подписка MantaRay (mantaray://{{variant}}/...). VPNTE не может расшифровать ее без ключей приложения MantaRay. Попросите у провайдера обычный subscription URL (https://...) или прямую ссылку ключа (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
       "encrypted": "Это зашифрованная ссылка {{app}} ({{variant}}). VPNTE не умеет её расшифровать — попросите у провайдера обычный subscription URL (https://…) или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
       "routingProfile": "Это правило маршрутизации Happ (happ://routing/…), а не VPN-подписка. Вставьте ссылку на подписку или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",

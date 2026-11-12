@@ -110,6 +110,43 @@ fn encrypted_links_never_echo_the_payload() {
     assert_eq!(e, DeepLinkError::UnknownHost("happ://…".into()));
 }
 
+/// p-subs (research happ-crypt.md, option C): the Happ refusal says where the plain link is (the
+/// subscription page in a browser, Remnawave, the account page or bot, the provider) and never
+/// talks about decrypting, in both languages.
+#[test]
+fn the_happ_refusal_points_at_the_plain_link() {
+    let texts: Vec<String> = crate::LOCALES
+        .iter()
+        .flat_map(|(ru, en)| [ru, en])
+        .filter_map(|json| {
+            let doc: serde_json::Value = serde_json::from_str(json).ok()?;
+            let text = doc.pointer("/profiles/deeplink/encryptedHapp")?;
+            Some(text.as_str()?.to_lowercase())
+        })
+        .collect();
+    assert_eq!(texts.len(), 2, "ru + en");
+    for text in &texts {
+        assert!(
+            text.contains("remnawave") && text.contains("https"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("decrypt") && !text.contains("расшифр"),
+            "{text}"
+        );
+    }
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("браузер") && t.contains("бот"))
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("browser") && t.contains("bot"))
+    );
+}
+
 #[test]
 fn mantaray_and_plain_wrappers() {
     for host in ["add", "import", "sub", "subscription"] {
