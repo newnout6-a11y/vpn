@@ -1,5 +1,5 @@
-//! «Поведение»: autostart (instant, read back from Windows) and the tray / autopilot / site
-//! metadata switches (draft).
+//! «Поведение»: autostart (instant, read back from Windows), connect at launch (instant), and the
+//! tray / autopilot / site metadata switches (draft).
 use dioxus::prelude::*;
 
 use super::{ActionError, use_api, use_ctx};
@@ -50,6 +50,7 @@ pub(super) fn Behaviour() -> Element {
                 checked: view.minimize_to_tray,
                 on_change: move |on| ctx.edit(|p| p.minimize_to_tray = Some(on)),
             }
+            super::launch::Launch {}
             Switch {
                 label: t!("ui.settings.behaviour.autopilot"),
                 hint: t!("ui.settings.behaviour.autopilotHint"),

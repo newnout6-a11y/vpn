@@ -117,6 +117,11 @@ messages to show.
 - Hard without TUN capture: `connect` fails with `Permission` and a message that offers Soft;
   never falls back to Soft silently.
 - `ping` records every result with `backend.servers.record_ping` (memory only).
+- WP-12 lab build only (feature `lab`, package w7-mihomo; a production build has none of it):
+  `svc_tunnel::lab::with_lab_engine` reads the lab record `<data>\lab\at-12.json` once
+  (`vpnte_engine::lab::activate`, logged; the gate decides every engine choice from then on) and
+  gives `RealEngines` the mihomo exe next to sing-box plus `<data>\lab\runs` for its run homes.
+  AmneziaWG then connects in Proxy mode through mihomo chained behind sing-box (tunnel API "WP-12").
 
 ## Notifier (`svc_core::notify`)
 `backend.notifier.notify(notice, Some(category))` (`None` = uncategorised). Owner decision D-12:
@@ -145,3 +150,23 @@ the start; the long tasks start after the start-up recovery, each under a child 
 `backend.shutdown`. The root hands `built.automation` to `api_lists::contexts` (Schedule page) and
 `api_settings::contexts` (rotation, adaptive, location privacy, browser hardening).
 `TunnelOps::resumed` wakes the scheduler; `TunnelOps::shutdown` rolls location privacy back.
+The automatic server choice (`svc_auto::pick`, package w7-autopick: connect at launch, stall
+watch, candidate warm-up, retries after every server failed) is started by the root with
+`svc_auto::spawn_autopick(&backend, &built.automation)` right after the tunnel is stored (its host
+needs `TunnelOps::{probe_ctx, runtime_status, snapshot}`); the root then hands the
+automation to `api_dashboard::contexts` (the status strip) as well. The user's own actions reach it
+through `AppCoordinator::user_acted` (fix-autopick): `TunnelOps::disconnect` and a `cancel` with an
+operation in flight are `UserAct::Stop`, `switch_server` is `Pick`, `apply_settings_change`,
+`set_kill_switch_level`, `set_protection_toggles` and the launch choice are `Change`, a window / tray
+connect is `Connect`; every act but `Change` also drops a restore that waits after a lost switch.
+
+## Links from browsers and messengers (`api_servers::phones`, package w7-phones)
+`api_servers::contexts` also provides an `api_servers::LinkInbox` root context. The root offers it the
+`--open-link` link of this start (`Wiring::first_link`) and every `Command::OpenLink` of a later launch
+(after `show_window`); the overlay `vpnte_ui::servers::LinkHandoff` (in the shell's overlays) opens the
+Servers page, whose add dialog takes the link once (`ServersApi::take_link`). Nothing is imported until
+the user confirms there. Link schemes: `setup::links` (installer `--setup register-links`, uninstall,
+`sync_at_start` in the release housekeeping of the installed copy; a portable copy registers only from
+the panel's «Открывать ссылки здесь») over `vpnte_winnet::url_scheme`; the Servers page's «Ссылки»
+panel changes them on the user's click. A later launch hands a link only to a pipe served by this exe
+in this session; a link it could not hand over is reported in a short box (`app.phones.linkNotTaken`).

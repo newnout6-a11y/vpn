@@ -257,7 +257,7 @@ impl TunnelOps for FakeTunnel {
 pub(super) fn setup(name: &str) -> (Arc<Hub>, Arc<FakeTunnel>, TempDir) {
     let dir = TempDir::new(name);
     let fake = FakeTunnel::new();
-    let hub = Hub::new(backend(&dir, fake.clone()));
+    let hub = Hub::new(backend(&dir, fake.clone()), None);
     feeds::spawn(&hub);
     (hub, fake, dir)
 }

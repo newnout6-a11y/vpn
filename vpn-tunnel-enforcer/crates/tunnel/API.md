@@ -476,6 +476,9 @@ address, an address the provider's resolver strategy would not dial, gRPC withou
 v2ray-plugin over TLS without `host`) keeps
 sing-box's own lookup and `StartReceipt::warnings` gets `tunnel.runtime.serverNotPreResolved`;
 a last known address adds `core.net.resolveLastKnown`.
+A native profile's `tls.spoof` / `tls.spoof_method` (provider sing-box JSON) stay in the started
+config only when this process is elevated (sing-box needs administrator rights for them);
+unelevated they are dropped and `StartReceipt::warnings` gets `tunnel.runtime.spoofDropped(name)`.
 `TunStatus::session` carries the Clash secret and the loopback proxy passwords: serde skips it and
 `Debug` hides them; never format its fields into a log.
 
@@ -620,3 +623,35 @@ is not done here.
   `alias::connection_names` counts registry names of absent adapters, so a TUN that leaves its
   `Connection` key behind makes every connect pick the next alias until `aliasExhausted` (fix
   belongs in winnet).
+
+## WP-12 lab: AmneziaWG sessions on mihomo (feature `lab`; absent from production builds)
+`lab = ["vpnte-engine/lab"]`. The app opens the gate (`vpnte_engine::lab::activate`) and hands
+the exe: `RealEngines::with_mihomo(exe, runs_dir)` (sweeps stale run dirs; without it a mihomo
+start answers `tunnel.runtime.mihomo.unavailable`). `Engines` gains `start_mihomo(config, socks,
+controller, cancel) -> AppResult<Arc<dyn CoreProc>>` (ready, or nothing left running).
+A start whose `choose` gives `Engine::Mihomo` (AmneziaWG, gate open):
+1. Tunnel mode -> `Validation`, `tunnel.runtime.mihomo.tunUnavailable`, before any effect
+   (`core_adapter::capabilities(Mihomo).tun_capture == false`: mihomo.exe would need a direct
+   route and a WFP permit; not built).
+2. `preflight` (bounds + what mihomo cannot express, exact list), peer names resolved with
+   `ResolvePath::Direct`, the loopback endpoints allocated (SOCKS5, hop, controller), config
+   translated (`Applied` logged).
+3. After `Capture::begin`: mihomo started and ready (held for the compensation), then the
+   egress echo through its authenticated SOCKS5 listener under the `HandshakeGate`. Any HTTP
+   answer that came back is the proof (an echo service's error page included: connected, address
+   unknown). Nothing back (or too late for the 4 s budget) -> `Network`,
+   `tunnel.runtime.mihomo.noTraffic`; the run died meanwhile -> `engine.lab.process.exited`; a
+   budget deferral or a cancel passes through as itself. On failure the compensation stops
+   mihomo and sing-box never runs. mihomo confirms SOCKS CONNECTs before it dials: only an answer
+   is proof.
+4. sing-box with `HopEndpoint::upstream()` (the run's keyed Shadowsocks 2022 hop; UDP inside it
+   as UDP-over-TCP, QUIC rejected as for every local proxy), mihomo's ports kept out of its
+   listeners; the actor supervises one chained core: a stop ends sing-box then mihomo, either one
+   exiting is the session's crash (the other half is terminated), `recent_fault` reads mihomo
+   first. The pair is supervised only once sing-box is ready (sing-box's readiness races mihomo's
+   exit), so a sing-box retry after a port race chains the same, untouched mihomo run; mihomo
+   dying during that readiness fails the start with `engine.lab.process.exited`.
+The receipt / status carry `EngineRun { kind: Mihomo, reason: Some(SelectReason::Amneziawg) }`. A
+server switch to or from an AmneziaWG server is a protected restart (no in-place switch).
+Not run here: a real AmneziaWG server (tests use fakes here and a silent loopback peer in the
+engine crate); mihomo.log is not in `log_files` of the session.

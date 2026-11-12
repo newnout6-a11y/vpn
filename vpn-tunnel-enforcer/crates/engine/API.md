@@ -142,6 +142,10 @@ pub fn compat_key(i: &ConfigInputs) -> [u8; 32];   // equal keys: a running conf
                                                    // upstream (ignores profile, slots, listener ports,
                                                    // secrets, alias; the capture and its proxy port count)
 pub fn usable_physical_dns(physical: &[Ipv4Addr]) -> Option<Ipv4Addr>;  // not TUN /30, loopback, 0.0.0.0
+pub const SPOOF_KEYS: [&str; 2];                    // "spoof", "spoof_method" (tls)
+pub fn gate_spoof(fragment: &mut SingBoxFragment, elevated: bool) -> bool;  // audit item 18: drops
+    // tls.spoof / tls.spoof_method unless elevated (sing-box needs administrator rights for them on
+    // Windows); true = dropped: tell the user (tunnel: tunnel.runtime.spoofDropped)
 ```
 Rules the caller must keep (review of the WFP / TUN design):
 - `tun.ipv6 = !tun.dns_hijack = Protection::session_guarded()` (kill switch != Off or leak
@@ -582,6 +586,75 @@ pub fn looks_corrupt(name: &str) -> bool;
 ```
 Picker: `spawn_blocking(apps::discover)` then `store.update(|d| d.merge_discovered(&found))`;
 adding by path: `SplitTarget::parse(raw)`, and for `App` require `probe_fs(..)` == `File` first.
+
+## WP-12 lab engine mihomo (feature `lab`; absent from production builds)
+
+`lab = ["vpnte-base/lab"]` adds `Engine::Mihomo` / `EnginePref::Mihomo` (base) and the modules
+below; `cargo xtask dist` never enables it (`dist --lab` builds a `…-lab` package). A stored
+`"mihomo"` reads as `EnginePref::Auto` in a production build (`#[serde(other)]`).
+
+```rust
+// lab — the gate (AT-12-002)
+pub const RECORD_FILE: &str = "lab/at-12.json";          // under the data dir
+pub const REQUIRED: [&str; 5];                           // AT-12-001, -002, -003, -004, -007
+pub struct LabRecord { pub version: String, pub passed: Vec<String>, pub by: String }
+pub enum LabGap { Missing, Unreadable, Incomplete, OtherVersion }   // msg(): engine.lab.gap.*
+pub fn activate(data_dir: &Path) -> Result<(), LabGap>;  // app start-up (blocking read), once
+pub fn gate() -> Result<(), LabGap>;  pub fn active() -> bool;
+pub fn load(data_dir: &Path) -> Result<LabRecord, LabGap>;  pub fn check(&LabRecord) -> Result<(), LabGap>;
+pub fn select(p: &Profile, pref: EnginePref, gate: Result<(), LabGap>) -> Option<Decision>; // pure
+// mihomo_config — translation and preflight (AT-12-004)
+pub fn preflight(p: &Profile) -> Result<(), PreflightError>;   // Invalid(AwgInvalid) | Unsupported(Vec<Gap>)
+pub fn hosts(p: &Profile) -> Vec<String>;                      // peer names to resolve first
+pub fn translate(p: &Profile, resolved: &HashMap<String, IpAddr>, listen: &Listen) -> Result<Compiled, TranslateError>;
+pub struct Listen<'a> { pub socks: &'a SlotEndpoint, pub hop: &'a HopEndpoint, pub controller: &'a ClashEndpoint }
+pub struct Compiled { pub text: String /* keys inside: never log */, pub applied: Vec<Applied> }
+impl Compiled { pub fn hop_port(&self) -> u16 }                // the hop this config listens on
+pub enum Applied { Mtu(u16), Dns, Pinned(usize) }              // what the config adds (explicit diff)
+pub const PROXY: &str = "awg"; pub const INBOUND: &str = "vpnte-in"; pub const DEFAULT_MTU: u16 = 1376;
+// the hop sing-box dials (audit mihomo-a4/a5): Shadowsocks 2022, 16-byte per-run key, TCP only
+pub const HOP_INBOUND: &str = "vpnte-hop"; pub const HOP_METHOD: &str = "2022-blake3-aes-128-gcm";
+pub struct HopEndpoint;  // Clone, Eq; Debug hides the key
+impl HopEndpoint { pub fn allocate(taken: &[u16]) -> Result<Self, PortsExhausted>; pub fn port(&self) -> u16;
+    pub fn key(&self) -> &str /* secret */; pub fn upstream(&self) -> Upstream /* Native shadowsocks
+    proxy-out, udp_over_tcp v2, UdpPolicy { udp: true, block_quic: true } */ }
+// mihomo_process — one run
+pub struct MihomoProcess;   // spawn(exe, runs_dir, &Compiled, socks, controller, logs) -> Result<_, MihomoError>
+    // wait_ready(timeout, cancel), terminate(within) -> Result<ExitInfo, StopError>, pid, exit_watch,
+    // exit_info, socks(), controller(), recent_fault, tail
+pub enum MihomoError { Exited(ExitInfo), Timeout, Cancelled, Spawn(io::Error), Inactive(LabGap),
+    Listener /* another process holds the hop port; engine.lab.process.notReady */ }
+pub fn sweep_homes(runs_dir: &Path);   // start-up: removes run dirs a crash left
+pub async fn engine_version(exe) -> io::Result<(u16,u16,u16)>;  pub async fn check_config(exe, runs_dir, &Compiled);
+pub fn classify_fault(lines) -> Option<OutboundFault>;  // the hop dead -> UpstreamUnreachable: >= 3
+    // `[WG](awg) Failed to send (handshake initiation|data packets)`, or dial timeouts to >= 3
+    // distinct destinations; refused / unreachable-network / one silent site never count.
+    // recent_fault() reads the last 120 s only.
+// core_adapter — AT-12-001
+pub fn capabilities(engine: Engine) -> Capabilities;  // amneziawg, other_kinds, proxy_capture,
+    // tun_capture, session_owner, controller, selector_switch, readiness, graceful_stop, config_check, stdin_config
+```
+`select_engine`: AmneziaWG under Auto / forced mihomo -> `Selected { Mihomo, SelectReason::Amneziawg }`
+with the gate open, else `Rejected(Reject::Lab(gap))`; forced mihomo on anything else ->
+`Reject::MihomoAwgOnly`; forced sing-box / Xray keep `Reject::Amneziawg`.
+**Lab record** (written by the person who ran the criteria; app restart re-reads it):
+`%APPDATA%\VPN Tunnel Enforcer\lab\at-12.json` =
+`{"version": "2.0.0", "passed": ["AT-12-001","AT-12-002","AT-12-003","AT-12-004","AT-12-007"], "by": "<name>"}`.
+**Run:** `mihomo -d <runs>\mihomo-<id> -f -` + explicit empty `-config= -post-up= -ext-ctl= …`
+(mihomo takes every flag default from `CLASH_*` env vars). Config: `log-level: warning` (trace
+would print the WireGuard IPC config with the key), no LAN, `bind-address 127.0.0.1`, no geodata,
+no stored selections, controller on 127.0.0.1 with the 32-hex secret and no CORS origins,
+`dns.enable: false`, two TCP-only listeners on 127.0.0.1 — the keyed hop sing-box dials (Shadowsocks
+2022, UDP inside it as UDP-over-TCP v2) and an authenticated SOCKS5 listener (`udp: false`: mihomo's
+SOCKS5 UDP relay checks no credentials) for the app's own proof — and `MATCH,awg`;
+the proxy = `export_mihomo` of the profile renamed `awg`, peer names replaced by the addresses
+the caller resolved (`ResolvePath::Direct`), MTU 1376 and tunnel DNS 1.1.1.1 / 9.9.9.9 when the
+key has none (`remote-dns-resolve`). Readiness = SOCKS5 handshake with our credentials + the hop's
+LISTEN socket owned by the run's pid (mihomo keeps running without a listener it could not open) +
+the controller's `/version`. **mihomo confirms a SOCKS CONNECT before it dials**: only bytes coming
+back prove the AmneziaWG tunnel (the tunnel's egress probe). Preflight refuses (exact list):
+TLS / transport / mux / provider graph, dial options, pasted sing-box options, no or a second
+address per family, no peer, per-peer keepalives, a 3.x keepalive range, `reserved`.
 
 ## Wiring per (re)start (tunnel)
 

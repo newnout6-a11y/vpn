@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
+use vpnte_base::Msg;
 use vpnte_base::types::Engine as EngineKind;
 use vpnte_core::net;
 use vpnte_core::resolve::{ResolveError, ServerAddrs, resolve_server};
@@ -21,8 +22,9 @@ use vpnte_engine::singbox_process::{ExitInfo, SingBoxProcess};
 use vpnte_engine::slot::{Slot as XraySlot, SlotEndpoint};
 use vpnte_engine::xray_config::{build_config, proxy_graph, select_engine};
 use vpnte_engine::xray_process::{SlotLaunch, XrayEvent, XraySupervisor};
-use vpnte_profiles::emit_singbox::{EmitPolicy, emit_singbox};
+use vpnte_profiles::emit_singbox::{EmitPolicy, SingBoxFragment, emit_singbox};
 use vpnte_profiles::model::Profile;
+use vpnte_winnet::elevation::is_elevated;
 
 use super::EngineChoice;
 use crate::config::{self, PROXY_OUT_TAG};
@@ -42,6 +44,8 @@ pub(crate) struct Plan {
     /// sing-box config (JSON) for stdin.
     pub singbox: Vec<u8>,
     pub xray: Option<XrayPlan>,
+    /// What the slot runs without, for its row (`proxies.slot.spoofDropped`).
+    pub notice: Option<Msg>,
 }
 
 /// The per-slot Xray child of an Xray profile.
@@ -68,6 +72,7 @@ pub(super) async fn prepare(
         };
         let mut upstream = emit_singbox(profile, PROXY_OUT_TAG, &policy)
             .map_err(|e| ProxyError::Engine(format!("cannot build the proxy outbound: {e}")))?;
+        let notice = gate_spoof(&mut upstream, &profile.name, is_elevated());
         for host in config::hostnames(&upstream) {
             let ip = names.resolve(&host).await?;
             config::pin(&mut upstream, &host, ip);
@@ -77,6 +82,7 @@ pub(super) async fn prepare(
             port,
             singbox,
             xray: None,
+            notice,
         });
     }
     let mut graph = proxy_graph(profile, choice.device)
@@ -100,7 +106,15 @@ pub(super) async fn prepare(
         port,
         singbox,
         xray: Some(XrayPlan { endpoint, launch }),
+        notice: None,
     })
+}
+
+/// Audit item 18 on the slot path: a provider's `tls.spoof` needs an elevated sing-box, so an
+/// unelevated slot runs without it and its row says so (the same note as the main tunnel's).
+fn gate_spoof(upstream: &mut SingBoxFragment, name: &str, elevated: bool) -> Option<Msg> {
+    vpnte_engine::singbox_config::gate_spoof(upstream, elevated)
+        .then(|| Msg::new("proxies.slot.spoofDropped").arg("name", name))
 }
 
 /// Endpoint names resolved by the app, cached for five minutes, in the order of

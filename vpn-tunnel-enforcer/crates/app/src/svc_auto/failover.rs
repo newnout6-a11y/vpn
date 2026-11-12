@@ -58,7 +58,7 @@ impl ServerFailover {
 /// What the stored evidence says about a row: `Some(false)` = a check found it dead or blocked,
 /// `Some(true)` = healthy, `None` = nothing known. A verdict older than the last health record is
 /// superseded by it (a later check without a verdict has spoken since).
-fn alive(row: &ServerRow) -> Option<bool> {
+pub(super) fn alive(row: &ServerRow) -> Option<bool> {
     let verdict =
         (row.verdict.as_ref()).filter(|v| row.health.as_ref().is_none_or(|h| v.at >= h.at));
     match (verdict, &row.health) {

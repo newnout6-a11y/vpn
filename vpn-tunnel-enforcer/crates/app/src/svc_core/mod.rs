@@ -201,6 +201,10 @@ const APP: &[(&str, &str)] = &[
         include_str!("../../locales/wire-proxies-live.ru.json"),
         include_str!("../../locales/wire-proxies-live.en.json"),
     ),
+    (
+        include_str!("../../locales/w7-phones.ru.json"),
+        include_str!("../../locales/w7-phones.en.json"),
+    ),
 ];
 
 /// First-start settings and the log pseudonym key. A read-only `settings.json` (newer version,

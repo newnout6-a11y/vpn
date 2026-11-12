@@ -19,7 +19,7 @@ vpnte-profiles.workspace = true
 | `clash`, `wg_ini` | Clash (mihomo) YAML, WireGuard / AmneziaWG `.conf` |
 | `awg` | AmneziaWG parameters: checks before import and start, generation, field names |
 | `amnezia` | AmneziaVPN share keys `vpn://…` (decode, server descriptions with containers) |
-| `deeplink` | `happ://` / `mantaray://` / `v2raytun://` / `incy://` -> carried text or URL |
+| `deeplink` | `happ://` / `mantaray://` / `v2raytun://` / `incy://` / `sing-box://` / `clash://` / `hiddify://` -> carried text or URL |
 | `legacy` | one stored Electron row -> `Profile` |
 | `text` | limits, body decoding, base64 layers, JSON spans, link candidates, subscription metadata |
 | `device`, `countries` | subscription UA / HWID headers, uTLS default per device; ISO country guess |
@@ -152,6 +152,8 @@ pub enum DeepLinkError { Encrypted { app: &'static str, variant: String }, Routi
                          AddPayloadUnrecognised, UnknownHost(String) }
 impl DeepLinkError { pub fn msg(&self) -> Msg }               // profiles.deeplink.*; never the payload
 pub fn unwrap_deeplink(input: &str) -> Result<Option<String>, DeepLinkError>;  // Ok(None): not a deep link
+pub fn unwrap_redirect(input: &str) -> Result<Option<String>, DeepLinkError>;  // same for a redirect's
+                                       // Location: no LocalTarget, the fetcher's hop policy judges it
 // legacy (one-time Electron import, the app orchestrates; see CONTRACT §3.5)
 pub enum LegacyError { NotAnObject, UnsupportedProtocol(String), Unusable(String), InvalidNativeGraph }
 impl From<LegacyError> for AppError;                          // Validation + profiles.legacy.*
@@ -198,6 +200,14 @@ pub fn from_legacy(name: &str, protocol: &str, outbound: &Value, source_uri: Opt
   `reality-opts` (`"grpc-opts.ping-interval"`).
 - `unwrap_deeplink`: Happ / MantaRay / v2RayTun / INCY `add` / `import` payloads (URL, key, base64,
   `{"url"|"link": …}`) -> `Some(text)`; `crypt*` hosts -> `Encrypted`; multi-line input -> `None`.
+  Remote-profile links -> `Some(http(s) URL)`: `sing-box://import-remote-profile?url=<enc>#name`,
+  `clash://install-config?url=<enc>&name=…`, `hiddify://import/<url|key>#name` and
+  `hiddify://install-config|install-sub?url=<enc>` (the name is dropped; `url` is percent-decoded,
+  `+` kept); no / non-http `url` -> `AddPayloadUnrecognised`, another host -> `UnknownHost`.
+  Every http(s) URL a link carries must name an internet host (as the fetcher's `url` parser reads
+  it): loopback, private, link-local, CGNAT, reserved, `localhost`, one-label names and `.local` /
+  `.lan` / `.internal` / `.home.arpa` -> `LocalTarget` (a page or a chat must not make the app
+  request the user's network; a LAN subscription is pasted as its plain address instead).
   `vpn://` (AmneziaVPN) -> `Some(decoded text)` (JSON description, `.conf` or Xray JSON),
   `AmneziaUnsupported("OpenVPN")`, or `AmneziaDamaged`.
 - AmneziaWG: a WireGuard entry (`.conf` `[Interface]` / `[Peer]` keys, Clash
@@ -481,7 +491,7 @@ warning and use the clipboard / file helpers of the app.
   (`profiles.emit.*`, WireGuard problems under `profiles.emit.wireguard.*`), `NativeError`
   (`profiles.xrayNative.*`), `LegacyError` (`profiles.legacy.*`). `DeepLinkError::msg()` gives
   `profiles.deeplink.*` (`encryptedHapp`, `encryptedMantaray`, `encrypted`, `routingProfile`,
-  `addPayloadUnrecognised`, `unknownHost`, `amneziaDamaged`, `amneziaUnsupported`).
+  `addPayloadUnrecognised`, `unknownHost`, `amneziaDamaged`, `amneziaUnsupported`, `localTarget`).
   `awg::AwgInvalid` (`profiles.awg.invalid`, arg `fields`).
 - What the UI must render with this crate's keys: `caps::note_msg(&note)` for every `Profile.notes`
   entry (`profiles.caps.note.*`; `Note::Other` keys: `profiles.import.realityFingerprint`,

@@ -13,12 +13,16 @@ mod export;
 mod import;
 mod live;
 mod live_view;
+mod phones;
 mod project;
 mod proxies;
+mod qr;
 mod relays;
 #[cfg(test)]
 mod tests;
 mod verdict;
+
+pub use phones::LinkInbox;
 
 use std::any::Any;
 use std::future::Future;
@@ -28,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{ClientDevice, EnginePref, Level, Notice};
 use vpnte_base::{AppError, AppResult, Msg};
@@ -40,9 +44,10 @@ use vpnte_servers::store::Servers;
 use vpnte_tunnel::lifecycle::ConnError;
 use vpnte_ui::servers::{
     AddTarget, BatchProgress, BatchResult, CountryCheck, ExportReport, GeoInfo, HealthReport,
-    ImportReport, LiveCheck, LiveMode, LiveProgress, ProbeReport, ProxyStartReport, RefreshOutcome,
-    SelectOutcome, ServersApi, ServersView, SubscriptionRequest,
+    ImportReport, LinkSchemes, LiveCheck, LiveMode, LiveProgress, ProbeReport, ProxyStartReport,
+    QrCode, RefreshOutcome, SelectOutcome, ServersApi, ServersView, SubscriptionRequest,
 };
+use vpnte_winnet::url_scheme::Registrar;
 
 use crate::services::Backend;
 use crate::support::{blocking, changed_opt, detached, joined, unavailable};
@@ -50,19 +55,26 @@ use crate::support::{blocking, changed_opt, detached, joined, unavailable};
 /// Coalesces bursts of store events (a ping-all, a refresh) into one projection.
 const DEBOUNCE: Duration = Duration::from_millis(60);
 
-/// The UI contexts of this package: `Rc<dyn ServersApi>`. Call it inside the tokio runtime (the
-/// projection task starts here) after `backend.tunnel` was set.
+/// The UI contexts of this package: `Rc<dyn ServersApi>` and the [`LinkInbox`] the root hands
+/// links to. Call it inside the tokio runtime (the projection task starts here) after
+/// `backend.tunnel` was set.
 pub fn contexts(backend: &Arc<Backend>) -> Vec<Box<dyn Any>> {
     // Subscription refreshes may now try the session's route and a spare slot (ru-2026 item 3).
     let relays = Arc::new(relays::AppRelays::new(backend));
     backend.refresh.fetcher.set_relays(relays);
-    let api: Rc<dyn ServersApi> = Rc::new(ServersBackend::start(backend.clone()));
-    vec![Box::new(api)]
+    let servers = ServersBackend::start(backend.clone());
+    let links = servers.links.clone();
+    let api: Rc<dyn ServersApi> = Rc::new(servers);
+    vec![Box::new(api), Box::new(links)]
 }
 
 /// [`ServersApi`] implementation; every action runs in a backend task.
 pub struct ServersBackend {
     shared: Arc<Shared>,
+    /// Links Windows handed over, until the page takes them.
+    links: LinkInbox,
+    /// This user's link schemes (a throw-away key in tests).
+    registrar: Registrar,
 }
 
 /// State shared by the API object, its actions and the projection task.
@@ -80,6 +92,11 @@ struct Shared {
 impl ServersBackend {
     /// Publishes the first snapshot and starts the task that keeps it current.
     pub fn start(backend: Arc<Backend>) -> Self {
+        Self::start_with(backend, Registrar::current_user())
+    }
+
+    /// [`ServersBackend::start`] over the link schemes of `registrar`.
+    fn start_with(backend: Arc<Backend>, registrar: Registrar) -> Self {
         let shared = Arc::new(Shared {
             backend,
             state: watch::Sender::new(ServersView::default()),
@@ -89,7 +106,11 @@ impl ServersBackend {
         });
         shared.publish();
         tokio::spawn(pump(shared.clone()));
-        Self { shared }
+        Self {
+            shared,
+            links: LinkInbox::default(),
+            registrar,
+        }
     }
 }
 
@@ -382,6 +403,46 @@ impl ServersApi for ServersBackend {
 
     async fn open_url(&self, url: String) -> AppResult<()> {
         detached(async move { vpnte_winnet::shell::open_url(&url).await }).await
+    }
+
+    fn link_arrivals(&self) -> watch::Receiver<u64> {
+        self.links.arrivals()
+    }
+
+    fn take_link(&self) -> Option<String> {
+        self.links.take()
+    }
+
+    async fn read_clipboard(&self) -> AppResult<String> {
+        phones::read_clipboard().await
+    }
+
+    async fn read_key_file(&self) -> AppResult<Option<String>> {
+        phones::read_key_file(self.shared.backend.lang()).await
+    }
+
+    async fn scan_qr_file(&self) -> AppResult<Option<String>> {
+        phones::scan_qr_file(self.shared.backend.lang()).await
+    }
+
+    async fn scan_qr_screen(&self, captured: oneshot::Sender<()>) -> AppResult<String> {
+        phones::scan_qr_screen(captured).await
+    }
+
+    async fn key_qr(&self, id: &str) -> AppResult<QrCode> {
+        phones::key_qr(self.shared.clone(), ProfileId::from(id)).await
+    }
+
+    async fn link_schemes(&self) -> AppResult<LinkSchemes> {
+        phones::link_schemes(self.registrar.clone()).await
+    }
+
+    async fn adopt_link_schemes(&self) -> AppResult<LinkSchemes> {
+        phones::adopt_link_schemes(self.registrar.clone()).await
+    }
+
+    async fn set_link_scheme(&self, scheme: String, on: bool) -> AppResult<LinkSchemes> {
+        phones::set_link_scheme(self.registrar.clone(), scheme, on).await
     }
 }
 

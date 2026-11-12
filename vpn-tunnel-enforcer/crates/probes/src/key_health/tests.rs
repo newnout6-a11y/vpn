@@ -696,3 +696,46 @@ fn locale_fragments_cover_every_key() {
     used.sort();
     assert_eq!(used, keys[0], "every key is used and every used key exists");
 }
+
+/// w7-mihomo (item 10): AmneziaWG is no setting's verdict. No engine of a production build runs
+/// it (and the lab engine has no key probe), so the key is not checked: an error carrying the
+/// engine's own explanation, never `engine-setting` (which would send the user to the setting).
+#[tokio::test]
+async fn amneziawg_is_not_checked_rather_than_an_engine_verdict() {
+    let ctx = |pref| ProbeCtx {
+        singbox_exe: "missing-sing-box.exe".into(),
+        xray_exe: "missing-xray.exe".into(),
+        engine_pref: pref,
+        device: ClientDevice::Pc,
+        net: NetPath::default(),
+        dns_bootstrap_in: None,
+    };
+    let conf = "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.8.1.2/32\nJc = 4\nJmin = 40\nJmax = 70\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 203.0.113.7:51820\n";
+    let awg = vpnte_profiles::wg_ini::parse_wg_ini(conf).unwrap().unwrap();
+    let cancel = CancellationToken::new();
+    for pref in [EnginePref::Auto, EnginePref::SingBox, EnginePref::Xray] {
+        let err = probe_with(&awg, &ctx(pref), &Wire::plain(), FAST, &cancel)
+            .await
+            .expect_err("not checked");
+        assert_eq!(err.kind, vpnte_base::ErrorKind::Validation);
+        let key = err.user_msg().key.into_owned();
+        assert_ne!(key, HealthReason::EngineSetting.msg().key);
+        // Production: the engines' refusal; lab: the gate's gap or the lab-only notice.
+        assert!(
+            key == "engine.xray.reject.amneziawg"
+                || key.starts_with("engine.lab.gap.")
+                || key == "probes.keyHealth.labNotProbed",
+            "{key}"
+        );
+        assert!(start_probe_engine(&awg, &ctx(pref), &cancel).await.is_err());
+    }
+    let registered = |lang: usize| {
+        crate::LOCALES
+            .iter()
+            .any(|l| [l.0, l.1][lang].contains("\"labNotProbed\""))
+    };
+    assert!(
+        registered(0) && registered(1),
+        "ru + en text of labNotProbed"
+    );
+}

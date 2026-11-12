@@ -42,6 +42,9 @@ pub enum SelectReason {
     CertPin,
     /// The profile uses something only sing-box can do.
     SingBoxOnly(SingBoxOnly),
+    /// AmneziaWG on the WP-12 lab engine mihomo (feature `lab`, lab record present).
+    #[cfg(feature = "lab")]
+    Amneziawg,
 }
 
 /// A profile feature Xray refuses or cannot honour, in check order.
@@ -84,6 +87,8 @@ impl SelectReason {
             SelectReason::NativeXray => "engine.xray.reason.nativeXray",
             SelectReason::CertPin => "engine.xray.reason.certPin",
             SelectReason::SingBoxOnly(_) => "engine.xray.reason.singBoxOnly",
+            #[cfg(feature = "lab")]
+            SelectReason::Amneziawg => "engine.lab.reason.amneziawg",
         })
     }
 }
@@ -135,6 +140,13 @@ pub enum Reject {
     /// AmneziaWG under any preference: neither engine dials it (mihomo does, a lab function of
     /// this build, WP-12), and plain WireGuard would only be dropped by the server.
     Amneziawg,
+    /// Lab build: AmneziaWG for mihomo, but the lab record does not open the gate (AT-12-002).
+    #[cfg(feature = "lab")]
+    Lab(crate::lab::LabGap),
+    /// Lab build: mihomo forced for a profile that is not AmneziaWG (the lab engine runs nothing
+    /// else; never a silent switch to another engine).
+    #[cfg(feature = "lab")]
+    MihomoAwgOnly,
 }
 
 impl Reject {
@@ -152,6 +164,10 @@ impl Reject {
                 Msg::new("engine.xray.reject.xrayForm").arg("protocol", *name)
             }
             Reject::Amneziawg => Msg::new("engine.xray.reject.amneziawg"),
+            #[cfg(feature = "lab")]
+            Reject::Lab(gap) => gap.msg(),
+            #[cfg(feature = "lab")]
+            Reject::MihomoAwgOnly => Msg::new("engine.lab.reject.mihomoAwgOnly"),
         }
     }
 }
@@ -188,6 +204,11 @@ impl Decision {
 /// Picks the engine for `p` under the user's preference (decision table of the xray-engine spec
 /// §2.2, first match wins).
 pub fn select_engine(p: &Profile, pref: EnginePref) -> Decision {
+    // Lab build: AmneziaWG goes to mihomo through the lab gate, forced mihomo runs nothing else.
+    #[cfg(feature = "lab")]
+    if let Some(decision) = crate::lab::select(p, pref, crate::lab::gate()) {
+        return decision;
+    }
     // Before every other rule: no preference may start AmneziaWG as plain WireGuard.
     if matches!(p.kind, Kind::Amneziawg { .. }) {
         return Decision::Rejected(Reject::Amneziawg);
@@ -196,12 +217,16 @@ pub fn select_engine(p: &Profile, pref: EnginePref) -> Decision {
         return match pref {
             EnginePref::SingBox => Decision::Rejected(Reject::NativeXray),
             EnginePref::Auto | EnginePref::Xray => xray(SelectReason::NativeXray),
+            #[cfg(feature = "lab")]
+            EnginePref::Mihomo => Decision::Rejected(Reject::MihomoAwgOnly),
         };
     }
     if let Some(lacks) = xray_lacks(p) {
         return match pref {
             EnginePref::Xray => Decision::Rejected(Reject::XrayLacks(lacks)),
             EnginePref::Auto | EnginePref::SingBox => sing_box(SelectReason::Protocol),
+            #[cfg(feature = "lab")]
+            EnginePref::Mihomo => Decision::Rejected(Reject::MihomoAwgOnly),
         };
     }
     match (xray_only(p), singbox_only(p)) {
@@ -225,6 +250,8 @@ pub fn select_engine(p: &Profile, pref: EnginePref) -> Decision {
         EnginePref::Auto => sing_box(SelectReason::Default),
         EnginePref::Xray if explicit_gun(p) => xray(SelectReason::XrayTransport),
         EnginePref::Xray => xray(SelectReason::Preference),
+        #[cfg(feature = "lab")]
+        EnginePref::Mihomo => Decision::Rejected(Reject::MihomoAwgOnly),
     }
 }
 
@@ -398,7 +425,8 @@ fn private_literal(host: &Host) -> bool {
     }
 }
 
-#[cfg(test)]
+// A lab build answers AmneziaWG through the lab gate (`crate::lab::tests` covers it there).
+#[cfg(all(test, not(feature = "lab")))]
 mod amneziawg_tests {
     use super::*;
 

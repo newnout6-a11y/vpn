@@ -45,14 +45,26 @@ pub fn engine_name(engine: Engine) -> &'static str {
     match engine {
         Engine::SingBox => "sing-box",
         Engine::Xray => "Xray",
+        #[cfg(feature = "lab")]
+        Engine::Mihomo => "mihomo",
     }
 }
 
 /// The row menu's per-server engine entries (menu id, choice), in menu order.
+#[cfg(not(feature = "lab"))]
 pub const ENGINE_ITEMS: [(&str, EnginePref); 3] = [
     ("engine-auto", EnginePref::Auto),
     ("engine-sing-box", EnginePref::SingBox),
     ("engine-xray", EnginePref::Xray),
+];
+
+/// Lab build (WP-12): the per-server choice also offers the lab engine mihomo.
+#[cfg(feature = "lab")]
+pub const ENGINE_ITEMS: [(&str, EnginePref); 4] = [
+    ("engine-auto", EnginePref::Auto),
+    ("engine-sing-box", EnginePref::SingBox),
+    ("engine-xray", EnginePref::Xray),
+    ("engine-mihomo", EnginePref::Mihomo),
 ];
 
 /// The engine choice a row menu id stands for.

@@ -11,6 +11,7 @@ mod dns;
 mod inbounds;
 mod outbounds;
 mod route;
+mod spoof;
 
 #[cfg(test)]
 mod check;
@@ -35,6 +36,7 @@ use vpnte_profiles::emit_singbox::{
 use vpnte_profiles::model::Profile;
 
 pub use dns::usable_physical_dns;
+pub use spoof::{SPOOF_KEYS, gate_spoof};
 
 use crate::slot::{Slot, SlotEndpoint};
 use crate::tags::{DIRECT_OUT, DNS_BOOTSTRAP, PROXY_OUT};

@@ -50,9 +50,32 @@ aes-gcm.workspace = true
 base64.workspace = true
 # app-tools: the routing self-test's echo client through a Soft session's mixed inbound.
 reqwest.workspace = true
+# fix-autopick: the stall confirmation counts raw bytes below the inner TLS, as the probes do
+# (same versions as vpnte-probes: nothing new in the tree).
+rustls.workspace = true
+rustls-platform-verifier = "0.7"
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
+# w7-phones: QR codes. Export = fast_qr (encoder, modules only); import = rqrr (pure-Rust decoder;
+# `img` lets it read a picture type whose copies check a deadline) over pictures decoded by image
+# (already in the tree for the tray). Features only add up and dioxus-desktop turns on image's
+# default formats, so the QR import picks its five formats itself (`api_servers::qr::FORMATS`).
+fast_qr = { version = "0.14.0", default-features = false }
+rqrr = { version = "0.11.0", default-features = false, features = ["img"] }
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 
 [build-dependencies]
 embed-resource = "3.0.12"
 
 [lints]
 workspace = true
+
+[features]
+# WP-12 lab build (mihomo / AmneziaWG behind the lab record). `cargo xtask dist` builds without it;
+# `cargo xtask dist --lab` builds a package marked `-lab`.
+lab = [
+  "vpnte-base/lab",
+  "vpnte-engine/lab",
+  "vpnte-tunnel/lab",
+  "vpnte-probes/lab",
+  "vpnte-ui/lab",
+]

@@ -211,11 +211,82 @@ fn other_input_is_not_a_deep_link() {
         "https://example.com/sub",
         "happ:///x",
         "happ://add/https%3A%2F%2Fa.example\nvless://u@h.example:443",
-        "hiddify://import/https://x.example/s",
+        "hiddify-next://import/https://x.example/s",
         "not a link",
     ] {
         assert_eq!(ok(input), None, "{input:?}");
     }
+}
+
+/// RU-2026 item 4: the remote-profile links of sing-box, Clash and Hiddify carry one
+/// subscription URL (forms recorded in `crates/profiles/progress/w7-phones.md`).
+#[test]
+fn remote_profile_links_carry_their_url() {
+    let sub = Some("https://sub.example/s/abc?t=1");
+    // sing-box docs: `sing-box://import-remote-profile?url=urlEncodedURL#urlEncodedName`.
+    let encoded = "https%3A%2F%2Fsub.example%2Fs%2Fabc%3Ft%3D1";
+    assert_eq!(
+        ok(&format!(
+            "sing-box://import-remote-profile?url={encoded}#My%20VPN"
+        ))
+        .as_deref(),
+        sub
+    );
+    assert_eq!(
+        ok(&format!("SING-BOX://Import-Remote-Profile?url={encoded}")).as_deref(),
+        sub
+    );
+    // Clash for Windows / Verge: `clash://install-config?url=…&name=…`, any parameter order.
+    assert_eq!(
+        ok(&format!("clash://install-config?name=X&url={encoded}")).as_deref(),
+        sub
+    );
+    assert_eq!(
+        ok("clash://install-config?url=https://sub.example/c.yaml&name=Y").as_deref(),
+        Some("https://sub.example/c.yaml")
+    );
+    // Hiddify: the path after `import/` (query kept, fragment = name), or a `url` parameter.
+    assert_eq!(
+        ok("hiddify://import/https://sub.example/s/abc?t=1#Name").as_deref(),
+        sub
+    );
+    assert_eq!(ok(&format!("hiddify://import/{encoded}")).as_deref(), sub);
+    assert_eq!(
+        ok(&format!("hiddify://install-config?url={encoded}#N")).as_deref(),
+        sub
+    );
+    assert_eq!(
+        ok(&format!("hiddify://install-sub?url={encoded}")).as_deref(),
+        sub
+    );
+    // A key handed over by Hiddify's import link is a key, as with the other add links.
+    assert_eq!(
+        ok("hiddify://import/vless%3A%2F%2Fu%40h.example%3A443").as_deref(),
+        Some("vless://u@h.example:443")
+    );
+}
+
+#[test]
+fn remote_profile_links_without_a_url_are_explicit_errors() {
+    for input in [
+        "sing-box://import-remote-profile",
+        "sing-box://import-remote-profile?name=x",
+        "sing-box://import-remote-profile?url=",
+        "sing-box://import-remote-profile?url=ftp%3A%2F%2Fx.example%2Fs",
+        "clash://install-config?url=vless%3A%2F%2Fu%40h.example%3A443",
+        "hiddify://install-config",
+        "hiddify://import/",
+    ] {
+        assert_eq!(err(input), DeepLinkError::AddPayloadUnrecognised, "{input}");
+    }
+    assert_eq!(
+        err("sing-box://add-profile?url=https%3A%2F%2Fx.example"),
+        DeepLinkError::UnknownHost("sing-box://add-profile".into())
+    );
+    assert_eq!(
+        err("clash://https%3A%2F%2Fx.example%2Fs"),
+        DeepLinkError::UnknownHost("clash://…".into())
+    );
 }
 
 /// Every error key exists in both languages and `profiles.deeplink` holds nothing else.
@@ -237,6 +308,7 @@ fn locale_fragments_cover_every_message() {
         DeepLinkError::RoutingProfile,
         DeepLinkError::AddPayloadUnrecognised,
         DeepLinkError::UnknownHost("happ://weird".into()),
+        DeepLinkError::LocalTarget,
     ];
     let used: std::collections::BTreeSet<String> =
         deeplink.iter().map(|e| e.msg().key.into_owned()).collect();
@@ -249,4 +321,67 @@ fn locale_fragments_cover_every_message() {
             .filter(|k| k.starts_with("profiles.deeplink."))
             .collect();
     assert_eq!(used, own, "unused locale keys");
+}
+
+/// phones-a11: a link from a web page or a chat never makes the app request the user's own
+/// network: loopback, LAN, link-local and local names are refused before any request, in every
+/// notation the fetcher's URL parser accepts; internet hosts pass.
+#[test]
+fn links_into_a_local_network_are_refused() {
+    let local = [
+        "http://127.0.0.1:9090/configs?x",
+        "http://0x7f.1/s",
+        "http://2130706433/s",
+        "http://[::1]/s",
+        "http://[::ffff:127.0.0.1]/s",
+        "https://192.168.1.1/sub",
+        "http://10.0.0.1/s",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://100.64.0.1/s",
+        "http://[fe80::1]/s",
+        "http://[fd00::1]/s",
+        "http://localhost:2017/s",
+        "http://api.localhost/s",
+        "http://router/s",
+        "http://nas.local/s",
+        "http://box.lan/s",
+        "http://hub.home.arpa/s",
+    ];
+    for url in local {
+        let encoded =
+            percent_encoding::utf8_percent_encode(url, percent_encoding::NON_ALPHANUMERIC);
+        let links = [
+            format!("sing-box://import-remote-profile?url={encoded}#Name"),
+            format!("clash://install-config?url={encoded}"),
+            format!("hiddify://import/{url}"),
+            format!("v2raytun://import/{url}"),
+            format!("happ://add/{url}"),
+        ];
+        for link in links {
+            assert_eq!(
+                unwrap_deeplink(&link),
+                Err(DeepLinkError::LocalTarget),
+                "{link}"
+            );
+            // A redirect's Location carries it on: the fetcher's hop policy judges it by the
+            // redirect's origin and the resolved addresses.
+            assert_eq!(
+                unwrap_redirect(&link).ok().flatten().as_deref(),
+                Some(url),
+                "{link}"
+            );
+        }
+    }
+    for url in [
+        "https://sub.example.com/s/t",
+        "http://8.8.8.8/s",
+        "https://[2001:4860::8888]/s",
+    ] {
+        let link = format!("hiddify://import/{url}");
+        assert_eq!(
+            unwrap_deeplink(&link).unwrap().as_deref(),
+            Some(url),
+            "{link}"
+        );
+    }
 }

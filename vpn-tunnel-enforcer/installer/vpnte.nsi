@@ -175,6 +175,7 @@ Section "Install"
   WriteUninstaller "$INSTDIR\${UNINST}"
   Call WriteRegistry
   Call CreateShortcuts
+  Call RegisterLinks
   Call CheckWebView2
   Call MachineWideNotice
   ${If} ${Silent}
@@ -182,6 +183,18 @@ Section "Install"
     Call RunApp
   ${EndIf}
 SectionEnd
+
+; Link schemes (vless://, hiddify://import/ ...) for this user, under HKCU\Software\Classes: the helper takes
+; the free ones on the first installation and later only points ours at this installation, so a scheme the user
+; turned off stays off and one another program answers is never taken here. A failure is a detail line, never a
+; failed installation (the app registers at its first start as well). `--setup uninstall` removes exactly the
+; schemes recorded for this installation.
+Function RegisterLinks
+  nsExec::ExecToStack /TIMEOUT=60000 '"${HELPER}" --setup register-links --install-dir "$INSTDIR"'
+  Pop $0
+  Pop $1
+  DetailPrint "$1"
+FunctionEnd
 
 ; Chains this user's previous uninstaller (same key under HKCU) so the user never has to uninstall first.
 ; It runs from a copy with `_?=` so that ExecWait waits for the real work; user data is always kept. The

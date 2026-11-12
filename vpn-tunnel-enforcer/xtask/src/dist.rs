@@ -33,10 +33,14 @@ pub fn portable_name(version: &str) -> String {
     format!("VPN-Tunnel-Enforcer-{version}-portable.zip")
 }
 
+/// Lab packages (WP-12) carry this suffix in every artifact name, so they cannot pass for a release.
+const LAB_SUFFIX: &str = "-lab";
+
 /// Runs the whole pipeline; with `skip_build` the build outputs are taken from `bin_dir` (default target/release).
-pub fn run(root: &Path, skip_build: bool, bin_dir: Option<PathBuf>) -> Result<()> {
+/// `lab` builds the app with its `lab` feature and stages the lab archives (AT-12-002: only on request).
+pub fn run(root: &Path, skip_build: bool, bin_dir: Option<PathBuf>, lab: bool) -> Result<()> {
     let version = workspace_version(root)?;
-    let manifest = Manifest::load(root)?;
+    let manifest = Manifest::load(root)?.composition(lab);
     let bin_dir = if skip_build {
         let dir = match bin_dir {
             Some(dir) => std::path::absolute(dir)?,
@@ -52,7 +56,7 @@ pub fn run(root: &Path, skip_build: bool, bin_dir: Option<PathBuf>) -> Result<()
             bin_dir.is_none(),
             "--bin-dir applies only with --skip-build"
         );
-        build(root, &manifest, &version)?
+        build(root, &manifest, &version, lab)?
     };
     let stage = root.join("target/stage");
     stage_all(root, &manifest, &bin_dir, &stage)?;
@@ -74,7 +78,15 @@ pub fn run(root: &Path, skip_build: bool, bin_dir: Option<PathBuf>) -> Result<()
         "makensis reported success but {} is missing",
         installer.display()
     );
-    let portable = dist.join(portable_name(&version));
+    let installer = if lab {
+        let renamed = dist.join(lab_name(&installer_name(&version)));
+        fs::rename(&installer, &renamed).context("name the lab installer")?;
+        renamed
+    } else {
+        installer
+    };
+    let portable = portable_name(&version);
+    let portable = dist.join(if lab { lab_name(&portable) } else { portable });
     write_portable(&stage, expected.keys().map(String::as_str), &portable)?;
     write_checksums(&dist)?;
     println!("  dist     {}", installer.display());
@@ -104,8 +116,16 @@ pub fn workspace_version(root: &Path) -> Result<String> {
     Ok(version.to_owned())
 }
 
+/// `name` with [`LAB_SUFFIX`] before its extension.
+pub fn lab_name(name: &str) -> String {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem}{LAB_SUFFIX}.{ext}"),
+        None => format!("{name}{LAB_SUFFIX}"),
+    }
+}
+
 /// Release build of the two shipped binaries plus the generated notices; returns the output directory.
-fn build(root: &Path, manifest: &Manifest, version: &str) -> Result<PathBuf> {
+fn build(root: &Path, manifest: &Manifest, version: &str, lab: bool) -> Result<PathBuf> {
     let args = [
         "build",
         "--release",
@@ -119,6 +139,11 @@ fn build(root: &Path, manifest: &Manifest, version: &str) -> Result<PathBuf> {
         Command::new(cargo())
             .args(args)
             .args(["--bin", "vpn-tunnel-enforcer", "--bin", "vpnte_proxy"])
+            .args(
+                lab.then_some(["--features", "vpnte-app/lab"])
+                    .into_iter()
+                    .flatten(),
+            )
             .current_dir(root),
     )?;
     let metadata = notices::metadata(root)?;
@@ -365,6 +390,19 @@ mod tests {
         assert_eq!(
             installer_name("2.0.0"),
             "VPN-Tunnel-Enforcer-Setup-2.0.0.exe"
+        );
+    }
+
+    /// AT-12-002: a lab package is named as one in every artifact.
+    #[test]
+    fn lab_artifacts_are_marked() {
+        assert_eq!(
+            lab_name(&installer_name("2.0.0")),
+            "VPN-Tunnel-Enforcer-Setup-2.0.0-lab.exe"
+        );
+        assert_eq!(
+            lab_name(&portable_name("2.0.0")),
+            "VPN-Tunnel-Enforcer-2.0.0-portable-lab.zip"
         );
     }
 

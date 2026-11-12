@@ -34,8 +34,11 @@ use crate::api::{CaptureKind, StartRequest, TunnelEvent};
 mod gate;
 mod lane;
 mod live;
+#[cfg(feature = "lab")]
+mod mihomo;
 mod proxy;
 mod recovery;
+mod spoof;
 mod supervision;
 
 /// What a spawned core does when asked for readiness.
@@ -48,6 +51,20 @@ pub enum Ready {
     BindFail,
     /// Never ready until cancelled.
     Hold,
+}
+
+/// What the fake egress probe through a loopback listener gets (the real echo's outcomes).
+#[cfg(feature = "lab")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EgressVia {
+    /// The slot's address came back.
+    Ip,
+    /// Nothing came back (a silent server).
+    NoReply,
+    /// Answers came back, none an address (an echo service's 429 page).
+    NoAddress,
+    /// The handshake budget deferred the probe: nothing was dialled.
+    Deferred,
 }
 
 /// Knobs and the effect log shared by all fakes.
@@ -83,6 +100,18 @@ pub struct World {
     pub resolve_answer: Mutex<Result<Option<Msg>, ResolveFault>>,
     /// The paths server names were resolved on, in order.
     pub resolve_paths: Mutex<Vec<ResolvePath>>,
+    /// The egress probe through a staged upstream gets no answer (a silent server).
+    #[cfg(feature = "lab")]
+    pub egress_via: Mutex<EgressVia>,
+    /// The mihomo run dies while its egress is probed (lab).
+    #[cfg(feature = "lab")]
+    pub crash_mihomo_on_probe: AtomicBool,
+    /// The SOCKS port of the last mihomo run started (lab).
+    #[cfg(feature = "lab")]
+    pub mihomo_port: Mutex<Option<u16>>,
+    /// The hop port of the last mihomo run (what sing-box must dial).
+    #[cfg(feature = "lab")]
+    pub mihomo_hop: Mutex<Option<u16>>,
 }
 
 impl World {
@@ -115,6 +144,14 @@ impl World {
             xray_events: Mutex::new(None),
             resolve_answer: Mutex::new(Ok(None)),
             resolve_paths: Mutex::new(Vec::new()),
+            #[cfg(feature = "lab")]
+            egress_via: Mutex::new(EgressVia::Ip),
+            #[cfg(feature = "lab")]
+            crash_mihomo_on_probe: AtomicBool::new(false),
+            #[cfg(feature = "lab")]
+            mihomo_port: Mutex::new(None),
+            #[cfg(feature = "lab")]
+            mihomo_hop: Mutex::new(None),
         })
     }
 
@@ -366,6 +403,27 @@ impl Engines for FakeEngines {
     ) -> AppResult<IpAddr> {
         let _ = port;
         self.0.note(format!("egress-via:{}", server.server));
+        #[cfg(feature = "lab")]
+        if self.0.crash_mihomo_on_probe.load(Ordering::SeqCst) {
+            let cores = self.0.cores.lock().clone();
+            cores
+                .iter()
+                .filter(|c| c.pid >= 5100)
+                .for_each(|c| c.crash());
+        }
+        #[cfg(feature = "lab")]
+        {
+            use super::engines::{EchoFailure, echo_failed};
+            match *self.0.egress_via.lock() {
+                EgressVia::Ip => {}
+                EgressVia::NoReply => return Err(echo_failed(EchoFailure::NoReply)),
+                EgressVia::NoAddress => return Err(echo_failed(EchoFailure::NoAddress)),
+                EgressVia::Deferred => {
+                    let msg = Msg::new("probes.discipline.deferred");
+                    return Err(AppError::conflict(msg));
+                }
+            }
+        }
         let staged = usize::from(self.0.running.lock()[1]);
         Ok(self.0.slot_ip[staged])
     }
@@ -387,6 +445,30 @@ impl Engines for FakeEngines {
     }
     async fn physical_dns(&self) -> Vec<Ipv4Addr> {
         vec![Ipv4Addr::new(192, 168, 1, 1)]
+    }
+    /// A mihomo run that is ready at once (the AmneziaWG hop's answer is `egress_via`).
+    #[cfg(feature = "lab")]
+    async fn start_mihomo(
+        &self,
+        config: &vpnte_engine::mihomo_config::Compiled,
+        socks: SlotEndpoint,
+        _controller: ClashEndpoint,
+        _cancel: &CancellationToken,
+    ) -> AppResult<Arc<dyn CoreProc>> {
+        let w = &self.0;
+        let pid = 5100 + u32::try_from(w.cores.lock().len()).unwrap_or(0);
+        w.note(format!("mihomo-start:{pid}"));
+        *w.mihomo_port.lock() = Some(socks.port());
+        *w.mihomo_hop.lock() = Some(config.hop_port());
+        let core = Arc::new(FakeCore {
+            pid,
+            ready: Ready::Ok,
+            world: w.clone(),
+            exit: watch::channel(None).0,
+            listener: Mutex::new(None),
+        });
+        w.cores.lock().push(core.clone());
+        Ok(core)
     }
 }
 

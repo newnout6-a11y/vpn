@@ -187,6 +187,40 @@ pub struct SettingsState {
     /// Packet capture can run in this process; otherwise the switch is greyed out with the
     /// reason.
     pub capture_available: bool,
+    /// Connect at launch (instant, the automatic server choice).
+    pub launch: LaunchView,
+}
+
+/// What the app connects to at its start (RU item 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LaunchChoice {
+    #[default]
+    Off,
+    LastUsed,
+    LowestDelay,
+    /// The provider's `subscription-autoconnect-type: random` (never offered as a choice).
+    Random,
+}
+
+/// Who decided what a launch does now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LaunchSource {
+    /// Nobody: off by default.
+    #[default]
+    Default,
+    User,
+    /// The provider of the last-used server's subscription (`subscription-autoconnect`).
+    Provider,
+}
+
+/// Connect at launch as the page shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LaunchView {
+    /// What a launch would do now.
+    pub effective: LaunchChoice,
+    pub source: LaunchSource,
+    /// The upstream is the server list (with a local proxy the route autopilot decides).
+    pub server_mode: bool,
 }
 
 /// A theme the user can pick.

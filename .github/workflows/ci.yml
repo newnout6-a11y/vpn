@@ -78,6 +78,18 @@ jobs:
         run: |
           cargo test --workspace --locked --no-fail-fast
           cargo test --manifest-path xtask/Cargo.toml --target-dir target/xtask --locked
+      # WP-12 lab engine (mihomo for AmneziaWG, AT-12-002): the crates with a `lab` feature built,
+      # linted and tested with it (the app's feature turns on every other one). A production build
+      # (`cargo xtask dist`, the package job) never enables it; the lab tests run the pinned mihomo
+      # from `cargo xtask engines` on 127.0.0.1 with fake keys only.
+      - name: Lab feature (check, clippy, tests)
+        env:
+          VPNTE_LAN_TESTS: '1'
+        run: |
+          lab=(-p vpnte-base -p vpnte-engine -p vpnte-tunnel -p vpnte-probes -p vpnte-ui -p vpnte-app)
+          cargo check "${lab[@]}" --all-targets --locked --features vpnte-app/lab
+          cargo clippy "${lab[@]}" --all-targets --locked --features vpnte-app/lab -- -D warnings
+          cargo test "${lab[@]}" --locked --no-fail-fast --features vpnte-app/lab
 
   docs:
     name: Acceptance traceability (docs)

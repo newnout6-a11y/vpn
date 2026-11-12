@@ -1,6 +1,7 @@
 //! `demo_servers`: the Servers page inside the real shell over `DemoServersApi` (fake store,
 //! realistic delays, no network). Flags: `--theme light|dark|system`, `--lang ru|en`,
-//! `--size WxH`, `--scene normal|empty|loading|foreign`.
+//! `--size WxH`, `--scene normal|empty|loading|foreign|link` (`link`: a link handed over at start
+//! opens the add dialog).
 #![windows_subsystem = "windows"]
 
 use std::rc::Rc;

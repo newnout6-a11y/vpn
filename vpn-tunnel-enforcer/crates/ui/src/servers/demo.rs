@@ -14,6 +14,7 @@ use super::live_model::*;
 use super::model::*;
 
 mod backend;
+mod links;
 mod live;
 
 /// Starting state of the demo store.
@@ -27,6 +28,8 @@ pub enum DemoScene {
     Loading,
     /// The tunnel is down and a competing VPN adapter is up.
     Foreign,
+    /// A browser handed the app a link at start: the add dialog opens with it.
+    Link,
 }
 
 impl DemoScene {
@@ -36,6 +39,7 @@ impl DemoScene {
             "empty" => DemoScene::Empty,
             "loading" => DemoScene::Loading,
             "foreign" => DemoScene::Foreign,
+            "link" => DemoScene::Link,
             _ => DemoScene::Normal,
         }
     }
@@ -49,6 +53,7 @@ pub struct DemoServersApi {
     runs: Cell<u64>,
     history_failed: Cell<bool>,
     cancel_switch: Notify,
+    links: links::DemoLinks,
 }
 
 impl DemoServersApi {
@@ -56,7 +61,7 @@ impl DemoServersApi {
         let now = now_ms();
         let mut view = demo_view(now);
         match scene {
-            DemoScene::Normal => {}
+            DemoScene::Normal | DemoScene::Link => {}
             DemoScene::Empty => {
                 view.servers.clear();
                 view.groups.clear();
@@ -75,6 +80,7 @@ impl DemoServersApi {
             runs: Cell::new(0),
             history_failed: Cell::new(false),
             cancel_switch: Notify::new(),
+            links: links::DemoLinks::new(),
         };
         // Two stored receipts for the connected server, so the history drawer has content.
         if scene == DemoScene::Normal
@@ -86,6 +92,9 @@ impl DemoServersApi {
                 .borrow_mut()
                 .insert(server.id, vec![newer, older]);
             api.runs.set(4);
+        }
+        if scene == DemoScene::Link {
+            api.links.offer(links::FAKE_LINK);
         }
         api
     }

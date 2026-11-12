@@ -308,6 +308,18 @@ impl SettingsApi for DemoSettingsApi {
         Ok(())
     }
 
+    async fn set_launch(&self, choice: LaunchChoice) -> AppResult<()> {
+        pause(200).await;
+        if choice == LaunchChoice::Random {
+            return Err(demo_err(ErrorKind::Validation, "errors.validation"));
+        }
+        self.state.send_modify(|s| {
+            s.launch.effective = choice;
+            s.launch.source = LaunchSource::User;
+        });
+        Ok(())
+    }
+
     async fn set_rotation_profile(&self, id: String, included: bool) -> AppResult<()> {
         pause(200).await;
         self.rotation.send_modify(|r| {

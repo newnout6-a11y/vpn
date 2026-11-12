@@ -42,6 +42,22 @@ files = [
   { path = "wintun/LICENSE.txt", install = "licenses/wintun.txt", sha256 = "183adac21e7d96c508c8fd34d394b7b6708bc81564ad1bad61ab66143a008cd2" },
 ]
 
+# WP-12 lab engine (AmneziaWG without administrator rights), `lab = true`: `cargo xtask engines` fills the dev
+# drop with it, `cargo xtask dist` stages it only with `--lab` (a production package never contains it).
+# The `compatible` build is GOAMD64=v1 (any x86-64 CPU; the same exe as the `-v1-` archive), built with a Go that
+# needs Windows 10 or later.
+[[archive]]
+id = "mihomo"
+version = "1.19.34"
+url = "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.34/mihomo-windows-amd64-compatible-v1.19.34.zip"
+sha256 = "cd6738d4648cc1a5f48049a1343b697ab510889d648f045c5c780fc1ab443a79"
+license = "GPL-3.0"
+source = "https://github.com/MetaCubeX/mihomo/tree/v1.19.34"
+lab = true
+files = [
+  { path = "mihomo-windows-amd64-compatible.exe", install = "resources/mihomo.exe", sha256 = "5a0231811a80b27477ebdee15684b41946d01afbd2114534e9a4b256125ca147" },
+]
+
 # Smart-RU rule-sets: shipped as local files because a remote rule-set whose first download fails is a fatal
 # sing-box error that takes the whole tunnel down.
 [[local]]

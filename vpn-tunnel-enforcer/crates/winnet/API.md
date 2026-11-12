@@ -5,7 +5,7 @@ counters, ICMP, the WFP kill switch and leak protection, registry, user environm
 system proxy, elevation, autostart (per-user `Run` value), single instance, secret clipboard,
 power / session / theme events, toasts and the Start-menu shortcut. Depends only on `vpnte-base`.
 Paths: `vpnte_winnet::{adapters, process, counters, icmp, wfp, registry, env, sysproxy, autostart,
-clipboard, elevation, single_instance, shell, toast, power}` plus `vpnte_winnet::LOCALES`. Shared types used below come from `vpnte_base`
+clipboard, elevation, single_instance, shell, toast, power, url_scheme}` plus `vpnte_winnet::LOCALES`. Shared types used below come from `vpnte_base`
 (`AppError`, `AppResult`, `ErrorKind`, `Msg`, `Notice`, `types::{KillSwitchLevel, UnixMs}`),
 `ipnet` (`IpNet`, `Ipv4Net`, `Ipv6Net`), `windows::core::{GUID, Error, Result}`,
 `tokio_util::sync::CancellationToken`.
@@ -551,7 +551,8 @@ pub const MUTEX_NAME: &str = r"Local\VpnTunnelEnforcer.Instance";  // per Window
 pub const PIPE_PREFIX: &str = r"\\.\pipe\VpnTunnelEnforcer";        // + ".<session id>"
 pub struct InstanceNames { pub mutex: String, pub pipe: String }     // tests use random names
 impl InstanceNames { pub fn production() -> AppResult<Self>; }      // this process's session
-pub enum Command { Activate, ShutdownForUpdate }                     // the caller maps its own argv
+pub enum Command { Activate, ShutdownForUpdate, OpenLink(String) }   // Clone; the caller maps its own argv
+pub const MAX_LINK: usize = 16 * 1024;                               // OpenLink: one printable line, <= this
 pub enum Acquire { Primary(Primary), Secondary }
 pub fn acquire(names: &InstanceNames) -> AppResult<Acquire>;        // Err only for unexpected mutex failures
 impl Primary {                                                       // drop = stop listener + release mutex
@@ -559,9 +560,19 @@ impl Primary {                                                       // drop = s
     pub fn is_listening(&self) -> bool;                              // false: the pipe could not be created
 }
 pub fn send(pipe: &str, cmd: Command, timeout: Duration) -> AppResult<()>;   // blocking
-    // errors carry winnet.singleInstance.noAnswer (Timeout | Permission | Internal); a primary
-    // refuses an activation from another session's client ("other-session" reply = error)
+    // errors carry winnet.singleInstance.noAnswer (Timeout | Permission | Internal; Validation for
+    // a link that is not one printable line within MAX_LINK); a primary refuses an activation or
+    // a link from another session's client ("other-session" reply = error); an OpenLink is
+    // written only to a server in this session running this exe (else Permission, nothing sent)
 ```
+`OpenLink` carries a link Windows passed to a later launch (`--open-link "%1"`, see `url_scheme`);
+the listener logs only the command name, never the link (it is a key or a subscription URL).
+Pipe names share one global namespace, so before writing a link the client checks the server
+(`GetNamedPipeServerSessionId`, the image of `GetNamedPipeServerProcessId`). The pipe's descriptor:
+owner = the user; SYSTEM and administrators all; the user read / write / attributes (no
+FILE_APPEND_DATA); medium label, no write up. So a link launch (always unelevated) reaches a primary
+started as administrator, while an elevated primary answers `shutdown-for-update` only to an equally
+elevated client ("denied").
 Per session (owner decision 12): every signed-in user runs their own copy; the installer's
 `--shutdown-for-update` launch runs in the installing user's session and reaches that user's copy.
 `main()` (`update` = the app's own `--shutdown-for-update` flag):
@@ -580,6 +591,44 @@ match single_instance::acquire(&names)? {
     }
 }
 ```
+
+## `url_scheme` — per-user link schemes (`HKCU\Software\Classes`; blocking, unelevated)
+```rust
+pub const SCHEMES: [&str; 12];        // vless vmess trojan ss hysteria2 hy2 tuic anytls sing-box clash v2raytun hiddify
+pub const OPEN_LINK_FLAG: &str = "--open-link";
+pub enum Owner { Free, Ours, Other(Option<String> /* program name: "Happ", "Hiddify Protocol" */),
+                 Chosen(String) /* UserChoice ProgId: the user's pick in Windows' chooser */ }
+pub enum Took { Ours, Chosen(String) }  // take(): Chosen = the Windows choice stays, nothing written
+pub struct SchemeState { pub scheme: &'static str, pub owner: Owner }
+pub struct Ensured { pub registered: Vec<&'static str>, pub repointed: usize }
+pub struct Registrar;                 // Clone
+impl Registrar {
+    pub fn current_user() -> Self;    // HKCU classes + record; HKLM classes only read
+    pub fn under(root: &str) -> Self; // tests: <root>\Classes, <root>\Machine (stands in for HKLM), <root>\Record, <root>\Choices
+    pub fn command(exe: &Path) -> String;               // "\"<exe>\" --open-link \"%1\""
+    pub fn initialized(&self) -> Result<bool>;          // the record exists (first run done)
+    pub fn states(&self, exe: &Path) -> Result<Vec<SchemeState>>;   // SCHEMES order
+    pub fn owner(&self, scheme: &str, exe: &Path) -> Result<Owner>;
+    pub fn ensure(&self, exe: &Path) -> Result<Ensured>;  // first run = adopt; later: re-point ours only
+    pub fn adopt(&self, exe: &Path) -> Result<Ensured>;   // every Free scheme + ours (re)written for exe (a portable copy's «open links here»)
+    pub fn take(&self, scheme: &str, exe: &Path) -> Result<Took>;  // user's request: also another program's class key (kept aside)
+    pub fn unregister(&self, scheme: &str, exe: &Path) -> Result<bool>;  // ours (recorded or exe's command); puts back the key we replaced
+    pub fn unregister_for(&self, exe: &Path) -> Result<Vec<String>>;  // uninstall: what the record lists for exe; record when empty
+    pub fn notify_shell(&self);       // SHChangeNotify(SHCNE_ASSOCCHANGED) after a change; nothing for `under`
+}
+```
+Record `HKCU\Software\VPN Tunnel Enforcer\LinkSchemes`: one value per scheme = the exact command we
+wrote; `Previous\<scheme>` = another program's per-user key replaced on the user's request (never a
+key of ours; replaced only by a newer foreign key; dropped when the class key vanished meanwhile, so
+a removed program's handler is never revived). Owner: a `UserChoice` ProgId under
+`HKCU\…\Shell\Associations\UrlAssociations\<scheme>` naming another handler wins (`Chosen(prog_id)`;
+Windows reaches no class key then, and only the user changes it, in Windows' default apps), else the
+per-user key (ours when it carries the recorded command or this exe's), else a machine-wide key
+(`Other`), else `Free`. A scheme name outside `SCHEMES` is `E_INVALIDARG` (nothing written);
+`unregister_for` also removes a recorded name only a newer version lists (a value that is no scheme
+name is just dropped), so an unknown name never stops an uninstall. Tests use `Registrar::under`
+with a throw-away `HKCU\Software\VPNTE-Test-*` key; `system_current_user_round_trip` (ignored,
+`changes system state`) runs on the real classes.
 
 ## `shell` — hand links and folders to Windows (async; `ShellExecuteExW` on the blocking pool)
 ```rust

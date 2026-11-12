@@ -245,8 +245,10 @@ pub struct DashboardView {
     pub soft_mode: bool, pub smart_ru: bool,          // settings (apply on the next connect)
     pub foreign_vpn: Option<String>,                  // another VPN's adapter, only while ours is down
     pub engine: Option<EngineLine>,                   // running engine + reason (identity column caption)
+    pub autopick: Option<PickLine>,                   // the automatic server choice's step (one strip)
 }
 pub struct EngineLine { pub engine: Engine, pub reason: Option<Msg> }  // «Xray · REALITY» under the node
+pub struct PickLine { pub title: Msg, pub body: Option<Msg> }  // step; during retries what traffic does
 pub trait DashboardApi: 'static {
     fn state(&self) -> watch::Receiver<DashboardView>;
     async fn connect(&self) -> AppResult<()>;                     // returns when the attempt is over
@@ -422,6 +424,19 @@ pub trait ServersApi: 'static {      // root component ServersPage; use_servers_
     async fn live_batch(&self, ids: Vec<String>, stop: CancellationToken,  // up to 12 servers; stop = finish
         progress: mpsc::UnboundedSender<BatchProgress>) -> AppResult<BatchResult>; // with receipts so far
     async fn open_url(&self, url: String) -> AppResult<()>;            // http(s) in the user's browser
+    // links and QR codes from phones (RU-2026 item 4, package w7-phones)
+    fn link_arrivals(&self) -> watch::Receiver<u64>;                   // bumped per link Windows handed over
+    fn take_link(&self) -> Option<String>;                             // that link, once (add dialog)
+    async fn read_clipboard(&self) -> AppResult<String>;               // on the user's click only
+    async fn read_key_file(&self) -> AppResult<Option<String>>;        // .txt .conf .json .yaml .yml; None = dismissed
+    async fn scan_qr_file(&self) -> AppResult<Option<String>>;         // keys / links of a picture's QR codes
+    async fn scan_qr_screen(&self, captured: oneshot::Sender<()>) -> AppResult<String>;
+        // every screen; the page hides its window first and shows it again when `captured` fires
+        // (right after the capture, before the decoding); a decode past its budget = app.phones.qr.slow
+    async fn key_qr(&self, id: &str) -> AppResult<QrCode>;             // through shareable_profile (hidden: refused)
+    async fn link_schemes(&self) -> AppResult<LinkSchemes>;            // who answers each scheme; portable copy?
+    async fn set_link_scheme(&self, scheme: String, on: bool) -> AppResult<LinkSchemes>;
+    async fn adopt_link_schemes(&self) -> AppResult<LinkSchemes>;      // portable copy: «open links here»
 }
 pub struct ServersView { loaded: bool, servers: Vec<ServerView>, groups: Vec<GroupView>, active_id, switching_to:
     Option<String>, tunnel_running, tunnel_busy, foreign_vpn, geo_lookup_disabled: bool }
@@ -463,7 +478,18 @@ their provider's `hide-settings` into another group. `SubscriptionRequest { send
 the add dialog's request draft: it resets to the new-group defaults after an import and when the
 dialog closes (a token header never reaches the next provider). The group toolbar's «Запрос» opens the request dialog (HWID switch,
 header names, replace / remove); an empty list without the HWID shows a hint with the switch.
-Demo: `DemoServersApi` with `DemoScene`.
+Links and QR codes (w7-phones): `QrCode { size, dark: Vec<bool> }` (row-major modules, no quiet zone;
+`path()` = SVG path data; `Debug` prints the size only), `LinkScheme { scheme, owner: SchemeOwner {
+Free, Ours, Other(Option<String>), Chosen(String) } }` (`Chosen` = the user's pick in Windows' own
+settings: a disabled box with a hint to change it there), `LinkSchemes { list, portable }` (a portable
+copy registers links only through the panel's «Открывать ссылки здесь»). Mount `LinkHandoff {}` once
+under the shell (the root's overlays): it opens the Servers page for each handed-over link; the page
+puts the link into the add dialog with a note and the new-group defaults (no previous provider's
+headers, HWID or target group); nothing is imported without «Добавить». While the dialog imports or
+reads a source the link waits in the inbox and opens once the dialog is free. The add dialog offers
+clipboard / file / QR-picture / QR-on-screen sources; the header's «Ссылки» opens the scheme panel;
+the detail shows `KeyQr` unless `config_hidden`.
+Demo: `DemoServersApi` with `DemoScene`; `DemoServersApi::offer_link(link)` plays a handed-over link.
 
 App duties: `ServerView.stealth` from `vpnte_profiles::caps`; finding titles / details and skipped-line
 reasons are `Msg` keys of the backend's own fragments; `save_key` / `export_*` show the native Save
@@ -500,6 +526,7 @@ pub trait SettingsApi: 'static {     // root component SettingsPage; a dismissed
     async fn add_exception(&self, kind: ExceptionKind, value: String, label: String) -> AppResult<()>;
     async fn remove_exception(&self, id: String) -> AppResult<()>;
     async fn pick_app(&self) -> AppResult<Option<PickedApp>>;              // Open dialog for an .exe
+    async fn set_launch(&self, choice: LaunchChoice) -> AppResult<()>;  // connect at launch (instant)
     async fn set_rotation(&self, patch: RotationPatch) -> AppResult<()>;
     async fn set_rotation_profile(&self, id: String, included: bool) -> AppResult<()>;
     async fn rotate_now(&self) -> AppResult<RotationOutcome>;
@@ -537,7 +564,10 @@ disable_geo_lookup, smart_ru_split, smart_ru_maps_direct, smart_ru_auto_update, 
 autopilot, domain_enrichment, advanced_mode, proxy_override, proxy_type, bootstrap_route_mode,
 check_interval_ms, adaptive_bypass_server_fallback, deep_inspection, deep_inspection_max_mb,
 capture_quota_mb`. `SettingsDraft` holds the page's unsaved edits. Section views: `KillSwitchView`,
-`RotationView` (+ `RotationPatch`, `RotationOutcome`), `DnsView`, `DomainsView` (+ import preview /
+`RotationView` (+ `RotationPatch`, `RotationOutcome`), `SettingsState::launch` = `LaunchView
+{ effective: LaunchChoice /* Off, LastUsed, LowestDelay, Random (provider) */, source: LaunchSource
+/* Default, User, Provider */, server_mode }` («Поведение»; the segments show only the user's own
+choice, so a click on «Нет» always stores an explicit Off), `DnsView`, `DomainsView` (+ import preview /
 report), `NotificationsView` (+ `NotificationChange`, `NotifyEvent`, `NotifyMethod`), config
 transfer `ExportMode`, `ImportMode`, `ConfigSection`, `ImportPreview`. Ranges: `CHECK_INTERVAL_SECS`,
 `CAPTURE_MAX_MB`, `CAPTURE_QUOTA_MB`, `ROTATION_INTERVAL_MIN`. Demo: `settings::demo::DemoSettingsApi`.

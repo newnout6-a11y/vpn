@@ -133,6 +133,19 @@ impl DemoSettingsApi {
             capture_used_bytes: Some(if fresh { 0 } else { 734_003_200 }),
             connected: !fresh,
             direct_session: !fresh,
+            launch: LaunchView {
+                effective: if fresh {
+                    LaunchChoice::Off
+                } else {
+                    LaunchChoice::LastUsed
+                },
+                source: if fresh {
+                    LaunchSource::Default
+                } else {
+                    LaunchSource::Provider
+                },
+                server_mode: !fresh,
+            },
             adaptive: AdaptiveView {
                 phase: if failures {
                     AdaptivePhase::Failed

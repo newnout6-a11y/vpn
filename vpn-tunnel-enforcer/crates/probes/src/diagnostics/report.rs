@@ -127,6 +127,8 @@ async fn engine_version(engine: Engine, exe: &Path) -> String {
     let version = match engine {
         Engine::SingBox => vpnte_engine::singbox_process::engine_version(exe).await,
         Engine::Xray => vpnte_engine::xray_process::engine_version(exe).await,
+        #[cfg(feature = "lab")]
+        Engine::Mihomo => vpnte_engine::mihomo_process::engine_version(exe).await,
     };
     match version {
         Ok((major, minor, patch)) => format!("{major}.{minor}.{patch}"),

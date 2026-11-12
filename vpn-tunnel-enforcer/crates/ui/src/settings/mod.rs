@@ -21,6 +21,7 @@ mod draft;
 mod fmt;
 mod general;
 mod kill_switch;
+mod launch;
 mod model;
 mod notifications;
 mod privacy;

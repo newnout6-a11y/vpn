@@ -11,6 +11,7 @@ use super::model::{
     AddTarget, ExportReport, ImportReport, KeyHealth, ServerView, ServersView, SubscriptionRequest,
 };
 use super::present::PingState;
+use super::schemes::SchemesPanel;
 use crate::widgets::UiError;
 
 /// Transient state of one server row.
@@ -96,6 +97,10 @@ pub(crate) struct AddForm {
     /// Request settings a new subscription group starts with (HWID off by default).
     pub request: SubscriptionRequest,
     pub busy: bool,
+    /// A source (clipboard, file, QR) is being read into the draft.
+    pub reading: bool,
+    /// The draft is a link Windows handed over (the dialog says so; the user confirms it).
+    pub from_link: bool,
     pub error: Option<UiError>,
     pub report: Option<ImportReport>,
 }
@@ -105,6 +110,19 @@ impl AddForm {
     /// previous provider's headers (they may be tokens) and HWID choice never reach the next one.
     pub(crate) fn imported(&mut self) {
         self.input.clear();
+        self.from_link = false;
+        self.target = AddTarget::Auto;
+        self.request = SubscriptionRequest::default();
+    }
+
+    /// A link Windows handed over becomes the draft, with the new-group defaults: whatever the
+    /// user set up for the previous provider (headers that may be tokens, HWID, a target group)
+    /// never reaches the provider the link names.
+    pub(crate) fn linked(&mut self, link: String) {
+        self.input = link;
+        self.error = None;
+        self.report = None;
+        self.from_link = true;
         self.target = AddTarget::Auto;
         self.request = SubscriptionRequest::default();
     }
@@ -113,6 +131,7 @@ impl AddForm {
     /// tokens, and the hint promises they are never shown again); the pasted text stays a draft.
     pub(crate) fn closed(&mut self) {
         self.report = None;
+        self.from_link = false;
         self.request = SubscriptionRequest::default();
     }
 }
@@ -147,6 +166,9 @@ pub(crate) struct Store {
     pub batch_open: Signal<bool>,
     pub add_open: Signal<bool>,
     pub add: Signal<AddForm>,
+    /// The link-scheme panel.
+    pub schemes_open: Signal<bool>,
+    pub schemes: Signal<SchemesPanel>,
     /// The open request dialog (`None`: closed).
     pub request: Signal<Option<RequestForm>>,
     pub confirm: Signal<Option<Confirm>>,
@@ -175,6 +197,8 @@ impl Store {
             batch_open: Signal::new(false),
             add_open: Signal::new(false),
             add: Signal::new(AddForm::default()),
+            schemes_open: Signal::new(false),
+            schemes: Signal::new(SchemesPanel::default()),
             request: Signal::new(None),
             confirm: Signal::new(None),
             confirm_busy: Signal::new(false),

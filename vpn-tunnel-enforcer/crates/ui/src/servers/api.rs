@@ -6,11 +6,12 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::AppResult;
 use vpnte_base::types::{ClientDevice, EnginePref};
 
+use super::links_model::{LinkSchemes, QrCode};
 use super::live_model::{BatchProgress, BatchResult, LiveCheck, LiveMode, LiveProgress};
 use super::model::{
     AddTarget, CountryCheck, ExportReport, GeoInfo, HealthReport, ImportReport, ProbeReport,
@@ -119,6 +120,36 @@ pub trait ServersApi: 'static {
 
     /// Opens an `http(s)` link in the user's browser.
     async fn open_url(&self, url: String) -> AppResult<()>;
+
+    /// Bumped each time Windows hands the app a link (a browser or a messenger opened
+    /// `vless://…`, `hiddify://import/…`); [`ServersApi::take_link`] then yields it.
+    fn link_arrivals(&self) -> watch::Receiver<u64>;
+    /// The link handed over last, once: the add dialog shows it and nothing is imported until
+    /// the user confirms there.
+    fn take_link(&self) -> Option<String>;
+    /// The clipboard's text, read on the user's click only (keys are never logged).
+    async fn read_clipboard(&self) -> AppResult<String>;
+    /// Asks for a key file (`.txt .conf .json .yaml .yml`) and answers its text; `None` = the
+    /// Open dialog was dismissed.
+    async fn read_key_file(&self) -> AppResult<Option<String>>;
+    /// Asks for a picture and answers the keys and links of the QR codes in it, one per line;
+    /// `None` = dismissed.
+    async fn scan_qr_file(&self) -> AppResult<Option<String>>;
+    /// Reads the QR codes on every screen now (the page hides its own window first) and
+    /// answers their keys and links, one per line. `captured` fires once the screen is read (or
+    /// could not be), before the slower decoding: the page shows its window again right then.
+    async fn scan_qr_screen(&self, captured: oneshot::Sender<()>) -> AppResult<String>;
+    /// The server's share key as a QR code for a phone; refused for a key its provider hides.
+    async fn key_qr(&self, id: &str) -> AppResult<QrCode>;
+    /// Who answers each link scheme the app can open.
+    async fn link_schemes(&self) -> AppResult<LinkSchemes>;
+    /// Opens `scheme` links in this app (`on`; another program's registration is kept aside)
+    /// or gives them back; answers the list after the change. A scheme the user gave another
+    /// program in Windows' settings stays there (the list says so).
+    async fn set_link_scheme(&self, scheme: String, on: bool) -> AppResult<LinkSchemes>;
+    /// A portable copy's «open links here»: every free scheme and every scheme of ours now
+    /// opens this copy; answers the list after the change.
+    async fn adopt_link_schemes(&self) -> AppResult<LinkSchemes>;
 }
 
 /// The [`ServersApi`] from context.

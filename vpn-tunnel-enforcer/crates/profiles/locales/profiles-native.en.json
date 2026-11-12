@@ -6,7 +6,8 @@
       "encrypted": "This is an encrypted {{app}} link ({{variant}}). VPNTE cannot decrypt it — ask your provider for a regular subscription URL (https://…) or a protocol key (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
       "routingProfile": "This is a Happ routing rule (happ://routing/…), not a VPN subscription. Paste a subscription link or a protocol key (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
       "addPayloadUnrecognised": "Could not read the app link (happ://add/…, mantaray://…): it should contain a subscription URL or a protocol key (vless://…), but the content looks like neither.",
-      "unknownHost": "Unknown link type {{link}}/. Paste a regular subscription link (https://…) or a protocol key (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://)."
+      "unknownHost": "Unknown link type {{link}}/. Paste a regular subscription link (https://…) or a protocol key (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
+      "localTarget": "This link points into a local network, so the app does not open it. If the subscription is yours, paste its address directly."
     },
     "xrayNative": {
       "invalidProfile": "The saved Xray profile is damaged. Import the provider's configuration again.",

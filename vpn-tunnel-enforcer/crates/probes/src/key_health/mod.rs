@@ -196,6 +196,29 @@ fn refused(reject: Reject) -> KeyCheck {
     }
 }
 
+/// Keys no setting can make checkable: AmneziaWG has no engine in a production build (and the
+/// lab engine has no key probe of its own), so "the engine setting" would be a false hint. The
+/// check is not made (an error with the engine's own explanation: "not checked", no verdict).
+fn unprobed(decision: &Decision) -> Option<AppError> {
+    match decision {
+        Decision::Rejected(reject @ Reject::Amneziawg) => Some((*reject).into()),
+        #[cfg(feature = "lab")]
+        Decision::Rejected(reject @ Reject::Lab(_)) => Some((*reject).into()),
+        #[cfg(feature = "lab")]
+        Decision::Selected {
+            engine: Engine::Mihomo,
+            ..
+        } => Some(lab_not_probed()),
+        _ => None,
+    }
+}
+
+/// Lab build: the AmneziaWG key is checked by connecting (the tunnel's egress proof), not here.
+#[cfg(feature = "lab")]
+fn lab_not_probed() -> AppError {
+    AppError::validation(Msg::new("probes.keyHealth.labNotProbed"))
+}
+
 /// Starts the engine `ctx.engine_pref` selects for `p` and waits for its local SOCKS port.
 pub async fn start_probe_engine(
     p: &Profile,
@@ -203,13 +226,19 @@ pub async fn start_probe_engine(
     cancel: &CancellationToken,
 ) -> AppResult<Started> {
     let hy2 = is_hysteria2(p);
-    let engine = match select_engine(p, ctx.engine_pref) {
+    let decision = select_engine(p, ctx.engine_pref);
+    if let Some(err) = unprobed(&decision) {
+        return Err(err);
+    }
+    let engine = match decision {
         Decision::Selected { engine, .. } => engine,
         Decision::Rejected(reject) => return Ok(Started::Offline(refused(reject).health)),
     };
     let start = match engine {
         Engine::SingBox => engine::start_singbox(p, ctx, cancel).await?,
         Engine::Xray => engine::start_xray(p, ctx, cancel).await?,
+        #[cfg(feature = "lab")]
+        Engine::Mihomo => return Err(lab_not_probed()),
     };
     Ok(match start {
         Start::Ready(running, socks) => Started::Ready(ProbeEngine {
@@ -267,7 +296,11 @@ pub(crate) async fn probe_with(
     cancel: &CancellationToken,
 ) -> AppResult<KeyCheck> {
     // Before the handshake budget: a refused key makes no handshake, so it spends no slot.
-    if let Decision::Rejected(reject) = select_engine(p, ctx.engine_pref) {
+    let decision = select_engine(p, ctx.engine_pref);
+    if let Some(err) = unprobed(&decision) {
+        return Err(err);
+    }
+    if let Decision::Rejected(reject) = decision {
         return Ok(refused(reject));
     }
     let endpoint = Endpoint::of(p);

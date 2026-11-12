@@ -87,3 +87,7 @@ path = "src/bin/demo_wizard.rs"
 
 [lints]
 workspace = true
+
+[features]
+# WP-12 lab: the lab engine's label and the per-server choice of it. Never in a production build.
+lab = ["vpnte-base/lab"]

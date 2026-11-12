@@ -51,10 +51,16 @@ pub enum KillSwitchLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EnginePref {
-    #[default]
-    Auto,
     SingBox,
     Xray,
+    /// WP-12 lab engine (feature `lab`, never in a production build).
+    #[cfg(feature = "lab")]
+    Mihomo,
+    /// Also what an unknown stored value reads as: a lab build's `"mihomo"` must not cost a
+    /// production build the server row it sits on (last: serde wants its `other` variant there).
+    #[default]
+    #[serde(other)]
+    Auto,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -62,6 +68,9 @@ pub enum EnginePref {
 pub enum Engine {
     SingBox,
     Xray,
+    /// WP-12 lab engine for AmneziaWG (feature `lab`, never in a production build).
+    #[cfg(feature = "lab")]
+    Mihomo,
 }
 
 /// Who asked for a connection operation. Order is priority: a higher owner pre-empts a lower one.
@@ -171,6 +180,20 @@ mod tests {
         assert!(Owner::Schedule > Owner::Rotation);
         assert!(Owner::Rotation > Owner::Autopilot);
         assert!(Owner::Autopilot > Owner::AdaptiveRetry);
+    }
+
+    /// AT-12-002: a lab build's stored per-server choice loads as `Auto` without the lab feature.
+    #[test]
+    fn unknown_engine_choice_reads_as_auto() {
+        let pref: EnginePref = serde_json::from_str("\"xray\"").unwrap();
+        assert_eq!(pref, EnginePref::Xray);
+        let stored: EnginePref = serde_json::from_str("\"mihomo\"").unwrap();
+        #[cfg(not(feature = "lab"))]
+        assert_eq!(stored, EnginePref::Auto);
+        #[cfg(feature = "lab")]
+        assert_eq!(stored, EnginePref::Mihomo);
+        let unknown: EnginePref = serde_json::from_str("\"future-engine\"").unwrap();
+        assert_eq!(unknown, EnginePref::Auto);
     }
 
     #[test]

@@ -176,6 +176,13 @@ auth → refused (`connection refused`, Go's Windows `actively refused`) → tls
 (auth and refused before the broad tls pattern on purpose); Hysteria2 has its own ladder (empty
 text → `hy2-handshake-failed`). A TCP key whose reach probe saw a reset gets `connection-refused`
 even when the engine only logged a timeout. Probe engine log level stays `debug` (the patterns need it).
+AmneziaWG (w7-mihomo): no engine of a production build runs it, so no setting can make it
+checkable: `check_profile[_verdict]` / `start_probe_engine` answer `Err(Validation)` with the
+engine's own text (`engine.xray.reject.amneziawg`; lab build: the lab gate's `engine.lab.gap.*`, or
+`probes.keyHealth.labNotProbed` when mihomo would run it: the tunnel's egress proof checks it at
+connect), never `engine-setting`; a batch leaves the key "not checked". Feature `lab` =
+`vpnte-engine/lab` (adds the mihomo arms). A provider's `tls.spoof` is dropped from the probe
+config unless the process is elevated (`vpnte_engine::singbox_config::gate_spoof`).
 
 ## public_ip (`vpnte_probes::public_ip`)
 

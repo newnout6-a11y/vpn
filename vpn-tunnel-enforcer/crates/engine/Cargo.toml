@@ -32,3 +32,7 @@ windows.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# WP-12 lab engine mihomo (AmneziaWG): never enabled by a production build (`cargo xtask dist`).
+lab = ["vpnte-base/lab"]

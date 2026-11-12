@@ -63,6 +63,10 @@ fn missing_install_dir_refuses_every_command() {
             "launch-as-user",
             "Installation path is missing; not started.",
         ),
+        (
+            "register-links",
+            "Installation path is missing; link schemes not registered.",
+        ),
     ];
     for (name, line) in expected {
         let end = command(&parse(&["--setup", name, "--install-dir", " "]));

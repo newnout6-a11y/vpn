@@ -6,7 +6,8 @@
       "encrypted": "Это зашифрованная ссылка {{app}} ({{variant}}). VPNTE не умеет её расшифровать — попросите у провайдера обычный subscription URL (https://…) или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
       "routingProfile": "Это правило маршрутизации Happ (happ://routing/…), а не VPN-подписка. Вставьте ссылку на подписку или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
       "addPayloadUnrecognised": "Не удалось разобрать ссылку приложения (happ://add/…, mantaray://…) — внутри ожидается subscription URL или ключ протокола (vless://…), но содержимое не похоже ни на то, ни на другое.",
-      "unknownHost": "Неизвестная схема {{link}}/. Вставьте обычную ссылку подписки (https://…) или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://)."
+      "unknownHost": "Неизвестная схема {{link}}/. Вставьте обычную ссылку подписки (https://…) или ключ протокола (vless://, trojan://, ss://, vmess://, hysteria2://, naive://, anytls://, shadowtls://, tuic://).",
+      "localTarget": "Эта ссылка ведёт в локальную сеть, поэтому приложение её не открывает. Если подписка ваша, вставьте её адрес напрямую."
     },
     "xrayNative": {
       "invalidProfile": "Сохранённый профиль Xray повреждён. Импортируйте конфигурацию провайдера заново.",

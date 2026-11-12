@@ -43,6 +43,12 @@ impl Actor {
     ) -> AppResult<Ready> {
         let slot_eps = work.slots.as_ref().map(|s| s.endpoints.clone());
         let taken: Vec<u16> = slot_eps.iter().flatten().map(SlotEndpoint::port).collect();
+        // WP-12 lab: the mihomo run already up (held by the start) is chained with each core,
+        // and its ports stay out of sing-box's listeners.
+        #[cfg(feature = "lab")]
+        let held = work.core.clone();
+        #[cfg(feature = "lab")]
+        let taken = super::mihomo::taken(p.planned, taken);
         let mut retried = false;
         loop {
             let (clash, listeners) = config::listeners(p.direct_vpn, slot_eps.is_some(), &taken)?;
@@ -63,6 +69,8 @@ impl Actor {
                         "slot upstream without slots",
                     )));
                 }
+                #[cfg(feature = "lab")]
+                (Planned::Mihomo(plan), _) => super::mihomo::upstream(plan),
             };
             let parts = EngineParts {
                 upstream,
@@ -76,6 +84,8 @@ impl Actor {
                 .engines
                 .spawn_core(json.to_string().as_bytes())
                 .map_err(|e| AppError::from(StartError::Spawn(e)))?;
+            #[cfg(feature = "lab")]
+            let core = super::mihomo::chain(core, held.clone());
             work.core = Some(core.clone());
             match core.wait_ready(self.deps.timings.ready, op).await {
                 Ok(()) => return Ok((core, clash, listeners, compat)),
@@ -86,8 +96,17 @@ impl Actor {
                         "sing-box could not bind an own loopback port: one retry with fresh ports");
                     self.record_exit(&info);
                     work.core = None;
+                    // The held mihomo run (never touched: the pair was not armed) stays in the
+                    // compensation's hands for the retry.
+                    #[cfg(feature = "lab")]
+                    {
+                        work.core = held.clone();
+                    }
                     retried = true;
                 }
+                #[cfg(feature = "lab")]
+                Err(e) => return Err(super::mihomo::start_error(e, held.as_ref())),
+                #[cfg(not(feature = "lab"))]
                 Err(e) => return Err(e.into()),
             }
         }

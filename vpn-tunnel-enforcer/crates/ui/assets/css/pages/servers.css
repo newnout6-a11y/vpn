@@ -274,3 +274,12 @@
   .srv-kv > div:nth-child(n + 3) { border-top: 1px solid var(--rule); }
 }
 .srv-batch .w-td:not(.is-grow) { white-space: nowrap; }
+/* w7-phones: links and QR codes from phones (add-dialog sources, link note, QR card, scheme panel) */
+.srv-strip.is-info { border-left-color: var(--ink); }
+.srv-add-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.srv-add-sources > .w-field-label { margin-right: 4px; }
+.srv-qr { justify-items: start; }
+.srv-qr-code { display: block; width: 232px; height: 232px; border: 1px solid var(--rule); background: #fff; }
+.srv-schemes { display: grid; gap: 2px; border-top: 1px solid var(--rule); padding-top: 10px; }
+.srv-schemes > h3 { margin: 0 0 4px; }
+.srv-schemes .w-check-row label { font-family: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace; }

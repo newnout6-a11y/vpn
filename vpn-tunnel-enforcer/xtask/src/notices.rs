@@ -173,11 +173,15 @@ pub fn render(root: &Path, manifest: &Manifest, meta: &Metadata, version: &str) 
     let mut out = format!("VPN Tunnel Enforcer {version}: third-party notices\n\n");
     out.push_str("Bundled programs (licence texts in this folder):\n");
     for archive in &manifest.archive {
-        let texts: Vec<&str> = archive
+        let mut texts: Vec<&str> = archive
             .files
             .iter()
             .filter_map(|f| f.install.as_str().strip_prefix("licenses/"))
             .collect();
+        // A GPL archive may ship no licence member of its own (mihomo): the full text covers it.
+        if archive.license.starts_with("GPL") {
+            texts.push("GPL-3.0.txt");
+        }
         out.push_str(&format!(
             "- {} {}: {}; licence file: {}",
             archive.id,
@@ -185,9 +189,6 @@ pub fn render(root: &Path, manifest: &Manifest, meta: &Metadata, version: &str) 
             archive.license,
             texts.join(", ")
         ));
-        if archive.license.starts_with("GPL") {
-            out.push_str(", GPL-3.0.txt");
-        }
         match &archive.source {
             Some(source) => out.push_str(&format!("; complete corresponding source: {source}\n")),
             None => out.push('\n'),
@@ -322,7 +323,14 @@ mod tests {
 
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let manifest = Manifest::load(root).unwrap();
+        let text = render(root, &manifest.composition(true), &meta, "2.0.0").unwrap();
+        assert!(
+            text.contains("- mihomo 1.19.34: GPL-3.0; licence file: GPL-3.0.txt;"),
+            "{text}"
+        );
+        let manifest = Manifest::load(root).unwrap().composition(false);
         let text = render(root, &manifest, &meta, "2.0.0").unwrap();
+        assert!(!text.contains("mihomo"), "a release lists no lab engine");
         assert!(
             text.contains(
                 "- sing-box 1.14.4: GPL-3.0-or-later; licence file: sing-box.txt, GPL-3.0.txt"

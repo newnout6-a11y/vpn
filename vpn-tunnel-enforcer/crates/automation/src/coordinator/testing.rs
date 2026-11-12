@@ -117,15 +117,42 @@ impl FakeCoordinator {
         let _ = self.events.send(event);
     }
 
+    fn started(s: &SessionInfo) -> LifecycleEvent {
+        LifecycleEvent::Started {
+            owner: s.owner,
+            runtime_id: s.runtime_id,
+            kind: s.kind,
+            profile_id: s.profile_id.clone(),
+            mode: s.mode,
+        }
+    }
+
+    fn stopped(s: &SessionInfo, cause: StopCause) -> LifecycleEvent {
+        LifecycleEvent::Stopped {
+            owner: s.owner,
+            runtime_id: s.runtime_id,
+            cause,
+        }
+    }
+
+    /// Events go out after the session lock is released, in the order the app's forwarder
+    /// sends them (the old run's `Stopped` before the new run's `Started`).
+    fn emit_all(&self, events: Vec<LifecycleEvent>) {
+        for event in events {
+            self.emit(event);
+        }
+    }
+
+    /// As the app's coordinator: a new session emits `Started`; a server session moved to
+    /// another server is a switch (`Started` only); any other running session is replaced (its
+    /// `Stopped { Requested(owner) }` first); a failed start leaves no event.
     fn do_connect(&self, owner: Owner, req: ConnectRequest) -> Result<ConnectOutcome, OpError> {
         self.calls.lock().push(Call::Connect(owner, req.clone()));
         if let Some(event) = self.during_connect.lock().take() {
             self.emit(event);
         }
-        let profile_id = match &req {
-            ConnectRequest::Direct { profile_id } => Some(profile_id.clone()),
-            _ => None,
-        };
+        let profile_id = req.profile_id().map(str::to_owned);
+        let mut events = Vec::new();
         let mut session = self.session.lock();
         let same = session
             .as_ref()
@@ -138,17 +165,32 @@ impl FakeCoordinator {
         }));
         match (&result, session.as_mut()) {
             (Ok(ConnectOutcome::AlreadyConnected), Some(s)) => s.owner = s.owner.max(owner),
-            (Ok(_), _) => {
-                *session = Some(SessionInfo {
+            (Ok(_), previous) => {
+                let switch = previous
+                    .as_ref()
+                    .is_some_and(|s| s.kind == req.kind() && s.kind.server());
+                let owner = match previous {
+                    Some(old) if switch => old.owner.max(owner),
+                    Some(old) => {
+                        events.push(Self::stopped(old, StopCause::Requested(owner)));
+                        owner
+                    }
+                    None => owner,
+                };
+                let next = SessionInfo {
                     kind: req.kind(),
                     owner,
                     profile_id,
                     runtime_id: RuntimeId(self.fresh_runtime()),
                     mode: AdaptiveMode::Baseline,
-                });
+                };
+                events.push(Self::started(&next));
+                *session = Some(next);
             }
             (Err(_), _) => {}
         }
+        drop(session);
+        self.emit_all(events);
         result
     }
 
@@ -158,23 +200,53 @@ impl FakeCoordinator {
         if session.as_ref().is_some_and(|s| s.owner > owner) {
             return Err(OpError::Conflict);
         }
-        if session.take().is_none() {
-            self.left_by.lock().take_if(|left| *left <= owner);
+        let ended = session.take();
+        drop(session);
+        match ended {
+            Some(s) => self.emit(Self::stopped(&s, StopCause::Requested(owner))),
+            None => drop(self.left_by.lock().take_if(|left| *left <= owner)),
         }
         Ok(())
     }
 
+    /// As the app's coordinator: no server session = `NotStarted(Conflict)`; the same server =
+    /// `Ok` without a restart; a switch that took emits only the new run's `Started`; one that
+    /// lost the tunnel ends the session with `Stopped { Fault }` (the lane's outcome is the
+    /// switch's, nobody asked for that stop) and, restored, the previous server's `Started`.
     fn do_switch(&self, owner: Owner, profile_id: &str) -> Result<(), SwitchError> {
         self.calls
             .lock()
             .push(Call::Switch(owner, profile_id.to_owned()));
-        let result = self.switch_results.lock().pop_front().unwrap_or(Ok(()));
-        if result.is_ok()
-            && let Some(s) = self.session.lock().as_mut()
-        {
-            s.profile_id = Some(profile_id.to_owned());
-            s.runtime_id = RuntimeId(self.fresh_runtime());
+        let mut session = self.session.lock();
+        let Some(s) = session.as_mut().filter(|s| s.kind.server()) else {
+            return Err(SwitchError::NotStarted(OpError::Conflict));
+        };
+        if s.profile_id.as_deref() == Some(profile_id) {
+            return Ok(());
         }
+        let result = self.switch_results.lock().pop_front().unwrap_or(Ok(()));
+        let mut events = Vec::new();
+        match &result {
+            Ok(()) => {
+                s.profile_id = Some(profile_id.to_owned());
+                s.runtime_id = RuntimeId(self.fresh_runtime());
+                events.push(Self::started(s));
+            }
+            Err(SwitchError::NotStarted(_)) => {}
+            Err(SwitchError::Failed {
+                restored_previous, ..
+            }) => {
+                events.push(Self::stopped(s, StopCause::Fault));
+                if *restored_previous {
+                    s.runtime_id = RuntimeId(self.fresh_runtime());
+                    events.push(Self::started(s));
+                } else {
+                    *session = None;
+                }
+            }
+        }
+        drop(session);
+        self.emit_all(events);
         result
     }
 }

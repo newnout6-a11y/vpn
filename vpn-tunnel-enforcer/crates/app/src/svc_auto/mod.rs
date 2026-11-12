@@ -10,12 +10,13 @@ mod failover;
 mod feed;
 mod host;
 mod lane;
+mod pick;
 mod pilot;
 mod react;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio_util::sync::CancellationToken;
 use vpnte_automation::adaptive::reaction::Reactions;
@@ -30,11 +31,12 @@ use vpnte_core::store::Store;
 use vpnte_probes::live::LiveCheckService;
 use vpnte_tunnel::api::Runtime;
 
-pub use coord::{AppCoordinator, Detect, Hooks};
+pub use coord::{AppCoordinator, Detect, Hooks, UserAct};
 pub use events::{Followed, Privacy};
 pub use failover::ServerFailover;
 pub use host::{Fingerprints, ServerHost};
 pub use lane::Lane;
+pub use pick::{AppPick, spawn_autopick, traffic_exposure};
 pub use pilot::PilotEnv;
 
 use crate::services::Backend;
@@ -58,6 +60,9 @@ pub struct Automation {
     /// Location privacy for the length of a session (per user, no elevation).
     pub privacy: Arc<Privacy>,
     pub elevated: bool,
+    /// The automatic server choice (launch connect, stall watch, retries); set once by
+    /// [`spawn_autopick`] when the backend is complete.
+    pub autopick: OnceLock<Arc<AppPick>>,
     pilot: AutoPilot<AppCoordinator, PilotEnv>,
 }
 
@@ -121,6 +126,7 @@ impl Automation {
             browsers,
             privacy,
             elevated: b.elevated,
+            autopick: OnceLock::new(),
             pilot,
         })
     }

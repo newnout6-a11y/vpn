@@ -65,6 +65,10 @@ pub trait SettingsApi: 'static {
     /// Open dialog for an `.exe`; `None` = dismissed.
     async fn pick_app(&self) -> AppResult<Option<PickedApp>>;
 
+    // ── connect at launch ──
+    /// Stores the user's choice (`Random` is the provider's and is refused as a choice).
+    async fn set_launch(&self, choice: LaunchChoice) -> AppResult<()>;
+
     // ── rotation ──
     async fn set_rotation(&self, patch: RotationPatch) -> AppResult<()>;
     /// Adds or removes one server inside the service (U-16: no list computed from a stale copy).

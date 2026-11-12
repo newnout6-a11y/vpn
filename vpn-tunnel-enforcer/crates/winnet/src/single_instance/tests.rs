@@ -32,19 +32,41 @@ const WAIT: Duration = Duration::from_secs(5);
 
 #[test]
 fn wire_lines_round_trip() {
-    for cmd in [Command::Activate, Command::ShutdownForUpdate] {
-        assert_eq!(
-            Command::parse(format!("{}\n", cmd.wire()).as_bytes()),
-            Some(cmd)
-        );
-        assert_eq!(
-            Command::parse(format!("{}\r\n", cmd.wire()).as_bytes()),
-            Some(cmd)
-        );
+    let link = Command::OpenLink(
+        "vless://00000000-0000-4000-8000-000000000000@h.example:443?security=reality#Ключ".into(),
+    );
+    for cmd in [Command::Activate, Command::ShutdownForUpdate, link] {
+        let line = cmd.line();
+        assert_eq!(Command::parse(line.as_bytes()), Some(cmd.clone()));
+        let crlf = format!("{}\r\n", line.trim_end());
+        assert_eq!(Command::parse(crlf.as_bytes()), Some(cmd));
     }
     assert_eq!(Command::parse(b""), None);
     assert_eq!(Command::parse(b"activate now\n"), None);
     assert_eq!(Command::parse(b"ACTIVATE\n"), None);
+    assert_eq!(Command::parse(b"open-link \n"), None);
+    assert_eq!(Command::parse(b"open-link a\tb\n"), None);
+    assert_eq!(Command::parse(b"open-link \xff\xfe\n"), None);
+}
+
+/// RU-2026 item 4: a link Windows passed to a second launch reaches the running instance whole;
+/// links that are not one printable line within the limit are refused before the pipe.
+#[test]
+fn a_second_launch_hands_over_its_link() {
+    let names = names();
+    let mut first = primary(&names);
+    let mut commands = first.take_commands().unwrap();
+    let link = format!(
+        "hiddify://import/https://sub.example/s/{}#Name",
+        "x".repeat(4000)
+    );
+    send(&names.pipe, Command::OpenLink(link.clone()), WAIT).unwrap();
+    assert_eq!(commands.try_recv().unwrap(), Command::OpenLink(link));
+    for bad in ["", "  ", "vless://a\nvless://b", &"a".repeat(MAX_LINK + 1)] {
+        let err = send(&names.pipe, Command::OpenLink(bad.to_owned()), WAIT).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Validation);
+    }
+    assert!(commands.try_recv().is_err());
 }
 
 /// C-04: a second launch in the same session forwards its command and the first instance
@@ -275,4 +297,209 @@ fn a_pipe_server_can_only_identify_the_client() {
     });
     send(&names.pipe, Command::Activate, WAIT).unwrap();
     assert_eq!(fake.join().unwrap(), SecurityIdentification);
+}
+
+const KEY: &str = "vless://00000000-0000-4000-8000-000000000000@h.example:443#Key";
+
+/// phones-b1: a link (a key, a subscription token) is written only to a pipe served by this exe
+/// in this session. A server that is another program, or sits in another session, gets nothing.
+#[test]
+fn a_link_goes_only_to_this_exe_in_this_session() {
+    let names = names();
+    let mut first = primary(&names);
+    let mut commands = first.take_commands().unwrap();
+    let us = Peer::this_process().unwrap();
+    let elsewhere = [
+        Peer {
+            exe: std::env::temp_dir(),
+            ..us.clone()
+        },
+        Peer {
+            session: us.session + 1,
+            ..us.clone()
+        },
+    ];
+    for peer in &elsewhere {
+        let err =
+            send_checked(&names.pipe, Command::OpenLink(KEY.into()), WAIT, Some(peer)).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Permission);
+        assert_eq!(err.user_msg().key, "winnet.singleInstance.noAnswer");
+    }
+    assert!(commands.try_recv().is_err());
+    send(&names.pipe, Command::OpenLink(KEY.into()), WAIT).unwrap();
+    assert_eq!(commands.try_recv().unwrap(), Command::OpenLink(KEY.into()));
+}
+
+/// phones-b1: a squatter that created the pipe name first (another user's program; here a pipe
+/// whose server fails the exe check) reads nothing: the link is refused before any write.
+#[test]
+fn a_squatter_reads_no_link() {
+    let names = names();
+    let pipe = fake_server(&names);
+    let squatter = std::thread::spawn(move || {
+        let event = event().unwrap();
+        let io = Io {
+            pipe: raw(&pipe),
+            event: raw(&event),
+            stop: None,
+        };
+        io.connect().unwrap();
+        let mut buf = [0u8; MAX_LINE];
+        io.read(&mut buf).map(|n| buf[..n].to_vec()).ok()
+    });
+    let stranger = Peer {
+        exe: std::env::temp_dir(),
+        ..Peer::this_process().unwrap()
+    };
+    let err = send_checked(
+        &names.pipe,
+        Command::OpenLink(KEY.into()),
+        WAIT,
+        Some(&stranger),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Permission);
+    assert_eq!(squatter.join().unwrap(), None, "the squatter read a line");
+}
+
+/// phones-a7: the pipe admits exactly the user's launches with the rights they ask for: the
+/// descriptor's owner is this user, the label is medium (no write up), and the user's grant is
+/// the client's request (never FILE_APPEND_DATA, which would let them add pipe instances).
+#[test]
+fn the_pipe_admits_the_user_at_medium_integrity() {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows::Win32::Security::{
+        DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
+    };
+    use windows::core::PWSTR;
+
+    let sd = PipeSecurity::new().unwrap();
+    let attributes = sd.attributes();
+    let mut text = PWSTR::null();
+    // SAFETY: a valid descriptor; the string is freed right after reading it.
+    let sddl = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            PSECURITY_DESCRIPTOR(attributes.lpSecurityDescriptor),
+            SDDL_REVISION_1,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
+            &mut text,
+            None,
+        )
+        .unwrap();
+        let sddl = text.to_string().unwrap();
+        LocalFree(Some(HLOCAL(text.0.cast())));
+        sddl
+    };
+    let owner = sddl[2..].split(['D', ':']).next().unwrap().to_owned();
+    assert!(owner.starts_with("S-1-5-"), "{sddl}");
+    assert!(
+        sddl.contains(&format!(";;;{owner})")),
+        "no grant for the user: {sddl}"
+    );
+    assert!(
+        !sddl.contains("WD)") && !sddl.contains(";AU)"),
+        "a grant for others: {sddl}"
+    );
+    assert!(sddl.contains("(ML;;NW;;;ME)"), "{sddl}");
+    assert_eq!(security::CLIENT_ACCESS & 0x4, 0, "FILE_APPEND_DATA");
+    // An unelevated primary refuses no shutdown: the guard is for an elevated one only.
+    let names = names();
+    let mut first = primary(&names);
+    let mut commands = first.take_commands().unwrap();
+    send(&names.pipe, Command::ShutdownForUpdate, WAIT).unwrap();
+    assert_eq!(commands.try_recv().unwrap(), Command::ShutdownForUpdate);
+}
+
+/// phones-a7 / b4: Windows starts a clicked link's launch unelevated. With the primary running as
+/// administrator (TUN) that launch still hands its link over, but cannot make the primary quit.
+#[test]
+#[ignore = "needs elevation"]
+fn elevated_an_unelevated_launch_hands_a_link_but_cannot_stop_the_primary() {
+    assert!(crate::elevation::is_elevated(), "run elevated");
+    let names = names();
+    let mut first = primary(&names);
+    let mut commands = first.take_commands().unwrap();
+    let pipe = names.pipe.clone();
+    let (linked, stopped) = std::thread::spawn(move || {
+        as_unelevated(|| {
+            let linked = send(&pipe, Command::OpenLink(KEY.into()), WAIT);
+            (linked, send(&pipe, Command::ShutdownForUpdate, WAIT))
+        })
+    })
+    .join()
+    .unwrap();
+    linked.unwrap();
+    assert!(stopped.is_err());
+    assert_eq!(commands.try_recv().unwrap(), Command::OpenLink(KEY.into()));
+    assert!(commands.try_recv().is_err());
+}
+
+/// Runs `f` on this thread as UAC runs an unelevated launch: a medium-integrity copy of the
+/// process token whose administrators group is deny-only.
+fn as_unelevated<T>(f: impl FnOnce() -> T) -> T {
+    use windows::Win32::Security::{
+        CreateRestrictedToken, CreateWellKnownSid, DISABLE_MAX_PRIVILEGE, GetLengthSid,
+        ImpersonateLoggedOnUser, PSID, RevertToSelf, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES,
+        SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_DUPLICATE, TOKEN_IMPERSONATE,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenIntegrityLevel, WinBuiltinAdministratorsSid,
+        WinMediumLabelSid,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut admins = [0u8; SECURITY_MAX_SID_SIZE as usize];
+    let mut medium = [0u8; SECURITY_MAX_SID_SIZE as usize];
+    let (admins, medium) = (
+        PSID(admins.as_mut_ptr().cast()),
+        PSID(medium.as_mut_ptr().cast()),
+    );
+    let (mut process, mut lowered) = (HANDLE::default(), HANDLE::default());
+    // SAFETY: SID buffers of the maximum size; tokens opened here, closed by OwnedHandle; the
+    // label struct and SID outlive SetTokenInformation; the thread reverts before returning.
+    unsafe {
+        let mut len = SECURITY_MAX_SID_SIZE;
+        CreateWellKnownSid(WinBuiltinAdministratorsSid, None, Some(admins), &mut len).unwrap();
+        let mut len = SECURITY_MAX_SID_SIZE;
+        CreateWellKnownSid(WinMediumLabelSid, None, Some(medium), &mut len).unwrap();
+        let rights = TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_IMPERSONATE;
+        OpenProcessToken(GetCurrentProcess(), rights, &mut process).unwrap();
+        let _process = OwnedHandle::from_raw_handle(process.0);
+        let deny = [SID_AND_ATTRIBUTES {
+            Sid: admins,
+            Attributes: 0,
+        }];
+        CreateRestrictedToken(
+            process,
+            DISABLE_MAX_PRIVILEGE,
+            Some(&deny),
+            None,
+            None,
+            &mut lowered,
+        )
+        .unwrap();
+        let lowered_owned = OwnedHandle::from_raw_handle(lowered.0);
+        // 0x20 = SE_GROUP_INTEGRITY.
+        let label = TOKEN_MANDATORY_LABEL {
+            Label: SID_AND_ATTRIBUTES {
+                Sid: medium,
+                Attributes: 0x20,
+            },
+        };
+        let size = size_of::<TOKEN_MANDATORY_LABEL>() as u32 + GetLengthSid(medium);
+        SetTokenInformation(
+            lowered,
+            TokenIntegrityLevel,
+            (&raw const label).cast(),
+            size,
+        )
+        .unwrap();
+        ImpersonateLoggedOnUser(lowered).unwrap();
+        let out = f();
+        RevertToSelf().unwrap();
+        drop(lowered_owned);
+        out
+    }
 }

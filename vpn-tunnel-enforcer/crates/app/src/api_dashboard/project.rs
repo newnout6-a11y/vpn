@@ -17,7 +17,7 @@ use vpnte_servers::model::ServerSummary;
 use vpnte_tunnel::api::TunStatus;
 use vpnte_tunnel::fsm::{self, Health, ProcessState, TunnelMode, TunnelSnapshot};
 use vpnte_tunnel::runtime::MAX_RESTARTS;
-use vpnte_ui::dashboard::EngineLine;
+use vpnte_ui::dashboard::{EngineLine, PickLine};
 use vpnte_ui::panels::ServerRowView;
 use vpnte_ui::tray;
 use vpnte_view::identity::{ExitIp, Geo, ServerHealth};
@@ -364,4 +364,16 @@ fn rate(bps: f64) -> u64 {
     } else {
         0
     }
+}
+
+/// The automatic server choice's strip: its step, and what traffic does right now (`exposure`:
+/// read from the live state).
+pub(super) fn pick_line(
+    status: &vpnte_automation::autopick::PickStatus,
+    exposure: vpnte_automation::autopick::Exposure,
+) -> Option<PickLine> {
+    Some(PickLine {
+        title: status.headline()?,
+        body: status.exposure_line(exposure),
+    })
 }

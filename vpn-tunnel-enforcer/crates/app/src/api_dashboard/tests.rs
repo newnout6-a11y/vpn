@@ -832,3 +832,24 @@ async fn lane_warnings_reach_the_user_once() {
     }
     assert_eq!(keys, ["w.one", "w.two"]);
 }
+
+/// Review fix a8/b2: the strip's traffic line is what the live state says, in every step; the
+/// stored step carries no claim of its own (a released block reads «direct» at once).
+#[test]
+fn the_pick_strip_shows_the_live_traffic_line() {
+    use vpnte_automation::autopick::{Exposure, Phase, PickStatus};
+    assert_eq!(
+        project::pick_line(&PickStatus::default(), Exposure::Direct),
+        None
+    );
+    let gave_up = PickStatus {
+        phase: Phase::GaveUp,
+        ..PickStatus::default()
+    };
+    let held = project::pick_line(&gave_up, Exposure::Blocked).unwrap();
+    let released = project::pick_line(&gave_up, Exposure::Direct).unwrap();
+    assert_eq!(held.title, released.title);
+    let body = |line: vpnte_ui::dashboard::PickLine| line.body.unwrap().key.to_string();
+    assert_eq!(body(held), "automation.autopick.exposure.blocked");
+    assert_eq!(body(released), "automation.autopick.exposure.direct");
+}

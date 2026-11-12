@@ -11,9 +11,11 @@ use super::api::use_servers_api;
 use super::batch::BatchDialog;
 use super::detail::ServerDetail;
 use super::group::GroupCard;
+use super::links::use_link_intake;
 use super::model::{AddTarget, ServersView};
 use super::present::{buckets, counts};
 use super::request::RequestDialog;
+use super::schemes::LinkSchemesDialog;
 use super::state::{Bulk, BulkKind, Confirm, Store, reconcile_expanded};
 use crate::pages::{Page, nav_number, use_page_active};
 use crate::t;
@@ -53,6 +55,8 @@ pub fn ServersPage() -> Element {
             }
         }
     });
+    // A link Windows handed over (a browser or messenger) opens the add dialog with it.
+    use_link_intake(&actions);
     // Hosts are resolved for the IP column on the first show (and after imports / refreshes).
     use_hook({
         let actions = actions.clone();
@@ -86,6 +90,7 @@ pub fn ServersPage() -> Element {
         .position(|p| *p == Page::Servers)
         .map(nav_number);
     let (a_ping, a_keys, a_proxies) = (actions.clone(), actions.clone(), actions.clone());
+    let a_schemes = actions.clone();
     let (mut add_open, mut batch_open) = (store.add_open, store.batch_open);
     let exporting = matches!(*store.bulk.read(), Some(Bulk::Working(_)));
     rsx! {
@@ -111,6 +116,12 @@ pub fn ServersPage() -> Element {
                     title: t!("ui.servers.batch.openTitle"),
                     onclick: move |_| batch_open.set(true),
                     {t!("ui.servers.batch.open")}
+                }
+                Button {
+                    kind: ButtonKind::Ghost,
+                    title: t!("ui.servers.phones.schemesOpenTitle"),
+                    onclick: move |_| a_schemes.open_schemes(),
+                    {t!("ui.servers.phones.schemesOpen")}
                 }
             }
             div { class: "srv-strip-facts",
@@ -165,6 +176,7 @@ pub fn ServersPage() -> Element {
             RequestDialog {}
             ServerDetail {}
             BatchDialog {}
+            LinkSchemesDialog {}
             ConfirmDialogs {}
         }
     }

@@ -122,7 +122,9 @@ pub(super) async fn get(
         let Some(next) = policy::normalize_redirect(&location, &current) else {
             return Ok(Answer::Unusable("redirect without a usable Location"));
         };
-        let target = match deeplink::unwrap_deeplink(&next) {
+        // The hop policy below judges the carried URL by this redirect's origin and the
+        // resolved addresses, so the deep-link rule "internet hosts only" does not apply here.
+        let target = match deeplink::unwrap_redirect(&next) {
             Ok(Some(inner)) => inner,
             _ => next,
         };

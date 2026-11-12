@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 use vpnte_base::types::ClientDevice;
 
 use super::actions::{Actions, fetch_error_text};
+use super::links::AddSources;
 use super::model::{AddTarget, GroupSource, ImportReport};
 use super::present::{DEVICES, device_label, sort_groups};
 use crate::lang::tr;
@@ -59,7 +60,7 @@ pub(crate) fn AddDialog() -> Element {
             Button { kind: ButtonKind::Ghost, onclick: move |_| close(), {t!("common.cancel")} }
             Button {
                 busy: f.busy,
-                disabled: blank,
+                disabled: blank || f.reading,
                 onclick: move |_| a_submit.add(),
                 {t!("servers.addServer")}
             }
@@ -78,6 +79,10 @@ pub(crate) fn AddDialog() -> Element {
                 Report { report }
             } else {
                 div { class: "srv-add",
+                    if f.from_link {
+                        p { class: "srv-strip is-info", role: "status", {t!("ui.servers.phones.fromLink")} }
+                    }
+                    AddSources {}
                     Field { label: t!("ui.servers.add.keyLabel"), hint: t!("ui.servers.add.hint"), error,
                         TextArea {
                             value: f.input.clone(),
@@ -85,10 +90,11 @@ pub(crate) fn AddDialog() -> Element {
                                 let mut f = form.write();
                                 f.input = text;
                                 f.error = None;
+                                f.from_link = false;
                             },
                             rows: 4,
                             placeholder: t!("servers.addPlaceholder"),
-                            disabled: f.busy,
+                            disabled: f.busy || f.reading,
                             invalid: f.error.is_some(),
                             mono: true,
                             on_submit: move |_| a_enter.add(),

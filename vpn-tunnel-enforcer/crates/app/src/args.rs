@@ -20,6 +20,9 @@ pub enum SetupCommand {
     StampShortcuts,
     /// Start the installed app as the desktop user, without elevation, and return at once.
     LaunchAsUser,
+    /// Register the free link schemes for the installed exe (a first install), or point ours at
+    /// it again (an upgrade); schemes the user turned off stay off.
+    RegisterLinks,
 }
 
 /// A parsed `--setup` request.
@@ -46,12 +49,17 @@ pub struct Args {
     /// Initialise without UI and elevation, print one line and exit: the installer smoke test.
     pub smoke: bool,
     pub version: bool,
+    /// A link Windows opened with us (`"<exe>" --open-link "%1"`, `vpnte_winnet::url_scheme`):
+    /// shown in the add dialog of the Servers page for the user to confirm.
+    pub open_link: Option<String>,
     /// `Err` is a usage error (one English line for stderr; exit code 2).
     pub setup: Option<Result<Setup, String>>,
 }
 
 impl Args {
-    /// Parses the arguments after the program name.
+    /// Parses the arguments after the program name. `--open-link` ends the parsing: whatever
+    /// follows it came from the link (a page can put `" --setup uninstall` into one), so it is
+    /// never read as a flag.
     pub fn parse(args: impl IntoIterator<Item = String>) -> Self {
         let mut out = Args::default();
         let mut setup: Option<Result<SetupCommand, String>> = None;
@@ -60,6 +68,10 @@ impl Args {
         let mut iter = args.into_iter();
         while let Some(arg) = iter.next() {
             match arg.as_str() {
+                vpnte_winnet::url_scheme::OPEN_LINK_FLAG => {
+                    out.open_link = iter.next().filter(|link| !link.trim().is_empty());
+                    break;
+                }
                 "--autostart" => out.autostart = true,
                 "--no-elevate" => out.no_elevate = true,
                 "--elevated-relaunch" => out.elevated_relaunch = true,
@@ -75,6 +87,7 @@ impl Args {
                         Some("uninstall") => Ok(SetupCommand::Uninstall),
                         Some("stamp-shortcuts") => Ok(SetupCommand::StampShortcuts),
                         Some("launch-as-user") => Ok(SetupCommand::LaunchAsUser),
+                        Some("register-links") => Ok(SetupCommand::RegisterLinks),
                         Some(other) => Err(format!("Unknown setup command: {}", ascii(other))),
                         None => Err("Missing setup command".to_owned()),
                     });
@@ -179,6 +192,12 @@ mod tests {
             setup(&["--setup", "launch-as-user"]).unwrap().command,
             SetupCommand::LaunchAsUser
         );
+        assert_eq!(
+            setup(&["--setup", "register-links", "--install-dir", "D:\\x"])
+                .unwrap()
+                .command,
+            SetupCommand::RegisterLinks
+        );
     }
 
     #[test]
@@ -202,5 +221,28 @@ mod tests {
         let a = parse(&["--updated", "--type=renderer", "whatever", "--smoke"]);
         assert!(a.smoke);
         assert!(!a.autostart && !a.cleanup && a.setup.is_none());
+    }
+
+    /// RU-2026 item 4: the registered command hands the link over as one argument; anything after
+    /// it came from the link and is never a flag (a link cannot start the uninstall helper).
+    #[test]
+    fn a_link_ends_the_command_line() {
+        let a = parse(&["--open-link", "vless://u@h.example:443?type=tcp#Мой ключ"]);
+        assert_eq!(
+            a.open_link.as_deref(),
+            Some("vless://u@h.example:443?type=tcp#Мой ключ")
+        );
+        let a = parse(&[
+            "--open-link",
+            "vless://x",
+            "--setup",
+            "uninstall",
+            "--cleanup",
+            "--shutdown-for-update",
+        ]);
+        assert_eq!(a.open_link.as_deref(), Some("vless://x"));
+        assert!(a.setup.is_none() && !a.cleanup && !a.shutdown_for_update);
+        assert_eq!(parse(&["--open-link"]).open_link, None);
+        assert_eq!(parse(&["--open-link", "  "]).open_link, None);
     }
 }

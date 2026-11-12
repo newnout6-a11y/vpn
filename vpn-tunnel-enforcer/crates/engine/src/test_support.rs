@@ -24,6 +24,83 @@ pub(crate) fn xray_exe() -> Option<PathBuf> {
     exe.is_file().then_some(exe)
 }
 
+/// The WP-12 lab engine mihomo (`cargo xtask engines` puts it in the dev drop), when present.
+#[cfg(feature = "lab")]
+pub(crate) fn mihomo_exe() -> Option<PathBuf> {
+    let exe = resources().join("mihomo.exe");
+    exe.is_file().then_some(exe)
+}
+
+/// An AmneziaWG profile with obviously fake keys: `interface` lines are added to `[Interface]`
+/// (AWG parameters), the peer dials `endpoint`.
+#[cfg(feature = "lab")]
+pub(crate) fn awg_profile(interface: &str, endpoint: &str) -> vpnte_profiles::model::Profile {
+    let conf = format!(
+        "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.8.1.2/32\n\
+         {interface}\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\n\
+         Endpoint = {endpoint}\n"
+    );
+    vpnte_profiles::wg_ini::parse_wg_ini(&conf)
+        .expect("a .conf")
+        .expect("valid")
+}
+
+/// `[Interface]` AmneziaWG parameters of each generation (bounds of `awg::validate`).
+#[cfg(feature = "lab")]
+pub(crate) mod awg_samples {
+    pub(crate) const V1_0: &str = "Jc = 4\nJmin = 40\nJmax = 70\nS1 = 15\nS2 = 18\nH1 = 1020325451\nH2 = 3288052141\nH3 = 2528465083\nH4 = 1766607858";
+    const DNS_I1: &str = "<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c000100010000105a00044d583737>";
+    const HPK: &str = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
+
+    pub(crate) fn v1_5() -> String {
+        format!(
+            "{V1_0}\nI1 = <b 0xf6ab3267fa><c><b 0xf6ab><t><r 10>\nJ1 = <b 0xffffffff><c><b 0xf6ab><t><r 10>\nJ2 = <c><b 0xf6ab><t><wt 1000>\nItime = 60"
+        )
+    }
+
+    pub(crate) fn v2_0() -> String {
+        format!(
+            "Jc = 5\nJmin = 500\nJmax = 501\nS1 = 30\nS2 = 40\nS3 = 50\nS4 = 8\nH1 = 100000-200000\nH2 = 300000-400000\nH3 = 500000-600000\nH4 = 700000-800000\nI1 = {DNS_I1}\nI2 = <b 0xf6ab3267fa><r 100>"
+        )
+    }
+
+    pub(crate) fn v3_1() -> String {
+        format!(
+            "Jc = 5\nJmin = 10\nJmax = 50\nS1 = 12\nS2 = 12\nS3 = 12\nS4 = 12\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\nI1 = {DNS_I1}\nHeaderProtectionKey = {HPK}\nContentPaddingAddition = 10-100\nRekeyAfterTime = 100-120\nRekeyTimeout = 3-7\nRejectAfterTime = 150-180\nKeepaliveTimeout = 5-15\nMaxHandshakeAttempts = 15-20\nRandomTrailers = on\nDisableCookies = on"
+        )
+    }
+}
+
+/// Fresh loopback endpoints of one mihomo run (SOCKS listener, hop, controller).
+#[cfg(feature = "lab")]
+pub(crate) fn mihomo_endpoints() -> (
+    crate::slot::SlotEndpoint,
+    crate::mihomo_config::HopEndpoint,
+    crate::clash_api::ClashEndpoint,
+) {
+    let socks = crate::slot::SlotEndpoint::allocate(&[]).unwrap();
+    let hop = crate::mihomo_config::HopEndpoint::allocate(&[socks.port()]).unwrap();
+    let controller =
+        crate::clash_api::ClashEndpoint::allocate(&[socks.port(), hop.port()]).unwrap();
+    (socks, hop, controller)
+}
+
+/// Opens the lab gate of this test process with a complete record in a throw-away dir (tests
+/// that need it closed use `lab::select` with an explicit gate instead).
+#[cfg(feature = "lab")]
+pub(crate) fn open_lab_gate() {
+    let dir = TempDir::new("lab-gate");
+    let path = crate::lab::record_path(dir.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let record = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "passed": crate::lab::REQUIRED,
+        "by": "engine tests",
+    });
+    std::fs::write(path, record.to_string()).unwrap();
+    crate::lab::activate(dir.path()).expect("complete record");
+}
+
 /// No console window for engines started by tests.
 pub(crate) fn hidden(cmd: &mut Command) -> &mut Command {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;

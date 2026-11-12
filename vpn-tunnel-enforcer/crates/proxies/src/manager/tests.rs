@@ -1331,3 +1331,33 @@ async fn borrowed_slots_are_never_leased() {
         added
     );
 }
+
+/// Audit item 18: an unelevated slot runs a provider's TLS spoof without it, and its row says so
+/// for as long as that engine runs (a passed probe keeps the note; a stop clears it).
+#[tokio::test]
+async fn a_dropped_tls_spoof_stays_on_the_slot_row() {
+    let spoofed = ProxyProfile {
+        name: "Spoofed".into(),
+        profile: crate::test_support::spoofed(),
+        ..sample(1)
+    };
+    let r = rig(vec![spoofed], slow_timing());
+    let started = r.manager.start(connect(1, "profile-1")).await.unwrap();
+    let config = r.launch.configs.lock()[0].clone();
+    let elevated = vpnte_winnet::elevation::is_elevated();
+    assert_eq!(
+        config["outbounds"][0]["tls"].get("spoof").is_some(),
+        elevated
+    );
+    let note = vpnte_base::Msg::new("proxies.slot.spoofDropped").arg("name", "Spoofed");
+    let expected = (!elevated).then_some(note);
+    assert_eq!(started.instance.notice, expected);
+
+    r.manager.check_health(slot(1)).await;
+    let probed = r.manager.status(slot(1)).await.instance;
+    assert_eq!(probed.health, Health::Healthy);
+    assert_eq!(probed.notice, expected, "a passed probe keeps the note");
+
+    let stopped = r.manager.stop(slot(1), StopReason::Ui).await.unwrap();
+    assert_eq!(stopped.instance.notice, None);
+}

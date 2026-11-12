@@ -1,5 +1,6 @@
 //! The notices above the facts strip, in the reference markup: auto-restart, a second TUN, the
-//! kill-switch banner, the leak card, the foreign-VPN notice strip and the network-mode strip.
+//! kill-switch banner, the leak card, the foreign-VPN notice strip, the automatic server choice's
+//! strip and the network-mode strip.
 //! The old Tailwind classes are kept (utilities.css draws them; the inert `…/NN` tint classes
 //! stay inert, as shipped).
 use dioxus::prelude::*;
@@ -31,7 +32,26 @@ pub(super) fn Banners() -> Element {
         if let Some(name) = shown.foreign_vpn {
             ForeignVpnNotice { name }
         }
+        if let Some(line) = dash.snapshot().autopick {
+            PickStrip { title: tr(&line.title), body: line.body.as_ref().map(tr) }
+        }
         super::netmode::NetBanner {}
+    }
+}
+
+/// The automatic server choice's step: a quiet strip (it never claims a success it has not seen;
+/// during the retries the body says whether traffic goes direct or is held).
+#[component]
+fn PickStrip(title: String, body: Option<String>) -> Element {
+    rsx! {
+        div { class: "overflow-hidden",
+            div { class: "c-swiss swiss-notice", role: "status", aria_live: "polite",
+                span { class: "swiss-label swiss-notice-tag", "{title}" }
+                if let Some(body) = body {
+                    p { class: "swiss-notice-body", "{body}" }
+                }
+            }
+        }
     }
 }
 

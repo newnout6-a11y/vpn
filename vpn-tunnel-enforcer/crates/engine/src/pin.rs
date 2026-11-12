@@ -84,6 +84,8 @@ fn engine_files(engine: Engine, exe: &Path) -> Vec<(PathBuf, &'static str)> {
             (dir.join("wintun.dll"), "wintun.dll"),
         ],
         Engine::Xray => vec![(exe.to_owned(), "xray.exe")],
+        #[cfg(feature = "lab")]
+        Engine::Mihomo => vec![(exe.to_owned(), "mihomo.exe")],
     }
 }
 

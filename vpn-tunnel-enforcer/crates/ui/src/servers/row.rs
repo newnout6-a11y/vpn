@@ -335,6 +335,8 @@ fn engine_items(current: EnginePref) -> Vec<MenuItem> {
                 EnginePref::Auto => t!("ui.servers.menu.engineAuto"),
                 EnginePref::SingBox => t!("ui.servers.menu.engineSingBox"),
                 EnginePref::Xray => t!("ui.servers.menu.engineXray"),
+                #[cfg(feature = "lab")]
+                EnginePref::Mihomo => t!("ui.servers.menu.engineMihomo"),
             };
             let chosen = (pref == current).then(|| t!("ui.servers.menu.engineCurrent"));
             MenuItem::new(id, label).blocked(chosen)

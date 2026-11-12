@@ -28,6 +28,11 @@ pub const LOCALES: &[(&str, &str)] = &[
         include_str!("../locales/tunnel-runtime.ru.json"),
         include_str!("../locales/tunnel-runtime.en.json"),
     ),
+    // w7-mihomo: the TLS-spoof notice, and lab texts (WP-12) that only a `lab` build shows.
+    (
+        include_str!("../locales/w7-mihomo.ru.json"),
+        include_str!("../locales/w7-mihomo.en.json"),
+    ),
 ];
 
 pub mod api;

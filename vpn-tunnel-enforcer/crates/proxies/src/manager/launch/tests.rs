@@ -3,7 +3,7 @@ use vpnte_base::types::{ClientDevice, EnginePref};
 use vpnte_profiles::model::{Host, Reality, Tls, Transport};
 
 use super::*;
-use crate::test_support::{self, vless};
+use crate::test_support::{self, spoofed, vless};
 
 const RESOURCES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources");
 
@@ -228,4 +228,56 @@ async fn engine_refusal_is_its_own_message() {
     assert_eq!(msg.key, "engine.xray.reject.noXrayClient");
     let app: vpnte_base::AppError = err.into();
     assert_eq!(app.kind, vpnte_base::ErrorKind::Validation);
+}
+
+/// Audit item 18 on the slot path: unelevated the spoof keys leave the slot config with the
+/// row's note naming the server; elevated they stay and nothing is said.
+#[test]
+fn tls_spoof_needs_an_elevated_slot() {
+    let emit = || emit_singbox(&spoofed(), PROXY_OUT_TAG, &EmitPolicy::default()).unwrap();
+    let tls = |f: &SingBoxFragment| f.outbounds()[0]["tls"].clone();
+
+    let mut kept = emit();
+    assert_eq!(gate_spoof(&mut kept, "Spoofed", true), None);
+    assert_eq!(tls(&kept)["spoof"], "decoy.example");
+
+    let mut dropped = emit();
+    let note = gate_spoof(&mut dropped, "Spoofed", false).expect("a note");
+    assert_eq!(
+        note,
+        Msg::new("proxies.slot.spoofDropped").arg("name", "Spoofed")
+    );
+    let tls = tls(&dropped);
+    assert!(
+        tls.get("spoof").is_none() && tls.get("spoof_method").is_none(),
+        "{tls}"
+    );
+    assert_eq!(tls["server_name"], "example.com", "the rest of tls stays");
+}
+
+/// The prepared slot config follows this process's rights (CI runs both: the workstation
+/// unelevated, the CI job elevated), and the plan carries the note exactly when it dropped.
+#[tokio::test]
+async fn prepared_slot_config_follows_the_process_rights() {
+    let plan = prepare(
+        &spoofed(),
+        17993,
+        EngineChoice::default(),
+        &Names::default(),
+    )
+    .await
+    .unwrap();
+    let config: Value = serde_json::from_slice(&plan.singbox).unwrap();
+    let tls = &config["outbounds"][0]["tls"];
+    if is_elevated() {
+        assert_eq!(tls["spoof"], "decoy.example");
+        assert!(plan.notice.is_none());
+    } else {
+        assert!(
+            tls.get("spoof").is_none() && tls.get("spoof_method").is_none(),
+            "{tls}"
+        );
+        let note = plan.notice.expect("the row's note");
+        assert_eq!(note.key, "proxies.slot.spoofDropped");
+    }
 }

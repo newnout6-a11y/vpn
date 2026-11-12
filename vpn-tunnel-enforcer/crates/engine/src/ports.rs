@@ -52,13 +52,18 @@ fn binds(port: u16, udp: bool) -> bool {
 
 /// 16 bytes from the OS CSPRNG as 32 lowercase hex chars. Never persisted, logged or shown.
 pub fn secret() -> String {
+    hex::encode(random16())
+}
+
+/// 16 bytes from the OS CSPRNG (a key or a secret; never persisted, logged or shown).
+pub(crate) fn random16() -> [u8; 16] {
     let mut bytes = [0u8; 16];
     // WHY panic: there is no safe fallback for a secret, and `ProcessPrng` does not fail on
     // supported Windows versions (std's `HashMap` seeding makes the same assumption).
     if let Err(err) = getrandom::fill(&mut bytes) {
         panic!("OS random generator failed: {err}");
     }
-    hex::encode(bytes)
+    bytes
 }
 
 /// A fresh user/password pair for an app-owned loopback listener.

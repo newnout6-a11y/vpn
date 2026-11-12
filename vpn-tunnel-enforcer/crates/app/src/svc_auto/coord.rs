@@ -9,6 +9,7 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, watch};
+use vpnte_automation::autopick::UserActs;
 use vpnte_automation::coordinator::{
     ConnectOutcome, ConnectRequest, Coordinator, LifecycleEvent, NoticeCategory, OpError,
     ProxyEndpoint, RuntimeId, SessionInfo, SessionKind, SwitchError,
@@ -35,6 +36,20 @@ const STARTED_WAIT: Duration = Duration::from_secs(5);
 /// How long a restore after a lost switch waits for the lane's own recovery stop (a Soft
 /// rollback and an engine stop: seconds; its own budget is the lane's 120 s).
 const RESTORE_WAIT: Duration = Duration::from_secs(30);
+
+/// What the user did, as the automatic paths count it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserAct {
+    /// Connect (window or tray).
+    Connect,
+    /// Disconnect, or Cancel of a connect or switch in flight: nothing automatic until the user
+    /// connects again.
+    Stop,
+    /// A server picked by hand.
+    Pick,
+    /// A changed setting, or a Cancel with nothing in flight.
+    Change,
+}
 
 /// The adaptive bypass and the profile views it starts from (set once after both exist: they
 /// hold the coordinator themselves).
@@ -82,6 +97,9 @@ pub struct AppCoordinator {
     /// The owner of a restore waiting for the lane after a lost switch; a stop meanwhile takes
     /// it (that owner's, a higher one's, the user's), and the restore then starts nothing.
     restoring: Mutex<Option<Owner>>,
+    /// The user's own actions: automation that started before gives up (the automatic server
+    /// choice never acts against the user).
+    user_acts: watch::Sender<UserActs>,
     pub(super) hooks: OnceLock<Hooks>,
 }
 
@@ -103,13 +121,36 @@ impl AppCoordinator {
             started: watch::Sender::new(0),
             pending_stop: Mutex::new(None),
             restoring: Mutex::new(None),
+            user_acts: watch::Sender::new(UserActs::default()),
             hooks: OnceLock::new(),
         }
     }
 
-    /// The user stops protection straight at the lane: a restore on its way must not undo it.
-    pub fn user_stops(&self) {
-        self.restoring.lock().take();
+    /// The user acted. A connect, a stop or a server picked by hand also drops a restore on its
+    /// way after a lost switch: it must not undo the user's choice (a changed setting does not
+    /// decide the lane, so the restore goes on).
+    pub fn user_acted(&self, act: UserAct) {
+        if act != UserAct::Change {
+            self.restoring.lock().take();
+        }
+        self.user_acts.send_modify(|a| {
+            a.seq += 1;
+            match act {
+                UserAct::Connect => a.stopped = false,
+                UserAct::Stop => a.stopped = true,
+                UserAct::Pick | UserAct::Change => {}
+            }
+        });
+    }
+
+    /// The user's own actions.
+    pub fn user_acts(&self) -> watch::Receiver<UserActs> {
+        self.user_acts.subscribe()
+    }
+
+    /// TUN capture exists in this process (what `connect` refuses without).
+    pub fn tun_capture(&self) -> bool {
+        self.tun
     }
 
     /// Starts `target` for `owner` in the mode the adaptive bypass picks for this network and
@@ -120,6 +161,10 @@ impl AppCoordinator {
         owner: Owner,
         source: Source,
     ) -> Result<Done, ConnError> {
+        // The user's own connect (window or tray); a restore of their session is not one.
+        if owner == Owner::Manual && matches!(source, Source::Ui | Source::Tray) {
+            self.user_acted(UserAct::Connect);
+        }
         let kind = decide::target_kind(&target);
         let profile = match &target {
             ConnectTarget::DirectVpn { profile_id } | ConnectTarget::SoftVpn { profile_id } => {

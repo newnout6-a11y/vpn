@@ -85,34 +85,54 @@ pub enum Instance {
 
 /// The single-instance check, before anything touches the data dir or the network. The lock is
 /// per Windows session (owner decision 12): each signed-in user runs their own copy. A second
-/// launch in the session hands `activate` or `shutdown-for-update` to the running instance and
-/// exits `0` silently (installer contract). `--shutdown-for-update` without a running instance
-/// starts nothing.
+/// launch in the session hands `activate`, its link (`--open-link`) or `shutdown-for-update` to
+/// the running instance and exits `0` silently (installer contract); a link the running copy did
+/// not take is reported in a short box. `--shutdown-for-update` without a running instance starts
+/// nothing; a link without one starts the app with it.
 pub fn single_instance(args: &Args) -> Instance {
     match InstanceNames::production() {
-        Ok(names) => single_instance_with(&names, args),
+        Ok(names) => single_instance_with(&names, args, link_not_taken),
         Err(err) => refuse_start(&err),
     }
 }
 
-fn single_instance_with(names: &InstanceNames, args: &Args) -> Instance {
-    let command = if args.shutdown_for_update {
-        Command::ShutdownForUpdate
-    } else {
-        Command::Activate
+fn single_instance_with(names: &InstanceNames, args: &Args, link_lost: impl FnOnce()) -> Instance {
+    let command = match (&args.open_link, args.shutdown_for_update) {
+        (_, true) => Command::ShutdownForUpdate,
+        (Some(link), false) => Command::OpenLink(link.clone()),
+        (None, false) => Command::Activate,
     };
     match single_instance::acquire(names) {
-        Ok(Acquire::Primary(primary)) if command == Command::Activate => Instance::Primary(primary),
+        Ok(Acquire::Primary(primary)) if command != Command::ShutdownForUpdate => {
+            Instance::Primary(primary)
+        }
         Ok(Acquire::Primary(_)) => Instance::Exit(ExitCode::SUCCESS),
         Ok(Acquire::Secondary) => {
-            // No log exists yet (it belongs to the running instance): nothing to report.
-            let _ = single_instance::send(&names.pipe, command, HANDOFF_TIMEOUT);
+            // No log exists yet (it belongs to the running instance). A link the running copy did
+            // not take (it has no pipe, the pipe is not ours, the link is too long) is not retried
+            // as a bare activation: a window without it would look like it was imported. The
+            // user is told instead, so a clicked link never ends in nothing.
+            let link = matches!(command, Command::OpenLink(_));
+            if single_instance::send(&names.pipe, command, HANDOFF_TIMEOUT).is_err() && link {
+                link_lost();
+            }
             Instance::Exit(ExitCode::SUCCESS)
         }
         // An unexpected mutex failure: running unguarded could let two instances fight over
         // the same system proxy, so refuse to start.
         Err(err) => refuse_start(&err),
     }
+}
+
+/// The running copy did not take a clicked link: say so and how to add it by hand.
+fn link_not_taken() {
+    use windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION;
+    let lang = vpnte_ui::lang::os_lang();
+    message_box(
+        &[Msg::new("app.phones.linkNotTaken")],
+        lang,
+        MB_ICONINFORMATION,
+    );
 }
 
 fn refuse_start(err: &AppError) -> Instance {
@@ -133,12 +153,15 @@ pub fn set_identity() {
 
 /// Start-up chores of a shipped (release) build, on their own thread so the window never waits:
 /// the per-user autostart `Run` value follows the setting (re-pointed at this exe; the 1.x logon
-/// task goes), and a stale dev `Electron.lnk` that hijacks the taskbar identity is removed
-/// (lifecycle-app §3.16, §3.24). A debug build skips both: its exe is a build artifact, and a
-/// development run must not rewrite the user's real `Run` value or Start menu.
+/// task goes), the link schemes are registered on this user's first start (later: ours re-pointed
+/// at this exe), and a stale dev `Electron.lnk` that hijacks the taskbar identity is removed
+/// (lifecycle-app §3.16, §3.24). A debug build skips all three: its exe is a build artifact, and
+/// a development run must not rewrite the user's real `Run` value, link schemes or Start menu.
 pub fn spawn_housekeeping(settings: &Store<Settings>) {
     if cfg!(debug_assertions) {
-        tracing::info!("autostart sync and taskbar identity heal skipped in a debug build");
+        tracing::info!(
+            "autostart sync, link schemes and taskbar identity heal skipped in a debug build"
+        );
         return;
     }
     let enabled = settings.read(|s| s.autostart);
@@ -146,6 +169,7 @@ pub fn spawn_housekeeping(settings: &Store<Settings>) {
         .name("housekeeping".into())
         .spawn(move || {
             sync_autostart(enabled);
+            crate::setup::links::sync_at_start();
             heal_taskbar_identity();
         });
     if let Err(err) = spawned {
@@ -218,7 +242,11 @@ pub fn start_failed(err: &AppError, lang: Lang) {
         Msg::new("app.main.startFailed.message"),
         err.user_msg(),
     ];
-    message_box(&text, lang);
+    message_box(
+        &text,
+        lang,
+        windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+    );
 }
 
 /// Ends the process with `code` now. The caller has run the bounded cleanup (which drained the
@@ -227,26 +255,21 @@ pub fn exit(code: u8) -> ! {
     std::process::exit(i32::from(code))
 }
 
-/// A blocking error box for a start that has no window: `lines` rendered in `lang` as
-/// paragraphs, under the product name.
-fn message_box(lines: &[Msg], lang: Lang) {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MessageBoxW,
-    };
+/// A blocking box for a launch that has no window: `lines` rendered in `lang` as paragraphs,
+/// under the product name.
+fn message_box(
+    lines: &[Msg],
+    lang: Lang,
+    icon: windows::Win32::UI::WindowsAndMessaging::MESSAGEBOX_STYLE,
+) {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_OK, MB_SETFOREGROUND, MessageBoxW};
     // Idempotent: the window path registers the same layers before launch.
     vpnte_ui::lang::init_locales(&crate::svc_core::locale_layers());
     let text: Vec<String> = lines.iter().map(|line| line.render(lang)).collect();
     let text = windows::core::HSTRING::from(text.join("\n\n"));
     let caption = windows::core::HSTRING::from(vpnte_ui::launch::APP_NAME);
     // SAFETY: both strings are NUL-terminated HSTRINGs that outlive the call; no owner window.
-    unsafe {
-        MessageBoxW(
-            None,
-            &text,
-            &caption,
-            MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
-        )
-    };
+    unsafe { MessageBoxW(None, &text, &caption, MB_OK | icon | MB_SETFOREGROUND) };
 }
 
 #[cfg(test)]

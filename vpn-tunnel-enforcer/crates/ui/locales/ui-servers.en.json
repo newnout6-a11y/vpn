@@ -545,6 +545,42 @@
       },
       "hidden": {
         "refused": "The provider hid the server settings of this subscription: the key cannot be shown, copied or exported"
+      },
+      "phones": {
+        "sources": "Take from",
+        "clipboard": "Clipboard",
+        "clipboardTitle": "Put the text of the clipboard into the field",
+        "file": "File…",
+        "fileTitle": "Open a key or config file: .txt, .conf, .json, .yaml",
+        "qrFile": "QR from a picture…",
+        "qrFileTitle": "Read the QR codes of a screenshot or a photo",
+        "qrScreen": "QR on screen",
+        "qrScreenTitle": "The window hides for half a second while the QR codes on every screen are read",
+        "fromLink": "A browser or messenger opened this link in the app. Check it and press «Add server»: nothing is added without that.",
+        "schemesOpen": "Links",
+        "schemesOpenTitle": "Which links (vless://, hiddify://import/ …) Windows opens in this app",
+        "schemesTitle": "Links from browsers and messengers",
+        "schemesDescription": "Checked links open in this app: it shows them in the add dialog, and nothing is added until you confirm.",
+        "schemesLoading": "Reading the link settings…",
+        "keysSection": "Server keys",
+        "importSection": "Subscriptions from other clients",
+        "free": "Not taken by any program",
+        "ours": "Opens in this app",
+        "other": "Opens in {{name}}; checking it takes the link over, unchecking gives it back",
+        "otherUnknown": "Opens in another program; checking it takes the link over, unchecking gives it back",
+        "chosen": "Opens in {{name}}, as chosen in Windows. To open these links here, pick this app in Settings → Apps → Default apps",
+        "portableNote": "This copy runs without installation and does not register links by itself.",
+        "adopt": "Open links here",
+        "cryptNote": "Encrypted Happ links (crypt4, crypt5) can only be opened by Happ.",
+        "qr": {
+          "title": "QR code",
+          "hint": "Show the key as a QR code to scan it with a phone (Happ, v2rayNG, Hiddify, v2RayTun).",
+          "show": "Show QR code",
+          "loading": "Making the QR code…",
+          "hide": "Hide QR code",
+          "warning": "This is your key: whoever scans it can use your server. Do not show it to anyone else.",
+          "failed": "No QR code:"
+        }
       }
     }
   },

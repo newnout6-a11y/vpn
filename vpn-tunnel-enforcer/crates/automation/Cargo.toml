@@ -29,5 +29,9 @@ vpnte-winnet.workspace = true
 windows.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+# Paused clock for the automatic-choice timing tests (stall window, backoff, retry rounds).
+tokio = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true

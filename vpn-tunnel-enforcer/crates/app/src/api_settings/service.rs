@@ -135,6 +135,10 @@ impl SettingsApi for SettingsService {
         }))
     }
 
+    async fn set_launch(&self, choice: LaunchChoice) -> AppResult<()> {
+        super::launch::set_launch(self.shared(), choice).await
+    }
+
     async fn set_rotation(&self, patch: RotationPatch) -> AppResult<()> {
         auto::set_rotation(self.shared(), patch).await
     }

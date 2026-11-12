@@ -24,15 +24,16 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use vpnte_automation::autopick::PickStatus;
 use vpnte_base::Msg;
 use vpnte_base::i18n::Lang;
-use vpnte_base::types::Verdict;
+use vpnte_base::types::{KillSwitchLevel, Verdict};
 use vpnte_core::ops::OpId;
 use vpnte_core::settings::RoutingMode;
 use vpnte_forensics::traffic::TrafficStats;
 use vpnte_probes::ip_monitor::IpEvidence;
 use vpnte_profiles::countries::Iso2;
-use vpnte_tunnel::api::TunStatus;
+use vpnte_tunnel::api::{CaptureKind, TunStatus};
 use vpnte_tunnel::fsm::{Transition, TunnelSnapshot, TunnelState};
 use vpnte_ui::dashboard::{DashboardApi, DashboardView};
 use vpnte_ui::panels::{PanelsApi, ProxiesView, ServersView};
@@ -41,6 +42,7 @@ use vpnte_view::labels::FirewallStatus;
 use vpnte_view::traffic::TrafficSample;
 
 use crate::services::{Backend, TunnelOps};
+use crate::svc_auto::{Automation, traffic_exposure};
 use crate::svc_proxies::ProxySlots;
 use project::{Clock, ConnLocal};
 
@@ -48,8 +50,9 @@ use project::{Clock, ConnLocal};
 /// `Rc<dyn DashboardApi>`, `Rc<dyn PanelsApi>`, `Rc<dyn TrayApi>`. Call it inside the tokio
 /// runtime, after the tunnel was stored in `backend.tunnel`: it starts the feed tasks (stopped by
 /// `backend.shutdown`).
-pub fn contexts(backend: &Arc<Backend>) -> Vec<Box<dyn Any>> {
-    let hub = Hub::new(backend.clone());
+pub fn contexts(backend: &Arc<Backend>, automation: &Automation) -> Vec<Box<dyn Any>> {
+    let pick = automation.autopick.get().map(|p| p.status());
+    let hub = Hub::new(backend.clone(), pick);
     feeds::spawn(&hub);
     proxies::spawn_feed(&hub);
     vec![
@@ -67,6 +70,8 @@ pub(crate) struct Hub {
     watches: Option<Watches>,
     /// The external proxy slots the tunnel hosts (`None`: the column stays empty).
     slots: Option<ProxySlots>,
+    /// The automatic server choice's status (`None`: not started, the strip stays hidden).
+    pick: Option<watch::Receiver<PickStatus>>,
     local: Mutex<Local>,
     dash: watch::Sender<DashboardView>,
     servers: watch::Sender<ServersView>,
@@ -140,10 +145,11 @@ struct Prefs {
     smart_ru: bool,
     minimize_to_tray: bool,
     lang: Lang,
+    kill_switch: KillSwitchLevel,
 }
 
 impl Hub {
-    fn new(backend: Arc<Backend>) -> Arc<Self> {
+    fn new(backend: Arc<Backend>, pick: Option<watch::Receiver<PickStatus>>) -> Arc<Self> {
         let watches = match backend.tunnel() {
             Ok(tunnel) => Some(Watches {
                 tunnel: tunnel.clone(),
@@ -167,6 +173,7 @@ impl Hub {
         }
         let hub = Arc::new(Self {
             slots: watches.as_ref().and_then(|w| w.tunnel.proxies()),
+            pick,
             backend,
             watches,
             local: Mutex::new(local),
@@ -189,6 +196,7 @@ impl Hub {
             smart_ru: s.smart_ru_split,
             minimize_to_tray: s.minimize_to_tray,
             lang: s.locale.unwrap_or_else(vpnte_ui::lang::os_lang),
+            kill_switch: s.kill_switch,
         })
     }
 
@@ -207,6 +215,12 @@ impl Hub {
                 let snap = w.snapshot.borrow();
                 let clock = local.clock_for(&snap);
                 let status = w.status.borrow();
+                // What traffic does is read from the live state on every projection (never a
+                // claim stored with the automatic choice's step).
+                let proxy = (status.capture).map_or(prefs.soft_mode, |c| c == CaptureKind::Proxy);
+                let exposure = traffic_exposure(snap.state, proxy, prefs.kill_switch);
+                let autopick =
+                    (self.pick.as_ref()).and_then(|p| project::pick_line(&p.borrow(), exposure));
                 let conn = project::conn_view(&snap, &status, &local.conn, &clock);
                 let (exit, exit_country) =
                     project::exit_ip(&snap, &w.evidence.borrow(), local.geo, prefs.lang);
@@ -220,6 +234,7 @@ impl Hub {
                     leak: local.leak,
                     soft_mode: prefs.soft_mode,
                     smart_ru: prefs.smart_ru,
+                    autopick,
                 }
             }
             None => DashboardView {

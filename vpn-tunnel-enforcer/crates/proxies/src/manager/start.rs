@@ -130,8 +130,9 @@ impl Inner {
                 } else {
                     EngineKind::SingBox
                 };
+                let notice = plan.notice.clone();
                 let started = self.launcher.start(plan, &self.closing).await;
-                started.map(|engine| (engine, kind))
+                started.map(|engine| (engine, kind, notice))
             }
             Err(err) => Err(err),
         };
@@ -143,9 +144,9 @@ impl Inner {
                     .get(&slot)
                     .is_some_and(|s| s.generation == generation && s.configured);
             match started {
-                Ok((engine, kind)) if current => {
+                Ok((engine, kind, notice)) if current => {
                     let pid = engine.pid();
-                    let live = self.go_live(slot, generation, port, engine, kind);
+                    let live = self.go_live(slot, generation, port, engine, kind, notice);
                     let now = now_ms();
                     let state = reg.slots.entry(slot).or_default();
                     state.live = Some(live);
@@ -157,7 +158,7 @@ impl Inner {
                         "instance started");
                     None
                 }
-                Ok((engine, _)) => Some(engine),
+                Ok((engine, ..)) => Some(engine),
                 Err(err) => {
                     if current && let Some(state) = reg.slots.get_mut(&slot) {
                         state

@@ -44,6 +44,7 @@ async fn run(shared: Arc<Shared>, tunnel: Option<Arc<dyn TunnelOps>>) {
     let auto = shared.automation.clone();
     let mut adaptive = auto.as_ref().map(|a| a.adaptive.status());
     let mut rotation = auto.as_ref().map(|a| a.rotation.subscribe());
+    let mut launch = (auto.as_ref()).and_then(|a| a.autopick.get().map(|p| p.subscribe()));
     let mut servers = backend.servers.subscribe();
 
     // Facts read from Windows once at start; the actions refresh them later.
@@ -81,6 +82,7 @@ async fn run(shared: Arc<Shared>, tunnel: Option<Arc<dyn TunnelOps>>) {
             () = shared.dirty.notified() => true,
             () = changed_opt(&mut adaptive) => false,
             () = changed_opt(&mut rotation) => false,
+            () = changed_opt(&mut launch) => false,
             () = servers_changed(&mut servers) => false,
         };
         tokio::time::sleep(DEBOUNCE).await;
@@ -141,6 +143,7 @@ fn publish_stores(shared: &Shared, snap: &TunnelSnapshot, session: Option<&Sessi
         // Packet capture is a service-hosted feature this build does not carry: the save refuses
         // it elevated or not, so the page must never offer it.
         capture_available: false,
+        launch: super::launch::launch_view(shared.automation.as_deref(), &settings),
     };
     publish(&shared.state, state);
     let doc = backend.rules.snapshot();

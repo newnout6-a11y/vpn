@@ -87,6 +87,9 @@ pub(super) enum Planned {
         resolved: Resolved,
         profile: VpnProfile,
     },
+    /// WP-12 lab: AmneziaWG on mihomo, chained behind sing-box.
+    #[cfg(feature = "lab")]
+    Mihomo(Box<super::mihomo::MihomoPlan>),
 }
 
 pub(super) fn cancelled_if(op: &CancellationToken) -> AppResult<()> {
@@ -322,6 +325,13 @@ impl Actor {
                 })
             }
             Mode::DirectVpn { profile } => {
+                #[cfg(feature = "lab")]
+                if engine == Engine::Mihomo {
+                    let engines = &*self.deps.engines;
+                    let (plan, warnings) = super::mihomo::plan(engines, profile, op).await?;
+                    work.warnings.extend(warnings);
+                    return Ok(Planned::Mihomo(Box::new(plan)));
+                }
                 if engine == Engine::SingBox {
                     let policy = EmitPolicy {
                         device: profile.device,
@@ -335,6 +345,14 @@ impl Actor {
                                 .with_source(e)
                         })?;
                     if let Upstream::Native { fragment, .. } = &mut upstream {
+                        // Audit item 18: a TLS spoof needs an elevated sing-box; never start a
+                        // config that needs rights this process does not have.
+                        let elevated = vpnte_winnet::elevation::is_elevated();
+                        if vpnte_engine::singbox_config::gate_spoof(fragment, elevated) {
+                            let name = profile.profile.name.as_str();
+                            let msg = Msg::new("tunnel.runtime.spoofDropped").arg("name", name);
+                            work.warnings.push(msg);
+                        }
                         let engines = &*self.deps.engines;
                         work.warnings
                             .extend(pin_native(engines, fragment, op).await?);
@@ -370,6 +388,8 @@ impl Actor {
         let user = self.deps.inputs.snapshot().await?;
         // Decided once, before any effect: the run, the receipt and the status show this engine.
         let engine = run_of(req)?;
+        #[cfg(feature = "lab")]
+        super::mihomo::admit(&engine, req)?;
         let plan = self.capture.prepare(req, avoid).await?;
         work.warnings.extend(plan.warnings.iter().cloned());
         work.plan = Some(plan.clone());
@@ -384,12 +404,18 @@ impl Actor {
             ),
             Planned::Native(_) => (Vec::new(), Vec::new()),
             Planned::Xray { .. } => (Vec::new(), vec![self.deps.engines.xray_exe()]),
+            // sing-box dials loopback only; mihomo's own traffic is the Proxy-mode case (no TUN).
+            #[cfg(feature = "lab")]
+            Planned::Mihomo(_) => (Vec::new(), Vec::new()),
         };
         let engine_paths = direct_engines(&*self.deps.engines, req.capture, own);
         let hostname = match &req.mode {
             Mode::DirectVpn { profile } => config::endpoint_is_hostname(&profile.profile),
             Mode::LocalProxy { .. } => false,
         };
+        // The app resolved mihomo's peer names itself: sing-box dials only loopback.
+        #[cfg(feature = "lab")]
+        let hostname = hostname && !matches!(planned, Planned::Mihomo(_));
         self.capture.begin(&plan, &programs).await?;
         work.began = true;
         cancelled_if(op)?;
@@ -401,6 +427,10 @@ impl Actor {
         {
             self.start_slot_a(graph, resolved, profile, op, work)
                 .await?;
+        }
+        #[cfg(feature = "lab")]
+        if let Planned::Mihomo(plan) = &planned {
+            self.start_mihomo(plan, op, work).await?;
         }
         let local = matches!(planned, Planned::Local { .. });
         let (routing, warnings) = config::routing(&user, &engine_paths, local, &phys_dns, hostname);

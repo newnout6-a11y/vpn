@@ -20,6 +20,7 @@ use super::project::{Inputs, RowExtras, fetch_error, project};
 
 mod backend;
 mod flows;
+mod phones;
 mod relays;
 mod reports;
 mod verdicts;

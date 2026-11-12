@@ -1,4 +1,5 @@
-//! App deep links (`happ://`, `mantaray://`, …) unwrapped to the text or URL they carry, and
+//! App deep links (`happ://`, `mantaray://`, …) unwrapped to the text or URL they carry, the
+//! remote-profile links of sing-box, Clash and Hiddify unwrapped to their subscription URL, and
 //! AmneziaVPN keys (`vpn://`) unwrapped to the server description they encode.
 use std::borrow::Cow;
 
@@ -9,6 +10,11 @@ use vpnte_base::msg::Msg;
 use crate::amnezia::{self, Payload};
 use crate::common::b64::base64_text;
 use crate::text::uri_candidates;
+
+mod remote;
+mod target;
+#[cfg(test)]
+mod tests;
 
 /// Why a deep link could not be unwrapped.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -27,6 +33,10 @@ pub enum DeepLinkError {
     /// A `vpn://` key carrying a protocol no engine of this app runs (`OpenVPN`).
     #[error("AmneziaVPN key with {0}")]
     AmneziaUnsupported(String),
+    /// A link carrying a subscription in the local network (loopback, LAN, link-local): a web
+    /// page or a chat must not make the app request it.
+    #[error("deep link into a local network")]
+    LocalTarget,
 }
 
 impl DeepLinkError {
@@ -52,6 +62,7 @@ impl DeepLinkError {
             DeepLinkError::AmneziaUnsupported(protocol) => {
                 Msg::new("profiles.deeplink.amneziaUnsupported").arg("protocol", protocol)
             }
+            DeepLinkError::LocalTarget => Msg::new("profiles.deeplink.localTarget"),
         }
     }
 }
@@ -96,6 +107,26 @@ const APPS: [LinkApp; 4] = [
 /// `Ok(None)` when the input is not a deep link. Only a single line is a link; errors never
 /// echo the payload (encrypted links exist to hide the subscription address).
 pub fn unwrap_deeplink(input: &str) -> Result<Option<String>, DeepLinkError> {
+    unwrap_with(input, Hosts::Internet)
+}
+
+/// [`unwrap_deeplink`] for a redirect's `Location`: the carried URL is not judged here. The
+/// subscription fetcher judges every hop by the redirect's origin and the resolved addresses,
+/// so a subscription the user runs in the LAN may redirect inside it and an internet one may not.
+pub fn unwrap_redirect(input: &str) -> Result<Option<String>, DeepLinkError> {
+    unwrap_with(input, Hosts::Any)
+}
+
+/// Which hosts a carried subscription URL may name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hosts {
+    /// Internet hosts only: the link came from a page, a chat or the clipboard.
+    Internet,
+    /// Any host: the caller judges the target itself.
+    Any,
+}
+
+fn unwrap_with(input: &str, hosts: Hosts) -> Result<Option<String>, DeepLinkError> {
     let input = input.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
     if input.contains(['\n', '\r']) {
         return Ok(None);
@@ -111,6 +142,9 @@ pub fn unwrap_deeplink(input: &str) -> Result<Option<String>, DeepLinkError> {
             }
             None => Err(DeepLinkError::AmneziaDamaged),
         };
+    }
+    if let Some(carried) = remote::unwrap(scheme, after, hosts) {
+        return carried.map(Some);
     }
     let Some(app) = APPS.iter().find(|a| scheme.eq_ignore_ascii_case(a.scheme)) else {
         return Ok(None);
@@ -136,7 +170,7 @@ pub fn unwrap_deeplink(input: &str) -> Result<Option<String>, DeepLinkError> {
         return Err(DeepLinkError::RoutingProfile);
     }
     if app.add_hosts.contains(&host.as_str()) {
-        return add_payload(rest).map(Some);
+        return add_payload(rest, hosts).map(Some);
     }
     Err(DeepLinkError::UnknownHost(format!(
         "{}://{}",
@@ -157,7 +191,7 @@ fn shown_host(host: &str) -> &str {
 /// Payload of an add/import link: a subscription URL or a key, as text, percent-encoded or
 /// base64, or a JSON object `{"url": …}` (fallback `link`). Candidates are tried in order and
 /// each one completely, so a key inside an earlier candidate wins over a URL in a later one.
-fn add_payload(rest: &str) -> Result<String, DeepLinkError> {
+fn add_payload(rest: &str, hosts: Hosts) -> Result<String, DeepLinkError> {
     let decoded = pct_decode(rest);
     let mut candidates: Vec<Cow<'_, str>> = Vec::with_capacity(3);
     if !decoded.trim().is_empty() {
@@ -172,10 +206,13 @@ fn add_payload(rest: &str) -> Result<String, DeepLinkError> {
     }
     for candidate in &candidates {
         if starts_http(candidate) {
-            return Ok(first_token(candidate).to_owned());
+            return target::carried_url(candidate, hosts);
         }
         if let Some(target) = json_target(candidate) {
-            return Ok(target);
+            return match starts_http(&target) {
+                true => target::carried_url(&target, hosts),
+                false => Ok(target),
+            };
         }
         if let Some(uri) = first_link(candidate) {
             return Ok(uri.to_owned());
@@ -234,6 +271,3 @@ fn pct_decode(value: &str) -> Cow<'_, str> {
         .decode_utf8()
         .unwrap_or(Cow::Borrowed(value))
 }
-
-#[cfg(test)]
-mod tests;

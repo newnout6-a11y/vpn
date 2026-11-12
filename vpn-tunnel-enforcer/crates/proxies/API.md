@@ -112,7 +112,9 @@ pub struct InstanceStatus { pub slot: Slot, pub running: bool /* process_running
     pub auto_disabled: bool, pub host: String, pub port: Option<u16>, pub proxy_url: Option<String>,
     pub profile_id, pub profile_name, pub country: Option<String>, pub pid: Option<u32>, pub started_at: Option<UnixMs>,
     pub engine: Option<Engine> /* while running: Xray when the slot has an Xray child, else sing-box;
-                                  JSON "engine": "sing-box" | "xray", omitted when None */ }
+                                  JSON "engine": "sing-box" | "xray", omitted when None */,
+    pub notice: Option<Msg> /* what the running engine goes without (proxies.slot.spoofDropped);
+                               UI only: #[serde(skip)], the control API JSON is unchanged */ }
 impl InstanceStatus { pub fn stopped(slot: Slot) -> Self }   // a never-started slot (no 404 for unknown slots)
 pub struct Aggregate { pub total, running, ready, healthy, unique_egress, duplicate_egress, starting,
     degraded, quarantined: u32 }
@@ -404,7 +406,10 @@ that captures the CLI's output is not held until the app exits) and waits up to 
 ## Elevation
 
 Nothing in this crate needs elevation: slots and the control API listen on 127.0.0.1, the engines run as the
-user, the token / endpoint files go to the data root with a user-only DACL. Under the `asInvoker` privilege model
+user, the token / endpoint files go to the data root with a user-only DACL. A provider's `tls.spoof` /
+`tls.spoof_method` (sing-box needs administrator rights for them) leave an unelevated slot's config
+(`vpnte_engine::singbox_config::gate_spoof`, audit item 18): the slot runs without them and its
+`InstanceStatus::notice` says so; an elevated process keeps them. Under the `asInvoker` privilege model
 nothing here returns `ErrorKind::Permission` and nothing belongs in the helper service. The CLI never elevates,
 starts the app as the current user and never relaunches it on a 401. Tests: none is `#[ignore]`d.
 
@@ -415,6 +420,8 @@ starts the app as the current user and never relaunches it on a 401. Tests: none
 - `proxies.control.tokenFailed`, `proxies.control.bindFailed` `{{port}}` — `AppError::from(ServeError)`.
 - `proxies.degradation.<camelCase Degradation>` — `degradation_msg` (the UI names `Health` states
   with its own texts).
+- `proxies.slot.spoofDropped` `{{name}}` — `InstanceStatus::notice` of a slot that runs without the
+  provider's TLS spoof (same words as the main tunnel's `tunnel.runtime.spoofDropped`).
 - Register `vpnte_proxies::LOCALES` at start.
 - State is pushed only through `ProxyManager::snapshot()` (a `watch`, sent when something visible changed).
   Readiness also expires with the clock: call `ProxySnapshot::refreshed(now)` on a UI timer (≤ 60 s) instead
@@ -443,3 +450,5 @@ to `VPN Tunnel Enforcer.exe`, and the installer ships the `vpnte-proxy.cmd` / `.
 - tunnel (main TUN config): route the bundled `sing-box.exe` / `xray.exe` processes to `direct-out`, else slot
   traffic hops through the main VPN server.
 - UI: render `ProxySnapshot`; a "restart" of a failed slot passes its `profile_id` explicitly.
+- app (`api_dashboard/proxies.rs` `row()`): show `InstanceStatus::notice` as the row's tooltip when
+  there is no error (today the tooltip shows the error or the health word only).

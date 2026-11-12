@@ -11,6 +11,7 @@
 | `sing-box.exe`, `libcronet.dll` | нет | sing-box 1.14.4 (windows-amd64) |
 | `xray.exe` | нет | Xray 26.11.9 (windows-64) |
 | `wintun.dll` | нет | Wintun 0.14.1 (amd64), нужен sing-box для TUN |
+| `mihomo.exe` | нет | mihomo 1.19.34 (windows-amd64-compatible = GOAMD64 v1): лабораторный движок WP-12 для AmneziaWG (`lab = true` в `engines.toml`), только для тестов и сборки `cargo xtask dist --lab` |
 | `README.md` | да | этот файл |
 
 Движки не хранятся в git (`*.exe`, `*.dll` в `.gitignore`). Их кладёт сюда команда из `vpn-tunnel-enforcer/`:
@@ -24,3 +25,7 @@ cargo xtask verify             # каждый закреплённый файл 
 Новая версия движка — только правкой `engines.toml` (URL, версия, SHA-256 архива и файлов) и повторным
 `cargo xtask engines`. `cargo xtask dist` раскладывает каждую запись `engines.toml` по её пути `install` в
 `target/stage`; лицензии движков попадают в `licenses\` установки.
+
+Архив с `lab = true` (сейчас mihomo) `cargo xtask engines` кладёт сюда вместе с остальными (его проверяют
+тесты с `--features lab`), а `cargo xtask dist` пропускает: в поставку он попадает только из
+`cargo xtask dist --lab`, которая собирает приложение с функцией `lab` и называет все артефакты `…-lab`.

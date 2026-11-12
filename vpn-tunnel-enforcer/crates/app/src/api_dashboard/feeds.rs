@@ -28,7 +28,29 @@ pub(super) fn spawn(hub: &Arc<Hub>) {
         tokio::spawn(tunnel_feed(hub.clone(), cancel.clone()));
         hub.refresh_firewall();
     }
+    if let Some(pick) = hub.pick.clone() {
+        tokio::spawn(pick_feed(hub.clone(), pick, cancel.clone()));
+    }
     tokio::spawn(foreign_feed(hub.clone(), cancel));
+}
+
+/// The automatic server choice's status line.
+async fn pick_feed(
+    hub: Arc<Hub>,
+    mut pick: watch::Receiver<vpnte_automation::autopick::PickStatus>,
+    cancel: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            changed = pick.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                hub.publish_dashboard();
+            }
+        }
+    }
 }
 
 /// Settings (mode, Smart RU, language, tray switch), the server list and the saved protection.

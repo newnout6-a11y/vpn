@@ -39,7 +39,11 @@ pub fn probe_config(
         domain_resolver: Some(DNS_TAG.to_owned()),
         ..EmitPolicy::default()
     };
-    let fragment = emit_singbox(p, PROXY_TAG, &policy)?;
+    let mut fragment = emit_singbox(p, PROXY_TAG, &policy)?;
+    // A TLS spoof needs an elevated sing-box (audit item 18): the probe tests the key the way an
+    // unelevated connect runs it, never a config this process has no rights for.
+    let elevated = vpnte_winnet::elevation::is_elevated();
+    vpnte_engine::singbox_config::gate_spoof(&mut fragment, elevated);
     let place = |mut entry: Value| {
         // Only entries that dial the server themselves; a chain's inner hop already detours.
         if entry.get("detour").is_none() {

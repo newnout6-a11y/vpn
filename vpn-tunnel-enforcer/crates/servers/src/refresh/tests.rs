@@ -475,8 +475,19 @@ async fn pasting_imports_then_refreshes() {
     assert_eq!(group.name, "ALL VPN");
     assert_eq!(group.status(now_ms()), GroupStatus::Active);
 
-    let again = e
+    // The same subscription in another form refreshes it. A wrapped form (`happ://add/<url>`) is
+    // refused here only because the test panel listens on loopback: a link must not send the app
+    // into the local network (finding phones-a11), while the plain address stays allowed.
+    let wrapped = e
         .paste(&format!("happ://add/{url}"), ClientDevice::Pc)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        wrapped.msg.as_ref().map(|m| &*m.key),
+        Some("profiles.deeplink.localTarget")
+    );
+    let again = e
+        .paste(&format!("  {url}\n"), ClientDevice::Pc)
         .await
         .unwrap();
     let AddOutcome::Refreshed {

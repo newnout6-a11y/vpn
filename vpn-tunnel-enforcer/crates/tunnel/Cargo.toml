@@ -26,3 +26,7 @@ vpnte-winnet.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# WP-12 lab engine mihomo (AmneziaWG sessions): never enabled by a production build.
+lab = ["vpnte-engine/lab"]

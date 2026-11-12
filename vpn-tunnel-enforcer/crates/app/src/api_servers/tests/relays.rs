@@ -186,7 +186,7 @@ async fn hidden_keys_stay_hidden_in_the_manual_group() {
 }
 
 /// The keys of the reports' paste, imported as a subscription that sent `hide-settings`.
-fn add_hidden(env: &super::backend::Env) -> vpnte_servers::store::AddReport {
+pub(super) fn add_hidden(env: &super::backend::Env) -> vpnte_servers::store::AddReport {
     use vpnte_servers::store::{AddTarget as StoreTarget, NewSubscription};
 
     let profiles = vpnte_servers::parse::parse_text(super::reports::PASTE)

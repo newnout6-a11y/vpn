@@ -30,6 +30,8 @@ mod config;
 mod crash;
 mod engines;
 mod handle;
+#[cfg(feature = "lab")]
+mod mihomo;
 mod pin;
 mod recovery;
 mod spawn;

@@ -16,7 +16,7 @@ use vpnte_tunnel::history::SessionMode;
 use vpnte_tunnel::lifecycle::{ConnectTarget, DisconnectReq, StopCause};
 
 use super::coord::{Rig, rig};
-use crate::svc_auto::coord::Hooks;
+use crate::svc_auto::coord::{Hooks, UserAct};
 use crate::svc_auto::host::{Fingerprints, ServerHost};
 use crate::svc_auto::lane::Lane;
 
@@ -64,7 +64,7 @@ async fn a_restore_never_undoes_a_stop_that_came_while_it_waited() {
         eventually("the restore waits", || r.coord.left_by() == Some(owner)).await;
         if owner == Owner::Manual {
             // What the dashboard's power button does (svc_tunnel ops).
-            r.coord.user_stops();
+            r.coord.user_acted(UserAct::Stop);
             let req = DisconnectReq::new(StopCause::User, Owner::Manual, Source::Ui);
             r.lane.disconnect(req).await.expect("user stop");
         } else {
@@ -168,4 +168,51 @@ async fn a_dropped_start_releases_its_adaptive_preparation() {
     let refused = r.coord.start(target(), Owner::Manual, Source::Ui).await;
     assert!(refused.is_err(), "the lane holds");
     assert_eq!(adaptive.status().borrow().phase, Phase::Failed);
+}
+
+/// Review fix a2/b1/a4 (the user always wins): Cancel and a server picked by hand are the
+/// user's actions too; a Cancel of an operation in flight is a stop (nothing automatic until the
+/// user connects again). A connect, a stop or a pick drops a restore that waits after a lost
+/// switch; a changed setting does not decide the lane, so the restore goes on.
+#[tokio::test]
+async fn cancel_and_a_hand_picked_server_end_what_automation_began() {
+    let r = rig("user-acts");
+    let acts = r.coord.user_acts();
+    r.coord.user_acted(UserAct::Stop);
+    assert_eq!((acts.borrow().seq, acts.borrow().stopped), (1, true));
+    r.coord.user_acted(UserAct::Change);
+    assert_eq!((acts.borrow().seq, acts.borrow().stopped), (2, true));
+    r.coord.user_acted(UserAct::Connect);
+    assert_eq!((acts.borrow().seq, acts.borrow().stopped), (3, false));
+    for act in [
+        UserAct::Connect,
+        UserAct::Stop,
+        UserAct::Pick,
+        UserAct::Change,
+    ] {
+        let r = rig(&format!("user-acts-{act:?}"));
+        let (a, b) = (r.ids[0].clone(), r.ids[1].clone());
+        r.lane.up(SessionMode::Soft, &a, Owner::Manual);
+        r.lane.hold_until_released.store(true, Ordering::SeqCst);
+        *r.lane.switch_fails.lock() = Some(true);
+        let coord = r.coord.clone();
+        let switch = tokio::spawn(async move { coord.switch_profile(Owner::Rotation, &b).await });
+        eventually("the restore waits", || {
+            r.coord.left_by() == Some(Owner::Manual)
+        })
+        .await;
+        r.coord.user_acted(act);
+        r.lane.release_hold();
+        let lost = switch.await.expect("switch task");
+        // A changed setting does not decide the lane: the previous server comes back.
+        let restored = act == UserAct::Change;
+        assert!(
+            matches!(lost, Err(SwitchError::Failed { restored_previous, .. }) if restored_previous == restored),
+            "{act:?}: {lost:?}"
+        );
+        let starts = (r.lane.calls().iter())
+            .filter(|c| c.starts_with("connect"))
+            .count();
+        assert_eq!(starts, usize::from(restored), "{act:?}");
+    }
 }

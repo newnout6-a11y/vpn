@@ -11,6 +11,7 @@
 //! with an honest "not available" error and never pretend to work.
 mod actions;
 mod auto;
+mod launch;
 mod project;
 mod pump;
 mod rules;

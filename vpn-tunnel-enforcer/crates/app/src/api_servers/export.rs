@@ -107,7 +107,7 @@ pub(super) async fn proxy_list(
 }
 
 /// The share form of a profile: a lossless link, else a JSON document.
-fn share(profile: &Profile) -> AppResult<SharedKey> {
+pub(super) fn share(profile: &Profile) -> AppResult<SharedKey> {
     export_share(profile)
         .ok_or_else(|| AppError::validation(Msg::new("app.servers.export.unsupported")))
 }

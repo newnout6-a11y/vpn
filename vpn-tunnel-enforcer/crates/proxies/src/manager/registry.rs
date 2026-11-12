@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use vpnte_base::Msg;
 use vpnte_base::types::{Engine as EngineKind, UnixMs};
 
 use super::launch::Engine;
@@ -38,6 +39,8 @@ pub(super) struct Live {
     /// Ends the slot's health loop, exit watcher and output pump.
     pub cancel: CancellationToken,
     pub probes: mpsc::UnboundedSender<LoopCmd>,
+    /// What this engine runs without (shown on the slot's row while it runs).
+    pub notice: Option<Msg>,
 }
 
 /// One slot (old `stateForSlot`); created on first use, kept after a stop for its counters.
@@ -102,6 +105,7 @@ impl SlotState {
             pid: self.live.as_ref().map(|l| l.pid),
             started_at: self.started_at.filter(|_| running),
             engine: self.live.as_ref().map(|l| l.kind),
+            notice: self.live.as_ref().and_then(|l| l.notice.clone()),
         }
     }
 

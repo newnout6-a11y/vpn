@@ -8,6 +8,9 @@
       "rotationDidNotChangeEgressIp": "The profile changed, but the exit IP stayed the same",
       "duplicateEgressIp": "Another proxy already exits through this IP",
       "egressProbeFailed": "The route check failed"
+    },
+    "slot": {
+      "spoofDropped": "\"{{name}}\": the provider's TLS hello spoofing (tls.spoof) needs the app started as administrator, so this proxy runs without it."
     }
   }
 }

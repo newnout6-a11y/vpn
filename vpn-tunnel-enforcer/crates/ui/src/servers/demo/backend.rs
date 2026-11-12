@@ -3,7 +3,7 @@
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{ClientDevice, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
@@ -11,6 +11,7 @@ use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use super::*;
 use crate::servers::api::ServersApi;
 use crate::servers::demo_data::{demo_verdict, test_ip};
+use crate::servers::links_model::{LinkSchemes, QrCode};
 
 #[async_trait::async_trait(?Send)]
 impl ServersApi for DemoServersApi {
@@ -587,6 +588,60 @@ impl ServersApi for DemoServersApi {
         // either: a provider panel URL can carry an account token.
         tracing::info!("demo: provider link requested");
         Ok(())
+    }
+
+    fn link_arrivals(&self) -> watch::Receiver<u64> {
+        self.links.arrivals()
+    }
+
+    fn take_link(&self) -> Option<String> {
+        self.links.take()
+    }
+
+    async fn read_clipboard(&self) -> AppResult<String> {
+        delay(150).await;
+        Ok(links::FAKE_KEY.to_owned())
+    }
+
+    async fn read_key_file(&self) -> AppResult<Option<String>> {
+        delay(300).await;
+        Ok(Some(format!(
+            "{}
+",
+            links::FAKE_KEY
+        )))
+    }
+
+    async fn scan_qr_file(&self) -> AppResult<Option<String>> {
+        self.links.scan().await.map(Some)
+    }
+
+    async fn scan_qr_screen(&self, captured: oneshot::Sender<()>) -> AppResult<String> {
+        delay(100).await;
+        let _ = captured.send(());
+        self.links.scan().await
+    }
+
+    async fn key_qr(&self, id: &str) -> AppResult<QrCode> {
+        delay(200).await;
+        let server = self.known(id)?;
+        if server.config_hidden {
+            return Err(AppError::validation(Msg::new("ui.servers.hidden.refused")));
+        }
+        Ok(links::fake_qr(id))
+    }
+
+    async fn link_schemes(&self) -> AppResult<LinkSchemes> {
+        delay(150).await;
+        Ok(self.links.schemes())
+    }
+
+    async fn set_link_scheme(&self, scheme: String, on: bool) -> AppResult<LinkSchemes> {
+        Ok(self.links.set(&scheme, on).await)
+    }
+
+    async fn adopt_link_schemes(&self) -> AppResult<LinkSchemes> {
+        Ok(self.links.adopt().await)
     }
 }
 

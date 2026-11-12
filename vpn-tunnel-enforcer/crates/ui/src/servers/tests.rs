@@ -18,6 +18,7 @@ use vpnte_base::{AppError, AppResult, ErrorKind};
 
 use super::api::ServersApi;
 use super::batch::BatchCtl;
+use super::links_model::{LinkSchemes, QrCode};
 use super::live::{History, LiveCtl};
 use super::live_model::*;
 use super::model::*;
@@ -45,6 +46,10 @@ struct FakeApi {
     batch_token: RefCell<Option<CancellationToken>>,
     batch_progress: RefCell<Option<mpsc::UnboundedSender<BatchProgress>>>,
     dropped: Rc<Cell<u32>>,
+    links: watch::Sender<u64>,
+    link: RefCell<Option<String>>,
+    /// Imports the page asked for (`add`): a link must never cause one by itself.
+    adds: Cell<u32>,
 }
 
 async fn held<T>(reply: Option<Reply<T>>, dropped: Rc<Cell<u32>>) -> AppResult<T> {
@@ -82,6 +87,7 @@ impl ServersApi for FakeApi {
         _: ClientDevice,
         _: SubscriptionRequest,
     ) -> AppResult<ImportReport> {
+        self.adds.set(self.adds.get() + 1);
         unused()
     }
     async fn remove(&self, _: &str) -> AppResult<()> {
@@ -189,6 +195,37 @@ impl ServersApi for FakeApi {
     async fn open_url(&self, _: String) -> AppResult<()> {
         Ok(())
     }
+    fn link_arrivals(&self) -> watch::Receiver<u64> {
+        self.links.subscribe()
+    }
+    fn take_link(&self) -> Option<String> {
+        self.link.borrow_mut().take()
+    }
+    async fn read_clipboard(&self) -> AppResult<String> {
+        Ok("vless://fake".into())
+    }
+    async fn read_key_file(&self) -> AppResult<Option<String>> {
+        Ok(None)
+    }
+    async fn scan_qr_file(&self) -> AppResult<Option<String>> {
+        Ok(None)
+    }
+    async fn scan_qr_screen(&self, captured: oneshot::Sender<()>) -> AppResult<String> {
+        let _ = captured.send(());
+        Ok(String::new())
+    }
+    async fn key_qr(&self, _: &str) -> AppResult<QrCode> {
+        Ok(QrCode::default())
+    }
+    async fn link_schemes(&self) -> AppResult<LinkSchemes> {
+        Ok(LinkSchemes::default())
+    }
+    async fn set_link_scheme(&self, _: String, _: bool) -> AppResult<LinkSchemes> {
+        Ok(LinkSchemes::default())
+    }
+    async fn adopt_link_schemes(&self) -> AppResult<LinkSchemes> {
+        Ok(LinkSchemes::default())
+    }
 }
 
 fn fake() -> Rc<FakeApi> {
@@ -200,6 +237,9 @@ fn fake() -> Rc<FakeApi> {
         batch_token: RefCell::default(),
         batch_progress: RefCell::default(),
         dropped: Rc::default(),
+        links: watch::Sender::new(0),
+        link: RefCell::default(),
+        adds: Cell::new(0),
     })
 }
 
@@ -497,6 +537,7 @@ fn every_key_the_page_uses_exists() {
         include_str!("demo_data.rs"),
         include_str!("detail.rs"),
         include_str!("group.rs"),
+        include_str!("links.rs"),
         include_str!("live.rs"),
         include_str!("live_model.rs"),
         include_str!("live_present.rs"),
@@ -504,10 +545,12 @@ fn every_key_the_page_uses_exists() {
         include_str!("model.rs"),
         include_str!("page.rs"),
         include_str!("present.rs"),
+        include_str!("qr.rs"),
         include_str!("report.rs"),
         include_str!("report/endpoint.rs"),
         include_str!("report/tunnel.rs"),
         include_str!("row.rs"),
+        include_str!("schemes.rs"),
         include_str!("verdict.rs"),
     ];
     let mut keys: Vec<String> = sources.iter().flat_map(|s| literal_keys(s)).collect();
@@ -576,4 +619,120 @@ fn the_add_form_forgets_the_request_settings() {
         f.input, "https://a.example/sub/token",
         "the pasted text stays a draft"
     );
+}
+
+/// RU-2026 item 4: a link Windows handed over stays a draft that names its origin until the user
+/// confirms it; after the import, or when the dialog closes, the note goes with it.
+#[test]
+fn a_handed_over_link_note_ends_with_the_import_or_the_dialog() {
+    use super::state::AddForm;
+
+    let linked = || AddForm {
+        input: "hiddify://import/https://sub.example/s".into(),
+        from_link: true,
+        ..AddForm::default()
+    };
+    let mut f = linked();
+    f.imported();
+    assert!(!f.from_link && f.input.is_empty());
+    let mut f = linked();
+    f.closed();
+    assert!(!f.from_link);
+    assert_eq!(f.input, "hiddify://import/https://sub.example/s");
+}
+
+/// The page's state and actions over a [`FakeApi`], with the link intake mounted as the page
+/// mounts it.
+fn page_root() -> Element {
+    use super::actions::Actions;
+    use super::state::Store;
+
+    let api = use_context::<Rc<FakeApi>>();
+    let slot = use_context::<Rc<RefCell<Option<Actions>>>>();
+    let toasts = crate::widgets::Toasts::use_provider();
+    let scope = dioxus::core::current_scope_id();
+    let store = use_hook(|| Store::new(scope, ServersView::default(), Vec::new()));
+    let actions = use_hook(|| Actions {
+        store,
+        api: api.clone(),
+        toasts,
+    });
+    super::links::use_link_intake(&actions);
+    slot.replace(Some(actions));
+    rsx! {}
+}
+
+fn mount_page(api: &Rc<FakeApi>) -> (VirtualDom, super::actions::Actions) {
+    let slot: Rc<RefCell<Option<super::actions::Actions>>> = Rc::default();
+    let mut dom = VirtualDom::new(page_root)
+        .with_root_context(api.clone())
+        .with_root_context(slot.clone());
+    dom.rebuild_in_place();
+    let actions = slot.borrow().clone().expect("page actions");
+    (dom, actions)
+}
+
+/// As if Windows handed the app `link` (the root offers it to the inbox).
+fn hand_over(api: &FakeApi, link: &str) {
+    api.link.replace(Some(link.to_owned()));
+    api.links.send_modify(|n| *n += 1);
+}
+
+const LINK: &str = "sing-box://import-remote-profile?url=https%3A%2F%2Fb.example%2Fs";
+
+/// phones-a1 / b5 / a12: a handed-over link replaces a draft set up for another provider with
+/// the new-group defaults (no token header, no HWID, no target group), opens the dialog, and
+/// imports nothing until the user confirms.
+#[tokio::test]
+async fn a_handed_over_link_starts_from_the_new_group_defaults() {
+    let api = fake();
+    let (mut dom, actions) = mount_page(&api);
+    dom.in_runtime(|| {
+        let mut add = actions.store.add;
+        let mut f = add.write();
+        f.input = "https://a.example/sub".into();
+        f.request.send_hwid = true;
+        f.request.headers = "X-Panel-Token: secret".into();
+        f.target = AddTarget::Group("a".into());
+    });
+    hand_over(&api, LINK);
+    settle(&mut dom, 4, 20).await;
+    let (f, open) = dom.in_runtime(|| {
+        (
+            actions.store.add.peek().clone(),
+            *actions.store.add_open.peek(),
+        )
+    });
+    assert!(open, "the add dialog opened");
+    assert_eq!((f.input.as_str(), f.from_link), (LINK, true));
+    assert_eq!(f.request, SubscriptionRequest::default());
+    assert_eq!(f.target, AddTarget::Auto);
+    assert_eq!(api.adds.get(), 0, "nothing imported without the user");
+    assert!(api.link.borrow().is_none(), "taken once");
+}
+
+/// phones-b6: a link that arrives while a source is read (or an import runs) waits and opens
+/// once the dialog is free, instead of being overwritten by the read.
+#[tokio::test]
+async fn a_link_waits_while_the_dialog_reads() {
+    let api = fake();
+    let (mut dom, actions) = mount_page(&api);
+    dom.in_runtime(|| {
+        let mut add = actions.store.add;
+        add.write().reading = true;
+    });
+    hand_over(&api, LINK);
+    settle(&mut dom, 4, 20).await;
+    assert!(dom.in_runtime(|| actions.store.add.peek().input.is_empty()));
+    assert!(api.link.borrow().is_some(), "the link waits in the inbox");
+    dom.in_runtime(|| {
+        let mut add = actions.store.add;
+        let mut f = add.write();
+        f.reading = false;
+        f.input = "vless://read-from-a-file".into();
+    });
+    settle(&mut dom, 4, 20).await;
+    let f = dom.in_runtime(|| actions.store.add.peek().clone());
+    assert_eq!((f.input.as_str(), f.from_link), (LINK, true));
+    assert_eq!(api.adds.get(), 0);
 }

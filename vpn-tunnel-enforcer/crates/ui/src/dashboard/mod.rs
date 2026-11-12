@@ -64,6 +64,16 @@ pub struct DashboardView {
     pub foreign_vpn: Option<String>,
     /// The engine that carries the running session and why (`None` while nothing runs).
     pub engine: Option<EngineLine>,
+    /// What the automatic server choice is doing (`None` while it does nothing).
+    pub autopick: Option<PickLine>,
+}
+
+/// The automatic server choice's step (connecting at start, checking a stalled session, the
+/// retries after every server failed) and, during the retries, what traffic does meanwhile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickLine {
+    pub title: Msg,
+    pub body: Option<Msg>,
 }
 
 /// The identity column's engine caption («Xray · REALITY»): never a silent choice.

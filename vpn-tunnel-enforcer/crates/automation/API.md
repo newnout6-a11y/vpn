@@ -37,7 +37,8 @@ four tasks and wires the lifecycle hooks below.
 ## Crate root
 ```rust
 pub const LOCALES: &[(&str, &str)];   // (ru_json, en_json) per package, file-name order:
-                                      // automation-adaptive, -hardening, -sched, -tweaks, noadmin-system
+                                      // automation-adaptive, -hardening, -sched, -tweaks, noadmin-system,
+                                      // w7-autopick
 ```
 Register with the other crates' layers at start, after the UI's base layer:
 `vpnte_base::i18n::init(&[ui_layers, .., vpnte_automation::LOCALES, ..].concat())`. Every key is
@@ -650,6 +651,108 @@ pub fn import(journal: &Journal, root: &Path, sys: &dyn System, src: &LegacySour
   no administrator rights); the old machine policies are still admitted, read for the status and
   rolled back when journalled (old version / legacy import).
 
+## `autopick` — the automatic server choice (RU research items 7 and 8, w7-autopick)
+```rust
+use vpnte_automation::autopick::*;
+
+pub enum LaunchChoice { Off, LastUsed, LowestDelay }   // the user's (serde kebab-case)
+pub enum LaunchPick { LastUsed, LowestDelay, Random /* provider only */ }
+pub enum ProviderWord { Off, On(LaunchPick) }          // subscription-autoconnect (+ -type)
+pub enum LaunchSource { User, Provider, Default }
+pub struct AutoPickConfig { pub launch: Option<LaunchChoice> }   // Document "autopick.json" v1
+pub fn launch_pick(choice, provider) -> Option<LaunchPick>;   // user > provider > off
+pub fn launch_source(choice, provider) -> LaunchSource;
+pub struct Candidate { pub id, pub group, pub name: String, pub alive: Option<bool>,
+                       pub checked_at: Option<UnixMs>, pub latency_ms: Option<u32> }
+pub struct Checked { pub alive: bool, pub latency_ms: Option<u32> }
+pub struct Counters { pub up: u64, pub down: u64, pub proxy_down: bool }   // VPN flows only + watchdog
+pub enum Confirmation { Passed, Frozen, NoTraffic, Inconclusive, Deferred }  // the probes' classes
+pub struct UserActs { pub seq: u64, pub stopped: bool }   // stopped = after Disconnect / Cancel
+pub struct Allowed { pub reconnect: bool, pub switch: bool }   // the user's opt-outs, read now
+pub enum NoRequest { LocalProxy, Refused(Msg) }      // why no server session can start
+pub enum Exposure { Direct, Blocked, ProxyBlocked, Tunnel, ProxyTunnel, Unknown }  // live; msg()
+pub enum Phase { Idle, Launching, Confirming, Refreshing, Trying, Waiting, GaveUp }
+pub struct PickStatus { pub phase, pub server: Option<String>, pub round: u8,
+                        pub retry_at: Option<UnixMs> }   // watch snapshot (no traffic claim in it)
+impl PickStatus { pub fn headline(&self) -> Option<Msg>; pub fn exposure_line(&self, now: Exposure) -> Option<Msg>; }
+pub fn rank(servers: &[Candidate], skip: impl Fn(&str) -> bool) -> Vec<&Candidate>;
+pub fn next_to_warm(servers: &[Candidate], running: &str, now: UnixMs) -> Option<&Candidate>;
+pub struct Detector;  impl Detector { pub fn push(&mut self, at: Instant, c: Counters) -> Suspicion }
+pub trait PickHost: Send + Sync + 'static {            // the app (RPITIT)
+    fn servers(&self) -> Vec<Candidate>;  fn last_used(&self) -> Option<String>;
+    fn provider_word(&self, id: &str) -> Option<ProviderWord>;
+    fn request(&self, id: &str) -> Result<ConnectRequest, NoRequest>;
+    fn allowed(&self) -> Allowed;
+    fn check(&self, id, cancel) -> impl Future<Output = Option<Checked>>;   // budgeted, recorded
+    fn counters(&self) -> impl Future<Output = Option<Counters>>;
+    fn confirm(&self, id, cancel) -> impl Future<Output = Confirmation>;   // 64 KiB via the session
+    fn refresh(&self, id, cancel) -> impl Future<Output = Option<Vec<String>>>; // fresh / re-keyed ids
+    fn slot(&self, id, max_wait, cancel) -> impl Future<Output = bool>;
+    fn exposure(&self) -> Exposure;  fn user_acts(&self) -> watch::Receiver<UserActs>;
+    fn report(&self, report: Report);                  // to the reactions
+}
+pub struct AutoPick<C: Coordinator, H: PickHost>;
+impl<C, H> AutoPick<C, H> {
+    pub fn new(coord, host, config: Arc<Store<AutoPickConfig>>, schedule: Option<watch::Receiver<SchedulerStatus>>) -> Self;
+    pub fn status(&self) -> watch::Receiver<PickStatus>;
+    pub fn choice(&self) -> Option<LaunchChoice>;  pub fn set_choice(&self, c: LaunchChoice) -> AppResult<()>;
+    pub fn launch_rule(&self) -> (Option<LaunchPick>, LaunchSource);  pub fn subscribe(&self) -> watch::Receiver<u64>;
+    pub async fn launch(&self, cancel) -> Launched;    // one-shot: Skipped | UserFirst | Connected | Failed
+    pub async fn run(&self, cancel);                   // the session watch + the warm-up
+}
+```
+- **The user always wins** (fix-autopick): every action of the user (Connect, Disconnect, Cancel,
+  a server picked by hand, a changed setting) moves `UserActs.seq`, and every automatic path
+  that saw another value ends at once (measurements, slot waits and pauses are cancelled, not
+  only checked later). After a Disconnect or a Cancel (`stopped`) nothing automatic runs until
+  the user connects again: no confirmation, no escalation, no episode, no warm-up. A fresh
+  process starts with `stopped = false` (connect at launch is the one exception).
+- **Launch** (after the scheduler's first pass, skipped while a schedule run holds it): user >
+  provider of the last-used server's group > off; an explicit Off is stored and always wins; an
+  install migrated from the old version starts off. Skipped when the user acted, a session / an
+  operation / a kept block holds the lane, or `request` says `LocalProxy`; `Refused` (the TUN
+  without the rights) = one `automation.autopick.launch.failed` notice with the reason, nothing
+  measured or dialled. Lowest delay: of the best three by rank, a stored check younger than
+  10 min counts as it is, the others are checked one after another until the user acts or the
+  lane is taken. One connect as `Owner::Autopilot`; `Conflict` / `Cancelled` are quiet;
+  `Permission` = the notice; another failure = an episode (below) when one may start, else the
+  notice.
+- **Stall** (server sessions only; 5 s samples of the VPN flows): upload >= 4 KiB with download
+  <= 1 KiB over 30 s, or the watchdog's `proxy_down`, makes one `confirm` (no more than one per
+  window; none while an operation runs). Passed = backoff 60 s doubling to 10 min; Inconclusive =
+  next look after 130 s, never reported; Frozen / NoTraffic = one `report` (frozen / offline,
+  switch server) for that run; still stalled on the same run 90 s later = an episode only with
+  `Allowed.switch` and no user action since the report; either way the watch then leaves that
+  run alone.
+- **Warm-up**: every 2 min at most one `check` of the next 3 candidates (the running server's
+  group first, then the others, by rank), the stalest one older than 10 min; never the running
+  server; skipped while an episode runs or after the user's stop.
+- **Episodes** (the retries). Triggers: the end of the run the watch tracks (`Stopped { Fault }`
+  with that `runtime_id`, not owned by `Schedule`, not within 150 s of the user's own action),
+  a failed launch, an escalated stall. Gates: fault and launch need `Allowed.reconnect`, a stall
+  needs `Allowed.switch`; one episode per failed server per network (a `NetworkChanged` clears
+  it); after a fault the lane must settle with nothing in it (a kept block is never replaced by
+  an automatic connect; a coordinator restore or anyone's session wins). What queued during an
+  episode (its own switches, their restores) is dropped afterwards. Rounds: `refresh` the failed
+  server's subscription once; round 1 its fresh keys (its own new key first, <= 3) then the best
+  of the other groups (<= 3); rounds 2..6 rank everything not dialled within 130 s (<= 3 each)
+  after pauses of 30 s, 60 s, 120 s, 300 s, 600 s (a `NetworkChanged` ends a pause early).
+  Without `Allowed.switch` only the failed server itself is dialled again. Each dial takes
+  `slot` (<= 10 s) first: the episode's own session (or the stalled one) moves (`AdaptiveRetry`
+  switch, or a protected `adaptive_restart` on the same server's new key), else a connect
+  (`Autopilot`). A dial succeeds only when `confirm` through the new session passes;
+  Frozen / NoTraffic = that dial failed; Inconclusive / Deferred = the episode ends quietly with
+  the session kept. Ends quietly on the user's action, someone else's session, `Conflict` /
+  `Cancelled` (also inside `SwitchError::Failed`) / `Permission`. Notices (`ConnectionError`),
+  only at the end: `automation.autopick.rescue.recovered` {name} (Info; after a launch
+  `.launch.connected` {name}), `.rescue.gaveUp` (Warn, body = what traffic does then). The
+  status line says the step; the page adds `Exposure::msg()` of the live state in every step
+  (`automation.autopick.exposure.{direct,blocked,proxyBlocked,tunnel,proxyTunnel,unknown}`).
+- Test double: `coordinator::testing::FakeCoordinator` emits `Started` / `Stopped` as the app's
+  coordinator does (a switch: `Started` only; a lost switch: `Stopped { Fault }` then the
+  restore's `Started`; a disconnect: `Stopped { Requested(owner) }`; a replaced session: its
+  `Stopped` first).
+
 ## Wiring in the app
 ```rust
 use vpnte_automation::{adaptive::*, autopilot::*, hardening, rotation::*, scheduler::*, tweaks};
@@ -727,6 +830,22 @@ reactions' inbox (`Reactions::deliver`) and marks a verdict seen only once deliv
 replays only refused keys ≤ 24 h old (a stored verdict has no network: a ban, freeze or UDP cut
 of another network must not rule servers out); new `Servers` verdicts and live checks (handshake
 ok → healthy, auth → key-rejected, Hysteria2 UDP cut → udp-blocked) follow as they come.
+The automatic server choice (w7-autopick, `crates/app/src/svc_auto/pick/`): root calls
+`svc_auto::spawn_autopick(&backend, &automation)` once the tunnel is stored (its host needs the
+tunnel's probe context, traffic counters and lane snapshot); `AutoHost` checks with
+`key_health::check_profile_verdict` (recorded in the list, so the feed teaches the reactions),
+confirms with a 64 KiB download through the session's exit behind `BudgetGate` (TUN-bound IPv4,
+or SOCKS5 to the mixed port; raw bytes counted below the inner TLS, verified against the Windows
+trust store), samples the VPN flows of the Clash API (`proxy-out` only), records a stall verdict
+in the list (the feed delivers it; straight to `Reactions::report` when it cannot be stored),
+refreshes as `Owner::Schedule` (never pre-empts the user's refresh), refuses a TUN request up
+front without TUN capture, reads `Allowed` from `auto_restart_on_crash` and
+`adaptive_bypass && adaptive_bypass_server_fallback`, and takes the user's actions from
+`AppCoordinator::user_acted(UserAct::{Connect, Stop, Pick, Change})` (window / tray connects,
+`TunnelOps::{disconnect, cancel, switch_server, apply_settings_change, set_kill_switch_level,
+set_protection_toggles}`, the launch choice). The
+start page shows `PickStatus` as one strip with `svc_auto::traffic_exposure` of the live state;
+Settings shows the launch choice the user made (none while unchosen) and what applies.
 
 ## Events, snapshots and texts the app / UI handles
 - `Coordinator::notify(category, Notice)`: `ScheduleTriggered` (scheduler start / stop),

@@ -39,6 +39,9 @@ pub struct Archive {
     pub sha256: Sha256Hex,
     pub license: String,
     pub source: Option<String>,
+    /// A WP-12 lab engine: in the dev drop (tests), staged only by `dist --lab`, never in a release.
+    #[serde(default)]
+    pub lab: bool,
     pub files: Vec<ArchiveFile>,
 }
 
@@ -182,6 +185,13 @@ impl Manifest {
             );
         }
         Ok(manifest)
+    }
+
+    /// What one package ships: a production package (`lab = false`) drops every lab archive, so the
+    /// stage check, the notices and the installer never see them.
+    pub fn composition(mut self, lab: bool) -> Self {
+        self.archive.retain(|a| lab || !a.lab);
+        self
     }
 
     /// Every pinned install path with what the stage must hold there (archive members, then repo files).
@@ -450,16 +460,54 @@ mod tests {
             .collect();
         assert_eq!(
             versions,
-            ["sing-box 1.14.4", "xray 26.11.9", "wintun 0.14.1"]
+            [
+                "sing-box 1.14.4",
+                "xray 26.11.9",
+                "wintun 0.14.1",
+                "mihomo 1.19.34"
+            ]
         );
         assert_eq!(m.tool("nsis").unwrap().version, "3.13");
-        for engine in ["sing-box.exe", "libcronet.dll", "xray.exe", "wintun.dll"] {
+        for engine in [
+            "sing-box.exe",
+            "libcronet.dll",
+            "xray.exe",
+            "wintun.dll",
+            "mihomo.exe",
+        ] {
             assert!(
                 m.installs()
                     .any(|(p, _)| p.as_str() == format!("resources/{engine}")),
                 "{engine}"
             );
         }
+    }
+
+    /// AT-12-002: the lab engine is in the dev drop, never in a production package.
+    #[test]
+    fn production_composition_drops_lab_archives() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let lab: Vec<String> = Manifest::load(root)
+            .unwrap()
+            .archive
+            .iter()
+            .filter(|a| a.lab)
+            .map(|a| a.id.clone())
+            .collect();
+        assert_eq!(lab, ["mihomo"]);
+        let release = Manifest::load(root).unwrap().composition(false);
+        assert!(release.archive.iter().all(|a| !a.lab));
+        let stage = release.expected_stage(&[]).unwrap();
+        assert!(!stage.contains_key("resources/mihomo.exe"));
+        assert!(stage.contains_key("resources/sing-box.exe"));
+        let lab_stage = Manifest::load(root)
+            .unwrap()
+            .composition(true)
+            .expected_stage(&[])
+            .unwrap();
+        assert!(lab_stage.contains_key("resources/mihomo.exe"));
+        // An archive without the key is a production archive.
+        assert!(!manifest(&archive("resources/a.exe")).unwrap().archive[0].lab);
     }
 
     /// AT-11-006: the stage must hold exactly the pinned set; every offender is named.

@@ -37,21 +37,49 @@ fn next_command(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> Optio
 #[test]
 fn a_second_launch_hands_over_and_exits() {
     let names = names();
-    let Instance::Primary(mut primary) = single_instance_with(&names, &args(&[])) else {
+    let Instance::Primary(mut primary) = single_instance_with(&names, &args(&[]), || {}) else {
         panic!("the first launch is the primary");
     };
     assert!(primary.is_listening());
     let mut commands = primary.take_commands().expect("commands taken once");
 
-    let second = single_instance_with(&names, &args(&["--no-elevate", "--elevated-relaunch"]));
+    let second = single_instance_with(
+        &names,
+        &args(&["--no-elevate", "--elevated-relaunch"]),
+        || {},
+    );
     assert!(matches!(second, Instance::Exit(code) if code == ExitCode::SUCCESS));
     assert_eq!(next_command(&mut commands), Some(Command::Activate));
 
-    let update = single_instance_with(&names, &args(&["--shutdown-for-update"]));
+    let update = single_instance_with(&names, &args(&["--shutdown-for-update"]), || {});
     assert!(matches!(update, Instance::Exit(code) if code == ExitCode::SUCCESS));
     assert_eq!(
         next_command(&mut commands),
         Some(Command::ShutdownForUpdate)
+    );
+}
+
+/// RU-2026 item 4: a link opened while the app runs reaches it through the session's pipe (the
+/// fake instance here has throw-away names); without a running instance the link starts the app.
+#[test]
+fn a_link_reaches_the_running_instance() {
+    let names = names();
+    let link = "sing-box://import-remote-profile?url=https%3A%2F%2Fsub.example%2Fs#Name";
+    let Instance::Primary(mut primary) =
+        single_instance_with(&names, &args(&["--open-link", link]), || {})
+    else {
+        panic!("a link without a running instance starts the app");
+    };
+    let mut commands = primary.take_commands().expect("commands taken once");
+    let second = single_instance_with(
+        &names,
+        &args(&["--open-link", link, "--setup", "uninstall"]),
+        || panic!("the link was handed over"),
+    );
+    assert!(matches!(second, Instance::Exit(code) if code == ExitCode::SUCCESS));
+    assert_eq!(
+        next_command(&mut commands),
+        Some(Command::OpenLink(link.to_owned()))
     );
 }
 
@@ -60,10 +88,10 @@ fn a_second_launch_hands_over_and_exits() {
 #[test]
 fn shutdown_for_update_without_a_primary_starts_nothing() {
     let names = names();
-    let first = single_instance_with(&names, &args(&["--shutdown-for-update"]));
+    let first = single_instance_with(&names, &args(&["--shutdown-for-update"]), || {});
     assert!(matches!(first, Instance::Exit(code) if code == ExitCode::SUCCESS));
     assert!(matches!(
-        single_instance_with(&names, &args(&[])),
+        single_instance_with(&names, &args(&[]), || {}),
         Instance::Primary(_)
     ));
 }
@@ -158,4 +186,41 @@ fn locale_fragments_match_the_code() {
             assert_ne!(Msg::new(key.clone()).render(lang), *key, "{lang:?} {key}");
         }
     }
+}
+
+/// phones-b4: a clicked link the running copy does not take is reported (here: one the hand-off
+/// refuses, and a running copy without its pipe); a link it takes, or a plain activation that
+/// fails, shows nothing.
+#[test]
+fn a_link_the_running_copy_does_not_take_is_reported() {
+    let names = names();
+    let Instance::Primary(mut primary) = single_instance_with(&names, &args(&[]), || {}) else {
+        panic!("the first launch is the primary");
+    };
+    let mut commands = primary.take_commands().expect("commands taken once");
+    let reported = std::cell::Cell::new(0);
+    let report = || reported.set(reported.get() + 1);
+
+    let long = format!("vless://{}@h.example:443", "a".repeat(17 * 1024));
+    let refused = single_instance_with(&names, &args(&["--open-link", &long]), report);
+    assert!(matches!(refused, Instance::Exit(code) if code == ExitCode::SUCCESS));
+    assert_eq!(reported.get(), 1);
+    assert!(commands.try_recv().is_err());
+
+    let link = "vless://00000000-0000-4000-8000-000000000000@h.example:443#Key";
+    single_instance_with(&names, &args(&["--open-link", link]), report);
+    assert_eq!(reported.get(), 1);
+    assert_eq!(
+        next_command(&mut commands),
+        Some(Command::OpenLink(link.into()))
+    );
+
+    let no_pipe = InstanceNames {
+        mutex: names.mutex.clone(),
+        pipe: format!("{}-gone", names.pipe),
+    };
+    single_instance_with(&no_pipe, &args(&["--open-link", link]), report);
+    assert_eq!(reported.get(), 2);
+    single_instance_with(&no_pipe, &args(&[]), report);
+    assert_eq!(reported.get(), 2);
 }

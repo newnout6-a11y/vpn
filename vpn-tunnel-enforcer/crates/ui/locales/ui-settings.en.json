@@ -271,6 +271,19 @@
         "badIp": "An IP address or a network is needed, for example 192.168.1.0/24.",
         "dotless": "Enter a domain with a dot (telegram.org) or a keyword with ~ (~telegram).",
         "badPattern": "Invalid domain pattern."
+      },
+      "launch": {
+        "label": "Connect at start",
+        "off": "No",
+        "lastUsed": "Last used",
+        "lowestDelay": "Fastest",
+        "hint": "At start the app connects by itself: to the last used server, or to the fastest of the best three (checked one at a time, never a burst of handshakes). If you already connected or disconnected yourself, it does nothing.",
+        "notChosen": "You have not chosen yet: off.",
+        "providerOff": "You have not chosen yet: the provider of the last server's subscription asks not to connect at start.",
+        "providerLastUsed": "You have not chosen yet: the provider of the last server's subscription asks to connect to the last used server.",
+        "providerLowestDelay": "You have not chosen yet: the provider of the last server's subscription asks to connect to its fastest server.",
+        "providerRandom": "You have not chosen yet: the provider of the last server's subscription asks to connect to a random server of it.",
+        "hintProxy": "Works when you connect through a server from the list. With a local proxy the route autopilot decides at start."
       }
     }
   }

@@ -47,4 +47,5 @@ pub mod shell;
 pub mod single_instance;
 pub mod sysproxy;
 pub mod toast;
+pub mod url_scheme;
 pub mod wfp;

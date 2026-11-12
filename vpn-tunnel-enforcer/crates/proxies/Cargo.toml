@@ -26,6 +26,7 @@ vpnte-base.workspace = true
 vpnte-core.workspace = true
 vpnte-engine.workspace = true
 vpnte-profiles.workspace = true
+vpnte-winnet.workspace = true
 windows.workspace = true
 
 [[bin]]

@@ -4,6 +4,7 @@
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
+use vpnte_base::Msg;
 use vpnte_base::types::{Engine, UnixMs};
 
 use super::{Degradation, Health, Lifecycle};
@@ -107,6 +108,10 @@ pub struct InstanceStatus {
     /// child (sing-box only bridges to it), else sing-box; `None` while nothing runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<Engine>,
+    /// What the running engine goes without, for the slot's row (`proxies.slot.spoofDropped`).
+    /// UI state only: the control API's JSON stays field-for-field the old one.
+    #[serde(skip)]
+    pub notice: Option<Msg>,
 }
 
 impl InstanceStatus {
@@ -142,6 +147,7 @@ impl InstanceStatus {
             pid: None,
             started_at: None,
             engine: None,
+            notice: None,
         }
     }
 }

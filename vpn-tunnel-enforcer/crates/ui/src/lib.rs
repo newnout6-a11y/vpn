@@ -65,6 +65,11 @@ pub const LOCALES: &[(&str, &str)] = &[
         include_str!("../locales/ui-wizard.ru.json"),
         include_str!("../locales/ui-wizard.en.json"),
     ),
+    // Lab texts (WP-12): shown only by a `lab` build, kept here so the key checks see one catalog.
+    (
+        include_str!("../locales/w7-mihomo.ru.json"),
+        include_str!("../locales/w7-mihomo.en.json"),
+    ),
 ];
 
 pub mod assets;

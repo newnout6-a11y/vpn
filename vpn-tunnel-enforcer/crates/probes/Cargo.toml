@@ -36,3 +36,7 @@ windows = { workspace = true, features = ["Win32_Networking_WinHttp", "Win32_Sys
 
 [lints]
 workspace = true
+
+[features]
+# WP-12 lab engine mihomo: never enabled by a production build.
+lab = ["vpnte-engine/lab"]

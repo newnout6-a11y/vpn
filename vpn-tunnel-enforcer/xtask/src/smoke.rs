@@ -51,8 +51,10 @@ pub fn run(root: &Path) -> Result<()> {
         "{PRODUCT} is already installed here; smoke-install needs a clean machine"
     );
 
+    let free = free_link_schemes();
     step("install", || expect_exit(&installer, &["/S"], 0))?;
     check_installed(&dir, &stage, &version)?;
+    check_links_registered(&dir, &free)?;
     check_engines(root, &dir)?;
     check_app(&dir, &version)?;
     // Same version again: the installer must chain the installed uninstaller with --updated and keep shortcuts.
@@ -60,8 +62,10 @@ pub fn run(root: &Path) -> Result<()> {
         expect_exit(&installer, &["/S"], 0)
     })?;
     check_installed(&dir, &stage, &version)?;
+    check_links_registered(&dir, &free)?;
     step("uninstall", || uninstall(&dir))?;
     check_removed(&dir)?;
+    check_links_removed(&dir, &free)?;
     println!("smoke-install: OK");
     Ok(())
 }
@@ -387,6 +391,98 @@ fn check_removed(dir: &Path) -> Result<()> {
         left.join("\n  ")
     );
     println!("  nothing left behind");
+    Ok(())
+}
+
+/// Link schemes the app registers per user (`vpnte_winnet::url_scheme::SCHEMES`: keep in step) and
+/// the record of what it wrote.
+const LINK_SCHEMES: [&str; 12] = [
+    "vless",
+    "vmess",
+    "trojan",
+    "ss",
+    "hysteria2",
+    "hy2",
+    "tuic",
+    "anytls",
+    "sing-box",
+    "clash",
+    "v2raytun",
+    "hiddify",
+];
+const LINK_RECORD: &str = r"Software\VPN Tunnel Enforcer\LinkSchemes";
+
+/// Schemes no program answers before the install (per user, machine-wide, or by the user's choice
+/// in Windows' settings): exactly the ones the installer may take.
+fn free_link_schemes() -> Vec<&'static str> {
+    LINK_SCHEMES
+        .into_iter()
+        .filter(|scheme| {
+            let path = format!(r"Software\Classes\{scheme}");
+            CURRENT_USER.open(&path).is_err()
+                && LOCAL_MACHINE.open(&path).is_err()
+                && !chosen_elsewhere(scheme)
+        })
+        .collect()
+}
+
+/// A `UserChoice` ProgId naming another handler than the scheme's own class key.
+fn chosen_elsewhere(scheme: &str) -> bool {
+    let path = format!(
+        r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\{scheme}\UserChoice"
+    );
+    CURRENT_USER
+        .open(path)
+        .and_then(|key| key.get_string("ProgId"))
+        .is_ok_and(|prog_id| {
+            let prog_id = prog_id.trim();
+            !prog_id.is_empty() && !prog_id.eq_ignore_ascii_case(scheme)
+        })
+}
+
+fn link_command(scheme: &str) -> Option<String> {
+    let key = CURRENT_USER
+        .open(format!(r"Software\Classes\{scheme}\shell\open\command"))
+        .ok()?;
+    key.get_string("").ok()
+}
+
+/// Every scheme that was free opens the installed exe with the link as one argument.
+fn check_links_registered(dir: &Path, free: &[&str]) -> Result<()> {
+    let expected = format!("\"{}\" --open-link \"%1\"", dir.join(EXE).display());
+    for scheme in free {
+        let command = link_command(scheme);
+        ensure!(
+            command.as_deref() == Some(expected.as_str()),
+            "link scheme {scheme}: {command:?}, expected {expected:?}"
+        );
+    }
+    println!("  link schemes registered: {}", free.join(" "));
+    Ok(())
+}
+
+/// Uninstall left no link scheme behind: none points into the install dir, the free ones are free
+/// again and the record is gone.
+fn check_links_removed(dir: &Path, free: &[&str]) -> Result<()> {
+    let dir_text = dir.display().to_string().to_lowercase();
+    let mut left: Vec<String> = LINK_SCHEMES
+        .into_iter()
+        .filter(|scheme| {
+            let ours = link_command(scheme).is_some_and(|c| c.to_lowercase().contains(&dir_text));
+            let path = format!(r"Software\Classes\{scheme}");
+            ours || (free.contains(scheme) && CURRENT_USER.open(&path).is_ok())
+        })
+        .map(|scheme| format!(r"HKCU\Software\Classes\{scheme}"))
+        .collect();
+    if CURRENT_USER.open(LINK_RECORD).is_ok() {
+        left.push(format!(r"HKCU\{LINK_RECORD}"));
+    }
+    ensure!(
+        left.is_empty(),
+        "uninstall left link schemes behind:\n  {}",
+        left.join("\n  ")
+    );
+    println!("  no link scheme left behind");
     Ok(())
 }
 

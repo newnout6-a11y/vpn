@@ -28,6 +28,7 @@ use vpnte_winnet::wfp::{ExceptionKind, KillSwitchException, RemoveReport, Toggle
 use super::guard::Guard;
 use super::{TunnelService, decide, probe};
 use crate::services::{KillSwitchStatus, TunnelOps};
+use crate::svc_auto::UserAct;
 use crate::svc_core::needs_admin;
 
 fn failed(e: AppError) -> ConnError {
@@ -95,21 +96,35 @@ impl TunnelOps for TunnelService {
     }
 
     async fn disconnect(&self, source: Source) -> Result<Done, ConnError> {
-        // A restore of the previous server after a lost switch must not undo the user's stop.
-        self.coord.user_stops();
+        // Nothing automatic after it (a restore of a lost switch, the retries) until the user
+        // connects again.
+        self.coord.user_acted(UserAct::Stop);
         self.lifecycle
             .disconnect(DisconnectReq::new(StopCause::User, Owner::Manual, source))
             .await
     }
 
     fn cancel(&self) {
-        if let Some(detection) = self.pending.lock().take() {
+        let detection = self.pending.lock().take();
+        // Cancel of a connect or switch in flight is the user's stop, also when the lane then
+        // ends the session with an outcome automation reads as a fault; with nothing in flight
+        // it still ends what automation had begun.
+        let in_flight = detection.is_some() || self.lifecycle.busy();
+        let act = if in_flight {
+            UserAct::Stop
+        } else {
+            UserAct::Change
+        };
+        self.coord.user_acted(act);
+        if let Some(detection) = detection {
             detection.cancel();
         }
         self.lifecycle.cancel_pending();
     }
 
     async fn switch_server(&self, id: ProfileId, source: Source) -> Result<Done, ConnError> {
+        // A server picked by hand ends every automatic path (and a restore on its way).
+        self.coord.user_acted(UserAct::Pick);
         let servers = self.servers.clone();
         let pick = id.clone();
         tokio::task::spawn_blocking(move || servers.select(&pick, SelectBy::User))
@@ -127,6 +142,8 @@ impl TunnelOps for TunnelService {
     }
 
     async fn apply_settings_change(&self, old: Settings, new: Settings) -> Result<Done, ConnError> {
+        // A changed setting is the user's action: automatic paths that began before give up.
+        self.coord.user_acted(UserAct::Change);
         let change = decide::settings_change(&old, &new);
         if let Some(every) = change.check_interval {
             self.ip.ip.set_interval(every);
@@ -190,10 +207,13 @@ impl TunnelOps for TunnelService {
     }
 
     async fn set_kill_switch_level(&self, level: KillSwitchLevel) -> AppResult<()> {
+        self.coord.user_acted(UserAct::Change);
         self.guarded(move |g| g.set_level(level)).await
     }
 
     async fn set_protection_toggles(&self, toggles: Toggles) -> AppResult<()> {
+        // A changed setting (and its restart) is the user's doing, not a fault to repair.
+        self.coord.user_acted(UserAct::Change);
         let reshaped = self.guarded(move |g| g.set_toggles(toggles)).await?;
         // Leak protection selects the TUN form (dual stack, native DNS); a Soft session has none.
         if reshaped && self.status().capture == Some(CaptureKind::Tun) {
@@ -347,5 +367,54 @@ impl TunnelOps for TunnelService {
             tracing::warn!("protection shutdown timed out");
         }
         report
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use vpnte_base::types::KillSwitchLevel;
+    use vpnte_core::ops::Source;
+    use vpnte_servers::model::ProfileId;
+
+    use crate::api_settings::test_support::{FakeTunnel, TempDir, backend};
+
+    /// Review fix b1/a2/a4 (the user always wins): Cancel, Disconnect, a server picked by hand
+    /// and a changed setting reach the automatic paths as the user's actions; a Cancel with
+    /// nothing in flight ends them without counting as a stop. Unelevated, nothing starts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_users_lane_actions_reach_automation() {
+        let dir = TempDir::new("ops-user-acts");
+        let b = backend(&dir, FakeTunnel::new(false));
+        let built = super::super::build(&b).expect("tunnel service");
+        let (t, acts) = (built.tunnel.clone(), built.automation.coord.user_acts());
+        let now = || {
+            let a = *acts.borrow();
+            (a.seq, a.stopped)
+        };
+        t.cancel();
+        assert_eq!(
+            now(),
+            (1, false),
+            "nothing in flight: an action, not a stop"
+        );
+        let _ = t
+            .switch_server(ProfileId::from("missing"), Source::Ui)
+            .await;
+        assert_eq!(now(), (2, false), "a server picked by hand");
+        let _ = t.disconnect(Source::Ui).await;
+        assert_eq!(
+            now(),
+            (3, true),
+            "a stop: nothing automatic until a connect"
+        );
+        let settings = b.settings.snapshot();
+        let _ = t.apply_settings_change(settings.clone(), settings).await;
+        assert_eq!(now(), (4, true), "a changed setting");
+        let _ = t.set_kill_switch_level(KillSwitchLevel::Off).await;
+        assert_eq!(now(), (5, true), "the kill switch's level");
+        let _ = t.shutdown(Duration::from_secs(5)).await;
+        b.shutdown.cancel();
     }
 }

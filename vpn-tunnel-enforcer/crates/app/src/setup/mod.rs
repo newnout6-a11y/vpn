@@ -14,6 +14,7 @@ use std::process::ExitCode;
 use crate::args::Args;
 
 pub mod gate;
+pub(crate) mod links;
 mod procs;
 mod shell;
 mod smoke;
@@ -140,11 +141,16 @@ fn installer(setup: &crate::args::Setup) -> End {
             Some(Err(line)) => End::failed(line),
             None => End::failed("Installation path is missing; not started."),
         },
+        SetupCommand::RegisterLinks => match dir {
+            Some(dir) => links::register(dir),
+            None => End::failed("Installation path is missing; link schemes not registered."),
+        },
     }
 }
 
 /// `--setup uninstall` (standalone uninstall, after `await-shutdown`): this user's tweaks with
-/// the system proxy, the autostart value and the jump list of our AUMID (the uninstaller deletes
+/// the system proxy, the autostart value, the link schemes recorded for this exe and the jump
+/// list of our AUMID (the uninstaller deletes
 /// the links itself); our WFP objects and the old version's firewall leftovers only when this
 /// process happens to be elevated, else they are listed as not checked. Refused (exit 1) when an
 /// elevated network cleanup fails (strict filters would keep the PC offline) or the system proxy
@@ -193,6 +199,10 @@ fn uninstall(dir: &std::path::Path) -> End {
         )),
     }
     lines.push(warn(system::autostart_value(&dir.join(gate::MAIN_EXE))));
+    lines.push(links::uninstall_line(
+        &vpnte_winnet::url_scheme::Registrar::current_user(),
+        &dir.join(gate::MAIN_EXE),
+    ));
     lines.push(match shell::remove_jump_list() {
         Ok(()) => "jump list: cleared".to_owned(),
         // No destinations file: nothing was ever recorded for our AUMID.

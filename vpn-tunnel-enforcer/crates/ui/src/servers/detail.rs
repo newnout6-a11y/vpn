@@ -15,6 +15,7 @@ use super::present::{
     DEVICES, device_label, displayed_ping, fingerprint, group_of, group_status_key,
     group_status_tone, is_removed_from_subscription, relative_time,
 };
+use super::qr::KeyQr;
 use super::row::Flag;
 use crate::t;
 use crate::widgets::{
@@ -224,6 +225,10 @@ fn DetailBody(id: String) -> Element {
             GeoCard { geo: geo(), country: server.country.clone(), geo_off }
             ProbeCards { probe: probe(), tunnel_running }
             LiveCheckPanel { id: id.clone() }
+            // The provider's `hide-settings`: no QR code either (the backend refuses it too).
+            if !server.config_hidden {
+                KeyQr { id: id.clone() }
+            }
         }
     }
 }

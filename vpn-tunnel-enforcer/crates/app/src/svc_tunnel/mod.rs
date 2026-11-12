@@ -8,6 +8,8 @@ mod domains;
 mod gate;
 mod guard;
 mod inputs;
+#[cfg(feature = "lab")]
+mod lab;
 mod leaks;
 mod legacy;
 mod monitor;
@@ -92,6 +94,12 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         Some(b.dirs.logs.clone()),
     )
     .with_gate(Arc::new(gate::BudgetGate));
+    // WP-12 lab build only: the lab gate and the mihomo engine (AmneziaWG in Proxy mode).
+    #[cfg(feature = "lab")]
+    let engines = match b.engines.singbox.parent() {
+        Some(resources) => lab::with_lab_engine(engines, &b.dirs.root, resources),
+        None => engines,
+    };
     let feed = engines.feed();
     let runtime = TunnelHandle::spawn(RuntimeDeps {
         engines: Arc::new(engines),

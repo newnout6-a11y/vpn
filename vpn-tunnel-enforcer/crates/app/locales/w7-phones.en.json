@@ -1,0 +1,29 @@
+{
+  "app": {
+    "phones": {
+      "linkNotTaken": "VPN Tunnel Enforcer is already open but could not take this link. Copy the link and paste it into the “Add server” dialog.",
+      "dialog": {
+        "openKeys": "Open a key or config file",
+        "keyFiles": "Keys and configs (*.txt, *.conf, *.json, *.yaml)",
+        "openQr": "Open a picture with a QR code",
+        "pictures": "Pictures (*.png, *.jpg, *.gif, *.bmp, *.webp)",
+        "allFiles": "All files"
+      },
+      "file": {
+        "unreadable": "The file could not be read.",
+        "empty": "The file is empty."
+      },
+      "qr": {
+        "tooLong": "This key is too long for a QR code: save it to a file or copy it instead.",
+        "none": "No QR code found. Show it larger (at least 2–3 cm on screen) and try again.",
+        "nothing": "A QR code was found, but it holds no key, subscription link or config.",
+        "unreadable": "The picture could not be read: PNG, JPEG, GIF, BMP or WebP is needed.",
+        "screenFailed": "The screen could not be read.",
+        "slow": "This took too long to read. Leave just the QR code in view (crop the picture or enlarge the code) and try again."
+      },
+      "schemes": {
+        "failed": "The Windows link settings could not be changed."
+      }
+    }
+  }
+}

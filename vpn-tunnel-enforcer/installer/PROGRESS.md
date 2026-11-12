@@ -396,3 +396,23 @@ A listener on a non-loopback address makes Windows Firewall ask for administrato
 - NOADMIN §3 lists "removal of the old Electron version's system leftovers" as an elevated installer step;
   the per-user installer has none. They go with the old version's own uninstaller (Settings > Apps, which
   asks for administrator rights itself), an app start as administrator, or `--cleanup` as administrator.
+
+# Work package `w7-phones` — link schemes in the installer (2026-11-12)
+- Install: after the links, `Function RegisterLinks` runs `--setup register-links --install-dir "$INSTDIR"`
+  (60 s, output to the detail log, never fails the installation). The helper (`crates/app/src/setup/links.rs`
+  over `vpnte_winnet::url_scheme`) registers this user's FREE schemes (`vless vmess trojan ss hysteria2 hy2 tuic
+  anytls sing-box clash v2raytun hiddify`) under `HKCU\Software\Classes\<scheme>` with the command
+  `"<dir>\VPN Tunnel Enforcer.exe" --open-link "%1"` on the first installation for this user; later runs (upgrade)
+  only point the schemes recorded as ours at `<dir>`. A scheme another program answers (per user or HKLM) is
+  never taken here. Output: `link schemes: done (registered: <names>|none new; re-pointed: N)` or
+  `warning: link schemes: FAILED (0x…)`.
+- Record: `HKCU\Software\VPN Tunnel Enforcer\LinkSchemes` (value per scheme = the exact command written;
+  `Previous\<scheme>` = another program's per-user key the user let us replace, put back on removal).
+- Uninstall: `--setup uninstall` adds the line `link schemes: done (removed N)` (or a `warning:`): it removes
+  exactly the schemes recorded for `<dir>\VPN Tunnel Enforcer.exe`, restores replaced keys, and deletes the
+  record (and `HKCU\Software\VPN Tunnel Enforcer` when empty). An upgrade (`--updated`) keeps them; the new
+  installer's register step re-points them.
+- `xtask smoke-install`: notes the free schemes before the install, checks after the install and after the
+  upgrade that each of them opens `<dir>\VPN Tunnel Enforcer.exe --open-link "%1"`, and after the uninstall
+  that no scheme points into `<dir>`, the free ones are free again and the record key is gone.
+- Not run here (CI only, changes real per-user state): the installer, the uninstaller, smoke-install.

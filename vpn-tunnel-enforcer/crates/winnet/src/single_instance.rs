@@ -1,15 +1,17 @@
 //! Single instance per Windows session: a named mutex decides who runs; a named pipe lets a
-//! later launch hand its command (activate, or shut down for an installer update) to the running
-//! instance.
+//! later launch hand its command (activate, open a link Windows passed it, or shut down for an
+//! installer update) to the running instance.
 //!
 //! The app is installed per user and runs unelevated, so every signed-in user runs their own copy
 //! (owner decision 12): the mutex lives in the session's `Local\` namespace, which other users
 //! cannot create objects in, and the pipe name carries the session id because pipes have no
 //! session namespace. The installer's `--shutdown-for-update` launch runs in the installing
-//! user's session and so reaches that user's copy. Both objects keep the default DACL: an
-//! elevated primary's pipe only accepts writers that are SYSTEM, administrators or the owner, so
-//! a non-elevated process cannot make it quit. A non-elevated launch that cannot even open the
-//! mutex still learns that it exists (access denied) and backs off.
+//! user's session and so reaches that user's copy. The mutex keeps the default DACL: a
+//! non-elevated launch that cannot open an elevated primary's mutex still learns that it exists
+//! (access denied) and backs off. The pipe admits the user at medium integrity, so a link clicked
+//! while the app runs as administrator still reaches it, but only an equally elevated launch may
+//! make an elevated primary quit ([`security`]). A link is written only to a pipe served by this
+//! exe in this session: another signed-in user may have created the pipe name first.
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -18,8 +20,7 @@ use tokio::sync::mpsc;
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use windows::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING,
-    ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_SHARE_NONE,
@@ -42,13 +43,20 @@ use windows::core::{HSTRING, PCWSTR};
 
 use crate::win;
 
+mod security;
+
+use security::{Peer, PipeSecurity};
+
 /// Mutex of the installed app, in the caller's session namespace.
 pub const MUTEX_NAME: &str = r"Local\VpnTunnelEnforcer.Instance";
 /// Command pipe of the installed app: this prefix, a dot and the Windows session id.
 pub const PIPE_PREFIX: &str = r"\\.\pipe\VpnTunnelEnforcer";
 
 /// A command is one UTF-8 line of at most this many bytes.
-const MAX_LINE: usize = 4096;
+const MAX_LINE: usize = 20 * 1024;
+/// The longest link a later launch hands over (a long `vmess://` or `ss://` key with plugin
+/// options stays far below; Windows' whole command line is 32 767 UTF-16 units).
+pub const MAX_LINK: usize = 16 * 1024;
 /// Bound for each read / write / close-wait of one hand-off, so a stuck peer cannot wedge us.
 const IO_TIMEOUT_MS: u32 = 2_000;
 
@@ -78,19 +86,33 @@ impl InstanceNames {
 }
 
 /// What a later launch asks the running instance to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Show and focus the main window.
     Activate,
     /// The installer is about to replace the exe: clean up and exit with code 73.
     ShutdownForUpdate,
+    /// Windows opened a link of one of our schemes (`vless://…`): show the window with the link
+    /// in the add dialog. Nothing is imported until the user confirms there.
+    OpenLink(String),
 }
 
+const OPEN_LINK: &[u8] = b"open-link ";
+
 impl Command {
-    fn wire(self) -> &'static str {
+    /// The command's name for logs; a link is never logged (it is a key or a subscription).
+    fn wire(&self) -> &'static str {
         match self {
             Command::Activate => "activate",
             Command::ShutdownForUpdate => "shutdown-for-update",
+            Command::OpenLink(_) => "open-link",
+        }
+    }
+
+    fn line(&self) -> String {
+        match self {
+            Command::OpenLink(link) => format!("open-link {link}\n"),
+            other => format!("{}\n", other.wire()),
         }
     }
 
@@ -98,9 +120,17 @@ impl Command {
         match trim_line(line) {
             b"activate" => Some(Command::Activate),
             b"shutdown-for-update" => Some(Command::ShutdownForUpdate),
-            _ => None,
+            line => {
+                let link = std::str::from_utf8(line.strip_prefix(OPEN_LINK)?).ok()?;
+                valid_link(link).then(|| Command::OpenLink(link.to_owned()))
+            }
         }
     }
+}
+
+/// One line of printable text within [`MAX_LINK`]: a link never holds a control character.
+fn valid_link(link: &str) -> bool {
+    !link.trim().is_empty() && link.len() <= MAX_LINK && !link.chars().any(char::is_control)
 }
 
 fn trim_line(line: &[u8]) -> &[u8] {
@@ -176,7 +206,10 @@ struct Listener {
 
 impl Listener {
     fn start(name: &str, tx: mpsc::UnboundedSender<Command>) -> AppResult<Self> {
-        // SAFETY: valid name; default security on purpose (module docs); the handle is owned below.
+        let security = PipeSecurity::new().map_err(AppError::internal)?;
+        let attributes = security.attributes();
+        // SAFETY: valid name; `attributes` and the descriptor it points to outlive the call; the
+        // handle is owned below.
         let pipe = unsafe {
             CreateNamedPipeW(
                 &HSTRING::from(name),
@@ -187,7 +220,7 @@ impl Listener {
                 MAX_LINE as u32,
                 MAX_LINE as u32,
                 0,
-                None,
+                Some(&raw const attributes),
             )
         };
         if pipe.is_invalid() {
@@ -198,10 +231,13 @@ impl Listener {
         let stop = event()?;
         let thread_stop = stop.try_clone()?;
         let io_event = event()?;
-        let session = current_session().ok();
+        let own = Own {
+            session: current_session().ok(),
+            integrity: security::own_integrity(),
+        };
         let thread = std::thread::Builder::new()
             .name("vpnte-single-instance".into())
-            .spawn(move || serve(&pipe, &thread_stop, &io_event, session, &tx))?;
+            .spawn(move || serve(&pipe, &thread_stop, &io_event, own, &tx))?;
         Ok(Self {
             stop,
             thread: Some(thread),
@@ -219,11 +255,21 @@ impl Drop for Listener {
     }
 }
 
+/// The primary's own session and integrity, read once when it starts listening.
+#[derive(Clone, Copy)]
+struct Own {
+    session: Option<u32>,
+    integrity: Option<u32>,
+}
+
+/// SECURITY_MANDATORY_MEDIUM_RID: an unelevated process.
+const MEDIUM: u32 = 0x2000;
+
 fn serve(
     pipe: &OwnedHandle,
     stop: &OwnedHandle,
     event: &OwnedHandle,
-    session: Option<u32>,
+    own: Own,
     tx: &mpsc::UnboundedSender<Command>,
 ) {
     let io = Io {
@@ -232,7 +278,7 @@ fn serve(
         stop: Some(raw(stop)),
     };
     loop {
-        let served = io.connect().and_then(|()| serve_client(&io, session, tx));
+        let served = io.connect().and_then(|()| serve_client(&io, own, tx));
         match served {
             Err(IoEnd::Stopped) => return,
             Err(IoEnd::Failed(e)) => {
@@ -252,17 +298,18 @@ fn serve(
     }
 }
 
-fn serve_client(
-    io: &Io,
-    session: Option<u32>,
-    tx: &mpsc::UnboundedSender<Command>,
-) -> Result<(), IoEnd> {
+fn serve_client(io: &Io, own: Own, tx: &mpsc::UnboundedSender<Command>) -> Result<(), IoEnd> {
     let mut buf = [0u8; MAX_LINE];
     let n = io.read(&mut buf)?;
     let reply = match Command::parse(&buf[..n]) {
         // Only a client that picked this session's pipe name on purpose comes from elsewhere:
         // our window cannot appear on its desktop.
-        Some(Command::Activate) if !same_session(io.pipe, session) => "other-session",
+        Some(Command::Activate | Command::OpenLink(_)) if !same_session(io.pipe, own.session) => {
+            "other-session"
+        }
+        // The pipe admits the user's unelevated launches (links); quitting an elevated primary
+        // (and with it TUN and the kill switch) stays with an equally elevated caller.
+        Some(Command::ShutdownForUpdate) if below(io.pipe, own.integrity) => "denied",
         Some(cmd) => {
             tracing::info!(
                 command = cmd.wire(),
@@ -279,6 +326,13 @@ fn serve_client(
         Err(IoEnd::Stopped) => Err(IoEnd::Stopped),
         _ => Ok(()),
     }
+}
+
+/// `true` when this primary is elevated and the client is not as high (unknown counts as lower).
+fn below(pipe: HANDLE, own: Option<u32>) -> bool {
+    own.is_some_and(|own| {
+        own > MEDIUM && security::client_integrity(pipe).is_none_or(|client| client < own)
+    })
 }
 
 fn same_session(pipe: HANDLE, own: Option<u32>) -> bool {
@@ -418,14 +472,42 @@ impl Io {
 
 /// Hands `cmd` to the instance listening on `pipe`, waiting up to `timeout` for its pipe (the
 /// primary may still be starting). Every error carries `winnet.singleInstance.noAnswer`; a
-/// refused command (an activation from another session's client, an unknown line) is one too.
+/// refused command (an activation from another session's client, an unknown line, a link that is
+/// not one printable line within [`MAX_LINK`]) is one too. A link goes only to a server running
+/// this exe in this session (else `Permission`, nothing written).
 pub fn send(pipe: &str, cmd: Command, timeout: Duration) -> AppResult<()> {
+    let peer = match cmd {
+        Command::OpenLink(_) => Some(Peer::this_process().map_err(no_answer)?),
+        Command::Activate | Command::ShutdownForUpdate => None,
+    };
+    send_checked(pipe, cmd, timeout, peer.as_ref())
+}
+
+/// [`send`]; a link is written only when the server matches `peer` (tests pass a stranger).
+fn send_checked(pipe: &str, cmd: Command, timeout: Duration, peer: Option<&Peer>) -> AppResult<()> {
+    if let Command::OpenLink(link) = &cmd
+        && !valid_link(link)
+    {
+        return Err(AppError::msg(
+            ErrorKind::Validation,
+            Msg::new("winnet.singleInstance.noAnswer"),
+        ));
+    }
     let handle = open_client(pipe, timeout)?;
     let pipe = raw(&handle);
+    if let Some(peer) = peer
+        && !security::server_is(pipe, peer)
+    {
+        return Err(AppError::msg(
+            ErrorKind::Permission,
+            Msg::new("winnet.singleInstance.noAnswer"),
+        )
+        .with_source(std::io::Error::other("the pipe is not served by this app")));
+    }
     let mode = PIPE_READMODE_MESSAGE;
     // SAFETY: live pipe handle; `mode` outlives the call.
     unsafe { SetNamedPipeHandleState(pipe, Some(&mode), None, None) }.map_err(no_answer)?;
-    if cmd == Command::Activate {
+    if cmd != Command::ShutdownForUpdate {
         allow_foreground(pipe);
     }
     let event = event()?;
@@ -436,7 +518,7 @@ pub fn send(pipe: &str, cmd: Command, timeout: Duration) -> AppResult<()> {
     };
     let mut reply = [0u8; 64];
     let n = io
-        .transact(format!("{}\n", cmd.wire()).as_bytes(), &mut reply)
+        .transact(cmd.line().as_bytes(), &mut reply)
         .map_err(|end| match end {
             IoEnd::Failed(e) => no_answer(e),
             IoEnd::TimedOut | IoEnd::Stopped => AppError::msg(
@@ -465,7 +547,7 @@ fn open_client(pipe: &str, timeout: Duration) -> AppResult<OwnedHandle> {
         let opened = unsafe {
             CreateFileW(
                 &name,
-                (GENERIC_READ | GENERIC_WRITE).0,
+                security::CLIENT_ACCESS,
                 FILE_SHARE_NONE,
                 None,
                 OPEN_EXISTING,

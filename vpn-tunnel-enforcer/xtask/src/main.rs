@@ -16,15 +16,18 @@ const USAGE: &str = "\
 cargo xtask <command>
 
   engines [--offline]   download the pinned engines, verify every hash, fill the dev drop resources/
+                        (the WP-12 lab engine mihomo included: tests use it)
   verify                check that resources/ holds exactly the pinned engine files
   nsis                  fetch and verify the pinned NSIS, unpack it to target/tools/nsis
-  dist [--skip-build] [--bin-dir DIR]
+  dist [--skip-build] [--bin-dir DIR] [--lab]
                         build the two shipped binaries (release, --locked), stage the installed layout in
                         target/stage, check its exact file set, compile installer/vpnte.nsi and write
                         target/dist/{VPN-Tunnel-Enforcer-Setup-<version>.exe,
                         VPN-Tunnel-Enforcer-<version>-portable.zip (no installation, no administrator), checksums.txt};
                         --skip-build takes vpn-tunnel-enforcer.exe, vpnte_proxy.exe and
-                        THIRD-PARTY-NOTICES.txt from DIR (default target/release) instead of running cargo
+                        THIRD-PARTY-NOTICES.txt from DIR (default target/release) instead of running cargo;
+                        --lab (WP-12 lab package, never a release): the app's `lab` feature, the lab engines
+                        staged, every artifact named `...-lab`
   smoke-install         CI only (requires CI=true): install the built per-user installer silently, check files,
                         HKCU registry, links and app start, that nothing machine-wide was written, upgrade over
                         itself, uninstall, check that nothing is left
@@ -47,7 +50,7 @@ fn main() -> Result<()> {
                 )),
                 None => None,
             };
-            dist::run(&root, flag("--skip-build"), bin_dir)
+            dist::run(&root, flag("--skip-build"), bin_dir, flag("--lab"))
         }
         #[cfg(windows)]
         Some("smoke-install") => smoke::run(&root),

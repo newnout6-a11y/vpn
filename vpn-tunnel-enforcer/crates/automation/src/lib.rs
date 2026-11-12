@@ -23,6 +23,10 @@ pub const LOCALES: &[(&str, &str)] = &[
         include_str!("../locales/noadmin-system.ru.json"),
         include_str!("../locales/noadmin-system.en.json"),
     ),
+    (
+        include_str!("../locales/w7-autopick.ru.json"),
+        include_str!("../locales/w7-autopick.en.json"),
+    ),
 ];
 
 mod lenient;
@@ -30,6 +34,7 @@ mod lenient;
 mod test_support;
 
 pub mod adaptive;
+pub mod autopick;
 pub mod autopilot;
 pub mod coordinator;
 pub mod hardening;

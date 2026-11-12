@@ -87,3 +87,16 @@ pub(crate) fn healthy_instance(slot: u64, ip: &str, now: UnixMs) -> InstanceStat
         ..InstanceStatus::stopped(slot)
     }
 }
+
+/// A provider's sing-box outbound with a TLS spoof (audit item 18; fake values, documentation
+/// address).
+pub(crate) fn spoofed() -> Profile {
+    let doc = serde_json::json!({ "outbounds": [{
+        "type": "trojan", "tag": "Spoofed", "server": "203.0.113.12", "server_port": 443,
+        "password": "fake-password",
+        "tls": { "enabled": true, "server_name": "example.com",
+                 "spoof": "decoy.example", "spoof_method": "wrong-sequence" }
+    }]});
+    let report = vpnte_profiles::json::parse_json(&doc);
+    report.profiles.into_iter().next().expect("one profile")
+}

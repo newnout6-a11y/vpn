@@ -61,6 +61,8 @@ pub fn run(args: &Args) -> ExitCode {
     boot::spawn_housekeeping(&backend.settings);
     let options = launch_options(&backend, args);
     let wiring = Wiring::new(backend, primary.take_commands());
+    // The link this start was opened with (`--open-link`) goes to the add dialog like a later one.
+    wiring.first_link.replace(args.open_link.clone());
     vpnte_ui::launch::launch(options, App, move || contexts(wiring))
 }
 
@@ -75,6 +77,8 @@ struct Wiring {
     notices: RefCell<Option<broadcast::Receiver<InAppNotice>>>,
     /// Clicks on a Windows toast while it is on screen.
     activations: RefCell<Option<mpsc::UnboundedReceiver<()>>>,
+    /// The link this process was started with (RU-2026 item 4), until the root hands it over.
+    first_link: RefCell<Option<String>>,
 }
 
 impl Wiring {
@@ -88,6 +92,7 @@ impl Wiring {
             notices: RefCell::new(Some(backend.notifier.subscribe())),
             commands: RefCell::new(commands),
             activations: RefCell::new(Some(activations)),
+            first_link: RefCell::new(None),
             backend,
         }
     }
@@ -109,6 +114,8 @@ fn contexts(wiring: Wiring) -> Vec<Box<dyn Any>> {
         Ok(built) => {
             let _ = backend.tunnel.set(built.tunnel.clone());
             boot::spawn_power_events(built.tunnel.clone(), backend.shutdown.child_token());
+            // Needs the tunnel stored above (probe context, counters); before the start page.
+            crate::svc_auto::spawn_autopick(&backend, &built.automation);
             built
         }
         Err(err) => {
@@ -126,7 +133,7 @@ fn contexts(wiring: Wiring) -> Vec<Box<dyn Any>> {
         backend.notifier.clone(),
         backend.shutdown.child_token(),
     ));
-    let mut out = api_dashboard::contexts(&backend);
+    let mut out = api_dashboard::contexts(&backend, &built.automation);
     out.extend(api_servers::contexts(&backend));
     out.extend(api_settings::contexts(&backend, &built.automation));
     out.extend(api_maintenance::contexts(&backend, &built));
@@ -194,6 +201,7 @@ pub fn App() -> Element {
                 registry,
                 overlays: rsx! {
                     vpnte_ui::wizard::Wizard {}
+                    vpnte_ui::servers::LinkHandoff {}
                 },
                 toasts: rsx! {
                     ToastHost { close_label: t!("common.close") }
@@ -281,21 +289,32 @@ fn show_notice(toasts: Toasts, notice: &Notice) {
     );
 }
 
-/// Commands of later launches: `activate` shows the window; the installer's
-/// `shutdown-for-update` runs the quit cleanup without a question and exits with 73.
+/// Commands of later launches: `activate` shows the window; a link (and the one this process
+/// started with) shows the window and goes to the Servers page's add dialog, where the user
+/// confirms it; the installer's `shutdown-for-update` runs the quit cleanup without a question
+/// and exits with 73.
 fn use_instance_commands(wiring: &Rc<Wiring>) {
     let wiring = wiring.clone();
     let tray = use_context::<Rc<dyn TrayApi>>();
+    let inbox = use_context::<crate::api_servers::LinkInbox>();
     let desktop = use_window();
     use_future(move || {
         let commands = wiring.commands.borrow_mut().take();
-        let (tray, desktop) = (tray.clone(), desktop.clone());
+        let first_link = wiring.first_link.borrow_mut().take();
+        let (tray, desktop, inbox) = (tray.clone(), desktop.clone(), inbox.clone());
         async move {
+            if let Some(link) = first_link {
+                inbox.offer(link);
+            }
             let Some(mut commands) = commands else { return };
             let mut updating = false;
             while let Some(command) = commands.recv().await {
                 match command {
                     Command::Activate => show_window(&desktop),
+                    Command::OpenLink(link) => {
+                        show_window(&desktop);
+                        inbox.offer(link);
+                    }
                     Command::ShutdownForUpdate if !updating => {
                         updating = true;
                         // Outlives any component: the exit must happen whatever the UI does.

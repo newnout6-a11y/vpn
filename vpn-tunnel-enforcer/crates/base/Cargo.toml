@@ -18,3 +18,7 @@ rustls.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# WP-12 lab functions (mihomo / AmneziaWG). Never enabled by a production build (`cargo xtask dist`).
+lab = []

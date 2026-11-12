@@ -116,6 +116,16 @@ pub trait Engines: Send + Sync {
     async fn local_proxy(&self, addr: &HostPort, limit: Duration) -> AppResult<Option<PathBuf>>;
     /// IPv4 resolvers of the physical adapters (empty when unreadable).
     async fn physical_dns(&self) -> Vec<Ipv4Addr>;
+    /// WP-12 lab: starts mihomo with `config` (translated for `socks` / `controller`) and waits
+    /// for its readiness; a failed start leaves nothing running.
+    #[cfg(feature = "lab")]
+    async fn start_mihomo(
+        &self,
+        config: &vpnte_engine::mihomo_config::Compiled,
+        socks: SlotEndpoint,
+        controller: ClashEndpoint,
+        cancel: &CancellationToken,
+    ) -> AppResult<Arc<dyn CoreProc>>;
 }
 
 /// Admits the probe handshakes the runtime makes to a server. RU networks freeze a server name
@@ -198,6 +208,9 @@ pub struct RealEngines {
     logs: Option<PathBuf>,
     gate: Option<Arc<dyn HandshakeGate>>,
     feed: EngineFeed,
+    /// WP-12 lab: the mihomo exe and the dir of its per-run home dirs.
+    #[cfg(feature = "lab")]
+    mihomo: Option<(PathBuf, PathBuf)>,
 }
 
 impl RealEngines {
@@ -209,7 +222,19 @@ impl RealEngines {
             logs,
             gate: None,
             feed: EngineFeed::default(),
+            #[cfg(feature = "lab")]
+            mihomo: None,
         }
+    }
+
+    /// WP-12 lab: the mihomo exe (canonical install path) and a private dir for its run homes
+    /// (swept here: nothing runs yet).
+    #[cfg(feature = "lab")]
+    #[must_use]
+    pub fn with_mihomo(mut self, exe: PathBuf, runs: PathBuf) -> Self {
+        vpnte_engine::mihomo_process::sweep_homes(&runs);
+        self.mihomo = Some((exe, runs));
+        self
     }
 
     /// Every egress probe through a slot first waits for `gate` (the app's handshake budget).
@@ -281,6 +306,30 @@ impl EngineFeed {
     }
 }
 
+/// Why no address came back from the echo services: the source of their `egressUnknown` error,
+/// so a caller can tell a silent route from one that answered (audit mihomo-b3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(super) enum EchoFailure {
+    /// No service sent an HTTP answer: nothing came back through the route.
+    #[error("no echo service answered through the route")]
+    NoReply,
+    /// Answers came back (an error status, a page that is not an address): the route carries
+    /// traffic, only the address is unknown.
+    #[error("the echo services answered without an address")]
+    NoAddress,
+}
+
+/// The `egressUnknown` error of an echo that found no address, with its cause.
+pub(super) fn echo_failed(why: EchoFailure) -> AppError {
+    AppError::msg(ErrorKind::Network, Msg::new("tunnel.runtime.egressUnknown")).with_source(why)
+}
+
+/// What `err` says about the route, when it is an echo's own failure.
+#[cfg(feature = "lab")]
+pub(super) fn echo_failure(err: &AppError) -> Option<EchoFailure> {
+    err.source.as_ref()?.downcast_ref::<EchoFailure>().copied()
+}
+
 /// The first public IP an echo service reports through `route`. With `admit`, every request
 /// first takes a handshake slot of the server behind the route: the fallback service is a new
 /// connection, and an unbudgeted retry against a freezing server extends the freeze.
@@ -292,22 +341,25 @@ async fn echo(
 ) -> AppResult<IpAddr> {
     let client = client_for(route, timeout)?;
     let ask = async {
+        let mut why = EchoFailure::NoReply;
         for url in ECHO_URLS {
             if let Some((gate, server)) = admit {
                 gate.admit(server, cancel).await?;
             }
-            let answer = match client.get(url).send().await {
-                Ok(resp) if resp.status().is_success() => resp.text().await.ok(),
-                _ => None,
+            let Ok(resp) = client.get(url).send().await else {
+                continue;
+            };
+            why = EchoFailure::NoAddress;
+            let answer = if resp.status().is_success() {
+                resp.text().await.ok()
+            } else {
+                None
             };
             if let Some(ip) = answer.and_then(|t| t.trim().parse::<IpAddr>().ok()) {
                 return Ok(ip);
             }
         }
-        Err(AppError::msg(
-            ErrorKind::Network,
-            Msg::new("tunnel.runtime.egressUnknown"),
-        ))
+        Err(echo_failed(why))
     };
     tokio::select! {
         () = cancel.cancelled() => Err(AppError::cancelled()),
@@ -458,6 +510,22 @@ impl Engines for RealEngines {
                 Vec::new()
             }
         }
+    }
+
+    #[cfg(feature = "lab")]
+    async fn start_mihomo(
+        &self,
+        config: &vpnte_engine::mihomo_config::Compiled,
+        socks: SlotEndpoint,
+        controller: ClashEndpoint,
+        cancel: &CancellationToken,
+    ) -> AppResult<Arc<dyn CoreProc>> {
+        let Some((exe, runs)) = &self.mihomo else {
+            let msg = Msg::new("tunnel.runtime.mihomo.unavailable");
+            return Err(AppError::msg(ErrorKind::Internal, msg));
+        };
+        let logs = self.logs.as_deref();
+        super::mihomo::start_run(exe, runs, logs, config, socks, controller, cancel).await
     }
 }
 
