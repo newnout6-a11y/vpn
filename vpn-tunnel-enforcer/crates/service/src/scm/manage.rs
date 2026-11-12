@@ -5,16 +5,19 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_NOT_ACTIVE};
+use windows::Win32::Foundation::{
+    ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_MARKED_FOR_DELETE, ERROR_SERVICE_NOT_ACTIVE,
+};
 use windows::Win32::Security::DACL_SECURITY_INFORMATION;
 use windows::Win32::System::Services::{
     ChangeServiceConfig2W, CloseServiceHandle, ControlService, CreateServiceW, DeleteService,
-    OpenSCManagerW, OpenServiceW, QUERY_SERVICE_CONFIGW, QueryServiceConfigW, QueryServiceStatusEx,
-    SC_ACTION, SC_ACTION_RESTART, SC_HANDLE, SC_MANAGER_ALL_ACCESS, SC_MANAGER_CONNECT,
-    SC_STATUS_PROCESS_INFO, SERVICE_ALL_ACCESS, SERVICE_AUTO_START, SERVICE_CONFIG_DESCRIPTION,
-    SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG,
-    SERVICE_CONFIG_SERVICE_SID_INFO, SERVICE_CONTROL_STOP, SERVICE_DESCRIPTIONW,
-    SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONS_FLAG, SERVICE_FAILURE_ACTIONSW,
+    ENUM_SERVICE_TYPE, OpenSCManagerW, OpenServiceW, QUERY_SERVICE_CONFIGW, QueryServiceConfigW,
+    QueryServiceStatusEx, SC_ACTION, SC_ACTION_RESTART, SC_HANDLE, SC_MANAGER_ALL_ACCESS,
+    SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
+    SERVICE_CHANGE_CONFIG, SERVICE_CONFIG_DESCRIPTION, SERVICE_CONFIG_FAILURE_ACTIONS,
+    SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, SERVICE_CONFIG_SERVICE_SID_INFO, SERVICE_CONTROL_STOP,
+    SERVICE_DESCRIPTIONW, SERVICE_DISABLED, SERVICE_ERROR, SERVICE_ERROR_NORMAL,
+    SERVICE_FAILURE_ACTIONS_FLAG, SERVICE_FAILURE_ACTIONSW, SERVICE_NO_CHANGE,
     SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_SID_INFO,
     SERVICE_SID_TYPE_UNRESTRICTED, SERVICE_START, SERVICE_STATUS, SERVICE_STATUS_PROCESS,
     SERVICE_STOP, SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS, SetServiceObjectSecurity,
@@ -230,13 +233,51 @@ pub fn stop(limit: Duration) -> windows::core::Result<bool> {
     wait_state(&service, SERVICE_STOPPED, limit)
 }
 
+/// Sets the start type of an installed service: `false` = disabled, so the SCM's recovery cannot
+/// start it again while its files are replaced or removed (review service-a13); `true` = back to
+/// automatic. Nothing to do when it is not installed.
+pub fn set_enabled(enabled: bool) -> windows::core::Result<()> {
+    let Some(service) = open(SERVICE_CHANGE_CONFIG)? else {
+        return Ok(());
+    };
+    let start = if enabled {
+        SERVICE_AUTO_START
+    } else {
+        SERVICE_DISABLED
+    };
+    // SAFETY: valid handle; "no change" values and null strings keep every other field.
+    unsafe {
+        windows::Win32::System::Services::ChangeServiceConfigW(
+            service.0,
+            ENUM_SERVICE_TYPE(SERVICE_NO_CHANGE),
+            start,
+            SERVICE_ERROR(SERVICE_NO_CHANGE),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            None,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            PCWSTR::null(),
+        )
+    }
+}
+
 /// Marks the service for deletion (the SCM removes it once stopped and every handle closed).
 pub fn delete() -> windows::core::Result<()> {
     if let Some(service) = open(DELETE)? {
         // SAFETY: valid handle opened with DELETE.
-        unsafe { DeleteService(service.0) }?;
+        marked(unsafe { DeleteService(service.0) })?;
     }
     Ok(())
+}
+
+/// Already marked for deletion (an earlier run whose stop hung) is what `delete` wants.
+fn marked(deleted: windows::core::Result<()>) -> windows::core::Result<()> {
+    match deleted {
+        Err(e) if e.code() == ERROR_SERVICE_MARKED_FOR_DELETE.to_hresult() => Ok(()),
+        other => other,
+    }
 }
 
 /// The installed service's executable (`None`: not installed). The app compares the pipe
@@ -263,4 +304,20 @@ pub fn exe_of_command_line(line: &str) -> Option<PathBuf> {
     let rest = line.trim().strip_prefix('"')?;
     let (exe, _) = rest.split_once('"')?;
     Some(PathBuf::from(exe))
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
+
+    use super::*;
+
+    /// Review service-a13: a rerun after a hung stop finds the service marked for deletion; that
+    /// is done, not a failure. Other errors stay errors.
+    #[test]
+    fn already_marked_for_deletion_counts_as_deleted() {
+        assert!(marked(Err(ERROR_SERVICE_MARKED_FOR_DELETE.into())).is_ok());
+        assert!(marked(Err(ERROR_ACCESS_DENIED.into())).is_err());
+        assert!(marked(Ok(())).is_ok());
+    }
 }

@@ -2,12 +2,17 @@
 //!
 //! The protocol's types already exclude file paths, command lines and engine JSON; this module
 //! bounds every free-form part that remains: provider sing-box keys (`Profile::singbox_extra`)
-//! pass only the union of the importers' allow-lists, a provider Xray graph re-runs its import
-//! checks, a local upstream proxy must be on loopback, text and list sizes are capped, and
-//! kill-switch exceptions are re-validated as the UI validates them (an app exception is a local
-//! `.exe` that becomes a WFP app id: opened for reading, never run).
+//! pass only the union of the importers' allow-lists, provider JSON (sing-box values, an XHTTP
+//! `extra`, a native Xray graph) may only use keys a Go decoder reads as we do, a provider Xray
+//! graph re-runs its full import checks, a local upstream proxy must be on loopback, text and list
+//! sizes are capped, and kill-switch exceptions are re-validated as the UI validates them (an app
+//! exception is a local `.exe` that becomes a WFP app id: opened for reading, never run).
+use std::collections::BTreeSet;
+
+use serde_json::{Map, Value};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
-use vpnte_profiles::model::Profile;
+use vpnte_profiles::model::{NativeXray, Profile, Transport};
+use vpnte_profiles::xray_native;
 use vpnte_winnet::wfp::{self, KillSwitchException, ProtectionSettings};
 
 use crate::proto::{RoutingInputs, ServerUpstream, TunnelStart, Upstream};
@@ -126,8 +131,61 @@ fn profile(p: &Profile) -> AppResult<()> {
         tracing::warn!(key = %key.chars().take(64).collect::<String>(), "refused a provider sing-box key");
         return Err(refused("service.refused.text", "singbox_extra"));
     }
+    for value in p.singbox_extra.values() {
+        provider_json(value, "singbox_extra")?;
+    }
+    if let Some(Transport::Xhttp {
+        extra: Some(extra), ..
+    }) = &p.transport
+    {
+        provider_object(extra, "extra")?;
+    }
     if let Some(graph) = &p.native_xray {
-        vpnte_profiles::xray_native::validate(graph)?;
+        native_graph(graph)?;
+    }
+    Ok(())
+}
+
+/// A provider Xray graph: its JSON as [`provider_json`] requires, then the full import checks
+/// (reach, local files, insecure TLS, application bypass) that the engine runs again at start.
+fn native_graph(graph: &NativeXray) -> AppResult<()> {
+    xray_native::validate(graph)?;
+    let routing = graph
+        .routing
+        .iter()
+        .flat_map(|r| r.rules.iter().chain(&r.balancers));
+    let extras = [&graph.observatory, &graph.burst_observatory, &graph.policy];
+    graph
+        .outbounds
+        .iter()
+        .chain(routing)
+        .chain(extras.into_iter().flatten())
+        .try_for_each(|value| provider_json(value, "native_xray"))?;
+    xray_native::compile(graph, xray_native::selected_outbound(graph)?)?;
+    Ok(())
+}
+
+/// Provider JSON reaches Go engines, whose decoder matches keys without regard to case, with
+/// Unicode folding (`ſ` is `s`, the Kelvin sign is `k`), and lets the last of two such keys win,
+/// while our checks compare ASCII. So every object, at any depth, may only have keys of printable
+/// ASCII, no two of them equal ignoring ASCII case (review service-b1).
+fn provider_json(value: &Value, field: &'static str) -> AppResult<()> {
+    match value {
+        Value::Object(map) => provider_object(map, field),
+        Value::Array(items) => items.iter().try_for_each(|v| provider_json(v, field)),
+        _ => Ok(()),
+    }
+}
+
+fn provider_object(map: &Map<String, Value>, field: &'static str) -> AppResult<()> {
+    let mut seen = BTreeSet::new();
+    for (key, child) in map {
+        let printable = key.bytes().all(|b| b == b' ' || b.is_ascii_graphic());
+        if !printable || !seen.insert(key.to_ascii_lowercase()) {
+            tracing::warn!(key = ?key.chars().take(64).collect::<String>(), "refused a provider JSON key");
+            return Err(refused("service.refused.text", field));
+        }
+        provider_json(child, field)?;
     }
     Ok(())
 }

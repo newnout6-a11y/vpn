@@ -1,9 +1,10 @@
 //! One request of the controlling client -> one call into the runtime / kill switch.
+use std::future::Future;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::KillSwitchLevel;
-use vpnte_base::{AppError, ErrorKind, Msg};
+use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_tunnel::api::{
     CaptureKind, Mode, RestartOptions, StartRequest, StopOptions, TunError, VpnProfile,
 };
@@ -65,6 +66,30 @@ fn start_request(start: &TunnelStart, level: KillSwitchLevel) -> StartRequest {
 }
 
 impl Host {
+    /// Runs `op` under the state lock, on a task of its own: it finishes even when its request is
+    /// dropped (the client left mid-request), and the next state change and the stop after the
+    /// client left see its result (reviews service-a1 / a10).
+    async fn serialized<T: Send + 'static>(
+        &self,
+        op: impl Future<Output = AppResult<T>> + Send + 'static,
+    ) -> Result<T, WireError> {
+        let guard = self.state.clone().lock_owned().await;
+        let task = tokio::spawn(async move {
+            let done = op.await;
+            drop(guard);
+            done
+        });
+        match task.await {
+            Ok(done) => done.map_err(|e| WireError::failed(&e)),
+            Err(e) => Err(WireError::failed(&AppError::internal(e))),
+        }
+    }
+
+    /// Waits for the state changes already asked for; nothing new starts while held.
+    pub(super) async fn settled(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.state.lock().await
+    }
+
     /// Validates a start / restart / switch, applies its kill-switch settings and inputs, and
     /// returns the runtime's request.
     async fn prepare(&self, start: &TunnelStart) -> Result<StartRequest, WireError> {
@@ -74,12 +99,14 @@ impl Host {
         validate::start(start).map_err(refused)?;
         let settings = validate::protection(&start.protection).map_err(refused)?;
         let level = settings.level;
-        self.deps
-            .kill_switch
-            .apply(settings)
-            .await
-            .map_err(|e| WireError::failed(&e))?;
-        self.deps.inputs.set(&start.routing, level);
+        let (kill_switch, inputs) = (self.deps.kill_switch.clone(), self.deps.inputs.clone());
+        let routing = start.routing.clone();
+        self.serialized(async move {
+            kill_switch.apply(settings).await?;
+            inputs.set(&routing, level);
+            Ok(())
+        })
+        .await?;
         Ok(start_request(start, level))
     }
 
@@ -98,12 +125,14 @@ impl Host {
             )),
             Request::Start(start) => {
                 let req = self.prepare(&start).await?;
+                self.owns_session(client);
                 let receipt = runtime.start(req, cancel.clone()).await;
                 let receipt = receipt.map_err(tunnel_failed)?;
                 Ok(Reply::Started(Some(StartReceiptWire::from(&receipt))))
             }
             Request::Restart(start) => {
                 let req = self.prepare(&start).await?;
+                self.owns_session(client);
                 let reason = "restart requested by the app".to_owned();
                 let opts = RestartOptions {
                     cancel: cancel.child_token(),
@@ -133,6 +162,7 @@ impl Host {
             }
             Request::Switch(start) => {
                 let req = self.prepare(&start).await?;
+                self.owns_session(client);
                 let owner = cancel.clone();
                 let is_owner = Arc::new(move || !owner.is_cancelled());
                 let receipt = runtime.switch_upstream(req, cancel.clone(), is_owner).await;
@@ -150,51 +180,73 @@ impl Host {
             }
             Request::Inputs(routing) => {
                 validate::routing(&routing).map_err(refused)?;
-                let level = self.deps.kill_switch.level();
-                self.deps.inputs.set(&routing, level);
+                let (kill_switch, inputs) =
+                    (self.deps.kill_switch.clone(), self.deps.inputs.clone());
+                self.serialized(async move {
+                    inputs.set(&routing, kill_switch.level());
+                    Ok(())
+                })
+                .await?;
                 Ok(Reply::Done { removing: false })
             }
-            Request::Status => Ok(Reply::Status(Box::new(self.status().await))),
+            Request::Status => Ok(Reply::Status(Box::new(self.status(client).await))),
             Request::KillSwitch(settings) => {
                 let settings = validate::protection(&settings).map_err(refused)?;
-                let level = settings.level;
-                self.deps
-                    .kill_switch
-                    .apply(settings)
-                    .await
-                    .map_err(|e| WireError::failed(&e))?;
-                self.deps.inputs.set_level(level);
+                let (kill_switch, inputs) =
+                    (self.deps.kill_switch.clone(), self.deps.inputs.clone());
+                self.serialized(async move {
+                    let level = settings.level;
+                    kill_switch.apply(settings).await?;
+                    inputs.set_level(level);
+                    Ok(())
+                })
+                .await?;
                 Ok(Reply::Done { removing: false })
             }
             Request::Cleanup => {
-                let report = self.deps.kill_switch.cleanup().await;
-                let report = report.map_err(|e| WireError::failed(&e))?;
+                let kill_switch = self.deps.kill_switch.clone();
+                let report = self
+                    .serialized(async move { kill_switch.cleanup().await })
+                    .await?;
                 Ok(Reply::Cleaned {
                     filters: report.filters,
                     sublayer: report.sublayer,
                     provider: report.provider,
                 })
             }
-            Request::ForgetMe => {
-                let removing = self
-                    .deps
-                    .users
-                    .remove(&client.user)
-                    .map_err(|e| WireError::failed(&AppError::internal(e)))?;
-                Ok(Reply::Done { removing })
-            }
+            Request::ForgetMe => self.forget(client),
         }
     }
 
-    async fn status(&self) -> StatusReply {
+    /// Removes the caller's SID; `removing` when he was the last user.
+    pub(super) fn forget(&self, client: &ClientInfo) -> Result<Reply, WireError> {
+        let removing = self
+            .deps
+            .users
+            .remove(&client.user)
+            .map_err(|e| WireError::failed(&AppError::internal(e)))?;
+        Ok(Reply::Done { removing })
+    }
+
+    /// The runtime's last exit and fault (an engine's stderr tail, a server's error) go only to
+    /// the user whose start they came from (review service-b2).
+    async fn status(&self, client: &ClientInfo) -> StatusReply {
         let runtime = &self.deps.runtime;
         let tunnel = StatusWire::from(&*runtime.status().borrow());
+        let own = self.session_user.lock().as_deref() == Some(client.user.as_str());
         StatusReply {
             tunnel,
-            last_exit: runtime.last_exit().as_ref().map(ExitWire::from),
-            recent_fault: runtime.recent_fault(),
+            last_exit: own
+                .then(|| runtime.last_exit().as_ref().map(ExitWire::from))
+                .flatten(),
+            recent_fault: own.then(|| runtime.recent_fault()).flatten(),
             protection: self.deps.kill_switch.status().await,
         }
+    }
+
+    /// `client` now owns what the runtime reports about its session.
+    fn owns_session(&self, client: &ClientInfo) {
+        *self.session_user.lock() = Some(client.user.clone());
     }
 }
 

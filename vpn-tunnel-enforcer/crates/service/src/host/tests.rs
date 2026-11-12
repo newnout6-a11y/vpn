@@ -1,6 +1,6 @@
 //! Host tests: a fake runtime and kill switch behind a private pipe (no SCM, no WFP, no engine).
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -22,9 +22,12 @@ use super::*;
 use crate::pipe::client::{CallError, Client, ServerCheck};
 use crate::pipe::{PipeConfig, admit_all};
 use crate::proto::{
-    ErrorCode, Event, Hello, ProtectionWire, Reply, Request, RoutingInputs, StopTunnel,
-    TunnelEventWire, TunnelStart, Upstream,
+    ErrorCode, Event, Hello, ProtectionWire, Reply, Request, RoutingInputs, ServerFrame,
+    StopTunnel, TunnelEventWire, TunnelStart, Upstream, frame,
 };
+
+mod access;
+mod order;
 
 /// Records calls; `start` emits the runtime's event sequence.
 struct FakeRuntime {
@@ -55,8 +58,12 @@ impl Runtime for FakeRuntime {
     async fn start(
         &self,
         req: StartRequest,
-        _: CancellationToken,
+        cancel: CancellationToken,
     ) -> Result<StartReceipt, TunError> {
+        // As the real runtime: a start whose token is cancelled is refused before anything runs.
+        if cancel.is_cancelled() {
+            return Err(vpnte_base::AppError::cancelled().into());
+        }
         self.starts.lock().push(req);
         let _ = self.events.send(TunnelEvent::StartBegan { generation: 1 });
         self.emit(TunStatusKind::Running, true);
@@ -138,25 +145,39 @@ impl Runtime for FakeRuntime {
     }
 
     fn recent_fault(&self) -> Option<OutboundFault> {
-        None
+        Some(OutboundFault::TlsHandshakeFailed)
     }
 }
 
 struct FakeKillSwitch {
     level: Mutex<KillSwitchLevel>,
+    /// "Always" can be kept safe (`Protection::set_always_available`).
+    always: AtomicBool,
     notices: broadcast::Sender<Notice>,
+    /// `apply` and `status` wait while this is `false`; `applying` / `asking` count the calls
+    /// that got that far.
+    gate: watch::Sender<bool>,
+    applying: AtomicU32,
+    asking: AtomicU32,
 }
 
 #[async_trait]
 impl KillSwitch for FakeKillSwitch {
     async fn apply(&self, settings: ProtectionSettings) -> AppResult<()> {
+        self.applying.fetch_add(1, Ordering::SeqCst);
+        let _ = self.gate.subscribe().wait_for(|open| *open).await;
         *self.level.lock() = settings.level;
         Ok(())
     }
     fn level(&self) -> KillSwitchLevel {
         *self.level.lock()
     }
+    fn level_in_force(&self) -> KillSwitchLevel {
+        self.level().effective(self.always.load(Ordering::SeqCst))
+    }
     async fn status(&self) -> ProtectionWire {
+        self.asking.fetch_add(1, Ordering::SeqCst);
+        let _ = self.gate.subscribe().wait_for(|open| *open).await;
         ProtectionWire::unknown(self.level())
     }
     fn notices(&self) -> broadcast::Receiver<Notice> {
@@ -180,6 +201,7 @@ static NEXT: AtomicU32 = AtomicU32::new(0);
 struct Harness {
     runtime: Arc<FakeRuntime>,
     kill: Arc<FakeKillSwitch>,
+    inputs: Arc<SharedInputs>,
     name: String,
     removed: Arc<AtomicU32>,
     cancel: CancellationToken,
@@ -206,14 +228,19 @@ fn harness() -> Harness {
     let runtime = FakeRuntime::new();
     let kill = Arc::new(FakeKillSwitch {
         level: Mutex::new(KillSwitchLevel::Off),
+        always: AtomicBool::new(false),
         notices: broadcast::channel(8).0,
+        gate: watch::channel(true).0,
+        applying: AtomicU32::new(0),
+        asking: AtomicU32::new(0),
     });
+    let inputs = Arc::new(SharedInputs::new(None));
     let removed = Arc::new(AtomicU32::new(0));
     let counter = removed.clone();
     let host = Host::new(HostDeps {
         runtime: runtime.clone(),
         kill_switch: kill.clone(),
-        inputs: Arc::new(SharedInputs::new(None)),
+        inputs: inputs.clone(),
         users: Arc::new(Users::open(&dir.join("users.json"))),
         check: admit_all(),
         on_last_user: Arc::new(move || {
@@ -227,6 +254,7 @@ fn harness() -> Harness {
     Harness {
         runtime,
         kill,
+        inputs,
         name,
         removed,
         cancel,
@@ -272,38 +300,92 @@ async fn wait_for(what: &str, cond: impl Fn() -> bool) {
     }
 }
 
+/// A raw protocol connection: these tests overlap requests or check where a reply sits among the
+/// events, which the one-call-at-a-time `Client` cannot show.
+struct Raw(tokio::net::windows::named_pipe::NamedPipeClient);
+
+impl Raw {
+    async fn open(h: &Harness) -> Self {
+        let pipe = tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(&h.name)
+            .expect("open");
+        let mut raw = Raw(pipe);
+        let hello = Hello {
+            protocol: crate::proto::PROTOCOL,
+            app_version: "2.0.0".into(),
+        };
+        raw.send(1, Request::Hello(hello)).await;
+        assert!(
+            matches!(raw.answer(1).await, ServerFrame::Reply { .. }),
+            "welcome"
+        );
+        raw
+    }
+
+    async fn send(&mut self, id: u64, request: Request) {
+        let frame = crate::proto::ClientFrame { id, request };
+        frame::write_frame(&mut self.0, &frame).await.expect("send");
+    }
+
+    async fn next(&mut self) -> ServerFrame {
+        let read = tokio::time::timeout(Duration::from_secs(5), frame::read_frame(&mut self.0));
+        let body = read.await.expect("a frame in time").expect("frame");
+        frame::decode(&body).expect("decode")
+    }
+
+    /// The answer to `id`; events and other answers on the way are skipped.
+    async fn answer(&mut self, id: u64) -> ServerFrame {
+        loop {
+            match self.next().await {
+                ServerFrame::Reply { id: got, .. } | ServerFrame::Failed { id: got, .. }
+                    if got != id => {}
+                ServerFrame::Event { .. } => {}
+                answer => return answer,
+            }
+        }
+    }
+}
+
+/// Review service-a11: the events of an operation are on the wire before its reply (read raw;
+/// repeated, since without the drain the order would only be wrong some of the time).
 #[tokio::test]
 async fn hello_start_events_before_reply_then_stop() {
     let h = harness();
-    let mut c = connect(&h).await;
-    assert_eq!(
-        c.hello("2.0.0").await.expect("hello"),
-        (1, "2.0.0-test".into())
-    );
-    let reply = c
-        .call(local_start(KillSwitchLevel::Standard))
-        .await
-        .expect("start");
-    assert!(matches!(reply, Reply::Started(Some(r)) if r.pid == 4242));
-    let mut seen = Vec::new();
-    while let Ok(Ok(e)) = tokio::time::timeout(Duration::from_millis(200), c.next_event()).await {
-        seen.push(e);
+    let mut c = Raw::open(&h).await;
+    for round in 0..10u64 {
+        let id = 2 + 2 * round;
+        c.send(id, local_start(KillSwitchLevel::Standard)).await;
+        let mut before = Vec::new();
+        let reply = loop {
+            match c.next().await {
+                ServerFrame::Event { event } => before.push(*event),
+                ServerFrame::Reply { id: got, reply } if got == id => break *reply,
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        assert!(matches!(reply, Reply::Started(Some(r)) if r.pid == 4242));
+        let began = before
+            .iter()
+            .position(|e| matches!(e, Event::Tunnel(TunnelEventWire::StartBegan { .. })));
+        let finished = before.iter().position(|e| {
+            matches!(
+                e,
+                Event::Tunnel(TunnelEventWire::StartFinished { ok: true, .. })
+            )
+        });
+        assert!(began.is_some() && finished > began, "{before:?}");
+        assert!(
+            before
+                .iter()
+                .any(|e| matches!(e, Event::Status(s) if s.running)),
+            "{before:?}"
+        );
+        c.send(id + 1, Request::Stop(StopTunnel::default())).await;
+        let stop = c.answer(id + 1).await;
+        assert!(
+            matches!(stop, ServerFrame::Reply { reply, .. } if matches!(*reply, Reply::Stopped(ref r) if r.ok))
+        );
     }
-    let began = seen
-        .iter()
-        .position(|e| matches!(e, Event::Tunnel(TunnelEventWire::StartBegan { .. })));
-    let finished = seen.iter().position(|e| {
-        matches!(
-            e,
-            Event::Tunnel(TunnelEventWire::StartFinished { ok: true, .. })
-        )
-    });
-    assert!(began.is_some() && finished > began, "{seen:?}");
-    assert!(
-        seen.iter()
-            .any(|e| matches!(e, Event::Status(s) if s.running)),
-        "{seen:?}"
-    );
     assert_eq!(
         h.kill.level(),
         KillSwitchLevel::Standard,
@@ -311,18 +393,16 @@ async fn hello_start_events_before_reply_then_stop() {
     );
     let started = h.runtime.starts.lock()[0].clone();
     assert_eq!(started.capture, vpnte_tunnel::api::CaptureKind::Tun);
-    let stop = c
-        .call(Request::Stop(StopTunnel::default()))
-        .await
-        .expect("stop");
-    assert!(matches!(stop, Reply::Stopped(r) if r.ok));
 }
 
 #[tokio::test]
 async fn a_second_client_gets_busy_until_the_first_leaves() {
     let h = harness();
     let mut first = connect(&h).await;
-    first.hello("2.0.0").await.expect("first hello");
+    assert_eq!(
+        first.hello("2.0.0").await.expect("first hello"),
+        (1, "2.0.0-test".into())
+    );
     let mut second = connect(&h).await;
     assert_eq!(
         code(second.hello("2.0.0").await.expect_err("busy")),
@@ -367,11 +447,15 @@ async fn hello_comes_first_and_versions_must_be_close() {
 
 #[tokio::test]
 async fn the_client_going_away_stops_the_session() {
-    for (level, keep_block) in [
-        (KillSwitchLevel::Standard, false),
-        (KillSwitchLevel::Strict, true),
+    // Only "Always" in force keeps a block: a stored strict works as "If the VPN drops" until the
+    // service can keep it safe (ks-a: `level_in_force`, not the stored level).
+    for (level, always, keep_block) in [
+        (KillSwitchLevel::Standard, false, false),
+        (KillSwitchLevel::Strict, false, false),
+        (KillSwitchLevel::Strict, true, true),
     ] {
         let h = harness();
+        h.kill.always.store(always, Ordering::SeqCst);
         let mut c = connect(&h).await;
         c.hello("2.0.0").await.expect("hello");
         c.call(local_start(level)).await.expect("start");
@@ -381,7 +465,10 @@ async fn the_client_going_away_stops_the_session() {
         })
         .await;
         let stop = h.runtime.stops.lock()[0];
-        assert_eq!(stop.preserve_protection, keep_block, "{level:?}");
+        assert_eq!(
+            stop.preserve_protection, keep_block,
+            "{level:?} always={always}"
+        );
         assert!(!stop.preserve_last);
     }
 }

@@ -30,11 +30,16 @@ fn main() -> ExitCode {
                 ["--resources", dir] => Some(PathBuf::from(dir)),
                 _ => return usage(),
             };
+            // First, before anything slow: this exe runs from the per-user app folder, so its
+            // bytes are taken now through a locked handle, and later DLLs only from System32.
+            install::system_dlls_only();
+            let source = install::Source::current(resources);
             console_log();
-            let done = install::Source::current(resources).and_then(|s| install::install(&s));
+            let done = source.and_then(|s| install::install(&s));
             report(done.map(|exe| eprintln!("installed: {}", exe.display())))
         }
         ["uninstall"] => {
+            install::system_dlls_only();
             console_log();
             report(install::uninstall().map(|()| eprintln!("uninstalled")))
         }

@@ -1,16 +1,16 @@
 //! The service body: everything between the SCM's START and STOP. One current-thread tokio
 //! runtime (a pipe server needs no worker per core); while idle nothing ticks: the listener waits
 //! in an overlapped `ConnectNamedPipe`, the runtime actor on its inbox, and the WFP watchdog runs
-//! only while a session does.
+//! only while a session's filters are held ([`crate::watchdog`]).
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use vpnte_base::Msg;
 use vpnte_base::types::KillSwitchLevel;
-use vpnte_tunnel::api::{Runtime, StopOptions, TunStatus};
+use vpnte_tunnel::api::{Runtime, StopOptions};
 use vpnte_tunnel::runtime::{
     Capture, ProxyCapture, RealEngines, RuntimeDeps, Timings, TunCapture, TunnelHandle,
 };
@@ -23,6 +23,7 @@ use crate::pipe::{Listener, PipeConfig, admit_all};
 use crate::sandbox::{self, Sandbox};
 use crate::scm::dispatch::Control;
 use crate::users::Users;
+use crate::watchdog::{self, Engaged};
 use crate::{install, sddl};
 
 /// Service log size at which it is rotated (one `.old` generation).
@@ -40,15 +41,48 @@ pub fn run(control: Control) -> u32 {
     runtime.block_on(serve(control))
 }
 
+/// Why the service does not run engines from its folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderFault {
+    /// A file is gone (an antivirus quarantined an engine, say): not a tampering alarm.
+    Missing(String),
+    /// The folder or a file admits writes by non-admins: the reason names which and why.
+    Untrusted(String),
+}
+
+impl FolderFault {
+    /// What a refused start says (review service-b6).
+    pub fn msg(&self) -> Msg {
+        match self {
+            Self::Missing(file) => Msg::new("service.folder.fileMissing").arg("file", file.clone()),
+            Self::Untrusted(_) => host::untrusted_folder(),
+        }
+    }
+}
+
+impl std::fmt::Display for FolderFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing(file) => write!(f, "{file} is missing"),
+            Self::Untrusted(reason) => f.write_str(reason),
+        }
+    }
+}
+
 /// The service's folder admits writes by administrators only, and so does every file it runs:
-/// `Err` names the first file that does not.
-pub fn trusted_install(dir: &Path, exe: &Path) -> Result<(), String> {
+/// `Err` names the first one missing or not admin-only.
+pub fn trusted_install(dir: &Path, exe: &Path) -> Result<(), FolderFault> {
     let files = pins::FILES.iter().map(|f| dir.join(f));
-    [dir.to_owned(), exe.to_owned()]
-        .into_iter()
-        .chain(files)
-        .find_map(|path| sddl::untrusted_reason(&path))
-        .map_or(Ok(()), Err)
+    for path in [dir.to_owned(), exe.to_owned()].into_iter().chain(files) {
+        if std::fs::symlink_metadata(&path).is_err() {
+            let name = path.file_name().unwrap_or(path.as_os_str());
+            return Err(FolderFault::Missing(name.to_string_lossy().into_owned()));
+        }
+        if let Some(reason) = sddl::untrusted_reason(&path) {
+            return Err(FolderFault::Untrusted(reason));
+        }
+    }
+    Ok(())
 }
 
 fn init_logging(log: &Path) {
@@ -80,19 +114,17 @@ async fn serve(control: Control) -> u32 {
         return 1;
     };
     let files = DataFiles::new(&data);
-    if paths::secure_dir(&files.root).is_err() {
+    if files.secure().is_err() {
         return 1;
     }
     let _ = std::fs::create_dir_all(&files.logs);
     init_logging(&files.service_log);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "service starting");
-    let trusted = match trusted_install(&dir, &exe) {
-        Ok(()) => true,
-        Err(reason) => {
-            tracing::error!(%reason, "install folder writable by users: tunnel disabled");
-            false
-        }
-    };
+    let fault = trusted_install(&dir, &exe).err();
+    if let Some(fault) = &fault {
+        tracing::error!(%fault, "tunnel disabled");
+    }
+    let trusted = fault.is_none();
     let (singbox, xray) = (dir.join("sing-box.exe"), dir.join("xray.exe"));
     let protection = Arc::new(Protection::new(
         EnginePaths {
@@ -108,21 +140,25 @@ async fn serve(control: Control) -> u32 {
         tracing::error!(error = %err, "kill switch start-up failed");
     }
     let inputs = Arc::new(SharedInputs::new(Some(dir.clone())));
-    let tun = trusted.then(|| Arc::new(TunCapture::new(protection.clone())) as Arc<dyn Capture>);
+    let tun = trusted.then(|| Arc::new(Engaged::new(TunCapture::new(protection.clone()))));
+    // The WFP watchdog runs while a session's filters are held (crash pause and preserved block
+    // included); an idle service has no timer.
+    if let Some(tun) = &tun {
+        let protection = protection.clone();
+        let start = move |token| {
+            tokio::spawn(protection.clone().run_watchdog(token));
+        };
+        tokio::spawn(watchdog::run(tun.holds(), start, control.stop.clone()));
+    }
     let runtime = TunnelHandle::spawn(RuntimeDeps {
         engines: Arc::new(RealEngines::new(singbox, xray, Some(files.logs.clone()))),
-        tun,
+        tun: tun.map(|t| t as Arc<dyn Capture>),
         proxy: Arc::new(ProxyCapture::new()),
         inputs: inputs.clone(),
         failover: None,
         confirmations: None,
         timings: Timings::default(),
     });
-    tokio::spawn(watchdog(
-        runtime.status(),
-        protection.clone(),
-        control.stop.clone(),
-    ));
     // Engines may not start programs: each one is confined as soon as it shows up.
     tokio::spawn(sandbox::run(
         Sandbox::new(dir.clone()),
@@ -142,7 +178,7 @@ async fn serve(control: Control) -> u32 {
         check: admit_all(),
         on_last_user: last_user(removing.clone(), control.stop.clone()),
         service_version: env!("CARGO_PKG_VERSION").to_owned(),
-        refuse_tunnel: (!trusted).then(host::untrusted_folder),
+        refuse_tunnel: fault.as_ref().map(FolderFault::msg),
     };
     let listener = match Listener::bind(&PipeConfig::production()) {
         Ok(listener) => listener,
@@ -169,10 +205,10 @@ fn last_user(removing: Arc<AtomicBool>, stop: CancellationToken) -> Arc<dyn Fn()
     })
 }
 
-/// Stops the tunnel (a strict kill switch keeps blocking: its filters are persistent by
-/// design), closes the dynamic WFP session and, after the last user left, removes the service.
+/// Stops the tunnel ("Always" in force keeps blocking: its filters are persistent by design),
+/// closes the dynamic WFP session and, after the last user left, removes the service.
 async fn finish(runtime: &TunnelHandle, protection: &Arc<Protection>, exe: &Path, remove: bool) {
-    let keep_block = protection.settings().level == KillSwitchLevel::Strict && !remove;
+    let keep_block = protection.level_in_force() == KillSwitchLevel::Strict && !remove;
     let receipt = runtime
         .stop(StopOptions {
             preserve_protection: keep_block,
@@ -192,30 +228,23 @@ async fn finish(runtime: &TunnelHandle, protection: &Arc<Protection>, exe: &Path
     tracing::info!("service stopped");
 }
 
-/// Runs winnet's WFP watchdog only while a session runs: an idle service has no timer.
-async fn watchdog(
-    mut status: watch::Receiver<TunStatus>,
-    protection: Arc<Protection>,
-    stop: CancellationToken,
-) {
-    let mut ticking: Option<CancellationToken> = None;
-    loop {
-        let session = status.borrow_and_update().capture.is_some();
-        match (session, ticking.as_ref()) {
-            (true, None) => {
-                let token = stop.child_token();
-                tokio::spawn(protection.clone().run_watchdog(token.clone()));
-                ticking = Some(token);
-            }
-            (false, Some(token)) => {
-                token.cancel();
-                ticking = None;
-            }
-            _ => {}
-        }
-        tokio::select! {
-            () = stop.cancelled() => break,
-            changed = status.changed() => if changed.is_err() { break },
-        }
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    /// Review service-b6: a missing engine is reported as missing, not as tampering.
+    #[test]
+    fn a_missing_file_is_not_a_tampering_alarm() {
+        let root = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"));
+        let system = root.join("System32");
+        let fault = trusted_install(&system, &system.join("notepad.exe")).expect_err("no engines");
+        assert_eq!(fault, FolderFault::Missing("sing-box.exe".into()));
+        assert_eq!(fault.msg().key, "service.folder.fileMissing");
+        let temp = std::env::temp_dir();
+        let fault = trusted_install(&temp, &temp.join("x.exe")).expect_err("user-writable");
+        assert!(matches!(fault, FolderFault::Untrusted(_)), "{fault:?}");
+        assert_eq!(fault.msg().key, "service.folder.untrusted");
     }
 }

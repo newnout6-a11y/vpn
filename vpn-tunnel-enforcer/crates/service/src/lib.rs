@@ -28,3 +28,4 @@ pub mod service;
 pub mod update;
 pub mod users;
 pub mod validate;
+pub mod watchdog;

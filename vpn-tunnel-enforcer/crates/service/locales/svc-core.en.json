@@ -2,10 +2,16 @@
   "service": {
     "pipe": {
       "busy": "Tunnel mode is in use by another Windows user on this PC.",
+      "busySelf": "The app's previous connection to the service is still closing. Try again in a few seconds.",
       "version": "The app and the Tunnel mode service are of incompatible versions. Update the app.",
       "helloFirst": "The Tunnel mode service expected a greeting first.",
       "badRequest": "The Tunnel mode service did not understand the request. Update the app.",
       "unavailable": "The Tunnel mode service is not running.",
+      "denied": "The Tunnel mode service is not available to this Windows account.",
+      "noAnswer": "The Tunnel mode service is not answering. Try again in a few seconds.",
+      "lost": "The connection to the Tunnel mode service was lost.",
+      "badReply": "The app did not understand the Tunnel mode service. Update the app.",
+      "tooLarge": "The request is too large for the Tunnel mode service.",
       "notOurs": "The program answering for the Tunnel mode service is not the installed service."
     },
     "refused": {
@@ -15,7 +21,8 @@
       "localProxy": "The local proxy must run on this computer (127.0.0.1)."
     },
     "folder": {
-      "untrusted": "Ordinary users can change the service's files, so it does not start the tunnel. Reinstall the service."
+      "untrusted": "Ordinary users can change the service's files, so it does not start the tunnel. Reinstall the service.",
+      "fileMissing": "A file of the Tunnel mode service is missing: {{file}}. Reinstall the service."
     },
     "update": {
       "keyNotSet": "Service updates are not set up in this build.",
@@ -25,6 +32,7 @@
       "notElevated": "Installing the service needs administrator rights.",
       "fileMissing": "{{file}} is missing from the package.",
       "fileMismatch": "{{file}} differs from the file shipped with the app.",
+      "imageChanged": "The program file changed during installation. Run the installation again.",
       "failed": "The Tunnel mode service could not be installed."
     }
   }

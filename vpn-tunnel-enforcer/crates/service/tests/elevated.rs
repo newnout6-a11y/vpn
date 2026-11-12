@@ -203,7 +203,18 @@ async fn elevated_install_tun_session_and_uninstall_leave_nothing() {
     drop(client);
     drop(guard.helper.take());
 
-    // 5. Uninstall leaves no service, no folder, no filter of ours.
+    // 5. An upgrade over the running service: every file checked first, the service disabled
+    // while its files change and stopped for good, then automatic and running again (review
+    // service-a13); the exe copied is what the running install verb read (service-a5).
+    assert!(
+        verb(&exe, &["install", "--resources", &resources_arg]),
+        "upgrade over the running service"
+    );
+    let mut again = connect(&service_exe).await;
+    again.hello("e2e").await.expect("hello after the upgrade");
+    drop(again);
+
+    // 6. Uninstall leaves no service, no folder, no filter of ours.
     assert!(verb(&exe, &["uninstall"]), "uninstall");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while manage::installed_binary().expect("SCM readable").is_some() {
@@ -222,5 +233,7 @@ async fn elevated_install_tun_session_and_uninstall_leave_nothing() {
         "data folder left"
     );
     assert_eq!(our_filters(), 0, "WFP filters left");
+    // Every step of uninstall tolerates what is already gone (review service-a13).
+    assert!(verb(&exe, &["uninstall"]), "a second uninstall");
     let _ = std::fs::remove_dir_all(&app);
 }

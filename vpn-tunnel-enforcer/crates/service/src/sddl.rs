@@ -7,7 +7,7 @@
 use std::ffi::c_void;
 use std::path::Path;
 
-use windows::Win32::Foundation::{HLOCAL, LocalFree};
+use windows::Win32::Foundation::{HLOCAL, LocalFree, WIN32_ERROR};
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
     GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
@@ -34,6 +34,9 @@ pub const SERVICE_SDDL: &str = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)\
 /// full, Users read and execute, inheritance from the parent cut.
 pub const ADMIN_ONLY_DIR_SDDL: &str =
     "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
+
+/// The data folder's private part: SYSTEM and Administrators only, nothing for users.
+pub const PRIVATE_DIR_SDDL: &str = "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 
 /// SIDs that may write where the service runs code from: SYSTEM, Administrators and
 /// TrustedInstaller.
@@ -89,6 +92,11 @@ impl SecurityDescriptor {
 
     /// Only SYSTEM, Administrators and TrustedInstaller own the object and may change it.
     pub fn admin_only_writes(&self) -> bool {
+        self.trusted_only(WRITE_RIGHTS)
+    }
+
+    /// Owned by a trusted SID, and every allow ACE that grants any of `rights` names one.
+    fn trusted_only(&self, rights: u32) -> bool {
         let mut owner = PSID::default();
         let mut defaulted = BOOL(0);
         // SAFETY: `self.0` is a valid descriptor; out pointers are locals.
@@ -107,7 +115,7 @@ impl SecurityDescriptor {
         if owner.is_invalid() || !present.as_bool() || dacl.is_null() {
             return false;
         }
-        trusted(owner) && dacl_admin_only(dacl)
+        trusted(owner) && dacl_trusted_only(dacl, rights)
     }
 }
 
@@ -128,9 +136,14 @@ const GRANTS_NOTHING: [u8; 7] = [1, 2, 3, 0x11, 0x12, 0x13, 0x14];
 /// The owner and DACL of `path` (file or folder) admit writes by SYSTEM, Administrators and
 /// TrustedInstaller only (`false` when unreadable).
 pub fn path_admin_only(path: &Path) -> bool {
+    path_descriptor(path).is_ok_and(|sd| sd.admin_only_writes())
+}
+
+/// The owner and DACL of `path` (file or folder).
+fn path_descriptor(path: &Path) -> Result<SecurityDescriptor, WIN32_ERROR> {
     let mut sd = PSECURITY_DESCRIPTOR::default();
     // SAFETY: valid path string and out pointer; the descriptor is LocalAlloc'd and owned by the
-    // SecurityDescriptor below, whose Drop frees it.
+    // SecurityDescriptor returned, whose Drop frees it.
     let status = unsafe {
         GetNamedSecurityInfoW(
             &HSTRING::from(path.as_os_str()),
@@ -144,12 +157,12 @@ pub fn path_admin_only(path: &Path) -> bool {
         )
     };
     if status.is_err() || sd.is_invalid() {
-        return false;
+        return Err(status);
     }
-    SecurityDescriptor(sd).admin_only_writes()
+    Ok(SecurityDescriptor(sd))
 }
 
-fn dacl_admin_only(dacl: *mut ACL) -> bool {
+fn dacl_trusted_only(dacl: *mut ACL, rights: u32) -> bool {
     // SAFETY: `dacl` points into a valid descriptor that outlives this call.
     let count = unsafe { (*dacl).AceCount };
     for index in 0..u32::from(count) {
@@ -176,7 +189,7 @@ fn dacl_admin_only(dacl: *mut ACL) -> bool {
                 PSID(&raw const (*allowed).SidStart as *mut c_void),
             )
         };
-        if mask & WRITE_RIGHTS != 0 && !trusted(sid) {
+        if mask & rights != 0 && !trusted(sid) {
             return false;
         }
     }
@@ -234,24 +247,10 @@ pub fn create_admin_owned(path: &Path) -> std::io::Result<std::fs::File> {
 /// Why `path` is not admin-only (`None` when it is): what the service logs and the install verb
 /// reports, so a refused folder says which file and which owner or grant.
 pub fn untrusted_reason(path: &Path) -> Option<String> {
-    let mut sd = PSECURITY_DESCRIPTOR::default();
-    // SAFETY: as in path_admin_only; freed by the SecurityDescriptor below.
-    let status = unsafe {
-        GetNamedSecurityInfoW(
-            &HSTRING::from(path.as_os_str()),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            None,
-            None,
-            None,
-            None,
-            &mut sd,
-        )
+    let sd = match path_descriptor(path) {
+        Ok(sd) => sd,
+        Err(status) => return Some(format!("{}: unreadable ({status:?})", path.display())),
     };
-    if status.is_err() || sd.is_invalid() {
-        return Some(format!("{}: unreadable ({status:?})", path.display()));
-    }
-    let sd = SecurityDescriptor(sd);
     if sd.admin_only_writes() {
         return None;
     }

@@ -17,8 +17,11 @@ use crate::proto::ProtectionWire;
 pub trait KillSwitch: Send + Sync {
     /// Applies validated settings (toggles, exceptions, level) and persists them.
     async fn apply(&self, settings: ProtectionSettings) -> AppResult<()>;
-    /// The current level.
+    /// The stored level.
     fn level(&self) -> KillSwitchLevel;
+    /// The level the filters enforce: a stored `strict` works as `standard` until "Always" can
+    /// be kept safe (`Protection::set_always_available`).
+    fn level_in_force(&self) -> KillSwitchLevel;
     /// Fresh status.
     async fn status(&self) -> ProtectionWire;
     /// Notices (traffic blocked, exception skipped, protection unverified).
@@ -40,19 +43,39 @@ impl WfpKillSwitch {
     }
 }
 
-/// The persisted settings (`Default` when missing or unreadable: kill switch off).
+/// The persisted settings: `Default` (kill switch off) when there are none. A file that exists
+/// but cannot be read whole (a power loss mid-write, damage) fails closed: level `strict`, so the
+/// start-up never lifts a block because of it (review service-a9).
 pub fn load_settings(store: &Path) -> ProtectionSettings {
-    std::fs::read(store)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    let bytes = match std::fs::read(store) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ProtectionSettings::default(),
+        Err(e) => return unreadable(store, &e),
+    };
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| unreadable(store, &e))
 }
 
+fn unreadable(store: &Path, error: &dyn std::fmt::Display) -> ProtectionSettings {
+    tracing::error!(path = %store.display(), %error, "kill-switch settings unreadable: strict");
+    ProtectionSettings {
+        level: KillSwitchLevel::Strict,
+        ..ProtectionSettings::default()
+    }
+}
+
+/// Written through a sibling file that reaches the disk before it replaces the old one (one
+/// writer at a time: every caller runs under the host's state lock).
 fn save_settings(store: &Path, settings: &ProtectionSettings) -> AppResult<()> {
     let tmp = store.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(settings).map_err(AppError::internal)?;
-    std::fs::write(&tmp, bytes).map_err(AppError::internal)?;
-    std::fs::rename(&tmp, store).map_err(AppError::internal)
+    let written = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, store)
+    })();
+    written.map_err(AppError::internal)
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> AppResult<T> {
@@ -79,6 +102,10 @@ impl KillSwitch for WfpKillSwitch {
         self.protection.settings().level
     }
 
+    fn level_in_force(&self) -> KillSwitchLevel {
+        self.protection.level_in_force()
+    }
+
     async fn status(&self) -> ProtectionWire {
         let protection = self.protection.clone();
         match blocking(move || ProtectionWire::from(&protection.status())).await {
@@ -98,5 +125,31 @@ impl KillSwitch for WfpKillSwitch {
             protection.reset(&persist).map_err(AppError::from)
         })
         .await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review service-a9: no file is "off", a damaged one is "strict", a saved one reads back.
+    #[test]
+    fn damaged_settings_fail_closed() {
+        let dir = std::env::temp_dir().join(format!("vpnte-ks-store-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let store = dir.join("protection.json");
+        let _ = std::fs::remove_file(&store);
+        assert_eq!(load_settings(&store).level, KillSwitchLevel::Off);
+        for torn in [&b""[..], b"\0\0\0\0", br#"{"level":"str"#] {
+            std::fs::write(&store, torn).expect("torn file");
+            assert_eq!(load_settings(&store).level, KillSwitchLevel::Strict);
+        }
+        let standard = ProtectionSettings {
+            level: KillSwitchLevel::Standard,
+            ..ProtectionSettings::default()
+        };
+        save_settings(&store, &standard).expect("save");
+        assert_eq!(load_settings(&store).level, KillSwitchLevel::Standard);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

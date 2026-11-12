@@ -10,9 +10,54 @@ fn admin_only(sddl: &str) -> bool {
 
 #[test]
 fn every_descriptor_parses() {
-    for sddl in [PIPE_SDDL, SERVICE_SDDL, ADMIN_ONLY_DIR_SDDL] {
+    for sddl in [
+        PIPE_SDDL,
+        SERVICE_SDDL,
+        ADMIN_ONLY_DIR_SDDL,
+        PRIVATE_DIR_SDDL,
+    ] {
         SecurityDescriptor::from_sddl(sddl).expect(sddl);
     }
+}
+
+/// Review service-b2: the service's own files (users, kill-switch settings with exception paths,
+/// its log) sit in a folder that grants other accounts nothing, not even reading: nobody else
+/// can read them or hold them open against the service.
+#[test]
+fn the_private_folder_grants_users_nothing() {
+    let any_right = |sddl: &str| {
+        SecurityDescriptor::from_sddl(sddl)
+            .expect("valid SDDL")
+            .trusted_only(u32::MAX)
+    };
+    assert!(any_right(PRIVATE_DIR_SDDL));
+    assert!(PRIVATE_DIR_SDDL.contains("D:P"), "nothing inherited");
+    assert!(
+        !any_right(ADMIN_ONLY_DIR_SDDL),
+        "users read the data folder"
+    );
+    let files = crate::paths::DataFiles::new(Path::new(r"C:\data"));
+    for file in [&files.users, &files.protection, &files.service_log] {
+        assert_eq!(file.parent(), Some(files.private.as_path()), "{file:?}");
+    }
+}
+
+/// The private folder as the service creates it really grants users nothing.
+#[test]
+#[ignore = "needs elevation"]
+fn elevated_the_private_folder_grants_users_nothing() {
+    assert!(vpnte_winnet::elevation::is_elevated(), "run elevated");
+    let root = std::env::temp_dir().join(format!("vpnte-sddl-private-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let files = crate::paths::DataFiles::new(&root);
+    let secured = files.secure();
+    let verdict = (
+        path_descriptor(&files.private).is_ok_and(|sd| sd.trusted_only(u32::MAX)),
+        path_admin_only(&root),
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    secured.expect("data folders created");
+    assert_eq!(verdict, (true, true));
 }
 
 #[test]

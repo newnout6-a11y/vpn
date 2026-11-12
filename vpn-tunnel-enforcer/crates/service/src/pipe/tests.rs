@@ -103,3 +103,64 @@ async fn a_missing_pipe_reads_as_service_unavailable() {
     .expect("no pipe");
     assert_eq!(err.user_msg().key, "service.pipe.unavailable");
 }
+
+/// A connected client and the server end of its pipe.
+async fn pair() -> (Client, tokio::net::windows::named_pipe::NamedPipeServer) {
+    let config = config();
+    let mut listener = Listener::bind(&config).expect("bind");
+    let server = tokio::spawn(async move { listener.accept().await.expect("accept") });
+    let client = Client::connect(&config.name, &ServerCheck::Any, Duration::from_secs(5))
+        .await
+        .expect("connect");
+    (client, server.await.expect("server task"))
+}
+
+fn status_event() -> Vec<u8> {
+    let status = crate::proto::StatusWire::from(&vpnte_tunnel::api::TunStatus::default());
+    let event = crate::proto::ServerFrame::Event {
+        event: Box::new(crate::proto::Event::Status(Box::new(status))),
+    };
+    frame::encode(&event).expect("encode")
+}
+
+/// Review service-a12: a read dropped in the middle of a frame (a `select!` that picked another
+/// branch) loses nothing; the frame is whole at the next read.
+#[tokio::test]
+async fn a_read_dropped_mid_frame_loses_nothing() {
+    use tokio::io::AsyncWriteExt;
+    let (mut client, mut server) = pair().await;
+    let bytes = status_event();
+    server.write_all(&bytes[..6]).await.expect("half a frame");
+    let first = tokio::time::timeout(Duration::from_millis(200), client.next_event()).await;
+    assert!(first.is_err(), "nothing whole yet");
+    server.write_all(&bytes[6..]).await.expect("the rest");
+    server.write_all(&bytes).await.expect("one more");
+    for _ in 0..2 {
+        let event = client.next_event().await.expect("a whole event");
+        assert!(matches!(event, crate::proto::Event::Status(_)));
+    }
+}
+
+/// Review service-b7: a frame this build cannot read and a broken connection are named for what
+/// they are, not "the service is not running".
+#[tokio::test]
+async fn a_foreign_reply_and_a_lost_connection_say_so() {
+    use tokio::io::AsyncWriteExt;
+    let (mut client, mut server) = pair().await;
+    let foreign = br#"{"future":true}"#;
+    let mut raw = u32::try_from(foreign.len())
+        .expect("len")
+        .to_le_bytes()
+        .to_vec();
+    raw.extend_from_slice(foreign);
+    server.write_all(&raw).await.expect("write");
+    let key = |err| match err {
+        super::client::CallError::Pipe(e) => e.user_msg().key,
+        other => panic!("{other:?}"),
+    };
+    let err = client.next_event().await.expect_err("not ours");
+    assert_eq!(key(err), "service.pipe.badReply");
+    drop(server);
+    let err = client.next_event().await.expect_err("gone");
+    assert_eq!(key(err), "service.pipe.lost");
+}

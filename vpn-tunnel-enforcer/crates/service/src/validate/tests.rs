@@ -1,6 +1,6 @@
 //! Refused requests (security model §3.8: paths, raw JSON, sizes, non-loopback proxies).
 use super::*;
-use serde_json::json;
+use serde_json::{Value, json};
 use vpnte_base::types::{AdaptiveMode, EnginePref, ProxyKind};
 use vpnte_tunnel::api::Origin;
 use vpnte_winnet::wfp::ExceptionTarget;
@@ -138,4 +138,72 @@ fn exceptions_are_revalidated() {
         ..ProtectionSettings::default()
     };
     assert!(protection(&dup).is_err());
+}
+
+/// One outbound `p` (Trojan over TLS) with `tls` merged into its `tlsSettings`, as the graph of a
+/// profile.
+fn native(tls: Value) -> Profile {
+    let mut outbound = json!({"tag": "p", "protocol": "trojan",
+        "settings": {"servers": [{"address": "192.0.2.1", "port": 443, "password": "SYNTHETIC"}]},
+        "streamSettings": {"network": "tcp", "security": "tls",
+            "tlsSettings": {"serverName": "front.example.com"}}});
+    let settings = &mut outbound["streamSettings"]["tlsSettings"];
+    for (key, value) in tls.as_object().expect("tls object") {
+        settings[key] = value.clone();
+    }
+    let graph = json!({"version": 1, "selectedTag": "p", "entry": {"outboundTag": "p"},
+        "outbounds": [outbound]});
+    let mut p = profile();
+    p.native_xray = Some(serde_json::from_value(graph).expect("graph"));
+    p
+}
+
+/// Review service-b1: Go's JSON decoder folds `ſ` (U+017F) to `s` and the Kelvin sign (U+212A)
+/// to `k`, so these keys fill Xray's `masterKeyLog` (a file SYSTEM would create); the full import
+/// checks run at the boundary too (an ASCII `MasterKeyLog` is a local file reference).
+#[test]
+fn provider_xray_keys_are_read_as_a_go_decoder_reads_them() {
+    assert!(start(&server(native(json!({})))).is_ok());
+    for key in ["ma\u{17f}terKeyLog", "master\u{212a}eyLog", "MasterKeyLog"] {
+        let p = native(json!({ key: r"\\10.0.0.66\s\k.log" }));
+        assert_eq!(
+            kind(start(&server(p))),
+            Some(ErrorKind::Validation),
+            "{key}"
+        );
+    }
+    // Go keeps the last of two keys equal but for case: "PROTOCOL" would win over "protocol".
+    let mut twice = native(json!({}));
+    if let Some(graph) = &mut twice.native_xray {
+        graph.outbounds[0]["PROTOCOL"] = json!("freedom");
+    }
+    assert!(start(&server(twice)).is_err());
+    let mut observatory = native(json!({}));
+    if let Some(graph) = &mut observatory.native_xray {
+        graph.observatory = Some(json!({"subjectSelector": ["p"], "probeUrl\u{17f}": "x"}));
+    }
+    assert!(start(&server(observatory)).is_err());
+}
+
+/// The same rule for an XHTTP `extra` and the values of provider sing-box keys.
+#[test]
+fn provider_json_keys_are_printable_ascii_and_distinct_ignoring_case() {
+    let mut xhttp = profile();
+    let extra = json!({"downloadSettings": {"tlsSettings": {"ma\u{17f}terKeyLog": "C:/x.log"}}});
+    xhttp.transport = Some(Transport::Xhttp {
+        host: "front.example.com".into(),
+        path: "/x".into(),
+        mode: None,
+        extra: extra.as_object().cloned(),
+    });
+    assert!(start(&server(xhttp)).is_err());
+    let mut headers = profile();
+    headers
+        .singbox_extra
+        .insert("headers".into(), json!({"Host": "a", "host": "b"}));
+    assert!(start(&server(headers)).is_err());
+    let mut fine = profile();
+    fine.singbox_extra
+        .insert("headers".into(), json!({"Host": "a", "X-Id": ["1", "2"]}));
+    assert!(start(&server(fine)).is_ok());
 }

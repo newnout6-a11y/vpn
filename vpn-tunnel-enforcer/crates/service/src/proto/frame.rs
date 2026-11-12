@@ -7,6 +7,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// Largest frame either side accepts: a start request with a provider Xray graph and a long
 /// domain-rule list stays far below it; anything bigger is refused before it is read.
 pub const MAX_FRAME: usize = 4 << 20;
+/// Largest first frame of a connection (`Hello`, or `ForgetMe`: a few hundred bytes): nothing
+/// big is held for a client before it is identified (review service-a4).
+pub const FIRST_FRAME_MAX: usize = 16 << 10;
 
 /// A frame that could not be read, decoded or written.
 #[derive(Debug, thiserror::Error)]
@@ -14,8 +17,8 @@ pub enum FrameError {
     /// The peer closed the pipe between frames.
     #[error("the peer closed the connection")]
     Closed,
-    /// The length prefix is 0 or over [`MAX_FRAME`].
-    #[error("frame length {0} is outside 1..={MAX_FRAME}")]
+    /// The length prefix is 0 or over the limit.
+    #[error("frame length {0} is outside the limit")]
     Length(usize),
     #[error("pipe I/O failed: {0}")]
     Io(#[from] std::io::Error),
@@ -25,6 +28,14 @@ pub enum FrameError {
 
 /// Reads one frame's JSON bytes.
 pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>, FrameError> {
+    read_frame_max(r, MAX_FRAME).await
+}
+
+/// Reads one frame's JSON bytes, refusing a frame over `max` before reading its body.
+pub async fn read_frame_max<R: AsyncRead + Unpin>(
+    r: &mut R,
+    max: usize,
+) -> Result<Vec<u8>, FrameError> {
     let mut len = [0u8; 4];
     // A clean close shows up as EOF before the first byte of a frame.
     let first = r.read(&mut len).await?;
@@ -33,12 +44,30 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>, Fram
     }
     r.read_exact(&mut len[first..]).await?;
     let len = u32::from_le_bytes(len) as usize;
-    if len == 0 || len > MAX_FRAME {
+    if len == 0 || len > max {
         return Err(FrameError::Length(len));
     }
     let mut body = vec![0u8; len];
     r.read_exact(&mut body).await?;
     Ok(body)
+}
+
+/// Takes one whole frame's JSON off the front of `buf` (`None`: not all of it is there yet).
+/// With the bytes kept by the caller, a read that is dropped half-way loses nothing.
+pub fn take_frame(buf: &mut Vec<u8>) -> Result<Option<Vec<u8>>, FrameError> {
+    let Some(prefix) = buf.first_chunk::<4>() else {
+        return Ok(None);
+    };
+    let len = u32::from_le_bytes(*prefix) as usize;
+    if len == 0 || len > MAX_FRAME {
+        return Err(FrameError::Length(len));
+    }
+    if buf.len() < 4 + len {
+        return Ok(None);
+    }
+    let body = buf[4..4 + len].to_vec();
+    buf.drain(..4 + len);
+    Ok(Some(body))
 }
 
 /// Decodes a frame's JSON.

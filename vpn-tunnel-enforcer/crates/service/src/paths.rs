@@ -51,6 +51,10 @@ pub struct DataFiles {
     pub root: PathBuf,
     /// Engine logs of TUN sessions (users may read them).
     pub logs: PathBuf,
+    /// SYSTEM and Administrators only: the users list, the kill-switch settings (exception paths
+    /// name user folders) and the service log (client images) are no other user's business, and a
+    /// user who could read them could also hold them open against the service (review service-b2).
+    pub private: PathBuf,
     pub users: PathBuf,
     pub protection: PathBuf,
     pub service_log: PathBuf,
@@ -58,13 +62,21 @@ pub struct DataFiles {
 
 impl DataFiles {
     pub fn new(root: &Path) -> Self {
+        let private = root.join("service");
         Self {
             root: root.to_owned(),
             logs: root.join("logs"),
-            users: root.join("users.json"),
-            protection: root.join("protection.json"),
-            service_log: root.join("service.log"),
+            users: private.join("users.json"),
+            protection: private.join("protection.json"),
+            service_log: private.join("service.log"),
+            private,
         }
+    }
+
+    /// Creates or re-secures the data folder and its private part.
+    pub fn secure(&self) -> io::Result<()> {
+        secure_dir(&self.root)?;
+        secure_dir_as(&self.private, sddl::PRIVATE_DIR_SDDL)
     }
 }
 
@@ -72,6 +84,10 @@ impl DataFiles {
 /// it (anyone may create folders in ProgramData: a folder planted before the install, with
 /// junctions inside, would let SYSTEM write where a user chose).
 pub fn secure_dir(dir: &Path) -> io::Result<()> {
+    secure_dir_as(dir, sddl::ADMIN_ONLY_DIR_SDDL)
+}
+
+fn secure_dir_as(dir: &Path, folder_sddl: &str) -> io::Result<()> {
     if dir.exists() {
         if sddl::path_admin_only(dir) {
             return Ok(());
@@ -83,7 +99,7 @@ pub fn secure_dir(dir: &Path) -> io::Result<()> {
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let sd = SecurityDescriptor::from_sddl(sddl::ADMIN_ONLY_DIR_SDDL).map_err(io::Error::other)?;
+    let sd = SecurityDescriptor::from_sddl(folder_sddl).map_err(io::Error::other)?;
     let attributes = sd.attributes();
     // SAFETY: valid path and attributes (pointing at `sd`, alive for the call).
     unsafe { CreateDirectoryW(&HSTRING::from(dir.as_os_str()), Some(&attributes)) }

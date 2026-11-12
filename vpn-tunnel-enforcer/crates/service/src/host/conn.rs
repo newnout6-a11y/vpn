@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use tokio::io::{AsyncReadExt, AsyncWrite};
 use tokio::net::windows::named_pipe::NamedPipeServer;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::ErrorKind;
 use vpnte_base::types::KillSwitchLevel;
@@ -32,13 +32,19 @@ enum Incoming {
     Bad(Option<u64>),
 }
 
+/// Requests of the controlling client in flight at once; with more, its frames are not read until
+/// one finishes (review service-a4).
+pub(super) const MAX_PENDING: usize = 32;
+
 pub(super) async fn run(
     host: Arc<Host>,
     id: u64,
     mut pipe: NamedPipeServer,
+    unidentified: OwnedSemaphorePermit,
     cancel: CancellationToken,
 ) {
-    let body = match tokio::time::timeout(HELLO_TIMEOUT, frame::read_frame(&mut pipe)).await {
+    let first = frame::read_frame_max(&mut pipe, frame::FIRST_FRAME_MAX);
+    let body = match tokio::time::timeout(HELLO_TIMEOUT, first).await {
         Ok(Ok(body)) => body,
         Ok(Err(err)) => return tracing::debug!(error = %err, "connection closed before hello"),
         Err(_) => return tracing::debug!("no hello in time"),
@@ -48,6 +54,10 @@ pub(super) async fn run(
             id: fid,
             request: Request::Hello(hello),
         }) => (fid, hello),
+        Ok(ClientFrame {
+            id: fid,
+            request: Request::ForgetMe,
+        }) => return forget(&host, pipe, fid).await,
         Ok(other) => return refuse(pipe, other.id, ErrorCode::HelloFirst).await,
         Err(_) => match frame::request_id(&body) {
             Some(fid) => return refuse(pipe, fid, ErrorCode::BadRequest).await,
@@ -70,9 +80,17 @@ pub(super) async fn run(
     let Some(protocol) = negotiate(hello.protocol, PROTOCOL) else {
         return refuse(pipe, fid, ErrorCode::Version).await;
     };
-    if !host.claim(id) {
-        return refuse(pipe, fid, ErrorCode::Busy).await;
+    if let Err(same_user) = host.claim(id, &client.user) {
+        // The user's own app reconnecting while its last connection still stops is told so,
+        // not that another Windows user has Tunnel mode (review service-b7).
+        let key = if same_user {
+            "service.pipe.busySelf"
+        } else {
+            "service.pipe.busy"
+        };
+        return refuse_with(pipe, fid, ErrorCode::Busy, key).await;
     }
+    drop(unidentified);
     if let Err(err) = host.deps.users.add(&client.user) {
         tracing::warn!(error = %err, "users list not saved");
     }
@@ -87,9 +105,11 @@ pub(super) async fn run(
     if frame::write_frame(&mut writer, &welcome).await.is_ok() {
         serve(&host, &client, reader, writer, cancel.clone()).await;
     }
-    // The session belongs to this connection: in-flight work is cancelled, then the tunnel stops.
+    // The session belongs to this connection: in-flight work is cancelled, kill-switch changes
+    // already asked for finish, then the tunnel stops. Only "Always" in force keeps its block.
     cancel.cancel();
-    let keep_block = host.deps.kill_switch.level() == KillSwitchLevel::Strict;
+    let settled = host.settled().await;
+    let keep_block = host.deps.kill_switch.level_in_force() == KillSwitchLevel::Strict;
     let receipt = host
         .deps
         .runtime
@@ -98,26 +118,63 @@ pub(super) async fn run(
             preserve_last: false,
         })
         .await;
+    drop(settled);
     tracing::info!(ok = receipt.ok, keep_block, "client gone; session stopped");
     host.release(id);
 }
 
 /// Answers the first request with `code`, then waits briefly for the client to read it and close
 /// (closing at once could drop the answer before the client read it).
-async fn refuse(mut pipe: NamedPipeServer, id: u64, code: ErrorCode) {
-    let (kind, key) = match code {
-        ErrorCode::Busy => (ErrorKind::Conflict, "service.pipe.busy"),
-        ErrorCode::Version => (ErrorKind::Validation, "service.pipe.version"),
-        ErrorCode::HelloFirst => (ErrorKind::Validation, "service.pipe.helloFirst"),
-        _ => (ErrorKind::Validation, "service.pipe.badRequest"),
+async fn refuse(pipe: NamedPipeServer, id: u64, code: ErrorCode) {
+    let key = match code {
+        ErrorCode::Busy => "service.pipe.busy",
+        ErrorCode::Version => "service.pipe.version",
+        ErrorCode::HelloFirst => "service.pipe.helloFirst",
+        _ => "service.pipe.badRequest",
+    };
+    refuse_with(pipe, id, code, key).await;
+}
+
+async fn refuse_with(pipe: NamedPipeServer, id: u64, code: ErrorCode, key: &'static str) {
+    let kind = match code {
+        ErrorCode::Busy => ErrorKind::Conflict,
+        _ => ErrorKind::Validation,
     };
     let failed = ServerFrame::Failed {
         id,
         error: WireError::new(code, kind, key),
     };
-    if frame::write_frame(&mut pipe, &failed).await.is_ok() {
+    answer_and_close(pipe, &failed).await;
+}
+
+async fn answer_and_close(mut pipe: NamedPipeServer, frame: &ServerFrame) {
+    if frame::write_frame(&mut pipe, frame).await.is_ok() {
         let mut byte = [0u8; 1];
         let _ = tokio::time::timeout(Duration::from_secs(2), pipe.read(&mut byte)).await;
+    }
+}
+
+/// `ForgetMe` as the first request: answered for any user without the controller slot (it does
+/// not touch the session), so an uninstaller is never turned away (review service-a7).
+async fn forget(host: &Arc<Host>, pipe: NamedPipeServer, id: u64) {
+    let client = match ident::client(&pipe) {
+        Ok(client) => client,
+        Err(err) => return tracing::warn!(error = %err, "client not identifiable; dropped"),
+    };
+    if !(host.deps.check)(&client) {
+        return refuse(pipe, id, ErrorCode::Refused).await;
+    }
+    let (frame, removing) = match host.forget(&client) {
+        Ok(reply) => {
+            let removing = reply == Reply::Done { removing: true };
+            let reply = Box::new(reply);
+            (ServerFrame::Reply { id, reply }, removing)
+        }
+        Err(error) => (ServerFrame::Failed { id, error }, false),
+    };
+    answer_and_close(pipe, &frame).await;
+    if removing {
+        (host.deps.on_last_user)();
     }
 }
 
@@ -211,17 +268,24 @@ async fn serve<W: AsyncWrite + Unpin>(
     let (mut status_open, mut events_open, mut notices_open) = (true, true, true);
     let mut incoming = spawn_reader(reader);
     let mut pending: FuturesUnordered<Pending> = FuturesUnordered::new();
+    // Start-like requests run under the token of the stops sent so far: a `Stop` cancels every
+    // one sent before it, also one still applying its kill-switch settings (review service-a2).
+    let mut starts = cancel.child_token();
     if !push_status(&mut writer, &mut status).await {
         return;
     }
     loop {
         let ok = tokio::select! {
             () = cancel.cancelled() => false,
-            msg = incoming.recv() => match msg {
+            msg = incoming.recv(), if pending.len() < MAX_PENDING => match msg {
                 Some(Incoming::Frame(f)) => {
-                    let (host, client, cancel) = (host.clone(), client.clone(), cancel.clone());
+                    if matches!(f.request, Request::Stop(_)) {
+                        starts.cancel();
+                        starts = cancel.child_token();
+                    }
+                    let (host, client, token) = (host.clone(), client.clone(), starts.clone());
                     pending.push(Box::pin(async move {
-                        (f.id, host.handle(&client, f.request, &cancel).await)
+                        (f.id, host.handle(&client, f.request, &token).await)
                     }));
                     true
                 }
