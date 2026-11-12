@@ -1,5 +1,5 @@
 //! The start page («Пломба»): banners, the foreign-VPN notice, the facts strip, the status slab
-//! (big word, caption, uptime, identity column, cancel / confirm block, power button, progress
+//! (big word, caption, uptime, identity column, cancel block, power button, progress
 //! ruler, the mascot) and the panel row.
 //!
 //! Emits the DOM of the reference start page (classes, attributes, text-node splits) so swiss.css,
@@ -33,8 +33,6 @@ use vpnte_view::labels::FirewallStatus;
 use vpnte_view::mascot::MascotEvent;
 use vpnte_view::swiss::{self, ConnView, SwissInput};
 use vpnte_view::traffic;
-
-use model::Confirm;
 
 use crate::hooks::use_watch;
 use crate::lang::tr;
@@ -178,7 +176,6 @@ struct Dash {
     leak: JobSlot<()>,
     recheck: JobSlot<()>,
     release: JobSlot<()>,
-    confirm: Signal<Confirm>,
     /// When the exit address was last copied (shows «скопировано» for [`COPIED_MS`]).
     copied: Signal<Option<Instant>>,
     /// The `role=status` caption: the power button's description (D-02).
@@ -220,7 +217,6 @@ fn use_dash() -> Dash {
     let (view, home) = use_view(&api);
     let (command, cancel, smart) = (use_job(), use_job(), use_job());
     let (leak, recheck, release) = (use_job(), use_job(), use_job());
-    let confirm = use_signal(Confirm::default);
     let copied = use_signal(|| None);
     let caption_id = crate::widgets::use_dom_id("dash-status");
     use_context_provider(|| Dash {
@@ -235,7 +231,6 @@ fn use_dash() -> Dash {
         leak,
         recheck,
         release,
-        confirm,
         copied,
         caption_id,
     })

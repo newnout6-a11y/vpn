@@ -473,7 +473,6 @@
 .swiss-slab.is-on .swiss-progress-cell { color: var(--on-signal); }
 .swiss-identity { display: flex; flex: 1; flex-direction: column; gap: 20px; padding: 20px; }
 .swiss-slab-side > .swiss-transient { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 0 20px 14px; }
-.c-swiss .swiss-confirm-text { font-size: 13px; font-weight: 600; }
 .swiss-confirm-actions { display: flex; gap: 8px; }
 .c-swiss .swiss-confirm-yes { padding: 6px 14px; background: var(--ink); color: var(--paper); font-size: 13px; font-weight: 600; }
 .c-swiss .swiss-confirm-no,

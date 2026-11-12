@@ -1,4 +1,4 @@
-//! The five screens. Each one has its own heading, focused when the screen appears (screen readers
+//! The six screens. Each one has its own heading, focused when the screen appears (screen readers
 //! announce it, Tab starts at the top), and its controls; choices are radio cards (`role=radio`,
 //! arrow keys move and select, Tab enters at the selected card).
 use std::rc::Rc;
@@ -23,6 +23,7 @@ pub(super) fn StepBody(ctx: Ctx, title_id: String) -> Element {
         Step::Welcome => rsx! { Welcome { ctx, title_id } },
         Step::Connect => rsx! { Connect { ctx, title_id } },
         Step::Routing => rsx! { RoutingStep { ctx, title_id } },
+        Step::SmartRu => rsx! { SmartRuStep { ctx, title_id } },
         Step::Protection => rsx! { Protection { ctx, title_id } },
         Step::Done => rsx! { Done { ctx, title_id } },
     }
@@ -373,7 +374,7 @@ fn ProxyPanel(ctx: Ctx) -> Element {
     }
 }
 
-/// Step 3: Tunnel (TUN, needs administrator rights) or Proxy; both work with either upstream
+/// Step 3: Tunnel (TUN, needs the helper service) or Proxy; both work with either upstream
 /// (NOADMIN §2).
 #[component]
 fn RoutingStep(ctx: Ctx, title_id: String) -> Element {
@@ -399,6 +400,31 @@ fn RoutingStep(ctx: Ctx, title_id: String) -> Element {
     }
 }
 
+/// Step 4: Smart RU, preselected on for a first run (owner answer 18); one line for each choice.
+#[component]
+fn SmartRuStep(ctx: Ctx, title_id: String) -> Element {
+    let mut model = ctx.model;
+    let on = model.read().smart_ru;
+    let cards = vec![
+        Card::new(true, t!("ui.wizard.smartRu.on")).text(t!("ui.wizard.smartRu.onText")),
+        Card::new(false, t!("ui.wizard.smartRu.off")).text(t!("ui.wizard.smartRu.offText")),
+    ];
+    rsx! {
+        StepHead {
+            step: Step::SmartRu,
+            title_id,
+            title: t!("ui.wizard.smartRu.title"),
+            lead: t!("ui.wizard.smartRu.lead"),
+        }
+        Cards {
+            label: t!("ui.wizard.smartRu.title"),
+            cards,
+            value: on,
+            on_change: move |v| model.write().smart_ru = v,
+        }
+    }
+}
+
 /// Catalog key of a kill-switch level's name.
 fn level_key(level: KillSwitchLevel) -> &'static str {
     match level {
@@ -408,7 +434,7 @@ fn level_key(level: KillSwitchLevel) -> &'static str {
     }
 }
 
-/// Step 4: kill-switch level (Off unless picked, D-15) and autostart. Two choices with one line
+/// Step 5: kill-switch level (Off unless picked, D-15) and autostart. Two choices with one line
 /// each (research killswitch 5.2); "Always" needs the helper service and lives in Settings, so a
 /// first run never picks it. In Proxy mode "If the VPN drops" adds its one neutral sentence.
 #[component]
@@ -460,7 +486,7 @@ fn Protection(ctx: Ctx, title_id: String) -> Element {
     }
 }
 
-/// Step 5: what «Завершить» will apply.
+/// Step 6: what «Завершить» will apply.
 #[component]
 fn Done(ctx: Ctx, title_id: String) -> Element {
     let m = ctx.model.read().clone();
@@ -489,6 +515,14 @@ fn Done(ctx: Ctx, title_id: String) -> Element {
         (t!("ui.wizard.done.language"), lang_name.to_owned()),
         (t!("ui.wizard.done.connection"), connection),
         (t!("ui.wizard.done.routing"), routing),
+        (
+            t!("ui.wizard.smartRu.title"),
+            t!(if m.smart_ru {
+                "common.on"
+            } else {
+                "common.off"
+            }),
+        ),
         (t!("settings.killSwitch"), t!(level_key(m.kill_switch))),
         (
             t!("ui.wizard.done.autostart"),

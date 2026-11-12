@@ -47,7 +47,6 @@ pub enum DashScene {
     CompetingTun,
     ForeignVpn,
     ServersEmpty,
-    ConfirmDisconnect,
     ConnectedSoft,
     MascotAlert,
     /// Disconnected; every action works with realistic delays.
@@ -56,7 +55,7 @@ pub enum DashScene {
 
 impl DashScene {
     /// Every scene with its name.
-    pub const ALL: [(&'static str, DashScene); 21] = [
+    pub const ALL: [(&'static str, DashScene); 20] = [
         ("disconnected", DashScene::Disconnected),
         ("connecting", DashScene::Connecting),
         ("connected-soft", DashScene::ConnectedSoft),
@@ -75,7 +74,6 @@ impl DashScene {
         ("competing-tun", DashScene::CompetingTun),
         ("foreign-vpn", DashScene::ForeignVpn),
         ("servers-empty", DashScene::ServersEmpty),
-        ("confirm-disconnect", DashScene::ConfirmDisconnect),
         ("mascot-alert", DashScene::MascotAlert),
         ("live", DashScene::Live),
     ];
@@ -97,19 +95,13 @@ impl DashScene {
     fn panels(self) -> DemoScene {
         use DashScene::*;
         match self {
-            Connected | ConfirmDisconnect | Verify | Leak | CompetingTun | Switching
-            | Reconnecting => DemoScene::Connected,
+            Connected | Verify | Leak | CompetingTun | Switching | Reconnecting => {
+                DemoScene::Connected
+            }
             ServersEmpty => DemoScene::ServersEmpty,
             Live => DemoScene::Live,
             _ => DemoScene::Disconnected,
         }
-    }
-
-    /// The JS the demo binary runs once the scene's frames are in (`confirm-disconnect` presses
-    /// the power button like the reference timeline).
-    pub fn after_frames_js(self) -> Option<&'static str> {
-        (self == DashScene::ConfirmDisconnect)
-            .then_some("document.querySelector('.swiss-skin .swiss-power')?.click()")
     }
 }
 
@@ -238,7 +230,7 @@ fn timeline(scene: DashScene) -> Vec<(u64, DashboardView)> {
     match scene {
         Disconnected | ServersEmpty | Live => vec![],
         Connecting => vec![(300, connecting(secs(18.0)))],
-        Connected | ConfirmDisconnect => vec![(300, connected(secs(9.0)))],
+        Connected => vec![(300, connected(secs(9.0)))],
         Verify => vec![(
             300,
             DashboardView {

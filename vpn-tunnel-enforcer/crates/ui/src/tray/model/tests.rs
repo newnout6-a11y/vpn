@@ -332,34 +332,27 @@ fn tooltip_fits_the_shell_limit() {
     );
 }
 
-/// AT-00-008 / §3.7: close prompt; Soft (connected, no engine) prompts too.
+/// The close button follows «Сворачивать в трей», connected or not; no question (owner,
+/// 12.11.2026).
 #[test]
 fn close_requests() {
     let mut state = disconnected();
     assert_eq!(state.close_action(), CloseAction::Quit);
     state.minimize_to_tray = true;
     assert_eq!(state.close_action(), CloseAction::Hide);
-    let soft = TrayState {
-        tunnel: TunnelState::Connected,
-        ..state.clone()
+    let connected_tray = TrayState {
+        minimize_to_tray: true,
+        ..connected()
     };
-    assert_eq!(soft.close_action(), CloseAction::Ask { offer_tray: true });
-    let hard = TrayState {
+    assert_eq!(connected_tray.close_action(), CloseAction::Hide);
+    let connected_quit = TrayState {
         minimize_to_tray: false,
         ..connected()
     };
-    assert_eq!(hard.close_action(), CloseAction::Ask { offer_tray: false });
+    assert_eq!(connected_quit.close_action(), CloseAction::Quit);
     let connecting = TrayState {
         transition: Some(Transition::Connecting),
         ..disconnected()
     };
-    assert_eq!(
-        connecting.close_action(),
-        CloseAction::Ask { offer_tray: false }
-    );
-    let error = TrayState {
-        tunnel: TunnelState::Error,
-        ..disconnected()
-    };
-    assert_eq!(error.close_action(), CloseAction::Quit);
+    assert_eq!(connecting.close_action(), CloseAction::Quit);
 }

@@ -144,3 +144,59 @@ fn list_sizes_are_verbatim() {
     assert_eq!(VPN_PINNED_MEDIA_SUFFIXES.len(), 8);
     assert_eq!(IP_CHECKER_SUFFIXES.len(), 26);
 }
+
+const ON: SmartRu = SmartRu {
+    enabled: true,
+    maps_direct: false,
+};
+
+fn rule(pattern: &str, action: DomainAction) -> DomainRule {
+    DomainRule::new(DomainPattern::parse(pattern).unwrap(), action)
+}
+
+/// Smart RU's own route by name, in its rule order: pins first (the IP checker under `.ru`,
+/// Google's `.ru`-free names), maps by the switch, RU names and Kimi direct, the rest undecided.
+#[test]
+fn route_of_follows_the_lists_in_rule_order() {
+    let cases = [
+        ("yandex.ru", Some(SmartRoute::Direct)),
+        ("music.yandex.ru", Some(SmartRoute::Direct)),
+        ("vk.com", Some(SmartRoute::Direct)),
+        ("api.kimi.com", Some(SmartRoute::Direct)),
+        ("2ip.ru", Some(SmartRoute::Vpn)),
+        ("www.google.com", Some(SmartRoute::Vpn)),
+        ("youtube.com", Some(SmartRoute::Vpn)),
+        ("maps.yandex.ru", Some(SmartRoute::Vpn)),
+        ("example.com", None),
+        ("my2ip.ru", Some(SmartRoute::Direct)),
+    ];
+    for (host, want) in cases {
+        assert_eq!(ON.route_of(host), want, "{host}");
+    }
+    let maps = SmartRu {
+        maps_direct: true,
+        ..ON
+    };
+    assert_eq!(maps.route_of("maps.yandex.ru"), Some(SmartRoute::Direct));
+    assert_eq!(maps.route_of("2gis.com"), Some(SmartRoute::Direct));
+    assert_eq!(SmartRu::default().route_of("yandex.ru"), None);
+}
+
+/// Owner answer 4: a note only where the user's rule sends a site the other way.
+#[test]
+fn overridden_by_names_only_real_conflicts() {
+    let vpn_ru = rule("yandex.ru", DomainAction::Vpn);
+    let direct_pin = rule("*.youtube.com", DomainAction::Direct);
+    assert_eq!(ON.overridden_by(&vpn_ru), Some(SmartRoute::Direct));
+    assert_eq!(ON.overridden_by(&direct_pin), Some(SmartRoute::Vpn));
+    for agree in [
+        rule("yandex.ru", DomainAction::Direct),
+        rule("youtube.com", DomainAction::Vpn),
+        rule("example.com", DomainAction::Direct),
+        rule("yandex.ru", DomainAction::Block),
+        rule("~yandex", DomainAction::Vpn),
+    ] {
+        assert_eq!(ON.overridden_by(&agree), None, "{}", agree.pattern);
+    }
+    assert_eq!(SmartRu::default().overridden_by(&vpn_ru), None);
+}

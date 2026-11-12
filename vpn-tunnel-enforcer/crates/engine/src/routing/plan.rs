@@ -1,17 +1,18 @@
-//! The one routing generator: every route / DNS fragment in the owner's fixed order (ТЗ-06
-//! §10.4, routing-dns §6.3). Pure: same inputs, same output.
+//! The one routing generator: every route / DNS fragment in the owner's fixed order (owner
+//! answer 4 of 12.11.2026, which replaced ТЗ-06 §10.4: the user's own rules win over Smart RU).
+//! Pure: same inputs, same output.
 //!
 //! Route order (first match wins), placed by engine-config around its own guards:
 //! - process rules, right after the inbound rules: P1 engine paths → direct, P2 third-party
 //!   cores (local-proxy mode) → direct, P3 user direct apps / commands, P4 user VPN apps;
 //! - domain rules, after hijack-dns / private / UDP guards / STUN pin: D1 user block →
-//!   D2 Smart RU pins → proxy → D3 gov rule set (+ maps when direct) → direct → D4 user
-//!   direct / VPN rules in the user's order → D5 `geoip-ru` + Kimi → direct; final = proxy.
+//!   D2 user direct / VPN rules in the user's order → D3 Smart RU pins → proxy → D4 gov rule
+//!   set (+ maps when direct) → direct → D5 `geoip-ru` + Kimi → direct; final = proxy.
 //!
-//! DNS rules mirror it: R1 block (REFUSED) → R2 pins → `dns-remote` → R3 gov (+ maps) →
-//! `dns-direct` → R4 user rules → `dns-direct` / `dns-remote` → R5 RU TLDs + RU services +
-//! Kimi → `dns-direct`; final = `dns-remote`. A domain that leaves directly must be resolved by
-//! the ISP-visible resolver, or the answer is the VPN-nearest CDN node and `geoip-ru` misses it.
+//! DNS rules mirror it: R1 block (REFUSED) → R2 user rules → `dns-direct` / `dns-remote` →
+//! R3 pins → `dns-remote` → R4 gov (+ maps) → `dns-direct` → R5 RU TLDs + RU services + Kimi →
+//! `dns-direct`; final = `dns-remote`. A domain that leaves directly must be resolved by the
+//! ISP-visible resolver, or the answer is the VPN-nearest CDN node and `geoip-ru` misses it.
 use std::net::Ipv4Addr;
 use std::path::Path;
 
@@ -140,30 +141,8 @@ pub fn build(i: &RoutingInputs) -> RoutingFragments {
         out.domain_rules.push(extend(fields.clone(), &reject));
         out.dns_rules.push(extend(fields, &reject));
     }
-    // D2 / R2: Smart RU pins, before every RU rule so sniffed SNI beats the IP country.
-    if smart_dir.is_some() {
-        for m in smart_ru::pins(maps_direct) {
-            let fields = m.into_fields();
-            out.domain_rules
-                .push(extend(fields.clone(), &[("outbound", json!(PROXY_OUT))]));
-            out.dns_rules
-                .push(extend(fields, &[("server", json!(DNS_REMOTE))]));
-        }
-    }
-    // D3 / R3: RU government / banks (+ maps when the user wants them direct).
-    if smart_dir.is_some() {
-        let mut ru_domains = vec![smart_ru::rule_set_ref(GOV_RU)];
-        if maps_direct {
-            ru_domains.push(smart_ru::suffixes(&[smart_ru::MAPS_DOMAIN_SUFFIXES]).into_fields());
-        }
-        for fields in ru_domains {
-            out.domain_rules
-                .push(extend(fields.clone(), &[("outbound", json!(DIRECT_OUT))]));
-            out.dns_rules
-                .push(extend(fields, &[("server", json!(DNS_DIRECT))]));
-        }
-    }
-    // D4 / R4: the user's direct and VPN rules, in the user's own order.
+    // D2 / R2: the user's direct and VPN rules, in the user's own order, before every Smart RU
+    // rule: what the user set by hand wins, and removing the rule brings Smart RU's choice back.
     let user = merged(i.domain_rules, |a| a != DomainAction::Block);
     let user_direct = user.iter().any(|(a, _)| *a == DomainAction::Direct);
     for (action, m) in user {
@@ -176,6 +155,29 @@ pub fn build(i: &RoutingInputs) -> RoutingFragments {
             .push(extend(fields.clone(), &[("outbound", json!(outbound))]));
         out.dns_rules
             .push(extend(fields, &[("server", json!(server))]));
+    }
+    // D3 / R3: Smart RU pins, before every RU rule so sniffed SNI beats the IP country.
+    if smart_dir.is_some() {
+        for m in smart_ru::pins(maps_direct) {
+            let fields = m.into_fields();
+            out.domain_rules
+                .push(extend(fields.clone(), &[("outbound", json!(PROXY_OUT))]));
+            out.dns_rules
+                .push(extend(fields, &[("server", json!(DNS_REMOTE))]));
+        }
+    }
+    // D4 / R4: RU government / banks (+ maps when the user wants them direct).
+    if smart_dir.is_some() {
+        let mut ru_domains = vec![smart_ru::rule_set_ref(GOV_RU)];
+        if maps_direct {
+            ru_domains.push(smart_ru::suffixes(&[smart_ru::MAPS_DOMAIN_SUFFIXES]).into_fields());
+        }
+        for fields in ru_domains {
+            out.domain_rules
+                .push(extend(fields.clone(), &[("outbound", json!(DIRECT_OUT))]));
+            out.dns_rules
+                .push(extend(fields, &[("server", json!(DNS_DIRECT))]));
+        }
     }
     // D5 / R5: RU addresses and Kimi direct; RU TLDs, RU services and Kimi resolve directly.
     if let Some(dir) = smart_dir {

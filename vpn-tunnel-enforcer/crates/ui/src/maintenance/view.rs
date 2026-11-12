@@ -70,7 +70,7 @@ pub(crate) fn OutcomeLine(outcome: Option<Outcome>) -> Element {
 
 /// «Состояние»: the summary badge, the four actions, export progress and the result line.
 #[component]
-pub(crate) fn StatePanel(ctl: Controller, on_repair: EventHandler<()>) -> Element {
+pub(crate) fn StatePanel(ctl: Controller) -> Element {
     let state = ctl.state.read();
     let report = ctl.report.read();
     let summary = rules::health_summary(state.protection.as_ref(), report.as_ref());
@@ -95,7 +95,7 @@ pub(crate) fn StatePanel(ctl: Controller, on_repair: EventHandler<()>) -> Elemen
                 Button {
                     busy: ctl.repair.running() || state.repair.running,
                     disabled: busy,
-                    onclick: move |_| on_repair.call(()),
+                    onclick: move |_| ctl.repair(),
                     {t!("ui.maintenance.actions.repair")}
                 }
                 Button {

@@ -22,7 +22,7 @@
       "modeProxy": "Прокси",
       "modeTunnel": "Туннель",
       "ksProxy": "Через прокси",
-      "ksNeedsAdmin": "Нужны права администратора"
+      "ksNeedsAdmin": "Нужна служба-помощник"
     }
   }
 }

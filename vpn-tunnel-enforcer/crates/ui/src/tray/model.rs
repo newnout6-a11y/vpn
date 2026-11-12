@@ -398,23 +398,17 @@ pub enum CloseAction {
     Hide,
     /// Run the shutdown cleanup and exit.
     Quit,
-    /// Protection is on: ask, offering «Свернуть в трей» when the setting allows it.
-    Ask { offer_tray: bool },
 }
 
 impl TrayState {
-    /// Protection counts as on for the close prompt: an engine of ours runs, the tunnel is
-    /// connected (also while its engine is between restarts) or an operation is in flight.
-    pub fn protection_on(&self) -> bool {
-        self.engine_running || self.tunnel == TunnelState::Connected || self.transition.is_some()
-    }
-
-    /// The close decision of `index.ts:850-916`.
+    /// What the window's close button does: the user's «Сворачивать в трей» setting decides,
+    /// without a question (owner, 12.11.2026: no confirmation for an action that can be undone;
+    /// a quit rolls everything back and the app starts again in a click).
     pub fn close_action(&self) -> CloseAction {
-        match (self.protection_on(), self.minimize_to_tray) {
-            (true, offer_tray) => CloseAction::Ask { offer_tray },
-            (false, true) => CloseAction::Hide,
-            (false, false) => CloseAction::Quit,
+        if self.minimize_to_tray {
+            CloseAction::Hide
+        } else {
+            CloseAction::Quit
         }
     }
 }

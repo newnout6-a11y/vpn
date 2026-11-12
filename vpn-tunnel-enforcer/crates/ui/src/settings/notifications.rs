@@ -69,7 +69,7 @@ pub(super) fn Notifications() -> Element {
                 disabled: saving,
                 on_change: move |on| change.call(NotificationChange::Enabled(on)),
             }
-            OsState { method: view.method }
+            OsState {}
             div { class: "set-subgroup", role: "group", aria_label: t!("ui.settings.notifications.events"),
                 p { class: "set-subgroup-title", {t!("ui.settings.notifications.events")} }
                 for event in NotifyEvent::ALL {
@@ -111,7 +111,7 @@ pub(super) fn Notifications() -> Element {
 /// The Windows block state: the blocked banner with its two repairs, or a failed check with
 /// «Повторить».
 #[component]
-fn OsState(method: NotifyMethod) -> Element {
+fn OsState() -> Element {
     let api = use_api();
     let ctx = use_ctx();
     let reset_job = use_job::<ResetReport>();
@@ -153,12 +153,9 @@ fn OsState(method: NotifyMethod) -> Element {
     rsx! {
         match os {
             OsNotifications::Blocked => rsx! {
-                div { class: "set-note is-warn", role: "alert",
+                div { class: "set-note is-warn", role: "note",
                     p { class: "set-note-title", {t!("notifications.osBlockedWarning")} }
                     p { {t!("notifications.osBlockedExplanation")} }
-                    if matches!(method, NotifyMethod::System | NotifyMethod::Both) {
-                        p { class: "set-hint", {t!("notifications.osBlockedHint")} }
-                    }
                     div { class: "set-form-actions",
                         Button { kind: ButtonKind::Primary, small: true, busy: reset_job.running(), onclick: reset,
                             {t!("notifications.resetWindowsBlock")}

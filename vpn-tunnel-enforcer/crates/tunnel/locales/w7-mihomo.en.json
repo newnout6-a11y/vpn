@@ -6,7 +6,7 @@
         "noTraffic": "The AmneziaWG server did not answer through the tunnel. Not connected.",
         "unavailable": "The mihomo lab engine was not found in the app folder."
       },
-      "spoofDropped": "\"{{name}}\": the provider's TLS hello spoofing (tls.spoof) needs the app started as administrator, so this connection goes without it."
+      "spoofDropped": "\"{{name}}\": the provider's TLS hello spoofing (tls.spoof) works only with the helper service; this connection goes without it."
     }
   }
 }

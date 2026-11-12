@@ -424,6 +424,7 @@ impl SettingsApi for DemoSettingsApi {
                 pattern,
                 action,
                 hits: 0,
+                overrides: None,
             })
         });
         Ok(())
@@ -441,6 +442,8 @@ impl SettingsApi for DemoSettingsApi {
             if let Some(r) = d.rules.iter_mut().find(|r| r.id == id) {
                 r.pattern = pattern;
                 r.action = action;
+                // The demo cannot ask Smart RU; an edited rule shows no note.
+                r.overrides = None;
             }
         });
         Ok(())
@@ -493,6 +496,7 @@ impl SettingsApi for DemoSettingsApi {
                     pattern: name.into(),
                     action,
                     hits: 0,
+                    overrides: None,
                 });
             });
         }

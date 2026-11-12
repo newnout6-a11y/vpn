@@ -19,7 +19,7 @@
         "disabledReason": "Disconnect the VPN first",
         "status": "Status",
         "ok": "Holding",
-        "warn": "Attention",
+        "warn": "Note",
         "fail": "Leak",
         "neutral": "Tunnel",
         "progress": "Speed test",

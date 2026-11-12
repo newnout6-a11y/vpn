@@ -68,14 +68,14 @@ fn every_literal_key_exists() {
     assert!(checked > 40, "only {checked} keys found");
 }
 
-/// b4 / NOADMIN §0: a TUN schedule is unavailable in an unelevated app (card and next-event
-/// strip say so); a proxy schedule always runs.
+/// b4 / NOADMIN §0: a TUN schedule is unavailable in an unelevated app without the helper
+/// service (card and next-event strip say so in one line); a proxy schedule always runs.
 #[test]
 fn tun_schedules_are_unavailable_unelevated() {
     assert!(Capture::Proxy.available(false) && Capture::Proxy.available(true));
     assert!(Capture::Tun.available(true));
     assert!(!Capture::Tun.available(false));
-    assert!(ru(&Msg::new("schedule.unavailable")).contains("администратора"));
+    assert!(ru(&Msg::new("schedule.unavailable")).contains("служба-помощник"));
 }
 
 fn hm(text: &str) -> HhMm {

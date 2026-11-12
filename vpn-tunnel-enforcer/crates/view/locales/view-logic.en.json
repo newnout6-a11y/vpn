@@ -22,7 +22,7 @@
       "modeProxy": "Proxy",
       "modeTunnel": "Tunnel",
       "ksProxy": "Via proxy",
-      "ksNeedsAdmin": "Needs administrator rights"
+      "ksNeedsAdmin": "Needs the helper service"
     }
   }
 }

@@ -1,16 +1,16 @@
 {
   "tunnel": {
     "runtime": {
-      "tunUnavailable": "Tunnel mode is unavailable: it needs the app to be started as administrator. Use Proxy mode instead.",
+      "tunUnavailable": "Tunnel mode needs the helper service. Proxy mode works without it.",
       "proxy": {
         "strictUnavailable": "“Always” works in Tunnel mode only: in Proxy mode the kill switch pauses on a drop.",
         "notAccepting": "The engine's local proxy does not accept connections on port {{port}}."
       },
       "watchdog": {
         "proxyMode": {
-          "proxyDown": "Proxy {{addr}} does not respond. Programs that use the system proxy get no connection until it answers again; other programs connect directly.",
-          "upstreamDown": "The VPN through server «{{name}}» is not confirmed. Programs that use the system proxy may get no connection; other programs connect directly. Check the connection or choose another server.",
-          "slotExited": "The server's xray-core exited; restarting it. Programs that use the system proxy wait until it is back."
+          "proxyDown": "Proxy {{addr}} does not respond; the internet is paused until it answers.",
+          "upstreamDown": "The VPN through server «{{name}}» does not respond. Check the connection or choose another server.",
+          "slotExited": "The server's xray-core exited; restarting it."
         }
       }
     },

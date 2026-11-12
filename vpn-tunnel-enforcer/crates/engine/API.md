@@ -490,8 +490,11 @@ pub const GEOIP_RU: &str;  pub const GOV_RU: &str;  pub const RULE_SETS: [(&str 
 pub const RU_TLD_SUFFIXES, RU_COMMERCIAL_SERVICE_SUFFIXES, MAPS_DOMAIN_SUFFIXES, GOOGLE_AND_GEMINI_PINNED_SUFFIXES,
           KIMI_MOONSHOT_DOMAIN_SUFFIXES, VPN_PINNED_MEDIA_SUFFIXES, IP_CHECKER_SUFFIXES: &[&str];
 pub struct SmartRu { pub enabled: bool, pub maps_direct: bool }
+pub enum SmartRoute { Direct, Vpn }
+impl SmartRu { pub fn route_of(&self, host: &str) -> Option<SmartRoute>;          // by name lists; None = off / undecided
+               pub fn overridden_by(&self, rule: &DomainRule) -> Option<SmartRoute>; } // Smart RU's route a user rule overrides
 
-// routing::plan — the one generator (pure, deterministic, owner order ТЗ-06 §10.4)
+// routing::plan — the one generator (pure, deterministic, owner order: answer 4 of 12.11.2026)
 pub struct RoutingInputs<'a> { pub smart: SmartRu, pub rule_set_dir: Option<&'a Path>,
     pub domain_rules: &'a [DomainRule], pub split: &'a ResolvedSplit,
     pub engine_paths: &'a [AppPath] /* our Xray / external proxy exe; never the app's own exe */,
@@ -502,8 +505,9 @@ pub enum RoutingWarning { SmartRuDisabled, BootstrapDnsFallback, InactiveApp(Ina
 pub fn build(i: &RoutingInputs) -> RoutingFragments;
 ```
 Process rules: P1 `engine_paths` -> direct, P2 third-party cores -> direct, P3 split direct,
-P4 split VPN (one rule per class). Domain rules: block -> Smart RU pins -> gov (+ maps) ->
-user rules in order -> `geoip-ru` + Kimi direct; DNS rules mirror them (`dns-direct` = UDP to
+P4 split VPN (one rule per class). Domain rules: block -> user rules in order -> Smart RU pins ->
+gov (+ maps) -> `geoip-ru` + Kimi direct (the user's own rules win over Smart RU; removing one
+brings Smart RU's choice back); DNS rules mirror them (`dns-direct` = UDP to
 `usable_physical_dns`, else `dhcp`). DNS rules match by domain only (domain lists, the
 domain-only gov geosite; never `ip_cidr` / `ip_is_private` / an IP rule set), so they stay
 valid next to the slot mode's `evaluate` bootstrap order (tested through `sing-box check`).

@@ -7,11 +7,12 @@
         "welcome": "Start",
         "connect": "Connection",
         "routing": "Mode",
+        "smartRu": "Smart RU",
         "protection": "Protection",
         "done": "Done"
       },
       "welcome": {
-        "lead": "Four short questions: language, how to connect, mode and protection. Nothing is applied before the last step, and you can change everything later in Settings.",
+        "lead": "Five short questions: language, how to connect, mode, Smart RU and protection. Nothing is applied before the last step, and you can change everything later in Settings.",
         "note": "The language switches right away. «Skip» saves only the language and leaves everything else at its default."
       },
       "connect": {
@@ -56,14 +57,22 @@
         "title": "Mode",
         "lead": "What goes through the tunnel.",
         "hard": "Tunnel",
-        "hardText": "All Windows traffic goes through the tunnel: browsers, games, updates, any program. Needs the app to be started as administrator.",
+        "hardText": "All Windows traffic goes through the tunnel: browsers, games, updates, any program. Needs the helper service.",
         "soft": "Proxy",
-        "softText": "No administrator rights needed: the app points the Windows system proxy at its own engine. Programs that honour the system proxy go through the VPN, the others go direct."
+        "softText": "The app points the Windows system proxy at its own engine. Programs that honour the system proxy go through the VPN, the others go direct."
+      },
+      "smartRu": {
+        "title": "Smart RU",
+        "lead": "How to open Russian sites. You can change it later in Settings.",
+        "on": "Turn on",
+        "onText": "Russian sites — banks, Gosuslugi, marketplaces — open directly, as without a VPN.",
+        "off": "Turn off",
+        "offText": "Everything goes through the VPN; some Russian sites may not open."
       },
       "protection": {
         "title": "Protection",
         "lead": "Optional. The Kill-Switch is off by default: turn it on if traffic outside the VPN is unacceptable even for a minute.",
-        "autostartHint": "An entry in your Windows account's startup list, no administrator rights needed."
+        "autostartHint": "An entry in your Windows account's startup list."
       },
       "done": {
         "title": "All set",

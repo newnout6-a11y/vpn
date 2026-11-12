@@ -15,7 +15,7 @@
       },
       "error": {
         "bfeUnavailable": "The Base Filtering Engine service (BFE) is unavailable, so protection cannot be applied.",
-        "accessDenied": "Network protection needs administrator rights.",
+        "accessDenied": "Network protection needs the helper service.",
         "programMissing": "Program not found: {{name}}.",
         "wfp": "WFP filter error ({{code}}); the previous filters stay in place.",
         "persist": "The protection settings could not be saved.",

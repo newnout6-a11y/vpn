@@ -1,4 +1,4 @@
-//! Pure rules: the power click rule, the D-01 confirmation, banners, the node line, ruler labels.
+//! Pure rules: the power click rule, banners, the node line, ruler labels.
 use std::net::IpAddr;
 
 use vpnte_base::types::Verdict;
@@ -28,26 +28,19 @@ fn connecting() -> ConnView {
     }
 }
 
-/// Spec §2.1 power-button click rule: nothing installed → connect; installed → confirm first,
-/// a second press while the confirmation is open disconnects.
+/// Power-button click rule: nothing installed → connect; installed → disconnect at once (owner,
+/// 12.11.2026: no confirmation for an action the next press undoes).
 #[test]
-fn power_click_asks_before_disconnecting() {
+fn power_click_connects_or_disconnects() {
     assert_eq!(
-        power_click(&ConnView::default(), false, false),
+        power_click(&ConnView::default(), false),
         PowerAction::Connect
     );
-    assert_eq!(
-        power_click(&connected(), false, false),
-        PowerAction::AskConfirm
-    );
-    assert_eq!(
-        power_click(&connected(), true, false),
-        PowerAction::Disconnect
-    );
+    assert_eq!(power_click(&connected(), false), PowerAction::Disconnect);
 }
 
 /// AT-00-008 (spec §7.8 #1): a faulted tunnel with our protection still installed offers the
-/// cleanup (confirm → disconnect), never a second start on top.
+/// cleanup (disconnect), never a second start on top.
 #[test]
 fn faulted_tunnel_with_leftovers_disconnects() {
     let fault = ConnView {
@@ -55,73 +48,30 @@ fn faulted_tunnel_with_leftovers_disconnects() {
         cleanup_required: true,
         ..ConnView::default()
     };
-    assert_eq!(power_click(&fault, false, false), PowerAction::AskConfirm);
-    assert_eq!(power_click(&fault, true, false), PowerAction::Disconnect);
+    assert_eq!(power_click(&fault, false), PowerAction::Disconnect);
     let cleaned = ConnView {
         cleanup_required: false,
         ..fault
     };
-    assert_eq!(power_click(&cleaned, false, false), PowerAction::Connect);
+    assert_eq!(power_click(&cleaned, false), PowerAction::Connect);
 }
 
 /// AT-00-003 / AT-00-007: while a transition, a switch or a cancellation is in flight the button
 /// does nothing (it is disabled too), and neither does a second press of our own command.
 #[test]
 fn power_click_ignores_presses_in_flight() {
-    assert_eq!(
-        power_click(&connecting(), false, false),
-        PowerAction::Ignore
-    );
+    assert_eq!(power_click(&connecting(), false), PowerAction::Ignore);
     let switching = ConnView {
         switching: Some("Norway".into()),
         ..connected()
     };
-    assert_eq!(power_click(&switching, true, false), PowerAction::Ignore);
+    assert_eq!(power_click(&switching, false), PowerAction::Ignore);
     let cancelling = ConnView {
         cancelling: true,
         ..connected()
     };
-    assert_eq!(power_click(&cancelling, false, false), PowerAction::Ignore);
-    assert_eq!(
-        power_click(&ConnView::default(), false, true),
-        PowerAction::Ignore
-    );
-}
-
-/// D-01: open at T0, «Отмена» at 1 s, open again at 2 s: the T0 timer (due at 3 s) must not
-/// close the second confirmation; its own timer does.
-#[test]
-fn confirm_timer_of_an_earlier_opening_is_stale() {
-    let mut c = Confirm::default();
-    let first = c.open();
-    c.close();
-    let second = c.open();
-    assert!(!c.expire(first));
-    assert!(c.is_open());
-    assert!(c.expire(second));
-    assert!(!c.is_open());
-    assert!(!c.expire(second), "expires once");
-}
-
-/// D-01: the pointer or the focus inside the row holds the timer; leaving re-arms it with a
-/// fresh generation (the timer armed at opening is then stale).
-#[test]
-fn confirm_is_held_while_pointed_at_or_focused() {
-    let mut c = Confirm::default();
-    let opened = c.open();
-    assert_eq!(c.hold(Hold::Pointer, true), None);
-    assert!(!c.expire(opened), "held by the pointer");
-    assert_eq!(c.hold(Hold::Focus, true), None);
-    assert_eq!(
-        c.hold(Hold::Pointer, false),
-        None,
-        "the focus still holds it"
-    );
-    let rearmed = c.hold(Hold::Focus, false).expect("re-armed when both left");
-    assert!(!c.expire(opened));
-    assert!(c.is_open());
-    assert!(c.expire(rearmed));
-    assert_eq!(c.hold(Hold::Pointer, true), None, "closed: nothing to hold");
+    assert_eq!(power_click(&cancelling, false), PowerAction::Ignore);
+    assert_eq!(power_click(&ConnView::default(), true), PowerAction::Ignore);
 }
 
 fn view(conn: ConnView) -> DashboardView {

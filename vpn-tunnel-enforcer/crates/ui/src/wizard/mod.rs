@@ -1,5 +1,5 @@
-//! First-run wizard: a five-step overlay in «Пломба» over the shell (language, how to connect,
-//! routing mode, optional protection, summary). Nothing is applied before the last step; «Завершить»
+//! First-run wizard: a six-step overlay in «Пломба» over the shell (language, how to connect,
+//! routing mode, Smart RU, optional protection, summary). Nothing is applied before the last step; «Завершить»
 //! hands every choice to the backend in one call, «Пропустить» saves only the language.
 //!
 //! The overlay is a `role=dialog aria-modal=true` layer below the title strip (the caption buttons
@@ -37,7 +37,8 @@ pub enum Connection {
 /// How traffic reaches the tunnel; both work with either [`Connection`] (NOADMIN §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Routing {
-    /// «Туннель»: TUN capture of every program; needs the app started as administrator.
+    /// «Туннель»: TUN capture of every program; needs the helper service (or the app started as
+    /// administrator).
     Hard,
     /// «Прокси»: the engine behind a loopback proxy and the per-user system proxy pointed at it;
     /// programs that ignore the system proxy go direct. The first-run default without
@@ -52,6 +53,9 @@ pub enum Routing {
 pub struct WizardDefaults {
     pub connection: Connection,
     pub routing: Routing,
+    /// Smart RU (Russian sites directly). The app preselects it on for a first run (owner answer
+    /// 18) and shows the stored choice on a re-run.
+    pub smart_ru: bool,
     pub kill_switch: KillSwitchLevel,
     /// Autostart as Windows reports it now (the checkbox shows it; finishing applies a change).
     pub autostart: bool,
@@ -102,6 +106,8 @@ pub struct WizardChoices {
     pub lang: Lang,
     pub connection: Connection,
     pub routing: Routing,
+    /// The Smart RU setting.
+    pub smart_ru: bool,
     /// The checked key (trimmed), only with [`Connection::Key`] and only after the backend found
     /// servers in exactly this text; to be imported like the Servers page «Добавить».
     pub key: Option<KeyText>,

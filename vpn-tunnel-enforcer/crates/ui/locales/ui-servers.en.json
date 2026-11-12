@@ -390,7 +390,7 @@
         "deviceLimit": "every device slot of the subscription is taken"
       },
       "key": {
-        "copied": "Key copied. It is an access secret: the clipboard clears itself in {{seconds}} s.",
+        "copied": "Key copied",
         "saved": "Key saved: {{path}}. The file contains an access secret.",
         "failed": "Could not export the key of «{{name}}»"
       },

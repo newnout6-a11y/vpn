@@ -2,7 +2,7 @@
 // round trip to Rust. (1) FitWord: the big state word is sized so every word (SECURE, LINKING,
 // EXPOSED…) is equally wide: its width is measured at 100 px in the display face (letter-spacing
 // is in em, so width scales linearly) and capped at 15 % of the window height, 40–150 px.
-// (2) Ctrl/Cmd+Enter presses the power button, with the same confirm / cancel rules as a click.
+// (2) Ctrl/Cmd+Enter presses the power button, with the same rules as a click.
 (() => {
   'use strict';
 
@@ -82,7 +82,7 @@
     const t = e.target;
     if (t instanceof Element) {
       if (t.isContentEditable || TEXT_CONTROLS.has(t.tagName)) return;
-      // a focused control keeps its own Ctrl+Enter (e.g. «Отмена» in the confirm); dialogs own
+      // a focused control keeps its own Ctrl+Enter (e.g. the cancel button); dialogs own
       // the keyboard
       if (t !== power && t.closest('button, a, [role="dialog"], [aria-modal="true"], dialog')) return;
     }

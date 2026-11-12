@@ -6,6 +6,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use vpnte_core::settings::RuleSetMode;
 use vpnte_engine::routing::rulesets::ActiveSource;
+use vpnte_engine::routing::smart_ru::SmartRu;
 use vpnte_tunnel::fsm::{TunnelSnapshot, TunnelState};
 use vpnte_tunnel::lifecycle::SessionView;
 use vpnte_ui::settings as ui;
@@ -152,7 +153,11 @@ fn publish_stores(shared: &Shared, snap: &TunnelSnapshot, session: Option<&Sessi
     publish(&shared.state, state);
     let doc = backend.rules.snapshot();
     publish(&shared.dns, dns_view(&doc));
-    publish(&shared.domains, domains_view(&doc, settings.smart_ru_split));
+    let smart = SmartRu {
+        enabled: settings.smart_ru_split,
+        maps_direct: settings.smart_ru_maps_direct,
+    };
+    publish(&shared.domains, domains_view(&doc, smart));
     publish(&shared.notifications, notifications_view(&settings, os));
     if let Some(auto) = &shared.automation {
         let view = auto::rotation_view(&auto.rotation.config(), &backend.servers);

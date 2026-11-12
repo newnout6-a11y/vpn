@@ -345,7 +345,7 @@ pub struct TrayState {
 }
 pub enum TrayStatus { Protected, Leak, Off, Starting, ProxyDown, KillSwitch, Restarting, Stopping, Error, Unknown, Paused }
 pub struct TrayModel { status, tooltip: Vec<Msg>, tooltip_speed: Option<Msg>, items: Vec<TrayItem> } // build(&state, quitting)
-pub enum CloseAction { Hide, Quit, Ask { offer_tray: bool } }    // TrayState::close_action()
+pub enum CloseAction { Hide, Quit }                              // TrayState::close_action(): the «Сворачивать в трей» setting
 #[component] pub fn TrayHost(children: Element) -> Element;      // wraps the Shell; provides TrayContext
 #[derive(Clone, Copy)] pub struct TrayContext { pub model: Memo<TrayModel>, pub native: Signal<Option<NativeReport>> }
 pub fn show_window(desktop: &DesktopContext);   // tray click, «Показать окно», a second launch (pipe `activate`)
@@ -353,8 +353,8 @@ pub fn hide_to_tray(desktop: &DesktopContext);  // hides window + WebView2 contr
 pub fn format_speed(bytes_per_second: u64) -> String;   // 0 -> "0 Kbps", 125 000 -> "1.0 Mbps"
 pub struct DemoTray;                            // new(scene), scene(TrayStatus) -> TrayState, update(..), spawn_traffic()
 ```
-`TrayHost` switches the window to hide-on-close and decides each close request: `Hide` (protection
-off and «Сворачивать в трей», or the user chose it), `Quit`, or a question while protection is on.
+`TrayHost` switches the window to hide-on-close and decides each close request without a question
+(p-calm, owner 12.11.2026): `Hide` with «Сворачивать в трей» and a tray icon, otherwise `Quit`.
 Quit hides the window first, runs `TrayApi::quit`, and closes only on `Ok`; a refused quit brings
 the window back with «Повторить» / «Выйти без восстановления». The native tray (Win32 via
 tray-icon / muda) is updated at most once a second for the speed lines; tooltip ≤ 127 UTF-16 units.
@@ -370,11 +370,11 @@ pub trait WizardApi: 'static {
     async fn skip(&self, lang: Lang) -> AppResult<()>;
 }
 pub struct WizardState { pub open: bool, pub current: WizardDefaults }
-pub struct WizardDefaults { connection: Connection, routing: Routing, kill_switch: KillSwitchLevel, autostart: bool, servers: usize }
+pub struct WizardDefaults { connection: Connection, routing: Routing, smart_ru: bool /* on for a first run */, kill_switch: KillSwitchLevel, autostart: bool, servers: usize }
 pub enum Connection { Key, LocalProxy }   pub enum Routing { Hard, Soft /* default */ }
 pub struct LocalProxy { host: String, port: u16, kind: ProxyKind }   pub struct KeyCheck { servers: usize, subscription: bool }
 pub struct KeyText(pub String);           // Debug prints `KeyText(..)`: the key never reaches a log
-pub struct WizardChoices { lang, connection, routing, key: Option<KeyText>, kill_switch: KillSwitchLevel, autostart: bool }
+pub struct WizardChoices { lang, connection, routing, smart_ru: bool, key: Option<KeyText>, kill_switch: KillSwitchLevel, autostart: bool }
 #[component] pub fn Wizard() -> Element;  // into Shell { overlays }; a modal shown while state.open
 pub use demo::{DemoScene, DemoWizardApi};
 ```
@@ -383,7 +383,7 @@ The page never sends `Soft` with `KillSwitchLevel::Strict` (it explains and hold
 the app still refuses that pair itself (`tunnel.lifecycle.soft.strictUnavailable`).
 `finish` order: import the key through the normal profile import (dedupe; it stays if a later step
 fails) → autostart if changed → kill-switch level if changed → one atomic settings write (`language`,
-`connection_mode`, `routing_mode`, `kill_switch`, `first_run_complete = true`); on failure undo the
+`connection_mode`, `routing_mode`, `smart_ru_split`, `kill_switch`, `first_run_complete = true`); on failure undo the
 level, then autostart, and return the failing step's `Msg` (a failed undo is the app's own notice).
 Push `open: false` after `finish` / `skip`; push `open: true` for `SettingsApi::open_wizard`.
 
@@ -575,7 +575,9 @@ capture_quota_mb`. `SettingsDraft` holds the page's unsaved edits. Section views
 `RotationView` (+ `RotationPatch`, `RotationOutcome`), `SettingsState::launch` = `LaunchView
 { effective: LaunchChoice /* Off, LastUsed, LowestDelay, Random (provider) */, source: LaunchSource
 /* Default, User, Provider */, server_mode }` («Поведение»; the segments show only the user's own
-choice, so a click on «Нет» always stores an explicit Off), `DnsView`, `DomainsView` (+ import preview /
+choice, so a click on «Нет» always stores an explicit Off), `DnsView`, `DomainsView` (rows carry
+`overrides: Option<SmartRoute>`: Smart RU's own route where the user's rule sends the site the other
+way; the row says so in one line) (+ import preview /
 report), `NotificationsView` (+ `NotificationChange`, `NotifyEvent`, `NotifyMethod`), config
 transfer `ExportMode`, `ImportMode`, `ConfigSection`, `ImportPreview`. Ranges: `CHECK_INTERVAL_SECS`,
 `CAPTURE_MAX_MB`, `CAPTURE_QUOTA_MB`, `ROTATION_INTERVAL_MIN`. Demo: `settings::demo::DemoSettingsApi`.
@@ -769,7 +771,7 @@ complete, runnable reference for the expected behaviour of its trait.
   `SettingsApi::set_theme` must write `theme::THEME`. Startup values go into `LaunchOptions`.
 - Advanced mode: the Shell's `advanced` signal must follow the saved `advanced_mode` (Maintenance).
 - Second instance / single-instance pipe `activate`: call `tray::show_window(&desktop)`.
-- Window close: `TrayHost` owns it (hide-to-tray / question / quit flow); the app's own shutdown runs
+- Window close: `TrayHost` owns it (hide-to-tray / quit flow); the app's own shutdown runs
   inside `TrayApi::quit`.
 - Wizard: open it by pushing `WizardState { open: true, .. }` (first run, `SettingsApi::open_wizard`),
   close it by pushing `open: false` after `finish` / `skip`.

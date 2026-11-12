@@ -10,6 +10,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use super::domain::{DomainAction, DomainPattern, DomainRule};
 use super::matcher::Matcher;
 
 /// Tag of the destination-IP country set.
@@ -138,6 +139,68 @@ pub const IP_CHECKER_SUFFIXES: &[&str] = &[
 pub struct SmartRu {
     pub enabled: bool,
     pub maps_direct: bool,
+}
+
+/// Where Smart RU itself sends a site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmartRoute {
+    Direct,
+    Vpn,
+}
+
+impl SmartRu {
+    /// Smart RU's own route for `host`, read from its name lists in rule order: pins → VPN,
+    /// maps when direct, RU TLDs, RU services and Kimi → direct. RU-TLD names are routed by
+    /// `geoip-ru` on the answer, which for them is nearly always direct. Any other name is left
+    /// to the address country, which a name alone cannot tell: `None`.
+    pub fn route_of(&self, host: &str) -> Option<SmartRoute> {
+        if !self.enabled {
+            return None;
+        }
+        let hit = |list: &[&str]| list.iter().any(|s| suffix_matches(s, host));
+        let pinned = [
+            IP_CHECKER_SUFFIXES,
+            GOOGLE_AND_GEMINI_PINNED_SUFFIXES,
+            VPN_PINNED_MEDIA_SUFFIXES,
+        ];
+        if pinned.iter().any(|l| hit(l)) {
+            return Some(SmartRoute::Vpn);
+        }
+        if hit(MAPS_DOMAIN_SUFFIXES) {
+            return Some(if self.maps_direct {
+                SmartRoute::Direct
+            } else {
+                SmartRoute::Vpn
+            });
+        }
+        let direct = [
+            RU_TLD_SUFFIXES,
+            RU_COMMERCIAL_SERVICE_SUFFIXES,
+            KIMI_MOONSHOT_DOMAIN_SUFFIXES,
+        ];
+        direct.iter().any(|l| hit(l)).then_some(SmartRoute::Direct)
+    }
+
+    /// Smart RU's route for the site of a user rule that sends it the other way (the user's
+    /// rule wins, owner answer 4); `None` when they agree, Smart RU is off or undecided, the
+    /// rule blocks, or the pattern is a keyword (no site to name).
+    pub fn overridden_by(&self, rule: &DomainRule) -> Option<SmartRoute> {
+        let host = match &rule.pattern {
+            DomainPattern::Exact(h) | DomainPattern::Subdomains(h) => h,
+            DomainPattern::Keyword(_) => return None,
+        };
+        let own = match rule.action {
+            DomainAction::Direct => SmartRoute::Direct,
+            DomainAction::Vpn => SmartRoute::Vpn,
+            DomainAction::Block => return None,
+        };
+        self.route_of(host).filter(|r| *r != own)
+    }
+}
+
+/// The list matcher's semantics (`Matcher::suffix`): `.x.com` covers `x.com` and `*.x.com`.
+fn suffix_matches(suffix: &str, host: &str) -> bool {
+    host.ends_with(suffix) || suffix.strip_prefix('.') == Some(host)
 }
 
 /// `route.rule_set` entries for the files in `dir` (forward slashes, as the old generator).

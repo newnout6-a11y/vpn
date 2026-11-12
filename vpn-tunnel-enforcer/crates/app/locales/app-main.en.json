@@ -3,7 +3,7 @@
     "main": {
       "internalError": "Internal error: the protection state is not confirmed",
       "startFailed": {
-        "title": "VPN Tunnel Enforcer could not be opened safely",
+        "title": "VPN Tunnel Enforcer could not be opened",
         "message": "Start-up stopped. Your saved settings were not replaced with empty data."
       }
     }

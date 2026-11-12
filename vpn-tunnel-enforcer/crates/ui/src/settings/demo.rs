@@ -74,6 +74,7 @@ fn rule(id: &str, pattern: &str, action: DomainAction, hits: u64) -> DomainRuleV
         pattern: pattern.into(),
         action,
         hits,
+        overrides: None,
     }
 }
 
@@ -299,6 +300,10 @@ impl DemoSettingsApi {
                 vec![
                     rule("r-1", "*.example.ru", DomainAction::Direct, 214),
                     rule("r-2", "video.example.com", DomainAction::Vpn, 98),
+                    DomainRuleView {
+                        overrides: Some(SmartRoute::Direct),
+                        ..rule("r-5", "music.yandex.ru", DomainAction::Vpn, 37)
+                    },
                     rule("r-3", "ads.example.net", DomainAction::Block, 2320),
                     rule("r-4", "~tracker", DomainAction::Block, 0),
                 ]

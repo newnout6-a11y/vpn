@@ -74,11 +74,16 @@ impl DemoWizardApi {
             DemoScene::Rerun => WizardDefaults {
                 connection: Connection::Key,
                 routing: Routing::Hard,
+                smart_ru: false,
                 kill_switch: KillSwitchLevel::Standard,
                 autostart: true,
                 servers: 12,
             },
-            _ => WizardDefaults::default(),
+            // A first run: Smart RU preselected on, as the app does (owner answer 18).
+            _ => WizardDefaults {
+                smart_ru: true,
+                ..WizardDefaults::default()
+            },
         };
         let (state, _) = watch::channel(WizardState {
             open: true,
@@ -225,13 +230,14 @@ impl WizardApi for DemoWizardApi {
             return Err(Self::disk_full());
         }
         self.note(format!(
-            "settings: lang={} connection={} routing={} kill={} first_run_complete",
+            "settings: lang={} connection={} routing={} smart_ru={} kill={} first_run_complete",
             c.lang.code(),
             connection_name(c.connection),
             match c.routing {
                 Routing::Hard => "hard",
                 Routing::Soft => "soft",
             },
+            c.smart_ru,
             level_name(c.kill_switch),
         ));
         self.state.send_modify(|s| {
@@ -239,6 +245,7 @@ impl WizardApi for DemoWizardApi {
             s.current = WizardDefaults {
                 connection: c.connection,
                 routing: c.routing,
+                smart_ru: c.smart_ru,
                 kill_switch: c.kill_switch,
                 autostart: c.autostart,
                 servers: s.current.servers + imported,

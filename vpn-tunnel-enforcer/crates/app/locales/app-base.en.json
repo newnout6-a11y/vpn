@@ -1,7 +1,7 @@
 {
   "app": {
     "base": {
-      "needsAdmin": "Available only when the app is started as administrator.",
+      "needsAdmin": "Needs the helper service.",
       "tunnelMissing": "Internal error: the tunnel is not ready yet."
     }
   }

@@ -50,13 +50,6 @@ mod tests {
         let none = TrayModel::build(&TrayState::default(), false);
         msgs.extend(none.items.into_iter().map(|item| item.label));
         for key in [
-            "ui.tray.close.title",
-            "ui.tray.close.message",
-            "ui.tray.close.detailTray",
-            "ui.tray.close.detailStop",
-            "ui.tray.close.toTray",
-            "ui.tray.close.stopAndClose",
-            "ui.tray.close.cancel",
             "ui.tray.quitFailed.title",
             "ui.tray.quitFailed.note",
             "ui.tray.quitFailed.retry",
@@ -83,7 +76,6 @@ mod tests {
             "Статус: Kill-switch: требуется проверка"
         );
         assert_eq!(ru("ui.tray.menu.show"), "Показать окно");
-        assert_eq!(ru("ui.tray.close.stopAndClose"), "Отключить и закрыть");
         assert_eq!(
             ru("ui.tray.quitFailed.exitAnyway"),
             "Выйти без восстановления"

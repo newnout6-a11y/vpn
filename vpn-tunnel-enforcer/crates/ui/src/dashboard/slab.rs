@@ -1,5 +1,5 @@
 //! The status slab: the big word (FitWord), the live caption and uptime, the identity column, the
-//! transient cancel / confirm block, the power button, the ten-cell ruler and the mascot overlay.
+//! transient cancel block, the power button, the ten-cell ruler and the mascot overlay.
 use std::iter;
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,7 @@ use vpnte_view::labels::{
 use vpnte_view::mascot::MascotEvent;
 use vpnte_view::swiss::{self, OpWindow, RULER_CELLS, SwissInput};
 
-use super::model::{Hold, NodeLine, engine_caption, node_line};
+use super::model::{NodeLine, engine_caption, node_line};
 use super::{Dash, EngineLine};
 use crate::lang::tr;
 use crate::mascot::MascotHost;
@@ -152,7 +152,6 @@ fn Side(servers: Signal<ServersView>, local_pings: Signal<LocalPings>) -> Elemen
     let real = real_line(conn, &view.exit, *dash.home.read());
     let node = node_line(&servers.read(), &local_pings.read());
     let cancel = cancel_label(conn);
-    let confirm_open = dash.confirm.read().is_open();
     rsx! {
         div { class: "swiss-slab-side",
             div { class: "swiss-identity",
@@ -160,14 +159,9 @@ fn Side(servers: Signal<ServersView>, local_pings: Signal<LocalPings>) -> Elemen
                 RealBlock { line: real }
                 NodeBlock { node, engine: view.engine.clone() }
             }
-            if confirm_open || cancel.is_some() {
+            if let Some(label) = cancel {
                 div { class: "swiss-transient",
-                    if confirm_open {
-                        ConfirmRow {}
-                    }
-                    if let Some(label) = cancel {
-                        CancelButton { label: tr(&label), cancelling: conn.cancelling }
-                    }
+                    CancelButton { label: tr(&label), cancelling: conn.cancelling }
                 }
             }
             PowerButton {}
@@ -312,44 +306,6 @@ fn NodeMeta(meta: String, engine: Option<String>, engine_title: String) -> Eleme
             }
         }
     }
-}
-
-/// «Отключить VPN…?» with «Да, отключить» / «Отмена»; the pointer or the focus over it holds the
-/// 3 s timer (D-01).
-#[component]
-fn ConfirmRow() -> Element {
-    let dash = use_context::<Dash>();
-    let (yes, no) = (dash.clone(), dash.clone());
-    rsx! {
-        div {
-            class: "flex flex-col gap-2 enter-up",
-            onmouseenter: holder::<MouseEvent>(&dash, Hold::Pointer, true),
-            onmouseleave: holder::<MouseEvent>(&dash, Hold::Pointer, false),
-            onfocusin: holder::<FocusEvent>(&dash, Hold::Focus, true),
-            onfocusout: holder::<FocusEvent>(&dash, Hold::Focus, false),
-            p { class: "swiss-confirm-text", {t!("dashboard.disconnectConfirmation")} }
-            div { class: "swiss-confirm-actions",
-                button {
-                    r#type: "button",
-                    class: "swiss-confirm-yes",
-                    onclick: move |_| yes.confirm_yes(),
-                    {t!("dashboard.confirmDisconnect")}
-                }
-                button {
-                    r#type: "button",
-                    class: "swiss-confirm-no",
-                    onclick: move |_| no.confirm_no(),
-                    {t!("dashboard.cancelDisconnect")}
-                }
-            }
-        }
-    }
-}
-
-/// An event handler that holds (`on`) or releases the confirmation's timer.
-fn holder<E: 'static>(dash: &Dash, by: Hold, on: bool) -> impl FnMut(E) + 'static {
-    let dash = dash.clone();
-    move |_| dash.hold_confirm(by, on)
 }
 
 /// «Отменить подключение» / «Отменить смену сервера»; «Отменяем…» with a spinner once pressed.

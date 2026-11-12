@@ -7,6 +7,7 @@ use vpnte_core::settings::{self as core, RuleSetMode, Settings};
 use vpnte_engine::routing::RulesDoc;
 use vpnte_engine::routing::dns::DnsAddr;
 use vpnte_engine::routing::domain::DomainAction as RuleAction;
+use vpnte_engine::routing::smart_ru::{SmartRoute, SmartRu};
 use vpnte_tunnel::fsm::{TunnelSnapshot, TunnelState};
 use vpnte_ui::settings as ui;
 use vpnte_winnet::wfp::{self, KillSwitchState};
@@ -234,7 +235,7 @@ pub fn dns_view(doc: &RulesDoc) -> ui::DnsView {
     }
 }
 
-pub fn domains_view(doc: &RulesDoc, smart_ru: bool) -> ui::DomainsView {
+pub fn domains_view(doc: &RulesDoc, smart: SmartRu) -> ui::DomainsView {
     let rules = doc
         .domain_rules
         .iter()
@@ -243,9 +244,16 @@ pub fn domains_view(doc: &RulesDoc, smart_ru: bool) -> ui::DomainsView {
             pattern: r.pattern.to_string(),
             action: rule_action(r.action),
             hits: doc.hit_count(r.id),
+            overrides: smart.overridden_by(r).map(|route| match route {
+                SmartRoute::Direct => ui::SmartRoute::Direct,
+                SmartRoute::Vpn => ui::SmartRoute::Vpn,
+            }),
         })
         .collect();
-    ui::DomainsView { rules, smart_ru }
+    ui::DomainsView {
+        rules,
+        smart_ru: smart.enabled,
+    }
 }
 
 pub fn notifications_view(s: &Settings, os: ui::OsNotifications) -> ui::NotificationsView {

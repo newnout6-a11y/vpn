@@ -1,13 +1,13 @@
 {
   "automation": {
     "hardening": {
-      "needsAdmin": "Administrator rights are needed: the app runs without elevation.",
+      "needsAdmin": "Needs the helper service.",
       "browser": {
         "applied": "Browser protection against WebRTC and DNS leaks is on. Close the browsers completely, background processes included, and open them again.",
         "alreadyApplied": "The protection is already in place. If a browser was open, restart it completely.",
         "noneFound": "No supported browser profiles were found.",
         "failed": "Could not apply the browser protection policy.",
-        "notConfirmed": "The WebRTC policy did not read back as written. Check the administrator rights.",
+        "notConfirmed": "The WebRTC policy did not read back as written.",
         "foreignValue": "A policy of this browser is already set with an unexpected value type; the browser was left as it is.",
         "managedNote": "A browser with these policies shows \"Managed by your organization\"; that is expected, and rolling back removes the policies.",
         "cleanupPartial": "Some browser policies left by earlier settings could not be restored; the next apply or rollback tries again.",
@@ -34,7 +34,7 @@
         "browserLeftover": "The previous version may have left WebRTC policies in the registry that cannot be restored automatically: check chrome://policy (edge://policy, browser://policy).",
         "browserFiles": "The previous version changed WebRTC settings in browser profiles (Preferences, user.js); they are not restored automatically. If calls do not work in Firefox, reset the media.peerconnection.* preferences on about:config.",
         "locationLeftover": "The previous version may have left Windows location turned off in a way that cannot be restored automatically: check Settings > Privacy > Location.",
-        "locationPolicy": "The previous version left a machine-wide policy that turns Windows location off for every account on this PC. Removing it needs administrator rights, so the app leaves it as it is."
+        "locationPolicy": "The previous version left a policy that turns Windows location off for every account on this PC; the helper service can remove it."
       }
     }
   }

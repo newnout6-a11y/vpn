@@ -43,13 +43,18 @@ pub async fn open(shared: &Arc<Shared>) {
 }
 
 /// The choices the wizard starts from. Hard is offered as the starting point only when this
-/// process can capture with the TUN (NOADMIN §0: elevated, in this phase).
+/// process can capture with the TUN (NOADMIN §0: elevated, in this phase). Smart RU is
+/// preselected on for a first run (owner answer 18); a re-run shows the stored choice.
 async fn defaults(shared: &Arc<Shared>) -> WizardDefaults {
     let backend = &shared.backend;
     let tun = backend.tunnel().is_ok_and(|t| t.tun_available());
-    let (connection, routing) = backend
-        .settings
-        .read(|s| (s.connection_mode, s.routing_mode));
+    let (connection, routing, smart_ru) = backend.settings.read(|s| {
+        (
+            s.connection_mode,
+            s.routing_mode,
+            s.smart_ru_split || !s.first_run_complete,
+        )
+    });
     WizardDefaults {
         connection: match connection {
             ConnectionMode::DirectVpn => Connection::Key,
@@ -59,6 +64,7 @@ async fn defaults(shared: &Arc<Shared>) -> WizardDefaults {
             RoutingMode::Hard if tun => Routing::Hard,
             _ => Routing::Soft,
         },
+        smart_ru,
         kill_switch: backend.protection.read(|d| d.settings.level),
         autostart: actions::read_autostart(shared).await.unwrap_or(false),
         servers: backend
@@ -216,6 +222,7 @@ async fn apply(
             Connection::LocalProxy => ConnectionMode::LocalProxy,
         };
         s.routing_mode = routing;
+        s.smart_ru_split = choices.smart_ru;
         s.first_run_complete = true;
     })?;
     let new = backend.settings.snapshot();

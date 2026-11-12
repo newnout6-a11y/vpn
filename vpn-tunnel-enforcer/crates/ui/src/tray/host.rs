@@ -87,8 +87,6 @@ fn set_webview_hidden(desktop: &DesktopContext, hidden: bool) {
 /// A modal question of the tray host, shown over the page.
 #[derive(Clone, Debug, PartialEq)]
 enum TrayDialog {
-    /// Close requested while protection is on (§3.7).
-    CloseProtected { offer_tray: bool },
     /// The quit cleanup was refused; `reason` comes from the backend.
     QuitFailed { reason: Msg },
 }
@@ -105,8 +103,6 @@ pub struct TrayContext {
 /// A button of a [`TrayDialog`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Choice {
-    ToTray,
-    StopAndClose,
     Cancel,
     Retry,
     ExitAnyway,
@@ -220,24 +216,10 @@ pub fn TrayHost(children: Element) -> Element {
             }
             // Without a tray icon a hidden window could never come back.
             let has_tray = native.borrow().is_some();
-            let action = match state.peek().close_action() {
-                CloseAction::Hide if !has_tray => CloseAction::Quit,
-                CloseAction::Ask { offer_tray } => CloseAction::Ask {
-                    offer_tray: offer_tray && has_tray,
-                },
-                action => action,
-            };
-            match action {
+            match state.peek().close_action() {
                 // dioxus hides the window right after this handler
-                CloseAction::Hide => set_webview_hidden(&desktop, true),
-                CloseAction::Quit => start_quit(QuitMode::Restore),
-                CloseAction::Ask { offer_tray } => {
-                    dialog.set(Some(TrayDialog::CloseProtected { offer_tray }));
-                    // dioxus hides the window right after this handler; a task runs after
-                    // that and brings it back with the question.
-                    let desktop = desktop.clone();
-                    spawn(async move { show_window(&desktop) });
-                }
+                CloseAction::Hide if has_tray => set_webview_hidden(&desktop, true),
+                CloseAction::Hide | CloseAction::Quit => start_quit(QuitMode::Restore),
             }
         }
     });
@@ -301,17 +283,10 @@ pub fn TrayHost(children: Element) -> Element {
         model,
         native: report,
     });
-    let on_choice = {
-        let desktop = desktop.clone();
-        move |choice: Choice| match choice {
-            Choice::ToTray => {
-                dialog.set(None);
-                hide_to_tray(&desktop);
-            }
-            Choice::StopAndClose | Choice::Retry => start_quit(QuitMode::Restore),
-            Choice::ExitAnyway => start_quit(QuitMode::SkipRestore),
-            Choice::Cancel => dialog.set(None),
-        }
+    let on_choice = move |choice: Choice| match choice {
+        Choice::Retry => start_quit(QuitMode::Restore),
+        Choice::ExitAnyway => start_quit(QuitMode::SkipRestore),
+        Choice::Cancel => dialog.set(None),
     };
     let open = use_memo(move || dialog.read().is_some());
     rsx! {
@@ -348,25 +323,6 @@ type Content = (String, String, String, Vec<(Choice, &'static str)>);
 
 fn dialog_content(dialog: &TrayDialog) -> Content {
     match dialog {
-        TrayDialog::CloseProtected { offer_tray } => {
-            let mut buttons = Vec::new();
-            if *offer_tray {
-                buttons.push((Choice::ToTray, "ui.tray.close.toTray"));
-            }
-            buttons.push((Choice::StopAndClose, "ui.tray.close.stopAndClose"));
-            buttons.push((Choice::Cancel, "ui.tray.close.cancel"));
-            let detail = if *offer_tray {
-                t!("ui.tray.close.detailTray")
-            } else {
-                t!("ui.tray.close.detailStop")
-            };
-            (
-                t!("ui.tray.close.title"),
-                t!("ui.tray.close.message"),
-                detail,
-                buttons,
-            )
-        }
         TrayDialog::QuitFailed { reason } => (
             t!("ui.tray.quitFailed.title"),
             tr(reason),
@@ -399,7 +355,7 @@ fn Question(
             title,
             description: message,
             on_close: move |()| on_choice.call(Choice::Cancel),
-            close_label: t!("ui.tray.close.cancel"),
+            close_label: t!("common.cancel"),
             show_close: false,
             // three buttons with these labels overflow the 420 px confirmation width
             size: ModalSize::Md,

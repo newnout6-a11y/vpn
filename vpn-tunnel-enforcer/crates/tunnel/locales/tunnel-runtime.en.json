@@ -2,34 +2,34 @@
   "tunnel": {
     "runtime": {
       "alreadyRunning": "Protection is already running",
-      "actorGone": "The tunnel service does not respond. Restart the app and check the log.",
+      "actorGone": "The tunnel service does not respond. Restart the app.",
       "notRunning": "The tunnel is not running",
       "noLastStart": "No parameters of a previous start: turn protection on again.",
-      "previousNotStopped": "Could not confirm that the previous VPN runtime stopped. Stop protection again and check the log.",
+      "previousNotStopped": "The previous connection did not stop. Disconnect and try again.",
       "proxyAddressInvalid": "Invalid upstream proxy address. Use host:port or [IPv6]:port; the port must be between 1 and 65535.",
       "proxyNotListening": "Proxy {{addr}} is unreachable. Make sure Happ runs in Proxy mode and listens on this port.",
       "profileUnusable": "This VPN profile cannot run in sing-box. Check the key or choose another server.",
-      "serverNotPreResolved": "The VPN server's address could not be found in advance: sing-box looks the name up itself, only through DNS over HTTPS at 1.1.1.1. If that is blocked on this network, the connection fails.",
+      "serverNotPreResolved": "The server address was not found in advance: sing-box looks it up over DNS over HTTPS (1.1.1.1).",
       "egressUnknown": "Could not determine the external IP through the tunnel.",
-      "fullStopRan": "A full stop already ran; protection cannot be considered preserved",
-      "stopIncomplete": "Turning protection off did not complete. Stop protection again and check the network diagnostics.",
-      "restartStopFailed": "Could not stop the previous VPN runtime during the protected restart. Stop protection again and check the log.",
+      "fullStopRan": "Protection was already removed by a full stop",
+      "stopIncomplete": "Disconnecting did not finish. Disconnect again.",
+      "restartStopFailed": "The restart failed: the previous connection did not stop. Disconnect and connect again.",
       "restartCancelled": "Restart cancelled",
       "switchUnconfirmed": "The new server did not confirm internet access through the tunnel.",
       "tunSetup": {
-        "adapter": "The tunnel interface did not come up. The start was cancelled to prevent a traffic leak.",
+        "adapter": "The tunnel interface did not come up; the connection was cancelled.",
         "protection": "The kill switch was not confirmed. The start was cancelled.",
-        "routes": "Could not confirm that the TUN interface was created and protected. The start was cancelled; details are in the log."
+        "routes": "The tunnel interface could not be set up; the connection was cancelled. Details are in the log."
       },
       "cleanup": {
-        "exitUnproven": "The VPN runtime exit was not confirmed; network protection is kept. Stop protection again and check the log.",
-        "xray": "The xray-core exit was not confirmed; protection is kept. Stop again and check the log.",
+        "exitUnproven": "The VPN did not stop completely; network protection stays on. Disconnect again.",
+        "xray": "xray-core did not stop; protection stays on. Disconnect again.",
         "protection": "The kill-switch firewall rules were not removed. Stop protection again and check the network diagnostics."
       },
       "watchdog": {
-        "proxyDown": "Proxy {{addr}} does not respond. Traffic is held inside the TUN so it cannot leak past the VPN.",
-        "upstreamDown": "The VPN through server «{{name}}» is not confirmed. Traffic stays inside the TUN (your real IP does not leak). Check the connection or choose another server.",
-        "slotExited": "The server's xray-core exited; restarting it. Traffic stays inside the TUN."
+        "proxyDown": "Proxy {{addr}} does not respond; the internet is paused until it answers.",
+        "upstreamDown": "The VPN through server «{{name}}» does not respond; the internet is paused. Check the connection or choose another server.",
+        "slotExited": "The server's xray-core exited; restarting it."
       }
     }
   }

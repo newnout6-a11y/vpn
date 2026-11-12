@@ -224,7 +224,7 @@ pub fn Wizard() -> Element {
     }
 }
 
-/// The five steps as a numbered hairline ruler; the current one is marked for assistive
+/// The steps as a numbered hairline ruler; the current one is marked for assistive
 /// technology with `aria-current="step"`.
 #[component]
 fn Ruler(step: Step) -> Element {

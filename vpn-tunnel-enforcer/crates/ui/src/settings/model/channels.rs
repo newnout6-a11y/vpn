@@ -186,6 +186,13 @@ impl DomainAction {
         [DomainAction::Vpn, DomainAction::Direct, DomainAction::Block];
 }
 
+/// Where Smart RU itself would send a site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmartRoute {
+    Direct,
+    Vpn,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainRuleView {
     pub id: String,
@@ -193,13 +200,16 @@ pub struct DomainRuleView {
     pub action: DomainAction,
     /// Connections whose host matched the pattern.
     pub hits: u64,
+    /// Smart RU's own route for this site when the rule sends it the other way (the rule wins;
+    /// removing it brings Smart RU's choice back).
+    pub overrides: Option<SmartRoute>,
 }
 
 /// User domain rules in priority order (first = checked first).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DomainsView {
     pub rules: Vec<DomainRuleView>,
-    /// Smart RU is on (its rules sit between the user's block and direct/VPN rules).
+    /// Smart RU is on (its rules follow the user's own rules).
     pub smart_ru: bool,
 }
 

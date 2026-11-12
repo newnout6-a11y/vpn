@@ -7,7 +7,7 @@
       "proxyNone": "Proxy: not selected",
       "tip": {
         "protected": "VPN Tunnel Enforcer — Protected",
-        "leak": "VPN Tunnel Enforcer — IP LEAK",
+        "leak": "VPN Tunnel Enforcer — IP leak",
         "off": "VPN Tunnel Enforcer — Off",
         "starting": "VPN Tunnel Enforcer — Starting protection",
         "proxyDown": "VPN Tunnel Enforcer — VPN server unreachable",
@@ -23,7 +23,7 @@
       "menu": {
         "status": {
           "protected": "Status: Protected",
-          "leak": "Status: IP LEAK",
+          "leak": "Status: IP leak",
           "off": "Status: Off",
           "starting": "Status: Starting protection",
           "proxyDown": "Status: VPN server unreachable",
@@ -44,15 +44,6 @@
         "checkRoute": "Check route",
         "openLogs": "Open logs",
         "quit": "Exit"
-      },
-      "close": {
-        "title": "Protection is on",
-        "message": "The VPN is active.",
-        "detailTray": "You can minimize the window to the tray and protection keeps running in the background. Or turn protection off and close the app (this safely rolls back every network setting and takes a few seconds).",
-        "detailStop": "To exit cleanly, protection has to be turned off first: DNS, IPv6 and firewall rules go back to their original state. This takes a few seconds.",
-        "toTray": "Minimize to tray",
-        "stopAndClose": "Turn off and close",
-        "cancel": "Cancel"
       },
       "quitFailed": {
         "title": "Exit not completed",

@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(ids, [TrayItemId::Status, TrayItemId::Speed]);
         assert!(
             now.tooltip
-                .is_some_and(|t| t.starts_with("VPN Tunnel Enforcer — УТЕЧКА IP"))
+                .is_some_and(|t| t.starts_with("VPN Tunnel Enforcer — утечка IP"))
         );
         // disconnect: icon, texts and the start/stop flags change together
         let off = differ.changes(&render(&TrayState::default()), t0 + ms(1_200));

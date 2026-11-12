@@ -16,13 +16,15 @@ fn choices(connection: Connection, routing: Routing) -> WizardChoices {
         lang: Lang::En,
         connection,
         routing,
+        smart_ru: true,
         key: None,
         kill_switch: KillSwitchLevel::Off,
         autostart: false,
     }
 }
 
-/// A fresh install opens the wizard with Soft preselected when the TUN is unavailable.
+/// A fresh install opens the wizard with Soft preselected when the TUN is unavailable, and
+/// Smart RU preselected on (owner answer 18).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn first_start_opens_with_soft_defaults() {
     let (shared, _, _, _dir) = setup("wizard-open", false, FakeAutostart::default());
@@ -31,6 +33,7 @@ async fn first_start_opens_with_soft_defaults() {
     assert_eq!(state.current.routing, Routing::Soft);
     assert_eq!(state.current.servers, 0);
     assert!(!state.current.autostart);
+    assert!(state.current.smart_ru);
 }
 
 /// Without TUN capture a key is stored as Soft (the page offers no Soft with a key), with the
@@ -47,8 +50,16 @@ async fn finish_with_a_key_without_tun_stores_soft() {
     assert_eq!(s.routing_mode, RoutingMode::Soft);
     assert_eq!(s.connection_mode, ConnectionMode::DirectVpn);
     assert_eq!(s.locale, Some(Lang::En));
+    assert!(s.smart_ru_split);
     assert!(s.first_run_complete);
     assert!(!api.state().borrow().open);
+    // A re-run starts from the stored Smart RU choice and stores a change of it.
+    wizard::open(&shared).await;
+    assert!(api.state().borrow().current.smart_ru);
+    let mut off = choices(Connection::Key, Routing::Soft);
+    off.smart_ru = false;
+    api.finish(off).await.expect("finished again");
+    assert!(!shared.backend.settings.read(|s| s.smart_ru_split));
 }
 
 /// Hard chosen over Soft with a local proxy and no TUN: refused, nothing written, still open.
@@ -111,9 +122,18 @@ async fn skip_then_reopen() {
     assert!(s.first_run_complete);
     assert_eq!(s.locale, Some(Lang::Ru));
     assert_eq!(s.routing_mode, RoutingMode::Hard, "nothing else written");
+    assert!(
+        !s.smart_ru_split,
+        "a skipped wizard leaves Smart RU at its default"
+    );
     assert!(!api.state().borrow().open);
     wizard::open(&shared).await;
-    assert!(api.state().borrow().open);
+    let reopened = api.state().borrow().clone();
+    assert!(reopened.open);
+    assert!(
+        !reopened.current.smart_ru,
+        "a re-run shows the stored choice"
+    );
 }
 
 /// A key is parsed without importing anything; text without a key says why.

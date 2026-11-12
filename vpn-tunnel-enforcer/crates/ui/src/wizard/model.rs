@@ -12,15 +12,17 @@ pub enum Step {
     Welcome,
     Connect,
     Routing,
+    SmartRu,
     Protection,
     Done,
 }
 
 impl Step {
-    pub const ALL: [Step; 5] = [
+    pub const ALL: [Step; 6] = [
         Step::Welcome,
         Step::Connect,
         Step::Routing,
+        Step::SmartRu,
         Step::Protection,
         Step::Done,
     ];
@@ -44,6 +46,7 @@ impl Step {
             Step::Welcome => "ui.wizard.steps.welcome",
             Step::Connect => "ui.wizard.steps.connect",
             Step::Routing => "ui.wizard.steps.routing",
+            Step::SmartRu => "ui.wizard.steps.smartRu",
             Step::Protection => "ui.wizard.steps.protection",
             Step::Done => "ui.wizard.steps.done",
         }
@@ -83,6 +86,7 @@ pub struct Model {
     pub lang: Lang,
     pub connection: Connection,
     pub routing: Routing,
+    pub smart_ru: bool,
     pub kill_switch: KillSwitchLevel,
     pub autostart: bool,
     /// Servers already in the list.
@@ -102,6 +106,7 @@ impl Model {
             lang,
             connection: current.connection,
             routing: current.routing,
+            smart_ru: current.smart_ru,
             kill_switch: current.kill_switch,
             autostart: current.autostart,
             servers: current.servers,
@@ -206,6 +211,7 @@ impl Model {
             lang: self.lang,
             connection: self.connection,
             routing: self.routing,
+            smart_ru: self.smart_ru,
             key,
             kill_switch: self.kill_switch,
             autostart: self.autostart,

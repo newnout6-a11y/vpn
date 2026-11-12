@@ -85,7 +85,7 @@ pub(super) fn FormPanel(
     } else {
         t!("schedule.create")
     };
-    // NOADMIN §0: the TUN needs the app started as administrator; said, never hidden.
+    // The TUN needs the helper service (or an elevated app): said, never hidden.
     let capture_hint = if draft.capture == Capture::Tun && !tun_available {
         t!("schedule.tunUnavailable")
     } else {

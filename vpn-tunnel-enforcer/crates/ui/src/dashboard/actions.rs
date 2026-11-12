@@ -1,4 +1,4 @@
-//! What the page's controls do: the power button rule, the confirmation timer, the cancel button,
+//! What the page's controls do: the power button rule, the cancel button,
 //! Smart RU, the leak check, copying the exit address and the kill-switch banner's buttons.
 //! Results go to the toast queue and the mascot; the new state arrives with the next snapshot.
 use std::net::IpAddr;
@@ -9,68 +9,21 @@ use vpnte_base::types::Verdict;
 use vpnte_view::mascot::MascotEvent;
 
 use super::Dash;
-use super::model::{CONFIRM_TTL_MS, COPIED_MS, Hold, PowerAction, power_click};
+use super::model::{COPIED_MS, PowerAction, power_click};
 use crate::lang::tr;
 use crate::t;
-
-/// Moves the focus to the power button (after the confirmation row it was in went away).
-const FOCUS_POWER_JS: &str = "document.querySelector('.swiss-skin .swiss-power')?.focus()";
 
 impl Dash {
     /// A press of the power button (a click, or Ctrl+Enter through `dashboard.js`).
     pub(super) fn press_power(&self) {
-        let conn = self.conn();
-        let open = self.confirm.peek().is_open();
-        match power_click(&conn, open, self.command.running()) {
-            PowerAction::AskConfirm => {
-                let mut confirm = self.confirm;
-                let generation = confirm.write().open();
-                self.arm_confirm(generation);
-            }
+        match power_click(&self.conn(), self.command.running()) {
             PowerAction::Connect => self.connect(),
             PowerAction::Disconnect => self.disconnect(),
             PowerAction::Ignore => {}
         }
     }
 
-    /// «Да, отключить»: disconnects unless the state moved on meanwhile (then it only closes).
-    pub(super) fn confirm_yes(&self) {
-        let conn = self.conn();
-        if power_click(&conn, true, self.command.running()) == PowerAction::Disconnect {
-            self.disconnect();
-        } else {
-            let mut confirm = self.confirm;
-            confirm.write().close();
-        }
-    }
-
-    /// «Отмена»: the row goes away, the focus goes back to the power button.
-    pub(super) fn confirm_no(&self) {
-        let mut confirm = self.confirm;
-        confirm.write().close();
-        let _ = document::eval(FOCUS_POWER_JS);
-    }
-
-    /// Pointer / focus over the confirmation row holds its timer.
-    pub(super) fn hold_confirm(&self, by: Hold, on: bool) {
-        let mut confirm = self.confirm;
-        let rearm = confirm.write().hold(by, on);
-        if let Some(generation) = rearm {
-            self.arm_confirm(generation);
-        }
-    }
-
-    fn arm_confirm(&self, generation: u64) {
-        let mut confirm = self.confirm;
-        spawn(async move {
-            tokio::time::sleep(Duration::from_millis(CONFIRM_TTL_MS)).await;
-            confirm.write().expire(generation);
-        });
-    }
-
     fn connect(&self) {
-        let mut confirm = self.confirm;
-        confirm.write().close();
         let (api, dash) = (self.api.clone(), self.clone());
         self.command.start(move |_| async move {
             if let Err(err) = api.connect().await {
@@ -81,8 +34,6 @@ impl Dash {
     }
 
     fn disconnect(&self) {
-        let mut confirm = self.confirm;
-        confirm.write().close();
         let (api, dash) = (self.api.clone(), self.clone());
         self.command.start(move |_| async move {
             match api.disconnect().await {
@@ -104,8 +55,6 @@ impl Dash {
         if !conn.circle_busy() || conn.cancelling {
             return;
         }
-        let mut confirm = self.confirm;
-        confirm.write().close();
         let switch = conn.switching.is_some();
         let (api, dash) = (self.api.clone(), self.clone());
         self.cancel.start(move |_| async move {

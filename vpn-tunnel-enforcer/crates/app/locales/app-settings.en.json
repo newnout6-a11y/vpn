@@ -1,7 +1,7 @@
 {
   "app": {
     "settings": {
-      "hardNeedsAdmin": "Tunnel mode is available only when the app is started as administrator. Choose Proxy mode: it works without administrator rights.",
+      "hardNeedsAdmin": "Tunnel mode needs the helper service. Proxy mode works without it.",
       "captureUnavailable": "Deep packet capture is not available in this version of the app.",
       "automationUnavailable": "This feature is not available right now: the automation of the app did not start.",
       "transferUnavailable": "Configuration import and export are not available in this version of the app.",
@@ -23,7 +23,7 @@
       },
       "wizard": {
         "softChosen": "Proxy mode selected",
-        "softChosenBody": "Tunnel mode needs the app to be started as administrator, so Proxy mode was saved. Programs that ignore the Windows system proxy connect directly.",
+        "softChosenBody": "Tunnel mode needs the helper service, so Proxy mode was saved.",
         "restoreFailed": "The wizard could not undo all of its changes: check the kill switch and autostart in Settings."
       }
     },

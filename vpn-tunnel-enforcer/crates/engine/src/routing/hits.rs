@@ -1,9 +1,9 @@
 //! Domain-rule hit counters from the engine's connection list (Clash API `/connections`).
 //!
 //! A hit means "a connection of this session whose host matches the rule's pattern and that
-//! the engine routed the way the rule says" — not "connections this rule routed": process,
-//! private-address and Smart RU pin rules run first. sing-box's own rule strings are not used
-//! as keys: they are truncated after three items and their format changes between versions.
+//! the engine routed the way the rule says" — not "connections this rule routed": process and
+//! private-address rules run first. sing-box's own rule strings are not used as keys: they are
+//! truncated after three items and their format changes between versions.
 use std::collections::{BTreeMap, HashSet};
 
 use uuid::Uuid;

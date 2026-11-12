@@ -12,9 +12,6 @@ const USED: &[(&str, &[&str])] = &[
     ("dashboard.swissNode", &[]),
     ("dashboard.swissNoServer", &[]),
     ("dashboard.swissInTunnel", &[]),
-    ("dashboard.disconnectConfirmation", &[]),
-    ("dashboard.confirmDisconnect", &[]),
-    ("dashboard.cancelDisconnect", &[]),
     ("dashboard.firewallChecking", &[]),
     ("dashboard.firewallRecheck", &[]),
     ("dashboard.connectionError", &[]),
@@ -64,18 +61,4 @@ fn every_rendered_key_resolves() {
             assert_eq!(placeholders(text), args, "{key}");
         }
     }
-}
-
-/// AT-00-008 (spec §7.8 #4): the disconnect question describes a normal recovery and never
-/// promises a persistent traffic block.
-#[test]
-fn disconnect_question_promises_no_block() {
-    let [ru, en] = view_catalogs();
-    let question = &ru["dashboard.disconnectConfirmation"];
-    assert!(!question.contains("Интернет будет заблокирован"));
-    assert!(
-        !en["dashboard.disconnectConfirmation"]
-            .to_lowercase()
-            .contains("blocked")
-    );
 }

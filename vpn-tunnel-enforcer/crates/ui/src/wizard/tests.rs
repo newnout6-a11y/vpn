@@ -1,4 +1,4 @@
-//! Ported vectors of `FirstRunWizard.test.tsx` (ui-servers §7.8) for the five-step wizard, plus the
+//! Ported vectors of `FirstRunWizard.test.tsx` (ui-servers §7.8) for the six-step wizard, plus the
 //! spec's decided fixes (W-2, W-5/D-15, V-05, W-8, W-9/W-10) and the locale gate.
 use vpnte_base::Msg;
 use vpnte_base::i18n::Lang;
@@ -33,7 +33,13 @@ fn next_and_back_walk_the_steps_in_order() {
     let mut m = first_run();
     assert_eq!(m.step, Step::Welcome);
     assert!(!m.backward());
-    for expected in [Step::Connect, Step::Routing, Step::Protection, Step::Done] {
+    for expected in [
+        Step::Connect,
+        Step::Routing,
+        Step::SmartRu,
+        Step::Protection,
+        Step::Done,
+    ] {
         assert!(m.forward());
         assert_eq!(m.step, expected);
     }
@@ -41,7 +47,7 @@ fn next_and_back_walk_the_steps_in_order() {
     assert_eq!(m.step, Step::Done);
     assert!(m.backward());
     assert_eq!(m.step, Step::Protection);
-    assert_eq!(Step::ALL.map(Step::index), [0, 1, 2, 3, 4]);
+    assert_eq!(Step::ALL.map(Step::index), [0, 1, 2, 3, 4, 5]);
     assert_eq!(Step::Done.next(), None);
     assert_eq!(Step::Welcome.prev(), None);
 }
@@ -124,6 +130,23 @@ fn a_key_is_only_sent_with_the_key_connection() {
     m.connection = Connection::LocalProxy;
     assert_eq!(m.choices().key, None);
     assert!(!m.key_left_unchecked());
+}
+
+/// Owner answer 18: Smart RU starts from what the app hands in (on for a first run, the stored
+/// choice on a re-run) and is sent as picked; the demo's first run preselects it on.
+#[test]
+fn smart_ru_starts_from_the_defaults_and_is_sent_as_picked() {
+    let first = WizardDefaults {
+        smart_ru: true,
+        ..WizardDefaults::default()
+    };
+    let mut m = Model::new(Lang::Ru, &first);
+    assert!(m.choices().smart_ru);
+    m.smart_ru = false;
+    assert!(!m.choices().smart_ru);
+    assert!(!Model::new(Lang::Ru, &WizardDefaults::default()).smart_ru);
+    let demo = DemoWizardApi::new(DemoScene::FirstRun);
+    assert!(demo.state().borrow().current.smart_ru);
 }
 
 /// AT-09-014 "shows the current autostart state and applies a change to it, not just enabling".
@@ -274,6 +297,7 @@ fn strict_with_autostart() -> WizardChoices {
         lang: Lang::Ru,
         connection: Connection::Key,
         routing: Routing::Hard,
+        smart_ru: true,
         key: Some(KeyText("vless://a@b.example:443#x".into())),
         kill_switch: KillSwitchLevel::Strict,
         autostart: true,
@@ -315,7 +339,9 @@ async fn demo_finish_applies_only_changes_and_closes() {
     assert!(!state.open);
     assert_eq!(
         *api.log().borrow(),
-        ["settings: lang=en connection=local-proxy routing=soft kill=off first_run_complete"]
+        [
+            "settings: lang=en connection=local-proxy routing=soft smart_ru=false kill=off first_run_complete"
+        ]
     );
     api.reopen();
     assert!(api.state().borrow().open);

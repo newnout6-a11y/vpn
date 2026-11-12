@@ -1,7 +1,7 @@
 {
   "cleanup": {
     "legacy": {
-      "needsAdmin": "Cleaning up after the old version is available only when the app is started as administrator.",
+      "needsAdmin": "Cleaning up after the old version needs the helper service.",
       "notice": {
         "firewallResetTitle": "Windows Firewall unblocked",
         "firewallReset": "The old strict mode had set Windows Firewall to block all outgoing traffic. It has been reset to Allow; protection now comes from the app's own filters.",

@@ -42,7 +42,6 @@ pub fn MaintenancePage() -> Element {
     let api = use_api();
     let state = use_watch(|| api.state());
     let ctl = ctl::use_controller(api, state);
-    let mut confirm_repair = use_signal(|| false);
     let mut confirm_delete = use_signal(|| false);
     let number = Page::ALL
         .iter()
@@ -58,7 +57,7 @@ pub fn MaintenancePage() -> Element {
                 description: t!("ui.maintenance.subtitle"),
             }
             div { class: "mt-sections",
-                view::StatePanel { ctl, on_repair: move |_| confirm_repair.set(true) }
+                view::StatePanel { ctl }
                 view::StepsPanel { ctl }
                 view::ResultsPanel { ctl }
                 if let Some(test) = test {
@@ -70,18 +69,6 @@ pub fn MaintenancePage() -> Element {
                     capture::FaultPanel { fault }
                 }
                 legacy::LegacyPanel { ctl, on_delete: move |_| confirm_delete.set(true) }
-            }
-            ConfirmDialog {
-                open: confirm_repair,
-                title: t!("ui.maintenance.repair.confirmTitle"),
-                message: t!("ui.maintenance.repair.confirm"),
-                confirm_label: t!("ui.maintenance.actions.repair"),
-                cancel_label: t!("common.cancel"),
-                on_confirm: move |_| {
-                    confirm_repair.set(false);
-                    ctl.repair();
-                },
-                on_cancel: move |_| confirm_repair.set(false),
             }
             ConfirmDialog {
                 open: confirm_delete,

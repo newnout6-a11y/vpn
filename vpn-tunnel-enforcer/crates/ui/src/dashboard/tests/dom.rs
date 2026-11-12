@@ -1,5 +1,5 @@
 //! VirtualDom runs: every demo scene renders, and the page's commands against a gated fake API
-//! (cancel, the disconnect confirmation, Smart RU, the leak check, the kill-switch banner).
+//! (cancel, the power press, Smart RU, the leak check, the kill-switch banner).
 use std::cell::RefCell;
 use std::net::IpAddr;
 use std::rc::Rc;
@@ -314,43 +314,16 @@ fn renders(dom: &VirtualDom, shown: &str, key: &str, vars: &[(&str, String)]) ->
     shown == key || shown == dom.in_runtime(|| translate(key, vars, None))
 }
 
-/// Spec §2.1 / D-01: with protection on, the first press asks, the second disconnects; the
-/// question closes on its own after 3 s.
+/// Owner, 12.11.2026 (no confirmation for an action the next press undoes): with protection on
+/// a press disconnects at once; a second press while that command runs does nothing.
 #[tokio::test]
-async fn power_asks_then_disconnects() {
+async fn power_disconnects_at_once() {
     let (mut dom, probe) = mount(state(connected()));
     act(&dom, &probe, Dash::press_power);
-    settle(&mut dom, 2, 40).await;
-    assert!(act(&dom, &probe, |d| d.confirm.peek().is_open()));
-    assert!(
-        calls(&probe).is_empty(),
-        "nothing happens before the answer"
-    );
     act(&dom, &probe, Dash::press_power);
     settle(&mut dom, 3, 40).await;
     assert_eq!(calls(&probe), ["disconnect"]);
-    assert!(!act(&dom, &probe, |d| d.confirm.peek().is_open()));
-    // the next opening closes by itself after 3 s
-    act(&dom, &probe, Dash::press_power);
-    settle(&mut dom, 2, 40).await;
-    assert!(act(&dom, &probe, |d| d.confirm.peek().is_open()));
-    tokio::time::sleep(Duration::from_millis(CONFIRM_TTL_MS + 100)).await;
-    settle(&mut dom, 3, 40).await;
-    assert!(!act(&dom, &probe, |d| d.confirm.peek().is_open()));
-    assert_eq!(calls(&probe), ["disconnect"]);
-}
-
-/// «Да, отключить» never starts a connection when the state moved on meanwhile.
-#[tokio::test]
-async fn confirm_yes_after_the_state_changed_only_closes() {
-    let (mut dom, probe) = mount(state(connected()));
-    act(&dom, &probe, Dash::press_power);
-    probe.api.tx.send_replace(state(ConnView::default()));
-    settle(&mut dom, 3, 40).await;
-    act(&dom, &probe, Dash::confirm_yes);
-    settle(&mut dom, 3, 40).await;
-    assert!(calls(&probe).is_empty());
-    assert!(!act(&dom, &probe, |d| d.confirm.peek().is_open()));
+    assert!(toasts(&dom, &probe).is_empty());
 }
 
 /// Spec §3.5: the Smart RU toggle saves the opposite of the current setting.

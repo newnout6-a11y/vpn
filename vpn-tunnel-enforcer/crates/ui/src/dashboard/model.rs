@@ -1,6 +1,6 @@
 //! Pure rules of the start page that are not already in `vpnte_view`: the power-button click
-//! rule, the disconnect confirmation's timer generations (D-01), which banners show, the node
-//! line of the identity column and its engine caption. No Dioxus, no clock reads.
+//! rule, which banners show, the node line of the identity column and its engine caption. No
+//! Dioxus, no clock reads.
 use vpnte_base::Msg;
 use vpnte_base::types::UnixMs;
 use vpnte_view::identity::{ping_of, visible_leak};
@@ -15,108 +15,26 @@ use crate::panels::{LocalPings, ServersView};
 /// What a press of the power button (click or Ctrl+Enter) does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerAction {
-    /// Something of ours is installed: ask «Отключить VPN…?» first.
-    AskConfirm,
     Connect,
     Disconnect,
     /// A transition, a switch or one of our own commands is in flight.
     Ignore,
 }
 
-/// The click rule of the old dashboard (`Dashboard.tsx:864-873`): with our protection installed
-/// the first press opens the confirmation and a second press while it is open disconnects (the
-/// confirmation's «Да» does the same); otherwise the press connects.
-pub fn power_click(conn: &ConnView, confirm_open: bool, command_running: bool) -> PowerAction {
+/// The click rule: with our protection installed a press disconnects at once (owner, 12.11.2026:
+/// no confirmation for an action the next press undoes); otherwise the press connects.
+pub fn power_click(conn: &ConnView, command_running: bool) -> PowerAction {
     if conn.circle_busy() || command_running {
         PowerAction::Ignore
-    } else if !conn.cleanup_required {
-        PowerAction::Connect
-    } else if confirm_open {
+    } else if conn.cleanup_required {
         PowerAction::Disconnect
     } else {
-        PowerAction::AskConfirm
+        PowerAction::Connect
     }
 }
-
-/// How long the disconnect confirmation stays open without an answer.
-pub const CONFIRM_TTL_MS: u64 = 3_000;
 
 /// How long «скопировано» replaces «копировать» after copying the exit IP.
 pub const COPIED_MS: u64 = 1_300;
-
-/// What keeps the confirmation open past its timer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Hold {
-    /// The pointer is over the row.
-    Pointer,
-    /// The keyboard focus is inside the row.
-    Focus,
-}
-
-/// The disconnect confirmation (D-01): every opening gets its own generation, so the timer of an
-/// earlier opening never closes a later one; while the pointer or the focus is inside the row the
-/// timer is held and re-armed when both have left.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Confirm {
-    open: bool,
-    pointer: bool,
-    focus: bool,
-    generation: u64,
-}
-
-impl Confirm {
-    /// The confirmation is shown.
-    pub fn is_open(&self) -> bool {
-        self.open
-    }
-
-    /// Opens it; returns the generation to arm the timer with.
-    pub fn open(&mut self) -> u64 {
-        *self = Confirm {
-            open: true,
-            generation: self.generation + 1,
-            ..Confirm::default()
-        };
-        self.generation
-    }
-
-    /// Closes it (answered, or a connection command started); pending timers become stale.
-    pub fn close(&mut self) {
-        *self = Confirm {
-            generation: self.generation + 1,
-            ..Confirm::default()
-        };
-    }
-
-    /// The timer armed with `generation` fired: closes the confirmation unless the timer is stale
-    /// or the row is held. Returns whether it closed.
-    pub fn expire(&mut self, generation: u64) -> bool {
-        if !self.open || self.pointer || self.focus || generation != self.generation {
-            return false;
-        }
-        self.close();
-        true
-    }
-
-    /// The pointer / focus entered (`true`) or left (`false`) the row. When the last hold is
-    /// released the timer starts again: returns the generation to arm it with.
-    pub fn hold(&mut self, by: Hold, on: bool) -> Option<u64> {
-        if !self.open {
-            return None;
-        }
-        let was_held = self.pointer || self.focus;
-        match by {
-            Hold::Pointer => self.pointer = on,
-            Hold::Focus => self.focus = on,
-        }
-        if was_held && !(self.pointer || self.focus) {
-            self.generation += 1;
-            Some(self.generation)
-        } else {
-            None
-        }
-    }
-}
 
 /// The notices above the facts strip, in page order.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

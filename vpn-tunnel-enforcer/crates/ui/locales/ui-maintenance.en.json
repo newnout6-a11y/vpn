@@ -15,7 +15,7 @@
       },
       "verdict": {
         "ok": "OK",
-        "warn": "Attention",
+        "warn": "Worth a look",
         "fail": "Failure",
         "notChecked": "Not checked"
       },
@@ -36,8 +36,6 @@
         "changed": "Changed: {{items}}"
       },
       "repair": {
-        "confirmTitle": "Auto-repair",
-        "confirm": "Run the safe auto-repair? It touches only the VPNTE filters, the old version's leftovers and stuck sing-box/xray processes.",
         "disconnectFirst": "Disconnect the VPN first: the auto-repair changes nothing while protection is active.",
         "done": "Auto-repair finished",
         "warned": "Auto-repair finished with warnings",

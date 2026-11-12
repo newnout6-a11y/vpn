@@ -4,6 +4,7 @@ use vpnte_base::types::KillSwitchLevel;
 use vpnte_core::settings::Settings;
 use vpnte_engine::routing::RulesDoc;
 use vpnte_engine::routing::domain::{DomainAction as RuleAction, DomainPattern};
+use vpnte_engine::routing::smart_ru::SmartRu;
 use vpnte_tunnel::fsm::{TunnelSnapshot, TunnelState};
 use vpnte_ui::settings as ui;
 use vpnte_ui::wizard::{Connection, KeyText, Routing, WizardChoices};
@@ -106,13 +107,37 @@ fn dns_and_domain_views() {
     doc.add_domain_rule(pattern("example.org"), RuleAction::Block)
         .expect("rule");
     doc.add_hits(&[(first, 3)].into_iter().collect());
-    let domains = project::domains_view(&doc, true);
+    let pin = doc
+        .add_domain_rule(pattern("youtube.com"), RuleAction::Direct)
+        .expect("rule");
+    doc.add_domain_rule(pattern("yandex.ru"), RuleAction::Vpn)
+        .expect("rule");
+    let on = SmartRu {
+        enabled: true,
+        maps_direct: false,
+    };
+    let domains = project::domains_view(&doc, on);
     assert!(domains.smart_ru);
-    assert_eq!(domains.rules.len(), 2);
+    assert_eq!(domains.rules.len(), 4);
     assert_eq!(domains.rules[0].pattern, "*.example.com");
     assert_eq!(domains.rules[0].action, ui::DomainAction::Direct);
     assert_eq!(domains.rules[0].hits, 3);
     assert_eq!(domains.rules[1].action, ui::DomainAction::Block);
+    // Owner answer 4: the row names Smart RU's own route where the user's rule overrides it.
+    let notes: Vec<_> = domains.rules.iter().map(|r| r.overrides).collect();
+    assert_eq!(
+        notes,
+        [
+            None,
+            None,
+            Some(ui::SmartRoute::Vpn),
+            Some(ui::SmartRoute::Direct)
+        ]
+    );
+    doc.delete_domain_rule(pin);
+    let off = project::domains_view(&doc, SmartRu::default());
+    assert!(!off.smart_ru);
+    assert!(off.rules.iter().all(|r| r.overrides.is_none()));
 }
 
 /// Notification switches in `NotifyEvent::ALL` order, and Windows' own setting.
@@ -170,6 +195,7 @@ fn wizard_routing_without_tun() {
         lang: vpnte_base::i18n::Lang::Ru,
         connection,
         routing,
+        smart_ru: true,
         key: (connection == Connection::Key).then(|| KeyText("vless://fake".into())),
         kill_switch: KillSwitchLevel::Off,
         autostart: false,

@@ -269,7 +269,7 @@ fn smart_ru_dns_rules_and_direct_server() {
     assert_eq!(tun_only.parts.dns_servers[1]["type"], "dhcp");
 }
 
-/// §7.6 owner order: block → pins → gov (+maps) → user direct / VPN in user order →
+/// Owner answer 4 (12.11.2026): block → user direct / VPN in user order → pins → gov (+maps) →
 /// geoip-ru + Kimi; DNS mirrors it.
 #[test]
 fn owner_rule_order() {
@@ -284,59 +284,97 @@ fn owner_rule_order() {
     assert_eq!(r.len(), 11);
     assert_eq!(r[0]["action"], "reject");
     assert_eq!(strs(&r[0], "domain"), ["ads.example"]);
-    assert!(strs(&r[1], "domain").contains(&"2ip.ru".into()));
-    assert!(strs(&r[2], "domain_suffix").contains(&".google.com".into()));
-    assert!(strs(&r[3], "domain_suffix").contains(&".youtube.com".into()));
     assert_eq!(
-        (
-            r[4]["outbound"].as_str(),
-            strs(&r[4], "domain_suffix")[2].as_str()
-        ),
-        (Some("proxy-out"), ".2gis.com")
-    );
-    assert_eq!(r[5]["rule_set"], json!(["geosite-category-gov-ru"]));
-    assert_eq!(
-        (strs(&r[6], "domain"), r[6]["outbound"].as_str()),
+        (strs(&r[1], "domain"), r[1]["outbound"].as_str()),
         (vec!["cdn.example.com".to_owned()], Some("proxy-out"))
     );
     assert_eq!(
-        (strs(&r[7], "domain"), r[7]["outbound"].as_str()),
+        (strs(&r[2], "domain"), r[2]["outbound"].as_str()),
         (vec!["example.com".to_owned()], Some("direct-out"))
     );
     assert_eq!(
-        (strs(&r[8], "domain"), r[8]["outbound"].as_str()),
+        (strs(&r[3], "domain"), r[3]["outbound"].as_str()),
         (vec!["gosuslugi.ru".to_owned()], Some("proxy-out"))
     );
+    assert!(strs(&r[4], "domain").contains(&"2ip.ru".into()));
+    assert!(strs(&r[5], "domain_suffix").contains(&".google.com".into()));
+    assert!(strs(&r[6], "domain_suffix").contains(&".youtube.com".into()));
+    assert_eq!(
+        (
+            r[7]["outbound"].as_str(),
+            strs(&r[7], "domain_suffix")[2].as_str()
+        ),
+        (Some("proxy-out"), ".2gis.com")
+    );
+    assert_eq!(r[8]["rule_set"], json!(["geosite-category-gov-ru"]));
     assert_eq!(r[9]["rule_set"], json!(["geoip-ru"]));
     assert!(strs(&r[10], "domain_suffix").contains(&".moonshot.cn".into()));
     assert_eq!(route(&f, "cdn.example.com", false), "proxy-out");
     assert_eq!(route(&f, "www.example.com", false), "direct-out");
-    assert_eq!(route(&f, "gosuslugi.ru", true), "direct-out");
     assert_eq!(route(&f, "ads.example", false), "reject");
-    let with_google = [rule("google.com", DomainAction::Direct)];
-    assert_eq!(
-        route(
-            &frag(ON, Some(DIR), &with_google, &[]),
-            "www.google.com",
-            false
-        ),
-        "proxy-out"
-    );
-    let ru_vpn = [rule("foo.example.ru", DomainAction::Vpn)];
-    let g = frag(ON, Some(DIR), &ru_vpn, &[]);
-    assert_eq!(route(&g, "foo.example.ru", true), "proxy-out");
-    assert_eq!(route(&g, "bar.example.ru", true), "direct-out");
     assert_eq!(dns(&f, "cdn.example.com"), "dns-remote");
     assert_eq!(dns(&f, "www.example.com"), "dns-direct");
-    assert_eq!(dns(&f, "gosuslugi.ru"), "dns-direct");
     assert_eq!(dns(&f, "ads.example"), "reject");
-    assert_eq!(dns(&g, "foo.example.ru"), "dns-remote");
-    assert_eq!(dns(&g, "bar.example.ru"), "dns-direct");
     assert_eq!(
         f.parts.dns_rules[0],
         json!({ "domain": ["ads.example"], "domain_suffix": [".ads.example"],
         "action": "reject", "method": "default", "no_drop": true })
     );
+    let user_dns: Vec<&str> = f.parts.dns_rules[1..4]
+        .iter()
+        .map(|d| d["server"].as_str().unwrap())
+        .collect();
+    assert_eq!(user_dns, ["dns-remote", "dns-direct", "dns-remote"]);
+}
+
+/// Owner answer 4: a user VPN rule beats Smart RU's direct choice (gov set, RU TLD + `geoip-ru`)
+/// for the route and its DNS; removing the rule brings Smart RU's choice back.
+#[test]
+fn user_vpn_rule_beats_smart_ru_direct() {
+    let without = frag(ON, Some(DIR), &[], &[]);
+    assert_eq!(route(&without, "gosuslugi.ru", true), "direct-out");
+    assert_eq!(dns(&without, "gosuslugi.ru"), "dns-direct");
+    assert_eq!(route(&without, "yandex.ru", true), "direct-out");
+    assert_eq!(dns(&without, "yandex.ru"), "dns-direct");
+    let rules = [
+        rule("gosuslugi.ru", DomainAction::Vpn),
+        rule("yandex.ru", DomainAction::Vpn),
+    ];
+    let with = frag(ON, Some(DIR), &rules, &[]);
+    for host in ["gosuslugi.ru", "yandex.ru", "music.yandex.ru"] {
+        assert_eq!(route(&with, host, true), "proxy-out", "{host}");
+        assert_eq!(dns(&with, host), "dns-remote", "{host}");
+    }
+    assert_eq!(route(&with, "bar.example.ru", true), "direct-out");
+    assert_eq!(dns(&with, "bar.example.ru"), "dns-direct");
+}
+
+/// Owner answer 4, the reverse: a user direct rule beats a Smart RU pin (Google, YouTube, maps)
+/// for the route and its DNS; removing the rule brings the pin back.
+#[test]
+fn user_direct_rule_beats_smart_ru_pin() {
+    let without = frag(ON, Some(DIR), &[], &[]);
+    for host in ["www.google.com", "youtube.com", "api.2gis.com"] {
+        assert_eq!(route(&without, host, true), "proxy-out", "{host}");
+        assert_eq!(dns(&without, host), "dns-remote", "{host}");
+    }
+    let rules = [
+        rule("google.com", DomainAction::Direct),
+        rule("*.youtube.com", DomainAction::Direct),
+        rule("2gis.com", DomainAction::Direct),
+    ];
+    let with = frag(ON, Some(DIR), &rules, &[]);
+    for host in [
+        "www.google.com",
+        "google.com",
+        "m.youtube.com",
+        "api.2gis.com",
+    ] {
+        assert_eq!(route(&with, host, false), "direct-out", "{host}");
+        assert_eq!(dns(&with, host), "dns-direct", "{host}");
+    }
+    assert_eq!(route(&with, "mail.googleapis.com", false), "proxy-out");
+    assert_eq!(dns(&with, "mail.googleapis.com"), "dns-remote");
 }
 
 /// domainRulesToSingboxRules vectors (Smart RU off) with the Rust changes: block hoisted

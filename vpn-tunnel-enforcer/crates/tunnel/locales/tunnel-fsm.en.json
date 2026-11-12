@@ -1,8 +1,8 @@
 {
   "tunnel": {
     "warning": {
-      "foreignTunUnverified": "Other TUN adapters could not be checked before the start: a conflict with another VPN is not ruled out.",
-      "releaseUnverified": "The previous TUN interface was not released in time — protection was brought up on a new interface."
+      "foreignTunUnverified": "Other VPN adapters could not be checked.",
+      "releaseUnverified": "The previous tunnel interface was slow to close; a new one is used."
     }
   }
 }

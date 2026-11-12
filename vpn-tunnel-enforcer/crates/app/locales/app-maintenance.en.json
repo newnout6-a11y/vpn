@@ -23,7 +23,7 @@
         "needsSession": "The protection test works only with an active connection."
       },
       "route": {
-        "softMode": "Proxy mode: the routing test applies to Tunnel mode only. Programs that do not use the Windows system proxy go direct."
+        "softMode": "The routing test works only in Tunnel mode."
       },
       "legacy": {
         "retryUnavailable": "Re-importing the keys is not available in this version of the app: they stay in the old version's files.",

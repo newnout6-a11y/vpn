@@ -50,9 +50,9 @@
         "routing": "Routing mode",
         "hard": "Tunnel",
         "soft": "Proxy",
-        "hardHint": "Tunnel (TUN) — all traffic goes through the tunnel; needs the app started as administrator",
-        "softHint": "Proxy — the Windows system proxy points at the app's engine; programs that ignore it go direct. No administrator rights needed",
-        "tunUnavailable": "Tunnel mode is available only when the app is started as administrator.",
+        "hardHint": "Tunnel (TUN) — all traffic goes through the tunnel; needs the helper service",
+        "softHint": "Proxy — the Windows system proxy points at the app's engine; programs that ignore it go direct",
+        "tunUnavailable": "Tunnel mode needs the helper service.",
         "softTargets": "Developer tools in Proxy mode",
         "softTargetsHint": "While Proxy mode is on, the chosen tools use the proxy too; their settings are restored when it stops.",
         "engine": "Connection engine (Proxy Core)",
@@ -69,7 +69,7 @@
         "disguiseAuto": "Works automatically every time protection is on — no separate switch needed.",
         "leak": "Leak protection (recommended)",
         "leakHint": "While protection is on, IPv6 and DNS outside the tunnel are blocked by Windows filters. Network adapters are not changed.",
-        "leakTunnelOnly": "Tunnel mode only: Proxy mode sets no Windows filters, and programs that ignore the proxy go direct.",
+        "leakTunnelOnly": "Tunnel mode only.",
         "wifi": "Public Wi-Fi compatibility (breaks less)",
         "wifiHint": "Until the tunnel is up, the router's DNS stays reachable (captive portals), and a safe MTU is used for hotspots.",
         "autoRestart": "Restart the engine after a crash",
@@ -98,7 +98,7 @@
         "wontHide": "The Windows location is no longer hidden",
         "storedBody": "Setting saved.",
         "notApplied": "The location setting did not apply",
-        "notAppliedBody": "Windows did not allow the change. Check administrator rights or the system location policy.",
+        "notAppliedBody": "Windows did not allow the change; a system location policy may be holding it.",
         "failed": "Could not change the location setting"
       },
       "browser": {
@@ -205,6 +205,8 @@
         "orderUser": "Your «Direct» and «VPN» rules — top to bottom",
         "orderGeoip": "Russian IP addresses (geoip-ru) — directly",
         "orderFinal": "Everything else — through the VPN",
+        "overridesDirect": "Smart RU would send this site direct; your rule applies",
+        "overridesVpn": "Smart RU would send this site through the VPN; your rule applies",
         "importFile": "File «{{name}}»",
         "importNew": "New domains: {{count}}",
         "importSkipped": "Skipped: {{duplicates}} duplicates, {{invalid}} invalid, {{over}} over the limit",
@@ -226,7 +228,7 @@
         "consumed": "This file has been used. To try again, pick the file again."
       },
       "advanced": {
-        "modeHint": "Opens Repair and the advanced options: manual proxy address, the app's download route and potentially dangerous network options.",
+        "modeHint": "Opens Repair and the advanced options: manual proxy address, the app's download route and rarely needed network options.",
         "wizard": "First-run wizard",
         "wizardHint": "Opens now; settings change only if you complete it.",
         "wizardOpen": "Run the wizard again",

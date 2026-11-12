@@ -3,7 +3,7 @@
     "cleanup": {
       "title": "Clear the logs?",
       "action": "Clear",
-      "confirm": "Clear connection history, app/engine logs, snapshots and traffic-forensics artifacts? Packet capture will be stopped."
+      "confirm": "The connection history, the logs and the traffic records will be deleted. This cannot be undone."
     },
     "exportDone": "File saved",
     "exportFailed": "Export failed",

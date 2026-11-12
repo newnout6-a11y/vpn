@@ -4,7 +4,9 @@
 //! user rules and Smart RU apply (owner 10.4 B / B-DR-8).
 use dioxus::prelude::*;
 
-use super::model::{DomainAction, DomainImportPreview, DomainImportReport, DomainRuleView};
+use super::model::{
+    DomainAction, DomainImportPreview, DomainImportReport, DomainRuleView, SmartRoute,
+};
 use super::{ActionError, use_api, use_ctx};
 use crate::lang::tr;
 use crate::t;
@@ -152,7 +154,8 @@ pub(super) fn Domains() -> Element {
     }
 }
 
-/// Which rules win, top to bottom (the routing generator's fixed order).
+/// Which rules win, top to bottom (the routing generator's fixed order: the user's own rules
+/// before Smart RU, owner answer 4).
 #[component]
 fn RuleOrder(smart_ru: bool) -> Element {
     rsx! {
@@ -160,17 +163,23 @@ fn RuleOrder(smart_ru: bool) -> Element {
             summary { {t!("ui.settings.domains.orderTitle")} }
             ol {
                 li { {t!("ui.settings.domains.orderBlock")} }
+                li { {t!("ui.settings.domains.orderUser")} }
                 if smart_ru {
                     li { {t!("ui.settings.domains.orderSmartPins")} }
                     li { {t!("ui.settings.domains.orderSmartDirect")} }
-                }
-                li { {t!("ui.settings.domains.orderUser")} }
-                if smart_ru {
                     li { {t!("ui.settings.domains.orderGeoip")} }
                 }
                 li { {t!("ui.settings.domains.orderFinal")} }
             }
         }
+    }
+}
+
+/// The one line under a rule that overrides Smart RU's own choice for its site.
+fn override_note(smart: SmartRoute) -> String {
+    match smart {
+        SmartRoute::Direct => t!("ui.settings.domains.overridesDirect"),
+        SmartRoute::Vpn => t!("ui.settings.domains.overridesVpn"),
     }
 }
 
@@ -195,6 +204,9 @@ fn RuleRow(
                     span { class: "set-list-sub", title: t!("ui.settings.domains.hitsTitle"),
                         {t!("domainRouting.hits", count = rule.hits)}
                     }
+                }
+                if let Some(smart) = rule.overrides {
+                    span { class: "set-list-sub", {override_note(smart)} }
                 }
             }
             Badge { tone: action_tone(rule.action), {action_label(rule.action)} }
@@ -399,6 +411,7 @@ mod tests {
                 pattern: format!("site{i}.example"),
                 action: DomainAction::Vpn,
                 hits: 0,
+                overrides: None,
             })
             .collect()
     }

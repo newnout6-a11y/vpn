@@ -4,7 +4,7 @@
       "target": {
         "systemProxy": {
           "name": "System proxy",
-          "warning": "While Proxy mode is on, the Windows proxy settings point at the app; programs that ignore them go direct. The previous settings come back when it is turned off."
+          "warning": "While Proxy mode is on, the Windows proxy settings point at the app; the previous settings come back when it is turned off."
         }
       }
     }
