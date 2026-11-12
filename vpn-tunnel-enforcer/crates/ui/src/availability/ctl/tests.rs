@@ -249,7 +249,8 @@ async fn failures_show_their_text_and_a_retry_gets_a_new_token() {
     dom.in_runtime(|| ctl.check());
     settle(&mut dom, 4, 30).await;
     assert_ne!(probe.api.token(0), probe.api.token(1));
-    let hint = "Введите URL вида example.com или https://example.com/path (поддерживаются HTTP и HTTPS).";
+    let hint =
+        "Введите URL вида example.com или https://example.com/path (поддерживаются HTTP и HTTPS).";
     assert_eq!(shown(&dom), hint);
 }
 

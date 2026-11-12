@@ -424,10 +424,10 @@ fn unread_filter_counts_are_not_shown() {
     };
     let lines = protection_lines(&unread);
     assert!(
-        lines
-            .iter()
-            .all(|l| !l.text.key.starts_with("ui.maintenance.protection.filters")
-                && l.text.key != "ui.maintenance.protection.strictMissing"),
+        lines.iter().all(
+            |l| !l.text.key.starts_with("ui.maintenance.protection.filters")
+                && l.text.key != "ui.maintenance.protection.strictMissing"
+        ),
         "{lines:?}"
     );
     assert!(lines.iter().any(|l| l.text.key == "app.base.needsAdmin"));

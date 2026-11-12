@@ -150,7 +150,11 @@ fn walking_through_keeps_the_defaults() {
     assert!(!c.autostart);
     assert_eq!(c.kill_switch, KillSwitchLevel::Off);
     assert_eq!(c.connection, Connection::LocalProxy);
-    assert_eq!(c.routing, Routing::Soft, "NOADMIN §0: Proxy mode unless elevated");
+    assert_eq!(
+        c.routing,
+        Routing::Soft,
+        "NOADMIN §0: Proxy mode unless elevated"
+    );
     assert_eq!(c.lang, Lang::Ru);
 }
 
