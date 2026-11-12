@@ -257,13 +257,15 @@ impl<C: Coordinator> Reconciler<'_, C> {
         }
     }
 
-    /// The run is over: end the session only if the schedule owns it (fixes S5, S9).
+    /// The run is over: end the session only if the schedule owns it (fixes S5, S9); with no
+    /// session, release what a schedule-held session left behind (the kill switch's block of a
+    /// kept stop, a restore on its way): nothing of the run outlives it.
     async fn end_run(&mut self, name: &str) {
-        let owned = self
-            .sched
-            .coord
-            .session()
-            .is_some_and(|s| s.owner == Owner::Schedule);
+        let coord = &self.sched.coord;
+        let owned = match coord.session() {
+            Some(s) => s.owner == Owner::Schedule,
+            None => coord.left_by() == Some(Owner::Schedule),
+        };
         if !owned {
             return;
         }

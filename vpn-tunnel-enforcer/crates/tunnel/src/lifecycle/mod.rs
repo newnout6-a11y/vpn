@@ -7,8 +7,6 @@
 //! deadline and report back to the actor; the engines are driven only through
 //! [`crate::api::Runtime`]. Every path that brings a tunnel up ends in one `on_connected` hook and
 //! every path that ends a session writes exactly one history row (lifecycle-app §6.3, §6.4).
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -64,6 +62,8 @@ mod key {
     pub const OUTCOME_TIMEOUT: &str = "tunnel.lifecycle.outcome.timeout";
     pub const OUTCOME_PREEMPTED: &str = "tunnel.lifecycle.outcome.preempted";
     pub const OUTCOME_FAILED: &str = "tunnel.lifecycle.outcome.failed";
+    pub const OUTCOME_FAILOVER: &str = "tunnel.lifecycle.outcome.failover";
+    pub const OUTCOME_FAILOVER_RESTARTS: &str = "tunnel.lifecycle.outcome.failoverRestarts";
     pub const NOTICE: &str = "tunnel.lifecycle.notice";
 }
 
@@ -156,10 +156,15 @@ pub struct DisconnectReq {
     pub correlation: Option<CorrelationId>,
     /// After this the caller gets `Timeout`; the rollback itself keeps running.
     pub timeout: Duration,
+    /// Ends the session but leaves the kill switch blocking when it is on (adaptive bypass gave
+    /// up on an unproven server): TUN keeps its firewall block, Soft its tweaks on the dead port;
+    /// the state reads `blocked` until a connect or a full disconnect. Kill switch `off`: a plain
+    /// full stop. A full stop asked meanwhile runs right after it.
+    pub keep_protection: bool,
 }
 
 impl DisconnectReq {
-    /// A request with a fresh correlation and the 120 s budget.
+    /// A full stop with a fresh correlation and the 120 s budget.
     pub fn new(cause: StopCause, owner: Owner, source: Source) -> Self {
         Self {
             cause,
@@ -167,6 +172,7 @@ impl DisconnectReq {
             source,
             correlation: None,
             timeout: DEFAULT_TIMEOUT,
+            keep_protection: false,
         }
     }
 }
@@ -297,6 +303,10 @@ pub enum SessionEvent {
     Ended {
         session: SessionView,
         outcome: OutcomeKind,
+        /// The next event is the `Up` of the run that replaces it (a switch that took, a runtime
+        /// failover, a protected restart). `false`: nothing runs after it, whatever the outcome
+        /// kind says (a switch that lost the tunnel ends the session as that switch).
+        continues: bool,
     },
 }
 
@@ -320,7 +330,8 @@ pub struct Lifecycle {
     snapshot: watch::Receiver<TunnelSnapshot>,
     session: watch::Receiver<Option<SessionView>>,
     events: broadcast::Sender<SessionEvent>,
-    busy: Arc<AtomicBool>,
+    busy: watch::Receiver<bool>,
+    kept_by: watch::Receiver<Option<Owner>>,
 }
 
 impl Lifecycle {
@@ -501,7 +512,22 @@ impl Lifecycle {
 
     /// A lane operation (start, switch, restart, stop, maintenance) is in flight.
     pub fn busy(&self) -> bool {
-        self.busy.load(Ordering::Acquire)
+        *self.busy.borrow()
+    }
+
+    /// The holder of the session a `keep_protection` stop ended, while the kill switch's block
+    /// it kept lasts (anything that leaves `blocked` clears it: a start that runs, a full stop).
+    /// Whoever ends that holder's run releases the block with a full stop.
+    pub fn kept_by(&self) -> Option<Owner> {
+        *self.kept_by.borrow()
+    }
+
+    /// Resolves once no lane operation is in flight, e.g. after a failed switch, whose recovery
+    /// stop still holds the lane when the switch's caller gets its answer. Callers bound it.
+    pub async fn idle(&self) {
+        let mut busy = self.busy.clone();
+        // The sender lives in the actor; gone = nothing can hold the lane any more.
+        let _ = busy.wait_for(|busy| !*busy).await;
     }
 
     /// Forces a fault state (start-up recovery could not confirm the network, a supervised task

@@ -202,10 +202,14 @@ impl Actor {
                 if !running {
                     return Err(conflict("tunnel.runtime.notRunning"));
                 }
-                let mut req = self
+                let last = self
                     .last
                     .clone()
                     .ok_or_else(|| conflict("tunnel.runtime.noLastStart"))?;
+                // A settings change can be what asks for the new mode (stealth, public Wi-Fi):
+                // the run takes the current settings too, never the last start's stale ones.
+                let now = self.deps.inputs.snapshot().await?;
+                let mut req = with_current_settings(&last, &now);
                 req.adaptive = mode;
                 if let Some(profile) = profile {
                     req.mode = Mode::DirectVpn { profile };

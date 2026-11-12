@@ -88,8 +88,9 @@ impl Memory {
     }
 }
 
-/// The network session's memory, shared by [`Reactions`](super::Reactions) (the only writer),
-/// rotation and the sibling fallback of adaptive bypass (readers).
+/// The network session's memory, shared by [`Reactions`](super::Reactions) (the writer; the
+/// app's network check sets only the UDP mark, through [`Verdicts::network_udp`]), rotation and
+/// the sibling fallback of adaptive bypass (readers).
 #[derive(Debug, Default)]
 pub struct Verdicts {
     memory: Mutex<Memory>,
@@ -110,6 +111,13 @@ impl Verdicts {
     /// banned, its transport freezes towards its data centre, it is offline or refuses us).
     pub fn avoided(&self, id: &str) -> bool {
         self.memory.lock().avoid.contains_key(id)
+    }
+
+    /// A check of the network itself (not of a server) measured UDP: `true` = UDP is dropped,
+    /// TCP-based profiles go first in automatic picks; `false` = UDP answered, so an earlier
+    /// mark is lifted. No session is switched by it: only a server's own check does that.
+    pub fn network_udp(&self, blocked: bool) {
+        self.memory.lock().udp_blocked = blocked;
     }
 
     /// Forgets everything (the physical network changed).

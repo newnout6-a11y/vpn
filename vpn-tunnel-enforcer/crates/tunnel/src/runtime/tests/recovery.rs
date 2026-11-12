@@ -8,7 +8,8 @@ use vpnte_base::types::{Engine, EnginePref};
 
 use super::*;
 use crate::api::{
-    RestartOptions, Runtime, StopOptions, SwitchOutcome, TunStatusKind, TunWarning, TunnelEvent,
+    FailoverCause, RestartOptions, Runtime, StopOptions, SwitchOutcome, TunStatusKind, TunWarning,
+    TunnelEvent,
 };
 use crate::runtime::TunnelHandle;
 
@@ -142,6 +143,25 @@ async fn restarts_of_the_last_start() {
     let mtu = w.configs.lock()[1]["inbounds"][0]["mtu"].clone();
     assert_eq!(mtu, 1280);
     assert!(h.restart_with_last("rules".into()).await.unwrap().is_some());
+}
+
+/// b6: an adaptive restart takes the current settings with its new mode: a stealth start
+/// (MTU 1280) restarted in baseline after stealth was turned off runs with the full MTU.
+#[tokio::test]
+async fn adaptive_restarts_take_the_current_settings() {
+    let w = World::new();
+    let h = spawn(&w);
+    let stealthy = StartRequest {
+        stealth: true,
+        ..local_req()
+    };
+    h.start(stealthy, CancellationToken::new()).await.unwrap();
+    assert_eq!(w.configs.lock()[0]["inbounds"][0]["mtu"], 1280);
+    let baseline = vpnte_base::types::AdaptiveMode::Baseline;
+    h.restart_adaptive(baseline, "settings".into(), None)
+        .await
+        .expect("adaptive restart");
+    assert_eq!(w.configs.lock()[1]["inbounds"][0]["mtu"], 1500);
 }
 
 /// AT-02-005 (§7.20): a crash restarts the last start after the backoff, protection held
@@ -600,4 +620,139 @@ async fn protected_restart_resets_the_crash_budget() {
     .await
     .expect("restart");
     assert_eq!(h.status().borrow().restart_attempt, 0);
+}
+
+/// A failover policy over fixed siblings; `true` = that sibling's start fails (its capture
+/// never gets ready).
+struct Siblings {
+    world: Arc<World>,
+    left: Mutex<Vec<(crate::api::VpnProfile, bool)>>,
+    committed: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl crate::runtime::Failover for Siblings {
+    async fn next_live_sibling(&self, _: &CancellationToken) -> Option<crate::api::VpnProfile> {
+        let mut left = self.left.lock();
+        if left.is_empty() {
+            return None;
+        }
+        let (profile, fails) = left.remove(0);
+        self.world.ready_fail.store(fails, Ordering::SeqCst);
+        Some(profile)
+    }
+
+    fn commit(&self, profile_id: &str) {
+        self.committed.lock().push(profile_id.to_owned());
+    }
+}
+
+fn sibling(uri: &str, id: &str) -> crate::api::VpnProfile {
+    let crate::api::Mode::DirectVpn { profile } = vpn_req(uri, EnginePref::Auto).mode else {
+        unreachable!("vpn_req builds a Direct VPN start");
+    };
+    crate::api::VpnProfile {
+        id: id.into(),
+        ..profile
+    }
+}
+
+/// b8: a crash inside the freeze window fails over at once. A candidate that does not start is
+/// never announced; the sibling that starts is named for the session right before its run's
+/// finish (`FailedOver`), committed, and announced once to the user after it started.
+#[tokio::test]
+async fn failover_announces_only_the_sibling_that_started() {
+    let w = World::new();
+    let siblings = Arc::new(Siblings {
+        world: w.clone(),
+        left: Mutex::new(vec![
+            (sibling(XRAY_KEY, "b"), true),
+            (sibling(XRAY_KEY_2, "c"), false),
+        ]),
+        committed: Mutex::new(Vec::new()),
+    });
+    let mut d = deps(&w);
+    d.failover = Some(siblings.clone());
+    let h = TunnelHandle::spawn(d);
+    let mut events = h.subscribe();
+    let req = vpn_req(NATIVE_KEY, EnginePref::Auto);
+    h.start(req, CancellationToken::new()).await.unwrap();
+    drain(&mut events);
+    w.core(0).crash();
+    let announced = |e: &TunnelEvent| {
+        matches!(
+            e,
+            TunnelEvent::Status(TunStatusKind::PostTrialFailover { .. })
+        )
+    };
+    let seen = until(&mut events, announced).await;
+    assert_eq!(seen.iter().filter(|e| announced(e)).count(), 1, "{seen:?}");
+    assert_eq!(
+        seen.last(),
+        Some(&TunnelEvent::Status(TunStatusKind::PostTrialFailover {
+            name: "Fake B".into()
+        }))
+    );
+    let named: Vec<_> = (seen.iter().enumerate())
+        .filter_map(|(i, e)| match e {
+            TunnelEvent::FailedOver {
+                generation,
+                profile_id,
+                cause,
+            } => Some((i, *generation, profile_id.clone(), *cause)),
+            _ => None,
+        })
+        .collect();
+    let [(at, generation, id, cause)] = named.as_slice() else {
+        panic!("one FailedOver expected: {seen:?}");
+    };
+    assert_eq!((id.as_str(), *cause), ("c", FailoverCause::ServerFault));
+    assert_eq!(
+        seen.get(at + 1),
+        Some(&TunnelEvent::StartFinished {
+            generation: *generation,
+            ok: true
+        })
+    );
+    assert_eq!(*siblings.committed.lock(), ["c"]);
+}
+
+/// b1: crashes with no outbound fault on record restart first; the failover that follows the
+/// spent budget says what was seen (`RestartsSpent`), so no text blames the server.
+#[tokio::test]
+async fn a_failover_without_a_fault_names_the_spent_restarts() {
+    let w = World::new();
+    w.no_fault.store(true, Ordering::SeqCst);
+    let siblings = Arc::new(Siblings {
+        world: w.clone(),
+        left: Mutex::new(vec![(sibling(XRAY_KEY_2, "c"), false)]),
+        committed: Mutex::new(Vec::new()),
+    });
+    let mut d = deps(&w);
+    d.failover = Some(siblings.clone());
+    let h = TunnelHandle::spawn(d);
+    let mut events = h.subscribe();
+    let req = vpn_req(NATIVE_KEY, EnginePref::Auto);
+    h.start(req, CancellationToken::new()).await.unwrap();
+    // The first run and each of the three restarts crash inside the stable window.
+    for run in 0..=crate::runtime::MAX_RESTARTS {
+        let generation = u64::from(run) + 1;
+        until(&mut events, |e| {
+            matches!(e, TunnelEvent::StartFinished { generation: g, ok: true } if *g == generation)
+        })
+        .await;
+        w.core(usize::from(run)).crash();
+    }
+    let seen = until(&mut events, |e| matches!(e, TunnelEvent::FailedOver { .. })).await;
+    let Some(TunnelEvent::FailedOver {
+        profile_id, cause, ..
+    }) = seen.last()
+    else {
+        panic!("a failover expected: {seen:?}");
+    };
+    assert_eq!(
+        (profile_id.as_str(), *cause),
+        ("c", FailoverCause::RestartsSpent)
+    );
+    assert_eq!(*siblings.committed.lock(), ["c"]);
 }

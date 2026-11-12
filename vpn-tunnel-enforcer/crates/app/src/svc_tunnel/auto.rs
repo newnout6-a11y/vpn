@@ -77,11 +77,12 @@ pub(super) fn build(b: &Backend, i: Inputs<'_>) -> Arc<Automation> {
     ));
     let sys: Arc<dyn hardening::System> = Arc::new(WinSystem::new());
     let browsers = Browsers::new(i.journal.clone(), sys.clone(), BrowserDirs::current_user());
-    let privacy = Arc::new(Privacy {
-        location: Location::new(i.journal, sys),
-        settings: b.settings.clone(),
-        notifier: b.notifier.clone(),
-    });
+    let privacy = Arc::new(Privacy::new(
+        Location::new(i.journal, sys),
+        b.settings.clone(),
+        b.notifier.clone(),
+        i.lifecycle.session(),
+    ));
     Automation::build(
         b,
         Parts {

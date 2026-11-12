@@ -1,6 +1,6 @@
 //! The page snapshot: a pure projection of the server list, the tunnel state and local marks
 //! (switch target, resolved addresses), plus the read that gathers its inputs.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::num::NonZeroU32;
 
@@ -35,6 +35,9 @@ pub(super) struct RowExtras {
     pub engine_plan: Option<ui::EnginePlan>,
     /// The classifier's verdict, when no younger health record contradicts it.
     pub verdict: Option<ui::CheckVerdict>,
+    /// The key carried its provider's hide-settings out of the provider's group
+    /// (`ServerRow::hidden`); a hiding group hides its own rows on top.
+    pub config_hidden: bool,
 }
 
 impl RowExtras {
@@ -63,6 +66,7 @@ impl RowExtras {
                 .verdict
                 .as_ref()
                 .and_then(|v| verdict::view(v, row.health.as_ref())),
+            config_hidden: row.hidden,
         }
     }
 }
@@ -144,13 +148,25 @@ pub(super) fn project(i: &Inputs) -> ui::ServersView {
         .session
         .filter(|id| connected && i.list.servers.iter().any(|s| s.id.as_str() == *id));
     let empty = RowExtras::default();
+    // Provider `hide-settings`: the rows of these groups offer no key view, copy or export.
+    let hidden: HashSet<&str> = i
+        .list
+        .groups
+        .iter()
+        .filter(|g| !g.manual && g.controls.hides_settings())
+        .map(|g| g.id.as_str())
+        .collect();
     ui::ServersView {
         loaded: true,
         servers: i
             .list
             .servers
             .iter()
-            .map(|s| server(s, i.extras.get(&s.id).unwrap_or(&empty), i.ips))
+            .map(|s| {
+                let extras = i.extras.get(&s.id).unwrap_or(&empty);
+                let config_hidden = extras.config_hidden || hidden.contains(s.group_id.as_str());
+                server(s, extras, i.ips, config_hidden)
+            })
             .collect(),
         groups: i.list.groups.iter().map(|g| group(g, i.lang)).collect(),
         active_id: on_server
@@ -164,7 +180,12 @@ pub(super) fn project(i: &Inputs) -> ui::ServersView {
     }
 }
 
-fn server(s: &ServerSummary, x: &RowExtras, ips: &HashMap<String, IpAddr>) -> ui::ServerView {
+fn server(
+    s: &ServerSummary,
+    x: &RowExtras,
+    ips: &HashMap<String, IpAddr>,
+    config_hidden: bool,
+) -> ui::ServerView {
     ui::ServerView {
         id: s.id.to_string(),
         name: s.name.clone(),
@@ -206,6 +227,7 @@ fn server(s: &ServerSummary, x: &RowExtras, ips: &HashMap<String, IpAddr>) -> ui
         // The list has no on / off switch; a key sealed for another Windows account cannot be
         // used until it is imported again, so it shows as switched off.
         enabled: !s.locked,
+        config_hidden,
     }
 }
 
@@ -241,6 +263,14 @@ fn group(g: &GroupSummary, lang: Lang) -> ui::GroupView {
         refresh_minutes: g
             .refresh_override_min
             .and_then(|m| NonZeroU32::new(u32::from(m))),
+        support_url: info.support_url.clone(),
+        announce: info.announce.clone(),
+        provider_refresh_hours: info.refresh_hours,
+        send_hwid: g.send_hwid,
+        header_names: g.header_names.clone(),
+        moved_at: g.moved_at,
+        host: g.host.clone(),
+        settings_hidden: !g.manual && g.controls.hides_settings(),
     }
 }
 

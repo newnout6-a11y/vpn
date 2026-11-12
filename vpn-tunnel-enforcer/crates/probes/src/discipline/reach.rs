@@ -50,13 +50,28 @@ async fn probe(host: &str, port: u16, udp_only: bool, net: &NetPath) -> Reach {
     let Some(ip) = resolve_target(host).await else {
         return Reach::default();
     };
-    let dst = SocketAddr::new(ip, port);
     let source = physical_sources()
         .await
         .into_iter()
         .find(|s| s.is_ipv4() == ip.is_ipv4());
+    reach_from(
+        SocketAddr::new(ip, port),
+        source,
+        udp_only,
+        net.tunnel_running(),
+    )
+    .await
+}
+
+/// Probes `dst` (an address, no lookup) from `source`, an uplink address of its family.
+pub(crate) async fn reach_from(
+    dst: SocketAddr,
+    source: Option<IpAddr>,
+    udp_only: bool,
+    tunnel_running: bool,
+) -> Reach {
     // Our TUN captures unbound sockets: without a physical source there is no clean path.
-    if source.is_none() && net.tunnel_running() {
+    if source.is_none() && tunnel_running {
         return Reach::default();
     }
     let tcp = async {
@@ -66,7 +81,7 @@ async fn probe(host: &str, port: u16, udp_only: bool, net: &NetPath) -> Reach {
             tcp(source, dst).await
         }
     };
-    let (icmp, tcp) = tokio::join!(echo(source, ip), tcp);
+    let (icmp, tcp) = tokio::join!(echo(source, dst.ip()), tcp);
     Reach { icmp, tcp }
 }
 

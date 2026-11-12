@@ -21,6 +21,7 @@ mod ctl;
 pub mod demo;
 mod legacy;
 mod model;
+mod network;
 mod rules;
 #[cfg(test)]
 mod tests;
@@ -63,6 +64,7 @@ pub fn MaintenancePage() -> Element {
                 if let Some(test) = test {
                     view::LeakPanel { test: test.leak }
                 }
+                network::NetworkPanel { state }
                 capture::CapturePanel { ctl }
                 if let Some(fault) = fault {
                     capture::FaultPanel { fault }

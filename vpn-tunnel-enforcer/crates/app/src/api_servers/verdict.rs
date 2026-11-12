@@ -67,6 +67,7 @@ fn kind(v: ServerVerdict) -> Option<ui::VerdictKind> {
         ServerVerdict::IpBanned => ui::VerdictKind::IpBanned,
         ServerVerdict::UdpBlocked => ui::VerdictKind::UdpBlocked,
         ServerVerdict::Offline => ui::VerdictKind::Offline,
+        ServerVerdict::Refused => ui::VerdictKind::Refused,
         ServerVerdict::Deferred => ui::VerdictKind::Deferred,
         ServerVerdict::NotVerified => ui::VerdictKind::NotVerified,
         ServerVerdict::Unknown => return None,

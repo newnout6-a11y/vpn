@@ -487,6 +487,59 @@ pub struct SecretsImport {
     pub pending: bool,
 }
 
+/// A stage of the network check, in the order it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NetStepKind {
+    Dns,
+    Tcp,
+    Tls,
+    /// Bytes after 16 KB (the freeze).
+    Bytes,
+    Udp,
+    /// The user's servers (address ban).
+    Servers,
+    /// The DNS canary: do the system's DNS queries reach our engine (TUN), or are they not
+    /// captured at all (proxy mode).
+    DnsCapture,
+}
+
+/// One stage line: its mark and its plain-words result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NetStepView {
+    pub kind: NetStepKind,
+    pub verdict: Verdict,
+    pub detail: Msg,
+}
+
+/// A finished network check.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NetCheckView {
+    pub at: UnixMs,
+    /// The probes left through the running session's direct-out (our TUN was up).
+    pub via_session: bool,
+    /// The overall colour: `Ok` only for a clean pass, `Warn` for a restriction, `Fail` for no
+    /// internet, `NotChecked` when nothing was proven either way (never the success colour).
+    pub verdict: Verdict,
+    pub steps: Vec<NetStepView>,
+    /// The restrictions found, most limiting first (empty: none).
+    pub modes: Vec<vpnte_view::netmode::NetMode>,
+    /// The verdict in one line.
+    pub headline: Msg,
+    /// What helps, one line per mode.
+    pub advice: Vec<Msg>,
+}
+
+/// The network-mode check (RU networks): pushed by the backend, which also runs it on its own
+/// at start and after a network change.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NetworkView {
+    /// A check runs now.
+    pub running: bool,
+    /// The latest check of the current network; `None` before one finished, and again after
+    /// the network changed.
+    pub last: Option<NetCheckView>,
+}
+
 /// Everything the backend pushes to the page (one snapshot, latest value).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MaintenanceState {
@@ -498,4 +551,6 @@ pub struct MaintenanceState {
     pub fault: Option<FaultView>,
     pub export: ExportView,
     pub legacy: LegacyView,
+    /// The network-mode check (also read by the start page's network banner).
+    pub network: NetworkView,
 }

@@ -2,6 +2,7 @@
 //! outcomes, the adaptive restart's `Started`, events forwarded from the lane.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -30,15 +31,28 @@ use crate::svc_auto::events;
 use crate::svc_auto::lane::Lane;
 use crate::svc_core::notify::Notifier;
 
-/// A lane that does what it is told and records every call.
+/// How long the fake's recovery stop holds the lane after a switch that lost the tunnel.
+const RECOVERY_STOP: Duration = Duration::from_millis(30);
+
+/// A lane that does what it is told and records every call. Like the lifecycle, it answers a
+/// switch that lost the tunnel while its recovery stop still holds the lane, and refuses every
+/// start meanwhile (`stopInProgress`).
 pub struct FakeLane {
     session: watch::Sender<Option<SessionView>>,
     events: broadcast::Sender<SessionEvent>,
     calls: Mutex<Vec<String>>,
     generation: AtomicU64,
-    busy: AtomicBool,
+    busy: Arc<watch::Sender<bool>>,
     /// The next switch fails; `true` = the session was lost with it.
-    switch_fails: Mutex<Option<bool>>,
+    pub(super) switch_fails: Mutex<Option<bool>>,
+    /// The kill switch is on: a `keep_protection` stop keeps the block (as the lifecycle).
+    pub kill_switch: AtomicBool,
+    /// The holder of the session a kept stop ended, until a start runs or a full stop.
+    kept: Mutex<Option<Owner>>,
+    /// The next connect never answers (its caller gives up and drops it).
+    pub connect_hangs: AtomicBool,
+    /// A lost switch's recovery stop holds the lane until [`FakeLane::release_hold`].
+    pub hold_until_released: AtomicBool,
 }
 
 impl FakeLane {
@@ -48,26 +62,51 @@ impl FakeLane {
             events: broadcast::channel(16).0,
             calls: Mutex::new(Vec::new()),
             generation: AtomicU64::new(0),
-            busy: AtomicBool::new(false),
+            busy: Arc::new(watch::Sender::new(false)),
             switch_fails: Mutex::new(None),
+            kill_switch: AtomicBool::new(false),
+            kept: Mutex::new(None),
+            connect_hangs: AtomicBool::new(false),
+            hold_until_released: AtomicBool::new(false),
         })
     }
 
-    fn calls(&self) -> Vec<String> {
+    pub(super) fn calls(&self) -> Vec<String> {
         self.calls.lock().clone()
     }
 
-    fn up(&self, mode: SessionMode, id: &str, owner: Owner) {
+    pub(super) fn up(&self, mode: SessionMode, id: &str, owner: Owner) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let view = view(mode, id, owner, generation);
         self.session.send_replace(Some(view.clone()));
         let _ = self.events.send(SessionEvent::Up(view));
     }
 
-    fn end(&self, outcome: OutcomeKind) {
+    fn end(&self, outcome: OutcomeKind, continues: bool) {
         if let Some(session) = self.session.send_replace(None) {
-            let _ = self.events.send(SessionEvent::Ended { session, outcome });
+            let _ = self.events.send(SessionEvent::Ended {
+                session,
+                outcome,
+                continues,
+            });
         }
+    }
+
+    /// The lane's own recovery stop after a lost switch: busy for a while, then idle.
+    pub(super) fn hold(&self) {
+        self.busy.send_replace(true);
+        if self.hold_until_released.load(Ordering::SeqCst) {
+            return;
+        }
+        let busy = self.busy.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(RECOVERY_STOP).await;
+            busy.send_replace(false);
+        });
+    }
+
+    pub(super) fn release_hold(&self) {
+        self.busy.send_replace(false);
     }
 }
 
@@ -77,12 +116,20 @@ impl Lane for FakeLane {
         self.calls
             .lock()
             .push(format!("connect {:?} {:?}", req.target, req.owner));
+        if self.connect_hangs.swap(false, Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        if *self.busy.borrow() {
+            let msg = Msg::new("tunnel.lifecycle.lane.stopInProgress");
+            return Err(ConnError::Refused(msg));
+        }
         let (mode, id) = match &req.target {
             ConnectTarget::DirectVpn { profile_id } => (SessionMode::Direct, profile_id.clone()),
             ConnectTarget::SoftVpn { profile_id } => (SessionMode::Soft, profile_id.clone()),
             ConnectTarget::LocalProxy { .. } => (SessionMode::Hard, Some("local-proxy".into())),
             ConnectTarget::Soft { .. } => (SessionMode::Soft, Some("local-proxy-soft-http".into())),
         };
+        self.kept.lock().take();
         self.up(mode, &id.unwrap_or_default(), req.owner);
         Ok(Done::default())
     }
@@ -96,7 +143,10 @@ impl Lane for FakeLane {
             StopCause::Schedule => OutcomeKind::Schedule,
             _ => OutcomeKind::Unknown,
         };
-        self.end(outcome);
+        let holder = self.session.borrow().as_ref().map(|s| s.owner);
+        let keep = req.keep_protection && self.kill_switch.load(Ordering::SeqCst);
+        *self.kept.lock() = holder.filter(|_| keep);
+        self.end(outcome, false);
         Ok(Done::default())
     }
 
@@ -107,12 +157,13 @@ impl Lane for FakeLane {
         let failed = self.switch_fails.lock().take();
         if let Some(lost) = failed {
             if lost {
-                self.end(OutcomeKind::ServerSwitch);
+                self.end(OutcomeKind::ServerSwitch, false);
+                self.hold();
             }
             return Err(ConnError::Refused(Msg::new("x.switchFailed")));
         }
         let current = self.session.borrow().clone().expect("a session to switch");
-        self.end(OutcomeKind::ServerSwitch);
+        self.end(OutcomeKind::ServerSwitch, true);
         self.up(current.mode, &req.profile_id, current.owner);
         Ok(Done::default())
     }
@@ -140,7 +191,16 @@ impl Lane for FakeLane {
     }
 
     fn busy(&self) -> bool {
-        self.busy.load(Ordering::SeqCst)
+        *self.busy.borrow()
+    }
+
+    async fn idle(&self) {
+        let mut busy = self.busy.subscribe();
+        let _ = busy.wait_for(|b| !*b).await;
+    }
+
+    fn kept_by(&self) -> Option<Owner> {
+        *self.kept.lock()
     }
 
     fn adopt(&self, owner: Owner) {
@@ -153,8 +213,16 @@ pub struct Rig {
     pub coord: Arc<AppCoordinator>,
     pub servers: Arc<Servers>,
     pub settings: Arc<Store<Settings>>,
+    pub notifier: Arc<Notifier>,
     pub ids: Vec<String>,
-    _dir: TempDir,
+    dir: TempDir,
+}
+
+impl Rig {
+    /// The rig's data dir (documents of other services may live next to its own).
+    pub fn dir(&self) -> std::path::PathBuf {
+        self.dir.0.clone()
+    }
 }
 
 /// Two servers in the list; no TUN (unelevated, the normal case).
@@ -184,7 +252,7 @@ pub fn rig(name: &str) -> Rig {
     let coord = Arc::new(AppCoordinator::new(
         lane.clone(),
         servers.clone(),
-        notifier,
+        notifier.clone(),
         detect,
         false,
     ));
@@ -193,8 +261,9 @@ pub fn rig(name: &str) -> Rig {
         coord,
         servers,
         settings,
+        notifier,
         ids,
-        _dir: dir,
+        dir,
     }
 }
 
@@ -223,7 +292,7 @@ async fn proxy_sessions_over_a_server_start_unelevated() {
         (SessionKind::SoftDirect, Owner::Schedule)
     );
     assert_eq!(session.profile_id.as_deref(), Some(a.as_str()));
-    r.lane.end(OutcomeKind::UserStop);
+    r.lane.end(OutcomeKind::UserStop, false);
     let tun = ConnectRequest::Direct {
         profile_id: a.clone(),
     };
@@ -401,12 +470,62 @@ async fn lane_changes_reach_automation_in_order() {
     cancel.cancel();
 }
 
+/// a1/a2: a switch that lost the tunnel is a `Stopped` for automation (a fault: the scheduler
+/// arms its crash retry, the location consent goes back), and the previous server, restored
+/// once the lane's recovery stop let go, is a `Started` of its own.
+#[tokio::test]
+async fn a_lost_switch_is_a_stop_then_the_restored_start() {
+    let r = rig("lost");
+    let (a, b) = (r.ids[0].clone(), r.ids[1].clone());
+    let cancel = CancellationToken::new();
+    tokio::spawn(events::sessions(r.coord.clone(), None, cancel.clone()));
+    tokio::task::yield_now().await;
+    let mut seen = r.coord.events();
+    r.coord.connect(Owner::Schedule, proxy(&a)).await.unwrap();
+    *r.lane.switch_fails.lock() = Some(true);
+    let lost = r.coord.switch_profile(Owner::Rotation, &b).await;
+    assert!(
+        matches!(
+            lost,
+            Err(SwitchError::Failed {
+                restored_previous: true,
+                ..
+            })
+        ),
+        "{lost:?}"
+    );
+    let mut got = Vec::new();
+    while got.len() < 3 {
+        got.push(seen.recv().await.expect("event"));
+    }
+    assert!(
+        matches!(
+            got[1],
+            LifecycleEvent::Stopped {
+                owner: Owner::Schedule,
+                cause: AutoStop::Fault,
+                ..
+            }
+        ),
+        "{got:?}"
+    );
+    assert!(
+        matches!(
+            &got[2],
+            LifecycleEvent::Started { owner: Owner::Schedule, profile_id, .. }
+                if profile_id.as_deref() == Some(a.as_str())
+        ),
+        "{got:?}"
+    );
+    cancel.cancel();
+}
+
 /// `busy` mirrors the lane; an error of the lane keeps its own message.
 #[tokio::test]
 async fn busy_and_failures_come_from_the_lane() {
     let r = rig("busy");
     assert!(!r.coord.busy());
-    r.lane.busy.store(true, Ordering::SeqCst);
+    r.lane.busy.send_replace(true);
     assert!(r.coord.busy());
     let failed = crate::svc_auto::decide::op_error(ConnError::Failed(
         AppError::msg(ErrorKind::Internal, Msg::new("x.engine")).into(),

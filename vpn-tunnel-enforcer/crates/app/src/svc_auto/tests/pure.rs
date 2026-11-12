@@ -134,20 +134,36 @@ fn disconnect_admission_follows_the_owner_order() {
     ));
 }
 
-/// A switch row never reads as an end; a stop names who asked for it, else it is a fault.
+/// The row of a session another run replaces is no end; a switch that lost the tunnel is (a2:
+/// the scheduler's crash retry and the location rollback hang on it); a stop names who asked
+/// for it, else it is a fault.
 #[test]
 fn session_ends_map_to_stop_causes() {
-    let ended = |outcome| SessionEvent::Ended {
+    let ended = |outcome, continues| SessionEvent::Ended {
         session: view(SessionMode::Soft, "a", Owner::Schedule, 3),
         outcome,
+        continues,
     };
     assert_eq!(
-        lifecycle_event(&ended(OutcomeKind::ServerSwitch), None),
+        lifecycle_event(&ended(OutcomeKind::ServerSwitch, true), None),
         None
     );
-    assert_eq!(lifecycle_event(&ended(OutcomeKind::Rotation), None), None);
     assert_eq!(
-        lifecycle_event(&ended(OutcomeKind::UserStop), None),
+        lifecycle_event(&ended(OutcomeKind::Rotation, true), None),
+        None
+    );
+    for lost in [OutcomeKind::Rotation, OutcomeKind::ServerSwitch] {
+        assert_eq!(
+            lifecycle_event(&ended(lost, false), None),
+            Some(LifecycleEvent::Stopped {
+                owner: Owner::Schedule,
+                runtime_id: RuntimeId(3),
+                cause: StopCause::Fault,
+            })
+        );
+    }
+    assert_eq!(
+        lifecycle_event(&ended(OutcomeKind::UserStop, false), None),
         Some(LifecycleEvent::Stopped {
             owner: Owner::Schedule,
             runtime_id: RuntimeId(3),

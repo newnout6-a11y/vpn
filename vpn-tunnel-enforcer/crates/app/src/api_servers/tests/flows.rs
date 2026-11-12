@@ -9,6 +9,7 @@ use vpnte_base::ErrorKind;
 use vpnte_base::types::ClientDevice;
 use vpnte_ui::servers::{
     AddTarget, ArchiveReason, CountryCheck, LiveMode, SelectOutcome, ServersApi,
+    SubscriptionRequest,
 };
 
 use super::super::ServersBackend;
@@ -25,7 +26,12 @@ async fn the_page_works_over_a_real_list() {
     assert!(state.borrow().loaded && state.borrow().servers.is_empty());
 
     let report = api
-        .add(PASTE.to_owned(), AddTarget::Auto, ClientDevice::Pc)
+        .add(
+            PASTE.to_owned(),
+            AddTarget::Auto,
+            ClientDevice::Pc,
+            SubscriptionRequest::default(),
+        )
         .await
         .unwrap();
     assert_eq!((report.added, report.subscription), (2, false));
@@ -128,9 +134,14 @@ async fn a_live_switch_shows_its_target_and_can_be_cancelled() {
     let env = Env::new("switch");
     let api = Rc::new(ServersBackend::start(env.backend.clone()));
     let mut state = api.state();
-    api.add(PASTE.to_owned(), AddTarget::Auto, ClientDevice::Pc)
-        .await
-        .unwrap();
+    api.add(
+        PASTE.to_owned(),
+        AddTarget::Auto,
+        ClientDevice::Pc,
+        SubscriptionRequest::default(),
+    )
+    .await
+    .unwrap();
     let view = state.borrow().clone();
     let (first, second) = (view.servers[0].id.clone(), view.servers[1].id.clone());
     env.tunnel.connect_to(&first);
@@ -169,9 +180,14 @@ async fn per_server_engine_is_visible_and_never_impossible() {
     let mut state = api.state();
     let paste = "vless://11111111-2222-3333-4444-555555555555@good.example.net:443?security=tls&sni=good.example.net#ok\n\
         tuic://00000000-0000-4000-8000-000000000003:fake-password@203.0.113.13:443?sni=example.com#t\n";
-    api.add(paste.to_owned(), AddTarget::Auto, ClientDevice::Pc)
-        .await
-        .unwrap();
+    api.add(
+        paste.to_owned(),
+        AddTarget::Auto,
+        ClientDevice::Pc,
+        SubscriptionRequest::default(),
+    )
+    .await
+    .unwrap();
     let view = state.borrow().clone();
     let (vless, tuic) = (view.servers[0].clone(), view.servers[1].clone());
     let plan = |engine, key: &str| EnginePlan::Runs {

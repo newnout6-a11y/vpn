@@ -313,7 +313,18 @@
       "facts": {
         "usable": "Usable",
         "total": "Total",
-        "export": "Export"
+        "export": "Export",
+        "announce": "Provider announcement",
+        "hidden": "The provider hid the server settings: keys cannot be viewed, copied or exported. Protocol, engine, TLS / REALITY and protection stay visible.",
+        "providerInterval_one": "Provider: refresh every {{count}} hour",
+        "providerInterval_few": "Provider: refresh every {{count}} hours",
+        "providerInterval_many": "Provider: refresh every {{count}} hours",
+        "providerInterval_other": "Provider: refresh every {{count}} hours",
+        "moved": "The provider moved the subscription to {{host}} {{when}}",
+        "support": "Support",
+        "supportTitle": "Open the provider's support link in the browser",
+        "supportFailed": "The support link did not open",
+        "hwidHint": "The list came back empty. Panels that bind a subscription to a device serve servers only with the device ID (HWID)."
       },
       "export": {
         "proxyList": "Proxy list",
@@ -325,7 +336,8 @@
         "skipped": ", skipped: {{count}}",
         "savedTo": "file {{path}}",
         "keysFailed": "Could not save the keys",
-        "proxiesFailed": "Could not save the proxy list"
+        "proxiesFailed": "Could not save the proxy list",
+        "hidden": ", hidden by the provider: {{count}}"
       },
       "add": {
         "open": "Add",
@@ -347,7 +359,14 @@
         "done": "Done",
         "doneTitle": "Keys added",
         "failedTitle": "Could not add the keys",
-        "summary": "Added: {{added}} · updated: {{updated}} · skipped: {{skipped}} → {{group}}"
+        "summary": "Added: {{added}} · updated: {{updated}} · skipped: {{skipped}} → {{group}}",
+        "hwidHint": "For a new subscription, off by default. Turn it on when the provider binds subscriptions to devices: without the HWID the list comes back empty.",
+        "headers": "Extra headers (optional)",
+        "providers": "Mihomo providers",
+        "providerServers_one": "{{count}} server",
+        "providerServers_few": "{{count}} servers",
+        "providerServers_many": "{{count}} servers",
+        "providerServers_other": "{{count}} servers"
       },
       "country": {
         "verified": "Exit country: {{country}}",
@@ -358,7 +377,8 @@
         "http": "the subscription server answered HTTP {{code}}",
         "network": "the subscription server is unreachable — check your connection",
         "tls": "could not establish TLS with the subscription server",
-        "timeout": "the subscription server did not answer in time"
+        "timeout": "the subscription server did not answer in time",
+        "refused": "not requested: its address is http under an https subscription or points into a local network"
       },
       "key": {
         "copied": "Key copied. It is an access secret: the clipboard clears itself in {{seconds}} s.",
@@ -434,6 +454,7 @@
         "offline": "no answer",
         "deferred": "deferred",
         "notVerified": "cause unclear",
+        "refused": "connection refused",
         "checked": "Checked {{when}}",
         "notChecked": "Not checked: {{count}} — their servers' connection limit for this minute was used up or the check did not start; try again in a minute",
         "advice": {
@@ -493,7 +514,8 @@
         "latencyNone": "No TCP connection succeeded.",
         "portClosed": "The server's port did not accept a TCP connection.",
         "copyTitle": "Copy to the clipboard",
-        "deleted": "The server was removed and will be purged {{when}}. You can restore it in the server list."
+        "deleted": "The server was removed and will be purged {{when}}. You can restore it in the server list.",
+        "hidden": "The provider hid this server's settings: the key cannot be shown, copied or saved."
       },
       "purge": {
         "title": "Delete for good?",
@@ -504,13 +526,33 @@
       },
       "engine": {
         "failed": "Could not change the engine of «{{name}}»"
+      },
+      "request": {
+        "open": "Request",
+        "openTitle": "The device ID and headers the app fetches this subscription with",
+        "title": "Request of “{{name}}”",
+        "description": "What the app sends to the provider when it refreshes the subscription.",
+        "hwid": "Send HWID",
+        "hwidHint": "Panels with a device limit need it: without it they send an empty list. Turning it on takes a device slot at the provider.",
+        "headers": "Extra headers",
+        "headersNone": "No extra headers",
+        "headersSet": "Set: {{names}}. A new list replaces them.",
+        "headersPlaceholder": "Name: value",
+        "headersHint": "One “Name: value” per line, for example User-Agent: v2rayN/7.25. Values are stored encrypted and never shown again.",
+        "clear": "Remove headers",
+        "save": "Save headers",
+        "failed": "The request setting was not saved"
+      },
+      "hidden": {
+        "refused": "The provider hid the server settings of this subscription: the key cannot be shown, copied or exported"
       }
     }
   },
   "servers": {
     "health": {
       "reasons": {
-        "engine-setting": "Not checked: the chosen engine cannot run this key; change the server's engine or choose «Auto»"
+        "engine-setting": "Not checked: the chosen engine cannot run this key; change the server's engine or choose «Auto»",
+        "connection-refused": "Connection refused: the key’s port answered with a reset (from the server or from a filter on the way)"
       }
     }
   }

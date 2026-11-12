@@ -11,6 +11,7 @@
 //! half-way.
 mod export;
 mod legacy;
+mod network;
 mod project;
 mod protection;
 mod repair;
@@ -28,15 +29,17 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
+use vpnte_automation::adaptive::reaction::Verdicts;
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_ui::maintenance::{
-    CaptureView, ExportDone, LeakTestView, MaintenanceApi, MaintenanceState, ProtectionView,
-    RepairView, RouteTestView, SecretsImport, SystemReport,
+    CaptureView, ExportDone, LeakTestView, MaintenanceApi, MaintenanceState, NetCheckView,
+    ProtectionView, RepairView, RouteTestView, SecretsImport, SystemReport,
 };
 
 use crate::services::Backend;
 use crate::svc_tunnel::Built;
 pub(crate) use export::ExportSources;
+pub(crate) use network::network_key_now;
 pub(crate) use repair::{RepairHost, WindowsHost};
 
 /// The UI context of this package for `vpnte_ui::launch`: `Rc<dyn MaintenanceApi>`. Call it
@@ -47,7 +50,14 @@ pub fn contexts(backend: &Arc<Backend>, built: &Built) -> Vec<Box<dyn Any>> {
         feed: built.feed.clone(),
         journal: built.journal.clone(),
     };
-    let shared = Shared::start(backend.clone(), Arc::new(WindowsHost), Some(sources));
+    let verdicts = Some(built.automation.reactions.verdicts());
+    let shared = Shared::start(
+        backend.clone(),
+        Arc::new(WindowsHost),
+        Some(sources),
+        verdicts,
+    );
+    network::spawn(&shared);
     let api: Rc<dyn MaintenanceApi> = Rc::new(MaintenanceService(shared));
     vec![Box::new(api)]
 }
@@ -67,6 +77,10 @@ pub(crate) struct Shared {
     pub sources: Option<ExportSources>,
     /// Wakes the projection for a change no store event announces (an action of this page).
     pub dirty: Notify,
+    /// The reactions' network memory the network check teaches (`None` in page tests).
+    pub verdicts: Option<Arc<Verdicts>>,
+    /// The current physical network: a change drops the network check in flight.
+    pub epoch: network::NetEpoch,
 }
 
 impl Shared {
@@ -75,6 +89,7 @@ impl Shared {
         backend: Arc<Backend>,
         host: Arc<dyn RepairHost>,
         sources: Option<ExportSources>,
+        verdicts: Option<Arc<Verdicts>>,
     ) -> Arc<Self> {
         let shared = Arc::new(Self {
             backend,
@@ -83,6 +98,8 @@ impl Shared {
             last_report: Mutex::new(None),
             sources,
             dirty: Notify::new(),
+            verdicts,
+            epoch: network::NetEpoch::default(),
         });
         project::spawn(&shared);
         shared
@@ -123,6 +140,10 @@ impl MaintenanceApi for MaintenanceService {
 
     async fn routing_self_test(&self, cancel: CancellationToken) -> AppResult<RouteTestView> {
         selftest::route(&self.0, cancel).await
+    }
+
+    async fn check_network(&self, cancel: CancellationToken) -> AppResult<NetCheckView> {
+        network::check(&self.0, cancel).await
     }
 
     async fn export_diagnostics(&self, cancel: CancellationToken) -> AppResult<Option<ExportDone>> {

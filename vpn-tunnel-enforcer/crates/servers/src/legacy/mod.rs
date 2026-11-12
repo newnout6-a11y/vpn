@@ -202,6 +202,8 @@ fn read_groups(doc: Option<&Value>, now: UnixMs, report: &mut LegacyReport) -> V
                     .filter(|m| REFRESH_OVERRIDE_MIN.contains(m));
                 group.fetch = fetch_state(item);
                 group.info = info(item);
+                // The old app always sent its HWID: the panel knows this device by it.
+                group.send_hwid = true;
             }
         }
         out.push(OldGroup {

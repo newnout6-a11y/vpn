@@ -28,7 +28,7 @@ impl Actor {
                 let run = self.session.as_ref().map(|s| (s.generation, s.engine));
                 if self.session.as_ref().is_none_or(|s| s.profile != profile) {
                     let ending = Captured::now(&self.deps);
-                    self.close_current(ends_as, None, ending).await;
+                    self.close_current(ends_as, None, ending, true).await;
                     self.deps
                         .forensics
                         .start_session(profile.mode, &profile.name);

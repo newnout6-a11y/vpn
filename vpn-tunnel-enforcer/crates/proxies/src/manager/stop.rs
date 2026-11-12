@@ -76,6 +76,7 @@ impl Inner {
             state.take_live();
             state.configured = false;
             state.port = None;
+            state.borrowed = false;
             if !preserve {
                 state.profile = None;
                 state.auto_disabled = false;

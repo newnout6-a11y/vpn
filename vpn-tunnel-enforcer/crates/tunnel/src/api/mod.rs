@@ -245,6 +245,23 @@ pub enum TunnelEvent {
     RestartScheduled {
         delay: Duration,
     },
+    /// Right before the `StartFinished { ok: true }` of a crash failover's run: the sibling
+    /// server it runs (the session continues on it, not on the server that crashed).
+    FailedOver {
+        generation: u64,
+        profile_id: String,
+        cause: FailoverCause,
+    },
+}
+
+/// What the runtime saw before it failed over: the texts the user reads claim only that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailoverCause {
+    /// The crashed run recorded outbound faults (refused, failed or unanswered handshakes):
+    /// the server must stay quiet, so a sibling took over at once.
+    ServerFault,
+    /// The engine kept stopping with no fault on the server, and the restarts did not hold.
+    RestartsSpent,
 }
 
 /// Key prefix of the runtime's TUN bring-up failures (`.adapter`, `.protection`, `.routes`):

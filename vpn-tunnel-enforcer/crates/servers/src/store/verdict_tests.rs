@@ -94,6 +94,7 @@ fn verdict_records_read_old_and_newer_files() {
         (ServerVerdict::HandshakeFailed, "handshake-failed"),
         (ServerVerdict::UdpBlocked, "udp-blocked"),
         (ServerVerdict::NotVerified, "not-verified"),
+        (ServerVerdict::Refused, "refused"),
     ];
     for (v, name) in names {
         assert_eq!(serde_json::to_value(v).unwrap(), json!(name));

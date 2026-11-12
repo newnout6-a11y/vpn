@@ -388,7 +388,8 @@ pub trait ServersApi: 'static {      // root component ServersPage; use_servers_
     fn expanded_groups(&self) -> Vec<String>;                           // persisted UI state
     async fn save_expanded_groups(&self, ids: Vec<String>) -> AppResult<()>;
     async fn resolve_ips(&self) -> AppResult<()>;                       // single flight; answers via state
-    async fn add(&self, input: String, target: AddTarget, device: ClientDevice) -> AppResult<ImportReport>;
+    async fn add(&self, input: String, target: AddTarget, device: ClientDevice,
+        request: SubscriptionRequest /* a new subscription's HWID switch + header lines */) -> AppResult<ImportReport>;
     async fn remove(&self, id: &str) -> AppResult<()>;                  // soft delete, purged after 30 days
     async fn restore(&self, id: &str) -> AppResult<()>;
     async fn purge(&self, id: &str) -> AppResult<()>;
@@ -405,6 +406,9 @@ pub trait ServersApi: 'static {      // root component ServersPage; use_servers_
     async fn refresh_group(&self, id: &str) -> AppResult<RefreshOutcome>;
     async fn set_refresh_interval(&self, id: &str, minutes: Option<NonZeroU32>) -> AppResult<()>;
     async fn rename_group(&self, id: &str, name: String) -> AppResult<()>; // trims, caps at 60 chars
+    async fn set_send_hwid(&self, id: &str, on: bool) -> AppResult<()>;   // subscription's HWID switch
+    async fn set_request_headers(&self, id: &str, lines: String) -> AppResult<Vec<String>>; // replaces all;
+                                  // blank = none; answers the names (values never come back)
     async fn delete_group(&self, id: &str, delete_servers: bool) -> AppResult<()>;
     async fn check_group_health(&self, id: &str) -> AppResult<HealthReport>;  // { results: Vec<(id, KeyHealth)>,
                                   // not_checked: u32 /* deferred by the handshake budget / probe not started */ }
@@ -446,6 +450,19 @@ never `android` / `ios` under Xray; replaces `default_fingerprint(device)`).
 `ServerView::fingerprint_warning: Option<Msg>`: the engine's `engine.xray.warn.fingerprint*` about a
 provider-pinned fingerprint (current REALITY servers refuse it, it fails everywhere, Xray does not
 know it), shown as a warning strip in the server detail.
+Provider facts and controls: `GroupView` carries `support_url` (an `http(s)` link opened
+through `open_url` on a click), `announce` (plain text, never linkified), `provider_refresh_hours`,
+`send_hwid`, `header_names`, `moved_at` (the provider moved the subscription: a note) and
+`settings_hidden` (`hide-settings`); `ServerView::config_hidden` hides Save / Copy key in the detail
+(the backend refuses them too: `servers.hidden.refused`), while protocol, engine, TLS / REALITY and
+the protection state stay as they are. `ImportReport::providers: Vec<ProviderLine { name, servers,
+error: Option<FetchError> }>` names the Mihomo providers of an import (`FetchError::Refused`: a
+provider URL the redirect rules refused, never requested); `ExportReport::hidden` counts servers a
+bulk export left out for their provider; `ServerView::config_hidden` also holds for keys that carried
+their provider's `hide-settings` into another group. `SubscriptionRequest { send_hwid, headers }` is
+the add dialog's request draft: it resets to the new-group defaults after an import and when the
+dialog closes (a token header never reaches the next provider). The group toolbar's «Запрос» opens the request dialog (HWID switch,
+header names, replace / remove); an empty list without the HWID shows a hint with the switch.
 Demo: `DemoServersApi` with `DemoScene`.
 
 App duties: `ServerView.stealth` from `vpnte_profiles::caps`; finding titles / details and skipped-line
@@ -611,9 +628,10 @@ pub trait TrafficHistoryApi: 'static {  // root component TrafficHistoryPage (ac
 ```
 Types: `ScheduleEntry`, `ScheduleInput` (both with `capture: Capture` {Proxy, Tun} and `upstream:
 Upstream` {Server, LocalProxy}: NOADMIN §2 keeps the two apart; `Upstream::uses_profile`),
-`ScheduleSnapshot.tun_available` (a TUN schedule is shown as needing administrator rights), `HhMm`
+`ScheduleSnapshot.tun_available` (`Capture::available(tun_available)`: false for a TUN schedule in
+an unelevated app; the card, the next-event strip and the editor mark it unavailable), `HhMm`
 (minutes; strict `H:MM` / `HH:MM`),
-`NextEvent`, `NextAction`, `ServerChoice`, form rules `ScheduleForm`, `FormProblem`, `time_until`,
+`NextEvent` (with its schedule's `capture`), `NextAction`, `ServerChoice`, form rules `ScheduleForm`, `FormProblem`, `time_until`,
 `local_hhmm`; `SplitApp`, `AppKind`, `AppRule`, `display_path`, `matches`; `DomainRow`, `SiteInfo`,
 `Moment`, `by_day`, `filter`, `totals`, `MAX_RENDERED`. Demos: `DemoSchedule`, `DemoSplitTunnel`,
 `DemoTrafficHistory` (each in its module's `demo`). App duties: schedule `days` are 0 = Sunday,
@@ -630,6 +648,7 @@ pub trait MaintenanceApi: 'static {     // root component MaintenancePage
     async fn repair(&self) -> AppResult<RepairView>;                 // refused unless the tunnel is idle; own task
     async fn leak_self_test(&self, cancel: CancellationToken) -> AppResult<LeakTestView>;
     async fn routing_self_test(&self, cancel: CancellationToken) -> AppResult<RouteTestView>;
+    async fn check_network(&self, cancel: CancellationToken) -> AppResult<NetCheckView>;  // also published
     async fn export_diagnostics(&self, cancel: CancellationToken) -> AppResult<Option<ExportDone>>; // None = dismissed
     async fn restart_capture(&self) -> AppResult<CaptureView>;
     async fn open_snapshots_folder(&self) -> AppResult<()>;
@@ -638,8 +657,22 @@ pub trait MaintenanceApi: 'static {     // root component MaintenancePage
     async fn set_aside_corrupt(&self, id: String) -> AppResult<()>;   // <name>.corrupt-<unix>.json, start empty
 }
 pub struct MaintenanceState { tunnel: TunnelPhase, protection: Option<ProtectionView>, repair: RepairView,
-    capture: CaptureView, fault: Option<FaultView>, export: ExportView, legacy: LegacyView }
+    capture: CaptureView, fault: Option<FaultView>, export: ExportView, legacy: LegacyView,
+    network: NetworkView /* { running, last: Option<NetCheckView> } */ }
+pub struct NetCheckView { at, via_session: bool, verdict: Verdict /* the result's colour */,
+    steps: Vec<NetStepView>, modes: Vec<vpnte_view::netmode::NetMode>, headline: Msg, advice: Vec<Msg> }
+pub struct NetStepView { kind: NetStepKind /* Dns Tcp Tls Bytes Udp Servers DnsCapture */, verdict: Verdict, detail: Msg }
 ```
+«Режим сети» (RU audit items 9, 11, 6): the panel shows `state.network` (the backend also runs the
+check at start and after a network change, and clears `last` when the network changes) with the
+button «Проверить сеть», and «Проверить все серверы» (only where a `ServersApi` context exists):
+`ServersApi::check_group_health` over every group in turn, summed; a group whose check failed
+(engine missing, another check of the group, every key postponed) is counted with the first reason
+(`ui.maintenance.network.servers.failed`), only an empty or vanished group is skipped. The
+result's colour is `NetCheckView::verdict` (`Ok` only for a clean pass; no internet = `Fail`,
+nothing proven = `NotChecked`). The start page's quiet network
+strip (`dashboard::netmode`) reads the same `state.network.last.modes` through the
+`MaintenanceApi` context (absent in demos: no strip) and names `vpnte_view::netmode::net_banner`.
 Types: `SystemReport` / `DiagItem` / `DiagCategory`, `ProtectionView` (+ `KillSwitchState`,
 `FirewallBlock`, `FwProfile`, `ProtectionTest`), `RepairStep` (`ALL`, run in order, each independent),
 `StepOutcome` (`done` / `failed(msg)` / `blocked(msg)`), `StepState`, `RepairView`, `LeakTestView`

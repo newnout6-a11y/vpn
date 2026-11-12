@@ -117,12 +117,12 @@ async fn tcp_frames_the_question_and_the_reply() {
         s.write_all(b"reply").await.unwrap();
         question
     });
-    let reply = tcp(addr, b"question").await.unwrap();
+    let reply = tcp(addr, None, b"question").await.unwrap();
     assert_eq!(reply, b"reply");
     assert_eq!(server.await.unwrap(), b"question");
     let closed = {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         listener.local_addr().unwrap()
     };
-    assert!(tcp(closed, b"question").await.is_err());
+    assert!(tcp(closed, None, b"question").await.is_err());
 }

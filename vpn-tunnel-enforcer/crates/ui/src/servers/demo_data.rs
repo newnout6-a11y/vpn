@@ -204,6 +204,8 @@ impl Seed {
             last_seen_in_subscription_at: Some(now - 30 * MIN),
             archived: None,
             enabled: true,
+            // The trial provider sends `hide-settings` in the demo.
+            config_hidden: self.group == Some("trial"),
         }
     }
 }
@@ -317,6 +319,14 @@ fn demo_groups(now: UnixMs) -> Vec<GroupView> {
             expires_at: Some(now + 19 * DAY),
             web_page_url: Some("https://panel.example.net/account".into()),
             refresh_minutes: None,
+            support_url: Some("https://t.me/support_example".into()),
+            announce: Some("Плановые работы 20 ноября с 03:00 до 04:00 МСК".into()),
+            provider_refresh_hours: Some(6),
+            send_hwid: true,
+            header_names: vec!["X-Panel-Client".into()],
+            moved_at: Some(now - 3 * DAY),
+            host: Some("sub.example-provider.net".into()),
+            settings_hidden: false,
         },
         GroupView {
             id: "trial".into(),
@@ -332,6 +342,8 @@ fn demo_groups(now: UnixMs) -> Vec<GroupView> {
             expires_at: Some(now - 2 * DAY),
             web_page_url: None,
             refresh_minutes: NonZeroU32::new(120),
+            settings_hidden: true,
+            ..GroupView::default()
         },
         GroupView {
             id: "keys".into(),

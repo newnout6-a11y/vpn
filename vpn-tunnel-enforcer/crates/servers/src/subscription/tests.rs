@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use vpnte_base::types::{ClientDevice, ProxyKind};
@@ -49,9 +50,41 @@ impl Seen {
 /// connection open without answering.
 type Handler = Arc<dyn Fn(&Seen) -> Option<Vec<u8>> + Send + Sync>;
 
+const TEST_CERT: &[u8] = include_bytes!("testdata/loopback.der");
+const TEST_KEY: &[u8] = include_bytes!("testdata/loopback.key.der");
+
+/// The only root the fetcher trusts in tests: the self-signed certificate of the loopback HTTPS
+/// panels (`127.0.0.1`, `localhost`; valid until 2126).
+pub(crate) fn test_root() -> reqwest::Certificate {
+    reqwest::Certificate::from_der(TEST_CERT).expect("test certificate")
+}
+
+fn tls_acceptor() -> tokio_rustls::TlsAcceptor {
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(TEST_KEY.to_vec()));
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![CertificateDer::from(TEST_CERT.to_vec())], key)
+        .unwrap();
+    tokio_rustls::TlsAcceptor::from(Arc::new(config))
+}
+
+/// How a test server talks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Http,
+    /// HTTPS with the loopback test certificate ([`test_root`]).
+    Https,
+    /// Writes these bytes on accept and answers nothing (a non-TLS peer, a hang-up).
+    Greeting(&'static [u8]),
+}
+
 /// A loopback HTTP/1.1 server; every connection answers one request and closes.
 pub(crate) struct Server {
     pub(crate) addr: SocketAddr,
+    https: bool,
     seen: Arc<Mutex<Vec<Seen>>>,
     accepted: Arc<Mutex<usize>>,
     /// Applied before every answer (a slow panel).
@@ -69,23 +102,31 @@ impl Server {
     pub(crate) async fn start(
         handler: impl Fn(&Seen) -> Option<Vec<u8>> + Send + Sync + 'static,
     ) -> Self {
-        Self::start_with(None, Arc::new(handler)).await
+        Self::start_with(Mode::Http, Arc::new(handler)).await
     }
 
-    /// `greeting`: bytes written at once on accept, before reading anything (a non-TLS peer).
-    async fn start_with(greeting: Option<&'static [u8]>, handler: Handler) -> Self {
+    /// The same over HTTPS (`url` gives `https://127.0.0.1:<port>`).
+    pub(crate) async fn start_tls(
+        handler: impl Fn(&Seen) -> Option<Vec<u8>> + Send + Sync + 'static,
+    ) -> Self {
+        Self::start_with(Mode::Https, Arc::new(handler)).await
+    }
+
+    pub(crate) async fn start_with(mode: Mode, handler: Handler) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let accepted = Arc::new(Mutex::new(0));
         let delay = Arc::new(Mutex::new(Duration::ZERO));
         let (log, count, pause) = (seen.clone(), accepted.clone(), delay.clone());
+        let tls = (mode == Mode::Https).then(tls_acceptor);
         let task = tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
                 *count.lock() += 1;
                 let (log, handler, pause) = (log.clone(), handler.clone(), pause.clone());
+                let tls = tls.clone();
                 tokio::spawn(async move {
-                    if let Some(bytes) = greeting {
+                    if let Mode::Greeting(bytes) = mode {
                         if !bytes.is_empty() {
                             // Read the client's first flight: closing with unread data sends a
                             // reset on Windows, which would hide what the client makes of `bytes`.
@@ -96,24 +137,20 @@ impl Server {
                         }
                         return;
                     }
-                    let Some(req) = read_request(&mut socket).await else {
-                        return;
-                    };
-                    log.lock().push(req.clone());
-                    let wait = *pause.lock();
-                    tokio::time::sleep(wait).await;
-                    match handler(&req) {
-                        Some(bytes) => {
-                            let _ = socket.write_all(&bytes).await;
-                            let _ = socket.shutdown().await;
+                    match tls {
+                        Some(tls) => {
+                            if let Ok(stream) = tls.accept(socket).await {
+                                serve(stream, &log, &handler, &pause).await;
+                            }
                         }
-                        None => tokio::time::sleep(Duration::from_secs(60)).await,
+                        None => serve(socket, &log, &handler, &pause).await,
                     }
                 });
             }
         });
         Self {
             addr,
+            https: mode == Mode::Https,
             seen,
             accepted,
             delay,
@@ -122,7 +159,8 @@ impl Server {
     }
 
     pub(crate) fn url(&self, path: &str) -> Url {
-        Url::parse(&format!("http://{}{path}", self.addr)).unwrap()
+        let scheme = if self.https { "https" } else { "http" };
+        Url::parse(&format!("{scheme}://{}{path}", self.addr)).unwrap()
     }
 
     pub(crate) fn seen(&self) -> Vec<Seen> {
@@ -135,7 +173,28 @@ impl Server {
     }
 }
 
-async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<Seen> {
+async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
+    mut socket: S,
+    log: &Mutex<Vec<Seen>>,
+    handler: &Handler,
+    pause: &Mutex<Duration>,
+) {
+    let Some(req) = read_request(&mut socket).await else {
+        return;
+    };
+    log.lock().push(req.clone());
+    let wait = *pause.lock();
+    tokio::time::sleep(wait).await;
+    match handler(&req) {
+        Some(bytes) => {
+            let _ = socket.write_all(&bytes).await;
+            let _ = socket.shutdown().await;
+        }
+        None => tokio::time::sleep(Duration::from_secs(60)).await,
+    }
+}
+
+async fn read_request<S: AsyncRead + Unpin>(socket: &mut S) -> Option<Seen> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -170,10 +229,66 @@ pub(crate) fn reply(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Opti
     Some(bytes)
 }
 
+/// A loopback HTTP proxy that only tunnels (`CONNECT`, what an HTTPS request through a proxy
+/// route sends); it counts the tunnels it opened.
+pub(crate) struct Tunnel {
+    pub(crate) addr: SocketAddr,
+    opened: Arc<Mutex<usize>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Tunnel {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl Tunnel {
+    pub(crate) async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let opened = Arc::new(Mutex::new(0));
+        let count = opened.clone();
+        let task = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let count = count.clone();
+                tokio::spawn(async move {
+                    // CONNECT's target is `127.0.0.1:<port>`: never anything but loopback here.
+                    let Some(req) = read_request(&mut socket).await else {
+                        return;
+                    };
+                    let Ok(mut upstream) = TcpStream::connect(req.path.as_str()).await else {
+                        return;
+                    };
+                    *count.lock() += 1;
+                    let ok = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+                    if socket.write_all(ok).await.is_ok() {
+                        let _ = tokio::io::copy_bidirectional(&mut socket, &mut upstream).await;
+                    }
+                });
+            }
+        });
+        Self { addr, opened, task }
+    }
+
+    pub(crate) fn route(&self) -> Route {
+        let addr = HostPort::new("127.0.0.1", self.addr.port()).unwrap();
+        Route::proxy(ProxyKind::Http, &addr, None)
+    }
+
+    pub(crate) fn opened(&self) -> usize {
+        *self.opened.lock()
+    }
+}
+
 pub(crate) fn fetcher(routes: Vec<Route>) -> SubscriptionFetcher {
     SubscriptionFetcher::with_plan(
         Hwids::of(&machine(), None),
-        RoutePlan { routes, doh: false },
+        RoutePlan {
+            routes,
+            doh: false,
+            relay: false,
+        },
     )
 }
 
@@ -181,9 +296,13 @@ fn direct() -> SubscriptionFetcher {
     fetcher(vec![Route::Direct])
 }
 
+/// A fetch as a stored group makes it: the HWID variants first (the plan these tests pin).
 async fn fetch(f: &SubscriptionFetcher, url: &Url) -> Result<ParseReport, FetchError> {
-    f.fetch(url, ClientDevice::Pc, &CancellationToken::new())
+    let mut req = FetchRequest::new(url.clone(), ClientDevice::Pc);
+    req.send_hwid = true;
+    f.fetch_request(&req, &CancellationToken::new())
         .await
+        .map(|f| f.report)
 }
 
 /// A port nothing listens on (bound, then released).
@@ -334,9 +453,11 @@ fn hwids_and_identity_headers_match_the_vectors() {
     for device in DEVICES {
         assert_eq!(fixed.get(device), "abc");
     }
-    let agents = vpnte_profiles::device::user_agents(ClientDevice::Pc, fixed.get(ClientDevice::Pc));
+    let agents =
+        vpnte_profiles::device::user_agents(ClientDevice::Pc, Some(fixed.get(ClientDevice::Pc)));
     assert_eq!(agents[0], "Happ/3.22.1/Windows/abc");
-    let mac = vpnte_profiles::device::user_agents(ClientDevice::Mac, ids.get(ClientDevice::Mac));
+    let mac =
+        vpnte_profiles::device::user_agents(ClientDevice::Mac, Some(ids.get(ClientDevice::Mac)));
     assert_eq!(
         mac.len(),
         4,
@@ -685,7 +806,7 @@ async fn transport_failures_are_classified() {
     );
 
     let plain = Server::start_with(
-        Some(b"HTTP/1.1 400 Bad Request\r\n\r\n"),
+        Mode::Greeting(b"HTTP/1.1 400 Bad Request\r\n\r\n"),
         Arc::new(|_| None),
     )
     .await;
@@ -697,7 +818,7 @@ async fn transport_failures_are_classified() {
         "a TLS failure is not retried with other agents"
     );
 
-    let hangup = Server::start_with(Some(b""), Arc::new(|_| None)).await;
+    let hangup = Server::start_with(Mode::Greeting(b""), Arc::new(|_| None)).await;
     assert_eq!(
         fetch(&direct(), &hangup.url("/s")).await.map(|_| ()),
         net(NetFail::Reset)

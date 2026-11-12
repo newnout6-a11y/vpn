@@ -270,6 +270,14 @@ impl Actor {
                     self.warn(crate::api::TunWarning::from_msg(w.clone()));
                 }
                 self.enter_running(session, work.events.take());
+                if let Some((profile_id, cause)) = self.failing_over.take() {
+                    // Before the finish: whoever judges the run must know which server it is.
+                    self.emit(TunnelEvent::FailedOver {
+                        generation,
+                        profile_id,
+                        cause,
+                    });
+                }
                 self.emit(TunnelEvent::StartFinished {
                     generation,
                     ok: true,
@@ -277,6 +285,7 @@ impl Actor {
                 Ok(receipt)
             }
             Err(cause) => {
+                self.failing_over = None;
                 tracing::warn!(error = %cause, generation, "tunnel start failed");
                 let err = self.compensate(work, cause).await;
                 self.emit(TunnelEvent::StartFinished {

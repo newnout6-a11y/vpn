@@ -30,6 +30,9 @@ pub(super) enum Answer {
     Body {
         headers: Vec<(String, String)>,
         body: Vec<u8>,
+        /// Where the leading run of 301 / 308 redirects pointed: the subscription's permanent new
+        /// address (a 302 / 307 after it is temporary and does not count).
+        moved: Option<Url>,
     },
     /// HTTP status >= 400.
     Status(u16),
@@ -54,11 +57,21 @@ pub(super) struct Hops {
     pub origin_public: Option<bool>,
 }
 
-/// GET `url` with `headers`, following at most five redirects.
+/// The headers of one attempt: the URL's own host gets `own`; once a redirect leaves that host
+/// the rest of the chain gets `elsewhere` (no identity, no user headers), even if it comes back.
+/// Hosts, not origins: an `http` -> `https` upgrade on the panel's own host keeps the HWID that
+/// HWID-bound panels need, while a CDN or paste host never sees a token.
+#[derive(Clone, Copy)]
+pub(super) struct Sends<'a> {
+    pub own: &'a HeaderMap,
+    pub elsewhere: &'a HeaderMap,
+}
+
+/// GET `url` with `sends`, following at most five redirects.
 pub(super) async fn get(
     client: &reqwest::Client,
     url: &Url,
-    headers: &HeaderMap,
+    sends: Sends<'_>,
     hops: Hops,
     cancel: &CancellationToken,
 ) -> Result<Answer, Abort> {
@@ -66,11 +79,20 @@ pub(super) async fn get(
     let mut current = url.clone();
     let mut visited: Vec<Url> = Vec::new();
     let mut origin_public = hops.origin_public;
+    // The target of the leading run of permanent hops; `permanent` ends the run.
+    let mut moved: Option<Url> = None;
+    let mut permanent = true;
+    let mut same_host = true;
     for _ in 0..MAX_REQUESTS {
         if visited.contains(&current) {
             return Ok(Answer::Unusable("redirect loop"));
         }
         visited.push(current.clone());
+        let headers = if same_host {
+            sends.own
+        } else {
+            sends.elsewhere
+        };
         let request = client.get(current.clone()).headers(headers.clone()).send();
         let response = cancellable(cancel, request)
             .await?
@@ -82,7 +104,11 @@ pub(super) async fn get(
             }
             let headers = header_pairs(response.headers());
             return Ok(match read_body(response, cancel, proxied).await? {
-                Some(body) => Answer::Body { headers, body },
+                Some(body) => Answer::Body {
+                    headers,
+                    body,
+                    moved,
+                },
                 None => Answer::Unusable("body over the size limit"),
             });
         }
@@ -115,7 +141,14 @@ pub(super) async fn get(
                 Some(Refusal::PrivateTarget) => {
                     return Ok(Answer::Unusable("redirect into a private network"));
                 }
-                None => current = next_url,
+                None => {
+                    permanent &= matches!(status, 301 | 308);
+                    if permanent {
+                        moved = Some(next_url.clone());
+                    }
+                    same_host &= next_url.host() == current.host();
+                    current = next_url;
+                }
             }
             continue;
         }
@@ -125,17 +158,31 @@ pub(super) async fn get(
             return Ok(Answer::Body {
                 headers: headers_seen,
                 body: target.trim().as_bytes().to_vec(),
+                moved: None,
             });
         }
         return Ok(match read_body(response, cancel, proxied).await? {
             Some(body) if !body.iter().all(u8::is_ascii_whitespace) => Answer::Body {
                 headers: headers_seen,
                 body,
+                moved: None,
             },
             _ => Answer::Unusable("unsupported redirect target"),
         });
     }
     Ok(Answer::Unusable("too many redirects"))
+}
+
+/// Whether the subscription at `base` may move to (or fall back on, or name as a provider)
+/// `target`: the rules of a redirect hop (no `https` -> `http`: the device headers would travel in
+/// clear text; a public subscription never points into a private network). Names are resolved
+/// by the system only when `local_dns` (the answer came direct, as [`get`] does): behind a proxy
+/// a lookup would send them to the local resolver the plan avoids, so names then count as public
+/// and only IP literals and `localhost` are checked.
+pub(super) async fn vet_relocation(base: &Url, target: &Url, local_dns: bool) -> bool {
+    let public = is_public_origin(base, local_dns).await;
+    let addrs = target_addrs(target, local_dns && public).await;
+    policy::refuse_hop(base, target, public, &addrs).is_none()
 }
 
 /// Response headers as (lower-case name, value) pairs; raw UTF-8 values (titles) are kept.

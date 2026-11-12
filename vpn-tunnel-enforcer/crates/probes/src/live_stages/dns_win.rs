@@ -12,8 +12,8 @@ use windows::Win32::Foundation::{
     DNS_INFO_NO_RECORDS, ERROR_SUCCESS, ERROR_TIMEOUT, WIN32_ERROR,
 };
 use windows::Win32::NetworkManagement::Dns::{
-    DNS_QUERY_STANDARD, DNS_RECORDA, DNS_RECORDW, DNS_TYPE, DNS_TYPE_A, DNS_TYPE_AAAA,
-    DNS_TYPE_PTR, DnsFree, DnsFreeRecordList, DnsQuery_W,
+    DNS_QUERY_OPTIONS, DNS_QUERY_STANDARD, DNS_QUERY_WIRE_ONLY, DNS_RECORDA, DNS_RECORDW, DNS_TYPE,
+    DNS_TYPE_A, DNS_TYPE_AAAA, DNS_TYPE_PTR, DnsFree, DnsFreeRecordList, DnsQuery_W,
 };
 use windows::core::PCWSTR;
 
@@ -143,26 +143,39 @@ struct RawRecord {
 
 /// Runs the synchronous query on the blocking pool; the caller's timeout drops a late answer.
 async fn blocking_query(name: String, rtype: DNS_TYPE) -> Result<Vec<RawRecord>, String> {
-    tokio::task::spawn_blocking(move || query(&name, rtype))
+    tokio::task::spawn_blocking(move || query(&name, rtype, DNS_QUERY_STANDARD))
         .await
         .map_err(|_| "DNS query task failed".to_owned())?
 }
 
-fn query(name: &str, rtype: DNS_TYPE) -> Result<Vec<RawRecord>, String> {
+/// A / AAAA addresses of `name` from the network only (`DNS_QUERY_WIRE_ONLY`: no cache, no
+/// hosts file), exactly as the Windows DNS client sends the query to its configured servers.
+/// The DNS canary relies on it: a cached answer would say nothing about where queries go now.
+pub(crate) async fn wire_addrs(name: String, v6: bool) -> Result<Vec<IpAddr>, String> {
+    let rtype = if v6 { DNS_TYPE_AAAA } else { DNS_TYPE_A };
+    let records = tokio::task::spawn_blocking(move || query(&name, rtype, DNS_QUERY_WIRE_ONLY))
+        .await
+        .map_err(|_| "DNS query task failed".to_owned())??;
+    Ok(records
+        .into_iter()
+        .filter_map(|r| match (r.rtype, r.value) {
+            (1 | 28, Raw::Addr(ip)) => Some(ip),
+            _ => None,
+        })
+        .collect())
+}
+
+fn query(
+    name: &str,
+    rtype: DNS_TYPE,
+    options: DNS_QUERY_OPTIONS,
+) -> Result<Vec<RawRecord>, String> {
     let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
     let mut list: *mut DNS_RECORDA = std::ptr::null_mut();
     // SAFETY: `wide` is NUL-terminated and outlives the call; `list` receives a record list
     // owned by us and freed below.
-    let status = unsafe {
-        DnsQuery_W(
-            PCWSTR(wide.as_ptr()),
-            rtype,
-            DNS_QUERY_STANDARD,
-            None,
-            &mut list,
-            None,
-        )
-    };
+    let status =
+        unsafe { DnsQuery_W(PCWSTR(wide.as_ptr()), rtype, options, None, &mut list, None) };
     let records = if list.is_null() {
         Vec::new()
     } else {

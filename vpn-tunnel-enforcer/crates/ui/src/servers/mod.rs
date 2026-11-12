@@ -12,6 +12,7 @@ mod batch;
 mod demo;
 mod demo_data;
 mod detail;
+mod facts;
 mod group;
 mod live;
 mod live_model;
@@ -21,6 +22,7 @@ mod model;
 mod page;
 mod present;
 mod report;
+mod request;
 mod row;
 mod state;
 #[cfg(test)]

@@ -172,6 +172,9 @@ impl Coordinator for Idle {
     fn session(&self) -> Option<SessionInfo> {
         None
     }
+    fn left_by(&self) -> Option<Owner> {
+        None
+    }
 
     fn busy(&self) -> bool {
         false
@@ -709,4 +712,32 @@ async fn the_pages_render_over_the_package_contexts() {
         }
         dom.render_immediate(&mut NoOpMutations);
     }
+}
+
+/// b4: the next event says how its schedule takes the traffic, so the page marks a TUN one
+/// unavailable in an unelevated app (its start would answer `Permission`).
+#[test]
+fn the_next_event_carries_its_capture() {
+    use vpnte_automation::schedule::{self as core, HhMm as CoreTime};
+    use vpnte_automation::scheduler::{BoundaryKind, Upcoming};
+    let time = |h| CoreTime::new(h, 0).expect("valid time");
+    let work = core::ScheduleEntry {
+        id: "w".into(),
+        name: "Work".into(),
+        enabled: true,
+        days: vec![1],
+        start_time: time(9),
+        end_time: time(18),
+        profile_id: String::new(),
+        capture: core::Capture::Tun,
+        upstream: core::Upstream::LocalProxy,
+    };
+    let upcoming = Upcoming {
+        kind: BoundaryKind::Start,
+        at: 5,
+        schedule_id: "w".into(),
+    };
+    let next = super::schedule::next_event(&upcoming, &[work]).expect("named");
+    assert_eq!((next.name.as_str(), next.capture), ("Work", Capture::Tun));
+    assert!(!next.capture.available(false));
 }

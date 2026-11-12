@@ -291,6 +291,44 @@ fn adapting_and_restarting_hand_over_to_native_recovery() {
     }
 }
 
+/// fixauto-a1: restarts whose starts failed leave `Error`; the failover's sibling run that
+/// follows (no restart announced) is still accepted and confirmed on its own evidence. Inside
+/// an operation, or for another generation, it is not.
+#[test]
+fn a_failover_run_confirms_after_failed_restarts() {
+    let mut h = H::new();
+    assert!(h.connect());
+    for generation in 1..=3 {
+        h.native_down();
+        h.runtime(TunStatusKind::Restarting { attempt: 1, max: 3 })
+            .unwrap();
+        h.fsm.native_start_began(generation).unwrap();
+        h.fsm
+            .native_start_finished(generation, false, h.e())
+            .unwrap();
+        assert_eq!(h.snap().state, TunnelState::Error);
+    }
+    h.fsm.native_start_began(4).unwrap();
+    h.native_up(456);
+    assert_eq!(h.fsm.native_failover(3, h.e()), Err(Invalid), "stale run");
+    h.fsm.native_failover(4, h.e()).unwrap();
+    h.fsm.native_start_finished(4, true, h.e()).unwrap();
+    let s = h.snap();
+    assert_eq!((s.state, s.transition), (TunnelState::Connected, None));
+    assert_eq!((s.mode, s.pid), (Some(TunnelMode::Tun), Some(456)));
+
+    let op = h.begin(OpKind::Rotation);
+    h.fsm.native_start_began(5).unwrap();
+    assert_eq!(
+        h.fsm.native_failover(5, h.e()),
+        Err(Invalid),
+        "the operation decides"
+    );
+    assert_eq!(h.fsm.native_start_finished(5, true, h.e()), Err(Invalid));
+    h.end(&op, OpStatus::Success, None).unwrap();
+    assert_eq!(h.snap().state, TunnelState::Connected);
+}
+
 /// AT-00-007 / AT-02-011: an explicit stop wins over native recovery and both older receipts.
 #[test]
 fn explicit_stop_wins_over_native_recovery() {

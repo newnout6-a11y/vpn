@@ -8,7 +8,7 @@ use vpnte_base::{AppError, AppResult, Msg};
 use super::{Servers, group_not_found, server_not_found};
 use crate::model::{
     ArchiveReason, Archived, GroupId, GroupKind, Origin, ProfileId, REFRESH_OVERRIDE_MIN,
-    ServersDoc, clean_group_name,
+    ServerGroup, ServersDoc, clean_group_name,
 };
 
 // --- archive and purge ---
@@ -127,6 +127,9 @@ impl Servers {
                     return Err(AppError::validation(Msg::new("servers.group.keepManual")));
                 }
                 let target = doc.ensure_manual_group(now);
+                // The provider's hide-settings goes with its keys (audit item 22: hidden configs
+                // are never shown or exported, also once the group is gone).
+                let hidden = doc.group(id).is_some_and(ServerGroup::hides_settings);
                 // Duplicates are kept apart only within a group: a key the manual group already
                 // holds stays there once, and the copy of the deleted group goes with it.
                 let mut held: HashMap<[u8; 16], ProfileId> = doc
@@ -151,6 +154,7 @@ impl Servers {
                     row.group_id = target.clone();
                     row.origin = Origin::Manual;
                     row.missing_since = None;
+                    row.hidden |= hidden;
                     true
                 });
                 // The selection follows its key to the copy the manual group keeps.

@@ -134,7 +134,8 @@ pub enum TunStatusKind {
     Error {
         warning: Msg,
     },
-    /// Crash budget exhausted, switched to a live sibling key.
+    /// A crashed server could not come back; this sibling (display name) runs instead. Announced
+    /// once, after its start succeeded (the old wire name is kept for the logs).
     PostTrialFailover {
         name: String,
     },

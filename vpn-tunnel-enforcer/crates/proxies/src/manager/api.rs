@@ -111,7 +111,12 @@ impl ProxyOps for ProxyManager {
     }
 
     async fn add(&self, profile_id: String) -> Result<ProxyStatus, ProxyError> {
-        let slot = self.inner.add_op(profile_id).await?;
+        let slot = self.inner.add_op(profile_id, false).await?;
+        Ok(self.inner.proxy_status(slot))
+    }
+
+    async fn borrow(&self, profile_id: String) -> Result<ProxyStatus, ProxyError> {
+        let slot = self.inner.add_op(profile_id, true).await?;
         Ok(self.inner.proxy_status(slot))
     }
 
@@ -142,7 +147,7 @@ impl ProxyOps for ProxyManager {
         let now = now_ms();
         let reservation = {
             let mut reg = self.inner.reg.lock();
-            let routes = reg.instances(now);
+            let routes = reg.leasable(now);
             reg.leases.reserve(&req, &routes, now)?
         };
         self.inner.lease_wake.notify_one();

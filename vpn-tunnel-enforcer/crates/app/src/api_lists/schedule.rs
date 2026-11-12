@@ -240,10 +240,7 @@ fn entry_view(e: &CoreEntry) -> Option<ScheduleEntry> {
         start: ui_time(e.start_time)?,
         end: ui_time(e.end_time)?,
         profile_id: e.profile_id.clone(),
-        capture: match e.capture {
-            CoreCapture::Tun => Capture::Tun,
-            CoreCapture::Proxy => Capture::Proxy,
-        },
+        capture: ui_capture(e.capture),
         upstream: match e.upstream {
             CoreUpstream::Server => Upstream::Server,
             CoreUpstream::LocalProxy => Upstream::LocalProxy,
@@ -251,8 +248,16 @@ fn entry_view(e: &CoreEntry) -> Option<ScheduleEntry> {
     })
 }
 
-/// The reconcile task's next boundary, named after its schedule.
-fn next_event(upcoming: &Upcoming, entries: &[CoreEntry]) -> Option<NextEvent> {
+fn ui_capture(capture: CoreCapture) -> Capture {
+    match capture {
+        CoreCapture::Tun => Capture::Tun,
+        CoreCapture::Proxy => Capture::Proxy,
+    }
+}
+
+/// The reconcile task's next boundary, named after its schedule (with how it takes the
+/// traffic: the page marks a TUN one unavailable in an unelevated app).
+pub(super) fn next_event(upcoming: &Upcoming, entries: &[CoreEntry]) -> Option<NextEvent> {
     let entry = entries.iter().find(|e| e.id == upcoming.schedule_id)?;
     Some(NextEvent {
         action: match upcoming.kind {
@@ -261,6 +266,7 @@ fn next_event(upcoming: &Upcoming, entries: &[CoreEntry]) -> Option<NextEvent> {
         },
         at: upcoming.at,
         name: entry.name.clone(),
+        capture: ui_capture(entry.capture),
     })
 }
 

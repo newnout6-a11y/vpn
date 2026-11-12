@@ -15,9 +15,16 @@ use vpnte_servers::store::{Servers, ServersEvent};
 use super::AppReactions;
 use super::react::{check_reaction, check_verdict};
 
-/// A stored verdict older than this says nothing about today's network: it is not replayed at
-/// start (the memory it would teach lasts until the network changes).
+/// A stored verdict older than this is not replayed at start (a key may have been renewed).
 const STORED_MAX_AGE_MS: UnixMs = 24 * 60 * 60 * 1000;
+
+/// What a stored verdict may teach at start. A record keeps no network identity, and a ban, a
+/// freeze or a UDP cut (an offline or failed handshake too, which is how a ban looks) is a fact
+/// about the path from the network it was taken on: replayed after a move, it would rule a
+/// working server out for the whole evening. A refused key is refused from anywhere.
+pub fn replayable(verdict: CheckVerdict) -> bool {
+    verdict == CheckVerdict::KeyRejected
+}
 
 /// The report of a stored verdict; `None` for names this version does not know.
 pub fn stored_report(id: &ProfileId, record: &VerdictRecord) -> Option<Report> {
@@ -62,10 +69,12 @@ pub async fn run(
     let mut seen: HashMap<ProfileId, UnixMs> = HashMap::new();
     let fresh_after = now_ms() - STORED_MAX_AGE_MS;
     for (id, record) in servers.verdicts() {
-        if record.at >= fresh_after
-            && let Some(report) = stored_report(&id, &record)
+        let report = stored_report(&id, &record)
+            .filter(|r| record.at >= fresh_after && replayable(r.verdict));
+        if let Some(report) = report
+            && !deliver(&reactions, report, &cancel).await
         {
-            reactions.report(report);
+            return;
         }
         seen.insert(id, record.at);
     }
@@ -76,14 +85,18 @@ pub async fn run(
             () = cancel.cancelled() => return,
             event = events.recv() => match event {
                 Ok(ServersEvent::Changed) | Err(RecvError::Lagged(_)) => {
-                    new_verdicts(&reactions, &servers, &mut seen);
+                    if !new_verdicts(&reactions, &servers, &mut seen, &cancel).await {
+                        return;
+                    }
                 }
                 Ok(_) => {}
                 Err(RecvError::Closed) => return,
             },
             Some(()) = changed(&mut checks) => {
-                if let Some(live) = &live {
-                    new_live_checks(&reactions, live, &mut live_seen);
+                if let Some(live) = &live
+                    && !new_live_checks(&reactions, live, &mut live_seen, &cancel).await
+                {
+                    return;
                 }
             }
         }
@@ -97,30 +110,52 @@ async fn changed<T>(rx: &mut Option<tokio::sync::watch::Receiver<T>>) -> Option<
     }
 }
 
-fn new_verdicts(
+/// Hands `report` over, waiting for room in the reactions' inbox (a group check records dozens
+/// of verdicts in one write); `false` once cancelled or the task is gone.
+async fn deliver(reactions: &AppReactions, report: Report, cancel: &CancellationToken) -> bool {
+    tokio::select! {
+        () = cancel.cancelled() => false,
+        delivered = reactions.deliver(report) => delivered,
+    }
+}
+
+/// Verdicts recorded since the last look, each marked seen only once it was delivered.
+async fn new_verdicts(
     reactions: &AppReactions,
     servers: &Servers,
     seen: &mut HashMap<ProfileId, UnixMs>,
-) {
+    cancel: &CancellationToken,
+) -> bool {
     for (id, record) in servers.verdicts() {
         if seen.get(&id).is_some_and(|at| *at >= record.at) {
             continue;
         }
-        if let Some(report) = stored_report(&id, &record) {
-            reactions.report(report);
+        if let Some(report) = stored_report(&id, &record)
+            && !deliver(reactions, report, cancel).await
+        {
+            return false;
         }
         seen.insert(id, record.at);
     }
+    true
 }
 
-fn new_live_checks(reactions: &AppReactions, live: &LiveCheckService, seen: &mut UnixMs) {
+async fn new_live_checks(
+    reactions: &AppReactions,
+    live: &LiveCheckService,
+    seen: &mut UnixMs,
+    cancel: &CancellationToken,
+) -> bool {
     let checks = live.history().list(None, None);
-    let newest = checks.iter().map(|c| c.finished_at).max().unwrap_or(*seen);
+    let after = *seen;
     // Oldest first, so a later check of the same server is the last word.
-    for check in checks.iter().rev().filter(|c| c.finished_at > *seen) {
-        if let Some(report) = live_report(check) {
-            reactions.report(report);
+    for check in checks.iter().rev().filter(|c| c.finished_at > after) {
+        if let Some(report) = live_report(check)
+            && !deliver(reactions, report, cancel).await
+        {
+            return false;
         }
+        *seen = check.finished_at.max(*seen);
     }
-    *seen = newest.max(*seen);
+    true
 }

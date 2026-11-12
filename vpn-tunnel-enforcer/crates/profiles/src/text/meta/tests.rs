@@ -207,3 +207,21 @@ fn content_disposition_names_the_subscription() {
         assert_eq!(name(value).as_deref(), Some("ВПН"), "{value}");
     }
 }
+
+/// ru-2026 item 2: Hiddify puts the same keys behind `//` (GitHub raw files cannot send headers);
+/// a base64 blob that happens to start with `//` is the body, not a comment.
+#[test]
+fn slash_comment_lines_carry_metadata() {
+    let body = "//profile-title: Hiddify Sub\n// support-url: https://t.me/support_example\n#announce: Hi\nvless://x\n";
+    let (meta, rest) = body_meta(body);
+    assert_eq!(meta.title.as_deref(), Some("Hiddify Sub"));
+    assert_eq!(
+        meta.support_url.as_deref(),
+        Some("https://t.me/support_example")
+    );
+    assert_eq!(meta.announce.as_deref(), Some("Hi"));
+    assert_eq!(rest, "vless://x\n");
+    let blob = "//8AAAAA+QWxsIFZQTg==\n";
+    let (meta, rest) = body_meta(blob);
+    assert_eq!((meta, rest), (SubscriptionMeta::default(), blob));
+}

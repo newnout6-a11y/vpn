@@ -171,3 +171,62 @@ fn capacity_forgets_the_oldest() {
         Some(vec![ip("203.0.113.3")])
     );
 }
+
+/// Review a6: an OS answer taken while the chain fails (an ISP stub page, a captive portal)
+/// never replaces a chain-verified address and is never written to disk; with nothing verified
+/// it still bridges this run.
+#[tokio::test]
+async fn os_answers_never_replace_a_verified_address() {
+    let cache = LastKnown::default();
+    let good = chain(answers(&["203.0.113.10"]));
+    server("vpn.example", &any, &good, &cache, never_asked)
+        .await
+        .unwrap();
+    let dead = chain(Act::Fail);
+    let stub = || os(Ok(addrs_of(&["10.10.10.10"])));
+    let found = server("vpn.example", &any, &dead, &cache, stub).await;
+    assert_eq!(found.map(|f| f.addrs), Ok(addrs_of(&["10.10.10.10"])));
+    let failing = || os(Err(ResolveError::Failed));
+    let bridged = server("vpn.example", &any, &dead, &cache, failing).await;
+    assert_eq!(
+        bridged.map(|f| (f.addrs, f.last_known)),
+        Ok((addrs_of(&["203.0.113.10"]), true)),
+        "the verified address bridges, not the stub"
+    );
+    let unverified = server("portal.example", &any, &dead, &cache, stub).await;
+    assert!(unverified.is_ok());
+    let stored: Vec<String> = cache.entries().into_iter().map(|e| e.0).collect();
+    assert_eq!(stored, ["vpn.example"], "only chain answers are persisted");
+    assert_eq!(
+        cache.recall("portal.example", &any),
+        Some(addrs_of(&["10.10.10.10"])),
+        "in memory for this run"
+    );
+}
+
+/// Review a5: nothing older than the memory's week is handed out, however long the process
+/// runs after it was seeded.
+#[test]
+fn recall_applies_the_week() {
+    let cache = LastKnown::default();
+    let day: UnixMs = 24 * 60 * 60 * 1000;
+    cache.seed(vec![
+        (
+            "old.example".into(),
+            vec![ip("203.0.113.1")],
+            now_ms() - 8 * day,
+        ),
+        (
+            "recent.example".into(),
+            vec![ip("203.0.113.2")],
+            now_ms() - 6 * day,
+        ),
+    ]);
+    assert_eq!(cache.recall("old.example", &any), None);
+    assert_eq!(
+        cache.recall("recent.example", &any),
+        Some(vec![ip("203.0.113.2")])
+    );
+    assert!(fresh(now_ms() - 7 * day + 1000, now_ms()));
+    assert!(!fresh(now_ms() - 7 * day - 1000, now_ms()));
+}

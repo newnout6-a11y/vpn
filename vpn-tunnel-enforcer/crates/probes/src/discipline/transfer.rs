@@ -16,11 +16,10 @@ use tokio::io::AsyncReadExt;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::AppError;
-use vpnte_base::types::Loopback;
 use vpnte_profiles::countries::Iso2;
 
 use crate::key_health::parse_trace;
-use crate::live::wire::{HeadError, Stream, Wire, exchange_head, io_text, read_body};
+use crate::live::wire::{Dial, HeadError, Stream, Wire, exchange_head, io_text, read_body};
 use crate::ping::rtt_ms;
 
 /// Host of the transfer and trace requests.
@@ -97,11 +96,12 @@ enum Stop {
     Failed(String),
 }
 
-/// Runs the check through `proxy` on one connection: the trace first when asked (keep-alive),
-/// then the transfer. `Err` only on cancellation.
+/// Runs the check over one connection made by `dial` (through a proxy, or direct for the
+/// network-mode check): the trace first when asked (keep-alive), then the transfer. `Err` only
+/// on cancellation.
 pub(crate) async fn check(
     wire: &Wire,
-    proxy: &Loopback,
+    dial: Dial<'_>,
     with_trace: bool,
     limits: Limits,
     cancel: &CancellationToken,
@@ -116,7 +116,7 @@ pub(crate) async fn check(
     };
     let run = async {
         let (mut stream, _) = wire
-            .open_counted(proxy, TRANSFER_HOST, 443, TRANSFER_HOST, &raw)
+            .open_counted(dial, TRANSFER_HOST, 443, TRANSFER_HOST, &raw)
             .await
             .map_err(|e| Stop::Failed(e.text()))?;
         if with_trace && let Some(found) = trace(&mut stream, &head).await? {

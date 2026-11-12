@@ -2,6 +2,7 @@
 //! come back (restart budget spent, or its quiet window after a freeze), the next live sibling of
 //! the same group starts instead; the selection follows a sibling that started.
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -17,15 +18,23 @@ use vpnte_tunnel::runtime::Failover;
 use super::host::{Fingerprints, latency};
 use crate::svc_tunnel::vpn_profile;
 
+/// A server that crashed out of a session is not picked again for this long: the RU freeze
+/// window, which a dial inside it extends (the runtime's `Timings::freeze`).
+const CRASHED_QUIET: Duration = Duration::from_secs(130);
+
 pub struct ServerFailover {
     servers: Arc<Servers>,
     fingerprints: Fingerprints,
-    /// The lane's session (which server crashed); set once the lifecycle exists.
+    /// The lane's session (which server crashed: the lifecycle moves it to the sibling that runs
+    /// after a failover); set once the lifecycle exists.
     session: OnceLock<watch::Receiver<Option<SessionView>>>,
     /// The check verdicts of this network (the reactions' memory); set once they exist.
     verdicts: OnceLock<Arc<Verdicts>>,
     /// The crashed server of this round and the siblings already tried for it.
     round: Mutex<(String, Vec<String>)>,
+    /// The crashed server of every recent round: a later round never goes back to one still in
+    /// its freeze window.
+    crashed: Mutex<Vec<(String, Instant)>>,
 }
 
 impl ServerFailover {
@@ -36,6 +45,7 @@ impl ServerFailover {
             session: OnceLock::new(),
             verdicts: OnceLock::new(),
             round: Mutex::new((String::new(), Vec::new())),
+            crashed: Mutex::new(Vec::new()),
         }
     }
 
@@ -59,7 +69,8 @@ fn alive(row: &ServerRow) -> Option<bool> {
             | ServerVerdict::KeyRejected
             | ServerVerdict::IpBanned
             | ServerVerdict::UdpBlocked
-            | ServerVerdict::Offline => Some(false),
+            | ServerVerdict::Offline
+            | ServerVerdict::Refused => Some(false),
             _ => None,
         },
         (None, Some(h)) => Some(h.online),
@@ -98,11 +109,19 @@ impl Failover for ServerFailover {
         let rows = self.servers.read(|doc| doc.profiles.clone());
         let mut round = self.round.lock();
         if round.0 != base_id {
+            let mut crashed = self.crashed.lock();
+            crashed.retain(|(_, at)| at.elapsed() < CRASHED_QUIET);
+            crashed.push((base_id.clone(), Instant::now()));
             *round = (base_id, Vec::new());
         }
+        let quiet: Vec<String> = (self.crashed.lock().iter())
+            .filter(|(_, at)| at.elapsed() < CRASHED_QUIET)
+            .map(|(id, _)| id.clone())
+            .collect();
         let verdicts = self.verdicts.get();
-        let skip =
-            |id: &str| round.1.iter().any(|t| t == id) || verdicts.is_some_and(|v| v.avoided(id));
+        let skip = |id: &str| {
+            round.1.iter().chain(&quiet).any(|t| t == id) || verdicts.is_some_and(|v| v.avoided(id))
+        };
         let pick = candidates(&rows, &base, skip)
             .first()
             .map(|r| (*r).clone())?;

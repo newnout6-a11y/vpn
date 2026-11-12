@@ -31,7 +31,7 @@ use vpnte_probes::live::LiveCheckService;
 use vpnte_tunnel::api::Runtime;
 
 pub use coord::{AppCoordinator, Detect, Hooks};
-pub use events::Privacy;
+pub use events::{Followed, Privacy};
 pub use failover::ServerFailover;
 pub use host::{Fingerprints, ServerHost};
 pub use lane::Lane;

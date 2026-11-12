@@ -75,7 +75,13 @@ impl ServersApi for FakeApi {
     async fn resolve_ips(&self) -> AppResult<()> {
         Ok(())
     }
-    async fn add(&self, _: String, _: AddTarget, _: ClientDevice) -> AppResult<ImportReport> {
+    async fn add(
+        &self,
+        _: String,
+        _: AddTarget,
+        _: ClientDevice,
+        _: SubscriptionRequest,
+    ) -> AppResult<ImportReport> {
         unused()
     }
     async fn remove(&self, _: &str) -> AppResult<()> {
@@ -128,6 +134,12 @@ impl ServersApi for FakeApi {
         unused()
     }
     async fn rename_group(&self, _: &str, _: String) -> AppResult<()> {
+        unused()
+    }
+    async fn set_send_hwid(&self, _: &str, _: bool) -> AppResult<()> {
+        unused()
+    }
+    async fn set_request_headers(&self, _: &str, _: String) -> AppResult<Vec<String>> {
         unused()
     }
     async fn delete_group(&self, _: &str, _: bool) -> AppResult<()> {
@@ -535,5 +547,33 @@ fn every_key_the_page_uses_exists() {
     crate::test_locales::assert_resolve(
         &crate::test_locales::catalogs(&[]),
         keys.iter().map(String::as_str),
+    );
+}
+
+/// subs-a7 / subs-b3: after an import, and when the dialog closes, the request settings go back
+/// to the new-group defaults: provider A's token header and HWID choice never reach provider B.
+#[test]
+fn the_add_form_forgets_the_request_settings() {
+    use super::state::AddForm;
+
+    let filled = || AddForm {
+        input: "https://a.example/sub/token".into(),
+        target: AddTarget::Group("g1".into()),
+        request: SubscriptionRequest {
+            send_hwid: true,
+            headers: "X-Panel-Token: a-secret".into(),
+        },
+        ..AddForm::default()
+    };
+    let mut f = filled();
+    f.imported();
+    assert_eq!(f.request, SubscriptionRequest::default());
+    assert!(f.input.is_empty() && f.target == AddTarget::Auto);
+    let mut f = filled();
+    f.closed();
+    assert_eq!(f.request, SubscriptionRequest::default());
+    assert_eq!(
+        f.input, "https://a.example/sub/token",
+        "the pasted text stays a draft"
     );
 }

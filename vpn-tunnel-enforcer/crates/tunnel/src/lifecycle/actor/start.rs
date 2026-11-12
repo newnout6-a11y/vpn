@@ -161,18 +161,24 @@ impl Actor {
             return;
         };
         start.token.cancel();
-        if let Some(ending) = report.mode_switch {
-            self.close_mode_switch(&start.job, ending).await;
-        }
+        // Before the operation's own ending, which would otherwise keep the crashed server.
+        self.follow_failover().await;
+        let mode_switch = report.mode_switch;
         let by = Provenance {
             owner: start.op.owner,
             source: start.op.source,
             correlation: start.op.correlation.clone(),
         };
         match (start.aborted, report.result) {
-            (Some(kind), result) => self.drained_after_abort(&start, kind, result).await,
-            (None, Ok(up)) => self.start_succeeded(start, up, by).await,
-            (None, Err(failure)) => self.start_failed(start, failure, by).await,
+            (Some(kind), result) => {
+                self.close_mode_switch(&start.job, mode_switch, false).await;
+                self.drained_after_abort(&start, kind, result).await;
+            }
+            (None, Ok(up)) => self.start_succeeded(start, up, by, mode_switch).await,
+            (None, Err(failure)) => {
+                self.close_mode_switch(&start.job, mode_switch, false).await;
+                self.start_failed(start, failure, by).await;
+            }
         }
         self.after_drain();
     }
@@ -238,7 +244,13 @@ pub(super) fn abort_error(kind: ErrorKind, start: bool) -> ConnError {
 
 /// Success and failure of start-type operations.
 impl Actor {
-    pub(super) async fn start_succeeded(&mut self, start: Start, up: Up, by: Provenance) {
+    pub(super) async fn start_succeeded(
+        &mut self,
+        start: Start,
+        up: Up,
+        by: Provenance,
+        mode_switch: Option<Captured>,
+    ) {
         let warnings = match &up {
             Up::Run { warnings, .. } | Up::Restarted { warnings, .. } => warnings.clone(),
             Up::Idle => Vec::new(),
@@ -249,6 +261,9 @@ impl Actor {
             Up::Idle => matches!(state, TunnelState::Connected | TunnelState::Disconnected),
             _ => state == TunnelState::Connected,
         };
+        let continues = confirmed && !matches!(up, Up::Idle);
+        self.close_mode_switch(&start.job, mode_switch, continues)
+            .await;
         if !confirmed {
             // Evidence changed between the effect's confirmation and the publish: never report
             // an unobserved success; roll back to a proven state instead.
@@ -313,16 +328,26 @@ impl Actor {
         }
         let ending = Captured::now(&self.deps);
         match job {
-            Job::Switch { kind, .. } => self.close_current(*kind, None, ending).await,
+            // Nothing replaces it: the lane's recovery stop follows (`continues: false`).
+            Job::Switch { kind, .. } => self.close_current(*kind, None, ending, false).await,
             _ => {
-                self.close_current(OutcomeKind::Unknown, Some(headline), ending)
+                self.close_current(OutcomeKind::Unknown, Some(headline), ending, false)
                     .await;
             }
         }
     }
 
     /// The other mode was ended before a start: its session closes as a mode switch (L-05).
-    pub(super) async fn close_mode_switch(&mut self, job: &Job, ending: Captured) {
+    /// `continues`: the start is confirmed and its `Up` follows.
+    pub(super) async fn close_mode_switch(
+        &mut self,
+        job: &Job,
+        ending: Option<Captured>,
+        continues: bool,
+    ) {
+        let Some(ending) = ending else {
+            return;
+        };
         let soft_start = matches!(job, Job::Connect { target, .. } if target.is_soft());
         // A session of the start's own mode was not ended by it (an unreadable Soft state
         // before a TUN start rolls back defensively).
@@ -331,17 +356,19 @@ impl Actor {
         };
         if soft != soft_start {
             let headline = soft.then(|| Msg::new(key::OUTCOME_SOFT_MODE_SWITCH));
-            self.close_current(OutcomeKind::ServerSwitch, headline, ending)
+            self.close_current(OutcomeKind::ServerSwitch, headline, ending, continues)
                 .await;
         }
     }
 
-    /// Ends the live session with `kind` (headline composed unless given) and writes its row.
+    /// Ends the live session with `kind` (headline composed unless given) and writes its row;
+    /// `continues`: the `Up` of the run that replaces it follows.
     pub(super) async fn close_current(
         &mut self,
         kind: OutcomeKind,
         headline: Option<Msg>,
         ending: Captured,
+        continues: bool,
     ) {
         let Some(live) = self.session.as_ref() else {
             return;
@@ -351,10 +378,15 @@ impl Actor {
             Some(headline) => SessionOutcome::with_headline(kind, evidence, headline),
             None => SessionOutcome::new(kind, evidence),
         };
-        self.end_session(outcome, ending.bytes).await;
+        self.end_session(outcome, ending.bytes, continues).await;
     }
 
-    pub(super) async fn end_session(&mut self, outcome: SessionOutcome, bytes: (u64, u64)) {
+    pub(super) async fn end_session(
+        &mut self,
+        outcome: SessionOutcome,
+        bytes: (u64, u64),
+        continues: bool,
+    ) {
         let Some(live) = self.session.take() else {
             return;
         };
@@ -363,6 +395,7 @@ impl Actor {
         let _ = self.events.send(SessionEvent::Ended {
             session: live.view(),
             outcome: kind,
+            continues,
         });
         self.push_session();
     }

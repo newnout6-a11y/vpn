@@ -1,10 +1,21 @@
 //! Runtime events and statuses: native reconnects, unexpected ends, lag resync.
 use super::*;
+use crate::api::FailoverCause;
+use crate::history::SessionMode;
 
 /// The longest crash-restart wait a Soft session with the kill switch `off` keeps its tweaks on
 /// the dead port: the plain backoff (2 / 5 / 10 s, recorded deviation noadmin-tunnel 8). A frozen
 /// server's quiet window (`Timings::freeze`, 130 s) is far longer.
 const SOFT_HOLD_MAX: Duration = Duration::from_secs(10);
+
+/// A crash failover's sibling run, named by the runtime right before its finish.
+pub(super) struct Failover {
+    generation: u64,
+    profile_id: String,
+    cause: FailoverCause,
+    /// Its start finished while a lane operation owned the session: applied at its end.
+    started: bool,
+}
 
 /// Runtime events (old `index.ts` fan-out, lifecycle-app §3.8, §3.12b, §6.4).
 impl Actor {
@@ -21,9 +32,30 @@ impl Actor {
                 }
                 let e = self.evidence();
                 let accepted = self.fsm.native_start_finished(generation, ok, e).is_ok();
-                if accepted && self.fsm.snapshot().state == TunnelState::Connected {
-                    self.native_reconnected(generation);
+                let connected = self.fsm.snapshot().state == TunnelState::Connected;
+                match self.failover.take_if(|f| f.generation == generation) {
+                    // The sibling runs whatever the state machine concluded: the session names
+                    // it now, or once the operation that owns the session ended.
+                    Some(f) if ok && self.lane_idle() => self.failed_over(f).await,
+                    Some(f) if ok => self.failover = Some(Failover { started: true, ..f }),
+                    Some(_) => {}
+                    None if accepted && connected => self.native_reconnected(generation),
+                    None => {}
                 }
+            }
+            TunnelEvent::FailedOver {
+                generation,
+                profile_id,
+                cause,
+            } => {
+                // A fresh run of its own: its finish may confirm even after failed restarts.
+                let _ = self.fsm.native_failover(generation, e);
+                self.failover = Some(Failover {
+                    generation,
+                    profile_id,
+                    cause,
+                    started: false,
+                });
             }
             TunnelEvent::StopFinished {
                 generation,
@@ -50,7 +82,8 @@ impl Actor {
                     && self.session.is_some()
                 {
                     let ending = Captured::now(&self.deps);
-                    self.close_current(kind, None, ending).await;
+                    // A restart outside the lane: the `Up` of its run is what comes next.
+                    self.close_current(kind, None, ending, true).await;
                 }
             }
             TunnelEvent::Status(kind) => self.on_status(kind, e).await,
@@ -163,11 +196,8 @@ impl Actor {
                 let kind = NoticeKind::ConnectionError;
                 self.notify(Level::Warn, "crashRestarting", kind, Some(body));
             }
-            TunStatusKind::PostTrialFailover { name } => {
-                let body = Msg::new(notice_key("failover", "body")).arg("name", name);
-                let kind = NoticeKind::ProfileRotation;
-                self.notify(Level::Warn, "failover", kind, Some(body));
-            }
+            // `PostTrialFailover` is no notice of its own: the user hears of a failover only
+            // once the session follows the sibling ([`Actor::failed_over`]).
             TunStatusKind::Error { warning } => {
                 // A crash whose cleanup failed: the engine is gone and the session with it.
                 if !self.runtime_running() && self.soft_session() {
@@ -184,6 +214,99 @@ impl Actor {
 
     fn soft_session(&self) -> bool {
         self.session.as_ref().is_some_and(LiveSession::is_soft)
+    }
+
+    /// A failover that finished while a lane operation owned the session: at the operation's
+    /// end, before its own ending, the session follows the sibling (a restart of the runtime's
+    /// last run then restarts the sibling, not the crashed server). A stop waiting to run ends
+    /// the session anyway: nothing to follow.
+    pub(super) async fn follow_failover(&mut self) {
+        let Some(f) = self.failover.take_if(|f| f.started) else {
+            return;
+        };
+        if self.stop.is_none() {
+            self.failed_over(f).await;
+        }
+    }
+
+    /// The runtime replaced a crashed server with a sibling: the session goes on over the
+    /// sibling, with a row for the crashed server and an `Up` for the new one, so everything
+    /// downstream (automation, the next failover round, the handshake budget) names the server
+    /// that actually runs. Holder, capture and adaptive mode stay. The notice says only what
+    /// the runtime saw ([`FailoverCause`]).
+    async fn failed_over(&mut self, f: Failover) {
+        let Failover {
+            generation,
+            profile_id: id,
+            cause,
+            ..
+        } = f;
+        let holder = self.session.as_ref().map_or(Owner::Recovery, |s| s.holder);
+        let adaptive = self.session.as_ref().map(|s| s.adaptive);
+        let from = self.session.as_ref().map(|s| s.profile.name.clone());
+        let soft = self.status.borrow().capture == Some(CaptureKind::Proxy);
+        let choice = self.deps.profiles.resolve(Some(&id));
+        let profile = match &choice {
+            Some(c) if soft => SessionProfile::soft_server(&c.server),
+            Some(c) => SessionProfile::direct(&c.server),
+            // Gone from the list meanwhile: the id still names the run.
+            None => SessionProfile {
+                id: id.clone(),
+                name: self
+                    .status
+                    .borrow()
+                    .profile_name
+                    .clone()
+                    .unwrap_or_default(),
+                mode: if soft {
+                    SessionMode::Soft
+                } else {
+                    SessionMode::Direct
+                },
+            },
+        };
+        let headline = match cause {
+            FailoverCause::ServerFault => key::OUTCOME_FAILOVER,
+            FailoverCause::RestartsSpent => key::OUTCOME_FAILOVER_RESTARTS,
+        };
+        let ending = Captured::now(&self.deps);
+        self.close_current(
+            OutcomeKind::ServerSwitch,
+            Some(Msg::new(headline)),
+            ending,
+            true,
+        )
+        .await;
+        self.deps
+            .forensics
+            .start_session(profile.mode, &profile.name);
+        let name = profile.name.clone();
+        let mut live = LiveSession::open(profile, None, holder);
+        live.country = choice.and_then(|c| c.country);
+        live.generation = Some(generation);
+        live.engine = self.status.borrow().engine;
+        live.adaptive = adaptive.unwrap_or(live.adaptive);
+        self.session = Some(live);
+        self.deps.monitor.start(Some(generation));
+        // "Switched to", not "connected": the state machine confirms the run on its own.
+        let body = match (from, cause) {
+            (Some(from), FailoverCause::ServerFault) => {
+                Msg::new(notice_key("failover", "body")).arg("from", from)
+            }
+            (Some(from), FailoverCause::RestartsSpent) => {
+                Msg::new(notice_key("failover", "bodyRestarts")).arg("from", from)
+            }
+            // No session named the crashed server any more.
+            (None, _) => Msg::new(notice_key("failover", "bodySwitched")),
+        };
+        let body = body.arg("name", name);
+        self.notify(
+            Level::Warn,
+            "failover",
+            NoticeKind::ProfileRotation,
+            Some(body),
+        );
+        self.announce_up();
     }
 
     /// The engine of a Soft session is gone for good (NOADMIN.md §2): the session ends, and the
@@ -255,7 +378,7 @@ impl Actor {
         let bytes = self.deps.forensics.session_bytes();
         let outcome = outcome::unexpected_end(&signals, live.facts(self.deps.monitor.egress_ip()));
         let headline = outcome.headline.clone();
-        self.end_session(outcome, bytes).await;
+        self.end_session(outcome, bytes, false).await;
         let forensics = self.deps.forensics.clone();
         tokio::spawn(async move {
             forensics.stop_session("status:stopped").await;

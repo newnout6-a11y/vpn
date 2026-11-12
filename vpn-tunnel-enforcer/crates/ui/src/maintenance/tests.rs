@@ -624,3 +624,41 @@ fn legacy_capture_alert_is_localized() {
     assert!(render(Lang::Ru, &as_outcome).starts_with("Остановка захвата старого клиента"));
     assert!(render(Lang::En, &as_outcome).starts_with("Stopping the old client's capture"));
 }
+
+/// Review a7 / b6: «Проверить все серверы» counts a group whose check failed (engine missing or
+/// blocked, another check of the group running, every key postponed) and keeps its reason,
+/// instead of reading as a clean run; only an empty or vanished group is nothing to check.
+#[test]
+fn list_check_counts_failed_groups() {
+    use super::network::ListCheck;
+    use crate::servers::{HealthReport, KeyHealth};
+    use vpnte_base::AppError;
+    let health = |online| KeyHealth {
+        online,
+        latency_ms: None,
+        reason: None,
+        checked_at: 0,
+    };
+    let mut sum = ListCheck::default();
+    sum.add(Ok(HealthReport {
+        results: vec![("a".into(), health(true)), ("b".into(), health(false))],
+        not_checked: 1,
+    }));
+    sum.add(Err(AppError::validation(Msg::new(
+        "probes.keyHealth.groupEmpty",
+    ))));
+    sum.add(Err(AppError::conflict(Msg::new("servers.group.notFound"))));
+    assert_eq!((sum.online, sum.offline, sum.deferred), (1, 1, 1));
+    assert_eq!((sum.failed, sum.reason.clone()), (0, None));
+    sum.add(Err(AppError::msg(
+        ErrorKind::Internal,
+        Msg::new("engine.binaryMissing"),
+    )));
+    sum.add(Err(AppError::conflict(Msg::new("core.ops.busy"))));
+    assert_eq!(sum.failed, 2);
+    assert_eq!(
+        sum.reason.map(|m| m.key.into_owned()),
+        Some("engine.binaryMissing".to_owned()),
+        "the first reason is shown"
+    );
+}

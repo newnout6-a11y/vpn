@@ -14,7 +14,7 @@ use vpnte_base::types::{ClientDevice, EnginePref};
 use super::live_model::{BatchProgress, BatchResult, LiveCheck, LiveMode, LiveProgress};
 use super::model::{
     AddTarget, CountryCheck, ExportReport, GeoInfo, HealthReport, ImportReport, ProbeReport,
-    ProxyStartReport, RefreshOutcome, SelectOutcome, ServersView,
+    ProxyStartReport, RefreshOutcome, SelectOutcome, ServersView, SubscriptionRequest,
 };
 
 /// Backend surface of the Servers page. Every action may be cancelled by dropping its future
@@ -30,12 +30,14 @@ pub trait ServersApi: 'static {
     /// Resolves every host for the IP column (single flight; answers arrive through `state`).
     async fn resolve_ips(&self) -> AppResult<()>;
 
-    /// Imports a key, a key list, JSON or a subscription URL (fetched as `device`).
+    /// Imports a key, a key list, JSON or a subscription URL (fetched as `device`; a new
+    /// subscription group takes `request`, a known one keeps its own settings).
     async fn add(
         &self,
         input: String,
         target: AddTarget,
         device: ClientDevice,
+        request: SubscriptionRequest,
     ) -> AppResult<ImportReport>;
     /// Soft delete: archived for the user, not selectable, purged after 30 days unless restored.
     async fn remove(&self, id: &str) -> AppResult<()>;
@@ -76,6 +78,11 @@ pub trait ServersApi: 'static {
     async fn set_refresh_interval(&self, id: &str, minutes: Option<NonZeroU32>) -> AppResult<()>;
     /// Trims and caps the name at 60 characters.
     async fn rename_group(&self, id: &str, name: String) -> AppResult<()>;
+    /// Turns the subscription's device HWID on or off (the next refresh uses it).
+    async fn set_send_hwid(&self, id: &str, on: bool) -> AppResult<()>;
+    /// Replaces the subscription's extra request headers (`Name: value` lines; blank = none);
+    /// answers the header names now set.
+    async fn set_request_headers(&self, id: &str, lines: String) -> AppResult<Vec<String>>;
     /// Also for recovered (orphan) group ids: applies the choice to the servers carrying the id.
     async fn delete_group(&self, id: &str, delete_servers: bool) -> AppResult<()>;
     /// Checks the keys of the group's current (not removed) servers; keys that could not be

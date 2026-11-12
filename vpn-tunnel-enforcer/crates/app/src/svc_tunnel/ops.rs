@@ -95,6 +95,8 @@ impl TunnelOps for TunnelService {
     }
 
     async fn disconnect(&self, source: Source) -> Result<Done, ConnError> {
+        // A restore of the previous server after a lost switch must not undo the user's stop.
+        self.coord.user_stops();
         self.lifecycle
             .disconnect(DisconnectReq::new(StopCause::User, Owner::Manual, source))
             .await
@@ -280,6 +282,8 @@ impl TunnelOps for TunnelService {
 
     fn resumed(&self) {
         self.lifecycle.resumed();
+        // The protection and the DNS capture are re-checked at once (RU audit item 11).
+        self.ip.resumed();
         // A schedule boundary may have passed while the machine slept.
         self.automation.scheduler.wake(Wake::Resume);
     }

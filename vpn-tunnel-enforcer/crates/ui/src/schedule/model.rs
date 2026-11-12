@@ -69,6 +69,12 @@ impl Capture {
             Capture::Tun => "schedule.captureTun",
         }
     }
+
+    /// Whether a schedule taking traffic this way can connect in this process: the tunnel needs
+    /// the app started as administrator (NOADMIN §0: shown as unavailable, never as working).
+    pub const fn available(self, tun_available: bool) -> bool {
+        matches!(self, Capture::Proxy) || tun_available
+    }
 }
 
 /// Where a schedule's traffic goes: a server of the list, or the local proxy (Happ & co.).
@@ -175,6 +181,8 @@ pub struct NextEvent {
     pub at: UnixMs,
     /// Name of the schedule that causes it.
     pub name: String,
+    /// How that schedule takes the traffic (a TUN one cannot connect unelevated).
+    pub capture: Capture,
 }
 
 /// A server a server schedule can use.

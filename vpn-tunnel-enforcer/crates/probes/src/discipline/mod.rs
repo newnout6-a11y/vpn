@@ -17,6 +17,7 @@ pub use budget::{
 pub use classify::{
     Classification, Observations, Reaction, Seen, Verdict, classify, real_certificate,
 };
+pub(crate) use reach::reach_from;
 pub use reach::{Reach, TCP_LIMIT, reach};
 pub(crate) use transfer::check as transfer_check;
 pub use transfer::{

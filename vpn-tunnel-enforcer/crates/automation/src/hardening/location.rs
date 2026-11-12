@@ -11,6 +11,7 @@
 //! applies or rolls back at once. Nothing here rewrites the setting. "Applied by us" comes from
 //! the journal; the OS state, which the user may have chosen himself, is reported next to it
 //! (fix L3).
+use std::io;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -19,7 +20,7 @@ use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use super::system::System;
 use super::{admissible, short_text};
 use crate::tweaks::journal::{
-    Feature, Journal, RegHive, RollbackReport, Target, TweakError, TweakState, Val,
+    Backend, Feature, Journal, RegHive, RollbackReport, Target, TweakError, TweakState, Val,
 };
 use crate::tweaks::run_blocking;
 
@@ -144,9 +145,13 @@ impl Location {
         run_blocking(move || this.status_blocking()).await
     }
 
-    /// Whether location values are journalled (the obligation disconnect and recovery look at).
+    /// Whether location values this process can roll back are journalled (the obligation
+    /// disconnect and recovery look at): the user's consent; the old version's machine policies
+    /// only in an elevated process (unelevated they wait, and must not hold the consent up).
     pub fn is_applied(&self) -> bool {
-        self.journal.is_applied(Feature::LocationPrivacy)
+        let elevated = self.sys.elevated();
+        (self.journal.records(Feature::LocationPrivacy).iter())
+            .any(|r| elevated || !machine(&r.target))
     }
 
     /// Blocking form of [`Location::apply`].
@@ -173,10 +178,17 @@ impl Location {
         Ok(self.status_blocking())
     }
 
-    /// Blocking form of [`Location::rollback`].
+    /// Blocking form of [`Location::rollback`]. Unelevated the machine policies are not tried
+    /// (access denied, every time): their records wait for an elevated process, and that is no
+    /// failure of this rollback (NOADMIN §0; the import told the user once).
     pub fn rollback_blocking(&self) -> RollbackReport {
-        self.journal
-            .rollback(&*self.sys, &[Feature::LocationPrivacy])
+        let features = [Feature::LocationPrivacy];
+        if self.sys.elevated() {
+            return self.journal.rollback(&*self.sys, &features);
+        }
+        let mut report = self.journal.rollback(&UserHive(&*self.sys), &features);
+        report.failed.retain(|t| !machine(t));
+        report
     }
 
     /// Blocking form of [`Location::status`].
@@ -198,6 +210,44 @@ impl Location {
             user_denied,
             policy_disabled,
         }
+    }
+}
+
+fn machine(target: &Target) -> bool {
+    matches!(
+        target,
+        Target::Reg {
+            hive: RegHive::Hklm,
+            ..
+        }
+    )
+}
+
+/// The registry as an unelevated process may change it: this user's hive. A machine value
+/// reads as "cannot tell", so the journal writes nothing there and keeps the record.
+struct UserHive<'a>(&'a dyn System);
+
+impl Backend for UserHive<'_> {
+    fn read(&self, target: &Target) -> io::Result<Val> {
+        if machine(target) {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        self.0.read(target)
+    }
+
+    fn write(&self, target: &Target, value: &Val) -> io::Result<bool> {
+        if machine(target) {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        self.0.write(target, value)
+    }
+
+    fn prune(&self, target: &Target) -> io::Result<()> {
+        self.0.prune(target)
+    }
+
+    fn changed(&self, targets: &[Target]) {
+        self.0.changed(targets);
     }
 }
 

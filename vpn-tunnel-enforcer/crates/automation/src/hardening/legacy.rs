@@ -312,12 +312,17 @@ fn browser_records(manifest: &Path, sys: &dyn System, out: &mut Vec<Record>) -> 
     notices
 }
 
-/// Records from the location manifest: the consent and the two policies.
+/// Records from the location manifest: the consent, and the two machine policies only in an
+/// elevated process (unelevated they could never be rolled back: one notice instead, while one
+/// the old app set is still set). Who set a machine policy is read from the manifest as the
+/// elevated branch reads it: a value that was already there before the old app (an
+/// administrator's policy) is nobody's leftover.
 fn location_records(manifest: &Path, sys: &dyn System, out: &mut Vec<Record>) -> Vec<Msg> {
     let Some(doc) = read_manifest(manifest) else {
         return Vec::new();
     };
     let mut leftover = false;
+    let mut machine_policy = false;
     for (feature, target, ours) in location::old_plan() {
         let Target::Reg { hive, key, name } = &target else {
             continue;
@@ -336,17 +341,31 @@ fn location_records(manifest: &Path, sys: &dyn System, out: &mut Vec<Record>) ->
                 .and_then(|text| section_values(&text, &format!(r"{}\{key}", root_name(*hive))))
                 .and_then(|values| exported(&values, name, matches!(ours, Val::Dword(_))))
         };
+        if *hive == RegHive::Hklm && !sys.elevated() {
+            if sys.read(&target).is_ok_and(|v| v == ours) {
+                match &baseline {
+                    Some(before) if *before == ours => {}
+                    Some(_) => machine_policy = true,
+                    // Who set it cannot be told: the hedged notice, as elevated.
+                    None => leftover = true,
+                }
+            }
+            continue;
+        }
         let created = existed == Some(false);
         match adopt(sys, feature, target.clone(), ours, baseline, created) {
             Ok(record) => out.extend(record),
             Err(()) => leftover = true,
         }
     }
+    let mut notices = Vec::new();
     if leftover {
-        vec![Msg::new("automation.hardening.legacy.locationLeftover")]
-    } else {
-        Vec::new()
+        notices.push(Msg::new("automation.hardening.legacy.locationLeftover"));
     }
+    if machine_policy {
+        notices.push(Msg::new("automation.hardening.legacy.locationPolicy"));
+    }
+    notices
 }
 
 /// Adopts the old values still in place as journal records; nothing is written to the system.

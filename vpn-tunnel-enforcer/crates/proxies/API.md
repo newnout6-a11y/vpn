@@ -171,6 +171,8 @@ pub trait ProxyOps: Send + Sync {
     async fn start(&self, req: StartRequest) -> Result<ProxyStatus, ProxyError>;  // start / rotate / connect
     async fn rotate(&self, slot: Slot, reason: Option<String>) -> Result<ProxyStatus, ProxyError>; // provided
     async fn add(&self, profile_id: String) -> Result<ProxyStatus, ProxyError>;   // UI "+": lowest free slot
+    async fn borrow(&self, profile_id: String) -> Result<ProxyStatus, ProxyError>; // = add, for the app's own
+        // short-lived use (a subscription fetch's spare route): never leased, so its stop is never a 409
     async fn start_profiles(&self, profile_ids: Vec<String>) -> BatchStartResult; // Servers page, never the VPN's
     async fn prewarm(&self, count: u64, country: Option<String>) -> Result<PrewarmResult, ProxyError>;
     async fn stop(&self, slot: Slot, reason: StopReason) -> Result<ProxyStatus, ProxyError>; // leased = 409
@@ -212,7 +214,8 @@ impl LeaseBook {
 pub fn ttl_secs(raw: Option<f64>) -> Result<u32, ProxyError>;   // None 120; 1..=3600 floored; else 400
 ```
 
-`routes` must carry readiness derived at `now`. Reserve order: strict `slot`, the owner's previous route (same
+`routes` must carry readiness derived at `now`; the manager passes no borrowed slot (`ProxyOps::borrow`).
+Reserve order: strict `slot`, the owner's previous route (same
 generation + egress), `preferred_egress_ip`, `preferred_slot`, then (with fallback) the first ready slot; 503
 "No free healthy route with a fresh unique egress IP is available". Unknown token = 403 (checked before the
 TTL); renewing a route whose engine is down = 409 "Leased route is down" and the lease is dropped.

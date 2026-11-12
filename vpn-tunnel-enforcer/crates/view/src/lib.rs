@@ -16,11 +16,16 @@ pub const LOCALES: &[(&str, &str)] = &[
         include_str!("../locales/view-mascot.ru.json"),
         include_str!("../locales/view-mascot.en.json"),
     ),
+    (
+        include_str!("../locales/view-netmode.ru.json"),
+        include_str!("../locales/view-netmode.en.json"),
+    ),
 ];
 
 pub mod fmt;
 pub mod identity;
 pub mod labels;
 pub mod mascot;
+pub mod netmode;
 pub mod swiss;
 pub mod traffic;

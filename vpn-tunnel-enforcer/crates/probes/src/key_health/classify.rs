@@ -51,9 +51,12 @@ static AUTH: LazyLock<Regex> = LazyLock::new(|| {
 static TIMEOUT: LazyLock<Regex> = LazyLock::new(|| {
     re(concat!(
         r"timeout|deadline exceeded|i/o timeout|network is unreachable|host unreachable|",
-        r"operation timed out|connection refused",
+        r"operation timed out",
     ))
 });
+// A reset is not a timeout (RU audit item 6): Go on Windows words it "actively refused it".
+static REFUSED: LazyLock<Regex> =
+    LazyLock::new(|| re(r"connection refused|actively refused|econnrefused"));
 static TRACE_IP: LazyLock<Regex> = LazyLock::new(|| re(r"\bip=([0-9a-fA-F:.]+)"));
 static TRACE_LOC: LazyLock<Regex> = LazyLock::new(|| re(r"\bloc=([A-Za-z]{2})\b"));
 
@@ -78,11 +81,14 @@ pub fn classify_failure(hysteria2: bool, log: &str, err: &str) -> HealthReason {
         };
     }
     // Auth before the broad `tls` pattern (live-probe B-37): in the old order a "tls" substring
-    // anywhere in the debug log turned a rejected key into `tls-failed`.
+    // anywhere in the debug log turned a rejected key into `tls-failed`. A refused dial never
+    // reached TLS, so it goes before that pattern for the same reason.
     if CONFIG.is_match(&text) {
         HealthReason::ConfigFailed
     } else if AUTH.is_match(&text) {
         HealthReason::AuthFailed
+    } else if REFUSED.is_match(&text) {
+        HealthReason::ConnectionRefused
     } else if TLS.is_match(&text) {
         HealthReason::TlsFailed
     } else if TIMEOUT.is_match(&text) {

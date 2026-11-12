@@ -154,6 +154,17 @@ impl MaintenanceApi for DemoMaintenanceApi {
         Ok(route_result(self.scene))
     }
 
+    async fn check_network(&self, cancel: CancellationToken) -> AppResult<NetCheckView> {
+        self.state.send_modify(|s| s.network.running = true);
+        let paused = pause(1_500, &cancel).await;
+        self.state.send_modify(|s| s.network.running = false);
+        paused?;
+        let result = network_result(self.scene);
+        self.state
+            .send_modify(|s| s.network.last = Some(result.clone()));
+        Ok(result)
+    }
+
     async fn export_diagnostics(&self, cancel: CancellationToken) -> AppResult<Option<ExportDone>> {
         if self.state.borrow().export.running {
             return Err(AppError::conflict(demo("exportBusy")));

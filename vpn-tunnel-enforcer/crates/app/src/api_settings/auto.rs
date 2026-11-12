@@ -15,7 +15,7 @@ use vpnte_ui::settings::{self as ui, LocationOutcome, RotationOutcome, RotationV
 
 use super::Shared;
 use crate::support::{blocking, detached};
-use crate::svc_auto::Automation;
+use crate::svc_auto::{Automation, Followed};
 
 /// The automation of this process; `Conflict` where the page runs without one (tests).
 fn automation(shared: &Shared) -> AppResult<Arc<Automation>> {
@@ -39,29 +39,15 @@ pub async fn set_location_privacy(shared: &Arc<Shared>, on: bool) -> AppResult<L
             let settings = shared.backend.settings.clone();
             blocking(move || settings.update(|s| s.location_privacy = on)).await?;
         }
-        let privacy = &auto.privacy;
-        let connected = shared.state.borrow().connected;
-        Ok(match (on, connected) {
-            (true, true) => {
-                privacy.session_up().await;
-                applied(privacy.location.is_applied())
-            }
-            (false, _) if privacy.location.is_applied() => {
-                privacy.session_down().await;
-                applied(!privacy.location.is_applied())
-            }
-            _ => LocationOutcome::Stored,
+        // Judged by the lane's session under the forwarder's own lock, never by the page's
+        // debounced "connected": a session that just ended must not get its consent denied.
+        Ok(match auto.privacy.follow_setting().await {
+            Followed::Applied => LocationOutcome::Applied,
+            Followed::NotApplied => LocationOutcome::NotApplied,
+            Followed::Stored => LocationOutcome::Stored,
         })
     })
     .await
-}
-
-fn applied(done: bool) -> LocationOutcome {
-    if done {
-        LocationOutcome::Applied
-    } else {
-        LocationOutcome::NotApplied
-    }
 }
 
 /// Applies (`true`) or rolls back the browser policies; unelevated the automation answers
@@ -206,16 +192,23 @@ pub async fn rotate_now(shared: &Arc<Shared>) -> AppResult<RotationOutcome> {
     let auto = automation(shared)?;
     let outcome =
         detached(async move { Ok(auto.rotation.rotate(RotationTrigger::User).await) }).await?;
+    page_outcome(outcome)
+}
+
+/// The page's outcome. Only a switch that ran says whether the previous server came back; an
+/// attempt that never started (another rotation runs, refused) or was cancelled midway (the
+/// list changed, the deadline) says just why, as the action's error: claiming the previous
+/// server "restored" there would be a guess (the lifecycle's own notices tell what happened).
+pub fn page_outcome(outcome: Outcome) -> AppResult<RotationOutcome> {
     Ok(match outcome {
         Outcome::Rotated { profile_id } => RotationOutcome::Rotated { profile_id },
         Outcome::NothingToRotate | Outcome::NotDirect => RotationOutcome::NothingToRotate,
         Outcome::NoProfiles => RotationOutcome::NoProfiles,
         Outcome::NoneAvailable => RotationOutcome::NoneAvailable,
-        // Refused or cancelled before the tunnel was touched: the previous server runs on.
-        Outcome::NotStarted { reason } | Outcome::Aborted { reason } => RotationOutcome::Failed {
-            reason,
-            restored_previous: true,
-        },
+        // Never `Cancelled`: the page hides that kind, and the user asked for this rotation.
+        Outcome::NotStarted { reason } | Outcome::Aborted { reason } => {
+            return Err(AppError::msg(ErrorKind::Conflict, reason));
+        }
         Outcome::Failed {
             reason,
             restored_previous,

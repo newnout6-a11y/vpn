@@ -5,6 +5,7 @@ use vpnte_core::ops::Source;
 
 use super::{ConnectReq, ConnectTarget, DisconnectReq, StopCause};
 
+mod automation;
 mod fakes;
 mod joint;
 mod lane;
@@ -62,6 +63,8 @@ fn notices_are_localized() {
         ("stopFailed", false),
         ("stopped", false),
         ("crashBlocked", true),
+        ("keptBlocked", true),
+        ("keptSoftBlocked", true),
         ("crashRestarting", true),
         ("failover", true),
         ("restartFailed", false),

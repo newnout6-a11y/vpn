@@ -19,6 +19,9 @@ pub(crate) enum Call {
 /// In-memory coordinator: scripted results, otherwise the contract's happy path.
 pub(crate) struct FakeCoordinator {
     pub(crate) session: Mutex<Option<SessionInfo>>,
+    /// What [`Coordinator::left_by`] answers; a disconnect by that owner or a higher one with
+    /// no session releases it.
+    pub(crate) left_by: Mutex<Option<Owner>>,
     pub(crate) calls: Mutex<Vec<Call>>,
     pub(crate) connect_results: Mutex<VecDeque<Result<ConnectOutcome, OpError>>>,
     pub(crate) switch_results: Mutex<VecDeque<Result<(), SwitchError>>>,
@@ -43,6 +46,7 @@ impl FakeCoordinator {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             session: Mutex::new(None),
+            left_by: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
             connect_results: Mutex::new(VecDeque::new()),
             switch_results: Mutex::new(VecDeque::new()),
@@ -154,7 +158,9 @@ impl FakeCoordinator {
         if session.as_ref().is_some_and(|s| s.owner > owner) {
             return Err(OpError::Conflict);
         }
-        *session = None;
+        if session.take().is_none() {
+            self.left_by.lock().take_if(|left| *left <= owner);
+        }
         Ok(())
     }
 
@@ -215,6 +221,10 @@ impl FakeCoordinator {
 impl Coordinator for FakeCoordinator {
     fn session(&self) -> Option<SessionInfo> {
         self.session.lock().clone()
+    }
+
+    fn left_by(&self) -> Option<Owner> {
+        *self.left_by.lock()
     }
 
     fn busy(&self) -> bool {

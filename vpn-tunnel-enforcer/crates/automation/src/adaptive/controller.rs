@@ -5,6 +5,7 @@
 //! settings restart, AutoPilot, profile switch) is adopted and verified without learning. A start
 //! this task did not ask for supersedes the running verification; `Stopped` ends it.
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tokio::sync::broadcast::error::RecvError;
@@ -41,11 +42,32 @@ pub struct Adaptive<C: Coordinator, H: AdaptiveHost> {
     verdicts: Option<Arc<Verdicts>>,
 }
 
+/// A prepared start nobody ended is dropped after this (its caller went away): longer than the
+/// lane's 120 s budget.
+const PENDING_MAX_AGE: Duration = Duration::from_secs(180);
+
+/// A start prepared with [`Adaptive::begin`]: the mode to start in, and the ticket that ends
+/// exactly this preparation when the start does not happen ([`Adaptive::start_failed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Begun {
+    pub mode: AdaptiveMode,
+    pub ticket: u64,
+}
+
+/// A prepared start (its ticket and when it was prepared).
+struct Pending {
+    ticket: u64,
+    at: Instant,
+    ctx: Context,
+}
+
 /// State shared between the app's calls and the task (lock held briefly, never across `.await`).
 #[derive(Default)]
 struct Shared {
-    /// Prepared by `begin` for the start in flight; attached to the matching `Started`.
-    pending: Option<Context>,
+    /// Prepared by `begin` for the starts in flight, oldest first: starts overlap (a higher owner
+    /// pre-empts a lower one, a refused one ends while another runs), so each keeps its own
+    /// context until its `Started` attaches it or its caller ends it.
+    pending: Vec<Pending>,
     /// The context of the runtime being verified (re-used by `retry`).
     current: Option<(RuntimeId, Context)>,
     /// Bumped by `begin` / `start_failed`: status writes of an older run are dropped.
@@ -133,12 +155,19 @@ impl<C: Coordinator, H: AdaptiveHost> Adaptive<C, H> {
     /// (TUN or system proxy) or a local-proxy TUN: reads the network identity, looks up what worked
     /// here before and returns the mode to start in. `Baseline` when adaptive bypass is off (fix
     /// A3) or for a local proxy.
-    pub async fn begin(&self, kind: SessionKind, profile: Option<ProfileView>) -> AdaptiveMode {
+    pub async fn begin(&self, kind: SessionKind, profile: Option<ProfileView>) -> Begun {
         if kind == SessionKind::Soft {
             // A local proxy behind the system proxy is not verified (as the old Soft mode): its
             // upstream belongs to another client and nothing here could change it.
-            self.start_failed(None);
-            return AdaptiveMode::Baseline;
+            let mut shared = self.shared.lock();
+            prune(&mut shared.pending);
+            if shared.pending.is_empty() {
+                self.settle(&mut shared, None);
+            }
+            return Begun {
+                mode: AdaptiveMode::Baseline,
+                ticket: 0,
+            };
         }
         let settings = self.settings.snapshot();
         let caps = capabilities(kind, profile.as_ref());
@@ -156,12 +185,16 @@ impl<C: Coordinator, H: AdaptiveHost> Adaptive<C, H> {
             {
                 (mode, reused) = (learned, true);
             } else if settings.stealth_mode {
-                // Old seed: stealth starts in the compatibility mode it implies.
-                mode = if caps.tls {
+                // Old seed: stealth starts in the compatibility mode it implies, when this start
+                // has the knob (a proxy capture has no adapter MTU to shrink).
+                let seed = if caps.tls {
                     AdaptiveMode::TlsCompatibility
                 } else {
                     AdaptiveMode::MtuCompatibility
                 };
+                if caps.allows(seed) {
+                    mode = seed;
+                }
             }
         }
         tracing::info!(
@@ -183,7 +216,13 @@ impl<C: Coordinator, H: AdaptiveHost> Adaptive<C, H> {
         };
         let mut shared = self.shared.lock();
         shared.generation += 1;
-        shared.pending = Some(context);
+        let ticket = shared.generation;
+        prune(&mut shared.pending);
+        shared.pending.push(Pending {
+            ticket,
+            at: Instant::now(),
+            ctx: context,
+        });
         let status = AdaptiveStatus {
             phase: Phase::Connecting,
             mode,
@@ -194,17 +233,35 @@ impl<C: Coordinator, H: AdaptiveHost> Adaptive<C, H> {
             updated_at: now_ms(),
         };
         self.status.send_replace(status);
-        mode
+        Begun { mode, ticket }
     }
 }
 
+/// Drops preparations whose caller went away without ending them.
+fn prune(pending: &mut Vec<Pending>) {
+    pending.retain(|p| p.at.elapsed() < PENDING_MAX_AGE);
+}
+
 impl<C: Coordinator, H: AdaptiveHost> Adaptive<C, H> {
-    /// The start prepared with [`Adaptive::begin`] did not produce a tunnel: `Some(error)` shows
-    /// `Failed` with the start error, `None` (cancelled) returns to `Idle`.
-    pub fn start_failed(&self, reason: Option<Msg>) {
+    /// The start prepared as `ticket` did not produce a tunnel: `Some(error)` shows `Failed`
+    /// with the start error, `None` (cancelled) returns to `Idle`, unless another prepared start
+    /// is still in flight (its own end decides then). A ticket already attached does nothing.
+    pub fn start_failed(&self, ticket: u64, reason: Option<Msg>) {
         let mut shared = self.shared.lock();
+        let Some(at) = shared.pending.iter().position(|p| p.ticket == ticket) else {
+            return;
+        };
+        shared.pending.remove(at);
+        prune(&mut shared.pending);
+        if shared.pending.is_empty() {
+            self.settle(&mut shared, reason);
+        }
+    }
+
+    /// No start in flight any more: `Failed` with `reason`, or `Idle`; older runs stop
+    /// publishing.
+    fn settle(&self, shared: &mut Shared, reason: Option<Msg>) {
         shared.generation += 1;
-        shared.pending = None;
         let status = match reason {
             Some(reason) => {
                 let mut status = self.status.borrow().clone();
@@ -315,7 +372,8 @@ impl<C: Coordinator, H: AdaptiveHost> Adaptive<C, H> {
     fn on_stopped(&self, cause: Option<StopCause>) {
         let mut shared = self.shared.lock();
         shared.current = None;
-        if shared.pending.is_some() {
+        prune(&mut shared.pending);
+        if !shared.pending.is_empty() {
             return;
         }
         let failed = self.status.borrow().phase == Phase::Failed;
@@ -328,11 +386,18 @@ impl<C: Coordinator, H: AdaptiveHost> Adaptive<C, H> {
     /// the same runtime, else an adopted context without learning.
     fn attach(&self, target: &Target) -> (Context, u64) {
         let mut shared = self.shared.lock();
-        let prepared = shared.pending.take_if(|p| {
-            p.kind == target.kind
-                && p.mode == target.mode
-                && p.profile.as_ref().map(|v| v.id.as_str()) == target.profile_id.as_deref()
-        });
+        let same = |p: &Pending| {
+            p.ctx.kind == target.kind
+                && p.ctx.mode == target.mode
+                && p.ctx.profile.as_ref().map(|v| v.id.as_str()) == target.profile_id.as_deref()
+        };
+        // The newest preparation of this very start; any other one of it was pre-empted or
+        // refused (its caller's `start_failed` then finds nothing to end).
+        let prepared =
+            (shared.pending.iter().rposition(same)).map(|at| shared.pending.remove(at).ctx);
+        if prepared.is_some() {
+            shared.pending.retain(|p| !same(p));
+        }
         let same_runtime = shared
             .current
             .as_ref()

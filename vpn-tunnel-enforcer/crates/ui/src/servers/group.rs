@@ -5,20 +5,18 @@
 use std::num::NonZeroU32;
 
 use dioxus::prelude::*;
-use vpnte_base::types::UnixMs;
 
-use super::actions::{Actions, fetch_error_text, toast_error};
-use super::model::{GroupSource, GroupStatus, GroupView};
+use super::actions::Actions;
+use super::facts::GroupFacts;
+use super::model::GroupSource;
 use super::present::{
     BucketKind, GROUP_NAME_MAX, GroupBucket, group_status_key, group_status_tone, is_deleted,
     is_removed_from_subscription, protocol_sections, proxy_ready, refresh_choices,
-    refresh_label_key, relative_time, safe_http_url, traffic,
+    refresh_label_key,
 };
 use super::row::ServerRow;
 use super::state::Confirm;
-use crate::lang::{LANG, translate_now};
 use crate::t;
-use crate::units::format_bytes;
 use crate::widgets::{
     Badge, Button, ButtonKind, Icon, IconButton, IconGlyph, Select, SelectOption, Size, Tone,
 };
@@ -98,6 +96,7 @@ pub(crate) fn GroupCard(bucket: GroupBucket) -> Element {
     );
     let server_count = servers.len();
     let (id_edit, name_edit) = (id.clone(), group.name.clone());
+    let (a_request, id_request, name_request) = (a.clone(), id.clone(), name.clone());
     let mut rename = store.rename;
     let mut confirm = store.confirm;
     rsx! {
@@ -163,6 +162,13 @@ pub(crate) fn GroupCard(bucket: GroupBucket) -> Element {
                                 disabled: busy.policy,
                                 size: Size::Sm,
                             }
+                        }
+                        Button {
+                            kind: ButtonKind::Link,
+                            small: true,
+                            title: t!("ui.servers.request.openTitle"),
+                            onclick: move |_| a_request.open_request(&id_request, &name_request),
+                            {t!("ui.servers.request.open")}
                         }
                     }
                     if real {
@@ -265,113 +271,6 @@ fn RenameInput(draft: String) -> Element {
                 _ => {}
             },
             onblur: move |_| a_blur.commit_rename(),
-        }
-    }
-}
-
-/// Subscription facts, each only when known: refresh error, expired note, trial end, traffic
-/// quota, provider panel, last update.
-#[component]
-fn GroupFacts(group: GroupView) -> Element {
-    let actions = use_context::<Actions>();
-    let now: UnixMs = (actions.store.now)();
-    let lang = *LANG.read();
-    let when = |ts: UnixMs| relative_time(ts, now, lang);
-    let quota = group
-        .traffic_total
-        .filter(|&total| total > 0)
-        .map(|total| (group.traffic_used.unwrap_or(0), total));
-    let panel = group
-        .web_page_url
-        .as_deref()
-        .and_then(safe_http_url)
-        .map(str::to_owned);
-    let anything = group.last_fetch_error.is_some()
-        || group.status == GroupStatus::Expired
-        || group.expires_at.is_some()
-        || quota.is_some()
-        || panel.is_some()
-        || group.last_fetched_at.is_some();
-    if !anything {
-        return rsx! {};
-    }
-    let a_open = actions.clone();
-    rsx! {
-        div { class: "srv-facts-block",
-            if let Some(why) = group.last_fetch_error {
-                p { class: "srv-strip is-fail", role: "alert",
-                    {t!(
-                        "servers.groups.refreshFailedDetail",
-                        error = fetch_error_text(why),
-                        when = group.last_fetch_attempt_at.map(when).unwrap_or_default()
-                    )}
-                }
-            }
-            if group.status == GroupStatus::Expired {
-                p { class: "srv-strip is-warn", {t!("ui.servers.group.expiredBanner")} }
-            }
-            div { class: "srv-meta",
-                if let Some(at) = group.expires_at {
-                    span { class: "srv-meta-item", class: if at < now { "is-alert" },
-                        if at < now {
-                            {t!("servers.groups.expiredAt", when = when(at))}
-                        } else {
-                            {t!("servers.groups.expiresAt", when = when(at))}
-                        }
-                    }
-                }
-                if let Some(at) = group.last_fetched_at {
-                    span { class: "srv-meta-item", {t!("servers.groups.lastUpdatedAt", when = when(at))} }
-                }
-                if let Some(url) = panel {
-                    Button {
-                        kind: ButtonKind::Link,
-                        small: true,
-                        title: t!("ui.servers.group.panelTitle"),
-                        onclick: move |_| {
-                            let (api, toasts, url) = (a_open.api.clone(), a_open.toasts, url.clone());
-                            a_open.spawn(async move {
-                                if let Err(err) = api.open_url(url).await {
-                                    let title = translate_now("ui.servers.group.panelFailed", &[]);
-                                    toast_error(toasts, title, &err);
-                                }
-                            });
-                        },
-                        {t!("servers.groups.providerPanel")}
-                    }
-                }
-            }
-            if let Some((used, total)) = quota {
-                Quota { used, total }
-            }
-        }
-    }
-}
-
-/// Traffic quota line with its bar (over the limit → signal, above 80 % → warning frame).
-#[component]
-fn Quota(used: u64, total: u64) -> Element {
-    let (pct, tone, over) = traffic(used, total);
-    let value = t!(
-        "servers.groups.trafficUsed",
-        used = format_bytes(used),
-        total = format_bytes(total)
-    );
-    rsx! {
-        div { class: "srv-quota", "data-tone": tone.name(),
-            div { class: "srv-quota-line",
-                span { class: "swiss-label", {t!("servers.groups.trafficUsage")} }
-                span { class: "srv-quota-value swiss-mono", class: if over { "is-alert" }, "{value}" }
-            }
-            div {
-                class: "srv-quota-bar",
-                role: "progressbar",
-                aria_label: t!("servers.groups.trafficUsage"),
-                aria_valuemin: "0",
-                aria_valuemax: "100",
-                aria_valuenow: "{pct}",
-                div { class: "srv-quota-fill", style: "width:{pct}%" }
-            }
         }
     }
 }

@@ -98,6 +98,13 @@ impl Wiring {
 /// the root's own wiring.
 fn contexts(wiring: Wiring) -> Vec<Box<dyn Any>> {
     let backend = wiring.backend.clone();
+    // Before the first connect: last-known server addresses and resolver winners (RU item 10),
+    // the current network's winner already asked first.
+    vpnte_core::resolve::persist(
+        &backend.dirs.root,
+        crate::api_maintenance::network_key_now(),
+        backend.shutdown.child_token(),
+    );
     let built = match svc_tunnel::build(&backend) {
         Ok(built) => {
             let _ = backend.tunnel.set(built.tunnel.clone());

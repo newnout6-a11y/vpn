@@ -384,13 +384,13 @@ use parking_lot::Mutex;
 
 use crate::subscription::tests::{KEY_A, KEY_B, Server, fetcher, reply};
 
-struct Env {
+pub(super) struct Env {
     _dir: TempDir,
-    servers: Arc<Servers>,
-    ctx: RefreshCtx,
+    pub(super) servers: Arc<Servers>,
+    pub(super) ctx: RefreshCtx,
 }
 
-fn env() -> Env {
+pub(super) fn env() -> Env {
     let dir = TempDir::new();
     let servers = Arc::new(Servers::open(&dir.0));
     let ctx = RefreshCtx::new(
@@ -412,25 +412,25 @@ impl Env {
             .await
     }
 
-    async fn refresh(&self, id: &GroupId, owner: Owner) -> AppResult<RefreshReport> {
+    pub(super) async fn refresh(&self, id: &GroupId, owner: Owner) -> AppResult<RefreshReport> {
         self.servers
             .refresh_group(&self.ctx, id, owner, CancellationToken::new())
             .await
     }
 
     /// Imports `url` and returns the new group.
-    async fn import(&self, url: &Url) -> GroupId {
+    pub(super) async fn import(&self, url: &Url) -> GroupId {
         match self.paste(url.as_str(), ClientDevice::Pc).await.unwrap() {
             AddOutcome::Added { report, .. } => report.group,
             other => panic!("expected a new group, got {other:?}"),
         }
     }
 
-    fn group(&self, id: &GroupId) -> ServerGroup {
+    pub(super) fn group(&self, id: &GroupId) -> ServerGroup {
         self.servers.read(|doc| doc.group(id).cloned()).unwrap()
     }
 
-    fn rows(&self) -> Vec<ServerRow> {
+    pub(super) fn rows(&self) -> Vec<ServerRow> {
         self.servers.read(|doc| doc.profiles.clone())
     }
 }
@@ -463,7 +463,10 @@ async fn pasting_imports_then_refreshes() {
     let server = panel(Arc::new(Mutex::new(201))).await;
     let url = server.url("/sub/token");
     let out = e.paste(url.as_str(), ClientDevice::Pc).await.unwrap();
-    let AddOutcome::Added { report, skipped } = out else {
+    let AddOutcome::Added {
+        report, skipped, ..
+    } = out
+    else {
         panic!("{out:?}")
     };
     assert_eq!((report.added.len(), skipped.len()), (2, 0));
@@ -492,11 +495,13 @@ async fn pasting_imports_then_refreshes() {
     };
     assert_ne!(second.group, report.group);
     assert_eq!(e.group(&second.group).device(), Some(ClientDevice::Android));
-    let android_seen = server
-        .seen()
-        .last()
-        .and_then(|s| s.header("x-device-os").map(str::to_owned));
-    assert_eq!(android_seen.as_deref(), Some("Android"));
+    // ru-2026 item 1: a new group names its device by the User-Agent, without the HWID headers.
+    let last = server.seen().last().cloned().unwrap();
+    assert_eq!(last.header("user-agent"), Some("Happ/3.22.1/Android"));
+    assert_eq!(
+        (last.header("x-hwid"), last.header("x-device-os")),
+        (None, None)
+    );
 
     let keys = e.paste(KEY_A, ClientDevice::Pc).await.unwrap();
     let AddOutcome::Added { report: manual, .. } = keys else {
@@ -533,6 +538,10 @@ async fn failures_keep_rows_and_selection() {
     assert_eq!(e.group(&id).fetch.last_success_at, success);
 
     *mode.lock() = 0;
+    // A new group sends no HWID: an empty list suggests turning it on (ru-2026 item 1).
+    let err = e.refresh(&id, Owner::Manual).await.unwrap_err();
+    assert_eq!(err.user_msg().key, "servers.fetch.emptyListNoHwid");
+    e.servers.set_group_send_hwid(&id, true).unwrap();
     let err = e.refresh(&id, Owner::Manual).await.unwrap_err();
     assert_eq!(err.user_msg().key, "servers.fetch.emptyList");
     assert_eq!(e.group(&id).status(now_ms()), GroupStatus::Expired);

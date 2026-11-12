@@ -15,6 +15,7 @@ mod live;
 mod live_view;
 mod project;
 mod proxies;
+mod relays;
 #[cfg(test)]
 mod tests;
 mod verdict;
@@ -40,7 +41,7 @@ use vpnte_tunnel::lifecycle::ConnError;
 use vpnte_ui::servers::{
     AddTarget, BatchProgress, BatchResult, CountryCheck, ExportReport, GeoInfo, HealthReport,
     ImportReport, LiveCheck, LiveMode, LiveProgress, ProbeReport, ProxyStartReport, RefreshOutcome,
-    SelectOutcome, ServersApi, ServersView,
+    SelectOutcome, ServersApi, ServersView, SubscriptionRequest,
 };
 
 use crate::services::Backend;
@@ -52,6 +53,9 @@ const DEBOUNCE: Duration = Duration::from_millis(60);
 /// The UI contexts of this package: `Rc<dyn ServersApi>`. Call it inside the tokio runtime (the
 /// projection task starts here) after `backend.tunnel` was set.
 pub fn contexts(backend: &Arc<Backend>) -> Vec<Box<dyn Any>> {
+    // Subscription refreshes may now try the session's route and a spare slot (ru-2026 item 3).
+    let relays = Arc::new(relays::AppRelays::new(backend));
+    backend.refresh.fetcher.set_relays(relays);
     let api: Rc<dyn ServersApi> = Rc::new(ServersBackend::start(backend.clone()));
     vec![Box::new(api)]
 }
@@ -193,8 +197,10 @@ impl ServersApi for ServersBackend {
         input: String,
         target: AddTarget,
         device: ClientDevice,
+        request: SubscriptionRequest,
     ) -> AppResult<ImportReport> {
-        detached(import::add(self.shared.clone(), input, target, device)).await
+        let shared = self.shared.clone();
+        detached(import::add(shared, input, target, device, request)).await
     }
 
     async fn remove(&self, id: &str) -> AppResult<()> {
@@ -291,6 +297,21 @@ impl ServersApi for ServersBackend {
     async fn rename_group(&self, id: &str, name: String) -> AppResult<()> {
         self.edit_group(id, move |servers, id| servers.rename_group(id, &name))
             .await
+    }
+
+    async fn set_send_hwid(&self, id: &str, on: bool) -> AppResult<()> {
+        self.edit_group(id, move |servers, id| servers.set_group_send_hwid(id, on))
+            .await
+    }
+
+    async fn set_request_headers(&self, id: &str, lines: String) -> AppResult<Vec<String>> {
+        let (shared, id) = (self.shared.clone(), GroupId::from(id));
+        blocking(move || {
+            let names = shared.backend.servers.set_group_headers(&id, &lines)?;
+            shared.publish();
+            Ok(names)
+        })
+        .await
     }
 
     async fn delete_group(&self, id: &str, delete_servers: bool) -> AppResult<()> {

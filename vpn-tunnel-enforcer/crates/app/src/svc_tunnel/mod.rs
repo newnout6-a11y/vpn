@@ -180,6 +180,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         leaks.forward(
             lifecycle.clone(),
             b.notifier.clone(),
+            guard.wfp.clone(),
             b.shutdown.child_token(),
         );
     }

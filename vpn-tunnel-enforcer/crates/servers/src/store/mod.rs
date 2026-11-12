@@ -7,10 +7,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
-use vpnte_base::types::{ClientDevice, now_ms};
+use vpnte_base::types::{ClientDevice, UnixMs, now_ms};
 use vpnte_base::{AppError, AppResult, Msg};
 use vpnte_core::store::{Mode, Store};
 use vpnte_profiles::model::SubscriptionMeta;
+use vpnte_profiles::text::Controls;
 
 use crate::model::{
     ArchiveReason, GroupId, GroupSummary, HealthRecord, Ping, ProfileId, ServerRow, ServerSummary,
@@ -20,12 +21,16 @@ use crate::model::{
 mod add;
 mod edit;
 mod probes;
+mod request;
+#[cfg(test)]
+mod request_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod verdict_tests;
 
 pub use add::subscription_name;
+pub use request::hidden_refused;
 
 /// Something changed in the list; re-read with [`Servers::view`] / [`Servers::active`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +85,16 @@ pub struct NewSubscription {
     pub info: SubscriptionMeta,
     /// The parser skipped entries.
     pub partial: bool,
+    /// The user's choice for the new group (see [`crate::model::ServerGroup::send_hwid`]).
+    pub send_hwid: bool,
+    /// The user's extra headers in their stored form ([`crate::subscription::stored_headers`]).
+    pub headers: Option<String>,
+    /// The provider's controls of the first answer.
+    pub controls: Controls,
+    /// The provider's fallback URL of the first answer.
+    pub fallback: Option<url::Url>,
+    /// Set when the first answer moved the subscription (`url` is then the new address).
+    pub moved_at: Option<UnixMs>,
 }
 
 /// What [`Servers::add`] did.

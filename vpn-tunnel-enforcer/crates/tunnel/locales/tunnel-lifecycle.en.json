@@ -33,7 +33,9 @@
         "cancelled": "The connection was cancelled",
         "timeout": "Protection start timed out — the connection was stopped",
         "preempted": "The connection was interrupted by a higher-priority operation",
-        "failed": "The protection state was not confirmed — the connection was stopped"
+        "failed": "The protection state was not confirmed — the connection was stopped",
+        "failover": "Connections to the server failed — the connection moved to another server of the same group",
+        "failoverRestarts": "The VPN engine stopped and restarts did not bring the connection back — it moved to another server of the same group"
       },
       "notice": {
         "connected": {
@@ -54,6 +56,14 @@
         "stopped": {
           "title": "Protection stopped"
         },
+        "keptBlocked": {
+          "title": "Connection stopped — traffic stays blocked",
+          "body": "The server did not pass the connection check. The firewall keeps blocking traffic so your IP does not leak. Turn protection on again or off."
+        },
+        "keptSoftBlocked": {
+          "title": "Connection stopped — programs stay blocked",
+          "body": "The server did not pass the connection check. The system proxy still points at the stopped engine: programs that use it get no connection until you turn protection on again or off. Other programs connect directly."
+        },
         "crashBlocked": {
           "title": "sing-box crashed",
           "body": "The firewall blocks traffic so your IP does not leak. Turn protection on again."
@@ -64,7 +74,9 @@
         },
         "failover": {
           "title": "Server changed",
-          "body": "The active key stopped answering. Switched to “{{name}}”, another key of the same subscription. The source subscription has expired, but this key still works."
+          "body": "Connections to “{{from}}” failed. Switched to “{{name}}”, another server of the same group.",
+          "bodyRestarts": "The VPN engine stopped on “{{from}}” and restarts did not bring the connection back. Switched to “{{name}}”, another server of the same group.",
+          "bodySwitched": "Switched to “{{name}}”, another server of the same group."
         },
         "restartFailed": {
           "title": "Could not restart protection"

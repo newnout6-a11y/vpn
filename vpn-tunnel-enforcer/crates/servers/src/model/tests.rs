@@ -285,3 +285,71 @@ fn amneziawg_row() {
     let summary = ServerSummary::of(&row, None, false);
     assert_eq!(summary.protocol, "amneziawg");
 }
+
+/// diag-a8: names a newer build writes into the same document version (a new health reason,
+/// archive reason, country source, origin, fetch outcome, device or engine) read as their safe
+/// fallbacks instead of failing the whole list.
+#[test]
+fn unknown_stored_names_keep_the_list_readable() {
+    let mut doc = ServersDoc::default();
+    let mut g = group(Some(FetchOutcome::EmptyList), None);
+    g.kind = GroupKind::Subscription {
+        url: Secret::new("https://sub.example.com/feed/fake-token"),
+        device: ClientDevice::Android,
+    };
+    doc.groups.push(g);
+    let mut row = ServerRow::new(
+        &vless("DE", "de.example.com", 443, UUID_A),
+        GroupId::from("g1"),
+        Origin::Feed,
+        ClientDevice::Android,
+        1,
+    )
+    .unwrap();
+    row.engine = vpnte_base::types::EnginePref::Xray;
+    row.health = Some(HealthRecord {
+        online: false,
+        at: 2,
+        rtt_ms: None,
+        reason: Some(HealthReason::ConnectionRefused),
+        egress_ip: None,
+    });
+    row.country = Some(VerifiedCountry {
+        iso2: Iso2::new("DE").unwrap(),
+        at: 3,
+        ip: None,
+        source: CountrySource::ExitIp,
+    });
+    row.archived = Some(Archived {
+        at: 4,
+        reason: ArchiveReason::Provider,
+    });
+    doc.profiles.push(row);
+    let mut value = serde_json::to_value(&doc).unwrap();
+    let newer = serde_json::json!("from-a-newer-build");
+    value["groups"][0]["device"] = newer.clone();
+    value["groups"][0]["fetch"]["lastOutcome"] = serde_json::json!({ "quic-blocked": 3 });
+    let stored = &mut value["profiles"][0];
+    for path in ["origin", "device", "engine"] {
+        stored[path] = newer.clone();
+    }
+    stored["health"]["reason"] = newer.clone();
+    stored["country"]["source"] = newer.clone();
+    stored["archived"]["reason"] = newer;
+    let back: ServersDoc = serde_json::from_value(value).unwrap();
+    assert_eq!(back.groups[0].device(), Some(ClientDevice::default()));
+    assert_eq!(back.groups[0].fetch.last_outcome, None);
+    let row = &back.profiles[0];
+    assert_eq!(row.origin, Origin::Manual, "a refresh never archives it");
+    assert_eq!(row.device, ClientDevice::default());
+    assert_eq!(row.engine, vpnte_base::types::EnginePref::Auto);
+    let health = row.health.unwrap();
+    assert_eq!((health.online, health.reason), (false, None));
+    assert_eq!(row.country.unwrap().source, CountrySource::Legacy);
+    assert_eq!(
+        row.archived.unwrap().reason,
+        ArchiveReason::User,
+        "never selectable by misreading"
+    );
+    assert_eq!(row.profile().unwrap().name, "DE");
+}

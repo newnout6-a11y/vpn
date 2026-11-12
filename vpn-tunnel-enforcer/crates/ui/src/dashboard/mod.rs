@@ -14,6 +14,7 @@ mod banners;
 pub mod demo;
 mod facts;
 mod model;
+mod netmode;
 mod slab;
 #[cfg(test)]
 mod tests;

@@ -244,6 +244,48 @@
           "stageLogs": "logs",
           "stageCapture": "capture summary",
           "stageZip": "packing the ZIP"
+        },
+        "network": {
+          "dnsCut": "The system DNS answers, DoH does not pass",
+          "tcpWhitelist": "Connection: Russian sites 2 of 2, foreign 0 of 2",
+          "tlsWhitelist": "TLS handshake: Russian sites 2 of 2, foreign 0 of 2",
+          "bytesSkipped": "Not checked: foreign sites are unreachable",
+          "udpBlocked": "UDP does not pass: neither QUIC on port 443 nor STUN on other ports answers",
+          "notCaptured": "Proxy mode does not capture DNS: programs ask the system DNS directly",
+          "whitelist": "Only whitelisted Russian sites are reachable",
+          "whitelistAdvice": "Foreign servers cannot be reached with any protocol. Only a server whose entry is in a whitelisted Russian range can work",
+          "dnsOk": "The system DNS and DoH answer",
+          "tcpOk": "Connection: Russian sites 2 of 2, foreign 2 of 2",
+          "tlsOk": "TLS handshake: Russian sites 2 of 2, foreign 2 of 2",
+          "bytesOk": "The whole transfer arrived (64 KB)",
+          "udpOk": "UDP (QUIC) passes",
+          "captured": "The tunnel answers the system’s DNS queries",
+          "open": "No restrictions found: foreign sites, transfers past 16 KB and UDP work"
+        }
+      },
+      "network": {
+        "title": "Network mode",
+        "subtitle": "What this network lets through: Russian and foreign sites, transfers past 16 KB, UDP and encrypted DNS. The check goes direct, past the VPN",
+        "check": "Check the network",
+        "checking": "Checking the network…",
+        "never": "The network has not been checked yet",
+        "checkedAt": "Checked at {{time}}",
+        "viaSession": "The check used the current connection’s direct exit, past the tunnel",
+        "step": {
+          "dns": "DNS",
+          "tcp": "TCP",
+          "tls": "TLS",
+          "bytes": "Bytes after 16 KB",
+          "udp": "UDP",
+          "servers": "Your servers",
+          "dnsCapture": "DNS capture"
+        },
+        "servers": {
+          "check": "Check all servers",
+          "checking": "Checking the servers…",
+          "hint": "Every server of the list through the engine: a real transfer past 16 KB, at most three handshakes a minute per server",
+          "summary": "Servers through the engine: {{online}} work, {{offline}} do not, {{deferred}} postponed. Details are on the Servers page",
+          "failed": "Groups not checked: {{count}}. {{reason}}"
         }
       }
     }

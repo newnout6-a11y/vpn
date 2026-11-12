@@ -56,6 +56,9 @@ pub(super) struct SlotState {
     pub last_rotate_reason: Option<String>,
     /// Stopped after its failure budget; keeps showing which profile died.
     pub auto_disabled: bool,
+    /// Lent to the app's own short-lived use ([`crate::model::ProxyOps::borrow`]): never leased,
+    /// so the borrower can always stop it. Cleared when the slot stops.
+    pub borrowed: bool,
     pub route: Route,
     pub live: Option<Live>,
     rotations: VecDeque<(String, Instant)>,
@@ -177,6 +180,13 @@ impl Registry {
             .map(|(slot, s)| s.instance(*slot))
             .collect();
         derive_readiness(&mut list, now);
+        list
+    }
+
+    /// The routes a lease may take: [`Registry::instances`] without the borrowed slots.
+    pub fn leasable(&self, now: UnixMs) -> Vec<InstanceStatus> {
+        let mut list = self.instances(now);
+        list.retain(|i| !self.slots.get(&i.slot).is_some_and(|s| s.borrowed));
         list
     }
 

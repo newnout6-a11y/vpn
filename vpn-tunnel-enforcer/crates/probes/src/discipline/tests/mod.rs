@@ -334,7 +334,13 @@ fn classifier_names_each_signature() {
                 icmp: Seen::Answered,
                 ..failed(HealthReason::Timeout)
             },
-            V::Offline,
+            V::Refused,
+            R::SwitchServer,
+        ),
+        (
+            "the engine saw the reset, no reach evidence",
+            failed(HealthReason::ConnectionRefused),
+            V::Refused,
             R::SwitchServer,
         ),
         (

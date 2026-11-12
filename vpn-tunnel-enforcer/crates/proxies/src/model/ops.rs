@@ -57,6 +57,10 @@ pub trait ProxyOps: Send + Sync {
     /// Starts `profile_id` on the lowest free slot the backend allocates (UI "+").
     async fn add(&self, profile_id: String) -> Result<ProxyStatus, ProxyError>;
 
+    /// [`ProxyOps::add`] for the app's own short-lived use (a subscription fetch's spare route):
+    /// the slot is never leased to a control API client, so its borrower can always stop it.
+    async fn borrow(&self, profile_id: String) -> Result<ProxyStatus, ProxyError>;
+
     /// One proxy per named profile, never the main VPN's own (`POST /connect-profiles`, the
     /// Servers page). Per-profile failures are reported in the result, not as an error.
     async fn start_profiles(&self, profile_ids: Vec<String>) -> BatchStartResult;

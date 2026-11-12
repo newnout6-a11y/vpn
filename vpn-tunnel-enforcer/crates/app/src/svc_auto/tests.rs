@@ -2,5 +2,8 @@
 //! and stop mapping, the verdict feed's mapping, the failover pick. Nothing here touches the
 //! system (no registry, no proxy, no engine).
 mod coord;
+mod failover;
 mod feed;
+mod leftovers;
+mod privacy;
 mod pure;

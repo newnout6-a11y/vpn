@@ -44,6 +44,7 @@ impl ServersApi for DemoServersApi {
         input: String,
         target: AddTarget,
         device: ClientDevice,
+        request: SubscriptionRequest,
     ) -> AppResult<ImportReport> {
         delay(1_200).await;
         let text = input.trim();
@@ -74,6 +75,8 @@ impl ServersApi for DemoServersApi {
                     imported_at: now,
                     last_fetched_at: Some(now),
                     last_fetch_attempt_at: Some(now),
+                    send_hwid: request.send_hwid,
+                    header_names: header_names(&request.headers),
                     ..GroupView::default()
                 });
                 for (i, (name, protocol, country, stealth)) in fresh.iter().enumerate() {
@@ -94,10 +97,20 @@ impl ServersApi for DemoServersApi {
                     });
                 }
             });
+            let providers = if lower.contains("clash") {
+                vec![ProviderLine {
+                    name: "Main".into(),
+                    servers: 3,
+                    error: None,
+                }]
+            } else {
+                Vec::new()
+            };
             return Ok(ImportReport {
                 group_name: format!("Subscription {n}"),
                 subscription: true,
                 added: 3,
+                providers,
                 ..ImportReport::default()
             });
         }
@@ -171,6 +184,7 @@ impl ServersApi for DemoServersApi {
             updated: 0,
             unchanged: 0,
             skipped,
+            providers: Vec::new(),
         })
     }
 
@@ -296,13 +310,13 @@ impl ServersApi for DemoServersApi {
 
     async fn copy_key(&self, id: &str) -> AppResult<Duration> {
         delay(150).await;
-        self.known(id)?;
+        shareable(self.known(id)?)?;
         Ok(Duration::from_secs(60))
     }
 
     async fn save_key(&self, id: &str) -> AppResult<Option<String>> {
         delay(500).await;
-        let server = self.known(id)?;
+        let server = shareable(self.known(id)?)?;
         let name: String = server
             .name
             .chars()
@@ -323,11 +337,15 @@ impl ServersApi for DemoServersApi {
 
     async fn export_all_keys(&self) -> AppResult<Option<ExportReport>> {
         delay(1_400).await;
-        let total = u32::try_from(self.view().servers.len()).unwrap_or(u32::MAX);
+        let view = self.view();
+        let hidden = view.servers.iter().filter(|s| s.config_hidden).count();
+        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let total = count(view.servers.len() - hidden);
         Ok(Some(ExportReport {
             path: r"C:\Users\Demo\Desktop\vpn-keys-20261111-0912.txt".into(),
             exported: total.saturating_sub(1),
             skipped: u32::from(total > 0),
+            hidden: count(hidden),
         }))
     }
 
@@ -414,6 +432,27 @@ impl ServersApi for DemoServersApi {
             }
         });
         Ok(())
+    }
+
+    async fn set_send_hwid(&self, id: &str, on: bool) -> AppResult<()> {
+        delay(200).await;
+        self.edit(|v| {
+            if let Some(g) = v.groups.iter_mut().find(|g| g.id == id) {
+                g.send_hwid = on;
+            }
+        });
+        Ok(())
+    }
+
+    async fn set_request_headers(&self, id: &str, lines: String) -> AppResult<Vec<String>> {
+        delay(300).await;
+        let names = header_names(&lines);
+        self.edit(|v| {
+            if let Some(g) = v.groups.iter_mut().find(|g| g.id == id) {
+                g.header_names = names.clone();
+            }
+        });
+        Ok(names)
     }
 
     async fn rename_group(&self, id: &str, name: String) -> AppResult<()> {
@@ -549,4 +588,22 @@ impl ServersApi for DemoServersApi {
         tracing::info!("demo: provider link requested");
         Ok(())
     }
+}
+
+/// The demo's header check: the names of `Name: value` lines.
+fn header_names(lines: &str) -> Vec<String> {
+    lines
+        .lines()
+        .filter_map(|l| l.split_once(':'))
+        .map(|(name, _)| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// A server whose key the demo may hand out (its provider does not hide it).
+fn shareable(server: ServerView) -> AppResult<ServerView> {
+    if server.config_hidden {
+        return Err(AppError::validation(Msg::new("ui.servers.hidden.refused")));
+    }
+    Ok(server)
 }

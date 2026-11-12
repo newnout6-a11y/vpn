@@ -22,6 +22,15 @@ impl StopError {
 impl Actor {
     pub(super) fn admit_stop(&mut self, req: DisconnectReq, reply: Reply) {
         if let Some(stop) = self.stop.as_mut() {
+            // A full stop never ends as a kept block: before the effect it turns the stop into
+            // a full one, after that it runs right behind it.
+            if stop.keep && !req.keep_protection {
+                if stop.running {
+                    stop.release.push((req, reply));
+                    return;
+                }
+                stop.keep = false;
+            }
             // Coalesce before any priority check: every later stop joins the running one.
             stop.waiters.push(reply);
             return;
@@ -32,13 +41,20 @@ impl Actor {
         if self.start.as_ref().is_some_and(|s| req.owner < s.op.owner) {
             return refuse(reply, key::HIGHER_PRIORITY);
         }
+        let keep = req.keep_protection
+            && self.deps.settings.read(|s| s.kill_switch) != KillSwitchLevel::Off;
         let head = Head::new(req.owner, req.source, req.correlation, req.timeout);
-        self.begin_stop(req.cause, head, vec![reply]);
+        self.begin_stop_as(req.cause, head, vec![reply], keep);
     }
 
-    /// Publishes the stop (reserving the lane), cancels a running start and runs the effect
-    /// once that start drained. The caller's deadline never interrupts the rollback itself.
+    /// A full stop: publishes it (reserving the lane), cancels a running start and runs the
+    /// effect once that start drained. The caller's deadline never interrupts the rollback.
     pub(super) fn begin_stop(&mut self, cause: StopCause, head: Head, waiters: Vec<Reply>) {
+        self.begin_stop_as(cause, head, waiters, false);
+    }
+
+    /// [`Actor::begin_stop`]; `keep` = the kill switch keeps blocking after it.
+    fn begin_stop_as(&mut self, cause: StopCause, head: Head, waiters: Vec<Reply>, keep: bool) {
         if let Some(stop) = self.stop.as_mut() {
             // One stop at a time: a second one joins it.
             stop.waiters.extend(waiters);
@@ -78,6 +94,8 @@ impl Actor {
             timer,
             shutdown: None,
             then: Vec::new(),
+            keep,
+            release: Vec::new(),
         });
         if self.start.is_none() {
             self.run_stop_effect();
@@ -91,10 +109,16 @@ impl Actor {
         stop.running = true;
         stop.captured = Captured::now(&self.deps);
         let quitting = stop.cause == StopCause::AppQuit;
+        let keep = match self.session.as_ref().map(LiveSession::is_soft) {
+            _ if !stop.keep => Keep::Nothing,
+            Some(true) => Keep::Tweaks,
+            Some(false) => Keep::Block,
+            None => Keep::Nothing,
+        };
         let (deps, tx, id) = (self.deps.clone(), self.tx.clone(), stop.op.id);
         supervise(
             &self.tx,
-            effects::stop(deps, quitting),
+            effects::stop(deps, quitting, keep),
             StopReport::panicked,
             move |report| {
                 let _ = tx.send(Cmd::StopDone {
@@ -131,9 +155,17 @@ impl Actor {
             return;
         };
         stop.timer.cancel();
+        // The stop ended whatever the runtime ran, a failover's sibling included.
+        self.failover = None;
+        let holder = self.session.as_ref().map(|s| s.holder);
         let error = self.settle_stop(&stop, &report).await;
         if !stop.terminal_published {
             self.publish(&terminal(&stop.op, error.as_ref().map(|e| e.kind)));
+        }
+        if report.kept != Keep::Nothing && error.is_none() && stop.release.is_empty() {
+            self.kept_blocked(report.kept);
+            // Whoever ends this holder's run must be able to release the block.
+            self.kept_by.send_replace(holder);
         }
         match (&error, stop.cause) {
             (None, StopCause::User) => {
@@ -169,7 +201,22 @@ impl Actor {
                 refuse(cmd.reply, key::PREEMPT_FAILED);
             }
         }
+        for (req, reply) in stop.release {
+            self.admit_stop(req, reply);
+        }
         self.after_drain();
+    }
+
+    /// The stop kept the kill switch's block: nothing runs, and the state says it blocks.
+    fn kept_blocked(&mut self, kept: Keep) {
+        let e = self.evidence();
+        self.fsm.fault(FaultState::Blocked, e);
+        let name = if kept == Keep::Tweaks {
+            "keptSoftBlocked"
+        } else {
+            "keptBlocked"
+        };
+        self.notify(Level::Warn, name, NoticeKind::ConnectionError, None);
     }
 
     /// Closes the sessions the stop ended and checks the result. A runtime whose exit is not
@@ -203,6 +250,10 @@ impl Actor {
         if soft_session {
             self.close_for_stop(stop.cause, &stop.captured).await;
         }
+        if report.kept != Keep::Nothing {
+            // The block stays on purpose: not a clean state, and not a failed cleanup.
+            return None;
+        }
         let e = self.evidence();
         (!self.fsm.can_confirm_stop(e)).then_some(StopError {
             kind: ErrorKind::Internal,
@@ -230,7 +281,7 @@ impl Actor {
             StopCause::Preempted => unknown(evidence, headline(key::OUTCOME_PREEMPTED)),
             StopCause::Failed => unknown(evidence, headline(key::OUTCOME_FAILED)),
         };
-        self.end_session(outcome, captured.bytes).await;
+        self.end_session(outcome, captured.bytes, false).await;
     }
 
     /// The lane changed: run a stop that waited for a drain, then a parked shutdown.

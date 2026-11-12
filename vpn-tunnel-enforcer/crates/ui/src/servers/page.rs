@@ -13,6 +13,7 @@ use super::detail::ServerDetail;
 use super::group::GroupCard;
 use super::model::{AddTarget, ServersView};
 use super::present::{buckets, counts};
+use super::request::RequestDialog;
 use super::state::{Bulk, BulkKind, Confirm, Store, reconcile_expanded};
 use crate::pages::{Page, nav_number, use_page_active};
 use crate::t;
@@ -161,6 +162,7 @@ pub fn ServersPage() -> Element {
                 }
             }
             AddDialog {}
+            RequestDialog {}
             ServerDetail {}
             BatchDialog {}
             ConfirmDialogs {}
@@ -225,6 +227,9 @@ fn BulkNotice() -> Element {
             let mut body = t!("ui.servers.export.done", count = report.exported);
             if report.skipped > 0 {
                 body.push_str(&t!("ui.servers.export.skipped", count = report.skipped));
+            }
+            if report.hidden > 0 {
+                body.push_str(&t!("ui.servers.export.hidden", count = report.hidden));
             }
             body.push_str(" · ");
             body.push_str(&t!("ui.servers.export.savedTo", path = report.path));

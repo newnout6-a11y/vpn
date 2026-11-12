@@ -79,6 +79,12 @@ fn direct(
         refresh_override_min: None,
         fetch: FetchState::default(),
         info,
+        // Migrated: the old app sent its HWID, the panel knows this device by it.
+        send_hwid: true,
+        headers: None,
+        fallback: None,
+        moved_at: None,
+        controls: Default::default(),
     });
     cx.note(Msg::new("app.import.subscriptionPending"));
     None

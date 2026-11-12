@@ -222,7 +222,8 @@ impl Harness {
         let mode = self
             .adaptive
             .begin(SessionKind::Direct, Some(view.clone()))
-            .await;
+            .await
+            .mode;
         self.coord.start(SessionKind::Direct, Some(&view.id), mode);
         mode
     }
@@ -365,27 +366,33 @@ async fn learning_round_trip() {
     assert_eq!(
         h.adaptive
             .begin(SessionKind::Direct, Some(server.clone()))
-            .await,
+            .await
+            .mode,
         AdaptiveMode::MtuCompatibility
     );
     *h.host.identity.lock() = Some(net("192.168.1.1@0011223344ff"));
     assert_eq!(
         h.adaptive
             .begin(SessionKind::Direct, Some(server.clone()))
-            .await,
+            .await
+            .mode,
         AdaptiveMode::Baseline
     );
     *h.host.identity.lock() = Some(net("192.168.1.1"));
     assert_eq!(
         h.adaptive
             .begin(SessionKind::Direct, Some(server.clone()))
-            .await,
+            .await
+            .mode,
         AdaptiveMode::MtuCompatibility
     );
     *h.host.identity.lock() = None;
     let before = h.docs.snapshot();
     assert_eq!(
-        h.adaptive.begin(SessionKind::Direct, Some(server)).await,
+        h.adaptive
+            .begin(SessionKind::Direct, Some(server))
+            .await
+            .mode,
         AdaptiveMode::Baseline
     );
     assert_eq!(h.docs.snapshot().learning.len(), before.learning.len());
@@ -797,20 +804,87 @@ async fn native_restart_failure_is_passed_through() {
 #[tokio::test]
 async fn failed_and_cancelled_starts() {
     let h = Harness::new().ready().await;
-    h.adaptive
+    let begun = h
+        .adaptive
         .begin(SessionKind::Direct, Some(tls_ws("t1")))
         .await;
-    h.adaptive
-        .start_failed(Some(vpnte_base::Msg::new("tunnel.example.startError")));
+    h.adaptive.start_failed(
+        begun.ticket,
+        Some(vpnte_base::Msg::new("tunnel.example.startError")),
+    );
     let status = h.status.borrow().clone();
     assert_eq!(
         (status.phase, status.reason.unwrap().key.as_ref()),
         (Phase::Failed, "tunnel.example.startError")
     );
-    h.adaptive
+    let begun = h
+        .adaptive
         .begin(SessionKind::Direct, Some(tls_ws("t1")))
         .await;
-    h.adaptive.start_failed(None);
+    h.adaptive.start_failed(begun.ticket, None);
     assert_eq!(h.status.borrow().phase, Phase::Idle);
     assert!(!h.adaptive.retry(), "no tunnel runs");
+}
+
+/// a7: starts overlap (a refused lower start while the user's runs; a lower start the user's
+/// pre-empts): each one's end touches only its own preparation, so the start that runs keeps
+/// its learning context (the passed window is learned) and the status never flashes `Failed`.
+#[tokio::test]
+async fn overlapping_starts_keep_their_own_preparation() {
+    for refused_first in [false, true] {
+        let mut h = Harness::new().ready().await;
+        let (user, other) = (reality("u1"), reality("s1"));
+        h.add(&user);
+        h.add(&other);
+        h.host.script(&[false, false, false, true, true, true]);
+        // Not refused first: the other start was in flight and the user's pre-empts it.
+        let early = match refused_first {
+            true => None,
+            false => Some(
+                h.adaptive
+                    .begin(SessionKind::Direct, Some(other.clone()))
+                    .await,
+            ),
+        };
+        let begun = h
+            .adaptive
+            .begin(SessionKind::Direct, Some(user.clone()))
+            .await;
+        let late = match early {
+            Some(early) => early,
+            None => h.adaptive.begin(SessionKind::Direct, Some(other)).await,
+        };
+        h.adaptive
+            .start_failed(late.ticket, Some(vpnte_base::Msg::new("x.startInProgress")));
+        assert_eq!(
+            h.status.borrow().phase,
+            Phase::Connecting,
+            "{refused_first}"
+        );
+        h.coord
+            .start(SessionKind::Direct, Some(&user.id), begun.mode);
+        assert_eq!(h.done().await.phase, Phase::Connected, "{refused_first}");
+        assert_eq!(h.learned(), vec![AdaptiveMode::MtuCompatibility]);
+    }
+}
+
+/// b2: the stealth seed only picks a mode the start can run: MTU needs a TUN, so a proxy
+/// capture over a server without the TLS knob starts (and so learns) in baseline.
+#[tokio::test]
+async fn the_stealth_seed_never_gives_a_proxy_capture_the_mtu_mode() {
+    let h = Harness::new().ready().await;
+    h.settings.update(|s| s.stealth_mode = true).unwrap();
+    let server = reality("r1");
+    let proxy = h
+        .adaptive
+        .begin(SessionKind::SoftDirect, Some(server.clone()))
+        .await;
+    assert_eq!(proxy.mode, AdaptiveMode::Baseline);
+    let tun = h.adaptive.begin(SessionKind::Direct, Some(server)).await;
+    assert_eq!(tun.mode, AdaptiveMode::MtuCompatibility);
+    let tls = h
+        .adaptive
+        .begin(SessionKind::SoftDirect, Some(tls_ws("t1")))
+        .await;
+    assert_eq!(tls.mode, AdaptiveMode::TlsCompatibility);
 }

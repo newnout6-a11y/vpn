@@ -22,8 +22,8 @@ use super::capture::{Capture, CaptureCheck, CapturePlan, CaptureProof};
 use super::engines::{CoreProc, Slots};
 use super::handle::{Cmd, Shared};
 use crate::api::{
-    CaptureKind, EngineRun, SessionEndpoints, StartRequest, StopOptions, StopReceipt, TunStatus,
-    TunStatusKind, TunWarning, TunnelEvent,
+    CaptureKind, EngineRun, FailoverCause, SessionEndpoints, StartRequest, StopOptions,
+    StopReceipt, TunStatus, TunStatusKind, TunWarning, TunnelEvent,
 };
 
 /// The Xray side of a slot-mode session.
@@ -127,6 +127,10 @@ pub(super) struct Actor {
     /// Crash restarts made in the current window and whether the failover was tried.
     pub attempt: u8,
     pub failover_tried: bool,
+    /// The failover candidate (profile id) the start in flight dials and why the runtime
+    /// failed over: its success is announced as [`TunnelEvent::FailedOver`] before its
+    /// `StartFinished`.
+    pub failing_over: Option<(String, FailoverCause)>,
     pub restart_due: Option<Instant>,
     /// The server (profile id) whose crash showed an outbound fault, and until when crash
     /// restarts keep away from it (freeze window, `crash` module).
@@ -188,6 +192,7 @@ impl Actor {
             last: None,
             attempt: 0,
             failover_tried: false,
+            failing_over: None,
             restart_due: None,
             quiet: None,
             stable_at: None,

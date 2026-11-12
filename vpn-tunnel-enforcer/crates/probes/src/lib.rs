@@ -25,6 +25,10 @@ pub const LOCALES: &[(&str, &str)] = &[
         include_str!("../locales/probes-live.en.json"),
     ),
     (
+        include_str!("../locales/probes-netmode.ru.json"),
+        include_str!("../locales/probes-netmode.en.json"),
+    ),
+    (
         include_str!("../locales/probes-servers.ru.json"),
         include_str!("../locales/probes-servers.en.json"),
     ),
@@ -52,6 +56,7 @@ pub mod leak;
 pub mod live;
 pub mod live_stages;
 pub mod local_proxy;
+pub mod netmode;
 pub mod ping;
 pub mod public_ip;
 pub mod speedtest;

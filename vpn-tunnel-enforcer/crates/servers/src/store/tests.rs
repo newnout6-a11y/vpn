@@ -26,6 +26,11 @@ fn sub(url: &str, device: ClientDevice) -> AddTarget {
         device,
         info: SubscriptionMeta::default(),
         partial: false,
+        send_hwid: false,
+        headers: None,
+        controls: Default::default(),
+        fallback: None,
+        moved_at: None,
     }))
 }
 

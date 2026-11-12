@@ -569,6 +569,25 @@ async fn run_end_without_a_schedule_session_does_nothing() {
     );
 }
 
+/// fixauto-a4/b3: the schedule's session ended shortly before the run's end and left the kill
+/// switch's block (an abandoned adaptive check): the run's end releases it with the schedule's
+/// stop and notice. What another owner's session left is not the schedule's to release.
+#[tokio::test]
+async fn run_end_releases_what_its_session_left_behind() {
+    for (left, released) in [(Owner::Schedule, true), (Owner::Manual, false)] {
+        let fx = fixture(vec![hard("a", &[WED], "09:00", "17:00")]);
+        let mut task = Reconciler::new(&fx.sched);
+        task.pass(at(&fx.tz, 10, 9, 0), &fx.tz).await;
+        fx.coord.stop(StopCause::Fault);
+        *fx.coord.left_by.lock() = Some(left);
+        task.pass(at(&fx.tz, 10, 17, 0), &fx.tz).await;
+        assert_eq!(fx.coord.disconnects(), usize::from(released), "{left:?}");
+        assert_eq!(fx.coord.left_by(), (!released).then_some(left));
+        let stopped = (fx.coord.notice_keys().iter()).any(|k| k == "automation.scheduler.stopped");
+        assert_eq!(stopped, released, "{left:?}");
+    }
+}
+
 /// An AutoPilot-owned session at the run start is switched to the scheduled request.
 #[tokio::test]
 async fn autopilot_session_is_switched_to_the_schedule() {

@@ -14,25 +14,46 @@ const MAX_TITLE_CHARS: usize = 256;
 const MAX_ANNOUNCE_CHARS: usize = 200;
 
 /// Metadata from the `#key: value` lines at the top of a body (Happ reads them only before the
-/// configs), and the rest of the body after the leading comment block. Comment lines that are not
-/// metadata are skipped with it; parse the rest (it may be a base64 blob).
+/// configs; Hiddify also reads `//key: value`), and the rest of the body after the leading
+/// comment block. Comment lines that are not metadata are skipped with it; parse the rest (it may
+/// be a base64 blob).
 pub fn body_meta(text: &str) -> (SubscriptionMeta, &str) {
     let mut meta = SubscriptionMeta::default();
+    let rest = comment_block(text, |key, value| apply_meta(&mut meta, key, value));
+    (meta, rest)
+}
+
+/// Walks the comment block at the top of `text`, hands every `key: value` line to `apply` and
+/// returns what follows the block.
+pub(super) fn comment_block(text: &str, mut apply: impl FnMut(&str, &str)) -> &str {
     let mut rest = text;
     while !rest.is_empty() {
         let (line, next) = rest.split_once('\n').unwrap_or((rest, ""));
         let line = line.trim();
         if !line.is_empty() {
-            let Some(comment) = line.strip_prefix('#') else {
+            let Some(comment) = comment_text(line) else {
                 break;
             };
             if let Some((key, value)) = comment.split_once(':') {
-                apply_meta(&mut meta, key, value);
+                apply(key, value);
             }
         }
         rest = next;
     }
-    (meta, rest)
+    rest
+}
+
+/// The text of a comment line: `#…`, or `//…` unless the line is a bare base64 run (`/` is a
+/// base64 character, so a blob may well start with `//`).
+fn comment_text(line: &str) -> Option<&str> {
+    if let Some(comment) = line.strip_prefix('#') {
+        return Some(comment);
+    }
+    let comment = line.strip_prefix("//")?;
+    let blob = line
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-'));
+    (!blob).then_some(comment)
 }
 
 /// Applies one metadata field to `meta`: `subscription-userinfo`, `profile-update-interval`
@@ -202,7 +223,7 @@ fn disposition_title(value: &str) -> Option<String> {
 }
 
 /// `s` without one pair of surrounding quotes (either kind) and surrounding whitespace.
-fn unquote(s: &str) -> &str {
+pub(super) fn unquote(s: &str) -> &str {
     let s = s.trim();
     let quote = |b: &u8| matches!(b, b'"' | b'\'');
     let quoted = s.len() >= 2

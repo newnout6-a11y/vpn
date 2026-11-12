@@ -7,7 +7,9 @@ use dioxus::core::{ScopeId, Task};
 use dioxus::prelude::*;
 use vpnte_base::types::{ClientDevice, UnixMs, now_ms};
 
-use super::model::{AddTarget, ExportReport, ImportReport, KeyHealth, ServerView, ServersView};
+use super::model::{
+    AddTarget, ExportReport, ImportReport, KeyHealth, ServerView, ServersView, SubscriptionRequest,
+};
 use super::present::PingState;
 use crate::widgets::UiError;
 
@@ -91,9 +93,39 @@ pub(crate) struct AddForm {
     pub input: String,
     pub target: AddTarget,
     pub device: ClientDevice,
+    /// Request settings a new subscription group starts with (HWID off by default).
+    pub request: SubscriptionRequest,
     pub busy: bool,
     pub error: Option<UiError>,
     pub report: Option<ImportReport>,
+}
+
+impl AddForm {
+    /// After an import: the next paste starts its own group with the new-group defaults. The
+    /// previous provider's headers (they may be tokens) and HWID choice never reach the next one.
+    pub(crate) fn imported(&mut self) {
+        self.input.clear();
+        self.target = AddTarget::Auto;
+        self.request = SubscriptionRequest::default();
+    }
+
+    /// The dialog closed: the report goes, and so do the request settings (header values may be
+    /// tokens, and the hint promises they are never shown again); the pasted text stays a draft.
+    pub(crate) fn closed(&mut self) {
+        self.report = None;
+        self.request = SubscriptionRequest::default();
+    }
+}
+
+/// The request dialog of one subscription: the HWID switch acts at once; the headers are a draft
+/// that replaces all of them (values never come back from the backend: they may be tokens).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct RequestForm {
+    pub group: String,
+    pub name: String,
+    pub headers: String,
+    pub busy: bool,
+    pub error: Option<UiError>,
 }
 
 /// The page state, `Copy`, provided to every part of the page through context.
@@ -115,6 +147,8 @@ pub(crate) struct Store {
     pub batch_open: Signal<bool>,
     pub add_open: Signal<bool>,
     pub add: Signal<AddForm>,
+    /// The open request dialog (`None`: closed).
+    pub request: Signal<Option<RequestForm>>,
     pub confirm: Signal<Option<Confirm>>,
     pub confirm_busy: Signal<bool>,
     /// Group being renamed and the draft name.
@@ -141,6 +175,7 @@ impl Store {
             batch_open: Signal::new(false),
             add_open: Signal::new(false),
             add: Signal::new(AddForm::default()),
+            request: Signal::new(None),
             confirm: Signal::new(None),
             confirm_busy: Signal::new(false),
             rename: Signal::new(None),

@@ -4,7 +4,7 @@ use vpnte_base::types::{ClientDevice, now_ms};
 use vpnte_probes::discipline::{Classification, Reaction, Verdict};
 use vpnte_probes::key_health::{HealthReason, KeyCheck, KeyHealth};
 use vpnte_servers::model::{HealthRecord, ProfileId, ServerReaction, ServerVerdict, VerdictRecord};
-use vpnte_ui::servers::{AddTarget, ServersApi, VerdictAdvice, VerdictKind};
+use vpnte_ui::servers::{AddTarget, ServersApi, SubscriptionRequest, VerdictAdvice, VerdictKind};
 
 use super::super::ServersBackend;
 use super::super::checks::{health_report, updates};
@@ -123,9 +123,14 @@ async fn a_stored_verdict_reaches_the_row() {
     let api = ServersBackend::start(env.backend.clone());
     let mut state = api.state();
     let paste = PASTE.to_owned();
-    api.add(paste, AddTarget::Auto, ClientDevice::Pc)
-        .await
-        .unwrap();
+    api.add(
+        paste,
+        AddTarget::Auto,
+        ClientDevice::Pc,
+        SubscriptionRequest::default(),
+    )
+    .await
+    .unwrap();
     let row = env.backend.servers.read(|doc| doc.profiles[0].clone());
     let health = KeyHealth {
         at: now_ms(),

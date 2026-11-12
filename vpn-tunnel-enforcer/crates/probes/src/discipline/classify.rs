@@ -40,6 +40,10 @@ pub enum Verdict {
     Deferred,
     /// The evidence does not single out a cause.
     NotVerified,
+    /// The TCP connect to the key's port was reset: by the server or by a filter on the way
+    /// (a firewall's REJECT looks the same), so no cause is claimed. Told apart from a silent
+    /// `offline`.
+    Refused,
 }
 
 /// What the user (or the automation) should do about a verdict.
@@ -67,6 +71,7 @@ impl Verdict {
             Verdict::Offline => "probes.verdict.offline",
             Verdict::Deferred => "probes.verdict.deferred",
             Verdict::NotVerified => "probes.verdict.notVerified",
+            Verdict::Refused => "probes.verdict.refused",
         })
     }
 }
@@ -93,7 +98,7 @@ pub enum Seen {
     NotRun,
     /// An answer: echo reply, or the TCP handshake completed.
     Answered,
-    /// TCP reset: the address is reachable, nothing listens on the port.
+    /// TCP reset at connect: from the server or from a filter on the way.
     Refused,
     /// No answer within the limit (a ban drops packets silently).
     Silent,
@@ -223,13 +228,17 @@ fn tcp(o: &Observations) -> Classification {
             Classification::of(V::HandshakeFailed, R::TryAnotherFingerprint)
         }
         (Seen::Answered, _) => Classification::of(V::HandshakeFailed, R::RetryLater),
-        // The host is up, nothing listens on the key's port.
-        (Seen::Refused, _) => Classification::of(V::Offline, R::SwitchServer),
+        // The key's port answers with a reset: a retry or a fingerprint will not change that.
+        (Seen::Refused, _) => Classification::of(V::Refused, R::SwitchServer),
         // Changing port or transport will not help against an address ban.
         (Seen::Silent, Seen::Answered) => Classification::of(V::IpBanned, R::SwitchServer),
         (Seen::Silent, Seen::Silent) => Classification::of(V::Offline, R::SwitchServer),
         // No clean reach evidence: a TLS failure still implies TCP got through.
         _ if explicit => Classification::of(V::HandshakeFailed, R::TryAnotherFingerprint),
+        // The engine itself saw the reset (no clean path for the reach probe).
+        _ if o.failure == Some(HealthReason::ConnectionRefused) => {
+            Classification::of(V::Refused, R::SwitchServer)
+        }
         _ => Classification::of(V::NotVerified, R::RetryLater),
     }
 }

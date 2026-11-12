@@ -127,6 +127,8 @@ pub enum VerdictKind {
     Deferred,
     /// The evidence names no cause.
     NotVerified,
+    /// The address answers, the key's port refuses the connection: the server is stopped or moved.
+    Refused,
 }
 
 /// The step a verdict suggests.
@@ -208,6 +210,9 @@ pub struct ServerView {
     pub archived: Option<Archive>,
     /// `false`: switched off by the user; cannot be selected or started as a proxy.
     pub enabled: bool,
+    /// Its provider keeps the config hidden: no key view, copy, save or export (protocol, engine,
+    /// TLS / REALITY and the protection state stay visible).
+    pub config_hidden: bool,
 }
 
 /// The engine a connect would use for a server, as the backend decides it: never a silent
@@ -251,6 +256,9 @@ pub enum FetchError {
     Network,
     Tls,
     Timeout,
+    /// Not requested: a Mihomo provider URL that is `http` under an `https` subscription, or
+    /// points into a private network.
+    Refused,
 }
 
 /// One server group (a subscription or the manual key ring).
@@ -273,6 +281,23 @@ pub struct GroupView {
     pub web_page_url: Option<String>,
     /// User override of the auto-refresh interval; `None` = provider / default interval.
     pub refresh_minutes: Option<NonZeroU32>,
+    /// Provider support link (`support-url`; opened only as an `http(s)` URL, on a click).
+    pub support_url: Option<String>,
+    /// Provider announcement (`announce`, at most 200 chars): plain text, links are never opened
+    /// by themselves.
+    pub announce: Option<String>,
+    /// The provider's refresh interval in hours (`profile-update-interval`).
+    pub provider_refresh_hours: Option<u32>,
+    /// The subscription sends the device HWID.
+    pub send_hwid: bool,
+    /// Names of the user's extra request headers (values are never sent to the page).
+    pub header_names: Vec<String>,
+    /// When the provider moved the subscription to a new address.
+    pub moved_at: Option<UnixMs>,
+    /// The host of the subscription URL (named in the move note: the user sees where it went).
+    pub host: Option<String>,
+    /// The provider keeps the configs of this group's servers hidden (`hide-settings`).
+    pub settings_hidden: bool,
 }
 
 /// Everything the Servers page renders from the stores, pushed on every change.
@@ -318,6 +343,27 @@ pub struct ImportReport {
     pub unchanged: u32,
     /// Lines that could not be imported (their text is never echoed: it may hold a key).
     pub skipped: Vec<SkippedLine>,
+    /// Mihomo providers the subscription named and the app fetched.
+    pub providers: Vec<ProviderLine>,
+}
+
+/// One Mihomo provider of an imported subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderLine {
+    pub name: String,
+    /// New servers it added.
+    pub servers: u32,
+    /// Why it gave nothing.
+    pub error: Option<FetchError>,
+}
+
+/// Request settings of a new subscription (the add dialog).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SubscriptionRequest {
+    /// Send the device HWID (off by default; HWID-bound panels need it).
+    pub send_hwid: bool,
+    /// Extra request headers, one `Name: value` per line.
+    pub headers: String,
 }
 
 /// One input line that was not imported.
@@ -354,6 +400,8 @@ pub struct ExportReport {
     pub path: String,
     pub exported: u32,
     pub skipped: u32,
+    /// Servers left out because their provider hides the configs.
+    pub hidden: u32,
 }
 
 /// Outcome of starting external loopback proxies for servers.

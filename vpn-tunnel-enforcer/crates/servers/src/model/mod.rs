@@ -10,9 +10,11 @@ use vpnte_base::types::{ClientDevice, UnixMs};
 use vpnte_core::secret::Secret;
 use vpnte_core::store::Document;
 use vpnte_profiles::model::SubscriptionMeta;
+use vpnte_profiles::text::Controls;
 
 use crate::common::http_url;
 
+pub(crate) mod lenient;
 mod row;
 mod summary;
 #[cfg(test)]
@@ -106,6 +108,14 @@ impl ServersDoc {
     pub fn row(&self, id: &ProfileId) -> Option<&ServerRow> {
         self.profiles.iter().find(|r| &r.id == id)
     }
+    /// The provider of `row` asked to keep its config hidden (`hide-settings`): its group does,
+    /// or the key carried the request out of the provider's group ([`ServerRow::hidden`]).
+    pub fn hides(&self, row: &ServerRow) -> bool {
+        row.hidden
+            || self
+                .group(&row.group_id)
+                .is_some_and(ServerGroup::hides_settings)
+    }
     /// Mutable access to the row with `id`.
     pub fn row_mut(&mut self, id: &ProfileId) -> Option<&mut ServerRow> {
         self.profiles.iter_mut().find(|r| &r.id == id)
@@ -155,6 +165,32 @@ pub struct ServerGroup {
     /// Provider metadata from the last successful fetch (traffic, expiry, links).
     #[serde(default)]
     pub info: SubscriptionMeta,
+    /// Sends the device HWID (`x-hwid` / `x-device-*`, the HWID in the Happ User-Agent). A group
+    /// stored before this switch existed keeps sending it: HWID-bound panels answer an empty list
+    /// without it, and a changed value takes a new device slot. New groups start without it.
+    #[serde(default = "stored_groups_send_hwid")]
+    pub send_hwid: bool,
+    /// The user's extra request headers (`Name: value` lines), sealed like the URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Secret>,
+    /// The provider's fallback URL (`fallback-url`), sealed like the URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<Secret>,
+    /// When the provider last moved the subscription to a new URL (shown as a note).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_at: Option<UnixMs>,
+    /// The provider's controls from the last successful fetch (`hide-settings`, `routing`,
+    /// autoconnect): stored for the page and for the routing / autoconnect features.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub controls: Controls,
+}
+
+fn stored_groups_send_hwid() -> bool {
+    true
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 /// What a group is. The subscription URL is a secret: its path or query is the access token.
@@ -165,6 +201,7 @@ pub enum GroupKind {
     /// Group key = (canonical URL, device): another device of the same URL is another group (S-05).
     Subscription {
         url: Secret,
+        #[serde(deserialize_with = "lenient::or_default")]
         device: ClientDevice,
     },
 }
@@ -176,6 +213,7 @@ pub struct FetchState {
     /// Set before any request goes out, so a blocked request does not make the sweep hammer the panel.
     pub last_attempt_at: Option<UnixMs>,
     pub last_success_at: Option<UnixMs>,
+    #[serde(deserialize_with = "lenient::option")]
     pub last_outcome: Option<FetchOutcome>,
     /// Profiles in the last successful answer.
     pub last_count: Option<u32>,
@@ -257,7 +295,28 @@ impl ServerGroup {
             refresh_override_min: None,
             fetch: FetchState::default(),
             info: SubscriptionMeta::default(),
+            send_hwid: false,
+            headers: None,
+            fallback: None,
+            moved_at: None,
+            controls: Controls::default(),
         }
+    }
+
+    /// A new subscription group (`send_hwid` as the user chose; see [`ServerGroup::send_hwid`]).
+    pub fn subscription(id: GroupId, url: &url::Url, device: ClientDevice, now: UnixMs) -> Self {
+        Self {
+            kind: GroupKind::Subscription {
+                url: Secret::new(url.as_str()),
+                device,
+            },
+            ..Self::manual(id, now)
+        }
+    }
+
+    /// The provider asked to keep the configs of this group's servers hidden (`hide-settings`).
+    pub fn hides_settings(&self) -> bool {
+        !self.is_manual() && self.controls.hides_settings()
     }
 
     /// True for the manual-keys group.

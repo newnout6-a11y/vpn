@@ -41,12 +41,27 @@ impl Inner {
 
     /// UI "+" (B-19): `profile_id` on the lowest free slot the backend picks (a blank id is a
     /// 400, never an auto-pick).
-    pub(super) async fn add_op(self: &Arc<Self>, profile_id: String) -> Result<Slot, ProxyError> {
+    pub(super) async fn add_op(
+        self: &Arc<Self>,
+        profile_id: String,
+        borrowed: bool,
+    ) -> Result<Slot, ProxyError> {
         let _batch = self.batch.lock().await;
         let (slot, _guard) = self.free_slot(&HashSet::new()).await.ok_or_else(no_ports)?;
-        self.start_held(slot, &connect(slot, profile_id, None))
-            .await?;
-        Ok(slot)
+        // Marked before the start: a lease could otherwise catch the slot between its first
+        // probe and the mark.
+        self.reg.lock().slots.entry(slot).or_default().borrowed = borrowed;
+        let started = self
+            .start_held(slot, &connect(slot, profile_id, None))
+            .await;
+        if started.is_err() {
+            // A start that failed before the slot was configured leaves no stop to clear it.
+            let mut reg = self.reg.lock();
+            if let Some(state) = reg.slots.get_mut(&slot).filter(|s| !s.configured) {
+                state.borrowed = false;
+            }
+        }
+        started.map(|()| slot)
     }
 
     /// One proxy per named profile (3.24), never the main VPN's own. A profile whose slot runs

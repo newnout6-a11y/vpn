@@ -127,9 +127,11 @@ fn parse_text(input: &str) -> Result<ParseReport, TooLarge> {
 This flow (with two small `merge` / `push` helpers) was compiled and run against the crate.
 Subscription bodies: `text::decode_body(bytes, text::MAX_BODY_BYTES)` (gzip / zlib / brotli / UTF-16
 aware, never inflates a corrupt stream partially), then the same steps; response headers:
-`text::header_meta(headers, meta_from_body)`. Fetch headers: `device::user_agents(device, hwid)` and
-`device::device_headers(device, hwid)` with one `hwid` = `device::hwid_override()` or the frozen
-`device::legacy_hwid(device, &MachineIdentity::current())` (compute once, persist).
+`text::header_meta(headers, meta_from_body)`; provider controls and relocation hints:
+`text::header_keys(headers, text::body_keys(text))`. Fetch headers: `device::user_agents(device,
+Some(hwid))` and `device::device_headers(device, hwid)` with one `hwid` = `device::hwid_override()`
+or the frozen `device::legacy_hwid(device, &MachineIdentity::current())` (compute once, persist);
+`user_agents(device, None)` for a subscription that does not send its HWID.
 
 ## Importers
 
@@ -141,6 +143,9 @@ pub fn excerpt(line: &str) -> String;                         // redacted `schem
 pub fn parse_json(value: &serde_json::Value) -> ParseReport;  // never fails; `meta` stays default
 // clash / wg_ini
 pub fn parse_clash(text: &str) -> Option<ParseReport>;        // None: not a Clash document
+pub fn http_providers(text: &str) -> Vec<HttpProvider>;      // Mihomo `proxy-providers` of `type: http`,
+pub struct HttpProvider { pub name: String, pub url: String } // document order, no repeated URL, at most
+pub const MAX_PROVIDERS: usize = 16;                           // 16; Debug hides the URL (a token)
 pub fn parse_wg_ini(text: &str) -> Option<Result<Profile, SkipReason>>;  // None: not a WireGuard config
 // deeplink
 pub enum DeepLinkError { Encrypted { app: &'static str, variant: String }, RoutingProfile,
@@ -282,7 +287,25 @@ pub fn body_meta(text: &str) -> (SubscriptionMeta, &str);
 pub fn apply_meta(meta: &mut SubscriptionMeta, key: &str, value: &str);
 pub fn header_meta<'a>(headers: impl IntoIterator<Item = (&'a str, &'a str)>, body: SubscriptionMeta)
     -> SubscriptionMeta;                                      // headers win, body fills gaps
+// provider controls (Happ app-management keys that steer the client)
+pub enum AutoconnectPick { LastUsed, LowestDelay, Random }   // serde "lastused" | "lowestdelay" | "random"
+pub struct Controls { pub routing: Option<String>, pub hide_settings: Option<bool>,
+    pub autoconnect: Option<bool>, pub autoconnect_pick: Option<AutoconnectPick> } // serde camelCase
+impl Controls { pub fn hides_settings(&self) -> bool }
+pub struct Relocation { pub fallback_url: Option<String>, pub new_url: Option<String>,
+    pub new_domain: Option<String> }                          // tokens: Debug prints only presence
+pub struct ProviderKeys { pub controls: Controls, pub relocation: Relocation }
+impl ProviderKeys { pub fn apply(&mut self, key: &str, value: &str); pub fn or(self, other: Self) -> Self }
+pub fn body_keys(text: &str) -> ProviderKeys;                 // top comment block + a happ://routing/ line
+pub fn header_keys<'a>(headers: impl IntoIterator<Item = (&'a str, &'a str)>, body: ProviderKeys)
+    -> ProviderKeys;                                          // headers win field by field
 ```
+Comment blocks: `#key: value` and (Hiddify) `//key: value` lines; a `//` line made only of base64
+characters is body, not a comment. Keys: `routing` (kept as sent, at most 64 KiB, no control
+characters; a `happ://routing/…` body line counts when no key names one), `hide-settings` and
+`subscription-autoconnect` (`true` / `1` on, any other non-blank value off),
+`subscription-autoconnect-type`, `fallback-url`, `new-url` = `moved-permanently-to` (`http(s)` URLs),
+`new-domain` (`host[:port]` only).
 `http(s)://` lines are never link candidates (a support link must not become a broken key).
 Per-line base64 is not decoded (a MIME-wrapped body would yield truncated keys). The
 `Content-Disposition` file name is the last title fallback; `filename*` wins over `filename`.
@@ -295,7 +318,8 @@ pub const HAPP_VERSION: &str = "3.22.1";  pub const HWID_ENV: &str = "VPNTE_SUBS
 pub struct DeviceProfile { pub os: &'static str, pub os_version: &'static str, pub model: &'static str }
 pub fn device_profile(device: ClientDevice) -> DeviceProfile;
 pub fn utls_fingerprint(device: ClientDevice) -> &'static str;   // chrome / android / ios / safari
-pub fn user_agents(device: ClientDevice, hwid: &str) -> Vec<String>;   // Happ UA first
+pub fn user_agents(device: ClientDevice, hwid: Option<&str>) -> Vec<String>; // Happ UA first; None:
+                                                                         // `Happ/<v>/<os>` without HWID
 pub fn device_headers(device: ClientDevice, hwid: &str) -> [(&'static str, String); 4];
 pub struct MachineIdentity { pub host_name: String, pub user_name: String, pub user_domain: String }
 impl MachineIdentity { pub fn current() -> Self }

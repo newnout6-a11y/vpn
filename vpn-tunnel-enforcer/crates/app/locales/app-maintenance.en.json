@@ -37,6 +37,10 @@
         "store": {
           "profiles": "Profiles"
         }
+      },
+      "network": {
+        "busy": "The network check is already running",
+        "changed": "The network changed during the check: its result was discarded. The new network is checked on its own in a few seconds"
       }
     }
   }

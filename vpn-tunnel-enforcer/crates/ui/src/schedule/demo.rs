@@ -263,6 +263,7 @@ pub fn next_event(entries: &[ScheduleEntry], tz: &TimeZone, now: UnixMs) -> Opti
                         action,
                         at: moment,
                         name: e.name.clone(),
+                        capture: e.capture,
                     });
                 }
             }

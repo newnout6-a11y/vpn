@@ -41,6 +41,8 @@
 .sched-item-hint { color: var(--ink); }
 .sched-item-server { color: var(--ink); overflow-wrap: anywhere; }
 .sched-item-server.is-missing { color: var(--signal-ink); }
+/* A TUN schedule in an unelevated app: it cannot connect (NOADMIN §0). */
+.sched-unavailable { margin: 4px 0 0; font-size: 12px; color: var(--signal-ink); }
 .sched-item-hint::before { content: '— '; color: var(--mute); }
 .sched-item.is-off .sched-item-name,
 .sched-item.is-off .sched-item-meta .swiss-mono,

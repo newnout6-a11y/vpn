@@ -1,6 +1,7 @@
 //! The notices above the facts strip, in the reference markup: auto-restart, a second TUN, the
-//! kill-switch banner, the leak card and the foreign-VPN notice strip. The old Tailwind classes
-//! are kept (utilities.css draws them; the inert `…/NN` tint classes stay inert, as shipped).
+//! kill-switch banner, the leak card, the foreign-VPN notice strip and the network-mode strip.
+//! The old Tailwind classes are kept (utilities.css draws them; the inert `…/NN` tint classes
+//! stay inert, as shipped).
 use dioxus::prelude::*;
 
 use super::Dash;
@@ -30,6 +31,7 @@ pub(super) fn Banners() -> Element {
         if let Some(name) = shown.foreign_vpn {
             ForeignVpnNotice { name }
         }
+        super::netmode::NetBanner {}
     }
 }
 

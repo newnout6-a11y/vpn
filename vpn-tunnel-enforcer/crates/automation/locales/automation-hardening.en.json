@@ -33,7 +33,8 @@
       "legacy": {
         "browserLeftover": "The previous version may have left WebRTC policies in the registry that cannot be restored automatically: check chrome://policy (edge://policy, browser://policy).",
         "browserFiles": "The previous version changed WebRTC settings in browser profiles (Preferences, user.js); they are not restored automatically. If calls do not work in Firefox, reset the media.peerconnection.* preferences on about:config.",
-        "locationLeftover": "The previous version may have left Windows location turned off in a way that cannot be restored automatically: check Settings > Privacy > Location."
+        "locationLeftover": "The previous version may have left Windows location turned off in a way that cannot be restored automatically: check Settings > Privacy > Location.",
+        "locationPolicy": "The previous version left a machine-wide policy that turns Windows location off for every account on this PC. Removing it needs administrator rights, so the app leaves it as it is."
       }
     }
   }

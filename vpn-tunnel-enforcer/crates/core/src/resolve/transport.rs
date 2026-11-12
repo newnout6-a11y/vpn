@@ -2,7 +2,7 @@
 //! it, which Quad9 requires) and DNS over TCP with the RFC 1035 §4.2.2 length prefix. Both go
 //! direct, never through the system proxy (contract §3.9).
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -10,8 +10,11 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use vpnte_base::http;
+use vpnte_base::types::Loopback;
 
 use super::chain::{Transport, UPSTREAM_LIMIT, Upstream};
+use crate::net::HostPort;
+use crate::socks5;
 
 const MESSAGE: &str = "application/dns-message";
 /// DoH bodies above this are refused instead of buffered (a DNS message never needs more).
@@ -25,21 +28,51 @@ const POOL_IDLE: Duration = Duration::from_secs(30);
 pub(super) struct Net {
     /// `None` only when the TLS client cannot be built: TCP/53 is then all that is left.
     client: Option<reqwest::Client>,
+    /// Through this loopback SOCKS5 inbound instead of direct (the network-mode check while our
+    /// TUN runs: the app's own sockets would otherwise enter the tunnel).
+    via: Option<Loopback>,
 }
 
 impl Net {
     pub(super) fn new() -> Net {
-        let client = http::client_builder(UPSTREAM_LIMIT)
+        Net::build(None)
+    }
+
+    /// Every exchange through `proxy` (SOCKS5, names resolved by the proxy).
+    pub(super) fn via(proxy: &Loopback) -> Net {
+        Net::build(Some(proxy.clone()))
+    }
+
+    fn build(via: Option<Loopback>) -> Net {
+        let mut builder = http::client_builder(UPSTREAM_LIMIT)
             .connect_timeout(CONNECT_LIMIT)
-            .pool_idle_timeout(POOL_IDLE)
-            .build();
+            .pool_idle_timeout(POOL_IDLE);
+        if let Some(proxy) = &via {
+            match socks_proxy(proxy) {
+                Ok(p) => builder = builder.proxy(p),
+                Err(err) => tracing::warn!(error = %err, "DoH proxy route not usable"),
+            }
+        }
+        let client = builder.build();
         if let Err(err) = &client {
             tracing::warn!(error = %err, "DoH client could not be built; only DNS over TCP is left");
         }
         Net {
             client: client.ok(),
+            via,
         }
     }
+}
+
+/// `socks5h://user:pass@127.0.0.1:port` (credentials percent-encoded by `Url`).
+fn socks_proxy(proxy: &Loopback) -> anyhow::Result<reqwest::Proxy> {
+    let mut url = url::Url::parse(&format!("socks5h://127.0.0.1:{}", proxy.port))?;
+    if let Some(creds) = &proxy.creds {
+        url.set_username(&creds.user)
+            .and_then(|()| url.set_password(Some(&creds.pass)))
+            .map_err(|()| anyhow::anyhow!("credentials do not fit a proxy URL"))?;
+    }
+    Ok(reqwest::Proxy::all(url.as_str())?)
 }
 
 impl Transport for Net {
@@ -49,7 +82,7 @@ impl Transport for Net {
                 let client = self.client.as_ref().context("no DoH client")?;
                 doh(client, url, query).await
             }
-            Upstream::Tcp(server) => Ok(tcp(server, query).await?),
+            Upstream::Tcp(server) => Ok(tcp(server, self.via.as_ref(), query).await?),
         }
     }
 }
@@ -73,11 +106,25 @@ pub(super) async fn doh(
     read_capped(response, BODY_CAP).await
 }
 
-/// One question over a fresh TCP connection.
-pub(super) async fn tcp(server: SocketAddr, query: &[u8]) -> io::Result<Vec<u8>> {
-    let mut stream = tokio::time::timeout(CONNECT_LIMIT, TcpStream::connect(server))
-        .await
-        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+/// One question over a fresh TCP connection, direct or through `via` (SOCKS5 CONNECT).
+pub(super) async fn tcp(
+    server: SocketAddr,
+    via: Option<&Loopback>,
+    query: &[u8],
+) -> io::Result<Vec<u8>> {
+    let mut stream = match via {
+        None => tokio::time::timeout(CONNECT_LIMIT, TcpStream::connect(server))
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??,
+        Some(proxy) => {
+            let local = SocketAddr::from((Ipv4Addr::LOCALHOST, proxy.port));
+            let target = HostPort::new(&server.ip().to_string(), server.port())
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+            socks5::connect(local, proxy.creds.as_ref(), &target, CONNECT_LIMIT)
+                .await
+                .map_err(io::Error::other)?
+        }
+    };
     let len =
         u16::try_from(query.len()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     let mut framed = Vec::with_capacity(query.len() + 2);

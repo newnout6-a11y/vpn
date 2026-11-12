@@ -27,6 +27,11 @@ vpnte-profiles.workspace = true
 [dev-dependencies]
 base64.workspace = true
 fastrand.workspace = true
+# Paused clock for the fallback-URL timing tests.
+tokio = { workspace = true, features = ["test-util"] }
+# Loopback HTTPS panels: relocations are trusted only over HTTPS.
+rustls.workspace = true
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 
 [lints]
 workspace = true

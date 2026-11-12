@@ -60,6 +60,7 @@ fn fragments_match_and_cover_the_code() {
         include_str!("../report.rs"),
         include_str!("../selftest.rs"),
         include_str!("../export.rs"),
+        include_str!("../network/mod.rs"),
     ];
     for source in sources {
         for (i, _) in source.match_indices("\"app.maintenance.") {

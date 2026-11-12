@@ -371,7 +371,24 @@ pub struct ServerAddrs { pub addrs: Vec<IpAddr>, pub last_known: bool }   // Clo
 impl ServerAddrs { pub fn warning(&self) -> Option<Msg>; }   // core.net.resolveLastKnown when last_known
 pub async fn resolve_server(name: &str, keep: impl Fn(IpAddr) -> bool)
     -> Result<ServerAddrs, ResolveError>;    // VPN server names: chain -> OS (2.5 s) -> last known
+pub enum DohByName { Cloudflare, Yandex }    // one DoH-by-name upstream, for the network-mode check
+pub async fn resolve_with(name: &str, resolver: DohByName, via: Option<&Loopback>,
+    keep: impl Fn(IpAddr) -> bool) -> Result<Vec<IpAddr>, ResolveError>;  // via = loopback SOCKS5 inbound
+pub const MEMORY_TTL: Duration;              // 7 days
+pub struct ResolverMemoryDoc;                // Document "cache/resolver.json": one DPAPI-sealed payload
+pub fn persist(root: &Path, network: Option<String>, cancel: CancellationToken); // load + seed + apply the
+                                             // network's winner at start; save on change every 30 s and at cancel
+pub fn set_network(key: Option<String>, at: UnixMs);  // moved to network `key` (None = unknown) at `at`
 ```
+`persist` (call once inside the runtime, before the first connect) seeds the last-known server
+addresses and the per-network winning upstream from the sealed document (entries older than
+`MEMORY_TTL` dropped, at most 32 networks), asks the winner of `network` (the caller's quick read
+of the current network) first from the very first lookup, and writes the memory back only when it
+changed (a winner keeps the time it won; the same winner again is stamped anew only once a day).
+`set_network` credits each chain win to the network that was current when it was won: a win
+before `at` stays with the old network, a win since `at` belongs to the new one and is asked first
+there; otherwise the new network's remembered winner (for example Yandex DoH on a mobile
+whitelist) goes first, and an unknown network uses the production order. `resolve_with` asks exactly one upstream and leaves the shared chain alone.
 An IP literal is returned without a lookup (still filtered; `resolve_server` never marks it
 `last_known`). `System` has no deadline of its own: wrap it in `tokio::time::timeout`. It is
 the honest OS answer (diagnostics rely on it) and cannot see poisoning.
@@ -395,9 +412,12 @@ the transport's cause chain (`resolver unreachable`) or the verdict (`no usable 
 `resolve_server` (before an engine dials a server name): the chain, then the OS resolver
 (mobile whitelists may leave only the ISP's DNS; a block-page-only OS answer = `Poisoned`; the
 chain's verdict stands over an OS `NotFound`, which cannot be told from a forged one), then the
-addresses the name had at its last successful lookup in this process (in memory, 256 names,
-no document stores DNS answers): returned with `last_known: true` on `Failed` / `Poisoned` /
+addresses the name had at its last successful lookup (256 names; never older than `MEMORY_TTL`,
+however long the process runs): returned with `last_known: true` on `Failed` / `Poisoned` /
 `NotFound`, never on `Filtered` (a real answer the caller refuses). Show `warning()` to the user.
+Only chain answers are persisted by `persist`; an OS-resolver answer taken while the chain fails
+(a stub page, a captive portal) never replaces a chain-verified address and lives for this run
+only.
 
 ## `ops` — registry of long feature operations
 ```rust

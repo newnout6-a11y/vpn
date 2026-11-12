@@ -267,6 +267,31 @@ async fn task_reacts_and_resets_on_network_change() {
         .unwrap();
 }
 
+/// a5: a burst bigger than the inbox (a group check records dozens of verdicts in one write)
+/// arrives in full when the feed waits for room: the report after the burst still counts.
+#[tokio::test]
+async fn a_burst_bigger_than_the_inbox_is_delivered() {
+    let rig = Rig::new(pool());
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({
+        let (reactions, cancel) = (rig.reactions.clone(), cancel.clone());
+        async move { reactions.run(cancel).await }
+    });
+    tokio::task::yield_now().await;
+    let healthy = || report("x", CheckVerdict::Healthy, CheckReaction::None);
+    for _ in 0..40 {
+        assert!(rig.reactions.deliver(healthy()).await);
+    }
+    assert!(rig.reactions.deliver(report("c", BANNED.0, BANNED.1)).await);
+    let verdicts = rig.reactions.verdicts();
+    wait_for(|| verdicts.avoided("c")).await;
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 async fn wait_for(done: impl Fn() -> bool) {
     for _ in 0..500 {
         if done() {

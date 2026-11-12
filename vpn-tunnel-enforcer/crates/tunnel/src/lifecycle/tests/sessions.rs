@@ -645,11 +645,16 @@ async fn session_events() {
     );
     assert!(view.generation.is_some());
     h.lc.disconnect(user_stop()).await.unwrap();
-    let Ok(SessionEvent::Ended { session, outcome }) = events.recv().await else {
+    let Ok(SessionEvent::Ended {
+        session,
+        outcome,
+        continues,
+    }) = events.recv().await
+    else {
         panic!("expected Ended");
     };
     assert_eq!(
-        (session.owner, outcome),
-        (Owner::Schedule, OutcomeKind::UserStop)
+        (session.owner, outcome, continues),
+        (Owner::Schedule, OutcomeKind::UserStop, false)
     );
 }

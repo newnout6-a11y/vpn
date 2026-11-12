@@ -93,6 +93,14 @@ impl IpWatch {
             token.cancel();
         }
     }
+
+    /// The machine woke from sleep or the session was unlocked: the protection and the DNS
+    /// capture are re-checked at once (elevated process only: that is where they exist).
+    pub fn resumed(&self) {
+        if let Some(leaks) = &self.leaks {
+            leaks.resumed();
+        }
+    }
 }
 
 /// Where the running session's traffic leaves: the TUN, or the mixed inbound of a proxy

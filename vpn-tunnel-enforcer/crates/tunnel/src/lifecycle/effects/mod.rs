@@ -283,7 +283,10 @@ pub(super) async fn connect(
     }
     if deps.runtime.status().borrow().running {
         let ending = mode_switch.take().unwrap_or_else(|| Captured::now(deps));
-        if !stop(deps.clone(), false).await.runtime_gone() {
+        if !stop(deps.clone(), false, Keep::Nothing)
+            .await
+            .runtime_gone()
+        {
             let msg = Msg::new(key::CLEANUP_UNCONFIRMED);
             let error = ConnError::Failed(TunError::new(ErrorKind::Internal, msg.clone()));
             let failure = Failure::new(error)
@@ -489,13 +492,26 @@ async fn undo_start(deps: &LifecycleDeps) -> bool {
         .runtime_stopped
 }
 
-/// What a full stop achieved.
+/// What a stop leaves blocking (`DisconnectReq::keep_protection` with the kill switch on).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Keep {
+    /// A full stop.
+    Nothing,
+    /// Soft: the tweaks stay on the dead port, so programs that honour them stay blocked.
+    Tweaks,
+    /// TUN: the runtime keeps its firewall block (a preserved stop).
+    Block,
+}
+
+/// What a stop achieved.
 #[derive(Debug)]
 pub(super) struct StopReport {
     pub receipt: StopReceipt,
-    /// Soft rollback result (it runs before the engine stops); `None` only from a panicked effect.
+    /// Soft rollback result (it runs before the engine stops); `None`: not attempted (the
+    /// tweaks were kept on purpose, or the effect panicked).
     pub soft: Option<Result<(), AppError>>,
     pub capture_stopped: bool,
+    pub kept: Keep,
 }
 
 impl StopReport {
@@ -519,6 +535,7 @@ impl StopReport {
             },
             soft: None,
             capture_stopped: false,
+            kept: Keep::Nothing,
         }
     }
 }
@@ -527,20 +544,28 @@ impl StopReport {
 /// point at an engine that is going away), then the runtime; when its exit is not proven,
 /// nothing else is touched (protection retained) unless the app quits (H-06: the kill-on-close
 /// job ends the engines with the process, so the rest is cleaned up now). Then forensics,
-/// external proxies and monitoring, each independent of the others.
-pub(super) async fn stop(deps: Arc<LifecycleDeps>, quitting: bool) -> StopReport {
+/// external proxies and monitoring, each independent of the others. `keep`: what stays
+/// blocking instead (the engines go either way).
+pub(super) async fn stop(deps: Arc<LifecycleDeps>, quitting: bool, keep: Keep) -> StopReport {
     let reason = if quitting { "shutdown" } else { "vpn-stop" };
     let soft = if deps.soft.applied() == Some(false) {
-        Ok(())
+        Some(Ok(()))
+    } else if keep == Keep::Tweaks {
+        None
     } else {
-        deps.soft.rollback().await
+        Some(deps.soft.rollback().await)
     };
-    let receipt = deps.runtime.stop(StopOptions::default()).await;
+    let opts = StopOptions {
+        preserve_protection: keep == Keep::Block,
+        preserve_last: false,
+    };
+    let receipt = deps.runtime.stop(opts).await;
     if !receipt.ok && !receipt.runtime_stopped && !quitting {
         return StopReport {
             receipt,
-            soft: Some(soft),
+            soft,
             capture_stopped: false,
+            kept: Keep::Nothing,
         };
     }
     let capture_stopped = deps.forensics.stop_session(reason).await;
@@ -549,8 +574,9 @@ pub(super) async fn stop(deps: Arc<LifecycleDeps>, quitting: bool) -> StopReport
     deps.monitor.stop();
     StopReport {
         receipt,
-        soft: Some(soft),
+        soft,
         capture_stopped,
+        kept: keep,
     }
 }
 

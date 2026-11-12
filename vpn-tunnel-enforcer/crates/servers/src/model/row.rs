@@ -10,27 +10,31 @@ use vpnte_core::secret::{Secret, SecretError};
 use vpnte_profiles::countries::{self, Iso2};
 use vpnte_profiles::model::Profile;
 
-use super::{ARCHIVE_TTL_MS, GroupId, ProfileId};
+use super::{ARCHIVE_TTL_MS, GroupId, ProfileId, lenient};
 
 /// Age after which weaker country evidence may replace stronger evidence.
 const COUNTRY_STALE_MS: UnixMs = 30 * 24 * 60 * 60 * 1000;
 
 /// Where a row came from. Only `Feed` rows are reconciled by a subscription refresh; keys the user
 /// pasted into a subscription group are `Manual` and never archived by it (S-22).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Origin {
     Feed,
+    /// Also what an origin a newer build named reads as: a refresh never archives such a row.
+    #[default]
     Manual,
 }
 
 /// Why a row is archived.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArchiveReason {
     /// The provider stopped publishing the key; the user can still select it (with a warning).
     Provider,
-    /// The user removed it (soft delete): not selectable until restored.
+    /// The user removed it (soft delete): not selectable until restored. Also what a reason a
+    /// newer build named reads as: an archived row never becomes selectable by being misread.
+    #[default]
     User,
 }
 
@@ -39,11 +43,12 @@ pub enum ArchiveReason {
 #[serde(rename_all = "camelCase")]
 pub struct Archived {
     pub at: UnixMs,
+    #[serde(deserialize_with = "lenient::or_default")]
     pub reason: ArchiveReason,
 }
 
 /// How a country was verified (S-11 / S-12).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CountrySource {
     /// Geo lookup of the exit IP seen through the tunnel.
@@ -52,7 +57,9 @@ pub enum CountrySource {
     HealthTrace,
     /// Geo lookup of the server's own address: wrong for bridges, so never replaces exit data.
     EntryIp,
-    /// Imported from the Electron app: low confidence, any new verification replaces it.
+    /// Imported from the Electron app: low confidence, any new verification replaces it. Also
+    /// what a source a newer build named reads as.
+    #[default]
     Legacy,
 }
 
@@ -76,6 +83,7 @@ pub struct VerifiedCountry {
     /// The address that was looked up (absent for some imported records).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip: Option<IpAddr>,
+    #[serde(deserialize_with = "lenient::or_default")]
     pub source: CountrySource,
 }
 
@@ -101,7 +109,12 @@ pub struct HealthRecord {
     /// From "SOCKS ready" to the first 2xx (S-14).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtt_ms: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// A reason a newer build named reads as none (the record still says offline).
+    #[serde(
+        default,
+        deserialize_with = "lenient::option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub reason: Option<HealthReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress_ip: Option<IpAddr>,
@@ -124,6 +137,8 @@ pub enum HealthReason {
     Hy2HandshakeFailed,
     /// Not a key fault: the engine setting (the app's or the row's own) does not run the key.
     EngineSetting,
+    /// The address reset the TCP connect: nothing listens on the key's port (not a timeout).
+    ConnectionRefused,
 }
 
 /// What the probes' classifier concluded about a server (`vpnte_probes::discipline::Verdict`,
@@ -148,6 +163,8 @@ pub enum ServerVerdict {
     /// Not checked: the server's handshake budget was used up.
     Deferred,
     NotVerified,
+    /// The address answers, the key's port refuses the connection (a stopped or moved server).
+    Refused,
     #[serde(other)]
     Unknown,
 }
@@ -181,6 +198,7 @@ pub struct VerdictRecord {
 pub struct ServerRow {
     pub id: ProfileId,
     pub group_id: GroupId,
+    #[serde(deserialize_with = "lenient::or_default")]
     pub origin: Origin,
     /// Plain copies of the profile's name, protocol label, host and port (lists, pings).
     pub name: String,
@@ -188,11 +206,15 @@ pub struct ServerRow {
     pub server: String,
     pub port: u16,
     /// Client device: a feed row follows its group, a manual row has its own (uTLS default, S-12b).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient::or_default")]
     pub device: ClientDevice,
     /// The server's own engine: sing-box / Xray win over the setting, `Auto` follows it. Kept
     /// across subscription refreshes (the row stays, only its profile changes).
-    #[serde(default, skip_serializing_if = "is_auto")]
+    #[serde(
+        default,
+        deserialize_with = "lenient::or_default",
+        skip_serializing_if = "is_auto"
+    )]
     pub engine: EnginePref,
     /// The typed [`Profile`] as JSON, DPAPI-sealed on disk.
     pub profile: Secret,
@@ -212,6 +234,11 @@ pub struct ServerRow {
     /// The classifier's verdict (frozen, IP ban, …); absent in older files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<VerdictRecord>,
+    /// The key's provider asked to keep its config hidden (`hide-settings`) and the key left that
+    /// provider's group (fetched into another group, or kept when the group was deleted): it
+    /// stays hidden wherever it lives (see [`super::ServersDoc::hides`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 impl ServerRow {
@@ -241,6 +268,7 @@ impl ServerRow {
             country: None,
             health: None,
             verdict: None,
+            hidden: false,
         };
         row.set_profile(profile)?;
         Ok(row)

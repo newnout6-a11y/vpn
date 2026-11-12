@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::super::far_side::{Answer, download, far_side, head, trace};
 use super::super::transfer::{Limits, Trace, Transfer, TransferReport, check};
-use crate::live::wire::Wire;
+use crate::live::wire::{Dial, Wire};
 
 /// Short limits so the stalls take a fraction of a second.
 const FAST: Limits = Limits {
@@ -18,9 +18,15 @@ const FAST: Limits = Limits {
 async fn report(answers: Vec<Answer>, with_trace: bool) -> TransferReport {
     let (inbound, task) = far_side(answers).await;
     let cancel = CancellationToken::new();
-    let out = check(&Wire::plain(), &inbound, with_trace, FAST, &cancel)
-        .await
-        .unwrap();
+    let out = check(
+        &Wire::plain(),
+        Dial::Socks(&inbound),
+        with_trace,
+        FAST,
+        &cancel,
+    )
+    .await
+    .unwrap();
     task.abort();
     out
 }

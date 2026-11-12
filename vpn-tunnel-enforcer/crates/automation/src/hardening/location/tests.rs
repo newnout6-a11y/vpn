@@ -233,6 +233,45 @@ fn old_policy_records_are_still_rolled_back() {
     assert!(!s.location.is_applied());
 }
 
+/// b1: unelevated, the old version's machine policies are neither written (every attempt
+/// would be refused) nor reported as a failed rollback (no notice per start, stop or toggle):
+/// their records wait for an elevated process. They do not count as "applied" either, so the
+/// user's own consent is applied and rolled back as usual next to them.
+#[test]
+fn unelevated_old_policies_wait_without_blocking_the_consent() {
+    let fake = Fake {
+        unelevated: true,
+        ..Fake::default()
+    };
+    for name in POLICY_VALUES {
+        fake.set(&policy(name), Val::Dword(1));
+    }
+    let s = setup(fake);
+    let records = POLICY_VALUES.map(|name| Record {
+        feature: Feature::LocationPrivacy,
+        target: policy(name),
+        baseline: Val::Absent,
+        applied: Val::Dword(1),
+        created: false,
+    });
+    assert_eq!(s.journal.adopt_legacy(records.to_vec()).unwrap(), 2);
+    assert!(
+        !s.location.is_applied(),
+        "machine leftovers hold nothing up"
+    );
+    let report = s.location.rollback_blocking();
+    assert!(report.is_complete() && rollback_failure_msg(&report).is_none());
+    assert_eq!(s.fake.write_count(), 0, "no machine write tried");
+    assert_eq!(s.journal.records(Feature::LocationPrivacy).len(), 2);
+    s.location.apply_blocking().unwrap();
+    assert!(s.location.is_applied());
+    assert_eq!(s.fake.get(&consent()), deny());
+    assert!(s.location.rollback_blocking().is_complete());
+    assert_eq!(s.fake.get(&consent()), Val::Absent);
+    assert!(!s.location.is_applied());
+    assert_eq!(s.fake.get(&policy("DisableLocation")), Val::Dword(1));
+}
+
 /// A current value the journal could not record (consent as a DWORD) is refused, not written.
 #[test]
 fn foreign_value_type_is_refused() {

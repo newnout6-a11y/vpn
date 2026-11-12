@@ -23,10 +23,10 @@ use vpnte_profiles::countries::Iso2;
 use vpnte_profiles::model::{Kind, Profile};
 
 use crate::discipline::{
-    self, Classification, Endpoint, FREEZE_BACKOFF, Limits, Observations, Reach, Reaction,
+    self, Classification, Endpoint, FREEZE_BACKOFF, Limits, Observations, Reach, Reaction, Seen,
     Transfer, TransferReport, Verdict, classify, real_certificate,
 };
-use crate::live::wire::Wire;
+use crate::live::wire::{Dial, Wire};
 use crate::ping::{NetPath, PingTarget};
 
 mod classify;
@@ -68,6 +68,9 @@ pub enum HealthReason {
     /// The engine setting (the app's or the server's own) does not run this key: an engine
     /// verdict, the key itself was never tried (ENGINE-GAPS decision 3).
     EngineSetting,
+    /// The TCP connect to the key's port was reset (by the server or a filter on the way),
+    /// unlike a silent timeout.
+    ConnectionRefused,
 }
 
 impl HealthReason {
@@ -86,6 +89,7 @@ impl HealthReason {
             HealthReason::Hy2TlsFailed => "probes.keyHealth.reason.hy2TlsFailed",
             HealthReason::Hy2HandshakeFailed => "probes.keyHealth.reason.hy2HandshakeFailed",
             HealthReason::EngineSetting => "probes.keyHealth.reason.engineSetting",
+            HealthReason::ConnectionRefused => "probes.keyHealth.reason.connectionRefused",
         })
     }
 }
@@ -285,7 +289,8 @@ pub(crate) async fn probe_with(
             return Ok(KeyCheck { health, verdict });
         }
     };
-    let report = discipline::transfer_check(wire, probe.socks(), true, limits, cancel).await;
+    let dial = Dial::Socks(probe.socks());
+    let report = discipline::transfer_check(wire, dial, true, limits, cancel).await;
     let report = match report {
         Ok(report) => report,
         Err(err) => {
@@ -322,6 +327,7 @@ pub(crate) async fn probe_with(
     } else {
         Reach::default()
     };
+    let failure = refined(failure, udp_transport, reach.tcp);
     let verdict = classify(&Observations {
         udp_transport,
         deferred: false,
@@ -363,6 +369,20 @@ fn failure_of(hysteria2: bool, log: &str, transfer: &Transfer) -> HealthReason {
         Transfer::Stalled { .. } => HealthReason::Timeout,
         Transfer::Failed { error, .. } => classify_failure(hysteria2, log, error),
         Transfer::NoData | Transfer::Complete { .. } => classify_failure(hysteria2, log, "timeout"),
+    }
+}
+
+/// The reach probe's reset outranks the engine's wording: a dial into a closed port often
+/// surfaces in the engine log only as a generic timeout or nothing at all. UDP transports keep
+/// their own class (a TCP reset there proves the address is up, not that the key's port is shut).
+fn refined(failure: Option<HealthReason>, udp_transport: bool, tcp: Seen) -> Option<HealthReason> {
+    match failure {
+        Some(HealthReason::Timeout | HealthReason::HandshakeFailed)
+            if !udp_transport && tcp == Seen::Refused =>
+        {
+            Some(HealthReason::ConnectionRefused)
+        }
+        other => other,
     }
 }
 

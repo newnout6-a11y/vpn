@@ -172,3 +172,32 @@ fn browser_states_are_shown_honestly() {
     );
     assert!(view.restart_required);
 }
+
+/// b7: «Ротировать сейчас» claims the previous server back only when the switch itself said
+/// so; an attempt that never started or was cancelled midway shows just its reason.
+#[test]
+fn rotate_now_never_guesses_a_restore() {
+    use vpnte_automation::rotation::RotationOutcome as Outcome;
+    use vpnte_base::Msg;
+    let reason = || Msg::new("automation.rotation.busy");
+    for outcome in [
+        Outcome::NotStarted { reason: reason() },
+        Outcome::Aborted { reason: reason() },
+    ] {
+        let err = super::auto::page_outcome(outcome).expect_err("no outcome to show");
+        assert_eq!(err.kind, ErrorKind::Conflict, "never hidden as cancelled");
+        assert_eq!(err.user_msg().key, "automation.rotation.busy");
+    }
+    let failed = Outcome::Failed {
+        profile_id: "b".into(),
+        reason: reason(),
+        restored_previous: false,
+    };
+    assert!(matches!(
+        super::auto::page_outcome(failed),
+        Ok(ui::RotationOutcome::Failed {
+            restored_previous: false,
+            ..
+        })
+    ));
+}

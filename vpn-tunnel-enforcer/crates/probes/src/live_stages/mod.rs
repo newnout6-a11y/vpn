@@ -25,10 +25,12 @@ mod x509;
 
 pub use dns::{DnsBackend, DnsDiagnostics, probe_dns};
 pub use dns_win::SystemDns;
+pub(crate) use dns_win::wire_addrs;
 pub use geo::{AsnInfo, GeoCache, Infrastructure, infrastructure, lookup_asn};
 pub use http::{HttpInfo, probe_http};
 pub use icmp::{Pmtu, RouteTrace, probe_pmtu, trace_route};
-pub use path::{PathInfo, path_info, physical_uplink};
+pub(crate) use net::connect;
+pub use path::{PathInfo, path_info, physical_uplink, route_uplink};
 pub use target::{TargetClass, classify_target, normalize_host_port};
 pub use tcp::{LatencyStats, PortItem, Reachability, sample_latency, scan_ports};
 pub use tls::{TlsInfo, inspect_tls};

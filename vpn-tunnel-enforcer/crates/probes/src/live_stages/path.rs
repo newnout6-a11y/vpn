@@ -145,6 +145,77 @@ pub fn physical_uplink() -> windows::core::Result<(ProbePath, String)> {
     Ok((path, a.alias.clone()))
 }
 
+/// The uplink of the network-mode check: the adapter that carries the default route once every
+/// tunnel is set aside — ours (`own_tun`, or any Wintun / WireGuard / TAP / VPN-named adapter per
+/// winnet's one detector) and another client's. A PPPoE or mobile-broadband uplink counts (it
+/// owns the default route, though it is no network card); a card without a route (a PPPoE NIC
+/// with an APIPA address) does not. Blocking: three table walks, a few ms.
+pub fn route_uplink(own_tun: Option<u64>) -> windows::core::Result<(ProbePath, String)> {
+    use adapters::{Family, foreign_tun};
+    let list = adapters::inventory()?;
+    let mut defaults: Vec<(u64, u32)> = Vec::new();
+    for family in [Family::V4, Family::V6] {
+        let table = adapters::routes(family).unwrap_or_default();
+        let zero = table.iter().filter(|r| r.destination.prefix_len() == 0);
+        defaults.extend(zero.map(|r| (r.luid, r.metric)));
+    }
+    let mut tunnels: Vec<u64> = foreign_tun::detect(None, &[])?
+        .iter()
+        .map(|t| t.luid)
+        .collect();
+    tunnels.extend(own_tun);
+    // Windows' own pick (route + interface metric) wins whenever it is not a tunnel.
+    let preferred = adapters::default_route(Family::V4)
+        .ok()
+        .flatten()
+        .map(|d| d.luid);
+    let Some(a) = pick_uplink(&list, &defaults, &tunnels, preferred) else {
+        return Err(windows::core::Error::new(
+            windows::Win32::Foundation::ERROR_NOT_FOUND.to_hresult(),
+            "no adapter outside a tunnel carries a default route",
+        ));
+    };
+    let path = ProbePath::Physical {
+        if_index: a.if_index,
+        luid: a.luid,
+        src_v4: a.source_v4().first().copied(),
+        src_v6: a.global_v6().first().copied(),
+    };
+    Ok((path, a.alias.clone()))
+}
+
+/// `defaults` = `(luid, route metric)` of every `/0` route; `preferred` = the stack's own pick.
+pub(crate) fn pick_uplink<'a>(
+    list: &'a [adapters::Adapter],
+    defaults: &[(u64, u32)],
+    tunnels: &[u64],
+    preferred: Option<u64>,
+) -> Option<&'a adapters::Adapter> {
+    let metric = |luid: u64| {
+        defaults
+            .iter()
+            .filter(|(l, _)| *l == luid)
+            .map(|(_, m)| *m)
+            .min()
+    };
+    let usable = |a: &&adapters::Adapter| {
+        a.is_up()
+            && !tunnels.contains(&a.luid)
+            && metric(a.luid).is_some()
+            && !(a.source_v4().is_empty() && a.global_v6().is_empty())
+    };
+    let candidates: Vec<&adapters::Adapter> = list.iter().filter(usable).collect();
+    candidates
+        .iter()
+        .find(|a| Some(a.luid) == preferred)
+        .or_else(|| {
+            candidates
+                .iter()
+                .min_by_key(|a| (metric(a.luid), a.if_index))
+        })
+        .copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +263,83 @@ mod tests {
             assert!(if_index > 0 && !alias.is_empty());
             assert!(src_v4.is_some() || src_v6.is_some());
         }
+        // The route uplink (read-only walks) is never a tunnel, ours or another client's.
+        if let Ok((ProbePath::Physical { luid, .. }, _)) = route_uplink(None) {
+            let tunnels = adapters::foreign_tun::detect(None, &[]).unwrap_or_default();
+            assert!(tunnels.iter().all(|t| t.luid != luid));
+        }
+    }
+
+    fn adapter(luid: u64, ip: &str, up: bool) -> adapters::Adapter {
+        use adapters::{AdapterStatus, UnicastAddress};
+        adapters::Adapter {
+            if_index: u32::try_from(luid).unwrap(),
+            luid,
+            guid: windows::core::GUID::zeroed(),
+            alias: format!("if{luid}"),
+            description: String::new(),
+            if_type: 6,
+            status: if up {
+                AdapterStatus::Up
+            } else {
+                AdapterStatus::Disconnected
+            },
+            mac: Vec::new(),
+            permanent_mac: Vec::new(),
+            hardware: true,
+            filter: false,
+            hidden: false,
+            driver: None,
+            ipv4_enabled: true,
+            ipv6_enabled: true,
+            link_speed_bps: 0,
+            addresses: vec![UnicastAddress {
+                ip: ip.parse().unwrap(),
+                prefix_len: 24,
+                dad_state: 4,
+                temporary: false,
+            }],
+            gateways: Vec::new(),
+            dns: Vec::new(),
+            dns_static: false,
+            physical: true,
+        }
+    }
+
+    /// Review b5: the probes take the adapter that carries the default route, never a tunnel.
+    /// PPPoE: the card has only an APIPA address and no route; the PPP line owns the default
+    /// route. A foreign TUN with a lower metric and our own TUN are set aside.
+    #[test]
+    fn uplink_is_the_default_route_owner_past_tunnels() {
+        let nic = adapter(3, "169.254.10.2", true);
+        let ppp = adapter(7, "100.71.4.9", true);
+        let happ = adapter(9, "172.19.0.1", true);
+        let ours = adapter(11, "192.168.250.253", true);
+        let list = [nic, ppp, happ, ours];
+        let defaults = [(7, 50), (9, 0), (11, 0)];
+        let pick = |tunnels: &[u64], preferred| {
+            pick_uplink(&list, &defaults, tunnels, preferred).map(|a| a.luid)
+        };
+        assert_eq!(
+            pick(&[9, 11], Some(9)),
+            Some(7),
+            "the stack's TUN pick is skipped"
+        );
+        assert_eq!(pick(&[9, 11], Some(7)), Some(7));
+        assert_eq!(pick(&[9, 11], None), Some(7));
+        // Without a route outside a tunnel there is no uplink (never a guessed card).
+        assert_eq!(pick(&[7, 9, 11], None), None);
+        // A disconnected adapter never carries the probes, whatever its route says.
+        let down = [adapter(7, "100.71.4.9", false)];
+        assert_eq!(pick_uplink(&down, &[(7, 0)], &[], Some(7)), None);
+        // Two uplinks: the stack's pick, else the lower metric.
+        let two = [
+            adapter(4, "192.0.2.10", true),
+            adapter(5, "198.51.100.10", true),
+        ];
+        let defaults = [(4, 25), (5, 35)];
+        let luid = |preferred| pick_uplink(&two, &defaults, &[], preferred).map(|a| a.luid);
+        assert_eq!(luid(Some(5)), Some(5));
+        assert_eq!(luid(None), Some(4));
     }
 }

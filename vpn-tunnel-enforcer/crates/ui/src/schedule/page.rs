@@ -61,7 +61,7 @@ pub fn SchedulePage() -> Element {
                 }
             }
             if let Some(next) = snapshot.next.clone() {
-                NextEventStrip { event: next }
+                NextEventStrip { event: next, tun_available: snapshot.tun_available }
             }
             if form.read().is_some() {
                 FormPanel {
@@ -103,6 +103,7 @@ pub fn SchedulePage() -> Element {
                                     key: "{entry.id}",
                                     entry: entry.clone(),
                                     servers: snapshot.servers.clone(),
+                                    tun_available: snapshot.tun_available,
                                     form,
                                 }
                             }
@@ -115,9 +116,10 @@ pub fn SchedulePage() -> Element {
 }
 
 /// «Следующее событие: <name>» with «Отключить в 19:00 (через 6 ч 24 мин)»; the countdown
-/// re-renders when its minute changes, only while the page is visible.
+/// re-renders when its minute changes, only while the page is visible. A TUN schedule in an
+/// unelevated app is marked unavailable: its start will not connect.
 #[component]
-fn NextEventStrip(event: NextEvent) -> Element {
+fn NextEventStrip(event: NextEvent, tun_available: bool) -> Element {
     let tz = use_context::<PageTz>().0;
     let active = use_page_active();
     let mut tick = use_signal(|| 0u64);
@@ -152,12 +154,16 @@ fn NextEventStrip(event: NextEvent) -> Element {
         .arg("time", local_hhmm(at, &tz).unwrap_or_default())
         .arg("until", tr(&time_until(at, now_ms()))));
     let title = format!("{}: {}", t!("schedule.nextEvent"), event.name);
+    let unavailable = !event.capture.available(tun_available);
     rsx! {
         section { class: "sched-next", role: "status",
             span { class: "sched-next-mark {mark}", aria_hidden: "true" }
             div { class: "sched-next-text",
                 p { class: "sched-next-title", "{title}" }
                 p { class: "sched-next-detail swiss-mono", "{detail}" }
+                if unavailable {
+                    p { class: "sched-unavailable", {t!("schedule.unavailable")} }
+                }
             }
         }
     }
@@ -170,6 +176,7 @@ fn NextEventStrip(event: NextEvent) -> Element {
 fn ScheduleCard(
     entry: ScheduleEntry,
     servers: Vec<ServerChoice>,
+    tun_available: bool,
     form: Signal<Option<ScheduleForm>>,
 ) -> Element {
     let api = use_api();
@@ -185,6 +192,7 @@ fn ScheduleCard(
     // The server is a name, not a choice: plain text next to the badges (a badge sets its text in
     // upper case); a deleted server is marked.
     let server = server_label(&entry, &servers);
+    let unavailable = !entry.capture.available(tun_available);
     let editing = form.read().as_ref().and_then(|f| f.editing.clone()) == Some(entry.id.clone());
 
     let toggle = {
@@ -225,6 +233,7 @@ fn ScheduleCard(
         li {
             class: "sched-item",
             class: if !entry.enabled { "is-off" },
+            class: if unavailable { "is-unavailable" },
             class: if editing { "is-editing" },
             Switch {
                 label: entry.name.clone(),
@@ -252,6 +261,9 @@ fn ScheduleCard(
                         },
                         None => rsx! {},
                     }
+                }
+                if unavailable {
+                    p { class: "sched-unavailable", {t!("schedule.unavailable")} }
                 }
             }
             div { class: "sched-item-actions",

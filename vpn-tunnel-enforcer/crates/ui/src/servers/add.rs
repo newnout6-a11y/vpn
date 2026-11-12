@@ -4,13 +4,13 @@
 use dioxus::prelude::*;
 use vpnte_base::types::ClientDevice;
 
-use super::actions::Actions;
+use super::actions::{Actions, fetch_error_text};
 use super::model::{AddTarget, GroupSource, ImportReport};
 use super::present::{DEVICES, device_label, sort_groups};
 use crate::lang::tr;
 use crate::t;
 use crate::widgets::{
-    Badge, Button, ButtonKind, Field, Modal, ModalSize, ProgressBar, Segmented, Select,
+    Badge, Button, ButtonKind, Checkbox, Field, Modal, ModalSize, ProgressBar, Segmented, Select,
     SelectOption, TextArea, Tone,
 };
 
@@ -44,7 +44,7 @@ pub(crate) fn AddDialog() -> Element {
     let blank = f.input.trim().is_empty();
     let mut close = move || {
         open.set(false);
-        form.write().report = None;
+        form.write().closed();
     };
     let (a_submit, a_enter) = (actions.clone(), actions.clone());
     let footer = if f.report.is_some() {
@@ -113,6 +113,24 @@ pub(crate) fn AddDialog() -> Element {
                         }
                         p { class: "w-field-hint", {t!("ui.servers.add.deviceHint")} }
                     }
+                    // A new subscription's request settings (a known one keeps its own).
+                    Checkbox {
+                        label: t!("ui.servers.request.hwid"),
+                        hint: t!("ui.servers.add.hwidHint"),
+                        checked: f.request.send_hwid,
+                        on_change: move |on| form.write().request.send_hwid = on,
+                        disabled: f.busy,
+                    }
+                    Field { label: t!("ui.servers.add.headers"), hint: t!("ui.servers.request.headersHint"),
+                        TextArea {
+                            value: f.request.headers.clone(),
+                            oninput: move |text: String| form.write().request.headers = text,
+                            rows: 2,
+                            placeholder: t!("ui.servers.request.headersPlaceholder"),
+                            disabled: f.busy,
+                            mono: true,
+                        }
+                    }
                     if f.busy {
                         div { class: "srv-add-progress", role: "status", aria_live: "polite",
                             span { {t!("ui.servers.add.loading")} }
@@ -151,6 +169,21 @@ fn Report(report: ImportReport) -> Element {
                 }
                 dt { class: "swiss-label", {t!("ui.servers.add.skipped")} }
                 dd { class: "swiss-mono", class: if !report.skipped.is_empty() { "is-alert" }, "{report.skipped.len()}" }
+            }
+            if !report.providers.is_empty() {
+                p { class: "srv-report-head", {t!("ui.servers.add.providers")} }
+                ul { class: "srv-report-skipped",
+                    for provider in report.providers.iter() {
+                        li { key: "{provider.name}",
+                            span { class: "swiss-mono", "{provider.name}" }
+                            " "
+                            match provider.error {
+                                Some(why) => fetch_error_text(why),
+                                None => t!("ui.servers.add.providerServers", count = provider.servers),
+                            }
+                        }
+                    }
+                }
             }
             if !report.skipped.is_empty() {
                 ul { class: "srv-report-skipped",

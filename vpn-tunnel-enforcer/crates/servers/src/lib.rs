@@ -19,6 +19,10 @@ pub const LOCALES: &[(&str, &str)] = &[
         include_str!("../locales/servers-store.ru.json"),
         include_str!("../locales/servers-store.en.json"),
     ),
+    (
+        include_str!("../locales/servers-subscription.ru.json"),
+        include_str!("../locales/servers-subscription.en.json"),
+    ),
 ];
 
 pub mod legacy;

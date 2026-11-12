@@ -2,7 +2,6 @@
 //! long work; effects run as child tasks and report back through the same inbox.
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::future::BoxFuture;
@@ -13,7 +12,7 @@ use vpnte_base::types::{AdaptiveMode, KillSwitchLevel, Level, Notice, Owner, Uni
 use vpnte_base::{ErrorKind, Msg};
 use vpnte_core::ops::{CorrelationId, OpId, OpKind, OpMeta, OpStatus, Source};
 
-use super::effects::{self, Captured, Ctx, StartReport, StopReport, Target, Up, Want};
+use super::effects::{self, Captured, Ctx, Keep, StartReport, StopReport, Target, Up, Want};
 use super::session::{self, LiveSession, Provenance, SessionProfile, start_failure_row};
 use super::{
     ConnError, ConnectTarget, DEFAULT_TIMEOUT, DisconnectReq, Done, Lifecycle, LifecycleDeps,
@@ -180,6 +179,10 @@ struct Stop {
     shutdown: Option<oneshot::Sender<ShutdownReport>>,
     /// Starts that pre-empted a lower one: re-admitted once this stop succeeded.
     then: Vec<StartCmd>,
+    /// The kill switch keeps blocking after it (`DisconnectReq::keep_protection`).
+    keep: bool,
+    /// Full stops asked while this one keeps protection: they run once it ended.
+    release: Vec<(DisconnectReq, Reply)>,
 }
 
 struct Actor {
@@ -190,7 +193,10 @@ struct Actor {
     snap_tx: watch::Sender<TunnelSnapshot>,
     session_tx: watch::Sender<Option<SessionView>>,
     events: broadcast::Sender<SessionEvent>,
-    busy: Arc<AtomicBool>,
+    /// A lane operation is in flight (published after every handled command).
+    busy: watch::Sender<bool>,
+    /// The holder of the session a kept stop ended, while its block lasts.
+    kept_by: watch::Sender<Option<Owner>>,
     start: Option<Start>,
     stop: Option<Stop>,
     maintenance: bool,
@@ -198,6 +204,8 @@ struct Actor {
     /// A shutdown waits for the operation in flight before its own stop.
     shutdown: Option<oneshot::Sender<ShutdownReport>>,
     session: Option<LiveSession>,
+    /// The runtime's failover run, from its `FailedOver` until the session follows it.
+    failover: Option<events::Failover>,
     last_resume: Option<Instant>,
     last_network_change: Option<Instant>,
 }
@@ -208,7 +216,8 @@ pub(super) fn spawn(deps: LifecycleDeps) -> Lifecycle {
     let (snap_tx, snapshot) = watch::channel(fsm.snapshot().clone());
     let (session_tx, session) = watch::channel(None);
     let (events, _) = broadcast::channel(64);
-    let busy = Arc::new(AtomicBool::new(false));
+    let (busy, idle) = watch::channel(false);
+    let (kept_by, kept) = watch::channel(None);
     // Subscribe before the first command so no runtime event is missed.
     let runtime_events = deps.runtime.subscribe();
     let actor = Actor {
@@ -219,13 +228,15 @@ pub(super) fn spawn(deps: LifecycleDeps) -> Lifecycle {
         snap_tx,
         session_tx,
         events: events.clone(),
-        busy: busy.clone(),
+        busy,
+        kept_by,
         start: None,
         stop: None,
         maintenance: false,
         closed: false,
         shutdown: None,
         session: None,
+        failover: None,
         last_resume: None,
         last_network_change: None,
     };
@@ -235,7 +246,8 @@ pub(super) fn spawn(deps: LifecycleDeps) -> Lifecycle {
         snapshot,
         session,
         events,
-        busy,
+        busy: idle,
+        kept_by: kept,
     }
 }
 
@@ -296,10 +308,13 @@ impl Actor {
                 }
             }
             self.push_snapshot();
-            self.busy.store(
-                self.start.is_some() || self.stop.is_some() || self.maintenance,
-                Ordering::Release,
-            );
+            let busy = self.start.is_some() || self.stop.is_some() || self.maintenance;
+            self.busy
+                .send_if_modified(|was| std::mem::replace(was, busy) != busy);
+            if self.fsm.snapshot().state != TunnelState::Blocked {
+                // The kept block is gone (a start ran, a full stop released it).
+                self.kept_by.send_if_modified(|kept| kept.take().is_some());
+            }
         }
     }
 

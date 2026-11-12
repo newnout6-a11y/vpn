@@ -16,6 +16,7 @@ use crate::model::{
 };
 
 mod kinds;
+mod providers;
 mod tls;
 mod yaml;
 
@@ -24,6 +25,7 @@ mod check;
 #[cfg(test)]
 mod tests;
 
+pub use providers::{HttpProvider, MAX_PROVIDERS, http_providers};
 use yaml::Node;
 
 /// Entries read from one document; the text pipeline caps a whole paste at the same number.

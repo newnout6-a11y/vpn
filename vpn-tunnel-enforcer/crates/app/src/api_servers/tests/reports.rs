@@ -63,6 +63,7 @@ fn import_report_counts_and_names_the_group() {
             selected: None,
         },
         skipped: Vec::new(),
+        providers: Vec::new(),
     };
     let title = |id: &GroupId| format!("title of {id}");
     let r = report(&added, "vless://x", false, title);
@@ -105,6 +106,11 @@ fn subscription(fetch: FetchState, expires_at: Option<i64>) -> ServerGroup {
             expires_at,
             ..SubscriptionMeta::default()
         },
+        send_hwid: true,
+        headers: None,
+        fallback: None,
+        moved_at: None,
+        controls: Default::default(),
     }
 }
 
@@ -275,4 +281,47 @@ fn health_updates_keep_identity_and_trace_country() {
     assert!(!shown.online);
     assert_eq!(shown.reason, Some(KeyHealthReason::Hy2UdpBlocked));
     assert_eq!(key_health_view(&alive).latency_ms, Some(120));
+}
+
+/// subs-b10: a Mihomo provider the redirect rules refused reads as refused in the import report,
+/// not as an unusable answer it never gave.
+#[test]
+fn refused_providers_read_as_refused() {
+    use vpnte_servers::subscription::{ProviderFailure, ProviderFetch};
+
+    let provider = |name: &str, servers, failed| ProviderFetch {
+        name: name.into(),
+        servers,
+        failed,
+    };
+    let added = AddOutcome::Added {
+        report: AddReport {
+            group: GroupId::from("sub"),
+            added: vec![ProfileId::from("a")],
+            restored: Vec::new(),
+            duplicates: 0,
+            selected: None,
+        },
+        skipped: Vec::new(),
+        providers: vec![
+            provider("lan", 0, Some(ProviderFailure::Refused)),
+            provider(
+                "down",
+                0,
+                Some(ProviderFailure::Fetch(FetchOutcome::Http(503))),
+            ),
+            provider("ok", 2, None),
+        ],
+    };
+    let r = report(
+        &added,
+        "https://sub.example.net/feed",
+        true,
+        |id: &GroupId| id.to_string(),
+    );
+    let errors: Vec<Option<FetchError>> = r.providers.iter().map(|p| p.error).collect();
+    assert_eq!(
+        errors,
+        [Some(FetchError::Refused), Some(FetchError::Http(503)), None]
+    );
 }

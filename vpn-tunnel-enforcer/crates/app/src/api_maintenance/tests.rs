@@ -3,4 +3,5 @@
 //! directory's guards in throw-away folders, and the locale fragment.
 mod flows;
 mod locales;
+mod network;
 mod views;

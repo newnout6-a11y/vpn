@@ -385,7 +385,9 @@ async fn native_auto_restart_continues_the_session() {
     ));
 }
 
-/// Runtime statuses the user must hear about become notices of their category.
+/// Runtime statuses the user must hear about become notices of their category. A failover
+/// status alone is none (fixauto-b1): its notice comes only with the session following the
+/// sibling, never for a run the lifecycle did not take over.
 #[tokio::test]
 async fn runtime_statuses_become_notices() {
     let h = Harness::new();
@@ -397,9 +399,7 @@ async fn runtime_statuses_become_notices() {
         warning: warning.clone(),
     }));
     h.settle().await;
-    let (n, kind) = notice(&h, "failover").expect("failover notice");
-    assert_eq!(kind, NoticeKind::ProfileRotation);
-    assert_eq!(n.body.unwrap().args[0].1, "nl-2");
+    assert!(notice(&h, "failover").is_none(), "no run was taken over");
     let (n, kind) = notice(&h, "restartFailed").expect("restart failed notice");
     assert_eq!((kind, n.body), (NoticeKind::ConnectionError, Some(warning)));
     assert_eq!(h.snap().state, TunnelState::Error);

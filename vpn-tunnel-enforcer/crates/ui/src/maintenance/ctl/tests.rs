@@ -92,6 +92,10 @@ impl MaintenanceApi for Script {
         self.record("route", Some(cancel));
         answer(&self.routes).await
     }
+    async fn check_network(&self, cancel: CancellationToken) -> AppResult<NetCheckView> {
+        self.record("network", Some(cancel));
+        Err(AppError::cancelled())
+    }
     async fn export_diagnostics(&self, cancel: CancellationToken) -> AppResult<Option<ExportDone>> {
         self.record("export", Some(cancel));
         answer(&self.exports).await

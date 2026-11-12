@@ -8,16 +8,19 @@ use std::net::IpAddr;
 use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
+use vpnte_base::types::Loopback;
 use vpnte_base::{AppError, ErrorKind, Msg};
 
 use crate::net::Host;
 
 mod chain;
+mod memory;
 mod server;
 mod transport;
 mod wire;
 
-use chain::{Chain, STAGGER, UPSTREAM_LIMIT, UPSTREAMS};
+use chain::{CLOUDFLARE_DOH, Chain, STAGGER, UPSTREAM_LIMIT, UPSTREAMS, YANDEX_DOH};
+pub use memory::{MEMORY_TTL, ResolverMemoryDoc, persist, set_network};
 use server::LastKnown;
 pub use server::ServerAddrs;
 use transport::Net;
@@ -83,6 +86,38 @@ pub async fn resolve_host(
     }
 }
 
+/// One DoH-by-name resolver of the chain, asked on its own by the network-mode check: RU SNI
+/// filtering cuts the foreign one while the Russian one stays reachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DohByName {
+    /// `cloudflare-dns.com`.
+    Cloudflare,
+    /// `common.dot.dns.yandex.net`.
+    Yandex,
+}
+
+/// Asks exactly `resolver` for `name` (A and AAAA within 3 s), directly or through `via` (a
+/// loopback SOCKS5 inbound). The process-wide chain and its remembered winner stay untouched.
+pub async fn resolve_with(
+    name: &str,
+    resolver: DohByName,
+    via: Option<&Loopback>,
+    keep: impl Fn(IpAddr) -> bool,
+) -> Result<Vec<IpAddr>, ResolveError> {
+    let name = match Host::parse(name).map_err(|_| ResolveError::InvalidName)? {
+        Host::Ip(ip) => return filtered(vec![ip], &keep),
+        Host::Name(name) => name,
+    };
+    let upstream = match resolver {
+        DohByName::Cloudflare => CLOUDFLARE_DOH,
+        DohByName::Yandex => YANDEX_DOH,
+    };
+    let net = via.map_or_else(Net::new, Net::via);
+    Chain::new(vec![upstream], net, STAGGER, UPSTREAM_LIMIT)
+        .resolve(&name, &keep)
+        .await
+}
+
 /// Resolves a VPN server name before an engine dials it: the direct chain, then the OS
 /// resolver (2.5 s), then the addresses this name resolved to last time in this process
 /// (`last_known`, with a warning for the user) when DNS fails or is poisoned. Block-page
@@ -101,13 +136,18 @@ pub async fn resolve_server(
         }
         Host::Name(name) => name,
     };
-    static LAST_KNOWN: LazyLock<LastKnown> = LazyLock::new(LastKnown::default);
     let os = || async {
         tokio::time::timeout(SYSTEM_LIMIT, system(&name))
             .await
             .unwrap_or(Err(ResolveError::Failed))
     };
-    server::server(&name, &keep, chain(), &LAST_KNOWN, os).await
+    server::server(&name, &keep, chain(), last_known(), os).await
+}
+
+/// The last good addresses of server names, shared with the persisted memory.
+fn last_known() -> &'static LastKnown {
+    static LAST_KNOWN: LazyLock<LastKnown> = LazyLock::new(LastKnown::default);
+    &LAST_KNOWN
 }
 
 /// The process-wide chain: one connection pool and one remembered winner for every caller.

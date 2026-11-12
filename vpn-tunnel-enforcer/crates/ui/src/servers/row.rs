@@ -174,10 +174,13 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
             .blocked(no_host)
             .busy(rt.verifying),
         MenuItem::new("details", t!("ui.servers.menu.details")),
-        MenuItem::new("copy", t!("servers.exportKey")).busy(rt.exporting),
-        MenuItem::new("save", t!("servers.saveKey")).busy(rt.exporting),
     ];
     let mut items = items;
+    // The provider's `hide-settings`: the key never leaves the app (the backend refuses it too).
+    if !server.config_hidden {
+        items.push(MenuItem::new("copy", t!("servers.exportKey")).busy(rt.exporting));
+        items.push(MenuItem::new("save", t!("servers.saveKey")).busy(rt.exporting));
+    }
     items.extend(engine_items(server.engine));
     if deleted {
         items.insert(0, MenuItem::new("restore", t!("ui.servers.row.restore")));

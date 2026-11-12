@@ -15,10 +15,23 @@ use vpnte_base::types::Loopback;
 use vpnte_core::net::HostPort;
 use vpnte_core::socks5::{self, SocksError};
 
+use crate::live_stages::ProbePath;
 use crate::live_stages::http::Io;
 
 /// A byte stream through the tunnel (TLS, or plain TCP in tests).
 pub(crate) type Stream = Box<dyn Io>;
+
+/// Where a connection starts.
+#[derive(Clone, Copy)]
+pub(crate) enum Dial<'a> {
+    /// SOCKS5 CONNECT through a loopback inbound (the target name resolves at the exit).
+    Socks(&'a Loopback),
+    /// A plain TCP connection to `addr` along `path` (the network-mode check, no engine).
+    Direct {
+        addr: SocketAddr,
+        path: &'a ProbePath,
+    },
+}
 
 /// How the engine stage opens its connections.
 #[derive(Clone)]
@@ -52,32 +65,42 @@ impl Wire {
         sni: &str,
     ) -> Result<(Stream, Option<String>), WireError> {
         let raw = Arc::new(AtomicU64::new(0));
-        self.open_counted(proxy, host, port, sni, &raw).await
+        self.open_counted(Dial::Socks(proxy), host, port, sni, &raw)
+            .await
     }
 
-    /// [`Wire::open`] that adds every byte the proxy delivers after its CONNECT reply (TLS
+    /// [`Wire::open`] that adds every byte the far side delivers (after the CONNECT reply, TLS
     /// records included) to `raw`, also while the TLS handshake is still running: the transfer
     /// check judges a freeze by what the server sent, not by what TLS decrypted.
     pub(crate) async fn open_counted(
         &self,
-        proxy: &Loopback,
+        dial: Dial<'_>,
         host: &str,
         port: u16,
         sni: &str,
         raw: &Arc<AtomicU64>,
     ) -> Result<(Stream, Option<String>), WireError> {
-        let target =
-            HostPort::new(host, port).map_err(|_| WireError::Socks(SocksError::InvalidInput))?;
-        let local = SocketAddr::from((Ipv4Addr::LOCALHOST, proxy.port));
-        // The caller's timeout bounds the whole step; this limit only has to be longer.
-        let tcp = socks5::connect(
-            local,
-            proxy.creds.as_ref(),
-            &target,
-            Duration::from_secs(60),
-        )
-        .await
-        .map_err(WireError::Socks)?;
+        let tcp = match dial {
+            Dial::Socks(proxy) => {
+                let target = HostPort::new(host, port)
+                    .map_err(|_| WireError::Socks(SocksError::InvalidInput))?;
+                let local = SocketAddr::from((Ipv4Addr::LOCALHOST, proxy.port));
+                // The caller's timeout bounds the whole step; this limit only has to be longer.
+                socks5::connect(
+                    local,
+                    proxy.creds.as_ref(),
+                    &target,
+                    Duration::from_secs(60),
+                )
+                .await
+                .map_err(WireError::Socks)?
+            }
+            Dial::Direct { addr, path } => {
+                crate::live_stages::connect(addr, path, Duration::from_secs(60))
+                    .await
+                    .map_err(WireError::Direct)?
+            }
+        };
         let tcp = Counted {
             inner: tcp,
             read: raw.clone(),
@@ -145,6 +168,8 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Counted<S> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WireError {
     Socks(SocksError),
+    /// A direct connect failed (Node-style code: `ECONNREFUSED`, `ETIMEDOUT`, …).
+    Direct(String),
     Tls(String),
 }
 
@@ -153,6 +178,7 @@ impl WireError {
     pub(crate) fn text(&self) -> String {
         match self {
             WireError::Socks(e) => socks_text(*e),
+            WireError::Direct(code) => format!("connect: {code}"),
             WireError::Tls(e) => format!("tls: {e}"),
         }
     }

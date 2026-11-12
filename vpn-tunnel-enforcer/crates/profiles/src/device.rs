@@ -44,7 +44,8 @@ pub use crate::common::fields::utls_fingerprint;
 /// User-Agents to try for `device`, in order, without repeats (the old mac list sent
 /// `sing-box/1.13.8` twice). The Happ agent carries the same `hwid` as the `x-hwid` header; the
 /// old app put the computed hash there even when the environment override was set (P-38).
-pub fn user_agents(device: ClientDevice, hwid: &str) -> Vec<String> {
+/// `None` (the group does not send its HWID) leaves the HWID segment out of the Happ agent.
+pub fn user_agents(device: ClientDevice, hwid: Option<&str>) -> Vec<String> {
     let second = match device {
         ClientDevice::Pc => None,
         ClientDevice::Android => Some("v2RayTun/1.0/android"),
@@ -52,7 +53,11 @@ pub fn user_agents(device: ClientDevice, hwid: &str) -> Vec<String> {
         ClientDevice::Mac => Some("sing-box/1.13.8"),
     };
     let os = device_profile(device).os;
-    let mut agents = vec![format!("Happ/{HAPP_VERSION}/{os}/{hwid}")];
+    let happ = match hwid {
+        Some(hwid) => format!("Happ/{HAPP_VERSION}/{os}/{hwid}"),
+        None => format!("Happ/{HAPP_VERSION}/{os}"),
+    };
+    let mut agents = vec![happ];
     for agent in second.into_iter().chain(EXTRA_AGENTS) {
         if !agents.iter().any(|a| a == agent) {
             agents.push(agent.to_owned());
@@ -210,7 +215,7 @@ mod tests {
     fn happ_agent_comes_first() {
         let hwid = legacy_hwid(ClientDevice::Pc, &id("HOST-1", "alice", "WORKGROUP"));
         assert_eq!(
-            user_agents(ClientDevice::Pc, &hwid)[0],
+            user_agents(ClientDevice::Pc, Some(&hwid))[0],
             "Happ/3.22.1/Windows/99c6d48e9a5a5e32"
         );
         let re =
@@ -218,27 +223,42 @@ mod tests {
         let oses: Vec<String> = ALL
             .iter()
             .map(|d| {
-                let first =
-                    user_agents(*d, &legacy_hwid(*d, &MachineIdentity::default())).remove(0);
+                let hwid = legacy_hwid(*d, &MachineIdentity::default());
+                let first = user_agents(*d, Some(&hwid)).remove(0);
                 re.captures(&first).unwrap()[1].to_owned()
             })
             .collect();
         assert_eq!(oses, ["Windows", "Android", "iOS", "macOS"]);
         // The override reaches the User-Agent too (P-38).
         assert_eq!(
-            user_agents(ClientDevice::Pc, "abc")[0],
+            user_agents(ClientDevice::Pc, Some("abc"))[0],
             "Happ/3.22.1/Windows/abc"
+        );
+    }
+
+    /// ru-2026 item 1: a group that does not send its HWID keeps the Happ agent without it.
+    #[test]
+    fn happ_agent_without_the_hwid() {
+        assert_eq!(
+            user_agents(ClientDevice::Pc, None)[0],
+            "Happ/3.22.1/Windows"
+        );
+        assert_eq!(user_agents(ClientDevice::Ios, None)[0], "Happ/3.22.1/iOS");
+        assert_eq!(
+            user_agents(ClientDevice::Pc, None)[1..],
+            user_agents(ClientDevice::Pc, Some("h"))[1..]
         );
     }
 
     #[test]
     fn agent_lists_per_device_without_repeats() {
+        let h = Some("h");
         assert_eq!(
-            user_agents(ClientDevice::Pc, "h")[1..],
+            user_agents(ClientDevice::Pc, h)[1..],
             ["sing-box/1.13.8", "v2RayTun/1.0", "v2rayN/7.0"]
         );
         assert_eq!(
-            user_agents(ClientDevice::Android, "h")[1..],
+            user_agents(ClientDevice::Android, h)[1..],
             [
                 "v2RayTun/1.0/android",
                 "sing-box/1.13.8",
@@ -246,9 +266,9 @@ mod tests {
                 "v2rayN/7.0"
             ]
         );
-        assert_eq!(user_agents(ClientDevice::Ios, "h")[1], "v2RayTun/1.0/ios");
+        assert_eq!(user_agents(ClientDevice::Ios, h)[1], "v2RayTun/1.0/ios");
         assert_eq!(
-            user_agents(ClientDevice::Mac, "h")[1..],
+            user_agents(ClientDevice::Mac, h)[1..],
             ["sing-box/1.13.8", "v2RayTun/1.0", "v2rayN/7.0"]
         );
     }

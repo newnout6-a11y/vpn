@@ -457,7 +457,7 @@ fn failure_classes() {
         class("dial tcp 198.51.100.1:443: i/o timeout"),
         HealthReason::Timeout
     );
-    assert_eq!(class("connection refused"), HealthReason::Timeout);
+    assert_eq!(class("connection refused"), HealthReason::ConnectionRefused);
     let log = "outbound/vless[proxy-out]: tls handshake done\ninbound: authentication failed";
     assert_eq!(
         classify_failure(false, log, "socks reply 1: general failure"),

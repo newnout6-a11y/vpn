@@ -85,6 +85,8 @@ pub fn check_verdict(v: ServerVerdict) -> Option<CheckVerdict> {
         ServerVerdict::Offline => CheckVerdict::Offline,
         ServerVerdict::Deferred => CheckVerdict::Deferred,
         ServerVerdict::NotVerified => CheckVerdict::NotVerified,
+        // A closed port gets the reactions of a dead server: switch away (RU audit item 6).
+        ServerVerdict::Refused => CheckVerdict::Offline,
         ServerVerdict::Unknown => return None,
     })
 }

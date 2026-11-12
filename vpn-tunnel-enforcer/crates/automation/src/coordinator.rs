@@ -230,6 +230,11 @@ pub trait Coordinator: Send + Sync + 'static {
     /// The running session, if any.
     fn session(&self) -> Option<SessionInfo>;
 
+    /// With no session: the owner of the session that ended but left something in the lane (the
+    /// kill switch's block of a kept stop, a restore of its previous server on the way); `None`
+    /// when nothing is left. A `disconnect` by that owner, or a higher one, releases it.
+    fn left_by(&self) -> Option<Owner>;
+
     /// A lifecycle operation (connect, stop, switch, restart) is in flight.
     fn busy(&self) -> bool;
 
@@ -241,7 +246,9 @@ pub trait Coordinator: Send + Sync + 'static {
         req: ConnectRequest,
     ) -> impl Future<Output = Result<ConnectOutcome, OpError>> + Send;
 
-    /// Stops the session; `Conflict` if `owner < session.owner`. No session → `Ok` without effects.
+    /// Stops the session; `Conflict` if `owner < session.owner`. No session → releases what
+    /// [`Coordinator::left_by`] names when `owner` is at least that owner, else `Ok` without
+    /// effects.
     fn disconnect(&self, owner: Owner) -> impl Future<Output = Result<(), OpError>> + Send;
 
     /// Moves a session over the server list (`Direct`, `SoftDirect`) to another profile, keeping

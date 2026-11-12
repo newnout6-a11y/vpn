@@ -16,6 +16,7 @@ use crate::lang::{tr_now, translate_now};
 use crate::widgets::Toasts;
 
 mod group;
+mod request;
 mod server;
 
 pub(crate) use group::fetch_error_text;

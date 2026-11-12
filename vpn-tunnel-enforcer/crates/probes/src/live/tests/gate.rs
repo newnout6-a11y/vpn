@@ -132,7 +132,7 @@ async fn a_failed_handshake_names_the_deferred_dials() {
     let m = measure(&Wire::plain(), &fake.inbound, None, Some(&gate), &cancel).await;
     assert_eq!((m.reflectors.len(), m.deferred), (1, 4));
     let stage = assemble(m, &profile, None, EngineRoute::PhysicalDirect, 1, "");
-    // A refused CONNECT is `timeout` in the old failure ladder; any failure will do here.
+    // A refused CONNECT is `connection-refused` (a transport failure); any failure will do here.
     let status = stage.handshake.status;
     assert!(
         !matches!(status, HandshakeStatus::Ok | HandshakeStatus::Skipped),

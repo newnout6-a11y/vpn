@@ -12,7 +12,7 @@ use vpnte_engine::xray_process::XrayEvent;
 use super::MAX_RESTARTS;
 use super::actor::{Actor, Crashed, Phase, Retained, Session};
 use super::crash::{CrashAction, CrashFacts, decide, frozen_server};
-use crate::api::{Mode, Origin, StartRequest, TunStatusKind, TunnelEvent};
+use crate::api::{FailoverCause, Mode, Origin, StartRequest, TunStatusKind, TunnelEvent};
 
 /// Xray slot restarts: backoff per attempt, at most three in this window (xray-engine §3).
 const SLOT_BACKOFF: [Duration; 3] = [
@@ -99,7 +99,14 @@ impl Actor {
             }
             CrashAction::Failover => {
                 self.failover_tried = true;
-                if !self.failover().await {
+                // Only a fault on record ties the failover to the server; otherwise all that
+                // was seen is an engine that kept stopping (the user is told just that).
+                let cause = if facts.quiet.is_zero() {
+                    FailoverCause::RestartsSpent
+                } else {
+                    FailoverCause::ServerFault
+                };
+                if !self.failover(cause).await {
                     Box::pin(self.after_crash()).await;
                 }
             }
@@ -202,9 +209,11 @@ impl Actor {
         self.announce(TunStatusKind::Stopped);
     }
 
-    /// Post-trial failover: live siblings of the expired key, in the policy's order; the first
-    /// that starts becomes the active server. `true` = a sibling runs.
-    async fn failover(&mut self) -> bool {
+    /// Failover after a crash the server cannot come back from (restart budget spent, or its
+    /// freeze window): live siblings in the policy's order; the first that starts becomes the
+    /// active server and is announced once, by name, only after it started (`FailedOver` with
+    /// `cause` for the session, `PostTrialFailover` in the status). `true` = a sibling runs.
+    async fn failover(&mut self, cause: FailoverCause) -> bool {
         let (Some(policy), Some(last)) = (self.deps.failover.clone(), self.last.clone()) else {
             return false;
         };
@@ -224,18 +233,17 @@ impl Actor {
             if op.is_cancelled() {
                 break;
             }
-            let id = profile.id.clone();
-            self.announce(TunStatusKind::PostTrialFailover {
-                name: profile.profile.name.clone(),
-            });
+            let (id, name) = (profile.id.clone(), profile.profile.name.clone());
             let req = StartRequest {
                 mode: Mode::DirectVpn { profile },
                 origin: Origin::Recovery,
                 ..last.clone()
             };
+            self.failing_over = Some((id.clone(), cause));
             match self.start_run(req, &op, &[]).await {
                 Ok(_) => {
                     policy.commit(&id);
+                    self.announce(TunStatusKind::PostTrialFailover { name });
                     started = true;
                     break;
                 }
@@ -245,6 +253,8 @@ impl Actor {
                 break;
             }
         }
+        // A start refused before it began never reached its finish.
+        self.failing_over = None;
         self.clear_op();
         started || op.is_cancelled()
     }

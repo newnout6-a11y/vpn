@@ -104,11 +104,55 @@ fn classify_live_probe_vectors() {
         ),
         ("x509: certificate signed by unknown authority", TlsFailed),
         ("dial tcp 198.51.100.1:443: i/o timeout", Timeout),
-        ("connection refused", Timeout),
+        ("connection refused", ConnectionRefused),
     ];
     for (err, want) in cases {
         assert_eq!(classify_failure(false, "", err), want, "{err}");
     }
+}
+
+/// RU audit item 6: a reset is its own class, never folded into a timeout, and it wins over a
+/// stray "tls" word of the debug log (the dial never reached TLS). Go's Windows wording counts.
+#[test]
+fn refused_is_not_a_timeout() {
+    use HealthReason::*;
+    let windows = "dial tcp 198.51.100.1:443: connectex: No connection could be made because \
+                   the target machine actively refused it.";
+    assert_eq!(classify_failure(false, "", windows), ConnectionRefused);
+    let log = "DEBUG outbound/vless[proxy-out]: tls fragment on\nERROR dial: connection refused";
+    assert_eq!(classify_failure(false, log, "timeout"), ConnectionRefused);
+    assert_eq!(classify_failure(false, "", "i/o timeout"), Timeout);
+    // QUIC has no reset: the Hysteria2 ladder is unchanged.
+    assert_eq!(
+        classify_failure(true, "", "connection refused"),
+        Hy2HandshakeFailed
+    );
+    assert_eq!(
+        serde_json::to_value(ConnectionRefused).unwrap(),
+        "connection-refused"
+    );
+}
+
+/// The reach probe's reset outranks a generic engine timeout on TCP transports only.
+#[test]
+fn reach_reset_refines_the_reason() {
+    use super::refined;
+    use HealthReason::*;
+    assert_eq!(
+        refined(Some(Timeout), false, Seen::Refused),
+        Some(ConnectionRefused)
+    );
+    assert_eq!(
+        refined(Some(HandshakeFailed), false, Seen::Refused),
+        Some(ConnectionRefused)
+    );
+    assert_eq!(refined(Some(Timeout), false, Seen::Silent), Some(Timeout));
+    assert_eq!(refined(Some(Timeout), true, Seen::Refused), Some(Timeout));
+    assert_eq!(
+        refined(Some(TlsFailed), false, Seen::Refused),
+        Some(TlsFailed)
+    );
+    assert_eq!(refined(None, false, Seen::Refused), None);
 }
 
 /// AT-00-001 (B-37 and the hy2 `auth` word): a "tls" substring elsewhere in the debug log no

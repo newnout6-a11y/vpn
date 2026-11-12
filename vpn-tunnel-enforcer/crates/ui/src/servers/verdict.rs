@@ -23,6 +23,7 @@ pub(crate) fn verdict_key(kind: VerdictKind) -> &'static str {
         VerdictKind::Offline => "ui.servers.verdict.offline",
         VerdictKind::Deferred => "ui.servers.verdict.deferred",
         VerdictKind::NotVerified => "ui.servers.verdict.notVerified",
+        VerdictKind::Refused => "ui.servers.verdict.refused",
     }
 }
 
@@ -78,7 +79,7 @@ mod tests {
 
     use super::*;
 
-    const KINDS: [VerdictKind; 10] = [
+    const KINDS: [VerdictKind; 11] = [
         VerdictKind::Healthy,
         VerdictKind::Frozen,
         VerdictKind::Stalled,
@@ -89,6 +90,7 @@ mod tests {
         VerdictKind::Offline,
         VerdictKind::Deferred,
         VerdictKind::NotVerified,
+        VerdictKind::Refused,
     ];
 
     /// The signal colour is kept for the two verdicts that need another server now.

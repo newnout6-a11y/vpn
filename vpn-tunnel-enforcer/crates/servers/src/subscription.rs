@@ -5,6 +5,7 @@
 //! Logs carry the host, the route label and the User-Agent family only: never the URL path or
 //! query (the access token), the HWID or the headers (S-27).
 use std::fmt;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use vpnte_base::types::{ClientDevice, ProxyKind};
@@ -16,14 +17,23 @@ use vpnte_profiles::model::{ParseReport, SkipReason};
 
 use crate::model::{BodyKind, FetchOutcome, NetFail};
 
+mod fallback;
 mod fetch;
+mod headers;
 mod http;
 mod policy;
+mod relay;
+mod request;
+#[cfg(test)]
+mod request_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 
 pub use crate::common::canonical_source;
+pub use headers::{MAX_HEADERS, header_names, parse_headers, stored_headers};
 pub use policy::{classify_body, normalize_redirect};
+pub use relay::{Relays, Spare, SpareFuture};
+pub use request::{FetchRequest, Fetched, ProviderFailure, ProviderFetch};
 
 /// Whole-request limit of one HTTP request (old curl `--max-time 25`).
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
@@ -31,6 +41,8 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 pub const MAX_REQUESTS: usize = 6;
 /// Pinned addresses taken from DNS-over-HTTPS.
 pub const DOH_MAX_IPS: usize = 3;
+/// Happ's rule: the fallback URL is tried when the URL has not answered after 9 s.
+pub const FALLBACK_AFTER: Duration = Duration::from_secs(9);
 /// Happ's local proxies, tried after the user's own proxy (old `bootstrapRoute.ts`).
 const HAPP_SOCKS: &str = "127.0.0.1:10808";
 const HAPP_HTTP: &str = "127.0.0.1:10809";
@@ -80,17 +92,39 @@ fn device_index(device: ClientDevice) -> usize {
     }
 }
 
-/// Where subscription requests may go, in order, and whether a DoH-pinned direct retry is allowed.
+/// Where subscription requests may go, in order, and what may follow when they all fail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutePlan {
     pub routes: Vec<Route>,
     /// True unless the user chose "local proxy only" (the retry goes out directly).
     pub doh: bool,
+    /// Only in "auto": the running session's route joins the plan, and a short-lived slot on a
+    /// healthy server of the list may be borrowed when every route failed. "Direct only" and
+    /// "local proxy only" mean what they say: the session's engine and a borrowed slot dial out
+    /// on their own (Smart RU sends Russian hosts direct, a slot connects to a VPN server).
+    pub relay: bool,
+}
+
+impl RoutePlan {
+    /// The plan with the session's own route right after direct (first without direct); a route
+    /// already in the plan is not repeated. Nothing changes when `relay` is off.
+    pub fn with_session(mut self, session: Option<Route>) -> Self {
+        let Some(route) = session.filter(|_| self.relay) else {
+            return self;
+        };
+        if self.routes.iter().any(|r| r.label() == route.label()) {
+            return self;
+        }
+        let at = usize::from(self.routes.first() == Some(&Route::Direct));
+        self.routes.insert(at, route);
+        self
+    }
 }
 
 /// The bootstrap routes of `settings` (old `bootstrapRoute.ts`): `auto` = direct, the user's proxy,
-/// Happ's SOCKS `127.0.0.1:10808`, Happ's HTTP `127.0.0.1:10809`; `direct` = direct only;
-/// `localProxy` = the proxies only. Duplicates (same scheme and address) are dropped.
+/// Happ's SOCKS `127.0.0.1:10808`, Happ's HTTP `127.0.0.1:10809` (plus the session's route and a
+/// spare slot, see [`RoutePlan::relay`]); `direct` = direct only; `localProxy` = the proxies only.
+/// Duplicates (same scheme and address) are dropped.
 pub fn route_plan(settings: &Settings) -> RoutePlan {
     let mode = settings.bootstrap_route_mode;
     let mut routes = Vec::new();
@@ -117,6 +151,7 @@ pub fn route_plan(settings: &Settings) -> RoutePlan {
     RoutePlan {
         routes,
         doh: mode != BootstrapRouteMode::LocalProxy,
+        relay: mode == BootstrapRouteMode::Auto,
     }
 }
 
@@ -150,6 +185,19 @@ impl From<FetchError> for AppError {
                 AppError::validation(Msg::new("servers.fetch.invalidUrl")).with_source(err)
             }
             FetchError::Cancelled => AppError::cancelled(),
+        }
+    }
+}
+
+impl FetchError {
+    /// The error of a group's fetch: an empty list fetched without the HWID suggests sending it
+    /// (HWID-bound panels answer an unknown device with an empty list).
+    pub fn for_group(self, send_hwid: bool) -> AppError {
+        match self {
+            FetchError::Failed(FetchOutcome::EmptyList) if !send_hwid => {
+                AppError::validation(Msg::new("servers.fetch.emptyListNoHwid")).with_source(self)
+            }
+            other => other.into(),
         }
     }
 }
@@ -191,7 +239,7 @@ pub fn is_complete(report: &ParseReport) -> bool {
 /// Where a fetcher takes its routes from.
 enum Plans {
     /// Read at every fetch, so a changed proxy setting applies to the next refresh.
-    Settings(std::sync::Arc<vpnte_core::store::Store<Settings>>),
+    Settings(Arc<vpnte_core::store::Store<Settings>>),
     Fixed(RoutePlan),
 }
 
@@ -200,15 +248,18 @@ pub struct SubscriptionFetcher {
     hwids: Hwids,
     plans: Plans,
     request_timeout: Duration,
+    /// Set once by the app when the tunnel and the proxy slots exist.
+    relays: OnceLock<Arc<dyn Relays>>,
 }
 
 impl SubscriptionFetcher {
     /// A fetcher that follows the proxy and bootstrap settings of `settings`.
-    pub fn new(hwids: Hwids, settings: std::sync::Arc<vpnte_core::store::Store<Settings>>) -> Self {
+    pub fn new(hwids: Hwids, settings: Arc<vpnte_core::store::Store<Settings>>) -> Self {
         Self {
             hwids,
             plans: Plans::Settings(settings),
             request_timeout: REQUEST_TIMEOUT,
+            relays: OnceLock::new(),
         }
     }
 
@@ -218,15 +269,24 @@ impl SubscriptionFetcher {
             hwids,
             plans: Plans::Fixed(plan),
             request_timeout: REQUEST_TIMEOUT,
+            relays: OnceLock::new(),
         }
     }
 
-    /// The routes the next fetch will use.
+    /// Lends the fetcher the session route and the spare slots; the first call wins.
+    pub fn set_relays(&self, relays: Arc<dyn Relays>) {
+        if self.relays.set(relays).is_err() {
+            tracing::warn!("subscription: relays were set already");
+        }
+    }
+
+    /// The routes the next fetch will use (the session's route included while one runs).
     pub fn plan(&self) -> RoutePlan {
-        match &self.plans {
+        let plan = match &self.plans {
             Plans::Settings(store) => store.read(route_plan),
             Plans::Fixed(plan) => plan.clone(),
-        }
+        };
+        plan.with_session(self.relays.get().and_then(|r| r.session_route()))
     }
 
     #[cfg(test)]

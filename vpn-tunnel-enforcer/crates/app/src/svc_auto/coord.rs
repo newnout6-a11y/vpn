@@ -32,12 +32,39 @@ pub type Detect = Arc<dyn Fn() -> BoxFuture<'static, Option<ProxyEndpoint>> + Se
 
 /// How long `adaptive_restart` waits for its run's `Started` to go out (the forwarder task).
 const STARTED_WAIT: Duration = Duration::from_secs(5);
+/// How long a restore after a lost switch waits for the lane's own recovery stop (a Soft
+/// rollback and an engine stop: seconds; its own budget is the lane's 120 s).
+const RESTORE_WAIT: Duration = Duration::from_secs(30);
 
 /// The adaptive bypass and the profile views it starts from (set once after both exist: they
 /// hold the coordinator themselves).
 pub struct Hooks {
     pub adaptive: Arc<AppAdaptive>,
     pub host: Arc<ServerHost>,
+}
+
+/// A start's adaptive preparation until the lane answered. A start dropped before that (a
+/// reaction or rotation attempt cancelled mid-connect) never reaches `start_failed` and would
+/// hold the adaptive status at "connecting" for minutes: dropping ends it as cancelled.
+struct Preparation {
+    adaptive: Arc<AppAdaptive>,
+    ticket: Option<u64>,
+}
+
+impl Preparation {
+    fn end(mut self, reason: Option<Msg>) {
+        if let Some(ticket) = self.ticket.take() {
+            self.adaptive.start_failed(ticket, reason);
+        }
+    }
+}
+
+impl Drop for Preparation {
+    fn drop(&mut self) {
+        if let Some(ticket) = self.ticket.take() {
+            self.adaptive.start_failed(ticket, None);
+        }
+    }
 }
 
 pub struct AppCoordinator {
@@ -52,6 +79,9 @@ pub struct AppCoordinator {
     pub(super) started: watch::Sender<u64>,
     /// A stop this coordinator asked for, so its `Stopped` names the owner (not a fault).
     pub(super) pending_stop: Mutex<Option<Owner>>,
+    /// The owner of a restore waiting for the lane after a lost switch; a stop meanwhile takes
+    /// it (that owner's, a higher one's, the user's), and the restore then starts nothing.
+    restoring: Mutex<Option<Owner>>,
     pub(super) hooks: OnceLock<Hooks>,
 }
 
@@ -72,8 +102,14 @@ impl AppCoordinator {
             events: broadcast::channel(64).0,
             started: watch::Sender::new(0),
             pending_stop: Mutex::new(None),
+            restoring: Mutex::new(None),
             hooks: OnceLock::new(),
         }
+    }
+
+    /// The user stops protection straight at the lane: a restore on its way must not undo it.
+    pub fn user_stops(&self) {
+        self.restoring.lock().take();
     }
 
     /// Starts `target` for `owner` in the mode the adaptive bypass picks for this network and
@@ -92,14 +128,27 @@ impl AppCoordinator {
             _ => None,
         };
         let mut req = ConnectReq::new(target, owner, source);
+        let mut preparation = None;
         if let Some(hooks) = self.hooks.get() {
             let view = profile.as_deref().and_then(|id| hooks.host.view(id));
-            req.adaptive = hooks.adaptive.begin(kind, view).await;
+            let begun = hooks.adaptive.begin(kind, view).await;
+            req.adaptive = begun.mode;
+            preparation = Some(Preparation {
+                adaptive: hooks.adaptive.clone(),
+                ticket: Some(begun.ticket),
+            });
         }
         let result = self.lane.connect(req).await;
-        if let (Err(err), Some(hooks)) = (&result, self.hooks.get()) {
-            let shown = !matches!(err, ConnError::Cancelled(_));
-            hooks.adaptive.start_failed(shown.then(|| err.user_msg()));
+        if let Some(mut preparation) = preparation {
+            match &result {
+                // Ends this start's preparation only: another start may be in flight meanwhile.
+                Err(err) => {
+                    let shown = !matches!(err, ConnError::Cancelled(_));
+                    preparation.end(shown.then(|| err.user_msg()));
+                }
+                // The run's `Started` attaches it.
+                Ok(_) => preparation.ticket = None,
+            }
         }
         result
     }
@@ -183,7 +232,11 @@ impl AppCoordinator {
     }
 
     async fn stop_as(&self, owner: Owner) -> Result<(), OpError> {
-        if !decide::admit_disconnect(self.session().as_ref(), owner)? {
+        let session = self.session();
+        if session.is_none() {
+            return self.release(owner).await;
+        }
+        if !decide::admit_disconnect(session.as_ref(), owner)? {
             return Ok(());
         }
         *self.pending_stop.lock() = Some(owner);
@@ -192,6 +245,20 @@ impl AppCoordinator {
         if result.is_err() {
             self.pending_stop.lock().take();
         }
+        result.map(drop).map_err(decide::op_error)
+    }
+
+    /// No session runs: releases what a session of `owner` (or of a lower owner) left in the
+    /// lane: a restore on its way, the kill switch's block of a kept stop. A full stop; no
+    /// `pending_stop` (no session ends, so no `Ended` would take it).
+    async fn release(&self, owner: Owner) -> Result<(), OpError> {
+        let restore = self.restoring.lock().take_if(|o| *o <= owner).is_some();
+        let kept = self.lane.kept_by().is_some_and(|o| o <= owner);
+        if !restore && !kept {
+            return Ok(());
+        }
+        let req = DisconnectReq::new(decide::stop_cause(owner), owner, Source::Lifecycle);
+        let result = self.lane.disconnect(req).await;
         result.map(drop).map_err(decide::op_error)
     }
 
@@ -230,15 +297,39 @@ impl AppCoordinator {
         })
     }
 
-    /// Starts the previous server again after a failed switch; `false` leaves nothing running
-    /// (the lane's own recovery stop undid the failed start).
+    /// Starts the previous server again after a failed switch, once the lane's own recovery stop
+    /// let go of the lane (the switch answers before that stop ran: a start right then would be
+    /// refused); `false` leaves nothing running. A stop that came meanwhile (the user's, the
+    /// owner's run ending) wins: nothing starts, or what started is stopped again.
     async fn restore(&self, kind: SessionKind, previous: String, owner: Owner) -> bool {
+        *self.restoring.lock() = Some(owner);
+        if tokio::time::timeout(RESTORE_WAIT, self.lane.idle())
+            .await
+            .is_err()
+        {
+            self.restoring.lock().take();
+            tracing::warn!("previous server not restored: the lane is still busy");
+            return false;
+        }
+        if self.restoring.lock().is_none() {
+            tracing::info!("previous server not restored: stopped while waiting for the lane");
+            return false;
+        }
         let profile_id = Some(previous);
         let target = match kind {
             SessionKind::SoftDirect => ConnectTarget::SoftVpn { profile_id },
             _ => ConnectTarget::DirectVpn { profile_id },
         };
-        self.start(target, owner, Source::Lifecycle).await.is_ok()
+        let started = self.start(target, owner, Source::Lifecycle).await.is_ok();
+        let stopped = self.restoring.lock().take().is_none();
+        if started && stopped {
+            // The stop reached the lane before this start did: it still wins.
+            if let Err(e) = self.stop_as(owner).await {
+                tracing::warn!(error = %e, "restored server not stopped again");
+            }
+            return false;
+        }
+        started
     }
 
     async fn commit_selection(&self, id: &str) {
@@ -283,6 +374,14 @@ impl Coordinator for AppCoordinator {
             .borrow()
             .as_ref()
             .map(decide::session_info)
+    }
+
+    fn left_by(&self) -> Option<Owner> {
+        if self.session().is_some() {
+            return None;
+        }
+        let restoring = *self.restoring.lock();
+        restoring.or_else(|| self.lane.kept_by())
     }
 
     fn busy(&self) -> bool {

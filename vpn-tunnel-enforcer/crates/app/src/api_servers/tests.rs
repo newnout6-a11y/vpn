@@ -20,6 +20,7 @@ use super::project::{Inputs, RowExtras, fetch_error, project};
 
 mod backend;
 mod flows;
+mod relays;
 mod reports;
 mod verdicts;
 
@@ -72,6 +73,10 @@ fn group(id: &str, manual: bool) -> GroupSummary {
         refresh_override_min: None,
         servers: 0,
         archived: 0,
+        send_hwid: false,
+        header_names: Vec::new(),
+        moved_at: None,
+        controls: Default::default(),
     }
 }
 
@@ -151,6 +156,7 @@ fn projection_maps_rows_and_groups() {
             has_outbound: true,
             engine_plan: None,
             verdict: None,
+            config_hidden: false,
         },
     )]);
     let resolved = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));

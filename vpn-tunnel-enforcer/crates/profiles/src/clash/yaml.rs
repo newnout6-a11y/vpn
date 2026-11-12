@@ -65,6 +65,29 @@ pub(super) fn read_proxies(text: &str, mut visit: impl FnMut(Node) -> bool) -> R
     }
 }
 
+/// The value of the root-level `key` of the first document that has one, as a tree; every other
+/// section is skipped event by event (anchors in them stay usable).
+pub(super) fn read_root(text: &str, key: &str) -> Result<Option<Node>, YamlError> {
+    let mut reader = Reader {
+        parser: Parser::new_from_str(text),
+        anchors: HashMap::new(),
+        used: 0,
+        found: false,
+    };
+    loop {
+        match reader.next()? {
+            Event::StreamEnd => return Ok(None),
+            Event::MappingStart(..) => {
+                if let Some(node) = reader.root_value(key)? {
+                    return Ok(Some(node));
+                }
+            }
+            ev @ (Event::Scalar(..) | Event::SequenceStart(..)) => reader.skip(ev)?,
+            _ => {}
+        }
+    }
+}
+
 struct Reader<'a> {
     parser: Parser<'a, StrInput<'a>>,
     /// Anchored nodes with their cost in bytes (the cost of each alias copy).
@@ -143,6 +166,23 @@ impl<'a> Reader<'a> {
                     _ => {}
                 },
             }
+        }
+    }
+
+    /// Walks one document's root mapping for `key`; its value as a tree, `None` when the mapping
+    /// ended without it.
+    fn root_value(&mut self, key: &str) -> Result<Option<Node>, YamlError> {
+        loop {
+            let ev = self.next()?;
+            if matches!(ev, Event::MappingEnd) {
+                return Ok(None);
+            }
+            let is_key = matches!(self.node(ev, 1)?, Node::Scalar { ref text, .. } if text == key);
+            let value = self.next()?;
+            if is_key {
+                return self.node(value, 1).map(Some);
+            }
+            self.skip(value)?;
         }
     }
 

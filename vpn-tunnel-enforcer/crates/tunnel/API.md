@@ -58,14 +58,21 @@ pub struct ProxyEndpoint { pub port: u16, pub user: String, pub pass: String }
 pub enum TunStatusKind { Stopping, Adapting, Stopped, Running, KillSwitchActive,
     Restarting { attempt: u8, max: u8 }, ProxyDown { reason: Msg }, Error { warning: Msg },
     PostTrialFailover { name: String }, CompetingTun { name: String }, CompetingTunCleared }
-                                                                     // Display = old wire string ("restarting:1/3")
+                                                                     // Display = old wire string ("restarting:1/3");
+                                                                     // PostTrialFailover: once, after the sibling started
+                                                                     // (status only: the lifecycle's notice comes from FailedOver)
 pub enum TunWarning { ForeignTunUnverified, ReleaseUnverified, Other(Msg) }  // Other: e.g. engine routing warnings
 impl TunWarning { pub fn msg(&self) -> Msg; pub fn from_msg(msg: Msg) -> Self }   // from_msg: typed for the known keys
 pub enum TunnelEvent { StartBegan { generation: u64 }, StartFinished { generation: u64, ok: bool },
     StopFinished { generation: u64, preserved: bool, receipt: StopReceipt },
     SwitchBegan { generation: u64 }, SwitchFinished { generation: u64, verified: bool },
     ProtectedRestart { reason: String }, Status(TunStatusKind), Warning(TunWarning),
-    RestartScheduled { delay: Duration } }                            // right after Status(Restarting): the wait
+    RestartScheduled { delay: Duration },                             // right after Status(Restarting): the wait
+    FailedOver { generation: u64, profile_id: String, cause: FailoverCause } }
+                                                                     // crash failover: right before its run's
+                                                                     // StartFinished { ok: true } (the server that runs)
+pub enum FailoverCause { ServerFault, RestartsSpent }               // what was seen: an outbound fault on record
+                                                                     // (freeze window) / the restart budget spent
 pub const TUN_SETUP_KEY_PREFIX: &str = "tunnel.runtime.tunSetup";  // TUN bring-up failures (history: tun-setup-failed)
 pub struct TunError { pub error: AppError, pub warnings: Vec<Msg> }  // From<AppError>, Into<AppError>
 impl TunError { pub fn new(kind: ErrorKind, msg: Msg) -> Self; pub fn kind(&self) -> ErrorKind;
@@ -131,10 +138,13 @@ pub struct Invalid;                                                  // Into<App
 impl Fsm { new, snapshot, can_start, can_rotate,
     can_confirm_start(Option<Evidence>), can_confirm_stop(Option<Evidence>),
     op_changed(&OpMeta, ..), fault(FaultState, ..), keep_previous(OpId, ..), runtime(&TunStatusKind, ..),
-    native_start_began(u64), native_start_finished(u64, bool, ..), upstream_began(u64, ..),
-    upstream_finished(u64, bool, ..), native_stop_finished(u64, bool, &StopReceipt, ..) }
+    native_start_began(u64), native_start_finished(u64, bool, ..), native_failover(u64, ..),
+    upstream_began(u64, ..), upstream_finished(u64, bool, ..),
+    native_stop_finished(u64, bool, &StopReceipt, ..) }
                                        // `..` = the current Option<Evidence>; mutators return Result<(), Invalid>
-                                       // except `fault` (always accepted)
+                                       // except `fault` (always accepted); native_failover: outside an operation
+                                       // the failover's run (current generation) may confirm on its own evidence,
+                                       // even from Error / Unknown after failed restarts
 ```
 Proofs: Hard = our engine with a real PID and the TUN capture; Soft (NOADMIN.md §2) = our engine
 with the proxy capture AND the applied tweaks (`soft_applied`); the mode follows `proxy_capture`.
@@ -247,7 +257,9 @@ pub struct ConnectReq { pub target: ConnectTarget, pub owner: Owner, pub source:
 impl ConnectReq { pub fn new(target: ConnectTarget, owner: Owner, source: Source) -> Self }
 pub enum StopCause { User, AppQuit, Schedule, Timeout, Cancelled, Preempted, Failed }
 pub struct DisconnectReq { pub cause: StopCause, pub owner: Owner, pub source: Source,
-    pub correlation: Option<CorrelationId>, pub timeout: Duration }
+    pub correlation: Option<CorrelationId>, pub timeout: Duration,
+    pub keep_protection: bool }  // kill switch on: Soft keeps its tweaks on the dead port, TUN its block
+                                 // (preserved stop); state blocked + notice keptBlocked / keptSoftBlocked
 impl DisconnectReq { pub fn new(cause: StopCause, owner: Owner, source: Source) -> Self }
 pub struct SwitchReq { pub profile_id: String, pub owner: Owner, pub source: Source,
     pub correlation: Option<CorrelationId>, pub timeout: Duration, pub cancel: Option<CancellationToken> }
@@ -260,7 +272,9 @@ pub struct SessionView { pub owner: Owner /* holder */, pub profile_id: String, 
     pub mode: SessionMode, pub generation: Option<u64>, pub adaptive: AdaptiveMode, pub started_at: UnixMs,
     pub engine: Option<EngineRun> }              // history evidence: proxy_engine + proxy_engine_reason
 impl SessionView { pub fn server_id(&self) -> Option<&str> }      // list id (Hard or Soft); None = local proxy
-pub enum SessionEvent { Up(SessionView), Ended { session: SessionView, outcome: OutcomeKind } }
+pub enum SessionEvent { Up(SessionView),
+    Ended { session: SessionView, outcome: OutcomeKind, continues: bool } } // continues: the Up of the run
+                                 // that replaces it is next (switch that took, failover); false: nothing runs
 pub struct ShutdownReport { pub engines_stopped: bool, pub soft_restored: bool, pub capture_stopped: bool,
     pub timed_out: bool }
 #[derive(Clone)] pub struct Lifecycle;
@@ -283,7 +297,11 @@ impl Lifecycle {
     pub fn snapshot(&self) -> watch::Receiver<TunnelSnapshot>;
     pub fn session(&self) -> watch::Receiver<Option<SessionView>>;
     pub fn events(&self) -> broadcast::Receiver<SessionEvent>;
-    pub fn busy(&self) -> bool;
+    pub fn busy(&self) -> bool;  pub async fn idle(&self);         // idle: no lane operation in flight (callers bound it)
+    pub fn kept_by(&self) -> Option<Owner>;                          // holder of the session a keep_protection stop
+                                                                     // ended, while that block lasts (a start that
+                                                                     // runs or a full stop clears it): whoever ends
+                                                                     // that holder's run releases it (full stop)
     pub fn fault(&self, state: FaultState);                         // start-up recovery / panic hook: no I/O
     pub fn adopt(&self, owner: Owner);                               // a higher owner takes the session over
     pub fn resumed(&self);  pub fn network_changed(&self, transition: NetworkTransition);  pub fn leak_detected(&self);
@@ -312,7 +330,14 @@ message. Engine / kill switch / stealth / public Wi-Fi come from `settings` at s
 start origin from the owner. Not enforced here (the app's automation `Coordinator` does it): a
 `disconnect` by an owner lower than `SessionView::owner`; restarting the previous server after a
 failed `rotate` (on failure: still connected on the old server -> report "not started", else
-`connect` the previous server).
+wait for `idle()` — the switch answers while its recovery stop still holds the lane — and
+`connect` the previous server). A runtime crash failover moves the session to the sibling
+(`FailedOver`) whatever the state machine concluded: the crashed server's row ends as
+server-switch with the `outcome.failover` (cause `ServerFault`) or `outcome.failoverRestarts`
+(`RestartsSpent`) headline (`continues`), the sibling's `Up` follows under the same holder, with
+one `failover` notice. When its start finishes while a lane operation owns the session, the move
+waits for that operation's end and happens before its own ending (a restart of the last start
+then names the sibling); a stop drops it (the stop ended the sibling's run).
 
 Soft (NOADMIN.md §2): a Soft connect starts the runtime with `CaptureKind::Proxy` for either upstream,
 then `SoftProxy::apply("127.0.0.1:<SessionEndpoints::proxy_port>", Http)` and `is_configured` must read
@@ -500,7 +525,12 @@ cleaning up in the background. `Done::warnings` / `ConnError::warnings` are extr
 - **Notices** arrive only through `Notifier::notify(notice, kind)` (title / body are `Msg`s under
   `tunnel.lifecycle.notice.<name>`): `connected`, `restored` (runtime reconnect), `disconnected`,
   `stopFailed`, `stopped` (unexpected end; body = outcome headline), `crashRestarting`
-  (`attempt`, `max`), `crashBlocked`, `failover` (`name`), `restartFailed` (body = runtime warning),
+  (`attempt`, `max`), `crashBlocked`, `failover` (`name`: the sibling that started, `from`: the
+  crashed server; once per failover, when the session follows the sibling; body `body` = outbound
+  faults on record, `bodyRestarts` = the restart budget spent, `bodySwitched` = no session named
+  the crashed server any more; "switched to", never "connected": the state confirms the run),
+  `keptBlocked` / `keptSoftBlocked` (a `keep_protection` stop left the
+  kill switch blocking), `restartFailed` (body = runtime warning),
   `internalError` (a lane effect panicked: the lane is released, A-01; whatever the start brought
   up is stopped by the recovery stop), `softRestored` (a Soft engine was lost for good with the kill
   switch off: the tweaks were rolled back, programs connect directly). Proxy mode never claims

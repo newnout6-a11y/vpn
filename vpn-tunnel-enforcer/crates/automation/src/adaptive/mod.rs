@@ -26,7 +26,7 @@ use vpnte_base::{AppResult, Msg};
 
 use crate::coordinator::SessionKind;
 
-pub use controller::Adaptive;
+pub use controller::{Adaptive, Begun};
 pub use identity::NetworkSnapshot;
 pub use learning::{AdaptiveDoc, LearnedRecord};
 

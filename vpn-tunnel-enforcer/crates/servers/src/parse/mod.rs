@@ -11,6 +11,7 @@ use vpnte_base::{AppError, Msg};
 use vpnte_profiles::model::{
     ParseReport, Profile, SkipReason, Skipped, Source, SubscriptionMeta, TooLarge,
 };
+use vpnte_profiles::text::ProviderKeys;
 use vpnte_profiles::{clash, deeplink, json, text, uri, wg_ini};
 
 use crate::common::is_http_url;
@@ -30,15 +31,33 @@ pub const MAX_SKIPPED: usize = 5000;
 /// URL, or cannot be unwrapped, comes back as a single skipped entry: route URLs and deep links to
 /// the fetcher before calling this (only it can fetch, and `DeepLinkError::msg` explains better).
 pub fn parse_text(input: &str) -> Result<ParseReport, TooLarge> {
-    text::prepare(input, text::MAX_INPUT_BYTES).map(parse_prepared)
+    text::prepare(input, text::MAX_INPUT_BYTES).map(|t| parse_prepared(t).0)
 }
 
 /// Subscription body bytes (at most [`text::MAX_BODY_BYTES`], also after decompression) ->
 /// the same report as [`parse_text`]. gzip / zlib / UTF-16 / brotli bodies are decoded first;
 /// response headers are merged afterwards with `text::header_meta(headers, report.meta)`.
 pub fn parse_body(raw: &[u8]) -> Result<ParseReport, TooLarge> {
+    parse_body_full(raw).map(|parsed| parsed.report)
+}
+
+/// A subscription body as the fetcher reads it: the report, the provider controls and relocation
+/// hints of its comment blocks (outer layers win), and the decoded text.
+pub(crate) struct Parsed {
+    pub report: ParseReport,
+    pub keys: ProviderKeys,
+    pub text: String,
+}
+
+/// [`parse_body`] with the provider keys and the decoded text kept.
+pub(crate) fn parse_body_full(raw: &[u8]) -> Result<Parsed, TooLarge> {
     let body = text::decode_body(raw, text::MAX_BODY_BYTES)?;
-    text::prepare(&body, text::MAX_BODY_BYTES).map(parse_prepared)
+    let (report, keys) = parse_prepared(text::prepare(&body, text::MAX_BODY_BYTES)?);
+    Ok(Parsed {
+        report,
+        keys,
+        text: body,
+    })
 }
 
 /// The validation error for a [`TooLarge`] input; `limit` is the byte limit that was exceeded.
@@ -67,31 +86,36 @@ pub fn no_profiles(report: &ParseReport) -> AppError {
 /// Scheme of the one entry reporting a text that looks like base64 but does not decode.
 const DAMAGED_BASE64: &str = "base64";
 
-/// Prepared text (trimmed, within its size limit) -> report.
-fn parse_prepared(text: &str) -> ParseReport {
+/// Prepared text (trimmed, within its size limit) -> report and provider keys.
+fn parse_prepared(text: &str) -> (ParseReport, ProviderKeys) {
+    let skipped = |detail: String| (link_skipped(text, detail), ProviderKeys::default());
     match deeplink::unwrap_deeplink(text) {
         Ok(None) => parse_document(text),
-        Ok(Some(inner)) if is_http_url(&inner) => link_skipped(
-            text,
-            "carries a subscription URL, which has to be fetched".to_owned(),
-        ),
+        Ok(Some(inner)) if is_http_url(&inner) => {
+            skipped("carries a subscription URL, which has to be fetched".to_owned())
+        }
         Ok(Some(inner)) => parse_document(&inner),
-        Err(err) => link_skipped(text, err.to_string()),
+        Err(err) => skipped(err.to_string()),
     }
 }
 
 /// Metadata lines, then the first base64 layer that yields anything (`base64(base64(list))`
 /// works, AT-04-003). Metadata lines at the top of a decoded layer count too; outer ones win.
-fn parse_document(text: &str) -> ParseReport {
+fn parse_document(text: &str) -> (ParseReport, ProviderKeys) {
     let (mut meta, body) = text::body_meta(text);
+    let mut keys = text::body_keys(text);
     let layers = text::layers(body);
-    for layer in &layers {
+    for (index, layer) in layers.iter().enumerate() {
         let (inner_meta, rest) = text::body_meta(layer);
         fill_gaps(&mut meta, inner_meta);
+        // Layer 0 is `body`, which `text` covered already.
+        if index > 0 {
+            keys = keys.or(text::body_keys(layer));
+        }
         let mut found = Collector::default();
         found.layer(rest);
         if !found.is_empty() {
-            return found.finish(meta);
+            return (found.finish(meta), keys);
         }
     }
     let mut report = ParseReport {
@@ -108,7 +132,7 @@ fn parse_document(text: &str) -> ParseReport {
             .skipped
             .push(invalid(DAMAGED_BASE64.to_owned(), DAMAGED_BASE64, detail));
     }
-    report
+    (report, keys)
 }
 
 /// What one layer yielded, in import order: JSON documents, then Clash, WireGuard `.conf` and
@@ -215,13 +239,8 @@ impl Collector {
         }
         if self.profiles.len() == MAX_PROFILES {
             self.full = true;
-            let detail = format!("more than {MAX_PROFILES} keys: the rest were not read");
             // Past every cap on purpose: this entry is what marks the list as cut.
-            self.skipped.push(invalid(
-                profile_excerpt(&profile),
-                profile.kind.label(),
-                detail,
-            ));
+            self.skipped.push(cut_marker(&profile));
             return;
         }
         self.profiles.push(profile);
@@ -305,6 +324,13 @@ fn invalid(excerpt: String, scheme: &str, detail: String) -> Skipped {
             detail,
         },
     }
+}
+
+/// The entry that marks a list as cut at [`MAX_PROFILES`] (`profile` is the first one not
+/// taken): a refresh must not take the unread keys as removed by the provider.
+pub(crate) fn cut_marker(profile: &Profile) -> Skipped {
+    let detail = format!("more than {MAX_PROFILES} keys: the rest were not read");
+    invalid(profile_excerpt(profile), profile.kind.label(), detail)
 }
 
 /// Excerpt of a profile for a duplicate / over-limit entry: the redacted link it came from, else

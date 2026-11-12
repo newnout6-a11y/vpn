@@ -1,7 +1,8 @@
 //! Key copy and exports. Exports are not redacted (that is their point): the page shows the
 //! secret-export warning, keys go to the self-clearing secret clipboard or to a file the user
 //! picked in the Save dialog (written atomically). File exports run as `Export` operations whose
-//! budget pauses while the dialog is open.
+//! budget pauses while the dialog is open. Servers whose provider sent `hide-settings` are never
+//! exported: a single key is refused (`servers.hidden.refused`), a bulk export leaves them out.
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +12,9 @@ use vpnte_base::types::{UnixMs, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::ops::{FeatureKind, RunOpts, Source};
 use vpnte_profiles::export::{Shared as SharedKey, export_proxy_line, export_share};
+use vpnte_profiles::model::Profile;
 use vpnte_servers::model::{ProfileId, ServerRow};
+use vpnte_servers::store::hidden_refused;
 use vpnte_ui::servers::ExportReport;
 
 use super::import::count;
@@ -21,12 +24,8 @@ use crate::support::files::{self, SaveFile, StartFolder};
 
 /// Copies the share key of `id` to the secret clipboard; answers when it clears itself.
 pub(super) async fn copy_key(shared: Arc<Shared>, id: ProfileId) -> AppResult<Duration> {
-    let row = shared
-        .backend
-        .servers
-        .get(&id)
-        .ok_or_else(server_not_found)?;
-    let text = share(&row)?.text();
+    let profile = shared.backend.servers.shareable_profile(&id)?;
+    let text = share(&profile)?.text();
     let backend = shared.backend.clone();
     blocking(move || backend.clipboard().copy(&text)).await
 }
@@ -42,7 +41,7 @@ pub(super) async fn save_key(
         .servers
         .get(&id)
         .ok_or_else(server_not_found)?;
-    let key = share(&row)?;
+    let key = share(&shared.backend.servers.shareable_profile(&id)?)?;
     let json = matches!(key, SharedKey::Json(_));
     let ext = if json { "json" } else { "txt" };
     let req = save_dialog(
@@ -64,13 +63,14 @@ pub(super) async fn all_keys(
     shared: Arc<Shared>,
     cancel: CancellationToken,
 ) -> AppResult<Option<ExportReport>> {
-    let shares: Vec<Option<SharedKey>> = current_rows(&shared)
+    let (rows, hidden) = current_rows(&shared);
+    let shares: Vec<Option<SharedKey>> = rows
         .iter()
         .map(|row| row.profile().ok().and_then(|p| export_share(&p)))
         .collect();
     let now = now_ms();
     let file = keys_file(&shares, now)
-        .ok_or_else(|| AppError::validation(Msg::new("app.servers.export.nothing")))?;
+        .ok_or_else(|| nothing_to_export(hidden, "app.servers.export.nothing"))?;
     let ext = if file.json { "json" } else { "txt" };
     let req = save_dialog(
         "app.servers.dialog.saveAllKeys",
@@ -78,7 +78,7 @@ pub(super) async fn all_keys(
         file.json,
     );
     let path = save_file(&shared, "export:keys", req, file.body, cancel).await?;
-    Ok(path.map(|p| report(&p, file.exported, file.skipped)))
+    Ok(path.map(|p| report(&p, file.exported, file.skipped, hidden)))
 }
 
 /// Saves a proxy list (one `socks5://` / `http://` / `https://` proxy per line, no header).
@@ -86,15 +86,13 @@ pub(super) async fn proxy_list(
     shared: Arc<Shared>,
     cancel: CancellationToken,
 ) -> AppResult<Option<ExportReport>> {
-    let rows = current_rows(&shared);
+    let (rows, hidden) = current_rows(&shared);
     let lines: Vec<String> = rows
         .iter()
         .filter_map(|row| row.profile().ok().and_then(|p| export_proxy_line(&p)))
         .collect();
     if lines.is_empty() {
-        return Err(AppError::validation(Msg::new(
-            "app.servers.export.noProxies",
-        )));
+        return Err(nothing_to_export(hidden, "app.servers.export.noProxies"));
     }
     let now = now_ms();
     let req = save_dialog(
@@ -104,31 +102,41 @@ pub(super) async fn proxy_list(
     );
     let body = format!("{}\n", lines.join("\n"));
     let path = save_file(&shared, "export:proxies", req, body, cancel).await?;
-    Ok(path.map(|p| report(&p, lines.len(), rows.len() - lines.len())))
+    let skipped = rows.len() - lines.len();
+    Ok(path.map(|p| report(&p, lines.len(), skipped, hidden)))
 }
 
-/// The share form of a row: a lossless link, else a JSON document.
-fn share(row: &ServerRow) -> AppResult<SharedKey> {
-    let profile = row.profile()?;
-    export_share(&profile)
+/// The share form of a profile: a lossless link, else a JSON document.
+fn share(profile: &Profile) -> AppResult<SharedKey> {
+    export_share(profile)
         .ok_or_else(|| AppError::validation(Msg::new("app.servers.export.unsupported")))
 }
 
-fn current_rows(shared: &Shared) -> Vec<ServerRow> {
+/// Rows a bulk export may write (not archived, not hidden by their provider) and how many rows
+/// were left out because their provider hides the configs.
+fn current_rows(shared: &Shared) -> (Vec<ServerRow>, usize) {
     shared.backend.servers.read(|doc| {
-        doc.profiles
-            .iter()
-            .filter(|row| row.archived.is_none())
-            .cloned()
-            .collect()
+        let current = doc.profiles.iter().filter(|row| row.archived.is_none());
+        let (shown, held): (Vec<&ServerRow>, Vec<&ServerRow>) =
+            current.partition(|row| !doc.hides(row));
+        (shown.into_iter().cloned().collect(), held.len())
     })
 }
 
-fn report(path: &std::path::Path, exported: usize, skipped: usize) -> ExportReport {
+/// Nothing to write: when only provider-hidden servers could have been written, say that.
+fn nothing_to_export(hidden: usize, key: &'static str) -> AppError {
+    if hidden > 0 {
+        return hidden_refused();
+    }
+    AppError::validation(Msg::new(key))
+}
+
+fn report(path: &std::path::Path, exported: usize, skipped: usize, hidden: usize) -> ExportReport {
     ExportReport {
         path: path.display().to_string(),
         exported: count(exported),
         skipped: count(skipped),
+        hidden: count(hidden),
     }
 }
 

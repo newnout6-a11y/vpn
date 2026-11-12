@@ -1,0 +1,18 @@
+{
+  "servers": {
+    "fetch": {
+      "emptyListNoHwid": "The subscription returned an empty list. Some panels serve servers only to a device that sends its ID (HWID): turn on “Send HWID” for this subscription"
+    },
+    "headers": {
+      "invalid": "Line {{line}}: a header must look like “Name: value” (ASCII, one line)",
+      "reserved": "The connection sets the {{name}} header itself; it cannot be replaced",
+      "tooMany": "At most {{max}} headers per subscription"
+    },
+    "group": {
+      "manualNoRequest": "The manual group makes no requests to a provider"
+    },
+    "hidden": {
+      "refused": "The provider hid the server settings of this subscription: the key cannot be shown, copied or exported"
+    }
+  }
+}

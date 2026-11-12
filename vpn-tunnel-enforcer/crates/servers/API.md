@@ -15,7 +15,7 @@ vpnte-servers.workspace = true
 | `model` | stored document `ServersDoc` (`profiles.json`), `ServerGroup`, `ServerRow`, outcomes / status, secret-free summaries |
 | `store` | `Servers`: the one owner of the list (read, select, add, archive, groups, probe results), `ServersEvent` |
 | `parse` | pasted text / subscription body -> `ParseReport` (deep links, base64 layers, JSON, Clash, `.conf`, links) |
-| `subscription` | `SubscriptionFetcher` (routes, UA / HWID, redirects, DoH retry), canonical URL, outcome texts |
+| `subscription` | `SubscriptionFetcher` (routes + session route, UA / HWID switch, extra headers, redirects, DoH retry, fallback URL, spare slot, Mihomo providers, relocation), canonical URL, outcome texts |
 | `refresh` | `reconcile`, intervals, `add_from_input`, `refresh_group`, `sweep`, `spawn_scheduler`, `import_legacy_direct` |
 | `legacy` | Electron `server-picker` / `server-groups` / `settings` -> `ServersDoc` + report |
 | `LOCALES` | the crate's locale fragments, `&[(ru_json, en_json)]` |
@@ -38,7 +38,9 @@ use vpnte_servers::{legacy, refresh::RefreshCtx, store::Servers, subscription::*
 
 let servers = Arc::new(Servers::open(&dirs.root));                  // never fails; read-only -> notice()
 let fetcher = Arc::new(SubscriptionFetcher::new(Hwids::current(), settings_store.clone()));
-let ctx = RefreshCtx::new(fetcher, ops.clone());                     // ops: vpnte_core::ops::OperationRegistry
+let ctx = RefreshCtx::new(fetcher.clone(), ops.clone());             // ops: vpnte_core::ops::OperationRegistry
+// once the tunnel and the proxy slots exist (app: api_servers::relays::AppRelays):
+fetcher.set_relays(Arc::new(app_relays));                            // session route + spare slots
 let scheduler = servers.spawn_scheduler(ctx.clone(), shutdown.clone()); // sweep after 10 s, then every 60 s
 let mut events = servers.subscribe();                                // ServersEvent, see below
 // locales: [vpnte_core::LOCALES, vpnte_profiles::LOCALES, vpnte_servers::LOCALES, …].concat()
@@ -71,16 +73,25 @@ pub struct ServersDoc { pub active_profile_id: Option<ProfileId>, pub groups: Ve
 impl ServersDoc {
     pub fn group(&self, &GroupId) -> Option<&ServerGroup>;     pub fn group_mut(..) -> Option<&mut ServerGroup>;
     pub fn row(&self, &ProfileId) -> Option<&ServerRow>;       pub fn row_mut(..) -> Option<&mut ServerRow>;
+    pub fn hides(&self, &ServerRow) -> bool;   // row.hidden, or its group hides_settings()
     pub fn manual_group(&self) -> Option<&ServerGroup>;        // by kind, never by name
     pub fn subscription_group(&self, url: &Url, device: ClientDevice) -> Option<&ServerGroup>; // group key
     pub fn ensure_manual_group(&mut self, now: UnixMs) -> GroupId;
 }
 pub struct ServerGroup { pub id: GroupId, pub name: String /* "" = default name */, pub kind: GroupKind,
     pub imported_at: UnixMs, pub refresh_override_min: Option<u16>, pub fetch: FetchState,
-    pub info: vpnte_profiles::model::SubscriptionMeta /* traffic, expiry, title, links */ }
+    pub info: vpnte_profiles::model::SubscriptionMeta /* traffic, expiry, title, links */,
+    pub send_hwid: bool       /* HWID headers + HWID in the Happ UA; a stored group without the
+                                 field reads true (migrated / older groups keep it), new groups false */,
+    pub headers: Option<Secret> /* the user's extra request headers, `Name: value` lines, sealed */,
+    pub fallback: Option<Secret> /* the provider's `fallback-url`, sealed */,
+    pub moved_at: Option<UnixMs> /* the provider moved the URL (note on the page) */,
+    pub controls: vpnte_profiles::text::Controls /* routing, hide-settings, autoconnect: stored only */ }
 pub enum GroupKind { Manual, Subscription { url: Secret /* canonical http(s) URL */, device: ClientDevice } }
 impl ServerGroup {
     pub fn manual(GroupId, now) -> Self;  pub fn is_manual(&self) -> bool;
+    pub fn subscription(GroupId, &Url, ClientDevice, now) -> Self;   // send_hwid false (set it after)
+    pub fn hides_settings(&self) -> bool; // subscription whose provider sent `hide-settings: 1`
     pub fn url(&self) -> Option<Url>;     // None: manual, locked secret, or not http(s)://host
     pub fn device(&self) -> Option<ClientDevice>;
     pub fn title(&self) -> Msg;           // the name, or servers.group.manualDefault / subscriptionDefault
@@ -104,11 +115,12 @@ pub struct HealthRecord { pub online: bool, pub at: UnixMs, pub rtt_ms: Option<u
                           pub reason: Option<HealthReason>, pub egress_ip: Option<IpAddr> }
 pub enum HealthReason { NoOutbound, ConfigFailed, TlsFailed, AuthFailed, Timeout, HandshakeFailed,
     Hy2ConfigFailed, Hy2AuthFailed, Hy2UdpBlocked, Hy2TlsFailed, Hy2HandshakeFailed,
-    EngineSetting /* not a key fault: the engine setting does not run the key */ }
+    EngineSetting /* not a key fault: the engine setting does not run the key */,
+    ConnectionRefused /* the key's port reset the connect (RU audit item 6) */ }
 // the probes' classifier verdict (vpnte_probes::discipline::{Verdict, Reaction}, same wire names);
 // a name this version does not know reads as Unknown instead of failing the whole list
 pub enum ServerVerdict { Healthy, Frozen, Stalled, HandshakeFailed, KeyRejected, IpBanned, UdpBlocked,
-    Offline, Deferred, NotVerified, Unknown }                  // kebab-case
+    Offline, Deferred, NotVerified, Refused, Unknown }         // kebab-case
 pub enum ServerReaction { None, SwitchServer, TryAnotherFingerprint, PreferTcpTransport, RetryLater, Unknown }
 pub struct VerdictRecord { pub verdict: ServerVerdict, pub reaction: ServerReaction, pub at: UnixMs }  // camelCase
 pub struct ServerRow { pub id: ProfileId, pub group_id: GroupId, pub origin: Origin,
@@ -117,7 +129,12 @@ pub struct ServerRow { pub id: ProfileId, pub group_id: GroupId, pub origin: Ori
     pub profile: Secret /* the typed Profile as JSON */, pub imported_at: UnixMs,
     pub last_seen_at, pub missing_since: Option<UnixMs>, pub archived: Option<Archived>,
     pub country: Option<VerifiedCountry>, pub health: Option<HealthRecord>,
-    pub verdict: Option<VerdictRecord> /* beside health: may come from another check, compare `at` */ }
+    pub verdict: Option<VerdictRecord> /* beside health: may come from another check, compare `at` */,
+    pub hidden: bool /* the provider's hide-settings, carried out of its group (see ServersDoc::hides) */ }
+// diag-a8: a name a newer build wrote into a stored enum field reads as a safe fallback
+// (model::lenient) instead of failing the list: health reason / fetch outcome / autoconnect pick
+// -> None, origin -> Manual, archive reason -> User, country source -> Legacy, device / engine ->
+// default. A new group kind changes the shape and bumps ServersDoc::VERSION instead.
 impl ServerRow {
     pub fn new(&Profile, GroupId, Origin, ClientDevice, now) -> AppResult<Self>;
     pub fn profile(&self) -> AppResult<Profile>;    // Conflict servers.locked (other PC / account), Internal servers.unreadable
@@ -135,7 +152,9 @@ pub struct ServerSummary { id, group_id, origin, name, protocol, server, port, d
     ping: Option<Ping>, locked: bool, selected: bool }          // all pub
 pub struct GroupSummary { id, name, title: Msg, manual: bool, device: Option<ClientDevice>,
     host: Option<String> /* never the URL */, url_locked: bool, status: GroupStatus, imported_at,
-    fetch: FetchState, info: SubscriptionMeta, refresh_override_min, servers: usize, archived: usize }
+    fetch: FetchState, info: SubscriptionMeta, refresh_override_min, servers: usize, archived: usize,
+    send_hwid: bool, header_names: Vec<String> /* never values */, moved_at: Option<UnixMs>,
+    controls: Controls }
 pub struct ServersView { pub groups: Vec<GroupSummary>, pub servers: Vec<ServerSummary>,
     pub active: Option<ProfileId>, pub fallback: bool, pub notice: Option<Msg> }
 impl ServerSummary { pub fn of(&ServerRow, Option<Ping>, selected: bool) -> Self }
@@ -172,6 +191,7 @@ impl Servers {
     pub fn purge_expired(&self, now: UnixMs) -> AppResult<usize>;
     pub fn rename_group(&self, &GroupId, &str) -> AppResult<()>;          // empty name: no change
     pub fn delete_group(&self, &GroupId, delete_servers: bool) -> AppResult<()>;  // false: rows -> manual group
+                                                    // (a hiding group's rows keep `hidden`)
                                         // (a key it already holds is not doubled: that copy goes, a selection follows)
     pub fn set_refresh_override(&self, &GroupId, Option<u16>) -> AppResult<()>;   // minutes 1..=1440 / None
     pub fn set_group_device(&self, &GroupId, ClientDevice) -> AppResult<()>;      // feed rows follow; refresh next
@@ -183,13 +203,22 @@ impl Servers {
     pub fn verdicts(&self) -> HashMap<ProfileId, VerdictRecord>;         // rows that have one (page, automation)
     pub fn record_country(&self, &ProfileId, VerifiedCountry, expected_generation: u64) -> AppResult<bool>;
     pub fn record_ping(&self, &ProfileId, rtt_ms: Option<u32>);          // memory only
+    // a subscription's request settings and the provider's hide-settings guard
+    pub fn set_group_send_hwid(&self, &GroupId, bool) -> AppResult<()>;  // next refresh sends accordingly
+    pub fn set_group_headers(&self, &GroupId, lines: &str) -> AppResult<Vec<String>>; // blank = none; names
+    pub fn shareable_profile(&self, &ProfileId) -> AppResult<Profile>;   // every key export (copy, save,
+                                                                        // QR): refused when hidden
+    pub fn hidden_rows(&self) -> HashSet<ProfileId>;                     // ServersDoc::hides: bulk exports skip them
 }
+pub fn hidden_refused() -> AppError;      // Validation servers.hidden.refused
 pub enum SelectBy { User, Automation }   // user may pick provider-archived rows, automation no archived row
 pub struct Active { pub row: ServerRow, pub fallback: bool /* not the user's selection: say so */ }
 pub enum AddTarget { Keys { group: Option<GroupId> /* None: manual group */, device: ClientDevice },
                      Subscription(Box<NewSubscription>) }
-pub struct NewSubscription { pub url: Url /* canonical */, pub device: ClientDevice,
-                             pub info: SubscriptionMeta, pub partial: bool }
+pub struct NewSubscription { pub url: Url /* canonical; the moved address when moved_at */,
+    pub device: ClientDevice, pub info: SubscriptionMeta, pub partial: bool, pub send_hwid: bool,
+    pub headers: Option<String> /* stored_headers form */, pub controls: Controls,
+    pub fallback: Option<Url>, pub moved_at: Option<UnixMs> }
 pub struct AddReport { pub group: GroupId, pub added: Vec<ProfileId>, pub restored: Vec<ProfileId>,
                        pub duplicates: usize, pub selected: Option<ProfileId> /* set when nothing was selected */ }
 pub struct HealthUpdate { pub id: ProfileId, pub identity: [u8; 16] /* row.identity() at probe start */,
@@ -236,33 +265,76 @@ link that carries a subscription URL is one skipped entry here: route user input
 pub const REQUEST_TIMEOUT: Duration;   // 25 s per request (connect <= 10 s)
 pub const MAX_REQUESTS: usize;         // 6 = first request + 5 redirects
 pub const DOH_MAX_IPS: usize;          // 3 pinned addresses for the DoH retry
+pub const FALLBACK_AFTER: Duration;    // 9 s (Happ): the fallback URL joins a silent URL
+pub const MAX_HEADERS: usize;          // 16 extra request headers per subscription
 pub struct Hwids;                      // Clone, Eq; Debug prints "Hwids(..)"
 impl Hwids {
     pub fn current() -> Self;          // env VPNTE_SUBSCRIPTION_HWID, else the Electron app's hash
     pub fn of(id: &MachineIdentity, fixed: Option<String>) -> Self;
     pub fn get(&self, device: ClientDevice) -> &str;
 }
-pub struct RoutePlan { pub routes: Vec<vpnte_core::net::Route>, pub doh: bool }
+pub struct RoutePlan { pub routes: Vec<vpnte_core::net::Route>, pub doh: bool,
+                       pub relay: bool /* only "auto": session route + spare slot; never in
+                                          "direct only" or "local proxy only" (subs-b5) */ }
+impl RoutePlan { pub fn with_session(self, Option<Route>) -> Self }  // right after direct, never twice
 pub fn route_plan(settings: &Settings) -> RoutePlan;   // auto: direct, user proxy, socks5h 10808, http 10809
+pub trait Relays: Send + Sync {                        // the app lends these (it owns tunnel + slots)
+    fn session_route(&self) -> Option<Route>;          // proxy capture's mixed inbound; None in TUN / idle
+    fn spare_route(&self, cancel: CancellationToken) -> SpareFuture<'_>;  // slot on a healthy server
+}
+pub struct Spare;                                      // Spare::new(route, release); drop = release once
+pub struct FetchRequest { pub url: Url, pub device: ClientDevice, pub send_hwid: bool,
+    pub headers: Vec<(String, String)>, pub fallback: Option<Url> }   // Debug: host only
+impl FetchRequest { pub fn new(url: Url, device: ClientDevice) -> Self }  // no HWID / headers / fallback
+pub struct Fetched { pub report: ParseReport, pub controls: Controls, pub moved_to: Option<Url>,
+    pub fallback: Option<Url>, pub via_fallback: bool, pub providers: Vec<ProviderFetch> } // Debug hides URLs
+impl Fetched { pub fn complete(&self) -> bool }        // only duplicates skipped, every provider answered
+pub struct ProviderFetch { pub name: String, pub servers: usize, pub failed: Option<ProviderFailure> }
+pub enum ProviderFailure { Fetch(FetchOutcome), Refused /* not asked: the redirect rules refused its URL */ }
 pub struct SubscriptionFetcher;                        // share in Arc
 impl SubscriptionFetcher {
     pub fn new(hwids: Hwids, settings: Arc<Store<Settings>>) -> Self;   // routes re-read at every fetch
     pub fn with_plan(hwids: Hwids, plan: RoutePlan) -> Self;           // fixed routes (probes, tests)
-    pub fn plan(&self) -> RoutePlan;
+    pub fn set_relays(&self, relays: Arc<dyn Relays>);                 // once; later calls are ignored
+    pub fn plan(&self) -> RoutePlan;                                   // with the session route
+    pub async fn fetch_request(&self, req: &FetchRequest, cancel: &CancellationToken)
+        -> Result<Fetched, FetchError>;
     pub async fn fetch(&self, url: &Url, device: ClientDevice, cancel: &CancellationToken)
-        -> Result<ParseReport, FetchError>;   // Ok has >= 1 profile; meta = headers over body `#key:` lines
+        -> Result<ParseReport, FetchError>;   // = fetch_request of FetchRequest::new (a new group)
 }
 pub enum FetchError { Failed(FetchOutcome), InvalidUrl, Cancelled }   // Copy; From<FetchError> for AppError
+impl FetchError { pub fn for_group(self, send_hwid: bool) -> AppError } // EmptyList without HWID -> hint
+pub fn parse_headers(lines: &str) -> AppResult<Vec<(String, String)>>; // servers.headers.* errors
+pub fn stored_headers(&[(String, String)]) -> Option<String>;  pub fn header_names(stored: &str) -> Vec<String>;
 pub fn outcome_msg(outcome: FetchOutcome) -> Msg;     // group status line (servers.fetch.*)
 pub fn is_complete(report: &ParseReport) -> bool;      // only Duplicate skips: absence is evidence
 pub fn canonical_source(input: &str) -> Option<Url>;   // URL / happ:// / mantaray:// -> http(s) URL, no fragment
 pub fn normalize_redirect(location: &str, base: &Url) -> Option<String>;
 pub fn classify_body(body: &str) -> FetchOutcome;      // EmptyList | Unparseable(kind)
 ```
-Plan: each route in turn (a transport failure moves to the next route); on a route that answers,
-every User-Agent of the device with the HWID headers, then without; 429, or 404/410 to every
-identified request, stops; then one DoH-pinned direct retry for domain hosts (not in local-proxy
-mode). Redirects are followed by hand: `https -> http` and public -> private hops are refused.
+Plan of one URL: each route in turn (direct, the session's route, the user's proxy, Happ's
+proxies; a transport failure moves to the next route); on a route that answers, every User-Agent
+of the device with the HWID headers, then without (`send_hwid` off: only without, and the Happ
+agent without its HWID segment); the user's headers go last and win (their `User-Agent` replaces
+the rotation); every request sends `Cache-Control: no-store`; 429, or 404/410 to every identified
+request, stops; then one DoH-pinned direct retry for domain hosts (not in local-proxy mode).
+`fetch_request`: the URL; the fallback URL starts when it fails (any failure, 300-599 included) or
+after 9 s, then the first success wins; when both failed and the plan allows it, one slot is
+borrowed from the relays for one more try of the URL, then the fallback (handed back afterwards),
+except a URL whose plan stopped on purpose (429, gone): it is not asked again from another
+address, and nothing left to try = no slot; then the Mihomo `type: http` providers of a Clash
+answer (at most 16, the answering route first, the same limits; a provider URL a redirect could
+not reach is `Refused`; a cut at 5000 keys marks the answer partial) are merged; a failed provider
+makes the answer incomplete. Private request data (HWID headers, the Happ agent with the HWID,
+the user's headers) goes only to the URL's and the fallback URL's hosts: a provider on another
+host and a redirect hop to another host get the plain agent without them. Relocation:
+`new-url` / `moved-permanently-to`, else `new-domain` on the URL, else a followed leading run of
+301 / 308 of the URL itself becomes `moved_to`, only from an HTTPS answer of the URL itself on
+the user's routes (not the fallback's, not through a spare slot); `fallback-url` becomes
+`fallback` from an HTTPS answer not through a spare slot; untrusted hints are ignored (logged).
+Both pass the redirect rules (no `https -> http`, a public subscription never points into a
+private network; names resolved by the system only when the answer came direct) and never equal
+the URL. Redirects are followed by hand: `https -> http` and public -> private hops are refused.
 Failure = strongest evidence: empty list > unusable body > HTTP 4xx > other HTTP > network > timeout.
 Logs carry host, route label and agent family only (never path, query, HWID or headers).
 
@@ -283,12 +355,18 @@ pub struct RefreshReport { pub added: Vec<ProfileId>, pub updated: usize, pub re
 #[derive(Clone)] pub struct RefreshCtx { pub fetcher: Arc<SubscriptionFetcher>, pub ops: OperationRegistry,
                                          pub deadline: Duration /* 120 s */ }
 impl RefreshCtx { pub fn new(fetcher: Arc<SubscriptionFetcher>, ops: OperationRegistry) -> Self }
-pub enum AddOutcome { Added { report: AddReport, skipped: Vec<Skipped> },
+pub enum AddOutcome { Added { report: AddReport, skipped: Vec<Skipped>,
+                              providers: Vec<ProviderFetch> /* Mihomo providers, import report */ },
                       Refreshed { group: GroupId, report: RefreshReport } }
+pub struct AddOptions { pub into: Option<GroupId>, pub device: ClientDevice,
+                        pub send_hwid: bool, pub headers: Vec<(String, String)> /* checked */ }
+impl AddOptions { pub fn new(into: Option<GroupId>, device: ClientDevice) -> Self }  // HWID off
 pub struct SweepReport { pub refreshed: usize, pub failed: usize }
 impl Servers {
     pub async fn add_from_input(self: &Arc<Self>, ctx: &RefreshCtx, input: &str, into: Option<GroupId>,
                                 device: ClientDevice, cancel: CancellationToken) -> AppResult<AddOutcome>;
+    pub async fn add_from_input_with(self: &Arc<Self>, ctx: &RefreshCtx, input: &str,
+                                     options: AddOptions, cancel: CancellationToken) -> AppResult<AddOutcome>;
     pub async fn refresh_group(self: &Arc<Self>, ctx: &RefreshCtx, id: &GroupId, owner: Owner,
                                cancel: CancellationToken) -> AppResult<RefreshReport>;
     pub async fn import_legacy_direct(self: &Arc<Self>, ctx: &RefreshCtx, direct: &LegacyDirect,
@@ -297,22 +375,30 @@ impl Servers {
     pub fn spawn_scheduler(self: &Arc<Self>, ctx: RefreshCtx, shutdown: CancellationToken) -> JoinHandle<()>;
 }
 ```
-`add_from_input`: a subscription URL (plain or in a `happ://` / `mantaray://` link) is fetched as
-`device`: known for that device -> that group is refreshed (`Refreshed`); `into: Some(g)` -> its
-keys are appended to `g` as manual rows; else a new subscription group. Any other text is parsed
-and added to `into` or the manual group; `skipped` lists entries that were not imported.
+`add_from_input` (= `add_from_input_with` and `AddOptions::new`): a subscription URL (plain or in
+a `happ://` / `mantaray://` link) is fetched as `device`: known for that device -> that group is
+refreshed with its own settings (`Refreshed`); `into: Some(g)` -> its keys are appended to `g` as
+manual rows (marked `hidden` when the answer sent `hide-settings`); else a new subscription group with `send_hwid` / `headers` of the options, the first
+answer's controls and fallback URL, and (when the answer moved it) the new URL plus `moved_at`.
+Any other text is parsed and added to `into` or the manual group; `skipped` lists entries that were
+not imported. A failed fetch without the HWID that saw an empty list answers
+`servers.fetch.emptyListNoHwid` (turn the switch on), as `refresh_group` does.
 `refresh_group` runs as operation `refresh:<id>` (`FeatureKind::Refresh`, 120 s; `Owner::Manual`
 pre-empts a scheduled run, an equal owner gets `core.ops.busy`). A failure stores its typed outcome
 and changes no row; a cancel stores nothing more; the deadline stores `Timeout`. After a success the
-provider metadata replaces `info`, and the provider title renames the group only while its name is
-an automatic one (empty, a host, or the provider's previous title). Missing keys: kept while the
+provider metadata replaces `info` and the controls replace `controls`, a named fallback URL is
+sealed into `fallback`, a vetted move re-points the URL and stamps `moved_at` (skipped when another
+group of the device has that URL), and the provider title renames the group only while its name is
+an automatic one (empty, a host, or the provider's previous title). The fetch sends the group's
+`send_hwid`, `headers` and `fallback`. Missing keys: kept while the
 answer is partial, archived for the provider after 15 min of complete answers without them; a
 provider-archived key that comes back is restored; a key whose host, port or credential changed
 loses its `health` and `verdict`; a key the group already holds as a manual row is not added
 again as a feed row; the selection is never changed by a refresh.
 A stamp from the future (wrong clock) makes a group due instead of blocking it.
-`import_legacy_direct`: the old single-key input goes in like a paste as `pc`, and the old selected
-index (clamped) becomes the selection; only into an empty list (`Ok(None)` otherwise).
+`import_legacy_direct`: the old single-key input goes in like a paste as `pc` (a subscription with
+the HWID on: the old app sent it), and the old selected index (clamped) becomes the selection; only
+into an empty list (`Ok(None)` otherwise).
 
 ## legacy (`vpnte_servers::legacy`)
 
@@ -329,7 +415,7 @@ kept; the first manual group absorbs other manual groups, subscriptions whose UR
 `http(s)://host` and rows of unknown groups; mixed-device subscriptions are split per device
 (` · android` etc.); subscription URLs are stored canonical (deep link unwrapped, fragment dropped),
 and old groups that share a canonical URL are merged into the first of them;
-every key is re-sealed and verified. With an empty picker an accepted settings cache becomes rows;
+every key is re-sealed and verified; migrated subscriptions keep sending the HWID (`send_hwid`). With an empty picker an accepted settings cache becomes rows;
 otherwise a non-empty `directVpnInput` is handed on in `direct` for `Servers::import_legacy_direct`.
 Nothing under the old data directory is written.
 
@@ -366,6 +452,10 @@ timeout the base `errors.*`). Every `Msg` this crate returns has its key under `
 | `servers.fetch.invalidUrl` | — | `Validation`: `FetchError::InvalidUrl` |
 | `servers.refresh.groupChanged` | — | `Conflict`: group deleted or re-pointed while its fetch ran |
 | `servers.refresh.unusableUrl` | — | `Validation`: subscription URL locked or not `http(s)://host` |
+| `servers.fetch.emptyListNoHwid` | — | `Validation`: `FetchError::for_group` — an empty list fetched without the HWID |
+| `servers.headers.{invalid,reserved,tooMany}` | `line` / `name` / `max` | `Validation`: `parse_headers`, `set_group_headers` |
+| `servers.group.manualNoRequest` | — | `Validation`: HWID switch / headers of the manual group |
+| `servers.hidden.refused` | — | `Validation`: `shareable_profile` of a provider-hidden server (`hidden_refused`) |
 
 Also passed through: `core.store.readOnly` (`Conflict`, document read-only), `core.ops.busy`
 (`Conflict`, the same refresh / import is running), `errors.cancelled` (`Cancelled`: user cancel or
@@ -376,7 +466,10 @@ pre-emption, show nothing), `errors.timeout` (`Timeout`: the 120 s budget), deep
 
 - Not run: the DoH-pinned retry (needs public DoH servers), redirect checks that resolve names with
   the system DNS, a successful HTTPS fetch, Happ's real local proxies (stand-ins on loopback are
-  tested). Everything else ran: 104 tests (loopback HTTP, real DPAPI, temp dirs).
+  tested). Everything else ran: 139 tests (loopback HTTP, real DPAPI, temp dirs, paused clock).
+- Not run (subscriptions under blocking): a spare slot through the real proxy manager (the fetch side runs against fake
+  relays and a loopback stand-in proxy), a fallback or a move over real HTTPS, name lookups of
+  relocation targets (IP literals only in tests).
 - HWIDs are computed at start (`Hwids::current`), not persisted. Identical concurrent fetches are not
   coalesced (the registry serialises them per group / import). Pings are never persisted. Events
   carry ids only. A group has one device (old groups with several devices are split on import).

@@ -160,6 +160,11 @@ pub(super) fn initial_state(scene: Scene) -> MaintenanceState {
         }),
         export: ExportView::default(),
         legacy: legacy(scene),
+        // The backend checks the network at start: the result is there before any click.
+        network: NetworkView {
+            running: false,
+            last: Some(network_result(scene)),
+        },
     }
 }
 
@@ -486,5 +491,48 @@ pub(super) fn step_outcome(scene: Scene, step: RepairStep) -> StepOutcome {
                 .arg("total", 2),
         ),
         _ => StepOutcome::done(Vec::new()),
+    }
+}
+
+/// The network check: a mobile whitelist in the `problems` scene, an open network otherwise.
+pub(super) fn network_result(scene: Scene) -> NetCheckView {
+    let step = |kind, verdict, key: &str| NetStepView {
+        kind,
+        verdict,
+        detail: demo(&format!("network.{key}")),
+    };
+    if scene == Scene::Problems {
+        return NetCheckView {
+            at: now_ms() - 40_000,
+            via_session: false,
+            verdict: Verdict::Warn,
+            steps: vec![
+                step(NetStepKind::Dns, Verdict::Warn, "dnsCut"),
+                step(NetStepKind::Tcp, Verdict::Warn, "tcpWhitelist"),
+                step(NetStepKind::Tls, Verdict::Warn, "tlsWhitelist"),
+                step(NetStepKind::Bytes, Verdict::NotChecked, "bytesSkipped"),
+                step(NetStepKind::Udp, Verdict::Fail, "udpBlocked"),
+                step(NetStepKind::DnsCapture, Verdict::NotChecked, "notCaptured"),
+            ],
+            modes: vec![vpnte_view::netmode::NetMode::Whitelist],
+            headline: demo("network.whitelist"),
+            advice: vec![demo("network.whitelistAdvice")],
+        };
+    }
+    NetCheckView {
+        at: now_ms() - 40_000,
+        via_session: scene.connected(),
+        verdict: Verdict::Ok,
+        steps: vec![
+            step(NetStepKind::Dns, Verdict::Ok, "dnsOk"),
+            step(NetStepKind::Tcp, Verdict::Ok, "tcpOk"),
+            step(NetStepKind::Tls, Verdict::Ok, "tlsOk"),
+            step(NetStepKind::Bytes, Verdict::Ok, "bytesOk"),
+            step(NetStepKind::Udp, Verdict::Ok, "udpOk"),
+            step(NetStepKind::DnsCapture, Verdict::Ok, "captured"),
+        ],
+        modes: Vec::new(),
+        headline: demo("network.open"),
+        advice: Vec::new(),
     }
 }

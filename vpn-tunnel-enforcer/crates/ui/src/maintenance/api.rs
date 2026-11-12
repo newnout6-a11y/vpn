@@ -5,8 +5,8 @@ use tokio_util::sync::CancellationToken;
 use vpnte_base::AppResult;
 
 use super::model::{
-    CaptureView, ExportDone, LeakTestView, MaintenanceState, ProtectionView, RepairView,
-    RouteTestView, SecretsImport, SystemReport,
+    CaptureView, ExportDone, LeakTestView, MaintenanceState, NetCheckView, ProtectionView,
+    RepairView, RouteTestView, SecretsImport, SystemReport,
 };
 
 /// Backend of the Maintenance page. The app implements it over probes, protection, forensics,
@@ -37,6 +37,11 @@ pub trait MaintenanceApi: 'static {
 
     /// The routing self-test (VPN exit vs direct exit, Smart-RU).
     async fn routing_self_test(&self, cancel: CancellationToken) -> AppResult<RouteTestView>;
+
+    /// The network-mode check (DNS, TCP, TLS, bytes after 16 KB, UDP, the DNS canary): names
+    /// the restriction of this network. Single flight with the backend's own runs; the result
+    /// also goes to [`MaintenanceState::network`].
+    async fn check_network(&self, cancel: CancellationToken) -> AppResult<NetCheckView>;
 
     /// Builds the diagnostics ZIP: the app asks where to save it (title «Сохранить диагностику»,
     /// Desktop, `vpn-tunnel-enforcer-diagnostics-<timestamp>.zip`); `Ok(None)` = the user

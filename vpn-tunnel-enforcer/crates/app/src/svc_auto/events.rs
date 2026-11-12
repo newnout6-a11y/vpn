@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_automation::adaptive::identity;
 use vpnte_automation::coordinator::{LifecycleEvent, RuntimeId, StopCause};
@@ -13,7 +13,7 @@ use vpnte_base::types::{Level, Notice, OutboundFault, Owner};
 use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
 use vpnte_tunnel::api::{Runtime, TunStatusKind, TunnelEvent};
-use vpnte_tunnel::lifecycle::SessionEvent;
+use vpnte_tunnel::lifecycle::{SessionEvent, SessionView};
 use vpnte_tunnel::outcome::OutcomeKind;
 use vpnte_winnet::adapters::NetChange;
 
@@ -24,14 +24,90 @@ use crate::svc_core::notify::{NoticeCategory, Notifier};
 /// Location privacy for the length of a session (`settings.location_privacy`, NOADMIN §3).
 pub struct Privacy {
     pub location: Location,
-    pub settings: Arc<Store<Settings>>,
-    pub notifier: Arc<Notifier>,
+    settings: Arc<Store<Settings>>,
+    notifier: Arc<Notifier>,
+    /// The lane's session as it is now (not a page's debounced projection of it).
+    session: watch::Receiver<Option<SessionView>>,
+    /// One change at a time: the forwarder's session up / down and the Settings toggle each read
+    /// the setting and the session and then apply or roll back under it, so a toggle never lands
+    /// between another one's read and its write.
+    one: Mutex<()>,
+}
+
+/// What a toggle did with the consent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Followed {
+    /// The consent follows the setting now (denied with a session, given back without).
+    Applied,
+    /// Windows refused the change: the consent is as it was.
+    NotApplied,
+    /// Nothing to do until the next connect.
+    Stored,
 }
 
 impl Privacy {
+    pub fn new(
+        location: Location,
+        settings: Arc<Store<Settings>>,
+        notifier: Arc<Notifier>,
+        session: watch::Receiver<Option<SessionView>>,
+    ) -> Self {
+        Self {
+            location,
+            settings,
+            notifier,
+            session,
+            one: Mutex::new(()),
+        }
+    }
+
+    fn running(&self) -> bool {
+        self.session.borrow().is_some()
+    }
+
     /// Connected: the user's location consent is denied while the setting is on.
     pub async fn session_up(&self) {
-        if !self.settings.read(|s| s.location_privacy) || self.location.is_applied() {
+        let _one = self.one.lock().await;
+        self.deny_if_wanted().await;
+    }
+
+    /// The session ended (or the app quits / recovers): the consent goes back to the user's.
+    pub async fn session_down(&self) {
+        let _one = self.one.lock().await;
+        self.give_back().await;
+    }
+
+    /// The Settings toggle changed `settings.location_privacy`: the consent follows at once,
+    /// judged by the lane's session itself; denied only while a session runs.
+    pub async fn follow_setting(&self) -> Followed {
+        let _one = self.one.lock().await;
+        let on = self.settings.read(|s| s.location_privacy);
+        let held = self.location.is_applied();
+        if on && self.running() {
+            self.deny_if_wanted().await;
+        }
+        // Denied only while a session runs: it may have ended meanwhile, or never begun.
+        if !(on && self.running()) {
+            self.give_back().await;
+        }
+        let applied = self.location.is_applied();
+        let done = |ok: bool| {
+            if ok {
+                Followed::Applied
+            } else {
+                Followed::NotApplied
+            }
+        };
+        match (on, self.running()) {
+            (true, true) => done(applied),
+            (false, _) if held => done(!applied),
+            _ => Followed::Stored,
+        }
+    }
+
+    async fn deny_if_wanted(&self) {
+        let on = self.settings.read(|s| s.location_privacy);
+        if !on || !self.running() || self.location.is_applied() {
             return;
         }
         if let Err(e) = self.location.apply().await {
@@ -40,8 +116,7 @@ impl Privacy {
         }
     }
 
-    /// The session ended (or the app quits / recovers): the consent goes back to the user's.
-    pub async fn session_down(&self) {
+    async fn give_back(&self) {
         if !self.location.is_applied() {
             return;
         }
@@ -74,8 +149,9 @@ pub fn stop_cause(outcome: OutcomeKind, asked: Option<Owner>) -> StopCause {
     }
 }
 
-/// The lifecycle event of a session change; `None` for the row of a switch (the session goes
-/// on: a switch emits only `Started`).
+/// The lifecycle event of a session change; `None` for the row of a session another run
+/// replaces at once (a switch that took, a failover: only its `Started` goes out). A switch that
+/// lost the tunnel ends the session with the switch's outcome and nothing after it: `Stopped`.
 pub fn lifecycle_event(event: &SessionEvent, asked: Option<Owner>) -> Option<LifecycleEvent> {
     match event {
         SessionEvent::Up(view) => {
@@ -89,10 +165,11 @@ pub fn lifecycle_event(event: &SessionEvent, asked: Option<Owner>) -> Option<Lif
             })
         }
         SessionEvent::Ended {
-            outcome: OutcomeKind::ServerSwitch | OutcomeKind::Rotation,
-            ..
+            continues: true, ..
         } => None,
-        SessionEvent::Ended { session, outcome } => Some(LifecycleEvent::Stopped {
+        SessionEvent::Ended {
+            session, outcome, ..
+        } => Some(LifecycleEvent::Stopped {
             owner: session.owner,
             runtime_id: RuntimeId(session.generation.unwrap_or(0)),
             cause: stop_cause(*outcome, asked),
@@ -164,8 +241,10 @@ async fn next_change(changes: &mut Option<mpsc::Receiver<NetChange>>) -> Option<
 
 async fn on_session(coord: &AppCoordinator, privacy: Option<&Privacy>, event: &SessionEvent) {
     let asked = match event {
-        SessionEvent::Ended { .. } => coord.pending_stop.lock().take(),
-        SessionEvent::Up(_) => None,
+        SessionEvent::Ended {
+            continues: false, ..
+        } => coord.pending_stop.lock().take(),
+        SessionEvent::Ended { .. } | SessionEvent::Up(_) => None,
     };
     let Some(mapped) = lifecycle_event(event, asked) else {
         return;

@@ -22,6 +22,10 @@ pub trait Lane: Send + Sync + 'static {
     fn session(&self) -> watch::Receiver<Option<SessionView>>;
     fn events(&self) -> broadcast::Receiver<SessionEvent>;
     fn busy(&self) -> bool;
+    /// Resolves once no lane operation is in flight (callers bound it).
+    async fn idle(&self);
+    /// The holder of the session a kept stop ended, while that block lasts.
+    fn kept_by(&self) -> Option<Owner>;
     fn adopt(&self, owner: Owner);
 }
 
@@ -62,6 +66,14 @@ impl Lane for Lifecycle {
 
     fn busy(&self) -> bool {
         Lifecycle::busy(self)
+    }
+
+    async fn idle(&self) {
+        Lifecycle::idle(self).await;
+    }
+
+    fn kept_by(&self) -> Option<Owner> {
+        Lifecycle::kept_by(self)
     }
 
     fn adopt(&self, owner: Owner) {

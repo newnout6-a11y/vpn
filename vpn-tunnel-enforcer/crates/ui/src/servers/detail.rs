@@ -72,27 +72,33 @@ pub(crate) fn ServerDetail() -> Element {
     });
     let (a_save, a_copy) = (actions.clone(), actions.clone());
     let (s_save, s_copy) = (server.clone(), server.clone());
+    // The provider's `hide-settings`: no key leaves the app; everything else stays visible.
+    let hidden = server.as_ref().is_some_and(|s| s.config_hidden);
     let footer = rsx! {
-        Button {
-            busy: exporting,
-            disabled: server.is_none(),
-            onclick: move |_| {
-                if let Some(s) = &s_save {
-                    a_save.export_key(s, true);
-                }
-            },
-            {t!("serverDetail.saveKey")}
-        }
-        Button {
-            kind: ButtonKind::Ghost,
-            disabled: server.is_none() || exporting,
-            title: t!("ui.servers.detail.copyTitle"),
-            onclick: move |_| {
-                if let Some(s) = &s_copy {
-                    a_copy.export_key(s, false);
-                }
-            },
-            {t!("serverDetail.copyKey")}
+        if hidden {
+            p { class: "srv-detail-note", {t!("ui.servers.detail.hidden")} }
+        } else {
+            Button {
+                busy: exporting,
+                disabled: server.is_none(),
+                onclick: move |_| {
+                    if let Some(s) = &s_save {
+                        a_save.export_key(s, true);
+                    }
+                },
+                {t!("serverDetail.saveKey")}
+            }
+            Button {
+                kind: ButtonKind::Ghost,
+                disabled: server.is_none() || exporting,
+                title: t!("ui.servers.detail.copyTitle"),
+                onclick: move |_| {
+                    if let Some(s) = &s_copy {
+                        a_copy.export_key(s, false);
+                    }
+                },
+                {t!("serverDetail.copyKey")}
+            }
         }
         span { class: "srv-detail-foot-gap" }
         Button { kind: ButtonKind::Ghost, onclick: move |_| detail.set(None), {t!("common.close")} }

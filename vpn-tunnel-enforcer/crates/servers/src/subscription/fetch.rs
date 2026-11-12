@@ -1,56 +1,87 @@
-//! The fetch plan (profiles §3.7, bounded as servers §6 / S-08 asks): route first; on a route that
-//! answers, the User-Agent variants with the device headers, then without; a route that fails at
-//! transport level is left at once; then a DoH-pinned direct retry; the strongest failure wins.
+//! The fetch plan of one URL (profiles §3.7, bounded as servers §6 / S-08 asks): route first; on a
+//! route that answers, the User-Agent variants with the device headers, then without; a route that
+//! fails at transport level is left at once; then a DoH-pinned direct retry; the strongest failure
+//! wins. Mihomo providers of an answer are fetched the same way, the answering route first.
+use std::collections::HashSet;
 use std::net::SocketAddr;
 
+use parking_lot::Mutex;
 use reqwest::header::{ACCEPT, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use vpnte_base::types::ClientDevice;
-use vpnte_core::net::{Route, builder_for, client_for, is_public_ip};
+use vpnte_base::{AppError, AppResult};
+use vpnte_core::net::{Route, builder_for, is_public_ip};
 use vpnte_core::resolve::{How, resolve_host};
+use vpnte_profiles::clash::HttpProvider;
 use vpnte_profiles::model::ParseReport;
-use vpnte_profiles::{device, text};
+use vpnte_profiles::text::{self, ProviderKeys};
+use vpnte_profiles::{clash, device};
 
+use super::headers::header_map;
 use super::http::{self, Abort, Answer, Hops};
-use super::{DOH_MAX_IPS, FetchError, SubscriptionFetcher, policy};
+use super::{DOH_MAX_IPS, FetchError, ProviderFailure, ProviderFetch, SubscriptionFetcher, policy};
 use crate::common::http_url;
 use crate::model::{BodyKind, FetchOutcome, NetFail};
-use crate::parse;
+use crate::parse::{self, MAX_PROFILES};
 
 /// One User-Agent, with or without the device headers.
-struct Variant {
+pub(super) struct Variant {
+    /// What the subscription's own origin gets.
     headers: HeaderMap,
+    /// What another origin gets after a redirect: the same client without the HWID, no device
+    /// headers, none of the user's headers (they may hold tokens; browsers, curl and reqwest drop
+    /// credentials on a cross-origin redirect the same way).
+    elsewhere: HeaderMap,
     /// Log label: the User-Agent family and `+hwid` (never the HWID itself, S-27).
     label: String,
     with_ids: bool,
 }
 
 /// The User-Agents of `device` with the HWID headers, then the same without them (servers §2.5:
-/// some panels answer an empty 200 without the HWID, others gate by client name).
-fn variants(device: ClientDevice, hwid: &str) -> Vec<Variant> {
-    let agents = device::user_agents(device, hwid);
-    let ids = device::device_headers(device, hwid);
-    let mut out = Vec::with_capacity(agents.len() * 2);
-    for with_ids in [true, false] {
-        for agent in &agents {
-            let mut headers = HeaderMap::new();
-            if let Ok(value) = HeaderValue::from_str(agent) {
-                headers.insert(USER_AGENT, value);
-            }
-            headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
-            if with_ids {
-                for (name, value) in &ids {
+/// some panels answer an empty 200 without the HWID, others gate by client name). `hwid: None`
+/// (the group does not send it) keeps only the variants without it. The user's own headers go on
+/// last and win; their `User-Agent` replaces the rotation.
+pub(super) fn variants(
+    device: ClientDevice,
+    hwid: Option<&str>,
+    custom: &[(String, String)],
+) -> Vec<Variant> {
+    let custom = header_map(custom);
+    let anonymous = device::user_agents(device, None);
+    let agents = match custom.get(USER_AGENT) {
+        Some(own) => vec![String::from_utf8_lossy(own.as_bytes()).into_owned()],
+        None => device::user_agents(device, hwid),
+    };
+    let ids = hwid.map(|h| device::device_headers(device, h));
+    let passes: &[bool] = if ids.is_some() {
+        &[true, false]
+    } else {
+        &[false]
+    };
+    let mut out = Vec::with_capacity(agents.len() * passes.len());
+    for &with_ids in passes {
+        for (at, agent) in agents.iter().enumerate() {
+            let mut headers = basic_headers(agent);
+            if let Some(ids) = ids.as_ref().filter(|_| with_ids) {
+                for (name, value) in ids {
                     let name = HeaderName::from_bytes(name.as_bytes());
                     if let (Ok(name), Ok(value)) = (name, HeaderValue::from_str(value)) {
                         headers.insert(name, value);
                     }
                 }
             }
+            for (name, value) in &custom {
+                headers.insert(name.clone(), value.clone());
+            }
+            // The rotation without the HWID has the same order; a user's own agent is replaced
+            // by the first (Happ's).
+            let plain = anonymous.get(at).or(anonymous.first());
             let family = agent.split('/').next().unwrap_or_default();
             let label = format!("{family}{}", if with_ids { "+hwid" } else { "" });
             out.push(Variant {
                 headers,
+                elsewhere: basic_headers(plain.map_or("", String::as_str)),
                 label,
                 with_ids,
             });
@@ -59,9 +90,35 @@ fn variants(device: ClientDevice, hwid: &str) -> Vec<Variant> {
     out
 }
 
+/// User-Agent, `Accept`, and a request for a fresh copy: panels behind CDNs answer stale lists
+/// from cache otherwise (Remnawave guides).
+fn basic_headers(agent: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = HeaderValue::from_str(agent) {
+        headers.insert(USER_AGENT, value);
+    }
+    headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
+    headers.insert("cache-control", HeaderValue::from_static("no-store"));
+    headers
+}
+
+/// What one URL brought back.
+pub(super) struct Got {
+    /// At least one profile, unless `providers` may still bring some.
+    pub report: ParseReport,
+    /// Controls and relocation hints (headers over body lines).
+    pub keys: ProviderKeys,
+    /// Where a leading run of 301 / 308 redirects pointed (the permanent new address).
+    pub moved: Option<Url>,
+    /// Mihomo `type: http` providers named by the body.
+    pub providers: Vec<HttpProvider>,
+    /// The plan route that answered (`None`: the DoH-pinned retry).
+    pub route: Option<Route>,
+}
+
 /// How one route ended.
 enum Step {
-    Done(Box<ParseReport>),
+    Done(Box<Got>),
     /// Go on with the next route.
     Next,
     /// The panel said enough (429, or 404 / 410 to every identified request): stop the plan.
@@ -85,7 +142,7 @@ impl Failures {
 }
 
 /// Evidence order of servers §6: a received but unusable answer beats a later network failure.
-fn rank(outcome: FetchOutcome) -> u8 {
+pub(super) fn rank(outcome: FetchOutcome) -> u8 {
     match outcome {
         FetchOutcome::EmptyList => 0,
         FetchOutcome::Unparseable(_) => 1,
@@ -97,13 +154,20 @@ fn rank(outcome: FetchOutcome) -> u8 {
     }
 }
 
-/// A body -> profiles with the header metadata merged in (headers win), or why it is unusable.
+/// A body evaluated: the report with the header metadata merged in (headers win), the provider
+/// keys, the Mihomo providers.
+struct Evaluated {
+    report: ParseReport,
+    keys: ProviderKeys,
+    providers: Vec<HttpProvider>,
+}
+
 /// Up to 16 MiB of nested base64, YAML and thousands of keys is CPU work: it runs on the blocking
 /// pool, not on a runtime worker.
 async fn evaluate(
     headers: Vec<(String, String)>,
     body: Vec<u8>,
-) -> Result<ParseReport, FetchOutcome> {
+) -> Result<Evaluated, FetchOutcome> {
     tokio::task::spawn_blocking(move || evaluate_now(&headers, &body))
         .await
         .unwrap_or_else(|err| {
@@ -112,39 +176,102 @@ async fn evaluate(
         })
 }
 
-fn evaluate_now(headers: &[(String, String)], body: &[u8]) -> Result<ParseReport, FetchOutcome> {
-    let mut report =
-        parse::parse_body(body).map_err(|_| FetchOutcome::Unparseable(BodyKind::Other))?;
-    if report.profiles.is_empty() {
-        let decoded = text::decode_body(body, text::MAX_BODY_BYTES).unwrap_or_default();
-        return Err(policy::classify_body(&decoded));
+fn evaluate_now(headers: &[(String, String)], body: &[u8]) -> Result<Evaluated, FetchOutcome> {
+    let parsed =
+        parse::parse_body_full(body).map_err(|_| FetchOutcome::Unparseable(BodyKind::Other))?;
+    let mut report = parsed.report;
+    let providers = clash::http_providers(&parsed.text);
+    if report.profiles.is_empty() && providers.is_empty() {
+        return Err(policy::classify_body(&parsed.text));
     }
+    let pairs = || headers.iter().map(|(k, v)| (k.as_str(), v.as_str()));
     let from_body = std::mem::take(&mut report.meta);
-    let pairs = headers.iter().map(|(k, v)| (k.as_str(), v.as_str()));
-    report.meta = text::header_meta(pairs, from_body);
-    Ok(report)
+    report.meta = text::header_meta(pairs(), from_body);
+    let keys = text::header_keys(pairs(), parsed.keys);
+    Ok(Evaluated {
+        report,
+        keys,
+        providers,
+    })
 }
 
 impl SubscriptionFetcher {
-    /// Downloads and parses the subscription at `url` as `device` would. `Ok` holds at least one
-    /// profile; its `meta` merges the userinfo headers over the body's `#key:` lines. A cancelled
-    /// token stops at once, and a token cancelled beforehand sends no request.
-    pub async fn fetch(
+    /// The client builder of `route` with the request timeout. Tests trust nothing but the
+    /// certificate of their loopback HTTPS panels.
+    fn builder(&self, route: &Route) -> AppResult<reqwest::ClientBuilder> {
+        let builder = builder_for(route, self.request_timeout)?;
+        #[cfg(test)]
+        let builder = builder.tls_certs_only([super::tests::test_root()]);
+        Ok(builder)
+    }
+
+    fn client(&self, route: &Route) -> AppResult<reqwest::Client> {
+        self.builder(route)?
+            .build()
+            .map_err(|e| AppError::internal(e.without_url()))
+    }
+}
+
+/// How the providers of an answer are fetched.
+pub(super) struct ProviderRoutes {
+    /// The route that answered first, then the rest of the plan: a blocked direct route costs one
+    /// timeout, not one per provider.
+    pub order: Vec<Route>,
+    pub doh: bool,
+    /// The answer came direct, so the system resolver may check provider names (behind a proxy
+    /// that would leak them to the local resolver, which the plan avoids).
+    pub local_dns: bool,
+}
+
+/// What every URL of one fetch shares: the fetcher (timeouts), the request variants, and which
+/// URLs the panel told to stop.
+pub(super) struct Ctx<'a> {
+    fetcher: &'a SubscriptionFetcher,
+    /// The subscription URL's and the fallback URL's requests: identity and the user's headers
+    /// as the group says.
+    pub own: Vec<Variant>,
+    /// Requests to anyone else (a Mihomo provider on another host): no identity, no user headers.
+    pub public: Vec<Variant>,
+    /// URLs whose plan stopped on purpose (429, or 404 / 410 to every identified request).
+    stopped: Mutex<Vec<Url>>,
+}
+
+impl<'a> Ctx<'a> {
+    /// The requests of one fetch as `device`, with the HWID when `hwid` is set and `headers`.
+    pub(super) fn new(
+        fetcher: &'a SubscriptionFetcher,
+        device: ClientDevice,
+        hwid: Option<&str>,
+        headers: &[(String, String)],
+    ) -> Self {
+        Self {
+            fetcher,
+            own: variants(device, hwid, headers),
+            public: variants(device, None, &[]),
+            stopped: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The panel at `url` said enough (429, or gone for every identified request): asking it
+    /// again from another address undoes that (S-08).
+    pub(super) fn stopped(&self, url: &Url) -> bool {
+        self.stopped.lock().contains(url)
+    }
+
+    /// `url` with `variants` over `routes` in order, then (when `doh`) one DoH-pinned direct
+    /// retry for a domain host. A cancelled token stops at once.
+    pub(super) async fn fetch_url(
         &self,
         url: &Url,
-        device: ClientDevice,
+        variants: &[Variant],
+        routes: &[Route],
+        doh: bool,
         cancel: &CancellationToken,
-    ) -> Result<ParseReport, FetchError> {
-        let url = http_url(url.as_str()).ok_or(FetchError::InvalidUrl)?;
-        if cancel.is_cancelled() {
-            return Err(FetchError::Cancelled);
-        }
+    ) -> Result<Got, FetchError> {
         let host = url.host_str().unwrap_or_default().to_owned();
-        let plan = self.plan();
-        let variants = variants(device, self.hwids.get(device));
         let mut failures = Failures::default();
-        for route in &plan.routes {
-            let client = match client_for(route, self.request_timeout) {
+        for route in routes {
+            let client = match self.fetcher.client(route) {
                 Ok(client) => client,
                 Err(err) => {
                     tracing::warn!(route = %route.label(), "subscription: no HTTP client: {err}");
@@ -155,22 +282,23 @@ impl SubscriptionFetcher {
                 local_dns: *route == Route::Direct,
                 origin_public: None,
             };
-            let ctx = Attempt {
+            let attempt = Attempt {
                 client: &client,
-                url: &url,
+                url,
                 host: &host,
-                route: route.label(),
+                label: route.label(),
+                route: Some(route),
                 hops,
             };
-            match ctx.run(&variants, &mut failures, cancel).await? {
-                Step::Done(report) => return Ok(*report),
-                Step::Stop => return Err(failures.into_error()),
+            match attempt.run(variants, &mut failures, cancel).await? {
+                Step::Done(got) => return Ok(*got),
+                Step::Stop => return Err(self.stop(url, failures)),
                 Step::Next => {}
             }
         }
-        if plan.doh
+        if doh
             && let Some(url::Host::Domain(name)) = url.host()
-            && !policy::is_local_name(&url)
+            && !policy::is_local_name(url)
         {
             let ips = tokio::select! {
                 biased;
@@ -181,28 +309,26 @@ impl SubscriptionFetcher {
                 Ok(ips) => {
                     let port = url.port_or_known_default().unwrap_or(443);
                     for ip in ips.into_iter().take(DOH_MAX_IPS) {
-                        let pinned =
-                            builder_for(&Route::Direct, self.request_timeout).and_then(|b| {
-                                b.resolve_to_addrs(name, &[SocketAddr::new(ip, port)])
-                                    .build()
-                                    .map_err(|e| vpnte_base::AppError::internal(e.without_url()))
-                            });
+                        let pinned = self.fetcher.builder(&Route::Direct).and_then(|b| {
+                            b.resolve_to_addrs(name, &[SocketAddr::new(ip, port)])
+                                .build()
+                                .map_err(|e| AppError::internal(e.without_url()))
+                        });
                         let Ok(client) = pinned else { continue };
-                        let hops = Hops {
-                            local_dns: true,
-                            origin_public: Some(true),
-                        };
-                        let route = format!("doh-pinned {ip}");
-                        let ctx = Attempt {
+                        let attempt = Attempt {
                             client: &client,
-                            url: &url,
+                            url,
                             host: &host,
-                            route,
-                            hops,
+                            label: format!("doh-pinned {ip}"),
+                            route: None,
+                            hops: Hops {
+                                local_dns: true,
+                                origin_public: Some(true),
+                            },
                         };
-                        match ctx.run(&variants, &mut failures, cancel).await? {
-                            Step::Done(report) => return Ok(*report),
-                            Step::Stop => return Err(failures.into_error()),
+                        match attempt.run(variants, &mut failures, cancel).await? {
+                            Step::Done(got) => return Ok(*got),
+                            Step::Stop => return Err(self.stop(url, failures)),
                             Step::Next => {}
                         }
                     }
@@ -216,6 +342,85 @@ impl SubscriptionFetcher {
         tracing::info!(%host, "subscription: every attempt failed: {err}");
         Err(err)
     }
+
+    fn stop(&self, url: &Url, failures: Failures) -> FetchError {
+        self.stopped.lock().push(url.clone());
+        failures.into_error()
+    }
+
+    /// Fetches each Mihomo provider over `order` and merges new keys into `report`, at most
+    /// [`MAX_PROFILES`] in all (a cut list is marked as such). A provider's own providers and
+    /// relocation hints are ignored. The subscription's identity and the user's headers go only
+    /// to a provider on the host of `own` (the subscription and fallback URLs): Mihomo itself
+    /// never sends a subscription's headers to its providers. A provider that a redirect from
+    /// `base` could not reach (`https` -> `http`, a public subscription into a private network)
+    /// is refused, not fetched.
+    pub(super) async fn providers(
+        &self,
+        refs: &[HttpProvider],
+        base: &Url,
+        own: &[&Url],
+        routes: &ProviderRoutes,
+        report: &mut ParseReport,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<ProviderFetch>, FetchError> {
+        let mut seen: HashSet<[u8; 16]> = report.profiles.iter().map(|p| p.identity()).collect();
+        let mut out = Vec::with_capacity(refs.len());
+        for provider in refs {
+            let Some(url) = http_url(&provider.url) else {
+                continue;
+            };
+            let allowed = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(FetchError::Cancelled),
+                allowed = http::vet_relocation(base, &url, routes.local_dns) => allowed,
+            };
+            if !allowed {
+                tracing::info!(provider = %provider.name, "subscription: provider URL refused");
+                out.push(ProviderFetch {
+                    name: provider.name.clone(),
+                    servers: 0,
+                    failed: Some(ProviderFailure::Refused),
+                });
+                continue;
+            }
+            let ours = own.iter().any(|o| o.host() == url.host());
+            let variants = if ours { &self.own } else { &self.public };
+            let fetched = self
+                .fetch_url(&url, variants, &routes.order, routes.doh, cancel)
+                .await;
+            let (servers, failed) = match fetched {
+                Ok(got) => (merge(report, &mut seen, got.report), None),
+                Err(FetchError::Failed(outcome)) => (0, Some(ProviderFailure::Fetch(outcome))),
+                Err(other) => return Err(other),
+            };
+            out.push(ProviderFetch {
+                name: provider.name.clone(),
+                servers,
+                failed,
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// Adds the keys of `fetched` that `report` lacks, up to [`MAX_PROFILES`] in all; the first key
+/// past the cap marks the list as cut, as the parser does. Returns how many were added.
+fn merge(report: &mut ParseReport, seen: &mut HashSet<[u8; 16]>, fetched: ParseReport) -> usize {
+    let before = report.profiles.len();
+    for profile in fetched.profiles {
+        if seen.contains(&profile.identity()) {
+            continue;
+        }
+        if report.profiles.len() == MAX_PROFILES {
+            report.skipped.push(parse::cut_marker(&profile));
+            break;
+        }
+        seen.insert(profile.identity());
+        report.profiles.push(profile);
+    }
+    report.skipped.extend(fetched.skipped);
+    report.profiles.len() - before
 }
 
 /// One route (or one pinned address) of the plan.
@@ -223,12 +428,14 @@ struct Attempt<'a> {
     client: &'a reqwest::Client,
     url: &'a Url,
     host: &'a str,
-    route: String,
+    /// Log label of the route (never credentials).
+    label: String,
+    route: Option<&'a Route>,
     hops: Hops,
 }
 
 impl Attempt<'_> {
-    /// The variants in order on this route until one yields profiles.
+    /// The variants in order on this route until one yields profiles (or providers).
     async fn run(
         &self,
         variants: &[Variant],
@@ -238,41 +445,54 @@ impl Attempt<'_> {
         let identified = variants.iter().filter(|v| v.with_ids).count();
         let mut gone = 0;
         for variant in variants {
-            let answer =
-                http::get(self.client, self.url, &variant.headers, self.hops, cancel).await;
+            let sends = http::Sends {
+                own: &variant.headers,
+                elsewhere: &variant.elsewhere,
+            };
+            let answer = http::get(self.client, self.url, sends, self.hops, cancel).await;
             let outcome = match answer {
                 Err(Abort::Cancelled) => return Err(FetchError::Cancelled),
-                Ok(Answer::Body { headers, body }) => {
+                Ok(Answer::Body {
+                    headers,
+                    body,
+                    moved,
+                }) => {
                     let parsed = tokio::select! {
                         biased;
                         () = cancel.cancelled() => return Err(FetchError::Cancelled),
                         parsed = evaluate(headers, body) => parsed,
                     };
                     match parsed {
-                        Ok(report) => {
-                            tracing::info!(host = %self.host, route = %self.route,
-                                ua = %variant.label, profiles = report.profiles.len(),
-                                "subscription fetched");
-                            return Ok(Step::Done(Box::new(report)));
+                        Ok(found) => {
+                            tracing::info!(host = %self.host, route = %self.label,
+                                ua = %variant.label, profiles = found.report.profiles.len(),
+                                providers = found.providers.len(), "subscription fetched");
+                            return Ok(Step::Done(Box::new(Got {
+                                report: found.report,
+                                keys: found.keys,
+                                moved,
+                                providers: found.providers,
+                                route: self.route.cloned(),
+                            })));
                         }
                         Err(outcome) => outcome,
                     }
                 }
                 Ok(Answer::Status(code)) => FetchOutcome::Http(code),
                 Ok(Answer::Unusable(reason)) => {
-                    tracing::info!(host = %self.host, route = %self.route, ua = %variant.label,
+                    tracing::info!(host = %self.host, route = %self.label, ua = %variant.label,
                         "subscription: {reason}");
                     FetchOutcome::Unparseable(BodyKind::Other)
                 }
                 Err(Abort::Transport(outcome)) => {
-                    tracing::info!(host = %self.host, route = %self.route, ua = %variant.label,
+                    tracing::info!(host = %self.host, route = %self.label, ua = %variant.label,
                         "subscription: route failed: {outcome:?}");
                     failures.note(outcome);
                     // A transport failure says nothing about User-Agents: next route (S-08).
                     return Ok(Step::Next);
                 }
             };
-            tracing::debug!(host = %self.host, route = %self.route, ua = %variant.label,
+            tracing::debug!(host = %self.host, route = %self.label, ua = %variant.label,
                 "subscription attempt: {outcome:?}");
             failures.note(outcome);
             match outcome {

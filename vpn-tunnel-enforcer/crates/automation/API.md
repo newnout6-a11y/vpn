@@ -26,8 +26,12 @@ four tasks and wires the lifecycle hooks below.
   `Browsers::rollback` (with journalled values) return `Err(Permission,
   "automation.hardening.needsAdmin")` before writing anything; the app shows them as unavailable
   (NOADMIN §0: no helper service in this phase). Location privacy writes only the user's consent
-  (NOADMIN §3) and needs no elevation; `Location::rollback` keeps HKLM policy records of the old
-  version for a retry when unelevated. Everything else (scheduler, rotation, AutoPilot, adaptive
+  (NOADMIN §3) and needs no elevation; unelevated, `Location::rollback` does not try the HKLM
+  policy records of the old version (kept for an elevated process, not reported as a failure) and
+  `is_applied` ignores them; an unelevated legacy import does not adopt them at all (one notice
+  `automation.hardening.legacy.locationPolicy` while one the old version set is still set, read
+  from its manifest's `hklmKeyExisted` / `hklmBackup` like the elevated branch: a policy already
+  there before it is nobody's leftover; unreadable backup → `locationLeftover`). Everything else (scheduler, rotation, AutoPilot, adaptive
   bypass incl. the Win32 network identity, Soft mode) runs as the signed-in user.
 
 ## Crate root
@@ -73,6 +77,9 @@ pub enum NoticeCategory { ScheduleTriggered, ProfileRotation, ConnectionError }
 
 pub trait Coordinator: Send + Sync + 'static {
     fn session(&self) -> Option<SessionInfo>;
+    fn left_by(&self) -> Option<Owner>;                // no session: the owner whose session left something
+                                                       // in the lane (a kept kill-switch block, a restore on
+                                                       // its way); `disconnect` by it or a higher owner releases
     fn busy(&self) -> bool;                            // a lifecycle operation is in flight
     fn connect(&self, owner: Owner, req: ConnectRequest) -> impl Future<Output = Result<ConnectOutcome, OpError>> + Send;
     fn disconnect(&self, owner: Owner) -> impl Future<Output = Result<(), OpError>> + Send;
@@ -89,7 +96,9 @@ The contract automation relies on (implement it exactly):
   natively; no half-started engine).
 - `connect`: an equal session → `AlreadyConnected` and a higher caller takes the session over; a
   different session is switched only if `owner >= session.owner`. `disconnect` without a session →
-  `Ok`; with a higher-owned session → `Conflict`.
+  releases what `left_by` names when `owner` is at least that owner (full stop), else `Ok` without
+  effects; with a higher-owned session → `Conflict`. A restore of the previous server (failed
+  `switch_profile`) never undoes a stop that came while it waited for the lane.
 - `switch_profile` (a session over the server list, either capture, kept): protected restart,
   egress + tunnel proof, selection committed only on success,
   owner kept; failure → previous profile restarted (`Failed { restored_previous: true }`); double
@@ -179,7 +188,9 @@ Behaviour the app and UI see:
   LocalProxy) → `LocalProxyHard { endpoint: None }`, (Proxy, LocalProxy) → `Soft { endpoint: None }`
   (a local-proxy schedule never uses the profile id). A run whose session is
   held by `Manual` / `Recovery` is left alone; a manual start / stop inside a run suppresses it (also
-  across restarts) until it ends. Only its own session is stopped at the run's end.
+  across restarts) until it ends. Only its own session is stopped at the run's end; with no session,
+  what a schedule-held session left in the lane (`Coordinator::left_by() == Schedule`: a kept
+  kill-switch block, a restore on its way) is released then, so nothing of the run outlives it.
 - Failed connects retry after 60 / 120 / 300 / 600 / 600 … s (`retry_at`); `Conflict` retries quietly.
 - Notices: `ScheduleTriggered` Info, title `automation.scheduler.title`, body `.started` / `.stopped`
   {name}; `ConnectionError` Warn on the first failure of a run, title `.connectFailed` /
@@ -287,8 +298,10 @@ impl<C: Coordinator, H: AdaptiveHost> Adaptive<C, H> {
     pub fn new(coord: Arc<C>, host: Arc<H>, settings: Arc<Store<Settings>>, store: Arc<Store<AdaptiveDoc>>) -> Self;
     pub fn with_verdicts(self, verdicts: Arc<Verdicts>) -> Self; // sibling fallback skips ruled-out servers, TCP first while UDP is cut
     pub fn status(&self) -> watch::Receiver<AdaptiveStatus>;
-    pub async fn begin(&self, kind: SessionKind, profile: Option<ProfileView>) -> AdaptiveMode; // start in this mode
-    pub fn start_failed(&self, reason: Option<Msg>);  // Some = start error shown; None = cancelled → Idle
+    pub async fn begin(&self, kind: SessionKind, profile: Option<ProfileView>) -> Begun; // start in Begun::mode
+    pub fn start_failed(&self, ticket: u64, reason: Option<Msg>);  // ends only that preparation: Some = start
+    // error shown, None = cancelled → Idle, unless another prepared start is still in flight
+pub struct Begun { pub mode: AdaptiveMode, pub ticket: u64 }  // overlapping starts keep their own context
     pub fn restart_mode(&self, running: AdaptiveMode) -> AdaptiveMode;  // settings / crash restarts
     pub fn retry(&self) -> bool;                       // UI "retry": re-verify with a fresh budget; false = no tunnel
     pub fn reset_learning(&self) -> AppResult<()>;     // «Сбросить запомненные настройки сети»
@@ -315,7 +328,8 @@ pub fn rows(adapters: &[Adapter], gateway_mac: impl Fn(u64, IpAddr) -> Option<St
 pub async fn read() -> Option<NetworkSnapshot>;       // Win32 on the blocking pool, ≤ 3 s, unelevated
 ```
 - Settings read: `adaptive_bypass` (off → `Baseline`, no learning, no escalation),
-  `adaptive_bypass_server_fallback` (siblings), `stealth_mode` (seeds the first mode).
+  `adaptive_bypass_server_fallback` (siblings), `stealth_mode` (seeds the first mode, only one the
+  start can run: a proxy capture never gets the TUN-only MTU mode).
 - Per tunnel start (sessions over a server, either capture, and local-proxy Hard; a local proxy
   behind the system proxy is never verified): 20 s settle, then 2 of 3
   probes; on failure TLS compatibility → MTU 1280 (TUN only; ≤ 2 mode restarts) → up to 2 siblings; what
@@ -349,19 +363,23 @@ pub trait ReactionHost: Send + Sync + 'static {       // the app (RPITIT)
         // uTLS fingerprint for this profile's engine starts in this app run; never stored; None clears
 }
 pub struct Verdicts;                                   // the network session's memory (reset on NetworkChanged)
-impl Verdicts { pub fn new() -> Self; pub fn udp_blocked(&self) -> bool; pub fn avoided(&self, id: &str) -> bool; }
+impl Verdicts { pub fn new() -> Self; pub fn udp_blocked(&self) -> bool; pub fn avoided(&self, id: &str) -> bool;
+    pub fn network_udp(&self, blocked: bool); }        // a check of the network itself: sets / lifts udp_blocked
 pub struct Reactions<C: Coordinator, H: ReactionHost>;
 impl<C: Coordinator, H: ReactionHost> Reactions<C, H> {
     pub fn new(coord: Arc<C>, host: Arc<H>, settings: Arc<Store<Settings>>) -> Self;
     pub fn verdicts(&self) -> Arc<Verdicts>;           // hand to Rotation / Adaptive ::with_verdicts
     pub fn report(&self, report: Report);              // after every finished check; never blocks (inbox 32)
+    pub async fn deliver(&self, report: Report) -> bool;  // waits for room (a feed replaying a burst); false: task gone
     pub async fn run(&self, cancel: CancellationToken); // the task (one runner)
 }
 ```
 - Every report teaches the network memory (until `LifecycleEvent::NetworkChanged`; a lagged event
   stream counts as one): ip-banned rules out every profile on that host, frozen every profile with
   the same transport towards the same site (IPv4 /24, IPv6 /48, else the host name), offline /
-  key-rejected / handshake-failed (not a hang) the profile; udp-blocked sets `udp_blocked`;
+  key-rejected / handshake-failed (not a hang) the profile; udp-blocked sets `udp_blocked` (the
+  app's network check, which measures the network and no server, sets or lifts it directly through
+  `Verdicts::network_udp`: no report, so no session switch);
   healthy lifts the profile and a ban of its host. Stalled, deferred, not-verified and a
   handshake hang (`retry-later`) change nothing.
 - Only a report about the profile of the running session **over the server list** (`Direct` or
@@ -597,7 +615,9 @@ impl Location {
     pub fn new(journal: Arc<Journal>, sys: Arc<dyn System>) -> Self;
     pub async fn apply(&self) -> AppResult<LocationStatus>;     // unelevated OK (+ E3 check)
     pub async fn rollback(&self) -> AppResult<RollbackReport>;  // HKLM policy records of the old version
-                                                                // need elevation; unelevated they stay for a retry
+                                                                // need elevation; unelevated: not tried, kept,
+                                                                // not in `failed`
+    // is_applied: the user's consent (plus the HKLM records only when elevated)
     pub async fn status(&self) -> AppResult<LocationStatus>;
     pub fn is_applied(&self) -> bool;
     // blocking twins: apply_blocking() -> AppResult<LocationStatus>, rollback_blocking() -> RollbackReport,
@@ -670,8 +690,8 @@ let pilot = AutoPilot::new(coord.clone(), env, settings.clone(), Some(scheduler.
 if let Some(result) = pilot.run(AutoPilotTrigger::AppLaunch).await { /* badge, log lines, one toast */ }
 
 // --- hooks inside the app's connect / restart / stop paths
-let mode = adaptive.begin(kind, profile_view).await;  // before a Direct / local-proxy Hard start
-// start error → adaptive.start_failed(Some(err.user_msg())); cancelled → adaptive.start_failed(None)
+let begun = adaptive.begin(kind, profile_view).await;  // before every start; start in begun.mode
+// start error → adaptive.start_failed(begun.ticket, Some(err.user_msg())); cancelled → (begun.ticket, None)
 // settings / crash restart → start with adaptive.restart_mode(session.mode)
 // Soft start / refresh → soft.apply(ep.addr, ep.kind, dev_targets).await?   (dev_targets: the app's setting)
 // stop, Hard / Direct start, shutdown, recovery (settings not Soft) → soft.rollback().await
@@ -683,21 +703,30 @@ let mode = adaptive.begin(kind, profile_view).await;  // before a Direct / local
 // shutdown: cancel.cancel() (tasks return; nothing is rolled back by them)
 ```
 
-How `vpnte-app` does it (w3-automation, `crates/app/src/svc_auto/`): `svc_tunnel::build` builds the
-`AppCoordinator` over the lifecycle (owner rules on top of the lane; every start — the user's too —
-goes through it, so `Adaptive::begin` picks the mode), `ServerHost` (`RotationProfiles`,
-`AdaptiveHost` with the probe through the session's own exit behind the handshake budget,
-`ReactionHost` with fingerprint overrides applied by the tunnel's profile source), `PilotEnv`, the
-runtime `Failover` (next live sibling of the same group, never one ruled out on this network), and
-`Automation` with the one journal; it returns them to the root, which hands the automation to the
-Schedule and Settings pages. A forwarder maps the lane's session events to `LifecycleEvent`s
-(a switch row emits only `Started`, a stop the coordinator asked for names its owner), engine
-faults, and `NetworkChanged` (winnet's watch plus a changed physical identity); location privacy
-follows the session events (applied on `Up` with the setting on, rolled back on `Ended`, at
-shutdown and in start-up recovery; a rollback failure is a Warn notice). The tasks start after the
-start-up recovery; the verdict feed reports stored verdicts ≤ 24 h old, each new `Servers`
-verdict, and live checks (handshake ok → healthy, auth → key-rejected, Hysteria2 UDP cut →
-udp-blocked).
+How `vpnte-app` does it (w3-automation, `crates/app/src/svc_auto/`; review fixes: fix-automation):
+`svc_tunnel::build` builds the `AppCoordinator` over the lifecycle (owner rules on top of the lane;
+every start — the user's too — goes through it, so `Adaptive::begin` picks the mode, and a failed
+start ends only its own `Begun::ticket`). A switch that lost the tunnel restores the previous
+server only after `Lifecycle::idle()` (the lane's own recovery stop holds the lane when the switch
+answers; bounded at 30 s). `ServerHost` implements `RotationProfiles`, `AdaptiveHost` (the probe
+through the session's own exit, never without a handshake-budget slot for a list server;
+`abandon` = a stop with `keep_protection`, so a kill switch that is on keeps blocking) and
+`ReactionHost` (fingerprint overrides applied by the tunnel's profile source); `PilotEnv`; the
+runtime `Failover` (next live sibling of the same group, never one ruled out on this network,
+never a server that crashed out of a session within the last 130 s; its round starts from the
+server that runs, which the lifecycle names after a failover). A forwarder maps the lane's
+session events to `LifecycleEvent`s: the row of a session another run replaces at once
+(`SessionEvent::Ended { continues: true }`: a switch that took, a failover) emits only that run's
+`Started`; any other end is `Stopped` (a switch that lost the tunnel too: a fault unless the
+coordinator asked); plus engine faults and `NetworkChanged` (winnet's watch plus a changed
+physical identity). Location privacy follows the session events under one lock shared with the
+Settings toggle, which decides from the lane's session (applied on `Up` with the setting on,
+rolled back on `Ended`, at shutdown and in start-up recovery; a rollback failure is a Warn
+notice). The tasks start after the start-up recovery; the verdict feed waits for room in the
+reactions' inbox (`Reactions::deliver`) and marks a verdict seen only once delivered; at start it
+replays only refused keys ≤ 24 h old (a stored verdict has no network: a ban, freeze or UDP cut
+of another network must not rule servers out); new `Servers` verdicts and live checks (handshake
+ok → healthy, auth → key-rejected, Hysteria2 UDP cut → udp-blocked) follow as they come.
 
 ## Events, snapshots and texts the app / UI handles
 - `Coordinator::notify(category, Notice)`: `ScheduleTriggered` (scheduler start / stop),

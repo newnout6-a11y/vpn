@@ -1293,3 +1293,41 @@ async fn slots_name_their_engine() {
     assert_eq!(carried.instance.engine, Some(EngineKind::Xray));
     assert_eq!(InstanceStatus::stopped(slot(3)).engine, None);
 }
+
+/// subs-a6: a borrowed slot (the app's own spare route for a subscription fetch) is never
+/// leased, so the borrower's stop cannot be refused by a lease; a stop clears the mark and the
+/// same slot started with "+" is leasable again.
+#[tokio::test]
+async fn borrowed_slots_are_never_leased() {
+    let r = rig(samples(1), slow_timing());
+    let borrowed = r
+        .manager
+        .borrow("profile-1".into())
+        .await
+        .unwrap()
+        .instance
+        .slot;
+    assert!(r.manager.check_health(borrowed).await.ready);
+    let err = r.manager.reserve(ask("buyer-worker-1")).await.unwrap_err();
+    assert_eq!(err.http_status(), 503);
+    let strict = ReserveRequest {
+        slot: Some(borrowed),
+        ..ask("buyer-worker-1")
+    };
+    assert!(r.manager.reserve(strict).await.is_err());
+    r.manager.stop(borrowed, StopReason::Api).await.unwrap();
+
+    let added = r
+        .manager
+        .add("profile-1".into())
+        .await
+        .unwrap()
+        .instance
+        .slot;
+    assert_eq!(added, borrowed);
+    assert!(r.manager.check_health(added).await.ready);
+    assert_eq!(
+        r.manager.reserve(ask("buyer-worker-1")).await.unwrap().slot,
+        added
+    );
+}

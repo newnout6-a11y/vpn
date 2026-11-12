@@ -86,10 +86,16 @@ impl ServerHost {
         })
     }
 
-    /// The profile of the server the running session uses.
-    fn running_profile(&self) -> Option<Profile> {
-        let id = self.session.borrow().as_ref()?.server_id()?.to_owned();
-        self.servers.get(&ProfileId::from(id))?.profile().ok()
+    /// What the running session dials: `Ok(None)` for a local proxy (its server is not ours
+    /// and has no budget here), `Err(())` for a server of the list that cannot be read.
+    fn running_server(&self) -> Result<Option<Profile>, ()> {
+        let Some(id) =
+            (self.session.borrow().as_ref()).and_then(|s| s.server_id().map(str::to_owned))
+        else {
+            return Ok(None);
+        };
+        let row = self.servers.get(&ProfileId::from(id)).ok_or(())?;
+        row.profile().map(Some).map_err(drop)
     }
 }
 
@@ -216,7 +222,8 @@ impl AdaptiveHost for ServerHost {
     /// new handshake with the server (RU discipline).
     async fn probe(&self, cancel: CancellationToken) -> Option<Duration> {
         let route = exit_route(&self.status.borrow())?;
-        if let Some(profile) = self.running_profile() {
+        // Every wave is a handshake with the running server: no slot, no probe.
+        if let Some(profile) = self.running_server().ok()? {
             BudgetGate.admit(&profile, &cancel).await.ok()?;
         }
         let started = Instant::now();
@@ -232,9 +239,13 @@ impl AdaptiveHost for ServerHost {
     }
 
     async fn abandon(&self) {
-        // A provisional sibling failed its window: the engine goes; with it the session ends
-        // as a fault (the lane's full stop, as after an exhausted restart budget).
-        let req = DisconnectReq::new(StopCause::Failed, Owner::AdaptiveRetry, Source::Lifecycle);
+        // A provisional sibling failed its window: the engine goes and the session ends as a
+        // fault, but a kill switch that is on keeps blocking (the user asked for exactly that
+        // when the VPN fails): never programs going direct behind an unproven server.
+        let req = DisconnectReq {
+            keep_protection: true,
+            ..DisconnectReq::new(StopCause::Failed, Owner::AdaptiveRetry, Source::Lifecycle)
+        };
         if let Err(e) = self.lane.disconnect(req).await {
             tracing::warn!(error = %e, "adaptive: abandoning the sibling failed");
         }

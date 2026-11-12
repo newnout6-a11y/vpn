@@ -4,12 +4,14 @@
 //! `parse_text` (crate `vpnte-servers`) strings these together. Every function here is pure and
 //! linear in its input, so a hostile body cannot freeze the process that owns the kill switch.
 mod body;
+mod controls;
 mod layers;
 mod meta;
 mod spans;
 mod uris;
 
 pub use body::{decode_body, prepare};
+pub use controls::{AutoconnectPick, Controls, ProviderKeys, Relocation, body_keys, header_keys};
 pub use layers::{decode_base64_layer, layers};
 pub use meta::{apply_meta, body_meta, header_meta};
 pub use spans::{blank_spans, json_spans};

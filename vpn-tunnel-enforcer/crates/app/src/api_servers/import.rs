@@ -9,28 +9,40 @@ use vpnte_profiles::caps::skip_msg;
 use vpnte_profiles::model::Skipped;
 use vpnte_profiles::uri;
 use vpnte_servers::model::{GroupId, GroupStatus, ServerGroup};
-use vpnte_servers::refresh::{AddOutcome, RefreshReport};
-use vpnte_servers::subscription::canonical_source;
-use vpnte_ui::servers::{AddTarget, ImportReport, RefreshOutcome, SkippedLine};
+use vpnte_servers::refresh::{AddOptions, AddOutcome, RefreshReport};
+use vpnte_servers::subscription::{
+    ProviderFailure, ProviderFetch, canonical_source, parse_headers,
+};
+use vpnte_ui::servers::{
+    AddTarget, FetchError, ImportReport, ProviderLine, RefreshOutcome, SkippedLine,
+    SubscriptionRequest,
+};
 
 use super::{Shared, project};
 
-/// Imports `input` into `target` (a subscription is fetched as `device`) and reports it.
+/// Imports `input` into `target` (a subscription is fetched as `device`; a new subscription group
+/// takes `request`) and reports it.
 pub(super) async fn add(
     shared: Arc<Shared>,
     input: String,
     target: AddTarget,
     device: ClientDevice,
+    request: SubscriptionRequest,
 ) -> AppResult<ImportReport> {
     let backend = &shared.backend;
     let into = match target {
         AddTarget::Auto => None,
         AddTarget::Group(id) => Some(GroupId::from(id)),
     };
+    let options = AddOptions {
+        send_hwid: request.send_hwid,
+        headers: parse_headers(&request.headers)?,
+        ..AddOptions::new(into, device)
+    };
     let cancel = backend.shutdown.child_token();
     let outcome = backend
         .servers
-        .add_from_input(&backend.refresh, &input, into, device, cancel)
+        .add_from_input_with(&backend.refresh, &input, options, cancel)
         .await?;
     shared.publish();
     let lang = shared.backend.lang();
@@ -53,7 +65,11 @@ pub(super) fn report(
     title: impl Fn(&GroupId) -> String,
 ) -> ImportReport {
     match outcome {
-        AddOutcome::Added { report, skipped } => ImportReport {
+        AddOutcome::Added {
+            report,
+            skipped,
+            providers,
+        } => ImportReport {
             group_name: title(&report.group),
             subscription,
             added: count(report.added.len()),
@@ -61,6 +77,7 @@ pub(super) fn report(
             unchanged: count(report.duplicates),
             // A subscription's skips come from the fetched body, which has no pasted lines.
             skipped: skipped_lines((!subscription).then_some(input), skipped),
+            providers: providers.iter().map(provider_line).collect(),
         },
         AddOutcome::Refreshed { group, report } => ImportReport {
             group_name: title(group),
@@ -69,7 +86,20 @@ pub(super) fn report(
             updated: count(report.updated + report.restored),
             unchanged: 0,
             skipped: Vec::new(),
+            providers: Vec::new(),
         },
+    }
+}
+
+/// A Mihomo provider of the import as the report names it.
+fn provider_line(p: &ProviderFetch) -> ProviderLine {
+    ProviderLine {
+        name: p.name.clone(),
+        servers: count(p.servers),
+        error: p.failed.and_then(|why| match why {
+            ProviderFailure::Fetch(outcome) => project::fetch_error(outcome),
+            ProviderFailure::Refused => Some(FetchError::Refused),
+        }),
     }
 }
 

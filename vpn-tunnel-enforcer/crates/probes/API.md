@@ -16,6 +16,7 @@ vpnte-probes.workspace = true
 | `geo` | `Geo`: country of an IP (3 providers, vote, 429 back-off, cache), exit / entry verification, ASN |
 | `key_health` | `check_profile[_verdict]` / `check_many[_verdicts]`: temporary probe engine, one budgeted transfer, verdict + `HealthReason` + classification |
 | `discipline` | RU discipline: per-endpoint handshake budget, 64 KiB transfer check (freeze), reach probe (ICMP + TCP), classifier |
+| `netmode` | network mode (RU audit item 9): DNS / TCP / TLS / bytes after 16 KB / UDP stages, classifier naming whitelist, UDP cut, DoH cut, server ban, freeze; DNS canary (item 11) |
 | `public_ip` | `IpReader`: sequential provider reads per family through a route (TUN-bound, loopback proxy, direct) |
 | `ip_monitor` | `IpMonitor`: evidence store + periodic task, baseline adoption, verdicts, auto-verify |
 | `leak` | adapter-bound leak self-test (curl.exe), `LeakWatch` scheduler, leak check card, direct-out audit |
@@ -132,7 +133,9 @@ pub const CONCURRENCY: usize /*5*/;  pub const BATCH_DEADLINE: Duration /*600 s*
 pub const PROXY_TAG /*"proxy-out"*/, DIRECT_TAG /*"probe-direct-out"*/, INBOUND_TAG /*"probe-in"*/: &str;
 pub enum HealthReason { NoOutbound, ConfigFailed, TlsFailed, AuthFailed, Timeout, HandshakeFailed,
     Hy2ConfigFailed, Hy2AuthFailed, Hy2UdpBlocked, Hy2TlsFailed, Hy2HandshakeFailed,
-    EngineSetting /* the engine setting refused the key: engine None, not-verified, no budget spent */ }
+    EngineSetting /* the engine setting refused the key: engine None, not-verified, no budget spent */,
+    ConnectionRefused /* `connection-refused`: the key's port answered with a TCP reset (from the
+        server or a filter on the way: no cause is claimed) */ }
                                                                      // kebab-case; msg()
 pub struct ProbeCtx { pub singbox_exe: PathBuf, pub xray_exe: PathBuf, pub engine_pref: EnginePref,
     pub device: ClientDevice, pub net: NetPath, pub dns_bootstrap_in: Option<SocketAddr> }
@@ -169,8 +172,10 @@ rejects the profile, exits or never serves its port is an offline verdict. `Heal
 `Servers::record_health(HealthUpdate { identity: row.identity() taken before the probe, .. })`, and
 the verdict with `Servers::record_verdicts`.
 `classify_failure` (also used by `live`): over lowercased `log + "\n" + err`, first match of config →
-auth → tls → timeout → handshake (auth before tls on purpose); Hysteria2 has its own ladder (empty
-text → `hy2-handshake-failed`). Probe engine log level stays `debug` (the patterns need it).
+auth → refused (`connection refused`, Go's Windows `actively refused`) → tls → timeout → handshake
+(auth and refused before the broad tls pattern on purpose); Hysteria2 has its own ladder (empty
+text → `hy2-handshake-failed`). A TCP key whose reach probe saw a reset gets `connection-refused`
+even when the engine only logged a timeout. Probe engine log level stays `debug` (the patterns need it).
 
 ## public_ip (`vpnte_probes::public_ip`)
 
@@ -404,6 +409,8 @@ pub struct Timed { pub status: TimedStatus, pub duration_ms: u64, pub error: Opt
 pub enum ProbeRoute { Os, Physical }                   // which way a stage's packets went (stored)
 pub enum ProbePath { Os, Physical { if_index: u32, luid: u64, src_v4: Option<Ipv4Addr>, src_v6: Option<Ipv6Addr> } }
 pub fn physical_uplink() -> windows::core::Result<(ProbePath, String /* alias */)>;   // blocking
+pub fn route_uplink(own_tun: Option<u64>) -> windows::core::Result<(ProbePath, String)>;  // blocking:
+    // the adapter with a default route once every tunnel (ours, foreign) is set aside (PPPoE counts)
 // target
 pub fn normalize_host_port(raw_host: &str, port: Option<u16>) -> NormalizedTarget;
 pub fn require_host(raw_host: &str) -> Result<(), AppError>;
@@ -462,7 +469,7 @@ pub async fn reach(host: &str, port: u16, udp_only: bool, net: &NetPath, cancel:
 pub struct Observations { pub udp_transport: bool, pub deferred: bool, pub transfer: Option<Transfer>,
     pub failure: Option<HealthReason>, pub real_certificate: bool, pub icmp: Seen, pub tcp: Seen }
 pub enum Verdict { Healthy, Frozen, Stalled, HandshakeFailed, KeyRejected, IpBanned, UdpBlocked, Offline,
-    Deferred, NotVerified }                                   // kebab-case; msg() -> probes.verdict.*
+    Deferred, NotVerified, Refused }                          // kebab-case; msg() -> probes.verdict.*
 pub enum Reaction { None, SwitchServer, TryAnotherFingerprint, PreferTcpTransport, RetryLater }  // msg() -> probes.reaction.*
 pub struct Classification { pub verdict: Verdict, pub reaction: Reaction }   // camelCase
 pub fn classify(o: &Observations) -> Classification;
@@ -476,7 +483,8 @@ stall = stalled / retry later, an HTTP error after data = not-verified) → the 
 fingerprint) → reach: UDP transport with a TLS failure inside QUIC = handshake-failed (the
 datagrams passed), with TCP answering (a reset counts) = udp-blocked / prefer TCP;
 TCP silent + ICMP answering = ip-banned / switch server (changing port or transport will not help);
-both silent or the port refused = offline; TCP connects + TLS failure = handshake-failed / try
+the port answered with a reset (or the engine saw one) = refused / switch server (the texts name
+only the reset, a firewall's REJECT looks the same); both silent = offline; TCP connects + TLS failure = handshake-failed / try
 another fingerprint, + a hang = handshake-failed / retry later (changing the fingerprint inside a
 freeze is reported to extend it); no evidence = not-verified. `Verdict` / `Reaction` share their
 wire names with `vpnte_servers::model::{ServerVerdict, ServerReaction}`: store them with
@@ -484,6 +492,63 @@ wire names with `vpnte_servers::model::{ServerVerdict, ServerReaction}`: store t
 Not wired by this crate (no dependency): the tunnel's post-connect egress probe takes its slot
 through the app's `HandshakeGate` over `budget().acquire`; the automation gets `Classification`
 as plain data from the app.
+
+## netmode (`vpnte_probes::netmode`)
+
+Names the network the PC is on (RU audit item 9). Stages in order: DNS (Windows resolver vs DoH by
+name to `cloudflare-dns.com` and Yandex), TCP and TLS to Russian whitelisted hosts (`ya.ru`,
+`vk.com`) and foreign ones (`github.com`, `www.debian.org`), 64 KiB from `speed.cloudflare.com`
+(the discipline transfer check, direct), a QUIC version-negotiation probe to UDP 443 of
+`cloudflare-quic.com` / `www.google.com` (RFC 9000 §6.1, no crypto), a STUN Binding Request to
+`stun.l.google.com:19302` / `stun.cloudflare.com:3478` (plain UDP on other ports), and ICMP + TCP
+to the user's servers (addresses: netmode never looks a server name up). Reference choice and
+reasons: `netmode::refs`.
+```rust
+pub enum Outcome { NotRun, Ok, Reset, Silent, Failed }       // one probe (Default NotRun)
+pub enum Mode { Whitelist, UdpBlocked, DohBlocked, ServerBlocked, Freeze }   // kebab-case; msg(), advice()
+pub enum Summary { Restricted, Open, Offline, NotVerified }
+pub enum StepKind { Dns, Tcp, Tls, Bytes, Udp, Servers };  pub enum StepStatus { Ok, Warn, Fail, NotRun }
+pub struct Step { pub kind: StepKind, pub status: StepStatus, pub detail: Msg }
+pub enum UdpEvidence { Dropped, Passes, Unclear }            // what the UDP probes prove about the network
+pub struct NetReport { pub at: UnixMs, pub via_session: bool, pub steps: Vec<Step>, pub modes: Vec<Mode>,
+    pub summary: Summary, pub udp: UdpEvidence }             // restrictive(), headline() -> Msg
+pub struct HostFacts { pub tcp: Outcome, pub tls: Outcome }
+pub struct Facts { system_dns, doh_foreign, doh_ru: Outcome, ru, foreign: Vec<HostFacts>,
+    transfer: Option<Transfer>, quic: Vec<Outcome>, stun: Vec<Outcome>, servers: Vec<Reach> }   // all pub
+pub trait NetProbe: Send + Sync { system_dns, doh, https, transfer, quic(host), stun(host, port),
+    reach(dst: SocketAddr) }                                 // RPITIT, fakes in tests
+pub struct LiveProbe;  impl LiveProbe {
+    pub async fn new(session: Option<Loopback>, own_tun: Option<u64>) -> AppResult<Self>;
+    pub fn via_session(&self) -> bool }                      // session = the TUN session's mixed-direct-in
+pub async fn gather<P: NetProbe>(probe: &P, servers: &[SocketAddr], cancel: &CancellationToken)
+    -> Result<Facts, AppError>;                              // Err only Cancelled
+pub fn classify(f: &Facts) -> (Vec<Mode>, Summary);  pub fn udp_evidence(f: &Facts) -> UdpEvidence;
+pub fn steps(f: &Facts, via_session: bool) -> Vec<Step>;     // TUN: DNS line keys `step.dnsTun.*`
+pub fn report(f: &Facts, via_session: bool) -> NetReport;
+// DNS canary (RU audit item 11)
+pub const CANARY_NAMES: [&str; 2];                           // ya.ru, www.google.com (dual stack everywhere)
+pub enum Canary { Captured, Escaped, NoAnswer, NotCaptured } // msg() -> probes.netmode.canary.*, verdict()
+pub trait CanaryLookup;  pub struct WireLookup;              // DnsQuery_W with DNS_QUERY_WIRE_ONLY
+pub async fn dns_canary<L: CanaryLookup>(lookup: &L) -> Canary;
+```
+Modes: whitelist = a Russian host passes TLS while no foreign host does; the others need foreign
+TLS to work: freeze = the transfer stalls inside `FREEZE_BAND`; server-blocked = a server answers
+ICMP while its TCP port is silent (a reset is no ban); udp-blocked = every QUIC probe AND every
+STUN probe that ran met silence (QUIC on 443 alone may be a QUIC / port filter: then the UDP line
+warns `udp.quicCut` and no mode holds); doh-blocked = foreign DoH by name fails while the Windows
+resolver answers. `UdpEvidence`: `Dropped` = udp-blocked; `Passes` = any QUIC or STUN answer;
+`Unclear` otherwise (also under a whitelist or offline). It is a fact about the network, for the
+reactions' network memory, never a verdict about a server. A TLS handshake counts as passed whatever the certificate's issuer (a Russian CA
+still proves the path). Paths: with `session` (our TUN up) TCP / TLS / DoH / the transfer go
+through the session's `mixed-direct-in`, UDP and ICMP from the uplink's address; without it every
+socket binds to the uplink, so another client's TUN does not carry the probes. The uplink is
+`live_stages::route_uplink(own_tun)`: the adapter that carries a default route once every tunnel
+(ours, another client's) is set aside (a PPPoE line counts). UDP and ICMP never leave from an
+unbound socket: without an uplink address of the destination's family they are not run. In a TUN
+session the system resolver is our tunnel's: the DNS line says so (`step.dnsTun.*`).
+The canary relies on every session's sing-box answering AAAA empty (`dns.strategy = ipv4_only`):
+AAAA records = another resolver answered. Callers report proxy capture as `NotCaptured` (no DNS is
+taken there) and never run the canary for it.
 
 ## live (`vpnte_probes::live`)
 
@@ -661,3 +726,10 @@ change notification from the store.
   130 s, same value as `FREEZE_BACKOFF`). Public-IP waves are not budgeted (no server identity in
   `IpReader`): they are sequential instead, one connection while the first provider answers. The
   live public-IP wave ran once by hand (2026-11-12, direct route, 0.19 s).
+- `netmode` (2026-11-12): the classifier, the stage lines, the runner order, the QUIC probe
+  (loopback fake server) and the canary states are tested with fakes. The live tests
+  (`live_network_mode`, `live_quic_probe_answers`, `live_canary_answers`, `#[ignore = "needs
+  internet"]`) were run once on the development machine and passed: Cloudflare and Google answered
+  the version-negotiation probe from the physical uplink (on the OS route both were silent: another
+  client's TUN drops QUIC there, which is why the probes bind to the uplink). Not verified: the
+  canary inside a real TUN session of ours (needs elevation).

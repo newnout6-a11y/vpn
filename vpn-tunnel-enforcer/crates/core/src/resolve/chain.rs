@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use parking_lot::Mutex;
 use tokio::time::{Instant, timeout_at};
+use vpnte_base::types::{UnixMs, now_ms};
 
 use super::wire::{self, NOERROR, NXDOMAIN, Record, Reply};
 use super::{ResolveError, filtered};
@@ -24,12 +26,29 @@ pub(super) enum Upstream {
     Tcp(SocketAddr),
 }
 
+impl Upstream {
+    /// Stable name for the resolver memory: the URL, or `tcp:<address>` (an index would point at
+    /// another upstream once the order changes).
+    pub(super) fn key(&self) -> String {
+        match self {
+            Upstream::Doh(url) => (*url).to_owned(),
+            Upstream::Tcp(addr) => format!("tcp:{addr}"),
+        }
+    }
+}
+
 const fn tcp53(a: u8, b: u8, c: u8, d: u8) -> Upstream {
     Upstream::Tcp(SocketAddr::V4(SocketAddrV4::new(
         Ipv4Addr::new(a, b, c, d),
         53,
     )))
 }
+
+/// DoH by name: Yandex stays reachable from RU networks (also on mobile whitelists).
+pub(super) const YANDEX_DOH: Upstream =
+    Upstream::Doh("https://common.dot.dns.yandex.net/dns-query");
+/// DoH by name, foreign: the one RU SNI filtering cuts first.
+pub(super) const CLOUDFLARE_DOH: Upstream = Upstream::Doh("https://cloudflare-dns.com/dns-query");
 
 /// Production order. IP-literal DoH first: it needs no DNS of its own and sends no SNI to filter
 /// on (each certificate carries the address; Quad9 answers over HTTP/2 only). DoH by name next:
@@ -41,8 +60,8 @@ pub(super) const UPSTREAMS: [Upstream; 9] = [
     Upstream::Doh("https://9.9.9.9/dns-query"),
     Upstream::Doh("https://8.8.8.8/dns-query"),
     Upstream::Doh("https://94.140.14.140/dns-query"),
-    Upstream::Doh("https://common.dot.dns.yandex.net/dns-query"),
-    Upstream::Doh("https://cloudflare-dns.com/dns-query"),
+    YANDEX_DOH,
+    CLOUDFLARE_DOH,
     tcp53(8, 8, 8, 8),
     tcp53(1, 1, 1, 1),
     tcp53(77, 88, 8, 8),
@@ -71,6 +90,9 @@ pub(super) struct Chain<T> {
     stagger: Duration,
     limit: Duration,
     last_good: AtomicUsize,
+    /// Which upstream last answered and when: the resolver memory credits the win to the
+    /// network that was current then, not to the one current when it looks.
+    won: Mutex<Option<(usize, UnixMs)>>,
 }
 
 impl<T: Transport> Chain<T> {
@@ -86,7 +108,23 @@ impl<T: Transport> Chain<T> {
             stagger,
             limit,
             last_good: AtomicUsize::new(0),
+            won: Mutex::new(None),
         }
+    }
+
+    /// The upstream that answered last and when (`None` before any answer).
+    pub(super) fn last_win(&self) -> Option<(Upstream, UnixMs)> {
+        let (index, at) = (*self.won.lock())?;
+        Some((*self.upstreams.get(index)?, at))
+    }
+
+    /// Asks the upstream named `key` first from now on (the winner remembered for this network);
+    /// an unknown key restores the production order.
+    pub(super) fn prefer(&self, key: Option<&str>) {
+        let index = key
+            .and_then(|k| self.upstreams.iter().position(|u| u.key() == k))
+            .unwrap_or(0);
+        self.last_good.store(index, Ordering::Relaxed);
     }
 
     /// The first usable answer in chain order: deduplicated, IPv4 first, no block-page address,
@@ -120,6 +158,7 @@ impl<T: Transport> Chain<T> {
                 Some((index, answer)) = running.next() => match answer {
                     Ok(addrs) => {
                         self.last_good.store(index, Ordering::Relaxed);
+                        *self.won.lock() = Some((index, now_ms()));
                         return Ok(addrs);
                     }
                     Err(miss) => {

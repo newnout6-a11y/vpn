@@ -63,6 +63,8 @@ pub struct World {
     /// `wait_gone` takes 200 ms (to overlap a second command with a running stop).
     pub slow_gone: AtomicBool,
     pub auto_restart: AtomicBool,
+    /// The core records no outbound fault: its crashes say nothing about the server.
+    pub no_fault: AtomicBool,
     pub xray_stop_fail: AtomicBool,
     pub guard: Mutex<KillSwitchLevel>,
     pub avoid: Mutex<Vec<Vec<String>>>,
@@ -96,6 +98,7 @@ impl World {
             gone: AtomicBool::new(true),
             slow_gone: AtomicBool::new(false),
             auto_restart: AtomicBool::new(true),
+            no_fault: AtomicBool::new(false),
             xray_stop_fail: AtomicBool::new(false),
             guard: Mutex::new(KillSwitchLevel::Standard),
             avoid: Mutex::new(Vec::new()),
@@ -225,7 +228,8 @@ impl CoreProc for FakeCore {
         self.exit.subscribe()
     }
     fn recent_fault(&self) -> Option<OutboundFault> {
-        Some(OutboundFault::UpstreamUnreachable)
+        let none = self.world.no_fault.load(Ordering::SeqCst);
+        (!none).then_some(OutboundFault::UpstreamUnreachable)
     }
 }
 

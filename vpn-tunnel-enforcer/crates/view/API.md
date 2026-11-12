@@ -186,6 +186,15 @@ impl TrafficHistory {
 }
 ```
 
+## `netmode` — the start page's network strip (RU audit item 9)
+```rust
+pub enum NetMode { Whitelist, Freeze, ServerBlocked, UdpBlocked, DohBlocked }   // Ord: most limiting first
+pub struct NetBanner { pub mode: NetMode, pub title: Msg, pub body: Msg }        // view.netmode.<mode>.{title,body}
+pub fn net_banner(modes: &[NetMode]) -> Option<NetBanner>;                        // None: nothing limits
+```
+The app supplies the modes of the latest network check of the current network (`vpnte_probes::netmode::
+Mode`, same names) and drops them when the network changes.
+
 ## `fmt` — text helpers
 ```rust
 pub fn to_fixed(v: f64, digits: usize) -> String;   // JS toFixed parity (ties away from zero)

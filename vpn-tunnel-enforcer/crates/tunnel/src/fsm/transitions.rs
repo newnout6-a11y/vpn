@@ -221,6 +221,21 @@ impl Fsm {
         Ok(())
     }
 
+    /// The runtime's crash failover named the sibling run `generation` (began, not finished).
+    /// Outside an operation that run's finish may confirm the tunnel whatever the crashed
+    /// server's recovery left behind (`Error` after failed restarts, `Unknown`): it is a fresh
+    /// start of its own, judged on its own evidence like any native start.
+    pub fn native_failover(&mut self, generation: u64, e: Option<Evidence>) -> Result<(), Invalid> {
+        if generation != self.native_gen || self.running_op().is_some() {
+            return Err(Invalid);
+        }
+        self.upstream = None;
+        self.expected_native_gen = Some(generation);
+        self.reconnect_eligible = true;
+        self.commit(e, |s| s.transition = Some(Transition::Reconnecting));
+        Ok(())
+    }
+
     /// An in-place upstream switch `generation` (strictly increasing, independent of native
     /// generations) began on an idle, connected, proven engine run (Hard or Soft).
     pub fn upstream_began(&mut self, generation: u64, e: Option<Evidence>) -> Result<(), Invalid> {

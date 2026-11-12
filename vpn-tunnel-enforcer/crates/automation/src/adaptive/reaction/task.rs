@@ -63,6 +63,12 @@ impl<C: Coordinator, H: ReactionHost> Reactions<C, H> {
         }
     }
 
+    /// Hands over a finished check, waiting for room in the inbox: for a feed that replays a
+    /// burst (a group check records dozens of verdicts at once). `false`: the task is gone.
+    pub async fn deliver(&self, report: Report) -> bool {
+        self.tx.send(report).await.is_ok()
+    }
+
     /// The task: learns from every report and reacts to those about the running server, until
     /// `cancel` fires. A second runner returns at once.
     pub async fn run(&self, cancel: CancellationToken) {

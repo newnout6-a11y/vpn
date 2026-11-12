@@ -191,6 +191,9 @@ impl ProxyOps for Fake {
     async fn add(&self, _profile_id: String) -> Result<ProxyStatus, ProxyError> {
         unreachable!("the control API has no add endpoint")
     }
+    async fn borrow(&self, _profile_id: String) -> Result<ProxyStatus, ProxyError> {
+        unreachable!("the control API never borrows")
+    }
     async fn start_profiles(&self, profile_ids: Vec<String>) -> BatchStartResult {
         self.record(Call::StartProfiles(profile_ids.clone()));
         BatchStartResult {

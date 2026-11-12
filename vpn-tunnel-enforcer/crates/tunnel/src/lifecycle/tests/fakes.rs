@@ -12,8 +12,8 @@ use vpnte_base::types::{Engine, Notice, OutboundFault, ProxyKind, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 
 use crate::api::{
-    CaptureKind, ExitInfo, ModeKind, OwnerCheck, ProxyEndpoint, RestartOptions, Runtime,
-    SessionEndpoints, StartReceipt, StartRequest, StopOptions, StopReceipt, SwitchReceipt,
+    CaptureKind, ExitInfo, FailoverCause, ModeKind, OwnerCheck, ProxyEndpoint, RestartOptions,
+    Runtime, SessionEndpoints, StartReceipt, StartRequest, StopOptions, StopReceipt, SwitchReceipt,
     TunError, TunStatus, TunStatusKind, TunnelEvent, VpnProfile,
 };
 use crate::test_support::TempDir;
@@ -40,6 +40,8 @@ impl Gate {
 pub struct RtScript {
     pub starts: u32,
     pub stops: u32,
+    /// Stops that kept the protection (`preserve_protection`).
+    pub preserved_stops: u32,
     pub switches: u32,
     pub restarts: u32,
     pub requests: Vec<StartRequest>,
@@ -57,6 +59,9 @@ pub struct RtScript {
     pub in_place: Option<SwitchReceipt>,
     /// The next protected / adaptive restart fails (ending in a full stop).
     pub restart_error: bool,
+    /// The next restart of the last start (settings, adaptive) waits for this gate first, as
+    /// the runtime's command waits behind a crash failover in flight.
+    pub restart_gate: Option<Gate>,
     /// The next restart is refused before anything is touched.
     pub restart_refusal: Option<TunError>,
     pub fault: Option<OutboundFault>,
@@ -207,6 +212,61 @@ impl FakeRuntime {
         generation
     }
 
+    /// A crash restart's start failed inside its bring-up, as the runtime reports it: the held
+    /// plan is announced (`Adapting`), then the failed finish; the next attempt is announced.
+    pub fn fail_restart(&self, next_attempt: u8) {
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.emit(TunnelEvent::StartBegan { generation });
+        self.emit(TunnelEvent::Status(TunStatusKind::Adapting));
+        self.emit(TunnelEvent::StartFinished {
+            generation,
+            ok: false,
+        });
+        if next_attempt <= 3 {
+            self.emit(TunnelEvent::Status(TunStatusKind::Restarting {
+                attempt: next_attempt,
+                max: 3,
+            }));
+        }
+    }
+
+    /// The runtime's crash failover started sibling `id` (`name`), as the runtime reports it:
+    /// the run's `Running`, the sibling named before the finish, the status after the start.
+    /// The sibling's start becomes the runtime's last start (a later restart restarts it).
+    pub fn fail_over_to(&self, id: &str, name: &str, cause: FailoverCause) -> u64 {
+        {
+            let mut s = self.script.lock();
+            if let Some(mut next) = s.requests.last().cloned() {
+                if let crate::api::Mode::DirectVpn { profile } = &mut next.mode {
+                    profile.id = id.to_owned();
+                    Arc::make_mut(&mut profile.profile).name = name.to_owned();
+                }
+                next.origin = crate::api::Origin::Recovery;
+                s.requests.push(next);
+            }
+        }
+        let generation = self.generation.load(Ordering::SeqCst) + 1;
+        self.emit(TunnelEvent::StartBegan { generation });
+        self.bring_up(None, true);
+        self.status
+            .send_modify(|s| s.profile_name = Some(name.to_owned()));
+        self.emit(TunnelEvent::Status(TunStatusKind::Running));
+        self.emit(TunnelEvent::FailedOver {
+            generation,
+            profile_id: id.to_owned(),
+            cause,
+        });
+        self.emit(TunnelEvent::StartFinished {
+            generation,
+            ok: true,
+        });
+        let name = name.to_owned();
+        self.emit(TunnelEvent::Status(TunStatusKind::PostTrialFailover {
+            name,
+        }));
+        generation
+    }
+
     /// The runtime restarts a crashed engine by itself (attempt 1 of 3).
     pub fn auto_restart(&self) -> u64 {
         self.emit(TunnelEvent::Status(TunStatusKind::Restarting {
@@ -222,6 +282,13 @@ impl FakeRuntime {
             ok: true,
         });
         generation
+    }
+
+    async fn hold_restart(&self) {
+        let gate = self.script.lock().restart_gate.take();
+        if let Some(gate) = gate {
+            gate.wait().await;
+        }
     }
 
     fn receipt(&self, generation: u64) -> StartReceipt {
@@ -290,10 +357,11 @@ impl Runtime for FakeRuntime {
         Ok(self.receipt(generation))
     }
 
-    async fn stop(&self, _opts: StopOptions) -> StopReceipt {
+    async fn stop(&self, opts: StopOptions) -> StopReceipt {
         let (unproven, gate) = {
             let mut s = self.script.lock();
             s.stops += 1;
+            s.preserved_stops += u32::from(opts.preserve_protection);
             (std::mem::take(&mut s.stop_unproven), s.stop_gate.take())
         };
         if let Some(gate) = gate {
@@ -310,6 +378,23 @@ impl Runtime for FakeRuntime {
             };
         }
         let generation = self.generation.load(Ordering::SeqCst);
+        if opts.preserve_protection {
+            // Engines gone, the block kept (the runtime's `Adapting`).
+            self.emit(TunnelEvent::Status(TunStatusKind::Adapting));
+            self.bring_down();
+            let receipt = StopReceipt {
+                protection_released: None,
+                baseline_restored: None,
+                adapter_gone: false,
+                ..Self::full_stop_receipt()
+            };
+            self.emit(TunnelEvent::StopFinished {
+                generation,
+                preserved: true,
+                receipt: receipt.clone(),
+            });
+            return receipt;
+        }
         self.emit(TunnelEvent::Status(TunStatusKind::Stopping));
         self.bring_down();
         self.emit(TunnelEvent::Status(TunStatusKind::Stopped));
@@ -361,6 +446,7 @@ impl Runtime for FakeRuntime {
     }
 
     async fn restart_with_last(&self, reason: String) -> Result<Option<StartReceipt>, TunError> {
+        self.hold_restart().await;
         if !self.running() {
             return Ok(None);
         }
@@ -380,6 +466,7 @@ impl Runtime for FakeRuntime {
         reason: String,
         profile: Option<VpnProfile>,
     ) -> Result<StartReceipt, TunError> {
+        self.hold_restart().await;
         let mut next =
             self.script.lock().requests.last().cloned().ok_or_else(|| {
                 TunError::new(ErrorKind::Conflict, Msg::new("test.nothingRunning"))

@@ -157,6 +157,71 @@ fn location_exports_contribute_only_our_three_values() {
     assert_eq!(fake.write_count(), 3);
 }
 
+/// b1: an unelevated import adopts the user's consent only: the machine policies could never
+/// be rolled back from here (a failure and a notice at every start, stop and toggle). While one
+/// is still set the user hears of it once, from the import.
+#[test]
+fn unelevated_import_leaves_the_machine_policies_with_one_notice() {
+    let tmp = TempDir::new("hardening");
+    let backups = tmp.0.join("privacy-backups");
+    let manifest = location_manifest(&backups, None, None, (false, false));
+    let fake = Arc::new(Fake {
+        unelevated: true,
+        ..location_applied()
+    });
+    let journal = Arc::new(Journal::open(&tmp.0, admit));
+    let report = import(&journal, &tmp.0, &*fake, &sources(None, Some(manifest)));
+    assert_eq!(report.adopted, 1);
+    assert_eq!(
+        report.notices,
+        [Msg::new("automation.hardening.legacy.locationPolicy")]
+    );
+    let [consent, ..] = location_targets();
+    let records = journal.records(Feature::LocationPrivacy);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].target, consent);
+    let again = import(&journal, &tmp.0, &*fake, &sources(None, None));
+    assert!(again.notices.is_empty(), "told once");
+}
+
+/// fixauto-b2: unelevated, the machine-policy notice names only what the old app set, read from
+/// its manifest as the elevated branch reads it: policies already there before it (an
+/// administrator's) are nobody's leftover; one it added is; an unreadable backup gets the
+/// hedged notice.
+#[test]
+fn unelevated_policy_notice_only_for_what_the_old_app_set() {
+    let dword = |name: &str| format!("\"{name}\"=dword:00000001\r\n");
+    let both = format!(
+        "{}{}",
+        dword("DisableLocation"),
+        dword("DisableWindowsLocationProvider")
+    );
+    let policy = Msg::new("automation.hardening.legacy.locationPolicy");
+    let leftover = Msg::new("automation.hardening.legacy.locationLeftover");
+    for (before, want) in [
+        (Some(both), Vec::new()),
+        (Some(dword("DisableLocation")), vec![policy]),
+        (None, vec![leftover]),
+    ] {
+        let tmp = TempDir::new("hardening");
+        let backups = tmp.0.join("privacy-backups");
+        let export = backups.join("hklm.reg");
+        if let Some(values) = &before {
+            write_reg(&export, &format!("[{HKLM_KEY}]\r\n{values}"));
+        }
+        let hklm = before.is_some().then_some(export.as_path());
+        let manifest = location_manifest(&backups, None, hklm, (false, true));
+        let fake = Fake {
+            unelevated: true,
+            ..location_applied()
+        };
+        let journal = Arc::new(Journal::open(&tmp.0, admit));
+        let report = import(&journal, &tmp.0, &fake, &sources(None, Some(manifest)));
+        assert_eq!(report.notices, want, "{before:?}");
+        assert_eq!(report.adopted, 1, "the consent only");
+    }
+}
+
 /// Spec §7.6 security: an export outside the backup folder is ignored (that value becomes a
 /// leftover notice); a key that did not exist gives `Absent` baselines without any export; a
 /// value that no longer holds ours is not adopted.

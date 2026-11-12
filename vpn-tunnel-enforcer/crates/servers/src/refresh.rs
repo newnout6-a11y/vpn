@@ -13,20 +13,18 @@ use url::Url;
 use vpnte_base::types::{ClientDevice, Owner, UnixMs, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::ops::{FeatureKind, OperationRegistry, RunOpts, Source};
-use vpnte_profiles::model::{ParseReport, Skipped};
-use vpnte_profiles::{deeplink, text};
+use vpnte_profiles::model::Skipped;
 
 use crate::legacy::LegacyDirect;
-use crate::model::{
-    FetchOutcome, FetchState, GroupId, ServerGroup, ServersDoc, clean_group_name, host_name,
-};
-use crate::parse;
-use crate::store::{
-    AddReport, AddTarget, NewSubscription, SelectBy, Servers, ServersEvent, group_not_found,
-};
-use crate::subscription::{FetchError, SubscriptionFetcher, canonical_source, is_complete};
+use crate::model::{FetchOutcome, GroupId, ServerGroup, ServersDoc};
+use crate::store::{AddReport, SelectBy, Servers, ServersEvent};
+use crate::subscription::{FetchError, Fetched, ProviderFetch, SubscriptionFetcher};
 
+mod add;
+mod apply;
 mod reconcile;
+#[cfg(test)]
+mod relocation_tests;
 #[cfg(test)]
 mod tests;
 
@@ -120,6 +118,8 @@ pub enum AddOutcome {
         report: AddReport,
         /// Entries that looked like keys but were not imported (redacted excerpts).
         skipped: Vec<Skipped>,
+        /// Mihomo providers the subscription named, fetched and merged (for the import report).
+        providers: Vec<ProviderFetch>,
     },
     /// The subscription already existed for this device: it was refreshed instead (servers §3.1).
     Refreshed {
@@ -128,98 +128,35 @@ pub enum AddOutcome {
     },
 }
 
+/// Where user input goes and how a new subscription is fetched.
+#[derive(Debug, Clone)]
+pub struct AddOptions {
+    /// A chosen group (`None`: the manual group, or a new subscription group).
+    pub into: Option<GroupId>,
+    pub device: ClientDevice,
+    /// A new subscription group sends the HWID (off by default; a known group keeps its own).
+    pub send_hwid: bool,
+    /// Extra request headers of a new subscription group (checked).
+    pub headers: Vec<(String, String)>,
+}
+
+impl AddOptions {
+    /// `into` as `device`, without the HWID or extra headers.
+    pub fn new(into: Option<GroupId>, device: ClientDevice) -> Self {
+        Self {
+            into,
+            device,
+            send_hwid: false,
+            headers: Vec::new(),
+        }
+    }
+}
+
 /// Result of one background sweep; cancelled and pre-empted refreshes count as neither.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SweepReport {
     pub refreshed: usize,
     pub failed: usize,
-}
-
-// --- bookkeeping on the list ---
-impl Servers {
-    /// The subscription a refresh of `id` fetches.
-    fn refresh_source(&self, id: &GroupId) -> AppResult<(Url, ClientDevice)> {
-        self.read(|doc| {
-            let group = doc.group(id).ok_or_else(group_not_found)?;
-            if group.is_manual() {
-                return Err(AppError::validation(Msg::new(
-                    "servers.group.manualNoRefresh",
-                )));
-            }
-            source_of(group)
-                .ok_or_else(|| AppError::validation(Msg::new("servers.refresh.unusableUrl")))
-        })
-    }
-
-    /// Stamps the attempt before any request, so a blocked or cancelled request does not make the
-    /// sweep hammer the panel every minute (old `serverGroups.ts`).
-    fn mark_attempt(&self, id: &GroupId, key: &(Url, ClientDevice), now: UnixMs) -> AppResult<()> {
-        self.update(|doc| {
-            same_group(doc, id, key)?.fetch.last_attempt_at = Some(now);
-            Ok(())
-        })
-    }
-
-    /// Records a failed fetch; rows and the selection stay as they are.
-    fn record_failure(
-        &self,
-        id: &GroupId,
-        key: &(Url, ClientDevice),
-        outcome: FetchOutcome,
-        now: UnixMs,
-    ) -> AppResult<()> {
-        self.update(|doc| {
-            let fetch = &mut same_group(doc, id, key)?.fetch;
-            fetch.last_attempt_at = Some(now);
-            fetch.last_outcome = Some(outcome);
-            Ok(())
-        })
-    }
-
-    /// Commits a fetched list: reconcile, provider metadata, fetch bookkeeping, and the provider
-    /// title as the name while the name is still an automatic one.
-    fn apply_refresh(
-        &self,
-        id: &GroupId,
-        key: &(Url, ClientDevice),
-        report: ParseReport,
-        now: UnixMs,
-    ) -> AppResult<RefreshReport> {
-        let complete = is_complete(&report);
-        let count = report.profiles.len();
-        let ParseReport { profiles, meta, .. } = report;
-        self.update(|doc| {
-            let before = same_group(doc, id, key)?.clone();
-            let out = reconcile(&before, &mut doc.profiles, profiles, complete, now)?;
-            let group = same_group(doc, id, key)?;
-            if let Some(title) = meta.title.as_deref().map(clean_group_name)
-                && !title.is_empty()
-                && is_automatic_name(&before, &meta)
-            {
-                group.name = title;
-            }
-            group.info = meta;
-            group.fetch = FetchState::success(now, count, !complete);
-            Ok(out)
-        })
-    }
-}
-
-/// True while the group's name is one the app derived (empty, the host of the URL or of the
-/// provider's web page, or the provider's previous title): only then does a new provider title
-/// rename it, so a user's own name survives every refresh.
-fn is_automatic_name(group: &ServerGroup, fresh: &vpnte_profiles::model::SubscriptionMeta) -> bool {
-    let name = group.name.as_str();
-    if name.is_empty() {
-        return true;
-    }
-    let derived = [
-        group.url().as_ref().map(Url::as_str).and_then(host_name),
-        group.info.web_page_url.as_deref().and_then(host_name),
-        fresh.web_page_url.as_deref().and_then(host_name),
-        group.info.title.as_deref().map(clean_group_name),
-    ];
-    derived.iter().flatten().any(|d| d == name)
 }
 
 // --- orchestration ---
@@ -235,7 +172,7 @@ impl Servers {
         owner: Owner,
         cancel: CancellationToken,
     ) -> AppResult<RefreshReport> {
-        let key = self.refresh_source(id)?;
+        let (key, request) = self.refresh_request(id)?;
         let started = Arc::new(AtomicBool::new(false));
         let source = if owner == Owner::Schedule {
             Source::Runtime
@@ -258,14 +195,14 @@ impl Servers {
                 servers.mark_attempt(&gid, &gkey, now_ms())?;
                 flag.store(true, Ordering::SeqCst);
                 servers.emit(ServersEvent::RefreshStarted(gid.clone()));
-                match fetcher.fetch(&gkey.0, gkey.1, lease.token()).await {
-                    Ok(report) => {
-                        lease.commit(|| servers.apply_refresh(&gid, &gkey, report, now_ms()))
+                match fetcher.fetch_request(&request, lease.token()).await {
+                    Ok(fetched) => {
+                        lease.commit(|| servers.apply_refresh(&gid, &gkey, fetched, now_ms()))
                     }
                     Err(FetchError::Failed(outcome)) => {
                         lease.assert_active()?;
                         servers.record_failure(&gid, &gkey, outcome, now_ms())?;
-                        Err(FetchError::Failed(outcome).into())
+                        Err(FetchError::Failed(outcome).for_group(request.send_hwid))
                     }
                     Err(err) => Err(lease.assert_active().err().unwrap_or_else(|| err.into())),
                 }
@@ -288,93 +225,6 @@ impl Servers {
         result
     }
 
-    /// Adds what the user pasted (servers §3.1). A subscription URL (plain, or carried by a
-    /// `happ://` / `mantaray://` link) is fetched as `device`: already known for that device ->
-    /// that group is refreshed; `into` a chosen group -> its keys are appended there; else a new
-    /// subscription group. Any other text is parsed for keys, added to `into` or the manual group.
-    pub async fn add_from_input(
-        self: &Arc<Self>,
-        ctx: &RefreshCtx,
-        input: &str,
-        into: Option<GroupId>,
-        device: ClientDevice,
-        cancel: CancellationToken,
-    ) -> AppResult<AddOutcome> {
-        let input = input.trim();
-        if let Err(err) = deeplink::unwrap_deeplink(input) {
-            return Err(AppError::validation(err.msg()));
-        }
-        let Some(url) = canonical_source(input) else {
-            // Up to 1 MiB of text is CPU work: the blocking pool, as for a fetched body.
-            let pasted = input.to_owned();
-            let report = tokio::task::spawn_blocking(move || parse::parse_text(&pasted))
-                .await
-                .map_err(AppError::internal)?
-                .map_err(|_| parse::too_large(text::MAX_INPUT_BYTES))?;
-            if report.profiles.is_empty() {
-                return Err(parse::no_profiles(&report));
-            }
-            let target = AddTarget::Keys {
-                group: into,
-                device,
-            };
-            let added = self.add(report.profiles, target)?;
-            return Ok(AddOutcome::Added {
-                report: added,
-                skipped: report.skipped,
-            });
-        };
-        if into.is_none()
-            && let Some(group) = self.find_subscription(&url, device)
-        {
-            let report = self
-                .refresh_group(ctx, &group, Owner::Manual, cancel)
-                .await?;
-            return Ok(AddOutcome::Refreshed { group, report });
-        }
-        let opts = RunOpts {
-            source: Source::Ui,
-            resource: Some(import_resource(&url, device, into.as_ref()).into()),
-            cancel: Some(cancel),
-            timeout: Some(ctx.deadline),
-            ..RunOpts::default()
-        };
-        let (servers, fetcher) = (self.clone(), ctx.fetcher.clone());
-        ctx.ops
-            .run(FeatureKind::Import, opts, move |lease| async move {
-                let report = match fetcher.fetch(&url, device, lease.token()).await {
-                    Ok(report) => report,
-                    Err(err) => {
-                        return Err(lease.assert_active().err().unwrap_or_else(|| err.into()));
-                    }
-                };
-                let partial = !is_complete(&report);
-                let ParseReport {
-                    profiles,
-                    skipped,
-                    meta,
-                } = report;
-                let target = match into {
-                    Some(group) => AddTarget::Keys {
-                        group: Some(group),
-                        device,
-                    },
-                    None => AddTarget::Subscription(Box::new(NewSubscription {
-                        url,
-                        device,
-                        info: meta,
-                        partial,
-                    })),
-                };
-                let added = lease.commit(|| servers.add(profiles, target))?;
-                Ok(AddOutcome::Added {
-                    report: added,
-                    skipped,
-                })
-            })
-            .await
-    }
-
     /// Storage §7.3 `import_legacy_direct`: the old app's single-key input ([`LegacyDirect`], from
     /// [`crate::legacy::from_legacy`]) goes in like a paste as `pc` (keys are parsed, a
     /// subscription URL or deep link is fetched), and the key the old app had selected becomes the
@@ -391,8 +241,11 @@ impl Servers {
         let Some(input) = direct.input.expose() else {
             return Err(AppError::conflict(Msg::new("servers.locked")));
         };
+        // A migrated subscription keeps sending the HWID the old app sent (its device slot).
+        let mut options = AddOptions::new(None, ClientDevice::Pc);
+        options.send_hwid = true;
         let outcome = self
-            .add_from_input(ctx, input, None, ClientDevice::Pc, cancel)
+            .add_from_input_with(ctx, input, options, cancel)
             .await?;
         if let AddOutcome::Added { report, .. } = &outcome
             && let Some(first) = &report.selected

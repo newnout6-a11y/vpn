@@ -6,7 +6,7 @@ use vpnte_base::ErrorKind;
 
 use super::*;
 use crate::lang::translate_now;
-use crate::servers::model::{AddTarget, FetchError, ImportReport, RefreshOutcome};
+use crate::servers::model::{FetchError, ImportReport, RefreshOutcome};
 use crate::servers::present::GROUP_NAME_MAX;
 use crate::widgets::UiError;
 
@@ -207,12 +207,13 @@ impl Actions {
         let (store, toasts, api, actions) =
             (self.store, self.toasts, self.api.clone(), self.clone());
         let mut form = store.add;
-        let (input, target, device) = {
+        let (input, target, device, request) = {
             let f = form.peek();
             if f.busy || f.input.trim().is_empty() {
                 return;
             }
-            (f.input.trim().to_owned(), f.target.clone(), f.device)
+            let draft = (f.input.trim().to_owned(), f.target.clone());
+            (draft.0, draft.1, f.device, f.request.clone())
         };
         {
             let mut f = form.write();
@@ -221,15 +222,13 @@ impl Actions {
             f.report = None;
         }
         self.spawn(async move {
-            let result = api.add(input, target, device).await;
+            let result = api.add(input, target, device, request).await;
             let open = *store.add_open.peek();
             let mut f = form.write();
             f.busy = false;
             match result {
                 Ok(report) => {
-                    f.input.clear();
-                    // The next paste creates its own group again unless the user picks one.
-                    f.target = AddTarget::Auto;
+                    f.imported();
                     // A closed dialog got its toast; reopening it starts with an empty form.
                     if open {
                         f.report = Some(report);
@@ -266,6 +265,7 @@ pub(crate) fn fetch_error_text(why: FetchError) -> String {
         FetchError::Network => translate_now("ui.servers.fetch.network", &[]),
         FetchError::Tls => translate_now("ui.servers.fetch.tls", &[]),
         FetchError::Timeout => translate_now("ui.servers.fetch.timeout", &[]),
+        FetchError::Refused => translate_now("ui.servers.fetch.refused", &[]),
     }
 }
 
