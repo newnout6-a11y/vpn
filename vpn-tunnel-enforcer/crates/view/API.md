@@ -64,7 +64,8 @@ impl ConnView {
     pub fn circle_busy(&self) -> bool;           // busy or switching (power button waits)
     pub fn swiss_busy(&self) -> bool;            // anything transient on the slab
     pub fn tun_running(&self) -> bool;  pub fn tun_started_at(&self) -> Option<UnixMs>;
-    pub fn uptime_since(&self) -> Option<UnixMs>;            // settled TUN session only
+    pub fn uptime_since(&self) -> Option<UnixMs>;            // settled TUN session only: the label
+                                                             // says «в туннеле», Soft must not claim it
     pub fn degraded_any(&self) -> bool;                      // degraded || competing TUN
     pub fn competing_tun_banner(&self) -> Option<&str>;      // only while our TUN runs
 }
@@ -134,25 +135,31 @@ pub struct PowerButton { pub label: Msg /*text = accessible name*/, pub title: M
 pub fn power_button(conn: &ConnView) -> PowerButton;
 pub fn cancel_label(conn: &ConnView) -> Option<Msg>;          // None = no cancel button
 pub struct FactValue { pub text: Msg, pub alert: bool, pub dim: bool }
-pub fn mode_fact(soft: bool) -> FactValue;
+pub fn mode_fact(soft: bool) -> FactValue;                    // view.fact.modeProxy / modeTunnel
 pub struct SmartFact { pub value: FactValue, pub action: Msg, pub action_aria: Msg }
 pub fn smart_fact(on: bool) -> SmartFact;
-pub enum FwState { Verified, Inactive, Unknown }
+pub enum FwState { Verified, Inactive, Unknown,
+    ProxyHold,    // no WFP in this process, level standard: Soft's system-proxy hold «Через прокси»
+    NeedsAdmin }  // the level needs WFP, which an unelevated process cannot host (alert)
 pub struct FirewallStatus { pub state: FwState, pub checking: bool }   // Default = Unknown, checking
-pub fn kill_switch_fact(fw: &FirewallStatus) -> FactValue;
+impl FirewallStatus { pub fn in_mode(self, soft: bool) -> Self }       // ProxyHold in Hard -> NeedsAdmin
+pub fn kill_switch_fact(fw: &FirewallStatus) -> FactValue;             // alert: Unknown / NeedsAdmin
 pub fn leak_fact(summary: Verdict, checking: bool) -> FactValue;       // NotChecked -> «—», dim
 pub struct SubLine { pub text: Msg, pub dash: bool /*«— » prefix*/, pub alert: bool,
     pub flag: Option<String> /*country for the flag coin*/ }
-pub struct ExitLine { pub ip: Option<IpAddr> /*None -> dim «—»*/, pub dim: bool, pub sub: SubLine }
+pub struct ExitLine { pub ip: Option<IpAddr> /*None -> dim «—»*/, pub dim: bool,
+    pub unmeasured: bool /*settled off, no address yet: «ещё не определён»*/, pub sub: SubLine }
 pub fn exit_line(conn: &ConnView, exit: &ExitIp) -> ExitLine;
 pub enum RealLook { Hidden /*struck*/, Exposed /*«открыт всем»*/, Neutral /*dim: busy or faulted*/ }
 pub struct RealLine { pub ip: Option<IpAddr>, pub look: RealLook }
-impl RealLine { pub fn struck(&self) -> bool /*.is-hidden*/; pub fn sub(&self) -> Option<SubLine> }
+impl RealLine { pub fn struck(&self) -> bool /*.is-hidden*/; pub fn sub(&self) -> Option<SubLine>;
+    pub fn unmeasured(&self) -> bool /*Exposed without an address*/ }
 pub fn real_line(conn: &ConnView, exit: &ExitIp, home: Option<IpAddr>) -> RealLine;
 pub fn node_meta(protocol: Option<&str>, ping: Option<u32>, health: ServerHealth) -> Msg;
 pub fn health_label(health: ServerHealth, minutes_ago: Option<u64>) -> Msg;
 pub struct KillSwitchBanner { pub title: Msg, pub body: Msg }
 pub fn kill_switch_banner(conn: &ConnView, fw: &FirewallStatus) -> Option<KillSwitchBanner>;
+    // Verified / Unknown only, settled, no TUN running (ProxyHold / NeedsAdmin install no filters)
 pub fn foreign_vpn_friendly_name(raw: Option<&str>) -> Option<String>;  // "happ-tun (…)" -> "Happ"
 ```
 
@@ -258,6 +265,7 @@ let power = labels::power_button(&conn);
 let exit_line = labels::exit_line(&conn, &exit);
 let real = labels::real_line(&conn, &exit, home.observe(&conn, &exit));
 let banner = labels::kill_switch_banner(&conn, &firewall);
+let ks_fact = labels::kill_switch_fact(&firewall.in_mode(soft));   // soft = routing setting is Soft
 history.observe(&sample);                           // every sample
 let bars = history.bars(sample.running, hovered);
 let figure = fmt::to_fixed(sample.down_mbps(), 1);
@@ -299,7 +307,7 @@ loop {
 
 ## Not here / not implemented
 - No elevation, network, persistence or clock access anywhere in this crate: nothing here needs
-  admin rights or a running backend, and the unit tests (66) exercise it without either.
+  admin rights or a running backend, and the unit tests (67) exercise it without either.
 - The external-proxy refresh interval (spec §7.4) belongs to the UI panels package.
 - Not ported on purpose: the unreachable «Перезапуск N/M» caption, the old traffic heuristic for
   "proxy down" (the backend publishes `proxy_down`), `FirewallStatus` reason strings, the dead

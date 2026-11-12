@@ -20,6 +20,13 @@ pub enum TunnelState {
     Unknown,
 }
 
+impl TunnelState {
+    /// Error / blocked / unknown: the slab says ALERT, never EXPOSED.
+    pub(crate) fn faulted(self) -> bool {
+        matches!(self, Self::Error | Self::Blocked | Self::Unknown)
+    }
+}
+
 /// A lifecycle transition in flight; never shown as connected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Transition {
@@ -33,7 +40,8 @@ pub enum Transition {
 pub enum Mode {
     /// sing-box TUN (Hard mode).
     Tun,
-    /// Environment proxy autoconfig, no TUN (Soft mode).
+    /// Our engine behind the per-user system proxy, no TUN (Soft mode): programs that ignore
+    /// the proxy go direct.
     Soft,
 }
 
@@ -126,7 +134,8 @@ impl ConnView {
         self.started_at.filter(|_| self.tun_running())
     }
 
-    /// Start time for the uptime label, shown only on a settled TUN session.
+    /// Start time for the uptime label, shown only on a settled TUN session: the label reads
+    /// «в туннеле», which a Soft session must not claim (programs may bypass the proxy).
     pub fn uptime_since(&self) -> Option<UnixMs> {
         self.tun_started_at().filter(|_| !self.swiss_busy())
     }
@@ -223,10 +232,7 @@ pub fn derive_swiss_state(i: &SwissInput) -> SwissState {
         return Leak;
     }
     // Not gated by `connected`: an unknown tunnel alerts even when off.
-    if matches!(
-        i.tunnel_state,
-        TunnelState::Error | TunnelState::Blocked | TunnelState::Unknown
-    ) {
+    if i.tunnel_state.faulted() {
         return Alert;
     }
     if i.connected && i.proxy_down {

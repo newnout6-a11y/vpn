@@ -280,8 +280,6 @@ pub(crate) fn clean_kill_switch(journals: &Journals, report: &mut CleanupReport)
         }
     }
     let changed_profiles = !done.is_empty();
-    report.firewall_reset |= plan == ProfilePlan::ResetBlocks && changed_profiles;
-    report.firewall_allow_all |= plan == ProfilePlan::AllowAll && changed_profiles;
     let mut profiles = match done.is_empty() {
         true => format!("profiles unchanged ({})", plan_name(&plan)),
         false => format!("profiles {} ({})", done.join(", "), plan_name(&plan)),
@@ -293,10 +291,13 @@ pub(crate) fn clean_kill_switch(journals: &Journals, report: &mut CleanupReport)
     }
     if !errors.is_empty() {
         // Keep the rules: removing the old LAN / DHCP / loopback allows under a Block that
-        // could not be reset would cut more traffic than it frees.
+        // could not be reset would cut more traffic than it frees. No "reset to Allow" notice
+        // either: a profile still at Block would make it false.
         let detail = format!("{profiles}; failed: {}; rules kept", errors.join("; "));
         return failed(detail).changed(changed_profiles);
     }
+    report.firewall_reset |= plan == ProfilePlan::ResetBlocks && changed_profiles;
+    report.firewall_allow_all |= plan == ProfilePlan::AllowAll && changed_profiles;
     match policy.remove(is_owned_rule) {
         Ok(removed) => {
             let detail = format!("{profiles}; {removed} {RULE_PREFIX}* rules removed");

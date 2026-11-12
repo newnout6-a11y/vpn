@@ -10,10 +10,9 @@ consumer is `vpnte-app` (start-up, `--cleanup`, maintenance page).
   unelevated they return `Err(AppError { kind: Permission, msg: "cleanup.legacy.needsAdmin" })`
   before anything is read or written (the marker is not touched either). Everything else (`LOCALES`,
   the marker / report / record methods, `StepId::key`) is pure and works unelevated, e.g. for the
-  maintenance page. Under the privilege model of CONTRACT §1 this work belongs in the helper service
-  `vpnte-service`; the code is not adapted yet (a `noadmin-*` follow-up): today the app calls it only
-  when the process itself is elevated, and must hand the service the per-user marker store when it
-  moves there.
+  maintenance page. Privilege model (NOADMIN §0, current phase): there is no helper service, so the
+  app calls `run` / `uninstall` only when its own process is elevated and shows the cleanup as
+  unavailable otherwise.
 - No events, no tasks, no shared state: calls return plain data. User-facing text is `Msg` / `Notice`;
   `StepRecord::detail` and the `tracing` lines (`info` per step, `warn` per failed step) are English.
 - Machine-wide data is found through the ProgramData known folder (`%ProgramData%\VPNTE`, not the
@@ -85,7 +84,7 @@ pub struct CleanupReport {
     pub steps: Vec<StepRecord>,           // one per step that ran, in run order
     pub firewall_reset: bool,             // old strict mode had Windows Firewall at Block: reset to Allow
     pub firewall_allow_all: bool,         // old rules without a journal: every profile set to Allow
-}
+}                                         // (both only when every profile write succeeded)
 impl CleanupReport {
     pub fn outcome(&self, step: StepId) -> Option<Outcome>;   // None = step did not run
     pub fn failed(&self) -> bool;
@@ -120,7 +119,7 @@ Each step is independent and adds one record. `S` = start-up / `Again`, `U` = `u
 | `adapters` | S | with a valid adapter journal, per present NIC: IPv6 binding re-enabled (INetCfg, read back) where the old app turned it off; static IPv4 DNS (or DHCP) restored only while the current list still holds only forced / TUN resolver addresses; resolver cache flushed. Without one: physical adapters whose static DNS is only `192.168.250.253/254` go back to DHCP. Teredo / 6to4 / ISATAP are reported, not restored | a write or read failed: `failed` |
 | `dnsPolicy` | S | HKLM `...\Policies\Microsoft\Windows NT\DNSClient\DisableSmartNameResolution` and `...\Services\Dnscache\Parameters\DisableParallelAandAAAA` restored from the journal (`exists:false` → deleted) only while they still read 1; no journal → untouched | write / read-back failed: `failed`; value without a valid snapshot or unreadable: `skipped` |
 | `tunAdapter` | S | report only: the old Wintun adapter of `tun-owner.json` (no device removal) | disabled / inactive leftover: `skipped` ("remove it in Device Manager"); adapter list unreadable: `failed` |
-| `tasks` | S U | `\VPNTE\BootRecoveryTask`, `\VPNTE Boot Recovery` deleted when the principal resolves to S-1-5-18 and the only action runs `vpnte-recover.ps1` through Windows PowerShell (`-File` or `-EncodedCommand`), then the `\VPNTE` folder if empty. The autostart task `\VPN Tunnel Enforcer` is NOT touched (same name as the new app's: `winnet::autostart::sync` re-points or deletes it) | foreign task kept: `skipped`; a read / delete failed: `failed` |
+| `tasks` | S U | `\VPNTE\BootRecoveryTask`, `\VPNTE Boot Recovery` deleted when the principal resolves to S-1-5-18 and the only action runs `vpnte-recover.ps1` through Windows PowerShell (`-File` or `-EncodedCommand`), then the `\VPNTE` folder if empty. The 1.x logon task `\VPN Tunnel Enforcer` is NOT touched (`winnet::autostart::sync` deletes it; the new app autostarts through the HKCU `Run` value) | foreign task kept: `skipped`; a read / delete failed: `failed` |
 | `files` | S U | under `%ProgramData%\VPNTE`: in a trusted `manifests`, journals whose replay finished in this run, `tmp-*`, `*.ps1`, `*.corrupt-*`, `recovery-result.json`; `runtime\<instance>\{tun-runtime, external-proxy-runtime}` (engine configs with credentials) whenever every folder on the way is a real folder; then empty folders up to the root. Kept: `traffic-forensics`, `windows-firewall-before-reset-*.wfw` (named in the detail), journals not replayed | root not a plain folder or `manifests` untrusted: `skipped`; a delete failed: `failed` |
 
 A journal is deleted only when it was valid and its own replay finished: `firewall.json` after
@@ -160,9 +159,9 @@ let code = match legacy::uninstall(&ctx) {
 };
 std::process::exit(code);
 ```
-Also the app's job, not this crate's: re-point or delete the old autostart task with
-`winnet::autostart::sync` (same task name), the proxy-baseline replay of the old journals, and our
-own WFP provider (`wfp::remove_all` / `Protection`).
+Also the app's job, not this crate's: delete the 1.x logon task with `winnet::autostart::sync`
+(it needs an elevated process when 1.x created it with the highest privileges), the proxy-baseline
+replay of the old journals, and our own WFP provider (`wfp::remove_all` / `Protection`).
 
 ## i18n keys (fragment `locales/cleanup-legacy.{ru,en}.json`)
 | Key | Args | Where |
@@ -185,7 +184,8 @@ banner channel.
 - The old EOS hosts-file line and its backup / log: left in place (editing `hosts` is riskier).
 - A read-only `scan()` API: diagnostics read the marker's step records instead.
 - Quarantine of corrupt journals: they stay where they are (old `*.corrupt-*` copies are deleted).
-- Hosting in `vpnte-service` (privilege model of 2026-11-11): pending `noadmin-*` follow-up.
+- Hosting in `vpnte-service`: the service is a later, optional phase (NOADMIN §0); today the code
+  runs in the elevated app process only.
 
 ## Not verified on a real machine (needs elevation; the unit tests cover the decisions)
 Every acting path: firewall profile writes and rule removal, legacy WFP deletion, INetCfg write lock /

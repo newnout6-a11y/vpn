@@ -1,8 +1,9 @@
 //! The old SYSTEM boot-recovery tasks (spec §2.7, §6.6 step 7). A task is deleted only when it
 //! provably is ours: principal SYSTEM and exactly one action that runs `vpnte-recover.ps1`
-//! through Windows PowerShell, in any of the three historical forms. The autostart task
-//! `\VPN Tunnel Enforcer` is not touched here: the app's `autostart::sync` re-points or deletes
-//! it (same task name as the old app).
+//! through Windows PowerShell, in any of the three historical forms. The 1.x logon task
+//! `\VPN Tunnel Enforcer` is not touched here: the app's `autostart::sync` deletes it (the new
+//! app starts through the per-user `Run` value; an elevated sync can delete a task 1.x created
+//! with the highest privileges).
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use vpnte_winnet::autostart::{self, ExecAction, TaskInfo};

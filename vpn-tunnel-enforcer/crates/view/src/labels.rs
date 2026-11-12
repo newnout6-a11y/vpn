@@ -315,7 +315,7 @@ pub struct ExitLine {
 pub fn exit_line(conn: &ConnView, exit: &ExitIp) -> ExitLine {
     let connected = conn.connected();
     let leak = exit.ip.is_some() && visible_leak(conn, exit);
-    let neutral = conn.swiss_busy() || (!leak && faulted(conn));
+    let neutral = conn.swiss_busy() || (!leak && conn.state.faulted());
     let sub = match exit.ip {
         _ if neutral => SubLine::plain(status_label(conn)),
         _ if leak => SubLine {
@@ -341,14 +341,6 @@ pub fn exit_line(conn: &ConnView, exit: &ExitIp) -> ExitLine {
         unmeasured: settled_off && exit.ip.is_none(),
         sub,
     }
-}
-
-// Error / blocked / unknown: the slab says ALERT, never EXPOSED.
-fn faulted(conn: &ConnView) -> bool {
-    matches!(
-        conn.state,
-        TunnelState::Error | TunnelState::Blocked | TunnelState::Unknown
-    )
 }
 
 // «Netherlands, Amsterdam» with the flag, for a geo looked up for this very address.
