@@ -8,8 +8,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::watch;
 use vpnte_base::{AppError, AppResult, Msg};
-use vpnte_forensics::enrichment::{EnrichStatus, HistoryEntry};
-use vpnte_tunnel::fsm::TunnelState;
+use vpnte_forensics::enrichment::{EnrichInputs, EnrichStatus, HistoryEntry};
+use vpnte_tunnel::fsm::{TunnelSnapshot, TunnelState};
 use vpnte_ui::traffic_history::{
     DomainRow, SiteInfo, TrafficHistoryApi, TrafficSnapshot, site_url,
 };
@@ -38,8 +38,11 @@ impl TrafficService {
             domains,
             state: watch::Sender::new(TrafficSnapshot::default()),
         });
+        // Subscribe before the first projection: a change between it and the follow task's first
+        // poll would otherwise be marked seen and never projected.
+        let sources = Sources::subscribe(&shared);
         shared.publish();
-        tokio::spawn(follow(shared.clone()));
+        tokio::spawn(follow(shared.clone(), sources));
         Self(shared)
     }
 }
@@ -106,13 +109,34 @@ impl TrafficHistoryApi for TrafficService {
     }
 }
 
+/// The change sources the page follows: history, site names, the lookup route, the tunnel.
+struct Sources {
+    history: watch::Receiver<u64>,
+    names: watch::Receiver<u64>,
+    inputs: watch::Receiver<EnrichInputs>,
+    snapshot: Option<watch::Receiver<TunnelSnapshot>>,
+}
+
+impl Sources {
+    fn subscribe(shared: &Shared) -> Self {
+        Self {
+            history: shared.domains.history.changes(),
+            names: shared.domains.enricher.changes(),
+            inputs: shared.domains.inputs.clone(),
+            snapshot: shared.backend.tunnel().ok().map(|t| t.snapshot()),
+        }
+    }
+}
+
 /// Re-projects on every history, site-name, lookup-route and tunnel change while the page is
 /// on screen (it holds the only receivers: the page is mounted only while it is current).
-async fn follow(shared: Arc<Shared>) {
-    let mut history = shared.domains.history.changes();
-    let mut names = shared.domains.enricher.changes();
-    let mut inputs = shared.domains.inputs.clone();
-    let mut snapshot = shared.backend.tunnel().ok().map(|t| t.snapshot());
+async fn follow(shared: Arc<Shared>, sources: Sources) {
+    let Sources {
+        mut history,
+        mut names,
+        mut inputs,
+        mut snapshot,
+    } = sources;
     let shutdown = shared.backend.shutdown.clone();
     loop {
         tokio::select! {
