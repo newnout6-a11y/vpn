@@ -36,10 +36,12 @@ static HELD: Mutex<Vec<(PathBuf, File)>> = Mutex::new(Vec::new());
 
 /// An engine file that is missing, unreadable or different from its release pin.
 #[derive(Debug, thiserror::Error)]
-#[error("{file} does not match the engine file shipped with the app")]
+#[error("{file} is missing or does not match the engine file shipped with the app")]
 pub(crate) struct NotPinned {
     /// File name only: the full path would carry the user's profile name.
     pub file: String,
+    /// The file does not exist: an incomplete install, not a changed file.
+    pub missing: bool,
 }
 
 /// Elevated: refuses to run `exe` unless it and the DLLs `engine` loads from its folder match
@@ -57,8 +59,14 @@ pub(crate) fn check(engine: Engine, exe: &Path) -> io::Result<()> {
         }
         let pin = pin(name).filter(|_| exe.is_absolute());
         let file = open_verified(&path, pin).map_err(|err| {
-            tracing::warn!(file = %err.file, "engine file does not match its release pin");
-            io::Error::new(io::ErrorKind::InvalidData, err)
+            tracing::warn!(file = %err.file, missing = err.missing, "engine file refused by its release pin");
+            // A missing DLL is refused too: Windows would search PATH for it.
+            let kind = if err.missing {
+                io::ErrorKind::NotFound
+            } else {
+                io::ErrorKind::InvalidData
+            };
+            io::Error::new(kind, err)
         })?;
         HELD.lock().push((path, file));
     }
@@ -86,19 +94,21 @@ fn pin(name: &str) -> Option<[u8; 32]> {
 /// Opens `path` sharing only reads (no writer, no rename or delete while it is open) and checks
 /// the SHA-256 of that very handle against `pin`.
 fn open_verified(path: &Path, pin: Option<[u8; 32]>) -> Result<File, NotPinned> {
-    let not_pinned = || NotPinned {
+    let refused = |missing| NotPinned {
         file: path
             .file_name()
             .unwrap_or(path.as_os_str())
             .to_string_lossy()
             .into_owned(),
+        missing,
     };
+    let not_pinned = || refused(false);
     let pin = pin.ok_or_else(not_pinned)?;
     let mut file = OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ.0)
         .open(path)
-        .map_err(|_| not_pinned())?;
+        .map_err(|err| refused(err.kind() == io::ErrorKind::NotFound))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     loop {

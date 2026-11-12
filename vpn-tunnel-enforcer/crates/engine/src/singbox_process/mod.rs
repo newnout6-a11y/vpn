@@ -119,8 +119,15 @@ impl From<CheckError> for AppError {
 /// from its release pin (elevated only, `crate::pin`), access denied, a missing exe, a job failure.
 pub(crate) fn spawn_error(engine: &'static str, err: &io::Error) -> (ErrorKind, Msg) {
     if let Some(refused) = err.get_ref().and_then(|e| e.downcast_ref::<NotPinned>()) {
-        let msg = Msg::new("engine.process.notPinned").arg("file", &refused.file);
-        return (ErrorKind::Internal, msg);
+        let key = if refused.missing {
+            "engine.process.fileMissing"
+        } else {
+            "engine.process.notPinned"
+        };
+        return (
+            ErrorKind::Internal,
+            Msg::new(key).arg("file", &refused.file),
+        );
     }
     let kind = match err.kind() {
         io::ErrorKind::PermissionDenied => ErrorKind::Permission,

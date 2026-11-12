@@ -37,9 +37,11 @@ executed here: a real TUN start (all engine tests are loopback-only).
 `rule-set match`) first verifies the exe — for sing-box also `libcronet.dll` and `wintun.dll`
 next to it — against the SHA-256 pins of `resources/engines.toml` (compiled in): the per-user
 install folder is user-writable. Verified files stay open without write / delete sharing until
-the process ends (the first run hashes them once). A missing, different or relative-path file is
-refused before the spawn: `io::ErrorKind::InvalidData`, rendered as `engine.process.notPinned(file)`
-by the `From<…> for AppError` impls. Unelevated nothing is checked.
+the process ends (the first run hashes them once). A different or relative-path file is refused
+before the spawn: `io::ErrorKind::InvalidData`, rendered as `engine.process.notPinned(file)` by
+the `From<…> for AppError` impls; a missing one (a missing DLL too: Windows would search `PATH`
+for it) as `io::ErrorKind::NotFound`, rendered as `engine.process.fileMissing(file)`. Unelevated
+nothing is checked.
 **Errors:** every error enum has `From<_> for vpnte_base::AppError` with an `engine.*` message;
 callers bubble them with `?` and render `AppError::user_msg()`.
 **Children:** every engine runs hidden (CREATE_NO_WINDOW, in its own windowless console and
@@ -247,7 +249,8 @@ DNS server tags (`dns-remote`, `dns-resolver`, `dns-direct`, `dns-bootstrap` and
 `-quad9` / `-google` / `-tcp` / `-isp` steps) stay readable.
 `StartError` -> `engine.process.singboxExited(code)` / `singboxNotReady` (Timeout) /
 `spawnFailed(engine)` (kind Permission when access is denied) / `notPinned(file)` (elevated, an
-engine file differs from its pin); `StopError` -> `stopUnconfirmed`.
+engine file differs from its pin) / `fileMissing(file)` (elevated, an engine file is missing);
+`StopError` -> `stopUnconfirmed`.
 
 ## `xray_process` — the two Xray slots
 

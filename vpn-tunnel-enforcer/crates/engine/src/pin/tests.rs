@@ -51,13 +51,20 @@ fn verified_files_are_held_and_others_refused() {
     drop(held);
     assert!(OpenOptions::new().write(true).open(&path).is_ok());
 
-    let refused = |pin| open_verified(&path, pin).map(drop).map_err(|e| e.file);
-    assert_eq!(refused(Some([0; 32])), Err("sing-box.exe".to_owned()));
-    assert_eq!(refused(None), Err("sing-box.exe".to_owned()));
+    let refused = |pin| {
+        open_verified(&path, pin)
+            .map(drop)
+            .map_err(|e| (e.file, e.missing))
+    };
+    assert_eq!(
+        refused(Some([0; 32])),
+        Err(("sing-box.exe".to_owned(), false))
+    );
+    assert_eq!(refused(None), Err(("sing-box.exe".to_owned(), false)));
     let missing = open_verified(&dir.path().join("wintun.dll"), Some(sha));
     assert_eq!(
-        missing.map(drop).map_err(|e| e.file),
-        Err("wintun.dll".to_owned())
+        missing.map(drop).map_err(|e| (e.file, e.missing)),
+        Err(("wintun.dll".to_owned(), true))
     );
 }
 
@@ -81,18 +88,29 @@ fn a_held_exe_still_starts() {
     drop(held);
 }
 
-/// A refused file reaches the user as its own message naming the file, not as "missing".
+/// A refused file reaches the user as its own message naming the file: a changed file as
+/// "differs", a missing one as "missing" (both say to reinstall).
 #[test]
 fn not_pinned_has_its_own_message() {
-    let err = io::Error::new(
-        io::ErrorKind::InvalidData,
-        NotPinned {
-            file: "wintun.dll".into(),
-        },
-    );
-    let (kind, msg) = spawn_error("sing-box", &err);
+    let refused = |missing| {
+        let kind = if missing {
+            io::ErrorKind::NotFound
+        } else {
+            io::ErrorKind::InvalidData
+        };
+        let file = "wintun.dll".into();
+        spawn_error(
+            "sing-box",
+            &io::Error::new(kind, NotPinned { file, missing }),
+        )
+    };
+    let (kind, msg) = refused(false);
     assert_eq!(kind, ErrorKind::Internal);
     assert_eq!(msg.key, "engine.process.notPinned");
+    assert_eq!(msg.args.first().map(|(k, _)| k.as_ref()), Some("file"));
+    let (kind, msg) = refused(true);
+    assert_eq!(kind, ErrorKind::Internal);
+    assert_eq!(msg.key, "engine.process.fileMissing");
     assert_eq!(msg.args.first().map(|(k, _)| k.as_ref()), Some("file"));
     let (kind, msg) = spawn_error("Xray", &io::Error::from(io::ErrorKind::PermissionDenied));
     assert_eq!(

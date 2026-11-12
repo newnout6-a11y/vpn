@@ -73,8 +73,10 @@ jobs:
         env:
           # Tests that open a listener on the LAN address (skipped on workstations: firewall prompt).
           VPNTE_LAN_TESTS: '1'
+        # --no-fail-fast: every failing crate in one run (the job is elevated, so a failure in one
+        # crate would otherwise hide the elevated-only failures of the crates after it).
         run: |
-          cargo test --workspace --locked
+          cargo test --workspace --locked --no-fail-fast
           cargo test --manifest-path xtask/Cargo.toml --target-dir target/xtask --locked
 
   docs:
@@ -139,7 +141,7 @@ jobs:
       - name: 'winnet: real WFP objects and the autostart task'
         run: cargo test -p vpnte-winnet -- --ignored elevated_ --test-threads=1 --nocapture
       - name: Tests that need elevation
-        run: cargo test --workspace --locked -- --ignored --test-threads=1
+        run: cargo test --workspace --locked --no-fail-fast -- --ignored --test-threads=1
 
   package:
     name: Installer (build, silent install, upgrade, uninstall)
