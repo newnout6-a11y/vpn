@@ -672,8 +672,9 @@ re-check the tunnel) and the theme service.
   first) and the TUN interface's removal after a graceful sing-box stop (elevated `e2e_tun` in CI).
 - The real clipboard write / clear (`OpenClipboard` is denied in this sandboxed shell), including
   the private owner window used across threads.
-- `icmp` TTL-expired / packet-too-big replies (the local VPN answers echo itself); IPv6 `df` on a
-  link with MTU < 1500.
+- `icmp` TTL-expired / packet-too-big replies: the local VPN answers echo itself, and GitHub-hosted
+  runners drop ICMP to the internet, so `ttl_one_expires_at_the_first_hop` is opt-in
+  (`VPNTE_ICMP_TESTS=1`); IPv6 `df` on a link with MTU < 1500.
 - `UnicastAddress::temporary` (= random suffix, as the old app): current Windows may also report a
   random suffix for the stable SLAAC address; no global IPv6 here (only diagnostics use it).
 - Sweeping an elevated orphan from an unelevated process; second launch from another Windows

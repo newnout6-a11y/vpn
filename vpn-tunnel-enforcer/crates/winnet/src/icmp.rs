@@ -394,10 +394,15 @@ mod tests {
 
     /// Traceroute building block: TTL 1 to a public address expires at the first hop. A VPN TUN
     /// may answer echo requests itself; `VPNTE_TEST_ICMP_SRC=<physical IPv4>` pins the probe to
-    /// the physical interface, as live checks do.
+    /// the physical interface, as live checks do. Opt-in with `VPNTE_ICMP_TESTS=1`: GitHub-hosted
+    /// runners (Azure) drop ICMP to the internet, so the elevated CI job cannot prove it.
     #[tokio::test]
-    #[ignore = "needs internet"]
+    #[ignore = "needs internet that answers ICMP (VPNTE_ICMP_TESTS=1)"]
     async fn ttl_one_expires_at_the_first_hop() {
+        if std::env::var_os("VPNTE_ICMP_TESTS").is_none() {
+            eprintln!("skipped: set VPNTE_ICMP_TESTS=1 on a network that answers ICMP");
+            return;
+        }
         let src = std::env::var("VPNTE_TEST_ICMP_SRC")
             .ok()
             .map(|s| s.parse().unwrap());
