@@ -46,10 +46,10 @@ fn refused(key: &'static str, name: &str) -> AppError {
     )
 }
 
-/// Copies `name` from `from` into `to`. The bytes are read once, hashed and written from the same
-/// buffer: the source folder is user-writable, so a file swapped after a separate check would
-/// never reach the admin-only folder.
-pub fn copy_verified(from: &Path, to: &Path, name: &str) -> AppResult<()> {
+/// The bytes of `name` in `from`, when they match its release pin. Read once and written from the
+/// same buffer ([`write_replacing`]): the source folder is user-writable, so a file swapped after a
+/// separate check would never reach the admin-only folder.
+pub fn read_verified(from: &Path, name: &str) -> AppResult<Vec<u8>> {
     let expected = pin(name).ok_or_else(|| refused("service.install.fileMismatch", name))?;
     let bytes = match std::fs::read(from.join(name)) {
         Ok(bytes) => bytes,
@@ -62,7 +62,7 @@ pub fn copy_verified(from: &Path, to: &Path, name: &str) -> AppResult<()> {
     if sha != expected {
         return Err(refused("service.install.fileMismatch", name));
     }
-    write_replacing(&to.join(name), &bytes)
+    Ok(bytes)
 }
 
 /// Writes `path` through a sibling temp file and a rename (an older copy is replaced whole).
@@ -70,18 +70,30 @@ pub fn copy_verified(from: &Path, to: &Path, name: &str) -> AppResult<()> {
 /// Elevated (the install verbs, the service), the file is born owned by Administrators: a file a
 /// user's elevated installer creates is otherwise owned by that user, and an owner may rewrite its
 /// DACL even from an unelevated process, so the service's trusted-folder check refuses it. No
-/// other process may open it while it is written.
+/// other process may open it while it is written. The temp file never outlives a call: one left
+/// by a crash is removed first (the folder is admin-only, so it can only be ours), and a failed
+/// write or rename removes it, so a retry starts clean.
 pub fn write_replacing(path: &Path, bytes: &[u8]) -> AppResult<()> {
     let tmp = path.with_extension("new");
-    let mut file = if vpnte_winnet::elevation::is_elevated() {
-        crate::sddl::create_admin_owned(&tmp)
-    } else {
-        std::fs::File::create(&tmp)
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(AppError::internal(e)),
     }
-    .map_err(AppError::internal)?;
-    std::io::Write::write_all(&mut file, bytes).map_err(AppError::internal)?;
-    drop(file);
-    std::fs::rename(&tmp, path).map_err(AppError::internal)
+    let written = (|| {
+        let mut file = if vpnte_winnet::elevation::is_elevated() {
+            crate::sddl::create_admin_owned(&tmp)
+        } else {
+            std::fs::File::create(&tmp)
+        }?;
+        std::io::Write::write_all(&mut file, bytes)?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.map_err(AppError::internal)
 }
 
 #[cfg(test)]
@@ -108,20 +120,35 @@ mod tests {
     }
 
     #[test]
-    fn a_pinned_file_copies_and_a_changed_or_missing_one_is_refused() {
-        let (from, to) = (temp("from"), temp("to"));
+    fn a_pinned_file_is_read_and_a_changed_or_missing_one_is_refused() {
+        let from = temp("from");
         let resources = Path::new(RESOURCES);
         if resources.join("wintun.dll").exists() {
-            copy_verified(resources, &to, "wintun.dll").expect("pinned wintun.dll");
-            assert!(to.join("wintun.dll").exists());
+            read_verified(resources, "wintun.dll").expect("pinned wintun.dll");
         }
         std::fs::write(from.join("sing-box.exe"), b"not the release").expect("fake");
-        let err = copy_verified(&from, &to, "sing-box.exe").expect_err("changed");
+        let err = read_verified(&from, "sing-box.exe").expect_err("changed");
         assert_eq!(err.user_msg().key, "service.install.fileMismatch");
-        assert!(!to.join("sing-box.exe").exists());
-        let err = copy_verified(&from, &to, "xray.exe").expect_err("missing");
+        let err = read_verified(&from, "xray.exe").expect_err("missing");
         assert_eq!(err.user_msg().key, "service.install.fileMissing");
         let _ = std::fs::remove_dir_all(&from);
-        let _ = std::fs::remove_dir_all(&to);
+    }
+
+    /// Review 4555370688: a temp file left by an earlier failed write does not block the next
+    /// one, and a failed write leaves none behind (a retry of the same replace starts clean).
+    #[test]
+    fn the_temp_file_never_outlives_a_write() {
+        let dir = temp("tmp");
+        let file = dir.join("engine.exe");
+        std::fs::write(dir.join("engine.new"), b"left by a crash").expect("stale temp");
+        write_replacing(&file, b"one").expect("replaces past a stale temp");
+        assert_eq!(std::fs::read(&file).expect("written"), b"one");
+        assert!(!dir.join("engine.new").exists());
+        // A rename onto a folder fails: the temp file is removed with the error.
+        let blocked = dir.join("blocked.exe");
+        std::fs::create_dir_all(&blocked).expect("a folder in the way");
+        write_replacing(&blocked, b"two").expect_err("cannot replace a folder");
+        assert!(!dir.join("blocked.new").exists(), "no temp left behind");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

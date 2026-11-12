@@ -66,12 +66,15 @@ pub fn install(source: &Source) -> AppResult<PathBuf> {
     let dir = paths::install_dir().map_err(failed)?;
     manage::stop(SCM_WAIT).map_err(failed)?;
     paths::secure_dir(&dir).map_err(failed)?;
+    // The stopped service's process and its engines may still be exiting for a moment: every
+    // replace is retried (the pins are checked once, before the retries).
     for name in pins::FILES {
-        pins::copy_verified(&source.resources, &dir, name)?;
+        let bytes = pins::read_verified(&source.resources, name)?;
+        let to = dir.join(name);
+        retry(|| pins::write_replacing(&to, &bytes))?;
     }
     let exe = dir.join(EXE_NAME);
     let bytes = std::fs::read(&source.exe).map_err(failed)?;
-    // The stopped service's process may still be exiting for a moment: retry the replace.
     retry(|| pins::write_replacing(&exe, &bytes))?;
     // The service runs Tunnel mode only from a folder users cannot change: checked here too, so a
     // folder it would refuse fails the install with the file and the reason.
