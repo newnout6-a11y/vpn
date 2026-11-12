@@ -246,8 +246,9 @@ impl Default for Settings {
 impl Document for Settings {
     const FILE: &'static str = "settings.json";
     const VERSION: u32 = 1;
-    // Only optional proxy credentials are secret, and they stay sealed in the moved-aside copy, so a
-    // corrupt file is moved aside and the app continues with defaults instead of going read-only.
+    // The secrets here (the optional proxy credentials and the log key) are DPAPI-sealed and stay
+    // sealed in the moved-aside copy, so a corrupt file is moved aside and the app continues with
+    // defaults instead of going read-only; a fresh log key is generated on the next start.
     const HOLDS_SECRETS: bool = false;
 }
 

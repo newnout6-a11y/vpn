@@ -81,6 +81,8 @@ pub(crate) struct Shared {
     pub verdicts: Option<Arc<Verdicts>>,
     /// The current physical network: a change drops the network check in flight.
     pub epoch: network::NetEpoch,
+    /// Held by the one diagnostics export, from the first click through the Save dialog.
+    pub export_claim: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
@@ -100,6 +102,7 @@ impl Shared {
             dirty: Notify::new(),
             verdicts,
             epoch: network::NetEpoch::default(),
+            export_claim: std::sync::atomic::AtomicBool::new(false),
         });
         project::spawn(&shared);
         shared

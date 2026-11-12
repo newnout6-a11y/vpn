@@ -1,6 +1,8 @@
 /* tailwind-utilities-used.css — every non-swiss class rule the start page and shell use.
  * Source: vpn-tunnel-enforcer/out/renderer/assets/index-CZyNNw4X.css (globals.css @layer components, Tailwind utilities, state and responsive variants,
- * the @keyframes they reference) and CountryFlagIcon-7DQa9fPm.css (flag-icons 7, MIT; only the flags in use,
+ * the @keyframes they reference) and CountryFlagIcon-7DQa9fPm.css (flag-icons 7, MIT, Copyright (c) 2013
+ * Panayiotis Lipiridis; the full licence text ships in licenses/THIRD-PARTY-NOTICES.txt from
+ * installer/third-party-assets.txt; only the flags in use,
  * their SVGs are inline data: URIs). Rules are verbatim and in bundle order; @media wrappers preserved.
  * A rule is kept when all classes of one of its selectors occur in
  *   dom              the 40 dashboard/shell DOM snapshots (dashboard/*.html), or

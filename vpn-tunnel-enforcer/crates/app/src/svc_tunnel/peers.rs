@@ -106,18 +106,19 @@ pub(crate) fn vpn_profile(row: ServerRow, fingerprints: &Fingerprints) -> Option
     })
 }
 
-/// The lifecycle's stop of the external proxy slots (spec external-proxy §3.28): a VPN stop
-/// (`"vpn-stop"`) stops the unleased slots, leased ones keep serving their clients; the stop of
-/// an app exit (`"shutdown"`) stops every slot.
+/// The lifecycle's stop of the external proxy slots (spec external-proxy §3.28): the stop of an
+/// app exit (`"shutdown"`) stops every slot and closes the control API for good; any other reason
+/// (`"vpn-stop"` today) takes the milder VPN-stop path: the unleased slots stop, leased ones keep
+/// serving their clients. Only the explicit word is irreversible.
 pub(super) struct Slots(pub Arc<Proxies>);
 
 #[async_trait]
 impl ExternalProxies for Slots {
     async fn stop_all(&self, reason: &str) {
-        if reason == "vpn-stop" {
-            self.0.vpn_stopped().await;
-        } else {
+        if reason == "shutdown" {
             self.0.shutdown().await;
+        } else {
+            self.0.vpn_stopped().await;
         }
     }
 }

@@ -356,3 +356,22 @@ fn old_data_directory_is_removed_only_when_safe() {
     assert!(dirs.root.join("migration.json").exists());
     assert!(dirs.root.join("settings.json").exists());
 }
+
+/// A second export while the first one's Save dialog is still open is refused before a second
+/// dialog opens (the busy check used to see only a running pack); the claim is released again.
+#[tokio::test]
+async fn a_second_export_is_refused_while_the_first_asks_where_to_save() {
+    use crate::api_maintenance::export::ExportClaim;
+
+    let r = rig("export-twice");
+    let first = ExportClaim::take(r.shared.clone()).expect("the first export claims it");
+    assert_eq!(
+        refusal_key(r.api.export_diagnostics(CancellationToken::new()).await),
+        (ErrorKind::Conflict, "core.ops.busy".to_owned())
+    );
+    drop(first);
+    assert!(
+        ExportClaim::take(r.shared.clone()).is_some(),
+        "the claim is released with its holder"
+    );
+}

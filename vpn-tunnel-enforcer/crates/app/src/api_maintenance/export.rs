@@ -41,15 +41,40 @@ pub(crate) struct ExportSources {
     pub journal: Arc<tweaks::Journal>,
 }
 
+/// One export from the first click to the end of packing (the Save dialog included); released
+/// on every exit path, a dismissed dialog and an error too.
+pub(crate) struct ExportClaim(Arc<Shared>);
+
+impl ExportClaim {
+    pub(crate) fn take(shared: Arc<Shared>) -> Option<Self> {
+        shared
+            .export_claim
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self(shared))
+    }
+}
+
+impl Drop for ExportClaim {
+    fn drop(&mut self) {
+        self.0.export_claim.store(false, Ordering::Release);
+    }
+}
+
 /// Asks for the destination and packs the archive; `Ok(None)` = the dialog was dismissed.
 pub(crate) async fn run(
     shared: Arc<Shared>,
     cancel: CancellationToken,
 ) -> AppResult<Option<ExportDone>> {
-    // One export app-wide: refused before the user is asked where to save it.
+    // One export app-wide: refused before the user is asked where to save it. The claim also
+    // covers the Save dialog: an owner-less dialog leaves the window clickable, and a second click
+    // must not open a second dialog only to be refused after a file was chosen.
     if shared.backend.ops.is_busy(RESOURCE) || shared.state.borrow().export.running {
         return Err(refused("core.ops.busy"));
     }
+    let Some(_claim) = ExportClaim::take(shared.clone()) else {
+        return Err(refused("core.ops.busy"));
+    };
     let backend = &shared.backend;
     let lang = backend.lang();
     let file = SaveFile::new(
