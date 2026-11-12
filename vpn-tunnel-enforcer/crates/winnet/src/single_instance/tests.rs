@@ -343,7 +343,11 @@ fn a_squatter_reads_no_link() {
             event: raw(&event),
             stop: None,
         };
-        io.connect().unwrap();
+        // The launch may check the server and leave before this connect runs; Windows then ends
+        // the connect with ERROR_NO_DATA ("the pipe is being closed"). Nothing was read either way.
+        if io.connect().is_err() {
+            return None;
+        }
         let mut buf = [0u8; MAX_LINE];
         io.read(&mut buf).map(|n| buf[..n].to_vec()).ok()
     });
