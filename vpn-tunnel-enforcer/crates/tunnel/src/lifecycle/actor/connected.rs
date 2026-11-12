@@ -1,5 +1,6 @@
 //! The one hook every path that brings protection up goes through, and notices.
 use super::*;
+use crate::history::SessionMode;
 
 /// The one hook every path that brings protection up goes through (H-05).
 impl Actor {
@@ -59,7 +60,10 @@ impl Actor {
         let generation = self.session.as_ref().and_then(|s| s.generation);
         self.deps.monitor.start(generation);
         if matches!(job, Job::Connect { .. }) && generation.is_some() {
-            self.notify(Level::Info, "connected", NoticeKind::VpnConnect, None);
+            // Proxy mode never claims "all traffic": programs ignoring the system proxy go direct.
+            let soft = self.session.as_ref().is_some_and(LiveSession::is_soft);
+            let name = if soft { "softConnected" } else { "connected" };
+            self.notify(Level::Info, name, NoticeKind::VpnConnect, None);
         }
         self.announce_up();
     }
@@ -84,15 +88,17 @@ impl Actor {
     }
 
     /// The live session, rebuilt from the runtime status when none is open (old
-    /// `ensureSessionForRunningTunnel`): provenance "runtime", ids never the display name.
+    /// `ensureSessionForRunningTunnel`): provenance "runtime", ids never the display name, the
+    /// mode from the running capture (a proxy-capture run is a Soft session).
     pub(super) fn ensure_session(&mut self, holder: Owner) -> &mut LiveSession {
         let status = self.status.borrow().clone();
         let profiles = &self.deps.profiles;
         self.session.get_or_insert_with(|| {
+            let soft = status.capture == Some(CaptureKind::Proxy);
             let profile = match status.mode {
                 Some(ModeKind::DirectVpn) => {
                     let active = profiles.resolve(None).map(|c| c.server);
-                    match (active, status.profile_name.as_deref()) {
+                    let profile = match (active, status.profile_name.as_deref()) {
                         (Some(server), Some(name)) if server.profile.name == name => {
                             SessionProfile::direct(&server)
                         }
@@ -101,15 +107,28 @@ impl Actor {
                             ..SessionProfile::direct_unknown()
                         },
                         _ => SessionProfile::direct_unknown(),
+                    };
+                    let mode = if soft {
+                        SessionMode::Soft
+                    } else {
+                        profile.mode
+                    };
+                    SessionProfile { mode, ..profile }
+                }
+                _ => {
+                    let addr = status.proxy_addr.as_deref().unwrap_or_default();
+                    let profile = match status.proxy_type.filter(|_| soft) {
+                        Some(kind) => SessionProfile::soft(addr, kind),
+                        None => SessionProfile::local_proxy(addr),
+                    };
+                    match addr {
+                        "" => SessionProfile {
+                            name: "Local Proxy".into(),
+                            ..profile
+                        },
+                        _ => profile,
                     }
                 }
-                _ => match status.proxy_addr.as_deref() {
-                    Some(addr) => SessionProfile::local_proxy(addr),
-                    None => SessionProfile {
-                        name: "Local Proxy".into(),
-                        ..SessionProfile::local_proxy("")
-                    },
-                },
             };
             LiveSession::open(profile, None, holder)
         })

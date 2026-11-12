@@ -19,7 +19,7 @@ use vpnte_profiles::emit_singbox::EmitPolicy;
 use vpnte_profiles::model::Profile;
 
 use super::actor::{Actor, Phase, Retained, Session, SlotSession};
-use super::capture::CapturePlan;
+use super::capture::{Capture, CapturePlan};
 use super::config;
 use super::engines::{CoreProc, Engines};
 use super::pin::pin_native;
@@ -186,18 +186,26 @@ fn previous_not_stopped() -> TunError {
 }
 
 impl Actor {
-    /// Makes `kind` the strategy of the next session. A strategy the host did not supply (TUN
-    /// without elevation) answers `Permission`. Protection the previous strategy still holds
-    /// (preserved stop, blocking crash outcome, failed release) is released first: two
-    /// strategies never share a session; a failed release refuses the start.
-    async fn adopt_strategy(&mut self, kind: CaptureKind) -> Result<(), TunError> {
-        let next = match kind {
+    /// The capture of `kind`; a strategy the host did not supply (TUN without elevation)
+    /// answers `Permission`, before anything runs.
+    fn supplied(&self, kind: CaptureKind) -> Result<Arc<dyn Capture>, TunError> {
+        match kind {
             CaptureKind::Tun => self.deps.tun.clone().ok_or_else(|| {
                 let msg = Msg::new("tunnel.runtime.tunUnavailable");
                 TunError::new(ErrorKind::Permission, msg)
-            })?,
-            CaptureKind::Proxy => self.deps.proxy.clone(),
-        };
+            }),
+            CaptureKind::Proxy => Ok(self.deps.proxy.clone()),
+        }
+    }
+
+    /// Makes `next` (of `kind`) the strategy of the next session. Protection the previous
+    /// strategy still holds (preserved stop, blocking crash outcome, failed release) is released
+    /// first: two strategies never share a session; a failed release refuses the start.
+    async fn adopt_strategy(
+        &mut self,
+        kind: CaptureKind,
+        next: Arc<dyn Capture>,
+    ) -> Result<(), TunError> {
         if kind == self.strategy {
             return Ok(());
         }
@@ -227,8 +235,9 @@ impl Actor {
         op: &CancellationToken,
         avoid: &[String],
     ) -> Result<StartReceipt, TunError> {
+        let capture = self.supplied(req.capture)?;
         self.retire().await?;
-        self.adopt_strategy(req.capture).await?;
+        self.adopt_strategy(req.capture, capture).await?;
         if req.origin != Origin::Recovery {
             // Every start but a crash recovery (protected restarts included) reopens the
             // auto-restart window (§3.5 (d)).

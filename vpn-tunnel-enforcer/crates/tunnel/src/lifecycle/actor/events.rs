@@ -124,12 +124,9 @@ impl Actor {
         if keep {
             let e = self.evidence();
             self.fsm.fault(FaultState::Blocked, e);
-            self.notify(
-                Level::Warn,
-                "crashBlocked",
-                NoticeKind::ConnectionError,
-                None,
-            );
+            // Not `crashBlocked`: no firewall holds anything here, only the system proxy does.
+            let kind = NoticeKind::ConnectionError;
+            self.notify(Level::Warn, "softBlocked", kind, None);
             return;
         }
         match self.deps.soft.rollback().await {

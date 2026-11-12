@@ -224,6 +224,9 @@ impl History { pub fn new(store: Arc<Store<ConnectionHistory>>) -> Self; pub fn 
 Writes are blocking file I/O (`spawn_blocking` in async code). The lifecycle writes every row; the
 app reads (`list` / `filter` / `stats` / exports, `subscribe` for changes), clears, and calls
 `import_legacy(&decrypted_electron_store)` once during the legacy import.
+Row names are data (never localized): the server's name; over a local proxy `Proxy <addr>` in
+both modes (ids `local-proxy` / `local-proxy-soft-<kind>`); `Direct VPN` when no server was
+known. The row's `mode` carries the mode name («Туннель» / «Прокси»).
 
 ## `lifecycle` — the lane: who may change the tunnel
 ```rust
@@ -365,7 +368,8 @@ pub struct EngineParts { pub upstream: Upstream, pub listeners: Listeners, pub r
 pub struct TunForm { pub dual_stack: bool, pub dns_hijack: bool }
 pub fn tun_form(level: KillSwitchLevel, leak_protection: bool) -> TunForm;  // WFP guard -> dual stack + native DNS
 pub struct TunCapture;  impl TunCapture { pub fn new(protection: Arc<vpnte_winnet::wfp::Protection>) -> Self }
-pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self }   // + Default; needs no privileges
+pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self;   // + Default; needs no privileges
+    pub fn port(&self) -> Option<u16> }   // the session's mixed port (the app's local-proxy scan skips it)
 // engines (real: RealEngines over vpnte_engine; tests: fakes in runtime/tests)
 #[async_trait] pub trait CoreProc: Send + Sync { fn pid(&self) -> u32;
     async fn wait_ready(&self, timeout: Duration, cancel: &CancellationToken) -> Result<(), StartError>;
@@ -380,14 +384,16 @@ pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self }   // + Defa
 #[async_trait] pub trait Engines: Send + Sync {
     fn spawn_core(&self, config: &[u8]) -> io::Result<Arc<dyn CoreProc>>;   // config on stdin
     fn slots(&self, events: mpsc::Sender<XrayEvent>) -> Box<dyn Slots>;
-    fn xray_exe(&self) -> PathBuf; fn log_files(&self, slots: bool) -> Vec<PathBuf>;
+    fn singbox_exe(&self) -> PathBuf; fn xray_exe(&self) -> PathBuf; fn log_files(&self, slots: bool) -> Vec<PathBuf>;
     async fn select(&self, clash: &ClashEndpoint, slot: Slot) -> AppResult<()>;
     async fn upstream_downloads(&self, clash: &ClashEndpoint) -> AppResult<Vec<(String, u64)>>;
     async fn resolve(&self, hosts: &[String], path: ResolvePath, cancel: &CancellationToken)
         -> Result<Resolved, ResolveFault>;
     async fn egress_via(&self, server: &Profile, port: u16, creds: &Creds, cancel: &CancellationToken)
         -> AppResult<IpAddr>;   // staged slot's SOCKS; each echo request = a new handshake to `server`
-    async fn egress(&self, timeout: Duration, cancel: &CancellationToken) -> AppResult<IpAddr>;
+    async fn egress(&self, via: Option<u16>, timeout: Duration, cancel: &CancellationToken)
+        -> AppResult<IpAddr>;   // through the tunnel: default route (TUN) or `via` = the proxy
+                                // capture's mixed port (the app's requests never use the system proxy)
     async fn local_proxy(&self, addr: &HostPort, limit: Duration) -> AppResult<Option<PathBuf>>;
     async fn physical_dns(&self) -> Vec<Ipv4Addr>; }
 // the app's handshake budget (probe discipline): the tunnel cannot depend on vpnte-probes
@@ -474,7 +480,11 @@ cleaning up in the background. `Done::warnings` / `ConnError::warnings` are extr
   (`attempt`, `max`), `crashBlocked`, `failover` (`name`), `restartFailed` (body = runtime warning),
   `internalError` (a lane effect panicked: the lane is released, A-01; whatever the start brought
   up is stopped by the recovery stop), `softRestored` (a Soft engine was lost for good with the kill
-  switch off: the tweaks were rolled back, programs connect directly). Rotation, schedule and tray toasts are their owners'. The notifier applies the user's
+  switch off: the tweaks were rolled back, programs connect directly). Proxy mode never claims
+  more than it does: a Soft connect sends `softConnected` instead of `connected` (only programs
+  that use the system proxy go through the VPN), a Soft engine lost with the kill switch
+  `standard` sends `softBlocked` instead of `crashBlocked` (no firewall: the system proxy points
+  at the dead port). Rotation, schedule and tray toasts are their owners'. The notifier applies the user's
   `NoticeKind` switches; the lifecycle does not.
 - **`maintenance`** past the 120 s lane budget: the action is dropped, the caller gets
   `ConnError::Timeout` (`tunnel.lifecycle.lane.maintenanceTimeout`) and the state reads `unknown`
@@ -496,7 +506,8 @@ cleaning up in the background. `Done::warnings` / `ConnError::warnings` are extr
 | `tunnel.runtime.serverNotPreResolved` | start warning: a native server name keeps sing-box's own lookup | — |
 | `tunnel.runtime.tunUnavailable`, `tunnel.runtime.proxy.{strictUnavailable,notAccepting}` | strategy refusals, proxy readiness | `port` (`notAccepting`) |
 | `tunnel.runtime.cleanup.{exitUnproven,xray,protection}` | compensation / stop warnings, `Error{warning}` | — |
-| `tunnel.runtime.watchdog.{proxyDown,upstreamDown,slotExited}` | `ProxyDown{reason}` | `addr` / `name` / — |
+| `tunnel.runtime.watchdog.{proxyDown,upstreamDown,slotExited}` | `ProxyDown{reason}` (TUN capture) | `addr` / `name` / — |
+| `tunnel.runtime.watchdog.proxyMode.{proxyDown,upstreamDown,slotExited}` | the same under the proxy capture (no "traffic held in the TUN" claim) | `addr` / `name` / — |
 | `tunnel.lifecycle.lane.*`, `.server.{none,unavailable}`, `.soft.*` | `ConnError` messages | — |
 | `tunnel.lifecycle.outcome.*` | lifecycle headlines of ended sessions | — |
 | `tunnel.lifecycle.notice.<name>.{title,body}` | notices (above) | per notice |

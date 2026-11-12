@@ -360,8 +360,16 @@ impl Engines for FakeEngines {
         let staged = usize::from(self.0.running.lock()[1]);
         Ok(self.0.slot_ip[staged])
     }
-    async fn egress(&self, _t: Duration, _c: &CancellationToken) -> AppResult<IpAddr> {
-        self.0.note("egress");
+    async fn egress(
+        &self,
+        via: Option<u16>,
+        _t: Duration,
+        _c: &CancellationToken,
+    ) -> AppResult<IpAddr> {
+        self.0.note(match via {
+            Some(port) => format!("egress:{port}"),
+            None => "egress".to_owned(),
+        });
         Ok(*self.0.tunnel_ip.lock())
     }
     async fn local_proxy(&self, addr: &HostPort, _limit: Duration) -> AppResult<Option<PathBuf>> {

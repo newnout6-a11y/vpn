@@ -5,6 +5,13 @@
       "proxy": {
         "strictUnavailable": "The strict kill switch is not available in Proxy mode: it needs WFP filters (Tunnel mode, started as administrator).",
         "notAccepting": "The engine's local proxy does not accept connections on port {{port}}."
+      },
+      "watchdog": {
+        "proxyMode": {
+          "proxyDown": "Proxy {{addr}} does not respond. Programs that use the system proxy get no connection until it answers again; other programs connect directly.",
+          "upstreamDown": "The VPN through server «{{name}}» is not confirmed. Programs that use the system proxy may get no connection; other programs connect directly. Check the connection or choose another server.",
+          "slotExited": "The server's xray-core exited; restarting it. Programs that use the system proxy wait until it is back."
+        }
       }
     },
     "lifecycle": {
@@ -12,6 +19,14 @@
         "strictUnavailable": "The strict kill switch is not available in Proxy mode. Choose Standard or Off, or Tunnel mode."
       },
       "notice": {
+        "softConnected": {
+          "title": "Proxy mode on",
+          "body": "Programs that use the Windows system proxy go through the VPN; other programs connect directly."
+        },
+        "softBlocked": {
+          "title": "The VPN engine stopped",
+          "body": "The system proxy still points at the stopped engine: programs that use it get no connection until you turn protection on again or off. Other programs connect directly."
+        },
         "softRestored": {
           "title": "Proxy mode stopped",
           "body": "The VPN engine stopped. The system proxy was restored: programs connect directly, without the VPN."

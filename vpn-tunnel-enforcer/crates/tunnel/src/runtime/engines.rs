@@ -99,8 +99,15 @@ pub trait Engines: Send + Sync {
         creds: &Creds,
         cancel: &CancellationToken,
     ) -> AppResult<IpAddr>;
-    /// Public IPv4 seen through the default route (the tunnel once it is up).
-    async fn egress(&self, timeout: Duration, cancel: &CancellationToken) -> AppResult<IpAddr>;
+    /// Public IPv4 seen through the running tunnel: the default route under the TUN, the
+    /// session's loopback `mixed` inbound (`via`) under the proxy capture (the app's own
+    /// requests never use the system proxy, so the default route would show the real address).
+    async fn egress(
+        &self,
+        via: Option<u16>,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> AppResult<IpAddr>;
     /// The local proxy answers on TCP within `limit`; returns its listener's image path.
     async fn local_proxy(&self, addr: &HostPort, limit: Duration) -> AppResult<Option<PathBuf>>;
     /// IPv4 resolvers of the physical adapters (empty when unreadable).
@@ -312,8 +319,20 @@ impl Engines for RealEngines {
         echo(&route, EGRESS_VIA_BUDGET, admit, cancel).await
     }
 
-    async fn egress(&self, timeout: Duration, cancel: &CancellationToken) -> AppResult<IpAddr> {
-        echo(&Route::Direct, timeout, None, cancel).await
+    async fn egress(
+        &self,
+        via: Option<u16>,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> AppResult<IpAddr> {
+        let route = match via {
+            Some(port) => {
+                let addr = HostPort::new("127.0.0.1", port)?;
+                Route::proxy(ProxyKind::Socks5, &addr, None)
+            }
+            None => Route::Direct,
+        };
+        echo(&route, timeout, None, cancel).await
     }
 
     async fn local_proxy(&self, addr: &HostPort, limit: Duration) -> AppResult<Option<PathBuf>> {

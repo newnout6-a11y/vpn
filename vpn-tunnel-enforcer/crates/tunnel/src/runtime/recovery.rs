@@ -245,7 +245,12 @@ impl Actor {
         tracing::error!(?slot, ?code, "active Xray slot exited");
         slots.restarts.retain(|t| t.elapsed() < SLOT_WINDOW);
         let tries = slots.restarts.len();
-        self.proxy_down(Msg::new("tunnel.runtime.watchdog.slotExited"));
+        let reason = super::watchdog::held(
+            s.req.capture,
+            "tunnel.runtime.watchdog.slotExited",
+            "tunnel.runtime.watchdog.proxyMode.slotExited",
+        );
+        self.proxy_down(reason);
         match SLOT_BACKOFF.get(tries) {
             Some(delay) => self.slot_due = Some(Instant::now() + *delay),
             None => self.end_as_crash().await,

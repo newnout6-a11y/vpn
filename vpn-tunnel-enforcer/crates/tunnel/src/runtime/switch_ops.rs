@@ -125,7 +125,7 @@ impl SwitchOps for RuntimeSwitch<'_> {
         } else {
             (self.timings.confirm_candidate, self.cancel.clone())
         };
-        let seen = self.engines.egress(budget, &token).await?;
+        let seen = self.engines.egress(self.proof.port, budget, &token).await?;
         if seen != expected {
             return Err(unconfirmed("tunnel egress differs from the slot's"));
         }

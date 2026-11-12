@@ -1,7 +1,7 @@
 {
   "tunnel": {
     "runtime": {
-      "alreadyRunning": "The TUN is already running",
+      "alreadyRunning": "Protection is already running",
       "actorGone": "The tunnel service does not respond. Restart the app and check the log.",
       "notRunning": "The tunnel is not running",
       "noLastStart": "No parameters of a previous start: turn protection on again.",

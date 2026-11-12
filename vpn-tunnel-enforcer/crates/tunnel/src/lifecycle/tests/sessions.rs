@@ -46,6 +46,8 @@ async fn owned_soft_session_writes_one_row_at_stop() {
         assert_eq!(kind(row), OutcomeKind::UserStop);
         assert_eq!(row.correlation_id.as_ref(), Some(&id));
         assert_eq!(row.profile_id, "local-proxy-soft-http");
+        // The name names the upstream; the mode («Прокси») is the row's own field.
+        assert_eq!(row.profile_name, "Proxy 127.0.0.1:8080");
         let p = row.provenance.as_ref().expect("provenance");
         assert_eq!(
             (p.source, p.owner, p.route, p.confidence),
@@ -76,6 +78,10 @@ async fn soft_runs_the_engine_and_points_the_tweaks_at_it() {
     assert_eq!(live.mode, SessionMode::Soft);
     assert_eq!(live.profile_id, "srv-a");
     assert!(live.generation.is_some(), "a Soft session is an engine run");
+    // Proxy mode never claims that all traffic goes through the VPN.
+    let titles = h.notifier.titles();
+    assert!(titles.contains(&"tunnel.lifecycle.notice.softConnected.title".to_owned()));
+    assert!(!titles.contains(&"tunnel.lifecycle.notice.connected.title".to_owned()));
     h.lc.disconnect(user_stop()).await.unwrap();
     assert_eq!(h.soft.state.lock().applied, None);
     let rows = h.rows();
@@ -215,7 +221,9 @@ async fn soft_engine_loss_follows_the_kill_switch() {
             assert_eq!(h.snap().state, TunnelState::Unknown);
         } else {
             assert_eq!(applied, Some((soft_addr(SOFT_PORT), ProxyKind::Http)));
-            assert!(noticed("crashBlocked"), "{titles:?}");
+            // No firewall holds anything in Soft: never the TUN's "firewall blocks" notice.
+            assert!(noticed("softBlocked"), "{titles:?}");
+            assert!(!noticed("crashBlocked"), "{titles:?}");
             assert_eq!(h.snap().state, TunnelState::Blocked);
             h.lc.disconnect(user_stop()).await.expect("stop");
             assert_eq!(h.soft.state.lock().applied, None);
@@ -388,6 +396,34 @@ async fn runtime_rebuilt_session_has_runtime_provenance() {
     assert_eq!(
         (rows[1].profile_id.as_str(), rows[1].mode),
         ("srv-nl", SessionMode::Direct)
+    );
+}
+
+/// The same rebuild in Proxy mode (review): the running capture decides the mode, so the row
+/// is a Soft row (route soft-env), never a Direct one.
+#[tokio::test]
+async fn runtime_rebuilt_soft_session_stays_soft() {
+    use crate::api::TunnelEvent;
+    let h = Harness::new();
+    h.profiles.add("srv-nl", "nl-1", true);
+    h.lc.connect(soft_vpn(None, Owner::Manual)).await.unwrap();
+    h.rt.emit(TunnelEvent::ProtectedRestart {
+        reason: "server switch".into(),
+    });
+    h.settle().await;
+    h.rt.auto_restart();
+    h.settle().await;
+    let live = h.lc.session().borrow().clone().expect("rebuilt session");
+    assert_eq!(
+        (live.profile_id.as_str(), live.mode),
+        ("srv-nl", SessionMode::Soft)
+    );
+    h.lc.disconnect(user_stop()).await.unwrap();
+    let rows = h.rows();
+    let route = rows[1].provenance.as_ref().map(|p| p.route);
+    assert_eq!(
+        (rows[1].mode, route),
+        (SessionMode::Soft, Some(Route::SoftEnv))
     );
 }
 

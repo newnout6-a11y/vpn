@@ -19,7 +19,8 @@ pub(super) struct SessionProfile {
 }
 
 impl SessionProfile {
-    /// Hard TUN through a local proxy.
+    /// Hard TUN through a local proxy. The name is data (the old rows' format) and names the
+    /// upstream only: the history row's mode carries the mode name («Туннель» / «Прокси»).
     pub fn local_proxy(addr: &str) -> Self {
         Self {
             id: "local-proxy".into(),
@@ -37,8 +38,8 @@ impl SessionProfile {
         };
         Self {
             id: format!("local-proxy-soft-{kind}"),
-            name: format!("Soft proxy {addr}"),
             mode: SessionMode::Soft,
+            ..Self::local_proxy(addr)
         }
     }
 

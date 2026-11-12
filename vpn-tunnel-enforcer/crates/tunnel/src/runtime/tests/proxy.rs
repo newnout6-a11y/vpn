@@ -84,6 +84,42 @@ async fn tun_without_a_tun_capture_answers_permission() {
         .expect("proxy start");
 }
 
+/// The `Permission` refusal comes before anything runs (review): a TUN start refused in a
+/// TUN-less host leaves a pending crash restart of the proxy session alone.
+#[tokio::test]
+async fn a_refused_tun_start_keeps_the_pending_crash_restart() {
+    let w = World::new();
+    let mut d = deps(&w);
+    d.tun = None;
+    d.timings.backoff = [Duration::from_millis(300); 3];
+    let h = TunnelHandle::spawn(d);
+    let mut events = h.subscribe();
+    h.start(proxy_req(), CancellationToken::new())
+        .await
+        .expect("proxy start");
+    w.core(0).crash();
+    until(&mut events, |e| {
+        matches!(e, TunnelEvent::Status(TunStatusKind::Restarting { .. }))
+    })
+    .await;
+    let err = h
+        .start(local_req(), CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Permission);
+    until(&mut events, |e| {
+        matches!(
+            e,
+            TunnelEvent::StartFinished {
+                generation: 2,
+                ok: true
+            }
+        )
+    })
+    .await;
+    assert_eq!(h.status().borrow().capture, Some(CaptureKind::Proxy));
+}
+
 /// NOADMIN.md §2: the strict kill switch needs WFP; the proxy capture refuses it before any
 /// engine runs.
 #[tokio::test]
@@ -234,4 +270,36 @@ async fn bundled_engines_go_direct_only_under_the_tun() {
     for exe in ["sing-box.exe", "xray.exe"] {
         assert_eq!(engine_rule(&proxy, exe), None, "{exe}");
     }
+}
+
+/// NOADMIN.md §2 (review): under the proxy capture the app's own requests never use the system
+/// proxy, so the default route shows the real address. The in-place switch therefore reads the
+/// tunnel egress through the session's mixed inbound; through the default route it could never
+/// match the slot's address and every Soft server switch on Xray would fail.
+#[tokio::test]
+async fn proxy_switch_reads_the_egress_through_the_mixed_inbound() {
+    use vpnte_base::types::EnginePref;
+    let w = World::new();
+    let h = TunnelHandle::spawn(deps(&w));
+    let soft = |key| StartRequest {
+        capture: CaptureKind::Proxy,
+        ..vpn_req(key, EnginePref::Xray)
+    };
+    h.start(soft(XRAY_KEY), CancellationToken::new())
+        .await
+        .expect("proxy slot start");
+    let port = proxy_in(&config(&w, 0)).expect("port");
+    let owner: crate::api::OwnerCheck = Arc::new(|| true);
+    let sw = h
+        .switch_upstream(soft(XRAY_KEY_2), CancellationToken::new(), owner)
+        .await
+        .expect("in place");
+    assert!(sw.verified(), "{sw:?}");
+    assert!(w.count(&format!("egress:{port}")) >= 1, "{:?}", w.log());
+    assert_eq!(
+        w.count("egress"),
+        0,
+        "never the default route: {:?}",
+        w.log()
+    );
 }

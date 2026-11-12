@@ -16,10 +16,20 @@ use super::actor::{Actor, Internal, Phase, Session};
 use super::capture::{Capture, CaptureCheck, CaptureProof};
 use super::engines::Engines;
 use super::{Confirmations, Timings, config};
-use crate::api::{Mode, TunStatusKind};
+use crate::api::{CaptureKind, Mode, TunStatusKind};
 
 /// Consecutive failed checks before the upstream is reported down.
 const FAILURES: u8 = 3;
+
+/// A watchdog text for the session's capture: the TUN holds every program's traffic, the proxy
+/// capture only that of programs using the system proxy (the others go direct), so each text
+/// says honestly what is held.
+pub(super) fn held(capture: CaptureKind, tun: &'static str, proxy: &'static str) -> Msg {
+    Msg::new(match capture {
+        CaptureKind::Tun => tun,
+        CaptureKind::Proxy => proxy,
+    })
+}
 
 fn every(period: Duration) -> tokio::time::Interval {
     let mut tick = tokio::time::interval_at(Instant::now() + period, period);
@@ -195,13 +205,21 @@ impl Actor {
         let current = s.generation;
         match report {
             Internal::ProxyDown { generation } if generation == current => {
+                let capture = s.req.capture;
                 let reason = match &s.req.mode {
-                    Mode::LocalProxy { addr, .. } => {
-                        Msg::new("tunnel.runtime.watchdog.proxyDown").arg("addr", addr)
-                    }
+                    Mode::LocalProxy { addr, .. } => held(
+                        capture,
+                        "tunnel.runtime.watchdog.proxyDown",
+                        "tunnel.runtime.watchdog.proxyMode.proxyDown",
+                    )
+                    .arg("addr", addr),
                     // The current name: an in-place switch changes it.
-                    Mode::DirectVpn { profile } => Msg::new("tunnel.runtime.watchdog.upstreamDown")
-                        .arg("name", &profile.profile.name),
+                    Mode::DirectVpn { profile } => held(
+                        capture,
+                        "tunnel.runtime.watchdog.upstreamDown",
+                        "tunnel.runtime.watchdog.proxyMode.upstreamDown",
+                    )
+                    .arg("name", &profile.profile.name),
                 };
                 self.proxy_down(reason);
             }
