@@ -18,8 +18,8 @@ use vpnte_winnet::process::SweepReport;
 use vpnte_winnet::wfp::{KillSwitchState as WfpState, RemoveReport};
 
 use super::{Shared, project, refused};
-use crate::api_settings::{blocking, detached};
 use crate::services::{Engines, KillSwitchStatus, TunnelOps};
+use crate::support::{blocking, detached};
 
 /// Engines the sweep stops, in stop order (the TUN consumer first, then its upstreams).
 pub(crate) const ENGINE_NAMES: [&str; 2] = ["sing-box.exe", "xray.exe"];
@@ -37,7 +37,12 @@ pub(crate) trait RepairHost: Send + Sync + 'static {
 pub(crate) struct WindowsHost;
 
 impl RepairHost for WindowsHost {
+    /// Refused while the old per-machine version is still installed: its boot-recovery task and
+    /// firewall rules are its working parts then, not leftovers.
     fn legacy(&self, marker: &Store<CleanupMarker>, ctx: &Context) -> AppResult<Run> {
+        if crate::setup::system::machine_wide_installed() {
+            return Err(refused("app.maintenance.repair.legacyInstalled"));
+        }
         legacy::run(marker, ctx, Mode::Again)
     }
 
@@ -164,7 +169,7 @@ async fn legacy_again(shared: &Arc<Shared>) -> StepOutcome {
         Ok(tunnel) => cleanup_context(shared, &tunnel.kill_switch().await),
         Err(err) => return StepOutcome::failed(err.user_msg()),
     };
-    let (host, marker) = (shared.host.clone(), shared.marker.clone());
+    let (host, marker) = (shared.host.clone(), shared.backend.cleanup.clone());
     legacy_outcome(blocking(move || host.legacy(&marker, &ctx)).await)
 }
 

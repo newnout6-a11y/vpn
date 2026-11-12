@@ -7,11 +7,14 @@ use vpnte_base::i18n::Lang;
 use vpnte_base::{AppResult, ErrorKind, Msg};
 use vpnte_profiles::model::TooLarge;
 use windows::Win32::UI::Shell::{
-    FOS_FORCEFILESYSTEM, FOS_NOREADONLYRETURN, FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST,
+    FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_NOREADONLYRETURN, FOS_OVERWRITEPROMPT,
+    FOS_PATHMUSTEXIST,
 };
 
 use super::clipboard::{block_text, no_text};
-use super::files::{SaveFile, StartFolder, configure, file_name, in_sta, take_path};
+use super::files::{
+    OpenFile, SaveFile, StartFolder, configure_open, configure_save, file_name, in_sta, take_path,
+};
 
 /// A NUL-terminated UTF-16 block with `slack` units of junk after the terminator, as Windows
 /// rounds clipboard allocations up.
@@ -135,7 +138,7 @@ fn save_dialog_is_set_up_without_being_shown() {
         .filter(Msg::new("test.all"), "*.*")
         .in_folder(StartFolder::Downloads);
     let (name, index, options) = in_sta(|| {
-        let dialog = configure(&req, Lang::En)?;
+        let dialog = configure_save(&req, Lang::En)?;
         // SAFETY: getters of a live dialog; the name is the caller's to free (`take_path`).
         unsafe {
             Ok((
@@ -167,9 +170,29 @@ fn bare_save_requests_are_set_up_for_every_start_folder() {
         StartFolder::Desktop,
     ] {
         let req = SaveFile::new(Msg::new("test.title"), "export", "").in_folder(folder);
-        let set_up = in_sta(|| configure(&req, Lang::Ru).map(drop));
+        let set_up = in_sta(|| configure_save(&req, Lang::Ru).map(drop));
         assert!(set_up.is_ok(), "{folder:?}: {set_up:?}");
     }
+}
+
+/// The Open dialog (domain lists, program picker) is set up for one existing file system file,
+/// never shown.
+#[test]
+fn open_dialog_is_set_up_without_being_shown() {
+    let req = OpenFile::new(Msg::new("test.title"))
+        .filter(Msg::new("test.programs"), "*.exe")
+        .filter(Msg::new("test.all"), "*.*");
+    let (index, options) = in_sta(|| {
+        let dialog = configure_open(&req, Lang::Ru)?;
+        // SAFETY: getters of a live dialog on this COM thread.
+        unsafe { Ok((dialog.GetFileTypeIndex()?, dialog.GetOptions()?)) }
+    })
+    .expect("dialog set up");
+    assert_eq!(index, 1);
+    for flag in [FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST] {
+        assert!(options.contains(flag), "{flag:?}");
+    }
+    assert!(!options.contains(FOS_OVERWRITEPROMPT));
 }
 
 /// Every `app.clickjack.*` key the code uses is in both fragments, and the fragments match.

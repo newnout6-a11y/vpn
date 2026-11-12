@@ -20,9 +20,9 @@ use vpnte_ui::split_tunnel::{AppKind, AppRule, SplitApp, SplitSnapshot, SplitTun
 use vpnte_ui::widgets::{Load, UiError};
 
 use super::refused;
-use crate::api_settings::dialog::{self, FileDialog};
-use crate::api_settings::{blocking, detached};
 use crate::services::Backend;
+use crate::support::files::pick_program;
+use crate::support::{blocking, detached};
 
 /// [`SplitTunnelApi`] over the routing rules store.
 pub struct SplitService(Arc<Shared>);
@@ -166,15 +166,7 @@ impl SplitTunnelApi for SplitService {
     }
 
     async fn add_app(&self) -> AppResult<Option<SplitApp>> {
-        let picker = FileDialog::open(
-            dialog::lang(&self.0.backend),
-            "app.settings.dialog.pickApp",
-            &[
-                ("app.settings.dialog.programs", "*.exe"),
-                ("app.settings.dialog.allFiles", "*.*"),
-            ],
-        );
-        let Some(path) = dialog::show(picker).await? else {
+        let Some(path) = pick_program(self.0.backend.lang()).await? else {
             return Ok(None);
         };
         self.add_program(path).await.map(Some)

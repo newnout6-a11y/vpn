@@ -9,6 +9,8 @@ const DIR: &str = r"C:\fixture\vpn";
 const EXE: &str = r"C:\fixture\vpn\VPN Tunnel Enforcer.exe";
 const RUNTIME: &str = r"C:\ProgramData\VPNTE\runtime";
 const OWN_PID: u32 = 9999;
+/// The Windows session the gate runs in.
+const OWN_SESSION: u32 = 1;
 const TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
@@ -17,6 +19,7 @@ struct Proc {
     ppid: u32,
     path: &'static str,
     created: u64,
+    session: Option<u32>,
 }
 
 impl Proc {
@@ -26,7 +29,12 @@ impl Proc {
             ppid,
             path,
             created,
+            session: Some(OWN_SESSION),
         }
+    }
+
+    fn in_session(self, session: Option<u32>) -> Self {
+        Self { session, ..self }
     }
 }
 
@@ -138,14 +146,25 @@ impl ProcessOs for Fake {
         let frame = &self.frames[self.snapshots.get().min(self.frames.len() - 1)];
         self.snapshots.set(self.snapshots.get() + 1);
         let killed = self.killed.borrow();
-        Ok(frame
-            .iter()
-            .filter(|p| !(self.kill_works && killed.contains(&p.pid)))
-            .map(|p| ProcRow {
-                pid: p.pid,
-                ppid: p.ppid,
-                name: p.path.rsplit('\\').next().unwrap_or_default().to_owned(),
-            })
+        // The helper itself (a copy of the client exe) is always listed.
+        let own = ProcRow {
+            pid: OWN_PID,
+            ppid: 1,
+            name: MAIN_EXE.to_owned(),
+            session: Some(OWN_SESSION),
+        };
+        Ok(std::iter::once(own)
+            .chain(
+                frame
+                    .iter()
+                    .filter(|p| !(self.kill_works && killed.contains(&p.pid)))
+                    .map(|p| ProcRow {
+                        pid: p.pid,
+                        ppid: p.ppid,
+                        name: p.path.rsplit('\\').next().unwrap_or_default().to_owned(),
+                        session: p.session,
+                    }),
+            )
             .collect())
     }
     fn image_path(&self, pid: u32) -> Result<PathBuf, ProcError> {
@@ -332,6 +351,45 @@ fn unidentifiable_clients_refuse_without_killing() {
         100,
     )]]);
     assert!(matches!(os.run(), Err(Refusal::CannotIdentify)));
+    assert!(os.killed.borrow().is_empty());
+}
+
+/// One copy runs per Windows session (owner decision 12): another user's own client, which a
+/// standard user cannot read, does not block the update of this session's copy, and the shared
+/// Electron runtime engines it may use stay alone. An unreadable client of this session or of an
+/// unknown session still refuses, and a readable one of ours in another session cannot be
+/// reached by the signal, so it refuses before anything is signalled.
+#[test]
+fn clients_of_other_sessions() {
+    let theirs = Proc::new(
+        80,
+        1,
+        r"C:\Users\b\AppData\Local\VPNTE\VPN Tunnel Enforcer.exe",
+        90,
+    )
+    .in_session(Some(2));
+    let mut os = Fake::new(vec![vec![client(), theirs.clone()], vec![theirs.clone()]]);
+    os.denied = vec![80];
+    assert!(os.run().is_ok());
+    os.assert_signalled(true, true);
+
+    let engine = Proc::new(61, 80, r"C:\ProgramData\VPNTE\runtime\x\vpnte-xray.exe", 95);
+    let mut os = Fake::new(vec![vec![theirs.clone(), engine]]);
+    os.denied = vec![80];
+    assert!(os.run().is_ok());
+    os.assert_signalled(false, false);
+    assert!(os.killed.borrow().is_empty());
+
+    for session in [Some(OWN_SESSION), None] {
+        let mut os = Fake::new(vec![vec![theirs.clone().in_session(session)]]);
+        os.denied = vec![80];
+        assert!(matches!(os.run(), Err(Refusal::CannotIdentify)));
+        os.assert_signalled(false, false);
+    }
+
+    let os = Fake::new(vec![vec![client().in_session(Some(2))]]);
+    assert!(matches!(os.run(), Err(Refusal::CannotIdentify)));
+    os.assert_signalled(false, false);
     assert!(os.killed.borrow().is_empty());
 }
 

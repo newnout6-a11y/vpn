@@ -12,6 +12,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::AppResult;
 use vpnte_base::types::{ClientDevice, KillSwitchLevel};
+use vpnte_cleanup::legacy::CleanupMarker;
 use vpnte_core::logging::LogGuard;
 use vpnte_core::ops::{OperationRegistry, Source};
 use vpnte_core::paths::{DataDirs, DataLock};
@@ -66,6 +67,9 @@ pub struct Backend {
     pub themes: Arc<Store<ThemesDoc>>,
     /// `soft.json`: the dev tools a Soft session also configures.
     pub soft: Arc<Store<SoftDoc>>,
+    /// `legacy-network-cleanup.json`: the old version's network cleanup, shared by the elevated
+    /// start-up run and the maintenance page.
+    pub cleanup: Arc<Store<CleanupMarker>>,
     /// `rules.json`: split tunnel, DNS profiles and the active choice, domain rules.
     pub rules: Arc<Store<RulesDoc>>,
     /// Smart RU rule sets (`cache/rulesets.json` + `cache/rulesets/`): the active set and refresh.

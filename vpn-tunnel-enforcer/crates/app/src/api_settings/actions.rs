@@ -13,8 +13,9 @@ use vpnte_ui::theme::Theme;
 use vpnte_winnet::autostart::{self, AutostartOs, AutostartState};
 use vpnte_winnet::toast::{self, NotifySetting};
 
+use super::Shared;
 use super::project::{core_notify_method, theme_exists, wfp_exception_kind};
-use super::{Shared, blocking, detached};
+use crate::support::{blocking, detached};
 
 /// Stores the language the page already switched to.
 pub async fn set_language(shared: &Arc<Shared>, lang: Lang) -> AppResult<()> {

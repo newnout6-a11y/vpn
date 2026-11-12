@@ -84,6 +84,7 @@ pub fn backend(dir: &TempDir, tunnel: Arc<dyn TunnelOps>) -> Arc<Backend> {
         protection: Arc::new(Store::<ProtectionDoc>::open(&root)),
         themes: Arc::new(Store::<ThemesDoc>::open(&root)),
         soft: Arc::new(Store::<SoftDoc>::open(&root)),
+        cleanup: Arc::new(Store::open(&root)),
         rules: Arc::new(Store::<RulesDoc>::open(&root)),
         rule_sets: Arc::new(RuleSetService::new(
             Arc::new(Store::<RuleSetsDoc>::open(&root)),

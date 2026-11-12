@@ -1,7 +1,7 @@
-//! The native Save dialog (`IFileSaveDialog`) the export actions (logs, diagnostics, histories)
-//! ask for a path. A shell window of the user's own session: no elevation, no rights beyond the
-//! user's. The path the backend then writes is the user's answer in that window, never a string
-//! that came from the page.
+//! The native file dialogs (`IFileOpenDialog` / `IFileSaveDialog`) every page uses: exports ask
+//! where to save, the domain-list import and the program picker ask what to open. A shell window
+//! of the user's own session: no elevation, no rights beyond the user's. The path the backend then
+//! reads or writes is the user's answer in that window, never a string that came from the page.
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
@@ -16,15 +16,16 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
-    FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOS_FORCEFILESYSTEM,
-    FOS_NOREADONLYRETURN, FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST, FileSaveDialog, IFileSaveDialog,
-    IShellItem, KF_FLAG_DEFAULT, SHGetKnownFolderItem, SIGDN_FILESYSPATH,
+    FILEOPENDIALOGOPTIONS, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads,
+    FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_NOREADONLYRETURN, FOS_OVERWRITEPROMPT,
+    FOS_PATHMUSTEXIST, FileOpenDialog, FileSaveDialog, IFileDialog, IShellItem, KF_FLAG_DEFAULT,
+    SHGetKnownFolderItem, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 use windows::core::{GUID, HRESULT, HSTRING, PCWSTR, PWSTR};
 
-/// Where the dialog opens while Windows remembers no folder of ours yet; afterwards it reopens
-/// where the user saved last.
+/// Where the Save dialog opens while Windows remembers no folder of ours yet; afterwards it
+/// reopens where the user saved last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StartFolder {
     #[default]
@@ -84,6 +85,32 @@ impl SaveFile {
     }
 }
 
+/// What the Open dialog shows (one existing file). Texts are keys, rendered in the language given
+/// to [`open_file`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenFile {
+    pub title: Msg,
+    /// `(label, pattern)`; the first is selected.
+    pub filters: Vec<(Msg, String)>,
+}
+
+impl OpenFile {
+    /// A dialog titled `title`, without file types yet.
+    pub fn new(title: Msg) -> Self {
+        Self {
+            title,
+            filters: Vec::new(),
+        }
+    }
+
+    /// Adds a file type; the first one added is selected.
+    #[must_use]
+    pub fn filter(mut self, label: Msg, pattern: &str) -> Self {
+        self.filters.push((label, pattern.to_owned()));
+        self
+    }
+}
+
 /// `name` as a valid Windows file name: reserved and control characters become `_`, trailing
 /// dots and spaces go (Windows would drop them silently), and a device name (`CON`, `nul.txt`,
 /// `COM1`, ...) gets a `_` in front. Server names and times (`12:30`) end up in suggested names.
@@ -117,26 +144,40 @@ fn is_device(name: &str) -> bool {
 }
 
 /// Asks where to save; `Ok(None)` = the user dismissed the dialog. Modal to our window when it is
-/// in front (the user just clicked in it). Blocks until the dialog closes: call it from a blocking
-/// thread (`spawn_blocking`), never from the UI thread, which must keep pumping messages while its
-/// window is the dialog's owner.
-pub fn save_file_blocking(req: &SaveFile, lang: Lang) -> AppResult<Option<PathBuf>> {
-    let owner = own_foreground_window();
-    // A thread of its own gets a fresh single-threaded apartment, whatever COM state the calling
-    // (pool) thread was left in.
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .name("save-dialog".into())
-            .spawn_scoped(scope, || in_sta(|| ask(&configure(req, lang)?, owner)))
-            .map_err(failed)?
-            .join()
-            .unwrap_or_else(|_| Err(failed(anyhow::anyhow!("save dialog thread panicked"))))
-    })
+/// in front (the user just clicked in it).
+pub async fn save_file(req: SaveFile, lang: Lang) -> AppResult<Option<PathBuf>> {
+    super::blocking(move || show(|| configure_save(&req, lang))).await
 }
 
-/// [`save_file_blocking`] on tokio's blocking pool.
-pub async fn save_file(req: SaveFile, lang: Lang) -> AppResult<Option<PathBuf>> {
-    super::blocking(move || save_file_blocking(&req, lang)).await
+/// Asks which existing file to open; `Ok(None)` = the user dismissed the dialog.
+pub async fn open_file(req: OpenFile, lang: Lang) -> AppResult<Option<PathBuf>> {
+    super::blocking(move || show(|| configure_open(&req, lang))).await
+}
+
+/// The program picker of the kill-switch exceptions and the split tunnel.
+pub async fn pick_program(lang: Lang) -> AppResult<Option<PathBuf>> {
+    let req = OpenFile::new(Msg::new("app.settings.dialog.pickApp"))
+        .filter(Msg::new("app.settings.dialog.programs"), "*.exe")
+        .filter(Msg::new("app.settings.dialog.allFiles"), "*.*");
+    open_file(req, lang).await
+}
+
+/// Shows the dialog `make` sets up and blocks until it closes (a blocking-pool thread, never the
+/// UI thread, which must keep pumping messages while its window owns the dialog). The dialog runs
+/// on a thread of its own: a fresh single-threaded apartment, whatever COM state the pool thread
+/// was left in.
+fn show(
+    make: impl FnOnce() -> windows::core::Result<IFileDialog> + Send,
+) -> AppResult<Option<PathBuf>> {
+    let owner = own_foreground_window();
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("file-dialog".into())
+            .spawn_scoped(scope, || in_sta(|| ask(&make()?, owner)))
+            .map_err(failed)?
+            .join()
+            .unwrap_or_else(|_| Err(failed(anyhow::anyhow!("file dialog thread panicked"))))
+    })
 }
 
 /// Our process's foreground window as a plain number (a window handle is not `Send`); a window
@@ -166,13 +207,51 @@ pub(super) fn in_sta<T>(f: impl FnOnce() -> windows::core::Result<T>) -> AppResu
     result
 }
 
-/// The dialog set up for `req`, not shown (COM must be initialised on this thread).
-pub(super) fn configure(req: &SaveFile, lang: Lang) -> windows::core::Result<IFileSaveDialog> {
-    // SAFETY: COM is initialised on this thread; the CLSID / IID pair is the shell's own.
-    let dialog: IFileSaveDialog =
-        unsafe { CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)? };
-    let texts: Vec<(HSTRING, HSTRING)> = req
-        .filters
+/// A Save dialog set up for `req`, not shown (COM must be initialised on this thread).
+pub(super) fn configure_save(req: &SaveFile, lang: Lang) -> windows::core::Result<IFileDialog> {
+    let options = FOS_OVERWRITEPROMPT | FOS_NOREADONLYRETURN;
+    let dialog = create(&FileSaveDialog, &req.title, &req.filters, lang, options)?;
+    // SAFETY: a live dialog; the HSTRING arguments outlive the calls.
+    unsafe {
+        dialog.SetFileName(&HSTRING::from(file_name(&req.file_name)))?;
+        if !req.extension.is_empty() {
+            dialog.SetDefaultExtension(&HSTRING::from(&req.extension))?;
+        }
+    }
+    // A redirected folder that is unavailable (OneDrive offline) leaves the shell's own choice.
+    // SAFETY: a known-folder id constant; no token = the current user.
+    let folder =
+        unsafe { SHGetKnownFolderItem::<IShellItem>(req.folder.id(), KF_FLAG_DEFAULT, None) };
+    if let Ok(folder) = folder {
+        // SAFETY: a live shell item.
+        unsafe { dialog.SetDefaultFolder(&folder)? };
+    }
+    Ok(dialog)
+}
+
+/// An Open dialog for one existing file, set up for `req`, not shown.
+pub(super) fn configure_open(req: &OpenFile, lang: Lang) -> windows::core::Result<IFileDialog> {
+    create(
+        &FileOpenDialog,
+        &req.title,
+        &req.filters,
+        lang,
+        FOS_FILEMUSTEXIST,
+    )
+}
+
+/// The shell dialog `clsid` with its title and file types; always a real file-system path in an
+/// existing folder, plus `extra` options.
+fn create(
+    clsid: &GUID,
+    title: &Msg,
+    filters: &[(Msg, String)],
+    lang: Lang,
+    extra: FILEOPENDIALOGOPTIONS,
+) -> windows::core::Result<IFileDialog> {
+    // SAFETY: COM is initialised on this thread; both shell dialogs implement `IFileDialog`.
+    let dialog: IFileDialog = unsafe { CoCreateInstance(clsid, None, CLSCTX_INPROC_SERVER)? };
+    let texts: Vec<(HSTRING, HSTRING)> = filters
         .iter()
         .map(|(label, pattern)| (HSTRING::from(label.render(lang)), HSTRING::from(pattern)))
         .collect();
@@ -189,31 +268,15 @@ pub(super) fn configure(req: &SaveFile, lang: Lang) -> windows::core::Result<IFi
             dialog.SetFileTypes(&specs)?;
             dialog.SetFileTypeIndex(1)?;
         }
-        dialog.SetTitle(&HSTRING::from(req.title.render(lang)))?;
-        dialog.SetFileName(&HSTRING::from(file_name(&req.file_name)))?;
-        if !req.extension.is_empty() {
-            dialog.SetDefaultExtension(&HSTRING::from(&req.extension))?;
-        }
-        let options = dialog.GetOptions()?
-            | FOS_OVERWRITEPROMPT
-            | FOS_FORCEFILESYSTEM
-            | FOS_PATHMUSTEXIST
-            | FOS_NOREADONLYRETURN;
+        dialog.SetTitle(&HSTRING::from(title.render(lang)))?;
+        let options = dialog.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | extra;
         dialog.SetOptions(options)?;
-    }
-    // A redirected folder that is unavailable (OneDrive offline) leaves the shell's own choice.
-    // SAFETY: a known-folder id constant; no token = the current user.
-    let folder =
-        unsafe { SHGetKnownFolderItem::<IShellItem>(req.folder.id(), KF_FLAG_DEFAULT, None) };
-    if let Ok(folder) = folder {
-        // SAFETY: a live shell item.
-        unsafe { dialog.SetDefaultFolder(&folder)? };
     }
     Ok(dialog)
 }
 
 /// Shows `dialog` modal to `owner`: the chosen path, `None` when it was dismissed.
-fn ask(dialog: &IFileSaveDialog, owner: Option<isize>) -> windows::core::Result<Option<PathBuf>> {
+fn ask(dialog: &IFileDialog, owner: Option<isize>) -> windows::core::Result<Option<PathBuf>> {
     // SAFETY: `owner` is a window of this process or none; the call blocks until the dialog closes.
     match unsafe { dialog.Show(owner.map(|h| HWND(h as *mut _))) } {
         Err(err) if err.code() == HRESULT::from_win32(ERROR_CANCELLED.0) => return Ok(None),
@@ -237,7 +300,7 @@ pub(super) fn take_path(text: PWSTR) -> PathBuf {
 fn failed(source: impl Into<anyhow::Error>) -> AppError {
     AppError::msg(
         ErrorKind::Internal,
-        Msg::new("app.clickjack.saveDialog.failed"),
+        Msg::new("app.clickjack.fileDialog.failed"),
     )
     .with_source(source)
 }

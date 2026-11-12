@@ -11,9 +11,10 @@ use vpnte_core::settings::{RuleSetMode, SettingsPatch};
 use vpnte_tunnel::lifecycle::{ConnError, Done};
 use vpnte_ui::settings as ui;
 
+use super::Shared;
 use super::project::{core_bootstrap_mode, core_connection_mode, core_routing_mode, settings_view};
-use super::{Shared, unavailable};
 use crate::services::Backend;
+use crate::support::unavailable;
 
 /// Update interval of the managed Smart RU lists the auto-update switch selects (hours).
 const RULE_SET_HOURS: u32 = 24;

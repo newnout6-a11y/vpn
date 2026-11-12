@@ -18,14 +18,14 @@ use tokio::time::MissedTickBehavior;
 use vpnte_base::{AppError, AppResult, Msg};
 use vpnte_core::store::{Document, SCHEMA_KEY};
 use vpnte_forensics::domains::DomainsDoc;
-use vpnte_tunnel::fsm::{TunnelSnapshot, TunnelState};
+use vpnte_tunnel::fsm::TunnelState;
 use vpnte_ui::traffic_history::{
     DomainRow, SiteInfo, TrafficHistoryApi, TrafficSnapshot, site_url,
 };
 use vpnte_ui::widgets::{Load, UiError};
 
-use crate::api_settings::{blocking, detached};
 use crate::services::Backend;
+use crate::support::{blocking, changed_opt, detached};
 
 /// How often the file is looked at while the page is on screen. The service writes it at most
 /// every 10 s, so a new domain shows within about 12 s.
@@ -172,7 +172,7 @@ async fn follow(shared: Arc<Shared>) {
         tokio::select! {
             () = shutdown.cancelled() => return,
             _ = look.tick() => {}
-            () = tunnel_changed(&mut snapshot) => {}
+            () = changed_opt(&mut snapshot) => {}
         }
         if shared.state.receiver_count() == 0 {
             continue;
@@ -180,16 +180,6 @@ async fn follow(shared: Arc<Shared>) {
         if let Err(err) = shared.refresh(false).await {
             tracing::debug!(error = %err, "traffic history not read");
         }
-    }
-}
-
-/// Waits for a change of the tunnel state; never returns once the tunnel is gone.
-async fn tunnel_changed(rx: &mut Option<watch::Receiver<TunnelSnapshot>>) {
-    let Some(current) = rx.as_mut() else {
-        return std::future::pending().await;
-    };
-    if current.changed().await.is_err() {
-        *rx = None;
     }
 }
 

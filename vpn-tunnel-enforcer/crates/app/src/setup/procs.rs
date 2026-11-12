@@ -1,5 +1,7 @@
-//! The real process layer of the installer gate: Toolhelp snapshot, image paths, creation times,
-//! bound handles, a detached start and termination (delivery §6.6 `ProcessOs`).
+//! The real process layer of the installer gate: Toolhelp snapshot with session ids, image
+//! paths, creation times, bound handles, a detached start and termination (delivery §6.6
+//! `ProcessOs`).
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
 use std::os::windows::ffi::OsStringExt;
@@ -15,6 +17,9 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
+use windows::Win32::System::RemoteDesktop::{
+    WTS_CURRENT_SERVER_HANDLE, WTS_PROCESS_INFOW, WTSEnumerateProcessesW, WTSFreeMemory,
+};
 use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_ACCESS_RIGHTS,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
@@ -29,6 +34,8 @@ pub struct RealProcesses;
 
 impl ProcessOs for RealProcesses {
     fn snapshot(&self) -> io::Result<Vec<ProcRow>> {
+        // Before the snapshot: a process started in between has no session (counts as ours).
+        let sessions = sessions();
         // SAFETY: plain call; the handle is owned right below.
         let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }?;
         // SAFETY: the snapshot handle is ours and closed only by `Owned`.
@@ -58,6 +65,7 @@ impl ProcessOs for RealProcesses {
                 pid: entry.th32ProcessID,
                 ppid: entry.th32ParentProcessID,
                 name: String::from_utf16_lossy(&entry.szExeFile[..len]),
+                session: sessions.get(&entry.th32ProcessID).copied(),
             });
             // SAFETY: as above.
             step = unsafe { Process32NextW(*snap, &mut entry) };
@@ -164,6 +172,30 @@ fn open(pid: u32, rights: PROCESS_ACCESS_RIGHTS) -> Result<Owned<HANDLE>, ProcEr
     Ok(unsafe { Owned::new(handle) })
 }
 
+/// Session id of every process from the session list. Unlike `ProcessIdToSessionId` it opens no
+/// process, so it covers another user's processes, which a standard user cannot open. Empty when
+/// the list is unavailable: then no process counts as another session's.
+fn sessions() -> HashMap<u32, u32> {
+    let mut info: *mut WTS_PROCESS_INFOW = std::ptr::null_mut();
+    let mut count = 0u32;
+    // SAFETY: two valid out pointers; on success `info` is freed with WTSFreeMemory below.
+    let listed = unsafe {
+        WTSEnumerateProcessesW(Some(WTS_CURRENT_SERVER_HANDLE), 0, 1, &mut info, &mut count)
+    };
+    if listed.is_err() || info.is_null() {
+        return HashMap::new();
+    }
+    // SAFETY: on success `info` points to `count` initialised entries owned by wtsapi32 until
+    // the free below.
+    let map = unsafe { std::slice::from_raw_parts(info, count as usize) }
+        .iter()
+        .map(|p| (p.ProcessId, p.SessionId))
+        .collect();
+    // SAFETY: `info` came from WTSEnumerateProcessesW and is freed exactly once.
+    unsafe { WTSFreeMemory(info.cast()) };
+    map
+}
+
 /// ERROR_INVALID_PARAMETER from `OpenProcess` means the PID no longer exists.
 fn classify(err: windows::core::Error) -> ProcError {
     match WIN32_ERROR::from_error(&err) {
@@ -231,15 +263,23 @@ mod tests {
     fn snapshot_sees_this_process() {
         let os = RealProcesses;
         let me = std::process::id();
-        let row = os
-            .snapshot()
-            .expect("snapshot")
-            .into_iter()
-            .find(|r| r.pid == me);
+        let rows = os.snapshot().expect("snapshot");
+        let row = rows.iter().find(|r| r.pid == me);
         assert!(row.is_some_and(|r| r.name.ends_with(".exe")));
         let path = os.image_path(me).expect("own image");
         assert_eq!(path, std::env::current_exe().expect("current exe"));
         assert!(os.created(me).is_some());
         assert!(matches!(os.image_path(0), Err(ProcError::Gone)));
+
+        // The session ids come without opening a process: our own matches the kernel's, and an
+        // interactive session also sees the services of session 0, which it cannot open.
+        let mut own = u32::MAX;
+        // SAFETY: valid out pointer.
+        unsafe { windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(me, &mut own) }
+            .expect("own session");
+        assert_eq!(row.and_then(|r| r.session), Some(own));
+        if own != 0 {
+            assert!(rows.iter().any(|r| r.session == Some(0) && r.pid > 4));
+        }
     }
 }

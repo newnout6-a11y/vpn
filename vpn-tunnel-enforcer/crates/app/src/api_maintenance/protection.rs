@@ -8,7 +8,7 @@ use vpnte_ui::maintenance::{FirewallBlock, FwProfile, KillSwitchState, Protectio
 use vpnte_winnet::wfp::{self, FwProfileBlock, KillSwitchState as WfpState, ProtectionStatus};
 
 use super::{Shared, project};
-use crate::api_settings::blocking;
+use crate::support::blocking;
 
 /// Reads the protection back, publishes it in the snapshot and returns it.
 pub(crate) async fn verify(shared: &Shared) -> AppResult<ProtectionView> {

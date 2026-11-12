@@ -18,9 +18,9 @@ use vpnte_ui::logs::{
 };
 use vpnte_ui::widgets::{Load, UiError};
 
-use crate::api_settings::dialog::{self, FileDialog};
-use crate::api_settings::{blocking, detached};
 use crate::services::Backend;
+use crate::support::files::{SaveFile, save_file};
+use crate::support::{blocking, detached};
 
 /// [`LogsApi`] over the backend.
 pub struct LogsService {
@@ -72,7 +72,7 @@ fn publish(shared: &Shared) {
                 .unwrap_or_else(|| Msg::new("app.logs.historyUnreadable")),
         }),
         _ => {
-            let lang = dialog::lang(&shared.backend);
+            let lang = shared.backend.lang();
             Load::Ready(history.list().iter().map(|e| rows::row(e, lang)).collect())
         }
     };
@@ -95,15 +95,18 @@ impl LogsApi for LogsService {
 
     async fn export_history(&self, format: ExportFormat, file_name: String) -> AppResult<String> {
         let backend = self.shared.backend.clone();
-        let lang = dialog::lang(&backend);
-        let ext = format.extension();
+        let lang = backend.lang();
         let (label, pattern) = match format {
             ExportFormat::Csv => ("app.logs.dialog.csv", "*.csv"),
             ExportFormat::Json => ("app.logs.dialog.json", "*.json"),
         };
-        let opts = FileDialog::open(lang, "app.logs.dialog.export", &[(label, pattern)])
-            .save_as(file_name, ext);
-        let Some(path) = dialog::show(opts).await? else {
+        let req = SaveFile::new(
+            Msg::new("app.logs.dialog.export"),
+            file_name,
+            format.extension(),
+        )
+        .filter(Msg::new(label), pattern);
+        let Some(path) = save_file(req, lang).await? else {
             return Err(AppError::cancelled());
         };
         blocking(move || {

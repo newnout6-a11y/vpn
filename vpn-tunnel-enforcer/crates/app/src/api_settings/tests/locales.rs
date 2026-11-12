@@ -33,7 +33,7 @@ fn fragments_match_and_cover_the_code() {
         include_str!("../actions.rs"),
         include_str!("../rules.rs"),
         include_str!("../wizard.rs"),
-        include_str!("../dialog.rs"),
+        include_str!("../../support/files.rs"),
         include_str!("../../api_logs/mod.rs"),
         include_str!("../../services.rs"),
     ];

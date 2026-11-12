@@ -13,7 +13,6 @@
         "writeFailed": "Could not write the file. Choose another folder."
       },
       "dialog": {
-        "failed": "Could not open the save dialog.",
         "saveKey": "Save VPN key — the file contains an access secret",
         "saveAllKeys": "Save all VPN keys — the file contains passwords and keys",
         "saveProxyList": "Save proxy list — the file may contain passwords",

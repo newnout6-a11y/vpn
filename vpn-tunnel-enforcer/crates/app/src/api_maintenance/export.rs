@@ -18,7 +18,7 @@ use vpnte_forensics::export::{
 use vpnte_ui::maintenance::{ExportDone, ExportView};
 
 use super::{Shared, refused};
-use crate::api_settings::detached;
+use crate::support::detached;
 use crate::support::files::{SaveFile, StartFolder, save_file};
 
 /// Asks for the destination and packs the archive; `Ok(None)` = the dialog was dismissed.
@@ -31,10 +31,7 @@ pub(crate) async fn run(
         return Err(refused("core.ops.busy"));
     }
     let backend = &shared.backend;
-    let lang = backend
-        .settings
-        .read(|s| s.locale)
-        .unwrap_or_else(vpnte_ui::lang::os_lang);
+    let lang = backend.lang();
     let file = SaveFile::new(
         Msg::new("forensics.export.dialogTitle"),
         export::default_file_name(now_ms()),

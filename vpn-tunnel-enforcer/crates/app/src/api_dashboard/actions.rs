@@ -1,7 +1,6 @@
 //! The hub's operations behind the API methods. A state-changing one runs on its own backend
 //! task, so it completes when the page is left mid-call, and publishes what it changed before it
 //! returns; measurements (pings) stop with their caller instead.
-use std::future::Future;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,20 +19,12 @@ use vpnte_ui::tray::QuitMode;
 
 use super::{Hub, project};
 use crate::services::TunnelOps;
+use crate::support::{blocking, detached};
 
 /// The tunnel's share of the app-exit cleanup (the whole exit stays within ~15 s).
 const QUIT_TUNNEL_BUDGET: Duration = Duration::from_secs(12);
 /// Draining the feature operations at exit.
 const QUIT_OPS_BUDGET: Duration = Duration::from_secs(3);
-
-/// Runs `fut` on its own backend task: the work finishes even when the caller is dropped.
-async fn detached<T: Send + 'static>(
-    fut: impl Future<Output = AppResult<T>> + Send + 'static,
-) -> AppResult<T> {
-    tokio::spawn(fut)
-        .await
-        .unwrap_or_else(|err| Err(AppError::internal(err)))
-}
 
 /// Who shows a lane call's warnings to the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,9 +336,8 @@ impl Hub {
         detached(async move {
             // Started on a backend task: the clipboard's owner task needs the runtime.
             let _ = backend.clipboard();
-            tokio::task::spawn_blocking(move || backend.clipboard().copy(&ip.to_string()))
+            blocking(move || backend.clipboard().copy(&ip.to_string()))
                 .await
-                .unwrap_or_else(|err| Err(AppError::internal(err)))
                 .map(|_| ())
         })
         .await
@@ -359,9 +349,7 @@ impl Hub {
         let hub = self.clone();
         detached(async move {
             let settings = hub.backend.settings.clone();
-            tokio::task::spawn_blocking(move || settings.update(|s| s.smart_ru_split = on))
-                .await
-                .unwrap_or_else(|err| Err(AppError::internal(err)))?;
+            blocking(move || settings.update(|s| s.smart_ru_split = on)).await?;
             hub.publish_dashboard();
             Ok(())
         })

@@ -104,13 +104,19 @@ $INSTDIR\licenses\sing-box.txt GPL-3.0.txt xray.txt wintun.txt OFL-InterTight.tx
   `%ProgramData%\VPNTE\runtime\`. NEVER select by image name alone: the user's own `xray.exe` / `sing-box.exe`
   elsewhere is not ours. Exclude the helper's own PID.
 - Primary = owned `VPN Tunnel Enforcer.exe` at `<dir>` whose parent is not another owned main-exe process (a parent
-  counts only if created before the child). More than one primary, or an owned main-exe process whose path
-  cannot be read → refuse `Cannot identify the installed primary client. Close VPNTE normally and retry; no
-  processes were killed.` A main exe running from another directory is ignored.
+  counts only if created before the child). More than one primary, a primary in another Windows session, or an
+  owned main-exe process of this session (or of an unknown session) whose path cannot be read → refuse `Cannot
+  identify the installed primary client. Close VPNTE normally and retry; no processes were killed.` A main exe
+  running from another directory is ignored, and so is an unreadable main exe of another Windows session (one copy
+  runs per session: another user's own copy, which a standard user cannot open; session ids come from
+  `WTSEnumerateProcessesW`, which opens no process). Either of the last two keeps the shared Electron runtime
+  engines alone.
 - Bind a handle to the primary (`SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION`) BEFORE signalling; its image
   path must still be `<dir>\VPN Tunnel Enforcer.exe` (else `Primary process identity changed; update refused.`).
 - Signal by starting `"<dir>\VPN Tunnel Enforcer.exe" --shutdown-for-update` (the INSTALLED exe: this reaches an
-  Electron 1.1.24 primary through Electron's second-instance path and a Rust primary through the pipe).
+  Electron 1.1.24 primary through Electron's second-instance path and a Rust primary through the pipe of the
+  helper's own session: mutex `Local\VpnTunnelEnforcer.Instance`, pipe `\\.\pipe\VpnTunnelEnforcer.<session id>`,
+  owner decision 12).
 - Wait up to `--timeout` (else `Client cleanup timed out; update refused.`); the bound handle's exit code must be
   `73` (else `Client exited without cleanup acknowledgement; update refused.`).
 - Drain ≤ 5 s (poll 200 ms). Leftover owned processes other than a primary (engines, `vpnte-proxy.exe`, Electron
@@ -371,9 +377,9 @@ A listener on a non-loopback address makes Windows Firewall ask for administrato
 - crate `cleanup`: a way to remove only the `sing-tun (<path>)` rule of our engine. While the per-machine
   version is still installed the elevated per-user uninstall skips `legacy::uninstall` as a whole (N6), so
   our own rule stays in that case.
-- app / cleanup (start-up `legacy::run`, elevated only): decide whether to wait while the per-machine version
-  is still registered (HKLM `...\Uninstall\{6ed500d7-e3cc-5276-81ea-221a0c3a3238}`); today it would delete
-  that installation's boot-recovery task and firewall rules while it is still installed.
+- (done 2026-11-12, review-app) app / cleanup (start-up `legacy::run`, elevated only): it waits while the
+  per-machine version is still registered (HKLM `...\Uninstall\6ed500d7-e3cc-5276-81ea-221a0c3a3238`, no braces);
+  so does the maintenance "run again" (`crates/app/progress/_review.md`).
 - winnet `API.md` (`toast` paragraph) still says the installer creates the all-users link and "never creates
   a per-user link": the installer's links are now `user_programs_dir()` / the user's desktop; a release build
   that re-stamps its link must look there.

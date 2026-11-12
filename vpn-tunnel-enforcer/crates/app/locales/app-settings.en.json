@@ -19,7 +19,6 @@
         "noList": "Choose a domain list file first."
       },
       "dialog": {
-        "failed": "Could not open the file dialog.",
         "domainList": "Import a domain list",
         "pickApp": "Choose a program",
         "textFiles": "Text files",

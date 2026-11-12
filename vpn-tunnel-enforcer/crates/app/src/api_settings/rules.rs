@@ -9,10 +9,11 @@ use vpnte_engine::routing::dns::DnsAddr;
 use vpnte_engine::routing::domain::{self, DomainPattern, DomainRule};
 use vpnte_ui::settings as ui;
 
-use super::dialog::{self, FileDialog};
+use super::Shared;
 use super::project::{core_rule_action, dns_kind};
-use super::{Shared, blocking, detached};
 use crate::services::Backend;
+use crate::support::files::{OpenFile, open_file};
+use crate::support::{blocking, detached};
 
 /// A domain list read and checked, waiting for the user's action choice.
 pub(crate) struct PickedList {
@@ -95,15 +96,13 @@ pub fn reorder_domain_rules(backend: &Backend, ids: &[String]) -> AppResult<()> 
 /// Open dialog + read + check a domain list against the current rules (nothing is written);
 /// the pick replaces an earlier one. `None` = dismissed.
 pub async fn pick_domain_list(shared: &Arc<Shared>) -> AppResult<Option<ui::DomainImportPreview>> {
-    let opts = FileDialog::open(
-        dialog::lang(&shared.backend),
-        "app.settings.dialog.domainList",
-        &[
-            ("app.settings.dialog.textFiles", "*.txt;*.list;*.conf"),
-            ("app.settings.dialog.allFiles", "*.*"),
-        ],
-    );
-    let Some(path) = dialog::show(opts).await? else {
+    let req = OpenFile::new(Msg::new("app.settings.dialog.domainList"))
+        .filter(
+            Msg::new("app.settings.dialog.textFiles"),
+            "*.txt;*.list;*.conf",
+        )
+        .filter(Msg::new("app.settings.dialog.allFiles"), "*.*");
+    let Some(path) = open_file(req, shared.backend.lang()).await? else {
         return Ok(None);
     };
     let shared = shared.clone();

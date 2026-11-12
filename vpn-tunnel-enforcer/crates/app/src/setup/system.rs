@@ -115,7 +115,7 @@ pub fn network(resources: &Path, elevated: bool) -> Vec<Step> {
         )),
         Err(err) => Outcome::Failed(err.to_string()),
     };
-    let leftovers = if hklm_key_present(MACHINE_WIDE_KEY) {
+    let leftovers = if machine_wide_installed() {
         Outcome::Done("left alone: the old per-machine version is still installed".into())
     } else {
         leftovers(resources)
@@ -127,9 +127,17 @@ pub fn network(resources: &Path, elevated: bool) -> Vec<Step> {
 }
 
 /// Uninstall key of the old per-machine installation (electron-builder's GUID for
-/// `com.vpntunnelenforcer.app`, 64-bit view). The per-user installer writes only HKCU.
+/// `com.vpntunnelenforcer.app`, 64-bit view, no braces: delivery §2). The per-user installer
+/// writes only HKCU.
 const MACHINE_WIDE_KEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Uninstall\6ed500d7-e3cc-5276-81ea-221a0c3a3238";
+
+/// The old per-machine version (1.x) is still installed. Its boot-recovery task, firewall rules
+/// and WFP sublayer are then its working parts, not leftovers: every cleanup of crate `cleanup`
+/// (start-up, maintenance, `--cleanup`, uninstall) leaves them alone. A blocking registry read.
+pub fn machine_wide_installed() -> bool {
+    hklm_key_present(MACHINE_WIDE_KEY)
+}
 
 /// A key exists in HKLM (64-bit view, read only). Unreadable counts as present: the old
 /// version's processes and rules are touched only when it is provably gone.

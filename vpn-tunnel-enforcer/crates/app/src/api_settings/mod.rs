@@ -9,7 +9,6 @@
 //! hardening, location privacy, config transfer, packet capture, diagnostics export) answer
 //! with an honest "not available" error and never pretend to work.
 mod actions;
-pub(crate) mod dialog;
 mod project;
 mod pump;
 mod rules;
@@ -23,13 +22,12 @@ pub(crate) mod test_support;
 mod tests;
 
 use std::any::Any;
-use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tokio::sync::{Notify, watch};
-use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
+use vpnte_base::Msg;
 use vpnte_ui::logs::LogsApi;
 use vpnte_ui::settings::{
     DnsView, DomainsView, KillSwitchView, NotificationsView, OsNotifications, RotationView,
@@ -124,41 +122,4 @@ impl Shared {
         f(&mut self.local.lock());
         self.dirty.notify_one();
     }
-}
-
-/// A feature this build does not wire: `Conflict` with its own message, never a fake result.
-pub(crate) fn unavailable(key: &'static str) -> AppError {
-    AppError::msg(ErrorKind::Conflict, Msg::new(key))
-}
-
-/// Runs `work` as a backend task and waits for it: dropping the caller's future (the page
-/// unmounted) does not stop a change half-way.
-pub(crate) async fn detached<T, Fut>(work: Fut) -> AppResult<T>
-where
-    T: Send + 'static,
-    Fut: Future<Output = AppResult<T>> + Send + 'static,
-{
-    joined(tokio::spawn(work).await)
-}
-
-/// Blocking file / registry / COM work on the blocking pool (it finishes even when the caller
-/// is dropped).
-pub(crate) async fn blocking<T, F>(work: F) -> AppResult<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> AppResult<T> + Send + 'static,
-{
-    joined(tokio::task::spawn_blocking(work).await)
-}
-
-fn joined<T>(result: Result<AppResult<T>, tokio::task::JoinError>) -> AppResult<T> {
-    result.unwrap_or_else(|err| {
-        if err.is_cancelled() {
-            Err(AppError::cancelled())
-        } else {
-            Err(AppError::internal(anyhow::anyhow!(
-                "settings task panicked: {err}"
-            )))
-        }
-    })
 }

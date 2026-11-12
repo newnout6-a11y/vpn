@@ -291,7 +291,6 @@ fn locale_fragments_pair_up_and_match_the_code() {
         include_str!("mod.rs"),
         include_str!("checks.rs"),
         include_str!("detail.rs"),
-        include_str!("dialog.rs"),
         include_str!("export.rs"),
         include_str!("import.rs"),
         include_str!("project.rs"),

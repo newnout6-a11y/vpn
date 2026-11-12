@@ -108,7 +108,7 @@ pub(super) fn current(shared: &Shared) -> ui::ServersView {
         session: session.as_deref(),
         switching: switching.as_deref(),
         geo_disabled: backend.settings.read(|s| s.disable_geo_lookup),
-        lang: shared.lang(),
+        lang: shared.backend.lang(),
     })
 }
 

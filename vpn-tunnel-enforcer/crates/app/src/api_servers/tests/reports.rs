@@ -276,32 +276,3 @@ fn health_updates_keep_identity_and_trace_country() {
     assert_eq!(shown.reason, Some(KeyHealthReason::Hy2UdpBlocked));
     assert_eq!(key_health_view(&alive).latency_ms, Some(120));
 }
-
-/// The Save dialog is created and set up as the user's own shell object (never shown here:
-/// nobody is at this desktop to answer it).
-#[test]
-fn the_save_dialog_sets_up_without_showing() {
-    use windows::Win32::UI::Shell::{FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT};
-
-    use super::super::dialog::{SaveOptions, configure, in_apartment};
-    let opts = SaveOptions {
-        title: "Save VPN key".into(),
-        file_name: "vless-NL-Amsterdam.txt".into(),
-        filters: vec![
-            ("Text file".into(), "*.txt".into()),
-            ("All files".into(), "*.*".into()),
-        ],
-        extension: "txt".into(),
-    };
-    let set_up = std::thread::spawn(move || {
-        in_apartment(|| {
-            let dialog = configure(&opts)?;
-            // SAFETY: a live dialog on this COM thread.
-            unsafe { Ok((dialog.GetFileTypeIndex()?, dialog.GetOptions()?)) }
-        })
-    });
-    let (index, options) = set_up.join().expect("dialog thread").expect("set up");
-    assert_eq!(index, 1);
-    assert_ne!(options.0 & FOS_OVERWRITEPROMPT.0, 0);
-    assert_ne!(options.0 & FOS_FORCEFILESYSTEM.0, 0);
-}

@@ -29,8 +29,6 @@ use parking_lot::Mutex;
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
-use vpnte_cleanup::legacy::CleanupMarker;
-use vpnte_core::store::Store;
 use vpnte_ui::maintenance::{
     CaptureView, ExportDone, LeakTestView, MaintenanceApi, MaintenanceState, ProtectionView,
     RepairView, RouteTestView, SecretsImport, SystemReport,
@@ -55,9 +53,6 @@ pub struct MaintenanceService(Arc<Shared>);
 pub(crate) struct Shared {
     pub backend: Arc<Backend>,
     pub state: watch::Sender<MaintenanceState>,
-    /// The old version's network-cleanup marker (`legacy-network-cleanup.json`). This package
-    /// is the only one that opens it: a later start-up cleanup must share this copy.
-    pub marker: Arc<Store<CleanupMarker>>,
     /// What the repair does to the machine (Windows; fakes in tests).
     pub host: Arc<dyn RepairHost>,
     /// The last system report as JSON, for the diagnostics export.
@@ -69,11 +64,9 @@ pub(crate) struct Shared {
 impl Shared {
     /// Publishes the first snapshot and starts the projection task.
     pub fn start(backend: Arc<Backend>, host: Arc<dyn RepairHost>) -> Arc<Self> {
-        let marker = Arc::new(Store::<CleanupMarker>::open(&backend.dirs.root));
         let shared = Arc::new(Self {
             backend,
             state: watch::Sender::new(MaintenanceState::default()),
-            marker,
             host,
             last_report: Mutex::new(None),
             dirty: Notify::new(),

@@ -13,7 +13,7 @@ use vpnte_core::store::{Mode, ReadOnlyReason};
 use vpnte_ui::maintenance::{CorruptStore, LegacyDir, LegacyView};
 
 use super::{Shared, project, refused};
-use crate::api_settings::blocking;
+use crate::support::blocking;
 
 /// The import's commit marker in the data root (written last by `app-import`): the old data is
 /// no longer needed once it exists.
@@ -38,7 +38,7 @@ fn read_view(shared: &Shared) -> LegacyView {
         secrets_pending: data_dir.is_some() && locked_at_import(&backend.dirs.root) > 0,
         data_dir,
         corrupt: corrupt_stores(backend.servers.mode()),
-        cleanup_failures: cleanup_failures(&shared.marker.snapshot()),
+        cleanup_failures: cleanup_failures(&shared.backend.cleanup.snapshot()),
     }
 }
 

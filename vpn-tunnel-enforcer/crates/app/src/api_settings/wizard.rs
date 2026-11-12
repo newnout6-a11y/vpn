@@ -20,7 +20,8 @@ use vpnte_ui::wizard::{
 };
 
 use super::pump::publish;
-use super::{Shared, actions, blocking, detached};
+use super::{Shared, actions};
+use crate::support::{blocking, detached};
 
 /// [`WizardApi`] over the backend.
 pub struct WizardService(pub(crate) Arc<Shared>);

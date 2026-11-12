@@ -44,6 +44,7 @@ without running destructors of the `Arc<Backend>`).
 | `protection` | `Store<ProtectionDoc>` (`protection.json`): level, leak protection, public Wi-Fi, LAN, exceptions | written only by app-tunnel through `TunnelOps` (WFP `Persist` callbacks); read by Settings (`KillSwitchView`) |
 | `themes` | `Store<ThemesDoc>` (`themes.json`): custom themes; `theme(id) -> Theme` resolves an id | Settings (`set_theme`, `themes` list), app-main (initial theme) |
 | `soft` | `Store<SoftDoc>` (`soft.json`): `DevTargets` of a Soft session (`soft_git` / `soft_gradle` / `soft_studio`) | Settings (save); app-tunnel reads it at every Soft apply and re-applies on change while a Soft session runs (subscribe) |
+| `cleanup` | `Store<CleanupMarker>` (`legacy-network-cleanup.json`): the old version's network cleanup | app-tunnel (elevated start-up run, skipped while the per-machine 1.x is installed); Maintenance (failures, "run again") |
 | `rules` | `Store<RulesDoc>` (`rules.json`): split tunnel, DNS profiles + active, domain rules | Settings (`dns`, `domains` sections); app-tunnel (`InputsSource`; the tunnel regenerates fragments on change) |
 | `rule_sets` | `RuleSetService` over `cache/rulesets.json` | Settings (`refresh_rule_sets`, `RuleSetView`); app-tunnel (`active(..)`, `prune()` before an engine start) |
 | `history` | connection history (`history/connections.json`) | Logs (`history`, `export_history`, `clear_all`); app-tunnel (`LifecycleDeps::history`) |
@@ -55,6 +56,7 @@ without running destructors of the `Arc<Backend>`).
 | `shutdown` | app-wide `CancellationToken` | every background task (child tokens) |
 | `clipboard` | secret clipboard, started by `Backend::clipboard()` inside the runtime | Servers (`copy_key`), Dashboard (`copy_ip`), Logs (`copy_text`) |
 | `tunnel` | `OnceLock<Arc<dyn TunnelOps>>`, read with `Backend::tunnel()` | Dashboard, Panels, Tray, Servers, Settings, Wizard |
+| `lang()` | method: the stored language, else Windows' (texts the backend renders: dialogs, exports, group names) | every page that renders a `Msg` itself; shared helpers: `support::{files, detached, blocking, changed}` |
 
 Documents are the single in-process copy: never open a second `Store` of the same type. Store
 writes are blocking file I/O (+ DPAPI for secrets): use `spawn_blocking` on hot async paths. A

@@ -1,8 +1,8 @@
 {
   "app": {
     "clickjack": {
-      "saveDialog": {
-        "failed": "Could not open the save dialog."
+      "fileDialog": {
+        "failed": "Could not open the file dialog."
       },
       "clipboard": {
         "busy": "The clipboard is in use by another program. Try again.",

@@ -14,6 +14,7 @@ use vpnte_ui::settings as ui;
 use super::project::{self, dns_view, domains_view, kill_switch_view, notifications_view};
 use super::{Shared, actions, wizard};
 use crate::services::{Backend, KillSwitchStatus, TunnelOps};
+use crate::support::{changed, changed_opt};
 
 /// Coalesces bursts of store events (a save writes several documents) into one projection.
 const DEBOUNCE: Duration = Duration::from_millis(40);
@@ -155,18 +156,4 @@ pub fn publish<T: PartialEq>(tx: &watch::Sender<T>, value: T) {
         }
         differs
     });
-}
-
-/// Waits for the next change; a closed channel never wakes the loop again.
-async fn changed<T>(rx: &mut watch::Receiver<T>) {
-    if rx.changed().await.is_err() {
-        std::future::pending::<()>().await;
-    }
-}
-
-async fn changed_opt<T>(rx: &mut Option<watch::Receiver<T>>) {
-    match rx {
-        Some(rx) => changed(rx).await,
-        None => std::future::pending().await,
-    }
 }

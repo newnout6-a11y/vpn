@@ -5,7 +5,6 @@
       "relaunchFailed": "Не удалось перезапустить VPN Tunnel Enforcer с правами администратора."
     },
     "singleInstance": {
-      "otherSession": "VPN Tunnel Enforcer уже запущен в другом сеансе Windows.",
       "noAnswer": "VPN Tunnel Enforcer уже запущен, но не ответил. Откройте его окно из трея."
     },
     "shell": {

@@ -64,7 +64,6 @@ vpnte_ui::lang::init_locales(&layers);
 | `winnet.clipboard.{busy,failed}` | — | `SecretClipboard::copy` |
 | `winnet.elevation.{declined,relaunchFailed}` | — | `relaunch_elevated` |
 | `winnet.singleInstance.noAnswer` | — | `single_instance::send` |
-| `winnet.singleInstance.otherSession` | — | not emitted any more (the pipe is per session since owner decision 12) |
 | `winnet.shell.{badUrl,noFolder,openFailed}` | — | `shell::*` |
 | `winnet.toast.productionAumid` | — | `toast::ensure_shortcut` (debug builds) |
 

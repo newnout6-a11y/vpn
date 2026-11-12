@@ -9,7 +9,9 @@ use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
+use vpnte_base::i18n::Lang;
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
+use vpnte_cleanup::legacy::CleanupMarker;
 use vpnte_core::logging;
 use vpnte_core::ops::OperationRegistry;
 use vpnte_core::paths::DataDirs;
@@ -66,6 +68,7 @@ pub fn build(args: &Args) -> AppResult<Arc<Backend>> {
         protection: Arc::new(Store::<ProtectionDoc>::open(&dirs.root)),
         themes: Arc::new(Store::<ThemesDoc>::open(&dirs.root)),
         soft: Arc::new(Store::<SoftDoc>::open(&dirs.root)),
+        cleanup: Arc::new(Store::<CleanupMarker>::open(&dirs.root)),
         rules: Arc::new(Store::<RulesDoc>::open(&dirs.root)),
         rule_sets: Arc::new(RuleSetService::new(rule_sets_doc, &dirs)),
         history: History::open(&dirs.root),
@@ -98,6 +101,14 @@ impl Backend {
     /// task): starting it outside one panics.
     pub fn clipboard(&self) -> &SecretClipboard {
         self.clipboard.get_or_init(SecretClipboard::start)
+    }
+
+    /// The user's language for texts the backend renders (dialogs, exports): the stored choice,
+    /// else Windows'.
+    pub fn lang(&self) -> Lang {
+        self.settings
+            .read(|s| s.locale)
+            .unwrap_or_else(vpnte_ui::lang::os_lang)
     }
 }
 

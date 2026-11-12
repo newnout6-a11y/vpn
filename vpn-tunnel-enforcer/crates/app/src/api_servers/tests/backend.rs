@@ -225,6 +225,7 @@ impl Env {
             protection: Arc::new(Store::<ProtectionDoc>::open(&dirs.root)),
             themes: Arc::new(Store::<ThemesDoc>::open(&dirs.root)),
             soft: Arc::new(Store::<SoftDoc>::open(&dirs.root)),
+            cleanup: Arc::new(Store::open(&dirs.root)),
             rules: Arc::new(Store::<RulesDoc>::open(&dirs.root)),
             rule_sets: Arc::new(RuleSetService::new(rule_sets, &dirs)),
             history: History::open(&dirs.root),

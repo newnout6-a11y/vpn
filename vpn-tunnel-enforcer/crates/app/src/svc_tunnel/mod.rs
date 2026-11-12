@@ -7,6 +7,7 @@ mod gate;
 mod guard;
 mod inputs;
 mod leaks;
+mod legacy;
 mod monitor;
 mod ops;
 mod peers;
@@ -152,7 +153,12 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
             b.shutdown.child_token(),
         ));
     }
-    tokio::spawn(recover(lifecycle.clone(), guard.clone(), soft.clone()));
+    tokio::spawn(recover(
+        b.clone(),
+        lifecycle.clone(),
+        guard.clone(),
+        soft.clone(),
+    ));
     let rule_sets = Arc::new(Notify::new());
     tokio::spawn(probe::refresh_rule_sets(
         b.rule_sets.clone(),
@@ -214,15 +220,25 @@ struct TunnelService {
 }
 
 /// Start-up recovery with the lane held (no connect can interleave): WFP leftovers of a crashed
-/// run (elevated only), then the Soft tweaks a crashed run left pointing at its dead engine
-/// (NOADMIN §2). Anything unconfirmed leaves the state `unknown`, never "disconnected".
-async fn recover(lifecycle: Lifecycle, guard: Arc<guard::Guard>, soft: Arc<soft::SoftTweaks>) {
+/// run (elevated only), the old version's network cleanup (elevated only, after the WFP start-up),
+/// then the Soft tweaks a crashed run left pointing at its dead engine (NOADMIN §2). Anything
+/// unconfirmed leaves the state `unknown`, never "disconnected".
+async fn recover(
+    backend: Arc<Backend>,
+    lifecycle: Lifecycle,
+    guard: Arc<guard::Guard>,
+    soft: Arc<soft::SoftTweaks>,
+) {
     let outcome = lifecycle
         .maintenance(move || async move {
+            let elevated = guard.wfp.is_some();
             let wfp = match tokio::task::spawn_blocking(move || guard.startup()).await {
                 Ok(result) => result,
                 Err(e) => Err(vpnte_base::AppError::internal(e)),
             };
+            if elevated {
+                legacy::startup(backend, wfp.is_ok()).await;
+            }
             let tweaks = if soft.soft.is_applied() {
                 tracing::info!("startup: rolling back the Soft tweaks of a previous run");
                 soft.restore().await

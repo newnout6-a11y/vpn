@@ -33,7 +33,7 @@ pub(super) async fn add(
         .add_from_input(&backend.refresh, &input, into, device, cancel)
         .await?;
     shared.publish();
-    let lang = shared.lang();
+    let lang = shared.backend.lang();
     let title = |id: &GroupId| {
         backend
             .servers

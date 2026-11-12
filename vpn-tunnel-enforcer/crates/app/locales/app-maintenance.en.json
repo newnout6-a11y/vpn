@@ -16,6 +16,7 @@
         "strictKept": "Strict mode: the persistent filters were kept. To remove them, turn strict mode off in Settings.",
         "filtersRemoved": "VPNTE filters removed: {{count}}",
         "legacyDeferred": "The old version is still running: close it and repeat the repair.",
+        "legacyInstalled": "The old version is still installed: its protection is left alone. Uninstall it and repeat the repair.",
         "checkRunning": "A server check is running: no processes were stopped, repeat after it finishes."
       },
       "selfTest": {

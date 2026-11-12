@@ -1,4 +1,4 @@
-//! [`ServersApi`] over the backend (work package `app-servers`): the server list projected into the
+//! [`ServerApi`] over the backend (work package `app-servers`): the server list projected into the
 //! page's snapshot, imports with their report, subscription refresh, selection and live switch
 //! with cancel, pings, key health, country checks, key copy and export, archive and groups.
 //!
@@ -9,7 +9,6 @@
 //! (`TunnelOps::live_checks` / `proxies`); without them they answer `Conflict`, never a fake result.
 mod checks;
 mod detail;
-mod dialog;
 mod export;
 mod import;
 mod live;
@@ -30,9 +29,8 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::i18n::Lang;
 use vpnte_base::types::{ClientDevice, EnginePref, Level, Notice};
-use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
+use vpnte_base::{AppError, AppResult, Msg};
 use vpnte_core::ops::Source;
 use vpnte_engine::xray_config::{Decision, select_engine, server_pref};
 use vpnte_probes::live::LiveCheckService;
@@ -46,6 +44,7 @@ use vpnte_ui::servers::{
 };
 
 use crate::services::Backend;
+use crate::support::{blocking, changed_opt, detached, joined, unavailable};
 
 /// Coalesces bursts of store events (a ping-all, a refresh) into one projection.
 const DEBOUNCE: Duration = Duration::from_millis(60);
@@ -104,14 +103,6 @@ impl Shared {
         });
     }
 
-    /// The UI language for names the backend renders (group titles, dialog texts).
-    fn lang(&self) -> Lang {
-        self.backend
-            .settings
-            .read(|s| s.locale)
-            .unwrap_or_else(vpnte_ui::lang::os_lang)
-    }
-
     /// The id of the list server our tunnel runs on (`None`: idle, or a local-proxy session).
     fn session_server(&self) -> Option<ProfileId> {
         let session = self.backend.tunnel().ok()?.session().borrow().clone()?;
@@ -143,43 +134,14 @@ async fn pump(shared: Arc<Shared>) {
                     return;
                 }
             }
-            () = changed(&mut settings) => {}
-            () = changed(&mut snapshot) => {}
-            () = changed(&mut session) => {}
+            () = changed_opt(&mut settings) => {}
+            () = changed_opt(&mut snapshot) => {}
+            () = changed_opt(&mut session) => {}
         }
         tokio::time::sleep(DEBOUNCE).await;
         while events.try_recv().is_ok() {}
         shared.publish();
     }
-}
-
-/// Waits for the next change of `rx`; never returns once it is gone.
-async fn changed<T>(rx: &mut Option<watch::Receiver<T>>) {
-    if let Some(r) = rx
-        && r.changed().await.is_ok()
-    {
-        return;
-    }
-    *rx = None;
-    std::future::pending::<()>().await;
-}
-
-/// Runs a mutation in a backend task: it finishes even when the page drops the call.
-async fn job<T, F>(work: F) -> AppResult<T>
-where
-    T: Send + 'static,
-    F: Future<Output = AppResult<T>> + Send + 'static,
-{
-    joined(tokio::spawn(work).await)
-}
-
-/// Runs a blocking store change on the blocking pool (file write, DPAPI); finishes when dropped.
-async fn blocking<T, F>(work: F) -> AppResult<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> AppResult<T> + Send + 'static,
-{
-    joined(tokio::task::spawn_blocking(work).await)
 }
 
 /// Runs a probe or an export in a backend task under a token of its own: dropping the returned
@@ -194,23 +156,6 @@ where
     let token = shutdown.child_token();
     let _cancel_on_drop = token.clone().drop_guard();
     joined(tokio::spawn(work(token)).await)
-}
-
-fn joined<T>(result: Result<AppResult<T>, tokio::task::JoinError>) -> AppResult<T> {
-    result.unwrap_or_else(|err| {
-        if err.is_cancelled() {
-            Err(AppError::cancelled())
-        } else {
-            Err(AppError::internal(anyhow::anyhow!(
-                "servers task panicked: {err}"
-            )))
-        }
-    })
-}
-
-/// A feature this build does not wire (`Conflict` with its own message, never a fake result).
-fn unavailable(key: &'static str) -> AppError {
-    AppError::msg(ErrorKind::Conflict, Msg::new(key))
 }
 
 /// `Conflict servers.notFound`: the row is gone (the servers crate's own key).
@@ -240,7 +185,7 @@ impl ServersApi for ServersBackend {
     }
 
     async fn resolve_ips(&self) -> AppResult<()> {
-        job(checks::resolve_ips(self.shared.clone())).await
+        detached(checks::resolve_ips(self.shared.clone())).await
     }
 
     async fn add(
@@ -249,7 +194,7 @@ impl ServersApi for ServersBackend {
         target: AddTarget,
         device: ClientDevice,
     ) -> AppResult<ImportReport> {
-        job(import::add(self.shared.clone(), input, target, device)).await
+        detached(import::add(self.shared.clone(), input, target, device)).await
     }
 
     async fn remove(&self, id: &str) -> AppResult<()> {
@@ -265,7 +210,7 @@ impl ServersApi for ServersBackend {
     }
 
     async fn select(&self, id: &str) -> AppResult<SelectOutcome> {
-        job(switch(self.shared.clone(), ProfileId::from(id))).await
+        detached(switch(self.shared.clone(), ProfileId::from(id))).await
     }
 
     async fn cancel_switch(&self) -> AppResult<()> {
@@ -299,7 +244,7 @@ impl ServersApi for ServersBackend {
     }
 
     async fn copy_key(&self, id: &str) -> AppResult<Duration> {
-        job(export::copy_key(self.shared.clone(), ProfileId::from(id))).await
+        detached(export::copy_key(self.shared.clone(), ProfileId::from(id))).await
     }
 
     async fn save_key(&self, id: &str) -> AppResult<Option<String>> {
@@ -327,11 +272,11 @@ impl ServersApi for ServersBackend {
             .tunnel()?
             .proxies()
             .ok_or_else(|| unavailable("app.servers.proxiesUnavailable"))?;
-        job(async move { Ok(proxies::report(slots.ops.start_profiles(ids).await)) }).await
+        detached(async move { Ok(proxies::report(slots.ops.start_profiles(ids).await)) }).await
     }
 
     async fn refresh_group(&self, id: &str) -> AppResult<RefreshOutcome> {
-        job(import::refresh(self.shared.clone(), GroupId::from(id))).await
+        detached(import::refresh(self.shared.clone(), GroupId::from(id))).await
     }
 
     async fn set_refresh_interval(&self, id: &str, minutes: Option<NonZeroU32>) -> AppResult<()> {
@@ -362,11 +307,11 @@ impl ServersApi for ServersBackend {
     }
 
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()> {
-        job(set_device(self.shared.clone(), ProfileId::from(id), device)).await
+        detached(set_device(self.shared.clone(), ProfileId::from(id), device)).await
     }
 
     async fn set_engine(&self, id: &str, engine: EnginePref) -> AppResult<()> {
-        job(set_engine(self.shared.clone(), ProfileId::from(id), engine)).await
+        detached(set_engine(self.shared.clone(), ProfileId::from(id), engine)).await
     }
 
     async fn probe(&self, id: &str) -> AppResult<ProbeReport> {
@@ -387,7 +332,7 @@ impl ServersApi for ServersBackend {
         mode: LiveMode,
         progress: mpsc::UnboundedSender<LiveProgress>,
     ) -> AppResult<LiveCheck> {
-        let (service, id, lang) = (self.live()?, id.to_owned(), self.shared.lang());
+        let (service, id, lang) = (self.live()?, id.to_owned(), self.shared.backend.lang());
         let shutdown = &self.shared.backend.shutdown;
         cancellable(shutdown, |token| {
             live::single(service, id, mode, lang, progress, token)
@@ -397,7 +342,7 @@ impl ServersApi for ServersBackend {
 
     async fn live_history(&self, id: &str) -> AppResult<Vec<LiveCheck>> {
         let service = self.live()?;
-        Ok(live::history(&service, id, self.shared.lang()))
+        Ok(live::history(&service, id, self.shared.backend.lang()))
     }
 
     async fn live_batch(
@@ -406,7 +351,7 @@ impl ServersApi for ServersBackend {
         stop: CancellationToken,
         progress: mpsc::UnboundedSender<BatchProgress>,
     ) -> AppResult<BatchResult> {
-        let (service, lang) = (self.live()?, self.shared.lang());
+        let (service, lang) = (self.live()?, self.shared.backend.lang());
         let shutdown = &self.shared.backend.shutdown;
         cancellable(shutdown, |token| {
             live::batch(service, ids, stop, lang, progress, token)
@@ -415,7 +360,7 @@ impl ServersApi for ServersBackend {
     }
 
     async fn open_url(&self, url: String) -> AppResult<()> {
-        job(async move { vpnte_winnet::shell::open_url(&url).await }).await
+        detached(async move { vpnte_winnet::shell::open_url(&url).await }).await
     }
 }
 

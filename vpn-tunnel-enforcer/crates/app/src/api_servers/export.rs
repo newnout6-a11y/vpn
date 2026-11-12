@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use vpnte_base::i18n::Lang;
 use vpnte_base::types::{UnixMs, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::ops::{FeatureKind, RunOpts, Source};
@@ -15,9 +14,10 @@ use vpnte_profiles::export::{Shared as SharedKey, export_proxy_line, export_shar
 use vpnte_servers::model::{ProfileId, ServerRow};
 use vpnte_ui::servers::ExportReport;
 
-use super::dialog::{self, SaveOptions};
 use super::import::count;
-use super::{Shared, blocking, server_not_found};
+use super::{Shared, server_not_found};
+use crate::support::blocking;
+use crate::support::files::{self, SaveFile, StartFolder};
 
 /// Copies the share key of `id` to the secret clipboard; answers when it clears itself.
 pub(super) async fn copy_key(shared: Arc<Shared>, id: ProfileId) -> AppResult<Duration> {
@@ -44,20 +44,18 @@ pub(super) async fn save_key(
         .ok_or_else(server_not_found)?;
     let key = share(&row)?;
     let json = matches!(key, SharedKey::Json(_));
-    let lang = shared.lang();
     let ext = if json { "json" } else { "txt" };
-    let opts = SaveOptions {
-        title: Msg::new("app.servers.dialog.saveKey").render(lang),
-        file_name: format!(
+    let req = save_dialog(
+        "app.servers.dialog.saveKey",
+        format!(
             "{}-{}.{ext}",
             row.protocol,
             safe_name(&row.name, &row.protocol)
         ),
-        filters: filters(lang, json),
-        extension: ext.to_owned(),
-    };
+        json,
+    );
     let body = format!("{}\n", key.text());
-    let path = save_file(&shared, "export:key", opts, body, cancel).await?;
+    let path = save_file(&shared, "export:key", req, body, cancel).await?;
     Ok(path.map(|p| p.display().to_string()))
 }
 
@@ -73,15 +71,13 @@ pub(super) async fn all_keys(
     let now = now_ms();
     let file = keys_file(&shares, now)
         .ok_or_else(|| AppError::validation(Msg::new("app.servers.export.nothing")))?;
-    let lang = shared.lang();
     let ext = if file.json { "json" } else { "txt" };
-    let opts = SaveOptions {
-        title: Msg::new("app.servers.dialog.saveAllKeys").render(lang),
-        file_name: format!("vpn-keys-{}.{ext}", stamp(now)),
-        filters: filters(lang, file.json),
-        extension: ext.to_owned(),
-    };
-    let path = save_file(&shared, "export:keys", opts, file.body, cancel).await?;
+    let req = save_dialog(
+        "app.servers.dialog.saveAllKeys",
+        format!("vpn-keys-{}.{ext}", stamp(now)),
+        file.json,
+    );
+    let path = save_file(&shared, "export:keys", req, file.body, cancel).await?;
     Ok(path.map(|p| report(&p, file.exported, file.skipped)))
 }
 
@@ -101,15 +97,13 @@ pub(super) async fn proxy_list(
         )));
     }
     let now = now_ms();
-    let lang = shared.lang();
-    let opts = SaveOptions {
-        title: Msg::new("app.servers.dialog.saveProxyList").render(lang),
-        file_name: format!("proxy-list-{}.txt", stamp(now)),
-        filters: filters(lang, false),
-        extension: "txt".to_owned(),
-    };
+    let req = save_dialog(
+        "app.servers.dialog.saveProxyList",
+        format!("proxy-list-{}.txt", stamp(now)),
+        false,
+    );
     let body = format!("{}\n", lines.join("\n"));
-    let path = save_file(&shared, "export:proxies", opts, body, cancel).await?;
+    let path = save_file(&shared, "export:proxies", req, body, cancel).await?;
     Ok(path.map(|p| report(&p, lines.len(), rows.len() - lines.len())))
 }
 
@@ -142,7 +136,7 @@ fn report(path: &std::path::Path, exported: usize, skipped: usize) -> ExportRepo
 async fn save_file(
     shared: &Shared,
     resource: &'static str,
-    opts: SaveOptions,
+    req: SaveFile,
     body: String,
     cancel: CancellationToken,
 ) -> AppResult<Option<PathBuf>> {
@@ -152,9 +146,10 @@ async fn save_file(
         cancel: Some(cancel),
         ..RunOpts::default()
     };
+    let lang = shared.backend.lang();
     let ops = &shared.backend.ops;
     ops.run(FeatureKind::Export, run, move |lease| async move {
-        let Some(path) = lease.wait_for_user(dialog::save(opts)).await?? else {
+        let Some(path) = lease.wait_for_user(files::save_file(req, lang)).await?? else {
             return Ok(None);
         };
         lease.commit(|| {
@@ -250,14 +245,14 @@ pub(super) fn safe_name(name: &str, protocol: &str) -> String {
     }
 }
 
-/// Save-dialog filters: JSON first for a JSON export, then text, then everything.
-fn filters(lang: Lang, json: bool) -> Vec<(String, String)> {
-    let label = |key: &'static str| Msg::new(key).render(lang);
-    let mut out = Vec::with_capacity(3);
+/// The Save dialog of an export (on the Desktop): JSON first for a JSON export, then text, then
+/// everything.
+fn save_dialog(title: &'static str, file_name: String, json: bool) -> SaveFile {
+    let ext = if json { "json" } else { "txt" };
+    let mut req = SaveFile::new(Msg::new(title), file_name, ext).in_folder(StartFolder::Desktop);
     if json {
-        out.push((label("app.servers.dialog.jsonFile"), "*.json".to_owned()));
+        req = req.filter(Msg::new("app.servers.dialog.jsonFile"), "*.json");
     }
-    out.push((label("app.servers.dialog.textFile"), "*.txt".to_owned()));
-    out.push((label("app.servers.dialog.allFiles"), "*.*".to_owned()));
-    out
+    req.filter(Msg::new("app.servers.dialog.textFile"), "*.txt")
+        .filter(Msg::new("app.servers.dialog.allFiles"), "*.*")
 }

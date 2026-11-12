@@ -12,6 +12,7 @@ use vpnte_ui::maintenance::{CaptureView, FaultView, LegacyView, MaintenanceState
 
 use super::{Shared, legacy, refused};
 use crate::services::TunnelOps;
+use crate::support::changed_opt;
 use crate::svc_core::needs_admin;
 
 /// Coalesces bursts of tunnel events into one projection.
@@ -116,8 +117,8 @@ async fn run(shared: Arc<Shared>, tunnel: Option<Arc<dyn TunnelOps>>) {
         publish(&shared.state, phase, fault, legacy.clone());
         let acted = tokio::select! {
             () = shared.backend.shutdown.cancelled() => break,
-            () = changed(&mut snapshot) => false,
-            () = changed(&mut session) => false,
+            () = changed_opt(&mut snapshot) => false,
+            () = changed_opt(&mut session) => false,
             () = shared.dirty.notified() => true,
         };
         tokio::time::sleep(DEBOUNCE).await;
@@ -141,16 +142,6 @@ fn publish(
         s.legacy = legacy;
         modified
     });
-}
-
-/// Resolves on the next change; never when the channel is absent or closed.
-async fn changed<T>(rx: &mut Option<watch::Receiver<T>>) {
-    if let Some(rx) = rx
-        && rx.changed().await.is_ok()
-    {
-        return;
-    }
-    std::future::pending::<()>().await
 }
 
 /// A sentence for a step the user cannot run here.

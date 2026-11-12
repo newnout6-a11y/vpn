@@ -6,11 +6,10 @@ use tokio::sync::watch;
 use vpnte_base::AppResult;
 use vpnte_ui::settings::*;
 
-use super::dialog::{self, FileDialog};
-use super::{
-    SettingsService, Shared, actions, blocking, detached, rules, save, unavailable, wizard,
-};
+use super::{SettingsService, Shared, actions, rules, save, wizard};
 use crate::services::Backend;
+use crate::support::files::pick_program;
+use crate::support::{blocking, detached, unavailable};
 
 impl SettingsService {
     /// Runs a blocking store change on the blocking pool with a backend handle.
@@ -126,15 +125,8 @@ impl SettingsApi for SettingsService {
     }
 
     async fn pick_app(&self) -> AppResult<Option<PickedApp>> {
-        let opts = FileDialog::open(
-            dialog::lang(&self.0.backend),
-            "app.settings.dialog.pickApp",
-            &[
-                ("app.settings.dialog.programs", "*.exe"),
-                ("app.settings.dialog.allFiles", "*.*"),
-            ],
-        );
-        Ok(dialog::show(opts).await?.map(|path| PickedApp {
+        let picked = pick_program(self.0.backend.lang()).await?;
+        Ok(picked.map(|path| PickedApp {
             name: path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())

@@ -31,8 +31,8 @@ use vpnte_ui::schedule::{
 use vpnte_ui::widgets::Load;
 
 use super::refused;
-use crate::api_settings::blocking;
 use crate::services::Backend;
+use crate::support::blocking;
 
 /// [`ScheduleApi`] over the scheduler's list API.
 pub struct ScheduleService(Arc<Shared>);

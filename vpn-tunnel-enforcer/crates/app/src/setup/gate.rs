@@ -38,6 +38,8 @@ pub struct ProcRow {
     pub ppid: u32,
     /// Image file name as the snapshot reports it (`VPN Tunnel Enforcer.exe`).
     pub name: String,
+    /// Windows session; `None` when the session list did not report the process.
+    pub session: Option<u32>,
 }
 
 /// Why a process could not be opened or read.
@@ -229,6 +231,9 @@ struct Owned {
     path: PathBuf,
     /// A client process (`VPN Tunnel Enforcer.exe`), not an engine or helper.
     main: bool,
+    /// Runs in another Windows session than the gate: the signal cannot reach it (one instance
+    /// per session, each with its own pipe).
+    elsewhere: bool,
 }
 
 /// The acknowledged client: Electron left helper children of it behind (crashpad).
@@ -268,8 +273,9 @@ pub fn gate(os: &dyn ProcessOs, scope: &Scope, timeout: Duration) -> Result<(), 
         })
         .collect();
     let client = match primaries.as_slice() {
-        [primary] => stop_client(os, scope, primary, timeout)?,
-        // A client we cannot address (two of them, or one elsewhere under the directory).
+        [primary] if !primary.elsewhere => stop_client(os, scope, primary, timeout)?,
+        // A client we cannot address (two of them, one in another session, or one elsewhere
+        // under the directory).
         [] if owned.iter().any(|p| p.main) => return Err(Refusal::CannotIdentify),
         [] => {
             // Engines without any client (B-08): they only lock our files.
@@ -284,13 +290,19 @@ pub fn gate(os: &dyn ProcessOs, scope: &Scope, timeout: Duration) -> Result<(), 
 }
 
 /// Our processes now. A row that exited since the snapshot is skipped; a client whose image
-/// cannot be read refuses the gate (it may be ours and could not be addressed); an engine-named
-/// process that cannot be read is not provably ours and is left alone. While a client runs from
-/// another directory, the Electron runtime engines may be its own: they are left alone too.
+/// cannot be read refuses the gate (it may be ours and could not be addressed) unless it runs in
+/// another Windows session: one copy runs per session, and another user's own copy is unreadable
+/// to a standard user. An engine-named process that cannot be read is not provably ours and is
+/// left alone. While a client runs from another directory, the Electron runtime engines may be
+/// its own: they are left alone too.
 fn scan(os: &dyn ProcessOs, scope: &Scope) -> Result<Vec<Owned>, Refusal> {
     let rows = os
         .snapshot()
         .map_err(|e| Refusal::os("list processes", &e))?;
+    let own_session = rows
+        .iter()
+        .find(|r| r.pid == scope.own_pid)
+        .and_then(|r| r.session);
     let mut owned = Vec::new();
     let mut runtime = Vec::new();
     let mut foreign_client = false;
@@ -300,11 +312,18 @@ fn scan(os: &dyn ProcessOs, scope: &Scope) -> Result<Vec<Owned>, Refusal> {
             continue;
         }
         let main = row.name.eq_ignore_ascii_case(MAIN_EXE);
+        // An unknown session counts as ours.
+        let elsewhere = matches!((own_session, row.session), (Some(a), Some(b)) if a != b);
         let path = match os.image_path(row.pid) {
             Ok(path) => path,
             Err(ProcError::Gone) => continue,
             Err(ProcError::Denied | ProcError::Other(_)) if main => {
-                return Err(Refusal::CannotIdentify);
+                if !elsewhere {
+                    return Err(Refusal::CannotIdentify);
+                }
+                // It may be the user of the shared Electron runtime engines.
+                foreign_client = true;
+                continue;
             }
             Err(_) => continue,
         };
@@ -318,6 +337,7 @@ fn scan(os: &dyn ProcessOs, scope: &Scope) -> Result<Vec<Owned>, Refusal> {
             ppid: row.ppid,
             path,
             main: is_main,
+            elsewhere,
         };
         match place {
             Some(Place::Installed) => owned.push(process),
