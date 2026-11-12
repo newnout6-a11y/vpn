@@ -87,11 +87,6 @@ impl LeaseBook {
         self.leases.get(&slot).filter(|l| l.expires_at > now)
     }
 
-    /// Live leases, in slot order.
-    pub fn active(&self, now: UnixMs) -> impl Iterator<Item = &Lease> {
-        self.leases.values().filter(move |l| l.expires_at > now)
-    }
-
     /// When the caller's timer should sweep next.
     pub fn next_expiry(&self) -> Option<UnixMs> {
         self.leases.values().map(|l| l.expires_at).min()

@@ -227,7 +227,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
                 while !self.line().await?.is_empty() {}
                 return Ok(body);
             }
-            if body.len() + size > MAX_BODY {
+            // `body` never exceeds the limit, so this cannot underflow; `body.len() + size`
+            // could overflow on a forged size (the body of an unknown GET path is read
+            // before any token check).
+            if size > MAX_BODY - body.len() {
                 return Err(ReadError::TooLarge);
             }
             body.extend(self.take(size).await?);
@@ -320,4 +323,27 @@ fn parse_head(raw: &[u8]) -> Option<Head> {
         target: target.to_owned(),
         headers,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A forged chunk size near `usize::MAX` after some data is "too large" (413), never an
+    /// arithmetic overflow or an unbounded read.
+    #[tokio::test]
+    async fn a_forged_chunk_size_is_too_large() {
+        let (mut client, server) = tokio::io::duplex(1024);
+        client
+            .write_all(b"5\r\nhello\r\nffffffffffffffff\r\n")
+            .await
+            .unwrap();
+        let head = Head {
+            method: "GET".into(),
+            target: "/unknown".into(),
+            headers: vec![("transfer-encoding".into(), "chunked".into())],
+        };
+        let read = Conn::new(server).read_body(&head).await;
+        assert!(matches!(read, Err(ReadError::TooLarge)), "{read:?}");
+    }
 }

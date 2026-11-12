@@ -109,11 +109,33 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
         file.write_all(bytes)?;
         file.sync_all()
     });
-    let result = written.and_then(|()| std::fs::rename(&temp, path));
+    let result = written.and_then(|()| replace(&temp, path));
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
     result
+}
+
+/// Renames `from` over `to`, retrying for a moment: an antivirus scan of the fresh file or a
+/// reader that opened the old one without `FILE_SHARE_DELETE` (PowerShell's `Get-Content` in a
+/// client script) makes the rename fail briefly, and a failed token write leaves the app
+/// without its control API until the next start.
+fn replace(from: &Path, to: &Path) -> io::Result<()> {
+    const ACCESS_DENIED: i32 = 5;
+    const SHARING_VIOLATION: i32 = 32;
+    let mut retries = 25;
+    loop {
+        match std::fs::rename(from, to) {
+            Err(e)
+                if retries > 0
+                    && matches!(e.raw_os_error(), Some(ACCESS_DENIED | SHARING_VIOLATION)) =>
+            {
+                retries -= 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return other,
+        }
+    }
 }
 
 /// `getrandom::Error` is not a `std` error without its `std` feature.
@@ -242,6 +264,36 @@ mod tests {
         assert_eq!((content.as_str(), entries), ("two\n", 1));
         assert!(protected, "inherited rights must not apply");
         assert_eq!(aces, 1, "only the current user");
+    }
+
+    /// A reader that holds the old file without `FILE_SHARE_DELETE` for a moment does not fail
+    /// the write: the rename is retried until the reader is gone.
+    #[test]
+    fn a_briefly_held_file_is_still_replaced() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let dir = std::env::temp_dir().join(format!("vpnte-control-held-{}", std::process::id()));
+        let path = dir.join(ENDPOINT_FILE);
+        write_private(&path, b"old\n").unwrap();
+        // FILE_SHARE_READ only.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        let plain = dir.join("plain.tmp");
+        std::fs::write(&plain, b"x").unwrap();
+        let blocked = std::fs::rename(&plain, &path).is_err();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            drop(held);
+        });
+        let written = write_private(&path, b"new\n");
+        release.join().unwrap();
+        let content = std::fs::read_to_string(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(blocked, "a held file must block a plain rename");
+        written.unwrap();
+        assert_eq!(content.unwrap(), "new\n");
     }
 
     /// (DACL protected?, number of entries) of a file.

@@ -24,8 +24,8 @@ use vpnte_profiles::model::Profile;
 
 use crate::health::Timing;
 use crate::model::{
-    Aggregate, Degradation, GroupHealth, Health, InstanceStatus, ProxyStatus, ServerStatus,
-    Unlimited, derive_readiness,
+    Aggregate, Degradation, GroupHealth, InstanceStatus, ProxyStatus, ServerStatus, Unlimited,
+    derive_readiness,
 };
 use crate::probe::{ProbeConfig, Prober};
 use crate::slot::{self, CONTROL_HOST, Slot};
@@ -315,18 +315,5 @@ pub fn degradation_msg(reason: Degradation) -> Msg {
         }
         Degradation::DuplicateEgressIp => "proxies.degradation.duplicateEgressIp",
         Degradation::EgressProbeFailed => "proxies.degradation.egressProbeFailed",
-    })
-}
-
-/// User-facing name of a route health state.
-pub fn health_msg(health: Health) -> Msg {
-    Msg::new(match health {
-        Health::Stopped => "proxies.health.stopped",
-        Health::Starting => "proxies.health.starting",
-        Health::Healthy => "proxies.health.healthy",
-        Health::Degraded => "proxies.health.degraded",
-        Health::Rotating => "proxies.health.rotating",
-        Health::Quarantined => "proxies.health.quarantined",
-        Health::Failed => "proxies.health.failed",
     })
 }

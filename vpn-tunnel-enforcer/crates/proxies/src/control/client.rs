@@ -125,8 +125,10 @@ pub(super) fn read_reply(stream: &mut impl io::Read) -> io::Result<Reply> {
     let mut raw = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
+        // Saturating: `VPNTE_CONTROL_URL` may name any loopback server, which may announce
+        // any length.
         if let Some((end, Some(length))) = head_info(&raw)
-            && raw.len() >= end + 4 + length
+            && raw.len() >= length.saturating_add(end + 4)
         {
             return parse(&raw);
         }

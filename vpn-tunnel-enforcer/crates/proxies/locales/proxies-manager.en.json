@@ -1,22 +1,13 @@
 {
   "proxies": {
     "degradation": {
-      "processFailed": "The proxy process exited",
+      "processFailed": "The proxy did not start or its process ended",
       "leasedRouteRecoveryBlocked": "The route keeps failing, but it is leased: the automatic stop is on hold",
       "healthFailureBudgetExhausted": "Disabled after repeated failed checks",
       "egressIpChangedWithoutRotation": "The exit IP changed without a profile change",
       "rotationDidNotChangeEgressIp": "The profile changed, but the exit IP stayed the same",
       "duplicateEgressIp": "Another proxy already exits through this IP",
       "egressProbeFailed": "The route check failed"
-    },
-    "health": {
-      "stopped": "stopped",
-      "starting": "starting…",
-      "healthy": "healthy",
-      "degraded": "degraded",
-      "rotating": "changing profile…",
-      "quarantined": "quarantined",
-      "failed": "failed"
     }
   }
 }

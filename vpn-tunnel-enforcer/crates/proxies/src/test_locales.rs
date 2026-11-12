@@ -108,7 +108,7 @@ fn fragments_are_valid_and_match() {
         }
     }
     assert!(
-        owner.len() >= 20,
+        owner.len() >= 10,
         "only {} keys: is the walk broken?",
         owner.len()
     );
@@ -217,8 +217,8 @@ fn messages_fill_their_placeholders() {
         }
     }
     {
-        use crate::manager::{degradation_msg, health_msg};
-        use crate::model::{Degradation, Health};
+        use crate::manager::degradation_msg;
+        use crate::model::Degradation;
         for reason in [
             Degradation::ProcessFailed,
             Degradation::LeasedRouteRecoveryBlocked,
@@ -229,17 +229,6 @@ fn messages_fill_their_placeholders() {
             Degradation::EgressProbeFailed,
         ] {
             assert_renders(&degradation_msg(reason));
-        }
-        for health in [
-            Health::Stopped,
-            Health::Starting,
-            Health::Healthy,
-            Health::Degraded,
-            Health::Rotating,
-            Health::Quarantined,
-            Health::Failed,
-        ] {
-            assert_renders(&health_msg(health));
         }
     }
     {

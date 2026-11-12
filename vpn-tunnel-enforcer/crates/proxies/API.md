@@ -77,7 +77,7 @@ pub struct ReserveRequest { pub owner: String, pub ttl_secs: Option<f64>, pub pr
     pub preferred_slot: Option<Slot>, pub slot: Option<Slot>, pub allow_fallback: bool }
 impl ReserveRequest { pub fn new(owner: impl Into<String>) -> Self }   // fallback on, TTL 120 s
 pub enum StopScope { Unleased, All }
-pub enum StopReason { Api, Ui, VpnStop, Shutdown }  impl StopReason { pub fn as_str(self) -> &'static str }
+pub enum StopReason { Api, Ui, VpnStop }  impl StopReason { pub fn as_str(self) -> &'static str } // app exit = shutdown()
 pub fn prewarm_count(count: u64) -> Result<u16, ProxyError>;   // 1..=47546, else 400
 pub const FRESH_WINDOW_MS: UnixMs = 60_000;
 pub fn derive_readiness(instances: &mut [InstanceStatus], now: UnixMs);  // sets `ready` + `running`
@@ -187,7 +187,8 @@ without a profile is 400; a failed start leaves the slot `failed` and configured
 an explicit stop clears the profile, the sticky country and the rotation keys. A rotate answers after its first
 probe; a repeated `idempotency_key` (per slot, last 64 keys, 10 min) returns the current status without rotating.
 A start's port must not be the control API's or another slot's and must be bindable on 127.0.0.1 (else 409). A
-stop whose engine does not exit within 3 s fails with 500 "engine did not exit": the slot stays `failed` with its
+stop asks the engines to end (CTRL_BREAK; sing-box and the Xray child at once), kills them after 3 s and waits
+up to 3 s more; an exit that is still not confirmed fails with 500 "engine did not exit": the slot stays `failed` with its
 port reserved, a plain `start` of it is then the idempotent no-op, and `stop` or `rotate` retries (B-18).
 
 ## `lease` — the pure lease book (the manager owns one; leases live in memory only)
@@ -200,7 +201,6 @@ pub enum Guarded { Stop, Restart, ChangeRoute }
 impl LeaseBook {
     pub fn sweep(&mut self, now: UnixMs) -> Vec<Slot>;                  // drop expired, return their slots
     pub fn lease(&self, slot: Slot, now: UnixMs) -> Option<&Lease>;
-    pub fn active(&self, now: UnixMs) -> impl Iterator<Item = &Lease>;
     pub fn next_expiry(&self) -> Option<UnixMs>;
     pub fn guard(&self, slot: Slot, op: Guarded, now: UnixMs) -> Result<(), ProxyError>;  // 409 when leased
     pub fn forget_slot(&mut self, slot: Slot) -> Option<Lease>;          // slot stopped
@@ -315,7 +315,6 @@ impl ProxyManager {
     pub async fn shutdown(&self);              // every slot stopped, leases dropped; later starts are 503
 }
 pub fn degradation_msg(reason: Degradation) -> Msg;   // proxies.degradation.<camelCase>  (row tooltip)
-pub fn health_msg(health: Health) -> Msg;             // proxies.health.<state>
 ```
 
 Behaviour: one sing-box per slot, config over stdin, ready when the slot port accepts within 5 s (no
@@ -411,7 +410,8 @@ starts the app as the current user and never relaunches it on a 401. Tests: none
 - `proxies.error.{badRequest,forbidden,notFound,conflict,unavailable,upstream,engine}` `{{detail}}` —
   `AppError::from(ProxyError)`.
 - `proxies.control.tokenFailed`, `proxies.control.bindFailed` `{{port}}` — `AppError::from(ServeError)`.
-- `proxies.degradation.<camelCase Degradation>` — `degradation_msg`; `proxies.health.<state>` — `health_msg`.
+- `proxies.degradation.<camelCase Degradation>` — `degradation_msg` (the UI names `Health` states
+  with its own texts).
 - Register `vpnte_proxies::LOCALES` at start.
 - State is pushed only through `ProxyManager::snapshot()` (a `watch`, sent when something visible changed).
   Readiness also expires with the clock: call `ProxySnapshot::refreshed(now)` on a UI timer (≤ 60 s) instead
@@ -420,7 +420,7 @@ starts the app as the current user and never relaunches it on a 401. Tests: none
 ## Not implemented / dropped
 
 - PID files, orphan cleanup, staged engine copies, per-exe firewall rules (children run in kill-on-close Jobs,
-  configs go over stdin); `sing-box check` before a start; graceful engine stop; HTTP keep-alive.
+  configs go over stdin); `sing-box check` before a start; HTTP keep-alive.
 - Lease persistence (leases live in memory); compatibility copies of the control files in the Electron dir.
 - Automatic restart of an exited engine (a manual start or rotate is the recovery).
 - Not exercised by tests: a real Xray child as a slot (its config passed `xray run -test`), real public IP

@@ -1366,6 +1366,15 @@ fn reply_parsing() {
     );
     let mut garbage = std::io::Cursor::new(b"SSH-2.0-OpenSSH\r\n\r\n".to_vec());
     assert!(client::read_reply(&mut garbage).is_err());
+    // A forged length is read to EOF, never an overflow.
+    let mut forged = std::io::Cursor::new(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\nhi",
+            usize::MAX
+        )
+        .into_bytes(),
+    );
+    assert_eq!(client::read_reply(&mut forged).unwrap().body, "hi");
 }
 
 /// The app's wiring (API.md): the real manager behind the real control server. The bound port

@@ -25,6 +25,11 @@ fn slot(n: u64) -> Slot {
     Slot::new(n).unwrap()
 }
 
+/// Leases still live at `now`.
+fn active(book: &LeaseBook, now: UnixMs) -> usize {
+    book.leases.values().filter(|l| l.expires_at > now).count()
+}
+
 /// Spec external-proxy §7.8: a client falls back from an occupied egress IP, tokens are
 /// enforced, renew keeps the token and a returning owner gets its route back.
 #[test]
@@ -153,7 +158,7 @@ fn expired_lease_is_freed_before_the_next_reservation() {
         .reserve(&strict("next-owner", 120.0), &routes, NOW + 1001)
         .unwrap();
     assert_eq!(next.slot, slot(1));
-    assert_eq!(book.active(NOW + 1001).count(), 1);
+    assert_eq!(active(&book, NOW + 1001), 1);
 }
 
 /// Spec external-proxy §3.3–3.5: input validation and the "nothing ready" answer.
@@ -305,9 +310,9 @@ fn thirty_clients_get_distinct_routes() {
     for l in &leases {
         book.release(&l.lease_token, NOW).unwrap();
     }
-    assert_eq!(book.active(NOW).count(), 0);
+    assert_eq!(active(&book, NOW), 0);
     let fresh = LeaseBook::default();
-    assert_eq!((fresh.active(NOW).count(), fresh.next_expiry()), (0, None));
+    assert_eq!((active(&fresh, NOW), fresh.next_expiry()), (0, None));
 }
 
 #[test]
@@ -330,5 +335,5 @@ fn tokens_never_show_in_debug_and_stopped_slots_are_forgotten() {
     // The owner memory went with the slot: plain fallback order now.
     assert_eq!(book.reserve(&ask("o"), &routes, NOW).unwrap().slot, slot(1));
     book.clear();
-    assert_eq!(book.active(NOW).count(), 0);
+    assert_eq!(active(&book, NOW), 0);
 }

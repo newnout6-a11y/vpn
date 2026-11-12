@@ -1,7 +1,6 @@
 //! AT-02-008 (sing-box 1.14 compatibility): every config shape `build` produces passes the real
 //! `sing-box check -c stdin` (the bundled 1.14 binary rejects unknown keys and refused
 //! combinations; `check` neither listens nor dials). Skipped quietly when the binary is absent.
-//! Runs with the engine crate's checker, so only in builds with `proxies-manager`.
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};

@@ -129,10 +129,13 @@ impl ControlServer {
         cancel: CancellationToken,
     ) -> Result<Self, ServeError> {
         let token = ControlToken::generate().map_err(ServeError::Token)?;
-        let token_file = files::write_token(&config.dir, &token).map_err(|e| {
-            tracing::warn!(error = %e, "control token write failed");
-            ServeError::Token(e)
-        })?;
+        let (dir, written) = (config.dir.clone(), token.clone());
+        let token_file = blocking(move || files::write_token(&dir, &written))
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "control token write failed");
+                ServeError::Token(e)
+            })?;
         let listener = bind(&config).map_err(|e| {
             tracing::warn!(port = config.port, error = %e, "control listener bind failed");
             e
@@ -145,9 +148,14 @@ impl ControlServer {
             })?
             .port();
         ops.set_control_port(port);
-        let endpoint_file = files::write_endpoint(&config.dir, &Endpoint::new(&config.dir, port))
-            .inspect_err(|e| tracing::warn!(error = %e, "failed to write control endpoint file"))
-            .ok();
+        let dir = config.dir.clone();
+        let endpoint_file =
+            blocking(move || files::write_endpoint(&dir, &Endpoint::new(&dir, port)))
+                .await
+                .inspect_err(
+                    |e| tracing::warn!(error = %e, "failed to write control endpoint file"),
+                )
+                .ok();
         tracing::info!(
             host = CONTROL_HOST,
             port,
@@ -189,6 +197,15 @@ impl ControlServer {
     pub async fn join(self) {
         let _ = self.task.await;
     }
+}
+
+/// Runs a file write (an fsync, a rename that may be retried) off the async workers.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(io::Error::other)?
 }
 
 /// Exclusive bind of the preferred port, else (when allowed) of an ephemeral one.

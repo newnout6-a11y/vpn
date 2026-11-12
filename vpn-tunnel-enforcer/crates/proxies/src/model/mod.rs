@@ -145,23 +145,21 @@ pub enum StopScope {
     All,
 }
 
-/// Who stopped a slot (for logs).
+/// Who stopped a slot (for logs). The app exit is `ProxyManager::shutdown`, not a stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StopReason {
     Api,
     Ui,
     VpnStop,
-    Shutdown,
 }
 
 impl StopReason {
-    /// Log label (`api`, `ui`, `vpn-stop`, `shutdown`).
+    /// Log label (`api`, `ui`, `vpn-stop`).
     pub fn as_str(self) -> &'static str {
         match self {
             StopReason::Api => "api",
             StopReason::Ui => "ui",
             StopReason::VpnStop => "vpn-stop",
-            StopReason::Shutdown => "shutdown",
         }
     }
 }

@@ -364,12 +364,15 @@ impl Engine for Running {
     }
 
     async fn terminate(&self, within: Duration) -> bool {
-        let singbox = self.singbox.terminate(within).await.is_ok();
-        let xray = match &self.xray {
-            Some(xray) => xray.sup.lock().await.stop(XraySlot::A).await.is_ok(),
-            None => true,
+        // Both children at once: each stop may take the engine's graceful wait plus a kill.
+        let xray = async {
+            match &self.xray {
+                Some(xray) => xray.sup.lock().await.stop(XraySlot::A).await.is_ok(),
+                None => true,
+            }
         };
-        singbox && xray
+        let (singbox, xray) = tokio::join!(self.singbox.terminate(within), xray);
+        singbox.is_ok() && xray
     }
 }
 
