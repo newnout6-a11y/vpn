@@ -14,6 +14,8 @@
 //! The journal ([`journal::Journal`]) is shared with browser hardening and location privacy
 //! (package `automation-hardening`), which bring their own [`journal::Backend`].
 
+use std::path::PathBuf;
+
 use vpnte_base::{AppError, AppResult};
 
 pub mod block;
@@ -44,4 +46,11 @@ pub(crate) async fn run_blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .map_err(AppError::internal)
+}
+
+/// A directory named by a non-empty environment variable (`USERPROFILE`, `APPDATA`, …).
+pub(crate) fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }

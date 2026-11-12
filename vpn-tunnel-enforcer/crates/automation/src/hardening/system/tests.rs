@@ -148,7 +148,7 @@ fn location_on_the_registry_api() {
 /// `HKLM\SOFTWARE\VPNTE-Test-hardening-*` key, removed afterwards.
 #[test]
 #[ignore = "needs elevation"]
-fn machine_hive_write_and_prune() {
+fn elevated_machine_hive_write_and_prune() {
     struct Cleanup(String);
     impl Drop for Cleanup {
         fn drop(&mut self) {

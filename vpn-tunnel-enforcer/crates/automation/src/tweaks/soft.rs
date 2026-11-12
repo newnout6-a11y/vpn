@@ -18,7 +18,7 @@ use super::journal::{
     Backend, BlockKind, Feature, Journal, RollbackReport, Target, TweakError, TweakState, Val,
 };
 use super::sysproxy::{self, SystemProxy, WinInet};
-use super::{block, env, run_blocking, studio, user};
+use super::{block, env, env_dir, run_blocking, studio, user};
 
 /// Every feature a Soft session owns, in apply order.
 pub const SOFT_FEATURES: [Feature; 5] = [
@@ -54,18 +54,14 @@ pub struct SoftSystem {
 impl SoftSystem {
     /// The real targets of the account this process runs as.
     pub fn current_user() -> Self {
-        let var = |name: &str| {
-            std::env::var_os(name)
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-        };
-        let profile = var("USERPROFILE");
-        let appdata = var("APPDATA").or_else(|| Some(profile.as_ref()?.join(r"AppData\Roaming")));
+        let profile = env_dir("USERPROFILE");
+        let appdata =
+            env_dir("APPDATA").or_else(|| Some(profile.as_ref()?.join(r"AppData\Roaming")));
         Self {
             proxy: Arc::new(WinInet),
             env: UserEnv::current_user(),
             git: GitCli::find(),
-            gradle_home: var("GRADLE_USER_HOME").or_else(|| Some(profile?.join(".gradle"))),
+            gradle_home: env_dir("GRADLE_USER_HOME").or_else(|| Some(profile?.join(".gradle"))),
             studio_root: appdata.map(|dir| dir.join("Google")),
             broadcast: true,
             check_user: true,
@@ -286,7 +282,7 @@ impl Soft {
             Feature::DevStudio => {
                 let root = self.sys.studio_root.as_ref().ok_or_else(missing)?;
                 let install = studio::newest_install(root)
-                    .map_err(|e| TweakError::Unreadable("Android Studio settings".into(), e))?
+                    .map_err(|e| TweakError::Unreadable(r"Google\AndroidStudio*".into(), e))?
                     .ok_or_else(missing)?;
                 Ok(studio::plan(&install, addr, kind))
             }

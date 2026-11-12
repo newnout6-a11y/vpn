@@ -172,6 +172,20 @@ fn legacy_import_keeps_ids_and_normalises_times() {
     );
 }
 
+/// A repeated old id gets a fresh one: edits address schedules by id.
+#[test]
+fn legacy_import_gives_a_repeated_id_a_fresh_one() {
+    let entry = |name: &str| {
+        json!({ "id": "dup", "name": name, "enabled": false, "days": [1],
+                "startTime": "09:00", "endTime": "10:00", "mode": "hard" })
+    };
+    let (doc, warnings) = Schedules::from_legacy(&json!({ "schedules": [entry("A"), entry("B")] }));
+    assert!(warnings.is_empty());
+    let ids: Vec<&str> = doc.schedules.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids[0], "dup");
+    assert!(!ids[1].is_empty() && ids[1] != "dup");
+}
+
 /// A hand-broken entry is skipped instead of making the whole file unreadable.
 #[test]
 fn stored_file_with_a_bad_entry_still_loads() {

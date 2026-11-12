@@ -1,7 +1,10 @@
 //! Windows location privacy (spec §2.13, §3.8, §6.8 `LocationPrivacy`): while a protected session
-//! runs, apps get no geolocation. The user's consent is set to deny and the machine policy turns
-//! the location provider off (owner question Q2: both, as before; the policy covers every account
-//! of the PC while it is applied).
+//! runs, apps of this user get no geolocation. Only the user's own consent is set to deny
+//! (NOADMIN §3: per user, no administrator rights). The machine policy of the old app (owner
+//! question Q2) needs elevation and covers every account of the PC, so the app no longer writes
+//! it; its values stay admitted so records from the old version or an earlier elevated build are
+//! still rolled back (that needs elevation; unelevated they stay journalled and the rollback says
+//! so), and an active policy is still reported.
 //!
 //! Session-scoped (fix L2): the lifecycle applies it after a successful connect when the setting
 //! is on and rolls it back on disconnect, shutdown and startup recovery; a toggle while connected
@@ -14,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 
 use super::system::System;
-use super::{admissible, needs_admin, short_text};
+use super::{admissible, short_text};
 use crate::tweaks::journal::{
     Feature, Journal, RegHive, RollbackReport, Target, TweakError, TweakState, Val,
 };
@@ -26,27 +29,37 @@ pub const CONSENT: (RegHive, &str, &str) = (
     r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location",
     "Value",
 );
-/// The machine policy key (`HKLM`) of the two location policies.
+/// The machine policy key (`HKLM`) of the two location policies (read and rolled back only).
 pub const POLICY_KEY: &str = r"SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors";
-/// The two `REG_DWORD` policies, 1 while applied.
+/// The two `REG_DWORD` policies, 1 = location off for the whole machine.
 pub const POLICY_VALUES: [&str; 2] = ["DisableLocation", "DisableWindowsLocationProvider"];
 
-/// The three values and what we write (LP:13-14, 207-211).
+/// What apply writes: the consent `Deny` (LP:13-14).
 pub fn plan() -> Vec<(Feature, Target, Val)> {
-    let (hive, key, name) = CONSENT;
-    let mut plan = vec![(
+    vec![(
         Feature::LocationPrivacy,
-        Target::Reg {
-            hive,
-            key: key.to_owned(),
-            name: name.to_owned(),
-        },
+        consent_target(),
         Val::Sz("Deny".to_owned()),
-    )];
+    )]
+}
+
+/// What the old version wrote (LP:13-14, 207-211): the consent and both machine policies. The
+/// legacy import adopts what of it is still in place.
+pub(crate) fn old_plan() -> Vec<(Feature, Target, Val)> {
+    let mut plan = plan();
     plan.extend(
         POLICY_VALUES.map(|name| (Feature::LocationPrivacy, policy_target(name), Val::Dword(1))),
     );
     plan
+}
+
+fn consent_target() -> Target {
+    let (hive, key, name) = CONSENT;
+    Target::Reg {
+        hive,
+        key: key.to_owned(),
+        name: name.to_owned(),
+    }
 }
 
 fn policy_target(name: &str) -> Target {
@@ -111,8 +124,8 @@ impl Location {
         Self { journal, sys }
     }
 
-    /// Denies location (needs elevation). Nothing is written when a current value cannot be
-    /// read; a failed write undoes the others. Applying again keeps the original baselines.
+    /// Denies location to this user's apps (no elevation needed). Nothing is written when the
+    /// current value cannot be read; applying again keeps the original baseline.
     pub async fn apply(&self) -> AppResult<LocationStatus> {
         let this = self.clone();
         run_blocking(move || this.apply_blocking()).await?
@@ -138,9 +151,6 @@ impl Location {
 
     /// Blocking form of [`Location::apply`].
     pub fn apply_blocking(&self) -> AppResult<LocationStatus> {
-        if !self.sys.elevated() {
-            return Err(needs_admin());
-        }
         // The consent lives in HKCU: as another administrator it would land in the wrong profile.
         self.sys.check_user()?;
         let plan = plan();
@@ -171,12 +181,7 @@ impl Location {
 
     /// Blocking form of [`Location::status`].
     pub fn status_blocking(&self) -> LocationStatus {
-        let (hive, key, name) = CONSENT;
-        let consent = self.sys.read(&Target::Reg {
-            hive,
-            key: key.to_owned(),
-            name: name.to_owned(),
-        });
+        let consent = self.sys.read(&consent_target());
         let user_denied = consent
             .ok()
             .map(|v| matches!(&v, Val::Sz(s) | Val::ExpandSz(s) if s.eq_ignore_ascii_case("deny")));
@@ -201,14 +206,9 @@ fn apply_error(e: TweakError) -> AppError {
     let (kind, _) = e.describe();
     let msg = match &e {
         TweakError::Journal(_) => return e.into(),
-        // The label starts with the hive (`Hkcu\…` / `Hklm\…`).
-        TweakError::Unreadable(label, _) => {
-            let hive = if label.starts_with("Hklm") {
-                "HKLM"
-            } else {
-                "HKCU"
-            };
-            Msg::new("automation.hardening.location.unreadable").arg("hive", hive)
+        // Apply reads the consent only.
+        TweakError::Unreadable(..) => {
+            Msg::new("automation.hardening.location.unreadable").arg("hive", CONSENT.0.name())
         }
         _ => Msg::new("automation.hardening.location.failed"),
     };

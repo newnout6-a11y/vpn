@@ -209,37 +209,48 @@ impl<C: Coordinator, P: RotationProfiles> Rotation<C, P> {
     /// are kept); a real change cancels the rotation in flight and restarts the countdown.
     /// Enabling with an empty list seeds it with every usable profile.
     pub fn set_config(&self, patch: RotationPatch) -> AppResult<RotationConfig> {
-        let current = self.store.snapshot();
-        let mut next = current.clone();
-        if let Some(enabled) = patch.enabled {
-            next.enabled = enabled;
-        }
-        if let Some(minutes) = patch.interval_minutes {
-            next.interval_minutes = clamp_interval(minutes);
-        }
-        if let Some(order) = patch.order {
-            next.order = order;
-        }
-        let ids_given = patch.profile_ids.is_some();
-        if let Some(ids) = patch.profile_ids {
-            next.profile_ids = dedup(ids);
-        }
-        if next.enabled && next.profile_ids.is_empty() && !ids_given {
+        // The profile store is asked before the document is locked; the patch itself applies to
+        // the live document, so a rotation committing meanwhile keeps its index and countdown.
+        let may_seed = patch.profile_ids.is_none()
+            && self
+                .store
+                .read(|c| patch.enabled.unwrap_or(c.enabled) && c.profile_ids.is_empty());
+        let seed = may_seed.then(|| {
             let usable = self.profiles.all().into_iter().filter(ProfileFacts::usable);
-            next.profile_ids = dedup(usable.map(|p| p.id).collect());
-            next.current_index = 0;
-        }
-        if next.current_index >= next.profile_ids.len() {
-            next.current_index = 0;
-        }
-        if next == current {
-            return Ok(current);
-        }
-        if let Some(token) = self.in_flight.lock().as_ref() {
+            dedup(usable.map(|p| p.id).collect())
+        });
+        let now = now_ms();
+        let (changed, next) = self.store.update(|current| {
+            let mut next = current.clone();
+            if let Some(enabled) = patch.enabled {
+                next.enabled = enabled;
+            }
+            if let Some(minutes) = patch.interval_minutes {
+                next.interval_minutes = clamp_interval(minutes);
+            }
+            if let Some(order) = patch.order {
+                next.order = order;
+            }
+            if let Some(ids) = patch.profile_ids {
+                next.profile_ids = dedup(ids);
+            }
+            if let Some(seed) = seed.filter(|_| next.enabled && next.profile_ids.is_empty()) {
+                next.profile_ids = seed;
+                next.current_index = 0;
+            }
+            if next.current_index >= next.profile_ids.len() {
+                next.current_index = 0;
+            }
+            let changed = next != *current;
+            if changed {
+                next.next_rotation_at = next.countdown_from(now);
+                *current = next.clone();
+            }
+            (changed, next)
+        })?;
+        if changed && let Some(token) = self.in_flight.lock().as_ref() {
             token.cancel();
         }
-        next.next_rotation_at = next.countdown_from(now_ms());
-        self.store.replace(next.clone())?;
         Ok(next)
     }
 }

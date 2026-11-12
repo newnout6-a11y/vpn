@@ -136,7 +136,8 @@ fn allow_list_admits_exactly_our_values() {
 #[test]
 fn every_planned_value_is_admitted() {
     use super::browser::{Browser, plan};
-    let mut planned = location::plan();
+    // The old version's location values too: their records must survive a restart to be rolled back.
+    let mut planned = location::old_plan();
     for browser in Browser::ALL {
         assert_eq!(browser.verified(), !plan(browser).is_empty(), "{browser:?}");
         planned.extend(plan(browser));

@@ -135,12 +135,15 @@ impl<C: Coordinator, H: ReactionHost> Reactions<C, H> {
             return Retry::Preempted;
         };
         let guard = Override::set(&*self.host, &server.id, fingerprint);
-        self.count_restart();
-        match self
+        let result = self
             .coord
             .adaptive_restart(Owner::AdaptiveRetry, mode, None)
-            .await
-        {
+            .await;
+        // A refusal never touched the tunnel: it does not use up the network's restarts.
+        if !matches!(result, Err(OpError::Conflict)) {
+            self.count_restart();
+        }
+        match result {
             Ok(_) => {
                 guard.keep();
                 self.verdicts.with(|m| m.avoid.remove(&server.id));
@@ -188,12 +191,15 @@ impl<C: Coordinator, H: ReactionHost> Reactions<C, H> {
                 deferred = true;
                 continue;
             }
-            self.count_restart();
-            match self
+            let result = self
                 .coord
                 .switch_profile(Owner::AdaptiveRetry, &to.id)
-                .await
-            {
+                .await;
+            // A switch that never touched the tunnel does not use up the network's restarts.
+            if !matches!(result, Err(SwitchError::NotStarted(_))) {
+                self.count_restart();
+            }
+            match result {
                 Ok(()) => {
                     tracing::info!(?cause, "reactions: session moved to another server");
                     let key = if cause == Cause::UdpBlocked {

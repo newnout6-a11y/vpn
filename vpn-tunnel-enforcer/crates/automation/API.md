@@ -22,14 +22,13 @@ four tasks and wires the lifecycle hooks below.
   `rotation.json` (`RotationConfig`), `adaptive.json` (`AdaptiveDoc`, `HOLDS_SECRETS`: DPAPI-sealed
   HMAC key), `tweaks.json` (`TweakDoc`, opened by `Journal::open`), `hardening.json`
   (`HardeningDoc`, legacy marker). Each file has exactly one `Store` in the process.
-- **Elevation.** Only browser policies and the machine part of location privacy need it (HKLM):
-  unelevated, `Browsers::apply`, `Browsers::rollback` (with journalled values) and
-  `Location::apply` return `Err(Permission, "automation.hardening.needsAdmin")` before reading
-  anything; `Location::rollback` restores the HKCU value and keeps the HKLM records for a retry.
-  Everything else (scheduler, rotation, AutoPilot, adaptive bypass incl. the Win32 network identity,
-  Soft mode) runs as the signed-in user. Under CONTRACT §1 the HKLM work belongs in the helper
-  service `vpnte-service`; the code is not adapted yet (a `noadmin-*` follow-up): today the app
-  calls it in-process and shows "unavailable" on `Permission`.
+- **Elevation.** Only browser policies need it (HKLM): unelevated, `Browsers::apply` and
+  `Browsers::rollback` (with journalled values) return `Err(Permission,
+  "automation.hardening.needsAdmin")` before writing anything; the app shows them as unavailable
+  (NOADMIN §0: no helper service in this phase). Location privacy writes only the user's consent
+  (NOADMIN §3) and needs no elevation; `Location::rollback` keeps HKLM policy records of the old
+  version for a retry when unelevated. Everything else (scheduler, rotation, AutoPilot, adaptive
+  bypass incl. the Win32 network identity, Soft mode) runs as the signed-in user.
 
 ## Crate root
 ```rust
@@ -576,20 +575,20 @@ impl Browsers {
     // blocking twins: apply_blocking() / rollback_blocking() -> AppResult<BrowserReport>, status_blocking() -> BrowserReport
 }
 
-// location — session-scoped Windows location privacy
+// location — session-scoped Windows location privacy (per user, no elevation: NOADMIN §3)
 pub const CONSENT: (RegHive, &str, &str);  // HKCU …\CapabilityAccessManager\ConsentStore\location, "Value"
 pub const POLICY_KEY: &str;                // HKLM SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors
-pub const POLICY_VALUES: [&str; 2];        // DisableLocation, DisableWindowsLocationProvider
-pub fn plan() -> Vec<(Feature, Target, Val)>;   // Sz("Deny"), Dword(1), Dword(1)
+pub const POLICY_VALUES: [&str; 2];        // DisableLocation, DisableWindowsLocationProvider (read / rollback only)
+pub fn plan() -> Vec<(Feature, Target, Val)>;   // consent Sz("Deny") only
 pub struct LocationStatus { pub ours: TweakState, pub user_denied: Option<bool>, pub policy_disabled: Option<bool> }
 impl LocationStatus { pub fn os_denied(&self) -> Option<bool>; }   // user_denied || policy_disabled
 pub fn rollback_failure_msg(report: &RollbackReport) -> Option<Msg>;   // automation.hardening.location.rollbackFailed
 #[derive(Clone)] pub struct Location;
 impl Location {
     pub fn new(journal: Arc<Journal>, sys: Arc<dyn System>) -> Self;
-    pub async fn apply(&self) -> AppResult<LocationStatus>;     // needs elevation (+ E3 check)
-    pub async fn rollback(&self) -> AppResult<RollbackReport>;  // no pre-check: unelevated, HKCU is restored
-                                                                // and the HKLM records stay for a retry
+    pub async fn apply(&self) -> AppResult<LocationStatus>;     // unelevated OK (+ E3 check)
+    pub async fn rollback(&self) -> AppResult<RollbackReport>;  // HKLM policy records of the old version
+                                                                // need elevation; unelevated they stay for a retry
     pub async fn status(&self) -> AppResult<LocationStatus>;
     pub fn is_applied(&self) -> bool;
     // blocking twins: apply_blocking() -> AppResult<LocationStatus>, rollback_blocking() -> RollbackReport,
@@ -608,13 +607,19 @@ pub fn import(journal: &Journal, root: &Path, sys: &dyn System, src: &LegacySour
   detected and reported `NotVerified` («Не проверено»), never touched. Each browser is one unit: a
   failure undoes that browser only (`Failed { reason }`). Policies take effect after a full browser
   restart (`restart_required`). Old values outside today's plan are rolled back on the next apply.
-- Errors: unelevated apply → `Permission` `automation.hardening.needsAdmin` (before any read);
-  location as another account → `Permission` `automation.tweaks.otherUser`; unreadable →
-  `automation.hardening.location.unreadable` {hive}; write / read-back failure → `.location.failed`;
-  a current value of a type the allow-list cannot hold → `Conflict` `.location.foreignValue`.
+- Errors: unelevated browser apply / rollback → `Permission` `automation.hardening.needsAdmin`
+  (before any write); location as another account → `Permission` `automation.tweaks.otherUser`;
+  unreadable consent → `automation.hardening.location.unreadable` {hive: HKCU}; write / read-back
+  failure → `.location.failed`; a current value of a type the allow-list cannot hold → `Conflict`
+  `.location.foreignValue`. `{{target}}` in `automation.tweaks.*` messages is `Target::label()`:
+  technical identifiers only (`HTTP_PROXY`, `http.proxy`, `gradle.properties`, `HKLM\…\Name`,
+  `HKCU\…\Internet Settings` for the system proxy), the same in every language.
 - Location is session-scoped: after a successful connect with `settings.location_privacy` →
   `apply()`; on disconnect, shutdown and startup recovery → `if is_applied() { rollback() }`, append
   `rollback_failure_msg(&report)` to the stop result. The setting is never rewritten from a result.
+  Since review-automation (2026-11-12) apply writes only the user's consent (NOADMIN §3: per user,
+  no administrator rights); the old machine policies are still admitted, read for the status and
+  rolled back when journalled (old version / legacy import).
 
 ## Wiring in the app
 ```rust
@@ -685,15 +690,17 @@ let mode = adaptive.begin(kind, profile_view).await;  // before a Direct / local
   `NotVerified`, `LocationStatus` fields `None`: show them as «Не проверено», never as protected.
 
 ## Not implemented / not verified
-- Not run here: anything elevated (real HKLM writes: `cargo test -p vpnte-automation -- --ignored`
-  in an elevated shell runs the one sandboxed HKLM test); the real `Coordinator`, `RotationProfiles`,
+- Not run here: anything elevated (real HKLM writes: CI runs `cargo test -p vpnte-automation --
+  --ignored elevated_` on an elevated runner, the one sandboxed HKLM test
+  `elevated_machine_hive_write_and_prune`); the real `Coordinator`, `RotationProfiles`,
   `AdaptiveHost`, `AutoPilotEnv`, `ReactionHost` (the app's; only test fakes exercise the contracts);
   check-verdict reactions against real banned / frozen / UDP-cut servers and a real REALITY
-  fingerprint rejection; browsers
-  obeying the policies; Windows honouring the three location values; a real Android Studio layout;
-  the E3 other-user path; the `ResolveIpNetEntry2` (active ARP) path of the identity reader.
-- Not adapted to the privilege model yet: browser policies and the location policy run in-process and
-  need an elevated process; moving them into `vpnte-service` is a `noadmin-*` follow-up.
+  fingerprint rejection; browsers obeying the policies; Windows honouring the location consent; a
+  real Android Studio layout; the E3 other-user path; the `ResolveIpNetEntry2` (active ARP) path of
+  the identity reader.
+- Privilege model (NOADMIN §0, no helper service in this phase): browser policies need an elevated
+  process (`Permission` otherwise, shown as unavailable); location privacy is per user and needs
+  none.
 - Not in this crate: persistence of the Soft dev-target list (`DevTargets`; `Settings` has no field
   for it), `WM_TIMECHANGE` (winnet has no event; the 60 s re-check covers clock changes), the old
   adaptive-learning import and install-secret migration (dropped), Chromium `Preferences` / Firefox

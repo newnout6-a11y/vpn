@@ -115,7 +115,8 @@ async fn failed_switches_are_not_retried_on_this_network() {
     assert_eq!(switches(&rig), ["x", "c", "x"]);
 }
 
-/// Refused by a higher-priority operation: quiet, and not counted as a failed reaction.
+/// Refused by a higher-priority operation: quiet, not counted as a failed reaction, and not a
+/// restart of this network's budget (the tunnel was never touched).
 #[tokio::test]
 async fn preempted_switch_stays_quiet() {
     let rig = Rig::new(pool());
@@ -124,8 +125,10 @@ async fn preempted_switch_stays_quiet() {
     rig.coord.switch_results.lock().push_back(refused);
     rig.feed("a", BANNED.0, BANNED.1).await;
     assert_eq!((switches(&rig).len(), keys(&rig).len()), (1, 0));
+    assert_eq!(rig.reactions.verdicts().with(|m| m.restarts), 0);
     rig.feed("a", BANNED.0, BANNED.1).await;
     assert_eq!(switches(&rig), ["x", "x"]);
+    assert_eq!(rig.reactions.verdicts().with(|m| m.restarts), 1);
 }
 
 /// AT-RU-REACT-003: a REALITY server that rejects the handshake gets one restart with the next

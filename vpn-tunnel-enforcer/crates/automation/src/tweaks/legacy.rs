@@ -9,6 +9,7 @@ use serde_json::Value;
 use vpnte_base::Msg;
 
 use super::block;
+use super::env_dir;
 use super::journal::{
     Backend, BlockKind, EnvVar, Feature, GitKey, Journal, Record, StudioOption, Target, Val,
 };
@@ -33,13 +34,9 @@ pub struct LegacySources {
 impl LegacySources {
     /// The old app's locations for the account this process runs as.
     pub fn current_user() -> Self {
-        let var = |n: &str| {
-            std::env::var_os(n)
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-        };
-        let profile = var("USERPROFILE");
-        let appdata = var("APPDATA").or_else(|| Some(profile.as_ref()?.join(r"AppData\Roaming")));
+        let profile = env_dir("USERPROFILE");
+        let appdata =
+            env_dir("APPDATA").or_else(|| Some(profile.as_ref()?.join(r"AppData\Roaming")));
         Self {
             receipts_dir: profile.as_ref().map(|p| p.join(".vpnte")),
             gradle_props: profile.map(|p| p.join(".gradle").join("gradle.properties")),

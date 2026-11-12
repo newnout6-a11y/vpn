@@ -17,6 +17,7 @@ use super::admissible;
 use super::browser::{WEBRTC_POLICY, canonical_key};
 use super::location;
 use super::system::System;
+use crate::tweaks::env_dir;
 use crate::tweaks::journal::{Feature, Journal, Record, RegHive, Target, Val};
 
 /// Manifests and exports are a few KB (the HKCU location export with its per-app subkeys about
@@ -50,9 +51,8 @@ pub struct LegacySources {
 impl LegacySources {
     /// The real places; `legacy_dir` is the old Electron data dir (`DataDirs::legacy_electron`).
     pub fn new(legacy_dir: &Path) -> Self {
-        let program_data = std::env::var_os("ProgramData")
-            .filter(|v| !v.is_empty())
-            .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
+        let program_data =
+            env_dir("ProgramData").unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
         Self {
             browser_manifest: Some(
                 legacy_dir.join(r"browser-hardening\latest-browser-hardening.json"),
@@ -318,7 +318,7 @@ fn location_records(manifest: &Path, sys: &dyn System, out: &mut Vec<Record>) ->
         return Vec::new();
     };
     let mut leftover = false;
-    for (feature, target, ours) in location::plan() {
+    for (feature, target, ours) in location::old_plan() {
         let Target::Reg { hive, key, name } = &target else {
             continue;
         };

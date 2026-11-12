@@ -113,7 +113,13 @@ impl Schedules {
         let items = legacy.get("schedules").and_then(Value::as_array);
         for (i, item) in items.into_iter().flatten().enumerate() {
             match legacy_entry(item) {
-                Some(entry) => doc.schedules.push(entry),
+                Some(mut entry) => {
+                    // Ids address edits: a repeated one would make `update` change only the first.
+                    if doc.schedules.iter().any(|e| e.id == entry.id) {
+                        entry.id = uuid::Uuid::new_v4().to_string();
+                    }
+                    doc.schedules.push(entry);
+                }
                 None => {
                     let label = item
                         .get("name")

@@ -30,9 +30,9 @@ pub struct GitCli {
 }
 
 impl GitCli {
-    /// Git for Windows from its HKLM install record first (an admin-only directory: the app runs
-    /// elevated and must not prefer a binary any user process could have replaced), else the
-    /// first `git.exe` on `PATH`.
+    /// Git for Windows from its HKLM install record first (an admin-only directory, so no user
+    /// process can have replaced the binary; it also matters when the app runs elevated), else
+    /// the first `git.exe` on `PATH`.
     pub fn find() -> Option<GitCli> {
         let exe = registered_git().or_else(|| {
             let path = std::env::var_os("PATH")?;

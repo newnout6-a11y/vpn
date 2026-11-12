@@ -1,8 +1,9 @@
 //! Browser hardening (spec §2.12, §3.7, §6.8 `BrowserWebRtc`; owner decision 10.2-B): machine
-//! policies for the verified Chromium browsers only, written to `HKLM` (the process is elevated
-//! and `HKLM` is the authoritative machine policy). Unverified browsers are detected and reported
-//! as not checked, with nothing written; `Preferences` and Firefox `user.js` are never edited
-//! (the running browser rewrites `Preferences`, and Firefox copies `user.js` into `prefs.js`).
+//! policies for the verified Chromium browsers only, written to `HKLM` (the authoritative machine
+//! policy; needs an elevated process, else `Permission`: NOADMIN §0). Unverified browsers are
+//! detected and reported as not checked, with nothing written; `Preferences` and Firefox
+//! `user.js` are never edited (the running browser rewrites `Preferences`, and Firefox copies
+//! `user.js` into `prefs.js`).
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use vpnte_base::{AppResult, Msg};
 use super::system::System;
 use super::{admissible, needs_admin, short_text};
 use crate::tweaks::journal::{Feature, Journal, RegHive, RollbackReport, Target, TweakError, Val};
-use crate::tweaks::run_blocking;
+use crate::tweaks::{env_dir, run_blocking};
 
 /// `WebRtcIPHandlingPolicy`: WebRTC may send UDP only through a proxy (the tunnel), so a page
 /// cannot learn the real address through STUN.
@@ -191,16 +192,11 @@ pub struct BrowserDirs {
 impl BrowserDirs {
     /// The folders of the account the process runs as.
     pub fn current_user() -> Self {
-        let var = |name: &str| {
-            std::env::var_os(name)
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-        };
-        let profile = var("USERPROFILE");
+        let profile = env_dir("USERPROFILE");
         let below = |rel: &str| Some(profile.as_ref()?.join(rel));
         Self {
-            local: var("LOCALAPPDATA").or_else(|| below(r"AppData\Local")),
-            roaming: var("APPDATA").or_else(|| below(r"AppData\Roaming")),
+            local: env_dir("LOCALAPPDATA").or_else(|| below(r"AppData\Local")),
+            roaming: env_dir("APPDATA").or_else(|| below(r"AppData\Roaming")),
         }
     }
 

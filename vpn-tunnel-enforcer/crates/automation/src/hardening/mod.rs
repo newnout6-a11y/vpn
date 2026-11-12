@@ -6,8 +6,8 @@
 //!   proxy, and the browser's own DNS-over-HTTPS resolver is off so its lookups reach the tunnel's
 //!   DNS. Other browsers are detected and reported as not checked, never touched (owner decision
 //!   10.2-B);
-//! - **location privacy** ([`location::Location`]): Windows location consent for the user and the
-//!   machine location policy, applied for the duration of a protected session.
+//! - **location privacy** ([`location::Location`]): the user's Windows location consent (per user,
+//!   no elevation), denied for the duration of a protected session.
 //!
 //! Every value goes through `vpnte_winnet::registry`; nothing is ever exported to or imported from
 //! a `.reg` file. The old app ran `reg import` on user-writable backups from an elevated process,
@@ -45,7 +45,7 @@ fn admissible(target: &Target, value: &Val) -> bool {
     }
 }
 
-/// Machine policies need an elevated process (`--no-elevate` runs return this).
+/// Machine policies need an elevated process (NOADMIN §0: shown as unavailable otherwise).
 fn needs_admin() -> AppError {
     AppError::msg(
         ErrorKind::Permission,

@@ -6,6 +6,7 @@ use super::*;
 use crate::hardening::admit;
 use crate::hardening::fake::{Fake, reg};
 use crate::test_support::TempDir;
+use crate::tweaks::journal::Record;
 
 struct Setup {
     _dir: TempDir,
@@ -66,16 +67,17 @@ fn status_reports_os_state_apart_from_ours() {
     assert_eq!(s.location.status_blocking().user_denied, None);
 }
 
-/// `locationPrivacy.test.ts`: apply → HKCU `Value=Deny`, HKLM `DisableLocation=1`,
-/// `DisableWindowsLocationProvider=1`.
+/// `locationPrivacy.test.ts`: apply → HKCU `Value=Deny`. NOADMIN §3: the machine policies are not
+/// written any more (per user, no elevation).
 #[test]
-fn apply_sets_the_three_values() {
+fn apply_denies_the_user_consent_only() {
     let s = setup(Fake::default());
     let status = s.location.apply_blocking().unwrap();
     assert_eq!(s.fake.get(&consent()), deny());
     for name in POLICY_VALUES {
-        assert_eq!(s.fake.get(&policy(name)), Val::Dword(1));
+        assert_eq!(s.fake.get(&policy(name)), Val::Absent);
     }
+    assert_eq!(s.fake.write_count(), 1);
     assert_eq!(status.ours, TweakState::On);
     assert_eq!(status.os_denied(), Some(true));
     assert!(s.location.is_applied());
@@ -85,32 +87,32 @@ fn apply_sets_the_three_values() {
 #[test]
 fn unreadable_prior_state_aborts_without_writes() {
     let fake = Fake::default();
-    fake.fail_read.lock().insert(policy("DisableLocation"));
+    fake.fail_read.lock().insert(consent());
     let s = setup(fake);
     let err = s.location.apply_blocking().unwrap_err();
     assert_eq!(err.kind, ErrorKind::Permission);
-    let msg = Msg::new("automation.hardening.location.unreadable").arg("hive", "HKLM");
+    let msg = Msg::new("automation.hardening.location.unreadable").arg("hive", "HKCU");
     assert_eq!(err.user_msg(), msg);
     assert_eq!(s.fake.write_count(), 0);
     assert!(!s.location.is_applied());
 }
 
-/// `locationPrivacy.test.ts`: baselines absent → rollback deletes `Value`, `DisableLocation`,
-/// `DisableWindowsLocationProvider` and leaves `Unrelated` (L1: per value, no `.reg` import).
+/// `locationPrivacy.test.ts`: an absent baseline → rollback deletes `Value` and leaves the rest of
+/// the key alone (L1: per value, no `.reg` import).
 #[test]
 fn rollback_deletes_absent_baselines_and_keeps_unrelated() {
     let fake = Fake::default();
     fake.set(&policy("Unrelated"), Val::Dword(5));
+    let unrelated = reg(CONSENT.0, CONSENT.1, "Unrelated");
+    fake.set(&unrelated, Val::Sz("x".into()));
     let s = setup(fake);
     s.location.apply_blocking().unwrap();
     let report = s.location.rollback_blocking();
     assert!(report.is_complete());
-    assert_eq!(report.restored.len(), 3);
+    assert_eq!(report.restored, vec![consent()]);
     assert_eq!(rollback_failure_msg(&report), None);
     assert_eq!(s.fake.get(&consent()), Val::Absent);
-    for name in POLICY_VALUES {
-        assert_eq!(s.fake.get(&policy(name)), Val::Absent);
-    }
+    assert_eq!(s.fake.get(&unrelated), Val::Sz("x".into()));
     assert_eq!(s.fake.get(&policy("Unrelated")), Val::Dword(5));
     assert!(!s.location.is_applied());
 }
@@ -120,20 +122,21 @@ fn rollback_deletes_absent_baselines_and_keeps_unrelated() {
 fn failing_delete_keeps_the_record() {
     let s = setup(Fake::default());
     s.location.apply_blocking().unwrap();
-    s.fake.fail_write.lock().insert(policy("DisableLocation"));
+    s.fake.fail_write.lock().insert(consent());
     let report = s.location.rollback_blocking();
-    assert_eq!(report.failed, vec![policy("DisableLocation")]);
+    assert_eq!(report.failed, vec![consent()]);
     let failure = Msg::new("automation.hardening.location.rollbackFailed");
     assert_eq!(rollback_failure_msg(&report), Some(failure));
     assert_eq!(s.journal.records(Feature::LocationPrivacy).len(), 1);
-    assert_eq!(s.fake.get(&consent()), Val::Absent);
+    assert_eq!(s.fake.get(&consent()), deny());
     s.fake.fail_write.lock().clear();
     assert!(s.location.rollback_blocking().is_complete());
-    assert_eq!(s.fake.get(&policy("DisableLocation")), Val::Absent);
+    assert_eq!(s.fake.get(&consent()), Val::Absent);
     assert!(!s.location.is_applied());
 }
 
-/// Re-applying keeps the original baselines; rollback brings back the user's own choice.
+/// Re-applying keeps the original baseline; rollback brings back the user's own choice and never
+/// touches the machine policy.
 #[test]
 fn reapply_keeps_the_original_baseline() {
     let fake = Fake::default();
@@ -145,26 +148,19 @@ fn reapply_keeps_the_original_baseline() {
     assert!(s.location.rollback_blocking().is_complete());
     assert_eq!(s.fake.get(&consent()), Val::Sz("Allow".into()));
     assert_eq!(s.fake.get(&policy("DisableLocation")), Val::Dword(0));
-    assert_eq!(
-        s.fake.get(&policy("DisableWindowsLocationProvider")),
-        Val::Absent
-    );
 }
 
-/// A failed write undoes the writes of the same apply; nothing is journalled.
+/// A refused write leaves nothing behind; nothing is journalled.
 #[test]
-fn failed_write_undoes_the_apply() {
+fn failed_write_leaves_nothing() {
     let fake = Fake::default();
-    fake.fail_write
-        .lock()
-        .insert(policy("DisableWindowsLocationProvider"));
+    fake.fail_write.lock().insert(consent());
     let s = setup(fake);
     let err = s.location.apply_blocking().unwrap_err();
     assert_eq!(err.kind, ErrorKind::Permission);
     let failed = Msg::new("automation.hardening.location.failed");
     assert_eq!(err.user_msg(), failed);
     assert_eq!(s.fake.get(&consent()), Val::Absent);
-    assert_eq!(s.fake.get(&policy("DisableLocation")), Val::Absent);
     assert!(!s.location.is_applied());
 }
 
@@ -178,7 +174,6 @@ fn user_change_is_kept_by_the_rollback() {
     let report = s.location.rollback_blocking();
     assert_eq!(report.kept_user_value, vec![consent()]);
     assert_eq!(s.fake.get(&consent()), Val::Sz("Allow".into()));
-    assert_eq!(s.fake.get(&policy("DisableLocation")), Val::Absent);
 }
 
 /// Spec E3: as another administrator the HKCU consent would land in the wrong profile.
@@ -194,16 +189,48 @@ fn other_user_is_refused() {
     assert_eq!(s.fake.write_count(), 0);
 }
 
-/// `--no-elevate`: refused before anything is read or written.
+/// NOADMIN §3: location privacy is per user and works without elevation.
 #[test]
-fn unelevated_apply_is_refused() {
+fn unelevated_apply_denies_the_consent() {
     let s = setup(Fake {
         unelevated: true,
         ..Fake::default()
     });
-    let err = s.location.apply_blocking().unwrap_err();
-    assert_eq!(err.user_msg(), Msg::new("automation.hardening.needsAdmin"));
-    assert_eq!(s.fake.write_count(), 0);
+    assert_eq!(s.location.apply_blocking().unwrap().ours, TweakState::On);
+    assert_eq!(s.fake.get(&consent()), deny());
+    assert!(s.location.rollback_blocking().is_complete());
+    assert_eq!(s.fake.get(&consent()), Val::Absent);
+}
+
+/// Machine policies journalled by the old version stay obligations: rolled back where the write
+/// is allowed (elevated), kept for a retry with the failure reported where it is refused.
+#[test]
+fn old_policy_records_are_still_rolled_back() {
+    let fake = Fake::default();
+    for name in POLICY_VALUES {
+        fake.set(&policy(name), Val::Dword(1));
+    }
+    fake.fail_write.lock().insert(policy("DisableLocation"));
+    let s = setup(fake);
+    let records = POLICY_VALUES.map(|name| Record {
+        feature: Feature::LocationPrivacy,
+        target: policy(name),
+        baseline: Val::Absent,
+        applied: Val::Dword(1),
+        created: false,
+    });
+    assert_eq!(s.journal.adopt_legacy(records.to_vec()).unwrap(), 2);
+    let report = s.location.rollback_blocking();
+    assert_eq!(report.failed, vec![policy("DisableLocation")]);
+    assert!(rollback_failure_msg(&report).is_some());
+    assert_eq!(
+        s.fake.get(&policy("DisableWindowsLocationProvider")),
+        Val::Absent
+    );
+    s.fake.fail_write.lock().clear();
+    assert!(s.location.rollback_blocking().is_complete());
+    assert_eq!(s.fake.get(&policy("DisableLocation")), Val::Absent);
+    assert!(!s.location.is_applied());
 }
 
 /// A current value the journal could not record (consent as a DWORD) is refused, not written.

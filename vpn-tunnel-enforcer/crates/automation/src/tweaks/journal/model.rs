@@ -145,6 +145,16 @@ pub enum RegHive {
     Hklm,
 }
 
+impl RegHive {
+    /// `HKCU` / `HKLM`.
+    pub fn name(self) -> &'static str {
+        match self {
+            RegHive::Hkcu => "HKCU",
+            RegHive::Hklm => "HKLM",
+        }
+    }
+}
+
 /// One system value we may change.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
@@ -172,20 +182,21 @@ pub enum Target {
 }
 
 impl Target {
-    /// Log-safe label: no user paths (file name only) and never a value.
+    /// Language-neutral name, also the `{{target}}` of user messages: technical identifiers only
+    /// (no prose to translate), no user path (file name only) and never a value.
     pub fn label(&self) -> String {
         let file = |p: &Path| {
             p.file_name()
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
         };
         match self {
-            Target::Env { var } => format!("env {}", var.name()),
-            Target::Git { key } => format!("git {}", key.name()),
-            Target::Block { path, .. } => format!("block in {}", file(path)),
-            Target::StudioOpt { path, option } => format!("{} in {}", option.name(), file(path)),
-            Target::Lines { path, .. } => format!("legacy lines in {}", file(path)),
-            Target::Reg { hive, key, name } => format!("{hive:?}\\{key}\\{name}"),
-            Target::SystemProxy => "system proxy".to_owned(),
+            Target::Env { var } => var.name().to_owned(),
+            Target::Git { key } => key.name().to_owned(),
+            Target::Block { path, .. } | Target::Lines { path, .. } => file(path),
+            Target::StudioOpt { path, option } => format!("{} ({})", option.name(), file(path)),
+            Target::Reg { hive, key, name } => format!("{}\\{key}\\{name}", hive.name()),
+            // Where WinINet keeps the per-user settings.
+            Target::SystemProxy => r"HKCU\…\Internet Settings".to_owned(),
         }
     }
 
