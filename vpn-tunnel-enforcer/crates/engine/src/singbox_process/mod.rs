@@ -23,7 +23,7 @@ mod tests;
 
 use crate::pin::NotPinned;
 use child::{EngineChild, Scrubber, Spec, exited};
-pub use child::{ExitInfo, KILL_CODE};
+pub use child::{ExitInfo, GRACEFUL_STOP, KILL_CODE};
 
 /// Emitted by `Box.Start()` after every start stage, e.g.
 /// `+0300 2026-09-02 10:54:30 INFO sing-box started (0.40s)` (not `sing-box pre-started (`).
@@ -33,7 +33,7 @@ pub const READY_MARKER: &str = "sing-box started (";
 pub const LOG_STEM: &str = "sing-box";
 /// Readiness budget: the first Wintun driver installation takes seconds.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(20);
-/// Exit wait after terminate.
+/// Exit wait after the kill (a stop first waits up to [`GRACEFUL_STOP`] for the engine's own exit).
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 /// Deadline of `version` and `check`.
 const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -182,10 +182,12 @@ impl SingBoxProcess {
         }
     }
 
-    /// Terminates the engine and waits up to `within` for its exit (idempotent; an already
-    /// exited process returns its exit at once). The returned exit is the proof.
+    /// Stops the engine and waits for its exit (idempotent; an already exited process returns
+    /// its exit at once): CTRL_BREAK, up to [`GRACEFUL_STOP`] for its own exit (sing-box then
+    /// closes its TUN and Wintun removes the adapter; [`ExitInfo::graceful`]), else the kill and
+    /// up to `within` more. The returned exit is the proof.
     pub async fn terminate(&self, within: Duration) -> Result<ExitInfo, StopError> {
-        let info = self.child.kill_and_wait(within).await;
+        let info = self.child.stop_and_wait(GRACEFUL_STOP, within).await;
         info.ok_or(StopError::ExitNotConfirmed)
     }
 

@@ -175,6 +175,7 @@ impl FakeRuntime {
             code: Some(code),
             stderr_tail: "fatal: outbound failed".into(),
             user_initiated: false,
+            graceful: false,
         });
         self.bring_down();
         self.emit(TunnelEvent::Status(TunStatusKind::Stopped));

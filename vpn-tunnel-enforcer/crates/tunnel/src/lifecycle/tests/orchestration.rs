@@ -416,6 +416,7 @@ async fn crash_with_failed_cleanup_ends_the_session() {
         code: Some(1),
         stderr_tail: "fatal: outbound failed".into(),
         user_initiated: false,
+        graceful: false,
     });
     h.rt.bring_down();
     let warning = vpnte_base::Msg::new("test.protectionNotReleased");

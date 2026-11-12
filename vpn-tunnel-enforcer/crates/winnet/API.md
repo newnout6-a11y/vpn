@@ -179,8 +179,19 @@ impl Job {
 }
 pub fn app_job() -> std::io::Result<&'static Job>; // process-wide, never dropped (one-shot tools)
 pub fn spawn_hidden(cmd: &mut tokio::process::Command, job: &Job) -> std::io::Result<tokio::process::Child>;
-    // runtime. CREATE_NO_WINDOW, stdin/stdout/stderr piped (overrides earlier stdio),
-    // kill_on_drop(true), assigned to `job` at once; a failed assign kills the child and errs.
+    // runtime. CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP (the child gets its own windowless
+    // console and leads its own group, so `ctrl_break` reaches exactly it), stdin/stdout/stderr
+    // piped (overrides earlier stdio), kill_on_drop(true), assigned to `job` at once; a failed
+    // assign kills the child and errs.
+pub fn ctrl_break(pid: u32) -> std::io::Result<()>;
+    // blocking (~50 ms, one at a time process-wide). CTRL_BREAK to the console group of a running
+    // `spawn_hidden` child: AttachConsole(pid), our own handler swallows C/BREAK, Generate…,
+    // 50 ms settle, FreeConsole. Only asks: the caller waits and kills on its own deadline. Go
+    // engines (sing-box, Xray) turn it into SIGINT and shut down cleanly. Errs when `pid` has no
+    // console or is 0, or when this process has a console of its own (access denied).
+pub fn detach_console() -> bool;
+    // tests / console tools: FreeConsole of an inherited console so `ctrl_break` works; refuses
+    // (false) while stdout / stderr is a terminal. The GUI app and a service have no console.
 pub fn image_path(pid: u32) -> Result<PathBuf, ImageError>;
 pub enum ImageError { Gone /* no such PID, also 0 */, Denied, Os(windows::core::Error) }
 
@@ -210,8 +221,11 @@ pub enum SweepError { UnsafePrefix(String), Enumeration(windows::core::Error), I
 ```
 Engines: `let job = Job::kill_on_close().map_err(AppError::internal)?;` then
 `let mut child = spawn_hidden(&mut cmd, &job)?;` and keep the `Job` as long as the engine should
-live; stop = `child.start_kill()` + `child.wait()` with a
-timeout (the reaped handle is the exit proof) or `job.terminate(code)`; curl / pktmon / `version`
+live; stop = `ctrl_break(pid)` on the blocking pool, wait for the exit with a grace period, then
+`job.terminate(code)` (or `child.start_kill()`) and wait again with a timeout (the reaped handle
+is the exit proof; keep the handle open while a `ctrl_break` may still target its PID: Windows
+never reuses the PID of a process with an open handle). A killed sing-box never calls
+`WintunCloseAdapter`, so its TUN interface outlives the session. curl / pktmon / `version`
 probes use `app_job()`. Orphan sweep at start (blocking thread): `sweep_orphans(&[engines_dir,
 legacy_runtime_dirs…], &["vpnte-sing-box.exe", "vpnte-xray.exe", …])`; names order = stop order;
 prefixes are plain long-form `X:\…` directories (8.3 names never match, `\\?\`, UNC, wildcards and
@@ -655,6 +669,8 @@ re-check the tunnel) and the theme service.
   (`RunValue::remove_legacy_task`) was never called; `relaunch_elevated` (UAC).
 - A real sing-box TUN for `wait_owned_tun` / `route_proof` success paths (unit vectors only);
   `watch_network` with real network changes (its loop is tested with a fake reader).
+- `ctrl_break` from the real GUI app (tests detach the test process from its inherited console
+  first) and the TUN interface's removal after a graceful sing-box stop (elevated `e2e_tun` in CI).
 - The real clipboard write / clear (`OpenClipboard` is denied in this sandboxed shell), including
   the private owner window used across threads.
 - `icmp` TTL-expired / packet-too-big replies (the local VPN answers echo itself); IPv6 `df` on a

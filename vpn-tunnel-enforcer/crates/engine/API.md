@@ -42,8 +42,9 @@ refused before the spawn: `io::ErrorKind::InvalidData`, rendered as `engine.proc
 by the `From<…> for AppError` impls. Unelevated nothing is checked.
 **Errors:** every error enum has `From<_> for vpnte_base::AppError` with an `engine.*` message;
 callers bubble them with `?` and render `AppError::user_msg()`.
-**Children:** every engine runs hidden (CREATE_NO_WINDOW) in its own kill-on-close Job: dropping
-the owning value kills exactly that process. Config always goes over stdin.
+**Children:** every engine runs hidden (CREATE_NO_WINDOW, in its own windowless console and
+process group) in its own kill-on-close Job: dropping the owning value kills exactly that
+process; a stop asks it to end (CTRL_BREAK) before it kills. Config always goes over stdin.
 
 ## `tags`
 
@@ -200,7 +201,8 @@ sb.wait_ready(singbox_process::READY_TIMEOUT, &cancel).await?;  // on Err: sb.te
 
 ```rust
 pub const READY_MARKER: &str = "sing-box started (";  pub const LOG_STEM: &str = "sing-box";
-pub const READY_TIMEOUT: Duration = 20 s;  pub const STOP_TIMEOUT: Duration = 3 s;
+pub const READY_TIMEOUT: Duration = 20 s;  pub const STOP_TIMEOUT: Duration = 3 s;  // wait after the kill
+pub const GRACEFUL_STOP: Duration = 3 s;              // wait for the own exit after CTRL_BREAK
 pub const KILL_CODE: i32 = 1;                         // exit code of our own kills
 pub struct SingBoxProcess;                            // drop = engine killed (its own Job)
 impl SingBoxProcess {
@@ -209,6 +211,7 @@ impl SingBoxProcess {
     pub fn spawn(exe: &Path, config: &[u8], logs: Option<&Path>) -> io::Result<Self>;
     pub async fn wait_ready(&self, timeout: Duration, cancel: &CancellationToken) -> Result<(), StartError>;
     pub async fn terminate(&self, within: Duration) -> Result<ExitInfo, StopError>;   // idempotent
+        // CTRL_BREAK, up to GRACEFUL_STOP for the own exit, else kill + up to `within`
     pub fn pid(&self) -> u32;
     pub fn exit_watch(&self) -> watch::Receiver<Option<ExitInfo>>;   // Some once the exit is proven
     pub fn exit_info(&self) -> Option<ExitInfo>;
@@ -217,7 +220,8 @@ impl SingBoxProcess {
     pub fn subscribe_lines(&self) -> broadcast::Receiver<Arc<str>>;  // RAW lines: never log them
 }
 pub struct ExitInfo { pub at: SystemTime, pub code: Option<i32>, pub stderr_tail: String /* 6 lines,
-    <= 800 chars, redacted */, pub user_initiated: bool, pub bind_failures: Vec<u16>, pub access_denied: bool }
+    <= 800 chars, redacted */, pub user_initiated: bool, pub graceful: bool, pub bind_failures: Vec<u16>,
+    pub access_denied: bool }
 impl ExitInfo { pub fn binds_any(&self, ports: &[u16]) -> bool; }  // died on one of our ports: retry once
 pub enum StartError { Exited(ExitInfo), Timeout, Cancelled, Spawn(io::Error) }
 pub enum StopError { ExitNotConfirmed }               // retry the stop
@@ -229,6 +233,15 @@ pub fn version_supported(v: (u16, u16, u16)) -> bool;                    // 1.14
 pub async fn check_config(exe: &Path, config: &[u8]) -> Result<(), CheckError>;  // `check -c stdin`, 10 s
 ```
 The exit is published after the output pumps drained (tail and bind evidence complete).
+**Stop (AT-02-009).** `terminate` asks first: CTRL_BREAK to the engine's own console group
+(`vpnte_winnet::process::ctrl_break`), which Go turns into SIGINT; sing-box then closes every
+inbound, the TUN's Wintun session and adapter included (`WintunCloseAdapter` removes the adapter
+it created), and exits 0 (measured: ~50 ms without TUN). A kill (TerminateJobObject, code
+`KILL_CODE`) follows only when it is not gone after `GRACEFUL_STOP` (logged `engine stop
+escalated`) or the event could not be delivered (a caller with a console of its own: tests must
+call `vpnte_winnet::process::detach_console()` first). `ExitInfo::graceful` = it ended by itself
+after our CTRL_BREAK; `user_initiated && !graceful` = we killed it. Worst case of a stop:
+`GRACEFUL_STOP + within`. A drop still kills at once (Job closes), as does the app's exit.
 Secrets of the config (and slot credentials) are masked in every logged / returned line; our
 DNS server tags (`dns-remote`, `dns-resolver`, `dns-direct`, `dns-bootstrap` and its
 `-quad9` / `-google` / `-tcp` / `-isp` steps) stay readable.
@@ -239,13 +252,14 @@ engine file differs from its pin); `StopError` -> `stopUnconfirmed`.
 ## `xray_process` — the two Xray slots
 
 ```rust
-pub const READY_TIMEOUT: Duration = 3500 ms;  pub const STOP_TIMEOUT: Duration = 1000 ms;
+pub const READY_TIMEOUT: Duration = 3500 ms;  pub const STOP_TIMEOUT: Duration = 1000 ms;  // after the kill
 pub const CHECK_TIMEOUT: Duration = 5 s;  pub const EXIT_CONFIG_REJECTED: i32 = 23;
 pub const FAULT_MAX_AGE: Duration = 120 s;
 pub struct SlotLaunch { pub config: Vec<u8>, pub dial_target: Option<SocketAddr> }  // Debug hides config
 pub struct SlotStatus { pub running: bool, pub port: Option<u16>, pub pid: Option<u32>,
     pub started_at: Option<SystemTime>, pub dial_target: Option<SocketAddr> }      // Default = empty slot
-pub enum XrayEvent { Exited { slot: Slot, pid: u32, code: Option<i32>, expected: bool, tail: String } }
+pub enum XrayEvent { Exited { slot: Slot, pid: u32, code: Option<i32>, expected: bool, graceful: bool,
+    tail: String } }
 pub enum XrayError { Spawn(io::Error), ConfigRejected(String), ExitedEarly { code: Option<i32>, tail: String },
     NotReady { port: u16, cause: SocksError }, SlotOccupied, PortOwnedByOtherSlot, NotRunning,
     NotStarted, ExitNotConfirmed, Cancelled }
@@ -270,7 +284,10 @@ impl XraySupervisor {
 pub fn classify_xray_fault<'a>(lines: impl IntoIterator<Item = &'a str>) -> Option<OutboundFault>;
 pub async fn check_config(exe: &Path, config: &[u8]) -> Result<(), XrayError>;  // `run -test -config stdin:`
 ```
-Events: `XrayEvent::Exited` only for slots that reached readiness; `expected` = we stopped it.
+Events: `XrayEvent::Exited` only for slots that reached readiness; `expected` = we stopped it;
+`graceful` = it ended by itself after our CTRL_BREAK. `stop` / `stop_all` / `restart` / a failed
+start stop a slot like sing-box: CTRL_BREAK, up to `singbox_process::GRACEFUL_STOP` (Xray exits
+0 in ~0.2 s here), else the kill and up to `STOP_TIMEOUT`; `stop_all` stops A then B.
 Restart policy / backoff (0.5 / 2 / 5 s, 3 per 60 s) is the tunnel FSM's. Messages:
 `engine.process.xray.{exited(code), socksNotReady(port), slotOccupied, portTaken, notRunning,
 notStarted}`, `engine.process.{configRejected, stopUnconfirmed, spawnFailed}(engine)`.
@@ -605,7 +622,11 @@ no fragment key is unused).
 - Not run: a real TUN start (needs elevation): routes, WFP interplay and runtime DNS are only
   checked by `sing-box check`; review risks R-E1..R-E5 (firewall vs mixed stack, IPv6 preference,
   UDP process lookup, link-local, VirtualBox) are open. The kill-not-delivered path of a stop
-  (`ExitNotConfirmed` after a refused kill) was not executed. The proxy capture runs live in a
+  (`ExitNotConfirmed` after a refused kill) was not executed. The graceful stop ran here against
+  the real engines without TUN (sing-box mixed inbound, Xray SOCKS slot: both exit 0 on their own)
+  and its kill fallback against a stand-in that ignores CTRL_BREAK (ping); that sing-box with a
+  real TUN closes its adapter on CTRL_BREAK is read from the 1.14.4 / sing-tun source and proven
+  only by the elevated `tunnel/tests/e2e_tun.rs` in CI. The proxy capture runs live in a
   loopback test (HTTP GET, CONNECT and SOCKS5 through `proxy-in`); process rules against proxy
   clients and SOCKS5 UDP through it were not executed (source-verified only).
 - Not here: a sing-box config for a standalone loopback proxy / probe instance (no TUN):

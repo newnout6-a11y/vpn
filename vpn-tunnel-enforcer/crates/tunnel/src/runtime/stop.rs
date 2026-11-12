@@ -2,7 +2,6 @@
 //! handle before anything is released; every cleanup step is independent and reported.
 use tokio_util::sync::CancellationToken;
 use vpnte_base::{AppError, ErrorKind, Msg};
-use vpnte_engine::singbox_process::KILL_CODE;
 
 use std::sync::atomic::Ordering;
 
@@ -62,7 +61,9 @@ impl Actor {
         if let Some(proc) = core.clone() {
             match proc.terminate(self.deps.timings.exit).await {
                 Ok(info) => {
-                    receipt.forced = info.code == Some(KILL_CODE);
+                    // Killed after the grace period (or the CTRL_BREAK could not be delivered):
+                    // a sing-box that never closed its TUN may leave the Wintun adapter behind.
+                    receipt.forced = info.user_initiated && !info.graceful;
                     self.record_exit(&info);
                 }
                 Err(e) => {

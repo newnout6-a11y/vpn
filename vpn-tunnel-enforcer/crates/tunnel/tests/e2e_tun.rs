@@ -95,6 +95,32 @@ async fn interface_gone_within(luid: u64, limit: Duration) -> Option<Duration> {
     }
 }
 
+/// The interface as Windows lists it right now (evidence for the CI log when it stays).
+fn interface_row(luid: u64) -> String {
+    let alias = adapters::alias_of(luid).unwrap_or_else(|e| format!("unreadable ({e})"));
+    let present = adapters::adapter_present(luid);
+    match adapters::inventory() {
+        Ok(list) => match list.iter().find(|a| a.luid == luid) {
+            Some(a) => format!(
+                "luid {luid:#x}: alias {:?}, oper status {:?}, present {present:?}, \
+                 alias_of {alias}, hidden {}, if_type {}, description {:?}, addresses {:?}",
+                a.alias,
+                a.status,
+                a.hidden,
+                a.if_type,
+                a.description,
+                a.addresses.iter().map(|u| u.ip).collect::<Vec<_>>()
+            ),
+            None => format!(
+                "luid {luid:#x}: not in the inventory, alias_of {alias}, present {present:?}"
+            ),
+        },
+        Err(e) => format!(
+            "luid {luid:#x}: inventory unreadable ({e}), alias_of {alias}, present {present:?}"
+        ),
+    }
+}
+
 async fn https_get() -> bool {
     let Ok(client) = client_for(&Route::Direct, Duration::from_secs(15)) else {
         return false;
@@ -124,6 +150,12 @@ fn helper_config(port: u16) -> Vec<u8> {
 async fn elevated_tun_session_end_to_end() {
     if !vpnte_winnet::elevation::is_elevated() {
         eprintln!("skipped: the process is not elevated");
+        return;
+    }
+    // The app has no console; the engines' graceful stop (CTRL_BREAK through the engine's own
+    // console) needs a caller without one. CI output goes to pipes, so detaching loses nothing.
+    if !vpnte_winnet::process::detach_console() {
+        eprintln!("skipped: output is a terminal (the graceful stop needs a console-less process)");
         return;
     }
     let (Some(singbox), Some(xray)) = (
@@ -234,9 +266,14 @@ async fn elevated_tun_session_end_to_end() {
     // 4. Stop: engines gone, adapter gone, dynamic filters gone, plain traffic works again.
     let stop = runtime.stop(StopOptions::default()).await;
     guard.runtime = None;
+    let exit = runtime.last_exit();
+    eprintln!("stop: forced {}, sing-box exit {exit:?}", stop.forced);
     assert!(stop.confirms_cleanup(), "{stop:?}");
     assert!(stop.adapter_gone, "adapter gone after the stop");
     let gone = interface_gone_within(tun.luid, Duration::from_secs(15)).await;
+    if gone.is_none() {
+        eprintln!("still present: {}", interface_row(tun.luid));
+    }
     assert!(
         gone.is_some(),
         "the TUN interface is still present 15 s after the stop"
@@ -245,7 +282,14 @@ async fn elevated_tun_session_end_to_end() {
         "TUN interface removed {:?} after the stop",
         gone.unwrap_or_default()
     );
-    assert_eq!(runtime.last_exit().map(|e| e.user_initiated), Some(true));
+    assert_eq!(exit.as_ref().map(|e| e.user_initiated), Some(true));
+    // AT-02-009: sing-box ended by itself on CTRL_BREAK (and so closed its Wintun adapter).
+    assert_eq!(
+        exit.as_ref().map(|e| e.graceful),
+        Some(true),
+        "sing-box had to be killed"
+    );
+    assert!(!stop.forced, "{stop:?}");
     let after = protection.status();
     assert_eq!(
         after.dynamic_filters.unwrap_or(0),

@@ -155,6 +155,7 @@ fn exit_info(code: i32, user_initiated: bool, bind: Vec<u16>) -> ExitInfo {
         code: Some(code),
         stderr_tail: "FATAL fake".into(),
         user_initiated,
+        graceful: false,
         bind_failures: bind,
         access_denied: false,
     }

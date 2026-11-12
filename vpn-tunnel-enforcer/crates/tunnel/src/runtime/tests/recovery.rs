@@ -431,6 +431,7 @@ async fn active_slot_exit_is_restarted() {
         pid: 1,
         code: Some(2),
         expected: false,
+        graceful: false,
         tail: String::new(),
     })
     .await

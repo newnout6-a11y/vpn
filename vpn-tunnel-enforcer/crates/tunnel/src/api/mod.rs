@@ -199,6 +199,9 @@ pub struct ExitInfo {
     pub stderr_tail: String,
     /// The app asked for this exit (stop, compensation): not a crash.
     pub user_initiated: bool,
+    /// The engine ended by itself after our CTRL_BREAK, without the kill (sing-box then closed
+    /// its TUN: Wintun removes the adapter only then).
+    pub graceful: bool,
 }
 
 /// Events on the runtime's broadcast channel, in the order they happened.

@@ -30,6 +30,17 @@ pub(crate) fn hidden(cmd: &mut Command) -> &mut Command {
     cmd.creation_flags(CREATE_NO_WINDOW)
 }
 
+/// The test process stands in for the console-less app: a graceful stop attaches to the
+/// engine's own console, which a process with a console of its own cannot do. Detaches from the
+/// inherited one; `false` (stops then kill) when stdout / stderr is a terminal.
+pub(crate) fn console_free() -> bool {
+    let free = vpnte_winnet::process::detach_console();
+    if !free {
+        eprintln!("skipped: output is a terminal, the test process keeps its console");
+    }
+    free
+}
+
 /// A fresh directory under `%TEMP%`, removed on drop.
 pub(crate) struct TempDir(PathBuf);
 

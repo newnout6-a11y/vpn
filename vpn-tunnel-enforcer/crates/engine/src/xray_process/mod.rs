@@ -21,7 +21,7 @@ use vpnte_base::types::{Creds, Engine, OutboundFault};
 use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::socks5::{self, SocksError};
 
-use crate::singbox_process::child::{self, EngineChild, Scrubber, Spec, exited};
+use crate::singbox_process::child::{self, EngineChild, GRACEFUL_STOP, Scrubber, Spec, exited};
 use crate::singbox_process::{code_text, re, spawn_error};
 use crate::slot::{Slot, SlotEndpoint};
 
@@ -30,7 +30,8 @@ mod tests;
 
 /// Authenticated SOCKS readiness budget (old `waitForLocalSocks`, 3500 ms).
 pub const READY_TIMEOUT: Duration = Duration::from_millis(3500);
-/// Exit confirmation after terminate.
+/// Exit confirmation after the kill (a stop first waits up to
+/// [`crate::singbox_process::GRACEFUL_STOP`] for Xray's own exit after CTRL_BREAK).
 pub const STOP_TIMEOUT: Duration = Duration::from_millis(1000);
 /// Deadline of `check_config`.
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -76,6 +77,8 @@ pub enum XrayEvent {
         pid: u32,
         code: Option<i32>,
         expected: bool,
+        /// Xray ended by itself after our CTRL_BREAK (no kill was needed).
+        graceful: bool,
         /// Redacted last output lines.
         tail: String,
     },
@@ -288,7 +291,7 @@ impl XraySupervisor {
         Ok(())
     }
 
-    /// Kills the slot's process and waits for the exit; an unconfirmed exit keeps the instance.
+    /// Stops the slot's process and waits for the exit; an unconfirmed exit keeps the instance.
     async fn reap(&mut self, slot: Slot) -> Result<(), XrayError> {
         let Some(inst) = &self.slots[slot.index()] else {
             return Ok(());
@@ -296,18 +299,49 @@ impl XraySupervisor {
         let _ = inst
             .state
             .compare_exchange(RUNNING, STOPPING, Ordering::SeqCst, Ordering::SeqCst);
-        if inst.child.kill_and_wait(STOP_TIMEOUT).await.is_none() {
+        let stopped = inst.child.stop_and_wait(GRACEFUL_STOP, STOP_TIMEOUT).await;
+        if stopped.is_none() {
             return Err(XrayError::ExitNotConfirmed);
         }
         self.slots[slot.index()] = None;
         Ok(())
     }
 
-    /// Stops both slots (both are attempted); the first error is returned.
+    /// Stops both slots at the same time (both are attempted), so a slot that ignores CTRL_BREAK
+    /// costs its grace period once, not once per slot; the first error is returned.
     pub async fn stop_all(&mut self) -> Result<(), XrayError> {
-        let a = self.stop(Slot::A).await;
-        let b = self.stop(Slot::B).await;
-        a.and(b)
+        for inst in self.slots.iter().flatten() {
+            let _ =
+                inst.state
+                    .compare_exchange(RUNNING, STOPPING, Ordering::SeqCst, Ordering::SeqCst);
+        }
+        let reap = |slot: Slot| {
+            let inst = self.slots[slot.index()].as_ref();
+            async move {
+                match inst {
+                    Some(inst) => inst
+                        .child
+                        .stop_and_wait(GRACEFUL_STOP, STOP_TIMEOUT)
+                        .await
+                        .is_some(),
+                    None => true,
+                }
+            }
+        };
+        let (a, b) = tokio::join!(reap(Slot::A), reap(Slot::B));
+        let mut first = Ok(());
+        for (slot, stopped) in [(Slot::A, a), (Slot::B, b)] {
+            if stopped {
+                self.slots[slot.index()] = None;
+                self.launches[slot.index()] = None;
+                if self.active == Some(slot) {
+                    self.active = None;
+                }
+            } else if first.is_ok() {
+                first = Err(XrayError::ExitNotConfirmed);
+            }
+        }
+        first
     }
 
     /// Marks `slot` as the one sing-box's selector points at (after the Clash API select).
@@ -438,6 +472,7 @@ fn forward_exit(
             pid,
             code: info.code,
             expected,
+            graceful: info.graceful,
             tail: info.stderr_tail,
         };
         // A closed channel only means nobody listens any more.

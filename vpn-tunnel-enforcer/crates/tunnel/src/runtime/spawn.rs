@@ -104,6 +104,7 @@ impl Actor {
             code: info.code,
             stderr_tail: info.stderr_tail.clone(),
             user_initiated: info.user_initiated,
+            graceful: info.graceful,
         });
     }
 

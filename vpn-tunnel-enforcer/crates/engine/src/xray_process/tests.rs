@@ -8,7 +8,7 @@ use vpnte_base::types::OutboundFault;
 use super::*;
 use crate::ports;
 use crate::singbox_process::testkit::xray_config;
-use crate::test_support::{TempDir, xray_exe};
+use crate::test_support::{TempDir, console_free, xray_exe};
 
 const NO_DESTINATION: &str = "2026/09/02 10:54:31.123456 [Info] [1234567] app/proxyman/outbound: failed to process outbound traffic > proxy/vless/outbound: failed to find an available destination > common/retry: [dial tcp 1.2.3.4:443: i/o timeout] > common/retry: all retry attempts failed";
 
@@ -131,6 +131,35 @@ async fn slot_starts_activates_and_stops() {
     sup.stop(Slot::A).await.unwrap();
     let log = std::fs::read_to_string(logs.path().join("xray-a.log")).unwrap();
     assert!(!log.is_empty() && !log.contains(&ep.creds().pass));
+}
+
+/// AT-02-009: a stop asks first. The real Xray (authenticated loopback SOCKS inbound) ends by
+/// itself on CTRL_BREAK with its own clean exit inside the grace period: no kill, and the exit
+/// event says so.
+#[tokio::test]
+async fn graceful_stop_needs_no_kill() {
+    let Some(exe) = xray_exe() else { return };
+    if !console_free() {
+        return;
+    }
+    let (mut sup, mut events) = supervisor(exe, None);
+    let ep = SlotEndpoint::allocate(&[]).unwrap();
+    sup.start(Slot::A, ep.clone(), launch(&ep), &CancellationToken::new())
+        .await
+        .unwrap();
+    let started = Instant::now();
+    sup.stop(Slot::A).await.unwrap();
+    let took = started.elapsed();
+    eprintln!("xray stopped gracefully in {took:?}");
+    let XrayEvent::Exited {
+        expected,
+        graceful,
+        code,
+        ..
+    } = next_event(&mut events).await;
+    assert!(expected && graceful, "code {code:?}");
+    assert_eq!(code, Some(0), "Xray's own exit, not a kill");
+    assert!(took < GRACEFUL_STOP, "took {took:?}");
 }
 
 /// AT-02-002 (xray-engine 7): staging B never stops A; B on A's port is refused without a

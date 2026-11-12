@@ -1,4 +1,5 @@
-//! Unit tests of the engine-child layer (no engine process involved).
+//! Unit tests of the engine-child layer (no engine process involved; the stop fallback runs
+//! ping as a stand-in engine).
 use super::*;
 
 fn output(scrub: Scrubber) -> Output {
@@ -52,7 +53,11 @@ fn exit_info_tail_and_bind_evidence() {
     }
     out.on_line("FATAL start inbound/mixed[mixed-in]: listen tcp 127.0.0.1:34567: bind: Only one usage of each socket address is normally permitted.".into());
     out.on_line("ERROR auth hunter2-secret uuid 0b6e3a0c-9a43-4c1e-8f2a-0123456789ab".into());
-    let info = out.exit_info(SystemTime::now(), Some(1), false);
+    let info = out.exit_info(SystemTime::now(), Some(1), RUNNING);
+    assert!(
+        !info.user_initiated && !info.graceful,
+        "nobody asked: a crash"
+    );
     let lines: Vec<&str> = info.stderr_tail.lines().collect();
     assert_eq!(lines.len(), 6);
     assert_eq!(lines[0], "INFO line 6");
@@ -61,12 +66,72 @@ fn exit_info_tail_and_bind_evidence() {
     assert!(info.binds_any(&[34567]) && !info.binds_any(&[34568]));
     out.on_line("y".repeat(1000));
     assert_eq!(
-        out.exit_info(SystemTime::now(), None, true)
+        out.exit_info(SystemTime::now(), None, KILLED)
             .stderr_tail
             .chars()
             .count(),
         800
     );
+}
+
+/// AT-02-009: the stop state read at the exit decides `user_initiated` / `graceful`.
+#[test]
+fn stop_state_maps_to_the_exit_record() {
+    let out = output(Scrubber::default());
+    let flags = |stop| {
+        let info = out.exit_info(SystemTime::now(), Some(0), stop);
+        (info.user_initiated, info.graceful)
+    };
+    assert_eq!(flags(RUNNING), (false, false));
+    assert_eq!(flags(ASKED), (true, true));
+    assert_eq!(flags(KILLED), (true, false));
+}
+
+/// A stand-in engine that ignores CTRL_BREAK (ping answers it with statistics and goes on),
+/// started without the pin check, once it has printed its first line (its handler is set).
+async fn stubborn() -> EngineChild {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    let ping = Path::new(&root).join("System32").join("PING.EXE");
+    let child = EngineChild::launch(Spec {
+        engine: Engine::SingBox,
+        exe: &ping,
+        args: &["-n", "30", "127.0.0.1"],
+        config: b"",
+        log: None,
+        marker: None,
+        scrub: Scrubber::default(),
+    })
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.raw_lines(None).is_empty() {
+        assert!(Instant::now() < deadline, "ping printed nothing");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    child
+}
+
+/// AT-02-009: an engine that does not end on CTRL_BREAK is killed once the grace period is
+/// over, never before, and its exit says it was killed; a repeated stop returns that exit.
+#[tokio::test]
+async fn stop_kills_what_ignores_the_request() {
+    let delivered = crate::test_support::console_free();
+    let child = stubborn().await;
+    let (grace, within) = (Duration::from_millis(600), Duration::from_secs(3));
+    let started = Instant::now();
+    let info = child
+        .stop_and_wait(grace, within)
+        .await
+        .expect("exit proven");
+    let took = started.elapsed();
+    assert!(info.user_initiated && !info.graceful, "{info:?}");
+    assert_eq!(info.code, Some(KILL_CODE));
+    if delivered {
+        assert!(
+            took >= grace,
+            "killed after {took:?}, inside the grace period"
+        );
+    }
+    assert_eq!(child.stop_and_wait(grace, within).await, Some(info));
 }
 
 /// tunnel-core B-17: the port is read from Go's `listen … bind:` prefix, whatever language

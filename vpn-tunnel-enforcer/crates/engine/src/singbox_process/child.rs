@@ -8,7 +8,7 @@ use std::ffi::OsStr;
 use std::io;
 use std::net::IpAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 use vpnte_base::types::Engine;
 use vpnte_core::logging::RotatingFile;
 use vpnte_core::{net, redact};
-use vpnte_winnet::process::{Job, app_job, spawn_hidden};
+use vpnte_winnet::process::{Job, app_job, ctrl_break, spawn_hidden};
 
 use crate::pin;
 use crate::tags::{
@@ -41,6 +41,16 @@ const MAX_LINE_BYTES: usize = 8 * 1024;
 const DRAIN: Duration = Duration::from_millis(250);
 /// Exit code of a process we terminate.
 pub const KILL_CODE: i32 = 1;
+/// How long a stop waits for the engine's own exit after CTRL_BREAK before it kills. sing-box
+/// closes its inbounds (the TUN: Wintun session and adapter) and outbounds; that takes well
+/// under a second here, and sing-box itself gives up after 10 s (`FatalStopTimeout`).
+pub const GRACEFUL_STOP: Duration = Duration::from_secs(3);
+/// How a stop was requested (`EngineChild::state`); ordered, so `fetch_max` never downgrades.
+const RUNNING: u8 = 0;
+/// CTRL_BREAK requested: an exit now is the engine's own, clean one.
+const ASKED: u8 = 1;
+/// Terminated by us (stop fallback, compensation, drop).
+const KILLED: u8 = 2;
 /// Exit tail: last non-empty lines and its character cap (old `stderrTail`).
 const TAIL_LINES: usize = 6;
 const TAIL_CHARS: usize = 800;
@@ -54,12 +64,16 @@ const MIN_SECRET_LEN: usize = 6;
 pub struct ExitInfo {
     /// When the exit was observed.
     pub at: SystemTime,
-    /// Process exit code (`-1` = 0xFFFFFFFF); [`KILL_CODE`] when we terminated it.
+    /// Process exit code (`-1` = 0xFFFFFFFF); [`KILL_CODE`] when we terminated it, 0 after a
+    /// graceful stop of sing-box or Xray.
     pub code: Option<i32>,
     /// Last 6 non-empty output lines, redacted, joined with `\n`, at most 800 chars.
     pub stderr_tail: String,
     /// The app asked for this exit (stop, compensation, drop): not a crash.
     pub user_initiated: bool,
+    /// The engine ended by itself after our CTRL_BREAK, without the kill: sing-box closed its
+    /// TUN (Wintun removes the adapter only then). `false` = killed, crashed, or never asked.
+    pub graceful: bool,
     /// Loopback ports the engine reported it could not bind (`listen tcp 127.0.0.1:<p>: bind: …`).
     pub bind_failures: Vec<u16>,
     /// The English WSAEACCES text appeared without a parsable address.
@@ -261,14 +275,16 @@ impl Output {
         }
     }
 
-    fn exit_info(&self, at: SystemTime, code: Option<i32>, user_initiated: bool) -> ExitInfo {
+    /// `stop` = the stop state read at the exit ([`RUNNING`] = nobody asked: a crash).
+    fn exit_info(&self, at: SystemTime, code: Option<i32>, stop: u8) -> ExitInfo {
         let lines = self.snapshot(None);
         let (bind_failures, access_denied) = bind_evidence(lines.iter().map(|l| &**l));
         ExitInfo {
             at,
             code,
             stderr_tail: self.scrub.tail(&lines),
-            user_initiated,
+            user_initiated: stop != RUNNING,
+            graceful: stop == ASKED,
             bind_failures,
             access_denied,
         }
@@ -342,7 +358,8 @@ pub(crate) struct EngineChild {
     out: Arc<Output>,
     exit: watch::Receiver<Option<ExitInfo>>,
     ready: watch::Receiver<bool>,
-    user_initiated: Arc<AtomicBool>,
+    /// [`RUNNING`] / [`ASKED`] / [`KILLED`], read by the waiter at the exit.
+    state: Arc<AtomicU8>,
     kill: Arc<Notify>,
 }
 
@@ -352,6 +369,11 @@ impl EngineChild {
     /// config, early exit) shows up on the exit watch.
     pub(crate) fn spawn(spec: Spec<'_>) -> io::Result<Self> {
         pin::check(spec.engine, spec.exe)?;
+        Self::launch(spec)
+    }
+
+    /// [`Self::spawn`] without the pin check (tests start stand-in programs with it).
+    pub(crate) fn launch(spec: Spec<'_>) -> io::Result<Self> {
         let job = Job::kill_on_close()?;
         let mut cmd = Command::new(spec.exe);
         cmd.args(spec.args);
@@ -391,13 +413,13 @@ impl EngineChild {
         .flatten()
         .collect();
         let (exit_tx, exit) = watch::channel(None);
-        let user_initiated = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(AtomicU8::new(RUNNING));
         let kill = Arc::new(Notify::new());
         tokio::spawn(wait_exit(
             child,
             pumps,
             out.clone(),
-            user_initiated.clone(),
+            state.clone(),
             kill.clone(),
             exit_tx,
         ));
@@ -407,7 +429,7 @@ impl EngineChild {
             out,
             exit,
             ready,
-            user_initiated,
+            state,
             kill,
         })
     }
@@ -456,7 +478,7 @@ impl EngineChild {
 
     /// Requests termination (idempotent); the exit is reported as user-initiated.
     pub(crate) fn kill(&self) {
-        self.user_initiated.store(true, Ordering::SeqCst);
+        self.state.store(KILLED, Ordering::SeqCst);
         // Terminating our private job ends exactly this engine; the handle path is the fallback.
         if let Err(err) = self.job.terminate(KILL_CODE.unsigned_abs()) {
             tracing::warn!(error = %err, "engine job termination failed; killing the process");
@@ -480,6 +502,57 @@ impl EngineChild {
             .ok()
             .flatten()
     }
+
+    /// The stop: CTRL_BREAK to the engine's console group, up to `grace` for its own exit (a
+    /// TerminateProcess'ed sing-box leaves its Wintun adapter and one of our TUN names behind),
+    /// then [`Self::kill_and_wait`] with `within`. An exited process returns its exit at once; a
+    /// repeated call after a kill goes straight to the kill. `None` = exit not confirmed.
+    pub(crate) async fn stop_and_wait(
+        &self,
+        grace: Duration,
+        within: Duration,
+    ) -> Option<ExitInfo> {
+        if let Some(info) = self.exited() {
+            return Some(info);
+        }
+        let asked = match self.state.fetch_max(ASKED, Ordering::SeqCst) {
+            RUNNING => self.ask().await,
+            // A concurrent stop asked already: give the engine the same grace.
+            ASKED => true,
+            _ => false,
+        };
+        if asked {
+            let mut exit = self.exit.clone();
+            match tokio::time::timeout(grace, exited(&mut exit)).await {
+                Ok(Some(info)) => return Some(info),
+                // The waiter is gone without an exit: the kill below still runs.
+                Ok(None) => {}
+                Err(_) => tracing::warn!(
+                    pid = self.pid,
+                    "engine stop escalated: no exit within the grace period"
+                ),
+            }
+        }
+        self.kill_and_wait(within).await
+    }
+
+    /// Delivers CTRL_BREAK (blocking pool: it holds a process-wide console lock for ~50 ms).
+    async fn ask(&self) -> bool {
+        let pid = self.pid;
+        match tokio::task::spawn_blocking(move || ctrl_break(pid)).await {
+            Ok(Ok(())) => true,
+            // A process with a console of its own (tests that keep it) cannot attach: the kill
+            // follows, and a killed sing-box may leave its TUN adapter behind.
+            Ok(Err(err)) => {
+                tracing::warn!(error = %err, pid, "graceful stop not delivered; killing");
+                false
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, pid, "graceful stop task failed; killing");
+                false
+            }
+        }
+    }
 }
 
 /// Resolves with the exit published on `rx` (`None` only if its waiter task is gone).
@@ -493,16 +566,19 @@ pub(crate) async fn exited(rx: &mut watch::Receiver<Option<ExitInfo>>) -> Option
 impl Drop for EngineChild {
     fn drop(&mut self) {
         // The job closes right after this: its member dies, and that exit was our decision.
-        self.user_initiated.store(true, Ordering::SeqCst);
+        self.state.store(KILLED, Ordering::SeqCst);
     }
 }
 
-/// Owns the child until it exits, then publishes [`ExitInfo`] once the pumps drained.
+/// Owns the child until it exits, then publishes [`ExitInfo`] once the pumps drained. The
+/// process handle stays open until every exit receiver is gone (the owner dropped): Windows
+/// never reuses the PID of a process with an open handle, so a late CTRL_BREAK to `pid` can
+/// never reach someone else's process.
 async fn wait_exit(
     mut child: Child,
     pumps: Vec<JoinHandle<()>>,
     out: Arc<Output>,
-    user_initiated: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
     kill: Arc<Notify>,
     tx: watch::Sender<Option<ExitInfo>>,
 ) {
@@ -527,9 +603,11 @@ async fn wait_exit(
         }
     };
     // Read at the exit, not after the drain: a stop requested while a crash drains stays a crash.
-    let (at, user) = (SystemTime::now(), user_initiated.load(Ordering::SeqCst));
+    let (at, stop) = (SystemTime::now(), state.load(Ordering::SeqCst));
     let _ = tokio::time::timeout(DRAIN, futures_util::future::join_all(pumps)).await;
-    tx.send_replace(Some(out.exit_info(at, status.code(), user)));
+    tx.send_replace(Some(out.exit_info(at, status.code(), stop)));
+    tx.closed().await;
+    drop(child);
 }
 
 /// Runs a one-shot engine command (`version`, config check, `rule-set match`) in the app job:

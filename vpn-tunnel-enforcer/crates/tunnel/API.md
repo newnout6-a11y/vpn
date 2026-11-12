@@ -36,12 +36,13 @@ pub struct StartReceipt { pub generation: u64, pub pid: u32, pub started_at: Uni
     pub warnings: Vec<Msg> }                                         // warnings include Xray's dropped settings
 pub struct StopOptions { pub preserve_protection: bool, pub preserve_last: bool }   // Default = full stop
 pub struct StopReceipt { pub operation_id: String /* stop_<32 hex> */, pub ok: bool, pub runtime_stopped: bool,
-    pub forced: bool, pub protection_released: Option<bool>, pub baseline_restored: Option<bool>,
+    pub forced: bool /* sing-box was killed: no own exit within GRACEFUL_STOP after CTRL_BREAK */,
+    pub protection_released: Option<bool>, pub baseline_restored: Option<bool>,
     pub adapter_gone: bool, pub warnings: Vec<Msg> }
 impl StopReceipt { pub fn confirms_cleanup(&self) -> bool }        // ok && stopped && both Some(true)
 pub struct RestartOptions { pub release_timeout: Duration /* 5 s */, pub cancel: CancellationToken } // Default
 pub struct ExitInfo { pub at: UnixMs, pub code: Option<i32>, pub stderr_tail: String /* redacted */,
-    pub user_initiated: bool }
+    pub user_initiated: bool, pub graceful: bool /* ended by itself after our CTRL_BREAK */ }
 pub struct TunStatus { pub running: bool, pub mode: Option<ModeKind>, pub proxy_addr: Option<String>,
     pub proxy_type: Option<ProxyKind>, pub profile_name: Option<String>, pub protocol: Option<String>,
     pub pid: Option<u32>, pub warning: Option<Msg>, pub proxy_reachable: bool /* Default true */,
@@ -334,6 +335,8 @@ impl TunnelHandle { pub fn spawn(deps: RuntimeDeps) -> Self }        // inside a
 pub struct Timings { pub ready, capture_ready, exit, release: Duration, pub backoff: [Duration; 3] /* 2/5/10 s */,
     pub stable /* 30 s */, proxy_watch /* 5 s */, proxy_probe, proxy_listen, egress_watch /* 15 s */,
     evidence_age /* 45 s */, capture_watch /* 15 s */, confirm_candidate, confirm_previous: Duration } // Default
+    // exit = wait after the kill; an engine stop first waits up to engine GRACEFUL_STOP (3 s)
+    // for the engine's own exit after CTRL_BREAK, so one engine stop takes at most 3 s + exit
 pub const MAX_RESTARTS: u8 = 3;
 pub struct UserInputs { pub smart_ru: bool, pub smart_ru_maps_direct: bool, pub rule_set_dir: Option<PathBuf>,
     pub domain_rules: Vec<DomainRule>, pub split_direct: Vec<String>, pub split_vpn: Vec<String>,
@@ -547,7 +550,11 @@ is not done here.
   the previous server after a failed `rotate` (see `lifecycle`).
 - Not run here: `tests/e2e_tun.rs::elevated_tun_session_end_to_end` (needs elevation; CI runs
   `cargo test -p vpnte-tunnel -- --ignored elevated_`), so `TunCapture` and `RealEngines`' network
-  reads run only there. Known leftover: sing-tun's `mixed` stack adds a Windows Firewall rule
+  reads run only there. The test detaches from its inherited console first (the engines' graceful
+  CTRL_BREAK stop needs a console-less caller, as the GUI app is; it skips when its output is a
+  terminal), asserts that sing-box ended by itself (`last_exit().graceful`, `!forced`) and, when
+  the interface outlives the 15 s wait, prints its row (alias, oper status, addresses) before
+  failing. Known leftover: sing-tun's `mixed` stack adds a Windows Firewall rule
   `sing-tun (<engine path>)` nobody removes (cleanup crate's job).
 - Soft mode against the real per-user system proxy: not run (the `SoftProxy` is the app's tweak
   journal; every test uses a fake). The real unelevated proxy capture IS run

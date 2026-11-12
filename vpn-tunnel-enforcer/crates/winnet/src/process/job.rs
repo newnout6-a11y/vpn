@@ -10,7 +10,7 @@ use windows::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
 };
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 use windows::core::PCWSTR;
 
 /// A Job Object whose members are killed when its last handle closes: on drop, and by the OS
@@ -86,8 +86,12 @@ pub fn app_job() -> io::Result<&'static Job> {
 ///
 /// The child runs unconfined for the microseconds between spawn and assignment; the engines
 /// and tools we start create no children of their own, so nothing can escape the job.
+///
+/// CREATE_NO_WINDOW still gives a console program a console of its own, only without a window
+/// (verified by `ctrl::tests`): [`super::ctrl_break`] attaches to it. CREATE_NEW_PROCESS_GROUP
+/// makes the child the leader of its own group, so that CTRL_BREAK reaches exactly this child.
 pub fn spawn_hidden(cmd: &mut Command, job: &Job) -> io::Result<Child> {
-    cmd.creation_flags(CREATE_NO_WINDOW.0)
+    cmd.creation_flags((CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP).0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

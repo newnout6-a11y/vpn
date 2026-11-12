@@ -7,7 +7,7 @@ use vpnte_base::types::OutboundFault;
 use super::testkit::singbox_config;
 use super::*;
 use crate::ports;
-use crate::test_support::{TempDir, singbox_exe};
+use crate::test_support::{TempDir, console_free, singbox_exe};
 
 const REALITY_LINE: &str = "+0300 2026-09-02 10:54:31 ERROR [123 200ms] connection: open connection to 1.1.1.1:443 using outbound/vless[proxy-out]: reality verification failed";
 const TLS_LINE: &str = "+0300 2026-09-02 10:54:31 ERROR [1 100ms] connection: open connection to proxy-out: remote error: tls: handshake failure";
@@ -137,7 +137,6 @@ async fn real_engine_starts_and_stops() {
 
     let info = sb.terminate(STOP_TIMEOUT).await.unwrap();
     assert!(info.user_initiated);
-    assert_eq!(info.code, Some(KILL_CODE));
     assert_eq!(
         sb.terminate(STOP_TIMEOUT).await.unwrap(),
         info,
@@ -150,6 +149,31 @@ async fn real_engine_starts_and_stops() {
     let log = std::fs::read_to_string(logs.path().join("sing-box.log")).unwrap();
     assert!(log.contains("sing-box started"));
     assert!(!log.contains(&creds.pass) && !log.contains(&creds.user));
+}
+
+/// AT-02-009: a stop asks first. The real sing-box (loopback mixed inbound, no TUN) ends by
+/// itself on CTRL_BREAK with its own clean exit, well inside the grace period: no kill.
+#[tokio::test]
+async fn graceful_stop_needs_no_kill() {
+    let Some(exe) = singbox_exe() else { return };
+    if !console_free() {
+        return;
+    }
+    let (sb, port) = start(&exe, None);
+    sb.wait_ready(READY_TIMEOUT, &CancellationToken::new())
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let info = sb.terminate(STOP_TIMEOUT).await.unwrap();
+    let took = started.elapsed();
+    eprintln!("sing-box stopped gracefully in {took:?}");
+    assert!(info.graceful && info.user_initiated, "{info:?}");
+    assert_eq!(info.code, Some(0), "sing-box's own exit, not {KILL_CODE}");
+    assert!(took < GRACEFUL_STOP, "took {took:?}");
+    assert!(
+        TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok(),
+        "port released"
+    );
 }
 
 /// tunnel-core 3.21: `sing-box.log` holds the current session; the previous one is `.1.log`.
@@ -240,6 +264,7 @@ async fn cancel_and_drop() {
         .clone()
         .unwrap();
     assert!(info.user_initiated);
+    assert!(!info.graceful, "a drop kills");
     assert!(TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok());
 }
 
