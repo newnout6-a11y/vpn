@@ -6,6 +6,7 @@
 use std::env;
 use std::fs;
 use std::io::Read;
+use std::os::windows::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -77,8 +78,23 @@ fn run_bounded(
     envs: &[(&str, &str)],
     limit: Duration,
 ) -> Result<Option<(i32, String)>> {
-    let mut child = Command::new(program)
-        .args(args)
+    run_bounded_raw(program, args, None, envs, limit)
+}
+
+/// [`run_bounded`] with an optional raw last argument that is passed to the program unquoted.
+fn run_bounded_raw(
+    program: &Path,
+    args: &[&str],
+    raw_tail: Option<&str>,
+    envs: &[(&str, &str)],
+    limit: Duration,
+) -> Result<Option<(i32, String)>> {
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    if let Some(tail) = raw_tail {
+        cmd.raw_arg(tail);
+    }
+    let mut child = cmd
         .envs(envs.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -132,8 +148,23 @@ fn uninstall(dir: &Path) -> Result<()> {
     fs::create_dir_all(&temp)?;
     let copy = temp.join("uninstall.exe");
     fs::copy(dir.join(UNINSTALLER), &copy).context("copy the uninstaller")?;
+    // NSIS reads `_?=` only as the last, UNQUOTED parameter (the rest of the command line, spaces
+    // included). std quotes an argument that contains a space, which NSIS does not recognise: the
+    // uninstaller then copies itself to %TEMP%, relaunches and exits 0 at once, and the relaunched copy
+    // runs against its own folder. So the directory goes in raw.
     let inst = format!("_?={}", dir.display());
-    let result = expect_exit(&copy, &["/S", &inst], 0);
+    let result = match run_bounded_raw(&copy, &["/S"], Some(&inst), &[], SETUP_TIMEOUT)? {
+        Some((0, _)) => Ok(()),
+        Some((actual, _)) => Err(anyhow::anyhow!(
+            "{} exited with {actual} (expected 0)",
+            copy.display()
+        )),
+        None => Err(anyhow::anyhow!(
+            "{} did not finish within {}s",
+            copy.display(),
+            SETUP_TIMEOUT.as_secs()
+        )),
+    };
     let _ = fs::remove_dir_all(&temp);
     result
 }

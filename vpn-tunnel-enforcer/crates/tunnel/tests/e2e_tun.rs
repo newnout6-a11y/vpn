@@ -80,6 +80,21 @@ async fn connect_around_the_tunnel(source: Ipv4Addr) -> std::io::Result<()> {
     }
 }
 
+/// Windows removes a closed Wintun interface asynchronously: the addresses are released at once
+/// (`StopReceipt::adapter_gone`), the interface entry follows. Returns how long that took.
+async fn interface_gone_within(luid: u64, limit: Duration) -> Option<Duration> {
+    let start = std::time::Instant::now();
+    loop {
+        if matches!(adapters::adapter_present(luid), Ok(false)) {
+            return Some(start.elapsed());
+        }
+        if start.elapsed() >= limit {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 async fn https_get() -> bool {
     let Ok(client) = client_for(&Route::Direct, Duration::from_secs(15)) else {
         return false;
@@ -221,7 +236,15 @@ async fn elevated_tun_session_end_to_end() {
     guard.runtime = None;
     assert!(stop.confirms_cleanup(), "{stop:?}");
     assert!(stop.adapter_gone, "adapter gone after the stop");
-    assert!(!adapters::adapter_present(tun.luid).unwrap_or(true));
+    let gone = interface_gone_within(tun.luid, Duration::from_secs(15)).await;
+    assert!(
+        gone.is_some(),
+        "the TUN interface is still present 15 s after the stop"
+    );
+    eprintln!(
+        "TUN interface removed {:?} after the stop",
+        gone.unwrap_or_default()
+    );
     assert_eq!(runtime.last_exit().map(|e| e.user_initiated), Some(true));
     let after = protection.status();
     assert_eq!(
