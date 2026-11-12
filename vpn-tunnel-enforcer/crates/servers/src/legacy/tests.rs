@@ -118,6 +118,31 @@ fn mixed_device_groups_are_split() {
     }
 }
 
+/// S-05: old groups that differ only in what canonical URLs drop (a fragment, a deep link) are
+/// one group key now: their rows land in the first group and no second group with the same key
+/// is created.
+#[test]
+fn groups_with_one_canonical_url_merge() {
+    let picker = json!({ "profiles": [
+        row("de", "DE", "de.example.com", UUID_A, Some("g1"), None),
+        row("nl", "NL", "nl.example.com", UUID_B, Some("g2"), None),
+    ] });
+    let groups = json!({ "groups": [
+        subscription("g1", "Provider", "https://sub.example.com/feed"),
+        subscription("g2", "Named", "https://sub.example.com/feed#Named"),
+    ] });
+    let (doc, report) = from_legacy(Some(&picker), Some(&groups), None, NOW);
+    assert_eq!((report.imported, report.groups), (2, 1));
+    let g1 = GroupId::from("g1");
+    assert_eq!(doc.groups[0].id, g1);
+    for id in ["de", "nl"] {
+        assert_eq!(
+            (&by_id(&doc, id).group_id, by_id(&doc, id).origin),
+            (&g1, Origin::Feed)
+        );
+    }
+}
+
 /// Servers spec §7 #15b / §2.1: the feed URL JSON / Clash rows carried is dropped; a per-line
 /// link is kept (the row is re-read from it).
 #[test]
@@ -411,6 +436,17 @@ fn direct_vpn_cache_fills_an_empty_list() {
         ),
         ("One", "two.example.com")
     );
+
+    // The index counts cache entries: a skipped entry before the selected one shifts nothing.
+    let shifted = json!({ "settings": { "directVpnInput": "key", "directVpnCachedInput": "key",
+        "directVpnSelectedIndex": 1, "directVpnCachedProfiles": [
+            { "name": "No outbound" },
+            { "name": "One", "protocol": "vless", "outbound": outbound("one.example.com", UUID_A) },
+            { "name": "Two", "protocol": "vless", "outbound": outbound("two.example.com", UUID_B) },
+        ] } });
+    let (doc, _) = from_legacy(Some(&picker), None, Some(&shifted), NOW);
+    let active = doc.active_profile_id.as_ref().and_then(|id| doc.row(id));
+    assert_eq!(active.map(|r| r.name.as_str()), Some("One"));
 
     let (doc, _) = from_legacy(Some(&picker), None, Some(&settings("other")), NOW);
     assert_eq!(doc, ServersDoc::default());

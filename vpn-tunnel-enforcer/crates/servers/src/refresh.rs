@@ -70,7 +70,8 @@ pub fn is_due(group: &ServerGroup, now: UnixMs) -> bool {
         .or(fetch.last_success_at)
         .unwrap_or(group.imported_at);
     let interval = i64::try_from(refresh_interval(group).as_millis()).unwrap_or(i64::MAX);
-    now.saturating_sub(since) >= interval
+    // A stamp from the future (the clock was wrong then) would stop refreshes until that date.
+    since > now || now - since >= interval
 }
 
 /// The URL and device a subscription group is fetched with; `None` for the manual group and for a
@@ -304,8 +305,12 @@ impl Servers {
             return Err(AppError::validation(err.msg()));
         }
         let Some(url) = canonical_source(input) else {
-            let report =
-                parse::parse_text(input).map_err(|_| parse::too_large(text::MAX_INPUT_BYTES))?;
+            // Up to 1 MiB of text is CPU work: the blocking pool, as for a fetched body.
+            let pasted = input.to_owned();
+            let report = tokio::task::spawn_blocking(move || parse::parse_text(&pasted))
+                .await
+                .map_err(AppError::internal)?
+                .map_err(|_| parse::too_large(text::MAX_INPUT_BYTES))?;
             if report.profiles.is_empty() {
                 return Err(parse::no_profiles(&report));
             }

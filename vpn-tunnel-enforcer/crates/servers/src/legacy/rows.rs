@@ -227,8 +227,9 @@ impl<'a> DirectVpnCache<'a> {
 
     /// `migrateLegacyDirectVpnProfiles` of an accepted cache: only for an empty server list.
     pub(super) fn migrate(&self, doc: &mut ServersDoc, now: UnixMs, report: &mut LegacyReport) {
+        // (cache index, row id): the old selected index counts cache entries, not imported rows.
         let mut added = Vec::new();
-        for entry in self.entries {
+        for (index, entry) in self.entries.iter().enumerate() {
             let Some(outbound) = entry.get("outbound").filter(|o| o.is_object()) else {
                 continue;
             };
@@ -242,7 +243,7 @@ impl<'a> DirectVpnCache<'a> {
                     let group = doc.ensure_manual_group(now);
                     match ServerRow::new(&profile, group, Origin::Manual, ClientDevice::Pc, now) {
                         Ok(row) if row.profile.verify().is_ok() => {
-                            added.push(row.id.clone());
+                            added.push((index, row.id.clone()));
                             doc.profiles.push(row);
                             continue;
                         }
@@ -257,9 +258,12 @@ impl<'a> DirectVpnCache<'a> {
                 reason,
             });
         }
+        // The selected entry; when it was not imported, the clamped index (storage §7.3).
         doc.active_profile_id = added
-            .get(self.selected.min(added.len().saturating_sub(1)))
-            .cloned();
+            .iter()
+            .find(|(index, _)| *index == self.selected)
+            .or_else(|| added.get(self.selected.min(added.len().saturating_sub(1))))
+            .map(|(_, id)| id.clone());
     }
 
     /// The input to resolve online when the cache is not the accepted one (storage §7.3).

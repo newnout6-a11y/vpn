@@ -90,10 +90,12 @@ pub fn from_legacy(
         }
         doc.groups.push(group);
     }
+    // The old app kept `…/sub` and `…/sub#name` apart; with canonical URLs they are one group key
+    // (S-05), so the rows of every such group go to the first one.
     let subscriptions: HashMap<&str, &OldGroup> = old_groups
         .iter()
         .filter(|g| g.url.is_some())
-        .map(|g| (g.group.id.as_str(), g))
+        .map(|g| (g.group.id.as_str(), first_of_url(&old_groups, g)))
         .collect();
 
     let rows = array(picker, "profiles");
@@ -262,6 +264,13 @@ pub(super) fn num(item: &Value, key: &str) -> Option<i64> {
     })
 }
 
+/// The first old group with `group`'s canonical URL (`group` itself when it is the first).
+fn first_of_url<'a>(old: &'a [OldGroup], group: &'a OldGroup) -> &'a OldGroup {
+    old.iter()
+        .find(|g| g.url.is_some() && g.url == group.url)
+        .unwrap_or(group)
+}
+
 /// Places feed rows into their subscription group. A group whose rows carry several devices
 /// becomes one group per device (same URL and metadata, ` · android` etc. on the non-pc copies):
 /// the old app fetched each device with its own headers, and one shared device would archive the
@@ -271,7 +280,10 @@ fn split_by_device(
     old: &[OldGroup],
     feed: &[(usize, GroupId, ClientDevice)],
 ) {
-    for sub in old.iter().filter(|g| g.url.is_some()) {
+    let firsts = old
+        .iter()
+        .filter(|g| g.url.is_some() && first_of_url(old, g).group.id == g.group.id);
+    for sub in firsts {
         let mut devices: BTreeSet<ClientDevice> = feed
             .iter()
             .filter(|(_, g, _)| *g == sub.group.id)

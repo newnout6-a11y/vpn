@@ -3,7 +3,7 @@
 //! but the exact-line one pairs a key only when it is unambiguous, because several locations
 //! behind one bridge often share host, port and even the UUID, and "first unmatched row" would
 //! silently re-point the user's selection to another location (S-01, S-02, S-04).
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 
 use vpnte_base::AppResult;
@@ -61,12 +61,13 @@ impl Keys {
         }
     }
 
-    /// A row's keys; a row whose key cannot be decrypted here still matches by its plain copies
-    /// (name, protocol, host, port), and the fresh key then replaces the locked one.
-    fn of_row(row: &ServerRow) -> Self {
-        match row.profile() {
-            Ok(p) => Self::of_profile(&p),
-            Err(_) => Self {
+    /// A row's keys from its opened `profile`; a row whose key cannot be decrypted here still
+    /// matches by its plain copies (name, protocol, host, port), and the fresh key then replaces
+    /// the locked one.
+    fn of_row(row: &ServerRow, profile: Option<&Profile>) -> Self {
+        match profile {
+            Some(p) => Self::of_profile(p),
+            None => Self {
                 line: None,
                 protocol: row.protocol.clone(),
                 server: row.server.to_ascii_lowercase(),
@@ -167,7 +168,8 @@ impl Matching {
 /// Passes: exact line → (protocol, host, port, name) → key identity → (protocol, host, port,
 /// credential) → (protocol, credential, name). Matched rows take the fresh key and name, lose
 /// their `missing_since`, come back from a provider archive (a user archive stays) and lose their
-/// health verdict when host, port or credential changed. Unmatched fresh entries become rows.
+/// health and classifier verdicts when host, port or credential changed. Unmatched fresh entries
+/// become rows, unless the group already holds that key as a manual row.
 /// Missing rows: untouched when `complete` is false (skipped lines prove nothing); otherwise
 /// marked missing, then archived for the provider once missing for [`MISSING_GRACE_MS`]. The
 /// selection is never changed here.
@@ -185,8 +187,22 @@ pub fn reconcile(
         .filter(|(_, r)| r.group_id == group.id && r.origin == Origin::Feed)
         .map(|(i, _)| i)
         .collect();
-    let row_keys: Vec<Keys> = feed.iter().map(|&i| Keys::of_row(&rows[i])).collect();
+    // Opened once: DPAPI is the cost of a refresh, and the matched rows are compared below.
+    let stored: Vec<Option<Profile>> = feed.iter().map(|&i| rows[i].profile().ok()).collect();
+    let row_keys: Vec<Keys> = feed
+        .iter()
+        .zip(&stored)
+        .map(|(&i, p)| Keys::of_row(&rows[i], p.as_ref()))
+        .collect();
     let fresh_keys: Vec<Keys> = fresh.iter().map(Keys::of_profile).collect();
+    // Keys the user holds in this group as manual rows (pasted in, or a provider-archived key
+    // pasted back) are not added again as feed copies: one key per group, as `Servers::add`
+    // keeps it.
+    let manual: HashSet<[u8; 16]> = rows
+        .iter()
+        .filter(|r| r.group_id == group.id && r.origin == Origin::Manual)
+        .filter_map(ServerRow::identity)
+        .collect();
     let mut m = Matching {
         row_taken: vec![false; feed.len()],
         fresh_row: vec![None; fresh.len()],
@@ -213,6 +229,12 @@ pub fn reconcile(
     };
     for (j, profile) in fresh.iter().enumerate() {
         let Some(k) = m.fresh_row[j] else {
+            if fresh_keys[j]
+                .identity
+                .is_some_and(|id| manual.contains(&id))
+            {
+                continue;
+            }
             let mut row = ServerRow::new(profile, group.id.clone(), Origin::Feed, device, now)?;
             row.last_seen_at = Some(now);
             report.added.push(row.id.clone());
@@ -222,12 +244,13 @@ pub fn reconcile(
         let (old, new) = (&row_keys[k], &fresh_keys[j]);
         let row = &mut rows[feed[k]];
         // Re-sealing an unchanged key would cost a DPAPI call per row and refresh.
-        if row.profile().ok().as_ref() != Some(profile) {
+        if stored[k].as_ref() != Some(profile) {
             row.set_profile(profile)?;
         }
         if old.credential != new.credential || old.server != new.server || old.port != new.port {
-            // The verdict was about the old endpoint or account.
+            // Both verdicts were about the old endpoint or account.
             row.health = None;
+            row.verdict = None;
         }
         row.last_seen_at = Some(now);
         row.missing_since = None;
@@ -244,7 +267,8 @@ pub fn reconcile(
             continue;
         }
         match row.missing_since {
-            Some(since) if now - since >= MISSING_GRACE_MS => {
+            // Saturating: the timestamp comes from a file and may be anything.
+            Some(since) if now.saturating_sub(since) >= MISSING_GRACE_MS => {
                 row.archived = Some(Archived {
                     at: now,
                     reason: ArchiveReason::Provider,

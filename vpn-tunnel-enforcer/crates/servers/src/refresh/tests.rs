@@ -14,7 +14,8 @@ use vpnte_profiles::model::{Profile, Source};
 use super::*;
 use crate::model::tests::{TempDir, UUID_A, UUID_B, UUID_C, vless};
 use crate::model::{
-    ArchiveReason, Archived, GroupKind, GroupStatus, HealthRecord, Origin, ProfileId, ServerRow,
+    ArchiveReason, Archived, GroupKind, GroupStatus, HealthRecord, Origin, ProfileId,
+    ServerReaction, ServerRow, ServerVerdict, VerdictRecord,
 };
 
 const MIN: UnixMs = 60_000;
@@ -85,6 +86,11 @@ fn due_rule() {
     g.fetch.last_attempt_at = None;
     g.fetch.last_success_at = Some(NOW - 29 * MIN);
     assert!(!is_due(&g, NOW));
+    g.fetch.last_success_at = Some(NOW + 365 * 24 * 60 * MIN);
+    assert!(
+        is_due(&g, NOW),
+        "a stamp from a wrong clock does not stop refreshes"
+    );
     let manual = ServerGroup::manual(GroupId::from("m"), 0);
     assert!(!is_due(&manual, NOW));
     let mut redacted = sub_group("r", "REDACTED");
@@ -300,8 +306,30 @@ fn manual_rows_and_user_archive_are_respected() {
     assert!(rows[2].missing_since.is_none() && rows[2].last_seen_at.is_none());
 }
 
-/// Servers §3.3: health is cleared when host, port or credential changed; a row whose key cannot
-/// be decrypted here is matched by its plain copies and gets the fresh key.
+/// A key the user holds in the group as a manual row (here: a provider-archived key pasted back)
+/// is not added again when the provider lists it once more; another group's copy does not count.
+#[test]
+fn listed_again_key_held_as_manual_row_is_not_duplicated() {
+    let g = sub_group("g", "https://sub.example.com/feed");
+    let other = sub_group("o", "https://other.example.com/feed");
+    let back = vless("DE", "de.example", 443, UUID_A);
+    let elsewhere = vless("NL", "nl.example", 443, UUID_B);
+    let mut rows = vec![
+        row(&g, &back, Origin::Manual),
+        row(&other, &elsewhere, Origin::Manual),
+    ];
+    let r = reconcile(&g, &mut rows, vec![back, elsewhere], true, NOW).unwrap();
+    assert_eq!((r.added.len(), r.updated), (1, 0));
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        (rows[2].group_id.as_str(), rows[2].name.as_str()),
+        ("g", "NL")
+    );
+}
+
+/// Servers §3.3: health (and the classifier verdict beside it) is cleared when host, port or
+/// credential changed; a row whose key cannot be decrypted here is matched by its plain copies
+/// and gets the fresh key.
 #[test]
 fn health_follows_the_endpoint_and_locked_rows_heal() {
     let g = sub_group("g", "https://sub.example.com/feed");
@@ -312,21 +340,32 @@ fn health_follows_the_endpoint_and_locked_rows_heal() {
         reason: None,
         egress_ip: None,
     };
+    let verdict = VerdictRecord {
+        verdict: ServerVerdict::IpBanned,
+        reaction: ServerReaction::SwitchServer,
+        at: NOW - MIN,
+    };
     let de = vless("DE", "de.example", 443, UUID_A);
     let nl = vless("NL", "nl.example", 443, UUID_B);
     let mut rows = vec![row(&g, &de, Origin::Feed), row(&g, &nl, Origin::Feed)];
-    rows[0].health = Some(health);
-    rows[1].health = Some(health);
+    for row in &mut rows {
+        row.health = Some(health);
+        row.verdict = Some(verdict);
+    }
     let rotated = vless("DE", "de.example", 443, UUID_C);
     let mut remark = no_line(nl.clone());
     remark.name = "NL fast".into();
     let r = reconcile(&g, &mut rows, vec![rotated, remark], true, NOW).unwrap();
     assert_eq!((r.updated, r.added.len()), (2, 0));
     assert_eq!(
-        rows[0].health, None,
-        "new credential: the old verdict is void"
+        (rows[0].health, rows[0].verdict),
+        (None, None),
+        "new credential: the old verdicts are void"
     );
-    assert_eq!(rows[1].health, Some(health));
+    assert_eq!(
+        (rows[1].health, rows[1].verdict),
+        (Some(health), Some(verdict))
+    );
 
     let mut locked = vec![row(&g, &de, Origin::Feed)];
     locked[0].profile = Secret::from_stored("dpapi:v1:AAAA".into());
@@ -568,6 +607,38 @@ async fn deadline_and_cancel_bookkeeping() {
     assert_eq!(e.rows(), rows);
 }
 
+/// Servers §7 #10: the deadline of a refresh whose group was re-pointed meanwhile (its device
+/// changed: the Rust form of "URL replaced") writes nothing on the group.
+#[tokio::test]
+async fn deadline_after_a_device_change_writes_nothing() {
+    let mut e = env();
+    let server = panel(Arc::new(Mutex::new(200))).await;
+    let id = e.import(&server.url("/feed")).await;
+    server.set_delay(Duration::from_secs(30));
+    let slow = fetcher(vec![Route::Direct]).with_request_timeout(Duration::from_secs(60));
+    e.ctx = RefreshCtx {
+        deadline: Duration::from_millis(400),
+        ..RefreshCtx::new(Arc::new(slow), e.ctx.ops.clone())
+    };
+    let seen = server.seen().len();
+    let (servers, ctx, gid) = (e.servers.clone(), e.ctx.clone(), id.clone());
+    let run = tokio::spawn(async move {
+        servers
+            .refresh_group(&ctx, &gid, Owner::Manual, CancellationToken::new())
+            .await
+    });
+    while server.seen().len() == seen {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let before = e.group(&id).fetch;
+    e.servers
+        .set_group_device(&id, ClientDevice::Android)
+        .unwrap();
+    let err = run.await.unwrap().unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Timeout);
+    assert_eq!(e.group(&id).fetch, before);
+}
+
 /// AT-00-003, servers §7 #10: a manual refresh pre-empts a scheduled one; only the manual result
 /// persists.
 #[tokio::test]
@@ -603,8 +674,7 @@ async fn manual_refresh_preempts_the_scheduled_one() {
 }
 
 /// AT-00-007, servers §7 #10: a group deleted during the fetch is not resurrected (`Conflict`); a
-/// rename made
-/// during the fetch survives the provider's title.
+/// rename made during the fetch survives the provider's title.
 #[tokio::test]
 async fn edits_during_a_fetch_win() {
     let e = env();

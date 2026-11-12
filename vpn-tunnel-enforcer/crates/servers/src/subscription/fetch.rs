@@ -98,7 +98,21 @@ fn rank(outcome: FetchOutcome) -> u8 {
 }
 
 /// A body -> profiles with the header metadata merged in (headers win), or why it is unusable.
-fn evaluate(headers: &[(String, String)], body: &[u8]) -> Result<ParseReport, FetchOutcome> {
+/// Up to 16 MiB of nested base64, YAML and thousands of keys is CPU work: it runs on the blocking
+/// pool, not on a runtime worker.
+async fn evaluate(
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> Result<ParseReport, FetchOutcome> {
+    tokio::task::spawn_blocking(move || evaluate_now(&headers, &body))
+        .await
+        .unwrap_or_else(|err| {
+            tracing::warn!("subscription: the body parser failed: {err}");
+            Err(FetchOutcome::Unparseable(BodyKind::Other))
+        })
+}
+
+fn evaluate_now(headers: &[(String, String)], body: &[u8]) -> Result<ParseReport, FetchOutcome> {
     let mut report =
         parse::parse_body(body).map_err(|_| FetchOutcome::Unparseable(BodyKind::Other))?;
     if report.profiles.is_empty() {
@@ -228,14 +242,22 @@ impl Attempt<'_> {
                 http::get(self.client, self.url, &variant.headers, self.hops, cancel).await;
             let outcome = match answer {
                 Err(Abort::Cancelled) => return Err(FetchError::Cancelled),
-                Ok(Answer::Body { headers, body }) => match evaluate(&headers, &body) {
-                    Ok(report) => {
-                        tracing::info!(host = %self.host, route = %self.route, ua = %variant.label,
-                            profiles = report.profiles.len(), "subscription fetched");
-                        return Ok(Step::Done(Box::new(report)));
+                Ok(Answer::Body { headers, body }) => {
+                    let parsed = tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => return Err(FetchError::Cancelled),
+                        parsed = evaluate(headers, body) => parsed,
+                    };
+                    match parsed {
+                        Ok(report) => {
+                            tracing::info!(host = %self.host, route = %self.route,
+                                ua = %variant.label, profiles = report.profiles.len(),
+                                "subscription fetched");
+                            return Ok(Step::Done(Box::new(report)));
+                        }
+                        Err(outcome) => outcome,
                     }
-                    Err(outcome) => outcome,
-                },
+                }
                 Ok(Answer::Status(code)) => FetchOutcome::Http(code),
                 Ok(Answer::Unusable(reason)) => {
                     tracing::info!(host = %self.host, route = %self.route, ua = %variant.label,

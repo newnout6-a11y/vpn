@@ -25,7 +25,8 @@ requests go out as the user (direct or through the user's / Happ's local proxy).
 **Blocking vs async:** every `Servers` method that changes the list writes `profiles.json`
 atomically and may call DPAPI; they are quick for normal lists, but run `Servers::open`,
 `legacy::from_legacy` and `Servers::import_legacy` from `spawn_blocking` or at startup. The `refresh`
-methods are async and need a tokio runtime (`spawn_scheduler` spawns onto the current one).
+methods are async and need a tokio runtime (`spawn_scheduler` spawns onto the current one); they
+parse fetched bodies and pasted text on tokio's blocking pool.
 **Secrets:** keys and subscription URLs live only in `vpnte_core::secret::Secret` (sealed on disk,
 redacted `Debug`); summaries, events, logs and errors never carry them.
 
@@ -305,7 +306,10 @@ and changes no row; a cancel stores nothing more; the deadline stores `Timeout`.
 provider metadata replaces `info`, and the provider title renames the group only while its name is
 an automatic one (empty, a host, or the provider's previous title). Missing keys: kept while the
 answer is partial, archived for the provider after 15 min of complete answers without them; a
-provider-archived key that comes back is restored; the selection is never changed by a refresh.
+provider-archived key that comes back is restored; a key whose host, port or credential changed
+loses its `health` and `verdict`; a key the group already holds as a manual row is not added
+again as a feed row; the selection is never changed by a refresh.
+A stamp from the future (wrong clock) makes a group due instead of blocking it.
 `import_legacy_direct`: the old single-key input goes in like a paste as `pc`, and the old selected
 index (clamped) becomes the selection; only into an empty list (`Ok(None)` otherwise).
 
@@ -322,7 +326,8 @@ pub struct LegacyDirect { pub input: Secret /* settings.directVpnInput */, pub s
 Inputs come from `vpnte_core::legacy` (secrets already plain, a locked stand-in or `null`). Ids are
 kept; the first manual group absorbs other manual groups, subscriptions whose URL is not
 `http(s)://host` and rows of unknown groups; mixed-device subscriptions are split per device
-(` · android` etc.); subscription URLs are stored canonical (deep link unwrapped, fragment dropped);
+(` · android` etc.); subscription URLs are stored canonical (deep link unwrapped, fragment dropped),
+and old groups that share a canonical URL are merged into the first of them;
 every key is re-sealed and verified. With an empty picker an accepted settings cache becomes rows;
 otherwise a non-empty `directVpnInput` is handed on in `direct` for `Servers::import_legacy_direct`.
 Nothing under the old data directory is written.
@@ -352,6 +357,7 @@ timeout the base `errors.*`). Every `Msg` this crate returns has its key under `
 | `servers.parse.tooLarge` | `mib` | `Validation`: paste over 1 MiB (`too_large`) |
 | `servers.parse.nothingFound` | — | `Validation`: nothing importable (`no_profiles`, `add` with no profiles) |
 | `servers.parse.allSkipped` | `count` | `Validation`: every entry skipped (`no_profiles`) |
+| `servers.parse.damagedBase64` | — | `Validation`: the lone entry is a base64 blob that does not decode (`no_profiles`) |
 | `servers.fetch.{ok,partial,emptyList,timeout}` | — | `outcome_msg`; `emptyList` (`Validation`), `timeout` (`Timeout`) as fetch errors |
 | `servers.fetch.body.{html,json,base64,uris,other}` | — | `outcome_msg(Unparseable(kind))`; `Validation` |
 | `servers.fetch.http` | `code` | `outcome_msg(Http(code))`; `Network` |
