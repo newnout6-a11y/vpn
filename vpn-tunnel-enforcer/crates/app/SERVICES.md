@@ -9,6 +9,8 @@ return `svc_core::needs_admin()` (`Permission`, `app.base.needsAdmin`: «Дос�
 working.
 
 ## Start order (`root::run`, app-main)
+0. `main`: `--crash-watch <pid>` (ks-b) returns into `crash_watch::run` before anything below:
+   the crash watcher holds no instance mutex, no log, no data-dir lock, no UI.
 1. `crate::setup::run(&args)`; `Some(code)` = exit. Then the single-instance check (a second
    launch hands over and exits before touching the data dir).
 2. `let backend = svc_core::build(&args)?;` — blocking, **no tokio runtime needed**: data dir +
@@ -96,6 +98,8 @@ messages to show.
 | `kill_switch_view()` | ks-a: Dashboard `pause` / `no_pause_vpn` strips, Tray `paused` (default: never paused) |
 | `retry_now()` | ks-a: Dashboard / Tray «Подключить» in the paused state; `false` = nothing paused, then a plain connect |
 | `always_available()` | ks-a: Settings kill switch ("Always" offered only with the helper service), maintenance repair (default `false`) |
+| `proxy_taken()` | ks-b: Dashboard `proxy_taken` line: another program holds the system proxy our proxy-mode session set (default: never) |
+| `reclaim_proxy()` | ks-b: Dashboard «Вернуть»: the journalled system proxy written again, original baseline kept (default: nothing to do) |
 
 ## What `app-tunnel` must provide (`svc_tunnel::build(&Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>>`)
 - Every method above, exactly as documented on the trait. Runs inside the tokio runtime.
@@ -173,3 +177,15 @@ the user confirms there. Link schemes: `setup::links` (installer `--setup regist
 the panel's «Открывать ссылки здесь») over `vpnte_winnet::url_scheme`; the Servers page's «Ссылки»
 panel changes them on the user's click. A later launch hands a link only to a pipe served by this exe
 in this session; a link it could not hand over is reported in a short box (`app.phones.linkNotTaken`).
+
+## Proxy-mode crash guardian (`crash_watch`, `svc_tunnel::soft`, package ks-b)
+While the tweak journal holds Soft values, `SoftTweaks` keeps two guards: the crash watcher (the
+app exe with `--crash-watch <own pid>`, started by `crash_watch::arm` before the first write;
+CreateProcessW without inherited handles, no window, out of the job when allowed) and the
+system-proxy watch (`soft::taken`: registry change notifications on the per-user Internet
+Settings, the read-back after each change, the start page's `proxy_taken` line). Both stop once
+a rollback left nothing journalled (`crash_watch::disarm` terminates the process the app
+started). The watcher waits on the app's handle; after an exit without rollback it runs
+`Soft::rollback_left_by(app)` on the journal under its file lock, only while the dead app is the
+journal's last writer (the next start's recovery may run at the same moment). Measured working
+set while waiting: `progress/ks-b.md`.

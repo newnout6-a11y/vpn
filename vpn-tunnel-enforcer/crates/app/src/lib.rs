@@ -10,6 +10,7 @@ pub mod api_settings;
 pub mod api_tools;
 pub mod args;
 pub mod boot;
+pub mod crash_watch;
 pub mod import;
 pub mod root;
 pub mod services;

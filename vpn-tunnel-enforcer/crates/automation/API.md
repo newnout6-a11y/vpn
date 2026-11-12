@@ -451,7 +451,7 @@ impl<C: Coordinator, E: AutoPilotEnv> AutoPilot<C, E> {
 ```rust
 use vpnte_automation::tweaks::{self, *};   // root re-exports: Backend, Feature, Journal, Record,
     // RollbackReport, Target, TweakError, TweakState, Val, DevTargets, ProxyOwner, Soft, SoftReport,
-    // SoftStatus, SoftSystem, SystemProxy, WinInet
+    // SoftStatus, SoftSystem, SystemProxy, WinInet, Writer
 
 // journal — one per process, shared by Soft, browsers and location; blocking, serialised by a mutex
 pub enum Feature { SoftEnv, SoftProxy, DevGit, DevGradle, DevStudio, BrowserWebRtc, LocationPrivacy } // serde kebab-case
@@ -473,7 +473,11 @@ pub enum Val { Absent, Sz(String), ExpandSz(String), Dword(u32), Text(String) } 
 pub struct Record { pub feature: Feature, pub target: Target, pub baseline: Val, pub applied: Val, pub created: bool }
 pub type RegAdmit = fn(RegHive, &str, &str, &Val) -> bool;      // load-time allow-list for Reg records
 pub fn no_registry(_: RegHive, _: &str, _: &str, _: &Val) -> bool;  // admits none
-pub struct TweakDoc { pub records: Vec<Record>, pub legacy_imported: bool }   // Document "tweaks.json" v1
+pub struct TweakDoc { pub records: Vec<Record>, pub legacy_imported: bool,   // Document "tweaks.json" v1
+                      pub writer: Option<Writer> }   // ks-b: the process that last changed the obligations
+pub struct Writer { pub pid: u32, pub started: u64 }  // a process across PID reuse (start FILETIME); serde camelCase
+impl Writer { pub fn current() -> Self; pub fn of_process(pid: u32, handle: HANDLE) -> windows::core::Result<Self>; }
+pub const LOCK_FILE: &str = "tweaks.lock";            // ks-b: the cross-process lock next to tweaks.json
 pub trait Backend: Send + Sync {
     fn read(&self, target: &Target) -> io::Result<Val>;              // Err = cannot tell
     fn write(&self, target: &Target, value: &Val) -> io::Result<bool>;  // Absent removes; true = created container
@@ -497,6 +501,8 @@ impl Journal {
     pub fn rollback(&self, backend: &dyn Backend, features: &[Feature]) -> RollbackReport;
     pub fn status(&self, backend: &dyn Backend, feature: Feature) -> TweakState;
     pub fn legacy_imported(&self) -> bool;  pub fn adopt_legacy(&self, records: Vec<Record>) -> AppResult<usize>;
+    pub fn rollback_left_by(&self, writer: Writer, backend: &dyn Backend, features: &[Feature])
+        -> Option<RollbackReport>;                     // ks-b crash watcher: None = another process changed it since
 }
 
 // soft — the Soft session: system proxy + env variables + the opted-in dev targets, together
@@ -519,8 +525,11 @@ impl Soft {
     pub async fn rollback(&self) -> AppResult<RollbackReport>;   // Err only if the blocking task panicked
     pub async fn status(&self) -> AppResult<SoftStatus>;
     pub fn is_applied(&self) -> bool;
+    pub async fn proxy_owner(&self) -> AppResult<ProxyOwner>;   // ks-b: the system proxy alone (no Git / file reads)
+    pub async fn reclaim_proxy(&self) -> AppResult<bool>;       // ks-b «Вернуть»: journalled value again; false = none
+    pub fn rollback_left_by(&self, writer: Writer) -> Option<RollbackReport>;  // ks-b: the crash watcher (blocking)
     // blocking twins: apply_blocking(&HostPort, ProxyKind, DevTargets), rollback_blocking() -> RollbackReport,
-    // status_blocking() -> SoftStatus
+    // status_blocking() -> SoftStatus, proxy_owner_blocking() -> ProxyOwner, reclaim_proxy_blocking() -> AppResult<bool>
 }
 pub fn feature_name(feature: Feature) -> Msg;  pub fn feature_warning(feature: Feature) -> Msg;  // opt-in list
 
@@ -564,6 +573,16 @@ legacy::{LegacySources { receipts_dir, gradle_props, studio_root } + current_use
   keeps it: `kept_user_value`), `Unreadable` = not checked. Kill switch `off` → `rollback` when
   the engine dies; `standard` → leave it applied until reconnect / stop (the app decides).
   Append `report.failure_msg()` to the stop result; show `report.kept_msg()` as info.
+- Several processes (ks-b: the app, its crash watcher, the next start, installer helpers) may
+  hold the same journal, each with its own copy. Every change (apply, rollback, adoption, the
+  open-time clean-up) runs under the file lock `tweaks.lock` (waits up to 10 s, then goes on
+  with a warning) on a copy read from disk under it; reads (`records`, `is_applied`, `status`)
+  use the copy as of the last change or open. A record already back at its baseline is retired
+  without a write, so a rollback another process already did changes nothing. `writer` is set
+  by every change of the obligations (not by the clean-up); `rollback_left_by(w)` acts only
+  while `writer == Some(w)`, so a crash watcher that wakes late never undoes the next start's
+  session. Open the journal with `hardening::admit` in every process: a narrower allow-list
+  drops the browser records from the file.
 
 ## `hardening` — browser policies and location privacy (registry, journalled)
 ```rust

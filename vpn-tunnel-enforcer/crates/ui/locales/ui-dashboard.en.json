@@ -27,6 +27,12 @@
       "noPause": {
         "title": "Another VPN",
         "body": "All traffic already goes through it, so the internet does not pause if our VPN drops."
+      },
+      "proxyTaken": {
+        "title": "System proxy",
+        "body": "Another program changed it: browsers bypass the VPN now.",
+        "restore": "Restore",
+        "failed": "Could not restore the proxy"
       }
     }
   }

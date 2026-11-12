@@ -337,6 +337,13 @@ impl Hub {
         detached(async move { Ok(tunnel.retry_now().await) }).await
     }
 
+    /// «Вернуть»: our proxy-mode session takes the system proxy back from another program; the
+    /// line follows the read-back the soft tweaks publish.
+    pub(super) async fn reclaim_proxy(self: &Arc<Self>) -> AppResult<()> {
+        let tunnel = self.tunnel()?;
+        detached(async move { tunnel.reclaim_proxy().await }).await
+    }
+
     /// Puts the exit address on the secret clipboard (cleared after a minute).
     pub(super) async fn copy_ip(&self, ip: IpAddr) -> AppResult<()> {
         let backend = self.backend.clone();

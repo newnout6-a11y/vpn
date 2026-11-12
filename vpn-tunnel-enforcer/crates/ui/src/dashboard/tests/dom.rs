@@ -109,6 +109,10 @@ impl DashboardApi for GateApi {
         self.log("retry");
         Ok(())
     }
+    async fn reclaim_proxy(&self) -> AppResult<()> {
+        self.log("reclaim");
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -392,4 +396,18 @@ async fn copied_feedback_expires() {
     tokio::time::sleep(Duration::from_millis(COPIED_MS + 100)).await;
     settle(&mut dom, 2, 40).await;
     assert!(act(&dom, &probe, |d| d.copied.peek().is_none()));
+}
+
+/// ks-b: «Вернуть» on the system-proxy line goes to the backend; a success needs no toast (the
+/// line goes away with the next snapshot).
+#[tokio::test]
+async fn proxy_line_takes_the_proxy_back() {
+    let (mut dom, probe) = mount(DashboardView {
+        proxy_taken: true,
+        ..state(connected())
+    });
+    act(&dom, &probe, Dash::reclaim_proxy);
+    settle(&mut dom, 3, 40).await;
+    assert_eq!(calls(&probe), ["reclaim"]);
+    assert!(toasts(&dom, &probe).is_empty());
 }

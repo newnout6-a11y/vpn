@@ -42,6 +42,9 @@ pub(super) fn Banners() -> Element {
         if let Some(name) = shown.no_pause_vpn {
             NoPauseNotice { name }
         }
+        if shown.proxy_taken {
+            ProxyTakenStrip {}
+        }
         if let Some(line) = dash.snapshot().autopick {
             PickStrip { title: tr(&line.title), body: line.body.as_ref().map(tr) }
         }
@@ -114,6 +117,31 @@ fn NoPauseNotice(name: String) -> Element {
                     ": {name}"
                 }
                 p { class: "swiss-notice-body", {t!("ui.dashboard.noPause.body")} }
+            }
+        }
+    }
+}
+
+/// Another program took over the system proxy while our session holds it (another VPN client, a
+/// policy): one calm line with «Вернуть» instead of fighting it silently (research killswitch 5.5).
+#[component]
+fn ProxyTakenStrip() -> Element {
+    let dash = use_context::<Dash>();
+    let busy = dash.reclaim.running();
+    rsx! {
+        div { class: "overflow-hidden",
+            div { class: "c-swiss swiss-notice", role: "status", aria_live: "polite",
+                span { class: "swiss-label swiss-notice-tag", {t!("ui.dashboard.proxyTaken.title")} }
+                p { class: "swiss-notice-body", {t!("ui.dashboard.proxyTaken.body")} }
+                div { class: "swiss-confirm-actions",
+                    button {
+                        r#type: "button",
+                        class: "swiss-confirm-yes",
+                        disabled: busy,
+                        onclick: move |_| dash.reclaim_proxy(),
+                        {t!("ui.dashboard.proxyTaken.restore")}
+                    }
+                }
             }
         }
     }

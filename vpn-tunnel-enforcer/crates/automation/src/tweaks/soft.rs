@@ -16,6 +16,7 @@ use vpnte_winnet::env::{BROADCAST_TIMEOUT, UserEnv, broadcast_change};
 use super::git::{self, GitCli};
 use super::journal::{
     Backend, BlockKind, Feature, Journal, RollbackReport, Target, TweakError, TweakState, Val,
+    Writer,
 };
 use super::sysproxy::{self, SystemProxy, WinInet};
 use super::{block, env, env_dir, run_blocking, studio, user};
@@ -317,7 +318,24 @@ impl Soft {
     /// Blocking form of [`Soft::status`].
     pub fn status_blocking(&self) -> SoftStatus {
         let state = |f| self.journal.status(&*self.sys, f);
-        let system_proxy = match state(Feature::SoftProxy) {
+        SoftStatus {
+            system_proxy: self.proxy_owner_blocking(),
+            env: state(Feature::SoftEnv),
+            git: state(Feature::DevGit),
+            gradle: state(Feature::DevGradle),
+            android_studio: state(Feature::DevStudio),
+        }
+    }
+
+    /// Reads only the system proxy back (no Git or file reads): the session's read-back.
+    pub async fn proxy_owner(&self) -> AppResult<ProxyOwner> {
+        let this = self.clone();
+        run_blocking(move || this.proxy_owner_blocking()).await
+    }
+
+    /// Blocking form of [`Soft::proxy_owner`].
+    pub fn proxy_owner_blocking(&self) -> ProxyOwner {
+        match self.journal.status(&*self.sys, Feature::SoftProxy) {
             TweakState::On => ProxyOwner::Ours,
             TweakState::Drifted => ProxyOwner::User,
             TweakState::Unknown => ProxyOwner::Unreadable,
@@ -325,14 +343,36 @@ impl Soft {
                 Ok(_) => ProxyOwner::User,
                 Err(_) => ProxyOwner::Unreadable,
             },
-        };
-        SoftStatus {
-            system_proxy,
-            env: state(Feature::SoftEnv),
-            git: state(Feature::DevGit),
-            gradle: state(Feature::DevGradle),
-            android_studio: state(Feature::DevStudio),
         }
+    }
+
+    /// Points the system proxy at the journalled value again after someone else changed it
+    /// (the user's «Вернуть»); the original baseline stays. `false`: nothing journalled.
+    pub async fn reclaim_proxy(&self) -> AppResult<bool> {
+        let this = self.clone();
+        run_blocking(move || this.reclaim_proxy_blocking()).await?
+    }
+
+    /// Blocking form of [`Soft::reclaim_proxy`].
+    pub fn reclaim_proxy_blocking(&self) -> AppResult<bool> {
+        if self.sys.check_user {
+            user::ensure_session_user()?;
+        }
+        let Some(ours) = self.journal.records(Feature::SoftProxy).pop() else {
+            return Ok(false);
+        };
+        self.journal.apply(
+            &*self.sys,
+            &[(Feature::SoftProxy, ours.target, ours.applied)],
+        )?;
+        Ok(true)
+    }
+
+    /// The crash watcher's rollback of the dead app `writer`'s session: only while that app is
+    /// the last process that changed the journal (`None`: someone else did and handles it).
+    pub fn rollback_left_by(&self, writer: Writer) -> Option<RollbackReport> {
+        self.journal
+            .rollback_left_by(writer, &*self.sys, &SOFT_FEATURES)
     }
 }
 

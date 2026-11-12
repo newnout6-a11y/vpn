@@ -33,7 +33,7 @@ pub mod user;
 mod test_support;
 
 pub use journal::{
-    Backend, Feature, Journal, Record, RollbackReport, Target, TweakError, TweakState, Val,
+    Backend, Feature, Journal, Record, RollbackReport, Target, TweakError, TweakState, Val, Writer,
 };
 pub use soft::{DevTargets, ProxyOwner, Soft, SoftReport, SoftStatus, SoftSystem};
 pub use sysproxy::{SystemProxy, WinInet};

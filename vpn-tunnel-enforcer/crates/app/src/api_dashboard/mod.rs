@@ -92,6 +92,8 @@ struct Watches {
     traffic: watch::Receiver<TrafficStats>,
     /// The paused kill switch and the "another VPN" line.
     kill_switch: watch::Receiver<KillSwitchView>,
+    /// Another program holds the system proxy our proxy-mode session set (ks-b).
+    proxy_taken: watch::Receiver<bool>,
 }
 
 /// App-side facts the backend does not publish itself.
@@ -161,6 +163,7 @@ impl Hub {
                 evidence: tunnel.ip_evidence(),
                 traffic: tunnel.traffic(),
                 kill_switch: tunnel.kill_switch_view(),
+                proxy_taken: tunnel.proxy_taken(),
             }),
             Err(err) => {
                 tracing::error!(%err, "start page built without a tunnel");
@@ -242,6 +245,7 @@ impl Hub {
                     autopick,
                     pause: project::pause_line(&kill_switch),
                     no_pause_vpn: kill_switch.foreign_vpn.clone(),
+                    proxy_taken: *w.proxy_taken.borrow(),
                 }
             }
             None => DashboardView {

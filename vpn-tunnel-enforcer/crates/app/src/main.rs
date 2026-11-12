@@ -13,5 +13,10 @@ fn main() -> ExitCode {
         .skip(1)
         .map(|arg| arg.to_string_lossy().into_owned());
     let args = vpnte_app::args::Args::parse(argv);
+    // The crash watcher returns before any UI, single-instance or logging setup: it must not
+    // hold the instance mutex (the next start would think it is a second copy) nor the log.
+    if let Some(pid) = args.crash_watch {
+        return vpnte_app::crash_watch::run(pid);
+    }
     vpnte_app::root::run(&args)
 }

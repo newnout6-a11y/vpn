@@ -343,6 +343,14 @@ impl TunnelOps for TunnelService {
         self.guard.always_available()
     }
 
+    fn proxy_taken(&self) -> watch::Receiver<bool> {
+        super::soft::taken::subscribe()
+    }
+
+    async fn reclaim_proxy(&self) -> vpnte_base::AppResult<()> {
+        self.soft.reclaim().await
+    }
+
     async fn clear_traffic_history(&self) -> vpnte_base::AppResult<()> {
         self.domains.clear().await
     }

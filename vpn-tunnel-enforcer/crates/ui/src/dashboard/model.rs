@@ -53,6 +53,8 @@ pub struct Banners {
     pub foreign_vpn: Option<String>,
     /// Another VPN carries all traffic while ours runs: no pause on a drop (one calm line).
     pub no_pause_vpn: Option<String>,
+    /// Another program took over the system proxy (ks-b): «Вернуть».
+    pub proxy_taken: bool,
 }
 
 /// Which notices the snapshot calls for.
@@ -71,6 +73,7 @@ pub fn banners(view: &DashboardView) -> Banners {
         leak: visible_leak(conn, &view.exit),
         foreign_vpn: foreign_vpn_friendly_name(foreign),
         no_pause_vpn: view.no_pause_vpn.clone().filter(|_| !paused),
+        proxy_taken: view.proxy_taken,
     }
 }
 

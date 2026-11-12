@@ -323,3 +323,55 @@ fn a_system_proxy_that_fails_changes_nothing() {
     assert_eq!(env.get("HTTP_PROXY").unwrap(), None);
     assert!(!soft.is_applied());
 }
+
+/// ks-b: another program takes the system proxy during a session: the read-back says so, and
+/// «Вернуть» puts ours back; the user's original setting still comes back at the end.
+#[test]
+fn a_taken_proxy_is_seen_and_reclaimed() {
+    let (key, dir) = (TestKey::new("tweaks"), TempDir::new("tweaks"));
+    let proxy = FakeProxy::with(corporate());
+    let soft = soft_with(&key, &dir, &proxy);
+    assert!(
+        !soft.reclaim_proxy_blocking().unwrap(),
+        "nothing journalled"
+    );
+    let ours = addr("127.0.0.1:20809");
+    soft.apply_blocking(&ours, ProxyKind::Http, DevTargets::default())
+        .unwrap();
+    assert_eq!(soft.proxy_owner_blocking(), ProxyOwner::Ours);
+
+    *proxy.config.lock() = ProxyConfig {
+        use_proxy: true,
+        server: "127.0.0.1:7890".into(),
+        ..ProxyConfig::default()
+    };
+    assert_eq!(soft.proxy_owner_blocking(), ProxyOwner::User);
+    assert!(soft.reclaim_proxy_blocking().unwrap());
+    assert_eq!(soft.proxy_owner_blocking(), ProxyOwner::Ours);
+    assert_eq!(proxy.get(), sysproxy::applied(&ours));
+
+    assert!(soft.rollback_blocking().is_complete());
+    assert_eq!(proxy.get(), corporate());
+}
+
+/// ks-b: the crash watcher, with its own journal copy, rolls back the whole session its app left.
+#[test]
+fn the_watcher_rolls_back_the_session_its_app_left() {
+    let (key, dir) = (TestKey::new("tweaks"), TempDir::new("tweaks"));
+    let proxy = FakeProxy::with(corporate());
+    let app = soft_with(&key, &dir, &proxy);
+    app.apply_blocking(
+        &addr("127.0.0.1:20809"),
+        ProxyKind::Http,
+        DevTargets::default(),
+    )
+    .unwrap();
+
+    let watcher = soft_with(&key, &dir, &proxy);
+    let report = watcher.rollback_left_by(Writer::current());
+    assert!(report.is_some_and(|r| r.is_complete()));
+    assert_eq!(proxy.get(), corporate());
+    let env = UserEnv::under(&key.0);
+    assert_eq!(env.get("HTTP_PROXY").unwrap(), None);
+    assert!(!watcher.is_applied());
+}

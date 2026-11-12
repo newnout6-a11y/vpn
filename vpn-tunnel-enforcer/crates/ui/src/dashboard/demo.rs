@@ -48,6 +48,8 @@ pub enum DashScene {
     ForeignVpn,
     ServersEmpty,
     ConnectedSoft,
+    /// Proxy mode while another program holds the system proxy (ks-b).
+    ProxyTaken,
     MascotAlert,
     /// Disconnected; every action works with realistic delays.
     Live,
@@ -55,10 +57,11 @@ pub enum DashScene {
 
 impl DashScene {
     /// Every scene with its name.
-    pub const ALL: [(&'static str, DashScene); 20] = [
+    pub const ALL: [(&'static str, DashScene); 21] = [
         ("disconnected", DashScene::Disconnected),
         ("connecting", DashScene::Connecting),
         ("connected-soft", DashScene::ConnectedSoft),
+        ("proxy-taken", DashScene::ProxyTaken),
         ("connected", DashScene::Connected),
         ("verify", DashScene::Verify),
         ("closing", DashScene::Closing),
@@ -335,23 +338,31 @@ fn timeline(scene: DashScene) -> Vec<(u64, DashboardView)> {
                 ..base()
             },
         )],
-        ConnectedSoft => vec![(
+        ConnectedSoft => vec![(300, connected_soft())],
+        ProxyTaken => vec![(
             300,
-            // Soft mode has no TUN, so no geo lookup: the sub-line says «через VPN»
             DashboardView {
-                soft_mode: true,
-                firewall: base().firewall,
-                exit: ExitIp {
-                    geo: None,
-                    ..connected(secs(6.3)).exit
-                },
-                exit_country: None,
-                ..with_conn(connected(secs(6.3)), |c| {
-                    c.mode = Some(Mode::Soft);
-                    c.started_at = None;
-                })
+                proxy_taken: true,
+                ..connected_soft()
             },
         )],
+    }
+}
+
+/// Connected in proxy mode. Soft mode has no TUN, so no geo lookup: the sub-line says «через VPN».
+fn connected_soft() -> DashboardView {
+    DashboardView {
+        soft_mode: true,
+        firewall: base().firewall,
+        exit: ExitIp {
+            geo: None,
+            ..connected(Duration::from_secs_f64(6.3)).exit
+        },
+        exit_country: None,
+        ..with_conn(connected(Duration::from_secs_f64(6.3)), |c| {
+            c.mode = Some(Mode::Soft);
+            c.started_at = None;
+        })
     }
 }
 
@@ -519,6 +530,13 @@ impl DashboardApi for DemoDashboard {
     async fn retry_now(&self) -> AppResult<()> {
         pause(600).await;
         self.tx.send_modify(|view| view.pause = None);
+        Ok(())
+    }
+
+    /// The demo takes the proxy back at once.
+    async fn reclaim_proxy(&self) -> AppResult<()> {
+        pause(400).await;
+        self.tx.send_modify(|view| view.proxy_taken = false);
         Ok(())
     }
 }

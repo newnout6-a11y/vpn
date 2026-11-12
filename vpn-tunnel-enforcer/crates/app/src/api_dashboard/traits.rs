@@ -76,6 +76,10 @@ impl DashboardApi for Dashboard {
         // Nothing paused any more: «Подключить» is a plain connect.
         self.connect().await
     }
+
+    async fn reclaim_proxy(&self) -> AppResult<()> {
+        self.0.reclaim_proxy().await
+    }
 }
 
 #[async_trait::async_trait(?Send)]

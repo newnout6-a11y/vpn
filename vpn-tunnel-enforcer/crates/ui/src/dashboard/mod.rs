@@ -70,6 +70,9 @@ pub struct DashboardView {
     /// Another VPN carries the default route (its label): the kill switch does not pause the
     /// running session.
     pub no_pause_vpn: Option<String>,
+    /// Another program took over the system proxy our proxy-mode session set: one calm
+    /// line with «Вернуть» (ks-b).
+    pub proxy_taken: bool,
 }
 
 /// The paused state's line: the next automatic attempt and whether the user must act.
@@ -125,6 +128,9 @@ pub trait DashboardApi: 'static {
     async fn release_kill_switch(&self) -> AppResult<()>;
     /// «Подключить» in the paused state: the paused session retries at once.
     async fn retry_now(&self) -> AppResult<()>;
+    /// «Вернуть»: points the system proxy at our session again after another program took
+    /// it over (the line then goes away with the next snapshot).
+    async fn reclaim_proxy(&self) -> AppResult<()>;
 }
 
 thread_local! {
@@ -176,6 +182,8 @@ struct Dash {
     leak: JobSlot<()>,
     recheck: JobSlot<()>,
     release: JobSlot<()>,
+    /// «Вернуть» of the system-proxy line in flight.
+    reclaim: JobSlot<()>,
     /// When the exit address was last copied (shows «скопировано» for [`COPIED_MS`]).
     copied: Signal<Option<Instant>>,
     /// The `role=status` caption: the power button's description (D-02).
@@ -217,6 +225,7 @@ fn use_dash() -> Dash {
     let (view, home) = use_view(&api);
     let (command, cancel, smart) = (use_job(), use_job(), use_job());
     let (leak, recheck, release) = (use_job(), use_job(), use_job());
+    let reclaim = use_job();
     let copied = use_signal(|| None);
     let caption_id = crate::widgets::use_dom_id("dash-status");
     use_context_provider(|| Dash {
@@ -231,6 +240,7 @@ fn use_dash() -> Dash {
         leak,
         recheck,
         release,
+        reclaim,
         copied,
         caption_id,
     })

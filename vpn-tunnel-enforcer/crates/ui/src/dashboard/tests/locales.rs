@@ -40,6 +40,10 @@ const USED: &[(&str, &[&str])] = &[
     ("ui.dashboard.releaseFailed", &[]),
     ("ui.dashboard.foreignVpn.title", &[]),
     ("ui.dashboard.foreignVpn.body", &[]),
+    ("ui.dashboard.proxyTaken.title", &[]),
+    ("ui.dashboard.proxyTaken.body", &[]),
+    ("ui.dashboard.proxyTaken.restore", &[]),
+    ("ui.dashboard.proxyTaken.failed", &[]),
     ("common.close", &[]),
 ];
 

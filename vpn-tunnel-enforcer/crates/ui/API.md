@@ -248,6 +248,7 @@ pub struct DashboardView {
     pub autopick: Option<PickLine>,                   // the automatic server choice's step (one strip)
     pub pause: Option<PauseLine>,                     // ks-a: «Интернет на паузе» (strip with two buttons)
     pub no_pause_vpn: Option<String>,                 // ks-a: another VPN carries all traffic: no pause
+    pub proxy_taken: bool,                            // ks-b: another program took the system proxy: one line + «Вернуть»
 }
 pub struct EngineLine { pub engine: Engine, pub reason: Option<Msg> }  // «Xray · REALITY» under the node
 pub struct PickLine { pub title: Msg, pub body: Option<Msg> }  // step; during retries what traffic does
@@ -263,6 +264,7 @@ pub trait DashboardApi: 'static {
     async fn recheck_firewall(&self) -> AppResult<()>;            // result via `firewall`
     async fn release_kill_switch(&self) -> AppResult<()>;         // remove our filters after a session
     async fn retry_now(&self) -> AppResult<()>;                   // ks-a: «Подключить» in the paused state
+    async fn reclaim_proxy(&self) -> AppResult<()>;               // ks-b: «Вернуть» on the system-proxy line
 }
 pub mod demo { pub enum DashScene { Disconnected, Connecting, Connected, …21 scenes };
     pub struct DemoDashboard; impl DemoDashboard {

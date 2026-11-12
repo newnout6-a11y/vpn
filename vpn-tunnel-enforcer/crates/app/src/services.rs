@@ -226,4 +226,14 @@ pub trait TunnelOps: Send + Sync + 'static {
     fn always_available(&self) -> bool {
         false
     }
+    /// Another program took over the system proxy our proxy-mode session set (added by ks-b).
+    /// The default: never.
+    fn proxy_taken(&self) -> watch::Receiver<bool> {
+        watch::channel(false).1
+    }
+    /// «Вернуть»: points the system proxy at our session again (added by ks-b). The default:
+    /// nothing to take back.
+    async fn reclaim_proxy(&self) -> AppResult<()> {
+        Ok(())
+    }
 }

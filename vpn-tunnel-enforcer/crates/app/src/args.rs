@@ -54,6 +54,9 @@ pub struct Args {
     pub open_link: Option<String>,
     /// `Err` is a usage error (one English line for stderr; exit code 2).
     pub setup: Option<Result<Setup, String>>,
+    /// Internal (`--crash-watch <pid>`): this process is the crash watcher of the app `pid`
+    /// (`crate::crash_watch`); main runs it before anything else.
+    pub crash_watch: Option<u32>,
 }
 
 impl Args {
@@ -79,6 +82,9 @@ impl Args {
                 "--cleanup" => out.cleanup = true,
                 "--smoke" => out.smoke = true,
                 "--version" | "-V" => out.version = true,
+                crate::crash_watch::FLAG => {
+                    out.crash_watch = iter.next().and_then(|pid| pid.parse().ok());
+                }
                 "--setup" => {
                     setup = Some(match iter.next().as_deref() {
                         Some("await-shutdown") => Ok(SetupCommand::AwaitShutdown {
@@ -244,5 +250,15 @@ mod tests {
         assert!(a.setup.is_none() && !a.cleanup && !a.shutdown_for_update);
         assert_eq!(parse(&["--open-link"]).open_link, None);
         assert_eq!(parse(&["--open-link", "  "]).open_link, None);
+    }
+
+    /// ks-b: the crash watcher's argument; a link can never carry it in.
+    #[test]
+    fn crash_watch_takes_the_app_pid() {
+        assert_eq!(parse(&["--crash-watch", "4242"]).crash_watch, Some(4242));
+        assert_eq!(parse(&["--crash-watch", "x"]).crash_watch, None);
+        assert_eq!(parse(&["--crash-watch"]).crash_watch, None);
+        let link = parse(&["--open-link", "vless://x", "--crash-watch", "4242"]);
+        assert_eq!(link.crash_watch, None);
     }
 }

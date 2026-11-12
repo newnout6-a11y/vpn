@@ -301,3 +301,18 @@ fn engine_caption_names_engine_and_reason() {
     assert_eq!(engine_caption(&local, None), "sing-box");
     assert_eq!(engine_caption(&local, Some(String::new())), "sing-box");
 }
+
+/// ks-b: another program holds the system proxy our session set: the line shows, also while
+/// paused (the user can take it back either way).
+#[test]
+fn proxy_taken_line_follows_the_read_back() {
+    let mut taken = view(connected());
+    assert!(!banners(&taken).proxy_taken);
+    taken.proxy_taken = true;
+    assert!(banners(&taken).proxy_taken);
+    taken.pause = Some(PauseLine {
+        next_attempt: None,
+        key_rejected: false,
+    });
+    assert!(banners(&taken).proxy_taken);
+}

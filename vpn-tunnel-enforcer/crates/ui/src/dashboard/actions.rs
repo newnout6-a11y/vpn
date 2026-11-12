@@ -172,4 +172,15 @@ impl Dash {
     pub(super) fn continue_without_vpn(&self) {
         self.disconnect();
     }
+
+    /// «Вернуть» on the system-proxy line: our session takes the proxy back.
+    pub(super) fn reclaim_proxy(&self) {
+        let (api, dash) = (self.api.clone(), self.clone());
+        self.reclaim.start(move |_| async move {
+            if let Err(err) = api.reclaim_proxy().await {
+                dash.fail(t!("ui.dashboard.proxyTaken.failed"), &err);
+            }
+            Ok(())
+        });
+    }
 }

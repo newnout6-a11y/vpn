@@ -5,26 +5,37 @@
 //! admission (closed enums for our own targets, well-formed managed text, a caller-supplied
 //! allow-list for registry values): a doctored journal cannot steer an elevated write elsewhere
 //! (spec B1/L1).
+//!
+//! Several processes of ours can hold the same journal (the app, its crash watcher, the next
+//! start, installer helpers), each with its own copy: every change runs under the journal's file
+//! lock on a copy read from disk under it, and a record whose value is already back at its
+//! baseline is simply retired, so a rollback repeated by another process changes nothing.
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use vpnte_base::Msg;
 use vpnte_core::store::{Document, Mode, Store};
 
 mod admission;
 mod error;
+mod lock;
 mod model;
 #[cfg(test)]
+mod multi;
+#[cfg(test)]
 mod tests;
+mod writer;
 
 pub(crate) use admission::admitted;
 pub use admission::{RegAdmit, no_registry};
 pub use error::TweakError;
+pub use lock::LOCK_FILE;
 pub use model::{
     BlockKind, EnvVar, Feature, GitKey, Record, RegHive, StudioOption, Target, Val, tool_name,
 };
+pub use writer::Writer;
 
 /// Reads and writes the system values behind [`Target`]s. Blocking: the journal runs on a blocking
 /// thread. A backend answers only for the targets of the features it was built for.
@@ -52,6 +63,10 @@ pub struct TweakDoc {
     /// The old app's leftovers were looked at once (`tweaks::legacy`).
     #[serde(default)]
     pub legacy_imported: bool,
+    /// The process that last changed the obligations (apply, rollback, adoption); `None` in a
+    /// journal no such process has changed yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer: Option<Writer>,
 }
 
 impl Document for TweakDoc {
@@ -113,30 +128,46 @@ impl RollbackReport {
 /// The journal: one per process, shared by every tweak feature. Operations are serialised and
 /// blocking (run them on a blocking thread).
 pub struct Journal {
-    store: Store<TweakDoc>,
+    root: PathBuf,
+    /// This process's copy; replaced by a fresh read from disk before every change.
+    store: RwLock<Store<TweakDoc>>,
+    /// Warning of the last load that had one (corrupt file moved aside, read-only store).
+    notice: Mutex<Option<Msg>>,
     admit_reg: RegAdmit,
     lock: Mutex<()>,
+    me: Writer,
 }
 
 impl Journal {
     /// Opens `tweaks.json` under the data `root`, dropping records outside the allow-list. A corrupt
     /// file is moved aside by the store and reported by [`Journal::notice`].
     pub fn open(root: &Path, admit_reg: RegAdmit) -> Self {
+        Self::open_as(root, admit_reg, Writer::current())
+    }
+
+    fn open_as(root: &Path, admit_reg: RegAdmit, me: Writer) -> Self {
+        let _held = lock::hold(root);
         let journal = Self {
-            store: Store::open(root),
+            root: root.to_path_buf(),
+            store: RwLock::new(Store::open(root)),
+            notice: Mutex::new(None),
             admit_reg,
             lock: Mutex::new(()),
+            me,
         };
-        let rejected = journal
-            .store
-            .read(|d| d.records.iter().filter(|r| !admitted(r, admit_reg)).count());
+        journal.remember_notice();
+        let rejected =
+            journal.doc(|d| d.records.iter().filter(|r| !admitted(r, admit_reg)).count());
         if rejected > 0 {
             tracing::warn!(
                 rejected,
                 "tweak journal records outside the allow-list dropped"
             );
+            // Housekeeping, not a change of obligations: `writer` stays, so the crash watcher of
+            // the app that wrote them still recognises its journal.
             if let Err(e) = journal
                 .store
+                .read()
                 .update(|d| d.records.retain(|r| admitted(r, admit_reg)))
             {
                 tracing::warn!(error = %e, "tweak journal not cleaned");
@@ -145,19 +176,37 @@ impl Journal {
         journal
     }
 
+    /// Runs `f` on this process's copy.
+    fn doc<R>(&self, f: impl FnOnce(&TweakDoc) -> R) -> R {
+        self.store.read().read(f)
+    }
+
+    /// Re-reads the file (call with the file lock held): another process may have changed it.
+    fn reload(&self) {
+        *self.store.write() = Store::open(&self.root);
+        self.remember_notice();
+    }
+
+    fn remember_notice(&self) {
+        let store = self.store.read();
+        let Some(notice) = store.notice() else {
+            return;
+        };
+        *self.notice.lock() = Some(match store.mode() {
+            Mode::Writable => Msg::new("automation.tweaks.journalCorrupt"),
+            Mode::ReadOnly(_) => notice,
+        });
+    }
+
     /// Warning for the user: the journal was corrupt (moved aside, obligations lost: check proxy
     /// variables and policies by hand), or it cannot be written.
     pub fn notice(&self) -> Option<Msg> {
-        let notice = self.store.notice()?;
-        Some(match self.store.mode() {
-            Mode::Writable => Msg::new("automation.tweaks.journalCorrupt"),
-            Mode::ReadOnly(_) => notice,
-        })
+        self.notice.lock().clone()
     }
 
     /// The admitted records of `feature`, in apply order.
     pub fn records(&self, feature: Feature) -> Vec<Record> {
-        self.store.read(|d| {
+        self.doc(|d| {
             d.records
                 .iter()
                 .filter(|r| r.feature == feature && admitted(r, self.admit_reg))
@@ -171,6 +220,18 @@ impl Journal {
         !self.records(feature).is_empty()
     }
 
+    /// Serialises a change: this process first, then every process (the file lock), on a copy
+    /// read from disk under the lock.
+    fn begin(&self) -> Change<'_> {
+        let serial = self.lock.lock();
+        let held = lock::hold(&self.root);
+        self.reload();
+        Change {
+            _held: held,
+            _serial: serial,
+        }
+    }
+
     /// Sets every `(feature, target, value)` of `plan` as one unit: all current values are read
     /// first (an unreadable one aborts with nothing written), the records are saved before the
     /// first write, each write is read back, and on any failure the writes of this call are undone
@@ -180,7 +241,7 @@ impl Journal {
         backend: &dyn Backend,
         plan: &[(Feature, Target, Val)],
     ) -> Result<(), TweakError> {
-        let _serial = self.lock.lock();
+        let _change = self.begin();
         let current = plan
             .iter()
             .map(|(_, t, _)| {
@@ -189,7 +250,7 @@ impl Journal {
                     .map_err(|e| TweakError::Unreadable(t.label(), e))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let before = self.store.read(|d| d.records.clone());
+        let before = self.doc(|d| d.records.clone());
         let mut records = before.clone();
         for ((feature, target, value), cur) in plan.iter().zip(&current) {
             match find(&mut records, *feature, target) {
@@ -290,20 +351,25 @@ impl Journal {
     }
 
     fn save(&self, records: Vec<Record>) -> vpnte_base::AppResult<()> {
-        self.store.update(|d| d.records = records)
+        let me = self.me;
+        self.store.read().update(|d| {
+            d.records = records;
+            d.writer = Some(me);
+        })
     }
 
     /// Whether the old app's leftovers were already looked at.
     pub fn legacy_imported(&self) -> bool {
-        self.store.read(|d| d.legacy_imported)
+        self.doc(|d| d.legacy_imported)
     }
 
     /// Takes over obligations the old app left (nothing is written to the system) and marks the
     /// one-time import done. Records outside the allow-list, or for a target already journalled,
     /// are skipped. Returns how many were adopted.
     pub fn adopt_legacy(&self, records: Vec<Record>) -> vpnte_base::AppResult<usize> {
-        let _serial = self.lock.lock();
-        self.store.update(|d| {
+        let _change = self.begin();
+        let me = self.me;
+        self.store.read().update(|d| {
             let before = d.records.len();
             for r in records {
                 let known = d
@@ -315,7 +381,11 @@ impl Journal {
                 }
             }
             d.legacy_imported = true;
-            d.records.len() - before
+            let adopted = d.records.len() - before;
+            if adopted > 0 {
+                d.writer = Some(me);
+            }
+            adopted
         })
     }
 
@@ -323,8 +393,25 @@ impl Journal {
     /// it still holds ours; one changed by someone else is kept and its record retired; one that
     /// fails keeps its record for the next attempt while the others carry on.
     pub fn rollback(&self, backend: &dyn Backend, features: &[Feature]) -> RollbackReport {
-        let _serial = self.lock.lock();
-        let records = self.store.read(|d| d.records.clone());
+        let _change = self.begin();
+        self.rollback_held(backend, features)
+    }
+
+    /// [`Journal::rollback`] for the crash watcher of the app `writer`: only while that app is
+    /// still the last process that changed the journal. `None`: another process (the next start,
+    /// an uninstall helper) changed it since and handles what is left.
+    pub fn rollback_left_by(
+        &self,
+        writer: Writer,
+        backend: &dyn Backend,
+        features: &[Feature],
+    ) -> Option<RollbackReport> {
+        let _change = self.begin();
+        (self.doc(|d| d.writer) == Some(writer)).then(|| self.rollback_held(backend, features))
+    }
+
+    fn rollback_held(&self, backend: &dyn Backend, features: &[Feature]) -> RollbackReport {
+        let records = self.doc(|d| d.records.clone());
         let mut report = RollbackReport::default();
         let mut retired = Vec::new();
         let mut touched = Vec::new();
@@ -350,10 +437,12 @@ impl Journal {
             }
             retired.push(r.clone());
         }
+        let me = self.me;
         if !retired.is_empty()
-            && let Err(e) = self
-                .store
-                .update(|d| d.records.retain(|r| !retired.contains(r)))
+            && let Err(e) = self.store.read().update(|d| {
+                d.records.retain(|r| !retired.contains(r));
+                d.writer = Some(me);
+            })
         {
             // The values are back; the stale records find them at the baseline next time.
             tracing::warn!(error = %e, "tweak journal not saved after rollback");
@@ -381,6 +470,12 @@ impl Journal {
         }
         state
     }
+}
+
+/// A change in progress: the file lock, then this process's lock, released together.
+struct Change<'a> {
+    _held: lock::Held,
+    _serial: parking_lot::MutexGuard<'a, ()>,
 }
 
 enum Restored {

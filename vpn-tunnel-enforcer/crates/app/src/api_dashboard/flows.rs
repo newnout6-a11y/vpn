@@ -114,6 +114,8 @@ pub(super) struct FakeTunnel {
     pub shutdown: Mutex<ShutdownReport>,
     /// The saved kill-switch level `kill_switch` reports.
     pub level: Mutex<KillSwitchLevel>,
+    /// Another program holds the system proxy (ks-b); `reclaim_proxy` clears it.
+    pub proxy_taken: watch::Sender<bool>,
 }
 
 impl FakeTunnel {
@@ -129,6 +131,7 @@ impl FakeTunnel {
             leak: Mutex::new(None),
             shutdown: Mutex::new(ShutdownReport::default()),
             level: Mutex::new(KillSwitchLevel::Off),
+            proxy_taken: watch::Sender::new(false),
         })
     }
 
@@ -247,6 +250,13 @@ impl TunnelOps for FakeTunnel {
     }
     fn tun_available(&self) -> bool {
         false
+    }
+    fn proxy_taken(&self) -> watch::Receiver<bool> {
+        self.proxy_taken.subscribe()
+    }
+    async fn reclaim_proxy(&self) -> AppResult<()> {
+        self.proxy_taken.send_replace(false);
+        Ok(())
     }
     async fn shutdown(&self, _budget: Duration) -> ShutdownReport {
         *self.shutdown.lock()
@@ -440,5 +450,19 @@ mod cases {
             .await
             .expect("read back after the save");
         assert_eq!(fake.snapshot.borrow().revision, 0, "no transition ran");
+    }
+
+    /// ks-b: the soft tweaks' read-back says another program holds the system proxy: the start
+    /// page shows the line; «Вернуть» goes to the tunnel and the line follows its next read-back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proxy_taken_line_and_its_restore() {
+        let (hub, fake, _dir) = setup("proxy-taken");
+        let dash = Dashboard(hub.clone());
+        let mut view = dash.state();
+        assert!(!view.borrow().proxy_taken);
+        fake.proxy_taken.send_replace(true);
+        within(view.wait_for(|v| v.proxy_taken)).await.unwrap();
+        within(dash.reclaim_proxy()).await.unwrap();
+        within(view.wait_for(|v| !v.proxy_taken)).await.unwrap();
     }
 }

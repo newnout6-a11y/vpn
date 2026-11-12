@@ -95,6 +95,7 @@ async fn tunnel_feed(hub: Arc<Hub>, cancel: CancellationToken) {
     let mut evidence = w.evidence.clone();
     let mut traffic = w.traffic.clone();
     let mut kill_switch = w.kill_switch.clone();
+    let mut proxy_taken = w.proxy_taken.clone();
     hub.on_snapshot();
     loop {
         tokio::select! {
@@ -115,6 +116,8 @@ async fn tunnel_feed(hub: Arc<Hub>, cancel: CancellationToken) {
             }
             // The paused state and its countdown target (ks-a). A tunnel without a lifecycle
             // pause (its sender gone) simply never wakes this branch.
+            // Another program took the system proxy over (ks-b); same rule for a closed sender.
+            () = crate::support::changed(&mut proxy_taken) => hub.publish_dashboard(),
             () = crate::support::changed(&mut kill_switch) => {
                 hub.publish_dashboard();
                 hub.publish_tray();
