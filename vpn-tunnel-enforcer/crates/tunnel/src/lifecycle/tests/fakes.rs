@@ -202,7 +202,10 @@ impl FakeRuntime {
             generation,
             pid: self.pid().unwrap_or(0),
             started_at: now_ms(),
-            engine: Engine::SingBox,
+            engine: crate::api::EngineRun {
+                kind: Engine::SingBox,
+                reason: Some(crate::api::SelectReason::Default),
+            },
             warnings: Vec::new(),
         }
     }
@@ -527,6 +530,7 @@ pub fn server(id: &str, name: &str) -> super::super::ServerChoice {
             id: id.to_owned(),
             profile: Arc::new(profile),
             device: None,
+            engine: vpnte_base::types::EnginePref::Auto,
         },
         country: Some("NL".into()),
     }

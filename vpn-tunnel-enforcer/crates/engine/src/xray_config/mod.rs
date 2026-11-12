@@ -26,7 +26,9 @@ mod wireguard;
 
 pub use config::{ProxyGraph, build_config, proxy_graph};
 pub use resolve::{ResolveFault, ResolvePath, Resolved, resolve_hosts};
-pub use select::{Decision, Reject, SelectReason, SingBoxOnly, select_engine};
+pub use select::{
+    Decision, Reject, SelectReason, SingBoxOnly, XrayLacks, select_engine, server_pref,
+};
 pub use translate::translate;
 pub use warnings::warnings;
 

@@ -16,6 +16,7 @@ pub(super) fn check(c: &live::LiveCheck, lang: Lang) -> ui::LiveCheck {
         .handshake
         .as_ref()
         .is_some_and(|h| h.route == Some(EngineRoute::ActiveTunnel));
+    let deferred = deferred_note(c);
     ui::LiveCheck {
         id: c.id.clone(),
         profile_id: c.profile_id.clone(),
@@ -64,14 +65,32 @@ pub(super) fn check(c: &live::LiveCheck, lang: Lang) -> ui::LiveCheck {
             .as_ref()
             .map(|i| infrastructure(i, c.asn.as_ref(), self_probe, c.egress.as_ref(), lang)),
         handshake: c.handshake.as_ref().map(|h| handshake(h, lang)),
-        egress: c.egress.as_ref().map(egress),
+        egress: c.egress.as_ref().map(|e| egress(e, deferred.is_some())),
         path: c.path_diagnostics.as_ref().map(|p| path(p, lang)),
         pmtu: c.pmtu.as_ref().map(|p| pmtu(p, lang)),
         media: c.media_stream.as_ref().map(|m| media(m, lang)),
         throughput: c.throughput.as_ref().map(|t| throughput(t, lang)),
         split_tunnel: c.split_tunnel.as_ref().map(|s| split(s, lang)),
+        deferred: deferred.map(|t| text(t, lang)),
         findings: c.findings.iter().map(finding).collect(),
     }
+}
+
+/// The probes' note that counts the requests the server's handshake budget left out.
+const DEFERRED_NOTE: &str = "probes.discipline.liveDeferred";
+
+fn is_deferred(t: &Text) -> bool {
+    matches!(t, Text::Msg(m) if m.key == DEFERRED_NOTE)
+}
+
+/// The budget note wherever the probes put it: the handshake's note, or the media box's detail
+/// when no media request was made.
+fn deferred_note(c: &live::LiveCheck) -> Option<&Text> {
+    let handshake = c.handshake.as_ref().and_then(|h| h.note.as_ref());
+    let media = c.media_stream.as_ref().and_then(|m| m.detail.as_ref());
+    handshake
+        .filter(|t| is_deferred(t))
+        .or(media.filter(|t| is_deferred(t)))
 }
 
 /// Durations are shown in milliseconds; a `u64` beyond `u32` is not a real measurement.
@@ -250,19 +269,26 @@ fn handshake(h: &live::Handshake, lang: Lang) -> ui::Handshake {
         status,
         duration_ms: ran.then(|| ms(h.duration_ms)),
         protocol: h.protocol.clone(),
+        // The budget note has its own line in the receipt: it is not evidence of a handshake.
         evidence: h
             .evidence
             .as_ref()
             .and_then(|e| e.detail.clone())
-            .or_else(|| h.note.as_ref().map(|t| text(t, lang))),
+            .or_else(|| {
+                let note = h.note.as_ref().filter(|t| !is_deferred(t));
+                note.map(|t| text(t, lang))
+            }),
         error: h.error.clone(),
     }
 }
 
-fn egress(e: &live::Egress) -> ui::Egress {
+/// `deferred`: the budget left requests of this check out. No reflector row then means none was
+/// dialled: skipped, not an error of the server.
+fn egress(e: &live::Egress, deferred: bool) -> ui::Egress {
     use live::EgressStatus as S;
     ui::Egress {
         status: match e.status {
+            _ if deferred && e.reflectors.is_empty() => ui::StageStatus::Skipped,
             S::Ok => ui::StageStatus::Ok,
             S::Partial => ui::StageStatus::Warning,
             S::Error => ui::StageStatus::Error,

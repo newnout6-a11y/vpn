@@ -77,14 +77,14 @@ pub(in crate::lifecycle) async fn switch(
         .runtime
         .switch_upstream(req.clone(), ctx.token.clone(), is_owner)
         .await;
-    if let Some(receipt) = in_place {
+    if let Some(mut receipt) = in_place {
         let up = Up::Run {
             profile,
             country: choice.country,
             generation: None,
-            engine: None,
+            engine: receipt.engine,
             adaptive,
-            warnings: Vec::new(),
+            warnings: std::mem::take(&mut receipt.warnings),
         };
         return StartReport::done(switched_in_place(&ctx, receipt, up).await);
     }

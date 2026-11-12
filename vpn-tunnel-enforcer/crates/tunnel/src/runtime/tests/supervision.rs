@@ -110,6 +110,11 @@ async fn generated_configs_pass_the_engine_check() {
             vpn_req(NATIVE_KEY, EnginePref::SingBox),
             KillSwitchLevel::Off,
         ),
+        // Pinned server address, the name kept as TLS server name and WebSocket host.
+        (
+            vpn_req(NATIVE_BY_NAME_KEY, EnginePref::SingBox),
+            KillSwitchLevel::Standard,
+        ),
         (vpn_req(XRAY_KEY, EnginePref::Xray), KillSwitchLevel::Strict),
     ];
     for (req, guard) in cases {

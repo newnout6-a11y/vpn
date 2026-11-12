@@ -61,11 +61,11 @@
       },
       "foreignTun": {
         "title": "A VPN/TUN is already on",
-        "explanation": "Hard mode is not needed here and would do harm. The system already has an active tunnel, so the app must not add a second one.",
+        "explanation": "Tunnel mode is not needed here and would do harm. The system already has an active tunnel, so the app must not add a second one.",
         "before": "Before: active system tunnel {{foreign}}.",
         "after": "After: the current VPN stays the main route; VPNTE only shows the status and helps set up apps when needed.",
         "blocker": "An external VPN/TUN is already active. Starting our protection would create a routing conflict.",
-        "gate": "A VPN/TUN is already on. Hard mode is not needed here and would do harm. The system already has an active tunnel, so the app must not add a second one. After: the current VPN stays the main route; VPNTE only shows the status and helps set up apps when needed."
+        "gate": "A VPN/TUN is already on. Tunnel mode is not needed here and would do harm. The system already has an active tunnel, so the app must not add a second one. After: the current VPN stays the main route; VPNTE only shows the status and helps set up apps when needed."
       },
       "noProfile": {
         "title": "No VPN profile selected",
@@ -83,11 +83,11 @@
       },
       "noProxy": {
         "title": "Proxy not found",
-        "explanation": "Hard mode builds the system tunnel on top of a local proxy. Without a proxy the TUN must not start: traffic would go nowhere.",
+        "explanation": "Tunnel mode builds the system tunnel on top of a local proxy. Without a proxy the TUN must not start: traffic would go nowhere.",
         "before": "Before: no working proxy.",
         "after": "After: once a proxy is on, the TUN gets a safe entry point.",
         "blocker": "No local proxy found. There is nothing to turn into a system tunnel.",
-        "gate": "Proxy not found. Hard mode builds the system tunnel on top of a local proxy. Without a proxy the TUN must not start: traffic would go nowhere. After: once a proxy is on, the TUN gets a safe entry point."
+        "gate": "Proxy not found. Tunnel mode builds the system tunnel on top of a local proxy. Without a proxy the TUN must not start: traffic would go nowhere. After: once a proxy is on, the TUN gets a safe entry point."
       },
       "proxyDead": {
         "title": "Proxy does not answer",
@@ -98,7 +98,7 @@
         "gate": "Proxy does not answer. Starting the TUN on a closed proxy would break the Internet at once. After: once the proxy runs, a safe route appears."
       },
       "hardReady": {
-        "title": "Hard mode can be turned on",
+        "title": "Tunnel mode can be turned on",
         "explanation": "No conflicting TUN found and the proxy is alive. This is a safe setup for system-wide redirection.",
         "before": "Before: the Internet takes the normal route, the proxy is available at {{proxy}}.",
         "after": "After: Internet traffic goes through {{tun}}, and the proxy core is excluded from the tunnel so there is no loop."
@@ -106,7 +106,7 @@
       "step": {
         "removeDouble": { "label": "Remove the double tunnel", "before": "Two system tunnels are on now: {{foreign}} and {{tun}}.", "after": "The app stops {{tun}}. One existing VPN/TUN remains, so DNS stops looping." },
         "useExisting": { "label": "Use the VPN that is already up", "before": "The system already goes through {{foreign}}.", "after": "VPNTE does not create a second TUN. This is safer: one route, no DNS loop." },
-        "viaProxy": { "label": "Connect apps through the local proxy", "before": "Local proxy found: {{proxy}}.", "after": "Soft mode can be turned on for individual apps: they use this proxy without a second TUN." },
+        "viaProxy": { "label": "Connect apps through the local proxy", "before": "Local proxy found: {{proxy}}.", "after": "In Proxy mode, apps that honour the Windows system proxy go through this proxy without a second TUN." },
         "chooseProfile": { "label": "Select a VPN profile", "before": "Direct VPN has nowhere to connect: no active profile is selected.", "after": "Once a profile is selected, the app can bring the TUN up straight to that server." },
         "connectProfile": { "label": "Connect the Direct VPN profile", "before": "There is no system {{tun}} now; active profile {{profile}} is ready to start.", "after": "VPNTE brings up one system tunnel straight to the selected VPN server." },
         "lanDirectVpn": { "label": "Keep the local network direct", "before": "Local addresses and localhost must not go to the VPN server.", "after": "The local network stays direct, Internet traffic goes through Direct VPN." },

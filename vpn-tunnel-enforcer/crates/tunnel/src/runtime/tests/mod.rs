@@ -21,6 +21,7 @@ use vpnte_engine::singbox_process::{ExitInfo, StartError, StopError};
 use vpnte_engine::slot::{Slot, SlotEndpoint};
 use vpnte_engine::xray_config::{ResolveFault, ResolvePath, Resolved};
 use vpnte_engine::xray_process::{SlotLaunch, XrayError, XrayEvent};
+use vpnte_profiles::model::Profile;
 
 use super::capture::{
     Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, ProxyCapture, tun_config,
@@ -30,6 +31,7 @@ use super::engines::{CoreProc, Engines, Slots};
 use super::{InputsSource, RuntimeDeps, Timings, UserInputs};
 use crate::api::{CaptureKind, StartRequest, TunnelEvent};
 
+mod gate;
 mod lane;
 mod live;
 mod proxy;
@@ -75,6 +77,10 @@ pub struct World {
     /// The selector write "succeeds" but the tunnel keeps egressing through the old slot.
     pub select_ignored: AtomicBool,
     pub xray_events: Mutex<Option<mpsc::Sender<XrayEvent>>>,
+    /// What every server-name lookup answers: the warning of a success, or the fault.
+    pub resolve_answer: Mutex<Result<Option<Msg>, ResolveFault>>,
+    /// The paths server names were resolved on, in order.
+    pub resolve_paths: Mutex<Vec<ResolvePath>>,
 }
 
 impl World {
@@ -104,6 +110,8 @@ impl World {
             stage_hold: AtomicBool::new(false),
             select_ignored: AtomicBool::new(false),
             xray_events: Mutex::new(None),
+            resolve_answer: Mutex::new(Ok(None)),
+            resolve_paths: Mutex::new(Vec::new()),
         })
     }
 
@@ -331,18 +339,24 @@ impl Engines for FakeEngines {
     async fn resolve(
         &self,
         hosts: &[String],
-        _path: ResolvePath,
+        path: ResolvePath,
         _cancel: &CancellationToken,
     ) -> Result<Resolved, ResolveFault> {
+        self.0.resolve_paths.lock().push(path);
+        let warning = self.0.resolve_answer.lock().clone()?;
         let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
         let addrs = hosts.iter().map(|h| (h.clone(), ip)).collect();
-        Ok(Resolved {
-            addrs,
-            bootstrap_used: false,
-        })
+        Ok(Resolved { addrs, warning })
     }
-    async fn egress_via(&self, port: u16, _c: &Creds, _x: &CancellationToken) -> AppResult<IpAddr> {
+    async fn egress_via(
+        &self,
+        server: &Profile,
+        port: u16,
+        _c: &Creds,
+        _x: &CancellationToken,
+    ) -> AppResult<IpAddr> {
         let _ = port;
+        self.0.note(format!("egress-via:{}", server.server));
         let staged = usize::from(self.0.running.lock()[1]);
         Ok(self.0.slot_ip[staged])
     }
@@ -555,6 +569,8 @@ pub const XRAY_KEY: &str = "vless://00000000-0000-4000-8000-000000000001@203.0.1
 pub const XRAY_KEY_2: &str = "vless://00000000-0000-4000-8000-000000000002@203.0.113.11:443?security=tls&sni=example.com&type=tcp#Fake%20B";
 pub const NATIVE_KEY: &str =
     "trojan://fake-password@203.0.113.12:443?security=tls&sni=example.com#Fake%20C";
+/// A native key that dials a name (WebSocket over TLS): its address is pinned at the start.
+pub const NATIVE_BY_NAME_KEY: &str = "vless://00000000-0000-4000-8000-000000000004@cdn.example:443?type=ws&path=%2Fws&security=tls#Fake%20D";
 
 pub fn vpn_req(uri: &str, engine: vpnte_base::types::EnginePref) -> StartRequest {
     let profile = vpnte_profiles::uri::parse_uri(uri).expect("fake key parses");
@@ -564,6 +580,7 @@ pub fn vpn_req(uri: &str, engine: vpnte_base::types::EnginePref) -> StartRequest
                 id: profile.name.clone(),
                 profile: Arc::new(profile),
                 device: None,
+                engine: vpnte_base::types::EnginePref::Auto,
             },
         },
         engine,

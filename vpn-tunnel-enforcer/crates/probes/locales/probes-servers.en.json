@@ -28,7 +28,8 @@
         "hy2AuthFailed": "The server rejected the Hysteria2 password",
         "hy2UdpBlocked": "UDP/QUIC is unavailable for Hysteria2",
         "hy2TlsFailed": "The Hysteria2 TLS handshake failed",
-        "hy2HandshakeFailed": "Hysteria2 could not establish a connection"
+        "hy2HandshakeFailed": "Hysteria2 could not establish a connection",
+        "engineSetting": "Not checked: the chosen engine cannot run this key; change the server's engine or choose «Auto»"
       }
     }
   }

@@ -102,6 +102,11 @@ pub(crate) fn LiveReport(check: LiveCheck) -> Element {
             if let Some(err) = infra_error {
                 p { class: "srv-strip is-warn", role: "alert", "{err}" }
             }
+            // The budget's left-out requests are named up front: their rows are missing on
+            // purpose, so no box may read as a failure of the server.
+            if let Some(note) = &check.deferred {
+                p { class: "srv-strip is-warn", role: "status", "{note}" }
+            }
             if !check.findings.is_empty() {
                 div { class: "srv-findings",
                     h4 { class: "swiss-label", {t!("ui.servers.live.findings", count = check.findings.len())} }

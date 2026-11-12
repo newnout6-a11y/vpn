@@ -272,9 +272,16 @@ async fn slot_session_and_in_place_switch() {
         )
         .await
         .expect("slot start");
-    assert_eq!(receipt.engine, Engine::Xray);
+    assert_eq!(receipt.engine.kind, Engine::Xray);
+    // Forced Xray: the reason is the preference, shown with the run (no silent choice).
+    assert_eq!(
+        receipt.engine.reason,
+        Some(crate::api::SelectReason::Preference)
+    );
     assert!(w.at("begin:0") < w.at("xray-start:a"));
     assert!(w.at("xray-start:a") < w.at("spawn:4100"));
+    // The slot's egress probe names the server it dials (the app's handshake budget keys on it).
+    assert!(w.at("xray-start:a") < w.at("egress-via:203.0.113.10"));
     assert!(w.at("ready") < w.at("select:a"));
     assert!(w.at("select:a") < w.at("activate:a"));
     let status = h.status().borrow().clone();
@@ -290,6 +297,7 @@ async fn slot_session_and_in_place_switch() {
     assert_eq!(sw.outcome, SwitchOutcome::Success, "{sw:?}");
     assert!(sw.verified());
     assert!(w.at("xray-start:b") < w.at("select:b"));
+    assert!(w.at("xray-start:b") < w.at("egress-via:203.0.113.11"));
     assert!(w.at("activate:b") < w.at("xray-stop:a"));
     assert_eq!(h.status().borrow().profile_name.as_deref(), Some("Fake B"));
     let seen = drain(&mut events);
@@ -305,6 +313,82 @@ async fn slot_session_and_in_place_switch() {
         .switch_upstream(stealth, CancellationToken::new(), owner)
         .await;
     assert!(none.is_none());
+}
+
+/// The engine and its reason travel through the receipt, the status and the switch receipt;
+/// the Xray path's dropped settings (stealth here) come with the start and with the switch.
+#[tokio::test]
+async fn engine_run_and_xray_warnings_are_visible() {
+    use crate::api::{EngineRun, SelectReason};
+    let w = World::new();
+    let h = spawn(&w);
+    let mut req = vpn_req(XRAY_KEY, EnginePref::Xray);
+    req.stealth = true;
+    let receipt = h
+        .start(req, CancellationToken::new())
+        .await
+        .expect("slot start");
+    let run = EngineRun {
+        kind: Engine::Xray,
+        reason: Some(SelectReason::Preference),
+    };
+    assert_eq!(receipt.engine, run);
+    let stealth = "engine.xray.warn.stealth";
+    assert!(
+        receipt.warnings.iter().any(|m| m.key == stealth),
+        "{receipt:?}"
+    );
+    assert_eq!(h.status().borrow().engine, Some(run));
+    let mut next = vpn_req(XRAY_KEY_2, EnginePref::Xray);
+    next.stealth = true;
+    let owner: crate::api::OwnerCheck = Arc::new(|| true);
+    let sw = h
+        .switch_upstream(next, CancellationToken::new(), owner)
+        .await
+        .expect("in place");
+    assert!(sw.verified(), "{sw:?}");
+    assert_eq!(sw.engine, Some(run));
+    assert!(sw.warnings.iter().any(|m| m.key == stealth), "{sw:?}");
+    assert_eq!(h.status().borrow().engine, Some(run));
+}
+
+/// The server's own choice wins over the setting; forced Xray refuses a protocol Xray lacks
+/// before any effect instead of starting sing-box.
+#[tokio::test]
+async fn server_override_and_xray_refusal() {
+    use crate::api::{EngineRun, SelectReason};
+    let w = World::new();
+    let h = spawn(&w);
+    let mut req = vpn_req(XRAY_KEY, EnginePref::Xray);
+    if let crate::api::Mode::DirectVpn { profile } = &mut req.mode {
+        profile.engine = EnginePref::SingBox;
+    }
+    let receipt = h
+        .start(req, CancellationToken::new())
+        .await
+        .expect("sing-box start");
+    let run = EngineRun {
+        kind: Engine::SingBox,
+        reason: Some(SelectReason::Preference),
+    };
+    assert_eq!(receipt.engine, run);
+    assert_eq!(w.count("xray-start:a"), 0);
+    h.stop(crate::api::StopOptions::default()).await;
+
+    let w = World::new();
+    let h = spawn(&w);
+    let tuic = "tuic://00000000-0000-4000-8000-000000000003:fake-password@203.0.113.13:443?sni=example.com#Fake%20T";
+    let err = h
+        .start(vpn_req(tuic, EnginePref::Xray), CancellationToken::new())
+        .await
+        .expect_err("refused");
+    assert_eq!(err.kind(), ErrorKind::Validation);
+    assert_eq!(err.user_msg().key, "engine.xray.reject.noXrayClient");
+    assert!(
+        w.log().iter().all(|l| !l.starts_with("begin")),
+        "{:?}",
+        w.log()
+    );
 }
 
 /// A native sing-box or local-proxy session never switches in place.

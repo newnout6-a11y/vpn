@@ -102,7 +102,8 @@ impl VerifiedCountry { pub fn supersedes(&self, old: &VerifiedCountry) -> bool }
 pub struct HealthRecord { pub online: bool, pub at: UnixMs, pub rtt_ms: Option<u32>,
                           pub reason: Option<HealthReason>, pub egress_ip: Option<IpAddr> }
 pub enum HealthReason { NoOutbound, ConfigFailed, TlsFailed, AuthFailed, Timeout, HandshakeFailed,
-    Hy2ConfigFailed, Hy2AuthFailed, Hy2UdpBlocked, Hy2TlsFailed, Hy2HandshakeFailed }
+    Hy2ConfigFailed, Hy2AuthFailed, Hy2UdpBlocked, Hy2TlsFailed, Hy2HandshakeFailed,
+    EngineSetting /* not a key fault: the engine setting does not run the key */ }
 // the probes' classifier verdict (vpnte_probes::discipline::{Verdict, Reaction}, same wire names);
 // a name this version does not know reads as Unknown instead of failing the whole list
 pub enum ServerVerdict { Healthy, Frozen, Stalled, HandshakeFailed, KeyRejected, IpBanned, UdpBlocked,
@@ -111,7 +112,8 @@ pub enum ServerReaction { None, SwitchServer, TryAnotherFingerprint, PreferTcpTr
 pub struct VerdictRecord { pub verdict: ServerVerdict, pub reaction: ServerReaction, pub at: UnixMs }  // camelCase
 pub struct ServerRow { pub id: ProfileId, pub group_id: GroupId, pub origin: Origin,
     pub name: String, pub protocol: String, pub server: String, pub port: u16,   // plain copies
-    pub device: ClientDevice, pub profile: Secret /* the typed Profile as JSON */, pub imported_at: UnixMs,
+    pub device: ClientDevice, pub engine: EnginePref /* own engine; Auto (omitted) = the setting */,
+    pub profile: Secret /* the typed Profile as JSON */, pub imported_at: UnixMs,
     pub last_seen_at, pub missing_since: Option<UnixMs>, pub archived: Option<Archived>,
     pub country: Option<VerifiedCountry>, pub health: Option<HealthRecord>,
     pub verdict: Option<VerdictRecord> /* beside health: may come from another check, compare `at` */ }
@@ -127,7 +129,7 @@ impl ServerRow {
 }
 // Secret-free view types (what lists render):
 pub struct Ping { pub rtt_ms: Option<u32> /* None: no answer */, pub at: UnixMs }   // memory only
-pub struct ServerSummary { id, group_id, origin, name, protocol, server, port, device,
+pub struct ServerSummary { id, group_id, origin, name, protocol, server, port, device, engine,
     country: Option<Iso2>, country_verified: bool, missing_since, archived, purge_at, health,
     ping: Option<Ping>, locked: bool, selected: bool }          // all pub
 pub struct GroupSummary { id, name, title: Msg, manual: bool, device: Option<ClientDevice>,
@@ -172,6 +174,7 @@ impl Servers {
     pub fn set_refresh_override(&self, &GroupId, Option<u16>) -> AppResult<()>;   // minutes 1..=1440 / None
     pub fn set_group_device(&self, &GroupId, ClientDevice) -> AppResult<()>;      // feed rows follow; refresh next
     pub fn set_profile_device(&self, &ProfileId, ClientDevice) -> AppResult<()>;  // manual rows only
+    pub fn set_profile_engine(&self, &ProfileId, EnginePref) -> AppResult<()>;   // any row; kept by refreshes
     // probe results
     pub fn record_health(&self, Vec<HealthUpdate>) -> AppResult<usize>;  // skips rows deleted / re-keyed meanwhile
     pub fn record_verdicts(&self, Vec<VerdictUpdate>) -> AppResult<usize>;  // same guards; an older verdict never wins

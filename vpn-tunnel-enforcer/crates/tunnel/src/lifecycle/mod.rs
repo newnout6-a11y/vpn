@@ -17,7 +17,7 @@ use vpnte_base::types::{AdaptiveMode, Owner, ProxyKind, UnixMs};
 use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::ops::{CorrelationId, Source};
 
-use crate::api::TunError;
+use crate::api::{EngineRun, TunError};
 use crate::fsm::{FaultState, TunnelSnapshot};
 use crate::history::SessionMode;
 use crate::outcome::{NetworkTransition, OutcomeKind};
@@ -276,6 +276,8 @@ pub struct SessionView {
     /// Adaptive compatibility mode the engine was started with.
     pub adaptive: AdaptiveMode,
     pub started_at: UnixMs,
+    /// The engine that carries the upstream and why (`None` until a run reported it).
+    pub engine: Option<EngineRun>,
 }
 
 /// Session changes, in order.

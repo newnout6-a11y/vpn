@@ -76,8 +76,9 @@ pub fn app_err(err: &AppError) -> String {
     format!("{:?} [{}]", err.kind, err.user_msg().key)
 }
 
-/// True while any instance of the app runs, for any user and from any location (its machine-wide
-/// single-instance mutex exists). Its WFP session, system proxy and journal belong to it.
+/// True while an instance of the app runs in this Windows session, from any location (its
+/// per-session single-instance mutex exists): the copy of the user who runs this command. Its
+/// WFP session, system proxy and journal belong to it.
 pub fn app_running() -> bool {
     let name = HSTRING::from(vpnte_winnet::single_instance::MUTEX_NAME);
     // SAFETY: plain call with a NUL-terminated name that outlives it.
@@ -87,7 +88,7 @@ pub fn app_running() -> bool {
             let _ = unsafe { CloseHandle(handle) };
             true
         }
-        // Created by another account with a stricter DACL: it exists all the same.
+        // Created by an elevated copy with a stricter DACL: it exists all the same.
         Err(err) => WIN32_ERROR::from_error(&err) != Some(ERROR_FILE_NOT_FOUND),
     }
 }

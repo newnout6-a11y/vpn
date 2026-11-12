@@ -16,7 +16,7 @@ fn names() -> InstanceNames {
         N.fetch_add(1, Ordering::Relaxed)
     );
     InstanceNames {
-        mutex: format!(r"Global\{tag}"),
+        mutex: format!(r"Local\{tag}"),
         pipe: format!(r"\\.\pipe\{tag}"),
     }
 }
@@ -70,15 +70,47 @@ fn second_launch_hands_its_command_to_the_first() {
     let mut commands = first.take_commands().unwrap();
     assert!(matches!(acquire(&names).unwrap(), Acquire::Secondary));
 
-    assert_eq!(
-        send(&names.pipe, Command::Activate, WAIT).unwrap(),
-        Handoff::Delivered
-    );
+    send(&names.pipe, Command::Activate, WAIT).unwrap();
     assert_eq!(commands.try_recv().unwrap(), Command::Activate);
-    let sent = send(&names.pipe, Command::ShutdownForUpdate, WAIT).unwrap();
-    assert_eq!(sent, Handoff::Delivered);
+    send(&names.pipe, Command::ShutdownForUpdate, WAIT).unwrap();
     assert_eq!(commands.try_recv().unwrap(), Command::ShutdownForUpdate);
     assert!(commands.try_recv().is_err());
+}
+
+/// Owner decision 12: the installed app's lock lives in the session's own namespace and its
+/// pipe name carries the session id, so every Windows session (every user) runs its own copy.
+#[test]
+fn production_names_are_per_session() {
+    let names = InstanceNames::production().unwrap();
+    assert_eq!(names.mutex, r"Local\VpnTunnelEnforcer.Instance");
+    let session = current_session().unwrap();
+    assert_eq!(names.pipe, format!(r"\\.\pipe\VpnTunnelEnforcer.{session}"));
+    assert_ne!(
+        InstanceNames::for_session(1).pipe,
+        InstanceNames::for_session(2).pipe
+    );
+}
+
+/// Owner decision 12: two sessions each run a listening primary (two mutex names stand in for
+/// the two `Local\` namespaces); the session id in the pipe name keeps the command pipes apart,
+/// so the installer's request reaches only the copy of its own session.
+#[test]
+fn each_session_runs_its_own_primary() {
+    let base = names();
+    let session = |id: u32| InstanceNames {
+        mutex: format!("{}-{id}", base.mutex),
+        pipe: format!("{}.{id}", base.pipe),
+    };
+    let (one, two) = (session(1), session(2));
+    let mut first = primary(&one);
+    let mut second = primary(&two);
+    assert!(first.is_listening() && second.is_listening());
+    let mut heard_by_one = first.take_commands().unwrap();
+    let mut heard_by_two = second.take_commands().unwrap();
+
+    send(&two.pipe, Command::ShutdownForUpdate, WAIT).unwrap();
+    assert_eq!(heard_by_two.try_recv().unwrap(), Command::ShutdownForUpdate);
+    assert!(heard_by_one.try_recv().is_err());
 }
 
 /// Dropping the guard stops the listener and frees the lock for the next start.
@@ -133,10 +165,7 @@ fn bad_lines_are_refused_and_the_listener_survives() {
     assert!(exchange(&names.pipe, &[b'a'; MAX_LINE + 100]).is_err());
     assert!(commands.try_recv().is_err());
 
-    assert_eq!(
-        send(&names.pipe, Command::Activate, WAIT).unwrap(),
-        Handoff::Delivered
-    );
+    send(&names.pipe, Command::Activate, WAIT).unwrap();
     assert_eq!(commands.try_recv().unwrap(), Command::Activate);
 }
 
@@ -203,10 +232,10 @@ fn serve_once<T>(pipe: &OwnedHandle, reply: &[u8], inspect: impl FnOnce(&[u8]) -
     seen
 }
 
-/// A primary in another Windows session answers `other-session` to an activation request;
-/// the second launch then shows the decided message instead of waiting for a window.
+/// A primary that refuses the command (an activation from another session's client) is no
+/// answer for the launch: it exits without waiting for a window.
 #[test]
-fn other_session_reply_is_reported() {
+fn a_refused_command_is_no_answer() {
     let names = names();
     let pipe = fake_server(&names);
     let fake = std::thread::spawn(move || {
@@ -214,8 +243,8 @@ fn other_session_reply_is_reported() {
             assert_eq!(Command::parse(line), Some(Command::Activate));
         });
     });
-    let sent = send(&names.pipe, Command::Activate, WAIT).unwrap();
-    assert_eq!(sent, Handoff::OtherSession);
+    let err = send(&names.pipe, Command::Activate, WAIT).unwrap_err();
+    assert_eq!(err.user_msg().key, "winnet.singleInstance.noAnswer");
     fake.join().unwrap();
 }
 
@@ -257,7 +286,6 @@ fn a_pipe_server_can_only_identify_the_client() {
             level
         })
     });
-    let sent = send(&names.pipe, Command::Activate, WAIT).unwrap();
-    assert_eq!(sent, Handoff::Delivered);
+    send(&names.pipe, Command::Activate, WAIT).unwrap();
     assert_eq!(fake.join().unwrap(), SecurityIdentification);
 }

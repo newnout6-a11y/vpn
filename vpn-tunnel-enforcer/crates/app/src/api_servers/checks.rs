@@ -13,22 +13,23 @@ use futures_util::stream;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{ClientDevice, now_ms};
+use vpnte_base::types::{ClientDevice, EnginePref, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind};
 use vpnte_core::net::Route;
 use vpnte_core::ops::{FeatureKind, RunOpts, Source};
 use vpnte_core::resolve::{How, resolve_host};
+use vpnte_engine::xray_config::server_pref;
 use vpnte_probes::geo::{VerifyReject, geo_routes};
-use vpnte_probes::key_health::{self, HealthError};
+use vpnte_probes::key_health::{self, HealthError, KeyCheck};
 use vpnte_probes::ping::RESOLVE_TIMEOUT;
 use vpnte_servers::model::{
     ArchiveReason, CountrySource, GroupId, HealthRecord, ProfileId, ServerRow, VerifiedCountry,
 };
 use vpnte_servers::store::HealthUpdate;
-use vpnte_ui::servers::{CountryCheck, KeyHealth};
+use vpnte_ui::servers::{CountryCheck, HealthReport, KeyHealth};
 
 use super::project::{reason_code, same_wire};
-use super::{Shared, group_not_found, server_not_found};
+use super::{Shared, group_not_found, server_not_found, verdict};
 
 /// Positive answers of the IP column are reused this long, failures for [`MISS_TTL`].
 const HIT_TTL: Duration = Duration::from_secs(5 * 60);
@@ -243,13 +244,16 @@ pub(super) type Key = (ProfileId, Option<[u8; 16]>);
 type Item = (Key, Option<vpnte_profiles::model::Profile>);
 
 /// Checks the keys of group `id` that the user has not removed (provider-archived keys are
-/// probed: that is the post-trial use) as one `HealthCheck` operation, five probes at a time;
-/// the verdicts land in the list, except for rows deleted or re-keyed meanwhile.
+/// probed: that is the post-trial use) as one `HealthCheck` operation, five probes at a time,
+/// each behind its server's handshake budget; the health records and the classifier verdicts
+/// land in the list, except for rows deleted or re-keyed meanwhile. Keys the budget deferred (or
+/// whose probe did not start) get no result and are counted as not checked; a batch deferred
+/// entirely answers the budget's "retry in N s".
 pub(super) async fn group_health(
     shared: Arc<Shared>,
     id: GroupId,
     cancel: CancellationToken,
-) -> AppResult<Vec<(String, KeyHealth)>> {
+) -> AppResult<HealthReport> {
     let backend = shared.backend.clone();
     let rows = backend.servers.read(|doc| {
         doc.group(&id).ok_or_else(group_not_found)?;
@@ -264,6 +268,7 @@ pub(super) async fn group_health(
     if rows.is_empty() {
         return Err(HealthError::GroupNotFoundOrEmpty.into());
     }
+    let submitted = rows.len();
     let tunnel = backend.tunnel()?.clone();
     let servers = backend.servers.clone();
     let opts = RunOpts {
@@ -277,9 +282,11 @@ pub(super) async fn group_health(
         .run(FeatureKind::HealthCheck, opts, move |lease| async move {
             let mut checked = Vec::new();
             let mut setup = None;
-            for (device, items) in by_device(rows) {
-                let ctx = tunnel.probe_ctx(device);
-                match key_health::check_many(items, &ctx, lease.token()).await {
+            for ((device, engine), items) in by_device(rows) {
+                let mut ctx = tunnel.probe_ctx(device);
+                // The row's own engine choice applies to its probe exactly as to its connect.
+                ctx.engine_pref = server_pref(ctx.engine_pref, engine);
+                match key_health::check_many_verdicts(items, &ctx, lease.token()).await {
                     Ok(found) => checked.extend(found),
                     Err(HealthError::Setup(err)) => setup = Some(err),
                     Err(err) => return Err(err.into()),
@@ -290,40 +297,51 @@ pub(super) async fn group_health(
             }
             lease.commit(|| {
                 servers.record_health(updates(&checked))?;
+                servers.record_verdicts(verdict::updates(&checked))?;
                 Ok(checked)
             })
         })
         .await?;
     shared.publish();
-    Ok(checked
-        .iter()
-        .map(|((id, _), h)| (id.to_string(), key_health_view(h)))
-        .collect())
+    Ok(health_report(&checked, submitted))
 }
 
-/// Rows grouped by client device: a probe context (uTLS default, Xray translation) per device;
-/// hand-added keys of one group may differ.
-fn by_device(rows: Vec<ServerRow>) -> Vec<(ClientDevice, Vec<Item>)> {
-    let mut out: Vec<(ClientDevice, Vec<Item>)> = Vec::new();
+/// The page's report: every checked key's health, and the keys left without a result counted.
+pub(super) fn health_report(checked: &[(Key, KeyCheck)], submitted: usize) -> HealthReport {
+    let missing = submitted.saturating_sub(checked.len());
+    HealthReport {
+        results: checked
+            .iter()
+            .map(|((id, _), c)| (id.to_string(), key_health_view(&c.health)))
+            .collect(),
+        not_checked: u32::try_from(missing).unwrap_or(u32::MAX),
+    }
+}
+
+/// Rows grouped by client device and their own engine choice: a probe context (uTLS default,
+/// Xray translation, engine) per pair; hand-added keys of one group may differ.
+fn by_device(rows: Vec<ServerRow>) -> Vec<((ClientDevice, EnginePref), Vec<Item>)> {
+    let mut out: Vec<((ClientDevice, EnginePref), Vec<Item>)> = Vec::new();
     for row in rows {
         let profile = row.profile().ok();
         let item = (
             (row.id.clone(), profile.as_ref().map(|p| p.identity())),
             profile,
         );
-        match out.iter_mut().find(|(d, _)| *d == row.device) {
+        let choice = (row.device, row.engine);
+        match out.iter_mut().find(|(c, _)| *c == choice) {
             Some((_, items)) => items.push(item),
-            None => out.push((row.device, vec![item])),
+            None => out.push((choice, vec![item])),
         }
     }
     out
 }
 
-/// What the list stores of the verdicts (with the trace's exit country).
-pub(super) fn updates(checked: &[(Key, key_health::KeyHealth)]) -> Vec<HealthUpdate> {
+/// What the list stores of the health records (with the trace's exit country).
+pub(super) fn updates(checked: &[(Key, KeyCheck)]) -> Vec<HealthUpdate> {
     checked
         .iter()
-        .filter_map(|((id, identity), h)| {
+        .filter_map(|((id, identity), KeyCheck { health: h, .. })| {
             Some(HealthUpdate {
                 id: id.clone(),
                 identity: (*identity)?,

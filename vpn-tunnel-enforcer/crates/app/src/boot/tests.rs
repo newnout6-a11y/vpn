@@ -135,8 +135,8 @@ fn fragment_keys(text: &str) -> BTreeSet<String> {
     out
 }
 
-/// The `app-main` fragments are valid JSON with identical key sets, every `app.main.*` key the
-/// code names exists, and the winnet text of the other-session box is registered.
+/// The `app-main` fragments are valid JSON with identical key sets, and every `app.main.*` key
+/// the code names exists in both languages.
 #[test]
 fn locale_fragments_match_the_code() {
     let ru = fragment_keys(include_str!("../../locales/app-main.ru.json"));
@@ -154,12 +154,8 @@ fn locale_fragments_match_the_code() {
     }
     vpnte_ui::lang::init_locales(&crate::svc_core::locale_layers());
     for lang in [Lang::Ru, Lang::En] {
-        for key in used
-            .iter()
-            .map(String::as_str)
-            .chain(["winnet.singleInstance.otherSession"])
-        {
-            assert_ne!(Msg::new(key.to_owned()).render(lang), key, "{lang:?} {key}");
+        for key in &used {
+            assert_ne!(Msg::new(key.clone()).render(lang), *key, "{lang:?} {key}");
         }
     }
 }

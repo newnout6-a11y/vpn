@@ -548,23 +548,42 @@ fn deterministic() {
     assert_eq!(a, b);
 }
 
-/// The fragments inside the real generated config (a local SOCKS upstream, IPv4 TUN).
-fn config(f: &RoutingFragments) -> Value {
-    use crate::singbox_config::{Capture, ConfigInputs, Listeners, TunParams, TunStack, Upstream};
+/// The fragments inside the real generated config (IPv4 TUN): a local SOCKS upstream, or the
+/// Xray slots whose `dns-bootstrap-in` puts the `evaluate` bootstrap order first in
+/// `dns.rules` (sing-box then leaves legacy DNS mode and refuses legacy address filters).
+fn config(f: &RoutingFragments, slot_mode: bool) -> Value {
+    use crate::singbox_config::{
+        Capture, ConfigInputs, Listeners, TunParams, TunStack, UdpPolicy, Upstream,
+    };
+    use crate::slot::{Slot, SlotEndpoint};
     use vpnte_base::types::{Creds, Loopback, ProxyKind};
+    let creds = |user: &str| Creds {
+        user: user.into(),
+        pass: format!("{user}-SYNTHETIC"),
+    };
     let direct = Loopback {
         port: 25554,
-        creds: Some(Creds {
-            user: "direct-user".into(),
-            pass: "direct-SYNTHETIC".into(),
-        }),
+        creds: Some(creds("direct-user")),
     };
-    crate::singbox_config::build(&ConfigInputs {
-        upstream: Upstream::LocalProxy {
+    let upstream = if slot_mode {
+        let ep = |port, user| SlotEndpoint::new(port, creds(user)).unwrap();
+        Upstream::XraySlots {
+            slots: [ep(25551, "slot-a"), ep(25552, "slot-b")],
+            active: Slot::A,
+            udp: UdpPolicy {
+                udp: true,
+                block_quic: true,
+            },
+        }
+    } else {
+        Upstream::LocalProxy {
             addr: vpnte_core::net::HostPort::parse("127.0.0.1:1080").unwrap(),
             kind: ProxyKind::Socks5,
             creds: None,
-        },
+        }
+    };
+    crate::singbox_config::build(&ConfigInputs {
+        upstream,
         capture: Capture::Tun(TunParams {
             alias: "Ethernet 5".into(),
             mtu: 1500,
@@ -577,7 +596,7 @@ fn config(f: &RoutingFragments) -> Value {
             clash_secret: "0123456789abcdef0123456789abcdef".into(),
             direct,
             probe: None,
-            dns_bootstrap: None,
+            dns_bootstrap: slot_mode.then_some(25556),
         },
         routing: f.parts.clone(),
         phys_dns: vec![Ipv4Addr::new(77, 88, 8, 7)],
@@ -587,7 +606,8 @@ fn config(f: &RoutingFragments) -> Value {
 
 /// §7.1 integration: the fragments (Smart RU with the bundled `.srs`, user rules of every
 /// kind, process rules, each DNS mapping) inside the generated config pass `sing-box check -c
-/// stdin`. Skipped quietly when the engine is not in `resources/`.
+/// stdin`, also next to the slot mode's `evaluate` bootstrap order. Skipped quietly when the
+/// engine is not in `resources/`.
 #[test]
 fn fragments_pass_sing_box_check() {
     if crate::test_support::singbox_exe().is_none() {
@@ -628,7 +648,35 @@ fn fragments_pass_sing_box_check() {
             physical_dns: &[Ipv4Addr::new(77, 88, 8, 7)],
             endpoint_is_hostname: true,
         });
-        let checked = crate::test_support::singbox_check(&config(&f));
+        let checked = crate::test_support::singbox_check(&config(&f, false));
         assert_eq!(checked, Ok(true), "{addr:?}");
+        let checked = crate::test_support::singbox_check(&config(&f, true));
+        assert_eq!(checked, Ok(true), "slot mode, {addr:?}");
+    }
+}
+
+/// Routing's DNS rules match by domain only (domain lists and the domain-only gov geosite):
+/// next to the slot mode's `evaluate` order sing-box refuses legacy address filters
+/// (`ip_cidr`, `ip_is_private`, ... without `match_response`), and an IP rule set would be one.
+#[test]
+fn dns_rules_match_by_domain_only() {
+    let rules = [
+        rule("ads.example", DomainAction::Block),
+        rule("*.example.org", DomainAction::Vpn),
+        rule("~kw", DomainAction::Direct),
+    ];
+    let f = frag(ON_MAPS, Some(DIR), &rules, &[]);
+    assert!(f.parts.dns_rules.len() >= 5, "{:?}", f.parts.dns_rules);
+    let matchers = ["domain", "domain_suffix", "domain_keyword", "rule_set"];
+    let effects = ["server", "action", "method", "no_drop"];
+    for r in &f.parts.dns_rules {
+        let keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
+        assert!(
+            keys.iter()
+                .all(|k| matchers.contains(k) || effects.contains(k)),
+            "{r}"
+        );
+        assert!(keys.iter().any(|k| matchers.contains(k)), "{r}");
+        assert!(strs(r, "rule_set").iter().all(|s| s != GEOIP_RU), "{r}");
     }
 }

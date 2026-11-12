@@ -1,11 +1,15 @@
-//! Single instance: a named mutex decides who runs; a named pipe lets a later launch hand its
-//! command (activate, or shut down for an installer update) to the running instance.
+//! Single instance per Windows session: a named mutex decides who runs; a named pipe lets a
+//! later launch hand its command (activate, or shut down for an installer update) to the running
+//! instance.
 //!
-//! The mutex lives in `Global\`: a per-session lock would let two Windows users run two
-//! instances against the same machine-wide TUN and WFP state. Both objects keep the default
-//! DACL: an elevated primary's pipe only accepts writers that are SYSTEM, administrators or the
-//! owner, so a non-elevated process cannot make it quit. A non-elevated launch that cannot even
-//! open the mutex still learns that it exists (access denied) and backs off.
+//! The app is installed per user and runs unelevated, so every signed-in user runs their own copy
+//! (owner decision 12): the mutex lives in the session's `Local\` namespace, which other users
+//! cannot create objects in, and the pipe name carries the session id because pipes have no
+//! session namespace. The installer's `--shutdown-for-update` launch runs in the installing
+//! user's session and so reaches that user's copy. Both objects keep the default DACL: an
+//! elevated primary's pipe only accepts writers that are SYSTEM, administrators or the owner, so
+//! a non-elevated process cannot make it quit. A non-elevated launch that cannot even open the
+//! mutex still learns that it exists (access denied) and backs off.
 use std::ffi::OsStr;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::thread::JoinHandle;
@@ -39,10 +43,10 @@ use windows::core::{HSTRING, PCWSTR};
 
 use crate::win;
 
-/// Mutex of the installed app.
-pub const MUTEX_NAME: &str = r"Global\VpnTunnelEnforcer.Instance";
-/// Command pipe of the installed app.
-pub const PIPE_NAME: &str = r"\\.\pipe\VpnTunnelEnforcer";
+/// Mutex of the installed app, in the caller's session namespace.
+pub const MUTEX_NAME: &str = r"Local\VpnTunnelEnforcer.Instance";
+/// Command pipe of the installed app: this prefix, a dot and the Windows session id.
+pub const PIPE_PREFIX: &str = r"\\.\pipe\VpnTunnelEnforcer";
 
 /// A command is one UTF-8 line of at most this many bytes.
 const MAX_LINE: usize = 4096;
@@ -54,16 +58,22 @@ const IO_TIMEOUT_MS: u32 = 2_000;
 pub struct InstanceNames {
     /// Named mutex, e.g. [`MUTEX_NAME`].
     pub mutex: String,
-    /// Pipe path, e.g. [`PIPE_NAME`].
+    /// Pipe path, e.g. [`PIPE_PREFIX`]`.1`.
     pub pipe: String,
 }
 
 impl InstanceNames {
-    /// The names of the installed app.
-    pub fn production() -> Self {
+    /// The names of the installed app in this process's Windows session.
+    pub fn production() -> AppResult<Self> {
+        current_session()
+            .map(Self::for_session)
+            .map_err(AppError::internal)
+    }
+
+    fn for_session(session: u32) -> Self {
         Self {
             mutex: MUTEX_NAME.into(),
-            pipe: PIPE_NAME.into(),
+            pipe: format!("{PIPE_PREFIX}.{session}"),
         }
     }
 }
@@ -205,7 +215,7 @@ impl Listener {
         let stop = event()?;
         let thread_stop = stop.try_clone()?;
         let io_event = event()?;
-        let session = current_session();
+        let session = current_session().ok();
         let thread = std::thread::Builder::new()
             .name("vpnte-single-instance".into())
             .spawn(move || serve(&pipe, &thread_stop, &io_event, session, &tx))?;
@@ -267,7 +277,8 @@ fn serve_client(
     let mut buf = [0u8; MAX_LINE];
     let n = io.read(&mut buf)?;
     let reply = match Command::parse(&buf[..n]) {
-        // Our window cannot appear on another session's desktop.
+        // Only a client that picked this session's pipe name on purpose comes from elsewhere:
+        // our window cannot appear on its desktop.
         Some(Command::Activate) if !same_session(io.pipe, session) => "other-session",
         Some(cmd) => {
             tracing::info!(
@@ -294,12 +305,11 @@ fn same_session(pipe: HANDLE, own: Option<u32>) -> bool {
     !known || own.is_none_or(|own| own == client)
 }
 
-fn current_session() -> Option<u32> {
+fn current_session() -> windows::core::Result<u32> {
     let mut id = 0;
     // SAFETY: valid out pointer.
-    unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut id) }
-        .ok()
-        .map(|()| id)
+    unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut id) }?;
+    Ok(id)
 }
 
 fn event() -> AppResult<OwnedHandle> {
@@ -423,19 +433,10 @@ impl Io {
     }
 }
 
-/// How a hand-off to the running instance went.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Handoff {
-    /// The running instance accepted the command.
-    Delivered,
-    /// The running instance belongs to another Windows session: show
-    /// `winnet.singleInstance.otherSession` and exit.
-    OtherSession,
-}
-
 /// Hands `cmd` to the instance listening on `pipe`, waiting up to `timeout` for its pipe (the
-/// primary may still be starting). Every error carries `winnet.singleInstance.noAnswer`.
-pub fn send(pipe: &str, cmd: Command, timeout: Duration) -> AppResult<Handoff> {
+/// primary may still be starting). Every error carries `winnet.singleInstance.noAnswer`; a
+/// refused command (an activation from another session's client, an unknown line) is one too.
+pub fn send(pipe: &str, cmd: Command, timeout: Duration) -> AppResult<()> {
     let handle = open_client(pipe, timeout)?;
     let pipe = raw(&handle);
     let mode = PIPE_READMODE_MESSAGE;
@@ -461,15 +462,14 @@ pub fn send(pipe: &str, cmd: Command, timeout: Duration) -> AppResult<Handoff> {
             ),
         })?;
     match trim_line(&reply[..n]) {
-        b"ok" => Ok(Handoff::Delivered),
-        b"other-session" => Ok(Handoff::OtherSession),
+        b"ok" => Ok(()),
         other => {
             let reply = String::from_utf8_lossy(other).into_owned();
             Err(AppError::msg(
                 ErrorKind::Internal,
                 Msg::new("winnet.singleInstance.noAnswer"),
             )
-            .with_source(std::io::Error::other(format!("unexpected reply {reply:?}"))))
+            .with_source(std::io::Error::other(format!("refused: reply {reply:?}"))))
         }
     }
 }

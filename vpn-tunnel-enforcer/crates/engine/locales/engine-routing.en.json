@@ -33,7 +33,7 @@
       },
       "warn": {
         "smartRuDisabled": "Smart RU is off for this connection: the rule lists are unavailable. All traffic goes through the VPN.",
-        "bootstrapDnsFallback": "System DNS is unavailable. A direct bootstrap DNS was used to reach the server",
+        "bootstrapDnsFallback": "The network's own DNS server is not usable: the VPN server's name is resolved only through public resolvers (DNS over HTTPS, then DNS over TCP).",
         "appMissing": "The rule for “{{name}}” is not active: the program file was not found. Its traffic goes through the VPN.",
         "appNotAFile": "The rule for “{{name}}” is not active: the path is not a file. Its traffic goes through the VPN."
       },

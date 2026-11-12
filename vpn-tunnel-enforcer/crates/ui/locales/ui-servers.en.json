@@ -273,7 +273,8 @@
         "colSpread": "Spread",
         "colPath": "Path",
         "colStatus": "Status",
-        "errors": "Profiles that could not be checked: {{count}}. The reasons are in the logs and in each profile's history."
+        "errors": "Profiles that could not be checked: {{count}}. The reasons are in the logs and in each profile's history.",
+        "deferred": "Profiles with skipped requests: {{count}}. Their servers' connection limit for this minute was used up; hover a status or open the profile's report for what was skipped."
       },
       "loading": "Loading servers…",
       "foreignVpn": "Another VPN's adapter is up: it intercepts our probes, so pings and checks may be inaccurate.",
@@ -344,7 +345,11 @@
         "details": "Details",
         "remove": "Delete server",
         "noHost": "The profile has no server address",
-        "purge": "Delete for good"
+        "purge": "Delete for good",
+        "engineAuto": "Engine: as in Settings",
+        "engineSingBox": "Engine: sing-box only",
+        "engineXray": "Engine: Xray only",
+        "engineCurrent": "Chosen now"
       },
       "proxy": {
         "groupTitle": "Proxies: {{name}}",
@@ -367,6 +372,7 @@
       },
       "row": {
         "openDetail": "Server details",
+        "engineRefused": "Engine",
         "off": "Off",
         "switching": "Switching",
         "switchingShort": "Working…",
@@ -387,6 +393,26 @@
         "deleted": "Removed · purged {{when}}",
         "purgeTitle": "Removed servers are purged after 30 days; until then they can be restored",
         "droppedTitle": "The provider no longer publishes this server: the key may stop working at any time"
+      },
+      "verdict": {
+        "healthy": "traffic flows",
+        "frozen": "frozen",
+        "stalled": "stalls",
+        "handshakeFailed": "TLS fails",
+        "keyRejected": "key rejected",
+        "ipBanned": "IP banned",
+        "udpBlocked": "UDP blocked",
+        "offline": "no answer",
+        "deferred": "deferred",
+        "notVerified": "cause unclear",
+        "checked": "Checked {{when}}",
+        "notChecked": "Not checked: {{count}} — their servers' connection limit for this minute was used up or the check did not start; try again in a minute",
+        "advice": {
+          "switchServer": "another server",
+          "tryAnotherFingerprint": "another fingerprint",
+          "preferTcpTransport": "TCP transport",
+          "retryLater": "later"
+        }
       },
       "select": {
         "failed": "Could not select the server «{{name}}»",
@@ -446,6 +472,16 @@
       },
       "restore": {
         "failed": "Could not restore «{{name}}»"
+      },
+      "engine": {
+        "failed": "Could not change the engine of «{{name}}»"
+      }
+    }
+  },
+  "servers": {
+    "health": {
+      "reasons": {
+        "engine-setting": "Not checked: the chosen engine cannot run this key; change the server's engine or choose «Auto»"
       }
     }
   }

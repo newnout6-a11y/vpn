@@ -16,7 +16,7 @@ use vpnte_base::{AppError, Msg};
 use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
 use vpnte_winnet::power::{PowerEvent, PowerMonitor};
-use vpnte_winnet::single_instance::{self, Acquire, Command, Handoff, InstanceNames, Primary};
+use vpnte_winnet::single_instance::{self, Acquire, Command, InstanceNames, Primary};
 
 use crate::args::Args;
 use crate::services::TunnelOps;
@@ -83,12 +83,16 @@ pub enum Instance {
     Exit(ExitCode),
 }
 
-/// The single-instance check, before anything touches the data dir or the network. A second
-/// launch hands `activate` or `shutdown-for-update` to the running instance and exits `0`
-/// silently (installer contract); a launch from another Windows session is told so in a box.
-/// `--shutdown-for-update` without a running instance starts nothing.
+/// The single-instance check, before anything touches the data dir or the network. The lock is
+/// per Windows session (owner decision 12): each signed-in user runs their own copy. A second
+/// launch in the session hands `activate` or `shutdown-for-update` to the running instance and
+/// exits `0` silently (installer contract). `--shutdown-for-update` without a running instance
+/// starts nothing.
 pub fn single_instance(args: &Args) -> Instance {
-    single_instance_with(&InstanceNames::production(), args)
+    match InstanceNames::production() {
+        Ok(names) => single_instance_with(&names, args),
+        Err(err) => refuse_start(&err),
+    }
 }
 
 fn single_instance_with(names: &InstanceNames, args: &Args) -> Instance {
@@ -101,24 +105,19 @@ fn single_instance_with(names: &InstanceNames, args: &Args) -> Instance {
         Ok(Acquire::Primary(primary)) if command == Command::Activate => Instance::Primary(primary),
         Ok(Acquire::Primary(_)) => Instance::Exit(ExitCode::SUCCESS),
         Ok(Acquire::Secondary) => {
-            match single_instance::send(&names.pipe, command, HANDOFF_TIMEOUT) {
-                Ok(Handoff::OtherSession) => message_box(
-                    &[Msg::new("winnet.singleInstance.otherSession")],
-                    vpnte_ui::lang::os_lang(),
-                    false,
-                ),
-                // No log exists yet (it belongs to the running instance): nothing to report.
-                Ok(Handoff::Delivered) | Err(_) => {}
-            }
+            // No log exists yet (it belongs to the running instance): nothing to report.
+            let _ = single_instance::send(&names.pipe, command, HANDOFF_TIMEOUT);
             Instance::Exit(ExitCode::SUCCESS)
         }
         // An unexpected mutex failure: running unguarded could let two instances fight over
         // the same system proxy, so refuse to start.
-        Err(err) => {
-            start_failed(&err, vpnte_ui::lang::os_lang());
-            Instance::Exit(ExitCode::from(EXIT_START_FAILED))
-        }
+        Err(err) => refuse_start(&err),
     }
+}
+
+fn refuse_start(err: &AppError) -> Instance {
+    start_failed(err, vpnte_ui::lang::os_lang());
+    Instance::Exit(ExitCode::from(EXIT_START_FAILED))
 }
 
 /// Gives the process its AppUserModelID before any window or toast exists (lifecycle-app §3.6):
@@ -219,7 +218,7 @@ pub fn start_failed(err: &AppError, lang: Lang) {
         Msg::new("app.main.startFailed.message"),
         err.user_msg(),
     ];
-    message_box(&text, lang, true);
+    message_box(&text, lang);
 }
 
 /// Ends the process with `code` now. The caller has run the bounded cleanup (which drained the
@@ -228,24 +227,26 @@ pub fn exit(code: u8) -> ! {
     std::process::exit(i32::from(code))
 }
 
-/// A blocking message box for the paths that have no window (a second launch, a failed start):
-/// `lines` rendered in `lang` as paragraphs, under the product name.
-fn message_box(lines: &[Msg], lang: Lang, error: bool) {
+/// A blocking error box for a start that has no window: `lines` rendered in `lang` as
+/// paragraphs, under the product name.
+fn message_box(lines: &[Msg], lang: Lang) {
     use windows::Win32::UI::WindowsAndMessaging::{
-        MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW,
+        MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MessageBoxW,
     };
     // Idempotent: the window path registers the same layers before launch.
     vpnte_ui::lang::init_locales(&crate::svc_core::locale_layers());
     let text: Vec<String> = lines.iter().map(|line| line.render(lang)).collect();
     let text = windows::core::HSTRING::from(text.join("\n\n"));
     let caption = windows::core::HSTRING::from(vpnte_ui::launch::APP_NAME);
-    let icon = if error {
-        MB_ICONERROR
-    } else {
-        MB_ICONINFORMATION
-    };
     // SAFETY: both strings are NUL-terminated HSTRINGs that outlive the call; no owner window.
-    unsafe { MessageBoxW(None, &text, &caption, MB_OK | icon | MB_SETFOREGROUND) };
+    unsafe {
+        MessageBoxW(
+            None,
+            &text,
+            &caption,
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
+        )
+    };
 }
 
 #[cfg(test)]

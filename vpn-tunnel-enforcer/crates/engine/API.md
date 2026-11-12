@@ -132,8 +132,8 @@ pub fn compat_key(i: &ConfigInputs) -> [u8; 32];   // equal keys: a running conf
                                                    // upstream (ignores profile, slots, listener ports,
                                                    // secrets, alias; the capture and its proxy port count)
 pub fn usable_physical_dns(physical: &[Ipv4Addr]) -> Option<Ipv4Addr>;  // not TUN /30, loopback, 0.0.0.0
-pub fn bootstrap_resolver(physical: &[Ipv4Addr]) -> Ipv4Addr;           // usable one, else 1.1.1.1: the UDP
-                                                   // retry of xray_config::resolve_hosts only
+pub fn bootstrap_resolver(physical: &[Ipv4Addr]) -> Ipv4Addr;           // usable one, else 1.1.1.1; unused
+                                                   // since xray_config dropped its UDP retry (dns-wiring)
 ```
 Rules the caller must keep (review of the WFP / TUN design):
 - `tun.ipv6 = !tun.dns_hijack = Protection::session_guarded()` (kill switch != Off or leak
@@ -223,7 +223,9 @@ pub fn version_supported(v: (u16, u16, u16)) -> bool;                    // 1.14
 pub async fn check_config(exe: &Path, config: &[u8]) -> Result<(), CheckError>;  // `check -c stdin`, 10 s
 ```
 The exit is published after the output pumps drained (tail and bind evidence complete).
-Secrets of the config (and slot credentials) are masked in every logged / returned line.
+Secrets of the config (and slot credentials) are masked in every logged / returned line; our
+DNS server tags (`dns-remote`, `dns-resolver`, `dns-direct`, `dns-bootstrap` and its
+`-quad9` / `-google` / `-tcp` / `-isp` steps) stay readable.
 `StartError` -> `engine.process.singboxExited(code)` / `singboxNotReady` (Timeout) /
 `spawnFailed(engine)` (kind Permission when access is denied); `StopError` -> `stopUnconfirmed`.
 
@@ -307,13 +309,20 @@ unreachable, badAnswer, notConfirmed}`.
 ```rust
 pub enum SelectReason { Default, Protocol, Preference, Reality, XrayTransport, NativeXray, CertPin,
     SingBoxOnly(SingBoxOnly) }                                          // Serialize, kebab-case
+impl SelectReason { pub fn msg(self) -> Msg; } // engine.xray.reason.*: short caption after the engine name
 pub enum SingBoxOnly { H2Transport, QuicTransport, InsecureWithoutPin, SpkiPin, Ech, ShadowsocksPlugin,
     ShadowsocksUdpOverTcp, ShadowsocksMethod, RealityTransport, Plaintext }
-pub enum Reject { NativeXray, XrayTransport, SingBoxOnly(SingBoxOnly), Conflict(SingBoxOnly) }
+pub enum XrayLacks { Client(&'static str) /* TUIC, NaiveProxy, AnyTLS, ShadowTLS */,
+    Form(&'static str) /* transport under Hy2 / WG / SOCKS / HTTP, SOCKS over TLS */ }
+pub enum Reject { NativeXray, XrayTransport, SingBoxOnly(SingBoxOnly), Conflict(SingBoxOnly),
+    XrayLacks(XrayLacks) }                                              // forced Xray: never a silent sing-box
 impl Reject { pub fn msg(&self) -> Msg; }      // engine.xray.{reject.*, singBoxOnly.*, conflict.*}; -> Validation
+                                               // reject.{noXrayClient,xrayForm}(protocol): offer Auto / sing-box
 pub enum Decision { Selected { engine: Engine, reason: SelectReason }, Rejected(Reject) }
 impl Decision { pub fn engine(self) -> Result<Engine, Reject>; }
 pub fn select_engine(p: &Profile, pref: EnginePref) -> Decision;      // pure
+pub fn server_pref(setting: EnginePref, server: EnginePref) -> EnginePref; // a server's own sing-box /
+                                    // Xray wins, its Auto follows the setting: apply before select_engine
 pub fn translate(p: &Profile, device: ClientDevice) -> Result<Value, XrayConfigError>; // outbound "proxy"
 pub fn warnings(p: &Profile, tls_compat: bool) -> Vec<Msg>;           // pure; engine.xray.warn.*
 pub enum ProxyGraph { Translated(Value), Native(Box<CompiledGraph>) } // Debug shows only the shape
@@ -332,7 +341,8 @@ Shadowsocks (9 ciphers; UDP-over-TCP only with 2022 ciphers), Hysteria2 (`hyster
 always, salamander / gecko in `finalmask.udp`, port hopping, Brutal bandwidth and BBR preset in
 `finalmask.quicParams`, certificate pin as `pinnedPeerCertSha256`), WireGuard (user-space, no
 adapter, provider DNS as `remoteDNS`), SOCKS (no TLS, no transport), HTTP (TLS allowed, no
-transport). TUIC, Naive, AnyTLS and ShadowTLS have no Xray outbound (`SelectReason::Protocol`).
+transport). TUIC, Naive, AnyTLS and ShadowTLS have no Xray outbound (Auto / forced sing-box:
+`SelectReason::Protocol`; forced Xray: `Reject::XrayLacks`).
 Static ECH configs go to `echConfigList`; ECH by DNS lookup, over QUIC or with REALITY stays
 `SingBoxOnly::Ech`. uTLS: the provider's fingerprint is kept (with a warning when servers refuse
 it), otherwise the device default if it is chrome / firefox / safari, else chrome. XHTTP gets
@@ -340,7 +350,9 @@ an explicit `extra.xmux` (4-6 connections) unless the provider set one; no typed
 carries `mux`, and mux.cool is removed from a provider graph's XHTTP outbounds.
 **Selection:** Auto picks Xray for provider graphs, Xray-only transports, explicit gRPC gun,
 REALITY and (new) any non-REALITY TLS profile with a certificate pin (`CertPin`: sing-box
-cannot enforce a DER hash pin); sing-box otherwise. Forced Xray runs every Xray-capable kind.
+cannot enforce a DER hash pin); sing-box otherwise. Forced Xray runs every Xray-capable kind and
+refuses the rest (no engine is ever switched silently; owner decision 2026-11-11). Show the
+engine with `reason.msg()` wherever a run or a planned run is displayed.
 **Warnings:** call `warnings(&profile, tls_compat)` whenever Xray runs the profile and show them
 (the sing-box options Xray drops: mux, dial, pasted sing-box options, `disable_sni`, stealth /
 TLS compatibility, ws early data; refused / broken / unknown fingerprints; an unknown BBR preset;
@@ -348,10 +360,10 @@ mux.cool removed from a provider XHTTP outbound). `tls_compat` = stealth or adap
 
 ```rust
 // async: names are resolved by the app, never by Xray (its lookup would loop through the TUN)
-pub enum ResolvePath { System { bootstrap: SocketAddr }, ViaSingBox(SocketAddr) }
-pub struct Resolved { pub addrs: HashMap<String, IpAddr>, pub bootstrap_used: bool }
-impl Resolved { pub fn warning(&self) -> Option<Msg>; }             // engine.xray.resolve.bootstrapFallback
-pub enum ResolveFault { Failed, Sinkhole, Cancelled }               // -> Network / Cancelled
+pub enum ResolvePath { Direct, ViaSingBox(SocketAddr) }
+pub struct Resolved { pub addrs: HashMap<String, IpAddr>,
+    pub warning: Option<Msg> }                                       // core.net.resolveLastKnown: show it
+pub enum ResolveFault { Failed, Sinkhole, Poisoned, Cancelled }     // -> Network / Cancelled
 pub async fn resolve_hosts(hosts: &[String], path: ResolvePath, cancel: &CancellationToken)
     -> Result<Resolved, ResolveFault>;
 ```
@@ -359,21 +371,26 @@ Config shape: SOCKS inbound `in` on `127.0.0.1:ep.port()` with password auth, UD
 sniffing (tls / http / quic); outbounds proxy (graph), `direct`, `block`; private CIDRs direct;
 log `info` to stdout, access log off; never dns / api / stats. Reject texts are complete
 sentences (render `reject.msg()`). `hosts()` / `substitute()` also cover WireGuard
-`peers[].endpoint` (`host:port`). `resolve_hosts`: `System` = OS resolver (TUN down), on
-failure one UDP retry at `bootstrap` = `(singbox_config::bootstrap_resolver(&phys_dns), 53)`;
-`ViaSingBox(addr)` = UDP DNS to the running sing-box's `dns-bootstrap-in` (TUN up). A, else
-AAAA; <= 4 lookups in flight, 4 s per attempt; the first failure fails the plan (no partial
-map); block-page answers (loopback, 0.0.0.0/8, link-local, multicast, broadcast) ->
-`Sinkhole`; private / CGNAT servers are accepted.
+`peers[].endpoint` (`host:port`). `resolve_hosts`: `Direct` (TUN down) =
+`vpnte_core::resolve::resolve_server` per name: the direct DoH / TCP chain against the Russian
+DNS blocking, the OS resolver (2.5 s), then the address the name had last time in this process
+(`warning` set; it is never silent); no plain UDP to any resolver; bounded by `resolve_server`
+itself (worst case about 11 s, typically under 1 s). `ViaSingBox(addr)` = UDP DNS to the
+running sing-box's loopback `dns-bootstrap-in` (TUN up; the socket binds loopback), A, else
+AAAA, 4 s per name. IP literals are answered in place. <= 4 lookups in flight; the first
+failure fails the plan (no partial map); block-page answers (loopback, 0.0.0.0/8, link-local,
+multicast, broadcast) -> `Sinkhole`; forged answers with no trustworthy resolver (NXDOMAIN with
+AA, block-page-only) -> `Poisoned` (`engine.xray.resolve.poisoned`); private / CGNAT servers
+are accepted. The tunnel also pins a native profile's server name with `Direct` (tunnel
+`runtime::pin`).
 
 ```rust
 // Xray upstream in slot A (cold start, TUN down) — sketch.
 let engine = select_engine(&profile, settings.engine_pref).engine()?;   // Engine::Xray here
 let mut graph = proxy_graph(&profile, device)?;
 notify_all(warnings(&profile, stealth || adaptive == AdaptiveMode::TlsCompatibility));
-let path = ResolvePath::System { bootstrap: (singbox_config::bootstrap_resolver(&phys_dns), 53).into() };
-let resolved = resolve_hosts(&graph.hosts(), path, &cancel).await?;
-if let Some(msg) = resolved.warning() { notify(msg) }
+let resolved = resolve_hosts(&graph.hosts(), ResolvePath::Direct, &cancel).await?;
+if let Some(msg) = resolved.warning.clone() { notify(msg) }
 graph.substitute(&resolved.addrs);
 let (ep_a, ep_b) = (SlotEndpoint::allocate(&taken)?, SlotEndpoint::allocate(&taken_plus_a)?);
 let launch = SlotLaunch { config: build_config(&graph, &ep_a).to_string().into_bytes(),
@@ -452,7 +469,12 @@ pub fn build(i: &RoutingInputs) -> RoutingFragments;
 Process rules: P1 `engine_paths` -> direct, P2 third-party cores -> direct, P3 split direct,
 P4 split VPN (one rule per class). Domain rules: block -> Smart RU pins -> gov (+ maps) ->
 user rules in order -> `geoip-ru` + Kimi direct; DNS rules mirror them (`dns-direct` = UDP to
-`usable_physical_dns`, else `dhcp`).
+`usable_physical_dns`, else `dhcp`). DNS rules match by domain only (domain lists, the
+domain-only gov geosite; never `ip_cidr` / `ip_is_private` / an IP rule set), so they stay
+valid next to the slot mode's `evaluate` bootstrap order (tested through `sing-box check`).
+`BootstrapDnsFallback` = the endpoint is a host name and the physical adapters have no usable
+resolver: the name resolves only through public resolvers (DoH / TCP), with no step at the
+network's own DNS.
 
 ```rust
 // routing::doc — Document `rules.json` (VERSION 1); open exactly one Store<RulesDoc>

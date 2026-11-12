@@ -81,6 +81,7 @@ fn session(id: &str) -> SessionView {
         generation: Some(1),
         adaptive: Default::default(),
         started_at: 1,
+        engine: None,
     }
 }
 

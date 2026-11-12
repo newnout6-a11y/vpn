@@ -2,8 +2,9 @@
 //! the Servers page's «Check keys» (one `HealthCheck` operation per group, one probe context per
 //! client device, verdicts recorded in the list).
 use vpnte_base::AppResult;
-use vpnte_base::types::ClientDevice;
+use vpnte_base::types::{ClientDevice, EnginePref};
 use vpnte_core::ops::{FeatureKind, RunOpts, Source};
+use vpnte_engine::xray_config::server_pref;
 use vpnte_probes::key_health::{self, HealthError};
 use vpnte_profiles::model::Profile;
 use vpnte_proxies::model::{GroupHealth, KeyHealth};
@@ -16,8 +17,9 @@ use super::source::{ServerProfiles, reason_code};
 
 /// A probed key: its id and the key identity taken before the probe.
 type Key = (ProfileId, Option<[u8; 16]>);
-/// The keys of one client device with their profiles (`None`: unreadable, checked as such).
-type DeviceItems = (ClientDevice, Vec<(Key, Option<Profile>)>);
+/// The keys of one client device and engine choice with their profiles (`None`: unreadable,
+/// checked as such).
+type DeviceItems = ((ClientDevice, EnginePref), Vec<(Key, Option<Profile>)>);
 
 /// Checks the keys of group `group_id` the user has not removed. An unknown or empty group is
 /// `HealthError::GroupNotFoundOrEmpty` (the control API answers 404).
@@ -45,8 +47,10 @@ pub(super) async fn check_group(src: &ServerProfiles, group_id: &str) -> AppResu
         .run(FeatureKind::HealthCheck, opts, move |lease| async move {
             let mut checked = Vec::new();
             let mut setup = None;
-            for (device, items) in by_device(rows) {
-                match key_health::check_many(items, &probe_ctx(device), lease.token()).await {
+            for ((device, engine), items) in by_device(rows) {
+                let mut ctx = probe_ctx(device);
+                ctx.engine_pref = server_pref(ctx.engine_pref, engine);
+                match key_health::check_many(items, &ctx, lease.token()).await {
                     Ok(found) => checked.extend(found),
                     Err(HealthError::Setup(err)) => setup = Some(err),
                     Err(err) => return Err(err.into()),
@@ -77,15 +81,17 @@ pub(super) async fn check_group(src: &ServerProfiles, group_id: &str) -> AppResu
     })
 }
 
-/// Rows grouped by client device (uTLS default, Xray translation differ per device).
+/// Rows grouped by client device (uTLS default, Xray translation differ per device) and their
+/// own engine choice (applied to the probe exactly as to a connect).
 fn by_device(rows: Vec<ServerRow>) -> Vec<DeviceItems> {
     let mut out: Vec<DeviceItems> = Vec::new();
     for row in rows {
         let profile = row.profile().ok();
+        let choice = (row.device, row.engine);
         let item = ((row.id, profile.as_ref().map(Profile::identity)), profile);
-        match out.iter_mut().find(|(d, _)| *d == row.device) {
+        match out.iter_mut().find(|(c, _)| *c == choice) {
             Some((_, items)) => items.push(item),
-            None => out.push((row.device, vec![item])),
+            None => out.push((choice, vec![item])),
         }
     }
     out

@@ -1,17 +1,36 @@
-//! One server row: flag, name (opens the detail), badges, Happ-style type line, the ping with its
-//! status mark, the select / switch control and the «…» menu.
+//! One server row: flag, name (opens the detail), badges, Happ-style type line, the engine a
+//! connect would use, the last check's verdict, the ping with its status mark, the select /
+//! switch control and the «…» menu.
 use dioxus::prelude::*;
+use vpnte_base::types::EnginePref;
 
 use super::actions::Actions;
 use super::menu::{MenuItem, OverflowMenu};
-use super::model::{GroupView, ServerView};
+use super::model::{EnginePlan, GroupView, ServerView};
 use super::present::{
-    RowSignal, Unusable, device_label, displayed_ping, happ_type, has_flag,
-    is_removed_from_subscription, proxy_ready, relative_time, row_signal, stealth_badge, unusable,
+    ENGINE_ITEMS, RowSignal, Unusable, device_label, displayed_ping, engine_name, engine_of_item,
+    happ_type, has_flag, is_removed_from_subscription, proxy_ready, relative_time, row_signal,
+    stealth_badge, unusable,
 };
 use super::state::{Confirm, effective_health};
+use super::verdict::VerdictCap;
+use crate::lang::tr;
 use crate::t;
 use crate::widgets::{Badge, Button, ButtonKind, Icon, IconGlyph, Spinner, Tone};
+
+/// The engine a connect would use (quiet mono caption, the reason as its title), or a warning
+/// when the chosen engine cannot run the server.
+#[component]
+fn EngineCap(plan: EnginePlan) -> Element {
+    match plan {
+        EnginePlan::Runs { engine, reason } => rsx! {
+            span { class: "srv-row-cap swiss-mono", title: tr(&reason), "{engine_name(engine)}" }
+        },
+        EnginePlan::Refused(why) => rsx! {
+            Badge { tone: Tone::Warn, title: tr(&why), {t!("ui.servers.row.engineRefused")} }
+        },
+    }
+}
 
 /// Round flag coin, or the mono country code where the shared stylesheet has no flag.
 #[component]
@@ -38,6 +57,7 @@ fn SignalMark(signal: RowSignal) -> Element {
     let (class, title) = match &signal {
         RowSignal::FreshPing => ("is-ok", t!("ui.servers.row.freshPing")),
         RowSignal::Alive => ("is-ok", t!("servers.health.alive")),
+        RowSignal::Engine => ("is-unknown", t!("servers.health.reasons.engine-setting")),
         RowSignal::Dead(Some(reason)) => (
             "is-fail",
             crate::lang::translate(
@@ -128,6 +148,7 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
         MenuItem::new("save", t!("servers.saveKey")).busy(rt.exporting),
     ];
     let mut items = items;
+    items.extend(engine_items(server.engine));
     if deleted {
         items.insert(0, MenuItem::new("restore", t!("ui.servers.row.restore")));
         items.push(MenuItem::new("purge", t!("ui.servers.menu.purge")).destructive());
@@ -189,6 +210,12 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
                         Badge { tone: Tone::Ok, {t!("servers.active")} }
                     }
                     span { class: "srv-row-cap swiss-mono", "{device_label(server.device)}" }
+                    if let Some(plan) = server.engine_plan.clone() {
+                        EngineCap { plan }
+                    }
+                    if let Some(verdict) = server.verdict.clone() {
+                        VerdictCap { verdict, now: (store.now)() }
+                    }
                     if let Some(code) = &server.country {
                         span { class: "srv-row-cap swiss-mono", "{code}" }
                     }
@@ -266,8 +293,28 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
     }
 }
 
+/// The per-server engine entries of the «…» menu; the current choice is listed, not offered.
+fn engine_items(current: EnginePref) -> Vec<MenuItem> {
+    ENGINE_ITEMS
+        .iter()
+        .map(|&(id, pref)| {
+            let label = match pref {
+                EnginePref::Auto => t!("ui.servers.menu.engineAuto"),
+                EnginePref::SingBox => t!("ui.servers.menu.engineSingBox"),
+                EnginePref::Xray => t!("ui.servers.menu.engineXray"),
+            };
+            let chosen = (pref == current).then(|| t!("ui.servers.menu.engineCurrent"));
+            MenuItem::new(id, label).blocked(chosen)
+        })
+        .collect()
+}
+
 fn row_action(actions: &Actions, server: &ServerView, connected: bool, item: &str) {
     let store = actions.store;
+    if let Some(engine) = engine_of_item(item) {
+        actions.set_engine(server, engine);
+        return;
+    }
     match item {
         "proxy" => actions.start_proxy(server),
         "ping" => actions.ping_one(&server.id),

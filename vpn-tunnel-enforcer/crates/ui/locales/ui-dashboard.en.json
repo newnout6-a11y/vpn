@@ -11,6 +11,7 @@
       "offWithWarnings": "Protection turned off with warnings",
       "recheckFailed": "Could not check the kill switch",
       "releaseFailed": "Could not remove the kill switch",
+      "engineTitle": "The engine that carries the connection, and why it was chosen",
       "foreignVpn": {
         "title": "Another VPN detected",
         "body": "While it runs, pings are unreliable: its adapter intercepts the checks and answers for every server (hence the identical ~1–40 ms). Quit the other VPN completely (exit it from the tray) to see the real latencies."

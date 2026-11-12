@@ -111,6 +111,8 @@ pub(super) struct FakeTunnel {
     pub disconnect_warnings: Vec<Msg>,
     pub leak: Mutex<Option<CheckReport>>,
     pub shutdown: Mutex<ShutdownReport>,
+    /// The saved kill-switch level `kill_switch` reports.
+    pub level: Mutex<KillSwitchLevel>,
 }
 
 impl FakeTunnel {
@@ -125,6 +127,7 @@ impl FakeTunnel {
             disconnect_warnings: vec![Msg::new("w.one"), Msg::new("w.two")],
             leak: Mutex::new(None),
             shutdown: Mutex::new(ShutdownReport::default()),
+            level: Mutex::new(KillSwitchLevel::Off),
         })
     }
 
@@ -192,10 +195,12 @@ impl TunnelOps for FakeTunnel {
         self.status.subscribe()
     }
     async fn kill_switch(&self) -> KillSwitchStatus {
-        KillSwitchStatus {
+        let mut status = KillSwitchStatus {
             settings: Default::default(),
             wfp: None,
-        }
+        };
+        status.settings.level = *self.level.lock();
+        status
     }
     async fn set_kill_switch_level(&self, _level: KillSwitchLevel) -> AppResult<()> {
         Err(crate::svc_core::needs_admin())
@@ -406,5 +411,33 @@ mod cases {
         let err = within(panels.proxy_start(1, "p-1")).await.unwrap_err();
         assert_eq!(err.user_msg().key, "app.dashboard.proxiesUnavailable");
         assert!(within(panels.proxy_refresh()).await.is_ok());
+    }
+
+    /// A kill-switch level saved in Settings shows on the start page at once, not at the next
+    /// connect: the saved protection triggers a read-back (no tunnel transition happens here).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_saved_kill_switch_level_shows_at_once() {
+        use vpnte_view::labels::FwState;
+
+        let (hub, fake, _dir) = setup("kill-switch");
+        let mut view = Dashboard(hub.clone()).state();
+        let read_back = |state: FwState| {
+            move |v: &vpnte_ui::dashboard::DashboardView| {
+                v.firewall.state == state && !v.firewall.checking
+            }
+        };
+        within(view.wait_for(read_back(FwState::Inactive)))
+            .await
+            .expect("first read-back");
+
+        *fake.level.lock() = KillSwitchLevel::Standard;
+        hub.backend
+            .protection
+            .update(|d| d.settings.level = KillSwitchLevel::Standard)
+            .expect("level saved");
+        within(view.wait_for(read_back(FwState::ProxyHold)))
+            .await
+            .expect("read back after the save");
+        assert_eq!(fake.snapshot.borrow().revision, 0, "no transition ran");
     }
 }

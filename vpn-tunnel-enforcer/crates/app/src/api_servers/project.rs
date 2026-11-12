@@ -7,7 +7,8 @@ use std::num::NonZeroU32;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use vpnte_base::i18n::Lang;
-use vpnte_base::types::UnixMs;
+use vpnte_base::types::{EnginePref, UnixMs};
+use vpnte_engine::xray_config::{Decision, select_engine, server_pref};
 use vpnte_profiles::caps;
 use vpnte_profiles::model::{Profile, Source as ProfileSource};
 use vpnte_servers::model::{
@@ -17,7 +18,7 @@ use vpnte_servers::model::{
 use vpnte_tunnel::fsm::{TunnelSnapshot, TunnelState};
 use vpnte_ui::servers as ui;
 
-use super::Shared;
+use super::{Shared, verdict};
 
 /// Display facts of a row that need its decrypted profile or its stored evidence.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -27,11 +28,16 @@ pub(super) struct RowExtras {
     pub stealth: Option<ui::Stealth>,
     pub fingerprint: Option<String>,
     pub has_outbound: bool,
+    /// What a connect would run under the current setting and the row's own choice.
+    pub engine_plan: Option<ui::EnginePlan>,
+    /// The classifier's verdict, when no younger health record contradicts it.
+    pub verdict: Option<ui::CheckVerdict>,
 }
 
 impl RowExtras {
-    /// The extras of `row`; a key sealed for another account shows none of the profile facts.
-    pub(super) fn of(row: &ServerRow) -> Self {
+    /// The extras of `row` under the engine `setting`; a key sealed for another account shows
+    /// none of the profile facts.
+    pub(super) fn of(row: &ServerRow, setting: EnginePref) -> Self {
         let profile = row.profile().ok();
         Self {
             exit_ip: exit_ip(row),
@@ -43,7 +49,25 @@ impl RowExtras {
                 .as_ref()
                 .and_then(|p| p.tls.as_ref()?.fingerprint.clone()),
             has_outbound: profile.as_ref().is_some_and(has_outbound),
+            engine_plan: profile
+                .as_ref()
+                .map(|p| engine_plan(p, server_pref(setting, row.engine))),
+            verdict: row
+                .verdict
+                .as_ref()
+                .and_then(|v| verdict::view(v, row.health.as_ref())),
         }
+    }
+}
+
+/// The tunnel's own selection rule for `p` (the same function the start runs).
+pub(super) fn engine_plan(p: &Profile, pref: EnginePref) -> ui::EnginePlan {
+    match select_engine(p, pref) {
+        Decision::Selected { engine, reason } => ui::EnginePlan::Runs {
+            engine,
+            reason: reason.msg(),
+        },
+        Decision::Rejected(reject) => ui::EnginePlan::Refused(reject.msg()),
     }
 }
 
@@ -65,10 +89,11 @@ pub(super) struct Inputs<'a> {
 pub(super) fn current(shared: &Shared) -> ui::ServersView {
     let backend = &shared.backend;
     let list = backend.servers.view();
+    let setting = backend.settings.read(|s| s.proxy_engine);
     let extras = backend.servers.read(|doc| {
         doc.profiles
             .iter()
-            .map(|row| (row.id.clone(), RowExtras::of(row)))
+            .map(|row| (row.id.clone(), RowExtras::of(row, setting)))
             .collect::<HashMap<_, _>>()
     });
     let tunnel = backend.tunnel().ok();
@@ -130,6 +155,8 @@ fn server(s: &ServerSummary, x: &RowExtras, ips: &HashMap<String, IpAddr>) -> ui
         country: s.country.map(|c| c.as_str().to_owned()),
         exit_ip: x.exit_ip,
         device: s.device,
+        engine: s.engine,
+        engine_plan: x.engine_plan.clone(),
         fingerprint: x.fingerprint.clone(),
         has_outbound: x.has_outbound,
         stealth: x.stealth,
@@ -140,6 +167,7 @@ fn server(s: &ServerSummary, x: &RowExtras, ips: &HashMap<String, IpAddr>) -> ui
             None => ui::OnlineStatus::Unknown,
         },
         health: s.health.as_ref().map(health),
+        verdict: x.verdict.clone(),
         group_id: Some(s.group_id.to_string()),
         last_seen_in_subscription_at: x.last_seen_at,
         archived: s.archived.map(|a| ui::Archive {

@@ -4,7 +4,7 @@ use std::net::IpAddr;
 use std::num::NonZeroU32;
 
 use vpnte_base::Msg;
-use vpnte_base::types::{ClientDevice, UnixMs};
+use vpnte_base::types::{ClientDevice, Engine, EnginePref, UnixMs};
 
 /// Id of the synthetic group that holds every server while the store has no groups at all.
 pub const VIRTUAL_ALL_GROUP: &str = "__virtual_all__";
@@ -45,12 +45,14 @@ pub enum KeyHealthReason {
     Hy2TlsFailed,
     Hy2ConfigFailed,
     Hy2HandshakeFailed,
+    /// Not a key fault: the chosen engine cannot run the key (an engine verdict, shown neutral).
+    EngineSetting,
     /// A code this build does not know: shown raw.
     Other(String),
 }
 
 impl KeyHealthReason {
-    const CODES: [(&'static str, KeyHealthReason); 11] = [
+    const CODES: [(&'static str, KeyHealthReason); 12] = [
         ("auth-failed", KeyHealthReason::AuthFailed),
         ("tls-failed", KeyHealthReason::TlsFailed),
         ("timeout", KeyHealthReason::Timeout),
@@ -62,6 +64,7 @@ impl KeyHealthReason {
         ("hy2-tls-failed", KeyHealthReason::Hy2TlsFailed),
         ("hy2-config-failed", KeyHealthReason::Hy2ConfigFailed),
         ("hy2-handshake-failed", KeyHealthReason::Hy2HandshakeFailed),
+        ("engine-setting", KeyHealthReason::EngineSetting),
     ];
 
     /// Parses a backend reason code.
@@ -91,6 +94,58 @@ pub struct KeyHealth {
     /// Health latency: a different metric from the ping; never shown as the ping.
     pub latency_ms: Option<u32>,
     pub reason: Option<KeyHealthReason>,
+    pub checked_at: UnixMs,
+}
+
+/// What a group health check measured: the keys it checked, and how many it could not check now
+/// (their server's handshake budget was used up, or the probe could not start). Those keep
+/// their previous state; they are counted, never shown as dead.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HealthReport {
+    pub results: Vec<(String, KeyHealth)>,
+    pub not_checked: u32,
+}
+
+/// What a server check concluded under the RU network discipline (Nov 2026): a frozen or banned
+/// server needs another server, not another port or retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VerdictKind {
+    /// The whole test transfer came through.
+    Healthy,
+    /// Data stopped after ~16 KB without a reset: the network throttles the server's hosting.
+    Frozen,
+    /// Data stopped outside the freeze band.
+    Stalled,
+    /// TCP connects, the TLS / REALITY handshake does not pass.
+    HandshakeFailed,
+    KeyRejected,
+    /// Ping answers, TCP and UDP are dropped: the address is banned in this network.
+    IpBanned,
+    UdpBlocked,
+    Offline,
+    /// The server's handshake budget left it unchecked.
+    Deferred,
+    /// The evidence names no cause.
+    NotVerified,
+}
+
+/// The step a verdict suggests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VerdictAdvice {
+    SwitchServer,
+    TryAnotherFingerprint,
+    PreferTcpTransport,
+    RetryLater,
+}
+
+/// The classifier's verdict on a server with its advice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckVerdict {
+    pub kind: VerdictKind,
+    pub advice: Option<VerdictAdvice>,
+    /// The verdict and the advice as full sentences (hover text).
+    pub detail: Msg,
+    pub advice_detail: Option<Msg>,
     pub checked_at: UnixMs,
 }
 
@@ -128,6 +183,10 @@ pub struct ServerView {
     /// Verified exit IP (country check or probe); differs from `resolved_ip` behind relays.
     pub exit_ip: Option<IpAddr>,
     pub device: ClientDevice,
+    /// The server's own engine (`Auto` = the setting in Settings).
+    pub engine: EnginePref,
+    /// What a connect would run under the current settings (`None`: the key cannot be opened).
+    pub engine_plan: Option<EnginePlan>,
     /// uTLS fingerprint the stored profile pins (`None`: the device default applies).
     pub fingerprint: Option<String>,
     /// The profile carries a full engine outbound (the «| JSON» suffix of Happ-style labels).
@@ -138,12 +197,24 @@ pub struct ServerView {
     pub status: OnlineStatus,
     /// Persisted key-health verdict.
     pub health: Option<KeyHealth>,
+    /// Persisted classifier verdict (never older than `health`: an outdated one is not sent).
+    pub verdict: Option<CheckVerdict>,
     pub group_id: Option<String>,
     pub last_seen_in_subscription_at: Option<UnixMs>,
     /// Archived rows stay visible (and restorable) until they are purged.
     pub archived: Option<Archive>,
     /// `false`: switched off by the user; cannot be selected or started as a proxy.
     pub enabled: bool,
+}
+
+/// The engine a connect would use for a server, as the backend decides it: never a silent
+/// choice, so the row says which engine and why, or why none can.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnginePlan {
+    /// `engine` runs the server; `reason` is the short caption («REALITY», «выбран вручную»).
+    Runs { engine: Engine, reason: Msg },
+    /// The chosen engine cannot run it: the full sentence with the way out.
+    Refused(Msg),
 }
 
 /// Where a group's servers come from.

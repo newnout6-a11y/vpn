@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::num::NonZeroU32;
 
 use vpnte_base::Msg;
-use vpnte_base::types::{ClientDevice, UnixMs};
+use vpnte_base::types::{ClientDevice, Engine, EnginePref, UnixMs};
 
 use super::live_model::*;
 use super::model::*;
@@ -16,6 +16,18 @@ const GB: u64 = 1024 * 1024 * 1024;
 /// A test-net address `198.51.100.n` (RFC 5737).
 pub(crate) fn test_ip(n: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(198, 51, 100, n))
+}
+
+/// What Auto would run for a demo protocol (the backend decides this for real rows).
+fn demo_plan(protocol: &str) -> EnginePlan {
+    let (engine, reason) = match protocol {
+        "vless" => (Engine::Xray, "engine.xray.reason.reality"),
+        _ => (Engine::SingBox, "engine.xray.reason.default"),
+    };
+    EnginePlan::Runs {
+        engine,
+        reason: Msg::new(reason),
+    }
 }
 
 /// One fake server: id (its first two letters are the country), display name, protocol, last
@@ -174,6 +186,8 @@ impl Seed {
             country: self.id.get(..2).map(str::to_ascii_uppercase),
             exit_ip: None,
             device: ClientDevice::Pc,
+            engine: EnginePref::Auto,
+            engine_plan: Some(demo_plan(self.protocol)),
             fingerprint: None,
             has_outbound: true,
             stealth: self.stealth,
@@ -184,11 +198,34 @@ impl Seed {
                 OnlineStatus::Offline
             },
             health: None,
+            verdict: None,
             group_id: self.group.map(Into::into),
             last_seen_in_subscription_at: Some(now - 30 * MIN),
             archived: None,
             enabled: true,
         }
+    }
+}
+
+/// A classifier verdict as the app projects it (the sentences are the probes' keys).
+pub(crate) fn demo_verdict(
+    kind: VerdictKind,
+    advice: Option<VerdictAdvice>,
+    at: UnixMs,
+) -> CheckVerdict {
+    let detail = match kind {
+        VerdictKind::Healthy => "probes.verdict.healthy",
+        VerdictKind::Frozen => "probes.verdict.frozen",
+        VerdictKind::KeyRejected => "probes.verdict.keyRejected",
+        VerdictKind::IpBanned => "probes.verdict.ipBanned",
+        _ => "probes.verdict.notVerified",
+    };
+    CheckVerdict {
+        kind,
+        advice,
+        detail: Msg::new(detail),
+        advice_detail: advice.map(|_| Msg::new("probes.reaction.switchServer")),
+        checked_at: at,
     }
 }
 
@@ -222,6 +259,11 @@ pub(crate) fn demo_view(now: UnixMs) -> ServersView {
                     reason: Some(KeyHealthReason::AuthFailed),
                     checked_at: now - 3 * 60 * MIN,
                 });
+                s.verdict = Some(demo_verdict(
+                    VerdictKind::KeyRejected,
+                    None,
+                    now - 3 * 60 * MIN,
+                ));
                 s.device = ClientDevice::Android;
             }
             "de-fra" => {
@@ -230,7 +272,17 @@ pub(crate) fn demo_view(now: UnixMs) -> ServersView {
                     latency_ms: Some(420),
                     reason: None,
                     checked_at: now - 50 * MIN,
-                })
+                });
+                s.verdict = Some(demo_verdict(VerdictKind::Healthy, None, now - 50 * MIN));
+            }
+            // the RU network discipline in the list: a frozen host and a banned address
+            "se-sto" => {
+                let advice = Some(VerdictAdvice::SwitchServer);
+                s.verdict = Some(demo_verdict(VerdictKind::Frozen, advice, now - 12 * MIN));
+            }
+            "tr-ist" => {
+                let advice = Some(VerdictAdvice::SwitchServer);
+                s.verdict = Some(demo_verdict(VerdictKind::IpBanned, advice, now - 40 * MIN));
             }
             _ => {}
         }
@@ -437,6 +489,7 @@ pub(crate) fn demo_check(server: &ServerView, mode: LiveMode, n: u64, now: UnixM
         }),
         throughput: extended.then(|| demo_throughput(n)),
         split_tunnel: None,
+        deferred: None,
         findings: demo_findings(n),
     }
 }

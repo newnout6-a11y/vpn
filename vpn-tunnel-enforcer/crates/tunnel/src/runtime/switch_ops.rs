@@ -101,7 +101,7 @@ impl SwitchOps for RuntimeSwitch<'_> {
         let ep = self.slots.endpoints[i].clone();
         let ip = self
             .engines
-            .egress_via(ep.port(), ep.creds(), cancel)
+            .egress_via(&self.next.profile, ep.port(), ep.creds(), cancel)
             .await?;
         self.slots.egress[i] = Some(ip);
         Ok(())
@@ -211,8 +211,8 @@ impl Actor {
         let Some(slots) = &s.slots else {
             return false;
         };
-        let xray = xray_config::select_engine(&profile.profile, next.engine).engine();
-        if slots.suspect || xray.ok() != Some(Engine::Xray) || !slots.slots.running(slots.active) {
+        let run = super::start::choose(profile, next.engine).map(|r| r.kind);
+        if slots.suspect || run.ok() != Some(Engine::Xray) || !slots.slots.running(slots.active) {
             return false;
         }
         let Ok(user) = self.deps.inputs.snapshot().await else {
@@ -304,6 +304,12 @@ impl Actor {
         }
         if receipt.committed {
             s.req = next.clone();
+            // Admitted only for an Xray run, so the choice is known; its reason may differ.
+            if let Ok(run) = super::start::choose(profile, next.engine) {
+                s.engine = run;
+                receipt.engine = Some(run);
+            }
+            receipt.warnings = super::start::xray_warnings(&profile.profile, next);
         }
         tracing::info!(outcome = ?receipt.outcome, committed = receipt.committed,
             verified = receipt.verified(), "upstream switch finished");
@@ -312,9 +318,11 @@ impl Actor {
             self.last = Some(next.clone());
             let name = profile.profile.name.clone();
             let protocol = profile.profile.kind.label().to_owned();
+            let engine = receipt.engine;
             self.publish(|st| {
                 st.profile_name = Some(name);
                 st.protocol = Some(protocol);
+                st.engine = engine.or(st.engine);
                 st.proxy_reachable = true;
                 st.warning = None;
             });

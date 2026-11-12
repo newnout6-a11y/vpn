@@ -8,24 +8,57 @@ use std::sync::atomic::Ordering;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{Engine, ProxyKind, now_ms};
+use vpnte_base::types::{AdaptiveMode, Engine, EnginePref, ProxyKind, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::net::HostPort;
-use vpnte_engine::singbox_config::{self, Upstream};
+use vpnte_engine::singbox_config::Upstream;
 use vpnte_engine::slot::{Slot, SlotEndpoint};
-use vpnte_engine::xray_config::{self, ProxyGraph, ResolvePath, Resolved};
+use vpnte_engine::xray_config::{self, Decision, ProxyGraph, Reject, ResolvePath, Resolved};
 use vpnte_engine::xray_process::{SlotLaunch, XrayEvent};
 use vpnte_profiles::emit_singbox::EmitPolicy;
+use vpnte_profiles::model::Profile;
 
 use super::actor::{Actor, Phase, Retained, Session, SlotSession};
 use super::capture::CapturePlan;
 use super::config;
 use super::engines::{CoreProc, Engines};
+use super::pin::pin_native;
 use super::spawn::Parts;
 use crate::api::{
-    CaptureKind, Mode, Origin, StartReceipt, StartRequest, TunError, TunStatusKind, TunnelEvent,
-    VpnProfile,
+    CaptureKind, EngineRun, Mode, Origin, StartReceipt, StartRequest, TunError, TunStatusKind,
+    TunnelEvent, VpnProfile,
 };
+
+/// The engine `server` runs on under its own choice and the app setting, with the reason; a
+/// profile the chosen engine cannot run is refused, never moved to the other engine.
+pub(super) fn choose(server: &VpnProfile, setting: EnginePref) -> Result<EngineRun, Reject> {
+    let pref = xray_config::server_pref(setting, server.engine);
+    match xray_config::select_engine(&server.profile, pref) {
+        Decision::Selected { engine, reason } => Ok(EngineRun {
+            kind: engine,
+            reason: Some(reason),
+        }),
+        Decision::Rejected(reject) => Err(reject),
+    }
+}
+
+/// The engine run of `req` before any effect (a local upstream proxy is forwarded by sing-box).
+fn run_of(req: &StartRequest) -> Result<EngineRun, Reject> {
+    match &req.mode {
+        Mode::LocalProxy { .. } => Ok(EngineRun {
+            kind: Engine::SingBox,
+            reason: None,
+        }),
+        Mode::DirectVpn { profile } => choose(profile, req.engine),
+    }
+}
+
+/// What Xray drops of `profile` under `req` (stealth / TLS compatibility included): shown with
+/// the start and the server switch (engine API: call it whenever Xray runs the profile).
+pub(super) fn xray_warnings(profile: &Profile, req: &StartRequest) -> Vec<Msg> {
+    let tls_compat = req.stealth || req.adaptive == AdaptiveMode::TlsCompatibility;
+    xray_config::warnings(profile, tls_compat)
+}
 
 /// Effects of a start in progress: exactly what the compensation must undo.
 #[derive(Default)]
@@ -246,12 +279,13 @@ impl Actor {
         }
     }
 
-    /// The upstream as far as it can be decided without effects (Xray names are resolved here,
-    /// before the protection blocks the system resolver).
+    /// The upstream as far as it can be decided without effects. Server names are resolved here
+    /// (Xray's always, a native profile's to pin its address), before the protection blocks
+    /// the system resolver.
     async fn plan_upstream(
         &self,
         req: &StartRequest,
-        phys_dns: &[std::net::Ipv4Addr],
+        engine: Engine,
         op: &CancellationToken,
         work: &mut Work,
     ) -> AppResult<Planned> {
@@ -270,7 +304,6 @@ impl Actor {
                 })
             }
             Mode::DirectVpn { profile } => {
-                let engine = xray_config::select_engine(&profile.profile, req.engine).engine()?;
                 if engine == Engine::SingBox {
                     let policy = EmitPolicy {
                         device: profile.device,
@@ -278,19 +311,24 @@ impl Actor {
                             || req.adaptive == vpnte_base::types::AdaptiveMode::TlsCompatibility,
                         ..EmitPolicy::default()
                     };
-                    let upstream = Upstream::native(&profile.profile, &policy).map_err(|e| {
-                        AppError::validation(Msg::new("tunnel.runtime.profileUnusable"))
-                            .with_source(e)
-                    })?;
+                    let mut upstream =
+                        Upstream::native(&profile.profile, &policy).map_err(|e| {
+                            AppError::validation(Msg::new("tunnel.runtime.profileUnusable"))
+                                .with_source(e)
+                        })?;
+                    if let Upstream::Native { fragment, .. } = &mut upstream {
+                        let engines = &*self.deps.engines;
+                        work.warnings
+                            .extend(pin_native(engines, fragment, op).await?);
+                    }
                     return Ok(Planned::Native(upstream));
                 }
                 let device = profile.device.unwrap_or_default();
                 let mut graph = xray_config::proxy_graph(&profile.profile, device)?;
-                let bootstrap =
-                    SocketAddr::from((singbox_config::bootstrap_resolver(phys_dns), 53));
-                let path = ResolvePath::System { bootstrap };
+                work.warnings.extend(xray_warnings(&profile.profile, req));
+                let path = ResolvePath::Direct;
                 let resolved = self.deps.engines.resolve(&graph.hosts(), path, op).await?;
-                work.warnings.extend(resolved.warning());
+                work.warnings.extend(resolved.warning.clone());
                 graph.substitute(&resolved.addrs);
                 Ok(Planned::Xray {
                     graph,
@@ -312,12 +350,14 @@ impl Actor {
         work: &mut Work,
     ) -> AppResult<Box<Session>> {
         let user = self.deps.inputs.snapshot().await?;
+        // Decided once, before any effect: the run, the receipt and the status show this engine.
+        let engine = run_of(req)?;
         let plan = self.capture.prepare(req, avoid).await?;
         work.warnings.extend(plan.warnings.iter().cloned());
         work.plan = Some(plan.clone());
         cancelled_if(op)?;
         let phys_dns = self.deps.engines.physical_dns().await;
-        let planned = self.plan_upstream(req, &phys_dns, op, work).await?;
+        let planned = self.plan_upstream(req, engine.kind, op, work).await?;
         cancelled_if(op)?;
         let (programs, own): (Vec<PathBuf>, Vec<PathBuf>) = match &planned {
             Planned::Local { owner, .. } => (
@@ -368,11 +408,6 @@ impl Actor {
         cancelled_if(op)?;
         let logs = self.deps.engines.log_files(work.slots.is_some());
         let endpoints = config::endpoints(&clash, &listeners, &proof, logs);
-        let engine = if work.slots.is_some() {
-            Engine::Xray
-        } else {
-            Engine::SingBox
-        };
         Ok(Box::new(Session {
             generation: self.generation,
             req: req.clone(),
@@ -430,7 +465,7 @@ impl Actor {
         let ip = self
             .deps
             .engines
-            .egress_via(a.port(), a.creds(), op)
+            .egress_via(&profile.profile, a.port(), a.creds(), op)
             .await?;
         if let Some(s) = work.slots.as_mut() {
             s.egress[Slot::A.index()] = Some(ip);

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::timeout;
-use vpnte_base::types::{Notice, Verdict};
+use vpnte_base::types::{Level, Notice, Verdict};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::ops::{FeatureKind, RunOpts, Source};
 use vpnte_probes::leak::{CheckReport, CheckStatus};
@@ -35,6 +35,15 @@ async fn detached<T: Send + 'static>(
         .unwrap_or_else(|err| Err(AppError::internal(err)))
 }
 
+/// Who shows a lane call's warnings to the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Shows {
+    /// Nobody else: they become notices (connect, server switch).
+    Notices,
+    /// The call's own answer carries them («off, but …» of a disconnect).
+    Answer,
+}
+
 /// Counts a lane call in `Hub::inflight` for its whole life, a panic included.
 struct InFlight(Arc<Hub>);
 
@@ -57,8 +66,8 @@ impl Hub {
     }
 
     /// A lane call (connect, disconnect) on a backend task, counted for a cancel; the views are
-    /// republished when it starts and when it ends.
-    pub(super) async fn lane<F, Fut>(self: &Arc<Self>, call: F) -> AppResult<Done>
+    /// republished when it starts and when it ends. `shows` = who shows the call's warnings.
+    pub(super) async fn lane<F, Fut>(self: &Arc<Self>, shows: Shows, call: F) -> AppResult<Done>
     where
         F: FnOnce(Arc<dyn TunnelOps>) -> Fut + Send + 'static,
         Fut: Future<Output = Result<Done, ConnError>> + Send + 'static,
@@ -69,7 +78,7 @@ impl Hub {
             let counted = InFlight::new(&hub);
             hub.publish_all();
             let res = call(tunnel).await;
-            hub.lane_ended(&res);
+            hub.lane_ended(&res, shows);
             drop(counted);
             hub.publish_all();
             res.map_err(AppError::from)
@@ -77,8 +86,10 @@ impl Hub {
         .await
     }
 
-    /// Logs a lane call's warnings; while a cancel is pending they become its answer.
-    fn lane_ended(&self, res: &Result<Done, ConnError>) {
+    /// A lane call's warnings (Xray's dropped settings, unresolved names, …) reach the user
+    /// (SERVICES: `Done::warnings` are extra messages to show): as notices unless the caller's
+    /// answer carries them; while a cancel is pending they become its answer instead.
+    fn lane_ended(&self, res: &Result<Done, ConnError>, shows: Shows) {
         let warnings = match res {
             Ok(done) => done.warnings.as_slice(),
             Err(err) => err.warnings(),
@@ -89,6 +100,14 @@ impl Hub {
         let mut local = self.local.lock();
         if local.conn.cancelling {
             local.cancel_warnings.extend_from_slice(warnings);
+            return;
+        }
+        drop(local);
+        if shows == Shows::Notices {
+            for w in warnings {
+                let notice = Notice::new(Level::Warn, w.clone());
+                self.backend.notifier.notify(notice, None);
+            }
         }
     }
 
@@ -171,7 +190,7 @@ impl Hub {
             let counted = InFlight::new(&hub);
             hub.publish_all();
             let res = tunnel.switch_server(ProfileId::from(id), Source::Ui).await;
-            hub.lane_ended(&res);
+            hub.lane_ended(&res, Shows::Notices);
             {
                 let mut local = hub.local.lock();
                 local.pending_active = None;

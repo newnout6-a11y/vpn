@@ -191,6 +191,11 @@ fn connected(session: Duration) -> DashboardView {
             state: FwState::Verified,
             checking: false,
         },
+        // Auto chose Xray for the reference REALITY node.
+        engine: Some(super::EngineLine {
+            engine: vpnte_base::types::Engine::Xray,
+            reason: Some(Msg::new("engine.xray.reason.reality")),
+        }),
         ..base()
     }
 }

@@ -13,6 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
+use vpnte_base::types::{ClientDevice, EnginePref};
 use vpnte_base::{AppError, AppResult, ErrorKind};
 use vpnte_profiles::model::{Kind, Profile};
 
@@ -259,6 +260,8 @@ pub(super) fn sample(n: u32) -> ProxyProfile {
         country: Some("Netherlands".into()),
         group_id: None,
         profile: vless("203.0.113.10"),
+        device: None,
+        engine: EnginePref::Auto,
         status: ServerStatus::Unknown,
         ping_ms: None,
         health_latency_ms: None,
@@ -1248,4 +1251,26 @@ async fn snapshot_readiness_follows_the_clock() {
         later.instances[0].egress_ip,
         snapshot.instances[0].egress_ip
     );
+}
+
+/// ENGINE-GAPS decision 3 / wire-proxies-live D5: a server's own engine and client device win
+/// over the source's preference and default device; `Auto` / `None` follow them.
+#[test]
+fn server_choice_wins_for_slots() {
+    let source = EngineChoice {
+        pref: EnginePref::Xray,
+        device: ClientDevice::Pc,
+    };
+    let plain = sample(1);
+    assert_eq!(source.for_profile(&plain), source);
+    let own = ProxyProfile {
+        device: Some(ClientDevice::Ios),
+        engine: EnginePref::SingBox,
+        ..sample(2)
+    };
+    let expected = EngineChoice {
+        pref: EnginePref::SingBox,
+        device: ClientDevice::Ios,
+    };
+    assert_eq!(source.for_profile(&own), expected);
 }

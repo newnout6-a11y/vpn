@@ -162,8 +162,19 @@ fn collect_secrets(v: &Value, secret: bool, out: &mut Vec<String>) {
 }
 
 /// Our DNS server tags: what the secret-named `server` key holds in DNS rules and resolvers. A
-/// reference, not a secret, and the name engine lines carry (`dns/https[dns-remote]`).
-const DNS_TAGS: [&str; 4] = [DNS_REMOTE, DNS_RESOLVER, DNS_BOOTSTRAP, DNS_DIRECT];
+/// reference, not a secret, and the name engine lines carry (`dns/https[dns-remote]`). The
+/// bootstrap order's steps (`singbox_config::dns`, private there) are spelled out: a test
+/// checks this list against every server tag a generated config carries.
+const DNS_TAGS: [&str; 8] = [
+    DNS_REMOTE,
+    DNS_RESOLVER,
+    DNS_BOOTSTRAP,
+    DNS_DIRECT,
+    "dns-bootstrap-quad9",
+    "dns-bootstrap-google",
+    "dns-bootstrap-tcp",
+    "dns-bootstrap-isp",
+];
 
 /// Long enough, not one of our DNS tags, and not a private / loopback address (`127.0.0.1`, the
 /// TUN `/30`): those carry no secret and must stay readable (`binds_any` evidence, adapter lines).

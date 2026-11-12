@@ -56,10 +56,10 @@
         "title": "Mode",
         "lead": "What goes through the tunnel.",
         "hard": "Tunnel",
-        "hardText": "All Windows traffic goes through the tunnel: browsers, games, updates, any program.",
+        "hardText": "All Windows traffic goes through the tunnel: browsers, games, updates, any program. Needs the app to be started as administrator.",
         "soft": "Proxy",
-        "softText": "No TUN: programs are given the proxy address through environment variables. Only the programs that honour them use the tunnel.",
-        "softNeedsProxy": "Proxy mode works only through a local proxy: with a key the connection always uses TUN."
+        "softText": "No administrator rights needed: the app points the Windows system proxy at its own engine. Programs that honour the system proxy go through the VPN, the others go direct.",
+        "softNeedsProxy": "With a key the app picks the mode itself: Tunnel when started as administrator, otherwise Proxy — a server from the list works in Proxy mode too, without administrator rights. You can change the mode in Settings."
       },
       "protection": {
         "title": "Protection",

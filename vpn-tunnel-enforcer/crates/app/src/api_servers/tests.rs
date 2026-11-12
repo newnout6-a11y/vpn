@@ -21,6 +21,7 @@ use super::project::{Inputs, RowExtras, fetch_error, project};
 mod backend;
 mod flows;
 mod reports;
+mod verdicts;
 
 /// Registers every locale layer of the app once (the first registration of the process wins).
 pub(super) fn locales() {
@@ -37,6 +38,7 @@ fn row(id: &str, group: &str) -> ServerSummary {
         server: format!("{id}.example.net"),
         port: 443,
         device: ClientDevice::Pc,
+        engine: Default::default(),
         country: Iso2::new("DE"),
         country_verified: false,
         missing_since: None,
@@ -146,6 +148,8 @@ fn projection_maps_rows_and_groups() {
             stealth: Some(ui::Stealth::Reality),
             fingerprint: Some("chrome".into()),
             has_outbound: true,
+            engine_plan: None,
+            verdict: None,
         },
     )]);
     let resolved = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 
 use vpnte_base::i18n::{Lang, lookup};
-use vpnte_base::types::{ClientDevice, UnixMs};
+use vpnte_base::types::{ClientDevice, Engine, EnginePref, UnixMs};
 
 use super::model::{
     ArchiveReason, GroupSource, GroupStatus, GroupView, KeyHealth, KeyHealthReason, OnlineStatus,
@@ -36,6 +36,29 @@ pub fn device_label(device: ClientDevice) -> &'static str {
         ClientDevice::Ios => "iOS",
         ClientDevice::Mac => "Mac",
     }
+}
+
+/// Product name of an engine (not translated).
+pub fn engine_name(engine: Engine) -> &'static str {
+    match engine {
+        Engine::SingBox => "sing-box",
+        Engine::Xray => "Xray",
+    }
+}
+
+/// The row menu's per-server engine entries (menu id, choice), in menu order.
+pub const ENGINE_ITEMS: [(&str, EnginePref); 3] = [
+    ("engine-auto", EnginePref::Auto),
+    ("engine-sing-box", EnginePref::SingBox),
+    ("engine-xray", EnginePref::Xray),
+];
+
+/// The engine choice a row menu id stands for.
+pub fn engine_of_item(id: &str) -> Option<EnginePref> {
+    ENGINE_ITEMS
+        .iter()
+        .find(|(item, _)| *item == id)
+        .map(|&(_, pref)| pref)
 }
 
 /// uTLS fingerprint the engine uses for a device when the profile pins none.
@@ -125,6 +148,8 @@ pub fn displayed_ping(persisted: Option<u32>, live: PingState) -> Option<u32> {
 pub enum RowSignal {
     FreshPing,
     Alive,
+    /// The chosen engine cannot run the key: not checked, not dead (neutral mark).
+    Engine,
     Dead(Option<KeyHealthReason>),
     Online,
     Offline,
@@ -138,6 +163,7 @@ pub fn row_signal(live: PingState, health: Option<&KeyHealth>, status: OnlineSta
     }
     match (health, status) {
         (Some(h), _) if h.online => RowSignal::Alive,
+        (Some(h), _) if h.reason == Some(KeyHealthReason::EngineSetting) => RowSignal::Engine,
         (Some(h), _) => RowSignal::Dead(h.reason.clone()),
         (None, OnlineStatus::Online) => RowSignal::Online,
         (None, OnlineStatus::Offline) => RowSignal::Offline,

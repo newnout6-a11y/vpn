@@ -72,33 +72,37 @@ async fn hostname_endpoints_are_pinned() {
     assert!(config.get("dns").is_none());
 }
 
-/// Spec external-proxy §7.3: OS resolver first, DoH when it fails, IPv4 preferred, and a
-/// clear error when both fail.
+/// Spec external-proxy §7.3 with `resolve_server` (answers faked, no lookup): IPv4 preferred,
+/// a last known address is dialed when DNS fails or is poisoned, and a clear error when there
+/// is nothing to dial.
 #[tokio::test]
-async fn resolution_falls_back_to_doh() {
+async fn resolution_dials_live_or_last_known_addresses() {
     let ip = |s: &str| s.parse::<IpAddr>().unwrap();
-    let doh_only =
-        |how| async move { (how == How::Doh).then(|| vec!["203.0.113.6".parse().unwrap()]) };
-    assert_eq!(
-        resolve_with("vpn.example.test", doh_only).await.unwrap(),
-        ip("203.0.113.6")
-    );
-    let none = |_| async { None };
-    let err = resolve_with("vpn.example.test", none).await.unwrap_err();
-    assert_eq!(
-        err,
-        ProxyError::Engine("cannot resolve vpn.example.test".into())
-    );
-    let mixed = |_| async {
-        Some(vec![
-            "2001:db8::1".parse().unwrap(),
-            "203.0.113.7".parse().unwrap(),
-        ])
+    let found = |addrs: &[&str], last_known| {
+        Ok(ServerAddrs {
+            addrs: addrs.iter().map(|a| ip(a)).collect(),
+            last_known,
+        })
     };
+    let host = "vpn.example.test";
+    let mixed = found(&["2001:db8::1", "203.0.113.7"], false);
+    assert_eq!(pick(host, mixed).unwrap(), ip("203.0.113.7"));
+    let bridged = found(&["203.0.113.6"], true);
+    assert_eq!(pick(host, bridged).unwrap(), ip("203.0.113.6"));
+    let poisoned = pick(host, Err(ResolveError::Poisoned)).unwrap_err();
     assert_eq!(
-        resolve_with("vpn.example.test", mixed).await.unwrap(),
-        ip("203.0.113.7")
+        poisoned,
+        ProxyError::Engine("cannot resolve vpn.example.test: the DNS answers were forged".into())
     );
+    assert!(pick(host, found(&[], false)).is_err());
+
+    // A literal never reaches a resolver; a block-page literal is refused.
+    let names = Names::default();
+    assert_eq!(
+        names.resolve("203.0.113.8").await.unwrap(),
+        ip("203.0.113.8")
+    );
+    assert!(names.resolve("127.0.0.1").await.is_err());
     assert!(dialable(ip("198.51.100.1")) && dialable(ip("10.0.0.1")));
     for blocked in [
         "127.0.0.1",
@@ -199,4 +203,29 @@ async fn prepared_configs_pass_the_engine_checks() {
             assert!(checked.is_ok(), "xray: {checked:?}");
         }
     }
+}
+
+/// ENGINE-GAPS decision 2: a profile the chosen engine cannot run is refused with the
+/// selection's own message (kind Validation in the UI), never moved to the other engine and
+/// never English text with a raw key; nothing is resolved or built.
+#[tokio::test]
+async fn engine_refusal_is_its_own_message() {
+    let tuic = vpnte_profiles::uri::parse_uri(
+        "tuic://00000000-0000-4000-8000-000000000003:fake-password@203.0.113.13:443?sni=example.com#T",
+    )
+    .unwrap();
+    let forced = EngineChoice {
+        pref: EnginePref::Xray,
+        device: ClientDevice::Pc,
+    };
+    let err = match prepare(&tuic, 17992, forced, &Names::default()).await {
+        Err(err) => err,
+        Ok(_) => panic!("forced Xray must refuse TUIC"),
+    };
+    let ProxyError::Refused(msg) = &err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(msg.key, "engine.xray.reject.noXrayClient");
+    let app: vpnte_base::AppError = err.into();
+    assert_eq!(app.kind, vpnte_base::ErrorKind::Validation);
 }

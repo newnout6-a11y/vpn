@@ -198,6 +198,7 @@ fn xray_server(id: &str, uri: &str) -> ServerChoice {
             id: id.to_owned(),
             profile: Arc::new(profile),
             device: None,
+            engine: EnginePref::Auto,
         },
         country: None,
     }
@@ -228,6 +229,15 @@ async fn in_place_switch_on_xray_slots() {
     let after = j.lc.session().borrow().clone().expect("session");
     assert_eq!(after.profile_id, "srv-b");
     assert_eq!(after.generation, before.generation, "same engine run");
+    // The engine and its reason ride along with the session and end up in the history row.
+    let run = crate::api::EngineRun {
+        kind: vpnte_base::types::Engine::Xray,
+        reason: Some(crate::api::SelectReason::Preference),
+    };
+    assert_eq!((before.engine, after.engine), (Some(run), Some(run)));
+    let rows = j.history.list();
+    let evidence = rows[0].outcome.as_ref().map(|o| o.evidence.proxy_engine);
+    assert_eq!(evidence, Some(Some(vpnte_base::types::Engine::Xray)));
     assert!(j.ran("select:b"), "{:?}", j.world.log());
     assert_eq!(j.world.cores.lock().len(), 1, "sing-box untouched");
     assert_eq!(j.state(), TunnelState::Connected);

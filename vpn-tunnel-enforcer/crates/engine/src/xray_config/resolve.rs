@@ -1,22 +1,24 @@
-//! Pre-resolution of an Xray graph's server names before the start (xray-engine spec §3.4): Xray
+//! Pre-resolution of server names before an engine dials them (xray-engine spec §3.4): Xray
 //! must never resolve them itself (under the TUN its lookup would be hijacked and answered
-//! through the very instance that waits for it). Lookups run in the app: the OS resolver while
-//! the TUN is down (one retry at the direct bootstrap resolver), or plain UDP DNS to sing-box's
-//! `dns-bootstrap-in` while it is up (the old upstream is often the thing that died). At most 4
-//! lookups in flight, 4 s each; any failure or a block-page answer fails the whole plan, so the
-//! graph is substituted completely or not at all.
+//! through the very instance that waits for it). Lookups run in the app: while the TUN is down
+//! with `vpnte_core::resolve::resolve_server` (the direct DoH / TCP chain that survives the
+//! 2026 Russian DNS blocking, then the OS resolver, then the name's last known address), while
+//! it is up as plain UDP DNS to sing-box's `dns-bootstrap-in` (the old upstream is often the
+//! thing that died). At most 4 lookups in flight; any failure or a block-page answer fails the
+//! whole plan, so the graph is substituted completely or not at all.
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::{AppError, ErrorKind, Msg};
-use vpnte_core::resolve::{How, ResolveError, resolve_host};
+use vpnte_core::resolve::{ResolveError, ServerAddrs, resolve_server};
 
-/// Budget of one lookup attempt.
+/// Budget of one lookup at `dns-bootstrap-in` (`resolve_server` bounds itself).
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(4);
 /// Lookups in flight at once.
 const PARALLEL: usize = 4;
@@ -26,10 +28,10 @@ const QTYPE_AAAA: u16 = 28;
 /// Where the names are resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvePath {
-    /// TUN down: the OS resolver; on failure one retry over UDP at `bootstrap`, port 53 of
-    /// `singbox_config::bootstrap_resolver(physical)` (reported to the user).
-    System { bootstrap: SocketAddr },
-    /// TUN up: UDP DNS to sing-box's `dns-bootstrap-in` loopback inbound.
+    /// TUN down: `resolve_server` (direct chain -> OS resolver -> last known address, the last
+    /// reported to the user). Worst case about 11 s per name, typically under 1 s.
+    Direct,
+    /// TUN up: UDP DNS to sing-box's loopback `dns-bootstrap-in` (4 s per name).
     ViaSingBox(SocketAddr),
 }
 
@@ -37,28 +39,25 @@ pub enum ResolvePath {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Resolved {
     pub addrs: HashMap<String, IpAddr>,
-    /// The system resolver failed for some host and the bootstrap resolver answered.
-    pub bootstrap_used: bool,
-}
-
-impl Resolved {
-    /// What the user should be told (the bootstrap fallback is never silent).
-    pub fn warning(&self) -> Option<Msg> {
-        self.bootstrap_used
-            .then(|| Msg::new("engine.xray.resolve.bootstrapFallback"))
-    }
+    /// What the user must be told: some name was unresolvable and the address it had last time
+    /// stands in (`ServerAddrs::warning`, `core.net.resolveLastKnown`). Never silent.
+    pub warning: Option<Msg>,
 }
 
 /// Why the plan failed (no host name in the error: diagnostics stay free of server names).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ResolveFault {
-    #[error("an Xray server name could not be resolved")]
+    #[error("a server name could not be resolved")]
     Failed,
     /// Only block-page addresses came back (unspecified, loopback, link-local, multicast,
     /// broadcast, `0.0.0.0/8`): dialing them would hit a local service.
-    #[error("an Xray server name resolved only to a blocked address")]
+    #[error("a server name resolved only to a blocked address")]
     Sinkhole,
-    #[error("Xray server name resolution cancelled")]
+    /// Every answer was forged (NXDOMAIN with AA, block-page addresses) and no trustworthy
+    /// resolver was reachable.
+    #[error("the DNS answers for a server name were forged")]
+    Poisoned,
+    #[error("server name resolution cancelled")]
     Cancelled,
 }
 
@@ -68,10 +67,14 @@ impl From<ResolveFault> for AppError {
             ResolveFault::Cancelled => return AppError::cancelled(),
             ResolveFault::Failed => "engine.xray.resolve.failed",
             ResolveFault::Sinkhole => "engine.xray.resolve.sinkhole",
+            ResolveFault::Poisoned => "engine.xray.resolve.poisoned",
         };
         AppError::msg(ErrorKind::Network, Msg::new(key)).with_source(err)
     }
 }
+
+/// One resolved host: its address and the warning that came with it.
+type Found = (IpAddr, Option<Msg>);
 
 /// An address a server may have. Private and CGNAT answers are fine (LAN / lab servers; Xray
 /// exempts private addresses from its TLS rule too), block-page answers are not, also when
@@ -168,18 +171,47 @@ pub async fn resolve_hosts(
     path: ResolvePath,
     cancel: &CancellationToken,
 ) -> Result<Resolved, ResolveFault> {
+    match path {
+        ResolvePath::Direct => {
+            let lookup = |host: String| async move { first(resolve_server(&host, dialable).await) };
+            resolve_all(hosts, lookup, cancel).await
+        }
+        ResolvePath::ViaSingBox(server) => {
+            let lookup = move |host: String| async move {
+                udp_lookup(server, &host).await.map(|ip| (ip, None))
+            };
+            resolve_all(hosts, lookup, cancel).await
+        }
+    }
+}
+
+/// The plan over any lookup: literals answered in place, at most [`PARALLEL`] lookups in
+/// flight, the first failure (or `cancel`) ends it.
+pub(super) async fn resolve_all<F, Fut>(
+    hosts: &[String],
+    lookup: F,
+    cancel: &CancellationToken,
+) -> Result<Resolved, ResolveFault>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Result<Found, ResolveFault>>,
+{
+    let lookup = &lookup;
     let lookups = stream::iter(hosts.iter().cloned())
         .map(|host| async move {
-            let (ip, bootstrap) = resolve_one(&host, path).await?;
-            Ok::<_, ResolveFault>((host, ip, bootstrap))
+            let found = match literal(&host) {
+                Some(found) => found?,
+                None => lookup(host.clone()).await?,
+            };
+            Ok::<_, ResolveFault>((host, found))
         })
         .buffer_unordered(PARALLEL)
         // The first failure drops the stream and with it every lookup still in flight.
         .try_fold(
             Resolved::default(),
-            |mut acc, (host, ip, bootstrap)| async move {
+            |mut acc, (host, (ip, warning))| async move {
                 acc.addrs.insert(host, ip);
-                acc.bootstrap_used |= bootstrap;
+                acc.warning = acc.warning.or(warning);
                 Ok(acc)
             },
         );
@@ -190,33 +222,29 @@ pub async fn resolve_hosts(
     }
 }
 
-/// One host: its address and whether the bootstrap resolver gave it.
-async fn resolve_one(host: &str, path: ResolvePath) -> Result<(IpAddr, bool), ResolveFault> {
-    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
-        return if dialable(ip) {
-            Ok((ip, false))
-        } else {
-            Err(ResolveFault::Sinkhole)
-        };
-    }
-    match path {
-        ResolvePath::ViaSingBox(server) => udp_lookup(server, host).await.map(|ip| (ip, false)),
-        ResolvePath::System { bootstrap } => match system_lookup(host).await {
-            Ok(ip) => Ok((ip, false)),
-            Err(first) => {
-                tracing::warn!(error = %first, "system DNS failed for an Xray server, asking the bootstrap resolver");
-                udp_lookup(bootstrap, host).await.map(|ip| (ip, true))
-            }
-        },
-    }
+/// An IP literal needs no lookup: dialable, or a sinkhole.
+fn literal(host: &str) -> Option<Result<Found, ResolveFault>> {
+    let ip = host.trim_matches(['[', ']']).parse::<IpAddr>().ok()?;
+    Some(if dialable(ip) {
+        Ok((ip, None))
+    } else {
+        Err(ResolveFault::Sinkhole)
+    })
 }
 
-async fn system_lookup(host: &str) -> Result<IpAddr, ResolveFault> {
-    let found = tokio::time::timeout(LOOKUP_TIMEOUT, resolve_host(host, How::System, dialable));
-    match found.await {
-        Ok(Ok(addrs)) => addrs.first().copied().ok_or(ResolveFault::Failed),
-        Ok(Err(ResolveError::Filtered)) => Err(ResolveFault::Sinkhole),
-        Ok(Err(_)) | Err(_) => Err(ResolveFault::Failed),
+/// The first address of a `resolve_server` answer, with its last-known warning.
+pub(super) fn first(found: Result<ServerAddrs, ResolveError>) -> Result<Found, ResolveFault> {
+    match found {
+        Ok(found) => {
+            let warning = found.warning();
+            let ip = found.addrs.first().copied().ok_or(ResolveFault::Failed)?;
+            Ok((ip, warning))
+        }
+        Err(ResolveError::Filtered) => Err(ResolveFault::Sinkhole),
+        Err(ResolveError::Poisoned) => Err(ResolveFault::Poisoned),
+        Err(ResolveError::InvalidName | ResolveError::NotFound | ResolveError::Failed) => {
+            Err(ResolveFault::Failed)
+        }
     }
 }
 
@@ -250,9 +278,11 @@ async fn exchange(server: SocketAddr, name: &str, qtype: u16) -> io::Result<Vec<
     let id = getrandom::u32().map_or(0x5a5a, |r| r as u16);
     let q = query(name, qtype, id)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a DNS name"))?;
+    // `dns-bootstrap-in` is a loopback inbound: a wildcard bind would make Windows Firewall
+    // ask the user about every build of the app.
     let local = match server {
-        SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
-        SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)),
+        SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
     };
     let sock = UdpSocket::bind(local).await?;
     sock.connect(server).await?;

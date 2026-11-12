@@ -15,7 +15,7 @@
       "defaultFingerprint": "The provider set no TLS fingerprint: the app default is used",
       "note": {
         "naiveInsecureIgnored": "Naive cannot skip certificate checks: the insecure option is kept but not applied",
-        "certPinNotEnforced": "The key pins the server certificate, but the engine cannot enforce the pin yet",
+        "certPinNotEnforced": "The key pins the server certificate: sing-box does not check the pin, Xray does",
         "alterIdNormalized": "alterId {{alterId}} was replaced with 0 (AEAD)",
         "fingerprintDroppedOnQuic": "The provider's TLS fingerprint does not apply to QUIC",
         "unsupportedField": "Unsupported option {{field}} was skipped",

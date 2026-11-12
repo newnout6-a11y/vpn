@@ -1,6 +1,6 @@
 //! Background tasks that turn the backend's subscriptions into pushed views (nothing is polled):
-//! settings and server-list changes, the tunnel's watches, the exit's country and network
-//! changes for the foreign-VPN scan. All stop with `backend.shutdown`.
+//! settings, protection and server-list changes, the tunnel's watches, the exit's country and
+//! network changes for the foreign-VPN scan. All stop with `backend.shutdown`.
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,10 +26,11 @@ pub(super) fn spawn(hub: &Arc<Hub>) {
     tokio::spawn(foreign_feed(hub.clone(), cancel));
 }
 
-/// Settings (mode, Smart RU, language, tray switch) and the server list.
+/// Settings (mode, Smart RU, language, tray switch), the server list and the saved protection.
 async fn app_feed(hub: Arc<Hub>, cancel: CancellationToken) {
     let mut settings = hub.backend.settings.subscribe();
     let mut servers = hub.backend.servers.subscribe();
+    let mut protection = hub.backend.protection.subscribe();
     loop {
         tokio::select! {
             () = cancel.cancelled() => return,
@@ -44,6 +45,15 @@ async fn app_feed(hub: Arc<Hub>, cancel: CancellationToken) {
                 Ok(_) | Err(RecvError::Lagged(_)) => hub.publish_servers(),
                 Err(RecvError::Closed) => return,
             },
+            // A saved kill-switch level, switch or exception (Settings, the setup wizard, a
+            // maintenance reset): the start page reads the kill switch back at once instead of
+            // at the next connect. The store saves after the effect, so the read sees it.
+            changed = protection.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                hub.refresh_firewall();
+            }
         }
     }
 }

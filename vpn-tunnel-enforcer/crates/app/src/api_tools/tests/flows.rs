@@ -269,6 +269,7 @@ fn session(profile: &str, generation: u64) -> Option<SessionView> {
         generation: Some(generation),
         adaptive: AdaptiveMode::Baseline,
         started_at: 1,
+        engine: None,
     })
 }
 

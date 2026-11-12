@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{AdaptiveMode, Engine, KillSwitchLevel, Owner, ProxyKind};
+use vpnte_base::types::{AdaptiveMode, KillSwitchLevel, Owner, ProxyKind};
 use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::ops::OpId;
 
@@ -14,8 +14,8 @@ use super::actor::Cmd;
 use super::session::SessionProfile;
 use super::{ConnError, LifecycleDeps, ServerChoice, key};
 use crate::api::{
-    CaptureKind, Mode, Origin, OwnerCheck, RestartOptions, StartRequest, StopOptions, StopReceipt,
-    SwitchOutcome, SwitchReceipt, TUN_SETUP_KEY_PREFIX, TunError, VpnProfile,
+    CaptureKind, EngineRun, Mode, Origin, OwnerCheck, RestartOptions, StartRequest, StopOptions,
+    StopReceipt, SwitchOutcome, SwitchReceipt, TUN_SETUP_KEY_PREFIX, TunError, VpnProfile,
 };
 use crate::history::SessionMode;
 use crate::outcome::{Evidence, OutcomeKind, SessionOutcome};
@@ -77,14 +77,14 @@ pub(super) enum Up {
         /// New engine run; `None` = the same run continues (in-place upstream switch).
         generation: Option<u64>,
         /// `None` = unchanged.
-        engine: Option<Engine>,
+        engine: Option<EngineRun>,
         adaptive: AdaptiveMode,
         warnings: Vec<Msg>,
     },
     /// The same profile on a new engine run (settings or adaptive restart).
     Restarted {
         generation: u64,
-        engine: Engine,
+        engine: EngineRun,
         /// New adaptive mode; `None` = unchanged.
         adaptive: Option<AdaptiveMode>,
         warnings: Vec<Msg>,

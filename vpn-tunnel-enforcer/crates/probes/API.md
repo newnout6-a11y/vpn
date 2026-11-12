@@ -140,7 +140,9 @@ Latency = socket creation to the full CONNECT reply, `max(1, round(ms))`. Egress
 pub const CONCURRENCY: usize /*5*/;  pub const BATCH_DEADLINE: Duration /*600 s*/;  pub const KEY_WAIT: Duration /*65 s*/;
 pub const PROXY_TAG /*"proxy-out"*/, DIRECT_TAG /*"probe-direct-out"*/, INBOUND_TAG /*"probe-in"*/: &str;
 pub enum HealthReason { NoOutbound, ConfigFailed, TlsFailed, AuthFailed, Timeout, HandshakeFailed,
-    Hy2ConfigFailed, Hy2AuthFailed, Hy2UdpBlocked, Hy2TlsFailed, Hy2HandshakeFailed }   // kebab-case; msg()
+    Hy2ConfigFailed, Hy2AuthFailed, Hy2UdpBlocked, Hy2TlsFailed, Hy2HandshakeFailed,
+    EngineSetting /* the engine setting refused the key: engine None, not-verified, no budget spent */ }
+                                                                     // kebab-case; msg()
 pub struct ProbeCtx { pub singbox_exe: PathBuf, pub xray_exe: PathBuf, pub engine_pref: EnginePref,
     pub device: ClientDevice, pub net: NetPath, pub dns_bootstrap_in: Option<SocketAddr> }
 pub struct KeyHealth { pub online: bool, pub at: UnixMs, pub rtt_ms: Option<u32>, pub reason: Option<HealthReason>,

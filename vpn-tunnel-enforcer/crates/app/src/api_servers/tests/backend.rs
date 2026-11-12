@@ -65,6 +65,7 @@ impl FakeTunnel {
             generation: Some(1),
             adaptive: Default::default(),
             started_at: 1,
+            engine: None,
         }));
         self.snapshot
             .send_modify(|s| s.state = TunnelState::Connected);

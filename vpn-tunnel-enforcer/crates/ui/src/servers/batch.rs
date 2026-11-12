@@ -364,6 +364,11 @@ fn Results(result: BatchResult, selected: Vec<String>, servers: Vec<ServerView>)
         .iter()
         .map(|c| (name_of(c), format!("{}:{}", c.host, c.port), (*c).clone()))
         .collect();
+    let deferred = result
+        .results
+        .iter()
+        .filter(|c| c.deferred.is_some())
+        .count();
     rsx! {
         div { class: "srv-batch",
             p { class: "srv-batch-summary",
@@ -401,7 +406,10 @@ fn Results(result: BatchResult, selected: Vec<String>, servers: Vec<ServerView>)
                                 {throughput_route_key(check.throughput.as_ref().and_then(|t| t.route), true).map_or_else(|| "—".to_owned(), |k| t!(k))}
                             }
                             Cell {
-                                Badge { tone: batch_label(&check).tone(), {t!(batch_label(&check).key())} }
+                                // A server whose budget left requests out says which on hover.
+                                Badge { tone: batch_label(&check).tone(), title: check.deferred.clone(),
+                                    {t!(batch_label(&check).key())}
+                                }
                             }
                         }
                     }
@@ -409,6 +417,9 @@ fn Results(result: BatchResult, selected: Vec<String>, servers: Vec<ServerView>)
             }
             if !result.errors.is_empty() {
                 p { class: "srv-detail-note is-alert", {t!("ui.servers.batch.errors", count = result.errors.len())} }
+            }
+            if deferred > 0 {
+                p { class: "srv-detail-note", {t!("ui.servers.batch.deferred", count = deferred)} }
             }
         }
     }

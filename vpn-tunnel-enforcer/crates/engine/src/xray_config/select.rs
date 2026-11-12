@@ -26,8 +26,8 @@ const XRAY_SS_METHODS: [&str; 9] = [
 pub enum SelectReason {
     /// Nothing asks for Xray: sing-box is the main engine.
     Default,
-    /// Xray has no outbound for the protocol (TUIC, Naive, AnyTLS, ShadowTLS) or for this form of
-    /// it (SOCKS over TLS, a stream transport under Hysteria2 / WireGuard / SOCKS / HTTP).
+    /// Xray has no outbound for the protocol or this form of it ([`XrayLacks`]); only under Auto
+    /// or forced sing-box (forced Xray refuses the profile).
     Protocol,
     /// The user forced this engine and the profile allows it.
     Preference,
@@ -72,6 +72,33 @@ pub enum SingBoxOnly {
     Plaintext,
 }
 
+impl SelectReason {
+    /// Short caption shown after the engine name («Xray · REALITY»), `engine.xray.reason.*`.
+    pub fn msg(self) -> Msg {
+        Msg::new(match self {
+            SelectReason::Default => "engine.xray.reason.default",
+            SelectReason::Protocol => "engine.xray.reason.protocol",
+            SelectReason::Preference => "engine.xray.reason.preference",
+            SelectReason::Reality => "engine.xray.reason.reality",
+            SelectReason::XrayTransport => "engine.xray.reason.xrayTransport",
+            SelectReason::NativeXray => "engine.xray.reason.nativeXray",
+            SelectReason::CertPin => "engine.xray.reason.certPin",
+            SelectReason::SingBoxOnly(_) => "engine.xray.reason.singBoxOnly",
+        })
+    }
+}
+
+/// What Xray lacks to run a profile; the name is the protocol as users know it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum XrayLacks {
+    /// No outbound at all (`unknown config id`): TUIC, NaiveProxy, AnyTLS, ShadowTLS.
+    Client(&'static str),
+    /// The protocol exists in Xray, not in this form: a stream transport under Hysteria2 /
+    /// WireGuard / SOCKS / HTTP, SOCKS over TLS.
+    Form(&'static str),
+}
+
 impl SingBoxOnly {
     /// Locale key suffix shared by the `singBoxOnly.*` and `conflict.*` messages.
     fn key(self) -> &'static str {
@@ -102,6 +129,9 @@ pub enum Reject {
     SingBoxOnly(SingBoxOnly),
     /// The profile needs Xray and also uses something Xray refuses.
     Conflict(SingBoxOnly),
+    /// Forced Xray for a protocol Xray cannot run: a refusal, never a silent sing-box start
+    /// (owner decision of 2026-11-11: both engines are first-class).
+    XrayLacks(XrayLacks),
 }
 
 impl Reject {
@@ -112,6 +142,12 @@ impl Reject {
             Reject::XrayTransport => Msg::new("engine.xray.reject.xrayTransport"),
             Reject::SingBoxOnly(f) => Msg::new(format!("engine.xray.singBoxOnly.{}", f.key())),
             Reject::Conflict(f) => Msg::new(format!("engine.xray.conflict.{}", f.key())),
+            Reject::XrayLacks(XrayLacks::Client(name)) => {
+                Msg::new("engine.xray.reject.noXrayClient").arg("protocol", *name)
+            }
+            Reject::XrayLacks(XrayLacks::Form(name)) => {
+                Msg::new("engine.xray.reject.xrayForm").arg("protocol", *name)
+            }
         }
     }
 }
@@ -154,8 +190,11 @@ pub fn select_engine(p: &Profile, pref: EnginePref) -> Decision {
             EnginePref::Auto | EnginePref::Xray => xray(SelectReason::NativeXray),
         };
     }
-    if !xray_protocol(p) {
-        return sing_box(SelectReason::Protocol);
+    if let Some(lacks) = xray_lacks(p) {
+        return match pref {
+            EnginePref::Xray => Decision::Rejected(Reject::XrayLacks(lacks)),
+            EnginePref::Auto | EnginePref::SingBox => sing_box(SelectReason::Protocol),
+        };
     }
     match (xray_only(p), singbox_only(p)) {
         (true, Some(f)) => return Decision::Rejected(Reject::Conflict(f)),
@@ -195,16 +234,38 @@ fn sing_box(reason: SelectReason) -> Decision {
     }
 }
 
-/// Kinds with an Xray outbound in the form `p` uses. TUIC, Naive, AnyTLS and ShadowTLS have none
-/// (`unknown config id`). A stream transport under Hysteria2 / WireGuard / SOCKS / HTTP is refused
-/// by sing-box too; SOCKS over TLS would send its UDP beside the TLS (Xray docs, transport.md).
+/// The preference for one server: its own override (sing-box / Xray) wins, its `Auto` follows
+/// the app setting. Tunnel, probes and proxy slots all apply it before [`select_engine`].
+pub fn server_pref(setting: EnginePref, server: EnginePref) -> EnginePref {
+    match server {
+        EnginePref::Auto => setting,
+        forced => forced,
+    }
+}
+
+/// Kinds with an Xray outbound in the form `p` uses.
 pub(super) fn xray_protocol(p: &Profile) -> bool {
+    xray_lacks(p).is_none()
+}
+
+/// What Xray lacks for `p`. TUIC, Naive, AnyTLS and ShadowTLS have no outbound (`unknown config
+/// id`). A stream transport under Hysteria2 / WireGuard / SOCKS / HTTP is refused by sing-box
+/// too; SOCKS over TLS would send its UDP beside the TLS (Xray docs, transport.md).
+fn xray_lacks(p: &Profile) -> Option<XrayLacks> {
+    let form = |name| p.transport.is_some().then_some(XrayLacks::Form(name));
     match &p.kind {
-        Kind::Vless { .. } | Kind::Vmess { .. } | Kind::Trojan { .. } => true,
-        Kind::Shadowsocks { shadowtls, .. } => shadowtls.is_none(),
-        Kind::Hysteria2 { .. } | Kind::Wireguard(_) | Kind::Http { .. } => p.transport.is_none(),
-        Kind::Socks { .. } => p.transport.is_none() && p.tls.is_none(),
-        Kind::Tuic { .. } | Kind::Naive { .. } | Kind::Anytls { .. } => false,
+        Kind::Vless { .. } | Kind::Vmess { .. } | Kind::Trojan { .. } => None,
+        Kind::Shadowsocks { shadowtls, .. } => shadowtls
+            .is_some()
+            .then_some(XrayLacks::Client("ShadowTLS")),
+        Kind::Hysteria2 { .. } => form("Hysteria2"),
+        Kind::Wireguard(_) => form("WireGuard"),
+        Kind::Http { .. } => form("HTTP"),
+        Kind::Socks { .. } if p.tls.is_some() => Some(XrayLacks::Form("SOCKS")),
+        Kind::Socks { .. } => form("SOCKS"),
+        Kind::Tuic { .. } => Some(XrayLacks::Client("TUIC")),
+        Kind::Naive { .. } => Some(XrayLacks::Client("NaiveProxy")),
+        Kind::Anytls { .. } => Some(XrayLacks::Client("AnyTLS")),
     }
 }
 

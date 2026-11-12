@@ -25,6 +25,7 @@ mod row;
 mod state;
 #[cfg(test)]
 mod tests;
+mod verdict;
 
 pub use api::{ServersApi, use_servers_api};
 pub use demo::{DemoScene, DemoServersApi};
@@ -33,7 +34,7 @@ pub use model::*;
 pub use page::ServersPage;
 pub use present::{
     BucketKind, DEVICES, GroupBucket, PingState, RowSignal, Unusable, buckets, default_fingerprint,
-    device_label, displayed_ping, happ_type, is_deleted, is_removed_from_subscription,
+    device_label, displayed_ping, engine_name, happ_type, is_deleted, is_removed_from_subscription,
     protocol_sections, proxy_ready, relative_time, row_signal, sort_groups, stealth_badge,
     unusable,
 };

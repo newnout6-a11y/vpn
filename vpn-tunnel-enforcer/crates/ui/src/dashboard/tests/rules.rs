@@ -330,3 +330,24 @@ fn ruler_cells_are_numbered_from_01() {
     assert_eq!(labels.last().map(String::as_str), Some("10"));
     assert_eq!(labels.len(), 10);
 }
+
+/// ENGINE-GAPS decision 2: the identity column names the running engine and, when a choice was
+/// made, why («Xray · REALITY»); a local upstream proxy shows the engine alone.
+#[test]
+fn engine_caption_names_engine_and_reason() {
+    use vpnte_base::types::Engine;
+    let xray = EngineLine {
+        engine: Engine::Xray,
+        reason: Some(Msg::new("engine.xray.reason.reality")),
+    };
+    assert_eq!(
+        engine_caption(&xray, Some("REALITY".into())),
+        "Xray · REALITY"
+    );
+    let local = EngineLine {
+        engine: Engine::SingBox,
+        reason: None,
+    };
+    assert_eq!(engine_caption(&local, None), "sing-box");
+    assert_eq!(engine_caption(&local, Some(String::new())), "sing-box");
+}

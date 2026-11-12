@@ -206,11 +206,13 @@ impl Hub {
             Some(w) => {
                 let snap = w.snapshot.borrow();
                 let clock = local.clock_for(&snap);
-                let conn = project::conn_view(&snap, &w.status.borrow(), &local.conn, &clock);
+                let status = w.status.borrow();
+                let conn = project::conn_view(&snap, &status, &local.conn, &clock);
                 let (exit, exit_country) =
                     project::exit_ip(&snap, &w.evidence.borrow(), local.geo, prefs.lang);
                 DashboardView {
                     foreign_vpn: project::foreign_vpn(&conn, local.foreign.as_deref()),
+                    engine: project::engine_line(&status),
                     conn,
                     exit,
                     exit_country,

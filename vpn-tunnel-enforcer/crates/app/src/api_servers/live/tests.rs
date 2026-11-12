@@ -112,6 +112,43 @@ fn a_stored_row_becomes_the_page_receipt() {
     assert_eq!(f.detail.key, "probes.live.finding.x.detail");
 }
 
+/// The requests the server's handshake budget left out are named on their own line of the
+/// receipt (not as handshake evidence), wherever the probes put the note; an egress without a
+/// single reflector row then reads as skipped, never as a failed server.
+#[test]
+fn budget_deferred_requests_are_named_in_the_receipt() {
+    use vpnte_probes::live::{EgressStatus, HandshakeStatus, MediaStatus, MediaStream};
+    let note = Msg::new("probes.discipline.liveDeferred").arg("count", 2);
+    let named = Some(note.render(Lang::En));
+
+    let mut row = stored();
+    let hs = row.handshake.as_mut().expect("handshake");
+    hs.status = HandshakeStatus::Skipped;
+    hs.note = Some(Text::Msg(note.clone()));
+    let egress = row.egress.as_mut().expect("egress");
+    egress.reflectors.clear();
+    egress.status = EgressStatus::Error;
+    let c = live_view::check(&row, Lang::En);
+    assert_eq!(c.deferred, named);
+    assert_eq!(c.handshake.expect("handshake").evidence, None);
+    assert_eq!(c.egress.expect("egress").status, ui::StageStatus::Skipped);
+
+    // Only the media box carries it (no media request was made): still named; the reflectors
+    // that were dialled keep their own status.
+    let mut row = stored();
+    row.media_stream = Some(MediaStream {
+        status: MediaStatus::Skipped,
+        detail: Some(Text::Msg(note)),
+        ..MediaStream::default()
+    });
+    let c = live_view::check(&row, Lang::En);
+    assert_eq!(c.deferred, named);
+    assert_eq!(c.egress.expect("egress").status, ui::StageStatus::Warning);
+
+    // No note, no claim.
+    assert_eq!(live_view::check(&stored(), Lang::En).deferred, None);
+}
+
 fn item(state: ItemState, stages: &[(StageId, ProgressStatus)]) -> ItemProgress {
     let mut item = ItemProgress {
         profile_id: Some("srv-1".into()),

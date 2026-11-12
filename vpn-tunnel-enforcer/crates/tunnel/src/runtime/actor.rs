@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{Engine, UnixMs};
+use vpnte_base::types::UnixMs;
 use vpnte_engine::clash_api::ClashEndpoint;
 use vpnte_engine::singbox_config::Listeners;
 use vpnte_engine::singbox_process::ExitInfo as EngineExit;
@@ -22,7 +22,7 @@ use super::capture::{Capture, CaptureCheck, CapturePlan, CaptureProof};
 use super::engines::{CoreProc, Slots};
 use super::handle::{Cmd, Shared};
 use crate::api::{
-    CaptureKind, SessionEndpoints, StartRequest, StopOptions, StopReceipt, TunStatus,
+    CaptureKind, EngineRun, SessionEndpoints, StartRequest, StopOptions, StopReceipt, TunStatus,
     TunStatusKind, TunWarning, TunnelEvent,
 };
 
@@ -54,7 +54,8 @@ pub(super) struct Session {
     pub clash: ClashEndpoint,
     pub listeners: Listeners,
     pub compat: [u8; 32],
-    pub engine: Engine,
+    /// The upstream's engine and why (an in-place switch updates it).
+    pub engine: EngineRun,
     pub started_at: UnixMs,
     pub endpoints: SessionEndpoints,
     /// Cancels this session's watchdog tasks.

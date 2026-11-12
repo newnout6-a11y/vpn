@@ -120,16 +120,25 @@ impl Actions {
             let result = api.check_group_health(&id).await;
             store.group_busy(&id, |b| b.health = false);
             match result {
-                Ok(results) => {
-                    let alive = results.iter().filter(|(_, h)| h.online).count();
-                    let total = results.len();
-                    for (sid, health) in results {
+                Ok(report) => {
+                    let alive = report.results.iter().filter(|(_, h)| h.online).count();
+                    let total = report.results.len();
+                    for (sid, health) in report.results {
                         store.row(&sid, |r| r.health = Some(health));
                     }
-                    let body = translate_now(
+                    let mut body = translate_now(
                         "servers.health.aliveCount",
                         &[("count", alive.to_string()), ("total", total.to_string())],
                     );
+                    // Keys left unchecked are named, never folded into the total as if checked.
+                    if report.not_checked > 0 {
+                        let count = report.not_checked.to_string();
+                        body.push_str(". ");
+                        body.push_str(&translate_now(
+                            "ui.servers.verdict.notChecked",
+                            &[("count", count)],
+                        ));
+                    }
                     toasts.info(name, Some(body));
                 }
                 Err(err) => toast_error(toasts, name, &err),

@@ -28,7 +28,8 @@
         "hy2AuthFailed": "Пароль Hysteria2 отклонён сервером",
         "hy2UdpBlocked": "UDP/QUIC для Hysteria2 недоступен",
         "hy2TlsFailed": "TLS Hysteria2 не прошёл",
-        "hy2HandshakeFailed": "Hysteria2 не установил соединение"
+        "hy2HandshakeFailed": "Hysteria2 не установил соединение",
+        "engineSetting": "Не проверен: выбранный движок не запускает этот ключ — смените движок сервера или выберите «Авто»"
       }
     }
   }

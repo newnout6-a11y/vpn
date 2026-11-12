@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
-use vpnte_base::types::{ClientDevice, UnixMs};
+use vpnte_base::types::{ClientDevice, EnginePref, UnixMs};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::secret::{Secret, SecretError};
 use vpnte_profiles::countries::{self, Iso2};
@@ -122,6 +122,8 @@ pub enum HealthReason {
     Hy2UdpBlocked,
     Hy2TlsFailed,
     Hy2HandshakeFailed,
+    /// Not a key fault: the engine setting (the app's or the row's own) does not run the key.
+    EngineSetting,
 }
 
 /// What the probes' classifier concluded about a server (`vpnte_probes::discipline::Verdict`,
@@ -188,6 +190,10 @@ pub struct ServerRow {
     /// Client device: a feed row follows its group, a manual row has its own (uTLS default, S-12b).
     #[serde(default)]
     pub device: ClientDevice,
+    /// The server's own engine: sing-box / Xray win over the setting, `Auto` follows it. Kept
+    /// across subscription refreshes (the row stays, only its profile changes).
+    #[serde(default, skip_serializing_if = "is_auto")]
+    pub engine: EnginePref,
     /// The typed [`Profile`] as JSON, DPAPI-sealed on disk.
     pub profile: Secret,
     pub imported_at: UnixMs,
@@ -226,6 +232,7 @@ impl ServerRow {
             server: String::new(),
             port: 0,
             device,
+            engine: EnginePref::Auto,
             profile: Secret::new(String::new()),
             imported_at: now,
             last_seen_at: None,
@@ -294,4 +301,9 @@ fn profile_error(err: SecretError) -> AppError {
             AppError::msg(ErrorKind::Internal, Msg::new("servers.unreadable")).with_source(other)
         }
     }
+}
+
+/// Rows without their own engine keep the old file shape.
+fn is_auto(engine: &EnginePref) -> bool {
+    *engine == EnginePref::Auto
 }

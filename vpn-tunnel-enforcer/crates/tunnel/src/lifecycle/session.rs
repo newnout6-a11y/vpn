@@ -1,11 +1,11 @@
 //! The live session and the history rows that end it (lifecycle-app §3.5).
 use std::time::Instant;
 
-use vpnte_base::types::{AdaptiveMode, Engine, Owner, ProxyKind, UnixMs, now_ms};
+use vpnte_base::types::{AdaptiveMode, Owner, ProxyKind, UnixMs, now_ms};
 use vpnte_core::ops::{CorrelationId, Source};
 
 use super::SessionView;
-use crate::api::VpnProfile;
+use crate::api::{EngineRun, VpnProfile};
 use crate::history::{History, NewEntry, Route, SessionMode};
 use crate::outcome::{AdaptiveContext, Evidence, NetworkTransition, SessionOutcome};
 
@@ -96,7 +96,8 @@ pub(super) struct LiveSession {
     pub started: Instant,
     pub generation: Option<u64>,
     pub adaptive: AdaptiveMode,
-    pub engine: Option<Engine>,
+    /// The engine of the current run and why it was chosen.
+    pub engine: Option<EngineRun>,
     /// Server country (egress evidence).
     pub country: Option<String>,
     pub leak_detected: bool,
@@ -135,6 +136,7 @@ impl LiveSession {
             generation: self.generation,
             adaptive: self.adaptive,
             started_at: self.started_at,
+            engine: self.engine,
         }
     }
 
@@ -147,7 +149,7 @@ impl LiveSession {
         Evidence {
             egress_ip,
             egress_country: self.country.clone(),
-            proxy_engine: self.engine,
+            proxy_engine: self.engine.map(|run| run.kind),
             ..Evidence::default()
         }
     }

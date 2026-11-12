@@ -25,7 +25,8 @@ struct Servers { /* the app's server list, settings, probes */ }
 impl ProfileSource for Servers {
     fn profiles(&self) -> Vec<ProxyProfile> { /* every server, list order */ }
     fn active_vpn_profile_id(&self) -> Option<String> { /* the main tunnel's server */ }
-    fn engine_choice(&self) -> EngineChoice { /* settings: EnginePref + ClientDevice */ }
+    fn engine_choice(&self) -> EngineChoice { /* settings: EnginePref + default ClientDevice; a */
+        /* ProxyProfile's own `engine` / `device` win: EngineChoice::for_profile */ }
     async fn check_group_health(&self, group_id: &str) -> vpnte_base::AppResult<GroupHealth> { /* probes */ }
 }
 
@@ -86,13 +87,15 @@ pub fn derive_readiness(instances: &mut [InstanceStatus], now: UnixMs);  // sets
 
 ```rust
 pub enum ProxyError { BadRequest(String) /*400*/, Forbidden(String) /*403*/, NotFound(String) /*404*/,
-    Conflict(String) /*409*/, Unavailable(String) /*503*/, Upstream(u16, String) /*status*/, Engine(String) /*500*/ }
+    Conflict(String) /*409*/, Unavailable(String) /*503*/, Upstream(u16, String) /*status*/, Engine(String) /*500*/,
+    Refused(Msg) /*422: the engine setting cannot run the profile; wire detail fixed English*/ }
 impl ProxyError {
     pub fn http_status(&self) -> u16;  pub fn code(&self) -> &'static str; // "conflict" | "forbidden" | "external-proxy-error"
     pub fn detail(&self) -> &str;
     pub fn group_health(kind: ErrorKind) -> Self;   // old /profiles/healthcheck mapping, generic Russian wire texts
 }
-impl From<ProxyError> for AppError;   // Msg `proxies.error.<kind>` {detail}; kind 400/403/404 Validation,
+impl From<ProxyError> for AppError;   // Msg `proxies.error.<kind>` {detail} (Refused: its own engine Msg);
+                                      // kind 400/403/404/422 Validation,
                                       // 409/503 Conflict, 502 Network, 504 Timeout, else Internal
 ```
 
@@ -283,11 +286,14 @@ pub fn ms(d: Duration) -> UnixMs;
 ```rust
 pub struct ProxyProfile { pub id: String, pub name: String, pub country: Option<String> /* ISO, name or flag */,
     pub group_id: Option<String>, pub profile: vpnte_profiles::model::Profile,
+    pub device: Option<ClientDevice> /* own; None = EngineChoice::device */,
+    pub engine: EnginePref /* own; Auto = EngineChoice::pref */,
     pub status: ServerStatus /* healthStatus, else ping status */, pub ping_ms: Option<u32>,
     pub health_latency_ms: Option<u32>, pub health_reason: Option<String>, pub last_checked_at: Option<UnixMs>,
     pub enabled: bool, pub removed: bool /* gone from its subscription */ }
 impl ProxyProfile { pub fn usable(&self) -> bool }                 // enabled && !removed
 pub struct EngineChoice { pub pref: EnginePref, pub device: ClientDevice }   // Default
+impl EngineChoice { pub fn for_profile(self, p: &ProxyProfile) -> EngineChoice }  // the server's own win
 #[async_trait::async_trait]
 pub trait ProfileSource: Send + Sync {
     fn profiles(&self) -> Vec<ProxyProfile>;
@@ -311,8 +317,10 @@ pub fn health_msg(health: Health) -> Msg;             // proxies.health.<state>
 ```
 
 Behaviour: one sing-box per slot, config over stdin, ready when the slot port accepts within 5 s (no
-`sing-box check`); every upstream host name is resolved by the app (OS 2.5 s, then DoH 6 s, IPv4 first,
-block-page answers refused, cached 5 min) and pinned; profiles the main tunnel would run on Xray get a per-slot
+`sing-box check`); every upstream host name is resolved by the app with
+`vpnte_core::resolve::resolve_server` (direct DoH / TCP chain, then the OS resolver, then the name's last
+known address, which is logged and not cached; IPv4 first, block-page answers refused, live answers cached
+5 min) and pinned; profiles the main tunnel would run on Xray get a per-slot
 Xray child behind a SOCKS5 bridge (either child exiting fails the slot); engine selection =
 `vpnte_engine::xray_config::select_engine(profile, pref)` like the main tunnel. Probes: first right after
 readiness (+ slot%5 × 100 ms), then every ~45 s; `Transport` failures retry after 15/30/60 s and the 4th

@@ -5,7 +5,6 @@
 //! Xray profiles run as a chain: the slot's sing-box forwards over SOCKS5 to a per-slot Xray
 //! child on an ephemeral loopback port; either child exiting fails the slot.
 use std::collections::HashMap;
-use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,7 +15,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::Engine as EngineKind;
 use vpnte_core::net;
-use vpnte_core::resolve::{How, resolve_host};
+use vpnte_core::resolve::{ResolveError, ServerAddrs, resolve_server};
 use vpnte_core::socks5::{self, SocksError};
 use vpnte_engine::singbox_process::{ExitInfo, SingBoxProcess};
 use vpnte_engine::slot::{Slot as XraySlot, SlotEndpoint};
@@ -35,10 +34,6 @@ pub(super) const READY_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long a resolved endpoint stays pinned (old `ENDPOINT_RESOLUTION_TTL_MS`).
 const RESOLVE_TTL: Duration = Duration::from_secs(300);
-/// OS resolver deadline (old `ENDPOINT_RESOLUTION_TIMEOUT_MS`).
-const OS_TIMEOUT: Duration = Duration::from_millis(2_500);
-/// DNS-over-HTTPS deadline, both servers together.
-const DOH_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Everything a start needs, prepared before the slot's old engine is stopped. No `Debug`: the
 /// configs carry server credentials.
@@ -65,12 +60,7 @@ pub(super) async fn prepare(
 ) -> Result<Plan, ProxyError> {
     let engine = select_engine(profile, choice.pref)
         .engine()
-        .map_err(|reject| {
-            ProxyError::Engine(format!(
-                "the profile cannot run with the current engine setting ({})",
-                reject.msg().key
-            ))
-        })?;
+        .map_err(|reject| ProxyError::Refused(reject.msg()))?;
     if engine == EngineKind::SingBox {
         let policy = EmitPolicy {
             device: Some(choice.device),
@@ -113,9 +103,11 @@ pub(super) async fn prepare(
     })
 }
 
-/// Endpoint names resolved by the app, cached for five minutes. The OS resolver goes first (it
-/// follows the system DNS, through the main tunnel when that is up), then DNS-over-HTTPS; a
-/// censored network's poisoned plaintext answer is never asked from the engine.
+/// Endpoint names resolved by the app, cached for five minutes, in the order of
+/// `vpnte_core::resolve::resolve_server`: the direct DoH / TCP chain that sees through the
+/// Russian DNS blocking (through the main tunnel when that is up), the OS resolver, then the
+/// address the name had last time. A censored network's poisoned plaintext answer is never
+/// asked from the engine.
 #[derive(Default)]
 pub(super) struct Names {
     cache: Mutex<HashMap<String, (IpAddr, Instant)>>,
@@ -131,19 +123,15 @@ impl Names {
         {
             return Ok(ip);
         }
-        let ip = resolve_with(&key, |how| lookup(&key, how)).await?;
-        self.cache.lock().insert(key, (ip, Instant::now()));
+        let found = resolve_server(&key, dialable).await;
+        // A bridged answer is not cached: the next start asks the live resolvers again.
+        let live = found.as_ref().is_ok_and(|f| !f.last_known);
+        let ip = pick(&key, found)?;
+        if live {
+            self.cache.lock().insert(key, (ip, Instant::now()));
+        }
         Ok(ip)
     }
-}
-
-async fn lookup(host: &str, how: How) -> Option<Vec<IpAddr>> {
-    let limit = match how {
-        How::System => OS_TIMEOUT,
-        How::Doh => DOH_TIMEOUT,
-    };
-    let answer = tokio::time::timeout(limit, resolve_host(host, how, dialable)).await;
-    answer.ok()?.ok()
 }
 
 /// Block-page answers (loopback, `0.0.0.0/8`, link-local, multicast, broadcast) are not
@@ -157,28 +145,22 @@ fn dialable(ip: IpAddr) -> bool {
     !(special || ip.is_multicast() || net::is_loopback(ip) || net::is_link_local(ip))
 }
 
-/// Tries the OS resolver, then DoH; the preferred address (IPv4 first) of the first answer.
-pub(super) async fn resolve_with<F, Fut>(host: &str, lookup: F) -> Result<IpAddr, ProxyError>
-where
-    F: Fn(How) -> Fut,
-    Fut: Future<Output = Option<Vec<IpAddr>>>,
-{
-    if let Some(ip) = lookup(How::System)
-        .await
-        .and_then(|a| config::preferred_address(&a))
-    {
-        tracing::debug!(via = "os", "resolved proxy endpoint");
-        return Ok(ip);
+/// The address to dial from a `resolve_server` answer (IPv4 preferred). The slot API has no
+/// channel for a non-fatal warning, so a last known address is logged, never silent.
+pub(super) fn pick(
+    host: &str,
+    found: Result<ServerAddrs, ResolveError>,
+) -> Result<IpAddr, ProxyError> {
+    match found {
+        Ok(found) => {
+            if found.last_known {
+                tracing::warn!("proxy endpoint unresolvable; dialing its last known address");
+            }
+            config::preferred_address(&found.addrs)
+                .ok_or_else(|| ProxyError::Engine(format!("cannot resolve {host}")))
+        }
+        Err(err) => Err(ProxyError::Engine(format!("cannot resolve {host}: {err}"))),
     }
-    tracing::warn!("system DNS could not resolve a proxy endpoint; trying DNS-over-HTTPS");
-    if let Some(ip) = lookup(How::Doh)
-        .await
-        .and_then(|a| config::preferred_address(&a))
-    {
-        tracing::debug!(via = "doh", "resolved proxy endpoint");
-        return Ok(ip);
-    }
-    Err(ProxyError::Engine(format!("cannot resolve {host}")))
 }
 
 /// How a slot engine ended.

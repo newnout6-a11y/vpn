@@ -3,6 +3,7 @@
 //! and the [`TunnelOps`] the API packages call (`ops.rs`). Privileged parts (TUN capture, WFP)
 //! exist only when the process itself is elevated (NOADMIN §0); everything else runs unelevated.
 mod decide;
+mod gate;
 mod guard;
 mod inputs;
 mod leaks;
@@ -59,11 +60,15 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
     // detector reads it so a scan can never pick our own inbound as the upstream.
     let proxy_capture = Arc::new(ProxyCapture::new());
     let runtime = TunnelHandle::spawn(RuntimeDeps {
-        engines: Arc::new(RealEngines::new(
-            b.engines.singbox.clone(),
-            b.engines.xray.clone(),
-            Some(b.dirs.logs.clone()),
-        )),
+        // The slot egress probe takes a slot of the handshake budget every check shares.
+        engines: Arc::new(
+            RealEngines::new(
+                b.engines.singbox.clone(),
+                b.engines.xray.clone(),
+                Some(b.dirs.logs.clone()),
+            )
+            .with_gate(Arc::new(gate::BudgetGate)),
+        ),
         // No TUN without the protection, i.e. without elevation: a Hard start answers
         // `Permission` up front instead of failing halfway (tunnel API, privilege model).
         tun: guard
@@ -107,6 +112,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>> {
     ));
     ip.ip
         .set_interval(decide::check_interval(&b.settings.snapshot()));
+    ip.spawn_home_reads(b.geo.clone(), b.shutdown.child_token());
     let domains = Arc::new(HistoryService::open(
         Arc::new(Store::<DomainsDoc>::open(&b.dirs.root)),
         None,

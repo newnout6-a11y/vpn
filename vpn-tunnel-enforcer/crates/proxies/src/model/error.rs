@@ -26,7 +26,14 @@ pub enum ProxyError {
     /// 500: engine spawn, readiness or endpoint resolution failed.
     #[error("{0}")]
     Engine(String),
+    /// 422: the engine setting (the app's or the server's own) cannot run the profile; the UI
+    /// gets the selection's own sentence (`engine.xray.*`), the wire a fixed English detail.
+    #[error("{REFUSED_DETAIL}")]
+    Refused(Msg),
 }
+
+/// Wire `detail` of [`ProxyError::Refused`] (control API clients match on English texts).
+const REFUSED_DETAIL: &str = "the profile cannot run with the selected engine";
 
 impl ProxyError {
     /// HTTP status of the control API response.
@@ -39,6 +46,7 @@ impl ProxyError {
             ProxyError::Unavailable(_) => 503,
             ProxyError::Upstream(status, _) => *status,
             ProxyError::Engine(_) => 500,
+            ProxyError::Refused(_) => 422,
         }
     }
 
@@ -61,6 +69,7 @@ impl ProxyError {
             | ProxyError::Unavailable(d)
             | ProxyError::Upstream(_, d)
             | ProxyError::Engine(d) => d,
+            ProxyError::Refused(_) => REFUSED_DETAIL,
         }
     }
 
@@ -83,7 +92,7 @@ impl ProxyError {
 
     fn app_kind(&self) -> ErrorKind {
         match self.http_status() {
-            400 | 403 | 404 => ErrorKind::Validation,
+            400 | 403 | 404 | 422 => ErrorKind::Validation,
             409 | 503 => ErrorKind::Conflict,
             502 => ErrorKind::Network,
             504 => ErrorKind::Timeout,
@@ -91,8 +100,10 @@ impl ProxyError {
         }
     }
 
-    fn i18n_key(&self) -> &'static str {
-        match self {
+    /// The UI's sentence: the category's text with the wire detail, or the engine's own refusal.
+    fn user_msg(&self) -> Msg {
+        let key = match self {
+            ProxyError::Refused(msg) => return msg.clone(),
             ProxyError::BadRequest(_) => "proxies.error.badRequest",
             ProxyError::Forbidden(_) => "proxies.error.forbidden",
             ProxyError::NotFound(_) => "proxies.error.notFound",
@@ -100,15 +111,17 @@ impl ProxyError {
             ProxyError::Unavailable(_) => "proxies.error.unavailable",
             ProxyError::Upstream(..) => "proxies.error.upstream",
             ProxyError::Engine(_) => "proxies.error.engine",
-        }
+        };
+        Msg::new(key).arg("detail", self.detail())
     }
 }
 
 /// For the UI: a localized sentence per category with the wire text as `{{detail}}` (the old
-/// card showed the same backend text under its own headline).
+/// card showed the same backend text under its own headline); an engine refusal is its own
+/// sentence.
 impl From<ProxyError> for AppError {
     fn from(err: ProxyError) -> Self {
-        let msg = Msg::new(err.i18n_key()).arg("detail", err.detail());
+        let msg = err.user_msg();
         AppError::msg(err.app_kind(), msg).with_source(err)
     }
 }
@@ -173,5 +186,22 @@ mod tests {
         let app: AppError = ProxyError::Engine("x".into()).into();
         assert_eq!(app.kind, ErrorKind::Internal);
         assert_eq!(ProxyError::Upstream(504, "t".into()).to_string(), "t");
+    }
+
+    /// An engine refusal reaches the UI as the selection's own sentence with kind Validation,
+    /// never as English text with a raw key; the wire keeps a fixed English detail.
+    #[test]
+    fn engine_refusal_keeps_its_message() {
+        let msg = Msg::new("engine.xray.reject.noXrayClient").arg("protocol", "TUIC");
+        let err = ProxyError::Refused(msg.clone());
+        assert_eq!(
+            (err.http_status(), err.code()),
+            (422, "external-proxy-error")
+        );
+        assert_eq!(err.detail(), REFUSED_DETAIL);
+        assert!(!err.to_string().contains("engine.xray"));
+        let app: AppError = err.into();
+        assert_eq!(app.kind, ErrorKind::Validation);
+        assert_eq!(app.user_msg(), msg);
     }
 }

@@ -12,9 +12,9 @@ use vpnte_view::labels::{
 use vpnte_view::mascot::MascotEvent;
 use vpnte_view::swiss::{self, OpWindow, RULER_CELLS, SwissInput};
 
-use super::Dash;
 use super::icons::{ArrowRight, Spinner, Square};
-use super::model::{Hold, NodeLine, cell_label, node_line};
+use super::model::{Hold, NodeLine, cell_label, engine_caption, node_line};
+use super::{Dash, EngineLine};
 use crate::lang::tr;
 use crate::mascot::MascotHost;
 use crate::pages::use_page_active;
@@ -152,7 +152,7 @@ fn Side(servers: Signal<ServersView>, local_pings: Signal<LocalPings>) -> Elemen
             div { class: "swiss-identity",
                 ExitBlock { line: exit, country: view.exit_country.clone() }
                 RealBlock { line: real }
-                NodeBlock { node }
+                NodeBlock { node, engine: view.engine.clone() }
             }
             if confirm_open || cancel.is_some() {
                 div { class: "swiss-transient",
@@ -257,9 +257,14 @@ fn RealBlock(line: RealLine) -> Element {
     }
 }
 
-/// «Узел»: the active server with its flag, protocol and ping.
+/// «Узел»: the active server with its flag, protocol and ping, and the engine that carries the
+/// running session (a quiet mono caption: the choice is never hidden).
 #[component]
-fn NodeBlock(node: Option<NodeLine>) -> Element {
+fn NodeBlock(node: Option<NodeLine>, engine: Option<EngineLine>) -> Element {
+    let engine = engine.map(|line| {
+        let reason = line.reason.as_ref().map(tr);
+        engine_caption(&line, reason)
+    });
     rsx! {
         div {
             div { class: "swiss-label", {t!("dashboard.swissNode")} }
@@ -273,6 +278,9 @@ fn NodeBlock(node: Option<NodeLine>) -> Element {
                 div { class: "swiss-sub", {tr(&node.meta)} }
             } else {
                 div { class: "swiss-node is-dim", {t!("dashboard.swissNoServer")} }
+            }
+            if let Some(caption) = engine {
+                div { class: "swiss-sub", "data-engine": "", title: t!("ui.dashboard.engineTitle"), "{caption}" }
             }
         }
     }

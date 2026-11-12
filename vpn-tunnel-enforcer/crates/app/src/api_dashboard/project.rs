@@ -14,6 +14,7 @@ use vpnte_servers::model::ServerSummary;
 use vpnte_tunnel::api::TunStatus;
 use vpnte_tunnel::fsm::{self, Health, ProcessState, TunnelMode, TunnelSnapshot};
 use vpnte_tunnel::runtime::MAX_RESTARTS;
+use vpnte_ui::dashboard::EngineLine;
 use vpnte_ui::panels::ServerRowView;
 use vpnte_ui::tray;
 use vpnte_view::identity::{ExitIp, Geo, ServerHealth};
@@ -127,6 +128,16 @@ pub(super) fn tun_running(snap: &TunnelSnapshot) -> bool {
 /// locally, and while ours runs the competing-TUN banner speaks instead.
 pub(super) fn foreign_vpn(conn: &ConnView, found: Option<&str>) -> Option<String> {
     found.filter(|_| !conn.tun_running()).map(str::to_owned)
+}
+
+/// The engine of the running session and why it was chosen, for the identity column (nothing
+/// while no engine runs: the caption never outlives the session).
+pub(super) fn engine_line(status: &TunStatus) -> Option<EngineLine> {
+    let run = status.engine.filter(|_| status.running)?;
+    Some(EngineLine {
+        engine: run.kind,
+        reason: run.reason.map(|reason| reason.msg()),
+    })
 }
 
 /// The exit address from the IP monitor, plus the country of `geo` when it was looked up for

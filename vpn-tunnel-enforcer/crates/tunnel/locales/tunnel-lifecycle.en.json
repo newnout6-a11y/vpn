@@ -24,12 +24,12 @@
         "unavailable": "The selected server is not in the server list. Refresh the subscription or pick another server in “Servers”."
       },
       "soft": {
-        "rollbackBeforeStart": "Could not turn Soft mode off before starting the tunnel",
-        "applyFailed": "Could not apply the Soft proxy settings",
+        "rollbackBeforeStart": "Could not turn Proxy mode off before starting the tunnel",
+        "applyFailed": "Could not apply the Proxy mode settings",
         "envRollbackFailed": "Could not restore the proxy settings. Retry the network restore."
       },
       "outcome": {
-        "softModeSwitch": "Soft protection was turned off before another mode started",
+        "softModeSwitch": "Proxy mode was turned off before another mode started",
         "cancelled": "The connection was cancelled",
         "timeout": "Protection start timed out — the connection was stopped",
         "preempted": "The connection was interrupted by a higher-priority operation",

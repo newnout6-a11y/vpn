@@ -1,7 +1,6 @@
 //! The temporary probe engine: sing-box (config on stdin, authenticated mixed inbound) or Xray
 //! (the engine crate's slot launcher), readiness of the local SOCKS port raced with the
 //! engine's exit, output for the classifier, and a guaranteed stop.
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
@@ -10,7 +9,6 @@ use vpnte_base::AppError;
 use vpnte_base::types::Loopback;
 use vpnte_core::socks5::{self, SocksError};
 use vpnte_engine::ports;
-use vpnte_engine::singbox_config::bootstrap_resolver;
 use vpnte_engine::singbox_process::{ExitInfo, STOP_TIMEOUT, SingBoxProcess, StartError};
 use vpnte_engine::slot::{Slot, SlotEndpoint};
 use vpnte_engine::xray_config::{
@@ -178,9 +176,9 @@ fn readiness_text(err: SocksError) -> &'static str {
 
 /// Starts Xray (selection already chose it) for `p`: provider graph or translated profile, names
 /// resolved by the app (through the running sing-box's bootstrap DNS listener while our TUN
-/// runs, else the OS resolver with a direct retry), then the engine crate's slot launcher with
-/// its authenticated readiness. Xray's own dials are routed `direct-out` by the tunnel's
-/// process-path rule for the Xray executable.
+/// runs, else directly: the DoH / TCP chain, the OS resolver, the last known address), then
+/// the engine crate's slot launcher with its authenticated readiness. Xray's own dials are
+/// routed `direct-out` by the tunnel's process-path rule for the Xray executable.
 pub(crate) async fn start_xray(
     p: &Profile,
     ctx: &ProbeCtx,
@@ -193,9 +191,7 @@ pub(crate) async fn start_xray(
     if !hosts.is_empty() {
         let path = match ctx.dns_bootstrap_in {
             Some(addr) if ctx.net.tunnel_running() => ResolvePath::ViaSingBox(addr),
-            _ => ResolvePath::System {
-                bootstrap: direct_resolver().await,
-            },
+            _ => ResolvePath::Direct,
         };
         match resolve_hosts(&hosts, path, cancel).await {
             Ok(resolved) => graph.substitute(&resolved.addrs),
@@ -242,16 +238,6 @@ pub(crate) async fn start_xray(
             Err(err) => Err(err.into()),
         };
     }
-}
-
-/// The physical adapters' resolver for the OS-resolver retry (1.1.1.1 when none is usable).
-async fn direct_resolver() -> SocketAddr {
-    let dns = tokio::task::spawn_blocking(vpnte_winnet::adapters::physical_dns_v4)
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default();
-    SocketAddr::from((bootstrap_resolver(&dns), 53))
 }
 
 /// The alias of the physical adapter that carries the default IPv4 route (one with a gateway

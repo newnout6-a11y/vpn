@@ -8,7 +8,7 @@ use vpnte_view::labels::{
 };
 use vpnte_view::swiss::ConnView;
 
-use super::DashboardView;
+use super::{DashboardView, EngineLine};
 use crate::panels::{LocalPings, ServersView};
 
 /// What a press of the power button (click or Ctrl+Enter) does.
@@ -172,4 +172,14 @@ pub fn node_line(servers: &ServersView, local: &LocalPings) -> Option<NodeLine> 
 /// Label of ruler cell `index` (0-based): «01» … «10».
 pub fn cell_label(index: u8) -> String {
     format!("{:02}", index + 1)
+}
+
+/// The engine caption under the node: the product name, then the reason when one was given
+/// («Xray · REALITY»; `reason` is the already translated text).
+pub fn engine_caption(line: &EngineLine, reason: Option<String>) -> String {
+    let name = crate::servers::engine_name(line.engine);
+    match reason.filter(|r| !r.is_empty()) {
+        Some(reason) => format!("{name} · {reason}"),
+        None => name.to_owned(),
+    }
 }

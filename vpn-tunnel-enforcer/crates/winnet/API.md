@@ -64,7 +64,7 @@ vpnte_ui::lang::init_locales(&layers);
 | `winnet.clipboard.{busy,failed}` | — | `SecretClipboard::copy` |
 | `winnet.elevation.{declined,relaunchFailed}` | — | `relaunch_elevated` |
 | `winnet.singleInstance.noAnswer` | — | `single_instance::send` |
-| `winnet.singleInstance.otherSession` | — | not emitted: the app's message box for `Handoff::OtherSession` |
+| `winnet.singleInstance.otherSession` | — | not emitted any more (the pipe is per session since owner decision 12) |
 | `winnet.shell.{badUrl,noFolder,openFailed}` | — | `shell::*` |
 | `winnet.toast.productionAumid` | — | `toast::ensure_shortcut` (debug builds) |
 
@@ -534,9 +534,10 @@ pub fn is_elevated() -> bool;                                        // TokenEle
 pub fn relaunch_elevated<S: AsRef<OsStr>>(args: &[S]) -> AppResult<()>;  // ShellExecuteExW "runas"; blocks until started
     // UAC "No" = Permission + winnet.elevation.declined; other = Internal + winnet.elevation.relaunchFailed
 
-pub const MUTEX_NAME: &str = r"Global\VpnTunnelEnforcer.Instance";
-pub const PIPE_NAME: &str = r"\\.\pipe\VpnTunnelEnforcer";
-pub struct InstanceNames { pub mutex: String, pub pipe: String }     // ::production(); tests use random names
+pub const MUTEX_NAME: &str = r"Local\VpnTunnelEnforcer.Instance";  // per Windows session
+pub const PIPE_PREFIX: &str = r"\\.\pipe\VpnTunnelEnforcer";        // + ".<session id>"
+pub struct InstanceNames { pub mutex: String, pub pipe: String }     // tests use random names
+impl InstanceNames { pub fn production() -> AppResult<Self>; }      // this process's session
 pub enum Command { Activate, ShutdownForUpdate }                     // ::from_args(argv): --shutdown-for-update
 pub enum Acquire { Primary(Primary), Secondary }
 pub fn acquire(names: &InstanceNames) -> AppResult<Acquire>;        // Err only for unexpected mutex failures
@@ -544,22 +545,19 @@ impl Primary {                                                       // drop = s
     pub fn take_commands(&mut self) -> Option<tokio::sync::mpsc::UnboundedReceiver<Command>>;  // once
     pub fn is_listening(&self) -> bool;                              // false: the pipe could not be created
 }
-pub enum Handoff { Delivered, OtherSession }
-pub fn send(pipe: &str, cmd: Command, timeout: Duration) -> AppResult<Handoff>;   // blocking
-    // errors carry winnet.singleInstance.noAnswer (Timeout | Permission | Internal)
+pub fn send(pipe: &str, cmd: Command, timeout: Duration) -> AppResult<()>;   // blocking
+    // errors carry winnet.singleInstance.noAnswer (Timeout | Permission | Internal); a primary
+    // refuses an activation from another session's client ("other-session" reply = error)
 ```
+Per session (owner decision 12): every signed-in user runs their own copy; the installer's
+`--shutdown-for-update` launch runs in the installing user's session and reaches that user's copy.
 `main()`:
 ```rust
 let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-if !no_elevate && !elevation::is_elevated() {
-    elevation::relaunch_elevated(&args)?;        // Permission: show winnet.elevation.declined, exit 1
-    return Ok(());                               // exit at once, before taking the mutex
-}
-match single_instance::acquire(&InstanceNames::production())? {
-    Acquire::Secondary => {                      // also: elevated primary + `--no-elevate` launch
-        if let Handoff::OtherSession = single_instance::send(PIPE_NAME, Command::from_args(&args), Duration::from_secs(5))? {
-            /* message box winnet.singleInstance.otherSession */
-        }
+let names = InstanceNames::production()?;
+match single_instance::acquire(&names)? {
+    Acquire::Secondary => {
+        let _ = single_instance::send(&names.pipe, Command::from_args(&args), Duration::from_secs(5));
         return Ok(());
     }
     Acquire::Primary(mut primary) => {           // keep `primary` alive for the process lifetime

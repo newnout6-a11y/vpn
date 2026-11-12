@@ -136,3 +136,79 @@ fn scrubber_takes_secrets_from_the_config() {
         "{clean}"
     );
 }
+
+/// Every DNS server tag a generated config can carry stays readable in engine lines: slot mode
+/// (the whole bootstrap order, the ISP step included), a DoH remote given by name
+/// (`dns-resolver`) and a direct resolver; and every entry of [`DNS_TAGS`] is a real tag.
+#[test]
+fn dns_tags_cover_every_generated_server() {
+    use std::net::Ipv4Addr;
+
+    use serde_json::json;
+    use vpnte_base::types::{Creds, Loopback};
+
+    use crate::singbox_config::{
+        Capture, ConfigInputs, Listeners, RoutingParts, TunParams, TunStack, UdpPolicy, Upstream,
+        build,
+    };
+    use crate::slot::{Slot, SlotEndpoint};
+    use crate::tags::PROXY_OUT;
+
+    let creds = |user: &str| Creds {
+        user: user.into(),
+        pass: format!("{user}-pass"),
+    };
+    let ep = |port, user| SlotEndpoint::new(port, creds(user)).unwrap();
+    let inputs = ConfigInputs {
+        upstream: Upstream::XraySlots {
+            slots: [ep(25551, "slot-a"), ep(25552, "slot-b")],
+            active: Slot::A,
+            udp: UdpPolicy {
+                udp: true,
+                block_quic: false,
+            },
+        },
+        capture: Capture::Tun(TunParams {
+            alias: "vpnte-test".into(),
+            mtu: 1380,
+            ipv6: false,
+            dns_hijack: true,
+            stack: TunStack::Mixed,
+        }),
+        listeners: Listeners {
+            clash_port: 25553,
+            clash_secret: "0123456789abcdef0123456789abcdef".into(),
+            direct: Loopback {
+                port: 25554,
+                creds: Some(creds("direct")),
+            },
+            probe: None,
+            dns_bootstrap: Some(25556),
+        },
+        routing: RoutingParts {
+            dns_servers: vec![
+                json!({ "type": "https", "tag": DNS_REMOTE, "server": "dns.example", "detour": PROXY_OUT }),
+                json!({ "type": "udp", "tag": DNS_DIRECT, "server": "192.168.1.1" }),
+            ],
+            ..RoutingParts::default()
+        },
+        phys_dns: vec![Ipv4Addr::new(192, 168, 1, 1)],
+    };
+    let config = build(&inputs).unwrap();
+    let tags: Vec<&str> = config["dns"]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["tag"].as_str())
+        .collect();
+    for tag in &tags {
+        assert!(DNS_TAGS.contains(tag), "{tag} would be scrubbed");
+    }
+    for tag in DNS_TAGS {
+        assert!(tags.contains(&tag), "{tag} not generated: {tags:?}");
+    }
+    let scrub = Scrubber::new(config.to_string().as_bytes(), &[]);
+    for tag in DNS_TAGS {
+        assert!(!scrub.secrets.iter().any(|s| s == tag), "{tag} collected");
+    }
+}

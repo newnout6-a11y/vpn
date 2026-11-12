@@ -133,10 +133,13 @@ impl ServersApi for FakeApi {
     async fn delete_group(&self, _: &str, _: bool) -> AppResult<()> {
         unused()
     }
-    async fn check_group_health(&self, _: &str) -> AppResult<Vec<(String, KeyHealth)>> {
+    async fn check_group_health(&self, _: &str) -> AppResult<HealthReport> {
         unused()
     }
     async fn set_device(&self, _: &str, _: ClientDevice) -> AppResult<()> {
+        unused()
+    }
+    async fn set_engine(&self, _: &str, _: vpnte_base::types::EnginePref) -> AppResult<()> {
         unused()
     }
     async fn probe(&self, _: &str) -> AppResult<ProbeReport> {
@@ -485,6 +488,7 @@ fn every_key_the_page_uses_exists() {
         include_str!("present.rs"),
         include_str!("report.rs"),
         include_str!("row.rs"),
+        include_str!("verdict.rs"),
     ];
     let mut keys: Vec<String> = sources.iter().flat_map(|s| literal_keys(s)).collect();
     let stages = [

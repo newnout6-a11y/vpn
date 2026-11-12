@@ -5,7 +5,9 @@ use vpnte_profiles::model::{
 };
 
 use super::*;
-use crate::xray_config::{Decision, Reject, SelectReason, SingBoxOnly, select_engine};
+use crate::xray_config::{
+    Decision, Reject, SelectReason, SingBoxOnly, XrayLacks, select_engine, server_pref,
+};
 
 const AUTO: EnginePref = EnginePref::Auto;
 const SING_BOX: EnginePref = EnginePref::SingBox;
@@ -97,9 +99,10 @@ fn defaults_and_preferences() {
 }
 
 /// TUIC, Naive, AnyTLS and ShadowTLS have no Xray outbound (`unknown config id`); SOCKS over TLS
-/// and a stream transport under Hysteria2 are not translated either. They stay on sing-box.
+/// and a stream transport under Hysteria2 are not translated either. Auto and forced sing-box run
+/// them on sing-box; forced Xray refuses them visibly.
 #[test]
-fn protocols_without_xray_outbound_run_on_sing_box() {
+fn protocols_without_xray_outbound_are_never_switched_silently() {
     let shadowtls = profile(Kind::Shadowsocks {
         method: "aes-128-gcm".into(),
         password: PW.into(),
@@ -133,9 +136,74 @@ fn protocols_without_xray_outbound_run_on_sing_box() {
         transport: ws(),
         ..profile(hysteria2())
     };
-    for p in [shadowtls, tuic, anytls, socks_tls, hy2_ws] {
-        assert_eq!(select_engine(&p, XRAY), sing_box(SelectReason::Protocol));
+    let naive = profile(Kind::Naive {
+        username: "user".into(),
+        password: PW.into(),
+        quic: false,
+        extra_headers: Vec::new(),
+        insecure_concurrency: None,
+    });
+    let cases = [
+        (shadowtls, XrayLacks::Client("ShadowTLS")),
+        (tuic, XrayLacks::Client("TUIC")),
+        (naive, XrayLacks::Client("NaiveProxy")),
+        (anytls, XrayLacks::Client("AnyTLS")),
+        (socks_tls, XrayLacks::Form("SOCKS")),
+        (hy2_ws, XrayLacks::Form("Hysteria2")),
+    ];
+    for (p, lacks) in cases {
+        let kind = p.kind.label();
+        assert_eq!(
+            select_engine(&p, AUTO),
+            sing_box(SelectReason::Protocol),
+            "{kind}"
+        );
+        assert_eq!(
+            select_engine(&p, SING_BOX),
+            sing_box(SelectReason::Protocol),
+            "{kind}"
+        );
+        // Forced Xray never starts sing-box behind the user's back.
+        assert_eq!(
+            select_engine(&p, XRAY),
+            Decision::Rejected(Reject::XrayLacks(lacks)),
+            "{kind}"
+        );
     }
+}
+
+/// The refusal names the protocol and offers Auto / sing-box (its own locale key per case).
+#[test]
+fn xray_lacks_messages_name_the_protocol() {
+    let msg = Reject::XrayLacks(XrayLacks::Client("TUIC")).msg();
+    assert_eq!(msg.key, "engine.xray.reject.noXrayClient");
+    assert_eq!(msg.args[0].1, "TUIC");
+    let msg = Reject::XrayLacks(XrayLacks::Form("SOCKS")).msg();
+    assert_eq!(msg.key, "engine.xray.reject.xrayForm");
+    let err: vpnte_base::AppError = Reject::XrayLacks(XrayLacks::Client("TUIC")).into();
+    assert_eq!(err.kind, vpnte_base::ErrorKind::Validation);
+}
+
+/// Every reason has its caption; the per-server override wins over the setting, its Auto
+/// follows the setting.
+#[test]
+fn reasons_and_server_override() {
+    for (reason, key) in [
+        (SelectReason::Default, "default"),
+        (SelectReason::Protocol, "protocol"),
+        (SelectReason::Preference, "preference"),
+        (SelectReason::Reality, "reality"),
+        (SelectReason::XrayTransport, "xrayTransport"),
+        (SelectReason::NativeXray, "nativeXray"),
+        (SelectReason::CertPin, "certPin"),
+        (SelectReason::SingBoxOnly(SingBoxOnly::Ech), "singBoxOnly"),
+    ] {
+        assert_eq!(reason.msg().key, format!("engine.xray.reason.{key}"));
+    }
+    assert_eq!(server_pref(XRAY, EnginePref::Auto), XRAY);
+    assert_eq!(server_pref(XRAY, SING_BOX), SING_BOX);
+    assert_eq!(server_pref(AUTO, XRAY), XRAY);
+    assert_eq!(server_pref(AUTO, EnginePref::Auto), AUTO);
 }
 
 /// Hysteria2, WireGuard, SOCKS and HTTP (also over TLS) run on Xray when it is forced; Auto and
@@ -603,8 +671,24 @@ fn every_rejection_has_text() {
     let mut rejects = vec![Reject::NativeXray, Reject::XrayTransport];
     rejects.extend(features.iter().map(|&f| Reject::SingBoxOnly(f)));
     rejects.extend(features.iter().map(|&f| Reject::Conflict(f)));
-    for reject in rejects {
-        let key = reject.msg().key;
+    rejects.push(Reject::XrayLacks(XrayLacks::Client("TUIC")));
+    rejects.push(Reject::XrayLacks(XrayLacks::Form("SOCKS")));
+    let reasons = [
+        SelectReason::Default,
+        SelectReason::Protocol,
+        SelectReason::Preference,
+        SelectReason::Reality,
+        SelectReason::XrayTransport,
+        SelectReason::NativeXray,
+        SelectReason::CertPin,
+        SelectReason::SingBoxOnly(SingBoxOnly::Ech),
+    ];
+    let keys = rejects
+        .iter()
+        .map(Reject::msg)
+        .chain(reasons.iter().map(|r| r.msg()));
+    for msg in keys {
+        let key = msg.key;
         assert!(
             !text(RU, &key).is_empty() && !text(EN, &key).is_empty(),
             "{key}"

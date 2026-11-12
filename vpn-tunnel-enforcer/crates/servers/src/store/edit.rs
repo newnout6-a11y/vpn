@@ -1,6 +1,6 @@
 //! Changing the list: soft delete, restore and purge of rows; renaming, deleting and re-pointing
-//! groups; per-row and per-group devices.
-use vpnte_base::types::{ClientDevice, UnixMs, now_ms};
+//! groups; per-row and per-group devices; the per-row engine.
+use vpnte_base::types::{ClientDevice, EnginePref, UnixMs, now_ms};
 use vpnte_base::{AppError, AppResult, Msg};
 
 use super::{Servers, group_not_found, server_not_found};
@@ -201,6 +201,16 @@ impl Servers {
                 return Err(AppError::validation(Msg::new("servers.deviceFollowsGroup")));
             }
             row.device = device;
+            Ok(())
+        })
+    }
+
+    /// Sets the server's own engine (`Auto` = follow the setting); feed rows too: the choice is
+    /// about this key, not about its subscription.
+    pub fn set_profile_engine(&self, id: &ProfileId, engine: EnginePref) -> AppResult<()> {
+        self.update(|doc| {
+            let row = doc.row_mut(id).ok_or_else(server_not_found)?;
+            row.engine = engine;
             Ok(())
         })
     }

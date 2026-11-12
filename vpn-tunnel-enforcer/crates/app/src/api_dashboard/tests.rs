@@ -238,6 +238,31 @@ fn settled_off_shows_the_home_address() {
     assert!(!exit.leak && exit.geo.is_none() && country.is_none());
 }
 
+/// Owner decision 13: before the first session the home address read at start shows as the
+/// real address with «ваш провайдер» (EXPOSED); until it is read the slot says «ещё не определён».
+#[test]
+fn before_the_first_session_the_start_read_shows_with_your_provider() {
+    let idle = TunnelSnapshot::default();
+    let conn = project::conn_view(
+        &idle,
+        &TunStatus::default(),
+        &ConnLocal::default(),
+        &clock(),
+    );
+    let read = IpEvidence {
+        real_ip: Some(HOME),
+        ..IpEvidence::default()
+    };
+    let (exit, country) = project::exit_ip(&idle, &read, None, Lang::Ru);
+    let line = labels::exit_line(&conn, &exit);
+    assert_eq!(line.ip, Some(HOME));
+    assert!(!line.unmeasured && !line.dim && country.is_none());
+    assert_eq!(line.sub.text.key, "dashboard.swissIpYourIsp");
+
+    let (exit, _) = project::exit_ip(&idle, &IpEvidence::default(), None, Lang::Ru);
+    assert!(labels::exit_line(&conn, &exit).unmeasured);
+}
+
 #[test]
 fn passed_exit_gets_the_country_looked_up_for_it() {
     let s = snap(TunnelState::Connected);
@@ -493,6 +518,7 @@ fn summary(id: &str, archived: Option<ArchiveReason>) -> ServerSummary {
         server: "vpn.example.invalid".into(),
         port: 443,
         device: ClientDevice::Pc,
+        engine: Default::default(),
         country: Iso2::new("de"),
         country_verified: false,
         missing_since: None,
@@ -702,4 +728,64 @@ fn op_clock_is_anchored_once_per_operation() {
     assert_eq!(local.clock_for(&s).at, first.at);
     s.operation = Some(op(OpKind::Disconnect, OpStatus::Running, 2, None));
     assert!(local.clock_for(&s).at > first.at);
+}
+
+/// ENGINE-GAPS decision 2: the identity column gets the running engine and its reason from the
+/// runtime status; nothing while no engine runs, the engine alone for a local upstream proxy.
+#[test]
+fn engine_line_follows_the_running_session() {
+    use vpnte_base::types::Engine;
+    use vpnte_tunnel::api::{EngineRun, SelectReason};
+    let run = EngineRun {
+        kind: Engine::Xray,
+        reason: Some(SelectReason::Reality),
+    };
+    let running = TunStatus {
+        running: true,
+        engine: Some(run),
+        ..TunStatus::default()
+    };
+    let line = project::engine_line(&running).expect("engine shown");
+    assert_eq!(line.engine, Engine::Xray);
+    let key = line.reason.map(|m| m.key.into_owned());
+    assert_eq!(key.as_deref(), Some("engine.xray.reason.reality"));
+    let stopped = TunStatus {
+        running: false,
+        ..running.clone()
+    };
+    assert_eq!(project::engine_line(&stopped), None);
+    let local = TunStatus {
+        engine: Some(EngineRun {
+            kind: Engine::SingBox,
+            reason: None,
+        }),
+        ..running
+    };
+    assert_eq!(project::engine_line(&local).and_then(|l| l.reason), None);
+}
+
+/// Brief point 5 (the Xray path's warnings reach the user): a lane call whose answer has no
+/// room for its warnings (tray stop here; connect and server switch alike) turns each into a
+/// notice; the dashboard's disconnect answers with its warning instead, so nothing doubles.
+/// Desktop notifications are off: the notices stay in the in-app list, no Windows toast.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lane_warnings_reach_the_user_once() {
+    use vpnte_ui::dashboard::DashboardApi;
+    use vpnte_ui::tray::TrayApi;
+    let (hub, _fake, _dir) = super::flows::setup("warnings");
+    hub.backend
+        .settings
+        .update(|s| s.desktop_notifications = false)
+        .expect("settings");
+    let mut notices = hub.backend.notifier.subscribe();
+    let answer = super::traits::Dashboard(hub.clone()).disconnect().await;
+    let key = answer.expect("off").map(|m| m.key.into_owned());
+    assert_eq!(key.as_deref(), Some("w.one"));
+    assert!(notices.try_recv().is_err(), "the answer carries it");
+    super::traits::Tray(hub.clone()).stop().await.expect("off");
+    let mut keys = Vec::new();
+    while let Ok(n) = notices.try_recv() {
+        keys.push(n.notice.title.key.into_owned());
+    }
+    assert_eq!(keys, ["w.one", "w.two"]);
 }

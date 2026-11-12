@@ -89,6 +89,7 @@ fn choice(row: ServerRow) -> Option<ServerChoice> {
             id: row.id.0,
             profile: Arc::new(profile),
             device: Some(row.device),
+            engine: row.engine,
         },
     })
 }

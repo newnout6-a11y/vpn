@@ -392,6 +392,44 @@ const FAST: Limits = Limits {
     deadline: Duration::from_secs(10),
 };
 
+/// ENGINE-GAPS decision 3: a key the engine setting refuses (XHTTP under forced sing-box, TUIC
+/// under forced Xray) is an engine verdict: `engine-setting`, no engine ran, `not-verified`,
+/// never `config-failed` (which reads as a broken key). Nothing is spawned, so no binaries needed.
+#[tokio::test]
+async fn engine_refusal_is_an_engine_verdict() {
+    let ctx = |pref| ProbeCtx {
+        singbox_exe: "missing-sing-box.exe".into(),
+        xray_exe: "missing-xray.exe".into(),
+        engine_pref: pref,
+        device: ClientDevice::Pc,
+        net: NetPath::default(),
+        dns_bootstrap_in: None,
+    };
+    let xhttp = parse_uri(&format!(
+        "vless://00000000-0000-4000-8000-000000000001@203.0.113.10:443?security=reality&sni=example.com&pbk={FAKE_PBK}&type=xhttp&path=%2F#X"
+    ))
+    .unwrap();
+    let tuic = parse_uri(
+        "tuic://00000000-0000-4000-8000-000000000003:fake-password@203.0.113.13:443?sni=example.com#T",
+    )
+    .unwrap();
+    let cancel = CancellationToken::new();
+    for (p, pref) in [(xhttp, EnginePref::SingBox), (tuic, EnginePref::Xray)] {
+        let check = probe_with(&p, &ctx(pref), &Wire::plain(), FAST, &cancel)
+            .await
+            .expect("a verdict, not a setup error");
+        assert!(!check.health.online);
+        assert_eq!(check.health.reason, Some(HealthReason::EngineSetting));
+        assert_eq!(check.health.engine, None);
+        assert_eq!(check.verdict.verdict, Verdict::NotVerified);
+        assert_eq!(check.verdict.reaction, Reaction::None);
+        match start_probe_engine(&p, &ctx(pref), &cancel).await {
+            Ok(Started::Offline(h)) => assert_eq!(h.reason, Some(HealthReason::EngineSetting)),
+            _ => panic!("refused without an engine"),
+        }
+    }
+}
+
 /// A probe through the real engine to the scripted far side (plain HTTP after the CONNECT).
 async fn probe_far_side(
     ctx: &ProbeCtx,
@@ -590,6 +628,7 @@ fn locale_fragments_cover_every_key() {
         HealthReason::Hy2UdpBlocked,
         HealthReason::Hy2TlsFailed,
         HealthReason::Hy2HandshakeFailed,
+        HealthReason::EngineSetting,
     ]
     .iter()
     .map(|r| r.msg().key.into_owned())

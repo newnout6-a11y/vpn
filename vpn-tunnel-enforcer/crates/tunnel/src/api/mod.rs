@@ -28,6 +28,21 @@ pub struct VpnProfile {
     pub profile: Arc<Profile>,
     /// Client the subscription expects; drives the default uTLS fingerprint.
     pub device: Option<ClientDevice>,
+    /// The server's own engine choice: sing-box / Xray win over [`StartRequest::engine`], `Auto`
+    /// follows it (`vpnte_engine::xray_config::server_pref`).
+    pub engine: EnginePref,
+}
+
+pub use vpnte_engine::xray_config::SelectReason;
+
+/// The engine that carries a session's upstream and why it was chosen: shown beside the server
+/// while connected, kept in the history row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineRun {
+    pub kind: Engine,
+    /// `None` for a local upstream proxy: sing-box forwards to it, no engine was chosen.
+    pub reason: Option<SelectReason>,
 }
 
 /// What the tunnel carries.
@@ -104,8 +119,9 @@ pub struct StartReceipt {
     /// PID of our sing-box process.
     pub pid: u32,
     pub started_at: UnixMs,
-    /// Engine that carries the upstream (`Xray` for slot upstreams behind the sing-box TUN).
-    pub engine: Engine,
+    /// Engine that carries the upstream (`Xray` for slot upstreams behind the sing-box TUN) and
+    /// why it was chosen.
+    pub engine: EngineRun,
     /// Things the user should know about this run (never raw OS text).
     pub warnings: Vec<Msg>,
 }
@@ -201,6 +217,9 @@ pub struct TunStatus {
     /// How the running session takes traffic (`None` while nothing runs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture: Option<CaptureKind>,
+    /// The engine of the running session and why (`None` while nothing runs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<EngineRun>,
     /// What the app needs to observe the running session. Holds secrets: never serialized
     /// (the status keeps the old wire shape, which had no session).
     #[serde(skip)]
@@ -223,6 +242,7 @@ impl Default for TunStatus {
             started_at: None,
             restart_attempt: 0,
             capture: None,
+            engine: None,
             session: None,
         }
     }
@@ -520,6 +540,10 @@ pub struct SwitchReceipt {
     /// The caller stopped owning the tunnel while the switch ran.
     pub ownership_lost: bool,
     pub failures: Vec<SwitchFailure>,
+    /// The engine run the committed candidate uses (`None` until committed).
+    pub engine: Option<EngineRun>,
+    /// Things the user should know about the new upstream (Xray's dropped settings).
+    pub warnings: Vec<Msg>,
 }
 
 impl Default for SwitchReceipt {
@@ -534,6 +558,8 @@ impl Default for SwitchReceipt {
             previous_stopped: false,
             ownership_lost: false,
             failures: Vec::new(),
+            engine: None,
+            warnings: Vec::new(),
         }
     }
 }

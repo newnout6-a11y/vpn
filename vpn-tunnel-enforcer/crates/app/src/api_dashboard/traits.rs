@@ -12,6 +12,7 @@ use vpnte_ui::panels::{PanelsApi, ProxiesView, Selected, ServersView};
 use vpnte_ui::tray::{QuitMode, TrayApi, TrayState};
 use vpnte_view::traffic::TrafficSample;
 
+use super::actions::Shows;
 use super::proxies::ProxyAction;
 use super::{Hub, project};
 
@@ -33,13 +34,13 @@ impl DashboardApi for Dashboard {
     async fn connect(&self) -> AppResult<()> {
         let call =
             |t: Arc<dyn crate::services::TunnelOps>| async move { t.connect(Source::Ui).await };
-        self.0.lane(call).await.map(|_| ())
+        self.0.lane(Shows::Notices, call).await.map(|_| ())
     }
 
     async fn disconnect(&self) -> AppResult<Option<Msg>> {
         let call =
             |t: Arc<dyn crate::services::TunnelOps>| async move { t.disconnect(Source::Ui).await };
-        let done = self.0.lane(call).await?;
+        let done = self.0.lane(Shows::Answer, call).await?;
         Ok(done.warnings.into_iter().next())
     }
 
@@ -143,14 +144,14 @@ impl TrayApi for Tray {
     async fn start(&self) -> AppResult<()> {
         let call =
             |t: Arc<dyn crate::services::TunnelOps>| async move { t.connect(Source::Tray).await };
-        self.0.lane(call).await.map(|_| ())
+        self.0.lane(Shows::Notices, call).await.map(|_| ())
     }
 
     async fn stop(&self) -> AppResult<()> {
         let call = |t: Arc<dyn crate::services::TunnelOps>| async move {
             t.disconnect(Source::Tray).await
         };
-        self.0.lane(call).await.map(|_| ())
+        self.0.lane(Shows::Notices, call).await.map(|_| ())
     }
 
     async fn check_route(&self) -> AppResult<()> {

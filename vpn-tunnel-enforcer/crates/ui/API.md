@@ -242,7 +242,9 @@ pub struct DashboardView {
     pub leak: Verdict,                                // last leak check; NotChecked = none
     pub soft_mode: bool, pub smart_ru: bool,          // settings (apply on the next connect)
     pub foreign_vpn: Option<String>,                  // another VPN's adapter, only while ours is down
+    pub engine: Option<EngineLine>,                   // running engine + reason (identity column caption)
 }
+pub struct EngineLine { pub engine: Engine, pub reason: Option<Msg> }  // «Xray · REALITY» under the node
 pub trait DashboardApi: 'static {
     fn state(&self) -> watch::Receiver<DashboardView>;
     async fn connect(&self) -> AppResult<()>;                     // returns when the attempt is over
@@ -398,8 +400,11 @@ pub trait ServersApi: 'static {      // root component ServersPage; use_servers_
     async fn set_refresh_interval(&self, id: &str, minutes: Option<NonZeroU32>) -> AppResult<()>;
     async fn rename_group(&self, id: &str, name: String) -> AppResult<()>; // trims, caps at 60 chars
     async fn delete_group(&self, id: &str, delete_servers: bool) -> AppResult<()>;
-    async fn check_group_health(&self, id: &str) -> AppResult<Vec<(String, KeyHealth)>>;
+    async fn check_group_health(&self, id: &str) -> AppResult<HealthReport>;  // { results: Vec<(id, KeyHealth)>,
+                                  // not_checked: u32 /* deferred by the handshake budget / probe not started */ }
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()>; // connected server reconnects
+    async fn set_engine(&self, id: &str, engine: EnginePref) -> AppResult<()>; // own engine (Auto = setting);
+                                  // impossible forced choice = Validation with the engine Msg; reconnects
     async fn probe(&self, id: &str) -> AppResult<ProbeReport>;          // passive: no TLS / HTTP to the endpoint
     async fn geo(&self, id: &str) -> AppResult<Option<GeoInfo>>;        // None = lookups off / unknown
     async fn live_check(&self, id: &str, mode: LiveMode, progress: mpsc::UnboundedSender<LiveProgress>) -> AppResult<LiveCheck>;
@@ -412,13 +417,21 @@ pub struct ServersView { loaded: bool, servers: Vec<ServerView>, groups: Vec<Gro
     Option<String>, tunnel_running, tunnel_busy, foreign_vpn, geo_lookup_disabled: bool }
 ```
 Other types (all `pub use`d at `servers::`): `ServerView`, `GroupView`, `GroupSource`, `GroupStatus`,
-`OnlineStatus`, `Stealth`, `KeyHealth`, `KeyHealthReason` (`from_code` / `code`), `Archive`,
+`OnlineStatus`, `Stealth`, `KeyHealth`, `KeyHealthReason` (`from_code` / `code`; `EngineSetting` =
+the neutral `RowSignal::Engine` mark, never "dead"), `EnginePlan { Runs { engine, reason }, Refused(Msg) }`
+(`ServerView::engine_plan`, beside `ServerView::engine`: the row's own choice), `CheckVerdict { kind:
+VerdictKind, advice: Option<VerdictAdvice>, detail: Msg, advice_detail: Option<Msg>, checked_at }`
+(`ServerView::verdict`: the probe-discipline classifier's last word, a quiet mono caption in the row,
+signal colour only for `Frozen` / `IpBanned`; the app sends none older than `health`), `HealthReport`,
+`Archive`,
 `ArchiveReason`, `AddTarget { Auto, Group(id) }`, `ImportReport`, `SkippedLine`, `SelectOutcome`,
 `CountryCheck`, `ExportReport`, `ProxyStartReport`, `StartedProxy`, `ProxySkip`, `RefreshOutcome`,
 `FetchError`, `ProbeReport`, `AsnInfo`, `LatencyStats`, `OpenPort`, `GeoInfo`; live checks:
 `LiveMode`, `Stage`, `ProgressStatus`, `LiveProgress`, `LiveCheck` (+ `DnsDiag`, `Reachability`,
 `TlsDiag`, `HttpDiag`, `PortProbe`, `RouteDiag`, `Infrastructure`, `Changes`, `Handshake`, `Egress`,
-`PathDiag`, `PmtuDiag`, `MediaDiag`, `Throughput`, `SplitTunnelDiag`, `Finding`, `Severity`, …),
+`PathDiag`, `PmtuDiag`, `MediaDiag`, `Throughput`, `SplitTunnelDiag`, `Finding`, `Severity`, …;
+`LiveCheck::deferred` = the rendered note naming the requests the handshake budget left out, a strip
+at the top of the receipt and a line under the batch table),
 `BatchProgress`, `BatchResult`. Pure helpers: `buckets`, `sort_groups`, `displayed_ping`,
 `row_signal`, `unusable`, `stealth_badge`, `relative_time`, `device_label`, `DEVICES`.
 Demo: `DemoServersApi` with `DemoScene`.

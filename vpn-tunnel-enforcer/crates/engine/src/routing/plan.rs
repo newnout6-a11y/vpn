@@ -48,8 +48,8 @@ pub struct RoutingInputs<'a> {
     pub dns: Option<&'a DnsAddr>,
     /// IPv4 resolvers of the physical adapters, read at this (re)start.
     pub physical_dns: &'a [Ipv4Addr],
-    /// The VPN endpoint (or a WireGuard peer) is a host name, so engine-config adds a direct
-    /// `dns-bootstrap` server; only the warning about its fallback comes from here.
+    /// The VPN endpoint (or a WireGuard peer) is a host name: only the warning about resolving
+    /// it without the network's own DNS comes from here (engine-config adds the bootstrap DNS).
     pub endpoint_is_hostname: bool,
 }
 
@@ -68,7 +68,10 @@ pub struct RoutingFragments {
 pub enum RoutingWarning {
     /// Smart RU is on but its rule sets are unavailable: everything goes through the tunnel.
     SmartRuDisabled,
-    /// No usable system resolver: the server name is resolved through 1.1.1.1 directly.
+    /// The upstream dials a server name and the physical adapters have no usable resolver: the
+    /// name is resolved only through public resolvers (the DoH / TCP order of
+    /// `vpnte_core::resolve` in the app, sing-box's bootstrap order), with no step at the
+    /// network's own DNS, the one that still answers under mobile whitelists (ru-2026 Ф9).
     BootstrapDnsFallback,
     /// A split-tunnel app got no rule; its traffic stays in the tunnel.
     InactiveApp(InactiveApp),

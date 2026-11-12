@@ -1,6 +1,7 @@
-//! Per-server actions: proxies, key export, select and switch, remove / restore / purge, bulk
-//! export, with their toast texts.
+//! Per-server actions: proxies, key export, select and switch, remove / restore / purge, the
+//! server's own engine, bulk export, with their toast texts.
 use vpnte_base::ErrorKind;
+use vpnte_base::types::EnginePref;
 
 use super::*;
 use crate::lang::{tr_now, translate_now};
@@ -245,6 +246,19 @@ impl Actions {
                     translate_now("ui.servers.restore.failed", &[("name", name)]),
                     &err,
                 );
+            }
+        });
+    }
+
+    /// Sets the server's own engine (the connected server reconnects); a refusal comes back as
+    /// a toast with the backend's reason.
+    pub fn set_engine(&self, server: &ServerView, engine: EnginePref) {
+        let (toasts, api) = (self.toasts, self.api.clone());
+        let (id, name) = (server.id.clone(), server.name.clone());
+        self.spawn(async move {
+            if let Err(err) = api.set_engine(&id, engine).await {
+                let title = translate_now("ui.servers.engine.failed", &[("name", name)]);
+                toast_error(toasts, title, &err);
             }
         });
     }

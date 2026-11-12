@@ -155,3 +155,53 @@ async fn a_live_switch_shows_its_target_and_can_be_cancelled() {
         "the tunnel did not move"
     );
 }
+
+/// ENGINE-GAPS decisions 2 and 3: every row says which engine a connect would use and why; the
+/// row's own engine is stored and shown; a forced engine that cannot run the key is refused with
+/// the selection's own sentence and nothing is stored.
+#[tokio::test]
+async fn per_server_engine_is_visible_and_never_impossible() {
+    use vpnte_base::types::{Engine, EnginePref};
+    use vpnte_ui::servers::EnginePlan;
+    locales();
+    let env = Env::new("engine");
+    let api = ServersBackend::start(env.backend.clone());
+    let mut state = api.state();
+    let paste = "vless://11111111-2222-3333-4444-555555555555@good.example.net:443?security=tls&sni=good.example.net#ok\n\
+        tuic://00000000-0000-4000-8000-000000000003:fake-password@203.0.113.13:443?sni=example.com#t\n";
+    api.add(paste.to_owned(), AddTarget::Auto, ClientDevice::Pc)
+        .await
+        .unwrap();
+    let view = state.borrow().clone();
+    let (vless, tuic) = (view.servers[0].clone(), view.servers[1].clone());
+    let plan = |engine, key: &str| EnginePlan::Runs {
+        engine,
+        reason: vpnte_base::Msg::new(key.to_owned()),
+    };
+    assert_eq!(vless.engine, EnginePref::Auto);
+    let default = plan(Engine::SingBox, "engine.xray.reason.default");
+    assert_eq!(vless.engine_plan, Some(default));
+    let protocol = plan(Engine::SingBox, "engine.xray.reason.protocol");
+    assert_eq!(tuic.engine_plan, Some(protocol));
+
+    api.set_engine(&vless.id, EnginePref::Xray).await.unwrap();
+    let id = vless.id.clone();
+    until(&mut state, |v| {
+        v.servers
+            .iter()
+            .any(|s| s.id == id && s.engine == EnginePref::Xray)
+    })
+    .await;
+    let row = state.borrow().servers[0].clone();
+    let chosen = plan(Engine::Xray, "engine.xray.reason.preference");
+    assert_eq!(row.engine_plan, Some(chosen));
+
+    let err = api
+        .set_engine(&tuic.id, EnginePref::Xray)
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Validation);
+    assert_eq!(err.user_msg().key, "engine.xray.reject.noXrayClient");
+    let stored = env.backend.servers.get(&tuic.id.as_str().into()).unwrap();
+    assert_eq!(stored.engine, EnginePref::Auto, "nothing stored");
+}

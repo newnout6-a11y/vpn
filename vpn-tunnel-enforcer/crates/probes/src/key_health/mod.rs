@@ -18,13 +18,13 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{ClientDevice, Engine, EnginePref, Loopback, UnixMs, now_ms};
 use vpnte_base::{AppError, AppResult, Msg};
-use vpnte_engine::xray_config::select_engine;
+use vpnte_engine::xray_config::{Decision, Reject, select_engine};
 use vpnte_profiles::countries::Iso2;
 use vpnte_profiles::model::{Kind, Profile};
 
 use crate::discipline::{
-    self, Classification, Endpoint, FREEZE_BACKOFF, Limits, Observations, Reach, Transfer,
-    TransferReport, classify, real_certificate,
+    self, Classification, Endpoint, FREEZE_BACKOFF, Limits, Observations, Reach, Reaction,
+    Transfer, TransferReport, Verdict, classify, real_certificate,
 };
 use crate::live::wire::Wire;
 use crate::ping::{NetPath, PingTarget};
@@ -65,6 +65,9 @@ pub enum HealthReason {
     Hy2UdpBlocked,
     Hy2TlsFailed,
     Hy2HandshakeFailed,
+    /// The engine setting (the app's or the server's own) does not run this key: an engine
+    /// verdict, the key itself was never tried (ENGINE-GAPS decision 3).
+    EngineSetting,
 }
 
 impl HealthReason {
@@ -82,6 +85,7 @@ impl HealthReason {
             HealthReason::Hy2UdpBlocked => "probes.keyHealth.reason.hy2UdpBlocked",
             HealthReason::Hy2TlsFailed => "probes.keyHealth.reason.hy2TlsFailed",
             HealthReason::Hy2HandshakeFailed => "probes.keyHealth.reason.hy2HandshakeFailed",
+            HealthReason::EngineSetting => "probes.keyHealth.reason.engineSetting",
         })
     }
 }
@@ -175,6 +179,19 @@ fn is_hysteria2(p: &Profile) -> bool {
     matches!(p.kind, Kind::Hysteria2 { .. })
 }
 
+/// The verdict of a key the engine setting refused: the setting, not the server, so never a
+/// "dead key" (it is stored as `engine-setting` and classified `not-verified`).
+fn refused(reject: Reject) -> KeyCheck {
+    tracing::debug!(reason = %reject.msg().key, "probe refused by the engine setting");
+    KeyCheck {
+        health: KeyHealth::offline(HealthReason::EngineSetting, None),
+        verdict: Classification {
+            verdict: Verdict::NotVerified,
+            reaction: Reaction::None,
+        },
+    }
+}
+
 /// Starts the engine `ctx.engine_pref` selects for `p` and waits for its local SOCKS port.
 pub async fn start_probe_engine(
     p: &Profile,
@@ -182,11 +199,9 @@ pub async fn start_probe_engine(
     cancel: &CancellationToken,
 ) -> AppResult<Started> {
     let hy2 = is_hysteria2(p);
-    let Ok(engine) = select_engine(p, ctx.engine_pref).engine() else {
-        return Ok(Started::Offline(KeyHealth::offline(
-            classify::config_failed(hy2),
-            None,
-        )));
+    let engine = match select_engine(p, ctx.engine_pref) {
+        Decision::Selected { engine, .. } => engine,
+        Decision::Rejected(reject) => return Ok(Started::Offline(refused(reject).health)),
     };
     let start = match engine {
         Engine::SingBox => engine::start_singbox(p, ctx, cancel).await?,
@@ -247,6 +262,10 @@ pub(crate) async fn probe_with(
     limits: Limits,
     cancel: &CancellationToken,
 ) -> AppResult<KeyCheck> {
+    // Before the handshake budget: a refused key makes no handshake, so it spends no slot.
+    if let Decision::Rejected(reject) = select_engine(p, ctx.engine_pref) {
+        return Ok(refused(reject));
+    }
     let endpoint = Endpoint::of(p);
     if let Some(endpoint) = &endpoint {
         discipline::budget()

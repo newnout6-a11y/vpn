@@ -157,6 +157,7 @@ impl FakeTunnel {
             generation: Some(generation),
             adaptive: vpnte_base::types::AdaptiveMode::Baseline,
             started_at: 1,
+            engine: None,
         }));
     }
 }

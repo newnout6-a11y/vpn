@@ -57,9 +57,9 @@ impl ProfileSource for ServerProfiles {
         self.servers.active().map(|a| a.row.id.0)
     }
 
-    /// `EngineChoice` has one device for every start, so slots take the device of the main VPN's
-    /// server (usually the same provider); a per-server device needs `ProxyProfile::device` in
-    /// vpnte-proxies.
+    /// The app's engine setting; the default device is the main VPN server's (usually the same
+    /// provider). Every slot's own row wins: `ProxyProfile::{engine, device}` (D5 of
+    /// wire-proxies-live, closed by engine-choice-visible).
     fn engine_choice(&self) -> EngineChoice {
         EngineChoice {
             pref: self.settings.read(|s| s.proxy_engine),
@@ -95,6 +95,8 @@ fn proxy_profile(row: ServerRow, ping: Option<Ping>) -> Option<ProxyProfile> {
     Some(ProxyProfile {
         country: row.display_country().map(|c| c.as_str().to_owned()),
         group_id: Some(row.group_id.0.clone()),
+        device: Some(row.device),
+        engine: row.engine,
         status,
         ping_ms: ping.and_then(|p| p.rtt_ms),
         health_latency_ms: health.and_then(|h| h.rtt_ms),

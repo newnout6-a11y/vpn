@@ -465,6 +465,31 @@ fn device_changes() {
     );
 }
 
+/// ENGINE-GAPS decision 3: every row (feed rows too) keeps its own engine; `Auto` is not
+/// written, so older files and rows without a choice keep their shape.
+#[test]
+fn engine_override_per_row() {
+    use vpnte_base::types::EnginePref;
+    let (_dir, s) = open();
+    let feed = s
+        .add(three()[..1].to_vec(), sub(FEED, ClientDevice::Pc))
+        .unwrap();
+    let id = feed.added[0].clone();
+    assert_eq!(s.get(&id).unwrap().engine, EnginePref::Auto);
+    s.set_profile_engine(&id, EnginePref::SingBox).unwrap();
+    assert_eq!(s.get(&id).unwrap().engine, EnginePref::SingBox);
+    let summary = s.view().servers.into_iter().find(|r| r.id == id).unwrap();
+    assert_eq!(summary.engine, EnginePref::SingBox);
+    let json = serde_json::to_value(s.get(&id).unwrap()).unwrap();
+    assert_eq!(json["engine"], "sing-box");
+    s.set_profile_engine(&id, EnginePref::Auto).unwrap();
+    let json = serde_json::to_value(s.get(&id).unwrap()).unwrap();
+    assert!(json.get("engine").is_none(), "{json}");
+    let gone = ProfileId::from("gone");
+    let err = s.set_profile_engine(&gone, EnginePref::Xray).unwrap_err();
+    assert_eq!(kind_and_key(err).1, "servers.notFound");
+}
+
 fn record(online: bool) -> HealthRecord {
     HealthRecord {
         online,

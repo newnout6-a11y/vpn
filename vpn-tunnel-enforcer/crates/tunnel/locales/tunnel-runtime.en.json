@@ -9,6 +9,7 @@
       "proxyAddressInvalid": "Invalid upstream proxy address. Use host:port or [IPv6]:port; the port must be between 1 and 65535.",
       "proxyNotListening": "Proxy {{addr}} is unreachable. Make sure Happ runs in Proxy mode and listens on this port.",
       "profileUnusable": "This VPN profile cannot run in sing-box. Check the key or choose another server.",
+      "serverNotPreResolved": "The VPN server's address could not be found in advance: sing-box looks the name up itself, only through DNS over HTTPS at 1.1.1.1. If that is blocked on this network, the connection fails.",
       "egressUnknown": "Could not determine the external IP through the tunnel.",
       "fullStopRan": "A full stop already ran; protection cannot be considered preserved",
       "stopIncomplete": "Turning protection off did not complete. Stop protection again and check the network diagnostics.",

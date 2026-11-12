@@ -452,6 +452,9 @@ pub struct LiveCheck {
     pub media: Option<MediaDiag>,
     pub throughput: Option<Throughput>,
     pub split_tunnel: Option<SplitTunnelDiag>,
+    /// Requests through the server that its handshake budget left out (the rendered note): their
+    /// rows are missing on purpose, not failed. `None`: nothing was left out.
+    pub deferred: Option<String>,
     pub findings: Vec<Finding>,
 }
 

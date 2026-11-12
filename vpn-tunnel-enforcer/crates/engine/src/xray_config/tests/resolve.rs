@@ -1,13 +1,15 @@
-//! Pre-resolution (xray-engine spec §3.4): DNS wire format, the sinkhole filter, and the whole
-//! plan against a fake loopback DNS server (the sing-box `dns-bootstrap-in` stand-in).
+//! Pre-resolution (xray-engine spec §3.4): DNS wire format, the sinkhole filter, the plan
+//! against a fake loopback DNS server (the sing-box `dns-bootstrap-in` stand-in) and against
+//! fake `resolve_server` answers (TUN down; no test here reaches a real resolver).
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::{AppError, ErrorKind};
+use vpnte_core::resolve::{ResolveError, ServerAddrs};
 
-use crate::xray_config::resolve::{dialable, parse_answer, query};
+use crate::xray_config::resolve::{dialable, first, parse_answer, query, resolve_all};
 use crate::xray_config::{ResolveFault, ResolvePath, resolve_hosts};
 
 /// An answer to `q` with the given records (`(type, rdata)`, owner name compressed to the
@@ -93,9 +95,9 @@ fn dialable_addresses() {
     }
 }
 
-/// A fake resolver on loopback: `a.example` -> 203.0.113.7, `fallback.invalid` -> 203.0.113.9,
-/// `v6.example` -> AAAA only, `blocked.example` -> 127.0.0.1, no data for other names, and
-/// NXDOMAIN for names containing `missing`.
+/// A fake resolver on loopback: `a.example` -> 203.0.113.7, `v6.example` -> AAAA only,
+/// `blocked.example` -> 127.0.0.1, no data for other names, and NXDOMAIN for names containing
+/// `missing`.
 async fn fake_dns() -> SocketAddr {
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = sock.local_addr().unwrap();
@@ -116,7 +118,6 @@ async fn fake_dns() -> SocketAddr {
                     0,
                 ),
                 ("blocked\u{7}example", 1) => answer(q, &[(1, &[127, 0, 0, 1])], 0),
-                ("fallback\u{7}invalid", 1) => answer(q, &[(1, &[203, 0, 113, 9])], 0),
                 (_, 1 | 28) if !name.contains("missing") => answer(q, &[], 0),
                 _ => answer(q, &[], 3),
             };
@@ -147,7 +148,7 @@ async fn via_sing_box_resolves_every_host() {
         "2001:db8::6".parse::<IpAddr>().unwrap()
     );
     assert_eq!(r.addrs["192.0.2.1"], "192.0.2.1".parse::<IpAddr>().unwrap());
-    assert!(!r.bootstrap_used && r.warning().is_none());
+    assert_eq!(r.warning, None);
 }
 
 /// One failure fails the plan (no partial map): NXDOMAIN, a block-page answer, a block-page
@@ -171,6 +172,11 @@ async fn failures_fail_the_whole_plan() {
     assert_eq!(
         (err.kind, err.user_msg().key.as_ref()),
         (ErrorKind::Network, "engine.xray.resolve.sinkhole")
+    );
+    let err = AppError::from(ResolveFault::Poisoned);
+    assert_eq!(
+        (err.kind, err.user_msg().key.as_ref()),
+        (ErrorKind::Network, "engine.xray.resolve.poisoned")
     );
     assert_eq!(
         AppError::from(ResolveFault::Cancelled).kind,
@@ -235,29 +241,89 @@ async fn at_most_four_lookups_in_flight() {
     assert_eq!(sent, 4);
 }
 
-/// TUN down: a name the system resolver cannot answer (reserved `.invalid` TLD) is retried at
-/// the bootstrap resolver, and the result says so.
-#[tokio::test]
-async fn system_failure_retries_at_the_bootstrap_resolver() {
-    let path = ResolvePath::System {
-        bootstrap: fake_dns().await,
+/// TUN down, `resolve_server`'s answers: the first address; a last-known bridge carries its
+/// warning; forged answers stay their own fault, a refused (block-page) answer is a sinkhole.
+#[test]
+fn direct_maps_resolve_server_answers() {
+    let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+    let addrs = |last_known| ServerAddrs {
+        addrs: vec![ip("203.0.113.9"), ip("2001:db8::9")],
+        last_known,
     };
-    let hosts = ["fallback.invalid".to_owned()];
+    assert_eq!(first(Ok(addrs(false))), Ok((ip("203.0.113.9"), None)));
+    let (bridged, warning) = first(Ok(addrs(true))).unwrap();
+    assert_eq!(bridged, ip("203.0.113.9"));
+    assert_eq!(
+        warning.map(|m| m.key.into_owned()),
+        Some("core.net.resolveLastKnown".to_owned())
+    );
+    let empty = ServerAddrs {
+        addrs: Vec::new(),
+        last_known: false,
+    };
+    assert_eq!(first(Ok(empty)), Err(ResolveFault::Failed));
+    for (err, fault) in [
+        (ResolveError::Filtered, ResolveFault::Sinkhole),
+        (ResolveError::Poisoned, ResolveFault::Poisoned),
+        (ResolveError::NotFound, ResolveFault::Failed),
+        (ResolveError::Failed, ResolveFault::Failed),
+        (ResolveError::InvalidName, ResolveFault::Failed),
+    ] {
+        assert_eq!(first(Err(err)), Err(fault), "{err:?}");
+    }
+}
+
+/// The plan over `resolve_server`-shaped answers (a fake lookup, no network): a name bridged by
+/// its last known address resolves with the warning; one unresolvable name fails the plan.
+#[tokio::test]
+async fn direct_plan_reports_the_last_known_bridge() {
+    let lookup = |host: String| async move {
+        let ip: IpAddr = match host.as_str() {
+            "fresh.example" => "203.0.113.7",
+            "bridged.example" => "203.0.113.8",
+            _ => return first(Err(ResolveError::Poisoned)),
+        }
+        .parse()
+        .unwrap();
+        let last_known = host.starts_with("bridged");
+        first(Ok(ServerAddrs {
+            addrs: vec![ip],
+            last_known,
+        }))
+    };
     let cancel = CancellationToken::new();
-    // `.invalid` never exists in public DNS (RFC 2606), so the system lookup fails.
-    let r = resolve_hosts(&hosts, path, &cancel).await.unwrap();
+    let hosts = ["fresh.example".to_owned(), "bridged.example".into()];
+    let r = resolve_all(&hosts, lookup, &cancel).await.unwrap();
+    assert_eq!(r.addrs.len(), 2);
     assert_eq!(
-        r.addrs["fallback.invalid"],
-        "203.0.113.9".parse::<IpAddr>().unwrap()
+        r.warning.map(|m| m.key.into_owned()),
+        Some("core.net.resolveLastKnown".to_owned())
     );
-    assert!(r.bootstrap_used);
+    let fresh = resolve_all(&hosts[..1], lookup, &cancel).await.unwrap();
+    assert_eq!(fresh.warning, None);
+    let forged = ["fresh.example".to_owned(), "forged.example".into()];
     assert_eq!(
-        r.warning().map(|m| m.key.into_owned()),
-        Some("engine.xray.resolve.bootstrapFallback".to_owned())
+        resolve_all(&forged, lookup, &cancel).await,
+        Err(ResolveFault::Poisoned)
     );
-    let gone = ["missing.invalid".to_owned()];
+}
+
+/// TUN down, IP literals are answered without any lookup (none reaches the resolvers here).
+#[tokio::test]
+async fn direct_literals_need_no_lookup() {
+    let cancel = CancellationToken::new();
+    let hosts = ["192.0.2.1".to_owned(), "[2001:db8::1]".into()];
+    let r = resolve_hosts(&hosts, ResolvePath::Direct, &cancel)
+        .await
+        .unwrap();
     assert_eq!(
-        resolve_hosts(&gone, path, &cancel).await,
-        Err(ResolveFault::Failed)
+        r.addrs["[2001:db8::1]"],
+        "2001:db8::1".parse::<IpAddr>().unwrap()
+    );
+    assert_eq!(r.warning, None);
+    let local = ["127.0.0.1".to_owned()];
+    assert_eq!(
+        resolve_hosts(&local, ResolvePath::Direct, &cancel).await,
+        Err(ResolveFault::Sinkhole)
     );
 }

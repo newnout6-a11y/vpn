@@ -110,6 +110,32 @@ fn row_signal_order() {
     );
 }
 
+/// ENGINE-GAPS decision 3: an engine refusal is its own neutral mark, never "dead key"; the
+/// row menu's engine ids map to the three choices and nothing else.
+#[test]
+fn engine_verdict_and_menu_ids() {
+    let refused = KeyHealth {
+        online: false,
+        latency_ms: None,
+        reason: Some(KeyHealthReason::from_code("engine-setting")),
+        checked_at: 1,
+    };
+    assert_eq!(refused.reason, Some(KeyHealthReason::EngineSetting));
+    assert_eq!(KeyHealthReason::EngineSetting.code(), "engine-setting");
+    assert_eq!(
+        row_signal(PingState::Unmeasured, Some(&refused), OnlineStatus::Offline),
+        RowSignal::Engine
+    );
+    use vpnte_base::types::{Engine, EnginePref};
+    for (id, pref) in ENGINE_ITEMS {
+        assert_eq!(engine_of_item(id), Some(pref));
+    }
+    assert_eq!(engine_of_item("ping"), None);
+    assert_eq!(engine_name(Engine::SingBox), "sing-box");
+    assert_eq!(engine_name(Engine::Xray), "Xray");
+    assert_eq!(ENGINE_ITEMS[0].1, EnginePref::Auto);
+}
+
 #[test]
 fn health_reason_codes_round_trip() {
     for code in ["auth-failed", "hy2-udp-blocked", "no-outbound", "timeout"] {

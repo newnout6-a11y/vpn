@@ -1,6 +1,7 @@
 //! The engines as the actor drives them: sing-box ([`CoreProc`]), the two Xray slots
 //! ([`Slots`]) and the few network reads around them ([`Engines`]). [`RealEngines`] runs the
-//! bundled binaries through `vpnte_engine`; the actor tests use fakes.
+//! bundled binaries through `vpnte_engine` (its slot egress probes wait for the app's
+//! [`HandshakeGate`]); the actor tests use fakes.
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use vpnte_engine::slot::{Slot, SlotEndpoint};
 use vpnte_engine::tags::{PROXY_OUT, SLOT_TAGS};
 use vpnte_engine::xray_config::{ResolveFault, ResolvePath, Resolved, resolve_hosts};
 use vpnte_engine::xray_process::{SlotLaunch, XrayError, XrayEvent, XraySupervisor};
+use vpnte_profiles::model::Profile;
 
 /// One running sing-box (the real one: `SingBoxProcess`). Dropping the last handle kills it.
 #[async_trait]
@@ -80,16 +82,19 @@ pub trait Engines: Send + Sync {
     async fn select(&self, clash: &ClashEndpoint, slot: Slot) -> AppResult<()>;
     /// `(connection id, downloaded bytes)` of the open connections leaving through the upstream.
     async fn upstream_downloads(&self, clash: &ClashEndpoint) -> AppResult<Vec<(String, u64)>>;
-    /// Resolves Xray's server names (Xray itself must never resolve: it would loop).
+    /// Resolves server names before an engine dials them: Xray's (Xray itself must never
+    /// resolve: it would loop) and a native profile's (pinned, see `pin`).
     async fn resolve(
         &self,
         hosts: &[String],
         path: ResolvePath,
         cancel: &CancellationToken,
     ) -> Result<Resolved, ResolveFault>;
-    /// Public IPv4 seen through an authenticated loopback SOCKS listener (a staged slot).
+    /// Public IPv4 seen through an authenticated loopback SOCKS listener (a staged slot): each
+    /// echo request is a new handshake to `server`, the slot's upstream.
     async fn egress_via(
         &self,
+        server: &Profile,
         port: u16,
         creds: &Creds,
         cancel: &CancellationToken,
@@ -100,6 +105,17 @@ pub trait Engines: Send + Sync {
     async fn local_proxy(&self, addr: &HostPort, limit: Duration) -> AppResult<Option<PathBuf>>;
     /// IPv4 resolvers of the physical adapters (empty when unreadable).
     async fn physical_dns(&self) -> Vec<Ipv4Addr>;
+}
+
+/// Admits the probe handshakes the runtime makes to a server. RU networks freeze a server name
+/// for ~120 s after ~3 new TLS handshakes within a minute (Nov 2026), so the slot's egress probe
+/// shares the app's handshake budget with every other check; this crate cannot depend on the
+/// probes, the app hands the budget in.
+#[async_trait]
+pub trait HandshakeGate: Send + Sync {
+    /// Waits for a handshake slot to `server`; `Err` = not now (the budget's "retry in N s") or
+    /// cancelled.
+    async fn admit(&self, server: &Profile, cancel: &CancellationToken) -> AppResult<()>;
 }
 
 #[async_trait]
@@ -166,6 +182,7 @@ pub struct RealEngines {
     singbox: PathBuf,
     xray: PathBuf,
     logs: Option<PathBuf>,
+    gate: Option<Arc<dyn HandshakeGate>>,
 }
 
 impl RealEngines {
@@ -175,15 +192,33 @@ impl RealEngines {
             singbox,
             xray,
             logs,
+            gate: None,
         }
+    }
+
+    /// Every egress probe through a slot first waits for `gate` (the app's handshake budget).
+    #[must_use]
+    pub fn with_gate(mut self, gate: Arc<dyn HandshakeGate>) -> Self {
+        self.gate = Some(gate);
+        self
     }
 }
 
-/// The first public IP an echo service reports through `route`.
-async fn echo(route: &Route, timeout: Duration, cancel: &CancellationToken) -> AppResult<IpAddr> {
+/// The first public IP an echo service reports through `route`. With `admit`, every request
+/// first takes a handshake slot of the server behind the route: the fallback service is a new
+/// connection, and an unbudgeted retry against a freezing server extends the freeze.
+async fn echo(
+    route: &Route,
+    timeout: Duration,
+    admit: Option<(&dyn HandshakeGate, &Profile)>,
+    cancel: &CancellationToken,
+) -> AppResult<IpAddr> {
     let client = client_for(route, timeout)?;
     let ask = async {
         for url in ECHO_URLS {
+            if let Some((gate, server)) = admit {
+                gate.admit(server, cancel).await?;
+            }
             let answer = match client.get(url).send().await {
                 Ok(resp) if resp.status().is_success() => resp.text().await.ok(),
                 _ => None,
@@ -266,17 +301,19 @@ impl Engines for RealEngines {
 
     async fn egress_via(
         &self,
+        server: &Profile,
         port: u16,
         creds: &Creds,
         cancel: &CancellationToken,
     ) -> AppResult<IpAddr> {
         let addr = HostPort::new("127.0.0.1", port)?;
         let route = Route::proxy(ProxyKind::Socks5, &addr, Some(creds));
-        echo(&route, EGRESS_VIA_BUDGET, cancel).await
+        let admit = self.gate.as_deref().map(|gate| (gate, server));
+        echo(&route, EGRESS_VIA_BUDGET, admit, cancel).await
     }
 
     async fn egress(&self, timeout: Duration, cancel: &CancellationToken) -> AppResult<IpAddr> {
-        echo(&Route::Direct, timeout, cancel).await
+        echo(&Route::Direct, timeout, None, cancel).await
     }
 
     async fn local_proxy(&self, addr: &HostPort, limit: Duration) -> AppResult<Option<PathBuf>> {

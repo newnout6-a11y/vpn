@@ -1,6 +1,6 @@
 //! What lists render: rows and groups without secrets, plus the memory-only pings.
 use vpnte_base::Msg;
-use vpnte_base::types::{ClientDevice, UnixMs};
+use vpnte_base::types::{ClientDevice, EnginePref, UnixMs};
 use vpnte_profiles::countries::Iso2;
 use vpnte_profiles::model::SubscriptionMeta;
 
@@ -28,6 +28,8 @@ pub struct ServerSummary {
     pub server: String,
     pub port: u16,
     pub device: ClientDevice,
+    /// The server's own engine (`Auto` = the setting).
+    pub engine: EnginePref,
     /// Verified country, else the one the name claims.
     pub country: Option<Iso2>,
     pub country_verified: bool,
@@ -53,6 +55,7 @@ impl ServerSummary {
             server: row.server.clone(),
             port: row.port,
             device: row.device,
+            engine: row.engine,
             country: row.display_country(),
             country_verified: row.country.is_some(),
             missing_since: row.missing_since,

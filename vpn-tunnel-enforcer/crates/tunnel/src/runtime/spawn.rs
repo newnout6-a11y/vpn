@@ -150,6 +150,7 @@ pub(super) fn running_status(s: &Session, attempt: u8) -> TunStatus {
         started_at: Some(s.started_at),
         restart_attempt: attempt,
         capture: Some(s.req.capture),
+        engine: Some(s.engine),
         session: Some(s.endpoints.clone()),
     }
 }

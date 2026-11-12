@@ -18,6 +18,7 @@ mod project;
 mod proxies;
 #[cfg(test)]
 mod tests;
+mod verdict;
 
 use std::any::Any;
 use std::future::Future;
@@ -30,16 +31,17 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::i18n::Lang;
-use vpnte_base::types::{ClientDevice, Level, Notice};
+use vpnte_base::types::{ClientDevice, EnginePref, Level, Notice};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::ops::Source;
+use vpnte_engine::xray_config::{Decision, select_engine, server_pref};
 use vpnte_probes::live::LiveCheckService;
 use vpnte_servers::model::{GroupId, ProfileId};
 use vpnte_servers::store::Servers;
 use vpnte_tunnel::lifecycle::ConnError;
 use vpnte_ui::servers::{
-    AddTarget, BatchProgress, BatchResult, CountryCheck, ExportReport, GeoInfo, ImportReport,
-    KeyHealth, LiveCheck, LiveMode, LiveProgress, ProbeReport, ProxyStartReport, RefreshOutcome,
+    AddTarget, BatchProgress, BatchResult, CountryCheck, ExportReport, GeoInfo, HealthReport,
+    ImportReport, LiveCheck, LiveMode, LiveProgress, ProbeReport, ProxyStartReport, RefreshOutcome,
     SelectOutcome, ServersApi, ServersView,
 };
 
@@ -353,7 +355,7 @@ impl ServersApi for ServersBackend {
         .await
     }
 
-    async fn check_group_health(&self, id: &str) -> AppResult<Vec<(String, KeyHealth)>> {
+    async fn check_group_health(&self, id: &str) -> AppResult<HealthReport> {
         let (shared, id) = (self.shared.clone(), GroupId::from(id));
         let shutdown = &self.shared.backend.shutdown;
         cancellable(shutdown, |token| checks::group_health(shared, id, token)).await
@@ -361,6 +363,10 @@ impl ServersApi for ServersBackend {
 
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()> {
         job(set_device(self.shared.clone(), ProfileId::from(id), device)).await
+    }
+
+    async fn set_engine(&self, id: &str, engine: EnginePref) -> AppResult<()> {
+        job(set_engine(self.shared.clone(), ProfileId::from(id), engine)).await
     }
 
     async fn probe(&self, id: &str) -> AppResult<ProbeReport> {
@@ -488,6 +494,34 @@ async fn set_device(shared: Arc<Shared>, id: ProfileId, device: ClientDevice) ->
         // Switching to the same server re-reads its profile, so the new persona applies now.
         let done = shared
             .backend
+            .tunnel()?
+            .switch_server(id, Source::Ui)
+            .await
+            .map_err(AppError::from)?;
+        warn(&shared, done.warnings);
+    }
+    Ok(())
+}
+
+/// Sets the server's own engine. A forced engine that cannot run the key is refused with the
+/// selection's own sentence (nothing stored); the server our tunnel runs on reconnects with it.
+async fn set_engine(shared: Arc<Shared>, id: ProfileId, engine: EnginePref) -> AppResult<()> {
+    let backend = &shared.backend;
+    let row = backend.servers.get(&id).ok_or_else(server_not_found)?;
+    if engine != EnginePref::Auto {
+        let profile = blocking(move || row.profile()).await?;
+        let setting = backend.settings.read(|s| s.proxy_engine);
+        if let Decision::Rejected(reject) = select_engine(&profile, server_pref(setting, engine)) {
+            return Err(reject.into());
+        }
+    }
+    let servers = backend.servers.clone();
+    let target = id.clone();
+    blocking(move || servers.set_profile_engine(&target, engine)).await?;
+    shared.publish();
+    if shared.session_server().as_ref() == Some(&id) {
+        // Switching to the same server re-reads its row, so the new engine applies now.
+        let done = backend
             .tunnel()?
             .switch_server(id, Source::Ui)
             .await

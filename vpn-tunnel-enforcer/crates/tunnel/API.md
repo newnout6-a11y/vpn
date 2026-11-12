@@ -19,7 +19,11 @@ history and notices).
 
 ## `api` — shared types, `trait Runtime`
 ```rust
-pub struct VpnProfile { pub id: String, pub profile: Arc<Profile>, pub device: Option<ClientDevice> }
+pub struct VpnProfile { pub id: String, pub profile: Arc<Profile>, pub device: Option<ClientDevice>,
+    pub engine: EnginePref /* the server's own choice; Auto = StartRequest::engine */ }
+pub use vpnte_engine::xray_config::SelectReason;
+pub struct EngineRun { pub kind: Engine, pub reason: Option<SelectReason> /* None: local upstream proxy */ }
+                                                                     // Copy, Serialize camelCase
 pub enum Mode { LocalProxy { addr: String, kind: ProxyKind }, DirectVpn { profile: VpnProfile } }
 impl Mode { pub fn kind(&self) -> ModeKind }
 pub enum ModeKind { LocalProxy, DirectVpn }                         // "localProxy" / "directVpn"
@@ -28,8 +32,8 @@ pub enum CaptureKind { Tun, Proxy }                                  // "tun" / 
 pub struct StartRequest { pub mode: Mode, pub capture: CaptureKind, pub kill_switch: KillSwitchLevel,
     pub public_wifi: bool, pub stealth: bool, pub adaptive: AdaptiveMode, pub engine: EnginePref,
     pub origin: Origin }                                             // capture: a strategy the host lacks -> Permission
-pub struct StartReceipt { pub generation: u64, pub pid: u32, pub started_at: UnixMs, pub engine: Engine,
-    pub warnings: Vec<Msg> }
+pub struct StartReceipt { pub generation: u64, pub pid: u32, pub started_at: UnixMs, pub engine: EngineRun,
+    pub warnings: Vec<Msg> }                                         // warnings include Xray's dropped settings
 pub struct StopOptions { pub preserve_protection: bool, pub preserve_last: bool }   // Default = full stop
 pub struct StopReceipt { pub operation_id: String /* stop_<32 hex> */, pub ok: bool, pub runtime_stopped: bool,
     pub forced: bool, pub protection_released: Option<bool>, pub baseline_restored: Option<bool>,
@@ -43,6 +47,7 @@ pub struct TunStatus { pub running: bool, pub mode: Option<ModeKind>, pub proxy_
     pub pid: Option<u32>, pub warning: Option<Msg>, pub proxy_reachable: bool /* Default true */,
     pub started_at: Option<UnixMs>, pub restart_attempt: u8,
     pub capture: Option<CaptureKind> /* Some while a session runs; omitted from JSON when None */,
+    pub engine: Option<EngineRun> /* Some while a session runs; omitted from JSON when None */,
     pub session: Option<SessionEndpoints> /* #[serde(skip)]: secrets never serialized */ }
 pub struct SessionEndpoints { pub clash_port: u16, pub clash_secret: String, pub direct: ProxyEndpoint,
     pub probe: Option<ProxyEndpoint>, pub tun_luid: Option<u64>, pub tun_alias: Option<String>,
@@ -70,7 +75,9 @@ pub enum SwitchPhase { Stage, Probe, Select, Confirm, Commit, Restore, ConfirmPr
 pub struct SwitchFailure { pub phase: SwitchPhase, pub message: String }
 pub struct SwitchReceipt { pub outcome: SwitchOutcome, pub committed: bool, pub active_slot: Option<Slot>,
     pub previous_preserved: bool, pub candidate_stopped: bool, pub previous_stopped: bool,
-    pub ownership_lost: bool, pub failures: Vec<SwitchFailure> }    // Default = "failed"
+    pub ownership_lost: bool, pub failures: Vec<SwitchFailure>,
+    pub engine: Option<EngineRun> /* the committed candidate's */, pub warnings: Vec<Msg> }
+                                                                     // Default = "failed"
 impl SwitchReceipt { pub fn verified(&self) -> bool }
 pub type OwnerCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 #[async_trait] pub trait Runtime: Send + Sync {
@@ -96,6 +103,13 @@ watch is updated before the matching `Status` event; every event of an operation
 the call returns; native generations strictly increase per start (lane or crash restart), one
 `StartFinished` per `StartBegan`, `StopFinished.generation` = the run it ended; the runtime sends
 no notices.
+Engine choice (owner decision 2026-11-11, no silent engine): decided once per start, before any
+effect, by `select_engine(profile, server_pref(req.engine, profile.engine))`; a refusal is the
+start's `Validation` error with the engine's own message (forced Xray never starts sing-box). The
+`EngineRun` (engine + reason) is in `StartReceipt`, `TunStatus::engine`, a committed
+`SwitchReceipt` and `SessionView`; history keeps the engine (`Evidence::proxy_engine`). When Xray
+runs, `xray_config::warnings(profile, stealth || adaptive == TlsCompatibility)` join the start's
+and the in-place switch's warnings (`Done::warnings`).
 
 ## `fsm` — pure connection state machine (no I/O)
 ```rust
@@ -236,7 +250,8 @@ pub enum ConnError { Refused(Msg), NoServer(Msg), Cancelled(Msg), Timeout(Msg), 
 impl ConnError { pub fn kind(&self) -> ErrorKind /* Refused|NoServer = Conflict */; pub fn user_msg(&self) -> Msg;
     pub fn warnings(&self) -> &[Msg] }                               // From<ConnError> for AppError
 pub struct SessionView { pub owner: Owner /* holder */, pub profile_id: String, pub profile_name: String,
-    pub mode: SessionMode, pub generation: Option<u64>, pub adaptive: AdaptiveMode, pub started_at: UnixMs }
+    pub mode: SessionMode, pub generation: Option<u64>, pub adaptive: AdaptiveMode, pub started_at: UnixMs,
+    pub engine: Option<EngineRun> }                                  // history evidence: proxy_engine
 pub enum SessionEvent { Up(SessionView), Ended { session: SessionView, outcome: OutcomeKind } }
 pub struct ShutdownReport { pub engines_stopped: bool, pub soft_restored: bool, pub capture_stopped: bool,
     pub timed_out: bool }
@@ -370,12 +385,17 @@ pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self }   // + Defa
     async fn upstream_downloads(&self, clash: &ClashEndpoint) -> AppResult<Vec<(String, u64)>>;
     async fn resolve(&self, hosts: &[String], path: ResolvePath, cancel: &CancellationToken)
         -> Result<Resolved, ResolveFault>;
-    async fn egress_via(&self, port: u16, creds: &Creds, cancel: &CancellationToken) -> AppResult<IpAddr>;
+    async fn egress_via(&self, server: &Profile, port: u16, creds: &Creds, cancel: &CancellationToken)
+        -> AppResult<IpAddr>;   // staged slot's SOCKS; each echo request = a new handshake to `server`
     async fn egress(&self, timeout: Duration, cancel: &CancellationToken) -> AppResult<IpAddr>;
     async fn local_proxy(&self, addr: &HostPort, limit: Duration) -> AppResult<Option<PathBuf>>;
     async fn physical_dns(&self) -> Vec<Ipv4Addr>; }
+// the app's handshake budget (probe discipline): the tunnel cannot depend on vpnte-probes
+#[async_trait] pub trait HandshakeGate: Send + Sync {
+    async fn admit(&self, server: &Profile, cancel: &CancellationToken) -> AppResult<()>; }  // Err: deferred / cancelled
 pub struct RealEngines;
-impl RealEngines { pub fn new(singbox: PathBuf, xray: PathBuf, logs: Option<PathBuf>) -> Self }  // canonical paths
+impl RealEngines { pub fn new(singbox: PathBuf, xray: PathBuf, logs: Option<PathBuf>) -> Self   // canonical paths
+    pub fn with_gate(self, gate: Arc<dyn HandshakeGate>) -> Self }   // every slot echo request waits for a slot
 ```
 Behaviour the caller can rely on: one task serialises every operation (a start waits for the one in
 flight); `stop()` cancels a start / switch / restart in flight and waits for its compensation;
@@ -391,6 +411,17 @@ restarts, preserved stops and protected restarts reuse it; an unverified release
 one); `check` = the port accepts (3 probes), `Lost` ends the core as a crash. A Tun start without
 `RuntimeDeps::tun` -> `Permission`, `tunnel.runtime.tunUnavailable`, before anything runs.
 The runtime never calls `Protection::set_level`: the owner of the settings keeps the level in sync.
+Server names (before any effect, with `Engines::resolve`): an Xray cold start resolves its graph's
+names with `ResolvePath::Direct` (`resolve_server`: DoH / TCP chain, OS resolver, last known
+address; a failure fails the start, `engine.xray.resolve.*`), switches with the TUN up via
+`dns-bootstrap-in`. A native sing-box profile's dialed names are resolved the same way and pinned
+into the fragment: sing-box dials the address while the name stays its TLS server name and
+WebSocket / HTTP-upgrade / HTTP host (as sing-box sent them before); its `domain_resolver` could
+name only one DNS server (DoH 1.1.1.1). A literal needs nothing; a name that cannot be pinned (no
+address, an address the provider's resolver strategy would not dial, gRPC without TLS, Shadowsocks'
+v2ray-plugin over TLS without `host`) keeps
+sing-box's own lookup and `StartReceipt::warnings` gets `tunnel.runtime.serverNotPreResolved`;
+a last known address adds `core.net.resolveLastKnown`.
 `TunStatus::session` carries the Clash secret and the loopback proxy passwords: serde skips it and
 `Debug` hides them; never format its fields into a log.
 
@@ -462,6 +493,7 @@ cleaning up in the background. `Done::warnings` / `ConnError::warnings` are extr
 | `tunnel.warning.{foreignTunUnverified,releaseUnverified}` | `TunWarning::msg` | — |
 | `tunnel.runtime.{alreadyRunning,actorGone,notRunning,noLastStart,previousNotStopped,proxyAddressInvalid,proxyNotListening,profileUnusable,egressUnknown,fullStopRan,stopIncomplete,restartStopFailed,restartCancelled,switchUnconfirmed}` | runtime errors / warnings | `addr` (`proxyNotListening`) |
 | `tunnel.runtime.tunSetup.{adapter,protection,routes}` | TUN bring-up failures (`TUN_SETUP_KEY_PREFIX`) | — |
+| `tunnel.runtime.serverNotPreResolved` | start warning: a native server name keeps sing-box's own lookup | — |
 | `tunnel.runtime.tunUnavailable`, `tunnel.runtime.proxy.{strictUnavailable,notAccepting}` | strategy refusals, proxy readiness | `port` (`notAccepting`) |
 | `tunnel.runtime.cleanup.{exitUnproven,xray,protection}` | compensation / stop warnings, `Error{warning}` | — |
 | `tunnel.runtime.watchdog.{proxyDown,upstreamDown,slotExited}` | `ProxyDown{reason}` | `addr` / `name` / — |

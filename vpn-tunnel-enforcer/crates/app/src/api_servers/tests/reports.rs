@@ -3,7 +3,8 @@
 use vpnte_base::types::ClientDevice;
 use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::secret::Secret;
-use vpnte_probes::key_health::{self, HealthReason as ProbeReason};
+use vpnte_probes::discipline::{Classification, Reaction, Verdict};
+use vpnte_probes::key_health::{self, HealthReason as ProbeReason, KeyCheck};
 use vpnte_profiles::countries::Iso2;
 use vpnte_profiles::export::Shared as SharedKey;
 use vpnte_profiles::model::{SkipReason, Skipped, SubscriptionMeta};
@@ -251,9 +252,16 @@ fn health_updates_keep_identity_and_trace_country() {
         engine: None,
     };
     let dead = key_health::KeyHealth::offline(ProbeReason::Hy2UdpBlocked, None);
+    let check = |health| KeyCheck {
+        health,
+        verdict: Classification {
+            verdict: Verdict::Healthy,
+            reaction: Reaction::None,
+        },
+    };
     let checked = vec![
-        ((ProfileId::from("a"), Some([1; 16])), alive.clone()),
-        ((ProfileId::from("sealed"), None), dead.clone()),
+        ((ProfileId::from("a"), Some([1; 16])), check(alive.clone())),
+        ((ProfileId::from("sealed"), None), check(dead.clone())),
     ];
     let stored = updates(&checked);
     assert_eq!(stored.len(), 1, "a sealed key has no identity to match");

@@ -15,7 +15,7 @@
       "defaultFingerprint": "Провайдер не задал отпечаток TLS: используется отпечаток приложения по умолчанию",
       "note": {
         "naiveInsecureIgnored": "Naive не умеет отключать проверку сертификата: параметр insecure сохранён, но не применяется",
-        "certPinNotEnforced": "Ключ закрепляет сертификат сервера, но ядро пока не умеет проверять это закрепление",
+        "certPinNotEnforced": "Ключ закрепляет сертификат сервера: на sing-box закрепление не проверяется, на Xray проверяется",
         "alterIdNormalized": "alterId {{alterId}} заменён на 0 (AEAD)",
         "fingerprintDroppedOnQuic": "Отпечаток TLS от провайдера не применяется к QUIC",
         "unsupportedField": "Неподдерживаемый параметр {{field}} пропущен",

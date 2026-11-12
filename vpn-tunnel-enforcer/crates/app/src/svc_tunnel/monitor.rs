@@ -1,6 +1,9 @@
 //! [`Monitor`] and [`Confirmations`] over the public-IP monitor (monitoring §3.4, §6.2): one
 //! monitored connection per tunnel session, the home IP read through the engine's direct-out,
 //! the exit adopted through the session's own path (TUN-bound sockets or the mixed inbound).
+//! Between sessions the home IP comes from [`home`] (owner decision 13).
+mod home;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -11,12 +14,13 @@ use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{Creds, Loopback};
 use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
+use vpnte_probes::geo::Geo;
 use vpnte_probes::ip_monitor::{AdoptError, ConnId, IpMonitor};
 use vpnte_probes::public_ip::{Family, IpReader, IpRoute, WAVE_BUDGET};
 use vpnte_tunnel::api::{CaptureKind, TunStatus};
 use vpnte_tunnel::lifecycle::Monitor;
 use vpnte_tunnel::runtime::Confirmations;
-use vpnte_winnet::adapters::TUN_V4;
+use vpnte_winnet::adapters::{self, TUN_V4};
 
 use super::decide::check_interval;
 use super::leaks::Leaks;
@@ -24,6 +28,8 @@ use super::leaks::Leaks;
 /// Exit adoption after a connect: up to 4 reads, 2 s apart (monitoring §3.4).
 const ADOPT_ATTEMPTS: u32 = 4;
 const ADOPT_PAUSE: Duration = Duration::from_secs(2);
+/// Debounce of the network-change watch behind the home-address reads.
+const NET_SETTLE: Duration = Duration::from_millis(1500);
 
 /// The public-IP side of a session.
 pub(super) struct IpWatch {
@@ -63,6 +69,23 @@ impl IpWatch {
     /// The reader the leak check shares (one 429 backoff for the process).
     pub fn reader(&self) -> &IpReader {
         &self.reader
+    }
+
+    /// Starts the home-address reads between sessions under `cancel`; `geo` is the switch of the
+    /// "no online lookups" setting, kept in step by whoever saves it.
+    pub fn spawn_home_reads(&self, geo: Geo, cancel: CancellationToken) {
+        let changes = adapters::watch_network(NET_SETTLE, cancel.clone())
+            .inspect_err(
+                |err| tracing::warn!(%err, "no network-change watch: home IP read at start only"),
+            )
+            .ok();
+        let reads = home::HomeReads {
+            sampler: self.reader.clone(),
+            ip: self.ip.clone(),
+            geo,
+            status: self.status.clone(),
+        };
+        tokio::spawn(reads.run(changes, cancel));
     }
 
     fn cancel_adoption(&self) {

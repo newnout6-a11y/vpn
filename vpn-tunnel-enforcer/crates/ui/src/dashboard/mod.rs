@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use dioxus::prelude::*;
 use tokio::sync::watch;
-use vpnte_base::types::{Notice, Verdict};
+use vpnte_base::types::{Engine, Notice, Verdict};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_view::identity::{ExitIp, HomeIp};
 use vpnte_view::labels::FirewallStatus;
@@ -62,6 +62,17 @@ pub struct DashboardView {
     pub smart_ru: bool,
     /// Adapter description of another VPN found while ours is down (`happ-tun (172.18.0.1)`).
     pub foreign_vpn: Option<String>,
+    /// The engine that carries the running session and why (`None` while nothing runs).
+    pub engine: Option<EngineLine>,
+}
+
+/// The identity column's engine caption («Xray · REALITY»): never a silent choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineLine {
+    pub engine: Engine,
+    /// Why it was chosen (`engine.xray.reason.*`); `None` when nothing was chosen (a local
+    /// upstream proxy behind sing-box).
+    pub reason: Option<Msg>,
 }
 
 /// Data and actions of the start page.

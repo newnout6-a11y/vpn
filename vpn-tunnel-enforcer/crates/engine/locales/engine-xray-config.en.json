@@ -3,7 +3,19 @@
     "xray": {
       "reject": {
         "nativeXray": "This JSON profile contains Xray settings; choose Auto or Xray to keep its route.",
-        "xrayTransport": "The transport settings require Xray; choose Auto or Xray."
+        "xrayTransport": "The transport settings require Xray; choose Auto or Xray.",
+        "noXrayClient": "Xray has no {{protocol}} client: this server runs only on sing-box. Choose «Auto» in the connection settings or sing-box for this server.",
+        "xrayForm": "Xray cannot run {{protocol}} with the transport or TLS of this profile. Choose «Auto» in the connection settings or sing-box for this server."
+      },
+      "reason": {
+        "default": "main engine",
+        "protocol": "Xray lacks this protocol",
+        "preference": "chosen by you",
+        "reality": "REALITY",
+        "xrayTransport": "Xray transport",
+        "nativeXray": "provider's Xray config",
+        "certPin": "pinned certificate",
+        "singBoxOnly": "sing-box-only feature"
       },
       "singBoxOnly": {
         "h2Transport": "The profile uses features Xray does not have (HTTP/2 transport); choose Auto or sing-box.",
@@ -50,7 +62,7 @@
       "resolve": {
         "failed": "Could not resolve the Xray server address before starting the tunnel.",
         "sinkhole": "DNS returned a blocked address for the Xray server; the tunnel was not started.",
-        "bootstrapFallback": "The system DNS did not answer; the Xray server address was resolved through the fallback DNS server."
+        "poisoned": "The DNS answers for the Xray server name were forged (it looks like blocking by the network) and no trustworthy DNS server could be reached; the tunnel was not started."
       }
     }
   }

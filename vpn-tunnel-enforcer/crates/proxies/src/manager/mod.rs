@@ -57,6 +57,10 @@ pub struct ProxyProfile {
     pub country: Option<String>,
     pub group_id: Option<String>,
     pub profile: Profile,
+    /// The server's own client device (`None`: the source's default, [`EngineChoice::device`]).
+    pub device: Option<ClientDevice>,
+    /// The server's own engine (`Auto`: the source's preference, [`EngineChoice::pref`]).
+    pub engine: EnginePref,
     /// Key health (`healthStatus` of the server, else its ping status).
     pub status: ServerStatus,
     pub ping_ms: Option<u32>,
@@ -83,6 +87,16 @@ pub struct EngineChoice {
     pub device: ClientDevice,
 }
 
+impl EngineChoice {
+    /// The choice for one server: its own engine and device win, as for the main tunnel.
+    pub fn for_profile(self, p: &ProxyProfile) -> EngineChoice {
+        EngineChoice {
+            pref: vpnte_engine::xray_config::server_pref(self.pref, p.engine),
+            device: p.device.unwrap_or(self.device),
+        }
+    }
+}
+
 /// Where the manager gets servers from; the app implements it over its server list.
 #[async_trait::async_trait]
 pub trait ProfileSource: Send + Sync {
@@ -90,7 +104,8 @@ pub trait ProfileSource: Send + Sync {
     fn profiles(&self) -> Vec<ProxyProfile>;
     /// The server the main VPN uses, if any: auto-picks avoid it (same exit IP).
     fn active_vpn_profile_id(&self) -> Option<String>;
-    /// Engine preference and client device for new starts.
+    /// The app's engine preference and default client device for new starts; a server's own
+    /// engine and device win ([`EngineChoice::for_profile`]).
     fn engine_choice(&self) -> EngineChoice;
     /// Key health check of a server group (`POST /profiles/healthcheck`); the error's kind
     /// picks the HTTP status (see `ProxyError::group_health`).

@@ -30,6 +30,7 @@ mod config;
 mod crash;
 mod engines;
 mod handle;
+mod pin;
 mod recovery;
 mod spawn;
 mod start;
@@ -44,7 +45,7 @@ pub use capture::{
     Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, ProxyCapture, TunCapture,
     TunForm, tun_form,
 };
-pub use engines::{CoreProc, Engines, RealEngines, Slots};
+pub use engines::{CoreProc, Engines, HandshakeGate, RealEngines, Slots};
 pub use handle::TunnelHandle;
 
 /// The inputs of one start that live in the user's stores, as one plain serialisable snapshot

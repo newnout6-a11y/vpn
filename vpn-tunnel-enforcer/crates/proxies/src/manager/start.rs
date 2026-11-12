@@ -116,6 +116,7 @@ impl Inner {
             Action::Rotate => "rotate",
             Action::Connect => "connect",
         };
+        let choice = choice.for_profile(&picked);
         let prepared = launch::prepare(&picked.profile, port, choice, &self.names).await;
         if let Some(old) = old {
             // Replaced only now that the new config is built and its endpoint resolved.

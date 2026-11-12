@@ -9,11 +9,11 @@ use dioxus::prelude::*;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::AppResult;
-use vpnte_base::types::ClientDevice;
+use vpnte_base::types::{ClientDevice, EnginePref};
 
 use super::live_model::{BatchProgress, BatchResult, LiveCheck, LiveMode, LiveProgress};
 use super::model::{
-    AddTarget, CountryCheck, ExportReport, GeoInfo, ImportReport, KeyHealth, ProbeReport,
+    AddTarget, CountryCheck, ExportReport, GeoInfo, HealthReport, ImportReport, ProbeReport,
     ProxyStartReport, RefreshOutcome, SelectOutcome, ServersView,
 };
 
@@ -78,11 +78,15 @@ pub trait ServersApi: 'static {
     async fn rename_group(&self, id: &str, name: String) -> AppResult<()>;
     /// Also for recovered (orphan) group ids: applies the choice to the servers carrying the id.
     async fn delete_group(&self, id: &str, delete_servers: bool) -> AppResult<()>;
-    /// Checks the keys of the group's current (not removed) servers.
-    async fn check_group_health(&self, id: &str) -> AppResult<Vec<(String, KeyHealth)>>;
+    /// Checks the keys of the group's current (not removed) servers; keys that could not be
+    /// checked now (handshake budget, probe setup) are counted in the report.
+    async fn check_group_health(&self, id: &str) -> AppResult<HealthReport>;
 
     /// Device persona of a server; the connected server reconnects.
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()>;
+    /// The server's own engine (`Auto` = the setting); the connected server reconnects, and a
+    /// choice the engine cannot run is refused there with its reason.
+    async fn set_engine(&self, id: &str, engine: EnginePref) -> AppResult<()>;
     /// Passive endpoint facts (no TLS / HTTP to the endpoint).
     async fn probe(&self, id: &str) -> AppResult<ProbeReport>;
     /// Geolocation of the resolved address; `None` when lookups are off or nothing is known.

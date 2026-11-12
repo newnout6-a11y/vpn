@@ -10,7 +10,7 @@ use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 
 use super::*;
 use crate::servers::api::ServersApi;
-use crate::servers::demo_data::test_ip;
+use crate::servers::demo_data::{demo_verdict, test_ip};
 
 #[async_trait::async_trait(?Send)]
 impl ServersApi for DemoServersApi {
@@ -453,7 +453,7 @@ impl ServersApi for DemoServersApi {
         Ok(())
     }
 
-    async fn check_group_health(&self, id: &str) -> AppResult<Vec<(String, KeyHealth)>> {
+    async fn check_group_health(&self, id: &str) -> AppResult<HealthReport> {
         delay(2_000).await;
         let now = now_ms();
         let results: Vec<(String, KeyHealth)> = self
@@ -481,10 +481,19 @@ impl ServersApi for DemoServersApi {
             for (sid, health) in &results {
                 if let Some(s) = v.servers.iter_mut().find(|s| &s.id == sid) {
                     s.health = Some(health.clone());
+                    let kind = if health.online {
+                        VerdictKind::Healthy
+                    } else {
+                        VerdictKind::KeyRejected
+                    };
+                    s.verdict = Some(demo_verdict(kind, None, now));
                 }
             }
         });
-        Ok(results)
+        Ok(HealthReport {
+            results,
+            not_checked: 0,
+        })
     }
 
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()> {
@@ -494,6 +503,13 @@ impl ServersApi for DemoServersApi {
             s.device = device;
             s.fingerprint = None;
         });
+        Ok(())
+    }
+
+    async fn set_engine(&self, id: &str, engine: vpnte_base::types::EnginePref) -> AppResult<()> {
+        delay(300).await;
+        self.known(id)?;
+        self.edit_server(id, |s| s.engine = engine);
         Ok(())
     }
 

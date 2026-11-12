@@ -57,9 +57,9 @@
       "tunnelsUnknown": "Could not tell whether another VPN is already running. Protection was not turned on, to avoid a second tunnel.",
       "noProxyTitle": "AutoPilot found no working proxy",
       "noProxy": "Turn on Proxy mode in your VPN client or enter the address manually. Until then it is safer not to redirect anything.",
-      "successTitle": "AutoPilot turned on Hard TUN",
+      "successTitle": "AutoPilot turned on Tunnel mode",
       "success": "The safe setup was applied automatically: one TUN, one proxy, no double tunnel.",
-      "failedTitle": "AutoPilot could not turn on Hard TUN",
+      "failedTitle": "AutoPilot could not turn on Tunnel mode",
       "failed": "Starting TUN failed.",
       "step": {
         "busy": {
