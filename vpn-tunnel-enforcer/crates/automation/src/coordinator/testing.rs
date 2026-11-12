@@ -174,7 +174,6 @@ impl FakeCoordinator {
 }
 
 /// Driving the session from the adaptive bypass tests.
-#[cfg_attr(not(feature = "automation-adaptive"), allow(dead_code))]
 impl FakeCoordinator {
     /// A tunnel start by someone else (the app's connect path, a crash restart, a switch): the
     /// session becomes the user's and `Started` is emitted.

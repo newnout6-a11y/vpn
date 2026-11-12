@@ -29,13 +29,5 @@ vpnte-winnet.workspace = true
 windows.workspace = true
 zeroize.workspace = true
 
-[features]
-# Build scaffolding: one flag per work package while they are written in parallel.
-default = ["automation-sched", "automation-adaptive", "automation-tweaks", "automation-hardening"]
-automation-sched = []
-automation-adaptive = ["automation-sched"]
-automation-tweaks = []
-automation-hardening = ["automation-tweaks"]
-
 [lints]
 workspace = true

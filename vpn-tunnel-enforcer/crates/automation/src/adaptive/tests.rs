@@ -158,18 +158,31 @@ impl Harness {
     }
 
     fn with_timing(timing: Timing) -> Self {
+        Self::build(timing, None)
+    }
+
+    /// A harness whose sibling fallback reads this network's check verdicts.
+    fn with_verdicts(verdicts: Arc<reaction::Verdicts>) -> Self {
+        Self::build(FAST, Some(verdicts))
+    }
+
+    fn build(timing: Timing, verdicts: Option<Arc<reaction::Verdicts>>) -> Self {
         let dir = TempDir::new("adaptive-task");
         let coord = FakeCoordinator::new();
         let host = FakeHost::new(coord.clone());
         let settings = Arc::new(Store::<Settings>::open(dir.path()));
         let docs = Arc::new(Store::<AdaptiveDoc>::open(dir.path()));
-        let adaptive = Arc::new(Adaptive::with_timing(
+        let mut adaptive = Adaptive::with_timing(
             coord.clone(),
             host.clone(),
             settings.clone(),
             docs.clone(),
             timing,
-        ));
+        );
+        if let Some(verdicts) = verdicts {
+            adaptive = adaptive.with_verdicts(verdicts);
+        }
+        let adaptive = Arc::new(adaptive);
         let cancel = CancellationToken::new();
         tokio::spawn({
             let (a, c) = (adaptive.clone(), cancel.clone());
@@ -488,6 +501,54 @@ async fn full_budget_then_abandon() {
         "the fault stop keeps the failure"
     );
     assert_eq!(h.coord.notices.lock().len(), 1);
+}
+
+/// The check verdicts of this network steer the sibling fallback: a server a check ruled out
+/// is never started, TCP-based siblings go first while UDP is cut.
+#[tokio::test]
+async fn sibling_fallback_follows_the_network_verdicts() {
+    let verdicts = Arc::new(reaction::Verdicts::scripted(true, &["r1"]));
+    let mut h = Harness::with_verdicts(verdicts).ready().await;
+    *h.host.siblings.lock() = vec![
+        Sibling {
+            profile: tls_ws("t2"),
+            latency_ms: Some(1),
+        },
+        Sibling {
+            profile: hy2("h1"),
+            latency_ms: Some(90),
+        },
+        Sibling {
+            profile: reality("r1"),
+            latency_ms: None,
+        },
+    ];
+    h.connect(&tls_ws("t1")).await;
+    assert_eq!(h.done().await.phase, Phase::Failed);
+    use AdaptiveMode::*;
+    assert_eq!(
+        h.coord.restarts(),
+        vec![
+            (TlsCompatibility, None),
+            (MtuCompatibility, None),
+            (MtuCompatibility, Some("t2".to_owned())),
+            (MtuCompatibility, Some("h1".to_owned())),
+        ]
+    );
+}
+
+#[test]
+fn udp_outbounds_are_recognised() {
+    assert!(udp_outbound(&hy2("h").outbound));
+    assert!(!udp_outbound(&tls_ws("t").outbound));
+    assert!(!udp_outbound(&reality("r").outbound));
+    assert!(udp_outbound(&json!({"type": "wireguard"})));
+    assert!(udp_outbound(
+        &json!({"type": "vless", "transport": {"type": "quic"}})
+    ));
+    assert!(udp_outbound(
+        &json!([{"type": "tuic"}, {"type": "shadowtls"}])
+    ));
 }
 
 /// AT-10-003: a sibling whose window gives `[10, null, 20]` is committed once.

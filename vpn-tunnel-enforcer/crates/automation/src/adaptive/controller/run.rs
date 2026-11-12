@@ -12,6 +12,7 @@ use super::{Adaptive, Context, Target};
 use crate::adaptive::window::{self, NEEDED};
 use crate::adaptive::{
     AdaptiveHost, AdaptiveStatus, MAX_SIBLINGS, Phase, capabilities, next_mode, order_siblings,
+    udp_outbound,
 };
 use crate::coordinator::{
     Coordinator, LifecycleEvent, NoticeCategory, OpError, RuntimeId, SessionKind, StopCause,
@@ -348,7 +349,14 @@ impl<C: Coordinator, H: AdaptiveHost> Run<'_, C, H> {
         let Some(active) = self.ctx.profile.clone().filter(|_| allowed) else {
             return self.fail(reason);
         };
-        let candidates = order_siblings(&active, self.a.host.siblings(&active.id));
+        let mut candidates = order_siblings(&active, self.a.host.siblings(&active.id));
+        if let Some(verdicts) = &self.a.verdicts {
+            // Checks on this network: never a ruled-out server, TCP first while UDP is cut.
+            candidates.retain(|c| !verdicts.avoided(&c.profile.id));
+            if verdicts.udp_blocked() {
+                candidates.sort_by_key(|c| udp_outbound(&c.profile.outbound));
+            }
+        }
         let mut provisional = false;
         let mut reason = reason;
         for sibling in candidates.into_iter().take(MAX_SIBLINGS) {

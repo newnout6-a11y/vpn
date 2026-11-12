@@ -10,6 +10,7 @@
 mod controller;
 pub mod identity;
 pub mod learning;
+pub mod reaction;
 mod window;
 
 #[cfg(test)]
@@ -144,6 +145,20 @@ pub fn family(outbound: &Value) -> String {
         if reality { "reality" } else { "" },
         text("/transport/type")
     )
+}
+
+/// The outbound rides UDP (Hysteria, Hysteria2, TUIC, WireGuard, a QUIC transport): what a
+/// network that cuts UDP stops.
+fn udp_outbound(outbound: &Value) -> bool {
+    let o = outbound
+        .as_array()
+        .and_then(|a| a.first())
+        .unwrap_or(outbound);
+    let text = |path: &str| o.pointer(path).and_then(Value::as_str).unwrap_or("");
+    matches!(
+        text("/type"),
+        "hysteria" | "hysteria2" | "tuic" | "wireguard"
+    ) || text("/transport/type") == "quic"
 }
 
 /// Sibling order: another protocol family first, then the lowest known latency, then store

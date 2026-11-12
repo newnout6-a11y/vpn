@@ -55,6 +55,7 @@ fn profile(id: &str) -> ProfileFacts {
         has_outbound: true,
         status: ProfileStatus::Unknown,
         checked_at: None,
+        udp: false,
     }
 }
 
@@ -624,4 +625,33 @@ async fn timer_loop_rotates_when_due() {
             .next_rotation_at
             .is_some_and(|t| t > now_ms() + 60_000)
     );
+}
+
+/// A server a check ruled out on this network (banned, frozen, offline) is never rotated to.
+#[tokio::test]
+async fn servers_ruled_out_on_this_network_are_skipped() {
+    let f = fixture(&["a", "b", "c"], 0, RotationOrder::Sequential);
+    let verdicts = Arc::new(Verdicts::scripted(false, &["b"]));
+    let rotation =
+        Rotation::new(f.store.clone(), f.coord.clone(), f.profiles.clone()).with_verdicts(verdicts);
+    f.live_on("a");
+    assert_eq!(rotation.rotate(RotationTrigger::Timer).await, rotated("c"));
+    assert_eq!(f.switches(), ["c"]);
+}
+
+/// While UDP is cut on this network, a TCP-based profile is preferred over the next UDP one;
+/// without the cut the list order holds.
+#[tokio::test]
+async fn tcp_profiles_go_first_while_udp_is_blocked() {
+    let f = fixture(&["a", "hy2", "c"], 0, RotationOrder::Sequential);
+    f.profiles.facts.lock()[1].udp = true;
+    let blocked = Rotation::new(f.store.clone(), f.coord.clone(), f.profiles.clone())
+        .with_verdicts(Arc::new(Verdicts::scripted(true, &[])));
+    f.live_on("a");
+    assert_eq!(blocked.rotate(RotationTrigger::Timer).await, rotated("c"));
+    let open = Rotation::new(f.store.clone(), f.coord.clone(), f.profiles.clone())
+        .with_verdicts(Arc::new(Verdicts::scripted(false, &[])));
+    assert_eq!(open.rotate(RotationTrigger::Timer).await, rotated("a"));
+    f.live_on("a");
+    assert_eq!(open.rotate(RotationTrigger::Timer).await, rotated("hy2"));
 }

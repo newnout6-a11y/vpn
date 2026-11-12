@@ -23,6 +23,27 @@
         "siblingStartFailed": "Could not connect to a neighbouring server",
         "siblingFailed": "The neighbouring server failed the internet check through the tunnel. Choose another VPN server and connect again.",
         "compatFailed": "Could not apply the compatibility mode"
+      },
+      "reaction": {
+        "cause": {
+          "ipBanned": "The IP of “{{name}}” is blocked: changing the port or transport will not help",
+          "frozen": "The connection to “{{name}}” freezes after the first kilobytes",
+          "offline": "Server “{{name}}” does not respond",
+          "keyRejected": "Server “{{name}}” rejected the key",
+          "handshakeFailed": "Server “{{name}}” rejects the TLS handshake",
+          "udpBlocked": "UDP is blocked on this network"
+        },
+        "action": {
+          "switched": "The connection was switched to “{{name}}”.",
+          "switchedTcp": "The connection was switched to “{{name}}” (a TCP-based transport). TCP-based profiles are preferred until the network changes.",
+          "fingerprint": "Connected with the {{fingerprint}} fingerprint. To use it every time, choose this fingerprint in the profile.",
+          "noAlternative": "There is no suitable other server — choose a server manually.",
+          "autoOff": "Automatic server switching is turned off in the settings — choose another server manually."
+        },
+        "paused": {
+          "title": "Automatic switching paused on this network",
+          "body": "Several servers in a row did not work. Check the network or choose a server manually; switching resumes after the network changes."
+        }
       }
     },
     "autopilot": {

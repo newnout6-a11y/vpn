@@ -23,7 +23,6 @@ where
 }
 
 /// `deserialize_with` for a `BTreeMap<String, T>`: the entries whose value parses.
-#[cfg(feature = "automation-adaptive")]
 pub(crate) fn map<'de, D, T>(d: D) -> Result<std::collections::BTreeMap<String, T>, D::Error>
 where
     D: Deserializer<'de>,

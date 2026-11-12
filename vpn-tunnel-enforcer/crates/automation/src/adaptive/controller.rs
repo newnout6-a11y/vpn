@@ -16,6 +16,7 @@ use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
 
 use super::learning::{AdaptiveDoc, Learning};
+use super::reaction::Verdicts;
 use super::window::Timing;
 use super::{
     AdaptiveHost, AdaptiveStatus, Capabilities, NetworkSnapshot, Phase, ProfileView, capabilities,
@@ -36,6 +37,8 @@ pub struct Adaptive<C: Coordinator, H: AdaptiveHost> {
     shared: Mutex<Shared>,
     retry: Notify,
     timing: Timing,
+    /// What checks found on this network (see [`Adaptive::with_verdicts`]).
+    verdicts: Option<Arc<Verdicts>>,
 }
 
 /// State shared between the app's calls and the task (lock held briefly, never across `.await`).
@@ -110,7 +113,15 @@ impl<C: Coordinator, H: AdaptiveHost> Adaptive<C, H> {
             shared: Mutex::new(Shared::default()),
             retry: Notify::new(),
             timing,
+            verdicts: None,
         }
+    }
+
+    /// Lets the check verdicts of this network steer the sibling fallback (`Reactions::verdicts`):
+    /// a server a check ruled out here is never tried, TCP-based ones go first while UDP is cut.
+    pub fn with_verdicts(mut self, verdicts: Arc<Verdicts>) -> Self {
+        self.verdicts = Some(verdicts);
+        self
     }
 
     /// Status for the UI.

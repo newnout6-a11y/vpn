@@ -17,6 +17,7 @@ use vpnte_base::types::{Level, Notice, Owner, UnixMs, now_ms};
 use vpnte_base::{AppResult, Msg};
 use vpnte_core::store::Store;
 
+use crate::adaptive::reaction::Verdicts;
 use crate::coordinator::{Coordinator, NoticeCategory, OpError, SessionKind, SwitchError};
 
 mod config;
@@ -74,6 +75,9 @@ pub struct ProfileFacts {
     pub status: ProfileStatus,
     /// When `status` was measured.
     pub checked_at: Option<UnixMs>,
+    /// Carried over UDP (Hysteria2, TUIC, WireGuard, a QUIC transport): tried after the
+    /// TCP-based profiles while a check saw UDP cut on this network.
+    pub udp: bool,
 }
 
 impl ProfileFacts {
@@ -166,6 +170,8 @@ pub struct Rotation<C: Coordinator, P: RotationProfiles> {
     store: Arc<Store<RotationConfig>>,
     coord: Arc<C>,
     profiles: Arc<P>,
+    /// What checks found on this network (see [`Rotation::with_verdicts`]).
+    verdicts: Option<Arc<Verdicts>>,
     /// The rotation in flight (single flight); cancelled by a real config change.
     in_flight: Mutex<Option<CancellationToken>>,
 }
@@ -177,8 +183,16 @@ impl<C: Coordinator, P: RotationProfiles> Rotation<C, P> {
             store,
             coord,
             profiles,
+            verdicts: None,
             in_flight: Mutex::new(None),
         }
+    }
+
+    /// Lets the check verdicts of this network steer the pick (`Reactions::verdicts`): a server
+    /// a check ruled out here is skipped, and TCP-based profiles go first while UDP is cut.
+    pub fn with_verdicts(mut self, verdicts: Arc<Verdicts>) -> Self {
+        self.verdicts = Some(verdicts);
+        self
     }
 
     /// The stored config (including the countdown).
@@ -297,7 +311,8 @@ impl<C: Coordinator, P: RotationProfiles> Rotation<C, P> {
             .unwrap_or(cfg.current_index % len);
         // Lazy: probe candidates in rotation order and stop at the first eligible one.
         let mut next = None;
-        for idx in candidate_order(len, base, cfg.order, &mut fastrand::Rng::new()) {
+        let order = candidate_order(len, base, cfg.order, &mut fastrand::Rng::new());
+        for idx in self.tcp_first(order, &cfg.profile_ids) {
             if let Some(facts) = self.eligible(&cfg.profile_ids[idx], live).await {
                 next = Some(facts);
                 break;
@@ -370,6 +385,10 @@ impl<C: Coordinator, P: RotationProfiles> Rotation<C, P> {
     /// "online" verdict or a probe now; unknown and stale verdicts never qualify by themselves.
     async fn eligible(&self, id: &str, live: bool) -> Option<ProfileFacts> {
         let facts = self.profiles.facts(id).filter(ProfileFacts::usable)?;
+        if self.verdicts.as_ref().is_some_and(|v| v.avoided(id)) {
+            // A check on this network found it banned, frozen, offline or refusing us.
+            return None;
+        }
         if live {
             return (facts.status != ProfileStatus::Offline).then_some(facts);
         }
@@ -381,6 +400,15 @@ impl<C: Coordinator, P: RotationProfiles> Rotation<C, P> {
         } else {
             None
         }
+    }
+
+    /// While a check saw UDP cut on this network, the TCP-based candidates go first (the order
+    /// among each kind is kept): a UDP profile would only fail the switch and restore.
+    fn tcp_first(&self, mut order: Vec<usize>, ids: &[String]) -> Vec<usize> {
+        if self.verdicts.as_ref().is_some_and(|v| v.udp_blocked()) {
+            order.sort_by_cached_key(|&idx| self.profiles.facts(&ids[idx]).is_some_and(|f| f.udp));
+        }
+        order
     }
 
     /// Commit, then announce (fix R1: no success notice before the switch held).

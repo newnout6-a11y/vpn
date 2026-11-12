@@ -1,15 +1,17 @@
 # vpnte-automation — API map for dependent crates
 
-Scheduler, profile rotation, AutoPilot, adaptive bypass, reversible Soft-mode tweaks and browser /
-location hardening. The only consumer is `vpnte-app`: it implements the four host traits over the
-tunnel, profiles and probes, spawns the three tasks and wires the lifecycle hooks below.
+Scheduler, profile rotation, AutoPilot, adaptive bypass (with the reactions to the server checks'
+verdicts), reversible Soft-mode tweaks and browser / location hardening. The only consumer is
+`vpnte-app`: it implements the five host traits over the tunnel, profiles and probes, spawns the
+four tasks and wires the lifecycle hooks below.
 
-- **Generic, not `dyn`.** `Coordinator`, `RotationProfiles`, `AdaptiveHost` and `AutoPilotEnv`
-  return `impl Future + Send` (RPITIT, no `async-trait`): implement them on concrete app types and
-  hold `Arc<AppCoordinator>` etc. Every future must be `Send` (the tasks run under `tokio::spawn`).
-- **Three long-running tasks**, each `async fn run(&self, cancel: CancellationToken)`, one runner
-  each: `Scheduler::run`, `Rotation::run`, `Adaptive::run`. They own their state; the UI reads
-  `watch` snapshots. AutoPilot is a one-shot `run(trigger)`.
+- **Generic, not `dyn`.** `Coordinator`, `RotationProfiles`, `AdaptiveHost`, `ReactionHost` and
+  `AutoPilotEnv` return `impl Future + Send` (RPITIT, no `async-trait`): implement them on concrete
+  app types and hold `Arc<AppCoordinator>` etc. Every future must be `Send` (the tasks run under
+  `tokio::spawn`).
+- **Four long-running tasks**, each `async fn run(&self, cancel: CancellationToken)`, one runner
+  each: `Scheduler::run`, `Rotation::run`, `Adaptive::run`, `Reactions::run`. They own their
+  state; the UI reads `watch` snapshots. AutoPilot is a one-shot `run(trigger)`.
 - **Tweaks / hardening are blocking cores with async facades** (`apply` / `rollback` / `status`
   run on tokio's blocking pool; `*_blocking` variants for a thread that may block). One
   `tweaks::Journal` per process is shared by Soft mode, browsers and location.
@@ -204,7 +206,8 @@ pub struct RotationPatch { pub enabled: Option<bool>, pub interval_minutes: Opti
 pub fn candidate_order(len: usize, current: usize, order: RotationOrder, rng: &mut fastrand::Rng) -> Vec<usize>;
 pub enum ProfileStatus { Unknown, Online, Offline }
 pub struct ProfileFacts { pub id: String, pub name: String, pub enabled: bool, pub archived: bool,
-                          pub has_outbound: bool, pub status: ProfileStatus, pub checked_at: Option<UnixMs> }
+                          pub has_outbound: bool, pub status: ProfileStatus, pub checked_at: Option<UnixMs>,
+                          pub udp: bool /* Hysteria2 / TUIC / WireGuard / QUIC transport */ }
 pub trait RotationProfiles: Send + Sync + 'static {   // the app: profile store + offline ping
     fn facts(&self, id: &str) -> Option<ProfileFacts>;
     fn all(&self) -> Vec<ProfileFacts>;                // store order (seeds an empty list)
@@ -221,6 +224,7 @@ impl RotationOutcome { pub fn message(&self) -> Option<Msg>; }  // UI text after
 pub struct Rotation<C: Coordinator, P: RotationProfiles>;
 impl<C: Coordinator, P: RotationProfiles> Rotation<C, P> {
     pub fn new(store: Arc<Store<RotationConfig>>, coord: Arc<C>, profiles: Arc<P>) -> Self;
+    pub fn with_verdicts(self, verdicts: Arc<Verdicts>) -> Self;   // Reactions::verdicts(), see adaptive::reaction
     pub fn config(&self) -> RotationConfig;
     pub fn subscribe(&self) -> watch::Receiver<u64>;  // store generation: re-read config() (countdown, index)
     pub fn set_config(&self, patch: RotationPatch) -> AppResult<RotationConfig>;  // store write errors only
@@ -237,6 +241,9 @@ impl<C: Coordinator, P: RotationProfiles> Rotation<C, P> {
 - Notices: success `ProfileRotation` Info, title `automation.rotation.title`, body `.switched`
   {name}; failures `ConnectionError`: `.failedRestored` (Warn), `.failedUnprotected` (Error),
   `.failedNotStarted` (Warn). "Busy" (`NotStarted { reason: .busy }`) is quiet.
+- With `with_verdicts`: a profile a check ruled out on this network (`Verdicts::avoided`) is not
+  eligible; while UDP is cut (`Verdicts::udp_blocked`) the candidates with `udp: true` come after
+  the TCP-based ones (order otherwise kept).
 
 ## `adaptive` — adaptive bypass (verify every tunnel start, escalate, learn)
 ```rust
@@ -272,6 +279,7 @@ pub trait AdaptiveHost: Send + Sync + 'static {        // the app
 pub struct Adaptive<C: Coordinator, H: AdaptiveHost>;
 impl<C: Coordinator, H: AdaptiveHost> Adaptive<C, H> {
     pub fn new(coord: Arc<C>, host: Arc<H>, settings: Arc<Store<Settings>>, store: Arc<Store<AdaptiveDoc>>) -> Self;
+    pub fn with_verdicts(self, verdicts: Arc<Verdicts>) -> Self; // sibling fallback skips ruled-out servers, TCP first while UDP is cut
     pub fn status(&self) -> watch::Receiver<AdaptiveStatus>;
     pub async fn begin(&self, kind: SessionKind, profile: Option<ProfileView>) -> AdaptiveMode; // start in this mode
     pub fn start_failed(&self, reason: Option<Msg>);  // Some = start error shown; None = cancelled → Idle
@@ -309,6 +317,68 @@ pub async fn read() -> Option<NetworkSnapshot>;       // Win32 on the blocking p
   `abandon`). A `Started` the task did not ask for (user, switch, crash restart) supersedes the run.
 - The learning key is DPAPI-sealed; when DPAPI, the store or the RNG fails, learning is off for the
   run and the connect still proceeds.
+
+## `adaptive::reaction` — reactions to the server checks' verdicts (RU networks, Nov 2026)
+```rust
+use vpnte_automation::adaptive::reaction::*;
+
+pub const ALLOWED_FINGERPRINTS: [&str; 3];            // chrome, firefox, safari (Xray ≥ 26.9.8 REALITY)
+pub enum CheckVerdict { Healthy, Frozen, Stalled, HandshakeFailed, KeyRejected, IpBanned, UdpBlocked,
+    Offline, Deferred, NotVerified }                    // = vpnte_probes::discipline::Verdict (kebab-case serde)
+pub enum CheckReaction { None, SwitchServer, TryAnotherFingerprint, PreferTcpTransport, RetryLater }
+                                                       // = vpnte_probes::discipline::Reaction
+pub struct Report { pub profile_id: String, pub verdict: CheckVerdict, pub reaction: CheckReaction }
+pub enum Transport { Tcp, Ws, Grpc, Http, HttpUpgrade, Xhttp, Udp /* Hysteria2, TUIC, WireGuard, QUIC */ }
+impl Transport { pub fn udp(self) -> bool; }
+pub struct ServerFacts { pub id: String, pub name: String, pub host: String /* as stored, lower case */,
+    pub transport: Transport, pub reality: bool, pub fingerprint: Option<String> /* effective, override incl. */,
+    pub verdict: Option<CheckVerdict> /* stored, Servers::verdicts() */, pub latency_ms: Option<u32> }
+pub trait ReactionHost: Send + Sync + 'static {       // the app (RPITIT)
+    fn server(&self, id: &str) -> Option<ServerFacts>;
+    fn servers(&self) -> Vec<ServerFacts>;             // usable profiles (enabled, not archived, connectable), store order
+    fn handshake_slot(&self, id: &str, max_wait: Duration, cancel: CancellationToken)
+        -> impl Future<Output = bool> + Send;          // discipline::budget().acquire(&Endpoint::of(&p), max_wait, &cancel).is_ok()
+    fn override_fingerprint(&self, id: &str, fingerprint: Option<&'static str>);
+        // uTLS fingerprint for this profile's engine starts in this app run; never stored; None clears
+}
+pub struct Verdicts;                                   // the network session's memory (reset on NetworkChanged)
+impl Verdicts { pub fn new() -> Self; pub fn udp_blocked(&self) -> bool; pub fn avoided(&self, id: &str) -> bool; }
+pub struct Reactions<C: Coordinator, H: ReactionHost>;
+impl<C: Coordinator, H: ReactionHost> Reactions<C, H> {
+    pub fn new(coord: Arc<C>, host: Arc<H>, settings: Arc<Store<Settings>>) -> Self;
+    pub fn verdicts(&self) -> Arc<Verdicts>;           // hand to Rotation / Adaptive ::with_verdicts
+    pub fn report(&self, report: Report);              // after every finished check; never blocks (inbox 32)
+    pub async fn run(&self, cancel: CancellationToken); // the task (one runner)
+}
+```
+- Every report teaches the network memory (until `LifecycleEvent::NetworkChanged`; a lagged event
+  stream counts as one): ip-banned rules out every profile on that host, frozen every profile with
+  the same transport towards the same site (IPv4 /24, IPv6 /48, else the host name), offline /
+  key-rejected / handshake-failed (not a hang) the profile; udp-blocked sets `udp_blocked`;
+  healthy lifts the profile and a ban of its host. Stalled, deferred, not-verified and a
+  handshake hang (`retry-later`) change nothing.
+- Only a report about the running **Direct** session's profile restarts anything: ip-banned /
+  offline / key-rejected → switch (never to the banned host); frozen → switch, XHTTP first, then
+  another site, never the same transport on the same site; handshake-failed + try-another-
+  fingerprint on REALITY → once the next of `ALLOWED_FINGERPRINTS` (none counts as chrome)
+  through `override_fingerprint` + `Coordinator::adaptive_restart(AdaptiveRetry, mode, None)`;
+  it fails → the override is removed and the server given up (switch); without REALITY → switch;
+  udp-blocked on a UDP profile → switch to a TCP-based one. Candidates: at most 2, ranked TCP
+  first while UDP is cut, then stored verdict healthy < none < bad, then latency, then store order.
+- Switches are `Coordinator::switch_profile(Owner::AdaptiveRetry, ..)` (lowest owner: a refusal
+  or cancellation is quiet and not a failure). Before each dial the host reserves a budget slot:
+  a candidate waits ≤ 10 s (deferred → next one; all deferred → quiet, the next check may react),
+  the fingerprint retry ≤ 65 s (still deferred → the server is given up).
+- Never a loop: per server and network session one fingerprint retry and one switch reaction;
+  a failed switch target is ruled out; at most 4 reaction restarts per network session, then one
+  `automation.adaptive.reaction.paused.*` notice. Settings: switching needs `adaptive_bypass &&
+  adaptive_bypass_server_fallback`, the fingerprint retry `adaptive_bypass`; off → one notice
+  (body `.action.autoOff`) and nothing restarted.
+- Notices (`ConnectionError`; Warn, Error when a failed switch stopped the session): title
+  `automation.adaptive.reaction.cause.{ipBanned,frozen,offline,keyRejected,handshakeFailed,
+  udpBlocked}` {name} (the ip-banned title says a port or transport change will not help), body
+  `.action.{switched,switchedTcp}` {name}, `.action.fingerprint` {fingerprint},
+  `.action.noAlternative`, `.action.autoOff`, or the coordinator's reason.
 
 ## `autopilot` — the launch-time planner (local-proxy Hard)
 ```rust
@@ -574,10 +644,13 @@ if let Some(old) = open("profile-rotation") { rotation_cfg.replace(RotationConfi
 // --- tasks, after startup recovery; the scheduler before the AutoPilot launch run
 let scheduler = Arc::new(Scheduler::new(schedules, coord.clone()));
 tokio::spawn({ let (s, c) = (scheduler.clone(), cancel.clone()); async move { s.run(c).await } });
-let rotation = Arc::new(Rotation::new(rotation_cfg, coord.clone(), profiles.clone())); // profiles: RotationProfiles
+let reactions = Arc::new(Reactions::new(coord.clone(), reaction_host, settings.clone())); // ReactionHost
+tokio::spawn({ let (r, c) = (reactions.clone(), cancel.clone()); async move { r.run(c).await } });
+let rotation = Arc::new(Rotation::new(rotation_cfg, coord.clone(), profiles.clone()) // profiles: RotationProfiles
+    .with_verdicts(reactions.verdicts()));
 tokio::spawn({ let (r, c) = (rotation.clone(), cancel.clone()); async move { r.run(c).await } });
 let adaptive = Arc::new(Adaptive::new(coord.clone(), host, settings.clone(),           // host: AdaptiveHost
-    Arc::new(Store::<AdaptiveDoc>::open(&dirs.root))));
+    Arc::new(Store::<AdaptiveDoc>::open(&dirs.root))).with_verdicts(reactions.verdicts()));
 tokio::spawn({ let (a, c) = (adaptive.clone(), cancel.clone()); async move { a.run(c).await } });
 let pilot = AutoPilot::new(coord.clone(), env, settings.clone(), Some(scheduler.status())); // env: AutoPilotEnv
 if let Some(result) = pilot.run(AutoPilotTrigger::AppLaunch).await { /* badge, log lines, one toast */ }
@@ -591,14 +664,16 @@ let mode = adaptive.begin(kind, profile_view).await;  // before a Direct / local
 // connected + settings.location_privacy → location.apply().await; stop / shutdown / recovery →
 //   if location.is_applied() { location.rollback().await }
 // winnet PowerEvent::Resumed | SessionUnlocked → scheduler.wake(Wake::Resume); config import → wake(Edited)
+// every finished server check (key_health::check_profile_verdict / check_many_verdicts, live check):
+//   reactions.report(Report { profile_id, verdict, reaction })  (map the probes' Classification by wire name)
 // shutdown: cancel.cancel() (tasks return; nothing is rolled back by them)
 ```
 
 ## Events, snapshots and texts the app / UI handles
 - `Coordinator::notify(category, Notice)`: `ScheduleTriggered` (scheduler start / stop),
   `ProfileRotation` (rotation success), `ConnectionError` (schedule connect failure, rotation
-  failures, adaptive terminal failure). Titles and bodies are `Msg`s of this crate or the reason the
-  coordinator returned.
+  failures, adaptive terminal failure, check-verdict reactions). Titles and bodies are `Msg`s of
+  this crate or the reason the coordinator returned.
 - Watch snapshots: `Scheduler::status()` → `SchedulerStatus` (next boundary, retry, suppressed),
   `Adaptive::status()` → `AdaptiveStatus` (`message` = `automation.adaptive.status.*`, `reason` =
   `automation.adaptive.reason.*` or a tunnel reason), `Rotation::subscribe()` → generation (re-read
@@ -612,7 +687,9 @@ let mode = adaptive.begin(kind, profile_view).await;  // before a Direct / local
 ## Not implemented / not verified
 - Not run here: anything elevated (real HKLM writes: `cargo test -p vpnte-automation -- --ignored`
   in an elevated shell runs the one sandboxed HKLM test); the real `Coordinator`, `RotationProfiles`,
-  `AdaptiveHost`, `AutoPilotEnv` (the app's; only test fakes exercise the contracts); browsers
+  `AdaptiveHost`, `AutoPilotEnv`, `ReactionHost` (the app's; only test fakes exercise the contracts);
+  check-verdict reactions against real banned / frozen / UDP-cut servers and a real REALITY
+  fingerprint rejection; browsers
   obeying the policies; Windows honouring the three location values; a real Android Studio layout;
   the E3 other-user path; the `ResolveIpNetEntry2` (active ARP) path of the identity reader.
 - Not adapted to the privilege model yet: browser policies and the location policy run in-process and
