@@ -1,17 +1,13 @@
 //! WireGuard field values written the same way in share links, sing-box JSON, Clash YAML and
-//! `.conf` files: interface / allowed addresses, WARP `reserved` bytes, AmneziaWG keys.
+//! `.conf` files: interface / allowed addresses, WARP `reserved` bytes; the WireGuard or
+//! AmneziaWG kind of an entry.
 use std::net::IpAddr;
 
 use ipnet::IpNet;
 
 use super::b64::base64_bytes;
 use super::fields::{parse_host, parse_port};
-use crate::model::{Host, Note, WgPeer};
-
-/// Note key: AmneziaWG handshake obfuscation (`S1`-`S4`, `H1`-`H4`) the server requires.
-pub const NOTE_AMNEZIA_INCOMPATIBLE: &str = "profiles.wgIni.amneziaIncompatible";
-/// Note key: client-side AmneziaWG junk packets (`Jc`, `I1`-`I5`, `J1`-`J3`) are not sent.
-pub const NOTE_AMNEZIA_JUNK: &str = "profiles.wgIni.amneziaJunkDropped";
+use crate::model::{Awg, Host, Kind, WgPeer, WireGuard};
 
 /// Several peers and one of them names no AllowedIPs: wg-quick would route nothing to it and
 /// an implicit full tunnel would make the peers fight over the same routes, so the emitter
@@ -65,42 +61,15 @@ pub fn reserved(raw: &str) -> Option<[u8; 3]> {
     bytes.try_into().ok()
 }
 
-/// AmneziaWG parameter names, lower case: `Jc`, `Jmin`, `Jmax`, `Itime`, `S1`-`S4`, `H1`-`H4`,
-/// `I1`-`I5`, `J1`-`J3`.
-pub fn is_amnezia_key(lower: &str) -> bool {
-    matches!(lower, "jc" | "jmin" | "jmax" | "itime")
-        || lower.len() == 2
-            && matches!(
-                lower.as_bytes(),
-                [b's', b'1'..=b'4']
-                    | [b'h', b'1'..=b'4']
-                    | [b'i', b'1'..=b'5']
-                    | [b'j', b'1'..=b'3']
-            )
-}
-
-/// What AmneziaWG keys mean for a plain WireGuard dial (AmneziaWG itself is the planned WP-12
-/// feature). `S1`-`S4` and `H1`-`H4` change the handshake the server accepts (defaults: `0` and
-/// `1`..`4`); junk packets (`Jc`, `I1`-`I5`, `J1`-`J3`) are client-side only, so the server still
-/// answers without them.
-pub fn amnezia_note<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<Note> {
-    let (mut incompatible, mut junk) = (false, false);
-    for (key, value) in pairs {
-        let (key, value) = (key.to_ascii_lowercase(), value.trim());
-        let set = !value.is_empty() && value != "0";
-        match key.as_bytes() {
-            [b's', b'1'..=b'4'] => incompatible |= set,
-            [b'h', n @ b'1'..=b'4'] => {
-                incompatible |= !value.is_empty() && value.as_bytes() != [*n]
-            }
-            b"jc" | [b'i', b'1'..=b'5'] | [b'j', b'1'..=b'3'] => junk |= set,
-            _ => {}
-        }
-    }
-    if incompatible {
-        Some(Note::Other(NOTE_AMNEZIA_INCOMPATIBLE.to_owned()))
-    } else {
-        junk.then(|| Note::Other(NOTE_AMNEZIA_JUNK.to_owned()))
+/// The kind of a WireGuard entry: AmneziaWG when any of its obfuscation is on
+/// (`crate::awg::AwgReader::finish`), plain WireGuard otherwise.
+pub fn wireguard_kind(wg: WireGuard, awg: Option<Awg>) -> Kind {
+    match awg {
+        Some(awg) => Kind::Amneziawg {
+            wg,
+            awg: Box::new(awg),
+        },
+        None => Kind::Wireguard(wg),
     }
 }
 
@@ -145,19 +114,5 @@ mod tests {
         for bad in ["1,2", "1,2,3,4", "1,2,256", "+1,2,3", "AQIDBA", "", "x"] {
             assert_eq!(reserved(bad), None, "{bad:?}");
         }
-    }
-
-    #[test]
-    fn amnezia_keys_are_classified() {
-        let note = |pairs: &[(&str, &str)]| amnezia_note(pairs.iter().copied());
-        let other = |key: &str| Some(Note::Other(key.to_owned()));
-        assert_eq!(note(&[("Jc", "4"), ("H1", "1")]), other(NOTE_AMNEZIA_JUNK));
-        assert_eq!(
-            note(&[("S1", "15"), ("Jc", "4")]),
-            other(NOTE_AMNEZIA_INCOMPATIBLE)
-        );
-        assert_eq!(note(&[("H2", "7")]), other(NOTE_AMNEZIA_INCOMPATIBLE));
-        assert_eq!(note(&[("S1", "0"), ("H3", "3"), ("Jmin", "40")]), None);
-        assert!(is_amnezia_key("jmax") && is_amnezia_key("i5") && !is_amnezia_key("i6"));
     }
 }

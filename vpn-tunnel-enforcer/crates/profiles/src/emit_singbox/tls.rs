@@ -43,7 +43,10 @@ pub(super) fn family(p: &Profile) -> Option<Family> {
         Kind::Shadowsocks {
             shadowtls: Some(_), ..
         } => Some(Family::ShadowTls),
-        Kind::Shadowsocks { .. } | Kind::Socks { .. } | Kind::Wireguard(_) => None,
+        Kind::Shadowsocks { .. }
+        | Kind::Socks { .. }
+        | Kind::Wireguard(_)
+        | Kind::Amneziawg { .. } => None,
     }
 }
 
@@ -277,7 +280,7 @@ fn rotation_seed(p: &Profile) -> String {
         Kind::Socks { password, .. } | Kind::Http { password, .. } => {
             password.as_deref().unwrap_or("")
         }
-        Kind::Wireguard(_) => "",
+        Kind::Wireguard(_) | Kind::Amneziawg { .. } => "",
     };
     format!("{}:{port}:{credential}", p.server)
 }

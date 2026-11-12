@@ -96,6 +96,7 @@ fn naive_with_ech() {
 /// without TLS and the emitter adds it.
 #[test]
 fn hysteria2_obfs_on_tcp_only_routing() {
+    // Older imports saved `network: tcp` on Hysteria2; the emitter drops it, so no hint.
     let mut p = profile(
         hy2(Some(Hy2Obfs {
             kind: "salamander".into(),
@@ -109,7 +110,21 @@ fn hysteria2_obfs_on_tcp_only_routing() {
         (c.protocol, c.stealth, c.tls),
         ("hysteria2", Stealth::Obfs, true)
     );
-    assert_eq!(keys(&c), ["profiles.caps.udpOnTcpOnly"]);
+    assert!(keys(&c).is_empty(), "{:?}", keys(&c));
+    // TUIC keeps the key: the hint stays.
+    let mut tuic = profile(
+        Kind::Tuic {
+            uuid: "00000000-0000-4000-8000-000000000000".into(),
+            password: "pass".into(),
+            congestion: None,
+            udp_relay_mode: None,
+            zero_rtt: false,
+            heartbeat_s: None,
+        },
+        Some(tls("t.example")),
+    );
+    tuic.singbox_extra.insert("network".into(), json!("tcp"));
+    assert_eq!(keys(&capabilities(&tuic)), ["profiles.caps.udpOnTcpOnly"]);
 }
 
 /// Pasted or legacy outbounds without a `tls` block: the summary describes the TLS the emitter
@@ -393,4 +408,47 @@ fn skip_reasons_have_messages() {
         msgs[8].args,
         [("reason".into(), "cyclic outbound chain".to_owned())]
     );
+}
+
+/// AmneziaWG: obfuscated, no TLS, and the summary says first that no bundled engine runs it;
+/// parameters that cannot work are listed too. Its skip reasons have messages of their own.
+#[test]
+fn amneziawg_capabilities() {
+    use crate::model::{Awg, AwgGeneration, WireGuard};
+    let wg = WireGuard {
+        private_key: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=".into(),
+        local_address: vec!["10.8.1.2/32".parse().expect("net")],
+        mtu: None,
+        dns: vec![],
+        peers: vec![],
+    };
+    let mut awg = Awg {
+        generation: AwgGeneration::V2_0,
+        jc: Some(4),
+        ..Awg::default()
+    };
+    let kind = |awg: &Awg| Kind::Amneziawg {
+        wg: wg.clone(),
+        awg: Box::new(awg.clone()),
+    };
+    let c = capabilities(&profile(kind(&awg), None));
+    assert_eq!(
+        (c.protocol, c.stealth, c.tls),
+        ("amneziawg", Stealth::Obfs, false)
+    );
+    assert_eq!(keys(&c), ["profiles.awg.noEngine"]);
+    assert_eq!(c.notes[0].args, [("generation".into(), "2.0".to_owned())]);
+    awg.jc = Some(500);
+    let c = capabilities(&profile(kind(&awg), None));
+    assert_eq!(keys(&c), ["profiles.awg.noEngine", "profiles.awg.invalid"]);
+    assert_eq!(c.notes[1].args, [("fields".into(), "Jc".to_owned())]);
+
+    let unsupported = skip_msg(&SkipReason::UnsupportedProtocol("OpenVPN".into()));
+    assert_eq!(
+        unsupported.args,
+        [("protocol".into(), "OpenVPN".to_owned())]
+    );
+    for key in [&unsupported.key, &c.notes[0].key, &c.notes[1].key] {
+        crate::test_locales::assert_localized(key);
+    }
 }

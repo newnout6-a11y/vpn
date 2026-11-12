@@ -80,6 +80,10 @@ const NEVER_PROFILES: &[&str] = &[
 
 /// Profiles found in one parsed JSON value. Never fails: unusable entries come back as `skipped`.
 pub fn parse_json(value: &Value) -> ParseReport {
+    // An AmneziaVPN server description (a decoded `vpn://` key) names its containers itself.
+    if let Some(report) = crate::amnezia::parse_document(value) {
+        return report;
+    }
     let mut out = Out::default();
     walk(value, 0, None, &mut out);
     ParseReport {

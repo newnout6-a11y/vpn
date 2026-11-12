@@ -124,17 +124,21 @@ fn missing_keys_and_noted_fields() {
         err("wireguard://k@wg.example.com:51820"),
         SkipReason::MissingCredential
     );
-    // AmneziaWG: junk packets only (h1 = its default) -> the server still answers plain WireGuard.
-    let amnezia = ok("wg://k@h.example?publicKey=p&jc=4&jmin=40&h1=1");
+    // AmneziaWG parameters make an AmneziaWG profile; all of them off stays WireGuard.
+    let amnezia = ok("wg://k@h.example?publicKey=p&jc=4&jmin=40&jmax=70&h1=1");
     assert_eq!(
-        amnezia.notes,
-        vec![Note::Other("profiles.wgIni.amneziaJunkDropped".into())]
+        (amnezia.kind.label(), amnezia.notes.len()),
+        ("amneziawg", 0)
     );
-    let amnezia = ok("wg://k@h.example?publicKey=p&s1=15&h1=12345");
     assert_eq!(
-        amnezia.notes,
-        vec![Note::Other("profiles.wgIni.amneziaIncompatible".into())]
+        ok("wg://k@h.example?publicKey=p&jc=0&h1=1").kind.label(),
+        "wireguard"
     );
+    // Init (148 + S1) and response (92 + S2) of the same size: no AmneziaWG 1.x/2.0 can tell them apart.
+    let SkipReason::AwgInvalid(invalid) = err("wg://k@h.example?publicKey=p&s1=15&s2=71") else {
+        panic!()
+    };
+    assert_eq!(invalid.names(), "S1, S2");
     let dns = ok("wg://k@h.example?publicKey=p&dns=1.1.1.1,dns.example&mtu=big");
     assert_eq!(wg(&dns).dns.len(), 1);
     let expected = vec![

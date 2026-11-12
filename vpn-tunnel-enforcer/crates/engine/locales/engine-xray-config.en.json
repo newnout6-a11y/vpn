@@ -5,7 +5,8 @@
         "nativeXray": "This JSON profile contains Xray settings; choose Auto or Xray to keep its route.",
         "xrayTransport": "The transport settings require Xray; choose Auto or Xray.",
         "noXrayClient": "Xray has no {{protocol}} client: this server runs only on sing-box. Choose «Auto» in the connection settings or sing-box for this server.",
-        "xrayForm": "Xray cannot run {{protocol}} with the transport or TLS of this profile. Choose «Auto» in the connection settings or sing-box for this server."
+        "xrayForm": "Xray cannot run {{protocol}} with the transport or TLS of this profile. Choose «Auto» in the connection settings or sing-box for this server.",
+        "amneziawg": "This is an AmneziaWG server: neither sing-box nor Xray can run it, and plain WireGuard would not reach it. It needs the mihomo engine, a lab feature this build does not run."
       },
       "reason": {
         "default": "main engine",

@@ -1,0 +1,26 @@
+{
+  "profiles": {
+    "awg": {
+      "invalid": "These AmneziaWG parameters cannot work: {{fields}}. Compare them with the server's configuration.",
+      "noEngine": "AmneziaWG {{generation}}: sing-box and Xray cannot run it. It needs the mihomo engine, a lab feature this build does not run."
+    },
+    "caps": {
+      "skip": {
+        "unsupportedProtocol": "{{protocol}} is not supported by this app"
+      }
+    },
+    "emit": {
+      "amneziawg": "AmneziaWG cannot run on sing-box or Xray: it needs the mihomo engine, a lab feature this build does not run."
+    },
+    "export": {
+      "sharedAsConf": "No share link can carry an AmneziaWG key, so it was exported as a .conf file (AmneziaVPN and AmneziaWG import it)."
+    },
+    "deeplink": {
+      "amneziaDamaged": "This AmneziaVPN key (vpn://) is damaged: it does not decode.",
+      "amneziaUnsupported": "This AmneziaVPN key (vpn://) carries {{protocol}}, which this app does not support."
+    },
+    "import": {
+      "naivePinNotEnforced": "The key pins the server's public key, but NaiveProxy cannot check pins: the certificate is still checked against trusted authorities."
+    }
+  }
+}

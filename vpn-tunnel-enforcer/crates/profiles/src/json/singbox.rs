@@ -178,6 +178,13 @@ pub(crate) fn import(input: Input<'_>) -> Result<Profile, SkipReason> {
         Kind::Shadowsocks { method, .. } if method == "none" => scan.note(Note::Unencrypted),
         _ => {}
     }
+    // NaiveProxy (Chromium's network stack) takes no public-key pin: the emitter cannot pass it
+    // on, so only the usual CA check protects the connection.
+    if matches!(kind_value, Kind::Naive { .. })
+        && tls.as_ref().is_some_and(|t| !t.spki_pin_sha256.is_empty())
+    {
+        scan.note(Note::Other(Note::NAIVE_PIN_NOT_ENFORCED.into()));
+    }
     if let Some(note) = Note::for_tls(tls.as_ref()) {
         scan.note(note);
     }

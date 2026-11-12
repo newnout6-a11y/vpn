@@ -191,6 +191,8 @@ pub(super) fn keys_file(shares: &[Option<SharedKey>], now: UnixMs) -> Option<Key
             .map(|s| match s {
                 SharedKey::Uri(uri) => serde_json::Value::String(uri.clone()),
                 SharedKey::Json(doc) => doc.clone(),
+                // An AmneziaWG `.conf` has no link form: its text as one item of the array.
+                SharedKey::Conf(conf) => serde_json::Value::String(conf.clone()),
             })
             .collect();
         format!("{}\n", serde_json::Value::Array(items))

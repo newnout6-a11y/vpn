@@ -8,8 +8,14 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+/// AmneziaWG parameters of [`Kind::Amneziawg`].
+mod awg;
 /// Redacting `Debug` for the types that hold credentials.
 mod debug;
+#[cfg(test)]
+mod tests;
+
+pub use awg::{Awg, AwgGeneration, AwgRange};
 
 /// One server key, as the provider described it. Defaults (uTLS, ALPN, mux policy) are applied
 /// when engine config is emitted, never here, so re-export stays faithful to the source.
@@ -120,6 +126,12 @@ pub enum Kind {
         min_idle: Option<u32>,
     },
     Wireguard(WireGuard),
+    /// AmneziaWG: WireGuard whose packets the server expects obfuscated by `awg`. No bundled
+    /// engine dials it (mihomo can: a lab function, WP-12), so it never runs as plain WireGuard.
+    Amneziawg {
+        wg: WireGuard,
+        awg: Box<Awg>,
+    },
     Socks {
         username: Option<String>,
         password: Option<String>,
@@ -143,6 +155,7 @@ impl Kind {
             Kind::Naive { .. } => "naive",
             Kind::Anytls { .. } => "anytls",
             Kind::Wireguard(_) => "wireguard",
+            Kind::Amneziawg { .. } => "amneziawg",
             Kind::Socks { .. } => "socks",
             Kind::Http { .. } => "http",
         }
@@ -155,8 +168,26 @@ impl Kind {
             Kind::Hysteria2 { .. }
                 | Kind::Tuic { .. }
                 | Kind::Wireguard(_)
+                | Kind::Amneziawg { .. }
                 | Kind::Naive { quic: true, .. }
         )
+    }
+
+    /// The WireGuard part of a WireGuard or AmneziaWG profile (keys, addresses, peers). Never a
+    /// reason to run AmneziaWG as WireGuard: match the kind for that.
+    pub fn wireguard(&self) -> Option<&WireGuard> {
+        match self {
+            Kind::Wireguard(wg) | Kind::Amneziawg { wg, .. } => Some(wg),
+            _ => None,
+        }
+    }
+
+    /// [`Kind::wireguard`] for importers that complete a parsed entry.
+    pub(crate) fn wireguard_mut(&mut self) -> Option<&mut WireGuard> {
+        match self {
+            Kind::Wireguard(wg) | Kind::Amneziawg { wg, .. } => Some(wg),
+            _ => None,
+        }
     }
 }
 
@@ -394,6 +425,9 @@ impl Note {
     pub const REALITY_FINGERPRINT: &str = "profiles.import.realityFingerprint";
     /// [`Note::Other`] key: an Xray stream Xray 26 removed (HTTP/2, QUIC) now runs on sing-box.
     pub const XRAY_TRANSPORT_REMOVED: &str = "profiles.import.xrayTransportRemoved";
+    /// [`Note::Other`] key: a NaiveProxy key pins a public key NaiveProxy cannot check (the
+    /// certificate is still checked against the trusted CAs).
+    pub const NAIVE_PIN_NOT_ENFORCED: &str = "profiles.import.naivePinNotEnforced";
 
     /// The note every importer adds for these TLS settings, if any (the REALITY fingerprint risk;
     /// it holds whichever engine runs the key).
@@ -433,6 +467,11 @@ pub enum SkipReason {
     UnsupportedTransport(String),
     Duplicate,
     NativeGraphRejected(String),
+    /// A protocol no engine of this app runs, named as users know it (`OpenVPN over Cloak`): a
+    /// container of an AmneziaVPN key.
+    UnsupportedProtocol(String),
+    /// AmneziaWG parameters out of bounds or inconsistent; every such field is named.
+    AwgInvalid(crate::awg::AwgInvalid),
 }
 
 /// Subscription metadata from body comment lines and response headers.

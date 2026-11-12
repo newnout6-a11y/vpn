@@ -652,7 +652,7 @@ fn xray_hysteria_brutal_rates() {
         (None, Some(210), vec![])
     );
     assert_eq!(
-        rates(json!({ "congestion": "reno", "brutalUp": "lots", "brutalDown": "0" })),
+        rates(json!({ "congestion": "reno", "brutalUp": "lots", "brutalDown": "-5 mbps" })),
         (
             None,
             None,
@@ -663,6 +663,11 @@ fn xray_hysteria_brutal_rates() {
             ]
         )
     );
+    // `0` and empty mean unset in Xray: no rate and no note.
+    for unset in [json!("0"), json!(""), json!(" 0 mbps "), json!(0)] {
+        let quic = json!({ "brutalUp": unset.clone(), "brutalDown": unset });
+        assert_eq!(rates(quic), (None, None, vec![]));
+    }
 }
 #[test]
 fn wrappers_and_strings() {
@@ -894,4 +899,28 @@ mod strings_with_links {
         let r = parse(json!({ "data": yaml }));
         assert_eq!(names(&r), ["c0"], "{r:?}");
     }
+}
+
+/// A NaiveProxy key from sing-box JSON with a public-key pin: NaiveProxy cannot check pins (the
+/// emitter drops them), so a note says that only the CA check runs; the pin is kept.
+#[test]
+fn naive_public_key_pin_is_explained() {
+    let pin = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    let r = parse(
+        json!({ "type": "naive", "tag": "n", "server": "n.example", "server_port": 443,
+        "username": "u", "password": "p",
+        "tls": { "enabled": true, "server_name": "n.example", "certificate_public_key_sha256": [pin] } }),
+    );
+    let p = &r.profiles[0];
+    assert_eq!(p.notes, [Note::Other(Note::NAIVE_PIN_NOT_ENFORCED.into())]);
+    assert_eq!(
+        p.tls.as_ref().map(|t| t.spki_pin_sha256.clone()),
+        Some(vec![pin.to_owned()])
+    );
+    crate::test_locales::assert_localized(Note::NAIVE_PIN_NOT_ENFORCED);
+    let plain = parse(
+        json!({ "type": "naive", "tag": "n", "server": "n.example", "server_port": 443,
+        "username": "u", "password": "p", "tls": { "enabled": true, "server_name": "n.example" } }),
+    );
+    assert!(plain.profiles[0].notes.is_empty());
 }

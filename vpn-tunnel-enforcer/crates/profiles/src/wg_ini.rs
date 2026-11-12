@@ -1,20 +1,22 @@
 //! WireGuard `.conf` importer: `[Interface]` / `[Peer]` as written by wg-quick, the WireGuard
 //! apps, wgcf (WARP) and AmneziaVPN. Also the WireGuard value parsers the Clash importer shares.
 //!
-//! Keys are matched case-insensitively (wg-quick lowercases them). AmneziaWG obfuscation keys
-//! (`Jc`, `S1`, `H1`, …) cannot be honoured by plain WireGuard (AmneziaWG is a planned WP-12
-//! feature): the profile is imported and a Note says whether the server can still be reached.
+//! Keys are matched case-insensitively (wg-quick lowercases them). A config whose AmneziaWG keys
+//! (`Jc`, `S1`, `H1`, `HeaderProtectionKey`, …) turn any obfuscation on is an AmneziaWG profile
+//! (checked by `crate::awg`); with every mechanism off it is plain WireGuard.
 use std::net::IpAddr;
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 
+use crate::awg::AwgReader;
 use crate::clash::parse_u32;
 use crate::common::wg::{
-    amnezia_note, endpoint as wg_endpoint, interface_address, is_amnezia_key, reserved,
-    unrouted_peer,
+    endpoint as wg_endpoint, interface_address, reserved, unrouted_peer, wireguard_kind,
 };
-use crate::model::{DialPrefs, Kind, Note, Profile, SkipReason, Source, WgPeer, WireGuard};
+use crate::model::{
+    AwgRange, DialPrefs, Kind, Note, Profile, SkipReason, Source, WgPeer, WireGuard,
+};
 
 /// Keys that only matter to wg-quick on Linux or to a server; dropping them changes nothing here.
 const SILENT_KEYS: &[&str] = &["listenport", "saveconfig"];
@@ -73,7 +75,7 @@ impl<'a> Ini<'a> {
         }
         let interface = &self.interfaces[0];
         let mut notes = Vec::new();
-        let mut amnezia = Vec::new();
+        let mut awg = AwgReader::default();
         let (mut private_key, mut address, mut dns, mut mtu) = (None, Vec::new(), Vec::new(), None);
         for &(key, value) in interface {
             match key.to_ascii_lowercase().as_str() {
@@ -95,8 +97,8 @@ impl<'a> Ini<'a> {
                             .ok_or_else(|| invalid("invalid MTU"))?,
                     )
                 }
-                lower if is_amnezia_key(lower) => amnezia.push((key, value)),
                 lower if SILENT_KEYS.contains(&lower) => {}
+                _ if awg.take(key, value) => {}
                 _ => notes.push(Note::UnsupportedField(key.to_owned())),
             }
         }
@@ -110,25 +112,31 @@ impl<'a> Ini<'a> {
         let peers = self
             .peers
             .iter()
-            .map(|p| peer(p, &mut notes, &mut amnezia))
+            .map(|p| peer(p, &mut notes, &mut awg))
             .collect::<Result<Vec<_>, _>>()?;
         if unrouted_peer(&peers) {
             return Err(invalid("[Peer] without AllowedIPs next to other peers"));
         }
-        notes.extend(amnezia_note(amnezia));
+        let awg = awg.finish().map_err(SkipReason::AwgInvalid)?;
         let (server, port) = (peers[0].host.clone(), peers[0].port);
+        let wg = WireGuard {
+            private_key,
+            local_address: address,
+            mtu,
+            dns,
+            peers,
+        };
+        let kind = wireguard_kind(wg, awg);
+        let name = match kind {
+            Kind::Amneziawg { .. } => "AmneziaWG",
+            _ => "WireGuard",
+        };
         Ok(Profile {
-            name: "WireGuard".to_owned(),
+            name: name.to_owned(),
             description: None,
             server,
             port,
-            kind: Kind::Wireguard(WireGuard {
-                private_key,
-                local_address: address,
-                mtu,
-                dns,
-                peers,
-            }),
+            kind,
             tls: None,
             transport: None,
             mux: None,
@@ -141,10 +149,10 @@ impl<'a> Ini<'a> {
     }
 }
 
-fn peer<'a>(
-    pairs: &[(&'a str, &'a str)],
+fn peer(
+    pairs: &[(&str, &str)],
     notes: &mut Vec<Note>,
-    amnezia: &mut Vec<(&'a str, &'a str)>,
+    awg: &mut AwgReader,
 ) -> Result<WgPeer, SkipReason> {
     let (mut public_key, mut psk, mut allowed, mut endpoint, mut keepalive_s, mut reserved_bytes) =
         (None, None, Vec::new(), None, None, None);
@@ -162,12 +170,16 @@ fn peer<'a>(
             "endpoint" => {
                 endpoint = Some(wg_endpoint(value).ok_or_else(|| invalid("invalid Endpoint"))?)
             }
-            "persistentkeepalive" => keepalive_s = keepalive(value),
+            // AmneziaWG 3.x writes a random range (`25-35`).
+            "persistentkeepalive" => match AwgRange::parse(value).filter(|r| r.is_range()) {
+                Some(range) => awg.keepalive_range(range),
+                None => keepalive_s = keepalive(value),
+            },
             // Not wg-quick, but WARP exporters write it next to the peer.
             "reserved" => {
                 reserved_bytes = Some(reserved(value).ok_or_else(|| invalid("invalid Reserved"))?)
             }
-            lower if is_amnezia_key(lower) => amnezia.push((name, value)),
+            _ if awg.take(name, value) => {}
             _ => notes.push(Note::UnsupportedField(name.to_owned())),
         }
     }

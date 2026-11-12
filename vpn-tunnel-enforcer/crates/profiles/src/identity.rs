@@ -113,7 +113,9 @@ fn credential(kind: &Kind, h: &mut Fields) {
             h.put(username);
             h.put(password);
         }
-        Kind::Wireguard(wg) => {
+        // AmneziaWG hashes like WireGuard under its own label: rotated obfuscation values keep
+        // the row (a refresh updates them), as rotated TLS fingerprints do elsewhere.
+        Kind::Wireguard(wg) | Kind::Amneziawg { wg, .. } => {
             h.put(&wg.private_key);
             h.put(&wg.peers.len().to_string());
             for peer in &wg.peers {

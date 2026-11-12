@@ -8,6 +8,10 @@ mod test_locales;
 /// order, for the app's locale registration at start (after the UI's base layer).
 pub const LOCALES: &[(&str, &str)] = &[
     (
+        include_str!("../locales/profiles-awg.ru.json"),
+        include_str!("../locales/profiles-awg.en.json"),
+    ),
+    (
         include_str!("../locales/profiles-clash.ru.json"),
         include_str!("../locales/profiles-clash.en.json"),
     ),
@@ -37,6 +41,8 @@ pub const LOCALES: &[(&str, &str)] = &[
     ),
 ];
 
+pub mod amnezia;
+pub mod awg;
 pub mod caps;
 pub mod clash;
 pub mod countries;

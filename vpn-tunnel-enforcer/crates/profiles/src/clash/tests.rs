@@ -463,6 +463,8 @@ fn socks_and_http() {
 
 const PRIV: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
 const PUB: &str = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=";
+/// A fake AmneziaWG header protection key (32 bytes).
+const HPK: &str = "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=";
 
 fn vless_with(lines: &str) -> String {
     format!(
@@ -629,24 +631,37 @@ fn wireguard_entries() {
     assert!(single.notes.is_empty(), "{:?}", single.notes);
 
     let multi = one(&format!(
-        "proxies:\n- name: m\n  type: wireguard\n  ip: 10.0.0.2/32\n  private-key: {PRIV}\n  amnezia-wg-option: {{jc: 4, jmin: 40, jmax: 70, version: 3, header-protection-key: k, random-trailers: false}}\n  peers:\n    - server: wg.example\n      port: 51820\n      public-key: {PUB}\n      allowed-ips: ['0.0.0.0/0']\n      reserved: U4An\n"
+        "proxies:\n- name: m\n  type: wireguard\n  ip: 10.0.0.2/32\n  private-key: {PRIV}\n  amnezia-wg-option: {{jc: 4, jmin: 40, jmax: 70, s1: 12, s2: 12, s3: 12, s4: 12, h1: 1, i3: '', version: 3, header-protection-key: {HPK}, random-trailers: false, future-knob: 7}}\n  peers:\n    - server: wg.example\n      port: 51820\n      public-key: {PUB}\n      allowed-ips: ['0.0.0.0/0']\n      reserved: U4An\n"
     ));
     assert_eq!(
         (multi.server.clone(), multi.port),
         (Host::Domain("wg.example".into()), 51820)
     );
-    let Kind::Wireguard(wg) = &multi.kind else {
-        panic!()
+    let Kind::Amneziawg { wg, awg } = &multi.kind else {
+        panic!("{:?}", multi.kind)
     };
     assert_eq!(wg.peers[0].reserved, Some([0x53, 0x80, 0x27]));
     assert_eq!(wg.peers[0].allowed_ips[0].to_string(), "0.0.0.0/0");
+    assert_eq!(awg.generation, crate::model::AwgGeneration::V3);
+    assert_eq!(
+        (awg.jc, awg.random_trailers, awg.i[2].as_deref()),
+        (Some(4), Some(false), None)
+    );
+    assert_eq!(awg.header_protection_key.as_deref(), Some(HPK));
     assert_eq!(
         multi.notes,
-        [
-            Note::Other("profiles.wgIni.amneziaJunkDropped".into()),
-            Note::UnsupportedField("amnezia-wg-option.header-protection-key".into())
-        ]
+        [Note::UnsupportedField(
+            "amnezia-wg-option.future-knob".into()
+        )]
     );
+    // mihomo would run 3.x keys on its legacy implementation; header protection needs S >= 12.
+    let refused = report(&format!(
+        "proxies:\n- {{name: a, type: wireguard, server: w.example, port: 1, ip: 10.0.0.2, private-key: {PRIV}, public-key: {PUB},\n   amnezia-wg-option: {{version: 2, header-protection-key: {HPK}, s1: 11, h2: [1, 2]}}}}\n"
+    ));
+    let SkipReason::AwgInvalid(invalid) = &refused.skipped[0].reason else {
+        panic!("{refused:?}")
+    };
+    assert_eq!(invalid.names(), "S1, S2, S3, S4, H2, Version");
 
     let bad = report(&format!(
         "proxies:\n- {{name: b, type: wireguard, server: w.example, port: 1, ip: 10.0.0.2, private-key: short, public-key: {PUB}}}\n"

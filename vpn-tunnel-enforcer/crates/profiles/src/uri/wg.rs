@@ -1,13 +1,15 @@
 //! WireGuard (`wireguard://`, `wg://`): one peer; parameter names in any case (Happ writes
-//! `publickey`), addresses without a prefix become /32 or /128.
+//! `publickey`), addresses without a prefix become /32 or /128. AmneziaWG parameters (`jc`,
+//! `s1`, `h1`, `header-protection-key`, …) that turn obfuscation on make an AmneziaWG profile.
 use std::net::IpAddr;
 
 use ipnet::IpNet;
 
 use super::parts::{Link, Params, duration_ms};
 use super::{Meta, Res, bad, skip};
-use crate::common::wg::{amnezia_note, interface_address};
-use crate::model::{Kind, Note, Profile, SkipReason, WgPeer, WireGuard};
+use crate::awg::AwgReader;
+use crate::common::wg::{interface_address, wireguard_kind};
+use crate::model::{Note, Profile, SkipReason, WgPeer, WireGuard};
 
 const DEFAULT_PORT: u16 = 51820;
 
@@ -58,9 +60,15 @@ pub(super) fn wireguard(body: &str, meta: Meta) -> Res<Profile> {
         dns: dns(p, &mut notes),
         peers: vec![peer],
     };
-    // AmneziaWG parameters (planned feature WP-12): imported as plain WireGuard with a Note.
-    notes.extend(amnezia_note(p.pairs()));
-    let mut profile = meta.profile(server, port, Kind::Wireguard(config));
+    let mut awg = AwgReader::default();
+    for (key, value) in p.pairs() {
+        awg.take(key, value);
+    }
+    let awg = match awg.finish() {
+        Ok(awg) => awg,
+        Err(invalid) => return skip(SkipReason::AwgInvalid(invalid)),
+    };
+    let mut profile = meta.profile(server, port, wireguard_kind(config, awg));
     profile.notes = notes;
     Ok(profile)
 }

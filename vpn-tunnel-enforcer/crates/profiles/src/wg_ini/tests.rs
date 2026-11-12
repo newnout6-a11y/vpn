@@ -1,5 +1,4 @@
 use super::*;
-use crate::common::wg::{NOTE_AMNEZIA_INCOMPATIBLE, NOTE_AMNEZIA_JUNK};
 use crate::model::Host;
 
 const PRIV: &str = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
@@ -105,29 +104,67 @@ fn several_peers_keep_their_routes() {
     ));
 }
 
-/// AT-04-002 / WP-12 boundary: AmneziaWG keys are parsed into a Note, never silently dropped.
-/// Junk-only settings keep the server reachable; S/H changes do not.
+/// An AmneziaVPN 3.1 config (AWG keys in `[Interface]`, a keepalive range in `[Peer]`) is an
+/// AmneziaWG profile with every parameter kept; nothing becomes a note.
 #[test]
-fn amnezia_keys_become_notes() {
-    let junk = parse_wg_ini(&conf(
-        "Jc = 4\nJmin = 40\nJmax = 70\nS1 = 0\nS2 = 0\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4",
-        "",
-    ));
-    let notes = junk.expect("WireGuard").expect("valid").notes;
-    assert_eq!(notes, [Note::Other(NOTE_AMNEZIA_JUNK.into())]);
-    let hard = parse_wg_ini(&conf("Jc = 4\nS1 = 86\nH1 = 1234567", ""));
+fn amnezia_config_is_amneziawg() {
+    let interface = [
+        "Jc = 5",
+        "Jmin = 10",
+        "Jmax = 50",
+        "S1 = 12",
+        "S2 = 12",
+        "S3 = 12",
+        "S4 = 12",
+        "H1 = 1",
+        "H2 = 2",
+        "H3 = 3",
+        "H4 = 4",
+        "I1 = <r 2><b 0x8580>",
+        "HeaderProtectionKey = AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
+        "ContentPaddingAddition = 10-100",
+        "RekeyAfterTime = 100-120",
+        "RandomTrailers = on",
+        "DisableCookies = on",
+    ];
+    let text = conf(
+        &interface.join("\n"),
+        "AllowedIPs = 0.0.0.0/0, ::/0\nPersistentKeepalive = 25-35",
+    );
+    let p = parse_wg_ini(&text).expect("WireGuard").expect("valid");
+    let Kind::Amneziawg { wg, awg } = &p.kind else {
+        panic!("{:?}", p.kind)
+    };
     assert_eq!(
-        hard.expect("WireGuard").expect("valid").notes,
-        [Note::Other(NOTE_AMNEZIA_INCOMPATIBLE.into())]
+        (p.name.as_str(), p.kind.label()),
+        ("AmneziaWG", "amneziawg")
     );
-    let defaults = parse_wg_ini(&conf("Jc = 0\nS1 = 0\nH1 = 1", ""));
-    assert!(
-        defaults
-            .expect("WireGuard")
-            .expect("valid")
-            .notes
-            .is_empty()
+    assert_eq!(awg.generation, crate::model::AwgGeneration::V3);
+    assert_eq!((awg.jc, awg.s), (Some(5), [Some(12); 4]));
+    assert_eq!(awg.i[0].as_deref(), Some("<r 2><b 0x8580>"));
+    let keepalive = awg.keepalive_range.map(|r| r.to_string());
+    assert_eq!(keepalive.as_deref(), Some("25-35"));
+    assert_eq!(
+        (wg.peers[0].keepalive_s, wg.private_key.as_str()),
+        (None, PRIV)
     );
+    assert!(p.notes.is_empty(), "{:?}", p.notes);
+}
+
+/// Junk packets alone already make AmneziaWG (they are what passes DPI); every mechanism off is
+/// plain WireGuard; broken parameters skip the file with every bad field named (AT-12-003).
+#[test]
+fn amnezia_keys_decide_the_kind() {
+    let parse = |extra: &str| parse_wg_ini(&conf(extra, "")).expect("a WireGuard config");
+    let junk = parse("Jc = 4\nJmin = 40\nJmax = 70\nH1 = 1").expect("valid");
+    assert_eq!(junk.kind.label(), "amneziawg");
+    let off = parse("Jc = 0\nS1 = 0\nH1 = 1").expect("valid");
+    assert_eq!((off.kind.label(), off.notes.len()), ("wireguard", 0));
+    let broken = parse("Jc = 400\nJmin = 90\nJmax = 70\nH1 = 100-200\nH2 = 150");
+    let Err(SkipReason::AwgInvalid(invalid)) = broken else {
+        panic!("{broken:?}")
+    };
+    assert_eq!(invalid.names(), "Jc, Jmin, Jmax, H1, H2");
 }
 
 /// AT-04-006: keys we cannot apply (hooks, routing table) are reported, not dropped silently;

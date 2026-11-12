@@ -1,7 +1,8 @@
 # vpnte-profiles — API for dependent crates
 
 Typed VPN profiles: the model every crate stores and passes, importers (share links, JSON,
-Clash YAML, WireGuard `.conf`, app deep links, Electron rows), the text pipeline building blocks,
+Clash YAML, WireGuard / AmneziaWG `.conf`, AmneziaVPN `vpn://` keys, app deep links, Electron
+rows), the text pipeline building blocks,
 the sing-box emitter, the native Xray graph, exporters, identity and capability summaries.
 Depends only on `vpnte-base`. Pure code: no I/O, no network, no async, nothing needs elevation
 (the one Win32 call, `device::MachineIdentity::current`, reads host and user names).
@@ -15,7 +16,9 @@ vpnte-profiles.workspace = true
 | `model` | `Profile` and its parts, `ParseReport`, `Skipped`/`SkipReason`, `SubscriptionMeta`, `TooLarge` |
 | `uri` | one share link -> `Profile` |
 | `json` | sing-box / Xray / wrapped JSON -> `ParseReport` |
-| `clash`, `wg_ini` | Clash (mihomo) YAML, WireGuard `.conf` |
+| `clash`, `wg_ini` | Clash (mihomo) YAML, WireGuard / AmneziaWG `.conf` |
+| `awg` | AmneziaWG parameters: checks before import and start, generation, field names |
+| `amnezia` | AmneziaVPN share keys `vpn://…` (decode, server descriptions with containers) |
 | `deeplink` | `happ://` / `mantaray://` / `v2raytun://` / `incy://` -> carried text or URL |
 | `legacy` | one stored Electron row -> `Profile` |
 | `text` | limits, body decoding, base64 layers, JSON spans, link candidates, subscription metadata |
@@ -24,7 +27,7 @@ vpnte-profiles.workspace = true
 | `identity` | `Profile::identity()` (the engine choice is `vpnte_engine::select_engine`) |
 | `emit_singbox` | the only producer of sing-box JSON (`Profile` -> outbound / endpoint / chain) |
 | `xray_native` | provider Xray graphs: import, validate, compile for the engine, export |
-| `export` | share link, share document (link or JSON), proxy-list line |
+| `export` | share link, share document (link, JSON or AmneziaWG `.conf`), proxy-list line, WireGuard / AmneziaWG `.conf` and mihomo YAML |
 | `LOCALES` | the crate's locale fragments, `&[(ru_json, en_json)]` |
 
 ## model (`vpnte_profiles::model`)
@@ -48,8 +51,18 @@ pub enum Kind { Vless{uuid, flow, packet_encoding, encryption}, Vmess{uuid, secu
     hop_interval_s, hop_interval_max_s, up_mbps, down_mbps, bbr_profile}, Tuic{uuid, password, congestion,
     udp_relay_mode, zero_rtt, heartbeat_s}, Naive{username, password, quic, extra_headers,
     insecure_concurrency}, Anytls{password, idle_check_s, idle_timeout_s, min_idle}, Wireguard(WireGuard),
-    Socks{username, password}, Http{username, password} }
-impl Kind { pub fn label(&self) -> &'static str; pub fn is_udp_transport(&self) -> bool }
+    Amneziawg{wg: WireGuard, awg: Box<Awg>} /* label "amneziawg" */, Socks{username, password},
+    Http{username, password} }
+impl Kind { pub fn label(&self) -> &'static str; pub fn is_udp_transport(&self) -> bool;
+    pub fn wireguard(&self) -> Option<&WireGuard> }   // WireGuard part of WG and AWG (keys, peers)
+pub struct Awg { generation: AwgGeneration, jc, jmin, jmax: Option<u32>, s: [Option<u32>; 4],
+    h: [Option<AwgRange>; 4], i: [Option<String>; 5], j: [Option<String>; 3], itime: Option<u32>,
+    header_protection_key: Option<String> /* base64, 32 bytes, stored padded */,
+    content_padding: Option<AwgRange>, timers: [Option<AwgRange>; 5] /* RekeyAfterTime, RekeyTimeout,
+    RejectAfterTime, KeepaliveTimeout, MaxHandshakeAttempts */, keepalive_range: Option<AwgRange>,
+    random_trailers, disable_cookies: Option<bool> }      // Debug hides the protection key
+pub enum AwgGeneration { V1_0, V1_5, V2_0, V3 }  // serde "1.0" "1.5" "2.0" "3"; label() "3.x"
+pub struct AwgRange { pub min: u32, pub max: u32 }  // "a" | "a-b"; parse, is_range, overlaps
 pub enum Transport { Ws{..}, Grpc{service_name, multi_mode}, Http{hosts, path}, HttpUpgrade{host, path},
     Quic, Xhttp{host, path, mode, extra} /* Xray only */, TcpHttpHeader{host, path} /* Xray only */ }
 pub enum Note { NaiveInsecureIgnored, CertPinNotEnforced, AlterIdNormalized(u32), ProviderFpDroppedOnQuic,
@@ -58,6 +71,7 @@ pub enum Note { NaiveInsecureIgnored, CertPinNotEnforced, AlterIdNormalized(u32)
 impl Note {
     pub const REALITY_FINGERPRINT: &str;     // Other key: REALITY fp current servers refuse
     pub const XRAY_TRANSPORT_REMOVED: &str;  // Other key: Xray h2/QUIC stream converted for sing-box
+    pub const NAIVE_PIN_NOT_ENFORCED: &str;  // Other key: naive with an SPKI pin (CA check only)
     pub fn for_tls(tls: Option<&Tls>) -> Option<Note>;  // the note every importer adds for these TLS
 }
 pub const REALITY_REFUSED_FINGERPRINTS: [&str; 6];  // edge ios qq random android 360
@@ -66,7 +80,8 @@ pub struct ParseReport { pub profiles: Vec<Profile>, pub skipped: Vec<Skipped>, 
 pub struct Skipped { pub excerpt: String /* redacted, <= 80 chars */, pub reason: SkipReason }
 pub enum SkipReason { UnknownScheme(String), Invalid{scheme, detail /* English */}, MissingCredential,
     ShadowTlsNeedsInner, UnsupportedPlugin(String), UnsupportedTransport(String), Duplicate,
-    NativeGraphRejected(String) }
+    NativeGraphRejected(String), UnsupportedProtocol(String /* "OpenVPN over Cloak" */),
+    AwgInvalid(awg::AwgInvalid) }
 pub struct SubscriptionMeta { upload, download, total: Option<u64>, expires_at: Option<UnixMs>,
     refresh_hours: Option<u32>, title, web_page_url, support_url, announce: Option<String> }
 pub struct TooLarge;                      // input over a limit
@@ -139,14 +154,19 @@ pub fn from_legacy(name: &str, protocol: &str, outbound: &Value, source_uri: Opt
     -> Result<Profile, LegacyError>;                          // a share-link row is re-read from its link
 ```
 - `parse_uri` schemes (any case): `vless vmess trojan ss hysteria2|hy2 tuic naive|naive+https|naive+quic
-  anytls wireguard|wg socks|socks5|socks5h http|https` (proxy links need a root path and a port);
+  anytls wireguard|wg socks|socks5|socks5h http|https vpn` (proxy links need a root path and a
+  port; `vpn` = an AmneziaVPN key among other lines: its one server, other containers as
+  `Note::UnsupportedField(name)`, several servers -> `Invalid`);
   `shadowtls` -> `ShadowTlsNeedsInner`, others -> `UnknownScheme(scheme)` (`""`: no `scheme://`).
 - `parse_json` reads sing-box outbounds / endpoints (incl. the SS + ShadowTLS chain), Xray outbounds
   and whole provider documents (one document with a native graph = one profile, rejected graph =
   `NativeGraphRejected`), wrappers up to depth 6, JSON strings (nested JSON, <= 2 base64 layers,
   share links, Clash text). Never walks `inbounds dns route routing log ...`. Xray 26 Hysteria
   `finalmask` maps Salamander / Gecko, `udpHop` and the Brutal rates (`brutalUp` / `brutalDown`
-  -> `up_mbps` / `down_mbps` as Xray's client applies them); other masks / QUIC knobs are Notes.
+  -> `up_mbps` / `down_mbps` as Xray's client applies them; `0` / empty = unset, no Note); other
+  masks / QUIC knobs are Notes. A sing-box naive outbound with `certificate_public_key_sha256`
+  gets `Note::Other(NAIVE_PIN_NOT_ENFORCED)` (naive takes no pin; the CA check runs). An
+  AmneziaVPN server description (`{"containers": […]}`) is read by `amnezia::parse_document`.
 - Xray VLESS / VMess / Trojan / Shadowsocks: a lone outbound (or a document routing everything to
   it) that says nothing the model drops is a typed profile without `native_xray`, so both engines
   run it. The graph is kept when the outbound has a balancer / chain / loopback around it, or any
@@ -173,6 +193,15 @@ pub fn from_legacy(name: &str, protocol: &str, outbound: &Value, source_uri: Opt
   `reality-opts` (`"grpc-opts.ping-interval"`).
 - `unwrap_deeplink`: Happ / MantaRay / v2RayTun / INCY `add` / `import` payloads (URL, key, base64,
   `{"url"|"link": …}`) -> `Some(text)`; `crypt*` hosts -> `Encrypted`; multi-line input -> `None`.
+  `vpn://` (AmneziaVPN) -> `Some(decoded text)` (JSON description, `.conf` or Xray JSON),
+  `AmneziaUnsupported("OpenVPN")`, or `AmneziaDamaged`.
+- AmneziaWG: a WireGuard entry (`.conf` `[Interface]` / `[Peer]` keys, Clash
+  `amnezia-wg-option`, `wg://` link parameters; names in any case, `-` / `_` ignored) whose
+  AmneziaWG parameters turn any mechanism on is `Kind::Amneziawg` with its implied generation
+  (mihomo `version: 3` forces 3.x); all mechanisms off is plain `Kind::Wireguard` (nothing to
+  note). Parameters that fail `awg::validate` (or do not parse) skip the entry with
+  `SkipReason::AwgInvalid` naming every field. A 3.x `PersistentKeepalive = a-b` is kept in
+  `Awg::keepalive_range`. Unknown `amnezia-wg-option` keys are `UnsupportedField` notes.
 - Every importer keeps provider values verbatim and records what it dropped as `Note`s; secrets
   never appear in `Skipped.excerpt`, `SkipReason` or error texts.
 - Keys no engine can run are skipped at import as `Invalid` (the same predicates the emitter
@@ -180,6 +209,60 @@ pub fn from_legacy(name: &str, protocol: &str, outbound: &Value, source_uri: Opt
   TUIC, QUIC transport) or with ECH (`uri`, `json`, `clash`); several WireGuard peers where one
   names no AllowedIPs (`json`, `clash`, `wg_ini`). `from_legacy` keeps old REALITY rows of that
   kind (the user's data is not dropped); the emitter refuses them at connect.
+
+## awg (`vpnte_profiles::awg`, AmneziaWG parameters)
+
+```rust
+pub fn validate(awg: &Awg) -> Result<(), AwgInvalid>;   // importers, caps; the runner calls it
+                                                         // again before any start (AT-12-003)
+pub fn implied_generation(awg: &Awg) -> AwgGeneration;  // lowest generation with every key
+pub enum AwgField { Jc, Jmin, Jmax, S1..S4, H1..H4, I1..I5, J1..J3, Itime, HeaderProtectionKey,
+    ContentPaddingAddition, RekeyAfterTime, RekeyTimeout, RejectAfterTime, KeepaliveTimeout,
+    MaxHandshakeAttempts, PersistentKeepalive, RandomTrailers, DisableCookies, Version }
+impl AwgField { pub fn conf_name(self) -> &'static str; pub fn yaml_name(self) -> String;
+    pub fn from_key(key: &str) -> Option<AwgField> }
+pub struct AwgInvalid { pub fields: Vec<AwgField> }      // field order, each once
+impl AwgInvalid { pub fn names(&self) -> String; pub fn msg(&self) -> Msg }  // profiles.awg.invalid
+impl From<AwgInvalid> for AppError;                       // Validation
+```
+Rules (bounds of amneziawg-go v3 and of the legacy 1.x / 2.0 code mihomo carries, never the
+MTU-1280 recommendations): `Jc <= 128`; `Jmin <= Jmax < 65535` (absent = 0); `S1`-`S4` keep the
+padded message (148 / 92 / 64 / 32 + S) below 65535, and before 3.x the four padded sizes differ
+(`S2 != S1 + 56`); `H1`-`H4` (absent = standard 1..4; legacy reads a value starting at 1..4 as
+standard) never overlap, ranges only from 2.0; `I1`-`I5` from 1.5, tags `<b 0x..>` `<t>` `<r N>`
+`<rc N>` `<rd N>` plus legacy `<c>` `<wt N>` (N <= 1000 / 5000, one `c` / `t` per chain) or v3
+`<d>` `<ds>` `<dz N>`, nothing but spaces between tags; `J1`-`J3`, `Itime` 1.5 only;
+`HeaderProtectionKey` (base64 of 32 bytes, needs S1-S4 >= 12), `ContentPaddingAddition`
+(<= 65535), the timers (`RejectAfterTime` above `RekeyAfterTime`, WireGuard's 180 / 120 for the
+missing one), keepalive range, `RandomTrailers`, `DisableCookies` 3.x only.
+
+## amnezia (`vpnte_profiles::amnezia`, AmneziaVPN `vpn://` keys)
+
+```rust
+pub const SCHEME: &str = "vpn";
+pub enum Payload { Text(String), Unsupported(&'static str) }
+pub fn decode_key(link: &str) -> Option<Payload>;        // None: not a key / damaged
+pub fn parse_payload(text: &str) -> ParseReport;          // description, `.conf` or Xray JSON
+pub fn parse_key(line: &str) -> Result<Profile, SkipReason>;   // `uri::parse_uri` for `vpn`
+pub fn parse_document(doc: &Value) -> Option<ParseReport>;     // None: not a description
+```
+Layout (amnezia-client `ExportController::generateVpnUrl` / `ImportController`): `vpn://` +
+base64url without padding (the standard alphabet is accepted too) of Qt `qCompress` output = a
+4-byte big-endian length + a zlib stream (inflated only when the whole stream matches the length,
+at most 1 MiB; otherwise the raw bytes are read, as AmneziaVPN does). The text is a server
+description `{"containers": [{"container": "amnezia-awg2", "awg": {<server params>,
+"last_config": "<JSON text>"}}], "defaultContainer", "description", "hostName", "dns1",
+"dns2"}`, or a bare `.conf`, an Xray JSON config or an OpenVPN config. Containers:
+`amnezia-awg` / `amnezia-awg2` (key `awg`) and `amnezia-wireguard` (`wireguard`): `last_config`
+holds the client `.conf` in `config` (older exports leave `$PRIMARY_DNS` / `$SECONDARY_DNS`,
+filled from `dns1` / `dns2`) and `mtu` (applied when the `.conf` has none); `amnezia-xray`
+(`xray`) / `amnezia-ssxray` (`ssxray`): `last_config` is an Xray client config for `parse_json`.
+Profiles are named by `description`. Every other container (`openvpn`, `openvpn-cloak`,
+`shadowsocks` = OpenVPN over SS, `ipsec`, `dns`, `sftp`, `torwebsite`, `socks5proxy`, `mtproxy`,
+`telemt`, `tproxy`) -> `UnsupportedProtocol(<AmneziaVPN's name>)`; a container without a client
+config (an administrator export: its `userName` / `password` are SSH credentials and are never
+read) -> `Invalid`; Amnezia Premium / Free keys (`api_key`, `auth_data`, `apiConfig`) ->
+`UnsupportedProtocol`. Excerpts are `vpn://…`.
 
 ## text (`vpnte_profiles::text`, pure and linear)
 
@@ -246,10 +329,14 @@ impl Profile {
 ```
 `identity` hashes protocol, lower-case host, port, credential, SNI, TLS mode, Reality public key,
 transport kind + path / service, HY2 ports, SS method, VLESS encryption, ShadowTLS password, WG
-peers, native graph; it ignores name, notes, mux, dial options and fingerprint. Use it for
+peers (AmneziaWG: the same under its own label, its obfuscation values excluded so that rotated
+values keep the row), native graph; it ignores name, notes, mux, dial options and fingerprint. Use it for
 de-duplication and to match rows across subscription refreshes; never change its inputs.
 Which engine runs a profile is decided by `vpnte_engine::select_engine` only (this crate keeps
-no second copy of that table).
+no second copy of that table). `capabilities` of AmneziaWG: stealth `Obfs`, no TLS, first note
+`profiles.awg.noEngine` (sing-box and Xray cannot run it; mihomo is a lab function of this
+build), then `profiles.awg.invalid` when `awg::validate` fails. `udpOnTcpOnly` is not shown for
+Hysteria2 (the emitter drops a stored tcp-only `network` there).
 
 ## emit_singbox (sing-box 1.14 JSON; the only place outbound normalisation happens)
 
@@ -269,7 +356,8 @@ impl SingBoxFragment {
 }
 pub enum EmitError { XrayOnly(&'static str), MuxUnsupported(&'static str), TlsUnsupported(&'static str),
     TransportUnsupported(&'static str), RealityWithEch, RealityOverQuic, PinWithCertificate,
-    CertPinUnenforced, EchConfig, SsPlugin(String), Hy2Obfs(String), WireGuard(WgProblem) }
+    CertPinUnenforced, EchConfig, SsPlugin(String), Hy2Obfs(String), WireGuard(WgProblem),
+    Amneziawg /* sing-box has no AmneziaWG: never emitted as plain WireGuard */ }
 pub enum WgProblem { NoAddress, NoPeer, NoPrivateKey, NoPeerAddress, BadPeerPort, NoPublicKey, AllowedIpsRequired }
 impl From<EmitError> for AppError;        // Validation + profiles.emit.*
 pub fn emit_singbox(p: &Profile, tag: &str, policy: &EmitPolicy) -> Result<SingBoxFragment, EmitError>;
@@ -334,16 +422,27 @@ Xray 26 refuses to load -> `RemovedTransport`; `export_document` refuses those g
 ## export
 
 ```rust
-pub enum Shared { Uri(String), Json(Value) }
+pub enum Shared { Uri(String), Json(Value), Conf(String) /* AmneziaWG */ }
 impl Shared {
-    pub fn text(&self) -> String;          // the link, or the JSON document on one line
-    pub fn notice(&self) -> Option<Msg>;   // Json -> profiles.export.sharedAsJson
-}
+    pub fn text(&self) -> String;          // the link, the JSON document on one line, the .conf
+    pub fn notice(&self) -> Option<Msg>;   // Json -> profiles.export.sharedAsJson,
+}                                          // Conf -> profiles.export.sharedAsConf
 pub fn export_uri(p: &Profile) -> Option<String>;      // only lossless links; imported line kept verbatim
 pub fn export_share(p: &Profile) -> Option<Shared>;    // link, else native graph's Xray document,
                                                        // else {"remarks", "outbounds"|"endpoints"}
 pub fn export_proxy_line(p: &Profile) -> Option<String>;  // socks5:// http:// https:// (naive h2)
+pub fn export_conf(p: &Profile) -> Option<String>;     // WireGuard / AmneziaWG `.conf`
+pub fn export_mihomo(p: &Profile) -> Option<String>;   // WireGuard / AmneziaWG mihomo `proxies:` doc
 ```
+AmneziaWG has no link (`export_uri` -> `None` unless the imported line reads back unchanged);
+`export_share` gives its `.conf` (`Shared::Conf`), which AmneziaVPN and the AmneziaWG apps import.
+`export_conf` / `export_mihomo` return `None` for other kinds and for profiles with TLS, a
+transport, mux, dial options or raw sing-box keys. Round trips (`wg_ini` / `clash` reading the
+export) keep every parameter, with two documented exceptions: a lone peer without AllowedIPs is
+written as `0.0.0.0/0, ::/0` (what it carries here, K21; other clients route nothing without
+it), and mihomo has no keepalive range, so an AmneziaWG 3.x range goes out as its lower bound.
+`export_mihomo` also refuses two local addresses of one family and peers with different
+keepalives (mihomo keeps one of each per entry); it writes `version: 3` for 3.x.
 A link is returned only when re-importing it yields the same profile (mux, dial options,
 `singbox_extra`, pins, multi-peer WireGuard, ShadowTLS, … -> no link). The JSON share is
 `emit_singbox(p, "proxy", &EmitPolicy::default())`, so it carries the emitter's defaults (uTLS
@@ -358,13 +457,16 @@ warning and use the clipboard / file helpers of the app.
   (`profiles.emit.*`, WireGuard problems under `profiles.emit.wireguard.*`), `NativeError`
   (`profiles.xrayNative.*`), `LegacyError` (`profiles.legacy.*`). `DeepLinkError::msg()` gives
   `profiles.deeplink.*` (`encryptedHapp`, `encryptedMantaray`, `encrypted`, `routingProfile`,
-  `addPayloadUnrecognised`, `unknownHost`).
+  `addPayloadUnrecognised`, `unknownHost`, `amneziaDamaged`, `amneziaUnsupported`).
+  `awg::AwgInvalid` (`profiles.awg.invalid`, arg `fields`).
 - What the UI must render with this crate's keys: `caps::note_msg(&note)` for every `Profile.notes`
-  entry (`profiles.caps.note.*`; `Note::Other` keys: `profiles.wgIni.amneziaIncompatible`,
-  `profiles.wgIni.amneziaJunkDropped`, `profiles.import.realityFingerprint`,
-  `profiles.import.xrayTransportRemoved`), `caps::skip_msg(&skipped.reason)` for every skipped entry
-  (`profiles.caps.skip.*`), `Stealth::msg()` (`profiles.caps.stealth.*`), `Capabilities.notes`,
-  `Shared::notice()` (`profiles.export.sharedAsJson`).
+  entry (`profiles.caps.note.*`; `Note::Other` keys: `profiles.import.realityFingerprint`,
+  `profiles.import.xrayTransportRemoved`, `profiles.import.naivePinNotEnforced`, and on rows
+  stored by older builds `profiles.wgIni.amneziaIncompatible` / `amneziaJunkDropped`, which now
+  ask to import the key again), `caps::skip_msg(&skipped.reason)` for every skipped entry
+  (`profiles.caps.skip.*`, `profiles.awg.invalid`), `Stealth::msg()` (`profiles.caps.stealth.*`),
+  `Capabilities.notes` (also `profiles.awg.noEngine`), `Shared::notice()`
+  (`profiles.export.sharedAsJson`, `profiles.export.sharedAsConf`).
 - Register the strings at start: `for (ru, en) in vpnte_profiles::LOCALES { … }` (one pair per work
   package, file-name order; all keys under `profiles`). A test keeps `LOCALES` equal to `locales/`
   and checks that every `"profiles.…"` key written in the sources exists in both languages.
@@ -379,7 +481,9 @@ warning and use the clipboard / file helpers of the app.
 
 - `parse_text`, `resolve`, subscription fetching, dedup / reconcile: `vpnte-servers` (above flow).
 - Xray JSON for typed profiles and engine selection: `vpnte-engine` (`xray_config`, `select_engine`).
-- AmneziaWG (planned WP-12): parameters are classified into Notes, never applied.
+- Running AmneziaWG (WP-12, lab gate): this crate models, imports, checks and exports AmneziaWG
+  keys only; no bundled engine runs them (`EmitError::Amneziawg`, engine `Reject::Amneziawg`).
+  The mihomo runner is the next package and must call `awg::validate` before any start.
 - Clash `proxy-providers` (remote lists), mihomo-only protocols / plugins (TUIC v4, restls, jls,
   kcptun, SOCKS over TLS, …): skipped with a reason.
 - Whole-certificate pins (`cert_pin_sha256`) on sing-box 1.14: not emitted (`Note::CertPinNotEnforced`);

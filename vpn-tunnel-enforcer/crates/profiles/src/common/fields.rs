@@ -87,6 +87,7 @@ pub fn display_name(label: &str) -> &'static str {
         "naive" => "Naive",
         "anytls" => "AnyTLS",
         "wireguard" => "WireGuard",
+        "amneziawg" => "AmneziaWG",
         "socks" => "SOCKS",
         "http" => "HTTP",
         _ => "VPN",

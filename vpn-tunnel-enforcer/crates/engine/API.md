@@ -343,7 +343,9 @@ pub enum SingBoxOnly { H2Transport, QuicTransport, InsecureWithoutPin, SpkiPin, 
 pub enum XrayLacks { Client(&'static str) /* TUIC, NaiveProxy, AnyTLS, ShadowTLS */,
     Form(&'static str) /* transport under Hy2 / WG / SOCKS / HTTP, SOCKS over TLS */ }
 pub enum Reject { NativeXray, XrayTransport, SingBoxOnly(SingBoxOnly), Conflict(SingBoxOnly),
-    XrayLacks(XrayLacks) }                                              // forced Xray: never a silent sing-box
+    XrayLacks(XrayLacks) /* forced Xray: never a silent sing-box */,
+    Amneziawg /* any preference, checked first: neither engine runs AmneziaWG (mihomo, a WP-12
+                 lab function, does); never started as plain WireGuard. reject.amneziawg */ }
 impl Reject { pub fn msg(&self) -> Msg; }      // engine.xray.{reject.*, singBoxOnly.*, conflict.*}; -> Validation
                                                // reject.{noXrayClient,xrayForm}(protocol): offer Auto / sing-box
 pub enum Decision { Selected { engine: Engine, reason: SelectReason }, Rejected(Reject) }

@@ -1,4 +1,5 @@
-//! Exporters: share link (URI), share document (link or JSON) and plain proxy-list line.
+//! Exporters: share link (URI), share document (link, JSON or an AmneziaWG `.conf`), plain
+//! proxy-list line, and WireGuard / AmneziaWG as a `.conf` or a mihomo proxy.
 //!
 //! Exports are not redacted: they exist to hand the key to the user (clipboard, file), and the
 //! caller shows the secret-export warning. A link is produced only when it carries the whole
@@ -8,12 +9,19 @@
 use serde_json::Value;
 use vpnte_base::Msg;
 
-use crate::model::{Kind, Profile, Source};
+use crate::model::{Awg, Kind, Profile, Source, WireGuard};
 
+mod conf;
 mod link;
+mod mihomo;
 mod schemes;
 mod vmess;
 
+pub use conf::export_conf;
+pub use mihomo::export_mihomo;
+
+#[cfg(test)]
+mod awg_tests;
 #[cfg(test)]
 mod tests;
 
@@ -24,6 +32,9 @@ pub enum Shared {
     Uri(String),
     /// A JSON document: sing-box `{"remarks", "outbounds"|"endpoints"}` or a provider Xray document.
     Json(Value),
+    /// An AmneziaWG `.conf` ([`export_conf`]): no link format carries AmneziaWG and no engine
+    /// JSON either.
+    Conf(String),
 }
 
 /// Redacted like the model types (CONTRACT §4.9): the link and the document are the credentials.
@@ -35,6 +46,7 @@ impl std::fmt::Debug for Shared {
                 write!(f, "Uri({scheme}://<hidden>)")
             }
             Shared::Json(_) => f.write_str("Json(<hidden>)"),
+            Shared::Conf(_) => f.write_str("Conf(<hidden>)"),
         }
     }
 }
@@ -45,12 +57,18 @@ impl Shared {
         match self {
             Shared::Uri(uri) => uri.clone(),
             Shared::Json(doc) => doc.to_string(),
+            Shared::Conf(conf) => conf.clone(),
         }
     }
 
-    /// What to tell the user next to the export: a JSON share means no link could carry the key.
+    /// What to tell the user next to the export: a JSON or `.conf` share means no link could
+    /// carry the key.
     pub fn notice(&self) -> Option<Msg> {
-        matches!(self, Shared::Json(_)).then(|| Msg::new("profiles.export.sharedAsJson"))
+        match self {
+            Shared::Uri(_) => None,
+            Shared::Json(_) => Some(Msg::new("profiles.export.sharedAsJson")),
+            Shared::Conf(_) => Some(Msg::new("profiles.export.sharedAsConf")),
+        }
     }
 }
 
@@ -77,11 +95,31 @@ pub fn export_share(p: &Profile) -> Option<Shared> {
     if let Some(uri) = export_uri(p) {
         return Some(Shared::Uri(uri));
     }
+    if matches!(p.kind, Kind::Amneziawg { .. }) {
+        return export_conf(p).map(Shared::Conf);
+    }
     let doc = match &p.native_xray {
         Some(graph) => crate::xray_native::export_document(graph, &p.name).ok()?,
         None => singbox_document(p)?,
     };
     Some(Shared::Json(doc))
+}
+
+/// The WireGuard part and AmneziaWG parameters of a profile the `.conf` and mihomo exporters
+/// carry whole: nothing else may be set (TLS, transport, mux, dial options, raw sing-box keys).
+fn wireguard_parts(p: &Profile) -> Option<(&WireGuard, Option<&Awg>)> {
+    let parts = match &p.kind {
+        Kind::Wireguard(wg) => (wg, None),
+        Kind::Amneziawg { wg, awg } => (wg, Some(awg.as_ref())),
+        _ => return None,
+    };
+    let plain = p.tls.is_none()
+        && p.transport.is_none()
+        && p.mux.is_none()
+        && p.dial.is_default()
+        && p.singbox_extra.is_empty()
+        && p.native_xray.is_none();
+    (plain && !parts.0.peers.is_empty()).then_some(parts)
 }
 
 fn singbox_document(p: &Profile) -> Option<Value> {

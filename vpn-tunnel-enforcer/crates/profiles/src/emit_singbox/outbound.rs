@@ -256,8 +256,9 @@ fn protocol(o: &mut Obj, kind: &Kind) -> Result<(), EmitError> {
             put_opt(o, "username", username.as_deref());
             put_opt(o, "password", password.as_deref());
         }
-        // Emitted as an endpoint by `wireguard::endpoint`, never as an outbound.
-        Kind::Wireguard(_) => {}
+        // Emitted as an endpoint by `wireguard::endpoint` (AmneziaWG: refused), never as an
+        // outbound.
+        Kind::Wireguard(_) | Kind::Amneziawg { .. } => {}
     }
     Ok(())
 }

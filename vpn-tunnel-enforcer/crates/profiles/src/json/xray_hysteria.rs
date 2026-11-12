@@ -148,8 +148,15 @@ fn finalmask(
         }
     };
     let mut rate = |key: &str| {
-        let raw = quic.get(key)?;
-        let mbps = raw.as_str().and_then(xray_mbps);
+        let bits = match quic.get(key)? {
+            Value::Number(n) => n.as_f64(),
+            raw => raw.as_str().and_then(xray_bits),
+        };
+        // `0` or empty is unset in Xray: nothing to carry, nothing dropped.
+        if bits == Some(0.0) {
+            return None;
+        }
+        let mbps = bits.and_then(mbps);
         if mbps.is_none() {
             note(format!("finalmask.quicParams.{key}"));
         }
@@ -180,11 +187,13 @@ fn finalmask(
     })
 }
 
-/// Xray `Bandwidth` (`infra/conf/transport_method.go`) in sing-box Mbps (10^6 bit/s, at least
-/// 1): case-insensitive, always bits, binary multiples (`100 mbps` = 100 * 2^20 bit/s); `0` or
-/// empty is unset.
-fn xray_mbps(raw: &str) -> Option<u32> {
+/// Xray `Bandwidth` (`infra/conf/transport_method.go`) in bit/s: case-insensitive, always bits,
+/// binary multiples (`100 mbps` = 100 * 2^20 bit/s); empty is 0, which Xray reads as unset.
+fn xray_bits(raw: &str) -> Option<f64> {
     let s = raw.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return Some(0.0);
+    }
     let split = s
         .find(|c: char| !c.is_ascii_digit() && c != '.')
         .unwrap_or(s.len());
@@ -197,6 +206,11 @@ fn xray_mbps(raw: &str) -> Option<u32> {
         "t" | "tb" | "tbps" => 4,
         _ => return None,
     };
-    let mbps = (value * 1024f64.powi(power) / 1e6).round().max(1.0);
-    (value > 0.0 && mbps <= f64::from(u32::MAX)).then_some(mbps as u32)
+    Some(value * 1024f64.powi(power))
+}
+
+/// sing-box Mbps (10^6 bit/s, at least 1) of a positive rate.
+fn mbps(bits: f64) -> Option<u32> {
+    let mbps = (bits / 1e6).round().max(1.0);
+    (bits > 0.0 && mbps <= f64::from(u32::MAX)).then_some(mbps as u32)
 }

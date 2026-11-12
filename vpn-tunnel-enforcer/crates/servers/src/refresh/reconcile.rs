@@ -91,7 +91,7 @@ fn credential(kind: &Kind) -> Option<String> {
         | Kind::Shadowsocks { password, .. }
         | Kind::Hysteria2 { password, .. }
         | Kind::Anytls { password, .. } => password.clone(),
-        Kind::Wireguard(wg) => wg.private_key.clone(),
+        Kind::Wireguard(wg) | Kind::Amneziawg { wg, .. } => wg.private_key.clone(),
         Kind::Naive {
             username, password, ..
         } => format!("{username}\u{0}{password}"),

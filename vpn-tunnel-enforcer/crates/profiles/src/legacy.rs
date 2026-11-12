@@ -139,6 +139,10 @@ fn describe(reason: &SkipReason) -> String {
         SkipReason::UnsupportedTransport(t) => format!("unsupported transport {t}"),
         SkipReason::Duplicate => "duplicate".into(),
         SkipReason::NativeGraphRejected(d) => format!("Xray graph rejected: {d}"),
+        SkipReason::UnsupportedProtocol(p) => format!("unsupported protocol {p}"),
+        SkipReason::AwgInvalid(invalid) => {
+            format!("invalid AmneziaWG parameters {}", invalid.names())
+        }
     }
 }
 

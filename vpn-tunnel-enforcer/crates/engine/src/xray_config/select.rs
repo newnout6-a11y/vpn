@@ -132,6 +132,9 @@ pub enum Reject {
     /// Forced Xray for a protocol Xray cannot run: a refusal, never a silent sing-box start
     /// (owner decision of 2026-11-11: both engines are first-class).
     XrayLacks(XrayLacks),
+    /// AmneziaWG under any preference: neither engine dials it (mihomo does, a lab function of
+    /// this build, WP-12), and plain WireGuard would only be dropped by the server.
+    Amneziawg,
 }
 
 impl Reject {
@@ -148,6 +151,7 @@ impl Reject {
             Reject::XrayLacks(XrayLacks::Form(name)) => {
                 Msg::new("engine.xray.reject.xrayForm").arg("protocol", *name)
             }
+            Reject::Amneziawg => Msg::new("engine.xray.reject.amneziawg"),
         }
     }
 }
@@ -184,6 +188,10 @@ impl Decision {
 /// Picks the engine for `p` under the user's preference (decision table of the xray-engine spec
 /// §2.2, first match wins).
 pub fn select_engine(p: &Profile, pref: EnginePref) -> Decision {
+    // Before every other rule: no preference may start AmneziaWG as plain WireGuard.
+    if matches!(p.kind, Kind::Amneziawg { .. }) {
+        return Decision::Rejected(Reject::Amneziawg);
+    }
     if p.native_xray.is_some() {
         return match pref {
             EnginePref::SingBox => Decision::Rejected(Reject::NativeXray),
@@ -266,6 +274,8 @@ fn xray_lacks(p: &Profile) -> Option<XrayLacks> {
         Kind::Tuic { .. } => Some(XrayLacks::Client("TUIC")),
         Kind::Naive { .. } => Some(XrayLacks::Client("NaiveProxy")),
         Kind::Anytls { .. } => Some(XrayLacks::Client("AnyTLS")),
+        // `select_engine` refuses it first; `translate` refuses it through this.
+        Kind::Amneziawg { .. } => Some(XrayLacks::Client("AmneziaWG")),
     }
 }
 
@@ -385,5 +395,31 @@ fn private_literal(host: &Host) -> bool {
             ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
         }
         Host::Domain(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod amneziawg_tests {
+    use super::*;
+
+    /// AmneziaWG is refused under every preference with its own reason and message, before any
+    /// other rule: never a broken key, never a plain WireGuard start.
+    #[test]
+    fn amneziawg_is_refused_under_every_preference() {
+        let conf = "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.8.1.2/32\nJc = 4\nJmin = 40\nJmax = 70\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 203.0.113.7:51820\n";
+        let p = vpnte_profiles::wg_ini::parse_wg_ini(conf)
+            .expect("a .conf")
+            .expect("valid");
+        assert_eq!(p.kind.label(), "amneziawg");
+        for pref in [EnginePref::Auto, EnginePref::SingBox, EnginePref::Xray] {
+            assert_eq!(
+                select_engine(&p, pref),
+                Decision::Rejected(Reject::Amneziawg)
+            );
+        }
+        assert!(!xray_protocol(&p), "translate refuses it too");
+        let err: AppError = Reject::Amneziawg.into();
+        assert_eq!(err.kind, vpnte_base::ErrorKind::Validation);
+        crate::test_locales::assert_localized(&Reject::Amneziawg.msg().key);
     }
 }

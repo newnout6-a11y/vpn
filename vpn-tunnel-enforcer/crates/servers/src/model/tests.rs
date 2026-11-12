@@ -260,3 +260,28 @@ fn locked_profile_is_reported() {
     );
     assert!(ServerSummary::of(&row, None, false).locked);
 }
+
+/// AmneziaWG: a row of the new kind carries the protocol label `amneziawg` for the
+/// lists, and its sealed profile keeps every AmneziaWG parameter.
+#[test]
+fn amneziawg_row() {
+    let conf = "[Interface]\nPrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAddress = 10.8.1.2/32\nJc = 4\nJmin = 40\nJmax = 70\nS1 = 15\nS2 = 18\nH1 = 1020325451\n[Peer]\nPublicKey = AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=\nEndpoint = 203.0.113.7:51820\n";
+    let p = vpnte_profiles::wg_ini::parse_wg_ini(conf)
+        .expect("a .conf")
+        .expect("valid");
+    let row = ServerRow::new(
+        &p,
+        GroupId::from("g"),
+        Origin::Manual,
+        ClientDevice::Android,
+        5,
+    )
+    .unwrap();
+    assert_eq!(
+        (row.protocol.as_str(), row.server.as_str(), row.port),
+        ("amneziawg", "203.0.113.7", 51820)
+    );
+    assert_eq!(row.profile().unwrap(), p);
+    let summary = ServerSummary::of(&row, None, false);
+    assert_eq!(summary.protocol, "amneziawg");
+}

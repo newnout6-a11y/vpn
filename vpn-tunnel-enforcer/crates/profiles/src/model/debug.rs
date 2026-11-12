@@ -215,6 +215,7 @@ impl fmt::Debug for Kind {
                 .field("idle_timeout_s", idle_timeout_s)
                 .field("min_idle", min_idle),
             Kind::Wireguard(wg) => s.field("config", wg),
+            Kind::Amneziawg { wg, awg } => s.field("config", wg).field("awg", awg),
             Kind::Socks { username, password } | Kind::Http { username, password } => s
                 .field("username", &hidden_opt(username))
                 .field("password", &hidden_opt(password)),

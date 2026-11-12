@@ -3,10 +3,11 @@ use std::net::IpAddr;
 
 use super::yaml::Node;
 use super::{Draft, Obj, Proto, invalid, parse_mbps, parse_u32};
+use crate::awg::AwgReader;
 use crate::common::fields::{HY2_OBFS_TYPES, parse_host, parse_port, port_range};
 use crate::common::wg;
 use crate::model::{
-    Host, Hy2Obfs, Kind, Note, ShadowTlsLayer, SkipReason, SsPlugin, Tls, WgPeer, WireGuard,
+    Awg, Host, Hy2Obfs, Kind, Note, ShadowTlsLayer, SkipReason, SsPlugin, Tls, WgPeer, WireGuard,
 };
 use crate::wg_ini;
 
@@ -89,7 +90,7 @@ pub(super) fn read_kind(proto: Proto, obj: &Obj, draft: &mut Draft) -> Result<Ki
             idle_timeout_s: obj.str("idle-session-timeout").and_then(seconds),
             min_idle: obj.str("min-idle-session").and_then(parse_u32),
         },
-        Proto::Wireguard => Kind::Wireguard(wireguard(obj, draft)?),
+        Proto::Wireguard => wireguard(obj, draft)?,
         Proto::Socks => {
             // sing-box's SOCKS outbound has no TLS; dialing a TLS-wrapped SOCKS server in clear
             // would fail and expose the credentials.
@@ -397,7 +398,8 @@ fn tuic(obj: &Obj, draft: &mut Draft) -> Result<Kind, SkipReason> {
     })
 }
 
-fn wireguard(obj: &Obj, draft: &mut Draft) -> Result<WireGuard, SkipReason> {
+/// WireGuard, or AmneziaWG when `amnezia-wg-option` turns any obfuscation on.
+fn wireguard(obj: &Obj, draft: &mut Draft) -> Result<Kind, SkipReason> {
     let private_key = wg_ini::key(obj.str("private-key"))?;
     let mut local_address = Vec::new();
     for key in ["ip", "ipv6"] {
@@ -445,21 +447,8 @@ fn wireguard(obj: &Obj, draft: &mut Draft) -> Result<WireGuard, SkipReason> {
         draft.server = Some(first.host.clone());
         draft.port = Some(first.port);
     }
-    if let Some(option) = obj.node("amnezia-wg-option").and_then(Node::as_map) {
-        let pairs = option
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str().unwrap_or_default()));
-        draft.notes.extend(wg::amnezia_note(pairs));
-        // Newer AmneziaWG knobs (header protection, padding, timers) are dropped: say so.
-        for (key, value) in option {
-            let off = value.is_null() || value.as_bool() == Some(false);
-            if !off && key != "version" && !wg::is_amnezia_key(&key.to_ascii_lowercase()) {
-                let field = format!("amnezia-wg-option.{key}");
-                draft.notes.push(Note::UnsupportedField(field));
-            }
-        }
-    }
-    Ok(WireGuard {
+    let awg = amnezia(obj, draft)?;
+    let wg = WireGuard {
         private_key,
         local_address,
         mtu: obj
@@ -473,7 +462,37 @@ fn wireguard(obj: &Obj, draft: &mut Draft) -> Result<WireGuard, SkipReason> {
             .filter_map(|d| d.parse().ok())
             .collect(),
         peers,
-    })
+    };
+    Ok(wg::wireguard_kind(wg, awg))
+}
+
+/// mihomo's `amnezia-wg-option`: every key it documents is read and checked; others are noted.
+fn amnezia(obj: &Obj, draft: &mut Draft) -> Result<Option<Awg>, SkipReason> {
+    let mut awg = AwgReader::default();
+    let option = obj.node("amnezia-wg-option").and_then(Node::as_map);
+    for (key, value) in option.unwrap_or_default() {
+        let Node::Scalar { .. } = value else {
+            // A list or a map where mihomo expects a scalar.
+            if !awg.reject(key) {
+                draft
+                    .notes
+                    .push(Note::UnsupportedField(format!("amnezia-wg-option.{key}")));
+            }
+            continue;
+        };
+        // `null` and blank values (`i3: ""`) are absent.
+        let text = value.as_str().unwrap_or_default();
+        if key == "version" {
+            if !text.is_empty() {
+                awg.version(text);
+            }
+        } else if !awg.take(key, text) && !text.is_empty() && value.as_bool() != Some(false) {
+            draft
+                .notes
+                .push(Note::UnsupportedField(format!("amnezia-wg-option.{key}")));
+        }
+    }
+    awg.finish().map_err(SkipReason::AwgInvalid)
 }
 
 /// One peer without its routes: the entry itself (single-peer form) or an item of `peers`.

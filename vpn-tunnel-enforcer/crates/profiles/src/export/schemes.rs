@@ -166,6 +166,8 @@ pub(super) fn link(p: &Profile) -> Option<String> {
             let private_key = wireguard(&mut q, p, wg)?;
             format!("{}@", pct(private_key))
         }
+        // No client agrees on an AmneziaWG link: shared as a `.conf` (`export_share`).
+        Kind::Amneziawg { .. } => return None,
         Kind::Socks { username, password } => {
             if tls.is_some() || transport.is_some() {
                 return None;

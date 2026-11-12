@@ -18,7 +18,7 @@ pub enum Stealth {
     Ech,
     /// NaïveProxy: Chromium's own network stack.
     Naive,
-    /// Obfuscated stream: Hysteria2 obfs, a Shadowsocks SIP003 plugin.
+    /// Obfuscated stream: Hysteria2 obfs, a Shadowsocks SIP003 plugin, AmneziaWG.
     Obfs,
     /// TLS with a browser fingerprint (uTLS): the provider's, else the app default.
     Utls,
@@ -87,11 +87,22 @@ pub fn capabilities(p: &Profile) -> Capabilities {
     }
 
     let mut msgs = Vec::new();
+    // No bundled engine runs AmneziaWG: the first thing to know, then any parameter that cannot
+    // work (a stored profile is checked again before any start).
+    if let Kind::Amneziawg { awg, .. } = &p.kind {
+        let generation = awg.generation.label();
+        msgs.push(Msg::new("profiles.awg.noEngine").arg("generation", generation));
+        if let Err(invalid) = crate::awg::validate(awg) {
+            msgs.push(invalid.msg());
+        }
+    }
     // Naive gets its own note above; REALITY verifies by key, so the emitter drops `insecure`.
     if !naive && tls.is_some_and(|t| t.insecure && t.reality.is_none()) {
         msgs.push(Msg::new("profiles.caps.insecure"));
     }
+    // The emitter drops a tcp-only `network` from Hysteria2 (older imports saved it there).
     if p.kind.is_udp_transport()
+        && !matches!(p.kind, Kind::Hysteria2 { .. })
         && p.singbox_extra.get("network").and_then(Value::as_str) == Some("tcp")
     {
         msgs.push(Msg::new("profiles.caps.udpOnTcpOnly"));
@@ -161,6 +172,10 @@ pub fn skip_msg(reason: &SkipReason) -> Msg {
         SkipReason::NativeGraphRejected(reason) => {
             Msg::new("profiles.caps.skip.nativeGraphRejected").arg("reason", reason)
         }
+        SkipReason::UnsupportedProtocol(protocol) => {
+            Msg::new("profiles.caps.skip.unsupportedProtocol").arg("protocol", protocol)
+        }
+        SkipReason::AwgInvalid(invalid) => invalid.msg(),
     }
 }
 
@@ -174,6 +189,7 @@ fn stealth(p: &Profile) -> Stealth {
     }
     match &p.kind {
         Kind::Naive { .. } => return Stealth::Naive,
+        Kind::Amneziawg { .. } => return Stealth::Obfs,
         Kind::Hysteria2 { obfs: Some(_), .. } => return Stealth::Obfs,
         // The ShadowTLS hop gets the device fingerprint like any TCP TLS.
         Kind::Shadowsocks {
@@ -218,7 +234,8 @@ fn unencrypted(p: &Profile) -> bool {
         | Kind::Tuic { .. }
         | Kind::Naive { .. }
         | Kind::Anytls { .. }
-        | Kind::Wireguard(_) => false,
+        | Kind::Wireguard(_)
+        | Kind::Amneziawg { .. } => false,
     }
 }
 

@@ -19,7 +19,10 @@ pub fn udp_capable(p: &Profile) -> bool {
         // listed it as TCP-only); naive does so only when `udp_over_tcp` is on.
         Kind::Anytls { .. } => true,
         Kind::Naive { .. } => uot_enabled(p.singbox_extra.get("udp_over_tcp")),
-        Kind::Hysteria2 { .. } | Kind::Tuic { .. } | Kind::Wireguard(_) => true,
+        Kind::Hysteria2 { .. }
+        | Kind::Tuic { .. }
+        | Kind::Wireguard(_)
+        | Kind::Amneziawg { .. } => true,
         // sing-box defaults VLESS to xudp; an explicitly empty encoding has no UDP tunnelling.
         Kind::Vless {
             packet_encoding, ..

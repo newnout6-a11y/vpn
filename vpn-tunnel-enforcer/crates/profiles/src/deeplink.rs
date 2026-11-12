@@ -1,10 +1,12 @@
-//! App deep links (`happ://`, `mantaray://`, …) unwrapped to the text or URL they carry.
+//! App deep links (`happ://`, `mantaray://`, …) unwrapped to the text or URL they carry, and
+//! AmneziaVPN keys (`vpn://`) unwrapped to the server description they encode.
 use std::borrow::Cow;
 
 use percent_encoding::percent_decode_str;
 use serde_json::Value;
 use vpnte_base::msg::Msg;
 
+use crate::amnezia::{self, Payload};
 use crate::common::b64::base64_text;
 use crate::text::uri_candidates;
 
@@ -19,6 +21,12 @@ pub enum DeepLinkError {
     AddPayloadUnrecognised,
     #[error("unknown deep link host {0}")]
     UnknownHost(String),
+    /// A `vpn://` key that does not decode (damaged or truncated).
+    #[error("damaged AmneziaVPN key")]
+    AmneziaDamaged,
+    /// A `vpn://` key carrying a protocol no engine of this app runs (`OpenVPN`).
+    #[error("AmneziaVPN key with {0}")]
+    AmneziaUnsupported(String),
 }
 
 impl DeepLinkError {
@@ -39,6 +47,10 @@ impl DeepLinkError {
             }
             DeepLinkError::UnknownHost(link) => {
                 Msg::new("profiles.deeplink.unknownHost").arg("link", link)
+            }
+            DeepLinkError::AmneziaDamaged => Msg::new("profiles.deeplink.amneziaDamaged"),
+            DeepLinkError::AmneziaUnsupported(protocol) => {
+                Msg::new("profiles.deeplink.amneziaUnsupported").arg("protocol", protocol)
             }
         }
     }
@@ -91,6 +103,15 @@ pub fn unwrap_deeplink(input: &str) -> Result<Option<String>, DeepLinkError> {
     let Some((scheme, after)) = input.split_once("://") else {
         return Ok(None);
     };
+    if scheme.eq_ignore_ascii_case(amnezia::SCHEME) {
+        return match amnezia::decode_key(input) {
+            Some(Payload::Text(text)) => Ok(Some(text)),
+            Some(Payload::Unsupported(protocol)) => {
+                Err(DeepLinkError::AmneziaUnsupported(protocol.to_owned()))
+            }
+            None => Err(DeepLinkError::AmneziaDamaged),
+        };
+    }
     let Some(app) = APPS.iter().find(|a| scheme.eq_ignore_ascii_case(a.scheme)) else {
         return Ok(None);
     };

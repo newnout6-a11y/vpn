@@ -24,6 +24,8 @@ pub const URI_SCHEMES: &[&str] = &[
     "shadowtls",
     "wireguard",
     "wg",
+    // AmneziaVPN keys.
+    "vpn",
 ];
 
 /// True when `line`, leading whitespace aside, starts with `<scheme>://` for a scheme in

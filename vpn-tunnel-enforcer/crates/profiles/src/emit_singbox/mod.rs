@@ -155,6 +155,10 @@ pub enum EmitError {
     Hy2Obfs(String),
     #[error("wireguard: {0:?}")]
     WireGuard(WgProblem),
+    /// AmneziaWG: sing-box 1.14 has no AmneziaWG (it would dial plain WireGuard, which the
+    /// server drops and RU networks block).
+    #[error("AmneziaWG cannot run on sing-box")]
+    Amneziawg,
 }
 
 /// What is missing from a WireGuard profile.
@@ -201,6 +205,7 @@ impl From<EmitError> for AppError {
                 WgProblem::NoPublicKey => "profiles.emit.wireguard.noPublicKey",
                 WgProblem::AllowedIpsRequired => "profiles.emit.wireguard.allowedIpsRequired",
             }),
+            EmitError::Amneziawg => Msg::new("profiles.emit.amneziawg"),
         };
         AppError::validation(msg).with_source(err)
     }
@@ -220,6 +225,7 @@ pub fn emit_singbox(
         Kind::Wireguard(wg) => {
             wireguard::endpoint(p, wg, tag, policy).map(SingBoxFragment::Endpoint)
         }
+        Kind::Amneziawg { .. } => Err(EmitError::Amneziawg),
         Kind::Shadowsocks {
             shadowtls: Some(layer),
             ..

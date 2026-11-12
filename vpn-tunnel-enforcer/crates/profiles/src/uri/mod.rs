@@ -67,6 +67,9 @@ pub fn parse_uri(line: &str) -> Result<Profile, SkipReason> {
     let Some((scheme, rest)) = split_scheme(line) else {
         return Err(SkipReason::UnknownScheme(String::new()));
     };
+    if scheme == crate::amnezia::SCHEME {
+        return crate::amnezia::parse_key(line);
+    }
     let (body, fragment) = parts::split_once(rest, '#');
     let meta = Meta::new(fragment, line);
     let parsed = match scheme.as_str() {
