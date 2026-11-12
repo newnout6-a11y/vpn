@@ -84,4 +84,34 @@ fn user_folders_on_this_machine_are_refused() {
     assert!(!path_admin_only(&exe));
     assert!(!path_admin_only(&std::env::temp_dir()));
     assert!(!path_admin_only(Path::new(r"C:\no\such\file.exe")));
+    // The reason names the file and its owner, so a refused install says what to fix.
+    let reason = untrusted_reason(&exe).expect("refused");
+    let name = exe
+        .file_name()
+        .expect("name")
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        reason.contains(&name) && reason.contains("owner S-1-5-"),
+        "{reason}"
+    );
+    let missing = untrusted_reason(Path::new(r"C:\no\such\file.exe")).expect("refused");
+    assert!(missing.contains("unreadable"), "{missing}");
+}
+
+/// A file an elevated installer writes into the admin-only folder is born owned by
+/// Administrators, so the service's own check accepts it (CI: an elevated user's files were
+/// owned by that user, and the service refused every Tunnel start with `service.folder.untrusted`).
+#[test]
+#[ignore = "needs elevation"]
+fn elevated_installed_files_pass_the_trusted_folder_check() {
+    assert!(vpnte_winnet::elevation::is_elevated(), "run elevated");
+    let dir = std::env::temp_dir().join(format!("vpnte-sddl-owner-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    crate::paths::secure_dir(&dir).expect("admin-only folder");
+    let file = dir.join("engine.exe");
+    crate::install::pins::write_replacing(&file, b"bytes").expect("written");
+    let verdict = (untrusted_reason(&dir), untrusted_reason(&file));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(verdict, (None, None));
 }

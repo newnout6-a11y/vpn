@@ -66,9 +66,21 @@ pub fn copy_verified(from: &Path, to: &Path, name: &str) -> AppResult<()> {
 }
 
 /// Writes `path` through a sibling temp file and a rename (an older copy is replaced whole).
+///
+/// Elevated (the install verbs, the service), the file is born owned by Administrators: a file a
+/// user's elevated installer creates is otherwise owned by that user, and an owner may rewrite its
+/// DACL even from an unelevated process, so the service's trusted-folder check refuses it. No
+/// other process may open it while it is written.
 pub fn write_replacing(path: &Path, bytes: &[u8]) -> AppResult<()> {
     let tmp = path.with_extension("new");
-    std::fs::write(&tmp, bytes).map_err(AppError::internal)?;
+    let mut file = if vpnte_winnet::elevation::is_elevated() {
+        crate::sddl::create_admin_owned(&tmp)
+    } else {
+        std::fs::File::create(&tmp)
+    }
+    .map_err(AppError::internal)?;
+    std::io::Write::write_all(&mut file, bytes).map_err(AppError::internal)?;
+    drop(file);
     std::fs::rename(&tmp, path).map_err(AppError::internal)
 }
 

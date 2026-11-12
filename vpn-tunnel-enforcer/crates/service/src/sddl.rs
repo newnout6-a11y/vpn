@@ -199,5 +199,74 @@ pub fn sid_string(sid: PSID) -> Option<String> {
     }
 }
 
+/// Owner only: the DACL is not present, so the new file inherits its folder's ACEs.
+const ADMIN_OWNER_SDDL: &str = "O:BA";
+
+/// Creates `path` (which must not exist) owned by Administrators, with its folder's inherited
+/// DACL, opened for writing with no sharing. Needs a token that may assign Administrators as
+/// owner (elevated, or SYSTEM).
+pub fn create_admin_owned(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows::Win32::Storage::FileSystem::{
+        CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_SHARE_NONE,
+    };
+
+    let sd = SecurityDescriptor::from_sddl(ADMIN_OWNER_SDDL).map_err(std::io::Error::other)?;
+    let attributes = sd.attributes();
+    // SAFETY: valid path and attributes (pointing at `sd`, alive for the call); the handle is
+    // owned by the returned File right away.
+    let handle = unsafe {
+        CreateFileW(
+            &HSTRING::from(path.as_os_str()),
+            FILE_GENERIC_WRITE.0,
+            FILE_SHARE_NONE,
+            Some(&attributes),
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    }
+    .map_err(std::io::Error::other)?;
+    // SAFETY: a fresh handle that nothing else owns.
+    Ok(unsafe { std::fs::File::from_raw_handle(handle.0 as RawHandle) })
+}
+
+/// Why `path` is not admin-only (`None` when it is): what the service logs and the install verb
+/// reports, so a refused folder says which file and which owner or grant.
+pub fn untrusted_reason(path: &Path) -> Option<String> {
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: as in path_admin_only; freed by the SecurityDescriptor below.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            &HSTRING::from(path.as_os_str()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            None,
+            None,
+            &mut sd,
+        )
+    };
+    if status.is_err() || sd.is_invalid() {
+        return Some(format!("{}: unreadable ({status:?})", path.display()));
+    }
+    let sd = SecurityDescriptor(sd);
+    if sd.admin_only_writes() {
+        return None;
+    }
+    let mut owner = PSID::default();
+    let mut defaulted = BOOL(0);
+    // SAFETY: a valid descriptor; out pointers are locals.
+    let owner = unsafe { GetSecurityDescriptorOwner(sd.0, &mut owner, &mut defaulted) }
+        .ok()
+        .and_then(|()| sid_string(owner))
+        .unwrap_or_else(|| "none".into());
+    Some(format!(
+        "{}: owner {owner} or a grant to another account may change it",
+        path.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests;

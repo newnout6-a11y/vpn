@@ -40,13 +40,15 @@ pub fn run(control: Control) -> u32 {
     runtime.block_on(serve(control))
 }
 
-/// The service's folder admits writes by administrators only, and so does every file it runs.
-fn trusted_install(dir: &Path, exe: &Path) -> bool {
-    sddl::path_admin_only(dir)
-        && sddl::path_admin_only(exe)
-        && pins::FILES
-            .iter()
-            .all(|f| sddl::path_admin_only(&dir.join(f)))
+/// The service's folder admits writes by administrators only, and so does every file it runs:
+/// `Err` names the first file that does not.
+pub fn trusted_install(dir: &Path, exe: &Path) -> Result<(), String> {
+    let files = pins::FILES.iter().map(|f| dir.join(f));
+    [dir.to_owned(), exe.to_owned()]
+        .into_iter()
+        .chain(files)
+        .find_map(|path| sddl::untrusted_reason(&path))
+        .map_or(Ok(()), Err)
 }
 
 fn init_logging(log: &Path) {
@@ -84,10 +86,13 @@ async fn serve(control: Control) -> u32 {
     let _ = std::fs::create_dir_all(&files.logs);
     init_logging(&files.service_log);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "service starting");
-    let trusted = trusted_install(&dir, &exe);
-    if !trusted {
-        tracing::error!(dir = %dir.display(), "install folder writable by users: tunnel disabled");
-    }
+    let trusted = match trusted_install(&dir, &exe) {
+        Ok(()) => true,
+        Err(reason) => {
+            tracing::error!(%reason, "install folder writable by users: tunnel disabled");
+            false
+        }
+    };
     let (singbox, xray) = (dir.join("sing-box.exe"), dir.join("xray.exe"));
     let protection = Arc::new(Protection::new(
         EnginePaths {

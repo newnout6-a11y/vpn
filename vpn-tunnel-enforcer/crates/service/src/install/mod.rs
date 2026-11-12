@@ -73,6 +73,10 @@ pub fn install(source: &Source) -> AppResult<PathBuf> {
     let bytes = std::fs::read(&source.exe).map_err(failed)?;
     // The stopped service's process may still be exiting for a moment: retry the replace.
     retry(|| pins::write_replacing(&exe, &bytes))?;
+    // The service runs Tunnel mode only from a folder users cannot change: checked here too, so a
+    // folder it would refuse fails the install with the file and the reason.
+    crate::service::trusted_install(&dir, &exe)
+        .map_err(|reason| failed(std::io::Error::other(reason)))?;
     let data = paths::data_dir().map_err(failed)?;
     paths::secure_dir(&data).map_err(failed)?;
     manage::create_or_update(&exe, DESCRIPTION).map_err(failed)?;
