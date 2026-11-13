@@ -3,7 +3,9 @@
 //! states show.
 //!
 //! Scenes: `full` (default), `empty`, `loading` (the first read never ends), `failed` (the first
-//! read fails, «Повторить» works), `errors` (every action fails).
+//! read fails, «Повторить» works), `errors` (every action fails), `only` (only the listed apps
+//! use the VPN), `only-empty` (the same with nothing listed), `old-service` (`only` with a
+//! helper service too old for it).
 mod routing;
 
 use std::cell::{Cell, RefCell};
@@ -13,7 +15,7 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 
-use super::model::{AppKind, AppRule, SplitApp, SplitSnapshot, SplitTunnelApi};
+use super::model::{AppKind, AppRule, AppScope, SplitApp, SplitSnapshot, SplitTunnelApi};
 use super::routing::{RoutingImported, RoutingOffer, RoutingPreview, RoutingSource};
 use crate::widgets::{Load, UiError};
 
@@ -34,6 +36,8 @@ pub struct DemoSplitTunnel {
     preview: RefCell<Option<RoutingPreview>>,
     tokens: Cell<u64>,
     smart_ru_on: Cell<bool>,
+    scope: Cell<AppScope>,
+    older_service: bool,
 }
 
 fn app(id: &str, name: &str, path: &str, rule: AppRule) -> SplitApp {
@@ -57,7 +61,7 @@ fn process(id: &str, name: &str) -> SplitApp {
 impl DemoSplitTunnel {
     /// A demo in `scene` (unknown scenes behave like `full`).
     pub fn new(scene: &str) -> Self {
-        let apps = if scene == "empty" {
+        let apps = if matches!(scene, "empty" | "only-empty") {
             Vec::new()
         } else {
             vec![
@@ -144,6 +148,11 @@ impl DemoSplitTunnel {
             preview: RefCell::new(None),
             tokens: Cell::new(0),
             smart_ru_on: Cell::new(false),
+            scope: Cell::new(match scene {
+                "only" | "only-empty" | "old-service" => AppScope::OnlyListed,
+                _ => AppScope::All,
+            }),
+            older_service: scene == "old-service",
         };
         match scene {
             "loading" => {}
@@ -151,6 +160,7 @@ impl DemoSplitTunnel {
                 demo.tx.send_replace(SplitSnapshot {
                     apps: Load::Failed(UiError::from(AppError::new(ErrorKind::Internal))),
                     offers: demo.offers.clone(),
+                    ..SplitSnapshot::default()
                 });
             }
             _ => demo.publish(),
@@ -168,6 +178,8 @@ impl DemoSplitTunnel {
         self.tx.send_replace(SplitSnapshot {
             apps: Load::Ready(self.apps.borrow().clone()),
             offers: self.offers.clone(),
+            scope: self.scope.get(),
+            older_service: self.older_service,
         });
     }
 
@@ -272,6 +284,13 @@ impl SplitTunnelApi for DemoSplitTunnel {
             .ok_or_else(|| AppError::new(ErrorKind::Conflict))?;
         app.rule = rule;
         drop(apps);
+        self.publish();
+        Ok(())
+    }
+
+    async fn set_scope(&self, scope: AppScope) -> AppResult<()> {
+        self.pause().await?;
+        self.scope.set(scope);
         self.publish();
         Ok(())
     }

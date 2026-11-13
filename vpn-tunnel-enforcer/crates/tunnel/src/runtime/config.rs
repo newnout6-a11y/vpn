@@ -8,9 +8,10 @@ use vpnte_base::{AppError, AppResult, Msg};
 use vpnte_core::net::HostPort;
 use vpnte_engine::clash_api::ClashEndpoint;
 use vpnte_engine::ports;
+use vpnte_engine::routing::RoutingInputs;
+use vpnte_engine::routing::plan::{self, Scope};
 use vpnte_engine::routing::process::AppPath;
 use vpnte_engine::routing::smart_ru::SmartRu;
-use vpnte_engine::routing::{self, RoutingInputs};
 use vpnte_engine::singbox_config::{Listeners, RoutingParts};
 use vpnte_profiles::model::{Host, Kind, Profile};
 
@@ -84,7 +85,8 @@ pub(super) fn endpoint_is_hostname(p: &Profile) -> bool {
         || matches!(&p.kind, Kind::Wireguard(wg) if wg.peers.iter().any(|peer| named(&peer.host)))
 }
 
-/// Route / DNS fragments of this run plus the warnings the user must see.
+/// Route / DNS fragments of this run plus the warnings the user must see; the apps page's
+/// scope comes with the inputs (the app's own exe among them).
 pub(super) fn routing(
     user: &UserInputs,
     engine_paths: &[PathBuf],
@@ -103,7 +105,11 @@ pub(super) fn routing(
         })
         .collect();
     let split = user.split();
-    let fragments = routing::build(&RoutingInputs {
+    let scope = match &user.only_listed {
+        Some(own) => Scope::OnlyListed { own },
+        None => Scope::All,
+    };
+    let inputs = RoutingInputs {
         smart: SmartRu {
             enabled: user.smart_ru,
             maps_direct: user.smart_ru_maps_direct,
@@ -116,7 +122,8 @@ pub(super) fn routing(
         dns: user.dns.as_ref(),
         physical_dns,
         endpoint_is_hostname,
-    });
+    };
+    let fragments = plan::build_scoped(&inputs, scope);
     let warnings = fragments.warnings.iter().map(|w| w.msg()).collect();
     (fragments.parts, warnings)
 }
@@ -150,5 +157,41 @@ pub(super) fn endpoints(
         tun_alias: proof.alias.clone(),
         proxy_port: proof.port,
         logs,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn rules(only_listed: Option<Vec<String>>) -> RoutingParts {
+        let user = UserInputs {
+            split_vpn: vec!["browser".into()],
+            only_listed,
+            ..UserInputs::default()
+        };
+        routing(&user, &[], false, &[], false).0
+    }
+
+    /// Re-check item 16: the inputs' scope reaches the routing, with the app's own exe kept
+    /// inside it; without one the listed VPN apps are forced in as before (P4).
+    #[test]
+    fn the_scope_of_the_inputs_reaches_the_routing() {
+        let only = rules(Some(vec!["own".into()]));
+        assert!(only.process_rules.is_empty(), "{:?}", only.process_rules);
+        assert_eq!(
+            only.domain_rules,
+            vec![json!({
+                "process_path_regex": ["browser", "own"], "invert": true, "outbound": "direct-out",
+            })]
+        );
+        let all = rules(None);
+        assert!(all.domain_rules.is_empty());
+        assert_eq!(
+            all.process_rules,
+            vec![json!({ "process_path_regex": ["browser"], "outbound": "proxy-out" })]
+        );
     }
 }

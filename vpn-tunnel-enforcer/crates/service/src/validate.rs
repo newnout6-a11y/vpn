@@ -192,9 +192,11 @@ fn provider_object(map: &Map<String, Value>, field: &'static str) -> AppResult<(
 
 /// The routing inputs.
 pub fn routing(r: &RoutingInputs) -> AppResult<()> {
+    let own = r.only_listed.as_deref().unwrap_or_default();
     for (list, field) in [
-        (&r.split_direct, "split_direct"),
-        (&r.split_vpn, "split_vpn"),
+        (r.split_direct.as_slice(), "split_direct"),
+        (r.split_vpn.as_slice(), "split_vpn"),
+        (own, "only_listed"),
     ] {
         if list.len() > MAX_SPLIT {
             return Err(refused("service.refused.tooMany", field));

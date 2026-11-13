@@ -1,6 +1,7 @@
 //! Tests of the bypass list (RU-2026 item 14 a-b): the user's list, the automatic entries
 //! against owner answer 4, and the read-back of the bundled rule sets.
 use uuid::Uuid;
+use vpnte_core::settings::AppScope;
 
 use super::*;
 use crate::routing::domain::{DomainAction, DomainPattern, DomainRule};
@@ -195,6 +196,7 @@ fn auto(
     shown(&automatic(&AutoInputs {
         domain_rules: rules,
         apps,
+        app_scope: AppScope::All,
         smart,
         lists: l,
     }))
@@ -262,6 +264,28 @@ fn an_app_through_the_vpn_stops_every_automatic_entry() {
         None,
     );
     assert_eq!(direct, ["bank.example"]);
+}
+
+/// Re-check item 16: with «VPN только для выбранных приложений» the apps decide, so no automatic
+/// entry, even before the first app is listed; the user's own list stays (`render`).
+#[test]
+fn only_listed_apps_stop_every_automatic_entry() {
+    let rules = [rule("bank.example", DomainAction::Direct)];
+    let only = |apps: &[SplitApp], smart, l| {
+        automatic(&AutoInputs {
+            domain_rules: &rules,
+            apps,
+            app_scope: AppScope::OnlyListed,
+            smart,
+            lists: l,
+        })
+    };
+    assert!(only(&[], SmartRu::default(), None).is_empty());
+    assert!(only(&[app(AppRule::Direct)], SMART, Some(&lists())).is_empty());
+    assert_eq!(
+        auto(&rules, &[], SmartRu::default(), None),
+        ["bank.example"]
+    );
 }
 
 #[test]

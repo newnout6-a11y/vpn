@@ -90,6 +90,18 @@ pub enum RuleSetChoice {
 /// The settings key of [`Settings::smart_ru_rule_set_choice`]; a file without it is version 1.
 const CHOICE_KEY: &str = "smartRuRuleSetChoice";
 
+/// Which apps use the VPN (re-check item 16, Happ's "proxy only selected apps").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AppScope {
+    /// Every app (the routing rules decide per site).
+    #[default]
+    All,
+    /// «VPN только для выбранных приложений»: only the apps set to «Через VPN»; every other
+    /// app connects directly once the user's own domain rules had their say.
+    OnlyListed,
+}
+
 /// Where notifications are shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -203,6 +215,8 @@ pub struct Settings {
     /// Soft mode also leaves direct the sites the routing sends direct for certain
     /// (`vpnte_engine::routing::bypass::automatic`).
     pub proxy_bypass_auto: bool,
+    /// Every app or only the apps set to «Через VPN» (the apps page's switch).
+    pub app_scope: AppScope,
     /// UI language; `None` follows Windows (storage B24).
     #[serde(serialize_with = "ser_locale")]
     pub locale: Option<Lang>,
@@ -258,6 +272,7 @@ impl Default for Settings {
             proxy_engine: EnginePref::Auto,
             proxy_bypass: Vec::new(),
             proxy_bypass_auto: true,
+            app_scope: AppScope::All,
             locale: None,
             // Follows the Windows light / dark setting (owner answer 11, 12.11.2026).
             active_theme_id: "builtin-system".to_owned(),
@@ -354,6 +369,7 @@ impl Settings {
         take(o, "proxyEngine", &mut self.proxy_engine);
         take(o, "proxyBypass", &mut self.proxy_bypass);
         take(o, "proxyBypassAuto", &mut self.proxy_bypass_auto);
+        take(o, "appScope", &mut self.app_scope);
         take_locale(o, &mut self.locale);
         take(o, "activeThemeId", &mut self.active_theme_id);
         take(o, "logKey", &mut self.log_key);
@@ -424,6 +440,7 @@ impl Settings {
             proxy_engine,
             proxy_bypass,
             proxy_bypass_auto,
+            app_scope,
             locale,
             active_theme_id,
             notifications,
@@ -531,6 +548,7 @@ pub struct SettingsPatch {
     pub proxy_engine: Option<EnginePref>,
     pub proxy_bypass: Option<Vec<String>>,
     pub proxy_bypass_auto: Option<bool>,
+    pub app_scope: Option<AppScope>,
     /// `Some(None)` returns to following the Windows language.
     pub locale: Option<Option<Lang>>,
     pub active_theme_id: Option<String>,

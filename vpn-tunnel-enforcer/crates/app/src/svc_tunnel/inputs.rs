@@ -4,10 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use vpnte_base::{AppError, AppResult};
-use vpnte_core::settings::{RuleSetMode, Settings};
+use vpnte_core::settings::{AppScope, RuleSetMode, Settings};
 use vpnte_core::store::Store;
 use vpnte_engine::routing::RulesDoc;
-use vpnte_engine::routing::process::{InactiveReason, probe_fs};
+use vpnte_engine::routing::process::{AppPath, InactiveReason, Probe, probe_fs};
 use vpnte_engine::routing::rulesets::RuleSetService;
 use vpnte_tunnel::runtime::{InactiveSplit, InputsSource, UserInputs};
 
@@ -28,15 +28,16 @@ impl InputsSource for StoreInputs {
         let rule_sets = self.rule_sets.clone();
         let managed = s.smart_ru_rule_set_mode == RuleSetMode::Managed;
         let smart_ru = s.smart_ru_split;
+        let only_listed = s.app_scope == AppScope::OnlyListed;
         // File probes and the rule-set cache prune are blocking; prune only runs right before an
         // engine start (engine API), which is exactly when the runtime asks.
-        let (rule_set_dir, split, doc) = tokio::task::spawn_blocking(move || {
+        let (rule_set_dir, split, doc, own) = tokio::task::spawn_blocking(move || {
             rule_sets.prune();
             let dir = smart_ru
                 .then(|| rule_sets.active(managed).map(|(_, dir)| dir))
                 .flatten();
             let split = doc.resolve_split(probe_fs);
-            (dir, split, doc)
+            (dir, split, doc, only_listed.then(own_exe))
         })
         .await
         .map_err(AppError::internal)?;
@@ -57,10 +58,30 @@ impl InputsSource for StoreInputs {
                     missing: a.reason == InactiveReason::FileMissing,
                 })
                 .collect(),
+            only_listed: own,
             kill_switch: s.kill_switch.effective(self.always.load(Ordering::Relaxed)),
             public_wifi: s.public_wifi_compatibility,
             stealth: s.stealth_mode,
             auto_restart_on_crash: s.auto_restart_on_crash,
         })
     }
+}
+
+/// The app's own exe as `process_path_regex` values (as stored and in its long spelling, like
+/// a listed app): with only the listed apps in the tunnel, the app's in-process probes must
+/// still use it (re-check item 16). Blocking: probes the file.
+fn own_exe() -> Vec<String> {
+    let exe = std::env::current_exe().ok();
+    let Some(path) = exe.and_then(|p| AppPath::parse(&p.to_string_lossy()).ok()) else {
+        tracing::warn!("own exe not usable in the apps scope");
+        return Vec::new();
+    };
+    let mut out = vec![path.regex()];
+    if let Probe::File {
+        canonical: Some(long),
+    } = probe_fs(&path)
+    {
+        out.push(long.regex());
+    }
+    out
 }

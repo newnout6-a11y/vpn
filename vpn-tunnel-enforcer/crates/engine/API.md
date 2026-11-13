@@ -531,8 +531,11 @@ pub struct RoutingInputs<'a> { pub smart: SmartRu, pub rule_set_dir: Option<&'a 
     pub third_party_cores: bool /* local-proxy mode */, pub dns: Option<&'a DnsAddr> /* None = auto DoH */,
     pub physical_dns: &'a [Ipv4Addr], pub endpoint_is_hostname: bool }
 pub struct RoutingFragments { pub parts: singbox_config::RoutingParts, pub warnings: Vec<RoutingWarning> }
-pub enum RoutingWarning { SmartRuDisabled, BootstrapDnsFallback, InactiveApp(InactiveApp) } // .msg(): show each
-pub fn build(i: &RoutingInputs) -> RoutingFragments;
+pub enum RoutingWarning { SmartRuDisabled, BootstrapDnsFallback, InactiveApp(InactiveApp),
+    InactiveAppDirect(InactiveApp) /* OnlyListed: its traffic leaves directly */ } // .msg(): show each
+pub fn build(i: &RoutingInputs) -> RoutingFragments;               // = build_scoped(i, Scope::All)
+pub enum Scope<'a> { All /*default*/, OnlyListed { own: &'a [String] /* the app's exe as regexes */ } }
+pub fn build_scoped(i: &RoutingInputs, scope: Scope) -> RoutingFragments; // the apps page's scope (re-check 16)
 ```
 Process rules: P1 `engine_paths` -> direct, P2 third-party cores -> direct, P3 split direct,
 P4 split VPN (one rule per class). Domain rules: block -> user rules in order -> blocked in
@@ -545,6 +548,13 @@ valid next to the slot mode's `evaluate` bootstrap order (tested through `sing-b
 `BootstrapDnsFallback` = the endpoint is a host name and the physical adapters have no usable
 resolver: the name resolves only through public resolvers (DoH / TCP), with no step at the
 network's own DNS.
+`Scope::OnlyListed` («VPN только для выбранных приложений»): no P4; right after the blocked-in-Russia
+step one rule `{process_path_regex: [split VPN apps + own], invert: true, outbound: direct-out}`
+(nothing in scope: `{network: [tcp, udp]}` -> direct), so the user's own rules still apply to every
+app first (answer 4), Smart RU and `final` see only the scope, and the app's own probes keep the
+tunnel. DNS is unchanged (final `dns-remote`): the DNS Client service sends every app's queries.
+The guards before the domain rules (QUIC / IPv6 rejects, STUN pin, a TCP-only upstream's UDP drop)
+stay for every app. Both captures, both scopes and the Xray slots pass `sing-box check`.
 
 ```rust
 // routing::bypass — «Не через прокси» for Soft mode's system proxy and NO_PROXY (RU-2026 item 14 a-b)
@@ -558,6 +568,7 @@ pub enum BypassError { Invalid(String /* the entry */), TooMany, TooLong }  // .
 pub fn parse_list(text: &str) -> Result<Vec<BypassEntry>, BypassError>; // lines / ; / , / spaces; <local> + repeats dropped
 pub fn from_stored(stored: &[String]) -> Vec<BypassEntry>;              // Settings::proxy_bypass; bad ones skipped
 pub struct AutoInputs<'a> { pub domain_rules: &'a [DomainRule], pub apps: &'a [SplitApp],
+    pub app_scope: AppScope /* Settings::app_scope: OnlyListed = no automatic entry */,
     pub smart: SmartRu /* enabled only with a rule-set dir */, pub lists: Option<&'a SmartLists> }
 pub fn automatic(i: &AutoInputs) -> Vec<BypassEntry>;   // user Direct Exact / Subdomains, then the D4 gov list
 pub struct SmartLists;  impl SmartLists { pub fn parse(gov_json: &str, blocked_json: &str) -> Result<Self, serde_json::Error>;
@@ -574,8 +585,8 @@ through the VPN or blocks it (answer 4). Automatic entries are names whose direc
 certain from the name: each is dropped when a user Block / VPN rule names a related site (equal,
 above or below; any such keyword rule drops all), when a Smart RU pin or a blocked-in-Russia name
 overlaps it (Smart RU on), and never a whole zone (a single-label name: `ru`, `*.su`); there are
-none while any app goes through the VPN (P4 precedes the domain rules) or while Smart RU runs with
-unreadable lists. Syntax: `x.com` -> `ProxyOverride` `x.com;*.x.com`, `NO_PROXY` `x.com,.x.com`;
+none while any app goes through the VPN (P4 precedes the domain rules), with only the listed apps
+in the VPN (an entry cannot tell apps apart) or while Smart RU runs with unreadable lists. Syntax: `x.com` -> `ProxyOverride` `x.com;*.x.com`, `NO_PROXY` `x.com,.x.com`;
 `*.x.com` -> `*.x.com` in `ProxyOverride` only (curl and Python read `.x.com` as `x.com` too, user
 entries included); `10.*` -> `10.0.0.0/8` in both (Chromium reads a `10.*` item as a host pattern).
 A user list over `MAX_OVERRIDE_TEXT` is refused (`tooLong`, arg `max`).

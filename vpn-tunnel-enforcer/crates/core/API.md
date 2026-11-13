@@ -160,6 +160,7 @@ pub enum RoutingMode { Hard /*default*/, Soft }                 // Hard = TUN (n
 pub enum BootstrapRouteMode { Auto /*default*/, Direct, LocalProxy }
 pub enum RuleSetMode { Bundled, Managed /*Settings default*/ }
 pub enum RuleSetChoice { Default /*default*/, User }  // who set the list source: the wizard keeps a User choice
+pub enum AppScope { All /*default*/, OnlyListed }  // "all" / "onlyListed": the apps page's «Только выбранные приложения»
 pub enum NotifyMethod { System /*default*/, InApp, Both }       // "system" / "inapp" / "both"
 
 #[derive(Debug, Clone, PartialEq, Serialize)]   // Deserialize = lenient per field (merge_json)
@@ -188,6 +189,7 @@ pub struct Settings {                            // JSON camelCase; Document FIL
     pub smart_ru_rule_set_update_hours: u32,     // 24
     pub smart_ru_rule_set_choice: RuleSetChoice, // Default; «Автообновлять списки» on the Settings page = User
     pub proxy_engine: EnginePref,                // Auto
+    pub app_scope: AppScope,                     // All; OnlyListed = only the apps set to «Через VPN» (re-check 16)
     pub locale: Option<Lang>,                    // None = follow Windows
     pub active_theme_id: String,                 // "builtin-dark" (the design's reference is dark)
     pub notifications: NotificationPrefs,        // every switch on, method System, sound on

@@ -1,9 +1,11 @@
-//! The page: header actions (rescan, add a program), search, the bypass-command card, the Happ
-//! routing panel and the app table with a rule control per row.
+//! The page: header actions (rescan, add a program), the scope switch, search, the
+//! bypass-command card, the Happ routing panel and the app table with a rule control per row.
 use dioxus::prelude::*;
 use vpnte_base::{ErrorKind, Msg};
 
-use super::model::{AppKind, AppRule, SplitApp, display_path, icon_src, initial, matches};
+use super::model::{
+    AppKind, AppRule, AppScope, SplitApp, display_path, icon_src, initial, matches, scope_hint_key,
+};
 use super::routing_panel::RoutingPanel;
 use super::{tr_now, use_api, use_watch};
 use crate::lang::tr;
@@ -11,7 +13,7 @@ use crate::pages::{Page, nav_number};
 use crate::t;
 use crate::widgets::{
     Badge, Button, ButtonKind, Cell, EmptyState, HeadCell, IconButton, IconGlyph, Load, LoadError,
-    Loading, Panel, SectionHeader, Spinner, Table, TextInput, TextKind, Toasts, use_job,
+    Loading, Panel, SectionHeader, Spinner, Switch, Table, TextInput, TextKind, Toasts, use_job,
 };
 
 /// The Apps page (register as `Page::Apps`). Needs `Rc<dyn SplitTunnelApi>` and the [`Toasts`]
@@ -77,6 +79,8 @@ pub fn SplitTunnelPage() -> Element {
 
     let apps = state.read().apps.clone();
     let offers = state.read().offers.clone();
+    let (scope, older_service) = (state.read().scope, state.read().older_service);
+    let hint_key = scope_hint_key(scope, &apps);
     let number = Page::ALL.iter().position(|p| *p == Page::Apps).unwrap_or(1);
     rsx! {
         div { class: "c-swiss swiss-skin apps",
@@ -99,6 +103,7 @@ pub fn SplitTunnelPage() -> Element {
                     {t!("splitTunneling.addApp")}
                 }
             }
+            ScopeSwitch { scope, hint_key, older_service }
             div { class: "apps-search",
                 TextInput {
                     value: query(),
@@ -129,6 +134,55 @@ pub fn SplitTunnelPage() -> Element {
                 Load::Ready(list) => rsx! {
                     AppTable { apps: list, query: query() }
                 },
+            }
+        }
+    }
+}
+
+/// «Только выбранные приложения»: the switch and one line on what it does with the list as it
+/// is; with a helper service too old for it, one calm line more (Tunnel mode there routes every
+/// app). A change applies from the next connection, as the list's own changes do.
+#[component]
+fn ScopeSwitch(scope: AppScope, hint_key: &'static str, older_service: bool) -> Element {
+    let api = use_api();
+    let toasts = Toasts::use_context();
+    let job = use_job::<()>();
+    let on = scope == AppScope::OnlyListed;
+    let change = move |want: bool| {
+        let api = api.clone();
+        let next = if want {
+            AppScope::OnlyListed
+        } else {
+            AppScope::All
+        };
+        job.start(move |_| async move {
+            match api.set_scope(next).await {
+                Ok(()) => {
+                    toasts.success(
+                        tr_now(&Msg::new("splitTunneling.routing.nextConnect")),
+                        None,
+                    );
+                }
+                Err(err) => toasts.failed(&Msg::new("splitTunneling.scope.failed"), &err),
+            }
+            Ok(())
+        });
+    };
+    rsx! {
+        Panel {
+            div { class: "apps-scope",
+                Switch {
+                    label: t!("splitTunneling.scope.label"),
+                    checked: on,
+                    hint: t!(hint_key),
+                    busy: job.running(),
+                    on_change: change,
+                }
+                if on && older_service {
+                    p { class: "apps-scope-note", role: "status",
+                        {t!("splitTunneling.scope.olderService")}
+                    }
+                }
             }
         }
     }

@@ -16,6 +16,10 @@
 .apps-cmd-result { margin: 0; border-left: 2px solid var(--ink); padding-left: 12px; font-size: 13px; overflow-wrap: anywhere; }
 .apps-cmd-result.is-error { border-left-color: var(--signal); font-weight: 500; color: var(--signal-ink); }
 
+/* «Только выбранные приложения» (p-app-split): the switch, then one calm line for an older service. */
+.apps-scope { display: flex; flex-direction: column; gap: 12px; }
+.apps-scope-note { margin: 0; border-left: 2px solid var(--rule); padding-left: 12px; font-size: 13px; line-height: 1.45; color: var(--mute); }
+
 /* ── Table ───────────────────────────────────────────────────────────── */
 .apps .w-td { vertical-align: middle; }
 .apps-th-actions { width: 56px; }

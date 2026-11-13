@@ -11,7 +11,8 @@ use vpnte_tunnel::runtime::UserInputs;
 use vpnte_winnet::wfp::ProtectionSettings;
 
 /// The routing part of the app's inputs (inactive splits stay here; the rule-set folder's files
-/// travel, read here: about 0.8 MB of local files per start).
+/// travel, read here: about 0.8 MB of local files per start). The apps page's scope travels
+/// with the app's own exe in it: the service is not the app.
 pub(super) fn routing(inputs: &UserInputs) -> RoutingInputs {
     RoutingInputs {
         smart_ru: inputs.smart_ru,
@@ -24,6 +25,7 @@ pub(super) fn routing(inputs: &UserInputs) -> RoutingInputs {
         stealth: inputs.stealth,
         auto_restart_on_crash: inputs.auto_restart_on_crash,
         rule_sets: inputs.rule_set_dir.as_deref().and_then(RuleSetFiles::read),
+        only_listed: inputs.only_listed.clone(),
     }
 }
 
@@ -116,6 +118,59 @@ mod tests {
             ProtectionSettings::default(),
         );
         assert_eq!(bad.expect_err("not an address").kind, ErrorKind::Validation);
+    }
+
+    /// Re-check item 16: the apps page's scope travels with the routing inputs, the app's own
+    /// exe in it; every app stays without one.
+    #[test]
+    fn the_scope_travels_with_the_routing_inputs() {
+        let mut inputs = UserInputs {
+            split_vpn: vec!["browser".into()],
+            only_listed: Some(vec!["own".into()]),
+            ..UserInputs::default()
+        };
+        let sent = routing(&inputs);
+        assert_eq!(sent.only_listed, Some(vec!["own".to_owned()]));
+        assert_eq!(sent.split_vpn, ["browser"]);
+        inputs.only_listed = None;
+        assert_eq!(routing(&inputs).only_listed, None);
+    }
+
+    /// Re-check item 16, end to end on the app side: with only the listed apps the store
+    /// inputs carry this process's own exe (the regex the engine matches) and the service's
+    /// start carries them; with every app, none.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_app_exe_joins_the_scope_of_the_store_inputs() {
+        use std::sync::Arc;
+
+        use vpnte_core::settings::AppScope;
+        use vpnte_engine::routing::process::AppPath;
+        use vpnte_tunnel::runtime::InputsSource;
+
+        use crate::api_settings::test_support::{FakeTunnel, TempDir, backend};
+        use crate::svc_tunnel::inputs::StoreInputs;
+
+        let dir = TempDir::new("start-scope");
+        let backend = backend(&dir, FakeTunnel::new(false));
+        let source = StoreInputs {
+            settings: backend.settings.clone(),
+            rules: backend.rules.clone(),
+            rule_sets: backend.rule_sets.clone(),
+            always: Arc::default(),
+        };
+        assert_eq!(source.snapshot().await.expect("inputs").only_listed, None);
+        backend
+            .settings
+            .update(|s| s.app_scope = AppScope::OnlyListed)
+            .expect("saved");
+        let inputs = source.snapshot().await.expect("inputs");
+        let own = inputs.only_listed.clone().expect("the scope");
+        let exe = std::env::current_exe().expect("exe");
+        let regex = AppPath::parse(&exe.to_string_lossy())
+            .expect("path")
+            .regex();
+        assert_eq!(own.first(), Some(&regex));
+        assert_eq!(routing(&inputs).only_listed, Some(own));
     }
 
     /// Re-check item 12a: the active rule-set folder's files travel with the routing inputs

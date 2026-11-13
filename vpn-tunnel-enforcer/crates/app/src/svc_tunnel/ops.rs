@@ -318,6 +318,11 @@ impl TunnelOps for TunnelService {
         self.guard.tun_available()
     }
 
+    fn service_protocol(&self) -> Option<u32> {
+        let remote = self.runtime.remote();
+        remote.installed().then(|| remote.protocol()).flatten()
+    }
+
     fn service_installed(&self) -> bool {
         let installed = self.runtime.remote().recheck();
         if installed {

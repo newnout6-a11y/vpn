@@ -4,10 +4,14 @@
 //! VPN rule naming a related site (a keyword one could match a host under any entry, so it
 //! drops them all) and, while Smart RU runs, a pin or a blocked-in-Russia name. Process rules
 //! run before every domain rule: while any app goes through the VPN there are no automatic
-//! entries at all, as the app's names would otherwise leave directly. A whole top-level zone
+//! entries at all, as the app's names would otherwise leave directly; nor with «VPN только для
+//! выбранных приложений» (re-check item 16): there the apps decide, and an entry cannot tell
+//! them apart (the engine sends every unlisted app direct anyway). A whole top-level zone
 //! (`ru`, `*.su`, a gov list's `.psk`) is never one: Smart RU sends a `.ru` site direct only
 //! for a Russian address, and a user's `*.ru -> Direct` rule stays the engine's (re-check 14.1).
 use std::collections::HashSet;
+
+use vpnte_core::settings::AppScope;
 
 use super::BypassEntry;
 use super::lists::{Names, SmartLists};
@@ -25,6 +29,8 @@ pub struct AutoInputs<'a> {
     pub domain_rules: &'a [DomainRule],
     /// The split-tunnel apps (`RulesDoc::split_tunnel.apps`).
     pub apps: &'a [SplitApp],
+    /// Every app or only the listed ones (`Settings::app_scope`).
+    pub app_scope: AppScope,
     /// Smart RU as the engine runs it: `enabled` only with a rule-set directory, the same
     /// condition as `RoutingInputs::rule_set_dir` (without one the engine runs it off).
     pub smart: SmartRu,
@@ -35,7 +41,7 @@ pub struct AutoInputs<'a> {
 /// The user's Direct rules of kind Exact / Subdomains in their order, then Smart RU's
 /// government and banks list (D4), minus everything the module doc rules out.
 pub fn automatic(i: &AutoInputs) -> Vec<BypassEntry> {
-    if i.apps.iter().any(|a| a.rule == AppRule::Vpn) {
+    if i.app_scope == AppScope::OnlyListed || i.apps.iter().any(|a| a.rule == AppRule::Vpn) {
         return Vec::new();
     }
     let lists = match (i.smart.enabled, i.lists) {

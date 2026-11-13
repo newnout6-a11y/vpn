@@ -229,3 +229,31 @@ async fn a_failing_set_keeps_the_last_set_that_passed() {
     }
     let _ = std::fs::remove_dir_all(&t);
 }
+
+/// p-app-split: the apps page's scope crosses the pipe to a version-4 service and reaches the
+/// runtime's inputs; a version-3 service (it refuses unknown fields) never sees the key and runs
+/// every app through the tunnel.
+#[tokio::test]
+async fn the_scope_reaches_only_a_service_that_speaks_it() {
+    let scoped = RoutingInputs {
+        split_vpn: vec!["browser".into()],
+        only_listed: Some(vec!["own".into()]),
+        ..RoutingInputs::default()
+    };
+    let inputs = SharedInputs::with_store(None, None);
+    let got = over_the_pipe(4, scoped.clone()).await;
+    assert_eq!(got, scoped);
+    inputs.set(&got, KillSwitchLevel::Off);
+    let now = inputs.snapshot().await.expect("inputs");
+    assert_eq!(now.only_listed, Some(vec!["own".to_owned()]));
+    assert_eq!(now.split_vpn, ["browser"]);
+
+    let got = over_the_pipe(3, scoped.clone()).await;
+    assert_eq!(got.only_listed, None, "left out for a version-3 service");
+    assert_eq!(got.split_vpn, ["browser"]);
+    inputs.set(&got, KillSwitchLevel::Off);
+    assert_eq!(inputs.snapshot().await.expect("inputs").only_listed, None);
+    let old = Request::Inputs(Box::new(scoped)).speak(3);
+    let wire = serde_json::to_string(&old).expect("json");
+    assert!(!wire.contains("onlyListed"), "{wire}");
+}

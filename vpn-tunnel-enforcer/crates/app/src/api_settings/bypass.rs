@@ -129,6 +129,7 @@ fn automatic(
     bypass::automatic(&AutoInputs {
         domain_rules: &doc.domain_rules,
         apps: &doc.split_tunnel.apps,
+        app_scope: s.app_scope,
         smart: SmartRu {
             enabled: smart,
             maps_direct: s.smart_ru_maps_direct,

@@ -246,6 +246,7 @@ fn defaults() {
     assert!(!s.smart_ru_maps_direct);
     assert_eq!(s.smart_ru_rule_set_mode, RuleSetMode::Managed);
     assert_eq!(s.proxy_engine, EnginePref::Auto);
+    assert_eq!(s.app_scope, AppScope::All, "every app uses the VPN");
     assert_eq!(
         (s.locale, s.active_theme_id.as_str()),
         (None, "builtin-system")
@@ -274,6 +275,7 @@ fn json_names_and_spellings() {
     assert_eq!(v["checkIntervalMs"], 30_000);
     assert_eq!(v["smartRuRuleSetUpdateHours"], 24);
     assert_eq!(v["locale"], "ru");
+    assert_eq!(v["appScope"], "all");
     assert_eq!(v["proxyOverride"], Value::Null);
     assert_eq!(v["notifications"]["method"], "inapp");
     assert_eq!(
@@ -319,6 +321,7 @@ fn every_field_changed() -> Settings {
         proxy_engine: EnginePref::Xray,
         proxy_bypass: vec!["corp.example".into(), "10.*".into()],
         proxy_bypass_auto: false,
+        app_scope: AppScope::OnlyListed,
         locale: Some(Lang::En),
         active_theme_id: "custom-1".into(),
         notifications: NotificationPrefs {

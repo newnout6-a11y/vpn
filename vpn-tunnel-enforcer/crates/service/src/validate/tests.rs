@@ -100,6 +100,14 @@ fn texts_and_lists_are_bounded() {
     let mut fine = server(profile());
     fine.routing.split_vpn = vec![r"(?i)^C:\\Tools\\x\.exe$".into()];
     assert!(start(&fine).is_ok());
+    // p-app-split: the app's own exe in the scope is checked like the split lists.
+    let mut own = server(profile());
+    own.routing.only_listed = Some(vec!["a\u{0}b".into()]);
+    assert!(start(&own).is_err());
+    own.routing.only_listed = Some(vec!["(?i)^x$".into(); MAX_SPLIT + 1]);
+    assert!(start(&own).is_err());
+    own.routing.only_listed = Some(vec![r"(?i)^C:\\App\\app\.exe$".into()]);
+    assert!(start(&own).is_ok());
 }
 
 fn exception(target: ExceptionTarget) -> KillSwitchException {

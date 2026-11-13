@@ -73,8 +73,8 @@ async fn the_self_test_reaches_its_sessions_user() {
 }
 
 /// Protocol compatibility one version back: a version-1 app refuses unknown fields, so it never
-/// gets `selfTest`; since protocol 3 it is refused at its `Hello`, and a version-2 app (which
-/// reads `selfTest`) is welcomed at 2.
+/// gets `selfTest`; since protocol 3 it is refused at its `Hello`, and the app one version back
+/// (which reads `selfTest`) is welcomed at its version.
 #[tokio::test]
 async fn a_version_1_client_never_gets_the_self_test() {
     let h = harness();
@@ -96,9 +96,11 @@ async fn a_version_1_client_never_gets_the_self_test() {
         .open(&h.name)
         .expect("open");
     let mut c = Raw(pipe);
-    c.send(1, Request::Hello(hello(2))).await;
+    let back = crate::proto::PROTOCOL - 1;
+    c.send(1, Request::Hello(hello(back))).await;
     assert!(matches!(
         c.answer(1).await,
-        ServerFrame::Reply { reply, .. } if matches!(*reply, Reply::Welcome { protocol: 2, .. })
+        ServerFrame::Reply { reply, .. }
+            if matches!(*reply, Reply::Welcome { protocol, .. } if protocol == back)
     ));
 }

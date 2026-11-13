@@ -10,6 +10,11 @@
 //!   addresses) → proxy → D3 Smart RU pins → proxy → D4 gov rule set (+ maps when direct) →
 //!   direct → D5 `geoip-ru` + Kimi → direct; final = proxy.
 //!
+//! «VPN только для выбранных приложений» ([`Scope::OnlyListed`], re-check item 16): no P4; the
+//! listed VPN apps and the app itself are the scope instead. Right after DB every other app
+//! leaves directly (one inverted process rule), so the user's own rules still apply to every
+//! app first (answer 4) and Smart RU and `final` see only the scope.
+//!
 //! DNS rules mirror it: R1 block (REFUSED) → R2 user rules → `dns-direct` / `dns-remote` →
 //! RB blocked domains → `dns-remote` → R3 pins → `dns-remote` → R4 gov (+ maps) → `dns-direct`
 //! → R5 RU TLDs + RU services + Kimi → `dns-direct`; final = `dns-remote`. A domain that leaves
@@ -58,6 +63,17 @@ pub struct RoutingInputs<'a> {
     pub endpoint_is_hostname: bool,
 }
 
+/// Which apps take the tunnel past the user's domain rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope<'a> {
+    /// Every app; the split's VPN apps are forced in ahead of every domain rule (P4).
+    All,
+    /// Only the split's VPN apps and `own`: the app's exe (`process_path_regex` values), whose
+    /// in-process probes must use the tunnel. Every other app leaves directly after the user's
+    /// domain rules and the blocked-in-Russia step.
+    OnlyListed { own: &'a [String] },
+}
+
 /// The fragments for `singbox_config::ConfigInputs::routing` + what the user must be told.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RoutingFragments {
@@ -80,6 +96,9 @@ pub enum RoutingWarning {
     BootstrapDnsFallback,
     /// A split-tunnel app got no rule; its traffic stays in the tunnel.
     InactiveApp(InactiveApp),
+    /// [`Scope::OnlyListed`]: a split-tunnel app got no rule; like every unlisted app, its
+    /// traffic leaves directly.
+    InactiveAppDirect(InactiveApp),
 }
 
 impl RoutingWarning {
@@ -95,12 +114,22 @@ impl RoutingWarning {
                 InactiveReason::NotAFile => "engine.routing.warn.appNotAFile",
             })
             .arg("name", &a.name),
+            RoutingWarning::InactiveAppDirect(a) => Msg::new(match a.reason {
+                InactiveReason::FileMissing => "engine.routing.warn.appMissingDirect",
+                InactiveReason::NotAFile => "engine.routing.warn.appNotAFileDirect",
+            })
+            .arg("name", &a.name),
         }
     }
 }
 
-/// Builds every fragment in the fixed order (see the module docs).
+/// Builds every fragment in the fixed order for every app (see the module docs).
 pub fn build(i: &RoutingInputs) -> RoutingFragments {
+    build_scoped(i, Scope::All)
+}
+
+/// [`build`] for the apps page's scope.
+pub fn build_scoped(i: &RoutingInputs, scope: Scope) -> RoutingFragments {
     let mut warnings = Vec::new();
     let mut out = RoutingParts::default();
     let smart_dir = i.rule_set_dir.filter(|_| i.smart.enabled);
@@ -121,11 +150,16 @@ pub fn build(i: &RoutingInputs) -> RoutingFragments {
     } else {
         Vec::new()
     };
+    let forced_vpn = match scope {
+        Scope::All => i.split.vpn.clone(),
+        // The listed apps are the scope instead: they meet the user's rules and Smart RU.
+        Scope::OnlyListed { .. } => Vec::new(),
+    };
     for (regexes, outbound) in [
         (engines, DIRECT_OUT),
         (cores, DIRECT_OUT),
         (i.split.direct.clone(), DIRECT_OUT),
-        (i.split.vpn.clone(), PROXY_OUT),
+        (forced_vpn, PROXY_OUT),
     ] {
         if !regexes.is_empty() {
             out.process_rules
@@ -171,6 +205,12 @@ pub fn build(i: &RoutingInputs) -> RoutingFragments {
             "rule_set": [smart_ru::RU_BLOCKED_SITES],
             "server": DNS_REMOTE,
         }));
+    }
+    // The scope: below the user's rules (answer 4) and the blocked step (a site blocked in
+    // Russia is unreachable directly for any app). DNS keeps its final: the DNS Client service
+    // sends every app's queries, so no DNS rule can tell the apps apart.
+    if let Scope::OnlyListed { own } = scope {
+        out.domain_rules.push(outside_scope(&i.split.vpn, own));
     }
     // D3 / R3: Smart RU pins, before every RU rule so sniffed SNI beats the IP country.
     if smart_dir.is_some() {
@@ -227,17 +267,31 @@ pub fn build(i: &RoutingInputs) -> RoutingFragments {
     if i.endpoint_is_hostname && usable_physical_dns(i.physical_dns).is_none() {
         warnings.push(RoutingWarning::BootstrapDnsFallback);
     }
-    warnings.extend(
-        i.split
-            .inactive
-            .iter()
-            .cloned()
-            .map(RoutingWarning::InactiveApp),
-    );
+    let inactive = i.split.inactive.iter().cloned();
+    warnings.extend(inactive.map(match scope {
+        Scope::All => RoutingWarning::InactiveApp,
+        Scope::OnlyListed { .. } => RoutingWarning::InactiveAppDirect,
+    }));
     RoutingFragments {
         parts: out,
         warnings,
     }
+}
+
+/// Every app outside the scope leaves directly: `invert` matches a process that is none of
+/// them, and a connection whose process is unknown.
+fn outside_scope(listed: &[String], own: &[String]) -> Value {
+    let mut regexes: Vec<&String> = Vec::new();
+    for r in listed.iter().chain(own) {
+        if !regexes.iter().any(|x| x.eq_ignore_ascii_case(r)) {
+            regexes.push(r);
+        }
+    }
+    if regexes.is_empty() {
+        // Nothing is in scope: every connection leaves directly.
+        return json!({ "network": ["tcp", "udp"], "outbound": DIRECT_OUT });
+    }
+    json!({ "process_path_regex": regexes, "invert": true, "outbound": DIRECT_OUT })
 }
 
 /// Consecutive user rules with the same action share one matcher object: first-match
@@ -270,3 +324,7 @@ fn extend(mut fields: Map<String, Value>, tail: &[(&str, Value)]) -> Value {
 #[cfg(test)]
 #[path = "plan_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "plan_scope_tests.rs"]
+mod scope_tests;

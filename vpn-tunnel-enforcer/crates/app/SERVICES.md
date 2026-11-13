@@ -95,6 +95,7 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
 | `probe_ctx(device)` | Servers `check_group_health` (`key_health::check_many`) and `check_all_health` (`key_health::check_list`), and anyone pinging by hand (`.net`) |
 | `tun_available()` | Settings routing-mode choice, Wizard `Routing::Hard` option: true with the helper service installed (or in an elevated process without it); otherwise shown unavailable with «Для туннеля нужна служба-помощник.» and the install button |
 | `service_installed()` | svc-wire: Settings «Установить службу-помощник» after Windows ran the service's install verb: Tunnel mode and "Always" go through the service from now on (`true` when it is there; default `false`) |
+| `service_protocol()` | p-app-split: Apps page, the line «Служба-помощник старой версии…» under «Только выбранные приложения» (Tunnel mode through a linked service older than `SCOPE_PROTOCOL`); `None` without a link (default) |
 | `shutdown(budget)` | app-main (Tray `quit`) |
 | `proxies()` | Panels proxy column and actions (`api_dashboard/proxies.rs`), Servers `start_proxies`; `None` = the column stays empty, actions answer `Conflict` |
 | `live_checks()` | Servers `live_check` / `live_history` / `live_batch` (`api_servers/live.rs`); `None` = `Conflict` `app.servers.liveUnavailable` |

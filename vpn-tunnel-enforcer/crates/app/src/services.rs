@@ -276,4 +276,9 @@ pub trait TunnelOps: Send + Sync + 'static {
     fn service_installed(&self) -> bool {
         false
     }
+    /// The protocol the installed helper service speaks (added by p-app-split: an older one
+    /// cannot carry the apps page's scope); `None` without a link to it. The default: none.
+    fn service_protocol(&self) -> Option<u32> {
+        None
+    }
 }

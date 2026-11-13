@@ -13,7 +13,7 @@
 //! run joins that pause as its recovery (`adopt`, fix-follow).
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -64,6 +64,9 @@ pub(crate) struct Remote(Arc<Inner>);
 struct Inner {
     /// The service is installed (read at start and after an install from Settings).
     installed: AtomicBool,
+    /// The protocol the last link speaks (0: no link yet); the apps page says when an older
+    /// service cannot carry its scope (p-app-split).
+    protocol: AtomicU32,
     /// A private test pipe served by anyone; `None` = the service's pipe, served by its exe.
     test_pipe: Option<String>,
     inputs: Arc<dyn InputsSource>,
@@ -172,6 +175,7 @@ impl Remote {
     ) -> Self {
         Self(Arc::new(Inner {
             installed: AtomicBool::new(false),
+            protocol: AtomicU32::new(0),
             test_pipe,
             inputs,
             protection,
@@ -185,6 +189,11 @@ impl Remote {
             state: Mutex::new(State::default()),
             shutdown,
         }))
+    }
+
+    /// The protocol the service's last link speaks; `None` before the first link.
+    pub(crate) fn protocol(&self) -> Option<u32> {
+        Some(self.0.protocol.load(Ordering::Relaxed)).filter(|p| *p > 0)
     }
 
     /// The service is installed: Tunnel mode and the kill switch go through it.
@@ -234,7 +243,8 @@ impl Remote {
         let mut client = Client::connect(pipe, &check, CONNECT_TIMEOUT)
             .await
             .map_err(CallError::Pipe)?;
-        client.hello(env!("CARGO_PKG_VERSION")).await?;
+        let (protocol, _) = client.hello(env!("CARGO_PKG_VERSION")).await?;
+        self.0.protocol.store(protocol, Ordering::Relaxed);
         let (requests, frames) = client.split().await?;
         let gone = CancellationToken::new();
         {

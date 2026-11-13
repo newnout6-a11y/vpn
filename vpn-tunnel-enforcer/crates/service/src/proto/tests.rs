@@ -114,7 +114,8 @@ fn versions_one_apart_negotiate_down() {
     assert_eq!(negotiate(2, 1), Some(1));
     assert_eq!(negotiate(1, 2), Some(1));
     assert_eq!(negotiate(3, 1), None);
-    assert_eq!(negotiate(PROTOCOL, 2), Some(2), "one version back");
+    let back = PROTOCOL - 1;
+    assert_eq!(negotiate(PROTOCOL, back), Some(back), "one version back");
     assert_eq!(negotiate(0, 1), None);
     assert_eq!(negotiate(PROTOCOL, PROTOCOL), Some(PROTOCOL));
 }
@@ -148,6 +149,29 @@ fn the_rule_sets_are_spoken_from_protocol_3_only() {
     assert!(!without.contains("ruleSets"));
     let read: RoutingInputs = serde_json::from_str(&without).expect("reads");
     assert_eq!(read.rule_sets, None);
+}
+
+/// Protocol 4 (p-app-split): the apps page's scope rides every request with routing inputs; a
+/// version-3 service never sees the key (it would refuse it) and runs every app.
+#[test]
+fn the_scope_is_spoken_from_protocol_4_only() {
+    let mut with = start();
+    with.routing.only_listed = Some(vec![r"(?i)^C:\\App\\app\.exe$".into()]);
+    let requests = [
+        Request::Start(Box::new(with.clone())),
+        Request::Restart(Box::new(with.clone())),
+        Request::Switch(Box::new(with.clone())),
+        Request::Inputs(Box::new(with.routing.clone())),
+    ];
+    for request in requests {
+        let four = serde_json::to_string(&request.clone().speak(4)).expect("json");
+        let back: Request = serde_json::from_str(&four).expect("a version-4 service reads it");
+        assert_eq!(back, request);
+        let three = serde_json::to_string(&request.speak(3)).expect("json");
+        assert!(!three.contains("onlyListed"), "{three}");
+    }
+    let without = serde_json::to_string(&start().routing).expect("json");
+    assert!(!without.contains("onlyListed"), "every app: no key");
 }
 
 #[test]

@@ -707,12 +707,15 @@ pub trait ScheduleApi: 'static {        // root component SchedulePage
     async fn delete(&self, id: String) -> AppResult<()>;                         // unknown id is not an error
 }
 pub trait SplitTunnelApi: 'static {     // root component SplitTunnelPage (Page::Apps)
-    fn state(&self) -> watch::Receiver<SplitSnapshot>;    // { apps: Load<Vec<SplitApp>>, offers: Vec<RoutingOffer> }; first empty read runs discovery
+    fn state(&self) -> watch::Receiver<SplitSnapshot>;    // { apps: Load<Vec<SplitApp>>, offers: Vec<RoutingOffer>,
+        // scope: AppScope, older_service: bool /* Tunnel mode via a service too old for the scope */ }; first empty read runs discovery
     async fn reload(&self) -> AppResult<()>;
     async fn refresh(&self) -> AppResult<usize>;          // rescan; returns how many new apps were found
     async fn add_app(&self) -> AppResult<Option<SplitApp>>;          // Open dialog (.exe); None = dismissed
     async fn add_process(&self, name: String) -> AppResult<SplitApp>; // bare process name, normalised by the service
     async fn set_rule(&self, id: String, rule: AppRule) -> AppResult<()>;
+    async fn set_scope(&self, scope: AppScope) -> AppResult<()>; // AppScope { All, OnlyListed }: the switch
+        // «Только выбранные приложения» at the top (hint: scope_hint_key); applies from the next connection
     async fn remove(&self, id: String) -> AppResult<()>;  // a later rescan does not bring it back
     async fn preview_routing(&self, source: RoutingSource) -> AppResult<RoutingPreview>; // Happ routing; changes nothing
     async fn import_routing(&self, token: u64) -> AppResult<RoutingImported>; // exactly that preview; stale token = Conflict

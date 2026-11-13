@@ -40,7 +40,9 @@
         "smartRuDisabled": "Smart RU is off for this connection: the rule lists are unavailable. All traffic goes through the VPN.",
         "bootstrapDnsFallback": "The network's own DNS server is not usable: the VPN server's address is looked up through public resolvers.",
         "appMissing": "The rule for “{{name}}” is not active: the program file was not found. Its traffic goes through the VPN.",
-        "appNotAFile": "The rule for “{{name}}” is not active: the path is not a file. Its traffic goes through the VPN."
+        "appNotAFile": "The rule for “{{name}}” is not active: the path is not a file. Its traffic goes through the VPN.",
+        "appMissingDirect": "The rule for “{{name}}” is not active: the program file was not found. Its traffic goes directly.",
+        "appNotAFileDirect": "The rule for “{{name}}” is not active: the path is not a file. Its traffic goes directly."
       },
       "ruleSets": {
         "notUpdated": "Smart RU rules were not updated; the local version is in use",

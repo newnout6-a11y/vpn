@@ -81,6 +81,7 @@ impl SharedInputs {
             split_direct: routing.split_direct.clone(),
             split_vpn: routing.split_vpn.clone(),
             split_inactive: Vec::new(),
+            only_listed: routing.only_listed.clone(),
             dns: routing.dns.clone(),
             kill_switch: level,
             public_wifi: routing.public_wifi,

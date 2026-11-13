@@ -418,7 +418,10 @@ pub struct Timings { pub ready, capture_ready, exit, release: Duration, pub back
 pub const MAX_RESTARTS: u8 = 3;
 pub struct UserInputs { pub smart_ru: bool, pub smart_ru_maps_direct: bool, pub rule_set_dir: Option<PathBuf>,
     pub domain_rules: Vec<DomainRule>, pub split_direct: Vec<String>, pub split_vpn: Vec<String>,
-    pub split_inactive: Vec<InactiveSplit>, pub dns: Option<DnsAddr>, pub kill_switch: KillSwitchLevel,
+    pub split_inactive: Vec<InactiveSplit>,
+    pub only_listed: Option<Vec<String>>, // Some(own exe regexes) = only the split's VPN apps + the app
+                                          // (engine plan::Scope::OnlyListed, re-check 16); None = every app
+    pub dns: Option<DnsAddr>, pub kill_switch: KillSwitchLevel,
     pub public_wifi: bool, pub stealth: bool, pub auto_restart_on_crash: bool }  // serde camelCase, Default
 impl UserInputs { pub fn split(&self) -> ResolvedSplit }
 pub struct InactiveSplit { pub name: String, pub path: String, pub missing: bool }

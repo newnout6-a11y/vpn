@@ -27,6 +27,9 @@ pub trait SplitTunnelApi: 'static {
     async fn add_process(&self, name: String) -> AppResult<SplitApp>;
     /// Sets the rule of app `id`.
     async fn set_rule(&self, id: String, rule: AppRule) -> AppResult<()>;
+    /// Saves which apps use the VPN; the running session takes it at its next start, like the
+    /// list itself.
+    async fn set_scope(&self, scope: AppScope) -> AppResult<()>;
     /// Removes app `id` (a later rescan does not bring it back).
     async fn remove(&self, id: String) -> AppResult<()>;
     /// Reads a Happ routing profile and says what importing it would do; nothing changes yet.
@@ -43,6 +46,10 @@ pub struct SplitSnapshot {
     pub apps: Load<Vec<SplitApp>>,
     /// Subscriptions whose provider sent a Happ routing profile.
     pub offers: Vec<RoutingOffer>,
+    pub scope: AppScope,
+    /// Tunnel mode runs in a helper service too old for [`AppScope::OnlyListed`]: there every
+    /// app still uses the VPN until the service is updated.
+    pub older_service: bool,
 }
 
 impl Default for SplitSnapshot {
@@ -50,7 +57,32 @@ impl Default for SplitSnapshot {
         Self {
             apps: Load::Loading,
             offers: Vec::new(),
+            scope: AppScope::All,
+            older_service: false,
         }
+    }
+}
+
+/// Which apps use the VPN: the switch at the top of the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AppScope {
+    /// Every app; the rules decide per site.
+    #[default]
+    All,
+    /// «VPN только для выбранных приложений»: the apps set to «Через VPN»; every other app
+    /// connects directly.
+    OnlyListed,
+}
+
+/// Catalog key of the switch's hint for the list as it is: with only the listed apps and none
+/// listed yet, it says that nothing goes through the VPN (a list still loading reads as listed).
+pub fn scope_hint_key(scope: AppScope, apps: &Load<Vec<SplitApp>>) -> &'static str {
+    let none_listed =
+        matches!(apps, Load::Ready(list) if list.iter().all(|a| a.rule != AppRule::Vpn));
+    match scope {
+        AppScope::All => "splitTunneling.scope.hintAll",
+        AppScope::OnlyListed if none_listed => "splitTunneling.scope.hintEmpty",
+        AppScope::OnlyListed => "splitTunneling.scope.hintListed",
     }
 }
 

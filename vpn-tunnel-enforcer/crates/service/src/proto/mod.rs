@@ -40,8 +40,14 @@ pub use wire::{ServiceUpdateWire, UpdateAsk, UpdatePhase};
 
 /// The protocol version this build speaks. 2 (p-svc-recheck): `StatusWire::self_test`, the
 /// service's leak self-test. 3 (p-smart-lists): `RoutingInputs::rule_sets` (`Request::speak`
-/// strips it for a version-2 service); a version-1 peer is refused (`negotiate`).
-pub const PROTOCOL: u32 = 3;
+/// strips it for a version-2 service). 4 (p-app-split): `RoutingInputs::only_listed` (stripped
+/// for a version-3 service, which then routes every app). A peer two versions apart is refused
+/// (`negotiate`).
+pub const PROTOCOL: u32 = 4;
+
+/// The first protocol whose service routes by the apps page's scope
+/// (`RoutingInputs::only_listed`): an older one runs every app through the tunnel.
+pub const SCOPE_PROTOCOL: u32 = 4;
 
 /// The version both sides speak, or `None` when they are more than one version apart.
 pub fn negotiate(client: u32, service: u32) -> Option<u32> {
@@ -163,22 +169,36 @@ pub struct RoutingInputs {
     /// ones; `None` = use those.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule_sets: Option<RuleSetFiles>,
+    /// Protocol 4: «VPN только для выбранных приложений». `Some(own)` = only the split's VPN apps
+    /// and `own` (the app's exe as `process_path_regex` values) take the tunnel; `None` = every
+    /// app. Checked like the split lists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub only_listed: Option<Vec<String>>,
 }
 
 impl Request {
-    /// This request as a service of version `protocol` reads it: version 2 refuses the rule
-    /// sets as an unknown field, so they are left out there (it keeps its pinned files).
+    /// This request as a service of version `protocol` reads it: an older one refuses a newer
+    /// field as unknown, so it is left out there. Version 2 keeps its pinned Smart RU files;
+    /// version 3 routes every app (the apps page says so).
     pub fn speak(mut self, protocol: u32) -> Self {
-        if protocol < 3 {
-            match &mut self {
-                Request::Start(s) | Request::Restart(s) | Request::Switch(s) => {
-                    s.routing.rule_sets = None;
-                }
-                Request::Inputs(r) => r.rule_sets = None,
-                _ => {}
+        if let Some(routing) = self.routing_mut() {
+            if protocol < 3 {
+                routing.rule_sets = None;
+            }
+            if protocol < SCOPE_PROTOCOL {
+                routing.only_listed = None;
             }
         }
         self
+    }
+
+    /// The routing inputs this request carries.
+    fn routing_mut(&mut self) -> Option<&mut RoutingInputs> {
+        match self {
+            Request::Start(s) | Request::Restart(s) | Request::Switch(s) => Some(&mut s.routing),
+            Request::Inputs(r) => Some(r),
+            _ => None,
+        }
     }
 }
 

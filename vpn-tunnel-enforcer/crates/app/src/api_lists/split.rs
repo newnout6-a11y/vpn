@@ -3,8 +3,11 @@
 //! routing profiles imported into the user's domain rules on the user's click (`routing`).
 //!
 //! A running session takes a changed list at its next engine start (the tunnel reads
-//! `rules.json` on every start), as the Settings page's domain rules do.
+//! `rules.json` on every start), as the Settings page's domain rules do; so does the switch
+//! «Только выбранные приложения» (`Settings::app_scope`, re-check item 16).
 mod routing;
+#[cfg(test)]
+mod scope_tests;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,20 +19,22 @@ use tokio::runtime::Handle;
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 use vpnte_base::{AppError, AppResult, Msg};
+use vpnte_core::settings::{self, RoutingMode, Settings};
 use vpnte_engine::apps;
 use vpnte_engine::routing::RulesDoc;
 use vpnte_engine::routing::process::{self as engine, AppPath, Probe, ProcessName, SplitTarget};
 use vpnte_servers::store::ServersEvent;
+use vpnte_service::proto::SCOPE_PROTOCOL;
 use vpnte_ui::split_tunnel::{
-    AppKind, AppRule, RoutingImported, RoutingOffer, RoutingPreview, RoutingSource, SplitApp,
-    SplitSnapshot, SplitTunnelApi,
+    AppKind, AppRule, AppScope, RoutingImported, RoutingOffer, RoutingPreview, RoutingSource,
+    SplitApp, SplitSnapshot, SplitTunnelApi,
 };
 use vpnte_ui::widgets::{Load, UiError};
 
 use super::refused;
 use crate::services::Backend;
 use crate::support::files::pick_program;
-use crate::support::{blocking, detached};
+use crate::support::{blocking, changed_opt, detached};
 
 /// [`SplitTunnelApi`] over the routing rules store.
 pub struct SplitService(Arc<Shared>);
@@ -82,21 +87,45 @@ impl SplitService {
 }
 
 impl Shared {
-    /// Projects the stored entries in order and the routing offers; sends only a changed
-    /// snapshot.
+    /// Projects the stored entries in order, the routing offers and the scope; sends only a
+    /// changed snapshot.
     fn publish(&self) {
         let _one = self.publishing.lock();
         let apps = self.backend.rules.read(project);
         let offers = self.offers.lock().clone();
+        let (scope, older_service) = self.scope();
         self.state.send_if_modified(|current| {
             let next = Load::Ready(apps);
-            let changed = current.apps != next || current.offers != offers;
+            let changed = current.apps != next
+                || current.offers != offers
+                || (current.scope, current.older_service) != (scope, older_service);
             if changed {
                 current.apps = next;
                 current.offers = offers;
+                (current.scope, current.older_service) = (scope, older_service);
             }
             changed
         });
+    }
+
+    /// Projects the scope alone (a settings change, a new link to the service): the list stays
+    /// as shown, a running discovery's «loading» included.
+    fn publish_scope(&self) {
+        let _one = self.publishing.lock();
+        let now = self.scope();
+        self.state.send_if_modified(|current| {
+            let changed = (current.scope, current.older_service) != now;
+            (current.scope, current.older_service) = now;
+            changed
+        });
+    }
+
+    /// The saved scope and whether Tunnel mode runs in a service too old for it.
+    fn scope(&self) -> (AppScope, bool) {
+        let s = self.backend.settings.snapshot();
+        let tunnel = self.backend.tunnel().ok();
+        let protocol = tunnel.and_then(|t| t.service_protocol());
+        (ui_scope(s.app_scope), older_service(&s, protocol))
     }
 
     /// Re-reads which subscriptions carry a routing profile (parses each stored value).
@@ -163,6 +192,8 @@ fn offer_gone() -> AppError {
 #[async_trait(?Send)]
 impl SplitTunnelApi for SplitService {
     fn state(&self) -> watch::Receiver<SplitSnapshot> {
+        // The service's protocol is known once the app linked to it, without a store change.
+        self.0.publish_scope();
         let rx = self.0.state.subscribe();
         let first = !self.0.looked.swap(true, Ordering::SeqCst);
         if first
@@ -233,6 +264,18 @@ impl SplitTunnelApi for SplitService {
         .await
     }
 
+    async fn set_scope(&self, scope: AppScope) -> AppResult<()> {
+        let shared = self.0.clone();
+        blocking(move || {
+            let stored = stored_scope(scope);
+            shared.backend.settings.update(|s| s.app_scope = stored)?;
+            tracing::info!(?stored, "apps scope saved");
+            shared.publish_scope();
+            Ok(())
+        })
+        .await
+    }
+
     async fn remove(&self, id: String) -> AppResult<()> {
         // An id the store does not know is removed already: the end state is the asked one.
         let Ok(id) = Uuid::parse_str(&id) else {
@@ -262,16 +305,30 @@ impl SplitTunnelApi for SplitService {
     }
 }
 
-/// Re-projects on every change of `rules.json` (this page, the Settings page, an import) and of
-/// the server list (a subscription's routing profile) until `backend.shutdown`.
+/// Re-projects on every change of `rules.json` (this page, the Settings page, an import), of the
+/// server list (a subscription's routing profile), of the settings (the scope, the routing
+/// mode) and of the connection (a new link to the service) until `backend.shutdown`.
 async fn follow(shared: Arc<Shared>) {
     let mut rules = shared.backend.rules.subscribe();
     let mut servers = shared.backend.servers.subscribe();
+    let mut settings = shared.backend.settings.subscribe();
+    let mut tunnel = shared.backend.tunnel().ok().map(|t| t.snapshot());
     let shutdown = shared.backend.shutdown.clone();
     loop {
         let alive = tokio::select! {
             () = shutdown.cancelled() => false,
             changed = rules.changed() => changed.is_ok(),
+            changed = settings.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                shared.publish_scope();
+                continue;
+            }
+            () = changed_opt(&mut tunnel) => {
+                shared.publish_scope();
+                continue;
+            }
             event = servers.recv() => match event {
                 // Pings and refresh starts change no stored routing value.
                 Ok(ServersEvent::Changed | ServersEvent::RefreshFinished(_))
@@ -287,6 +344,27 @@ async fn follow(shared: Arc<Shared>) {
             return;
         }
         shared.publish();
+    }
+}
+
+/// Tunnel mode runs in a helper service (linked, speaking `protocol`) too old to route by the
+/// scope: there every app keeps the VPN (`Request::speak` leaves the scope out) until the
+/// service is updated.
+fn older_service(s: &Settings, protocol: Option<u32>) -> bool {
+    s.routing_mode == RoutingMode::Hard && protocol.is_some_and(|p| p < SCOPE_PROTOCOL)
+}
+
+fn ui_scope(scope: settings::AppScope) -> AppScope {
+    match scope {
+        settings::AppScope::All => AppScope::All,
+        settings::AppScope::OnlyListed => AppScope::OnlyListed,
+    }
+}
+
+fn stored_scope(scope: AppScope) -> settings::AppScope {
+    match scope {
+        AppScope::All => settings::AppScope::All,
+        AppScope::OnlyListed => settings::AppScope::OnlyListed,
     }
 }
 

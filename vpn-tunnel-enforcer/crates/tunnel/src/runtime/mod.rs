@@ -69,6 +69,10 @@ pub struct UserInputs {
     pub split_vpn: Vec<String>,
     /// Split-tunnel entries whose file is unusable right now (each becomes a warning).
     pub split_inactive: Vec<InactiveSplit>,
+    /// «VPN только для выбранных приложений» (re-check item 16): `Some(own)` = only the split's
+    /// VPN apps and `own`, the app's exe as `process_path_regex` values (sent by the app: in the
+    /// service this process is not the app), take the tunnel; `None` = every app.
+    pub only_listed: Option<Vec<String>>,
     /// The active resolver; `None` = automatic (DoH through the tunnel).
     pub dns: Option<DnsAddr>,
     /// Current settings, applied by `restart_with_last` on top of the last start.

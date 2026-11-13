@@ -59,6 +59,14 @@
     "ruleNoneTitle": "No rule",
     "commandAdded": "{{name}} now bypasses the VPN.",
     "invalidProcess": "Invalid process name. Example: curl.exe or yt-dlp",
+    "scope": {
+      "label": "Only selected apps",
+      "hintAll": "Every app uses the VPN now. Turn this on to keep it for apps with the route “VPN”.",
+      "hintListed": "Only apps with the route “VPN” use the VPN; the rest connect directly. Your site rules apply to every app.",
+      "hintEmpty": "No app has the route “VPN” yet, so everything connects directly.",
+      "olderService": "The helper service is an older version: in Tunnel mode every app still uses the VPN.",
+      "failed": "Could not switch"
+    },
     "routing": {
       "title": "Happ routing",
       "hint": "Add a Happ routing profile to your own rules: paste a happ://routing/… link or pick a subscription's profile. You see what changes first.",

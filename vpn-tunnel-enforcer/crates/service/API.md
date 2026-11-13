@@ -93,11 +93,12 @@ connection is at most `frame::FIRST_FRAME_MAX` (16 KiB) and must arrive within `
 connections wait for theirs, more are closed at once: nothing big is held for a client before it
 is identified. Client ->
 `ClientFrame { id, request }`; service -> `ServerFrame::{Reply { id, reply }, Failed { id, error },
-Event { event }}`. `PROTOCOL = 3` (2 added `StatusWire::self_test`, 3 `RoutingInputs::rule_sets`);
-`negotiate(client, service)` = the lower one while they differ by at most one (so a version-1
-client is refused now). Evolution: add requests / replies / events / optional fields only; the
+Event { event }}`. `PROTOCOL = 4` (2 added `StatusWire::self_test`, 3 `RoutingInputs::rule_sets`, 4
+`RoutingInputs::only_listed`; `SCOPE_PROTOCOL = 4` names the last one for the app);
+`negotiate(client, service)` = the lower one while they differ by at most one (so a version-2
+peer is refused now). Evolution: add requests / replies / events / optional fields only; the
 newer side speaks the negotiated version (`Request::speak(protocol)` strips the rule sets for a
-version-2 service, applied by `pipe::client` to every request after `Hello`; every status a
+version-2 service and the scope for a version-3 one, which then runs every app through the tunnel, applied by `pipe::client` to every request after `Hello`; every status a
 service of this build sends carries `self_test`, which versions 2 and 3 both know); structs refuse
 unknown fields.
 ```rust
@@ -114,7 +115,9 @@ pub struct ServerUpstream { pub id: String, pub profile: Profile, pub device: Op
 pub struct RoutingInputs { smart_ru, smart_ru_maps_direct, domain_rules: Vec<DomainRule>, split_direct,
     split_vpn: Vec<String> /* process_path_regex */, dns: Option<DnsAddr>, public_wifi, stealth,
     auto_restart_on_crash,
-    rule_sets: Option<RuleSetFiles> /* protocol 3: the app's active Smart RU lists as bytes */ }
+    rule_sets: Option<RuleSetFiles> /* protocol 3: the app's active Smart RU lists as bytes */,
+    only_listed: Option<Vec<String>> /* protocol 4: «VPN только для выбранных приложений»; the app's
+        own exe as process_path_regex values; checked like the split lists */ }
     // no rule-set dir, no inactive splits
 pub enum Reply { Welcome { protocol, service_version }, Started(Option<StartReceiptWire>),
     Stopped(StopReceiptWire), Switched(Option<SwitchReceiptWire>), Status(Box<StatusReply>),
