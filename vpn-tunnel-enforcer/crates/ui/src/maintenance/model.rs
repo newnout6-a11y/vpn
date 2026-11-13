@@ -113,6 +113,9 @@ pub enum KillSwitchState {
     Blocking,
     /// The filters could not be applied or read back.
     Failed(Msg),
+    /// No filters here (no helper service, an unelevated app): the kill switch acts through the
+    /// system proxy; the filters come with the service (p-noadmin-ui).
+    ProxyOnly,
 }
 
 /// A Windows Firewall profile.

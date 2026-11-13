@@ -213,6 +213,7 @@ impl Seed {
                 marked: false,
                 worked_at: Some(now - 2 * 60 * MIN),
             }),
+            placeholder: false,
         }
     }
 }
@@ -336,6 +337,7 @@ fn demo_groups(now: UnixMs) -> Vec<GroupView> {
             moved_at: Some(now - 3 * DAY),
             host: Some("sub.example-provider.net".into()),
             settings_hidden: false,
+            provider_said: None,
         },
         GroupView {
             id: "trial".into(),
@@ -345,8 +347,10 @@ fn demo_groups(now: UnixMs) -> Vec<GroupView> {
             imported_at: now - 9 * DAY,
             last_fetched_at: Some(now - 2 * DAY),
             last_fetch_attempt_at: Some(now - 2 * 60 * MIN),
-            // Remnawave's answer to a device without the HWID: one line and the switch.
+            // Remnawave's answer to a device without the HWID: its placeholder's words, the
+            // servers kept, and the switch.
             last_fetch_error: Some(FetchError::HwidRequired),
+            provider_said: Some("Приложение не поддерживается".into()),
             device_id: Some(DEMO_PC_ID.into()),
             traffic_used: Some(11 * GB),
             traffic_total: Some(10 * GB),

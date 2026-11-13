@@ -53,6 +53,16 @@ impl Servers {
         })
     }
 
+    /// The client identity (User-Agent family) that brought the first servers of the new
+    /// subscription group `id`: its refreshes try it first (p-live-fix 1c).
+    pub(crate) fn remember_agent(&self, id: &GroupId, agent: String) -> AppResult<()> {
+        self.update(|doc| {
+            doc.group(id).ok_or_else(group_not_found)?;
+            doc.fetch_notes.entry(id.clone()).or_default().agent = Some(agent);
+            Ok(())
+        })
+    }
+
     /// Replaces the extra request headers of a subscription group with the `Name: value` lines of
     /// `text` (blank: none), sealed like the URL. Returns the names now set.
     pub fn set_group_headers(&self, id: &GroupId, text: &str) -> AppResult<Vec<String>> {

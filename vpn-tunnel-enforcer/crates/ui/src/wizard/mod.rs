@@ -15,6 +15,8 @@ use vpnte_base::i18n::Lang;
 use vpnte_base::types::{KillSwitchLevel, ProxyKind};
 
 mod demo;
+#[cfg(test)]
+mod helper_tests;
 mod model;
 mod steps;
 #[cfg(test)]

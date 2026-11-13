@@ -67,6 +67,80 @@ pub fn installed() -> bool {
     }
 }
 
+/// The helper service as the SCM sees it right now (p-live-fix): after a Windows restart the
+/// app's autostart runs at sign-in, in parallel with the automatic services, so "registered but
+/// not answering yet" is normal for a while.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// Not registered (or out of a test's reach, see [`installed_binary`]).
+    Missing,
+    /// Registered and stopped: Windows starts it at boot, its recovery restarts it after a crash.
+    Stopped,
+    /// `START_PENDING` / `CONTINUE_PENDING`: coming up.
+    Starting,
+    /// `RUNNING`: its pipe is there or about to be.
+    Running,
+    /// `STOP_PENDING`, `PAUSE_PENDING`, `PAUSED`: going away.
+    Stopping,
+}
+
+impl Presence {
+    /// The service is on its way up (or up): worth waiting for its pipe.
+    pub fn coming(self) -> bool {
+        matches!(self, Presence::Starting | Presence::Running)
+    }
+}
+
+/// The service's [`Presence`]; an SCM it cannot read counts as missing (logged).
+pub fn presence() -> Presence {
+    if !reachable() {
+        return Presence::Missing;
+    }
+    scm_presence().unwrap_or_else(|err| {
+        tracing::warn!(error = %err, "service state unreadable");
+        Presence::Missing
+    })
+}
+
+fn scm_presence() -> windows::core::Result<Presence> {
+    use windows::Win32::Foundation::ERROR_SERVICE_DOES_NOT_EXIST;
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_HANDLE,
+        SC_MANAGER_CONNECT, SERVICE_CONTINUE_PENDING, SERVICE_QUERY_STATUS, SERVICE_RUNNING,
+        SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STOPPED,
+    };
+    use windows::core::{HSTRING, PCWSTR};
+
+    struct Handle(SC_HANDLE);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            // SAFETY: opened below, closed once.
+            let _ = unsafe { CloseServiceHandle(self.0) };
+        }
+    }
+    // SAFETY: local machine, default database, connect right only.
+    let scm =
+        Handle(unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) }?);
+    let name = HSTRING::from(vpnte_service::paths::SERVICE_NAME);
+    // SAFETY: a valid manager handle and name; query right only (any user has it).
+    let service = match unsafe { OpenServiceW(scm.0, &name, SERVICE_QUERY_STATUS) } {
+        Ok(handle) => Handle(handle),
+        Err(e) if e.code() == ERROR_SERVICE_DOES_NOT_EXIST.to_hresult() => {
+            return Ok(Presence::Missing);
+        }
+        Err(e) => return Err(e),
+    };
+    let mut status = SERVICE_STATUS::default();
+    // SAFETY: a valid service handle and a writable status struct.
+    unsafe { QueryServiceStatus(service.0, &mut status) }?;
+    Ok(match status.dwCurrentState {
+        SERVICE_RUNNING => Presence::Running,
+        SERVICE_START_PENDING | SERVICE_CONTINUE_PENDING => Presence::Starting,
+        SERVICE_STOPPED => Presence::Stopped,
+        _ => Presence::Stopping,
+    })
+}
+
 fn service_exe() -> AppResult<PathBuf> {
     let exe = std::env::current_exe().map_err(AppError::internal)?;
     let path = exe.with_file_name(SERVICE_EXE);
@@ -107,5 +181,16 @@ mod tests {
     fn tests_never_see_an_installed_service() {
         assert_eq!(super::installed_binary().unwrap(), None);
         assert!(!super::installed());
+        assert_eq!(super::presence(), super::Presence::Missing);
+    }
+
+    #[test]
+    fn only_a_service_on_its_way_up_is_waited_for() {
+        use super::Presence::*;
+        let coming: Vec<bool> = [Missing, Stopped, Starting, Running, Stopping]
+            .iter()
+            .map(|p| p.coming())
+            .collect();
+        assert_eq!(coming, [false, false, true, true, false]);
     }
 }

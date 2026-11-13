@@ -8,6 +8,7 @@ use super::model::{
     SystemReport,
 };
 use super::rules::{self, Outcome};
+use crate::helper::{Feature, HelperLine, use_capability};
 use crate::lang::tr;
 use crate::t;
 use crate::widgets::{Badge, Button, ButtonKind, Panel, ProgressBar, Tone};
@@ -135,6 +136,7 @@ pub(crate) fn StatePanel(ctl: Controller) -> Element {
 #[component]
 pub(crate) fn StepsPanel(ctl: Controller) -> Element {
     let steps = ctl.state.read().repair.steps.clone();
+    let cap = use_capability();
     rsx! {
         Panel { title: t!("ui.maintenance.steps.title"), id: "mt-steps",
             ul { class: "mt-steps",
@@ -143,7 +145,7 @@ pub(crate) fn StepsPanel(ctl: Controller) -> Element {
                         StepMark { state: state.clone() }
                         div { class: "mt-step-text",
                             p { class: "mt-step-label", {t!(step.label_key())} }
-                            StepDetail { state }
+                            StepDetail { up_front: rules::step_up_front(step, cap.as_ref()), state }
                         }
                     }
                 }
@@ -167,10 +169,15 @@ fn StepMark(state: StepState) -> Element {
     }
 }
 
+/// A step's line: its outcome, or before any run what keeps it from running here
+/// (`up_front`, said calmly instead of after the click).
 #[component]
-fn StepDetail(state: StepState) -> Element {
+fn StepDetail(up_front: Option<&'static str>, state: StepState) -> Element {
     let (text, tone) = match &state {
-        StepState::Idle => return rsx! {},
+        StepState::Idle => match up_front {
+            Some(key) => (t!(key), "info"),
+            None => return rsx! {},
+        },
         StepState::Pending => (t!("ui.maintenance.steps.pending"), "info"),
         StepState::Running => (t!("ui.maintenance.steps.running"), "running"),
         StepState::Done(o) => (
@@ -216,6 +223,7 @@ pub(crate) fn ResultsPanel(ctl: Controller) -> Element {
                             {t!("ui.maintenance.protection.verified", time = fmt_time(at))}
                         }
                     }
+                    HelperLine { feature: Feature::KillSwitch }
                 }
             }
             if let Some(report) = report {

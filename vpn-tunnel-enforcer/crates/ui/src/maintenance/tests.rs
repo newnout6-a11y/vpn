@@ -522,11 +522,14 @@ fn capture_helpers() {
 }
 
 const RU: &str = include_str!("../../locales/ui-maintenance.ru.json");
+/// p-noadmin-ui's fragment adds the calm protection state without the helper service.
+const NOADMIN_RU: &str = include_str!("../../locales/p-noadmin-ui.ru.json");
 
 /// Every `ui.maintenance.*` key the code names exists (a family prefix must name an object).
 #[test]
 fn every_key_the_code_uses_exists() {
-    let keys: Vec<String> = crate::test_locales::flatten(RU).into_keys().collect();
+    let mut keys: Vec<String> = crate::test_locales::flatten(RU).into_keys().collect();
+    keys.extend(crate::test_locales::flatten(NOADMIN_RU).into_keys());
     let exists = |key: &str| {
         keys.iter()
             .any(|k| k == key || k.starts_with(&format!("{key}.")))

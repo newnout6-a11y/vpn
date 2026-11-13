@@ -290,4 +290,21 @@ pub trait TunnelOps: Send + Sync + 'static {
     fn service_rule_sets(&self) -> Option<vpnte_service::proto::RuleSetsWire> {
         None
     }
+    /// The helper service is registered, as this tunnel uses it: read at start and after an
+    /// install from the app (added by p-noadmin-ui, read-only). The default: not installed.
+    fn service_present(&self) -> bool {
+        false
+    }
+    /// Changes once per link to the helper service lost without the app asking (it restarted,
+    /// for example to update itself); its version is known again after the re-link (added by
+    /// p-noadmin-ui). The default: none.
+    fn service_losses(&self) -> Option<watch::Receiver<u64>> {
+        None
+    }
+    /// The SCM reports the helper service coming up while its pipe does not answer yet (after a
+    /// Windows restart): a view says «Служба-помощник запускается…», not "not installed" (added
+    /// by p-live-fix). The default: no.
+    fn service_starting(&self) -> bool {
+        false
+    }
 }

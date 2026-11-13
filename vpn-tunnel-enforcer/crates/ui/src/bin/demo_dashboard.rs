@@ -3,12 +3,19 @@
 //! `closing`, `cancelling`, `switching`, `reconnecting`, `restart`, `leak`, `error-killswitch`,
 //! `unknown-killswitch`, `tunnel-blocked`, `proxy-down`, `competing-tun`, `foreign-vpn`,
 //! `servers-empty`, `connected-soft`, `mascot-alert`, `live`; a reference id
-//! such as `connected-dark-860x600` also sets theme and size), `--theme`, `--lang`, `--size WxH`.
+//! such as `connected-dark-860x600` also sets theme and size; an optional helper state
+//! `+installed|+missing|+older|+elevated`, default installed: `disconnected+missing` shows the
+//! strip of a saved Tunnel mode that waits for the helper service), `--theme`, `--lang`,
+//! `--size WxH`.
 #![windows_subsystem = "windows"]
+
+use std::rc::Rc;
 
 use dioxus::prelude::*;
 use vpnte_ui::dashboard::Dashboard;
 use vpnte_ui::dashboard::demo::{DashScene, DemoDashboard, DemoStart};
+use vpnte_ui::helper::HelperApi;
+use vpnte_ui::helper::demo::{DemoHelper, split_scene};
 use vpnte_ui::launch::{DemoArgs, LaunchOptions, launch};
 use vpnte_ui::pages::{Page, PageRegistry};
 use vpnte_ui::shell::Shell;
@@ -36,6 +43,9 @@ fn apply_scene_id(args: &mut DemoArgs) {
 
 fn main() {
     let mut args = DemoArgs::parse();
+    let (page, helper) = split_scene(args.scene.as_deref().unwrap_or_default());
+    let page = page.to_owned();
+    args.scene = (!page.is_empty()).then_some(page);
     apply_scene_id(&mut args);
     let scene = args
         .scene
@@ -59,11 +69,13 @@ fn main() {
     let options = LaunchOptions::demo("demo_dashboard", &args);
     launch(options, App, move || {
         let (api, panels, start) = DemoDashboard::handle(scene);
+        let helper: Rc<dyn HelperApi> = Rc::new(DemoHelper::new(helper));
         vec![
             Box::new(args),
             Box::new(api),
             Box::new(panels),
             Box::new(start),
+            Box::new(helper),
         ]
     });
 }

@@ -547,7 +547,14 @@ the protection state stay as they are. `ImportReport::providers: Vec<ProviderLin
 error: Option<FetchError> }>` names the Mihomo providers of an import (`FetchError::Refused`: a
 provider URL the redirect rules refused, never requested); `ExportReport::hidden` counts servers a
 bulk export left out for their provider; `ServerView::config_hidden` also holds for keys that carried
-their provider's `hide-settings` into another group. `SubscriptionRequest { send_hwid, headers }` is
+their provider's `hide-settings` into another group. Provider placeholders (p-live-fix):
+`ServerView::placeholder` marks a provider notice an older build stored as a server (badge «не
+сервер», `present::Unusable::Placeholder`: never selected, pinged, checked or started as a proxy);
+`GroupView::provider_said` holds the provider's words of the last placeholder answer
+(`facts::refresh_lines`: one line «Провайдер ответил: «…». Серверы оставлены прежними.» instead of
+the generic failure, the HWID switch kept); `FetchError::{Placeholder, Encrypted}` (notices instead
+of servers; a list only the provider's own app reads). A modal footer wraps and with three or more
+actions keeps the first at the left edge (widgets.css; the delete-group dialog is medium). `SubscriptionRequest { send_hwid, headers }` is
 the add dialog's request draft: it resets to the new-group defaults after an import and when the
 dialog closes (a token header never reaches the next provider). The group toolbar's «Запрос» opens the request dialog (HWID switch,
 header names, replace / remove); an empty list without the HWID shows a hint with the switch.
@@ -628,9 +635,10 @@ pub trait SettingsApi: 'static {     // root component SettingsPage; a dismissed
 pub struct SettingsState { settings: SettingsView, locale: Option<Lang>, active_theme_id: String,
     themes: Vec<ThemeChoice>, autostart, location_privacy, proxy_credentials_saved, capture_consent_given: bool,
     capture_used_bytes: Option<u64>, connected, direct_session: bool, adaptive: AdaptiveView,
-    rule_sets: RuleSetView, browser: BrowserView, diagnostics_export_running: bool,
-    tun_available: bool /* false: Proxy only, the reason under the routing choice */,
-    capture_available: bool /* false: the capture switch greyed out with the reason */ }
+    rule_sets: RuleSetView, browser: BrowserView, diagnostics_export_running: bool }
+    // p-noadmin-ui: whether Tunnel mode, the WFP kill switch, browser policies and capture run
+    // here is the capability view (`helper`), not a field of this state; «Установить
+    // службу-помощник» is `HelperApi::install_service` (was `SettingsApi::install_service`)
 ```
 `SettingsView` (live values) and `SettingsPatch` (one `Option` per field, `apply_to`) are generated
 from one field list: `connection_mode, routing_mode, soft_git, soft_gradle, soft_studio,
@@ -643,7 +651,8 @@ check_interval_ms, adaptive_bypass_server_fallback, deep_inspection, deep_inspec
 capture_quota_mb`. `SettingsDraft` holds the page's unsaved edits. Section views: `KillSwitchView`
 (ks-a: `level`, `status`, `exceptions` (`broad` = an inline hint), `firewall_blocks_outbound` /
 `hyperv_unfiltered` (lines in a closed Details panel), `always_available` ("Always" disabled with
-«Нужна служба-помощник» when false; a stored "Always" stays shown)),
+«Нужна служба-помощник» when false, or under the panel's helper line while the service is missing,
+p-noadmin-ui; a stored "Always" stays shown)),
 `RotationView` (+ `RotationPatch`, `RotationOutcome`), `SettingsState::launch` = `LaunchView
 { effective: LaunchChoice /* Off, LastUsed, LowestDelay, Random (provider) */, source: LaunchSource
 /* Default, User, Provider */, server_mode }` («Поведение»; the segments show only the user's own
@@ -763,8 +772,10 @@ pub trait TrafficHistoryApi: 'static {  // root component TrafficHistoryPage (ac
 ```
 Types: `ScheduleEntry`, `ScheduleInput` (both with `capture: Capture` {Proxy, Tun} and `upstream:
 Upstream` {Server, LocalProxy}: NOADMIN §2 keeps the two apart; `Upstream::uses_profile`),
-`ScheduleSnapshot.tun_available` (`Capture::available(tun_available)`: false for a TUN schedule in
-an unelevated app; the card, the next-event strip and the editor mark it unavailable), `HhMm`
+`Capture::available(tun_available)` (p-noadmin-ui: `tun_available` = the capability view's
+`tunnel.works()`, live; false for a TUN schedule while the helper service is missing in an
+unelevated app: the card, the next-event strip and the editor mark it unavailable, the editor
+with `helper::InstallService`), `HhMm`
 (minutes; strict `H:MM` / `HH:MM`),
 `NextEvent` (with its schedule's `capture`), `NextAction`, `ServerChoice`, form rules `ScheduleForm`, `FormProblem`, `time_until`,
 `local_hhmm`; `SplitApp`, `AppKind`, `AppRule`, `display_path`, `matches`; Happ routing panel
@@ -833,7 +844,9 @@ the protection `status()` read-back (filters, BFE, `INetFwPolicy2` profiles); `r
 legacy cleanup again, engine orphan sweep — a failure maps to `StepOutcome::failed(msg)`, a refusal to
 `blocked(msg)`; `export_diagnostics` = Save dialog («Сохранить диагностику», Desktop,
 `vpn-tunnel-enforcer-diagnostics-<ISO with ':' and '.' as '-'>.zip`) + the forensics export with progress
-in `state.export`; capture fields from forensics `CaptureStatus` (`status_unavailable` when the read
+in `state.export`, plus (p-noadmin-ui, `vpnte-app` `api_maintenance::extras`) the event journal
+`events.1.jsonl` / `events.jsonl` and, while the helper service is installed, this user's
+service lines `service-log.txt`, scrubbed like the archive's logs; capture fields from forensics `CaptureStatus` (`status_unavailable` when the read
 fails); legacy fields from the storage import receipt.
 
 ## How the app implements an `XxxApi`
@@ -899,6 +912,38 @@ they return `ErrorKind::Permission`; the pages show its `errors.permission` text
 add folder advice) and never report the action as done. `--no-elevate` means nothing. Only an
 elevated development run needs `launch::scrub_webview2_env()` first and a WebView2 `data_dir` of its
 own.
+Since p-noadmin-ui the pages say it before the click (the capability view below); the
+`Permission` answer stays the backstop.
+
+## Helper service capability: `helper` (p-noadmin-ui)
+
+```rust
+pub trait HelperApi: 'static {      // context Rc<dyn HelperApi>; absent (demos, other tests): nothing shown
+    fn capability(&self) -> watch::Receiver<Capability>;  // pushed at start, after an install, when the
+                                                          // service's protocol becomes known
+    async fn install_service(&self) -> AppResult<bool>;   // Windows' one prompt; Ok(false) = declined
+}
+pub struct Capability { service: Service, elevated: bool, tunnel, kill_switch, policies, capture: Ability }
+pub enum Service { Missing, Installed, Older { lacks: Vec<Lack> } }   pub enum Lack { AppScope }
+pub enum Ability { Service, InProcess, NeedsService, NotInVersion }   // works() = Service | InProcess
+pub enum Feature { Tunnel, KillSwitch, Policies, Capture }            // Capability::ability(feature)
+pub fn use_capability() -> Option<Capability>;          // live; None without a HelperApi in context
+#[component] pub fn HelperLine(feature: Feature) -> Element;   // the one calm line where a control lives
+#[component] pub fn InstallService() -> Element;               // «Установить службу-помощник» + its error
+#[component] pub fn TunnelStrip(tunnel_mode: bool) -> Element; // start page: saved Tunnel mode, no service
+```
+`HelperLine`: nothing while the feature works; `NeedsService`: «… работает через
+службу-помощник.» with «Установить службу-помощник»; `NotInVersion`: «В этой версии недоступно.»
+(no install: installing does not help); under Tunnel mode an older service's `lacks` (it updates
+itself). Muted text, no colour of its own, no dialog (`assets/css/pages/helper.css`). Used by
+Settings (Подключение, Kill switch: «Всегда» needs no note of its own and the exceptions are
+read-only without WFP; browser policies: no buttons where nothing can write them; capture greyed
+out), the wizard (routing step; the summary shows what «Завершить» saves: Proxy while Tunnel mode
+waits), Maintenance (protection block; repair steps say up front what keeps them from running;
+`KillSwitchState::ProxyOnly` = no filters of ours, not a failure), the Schedule editor and the
+start page (`dashboard::banners`). Demo: `helper::demo::{DemoHelper, HelperScene, split_scene}`:
+`demo_settings`, `demo_maintenance`, `demo_wizard`, `demo_dashboard` and `demo_lists` take
+`--scene <page scene>+installed|+missing|+older|+elevated` (default installed).
 
 ## Demo binaries
 
@@ -942,10 +987,10 @@ GPU memory.
 - `OverflowMenu`, `SortableList` (drag reordering): not built; domain rules reorder with ↑ / ↓.
 - Flag coins cover the 65 countries of `ui.panels.country.*` (flag-icons 7.5, `assets/flags/`); any
   other code shows a code mark (servers) or an empty ringed coin (panels).
-- No view says up front that the helper service is missing: privileged controls stay enabled and a
-  page learns that an action is unavailable from its `ErrorKind::Permission` answer (only read-backs
-  such as the capture status have an "unavailable" state). Capability fields are for the `noadmin-*`
-  packages to add.
+- The capability view (`helper`, p-noadmin-ui) covers Settings, the wizard, Maintenance, the
+  Schedule and the start page's strip. The tray (another package's) still learns of a missing
+  helper service from a refused start; the Apps page keeps its own older-service line
+  (`SplitTunnelState::older_service`).
 - `TextInput` is controlled: very fast synthetic typing (CDP at zero delay) can drop keystrokes.
 - Reset of Windows Firewall («Аварийно»), the dashboard's «Сбросить firewall»: dropped with the old
   firewall rules (protection is WFP now).

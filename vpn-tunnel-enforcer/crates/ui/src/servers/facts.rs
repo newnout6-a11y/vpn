@@ -12,6 +12,46 @@ use crate::t;
 use crate::units::format_bytes;
 use crate::widgets::{Button, ButtonKind};
 
+/// The lines of the last refresh under a group header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RefreshLines {
+    /// The generic "refresh failed" line.
+    pub failure: Option<FetchError>,
+    /// The provider's own words (its placeholders), with the servers kept.
+    pub said: Option<String>,
+    /// The HWID hint with its switch.
+    pub hwid_hint: Option<&'static str>,
+    /// The plain device-limit line.
+    pub device_limit: bool,
+}
+
+/// What [`GroupFacts`] says about the last refresh. HWID-bound panels answer an unknown device
+/// with an empty list (ru-2026 item 1) or say so (Remnawave's scheme): one line with the switch
+/// at hand; a full device limit is a plain line. The provider's own words say why better than
+/// a generic line, so they replace it (one line, not two); the HWID switch stays (p-live-fix).
+pub(crate) fn refresh_lines(group: &GroupView) -> RefreshLines {
+    let (failure, hwid_hint) = match group.last_fetch_error {
+        Some(FetchError::HwidRequired) if !group.send_hwid => {
+            (None, Some("ui.servers.facts.hwidRequired"))
+        }
+        Some(FetchError::Empty) if !group.send_hwid => {
+            (group.last_fetch_error, Some("ui.servers.facts.hwidHint"))
+        }
+        Some(FetchError::DeviceLimit) => (None, None),
+        other => (other, None),
+    };
+    let said = group
+        .provider_said
+        .clone()
+        .filter(|_| group.last_fetch_error.is_some());
+    RefreshLines {
+        failure: failure.filter(|_| said.is_none()),
+        device_limit: group.last_fetch_error == Some(FetchError::DeviceLimit) && said.is_none(),
+        said,
+        hwid_hint,
+    }
+}
+
 #[component]
 pub(crate) fn GroupFacts(group: GroupView) -> Element {
     let actions = use_context::<Actions>();
@@ -24,19 +64,12 @@ pub(crate) fn GroupFacts(group: GroupView) -> Element {
         .map(|total| (group.traffic_used.unwrap_or(0), total));
     let link = |url: &Option<String>| url.as_deref().and_then(safe_http_url).map(str::to_owned);
     let (panel, support) = (link(&group.web_page_url), link(&group.support_url));
-    // HWID-bound panels answer an unknown device with an empty list (ru-2026 item 1) or say so
-    // (Remnawave's scheme): one line with the switch at hand. A full device limit is a plain line.
-    let (failure, hwid_hint) = match group.last_fetch_error {
-        Some(FetchError::HwidRequired) if !group.send_hwid => {
-            (None, Some("ui.servers.facts.hwidRequired"))
-        }
-        Some(FetchError::Empty) if !group.send_hwid => {
-            (group.last_fetch_error, Some("ui.servers.facts.hwidHint"))
-        }
-        Some(FetchError::DeviceLimit) => (None, None),
-        other => (other, None),
-    };
-    let device_limit = group.last_fetch_error == Some(FetchError::DeviceLimit);
+    let RefreshLines {
+        failure,
+        said,
+        hwid_hint,
+        device_limit,
+    } = refresh_lines(&group);
     let anything = group.last_fetch_error.is_some()
         || group.status == GroupStatus::Expired
         || group.expires_at.is_some()
@@ -60,6 +93,12 @@ pub(crate) fn GroupFacts(group: GroupView) -> Element {
                         error = fetch_error_text(why),
                         when = group.last_fetch_attempt_at.map(when).unwrap_or_default()
                     )}
+                }
+            }
+            if let Some(text) = said {
+                // Provider text, shown as plain text inside a fixed sentence.
+                p { class: "srv-strip is-warn", role: "status",
+                    {t!("ui.servers.facts.said", said = text)}
                 }
             }
             if let Some(key) = hwid_hint {
@@ -187,5 +226,43 @@ fn Quota(used: u64, total: u64) -> Element {
                 div { class: "srv-quota-fill", style: "width:{pct}%" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group(error: Option<FetchError>, said: Option<&str>, send_hwid: bool) -> GroupView {
+        GroupView {
+            last_fetch_error: error,
+            provider_said: said.map(str::to_owned),
+            send_hwid,
+            ..GroupView::default()
+        }
+    }
+
+    /// p-live-fix 1a: the provider's words replace the generic lines (one calm line, the servers
+    /// kept); the HWID switch stays; without words nothing changes.
+    #[test]
+    fn the_providers_words_make_one_line() {
+        let said = Some("Приложение не поддерживается");
+        let lines = refresh_lines(&group(Some(FetchError::Placeholder), said, true));
+        assert_eq!(lines.said.as_deref(), said);
+        assert_eq!(
+            (lines.failure, lines.hwid_hint, lines.device_limit),
+            (None, None, false)
+        );
+        let lines = refresh_lines(&group(Some(FetchError::HwidRequired), said, false));
+        assert_eq!(lines.said.as_deref(), said);
+        assert_eq!(lines.hwid_hint, Some("ui.servers.facts.hwidRequired"));
+        let lines = refresh_lines(&group(Some(FetchError::DeviceLimit), said, true));
+        assert_eq!((lines.said.as_deref(), lines.device_limit), (said, false));
+        let lines = refresh_lines(&group(Some(FetchError::DeviceLimit), None, true));
+        assert_eq!((lines.said, lines.device_limit), (None, true));
+        let lines = refresh_lines(&group(Some(FetchError::Network), None, true));
+        assert_eq!(lines.failure, Some(FetchError::Network));
+        // Words of an old refusal say nothing once a refresh worked.
+        assert_eq!(refresh_lines(&group(None, said, true)).said, None);
     }
 }

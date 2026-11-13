@@ -1,13 +1,14 @@
-//! «Защита сети» read back from Windows: the WFP status of the protection this process hosts
-//! (elevated only), else what an unelevated process can still read honestly (BFE state and the
-//! Windows Firewall profiles) under a state line that says the filters need administrator
-//! rights. Filter counts that could not be read are never shown as a verified state.
+//! «Защита сети» read back from Windows: the WFP status of the protection (the helper service's,
+//! or this elevated process's), else what an unelevated process can still read honestly (BFE
+//! state and the Windows Firewall profiles) under a calm state line: without the service the
+//! kill switch acts through the system proxy. Filter counts that could not be read are never
+//! shown as a verified state.
 use vpnte_base::types::KillSwitchLevel;
 use vpnte_base::{AppResult, Msg};
 use vpnte_ui::maintenance::{FirewallBlock, FwProfile, KillSwitchState, ProtectionView};
 use vpnte_winnet::wfp::{self, FwProfileBlock, KillSwitchState as WfpState, ProtectionStatus};
 
-use super::{Shared, project};
+use super::Shared;
 use crate::support::blocking;
 
 /// Reads the protection back, publishes it in the snapshot and returns it.
@@ -84,12 +85,13 @@ pub(crate) fn from_status(s: &ProtectionStatus, machine: &Machine) -> Protection
     }
 }
 
-/// Unelevated, our filters cannot be enumerated (BFE grants that to administrators): the state
-/// line says so, the counts stay at 0 under it, the rest is read for real.
+/// No WFP here (no helper service, an unelevated app): there are no filters of ours, the level
+/// acts through the system proxy and the state line says so calmly (p-noadmin-ui; the page's
+/// helper line offers the service). The counts stay at 0 unshown, the rest is read for real.
 pub(crate) fn unelevated(level: KillSwitchLevel, machine: &Machine) -> ProtectionView {
     ProtectionView {
         level,
-        kill_switch: KillSwitchState::Failed(project::needs_admin_msg()),
+        kill_switch: KillSwitchState::ProxyOnly,
         leak_protection_active: false,
         dynamic_filters: 0,
         persistent_filters: 0,

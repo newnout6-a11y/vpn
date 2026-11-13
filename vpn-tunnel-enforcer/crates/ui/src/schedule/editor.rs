@@ -5,6 +5,7 @@ use vpnte_base::{ErrorKind, Msg};
 use super::form::{DISPLAY_ORDER, ScheduleForm, day_key};
 use super::model::{Capture, ServerChoice, Upstream};
 use super::use_api;
+use crate::helper::InstallService;
 use crate::lang::tr;
 use crate::t;
 use crate::widgets::{
@@ -85,7 +86,8 @@ pub(super) fn FormPanel(
     } else {
         t!("schedule.create")
     };
-    // The TUN needs the helper service (or an elevated app): said, never hidden.
+    // The TUN needs the helper service (or an elevated app): said, never hidden, with its
+    // install right there.
     let capture_hint = if draft.capture == Capture::Tun && !tun_available {
         t!("schedule.tunUnavailable")
     } else {
@@ -168,6 +170,9 @@ pub(super) fn FormPanel(
                         },
                     }
                     p { class: "w-field-hint", "{capture_hint}" }
+                    if draft.capture == Capture::Tun && !tun_available {
+                        div { class: "helper-line", InstallService {} }
+                    }
                 }
                 div { class: "sched-field",
                     span { class: "w-field-label", {t!("schedule.upstream")} }

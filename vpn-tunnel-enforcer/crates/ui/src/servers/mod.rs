@@ -13,6 +13,8 @@ mod demo;
 mod demo_data;
 mod detail;
 mod facts;
+#[cfg(test)]
+mod footer_tests;
 mod group;
 mod links;
 mod links_model;

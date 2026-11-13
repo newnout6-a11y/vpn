@@ -162,7 +162,7 @@ fn schedule_backend(dir: &TempDir) -> Arc<Backend> {
 fn schedule_api(backend: &Arc<Backend>) -> ScheduleService<Idle> {
     let store = Arc::new(Store::<Schedules>::open(&backend.dirs.root));
     let scheduler = Arc::new(Scheduler::new(store.clone(), Arc::new(Idle)));
-    ScheduleService::start(backend.clone(), store, scheduler, false)
+    ScheduleService::start(backend.clone(), store, scheduler)
 }
 
 /// A coordinator with no tunnel behind it (the reconcile task does not run in these tests).
@@ -244,7 +244,6 @@ async fn schedules_are_edited_through_the_scheduler() {
     let api = schedule_api(&backend);
     let mut state = api.state();
     assert!(entries(&state.borrow()).is_empty());
-    assert!(!state.borrow().tun_available);
 
     api.create(input("  Work  ", true, Upstream::LocalProxy, ""))
         .await

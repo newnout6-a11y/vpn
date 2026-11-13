@@ -5544,6 +5544,7 @@ dependencies = [
  "image",
  "jiff",
  "parking_lot 0.13.0",
+ "regex",
  "reqwest",
  "rqrr",
  "rustls",
@@ -5573,6 +5574,7 @@ dependencies = [
  "vpnte-view",
  "vpnte-winnet",
  "windows 0.62.2",
+ "zip",
 ]
 
 [[package]]

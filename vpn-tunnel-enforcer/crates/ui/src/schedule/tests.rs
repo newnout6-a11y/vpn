@@ -379,6 +379,40 @@ mod dom {
         }
     }
 
+    #[component]
+    fn ScheduleRoot(helper: crate::helper::demo::HelperScene) -> Element {
+        use crate::helper::HelperApi;
+        use crate::helper::demo::DemoHelper;
+        use_context_provider(|| Rc::new(DemoHelper::new(helper)) as Rc<dyn HelperApi>);
+        use_context_provider(|| {
+            Rc::new(DemoSchedule::new("full").instant()) as Rc<dyn ScheduleApi>
+        });
+        Toasts::use_provider();
+        rsx! {
+            SchedulePage {}
+        }
+    }
+
+    /// p-noadmin-ui: a TUN schedule is marked unavailable only while Tunnel mode cannot run (no
+    /// helper service, unelevated); installed, older or elevated, it connects as it is.
+    #[tokio::test]
+    async fn tun_schedules_follow_the_capability_view() {
+        use crate::helper::demo::HelperScene;
+        crate::test_locales::init_locales();
+        for (helper, marked) in [
+            (HelperScene::Missing, true),
+            (HelperScene::Installed, false),
+            (HelperScene::Older, false),
+            (HelperScene::Elevated, false),
+        ] {
+            let mut dom = VirtualDom::new_with_props(ScheduleRoot, ScheduleRootProps { helper });
+            let seen = crate::test_support::shown(&mut dom).await;
+            let unavailable =
+                dom.in_runtime(|| crate::lang::translate_now("schedule.unavailable", &[]));
+            assert_eq!(seen.shows(&unavailable), marked, "{helper:?}");
+        }
+    }
+
     #[tokio::test]
     async fn every_scene_renders() {
         for scene in ["full", "empty", "loading", "failed", "errors", "many"] {

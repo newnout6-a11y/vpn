@@ -215,6 +215,9 @@ pub struct ServerView {
     pub config_hidden: bool,
     /// What says it passes a mobile whitelist (`None`: nothing does): the row's badge.
     pub whitelist: Option<WhitelistReady>,
+    /// A provider notice an older build stored as a server («Приложение не поддерживается» at
+    /// 0.0.0.0:1): shown as such, never selected, checked or started.
+    pub placeholder: bool,
 }
 
 /// Why a server counts as passing a mobile whitelist (RU mobile networks): automatic picks try
@@ -275,6 +278,10 @@ pub enum FetchError {
     HwidRequired,
     /// Every device slot of the subscription is taken.
     DeviceLimit,
+    /// The provider answered with notices instead of servers (its words: `provider_said`).
+    Placeholder,
+    /// The provider sends the list only encrypted, for its own app (never decrypted).
+    Encrypted,
 }
 
 /// One server group (a subscription or the manual key ring).
@@ -319,6 +326,9 @@ pub struct GroupView {
     pub host: Option<String>,
     /// The provider keeps the configs of this group's servers hidden (`hide-settings`).
     pub settings_hidden: bool,
+    /// The provider's own words when its last answer was placeholders instead of servers
+    /// («Приложение не поддерживается»): plain text, shown with the servers kept.
+    pub provider_said: Option<String>,
 }
 
 /// Everything the Servers page renders from the stores, pushed on every change.

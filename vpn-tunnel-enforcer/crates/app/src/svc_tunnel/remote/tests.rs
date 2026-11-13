@@ -35,7 +35,7 @@ use crate::svc_core::docs::ProtectionDoc;
 mod takeover;
 
 /// A runtime that runs whatever it is asked to, at once.
-struct FakeRuntime {
+pub(super) struct FakeRuntime {
     status: watch::Sender<TunStatus>,
     events: broadcast::Sender<TunnelEvent>,
     starts: AtomicU32,
@@ -219,7 +219,7 @@ impl InputsSource for NoInputs {
     }
 }
 
-static NEXT: AtomicU32 = AtomicU32::new(0);
+pub(super) static NEXT: AtomicU32 = AtomicU32::new(0);
 
 struct Service {
     pipe: String,
@@ -264,7 +264,7 @@ fn host(runtime: Arc<FakeRuntime>, kill: Arc<FakeKillSwitch>, dir: &Path) -> Arc
     })
 }
 
-fn pipe_name(n: u32) -> String {
+pub(super) fn pipe_name(n: u32) -> String {
     format!(r"\\.\pipe\vpnte-app-remote-{}-{n}", std::process::id())
 }
 
@@ -453,7 +453,10 @@ async fn the_split_routes_by_capture_with_increasing_generations() {
 
 /// A restarted service on `pipe` keeping its sessions in `memory`: its session host, runtime and
 /// stop token. The previous instance's pipe may still be closing: binding is retried.
-async fn restarted(pipe: &str, dir: &Path) -> (Arc<Host>, Arc<FakeRuntime>, CancellationToken) {
+pub(super) async fn restarted(
+    pipe: &str,
+    dir: &Path,
+) -> (Arc<Host>, Arc<FakeRuntime>, CancellationToken) {
     let mut tries = 0;
     let listener = loop {
         match Listener::bind(&pipe_config(pipe)) {

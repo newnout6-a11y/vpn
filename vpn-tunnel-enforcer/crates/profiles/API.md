@@ -393,12 +393,15 @@ Per-line base64 is not decoded (a MIME-wrapped body would yield truncated keys).
 
 ```rust
 // device
-pub const HAPP_VERSION: &str = "3.22.1";  pub const HWID_ENV: &str = "VPNTE_SUBSCRIPTION_HWID";
+pub const HAPP_VERSION: &str = "4.7.2";   pub const HWID_ENV: &str = "VPNTE_SUBSCRIPTION_HWID";
 pub struct DeviceProfile { pub os: &'static str, pub os_version: &'static str, pub model: &'static str }
 pub fn device_profile(device: ClientDevice) -> DeviceProfile;
 pub fn utls_fingerprint(device: ClientDevice) -> &'static str;   // chrome / android / ios / safari
 pub fn user_agents(device: ClientDevice, hwid: Option<&str>) -> Vec<String>; // Happ UA first; None:
-                                                                         // `Happ/<v>/<os>` without HWID
+                                                                         // `Happ/<v>/<os>` without HWID;
+                                                                         // then v2rayN, clash-verge,
+                                                                         // sing-box, v2RayTun (p-live-fix)
+pub fn agent_family(agent: &str) -> &str;  // `Happ` of `Happ/4.7.2/Windows/<hwid>`: logs, sticky identity
 pub fn device_headers(device: ClientDevice, hwid: &str) -> [(&'static str, String); 4];
 pub struct MachineIdentity { pub host_name: String, pub user_name: String, pub user_domain: String }
 impl MachineIdentity { pub fn current() -> Self }

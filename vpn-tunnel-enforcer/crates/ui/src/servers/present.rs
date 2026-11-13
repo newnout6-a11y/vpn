@@ -235,6 +235,8 @@ pub fn is_deleted(server: &ServerView) -> bool {
 /// Why a server cannot be selected (the backend refuses it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unusable {
+    /// A provider notice stored as a server by an older build: never a server.
+    Placeholder,
     /// Removed by the user: restore it first.
     Deleted,
     Disabled,
@@ -244,7 +246,9 @@ pub enum Unusable {
 /// are refused by the backend, so the row says why before the click. A server the provider
 /// dropped stays selectable by hand, with a warning (`is_removed_from_subscription`).
 pub fn unusable(server: &ServerView) -> Option<Unusable> {
-    if is_deleted(server) {
+    if server.placeholder {
+        Some(Unusable::Placeholder)
+    } else if is_deleted(server) {
         Some(Unusable::Deleted)
     } else if !server.enabled {
         Some(Unusable::Disabled)

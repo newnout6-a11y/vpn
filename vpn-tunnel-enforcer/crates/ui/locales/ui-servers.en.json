@@ -332,7 +332,8 @@
         "supportFailed": "The support link did not open",
         "hwidHint": "The list came back empty. Panels that bind a subscription to a device serve servers only with the device ID (HWID).",
         "hwidRequired": "The provider serves this subscription only to devices that send their ID (HWID).",
-        "deviceLimit": "Every device slot of this subscription is taken: the provider can free one."
+        "deviceLimit": "Every device slot of this subscription is taken: the provider can free one.",
+        "said": "The provider answered: “{{said}}”. The servers were kept."
       },
       "export": {
         "proxyList": "Proxy list",
@@ -393,7 +394,9 @@
         "timeout": "the subscription server did not answer in time",
         "refused": "not requested: its address is http under an https subscription or points into a local network",
         "hwidRequired": "the provider serves it only to devices that send their ID (HWID)",
-        "deviceLimit": "every device slot of the subscription is taken"
+        "deviceLimit": "every device slot of the subscription is taken",
+        "placeholder": "the provider sent notices instead of servers",
+        "encrypted": "the provider sends the list only encrypted, for its own app"
       },
       "key": {
         "copied": "Key copied",
@@ -459,6 +462,8 @@
         "dnsBridgeTitle": "DNS: {{host}} (entry bridge)",
         "ipUnresolved": "IP not resolved",
         "deletedReason": "The server was removed — restore it first",
+        "placeholder": "not a server",
+        "placeholderReason": "A provider notice, not a server: it cannot be connected",
         "restore": "Restore",
         "deleted": "Removed · purged {{when}}",
         "purgeTitle": "Removed servers are purged after 30 days; until then they can be restored",

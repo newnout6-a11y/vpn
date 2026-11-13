@@ -18,12 +18,14 @@ use vpnte_profiles::model::Skipped;
 use crate::legacy::LegacyDirect;
 use crate::model::{FetchOutcome, GroupId, ServerGroup, ServersDoc};
 use crate::store::{AddReport, SelectBy, Servers, ServersEvent};
-use crate::subscription::{FetchError, Fetched, ProviderFetch, SubscriptionFetcher};
+use crate::subscription::{Fetched, ProviderFetch, SubscriptionFetcher};
 
 mod add;
 mod apply;
 #[cfg(test)]
 mod device_tests;
+#[cfg(test)]
+mod placeholder_tests;
 mod reconcile;
 #[cfg(test)]
 mod relocation_tests;
@@ -205,12 +207,14 @@ impl Servers {
                     Ok(fetched) => {
                         lease.commit(|| servers.apply_refresh(&gid, &gkey, fetched, now_ms()))
                     }
-                    Err(FetchError::Failed(outcome)) => {
-                        lease.assert_active()?;
-                        servers.record_failure(&gid, &gkey, outcome, now_ms())?;
-                        Err(FetchError::Failed(outcome).for_group(request.send_hwid))
-                    }
-                    Err(err) => Err(lease.assert_active().err().unwrap_or_else(|| err.into())),
+                    Err(err) => match err.outcome() {
+                        Some(outcome) => {
+                            lease.assert_active()?;
+                            servers.record_failure(&gid, &gkey, outcome, err.said(), now_ms())?;
+                            Err(err.for_group(request.send_hwid))
+                        }
+                        None => Err(lease.assert_active().err().unwrap_or_else(|| err.into())),
+                    },
                 }
             })
             .await;
@@ -219,7 +223,7 @@ impl Servers {
                 && err.kind == ErrorKind::Timeout
             {
                 // Unreachable at the deadline; a group deleted or re-pointed meanwhile stays as is.
-                let _ = self.record_failure(id, &key, FetchOutcome::Timeout, now_ms());
+                let _ = self.record_failure(id, &key, FetchOutcome::Timeout, None, now_ms());
             }
             self.emit(ServersEvent::RefreshFinished(id.clone()));
         }

@@ -54,6 +54,8 @@ pub struct DemoMaintenanceApi {
     /// Shared with the repair task, which outlives the caller's future.
     state: Arc<watch::Sender<MaintenanceState>>,
     exports: Cell<u32>,
+    /// No helper service (`+missing`): no filters of ours to read back (p-noadmin-ui).
+    proxy_only: Cell<bool>,
 }
 
 impl DemoMaintenanceApi {
@@ -63,8 +65,24 @@ impl DemoMaintenanceApi {
             scene,
             state: Arc::new(watch::Sender::new(initial_state(scene))),
             exports: Cell::new(0),
+            proxy_only: Cell::new(false),
         })
     }
+
+    /// The helper service is missing and the app unelevated: the kill switch acts through the
+    /// system proxy, so the read-back finds no filters of ours (demo scene `+missing`).
+    pub fn without_service(&self) {
+        self.proxy_only.set(true);
+        self.state
+            .send_modify(|s| s.protection.iter_mut().for_each(proxy_only));
+    }
+}
+
+fn proxy_only(p: &mut ProtectionView) {
+    p.kill_switch = KillSwitchState::ProxyOnly;
+    p.leak_protection_active = false;
+    p.dynamic_filters = 0;
+    p.persistent_filters = 0;
 }
 
 /// Waits `ms`, or fails with `Cancelled` when `token` fires first.
@@ -105,6 +123,9 @@ impl MaintenanceApi for DemoMaintenanceApi {
     async fn verify_protection(&self) -> AppResult<ProtectionView> {
         tokio::time::sleep(Duration::from_millis(300)).await;
         let mut p = protection(self.scene);
+        if self.proxy_only.get() {
+            proxy_only(&mut p);
+        }
         p.last_verified = Some(now_ms());
         self.state.send_modify(|s| s.protection = Some(p.clone()));
         Ok(p)

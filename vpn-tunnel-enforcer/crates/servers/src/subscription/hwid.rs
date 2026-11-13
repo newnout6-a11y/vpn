@@ -24,12 +24,17 @@ pub(super) fn refusal(
                 && (v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
         })
     };
-    // `x-hwid-limit` is the same fact for v2RayTun's sake.
-    if set("x-hwid-max-devices-reached") || set("x-hwid-limit") {
+    if set("x-hwid-max-devices-reached") {
         return Some(FetchOutcome::DeviceLimit);
     }
     if set("x-hwid-not-supported") || (status == 404 && !sent_hwid && set("x-hwid-active")) {
         return Some(FetchOutcome::HwidRequired);
+    }
+    // `x-hwid-limit` is the same fact for v2RayTun's sake, but Remnawave sets it on every refusal
+    // of its HWID check, "no HWID sent" included (13.11.2026: the owner's answer read as a full
+    // device limit): a device limit only when nothing above named another reason.
+    if set("x-hwid-limit") {
+        return Some(FetchOutcome::DeviceLimit);
     }
     let head = String::from_utf8_lossy(&body[..body.len().min(BODY_PREFIX)]).to_ascii_lowercase();
     (status == 403 && head.contains("device fingerprint required"))
@@ -99,5 +104,30 @@ mod tests {
         late.extend_from_slice(b"device fingerprint required");
         assert_eq!(refusal(403, &none, &late, off), None);
         assert_eq!(refusal(401, &none, json, off), None);
+    }
+
+    /// p-live-fix: Remnawave (main, 14.11.2026) answers a request without the HWID with 200, its
+    /// placeholders and `x-hwid-limit` next to `x-hwid-not-supported`: the HWID is what it wants.
+    #[test]
+    fn a_missing_hwid_is_not_a_device_limit() {
+        let not_sent = headers(&[
+            ("x-hwid-active", "true"),
+            ("x-hwid-not-supported", "true"),
+            ("x-hwid-limit", "true"),
+        ]);
+        for status in [200, 404] {
+            assert_eq!(
+                refusal(status, &not_sent, b"", false),
+                Some(FetchOutcome::HwidRequired)
+            );
+        }
+        let full = headers(&[
+            ("x-hwid-limit", "true"),
+            ("x-hwid-max-devices-reached", "true"),
+        ]);
+        assert_eq!(
+            refusal(200, &full, b"", true),
+            Some(FetchOutcome::DeviceLimit)
+        );
     }
 }

@@ -438,6 +438,24 @@ fn bodies_without_profiles_are_classified() {
     assert_eq!(classify_body(&"QUFB".repeat(20)), unparseable(Base64));
     assert_eq!(classify_body("ssr://unsupported-entry"), unparseable(Uris));
     assert_eq!(classify_body("Forbidden"), unparseable(Other));
+    // p-live-fix: lists only the provider's own app reads (never decrypted).
+    for encrypted in [
+        "happ://crypt5/QUJDREVGR0hJSktMTU5PUFFSU1RVVldY",
+        "#profile-title: X\nv2raytun://crypt/QUJD",
+        "INCY://crypt1/QUJD",
+        "age-encryption.org/v1\n-> X25519 QUJD\n",
+        "-----BEGIN AGE ENCRYPTED FILE-----\nQUJD\n-----END AGE ENCRYPTED FILE-----",
+    ] {
+        assert_eq!(
+            classify_body(encrypted),
+            unparseable(Encrypted),
+            "{encrypted}"
+        );
+    }
+    assert_eq!(
+        classify_body("happ://add/https://x.example/s"),
+        unparseable(Uris)
+    );
 }
 
 /// Servers §7 "HWID / UA": the Electron HWIDs bit for bit; one HWID in UA and header (S-44).
@@ -455,13 +473,13 @@ fn hwids_and_identity_headers_match_the_vectors() {
     }
     let agents =
         vpnte_profiles::device::user_agents(ClientDevice::Pc, Some(fixed.get(ClientDevice::Pc)));
-    assert_eq!(agents[0], "Happ/3.22.1/Windows/abc");
+    assert_eq!(agents[0], "Happ/4.7.2/Windows/abc");
     let mac =
         vpnte_profiles::device::user_agents(ClientDevice::Mac, Some(ids.get(ClientDevice::Mac)));
     assert_eq!(
         mac.len(),
-        4,
-        "the old duplicate sing-box agent is gone (S-30)"
+        5,
+        "no agent twice (S-30: the old mac list sent sing-box twice)"
     );
 }
 
@@ -585,7 +603,7 @@ async fn first_request_carries_the_happ_identity() {
     assert_eq!(first.path, "/sub/token");
     assert_eq!(
         first.header("user-agent"),
-        Some("Happ/3.22.1/Windows/99c6d48e9a5a5e32")
+        Some("Happ/4.7.2/Windows/99c6d48e9a5a5e32")
     );
     assert_eq!(first.header("x-hwid"), Some("99c6d48e9a5a5e32"));
     assert_eq!(first.header("x-device-os"), Some("Windows"));
@@ -616,7 +634,7 @@ async fn other_agents_are_tried_on_a_route_that_answers() {
                 .to_owned()
         })
         .collect();
-    assert_eq!(agents, ["Happ", "sing-box", "v2RayTun", "v2rayN"]);
+    assert_eq!(agents, ["Happ", "v2rayN"]);
 }
 
 /// AT-00-005, servers §6 / S-08: 404 to every identified request ends the plan (no anonymous
@@ -627,7 +645,7 @@ async fn statuses_end_the_plan_as_the_spec_says() {
     let err = fetch(&direct(), &gone.url("/s")).await.unwrap_err();
     assert_eq!(err, FetchError::Failed(FetchOutcome::Http(404)));
     let seen = gone.seen();
-    assert_eq!(seen.len(), 4, "one request per Happ-set agent");
+    assert_eq!(seen.len(), 5, "one request per Happ-set agent");
     assert!(seen.iter().all(|s| s.header("x-hwid").is_some()));
 
     let limited =
@@ -640,8 +658,8 @@ async fn statuses_end_the_plan_as_the_spec_says() {
     let err = fetch(&direct(), &broken.url("/s")).await.unwrap_err();
     assert_eq!(err, FetchError::Failed(FetchOutcome::Http(500)));
     let seen = broken.seen();
-    assert_eq!(seen.len(), 8, "four agents with the HWID, then without");
-    assert!(seen[4..].iter().all(|s| s.header("x-hwid").is_none()));
+    assert_eq!(seen.len(), 10, "five agents with the HWID, then without");
+    assert!(seen[5..].iter().all(|s| s.header("x-hwid").is_none()));
 }
 
 /// Servers §7 #4 / #13: an empty answer is the provider's empty list; an HTML page is unusable.
@@ -788,7 +806,7 @@ async fn redirects_are_followed_by_hand() {
         .count();
     assert_eq!(
         chain,
-        8 * MAX_REQUESTS,
+        10 * MAX_REQUESTS,
         "at most five redirects per attempt"
     );
 }

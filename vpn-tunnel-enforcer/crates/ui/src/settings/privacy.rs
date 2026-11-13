@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 
 use super::model::{BrowserStatus, BrowserView, LocationOutcome};
 use super::{ActionError, toast, use_api, use_ctx};
+use crate::helper::{Feature, HelperLine, use_capability};
 use crate::lang::tr;
 use crate::t;
 use crate::widgets::{Badge, Button, ButtonKind, Switch, ToastKind, Tone, use_job};
@@ -123,6 +124,9 @@ pub(super) fn BrowserProtection() -> Element {
         Some(Err(err)) => Some(err),
         _ => None,
     };
+    // Machine-wide policies: where nothing here can write them the buttons are not offered and
+    // the helper line says so (the browsers' state is still read).
+    let writable = use_capability().is_none_or(|c| c.policies.works());
     rsx! {
         div { class: "w-row set-browser",
             div { class: "w-row-text",
@@ -150,13 +154,16 @@ pub(super) fn BrowserProtection() -> Element {
                     p { class: "set-result is-warn", role: "status", {t!("ui.settings.browser.restart")} }
                 }
                 ActionError { error }
+                HelperLine { feature: Feature::Policies }
             }
-            div { class: "w-row-control",
-                Button { kind: ButtonKind::Ghost, small: true, busy: job.running(), onclick: apply,
-                    {t!("ui.settings.browser.apply")}
-                }
-                Button { kind: ButtonKind::Ghost, small: true, disabled: job.running(), onclick: rollback,
-                    {t!("ui.settings.browser.rollback")}
+            if writable {
+                div { class: "w-row-control",
+                    Button { kind: ButtonKind::Ghost, small: true, busy: job.running(), onclick: apply,
+                        {t!("ui.settings.browser.apply")}
+                    }
+                    Button { kind: ButtonKind::Ghost, small: true, disabled: job.running(), onclick: rollback,
+                        {t!("ui.settings.browser.rollback")}
+                    }
                 }
             }
         }

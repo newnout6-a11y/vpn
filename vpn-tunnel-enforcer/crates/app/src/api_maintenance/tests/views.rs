@@ -119,15 +119,13 @@ fn protection_read_back_is_mapped_honestly() {
     );
 }
 
-/// NOADMIN §0: unelevated, the filters cannot be read; the state line says the app needs to
-/// run as administrator and nothing claims a verification.
+/// NOADMIN §0, p-noadmin-ui: without the service and unelevated there are no filters of ours;
+/// the state line says the protection acts through the system proxy (calm, not a failure) and
+/// nothing claims a verification.
 #[test]
-fn unelevated_protection_says_it_needs_admin() {
+fn unelevated_protection_says_it_acts_through_the_proxy() {
     let view = unelevated(KillSwitchLevel::Off, &machine(Some(true)));
-    assert_eq!(
-        view.kill_switch,
-        KillSwitchState::Failed(Msg::new("app.base.needsAdmin"))
-    );
+    assert_eq!(view.kill_switch, KillSwitchState::ProxyOnly);
     assert_eq!(view.last_verified, None);
     assert!(!view.leak_protection_active);
     assert!(view.bfe_running);
@@ -358,24 +356,20 @@ fn leak_evidence_becomes_the_panel() {
     );
 }
 
-/// NOADMIN §0: nothing captures in this build; the first warning says why, and nothing reads
-/// as "status unavailable" or "stop not confirmed".
+/// NOADMIN §0: nothing captures in this build, elevated or not, and the helper service does not
+/// carry it: the first warning says «not in this version» (never «needs the service»), and
+/// nothing reads as "status unavailable" or "stop not confirmed".
 #[test]
 fn capture_view_says_why_nothing_captures() {
     use crate::api_maintenance::project::{capture_refusal, capture_view};
-    let user = capture_view(false);
-    assert!(!user.running && !user.enabled && !user.status_unavailable && !user.cleanup_pending);
-    // The page disables «restart» up front, elevated or not.
-    assert!(!user.available && !capture_view(true).available);
-    assert_eq!(user.warnings, vec![Msg::new("app.base.needsAdmin")]);
-    assert_eq!(user.last_error, Some(Msg::new("app.base.needsAdmin")));
-    assert_eq!(capture_refusal(false).kind, ErrorKind::Permission);
-    let admin = capture_view(true);
-    assert_eq!(
-        admin.warnings,
-        vec![Msg::new("app.maintenance.capture.unavailable")]
-    );
-    assert_eq!(capture_refusal(true).kind, ErrorKind::Conflict);
+    let view = capture_view();
+    assert!(!view.running && !view.enabled && !view.status_unavailable && !view.cleanup_pending);
+    // The page disables «restart» up front.
+    assert!(!view.available);
+    let why = Msg::new("app.maintenance.capture.unavailable");
+    assert_eq!(view.warnings, vec![why.clone()]);
+    assert_eq!(view.last_error, Some(why));
+    assert_eq!(capture_refusal().kind, ErrorKind::Conflict);
 }
 
 /// The fault box shows the last error of a backend crate; UI action lines and warnings are left

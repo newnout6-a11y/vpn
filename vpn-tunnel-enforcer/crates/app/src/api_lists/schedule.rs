@@ -34,8 +34,6 @@ struct Shared<C: Coordinator> {
     /// `schedules.json`, the scheduler's own store (one per process).
     store: Arc<Store<Schedules>>,
     scheduler: Arc<Scheduler<C>>,
-    /// The TUN exists in this process: TUN schedules can connect.
-    tun_available: bool,
     state: watch::Sender<ScheduleSnapshot>,
     /// Serialises the read-modify-write of `set_enabled` with every other change.
     writes: Mutex<()>,
@@ -51,13 +49,11 @@ impl<C: Coordinator> ScheduleService<C> {
         backend: Arc<Backend>,
         store: Arc<Store<Schedules>>,
         scheduler: Arc<Scheduler<C>>,
-        tun_available: bool,
     ) -> Self {
         let shared = Arc::new(Shared {
             backend,
             store,
             scheduler,
-            tun_available,
             state: watch::Sender::new(ScheduleSnapshot::default()),
             writes: Mutex::new(()),
             publishing: Mutex::new(()),
@@ -72,14 +68,12 @@ impl<C: Coordinator> Shared<C> {
     /// Projects the list, the next event and the servers; sends only a changed snapshot.
     fn publish(&self) {
         let _one = self.publishing.lock();
-        let snapshot = ScheduleSnapshot {
-            tun_available: self.tun_available,
-            ..project(
-                &self.scheduler.list(),
-                self.scheduler.status().borrow().next.as_ref(),
-                server_choices(&self.backend.servers),
-            )
-        };
+        // Whether a TUN schedule can connect is the capability view's (`api_helper`), live.
+        let snapshot = project(
+            &self.scheduler.list(),
+            self.scheduler.status().borrow().next.as_ref(),
+            server_choices(&self.backend.servers),
+        );
         self.state.send_if_modified(|current| {
             let changed = *current != snapshot;
             if changed {
@@ -226,7 +220,6 @@ fn project(
         schedules: Load::Ready(entries.iter().filter_map(entry_view).collect()),
         next: next.and_then(|upcoming| next_event(upcoming, entries)),
         servers,
-        tun_available: false,
     }
 }
 

@@ -16,12 +16,14 @@ use vpnte_profiles::text::Controls;
 use crate::common::http_url;
 
 pub(crate) mod lenient;
+mod placeholder;
 mod row;
 mod summary;
 #[cfg(test)]
 pub(crate) mod tests;
 mod whitelist;
 
+pub use placeholder::{is_placeholder, is_placeholder_profile, provider_words};
 pub use row::{
     ArchiveReason, Archived, CountrySource, HealthReason, HealthRecord, Origin, RowTricks,
     ServerReaction, ServerRow, ServerVerdict, VerdictRecord, VerifiedCountry,
@@ -98,6 +100,24 @@ pub struct ServersDoc {
     /// refresh keeps them out of the local network as their add did (phones-a11, fix-ks b2).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub linked: BTreeSet<GroupId>,
+    /// What the fetches of a subscription group learned (p-live-fix): the client identity that
+    /// last brought servers, the provider's words of a refusal. Kept here, not on the group, so
+    /// the group's shape stays.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fetch_notes: BTreeMap<GroupId, FetchNote>,
+}
+
+/// What the fetches of one subscription group learned.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FetchNote {
+    /// The User-Agent family (`Happ`, `v2rayN`) that last brought servers: tried first next time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The provider's own words when the last refresh got placeholders instead of servers
+    /// (cleared by a success).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub said: Option<String>,
 }
 
 impl Document for ServersDoc {
@@ -118,6 +138,10 @@ impl ServersDoc {
     /// The group `id` was added from a link: its requests never reach the local network.
     pub fn linked(&self, id: &GroupId) -> bool {
         self.linked.contains(id)
+    }
+    /// What the fetches of the group `id` learned.
+    pub fn fetch_note(&self, id: &GroupId) -> Option<&FetchNote> {
+        self.fetch_notes.get(id)
     }
     /// The device ID the user reset for the group `id` (`None`: it sends this PC's ID).
     pub fn device_id(&self, id: &GroupId) -> Option<&str> {
@@ -266,6 +290,9 @@ pub enum FetchOutcome {
     HwidRequired,
     /// Every device slot of the subscription is taken (`x-hwid-max-devices-reached`).
     DeviceLimit,
+    /// The panel answered with placeholders instead of servers («Приложение не поддерживается»,
+    /// an expired plan's notes): its words are in [`FetchNote::said`].
+    Placeholder,
     Unparseable(BodyKind),
     Http(u16),
     Network(NetFail),
@@ -280,6 +307,8 @@ pub enum BodyKind {
     Json,
     Base64,
     Uris,
+    /// Encrypted for the provider's own app (`happ://crypt…`, an age file): never decrypted.
+    Encrypted,
     Other,
 }
 
@@ -391,6 +420,7 @@ impl ServerGroup {
             Some(
                 FetchOutcome::HwidRequired
                 | FetchOutcome::DeviceLimit
+                | FetchOutcome::Placeholder
                 | FetchOutcome::Unparseable(_)
                 | FetchOutcome::Http(_),
             ) => GroupStatus::Failed,

@@ -32,6 +32,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tokio::sync::{Notify, watch};
 use vpnte_base::Msg;
+use vpnte_ui::helper::{Capability, HelperApi};
 use vpnte_ui::logs::LogsApi;
 use vpnte_ui::settings::{
     DnsView, DomainsView, KillSwitchView, NotificationsView, OsNotifications, RotationView,
@@ -40,13 +41,15 @@ use vpnte_ui::settings::{
 use vpnte_ui::wizard::{WizardApi, WizardState};
 use vpnte_winnet::autostart::{AutostartOs, RunValue};
 
+use crate::api_helper::HelperService;
 use crate::services::Backend;
 use crate::svc_auto::Automation;
 pub use wizard::WizardService;
 
 /// The UI contexts of this package for `vpnte_ui::launch`: `Rc<dyn SettingsApi>`,
-/// `Rc<dyn WizardApi>` and `Rc<dyn LogsApi>`. Call it inside the tokio runtime (the projection
-/// tasks start here, stopped by `backend.shutdown`) after `backend.tunnel` was set.
+/// `Rc<dyn WizardApi>`, `Rc<dyn LogsApi>` and the capability view `Rc<dyn HelperApi>`. Call it
+/// inside the tokio runtime (the projection tasks start here, stopped by `backend.shutdown`)
+/// after `backend.tunnel` was set.
 pub fn contexts(backend: &Arc<Backend>, automation: &Arc<Automation>) -> Vec<Box<dyn Any>> {
     // Here, not in `Shared::start`: page tests must not change the process-wide list.
     bypass::spawn(backend);
@@ -58,10 +61,33 @@ pub fn contexts(backend: &Arc<Backend>, automation: &Arc<Automation>) -> Vec<Box
     });
     let autostart = Arc::new(RunValue { exe });
     let shared = Shared::start(backend.clone(), autostart, Some(automation.clone()));
+    let helper = HelperService::start(backend.clone());
+    tokio::spawn(follow_helper(shared.clone(), helper.subscribe()));
     let settings: Rc<dyn SettingsApi> = Rc::new(SettingsService(shared.clone()));
     let wizard: Rc<dyn WizardApi> = Rc::new(WizardService(shared));
     let logs: Rc<dyn LogsApi> = Rc::new(crate::api_logs::LogsService::start(backend.clone()));
-    vec![Box::new(settings), Box::new(wizard), Box::new(logs)]
+    let helper: Rc<dyn HelperApi> = Rc::new(helper);
+    vec![
+        Box::new(settings),
+        Box::new(wizard),
+        Box::new(logs),
+        Box::new(helper),
+    ]
+}
+
+/// The service installed from any page: the kill-switch section offers «Всегда» from now on
+/// (the projection re-reads it) until `backend.shutdown`.
+async fn follow_helper(shared: Arc<Shared>, mut helper: watch::Receiver<Capability>) {
+    let shutdown = shared.backend.shutdown.clone();
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            changed = helper.changed() => match changed {
+                Ok(()) => shared.dirty.notify_one(),
+                Err(_) => return,
+            },
+        }
+    }
 }
 
 /// The Windows `Run` value as the autostart toggle drives it (a fake in tests).

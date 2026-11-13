@@ -150,6 +150,7 @@ pub fn classify_body(body: &str) -> FetchOutcome {
     }
     let head = &rest[..end];
     let kind = match head.as_bytes().first() {
+        _ if is_encrypted(head) => BodyKind::Encrypted,
         Some(b'<') => BodyKind::Html,
         Some(b'{' | b'[') => BodyKind::Json,
         _ if names_a_config_key(head) => BodyKind::Json,
@@ -158,6 +159,26 @@ pub fn classify_body(body: &str) -> FetchOutcome {
         _ => BodyKind::Other,
     };
     FetchOutcome::Unparseable(kind)
+}
+
+/// A list encrypted for the provider's own app: an app link to an encrypted payload
+/// (`happ://crypt5/…`, `v2raytun://crypt/…`, `incy://crypt1/…`) or an age file (Remnawave's
+/// response rules encrypt with age1 / age1pq1). Never decrypted (owner decision 12.11.2026).
+fn is_encrypted(head: &str) -> bool {
+    let first = head
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let crypt_link = first.split_once("://").is_some_and(|(scheme, rest)| {
+        !scheme.is_empty()
+            && scheme.bytes().all(|b| b.is_ascii_alphanumeric())
+            && rest.starts_with("crypt")
+    });
+    crypt_link
+        || first.starts_with("age-encryption.org/")
+        || first.starts_with("-----begin age encrypted file-----")
 }
 
 /// `"outbounds":` / `'proxies':`-style keys anywhere in `text` (any case).

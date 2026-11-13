@@ -9,7 +9,8 @@ use vpnte_profiles::model::{ParseReport, SubscriptionMeta};
 use super::{RefreshReport, reconcile, same_group, source_of};
 use crate::common::http_url;
 use crate::model::{
-    FetchOutcome, FetchState, GroupId, GroupKind, ServerGroup, clean_group_name, host_name,
+    FetchNote, FetchOutcome, FetchState, GroupId, GroupKind, ServerGroup, clean_group_name,
+    host_name,
 };
 use crate::store::{Servers, group_not_found};
 use crate::subscription::{FetchRequest, Fetched, parse_headers};
@@ -31,6 +32,7 @@ impl Servers {
                 .ok_or_else(|| AppError::validation(Msg::new("servers.refresh.unusableUrl")))?;
             let mut req = request_of(group, key.clone(), doc.device_id(id));
             req.from_link = doc.linked(id);
+            req.prefer_agent = doc.fetch_note(id).and_then(|n| n.agent.clone());
             Ok((key, req))
         })
     }
@@ -44,18 +46,25 @@ impl Servers {
         })
     }
 
-    /// Records a failed fetch; rows and the selection stay as they are.
+    /// Records a failed fetch; rows and the selection stay as they are. `said`: the provider's
+    /// words when it answered with placeholders (a placeholder never replaces the list).
     pub(super) fn record_failure(
         &self,
         id: &GroupId,
         key: &Key,
         outcome: FetchOutcome,
+        said: Option<&str>,
         now: UnixMs,
     ) -> AppResult<()> {
         self.update(|doc| {
             let fetch = &mut same_group(doc, id, key)?.fetch;
             fetch.last_attempt_at = Some(now);
             fetch.last_outcome = Some(outcome);
+            let note = doc.fetch_notes.entry(id.clone()).or_default();
+            note.said = said.map(str::to_owned);
+            if *note == FetchNote::default() {
+                doc.fetch_notes.remove(id);
+            }
             Ok(())
         })
     }
@@ -76,6 +85,7 @@ impl Servers {
             controls,
             moved_to,
             fallback,
+            agent,
             ..
         } = fetched;
         let count = report.profiles.len();
@@ -102,6 +112,15 @@ impl Servers {
             if let Some(url) = fallback {
                 group.fallback = Some(Secret::new(url.as_str()));
             }
+            // The identity that brought servers goes first next time (p-live-fix 1c).
+            doc.fetch_notes.insert(
+                id.clone(),
+                FetchNote {
+                    agent: Some(agent),
+                    said: None,
+                },
+            );
+            let group = same_group(doc, id, key)?;
             match moved_to {
                 Some(url) if !taken => {
                     group.kind = GroupKind::Subscription {

@@ -413,7 +413,12 @@
 .w-modal-title { margin: 0; padding-top: 3px; font-size: 18px; font-weight: 600; line-height: 1.25; letter-spacing: -0.015em; }
 .w-modal-desc { flex-shrink: 0; padding: 12px 20px 0; font-size: 13px; line-height: 1.45; color: var(--mute); }
 .w-modal-body { min-height: 0; overflow: auto; padding: 16px 20px 20px; }
-.w-modal-foot { display: flex; flex-shrink: 0; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--rule); padding: 12px 20px; }
+.w-modal-foot { display: flex; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--rule); padding: 12px 20px; }
+/* The footer never runs out of its dialog (13.11.2026, 200 % scale: «Отмена» stuck out on the
+   left): actions wrap to a second row, a label wider than the dialog wraps inside its button, and
+   with three or more actions the first one (the way back) keeps the left edge. */
+.w-modal-foot > .w-btn { max-width: 100%; height: auto; min-height: 36px; padding-block: 8px; line-height: 1.25; white-space: normal; text-align: center; }
+.w-modal-foot:has(> :nth-child(3)) > :first-child { margin-right: auto; }
 .w-confirm-text { font-size: 14px; line-height: 1.5; }
 
 /* ── Toasts: swiss.css draws the card (.swiss-toast); this places the stack ─ */

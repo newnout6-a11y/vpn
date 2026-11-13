@@ -5,7 +5,8 @@
     "unreadable": "The saved key is damaged and cannot be read. Add it again.",
     "deviceFollowsGroup": "The device of a subscription key is set for the whole subscription.",
     "select": {
-      "archived": "The server is archived. Restore it to select it."
+      "archived": "The server is archived. Restore it to select it.",
+      "placeholder": "This is a provider notice, not a server: it cannot be connected."
     },
     "group": {
       "title": "{{name}}",

@@ -6,14 +6,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
-use vpnte_base::{AppError, AppResult, Msg};
+use vpnte_base::{AppError, AppResult};
 use vpnte_tunnel::fsm::{TunnelSnapshot, TunnelState};
 use vpnte_ui::maintenance::{CaptureView, FaultView, LegacyView, MaintenanceState, TunnelPhase};
 
 use super::{Shared, legacy, refused};
 use crate::services::TunnelOps;
 use crate::support::changed_opt;
-use crate::svc_core::needs_admin;
 
 /// Coalesces bursts of tunnel events into one projection.
 const DEBOUNCE: Duration = Duration::from_millis(40);
@@ -55,19 +54,16 @@ pub(crate) fn settled(shared: &Shared) -> AppResult<()> {
     }
 }
 
-/// Packet capture is not hosted by this build; unelevated it could not run anyway.
-pub(crate) fn capture_refusal(elevated: bool) -> AppError {
-    if elevated {
-        refused("app.maintenance.capture.unavailable")
-    } else {
-        needs_admin()
-    }
+/// Packet capture is not hosted by this build, elevated or not, and the helper service does not
+/// carry it either: «not in this version», never «install the service» (p-noadmin-ui).
+pub(crate) fn capture_refusal() -> AppError {
+    refused("app.maintenance.capture.unavailable")
 }
 
 /// The capture panel: nothing captures in this build, and the first warning says why (no
 /// session dir is ever read, so nothing is shown as "stopped cleanly" beyond that fact).
-pub(crate) fn capture_view(elevated: bool) -> CaptureView {
-    let why = capture_refusal(elevated).user_msg();
+pub(crate) fn capture_view() -> CaptureView {
+    let why = capture_refusal().user_msg();
     CaptureView {
         // The page disables «restart» up front instead of letting it fail.
         available: false,
@@ -100,7 +96,7 @@ pub(crate) fn last_fault(problems: &[vpnte_core::logging::Problem]) -> Option<Fa
 pub fn spawn(shared: &Arc<Shared>) {
     let tunnel = shared.backend.tunnel().ok().cloned();
     let phase = tunnel.as_deref().map_or(TunnelPhase::Busy, tunnel_phase);
-    let capture = capture_view(shared.backend.elevated);
+    let capture = capture_view();
     shared.state.send_modify(|s| {
         s.tunnel = phase;
         s.capture = capture;
@@ -144,9 +140,4 @@ fn publish(
         s.legacy = legacy;
         modified
     });
-}
-
-/// A sentence for a step the user cannot run here.
-pub(crate) fn needs_admin_msg() -> Msg {
-    needs_admin().user_msg()
 }

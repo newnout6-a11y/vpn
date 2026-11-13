@@ -14,7 +14,7 @@ use super::{AddOptions, AddOutcome, Fetched, RefreshCtx, import_resource};
 use crate::model::GroupId;
 use crate::parse;
 use crate::store::{AddTarget, NewSubscription, Servers};
-use crate::subscription::{FetchError, FetchRequest, canonical_source, stored_headers};
+use crate::subscription::{FetchRequest, canonical_source, stored_headers};
 
 impl Servers {
     /// [`Servers::add_from_input_with`] into `into` as `device`, a new subscription group without
@@ -103,9 +103,9 @@ impl Servers {
                 let fetched = match fetcher.fetch_request(&request, lease.token()).await {
                     Ok(fetched) => fetched,
                     Err(err) => {
-                        let err = match err {
-                            FetchError::Failed(_) => err.for_group(send_hwid),
-                            other => other.into(),
+                        let err = match err.outcome() {
+                            Some(_) => err.for_group(send_hwid),
+                            None => err.into(),
                         };
                         return Err(lease.assert_active().err().unwrap_or(err));
                     }
@@ -117,6 +117,7 @@ impl Servers {
                     moved_to,
                     fallback,
                     providers,
+                    agent,
                     ..
                 } = fetched;
                 let ParseReport {
@@ -146,6 +147,9 @@ impl Servers {
                 let subscription = matches!(target, AddTarget::Subscription(_));
                 let added = lease.commit(|| {
                     let added = servers.add_marked(profiles, target, hidden)?;
+                    if subscription {
+                        servers.remember_agent(&added.group, agent)?;
+                    }
                     if subscription && request.from_link {
                         servers.mark_linked(&added.group)?;
                     }

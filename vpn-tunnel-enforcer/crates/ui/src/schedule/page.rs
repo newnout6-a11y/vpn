@@ -12,6 +12,7 @@ use super::form::{
 };
 use super::model::{NextAction, NextEvent, ScheduleEntry, ServerChoice};
 use super::{use_api, use_watch};
+use crate::helper::use_capability;
 use crate::lang::tr;
 use crate::pages::{Page, nav_number, use_page_active};
 use crate::t;
@@ -42,6 +43,9 @@ pub fn SchedulePage() -> Element {
     };
 
     let snapshot = state.read().clone();
+    // A TUN schedule connects only where Tunnel mode runs: the capability view, live (an
+    // install from any page shows here at once).
+    let tun_available = use_capability().is_some_and(|c| c.tunnel.works());
     let number = Page::ALL
         .iter()
         .position(|p| *p == Page::Schedule)
@@ -61,13 +65,13 @@ pub fn SchedulePage() -> Element {
                 }
             }
             if let Some(next) = snapshot.next.clone() {
-                NextEventStrip { event: next, tun_available: snapshot.tun_available }
+                NextEventStrip { event: next, tun_available }
             }
             if form.read().is_some() {
                 FormPanel {
                     form,
                     servers: snapshot.servers.clone(),
-                    tun_available: snapshot.tun_available,
+                    tun_available,
                 }
             }
             match snapshot.schedules {
@@ -103,7 +107,7 @@ pub fn SchedulePage() -> Element {
                                     key: "{entry.id}",
                                     entry: entry.clone(),
                                     servers: snapshot.servers.clone(),
-                                    tun_available: snapshot.tun_available,
+                                    tun_available,
                                     form,
                                 }
                             }
@@ -116,8 +120,8 @@ pub fn SchedulePage() -> Element {
 }
 
 /// «Следующее событие: <name>» with «Отключить в 19:00 (через 6 ч 24 мин)»; the countdown
-/// re-renders when its minute changes, only while the page is visible. A TUN schedule in an
-/// unelevated app is marked unavailable: its start will not connect.
+/// re-renders when its minute changes, only while the page is visible. A TUN schedule where
+/// Tunnel mode cannot run (no helper service) is marked unavailable: its start will not connect.
 #[component]
 fn NextEventStrip(event: NextEvent, tun_available: bool) -> Element {
     let tz = use_context::<PageTz>().0;

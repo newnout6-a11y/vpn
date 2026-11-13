@@ -1,6 +1,7 @@
 //! The notices above the facts strip, in the reference markup: the paused kill switch, auto-
 //! restart, a second TUN, the kill-switch banner, the leak card, the foreign-VPN notice strip,
-//! the automatic server choice's strip and the network-mode strip.
+//! the automatic server choice's strip, the network-mode strip and the strip of a saved Tunnel
+//! mode that waits for the helper service.
 //! The old Tailwind classes are kept (utilities.css draws them; the inert `…/NN` tint classes
 //! stay inert, as shipped).
 use std::time::Duration;
@@ -50,6 +51,7 @@ pub(super) fn Banners() -> Element {
             PickStrip { title: tr(&line.title), body: line.body.as_ref().map(tr) }
         }
         super::netmode::NetBanner {}
+        crate::helper::TunnelStrip { tunnel_mode: !dash.snapshot().soft_mode }
         crate::updates::UpdateBanner {}
     }
 }

@@ -1,11 +1,14 @@
 //! `demo_settings`: the Settings page inside the shell, on the fake backend
 //! ([`DemoSettingsApi`]). Flags: `--theme light|dark|system`, `--lang ru|en`, `--size WxH`,
-//! `--page <id>` (start page, default settings), `--scene default|fresh|blocked|failures|advanced`.
+//! `--page <id>` (start page, default settings), `--scene default|fresh|blocked|failures|advanced`
+//! with an optional helper state `+installed|+missing|+older|+elevated` (default installed).
 #![windows_subsystem = "windows"]
 
 use std::rc::Rc;
 
 use dioxus::prelude::*;
+use vpnte_ui::helper::HelperApi;
+use vpnte_ui::helper::demo::{DemoHelper, HelperScene, split_scene};
 use vpnte_ui::lang::init_locales;
 use vpnte_ui::launch::{DemoArgs, LaunchOptions, launch};
 use vpnte_ui::pages::{Page, PageRegistry};
@@ -26,8 +29,15 @@ fn main() {
     let scene = args.scene.clone().unwrap_or_default();
     let theme = args.theme.unwrap_or_default();
     launch(options, App, move || {
-        let api: Rc<dyn SettingsApi> = DemoSettingsApi::new(&scene, theme);
-        vec![Box::new(args), Box::new(api)]
+        let (scene, helper) = split_scene(&scene);
+        let demo = DemoSettingsApi::new(scene, theme);
+        demo.set_always_available(matches!(
+            helper,
+            HelperScene::Installed | HelperScene::Older
+        ));
+        let api: Rc<dyn SettingsApi> = demo;
+        let helper: Rc<dyn HelperApi> = Rc::new(DemoHelper::new(helper));
+        vec![Box::new(args), Box::new(api), Box::new(helper)]
     });
 }
 

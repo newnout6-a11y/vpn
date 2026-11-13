@@ -31,12 +31,15 @@ use vpnte_service::proto::{
 use vpnte_tunnel::api::{ExitInfo, TunError, TunStatus, TunStatusKind, TunWarning, TunnelEvent};
 use vpnte_tunnel::runtime::InputsSource;
 
+use crate::boot::service::Presence;
 use crate::svc_core::docs::ProtectionDoc;
 
 #[cfg(test)]
 mod elevated;
 mod gens;
 pub(super) mod guard;
+#[cfg(test)]
+mod presence_tests;
 mod runtime;
 mod split;
 mod start;
@@ -47,6 +50,14 @@ pub(super) use split::Split;
 
 /// How long a connect waits for a busy pipe.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long one call waits for a service the SCM reports as starting or running but whose pipe
+/// is not there yet: after a Windows restart the app's autostart runs at sign-in, in parallel
+/// with the automatic services (p-live-fix). The pauses double from the first to the last.
+const START_WAIT: Duration = Duration::from_secs(45);
+const START_PAUSES: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(4));
+/// A service the SCM did not know is looked for again at most this often (it may have been out
+/// of reach, or installed meanwhile): "missing" is never kept for the whole run.
+const LOOK_AGAIN: Duration = Duration::from_secs(30);
 /// Start-up connects to the service (`attach`), and the pause between them.
 const ATTACH_TRIES: u32 = 5;
 const ATTACH_PAUSE: Duration = Duration::from_secs(2);
@@ -64,6 +75,13 @@ pub(crate) struct Remote(Arc<Inner>);
 struct Inner {
     /// The service is installed (read at start and after an install from Settings).
     installed: AtomicBool,
+    /// The SCM says it is coming up and its pipe is not answering yet (p-live-fix).
+    starting: AtomicBool,
+    /// When the SCM was last asked while the service was not installed.
+    looked: Mutex<Option<std::time::Instant>>,
+    /// What the SCM "says" about a private test pipe's service (`None`: stopped).
+    #[cfg(test)]
+    test_presence: Mutex<Option<Presence>>,
     /// The protocol the last link speaks (0: no link yet); the apps page says when an older
     /// service cannot carry its scope (p-app-split).
     protocol: AtomicU32,
@@ -113,6 +131,28 @@ fn lost() -> CallError {
         ErrorKind::Network,
         Msg::new("service.pipe.lost"),
     ))
+}
+
+/// The pipe client's "nobody serves the pipe" (no service, or one not up yet).
+const PIPE_ABSENT: &str = "service.pipe.unavailable";
+
+/// A failed connect as one true, calm line (p-live-fix): the pipe that is not there says why
+/// from the SCM's state, a refused server says another program answers; anything else (busy,
+/// denied) keeps the pipe client's own sentence.
+fn truthful(err: AppError, presence: Presence) -> AppError {
+    let key = match err.msg.as_ref().map(|m| m.key.as_ref()) {
+        Some(PIPE_ABSENT) => match presence {
+            Presence::Missing => "app.service.missing",
+            Presence::Starting | Presence::Running => "app.service.starting",
+            Presence::Stopped | Presence::Stopping => "app.service.stopped",
+        },
+        Some("service.pipe.notOurs") => "app.service.refused",
+        _ => return err,
+    };
+    AppError {
+        msg: Some(Msg::new(key)),
+        ..err
+    }
 }
 
 /// A failed call as the runtime's error: the service's own message, or the pipe's.
@@ -177,6 +217,10 @@ impl Remote {
     ) -> Self {
         Self(Arc::new(Inner {
             installed: AtomicBool::new(false),
+            starting: AtomicBool::new(false),
+            looked: Mutex::new(None),
+            #[cfg(test)]
+            test_presence: Mutex::new(None),
             protocol: AtomicU32::new(0),
             test_pipe,
             inputs,
@@ -198,16 +242,58 @@ impl Remote {
         Some(self.0.protocol.load(Ordering::Relaxed)).filter(|p| *p > 0)
     }
 
-    /// The service is installed: Tunnel mode and the kill switch go through it.
+    /// The service is installed: Tunnel mode and the kill switch go through it. A service the
+    /// SCM did not know at the last look is looked for again every [`LOOK_AGAIN`].
     pub(crate) fn installed(&self) -> bool {
-        self.0.installed.load(Ordering::Relaxed)
+        if self.0.installed.load(Ordering::Relaxed) {
+            return true;
+        }
+        if self.0.test_pipe.is_some() {
+            return false;
+        }
+        let due = {
+            let mut looked = self.0.looked.lock();
+            let due = looked.is_none_or(|at| at.elapsed() >= LOOK_AGAIN);
+            if due {
+                *looked = Some(std::time::Instant::now());
+            }
+            due
+        };
+        due && self.recheck()
     }
 
     /// Reads the SCM again (start, and after an install from Settings); the new answer.
     pub(crate) fn recheck(&self) -> bool {
         let installed = crate::boot::service::installed();
         self.0.installed.store(installed, Ordering::Relaxed);
+        *self.0.looked.lock() = Some(std::time::Instant::now());
         installed
+    }
+
+    /// The SCM reports the service coming up while its pipe does not answer yet (after a Windows
+    /// restart): the page says «Служба-помощник запускается…», not "not installed".
+    pub(crate) fn starting(&self) -> bool {
+        self.0.starting.load(Ordering::Relaxed)
+    }
+
+    /// The service's state now (the SCM; a private test pipe has none: what the test set, else
+    /// stopped, so nothing waits for it). Keeps `installed` and `starting` in step.
+    fn observe(&self) -> Presence {
+        if self.0.test_pipe.is_some() {
+            #[cfg(test)]
+            let presence = self.0.test_presence.lock().unwrap_or(Presence::Stopped);
+            #[cfg(not(test))]
+            let presence = Presence::Stopped;
+            self.0.starting.store(presence.coming(), Ordering::Relaxed);
+            return presence;
+        }
+        let presence = crate::boot::service::presence();
+        self.0
+            .installed
+            .store(presence != Presence::Missing, Ordering::Relaxed);
+        self.0.starting.store(presence.coming(), Ordering::Relaxed);
+        *self.0.looked.lock() = Some(std::time::Instant::now());
+        presence
     }
 
     pub(super) fn notices(&self) -> broadcast::Receiver<Notice> {
@@ -224,27 +310,37 @@ impl Remote {
         self.0.losses.subscribe()
     }
 
-    /// The current connection, or a new one (the pipe's server checked first).
+    /// The current connection, or a new one (the pipe's server checked first). A service the
+    /// SCM reports as starting or running gets [`START_WAIT`] to open its pipe; a failure says
+    /// what is true: not installed, still starting, stopped, or another program on its pipe.
     async fn link(&self) -> Result<Requests, CallError> {
         let mut slot = self.0.link.lock().await;
         if let Some(link) = slot.as_ref().filter(|l| !l.gone.is_cancelled()) {
             return Ok(link.requests.clone());
         }
-        let (pipe, check) = match &self.0.test_pipe {
-            Some(name) => (name.as_str(), ServerCheck::Any),
-            None => match crate::boot::service::installed_binary() {
-                Ok(Some(exe)) => (vpnte_service::sddl::PIPE_NAME, ServerCheck::Image(exe)),
-                _ => {
-                    return Err(CallError::Pipe(AppError::msg(
-                        ErrorKind::Network,
-                        Msg::new("service.pipe.unavailable"),
-                    )));
-                }
-            },
+        let deadline = tokio::time::Instant::now() + START_WAIT;
+        let mut pause = START_PAUSES.0;
+        let mut client = loop {
+            let err = match self.open().await {
+                Ok(client) => break client,
+                Err(err) => err,
+            };
+            let presence = self.observe();
+            let absent = err.msg.as_ref().is_some_and(|m| m.key == PIPE_ABSENT);
+            let wait = absent
+                && presence.coming()
+                && tokio::time::Instant::now() + pause < deadline
+                && self.pause_for(pause).await;
+            if !wait {
+                return Err(CallError::Pipe(truthful(err, presence)));
+            }
+            tracing::debug!(
+                ?presence,
+                "helper service starting: its pipe is not there yet"
+            );
+            pause = (pause * 2).min(START_PAUSES.1);
         };
-        let mut client = Client::connect(pipe, &check, CONNECT_TIMEOUT)
-            .await
-            .map_err(CallError::Pipe)?;
+        self.0.starting.store(false, Ordering::Relaxed);
         let (protocol, _) = client.hello(env!("CARGO_PKG_VERSION")).await?;
         self.0.protocol.store(protocol, Ordering::Relaxed);
         let (requests, frames) = client.split().await?;
@@ -324,8 +420,9 @@ impl Remote {
     }
 
     /// Connects and learns a kept session; the session to take over, if any (start-up).
-    /// A crashed window's last connection may still be closing (`busySelf`) or the service still
-    /// starting with Windows: a few tries, a few seconds apart, then the next connect parks it.
+    /// A crashed window's last connection may still be closing (`busySelf`): a few tries, a few
+    /// seconds apart, then the next connect parks it. A service Windows is still starting is
+    /// waited for inside each try ([`START_WAIT`]) while the SCM says it is coming up.
     pub(super) async fn attach(&self) -> Option<KeptSession> {
         if !self.installed() {
             return None;
@@ -404,10 +501,27 @@ impl Remote {
 
     /// One pause between tries; `false` when the app is closing.
     async fn pause(&self) -> bool {
+        self.pause_for(ATTACH_PAUSE).await
+    }
+
+    async fn pause_for(&self, pause: Duration) -> bool {
         tokio::select! {
             () = self.0.shutdown.cancelled() => false,
-            () = tokio::time::sleep(ATTACH_PAUSE) => true,
+            () = tokio::time::sleep(pause) => true,
         }
+    }
+
+    /// Opens the pipe: the installed service's, served by the service itself, or the private
+    /// test pipe. A service the SCM does not know is "absent" like a pipe that is not there.
+    async fn open(&self) -> Result<Client, AppError> {
+        let (pipe, check) = match &self.0.test_pipe {
+            Some(name) => (name.as_str(), ServerCheck::Any),
+            None => match crate::boot::service::installed_binary() {
+                Ok(Some(exe)) => (vpnte_service::sddl::PIPE_NAME, ServerCheck::Image(exe)),
+                _ => return Err(AppError::msg(ErrorKind::Network, Msg::new(PIPE_ABSENT))),
+            },
+        };
+        Client::connect(pipe, &check, CONNECT_TIMEOUT).await
     }
 
     /// The parked session's status (local proxy kind, name) for the take-over's target.

@@ -341,6 +341,18 @@ impl TunnelOps for TunnelService {
             .flatten()
     }
 
+    fn service_present(&self) -> bool {
+        self.runtime.remote().installed()
+    }
+
+    fn service_losses(&self) -> Option<watch::Receiver<u64>> {
+        Some(self.runtime.remote().losses())
+    }
+
+    fn service_starting(&self) -> bool {
+        self.runtime.remote().starting()
+    }
+
     fn service_installed(&self) -> bool {
         let installed = self.runtime.remote().recheck();
         if installed {

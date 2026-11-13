@@ -34,9 +34,6 @@ pub struct ScheduleSnapshot {
     pub next: Option<NextEvent>,
     /// Servers a server schedule may pick (name and protocol only).
     pub servers: Vec<ServerChoice>,
-    /// The TUN exists in this process (started as administrator): otherwise a TUN schedule is
-    /// offered as unavailable, never as working.
-    pub tun_available: bool,
 }
 
 impl Default for ScheduleSnapshot {
@@ -45,13 +42,12 @@ impl Default for ScheduleSnapshot {
             schedules: Load::Loading,
             next: None,
             servers: Vec::new(),
-            tun_available: false,
         }
     }
 }
 
 /// How a schedule takes the traffic (NOADMIN §2): the per-user system proxy (no rights needed)
-/// or the TUN adapter (the app must run as administrator).
+/// or the TUN adapter (through the helper service, or in an app started as administrator).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Capture {
     #[default]

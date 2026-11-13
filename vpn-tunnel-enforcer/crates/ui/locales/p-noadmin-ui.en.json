@@ -1,0 +1,25 @@
+{
+  "ui": {
+    "helper": {
+      "tunnel": "Tunnel mode works through the helper service.",
+      "killSwitch": "“Always” and the exceptions work through the helper service.",
+      "viaService": "Works through the helper service.",
+      "notInVersion": "Not available in this version.",
+      "install": "Install the helper service",
+      "older": {
+        "appScope": "The helper service updates itself. Until then, Tunnel mode sends every app through the VPN."
+      },
+      "strip": {
+        "title": "Tunnel mode",
+        "body": "Works through the helper service. Proxy mode works without it."
+      }
+    },
+    "maintenance": {
+      "protection": {
+        "state": {
+          "proxyOnly": "Without the helper service there are no filters: protection works through the system proxy."
+        }
+      }
+    }
+  }
+}

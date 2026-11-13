@@ -23,7 +23,7 @@ use super::http::{self, Abort, Answer, Hops};
 use super::hwid;
 use super::{DOH_MAX_IPS, FetchError, ProviderFailure, ProviderFetch, SubscriptionFetcher, policy};
 use crate::common::http_url;
-use crate::model::{BodyKind, FetchOutcome, NetFail};
+use crate::model::{BodyKind, FetchOutcome, NetFail, is_placeholder_profile, provider_words};
 use crate::parse::{self, MAX_PROFILES};
 
 /// One User-Agent, with or without the device headers.
@@ -34,26 +34,41 @@ pub(super) struct Variant {
     /// headers, none of the user's headers (they may hold tokens; browsers, curl and reqwest drop
     /// credentials on a cross-origin redirect the same way).
     elsewhere: HeaderMap,
-    /// Log label: the User-Agent family and `+hwid` (never the HWID itself, S-27).
+    /// The User-Agent family (`Happ`, `v2rayN`): logs and the group's remembered identity.
+    family: String,
+    /// Log label: the family and `+hwid` (never the HWID itself, S-27).
     label: String,
     with_ids: bool,
 }
 
 /// The User-Agents of `device` with the HWID headers, then the same without them (servers §2.5:
 /// some panels answer an empty 200 without the HWID, others gate by client name). `hwid: None`
-/// (the group does not send it) keeps only the variants without it. The user's own headers go on
-/// last and win; their `User-Agent` replaces the rotation.
+/// (the group does not send it) keeps only the variants without it. `prefer` (the family that
+/// last brought servers, p-live-fix) goes first in each pass. The user's own headers go on last
+/// and win; their `User-Agent` replaces the rotation.
 pub(super) fn variants(
     device: ClientDevice,
     hwid: Option<&str>,
     custom: &[(String, String)],
+    prefer: Option<&str>,
 ) -> Vec<Variant> {
     let custom = header_map(custom);
-    let anonymous = device::user_agents(device, None);
-    let agents = match custom.get(USER_AGENT) {
+    let mut anonymous = device::user_agents(device, None);
+    let mut agents = match custom.get(USER_AGENT) {
         Some(own) => vec![String::from_utf8_lossy(own.as_bytes()).into_owned()],
         None => device::user_agents(device, hwid),
     };
+    if let Some(at) = prefer
+        .and_then(|family| {
+            agents
+                .iter()
+                .position(|a| device::agent_family(a) == family)
+        })
+        .filter(|_| custom.get(USER_AGENT).is_none())
+    {
+        agents[..=at].rotate_right(1);
+        anonymous[..=at].rotate_right(1);
+    }
     let ids = hwid.map(|h| device::device_headers(device, h));
     let passes: &[bool] = if ids.is_some() {
         &[true, false]
@@ -78,11 +93,12 @@ pub(super) fn variants(
             // The rotation without the HWID has the same order; a user's own agent is replaced
             // by the first (Happ's).
             let plain = anonymous.get(at).or(anonymous.first());
-            let family = agent.split('/').next().unwrap_or_default();
+            let family = device::agent_family(agent).to_owned();
             let label = format!("{family}{}", if with_ids { "+hwid" } else { "" });
             out.push(Variant {
                 headers,
                 elsewhere: basic_headers(plain.map_or("", String::as_str)),
+                family,
                 label,
                 with_ids,
             });
@@ -115,6 +131,8 @@ pub(super) struct Got {
     pub providers: Vec<HttpProvider>,
     /// The plan route that answered (`None`: the DoH-pinned retry).
     pub route: Option<Route>,
+    /// The User-Agent family that brought the servers.
+    pub agent: String,
 }
 
 /// How one route ended.
@@ -126,35 +144,60 @@ enum Step {
     Stop,
 }
 
-/// The strongest failure seen so far.
+/// The strongest failure seen so far, with the provider's words when it came as placeholders.
 #[derive(Default)]
-struct Failures(Option<FetchOutcome>);
+struct Failures {
+    worst: Option<FetchOutcome>,
+    said: Option<String>,
+}
 
 impl Failures {
     fn note(&mut self, outcome: FetchOutcome) {
-        if self.0.is_none_or(|seen| rank(outcome) < rank(seen)) {
-            self.0 = Some(outcome);
+        self.note_said(outcome, None);
+    }
+
+    /// `outcome` with the words of its placeholders: a stronger failure takes over (words and
+    /// all), an equal one only adds words the first lacked.
+    fn note_said(&mut self, outcome: FetchOutcome, said: Option<String>) {
+        if self.worst.is_none_or(|seen| rank(outcome) < rank(seen)) {
+            self.worst = Some(outcome);
+            self.said = said;
+        } else if self.worst == Some(outcome) && self.said.is_none() {
+            self.said = said;
         }
     }
 
     fn into_error(self) -> FetchError {
-        FetchError::Failed(self.0.unwrap_or(FetchOutcome::Network(NetFail::Connect)))
+        let outcome = self
+            .worst
+            .unwrap_or(FetchOutcome::Network(NetFail::Connect));
+        match self.said {
+            Some(said) => FetchError::Said(outcome, said),
+            None => FetchError::Failed(outcome),
+        }
+    }
+
+    fn seen(&self) -> bool {
+        self.worst.is_some()
     }
 }
 
 /// Evidence order of servers §6: a received but unusable answer beats a later network failure;
-/// a panel that named its reason for refusing the device beats everything.
+/// a panel that named its reason for refusing the device beats everything; an answer only the
+/// provider's own app can read, or its placeholders, say more than an empty list (p-live-fix).
 pub(super) fn rank(outcome: FetchOutcome) -> u8 {
     match outcome {
         FetchOutcome::DeviceLimit => 0,
         FetchOutcome::HwidRequired => 1,
-        FetchOutcome::EmptyList => 2,
-        FetchOutcome::Unparseable(_) => 3,
-        FetchOutcome::Http(400..=499) => 4,
-        FetchOutcome::Http(_) => 5,
-        FetchOutcome::Network(_) => 6,
-        FetchOutcome::Timeout => 7,
-        FetchOutcome::Ok { .. } => 8,
+        FetchOutcome::Unparseable(BodyKind::Encrypted) => 2,
+        FetchOutcome::Placeholder => 3,
+        FetchOutcome::EmptyList => 4,
+        FetchOutcome::Unparseable(_) => 5,
+        FetchOutcome::Http(400..=499) => 6,
+        FetchOutcome::Http(_) => 7,
+        FetchOutcome::Network(_) => 8,
+        FetchOutcome::Timeout => 9,
+        FetchOutcome::Ok { .. } => 10,
     }
 }
 
@@ -166,27 +209,37 @@ struct Evaluated {
     providers: Vec<HttpProvider>,
 }
 
+/// Why a body gave no servers, with the provider's words when it gave placeholders only.
+type NoServers = (FetchOutcome, Option<String>);
+
 /// Up to 16 MiB of nested base64, YAML and thousands of keys is CPU work: it runs on the blocking
 /// pool, not on a runtime worker.
-async fn evaluate(
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-) -> Result<Evaluated, FetchOutcome> {
+async fn evaluate(headers: Vec<(String, String)>, body: Vec<u8>) -> Result<Evaluated, NoServers> {
     tokio::task::spawn_blocking(move || evaluate_now(&headers, &body))
         .await
         .unwrap_or_else(|err| {
             tracing::warn!("subscription: the body parser failed: {err}");
-            Err(FetchOutcome::Unparseable(BodyKind::Other))
+            Err((FetchOutcome::Unparseable(BodyKind::Other), None))
         })
 }
 
-fn evaluate_now(headers: &[(String, String)], body: &[u8]) -> Result<Evaluated, FetchOutcome> {
-    let parsed =
-        parse::parse_body_full(body).map_err(|_| FetchOutcome::Unparseable(BodyKind::Other))?;
+/// Provider placeholders («Приложение не поддерживается» at `0.0.0.0:1`) are dropped from every
+/// answer: an answer made of them only is the provider's refusal, never a list (p-live-fix).
+fn evaluate_now(headers: &[(String, String)], body: &[u8]) -> Result<Evaluated, NoServers> {
+    let parsed = parse::parse_body_full(body)
+        .map_err(|_| (FetchOutcome::Unparseable(BodyKind::Other), None))?;
     let mut report = parsed.report;
+    let (placeholders, servers): (Vec<_>, Vec<_>) = std::mem::take(&mut report.profiles)
+        .into_iter()
+        .partition(is_placeholder_profile);
+    report.profiles = servers;
     let providers = clash::http_providers(&parsed.text);
     if report.profiles.is_empty() && providers.is_empty() {
-        return Err(policy::classify_body(&parsed.text));
+        if !placeholders.is_empty() {
+            let said = provider_words(placeholders.iter().map(|p| p.name.as_str()));
+            return Err((FetchOutcome::Placeholder, said));
+        }
+        return Err((policy::classify_body(&parsed.text), None));
     }
     let pairs = || headers.iter().map(|(k, v)| (k.as_str(), v.as_str()));
     let from_body = std::mem::take(&mut report.meta);
@@ -246,18 +299,19 @@ pub(super) struct Ctx<'a> {
 
 impl<'a> Ctx<'a> {
     /// The requests of one fetch as `device`, with the HWID when `hwid` is set and `headers`;
-    /// `linked`: the subscription came from outside.
+    /// `prefer`: the User-Agent family to try first; `linked`: the subscription came from outside.
     pub(super) fn new(
         fetcher: &'a SubscriptionFetcher,
         device: ClientDevice,
         hwid: Option<&str>,
         headers: &[(String, String)],
+        prefer: Option<&str>,
         linked: bool,
     ) -> Self {
         Self {
             fetcher,
-            own: variants(device, hwid, headers),
-            public: variants(device, None, &[]),
+            own: variants(device, hwid, headers, prefer),
+            public: variants(device, None, &[], None),
             stopped: Mutex::new(Vec::new()),
             linked,
         }
@@ -379,7 +433,7 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
-        if refused_direct && failures.0.is_none() {
+        if refused_direct && !failures.seen() {
             return Err(FetchError::LocalTarget);
         }
         let err = failures.into_error();
@@ -481,7 +535,9 @@ impl<'a> Ctx<'a> {
                 .await;
             let (servers, failed) = match fetched {
                 Ok(got) => (merge(report, &mut seen, got.report), None),
-                Err(FetchError::Failed(outcome)) => (0, Some(ProviderFailure::Fetch(outcome))),
+                Err(FetchError::Failed(outcome) | FetchError::Said(outcome, _)) => {
+                    (0, Some(ProviderFailure::Fetch(outcome)))
+                }
                 // A linked subscription's provider in the local network: that provider only.
                 Err(FetchError::LocalTarget) => (0, Some(ProviderFailure::Refused)),
                 Err(other) => return Err(other),
@@ -551,6 +607,7 @@ impl Attempt<'_> {
                 })
             };
             let answer = http::get(self.client, self.url, sends, self.hops, self.pin, cancel).await;
+            let mut said = None;
             let outcome = match answer {
                 Err(Abort::Cancelled) => return Err(FetchError::Cancelled),
                 Ok(Answer::Body {
@@ -558,7 +615,8 @@ impl Attempt<'_> {
                     body,
                     moved,
                 }) => {
-                    // A device-limited panel may send an empty list with the reason in headers.
+                    // A device-limited panel may send an empty list (or its placeholders) with
+                    // the reason in headers.
                     let refused = refusal(200, &headers, b"");
                     let parsed = tokio::select! {
                         biased;
@@ -576,9 +634,17 @@ impl Attempt<'_> {
                                 moved,
                                 providers: found.providers,
                                 route: self.route.cloned(),
+                                agent: variant.family.clone(),
                             })));
                         }
-                        Err(outcome) => refused.unwrap_or(outcome),
+                        Err((outcome, words)) => {
+                            if words.is_some() {
+                                tracing::info!(host = %self.host, route = %self.label,
+                                    ua = %variant.label, "subscription: placeholders instead of servers");
+                            }
+                            said = words;
+                            refused.unwrap_or(outcome)
+                        }
                     }
                 }
                 Ok(Answer::Status {
@@ -601,7 +667,7 @@ impl Attempt<'_> {
             };
             tracing::debug!(host = %self.host, route = %self.label, ua = %variant.label,
                 "subscription attempt: {outcome:?}");
-            failures.note(outcome);
+            failures.note_said(outcome, said);
             match outcome {
                 // Rate limited: hammering other routes or agents would only make it worse.
                 FetchOutcome::Http(429) => return Ok(Step::Stop),

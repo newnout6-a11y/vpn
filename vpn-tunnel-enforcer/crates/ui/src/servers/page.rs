@@ -374,7 +374,9 @@ fn ConfirmDialogs() -> Element {
             on_close: move |_| cancel(),
             close_label: t!("common.close"),
             can_close: !busy,
-            size: ModalSize::Sm,
+            // Three actions: the medium dialog keeps them on one row at 100 %; narrower, the
+            // footer wraps (widgets.css) instead of running out of the dialog.
+            size: ModalSize::Md,
             footer: rsx! {
                 Button { kind: ButtonKind::Ghost, initial_focus: true, disabled: busy, onclick: move |_| cancel(),
                     {t!("servers.groups.deleteCancel")}

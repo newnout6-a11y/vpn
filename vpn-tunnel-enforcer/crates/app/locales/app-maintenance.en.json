@@ -17,7 +17,9 @@
         "filtersRemoved": "VPNTE filters removed: {{count}}",
         "legacyDeferred": "The old version is still running: close it and repeat the repair.",
         "legacyInstalled": "The old version is still installed: its protection is left alone. Uninstall it and repeat the repair.",
-        "checkRunning": "A server check is running: no processes were stopped, repeat after it finishes."
+        "checkRunning": "A server check is running: no processes were stopped, repeat after it finishes.",
+        "viaService": "Works through the helper service.",
+        "notInVersion": "Not available in this version."
       },
       "selfTest": {
         "needsSession": "The protection test works only with an active connection."

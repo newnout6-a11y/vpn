@@ -7,7 +7,6 @@ use vpnte_base::{AppError, AppResult};
 use vpnte_core::logging::{self, LogFile};
 use vpnte_service::pipe::client::{CallError, Client, ServerCheck};
 use vpnte_service::proto::{ErrorCode, Reply, Request, ServiceLogWire};
-use vpnte_service::scm::manage;
 use vpnte_tunnel::api::CaptureKind;
 use vpnte_tunnel::history::{Entry, Route};
 use vpnte_ui::logs::{LogTail, TailLine, TailNote};
@@ -102,38 +101,45 @@ pub trait ServiceLogs {
     async fn read(&self) -> AppResult<ServiceAnswer>;
 }
 
-/// Over the installed service's pipe: a connection of its own, the request as its first frame
-/// (no controller slot taken, no `Hello`: reading a log never ends anyone's kept session).
+/// Over the installed service's pipe (see [`ask_service`]).
 pub struct PipeServiceLogs;
 
 #[async_trait::async_trait(?Send)]
 impl ServiceLogs for PipeServiceLogs {
     async fn read(&self) -> AppResult<ServiceAnswer> {
-        let Some(exe) = manage::installed_binary().map_err(AppError::internal)? else {
-            return Ok(ServiceAnswer::NotInstalled);
-        };
-        let check = ServerCheck::Image(exe);
-        let ask = async {
-            let mut client = Client::connect(vpnte_service::sddl::PIPE_NAME, &check, ASK).await?;
-            match client.call(Request::ServiceLog).await {
-                Ok(Reply::ServiceLog(log)) => Ok(ServiceAnswer::Lines(log)),
-                Ok(other) => {
-                    tracing::warn!(?other, "unexpected service reply to its log");
-                    Ok(ServiceAnswer::Old)
-                }
-                Err(CallError::Service(wire))
-                    if matches!(wire.code, ErrorCode::BadRequest | ErrorCode::HelloFirst) =>
-                {
-                    Ok(ServiceAnswer::Old)
-                }
-                Err(CallError::Service(wire)) => Err(AppError::msg(wire.kind, wire.msg)),
-                Err(CallError::Pipe(err)) => Err(err),
+        ask_service().await
+    }
+}
+
+/// This user's lines from the installed service: a connection of its own, the request as its
+/// first frame (no controller slot taken, no `Hello`: reading a log never ends anyone's kept
+/// session). The service is found through `boot::service`, the one gate to it (tests never
+/// reach a service installed on this PC).
+pub async fn ask_service() -> AppResult<ServiceAnswer> {
+    let Some(exe) = crate::boot::service::installed_binary().map_err(AppError::internal)? else {
+        return Ok(ServiceAnswer::NotInstalled);
+    };
+    let check = ServerCheck::Image(exe);
+    let ask = async {
+        let mut client = Client::connect(vpnte_service::sddl::PIPE_NAME, &check, ASK).await?;
+        match client.call(Request::ServiceLog).await {
+            Ok(Reply::ServiceLog(log)) => Ok(ServiceAnswer::Lines(log)),
+            Ok(other) => {
+                tracing::warn!(?other, "unexpected service reply to its log");
+                Ok(ServiceAnswer::Old)
             }
-        };
-        match tokio::time::timeout(ASK, ask).await {
-            Ok(answer) => answer,
-            Err(_) => Err(AppError::new(vpnte_base::ErrorKind::Timeout)),
+            Err(CallError::Service(wire))
+                if matches!(wire.code, ErrorCode::BadRequest | ErrorCode::HelloFirst) =>
+            {
+                Ok(ServiceAnswer::Old)
+            }
+            Err(CallError::Service(wire)) => Err(AppError::msg(wire.kind, wire.msg)),
+            Err(CallError::Pipe(err)) => Err(err),
         }
+    };
+    match tokio::time::timeout(ASK, ask).await {
+        Ok(answer) => answer,
+        Err(_) => Err(AppError::new(vpnte_base::ErrorKind::Timeout)),
     }
 }
 

@@ -2,6 +2,7 @@
 //! UI's API traits over it and runs the Dioxus shell.
 
 pub mod api_dashboard;
+pub mod api_helper;
 pub mod api_lists;
 pub mod api_logs;
 pub mod api_maintenance;

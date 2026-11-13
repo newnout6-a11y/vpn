@@ -7,6 +7,7 @@ use super::model::{
     ProxyKind,
 };
 use super::{ActionError, toast, use_api, use_ctx};
+use crate::helper::use_capability;
 use crate::lang::tr;
 use crate::t;
 use crate::units::format_bytes;
@@ -143,14 +144,11 @@ fn Capture() -> Element {
     let clear_job = use_job::<()>();
     let mut consent_open = use_signal(|| false);
     let mut clear_open = use_signal(|| false);
-    let (consented, used, available) = {
+    let (consented, used) = {
         let state = ctx.state.read();
-        (
-            state.capture_consent_given,
-            state.capture_used_bytes,
-            state.capture_available,
-        )
+        (state.capture_consent_given, state.capture_used_bytes)
     };
+    let available = use_capability().is_some_and(|c| c.capture.works());
     let toggle = move |on: bool| {
         if on && !consented {
             consent_open.set(true);

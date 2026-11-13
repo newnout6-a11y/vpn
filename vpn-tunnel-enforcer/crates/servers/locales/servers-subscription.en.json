@@ -3,7 +3,12 @@
     "fetch": {
       "emptyListNoHwid": "The subscription returned an empty list. Some panels serve servers only to a device that sends its ID (HWID): turn on “Send HWID” for this subscription",
       "hwidRequired": "The provider serves this subscription only to devices that send their ID (HWID)",
-      "deviceLimit": "Every device slot of this subscription is taken: the provider can free one"
+      "deviceLimit": "Every device slot of this subscription is taken: the provider can free one",
+      "placeholder": "The provider sent notices instead of servers",
+      "said": "The provider answered: “{{said}}”. The answer has no servers",
+      "body": {
+        "encrypted": "The provider sends this list only encrypted, for its own app. Such lists are not read here: the provider can give a plain link"
+      }
     },
     "headers": {
       "invalid": "Line {{line}}: a header must look like “Name: value” (ASCII, one line)",

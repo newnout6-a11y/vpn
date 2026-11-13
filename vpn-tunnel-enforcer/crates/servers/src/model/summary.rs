@@ -101,6 +101,9 @@ pub struct GroupSummary {
     pub controls: Controls,
     /// The group's own device ID (the user reset it); `None` = this PC's ID. Not a credential.
     pub own_hwid: Option<String>,
+    /// The provider's words when its last answer was placeholders instead of servers
+    /// ([`crate::model::FetchNote::said`]; filled from the document, `None` here).
+    pub said: Option<String>,
 }
 
 impl GroupSummary {
@@ -135,6 +138,7 @@ impl GroupSummary {
             moved_at: group.moved_at,
             controls: group.controls.clone(),
             own_hwid: None,
+            said: None,
         }
     }
 }

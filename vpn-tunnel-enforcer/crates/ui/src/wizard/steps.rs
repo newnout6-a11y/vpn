@@ -10,6 +10,7 @@ use vpnte_base::types::{KillSwitchLevel, ProxyKind};
 use super::model::{Detect, KeyStatus, Step};
 use super::view::{Ctx, start_check, start_detection};
 use super::{Connection, LocalProxy, Routing, WizardApi};
+use crate::helper::{Feature, HelperLine, use_capability};
 use crate::lang::{LANG, tr};
 use crate::t;
 use crate::widgets::{
@@ -374,8 +375,8 @@ fn ProxyPanel(ctx: Ctx) -> Element {
     }
 }
 
-/// Step 3: Tunnel (TUN, needs the helper service) or Proxy; both work with either upstream
-/// (NOADMIN §2).
+/// Step 3: Tunnel (TUN, through the helper service) or Proxy; both work with either upstream
+/// (NOADMIN §2). Without the service the helper line under the cards offers its install.
 #[component]
 fn RoutingStep(ctx: Ctx, title_id: String) -> Element {
     let mut model = ctx.model;
@@ -397,6 +398,7 @@ fn RoutingStep(ctx: Ctx, title_id: String) -> Element {
             value: routing,
             on_change: move |r| model.write().routing = r,
         }
+        HelperLine { feature: Feature::Tunnel }
     }
 }
 
@@ -507,9 +509,14 @@ fn Done(ctx: Ctx, title_id: String) -> Element {
         }
         (Connection::LocalProxy, ..) => t!("ui.wizard.done.proxyNotFound"),
     };
-    let routing = match m.routing {
-        Routing::Hard => t!("ui.wizard.routing.hard"),
-        Routing::Soft => t!("ui.wizard.routing.soft"),
+    // Tunnel mode where it cannot run yet is saved as Proxy (the app says so after «Завершить»):
+    // the summary shows what will be saved, and the helper line its install.
+    let tunnel_waits = use_capability().is_some_and(|c| !c.tunnel.works());
+    let tunnel = m.routing == Routing::Hard && !tunnel_waits;
+    let routing = if tunnel {
+        t!("ui.wizard.routing.hard")
+    } else {
+        t!("ui.wizard.routing.soft")
     };
     let rows = [
         (t!("ui.wizard.done.language"), lang_name.to_owned()),
@@ -547,6 +554,9 @@ fn Done(ctx: Ctx, title_id: String) -> Element {
                     dd { "{value}" }
                 }
             }
+        }
+        if m.routing == Routing::Hard {
+            HelperLine { feature: Feature::Tunnel }
         }
         if m.key_left_unchecked() {
             p { class: "wz-status is-warn",

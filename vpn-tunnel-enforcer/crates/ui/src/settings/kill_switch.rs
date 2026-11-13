@@ -1,12 +1,14 @@
 //! «Kill switch»: three choices with one line each (research killswitch 5.2), applied and
 //! verified by the backend (U-04 shows «Применяем…», the failure reason and an unconfirmed
 //! state), a Details panel for what concerns few people, and the exceptions editor. "Always" is
-//! offered only where the helper service keeps it safe; until then it shows disabled with one
-//! calm line and a stored "Always" works as "If the VPN drops" (owner decision 12.11.2026).
+//! offered only where the helper service keeps it safe; until then it shows disabled, a stored
+//! "Always" works as "If the VPN drops" (owner decision 12.11.2026), and without the service one
+//! helper line under the choices offers its install (the exceptions wait for it read-only).
 use dioxus::prelude::*;
 
 use super::model::{ExceptionKind, KillSwitchLevel, ProtectionStatus, RoutingMode};
 use super::{ActionError, use_api, use_ctx};
+use crate::helper::{Ability, Feature, HelperLine, use_capability};
 use crate::lang::tr;
 use crate::t;
 use crate::widgets::{
@@ -102,6 +104,13 @@ pub(super) fn KillSwitch() -> Element {
     };
     let (tone, status_text) = status_badge(&kill.status);
     let details = kill.firewall_blocks_outbound || kill.hyperv_unfiltered;
+    // Without the service the helper line under the choices says what waits for it (with the
+    // install), so «Всегда» needs no note of its own and the exceptions are read-only.
+    let cap = use_capability();
+    let waits = cap
+        .as_ref()
+        .is_some_and(|c| c.kill_switch == Ability::NeedsService);
+    let wfp = cap.is_none_or(|c| c.kill_switch.works());
     rsx! {
         Panel { title: t!("settings.killSwitch"), id: "set-kill-switch",
             div { class: "set-choices", role: "radiogroup", aria_label: t!("settings.killSwitch"),
@@ -113,6 +122,7 @@ pub(super) fn KillSwitch() -> Element {
                         checked: shown == level,
                         // Never offered where it cannot be kept safe; a stored one stays shown.
                         unavailable: level == KillSwitchLevel::Strict && !kill.always_available,
+                        said: waits,
                         disabled: applying,
                         on_pick: set_level,
                     }
@@ -121,6 +131,7 @@ pub(super) fn KillSwitch() -> Element {
                     span { class: "set-applying", role: "status", Spinner {} {t!("ui.settings.killSwitch.applying")} }
                 }
             }
+            HelperLine { feature: Feature::KillSwitch }
             ActionError { error }
             div { class: "set-status-line",
                 span { class: "set-status-label", {t!("ui.settings.killSwitch.status")} }
@@ -140,7 +151,7 @@ pub(super) fn KillSwitch() -> Element {
                     }
                 }
             }
-            Exceptions {}
+            Exceptions { wfp }
         }
     }
 }
@@ -152,6 +163,8 @@ fn Choice(
     routing: RoutingMode,
     checked: bool,
     unavailable: bool,
+    /// The panel's helper line already says that it needs the service.
+    said: bool,
     disabled: bool,
     on_pick: EventHandler<KillSwitchLevel>,
 ) -> Element {
@@ -159,7 +172,7 @@ fn Choice(
     // A stored "Always" without the service: it runs as "If the VPN drops" meanwhile.
     let note = match (unavailable, checked) {
         (true, true) => Some("ui.settings.killSwitch.alwaysAsOnDrop"),
-        (true, false) => Some("ui.settings.killSwitch.needsService"),
+        (true, false) if !said => Some("ui.settings.killSwitch.needsService"),
         _ => None,
     };
     rsx! {
@@ -187,8 +200,10 @@ fn Choice(
     }
 }
 
+/// The exceptions of the WFP kill switch; without WFP (`wfp` false) the stored ones are shown
+/// read-only and nothing new is offered.
 #[component]
-fn Exceptions() -> Element {
+fn Exceptions(wfp: bool) -> Element {
     let api = use_api();
     let ctx = use_ctx();
     let remove_job = use_job::<()>();
@@ -220,7 +235,7 @@ fn Exceptions() -> Element {
                                 glyph: IconGlyph::Trash,
                                 label: format!("{} {}", t!("common.remove"), item.label),
                                 danger: true,
-                                disabled: remove_job.running(),
+                                disabled: remove_job.running() || !wfp,
                                 onclick: {
                                     let api = api.clone();
                                     let id = item.id.clone();
@@ -235,7 +250,9 @@ fn Exceptions() -> Element {
                 }
             }
             ActionError { error: remove_error }
-            AddException {}
+            if wfp {
+                AddException {}
+            }
         }
     }
 }

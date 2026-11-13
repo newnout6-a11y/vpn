@@ -147,11 +147,6 @@ fn publish_stores(shared: &Shared, snap: &TunnelSnapshot, session: Option<&Sessi
         rule_sets: rule_set_view(backend, &settings, refreshing, last_error),
         browser: browser.unwrap_or_default(),
         diagnostics_export_running: false,
-        // Elevated only (NOADMIN §0): the save refuses Hard otherwise (`save::check`).
-        tun_available: backend.tunnel().is_ok_and(|t| t.tun_available()),
-        // Packet capture is a service-hosted feature this build does not carry: the save refuses
-        // it elevated or not, so the page must never offer it.
-        capture_available: false,
         launch: super::launch::launch_view(shared.automation.as_deref(), &settings),
     };
     publish(&shared.state, state);

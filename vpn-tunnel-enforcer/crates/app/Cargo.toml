@@ -45,7 +45,8 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
-windows.workspace = true
+# p-live-fix: the helper service's state from the SCM (starting after a Windows restart).
+windows = { workspace = true, features = ["Win32_System_Services"] }
 jiff.workspace = true
 uuid.workspace = true
 # app-tools: the routing self-test's echo client through a Soft session's mixed inbound.
@@ -62,6 +63,10 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"
 fast_qr = { version = "0.14.0", default-features = false }
 rqrr = { version = "0.11.0", default-features = false, features = ["img"] }
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+# p-noadmin-ui: the support archive's own entries are appended to the forensics pack (the same zip
+# as vpnte-forensics: nothing new in the tree), the Windows user name masked as it masks it.
+zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+regex.workspace = true
 
 [dev-dependencies]
 # p-uiperf: paused clock for the live-feed cadence tests (`api_dashboard::pace`).

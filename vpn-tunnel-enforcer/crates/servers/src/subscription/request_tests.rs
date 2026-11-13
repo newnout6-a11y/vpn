@@ -80,8 +80,8 @@ async fn hwid_switch_decides_the_identity() {
     let mut req = FetchRequest::new(url, ClientDevice::Pc);
     assert!(run(&f, &req).await.is_err());
     let off = server.seen();
-    assert_eq!(off.len(), 4, "four agents, no identified pass");
-    assert_eq!(off[0].header("user-agent"), Some("Happ/3.22.1/Windows"));
+    assert_eq!(off.len(), 5, "five agents, no identified pass");
+    assert_eq!(off[0].header("user-agent"), Some("Happ/4.7.2/Windows"));
     assert!(off.iter().all(|s| s.header("x-hwid").is_none()));
     assert!(off.iter().all(|s| s.header("x-device-os").is_none()));
     assert!(
@@ -90,11 +90,11 @@ async fn hwid_switch_decides_the_identity() {
     );
     req.send_hwid = true;
     assert!(run(&f, &req).await.is_err());
-    let on = &server.seen()[4..];
+    let on = &server.seen()[5..];
     assert_eq!(on[0].header("x-hwid"), Some("99c6d48e9a5a5e32"));
     assert_eq!(
         on[0].header("user-agent"),
-        Some("Happ/3.22.1/Windows/99c6d48e9a5a5e32")
+        Some("Happ/4.7.2/Windows/99c6d48e9a5a5e32")
     );
 }
 
@@ -523,7 +523,7 @@ async fn private_headers_stay_on_the_subscriptions_host() {
     assert_eq!(moved.header("x-hwid"), None);
     assert_eq!(moved.header("x-device-model"), None);
     assert_eq!(moved.header("x-panel-token"), None);
-    assert_eq!(moved.header("user-agent"), Some("Happ/3.22.1/Windows"));
+    assert_eq!(moved.header("user-agent"), Some("Happ/4.7.2/Windows"));
 
     req.url = panel.url("/here");
     run(&f, &req).await.unwrap();
@@ -567,7 +567,7 @@ async fn providers_elsewhere_get_no_identity() {
     assert_eq!(other.header("x-hwid"), None);
     assert_eq!(other.header("x-device-os"), None);
     assert_eq!(other.header("authorization"), None);
-    assert_eq!(other.header("user-agent"), Some("Happ/3.22.1/Windows"));
+    assert_eq!(other.header("user-agent"), Some("Happ/4.7.2/Windows"));
 }
 
 /// subs-a2 / subs-b6: a panel that said enough (429; 404 / 410 to every identified request) is

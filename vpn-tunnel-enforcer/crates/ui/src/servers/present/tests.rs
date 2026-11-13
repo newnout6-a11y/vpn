@@ -237,6 +237,13 @@ fn removed_from_subscription_rule() {
     assert_eq!(unusable(&off), Some(Unusable::Disabled));
     assert_eq!(unusable(&server("d", "vless", None)), None);
     assert!(proxy_ready(&server("d", "vless", None), None));
+    // p-live-fix: a provider notice an older build stored is never a server, archived or not.
+    let mut notice = server("n", "vless", None);
+    notice.placeholder = true;
+    assert_eq!(unusable(&notice), Some(Unusable::Placeholder));
+    notice.archived = Some(archive(ArchiveReason::Provider));
+    assert_eq!(unusable(&notice), Some(Unusable::Placeholder));
+    assert!(!proxy_ready(&notice, None));
 }
 
 #[test]

@@ -169,7 +169,7 @@ async fn finish(shared: Arc<Shared>, choices: WizardChoices) -> AppResult<()> {
     let _writes = shared.writes.lock().await;
     let backend = shared.backend.clone();
     let tunnel = backend.tunnel()?.clone();
-    let (routing, adjusted) = routing_for(&choices, tunnel.tun_available())?;
+    let (routing, adjusted) = routing_for(&choices, tunnel.tun_available());
     let mut applied = Applied::default();
     let result = apply(&shared, &choices, routing, &mut applied).await;
     if let Err(err) = result {
@@ -274,15 +274,14 @@ async fn undo(shared: &Arc<Shared>, applied: Applied) {
     }
 }
 
-/// The routing mode to store. The wizard page offers no Soft with a key (old Soft needed a
-/// local proxy); the new Soft works with both upstreams (NOADMIN §2), so a key without TUN
-/// capture is stored as Soft and the user is told so. Hard chosen over Soft with a local proxy
-/// is refused: the user can pick Soft on the page.
-pub fn routing_for(choices: &WizardChoices, tun_available: bool) -> AppResult<(RoutingMode, bool)> {
-    match (choices.routing, choices.connection) {
-        (Routing::Soft, _) => Ok((RoutingMode::Soft, false)),
-        (Routing::Hard, _) if tun_available => Ok((RoutingMode::Hard, false)),
-        (Routing::Hard, Connection::Key) => Ok((RoutingMode::Soft, true)),
-        (Routing::Hard, Connection::LocalProxy) => Err(super::save::hard_needs_admin()),
+/// The routing mode to store, and whether it differs from the choice. Soft works with both
+/// upstreams (NOADMIN §2), so Tunnel mode chosen where it cannot run (no helper service) is
+/// stored as Soft and the user is told so: the wizard's summary already shows «Прокси» with
+/// the service's install (p-noadmin-ui), so «Завершить» never fails for it.
+pub fn routing_for(choices: &WizardChoices, tun_available: bool) -> (RoutingMode, bool) {
+    match choices.routing {
+        Routing::Soft => (RoutingMode::Soft, false),
+        Routing::Hard if tun_available => (RoutingMode::Hard, false),
+        Routing::Hard => (RoutingMode::Soft, true),
     }
 }

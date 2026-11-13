@@ -83,6 +83,7 @@ fn group(id: &str, manual: bool) -> GroupSummary {
         moved_at: None,
         controls: Default::default(),
         own_hwid: None,
+        said: None,
     }
 }
 
@@ -177,6 +178,48 @@ fn groups_show_the_device_id_they_send() {
         (sub.device_id.as_deref(), sub.own_device_id),
         (Some("0123456789abcdef"), true)
     );
+}
+
+/// p-live-fix: a provider notice an older build stored as a feed row is shown as such (never a
+/// server); the user's own 127.0.0.1 key is a key; the provider's words reach the group.
+#[test]
+fn placeholders_and_the_providers_words_are_shown() {
+    let mut list = list();
+    let mut stub = row("stub", "sub");
+    stub.name = "Приложение не поддерживается".into();
+    stub.server = "0.0.0.0".into();
+    stub.port = 1;
+    let mut local = row("local", "keys");
+    local.origin = Origin::Manual;
+    local.server = "127.0.0.1".into();
+    local.port = 10808;
+    list.servers.extend([stub, local]);
+    list.groups[1].fetch.last_outcome = Some(FetchOutcome::Placeholder);
+    list.groups[1].said = Some("Приложение не поддерживается".into());
+    let (empty, ips) = (HashMap::new(), HashMap::new());
+    let view = project(&inputs(&list, &empty, &ips));
+    let marks: Vec<(&str, bool)> = view
+        .servers
+        .iter()
+        .map(|s| (s.id.as_str(), s.placeholder))
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            ("a", false),
+            ("b", false),
+            ("c", false),
+            ("stub", true),
+            ("local", false)
+        ]
+    );
+    let sub = &view.groups[1];
+    assert_eq!(sub.last_fetch_error, Some(ui::FetchError::Placeholder));
+    assert_eq!(
+        sub.provider_said.as_deref(),
+        Some("Приложение не поддерживается")
+    );
+    assert_eq!(view.groups[0].provider_said, None);
 }
 
 #[test]
@@ -300,6 +343,11 @@ fn fetch_outcomes_map_to_the_page_errors() {
             Some(ui::FetchError::HwidRequired),
         ),
         (FetchOutcome::DeviceLimit, Some(ui::FetchError::DeviceLimit)),
+        (FetchOutcome::Placeholder, Some(ui::FetchError::Placeholder)),
+        (
+            FetchOutcome::Unparseable(sm::BodyKind::Encrypted),
+            Some(ui::FetchError::Encrypted),
+        ),
         (
             FetchOutcome::Unparseable(sm::BodyKind::Html),
             Some(ui::FetchError::Invalid),

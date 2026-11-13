@@ -20,6 +20,9 @@ use crate::model::{
 
 mod add;
 mod edit;
+mod placeholders;
+#[cfg(test)]
+mod placeholders_tests;
 mod probes;
 mod request;
 #[cfg(test)]
@@ -149,11 +152,15 @@ impl Servers {
             pings: Mutex::new(HashMap::new()),
             geo_generation: AtomicU64::new(0),
         };
-        // A read-only document (newer version, damaged) is left exactly as it is.
-        if servers.mode() == Mode::Writable
-            && let Err(err) = servers.purge_expired(now_ms())
-        {
-            tracing::warn!("servers: archive purge at start failed: {err}");
+        // A read-only document (newer version, damaged) is left exactly as it is. Placeholders
+        // first: the servers they pushed into the archive must not be purged with it.
+        if servers.mode() == Mode::Writable {
+            if let Err(err) = servers.retire_placeholders(now_ms()) {
+                tracing::warn!("servers: placeholder repair at start failed: {err}");
+            }
+            if let Err(err) = servers.purge_expired(now_ms()) {
+                tracing::warn!("servers: archive purge at start failed: {err}");
+            }
         }
         servers
     }
@@ -239,6 +246,7 @@ impl Servers {
                     .iter()
                     .map(|g| GroupSummary {
                         own_hwid: doc.device_id(&g.id).map(str::to_owned),
+                        said: doc.fetch_note(&g.id).and_then(|n| n.said.clone()),
                         ..GroupSummary::of(g, &doc.profiles, now)
                     })
                     .collect(),
@@ -283,6 +291,9 @@ impl Servers {
             if refused {
                 return Err(AppError::conflict(Msg::new("servers.select.archived")));
             }
+            if row.is_placeholder() {
+                return Err(AppError::conflict(Msg::new("servers.select.placeholder")));
+            }
             if row.is_locked() {
                 return Err(AppError::conflict(Msg::new("servers.locked")));
             }
@@ -324,13 +335,13 @@ fn resolve_active(doc: &ServersDoc) -> Option<(&ServerRow, bool)> {
         .active_profile_id
         .as_ref()
         .and_then(|id| doc.row(id))
-        .filter(|row| !row.archived_for(ArchiveReason::User));
+        .filter(|row| !row.archived_for(ArchiveReason::User) && !row.is_placeholder());
     match selected {
         Some(row) => Some((row, false)),
         None => doc
             .profiles
             .iter()
-            .find(|r| r.archived.is_none() && !r.is_locked())
+            .find(|r| r.archived.is_none() && !r.is_locked() && !r.is_placeholder())
             .map(|row| (row, true)),
     }
 }

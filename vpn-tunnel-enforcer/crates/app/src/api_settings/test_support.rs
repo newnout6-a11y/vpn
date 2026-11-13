@@ -122,6 +122,12 @@ pub struct FakeTunnel {
     pub restart: Mutex<Restart>,
     /// "Always" can be kept safe (the helper service of a later phase).
     pub always: std::sync::atomic::AtomicBool,
+    /// The helper service is registered, as the tunnel uses it (p-noadmin-ui).
+    pub service: std::sync::atomic::AtomicBool,
+    /// The protocol of the service's last link; 0 = no link yet.
+    pub protocol: std::sync::atomic::AtomicU32,
+    /// Links to the service lost without the app asking.
+    pub losses: watch::Sender<u64>,
 }
 
 /// Behaviour of `apply_settings_change` while a session is open.
@@ -148,6 +154,9 @@ impl FakeTunnel {
             applied: Mutex::new(Vec::new()),
             restart: Mutex::new(Restart::Keeps),
             always: std::sync::atomic::AtomicBool::new(false),
+            service: std::sync::atomic::AtomicBool::new(false),
+            protocol: std::sync::atomic::AtomicU32::new(0),
+            losses: watch::Sender::new(0),
         })
     }
 
@@ -267,7 +276,17 @@ impl TunnelOps for FakeTunnel {
         unreachable!("not used by the Settings page")
     }
     fn tun_available(&self) -> bool {
-        self.tun
+        self.tun || self.service_present()
+    }
+    fn service_present(&self) -> bool {
+        self.service.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn service_protocol(&self) -> Option<u32> {
+        let protocol = self.protocol.load(std::sync::atomic::Ordering::Relaxed);
+        (self.service_present() && protocol > 0).then_some(protocol)
+    }
+    fn service_losses(&self) -> Option<watch::Receiver<u64>> {
+        Some(self.losses.subscribe())
     }
     async fn shutdown(&self, _budget: Duration) -> ShutdownReport {
         ShutdownReport::default()

@@ -1,5 +1,4 @@
 //! Pure projections of the sections, the wizard routing rule and the locale fragments.
-use vpnte_base::ErrorKind;
 use vpnte_base::types::KillSwitchLevel;
 use vpnte_core::settings::Settings;
 use vpnte_engine::routing::RulesDoc;
@@ -196,8 +195,8 @@ fn themes_list_and_existence() {
     assert_eq!(en, ["Light", "Dark", "System", "Ocean"]);
 }
 
-/// Wizard routing without TUN capture: Soft as chosen; a key (the page offers no Soft with a
-/// key) is stored as Soft and the user is told; Hard over Soft with a local proxy is refused.
+/// Wizard routing without TUN capture: Soft as chosen; Tunnel mode, with either upstream, is
+/// stored as Soft and the user is told (the summary said so up front, p-noadmin-ui).
 #[test]
 fn wizard_routing_without_tun() {
     use vpnte_core::settings::RoutingMode as R;
@@ -210,21 +209,15 @@ fn wizard_routing_without_tun() {
         kill_switch: KillSwitchLevel::Off,
         autostart: false,
     };
-    let key_hard = choices(Connection::Key, Routing::Hard);
-    assert_eq!(
-        routing_for(&key_hard, false).expect("soft"),
-        (R::Soft, true)
-    );
-    assert_eq!(
-        routing_for(&key_hard, true).expect("hard"),
-        (R::Hard, false)
-    );
-    let proxy_soft = choices(Connection::LocalProxy, Routing::Soft);
-    assert_eq!(
-        routing_for(&proxy_soft, false).expect("soft"),
-        (R::Soft, false)
-    );
-    let proxy_hard = choices(Connection::LocalProxy, Routing::Hard);
-    let err = routing_for(&proxy_hard, false).expect_err("needs admin");
-    assert_eq!(err.kind, ErrorKind::Permission);
+    for connection in [Connection::Key, Connection::LocalProxy] {
+        let hard = choices(connection, Routing::Hard);
+        assert_eq!(routing_for(&hard, false), (R::Soft, true), "{connection:?}");
+        assert_eq!(routing_for(&hard, true), (R::Hard, false), "{connection:?}");
+        let soft = choices(connection, Routing::Soft);
+        assert_eq!(
+            routing_for(&soft, false),
+            (R::Soft, false),
+            "{connection:?}"
+        );
+    }
 }

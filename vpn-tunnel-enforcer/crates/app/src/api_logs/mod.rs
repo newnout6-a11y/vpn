@@ -30,7 +30,9 @@ use crate::support::files::{SaveFile, save_file};
 use crate::support::{blocking, detached};
 use crate::svc_journal::{self, Journal};
 
-pub use sources::{Folders, PipeServiceLogs, ServiceAnswer, ServiceLogs, engine_place};
+pub use sources::{
+    Folders, PipeServiceLogs, ServiceAnswer, ServiceLogs, ask_service, engine_place,
+};
 
 /// [`LogsApi`] over the backend.
 pub struct LogsService {

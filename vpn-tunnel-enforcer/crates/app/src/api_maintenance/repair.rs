@@ -1,7 +1,9 @@
 //! «Починить»: the auto-repair as one backend task (leaving the page never stops it between two
 //! steps). Steps run in order, each independent of the others' outcome:
-//! 1. our WFP filters removed outside a session (elevated only; strict filters are kept),
-//! 2. the old version's network cleanup run again (elevated only),
+//! 1. our WFP filters removed outside a session (through the helper service, or in this
+//!    elevated process; strict filters are kept),
+//! 2. the old version's network cleanup run again (elevated only: not in this version for the
+//!    app as the user runs it, and the helper service does not carry it),
 //! 3. engines of ours that no session owns stopped (own processes: no elevation needed).
 //!
 //! A step this process may not run is `blocked` with the reason, never reported as done.
@@ -124,14 +126,20 @@ async fn run_step(shared: &Arc<Shared>, step: RepairStep) -> StepOutcome {
 /// level to off: a downgrade nobody asked for); the release itself holds the tunnel's lane.
 async fn filters(shared: &Arc<Shared>) -> StepOutcome {
     match shared.backend.tunnel() {
-        Ok(tunnel) => filters_step(shared.backend.elevated, tunnel.as_ref()).await,
+        Ok(tunnel) => {
+            let wfp = crate::api_helper::capability_now(&shared.backend)
+                .kill_switch
+                .works();
+            filters_step(wfp, tunnel.as_ref()).await
+        }
         Err(err) => StepOutcome::failed(err.user_msg()),
     }
 }
 
-pub(crate) async fn filters_step(elevated: bool, tunnel: &dyn TunnelOps) -> StepOutcome {
-    if !elevated {
-        return StepOutcome::blocked(project::needs_admin_msg());
+/// `wfp`: our filters are reachable here (the helper service, or this elevated process).
+pub(crate) async fn filters_step(wfp: bool, tunnel: &dyn TunnelOps) -> StepOutcome {
+    if !wfp {
+        return StepOutcome::blocked(Msg::new("app.maintenance.repair.viaService"));
     }
     let level = tunnel.kill_switch().await.settings.level;
     if level.effective(tunnel.always_available()) == KillSwitchLevel::Strict {
@@ -164,7 +172,7 @@ fn refusal_or_failure(err: &AppError) -> StepOutcome {
 /// Step 2: the old version's leftovers, removed again ("run again" ignores the marker).
 async fn legacy_again(shared: &Arc<Shared>) -> StepOutcome {
     if !shared.backend.elevated {
-        return StepOutcome::blocked(project::needs_admin_msg());
+        return StepOutcome::blocked(Msg::new("app.maintenance.repair.notInVersion"));
     }
     let ctx = match shared.backend.tunnel() {
         Ok(tunnel) => {

@@ -2,12 +2,15 @@
 //! button counts presses (proof that nothing underneath can be toggled while the wizard is open)
 //! and shows what the fake backend was asked to do. Flags: `--theme light|dark|system`,
 //! `--lang ru|en`, `--size WxH`, `--scene first-run|no-proxy|rerun|finish-fails|restore-fails|
-//! skip-fails`.
+//! skip-fails` with an optional helper state `+installed|+missing|+older|+elevated` (default
+//! installed).
 #![windows_subsystem = "windows"]
 
 use std::rc::Rc;
 
 use dioxus::prelude::*;
+use vpnte_ui::helper::HelperApi;
+use vpnte_ui::helper::demo::{DemoHelper, split_scene};
 use vpnte_ui::launch::{DemoArgs, LaunchOptions, launch};
 use vpnte_ui::pages::{Page, PageRegistry};
 use vpnte_ui::shell::Shell;
@@ -31,8 +34,10 @@ fn main() {
 #[component]
 fn App() -> Element {
     let args = use_context::<DemoArgs>();
+    let (scene, helper) = split_scene(args.scene.as_deref().unwrap_or_default());
+    use_context_provider(|| Rc::new(DemoHelper::new(helper)) as Rc<dyn HelperApi>);
     let api = use_context_provider(|| {
-        let scene = args.scene.as_deref().and_then(DemoScene::from_name);
+        let scene = DemoScene::from_name(scene);
         Rc::new(DemoWizardApi::new(scene.unwrap_or_default()))
     });
     use_context_provider(|| api.clone() as Rc<dyn WizardApi>);

@@ -135,7 +135,8 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
     } = marks();
     let id = server.id.clone();
     let blocked = unusable(&server);
-    let dropped = is_removed_from_subscription(&server, group.as_ref());
+    // A stored provider notice says so itself, not "dropped by the provider".
+    let dropped = !server.placeholder && is_removed_from_subscription(&server, group.as_ref());
     let purge_when = server
         .archived
         .filter(|_| blocked == Some(Unusable::Deleted))
@@ -145,6 +146,7 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
     let ping = displayed_ping(server.ping_ms, rt.ping);
     let ping_failed = rt.ping == super::present::PingState::Done(None);
     let unusable_reason = blocked.map(|b| match b {
+        Unusable::Placeholder => t!("ui.servers.row.placeholderReason"),
         Unusable::Deleted => t!("ui.servers.row.deletedReason"),
         Unusable::Disabled => t!("ui.servers.row.disabledReason"),
     });
@@ -161,8 +163,11 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
         unusable_reason.clone()
     };
     let deleted = blocked == Some(Unusable::Deleted);
-    let no_host =
-        (server.host.is_empty() || server.port == 0).then(|| t!("ui.servers.menu.noHost"));
+    let no_host = if server.placeholder {
+        Some(t!("ui.servers.row.placeholderReason"))
+    } else {
+        (server.host.is_empty() || server.port == 0).then(|| t!("ui.servers.menu.noHost"))
+    };
     let items = vec![
         MenuItem::new("proxy", t!("ui.servers.menu.proxy"))
             .blocked(proxy_reason)
@@ -239,6 +244,11 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
                     }
                     if blocked == Some(Unusable::Disabled) {
                         Badge { tone: Tone::Unknown, {t!("ui.servers.row.off")} }
+                    }
+                    if blocked == Some(Unusable::Placeholder) {
+                        Badge { tone: Tone::Unknown, title: t!("ui.servers.row.placeholderReason"),
+                            {t!("ui.servers.row.placeholder")}
+                        }
                     }
                     if pending {
                         Badge { tone: Tone::Warn, {t!("ui.servers.row.switching")} }

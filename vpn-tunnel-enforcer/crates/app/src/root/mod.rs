@@ -176,6 +176,7 @@ fn reusable(context: Box<dyn Any>) -> Box<dyn RootContext> {
         Rc<dyn AvailabilityApi>,
         Rc<dyn SpeedTestApi>,
         Rc<dyn UpdatesApi>,
+        Rc<dyn vpnte_ui::helper::HelperApi>,
     )
 }
 

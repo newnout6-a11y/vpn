@@ -8,6 +8,7 @@ use super::model::{
     CaptureView, Counted, DiagItem, EtwView, KillSwitchState, LeakVerdict, ProtectionTest,
     ProtectionView, RepairStep, RouteVerdict, StepOutcome, StepState, SystemReport,
 };
+use crate::helper::{Ability, Capability};
 use crate::widgets::{Tone, UiError};
 
 /// Important items shown in the results panel at most.
@@ -120,6 +121,11 @@ pub fn protection_lines(p: &ProtectionView) -> Vec<ProtectionLine> {
             verdict: Verdict::Fail,
             text: why.clone(),
         },
+        // Nothing of ours was read back: not checked, never a failure.
+        KillSwitchState::ProxyOnly => line(
+            Verdict::NotChecked,
+            "ui.maintenance.protection.state.proxyOnly",
+        ),
     });
     lines.push(if p.bfe_running {
         line(Verdict::Ok, "ui.maintenance.protection.bfeRunning")
@@ -196,6 +202,20 @@ pub fn journal_level(verdict: Verdict) -> tracing::Level {
         Verdict::Fail => tracing::Level::ERROR,
         Verdict::Warn => tracing::Level::WARN,
         Verdict::Ok | Verdict::NotChecked => tracing::Level::INFO,
+    }
+}
+
+/// What keeps a repair step from running here, said before any run (p-noadmin-ui): our filters
+/// come with the helper service; the old version's leftovers need an elevated app, which this
+/// version never is by itself. `None` without a helper backend in context.
+pub fn step_up_front(step: RepairStep, cap: Option<&Capability>) -> Option<&'static str> {
+    let cap = cap?;
+    match step {
+        RepairStep::Filters if cap.kill_switch == Ability::NeedsService => {
+            Some("ui.helper.viaService")
+        }
+        RepairStep::Legacy if !cap.elevated => Some("ui.helper.notInVersion"),
+        _ => None,
     }
 }
 

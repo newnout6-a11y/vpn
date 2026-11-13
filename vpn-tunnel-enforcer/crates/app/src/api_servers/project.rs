@@ -249,6 +249,8 @@ fn server(
         enabled: !s.locked,
         config_hidden,
         whitelist: x.whitelist,
+        // A provider notice an older build stored: the page shows it as such (p-live-fix).
+        placeholder: s.origin == sm::Origin::Feed && sm::is_placeholder(&s.name, &s.server, s.port),
     }
 }
 
@@ -299,6 +301,7 @@ fn group(g: &GroupSummary, lang: Lang, hwids: &Hwids) -> ui::GroupView {
         moved_at: g.moved_at,
         host: g.host.clone(),
         settings_hidden: !g.manual && g.controls.hides_settings(),
+        provider_said: g.said.clone(),
     }
 }
 
@@ -309,6 +312,8 @@ pub(super) fn fetch_error(outcome: FetchOutcome) -> Option<ui::FetchError> {
         FetchOutcome::EmptyList => ui::FetchError::Empty,
         FetchOutcome::HwidRequired => ui::FetchError::HwidRequired,
         FetchOutcome::DeviceLimit => ui::FetchError::DeviceLimit,
+        FetchOutcome::Placeholder => ui::FetchError::Placeholder,
+        FetchOutcome::Unparseable(sm::BodyKind::Encrypted) => ui::FetchError::Encrypted,
         FetchOutcome::Unparseable(_) => ui::FetchError::Invalid,
         FetchOutcome::Http(code) => ui::FetchError::Http(code),
         FetchOutcome::Network(NetFail::Tls) => ui::FetchError::Tls,

@@ -160,12 +160,16 @@ pub fn route_plan(settings: &Settings) -> RoutePlan {
 }
 
 /// Why a fetch produced no profiles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FetchError {
     /// Every attempt failed; the strongest evidence wins (servers §6: empty list > unparseable
     /// body > HTTP 4xx > HTTP 5xx > network > timeout).
     #[error("subscription fetch failed: {0:?}")]
     Failed(FetchOutcome),
+    /// As `Failed`, and the strongest answer came as provider placeholders instead of servers:
+    /// their words («Приложение не поддерживается»), one line (p-live-fix).
+    #[error("subscription fetch failed: {0:?} (the provider answered with placeholders)")]
+    Said(FetchOutcome, String),
     /// Not a single-line `http(s)://host` URL.
     #[error("not a subscription URL")]
     InvalidUrl,
@@ -180,17 +184,26 @@ pub enum FetchError {
 
 impl From<FetchError> for AppError {
     fn from(err: FetchError) -> Self {
-        match err {
-            FetchError::Failed(outcome) => {
+        match &err {
+            FetchError::Failed(outcome) | FetchError::Said(outcome, _) => {
                 let kind = match outcome {
                     FetchOutcome::EmptyList
                     | FetchOutcome::HwidRequired
                     | FetchOutcome::DeviceLimit
+                    | FetchOutcome::Placeholder
                     | FetchOutcome::Unparseable(_) => ErrorKind::Validation,
                     FetchOutcome::Timeout => ErrorKind::Timeout,
                     _ => ErrorKind::Network,
                 };
-                AppError::msg(kind, outcome_msg(outcome)).with_source(err)
+                // A refusal the panel typed (HWID, device limit) keeps its own sentence: the
+                // add dialog offers the HWID switch by it; the group keeps the words.
+                let msg = match (&err, outcome) {
+                    (FetchError::Said(_, said), FetchOutcome::Placeholder) => {
+                        Msg::new("servers.fetch.said").arg("said", said)
+                    }
+                    _ => outcome_msg(*outcome),
+                };
+                AppError::msg(kind, msg).with_source(err)
             }
             FetchError::InvalidUrl => {
                 AppError::validation(Msg::new("servers.fetch.invalidUrl")).with_source(err)
@@ -204,6 +217,22 @@ impl From<FetchError> for AppError {
 }
 
 impl FetchError {
+    /// The typed outcome of a failed fetch (`None`: not a failure of the panel or the network).
+    pub fn outcome(&self) -> Option<FetchOutcome> {
+        match self {
+            FetchError::Failed(outcome) | FetchError::Said(outcome, _) => Some(*outcome),
+            _ => None,
+        }
+    }
+
+    /// The provider's own words, when its answer was placeholders.
+    pub fn said(&self) -> Option<&str> {
+        match self {
+            FetchError::Said(_, said) => Some(said),
+            _ => None,
+        }
+    }
+
     /// The error of a group's fetch: an empty list fetched without the HWID suggests sending it
     /// (HWID-bound panels answer an unknown device with an empty list).
     pub fn for_group(self, send_hwid: bool) -> AppError {
@@ -224,11 +253,13 @@ pub fn outcome_msg(outcome: FetchOutcome) -> Msg {
         FetchOutcome::EmptyList => Msg::new("servers.fetch.emptyList"),
         FetchOutcome::HwidRequired => Msg::new("servers.fetch.hwidRequired"),
         FetchOutcome::DeviceLimit => Msg::new("servers.fetch.deviceLimit"),
+        FetchOutcome::Placeholder => Msg::new("servers.fetch.placeholder"),
         FetchOutcome::Unparseable(kind) => Msg::new(match kind {
             BodyKind::Html => "servers.fetch.body.html",
             BodyKind::Json => "servers.fetch.body.json",
             BodyKind::Base64 => "servers.fetch.body.base64",
             BodyKind::Uris => "servers.fetch.body.uris",
+            BodyKind::Encrypted => "servers.fetch.body.encrypted",
             BodyKind::Other => "servers.fetch.body.other",
         }),
         FetchOutcome::Http(code) => Msg::new("servers.fetch.http").arg("code", code),

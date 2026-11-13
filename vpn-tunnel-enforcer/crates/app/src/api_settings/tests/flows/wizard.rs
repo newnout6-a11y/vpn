@@ -133,19 +133,21 @@ async fn the_wizard_keeps_a_list_choice_made_in_settings() {
     );
 }
 
-/// Hard chosen over Soft with a local proxy and no TUN: refused, nothing written, still open.
+/// Tunnel mode over a local proxy where it cannot run (no helper service): stored as Proxy, as
+/// the wizard's summary already showed with the service's install (p-noadmin-ui): «Завершить»
+/// never fails for it, and the wizard closes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn finish_hard_over_local_proxy_is_refused() {
+async fn finish_hard_over_local_proxy_without_tun_stores_soft() {
     let (shared, _, _, _dir) = setup("wizard-hard", false, FakeAutostart::default());
     let api = WizardService(shared.clone());
     until(&api.state(), |w| w.open).await;
-    let err = api
-        .finish(choices(Connection::LocalProxy, Routing::Hard))
+    api.finish(choices(Connection::LocalProxy, Routing::Hard))
         .await
-        .expect_err("needs admin");
-    assert_eq!(err.kind, ErrorKind::Permission);
-    assert!(!shared.backend.settings.read(|s| s.first_run_complete));
-    assert!(api.state().borrow().open);
+        .expect("finished");
+    let s = shared.backend.settings.snapshot();
+    assert_eq!(s.routing_mode, RoutingMode::Soft);
+    assert!(s.first_run_complete);
+    assert!(!api.state().borrow().open);
 }
 
 /// A failed key import undoes the kill switch and autostart changes made before it.

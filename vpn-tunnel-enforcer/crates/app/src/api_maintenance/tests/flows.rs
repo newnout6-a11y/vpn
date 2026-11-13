@@ -128,22 +128,24 @@ async fn repair_is_refused_during_a_session() {
     assert_eq!(r.host.legacy_runs.load(Ordering::SeqCst), 0);
 }
 
-/// NOADMIN §0 / AT-03-007: unelevated, the two privileged steps are refused with the reason
-/// (never "done") while our own stale engines are still swept, under the resources dir only,
-/// sing-box first. The final view is the one published last.
+/// NOADMIN §0 / AT-03-007: unelevated without the service, the two privileged steps are refused
+/// with their calm reason (never "done"; the filters are the service's, the old version's
+/// leftovers are not in this version) while our own stale engines are still swept, under the
+/// resources dir only, sing-box first. The final view is the one published last.
 #[tokio::test]
 async fn unelevated_repair_refuses_privileged_steps_and_sweeps_engines() {
     let r = rig("repair");
     let view = r.api.repair().await.expect("repair ran");
     assert!(!view.running);
-    let needs_admin = StepOutcome::blocked(Msg::new("app.base.needsAdmin"));
+    let via_service = StepOutcome::blocked(Msg::new("app.maintenance.repair.viaService"));
     assert_eq!(
         view.steps[0],
-        (RepairStep::Filters, StepState::Done(needs_admin.clone()))
+        (RepairStep::Filters, StepState::Done(via_service))
     );
+    let not_here = StepOutcome::blocked(Msg::new("app.maintenance.repair.notInVersion"));
     assert_eq!(
         view.steps[1],
-        (RepairStep::Legacy, StepState::Done(needs_admin))
+        (RepairStep::Legacy, StepState::Done(not_here))
     );
     let StepState::Done(engines) = &view.steps[2].1 else {
         panic!("engines step not finished: {:?}", view.steps[2]);
@@ -208,7 +210,7 @@ async fn engine_sweep_waits_for_a_server_check() {
     let _ = check.await;
 }
 
-/// Elevated, the strict level keeps its persistent filters; other levels release them
+/// With our filters reachable, the strict level keeps its persistent filters; other levels release them
 /// through the tunnel (whose refusal is reported as a refusal). ks-a: only an "Always" in force
 /// (the helper service) is kept; a stored strict without it is released like the others.
 #[tokio::test]
@@ -231,33 +233,35 @@ async fn strict_filters_are_kept_by_the_repair() {
         filters_step(true, tunnel.as_ref()).await.blocked,
         "fake has no WFP"
     );
+    // No filters reachable here (no service, unelevated): said as the service's, calmly.
     assert_eq!(
         filters_step(false, tunnel.as_ref()).await,
-        StepOutcome::blocked(Msg::new("app.base.needsAdmin"))
+        StepOutcome::blocked(Msg::new("app.maintenance.repair.viaService"))
     );
 }
 
-/// Unelevated, the read-back says the filters need administrator rights and is published.
+/// Unelevated without the service, the read-back says the protection acts through the system
+/// proxy (calm, not a failure) and is published.
 #[tokio::test]
 async fn unelevated_protection_read_back_is_published() {
     let r = rig("protection");
     let view = r.api.verify_protection().await.expect("read back");
-    assert_eq!(
-        view.kill_switch,
-        KillSwitchState::Failed(Msg::new("app.base.needsAdmin"))
-    );
+    assert_eq!(view.kill_switch, KillSwitchState::ProxyOnly);
     assert_eq!(view.last_verified, None);
     assert_eq!(r.shared.state.borrow().protection.as_ref(), Some(&view));
 }
 
-/// Unavailable features answer honestly: capture needs elevation here, the key re-import does
+/// Unavailable features answer honestly: capture is not in this version, the key re-import does
 /// not exist, unknown documents are refused.
 #[tokio::test]
 async fn unavailable_actions_say_so() {
     let r = rig("unavailable");
     assert_eq!(
         refusal_key(r.api.restart_capture().await),
-        (ErrorKind::Permission, "app.base.needsAdmin".to_owned())
+        (
+            ErrorKind::Conflict,
+            "app.maintenance.capture.unavailable".to_owned()
+        )
     );
     assert_eq!(
         refusal_key(r.api.retry_secrets_import().await),
@@ -273,10 +277,12 @@ async fn unavailable_actions_say_so() {
             "app.maintenance.legacy.unknownStore".to_owned()
         )
     );
+    // Packet capture is not in this version, elevated or not: said as such, never as «install
+    // the service» or «run as administrator» (p-noadmin-ui).
     let state = r.shared.state.borrow().clone();
     assert_eq!(
         state.capture.warnings,
-        vec![Msg::new("app.base.needsAdmin")]
+        vec![Msg::new("app.maintenance.capture.unavailable")]
     );
 }
 

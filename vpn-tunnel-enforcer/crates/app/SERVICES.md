@@ -99,9 +99,12 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
 | `traffic()` | Panels `traffic`, Tray speeds |
 | `ping(ids, cancel)` | Panels `ping_one` / `ping_all`, Servers `ping_one` / `ping_many` |
 | `probe_ctx(device)` | Servers `check_group_health` (`key_health::check_many`) and `check_all_health` (`key_health::check_list`), and anyone pinging by hand (`.net`) |
-| `tun_available()` | Settings routing-mode choice, Wizard `Routing::Hard` option: true with the helper service installed (or in an elevated process without it); otherwise shown unavailable with «Для туннеля нужна служба-помощник.» and the install button |
+| `tun_available()` | Settings routing-mode choice, Wizard `Routing::Hard` option: true with the helper service installed (or in an elevated process without it); otherwise shown unavailable with «Для туннеля нужна служба-помощник.» and the install button; p-noadmin-ui: `api_helper` (the capability view every page reads, the Schedule included) |
 | `service_installed()` | svc-wire: Settings «Установить службу-помощник» after Windows ran the service's install verb: Tunnel mode and "Always" go through the service from now on (`true` when it is there; default `false`) |
 | `service_protocol()` | p-app-split: Apps page, the line «Служба-помощник старой версии…» under «Только выбранные приложения» (Tunnel mode through a linked service older than `SCOPE_PROTOCOL`); `None` without a link (default) |
+| `service_present()` | p-noadmin-ui: `api_helper` (the capability view): the service is registered, as the tunnel uses it (read-only; default `false`) |
+| `service_losses()` | p-noadmin-ui: `api_helper`: a link lost without the app asking (the service restarted, e.g. to update itself): the view re-reads the protocol after the re-link (default `None`) |
+| `service_starting()` | p-live-fix: the SCM reports the helper service START_PENDING / RUNNING while its pipe does not answer yet (after a Windows restart): a view says «Служба-помощник запускается…», not «не установлена» (default `false`) |
 | `shutdown(budget)` | app-main (Tray `quit`) |
 | `proxies()` | Panels proxy column and actions (`api_dashboard/proxies.rs`), Servers `start_proxies`; `None` = the column stays empty, actions answer `Conflict` |
 | `live_checks()` | Servers `live_check` / `live_history` / `live_batch` (`api_servers/live.rs`); `None` = `Conflict` `app.servers.liveUnavailable` |

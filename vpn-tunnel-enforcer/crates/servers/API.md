@@ -71,11 +71,15 @@ impl ProfileId / GroupId { pub fn random() -> Self; pub fn as_str(&self) -> &str
 pub struct ServersDoc { pub active_profile_id: Option<ProfileId>, pub groups: Vec<ServerGroup>,
                         pub profiles: Vec<ServerRow>,
                         pub device_ids: BTreeMap<GroupId, String> /* reset device IDs (p-subs) */,
-                        pub linked: BTreeSet<GroupId> /* added from a link: refreshes linked (fix-ks) */ }
+                        pub linked: BTreeSet<GroupId> /* added from a link: refreshes linked (fix-ks) */,
+                        pub fetch_notes: BTreeMap<GroupId, FetchNote> /* p-live-fix */ }
+pub struct FetchNote { pub agent: Option<String> /* UA family that last brought servers: tried first */,
+                       pub said: Option<String> /* the provider's words of the last placeholder answer */ }
                         // Document: "profiles.json", v1, holds secrets
 impl ServersDoc {
     pub fn group(&self, &GroupId) -> Option<&ServerGroup>;     pub fn group_mut(..) -> Option<&mut ServerGroup>;
     pub fn device_id(&self, &GroupId) -> Option<&str>;         // the group's own HWID (None: this PC's)
+    pub fn fetch_note(&self, &GroupId) -> Option<&FetchNote>;
     pub fn linked(&self, &GroupId) -> bool;                    // the group came from a link
     pub fn row(&self, &ProfileId) -> Option<&ServerRow>;       pub fn row_mut(..) -> Option<&mut ServerRow>;
     pub fn hides(&self, &ServerRow) -> bool;   // row.hidden, or its group hides_settings()
@@ -104,9 +108,16 @@ impl ServerGroup {
 }
 pub struct FetchState { pub last_attempt_at, pub last_success_at: Option<UnixMs>,
                         pub last_outcome: Option<FetchOutcome>, pub last_count: Option<u32> }
-pub enum FetchOutcome { Ok { partial: bool }, EmptyList, HwidRequired, DeviceLimit, Unparseable(BodyKind),
-                        Http(u16), Network(NetFail), Timeout }   // wire: "hwid-required", "device-limit"
-pub enum BodyKind { Html, Json, Base64, Uris, Other }      pub enum NetFail { Dns, Connect, Tls, Proxy, Reset }
+pub enum FetchOutcome { Ok { partial: bool }, EmptyList, HwidRequired, DeviceLimit, Placeholder,
+                        Unparseable(BodyKind), Http(u16), Network(NetFail), Timeout }
+                        // wire: "hwid-required", "device-limit", "placeholder" (p-live-fix)
+pub enum BodyKind { Html, Json, Base64, Uris, Encrypted /* happ://crypt…, age */, Other }
+pub enum NetFail { Dns, Connect, Tls, Proxy, Reset }
+// p-live-fix: provider placeholders («Приложение не поддерживается» at 0.0.0.0:1) are never servers.
+pub fn is_placeholder(name: &str, host: &str, port: u16) -> bool; // 0.0.0.0 / :: / loopback / empty,
+pub fn is_placeholder_profile(&Profile) -> bool;   // port 0-1, or a "not supported / update the app" name
+pub fn provider_words<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<String>; // 3 names, 160 chars
+impl ServerRow { pub fn is_placeholder(&self) -> bool }   // feed rows only (a manual 127.0.0.1 key is a key)
 pub enum GroupStatus { Unknown, Active, Expired, Unreachable, Failed }
 // Unknown: manual / never fetched; Expired: plan date passed, empty list, HTTP 404/410;
 // Failed: other HTTP, unusable body, a refused device (HWID required / device limit);
@@ -178,7 +189,8 @@ pub struct GroupSummary { id, name, title: Msg, manual: bool, device: Option<Cli
     host: Option<String> /* never the URL */, url_locked: bool, status: GroupStatus, imported_at,
     fetch: FetchState, info: SubscriptionMeta, refresh_override_min, servers: usize, archived: usize,
     send_hwid: bool, header_names: Vec<String> /* never values */, moved_at: Option<UnixMs>,
-    controls: Controls, own_hwid: Option<String> /* the group's reset ID; None = this PC's */ }
+    controls: Controls, own_hwid: Option<String> /* the group's reset ID; None = this PC's */,
+    said: Option<String> /* the provider's words of the last placeholder answer (FetchNote) */ }
 pub struct ServersView { pub groups: Vec<GroupSummary>, pub servers: Vec<ServerSummary>,
     pub active: Option<ProfileId>, pub fallback: bool, pub notice: Option<Msg> }
 impl ServerSummary { pub fn of(&ServerRow, Option<Ping>, selected: bool) -> Self }
@@ -319,10 +331,12 @@ pub struct Spare;                                      // Spare::new(route, rele
 pub struct FetchRequest { pub url: Url, pub device: ClientDevice, pub send_hwid: bool,
     pub hwid: Option<String> /* the group's own ID; None = this PC's */,
     pub headers: Vec<(String, String)>, pub fallback: Option<Url>,
-    pub from_link: bool /* came from outside: never into the LAN (phones-a11) */ }  // Debug: host only
+    pub from_link: bool /* came from outside: never into the LAN (phones-a11) */,
+    pub prefer_agent: Option<String> /* UA family tried first (FetchNote::agent) */ }  // Debug: host only
 impl FetchRequest { pub fn new(url: Url, device: ClientDevice) -> Self }  // no HWID / headers / fallback, typed
 pub struct Fetched { pub report: ParseReport, pub controls: Controls, pub moved_to: Option<Url>,
-    pub fallback: Option<Url>, pub via_fallback: bool, pub providers: Vec<ProviderFetch> } // Debug hides URLs
+    pub fallback: Option<Url>, pub via_fallback: bool, pub providers: Vec<ProviderFetch>,
+    pub agent: String /* the UA family that brought the servers */ } // Debug hides URLs
 impl Fetched { pub fn complete(&self) -> bool }        // only duplicates skipped, every provider answered
 pub struct ProviderFetch { pub name: String, pub servers: usize, pub failed: Option<ProviderFailure> }
 pub enum ProviderFailure { Fetch(FetchOutcome), Refused /* not asked: the redirect rules refused its URL */ }
@@ -338,8 +352,15 @@ impl SubscriptionFetcher {
     pub async fn fetch(&self, url: &Url, device: ClientDevice, cancel: &CancellationToken)
         -> Result<ParseReport, FetchError>;   // = fetch_request of FetchRequest::new (a new group)
 }
-pub enum FetchError { Failed(FetchOutcome), InvalidUrl, LocalTarget, Cancelled }   // Copy; From<FetchError> for AppError
-impl FetchError { pub fn for_group(self, send_hwid: bool) -> AppError } // EmptyList without HWID -> hint
+pub enum FetchError { Failed(FetchOutcome), Said(FetchOutcome, String) /* placeholders: their words */,
+                      InvalidUrl, LocalTarget, Cancelled }   // Clone (no longer Copy); From<..> for AppError
+impl FetchError { pub fn for_group(self, send_hwid: bool) -> AppError; // EmptyList without HWID -> hint
+                  pub fn outcome(&self) -> Option<FetchOutcome>;     // Failed / Said
+                  pub fn said(&self) -> Option<&str> }
+// Placeholders are dropped from every answer; an answer of placeholders only is a refusal: the
+// rotation goes on (Remnawave's x-hwid-* headers first: HwidRequired / DeviceLimit; else
+// Placeholder); a refresh keeps the rows and stores the words; a stored placeholder is archived at
+// open (Servers::open), refused by select and skipped by active().
 pub fn parse_headers(lines: &str) -> AppResult<Vec<(String, String)>>; // servers.headers.* errors
 pub fn stored_headers(&[(String, String)]) -> Option<String>;  pub fn header_names(stored: &str) -> Vec<String>;
 pub fn outcome_msg(outcome: FetchOutcome) -> Msg;     // group status line (servers.fetch.*)
@@ -511,6 +532,10 @@ timeout the base `errors.*`). Every `Msg` this crate returns has its key under `
 | `servers.fetch.emptyListNoHwid` | — | `Validation`: `FetchError::for_group` — an empty list fetched without the HWID |
 | `servers.fetch.hwidRequired` | — | `outcome_msg(HwidRequired)`; `Validation`: the panel serves only devices with an HWID |
 | `servers.fetch.deviceLimit` | — | `outcome_msg(DeviceLimit)`; `Validation`: every device slot is taken |
+| `servers.fetch.placeholder` | — | `outcome_msg(Placeholder)`; `Validation`: notices instead of servers |
+| `servers.fetch.said` | `said` | `Validation`: `FetchError::Said(Placeholder, words)` — the provider's words |
+| `servers.fetch.body.encrypted` | — | `outcome_msg(Unparseable(Encrypted))`: a list only the provider's app reads |
+| `servers.select.placeholder` | — | `Conflict`: `select` of a stored provider placeholder |
 | `profiles.deeplink.localTarget` | — | `Validation`: `FetchError::LocalTarget` (a linked subscription resolves into the LAN) |
 | `servers.headers.{invalid,reserved,tooMany}` | `line` / `name` / `max` | `Validation`: `parse_headers`, `set_group_headers` |
 | `servers.group.manualNoRequest` | — | `Validation`: HWID switch / headers of the manual group |

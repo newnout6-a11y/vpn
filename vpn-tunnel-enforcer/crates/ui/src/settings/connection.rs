@@ -3,11 +3,12 @@
 use dioxus::prelude::*;
 
 use super::model::{ConnectionMode, EnginePref, RoutingMode};
-use super::{ActionError, Line, use_api, use_ctx};
+use super::{Line, use_ctx};
+use crate::helper::{Feature, HelperLine, use_capability};
 use crate::pages::{Page, use_nav};
 use crate::t;
 use crate::widgets::{
-    Button, ButtonKind, Checkbox, Panel, Row, Segmented, Select, SelectOption, TextArea, use_job,
+    Button, ButtonKind, Checkbox, Panel, Row, Segmented, Select, SelectOption, TextArea,
 };
 
 #[component]
@@ -38,23 +39,12 @@ pub(super) fn Connection() -> Element {
         RoutingMode::Soft => t!("ui.settings.connection.softHint"),
     };
     // Without the TUN only Proxy can be saved: a stored Tunnel choice can still move to Proxy,
-    // a Tunnel choice is ignored, and the reason stays on screen.
-    let tun_available = ctx.state.read().tun_available;
+    // a Tunnel choice is ignored, and the helper line says why (with the install) on screen.
+    let tun_available = use_capability().is_some_and(|c| c.tunnel.works());
     let pick_routing = move |mode: RoutingMode| {
         if mode == RoutingMode::Soft || tun_available {
             ctx.edit(|p| p.routing_mode = Some(mode));
         }
-    };
-    // «Установить службу-помощник»: Windows asks once; a declined prompt changes nothing.
-    let api = use_api();
-    let install = use_job::<bool>();
-    let install_service = move |_| {
-        let api = api.clone();
-        install.start(move |_| async move { api.install_service().await });
-    };
-    let install_error = match install.last() {
-        Some(Err(err)) => Some(err),
-        _ => None,
     };
     rsx! {
         Panel { title: t!("ui.settings.connection.title"), id: "set-connection",
@@ -90,13 +80,7 @@ pub(super) fn Connection() -> Element {
                     on_change: pick_routing,
                 }
             }
-            if !tun_available {
-                p { class: "set-hint", "data-unavailable": "tun", {t!("ui.settings.connection.tunUnavailable")} }
-                Button { kind: ButtonKind::Ghost, small: true, busy: install.running(), onclick: install_service,
-                    {t!("ui.settings.connection.installService")}
-                }
-                ActionError { error: install_error }
-            }
+            HelperLine { feature: Feature::Tunnel }
             if view.routing_mode == RoutingMode::Soft {
                 div { class: "set-subgroup", role: "group", aria_label: t!("ui.settings.connection.softTargets"),
                     p { class: "set-subgroup-title", {t!("ui.settings.connection.softTargets")} }

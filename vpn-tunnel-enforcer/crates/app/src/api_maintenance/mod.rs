@@ -3,13 +3,14 @@
 //!
 //! The page renders one pushed snapshot (`project`): tunnel phase, capture, the last caught
 //! error and the old version's leftovers are re-projected by a task; protection, repair and
-//! export progress are published by the actions that produce them. Privileged operations exist
-//! only when the process is elevated (NOADMIN §0): otherwise they answer «Доступно, только если
-//! приложение запущено от имени администратора» (`Permission`, or a `blocked` repair step) and
-//! are never reported as done. Every mutation is refused while the tunnel connects, switches or
-//! disconnects; state-changing work runs as a backend task, so leaving the page never stops it
-//! half-way.
+//! export progress are published by the actions that produce them. Privileged operations run
+//! through the helper service or in an elevated process (NOADMIN §0); where neither is there
+//! the page says so up front (p-noadmin-ui: the capability view, `api_helper`), the protection
+//! read-back is `ProxyOnly` and a repair step is `blocked` with a calm reason, never reported as
+//! done. Every mutation is refused while the tunnel connects, switches or disconnects;
+//! state-changing work runs as a backend task, so leaving the page never stops it half-way.
 mod export;
+mod extras;
 mod legacy;
 mod network;
 mod project;
@@ -155,7 +156,7 @@ impl MaintenanceApi for MaintenanceService {
 
     async fn restart_capture(&self) -> AppResult<CaptureView> {
         project::settled(&self.0)?;
-        Err(project::capture_refusal(self.0.backend.elevated))
+        Err(project::capture_refusal())
     }
 
     async fn open_snapshots_folder(&self) -> AppResult<()> {

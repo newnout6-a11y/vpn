@@ -5,10 +5,22 @@
 use sha2::{Digest, Sha256};
 use vpnte_base::types::ClientDevice;
 
-/// Happ version announced in the User-Agent.
-pub const HAPP_VERSION: &str = "3.22.1";
-/// Clients tried after the Happ User-Agent, in order.
-const EXTRA_AGENTS: [&str; 3] = ["sing-box/1.13.8", "v2RayTun/1.0", "v2rayN/7.0"];
+/// Happ version announced in the User-Agent of a PC or a Mac (Happ desktop 4.7.2, GitHub release
+/// of 2026-10-30): panels gate old clients with an "update the app" placeholder.
+pub const HAPP_VERSION: &str = "4.7.2";
+/// Happ for Android (GitHub release 4.10.1, 2026-11-04) and iOS (App Store 6.4.0, 2026-11-11).
+const HAPP_ANDROID: &str = "4.10.1";
+const HAPP_IOS: &str = "6.4.0";
+/// Clients tried after the device's own, in order, each one whose answer the parser reads:
+/// v2rayN 7.25.6 (`v2rayN/x.y.z`: Remnawave and Marzban want three parts before they serve Xray
+/// JSON), Clash Verge Rev 2.5.10 (Mihomo YAML), sing-box 1.14.4, v2RayTun 5.26.83 (research in
+/// `crates/servers/progress/p-live-fix.md`, 14.11.2026).
+const EXTRA_AGENTS: [&str; 4] = [
+    "v2rayN/7.25.6",
+    "clash-verge/v2.5.10",
+    "sing-box/1.14.4",
+    "v2RayTun/5.26.83",
+];
 /// Environment override of the HWID (development and tests).
 pub const HWID_ENV: &str = "VPNTE_SUBSCRIPTION_HWID";
 
@@ -41,21 +53,21 @@ pub fn device_profile(device: ClientDevice) -> DeviceProfile {
 /// uTLS fingerprint that matches `device` (the emitter's default when the provider gave none).
 pub use crate::common::fields::utls_fingerprint;
 
-/// User-Agents to try for `device`, in order, without repeats (the old mac list sent
-/// `sing-box/1.13.8` twice). The Happ agent carries the same `hwid` as the `x-hwid` header; the
-/// old app put the computed hash there even when the environment override was set (P-38).
-/// `None` (the group does not send its HWID) leaves the HWID segment out of the Happ agent.
+/// User-Agents to try for `device`, in order, without repeats: Happ first (the client panels
+/// serve most), then the device's own second client, then [`EXTRA_AGENTS`]. The Happ agent
+/// carries the same `hwid` as the `x-hwid` header; the old app put the computed hash there even
+/// when the environment override was set (P-38). `None` (the group does not send its HWID) leaves
+/// the HWID segment out of the Happ agent.
 pub fn user_agents(device: ClientDevice, hwid: Option<&str>) -> Vec<String> {
-    let second = match device {
-        ClientDevice::Pc => None,
-        ClientDevice::Android => Some("v2RayTun/1.0/android"),
-        ClientDevice::Ios => Some("v2RayTun/1.0/ios"),
-        ClientDevice::Mac => Some("sing-box/1.13.8"),
+    let (happ, second) = match device {
+        ClientDevice::Pc | ClientDevice::Mac => (HAPP_VERSION, None),
+        ClientDevice::Android => (HAPP_ANDROID, Some("v2RayTun/5.26.83/android")),
+        ClientDevice::Ios => (HAPP_IOS, Some("Streisand/1.7.1")),
     };
     let os = device_profile(device).os;
     let happ = match hwid {
-        Some(hwid) => format!("Happ/{HAPP_VERSION}/{os}/{hwid}"),
-        None => format!("Happ/{HAPP_VERSION}/{os}"),
+        Some(hwid) => format!("Happ/{happ}/{os}/{hwid}"),
+        None => format!("Happ/{happ}/{os}"),
     };
     let mut agents = vec![happ];
     for agent in second.into_iter().chain(EXTRA_AGENTS) {
@@ -64,6 +76,12 @@ pub fn user_agents(device: ClientDevice, hwid: Option<&str>) -> Vec<String> {
         }
     }
     agents
+}
+
+/// The family of a User-Agent (`Happ`, `v2rayN`, `clash-verge`): what a log line and a group's
+/// remembered identity name, never the version or the HWID it may carry.
+pub fn agent_family(agent: &str) -> &str {
+    agent.split('/').next().unwrap_or_default().trim()
 }
 
 /// Identity headers sent with the HWID set: `x-hwid`, `x-device-os`, `x-ver-os`, `x-device-model`.
@@ -248,67 +266,92 @@ mod tests {
         assert!(!is_valid_hwid(&"a".repeat(65)));
     }
 
-    /// §7.2 "UA format": the Happ agent first, per device.
+    /// §7.2 "UA format": the Happ agent first, per device, with the current Happ of each OS
+    /// (p-live-fix 1b).
     #[test]
     fn happ_agent_comes_first() {
         let hwid = legacy_hwid(ClientDevice::Pc, &id("HOST-1", "alice", "WORKGROUP"));
         assert_eq!(
             user_agents(ClientDevice::Pc, Some(&hwid))[0],
-            "Happ/3.22.1/Windows/99c6d48e9a5a5e32"
+            "Happ/4.7.2/Windows/99c6d48e9a5a5e32"
         );
-        let re =
-            regex::Regex::new(r"^Happ/3\.22\.1/(Windows|Android|iOS|macOS)/[a-f0-9]{16}$").unwrap();
+        let re = regex::Regex::new(
+            r"^Happ/(4\.7\.2|4\.10\.1|6\.4\.0)/(Windows|Android|iOS|macOS)/[a-f0-9]{16}$",
+        )
+        .unwrap();
         let oses: Vec<String> = ALL
             .iter()
             .map(|d| {
                 let hwid = legacy_hwid(*d, &MachineIdentity::default());
                 let first = user_agents(*d, Some(&hwid)).remove(0);
-                re.captures(&first).unwrap()[1].to_owned()
+                let caps = re.captures(&first).unwrap();
+                format!("{} {}", &caps[2], &caps[1])
             })
             .collect();
-        assert_eq!(oses, ["Windows", "Android", "iOS", "macOS"]);
+        assert_eq!(
+            oses,
+            [
+                "Windows 4.7.2",
+                "Android 4.10.1",
+                "iOS 6.4.0",
+                "macOS 4.7.2"
+            ]
+        );
         // The override reaches the User-Agent too (P-38).
         assert_eq!(
             user_agents(ClientDevice::Pc, Some("abc"))[0],
-            "Happ/3.22.1/Windows/abc"
+            "Happ/4.7.2/Windows/abc"
         );
     }
 
     /// ru-2026 item 1: a group that does not send its HWID keeps the Happ agent without it.
     #[test]
     fn happ_agent_without_the_hwid() {
-        assert_eq!(
-            user_agents(ClientDevice::Pc, None)[0],
-            "Happ/3.22.1/Windows"
-        );
-        assert_eq!(user_agents(ClientDevice::Ios, None)[0], "Happ/3.22.1/iOS");
+        assert_eq!(user_agents(ClientDevice::Pc, None)[0], "Happ/4.7.2/Windows");
+        assert_eq!(user_agents(ClientDevice::Ios, None)[0], "Happ/6.4.0/iOS");
         assert_eq!(
             user_agents(ClientDevice::Pc, None)[1..],
             user_agents(ClientDevice::Pc, Some("h"))[1..]
         );
     }
 
+    /// p-live-fix 1b: then clients whose answers the parser reads, current versions.
     #[test]
     fn agent_lists_per_device_without_repeats() {
         let h = Some("h");
-        assert_eq!(
-            user_agents(ClientDevice::Pc, h)[1..],
-            ["sing-box/1.13.8", "v2RayTun/1.0", "v2rayN/7.0"]
-        );
+        let tail = [
+            "v2rayN/7.25.6",
+            "clash-verge/v2.5.10",
+            "sing-box/1.14.4",
+            "v2RayTun/5.26.83",
+        ];
+        assert_eq!(user_agents(ClientDevice::Pc, h)[1..], tail);
+        assert_eq!(user_agents(ClientDevice::Mac, h)[1..], tail);
         assert_eq!(
             user_agents(ClientDevice::Android, h)[1..],
             [
-                "v2RayTun/1.0/android",
-                "sing-box/1.13.8",
-                "v2RayTun/1.0",
-                "v2rayN/7.0"
+                "v2RayTun/5.26.83/android",
+                "v2rayN/7.25.6",
+                "clash-verge/v2.5.10",
+                "sing-box/1.14.4",
+                "v2RayTun/5.26.83"
             ]
         );
-        assert_eq!(user_agents(ClientDevice::Ios, h)[1], "v2RayTun/1.0/ios");
-        assert_eq!(
-            user_agents(ClientDevice::Mac, h)[1..],
-            ["sing-box/1.13.8", "v2RayTun/1.0", "v2rayN/7.0"]
-        );
+        assert_eq!(user_agents(ClientDevice::Ios, h)[1], "Streisand/1.7.1");
+        for d in ALL {
+            let mut agents = user_agents(d, h);
+            let n = agents.len();
+            agents.sort();
+            agents.dedup();
+            assert_eq!(agents.len(), n, "{d:?}");
+        }
+    }
+
+    #[test]
+    fn families_carry_no_version_or_hwid() {
+        assert_eq!(agent_family("Happ/4.7.2/Windows/99c6d48e9a5a5e32"), "Happ");
+        assert_eq!(agent_family("clash-verge/v2.5.10"), "clash-verge");
+        assert_eq!(agent_family("Streisand"), "Streisand");
     }
 
     #[test]

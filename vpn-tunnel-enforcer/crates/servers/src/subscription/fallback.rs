@@ -30,7 +30,7 @@ pub(super) async fn with_fallback<T>(
     };
     let mut main_failed = match early {
         Some(Ok(got)) => return Ok((got, Source::Main)),
-        Some(Err(FetchError::Failed(outcome))) => Some(FetchError::Failed(outcome)),
+        Some(Err(err)) if err.outcome().is_some() => Some(err),
         Some(Err(other)) => return Err(other),
         None => None,
     };
@@ -40,25 +40,26 @@ pub(super) async fn with_fallback<T>(
         tokio::select! {
             out = &mut main, if main_failed.is_none() => match out {
                 Ok(got) => return Ok((got, Source::Main)),
-                Err(FetchError::Failed(o)) => main_failed = Some(FetchError::Failed(o)),
+                Err(err) if err.outcome().is_some() => main_failed = Some(err),
                 Err(other) => return Err(other),
             },
             out = &mut fallback, if fallback_failed.is_none() => match out {
                 Ok(got) => return Ok((got, Source::Fallback)),
-                Err(FetchError::Failed(o)) => fallback_failed = Some(FetchError::Failed(o)),
+                Err(err) if err.outcome().is_some() => fallback_failed = Some(err),
                 Err(other) => return Err(other),
             },
         }
-        if let (Some(a), Some(b)) = (main_failed, fallback_failed) {
-            return Err(stronger(a, b));
+        match (main_failed.take(), fallback_failed.take()) {
+            (Some(a), Some(b)) => return Err(stronger(a, b)),
+            (a, b) => (main_failed, fallback_failed) = (a, b),
         }
     }
 }
 
 /// The failure with the stronger evidence (servers §6 order); `a` on a tie.
 pub(super) fn stronger(a: FetchError, b: FetchError) -> FetchError {
-    match (a, b) {
-        (FetchError::Failed(x), FetchError::Failed(y)) if rank(y) < rank(x) => b,
+    match (a.outcome(), b.outcome()) {
+        (Some(x), Some(y)) if rank(y) < rank(x) => b,
         _ => a,
     }
 }
@@ -144,6 +145,13 @@ mod tests {
         assert_eq!(
             out.unwrap_err(),
             FetchError::Failed(FetchOutcome::EmptyList)
+        );
+        // p-live-fix: placeholders keep their words when they are the stronger evidence.
+        let said = Err(FetchError::Said(FetchOutcome::Placeholder, "x".into()));
+        let (out, _) = run((1, failed(net)), (1, said)).await;
+        assert_eq!(
+            out.unwrap_err(),
+            FetchError::Said(FetchOutcome::Placeholder, "x".into())
         );
     }
 

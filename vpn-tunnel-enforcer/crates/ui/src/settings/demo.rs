@@ -180,9 +180,6 @@ impl DemoSettingsApi {
                 restart_required: false,
             },
             diagnostics_export_running: false,
-            // The demo plays an elevated process: every choice is on offer.
-            tun_available: true,
-            capture_available: true,
         };
         let kill = KillSwitchView {
             level: if fresh {
@@ -347,5 +344,11 @@ impl DemoSettingsApi {
     /// The live settings (for tests of the fake itself).
     pub fn live(&self) -> SettingsView {
         self.state.borrow().settings.clone()
+    }
+
+    /// «Всегда» is offered where the helper service keeps it (the demo's helper scene: an
+    /// installed service, older or not; never in an elevated app without it).
+    pub fn set_always_available(&self, on: bool) {
+        self.kill.send_modify(|k| k.always_available = on);
     }
 }

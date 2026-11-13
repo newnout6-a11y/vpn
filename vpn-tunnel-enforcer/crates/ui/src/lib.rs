@@ -10,6 +10,10 @@ mod test_support;
 /// backend crates' `LOCALES` as its extra layers.
 pub const LOCALES: &[(&str, &str)] = &[
     (
+        include_str!("../locales/p-noadmin-ui.ru.json"),
+        include_str!("../locales/p-noadmin-ui.en.json"),
+    ),
+    (
         include_str!("../locales/p-updates.ru.json"),
         include_str!("../locales/p-updates.en.json"),
     ),
@@ -79,6 +83,7 @@ pub const LOCALES: &[(&str, &str)] = &[
 pub mod assets;
 pub mod availability;
 pub mod dashboard;
+pub mod helper;
 pub mod hooks;
 pub mod lang;
 pub mod launch;

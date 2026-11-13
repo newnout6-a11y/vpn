@@ -264,7 +264,10 @@ pub(super) async fn group_health(
         Ok::<_, AppError>(
             doc.profiles
                 .iter()
-                .filter(|r| r.group_id == id && !r.archived_for(ArchiveReason::User))
+                // A stored provider notice is no server to probe (p-live-fix).
+                .filter(|r| {
+                    r.group_id == id && !r.archived_for(ArchiveReason::User) && !r.is_placeholder()
+                })
                 .cloned()
                 .collect::<Vec<_>>(),
         )
@@ -323,7 +326,7 @@ pub(super) async fn list_health(
     let backend = shared.backend.clone();
     let rows = backend.servers.read(|doc| {
         (doc.profiles.iter())
-            .filter(|r| !r.archived_for(ArchiveReason::User))
+            .filter(|r| !r.archived_for(ArchiveReason::User) && !r.is_placeholder())
             .cloned()
             .collect::<Vec<_>>()
     });

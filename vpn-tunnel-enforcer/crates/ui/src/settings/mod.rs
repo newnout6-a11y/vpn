@@ -32,6 +32,8 @@ mod smart_ru;
 mod transfer;
 
 #[cfg(test)]
+mod helper_tests;
+#[cfg(test)]
 mod tests;
 
 pub use api::SettingsApi;

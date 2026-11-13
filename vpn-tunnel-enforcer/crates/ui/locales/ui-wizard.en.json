@@ -57,7 +57,7 @@
         "title": "Mode",
         "lead": "What goes through the tunnel.",
         "hard": "Tunnel",
-        "hardText": "All Windows traffic goes through the tunnel: browsers, games, updates, any program. Needs the helper service.",
+        "hardText": "All Windows traffic goes through the tunnel: browsers, games, updates, any program.",
         "soft": "Proxy",
         "softText": "The app points the Windows system proxy at its own engine. Programs that honour the system proxy go through the VPN, the others go direct."
       },

@@ -33,6 +33,9 @@ pub struct FetchRequest {
     /// The URL came from outside (a deep link, a QR code): it must not lead into the local
     /// network, also through a public name (phones-a11). A URL the user typed may.
     pub from_link: bool,
+    /// The User-Agent family that last brought this subscription's servers: tried first
+    /// (p-live-fix).
+    pub prefer_agent: Option<String>,
 }
 
 impl FetchRequest {
@@ -47,6 +50,7 @@ impl FetchRequest {
             headers: Vec::new(),
             fallback: None,
             from_link: false,
+            prefer_agent: None,
         }
     }
 }
@@ -61,6 +65,7 @@ impl fmt::Debug for FetchRequest {
             .field("headers", &self.headers.len())
             .field("fallback", &self.fallback.is_some())
             .field("from_link", &self.from_link)
+            .field("prefer_agent", &self.prefer_agent)
             .finish()
     }
 }
@@ -101,6 +106,8 @@ pub struct Fetched {
     pub via_fallback: bool,
     /// Mihomo providers fetched and merged.
     pub providers: Vec<ProviderFetch>,
+    /// The User-Agent family that brought the servers (remembered per group, p-live-fix).
+    pub agent: String,
 }
 
 impl Fetched {
@@ -119,6 +126,7 @@ impl fmt::Debug for Fetched {
             .field("fallback", &self.fallback.is_some())
             .field("via_fallback", &self.via_fallback)
             .field("providers", &self.providers)
+            .field("agent", &self.agent)
             .finish()
     }
 }
@@ -158,7 +166,14 @@ impl SubscriptionFetcher {
         let hwid = req
             .send_hwid
             .then(|| req.hwid.as_deref().unwrap_or(self.hwids.get(req.device)));
-        let ctx = Ctx::new(self, req.device, hwid, &req.headers, req.from_link);
+        let ctx = Ctx::new(
+            self,
+            req.device,
+            hwid,
+            &req.headers,
+            req.prefer_agent.as_deref(),
+            req.from_link,
+        );
         let tried = with_fallback(
             ctx.fetch_url(&url, &ctx.own, &plan.routes, plan.doh, cancel),
             fallback.as_ref().map(|f| {
@@ -183,7 +198,7 @@ impl SubscriptionFetcher {
         let mut spare: Option<Spare> = None;
         let (got, source) = match tried {
             Ok(found) => found,
-            Err(FetchError::Failed(outcome)) => {
+            Err(failed) if failed.outcome().is_some() => {
                 match self
                     .through_spare(&ctx, &plan, &url, fallback.as_ref(), cancel)
                     .await?
@@ -192,7 +207,7 @@ impl SubscriptionFetcher {
                         spare = Some(borrowed);
                         found
                     }
-                    None => return Err(FetchError::Failed(outcome)),
+                    None => return Err(failed),
                 }
             }
             Err(other) => return Err(other),
@@ -251,7 +266,7 @@ impl SubscriptionFetcher {
                 .await
             {
                 Ok(got) => return Ok(Some(((got, source), spare))),
-                Err(FetchError::Failed(_)) => {}
+                Err(err) if err.outcome().is_some() => {}
                 Err(other) => return Err(other),
             }
         }
@@ -273,6 +288,7 @@ impl SubscriptionFetcher {
             moved,
             providers: refs,
             route,
+            agent,
         } = got;
         // Names are checked by the system resolver only when the answer came direct.
         let local_dns = route == Some(Route::Direct);
@@ -334,6 +350,7 @@ impl SubscriptionFetcher {
             fallback,
             via_fallback: answer.source == Source::Fallback,
             providers,
+            agent,
         })
     }
 }

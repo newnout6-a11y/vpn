@@ -275,6 +275,8 @@ pub(crate) fn fetch_error_text(why: FetchError) -> String {
         FetchError::Refused => translate_now("ui.servers.fetch.refused", &[]),
         FetchError::HwidRequired => translate_now("ui.servers.fetch.hwidRequired", &[]),
         FetchError::DeviceLimit => translate_now("ui.servers.fetch.deviceLimit", &[]),
+        FetchError::Placeholder => translate_now("ui.servers.fetch.placeholder", &[]),
+        FetchError::Encrypted => translate_now("ui.servers.fetch.encrypted", &[]),
     }
 }
 

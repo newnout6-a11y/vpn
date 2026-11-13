@@ -137,7 +137,6 @@ impl DemoSchedule {
             schedules: Load::Ready(entries),
             next,
             servers: self.servers.clone(),
-            tun_available: false,
         });
     }
 

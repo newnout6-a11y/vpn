@@ -43,7 +43,6 @@ pub fn contexts(backend: &Arc<Backend>, built: &Built) -> Vec<Box<dyn Any>> {
         backend.clone(),
         automation.schedules.clone(),
         automation.scheduler.clone(),
-        backend.tunnel().is_ok_and(|t| t.tun_available()),
     ));
     with_schedule(backend, schedule, built.domains.clone())
 }

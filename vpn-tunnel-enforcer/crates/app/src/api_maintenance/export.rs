@@ -1,8 +1,9 @@
 //! «ZIP»: the diagnostics archive. The Save dialog asks where (`forensics.export.dialogTitle`,
 //! `vpn-tunnel-enforcer-diagnostics-<timestamp>.zip`), then the forensics export packs it as
 //! one operation of the registry (single flight app-wide, resource `diagnostics:export`) while
-//! its stages are published in `state.export`. The archive is written next to the destination
-//! and renamed over it only when complete; the token stops it (`Cancelled`, shown silently).
+//! its stages are published in `state.export`. The archive is written next to the destination,
+//! gets the event journal and this user's helper service lines (`extras`, p-noadmin-ui) and is
+//! renamed over it only when complete; the token stops it (`Cancelled`, shown silently).
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -31,10 +32,12 @@ use vpnte_tunnel::api::{CaptureKind, TunStatus};
 use vpnte_tunnel::runtime::{EngineFeed, EngineStarts};
 use vpnte_ui::maintenance::{ExportDone, ExportView};
 
+use super::extras;
 use super::{Shared, refused};
+use crate::api_logs::{ServiceAnswer, ask_service};
 use crate::services::Engines;
-use crate::support::detached;
 use crate::support::files::{SaveFile, StartFolder, save_file};
+use crate::support::{blocking, detached};
 
 /// What only the tunnel side holds for the archive (pages built without a tunnel have none).
 pub(crate) struct ExportSources {
@@ -116,22 +119,25 @@ pub(crate) async fn pack(
     // Running from the first moment, and Cancel works from it: gathering the inputs runs the
     // engines' `version` (each bounded, sing-box 10 s and Xray 5 s, in parallel).
     publish(&shared, Some(ExportProgress::default()));
-    let inputs = tokio::select! {
+    let gathered = tokio::select! {
         biased;
         () = cancel.cancelled() => None,
-        inputs = inputs(&shared) => Some(inputs),
+        gathered = async { tokio::join!(inputs(&shared), service_lines()) } => Some(gathered),
     };
-    let Some(inputs) = inputs else {
+    let Some((inputs, service)) = gathered else {
         publish(&shared, None);
         return Err(AppError::cancelled());
     };
+    // The forensics pack is written to a staging file next to `dest`; the journal and the
+    // service's lines are appended to it before it takes `dest`'s place.
+    let staging = staging_path(&dest);
     let (progress, mut stages) = watch::channel(ExportProgress::default());
     // The only notice the export sends: its temporary files could not be removed.
     let cleanup_failed = Arc::new(AtomicBool::new(false));
     let flag = cleanup_failed.clone();
     let notices: NoticeSink = Arc::new(move |_| flag.store(true, Ordering::Relaxed));
     let request = ExportRequest {
-        dest,
+        dest: staging.clone(),
         inputs,
         source: Source::Ui,
         progress,
@@ -150,17 +156,71 @@ pub(crate) async fn pack(
     };
     forward.abort();
     let _ = forward.await;
+    let result = match result {
+        Ok(done) => {
+            let root = shared.backend.dirs.root.clone();
+            place(staging, dest.clone(), root, service, None)
+                .await
+                .map(|added| (done, added))
+        }
+        Err(err) => Err(err),
+    };
     publish(&shared, None);
-    let done = result?;
+    let (done, added) = result?;
     tracing::info!(
-        entries = done.entries,
+        entries = done.entries + added,
         excluded = done.excluded.len(),
         "maintenance: diagnostics archive written"
     );
     Ok(ExportDone {
-        path: done.path.display().to_string(),
+        path: dest.display().to_string(),
         cleanup_failed: cleanup_failed.load(Ordering::Relaxed),
     })
+}
+
+/// The staging file of the pack bound for `dest`, in the same folder (the move stays a rename).
+fn staging_path(dest: &Path) -> PathBuf {
+    let name = dest.file_name().map(|n| n.to_string_lossy().into_owned());
+    dest.with_file_name(format!(".{}.pack", name.unwrap_or_default()))
+}
+
+/// Appends the journal of the data folder `root` and the service's lines (`extras::gather`;
+/// `user` = the Windows user name to mask, `None` = `%USERNAME%`) to the finished pack at
+/// `staging` and moves it over `dest`: how many entries were added. On a failure the staging
+/// file goes and `dest` keeps what it held.
+pub(crate) async fn place(
+    staging: PathBuf,
+    dest: PathBuf,
+    root: PathBuf,
+    service: Option<ServiceAnswer>,
+    user: Option<String>,
+) -> AppResult<usize> {
+    blocking(move || {
+        let extras = extras::gather(&root, service, user.as_deref());
+        let placed = extras::append(&staging, &extras, extras::zip_time())
+            .and_then(|()| std::fs::rename(&staging, &dest));
+        match placed {
+            Ok(()) => Ok(extras.len()),
+            Err(err) => {
+                let _ = std::fs::remove_file(&staging);
+                Err(AppError::from(err))
+            }
+        }
+    })
+    .await
+}
+
+/// This user's lines from the helper service while it is installed (through the one gate to
+/// it); `None` when it is not or did not answer: the archive simply has no such entry.
+async fn service_lines() -> Option<ServiceAnswer> {
+    match ask_service().await {
+        Ok(answer @ ServiceAnswer::Lines(_)) => Some(answer),
+        Ok(_) => None,
+        Err(err) => {
+            tracing::warn!(error = %err, "diagnostics export: service lines unavailable");
+            None
+        }
+    }
 }
 
 /// What goes into the archive besides the logs: settings, the last system report, the engines'

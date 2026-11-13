@@ -50,11 +50,6 @@ pub trait SettingsApi: 'static {
     async fn export_diagnostics(&self) -> AppResult<DiagnosticsExport>;
     /// Deletes the stored capture sessions.
     async fn clear_captures(&self) -> AppResult<()>;
-    /// Asks Windows to install the helper service (its one prompt): `Ok(true)` Tunnel mode is
-    /// available now, `Ok(false)` nobody approved the prompt (nothing else happens).
-    async fn install_service(&self) -> AppResult<bool> {
-        Ok(false)
-    }
 
     // ── kill switch ──
     /// Applies, verifies and persists the level; on failure the level stays as it was.

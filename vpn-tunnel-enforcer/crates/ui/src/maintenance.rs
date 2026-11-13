@@ -19,6 +19,8 @@ mod api;
 mod capture;
 mod ctl;
 pub mod demo;
+#[cfg(test)]
+mod helper_tests;
 mod legacy;
 mod model;
 mod network;

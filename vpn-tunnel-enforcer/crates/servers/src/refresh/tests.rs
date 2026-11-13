@@ -508,7 +508,7 @@ async fn pasting_imports_then_refreshes() {
     assert_eq!(e.group(&second.group).device(), Some(ClientDevice::Android));
     // ru-2026 item 1: a new group names its device by the User-Agent, without the HWID headers.
     let last = server.seen().last().cloned().unwrap();
-    assert_eq!(last.header("user-agent"), Some("Happ/3.22.1/Android"));
+    assert_eq!(last.header("user-agent"), Some("Happ/4.10.1/Android"));
     assert_eq!(
         (last.header("x-hwid"), last.header("x-device-os")),
         (None, None)
