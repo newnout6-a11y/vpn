@@ -34,6 +34,7 @@ use vpnte_tunnel::api::TunStatus;
 use vpnte_tunnel::fsm::TunnelSnapshot;
 use vpnte_tunnel::history::History;
 use vpnte_tunnel::lifecycle::{ConnError, Done, KillSwitchView, SessionView, ShutdownReport};
+use vpnte_tunnel::runtime::EngineStarts;
 use vpnte_winnet::clipboard::SecretClipboard;
 use vpnte_winnet::wfp::{
     ExceptionKind, KillSwitchException, ProtectionSettings, ProtectionStatus, RemoveReport, Toggles,
@@ -104,6 +105,17 @@ pub struct Backend {
 pub struct Engines {
     pub singbox: PathBuf,
     pub xray: PathBuf,
+}
+
+impl Backend {
+    /// The engine files the next start runs (added by fix-follow): the tunnel's, which the
+    /// update channel moves while the app runs (p-follow); without a tunnel those of the app
+    /// start.
+    pub fn live_engines(&self) -> Engines {
+        (self.tunnel.get())
+            .and_then(|tunnel| tunnel.engines())
+            .unwrap_or_else(|| self.engines.clone())
+    }
 }
 
 /// The kill switch as the settings page and the start page read it.
@@ -232,6 +244,17 @@ pub trait TunnelOps: Send + Sync + 'static {
     /// (1–3 s) on the new engine. The default: nothing runs here to reconnect.
     async fn reconnect(&self, _reason: String) -> Result<Done, ConnError> {
         Ok(Done::default())
+    }
+    /// The engine files this process's runtime started (added by fix-follow): the update
+    /// channel's trial charges a start to an engine version only when its file ran. The default:
+    /// no runtime here.
+    fn engine_starts(&self) -> Option<watch::Receiver<EngineStarts>> {
+        None
+    }
+    /// The engine files the next start of this process runs (added by fix-follow; the update
+    /// channel moves them, p-follow). The default: those of the app start (`Backend::engines`).
+    fn engines(&self) -> Option<Engines> {
+        None
     }
     /// "Always" can be kept safe here (the helper service holds it); until the service wiring
     /// sets it, a stored "strict" works as "If the VPN drops" (added by ks-a). Default: no.

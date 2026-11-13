@@ -103,7 +103,7 @@ pub(super) async fn run(
     };
     let (reader, mut writer) = tokio::io::split(pipe);
     if frame::write_frame(&mut writer, &welcome).await.is_ok() {
-        serve(&host, &client, protocol, reader, writer, cancel.clone()).await;
+        serve(&host, &client, reader, writer, cancel.clone()).await;
     }
     // Gone without a stop (Quit and Disconnect send one): a start or switch in flight is
     // cancelled, kill-switch changes already asked for finish, and a running session stays for
@@ -244,12 +244,11 @@ async fn drain<W: AsyncWrite + Unpin>(
 
 /// The runtime's status as this connection pushes it: with the last exit, fault and self-test
 /// when the session is this client's (review service-b2), so the app reads them with the status
-/// of a crash; in the negotiated `protocol`.
+/// of a crash. Every protocol this build accepts (2 and 3) carries all of it.
 struct Status {
     rx: tokio::sync::watch::Receiver<vpnte_tunnel::api::TunStatus>,
     host: Arc<Host>,
     user: String,
-    protocol: u32,
 }
 
 impl Status {
@@ -269,17 +268,8 @@ impl Status {
             wire.recent_fault = runtime.recent_fault();
         }
         wire.self_test = self.host.self_test_for(&self.user, &wire);
-        wire.speak(self.protocol);
         wire
     }
-}
-
-/// A reply as the negotiated `protocol` carries it.
-fn spoken(mut reply: Reply, protocol: u32) -> Reply {
-    if let Reply::Status(status) = &mut reply {
-        status.tunnel.speak(protocol);
-    }
-    reply
 }
 
 /// Resolves when the service has a new self-test result (never without self-tests).
@@ -297,7 +287,6 @@ async fn next_self_test(rx: &mut Option<tokio::sync::watch::Receiver<Option<Self
 async fn serve<W: AsyncWrite + Unpin>(
     host: &Arc<Host>,
     client: &ClientInfo,
-    protocol: u32,
     reader: tokio::io::ReadHalf<NamedPipeServer>,
     mut writer: W,
     cancel: CancellationToken,
@@ -307,15 +296,9 @@ async fn serve<W: AsyncWrite + Unpin>(
         rx: runtime.status(),
         host: host.clone(),
         user: client.user.clone(),
-        protocol,
     };
-    // A fresh result is pushed with the status (marked seen first: the first push carries it);
-    // a version-1 client gets no field, so no push for it either.
-    let mut self_tests = host
-        .self_tests
-        .get()
-        .filter(|_| StatusWire::self_test_in(protocol))
-        .cloned();
+    // A fresh result is pushed with the status (marked seen first: the first push carries it).
+    let mut self_tests = host.self_tests.get().cloned();
     if let Some(rx) = self_tests.as_mut() {
         rx.borrow_and_update();
     }
@@ -359,7 +342,7 @@ async fn serve<W: AsyncWrite + Unpin>(
             Some((id, result)) = pending.next(), if !pending.is_empty() => {
                 let removing = matches!(result, Ok(Reply::Done { removing: true }));
                 let frame = match result {
-                    Ok(reply) => ServerFrame::Reply { id, reply: Box::new(spoken(reply, protocol)) },
+                    Ok(reply) => ServerFrame::Reply { id, reply: Box::new(reply) },
                     Err(error) => ServerFrame::Failed { id, error },
                 };
                 let sent = drain(&mut writer, &mut status, &mut events).await

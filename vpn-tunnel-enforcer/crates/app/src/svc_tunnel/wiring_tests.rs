@@ -193,7 +193,17 @@ async fn unelevated_service_refuses_privileged_operations() {
         singbox: root.0.join("1.14.5").join("sing-box.exe"),
         xray: root.0.join("26.11.10").join("xray.exe"),
     };
+    assert_eq!(
+        b.live_engines(),
+        b.engines,
+        "no tunnel yet: the app start's"
+    );
+    let _ = b.tunnel.set(t.clone());
     assert!(t.set_engines(next.clone()));
+    // fix-follow (pfollow-b4): the diagnostics archive and the repair sweep read them as well;
+    // (pfollow-b1) the trial sees what this process's runtime starts.
+    assert_eq!(b.live_engines(), next);
+    assert!(t.engine_starts().is_some());
     let ctx = t.probe_ctx(device);
     assert_eq!((ctx.singbox_exe, ctx.xray_exe), (next.singbox, next.xray));
 

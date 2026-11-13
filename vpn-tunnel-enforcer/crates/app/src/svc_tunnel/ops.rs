@@ -24,7 +24,7 @@ use vpnte_tunnel::lifecycle::{
     ConnError, DisconnectReq, Done, KillSwitchView, SessionView, ShutdownReport, StopCause,
     SwitchReq,
 };
-use vpnte_tunnel::runtime::EngineExes;
+use vpnte_tunnel::runtime::{EngineExes, EngineStarts};
 use vpnte_winnet::wfp::{ExceptionKind, KillSwitchException, RemoveReport, Toggles};
 
 use super::guard::Guard;
@@ -362,6 +362,14 @@ impl TunnelOps for TunnelService {
             xray: engines.xray,
         });
         true
+    }
+
+    fn engine_starts(&self) -> Option<watch::Receiver<EngineStarts>> {
+        Some(self.starts.clone())
+    }
+
+    fn engines(&self) -> Option<Engines> {
+        Some(Engines::from(&*self.exes.borrow()))
     }
 
     async fn reconnect(&self, reason: String) -> Result<Done, ConnError> {

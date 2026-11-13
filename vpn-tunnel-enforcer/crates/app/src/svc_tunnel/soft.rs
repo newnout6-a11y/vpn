@@ -148,4 +148,13 @@ impl SoftProxy for SoftTweaks {
             .any(|r| r.applied == want);
         Ok(owner == ProxyOwner::Ours && points_here)
     }
+
+    async fn taken(&self) -> bool {
+        // The ks-b watch's own test: an unreadable value is not "taken" (a restart then writes
+        // it again and reads it back).
+        let (soft, journal) = (self.soft.clone(), self.journal.clone());
+        tokio::task::spawn_blocking(move || is_taken(&soft, &journal))
+            .await
+            .unwrap_or(false)
+    }
 }

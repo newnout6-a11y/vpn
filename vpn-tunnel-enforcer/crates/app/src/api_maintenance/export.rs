@@ -176,7 +176,8 @@ async fn inputs(shared: &Shared) -> ExportInputs {
     recovery.extend(sources.map(|s| journal(&s.journal)));
     ExportInputs {
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
-        engine_versions: engine_versions(&backend.engines).await,
+        // The files new starts run, not those of the app start (pfollow-b4).
+        engine_versions: engine_versions(&backend.live_engines()).await,
         capture: capture(&settings),
         settings,
         logs_dir: Some(backend.dirs.logs.clone()),

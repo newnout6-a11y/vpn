@@ -220,6 +220,14 @@ fn uninstall(dir: &std::path::Path) -> End {
     End::Done(lines)
 }
 
+/// The logon restore value goes with a cleanup only once the rollback left nothing of the
+/// session's tweaks: whatever failed (a locked `.gitconfig`, an unwritable variable) waits for
+/// its retry at the next sign-in, as the restore module's rule says (pfollow-a4). Machine-wide
+/// policies that need administrator rights are not the sign-in retry's business.
+fn logon_value_goes(tweaks: &system::Step) -> bool {
+    tweaks.is_done() || tweaks.outcome == system::Outcome::NeedsAdmin
+}
+
 /// `--cleanup`: removes what the app put into the system for this user (tweaks, the logon
 /// restore value, autostart) and, when elevated, our WFP objects and the old version's leftovers
 /// (the `sing-tun` firewall rule included). Refused while the app runs: its filters, proxy and
@@ -253,9 +261,9 @@ fn cleanup() -> End {
     let elevated = vpnte_winnet::elevation::is_elevated();
     let mut steps = system::network(&dirs.resources, elevated);
     let tweaks = system::tweaks(&dirs, elevated);
+    let logon_goes = logon_value_goes(&tweaks.step);
     steps.push(tweaks.step);
-    // A proxy that stays the app's keeps its logon restore: the next sign-in retries it.
-    if !tweaks.proxy_stuck {
+    if logon_goes {
         let logon = crate::restore::LogonValue::current();
         steps.push(system::logon_value(logon.as_ref()));
     }

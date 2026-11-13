@@ -135,6 +135,21 @@ async fn failed_finish_undoes_autostart_and_kill_switch() {
     assert!(!shared.backend.settings.read(|s| s.first_run_complete));
 }
 
+/// PR #137 review: a failed finish puts back the autostart Windows had before the step, not
+/// the stored setting (here Windows starts the app while the setting says no).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_finish_restores_the_autostart_windows_had() {
+    let on = FakeAutostart::default();
+    *on.present.lock() = true;
+    let (shared, _, os, _dir) = setup("wizard-undo-os", false, on);
+    assert!(!shared.backend.settings.read(|s| s.autostart));
+    let api = WizardService(shared.clone());
+    let mut bad = choices(Connection::Key, Routing::Soft);
+    bad.key = Some(KeyText("this is not a key".into()));
+    api.finish(bad).await.expect_err("import fails");
+    assert!(*os.present.lock(), "Windows starts the app again");
+}
+
 /// ks-a: the wizard itself refuses nothing about the kill switch any more ("Always" is not a
 /// first-run choice); a picked "Always" is the tunnel's call, which without the helper service
 /// says so in one line, and nothing stays applied.

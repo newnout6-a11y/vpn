@@ -38,9 +38,8 @@ pub use wire::{
 };
 
 /// The protocol version this build speaks. 2 (p-svc-recheck): `StatusWire::self_test`, the
-/// service's leak self-test (`StatusWire::speak` strips it for a version-1 client). 3
-/// (p-smart-lists): `RoutingInputs::rule_sets` (`Request::speak` strips it for a version-2
-/// service).
+/// service's leak self-test. 3 (p-smart-lists): `RoutingInputs::rule_sets` (`Request::speak`
+/// strips it for a version-2 service); a version-1 peer is refused (`negotiate`).
 pub const PROTOCOL: u32 = 3;
 
 /// The version both sides speak, or `None` when they are more than one version apart.

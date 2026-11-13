@@ -17,7 +17,7 @@ use tokio::sync::watch;
 use vpnte_base::{AppResult, Msg};
 
 use super::model::{CloseAction, TrayExtras, TrayItemId, TrayModel, TrayState};
-use super::native::{NativeReport, NativeTray, SPEED_REFRESH, UPDATE_MENU_ID};
+use super::native::{ALWAYS_MENU_ID, NativeReport, NativeTray, SPEED_REFRESH, UPDATE_MENU_ID};
 use crate::hooks::use_watch;
 use crate::lang::{LANG, tr, translate};
 use crate::settings::{KillSwitchLevel, KillSwitchView, SettingsApi};
@@ -289,33 +289,34 @@ pub fn TrayHost(children: Element) -> Element {
     use_muda_event_handler({
         let (api, desktop) = (api.clone(), desktop.clone());
         move |event| {
-            if event.id().0 == UPDATE_MENU_ID {
-                // The offer and its buttons are on the start page and in Settings.
-                show_window(&desktop);
-                return;
-            }
-            let Some(id) = TrayItemId::from_menu_id(&event.id().0) else {
+            let Some(click) = click(&event.id().0) else {
                 return;
             };
-            if !model.peek().item(id).enabled {
+            if click
+                .entry()
+                .is_some_and(|id| !model.peek().item(id).enabled)
+            {
                 return;
             }
-            match id {
-                TrayItemId::Show => show_window(&desktop),
-                TrayItemId::Quit => start_quit(QuitMode::Restore),
-                TrayItemId::Stop if model.peek().turn_off_always => {
+            match click {
+                // The offer and its buttons are on the start page and in Settings.
+                Click::Window | Click::Item(TrayItemId::Show) => show_window(&desktop),
+                Click::TurnOffAlways => {
                     if let Some(settings) = settings.clone() {
                         spawn(turn_off_always(settings, desktop.clone()));
                     }
                 }
-                TrayItemId::Start
-                | TrayItemId::Stop
-                | TrayItemId::CheckRoute
-                | TrayItemId::OpenLogs => {
+                Click::Item(TrayItemId::Quit) => start_quit(QuitMode::Restore),
+                Click::Item(
+                    id @ (TrayItemId::Start
+                    | TrayItemId::Stop
+                    | TrayItemId::CheckRoute
+                    | TrayItemId::OpenLogs),
+                ) => {
                     let (api, desktop) = (api.clone(), desktop.clone());
                     spawn(async move { run_action(api.as_ref(), id, &desktop).await });
                 }
-                TrayItemId::Status | TrayItemId::Ip | TrayItemId::Proxy | TrayItemId::Speed => {}
+                Click::Item(_) => {}
             }
         }
     });
@@ -337,6 +338,36 @@ pub fn TrayHost(children: Element) -> Element {
 
 /// Runs a menu action. Errors are logged, never dropped silently (`tray.ts:133-141`); a failed
 /// start and every route check end with the window shown, where the details are (§3.11).
+/// What a menu click asks for, read from the id its entry was built with, never from a newer
+/// state: the label the user read belongs to that id (pfollow-b2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Click {
+    /// The update line.
+    Window,
+    /// «Выключить «Всегда»» (the Stop entry while "Always" holds a pause).
+    TurnOffAlways,
+    Item(TrayItemId),
+}
+
+impl Click {
+    /// The entry whose enabled flag gates the click (none for the update line).
+    fn entry(self) -> Option<TrayItemId> {
+        match self {
+            Click::Window => None,
+            Click::TurnOffAlways => Some(TrayItemId::Stop),
+            Click::Item(id) => Some(id),
+        }
+    }
+}
+
+fn click(id: &str) -> Option<Click> {
+    match id {
+        UPDATE_MENU_ID => Some(Click::Window),
+        ALWAYS_MENU_ID => Some(Click::TurnOffAlways),
+        id => TrayItemId::from_menu_id(id).map(Click::Item),
+    }
+}
+
 async fn run_action(api: &dyn TrayApi, id: TrayItemId, desktop: &DesktopContext) {
     let result = match id {
         TrayItemId::Start => api.start().await,
@@ -450,5 +481,18 @@ mod tests {
             msg: "x".repeat(10_000),
         };
         assert!(!debug_equals(&typed, "CloseWindow(7)"));
+    }
+
+    /// fix-follow (pfollow-b2): a click does what its entry said when it was drawn: «Выключить
+    /// «Всегда»» and the disconnect have their own ids, nothing is read from a newer state.
+    #[test]
+    fn a_click_does_what_its_entry_said() {
+        assert_eq!(click(ALWAYS_MENU_ID), Some(Click::TurnOffAlways));
+        let stop = TrayItemId::Stop.menu_id();
+        assert_eq!(click(stop), Some(Click::Item(TrayItemId::Stop)));
+        assert_eq!(click(UPDATE_MENU_ID), Some(Click::Window));
+        assert_eq!(click("tray.unknown"), None);
+        assert_eq!(Click::TurnOffAlways.entry(), Some(TrayItemId::Stop));
+        assert_eq!(Click::Window.entry(), None);
     }
 }

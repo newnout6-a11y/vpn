@@ -96,9 +96,9 @@ is identified. Client ->
 Event { event }}`. `PROTOCOL = 3` (2 added `StatusWire::self_test`, 3 `RoutingInputs::rule_sets`);
 `negotiate(client, service)` = the lower one while they differ by at most one (so a version-1
 client is refused now). Evolution: add requests / replies / events / optional fields only; the
-newer side speaks the negotiated version (`StatusWire::speak(protocol)` strips what version 1
-lacks, on every status the service sends; `Request::speak(protocol)` strips the rule sets for a
-version-2 service, applied by `pipe::client` to every request after `Hello`); structs refuse
+newer side speaks the negotiated version (`Request::speak(protocol)` strips the rule sets for a
+version-2 service, applied by `pipe::client` to every request after `Hello`; every status a
+service of this build sends carries `self_test`, which versions 2 and 3 both know); structs refuse
 unknown fields.
 ```rust
 pub enum Request { Hello(Hello), Start(Box<TunnelStart>), Stop(StopTunnel), Restart(Box<TunnelStart>),

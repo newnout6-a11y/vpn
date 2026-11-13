@@ -8,7 +8,6 @@ edition = "2024"
 rust-version = "1.99"
 license = "MIT"
 publish = false
-authors = ["Vladimir Sakharov <newnout6@gmail.com>"]
 repository = "https://github.com/newnout6-a11y/vpn"
 
 # One version of every dependency for the whole workspace. Crates opt in with

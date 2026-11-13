@@ -39,7 +39,6 @@
         "offer": "{{name}} {{from}} → {{to}}",
         "offerTested": "{{name}} {{from}} → {{to}} (tested by us {{day}})",
         "install": "Install",
-        "when": "In Proxy mode the new engine takes over without restarting the app.",
         "now": "Now (reconnects for 1–3 s)",
         "next": "At the next connection"
       },

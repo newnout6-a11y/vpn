@@ -7,12 +7,12 @@ use std::time::Duration;
 
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::KillSwitchLevel;
 use vpnte_probes::leak::{
-    CurlOutcome, LeakEnv, PhysicalAddr, SelfTestResult, SelfTestVerdict, SelfTester, WatchConfig,
-    verdict,
+    CurlOutcome, LeakEnv, LeakEvent, PhysicalAddr, SelfTestResult, SelfTestVerdict, SelfTester,
+    WatchConfig, verdict,
 };
 use vpnte_winnet::adapters::NetChange;
 
@@ -61,14 +61,14 @@ struct Rig {
     cancel: CancellationToken,
 }
 
-/// A running re-check: `gate` open or closed, `leaky` adapters, background runs every `every`.
-fn rig(gate: bool, leaky: bool, every: Duration) -> Rig {
+/// A re-check over the fakes: `gate` open or closed, `leaky` adapters, background runs every
+/// `every`; with its filter-check count.
+fn recheck(gate: bool, leaky: bool, every: Duration) -> (Arc<Recheck>, Arc<AtomicUsize>) {
     let ticks = Arc::new(AtomicUsize::new(0));
     let counted = ticks.clone();
     let env = Arc::new(FakeEnv {
         leaky: AtomicBool::new(leaky),
     });
-    let results = watch::channel(None).0;
     let recheck = Arc::new(Recheck {
         tick: Arc::new(move || {
             counted.fetch_add(1, Ordering::SeqCst);
@@ -80,16 +80,23 @@ fn rig(gate: bool, leaky: bool, every: Duration) -> Rig {
         },
         gate: Arc::new(move || gate),
         level: Arc::new(|| KillSwitchLevel::Standard),
-        results: results.clone(),
+        results: watch::channel(None).0,
         settle: Duration::from_millis(50),
     });
+    (recheck, ticks)
+}
+
+/// A running re-check (see [`recheck`]).
+fn rig(gate: bool, leaky: bool, every: Duration) -> Rig {
+    let (recheck, ticks) = recheck(gate, leaky, every);
+    let results = recheck.results.subscribe();
     let wakes = watch::channel(0).0;
     let (changes, rx) = mpsc::channel(4);
     let cancel = CancellationToken::new();
     tokio::spawn(recheck.run(wakes.subscribe(), Some(rx), cancel.clone()));
     Rig {
         ticks,
-        results: results.subscribe(),
+        results,
         wakes,
         changes,
         cancel,
@@ -170,4 +177,20 @@ async fn a_release_clears_the_result() {
     assert!(until(|| latest(&r).is_some()).await);
     r.cancel.cancel();
     assert!(until(|| latest(&r).is_none()).await);
+}
+
+/// PR #137 review: once the self-tests' stream closed nothing arrives any more, and a closed
+/// stream answers at once: the loop ends instead of spinning until the filters are released.
+#[tokio::test]
+async fn a_closed_self_test_stream_ends_the_loop() {
+    let (recheck, ticks) = recheck(true, false, QUIET);
+    let closed = broadcast::channel::<LeakEvent>(1).1;
+    let wakes = watch::channel(0).0;
+    let (mut resumes, mut changes) = (wakes.subscribe(), None);
+    let cancel = CancellationToken::new();
+    let ended = recheck.follow(closed, |_| {}, &mut resumes, &mut changes, &cancel);
+    tokio::time::timeout(Duration::from_secs(5), ended)
+        .await
+        .expect("ended without a release");
+    assert_eq!(ticks.load(Ordering::SeqCst), 0);
 }

@@ -158,7 +158,7 @@ impl WizardApi for WizardService {
 struct Applied {
     /// The level that was in force before.
     level: Option<KillSwitchLevel>,
-    /// The stored autostart value before.
+    /// The autostart Windows had before (the stored value when it could not be read).
     autostart: Option<bool>,
 }
 
@@ -202,8 +202,10 @@ async fn apply(
         tunnel.set_kill_switch_level(choices.kill_switch).await?;
         applied.level = Some(level);
     }
-    if actions::read_autostart(shared).await != Some(choices.autostart) {
-        let before = backend.settings.read(|s| s.autostart);
+    let os = actions::read_autostart(shared).await;
+    if os != Some(choices.autostart) {
+        // What Windows did goes back on a failure, not the stored value: they can differ.
+        let before = os.unwrap_or_else(|| backend.settings.read(|s| s.autostart));
         actions::apply_autostart(shared, choices.autostart).await?;
         applied.autostart = Some(before);
     }

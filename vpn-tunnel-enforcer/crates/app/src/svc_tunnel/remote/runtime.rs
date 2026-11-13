@@ -64,8 +64,9 @@ impl Remote {
     }
 
     /// Takes the kept session over: fresh numbers (it may have restarted since the connect),
-    /// its status shown, and the start events the lifecycle expects of a run it started.
-    async fn take_over(&self) -> Result<StartReceipt, TunError> {
+    /// its status shown, and the start events the lifecycle expects of a run it started (or of
+    /// one the runtime brought back by itself: [`Remote::adopt`]).
+    pub(super) async fn take_over(&self) -> Result<StartReceipt, TunError> {
         let reply = self.refresh().await.map_err(tun_error)?;
         let Some(kept) = reply.kept else {
             self.unpark();

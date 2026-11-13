@@ -371,6 +371,9 @@ pub struct TrayModel { status, tooltip: Vec<Msg>, tooltip_speed: Option<Msg>, it
 pub struct TrayExtras { pub always: bool, pub update: Option<String> }  // p-follow: read by TrayHost from the
     // root Rc<dyn SettingsApi> (kill-switch view: Strict + always_available) and Rc<dyn UpdatesApi> (app.version)
 pub const UPDATE_MENU_ID: &str = "tray.update";  // the update line (muda insert/remove above «Показать окно»)
+pub const ALWAYS_MENU_ID: &str = "tray.turnOffAlways";  // fix-follow: the Stop entry while it turns
+    // "Always" off is built again with this id (`tray.stop` = always the disconnect): a click does
+    // what the label said when it was drawn
 pub enum CloseAction { Hide, Quit }                              // TrayState::close_action(): the «Сворачивать в трей» setting
 #[component] pub fn TrayHost(children: Element) -> Element;      // wraps the Shell; provides TrayContext
 #[derive(Clone, Copy)] pub struct TrayContext { pub model: Memo<TrayModel>, pub native: Signal<Option<NativeReport>> }

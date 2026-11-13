@@ -9,7 +9,8 @@
 //! lifecycle's own connect of the same upstream takes it over (`start`), so nothing stops it on
 //! the way; Quit and Disconnect send a stop as before. A link lost without the app asking (the
 //! service restarted and resumes its session) is shown as ended, then re-attached the same way
-//! (`reattach`, p-follow).
+//! (`reattach`, p-follow); a drop the kill switch held stays paused meanwhile, and the resumed
+//! run joins that pause as its recovery (`adopt`, fix-follow).
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +19,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, oneshot, watch};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{Notice, OutboundFault};
+use vpnte_base::types::{KillSwitchLevel, Notice, OutboundFault};
 use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::store::Store;
 use vpnte_probes::leak::SelfTestResult;
@@ -400,6 +401,19 @@ impl Remote {
     /// The parked session's status (local proxy kind, name) for the take-over's target.
     pub(super) fn parked(&self) -> Option<TunStatus> {
         self.0.state.lock().parked.clone()
+    }
+
+    /// The parked session joins the lifecycle's paused one (a drop the kill switch held when
+    /// the service restarted): the start events of a run the runtime brought back by itself, so
+    /// the pause ends as after an engine restart. `false`: it ended meanwhile.
+    pub(super) async fn adopt(&self) -> bool {
+        self.take_over().await.is_ok()
+    }
+
+    /// The service's kill switch keeps blocking when its tunnel goes ("If the VPN drops" and
+    /// "Always").
+    pub(super) fn holds(&self) -> bool {
+        self.0.protection.read(|d| d.settings.level) != KillSwitchLevel::Off
     }
 
     /// Forgets a parked session (and ends a wait for one): what comes next replaces or stops it.

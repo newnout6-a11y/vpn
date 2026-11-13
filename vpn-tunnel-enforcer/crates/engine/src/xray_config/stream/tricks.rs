@@ -151,14 +151,24 @@ mod tests {
     }
 
     /// Why finalmask: the bundled 26.11.9 still reads the freedom `fragment` but warns that it
-    /// is deprecated in favour of `streamSettings.finalmask.tcp`.
+    /// is deprecated in favour of `streamSettings.finalmask.tcp`. Xray writes that warning from
+    /// its log goroutine, and `run -test` may exit before it is flushed (seen in CI): one of a
+    /// few runs showing it proves the point.
     #[test]
     fn freedom_fragment_is_deprecated_here() {
         let config = json!({ "outbounds": [{ "protocol": "freedom", "settings": {
             "fragment": { "packets": "tlshello", "length": "100-200", "interval": "10-20" } } }] });
-        if let Some(out) = xray_test(&config) {
-            assert!(out.contains("finalmask"), "{out}");
+        let mut outs = Vec::new();
+        for _ in 0..5 {
+            let Some(out) = xray_test(&config) else {
+                return;
+            };
+            if out.contains("finalmask") {
+                return;
+            }
+            outs.push(out);
         }
+        panic!("no finalmask deprecation in 5 runs: {outs:#?}");
     }
 
     /// A key with tricks of its own keeps them on Xray: no "stealth does not apply" warning,

@@ -42,6 +42,12 @@ pub trait SoftProxy: Send + Sync {
     async fn rollback(&self) -> AppResult<()>;
     /// The system points at `addr` / `kind` (the read-back that proves Soft: our mixed port).
     async fn is_configured(&self, addr: &str, kind: ProxyKind) -> AppResult<bool>;
+    /// Another program set the system proxy since ours was applied, read now (ks-b); `false`
+    /// when that cannot be read. A restart leaves such a proxy to the user instead of taking it
+    /// back; anything else is written again and read back.
+    async fn taken(&self) -> bool {
+        false
+    }
 }
 
 /// Public-IP monitoring and leak self-tests.

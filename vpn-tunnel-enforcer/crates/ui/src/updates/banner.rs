@@ -222,7 +222,6 @@ fn EngineStrip(offer: EngineOffer, busy: bool, job: JobSlot<()>) -> Element {
                         p { "{notes}" }
                     }
                 }
-                p { class: "swiss-notice-body", {t!("ui.update.engine.when")} }
                 div { class: "swiss-confirm-actions",
                     button { r#type: "button", class: "swiss-confirm-yes", disabled: busy,
                         onclick: move |_| {
@@ -239,6 +238,32 @@ fn EngineStrip(offer: EngineOffer, busy: bool, job: JobSlot<()>) -> Element {
                         {t!("ui.update.later")}
                     }
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use vpnte_base::Msg;
+    use vpnte_base::i18n::Lang;
+
+    /// fix-follow (pfollow-b3): the engine offer promises nothing about where the new engine
+    /// reaches (an elevated app without the helper service keeps its engines until it
+    /// restarts); the line after the install says where it does, from the real reach.
+    #[test]
+    fn the_engine_offer_makes_no_restart_promise() {
+        crate::test_locales::init_locales();
+        assert_eq!(
+            Msg::new("ui.update.engine.when").render(Lang::Ru),
+            "ui.update.engine.when",
+            "the claim is gone"
+        );
+        for lang in [Lang::Ru, Lang::En] {
+            for key in ["offer", "offerTested", "install", "now", "next"] {
+                let text = Msg::new(format!("ui.update.engine.{key}")).render(lang);
+                assert!(!text.to_lowercase().contains("перезапуск"), "{text}");
+                assert!(!text.to_lowercase().contains("restart"), "{text}");
             }
         }
     }

@@ -234,7 +234,12 @@ async fn engines(shared: &Arc<Shared>) -> StepOutcome {
     if probes_running(shared) {
         return StepOutcome::blocked(Msg::new("app.maintenance.repair.checkRunning"));
     }
-    let (host, dirs) = (shared.host.clone(), engine_dirs(&shared.backend.engines));
+    // The app start's folders and the live ones: after an engine update either may hold one.
+    let mut dirs = engine_dirs(&shared.backend.engines);
+    dirs.extend(engine_dirs(&shared.backend.live_engines()));
+    dirs.sort();
+    dirs.dedup();
+    let host = shared.host.clone();
     engines_outcome(blocking(move || host.sweep(&dirs, &ENGINE_NAMES)).await)
 }
 

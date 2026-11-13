@@ -3,7 +3,7 @@
 //! bundled binaries through `vpnte_engine` (its slot egress probes wait for the app's
 //! [`HandshakeGate`]); the actor tests use fakes.
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use std::{io, iter};
@@ -208,11 +208,38 @@ pub struct EngineExes {
     pub xray: PathBuf,
 }
 
+/// The engine files a runtime started, per engine. The update channel's trial charges a start
+/// to an engine version only when that version's file ran for it: an in-place server switch
+/// keeps the running processes, and Tunnel mode through the helper service runs none here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EngineStarts {
+    /// sing-box cores (attempts: a file that does not even spawn counts as well).
+    pub singbox: Started,
+    /// Xray slot sets, one per session start that needs Xray.
+    pub xray: Started,
+}
+
+/// The starts of one engine: how many so far, and the file of the last one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Started {
+    pub count: u64,
+    pub exe: Option<PathBuf>,
+}
+
+impl Started {
+    fn bump(&mut self, exe: &Path) {
+        self.count += 1;
+        self.exe = Some(exe.to_path_buf());
+    }
+}
+
 /// The real engines over `vpnte_engine`.
 pub struct RealEngines {
     /// Read at every engine start: the update channel may switch an engine while the app runs
     /// (a running sing-box or Xray slot set keeps the file it started from).
     exes: watch::Receiver<EngineExes>,
+    /// Every file started, as it starts.
+    starts: watch::Sender<EngineStarts>,
     logs: Option<PathBuf>,
     gate: Option<Arc<dyn HandshakeGate>>,
     feed: EngineFeed,
@@ -234,6 +261,7 @@ impl RealEngines {
     pub fn following(exes: watch::Receiver<EngineExes>, logs: Option<PathBuf>) -> Self {
         Self {
             exes,
+            starts: watch::channel(EngineStarts::default()).0,
             logs,
             gate: None,
             feed: EngineFeed::default(),
@@ -250,6 +278,11 @@ impl RealEngines {
         vpnte_engine::mihomo_process::sweep_homes(&runs);
         self.mihomo = Some((exe, runs));
         self
+    }
+
+    /// The engine files this runtime started so far ([`EngineStarts`]).
+    pub fn starts(&self) -> watch::Receiver<EngineStarts> {
+        self.starts.subscribe()
     }
 
     /// Every egress probe through a slot first waits for `gate` (the app's handshake budget).
@@ -385,17 +418,17 @@ async fn echo(
 #[async_trait]
 impl Engines for RealEngines {
     fn spawn_core(&self, config: &[u8]) -> io::Result<Arc<dyn CoreProc>> {
-        let core = SingBoxProcess::spawn(&self.singbox_exe(), config, self.logs.as_deref())?;
+        let exe = self.singbox_exe();
+        self.starts.send_modify(|s| s.singbox.bump(&exe));
+        let core = SingBoxProcess::spawn(&exe, config, self.logs.as_deref())?;
         self.feed.attach(config, core.subscribe_lines());
         Ok(Arc::new(core))
     }
 
     fn slots(&self, events: mpsc::Sender<XrayEvent>) -> Box<dyn Slots> {
-        Box::new(XraySupervisor::new(
-            self.xray_exe(),
-            self.logs.clone(),
-            events,
-        ))
+        let exe = self.xray_exe();
+        self.starts.send_modify(|s| s.xray.bump(&exe));
+        Box::new(XraySupervisor::new(exe, self.logs.clone(), events))
     }
 
     fn singbox_exe(&self) -> PathBuf {
@@ -597,5 +630,24 @@ mod exes_tests {
         let fixed = RealEngines::new(exes("pinned").singbox, exes("pinned").xray, None);
         assert_eq!(fixed.singbox_exe(), exes("pinned").singbox);
         assert_eq!(fixed.xray_exe(), exes("pinned").xray);
+    }
+
+    /// fix-follow (pfollow-b1): each engine file a start runs is counted with its path, even a
+    /// file that does not spawn; nothing else bumps the counts (no file here exists, so nothing
+    /// runs).
+    #[tokio::test]
+    async fn every_engine_start_is_counted_with_its_file() {
+        let (tx, rx) = watch::channel(exes("no-such-dir-a"));
+        let engines = RealEngines::following(rx, None);
+        let starts = engines.starts();
+        assert_eq!(*starts.borrow(), EngineStarts::default());
+        assert!(engines.spawn_core(b"{}").is_err(), "no such file");
+        tx.send_replace(exes("no-such-dir-b"));
+        drop(engines.slots(mpsc::channel(1).0));
+        let seen = starts.borrow().clone();
+        assert_eq!(seen.singbox.count, 1);
+        assert_eq!(seen.singbox.exe, Some(exes("no-such-dir-a").singbox));
+        assert_eq!(seen.xray.count, 1);
+        assert_eq!(seen.xray.exe, Some(exes("no-such-dir-b").xray));
     }
 }

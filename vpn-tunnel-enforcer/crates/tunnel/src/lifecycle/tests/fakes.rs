@@ -604,6 +604,8 @@ pub struct SoftState {
     pub apply_gate: Option<Gate>,
     /// The next apply panics (a broken collaborator).
     pub apply_panics: bool,
+    /// The value held now is another program's, read as such (ks-b "taken").
+    pub foreign: bool,
 }
 
 #[derive(Default)]
@@ -659,6 +661,11 @@ impl super::super::SoftProxy for FakeSoft {
             return Err(AppError::new(ErrorKind::Internal));
         }
         Ok(s.applied.as_ref() == Some(&(addr.to_owned(), kind)))
+    }
+
+    async fn taken(&self) -> bool {
+        let s = self.state.lock();
+        s.foreign && !s.unreadable
     }
 }
 

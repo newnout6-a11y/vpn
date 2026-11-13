@@ -17,6 +17,18 @@ pub const SPEED_REFRESH: Duration = Duration::from_secs(1);
 /// one of the fixed [`TrayItemId`] entries).
 pub const UPDATE_MENU_ID: &str = "tray.update";
 
+/// muda id of the Stop entry while it turns "Always" off: its own id, so a click does what the
+/// label said when it was clicked, even when the state changed while the menu was open.
+pub const ALWAYS_MENU_ID: &str = "tray.turnOffAlways";
+
+/// The muda id entry `id` is built with (see [`ALWAYS_MENU_ID`]).
+pub fn menu_id(id: TrayItemId, always: bool) -> &'static str {
+    match id {
+        TrayItemId::Stop if always => ALWAYS_MENU_ID,
+        id => id.menu_id(),
+    }
+}
+
 /// The model rendered in one language: what the tray should show.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rendered {
@@ -29,6 +41,8 @@ pub struct Rendered {
     pub badge: Badge,
     /// The update line, while a version is offered.
     pub update: Option<String>,
+    /// The Stop entry turns "Always" off ([`ALWAYS_MENU_ID`]).
+    pub always: bool,
 }
 
 impl Rendered {
@@ -44,6 +58,7 @@ impl Rendered {
             tooltip_speed: model.tooltip_speed.as_ref().map(|m| m.render(lang)),
             badge: model.status.badge(),
             update: (model.update.as_ref()).map(|m| m.render(lang).replace('&', "&&")),
+            always: model.turn_off_always,
         }
     }
 
@@ -64,6 +79,8 @@ pub struct Changes {
     pub badge: Option<Badge>,
     /// The update line changed: `Some(None)` removes it.
     pub update: Option<Option<String>>,
+    /// The Stop entry's meaning changed: it is built again with the id of the new one.
+    pub always: Option<bool>,
 }
 
 impl Changes {
@@ -74,6 +91,7 @@ impl Changes {
             && self.tooltip.is_none()
             && self.badge.is_none()
             && self.update.is_none()
+            && self.always.is_none()
     }
 }
 
@@ -111,10 +129,14 @@ impl Differ {
         if prev.map(|p| &p.update) != Some(&next.update) {
             changes.update = Some(next.update.clone());
         }
+        if prev.map(|p| p.always) != Some(next.always) {
+            changes.always = Some(next.always);
+        }
         let speed_only = prev.is_some_and(|p| p.tooltip_head == next.tooltip_head)
             && changes.enabled.is_empty()
             && changes.badge.is_none()
             && changes.update.is_none()
+            && changes.always.is_none()
             && changes.texts.iter().all(|(id, _)| *id == TrayItemId::Speed);
         let too_soon = self
             .speed_at
@@ -181,7 +203,9 @@ impl NativeTray {
         let items: Vec<MenuItem> = TrayItemId::ALL
             .into_iter()
             .zip(&rendered.items)
-            .map(|(id, (text, enabled))| MenuItem::with_id(id.menu_id(), text, *enabled, None))
+            .map(|(id, (text, enabled))| {
+                MenuItem::with_id(menu_id(id, rendered.always), text, *enabled, None)
+            })
             .collect();
         let separators: Vec<Option<PredefinedMenuItem>> = TrayItemId::ALL
             .into_iter()
@@ -265,6 +289,28 @@ impl NativeTray {
         }
     }
 
+    /// Builds the Stop entry again, in its place, with the id of what it does now: a new entry
+    /// first, then the old one goes (a failed insert leaves the menu as it was).
+    fn rebuild_stop(&mut self, always: bool) {
+        let slot = TrayItemId::Stop as usize;
+        let old = &self.items[slot];
+        let item = MenuItem::with_id(
+            menu_id(TrayItemId::Stop, always),
+            old.text(),
+            old.is_enabled(),
+            None,
+        );
+        let at = position(TrayItemId::Stop) + usize::from(self.update.is_some());
+        if let Err(err) = self.menu.insert(&item, at) {
+            tracing::warn!(%err, "tray stop entry not rebuilt");
+            return;
+        }
+        if let Err(err) = self.menu.remove(old) {
+            tracing::warn!(%err, "old tray stop entry not removed");
+        }
+        self.items[slot] = item;
+    }
+
     /// Brings the tray to `model` with the fewest Win32 calls.
     pub fn apply(&mut self, model: &TrayModel, lang: Lang, now: Instant) {
         let changes = self.differ.changes(&Rendered::of(model, lang), now);
@@ -278,6 +324,9 @@ impl NativeTray {
         }
         if let Some(update) = changes.update {
             self.set_update(update);
+        }
+        if let Some(always) = changes.always {
+            self.rebuild_stop(always);
         }
         if let Some(tooltip) = changes.tooltip {
             match self.icon.set_tooltip(Some(&tooltip)) {
@@ -315,10 +364,15 @@ impl NativeTray {
 
 /// Menu position of the update line: the entries (and separators) before «Показать окно».
 fn update_position() -> usize {
+    position(TrayItemId::Show)
+}
+
+/// Menu position of entry `id` without the update line: the entries and separators before it.
+fn position(id: TrayItemId) -> usize {
     TrayItemId::ALL
         .into_iter()
-        .take_while(|id| *id != TrayItemId::Show)
-        .map(|id| 1 + usize::from(id.separator_after()))
+        .take_while(|item| *item != id)
+        .map(|item| 1 + usize::from(item.separator_after()))
         .sum()
 }
 
@@ -448,5 +502,36 @@ mod tests {
         assert!(differ.changes(&offered(Some("2.0.1")), t0).is_empty());
         assert_eq!(differ.changes(&offered(None), t0).update, Some(None));
         assert_eq!(update_position(), 5);
+    }
+
+    /// fix-follow (pfollow-b2): when the Stop entry starts or stops turning "Always" off, it
+    /// is built again with the id of its new meaning (one change of its own), so a click on the
+    /// label the user read keeps that label's meaning.
+    #[test]
+    fn the_stop_entry_changes_its_id_with_its_meaning() {
+        crate::test_locales::init_locales();
+        let t0 = Instant::now();
+        let always = TrayExtras {
+            always: true,
+            update: None,
+        };
+        let paused = TrayState {
+            paused: true,
+            kill_switch: true,
+            ..TrayState::default()
+        };
+        let render = |state: &TrayState| {
+            Rendered::of(&TrayModel::build_with(state, &always, false), Lang::Ru)
+        };
+        let mut differ = Differ::default();
+        differ.shown(render(&connected(0)), t0);
+        let pause = differ.changes(&render(&paused), t0);
+        assert_eq!(pause.always, Some(true));
+        assert_eq!(menu_id(TrayItemId::Stop, true), ALWAYS_MENU_ID);
+        assert!(differ.changes(&render(&paused), t0).is_empty());
+        let back = differ.changes(&render(&connected(0)), t0);
+        assert_eq!(back.always, Some(false));
+        assert_eq!(menu_id(TrayItemId::Stop, false), "tray.stop");
+        assert_eq!(position(TrayItemId::Stop), 7);
     }
 }

@@ -17,7 +17,8 @@ const DEFAULT_HOP_S: u32 = 30;
 const GECKO_PACKET_SIZE: &str = "512-1200";
 
 /// The outbound of a Hysteria2 profile (without its tag). TLS is always on (Xray requires it);
-/// an insecure profile gets here only with a pinned certificate (selection checks first).
+/// an insecure profile gets here only with a pinned certificate or certificate names (selection
+/// checks first; see `tls_common`).
 pub(super) fn outbound(p: &Profile) -> Result<Value, XrayConfigError> {
     let Kind::Hysteria2 {
         password,

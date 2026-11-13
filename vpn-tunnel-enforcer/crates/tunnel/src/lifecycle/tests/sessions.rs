@@ -133,6 +133,7 @@ async fn a_restart_leaves_a_taken_system_proxy_alone() {
     assert_eq!(h.soft.state.lock().applies, 1, "kept without a write");
     let taken = Some(("10.9.8.7:3128".to_owned(), ProxyKind::Http));
     h.soft.state.lock().applied = taken.clone();
+    h.soft.state.lock().foreign = true;
     restart().await.expect("restart");
     h.settle().await;
     assert_eq!(h.rt.script.lock().restarts, 2);
@@ -143,6 +144,35 @@ async fn a_restart_leaves_a_taken_system_proxy_alone() {
         "never written back by a restart"
     );
     assert_eq!(h.snap().state, TunnelState::Connected);
+}
+
+/// fix-follow (pfollow-a3): a read-back that only says "not ours" is no proof that another
+/// program took the system proxy (the read may have failed): a same-port restart writes it
+/// again and reads it back, and when that fails it fails closed instead of reading connected.
+#[tokio::test]
+async fn a_restart_takes_no_unproven_proxy_for_taken() {
+    let h = Harness::new();
+    h.lc.connect(soft(10808, ProxyKind::Socks5, Owner::Manual))
+        .await
+        .expect("soft session");
+    let restart = || {
+        h.lc.restart_with_last("settings changed: stealth", Owner::Manual, Source::Ui)
+    };
+    let ours = Some((soft_addr(SOFT_PORT), ProxyKind::Http));
+    let unproven = Some(("10.9.8.7:3128".to_owned(), ProxyKind::Http));
+    h.soft.state.lock().applied = unproven.clone();
+    restart().await.expect("restart");
+    h.settle().await;
+    assert_eq!(h.soft.state.lock().applied, ours, "written again");
+    assert_eq!(h.soft.state.lock().applies, 2);
+    assert_eq!(h.snap().state, TunnelState::Connected);
+
+    h.soft.state.lock().applied = unproven;
+    h.soft.state.lock().apply_failures = 1;
+    assert!(restart().await.is_err(), "not confirmed without its proof");
+    h.settle().await;
+    assert_eq!(h.soft.state.lock().applies, 3);
+    assert_ne!(h.snap().state, TunnelState::Connected);
 }
 
 /// NOADMIN.md §2: disconnect rolls the tweaks back before the engine stops.

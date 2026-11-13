@@ -313,7 +313,9 @@ pub struct ServerChoice { pub server: VpnProfile, pub country: Option<String> }
 pub trait ProfileSource: Send + Sync { fn resolve(&self, id: Option<&str>) -> Option<ServerChoice>; }
 #[async_trait] pub trait SoftProxy: Send + Sync { fn applied(&self) -> Option<bool>;
     async fn apply(&self, addr: &str, kind: ProxyKind) -> AppResult<()>; async fn rollback(&self) -> AppResult<()>;
-    async fn is_configured(&self, addr: &str, kind: ProxyKind) -> AppResult<bool>; }   // read-back proof of Soft
+    async fn is_configured(&self, addr: &str, kind: ProxyKind) -> AppResult<bool>;   // read-back proof of Soft
+    async fn taken(&self) -> bool { false } }   // fix-follow: another program's proxy, read as such
+    // (ks-b); a same-port restart leaves only that alone, anything else is applied and read back
 pub trait Monitor: Send + Sync { fn suppress_leak_tests(&self, span: Duration); fn start(&self, generation: Option<u64>);
     fn stop(&self); fn egress_ip(&self) -> Option<String>; }
 #[async_trait] pub trait Forensics: Send + Sync { fn start_session(&self, mode: SessionMode, target: &str);
@@ -484,7 +486,12 @@ impl RealEngines { pub fn new(singbox: PathBuf, xray: PathBuf, logs: Option<Path
     pub fn following(exes: watch::Receiver<EngineExes>, logs: Option<PathBuf>) -> Self  // read at every engine
         // start: an engine the update channel switched runs from the next start on (p-follow)
     pub fn with_gate(self, gate: Arc<dyn HandshakeGate>) -> Self     // every slot echo request waits for a slot
+    pub fn starts(&self) -> watch::Receiver<EngineStarts>   // fix-follow: the files this runtime started
     pub fn feed(&self) -> EngineFeed }   // take it before the engines move into RuntimeDeps
+#[derive(Debug, Clone, Default, PartialEq, Eq)] pub struct EngineStarts { pub singbox: Started, pub xray: Started }
+#[derive(Debug, Clone, Default, PartialEq, Eq)] pub struct Started { pub count: u64, pub exe: Option<PathBuf> }
+    // every sing-box core spawn (attempts too) and Xray slot set, with its file: the update
+    // channel's trial counts a start for a version only when that version's file ran
 #[derive(Clone)] pub struct EngineFeed;  // the sing-box cores of this runtime, for in-process consumers
 impl EngineFeed { pub fn subscribe_lines(&self) -> broadcast::Receiver<Arc<str>>;  // RAW lines of every core
                                          // (crash restarts included; backlog 1024): never log them

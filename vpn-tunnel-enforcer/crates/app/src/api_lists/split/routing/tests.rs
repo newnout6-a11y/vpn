@@ -243,7 +243,8 @@ fn add_subscription(backend: &crate::services::Backend, routing: &str) -> String
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn offer_preview_import() {
     let dir = TempDir::new("lists-routing-import");
-    let backend = backend(&dir, FakeTunnel::new(false));
+    let tunnel = FakeTunnel::new(false);
+    let backend = backend(&dir, tunnel.clone());
     backend
         .rules
         .update(|doc| {
@@ -320,6 +321,13 @@ async fn offer_preview_import() {
         ]
     );
     assert!(backend.settings.read(|s| s.smart_ru_split));
+    // PR #137 review: the tunnel is told, as by the Settings page (a running one restarts).
+    let told = tunnel.applied.lock().clone();
+    assert!(
+        matches!(told.as_slice(), [(old, new)] if !old.smart_ru_split && new.smart_ru_split),
+        "{} changes told",
+        told.len()
+    );
 
     let err = api.import_routing(preview.token).await.expect_err("spent");
     assert_eq!(err.kind, ErrorKind::Conflict);

@@ -126,3 +126,19 @@ fn locale_fragments_are_empty_and_identical() {
     assert_eq!(ru, en);
     assert!(ru.is_empty());
 }
+
+/// fix-follow (pfollow-a4): `--cleanup` removes the logon restore value only after a complete
+/// rollback of the session's tweaks; a failed Git or variable restore keeps it for the next
+/// sign-in's retry, whether or not the system proxy itself came back.
+#[test]
+fn the_logon_value_waits_for_a_complete_rollback() {
+    use system::{AREA_TWEAKS, Outcome, Step};
+    let step = |outcome| Step {
+        area: AREA_TWEAKS,
+        outcome,
+    };
+    assert!(logon_value_goes(&step(Outcome::Done("2 restored".into()))));
+    assert!(logon_value_goes(&step(Outcome::NeedsAdmin)));
+    let git_left = step(Outcome::Failed("git proxy not restored".into()));
+    assert!(!logon_value_goes(&git_left));
+}

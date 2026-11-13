@@ -52,27 +52,46 @@ impl Recheck {
             move || level(),
             None,
         );
-        let mut events = leaks.subscribe();
         self.results.send_replace(None);
+        let events = leaks.subscribe();
+        let trigger = |why| leaks.trigger(why);
+        self.follow(events, trigger, &mut resumes, &mut changes, &cancel)
+            .await;
+        // Released: the result described filters that are gone now.
+        self.results.send_replace(None);
+    }
+
+    /// The loop of [`Recheck::run`]: until `cancel`, or until the self-tests' stream closed
+    /// (nothing arrives any more, and a closed stream answers at once: the loop would spin).
+    async fn follow(
+        &self,
+        mut events: broadcast::Receiver<LeakEvent>,
+        trigger: impl Fn(&'static str),
+        resumes: &mut watch::Receiver<u64>,
+        changes: &mut Option<mpsc::Receiver<NetChange>>,
+        cancel: &CancellationToken,
+    ) {
         loop {
             let why = tokio::select! {
-                () = cancel.cancelled() => break,
+                () = cancel.cancelled() => return,
                 Ok(()) = resumes.changed() => "resume",
-                Some(_) = next_change(&mut changes) => "network change",
+                Some(_) = next_change(changes) => "network change",
                 event = events.recv() => {
+                    if matches!(event, Err(broadcast::error::RecvError::Closed)) {
+                        tracing::warn!("leak self-tests ended: re-checks stop");
+                        return;
+                    }
                     self.take(event).await;
                     continue;
                 }
             };
             self.tick_now(why).await;
             tokio::select! {
-                () = cancel.cancelled() => break,
+                () = cancel.cancelled() => return,
                 () = tokio::time::sleep(self.settle) => {}
             }
-            leaks.trigger(why);
+            trigger(why);
         }
-        // Released: the result described filters that are gone now.
-        self.results.send_replace(None);
     }
 
     /// A finished background run: published; a leak re-verifies the filters at once.

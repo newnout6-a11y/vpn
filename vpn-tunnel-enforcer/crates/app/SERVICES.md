@@ -105,6 +105,8 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
 | `reclaim_proxy()` | ks-b: Dashboard «Вернуть»: the journalled system proxy written again, original baseline kept (default: nothing to do) |
 | `set_engines(engines)` | p-follow: `svc_update` after an engine install, a revert or a trial rollback: the runtime's next engine start, the server probes and the proxies' key checks run them; `false` (default, and an elevated process holding WFP) = the start's engines stay until the app restarts |
 | `reconnect(reason)` | p-follow: «Сейчас (переподключение на 1–3 с)» after an engine switch: `restart_with_last` of the running session (default: nothing runs here) |
+| `engine_starts()` | fix-follow: `svc_update` trial: the engine files this process's runtime started (`RealEngines::starts`); a start counts for a version only when its file ran (default: `None`, no runtime here) |
+| `engines()` | fix-follow: `Backend::live_engines()` (the diagnostics archive, the repair sweep): the engine files the next start runs (default: `None` = `Backend::engines`, those of the app start) |
 
 ## What `app-tunnel` must provide (`svc_tunnel::build(&Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>>`)
 - Every method above, exactly as documented on the trait. Runs inside the tokio runtime.
@@ -261,7 +263,9 @@ session running the old engine gets «Сейчас (переподключени
 idle one the line «… заработает при следующем подключении в режиме «Прокси»». An elevated process
 holding the WFP filters keeps the start's engines (its permits name those paths): there the old
 «после перезапуска приложения» lines stay. Tunnel mode through the helper service runs the
-service's own pinned engines (unchanged). The trial watch (`svc_update::trial`) counts each
-Proxy-mode start against the versions active when it began (every start, against the app start's
-versions, in a process that keeps its engines). Security releases: one notice through
+service's own pinned engines (unchanged). The trial watch (`svc_update::trial`) counts what ran
+(fix-follow): at each settle of the tunnel, every engine file this process's runtime started since
+the last one (`TunnelOps::engine_starts`) for the version whose exe it is, while that version is
+the active one on trial; an in-place server switch and a Tunnel-mode start in the service start
+none here. Security releases: one notice through
 `backend.notifier`, no «Пропустить», never forced.

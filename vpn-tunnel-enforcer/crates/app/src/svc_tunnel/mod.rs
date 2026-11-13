@@ -22,6 +22,7 @@ mod peers;
 mod probe;
 mod remote;
 mod soft;
+mod takeover;
 #[cfg(test)]
 mod tests;
 mod traffic;
@@ -35,8 +36,7 @@ use tokio::sync::{Notify, broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_automation::{hardening, tweaks};
 use vpnte_base::AppResult;
-use vpnte_base::types::{Level, Notice, Owner, ProxyKind};
-use vpnte_core::ops::Source;
+use vpnte_base::types::{Level, Notice};
 use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
 use vpnte_probes::diagnostics::{SnapshotReason, Snapshotter};
@@ -44,14 +44,12 @@ use vpnte_probes::ip_monitor::IpMonitor;
 use vpnte_probes::local_proxy::{LocalProxyDetector, ScanOptions};
 use vpnte_probes::public_ip::IpReader;
 use vpnte_servers::store::Servers;
-use vpnte_service::proto::KeptSession;
 use vpnte_tunnel::api::Runtime;
-use vpnte_tunnel::api::StopOptions;
 use vpnte_tunnel::fsm::FaultState;
-use vpnte_tunnel::lifecycle::{ConnectTarget, Lifecycle, LifecycleDeps, SystemForeignVpn};
+use vpnte_tunnel::lifecycle::{Lifecycle, LifecycleDeps, SystemForeignVpn};
 use vpnte_tunnel::runtime::{
-    Capture, EngineExes, EngineFeed, ProxyCapture, RealEngines, RuntimeDeps, Timings, TunCapture,
-    TunnelHandle,
+    Capture, EngineExes, EngineFeed, EngineStarts, ProxyCapture, RealEngines, RuntimeDeps, Timings,
+    TunCapture, TunnelHandle,
 };
 
 use crate::services::{Backend, Engines, TunnelOps};
@@ -126,6 +124,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         None => engines,
     };
     let feed = engines.feed();
+    let starts = engines.starts();
     let local = TunnelHandle::spawn(RuntimeDeps {
         engines: Arc::new(engines),
         // No TUN without the protection, i.e. without elevation: a Hard start answers
@@ -254,16 +253,24 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         let (automation, live) = (automation.clone(), live.clone());
         let remote = remote.clone();
         async move {
-            recover(b.clone(), lifecycle, guard, soft, automation.clone()).await;
+            recover(
+                b.clone(),
+                lifecycle.clone(),
+                guard,
+                soft,
+                automation.clone(),
+            )
+            .await;
             // On its own task: a service still starting with Windows must not hold the rest up.
             tokio::spawn({
                 let (automation, cancel) = (automation.clone(), b.shutdown.child_token());
                 let losses = remote.losses();
                 async move {
                     if let Some(kept) = remote.attach().await {
-                        take_over(&remote, &automation, kept).await;
+                        let connect = |t| takeover::connect_kept(&automation, t);
+                        takeover::take_over(&remote, &lifecycle, kept, connect).await;
                     }
-                    reattach(&remote, &automation, losses, cancel).await;
+                    takeover::reattach(&remote, &lifecycle, &automation, losses, cancel).await;
                 }
             });
             let (servers, notifier) = (b.servers.clone(), b.notifier.clone());
@@ -295,6 +302,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         settings: b.settings.clone(),
         servers: b.servers.clone(),
         exes,
+        starts,
         detector: Arc::clone(&proxy_capture),
         pending: Mutex::new(None),
         rule_sets,
@@ -348,6 +356,8 @@ struct TunnelService {
     /// The engine paths every engine start of this process reads (the update channel moves
     /// them).
     exes: watch::Sender<EngineExes>,
+    /// The engine files this process's runtime started (the update channel's trial).
+    starts: watch::Receiver<EngineStarts>,
     /// The Soft capture: the runtime owns its mixed port, the detector skips it (see [`make_detector`]).
     detector: Arc<ProxyCapture>,
     /// The token of the user's connect / switch in flight, cancelled by "Cancel".
@@ -406,55 +416,6 @@ async fn recover(
         Err(e) => tracing::error!(error = %e, "startup recovery did not run"),
     }
     lifecycle.fault(FaultState::Unknown);
-}
-
-/// A session the service kept after this app's window crashed (owner question 23) is taken over
-/// by the lifecycle's own connect of the same upstream: it shows as connected again, with its
-/// history and notices. If that connect fails, the session is stopped rather than left running
-/// unseen.
-async fn take_over(remote: &remote::Remote, automation: &Automation, kept: KeptSession) {
-    let target = match (kept.server_id, kept.local_proxy) {
-        (Some(id), _) => ConnectTarget::DirectVpn {
-            profile_id: Some(id),
-        },
-        (None, Some(addr)) => ConnectTarget::LocalProxy {
-            addr: addr.to_string(),
-            kind: (remote.parked().and_then(|s| s.proxy_type)).unwrap_or(ProxyKind::Socks5),
-        },
-        (None, None) => return,
-    };
-    let taken = automation
-        .coord
-        .start(target, Owner::Manual, Source::Lifecycle)
-        .await;
-    if let Err(err) = taken {
-        tracing::warn!(error = %err.user_msg().key, "kept session not taken over: stopped");
-        if remote.parked().is_some() {
-            let receipt = vpnte_tunnel::api::Runtime::stop(remote, StopOptions::default()).await;
-            tracing::info!(ok = receipt.ok, "kept session stopped");
-        }
-    }
-}
-
-/// A link to the helper service lost without the app asking (the service restarted; the session
-/// shows as ended meanwhile): the session the restarted service resumes is taken over as at
-/// start-up, once per loss.
-async fn reattach(
-    remote: &remote::Remote,
-    automation: &Automation,
-    mut losses: watch::Receiver<u64>,
-    cancel: CancellationToken,
-) {
-    loop {
-        tokio::select! {
-            () = cancel.cancelled() => return,
-            changed = losses.changed() => if changed.is_err() { return },
-        }
-        tracing::info!("helper service link lost: re-attaching");
-        if let Some(kept) = remote.reattach().await {
-            take_over(remote, automation, kept).await;
-        }
-    }
 }
 
 /// Protection notices (blocked traffic, skipped exceptions, unconfirmed protection) as toasts.

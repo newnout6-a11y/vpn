@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::Mutex;
 use vpnte_base::i18n::Lang;
 use vpnte_base::{AppError, AppResult};
+use vpnte_core::settings::Settings;
 use vpnte_engine::routing::RulesDoc;
 use vpnte_engine::routing::domain::{DomainAction, DomainPattern};
 use vpnte_profiles::text::{RoutingValue, parse_routing};
@@ -55,7 +56,7 @@ impl Imports {
 
     /// Applies the plan of preview `token`: its rules appended to the user's list (a site the
     /// user has a rule for meanwhile keeps the user's rule), Smart RU switched on when asked.
-    /// Blocking: store writes.
+    /// Blocking: store writes, and a running tunnel taking the Smart RU change.
     pub(super) fn import(&self, backend: &Backend, token: u64) -> AppResult<RoutingImported> {
         let plan = match &*self.latest.lock() {
             Some((latest, plan)) if *latest == token => plan.clone(),
@@ -64,7 +65,9 @@ impl Imports {
         let (added, over_limit) = backend.rules.update(|doc| apply(doc, &plan.rules))?;
         let smart_ru_on = plan.smart_ru && !backend.settings.read(|s| s.smart_ru_split);
         if smart_ru_on {
+            let old = backend.settings.snapshot();
             backend.settings.update(|s| s.smart_ru_split = true)?;
+            tell_tunnel(backend, old);
         }
         // Spent: a second click on the same preview asks for a new one.
         let mut latest = self.latest.lock();
@@ -77,6 +80,20 @@ impl Imports {
             over_limit,
             smart_ru_on,
         })
+    }
+}
+
+/// Smart RU switched on by an import reaches a running tunnel as a change on the Settings page
+/// does (`apply_settings_change`: a restart while connected, nothing while idle). On the
+/// import's blocking thread, so the import answers once the tunnel took it.
+fn tell_tunnel(backend: &Backend, old: Settings) {
+    let (Ok(tunnel), Ok(runtime)) = (backend.tunnel(), tokio::runtime::Handle::try_current())
+    else {
+        return;
+    };
+    let new = backend.settings.snapshot();
+    if let Err(err) = runtime.block_on(tunnel.apply_settings_change(old, new)) {
+        tracing::warn!(error = %err.user_msg().key, "Smart RU not applied to the running tunnel");
     }
 }
 

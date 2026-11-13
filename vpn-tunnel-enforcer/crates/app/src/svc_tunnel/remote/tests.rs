@@ -32,11 +32,16 @@ use super::Remote;
 use crate::api_settings::test_support::TempDir;
 use crate::svc_core::docs::ProtectionDoc;
 
+mod takeover;
+
 /// A runtime that runs whatever it is asked to, at once.
 struct FakeRuntime {
     status: watch::Sender<TunStatus>,
     events: broadcast::Sender<TunnelEvent>,
     starts: AtomicU32,
+    stops: AtomicU32,
+    /// Stops that kept the kill switch's block.
+    kept: AtomicU32,
 }
 
 impl FakeRuntime {
@@ -45,6 +50,8 @@ impl FakeRuntime {
             status: watch::channel(TunStatus::default()).0,
             events: broadcast::channel(64).0,
             starts: AtomicU32::new(0),
+            stops: AtomicU32::new(0),
+            kept: AtomicU32::new(0),
         })
     }
 }
@@ -80,7 +87,11 @@ impl Runtime for FakeRuntime {
             warnings: Vec::new(),
         })
     }
-    async fn stop(&self, _: StopOptions) -> StopReceipt {
+    async fn stop(&self, opts: StopOptions) -> StopReceipt {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        if opts.preserve_protection {
+            self.kept.fetch_add(1, Ordering::SeqCst);
+        }
         self.status.send_replace(TunStatus::default());
         let _ = self
             .events

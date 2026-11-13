@@ -48,20 +48,6 @@ pub struct StatusWire {
     pub self_test: Option<SelfTestResult>,
 }
 
-impl StatusWire {
-    /// `protocol` carries `self_test` (version 2 on).
-    pub fn self_test_in(protocol: u32) -> bool {
-        protocol >= 2
-    }
-
-    /// What `protocol` carries: a version-1 client refuses the fields it does not know.
-    pub fn speak(&mut self, protocol: u32) {
-        if !Self::self_test_in(protocol) {
-            self.self_test = None;
-        }
-    }
-}
-
 /// Which engine runs and why (`reason` is the engine crate's serialized `SelectReason`, for
 /// display; `None` for a local upstream proxy).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -628,19 +614,16 @@ mod tests {
         }
     }
 
-    /// p-svc-recheck: protocol 2 carries the self-test and reads it back; version 1 never sees it.
+    /// p-svc-recheck: every status carries the self-test and reads it back. A version-1 client,
+    /// which would refuse the field, is refused at `Hello` (this build speaks 2 and 3 only).
     #[test]
-    fn the_self_test_speaks_protocol_2_only() {
-        let mut v2 = with_self_test();
-        v2.speak(2);
-        let json = serde_json::to_string(&v2).expect("json");
+    fn every_status_carries_the_self_test() {
+        let status = with_self_test();
+        let json = serde_json::to_string(&status).expect("json");
         assert!(json.contains("\"selfTest\""), "{json}");
         let back: StatusWire = serde_json::from_str(&json).expect("reads back");
-        assert_eq!(back, v2);
-        let mut v1 = with_self_test();
-        v1.speak(1);
-        let json = serde_json::to_string(&v1).expect("json");
-        assert!(!json.contains("selfTest"), "{json}");
+        assert_eq!(back, status);
+        assert_eq!(crate::proto::negotiate(1, crate::proto::PROTOCOL), None);
     }
 
     /// A version-1 service's status (no field) reads as "no self-test" in this build.

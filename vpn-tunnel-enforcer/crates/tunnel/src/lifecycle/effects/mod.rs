@@ -445,10 +445,16 @@ async fn point_tweaks(ctx: &Ctx, applied: Option<u16>) -> Result<(), Failure> {
             } else {
                 None
             };
+            // Still journalled as ours, yet another program's value holds now: taken. A
+            // read-back that merely is not ours (an unreadable proxy) proves nothing: written
+            // again and read back, so it fails closed (pfollow-a3).
+            let taken = match read_back {
+                Some(Ok(false)) if deps.soft.applied() == Some(true) => deps.soft.taken().await,
+                _ => false,
+            };
             match read_back {
                 Some(Ok(true)) => Ok(()),
-                // Still journalled as ours, yet the system shows another value: taken.
-                Some(Ok(false)) if deps.soft.applied() == Some(true) => {
+                _ if taken => {
                     tracing::info!("system proxy taken by another program: left alone");
                     Ok(())
                 }
