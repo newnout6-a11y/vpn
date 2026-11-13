@@ -31,7 +31,7 @@ mod wiring_tests;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Notify, broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_automation::{hardening, tweaks};
 use vpnte_base::AppResult;
@@ -44,12 +44,14 @@ use vpnte_probes::ip_monitor::IpMonitor;
 use vpnte_probes::local_proxy::{LocalProxyDetector, ScanOptions};
 use vpnte_probes::public_ip::IpReader;
 use vpnte_servers::store::Servers;
+use vpnte_service::proto::KeptSession;
 use vpnte_tunnel::api::Runtime;
 use vpnte_tunnel::api::StopOptions;
 use vpnte_tunnel::fsm::FaultState;
 use vpnte_tunnel::lifecycle::{ConnectTarget, Lifecycle, LifecycleDeps, SystemForeignVpn};
 use vpnte_tunnel::runtime::{
-    Capture, EngineFeed, ProxyCapture, RealEngines, RuntimeDeps, Timings, TunCapture, TunnelHandle,
+    Capture, EngineExes, EngineFeed, ProxyCapture, RealEngines, RuntimeDeps, Timings, TunCapture,
+    TunnelHandle,
 };
 
 use crate::services::{Backend, Engines, TunnelOps};
@@ -108,13 +110,14 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
     // One Soft capture for the whole process: the runtime writes its mixed port, the local-proxy
     // detector reads it so a scan can never pick our own inbound as the upstream.
     let proxy_capture = Arc::new(ProxyCapture::new());
-    // The slot egress probe takes a slot of the handshake budget every check shares.
-    let engines = RealEngines::new(
-        b.engines.singbox.clone(),
-        b.engines.xray.clone(),
-        Some(b.dirs.logs.clone()),
-    )
-    .with_gate(Arc::new(gate::BudgetGate));
+    // The engine paths follow the update channel (`TunnelOps::set_engines`): every engine start
+    // reads them. The slot egress probe takes a slot of the handshake budget every check shares.
+    let exes = watch::Sender::new(EngineExes {
+        singbox: b.engines.singbox.clone(),
+        xray: b.engines.xray.clone(),
+    });
+    let engines = RealEngines::following(exes.subscribe(), Some(b.dirs.logs.clone()))
+        .with_gate(Arc::new(gate::BudgetGate));
     // WP-12 lab build only: the lab gate and the mihomo engine (AmneziaWG in Proxy mode).
     #[cfg(feature = "lab")]
     let engines = match b.engines.singbox.parent() {
@@ -190,7 +193,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         snapshots,
         b.shutdown.clone(),
     ));
-    let proxies = peers::proxies(b, runtime.status());
+    let proxies = peers::proxies(b, runtime.status(), exes.subscribe());
     let lifecycle = Lifecycle::spawn(LifecycleDeps {
         runtime: Arc::new(runtime.clone()),
         profiles: Arc::new(peers::ServerSource {
@@ -253,8 +256,14 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
             recover(b.clone(), lifecycle, guard, soft, automation.clone()).await;
             // On its own task: a service still starting with Windows must not hold the rest up.
             tokio::spawn({
-                let automation = automation.clone();
-                async move { take_over(&remote, &automation).await }
+                let (automation, cancel) = (automation.clone(), b.shutdown.child_token());
+                let losses = remote.losses();
+                async move {
+                    if let Some(kept) = remote.attach().await {
+                        take_over(&remote, &automation, kept).await;
+                    }
+                    reattach(&remote, &automation, losses, cancel).await;
+                }
             });
             let (servers, notifier) = (b.servers.clone(), b.notifier.clone());
             automation
@@ -283,7 +292,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         domains: domains.clone(),
         settings: b.settings.clone(),
         servers: b.servers.clone(),
-        engines: b.engines.clone(),
+        exes,
         detector: Arc::clone(&proxy_capture),
         pending: Mutex::new(None),
         rule_sets,
@@ -297,6 +306,15 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         feed,
         journal,
     })
+}
+
+impl From<&EngineExes> for Engines {
+    fn from(exes: &EngineExes) -> Self {
+        Self {
+            singbox: exes.singbox.clone(),
+            xray: exes.xray.clone(),
+        }
+    }
 }
 
 /// The local-proxy detector for one scan. Our own mixed inbound is always skipped (NOADMIN §2):
@@ -325,7 +343,9 @@ struct TunnelService {
     domains: Arc<DomainHistory>,
     settings: Arc<Store<Settings>>,
     servers: Arc<Servers>,
-    engines: Engines,
+    /// The engine paths every engine start of this process reads (the update channel moves
+    /// them).
+    exes: watch::Sender<EngineExes>,
     /// The Soft capture: the runtime owns its mixed port, the detector skips it (see [`make_detector`]).
     detector: Arc<ProxyCapture>,
     /// The token of the user's connect / switch in flight, cancelled by "Cancel".
@@ -390,10 +410,7 @@ async fn recover(
 /// by the lifecycle's own connect of the same upstream: it shows as connected again, with its
 /// history and notices. If that connect fails, the session is stopped rather than left running
 /// unseen.
-async fn take_over(remote: &remote::Remote, automation: &Automation) {
-    let Some(kept) = remote.attach().await else {
-        return;
-    };
+async fn take_over(remote: &remote::Remote, automation: &Automation, kept: KeptSession) {
     let target = match (kept.server_id, kept.local_proxy) {
         (Some(id), _) => ConnectTarget::DirectVpn {
             profile_id: Some(id),
@@ -413,6 +430,27 @@ async fn take_over(remote: &remote::Remote, automation: &Automation) {
         if remote.parked().is_some() {
             let receipt = vpnte_tunnel::api::Runtime::stop(remote, StopOptions::default()).await;
             tracing::info!(ok = receipt.ok, "kept session stopped");
+        }
+    }
+}
+
+/// A link to the helper service lost without the app asking (the service restarted; the session
+/// shows as ended meanwhile): the session the restarted service resumes is taken over as at
+/// start-up, once per loss.
+async fn reattach(
+    remote: &remote::Remote,
+    automation: &Automation,
+    mut losses: watch::Receiver<u64>,
+    cancel: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            changed = losses.changed() => if changed.is_err() { return },
+        }
+        tracing::info!("helper service link lost: re-attaching");
+        if let Some(kept) = remote.reattach().await {
+            take_over(remote, automation, kept).await;
         }
     }
 }

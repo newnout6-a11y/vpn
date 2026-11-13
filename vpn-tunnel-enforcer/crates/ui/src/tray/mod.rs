@@ -4,7 +4,9 @@
 //! the app's root) turns it into a [`TrayModel`], keeps the notification-area icon in sync by
 //! diff, routes menu clicks to the [`TrayApi`] actions, shows the window on a left click, hides
 //! the window on close (asking first while protection is on) and runs the quit cleanup before
-//! the window goes away.
+//! the window goes away. Besides the app's feed it reads the root's Settings and Updates backends
+//! ([`TrayExtras`]): in "Always" the paused menu turns "Always" off, and an offered app version
+//! gets a line that opens the window.
 mod demo;
 mod host;
 mod icon;
@@ -16,10 +18,12 @@ pub(crate) use host::set_webview_hidden;
 pub use host::{QuitMode, TrayApi, TrayContext, TrayHost, hide_to_tray, show_window};
 pub use icon::{TrayIcons, base_icon, ico_entries, tray_icon_size, variant, variant_png};
 pub use model::{
-    Badge, CloseAction, ProxyStatus, TOOLTIP_MAX, Transition, TrayItem, TrayItemId, TrayModel,
-    TrayState, TrayStatus, TunnelState, fit_tooltip, format_speed,
+    Badge, CloseAction, ProxyStatus, TOOLTIP_MAX, Transition, TrayExtras, TrayItem, TrayItemId,
+    TrayModel, TrayState, TrayStatus, TunnelState, fit_tooltip, format_speed,
 };
-pub use native::{Changes, Differ, NativeCalls, NativeReport, NativeTray, Rendered, SPEED_REFRESH};
+pub use native::{
+    Changes, Differ, NativeCalls, NativeReport, NativeTray, Rendered, SPEED_REFRESH, UPDATE_MENU_ID,
+};
 
 #[cfg(test)]
 mod tests {
@@ -40,10 +44,19 @@ mod tests {
                 engine_running: true,
                 ..DemoTray::scene(status)
             };
-            for quitting in [false, true] {
-                let model = TrayModel::build(&state, quitting);
+            let always = TrayExtras {
+                always: true,
+                update: Some("2.0.1".into()),
+            };
+            for (extras, quitting) in [
+                (TrayExtras::default(), false),
+                (TrayExtras::default(), true),
+                (always, false),
+            ] {
+                let model = TrayModel::build_with(&state, &extras, quitting);
                 msgs.extend(model.tooltip);
                 msgs.extend(model.tooltip_speed);
+                msgs.extend(model.update);
                 msgs.extend(model.items.into_iter().map(|item| item.label));
             }
             msgs.push(Msg::new(format!("ui.tray.demo.status.{}", status.key())));

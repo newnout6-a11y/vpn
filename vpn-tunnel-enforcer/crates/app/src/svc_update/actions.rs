@@ -148,10 +148,10 @@ impl Updates {
             .await
         {
             Ok(done) => {
-                let msg = Msg::new("app.update.engineInstalled")
+                let restart = Msg::new("app.update.engineInstalled")
                     .arg("name", name)
                     .arg("version", done.version);
-                self.note(msg, false);
+                self.engine_switched(&entry.id, restart);
                 Ok(())
             }
             Err(err) => {

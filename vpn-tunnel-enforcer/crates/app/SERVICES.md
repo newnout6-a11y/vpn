@@ -103,6 +103,8 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
 | `always_available()` | ks-a: Settings kill switch ("Always" offered only with the helper service), maintenance repair (default `false`) |
 | `proxy_taken()` | ks-b: Dashboard `proxy_taken` line: another program holds the system proxy our proxy-mode session set (default: never) |
 | `reclaim_proxy()` | ks-b: Dashboard «Вернуть»: the journalled system proxy written again, original baseline kept (default: nothing to do) |
+| `set_engines(engines)` | p-follow: `svc_update` after an engine install, a revert or a trial rollback: the runtime's next engine start, the server probes and the proxies' key checks run them; `false` (default, and an elevated process holding WFP) = the start's engines stay until the app restarts |
+| `reconnect(reason)` | p-follow: «Сейчас (переподключение на 1–3 с)» after an engine switch: `restart_with_last` of the running session (default: nothing runs here) |
 
 ## What `app-tunnel` must provide (`svc_tunnel::build(&Arc<Backend>) -> AppResult<Arc<dyn TunnelOps>>`)
 - Every method above, exactly as documented on the trait. Runs inside the tokio runtime.
@@ -116,7 +118,11 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
   to the service over its pipe (`remote::Remote`; the pipe's server must be the installed exe),
   proxy mode stays in-process — and the kill switch is applied by the service (no in-process WFP,
   also when elevated); "Always" is offered. A session the service kept after the window crashed is
-  taken over by a connect of the same upstream once start-up recovery ran (`take_over`).
+  taken over by a connect of the same upstream once start-up recovery ran (`take_over`). A link
+  lost without a stop (the service restarted) shows the session ended, then re-attaches the same
+  way (`Remote::reattach`, p-follow): connects again for about 22 s (Windows restarts a crashed
+  service after 5, then 10 s), then up to 10 s for the session the restarted service resumes,
+  whose own events are held back until the take-over (any start or stop of the app ends the wait).
 - Leak self-tests and re-checks (RU audit item 11, p-svc-recheck, `svc_tunnel/leaks.rs`): every TUN
   session, in this process or in the service, gets the DNS canary after a wake or a network change;
   the 30 s self-test and the immediate filter check run where the filters are: here when this
@@ -219,7 +225,10 @@ value of a newer session. `root::run` calls `restore::at_start(root)` after `svc
 run's value goes (the start-up recovery owns what is left) and a hidden top-level window rolls
 the Soft values back at `WM_ENDSESSION(TRUE)` (logoff, shutdown) without the variables
 broadcast. A process on an overridden data dir (`VPNTE_DATA_DIR`) never touches the value: the
-sign-in process would read the default journal. Decisions: `progress/p-proxy-restore.md`.
+sign-in process would read the default journal. `--setup uninstall` and `--cleanup` remove the
+value after their tweak rollback (step "logon restore"; p-follow), unless the system proxy stays
+the app's (uninstall stops then; `--cleanup` leaves it for the next sign-in). Decisions:
+`progress/p-proxy-restore.md`.
 
 ## Update channel (`svc_update`, package p-updates)
 `root::contexts` adds `svc_update::contexts(&backend)`: one `Rc<dyn vpnte_ui::updates::UpdatesApi>`
@@ -236,6 +245,14 @@ this app to exit (code 73). The next start reads `pending.json`: «Обновл�
 with the kept installer. Engines: `svc_core::build` resolves `Backend::engines` through
 `vpnte_update::store::EngineStore` (the active downloaded version while usable, else bundled);
 «Установить» installs into the store after `AppCheck` (version + our configs through the new
-engine's own check), effective from the next app start (the tunnel holds fixed paths); the trial
-watch (`svc_update::trial`) counts this run's starts of an engine on trial. Security releases: one
-notice through `backend.notifier`, no «Пропустить», never forced.
+engine's own check). The switch reaches the tunnel without an app restart (p-follow,
+`svc_update::switch`): `svc_core::resolve_engines` -> `TunnelOps::set_engines`; a Proxy-mode
+session running the old engine gets «Сейчас (переподключение на 1–3 с)» / «При следующем
+подключении» (`Note::switch_now`, `UpdatesApi::switch_engine_now` -> `TunnelOps::reconnect`), an
+idle one the line «… заработает при следующем подключении в режиме «Прокси»». An elevated process
+holding the WFP filters keeps the start's engines (its permits name those paths): there the old
+«после перезапуска приложения» lines stay. Tunnel mode through the helper service runs the
+service's own pinned engines (unchanged). The trial watch (`svc_update::trial`) counts each
+Proxy-mode start against the versions active when it began (every start, against the app start's
+versions, in a process that keeps its engines). Security releases: one notice through
+`backend.notifier`, no «Пропустить», never forced.

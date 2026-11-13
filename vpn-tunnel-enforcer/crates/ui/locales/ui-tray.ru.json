@@ -41,6 +41,8 @@
         "stop": "Выключить защиту",
         "reconnectNow": "Подключить",
         "continueWithoutVpn": "Продолжить без VPN",
+        "turnOffAlways": "Выключить «Всегда»",
+        "update": "Доступна версия {{version}}",
         "checkRoute": "Проверить маршрут",
         "openLogs": "Открыть логи",
         "quit": "Выход"

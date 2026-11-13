@@ -149,10 +149,10 @@ fn installer(setup: &crate::args::Setup) -> End {
 }
 
 /// `--setup uninstall` (standalone uninstall, after `await-shutdown`): this user's tweaks with
-/// the system proxy, the autostart value, the link schemes recorded for this exe and the jump
-/// list of our AUMID (the uninstaller deletes
-/// the links itself); our WFP objects and the old version's firewall leftovers only when this
-/// process happens to be elevated, else they are listed as not checked. Refused (exit 1) when an
+/// the system proxy, the logon restore value, the autostart value, the link schemes recorded for
+/// this exe and the jump list of our AUMID (the uninstaller deletes the links itself); our WFP
+/// objects and the old version's firewall leftovers only when this process happens to be
+/// elevated, else they are listed as not checked. Refused (exit 1) when an
 /// elevated network cleanup fails (strict filters would keep the PC offline) or the system proxy
 /// stays the app's (it would point at a dead port): the app stays installed and its next start
 /// retries from the journal. Other failures are warnings. User data stays.
@@ -198,6 +198,9 @@ fn uninstall(dir: &std::path::Path) -> End {
             app_err(&err)
         )),
     }
+    // The exe goes: a logon restore value left behind would start a removed program.
+    let logon = crate::restore::LogonValue::current();
+    lines.push(warn(system::logon_value(logon.as_ref())));
     lines.push(warn(system::autostart_value(&dir.join(gate::MAIN_EXE))));
     lines.push(links::uninstall_line(
         &vpnte_winnet::url_scheme::Registrar::current_user(),
@@ -217,9 +220,10 @@ fn uninstall(dir: &std::path::Path) -> End {
     End::Done(lines)
 }
 
-/// `--cleanup`: removes what the app put into the system for this user (tweaks, autostart) and,
-/// when elevated, our WFP objects and the old version's leftovers (the `sing-tun` firewall rule
-/// included). Refused while the app runs: its filters, proxy and journal belong to it.
+/// `--cleanup`: removes what the app put into the system for this user (tweaks, the logon
+/// restore value, autostart) and, when elevated, our WFP objects and the old version's leftovers
+/// (the `sing-tun` firewall rule included). Refused while the app runs: its filters, proxy and
+/// journal belong to it.
 fn cleanup() -> End {
     use system::Outcome;
 
@@ -248,7 +252,13 @@ fn cleanup() -> End {
     };
     let elevated = vpnte_winnet::elevation::is_elevated();
     let mut steps = system::network(&dirs.resources, elevated);
-    steps.push(system::tweaks(&dirs, elevated).step);
+    let tweaks = system::tweaks(&dirs, elevated);
+    steps.push(tweaks.step);
+    // A proxy that stays the app's keeps its logon restore: the next sign-in retries it.
+    if !tweaks.proxy_stuck {
+        let logon = crate::restore::LogonValue::current();
+        steps.push(system::logon_value(logon.as_ref()));
+    }
     steps.push(system::autostart_value(&exe));
     let lines = steps.iter().map(ToString::to_string).collect();
     match steps.iter().find(|s| !s.is_done() && s.outcome != Outcome::NeedsAdmin) {

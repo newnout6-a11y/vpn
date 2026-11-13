@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 
 use super::UpdatesApi;
 use super::format::{day_label, megabytes, notes_for};
-use super::model::{AppOffer, EngineOffer, UpdateOutcome, UpdatesView};
+use super::model::{AppOffer, EngineOffer, Note, UpdateOutcome, UpdatesView};
 use crate::hooks::use_watch;
 use crate::lang::{LANG, tr};
 use crate::t;
@@ -75,14 +75,36 @@ fn Strips() -> Element {
             EngineStrip { key: "{offer.id}", offer, busy, job }
         }
         if let Some(note) = view.note.clone() {
-            div { class: "overflow-hidden",
-                div { class: "c-swiss swiss-notice", role: "status", id: "upd-note",
-                    p { class: "swiss-notice-body", {tr(&note.msg)} }
-                    div { class: "swiss-confirm-actions",
-                        button { r#type: "button", class: "swiss-confirm-no",
-                            onclick: move |_| act(job, &api, |a| async move { a.dismiss().await }),
-                            {t!("ui.update.dismiss")}
+            NoteStrip { note, busy, job }
+        }
+    }
+}
+
+/// The calm line after an action. After an engine switch a session that runs the old engine is
+/// offered the switch now (it reconnects for 1–3 s) or at its next connection (p-follow).
+#[component]
+fn NoteStrip(note: Note, busy: bool, job: JobSlot<()>) -> Element {
+    let api = use_context::<Rc<dyn UpdatesApi>>();
+    let now_api = api.clone();
+    let later = if note.switch_now {
+        t!("ui.update.engine.next")
+    } else {
+        t!("ui.update.dismiss")
+    };
+    rsx! {
+        div { class: "overflow-hidden",
+            div { class: "c-swiss swiss-notice", role: "status", id: "upd-note",
+                p { class: "swiss-notice-body", {tr(&note.msg)} }
+                div { class: "swiss-confirm-actions",
+                    if note.switch_now {
+                        button { r#type: "button", class: "swiss-confirm-yes", id: "upd-engine-now", disabled: busy,
+                            onclick: move |_| act(job, &now_api, |a| async move { a.switch_engine_now().await }),
+                            {t!("ui.update.engine.now")}
                         }
+                    }
+                    button { r#type: "button", class: "swiss-confirm-no",
+                        onclick: move |_| act(job, &api, |a| async move { a.dismiss().await }),
+                        "{later}"
                     }
                 }
             }

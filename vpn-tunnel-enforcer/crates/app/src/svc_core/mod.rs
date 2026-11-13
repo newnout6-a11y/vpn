@@ -77,7 +77,7 @@ pub(crate) fn build_in(args: &Args, dirs: DataDirs) -> AppResult<Arc<Backend>> {
         lock,
         log: Mutex::new(Some(log)),
         elevated,
-        engines: engines(&crate::svc_update::engine_store(
+        engines: resolve_engines(&crate::svc_update::engine_store(
             &dirs.root,
             dirs.resources.clone(),
         )),
@@ -253,12 +253,13 @@ fn first_start(settings: &Store<Settings>, fresh: bool, elevated: bool) {
     }
 }
 
-/// The engines of this run: the active version the update channel downloaded while it is still
-/// usable (`vpnte_update::store`: newer than the bundled one, inside this build's range, its
-/// signed feed verifies), else the bundled one in `resources`. Canonical when the file exists (the
-/// spelling WFP app ids and `RealEngines` expect); a missing engine keeps its expected path and
-/// fails at its first start. Versions this build no longer allows are dropped first.
-fn engines(store: &EngineStore) -> Engines {
+/// The active engines (at the start, and again after every switch of the update channel): the
+/// version the update channel downloaded while it is still usable (`vpnte_update::store`: newer
+/// than the bundled one, inside this build's range, its signed feed verifies), else the bundled
+/// one in `resources`. Canonical when the file exists (the spelling WFP app ids and
+/// `RealEngines` expect); a missing engine keeps its expected path and fails at its first start.
+/// Versions this build no longer allows are dropped first. Blocking (file reads).
+pub(crate) fn resolve_engines(store: &EngineStore) -> Engines {
     let path = |id: &str| {
         store.tidy(id);
         let expected = store.resolve(id).exe;

@@ -185,6 +185,18 @@ async fn unelevated_service_refuses_privileged_operations() {
         .await;
     assert!(err.is_err());
 
+    // p-follow: an engine the update channel switched reaches this process's next engine starts
+    // and the server probes at once (no WFP here names the start's paths).
+    let device = vpnte_base::types::ClientDevice::default();
+    assert_eq!(t.probe_ctx(device).singbox_exe, b.engines.singbox);
+    let next = Engines {
+        singbox: root.0.join("1.14.5").join("sing-box.exe"),
+        xray: root.0.join("26.11.10").join("xray.exe"),
+    };
+    assert!(t.set_engines(next.clone()));
+    let ctx = t.probe_ctx(device);
+    assert_eq!((ctx.singbox_exe, ctx.xray_exe), (next.singbox, next.xray));
+
     let report = t.shutdown(Duration::from_secs(5)).await;
     assert!(
         report.soft_restored,

@@ -101,13 +101,13 @@ fn first_start_defaults_to_soft_unless_elevated() {
 #[test]
 fn engines_resolve_canonically_or_keep_the_expected_path() {
     let missing = PathBuf::from(r"C:\nonexistent-vpnte\resources");
-    let e = engines(&EngineStore::new(missing.join("engines"), missing.clone()));
+    let e = resolve_engines(&EngineStore::new(missing.join("engines"), missing.clone()));
     assert_eq!(e.singbox, missing.join("sing-box.exe"));
     assert_eq!(e.xray, missing.join("xray.exe"));
 
     let bundled = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources"));
     if bundled.join("sing-box.exe").is_file() {
-        let e = engines(&EngineStore::new(missing.join("engines"), bundled.clone()));
+        let e = resolve_engines(&EngineStore::new(missing.join("engines"), bundled.clone()));
         let text = e.singbox.to_string_lossy().into_owned();
         assert!(
             e.singbox.is_file() && !text.contains("..") && !text.starts_with(r"\\?\"),

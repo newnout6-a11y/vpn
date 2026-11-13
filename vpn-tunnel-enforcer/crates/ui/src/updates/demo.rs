@@ -154,6 +154,7 @@ impl UpdatesApi for DemoUpdates {
                     .arg("name", offer.name)
                     .arg("version", offer.to),
                 warn: false,
+                switch_now: true,
             });
         })
     }
@@ -195,6 +196,9 @@ impl UpdatesApi for DemoUpdates {
             v.note = None;
         })
     }
+    async fn switch_engine_now(&self) -> AppResult<()> {
+        self.change(|v| v.note = None)
+    }
 }
 
 #[cfg(test)]
@@ -216,8 +220,12 @@ mod tests {
         assert_eq!(view.installed[0].version, "1.14.5");
         assert_eq!(view.installed[0].previous.as_deref(), Some("1.14.4"));
         assert_eq!(
-            view.note.map(|n| n.msg.key.into_owned()).as_deref(),
+            view.note.as_ref().map(|n| n.msg.key.as_ref()),
             Some("ui.update.demoInstalled")
         );
+        // p-follow: a running session is offered the switch now; taking it ends the note.
+        assert!(view.note.is_some_and(|n| n.switch_now));
+        demo.switch_engine_now().await.unwrap();
+        assert!(rx.borrow().note.is_none());
     }
 }

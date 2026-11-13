@@ -134,13 +134,13 @@ fn expected_command() -> String {
 #[test]
 fn the_value_runs_the_exe_with_the_flag_and_goes_away() {
     let place = Place::new();
-    place.logon.clear().unwrap();
+    assert!(!place.logon.clear().unwrap(), "nothing to remove yet");
     place.logon.set().unwrap();
     place.logon.set().unwrap();
     assert_eq!(place.logon_command(), Some(expected_command()));
-    place.logon.clear().unwrap();
+    assert!(place.logon.clear().unwrap());
     assert_eq!(place.logon_command(), None);
-    place.logon.clear().unwrap();
+    assert!(!place.logon.clear().unwrap());
     let too_long = std::env::temp_dir().join("d".repeat(250)).join("app.exe");
     assert_eq!(
         LogonValue::under(&place.key, &too_long),

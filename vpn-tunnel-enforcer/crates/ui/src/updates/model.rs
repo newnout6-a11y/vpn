@@ -117,4 +117,7 @@ pub struct Note {
     pub msg: vpnte_base::Msg,
     /// A refusal or failure (shown in the warning tone).
     pub warn: bool,
+    /// An engine switch a running session can take at once: «Сейчас (переподключение на 1–3 с)»
+    /// / «При следующем подключении» (p-follow).
+    pub switch_now: bool,
 }

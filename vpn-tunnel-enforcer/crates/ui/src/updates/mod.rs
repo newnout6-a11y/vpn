@@ -56,4 +56,6 @@ pub trait UpdatesApi: 'static {
     async fn retry_installer(&self) -> AppResult<()>;
     /// Hides the outcome line and the note.
     async fn dismiss(&self) -> AppResult<()>;
+    /// «Сейчас» on an engine switch: the running session reconnects on the new engine.
+    async fn switch_engine_now(&self) -> AppResult<()>;
 }

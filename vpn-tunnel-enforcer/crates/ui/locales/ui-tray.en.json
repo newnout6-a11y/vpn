@@ -41,6 +41,8 @@
         "stop": "Turn protection off",
         "reconnectNow": "Connect",
         "continueWithoutVpn": "Continue without VPN",
+        "turnOffAlways": "Turn off “Always”",
+        "update": "Version {{version}} available",
         "checkRoute": "Check route",
         "openLogs": "Open logs",
         "quit": "Exit"

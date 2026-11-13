@@ -22,12 +22,12 @@ impl Handle {
         Ok(())
     }
 
-    /// An engine switch done by hand takes effect at the next start.
+    /// An engine switch done by hand reaches the tunnel at its next engine start.
     fn switched(&self, id: &str, result: std::io::Result<bool>) -> AppResult<()> {
         match result {
             Ok(true) => {
-                let msg = Msg::new("app.update.engineSwitched").arg("name", engine_name(id));
-                self.0.note(msg, false);
+                let restart = Msg::new("app.update.engineSwitched").arg("name", engine_name(id));
+                self.0.engine_switched(id, restart);
                 Ok(())
             }
             Ok(false) => Err(AppError::conflict(Msg::new("app.update.nothingToRestore"))),
@@ -133,5 +133,9 @@ impl UpdatesApi for Handle {
         }
         self.0.refresh();
         Ok(())
+    }
+
+    async fn switch_engine_now(&self) -> AppResult<()> {
+        self.0.switch_now().await
     }
 }

@@ -10,18 +10,25 @@ use vpnte_servers::model::{ArchiveReason, ProfileId, ServerRow};
 use vpnte_servers::store::Servers;
 use vpnte_tunnel::api::{Runtime, TunStatus, VpnProfile};
 use vpnte_tunnel::lifecycle::{ExternalProxies, Lifecycle, ProfileSource, ServerChoice};
+use vpnte_tunnel::runtime::EngineExes;
 
-use crate::services::Backend;
+use crate::services::{Backend, Engines};
 use crate::svc_auto::Fingerprints;
 use crate::svc_live::{self, AppLiveEnv};
 use crate::svc_proxies::{ProbeCtxFn, Proxies, ServerProfiles};
 
 /// The slots over the server list, with the control API on 127.0.0.1 (port 17873 or
-/// `VPNTE_CONTROL_PORT`); key checks of `/profiles/healthcheck` take the path `status` allows.
-pub(super) fn proxies(b: &Backend, status: watch::Receiver<TunStatus>) -> Arc<Proxies> {
-    let (engines, settings) = (b.engines.clone(), b.settings.clone());
+/// `VPNTE_CONTROL_PORT`); key checks of `/profiles/healthcheck` take the path `status` allows and
+/// the engines `exes` names at that moment.
+pub(super) fn proxies(
+    b: &Backend,
+    status: watch::Receiver<TunStatus>,
+    exes: watch::Receiver<EngineExes>,
+) -> Arc<Proxies> {
+    let settings = b.settings.clone();
     let probe_ctx: ProbeCtxFn = Arc::new(move |device| {
         let pref = settings.read(|s| s.proxy_engine);
+        let engines = Engines::from(&*exes.borrow());
         super::probe::probe_ctx(&engines, pref, device, &status.borrow())
     });
     let source = ServerProfiles {

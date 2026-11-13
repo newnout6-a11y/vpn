@@ -53,16 +53,16 @@ impl LogonValue {
         key.set_string(VALUE, &self.command)
     }
 
-    /// Removes the value; an absent one is fine. Blocking.
-    pub fn clear(&self) -> windows::core::Result<()> {
+    /// Removes the value; an absent one is fine (`false`). Blocking.
+    pub fn clear(&self) -> windows::core::Result<bool> {
         match Key::open(
             Hive::CurrentUser,
             &self.key,
             Access::ReadWrite,
             View::Native,
         )? {
-            Some(key) => key.delete_value(VALUE).map(drop),
-            None => Ok(()),
+            Some(key) => key.delete_value(VALUE),
+            None => Ok(false),
         }
     }
 
@@ -71,7 +71,7 @@ impl LogonValue {
     /// start's recovery still rolls back.
     pub fn follow(&self, report: &RollbackReport) {
         let result = if report.is_complete() {
-            self.clear()
+            self.clear().map(drop)
         } else {
             self.set()
         };

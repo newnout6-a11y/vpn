@@ -62,6 +62,17 @@ pub struct TrayState {
     pub paused: bool,
 }
 
+/// What the tray reads besides [`TrayState`], from the root's Settings and Updates backends
+/// (as the start page does), so the app's tray feed keeps its shape.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrayExtras {
+    /// "Always" is chosen and kept (the helper service holds it): the paused menu's way out
+    /// turns it off instead of disconnecting, which would not give the internet back (ks-d).
+    pub always: bool,
+    /// The newer app version on offer (`UpdatesApi::state().app`): «Доступна версия X».
+    pub update: Option<String>,
+}
+
 /// What the tray says about protection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TrayStatus {
@@ -263,11 +274,20 @@ pub struct TrayModel {
     pub tooltip_speed: Option<Msg>,
     /// Menu entries in [`TrayItemId::ALL`] order.
     pub items: Vec<TrayItem>,
+    /// The Stop entry reads «Выключить «Всегда»»: it moves the level to "If the VPN drops".
+    pub turn_off_always: bool,
+    /// «Доступна версия X» above «Показать окно» (opens the window); `None`: no such line.
+    pub update: Option<Msg>,
 }
 
 impl TrayModel {
     /// Builds the model. `quitting`: the shutdown cleanup runs, only «Показать окно» stays usable.
     pub fn build(state: &TrayState, quitting: bool) -> TrayModel {
+        TrayModel::build_with(state, &TrayExtras::default(), quitting)
+    }
+
+    /// [`TrayModel::build`] with what the tray reads from the other backends.
+    pub fn build_with(state: &TrayState, extras: &TrayExtras, quitting: bool) -> TrayModel {
         let status = TrayStatus::of(state);
         // An engaged kill switch is active protection too (traySource.test.ts).
         let active = state.engine_running || state.kill_switch || status.holds_protection();
@@ -283,14 +303,17 @@ impl TrayModel {
         };
         let (down, up) = (format_speed(state.down_bps), format_speed(state.up_bps));
         let paused = status == TrayStatus::Paused;
+        let turn_off_always = paused && extras.always;
         // The paused state's two buttons (research 5.2): «Подключить» retries now,
-        // «Продолжить без VPN» is the disconnect.
-        let (start, stop) = match paused {
-            true => (
+        // «Продолжить без VPN» is the disconnect; in "Always", which blocks without a session
+        // too, the second one turns "Always" off (the pause then offers the disconnect).
+        let (start, stop) = match (paused, turn_off_always) {
+            (true, true) => ("ui.tray.menu.reconnectNow", "ui.tray.menu.turnOffAlways"),
+            (true, false) => (
                 "ui.tray.menu.reconnectNow",
                 "ui.tray.menu.continueWithoutVpn",
             ),
-            false => ("ui.tray.menu.start", "ui.tray.menu.stop"),
+            (false, _) => ("ui.tray.menu.start", "ui.tray.menu.stop"),
         };
         let can_start = can_start || paused;
         let mut tooltip = vec![status_msg("tip", status, state.restart)];
@@ -329,6 +352,9 @@ impl TrayModel {
             tooltip,
             tooltip_speed,
             items,
+            turn_off_always,
+            update: (extras.update.as_ref())
+                .map(|version| Msg::new("ui.tray.menu.update").arg("version", version)),
         }
     }
 

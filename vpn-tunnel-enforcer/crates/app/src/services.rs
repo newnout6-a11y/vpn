@@ -221,6 +221,18 @@ pub trait TunnelOps: Send + Sync + 'static {
     async fn retry_now(&self) -> bool {
         false
     }
+    /// The update channel installed or rolled back an engine (added by p-follow): sessions this
+    /// process starts from now on run `engines`. `false`: they keep the engines of the app start
+    /// (an elevated process holding the WFP filters: its permits name those paths). The
+    /// default keeps them.
+    fn set_engines(&self, _engines: Engines) -> bool {
+        false
+    }
+    /// «Сейчас» after an engine switch (added by p-follow): the running session reconnects
+    /// (1–3 s) on the new engine. The default: nothing runs here to reconnect.
+    async fn reconnect(&self, _reason: String) -> Result<Done, ConnError> {
+        Ok(Done::default())
+    }
     /// "Always" can be kept safe here (the helper service holds it); until the service wiring
     /// sets it, a stored "strict" works as "If the VPN drops" (added by ks-a). Default: no.
     fn always_available(&self) -> bool {

@@ -24,11 +24,12 @@ use vpnte_tunnel::lifecycle::{
     ConnError, DisconnectReq, Done, KillSwitchView, SessionView, ShutdownReport, StopCause,
     SwitchReq,
 };
+use vpnte_tunnel::runtime::EngineExes;
 use vpnte_winnet::wfp::{ExceptionKind, KillSwitchException, RemoveReport, Toggles};
 
 use super::guard::Guard;
 use super::{TunnelService, decide, probe};
-use crate::services::{KillSwitchStatus, TunnelOps};
+use crate::services::{Engines, KillSwitchStatus, TunnelOps};
 use crate::svc_auto::UserAct;
 use crate::svc_core::needs_admin;
 
@@ -306,7 +307,7 @@ impl TunnelOps for TunnelService {
     fn probe_ctx(&self, device: ClientDevice) -> ProbeCtx {
         let engine = self.settings.read(|s| s.proxy_engine);
         probe::probe_ctx(
-            &self.engines,
+            &Engines::from(&*self.exes.borrow()),
             engine,
             device,
             &self.runtime.status().borrow(),
@@ -348,6 +349,26 @@ impl TunnelOps for TunnelService {
     async fn retry_now(&self) -> bool {
         self.coord.user_acted(UserAct::Change);
         self.lifecycle.retry_now().await
+    }
+
+    fn set_engines(&self, engines: Engines) -> bool {
+        // An elevated process holding the WFP filters keeps the start's engines: its permits
+        // name those paths, so a new file would be blocked.
+        if self.guard.wfp.is_some() {
+            return false;
+        }
+        self.exes.send_replace(EngineExes {
+            singbox: engines.singbox,
+            xray: engines.xray,
+        });
+        true
+    }
+
+    async fn reconnect(&self, reason: String) -> Result<Done, ConnError> {
+        self.coord.user_acted(UserAct::Change);
+        self.lifecycle
+            .restart_with_last(reason, Owner::Manual, Source::Ui)
+            .await
     }
 
     fn always_available(&self) -> bool {

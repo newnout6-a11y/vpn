@@ -114,6 +114,37 @@ async fn soft_runs_the_engine_and_points_the_tweaks_at_it() {
     );
 }
 
+/// p-follow (ks-b follow-up): a restart on the same port keeps tweaks that still point at it
+/// without a write, and leaves a system proxy another program took meanwhile alone (the start
+/// page's «Вернуть» lets the user decide); the session goes on either way.
+#[tokio::test]
+async fn a_restart_leaves_a_taken_system_proxy_alone() {
+    let h = Harness::new();
+    h.lc.connect(soft(10808, ProxyKind::Socks5, Owner::Manual))
+        .await
+        .expect("soft session");
+    let restart = || {
+        h.lc.restart_with_last("settings changed: stealth", Owner::Manual, Source::Ui)
+    };
+    restart().await.expect("restart");
+    h.settle().await;
+    let ours = Some((soft_addr(SOFT_PORT), ProxyKind::Http));
+    assert_eq!(h.soft.state.lock().applied, ours, "still ours");
+    assert_eq!(h.soft.state.lock().applies, 1, "kept without a write");
+    let taken = Some(("10.9.8.7:3128".to_owned(), ProxyKind::Http));
+    h.soft.state.lock().applied = taken.clone();
+    restart().await.expect("restart");
+    h.settle().await;
+    assert_eq!(h.rt.script.lock().restarts, 2);
+    assert_eq!(h.soft.state.lock().applied, taken, "left to the user");
+    assert_eq!(
+        h.soft.state.lock().applies,
+        1,
+        "never written back by a restart"
+    );
+    assert_eq!(h.snap().state, TunnelState::Connected);
+}
+
 /// NOADMIN.md §2: disconnect rolls the tweaks back before the engine stops.
 #[tokio::test]
 async fn soft_disconnect_rolls_back_before_the_engine_stops() {

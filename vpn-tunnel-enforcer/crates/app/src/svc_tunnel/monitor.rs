@@ -39,7 +39,8 @@ pub(super) struct IpWatch {
     status: watch::Receiver<TunStatus>,
     conn: AtomicU64,
     adopting: Mutex<Option<CancellationToken>>,
-    /// Background leak self-tests (elevated process only).
+    /// Background leak self-tests and re-checks of every TUN session, here or in the helper
+    /// service (`leaks`).
     pub leaks: Option<Leaks>,
     shutdown: CancellationToken,
 }
@@ -95,7 +96,8 @@ impl IpWatch {
     }
 
     /// The machine woke from sleep or the session was unlocked: the protection and the DNS
-    /// capture are re-checked at once (elevated process only: that is where they exist).
+    /// capture of a TUN session are re-checked at once, where its filters live (this elevated
+    /// process or the helper service).
     pub fn resumed(&self) {
         if let Some(leaks) = &self.leaks {
             leaks.resumed();

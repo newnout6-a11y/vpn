@@ -16,11 +16,13 @@ use dioxus::prelude::*;
 use tokio::sync::watch;
 use vpnte_base::{AppResult, Msg};
 
-use super::model::{CloseAction, TrayItemId, TrayModel, TrayState};
-use super::native::{NativeReport, NativeTray, SPEED_REFRESH};
+use super::model::{CloseAction, TrayExtras, TrayItemId, TrayModel, TrayState};
+use super::native::{NativeReport, NativeTray, SPEED_REFRESH, UPDATE_MENU_ID};
 use crate::hooks::use_watch;
 use crate::lang::{LANG, tr, translate};
+use crate::settings::{KillSwitchLevel, KillSwitchView, SettingsApi};
 use crate::t;
+use crate::updates::{UpdatesApi, UpdatesView};
 use crate::widgets::{Button, ButtonKind, Modal, ModalSize};
 
 /// How the quit cleanup treats a failed rollback of the Proxy-mode tweaks (system proxy, variables).
@@ -144,6 +146,32 @@ fn debug_equals(value: &impl std::fmt::Debug, expected: &str) -> bool {
     std::fmt::write(&mut rest, format_args!("{value:?}")).is_ok() && rest.0.is_empty()
 }
 
+/// What the tray reads from the root's Settings and Updates backends (none in the demo): "Always"
+/// in force and the app version on offer.
+fn use_extras() -> (Option<Rc<dyn SettingsApi>>, Memo<TrayExtras>) {
+    let settings = try_use_context::<Rc<dyn SettingsApi>>();
+    let updates = try_use_context::<Rc<dyn UpdatesApi>>();
+    let source = settings.clone();
+    let kill = use_watch(move || match source {
+        Some(api) => api.kill_switch(),
+        None => watch::channel(KillSwitchView::default()).1,
+    });
+    let offer = use_watch(move || match updates {
+        Some(api) => api.state(),
+        None => watch::channel(UpdatesView::default()).1,
+    });
+    let extras = use_memo(move || {
+        let kill = kill.read();
+        TrayExtras {
+            // As the start page reads it: a stored "Always" nothing keeps works as "If the VPN
+            // drops", where the disconnect gives the internet back.
+            always: kill.level == KillSwitchLevel::Strict && kill.always_available,
+            update: offer.read().app.as_ref().map(|app| app.version.clone()),
+        }
+    });
+    (settings, extras)
+}
+
 /// The tray. Mount it once around the app's root; it needs `Rc<dyn TrayApi>` in context and
 /// provides [`TrayContext`] to its children.
 #[component]
@@ -151,9 +179,10 @@ pub fn TrayHost(children: Element) -> Element {
     let api = use_context::<Rc<dyn TrayApi>>();
     let desktop = use_window();
     let state = use_watch(|| api.state());
+    let (settings, extras) = use_extras();
     let mut quitting = use_signal(|| false);
     let mut dialog = use_signal(|| None::<TrayDialog>);
-    let model = use_memo(move || TrayModel::build(&state.read(), quitting()));
+    let model = use_memo(move || TrayModel::build_with(&state.read(), &extras.read(), quitting()));
     let native = use_hook(|| Rc::new(RefCell::new(NativeTray::new(&model.peek(), *LANG.peek()))));
     let report = use_signal(|| native.borrow().as_ref().map(NativeTray::report));
     use_hook({
@@ -260,6 +289,11 @@ pub fn TrayHost(children: Element) -> Element {
     use_muda_event_handler({
         let (api, desktop) = (api.clone(), desktop.clone());
         move |event| {
+            if event.id().0 == UPDATE_MENU_ID {
+                // The offer and its buttons are on the start page and in Settings.
+                show_window(&desktop);
+                return;
+            }
             let Some(id) = TrayItemId::from_menu_id(&event.id().0) else {
                 return;
             };
@@ -269,6 +303,11 @@ pub fn TrayHost(children: Element) -> Element {
             match id {
                 TrayItemId::Show => show_window(&desktop),
                 TrayItemId::Quit => start_quit(QuitMode::Restore),
+                TrayItemId::Stop if model.peek().turn_off_always => {
+                    if let Some(settings) = settings.clone() {
+                        spawn(turn_off_always(settings, desktop.clone()));
+                    }
+                }
                 TrayItemId::Start
                 | TrayItemId::Stop
                 | TrayItemId::CheckRoute
@@ -315,6 +354,19 @@ async fn run_action(api: &dyn TrayApi, id: TrayItemId, desktop: &DesktopContext)
     };
     if show {
         show_window(desktop);
+    }
+}
+
+/// «Выключить «Всегда»» in the paused menu: the level goes to "If the VPN drops", as the start
+/// page's button does (the pause then offers «Продолжить без VPN»). A failure shows the window,
+/// where the pause offers the same button.
+async fn turn_off_always(settings: Rc<dyn SettingsApi>, desktop: DesktopContext) {
+    if let Err(err) = settings
+        .set_kill_switch_level(KillSwitchLevel::Standard)
+        .await
+    {
+        tracing::error!(target: "tray", error = %err, "\"Always\" not turned off");
+        show_window(&desktop);
     }
 }
 

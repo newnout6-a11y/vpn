@@ -7,7 +7,9 @@
 //! else created is refused before anything is sent). A session the service kept after this app's
 //! window crashed (owner question 23) is parked at connect: it is not shown as running until the
 //! lifecycle's own connect of the same upstream takes it over (`start`), so nothing stops it on
-//! the way; Quit and Disconnect send a stop as before.
+//! the way; Quit and Disconnect send a stop as before. A link lost without the app asking (the
+//! service restarted and resumes its session) is shown as ended, then re-attached the same way
+//! (`reattach`, p-follow).
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +49,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Start-up connects to the service (`attach`), and the pause between them.
 const ATTACH_TRIES: u32 = 5;
 const ATTACH_PAUSE: Duration = Duration::from_secs(2);
+/// Connects after a lost link (`reattach`): Windows restarts a crashed service after 5 s, then
+/// 10 s; a third crash (60 s) is left to the next connect, which parks the session as well.
+const REATTACH_TRIES: u32 = 12;
+/// Status reads after the re-link while the restarted service may still be starting the session
+/// it resumes (it is offered for a take-over once its engine runs).
+const RESUME_TRIES: u32 = 5;
 
 /// The tunnel runtime in the helper service.
 #[derive(Clone)]
@@ -65,6 +73,8 @@ struct Inner {
     notices: broadcast::Sender<Notice>,
     /// The service's latest leak self-test of the shown session (protocol 2, p-svc-recheck).
     self_test: watch::Sender<Option<SelfTestResult>>,
+    /// Counts links lost without the app asking (the service restarted): each one re-attaches.
+    losses: watch::Sender<u64>,
     link: tokio::sync::Mutex<Option<Link>>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Reply, WireError>>>>,
     state: Mutex<State>,
@@ -86,6 +96,9 @@ struct State {
     parked: Option<TunStatus>,
     /// A new connection whose first view is not in yet: nothing is shown meanwhile.
     attaching: bool,
+    /// Re-attached after a lost link: what the restarted service starts by itself (the session
+    /// it resumes) waits for the take-over; any operation of the app ends the wait.
+    waiting: bool,
     gens: gens::Gens,
 }
 
@@ -165,6 +178,7 @@ impl Remote {
             events: broadcast::channel(256).0,
             notices: broadcast::channel(16).0,
             self_test: watch::channel(None).0,
+            losses: watch::channel(0).0,
             link: tokio::sync::Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
             state: Mutex::new(State::default()),
@@ -191,6 +205,11 @@ impl Remote {
     /// The service's leak self-tests of the shown TUN session, as they arrive.
     pub(super) fn self_tests(&self) -> watch::Receiver<Option<SelfTestResult>> {
         self.0.self_test.subscribe()
+    }
+
+    /// Changes once per link lost without the app asking (the service restarted).
+    pub(super) fn losses(&self) -> watch::Receiver<u64> {
+        self.0.losses.subscribe()
     }
 
     /// The current connection, or a new one (the pipe's server checked first).
@@ -247,8 +266,12 @@ impl Remote {
                 );
                 st.kept = reply.kept;
                 st.parked = Some(reply.tunnel.into());
+                st.waiting = false;
                 return;
             }
+        }
+        if st.waiting {
+            return;
         }
         if let Some(status) = st.parked.take() {
             drop(st);
@@ -301,12 +324,77 @@ impl Remote {
                     tracing::info!(attempt, error = %err, "helper service not reached at start");
                 }
             }
-            tokio::select! {
-                () = self.0.shutdown.cancelled() => return None,
-                () = tokio::time::sleep(ATTACH_PAUSE) => {}
+            if !self.pause().await {
+                return None;
             }
         }
         None
+    }
+
+    /// After a lost link (the service restarted): connects again as at start-up, then gives the
+    /// restarted service a few seconds to bring back the session it resumes (it is offered for a
+    /// take-over once its engine runs; until then its own events are held back). The session to
+    /// take over, if any.
+    pub(super) async fn reattach(&self) -> Option<KeptSession> {
+        if !self.installed() {
+            return None;
+        }
+        self.0.state.lock().waiting = true;
+        let kept = self.resumed_session().await;
+        self.stop_waiting();
+        kept
+    }
+
+    async fn resumed_session(&self) -> Option<KeptSession> {
+        let mut tries = 1;
+        while let Err(err) = self.link().await {
+            tracing::debug!(tries, error = %err, "helper service not reached again yet");
+            if tries == REATTACH_TRIES || !self.pause().await {
+                return None;
+            }
+            tries += 1;
+        }
+        for _ in 0..RESUME_TRIES {
+            {
+                let st = self.0.state.lock();
+                if st.kept.is_some() || !st.waiting {
+                    return st.kept.clone();
+                }
+            }
+            if !self.pause().await {
+                return None;
+            }
+            let reply = self.refresh().await.ok()?;
+            let mut st = self.0.state.lock();
+            // Not after an operation of the app began: its own start's events must flow.
+            if reply.kept.is_some() && st.waiting {
+                st.kept = reply.kept;
+                st.parked = Some(reply.tunnel.into());
+                st.waiting = false;
+            }
+        }
+        self.0.state.lock().kept.clone()
+    }
+
+    /// The wait after a re-link is over: unless a session waits for its take-over (or the app
+    /// acted meanwhile), what arrived is shown.
+    fn stop_waiting(&self) {
+        let mut st = self.0.state.lock();
+        if !std::mem::take(&mut st.waiting) || st.kept.is_some() {
+            return;
+        }
+        if let Some(status) = st.parked.take() {
+            drop(st);
+            self.0.status.send_replace(status);
+        }
+    }
+
+    /// One pause between tries; `false` when the app is closing.
+    async fn pause(&self) -> bool {
+        tokio::select! {
+            () = self.0.shutdown.cancelled() => false,
+            () = tokio::time::sleep(ATTACH_PAUSE) => true,
+        }
     }
 
     /// The parked session's status (local proxy kind, name) for the take-over's target.
@@ -314,11 +402,12 @@ impl Remote {
         self.0.state.lock().parked.clone()
     }
 
-    /// Forgets a parked session: what comes next replaces or stops it.
+    /// Forgets a parked session (and ends a wait for one): what comes next replaces or stops it.
     fn unpark(&self) {
         let mut st = self.0.state.lock();
         st.kept = None;
         st.parked = None;
+        st.waiting = false;
     }
 }
 
@@ -367,7 +456,7 @@ fn on_status(inner: &Inner, mut wire: StatusWire) {
     st.recent_fault = wire.recent_fault.take();
     let self_test = wire.self_test.take();
     let status = TunStatus::from(wire);
-    if st.attaching || st.kept.is_some() {
+    if st.attaching || st.waiting || st.kept.is_some() {
         st.parked = Some(status);
         return;
     }
@@ -391,14 +480,15 @@ fn on_tunnel(inner: &Inner, wire: TunnelEventWire) {
     let mut st = inner.state.lock();
     let event = st.gens.event(TunnelEvent::from(wire));
     // A parked session's own events wait for its take-over (its status is kept meanwhile).
-    if !st.attaching && st.kept.is_none() {
+    if !st.attaching && !st.waiting && st.kept.is_none() {
         drop(st);
         let _ = inner.events.send(event);
     }
 }
 
 /// The connection is gone: callers still waiting hear so, and a session shown as running is
-/// shown as ended (the service is out of reach; it never reads as running).
+/// shown as ended (the service is out of reach; it never reads as running). Unless the app is
+/// closing, the loss is counted: the tunnel re-attaches (`reattach`).
 fn on_lost(inner: &Inner) {
     inner.pending.lock().clear();
     {
@@ -406,18 +496,21 @@ fn on_lost(inner: &Inner) {
         st.kept = None;
         st.parked = None;
     }
-    if !inner.status.borrow().running {
-        return;
+    let running = inner.status.borrow().running;
+    if running {
+        let warning = Msg::new("service.pipe.lost");
+        inner.status.send_replace(TunStatus {
+            warning: Some(warning.clone()),
+            ..TunStatus::default()
+        });
+        let _ = inner
+            .events
+            .send(TunnelEvent::Warning(TunWarning::Other(warning)));
+        let _ = inner
+            .events
+            .send(TunnelEvent::Status(TunStatusKind::Stopped));
     }
-    let warning = Msg::new("service.pipe.lost");
-    inner.status.send_replace(TunStatus {
-        warning: Some(warning.clone()),
-        ..TunStatus::default()
-    });
-    let _ = inner
-        .events
-        .send(TunnelEvent::Warning(TunWarning::Other(warning)));
-    let _ = inner
-        .events
-        .send(TunnelEvent::Status(TunStatusKind::Stopped));
+    if !inner.shutdown.is_cancelled() {
+        inner.losses.send_modify(|n| *n += 1);
+    }
 }

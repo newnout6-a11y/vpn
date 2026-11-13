@@ -430,7 +430,9 @@ pub(super) fn session_port(deps: &LifecycleDeps) -> Option<u16> {
 
 /// Soft: points the user-level tweaks at the session's mixed port (HTTP: what WinINet and the
 /// `*_PROXY` variables take; the inbound also serves SOCKS5) and reads them back. `applied` =
-/// the port they already point at: kept while the read-back still shows it. A failure is
+/// the port they already point at (a restart): kept while the read-back still shows it, and
+/// left alone when another program took the system proxy since (ks-b): the start page's
+/// «Вернуть» lets the user decide, a restart never takes it back silently. A failure is
 /// `touched`: the lane's recovery stop then rolls back whatever was applied and stops the
 /// engine (no tweak left behind).
 async fn point_tweaks(ctx: &Ctx, applied: Option<u16>) -> Result<(), Failure> {
@@ -438,15 +440,19 @@ async fn point_tweaks(ctx: &Ctx, applied: Option<u16>) -> Result<(), Failure> {
     let result = match session_port(deps) {
         Some(port) => {
             let addr = soft_addr(port);
-            let kept = applied == Some(port)
-                && matches!(
-                    deps.soft.is_configured(&addr, ProxyKind::Http).await,
-                    Ok(true)
-                );
-            if kept {
-                Ok(())
+            let read_back = if applied == Some(port) {
+                Some(deps.soft.is_configured(&addr, ProxyKind::Http).await)
             } else {
-                apply_and_read_back(deps, &addr).await
+                None
+            };
+            match read_back {
+                Some(Ok(true)) => Ok(()),
+                // Still journalled as ours, yet the system shows another value: taken.
+                Some(Ok(false)) if deps.soft.applied() == Some(true) => {
+                    tracing::info!("system proxy taken by another program: left alone");
+                    Ok(())
+                }
+                _ => apply_and_read_back(deps, &addr).await,
             }
         }
         // A proxy-capture session always publishes its port; without it nothing can be pointed.

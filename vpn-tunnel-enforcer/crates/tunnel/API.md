@@ -478,8 +478,11 @@ pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self;   // + Defau
 // the app's handshake budget (probe discipline): the tunnel cannot depend on vpnte-probes
 #[async_trait] pub trait HandshakeGate: Send + Sync {
     async fn admit(&self, server: &Profile, cancel: &CancellationToken) -> AppResult<()>; }  // Err: deferred / cancelled
+#[derive(Debug, Clone, PartialEq, Eq)] pub struct EngineExes { pub singbox: PathBuf, pub xray: PathBuf }  // canonical paths
 pub struct RealEngines;
-impl RealEngines { pub fn new(singbox: PathBuf, xray: PathBuf, logs: Option<PathBuf>) -> Self   // canonical paths
+impl RealEngines { pub fn new(singbox: PathBuf, xray: PathBuf, logs: Option<PathBuf>) -> Self   // fixed (helper service)
+    pub fn following(exes: watch::Receiver<EngineExes>, logs: Option<PathBuf>) -> Self  // read at every engine
+        // start: an engine the update channel switched runs from the next start on (p-follow)
     pub fn with_gate(self, gate: Arc<dyn HandshakeGate>) -> Self     // every slot echo request waits for a slot
     pub fn feed(&self) -> EngineFeed }   // take it before the engines move into RuntimeDeps
 #[derive(Clone)] pub struct EngineFeed;  // the sing-box cores of this runtime, for in-process consumers

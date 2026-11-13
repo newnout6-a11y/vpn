@@ -20,6 +20,8 @@ use windows::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, WIN32_ERROR}
 use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
 use windows::core::HSTRING;
 
+use crate::restore::LogonValue;
+
 /// How one area ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -66,6 +68,7 @@ pub const AREA_FILTERS: &str = "network filters";
 pub const AREA_LEGACY: &str = "old version leftovers";
 pub const AREA_TWEAKS: &str = "proxy and tool settings";
 pub const AREA_AUTOSTART: &str = "autostart";
+pub const AREA_LOGON: &str = "logon restore";
 
 /// Every journalled feature: the Soft session (system proxy, variables, dev tools), browser
 /// policies and location privacy.
@@ -264,6 +267,21 @@ fn judge(report: &RollbackReport, lost: Option<&str>, elevated: bool) -> Outcome
     }
 }
 
+/// Removes the logon restore value (`crate::restore`) after the tweak rollback: nothing is left
+/// for it to restore, and after an uninstall it would start a removed program at the next
+/// sign-in. `None` (an overridden data dir) leaves the real key alone.
+pub fn logon_value(value: Option<&LogonValue>) -> Step {
+    let outcome = match value.map(LogonValue::clear) {
+        None => Outcome::Done("RunOnce value left alone (data folder overridden)".into()),
+        Some(Ok(removed)) => Outcome::Done(format!("RunOnce value {}", gone(removed))),
+        Some(Err(err)) => Outcome::Failed(format!(
+            "RunOnce value kept (0x{:08X})",
+            err.code().0.cast_unsigned()
+        )),
+    };
+    Step::new(AREA_LOGON, outcome)
+}
+
 /// Deletes this user's autostart `Run` value whatever it points at (its name is ours), and the
 /// 1.x logon task when the process may (it was created elevated); then reads the value back.
 pub fn autostart_value(exe: &Path) -> Step {
@@ -340,6 +358,24 @@ mod tests {
         let empty = tweaks(&dirs, false);
         assert!(empty.step.is_done() && !empty.proxy_stuck, "{}", empty.step);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// p-follow: `--setup uninstall` and `--cleanup` remove the logon restore value after the
+    /// tweak rollback (a removed exe must not start at the next sign-in); an overridden data dir
+    /// leaves the real key alone. A throw-away key stands in for `RunOnce`.
+    #[test]
+    fn the_logon_value_goes_after_the_rollback() {
+        let key = format!(r"Software\VPNTE-Test-setup-logon-{}", std::process::id());
+        let exe = std::env::current_exe().expect("test exe");
+        let value = LogonValue::under(&key, &exe).expect("short command");
+        value.set().expect("value written");
+        let step = logon_value(Some(&value));
+        assert_eq!(step.outcome, Outcome::Done("RunOnce value removed".into()));
+        assert!(!value.clear().expect("key readable"), "the value is gone");
+        let again = logon_value(Some(&value));
+        assert_eq!(again.outcome, Outcome::Done("RunOnce value absent".into()));
+        assert!(logon_value(None).is_done());
+        let _ = vpnte_winnet::registry::delete_tree(Hive::CurrentUser, &key, View::Native);
     }
 
     /// The old per-machine installation is found by reading HKLM only; an absent key is the only

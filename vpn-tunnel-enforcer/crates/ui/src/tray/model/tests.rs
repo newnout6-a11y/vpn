@@ -356,3 +356,54 @@ fn close_requests() {
     };
     assert_eq!(connecting.close_action(), CloseAction::Quit);
 }
+
+/// p-follow (ks-d follow-up): in "Always" the paused menu's way out reads «Выключить «Всегда»»
+/// and turns "Always" off (as the start page's button) instead of a disconnect that would not
+/// give the internet back; without "Always", or outside the pause, the entries keep their words.
+#[test]
+fn always_changes_only_the_paused_way_out() {
+    let paused = TrayState {
+        paused: true,
+        kill_switch: true,
+        ..TrayState::default()
+    };
+    let always = TrayExtras {
+        always: true,
+        update: None,
+    };
+    let model = TrayModel::build_with(&paused, &always, false);
+    assert!(model.turn_off_always);
+    let stop = model.item(TrayItemId::Stop);
+    assert_eq!(stop.label.key, "ui.tray.menu.turnOffAlways");
+    assert!(stop.enabled);
+    assert_eq!(
+        model.item(TrayItemId::Start).label.key,
+        "ui.tray.menu.reconnectNow"
+    );
+    let plain = TrayModel::build(&paused, false);
+    assert!(!plain.turn_off_always);
+    assert_eq!(
+        plain.item(TrayItemId::Stop).label.key,
+        "ui.tray.menu.continueWithoutVpn"
+    );
+    let running = TrayModel::build_with(&connected(), &always, false);
+    assert!(!running.turn_off_always);
+    assert_eq!(
+        running.item(TrayItemId::Stop).label.key,
+        "ui.tray.menu.stop"
+    );
+}
+
+/// p-follow (p-updates follow-up): an offered app version adds «Доступна версия X»; none, no line.
+#[test]
+fn an_offered_version_gets_a_line() {
+    let offered = TrayExtras {
+        always: false,
+        update: Some("2.0.1".into()),
+    };
+    let model = TrayModel::build_with(&connected(), &offered, false);
+    let line = model.update.expect("update line");
+    assert_eq!(line.key, "ui.tray.menu.update");
+    assert_eq!(line.args[0].1, "2.0.1");
+    assert_eq!(TrayModel::build(&connected(), false).update, None);
+}

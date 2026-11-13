@@ -18,7 +18,10 @@
       "engineRefused": "{{name}} refused our settings ({{reason}}); nothing was installed.",
       "engineSwitched": "{{name}}: takes over after the app restarts.",
       "nothingToRestore": "There is nothing to go back to.",
-      "trialFailed": "{{name}} {{from}} does not start. {{to}} comes back at the next app start."
+      "trialFailed": "{{name}} {{from}} does not start. {{to}} comes back at the next app start.",
+      "engineNext": "{{name}} {{version}} takes over at the next connection in Proxy mode.",
+      "engineRunning": "{{name}} {{version}} is ready. The connection still runs the previous version.",
+      "trialRolledBack": "{{name}} {{from}} does not start: back to {{to}}."
     }
   }
 }

@@ -1,6 +1,7 @@
 //! The remote runtime against the service's real session host (fake runtime and kill switch
 //! behind a private pipe): starts, the kept session of a crashed window and its take-over, and
 //! the kill switch through the service.
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -197,31 +198,46 @@ impl Drop for Service {
     }
 }
 
-/// The service's session host on a private pipe.
-fn service() -> Service {
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let pipe = format!(r"\\.\pipe\vpnte-app-remote-{}-{n}", std::process::id());
-    let dir = TempDir::new(&format!("remote-{n}"));
-    let listener = Listener::bind(&PipeConfig {
-        name: pipe.clone(),
+fn pipe_config(name: &str) -> PipeConfig {
+    PipeConfig {
+        name: name.to_owned(),
         sddl: "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)".into(),
-    })
-    .expect("private pipe");
-    let runtime = FakeRuntime::new();
-    let kill = Arc::new(FakeKillSwitch {
+    }
+}
+
+fn kill_switch() -> Arc<FakeKillSwitch> {
+    Arc::new(FakeKillSwitch {
         level: Mutex::new(KillSwitchLevel::Off),
         notices: broadcast::channel(4).0,
-    });
-    let host = Host::new(HostDeps {
-        runtime: runtime.clone(),
-        kill_switch: kill.clone(),
+    })
+}
+
+/// A session host over `runtime` with its users in `dir`.
+fn host(runtime: Arc<FakeRuntime>, kill: Arc<FakeKillSwitch>, dir: &Path) -> Arc<Host> {
+    Host::new(HostDeps {
+        runtime,
+        kill_switch: kill,
         inputs: Arc::new(SharedInputs::new(None)),
-        users: Arc::new(Users::open(&dir.0.join("users.json"))),
+        users: Arc::new(Users::open(&dir.join("users.json"))),
         check: admit_all(),
         on_last_user: Arc::new(|| {}),
         service_version: "2.0.0-test".into(),
         refuse_tunnel: None,
-    });
+    })
+}
+
+fn pipe_name(n: u32) -> String {
+    format!(r"\\.\pipe\vpnte-app-remote-{}-{n}", std::process::id())
+}
+
+/// The service's session host on a private pipe.
+fn service() -> Service {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let pipe = pipe_name(n);
+    let dir = TempDir::new(&format!("remote-{n}"));
+    let listener = Listener::bind(&pipe_config(&pipe)).expect("private pipe");
+    let (runtime, kill) = (FakeRuntime::new(), kill_switch());
+    let host = host(runtime.clone(), kill.clone(), &dir.0);
     let cancel = CancellationToken::new();
     tokio::spawn(host.serve(listener, cancel.clone()));
     let protection = Arc::new(Store::<ProtectionDoc>::open(&dir.0));
@@ -395,4 +411,96 @@ async fn the_split_routes_by_capture_with_increasing_generations() {
     }
     assert_eq!(began, [first.generation, second.generation]);
     assert!(split.status().borrow().running);
+}
+
+/// A restarted service on `pipe` keeping its sessions in `memory`: its session host, runtime and
+/// stop token. The previous instance's pipe may still be closing: binding is retried.
+async fn restarted(pipe: &str, dir: &Path) -> (Arc<Host>, Arc<FakeRuntime>, CancellationToken) {
+    let mut tries = 0;
+    let listener = loop {
+        match Listener::bind(&pipe_config(pipe)) {
+            Ok(listener) => break listener,
+            Err(err) if tries < 250 => {
+                tries += 1;
+                tracing::debug!(%err, "pipe still taken");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(err) => panic!("pipe not free again: {err}"),
+        }
+    };
+    let runtime = FakeRuntime::new();
+    let host = host(runtime.clone(), kill_switch(), dir);
+    host.keep_sessions_in(dir.join("session.json"));
+    let cancel = CancellationToken::new();
+    tokio::spawn(host.clone().serve(listener, cancel.clone()));
+    (host, runtime, cancel)
+}
+
+/// p-follow (ks-d follow-up): the helper service restarted (the link dropped without a stop) and
+/// resumes the session after the app connected again. The app shows the session ended, connects
+/// again as at start-up, holds the resumed session's own events back and offers it for the
+/// lifecycle's take-over: one start in the restarted service, none from the app.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_service_is_attached_again() {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let (pipe, dir) = (pipe_name(n), TempDir::new(&format!("remote-restart-{n}")));
+    let protection = Arc::new(Store::<ProtectionDoc>::open(&dir.0));
+    let (_, _, first) = restarted(&pipe, &dir.0).await;
+    let r = Remote::on_pipe(&pipe, Arc::new(NoInputs), protection);
+    r.start(tun_request(), CancellationToken::new())
+        .await
+        .expect("started");
+    let losses = r.losses();
+    first.cancel();
+    // A real restart ends the service's process and with it the pipe; the stopped host here
+    // lets go of the pipe at the next request its reader takes.
+    let lost = async {
+        while !losses.has_changed().unwrap_or(true) {
+            let _ = r.refresh().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), lost)
+        .await
+        .expect("loss seen");
+    assert!(!r.status().borrow().running, "shown as ended");
+
+    let (host, runtime, second) = restarted(&pipe, &dir.0).await;
+    let mut events = r.subscribe();
+    let reattach = tokio::spawn({
+        let r = r.clone();
+        async move { r.reattach().await }
+    });
+    let linked = || {
+        r.0.link
+            .try_lock()
+            .is_ok_and(|link| link.as_ref().is_some_and(|l| !l.gone.is_cancelled()))
+    };
+    for _ in 0..500 {
+        if linked() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(linked(), "connected again");
+    assert!(host.resume(CancellationToken::new()).await, "resumed");
+    let kept = reattach
+        .await
+        .expect("task")
+        .expect("offered for a take-over");
+    assert_eq!(
+        kept.local_proxy,
+        Some("127.0.0.1:10808".parse().expect("addr"))
+    );
+    assert!(
+        events.try_recv().is_err(),
+        "the resume's own events held back"
+    );
+    assert!(!r.status().borrow().running, "parked, not shown");
+    r.start(tun_request(), CancellationToken::new())
+        .await
+        .expect("taken over");
+    assert_eq!(runtime.starts.load(Ordering::SeqCst), 1, "no second start");
+    assert!(r.status().borrow().running);
+    second.cancel();
 }

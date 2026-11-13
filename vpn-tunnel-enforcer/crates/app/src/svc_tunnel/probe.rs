@@ -94,9 +94,9 @@ pub(super) async fn ping(
 }
 
 /// The leak check for the current state (at most 15 s). The upstream is the running session's,
-/// else the configured one; `self_test` is this session's latest background self-test (Hard
-/// sessions of an elevated process only). The direct-out audit is not wired (`direct: None`:
-/// "not checked").
+/// else the configured one; `self_test` is this session's latest background self-test (TUN
+/// sessions, run where their filters live: this elevated process or the helper service). The
+/// direct-out audit is not wired (`direct: None`: "not checked").
 pub(super) async fn leak_check(
     reader: &IpReader,
     settings: &Settings,

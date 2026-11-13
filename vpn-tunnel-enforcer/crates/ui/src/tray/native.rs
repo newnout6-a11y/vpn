@@ -13,6 +13,10 @@ use super::model::{Badge, TrayItemId, TrayModel, fit_tooltip};
 /// The speed line and the tooltip change on every traffic tick; Win32 gets them once a second.
 pub const SPEED_REFRESH: Duration = Duration::from_secs(1);
 
+/// muda id of the «Доступна версия X» line (shown only while a version is offered, so it is not
+/// one of the fixed [`TrayItemId`] entries).
+pub const UPDATE_MENU_ID: &str = "tray.update";
+
 /// The model rendered in one language: what the tray should show.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rendered {
@@ -23,6 +27,8 @@ pub struct Rendered {
     /// The speed line, while an engine runs.
     pub tooltip_speed: Option<String>,
     pub badge: Badge,
+    /// The update line, while a version is offered.
+    pub update: Option<String>,
 }
 
 impl Rendered {
@@ -37,6 +43,7 @@ impl Rendered {
             tooltip_head: model.tooltip.iter().map(|m| m.render(lang)).collect(),
             tooltip_speed: model.tooltip_speed.as_ref().map(|m| m.render(lang)),
             badge: model.status.badge(),
+            update: (model.update.as_ref()).map(|m| m.render(lang).replace('&', "&&")),
         }
     }
 
@@ -55,6 +62,8 @@ pub struct Changes {
     pub enabled: Vec<(TrayItemId, bool)>,
     pub tooltip: Option<String>,
     pub badge: Option<Badge>,
+    /// The update line changed: `Some(None)` removes it.
+    pub update: Option<Option<String>>,
 }
 
 impl Changes {
@@ -64,6 +73,7 @@ impl Changes {
             && self.enabled.is_empty()
             && self.tooltip.is_none()
             && self.badge.is_none()
+            && self.update.is_none()
     }
 }
 
@@ -98,9 +108,13 @@ impl Differ {
         if prev.map(|p| p.badge) != Some(next.badge) {
             changes.badge = Some(next.badge);
         }
+        if prev.map(|p| &p.update) != Some(&next.update) {
+            changes.update = Some(next.update.clone());
+        }
         let speed_only = prev.is_some_and(|p| p.tooltip_head == next.tooltip_head)
             && changes.enabled.is_empty()
             && changes.badge.is_none()
+            && changes.update.is_none()
             && changes.texts.iter().all(|(id, _)| *id == TrayItemId::Speed);
         let too_soon = self
             .speed_at
@@ -140,13 +154,18 @@ pub struct NativeReport {
     pub tooltip: String,
     pub badge: Option<Badge>,
     pub calls: NativeCalls,
+    /// The update line as muda holds it.
+    pub update: Option<String>,
 }
 
 /// The tray icon with its menu. Dropping it removes the icon (the old tray was never destroyed,
 /// F-134).
 pub struct NativeTray {
     icon: TrayIcon,
+    /// The menu (muda shares it with the icon): the update line comes and goes.
+    menu: Menu,
     items: Vec<MenuItem>,
+    update: Option<MenuItem>,
     icons: Option<TrayIcons>,
     differ: Differ,
     tooltip: String,
@@ -191,7 +210,7 @@ impl NativeTray {
         let mut builder = TrayIconBuilder::new()
             .with_id("vpnte")
             .with_tooltip(&tooltip)
-            .with_menu(Box::new(menu))
+            .with_menu(Box::new(menu.clone()))
             .with_menu_on_left_click(false);
         if let Some(icon) = icon {
             builder = builder.with_icon(icon);
@@ -204,17 +223,46 @@ impl NativeTray {
             }
         };
         let badge = icons.as_ref().map(|_| rendered.badge);
+        let update = rendered.update.clone();
         let mut differ = Differ::default();
         differ.shown(rendered, Instant::now());
-        Some(NativeTray {
+        let mut tray = NativeTray {
             icon,
+            menu,
             items,
+            update: None,
             icons,
             differ,
             tooltip,
             badge,
             calls: NativeCalls::default(),
-        })
+        };
+        tray.set_update(update);
+        Some(tray)
+    }
+
+    /// Adds, changes or removes the update line (right above «Показать окно»).
+    fn set_update(&mut self, text: Option<String>) {
+        match (text, &self.update) {
+            (Some(text), Some(item)) => {
+                item.set_text(text);
+                self.calls.text += 1;
+            }
+            (Some(text), None) => {
+                let item = MenuItem::with_id(UPDATE_MENU_ID, text, true, None);
+                match self.menu.insert(&item, update_position()) {
+                    Ok(()) => self.update = Some(item),
+                    Err(err) => tracing::warn!(%err, "tray update line not added"),
+                }
+            }
+            (None, Some(item)) => {
+                if let Err(err) = self.menu.remove(item) {
+                    tracing::warn!(%err, "tray update line not removed");
+                }
+                self.update = None;
+            }
+            (None, None) => {}
+        }
     }
 
     /// Brings the tray to `model` with the fewest Win32 calls.
@@ -227,6 +275,9 @@ impl NativeTray {
         for (id, enabled) in changes.enabled {
             self.items[id as usize].set_enabled(enabled);
             self.calls.enabled += 1;
+        }
+        if let Some(update) = changes.update {
+            self.set_update(update);
         }
         if let Some(tooltip) = changes.tooltip {
             match self.icon.set_tooltip(Some(&tooltip)) {
@@ -257,14 +308,24 @@ impl NativeTray {
             tooltip: self.tooltip.clone(),
             badge: self.badge,
             calls: self.calls,
+            update: self.update.as_ref().map(MenuItem::text),
         }
     }
+}
+
+/// Menu position of the update line: the entries (and separators) before «Показать окно».
+fn update_position() -> usize {
+    TrayItemId::ALL
+        .into_iter()
+        .take_while(|id| *id != TrayItemId::Show)
+        .map(|id| 1 + usize::from(id.separator_after()))
+        .sum()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tray::model::{TrayState, TunnelState};
+    use crate::tray::model::{TrayExtras, TrayState, TunnelState};
 
     fn render(state: &TrayState) -> Rendered {
         crate::test_locales::init_locales();
@@ -361,5 +422,31 @@ mod tests {
         assert!(changes.texts.len() >= 8, "{changes:?}");
         assert!(changes.tooltip.is_some());
         assert!(changes.enabled.is_empty() && changes.badge.is_none());
+    }
+
+    /// p-follow: the update line comes, changes and goes as one change of its own, right above
+    /// «Показать окно» (after the four status lines and their separator).
+    #[test]
+    fn the_update_line_comes_and_goes() {
+        crate::test_locales::init_locales();
+        let t0 = Instant::now();
+        let offered = |version: Option<&str>| {
+            let extras = TrayExtras {
+                always: false,
+                update: version.map(str::to_owned),
+            };
+            Rendered::of(
+                &TrayModel::build_with(&connected(0), &extras, false),
+                Lang::Ru,
+            )
+        };
+        let mut differ = Differ::default();
+        differ.shown(offered(None), t0);
+        let shown = differ.changes(&offered(Some("2.0.1")), t0);
+        assert_eq!(shown.update, Some(Some("Доступна версия 2.0.1".to_owned())));
+        assert!(shown.texts.is_empty() && shown.enabled.is_empty());
+        assert!(differ.changes(&offered(Some("2.0.1")), t0).is_empty());
+        assert_eq!(differ.changes(&offered(None), t0).update, Some(None));
+        assert_eq!(update_position(), 5);
     }
 }

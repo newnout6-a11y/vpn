@@ -47,7 +47,7 @@ pub use capture::{
     Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, ProxyCapture, TunCapture,
     TunForm, tun_form,
 };
-pub use engines::{CoreProc, EngineFeed, Engines, HandshakeGate, RealEngines, Slots};
+pub use engines::{CoreProc, EngineExes, EngineFeed, Engines, HandshakeGate, RealEngines, Slots};
 pub use handle::TunnelHandle;
 
 /// The inputs of one start that live in the user's stores, as one plain serialisable snapshot

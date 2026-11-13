@@ -364,7 +364,12 @@ pub struct TrayState {
     pub paused: bool /*ks-a: the kill switch holds a drop: menu «Подключить» / «Продолжить без VPN»*/,
 }
 pub enum TrayStatus { Protected, Leak, Off, Starting, ProxyDown, KillSwitch, Restarting, Stopping, Error, Unknown, Paused }
-pub struct TrayModel { status, tooltip: Vec<Msg>, tooltip_speed: Option<Msg>, items: Vec<TrayItem> } // build(&state, quitting)
+pub struct TrayModel { status, tooltip: Vec<Msg>, tooltip_speed: Option<Msg>, items: Vec<TrayItem>,
+    turn_off_always: bool /*Stop reads «Выключить «Всегда»»*/, update: Option<Msg> /*«Доступна версия X»*/ }
+    // build(&state, quitting) = build_with(&state, &TrayExtras::default(), quitting)
+pub struct TrayExtras { pub always: bool, pub update: Option<String> }  // p-follow: read by TrayHost from the
+    // root Rc<dyn SettingsApi> (kill-switch view: Strict + always_available) and Rc<dyn UpdatesApi> (app.version)
+pub const UPDATE_MENU_ID: &str = "tray.update";  // the update line (muda insert/remove above «Показать окно»)
 pub enum CloseAction { Hide, Quit }                              // TrayState::close_action(): the «Сворачивать в трей» setting
 #[component] pub fn TrayHost(children: Element) -> Element;      // wraps the Shell; provides TrayContext
 #[derive(Clone, Copy)] pub struct TrayContext { pub model: Memo<TrayModel>, pub native: Signal<Option<NativeReport>> }
@@ -378,6 +383,10 @@ pub struct DemoTray;                            // new(scene), scene(TrayStatus)
 Quit hides the window first, runs `TrayApi::quit`, and closes only on `Ok`; a refused quit brings
 the window back with «Повторить» / «Выйти без восстановления». The native tray (Win32 via
 tray-icon / muda) is updated at most once a second for the speed lines; tooltip ≤ 127 UTF-16 units.
+p-follow: in "Always" the paused menu's second entry reads «Выключить «Всегда»» and calls
+`SettingsApi::set_kill_switch_level(Standard)` (as the start page's button; a failure shows the
+window); an offered app version adds «Доступна версия X», which opens the window. Both come from
+the root's Settings / Updates APIs; without them (demo) the menu is as before.
 
 ## First-run wizard: `wizard`
 

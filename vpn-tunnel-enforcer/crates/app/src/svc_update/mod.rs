@@ -1,6 +1,7 @@
 //! The update channel in the app (p-updates; research/updates.md §4): the feed check on its
 //! schedule, the offers on the start page and in Settings, downloads through the running session,
-//! engine installs into the engine store, the app's own update through the per-user installer.
+//! engine installs into the engine store (they reach the tunnel without an app restart:
+//! `switch`), the app's own update through the per-user installer.
 //! Nothing runs while the owner's keys are not compiled in (`vpnte_update::policy::keys_ready`).
 mod actions;
 mod api;
@@ -8,6 +9,7 @@ mod checks;
 mod doc;
 mod flow;
 mod launch;
+mod switch;
 mod trial;
 mod view;
 mod ways;
@@ -149,7 +151,11 @@ impl Updates {
 
     /// One calm line after an action (`warn` = a refusal or failure).
     fn note(&self, msg: vpnte_base::Msg, warn: bool) {
-        self.inner.lock().note = Some(Note { msg, warn });
+        self.inner.lock().note = Some(Note {
+            msg,
+            warn,
+            switch_now: false,
+        });
         self.refresh();
     }
 }

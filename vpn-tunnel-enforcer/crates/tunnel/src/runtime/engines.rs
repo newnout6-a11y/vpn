@@ -200,11 +200,19 @@ const ECHO_URLS: [&str; 2] = ["https://api.ipify.org", "https://ifconfig.me/ip"]
 /// Cold SOCKS egress probe budget (xray-engine §3.8).
 const EGRESS_VIA_BUDGET: Duration = Duration::from_secs(4);
 
-/// The bundled engines. Paths must be the canonical install paths: the WFP permits match the
+/// The engine executables a runtime starts. Canonical install paths: the WFP permits match the
 /// image path the processes run from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineExes {
+    pub singbox: PathBuf,
+    pub xray: PathBuf,
+}
+
+/// The real engines over `vpnte_engine`.
 pub struct RealEngines {
-    singbox: PathBuf,
-    xray: PathBuf,
+    /// Read at every engine start: the update channel may switch an engine while the app runs
+    /// (a running sing-box or Xray slot set keeps the file it started from).
+    exes: watch::Receiver<EngineExes>,
     logs: Option<PathBuf>,
     gate: Option<Arc<dyn HandshakeGate>>,
     feed: EngineFeed,
@@ -214,11 +222,18 @@ pub struct RealEngines {
 }
 
 impl RealEngines {
-    /// `logs` = the engine logs dir (`sing-box.log`, `xray-a.log`, `xray-b.log`).
+    /// Fixed engines (the helper service runs only its own pinned files). `logs` = the engine
+    /// logs dir (`sing-box.log`, `xray-a.log`, `xray-b.log`).
     pub fn new(singbox: PathBuf, xray: PathBuf, logs: Option<PathBuf>) -> Self {
+        Self::following(watch::channel(EngineExes { singbox, xray }).1, logs)
+    }
+
+    /// Engines that follow `exes`: every start reads the paths current then, so an engine the
+    /// update channel installed or rolled back runs from the next start on, without an app
+    /// restart.
+    pub fn following(exes: watch::Receiver<EngineExes>, logs: Option<PathBuf>) -> Self {
         Self {
-            singbox,
-            xray,
+            exes,
             logs,
             gate: None,
             feed: EngineFeed::default(),
@@ -370,25 +385,25 @@ async fn echo(
 #[async_trait]
 impl Engines for RealEngines {
     fn spawn_core(&self, config: &[u8]) -> io::Result<Arc<dyn CoreProc>> {
-        let core = SingBoxProcess::spawn(&self.singbox, config, self.logs.as_deref())?;
+        let core = SingBoxProcess::spawn(&self.singbox_exe(), config, self.logs.as_deref())?;
         self.feed.attach(config, core.subscribe_lines());
         Ok(Arc::new(core))
     }
 
     fn slots(&self, events: mpsc::Sender<XrayEvent>) -> Box<dyn Slots> {
         Box::new(XraySupervisor::new(
-            self.xray.clone(),
+            self.xray_exe(),
             self.logs.clone(),
             events,
         ))
     }
 
     fn singbox_exe(&self) -> PathBuf {
-        self.singbox.clone()
+        self.exes.borrow().singbox.clone()
     }
 
     fn xray_exe(&self) -> PathBuf {
-        self.xray.clone()
+        self.exes.borrow().xray.clone()
     }
 
     fn log_files(&self, slots: bool) -> Vec<PathBuf> {
@@ -554,5 +569,33 @@ mod feed_tests {
             drop(core);
         }
         assert!(rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod exes_tests {
+    use super::*;
+
+    fn exes(dir: &str) -> EngineExes {
+        EngineExes {
+            singbox: PathBuf::from(dir).join("sing-box.exe"),
+            xray: PathBuf::from(dir).join("xray.exe"),
+        }
+    }
+
+    /// p-follow (p-updates follow-up): engines that follow the update channel start from the
+    /// paths current at each start, so a newly installed engine needs no app restart; fixed ones
+    /// (the helper service) keep theirs.
+    #[test]
+    fn every_start_reads_the_current_engine_paths() {
+        let (tx, rx) = watch::channel(exes("bundled"));
+        let following = RealEngines::following(rx, None);
+        assert_eq!(following.singbox_exe(), exes("bundled").singbox);
+        tx.send_replace(exes("1.14.5"));
+        assert_eq!(following.singbox_exe(), exes("1.14.5").singbox);
+        assert_eq!(following.xray_exe(), exes("1.14.5").xray);
+        let fixed = RealEngines::new(exes("pinned").singbox, exes("pinned").xray, None);
+        assert_eq!(fixed.singbox_exe(), exes("pinned").singbox);
+        assert_eq!(fixed.xray_exe(), exes("pinned").xray);
     }
 }

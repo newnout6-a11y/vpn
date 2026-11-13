@@ -135,7 +135,11 @@ impl Runtime for Remote {
                 self.unpark();
                 Request::Restart(Box::new(start))
             }
-            None => Request::Start(Box::new(start)),
+            // The app's own start ends a wait for a resumed session (`reattach`).
+            None => {
+                self.unpark();
+                Request::Start(Box::new(start))
+            }
         };
         let receipt = self.started(request, &cancel).await?;
         receipt.ok_or_else(|| AppError::internal(std::io::Error::other("no receipt")).into())
