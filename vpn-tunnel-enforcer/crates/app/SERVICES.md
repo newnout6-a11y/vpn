@@ -271,9 +271,20 @@ session running the old engine gets «Сейчас (переподключени
 idle one the line «… заработает при следующем подключении в режиме «Прокси»». An elevated process
 holding the WFP filters keeps the start's engines (its permits name those paths): there the old
 «после перезапуска приложения» lines stay. Tunnel mode through the helper service runs the
-service's own pinned engines (unchanged). The trial watch (`svc_update::trial`) counts what ran
+service's own engines, which the service updates itself from the same signed feed (p-svc-update,
+`crates/service/API.md` «Updates»). The trial watch (`svc_update::trial`) counts what ran
 (fix-follow): at each settle of the tunnel, every engine file this process's runtime started since
 the last one (`TunnelOps::engine_starts`) for the version whose exe it is, while that version is
 the active one on trial; an in-place server switch and a Tunnel-mode start in the service start
 none here. Security releases: one notice through
 `backend.notifier`, no «Пропустить», never forced.
+The helper service (p-svc-update, `svc_update::service`): Settings «Обновления» shows one line from
+the installed service's answer to `Request::Update(UpdateAsk::State)` (a first frame on a short
+connection of its own: the tunnel's connection keeps the controller slot; no service, or an older
+one that refuses the request: no line), read at start and after each check. Before «Обновить» runs
+the installer of release V, `service_first(V)` sends `Take { version: V }` and follows the
+service's `State` (answered at once; up to 120 s while it checks, 45 s while it restarts): the
+service takes V's service from the signed feed itself and restarts into it (only when no session
+runs or the session is this user's), so the installer's `request-install` finds it current and
+Windows asks nothing. Any other outcome: the installer runs and asks as before. The live server check (`svc_live`) reads the engine paths from
+the same watch as `TunnelOps::probe_ctx` (`AppLiveEnv::exes`), so it follows an engine switch.

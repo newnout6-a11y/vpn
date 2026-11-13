@@ -221,6 +221,7 @@ impl Host {
                 })
             }
             Request::ForgetMe => self.forget(client).await,
+            Request::Update(ask) => self.update(&client.user, ask).await,
         }
     }
 

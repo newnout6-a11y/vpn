@@ -18,7 +18,8 @@ use vpnte_probes::leak::SelfTestResult;
 use vpnte_tunnel::api::{CaptureKind, Runtime, StopOptions, TunnelEvent};
 
 use crate::pipe::{ClientCheck, Listener};
-use crate::proto::StatusWire;
+use crate::proto::{ErrorCode, Reply, StatusWire, UpdateAsk, WireError};
+use crate::update::UpdateDesk;
 use crate::users::Users;
 
 mod conn;
@@ -78,6 +79,8 @@ pub struct Host {
     memory: OnceLock<PathBuf>,
     /// The service's leak self-tests ([`Host::report_self_tests`]).
     self_tests: OnceLock<watch::Receiver<Option<SelfTestResult>>>,
+    /// The service's own updater ([`Host::serve_updates`]).
+    updates: OnceLock<Arc<dyn UpdateDesk>>,
 }
 
 impl Host {
@@ -93,7 +96,34 @@ impl Host {
             generation: Arc::default(),
             memory: OnceLock::new(),
             self_tests: OnceLock::new(),
+            updates: OnceLock::new(),
         })
+    }
+
+    /// `Request::Update` is answered by `desk` (set once, at start-up; without it the request is
+    /// a bad one, as for an older service).
+    pub fn serve_updates(&self, desk: Arc<dyn UpdateDesk>) {
+        let _ = self.updates.set(desk);
+    }
+
+    /// `user`'s `Update`. The answer may restart the service only while no session runs or the
+    /// session is the caller's own: another Windows user's session never ends for an update.
+    async fn update(&self, user: &str, ask: UpdateAsk) -> Result<Reply, WireError> {
+        let Some(desk) = self.updates.get().cloned() else {
+            let error = WireError::new(
+                ErrorCode::BadRequest,
+                vpnte_base::ErrorKind::Validation,
+                "service.pipe.badRequest",
+            );
+            return Err(error);
+        };
+        let busy = {
+            let status = self.deps.runtime.status();
+            let status = status.borrow();
+            status.running || status.capture.is_some()
+        };
+        let own = self.session_user.lock().as_deref() == Some(user);
+        Ok(Reply::Update(desk.answer(ask, !busy || own).await))
     }
 
     /// The status carries the latest of these self-test results (set once, at start-up).

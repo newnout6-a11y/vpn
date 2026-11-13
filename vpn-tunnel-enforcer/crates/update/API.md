@@ -92,6 +92,7 @@ the finished file is renamed, reopened held and hashed once more through that ha
 pub struct EngineStore;  impl EngineStore {
     pub fn new(root /* <local>\engines */, resources: PathBuf) -> Self;   // compiled keys
     pub fn with_keys(root, resources, &'static [PublicKey]) -> Self;     // tests
+    pub fn not_below_bundled(self) -> Self;  // the helper service: a version equal to the bundled one counts too
     pub fn resolve(&self, id) -> Resolved { exe, origin: Origin::{Bundled, Downloaded { version, on }} };
     pub async fn install(&self, &EngineEntry, feed: &[u8], sig: &str, archive: Verified, &impl EngineCheck)
         -> Result<Installed, InstallError>;   // Unknown | NotAllowed | Feed | Member | VersionMismatch | ConfigRefused | Io
@@ -112,5 +113,7 @@ range, and it is newer than the bundled one.
 - App: `svc_core::build` resolves `Backend::engines` through `EngineStore::resolve` (after `tidy`);
   `svc_update` runs the checker, the offers, the downloads, installs and the app's own update.
 - Engine: `pin::check` adds the pins of the feed stored next to a downloaded exe (see engine API).
-- Helper service (not wired here): `feed::verify_trusted` + `Feed::service` for its self-update, and
-  `Feed::engine` + `policy::engine_allowed` before it copies a downloaded engine into its own folder.
+- Helper service (`vpnte_service::update`, p-svc-update): the same keys and `feed::verify`; `fetch`,
+  `download`, `check::run` and an `EngineStore` over `<install>\engines` with `not_below_bundled`
+  (after it took a newer release's exe, its folder still holds the previous release's engine
+  files, which the new exe's pins refuse); `Feed::service` for its own exe.

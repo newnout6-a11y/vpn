@@ -16,10 +16,10 @@ use vpnte_probes::live_stages::Text;
 use vpnte_servers::store::Servers;
 use vpnte_tunnel::api::TunStatus;
 use vpnte_tunnel::fsm::TunnelSnapshot;
+use vpnte_tunnel::runtime::EngineExes;
 use vpnte_ui::servers as ui;
 
 use super::*;
-use crate::services::Engines;
 use crate::svc_live::AppLiveEnv;
 
 /// A throw-away data dir under %TEMP%, removed on drop.
@@ -271,10 +271,11 @@ async fn unknown_servers_are_answered_without_a_check() {
         servers: servers.clone(),
         settings: Arc::new(Store::<Settings>::open(&dir.0)),
         rules: Arc::new(Store::<RulesDoc>::open(&dir.0)),
-        engines: Engines {
+        exes: watch::channel(EngineExes {
             singbox: resources.join("sing-box.exe"),
             xray: resources.join("xray.exe"),
-        },
+        })
+        .1,
         status: watch::channel(TunStatus::default()).1,
         snapshot: watch::channel(TunnelSnapshot::default()).1,
         session: watch::channel(None).1,

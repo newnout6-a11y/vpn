@@ -13,7 +13,7 @@ use super::state::{self, Choice};
 use super::{EngineStore, exe_name};
 use crate::download::{Verified, parse_sha};
 use crate::feed::{EngineEntry, FEED_FILE, MemberEntry, SIG_FILE, verify};
-use crate::policy::{self, bundled_version, engine_allowed};
+use crate::policy::{self, engine_allowed};
 use crate::version::Version;
 
 /// No engine file comes near this; a larger member is not the one the feed means.
@@ -70,7 +70,7 @@ impl EngineStore {
     ) -> Result<Installed, InstallError> {
         let (id, version) = (entry.id.as_str(), entry.version);
         exe_name(id).ok_or_else(|| InstallError::Unknown(id.to_owned()))?;
-        let newer = bundled_version(id).is_none_or(|b| version > b);
+        let newer = self.above_bundled(id, version);
         if !engine_allowed(id, version) || !entry.app.contains(policy::app_version()) || !newer {
             return Err(InstallError::NotAllowed(version));
         }

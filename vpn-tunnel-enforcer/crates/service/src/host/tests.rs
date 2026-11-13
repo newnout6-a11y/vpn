@@ -30,6 +30,7 @@ mod access;
 mod order;
 mod resume;
 mod selftest;
+mod update;
 
 /// Records calls; `start` emits the runtime's event sequence.
 struct FakeRuntime {

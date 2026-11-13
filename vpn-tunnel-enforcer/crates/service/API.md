@@ -27,7 +27,7 @@ vpnte-service.workspace = true
 | `service` | the service body (`run`): logging, WFP start-up, runtime, host, sandbox, graceful stop, the re-checks of a held kill switch (`service::recheck`: wake / network change, leak self-test); `trusted_install` / `FolderFault` |
 | `watchdog` | `Engaged` (a capture that records whether a session's filters are held) and `run` (the WFP watchdog exactly while they are) |
 | `sandbox` | engines may not start programs: each engine process in a nested job with `ActiveProcessLimit = 1` |
-| `update` | signed self-update hook: `verify(package, signature)` with `PUBLIC_KEY` (all zero = not set: refuses) |
+| `update` | its own updates through the signed feed (p-svc-update): `swap` (the exe swap, trial, rollback), `engines` (`ServiceEngines`: Tunnel mode's engine store), `checks`, `source` (`Mirrors`), `Updates` / `UpdatesDeps` (schedule, `Take`), `UpdateDesk`, `RESTART_EXIT` |
 | `LOCALES` | `&[(ru_json, en_json)]`, keys under `service.*` |
 
 ## Binary verbs
@@ -103,7 +103,9 @@ unknown fields.
 ```rust
 pub enum Request { Hello(Hello), Start(Box<TunnelStart>), Stop(StopTunnel), Restart(Box<TunnelStart>),
     RestartWithLast { reason: String }, RestartAdaptive(Box<AdaptiveRestart>), Switch(Box<TunnelStart>),
-    Inputs(Box<RoutingInputs>), Status, KillSwitch(Box<ProtectionSettings>), Cleanup, ForgetMe }
+    Inputs(Box<RoutingInputs>), Status, KillSwitch(Box<ProtectionSettings>), Cleanup, ForgetMe,
+    Update(UpdateAsk) /* p-svc-update: a first frame like ForgetMe, or after Hello */ }
+pub enum UpdateAsk { State, Take { version: String } }
 pub struct Hello { pub protocol: u32, pub app_version: String }
 pub struct TunnelStart { pub upstream: Upstream, pub routing: RoutingInputs,
     pub protection: ProtectionSettings, pub adaptive: AdaptiveMode, pub engine: EnginePref, pub origin: Origin }
@@ -116,7 +118,9 @@ pub struct RoutingInputs { smart_ru, smart_ru_maps_direct, domain_rules: Vec<Dom
     // no rule-set dir, no inactive splits
 pub enum Reply { Welcome { protocol, service_version }, Started(Option<StartReceiptWire>),
     Stopped(StopReceiptWire), Switched(Option<SwitchReceiptWire>), Status(Box<StatusReply>),
-    Done { removing: bool }, Cleaned { filters, sublayer, provider } }
+    Done { removing: bool }, Cleaned { filters, sublayer, provider }, Update(ServiceUpdateWire) }
+pub struct ServiceUpdateWire { pub version: String, pub phase: UpdatePhase /* Off | Idle | Working | Waiting
+    | Restarting | Failed */, pub target: Option<String>, pub checked_at: Option<UnixMs> }
 pub struct StatusReply { pub tunnel: StatusWire /* with SessionWire: Clash secret, proxy creds */,
     pub last_exit: Option<ExitWire>, pub recent_fault: Option<OutboundFault>, pub protection: ProtectionWire,
     pub kept: Option<KeptSession> }   // the running session, for its own user's take-over
@@ -263,8 +267,62 @@ is dropped when it comes. A per-user uninstaller sends `ForgetMe` as its first f
   TUN session runs with the kill switch on (level in force not Off); a leak is logged and runs
   the filter check at once. Results go to the status (above). In the service, not the app: with
   "Always" the session runs before any app does. The DNS canary stays in the app (a plain lookup).
-- Signed self-update: only the hook (`update::verify`, Ed25519 over the whole package,
-  `PUBLIC_KEY` constant to fill in; all zero refuses everything with `service.update.keyNotSet`).
+- Its own updates (p-svc-update; owner answer 7: our own minisign key, no code signing): one key
+  set with the app, `vpnte_update::policy::trusted_keys()` (`feed::verify`); without keys the
+  service never checks (`UpdatePhase::Off`). See "Updates" below.
+
+## Updates (`update`, p-svc-update)
+The service fetches the signed feed and the files itself, directly over HTTPS from the compiled
+mirrors (`source::Mirrors`; while a TUN session runs the requests go through it like any traffic,
+the service's own exe being permitted), never from a file a client hands over; `vpnte_update::
+feed::verify` with the compiled keys is the only trust. Checks: 2-5 min after start, then daily
+(+ up to 1 h; retries 1 h / 3 h), and on the app's `Take`; one at a time; a feed older than the
+newest accepted `seq` (`service\update.json`, private: `maxSeq`, `checkedAt`) or past 90 days is
+not acted on.
+- Engines for Tunnel mode (`engines::ServiceEngines`): the engine store over `<install>\engines`
+  with the install folder as the bundled set and `EngineStore::not_below_bundled` (after an exe
+  swap the folder holds the previous release's engine files, which the new exe's pins refuse: the
+  same version from the feed replaces them). Wanted: `feed.engine(id)` inside the compiled range,
+  meant for this version, newer than what runs (or what runs fails the pins). Each archive goes to
+  the staging folder, its listed members (hashes of the signed feed) into `<id>\<version>\` with
+  the feed next to them (the engine crate's elevated pin check accepts that folder), the engine
+  must report the feed's version and pass a TUN + Xray-slot config check (`checks::EngineChecks`).
+  Every engine start reads the active paths (`RealEngines::following`); `Engaged::with_engines`
+  permits a version installed after the start of the service in each session (the protection's
+  own engine permits are those resolved at start). The previous version stays for one rollback;
+  three failed starts in a row of a fresh version go back (the store's trial, fed from the
+  runtime's `StartBegan` / `StartFinished` and `RealEngines::starts`). A version folder that
+  users could change is not run (bundled instead, logged).
+- Its own exe (`swap`): `feed.service` above its own version (never one that failed its trial
+  here) is downloaded into `<install>\update\` (`paths::secure_dir` before every download:
+  ADMIN_ONLY_DIR_SDDL, re-created when users could change it) with the signed feed kept next to
+  it; `swap::ready` re-verifies feed, size and SHA-256 right before any swap. Engines go first:
+  the exe is staged only when every wanted engine installed. It goes in when no session runs and
+  no session's filters are held, at the service's next start (before anything runs), or at once
+  on a `Take` whose caller owns the running session or finds none (another user's session is
+  never ended: the release waits). The swap: the staged file is flushed, `swap.json` written
+  (synced), the running image gets a second name (`update\vpnte-service.prev.exe`, hard link:
+  Windows refuses to replace the entry of a running exe with one name, checked by
+  `swap::tests::a_running_exe_is_replaced_through_its_second_name`), the entry is replaced
+  (`MoveFileExW` replace + write-through), the service stops with `RESTART_EXIT` (10) and the
+  SCM's recovery starts the new file. Trial: every start of the new version counts first
+  (`swap::at_start`, the first thing the service does); a start that runs 30 s ends it; the start
+  after three that did not puts the previous exe back the same way and exits for the SCM again;
+  that version is skipped from then on (the spent marker stays as the record).
+- Power loss (`swap` docs, tested state by state): before the marker, the old exe and the staged
+  file (the next start swaps it in); marker / link written, entry not replaced: the old exe (its
+  start drops both, swaps again); entry replaced: the new exe on trial; during a rollback: the new
+  exe again (it rolls back again); rollback done: the old exe. `vpnte-service.exe` is never
+  missing: the replace is one directory operation.
+- `Update(State | Take { version })`: answered as the first frame of a connection for any user,
+  without `Hello` or the controller slot (like `ForgetMe`), and after `Hello` alike; an older
+  service answers `badRequest`. Every answer is immediate (no connection waits on a download).
+  `Take` = the app runs the installer of `version` next: the service answers `Working` and checks
+  on a task of its own (one at a time; one that ended within 60 s stands in, so many asks never
+  mean many feed reads); when the feed's service is exactly `version` and the ask allowed a
+  restart (it stands 3 min), it swaps and reports `Restarting`. The app follows `State` until the
+  service answers as `version`, so the installer's `request-install` finds it current
+  (`per_user::is_current`: the same bytes) and asks nothing.
 
 ## Idle footprint (measured 12.11.2026, `examples/idle.rs`, this machine)
 Current-thread runtime; the listener waits in an overlapped `ConnectNamedPipe`, the runtime actor
@@ -286,7 +344,6 @@ elevation) — it adds the WFP engine handle and the SCM thread, no timer.
 | `service.refused.{tooLong,tooMany,text}` | `field` | `validate` |
 | `service.refused.localProxy` | — | `validate::start` |
 | `service.folder.untrusted` / `service.folder.fileMissing` | — / `file` | `service::FolderFault::msg` (refused starts) |
-| `service.update.{keyNotSet,badSignature}` | — | `update::UpdateError` |
 | `service.install.{notElevated,imageChanged,failed}`, `service.install.{fileMissing,fileMismatch}` | — / `file` | `install` |
 | `service.install.notRestarted`, `service.uninstall.filtersKept` | — | `install::flow` (exit codes 4 / 3), the last user's `ForgetMe` |
 
@@ -313,12 +370,19 @@ elevation) — it adds the WFP engine handle and the SCM thread, no timer.
   restart with the service Disabled (provider `FWPM_PROVIDER_FLAG_DISABLED`, no persistent filter
   of ours active, back after enabling) only with `VPNTE_BFE_RESTART_TESTS` set. Needs a real reboot, never run: static filters gone after one,
   "Always" not enforced at boot after the service was removed or disabled.
-- Not built (later): the HKLM uninstall entry, the persistent Wintun adapter (research §5), the
-  signed-update flow beyond the hook, failover / confirmation seams over the pipe (`None` in the
-  service), a non-admin squatting test (the DACL mask is unit-tested).
+- Not built (later): the HKLM uninstall entry, the persistent Wintun adapter (research §5),
+  failover / confirmation seams over the pipe (`None` in the service), a non-admin squatting test
+  (the DACL mask is unit-tested).
 - Smart RU in the service uses the bundled, pinned rule sets, not the app's refreshed copies.
 - p-svc-recheck (13.11.2026), elevated, CI only: `tests/elevated_recheck.rs` (a TUN session of the
   installed service under "If the VPN drops" gets a periodic self-test in its pushed status and in
   the answer to `Status`, never a leak). Never run anywhere: a real wake reaching the service's
   control handler and a real network change; the re-check's reaction to both is tested with fakes
   (`service::recheck::tests`).
+- p-svc-update (13.11.2026): never run against a real feed (the owner's keys are placeholders) nor
+  under the SCM here: the swap, the trial, the rollback and every power-loss state ran on plain
+  files in a temp folder (and once on a running copy of PING.EXE); a real `RESTART_EXIT` restart by
+  the SCM's recovery, the at-start swap of the installed service, a downloaded engine in a real TUN
+  session (the engine crate's elevated pin check over the version folder) and the staging folder's
+  owner as written by SYSTEM were not executed. The release pipeline's service asset
+  (`release.yml`) runs in CI only.

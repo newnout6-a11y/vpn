@@ -66,6 +66,8 @@ pub struct EngineStore {
     root: PathBuf,
     resources: PathBuf,
     keys: &'static [PublicKey],
+    /// A downloaded version equal to the bundled one counts too ([`EngineStore::not_below_bundled`]).
+    equal_ok: bool,
 }
 
 impl EngineStore {
@@ -80,7 +82,23 @@ impl EngineStore {
             root,
             resources,
             keys,
+            equal_ok: false,
         }
+    }
+
+    /// The helper service's store: a downloaded version equal to the bundled one is used and
+    /// installed as well. After the service took a newer release's exe from the feed, its folder
+    /// still holds the older release's engine files, which the new exe's release pins refuse;
+    /// the same version from the signed feed (the same member hashes) takes their place.
+    #[must_use]
+    pub fn not_below_bundled(mut self) -> Self {
+        self.equal_ok = true;
+        self
+    }
+
+    /// `version` of `id` is past the bundled engine (or equal to it, see `not_below_bundled`).
+    fn above_bundled(&self, id: &str, version: Version) -> bool {
+        bundled_version(id).is_none_or(|b| version > b || (self.equal_ok && version == b))
     }
 
     /// The folder of version `version` of engine `id`.
@@ -122,8 +140,7 @@ impl EngineStore {
     fn usable(&self, id: &str, version: Version) -> Option<PathBuf> {
         let dir = self.version_dir(id, version);
         let exe = dir.join(exe_name(id)?);
-        let newer = bundled_version(id).is_none_or(|b| version > b);
-        if !exe.is_file() || !engine_allowed(id, version) || !newer {
+        if !exe.is_file() || !engine_allowed(id, version) || !self.above_bundled(id, version) {
             return None;
         }
         let bytes = std::fs::read(dir.join(FEED_FILE)).ok()?;

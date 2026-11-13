@@ -7,7 +7,8 @@ use vpnte_base::{AppResult, Msg};
 
 use super::UpdatesApi;
 use super::model::{
-    AppOffer, CheckLine, CheckResult, EngineOffer, EngineRow, Note, UpdateOutcome, UpdatesView,
+    AppOffer, CheckLine, CheckResult, EngineOffer, EngineRow, Note, ServiceLine, ServiceState,
+    UpdateOutcome, UpdatesView,
 };
 
 /// The demo backend: every action changes the pushed view the way the app would.
@@ -104,6 +105,10 @@ pub fn sample() -> UpdatesView {
         outcome: None,
         progress: None,
         note: None,
+        service: Some(ServiceLine {
+            version: "2.0.0".into(),
+            state: ServiceState::Current,
+        }),
     }
 }
 

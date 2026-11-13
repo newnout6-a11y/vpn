@@ -30,6 +30,32 @@ pub struct UpdatesView {
     pub progress: Option<Progress>,
     /// One calm line after an action: «Заработает после перезапуска приложения», a refusal…
     pub note: Option<Note>,
+    /// The helper service, when it is installed and answers: its version and its own update.
+    pub service: Option<ServiceLine>,
+}
+
+/// «Служба-помощник 2.0.1: актуальна».
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceLine {
+    pub version: String,
+    pub state: ServiceState,
+}
+
+/// Where the helper service's own update stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceState {
+    /// Not checked (no update keys in this build, or not yet): the version only.
+    Unchecked,
+    /// Its last check found nothing newer.
+    Current,
+    /// Checking or downloading.
+    Working,
+    /// `target` goes in once the VPN is off (or at the service's next start).
+    Waiting { target: String },
+    /// `target` goes in now.
+    Restarting { target: String },
+    /// The last check failed; the service tries again by itself.
+    Failed,
 }
 
 /// The last check: when, from where, and what it found.

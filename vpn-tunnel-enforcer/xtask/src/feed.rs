@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
-use crate::dist::{installer_name, workspace_version};
+use crate::dist::{installer_name, service_name, workspace_version};
 use crate::fetch;
 use crate::manifest::{Manifest, Sha256Hex};
 
@@ -130,10 +130,10 @@ fn from_dist(root: &Path, dist: &Path, args: &[String]) -> Result<(Value, Option
             "urls": [format!("{REPO}/releases/download/v{to}/{name}")] });
     }
     let app = json!({ "stable": stable, "beta": null, "warn_below": value("--warn-below") });
-    let service_name = format!("vpnte-service-{version}.exe");
-    let service = match sums.contains_key(&service_name) {
+    let service_file = service_name(&version);
+    let service = match sums.contains_key(&service_file) {
         true => {
-            let file = release_file(dist, &sums, &service_name, &version)?;
+            let file = release_file(dist, &sums, &service_file, &version)?;
             Some(
                 json!({ "version": version, "size": file["size"], "sha256": file["sha256"], "urls": file["urls"] }),
             )

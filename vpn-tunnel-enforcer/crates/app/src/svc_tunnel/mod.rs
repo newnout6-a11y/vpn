@@ -210,7 +210,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         always_available: guard.always.clone(),
         foreign_vpn: Arc::new(SystemForeignVpn),
     });
-    let live = peers::live_checks(b, &runtime, &lifecycle);
+    let live = peers::live_checks(b, &runtime, &lifecycle, exes.subscribe());
 
     if let Some(leaks) = &ip.leaks {
         leaks.forward(

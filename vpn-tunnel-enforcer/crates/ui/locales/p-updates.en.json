@@ -50,7 +50,15 @@
         "previous": "Go back to {{version}}",
         "restoreBundled": "Restore the built-in one"
       },
-      "demoInstalled": "{{name}} {{version}} installed."
+      "demoInstalled": "{{name}} {{version}} installed.",
+      "service": {
+        "version": "Helper service {{version}}",
+        "current": "Helper service {{version}}: up to date",
+        "working": "Helper service {{version}}: checking for updates",
+        "waiting": "Helper service {{version}}: version {{target}} goes in once the VPN is off",
+        "restarting": "Helper service {{version}}: moving to version {{target}}",
+        "failed": "Helper service {{version}}: the check failed, it tries again by itself"
+      }
     }
   }
 }

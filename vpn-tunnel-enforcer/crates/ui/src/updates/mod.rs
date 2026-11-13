@@ -18,8 +18,8 @@ mod section;
 pub use banner::UpdateBanner;
 pub use format::{day_label, notes_for};
 pub use model::{
-    AppOffer, CheckLine, CheckResult, EngineOffer, EngineRow, Note, Progress, UpdateOutcome,
-    UpdatesView,
+    AppOffer, CheckLine, CheckResult, EngineOffer, EngineRow, Note, Progress, ServiceLine,
+    ServiceState, UpdateOutcome, UpdatesView,
 };
 pub use section::UpdatesSection;
 

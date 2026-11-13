@@ -24,10 +24,6 @@
       "untrusted": "Ordinary users can change the service's files, so it does not start the tunnel. Reinstall the service.",
       "fileMissing": "A file of the Tunnel mode service is missing: {{file}}. Reinstall the service."
     },
-    "update": {
-      "keyNotSet": "Service updates are not set up in this build.",
-      "badSignature": "The update package is not signed by the developer."
-    },
     "install": {
       "notElevated": "Installing the service needs administrator rights.",
       "fileMissing": "{{file}} is missing from the package.",

@@ -603,6 +603,52 @@ impl ProtectionWire {
     }
 }
 
+/// What a client asks the service's updater (p-svc-update). Answered as the first frame of a
+/// connection, without `Hello` and the controller slot (like `ForgetMe`), and after `Hello`
+/// alike; an older service answers `badRequest`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum UpdateAsk {
+    /// The service's version and update state.
+    State,
+    /// Right before the app runs the installer of release `version`: take that release's
+    /// service from the signed feed first, so the installer finds it current (no prompt).
+    Take { version: String },
+}
+
+/// Where the service's own update stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UpdatePhase {
+    /// This build carries no update key: the service never checks (as the app).
+    Off,
+    /// Nothing to do (as of `checked_at`, when it checked at all).
+    Idle,
+    /// Checking the feed or downloading.
+    Working,
+    /// `target` is ready and goes in once no session runs (or at the service's next start).
+    Waiting,
+    /// `target` goes in now: the service restarts within seconds.
+    Restarting,
+    /// The last check failed; the service retries on its own.
+    Failed,
+}
+
+/// The service's version and update state (the answer to every [`UpdateAsk`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServiceUpdateWire {
+    /// The running service.
+    pub version: String,
+    pub phase: UpdatePhase,
+    /// The version being taken or waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// When the service last accepted a feed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<UnixMs>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

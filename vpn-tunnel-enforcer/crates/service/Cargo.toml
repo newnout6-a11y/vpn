@@ -13,8 +13,6 @@ hex.workspace = true
 ipnet.workspace = true
 parking_lot.workspace = true
 regex.workspace = true
-# Ed25519 for the signed self-update: already in the workspace through rustls' ring provider.
-ring = { version = "0.17", default-features = false }
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -30,8 +28,16 @@ vpnte-engine.workspace = true
 vpnte-probes.workspace = true
 vpnte-profiles.workspace = true
 vpnte-tunnel.workspace = true
+# p-svc-update: the signed feed, the downloader and the engine store (one key set with the app).
+vpnte-update.workspace = true
 vpnte-winnet.workspace = true
 windows = { workspace = true, features = ["Win32_System_Services"] }
+
+[dev-dependencies]
+# p-svc-update: signs test feeds with throw-away keys (the service itself only verifies).
+minisign = "0.10.0"
+# p-svc-update: test engine archives.
+zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [lints]
 workspace = true

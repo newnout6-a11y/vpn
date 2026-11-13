@@ -61,6 +61,7 @@ pub(super) fn compute(u: &Updates) -> UpdatesView {
         }),
         progress: inner.progress.clone(),
         note: inner.note.clone(),
+        service: inner.service.as_ref().map(super::service::line),
     }
 }
 

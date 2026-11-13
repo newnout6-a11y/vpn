@@ -58,6 +58,7 @@ impl Updates {
         if ok {
             self.clone().download_ahead();
         }
+        self.refresh_service().await;
         ok
     }
 

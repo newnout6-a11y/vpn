@@ -211,6 +211,7 @@ jobs:
           path: |
             vpn-tunnel-enforcer/target/dist/VPN-Tunnel-Enforcer-Setup-*.exe
             vpn-tunnel-enforcer/target/dist/VPN-Tunnel-Enforcer-*-portable.zip
+            vpn-tunnel-enforcer/target/dist/vpnte-service-*.exe
             vpn-tunnel-enforcer/target/dist/checksums.txt
           if-no-files-found: error
           retention-days: 7

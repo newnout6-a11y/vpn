@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 use super::UpdatesApi;
 use super::banner::act;
 use super::format::{day_label, time_label};
-use super::model::{CheckLine, CheckResult, EngineRow};
+use super::model::{CheckLine, CheckResult, EngineRow, ServiceLine, ServiceState};
 use crate::hooks::use_watch;
 use crate::lang::{LANG, tr};
 use crate::t;
@@ -73,6 +73,9 @@ fn Updates() -> Element {
             if let Some(line) = view.last_check.clone() {
                 LastCheck { line }
             }
+            if let Some(line) = view.service.clone() {
+                Service { line }
+            }
             div { class: "set-form-actions",
                 Button {
                     id: "upd-check",
@@ -106,6 +109,35 @@ fn Updates() -> Element {
                 }
             }
         }
+    }
+}
+
+/// The helper service in one calm line: its version and its own update (p-svc-update).
+#[component]
+fn Service(line: ServiceLine) -> Element {
+    let version = line.version;
+    let text = match line.state {
+        ServiceState::Unchecked => t!("ui.update.service.version", version = version),
+        ServiceState::Current => t!("ui.update.service.current", version = version),
+        ServiceState::Working => t!("ui.update.service.working", version = version),
+        ServiceState::Waiting { target } => {
+            t!(
+                "ui.update.service.waiting",
+                version = version,
+                target = target
+            )
+        }
+        ServiceState::Restarting { target } => {
+            t!(
+                "ui.update.service.restarting",
+                version = version,
+                target = target
+            )
+        }
+        ServiceState::Failed => t!("ui.update.service.failed", version = version),
+    };
+    rsx! {
+        p { class: "set-hint upd-service", id: "upd-service", "{text}" }
     }
 }
 
@@ -204,6 +236,36 @@ fn EngineLine(row: EngineRow, job: JobSlot<()>) -> Element {
                         {t!("ui.update.engines.restoreBundled")}
                     }
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use vpnte_base::Msg;
+    use vpnte_base::i18n::Lang;
+
+    /// p-svc-update: the helper service's line reads calmly in both languages, with its version
+    /// and, where one waits, the next one.
+    #[test]
+    fn the_service_line_reads_calmly() {
+        crate::test_locales::init_locales();
+        for lang in [Lang::Ru, Lang::En] {
+            for key in [
+                "version",
+                "current",
+                "working",
+                "waiting",
+                "restarting",
+                "failed",
+            ] {
+                let text = Msg::new(format!("ui.update.service.{key}"))
+                    .arg("version", "2.0.0")
+                    .arg("target", "2.0.1")
+                    .render(lang);
+                assert!(text.contains("2.0.0"), "{key}: {text}");
+                assert!(!text.contains('!') && !text.contains("{{"), "{key}: {text}");
             }
         }
     }

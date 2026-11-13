@@ -21,10 +21,10 @@ use vpnte_tunnel::api::{ProxyEndpoint, SessionEndpoints, TunStatus};
 use vpnte_tunnel::fsm::{Transition, TunnelSnapshot};
 use vpnte_tunnel::history::SessionMode;
 use vpnte_tunnel::lifecycle::SessionView;
+use vpnte_tunnel::runtime::EngineExes;
 
 use super::env::{split_rules, tunnel_view};
 use super::*;
-use crate::services::Engines;
 
 const KEY: &str = "vless://00000000-0000-4000-8000-00000000000a@203.0.113.20:443?security=tls&sni=example.com&type=tcp#Fake%20A";
 
@@ -165,10 +165,11 @@ fn env(dir: &TempDir, servers: &Arc<Servers>) -> Arc<AppLiveEnv> {
         servers: servers.clone(),
         settings: Arc::new(Store::<Settings>::open(&dir.0)),
         rules: Arc::new(Store::<RulesDoc>::open(&dir.0)),
-        engines: Engines {
+        exes: watch::channel(EngineExes {
             singbox: resources.join("sing-box.exe"),
             xray: resources.join("xray.exe"),
-        },
+        })
+        .1,
         status: watch::channel(TunStatus::default()).1,
         snapshot: watch::channel(TunnelSnapshot::default()).1,
         session: watch::channel(None).1,

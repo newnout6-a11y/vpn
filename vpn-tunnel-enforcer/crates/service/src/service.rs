@@ -3,6 +3,7 @@
 //! in an overlapped `ConnectNamedPipe`, the runtime actor on its inbox, and the WFP watchdog with
 //! the re-checks on wake / network change and the leak self-test (`recheck`) runs only while a
 //! session's filters are held ([`crate::watchdog`]).
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +18,8 @@ use vpnte_tunnel::api::{CaptureKind, Runtime, StopOptions};
 use vpnte_tunnel::runtime::{
     Capture, ProxyCapture, RealEngines, RuntimeDeps, Timings, TunCapture, TunnelHandle,
 };
+use vpnte_update::policy;
+use vpnte_update::version::Version;
 use vpnte_winnet::adapters;
 use vpnte_winnet::wfp::{EnginePaths, Protection};
 
@@ -26,6 +29,10 @@ use crate::paths::{self, DataFiles};
 use crate::pipe::{Listener, PipeConfig, admit_all};
 use crate::sandbox::{self, Sandbox};
 use crate::scm::dispatch::Control;
+use crate::update::engines::ServiceEngines;
+use crate::update::source::Mirrors;
+use crate::update::swap::{self, AtStart, SwapFiles};
+use crate::update::{RESTART_EXIT, Updates, UpdatesDeps};
 use crate::users::Users;
 use crate::watchdog::{self, Engaged};
 use crate::{install, sddl};
@@ -120,6 +127,14 @@ async fn serve(control: Control) -> u32 {
     let Some(dir) = exe.parent().map(Path::to_path_buf) else {
         return 1;
     };
+    // First, before anything that could fail: a fresh exe counts its trial, a failed one puts
+    // the previous exe back (p-svc-update).
+    let swap_files = SwapFiles::new(&exe);
+    let own = policy::app_version();
+    let at_start = staging_trusted(&swap_files).then(|| swap::at_start(&swap_files, own));
+    if let Some(Ok(AtStart::RolledBack(_))) = at_start {
+        return RESTART_EXIT;
+    }
     let Ok(data) = paths::data_dir() else {
         return 1;
     };
@@ -130,12 +145,21 @@ async fn serve(control: Control) -> u32 {
     let _ = std::fs::create_dir_all(&files.logs);
     init_logging(&files.service_log);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "service starting");
+    if update_at_start(&swap_files, own, at_start.as_ref()) {
+        return RESTART_EXIT;
+    }
     let fault = trusted_install(&dir, &exe).err();
     if let Some(fault) = &fault {
         tracing::error!(%fault, "tunnel disabled");
     }
     let trusted = fault.is_none();
-    let (singbox, xray) = (dir.join("sing-box.exe"), dir.join("xray.exe"));
+    // The engines of the next session start: a version the updater installed, else the bundled.
+    let engines = Arc::new(ServiceEngines::open(&dir));
+    let exes = engines.exes();
+    let (singbox, xray) = {
+        let current = exes.borrow();
+        (current.singbox.clone(), current.xray.clone())
+    };
     // This service owns our filters (owner decision 12.11.2026): "Always" is kept here, under a
     // provider registered with the service's name, and "If the VPN drops" is static, so its block
     // outlives a crash of the service until Windows restarts it (research killswitch §5.4).
@@ -155,10 +179,17 @@ async fn serve(control: Control) -> u32 {
         tracing::error!(error = %err, "kill switch start-up failed");
     }
     let inputs = Arc::new(SharedInputs::new(Some(dir.clone())));
-    let tun = trusted.then(|| Arc::new(Engaged::new(TunCapture::new(protection.clone()))));
+    let permitted = vec![singbox.clone(), xray.clone()];
+    let tun = trusted.then(|| {
+        let capture = Engaged::new(TunCapture::new(protection.clone()));
+        Arc::new(capture.with_engines(exes.clone(), permitted))
+    });
     let holds = tun.as_ref().map(|t| t.holds());
+    let held = holds.clone().unwrap_or_else(|| watch::channel(false).1);
+    let real = RealEngines::following(exes, Some(files.logs.clone()));
+    let starts = real.starts();
     let runtime = TunnelHandle::spawn(RuntimeDeps {
-        engines: Arc::new(RealEngines::new(singbox, xray, Some(files.logs.clone()))),
+        engines: Arc::new(real),
         tun: tun.map(|t| t as Arc<dyn Capture>),
         proxy: Arc::new(ProxyCapture::new()),
         inputs: inputs.clone(),
@@ -216,6 +247,27 @@ async fn serve(control: Control) -> u32 {
     if let Some(recheck) = &recheck {
         host.report_self_tests(recheck.results.subscribe());
     }
+    let restart = Arc::new(AtomicBool::new(false));
+    let updates = Updates::new(UpdatesDeps {
+        own,
+        keys: policy::trusted_keys(),
+        source: Arc::new(Mirrors {
+            cancel: control.stop.clone(),
+        }),
+        engines: engines.clone(),
+        files: swap_files.clone(),
+        record: files.private.join("update.json"),
+        status: runtime.status(),
+        holds: held,
+        restart: restarter(restart.clone(), control.stop.clone()),
+    });
+    host.serve_updates(Arc::new(updates.clone()));
+    tokio::spawn(updates.run(control.stop.clone()));
+    let stop = control.stop.clone();
+    tokio::spawn(engines.follow_starts(runtime.subscribe(), starts, stop));
+    if let Some(Ok(AtStart::Trial(_))) = at_start {
+        tokio::spawn(settle_trial(swap_files, control.stop.clone()));
+    }
     control.running();
     tracing::info!("service running");
     let resume = protection.paused() || protection.level_in_force() == KillSwitchLevel::Strict;
@@ -226,7 +278,68 @@ async fn serve(control: Control) -> u32 {
     host.serve(listener, control.stop.clone()).await;
     control.stopping(Duration::from_secs(15));
     finish(&runtime, &protection, &exe, removing.load(Ordering::SeqCst)).await;
-    0
+    if restart.load(Ordering::SeqCst) {
+        RESTART_EXIT
+    } else {
+        0
+    }
+}
+
+/// The staging folder is ours: absent, or admin-only (it holds the exe the service may run next).
+fn staging_trusted(files: &SwapFiles) -> bool {
+    !files.staging.exists() || sddl::path_admin_only(&files.staging)
+}
+
+/// Logs what the start found; `true` = a verified release waits staged for this start and is
+/// now in place (the service exits for the SCM to start it, before anything runs).
+fn update_at_start(files: &SwapFiles, own: Version, found: Option<&io::Result<AtStart>>) -> bool {
+    match found {
+        None => {
+            tracing::warn!(dir = %files.staging.display(), "update folder writable by users: ignored")
+        }
+        Some(Err(err)) => tracing::warn!(%err, "update trial not read"),
+        Some(Ok(AtStart::Trial(n))) => tracing::info!(start = n, "fresh service version on trial"),
+        Some(Ok(_)) => {}
+    }
+    if let Some(m) = swap::marker(files).filter(|m| m.spent() && m.from == own) {
+        tracing::warn!(version = %m.to, "a service update failed its trial and was rolled back");
+    }
+    if found.is_none() || !policy::keys_ready() {
+        return false;
+    }
+    let Some((staged, version)) = swap::ready(files, policy::trusted_keys(), own) else {
+        return false;
+    };
+    match swap::swap_in(files, &staged, own, version) {
+        Ok(()) => {
+            tracing::info!(%version, "staged service update swapped in at start: restarting");
+            true
+        }
+        Err(err) => {
+            tracing::error!(%version, %err, "staged service update not swapped in");
+            false
+        }
+    }
+}
+
+/// A start that ran [`swap::TRIAL_RUN`] ends the trial of a fresh exe.
+async fn settle_trial(files: SwapFiles, stop: CancellationToken) {
+    tokio::select! {
+        () = stop.cancelled() => {}
+        () = tokio::time::sleep(swap::TRIAL_RUN) => {
+            swap::settled(&files);
+            tracing::info!("fresh service version passed its trial");
+        }
+    }
+}
+
+/// An update asks to restart: remember it and stop (the exit code makes the SCM start the exe
+/// now in place).
+fn restarter(restart: Arc<AtomicBool>, stop: CancellationToken) -> Arc<dyn Fn() + Send + Sync> {
+    Arc::new(move || {
+        restart.store(true, Ordering::SeqCst);
+        stop.cancel();
+    })
 }
 
 /// The re-checks over the real filters, runtime and curl: self-tests while a TUN session runs
@@ -314,5 +427,17 @@ mod tests {
         let fault = trusted_install(&temp, &temp.join("x.exe")).expect_err("user-writable");
         assert!(matches!(fault, FolderFault::Untrusted(_)), "{fault:?}");
         assert_eq!(fault.msg().key, "service.folder.untrusted");
+    }
+
+    /// p-svc-update: what the update folder holds is used at start only from a folder users
+    /// cannot change (none yet is fine: nothing is staged).
+    #[test]
+    fn the_update_folder_counts_only_when_admin_only() {
+        let temp = std::env::temp_dir().join(format!("vpnte-svc-staging-{}", std::process::id()));
+        let files = SwapFiles::new(&temp.join("vpnte-service.exe"));
+        assert!(staging_trusted(&files), "absent");
+        std::fs::create_dir_all(&files.staging).expect("user-writable folder");
+        assert!(!staging_trusted(&files));
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

@@ -50,7 +50,15 @@
         "previous": "Вернуть предыдущую ({{version}})",
         "restoreBundled": "Вернуть встроенную"
       },
-      "demoInstalled": "{{name}} {{version}} установлен."
+      "demoInstalled": "{{name}} {{version}} установлен.",
+      "service": {
+        "version": "Служба-помощник {{version}}",
+        "current": "Служба-помощник {{version}}: актуальна",
+        "working": "Служба-помощник {{version}}: проверяет обновления",
+        "waiting": "Служба-помощник {{version}}: версия {{target}} установится, когда VPN будет отключён",
+        "restarting": "Служба-помощник {{version}}: переходит на версию {{target}}",
+        "failed": "Служба-помощник {{version}}: проверка не удалась, повторит сама"
+      }
     }
   }
 }

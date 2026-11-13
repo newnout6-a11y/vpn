@@ -14,6 +14,8 @@ use super::*;
 #[derive(Default)]
 struct Fake {
     fail: AtomicBool,
+    /// The programs of the last `begin`.
+    programs: Mutex<Vec<PathBuf>>,
 }
 
 impl Fake {
@@ -34,7 +36,8 @@ impl Capture for Fake {
     fn config(&self, _: &CapturePlan, _: &EngineParts) -> Result<(Value, [u8; 32]), ConfigError> {
         unreachable!("not used by the watchdog")
     }
-    async fn begin(&self, _: &CapturePlan, _: &[PathBuf]) -> AppResult<()> {
+    async fn begin(&self, _: &CapturePlan, programs: &[PathBuf]) -> AppResult<()> {
+        *self.programs.lock() = programs.to_vec();
         self.outcome()
     }
     async fn ready(
@@ -122,4 +125,30 @@ async fn the_watchdog_runs_exactly_while_held() {
     assert!(started.lock()[0].is_cancelled());
     stop.cancel();
     task.await.expect("watchdog loop");
+}
+
+/// p-svc-update: a session permits the engine files current at its start that the protection
+/// does not permit anyway (a version the updater installed while the service runs).
+#[tokio::test]
+async fn a_session_permits_the_engines_it_starts() {
+    let bundled = |name: &str| PathBuf::from(r"C:\Service").join(name);
+    let downloaded = PathBuf::from(r"C:\Service\engines\sing-box\1.14.5\sing-box.exe");
+    let (tx, rx) = watch::channel(EngineExes {
+        singbox: bundled("sing-box.exe"),
+        xray: bundled("xray.exe"),
+    });
+    let permitted = vec![bundled("sing-box.exe"), bundled("xray.exe")];
+    let engaged = Engaged::new(Fake::default()).with_engines(rx, permitted);
+    let owner = PathBuf::from(r"C:\Proxy\owner.exe");
+    engaged
+        .begin(&plan(), std::slice::from_ref(&owner))
+        .await
+        .expect("begin");
+    assert_eq!(*engaged.inner.programs.lock(), vec![owner.clone()]);
+    tx.send_modify(|e| e.singbox = downloaded.clone());
+    engaged
+        .begin(&plan(), std::slice::from_ref(&owner))
+        .await
+        .expect("begin");
+    assert_eq!(*engaged.inner.programs.lock(), vec![owner, downloaded]);
 }

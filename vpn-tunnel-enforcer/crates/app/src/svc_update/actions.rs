@@ -104,6 +104,9 @@ impl Updates {
         };
         pending::write(&self.updates_dir, &pending)
             .map_err(|_| Msg::new("app.update.fileError"))?;
+        // The helper service takes this release first, so the installer finds it current and
+        // Windows asks nothing (p-svc-update); otherwise the installer asks as before.
+        self.service_first(to).await;
         match launch::run_unelevated(&verified.path, &INSTALLER_ARGS) {
             Ok(()) => {
                 tracing::info!(%to, "installer started");

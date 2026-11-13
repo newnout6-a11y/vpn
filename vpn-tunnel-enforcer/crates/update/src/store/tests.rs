@@ -321,3 +321,33 @@ async fn reverting_by_hand() {
     );
     assert!(!dir.exists(), "an unusable version is removed");
 }
+
+/// D-S7 (p-svc-update): the app's store installs only versions past the bundled one; the helper
+/// service's store (`not_below_bundled`) also takes the bundled version from the signed feed,
+/// keeps it through `tidy` and runs it, so a swapped service exe finds engines its pins accept.
+#[tokio::test]
+async fn the_service_store_takes_the_bundled_version_from_the_feed() {
+    let check = Fake {
+        version: bundled(),
+        refuse: None,
+    };
+    let s = setup(bundled());
+    let err = s.install(&check).await.unwrap_err();
+    assert!(
+        matches!(err, InstallError::NotAllowed(v) if v == bundled()),
+        "{err:?}"
+    );
+    let mut s = setup(bundled());
+    s.store = s.store.clone().not_below_bundled();
+    let done = s.install(&check).await.unwrap();
+    assert_eq!(done.version, bundled());
+    s.store.tidy("sing-box");
+    let resolved = s.store.resolve("sing-box");
+    assert_eq!(
+        resolved.exe,
+        s.store
+            .version_dir("sing-box", bundled())
+            .join("sing-box.exe")
+    );
+    assert!(matches!(resolved.origin, Origin::Downloaded { version, .. } if version == bundled()));
+}

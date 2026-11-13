@@ -1,6 +1,6 @@
 //! [`LiveEnv`] over the backend: the saved servers, our tunnel (runtime status, lifecycle snapshot
-//! and session), the split-tunnel rules, the bundled engines and the geo switch. Every call is a
-//! cheap read of in-memory state.
+//! and session), the split-tunnel rules, the engines and the geo switch. Every call is a cheap
+//! read of in-memory state.
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -19,6 +19,7 @@ use vpnte_servers::store::Servers;
 use vpnte_tunnel::api::{ProxyEndpoint, TunStatus};
 use vpnte_tunnel::fsm::TunnelSnapshot;
 use vpnte_tunnel::lifecycle::SessionView;
+use vpnte_tunnel::runtime::EngineExes;
 
 use crate::services::Engines;
 
@@ -27,7 +28,9 @@ pub(crate) struct AppLiveEnv {
     pub servers: Arc<Servers>,
     pub settings: Arc<Store<Settings>>,
     pub rules: Arc<Store<RulesDoc>>,
-    pub engines: Engines,
+    /// The engine files the tunnel starts now (the update channel may switch them while the app
+    /// runs): the same watch the tunnel's probes read, so a check follows a switch.
+    pub exes: watch::Receiver<EngineExes>,
     pub status: watch::Receiver<TunStatus>,
     pub snapshot: watch::Receiver<TunnelSnapshot>,
     pub session: watch::Receiver<Option<SessionView>>,
@@ -79,9 +82,10 @@ impl LiveEnv for AppLiveEnv {
     }
 
     fn engine_setup(&self) -> EngineSetup {
+        let engines = Engines::from(&*self.exes.borrow());
         EngineSetup {
-            singbox_exe: self.engines.singbox.clone(),
-            xray_exe: self.engines.xray.clone(),
+            singbox_exe: engines.singbox,
+            xray_exe: engines.xray,
             engine_pref: self.settings.read(|s| s.proxy_engine),
             // The runtime publishes no DNS bootstrap listener: probe engines resolve on their own.
             dns_bootstrap_in: None,

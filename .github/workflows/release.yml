@@ -61,13 +61,16 @@ jobs:
         run: cargo xtask dist
       - name: Silent per-user install, upgrade over itself, uninstall
         run: cargo xtask smoke-install
-      - name: Build provenance of the installer and the portable archive
+      - name: Build provenance of the installer, the portable archive and the helper service
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             vpn-tunnel-enforcer/target/dist/VPN-Tunnel-Enforcer-Setup-*.exe
             vpn-tunnel-enforcer/target/dist/VPN-Tunnel-Enforcer-*-portable.zip
-      - name: Draft GitHub release with the installer and checksums
+            vpn-tunnel-enforcer/target/dist/vpnte-service-*.exe
+      # vpnte-service-<V>.exe: the installer's own service exe, so the feed lists it and an installed service
+      # takes it before the installer runs (the installer then asks Windows nothing).
+      - name: Draft GitHub release with the installer, the helper service and checksums
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
@@ -75,7 +78,8 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
             --title "VPN Tunnel Enforcer ${TAG#v}" \
             --notes "Verify the download against checksums.txt (SHA-256)." \
-            target/dist/VPN-Tunnel-Enforcer-Setup-*.exe target/dist/VPN-Tunnel-Enforcer-*-portable.zip target/dist/checksums.txt
+            target/dist/VPN-Tunnel-Enforcer-Setup-*.exe target/dist/VPN-Tunnel-Enforcer-*-portable.zip \
+            target/dist/vpnte-service-*.exe target/dist/checksums.txt
 
   feed:
     name: Signed update feed

@@ -57,6 +57,10 @@ pub(super) async fn run(
             id: fid,
             request: Request::ForgetMe,
         }) => return forget(&host, pipe, fid).await,
+        Ok(ClientFrame {
+            id: fid,
+            request: Request::Update(ask),
+        }) => return update(&host, pipe, fid, ask).await,
         Ok(other) => return refuse(pipe, other.id, ErrorCode::HelloFirst).await,
         Err(_) => match frame::request_id(&body) {
             Some(fid) => return refuse(pipe, fid, ErrorCode::BadRequest).await,
@@ -168,6 +172,26 @@ async fn forget(host: &Arc<Host>, pipe: NamedPipeServer, id: u64) {
     if removing {
         (host.deps.on_last_user)();
     }
+}
+
+/// `Update` as the first request (p-svc-update): answered for any user without the controller
+/// slot, like `ForgetMe` (the app asks on a connection of its own while its tunnel holds the slot).
+async fn update(host: &Arc<Host>, pipe: NamedPipeServer, id: u64, ask: crate::proto::UpdateAsk) {
+    let client = match ident::client(&pipe) {
+        Ok(client) => client,
+        Err(err) => return tracing::warn!(error = %err, "client not identifiable; dropped"),
+    };
+    if !(host.deps.check)(&client) {
+        return refuse(pipe, id, ErrorCode::Refused).await;
+    }
+    let frame = match host.update(&client.user, ask).await {
+        Ok(reply) => ServerFrame::Reply {
+            id,
+            reply: Box::new(reply),
+        },
+        Err(error) => ServerFrame::Failed { id, error },
+    };
+    answer_and_close(pipe, &frame).await;
 }
 
 /// Reads frames on its own task (a partial read must never be lost to a `select!`).

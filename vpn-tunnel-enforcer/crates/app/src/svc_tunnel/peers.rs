@@ -50,12 +50,13 @@ pub(super) fn live_checks(
     b: &Backend,
     runtime: &dyn Runtime,
     lifecycle: &Lifecycle,
+    exes: watch::Receiver<EngineExes>,
 ) -> Option<Arc<LiveCheckService>> {
     let env = AppLiveEnv {
         servers: b.servers.clone(),
         settings: b.settings.clone(),
         rules: b.rules.clone(),
-        engines: b.engines.clone(),
+        exes,
         status: runtime.status(),
         snapshot: lifecycle.snapshot(),
         session: lifecycle.session(),

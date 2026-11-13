@@ -36,6 +36,7 @@ pub use wire::{
     StatusKindWire, StatusWire, StopReceiptWire, SwitchFailureWire, SwitchReceiptWire,
     TunnelEventWire,
 };
+pub use wire::{ServiceUpdateWire, UpdateAsk, UpdatePhase};
 
 /// The protocol version this build speaks. 2 (p-svc-recheck): `StatusWire::self_test`, the
 /// service's leak self-test. 3 (p-smart-lists): `RoutingInputs::rule_sets` (`Request::speak`
@@ -85,6 +86,9 @@ pub enum Request {
     /// The caller's Windows user no longer uses the service (per-user uninstall); the last one
     /// leaving removes the service.
     ForgetMe,
+    /// The service's own update (p-svc-update): its state, or take a release before its
+    /// installer runs. A first frame like `ForgetMe`; an older service answers `badRequest`.
+    Update(UpdateAsk),
 }
 
 /// Versions of the client.
@@ -236,6 +240,8 @@ pub enum Reply {
         sublayer: bool,
         provider: bool,
     },
+    /// To `Update`: the service's version and update state.
+    Update(ServiceUpdateWire),
 }
 
 /// The tunnel and the kill switch right now.

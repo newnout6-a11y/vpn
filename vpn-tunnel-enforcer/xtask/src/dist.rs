@@ -36,6 +36,14 @@ pub fn portable_name(version: &str) -> String {
     format!("VPN-Tunnel-Enforcer-{version}-portable.zip")
 }
 
+/// The release's helper service as an artifact of its own (p-svc-update): the bytes the installer carries,
+/// listed in `checksums.txt`, so `cargo xtask feed` adds it as the feed's `service` entry. An installed service
+/// takes it from the signed feed before the app runs the installer, which then finds the service current and
+/// asks Windows nothing.
+pub fn service_name(version: &str) -> String {
+    format!("vpnte-service-{version}.exe")
+}
+
 /// Lab packages (WP-12) carry this suffix in every artifact name, so they cannot pass for a release.
 const LAB_SUFFIX: &str = "-lab";
 
@@ -91,10 +99,20 @@ pub fn run(root: &Path, skip_build: bool, bin_dir: Option<PathBuf>, lab: bool) -
     let portable = portable_name(&version);
     let portable = dist.join(if lab { lab_name(&portable) } else { portable });
     write_portable(&stage, expected.keys().map(String::as_str), &portable)?;
+    let service = copy_service(&stage, &dist, &version, lab)?;
     write_checksums(&dist)?;
     println!("  dist     {}", installer.display());
     println!("  dist     {}", portable.display());
+    println!("  dist     {}", service.display());
     Ok(())
+}
+
+/// `vpnte-service.exe` of the stage as [`service_name`] in `dist` (lab builds marked: never a feed entry).
+fn copy_service(stage: &Path, dist: &Path, version: &str, lab: bool) -> Result<PathBuf> {
+    let name = service_name(version);
+    let to = dist.join(if lab { lab_name(&name) } else { name });
+    fs::copy(stage.join("vpnte-service.exe"), &to).context("copy the service exe into dist")?;
+    Ok(to)
 }
 
 /// `[workspace.package] version` of the workspace `Cargo.toml`; must be plain `X.Y.Z` (NSIS version resource).
@@ -443,6 +461,24 @@ mod tests {
             portable_name("2.0.0"),
             "VPN-Tunnel-Enforcer-2.0.0-portable.zip"
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// p-svc-update: the service artifact is the staged exe byte for byte (what the installer carries), named
+    /// as `cargo xtask feed` looks for it; a lab build's is marked and so never becomes a feed entry.
+    #[test]
+    fn the_service_artifact_is_the_staged_exe() {
+        let dir = root().join("target/xtask/test-scratch/service");
+        recreate(&dir).unwrap();
+        let (stage, dist) = (dir.join("stage"), dir.join("dist"));
+        fs::create_dir_all(&stage).unwrap();
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(stage.join("vpnte-service.exe"), b"service bytes").unwrap();
+        let release = copy_service(&stage, &dist, "2.0.1", false).unwrap();
+        assert_eq!(release, dist.join("vpnte-service-2.0.1.exe"));
+        assert_eq!(fs::read(&release).unwrap(), b"service bytes");
+        let lab = copy_service(&stage, &dist, "2.0.1", true).unwrap();
+        assert_eq!(lab, dist.join("vpnte-service-2.0.1-lab.exe"));
         fs::remove_dir_all(&dir).unwrap();
     }
 

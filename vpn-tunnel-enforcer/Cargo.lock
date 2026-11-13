@@ -5830,9 +5830,9 @@ dependencies = [
  "futures-util",
  "hex",
  "ipnet",
+ "minisign",
  "parking_lot 0.13.0",
  "regex",
- "ring",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -5846,8 +5846,10 @@ dependencies = [
  "vpnte-probes",
  "vpnte-profiles",
  "vpnte-tunnel",
+ "vpnte-update",
  "vpnte-winnet",
  "windows 0.62.2",
+ "zip",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@ mod checks;
 mod doc;
 mod flow;
 mod launch;
+mod service;
 mod switch;
 mod trial;
 mod view;
@@ -78,6 +79,8 @@ struct Inner {
     busy: bool,
     /// The installer handed to Windows, held without write / delete sharing until exit.
     held: Option<File>,
+    /// The helper service's last answer about its own update (p-svc-update).
+    service: Option<vpnte_service::proto::ServiceUpdateWire>,
 }
 
 /// The update channel of this app run.
@@ -120,6 +123,8 @@ impl Updates {
             flow::spawn_checker(&this);
         }
         trial::spawn(&this);
+        let reader = this.clone();
+        tokio::spawn(async move { reader.refresh_service().await });
         this
     }
 

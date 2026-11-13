@@ -14,12 +14,17 @@ use tokio_util::sync::CancellationToken;
 use vpnte_base::AppResult;
 use vpnte_engine::singbox_config::ConfigError;
 use vpnte_tunnel::api::StartRequest;
-use vpnte_tunnel::runtime::{Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts};
+use vpnte_tunnel::runtime::{
+    Capture, CaptureCheck, CapturePlan, CaptureProof, EngineExes, EngineParts,
+};
 
 /// A capture that records whether its protection holds a session's filters.
 pub struct Engaged<C> {
     inner: C,
     holds: watch::Sender<bool>,
+    /// The engine files sessions start now and those the protection permits anyway
+    /// ([`Engaged::with_engines`]).
+    engines: Option<(watch::Receiver<EngineExes>, Vec<PathBuf>)>,
 }
 
 impl<C: Capture> Engaged<C> {
@@ -27,7 +32,22 @@ impl<C: Capture> Engaged<C> {
         Self {
             inner,
             holds: watch::channel(false).0,
+            engines: None,
         }
+    }
+
+    /// Every session also permits the engine files `exes` names at its start, unless they are
+    /// among `permitted` (the protection's own engine permits, fixed when it was built): a version
+    /// the updater installed while the service runs gets through from its first session on
+    /// (p-svc-update).
+    #[must_use]
+    pub fn with_engines(
+        mut self,
+        exes: watch::Receiver<EngineExes>,
+        permitted: Vec<PathBuf>,
+    ) -> Self {
+        self.engines = Some((exes, permitted));
+        self
     }
 
     /// `true` while a session's filters are held.
@@ -51,8 +71,17 @@ impl<C: Capture> Capture for Engaged<C> {
     }
 
     async fn begin(&self, plan: &CapturePlan, session_programs: &[PathBuf]) -> AppResult<()> {
+        let mut programs = session_programs.to_vec();
+        if let Some((exes, permitted)) = &self.engines {
+            let exes = exes.borrow().clone();
+            for exe in [exes.singbox, exes.xray] {
+                if !permitted.contains(&exe) && !programs.contains(&exe) {
+                    programs.push(exe);
+                }
+            }
+        }
         // A failed begin leaves the record as it was: a reconnect keeps the earlier hold.
-        self.inner.begin(plan, session_programs).await?;
+        self.inner.begin(plan, &programs).await?;
         self.holds.send_replace(true);
         Ok(())
     }
