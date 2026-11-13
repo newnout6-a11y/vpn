@@ -210,7 +210,8 @@ async fn crash_without_restart_with_the_kill_switch_off_ends_the_session() {
     j.world.core(0).crash();
     eventually("released", || j.ran("release")).await;
     eventually("one row", || j.kinds().len() == 1).await;
-    assert!(j.noticed("stopped"));
+    // The row is written first and the notice right after it, in the same step: wait for both.
+    eventually("the «stopped» notice", || j.noticed("stopped")).await;
     // An exit nobody asked for proves nothing about the machine: unknown, but never blocked.
     assert_ne!(j.state(), TunnelState::Blocked);
     assert!(j.lc.kill_switch().borrow().pause.is_none());
