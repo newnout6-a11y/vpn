@@ -1,5 +1,7 @@
 //! The Apps page («Приложения», split tunnel): a rule per program — through the VPN, around it
-//! or none — plus bypass by bare process name; search, rescan, add a program (ui-pages §3.14).
+//! or none — plus bypass by bare process name; search, rescan, add a program (ui-pages §3.14);
+//! and «Маршрутизация Happ»: a Happ routing profile previewed, then added to the user's own
+//! domain rules on the user's click (re-check item 12d).
 //!
 //! Data and actions come from a [`SplitTunnelApi`] in context (`Rc<dyn SplitTunnelApi>`); the
 //! app implements it over the routing service, [`demo::DemoSplitTunnel`] fakes it. Register the
@@ -8,6 +10,9 @@
 pub mod demo;
 mod model;
 mod page;
+mod routing;
+mod routing_panel;
+mod routing_preview;
 #[cfg(test)]
 mod tests;
 
@@ -22,6 +27,10 @@ pub use model::{
     matches,
 };
 pub use page::SplitTunnelPage;
+pub use routing::{
+    EntryNote, Kept, PreviewEntry, PreviewRule, RouteKind, RoutingImported, RoutingOffer,
+    RoutingPreview, RoutingSource, SmartRuStep,
+};
 
 /// The API from context.
 fn use_api() -> Rc<dyn SplitTunnelApi> {

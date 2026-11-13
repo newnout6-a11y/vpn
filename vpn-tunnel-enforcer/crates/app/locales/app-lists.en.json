@@ -7,6 +7,10 @@
       },
       "traffic": {
         "badLink": "This link cannot be opened."
+      },
+      "routing": {
+        "stale": "The profile changed: review it again.",
+        "gone": "The subscription no longer sends a routing profile."
       }
     }
   }

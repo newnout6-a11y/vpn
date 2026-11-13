@@ -1,9 +1,10 @@
-//! The page: header actions (rescan, add a program), search, the bypass-command card and the app
-//! table with a rule control per row.
+//! The page: header actions (rescan, add a program), search, the bypass-command card, the Happ
+//! routing panel and the app table with a rule control per row.
 use dioxus::prelude::*;
 use vpnte_base::{ErrorKind, Msg};
 
 use super::model::{AppKind, AppRule, SplitApp, display_path, icon_src, initial, matches};
+use super::routing_panel::RoutingPanel;
 use super::{tr_now, use_api, use_watch};
 use crate::lang::tr;
 use crate::pages::{Page, nav_number};
@@ -75,6 +76,7 @@ pub fn SplitTunnelPage() -> Element {
     };
 
     let apps = state.read().apps.clone();
+    let offers = state.read().offers.clone();
     let number = Page::ALL.iter().position(|p| *p == Page::Apps).unwrap_or(1);
     rsx! {
         div { class: "c-swiss swiss-skin apps",
@@ -108,6 +110,7 @@ pub fn SplitTunnelPage() -> Element {
                 }
             }
             BypassCommand {}
+            RoutingPanel { offers }
             match apps {
                 Load::Loading => rsx! {
                     Panel {

@@ -73,3 +73,38 @@
 .apps-rule-item.is-on[data-rule='None'] { background: var(--rule); color: var(--ink); }
 .apps-rule-item:disabled { cursor: default; }
 .apps-row.is-busy .apps-rule-item:not(.is-on) { opacity: 0.5; }
+
+/* ── Happ routing (preview, then the user's own rules) ───────────────── */
+.apps-routing { display: flex; flex-direction: column; gap: 12px; }
+.apps-routing-offer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--rule);
+  padding-top: 12px;
+}
+.apps-routing-offer-text { min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
+.apps-routing-preview { display: flex; flex-direction: column; gap: 16px; border-top: 1px solid var(--rule-strong); padding-top: 16px; }
+.apps-routing-name { margin: 0; font-size: 14px; font-weight: 600; }
+.apps-routing-group { display: flex; flex-direction: column; gap: 8px; }
+.apps-routing-head { margin: 0; font-size: 12px; font-weight: 600; color: var(--mute); font-variant-numeric: tabular-nums; }
+.apps-routing-line { margin: 0; max-width: 80ch; font-size: 13px; line-height: 1.45; }
+.apps-routing-from { margin: 0; font-size: 11px; color: var(--mute); overflow-wrap: anywhere; }
+.apps-routing-list { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--rule); }
+.apps-routing-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 12px;
+  border-bottom: 1px solid var(--rule);
+  padding: 8px 0;
+  font-size: 12px;
+}
+.apps-routing-row.is-kept { grid-template-columns: minmax(0, 1fr); }
+.apps-routing-entry { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.apps-routing-route { font-weight: 600; white-space: nowrap; }
+/* «Напрямую» leaves the tunnel: the signal ink, as the rule control's Direct. */
+.apps-routing-route[data-route='Direct'] { color: var(--signal-ink); }
+.apps-routing-note { color: var(--mute); }
+.apps-routing-actions { display: flex; gap: 8px; }

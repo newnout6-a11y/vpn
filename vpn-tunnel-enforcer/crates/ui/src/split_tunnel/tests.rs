@@ -163,3 +163,178 @@ async fn demo_publishes_before_returning() {
     demo.remove("a1".into()).await.expect("removed");
     assert_eq!(count(&rx), Some(12));
 }
+
+/// Every text of the Happ routing panel exists in both languages: the reasons, the routes, the
+/// kept settings and the panel's own lines.
+#[test]
+fn routing_keys() {
+    let notes = [
+        EntryNote::Local,
+        EntryNote::Present,
+        EntryNote::YourRule(RouteKind::Vpn),
+        EntryNote::Repeated,
+        EntryNote::NotShipped,
+        EntryNote::IpRule,
+        EntryNote::Regexp,
+        EntryNote::Invalid,
+        EntryNote::RussianSites,
+    ];
+    let kept = [
+        Kept::RestDirect,
+        Kept::Dns("1.1.1.1".into()),
+        Kept::DnsHosts(2),
+        Kept::FakeDns,
+    ];
+    let mut keys: Vec<String> = notes.iter().map(|n| n.key().to_owned()).collect();
+    keys.extend(
+        [RouteKind::Vpn, RouteKind::Direct, RouteKind::Block].map(|r| r.label_key().to_owned()),
+    );
+    keys.extend(kept.iter().map(|k| k.msg().key.into_owned()));
+    keys.extend(
+        [
+            "title",
+            "hint",
+            "placeholder",
+            "show",
+            "offer",
+            "offerNamed",
+            "profile",
+            "profileNamed",
+            "off",
+            "addTitle",
+            "smartRuTurnOn",
+            "smartRuAlreadyOn",
+            "coveredTitle",
+            "skippedTitle",
+            "nothingToAdd",
+            "import",
+            "showAll",
+            "added",
+            "smartRuOn",
+            "overLimit",
+            "nothingAdded",
+            "whereRules",
+            "nextConnect",
+            "stale",
+        ]
+        .map(|k| format!("splitTunneling.routing.{k}")),
+    );
+    for key in &keys {
+        for lang in [Lang::Ru, Lang::En] {
+            assert!(lookup(lang, key).is_some(), "{key} ({lang:?})");
+        }
+    }
+}
+
+/// The demo offers a subscription's profile with the page state; the import takes exactly the
+/// latest preview once, then asks for a new one.
+#[tokio::test]
+async fn demo_routing_preview_then_import() {
+    let demo = DemoSplitTunnel::new("full").instant();
+    let rx = demo.state();
+    let offer = rx.borrow().offers.first().cloned().expect("an offer");
+    let first = demo
+        .preview_routing(RoutingSource::Subscription(offer.group_id))
+        .await
+        .expect("preview");
+    assert!(first.changes());
+    let second = demo
+        .preview_routing(RoutingSource::Pasted("happ://routing/onadd/x".into()))
+        .await
+        .expect("preview");
+    let stale = demo.import_routing(first.token).await.expect_err("older");
+    assert_eq!(stale.kind, vpnte_base::ErrorKind::Conflict);
+    let done = demo.import_routing(second.token).await.expect("import");
+    assert_eq!((done.added, done.smart_ru_on), (2, true));
+    assert!(demo.import_routing(second.token).await.is_err(), "spent");
+    let after = demo
+        .preview_routing(RoutingSource::Pasted("happ://routing/onadd/x".into()))
+        .await
+        .expect("preview");
+    assert!(!after.smart_ru.expect("step").turn_on, "Smart RU is on now");
+    let off = demo
+        .preview_routing(RoutingSource::Pasted("happ://routing/off".into()))
+        .await
+        .expect("off");
+    assert!(off.off && !off.changes());
+}
+
+/// The preview renders every part (a folded rule list, Smart RU, covered, skipped with the kept
+/// settings) and the «off» form.
+#[tokio::test]
+async fn preview_renders_every_part() {
+    use dioxus::core::NoOpMutations;
+    use dioxus::prelude::*;
+
+    use super::routing_preview::PreviewView;
+
+    #[derive(Clone)]
+    struct Shown(RoutingPreview);
+
+    fn root() -> Element {
+        let preview = use_context::<Shown>().0;
+        rsx! {
+            PreviewView { preview, busy: false, on_import: |_| {}, on_cancel: |_| {} }
+        }
+    }
+
+    crate::test_locales::init_locales();
+    let demo = DemoSplitTunnel::new("full").instant();
+    let mut full = demo
+        .preview_routing(RoutingSource::Pasted("happ://routing/onadd/x".into()))
+        .await
+        .expect("preview");
+    full.add = (0..9)
+        .map(|i| PreviewRule {
+            pattern: format!("s{i}.example"),
+            route: RouteKind::Direct,
+        })
+        .collect();
+    let off = demo
+        .preview_routing(RoutingSource::Pasted("happ://routing/off".into()))
+        .await
+        .expect("off");
+    for preview in [full, off] {
+        let mut dom = VirtualDom::new(root).with_root_context(Shown(preview));
+        dom.rebuild_in_place();
+        dom.render_immediate(&mut NoOpMutations);
+    }
+}
+
+/// The result line names what changed, then where the rules live and when they apply.
+#[test]
+fn import_result_line() {
+    use super::routing_panel::done_msgs;
+    use vpnte_base::Msg;
+
+    let all = RoutingImported {
+        added: 3,
+        over_limit: 1,
+        smart_ru_on: true,
+    };
+    assert_eq!(
+        done_msgs(all),
+        [
+            Msg::new("splitTunneling.routing.added").arg("count", 3),
+            Msg::new("splitTunneling.routing.smartRuOn"),
+            Msg::new("splitTunneling.routing.overLimit").arg("count", 1),
+            Msg::new("splitTunneling.routing.whereRules"),
+            Msg::new("splitTunneling.routing.nextConnect"),
+        ]
+    );
+    let smart_only = RoutingImported {
+        smart_ru_on: true,
+        ..RoutingImported::default()
+    };
+    assert_eq!(
+        done_msgs(smart_only),
+        [
+            Msg::new("splitTunneling.routing.smartRuOn"),
+            Msg::new("splitTunneling.routing.nextConnect"),
+        ]
+    );
+    assert_eq!(
+        done_msgs(RoutingImported::default()),
+        [Msg::new("splitTunneling.routing.nothingAdded")]
+    );
+}

@@ -7,6 +7,7 @@ mod body;
 mod controls;
 mod layers;
 mod meta;
+mod routing_profile;
 mod spans;
 mod uris;
 
@@ -14,6 +15,10 @@ pub use body::{decode_body, prepare};
 pub use controls::{AutoconnectPick, Controls, ProviderKeys, Relocation, body_keys, header_keys};
 pub use layers::{decode_base64_layer, layers};
 pub use meta::{apply_meta, body_meta, header_meta};
+pub use routing_profile::{
+    Entry, MAX_PROFILE_BYTES, Route, RouteEntry, RoutingError, RoutingProfile, RoutingValue,
+    parse_routing,
+};
 pub use spans::{blank_spans, json_spans};
 pub use uris::{URI_SCHEMES, is_uri_line, uri_candidates};
 

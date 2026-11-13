@@ -152,7 +152,8 @@ pub const MAX_PROVIDERS: usize = 16;                           // 16; Debug hide
 pub fn parse_wg_ini(text: &str) -> Option<Result<Profile, SkipReason>>;  // None: not a WireGuard config
 // deeplink
 pub enum DeepLinkError { Encrypted { app: &'static str, variant: String }, RoutingProfile,
-                         AddPayloadUnrecognised, UnknownHost(String) }
+                         AddPayloadUnrecognised, UnknownHost(String) }  // RoutingProfile: happ://routing/…
+                         // is no subscription; its message names the Apps page (text::parse_routing)
 impl DeepLinkError { pub fn msg(&self) -> Msg }               // profiles.deeplink.*; never the payload
 pub fn unwrap_deeplink(input: &str) -> Result<Option<String>, DeepLinkError>;  // Ok(None): not a deep link
 pub fn unwrap_redirect(input: &str) -> Result<Option<String>, DeepLinkError>;  // same for a redirect's
@@ -320,7 +321,27 @@ impl ProviderKeys { pub fn apply(&mut self, key: &str, value: &str); pub fn or(s
 pub fn body_keys(text: &str) -> ProviderKeys;                 // top comment block + a happ://routing/ line
 pub fn header_keys<'a>(headers: impl IntoIterator<Item = (&'a str, &'a str)>, body: ProviderKeys)
     -> ProviderKeys;                                          // headers win field by field
+// Happ routing profiles (p-provider-routing): read only, for a preview; nothing is applied here
+pub const MAX_PROFILE_BYTES: usize = 64 * 1024;
+pub fn parse_routing(value: &str) -> Result<RoutingValue, RoutingError>;  // link, its base64 or JSON
+pub enum RoutingValue { Profile(RoutingProfile), Off /* happ://routing/off */ }
+pub struct RoutingProfile { pub name: Option<String>, pub global_proxy: bool /* default true */,
+    pub entries: Vec<RouteEntry> /* RouteOrder (default block-proxy-direct), sites before IPs */,
+    pub dns: Vec<String> /* remote, domestic; DoH URL else address */, pub dns_hosts: usize,
+    pub fake_dns: bool }
+pub struct RouteEntry { pub route: Route, pub entry: Entry, pub raw: String /* as written */ }
+pub enum Route { Block, Proxy, Direct }
+pub enum Entry { Domain(String), Full(String), Keyword(String), Plain(String), Regexp(String),
+    Geosite(String), Geoip(String), Ip(IpNet), External(String), Unknown(String) } // Xray syntax
+pub enum RoutingError { NotRouting, Damaged, TooLarge }      // .msg(): profiles.routing.*
 ```
+Routing profiles (Happ's public docs, `happ.su/main/dev-docs/routing`): `happ://routing/add|onadd/
+<base64 JSON>` (either alphabet, padding optional or `%3D`, or percent-encoded JSON), `happ://routing/off`,
+or the base64 / JSON alone (a provider's stored `Controls::routing`). A JSON object needs one of
+`GlobalProxy`, `*Sites`, `*Ip`, `RouteOrder` to count; single values are strings (`"true"`), a JSON bool
+reads the same. Every non-blank list item becomes an entry (a non-string as `Unknown`, a list sent as one
+string as one entry, entries over 512 bytes cut for display), so nothing a provider sent goes unseen.
+The app maps entries to the user's own rules (`app::api_lists::split::routing`).
 Comment blocks: `#key: value` and (Hiddify) `//key: value` lines; a `//` line made only of base64
 characters is body, not a comment. Keys: `routing` (kept as sent, at most 64 KiB, no control
 characters; a `happ://routing/…` body line counts when no key names one), `hide-settings` and
@@ -508,6 +529,7 @@ warning and use the clipboard / file helpers of the app.
   (`profiles.xrayNative.*`), `LegacyError` (`profiles.legacy.*`). `DeepLinkError::msg()` gives
   `profiles.deeplink.*` (`encryptedHapp`, `encryptedMantaray`, `encrypted`, `routingProfile`,
   `addPayloadUnrecognised`, `unknownHost`, `amneziaDamaged`, `amneziaUnsupported`, `localTarget`).
+  `RoutingError::msg()` gives `profiles.routing.{notRouting, damaged, tooLarge}`.
   `awg::AwgInvalid` (`profiles.awg.invalid`, arg `fields`).
 - What the UI must render with this crate's keys: `caps::note_msg(&note)` for every `Profile.notes`
   entry (`profiles.caps.note.*`; `Note::Other` keys: `profiles.import.realityFingerprint`,

@@ -1,8 +1,11 @@
 //! Apps page: the split-tunnel entries of `rules.json` (a program by its path or a process by
-//! its name, each with its rule), installed-app discovery and the native Open dialog.
+//! its name, each with its rule), installed-app discovery and the native Open dialog; and Happ
+//! routing profiles imported into the user's domain rules on the user's click (`routing`).
 //!
 //! A running session takes a changed list at its next engine start (the tunnel reads
 //! `rules.json` on every start), as the Settings page's domain rules do.
+mod routing;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,13 +13,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 use vpnte_base::{AppError, AppResult, Msg};
 use vpnte_engine::apps;
 use vpnte_engine::routing::RulesDoc;
 use vpnte_engine::routing::process::{self as engine, AppPath, Probe, ProcessName, SplitTarget};
-use vpnte_ui::split_tunnel::{AppKind, AppRule, SplitApp, SplitSnapshot, SplitTunnelApi};
+use vpnte_servers::store::ServersEvent;
+use vpnte_ui::split_tunnel::{
+    AppKind, AppRule, RoutingImported, RoutingOffer, RoutingPreview, RoutingSource, SplitApp,
+    SplitSnapshot, SplitTunnelApi,
+};
 use vpnte_ui::widgets::{Load, UiError};
 
 use super::refused;
@@ -40,6 +47,10 @@ struct Shared {
     /// Projection and send as one step, so a slower projection never sends an older list
     /// after a newer one (actions and the projection task both publish).
     publishing: Mutex<()>,
+    /// The subscriptions with a Happ routing profile, re-read when the server list changes.
+    offers: Mutex<Vec<RoutingOffer>>,
+    /// Routing previews and their import.
+    routing: routing::Imports,
 }
 
 impl SplitService {
@@ -53,7 +64,10 @@ impl SplitService {
             looked: AtomicBool::new(false),
             scan: tokio::sync::Mutex::new(()),
             publishing: Mutex::new(()),
+            offers: Mutex::new(Vec::new()),
+            routing: routing::Imports::default(),
         });
+        shared.read_offers();
         shared.publish();
         tokio::spawn(follow(shared.clone()));
         Self(shared)
@@ -68,18 +82,28 @@ impl SplitService {
 }
 
 impl Shared {
-    /// Projects the stored entries in order; sends only a changed snapshot.
+    /// Projects the stored entries in order and the routing offers; sends only a changed
+    /// snapshot.
     fn publish(&self) {
         let _one = self.publishing.lock();
         let apps = self.backend.rules.read(project);
+        let offers = self.offers.lock().clone();
         self.state.send_if_modified(|current| {
             let next = Load::Ready(apps);
-            let changed = current.apps != next;
+            let changed = current.apps != next || current.offers != offers;
             if changed {
                 current.apps = next;
+                current.offers = offers;
             }
             changed
         });
+    }
+
+    /// Re-reads which subscriptions carry a routing profile (parses each stored value).
+    fn read_offers(&self) {
+        let lang = self.backend.lang();
+        let offers = self.backend.servers.read(|doc| routing::offers(doc, lang));
+        *self.offers.lock() = offers;
     }
 
     /// Scans the installed apps and merges the new ones (rule «Нет»; rules kept, entries the
@@ -126,6 +150,16 @@ fn gone() -> AppError {
     refused("app.lists.apps.gone")
 }
 
+/// The import names a preview that is not the latest one (or was imported already).
+fn stale_preview() -> AppError {
+    refused("app.lists.routing.stale")
+}
+
+/// The subscription no longer carries the routing profile the page offered.
+fn offer_gone() -> AppError {
+    refused("app.lists.routing.gone")
+}
+
 #[async_trait(?Send)]
 impl SplitTunnelApi for SplitService {
     fn state(&self) -> watch::Receiver<SplitSnapshot> {
@@ -139,16 +173,16 @@ impl SplitTunnelApi for SplitService {
                 .read(|doc| doc.split_tunnel.apps.is_empty())
         {
             // The first look at an empty list finds the installed apps (the old page did too).
-            self.0.state.send_replace(SplitSnapshot {
-                apps: Load::Loading,
-            });
+            self.0
+                .state
+                .send_modify(|current| current.apps = Load::Loading);
             let shared = self.0.clone();
             self.0.runtime.spawn(async move {
                 if let Err(err) = shared.rescan().await {
                     tracing::warn!(error = %err, "app discovery failed");
-                    shared.state.send_replace(SplitSnapshot {
-                        apps: Load::Failed(UiError::from(err)),
-                    });
+                    shared
+                        .state
+                        .send_modify(|current| current.apps = Load::Failed(UiError::from(err)));
                 }
             });
         }
@@ -212,17 +246,42 @@ impl SplitTunnelApi for SplitService {
         })
         .await
     }
+
+    async fn preview_routing(&self, source: RoutingSource) -> AppResult<RoutingPreview> {
+        let shared = self.0.clone();
+        blocking(move || shared.routing.preview(&shared.backend, &source)).await
+    }
+
+    async fn import_routing(&self, token: u64) -> AppResult<RoutingImported> {
+        let shared = self.0.clone();
+        // Detached: leaving the page mid-import never leaves half of it done.
+        detached(
+            async move { blocking(move || shared.routing.import(&shared.backend, token)).await },
+        )
+        .await
+    }
 }
 
-/// Re-projects on every change of `rules.json` (this page, the Settings page, an import) until
-/// `backend.shutdown`.
+/// Re-projects on every change of `rules.json` (this page, the Settings page, an import) and of
+/// the server list (a subscription's routing profile) until `backend.shutdown`.
 async fn follow(shared: Arc<Shared>) {
     let mut rules = shared.backend.rules.subscribe();
+    let mut servers = shared.backend.servers.subscribe();
     let shutdown = shared.backend.shutdown.clone();
     loop {
         let alive = tokio::select! {
             () = shutdown.cancelled() => false,
             changed = rules.changed() => changed.is_ok(),
+            event = servers.recv() => match event {
+                // Pings and refresh starts change no stored routing value.
+                Ok(ServersEvent::Changed | ServersEvent::RefreshFinished(_))
+                | Err(broadcast::error::RecvError::Lagged(_)) => {
+                    shared.read_offers();
+                    true
+                }
+                Ok(_) => continue,
+                Err(broadcast::error::RecvError::Closed) => false,
+            },
         };
         if !alive {
             return;

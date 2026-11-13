@@ -21,6 +21,8 @@ mod tests;
 pub enum DeepLinkError {
     #[error("encrypted {app} link ({variant})")]
     Encrypted { app: &'static str, variant: String },
+    /// A Happ routing profile (`happ://routing/…`), not a subscription: the Apps page reads it
+    /// ([`crate::text::parse_routing`]) and adds it to the user's own rules on the user's click.
     #[error("routing profile link")]
     RoutingProfile,
     #[error("unrecognised add payload")]
@@ -166,6 +168,8 @@ fn unwrap_with(input: &str, hosts: Hosts) -> Result<Option<String>, DeepLinkErro
             variant: host,
         });
     }
+    // Routing profiles are offered on the Apps page, never added as a subscription: the
+    // message says where.
     if app.name == HAPP && host == "routing" {
         return Err(DeepLinkError::RoutingProfile);
     }

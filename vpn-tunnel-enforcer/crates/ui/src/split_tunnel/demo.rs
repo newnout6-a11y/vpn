@@ -4,6 +4,8 @@
 //!
 //! Scenes: `full` (default), `empty`, `loading` (the first read never ends), `failed` (the first
 //! read fails, «Повторить» works), `errors` (every action fails).
+mod routing;
+
 use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
@@ -12,6 +14,7 @@ use tokio::sync::watch;
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 
 use super::model::{AppKind, AppRule, SplitApp, SplitSnapshot, SplitTunnelApi};
+use super::routing::{RoutingImported, RoutingOffer, RoutingPreview, RoutingSource};
 use crate::widgets::{Load, UiError};
 
 /// A 16×16 PNG (dark square, signal frame) so the image path of the icon cell shows.
@@ -26,6 +29,11 @@ pub struct DemoSplitTunnel {
     fail_actions: bool,
     next_id: Cell<u32>,
     delay: Duration,
+    offers: Vec<RoutingOffer>,
+    /// The latest routing preview (its token is the one `import_routing` takes).
+    preview: RefCell<Option<RoutingPreview>>,
+    tokens: Cell<u64>,
+    smart_ru_on: Cell<bool>,
 }
 
 fn app(id: &str, name: &str, path: &str, rule: AppRule) -> SplitApp {
@@ -132,12 +140,17 @@ impl DemoSplitTunnel {
             fail_actions: scene == "errors",
             next_id: Cell::new(1),
             delay: Duration::from_millis(500),
+            offers: routing::offers(scene),
+            preview: RefCell::new(None),
+            tokens: Cell::new(0),
+            smart_ru_on: Cell::new(false),
         };
         match scene {
             "loading" => {}
             "failed" => {
                 demo.tx.send_replace(SplitSnapshot {
                     apps: Load::Failed(UiError::from(AppError::new(ErrorKind::Internal))),
+                    offers: demo.offers.clone(),
                 });
             }
             _ => demo.publish(),
@@ -154,6 +167,7 @@ impl DemoSplitTunnel {
     fn publish(&self) {
         self.tx.send_replace(SplitSnapshot {
             apps: Load::Ready(self.apps.borrow().clone()),
+            offers: self.offers.clone(),
         });
     }
 
@@ -267,5 +281,24 @@ impl SplitTunnelApi for DemoSplitTunnel {
         self.apps.borrow_mut().retain(|a| a.id != id);
         self.publish();
         Ok(())
+    }
+
+    async fn preview_routing(&self, source: RoutingSource) -> AppResult<RoutingPreview> {
+        self.pause().await?;
+        let token = self.tokens.get() + 1;
+        self.tokens.set(token);
+        let preview = routing::preview(&source, token, self.smart_ru_on.get());
+        *self.preview.borrow_mut() = Some(preview.clone());
+        Ok(preview)
+    }
+
+    async fn import_routing(&self, token: u64) -> AppResult<RoutingImported> {
+        self.pause().await?;
+        let done = routing::import(self.preview.borrow().as_ref(), token)?;
+        // The plan is spent: a second click on the same preview asks for a new one.
+        *self.preview.borrow_mut() = None;
+        self.smart_ru_on
+            .set(self.smart_ru_on.get() || done.smart_ru_on);
+        Ok(done)
     }
 }

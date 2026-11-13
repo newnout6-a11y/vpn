@@ -47,15 +47,15 @@ without running destructors of the `Arc<Backend>`).
 | `lock`, `log` | data-dir lock (process life); log guard (take + drop at the end of shutdown) | app-main |
 | `elevated` | process elevated: TUN / WFP available in-process | everyone who labels a privileged feature; `TunnelOps::tun_available` |
 | `engines` | `sing-box.exe` / `xray.exe`, canonical when present | app-tunnel (`RealEngines`, WFP `EnginePaths`); `probe_ctx` |
-| `settings` | `Store<Settings>` (`settings.json`) | Settings, Wizard, Dashboard (`soft_mode`, `smart_ru`), Tray (`minimize_to_tray`), app-tunnel (`InputsSource`, `LifecycleDeps::settings`), notifier |
+| `settings` | `Store<Settings>` (`settings.json`) | Settings, Wizard, Dashboard (`soft_mode`, `smart_ru`), Apps (a Happ routing import turns `smart_ru_split` on), Tray (`minimize_to_tray`), app-tunnel (`InputsSource`, `LifecycleDeps::settings`), notifier |
 | `protection` | `Store<ProtectionDoc>` (`protection.json`): level, leak protection, public Wi-Fi, LAN, exceptions | written only by app-tunnel through `TunnelOps` (WFP `Persist` callbacks); read by Settings (`KillSwitchView`) |
 | `themes` | `Store<ThemesDoc>` (`themes.json`): custom themes; `theme(id) -> Theme` resolves an id | Settings (`set_theme`, `themes` list), app-main (initial theme) |
 | `soft` | `Store<SoftDoc>` (`soft.json`): `DevTargets` of a Soft session (`soft_git` / `soft_gradle` / `soft_studio`) | Settings (save); app-tunnel reads it at every Soft apply and re-applies on change while a Soft session runs (subscribe) |
 | `cleanup` | `Store<CleanupMarker>` (`legacy-network-cleanup.json`): the old version's network cleanup | app-tunnel (elevated start-up run, skipped while the per-machine 1.x is installed); Maintenance (failures, "run again") |
-| `rules` | `Store<RulesDoc>` (`rules.json`): split tunnel, DNS profiles + active, domain rules | Settings (`dns`, `domains` sections); app-tunnel (`InputsSource`; the tunnel regenerates fragments on change) |
+| `rules` | `Store<RulesDoc>` (`rules.json`): split tunnel, DNS profiles + active, domain rules | Settings (`dns`, `domains` sections); Apps (split tunnel; a Happ routing import appends domain rules on the user's click); app-tunnel (`InputsSource`; the tunnel regenerates fragments on change) |
 | `rule_sets` | `RuleSetService` over `cache/rulesets.json` | Settings (`refresh_rule_sets`, `RuleSetView`); app-tunnel (`active(..)`, `prune()` before an engine start) |
 | `history` | connection history (`history/connections.json`) | Logs (`history`, `export_history`, `clear_all`); app-tunnel (`LifecycleDeps::history`) |
-| `servers`, `refresh` | server list; subscription fetcher + registry (`RefreshCtx`) | Servers (all list actions, `add_from_input`, `refresh_group`), Dashboard panels (`servers`, `select_server`), Wizard (`check_key`, key import), app-tunnel (`ProfileSource`) |
+| `servers`, `refresh` | server list; subscription fetcher + registry (`RefreshCtx`) | Servers (all list actions, `add_from_input`, `refresh_group`), Dashboard panels (`servers`, `select_server`), Wizard (`check_key`, key import), Apps (routing offers from `controls.routing`, read only), app-tunnel (`ProfileSource`) |
 | `ops` | operation registry (single flight per resource, cancel, list) | Servers (refresh, health check), Tray (`check_route`), Settings (exports); app-main closes it at shutdown |
 | `geo` | country / ASN lookups (one cache and backoff) | Dashboard (exit country), Servers (`verify_country`, `geo`); whoever saves `disable_geo_lookup` calls `geo.set_enabled(!value)` (app-settings) |
 | `notifier` | toasts + in-app list | app-tunnel (lifecycle `Notifier`, WFP notices), Tray (`check_route` verdict), app-main (`subscribe()` feeds the toast host; `set_on_activate` shows the window) |

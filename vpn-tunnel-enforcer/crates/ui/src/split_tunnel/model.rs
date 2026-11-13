@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 use vpnte_base::AppResult;
 
+use super::routing::{RoutingImported, RoutingOffer, RoutingPreview, RoutingSource};
 use crate::widgets::Load;
 
 /// What the page needs from the split-tunnel service (routing). Every mutation publishes the
@@ -28,18 +29,27 @@ pub trait SplitTunnelApi: 'static {
     async fn set_rule(&self, id: String, rule: AppRule) -> AppResult<()>;
     /// Removes app `id` (a later rescan does not bring it back).
     async fn remove(&self, id: String) -> AppResult<()>;
+    /// Reads a Happ routing profile and says what importing it would do; nothing changes yet.
+    /// A value that is not a profile is a `Validation` error whose message the page shows.
+    async fn preview_routing(&self, source: RoutingSource) -> AppResult<RoutingPreview>;
+    /// Adds the previewed profile (`RoutingPreview::token`) to the user's own rules; a token
+    /// that is no longer the latest preview is a `Conflict` (preview again).
+    async fn import_routing(&self, token: u64) -> AppResult<RoutingImported>;
 }
 
 /// Pushed state of the page.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SplitSnapshot {
     pub apps: Load<Vec<SplitApp>>,
+    /// Subscriptions whose provider sent a Happ routing profile.
+    pub offers: Vec<RoutingOffer>,
 }
 
 impl Default for SplitSnapshot {
     fn default() -> Self {
         Self {
             apps: Load::Loading,
+            offers: Vec::new(),
         }
     }
 }

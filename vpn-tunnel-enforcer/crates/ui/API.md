@@ -678,13 +678,15 @@ pub trait ScheduleApi: 'static {        // root component SchedulePage
     async fn delete(&self, id: String) -> AppResult<()>;                         // unknown id is not an error
 }
 pub trait SplitTunnelApi: 'static {     // root component SplitTunnelPage (Page::Apps)
-    fn state(&self) -> watch::Receiver<SplitSnapshot>;    // { apps: Load<Vec<SplitApp>> }; first empty read runs discovery
+    fn state(&self) -> watch::Receiver<SplitSnapshot>;    // { apps: Load<Vec<SplitApp>>, offers: Vec<RoutingOffer> }; first empty read runs discovery
     async fn reload(&self) -> AppResult<()>;
     async fn refresh(&self) -> AppResult<usize>;          // rescan; returns how many new apps were found
     async fn add_app(&self) -> AppResult<Option<SplitApp>>;          // Open dialog (.exe); None = dismissed
     async fn add_process(&self, name: String) -> AppResult<SplitApp>; // bare process name, normalised by the service
     async fn set_rule(&self, id: String, rule: AppRule) -> AppResult<()>;
     async fn remove(&self, id: String) -> AppResult<()>;  // a later rescan does not bring it back
+    async fn preview_routing(&self, source: RoutingSource) -> AppResult<RoutingPreview>; // Happ routing; changes nothing
+    async fn import_routing(&self, token: u64) -> AppResult<RoutingImported>; // exactly that preview; stale token = Conflict
 }
 pub trait TrafficHistoryApi: 'static {  // root component TrafficHistoryPage (active-only)
     fn state(&self) -> watch::Receiver<TrafficSnapshot>;  // { domains: Load<Arc<[DomainRow]>>, tunnel_up: bool }
@@ -699,7 +701,14 @@ Upstream` {Server, LocalProxy}: NOADMIN §2 keeps the two apart; `Upstream::uses
 an unelevated app; the card, the next-event strip and the editor mark it unavailable), `HhMm`
 (minutes; strict `H:MM` / `HH:MM`),
 `NextEvent` (with its schedule's `capture`), `NextAction`, `ServerChoice`, form rules `ScheduleForm`, `FormProblem`, `time_until`,
-`local_hhmm`; `SplitApp`, `AppKind`, `AppRule`, `display_path`, `matches`; `DomainRow`, `SiteInfo`,
+`local_hhmm`; `SplitApp`, `AppKind`, `AppRule`, `display_path`, `matches`; Happ routing panel
+(p-provider-routing): `RoutingSource` {Pasted(text), Subscription(group_id)}, `RoutingOffer`
+{group_id, group (rendered name), profile}, `RoutingPreview` {token, name, off, add: Vec<PreviewRule>
+{pattern, route}, smart_ru: Option<SmartRuStep {turn_on, from}>, covered / skipped: Vec<PreviewEntry
+{text, route, note: EntryNote}>, kept: Vec<Kept>} with `changes()`, `RouteKind` {Vpn, Direct, Block},
+`EntryNote` (Local, Present, YourRule(route), Repeated, NotShipped, IpRule, Regexp, Invalid,
+RussianSites; `key()`), `Kept` (RestDirect, Dns, DnsHosts, FakeDns; `msg()`), `RoutingImported`
+{added, over_limit, smart_ru_on}; `DomainRow`, `SiteInfo`,
 `Moment`, `by_day`, `filter`, `totals`, `MAX_RENDERED`. Demos: `DemoSchedule`, `DemoSplitTunnel`,
 `DemoTrafficHistory` (each in its module's `demo`). App duties: schedule `days` are 0 = Sunday,
 `NextEvent.name` = the entry's name; split-tunnel icons are optional base64 PNGs; traffic
