@@ -186,6 +186,8 @@ pub(crate) struct Store {
     /// The running ping-all (a second click cancels it) and the row states it replaced.
     pub ping_task: Signal<Option<Task>>,
     pub ping_before: Signal<Vec<(String, PingState)>>,
+    /// The running list-wide check through each server (a second click stops it).
+    pub check_task: Signal<Option<Task>>,
 }
 
 impl Store {
@@ -213,6 +215,7 @@ impl Store {
             bulk: Signal::new(None),
             ping_task: Signal::new(None),
             ping_before: Signal::new(Vec::new()),
+            check_task: Signal::new(None),
         }
     }
 

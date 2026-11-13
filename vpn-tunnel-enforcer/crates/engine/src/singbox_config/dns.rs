@@ -12,21 +12,26 @@ use super::outbounds::UpstreamParts;
 use super::{ConfigError, ConfigInputs, require_objects};
 use crate::tags::{
     DNS_BOOTSTRAP, DNS_BOOTSTRAP_GOOGLE, DNS_BOOTSTRAP_IN, DNS_BOOTSTRAP_ISP, DNS_BOOTSTRAP_QUAD9,
-    DNS_BOOTSTRAP_TCP, DNS_REMOTE, DNS_RESOLVER, PROXY_OUT,
+    DNS_BOOTSTRAP_TCP, DNS_BOOTSTRAP_YANDEX, DNS_REMOTE, DNS_RESOLVER, PROXY_OUT,
 };
 
-/// Resolvers of the bootstrap order after `dns-bootstrap` (1.1.1.1): DoH by IP literal to Quad9
-/// and Google, then DNS over TCP to Google; the physical adapter's resolver comes last, it
+/// Resolvers of the bootstrap order after `dns-bootstrap` (1.1.1.1): DoH by IP literal to Yandex,
+/// Quad9 and Google, then DNS over TCP to Google; the physical adapter's resolver comes last, it
 /// answers unblocked names when every public resolver is cut off (mobile whitelists).
+/// Yandex is second: RU networks that cut foreign resolvers (whitelists included) leave it
+/// reachable, and a step that late still fits Xray's 4 s after one blackholed step. Its
+/// certificate carries the address (77.88.8.8 is an IP SAN), so no SNI is sent here either.
+const YANDEX: &str = "77.88.8.8";
 const QUAD9: &str = "9.9.9.9";
 const GOOGLE: &str = "8.8.8.8";
 /// Budget of one step of the bootstrap order: Xray gives a whole lookup 4 s, so two blackholed
 /// steps must still leave room for the third.
 const STEP_TIMEOUT: &str = "1500ms";
 /// Tags the builder owns: routing must not define them.
-const RESERVED: [&str; 6] = [
+const RESERVED: [&str; 7] = [
     DNS_RESOLVER,
     DNS_BOOTSTRAP,
+    DNS_BOOTSTRAP_YANDEX,
     DNS_BOOTSTRAP_QUAD9,
     DNS_BOOTSTRAP_GOOGLE,
     DNS_BOOTSTRAP_TCP,
@@ -92,6 +97,7 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
 /// `type: local` would recurse into the TUN resolver, `detour: direct-out` is refused).
 fn bootstrap_servers(isp: Option<Ipv4Addr>) -> Vec<Value> {
     let mut servers = vec![
+        doh_direct(DNS_BOOTSTRAP_YANDEX, YANDEX),
         doh_direct(DNS_BOOTSTRAP_QUAD9, QUAD9),
         doh_direct(DNS_BOOTSTRAP_GOOGLE, GOOGLE),
         json!({ "type": "tcp", "tag": DNS_BOOTSTRAP_TCP, "server": GOOGLE }),
@@ -103,9 +109,11 @@ fn bootstrap_servers(isp: Option<Ipv4Addr>) -> Vec<Value> {
 }
 
 /// Rules for queries of `dns-bootstrap-in` (Xray's server names), first in the list. Each step
-/// is evaluated and its answer taken when it has an address or, over DoH (TLS: not forgeable
-/// on the path), when the name does not exist; an error, a timeout or an empty answer moves
-/// on. The last step's answer stands as it is: an honest failure, never an empty success.
+/// is evaluated and its answer taken when it has an address or, over foreign DoH (TLS: not
+/// forgeable on the path), when the name does not exist; an error, a timeout or an empty answer
+/// moves on. Yandex's NXDOMAIN moves on as well: a domestic resolver may answer the blocking
+/// registry rather than the zone. The last step's answer stands as it is: an honest failure,
+/// never an empty success.
 fn bootstrap_rules(isp: bool) -> Vec<Value> {
     let inbound = json!([DNS_BOOTSTRAP_IN]);
     let step = |action: &str, server: &str| json!({ "inbound": inbound, "action": action, "server": server, "timeout": STEP_TIMEOUT });
@@ -117,12 +125,16 @@ fn bootstrap_rules(isp: bool) -> Vec<Value> {
         "action": "respond",
     });
     let mut rules = Vec::new();
-    for doh in [DNS_BOOTSTRAP, DNS_BOOTSTRAP_QUAD9, DNS_BOOTSTRAP_GOOGLE] {
-        rules.extend([
-            step("evaluate", doh),
-            has_address.clone(),
-            no_such_name.clone(),
-        ]);
+    for doh in [
+        DNS_BOOTSTRAP,
+        DNS_BOOTSTRAP_YANDEX,
+        DNS_BOOTSTRAP_QUAD9,
+        DNS_BOOTSTRAP_GOOGLE,
+    ] {
+        rules.extend([step("evaluate", doh), has_address.clone()]);
+        if doh != DNS_BOOTSTRAP_YANDEX {
+            rules.push(no_such_name.clone());
+        }
     }
     if isp {
         rules.extend([step("evaluate", DNS_BOOTSTRAP_TCP), has_address]);

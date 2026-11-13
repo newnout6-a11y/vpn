@@ -6,7 +6,7 @@ use vpnte_base::ErrorKind;
 
 use super::*;
 use crate::lang::translate_now;
-use crate::servers::model::{FetchError, ImportReport, RefreshOutcome};
+use crate::servers::model::{FetchError, HealthReport, ImportReport, RefreshOutcome};
 use crate::servers::present::GROUP_NAME_MAX;
 use crate::widgets::UiError;
 
@@ -121,23 +121,9 @@ impl Actions {
             store.group_busy(&id, |b| b.health = false);
             match result {
                 Ok(report) => {
-                    let alive = report.results.iter().filter(|(_, h)| h.online).count();
-                    let total = report.results.len();
+                    let body = health_body(&report);
                     for (sid, health) in report.results {
                         store.row(&sid, |r| r.health = Some(health));
-                    }
-                    let mut body = translate_now(
-                        "servers.health.aliveCount",
-                        &[("count", alive.to_string()), ("total", total.to_string())],
-                    );
-                    // Keys left unchecked are named, never folded into the total as if checked.
-                    if report.not_checked > 0 {
-                        let count = report.not_checked.to_string();
-                        body.push_str(". ");
-                        body.push_str(&translate_now(
-                            "ui.servers.verdict.notChecked",
-                            &[("count", count)],
-                        ));
                     }
                     toasts.info(name, Some(body));
                 }
@@ -303,4 +289,24 @@ pub(crate) fn import_summary(report: &ImportReport) -> String {
             ("group", report.group_name.clone()),
         ],
     )
+}
+
+/// A key check's summary: how many of the checked keys work, and the keys left unchecked named,
+/// never folded into the total as if checked.
+pub(crate) fn health_body(report: &HealthReport) -> String {
+    let alive = report.results.iter().filter(|(_, h)| h.online).count();
+    let total = report.results.len();
+    let mut body = translate_now(
+        "servers.health.aliveCount",
+        &[("count", alive.to_string()), ("total", total.to_string())],
+    );
+    if report.not_checked > 0 {
+        let count = report.not_checked.to_string();
+        body.push_str(". ");
+        body.push_str(&translate_now(
+            "ui.servers.verdict.notChecked",
+            &[("count", count)],
+        ));
+    }
+    body
 }

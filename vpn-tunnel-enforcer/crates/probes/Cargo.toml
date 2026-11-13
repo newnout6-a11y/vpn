@@ -34,6 +34,9 @@ vpnte-profiles.workspace = true
 vpnte-winnet.workspace = true
 windows = { workspace = true, features = ["Win32_Networking_WinHttp", "Win32_System_Services", "Win32_NetworkManagement_Dns"] }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true
 

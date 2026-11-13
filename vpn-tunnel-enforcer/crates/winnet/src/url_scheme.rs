@@ -9,10 +9,8 @@ use std::path::Path;
 
 use crate::registry::{self, Access, Hive, Key, View};
 
-/// Link schemes the app opens: share links of the protocols it runs, then other clients' import
-/// links (`sing-box://import-remote-profile`, `clash://install-config`, `v2raytun://import/`,
-/// `hiddify://import/`). Happ's own `happ://` is not among them: Happ answers it.
-pub const SCHEMES: [&str; 12] = [
+/// Link schemes the app opens: share links of the protocols it runs, then [`CLIENT_SCHEMES`].
+pub const SCHEMES: [&str; 14] = [
     "vless",
     "vmess",
     "trojan",
@@ -25,7 +23,16 @@ pub const SCHEMES: [&str; 12] = [
     "clash",
     "v2raytun",
     "hiddify",
+    "happ",
+    "incy",
 ];
+
+/// Other clients' import links (`sing-box://import-remote-profile`, `clash://install-config`,
+/// `v2raytun://import/`, `hiddify://import/`, `happ://add/`, `incy://`): providers' «add to
+/// Happ» buttons then work on a PC without that client. Taken by default only while free and
+/// given back when the client registers machine-wide later (Happ writes HKLM, which our
+/// per-user key would hide from this user); one the user took on purpose stays ours.
+pub const CLIENT_SCHEMES: [&str; 6] = ["sing-box", "clash", "v2raytun", "hiddify", "happ", "incy"];
 
 /// The flag our registered command hands the link over with (the app's `args`).
 pub const OPEN_LINK_FLAG: &str = "--open-link";
@@ -34,6 +41,8 @@ pub const OPEN_LINK_FLAG: &str = "--open-link";
 const RECORD: &str = r"Software\VPN Tunnel Enforcer\LinkSchemes";
 /// Under the record: other programs' per-user keys we replaced on the user's request.
 const PREVIOUS: &str = "Previous";
+/// Under the record: one value per client scheme we hold only while its client is absent.
+const WHILE_FREE: &str = "WhileFree";
 /// The user's handler choices for URL schemes (read only: Windows protects them with a hash).
 const CHOICES: &str = r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations";
 
@@ -75,6 +84,15 @@ pub struct Ensured {
     pub registered: Vec<&'static str>,
     /// Our schemes pointed at this exe again (it moved, or an upgrade replaced it).
     pub repointed: usize,
+    /// Client schemes given back: their client registered machine-wide since we took them free.
+    pub released: Vec<&'static str>,
+}
+
+impl Ensured {
+    /// Something was written or removed: Explorer should hear of it.
+    pub fn changed(&self) -> bool {
+        !self.registered.is_empty() || self.repointed > 0 || !self.released.is_empty()
+    }
 }
 
 /// Where the keys live; [`Registrar::current_user`] in the app, a throw-away key in tests.
@@ -161,11 +179,16 @@ impl Registrar {
                 Owner::Other(owner_name(&key, command.as_deref()))
             });
         }
-        let (hive, root) = &self.machine;
-        match open(*hive, &format!(r"{root}\{scheme}"))? {
+        match self.machine_key(scheme)? {
             Some(key) => Ok(Owner::Other(owner_name(&key, command_of(&key).as_deref()))),
             None => Ok(Owner::Free),
         }
+    }
+
+    /// The machine-wide registration of `scheme` (only read: another program's).
+    fn machine_key(&self, scheme: &str) -> windows::core::Result<Option<Key>> {
+        let (hive, root) = &self.machine;
+        open(*hive, &format!(r"{root}\{scheme}"))
     }
 
     /// `command` (of a per-user key or a saved one) is the one we recorded, or this exe's.
@@ -228,12 +251,22 @@ impl Registrar {
     /// The first run for this user (installer or app start) registers every free scheme (and
     /// records a key of this exe left without a record, so uninstall finds it); later runs only
     /// point our schemes at `exe` again (an upgrade, a moved portable copy) and register nothing
-    /// new, so what the user turned off stays off.
+    /// new, so what the user turned off stays off. A client scheme taken while free goes back to
+    /// its client once that registered machine-wide ([`CLIENT_SCHEMES`]).
     pub fn ensure(&self, exe: &Path) -> windows::core::Result<Ensured> {
         if !self.initialized()? {
             return self.adopt(exe);
         }
         let mut done = Ensured::default();
+        for scheme in CLIENT_SCHEMES {
+            if self.while_free(scheme)?
+                && self.class_owner(scheme, exe)? == Owner::Ours
+                && self.machine_key(scheme)?.is_some()
+            {
+                self.remove(scheme, exe)?;
+                done.released.push(scheme);
+            }
+        }
         let command = Self::command(exe);
         for scheme in self.recorded_schemes()? {
             let current = open(Hive::CurrentUser, &self.scheme_path(&scheme))?;
@@ -258,6 +291,9 @@ impl Registrar {
             match self.owner(scheme, exe)? {
                 Owner::Free => {
                     self.write(scheme, exe)?;
+                    if CLIENT_SCHEMES.contains(&scheme) {
+                        create(&self.while_free_path())?.set_string(scheme, "")?;
+                    }
                     done.registered.push(scheme);
                 }
                 Owner::Ours => {
@@ -303,6 +339,8 @@ impl Registrar {
             }
         }
         self.write(scheme, exe)?;
+        // Taken on purpose: no longer given back when its client turns up.
+        self.unmark(scheme)?;
         Ok(Took::Ours)
     }
 
@@ -411,7 +449,7 @@ impl Registrar {
 }
 
 impl Registrar {
-    /// Drops the record value `name` (nothing else).
+    /// Drops the record value `name` and its while-free mark (nothing else).
     fn forget(&self, name: &str) -> windows::core::Result<()> {
         if let Some(record) = Key::open(
             Hive::CurrentUser,
@@ -420,6 +458,26 @@ impl Registrar {
             View::Native,
         )? {
             record.delete_value(name)?;
+        }
+        self.unmark(name)
+    }
+
+    fn while_free_path(&self) -> String {
+        format!(r"{}\{WHILE_FREE}", self.record)
+    }
+
+    /// `scheme` was taken only because it was free (a client scheme at the first run).
+    fn while_free(&self, scheme: &str) -> windows::core::Result<bool> {
+        Ok(match open(Hive::CurrentUser, &self.while_free_path())? {
+            Some(marks) => marks.string(scheme)?.is_some(),
+            None => false,
+        })
+    }
+
+    fn unmark(&self, scheme: &str) -> windows::core::Result<()> {
+        let path = self.while_free_path();
+        if let Some(marks) = Key::open(Hive::CurrentUser, &path, Access::ReadWrite, View::Native)? {
+            marks.delete_value(scheme)?;
         }
         Ok(())
     }

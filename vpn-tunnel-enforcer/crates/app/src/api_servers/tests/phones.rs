@@ -88,7 +88,7 @@ async fn the_scheme_panel_takes_and_gives_back_links() {
     ));
     let api = ServersBackend::start_with(env.backend.clone(), Registrar::under(&root.0));
     let schemes = api.link_schemes().await.unwrap();
-    assert_eq!(schemes.list.len(), 12);
+    assert_eq!(schemes.list.len(), vpnte_winnet::url_scheme::SCHEMES.len());
     assert!(schemes.list.iter().all(|s| s.owner == SchemeOwner::Free));
     assert!(schemes.portable, "a test exe is no installed copy");
     let owner = |schemes: &LinkSchemes, name: &str| {

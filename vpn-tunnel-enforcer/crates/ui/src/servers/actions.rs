@@ -19,7 +19,7 @@ mod group;
 mod request;
 mod server;
 
-pub(crate) use group::fetch_error_text;
+pub(crate) use group::{fetch_error_text, health_body};
 pub(crate) use server::save_key_label;
 
 /// Shows an action's error unless it was a cancellation (silent everywhere).
@@ -117,6 +117,43 @@ impl Actions {
             let mut running = store.ping_task;
             running.set(None);
             actions.restore_pings();
+        });
+        running.set(Some(task));
+    }
+
+    /// «Проверить все» (RU-2026 item 6): every server through itself, under each server name's
+    /// handshake budget; rows take their results as they land and a toast sums up. A second call
+    /// stops the run: the backend keeps what finished, nothing is told.
+    pub fn check_all(&self) {
+        let store = self.store;
+        let mut running = store.check_task;
+        if let Some(task) = running.take() {
+            task.cancel();
+            return;
+        }
+        let (api, toasts) = (self.api.clone(), self.toasts);
+        let task = self.spawn(async move {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let run = api.check_all_health(tx);
+            futures_util::pin_mut!(run);
+            let result = loop {
+                tokio::select! {
+                    result = &mut run => break result,
+                    Some((id, health)) = rx.recv() => store.row(&id, |r| r.health = Some(health)),
+                }
+            };
+            while let Ok((id, health)) = rx.try_recv() {
+                store.row(&id, |r| r.health = Some(health));
+            }
+            let mut running = store.check_task;
+            running.set(None);
+            let title = translate_now("ui.servers.checkAll.done", &[]);
+            match result {
+                Ok(report) => {
+                    toasts.info(title, Some(health_body(&report)));
+                }
+                Err(err) => toast_error(toasts, title, &err),
+            }
         });
         running.set(Some(task));
     }

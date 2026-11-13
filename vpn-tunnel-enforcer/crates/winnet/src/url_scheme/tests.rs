@@ -214,7 +214,7 @@ fn uninstall_removes_exactly_what_we_wrote() {
 fn unknown_schemes_are_refused() {
     let t = TestKey::new();
     let r = reg(&t);
-    for name in ["http", "https", "", r"vless\..\http", "happ"] {
+    for name in ["http", "https", "", r"vless\..\http", "ms-settings"] {
         assert!(r.take(name, &exe("A")).is_err(), "{name}");
         assert!(r.unregister(name, &exe("A")).is_err(), "{name}");
     }
@@ -420,4 +420,75 @@ fn adopting_takes_free_and_ours_only() {
         r.owner("clash", &portable).unwrap(),
         Owner::Chosen("Clash.Verge".into())
     );
+}
+
+/// Happ's machine-wide registration, as Happ's installer writes it (HKLM, here the stand-in).
+fn happ_machine_wide(t: &TestKey, scheme: &str) {
+    let path = format!(r"{}\Machine\{scheme}", t.path);
+    create(&path)
+        .unwrap()
+        .set_string("", "URL:Custom Protocol")
+        .unwrap();
+    create(&format!(r"{path}\shell\open\command"))
+        .unwrap()
+        .set_string("", r#""C:\Program Files\FlyFrogLLC\Happ\Happ.exe" "%1""#)
+        .unwrap();
+}
+
+/// p-small (RU-2026 item 4): `happ://` and `incy://` open this app only while no other program
+/// has them: taken free at the first run, never taken from an installed Happ, and given back
+/// at the next start once Happ registers machine-wide later (our per-user key would hide it).
+/// One the user took on purpose stays ours.
+#[test]
+fn client_schemes_are_held_only_while_free() {
+    let t = TestKey::new();
+    let r = reg(&t);
+    let a = exe("A");
+    happ_machine_wide(&t, "happ");
+    let done = r.ensure(&a).unwrap();
+    assert!(done.registered.contains(&"incy") && !done.registered.contains(&"happ"));
+    assert_eq!(
+        r.owner("happ", &a).unwrap(),
+        Owner::Other(Some("Happ".into()))
+    );
+    assert_eq!(command(&t, "happ"), None, "Happ's scheme stays Happ's");
+
+    // Happ moves on; a new user of the same PC (fresh record) gets happ:// while it is free.
+    let t = TestKey::new();
+    let r = reg(&t);
+    let done = r.ensure(&a).unwrap();
+    assert!(done.registered.contains(&"happ") && done.registered.contains(&"incy"));
+    assert_eq!(r.ensure(&a).unwrap(), Ensured::default());
+
+    // Happ and Incy are installed later, machine-wide; the user took incy:// on purpose.
+    happ_machine_wide(&t, "happ");
+    happ_machine_wide(&t, "incy");
+    assert_eq!(r.take("incy", &a).unwrap(), Took::Ours);
+    let done = r.ensure(&a).unwrap();
+    assert_eq!(done.released, ["happ"]);
+    assert!(done.changed());
+    assert_eq!(command(&t, "happ"), None);
+    assert_eq!(r.recorded("happ").unwrap(), None);
+    assert_eq!(
+        r.owner("happ", &a).unwrap(),
+        Owner::Other(Some("Happ".into()))
+    );
+    assert_eq!(r.owner("incy", &a).unwrap(), Owner::Ours);
+    assert_eq!(r.ensure(&a).unwrap(), Ensured::default());
+
+    // A share-link scheme taken free is no client's: a later machine-wide key changes nothing.
+    let machine = create(&format!(r"{}\Machine\vless", t.path)).unwrap();
+    machine.set_string("", "URL:vless").unwrap();
+    assert_eq!(r.ensure(&a).unwrap(), Ensured::default());
+    assert_eq!(r.owner("vless", &a).unwrap(), Owner::Ours);
+
+    // Uninstall removes ours and every mark with the record.
+    r.unregister_for(&a).unwrap();
+    assert!(!r.initialized().unwrap());
+}
+
+/// Every client scheme is one of the registered schemes (the give-back covers only those).
+#[test]
+fn client_schemes_are_registered_schemes() {
+    assert!(CLIENT_SCHEMES.iter().all(|c| SCHEMES.contains(c)));
 }

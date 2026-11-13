@@ -69,7 +69,7 @@ pub const SLOT_TAGS: [&str; 2] = ["vpnte-upstream-a", "vpnte-upstream-b"];
 pub const DNS_REMOTE: &str = "dns-remote";      // dns.final, through proxy-out
 pub const DNS_RESOLVER: &str = "dns-resolver";  // resolves hostname DoH/DoT servers, through proxy-out
 pub const DNS_BOOTSTRAP: &str = "dns-bootstrap";// direct, for upstream server names
-pub const DNS_BOOTSTRAP_QUAD9, DNS_BOOTSTRAP_GOOGLE, DNS_BOOTSTRAP_TCP, DNS_BOOTSTRAP_ISP: &str;
+pub const DNS_BOOTSTRAP_YANDEX, DNS_BOOTSTRAP_QUAD9, DNS_BOOTSTRAP_GOOGLE, DNS_BOOTSTRAP_TCP, DNS_BOOTSTRAP_ISP: &str;
                                                 // the rest of the slot mode's bootstrap order
 pub const DNS_DIRECT: &str = "dns-direct";      // direct, for Smart RU / user "direct" domains
 ```
@@ -178,9 +178,10 @@ Rules the caller must keep (review of the WFP / TUN design):
   a name or bootstrap-in exists. An outbound's `domain_resolver` names one server and bypasses
   the DNS rules (sing-box 1.14 `dns/router.go` `Lookup`), so native outbounds get this first
   step only. Queries of `dns-bootstrap-in` (Xray slots) get the whole order, first in
-  `dns.rules`: `evaluate` (1.5 s each) `dns-bootstrap` -> `dns-bootstrap-quad9` (DoH 9.9.9.9)
-  -> `dns-bootstrap-google` (DoH 8.8.8.8), a step's answer taken (`respond`) when it has an
-  address or is NXDOMAIN; then `dns-bootstrap-tcp` (TCP 8.8.8.8:53) and, when
+  `dns.rules`: `evaluate` (1.5 s each) `dns-bootstrap` -> `dns-bootstrap-yandex` (DoH 77.88.8.8:
+  reachable where RU networks cut foreign resolvers; its NXDOMAIN moves on) -> `dns-bootstrap-quad9`
+  (DoH 9.9.9.9) -> `dns-bootstrap-google` (DoH 8.8.8.8), a step's answer taken (`respond`) when it
+  has an address or is NXDOMAIN; then `dns-bootstrap-tcp` (TCP 8.8.8.8:53) and, when
   `usable_physical_dns` gives one, `dns-bootstrap-isp` (UDP to it) last. These tags are
   reserved (routing must not define them). Routing's DNS rules must not use legacy address
   filters (`ip_cidr` / `ip_is_private` without `match_response`): `evaluate` turns legacy DNS
@@ -257,7 +258,7 @@ after our CTRL_BREAK; `user_initiated && !graceful` = we killed it. Worst case o
 `GRACEFUL_STOP + within`. A drop still kills at once (Job closes), as does the app's exit.
 Secrets of the config (and slot credentials) are masked in every logged / returned line; our
 DNS server tags (`dns-remote`, `dns-resolver`, `dns-direct`, `dns-bootstrap` and its
-`-quad9` / `-google` / `-tcp` / `-isp` steps) stay readable.
+`-yandex` / `-quad9` / `-google` / `-tcp` / `-isp` steps) stay readable.
 `StartError` -> `engine.process.singboxExited(code)` / `singboxNotReady` (Timeout) /
 `spawnFailed(engine)` (kind Permission when access is denied) / `notPinned(file)` (elevated, an
 engine file differs from its pin) / `fileMissing(file)` (elevated, an engine file is missing);

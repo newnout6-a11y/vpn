@@ -174,7 +174,8 @@ pub(super) fn observed<'g>(reach: &Reach<'g>, observatory: &Value) -> Option<Vec
 }
 
 /// The bundled Xray refuses `allowInsecure: true` even next to a pin. Import accepted it only
-/// with `pinnedPeerCertSha256`, which replaces the CA check on its own, so the flag is dropped.
+/// with `pinnedPeerCertSha256` (replaces the CA check on its own) or `verifyPeerCertByName`
+/// (keeps the CA check against those names), so the flag is dropped.
 fn drop_allow_insecure(value: &mut Value) {
     match value {
         Value::Object(map) => {

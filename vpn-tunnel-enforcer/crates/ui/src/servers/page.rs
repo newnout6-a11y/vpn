@@ -85,12 +85,13 @@ pub fn ServersPage() -> Element {
     let empty = loaded && view.servers.is_empty() && view.groups.is_empty();
     drop(view);
     let pinging = store.ping_task.read().is_some();
+    let checking = store.check_task.read().is_some();
     let number = Page::ALL
         .iter()
         .position(|p| *p == Page::Servers)
         .map(nav_number);
     let (a_ping, a_keys, a_proxies) = (actions.clone(), actions.clone(), actions.clone());
-    let a_schemes = actions.clone();
+    let (a_schemes, a_check) = (actions.clone(), actions.clone());
     let (mut add_open, mut batch_open) = (store.add_open, store.batch_open);
     let exporting = matches!(*store.bulk.read(), Some(Bulk::Working(_)));
     rsx! {
@@ -109,6 +110,13 @@ pub fn ServersPage() -> Element {
                     title: if pinging { t!("ui.servers.pingAllStopTitle") } else { t!("ui.servers.pingAllTitle") },
                     onclick: move |_| a_ping.ping_all(),
                     {if pinging { t!("ui.servers.pingAllStop") } else { t!("servers.pingAll") }}
+                }
+                Button {
+                    kind: ButtonKind::Ghost,
+                    disabled: total == 0,
+                    title: if checking { t!("ui.servers.checkAll.stopTitle") } else { t!("ui.servers.checkAll.title") },
+                    onclick: move |_| a_check.check_all(),
+                    {if checking { t!("ui.servers.checkAll.stop") } else { t!("ui.servers.checkAll.open") }}
                 }
                 Button {
                     kind: ButtonKind::Ghost,

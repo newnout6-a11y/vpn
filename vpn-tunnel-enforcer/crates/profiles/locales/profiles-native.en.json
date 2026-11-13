@@ -31,7 +31,7 @@
       "selectedOutsideGraph": "The main server of the Xray configuration is not part of its route.",
       "localFileReference": "The Xray configuration refers to a local file (certificate, key or TLS key log); such subscriptions are not accepted.",
       "multipleEndpoints": "A server in the Xray configuration must list exactly one server and one user; Xray refuses anything else.",
-      "insecureWithoutPin": "The Xray configuration turns off certificate checks (allowInsecure) without pinnedPeerCertSha256; Xray refuses to run it.",
+      "insecureWithoutPin": "The Xray configuration turns off certificate checks (allowInsecure) without pinnedPeerCertSha256 or verifyPeerCertByName; Xray refuses to run it.",
       "reservedTag": "The Xray configuration uses the reserved tag vpnte-block.",
       "tooDeep": "The chain of servers in the Xray configuration is too long.",
       "geoData": "The Xray configuration routes by geo data (geoip, geosite or an ext: file) that the app does not ship; Xray could not start it.",

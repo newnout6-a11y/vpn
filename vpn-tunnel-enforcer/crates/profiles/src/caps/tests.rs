@@ -236,6 +236,17 @@ fn reality_and_tcp_tls_use_a_fingerprint() {
         keys(&c),
         ["profiles.caps.insecure", "profiles.caps.defaultFingerprint"]
     );
+    // p-small (p-tls-names follow-up): certificate names keep Xray's certificate check.
+    let named = Tls {
+        insecure: true,
+        verify_peer_cert_by_name: Some("real.example".into()),
+        ..tls("white.example")
+    };
+    let trojan = Kind::Trojan {
+        password: "p".into(),
+    };
+    let c = capabilities(&profile(trojan, Some(named)));
+    assert_eq!(keys(&c), ["profiles.caps.defaultFingerprint"]);
 
     let mut quic_transport = profile(vless(), Some(tls("x.example")));
     quic_transport.transport = Some(Transport::Quic);

@@ -153,15 +153,27 @@ fn ProxyTakenStrip() -> Element {
 }
 
 /// The automatic server choice's step: a quiet strip (it never claims a success it has not seen;
-/// during the retries the body says whether traffic goes direct or is held).
+/// during the retries the body says whether traffic goes direct or is held) with «Отменить»,
+/// which ends the step like any action of the user (RU-2026 item 8).
 #[component]
 fn PickStrip(title: String, body: Option<String>) -> Element {
+    let dash = use_context::<Dash>();
+    let busy = dash.snapshot().conn.cancelling;
     rsx! {
         div { class: "overflow-hidden",
             div { class: "c-swiss swiss-notice", role: "status", aria_live: "polite",
                 span { class: "swiss-label swiss-notice-tag", "{title}" }
                 if let Some(body) = body {
                     p { class: "swiss-notice-body", "{body}" }
+                }
+                div { class: "swiss-confirm-actions",
+                    button {
+                        r#type: "button",
+                        class: "swiss-confirm-no",
+                        disabled: busy,
+                        onclick: move |_| dash.stop_autopick(),
+                        {t!("ui.dashboard.pick.cancel")}
+                    }
                 }
             }
         }

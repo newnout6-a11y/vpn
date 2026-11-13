@@ -70,6 +70,14 @@ async fn the_page_works_over_a_real_list() {
     let err = api.ping_one("gone").await.unwrap_err();
     assert_eq!(err.user_msg().key, "servers.notFound");
 
+    // p-small (RU-2026 item 6): the list-wide check runs through the probes; no engine can start
+    // here, so both keys are counted as not checked, nothing streams and nothing is stored.
+    let (results, mut landed) = mpsc::unbounded_channel();
+    let report = api.check_all_health(results).await.unwrap();
+    assert_eq!((report.results.len(), report.not_checked), (0, 2));
+    assert!(landed.try_recv().is_err());
+    assert!(state.borrow().servers.iter().all(|s| s.health.is_none()));
+
     api.remove(&first).await.unwrap();
     let archive = state.borrow().servers[0].archived.expect("archived");
     assert_eq!(archive.reason, ArchiveReason::User);
@@ -124,6 +132,10 @@ async fn the_page_works_over_a_real_list() {
     assert_eq!(err.user_msg().key, "probes.keyHealth.groupEmpty");
     let err = api.check_group_health("gone").await.unwrap_err();
     assert_eq!(err.user_msg().key, "servers.group.notFound");
+    // p-small (RU-2026 item 6): the list-wide check has nothing left either.
+    let (results, _keep) = mpsc::unbounded_channel();
+    let err = api.check_all_health(results).await.unwrap_err();
+    assert_eq!(err.user_msg().key, "app.servers.nothingToCheck");
 }
 
 /// AT-00-003 / AT-00-007 (selection owns its cleanup): a live switch publishes its target, the

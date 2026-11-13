@@ -73,6 +73,27 @@ impl Dash {
         });
     }
 
+    /// «Отменить» on the automatic choice's strip: the user's Cancel, which stops a connect or
+    /// switch the choice has in flight and, like any action of the user, ends its episode. The
+    /// strip goes with the next snapshot, so only a warning or a failure is told.
+    pub(super) fn stop_autopick(&self) {
+        if self.conn().cancelling {
+            return;
+        }
+        let (api, dash) = (self.api.clone(), self.clone());
+        self.cancel.start(move |_| async move {
+            match api.cancel().await {
+                Ok(None) => {}
+                Ok(Some(warning)) => {
+                    dash.toasts
+                        .warning(t!("dashboard.cancelledWithWarnings"), Some(tr(&warning)));
+                }
+                Err(err) => dash.fail(t!("dashboard.cancelFailed"), &err),
+            }
+            Ok(())
+        });
+    }
+
     /// The Smart RU toggle: saved at once, applied on the next connect. Only a saved change gets
     /// the mascot's comment.
     pub(super) fn toggle_smart(&self) {

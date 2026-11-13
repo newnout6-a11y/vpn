@@ -64,12 +64,13 @@ pub fn sync_at_start() {
     let registrar = Registrar::current_user();
     match registrar.ensure(&exe) {
         Ok(done) => {
-            if !done.registered.is_empty() || done.repointed > 0 {
+            if done.changed() {
                 registrar.notify_shell();
             }
             tracing::info!(
                 registered = ?done.registered,
                 repointed = done.repointed,
+                released = ?done.released,
                 "link schemes synced"
             );
         }
@@ -81,7 +82,7 @@ pub fn sync_at_start() {
 fn ensure_line(registrar: &Registrar, exe: &Path) -> String {
     match registrar.ensure(exe) {
         Ok(done) => {
-            if !done.registered.is_empty() || done.repointed > 0 {
+            if done.changed() {
                 registrar.notify_shell();
             }
             let names = if done.registered.is_empty() {
@@ -89,8 +90,13 @@ fn ensure_line(registrar: &Registrar, exe: &Path) -> String {
             } else {
                 done.registered.join(" ")
             };
+            let released = if done.released.is_empty() {
+                String::new()
+            } else {
+                format!("; given back: {}", done.released.join(" "))
+            };
             format!(
-                "{AREA}: done (registered: {names}; re-pointed: {})",
+                "{AREA}: done (registered: {names}; re-pointed: {}{released})",
                 done.repointed
             )
         }

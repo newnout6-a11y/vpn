@@ -51,6 +51,7 @@ const USED: &[(&str, &[&str])] = &[
     ("ui.dashboard.pause.manual", &[]),
     ("ui.dashboard.pause.keyRejected", &[]),
     ("ui.dashboard.pause.connect", &[]),
+    ("ui.dashboard.pick.cancel", &[]),
     ("common.close", &[]),
 ];
 

@@ -27,11 +27,13 @@ pub const DNS_REMOTE: &str = "dns-remote";
 pub const DNS_RESOLVER: &str = "dns-resolver";
 /// Direct resolver for hostname upstream servers (no detour: the server's default dialer).
 pub const DNS_BOOTSTRAP: &str = "dns-bootstrap";
-/// Second step of the slot mode's bootstrap order (`dns-bootstrap-in`): DoH to Quad9 by IP.
+/// Second step of the slot mode's bootstrap order (`dns-bootstrap-in`): DoH to Yandex by IP.
+pub const DNS_BOOTSTRAP_YANDEX: &str = "dns-bootstrap-yandex";
+/// Third step: DoH to Quad9 by IP.
 pub const DNS_BOOTSTRAP_QUAD9: &str = "dns-bootstrap-quad9";
-/// Third step: DoH to Google by IP.
+/// Fourth step: DoH to Google by IP.
 pub const DNS_BOOTSTRAP_GOOGLE: &str = "dns-bootstrap-google";
-/// Fourth step: DNS over TCP to Google.
+/// Fifth step: DNS over TCP to Google.
 pub const DNS_BOOTSTRAP_TCP: &str = "dns-bootstrap-tcp";
 /// Last step: the physical adapter's resolver over UDP (when one is usable).
 pub const DNS_BOOTSTRAP_ISP: &str = "dns-bootstrap-isp";

@@ -44,8 +44,9 @@ use vpnte_servers::store::Servers;
 use vpnte_tunnel::lifecycle::ConnError;
 use vpnte_ui::servers::{
     AddTarget, BatchProgress, BatchResult, CountryCheck, ExportReport, GeoInfo, HealthReport,
-    ImportReport, LinkSchemes, LiveCheck, LiveMode, LiveProgress, ProbeReport, ProxyStartReport,
-    QrCode, RefreshOutcome, SelectOutcome, ServersApi, ServersView, SubscriptionRequest,
+    ImportReport, KeyHealth, LinkSchemes, LiveCheck, LiveMode, LiveProgress, ProbeReport,
+    ProxyStartReport, QrCode, RefreshOutcome, SelectOutcome, ServersApi, ServersView,
+    SubscriptionRequest,
 };
 use vpnte_winnet::url_scheme::Registrar;
 
@@ -359,6 +360,14 @@ impl ServersApi for ServersBackend {
         let (shared, id) = (self.shared.clone(), GroupId::from(id));
         let shutdown = &self.shared.backend.shutdown;
         cancellable(shutdown, |token| checks::group_health(shared, id, token)).await
+    }
+
+    async fn check_all_health(
+        &self,
+        results: mpsc::UnboundedSender<(String, KeyHealth)>,
+    ) -> AppResult<HealthReport> {
+        let (shared, shutdown) = (self.shared.clone(), &self.shared.backend.shutdown);
+        cancellable(shutdown, |stop| checks::list_health(shared, results, stop)).await
     }
 
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()> {

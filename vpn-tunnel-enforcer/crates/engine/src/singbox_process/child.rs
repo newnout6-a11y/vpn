@@ -27,7 +27,7 @@ use vpnte_winnet::process::{Job, app_job, ctrl_break, spawn_hidden};
 use crate::pin;
 use crate::tags::{
     DNS_BOOTSTRAP, DNS_BOOTSTRAP_GOOGLE, DNS_BOOTSTRAP_ISP, DNS_BOOTSTRAP_QUAD9, DNS_BOOTSTRAP_TCP,
-    DNS_DIRECT, DNS_REMOTE, DNS_RESOLVER,
+    DNS_BOOTSTRAP_YANDEX, DNS_DIRECT, DNS_REMOTE, DNS_RESOLVER,
 };
 
 /// Raw output lines kept per process: fault window, exit tail, live view.
@@ -184,11 +184,12 @@ fn collect_secrets(v: &Value, secret: bool, out: &mut Vec<String>) {
 /// Our DNS server tags: what the secret-named `server` key holds in DNS rules and resolvers. A
 /// reference, not a secret, and the name engine lines carry (`dns/https[dns-remote]`). A test
 /// checks this list against every server tag a generated config carries.
-const DNS_TAGS: [&str; 8] = [
+const DNS_TAGS: [&str; 9] = [
     DNS_REMOTE,
     DNS_RESOLVER,
     DNS_BOOTSTRAP,
     DNS_DIRECT,
+    DNS_BOOTSTRAP_YANDEX,
     DNS_BOOTSTRAP_QUAD9,
     DNS_BOOTSTRAP_GOOGLE,
     DNS_BOOTSTRAP_TCP,

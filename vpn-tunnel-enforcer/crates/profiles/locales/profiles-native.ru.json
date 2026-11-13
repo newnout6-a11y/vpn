@@ -31,7 +31,7 @@
       "selectedOutsideGraph": "Основной узел конфигурации Xray не участвует в её маршруте.",
       "localFileReference": "Конфигурация Xray ссылается на локальный файл (сертификат, ключ или журнал TLS) — такие подписки не принимаются.",
       "multipleEndpoints": "Узел конфигурации Xray должен содержать ровно один сервер и одного пользователя — другое Xray не запускает.",
-      "insecureWithoutPin": "Конфигурация Xray отключает проверку сертификата (allowInsecure) без pinnedPeerCertSha256; Xray такое не запускает.",
+      "insecureWithoutPin": "Конфигурация Xray отключает проверку сертификата (allowInsecure) без pinnedPeerCertSha256 или verifyPeerCertByName; Xray такое не запускает.",
       "reservedTag": "Конфигурация Xray использует служебный тег vpnte-block.",
       "tooDeep": "Цепочка узлов конфигурации Xray слишком длинная.",
       "geoData": "Конфигурация Xray маршрутизирует по геоданным (geoip, geosite или файл ext:), которых нет в приложении; Xray не сможет её запустить.",

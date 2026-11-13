@@ -6,7 +6,7 @@ use serde_json::Value;
 use vpnte_base::Msg;
 
 use crate::emit_singbox::tls_required;
-use crate::model::{Kind, Note, Profile, SkipReason, Transport};
+use crate::model::{Kind, Note, Profile, SkipReason, Tls, Transport};
 
 /// How a profile disguises its traffic, strongest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -96,8 +96,10 @@ pub fn capabilities(p: &Profile) -> Capabilities {
             msgs.push(invalid.msg());
         }
     }
-    // Naive gets its own note above; REALITY verifies by key, so the emitter drops `insecure`.
-    if !naive && tls.is_some_and(|t| t.insecure && t.reality.is_none()) {
+    // Naive gets its own note above; REALITY verifies by key, so the emitter drops `insecure`;
+    // certificate names (`vcn`) keep Xray's certificate check, so it is no insecure key either.
+    let unchecked = |t: &Tls| t.insecure && t.reality.is_none() && t.cert_names().is_none();
+    if !naive && tls.is_some_and(unchecked) {
         msgs.push(Msg::new("profiles.caps.insecure"));
     }
     // The emitter drops a tcp-only `network` from Hysteria2 (older imports saved it there).

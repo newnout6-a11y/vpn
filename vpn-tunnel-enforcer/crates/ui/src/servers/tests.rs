@@ -24,6 +24,8 @@ use super::live_model::*;
 use super::model::*;
 
 type Reply<T> = oneshot::Receiver<AppResult<T>>;
+/// The list-wide check's queued run: the results it streams, then its held answer.
+type CheckAllRun = (Vec<(String, KeyHealth)>, Reply<HealthReport>);
 
 /// Counts futures dropped before they finished (= cancelled by the UI).
 struct Track(Rc<Cell<u32>>, bool);
@@ -50,6 +52,7 @@ struct FakeApi {
     link: RefCell<Option<String>>,
     /// Imports the page asked for (`add`): a link must never cause one by itself.
     adds: Cell<u32>,
+    check_all: RefCell<Option<CheckAllRun>>,
 }
 
 async fn held<T>(reply: Option<Reply<T>>, dropped: Rc<Cell<u32>>) -> AppResult<T> {
@@ -157,6 +160,18 @@ impl ServersApi for FakeApi {
     async fn check_group_health(&self, _: &str) -> AppResult<HealthReport> {
         unused()
     }
+    async fn check_all_health(
+        &self,
+        results: mpsc::UnboundedSender<(String, KeyHealth)>,
+    ) -> AppResult<HealthReport> {
+        let Some((stream, reply)) = self.check_all.borrow_mut().take() else {
+            return unused();
+        };
+        for result in stream {
+            let _ = results.send(result);
+        }
+        held(Some(reply), self.dropped.clone()).await
+    }
     async fn set_device(&self, _: &str, _: ClientDevice) -> AppResult<()> {
         unused()
     }
@@ -249,6 +264,7 @@ fn fake() -> Rc<FakeApi> {
         links: watch::Sender::new(0),
         link: RefCell::default(),
         adds: Cell::new(0),
+        check_all: RefCell::default(),
     })
 }
 
@@ -842,4 +858,67 @@ fn export_texts_stay_calm() {
         text(Lang::En, "ui.servers.key.saved").as_deref(),
         Some("Key saved: {{path}}")
     );
+}
+
+/// A key that answered (the fake's results).
+fn alive(at: i64) -> KeyHealth {
+    KeyHealth {
+        online: true,
+        latency_ms: Some(320),
+        reason: None,
+        checked_at: at,
+    }
+}
+
+/// Queues the list-wide check's streamed results and holds its answer.
+fn hold_check_all(
+    api: &FakeApi,
+    stream: Vec<(String, KeyHealth)>,
+) -> oneshot::Sender<AppResult<HealthReport>> {
+    let (tx, rx) = oneshot::channel();
+    api.check_all.replace(Some((stream, rx)));
+    tx
+}
+
+/// p-small (RU-2026 item 6): «Проверить все» puts each result into its row as it lands; a second
+/// click stops the run without a toast (the backend keeps what finished); a finished run sums up
+/// in one toast that names the keys left unchecked.
+#[tokio::test]
+async fn check_all_streams_rows_and_a_second_click_stops() {
+    let api = fake();
+    let (mut dom, actions) = mount_page(&api);
+    let _held = hold_check_all(&api, vec![("s1".into(), alive(1))]);
+    dom.in_runtime(|| actions.check_all());
+    settle(&mut dom, 4, 20).await;
+    let (row, running) = dom.in_runtime(|| {
+        let rows = actions.store.rows.peek();
+        let row = rows.get("s1").and_then(|r| r.health.clone());
+        (row, actions.store.check_task.peek().is_some())
+    });
+    assert_eq!(row, Some(alive(1)));
+    assert!(running);
+    dom.in_runtime(|| actions.check_all());
+    settle(&mut dom, 4, 20).await;
+    assert_eq!(api.dropped.get(), 1, "the backend call was dropped");
+    assert!(dom.in_runtime(|| actions.store.check_task.peek().is_none()));
+    assert!(dom.in_runtime(|| actions.toasts.list()).is_empty());
+
+    let done = hold_check_all(&api, vec![("s2".into(), alive(2))]);
+    dom.in_runtime(|| actions.check_all());
+    settle(&mut dom, 4, 20).await;
+    let report = HealthReport {
+        results: vec![("s2".into(), alive(2))],
+        not_checked: 1,
+    };
+    done.send(Ok(report)).expect("check pending");
+    settle(&mut dom, 4, 20).await;
+    let shown = dom.in_runtime(|| actions.toasts.list());
+    assert_eq!(shown.len(), 1);
+    assert!(
+        shown[0]
+            .description
+            .as_ref()
+            .is_some_and(|d| d.contains(". "))
+    );
+    assert!(dom.in_runtime(|| actions.store.check_task.peek().is_none()));
 }

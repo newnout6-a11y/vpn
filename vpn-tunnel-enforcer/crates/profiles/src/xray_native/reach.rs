@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use super::{BYPASS_PROTOCOLS, EXPORT_BLOCK_TAG, GRAPH_PROTOCOLS, NativeError, removed_network};
 use super::{non_empty, non_empty_str, protocol, routes_inbound, strings, tag, truthy};
-use crate::model::NativeXray;
+use crate::model::{NativeXray, Tls};
 
 /// Fields that name another outbound the hop dials through (split XHTTP downloads included:
 /// an unmapped tag there would point at nothing once the graph is namespaced).
@@ -308,7 +308,7 @@ fn walk_values(value: &Value) -> Result<(), NativeError> {
                 if is_file_key(key) && truthy(child) {
                     return Err(NativeError::LocalFileReference);
                 }
-                if key == "tlsSettings" && insecure_without_pin(child) {
+                if key == "tlsSettings" && insecure_unchecked(child) {
                     return Err(NativeError::InsecureWithoutPin);
                 }
                 walk_values(child)?;
@@ -332,7 +332,12 @@ fn is_file_key(key: &str) -> bool {
     .any(|k| k.eq_ignore_ascii_case(key))
 }
 
-fn insecure_without_pin(tls: &Value) -> bool {
+/// `allowInsecure` with nothing that checks the certificate instead: a pin replaces the CA check
+/// on its own, certificate names (`verifyPeerCertByName`, p-tls-names) keep it against those
+/// names (a whitelisted SNI in front of the server's real name).
+fn insecure_unchecked(tls: &Value) -> bool {
+    let names = tls.get("verifyPeerCertByName").and_then(Value::as_str);
     tls.get("allowInsecure").and_then(Value::as_bool) == Some(true)
         && non_empty(tls.get("pinnedPeerCertSha256")).is_none()
+        && names.and_then(Tls::parse_cert_names).is_none()
 }

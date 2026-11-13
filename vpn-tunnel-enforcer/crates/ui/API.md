@@ -263,7 +263,8 @@ pub struct DashboardView {
     pub proxy_taken: bool,                            // ks-b: another program took the system proxy: one line + «Вернуть»
 }
 pub struct EngineLine { pub engine: Engine, pub reason: Option<Msg> }  // «Xray · REALITY» under the node
-pub struct PickLine { pub title: Msg, pub body: Option<Msg> }  // step; during retries what traffic does
+pub struct PickLine { pub title: Msg, pub body: Option<Msg> }  // step; during retries what traffic does;
+    // the strip's «Отменить» calls `cancel` (the user's act: ends the step, also with nothing in flight)
 pub struct PauseLine { pub next_attempt: Option<UnixMs>, pub manual: bool, pub key_rejected: bool }
     // countdown target; manual: nothing retries by itself (asks for «Подключить», fix-ks); the key reason
 pub trait DashboardApi: 'static {
@@ -448,6 +449,10 @@ pub trait ServersApi: 'static {      // root component ServersPage; use_servers_
     async fn delete_group(&self, id: &str, delete_servers: bool) -> AppResult<()>;
     async fn check_group_health(&self, id: &str) -> AppResult<HealthReport>;  // { results: Vec<(id, KeyHealth)>,
                                   // not_checked: u32 /* deferred by the handshake budget / probe not started */ }
+    async fn check_all_health(&self, results: mpsc::UnboundedSender<(String, KeyHealth)>)
+        -> AppResult<HealthReport>;  // «Проверить все» (RU-2026 item 6): every server not removed by the user,
+                                  // through itself under each name's budget; results stream; a dropped call
+                                  // stops it and the backend keeps what finished (page: a second click stops)
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()>; // connected server reconnects
     async fn set_engine(&self, id: &str, engine: EnginePref) -> AppResult<()>; // own engine (Auto = setting);
                                   // impossible forced choice = Validation with the engine Msg; reconnects

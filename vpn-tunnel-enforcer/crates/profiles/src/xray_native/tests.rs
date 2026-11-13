@@ -1000,3 +1000,27 @@ fn compiled_debug_hides_credentials() {
         "{shown}"
     );
 }
+
+/// p-small (p-tls-names follow-up): certificate names (`verifyPeerCertByName`) keep Xray's CA
+/// check, so a provider graph with `allowInsecure` next to them imports like one with a pin and
+/// compiles to the names alone; names that are all blank check nothing and stay refused.
+#[test]
+fn certificate_names_stand_in_for_a_pin() {
+    let tls = |extra: Value| preserve(&trojan("t", extra), None, None);
+    let names = json!({"allowInsecure": true, "verifyPeerCertByName": "real.example, alt.example"});
+    let graph = tls(names).unwrap();
+    let c = compiled(&graph);
+    let out = &c.outbounds[0]["streamSettings"]["tlsSettings"];
+    assert!(out.get("allowInsecure").is_none());
+    assert_eq!(
+        out["verifyPeerCertByName"],
+        json!("real.example, alt.example")
+    );
+    if let Some(result) = xray_check(&runtime_config(&c)) {
+        assert_eq!(result, Ok(()));
+    }
+    assert_eq!(
+        tls(json!({"allowInsecure": true, "verifyPeerCertByName": " , "})),
+        Err(NativeError::InsecureWithoutPin)
+    );
+}

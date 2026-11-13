@@ -411,3 +411,38 @@ async fn proxy_line_takes_the_proxy_back() {
     assert_eq!(calls(&probe), ["reclaim"]);
     assert!(toasts(&dom, &probe).is_empty());
 }
+
+/// p-small (RU-2026 item 8): «Отменить» on the automatic choice's strip is the user's Cancel,
+/// also with nothing in flight (waiting between rounds, gave up): it goes to the backend once,
+/// a quiet success needs no toast (the strip goes with the next snapshot), a failure is told.
+#[tokio::test]
+async fn pick_strip_cancel_ends_the_automatic_choice() {
+    let waiting = DashboardView {
+        autopick: Some(PickLine {
+            title: Msg::new("automation.autopick.status.waiting"),
+            body: Some(Msg::new("automation.autopick.exposure.direct")),
+        }),
+        ..state(ConnView::default())
+    };
+    let (mut dom, probe) = mount(waiting);
+    let gate = gate_cancel(&probe);
+    act(&dom, &probe, Dash::stop_autopick);
+    act(&dom, &probe, Dash::stop_autopick);
+    settle(&mut dom, 3, 40).await;
+    assert_eq!(calls(&probe), ["cancel"]);
+    assert!(act(&dom, &probe, Dash::conn).cancelling);
+    gate.send(Ok(None)).expect("cancel pending");
+    probe.api.tx.send_replace(state(ConnView::default()));
+    settle(&mut dom, 4, 40).await;
+    assert!(toasts(&dom, &probe).is_empty());
+    assert!(!act(&dom, &probe, Dash::conn).cancelling);
+
+    let gate = gate_cancel(&probe);
+    act(&dom, &probe, Dash::stop_autopick);
+    gate.send(Err(AppError::new(ErrorKind::Network)))
+        .expect("cancel pending");
+    settle(&mut dom, 4, 40).await;
+    let shown = toasts(&dom, &probe);
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].kind, ToastKind::Error);
+}

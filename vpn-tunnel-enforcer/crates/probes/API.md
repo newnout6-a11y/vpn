@@ -157,7 +157,16 @@ pub async fn check_many<K: Send>(items: Vec<(K, Option<Profile>)>, ctx: &ProbeCt
     -> Result<Vec<(K, KeyHealth)>, HealthError>;   // None profile = unreadable → no-outbound
 pub async fn check_many_verdicts<K: Send>(items: Vec<(K, Option<Profile>)>, ctx: &ProbeCtx,
     cancel: &CancellationToken) -> Result<Vec<(K, KeyCheck)>, HealthError>;
+pub const LIST_DEADLINE: Duration /*20 min*/;
+pub async fn check_list<K: Send>(items: Vec<(K, Option<Profile>)>, ctx: &ProbeCtx, until: tokio::time::Instant,
+    stop: &CancellationToken, on_result: impl Fn(&K, &KeyCheck) + Send + Sync) -> Vec<(K, KeyCheck)>;
 ```
+`check_list` (the list-wide check, RU-2026 item 6): keys chained per budget endpoint (one probe at a
+time, list order), each chain first waits out its endpoint's budget (`HandshakeBudget::wait_for`:
+the 3-a-minute window, the `FREEZE_BACKOFF` hold) without holding a probe, then takes one of
+`CONCURRENCY` probes; a key that cannot be checked (deferred, setup failure) ends its chain. It
+never fails: `until` or `stop` drops the probes in flight (not checked) and answers what finished;
+`on_result` sees each result as it lands (completion order).
 One check = one budgeted handshake (`discipline::budget`, wait ≤ `KEY_WAIT`, else `Err`
 `probes.discipline.deferred`: not checked, no result in a batch), the probe engine, then ONE
 connection through it: the Cloudflare trace (exit IP / country) and a 64 KiB transfer

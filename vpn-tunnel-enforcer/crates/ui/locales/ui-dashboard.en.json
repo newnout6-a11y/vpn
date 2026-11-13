@@ -43,6 +43,9 @@
         "body": "Another program changed it: browsers bypass the VPN now.",
         "restore": "Restore",
         "failed": "Could not restore the proxy"
+      },
+      "pick": {
+        "cancel": "Cancel"
       }
     }
   }

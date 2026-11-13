@@ -92,7 +92,7 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
 | `leak_check(cancel)` | Dashboard `run_leak_check`, Tray `check_route` (as an `ops` operation, verdict as a notice) |
 | `traffic()` | Panels `traffic`, Tray speeds |
 | `ping(ids, cancel)` | Panels `ping_one` / `ping_all`, Servers `ping_one` / `ping_many` |
-| `probe_ctx(device)` | Servers `check_group_health` (`key_health::check_many`), and anyone pinging by hand (`.net`) |
+| `probe_ctx(device)` | Servers `check_group_health` (`key_health::check_many`) and `check_all_health` (`key_health::check_list`), and anyone pinging by hand (`.net`) |
 | `tun_available()` | Settings routing-mode choice, Wizard `Routing::Hard` option: true with the helper service installed (or in an elevated process without it); otherwise shown unavailable with «Для туннеля нужна служба-помощник.» and the install button |
 | `service_installed()` | svc-wire: Settings «Установить службу-помощник» after Windows ran the service's install verb: Tunnel mode and "Always" go through the service from now on (`true` when it is there; default `false`) |
 | `shutdown(budget)` | app-main (Tray `quit`) |

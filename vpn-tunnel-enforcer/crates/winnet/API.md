@@ -627,13 +627,16 @@ match single_instance::acquire(&names)? {
 
 ## `url_scheme` — per-user link schemes (`HKCU\Software\Classes`; blocking, unelevated)
 ```rust
-pub const SCHEMES: [&str; 12];        // vless vmess trojan ss hysteria2 hy2 tuic anytls sing-box clash v2raytun hiddify
+pub const SCHEMES: [&str; 14];        // vless vmess trojan ss hysteria2 hy2 tuic anytls sing-box clash v2raytun hiddify happ incy
+pub const CLIENT_SCHEMES: [&str; 6];  // sing-box clash v2raytun hiddify happ incy: other clients' import links
 pub const OPEN_LINK_FLAG: &str = "--open-link";
 pub enum Owner { Free, Ours, Other(Option<String> /* program name: "Happ", "Hiddify Protocol" */),
                  Chosen(String) /* UserChoice ProgId: the user's pick in Windows' chooser */ }
 pub enum Took { Ours, Chosen(String) }  // take(): Chosen = the Windows choice stays, nothing written
 pub struct SchemeState { pub scheme: &'static str, pub owner: Owner }
-pub struct Ensured { pub registered: Vec<&'static str>, pub repointed: usize }
+pub struct Ensured { pub registered: Vec<&'static str>, pub repointed: usize,
+                     pub released: Vec<&'static str> /* client schemes given back */ }
+impl Ensured { pub fn changed(&self) -> bool; }   // anything written or removed (then notify_shell)
 pub struct Registrar;                 // Clone
 impl Registrar {
     pub fn current_user() -> Self;    // HKCU classes + record; HKLM classes only read
@@ -642,7 +645,7 @@ impl Registrar {
     pub fn initialized(&self) -> Result<bool>;          // the record exists (first run done)
     pub fn states(&self, exe: &Path) -> Result<Vec<SchemeState>>;   // SCHEMES order
     pub fn owner(&self, scheme: &str, exe: &Path) -> Result<Owner>;
-    pub fn ensure(&self, exe: &Path) -> Result<Ensured>;  // first run = adopt; later: re-point ours only
+    pub fn ensure(&self, exe: &Path) -> Result<Ensured>;  // first run = adopt; later: give back, re-point ours only
     pub fn adopt(&self, exe: &Path) -> Result<Ensured>;   // every Free scheme + ours (re)written for exe (a portable copy's «open links here»)
     pub fn take(&self, scheme: &str, exe: &Path) -> Result<Took>;  // user's request: also another program's class key (kept aside)
     pub fn unregister(&self, scheme: &str, exe: &Path) -> Result<bool>;  // ours (recorded or exe's command); puts back the key we replaced
@@ -653,7 +656,11 @@ impl Registrar {
 Record `HKCU\Software\VPN Tunnel Enforcer\LinkSchemes`: one value per scheme = the exact command we
 wrote; `Previous\<scheme>` = another program's per-user key replaced on the user's request (never a
 key of ours; replaced only by a newer foreign key; dropped when the class key vanished meanwhile, so
-a removed program's handler is never revived). Owner: a `UserChoice` ProgId under
+a removed program's handler is never revived); `WhileFree\<scheme>` = a client scheme taken only
+because it was free (first run or «open links here»): a later `ensure` gives it back (key and record
+value removed, `Ensured::released`) once a machine-wide key of another program exists (Happ installs
+in HKLM, which our per-user key would hide); `take` clears the mark (the user's own pick stays ours).
+Owner: a `UserChoice` ProgId under
 `HKCU\…\Shell\Associations\UrlAssociations\<scheme>` naming another handler wins (`Chosen(prog_id)`;
 Windows reaches no class key then, and only the user changes it, in Windows' default apps), else the
 per-user key (ours when it carries the recorded command or this exe's), else a machine-wide key

@@ -309,6 +309,13 @@
       "pingAllTitle": "Ping every server directly, around the tunnel (5 at a time)",
       "pingAllStop": "Stop pinging",
       "pingAllStopTitle": "Stop the run; values already measured stay",
+      "checkAll": {
+        "open": "Check all",
+        "title": "Check each server through itself. At most three checks a minute per server name, so a long list takes a few minutes",
+        "stop": "Stop the check",
+        "stopTitle": "Servers already checked keep their result",
+        "done": "Server check"
+      },
       "facts": {
         "usable": "Usable",
         "total": "Total",

@@ -549,6 +549,37 @@ impl ServersApi for DemoServersApi {
         })
     }
 
+    async fn check_all_health(
+        &self,
+        results: mpsc::UnboundedSender<(String, KeyHealth)>,
+    ) -> AppResult<HealthReport> {
+        let ids: Vec<(String, bool)> = (self.view().servers.iter())
+            .filter(|s| s.archived.is_none())
+            .map(|s| (s.id.clone(), s.ping_ms.is_some() || s.id == "se-sto"))
+            .collect();
+        let mut done = Vec::new();
+        // Five probes at a time, like the real check (its per-name budget only slows it down).
+        for chunk in ids.chunks(5) {
+            delay(1_200 + fastrand::u64(0..600)).await;
+            let now = now_ms();
+            for (id, online) in chunk {
+                let health = KeyHealth {
+                    online: *online,
+                    latency_ms: online.then(|| 300 + fastrand::u32(0..400)),
+                    reason: (!online).then_some(KeyHealthReason::AuthFailed),
+                    checked_at: now,
+                };
+                self.edit_server(id, |s| s.health = Some(health.clone()));
+                let _ = results.send((id.clone(), health.clone()));
+                done.push((id.clone(), health));
+            }
+        }
+        Ok(HealthReport {
+            results: done,
+            not_checked: 0,
+        })
+    }
+
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()> {
         delay(400).await;
         self.known(id)?;

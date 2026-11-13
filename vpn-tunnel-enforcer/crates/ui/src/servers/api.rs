@@ -14,8 +14,8 @@ use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use super::links_model::{LinkSchemes, QrCode};
 use super::live_model::{BatchProgress, BatchResult, LiveCheck, LiveMode, LiveProgress};
 use super::model::{
-    AddTarget, CountryCheck, ExportReport, GeoInfo, HealthReport, ImportReport, ProbeReport,
-    ProxyStartReport, RefreshOutcome, SelectOutcome, ServersView, SubscriptionRequest,
+    AddTarget, CountryCheck, ExportReport, GeoInfo, HealthReport, ImportReport, KeyHealth,
+    ProbeReport, ProxyStartReport, RefreshOutcome, SelectOutcome, ServersView, SubscriptionRequest,
     TricksChoice, TricksView,
 };
 
@@ -93,6 +93,13 @@ pub trait ServersApi: 'static {
     /// Checks the keys of the group's current (not removed) servers; keys that could not be
     /// checked now (handshake budget, probe setup) are counted in the report.
     async fn check_group_health(&self, id: &str) -> AppResult<HealthReport>;
+    /// Checks every server the user has not removed through the server itself, behind each
+    /// server name's handshake budget (RU-2026 item 6); each result arrives on `results` as it
+    /// lands. Dropping the future stops the check: what finished is kept.
+    async fn check_all_health(
+        &self,
+        results: mpsc::UnboundedSender<(String, KeyHealth)>,
+    ) -> AppResult<HealthReport>;
 
     /// Device persona of a server; the connected server reconnects.
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()>;

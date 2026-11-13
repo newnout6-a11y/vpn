@@ -89,8 +89,11 @@ pub enum NativeError {
     /// Xray builds VLESS/VMess with exactly one `vnext` and user, Trojan/SS with one `servers` entry.
     #[error("Preserved Xray outbound must have exactly one server and one user")]
     MultipleEndpoints,
-    /// The bundled Xray refuses `allowInsecure: true`; only a pinned certificate may replace CA checks.
-    #[error("Preserved Xray outbound disables certificate checks without a pinned certificate")]
+    /// The bundled Xray refuses `allowInsecure: true`; only a pinned certificate or certificate
+    /// names (`verifyPeerCertByName`) may stand in for the SNI check.
+    #[error(
+        "Preserved Xray outbound disables certificate checks without a pin or certificate names"
+    )]
     InsecureWithoutPin,
     #[error("Preserved Xray outbound uses the reserved tag vpnte-block")]
     ReservedTag,

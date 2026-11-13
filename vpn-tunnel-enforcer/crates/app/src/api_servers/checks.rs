@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{ClientDevice, EnginePref, now_ms};
-use vpnte_base::{AppError, AppResult, ErrorKind};
+use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::net::Route;
 use vpnte_core::ops::{FeatureKind, RunOpts, Source};
 use vpnte_core::resolve::{How, resolve_host};
@@ -38,6 +38,8 @@ const MISS_TTL: Duration = Duration::from_secs(30);
 const RESOLVE_WIDTH: usize = 24;
 /// Parallel pings of a ping-all (the page's contract: five at a time).
 const PING_WIDTH: usize = 5;
+/// The list check's operation budget past the list deadline: room for the final commit.
+const LIST_COMMIT: Duration = Duration::from_secs(60);
 
 /// Latest address per lower-case host for the IP column (memory only).
 #[derive(Default)]
@@ -294,6 +296,60 @@ pub(super) async fn group_health(
             }
             if let Some(err) = setup.filter(|_| checked.is_empty()) {
                 return Err(err);
+            }
+            lease.commit(|| {
+                servers.record_health(updates(&checked))?;
+                servers.record_verdicts(verdict::updates(&checked))?;
+                Ok(checked)
+            })
+        })
+        .await?;
+    shared.publish();
+    Ok(health_report(&checked, submitted))
+}
+
+/// The list-wide check (RU-2026 item 6): every key the user has not removed, through its own
+/// server ([`key_health::check_list`]: chains per server name under the handshake budget), each
+/// result sent to the page as it lands. One `HealthCheck` operation that `stop` does not abort:
+/// a stop (the page dropped the call) or the list deadline keeps what finished, and that is
+/// recorded like a group check's results.
+pub(super) async fn list_health(
+    shared: Arc<Shared>,
+    results: mpsc::UnboundedSender<(String, KeyHealth)>,
+    stop: CancellationToken,
+) -> AppResult<HealthReport> {
+    let backend = shared.backend.clone();
+    let rows = backend.servers.read(|doc| {
+        (doc.profiles.iter())
+            .filter(|r| !r.archived_for(ArchiveReason::User))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    if rows.is_empty() {
+        return Err(AppError::validation(Msg::new("app.servers.nothingToCheck")));
+    }
+    let submitted = rows.len();
+    let tunnel = backend.tunnel()?.clone();
+    let servers = backend.servers.clone();
+    let until = tokio::time::Instant::now() + key_health::LIST_DEADLINE;
+    let opts = RunOpts {
+        source: Source::Ui,
+        resource: Some("health:list".into()),
+        // Past the list's own deadline: the run ends by itself first and still commits.
+        timeout: Some(key_health::LIST_DEADLINE + LIST_COMMIT),
+        ..RunOpts::default()
+    };
+    let checked = backend
+        .ops
+        .run(FeatureKind::HealthCheck, opts, move |lease| async move {
+            let report = |(id, _): &Key, check: &KeyCheck| {
+                let _ = results.send((id.to_string(), key_health_view(&check.health)));
+            };
+            let mut checked = Vec::new();
+            for ((device, engine), items) in by_device(rows) {
+                let mut ctx = tunnel.probe_ctx(device);
+                ctx.engine_pref = server_pref(ctx.engine_pref, engine);
+                checked.extend(key_health::check_list(items, &ctx, until, &stop, report).await);
             }
             lease.commit(|| {
                 servers.record_health(updates(&checked))?;
