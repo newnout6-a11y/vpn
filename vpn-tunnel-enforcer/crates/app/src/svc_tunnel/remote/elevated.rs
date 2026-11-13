@@ -81,6 +81,8 @@ async fn elevated_remote_tun_session_through_the_installed_service() {
     let exe = app.0.join("vpnte-service.exe");
     std::fs::copy(&built, &exe).expect("copy the service build");
     let _uninstall = Uninstall(exe.clone());
+    // The service this test installs is the one it may reach (tests see none otherwise).
+    let _real = crate::boot::service::RealService::allow();
     let resources_arg = resources.to_string_lossy().into_owned();
     assert!(
         verb(&exe, &["install", "--resources", &resources_arg]),

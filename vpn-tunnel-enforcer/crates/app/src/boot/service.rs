@@ -15,13 +15,45 @@ const SERVICE_EXE: &str = "vpnte-service.exe";
 /// anywhere else.
 pub const ENV_NO_SERVICE: &str = "VPNTE_NO_SERVICE";
 
-/// The installed service's exe, as the SCM has it. `None` in tests and with [`ENV_NO_SERVICE`]
-/// set: a test run on a PC where the owner installed the service never touches it.
+/// The installed service's exe, as the SCM has it. `None` with [`ENV_NO_SERVICE`] set and in
+/// unit tests (outside [`RealService`]): a test run on a PC where the owner installed the
+/// service never touches it.
 pub fn installed_binary() -> windows::core::Result<Option<PathBuf>> {
-    if cfg!(test) || std::env::var_os(ENV_NO_SERVICE).is_some() {
+    if !reachable() {
         return Ok(None);
     }
     manage::installed_binary()
+}
+
+fn reachable() -> bool {
+    #[cfg(test)]
+    if !REAL_SERVICE.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    std::env::var_os(ENV_NO_SERVICE).is_none()
+}
+
+#[cfg(test)]
+static REAL_SERVICE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// While alive, unit tests reach the installed service: only an elevated test that installed
+/// its own (CI's runner, after its elevation check), never one on a PC with a real service.
+#[cfg(test)]
+pub(crate) struct RealService(());
+
+#[cfg(test)]
+impl RealService {
+    pub(crate) fn allow() -> Self {
+        REAL_SERVICE.store(true, std::sync::atomic::Ordering::Relaxed);
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for RealService {
+    fn drop(&mut self) {
+        REAL_SERVICE.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// The service is registered with the SCM.
