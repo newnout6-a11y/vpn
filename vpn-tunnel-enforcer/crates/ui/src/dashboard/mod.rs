@@ -81,6 +81,8 @@ pub struct DashboardView {
 pub struct PauseLine {
     /// Unix ms of the next automatic attempt; `None` while one runs or none is scheduled.
     pub next_attempt: Option<UnixMs>,
+    /// Nothing retries by itself (auto-restart is off): only «Подключить» does.
+    pub manual: bool,
     /// The server rejected the key: reconnecting will not help until the user acts.
     pub key_rejected: bool,
 }

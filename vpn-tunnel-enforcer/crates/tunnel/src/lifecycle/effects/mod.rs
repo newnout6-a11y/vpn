@@ -327,9 +327,9 @@ pub(super) async fn connect(
     }
 }
 
-/// The kill switch of a new session. Proxy mode is where another VPN may carry the default
-/// route (Tunnel mode refuses such a connect): then nothing pauses this session.
-async fn session_guard(deps: &LifecycleDeps, soft: bool) -> SessionGuard {
+/// The kill switch of a session, as it is now. Proxy mode is where another VPN may carry the
+/// default route (Tunnel mode refuses such a connect): then nothing pauses this session.
+pub(super) async fn session_guard(deps: &LifecycleDeps, soft: bool) -> SessionGuard {
     let level = deps.kill_switch();
     let foreign = match soft && level != KillSwitchLevel::Off {
         true => {
@@ -340,9 +340,6 @@ async fn session_guard(deps: &LifecycleDeps, soft: bool) -> SessionGuard {
         }
         false => None,
     };
-    if let Some(name) = &foreign {
-        tracing::info!(%name, "another VPN carries the default route: no pause on a drop");
-    }
     SessionGuard::new(level, soft, foreign)
 }
 

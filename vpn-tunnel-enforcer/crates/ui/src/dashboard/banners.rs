@@ -71,13 +71,9 @@ fn PauseStrip(line: PauseLine) -> Element {
             }
         }
     });
-    let body = match (line.key_rejected, next) {
-        (true, _) => t!("ui.dashboard.pause.keyRejected"),
-        (false, Some(at)) => t!(
-            "ui.dashboard.pause.nextAttempt",
-            wait = countdown(at, now())
-        ),
-        (false, None) => t!("ui.dashboard.pause.reconnecting"),
+    let body = match (pause_key(&line), next) {
+        (key @ NEXT_ATTEMPT, Some(at)) => t!(key, wait = countdown(at, now())),
+        (key, _) => t!(key),
     };
     let busy = dash.command.running();
     let retry = dash.clone();
@@ -98,6 +94,19 @@ fn PauseStrip(line: PauseLine) -> Element {
                 }
             }
         }
+    }
+}
+
+const NEXT_ATTEMPT: &str = "ui.dashboard.pause.nextAttempt";
+
+/// The paused strip's line: «переподключается» only while something retries; with nothing
+/// retrying by itself (auto-restart off) it asks for «Подключить» (fix-ks a3).
+pub(super) fn pause_key(line: &PauseLine) -> &'static str {
+    match (line.key_rejected, line.next_attempt) {
+        (true, _) => "ui.dashboard.pause.keyRejected",
+        (false, Some(_)) => NEXT_ATTEMPT,
+        (false, None) if line.manual => "ui.dashboard.pause.manual",
+        (false, None) => "ui.dashboard.pause.reconnecting",
     }
 }
 

@@ -4,7 +4,7 @@
 //! values that an automatic redirect policy would reject before we could look at them.
 use std::future::Future;
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use reqwest::header::{HeaderMap, LOCATION};
@@ -63,6 +63,11 @@ pub(super) struct Hops {
     pub origin_public: Option<bool>,
 }
 
+/// Builds a direct client whose lookups of a host answer exactly the given addresses: a linked
+/// fetch's redirect goes where the hop check looked, never where a second lookup points
+/// (phones-a11, fix-ks a5).
+pub(super) type Pin<'a> = &'a (dyn Fn(&str, &[SocketAddr]) -> Option<reqwest::Client> + Sync);
+
 /// The headers of one attempt: the URL's own host gets `own`; once a redirect leaves that host
 /// the rest of the chain gets `elsewhere` (no identity, no user headers), even if it comes back.
 /// Hosts, not origins: an `http` -> `https` upgrade on the panel's own host keeps the HWID that
@@ -73,15 +78,19 @@ pub(super) struct Sends<'a> {
     pub elsewhere: &'a HeaderMap,
 }
 
-/// GET `url` with `sends`, following at most five redirects.
+/// GET `url` with `sends`, following at most five redirects. With `pin` (a linked direct fetch)
+/// every hop to a name is resolved once, refused unless the answer is public and not empty,
+/// and requested through a client pinned to that answer.
 pub(super) async fn get(
     client: &reqwest::Client,
     url: &Url,
     sends: Sends<'_>,
     hops: Hops,
+    pin: Option<Pin<'_>>,
     cancel: &CancellationToken,
 ) -> Result<Answer, Abort> {
     let proxied = !hops.local_dns;
+    let mut hop_client: Option<reqwest::Client> = None;
     let mut current = url.clone();
     let mut visited: Vec<Url> = Vec::new();
     let mut origin_public = hops.origin_public;
@@ -99,7 +108,8 @@ pub(super) async fn get(
         } else {
             sends.elsewhere
         };
-        let request = client.get(current.clone()).headers(headers.clone()).send();
+        let via = hop_client.as_ref().unwrap_or(client);
+        let request = via.get(current.clone()).headers(headers.clone()).send();
         let response = cancellable(cancel, request)
             .await?
             .map_err(|e| Abort::Transport(classify(&e, proxied)))?;
@@ -160,6 +170,19 @@ pub(super) async fn get(
                     return Ok(Answer::Unusable("redirect into a private network"));
                 }
                 None => {
+                    if let Some(pin) = pin
+                        && let Some(url::Host::Domain(name)) = next_url.host()
+                    {
+                        let port = next_url.port_or_known_default().unwrap_or(443);
+                        let to: Vec<SocketAddr> =
+                            addrs.iter().map(|ip| SocketAddr::new(*ip, port)).collect();
+                        // An empty answer proves nothing public: a late or failed lookup is a
+                        // refusal here, not a pass.
+                        match pin(name, &to).filter(|_| !to.is_empty()) {
+                            Some(pinned) => hop_client = Some(pinned),
+                            None => return Ok(Answer::Unusable("redirect target not resolved")),
+                        }
+                    }
                     permanent &= matches!(status, 301 | 308);
                     if permanent {
                         moved = Some(next_url.clone());

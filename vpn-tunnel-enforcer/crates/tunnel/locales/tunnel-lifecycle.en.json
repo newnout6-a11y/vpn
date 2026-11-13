@@ -66,7 +66,8 @@
         },
         "paused": {
           "title": "Internet paused",
-          "body": "The VPN is reconnecting. Programs wait for it, or choose Continue without VPN."
+          "body": "The VPN is reconnecting. Programs wait for it, or choose Continue without VPN.",
+          "manual": "Automatic reconnect is off. Press Connect, or choose Continue without VPN."
         },
         "keyRejected": {
           "title": "The server rejects the key",
@@ -74,7 +75,9 @@
         },
         "reconnecting": {
           "title": "The VPN is reconnecting",
-          "body": "Meanwhile programs connect directly, without the VPN."
+          "body": "Programs go through the VPN again as soon as it is back.",
+          "direct": "Meanwhile programs connect directly, without the VPN.",
+          "other": "Meanwhile programs go through the other VPN."
         },
         "failover": {
           "title": "Server changed",

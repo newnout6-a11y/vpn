@@ -264,7 +264,8 @@ pub struct DashboardView {
 }
 pub struct EngineLine { pub engine: Engine, pub reason: Option<Msg> }  // «Xray · REALITY» under the node
 pub struct PickLine { pub title: Msg, pub body: Option<Msg> }  // step; during retries what traffic does
-pub struct PauseLine { pub next_attempt: Option<UnixMs>, pub key_rejected: bool }  // countdown target, the key reason
+pub struct PauseLine { pub next_attempt: Option<UnixMs>, pub manual: bool, pub key_rejected: bool }
+    // countdown target; manual: nothing retries by itself (asks for «Подключить», fix-ks); the key reason
 pub trait DashboardApi: 'static {
     fn state(&self) -> watch::Receiver<DashboardView>;
     async fn connect(&self) -> AppResult<()>;                     // returns when the attempt is over

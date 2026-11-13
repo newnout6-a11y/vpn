@@ -15,7 +15,7 @@ use super::fetch::{Ctx, Got, ProviderRoutes};
 use super::relay::Spare;
 use super::{FALLBACK_AFTER, FetchError, RoutePlan, SubscriptionFetcher, http, is_complete};
 use crate::common::{canonical_source, http_url};
-use crate::model::{BodyKind, FetchOutcome};
+use crate::model::{BodyKind, FetchOutcome, NetFail};
 
 /// What a fetch needs besides the URL. `Debug` shows the host only (the URL is a token).
 #[derive(Clone)]
@@ -158,13 +158,24 @@ impl SubscriptionFetcher {
         let hwid = req
             .send_hwid
             .then(|| req.hwid.as_deref().unwrap_or(self.hwids.get(req.device)));
-        let linked = req.from_link.then(|| url.clone());
-        let ctx = Ctx::new(self, req.device, hwid, &req.headers, linked);
+        let ctx = Ctx::new(self, req.device, hwid, &req.headers, req.from_link);
         let tried = with_fallback(
             ctx.fetch_url(&url, &ctx.own, &plan.routes, plan.doh, cancel),
-            fallback
-                .as_ref()
-                .map(|f| ctx.fetch_url(f, &ctx.own, &plan.routes, plan.doh, cancel)),
+            fallback.as_ref().map(|f| {
+                let (ctx, plan) = (&ctx, &plan);
+                // A linked subscription's fallback in the local network fails as that URL only:
+                // the subscription's own URL may still answer.
+                async move {
+                    ctx.fetch_url(f, &ctx.own, &plan.routes, plan.doh, cancel)
+                        .await
+                        .map_err(|e| match e {
+                            FetchError::LocalTarget => {
+                                FetchError::Failed(FetchOutcome::Network(NetFail::Connect))
+                            }
+                            other => other,
+                        })
+                }
+            }),
             FALLBACK_AFTER,
         )
         .await;

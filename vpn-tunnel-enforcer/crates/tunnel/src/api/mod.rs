@@ -370,6 +370,11 @@ pub trait Runtime: Send + Sync {
         false
     }
 
+    /// The running session's kill switch changed (the user's level, another VPN came or went):
+    /// its crash policy and its next attempts follow it. Queued, not awaited. A host whose
+    /// filters carry the level live (the helper service's TUN) needs nothing more.
+    async fn set_kill_switch(&self, _level: KillSwitchLevel) {}
+
     /// Status watch (current value via `borrow()`).
     fn status(&self) -> watch::Receiver<TunStatus>;
 

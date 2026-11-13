@@ -2,7 +2,7 @@
 //! renders. A row keeps its typed [`Profile`](vpnte_profiles::model::Profile) as JSON inside a
 //! DPAPI [`Secret`]; the few fields a list or a ping needs (name, protocol, host, port) are plain
 //! copies, so a view never opens keys.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -92,6 +92,10 @@ pub struct ServersDoc {
     /// this PC's ID. Kept here, not on the group, so a reset never changes the group's shape.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub device_ids: BTreeMap<GroupId, String>,
+    /// Subscription groups added from a link (a deep link, a QR code, a handed-over link): every
+    /// refresh keeps them out of the local network as their add did (phones-a11, fix-ks b2).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub linked: BTreeSet<GroupId>,
 }
 
 impl Document for ServersDoc {
@@ -108,6 +112,10 @@ impl ServersDoc {
     /// Mutable access to the group with `id`.
     pub fn group_mut(&mut self, id: &GroupId) -> Option<&mut ServerGroup> {
         self.groups.iter_mut().find(|g| &g.id == id)
+    }
+    /// The group `id` was added from a link: its requests never reach the local network.
+    pub fn linked(&self, id: &GroupId) -> bool {
+        self.linked.contains(id)
     }
     /// The device ID the user reset for the group `id` (`None`: it sends this PC's ID).
     pub fn device_id(&self, id: &GroupId) -> Option<&str> {

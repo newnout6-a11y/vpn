@@ -164,3 +164,100 @@ async fn a_linked_name_resolving_into_the_lan_is_refused() {
     req.from_link = true;
     assert_eq!(run(&req).await.unwrap_err(), FetchError::LocalTarget);
 }
+
+/// This PC's own name when the system resolves it into a non-public range (as a fake-ip
+/// resolver does for every name); `None` where it does not (the caller skips quietly).
+async fn locally_answered_name() -> Option<String> {
+    let name = std::env::var("COMPUTERNAME").ok()?;
+    let local = tokio::net::lookup_host((name.as_str(), 80)).await;
+    local
+        .is_ok_and(|mut a| a.any(|a| !vpnte_core::net::is_public_ip(a.ip())))
+        .then_some(name)
+}
+
+/// A fetcher whose plan is direct, then the HTTP proxy `proxy` (a loopback stand-in).
+fn direct_then(proxy: &Server) -> SubscriptionFetcher {
+    let at = HostPort::new("127.0.0.1", proxy.addr.port()).unwrap();
+    let plan = RoutePlan {
+        routes: vec![Route::Direct, Route::proxy(ProxyKind::Http, &at, None)],
+        doh: false,
+        relay: false,
+    };
+    SubscriptionFetcher::with_plan(Hwids::of(&machine(), None), plan)
+}
+
+/// fix-ks b5: a fake-ip resolver (another client's TUN) puts every name into a non-public range;
+/// a linked subscription then skips only its direct request and is fetched over the next route,
+/// whose proxy resolves the name itself.
+#[tokio::test]
+async fn a_linked_name_answered_locally_goes_on_over_the_proxy() {
+    let Some(name) = locally_answered_name().await else {
+        return;
+    };
+    let proxy = Server::start(|_| reply("200 OK", &[], KEY_A.as_bytes())).await;
+    let mut req = request(Url::parse(&format!("http://{name}:9/sub")).unwrap(), false);
+    req.from_link = true;
+    let fetched = direct_then(&proxy)
+        .fetch_request(&req, &CancellationToken::new())
+        .await;
+    assert_eq!(fetched.expect("over the proxy").report.profiles.len(), 1);
+    assert_eq!(proxy.seen().len(), 1, "the proxy route was asked");
+}
+
+/// fix-ks b2: a linked subscription's fallback is linked too: one in the local network is never
+/// requested, and it fails as that URL only (the subscription's own failure is the answer, not
+/// «ведёт в локальную сеть»).
+#[tokio::test]
+async fn a_linked_fallback_into_the_lan_fails_alone() {
+    let Some(name) = locally_answered_name().await else {
+        return;
+    };
+    let proxy = Server::start(|_| reply("500 Internal Server Error", &[], b"")).await;
+    let mut req = request(Url::parse(&format!("http://{name}:9/sub")).unwrap(), false);
+    req.from_link = true;
+    req.fallback = Some(Url::parse("http://192.168.1.10/sub").unwrap());
+    let err = direct_then(&proxy)
+        .fetch_request(&req, &CancellationToken::new())
+        .await;
+    assert_eq!(
+        err.unwrap_err(),
+        FetchError::Failed(FetchOutcome::Http(500))
+    );
+}
+
+/// fix-ks a5: a linked fetch's redirect to a name that gives no answer (late, failed) is
+/// refused instead of being left to a second, unchecked lookup by the request.
+#[tokio::test]
+async fn a_linked_hop_without_an_answer_is_refused() {
+    let panel = Server::start(|_| {
+        reply(
+            "302 Found",
+            &[("location", "http://nowhere.invalid/next")],
+            b"",
+        )
+    })
+    .await;
+    let client = vpnte_base::http::client_builder(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let pin = |_: &str, _: &[std::net::SocketAddr]| Some(client.clone());
+    let none = reqwest::header::HeaderMap::new();
+    let sends = http::Sends {
+        own: &none,
+        elsewhere: &none,
+    };
+    let hops = http::Hops {
+        local_dns: true,
+        origin_public: Some(true),
+    };
+    let cancel = CancellationToken::new();
+    let answer = http::get(&client, &panel.url("/s"), sends, hops, Some(&pin), &cancel).await;
+    assert!(
+        matches!(
+            answer,
+            Ok(http::Answer::Unusable("redirect target not resolved"))
+        ),
+        "{answer:?}"
+    );
+    assert_eq!(panel.seen().len(), 1, "the hop was never requested");
+}

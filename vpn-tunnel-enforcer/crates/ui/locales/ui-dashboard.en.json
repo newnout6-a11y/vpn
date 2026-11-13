@@ -25,6 +25,7 @@
       "pause": {
         "title": "Internet paused",
         "reconnecting": "The VPN is reconnecting…",
+        "manual": "Automatic reconnect is off — press Connect.",
         "nextAttempt": "The VPN is reconnecting… next attempt in {{wait}}",
         "keyRejected": "The server rejects the key: update the key or the subscription.",
         "connect": "Connect",

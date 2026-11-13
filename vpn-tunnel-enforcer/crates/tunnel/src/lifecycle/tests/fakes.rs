@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{Engine, Notice, OutboundFault, ProxyKind, now_ms};
+use vpnte_base::types::{Engine, KillSwitchLevel, Notice, OutboundFault, ProxyKind, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 
 use crate::api::{
@@ -73,6 +73,8 @@ pub struct RtScript {
     pub restart_held: bool,
     /// «Подключить» calls that reached the runtime.
     pub retries_now: u32,
+    /// Kill-switch levels the lifecycle handed to the running session, in order.
+    pub kill_switches: Vec<KillSwitchLevel>,
 }
 
 /// Mixed port of a proxy-capture run of the fake runtime.
@@ -541,6 +543,10 @@ impl Runtime for FakeRuntime {
         self.script.lock().retries_now += 1;
         true
     }
+
+    async fn set_kill_switch(&self, level: KillSwitchLevel) {
+        self.script.lock().kill_switches.push(level);
+    }
 }
 
 impl FakeRuntime {
@@ -553,6 +559,16 @@ impl FakeRuntime {
         });
         self.emit(TunnelEvent::Status(TunStatusKind::KillSwitchActive));
         self.emit(TunnelEvent::RestartScheduled { delay });
+    }
+
+    /// The engine died with auto-restart off (or it was turned off before a slow retry): the
+    /// runtime keeps the block and schedules nothing.
+    pub fn crash_blocked(&self) {
+        self.status.send_modify(|s| {
+            s.running = false;
+            s.pid = None;
+        });
+        self.emit(TunnelEvent::Status(TunStatusKind::KillSwitchActive));
     }
 }
 
@@ -769,6 +785,15 @@ impl FakeNotifier {
         notices
             .iter()
             .map(|(n, _)| n.title.key.to_string())
+            .collect()
+    }
+
+    /// The body keys, in order.
+    pub fn bodies(&self) -> Vec<String> {
+        let notices = self.notices.lock();
+        notices
+            .iter()
+            .filter_map(|(n, _)| n.body.as_ref().map(|b| b.key.to_string()))
             .collect()
     }
 }

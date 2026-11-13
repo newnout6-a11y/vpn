@@ -29,7 +29,9 @@ impl Servers {
             }
             let key = source_of(group)
                 .ok_or_else(|| AppError::validation(Msg::new("servers.refresh.unusableUrl")))?;
-            Ok((key.clone(), request_of(group, key, doc.device_id(id))))
+            let mut req = request_of(group, key.clone(), doc.device_id(id));
+            req.from_link = doc.linked(id);
+            Ok((key, req))
         })
     }
 

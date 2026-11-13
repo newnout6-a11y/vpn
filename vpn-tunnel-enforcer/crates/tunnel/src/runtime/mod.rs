@@ -167,6 +167,9 @@ pub struct Timings {
     /// Quiet time of a crashed server with an outbound fault on record before a restart dials it
     /// again (RU freeze window ~120 s; the same value as the probes' `FREEZE_BACKOFF`).
     pub freeze: Duration,
+    /// The shortest gap between two attempts on one server the user's «Подключить» may make
+    /// (RU: a server name freezes after ~3 new handshakes within a minute).
+    pub retry_spacing: Duration,
     /// A run this long resets the crash-restart budget.
     pub stable: Duration,
     /// Local-proxy watchdog period and TCP probe budget.
@@ -194,6 +197,7 @@ impl Default for Timings {
             backoff: [2_000, 5_000, 10_000].map(Duration::from_millis),
             slow_retry: [60, 120, 300].map(Duration::from_secs),
             freeze: Duration::from_secs(130),
+            retry_spacing: Duration::from_secs(20),
             stable: Duration::from_secs(30),
             proxy_watch: Duration::from_secs(5),
             proxy_probe: Duration::from_millis(1500),
@@ -211,11 +215,13 @@ impl Default for Timings {
 pub const MAX_RESTARTS: u8 = 3;
 
 /// The start request the next attempt uses: `restart_with_last` applies current settings. A
-/// proxy capture holds only through the system proxy: "Always" acts there as "If the VPN drops".
+/// proxy session keeps its own kill switch, which the lifecycle keeps current
+/// ([`crate::api::Runtime::set_kill_switch`]): next to another full-tunnel VPN it never pauses,
+/// whatever level is stored (fix-ks a2). A TUN's filters enforce the level in force anyway.
 pub(crate) fn with_current_settings(last: &StartRequest, now: &UserInputs) -> StartRequest {
-    let kill_switch = match (now.kill_switch, last.capture) {
-        (KillSwitchLevel::Strict, CaptureKind::Proxy) => KillSwitchLevel::Standard,
-        (level, _) => level,
+    let kill_switch = match last.capture {
+        CaptureKind::Proxy => last.kill_switch,
+        CaptureKind::Tun => now.kill_switch,
     };
     StartRequest {
         kill_switch,

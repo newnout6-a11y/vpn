@@ -44,6 +44,12 @@ const USED: &[(&str, &[&str])] = &[
     ("ui.dashboard.proxyTaken.body", &[]),
     ("ui.dashboard.proxyTaken.restore", &[]),
     ("ui.dashboard.proxyTaken.failed", &[]),
+    ("ui.dashboard.pause.title", &[]),
+    ("ui.dashboard.pause.reconnecting", &[]),
+    ("ui.dashboard.pause.nextAttempt", &["wait"]),
+    ("ui.dashboard.pause.manual", &[]),
+    ("ui.dashboard.pause.keyRejected", &[]),
+    ("ui.dashboard.pause.connect", &[]),
     ("common.close", &[]),
 ];
 

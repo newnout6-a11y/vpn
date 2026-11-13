@@ -70,11 +70,13 @@ impl ProfileId / GroupId { pub fn random() -> Self; pub fn as_str(&self) -> &str
 
 pub struct ServersDoc { pub active_profile_id: Option<ProfileId>, pub groups: Vec<ServerGroup>,
                         pub profiles: Vec<ServerRow>,
-                        pub device_ids: BTreeMap<GroupId, String> /* reset device IDs (p-subs) */ }
+                        pub device_ids: BTreeMap<GroupId, String> /* reset device IDs (p-subs) */,
+                        pub linked: BTreeSet<GroupId> /* added from a link: refreshes linked (fix-ks) */ }
                         // Document: "profiles.json", v1, holds secrets
 impl ServersDoc {
     pub fn group(&self, &GroupId) -> Option<&ServerGroup>;     pub fn group_mut(..) -> Option<&mut ServerGroup>;
     pub fn device_id(&self, &GroupId) -> Option<&str>;         // the group's own HWID (None: this PC's)
+    pub fn linked(&self, &GroupId) -> bool;                    // the group came from a link
     pub fn row(&self, &ProfileId) -> Option<&ServerRow>;       pub fn row_mut(..) -> Option<&mut ServerRow>;
     pub fn hides(&self, &ServerRow) -> bool;   // row.hidden, or its group hides_settings()
     pub fn manual_group(&self) -> Option<&ServerGroup>;        // by kind, never by name
@@ -352,12 +354,16 @@ carry `x-hwid-max-devices-reached` / `x-hwid-limit` is `DeviceLimit`; `x-hwid-no
 404 with `x-hwid-active` to a request without the HWID, or a 403 whose body says "Device
 fingerprint required" is `HwidRequired`. Both stop the plan (no other agent, route or spare slot;
 an anonymous request's "send the HWID" is ignored when the plan sends it) and rank above every
-other failure. A `from_link` URL (phones-a11): a non-public IP literal or `localhost` is refused
-with `LocalTarget` on every route; on the direct route a name is resolved first and any
-non-public address ends the whole fetch with `LocalTarget` before anything is sent; otherwise
-the request is pinned to the checked addresses (an unresolvable name skips the direct route).
-Proxy routes resolve on their own (no local lookup behind a proxy); the DoH retry takes public
-addresses only.
+other failure. A `from_link` request (phones-a11) is linked as a whole: its URL, its fallback and
+its Mihomo providers. A non-public IP literal or `localhost` is refused with `LocalTarget` on
+every route; on the direct route a name is resolved first and any non-public address skips the
+direct request (nothing is sent; a fake-ip resolver of another client's TUN answers so for
+every name), so the proxy routes and the DoH retry still run, and `LocalTarget` is answered
+only when nothing else was tried (fix-ks); otherwise the request is pinned to the checked
+addresses (an unresolvable name skips the direct route). Every redirect hop of a linked direct
+request to a name is resolved once, refused on an empty or non-public answer, and requested
+through a client pinned to that answer. Proxy routes resolve on their own (no local lookup
+behind a proxy); the DoH retry takes public addresses only.
 
 ## refresh (`vpnte_servers::refresh`)
 
@@ -407,7 +413,8 @@ not imported. A failed fetch without the HWID that saw an empty list answers
 `servers.fetch.emptyListNoHwid` (turn the switch on), as `refresh_group` does. A subscription URL
 carried by a deep link, or with `from_link` set, is fetched as `FetchRequest::from_link` (never
 into the local network, also through a name: `profiles.deeplink.localTarget`); one the user typed
-may live in the LAN.
+may live in the LAN. A subscription group added so keeps the mark (`ServersDoc::linked`, gone
+with the group): every refresh of it is a `from_link` request too (fix-ks).
 `refresh_group` runs as operation `refresh:<id>` (`FeatureKind::Refresh`, 120 s; `Owner::Manual`
 pre-empts a scheduled run, an equal owner gets `core.ops.busy`). A failure stores its typed outcome
 and changes no row; a cancel stores nothing more; the deadline stores `Timeout`. After a success the

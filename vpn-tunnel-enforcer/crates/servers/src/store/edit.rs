@@ -166,6 +166,7 @@ impl Servers {
             }
             doc.groups.retain(|g| &g.id != id);
             doc.device_ids.remove(id);
+            doc.linked.remove(id);
             Ok(())
         })?;
         let mut pings = self.pings.lock();

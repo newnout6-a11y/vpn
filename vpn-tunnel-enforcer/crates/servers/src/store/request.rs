@@ -42,6 +42,17 @@ impl Servers {
         })
     }
 
+    /// The subscription group `id` came from a link (fix-ks b2): its refreshes are checked and
+    /// pinned like its add. A later add of the same subscription by hand keeps the mark: the
+    /// safe side.
+    pub(crate) fn mark_linked(&self, id: &GroupId) -> AppResult<()> {
+        self.update(|doc| {
+            doc.group(id).ok_or_else(group_not_found)?;
+            doc.linked.insert(id.clone());
+            Ok(())
+        })
+    }
+
     /// Replaces the extra request headers of a subscription group with the `Name: value` lines of
     /// `text` (blank: none), sealed like the URL. Returns the names now set.
     pub fn set_group_headers(&self, id: &GroupId, text: &str) -> AppResult<Vec<String>> {

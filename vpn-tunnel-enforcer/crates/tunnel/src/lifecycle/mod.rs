@@ -352,6 +352,12 @@ impl Lifecycle {
         self.kill_switch.clone()
     }
 
+    /// The user changed the kill-switch level (already stored): the live session follows it at
+    /// once, so a later drop pauses, or not, as the level now says.
+    pub fn kill_switch_changed(&self) {
+        self.send(actor::Cmd::KillSwitchChanged);
+    }
+
     /// «Подключить» in the paused state: the paused session retries now instead of after its
     /// wait. `false`: nothing paused to retry (then a plain connect is the answer).
     pub async fn retry_now(&self) -> bool {

@@ -75,8 +75,8 @@ impl Actor {
             }
         };
         let guard = match &self.phase {
-            Phase::Crashed(c) => c.plan.guard,
-            Phase::Adapting(plan) => plan.guard,
+            Phase::Crashed(c) => self.capture.guard(&c.plan),
+            Phase::Adapting(plan) => self.capture.guard(plan),
             _ => vpnte_base::types::KillSwitchLevel::Off,
         };
         let facts = CrashFacts {
@@ -129,7 +129,13 @@ impl Actor {
 
     /// What is left of the freeze window of the server a restart of the last start would dial.
     fn quiet_left(&self) -> Duration {
-        let Some((id, until)) = &self.quiet else {
+        self.left_for_last(self.quiet.as_ref().map(|(id, until)| (id, *until)))
+    }
+
+    /// The time until `mark` (a server id and an instant) if it names the server of the last
+    /// start (a local proxy's server is dialled by another client: never ours to keep quiet).
+    fn left_for_last(&self, mark: Option<(&String, Instant)>) -> Duration {
+        let Some((id, until)) = mark else {
             return Duration::ZERO;
         };
         match self.last.as_ref().map(|last| &last.mode) {
@@ -140,9 +146,30 @@ impl Actor {
         }
     }
 
-    /// The backoff elapsed: restart the last start through the normal start path.
+    /// The user's «Подключить» in the paused state: dials at once, unless the server must stay
+    /// quiet (its freeze window, or an attempt less than `Timings::retry_spacing` ago). Then it
+    /// runs as soon as it may and the paused state's countdown says when (fix-ks a4).
+    pub(super) async fn retry_asked(&mut self) {
+        let gap = self.deps.timings.retry_spacing;
+        let spacing = self.tried.as_ref().map(|(id, at)| (id, *at + gap));
+        let wait = self.quiet_left().max(self.left_for_last(spacing));
+        if wait.is_zero() {
+            return self.retry(true).await;
+        }
+        let at = Instant::now() + wait;
+        tracing::info!(?wait, "the server must stay quiet: the asked retry waits");
+        self.asked = true;
+        if self.restart_due.is_none_or(|due| due > at) {
+            self.restart_due = Some(at);
+            self.emit(TunnelEvent::RestartScheduled { delay: wait });
+        }
+    }
+
+    /// The backoff elapsed (or a deferred «Подключить» is due): restart the last start through
+    /// the normal start path.
     pub(super) async fn recover(&mut self) {
-        self.retry(false).await;
+        let asked = std::mem::take(&mut self.asked);
+        self.retry(asked).await;
     }
 
     /// Restarts the last start (origin `Recovery`); `asked` = the user's «Подключить» in the
@@ -162,6 +189,9 @@ impl Actor {
         if !auto_restart {
             // Turned off during the backoff (re-read at fire time): the terminal table decides.
             return self.after_crash().await;
+        }
+        if let Mode::DirectVpn { profile } = &last.mode {
+            self.tried = Some((profile.id.clone(), Instant::now()));
         }
         let req = StartRequest {
             origin: Origin::Recovery,

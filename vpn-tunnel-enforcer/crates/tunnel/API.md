@@ -102,6 +102,7 @@ pub type OwnerCheck = Arc<dyn Fn() -> bool + Send + Sync>;
     async fn switch_upstream(&self, next: StartRequest, cancel: CancellationToken, is_owner: OwnerCheck)
         -> Option<SwitchReceipt>;                                    // None = not in place: restart_protected
     async fn retry_now(&self) -> bool { false }                       // ks-a: the paused session retries now
+    async fn set_kill_switch(&self, level: KillSwitchLevel) {}         // fix-ks: the live session's guard
     fn status(&self) -> watch::Receiver<TunStatus>;
     fn subscribe(&self) -> broadcast::Receiver<TunnelEvent>;         // on Lagged: resync from status()
     fn last_exit(&self) -> Option<ExitInfo>;
@@ -332,25 +333,35 @@ pub struct SystemForeignVpn;                                         // winnet f
 // ks-a: the kill switch of the running session and its paused state
 pub struct SessionGuard { pub level: KillSwitchLevel, pub foreign_vpn: Option<String> }
 impl SessionGuard { pub fn new(level, soft: bool, foreign_vpn: Option<String>) -> Self; pub fn pauses(&self) -> bool }
-pub struct Pause { pub since: UnixMs, pub next_attempt: Option<UnixMs>, pub key_rejected: bool }
+pub struct Pause { pub since: UnixMs, pub next_attempt: Option<UnixMs>,
+    pub manual: bool /* nothing retries by itself: auto-restart off */, pub key_rejected: bool }
 pub struct KillSwitchView { pub pause: Option<Pause>, pub foreign_vpn: Option<String> }  // Default
 impl Lifecycle { pub fn kill_switch(&self) -> watch::Receiver<KillSwitchView>;
+    pub fn kill_switch_changed(&self);                              // the stored level changed
     pub async fn retry_now(&self) -> bool }                          // «Подключить»: false = nothing paused
 ```
 Kill switch (ks-a, research killswitch §5): a connect decides the session's guard: the level in
 force (`LifecycleDeps::kill_switch`; proxy capture never holds "Always": it acts as "If the VPN
 drops"), `Off` when another full-tunnel VPN carries the default route (proxy capture only: a
 Tunnel connect is refused then; `KillSwitchView::foreign_vpn` names it while the session lives).
-The request carries that level. A drop of a session whose guard pauses (runtime `Restarting`
+The request carries that level. The guard stays current (fix-ks): it is read again when the
+app calls `kill_switch_changed` (after a level change), when an outage begins, and every 30 s
+while another VPN keeps a proxy session from pausing (the line follows a live scan); a change
+goes to the runtime (`Runtime::set_kill_switch`) and, when an outage now pauses, the Soft
+tweaks go back on the dead port. A drop of a session whose guard pauses (runtime `Restarting`
 or `KillSwitchActive` outside an operation; `KillSwitchActive` always counts as held) keeps the
 session open and paused: FSM `paused` (`Blocked` + reconnecting, a later native success confirms
 on evidence), `KillSwitchView::pause` with the next attempt (`RestartScheduled`) and
-`key_rejected` (outbound fault `RealityKeyMismatch`), Soft tweaks stay on the port. A planned
+`key_rejected` (outbound fault `RealityKeyMismatch`), `manual` when the runtime holds the block
+and schedules nothing (auto-restart off; a stale countdown is cleared), Soft tweaks stay on the
+port. A planned
 reconnect that fails while the runtime holds (its last status `Restarting` / `KillSwitchActive`)
 pauses too, without the recovery stop. The pause ends with a native reconnect (`restored` only
 when the user was told), the sibling of a failover, a stop (row `user-stop` etc.) or quit. One
-notice per outage after 10 s (`paused`, `keyRejected` when the key was rejected, `reconnecting`
-when the guard does not pause), a second one only for a key rejected later.
+notice per outage after 10 s (`paused`, body `manual` when nothing retries by itself;
+`keyRejected` when the key was rejected; `reconnecting` when the guard does not pause, body
+`direct` only for a proxy session whose tweaks were rolled back, `other` for that case next to
+another VPN, else the neutral `body`), a second one only for a key rejected later.
 Admission: a strictly higher `Owner` pre-empts a running start; stops coalesce and win over
 everything except a strictly higher start; refusals are `Refused` with a `tunnel.lifecycle.lane.*`
 message. Engine / kill switch / stealth / public Wi-Fi come from `settings` at start time; the
@@ -395,6 +406,7 @@ impl TunnelHandle { pub fn spawn(deps: RuntimeDeps) -> Self }        // inside a
 pub struct Timings { pub ready, capture_ready, exit, release: Duration, pub backoff: [Duration; 3] /* 2/5/10 s */,
     pub slow_retry: [Duration; 3] /* 60/120/300 s, then the last: paused kill switch (ks-a) */,
     pub freeze /* 130 s: crashed server with a fault stays quiet */,
+    pub retry_spacing /* 20 s: «Подключить» on one server at most this often (fix-ks) */,
     pub stable /* 30 s */, proxy_watch /* 5 s */, proxy_probe, proxy_listen, egress_watch /* 15 s */,
     evidence_age /* 45 s */, capture_watch /* 15 s */, confirm_candidate, confirm_previous: Duration } // Default
     // exit = wait after the kill; an engine stop first waits up to engine GRACEFUL_STOP (3 s)
@@ -422,7 +434,8 @@ pub trait Confirmations: Send + Sync { fn confirmed_within(&self, age: Duration)
     async fn lost(&self) -> AppResult<()>;
     async fn release(&self) -> AppResult<()>;
     async fn wait_gone(&self, plan: &CapturePlan, timeout: Duration, cancel: &CancellationToken) -> bool;
-    async fn check(&self, proof: &CaptureProof) -> CaptureCheck; }
+    async fn check(&self, proof: &CaptureProof) -> CaptureCheck;
+    fn guard(&self, plan: &CapturePlan) -> KillSwitchLevel { plan.guard } } // TunCapture: level in force, live
 pub struct CapturePlan { pub alias: Option<String> /* TUN alias, or the mixed port as text */, pub form: TunForm,
     pub stack: TunStack, pub mtu: u16, pub guard: KillSwitchLevel /* what the protection enforces */,
     pub warnings: Vec<Msg> }
@@ -488,7 +501,15 @@ restart / restart with last / adaptive restart whose start fails while the kill 
 protection (`Adapting`, guard != Off) counts as a drop: no full stop, the crash policy above
 runs (the call still answers its error). `Runtime::retry_now` (default `false`; `TunnelHandle`:
 `true` when a crashed or held session with a last start exists and no operation runs) runs that
-recovery start at once, whatever the auto-restart setting. Freeze window (RU
+recovery start at once, whatever the auto-restart setting — unless the server must stay quiet
+(its freeze window, or an attempt less than `Timings::retry_spacing` ago): then the attempt
+moves to the earliest allowed moment (`RestartScheduled`) and still runs with auto-restart off
+(fix-ks). The crash policy reads the guard live: `Capture::guard(plan)` (default `plan.guard`;
+the TUN capture answers the protection's level in force, which the app's guard or the helper
+service changes during a session); `Runtime::set_kill_switch` (`TunnelHandle`) sets the running
+session's `last` request and plan guard (proxy capture: never "Always"). `restart_with_last` /
+`restart_adaptive` keep a proxy session's own level (another VPN: `Off`), a TUN takes the
+stored one. Freeze window (RU
 discipline): when a Direct VPN session crashes with an outbound fault on record (sing-box's
 `recent_fault`, in a slot session the active slot's `Slots::recent_fault`), restarts of that same
 server wait at least `Timings::freeze` (130 s) from the crash instead of the plain backoff, and the
@@ -564,7 +585,8 @@ cleaning up in the background. `Done::warnings` / `ConnError::warnings` are extr
 - **Notices** arrive only through `Notifier::notify(notice, kind)` (title / body are `Msg`s under
   `tunnel.lifecycle.notice.<name>`): `connected`, `restored` (a runtime reconnect after an outage
   the user was told about), `disconnected`, `stopFailed`, `stopped` (unexpected end; body =
-  outcome headline), `paused` / `keyRejected` / `reconnecting` (one per outage, after 10 s; see
+  outcome headline), `paused` / `keyRejected` / `reconnecting` (one per outage, after 10 s, its
+  body chosen by what holds: `paused.manual`, `reconnecting.{body,direct,other}`; see
   the kill-switch paragraph), `failover` (`name`: the sibling that started, `from`: the
   crashed server; once per failover, when the session follows the sibling; body `body` = outbound
   faults on record, `bodyRestarts` = the restart budget spent, `bodySwitched` = no session named

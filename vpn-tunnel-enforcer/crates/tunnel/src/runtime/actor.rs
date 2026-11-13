@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::UnixMs;
+use vpnte_base::types::{KillSwitchLevel, UnixMs};
 use vpnte_engine::clash_api::ClashEndpoint;
 use vpnte_engine::singbox_config::Listeners;
 use vpnte_engine::singbox_process::ExitInfo as EngineExit;
@@ -137,6 +137,11 @@ pub(super) struct Actor {
     /// The server (profile id) whose crash showed an outbound fault, and until when crash
     /// restarts keep away from it (freeze window, `crash` module).
     pub quiet: Option<(String, Instant)>,
+    /// The server (profile id) the last recovery attempt dialled, and when.
+    pub tried: Option<(String, Instant)>,
+    /// The pending `restart_due` is the user's «Подключить», deferred to when the server may
+    /// be dialled again: it runs whatever the auto-restart setting says.
+    pub asked: bool,
     pub stable_at: Option<Instant>,
     pub slot_due: Option<Instant>,
     pub exit: Option<watch::Receiver<Option<EngineExit>>>,
@@ -198,6 +203,8 @@ impl Actor {
             failing_over: None,
             restart_due: None,
             quiet: None,
+            tried: None,
+            asked: false,
             stable_at: None,
             slot_due: None,
             exit: None,
@@ -266,9 +273,32 @@ impl Actor {
                 let due = self.retry_due_now();
                 let _ = reply.send(due);
                 if due {
-                    self.retry(true).await;
+                    self.retry_asked().await;
                 }
             }
+            Cmd::KillSwitch { level } => self.follow_kill_switch(level),
+        }
+    }
+
+    /// The session's kill switch changed: the next attempts and the crash policy follow it (a
+    /// proxy capture holds only through the system proxy, so never "Always").
+    fn follow_kill_switch(&mut self, level: KillSwitchLevel) {
+        let level = match (level, self.strategy) {
+            (KillSwitchLevel::Strict, CaptureKind::Proxy) => KillSwitchLevel::Standard,
+            (level, _) => level,
+        };
+        if let Some(last) = self.last.as_mut() {
+            last.kill_switch = level;
+        }
+        let plan = match &mut self.phase {
+            Phase::Running(s) => Some(&mut s.plan),
+            Phase::Crashed(c) => Some(&mut c.plan),
+            Phase::Adapting(plan) => Some(plan),
+            Phase::Faulted(r) => r.plan.as_mut(),
+            Phase::Idle => None,
+        };
+        if let Some(plan) = plan {
+            plan.guard = level;
         }
     }
 

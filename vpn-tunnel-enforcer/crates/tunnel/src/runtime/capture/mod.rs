@@ -134,6 +134,11 @@ pub trait Capture: Send + Sync {
     ) -> bool;
     /// Periodic check while running.
     async fn check(&self, proof: &CaptureProof) -> CaptureCheck;
+    /// The level `plan`'s protection enforces now: the crash policy follows a level the user
+    /// changed during the session (fix-ks a1), not the one read at `prepare`.
+    fn guard(&self, plan: &CapturePlan) -> KillSwitchLevel {
+        plan.guard
+    }
 }
 
 #[cfg(test)]

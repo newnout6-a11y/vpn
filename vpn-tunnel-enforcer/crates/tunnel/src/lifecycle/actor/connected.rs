@@ -45,7 +45,11 @@ impl Actor {
                     live.proxy_down = false;
                 }
                 if let Some(guard) = guard {
+                    if let Some(name) = &guard.foreign_vpn {
+                        tracing::info!(%name, "another VPN carries the default route: no pause on a drop");
+                    }
                     self.guard = guard;
+                    self.watch_foreign();
                 }
             }
             Up::Restarted {

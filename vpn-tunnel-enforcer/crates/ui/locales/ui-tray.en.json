@@ -17,7 +17,7 @@
         "stopping": "VPN Tunnel Enforcer — Stopping protection",
         "error": "VPN Tunnel Enforcer — Protection error, retry recovery",
         "unknown": "VPN Tunnel Enforcer — Protection state not confirmed",
-        "paused": "VPN Tunnel Enforcer — Internet paused: the VPN is reconnecting",
+        "paused": "VPN Tunnel Enforcer — Internet paused",
         "speed": "↓ {{down}} / ↑ {{up}}"
       },
       "menu": {
@@ -33,7 +33,7 @@
           "stopping": "Status: Stopping protection",
           "error": "Status: Protection error, retry recovery",
           "unknown": "Status: Protection state not confirmed",
-          "paused": "Status: Internet paused — the VPN is reconnecting"
+          "paused": "Status: Internet paused"
         },
         "speed": "Speed: ↓ {{down}} / ↑ {{up}}",
         "show": "Show window",

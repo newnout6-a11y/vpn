@@ -210,6 +210,9 @@ impl TunnelOps for TunnelService {
     async fn set_kill_switch_level(&self, level: KillSwitchLevel) -> AppResult<()> {
         self.coord.user_acted(UserAct::Change);
         self.guarded(move |g| g.set_level(level)).await?;
+        // The live session follows the new level at once: a later drop pauses, or not, as the
+        // user just chose (fix-ks a1).
+        self.lifecycle.kill_switch_changed();
         // A level change ends a pause (research 5.2): with the kill switch off nothing should
         // hold the internet any more, so the paused session ends like «Продолжить без VPN».
         let paused = self.lifecycle.kill_switch().borrow().pause.is_some();

@@ -27,6 +27,7 @@ use crate::outcome::{
 
 mod connected;
 mod events;
+mod guard;
 mod paused;
 mod start;
 mod stop;
@@ -157,6 +158,10 @@ pub(super) enum Cmd {
     PauseNotice {
         since: UnixMs,
     },
+    /// The user changed the kill-switch level (it is stored already).
+    KillSwitchChanged,
+    /// Time to look again whether another VPN still keeps the session from pausing.
+    GuardCheck,
     /// Answers once everything queued before it was handled.
     #[cfg(test)]
     Barrier(oneshot::Sender<()>),
@@ -214,8 +219,10 @@ struct Actor {
     /// A shutdown waits for the operation in flight before its own stop.
     shutdown: Option<oneshot::Sender<ShutdownReport>>,
     session: Option<LiveSession>,
-    /// What a drop does to the live session (decided at its connect).
+    /// What a drop does to the live session (decided at its connect, kept current: `guard`).
     guard: SessionGuard,
+    /// A [`Cmd::GuardCheck`] is on its way.
+    foreign_watch: bool,
     /// The internet is paused (the session's kill switch holds a drop).
     paused: Option<paused::Paused>,
     kill_switch: watch::Sender<KillSwitchView>,
@@ -256,6 +263,7 @@ pub(super) fn spawn(deps: LifecycleDeps) -> Lifecycle {
         shutdown: None,
         session: None,
         guard: SessionGuard::default(),
+        foreign_watch: false,
         paused: None,
         kill_switch,
         last_kind: None,
@@ -421,6 +429,8 @@ impl Actor {
                 });
             }
             Cmd::PauseNotice { since } => self.pause_notice(since),
+            Cmd::KillSwitchChanged => self.refresh_guard().await,
+            Cmd::GuardCheck => self.guard_check().await,
             #[cfg(test)]
             Cmd::Barrier(done) => {
                 let _ = done.send(());

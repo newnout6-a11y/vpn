@@ -143,3 +143,33 @@ fn subscription_id(servers: &crate::store::Servers) -> GroupId {
         })
         .expect("a subscription group")
 }
+
+/// fix-ks b2: a group that came from a link keeps that mark, so its refreshes stay out of the
+/// local network as its add did (the loopback panel sees nothing); deleting the group forgets
+/// the mark.
+#[tokio::test]
+async fn a_linked_group_refreshes_out_of_the_lan() {
+    let e = env();
+    let (server, ids) = panel().await;
+    let url = server.url("/sub/token").to_string();
+    e.servers
+        .add_from_input_with(
+            &e.ctx,
+            &url,
+            options(false, false),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let id = subscription_id(&e.servers);
+    let (_, typed) = e.servers.refresh_request(&id).unwrap();
+    assert!(!typed.from_link, "typed by hand");
+    e.servers.mark_linked(&id).unwrap();
+    let (_, linked) = e.servers.refresh_request(&id).unwrap();
+    assert!(linked.from_link);
+    let sent = ids.lock().len();
+    let _ = e.refresh(&id, Owner::Manual).await;
+    assert_eq!(ids.lock().len(), sent, "nothing was sent into the LAN");
+    e.servers.delete_group(&id, true).unwrap();
+    assert!(!e.servers.read(|doc| doc.linked(&id)));
+}

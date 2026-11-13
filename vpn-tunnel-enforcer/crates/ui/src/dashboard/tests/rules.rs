@@ -312,7 +312,25 @@ fn proxy_taken_line_follows_the_read_back() {
     assert!(banners(&taken).proxy_taken);
     taken.pause = Some(PauseLine {
         next_attempt: None,
+        manual: false,
         key_rejected: false,
     });
     assert!(banners(&taken).proxy_taken);
+}
+
+/// fix-ks a3: the paused strip says «переподключается» only while something retries; with
+/// auto-restart off it asks for «Подключить», and a rejected key is named first.
+#[test]
+fn the_pause_line_says_whether_anything_retries() {
+    use super::super::banners::pause_key;
+    let line = |next_attempt, manual, key_rejected| PauseLine {
+        next_attempt,
+        manual,
+        key_rejected,
+    };
+    let key = |l: &PauseLine| pause_key(l).rsplit('.').next().unwrap_or_default();
+    assert_eq!(key(&line(None, false, false)), "reconnecting");
+    assert_eq!(key(&line(Some(1), false, false)), "nextAttempt");
+    assert_eq!(key(&line(None, true, false)), "manual");
+    assert_eq!(key(&line(None, true, true)), "keyRejected");
 }

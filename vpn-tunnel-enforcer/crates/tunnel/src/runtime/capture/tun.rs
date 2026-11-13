@@ -8,6 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
+use vpnte_base::types::KillSwitchLevel;
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_engine::singbox_config::{self, ConfigError, ConfigInputs, TunParams, TunStack};
 use vpnte_winnet::adapters::{self, OwnedTun, Release, alias, foreign_tun};
@@ -207,6 +208,12 @@ impl Capture for TunCapture {
                 CaptureCheck::Unknown
             }
         }
+    }
+
+    /// The filters follow a level change at once (the app's guard or the helper service sets
+    /// it live); the crash policy reads the same level.
+    fn guard(&self, _plan: &CapturePlan) -> KillSwitchLevel {
+        self.protection.level_in_force()
     }
 }
 

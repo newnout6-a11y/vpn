@@ -32,6 +32,7 @@ impl Actor {
         };
         // A stop always wins over pending recovery and supervision of the old run.
         self.restart_due = None;
+        self.asked = false;
         self.slot_due = None;
         self.stable_at = None;
         if !opts.preserve_last {
@@ -322,7 +323,7 @@ impl Actor {
 
     /// The failed start left the protection held (`Adapting`) under a kill switch that pauses.
     fn held_by_kill_switch(&self) -> bool {
-        matches!(&self.phase, Phase::Adapting(plan) if plan.guard != KillSwitchLevel::Off)
+        matches!(&self.phase, Phase::Adapting(plan) if self.capture.guard(plan) != KillSwitchLevel::Off)
     }
 }
 

@@ -32,6 +32,7 @@ use super::{InputsSource, RuntimeDeps, Timings, UserInputs};
 use crate::api::{CaptureKind, StartRequest, TunnelEvent};
 
 mod gate;
+mod kill_switch;
 mod lane;
 mod live;
 #[cfg(feature = "lab")]
@@ -83,6 +84,7 @@ pub struct World {
     /// The core records no outbound fault: its crashes say nothing about the server.
     pub no_fault: AtomicBool,
     pub xray_stop_fail: AtomicBool,
+    /// The level the TUN protection enforces (the app's guard keeps it equal to the stored one).
     pub guard: Mutex<KillSwitchLevel>,
     pub avoid: Mutex<Vec<Vec<String>>>,
     pub aliases: AtomicU32,
@@ -551,6 +553,10 @@ impl Capture for FakeCapture {
     }
     async fn check(&self, _proof: &CaptureProof) -> CaptureCheck {
         CaptureCheck::Clear
+    }
+    /// As the real TUN capture: the protection's level in force now (`World::guard`).
+    fn guard(&self, _plan: &CapturePlan) -> KillSwitchLevel {
+        *self.0.guard.lock()
     }
 }
 

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{AdaptiveMode, OutboundFault};
+use vpnte_base::types::{AdaptiveMode, KillSwitchLevel, OutboundFault};
 use vpnte_base::{AppError, ErrorKind, Msg};
 
 use super::RuntimeDeps;
@@ -62,6 +62,8 @@ pub(super) enum Cmd {
     },
     /// The paused session's recovery start, now instead of after its wait.
     RetryNow { reply: Reply<bool> },
+    /// The running session's kill switch changed.
+    KillSwitch { level: KillSwitchLevel },
 }
 
 /// State shared between the handle and the actor (short locks, never across `.await`).
@@ -227,6 +229,11 @@ impl Runtime for TunnelHandle {
         self.ask(|reply| Cmd::RetryNow { reply })
             .await
             .unwrap_or(false)
+    }
+
+    async fn set_kill_switch(&self, level: KillSwitchLevel) {
+        // Ordered after everything queued before; a gone actor has no session to follow it.
+        let _ = self.tx.send(Cmd::KillSwitch { level }).await;
     }
 
     fn status(&self) -> watch::Receiver<TunStatus> {

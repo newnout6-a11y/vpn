@@ -10,7 +10,9 @@ mod fakes;
 mod joint;
 mod killswitch;
 mod lane;
+mod live_guard;
 mod orchestration;
+mod outage;
 mod sessions;
 
 const PROXY: &str = "127.0.0.1:10808";
@@ -79,5 +81,10 @@ fn notices_are_localized() {
         let body = format!("tunnel.lifecycle.notice.{name}.body");
         assert!(crate::test_locales::has_key(&title), "{title}");
         assert_eq!(crate::test_locales::has_key(&body), with_body, "{body}");
+    }
+    // The outage notice's other bodies (fix-ks a3, b4).
+    for key in ["paused.manual", "reconnecting.direct", "reconnecting.other"] {
+        let key = format!("tunnel.lifecycle.notice.{key}");
+        assert!(crate::test_locales::has_key(&key), "{key}");
     }
 }

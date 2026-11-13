@@ -40,6 +40,12 @@ impl Actor {
     /// a failed planned reconnect). `held`: the kill switch keeps the internet paused (the state
     /// machine says so); otherwise the caller already fed the runtime status to it.
     pub(super) fn enter_pause(&mut self, e: Option<Evidence>, held: bool) {
+        self.enter_outage(e, held, false);
+    }
+
+    /// [`Actor::enter_pause`] for the runtime's own statuses: `blocked` = it holds the block
+    /// (`KillSwitchActive`), and nothing retries unless a `RestartScheduled` follows at once.
+    pub(super) fn enter_outage(&mut self, e: Option<Evidence>, held: bool, blocked: bool) {
         if held && self.fsm.paused(e).is_err() {
             tracing::debug!("pause not applied to the state machine (operation in flight)");
         }
@@ -50,6 +56,7 @@ impl Actor {
             view: Pause {
                 since: now_ms(),
                 next_attempt: None,
+                manual: false,
                 key_rejected: false,
             },
             held,
@@ -58,6 +65,11 @@ impl Actor {
         });
         p.held |= held;
         p.view.key_rejected |= key_rejected;
+        if blocked {
+            // A scheduled attempt was the runtime's; a block it holds has none until told.
+            p.view.next_attempt = None;
+            p.view.manual = true;
+        }
         let tell_key = p.told && p.view.key_rejected && !p.told_key;
         let since = p.view.since;
         if begun {
@@ -86,24 +98,37 @@ impl Actor {
     }
 
     /// One notice per outage; a second one only when the user must act (the key was rejected).
+    /// Its text says what programs really do meanwhile (fix-ks a3, b4).
     fn tell_pause(&mut self) {
+        let soft = self.session.as_ref().map(|s| (s.is_soft(), s.soft_paused));
+        let foreign = self.guard.foreign_vpn.is_some();
         let Some(p) = self.paused.as_mut() else {
             return;
         };
-        let name = match (p.view.key_rejected, p.held) {
-            (true, _) => "keyRejected",
-            (false, true) => "paused",
-            (false, false) => "reconnecting",
+        let (name, body) = match (p.view.key_rejected, p.held) {
+            (true, _) => ("keyRejected", "body"),
+            (false, true) if p.view.manual => ("paused", "manual"),
+            (false, true) => ("paused", "body"),
+            // Not held: only a proxy session whose tweaks were rolled back sends programs
+            // around the VPN. Otherwise they wait (a proxy on the dead port, the TUN's leak
+            // protection) or go direct (a TUN without it): the neutral line is true for both.
+            (false, false) => match soft {
+                Some((true, true)) if foreign => ("reconnecting", "other"),
+                Some((true, true)) => ("reconnecting", "direct"),
+                _ => ("reconnecting", "body"),
+            },
         };
         p.told = true;
         p.told_key |= p.view.key_rejected;
-        self.notify(Level::Warn, name, NoticeKind::ConnectionError, None);
+        let body = Msg::new(notice_key(name, body));
+        self.notify(Level::Warn, name, NoticeKind::ConnectionError, Some(body));
     }
 
-    /// The next automatic attempt (`None`: one runs now, or none is scheduled).
+    /// The next automatic attempt (`None`: one runs now); either way something retries.
     pub(super) fn pause_next(&mut self, at: Option<UnixMs>) {
         if let Some(p) = self.paused.as_mut() {
             p.view.next_attempt = at;
+            p.view.manual = false;
             self.push_kill_switch();
         }
     }

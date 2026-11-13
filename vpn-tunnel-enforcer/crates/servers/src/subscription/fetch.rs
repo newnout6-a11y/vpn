@@ -238,20 +238,21 @@ pub(super) struct Ctx<'a> {
     pub public: Vec<Variant>,
     /// URLs whose plan stopped on purpose (429, or 404 / 410 to every identified request).
     stopped: Mutex<Vec<Url>>,
-    /// The subscription URL when it came from outside (a deep link, a QR code): its first
-    /// request must not reach the local network (see [`Ctx::linked_client`]).
-    linked: Option<Url>,
+    /// The subscription came from outside (a deep link, a QR code, a stored group added so):
+    /// no request of this fetch — its URL, its fallback, its providers, every redirect — may
+    /// reach the local network (see [`Ctx::linked_client`]).
+    linked: bool,
 }
 
 impl<'a> Ctx<'a> {
     /// The requests of one fetch as `device`, with the HWID when `hwid` is set and `headers`;
-    /// `linked`: the subscription URL came from outside.
+    /// `linked`: the subscription came from outside.
     pub(super) fn new(
         fetcher: &'a SubscriptionFetcher,
         device: ClientDevice,
         hwid: Option<&str>,
         headers: &[(String, String)],
-        linked: Option<Url>,
+        linked: bool,
     ) -> Self {
         Self {
             fetcher,
@@ -280,7 +281,13 @@ impl<'a> Ctx<'a> {
     ) -> Result<Got, FetchError> {
         let host = url.host_str().unwrap_or_default().to_owned();
         let mut failures = Failures::default();
-        let linked = self.linked.as_ref() == Some(url);
+        let linked = self.linked;
+        // The system resolver put a linked name into a non-public range: no direct request.
+        // A fake-ip resolver (another client's TUN) answers so for every name, so the proxy
+        // routes and the DoH retry still run; "local network" only when nothing else answered.
+        let mut refused_direct = false;
+        let pin_direct = |name: &str, to: &[SocketAddr]| self.pinned_client(name, to);
+        let pin = linked.then_some(&pin_direct as http::Pin);
         // A link's local name or non-public IP literal needs no lookup: refused on every route.
         if linked
             && (policy::is_local_name(url)
@@ -292,7 +299,13 @@ impl<'a> Ctx<'a> {
         for route in routes {
             let direct = *route == Route::Direct;
             let client = if linked && direct {
-                self.linked_client(url, cancel).await?
+                match self.linked_client(url, cancel).await {
+                    Err(FetchError::LocalTarget) => {
+                        refused_direct = true;
+                        None
+                    }
+                    other => other?,
+                }
             } else {
                 match self.fetcher.client(route) {
                     Ok(client) => Some(client),
@@ -315,6 +328,7 @@ impl<'a> Ctx<'a> {
                 label: route.label(),
                 route: Some(route),
                 hops,
+                pin: pin.filter(|_| direct),
             };
             match attempt.run(variants, &mut failures, cancel).await? {
                 Step::Done(got) => return Ok(*got),
@@ -351,6 +365,7 @@ impl<'a> Ctx<'a> {
                                 local_dns: true,
                                 origin_public: Some(true),
                             },
+                            pin,
                         };
                         match attempt.run(variants, &mut failures, cancel).await? {
                             Step::Done(got) => return Ok(*got),
@@ -363,6 +378,9 @@ impl<'a> Ctx<'a> {
                     tracing::info!(%host, "subscription: DNS-over-HTTPS gave no address: {err}")
                 }
             }
+        }
+        if refused_direct && failures.0.is_none() {
+            return Err(FetchError::LocalTarget);
         }
         let err = failures.into_error();
         tracing::info!(%host, "subscription: every attempt failed: {err}");
@@ -377,9 +395,9 @@ impl<'a> Ctx<'a> {
     /// The direct client for a URL that came from outside (phones-a11): a name is resolved here
     /// and the request is pinned to those addresses, so no second lookup can answer otherwise
     /// (DNS rebinding). Any loopback, private, link-local or otherwise non-public address refuses
-    /// the URL before anything is sent (literals and local names were refused by `fetch_url`). A
-    /// name the system cannot resolve skips the direct route (`None`): an unchecked lookup is not
-    /// left to the request.
+    /// the direct route before anything is sent (`LocalTarget`; literals and local names were
+    /// refused by `fetch_url`). A name the system cannot resolve skips the direct route (`None`):
+    /// an unchecked lookup is not left to the request.
     async fn linked_client(
         &self,
         url: &Url,
@@ -395,7 +413,7 @@ impl<'a> Ctx<'a> {
             },
         };
         if addrs.iter().any(|ip| !is_public_ip(*ip)) {
-            tracing::info!(%host, "subscription: a link into the local network was refused");
+            tracing::info!(%host, "subscription: a link's name resolves into a local range: no direct request");
             return Err(FetchError::LocalTarget);
         }
         if addrs.is_empty() {
@@ -404,16 +422,20 @@ impl<'a> Ctx<'a> {
         }
         let port = url.port_or_known_default().unwrap_or(443);
         let pinned: Vec<SocketAddr> = addrs.iter().map(|ip| SocketAddr::new(*ip, port)).collect();
+        Ok(self.pinned_client(host, &pinned))
+    }
+
+    /// A direct client whose lookups of `name` answer `addrs` only (an IP literal's `name` is
+    /// never looked up, so the pin is harmless there).
+    fn pinned_client(&self, name: &str, addrs: &[SocketAddr]) -> Option<reqwest::Client> {
         let built = self.fetcher.builder(&Route::Direct).and_then(|b| {
-            let b = match url.host() {
-                Some(url::Host::Domain(name)) => b.resolve_to_addrs(name, &pinned),
-                _ => b,
-            };
-            b.build().map_err(|e| AppError::internal(e.without_url()))
+            b.resolve_to_addrs(name, addrs)
+                .build()
+                .map_err(|e| AppError::internal(e.without_url()))
         });
-        Ok(built
+        built
             .map_err(|err| tracing::warn!("subscription: no HTTP client: {err}"))
-            .ok())
+            .ok()
     }
 
     /// Fetches each Mihomo provider over `order` and merges new keys into `report`, at most
@@ -460,6 +482,8 @@ impl<'a> Ctx<'a> {
             let (servers, failed) = match fetched {
                 Ok(got) => (merge(report, &mut seen, got.report), None),
                 Err(FetchError::Failed(outcome)) => (0, Some(ProviderFailure::Fetch(outcome))),
+                // A linked subscription's provider in the local network: that provider only.
+                Err(FetchError::LocalTarget) => (0, Some(ProviderFailure::Refused)),
                 Err(other) => return Err(other),
             };
             out.push(ProviderFetch {
@@ -500,6 +524,8 @@ struct Attempt<'a> {
     label: String,
     route: Option<&'a Route>,
     hops: Hops,
+    /// A linked direct fetch: every redirect hop is pinned ([`http::get`]).
+    pin: Option<http::Pin<'a>>,
 }
 
 impl Attempt<'_> {
@@ -524,7 +550,7 @@ impl Attempt<'_> {
                     variant.with_ids || identified == 0 || *r != FetchOutcome::HwidRequired
                 })
             };
-            let answer = http::get(self.client, self.url, sends, self.hops, cancel).await;
+            let answer = http::get(self.client, self.url, sends, self.hops, self.pin, cancel).await;
             let outcome = match answer {
                 Err(Abort::Cancelled) => return Err(FetchError::Cancelled),
                 Ok(Answer::Body {

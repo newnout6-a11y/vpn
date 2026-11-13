@@ -130,7 +130,7 @@ impl Actor {
     /// The run is back after [`Actor::pause_soft`]: the tweaks point at its mixed port again and
     /// are read back. A failure rolls back what was applied (nothing half-set), so the state
     /// machine sees an engine without its proxy and does not call it connected.
-    async fn resume_soft(&mut self) {
+    pub(super) async fn resume_soft(&mut self) {
         if !self.session.as_ref().is_some_and(|s| s.soft_paused) {
             return;
         }
@@ -174,13 +174,19 @@ impl Actor {
             TunStatusKind::Restarting { .. } | TunStatusKind::KillSwitchActive
         );
         if lost && self.session.is_some() && self.lane_idle() {
+            if self.paused.is_none() {
+                // Pause or not is decided by the kill switch as it is now: the level may have
+                // changed, and the other VPN of a proxy session may be gone (fix-ks b1).
+                self.refresh_guard().await;
+            }
             // The session stays open while the runtime recovers it. The runtime holding the
             // block is the authority on a pause, whatever this session's guard says.
             let held = self.guard.pauses() || kind == TunStatusKind::KillSwitchActive;
             if !held {
                 let _ = self.fsm.runtime(&kind, e);
             }
-            return self.enter_pause(e, held);
+            let blocked = kind == TunStatusKind::KillSwitchActive;
+            return self.enter_outage(e, held, blocked);
         }
         let _ = self.fsm.runtime(&kind, e);
         if !self.lane_idle() {

@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{AdaptiveMode, OutboundFault};
+use vpnte_base::types::{AdaptiveMode, KillSwitchLevel, OutboundFault};
 use vpnte_tunnel::api::{
     CaptureKind, ExitInfo, OwnerCheck, RestartOptions, Runtime, StartReceipt, StartRequest,
     StopOptions, StopReceipt, SwitchReceipt, TunError, TunStatus, TunnelEvent, VpnProfile,
@@ -269,6 +269,10 @@ impl Runtime for Split {
         let retried = self.active().retry_now().await;
         self.flush().await;
         retried
+    }
+
+    async fn set_kill_switch(&self, level: KillSwitchLevel) {
+        self.active().set_kill_switch(level).await;
     }
 
     fn status(&self) -> watch::Receiver<TunStatus> {

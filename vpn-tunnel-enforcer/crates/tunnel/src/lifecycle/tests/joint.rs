@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use vpnte_base::types::{EnginePref, Owner, ProxyKind};
+use vpnte_base::types::{EnginePref, KillSwitchLevel, Owner, ProxyKind};
 use vpnte_core::ops::Source;
 use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
@@ -46,6 +46,9 @@ impl Joint {
     fn new_with(timings: impl FnOnce(&mut crate::runtime::Timings)) -> Self {
         let dir = TempDir::new("joint");
         let world = World::new();
+        // The protection enforces the stored level (default «Выключен»), as the app's guard
+        // keeps it.
+        *world.guard.lock() = KillSwitchLevel::Off;
         let mut runtime_deps = crate::runtime::tests::deps(&world);
         timings(&mut runtime_deps.timings);
         let runtime = TunnelHandle::spawn(runtime_deps);
@@ -80,6 +83,14 @@ impl Joint {
 
     fn state(&self) -> TunnelState {
         self.lc.snapshot().borrow().state
+    }
+
+    /// The user's level: stored, and enforced by the TUN protection.
+    fn level(&self, level: KillSwitchLevel) {
+        self.settings
+            .update(|s| s.kill_switch = level)
+            .expect("settings");
+        *self.world.guard.lock() = level;
     }
 
     fn kinds(&self) -> Vec<OutcomeKind> {
@@ -173,6 +184,7 @@ async fn crash_restart_continues_the_session() {
 #[tokio::test]
 async fn crash_without_restart_pauses_until_stopped() {
     let j = Joint::new();
+    j.level(KillSwitchLevel::Standard);
     j.world.auto_restart.store(false, Ordering::SeqCst);
     j.lc.connect(proxy()).await.expect("connect");
     j.world.core(0).crash();
@@ -187,15 +199,31 @@ async fn crash_without_restart_pauses_until_stopped() {
     assert!(j.lc.kill_switch().borrow().pause.is_none());
 }
 
+/// fix-ks a7, the same crash with the kill switch off (the stored level and the protection
+/// agree, as in production): the runtime releases, the session ends with its row and the
+/// «stopped» notice, nothing pauses.
+#[tokio::test]
+async fn crash_without_restart_with_the_kill_switch_off_ends_the_session() {
+    let j = Joint::new();
+    j.world.auto_restart.store(false, Ordering::SeqCst);
+    j.lc.connect(proxy()).await.expect("connect");
+    j.world.core(0).crash();
+    eventually("released", || j.ran("release")).await;
+    eventually("one row", || j.kinds().len() == 1).await;
+    assert!(j.noticed("stopped"));
+    // An exit nobody asked for proves nothing about the machine: unknown, but never blocked.
+    assert_ne!(j.state(), TunnelState::Blocked);
+    assert!(j.lc.kill_switch().borrow().pause.is_none());
+    assert!(j.lc.session().borrow().is_none());
+}
+
 /// ks-a across the seam (research 5.4 "no silent release"): the restart budget is spent while
 /// the server stays unreachable; the block stays, the paused state shows the next slow retry,
 /// and the first retry that works confirms the session again.
 #[tokio::test]
 async fn spent_budget_keeps_the_pause_and_retries_slowly() {
     let j = Joint::new_with(|t| t.slow_retry = [150, 150, 150].map(Duration::from_millis));
-    j.settings
-        .update(|s| s.kill_switch = vpnte_base::types::KillSwitchLevel::Standard)
-        .expect("settings");
+    j.level(KillSwitchLevel::Standard);
     j.lc.connect(proxy()).await.expect("connect");
     j.world.ready_fail.store(true, Ordering::SeqCst);
     j.world.core(0).crash();

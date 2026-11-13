@@ -36,9 +36,10 @@ impl SessionGuard {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pause {
     pub since: UnixMs,
-    /// The next automatic attempt; `None` while one runs, or when none is scheduled
-    /// (auto-restart off: only «Подключить» retries).
+    /// The next automatic attempt; `None` while one runs, or when none is scheduled.
     pub next_attempt: Option<UnixMs>,
+    /// Nothing retries by itself (auto-restart is off): only «Подключить» does (fix-ks a3).
+    pub manual: bool,
     /// The server rejected the key: reconnecting will not help until the user acts.
     pub key_rejected: bool,
 }

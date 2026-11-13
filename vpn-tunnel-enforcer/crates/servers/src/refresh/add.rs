@@ -143,7 +143,14 @@ impl Servers {
                         fallback,
                     })),
                 };
-                let added = lease.commit(|| servers.add_marked(profiles, target, hidden))?;
+                let subscription = matches!(target, AddTarget::Subscription(_));
+                let added = lease.commit(|| {
+                    let added = servers.add_marked(profiles, target, hidden)?;
+                    if subscription && request.from_link {
+                        servers.mark_linked(&added.group)?;
+                    }
+                    Ok(added)
+                })?;
                 Ok(AddOutcome::Added {
                     report: added,
                     skipped,

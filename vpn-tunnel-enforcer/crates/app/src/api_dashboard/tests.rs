@@ -523,8 +523,8 @@ fn unelevated_kill_switch_is_off_without_a_banner() {
 }
 
 /// NOADMIN §2 (ui-unslop): unelevated, the saved level decides what can hold: standard is Soft's
-/// proxy hold («Через прокси», a needs-admin alert in Hard mode), strict needs administrator
-/// rights; neither raises the WFP banner.
+/// proxy hold («Через прокси», a needs-the-service alert in Hard mode), a stored "Always" needs
+/// the helper service in both modes; neither raises the WFP banner.
 #[test]
 fn unelevated_kill_switch_names_what_can_hold() {
     let at = |level| {
@@ -539,11 +539,15 @@ fn unelevated_kill_switch_names_what_can_hold() {
         "view.fact.ksProxy"
     );
     assert_eq!(proxy.in_mode(false).state, FwState::NeedsAdmin);
-    // ks-a: a stored "Always" works as "If the VPN drops" until the helper service.
+    // fix-ks a6: a stored "Always" is not in force without the service, and the filters an
+    // earlier elevated "strict" run left may still block: the fact says what removes them.
     let strict = at(KillSwitchLevel::Strict);
-    assert_eq!(strict.state, FwState::ProxyHold);
-    let fact = labels::kill_switch_fact(&strict.in_mode(true));
-    assert_eq!(fact.text.key, "view.fact.ksProxy");
+    assert_eq!(strict.state, FwState::NeedsAdmin);
+    for soft in [true, false] {
+        let fact = labels::kill_switch_fact(&strict.in_mode(soft));
+        assert_eq!(fact.text.key, "view.fact.ksNeedsAdmin");
+        assert!(fact.alert);
+    }
     for fw in [proxy, strict] {
         assert!(labels::kill_switch_banner(&swiss::ConnView::default(), &fw).is_none());
     }

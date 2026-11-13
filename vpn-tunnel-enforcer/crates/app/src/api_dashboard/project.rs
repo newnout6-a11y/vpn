@@ -138,6 +138,7 @@ pub(super) fn foreign_vpn(conn: &ConnView, found: Option<&str>) -> Option<String
 pub(super) fn pause_line(view: &KillSwitchView) -> Option<PauseLine> {
     view.pause.as_ref().map(|p| PauseLine {
         next_attempt: p.next_attempt,
+        manual: p.manual,
         key_rejected: p.key_rejected,
     })
 }
@@ -216,16 +217,19 @@ pub(super) fn geo_route(
     }
 }
 
-/// The kill-switch fact from a read-back. Without WFP in this process (not elevated) nothing of
+/// The kill-switch fact from a read-back. Without WFP here or in the helper service nothing of
 /// ours can be installed, so the saved level decides what can hold: off reads «Снят», "If the
 /// VPN drops" is the proxy mode's system-proxy hold «Через прокси» (never «Держит»: it cannot
-/// be read back), and so is a stored "Always" until the helper service keeps it (ks-a). The
-/// view turns the proxy hold into the latter in Hard mode (`FirewallStatus::in_mode`).
+/// be read back); the view turns the hold into «Нужна служба-помощник» in Hard mode
+/// (`FirewallStatus::in_mode`). A stored "Always" reads «Нужна служба-помощник» in both modes
+/// (fix-ks a6): it is not in force, and the persistent filters an earlier elevated run left
+/// keep blocking until the service (or one elevated start) removes them.
 pub(super) fn firewall(ks: &KillSwitchStatus) -> FirewallStatus {
     let state = match &ks.wfp {
         None => match ks.settings.level {
             KillSwitchLevel::Off => FwState::Inactive,
-            KillSwitchLevel::Standard | KillSwitchLevel::Strict => FwState::ProxyHold,
+            KillSwitchLevel::Standard => FwState::ProxyHold,
+            KillSwitchLevel::Strict => FwState::NeedsAdmin,
         },
         Some(status) => match status.kill_switch {
             KillSwitchState::Off | KillSwitchState::Armed => FwState::Inactive,
