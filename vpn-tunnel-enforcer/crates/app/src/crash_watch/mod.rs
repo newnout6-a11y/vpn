@@ -20,9 +20,12 @@ pub const FLAG: &str = "--crash-watch";
 /// The watcher of this process: one per process, like the proxy session it guards.
 static WATCHER: Mutex<Option<Child>> = Mutex::new(None);
 
-/// Starts this process's watcher unless it runs. Blocking (a process start). Best effort: without
-/// it the next start's recovery still rolls back, so a failure is only logged.
+/// Starts this process's watcher unless it runs, and registers the logon restore
+/// ([`crate::restore`]) for a logoff or a power loss, which no watcher survives. Blocking (a
+/// process start). Best effort: without them the next start's recovery still rolls back, so a
+/// failure is only logged.
 pub fn arm() {
+    crate::restore::arm();
     let mut slot = WATCHER.lock();
     if slot.as_ref().is_some_and(Child::running) {
         return;
@@ -37,12 +40,13 @@ pub fn arm() {
     }
 }
 
-/// Stops this process's watcher once the session's tweaks are rolled back. Blocking (at most
-/// about 2 s).
+/// Stops this process's watcher and removes the logon restore once the session's tweaks are
+/// rolled back. Blocking (at most about 2 s).
 pub fn disarm() {
     let child = WATCHER.lock().take();
     if let Some(child) = child {
         child.stop();
         tracing::info!("crash watcher stopped");
     }
+    crate::restore::disarm();
 }

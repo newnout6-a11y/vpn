@@ -7,6 +7,8 @@ use std::sync::Arc;
 use vpnte_automation::hardening;
 use vpnte_automation::tweaks::{Journal, RollbackReport, Soft, SoftSystem, Writer};
 use vpnte_core::paths::DataDirs;
+
+use crate::restore::LogonValue;
 use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::ProcessStatus::K32EmptyWorkingSet;
 use windows::Win32::System::Threading::{
@@ -39,7 +41,13 @@ pub(super) fn watch(pid: u32) -> u8 {
     let Ok(dirs) = DataDirs::resolve() else {
         return EXIT_INCOMPLETE;
     };
-    match roll_back(&dirs.root, SoftSystem::current_user(), app.writer) {
+    let logon = LogonValue::current();
+    match roll_back(
+        &dirs.root,
+        SoftSystem::current_user(),
+        app.writer,
+        logon.as_ref(),
+    ) {
         Some(report) if !report.is_complete() => EXIT_INCOMPLETE,
         _ => 0,
     }
@@ -66,10 +74,21 @@ fn trim() {
     let _ = unsafe { K32EmptyWorkingSet(GetCurrentProcess()) }.ok();
 }
 
-/// Rolls back the Soft session the dead app `writer` left under the data `root`. `None`: the
-/// journal is no longer that app's (the next start or a helper changed it since). Opened with
-/// the hardening allow-list, as the app does: a narrower one would drop the browser records.
-pub(super) fn roll_back(root: &Path, sys: SoftSystem, writer: Writer) -> Option<RollbackReport> {
+/// Rolls back the Soft session the dead app `writer` left under the data `root`; the logon
+/// value follows under the journal lock (gone once nothing is left). `None`: the journal is no
+/// longer that app's (the next start or a helper changed it since; the value is theirs too).
+/// Opened with the hardening allow-list, as the app does: a narrower one would drop the
+/// browser records.
+pub(super) fn roll_back(
+    root: &Path,
+    sys: SoftSystem,
+    writer: Writer,
+    logon: Option<&LogonValue>,
+) -> Option<RollbackReport> {
     let journal = Arc::new(Journal::open(root, hardening::admit));
-    Soft::new(journal, sys).rollback_left_by(writer)
+    Soft::new(journal, sys).rollback_left_by(writer, |report| {
+        if let Some(value) = logon {
+            value.follow(report);
+        }
+    })
 }

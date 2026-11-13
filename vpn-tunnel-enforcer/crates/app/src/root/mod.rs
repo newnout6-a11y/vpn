@@ -59,6 +59,9 @@ pub fn run(args: &Args) -> ExitCode {
     };
     boot::set_identity();
     boot::spawn_housekeeping(&backend.settings);
+    // Before the start-up recovery and any session (RU-2026 14c): the logon value and the
+    // end-session rollback.
+    crate::restore::at_start(backend.dirs.root.clone());
     let options = launch_options(&backend, args);
     let wiring = Wiring::new(backend, primary.take_commands());
     // The link this start was opened with (`--open-link`) goes to the add dialog like a later one.

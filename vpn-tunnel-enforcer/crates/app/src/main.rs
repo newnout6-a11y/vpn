@@ -18,5 +18,10 @@ fn main() -> ExitCode {
     if let Some(pid) = args.crash_watch {
         return vpnte_app::crash_watch::run(pid);
     }
+    // The logon restore likewise: no window, mutex or log, so the app started at the same
+    // sign-in (autostart) runs as usual next to it.
+    if args.restore_proxy {
+        return vpnte_app::restore::run();
+    }
     vpnte_app::root::run(&args)
 }

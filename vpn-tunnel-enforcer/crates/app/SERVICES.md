@@ -10,7 +10,8 @@ working.
 
 ## Start order (`root::run`, app-main)
 0. `main`: `--crash-watch <pid>` (ks-b) returns into `crash_watch::run` before anything below:
-   the crash watcher holds no instance mutex, no log, no data-dir lock, no UI.
+   the crash watcher holds no instance mutex, no log, no data-dir lock, no UI. `--restore-proxy`
+   (p-proxy-restore) returns into `restore::run` the same way.
 1. `crate::setup::run(&args)`; `Some(code)` = exit. Then the single-instance check (a second
    launch hands over and exits before touching the data dir).
 2. `let backend = svc_core::build(&args)?;` — blocking, **no tokio runtime needed**: data dir +
@@ -196,3 +197,19 @@ started). The watcher waits on the app's handle; after an exit without rollback 
 `Soft::rollback_left_by(app)` on the journal under its file lock, only while the dead app is the
 journal's last writer (the next start's recovery may run at the same moment). Measured working
 set while waiting: `progress/ks-b.md`.
+
+## Logon restore of a proxy session (`restore`, package p-proxy-restore, RU-2026 14c)
+No watcher survives a logoff or a power loss, and with autostart off nothing starts the app
+again, so `crash_watch::arm` / `disarm` also keep `HKCU\…\RunOnce\VPN Tunnel Enforcer proxy
+restore` = `"<exe>" --restore-proxy` in step with the journal. At the next sign-in Windows
+deletes the value and starts that process: `Soft::rollback_orphaned` under the journal lock,
+only while the journal's last writer no longer runs (an app autostarted at the same sign-in
+keeps its session); no window, mutex or log; nothing created without a `tweaks.json`; the
+`RunOnce` key is never written while Windows works through it (what a failed rollback leaves
+waits for the next start). The watcher updates the value inside the same journal lock as its
+rollback (complete = removed, incomplete = kept for the next sign-in), so it never removes the
+value of a newer session. `root::run` calls `restore::at_start(root)` after `svc_core::build`: an earlier
+run's value goes (the start-up recovery owns what is left) and a hidden top-level window rolls
+the Soft values back at `WM_ENDSESSION(TRUE)` (logoff, shutdown) without the variables
+broadcast. A process on an overridden data dir (`VPNTE_DATA_DIR`) never touches the value: the
+sign-in process would read the default journal. Decisions: `progress/p-proxy-restore.md`.

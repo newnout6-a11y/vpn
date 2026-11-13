@@ -12,6 +12,7 @@ pub mod args;
 pub mod boot;
 pub mod crash_watch;
 pub mod import;
+pub mod restore;
 pub mod root;
 pub mod services;
 pub mod setup;

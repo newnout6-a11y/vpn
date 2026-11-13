@@ -397,17 +397,26 @@ impl Journal {
         self.rollback_held(backend, features)
     }
 
-    /// [`Journal::rollback`] for the crash watcher of the app `writer`: only while that app is
-    /// still the last process that changed the journal. `None`: another process (the next start,
-    /// an uninstall helper) changed it since and handles what is left.
-    pub fn rollback_left_by(
+    /// [`Journal::rollback`] for a process that finds the journal after the process that changed
+    /// it last (the crash watcher of its app, the logon restore): only while `left` accepts that
+    /// last writer, decided under the lock. A journal no writer is recorded in (an older
+    /// build's) is left to the next start. `after` runs under the same lock with the report, so
+    /// what follows the journal (the logon restore value) cannot interleave with a newer
+    /// session's start. `None`: not accepted; another process handles what is left.
+    pub fn rollback_left(
         &self,
-        writer: Writer,
         backend: &dyn Backend,
         features: &[Feature],
+        left: impl FnOnce(Writer) -> bool,
+        after: impl FnOnce(&RollbackReport),
     ) -> Option<RollbackReport> {
         let _change = self.begin();
-        (self.doc(|d| d.writer) == Some(writer)).then(|| self.rollback_held(backend, features))
+        let report = self
+            .doc(|d| d.writer)
+            .is_some_and(left)
+            .then(|| self.rollback_held(backend, features))?;
+        after(&report);
+        Some(report)
     }
 
     fn rollback_held(&self, backend: &dyn Backend, features: &[Feature]) -> RollbackReport {

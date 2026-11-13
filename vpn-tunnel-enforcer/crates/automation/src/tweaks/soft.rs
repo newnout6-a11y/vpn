@@ -370,9 +370,22 @@ impl Soft {
 
     /// The crash watcher's rollback of the dead app `writer`'s session: only while that app is
     /// the last process that changed the journal (`None`: someone else did and handles it).
-    pub fn rollback_left_by(&self, writer: Writer) -> Option<RollbackReport> {
+    /// `after` runs under the journal lock ([`Journal::rollback_left`]).
+    pub fn rollback_left_by(
+        &self,
+        writer: Writer,
+        after: impl FnOnce(&RollbackReport),
+    ) -> Option<RollbackReport> {
         self.journal
-            .rollback_left_by(writer, &*self.sys, &SOFT_FEATURES)
+            .rollback_left(&*self.sys, &SOFT_FEATURES, |w| w == writer, after)
+    }
+
+    /// The logon restore's rollback (RU-2026 14c): the session the journal's last writer left,
+    /// once that process is gone (a logoff or a power loss ended it). `None`: it still runs, so
+    /// what is journalled is a live session's (the app started at this sign-in) and stays.
+    pub fn rollback_orphaned(&self) -> Option<RollbackReport> {
+        self.journal
+            .rollback_left(&*self.sys, &SOFT_FEATURES, |w| !w.is_running(), |_| {})
     }
 }
 

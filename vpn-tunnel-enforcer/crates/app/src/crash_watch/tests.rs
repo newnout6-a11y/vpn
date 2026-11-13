@@ -15,10 +15,11 @@ use vpnte_base::types::ProxyKind;
 use vpnte_core::net::HostPort;
 use vpnte_core::store::Store;
 use vpnte_winnet::env::UserEnv;
-use vpnte_winnet::registry::{self, Hive, View};
+use vpnte_winnet::registry::{self, Access, Hive, Key, View};
 use vpnte_winnet::sysproxy::ProxyConfig;
 
 use super::*;
+use crate::restore::{self, LogonValue};
 
 /// Not a test: the child the spawn tests start (`--exact … --ignored`); it only waits.
 #[test]
@@ -92,6 +93,29 @@ impl Place {
     }
 }
 
+impl Place {
+    /// The logon value under this place's key instead of the real `RunOnce`.
+    fn logon(&self) -> LogonValue {
+        LogonValue::under(&self.run_once(), &std::env::current_exe().unwrap()).unwrap()
+    }
+
+    fn run_once(&self) -> String {
+        format!(r"{}\RunOnce", self.key)
+    }
+
+    /// The command the logon value holds now (`None`: absent).
+    fn logon_command(&self) -> Option<String> {
+        Key::open(
+            Hive::CurrentUser,
+            &self.run_once(),
+            Access::Read,
+            View::Native,
+        )
+        .unwrap()
+        .and_then(|key| key.string(restore::VALUE).unwrap())
+    }
+}
+
 impl Drop for Place {
     fn drop(&mut self) {
         let _ = registry::delete_tree(Hive::CurrentUser, &self.key, View::Native);
@@ -125,16 +149,20 @@ const APP: Writer = Writer {
     started: 7,
 };
 
-/// After its app died, the watcher puts the user's own proxy and variables back.
+/// After its app died, the watcher puts the user's own proxy and variables back, and the logon
+/// restore has nothing left to do: its value goes too (RU-2026 14c).
 #[test]
 fn the_watcher_rolls_back_what_its_app_left() {
     let place = Place::new();
     let proxy = Arc::new(MemProxy(Mutex::new(users_proxy())));
     session(&place, &proxy, APP);
     assert_ne!(proxy.read().unwrap(), users_proxy());
+    let logon = place.logon();
+    logon.set().unwrap();
 
-    let report = watch::roll_back(&place.dir, place.system(&proxy), APP);
+    let report = watch::roll_back(&place.dir, place.system(&proxy), APP, Some(&logon));
     assert!(report.is_some_and(|r| r.is_complete()));
+    assert_eq!(place.logon_command(), None);
     assert_eq!(proxy.read().unwrap(), users_proxy());
     assert_eq!(
         UserEnv::under(place.key.clone()).get("HTTP_PROXY").unwrap(),
@@ -149,10 +177,19 @@ fn the_watcher_leaves_another_app_s_journal_alone() {
     let proxy = Arc::new(MemProxy(Mutex::new(users_proxy())));
     session(&place, &proxy, APP);
     let other = Writer { pid: 5200, ..APP };
+    let logon = place.logon();
+    logon.set().unwrap();
 
     assert_eq!(
-        watch::roll_back(&place.dir, place.system(&proxy), other),
+        watch::roll_back(&place.dir, place.system(&proxy), other, Some(&logon)),
         None
     );
     assert_ne!(proxy.read().unwrap(), users_proxy());
+    let exe = std::env::current_exe().unwrap();
+    let expected = format!("\"{}\" --restore-proxy", exe.display());
+    assert_eq!(
+        place.logon_command(),
+        Some(expected),
+        "the journal's owner keeps it"
+    );
 }

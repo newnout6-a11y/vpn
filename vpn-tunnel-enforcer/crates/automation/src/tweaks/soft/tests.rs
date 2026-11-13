@@ -368,10 +368,44 @@ fn the_watcher_rolls_back_the_session_its_app_left() {
     .unwrap();
 
     let watcher = soft_with(&key, &dir, &proxy);
-    let report = watcher.rollback_left_by(Writer::current());
+    let report = watcher.rollback_left_by(Writer::current(), |_| {});
     assert!(report.is_some_and(|r| r.is_complete()));
     assert_eq!(proxy.get(), corporate());
     let env = UserEnv::under(&key.0);
     assert_eq!(env.get("HTTP_PROXY").unwrap(), None);
     assert!(!watcher.is_applied());
+}
+
+/// RU-2026 14c: the logon restore leaves a live writer's session alone (the app started at this
+/// sign-in owns it) and rolls back the session of a writer that is gone.
+#[test]
+fn the_logon_restore_rolls_back_only_a_gone_writer_s_session() {
+    let (key, dir) = (TestKey::new("tweaks"), TempDir::new("tweaks"));
+    let proxy = FakeProxy::with(corporate());
+    let app = soft_with(&key, &dir, &proxy);
+    let ours = addr("127.0.0.1:20809");
+    app.apply_blocking(&ours, ProxyKind::Http, DevTargets::default())
+        .unwrap();
+
+    let restore = soft_with(&key, &dir, &proxy);
+    assert_eq!(
+        restore.rollback_orphaned(),
+        None,
+        "a live session is not touched"
+    );
+    assert_eq!(proxy.get(), sysproxy::applied(&ours));
+
+    // The app died with the session (a power loss): its PID no longer runs.
+    let gone = Writer {
+        pid: u32::MAX - 3,
+        started: 1,
+    };
+    vpnte_core::store::Store::<crate::tweaks::journal::TweakDoc>::open(&dir.path().join("data"))
+        .update(|d| d.writer = Some(gone))
+        .unwrap();
+    let report = restore.rollback_orphaned();
+    assert!(report.is_some_and(|r| r.is_complete()));
+    assert_eq!(proxy.get(), corporate());
+    assert_eq!(UserEnv::under(&key.0).get("HTTP_PROXY").unwrap(), None);
+    assert!(!restore.is_applied());
 }

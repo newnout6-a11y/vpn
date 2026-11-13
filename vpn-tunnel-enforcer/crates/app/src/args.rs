@@ -57,6 +57,9 @@ pub struct Args {
     /// Internal (`--crash-watch <pid>`): this process is the crash watcher of the app `pid`
     /// (`crate::crash_watch`); main runs it before anything else.
     pub crash_watch: Option<u32>,
+    /// Internal (`--restore-proxy`, from the `RunOnce` value at sign-in): roll back what a
+    /// proxy session ended by a logoff or a power loss left (`crate::restore`), then exit.
+    pub restore_proxy: bool,
 }
 
 impl Args {
@@ -85,6 +88,7 @@ impl Args {
                 crate::crash_watch::FLAG => {
                     out.crash_watch = iter.next().and_then(|pid| pid.parse().ok());
                 }
+                crate::restore::FLAG => out.restore_proxy = true,
                 "--setup" => {
                     setup = Some(match iter.next().as_deref() {
                         Some("await-shutdown") => Ok(SetupCommand::AwaitShutdown {
@@ -260,5 +264,15 @@ mod tests {
         assert_eq!(parse(&["--crash-watch"]).crash_watch, None);
         let link = parse(&["--open-link", "vless://x", "--crash-watch", "4242"]);
         assert_eq!(link.crash_watch, None);
+    }
+
+    /// RU-2026 14c: the logon restore's argument (the `RunOnce` value's command); a link can
+    /// never carry it in either.
+    #[test]
+    fn restore_proxy_is_its_own_run() {
+        assert!(parse(&["--restore-proxy"]).restore_proxy);
+        assert!(!parse(&[]).restore_proxy);
+        let link = parse(&["--open-link", "vless://x", "--restore-proxy"]);
+        assert!(!link.restore_proxy);
     }
 }

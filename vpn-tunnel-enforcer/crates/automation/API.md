@@ -476,7 +476,8 @@ pub fn no_registry(_: RegHive, _: &str, _: &str, _: &Val) -> bool;  // admits no
 pub struct TweakDoc { pub records: Vec<Record>, pub legacy_imported: bool,   // Document "tweaks.json" v1
                       pub writer: Option<Writer> }   // ks-b: the process that last changed the obligations
 pub struct Writer { pub pid: u32, pub started: u64 }  // a process across PID reuse (start FILETIME); serde camelCase
-impl Writer { pub fn current() -> Self; pub fn of_process(pid: u32, handle: HANDLE) -> windows::core::Result<Self>; }
+impl Writer { pub fn current() -> Self; pub fn of_process(pid: u32, handle: HANDLE) -> windows::core::Result<Self>;
+    pub fn is_running(self) -> bool; }   // 14c: same PID + start time, not exited; unopenable = gone
 pub const LOCK_FILE: &str = "tweaks.lock";            // ks-b: the cross-process lock next to tweaks.json
 pub trait Backend: Send + Sync {
     fn read(&self, target: &Target) -> io::Result<Val>;              // Err = cannot tell
@@ -501,8 +502,10 @@ impl Journal {
     pub fn rollback(&self, backend: &dyn Backend, features: &[Feature]) -> RollbackReport;
     pub fn status(&self, backend: &dyn Backend, feature: Feature) -> TweakState;
     pub fn legacy_imported(&self) -> bool;  pub fn adopt_legacy(&self, records: Vec<Record>) -> AppResult<usize>;
-    pub fn rollback_left_by(&self, writer: Writer, backend: &dyn Backend, features: &[Feature])
-        -> Option<RollbackReport>;                     // ks-b crash watcher: None = another process changed it since
+    pub fn rollback_left(&self, backend: &dyn Backend, features: &[Feature], left: impl FnOnce(Writer) -> bool,
+        after: impl FnOnce(&RollbackReport)) -> Option<RollbackReport>;
+        // ks-b / 14c: only while `left` accepts the last writer (none recorded = never); `after` runs
+        // under the same lock; None = not accepted, another process handles it
 }
 
 // soft — the Soft session: system proxy + env variables + the opted-in dev targets, together
@@ -527,7 +530,9 @@ impl Soft {
     pub fn is_applied(&self) -> bool;
     pub async fn proxy_owner(&self) -> AppResult<ProxyOwner>;   // ks-b: the system proxy alone (no Git / file reads)
     pub async fn reclaim_proxy(&self) -> AppResult<bool>;       // ks-b «Вернуть»: journalled value again; false = none
-    pub fn rollback_left_by(&self, writer: Writer) -> Option<RollbackReport>;  // ks-b: the crash watcher (blocking)
+    pub fn rollback_left_by(&self, writer: Writer, after: impl FnOnce(&RollbackReport))
+        -> Option<RollbackReport>;                     // ks-b: the crash watcher (blocking)
+    pub fn rollback_orphaned(&self) -> Option<RollbackReport>;  // 14c: the logon restore; None = last writer still runs
     // blocking twins: apply_blocking(&HostPort, ProxyKind, DevTargets), rollback_blocking() -> RollbackReport,
     // status_blocking() -> SoftStatus, proxy_owner_blocking() -> ProxyOwner, reclaim_proxy_blocking() -> AppResult<bool>
 }
@@ -579,9 +584,12 @@ legacy::{LegacySources { receipts_dir, gradle_props, studio_root } + current_use
   with a warning) on a copy read from disk under it; reads (`records`, `is_applied`, `status`)
   use the copy as of the last change or open. A record already back at its baseline is retired
   without a write, so a rollback another process already did changes nothing. `writer` is set
-  by every change of the obligations (not by the clean-up); `rollback_left_by(w)` acts only
-  while `writer == Some(w)`, so a crash watcher that wakes late never undoes the next start's
-  session. Open the journal with `hardening::admit` in every process: a narrower allow-list
+  by every change of the obligations (not by the clean-up); `Soft::rollback_left_by(w)` acts
+  only while `writer == Some(w)`, so a crash watcher that wakes late never undoes the next
+  start's session, and `Soft::rollback_orphaned` (the app's `--restore-proxy` at sign-in, RU-2026
+  14c) only while the recorded writer no longer runs, so the session of an app started at the
+  same sign-in is never undone. `rollback_left_by` takes an `after` hook that runs under the
+  same lock (the crash watcher keeps the app's `RunOnce` value in step there). Open the journal with `hardening::admit` in every process: a narrower allow-list
   drops the browser records from the file.
 
 ## `hardening` — browser policies and location privacy (registry, journalled)
