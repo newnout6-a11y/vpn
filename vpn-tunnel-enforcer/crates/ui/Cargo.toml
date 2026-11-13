@@ -29,6 +29,10 @@ webview2-com = "0.38"
 windows.workspace = true
 windows-core-061 = { package = "windows-core", version = "0.61" }
 
+[dev-dependencies]
+# paused clock for the coalescing tests (traffic_history)
+tokio = { workspace = true, features = ["test-util"] }
+
 [[bin]]
 name = "demo_frame"
 path = "src/bin/demo_frame.rs"

@@ -393,7 +393,9 @@ fn Progress(op: Option<OpWindow>, busy: bool) -> Element {
     }
 }
 
-/// The busy ruler with its 250 ms ticker (paused while the page is not shown).
+/// The busy ruler. Its 250 ms ticker (paused while the page is not shown) feeds a memo, so the
+/// ruler renders only when a cell lights: a few times per operation, never while it waits with
+/// stripes (no deadline) or full.
 #[component]
 fn LiveProgress(op: Option<OpWindow>) -> Element {
     let active = use_page_active();
@@ -406,9 +408,9 @@ fn LiveProgress(op: Option<OpWindow>) -> Element {
             }
         }
     });
-    let ruler = swiss::ruler(op.as_ref(), true, now());
+    let ruler = use_memo(use_reactive!(|op| swiss::ruler(op.as_ref(), true, now())));
     rsx! {
-        Cells { ruler, busy: true }
+        Cells { ruler: ruler(), busy: true }
     }
 }
 
@@ -429,5 +431,51 @@ fn Cells(ruler: swiss::Ruler, busy: bool) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn progress_root() -> Element {
+        let op = use_context::<Option<OpWindow>>();
+        rsx! {
+            LiveProgress { op }
+        }
+    }
+
+    /// Whether the ruler asks for a render within `wait`.
+    async fn renders_within(op: Option<OpWindow>, wait: Duration) -> bool {
+        let mut dom = VirtualDom::new(progress_root).with_root_context(op);
+        dom.rebuild_in_place();
+        tokio::time::timeout(wait, dom.wait_for_work())
+            .await
+            .is_ok()
+    }
+
+    /// p-webview-recover: the ticker does not re-render a ruler that shows the same cells
+    /// (stripes without a deadline, a full ruler past it); it does while cells light.
+    #[tokio::test]
+    async fn the_ruler_renders_only_when_a_cell_lights() {
+        let now = Instant::now();
+        let striped = OpWindow {
+            started: now,
+            deadline: None,
+        };
+        let full = OpWindow {
+            started: now - Duration::from_secs(20),
+            deadline: Some(now - Duration::from_secs(10)),
+        };
+        let quiet = Duration::from_millis(900);
+        assert!(!renders_within(Some(striped), quiet).await);
+        assert!(!renders_within(Some(full), quiet).await);
+        assert!(!renders_within(None, quiet).await);
+        let now = Instant::now();
+        let filling = OpWindow {
+            started: now,
+            deadline: Some(now + Duration::from_millis(600)),
+        };
+        assert!(renders_within(Some(filling), Duration::from_secs(3)).await);
     }
 }

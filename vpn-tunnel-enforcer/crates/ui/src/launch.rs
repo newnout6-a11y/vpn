@@ -1,10 +1,12 @@
 //! Process entry for every UI binary: window and WebView2 configuration, our own tokio runtime,
 //! the frame root (cloak until painted, minimum size, WebView2 hardening, theme and language
-//! sync, renderer crash watch), and the command line of the demo binaries.
+//! sync, WebView2 crash watch and window rebuild), and the command line of the demo binaries.
 mod recover;
+mod remount;
+mod stand_in;
 
-use std::any::Any;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use dioxus::desktop::tao::platform::windows::{IconExtWindows, WindowExtWindows};
@@ -12,6 +14,9 @@ use dioxus::desktop::tao::window::{Icon, Window};
 use dioxus::desktop::{Config, DesktopContext, LogicalSize, WindowBuilder, use_window};
 use dioxus::prelude::*;
 use vpnte_base::i18n::Lang;
+
+use remount::{Mount, Rebuild};
+pub use remount::{RootContext, once};
 
 use crate::theme::{Rgb, Theme, ThemeMode};
 use crate::{assets, lang, theme};
@@ -276,37 +281,54 @@ fn show_webview2_missing(lang: Lang) {
 /// `--paper` and cloaked until the first frame; our index page and the `app` protocol; the
 /// WebView2 folder; no native context menu in release.
 pub fn desktop_config(options: &LaunchOptions) -> Config {
+    window_config(
+        options,
+        &Mount::First {
+            hidden: options.start_hidden,
+        },
+    )
+}
+
+/// [`desktop_config`] for a window that starts as `mount` says. A rebuilt window opens hidden
+/// (dioxus applies its edits without animation frames only to a window built hidden) in the old
+/// one's place, with the language and theme shown before the crash, cloaked until it settles.
+fn window_config(options: &LaunchOptions, mount: &Mount) -> Config {
     use dioxus::desktop::tao::platform::windows::WindowBuilderExtWindows;
-    let scheme = options.theme.mode.resolve(theme::os_prefers_dark());
+    let (lang, theme) = match mount {
+        Mount::First { .. } => (options.lang, options.theme),
+        Mount::Again { lang, theme, .. } => (*lang, *theme),
+    };
+    let scheme = theme.mode.resolve(theme::os_prefers_dark());
     let paper = scheme.paper().rgba();
     let icon = window_icon();
     let (w, h) = options.size;
     let (min_w, min_h) = options.min_size;
-    let window = WindowBuilder::new()
+    let mut window = WindowBuilder::new()
         .with_title(&options.title)
         .with_inner_size(LogicalSize::new(w, h))
         .with_min_inner_size(LogicalSize::new(min_w, min_h))
         .with_decorations(false)
         .with_undecorated_shadow(true)
         .with_resizable(true)
-        .with_visible(!options.start_hidden)
+        .with_visible(matches!(mount, Mount::First { hidden: false }))
         .with_background_color(paper)
         // `None` follows the OS, which is what makes tao report light/dark flips.
-        .with_theme((options.theme.mode != ThemeMode::System).then(|| scheme.tao()))
+        .with_theme((theme.mode != ThemeMode::System).then(|| scheme.tao()))
         .with_window_icon(icon.clone())
         .with_taskbar_icon(icon)
         .with_window_classname("VpnteMainWindow");
-    let cloak = !options.start_hidden;
+    if let Mount::Again { shape, .. } = mount {
+        if let Some((position, size)) = shape.place {
+            window = window.with_position(position).with_inner_size(size);
+        }
+        window = window.with_maximized(shape.maximized);
+    }
+    let cloak = !matches!(mount, Mount::First { hidden: true });
     Config::new()
         .with_menu(None)
         .with_window(window)
         .with_background_color(paper)
-        .with_custom_index(assets::index_html(
-            &options.title,
-            options.lang,
-            &options.theme,
-            scheme,
-        ))
+        .with_custom_index(assets::index_html(&options.title, lang, &theme, scheme))
         .with_custom_protocol("app", assets::serve)
         .with_data_directory(&options.data_dir)
         .with_disable_context_menu(!cfg!(debug_assertions))
@@ -321,33 +343,37 @@ pub fn desktop_config(options: &LaunchOptions) -> Config {
 struct FrameProps {
     root: fn() -> Element,
     min_size: (f64, f64),
-    start_hidden: bool,
+    mount: Mount,
+    rebuild: Rc<Rebuild>,
 }
 
 /// Root of every UI binary: the frame hooks, then the caller's root component.
 #[allow(non_snake_case)]
 fn Frame(props: FrameProps) -> Element {
-    use_frame(props.min_size, props.start_hidden);
-    recover::use_crash_watch();
+    use_frame(props.min_size, props.mount, &props.rebuild);
+    recover::use_crash_watch(props.rebuild.clone());
     let Root = props.root;
     rsx! {
         Root {}
     }
 }
 
-fn use_frame(min_size: (f64, f64), start_hidden: bool) {
+fn use_frame(min_size: (f64, f64), mount: Mount, rebuild: &Rc<Rebuild>) {
     let desktop = use_window();
+    remount::use_carry(rebuild, mount);
     theme::use_theme_sync();
     lang::use_lang_sync();
     use_hook({
-        let desktop = desktop.clone();
+        let (desktop, rebuild) = (desktop.clone(), rebuild.clone());
         move || {
+            // A rebuilt window has mounted: the one it replaces goes.
+            rebuild.mounted();
             harden_webview(&desktop);
             apply_min_size(&desktop.window, min_size);
             // A start in the tray hides only the window; the page would render unseen at full
             // cost until the first show. The first render is the earliest point we hold the
             // webview (the page has just loaded).
-            if start_hidden {
+            if mount.hidden() {
                 crate::tray::set_webview_hidden(&desktop, true);
             }
         }
@@ -355,29 +381,37 @@ fn use_frame(min_size: (f64, f64), start_hidden: bool) {
     use_future(move || {
         let desktop = desktop.clone();
         async move {
-            if start_hidden {
-                return;
+            match mount {
+                Mount::First { hidden: true } => {}
+                Mount::First { hidden: false } => {
+                    painted().await;
+                    set_cloaked(&desktop.window, false);
+                }
+                Mount::Again { shape, .. } => remount::settle(&desktop, shape).await,
             }
-            // Two animation frames after the first edits: WebView2 has presented them. The
-            // timeout is a safety net, a cloaked window must never stay invisible.
-            let painted = document::eval(
-                "await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); return 1;",
-            );
-            let _ = tokio::time::timeout(Duration::from_secs(2), painted.join::<u8>()).await;
-            set_cloaked(&desktop.window, false);
         }
     });
 }
 
+/// Two animation frames after the first edits: WebView2 has presented them. The timeout is a
+/// safety net, a cloaked window must never stay invisible.
+async fn painted() {
+    let painted = document::eval(
+        "await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); return 1;",
+    );
+    let _ = tokio::time::timeout(Duration::from_secs(2), painted.join::<u8>()).await;
+}
+
 /// Runs the UI and never returns: registers the UI locales (unless the app already registered
 /// them with its backend layers), shows a message box and exits with code 3 when the WebView2
-/// runtime is missing, builds our multi-thread tokio runtime, calls `contexts` inside it (backend
-/// handles may spawn tasks) and provides each value as a root context, then runs the event loop on
-/// this thread.
+/// runtime is missing, builds our multi-thread tokio runtime, calls `contexts` once inside it
+/// (backend handles may spawn tasks) and provides a value of each context to the window's
+/// VirtualDom (and to the new one a WebView2 crash gets, see [`RootContext`]), then runs the event
+/// loop on this thread.
 pub fn launch(
     options: LaunchOptions,
     root: fn() -> Element,
-    contexts: impl FnOnce() -> Vec<Box<dyn Any>>,
+    contexts: impl FnOnce() -> Vec<Box<dyn RootContext>>,
 ) -> ! {
     lang::init_locales(&[]);
     lang::set_initial(options.lang);
@@ -402,16 +436,11 @@ pub fn launch(
         }
     };
     let _entered = runtime.enter();
-    let props = FrameProps {
-        root,
-        min_size: options.min_size,
-        start_hidden: options.start_hidden,
-    };
-    let mut vdom = VirtualDom::new_with_props(Frame, props);
-    for context in contexts() {
-        vdom.insert_any_root_context(context);
-    }
-    dioxus::desktop::launch::launch_virtual_dom(vdom, desktop_config(&options))
+    let config = desktop_config(&options);
+    let hidden = options.start_hidden;
+    let rebuild = Rebuild::new(options, root, contexts());
+    let vdom = rebuild.dom(Mount::First { hidden });
+    dioxus::desktop::launch::launch_virtual_dom(vdom, config)
 }
 
 #[cfg(test)]

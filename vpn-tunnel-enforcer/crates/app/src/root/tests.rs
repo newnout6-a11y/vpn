@@ -58,3 +58,20 @@ fn webview_folder_follows_the_data_dir_override_and_elevation() {
         PathBuf::from(r"C:\Users\u\AppData\Local\VPN Tunnel Enforcer\WebView2.elevated")
     );
 }
+
+/// A context of a listed type is provided to every window (the same handle); one of an unlisted
+/// type to the first window only.
+#[test]
+fn listed_contexts_are_provided_again() {
+    let links = api_servers::LinkInbox::default();
+    let context = reusable(Box::new(links));
+    assert!(context.reusable());
+    for _ in 0..2 {
+        let value = context.provide().expect("provided again");
+        assert!(value.downcast::<api_servers::LinkInbox>().is_ok());
+    }
+    let unlisted = reusable(Box::new(7_u8));
+    assert!(!unlisted.reusable());
+    assert!(unlisted.provide().is_some());
+    assert!(unlisted.provide().is_none());
+}

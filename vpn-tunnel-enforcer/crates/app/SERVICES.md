@@ -30,6 +30,12 @@ working.
 4. `vpnte_ui::lang::init_locales(&svc_core::locale_layers())` before `vpnte_ui::launch`; the
    initial theme is `backend.themes.read(|t| t.theme(&settings.active_theme_id))`, the language
    `settings.locale.unwrap_or_else(vpnte_ui::lang::os_lang)`.
+4a. `root::contexts` runs once (inside `vpnte_ui::launch`'s runtime); a WebView2 crash rebuilds the
+   window with a new `App` over clones of the same contexts (p-webview-recover). `api_*::contexts`
+   return type-erased boxes: `root::reusable` lists their types, so a new context type is added
+   there too (an unlisted one is provided to the first window only and logged; the window then
+   cannot be rebuilt). What must survive a rebuild (later launches' commands, toast clicks, the
+   notice list, the page shown) lives in `root::wiring::Inbox`, not in the root's hooks.
 5. Background tasks that do network work are started by their owners, never by `build`, each
    under a child of `backend.shutdown`: the subscription scheduler
    (`backend.servers.spawn_scheduler(backend.refresh.clone(), backend.shutdown.child_token())`,
@@ -201,7 +207,7 @@ keep `profile()`.
 
 ## Links from browsers and messengers (`api_servers::phones`, package w7-phones)
 `api_servers::contexts` also provides an `api_servers::LinkInbox` root context. The root offers it the
-`--open-link` link of this start (`Wiring::first_link`) and every `Command::OpenLink` of a later launch
+`--open-link` link of this start (`root::wiring::Inbox`, once per process) and every `Command::OpenLink` of a later launch
 (after `show_window`); the overlay `vpnte_ui::servers::LinkHandoff` (in the shell's overlays) opens the
 Servers page, whose add dialog takes the link once (`ServersApi::take_link`). Nothing is imported until
 the user confirms there. Link schemes: `setup::links` (installer `--setup register-links`, uninstall,

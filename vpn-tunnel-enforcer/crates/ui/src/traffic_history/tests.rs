@@ -1,7 +1,14 @@
 //! Tests of the Traffic page: the ported vectors of ui-pages §7.13 (sizes) and §7.14 (the
-//! 300-row cap), plurals, day groups, the second line, dates, links and the demo.
+//! 300-row cap), plurals, day groups, the second line, dates, links, the demo and the pace at
+//! which the page takes its feed.
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::Duration;
+
+use dioxus::core::NoOpMutations;
 use jiff::civil::date;
 use jiff::tz::TimeZone;
+use tokio::time::Instant;
 use vpnte_base::Msg;
 use vpnte_base::i18n::Lang;
 
@@ -169,4 +176,64 @@ async fn demo_actions() {
     assert_eq!(rx.borrow().domains.ready().map(|r| r.len()), Some(0));
     let failing = DemoTrafficHistory::new("errors", 0).instant();
     assert!(failing.clear().await.is_err());
+}
+
+/// The feed and what the page rendered of it.
+#[derive(Clone)]
+struct Feed(watch::Receiver<u32>, Rc<RefCell<Vec<u32>>>);
+
+fn coalesced_root() -> Element {
+    let Feed(rx, shown) = use_context::<Feed>();
+    let value = use_coalesced(move || rx);
+    let now = value();
+    if shown.borrow().last() != Some(&now) {
+        shown.borrow_mut().push(now);
+    }
+    rsx! { "{now}" }
+}
+
+/// Drives the page until `ms` after `start` on the paused clock.
+async fn run_until(dom: &mut VirtualDom, start: Instant, ms: u64) {
+    let until = start + Duration::from_millis(ms);
+    while Instant::now() < until {
+        tokio::select! {
+            () = dom.wait_for_work() => {}
+            () = tokio::time::sleep_until(until) => {}
+        }
+        dom.render_immediate(&mut NoOpMutations);
+    }
+}
+
+/// p-webview-recover: a change reaches the page at once; a burst after it only at the end of
+/// the 500 ms window, as its latest value (the app paces this feed the same way).
+#[tokio::test(start_paused = true)]
+async fn changes_are_taken_at_the_feeds_pace() {
+    let (tx, rx) = watch::channel(0_u32);
+    let shown = Rc::default();
+    let mut dom = VirtualDom::new(coalesced_root).with_root_context(Feed(rx, Rc::clone(&shown)));
+    let start = Instant::now();
+    dom.rebuild_in_place();
+    run_until(&mut dom, start, 10).await;
+    tx.send(1).unwrap();
+    run_until(&mut dom, start, 20).await;
+    assert_eq!(*shown.borrow(), [0, 1], "the first change at once");
+    for (value, at) in [(2, 70), (3, 120), (4, 400)] {
+        tx.send(value).unwrap();
+        run_until(&mut dom, start, at).await;
+    }
+    assert_eq!(*shown.borrow(), [0, 1], "held for the window");
+    run_until(&mut dom, start, 530).await;
+    assert_eq!(
+        *shown.borrow(),
+        [0, 1, 4],
+        "the latest at the end of the window"
+    );
+    run_until(&mut dom, start, 1_500).await;
+    tx.send(5).unwrap();
+    run_until(&mut dom, start, 1_510).await;
+    assert_eq!(
+        *shown.borrow(),
+        [0, 1, 4, 5],
+        "after a quiet window at once again"
+    );
 }

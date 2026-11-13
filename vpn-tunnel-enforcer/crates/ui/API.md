@@ -71,11 +71,11 @@ let options = LaunchOptions {
     data_dir,                              // default %LOCALAPPDATA%\VPN Tunnel Enforcer\WebView2; an elevated run needs its own folder
     ..LaunchOptions::default()             // title APP_NAME, 1100x720, min 860x600
 };
-launch(options, App, move || vec![        // never returns; contexts are built inside our tokio runtime
+launch(options, App, move || vec![        // never returns; called once, inside our tokio runtime
     Box::new(Rc::new(dashboard_api) as Rc<dyn DashboardApi>),
     Box::new(Rc::new(panels_api) as Rc<dyn PanelsApi>),
     // … one Rc<dyn XxxApi> per trait below, plus Rc<dyn TrayApi> …
-]);
+]);                                        // Vec<Box<dyn RootContext>>: any Clone + 'static value
 ```
 `launch` registers the UI locales itself if nobody did (safety net), shows a message box and exits
 with code 3 when the WebView2 runtime is missing, runs a 4-worker tokio runtime (threads `backend`;
@@ -86,13 +86,25 @@ the window background in sync with `lang::LANG` / `theme::THEME` / the OS theme.
 (as hiding to the tray does; wry creates the controller visible whatever the window is), so a start
 in the tray never renders the page; `tray::show_window` restores both.
 
-When the page's renderer process dies (`ProcessFailed`), the frame opens a stand-in page (the app's
-page with `?recover`; a script registered at start acknowledges every edit batch there and never
-announces the page). The VirtualDom keeps its tree and keeps running: the tray, Quit with its
-cleanup and a second launch's activation work; the window stays empty until the app restarts (at
-most 3 stand-ins per process). The page itself cannot be built again in dioxus-desktop 0.7.10 (its
-template cache belongs to the dead page; see known gaps). A dead browser process is only logged;
-helper processes are restarted by WebView2.
+When the page's renderer or the WebView2 browser process dies (`ProcessFailed`), the window is
+rebuilt (p-webview-recover): a new window with a new VirtualDom over the same root contexts (each
+VirtualDom gets a clone of every context: `RootContext`, so build the backend once in the closure
+and hand out cheap handles), in the old window's place and state (shown or in the tray, maximised,
+minimised, focused), with the language and theme shown before the crash. The crashed window hides at
+once; a dead renderer's window opens a stand-in page (the app's page with `?recover`; a script
+registered at start acknowledges every edit batch there and never announces the page) so its
+VirtualDom keeps running, tray and Quit included, until the new window has mounted; then it closes
+and the tray hands over. After a dead browser the new window waits for the environment's
+`BrowserProcessExited` (at most 10 s). At most 3 automatic rebuilds per 10 minutes; beyond that, or
+when a new window does not mount within 30 s, the window stays hidden as the crash left it (logged)
+and the next request to show it (the tray's «Показать окно» or icon click, a second launch, a toast
+click) builds a new one. The tray's Quit during a rebuild after a dead renderer closes the new
+window (the old VirtualDom runs the quit). A hang is only logged; helper processes are restarted by
+WebView2. The caller's root mounts again in a rebuilt window: state that must survive (receivers of
+one-shot channels, the page shown) belongs in a root context, not in the root's hooks. Verified by
+unit and VirtualDom tests (the limit, contexts per VirtualDom, the app's wiring across a remount); a
+real crash has not been run since the rebuild (manual check: `.tmp/uiperf/crash.ps1`, see
+`progress/p-webview-recover.md`).
 
 ## The app's root component
 
@@ -119,6 +131,7 @@ fn App() -> Element {
         TrayHost {                                              // tray icon, close / quit flow
             Shell {
                 version: env!("CARGO_PKG_VERSION"), advanced, registry,
+                start,                                          // a rebuilt window: the page shown before
                 overlays: rsx! { Wizard {} },                   // + the app's shutdown overlay, if any
                 toasts: rsx! { ToastHost { close_label: t!("common.close") } },
             }
@@ -171,7 +184,9 @@ pub fn os_prefers_dark() -> bool;  pub fn accent_hover(Rgb, Scheme) -> Rgb;  pub
 pub const APP_NAME: &str = "VPN Tunnel Enforcer";
 pub struct LaunchOptions { pub title: String, pub size: (f64, f64), pub min_size: (f64, f64),
     pub start_hidden: bool, pub data_dir: PathBuf, pub lang: Lang, pub theme: Theme }  // Default, demo(name, &DemoArgs)
-pub fn launch(options: LaunchOptions, root: fn() -> Element, contexts: impl FnOnce() -> Vec<Box<dyn Any>>) -> !;
+pub fn launch(options: LaunchOptions, root: fn() -> Element, contexts: impl FnOnce() -> Vec<Box<dyn RootContext>>) -> !;
+pub trait RootContext: 'static { fn provide(&self) -> Option<Box<dyn Any>>; fn reusable(&self) -> bool }  // blanket: T: Clone + 'static
+pub fn once(context: Box<dyn Any>) -> Box<dyn RootContext>;  // a type-erased context: first window only, no rebuild after a crash
 pub unsafe fn scrub_webview2_env();                     // only if elevated: first thing in main, single-threaded
 pub fn desktop_config(&LaunchOptions) -> Config;  pub fn set_cloaked(&Window, bool);
 pub fn apply_min_size(&Window, (f64, f64));  pub fn harden_webview(&DesktopContext);  // the frame calls both once at start
@@ -759,7 +774,8 @@ an unelevated app; the card, the next-event strip and the editor mark it unavail
 `EntryNote` (Local, Present, YourRule(route), Repeated, NotShipped, IpRule, Regexp, Invalid,
 RussianSites; `key()`), `Kept` (RestDirect, Dns, DnsHosts, FakeDns; `msg()`), `RoutingImported`
 {added, over_limit, smart_ru_on}; `DomainRow`, `SiteInfo`,
-`Moment`, `by_day`, `filter`, `totals`, `MAX_RENDERED`. Demos: `DemoSchedule`, `DemoSplitTunnel`,
+`Moment`, `by_day`, `filter`, `totals`, `MAX_RENDERED`, `COALESCE` (500 ms: the Traffic page takes
+a change at once and later ones at the end of the window, the pace of the app's feed). Demos: `DemoSchedule`, `DemoSplitTunnel`,
 `DemoTrafficHistory` (each in its module's `demo`). App duties: schedule `days` are 0 = Sunday,
 `NextEvent.name` = the entry's name; split-tunnel icons are optional base64 PNGs; traffic
 `connections` → `count`, enrichment → `SiteInfo`, `tunnel_up` from the lifecycle.
@@ -915,12 +931,12 @@ GPU memory.
 - Snap Layouts flyout on the HTML maximise button; DWM caption colours (frameless window by design).
 - Forwarding WebView `error` / `unhandledrejection` to the log, a shutdown overlay: app / logging
   work (the Shell has the `overlays` slot).
-- After a WebView2 renderer or browser process dies the window stays empty until the app restarts.
-  dioxus-desktop 0.7.10 cannot rebuild a reloaded page (it allows its own page to load once, and
-  its template ids and string caches belong to the page that died); a working window needs a new
-  window with a new VirtualDom and the same root contexts, and `launch` takes its contexts once
-  (`FnOnce`; the app's contexts also start the backend). After a renderer crash the stand-in page
-  keeps the VirtualDom running; after a browser crash it stops, as before.
+- A WebView2 crash rebuilds the window (Startup), but the tray icon is the new VirtualDom's: it is
+  replaced (same menu, same state) when the new window mounts, and page-local state (an open
+  dialog, a typed draft, toasts on screen) starts fresh. After a dead browser the old VirtualDom
+  stops until the new window mounts (its tray menu shows the window, its actions wait). The tray
+  offers no separate «Открыть окно» entry after the rebuild limit: «Показать окно» opens the new
+  window (the tray model is not this package's).
 - PageTip strips (`tips.*`): need a persisted dismissal store; no page renders them.
 - `OverflowMenu`, `SortableList` (drag reordering): not built; domain rules reorder with ↑ / ↓.
 - Flag coins cover the 65 countries of `ui.panels.country.*` (flag-icons 7.5, `assets/flags/`); any

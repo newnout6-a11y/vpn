@@ -25,16 +25,20 @@ pub use model::{
 };
 pub use page::TrafficHistoryPage;
 
-/// Site names can arrive in a burst (one per domain): changes are taken at most this often.
-pub const COALESCE: Duration = Duration::from_millis(250);
+/// Changes are taken at most this often. Site names can arrive in a burst (one per domain); the
+/// app already paces the page's feed to this cadence (`vpnte-app` `api_dashboard::pace`, the
+/// first change at once), so a paced push is never held back and an unpaced source (the demo)
+/// still renders at most twice a second.
+pub const COALESCE: Duration = Duration::from_millis(500);
 
 /// The API from context.
 fn use_api() -> Rc<dyn TrafficHistoryApi> {
     use_context::<Rc<dyn TrafficHistoryApi>>()
 }
 
-/// A signal that follows the API's watch channel; after a change it waits [`COALESCE`] and
-/// takes the latest value, so a burst re-renders the list once.
+/// A signal that follows the API's watch channel: a change is taken at once, later ones at the
+/// end of the [`COALESCE`] window that follows (the latest value), so a burst re-renders the list
+/// at most twice a second.
 fn use_coalesced<T: Clone + PartialEq + 'static>(
     subscribe: impl FnOnce() -> watch::Receiver<T>,
 ) -> Signal<T> {
@@ -44,11 +48,11 @@ fn use_coalesced<T: Clone + PartialEq + 'static>(
         let mut rx = rx.clone();
         async move {
             while rx.changed().await.is_ok() {
-                tokio::time::sleep(COALESCE).await;
                 let next = rx.borrow_and_update().clone();
                 if *value.peek() != next {
                     value.set(next);
                 }
+                tokio::time::sleep(COALESCE).await;
             }
         }
     });

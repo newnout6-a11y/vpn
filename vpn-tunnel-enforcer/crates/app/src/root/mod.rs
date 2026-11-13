@@ -1,9 +1,11 @@
 //! The application (work package `app-main`): [`run`] wires the backend into the Dioxus shell
 //! (bootstrap order of lifecycle-app §3.12 / §6.5 and `SERVICES.md`), and [`App`] is the root
 //! component: tray, shell with the pages of this build, first-run wizard, toasts fed by the
-//! backend's notices, commands of later launches and toast clicks.
+//! backend's notices, commands of later launches and toast clicks. A WebView2 crash rebuilds the
+//! window with a new [`App`] over the same contexts ([`wiring`] keeps what must carry over).
+mod wiring;
+
 use std::any::Any;
-use std::cell::RefCell;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -11,13 +13,12 @@ use std::sync::Arc;
 
 use dioxus::desktop::{DesktopContext, use_window};
 use dioxus::prelude::*;
-use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use vpnte_base::types::{Level, Notice};
 use vpnte_core::paths::DataDirs;
 use vpnte_ui::lang::tr_now;
-use vpnte_ui::launch::LaunchOptions;
-use vpnte_ui::pages::{Page, PageRegistry};
+use vpnte_ui::launch::{LaunchOptions, RootContext};
+use vpnte_ui::pages::{Page, PageRegistry, use_nav};
 use vpnte_ui::shell::Shell;
 use vpnte_ui::t;
 use vpnte_ui::tray::{QuitMode, TrayApi, TrayHost, hide_to_tray, show_window};
@@ -27,7 +28,6 @@ use vpnte_winnet::single_instance::Command;
 use crate::args::Args;
 use crate::boot::{self, Instance};
 use crate::services::Backend;
-use crate::svc_core::notify::InAppNotice;
 use crate::{
     api_dashboard, api_lists, api_maintenance, api_servers, api_settings, api_tools, svc_core,
     svc_tunnel,
@@ -67,46 +67,36 @@ pub fn run(args: &Args) -> ExitCode {
     let options = launch_options(&backend, args);
     let wiring = Wiring::new(backend, primary.take_commands());
     // The link this start was opened with (`--open-link`) goes to the add dialog like a later one.
-    wiring.first_link.replace(args.open_link.clone());
+    wiring.inbox.set_first_link(args.open_link.clone());
     vpnte_ui::launch::launch(options, App, move || contexts(wiring))
 }
 
-/// What [`App`] takes over from [`run`] (one root context). The receivers are taken once by the
-/// root's pumps; the notice list is subscribed before the window exists, so notices of the
-/// tunnel's start-up recovery are not lost.
+/// What [`App`] takes over from [`run`] (one root context, the same for a rebuilt window).
 struct Wiring {
     backend: Arc<Backend>,
-    /// Commands of later launches (`activate`, `shutdown-for-update`).
-    commands: RefCell<Option<mpsc::UnboundedReceiver<Command>>>,
-    /// The notifier's in-app list.
-    notices: RefCell<Option<broadcast::Receiver<InAppNotice>>>,
-    /// Clicks on a Windows toast while it is on screen.
-    activations: RefCell<Option<mpsc::UnboundedReceiver<()>>>,
-    /// The link this process was started with (RU-2026 item 4), until the root hands it over.
-    first_link: RefCell<Option<String>>,
+    inbox: Rc<wiring::Inbox>,
 }
 
 impl Wiring {
     fn new(backend: Arc<Backend>, commands: Option<mpsc::UnboundedReceiver<Command>>) -> Self {
-        let (tx, activations) = mpsc::unbounded_channel();
+        let (tx, clicks) = mpsc::unbounded_channel();
         // The notifier calls this on its toast thread: hand the click to the UI thread.
         backend.notifier.set_on_activate(Arc::new(move || {
             let _ = tx.send(());
         }));
+        // Subscribed before the window exists: notices of the tunnel's start-up recovery wait.
+        let notices = backend.notifier.subscribe();
         Wiring {
-            notices: RefCell::new(Some(backend.notifier.subscribe())),
-            commands: RefCell::new(commands),
-            activations: RefCell::new(Some(activations)),
-            first_link: RefCell::new(None),
+            inbox: Rc::new(wiring::Inbox::new(commands, clicks, notices)),
             backend,
         }
     }
 }
 
-/// The root contexts, built inside the UI's tokio runtime: the tunnel first (every API reads
+/// The root contexts, built once inside the UI's tokio runtime: the tunnel first (every API reads
 /// it), the background tasks this package owns, then the contexts of every `api_*` module and
-/// the root's own wiring.
-fn contexts(wiring: Wiring) -> Vec<Box<dyn Any>> {
+/// the root's own wiring. A rebuilt window gets clones of the same contexts.
+fn contexts(wiring: Wiring) -> Vec<Box<dyn RootContext>> {
     let backend = wiring.backend.clone();
     // Before the first connect: last-known server addresses and resolver winners (RU item 10),
     // the current network's winner already asked first.
@@ -145,8 +135,48 @@ fn contexts(wiring: Wiring) -> Vec<Box<dyn Any>> {
     out.extend(api_tools::contexts(&backend));
     out.extend(api_lists::contexts(&backend, &built));
     out.extend(crate::svc_update::contexts(&backend));
+    let mut out: Vec<Box<dyn RootContext>> = out.into_iter().map(reusable).collect();
     out.push(Box::new(Rc::new(wiring)));
     out
+}
+
+/// The `api_*` modules hand their contexts over type-erased; a rebuilt window needs each again,
+/// so each is taken back as the type it is. A type missing here is provided to the first window
+/// only (logged): the window could then not be rebuilt after a WebView2 crash.
+fn reusable(context: Box<dyn Any>) -> Box<dyn RootContext> {
+    use vpnte_ui::{
+        availability::AvailabilityApi, dashboard::DashboardApi, logs::LogsApi,
+        maintenance::MaintenanceApi, panels::PanelsApi, schedule::ScheduleApi, servers::ServersApi,
+        settings::SettingsApi, speedtest::SpeedTestApi, split_tunnel::SplitTunnelApi,
+        traffic_history::TrafficHistoryApi, updates::UpdatesApi, wizard::WizardApi,
+    };
+    macro_rules! typed {
+        ($($kind:ty),+ $(,)?) => {{
+            $(let context = match context.downcast::<$kind>() {
+                Ok(typed) => return typed,
+                Err(other) => other,
+            };)+
+            tracing::error!("a root context of a type `root::reusable` does not list");
+            vpnte_ui::launch::once(context)
+        }};
+    }
+    typed!(
+        Rc<dyn DashboardApi>,
+        Rc<dyn PanelsApi>,
+        Rc<dyn TrayApi>,
+        Rc<dyn ScheduleApi>,
+        Rc<dyn SplitTunnelApi>,
+        Rc<dyn TrafficHistoryApi>,
+        Rc<dyn MaintenanceApi>,
+        Rc<dyn ServersApi>,
+        api_servers::LinkInbox,
+        Rc<dyn SettingsApi>,
+        Rc<dyn WizardApi>,
+        Rc<dyn LogsApi>,
+        Rc<dyn AvailabilityApi>,
+        Rc<dyn SpeedTestApi>,
+        Rc<dyn UpdatesApi>,
+    )
 }
 
 /// The first frame: the saved language (else Windows'), the saved theme, hidden in the tray for
@@ -196,6 +226,8 @@ pub fn App() -> Element {
     let toasts = Toasts::use_provider();
     let advanced = use_advanced(&wiring.backend);
     let registry = use_hook(registry);
+    // The page shown before a WebView2 crash, else the start page.
+    let start = use_hook(|| wiring.inbox.page());
     use_notices(&wiring, toasts);
     use_instance_commands(&wiring);
     use_toast_clicks(&wiring);
@@ -205,9 +237,11 @@ pub fn App() -> Element {
                 version: env!("CARGO_PKG_VERSION"),
                 advanced,
                 registry,
+                start,
                 overlays: rsx! {
                     vpnte_ui::wizard::Wizard {}
                     vpnte_ui::servers::LinkHandoff {}
+                    PageMemory {}
                 },
                 toasts: rsx! {
                     ToastHost { close_label: t!("common.close") }
@@ -215,6 +249,15 @@ pub fn App() -> Element {
             }
         }
     }
+}
+
+/// Remembers the page shown (inside the shell, where the navigation lives) for a rebuilt window.
+#[component]
+fn PageMemory() -> Element {
+    let wiring = use_context::<Rc<Wiring>>();
+    let nav = use_nav();
+    use_effect(move || wiring.inbox.keep_page(nav.current()));
+    rsx! {}
 }
 
 /// The pages wired to the backend.
@@ -262,21 +305,9 @@ fn use_advanced(backend: &Arc<Backend>) -> Signal<bool> {
 /// Backend notices marked `popup` become in-app toasts (the notifier already logged them and
 /// chose between a Windows toast and the window, owner decision D-12).
 fn use_notices(wiring: &Rc<Wiring>, toasts: Toasts) {
-    let wiring = wiring.clone();
-    use_future(move || {
-        let list = wiring.notices.borrow_mut().take();
-        async move {
-            let Some(mut list) = list else { return };
-            loop {
-                match list.recv().await {
-                    Ok(item) if item.popup => show_notice(toasts, &item.notice),
-                    Ok(_) => {}
-                    Err(RecvError::Lagged(missed)) => {
-                        tracing::warn!(missed, "in-app notices dropped (window busy)");
-                    }
-                    Err(RecvError::Closed) => return,
-                }
-            }
+    wiring::use_notices(&wiring.inbox, move |item| {
+        if item.popup {
+            show_notice(toasts, &item.notice);
         }
     });
 }
@@ -300,39 +331,34 @@ fn show_notice(toasts: Toasts, notice: &Notice) {
 /// confirms it; the installer's `shutdown-for-update` runs the quit cleanup without a question
 /// and exits with 73.
 fn use_instance_commands(wiring: &Rc<Wiring>) {
-    let wiring = wiring.clone();
     let tray = use_context::<Rc<dyn TrayApi>>();
-    let inbox = use_context::<crate::api_servers::LinkInbox>();
+    let links = use_context::<crate::api_servers::LinkInbox>();
     let desktop = use_window();
-    use_future(move || {
-        let commands = wiring.commands.borrow_mut().take();
-        let first_link = wiring.first_link.borrow_mut().take();
-        let (tray, desktop, inbox) = (tray.clone(), desktop.clone(), inbox.clone());
-        async move {
-            if let Some(link) = first_link {
-                inbox.offer(link);
-            }
-            let Some(mut commands) = commands else { return };
-            let mut updating = false;
-            while let Some(command) = commands.recv().await {
-                match command {
-                    Command::Activate => show_window(&desktop),
-                    Command::OpenLink(link) => {
-                        show_window(&desktop);
-                        inbox.offer(link);
-                    }
-                    Command::ShutdownForUpdate if !updating => {
-                        updating = true;
-                        // Outlives any component: the exit must happen whatever the UI does.
-                        dioxus::core::spawn_forever(shutdown_for_update(
-                            tray.clone(),
-                            desktop.clone(),
-                        ));
-                    }
-                    Command::ShutdownForUpdate => {}
+    use_future({
+        let (inbox, links) = (wiring.inbox.clone(), links.clone());
+        move || {
+            let link = inbox.take_first_link();
+            let links = links.clone();
+            async move {
+                if let Some(link) = link {
+                    links.offer(link);
                 }
             }
         }
+    });
+    let mut updating = false;
+    wiring::use_commands(&wiring.inbox, move |command| match command {
+        Command::Activate => show_window(&desktop),
+        Command::OpenLink(link) => {
+            show_window(&desktop);
+            links.offer(link);
+        }
+        Command::ShutdownForUpdate if !updating => {
+            updating = true;
+            // Outlives any component: the exit must happen whatever the UI does.
+            dioxus::core::spawn_forever(shutdown_for_update(tray.clone(), desktop.clone()));
+        }
+        Command::ShutdownForUpdate => {}
     });
 }
 
@@ -351,18 +377,8 @@ async fn shutdown_for_update(tray: Rc<dyn TrayApi>, desktop: DesktopContext) {
 
 /// A click on a Windows toast shows the window.
 fn use_toast_clicks(wiring: &Rc<Wiring>) {
-    let wiring = wiring.clone();
     let desktop = use_window();
-    use_future(move || {
-        let clicks = wiring.activations.borrow_mut().take();
-        let desktop = desktop.clone();
-        async move {
-            let Some(mut clicks) = clicks else { return };
-            while clicks.recv().await.is_some() {
-                show_window(&desktop);
-            }
-        }
-    });
+    wiring::use_clicks(&wiring.inbox, move || show_window(&desktop));
 }
 
 #[cfg(test)]

@@ -1,67 +1,48 @@
-//! Renderer crash handling (`ICoreWebView2::ProcessFailed`). WebView2 restarts its helper
-//! processes by itself. When the page's renderer dies, dioxus-desktop 0.7.10 has no page to send
-//! its edit batches to: the queue stalls and the VirtualDom stops (tray menu actions, Quit and a
-//! second launch's activation never run). The page cannot be built again either: dioxus keeps its
-//! template ids and string caches per webview and resends none of them to a new page.
+//! WebView2 process failures (`ICoreWebView2::ProcessFailed`). WebView2 restarts its helper
+//! processes by itself. A dead page renderer or browser process leaves dioxus-desktop 0.7.10
+//! without a page: its edit queue stalls and the VirtualDom stops (tray actions, Quit, a second
+//! launch's activation). So the window is rebuilt ([`super::remount`]): a new window with a new
+//! VirtualDom over the same root contexts, in the old one's place and state. After a dead browser
+//! process the new window waits until its processes are gone (WebView2 asks for that before a new
+//! environment on the same user-data folder).
 //!
-//! So the window opens a stand-in page (the app's page with [`MARKER`]): a script registered at
-//! start acknowledges every edit batch there and never announces the page, so the VirtualDom keeps
-//! its tree and keeps running. The window stays empty until the app restarts; the tray and the
-//! quit cleanup keep working. A dead browser process takes the controller with it and is only
-//! logged.
+//! The crashed window hides at once; a dead renderer's window opens the [`stand_in`] page, so its
+//! VirtualDom keeps running (tray, Quit with its cleanup) until the new window has mounted and the
+//! old one closes. At most [`MAX_REBUILDS`] automatic rebuilds per [`REBUILD_SPAN`]; beyond that,
+//! or when a new window does not come up, the old one stays hidden as the crash left it and the
+//! next request to show it (the tray, a second launch) builds a new one.
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
+use dioxus::desktop::tao::event::{Event, WindowEvent};
 use dioxus::desktop::wry::WebViewExtWindows;
-use dioxus::desktop::{DesktopContext, use_window};
+use dioxus::desktop::{DesktopContext, use_muda_event_handler, use_window, use_wry_event_handler};
 use dioxus::prelude::*;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
-    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE, ICoreWebView2Environment5,
     ICoreWebView2ProcessFailedEventArgs, ICoreWebView2ProcessFailedEventArgs2,
 };
 use webview2_com::{
-    AddScriptToExecuteOnDocumentCreatedCompletedHandler, NavigationCompletedEventHandler,
-    NavigationStartingEventHandler, ProcessFailedEventHandler, take_pwstr,
+    AddScriptToExecuteOnDocumentCreatedCompletedHandler, BrowserProcessExitedEventHandler,
+    NavigationCompletedEventHandler, NavigationStartingEventHandler, ProcessFailedEventHandler,
+    take_pwstr,
 };
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
 use windows_core_061::{BOOL, HSTRING, Interface, PWSTR};
 
-/// Stand-in pages per process: a renderer that keeps dying must not become a reload loop.
-const MAX_STAND_INS: u32 = 3;
-/// Query of the stand-in page; nothing else opens the page with it.
-const MARKER: &str = "?recover";
-/// Attempts to open the stand-in page, one per [`OPEN_DELAY_MS`].
-const OPEN_TRIES: u32 = 20;
-/// Pause before each attempt (measured: navigations started within 40 ms of the crash were
-/// cancelled while WebView2 was still taking it in).
-const OPEN_DELAY_MS: u32 = 250;
+use super::remount::{MAX_REBUILDS, REBUILD_SPAN, Rebuild, Shape};
+use super::stand_in::{self, OPEN_DELAY_MS, StandIn};
+use crate::tray::{TrayItemId, hide_to_tray};
 
-/// Registered at start (`AddScriptToExecuteOnDocumentCreated` waits for a live renderer, so it
-/// cannot be added after the crash); acts on the stand-in page only. It wraps dioxus'
-/// interpreter (`native.ts` of 0.7.10: `rafEdits`, `markEditsFinished`, `sendIpcMessage`) when
-/// the page creates it: every batch is acknowledged, applied or not (they name nodes of the page
-/// that died), and `initialize` is never sent (dioxus would rebuild the tree as new scopes next
-/// to the old ones, against a template cache the page does not have).
-const STAND_IN_JS: &str = r#"(() => {
-  if (location.search !== "?recover") return;
-  let interpreter;
-  Object.defineProperty(window, "interpreter", {
-    configurable: true,
-    get: () => interpreter,
-    set(value) {
-      interpreter = value;
-      const apply = value.rafEdits.bind(value);
-      value.rafEdits = (bytes) => {
-        try { apply(bytes); } catch (err) { value.markEditsFinished(); }
-      };
-      const send = value.sendIpcMessage.bind(value);
-      value.sendIpcMessage = (...args) => { if (args[0] !== "initialize") send(...args); };
-    },
-  });
-})();"#;
+/// How long a rebuild after a dead browser process waits for `BrowserProcessExited` before it
+/// opens the new window anyway (a new environment too early can fail, and dioxus panics then).
+const BROWSER_WAIT_MS: u32 = 10_000;
+/// How long a new window may take to mount (its page loads in about a second); one that did not
+/// is closed and the old one waits for the user, as after the rebuild limit.
+const MOUNT_WAIT_MS: u32 = 30_000;
 
 /// What a process failure means for the window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,49 +68,115 @@ impl Failure {
     }
 }
 
-thread_local! {
-    /// The watch a delayed open belongs to (a thread timer callback carries no context).
-    static OPENING: RefCell<Weak<CrashWatch>> = const { RefCell::new(Weak::new()) };
+/// Where a window is in its crash handling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    Live,
+    /// The browser process died: the rebuild waits for its processes to end.
+    Waiting,
+    /// A new window is on its way; this one closes when it has mounted.
+    Replaced,
+    /// Left as the crash left it (rebuild limit): the next request to show it builds a new one.
+    Lost,
+    /// Left as the crash left it for good (a single-use root context).
+    Stuck,
 }
 
-/// The timer callback of [`CrashWatch::open_later`]: runs on the UI thread while it dispatches
-/// messages.
-unsafe extern "system" fn open_now(_: HWND, _: u32, id: usize, _: u32) {
-    // SAFETY: the one-shot timer this thread set; a second kill is harmless.
+/// What a timer of [`later`] is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Due {
+    /// The next attempt to open the stand-in page.
+    StandIn,
+    /// The dead browser's processes had their time to end.
+    BrowserWait,
+    /// The new window had its time to mount.
+    MountCheck,
+}
+
+thread_local! {
+    /// Pending thread timers, the watch and the purpose of each (a timer callback has no context).
+    static TIMERS: RefCell<Vec<(usize, Weak<CrashWatch>, Due)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A thread timer of [`later`]: runs on the UI thread while it dispatches messages, also while
+/// the VirtualDom stands still (a dead page never acknowledges its edits).
+unsafe extern "system" fn on_timer(_: HWND, _: u32, id: usize, _: u32) {
+    // SAFETY: a one-shot timer this thread set; a second kill is harmless.
     let _ = unsafe { KillTimer(None, id) };
-    if let Some(watch) = OPENING.with(|opening| opening.borrow().upgrade()) {
-        watch.open();
+    let due = TIMERS.with(|timers| {
+        let mut timers = timers.borrow_mut();
+        let at = timers.iter().position(|(timer, ..)| *timer == id)?;
+        let (_, watch, due) = timers.swap_remove(at);
+        Some((watch.upgrade()?, due))
+    });
+    if let Some((watch, due)) = due {
+        watch.on_timer(due);
     }
 }
 
-/// The main window's crash watch: the `ProcessFailed` handler and the stand-in page.
+/// Calls [`CrashWatch::on_timer`] with `due` after `ms`; `false` when no timer could be set.
+fn later(watch: &Rc<CrashWatch>, ms: u32, due: Due) -> bool {
+    // SAFETY: a thread timer with a plain callback; this thread runs the message loop.
+    let id = unsafe { SetTimer(None, 0, ms, Some(on_timer)) };
+    if id == 0 {
+        return false;
+    }
+    TIMERS.with(|timers| timers.borrow_mut().push((id, Rc::downgrade(watch), due)));
+    true
+}
+
+/// One window's crash watch.
 pub(crate) struct CrashWatch {
     desktop: DesktopContext,
-    /// The page's address, read at start (the stand-in is this address with [`MARKER`]).
-    home: Option<String>,
-    /// Stand-in pages opened so far.
-    count: Cell<u32>,
-    /// Attempts left to open the stand-in page; 0 while none is being opened.
-    opening: Cell<u32>,
+    rebuild: Rc<Rebuild>,
+    stand_in: StandIn,
+    state: Cell<State>,
+    /// The window as the crash found it, for the new one.
+    shape: Cell<Option<Shape>>,
+    /// What took the page.
+    failure: Cell<Option<Failure>>,
 }
 
 /// Watches the window's WebView2 for process failures. Call it once, in the root component.
-pub(crate) fn use_crash_watch() {
+pub(crate) fn use_crash_watch(rebuild: Rc<Rebuild>) {
     let desktop = use_window();
-    use_hook(|| {
+    let watch = use_hook(|| {
         let home = desktop
             .webview
             .url()
             .inspect_err(|err| tracing::warn!(%err, "page address unknown"))
             .ok();
         let watch = Rc::new(CrashWatch {
-            desktop,
-            home,
-            count: Cell::new(0),
-            opening: Cell::new(0),
+            desktop: desktop.clone(),
+            rebuild,
+            stand_in: StandIn::new(home),
+            state: Cell::new(State::Live),
+            shape: Cell::new(None),
+            failure: Cell::new(None),
         });
         watch.register();
         watch
+    });
+    // A lost window is hidden; whatever shows it again (the tray, a second launch, a toast
+    // click) focuses it, which is the request for a new one. Runs inside the event loop's tick,
+    // so also while a dead page keeps the VirtualDom still.
+    let id = desktop.window.id();
+    let shown = watch.clone();
+    use_wry_event_handler(move |event, _| {
+        if let Event::WindowEvent {
+            window_id,
+            event: WindowEvent::Focused(true),
+            ..
+        } = event
+            && *window_id == id
+        {
+            shown.on_shown();
+        }
+    });
+    use_muda_event_handler(move |event| {
+        if event.id().0 == TrayItemId::Quit.menu_id() {
+            watch.on_quit();
+        }
     });
 }
 
@@ -164,14 +211,14 @@ impl CrashWatch {
                 // SAFETY: COM getter on the event's live arguments, UI thread; `take_pwstr`
                 // frees the string.
                 let uri = unsafe { args.Uri(&mut uri) }.map(|()| take_pwstr(uri));
-                if uri.is_ok_and(|uri| this.lets_through(&uri)) {
+                if uri.is_ok_and(|uri| this.stand_in.lets_through(&uri)) {
                     // SAFETY: COM setter on the event's live arguments, UI thread.
                     unsafe { args.SetCancel(false) }?;
                 }
             }
             Ok(())
         }));
-        let script = HSTRING::from(STAND_IN_JS);
+        let script = HSTRING::from(stand_in::STAND_IN_JS);
         let added =
             AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(|added, _| {
                 if let Err(err) = added {
@@ -192,8 +239,35 @@ impl CrashWatch {
         if let Err(err) = registered {
             tracing::warn!(%err, "WebView2 process failures not fully watched");
         }
+        self.watch_browser_exit();
     }
 
+    /// `BrowserProcessExited` of the window's environment: every process of a dead browser has
+    /// ended, a new environment on the same user-data folder can start.
+    fn watch_browser_exit(self: &Rc<Self>) {
+        let this = Rc::downgrade(self);
+        let exited = BrowserProcessExitedEventHandler::create(Box::new(move |_, _| {
+            if let Some(this) = this.upgrade() {
+                this.on_browser_gone();
+            }
+            Ok(())
+        }));
+        let mut token = 0;
+        let environment = self.desktop.webview.environment();
+        // SAFETY: COM calls on the UI (STA) thread on a live interface; `token` outlives the call.
+        let registered =
+            environment
+                .cast::<ICoreWebView2Environment5>()
+                .and_then(|environment| unsafe {
+                    environment.add_BrowserProcessExited(&exited, &mut token)
+                });
+        if let Err(err) = registered {
+            tracing::warn!(%err, "WebView2 browser exit not watched; a rebuild waits for its timer");
+        }
+    }
+}
+
+impl CrashWatch {
     fn on_failure(self: &Rc<Self>, args: &ICoreWebView2ProcessFailedEventArgs) {
         let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
         // SAFETY: COM getters on the event's live arguments, UI thread; out pointers are live.
@@ -215,85 +289,144 @@ impl CrashWatch {
                 "WebView2 helper process exited; WebView2 restarts it"
             ),
             Failure::Unresponsive => tracing::warn!("WebView2 renderer unresponsive"),
-            Failure::Browser => tracing::error!(
-                ?exit_code,
-                "WebView2 browser process exited; the window stays empty until the app restarts"
-            ),
-            Failure::Renderer => self.stand_in(exit_code),
+            failure => self.on_page_lost(failure, exit_code),
         }
     }
-}
 
-impl CrashWatch {
-    /// The page's renderer died: open the stand-in page, so the VirtualDom keeps running.
-    fn stand_in(self: &Rc<Self>, exit_code: Option<i32>) {
-        if self.opening.get() > 0 {
-            return;
+    /// The page's renderer or the browser process died.
+    fn on_page_lost(self: &Rc<Self>, failure: Failure, exit_code: Option<i32>) {
+        match self.state.get() {
+            State::Live => {}
+            // The stand-in page's own renderer died: open it again (bounded by the stand-in).
+            _ if failure == Failure::Renderer => return self.open_stand_in(),
+            _ => return,
         }
-        let count = self.count.get() + 1;
-        self.count.set(count);
-        if self.home.is_none() || count > MAX_STAND_INS {
+        // Before the window hides: the new one takes this state over.
+        self.shape.set(Some(Shape::of(&self.desktop.window)));
+        self.failure.set(Some(failure));
+        self.shelve(failure);
+        if !self.rebuild.reusable {
             tracing::error!(
+                ?failure,
                 ?exit_code,
-                count,
-                "WebView2 renderer exited; the app needs a restart"
+                "WebView2 page lost; the window cannot be rebuilt (a root context is single-use), the tray keeps working"
             );
-            return;
+            return self.state.set(State::Stuck);
         }
-        tracing::warn!(
-            ?exit_code,
-            count,
-            "WebView2 renderer exited; the window stays empty until the app restarts, the tray keeps working"
-        );
-        self.opening.set(OPEN_TRIES);
-        self.open_later();
-    }
-
-    /// Opens the stand-in page.
-    fn open(&self) {
-        let Some(home) = &self.home else {
-            return;
-        };
-        if let Err(err) = self.desktop.webview.load_url(&format!("{home}{MARKER}")) {
-            tracing::error!(%err, "renderer crash stand-in not opened");
-            self.opening.set(0);
+        if !self.rebuild.allow() {
+            tracing::error!(
+                ?failure,
+                ?exit_code,
+                max = MAX_REBUILDS,
+                minutes = REBUILD_SPAN.as_secs() / 60,
+                "WebView2 crashed too often; the window stays closed until it is opened from the tray"
+            );
+            return self.state.set(State::Lost);
         }
-    }
-
-    /// Whether a navigation to `uri` is the stand-in page while it is being opened.
-    fn lets_through(&self, uri: &str) -> bool {
-        self.opening.get() > 0
-            && self
-                .home
-                .as_deref()
-                .is_some_and(|home| uri.strip_suffix(MARKER) == Some(home))
-    }
-
-    /// [`CrashWatch::open`] after [`OPEN_DELAY_MS`], on this (UI) thread.
-    fn open_later(self: &Rc<Self>) {
-        OPENING.with(|opening| *opening.borrow_mut() = Rc::downgrade(self));
-        // SAFETY: a thread timer with a plain callback; this thread runs the message loop.
-        if unsafe { SetTimer(None, 0, OPEN_DELAY_MS, Some(open_now)) } == 0 {
-            tracing::error!("renderer crash stand-in not opened: no timer");
-            self.opening.set(0);
-        }
-    }
-
-    /// A navigation ended: while the stand-in is being opened, a failed attempt is retried.
-    fn on_navigated(self: &Rc<Self>, ok: bool) {
-        let left = self.opening.get();
-        if left == 0 {
-            return;
-        }
-        if ok {
-            self.opening.set(0);
-            return;
-        }
-        self.opening.set(left - 1);
-        if left > 1 {
-            self.open_later();
+        if failure == Failure::Browser {
+            tracing::warn!(
+                ?exit_code,
+                "WebView2 browser process exited; a new window opens once its processes are gone"
+            );
+            self.state.set(State::Waiting);
+            if !later(self, BROWSER_WAIT_MS, Due::BrowserWait) {
+                self.replace();
+            }
         } else {
-            tracing::error!("renderer crash stand-in not opened: every attempt was cancelled");
+            tracing::warn!(?exit_code, "WebView2 renderer exited; opening a new window");
+            self.replace();
+        }
+    }
+
+    /// Hides the window as the crash left it. A dead renderer's window gets the stand-in page,
+    /// so its VirtualDom (the tray, Quit with its cleanup) keeps running until it is replaced; a
+    /// dead browser took the controller with it.
+    fn shelve(self: &Rc<Self>, failure: Failure) {
+        if failure == Failure::Renderer {
+            hide_to_tray(&self.desktop);
+            self.open_stand_in();
+        } else {
+            self.desktop.window.set_visible(false);
+        }
+    }
+
+    fn open_stand_in(self: &Rc<Self>) {
+        if self.stand_in.start() && !later(self, OPEN_DELAY_MS, Due::StandIn) {
+            tracing::error!("renderer crash stand-in not opened: no timer");
+        }
+    }
+
+    /// A new window replaces this one, in the state the crash found it in.
+    fn replace(self: &Rc<Self>) {
+        let shape = self
+            .shape
+            .get()
+            .unwrap_or_else(|| Shape::of(&self.desktop.window));
+        if !self.rebuild.open(&self.desktop, shape) {
+            tracing::warn!("another window rebuild is under way; this window stays closed");
+            return self.state.set(State::Lost);
+        }
+        self.state.set(State::Replaced);
+        if !later(self, MOUNT_WAIT_MS, Due::MountCheck) {
+            tracing::warn!("no timer to check that the new window comes up");
+        }
+    }
+
+    /// Every process of the dead browser has ended.
+    fn on_browser_gone(self: &Rc<Self>) {
+        if self.state.get() == State::Waiting {
+            self.replace();
+        }
+    }
+
+    fn on_timer(self: &Rc<Self>, due: Due) {
+        match due {
+            Due::StandIn => self.stand_in.open(&self.desktop),
+            Due::BrowserWait if self.state.get() == State::Waiting => {
+                tracing::warn!("no WebView2 browser exit report in time; opening the new window");
+                self.replace();
+            }
+            Due::MountCheck
+                if self.state.get() == State::Replaced && self.rebuild.abandon(&self.desktop) =>
+            {
+                tracing::error!(
+                    "the new WebView2 window did not come up; the window stays closed until it is opened from the tray"
+                );
+                self.state.set(State::Lost);
+            }
+            Due::BrowserWait | Due::MountCheck => {}
+        }
+    }
+
+    /// The window was focused, which a lost (hidden) window only is when something shows it: a
+    /// new window replaces it now, in the state it is shown in.
+    fn on_shown(self: &Rc<Self>) {
+        if self.state.get() == State::Lost {
+            tracing::info!("window opened again after a WebView2 crash");
+            self.shape.set(Some(Shape::of(&self.desktop.window)));
+            self.replace();
+        }
+    }
+
+    /// The tray's Quit while a new window is on its way. This window's VirtualDom runs the quit
+    /// (the stand-in keeps it running after a dead renderer) and closes this window at its end;
+    /// a new window would keep the process alive past it, or drop this one mid-quit when it
+    /// mounts. So the new window goes; a refused quit shows this window, which then rebuilds.
+    /// After a dead browser this VirtualDom stands still: the rebuild goes on, the new tray quits.
+    fn on_quit(&self) {
+        if self.state.get() == State::Replaced
+            && self.failure.get() == Some(Failure::Renderer)
+            && self.rebuild.abandon(&self.desktop)
+        {
+            tracing::info!("quit while the window was being rebuilt; the new window is closed");
+            self.state.set(State::Lost);
+        }
+    }
+
+    /// A navigation ended: a failed attempt to open the stand-in page is retried.
+    fn on_navigated(self: &Rc<Self>, ok: bool) {
+        if self.stand_in.on_navigated(ok) && !later(self, OPEN_DELAY_MS, Due::StandIn) {
+            tracing::error!("renderer crash stand-in not opened: no timer");
         }
     }
 }
@@ -308,8 +441,8 @@ mod tests {
 
     use super::*;
 
-    /// p-uiperf: only the page's own renderer gets the stand-in page; a dead browser process and a
-    /// hang are reported, helpers are left to WebView2.
+    /// p-uiperf: a dead page renderer or browser process loses the page (the window is rebuilt);
+    /// a hang is reported, helpers are left to WebView2.
     #[test]
     fn failures_are_told_apart() {
         let of = Failure::of;
@@ -331,22 +464,6 @@ mod tests {
             COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED,
         ] {
             assert_eq!(of(helper), Failure::Helper);
-        }
-    }
-
-    /// The script acts on the stand-in page only and wraps exactly the interpreter members
-    /// dioxus-desktop 0.7.10 uses for the edit queue and the IPC (`native.ts`).
-    #[test]
-    fn the_script_wraps_the_pinned_interpreter() {
-        assert!(STAND_IN_JS.contains(&format!("location.search !== \"{MARKER}\"")));
-        for member in [
-            "\"interpreter\"",
-            "value.rafEdits",
-            "value.markEditsFinished()",
-            "value.sendIpcMessage",
-            "\"initialize\"",
-        ] {
-            assert!(STAND_IN_JS.contains(member), "{member}");
         }
     }
 }
