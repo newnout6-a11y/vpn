@@ -24,6 +24,8 @@ pub use mihomo::export_mihomo;
 mod awg_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tls_names_tests;
 
 /// A key ready to share.
 #[derive(Clone, PartialEq)]

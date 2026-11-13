@@ -50,6 +50,7 @@ pub(super) fn Banners() -> Element {
             PickStrip { title: tr(&line.title), body: line.body.as_ref().map(tr) }
         }
         super::netmode::NetBanner {}
+        crate::updates::UpdateBanner {}
     }
 }
 

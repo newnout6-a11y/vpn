@@ -69,8 +69,12 @@ fn version_parsing_and_gate() {
     assert_eq!(parse_version("1.14.4\n"), None);
     assert_eq!(parse_version("sing-box version x.y\n"), None);
     assert_eq!(parse_version(""), None);
-    assert!(version_supported((1, 14, 4)) && version_supported((1, 14, 0)));
-    assert!(!version_supported((1, 13, 13)) && !version_supported((1, 15, 0)));
+    assert!(version_supported((1, 14, 4)) && version_supported((1, 14, 9)));
+    assert!(
+        !version_supported((1, 14, 3))
+            && !version_supported((1, 13, 13))
+            && !version_supported((1, 15, 0))
+    );
 }
 
 #[test]

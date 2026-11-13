@@ -17,6 +17,8 @@ sha2 = "0.11"
 toml = "1"
 ureq = "3"
 zip = { version = "9", default-features = false, features = ["deflate"] }
+# `cargo xtask feed`: signs the update feed (prehashed Ed25519, minisign format).
+minisign = "0.10.0"
 
 [target.'cfg(windows)'.dependencies]
 # smoke-install reads the installer's registry values back (UTF-16, so the em dash in Comments round-trips).

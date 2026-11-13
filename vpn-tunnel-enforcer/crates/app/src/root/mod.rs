@@ -142,6 +142,7 @@ fn contexts(wiring: Wiring) -> Vec<Box<dyn Any>> {
     out.extend(api_maintenance::contexts(&backend, &built));
     out.extend(api_tools::contexts(&backend));
     out.extend(api_lists::contexts(&backend, &built));
+    out.extend(crate::svc_update::contexts(&backend));
     out.push(Box::new(Rc::new(wiring)));
     out
 }

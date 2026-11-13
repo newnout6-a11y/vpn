@@ -130,6 +130,7 @@ fn reality() -> Profile {
                 public_key: "fakefakefakefakefakefakefakefakefakefakefak".into(),
                 short_id: "ab".into(),
                 spider_x: None,
+                ..Reality::default()
             }),
             ..Tls::default()
         }),

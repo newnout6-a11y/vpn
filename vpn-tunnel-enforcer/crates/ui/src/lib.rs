@@ -10,6 +10,10 @@ mod test_support;
 /// backend crates' `LOCALES` as its extra layers.
 pub const LOCALES: &[(&str, &str)] = &[
     (
+        include_str!("../locales/p-updates.ru.json"),
+        include_str!("../locales/p-updates.en.json"),
+    ),
+    (
         include_str!("../locales/ui-dashboard.ru.json"),
         include_str!("../locales/ui-dashboard.en.json"),
     ),
@@ -93,5 +97,6 @@ pub mod theme;
 pub mod traffic_history;
 pub mod tray;
 pub mod units;
+pub mod updates;
 pub mod widgets;
 pub mod wizard;

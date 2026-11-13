@@ -98,6 +98,7 @@ pub(crate) fn tls(v: Option<&Value>, scan: &mut Scan) -> Result<Option<Tls>, &'s
                 public_key: public_key.to_owned(),
                 short_id: text(reality, &["short_id"]).unwrap_or_default().to_owned(),
                 spider_x: text(reality, &["spider_x"]).map(str::to_owned),
+                ..Reality::default()
             });
         }
     }

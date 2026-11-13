@@ -29,6 +29,7 @@ const TYPED: &[(&str, &[&str])] = &[
             "minVersion",
             "maxVersion",
             "pinnedPeerCertSha256",
+            "verifyPeerCertByName",
             "echConfigList",
         ],
     ),
@@ -47,6 +48,7 @@ const TYPED: &[(&str, &[&str])] = &[
             "spx",
             "fingerprint",
             "fp",
+            "mldsa65Verify",
             // Debug logging on the client: changes nothing on the wire.
             "show",
         ],

@@ -116,6 +116,7 @@ pub(super) fn read_tls(
                 .unwrap_or_default()
                 .to_owned(),
             spider_x: None,
+            ..Reality::default()
         });
         // E.g. mihomo's `support-x25519mlkem768`: sing-box REALITY has only key and short id.
         let read = ["public-key", "public_key", "short-id", "short_id"];

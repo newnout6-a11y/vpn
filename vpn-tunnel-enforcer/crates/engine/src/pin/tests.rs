@@ -22,7 +22,7 @@ fn manifest_pins_the_bundled_rule_sets() {
         assert_eq!(path, dir.join(name));
         assert!(pin(name).is_some(), "{name}");
         if resources().join(name).is_file() {
-            open_verified(&resources().join(name), pin(name)).unwrap();
+            open_verified(&resources().join(name), pin(name).as_slice()).unwrap();
         }
     }
     assert_eq!(
@@ -31,15 +31,21 @@ fn manifest_pins_the_bundled_rule_sets() {
     );
 }
 
-/// The compiled manifest pins every file an engine runs or loads; the exe comes first.
+/// The compiled manifest pins every file an engine runs or loads; the exe comes first. The pin
+/// is read from the manifest line itself, so an engine bump (engines-watch) keeps this green.
 #[test]
 fn manifest_pins_every_engine_file() {
     for name in ["sing-box.exe", "libcronet.dll", "wintun.dll", "xray.exe"] {
         assert!(pin(name).is_some(), "{name}");
     }
+    let line = MANIFEST
+        .lines()
+        .find(|l| l.contains(r#"install = "resources/sing-box.exe""#))
+        .unwrap();
+    let listed = line.split("sha256 = \"").nth(1).unwrap().get(..64).unwrap();
     assert_eq!(
         pin("sing-box.exe").map(hex::encode).as_deref(),
-        Some("8f30682ee198855440d2a7fe070d5d3653793b2d01bb8c85eea88f93bbe7c8b9")
+        Some(listed)
     );
     let exe = Path::new(r"C:\Apps\VPN\resources\sing-box.exe");
     let files = engine_files(Engine::SingBox, exe);
@@ -63,7 +69,7 @@ fn verified_files_are_held_and_others_refused() {
     std::fs::write(&path, b"fake engine").unwrap();
     let sha: [u8; 32] = Sha256::digest(b"fake engine").into();
 
-    let held = open_verified(&path, Some(sha)).unwrap();
+    let held = open_verified(&path, &[sha]).unwrap();
     let write = OpenOptions::new().write(true).open(&path).unwrap_err();
     assert_eq!(write.raw_os_error(), Some(SHARING_VIOLATION));
     assert!(std::fs::rename(&path, dir.path().join("moved.exe")).is_err());
@@ -71,17 +77,14 @@ fn verified_files_are_held_and_others_refused() {
     drop(held);
     assert!(OpenOptions::new().write(true).open(&path).is_ok());
 
-    let refused = |pin| {
+    let refused = |pin: &[[u8; 32]]| {
         open_verified(&path, pin)
             .map(drop)
             .map_err(|e| (e.file, e.missing))
     };
-    assert_eq!(
-        refused(Some([0; 32])),
-        Err(("sing-box.exe".to_owned(), false))
-    );
-    assert_eq!(refused(None), Err(("sing-box.exe".to_owned(), false)));
-    let missing = open_verified(&dir.path().join("wintun.dll"), Some(sha));
+    assert_eq!(refused(&[[0; 32]]), Err(("sing-box.exe".to_owned(), false)));
+    assert_eq!(refused(&[]), Err(("sing-box.exe".to_owned(), false)));
+    let missing = open_verified(&dir.path().join("wintun.dll"), &[sha]);
     assert_eq!(
         missing.map(drop).map_err(|e| (e.file, e.missing)),
         Err(("wintun.dll".to_owned(), true))
@@ -100,7 +103,7 @@ fn a_held_exe_still_starts() {
     let dir = TempDir::new("pin-run");
     let exe = dir.path().join("hostname.exe");
     std::fs::write(&exe, &bytes).unwrap();
-    let held = open_verified(&exe, Some(Sha256::digest(&bytes).into())).unwrap();
+    let held = open_verified(&exe, &[Sha256::digest(&bytes).into()]).unwrap();
     let out = hidden(&mut std::process::Command::new(&exe))
         .output()
         .unwrap();
@@ -150,4 +153,137 @@ fn elevated_bundled_engines_match_their_pins() {
     check(Engine::SingBox, &singbox).unwrap();
     check(Engine::Xray, &xray).unwrap();
     assert!(check(Engine::Xray, Path::new("xray.exe")).is_err());
+}
+
+/// A throw-away minisign key: (the app's view of the public key, the signer).
+fn test_key() -> (PublicKey, minisign::KeyPair) {
+    let pair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+    (PublicKey::from_base64(&pair.pk.to_base64()).unwrap(), pair)
+}
+
+fn sha_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// `<tmp>\sing-box\<folder>\` with an exe, libcronet and a feed listing sing-box `listed`
+/// (exe, libcronet and a would-be Wintun) signed by `signer`.
+fn downloaded(folder: &str, listed: &str, signer: &minisign::KeyPair) -> (TempDir, PathBuf) {
+    let tmp = TempDir::new("pin-feed");
+    let dir = tmp.path().join("sing-box").join(folder);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("sing-box.exe"), b"new engine").unwrap();
+    std::fs::write(dir.join("libcronet.dll"), b"new cronet").unwrap();
+    let member = |name: &str, body: &[u8]| serde_json::json!({ "path": format!("d/{name}"), "name": name, "sha256": sha_hex(body) });
+    let feed = serde_json::json!({
+        "schema": 1, "seq": 5, "issued": "2026-11-12T10:00:00Z", "app": { "stable": null },
+        "engines": [{ "id": "sing-box", "version": listed,
+            "archive": { "url": "https://example.invalid/a.zip", "size": 1, "sha256": sha_hex(b"zip") },
+            "files": [member("sing-box.exe", b"new engine"), member("libcronet.dll", b"new cronet"),
+                      member("wintun.dll", b"other wintun")] }]
+    });
+    let bytes = serde_json::to_vec(&feed).unwrap();
+    let sig = minisign::sign(
+        Some(&signer.pk),
+        &signer.sk,
+        std::io::Cursor::new(&bytes),
+        None,
+        None,
+    )
+    .unwrap()
+    .into_string();
+    std::fs::write(dir.join("update.json"), &bytes).unwrap();
+    std::fs::write(dir.join("update.json.minisig"), sig).unwrap();
+    (tmp, dir.join("sing-box.exe"))
+}
+
+/// The refusal of `name` under `pins` as the user sees it (`None` = accepted).
+fn verdict(expected: &[Expected], name: &str) -> Option<String> {
+    let (path, pins) = expected.iter().find(|(p, _)| p.ends_with(name)).unwrap();
+    match open_verified(path, pins) {
+        Ok(_) => None,
+        Err(err) => Some(
+            spawn_error("sing-box", &io::Error::new(io::ErrorKind::InvalidData, err))
+                .1
+                .key
+                .into_owned(),
+        ),
+    }
+}
+
+/// AT-11-010 / research §4.8: a downloaded version whose signed feed verifies with a compiled
+/// key and lies inside the compiled range runs elevated; Wintun still needs the release pin.
+#[test]
+fn a_signed_download_is_pinned_by_its_feed() {
+    let (public, signer) = test_key();
+    let (_tmp, exe) = downloaded("1.14.5", "1.14.5", &signer);
+    let pins = expected(Engine::SingBox, &exe, &[public]);
+    assert_eq!(verdict(&pins, "sing-box.exe"), None);
+    assert_eq!(verdict(&pins, "libcronet.dll"), None);
+    let wintun = &pins
+        .iter()
+        .find(|(p, _)| p.ends_with("wintun.dll"))
+        .unwrap()
+        .1;
+    assert_eq!(wintun, &pin("wintun.dll").into_iter().collect::<Vec<_>>());
+    assert!(pins.iter().all(|(_, p)| !p.is_empty()));
+    // A relative exe has no pins at all.
+    assert!(
+        expected(Engine::SingBox, Path::new("sing-box.exe"), &[test_key().0])
+            .iter()
+            .all(|(_, p)| p.is_empty())
+    );
+}
+
+/// A swapped file, a swapped feed, a foreign key, a version below the minimum, outside the
+/// range, or a folder that is not the listed version: `engine.process.notPinned`.
+#[test]
+fn every_tampering_is_refused() {
+    let refused = Some("engine.process.notPinned".to_owned());
+    let (public, signer) = test_key();
+
+    let (_a, exe) = downloaded("1.14.5", "1.14.5", &signer);
+    std::fs::write(&exe, b"swapped engine").unwrap();
+    assert_eq!(
+        verdict(
+            &expected(Engine::SingBox, &exe, std::slice::from_ref(&public)),
+            "sing-box.exe"
+        ),
+        refused
+    );
+
+    let (_b, exe) = downloaded("1.14.5", "1.14.5", &signer);
+    let feed = exe.with_file_name("update.json");
+    let text = std::fs::read_to_string(&feed)
+        .unwrap()
+        .replace("\"seq\":5", "\"seq\":6");
+    std::fs::write(&feed, text).unwrap();
+    assert_eq!(
+        verdict(
+            &expected(Engine::SingBox, &exe, std::slice::from_ref(&public)),
+            "sing-box.exe"
+        ),
+        refused
+    );
+
+    let (_c, exe) = downloaded("1.14.5", "1.14.5", &signer);
+    assert_eq!(
+        verdict(
+            &expected(Engine::SingBox, &exe, &[test_key().0]),
+            "sing-box.exe"
+        ),
+        refused
+    );
+
+    for (folder, listed) in [
+        ("1.14.3", "1.14.3"),
+        ("1.15.0", "1.15.0"),
+        ("1.14.6", "1.14.5"),
+    ] {
+        let (_d, exe) = downloaded(folder, listed, &signer);
+        let got = verdict(
+            &expected(Engine::SingBox, &exe, std::slice::from_ref(&public)),
+            "sing-box.exe",
+        );
+        assert_eq!(got, refused, "{folder} / {listed}");
+    }
 }

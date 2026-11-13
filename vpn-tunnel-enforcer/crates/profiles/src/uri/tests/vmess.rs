@@ -87,7 +87,7 @@ fn vmess_json_errors() {
 }
 
 /// AT-04-002, K14: v2rayN / 3x-ui keep the gRPC and XHTTP mode in `type`; an explicit `mode`
-/// wins, `none` means unset. Their `pcs` pin is read, `vcn` is noted (not dropped silently).
+/// wins, `none` means unset. Their `pcs` pin and `vcn` names are read (AT-04-006).
 #[test]
 fn vmess_json_mode_in_type() {
     let doc = |net: &str, extra: serde_json::Value| {
@@ -119,15 +119,17 @@ fn vmess_json_mode_in_type() {
         "ws",
         json!({"type": "none", "pcs": pin, "vcn": "n.example"}),
     );
-    let expected = vec![
-        Note::CertPinNotEnforced,
-        Note::UnsupportedField("vcn".into()),
-    ];
-    assert_eq!(pinned.notes, expected);
+    assert_eq!(pinned.notes, vec![Note::CertPinNotEnforced]);
+    let tls = pinned.tls.expect("TLS");
     assert_eq!(
-        pinned.tls.and_then(|t| t.cert_pin_sha256),
+        tls.cert_pin_sha256,
         Some(pin),
         "pcs is Xray's pinnedPeerCertSha256"
+    );
+    assert_eq!(
+        tls.cert_names(),
+        Some("n.example"),
+        "vcn is verifyPeerCertByName"
     );
 }
 

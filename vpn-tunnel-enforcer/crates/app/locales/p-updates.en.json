@@ -1,0 +1,24 @@
+{
+  "app": {
+    "update": {
+      "updated": "Updated to {{version}}",
+      "securityTitle": "Version {{version}} with a security fix is available",
+      "securityBody": "You can update from the start page whenever it suits you.",
+      "nothingNew": "No new versions.",
+      "busy": "Please wait: a download is already running.",
+      "notReady": "The update channel is not set up in this build yet.",
+      "fileError": "The update file could not be written.",
+      "noShell": "The app runs as administrator. Close it, start it the usual way and update.",
+      "launchFailed": "The installer did not start.",
+      "engineInstalled": "{{name}} {{version}} installed. It takes over after the app restarts.",
+      "downloadFailed": "The update could not be downloaded. Try again later.",
+      "downloadInvalid": "The downloaded file failed its check; nothing was installed.",
+      "engineNotAllowed": "This {{name}} version does not fit this version of the app.",
+      "engineVersion": "{{name}} reported version {{got}} instead of {{want}}; nothing was installed.",
+      "engineRefused": "{{name}} refused our settings ({{reason}}); nothing was installed.",
+      "engineSwitched": "{{name}}: takes over after the app restarts.",
+      "nothingToRestore": "There is nothing to go back to.",
+      "trialFailed": "{{name}} {{from}} does not start. {{to}} comes back at the next app start."
+    }
+  }
+}

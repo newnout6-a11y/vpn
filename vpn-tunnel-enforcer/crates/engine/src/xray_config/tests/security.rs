@@ -78,6 +78,7 @@ fn reality_spider_x() {
                     public_key: PBK.into(),
                     short_id: String::new(),
                     spider_x: value.map(str::to_owned),
+                    ..Reality::default()
                 }),
                 ..Tls::default()
             }),

@@ -112,6 +112,7 @@ pub(super) fn reality(server: &str) -> Profile {
             public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
             short_id: "0123abcd".into(),
             spider_x: None,
+            ..Reality::default()
         });
     }
     p

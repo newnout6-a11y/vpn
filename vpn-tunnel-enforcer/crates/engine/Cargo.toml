@@ -28,7 +28,13 @@ vpnte-base.workspace = true
 vpnte-core.workspace = true
 vpnte-profiles.workspace = true
 vpnte-winnet.workspace = true
+# p-updates: the signed feed of downloaded engines (elevated pin check) and the compiled version range.
+vpnte-update.workspace = true
 windows.workspace = true
+
+[dev-dependencies]
+# p-updates: signs the test feeds of the pin check with throw-away keys.
+minisign = "0.10.0"
 
 [lints]
 workspace = true

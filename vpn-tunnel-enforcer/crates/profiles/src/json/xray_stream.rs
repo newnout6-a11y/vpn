@@ -42,15 +42,27 @@ pub(crate) fn tls(stream: &Map<String, Value>) -> Result<Option<Tls>, &'static s
         max_version: owned(&["maxVersion"]),
         cert_pin_sha256: text(src, &["pinnedPeerCertSha256"]).and_then(sha256_pin),
         ech: text(src, &["echConfigList"]).map(ech),
+        // REALITY verifies by key: Xray reads no certificate names there.
+        verify_peer_cert_by_name: text(src, &["verifyPeerCertByName"])
+            .filter(|_| !reality)
+            .and_then(Tls::parse_cert_names),
         ..Tls::default()
     };
     if reality {
         let public_key = text(src, &["publicKey", "password", "public_key"])
             .ok_or("REALITY without publicKey")?;
+        // Xray refuses a malformed key; dropping it would skip the check the provider set.
+        let mldsa65_verify = match text(src, &["mldsa65Verify"]) {
+            Some(raw) => {
+                Some(Reality::parse_mldsa65_key(raw).ok_or("invalid REALITY mldsa65Verify")?)
+            }
+            None => None,
+        };
         tls.reality = Some(Reality {
             public_key: public_key.to_owned(),
             short_id: owned(&["shortId", "short_id"]).unwrap_or_default(),
             spider_x: owned(&["spiderX", "spider_x", "spx"]),
+            mldsa65_verify,
         });
     }
     Ok(Some(tls))

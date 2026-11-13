@@ -233,6 +233,9 @@ pub struct Tls {
     pub certificate_pem: Option<String>,
     pub min_version: Option<String>,
     pub max_version: Option<String>,
+    /// Xray `verifyPeerCertByName` (`vcn`): comma-separated names the certificate is checked
+    /// against instead of the SNI, e.g. a whitelisted SNI in front of the server's real name.
+    pub verify_peer_cert_by_name: Option<String>,
 }
 
 /// uTLS fingerprints REALITY servers since Xray 26.9.8 refuse (`android` and `360` fail on every
@@ -241,6 +244,24 @@ pub const REALITY_REFUSED_FINGERPRINTS: [&str; 6] =
     ["edge", "ios", "qq", "random", "android", "360"];
 
 impl Tls {
+    /// `raw` as Xray reads `verifyPeerCertByName`: names trimmed, empty items dropped; `None`
+    /// when no name is left.
+    pub(crate) fn parse_cert_names(raw: &str) -> Option<String> {
+        let names: Vec<&str> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .collect();
+        (!names.is_empty()).then(|| names.join(","))
+    }
+
+    /// The `verifyPeerCertByName` Xray gets: on TLS only (REALITY checks no certificate), never
+    /// blank. Engine choice and both emitters go by this one answer.
+    pub fn cert_names(&self) -> Option<&str> {
+        let names = self.verify_peer_cert_by_name.as_deref()?.trim();
+        (self.reality.is_none() && !names.is_empty()).then_some(names)
+    }
+
     /// REALITY with a provider fingerprint that current REALITY servers refuse.
     pub fn refused_reality_fingerprint(&self) -> bool {
         self.reality.is_some()
@@ -257,6 +278,28 @@ pub struct Reality {
     pub public_key: String,
     pub short_id: String,
     pub spider_x: Option<String>,
+    /// Xray `mldsa65Verify` (`pqv`): the server's ML-DSA-65 public key, unpadded base64url.
+    pub mldsa65_verify: Option<String>,
+}
+
+/// Bytes of an ML-DSA-65 public key; Xray refuses an `mldsa65Verify` of any other length.
+const MLDSA65_PUBLIC_KEY_LEN: usize = 1952;
+
+impl Reality {
+    /// `raw` as the unpadded base64url Xray demands; providers also write standard base64 and
+    /// padding. `None` when it is not an ML-DSA-65 public key.
+    pub(crate) fn parse_mldsa65_key(raw: &str) -> Option<String> {
+        use base64::Engine as _;
+        let key = crate::common::b64::base64_bytes(raw)?;
+        (key.len() == MLDSA65_PUBLIC_KEY_LEN)
+            .then(|| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key))
+    }
+
+    /// The `mldsa65Verify` Xray gets, never blank.
+    pub fn mldsa65_key(&self) -> Option<&str> {
+        let key = self.mldsa65_verify.as_deref()?.trim();
+        (!key.is_empty()).then_some(key)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

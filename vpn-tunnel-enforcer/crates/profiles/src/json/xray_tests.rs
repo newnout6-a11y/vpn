@@ -223,10 +223,6 @@ fn plain_outbounds_are_typed_xray_only_ones_keep_the_graph() {
         ),
         with("/sendThrough", json!("192.0.2.99")),
         with(
-            "/streamSettings/realitySettings/mldsa65Verify",
-            json!("FAKE"),
-        ),
-        with(
             "/streamSettings/tcpSettings/header",
             json!({ "type": "http", "request": { "path": ["/"] } }),
         ),

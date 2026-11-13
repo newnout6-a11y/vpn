@@ -15,6 +15,7 @@ mod resolve;
 mod security;
 mod select;
 mod sniff;
+mod tls_names;
 mod translate;
 mod udp;
 mod warnings;
@@ -147,6 +148,7 @@ fn reality(sni: &str) -> Option<Tls> {
             public_key: PBK.into(),
             short_id: SID.into(),
             spider_x: None,
+            ..Reality::default()
         }),
         ..Tls::default()
     })

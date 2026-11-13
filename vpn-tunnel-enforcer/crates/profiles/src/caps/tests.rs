@@ -192,6 +192,7 @@ fn reality_and_tcp_tls_use_a_fingerprint() {
             public_key: "pbk".into(),
             short_id: "1234".into(),
             spider_x: None,
+            ..Reality::default()
         }),
         ..tls("www.example.com")
     };

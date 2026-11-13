@@ -22,3 +22,4 @@ pub mod svc_core;
 pub mod svc_live;
 pub mod svc_proxies;
 pub mod svc_tunnel;
+pub mod svc_update;

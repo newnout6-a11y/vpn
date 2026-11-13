@@ -1,6 +1,7 @@
 //! `cargo xtask <command>`: build automation that must behave the same locally and in CI.
 mod dist;
 mod engines;
+mod feed;
 mod fetch;
 mod manifest;
 mod notices;
@@ -32,6 +33,11 @@ cargo xtask <command>
                         HKCU registry, links and app start, that nothing machine-wide was written, upgrade over
                         itself, uninstall, check that nothing is left
   version               print the workspace version (release tags must be v<version>)
+  feed [--dist DIR | --base update.json] [--engines FILE] [--out DIR] [--seq N] [--severity S]
+       [--notes-ru FILE] [--notes-en FILE] [--warn-below V] [--rollback-to V --rollback-checksums FILE
+       --rollback-size N] [--pubkey RW...]
+                        build the signed update feed (update.json + update.json.minisig, default target/feed)
+                        with the key in UPDATE_SIGNING_KEY (+ UPDATE_SIGNING_PASSWORD); --verify checks one
 ";
 
 fn main() -> Result<()> {
@@ -56,6 +62,7 @@ fn main() -> Result<()> {
         Some("smoke-install") => smoke::run(&root),
         #[cfg(not(windows))]
         Some("smoke-install") => bail!("smoke-install runs only on Windows"),
+        Some("feed") => feed::run(&root, &args[1..]),
         Some("version") => {
             println!("{}", dist::workspace_version(&root)?);
             Ok(())

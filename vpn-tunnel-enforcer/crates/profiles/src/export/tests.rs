@@ -226,6 +226,7 @@ fn golden() -> Vec<(Profile, &'static str)> {
         public_key: "PBK-synthetic_key".into(),
         short_id: "1234".into(),
         spider_x: Some("/test-path".into()),
+        ..Reality::default()
     };
     let mut p = profile(
         "Reality",
@@ -919,6 +920,7 @@ fn more_linkable() -> Vec<Profile> {
         public_key: "PBK".into(),
         short_id: "d34db33f".into(),
         spider_x: None,
+        ..Reality::default()
     };
     let reality_tls = Tls {
         server_name: Some("www.example.com".into()),

@@ -220,3 +220,22 @@ run's value goes (the start-up recovery owns what is left) and a hidden top-leve
 the Soft values back at `WM_ENDSESSION(TRUE)` (logoff, shutdown) without the variables
 broadcast. A process on an overridden data dir (`VPNTE_DATA_DIR`) never touches the value: the
 sign-in process would read the default journal. Decisions: `progress/p-proxy-restore.md`.
+
+## Update channel (`svc_update`, package p-updates)
+`root::contexts` adds `svc_update::contexts(&backend)`: one `Rc<dyn vpnte_ui::updates::UpdatesApi>`
+(the start page's `UpdateBanner`, Settings' «Обновления» and «Движки»). Nothing is checked while
+`vpnte_update::policy::keys_ready()` is false (placeholder keys): the section says so in one line.
+With keys: the checker (`vpnte_update::check::run`, 2-5 min after start, then daily) fetches the
+signed feed through the session's `live-check-in`, then directly (`mixed-direct-in` while a session
+runs), from the mirrors in order; an accepted feed is kept in `%LOCALAPPDATA%\VPN Tunnel
+Enforcer\updates\` with its signature, its `seq` in `updates.json` (data dir: auto check, download
+ahead, skipped versions, last check). «Обновить» downloads the installer (size + SHA-256 from the
+feed, held open), writes `updates\pending.json` and starts `"<setup>" /S --updated --force-run` as
+the desktop user (`svc_update::launch`); the installer's `--setup await-shutdown` gate then asks
+this app to exit (code 73). The next start reads `pending.json`: «Обновлено до …» once, or a banner
+with the kept installer. Engines: `svc_core::build` resolves `Backend::engines` through
+`vpnte_update::store::EngineStore` (the active downloaded version while usable, else bundled);
+«Установить» installs into the store after `AppCheck` (version + our configs through the new
+engine's own check), effective from the next app start (the tunnel holds fixed paths); the trial
+watch (`svc_update::trial`) counts this run's starts of an engine on trial. Security releases: one
+notice through `backend.notifier`, no «Пропустить», never forced.

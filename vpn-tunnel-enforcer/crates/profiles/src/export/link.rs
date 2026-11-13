@@ -9,7 +9,7 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::Value;
 
 use crate::common::fields::{XHTTP_MODES, parse_host};
-use crate::model::{Host, Tls, Transport};
+use crate::model::{Host, Reality, Tls, Transport};
 
 /// RFC 3986 unreserved characters stay, everything else is encoded (`+` -> `%2B`, space ->
 /// `%20`, `,` -> `%2C`): the importer reads `+` literally and decodes exactly once.
@@ -188,7 +188,11 @@ fn tls_params(
         || t.fingerprint
             .as_deref()
             .is_some_and(|fp| fp.eq_ignore_ascii_case("none"));
-    if unlinkable {
+    // Xray's own checks: the importer reads `pqv` / `vcn` on the V2Ray family only, so another
+    // scheme cannot carry them.
+    let checks =
+        t.cert_names().is_some() || t.reality.as_ref().and_then(Reality::mldsa65_key).is_some();
+    if unlinkable || (checks && insecure_key != "allowInsecure") {
         return None;
     }
     match (&t.reality, mode) {
@@ -206,7 +210,9 @@ fn tls_params(
         q.opt("pbk", Some(&reality.public_key))?;
         q.text("sid", &reality.short_id);
         q.opt("spx", reality.spider_x.as_deref())?;
+        q.opt("pqv", reality.mldsa65_key())?;
     }
+    q.opt("vcn", t.cert_names())?;
     if let Some(ech) = &t.ech {
         q.set("ech", "1");
         q.list("echConfig", &ech.config_lines)?;

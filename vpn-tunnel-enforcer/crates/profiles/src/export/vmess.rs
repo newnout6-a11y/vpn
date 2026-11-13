@@ -188,7 +188,14 @@ fn tls(o: &mut Object, tls: Option<&Tls>) -> Option<()> {
     if t.insecure {
         put(o, "allowInsecure", true);
     }
+    // v2rayN's VMess JSON has `vcn`; it has no `pqv`, so such a REALITY key needs a link form.
+    if let Some(names) = t.cert_names() {
+        put(o, "vcn", names);
+    }
     if let Some(reality) = &t.reality {
+        if reality.mldsa65_key().is_some() {
+            return None;
+        }
         put(o, "pbk", exact(&reality.public_key)?);
         if !reality.short_id.is_empty() {
             put(o, "sid", exact(&reality.short_id)?);

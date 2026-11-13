@@ -53,6 +53,7 @@ fn basic_profiles_pass_xray_test() {
                 public_key: PBK.into(),
                 short_id: String::new(),
                 spider_x: Some("abc".into()),
+                ..Reality::default()
             }),
             ..Tls::default()
         }),
@@ -240,6 +241,7 @@ fn security_options_pass_xray_test() {
                 public_key: PBK.into(),
                 short_id: SID.into(),
                 spider_x: None,
+                ..Reality::default()
             }),
             ..tls
         };

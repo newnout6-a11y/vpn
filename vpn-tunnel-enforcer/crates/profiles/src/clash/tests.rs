@@ -143,6 +143,7 @@ fn vless_reality_block() {
         public_key: "SYNTHETIC-PUBLIC-KEY".into(),
         short_id: "0123".into(),
         spider_x: None,
+        ..Reality::default()
     };
     assert_eq!(t.reality, Some(reality));
     assert!(p.transport.is_none());

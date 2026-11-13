@@ -305,9 +305,13 @@ pub fn parse_version(text: &str) -> Option<(u16, u16, u16)> {
 }
 
 /// The generated config uses 1.14-only fields (`dns_mode`) and ≤1.13 rejects unknown ones, so
-/// only 1.14.x is accepted.
+/// only the compiled range is accepted: 1.14.x from the bundled release on
+/// (`vpnte_update::policy::engine_range`, shared with the update channel and the pin check).
 pub fn version_supported(version: (u16, u16, u16)) -> bool {
-    matches!(version, (1, 14, _))
+    vpnte_update::policy::engine_allowed(
+        vpnte_update::policy::SINGBOX,
+        vpnte_update::version::Version::from_triple(version),
+    )
 }
 
 /// `exe check -c stdin`: decodes the config and builds every component without starting it

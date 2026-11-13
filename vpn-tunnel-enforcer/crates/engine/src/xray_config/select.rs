@@ -4,7 +4,7 @@ use serde::Serialize;
 use vpnte_base::error::AppError;
 use vpnte_base::msg::Msg;
 use vpnte_base::types::{Engine, EnginePref};
-use vpnte_profiles::model::{Host, Kind, Profile, Transport};
+use vpnte_profiles::model::{Host, Kind, Profile, Reality, Tls, Transport};
 
 /// Shadowsocks ciphers the bundled Xray builds (checked with `xray run -test`; it refuses
 /// `none`, `plain`, `aes-192-gcm` and the legacy stream ciphers sing-box still has).
@@ -33,7 +33,8 @@ pub enum SelectReason {
     Preference,
     /// Current Xray REALITY servers reject the sing-box client (sing-box issue #4520).
     Reality,
-    /// XHTTP, gRPC multi / explicit gun, VLESS Encryption or a RAW HTTP header mask.
+    /// XHTTP, gRPC multi / explicit gun, VLESS Encryption, a RAW HTTP header mask, certificate
+    /// names or the REALITY ML-DSA-65 key.
     XrayTransport,
     /// Provider Xray graph (balancers, bridges, loopback reroutes).
     NativeXray,
@@ -306,7 +307,9 @@ fn xray_lacks(p: &Profile) -> Option<XrayLacks> {
     }
 }
 
-/// XHTTP, gRPC multi mode, RAW HTTP header mask or VLESS Encryption: sing-box has none of them.
+/// XHTTP, gRPC multi mode, RAW HTTP header mask, VLESS Encryption, certificate names
+/// (`verifyPeerCertByName`) or the REALITY ML-DSA-65 key: sing-box has none of them, and running
+/// a check-carrying profile there would quietly drop the check.
 fn xray_only(p: &Profile) -> bool {
     matches!(
         p.transport,
@@ -319,6 +322,17 @@ fn xray_only(p: &Profile) -> bool {
                 | Transport::TcpHttpHeader { .. }
         )
     ) || vless_encryption(&p.kind).is_some()
+        || p.tls.as_ref().is_some_and(xray_checks)
+}
+
+/// Certificate names or the REALITY ML-DSA-65 key: checks only Xray makes.
+fn xray_checks(tls: &Tls) -> bool {
+    tls.cert_names().is_some()
+        || tls
+            .reality
+            .as_ref()
+            .and_then(Reality::mldsa65_key)
+            .is_some()
 }
 
 fn explicit_gun(p: &Profile) -> bool {
@@ -364,7 +378,9 @@ pub(super) fn singbox_only(p: &Profile) -> Option<SingBoxOnly> {
     }
     let reality = reality(p);
     if let Some(tls) = p.tls.as_ref().filter(|_| !reality) {
-        if tls.insecure && cert_pin(p).is_none() {
+        // Certificate names keep the CA check (against those names), so Xray needs no
+        // `allowInsecure` for a provider that also set it for older clients.
+        if tls.insecure && cert_pin(p).is_none() && tls.cert_names().is_none() {
             return Some(SingBoxOnly::InsecureWithoutPin);
         }
         if !tls.spki_pin_sha256.is_empty() {

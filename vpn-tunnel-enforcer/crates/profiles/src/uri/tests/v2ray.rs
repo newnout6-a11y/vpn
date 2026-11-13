@@ -141,12 +141,12 @@ fn unknown_security_and_header_types_are_rejected() {
 #[test]
 fn unmodeled_xray_parameters_are_noted() {
     let line = format!(
-        "vless://{ID0}@h.example:443?security=reality&pbk={PBK}&fragment=1,40-60,30-50&pqv=SYNTH#F"
+        "vless://{ID0}@h.example:443?security=reality&pbk={PBK}&fragment=1,40-60,30-50&noises=SYNTH#F"
     );
     let p = ok(&line);
     let expected = vec![
         Note::UnsupportedField("fragment".into()),
-        Note::UnsupportedField("pqv".into()),
+        Note::UnsupportedField("noises".into()),
     ];
     assert_eq!(p.notes, expected);
 }

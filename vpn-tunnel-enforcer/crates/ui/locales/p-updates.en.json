@@ -1,0 +1,55 @@
+{
+  "ui": {
+    "update": {
+      "title": "Updates",
+      "notReady": "The update channel is not set up in this build yet.",
+      "auto": "Check automatically",
+      "autoHint": "Once a day: a small signed file, no identifiers.",
+      "ahead": "Download in advance",
+      "aheadHint": "A new version downloads by itself and installs only when you click. Off to save mobile data.",
+      "checkNow": "Check now",
+      "lastCheck": "Last check: {{at}}",
+      "sourceVpn": "{{host}} through the VPN",
+      "sourceDirect": "{{host}} directly",
+      "result": {
+        "upToDate": "no new versions",
+        "found": "an update is available",
+        "stale": "the update feed has not changed for a long time",
+        "failed": "the check did not go through"
+      },
+      "skipped": "Skipped versions: {{versions}}",
+      "resetSkipped": "Reset",
+      "rollback": "Go back to {{version}}",
+      "app": {
+        "available": "Version {{version}} is available",
+        "security": "Version {{version}} with a security fix is available",
+        "update": "Update",
+        "skip": "Skip this version"
+      },
+      "whatsNew": "What's new",
+      "later": "Later",
+      "downloading": "Downloading: {{what}}",
+      "progress": "{{done}} of {{total}} MB",
+      "updated": "Updated to {{version}}",
+      "failed": "The update to {{version}} did not install",
+      "failedBody": "The installer is kept; you can run it again.",
+      "retry": "Run it again",
+      "dismiss": "Hide",
+      "engine": {
+        "offer": "{{name}} {{from}} → {{to}}",
+        "offerTested": "{{name}} {{from}} → {{to}} (tested by us {{day}})",
+        "install": "Install",
+        "when": "The new engine takes over after the app restarts."
+      },
+      "engines": {
+        "title": "Engines",
+        "hint": "The built-in engines stay in the app: you can always go back to them.",
+        "bundled": "built in",
+        "updated": "updated {{day}}",
+        "previous": "Go back to {{version}}",
+        "restoreBundled": "Restore the built-in one"
+      },
+      "demoInstalled": "{{name}} {{version}} installed."
+    }
+  }
+}

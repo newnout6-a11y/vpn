@@ -32,6 +32,8 @@ vpnte-cleanup.workspace = true
 vpnte-view.workspace = true
 vpnte-ui.workspace = true
 vpnte-service.workspace = true
+# p-updates: the signed update feed, downloads and the engine store.
+vpnte-update.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 dioxus.workspace = true

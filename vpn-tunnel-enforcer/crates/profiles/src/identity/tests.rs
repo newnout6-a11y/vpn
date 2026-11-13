@@ -47,6 +47,7 @@ fn reality(p: &mut Profile, key: &str) {
         public_key: key.into(),
         short_id: "1234".into(),
         spider_x: None,
+        ..Reality::default()
     };
     p.tls = Some(Tls {
         reality: Some(reality),

@@ -3,7 +3,7 @@
 sing-box and Xray: the full sing-box config of a tunnel start, Xray configs and endpoint
 resolution, engine processes (spawn / readiness / exit / faults), the Clash API client, the
 user's routing document (split tunnelling, DNS profiles, domain rules, hits), Smart RU rule
-sets and installed-app discovery. Depends on `vpnte-base`, `vpnte-core`, `vpnte-winnet`,
+sets and installed-app discovery. Depends on `vpnte-base`, `vpnte-core`, `vpnte-winnet`, `vpnte-update`,
 `vpnte-profiles`.
 
 ```toml
@@ -41,7 +41,12 @@ the process ends (the first run hashes them once). A different or relative-path 
 before the spawn: `io::ErrorKind::InvalidData`, rendered as `engine.process.notPinned(file)` by
 the `From<…> for AppError` impls; a missing one (a missing DLL too: Windows would search `PATH`
 for it) as `io::ErrorKind::NotFound`, rendered as `engine.process.fileMissing(file)`. Unelevated
-nothing is checked. The bundled Smart RU rule sets (`geoip-ru.srs`, `geosite-category-gov-ru.srs`) are
+nothing is checked. A version the update channel downloaded (`<local>\engines\<id>\<version>\`,
+`vpnte_update::store`) is pinned by the signed feed stored next to it (`update.json` +
+`.minisig`): re-verified with the compiled keys at every elevated check, used only when it lists
+this engine at exactly the folder's version and that version lies inside the compiled range
+(`vpnte_update::policy::engine_range`, whose floor stops an old signed feed); `wintun.dll` always
+needs the release pin. The bundled Smart RU rule sets (`geoip-ru.srs`, `geosite-category-gov-ru.srs`) are
 pinned the same way: an elevated `RuleSetService::active` uses only them, and only while they match
 (a refused file = `None`, Smart RU off for the run with its usual warning).
 **Errors:** every error enum has `From<_> for vpnte_base::AppError` with an `engine.*` message;
@@ -237,7 +242,7 @@ pub enum CheckError { Rejected(String /* redacted */), Run(io::Error) }
 pub fn classify_fault<'a>(lines: impl IntoIterator<Item = &'a str>) -> Option<OutboundFault>;
 pub async fn engine_version(exe: &Path) -> io::Result<(u16, u16, u16)>;  // cache once per app run
 pub fn parse_version(text: &str) -> Option<(u16, u16, u16)>;
-pub fn version_supported(v: (u16, u16, u16)) -> bool;                    // 1.14.x only
+pub fn version_supported(v: (u16, u16, u16)) -> bool;                    // compiled range >=1.14.4 <1.15.0 (vpnte_update::policy)
 pub async fn check_config(exe: &Path, config: &[u8]) -> Result<(), CheckError>;  // `check -c stdin`, 10 s
 ```
 The exit is published after the output pumps drained (tail and bind evidence complete).
@@ -379,16 +384,20 @@ pub enum XrayConfigError { Protocol(&'static str), Feature(SingBoxOnly), Invalid
 **Outbounds** (bundled Xray 26.11.9; each shape passes `xray run -test`): VLESS, VMess, Trojan,
 Shadowsocks (9 ciphers; UDP-over-TCP only with 2022 ciphers), Hysteria2 (`hysteria` v2: TLS
 always, salamander / gecko in `finalmask.udp`, port hopping, Brutal bandwidth and BBR preset in
-`finalmask.quicParams`, certificate pin as `pinnedPeerCertSha256`), WireGuard (user-space, no
+`finalmask.quicParams`, certificate pin as `pinnedPeerCertSha256`, certificate names as
+`verifyPeerCertByName`), WireGuard (user-space, no
 adapter, provider DNS as `remoteDNS`), SOCKS (no TLS, no transport), HTTP (TLS allowed, no
 transport). TUIC, Naive, AnyTLS and ShadowTLS have no Xray outbound (Auto / forced sing-box:
 `SelectReason::Protocol`; forced Xray: `Reject::XrayLacks`).
 Static ECH configs go to `echConfigList`; ECH by DNS lookup, over QUIC or with REALITY stays
-`SingBoxOnly::Ech`. uTLS: the provider's fingerprint is kept (with a warning when servers refuse
+`SingBoxOnly::Ech`. TLS writes `Tls::cert_names()` as `verifyPeerCertByName` (the SNI stays
+`serverName`), REALITY writes `Reality::mldsa65_key()` as `mldsa65Verify`. uTLS: the provider's fingerprint is kept (with a warning when servers refuse
 it), otherwise the device default if it is chrome / firefox / safari, else chrome. XHTTP gets
 an explicit `extra.xmux` (4-6 connections) unless the provider set one; no typed outbound ever
 carries `mux`, and mux.cool is removed from a provider graph's XHTTP outbounds.
-**Selection:** Auto picks Xray for provider graphs, Xray-only transports, explicit gRPC gun,
+**Selection:** Auto picks Xray for provider graphs, Xray-only transports and checks
+(`verifyPeerCertByName`, REALITY `mldsa65Verify`: `XrayTransport`; forced sing-box ->
+`Reject::XrayTransport`), explicit gRPC gun,
 REALITY and (new) any non-REALITY TLS profile with a certificate pin (`CertPin`: sing-box
 cannot enforce a DER hash pin); sing-box otherwise. Forced Xray runs every Xray-capable kind and
 refuses the rest (no engine is ever switched silently; owner decision 2026-11-11). Show the
@@ -727,7 +736,8 @@ no fragment key is unused).
   implemented. Clash `/proxies/<tag>/delay` is dropped.
 - `resolve_hosts`: the 5-minute server-list IP seed is the caller's (leave known hosts out and
   merge them); one outbound with several different names and an empty server name keeps only
-  the first pin (no warning). Xray `verifyPeerCertByName` / `mldsa65Verify` are not modelled;
+  the first pin (no warning). `insecure` next to certificate names is not `InsecureWithoutPin`:
+  the names keep the CA check, `allowInsecure` is never written (also in XHTTP `extra`).
   VLESS Encryption strings are not validated (Xray's own start failure is reported).
 - Not run here: live rule-set downloads from GitHub (loopback HTTP tests only), the registry
   discovery smoke test (`#[ignore]`, reads this PC), directory-junction walking of `scan_programs`.

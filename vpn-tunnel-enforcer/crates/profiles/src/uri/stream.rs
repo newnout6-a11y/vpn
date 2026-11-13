@@ -96,6 +96,8 @@ fn reality(p: &Params) -> Res<Reality> {
             .unwrap_or_default()
             .to_owned(),
         spider_x: p.get(&["spx", "spider_x", "spiderX"]).map(str::to_owned),
+        // `pqv` is read by the V2Ray-family reader, where Xray defines it.
+        ..Reality::default()
     })
 }
 

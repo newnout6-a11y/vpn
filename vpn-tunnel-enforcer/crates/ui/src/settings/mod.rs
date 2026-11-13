@@ -170,6 +170,7 @@ pub fn SettingsPage() -> Element {
                 dns::Dns {}
                 domains::Domains {}
                 notifications::Notifications {}
+                crate::updates::UpdatesSection {}
                 transfer::Transfer {}
                 advanced::AdvancedMode {}
                 if advanced {

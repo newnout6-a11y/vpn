@@ -5,7 +5,7 @@ use super::parts::{Link, Params, description, host_name, name, port, split_once}
 use super::stream::{TlsMode, mux, tls, transport};
 use super::{Meta, Res, bad, skip};
 use crate::common::b64::base64_text;
-use crate::model::{Host, Kind, Note, Profile, SkipReason};
+use crate::model::{Host, Kind, Note, Profile, Reality, SkipReason, Tls};
 
 pub(super) fn vless(body: &str, meta: Meta) -> Res<Profile> {
     let link = Link::parse(body);
@@ -138,19 +138,52 @@ fn vmess_profile(
     Ok(profile)
 }
 
-/// Xray link parameters the profile model cannot carry (TLS fragmentation, UDP noise, REALITY
-/// ML-DSA key, certificate name override, gRPC authority): noted so the loss is visible.
-const UNMODELED: &[&str] = &["fragment", "noises", "pqv", "vcn", "authority"];
+/// Xray link parameters the profile model cannot carry (TLS fragmentation, UDP noise, gRPC
+/// authority): noted so the loss is visible.
+const UNMODELED: &[&str] = &["fragment", "noises", "authority"];
 
 /// TLS, transport and mux of the V2Ray-family schemes.
 fn stream(profile: &mut Profile, p: &Params, mode: TlsMode) -> Res<()> {
     profile.tls = tls(p, mode, &mut profile.notes)?;
+    xray_checks(profile, p)?;
     profile.transport = transport(p)?;
     profile.mux = mux(p);
     let unmodeled = UNMODELED.iter().filter(|name| p.get(&[name]).is_some());
     profile
         .notes
         .extend(unmodeled.map(|name| Note::UnsupportedField((*name).into())));
+    Ok(())
+}
+
+/// Xray 26 checks on top of the shared TLS reader: `vcn` (`verifyPeerCertByName`) on TLS, `pqv`
+/// (`mldsa65Verify`) on REALITY. On the other security they mean nothing: dropped with a note.
+/// A malformed `pqv` fails the link, like a malformed pin: Xray refuses to start with it, and
+/// dropping it would skip a check the provider asked for.
+fn xray_checks(profile: &mut Profile, p: &Params) -> Res<()> {
+    let mut names = p
+        .get(&["vcn", "verifyPeerCertByName"])
+        .and_then(Tls::parse_cert_names);
+    let mut pq = p.get(&["pqv", "mldsa65Verify"]);
+    if let Some(tls) = profile.tls.as_mut() {
+        match tls.reality.as_mut() {
+            Some(reality) => {
+                if let Some(raw) = pq.take() {
+                    let Some(key) = Reality::parse_mldsa65_key(raw) else {
+                        return bad("REALITY ML-DSA-65 key (pqv) is not a valid public key");
+                    };
+                    reality.mldsa65_verify = Some(key);
+                }
+            }
+            None => tls.verify_peer_cert_by_name = names.take(),
+        }
+    }
+    let dropped = [("vcn", names.is_some()), ("pqv", pq.is_some())];
+    profile.notes.extend(
+        dropped
+            .iter()
+            .filter(|(_, lost)| *lost)
+            .map(|(name, _)| Note::UnsupportedField((*name).into())),
+    );
     Ok(())
 }
 

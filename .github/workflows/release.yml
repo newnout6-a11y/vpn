@@ -1,11 +1,17 @@
 # Release: a `v<version>` tag builds the installer from the tagged commit, proves it with the same silent
-# install / upgrade / uninstall round trip as CI, and attaches it with checksums.txt to a draft GitHub release.
-# The owner publishes the draft (code signing is still an open owner decision, ТЗ-06 §10.8).
+# install / upgrade / uninstall round trip as CI, attests its build provenance and attaches it with
+# checksums.txt to a draft GitHub release. The owner publishes the draft; publishing starts the `feed` job,
+# which waits in the Environment `release` for the owner's Approve, checks the published assets against
+# checksums.txt, signs the update feed (update.json + update.json.minisig, our own minisign key) and pushes it
+# to the `update-feed` branch, where the app reads it (research/updates.md §4.2). Without the signing secrets
+# the feed job ends with a notice, never a failure.
 name: Release
 
 on:
   push:
     tags: ['v*']
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -22,10 +28,13 @@ env:
 jobs:
   release:
     name: Installer release
+    if: github.event_name == 'push'
     runs-on: windows-2025
     timeout-minutes: 75
     permissions:
       contents: write # this job only: create the release and upload its assets
+      id-token: write # build provenance (Sigstore certificate of this workflow run)
+      attestations: write
     defaults:
       run:
         shell: bash
@@ -52,6 +61,12 @@ jobs:
         run: cargo xtask dist
       - name: Silent per-user install, upgrade over itself, uninstall
         run: cargo xtask smoke-install
+      - name: Build provenance of the installer and the portable archive
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            vpn-tunnel-enforcer/target/dist/VPN-Tunnel-Enforcer-Setup-*.exe
+            vpn-tunnel-enforcer/target/dist/VPN-Tunnel-Enforcer-*-portable.zip
       - name: Draft GitHub release with the installer and checksums
         env:
           GH_TOKEN: ${{ github.token }}
@@ -61,3 +76,80 @@ jobs:
             --title "VPN Tunnel Enforcer ${TAG#v}" \
             --notes "Verify the download against checksums.txt (SHA-256)." \
             target/dist/VPN-Tunnel-Enforcer-Setup-*.exe target/dist/VPN-Tunnel-Enforcer-*-portable.zip target/dist/checksums.txt
+
+  feed:
+    name: Signed update feed
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release # required reviewer: the owner (one Approve per release)
+    permissions:
+      contents: write # push the update-feed branch
+    defaults:
+      run:
+        shell: bash
+        working-directory: vpn-tunnel-enforcer
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - name: Signing key present
+        id: key
+        env:
+          KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::notice::UPDATE_SIGNING_KEY is not set in the Environment 'release': the update feed is not published."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Toolchain
+        if: steps.key.outputs.ready == 'true'
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Published assets match checksums.txt and GitHub's digests
+        if: steps.key.outputs.ready == 'true'
+        run: |
+          mkdir -p target/dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir target/dist
+          (cd target/dist && sha256sum --check --strict checksums.txt)
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.assets[] | "\(.digest) \(.name)"' |
+          while read -r digest name; do
+            want="sha256:$(sha256sum "target/dist/$name" | cut -d' ' -f1)"
+            if [ "$digest" != "$want" ]; then
+              echo "$name: GitHub digest $digest differs from the downloaded file ($want)" >&2
+              exit 1
+            fi
+          done
+      - name: Build and sign the feed
+        if: steps.key.outputs.ready == 'true'
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_SIGNING_PASSWORD: ${{ secrets.UPDATE_SIGNING_PASSWORD }}
+          NOTES: ${{ github.event.release.body }}
+        run: |
+          printf '%s\n' "$NOTES" > target/notes.txt
+          cargo xtask feed --dist target/dist --notes-ru target/notes.txt --notes-en target/notes.txt --out target/feed
+      - name: Publish to the update-feed branch
+        if: steps.key.outputs.ready == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          rm -rf ../feed-branch
+          if git ls-remote --exit-code --heads "$remote" update-feed >/dev/null; then
+            git clone --quiet --depth 1 --branch update-feed "$remote" ../feed-branch
+          else
+            git init --quiet -b update-feed ../feed-branch
+          fi
+          cp target/feed/update.json target/feed/update.json.minisig ../feed-branch/
+          cd ../feed-branch
+          git add update.json update.json.minisig
+          git commit --quiet -m "feed: ${TAG}"
+          git push --quiet "$remote" HEAD:update-feed

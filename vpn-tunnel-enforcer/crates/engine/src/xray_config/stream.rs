@@ -60,6 +60,9 @@ pub(super) fn stream(p: &Profile, device: ClientDevice) -> Result<Stream, XrayCo
                 // The REALITY public key; Xray renamed `publicKey` to `password` (old name still read).
                 r.insert("password".into(), json!(reality.public_key.trim()));
                 r.insert("shortId".into(), json!(reality.short_id.trim()));
+                if let Some(key) = reality.mldsa65_key() {
+                    r.insert("mldsa65Verify".into(), json!(key));
+                }
                 r.insert("fingerprint".into(), json!(fingerprint(tls, device)));
                 if let Some(spider) = non_empty(reality.spider_x.as_deref()) {
                     // Xray refuses a spiderX that does not start with `/`.
@@ -94,7 +97,8 @@ pub(super) fn stream(p: &Profile, device: ClientDevice) -> Result<Stream, XrayCo
 
 /// `tlsSettings` without uTLS and ECH, which a QUIC outbound has not. Never `allowInsecure`
 /// (the bundled Xray refuses it): an insecure profile reaches Xray only with a pinned
-/// certificate, which replaces the CA check.
+/// certificate, which replaces the CA check, or with `verifyPeerCertByName`, which keeps the CA
+/// check and moves the name check off the SNI.
 pub(super) fn tls_common(p: &Profile, tls: &Tls) -> Map<String, Value> {
     let mut t = Map::new();
     t.insert("serverName".into(), json!(sni(p, tls)));
@@ -105,6 +109,10 @@ pub(super) fn tls_common(p: &Profile, tls: &Tls) -> Map<String, Value> {
     }
     if let Some(pin) = non_empty(tls.cert_pin_sha256.as_deref()) {
         t.insert("pinnedPeerCertSha256".into(), json!(pin));
+    }
+    // The SNI stays `serverName`; the certificate is checked against these names instead.
+    if let Some(names) = tls.cert_names() {
+        t.insert("verifyPeerCertByName".into(), json!(names));
     }
     if let Some(pem) = non_empty(tls.certificate_pem.as_deref()) {
         // sing-box trusts only this certificate; Xray's equivalent is a `verify` root without
@@ -323,8 +331,9 @@ fn take_host_header(extra: &mut Map<String, Value>) -> Option<String> {
 }
 
 /// XHTTP `extra` is provider JSON handed to an elevated engine, checked like a native graph: no
-/// local files, and certificate checks disabled only next to a pin. The pin replaces the CA check
-/// on its own and the bundled Xray refuses any `allowInsecure: true`, so the flag is dropped.
+/// local files, and certificate checks disabled only next to a pin or certificate names. Either
+/// one verifies on its own and the bundled Xray refuses any `allowInsecure: true`, so the flag is
+/// dropped.
 /// Keys match case-insensitively because Xray's Go JSON decoder does.
 fn sanitize_extra(value: &mut Value) -> Result<(), NativeError> {
     match value {
@@ -338,9 +347,11 @@ fn sanitize_extra(value: &mut Value) -> Result<(), NativeError> {
                 if key.eq_ignore_ascii_case("tlsSettings")
                     && let Some(tls) = child.as_object_mut()
                 {
-                    let pinned = tls.iter().any(|(k, v)| {
-                        k.eq_ignore_ascii_case("pinnedPeerCertSha256")
-                            && non_empty(v.as_str()).is_some()
+                    let verified = tls.iter().any(|(k, v)| {
+                        (k.eq_ignore_ascii_case("pinnedPeerCertSha256")
+                            || k.eq_ignore_ascii_case("verifyPeerCertByName"))
+                            && v.as_str()
+                                .is_some_and(|v| v.split(',').any(|n| !n.trim().is_empty()))
                     });
                     let mut insecure = false;
                     tls.retain(|k, v| {
@@ -348,7 +359,7 @@ fn sanitize_extra(value: &mut Value) -> Result<(), NativeError> {
                         insecure |= flag && *v == Value::Bool(true);
                         !flag
                     });
-                    if insecure && !pinned {
+                    if insecure && !verified {
                         return Err(NativeError::InsecureWithoutPin);
                     }
                 }

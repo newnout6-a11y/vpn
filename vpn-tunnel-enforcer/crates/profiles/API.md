@@ -76,6 +76,9 @@ impl Note {
 }
 pub const REALITY_REFUSED_FINGERPRINTS: [&str; 6];  // edge ios qq random android 360
 impl Tls { pub fn refused_reality_fingerprint(&self) -> bool }  // REALITY + one of those
+impl Tls { pub fn cert_names(&self) -> Option<&str> }  // `verify_peer_cert_by_name` as Xray gets it:
+                                                       // TLS only (not REALITY), never blank
+impl Reality { pub fn mldsa65_key(&self) -> Option<&str> }  // `mldsa65_verify`, never blank
 pub struct ParseReport { pub profiles: Vec<Profile>, pub skipped: Vec<Skipped>, pub meta: SubscriptionMeta }
 pub struct Skipped { pub excerpt: String /* redacted, <= 80 chars */, pub reason: SkipReason }
 pub enum SkipReason { UnknownScheme(String), Invalid{scheme, detail /* English */}, MissingCredential,
@@ -194,6 +197,14 @@ pub fn from_legacy(name: &str, protocol: &str, outbound: &Value, source_uri: Opt
   `fingerprint`. A pin that cannot be read is never dropped silently, since that would leave an
   unverified key: a link is skipped, Xray JSON keeps its graph, a Clash entry with
   `skip-cert-verify` is skipped (without it: a Note).
+- Xray 26 checks (p-tls-names): `Tls::verify_peer_cert_by_name` (comma list, items trimmed, empty
+  ones dropped) from link `vcn` / JSON `verifyPeerCertByName` (TLS only; the SNI stays
+  `server_name`, the certificate is CA-checked against these names) and
+  `Reality::mldsa65_verify` (ML-DSA-65 public key, 1952 bytes, stored as unpadded base64url;
+  either base64 alphabet read) from link `pqv` / JSON `mldsa65Verify`. Links: V2Ray family only;
+  `vcn` next to REALITY or `pqv` next to plain TLS -> dropped with `UnsupportedField`; a malformed
+  `pqv` skips the link and a malformed `mldsa65Verify` the outbound (Xray refuses such a config).
+  v2rayN VMess JSON: `vcn`. Both JSON keys are typed, so a lone Xray outbound with them stays plain.
 - `parse_clash` streams only the first root `proxies` list (limits: 5000 entries, nesting 32,
   64 MiB of approximate materialised bytes, alias copies included); every unread key becomes
   `Note::UnsupportedField`, so do unread sub-keys of the transport's `*-opts` map and of
@@ -410,7 +421,8 @@ the UDP reject rules. A Chain is `[shadowsocks(tag, detour), shadowtls("<tag>-sh
 fragment never carries `domain_strategy`, `detour` (except inside the chain), bind keys or
 `*_path` keys. `XrayOnly(feature)`: native graph, XHTTP, gRPC multi mode (`multi_mode: Some(true)`;
 explicit gun is emitted as sing-box gRPC), TCP HTTP header, VLESS
-encryption — run those on Xray. Provider uTLS names sing-box does not know fall back to the default.
+encryption, `verifyPeerCertByName` (`Tls::cert_names`), `mldsa65Verify` (`Reality::mldsa65_key`;
+sing-box has neither check) — run those on Xray. Provider uTLS names sing-box does not know fall back to the default.
 Default uTLS when the provider names none: REALITY always `chrome` (servers since Xray 26.9.8 refuse
 the device defaults `android` / `ios`); other TCP TLS the device default, else the stealth rotation,
 else `chrome`. Pins: `spki_pin_sha256` goes out as `certificate_public_key_sha256`, which sing-box
@@ -480,7 +492,9 @@ it), and mihomo has no keepalive range, so an AmneziaWG 3.x range goes out as it
 `export_mihomo` also refuses two local addresses of one family and peers with different
 keepalives (mihomo keeps one of each per entry); it writes `version: 3` for 3.x.
 A link is returned only when re-importing it yields the same profile (mux, dial options,
-`singbox_extra`, pins, multi-peer WireGuard, ShadowTLS, … -> no link). The JSON share is
+`singbox_extra`, pins, multi-peer WireGuard, ShadowTLS, … -> no link). V2Ray-family links write
+`vcn` / `pqv` (another scheme cannot carry them -> no link); VMess JSON writes `vcn`, `pqv` there
+-> no VMess link. The JSON share is
 `emit_singbox(p, "proxy", &EmitPolicy::default())`, so it carries the emitter's defaults (uTLS
 `chrome`, TUIC `alpn: ["h3"]`): runnable on any sing-box client, read back as provider values on
 re-import. `None` = neither form can carry the key (e.g.

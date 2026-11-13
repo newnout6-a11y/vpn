@@ -23,7 +23,7 @@ use serde_json::Value;
 use vpnte_base::types::ClientDevice;
 use vpnte_base::{AppError, Msg};
 
-use crate::model::{Kind, Profile, Transport};
+use crate::model::{Kind, Profile, Reality, Transport};
 
 pub(crate) use tls::tls_required;
 pub use tls::{effective_fingerprint, stealth_fingerprint};
@@ -247,6 +247,21 @@ fn xray_only(p: &Profile) -> Option<&'static str> {
         let e = e.trim();
         if !e.is_empty() && !e.eq_ignore_ascii_case("none") {
             return Some("VLESS encryption");
+        }
+    }
+    // sing-box checks the certificate against `server_name` only and REALITY by its X25519 key
+    // only: running there would quietly drop a check the provider asked for.
+    if let Some(tls) = &p.tls {
+        if tls.cert_names().is_some() {
+            return Some("verifyPeerCertByName");
+        }
+        if tls
+            .reality
+            .as_ref()
+            .and_then(Reality::mldsa65_key)
+            .is_some()
+        {
+            return Some("mldsa65Verify");
         }
     }
     match &p.transport {

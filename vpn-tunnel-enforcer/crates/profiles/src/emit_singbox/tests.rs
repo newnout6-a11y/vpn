@@ -48,6 +48,7 @@ pub(super) fn reality() -> Reality {
         public_key: PBK.into(),
         short_id: "1234".into(),
         spider_x: Some("/test-path".into()),
+        ..Reality::default()
     }
 }
 

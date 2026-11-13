@@ -4,7 +4,6 @@
 pub mod docs;
 pub mod notify;
 
-use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
@@ -25,6 +24,8 @@ use vpnte_servers::refresh::RefreshCtx;
 use vpnte_servers::store::Servers;
 use vpnte_servers::subscription::{Hwids, SubscriptionFetcher};
 use vpnte_tunnel::history::History;
+use vpnte_update::policy;
+use vpnte_update::store::EngineStore;
 use vpnte_winnet::clipboard::SecretClipboard;
 
 use crate::args::Args;
@@ -76,7 +77,10 @@ pub(crate) fn build_in(args: &Args, dirs: DataDirs) -> AppResult<Arc<Backend>> {
         lock,
         log: Mutex::new(Some(log)),
         elevated,
-        engines: engines(&dirs.resources),
+        engines: engines(&crate::svc_update::engine_store(
+            &dirs.root,
+            dirs.resources.clone(),
+        )),
         protection: Arc::new(Store::<ProtectionDoc>::open(&dirs.root)),
         themes: Arc::new(Store::<ThemesDoc>::open(&dirs.root)),
         soft: Arc::new(Store::<SoftDoc>::open(&dirs.root)),
@@ -222,6 +226,10 @@ const APP: &[(&str, &str)] = &[
         include_str!("../../locales/svc-wire.ru.json"),
         include_str!("../../locales/svc-wire.en.json"),
     ),
+    (
+        include_str!("../../locales/p-updates.ru.json"),
+        include_str!("../../locales/p-updates.en.json"),
+    ),
 ];
 
 /// First-start settings and the log pseudonym key. A read-only `settings.json` (newer version,
@@ -245,12 +253,16 @@ fn first_start(settings: &Store<Settings>, fresh: bool, elevated: bool) {
     }
 }
 
-/// The bundled engines in `resources`, canonical when they exist (the spelling WFP app ids and
-/// `RealEngines` expect); a missing engine keeps its expected path and fails at its first start.
-fn engines(resources: &Path) -> Engines {
-    let path = |name: &str| {
-        let expected = resources.join(name);
-        // `canonical_exe` refuses `..` and `\\?\` spellings, which a relative VPNTE_RESOURCES_DIR
+/// The engines of this run: the active version the update channel downloaded while it is still
+/// usable (`vpnte_update::store`: newer than the bundled one, inside this build's range, its
+/// signed feed verifies), else the bundled one in `resources`. Canonical when the file exists (the
+/// spelling WFP app ids and `RealEngines` expect); a missing engine keeps its expected path and
+/// fails at its first start. Versions this build no longer allows are dropped first.
+fn engines(store: &EngineStore) -> Engines {
+    let path = |id: &str| {
+        store.tidy(id);
+        let expected = store.resolve(id).exe;
+        // `canonical_exe` refuses `..` and `\?\` spellings, which a relative VPNTE_RESOURCES_DIR
         // made absolute can carry: resolve them first.
         std::fs::canonicalize(&expected)
             .ok()
@@ -261,8 +273,8 @@ fn engines(resources: &Path) -> Engines {
             .unwrap_or(expected)
     };
     Engines {
-        singbox: path("sing-box.exe"),
-        xray: path("xray.exe"),
+        singbox: path(policy::SINGBOX),
+        xray: path(policy::XRAY),
     }
 }
 
