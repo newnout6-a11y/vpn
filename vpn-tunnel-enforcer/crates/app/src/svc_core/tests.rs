@@ -209,20 +209,24 @@ fn backend_is_shareable_across_threads() {
 }
 
 /// The whole bootstrap against throw-away dirs: lock, log, stores, first-start default, paths.
-/// The only test that calls `build` (it installs the process-wide log subscriber).
+/// The only test that builds the backend (it installs the process-wide log subscriber). It passes
+/// the dirs to `build_in`: an elevated process ignores the environment overrides (p-left), and CI
+/// runners are elevated.
 #[test]
 fn build_bootstraps_an_empty_data_dir() {
     let data = TempDir::new("build-data");
     let legacy = TempDir::new("build-legacy");
     let resources = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources"));
     // SAFETY: the Windows environment block is guarded by the OS; no other test reads or
-    // writes these variables.
+    // writes these variables. Code that reads them directly (the import's own-install check)
+    // sees the same throw-away dirs.
     unsafe {
         std::env::set_var(vpnte_core::paths::ENV_DATA_DIR, &data.0);
         std::env::set_var(vpnte_core::paths::ENV_LEGACY_DIR, &legacy.0);
         std::env::set_var(vpnte_core::paths::ENV_RESOURCES_DIR, &resources);
     }
-    let backend = build(&Args::default()).unwrap();
+    let dirs = DataDirs::new(data.0.clone(), legacy.0.clone(), resources);
+    let backend = build_in(&Args::default(), dirs).unwrap();
     assert_eq!(backend.dirs.root, data.0);
     assert!(backend.dirs.logs.is_dir() && backend.import.is_none());
     let expected = if backend.elevated {

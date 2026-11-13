@@ -84,7 +84,9 @@ fn download_routes() {
 fn source_selection() {
     let t = TempDir::new("rulesets");
     let s = service(&t);
-    let active = |managed| s.active(managed).unwrap();
+    // The unelevated selection, whatever this test process is (CI runners are elevated; the
+    // elevated selection has its own test below).
+    let active = |managed| s.select(managed, false).unwrap();
     assert_eq!(active(true), (ActiveSource::Bundled, resources()));
     let generation = format!("{GEN_PREFIX}1700000000000");
     let dir = t.path().join("rulesets").join(&generation);
@@ -116,8 +118,8 @@ fn source_selection() {
     let store = Arc::new(Store::<RuleSetsDoc>::open(t.path()));
     let no_bundle = t.path().join("none");
     let empty = RuleSetService::with_paths(store, t.path().join("rulesets"), no_bundle);
-    assert_eq!(empty.active(false), None);
-    let (source, path) = empty.active(true).unwrap();
+    assert_eq!(empty.select(false, false), None);
+    let (source, path) = empty.select(true, false).unwrap();
     assert!(matches!(source, ActiveSource::Managed { .. }) && path == dir);
 }
 
@@ -205,7 +207,7 @@ async fn refresh_promotes_or_keeps() {
     let RefreshOutcome::Updated { generation } = first else {
         panic!("{first:?}")
     };
-    let (source, dir) = s.active(true).unwrap();
+    let (source, dir) = s.select(true, false).unwrap();
     assert!(matches!(source, ActiveSource::Managed { .. }));
     assert_eq!(
         std::fs::read(dir.join("geoip-ru.srs")).unwrap(),

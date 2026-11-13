@@ -37,8 +37,14 @@ use notify::Notifier;
 /// lock gets `Conflict` (`core.store.dataDirLocked`). Blocking (file reads, DPAPI): call it
 /// before the UI starts, or from `spawn_blocking`.
 pub fn build(args: &Args) -> AppResult<Arc<Backend>> {
+    build_in(args, DataDirs::resolve()?)
+}
+
+/// [`build`] in the given directories: production resolves them ([`DataDirs::resolve`], which
+/// ignores the overrides in an elevated process); the bootstrap test passes throw-away ones, so it
+/// runs on an elevated CI runner too without touching the real data folder.
+pub(crate) fn build_in(args: &Args, dirs: DataDirs) -> AppResult<Arc<Backend>> {
     vpnte_base::http::init_tls();
-    let dirs = DataDirs::resolve()?;
     dirs.ensure()?;
     let lock = dirs.lock()?;
     // Debug logging is a setting, but settings may only be opened after the import.
