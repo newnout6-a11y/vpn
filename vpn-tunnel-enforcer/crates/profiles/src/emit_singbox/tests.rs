@@ -1796,12 +1796,29 @@ fn tls_tricks_per_key() {
     // A zero pause would read as unset (sing-box's 500 ms): 1 ms.
     let only_hello = (None, Some(json!(true)), Some(json!("1ms")));
     assert_eq!(tricks(&out(&hello, &stealth())), only_hello);
-    // Pasted keys are the key's own; under a typed Off they are not re-emitted.
+    // Pasted keys add to the default and never take it away (review a1): one pasted trick or
+    // an explicit `false` under stealth still gives both; without stealth they are the key's.
     let mut pasted = with(None);
     pasted
         .singbox_extra
         .insert("tls.record_fragment".into(), json!(true));
-    assert_eq!(tricks(&out(&pasted, &stealth())), only_record);
+    assert_eq!(tricks(&out(&pasted, &stealth())), strong);
+    assert_eq!(tricks(&out(&pasted, &EmitPolicy::default())), only_record);
+    let mut refused = with(None);
+    refused
+        .singbox_extra
+        .insert("tls.fragment".into(), json!(false));
+    assert_eq!(tricks(&out(&refused, &stealth())), strong);
+    assert_eq!(tricks(&out(&refused, &EmitPolicy::default())), none);
+    // A pasted 500 ms fallback is not a per-piece pause (review a3): the preset split.
+    let mut slow = with(None);
+    slow.singbox_extra
+        .insert("tls.fragment".into(), json!(true));
+    slow.singbox_extra
+        .insert("tls.fragment_fallback_delay".into(), json!("500ms"));
+    let preset_hello = (None, Some(json!(true)), Some(json!("20ms")));
+    assert_eq!(tricks(&out(&slow, &EmitPolicy::default())), preset_hello);
+    // A typed value (link, the user's choice) replaces both.
     pasted.tls.as_mut().expect("tls").tricks = Some(TlsTricks::Off);
     assert_eq!(tricks(&out(&pasted, &stealth())), none);
     // REALITY on sing-box, the ShadowTLS dialer and QUIC: never, whatever asked for it.

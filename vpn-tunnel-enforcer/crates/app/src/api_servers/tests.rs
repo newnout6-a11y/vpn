@@ -26,6 +26,7 @@ mod flows;
 mod phones;
 mod relays;
 mod reports;
+mod tricks;
 mod verdicts;
 
 /// Registers every locale layer of the app once (the first registration of the process wins).

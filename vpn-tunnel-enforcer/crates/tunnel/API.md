@@ -119,8 +119,10 @@ effect, by `select_engine(profile, server_pref(req.engine, profile.engine))`; a 
 start's `Validation` error with the engine's own message (forced Xray never starts sing-box). The
 `EngineRun` (engine + reason) is in `StartReceipt`, `TunStatus::engine`, a committed
 `SwitchReceipt` and `SessionView`; history keeps the engine (`Evidence::proxy_engine`). When Xray
-runs, `xray_config::warnings(profile, stealth || adaptive == TlsCompatibility)` join the start's
-and the in-place switch's warnings (`Done::warnings`).
+runs (start and in-place switch), the app's default TLS tricks are resolved into a clone of the
+profile first (`tls.tricks = Some(profile.tls_tricks_for(stealth || adaptive == TlsCompatibility))`,
+item 18: the sing-box emitter applies the same rule), and `xray_config::warnings` of that clone
+join the start's and the switch's warnings (`Done::warnings`).
 
 ## `fsm` — pure connection state machine (no I/O)
 ```rust

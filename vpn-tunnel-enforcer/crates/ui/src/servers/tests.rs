@@ -53,6 +53,9 @@ struct FakeApi {
     /// Imports the page asked for (`add`): a link must never cause one by itself.
     adds: Cell<u32>,
     check_all: RefCell<Option<CheckAllRun>>,
+    /// The app's answer to the TLS tricks editor, and the held replies of its saves.
+    tricks: RefCell<Option<TricksView>>,
+    tricks_saves: RefCell<VecDeque<Reply<()>>>,
 }
 
 async fn held<T>(reply: Option<Reply<T>>, dropped: Rc<Cell<u32>>) -> AppResult<T> {
@@ -73,6 +76,17 @@ fn unused<T>() -> AppResult<T> {
 impl ServersApi for FakeApi {
     fn state(&self) -> watch::Receiver<ServersView> {
         self.state.subscribe()
+    }
+    async fn tls_tricks(&self, _: &str) -> AppResult<Option<TricksView>> {
+        Ok(*self.tricks.borrow())
+    }
+    async fn set_tls_tricks(&self, _: &str, choice: TricksChoice) -> AppResult<()> {
+        let reply = self.tricks_saves.borrow_mut().pop_front();
+        held(reply, self.dropped.clone()).await?;
+        if let Some(view) = self.tricks.borrow_mut().as_mut() {
+            view.choice = choice;
+        }
+        Ok(())
     }
     fn expanded_groups(&self) -> Vec<String> {
         Vec::new()
@@ -265,6 +279,8 @@ fn fake() -> Rc<FakeApi> {
         link: RefCell::default(),
         adds: Cell::new(0),
         check_all: RefCell::default(),
+        tricks: RefCell::default(),
+        tricks_saves: RefCell::default(),
     })
 }
 
@@ -921,4 +937,168 @@ async fn check_all_streams_rows_and_a_second_click_stops() {
             .is_some_and(|d| d.contains(". "))
     );
     assert!(dom.in_runtime(|| actions.store.check_task.peek().is_none()));
+}
+
+/// What the renderer was asked to show: dynamic texts, and the click listeners in mount order.
+#[derive(Default)]
+struct Seen {
+    texts: Vec<String>,
+    clicks: Vec<dioxus::core::ElementId>,
+}
+
+impl Seen {
+    fn shows(&self, text: &str) -> bool {
+        self.texts.iter().any(|t| t == text)
+    }
+}
+
+impl dioxus::core::WriteMutations for Seen {
+    fn append_children(&mut self, _: dioxus::core::ElementId, _: usize) {}
+    fn assign_node_id(&mut self, _: &'static [u8], _: dioxus::core::ElementId) {}
+    fn create_placeholder(&mut self, _: dioxus::core::ElementId) {}
+    fn create_text_node(&mut self, value: &str, _: dioxus::core::ElementId) {
+        self.texts.push(value.to_owned());
+    }
+    fn load_template(&mut self, _: dioxus::core::Template, _: usize, _: dioxus::core::ElementId) {}
+    fn replace_node_with(&mut self, _: dioxus::core::ElementId, _: usize) {}
+    fn replace_placeholder_with_nodes(&mut self, _: &'static [u8], _: usize) {}
+    fn insert_nodes_after(&mut self, _: dioxus::core::ElementId, _: usize) {}
+    fn insert_nodes_before(&mut self, _: dioxus::core::ElementId, _: usize) {}
+    fn set_attribute(
+        &mut self,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: &dioxus::core::AttributeValue,
+        _: dioxus::core::ElementId,
+    ) {
+    }
+    fn set_node_text(&mut self, value: &str, _: dioxus::core::ElementId) {
+        self.texts.push(value.to_owned());
+    }
+    fn create_event_listener(&mut self, name: &'static str, id: dioxus::core::ElementId) {
+        if name == "click" {
+            self.clicks.push(id);
+        }
+    }
+    fn remove_event_listener(&mut self, _: &'static str, _: dioxus::core::ElementId) {}
+    fn remove_node(&mut self, _: dioxus::core::ElementId) {}
+    fn push_root(&mut self, _: dioxus::core::ElementId) {}
+}
+
+/// Renders whatever work is due, a few rounds, into a fresh record.
+async fn render(dom: &mut VirtualDom) -> Seen {
+    let mut seen = Seen::default();
+    for _ in 0..6 {
+        tokio::select! {
+            () = dom.wait_for_work() => {}
+            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        dom.render_immediate(&mut seen);
+    }
+    seen
+}
+
+/// A mouse click on `id`, as the webview would send it.
+fn click(dom: &VirtualDom, id: dioxus::core::ElementId) {
+    let data = dioxus::html::PlatformEventData::new(Box::new(
+        dioxus::html::SerializedMouseData::default(),
+    ));
+    let event = dioxus::core::Event::new(Rc::new(data) as Rc<dyn std::any::Any>, true);
+    dom.runtime().handle_event("click", event, id);
+}
+
+/// The TLS tricks row of the detail for a connected server, over the page's actions.
+fn tricks_root() -> Element {
+    use super::actions::Actions;
+    use super::state::Store;
+
+    let api = use_context::<Rc<FakeApi>>();
+    let toasts = crate::widgets::Toasts::use_provider();
+    let scope = dioxus::core::current_scope_id();
+    let store = use_hook(|| Store::new(scope, ServersView::default(), Vec::new()));
+    use_context_provider(|| Actions {
+        store,
+        api: api.clone(),
+        toasts,
+    });
+    rsx! {
+        super::detail::TricksRow { id: "srv".to_owned(), connected: true }
+    }
+}
+
+/// Item 18, the editor in a window: with the app's answer for a provider key under stealth the
+/// row offers the default line «as in settings: strong», the presets and the provider's own
+/// option; a pick shows the reconnecting note while it saves, a failed save says so, and a
+/// saved pick shows what the backend reads back.
+#[tokio::test]
+async fn tricks_row_renders_the_apps_answer() {
+    crate::lang::init_locales(&[]);
+    dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
+    let api = fake();
+    let provider = TricksChoice::Custom {
+        record: false,
+        split: TricksSplit {
+            len: (40, 60),
+            interval_ms: (30, 50),
+        },
+    };
+    api.tricks.replace(Some(TricksView {
+        choice: provider,
+        default_strong: true,
+    }));
+    let mut dom = VirtualDom::new(tricks_root).with_root_context(api.clone());
+    dom.rebuild_in_place();
+    let text =
+        |dom: &VirtualDom, key: &str| dom.in_runtime(|| crate::lang::translate_now(key, &[]));
+    let key = |name: &str| format!("ui.servers.detail.tricks.{name}");
+    let first = render(&mut dom).await;
+    assert!(first.shows(&text(&dom, &key("label"))), "{:?}", first.texts);
+    assert!(
+        first.shows(&text(&dom, &key("custom"))),
+        "{:?}",
+        first.texts
+    );
+    let trigger = first.clicks[0];
+
+    // The choices, in order: the default line under stealth, off, soft, strong, the provider's.
+    click(&dom, trigger);
+    let open = render(&mut dom).await;
+    for name in ["defaultStrong", "off", "soft", "strong", "custom"] {
+        assert!(
+            open.shows(&text(&dom, &key(name))),
+            "{name}: {:?}",
+            open.texts
+        );
+    }
+    assert!(!open.shows(&text(&dom, &key("defaultOff"))));
+    assert_eq!(open.clicks.len(), 5, "one click per option");
+
+    // «Сильно» while the save is held: the reconnecting note; then the save fails.
+    let (tx, rx) = oneshot::channel();
+    api.tricks_saves.borrow_mut().push_back(rx);
+    click(&dom, open.clicks[3]);
+    let saving = render(&mut dom).await;
+    let reconnecting = text(&dom, "ui.servers.detail.reconnecting");
+    assert!(saving.shows(&reconnecting), "{:?}", saving.texts);
+    tx.send(Err(AppError::new(ErrorKind::Network)))
+        .expect("held save");
+    let failed = render(&mut dom).await;
+    let save_failed = text(&dom, "ui.servers.detail.saveFailed");
+    assert!(failed.shows(&save_failed), "{:?}", failed.texts);
+    assert_eq!(api.tricks.borrow().map(|v| v.choice), Some(provider));
+
+    // «Выкл.» saves; the row shows what the backend reads back.
+    let (tx, rx) = oneshot::channel();
+    api.tricks_saves.borrow_mut().push_back(rx);
+    tx.send(Ok(())).expect("save");
+    click(&dom, trigger);
+    let open = render(&mut dom).await;
+    click(&dom, open.clicks[1]);
+    let saved = render(&mut dom).await;
+    assert!(saved.shows(&text(&dom, &key("off"))), "{:?}", saved.texts);
+    assert!(!saved.shows(&save_failed));
+    assert_eq!(
+        api.tricks.borrow().map(|v| v.choice),
+        Some(TricksChoice::Off)
+    );
 }

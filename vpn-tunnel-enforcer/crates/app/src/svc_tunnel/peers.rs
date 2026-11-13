@@ -89,10 +89,12 @@ impl ProfileSource for ServerSource {
     }
 }
 
-/// The engine's view of a row; a fingerprint override (never stored) replaces the profile's own
-/// for this app run. `None` when the profile is locked (another PC / account) or unreadable.
+/// The engine's view of a row: the profile as it runs (the user's TLS tricks over the key's own,
+/// so the helper service gets them too); a fingerprint override (never stored) replaces the
+/// profile's own for this app run. `None` when the profile is locked (another PC / account) or
+/// unreadable.
 pub(crate) fn vpn_profile(row: ServerRow, fingerprints: &Fingerprints) -> Option<VpnProfile> {
-    let mut profile = match row.profile() {
+    let mut profile = match row.run_profile() {
         Ok(profile) => profile,
         Err(e) => {
             // Locked or unreadable: the lifecycle reports "no server".

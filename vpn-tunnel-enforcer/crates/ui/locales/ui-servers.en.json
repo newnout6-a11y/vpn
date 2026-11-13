@@ -545,8 +545,7 @@
           "off": "Off",
           "soft": "Soft",
           "strong": "Strong",
-          "custom": "From the provider: pieces of {{len}} B, {{ms}} ms",
-          "customBoth": "From the provider: records and pieces of {{len}} B, {{ms}} ms"
+          "custom": "As the provider set it"
         }
       },
       "purge": {

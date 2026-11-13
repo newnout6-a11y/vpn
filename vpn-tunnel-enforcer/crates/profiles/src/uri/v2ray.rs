@@ -157,6 +157,12 @@ fn stream(profile: &mut Profile, p: &Params, mode: TlsMode) -> Res<()> {
     xray_checks(profile, p)?;
     profile.transport = transport(p)?;
     profile.mux = mux(p);
+    // Kept for export, but no engine runs them on REALITY or XHTTP over HTTP/3 (review a5).
+    if profile.tls.as_ref().is_some_and(|t| t.tricks.is_some()) && !profile.takes_tls_tricks() {
+        profile
+            .notes
+            .push(Note::UnsupportedField("fragment".into()));
+    }
     let unmodeled = UNMODELED.iter().filter(|name| p.get(&[name]).is_some());
     profile
         .notes

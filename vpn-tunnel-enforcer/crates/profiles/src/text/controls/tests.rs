@@ -155,3 +155,48 @@ fn unknown_stored_pick_reads_as_none() {
     let round = serde_json::to_string(&known).unwrap();
     assert_eq!(serde_json::from_str::<Controls>(&round).unwrap(), known);
 }
+
+/// Item 18: Happ / limcore `fragmentation-*` keys become the provider's TLS tricks: off with
+/// `enable` 0 / false, the preset where length or pause are not sent, headers over the body.
+#[test]
+fn fragmentation_keys_set_tls_tricks() {
+    use crate::model::{HelloSplit, Span, TlsTricks};
+    let tricks = |lines: &str| keys(lines).controls.tls_tricks;
+    assert_eq!(
+        tricks("#fragmentation-enable: 1\nvless://x"),
+        Some(TlsTricks::STRONG)
+    );
+    assert_eq!(
+        tricks("#fragmentation-enable: false\n#fragmentation-packets: tlshello\nvless://x"),
+        Some(TlsTricks::Off)
+    );
+    let split = HelloSplit {
+        len: Span::new(40, 60),
+        interval_ms: Span::new(30, 50),
+    };
+    assert_eq!(
+        tricks(
+            "#fragmentation-enable: true\n#fragmentation-packets: 1-3\n#fragmentation-length: 40-60\n#fragmentation-interval: 30-50\nvless://x"
+        ),
+        Some(TlsTricks::Hello(split))
+    );
+    // No `enable`: no instruction; an unreadable range: nothing rather than a guess.
+    assert_eq!(tricks("#fragmentation-packets: tlshello\nvless://x"), None);
+    assert_eq!(
+        tricks("#fragmentation-enable: 1\n#fragmentation-length: 200-100\nvless://x"),
+        None
+    );
+    let body = keys("#fragmentation-packets: 1-3\nvless://x");
+    let merged = header_keys([("Fragmentation-Enable", "1")], body);
+    assert_eq!(
+        merged.controls.tls_tricks,
+        Some(TlsTricks::Hello(HelloSplit::PRESET))
+    );
+    // The group stores it; older groups without it load unchanged.
+    let stored = serde_json::to_value(&merged.controls).expect("serialises");
+    let back: Controls = serde_json::from_value(stored).expect("reads back");
+    assert_eq!(back, merged.controls);
+    let old: Controls =
+        serde_json::from_value(serde_json::json!({ "hideSettings": true })).expect("old group");
+    assert_eq!(old.tls_tricks, None);
+}

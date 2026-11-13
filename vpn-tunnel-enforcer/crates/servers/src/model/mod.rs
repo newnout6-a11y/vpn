@@ -23,8 +23,8 @@ pub(crate) mod tests;
 mod whitelist;
 
 pub use row::{
-    ArchiveReason, Archived, CountrySource, HealthReason, HealthRecord, Origin, ServerReaction,
-    ServerRow, ServerVerdict, VerdictRecord, VerifiedCountry,
+    ArchiveReason, Archived, CountrySource, HealthReason, HealthRecord, Origin, RowTricks,
+    ServerReaction, ServerRow, ServerVerdict, VerdictRecord, VerifiedCountry,
 };
 pub use summary::{GroupSummary, Ping, ServerSummary, ServersView};
 pub use whitelist::{WHITELIST_NETWORKS_MAX, Whitelist, WorkedUnder};

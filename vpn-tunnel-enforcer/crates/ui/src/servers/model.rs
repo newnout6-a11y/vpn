@@ -530,15 +530,16 @@ pub struct GeoInfo {
 /// ClientHello so DPI cannot read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TricksChoice {
-    /// Follow the stealth switch in Settings (on: «Сильно», off: none).
+    /// The app default, even over the provider's own value: «Сильно» while stealth or the
+    /// adaptive bypass's TLS compatibility is on, none otherwise.
     Default,
     Off,
     /// «Мягко»: the hello in several TLS records.
     Soft,
     /// «Сильно»: the records also go out as separate TCP pieces, 100-200 B, 10-20 ms apart.
     Strong,
-    /// The provider's own split (with or without the record split), shown as given; picking a
-    /// preset replaces it.
+    /// The provider's own split (with or without the record split); picking a preset replaces
+    /// it, picking it again follows the provider.
     Custom {
         record: bool,
         split: TricksSplit,
@@ -556,6 +557,6 @@ pub struct TricksSplit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TricksView {
     pub choice: TricksChoice,
-    /// The stealth switch is on, so `Default` means «Сильно».
+    /// Stealth or adaptive TLS compatibility is on, so `Default` means «Сильно».
     pub default_strong: bool,
 }

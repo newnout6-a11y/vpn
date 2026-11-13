@@ -109,13 +109,14 @@ pub trait ServersApi: 'static {
     /// Marks the server «Работает в белых списках» (`true`), or takes the mark off together
     /// with what was learned (`false`).
     async fn set_whitelist_ready(&self, id: &str, on: bool) -> AppResult<()>;
-    /// The server's TLS tricks for the detail editor; `None` when they do not apply to its key
-    /// (no TLS over TCP) or the backend does not offer them yet (the editor stays hidden).
+    /// The server's TLS tricks for the detail editor; `None` when no engine applies them to its
+    /// key (no TLS over TCP, REALITY, QUIC, no server name in the hello) or the backend does not
+    /// offer them (the editor stays hidden).
     async fn tls_tricks(&self, _id: &str) -> AppResult<Option<TricksView>> {
         Ok(None)
     }
-    /// Sets the server's TLS tricks (its own choice from now on, over the provider's); the
-    /// connected server reconnects with them.
+    /// Sets the server's TLS tricks (the user's choice from now on, over the provider's; the
+    /// provider's own option follows the provider again); the connected server reconnects.
     async fn set_tls_tricks(&self, _id: &str, _choice: TricksChoice) -> AppResult<()> {
         Err(AppError::msg(
             ErrorKind::Conflict,

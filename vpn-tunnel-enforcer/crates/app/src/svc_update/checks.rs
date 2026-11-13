@@ -69,10 +69,10 @@ impl EngineCheck for AppCheck {
 }
 
 impl AppCheck {
-    /// The user's server (when it reads) and its engine choice.
+    /// The user's server as it runs (when it reads: its TLS tricks applied) and its engine choice.
     fn current(&self) -> Option<(Profile, ClientDevice, Engine)> {
         let row = self.0.servers.active()?.row;
-        let profile = row.profile().ok()?;
+        let profile = row.run_profile().ok()?;
         let setting = self.0.settings.read(|s| s.proxy_engine);
         let pref = xray_config::server_pref(setting, row.engine);
         let engine = match xray_config::select_engine(&profile, pref) {

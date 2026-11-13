@@ -78,7 +78,8 @@ impl ProfileSource for ServerProfiles {
 
 /// One row as a slot candidate; `None` when its key cannot be opened under this account.
 fn proxy_profile(row: ServerRow, ping: Option<Ping>) -> Option<ProxyProfile> {
-    let profile = match row.profile() {
+    // As it runs: the user's TLS tricks over the key's own.
+    let profile = match row.run_profile() {
         Ok(profile) => profile,
         Err(e) => {
             tracing::debug!(error = %e, "server not offered for proxies");

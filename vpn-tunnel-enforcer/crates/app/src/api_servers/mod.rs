@@ -20,6 +20,7 @@ mod qr;
 mod relays;
 #[cfg(test)]
 mod tests;
+mod tricks;
 mod verdict;
 
 pub use phones::LinkInbox;
@@ -46,7 +47,7 @@ use vpnte_ui::servers::{
     AddTarget, BatchProgress, BatchResult, CountryCheck, ExportReport, GeoInfo, HealthReport,
     ImportReport, KeyHealth, LinkSchemes, LiveCheck, LiveMode, LiveProgress, ProbeReport,
     ProxyStartReport, QrCode, RefreshOutcome, SelectOutcome, ServersApi, ServersView,
-    SubscriptionRequest,
+    SubscriptionRequest, TricksChoice, TricksView,
 };
 use vpnte_winnet::url_scheme::Registrar;
 
@@ -378,6 +379,15 @@ impl ServersApi for ServersBackend {
         detached(set_engine(self.shared.clone(), ProfileId::from(id), engine)).await
     }
 
+    async fn tls_tricks(&self, id: &str) -> AppResult<Option<TricksView>> {
+        detached(tricks::view(self.shared.clone(), ProfileId::from(id))).await
+    }
+
+    async fn set_tls_tricks(&self, id: &str, choice: TricksChoice) -> AppResult<()> {
+        let (shared, id) = (self.shared.clone(), ProfileId::from(id));
+        detached(tricks::set(shared, id, choice)).await
+    }
+
     async fn set_whitelist_ready(&self, id: &str, on: bool) -> AppResult<()> {
         let (shared, id) = (self.shared.clone(), ProfileId::from(id));
         detached(async move {
@@ -556,17 +566,7 @@ async fn set_device(shared: Arc<Shared>, id: ProfileId, device: ClientDevice) ->
     let row = id.clone();
     blocking(move || servers.set_profile_device(&row, device)).await?;
     shared.publish();
-    if shared.session_server().as_ref() == Some(&id) {
-        // Switching to the same server re-reads its profile, so the new persona applies now.
-        let done = shared
-            .backend
-            .tunnel()?
-            .switch_server(id, Source::Ui)
-            .await
-            .map_err(AppError::from)?;
-        warn(&shared, done.warnings);
-    }
-    Ok(())
+    reconnect_live(&shared, id).await
 }
 
 /// Sets the server's own engine. A forced engine that cannot run the key is refused with the
@@ -585,15 +585,18 @@ async fn set_engine(shared: Arc<Shared>, id: ProfileId, engine: EnginePref) -> A
     let target = id.clone();
     blocking(move || servers.set_profile_engine(&target, engine)).await?;
     shared.publish();
-    if shared.session_server().as_ref() == Some(&id) {
-        // Switching to the same server re-reads its row, so the new engine applies now.
-        let done = backend
-            .tunnel()?
-            .switch_server(id, Source::Ui)
-            .await
-            .map_err(AppError::from)?;
-        warn(&shared, done.warnings);
+    reconnect_live(&shared, id).await
+}
+
+/// When our tunnel runs on `id`: switches to the same server, which re-reads its row, so a
+/// changed persona, engine or TLS tricks apply now.
+async fn reconnect_live(shared: &Shared, id: ProfileId) -> AppResult<()> {
+    if shared.session_server().as_ref() != Some(&id) {
+        return Ok(());
     }
+    let tunnel = shared.backend.tunnel()?;
+    let done = tunnel.switch_server(id, Source::Ui).await;
+    warn(shared, done.map_err(AppError::from)?.warnings);
     Ok(())
 }
 

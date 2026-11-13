@@ -41,6 +41,7 @@ mod proxy;
 mod recovery;
 mod spoof;
 mod supervision;
+mod tricks;
 
 /// What a spawned core does when asked for readiness.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +75,8 @@ pub struct World {
     pub ready: Mutex<VecDeque<Ready>>,
     pub cores: Mutex<Vec<Arc<FakeCore>>>,
     pub configs: Mutex<Vec<Value>>,
+    /// Configs the Xray slots were started with, in order.
+    pub xray_configs: Mutex<Vec<Value>>,
     pub kill_ok: AtomicBool,
     pub ready_fail: AtomicBool,
     pub release_fail: AtomicBool,
@@ -123,6 +126,7 @@ impl World {
             ready: Mutex::new(VecDeque::new()),
             cores: Mutex::new(Vec::new()),
             configs: Mutex::new(Vec::new()),
+            xray_configs: Mutex::new(Vec::new()),
             kill_ok: AtomicBool::new(true),
             ready_fail: AtomicBool::new(false),
             release_fail: AtomicBool::new(false),
@@ -287,10 +291,13 @@ impl Slots for FakeSlots {
         &mut self,
         slot: Slot,
         _ep: SlotEndpoint,
-        _launch: SlotLaunch,
+        launch: SlotLaunch,
         cancel: &CancellationToken,
     ) -> Result<(), XrayError> {
         self.0.note(format!("xray-start:{}", slot_name(slot)));
+        if let Ok(config) = serde_json::from_slice(&launch.config) {
+            self.0.xray_configs.lock().push(config);
+        }
         if self.0.stage_hold.load(Ordering::SeqCst) {
             cancel.cancelled().await;
             return Err(XrayError::Cancelled);

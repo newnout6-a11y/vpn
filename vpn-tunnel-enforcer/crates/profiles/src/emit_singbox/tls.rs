@@ -156,10 +156,7 @@ fn build(tls: &Tls, family: Family, p: &Profile, policy: &EmitPolicy) -> Result<
     }
     // Reality authenticates inside the structure of its ClientHello: never fragment it.
     if family == Family::TcpTls && reality.is_none() {
-        put_tricks(
-            &mut o,
-            TlsTricks::effective(p.own_tls_tricks(), policy.tls_compat),
-        );
+        put_tricks(&mut o, p.tls_tricks_for(policy.tls_compat));
     }
     if let Some(ech) = &tls.ech {
         o.insert("ech".into(), ech_object(ech)?);

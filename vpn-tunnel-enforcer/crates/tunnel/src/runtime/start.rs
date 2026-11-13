@@ -53,11 +53,28 @@ fn run_of(req: &StartRequest) -> Result<EngineRun, Reject> {
     }
 }
 
+/// Stealth or adaptive TLS compatibility: the app default of TLS tricks is «Сильно».
+fn tls_compat(req: &StartRequest) -> bool {
+    req.stealth || req.adaptive == AdaptiveMode::TlsCompatibility
+}
+
+/// `profile` as Xray runs it under `req`: `proxy_graph` has no stealth input, so the app's
+/// default TLS tricks are resolved into the key's own value first (item 18), the same rule as
+/// the sing-box emitter's.
+pub(super) fn xray_profile(profile: &Profile, req: &StartRequest) -> Profile {
+    let mut run = profile.clone();
+    let tricks = run.tls_tricks_for(tls_compat(req));
+    if let Some(tls) = run.tls.as_mut() {
+        tls.tricks = Some(tricks);
+    }
+    run
+}
+
 /// What Xray drops of `profile` under `req` (stealth / TLS compatibility included): shown with
-/// the start and the server switch (engine API: call it whenever Xray runs the profile).
+/// the start and the server switch (engine API: call it whenever Xray runs the profile, with
+/// the profile [`xray_profile`] made).
 pub(super) fn xray_warnings(profile: &Profile, req: &StartRequest) -> Vec<Msg> {
-    let tls_compat = req.stealth || req.adaptive == AdaptiveMode::TlsCompatibility;
-    xray_config::warnings(profile, tls_compat)
+    xray_config::warnings(profile, tls_compat(req))
 }
 
 /// Effects of a start in progress: exactly what the compensation must undo.
@@ -336,8 +353,7 @@ impl Actor {
                 if engine == Engine::SingBox {
                     let policy = EmitPolicy {
                         device: profile.device,
-                        tls_compat: req.stealth
-                            || req.adaptive == vpnte_base::types::AdaptiveMode::TlsCompatibility,
+                        tls_compat: tls_compat(req),
                         ..EmitPolicy::default()
                     };
                     let mut upstream =
@@ -361,8 +377,9 @@ impl Actor {
                     return Ok(Planned::Native(upstream));
                 }
                 let device = profile.device.unwrap_or_default();
-                let mut graph = xray_config::proxy_graph(&profile.profile, device)?;
-                work.warnings.extend(xray_warnings(&profile.profile, req));
+                let run = xray_profile(&profile.profile, req);
+                let mut graph = xray_config::proxy_graph(&run, device)?;
+                work.warnings.extend(xray_warnings(&run, req));
                 let path = ResolvePath::Direct;
                 let resolved = self.deps.engines.resolve(&graph.hosts(), path, op).await?;
                 work.warnings.extend(resolved.warning.clone());

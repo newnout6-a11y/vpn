@@ -190,6 +190,14 @@ operation in flight are `UserAct::Stop`, `switch_server` is `Pick`, `apply_setti
 `set_kill_switch_level`, `set_protection_toggles` and the launch choice are `Change`, a window / tray
 connect is `Connect`; every act but `Change` also drops a restore that waits after a lost switch.
 
+## TLS tricks per server (`api_servers::tricks`, package p-tricks-wire)
+`ServersApi::tls_tricks` / `set_tls_tricks` read and store `ServerRow::tls_tricks` (`RowTricks`):
+the pick that equals what the key brings itself stores nothing, a change on the connected server
+reconnects it like `set_engine`. Every path that runs a key takes `ServerRow::run_profile()` (the
+choice applied): `svc_tunnel::vpn_profile` (tunnel and helper service), the proxies' candidates,
+live checks, autopick probes and the engine update's config checks; export, reconcile and identity
+keep `profile()`.
+
 ## Links from browsers and messengers (`api_servers::phones`, package w7-phones)
 `api_servers::contexts` also provides an `api_servers::LinkInbox` root context. The root offers it the
 `--open-link` link of this start (`Wiring::first_link`) and every `Command::OpenLink` of a later launch

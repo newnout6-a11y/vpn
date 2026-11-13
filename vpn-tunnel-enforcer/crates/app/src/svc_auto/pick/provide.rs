@@ -82,7 +82,8 @@ impl PickHost for AutoHost {
     async fn check(&self, id: &str, cancel: CancellationToken) -> Option<Checked> {
         let row = self.row(id)?;
         let identity = row.identity()?;
-        let profile = row.profile().ok()?;
+        // Probed as it runs: the user's TLS tricks over the key's own.
+        let profile = row.run_profile().ok()?;
         let mut ctx = self.tunnel()?.probe_ctx(row.device);
         // The row's own engine choice applies to its probe exactly as to its connect.
         ctx.engine_pref = server_pref(ctx.engine_pref, row.engine);

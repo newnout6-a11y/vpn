@@ -51,7 +51,7 @@
         "xhttpMux": "Для соединения XHTTP отключён mux.cool: XHTTP сам объединяет соединения.",
         "mux": "Xray не использует мультиплексирование из профиля (mux sing-box).",
         "dial": "Xray не применяет параметры соединения из профиля (тайм-аут, TCP Fast Open, MPTCP, фрагментация UDP, выбор IPv4/IPv6).",
-        "singboxExtra": "Xray не применяет дополнительные параметры sing-box из профиля (например, фрагментацию TLS).",
+        "singboxExtra": "Xray не применяет дополнительные параметры sing-box из профиля.",
         "disableSni": "Xray не умеет скрывать имя сервера: SNI отправляется, хотя профиль его отключает.",
         "fingerprintUnknown": "Xray не знает отпечаток TLS «{{fingerprint}}»; используется отпечаток по умолчанию.",
         "fingerprintRejected": "Отпечаток TLS «{{fingerprint}}» отвергают современные серверы REALITY (Xray 26.9.8 и новее); выберите chrome, firefox или safari.",

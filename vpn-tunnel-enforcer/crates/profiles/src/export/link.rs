@@ -9,7 +9,7 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::Value;
 
 use crate::common::fields::{XHTTP_MODES, parse_host};
-use crate::model::{Host, Reality, Tls, Transport};
+use crate::model::{HelloSplit, Host, Reality, Span, Tls, TlsTricks, Transport};
 
 /// RFC 3986 unreserved characters stay, everything else is encoded (`+` -> `%2B`, space ->
 /// `%20`, `,` -> `%2C`): the importer reads `+` literally and decodes exactly once.
@@ -213,6 +213,13 @@ fn tls_params(
         q.opt("pqv", reality.mldsa65_key())?;
     }
     q.opt("vcn", t.cert_names())?;
+    if let Some(tricks) = t.tricks {
+        // Only the V2Ray-family reader takes `fragment=` back; elsewhere the JSON form keeps it.
+        if insecure_key != "allowInsecure" {
+            return None;
+        }
+        q.set("fragment", tricks_param(tricks)?);
+    }
     if let Some(ech) = &t.ech {
         q.set("ech", "1");
         q.list("echConfig", &ech.config_lines)?;
@@ -235,6 +242,24 @@ fn tls_params(
         q.set(key, pin.as_str());
     }
     Some(())
+}
+
+/// `fragment=` in Xray's order (`packets,length,interval`), as `uri` reads it back; `None` for
+/// `Off`, which no link names.
+fn tricks_param(tricks: TlsTricks) -> Option<String> {
+    let (packets, split) = match tricks {
+        TlsTricks::Off => return None,
+        TlsTricks::Record => (
+            "tlshello",
+            HelloSplit {
+                interval_ms: Span::new(0, 0),
+                ..HelloSplit::PRESET
+            },
+        ),
+        TlsTricks::Hello(split) => ("1", split),
+        TlsTricks::Both(split) => ("tlshello", split),
+    };
+    Some(format!("{packets},{},{}", split.len, split.interval_ms))
 }
 
 /// `type` and the transport parameters; nothing for plain TCP.

@@ -9,7 +9,7 @@
 use serde_json::Value;
 use vpnte_base::Msg;
 
-use crate::model::{Awg, Kind, Profile, Source, WireGuard};
+use crate::model::{Awg, Kind, Note, Profile, Source, WireGuard};
 
 mod conf;
 mod link;
@@ -182,8 +182,14 @@ fn faithful_line(p: &Profile, reparse: impl FnOnce(&str) -> Option<Profile>) -> 
     let Source::Uri(line) = &p.source else {
         return None;
     };
+    // A key stored before item 18 kept `fragment=` as a note only: still the same line (a2).
+    let noted = p.notes.contains(&Note::UnsupportedField("fragment".into()));
+    let stored_before = noted && p.tls.as_ref().is_some_and(|t| t.tricks.is_none());
     reparse(line)
-        .is_some_and(|again| {
+        .is_some_and(|mut again| {
+            if let Some(tls) = again.tls.as_mut().filter(|_| stored_before) {
+                tls.tricks = None;
+            }
             let again = Profile {
                 notes: p.notes.clone(),
                 ..again

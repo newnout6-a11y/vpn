@@ -89,9 +89,14 @@ impl TlsTricks {
     pub fn effective(own: Option<TlsTricks>, tls_compat: bool) -> TlsTricks;  // own, else STRONG / Off
     pub fn record(self) -> bool; pub fn hello(self) -> Option<HelloSplit>;
     pub fn from_fragment(packets: &str, length: Option<&str>, interval: Option<&str>) -> Option<TlsTricks>;
-    pub fn from_singbox(extra: &Map<String, Value>) -> Option<TlsTricks>;     // pasted sing-box keys
+    pub fn from_singbox(extra: &Map<String, Value>) -> Option<TlsTricks>;     // pasted keys: flags, preset split
+    pub fn with(self, other: TlsTricks) -> TlsTricks;  // both tricks; self's split first
 }
-impl Profile { pub fn own_tls_tricks(&self) -> Option<TlsTricks> }  // Tls::tricks, else pasted keys
+impl Profile {
+    pub fn own_tls_tricks(&self) -> Option<TlsTricks>;   // Tls::tricks, else pasted keys
+    pub fn tls_tricks_for(&self, tls_compat: bool) -> TlsTricks;  // what the key runs with (both engines)
+    pub fn takes_tls_tricks(&self) -> bool;              // TCP TLS with an SNI; not REALITY / QUIC / naive /
+}                                                        // ShadowTLS / native Xray graph
 pub struct ParseReport { pub profiles: Vec<Profile>, pub skipped: Vec<Skipped>, pub meta: SubscriptionMeta }
 pub struct Skipped { pub excerpt: String /* redacted, <= 80 chars */, pub reason: SkipReason }
 pub enum SkipReason { UnknownScheme(String), Invalid{scheme, detail /* English */}, MissingCredential,
@@ -106,12 +111,16 @@ pub struct TooLarge;                      // input over a limit
 change them only additively).
 TLS tricks: `Record` cuts the ClientHello into TLS records sent at once, `Hello` into TCP pieces of
 `len` bytes `interval_ms` apart, `Both` sends the records as such pieces (FOCI 2025: the TSPU
-reassembled either trick alone). Order: the key's own value (`own_tls_tricks`: share link, pasted
-sing-box keys, later the user's per-server choice) > the app default (stealth or adaptive TLS
-compatibility -> `STRONG`) > `Off`. `from_fragment` reads Xray's triple as links and Happ / Hiddify
-provider keys (`fragmentation-packets` / `-length` / `-interval`) write it: `tlshello` = records
-(interval 0 or none: `Record`, else `Both`), packets from 1 (`1`, `1-3`) = `Hello`, anything else
-`None` (not the hello). Provider values are kept as given: uTLS / ALPN / mux defaults are
+reassembled either trick alone). `tls_tricks_for(tls_compat)` is the one rule both engines use:
+`Off` where the key cannot take tricks (`takes_tls_tricks`: REALITY never, its hello names a
+whitelisted camouflage site), else the typed value (share link, the user's per-server choice the
+app merges in) as is, else pasted sing-box keys on top of the app default (they only add: explicit
+`false` adds nothing), else the default (stealth or adaptive TLS compatibility -> `STRONG`, else
+`Off`). `from_fragment` reads Xray's triple as links and Happ / Hiddify provider keys
+(`fragmentation-packets` / `-length` / `-interval`) write it: `tlshello` = records (interval 0 or
+none: `Record`; with the provider's own record length `Both` with that length and pause 0, else
+`Both`), packets from 1 (`1`, `1-3`) = `Hello`, anything else `None` (not the hello). `from_singbox`
+reads flags only: sing-box's `fragment_fallback_delay` is one wait at one cut, not a per-piece pause. Provider values are kept as given: uTLS / ALPN / mux defaults are
 applied by `emit_singbox`, never stored. Durations are whole seconds (`*_s`).
 
 ## Importing text (servers-parse / servers-refresh)
@@ -192,7 +201,8 @@ pub fn from_legacy(name: &str, protocol: &str, outbound: &Value, source_uri: Opt
   `shadowtls` -> `ShadowTlsNeedsInner`, others -> `UnknownScheme(scheme)` (`""`: no `scheme://`).
   VLESS / VMess / Trojan `fragment=` (Xray `packets,length,interval`; Hiddify `size,sleep,tlshello`)
   and Hiddify `fgsize` / `fgsleep` -> `Tls::tricks`; without TLS or unreadable ->
-  `Note::UnsupportedField("fragment")`.
+  `Note::UnsupportedField("fragment")`; kept but noted the same way where no engine runs them
+  (REALITY, XHTTP over HTTP/3).
 - `parse_json` reads sing-box outbounds / endpoints (incl. the SS + ShadowTLS chain), Xray outbounds
   and whole provider documents (one document with a native graph = one profile, rejected graph =
   `NativeGraphRejected`), wrappers up to depth 6, JSON strings (nested JSON, <= 2 base64 layers,
@@ -336,11 +346,14 @@ pub fn header_meta<'a>(headers: impl IntoIterator<Item = (&'a str, &'a str)>, bo
 // provider controls (Happ app-management keys that steer the client)
 pub enum AutoconnectPick { LastUsed, LowestDelay, Random }   // serde "lastused" | "lowestdelay" | "random"
 pub struct Controls { pub routing: Option<String>, pub hide_settings: Option<bool>,
-    pub autoconnect: Option<bool>, pub autoconnect_pick: Option<AutoconnectPick> } // serde camelCase
+    pub autoconnect: Option<bool>, pub autoconnect_pick: Option<AutoconnectPick>,  // serde camelCase
+    pub tls_tricks: Option<TlsTricks> }  // `fragmentation-enable|packets|length|interval` (Happ, limcore):
+    // enable 0/false = Off; on: packets (default tlshello), length / pause (default the preset);
+    // no enable = None. Servers put it on a provider's new rows once (afterwards the user's).
 impl Controls { pub fn hides_settings(&self) -> bool }
 pub struct Relocation { pub fallback_url: Option<String>, pub new_url: Option<String>,
     pub new_domain: Option<String> }                          // tokens: Debug prints only presence
-pub struct ProviderKeys { pub controls: Controls, pub relocation: Relocation }
+pub struct ProviderKeys { pub controls: Controls, pub relocation: Relocation, /* private */ }
 impl ProviderKeys { pub fn apply(&mut self, key: &str, value: &str); pub fn or(self, other: Self) -> Self }
 pub fn body_keys(text: &str) -> ProviderKeys;                 // top comment block + a happ://routing/ line
 pub fn header_keys<'a>(headers: impl IntoIterator<Item = (&'a str, &'a str)>, body: ProviderKeys)
@@ -477,11 +490,11 @@ kind (route such keys to Xray, which enforces `pinnedPeerCertSha256`); without `
 certificate pin is not emitted and the CA check runs (`Note::CertPinNotEnforced` stays true).
 
 TLS tricks (TCP TLS without REALITY only; never the ShadowTLS dialer, naive or QUIC):
-`TlsTricks::effective(p.own_tls_tricks(), policy.tls_compat)` -> `record_fragment` (record),
+`p.tls_tricks_for(policy.tls_compat)` -> `record_fragment` (record),
 `fragment` + `fragment_fallback_delay` = the split's longest pause, at least 1 ms (hello; sing-box
 has no length knob, cuts inside the SNI and waits for the ACK where it can see it). Pasted
-`tls.fragment*` keys are never re-emitted raw: they are the key's own tricks, a typed value
-overrides them.
+`tls.fragment*` keys are never re-emitted raw: they add to the default, a typed value overrides
+them.
 
 ## xray_native (provider Xray graphs; Xray JSON itself is `vpnte_engine::xray_config`'s job)
 
@@ -546,7 +559,10 @@ keepalives (mihomo keeps one of each per entry); it writes `version: 3` for 3.x.
 A link is returned only when re-importing it yields the same profile (mux, dial options,
 `singbox_extra`, pins, multi-peer WireGuard, ShadowTLS, … -> no link). V2Ray-family links write
 `vcn` / `pqv` (another scheme cannot carry them -> no link); VMess JSON writes `vcn`, `pqv` there
--> no VMess link. The JSON share is
+-> no VMess link. TLS tricks go back as `fragment=` in Xray's order (`tlshello,100-200,10-20`,
+`1,40-60,30-50`) on VLESS / Trojan links; other schemes and VMess JSON have no reader for them
+(-> no link, the JSON share keeps them). A key stored before item 18 (`fragment=` only noted,
+`Tls::tricks` absent) still gets its imported line back. The JSON share is
 `emit_singbox(p, "proxy", &EmitPolicy::default())`, so it carries the emitter's defaults (uTLS
 `chrome`, TUIC `alpn: ["h3"]`): runnable on any sing-box client, read back as provider values on
 re-import. `None` = neither form can carry the key (e.g.

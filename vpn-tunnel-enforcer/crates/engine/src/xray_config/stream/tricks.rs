@@ -4,20 +4,21 @@
 use serde_json::{Value, json};
 use vpnte_profiles::model::{HelloSplit, Profile, Span, Tls, TlsTricks};
 
-/// `finalmask` for a TCP stream under TLS or REALITY; `None` when the key has no tricks of its
-/// own (the app's default needs the caller's stealth flag, which `translate` does not get).
+/// `finalmask` for a TCP stream under TLS; `None` when the key runs without tricks. The app's
+/// default needs the caller's stealth flag, which `translate` does not get: the tunnel resolves
+/// it into the profile first ([`Profile::tls_tricks_for`]).
 ///
 /// Xray's `fragment` mask: `packets: "tlshello"` cuts the hello into TLS records of `length`
 /// bytes, each written `delay` ms after the last (`delay` 0: all records in one write, so a
 /// record split only); numeric packets (`"1-1"`) cut the first write, the hello, into raw TCP
-/// pieces. REALITY is fine on the client side (the finalmask crash of ru-2026 §6 is a REALITY
-/// inbound bug); XHTTP over HTTP/3 dials QUIC, where TCP masks mean nothing.
+/// pieces. Never REALITY (as on sing-box: `tls_tricks_for` gives it none); XHTTP over HTTP/3
+/// dials QUIC, where TCP masks mean nothing.
 pub(super) fn finalmask(p: &Profile, tls: &Tls, network: &str) -> Option<Value> {
     let h3 = matches!(tls.alpn.as_slice(), [only] if only.eq_ignore_ascii_case("h3"));
     if network == "xhttp" && h3 {
         return None;
     }
-    let (packets, split) = match p.own_tls_tricks()? {
+    let (packets, split) = match p.tls_tricks_for(false) {
         TlsTricks::Off => return None,
         TlsTricks::Record => (
             "tlshello",
@@ -96,8 +97,8 @@ mod tests {
         Some(text)
     }
 
-    /// Item 18: every TCP stream under TLS or REALITY carries the key's tricks as a finalmask
-    /// fragment that the bundled Xray accepts without a deprecation; XHTTP over HTTP/3 does not.
+    /// Item 18: every TCP stream under TLS carries the key's tricks as a finalmask fragment that
+    /// the bundled Xray accepts without a deprecation; REALITY and XHTTP over HTTP/3 do not.
     #[test]
     fn tricks_reach_finalmask_and_pass_xray_test() {
         let fragment = |packets: &str, length: &str, delay: &str| {
@@ -114,7 +115,7 @@ mod tests {
                 fragment("tlshello", "100-200", "10-20"),
             ),
             (
-                format!("{reality}&fragment=1,40-60,30-50#hello"),
+                format!("{base}&type=tcp&fragment=1,40-60,30-50#hello"),
                 fragment("1-1", "40-60", "30-50"),
             ),
             (
@@ -139,8 +140,10 @@ mod tests {
                 assert!(!out.lines().any(|line| ours(&line)), "{out}");
             }
         }
+        // REALITY never (review a4 / b1, as sing-box): its hello names a camouflage site.
         let untouched = [
             format!("{base}&type=xhttp&alpn=h3&path=/x&fragment=tlshello,100-200,10-20#h3"),
+            format!("{reality}&fragment=1,40-60,30-50#reality"),
             format!("{base}#none"),
         ];
         for link in untouched {
@@ -192,7 +195,13 @@ mod tests {
         pasted
             .singbox_extra
             .insert("tls.record_fragment".into(), json!(true));
+        // Pasted keys add to the default: until the caller resolves it, stealth is not whole.
         let msgs = crate::xray_config::warnings(&pasted, true);
+        assert_eq!(msgs.len(), 1, "{msgs:?}");
+        assert_eq!(msgs[0].key, "engine.xray.warn.stealth");
+        let mut resolved = pasted.clone();
+        resolved.tls.as_mut().expect("tls").tricks = Some(pasted.tls_tricks_for(true));
+        let msgs = crate::xray_config::warnings(&resolved, true);
         assert!(msgs.is_empty(), "{msgs:?}");
         assert_eq!(
             mask(&build_config(
@@ -208,5 +217,22 @@ mod tests {
             ))["tcp"][0]["settings"]["packets"],
             "tlshello"
         );
+    }
+
+    /// Xray applies pasted trick keys, so the "lost sing-box options" text names none (review a6).
+    #[test]
+    fn lost_options_text_names_no_fragmentation() {
+        let texts = [
+            include_str!("../../../locales/engine-xray-config.en.json"),
+            include_str!("../../../locales/engine-xray-config.ru.json"),
+        ];
+        for json in texts {
+            let text = &crate::test_locales::flatten(json)["engine.xray.warn.singboxExtra"];
+            let lower = text.to_lowercase();
+            assert!(
+                !lower.contains("fragment") && !lower.contains("фрагмент"),
+                "{text}"
+            );
+        }
     }
 }

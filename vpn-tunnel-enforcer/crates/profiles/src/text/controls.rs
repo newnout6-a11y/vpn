@@ -1,11 +1,13 @@
 //! Provider controls: the Happ app-management keys that steer the client instead of describing
-//! the plan (`routing`, `hide-settings`, `subscription-autoconnect`, the relocation keys). They
-//! arrive like the metadata, as response headers or `#` / `//` lines at the top of the body.
+//! the plan (`routing`, `hide-settings`, `subscription-autoconnect`, `fragmentation-*`, the
+//! relocation keys). They arrive like the metadata, as response headers or `#` / `//` lines at
+//! the top of the body.
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::meta::{comment_block, unquote};
+use crate::model::{HelloSplit, TlsTricks};
 
 /// Longest routing value kept (a `happ://routing/…` link carries a base64 JSON profile).
 const MAX_ROUTING_BYTES: usize = 64 * 1024;
@@ -40,6 +42,11 @@ pub struct Controls {
         deserialize_with = "pick_or_none"
     )]
     pub autoconnect_pick: Option<AutoconnectPick>,
+    /// `fragmentation-enable` / `-packets` / `-length` / `-interval` (Happ, limcore): the TLS
+    /// tricks the provider sets for its servers. New rows take them once, when they are added;
+    /// afterwards the value is the user's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_tricks: Option<TlsTricks>,
 }
 
 /// A pick a newer build stored (a name this one does not know) reads as none, the default pick:
@@ -83,6 +90,43 @@ impl fmt::Debug for Relocation {
 pub struct ProviderKeys {
     pub controls: Controls,
     pub relocation: Relocation,
+    /// The `fragmentation-*` values as sent: read together into `controls.tls_tricks`.
+    fragmentation: Fragmentation,
+}
+
+/// Happ's `fragmentation-*` keys of one answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Fragmentation {
+    enable: Option<bool>,
+    packets: Option<String>,
+    length: Option<String>,
+    interval: Option<String>,
+}
+
+impl Fragmentation {
+    fn or(self, other: Fragmentation) -> Fragmentation {
+        Fragmentation {
+            enable: self.enable.or(other.enable),
+            packets: self.packets.or(other.packets),
+            length: self.length.or(other.length),
+            interval: self.interval.or(other.interval),
+        }
+    }
+
+    /// Off when the provider switched fragmentation off; on: its packets (Happ's first choice,
+    /// `tlshello`, when not sent), length and pause, the preset where not sent. Nothing without
+    /// `fragmentation-enable` or with a value Xray would not read.
+    fn tricks(&self) -> Option<TlsTricks> {
+        if !self.enable? {
+            return Some(TlsTricks::Off);
+        }
+        let preset = HelloSplit::PRESET.interval_ms.to_string();
+        TlsTricks::from_fragment(
+            self.packets.as_deref().unwrap_or("tlshello"),
+            self.length.as_deref(),
+            Some(self.interval.as_deref().unwrap_or(&preset)),
+        )
+    }
 }
 
 impl ProviderKeys {
@@ -91,6 +135,7 @@ impl ProviderKeys {
         let value = unquote(value);
         let c = &mut self.controls;
         let r = &mut self.relocation;
+        let f = &mut self.fragmentation;
         match key.trim().to_ascii_lowercase().as_str() {
             "routing" => c.routing = routing(value).or(c.routing.take()),
             "hide-settings" => c.hide_settings = toggle(value).or(c.hide_settings),
@@ -101,26 +146,34 @@ impl ProviderKeys {
             "fallback-url" => r.fallback_url = http_url(value).or(r.fallback_url.take()),
             "new-url" | "moved-permanently-to" => r.new_url = http_url(value).or(r.new_url.take()),
             "new-domain" => r.new_domain = domain(value).or(r.new_domain.take()),
-            _ => {}
+            "fragmentation-enable" => f.enable = toggle(value).or(f.enable),
+            "fragmentation-packets" => f.packets = short(value).or(f.packets.take()),
+            "fragmentation-length" => f.length = short(value).or(f.length.take()),
+            "fragmentation-interval" => f.interval = short(value).or(f.interval.take()),
+            _ => return,
         }
+        c.tls_tricks = f.tricks();
     }
 
     /// `self`, each missing field taken from `other` (headers over body, outer layer over inner).
     pub fn or(self, other: ProviderKeys) -> ProviderKeys {
         let (c, o) = (self.controls, other.controls);
         let (r, p) = (self.relocation, other.relocation);
+        let fragmentation = self.fragmentation.or(other.fragmentation);
         ProviderKeys {
             controls: Controls {
                 routing: c.routing.or(o.routing),
                 hide_settings: c.hide_settings.or(o.hide_settings),
                 autoconnect: c.autoconnect.or(o.autoconnect),
                 autoconnect_pick: c.autoconnect_pick.or(o.autoconnect_pick),
+                tls_tricks: fragmentation.tricks(),
             },
             relocation: Relocation {
                 fallback_url: r.fallback_url.or(p.fallback_url),
                 new_url: r.new_url.or(p.new_url),
                 new_domain: r.new_domain.or(p.new_domain),
             },
+            fragmentation,
         }
     }
 }
@@ -166,6 +219,13 @@ fn pick(value: &str) -> Option<AutoconnectPick> {
         "random" => Some(AutoconnectPick::Random),
         _ => None,
     }
+}
+
+/// A short value (a fragment range, `tlshello`), trimmed; `None` when blank or odd.
+fn short(value: &str) -> Option<String> {
+    let value = value.trim();
+    let usable = !value.is_empty() && value.len() <= 32 && !value.chars().any(char::is_control);
+    usable.then(|| value.to_owned())
 }
 
 /// Kept as sent, within the size cap and without control characters.

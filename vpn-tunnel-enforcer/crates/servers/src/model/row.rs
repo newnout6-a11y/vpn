@@ -8,7 +8,7 @@ use vpnte_base::types::{ClientDevice, EnginePref, UnixMs};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::secret::{Secret, SecretError};
 use vpnte_profiles::countries::{self, Iso2};
-use vpnte_profiles::model::Profile;
+use vpnte_profiles::model::{Profile, TlsTricks};
 
 use super::{ARCHIVE_TTL_MS, GroupId, ProfileId, lenient};
 
@@ -243,6 +243,38 @@ pub struct ServerRow {
     /// older files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub whitelist: Option<super::Whitelist>,
+    /// The user's TLS tricks for this key (item 18), over what the key brings itself; absent =
+    /// the key's own (share link, pasted options) or the app default. A row field, not part of
+    /// the profile: a subscription refresh replaces the profile and keeps the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_tricks: Option<RowTricks>,
+}
+
+/// A row's TLS tricks choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RowTricks {
+    /// The app default (stealth / TLS compatibility), even where the key brings its own.
+    Default,
+    /// This value, whatever the key brings.
+    Set(TlsTricks),
+}
+
+impl RowTricks {
+    /// `profile` with this choice in place of the key's own tricks (the typed value and the
+    /// pasted sing-box keys alike, so `Default` really follows the app).
+    pub fn apply(self, profile: &mut Profile) {
+        let Some(tls) = profile.tls.as_mut() else {
+            return;
+        };
+        tls.tricks = match self {
+            RowTricks::Default => None,
+            RowTricks::Set(tricks) => Some(tricks),
+        };
+        for key in TlsTricks::SINGBOX_KEYS {
+            profile.singbox_extra.remove(key);
+        }
+    }
 }
 
 impl ServerRow {
@@ -274,6 +306,7 @@ impl ServerRow {
             verdict: None,
             hidden: false,
             whitelist: None,
+            tls_tricks: None,
         };
         row.set_profile(profile)?;
         Ok(row)
@@ -282,6 +315,17 @@ impl ServerRow {
     /// The typed profile. Fails when the key cannot be decrypted under this Windows account.
     pub fn profile(&self) -> AppResult<Profile> {
         self.profile.expose_json().map_err(profile_error)
+    }
+
+    /// The profile as it runs: the user's TLS tricks over the key's own. Every path that runs
+    /// the key (tunnel, service, proxies, probes) takes this; export and identity take
+    /// [`ServerRow::profile`], the key as the provider gave it.
+    pub fn run_profile(&self) -> AppResult<Profile> {
+        let mut profile = self.profile()?;
+        if let Some(tricks) = self.tls_tricks {
+            tricks.apply(&mut profile);
+        }
+        Ok(profile)
     }
 
     /// Replaces the stored profile and refreshes the plain copies.
@@ -340,3 +384,6 @@ fn profile_error(err: SecretError) -> AppError {
 fn is_auto(engine: &EnginePref) -> bool {
     *engine == EnginePref::Auto
 }
+
+#[cfg(test)]
+mod tricks_tests;

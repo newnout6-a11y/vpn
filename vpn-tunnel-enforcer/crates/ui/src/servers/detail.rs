@@ -290,8 +290,9 @@ fn DeviceRow(id: String, device: ClientDevice, fingerprint: String, connected: b
 
 /// TLS tricks of the server (item 18): the presets in one select; a provider's own split shows
 /// as its own option until a preset replaces it. Nothing at all when the key has none to offer.
+/// A save reads the server back: what it runs with is the backend's answer, not the pick.
 #[component]
-fn TricksRow(id: String, connected: bool) -> Element {
+pub(super) fn TricksRow(id: String, connected: bool) -> Element {
     let actions = use_context::<Actions>();
     let mut view = use_signal(|| None::<TricksView>);
     let mut saving = use_signal(|| false);
@@ -321,13 +322,9 @@ fn TricksRow(id: String, connected: bool) -> Element {
         SelectOption::new(TricksChoice::Soft, t!("ui.servers.detail.tricks.soft")),
         SelectOption::new(TricksChoice::Strong, t!("ui.servers.detail.tricks.strong")),
     ];
-    if let TricksChoice::Custom { record, split } = current.choice {
-        let (len, ms) = (range(split.len), range(split.interval_ms));
-        let label = if record {
-            t!("ui.servers.detail.tricks.customBoth", len = len, ms = ms)
-        } else {
-            t!("ui.servers.detail.tricks.custom", len = len, ms = ms)
-        };
+    // The engines cut differently (sing-box has no piece length), so no numbers are shown.
+    if let TricksChoice::Custom { .. } = current.choice {
+        let label = t!("ui.servers.detail.tricks.custom");
         options.push(SelectOption::new(current.choice, label));
     }
     let api = actions.api.clone();
@@ -347,10 +344,20 @@ fn TricksRow(id: String, connected: bool) -> Element {
                         failed.set(false);
                         spawn(async move {
                             let result = api.set_tls_tricks(&id, next).await;
+                            if let Err(e) = result {
+                                saving.set(false);
+                                failed.set(e.kind != vpnte_base::ErrorKind::Cancelled);
+                                return;
+                            }
+                            let read = with_deadline(PROBE_UI_TIMEOUT, api.tls_tricks(&id)).await;
                             saving.set(false);
-                            match result {
-                                Ok(()) => view.set(Some(TricksView { choice: next, ..current })),
-                                Err(e) => failed.set(e.kind != vpnte_base::ErrorKind::Cancelled),
+                            match read {
+                                Some(Read::Done(read)) => view.set(read),
+                                // Saved, only the read-back failed: show the pick.
+                                Some(Read::Failed | Read::Running) => {
+                                    view.set(Some(TricksView { choice: next, ..current }));
+                                }
+                                None => {}
                             }
                         });
                     },
@@ -367,15 +374,6 @@ fn TricksRow(id: String, connected: bool) -> Element {
                 }
             }
         }
-    }
-}
-
-/// `100–200`, or one number when both ends agree.
-fn range((min, max): (u16, u16)) -> String {
-    if min == max {
-        min.to_string()
-    } else {
-        format!("{min}–{max}")
     }
 }
 
@@ -589,8 +587,8 @@ mod tests {
         assert_eq!(PROBE_UI_TIMEOUT, Duration::from_secs(10));
     }
 
-    /// Item 18: the editor shows only for TLS over TCP, a provider's split as its own option,
-    /// and a choice reads back; ranges print as `min–max`, or one number.
+    /// Item 18: the editor shows only for TLS over TCP without REALITY, a provider's split as
+    /// its own option, and a choice reads back.
     #[tokio::test]
     async fn tricks_editor_reads_and_writes() {
         use super::super::api::ServersApi;
@@ -606,27 +604,19 @@ mod tests {
         assert_eq!(api.tls_tricks(&quic.id).await.expect("read"), None);
         let reality = servers.iter().find(|s| s.stealth == Some(Stealth::Reality));
         let reality = reality.expect("a REALITY key");
-        let read = api
-            .tls_tricks(&reality.id)
-            .await
-            .expect("read")
-            .expect("offered");
+        assert_eq!(api.tls_tricks(&reality.id).await.expect("read"), None);
+        let utls = servers.iter().find(|s| s.stealth == Some(Stealth::Utls));
+        let utls = utls.expect("a uTLS key");
+        let read = api.tls_tricks(&utls.id).await.expect("read");
+        let read = read.expect("offered");
         assert!(matches!(
             read.choice,
             TricksChoice::Custom { record: false, .. }
         ));
-        api.set_tls_tricks(&reality.id, TricksChoice::Strong)
+        api.set_tls_tricks(&utls.id, TricksChoice::Strong)
             .await
             .expect("saved");
-        let read = api
-            .tls_tricks(&reality.id)
-            .await
-            .expect("read")
-            .expect("offered");
-        assert_eq!(read.choice, TricksChoice::Strong);
-        assert_eq!(
-            (range((100, 200)), range((15, 15))),
-            ("100–200".into(), "15".into())
-        );
+        let read = api.tls_tricks(&utls.id).await.expect("read");
+        assert_eq!(read.expect("offered").choice, TricksChoice::Strong);
     }
 }

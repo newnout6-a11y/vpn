@@ -256,6 +256,11 @@ impl Actor {
         let Mode::DirectVpn { profile } = &next.mode else {
             return None;
         };
+        // Xray gets the app's default TLS tricks resolved into the profile (item 18).
+        let run = VpnProfile {
+            profile: Arc::new(super::start::xray_profile(&profile.profile, next)),
+            ..profile.clone()
+        };
         let deps = &self.deps;
         let capture = &*self.capture;
         let stops = &self.shared.stops;
@@ -272,7 +277,7 @@ impl Actor {
             clash: &s.clash,
             proof: &s.proof,
             core: &s.core,
-            next: profile,
+            next: &run,
             previous,
             cancel: op,
             is_owner,
@@ -309,7 +314,7 @@ impl Actor {
                 s.engine = run;
                 receipt.engine = Some(run);
             }
-            receipt.warnings = super::start::xray_warnings(&profile.profile, next);
+            receipt.warnings = super::start::xray_warnings(&run.profile, next);
         }
         tracing::info!(outcome = ?receipt.outcome, committed = receipt.committed,
             verified = receipt.verified(), "upstream switch finished");

@@ -8,7 +8,7 @@ use vpnte_profiles::model::{Profile, SubscriptionMeta};
 
 use super::{AddReport, AddTarget, Servers, group_not_found};
 use crate::model::{
-    ArchiveReason, FetchState, GroupId, Origin, ServerGroup, ServerRow, ServersDoc,
+    ArchiveReason, FetchState, GroupId, Origin, RowTricks, ServerGroup, ServerRow, ServersDoc,
     clean_group_name, host_name,
 };
 
@@ -33,6 +33,11 @@ impl Servers {
             return Err(AppError::validation(Msg::new("servers.parse.nothingFound")));
         }
         let now = now_ms();
+        // The provider's TLS tricks go on its new rows once; afterwards the value is the user's.
+        let tricks = match &target {
+            AddTarget::Subscription(sub) => sub.controls.tls_tricks.map(RowTricks::Set),
+            AddTarget::Keys { .. } => None,
+        };
         self.update(|doc| {
             let (group, origin, device) = resolve_target(doc, &target, profiles.len(), now)?;
             let mut known: HashMap<[u8; 16], usize> = doc
@@ -73,6 +78,7 @@ impl Servers {
                 }
                 let mut row = ServerRow::new(profile, group.clone(), origin, device, now)?;
                 row.hidden = hidden;
+                row.tls_tricks = tricks;
                 known.insert(identity, doc.profiles.len());
                 report.added.push(row.id.clone());
                 doc.profiles.push(row);

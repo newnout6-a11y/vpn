@@ -379,7 +379,7 @@ pub(super) fn health_report(checked: &[(Key, KeyCheck)], submitted: usize) -> He
 fn by_device(rows: Vec<ServerRow>) -> Vec<((ClientDevice, EnginePref), Vec<Item>)> {
     let mut out: Vec<((ClientDevice, EnginePref), Vec<Item>)> = Vec::new();
     for row in rows {
-        let profile = row.profile().ok();
+        let profile = row.run_profile().ok();
         let item = (
             (row.id.clone(), profile.as_ref().map(|p| p.identity())),
             profile,

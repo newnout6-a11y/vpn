@@ -462,9 +462,10 @@ pub trait ServersApi: 'static {      // root component ServersPage; use_servers_
     async fn set_whitelist_ready(&self, id: &str, on: bool) -> AppResult<()>; // p-net-aware: the user's mark;
                                   // false also forgets what was learned (the badge goes)
     async fn tls_tricks(&self, id: &str) -> AppResult<Option<TricksView>>;  // p-tls-tricks; default body
-                                  // Ok(None) = editor hidden (no TLS over TCP, or not offered yet)
-    async fn set_tls_tricks(&self, id: &str, choice: TricksChoice) -> AppResult<()>; // the server's own
-                                  // choice from now on (over the provider's); connected server reconnects
+                                  // Ok(None) = editor hidden (no engine applies them: no TLS over TCP,
+                                  // REALITY, QUIC, no SNI; or not offered)
+    async fn set_tls_tricks(&self, id: &str, choice: TricksChoice) -> AppResult<()>; // the user's choice
+                                  // (over the provider's; its own option follows it again); reconnects
     async fn probe(&self, id: &str) -> AppResult<ProbeReport>;          // passive: no TLS / HTTP to the endpoint
     async fn geo(&self, id: &str) -> AppResult<Option<GeoInfo>>;        // None = lookups off / unknown
     async fn live_check(&self, id: &str, mode: LiveMode, progress: mpsc::UnboundedSender<LiveProgress>) -> AppResult<LiveCheck>;
@@ -520,10 +521,11 @@ through `open_url` on a click), `announce` (plain text, never linkified), `provi
 (p-net-aware) is the row's neutral «Белые списки» badge (hover: the user's mark, else when it last
 carried data on a whitelisted network) and the «…» entry «Работает в белых списках» / «Снять отметку
 «Белые списки»» (`set_whitelist_ready`); the detail's «Фрагментация TLS» select (p-tls-tricks) reads
-`TricksView { choice: TricksChoice, default_strong /* stealth on: Default = Strong */ }` with
-`TricksChoice::{Default /* follow stealth */, Off, Soft /* records */, Strong /* records + pieces
-100-200 B, 10-20 ms */, Custom { record, split: TricksSplit { len, interval_ms: (u16, u16) } }}`
-(Custom = the provider's own split, offered until a preset replaces it); `ServerView::config_hidden` hides Save / Copy key in the detail
+`TricksView { choice: TricksChoice, default_strong /* stealth or adaptive TLS compat: Default =
+Strong */ }` with `TricksChoice::{Default /* the app default, over the provider's too */, Off, Soft
+/* records */, Strong /* records + pieces 100-200 B, 10-20 ms */, Custom { record, split:
+TricksSplit { len, interval_ms: (u16, u16) } }}` (Custom = the provider's own split, labelled «Как у
+провайдера» without numbers: the engines cut differently; a save reads the view back); `ServerView::config_hidden` hides Save / Copy key in the detail
 (the backend refuses them too: `servers.hidden.refused`), while protocol, engine, TLS / REALITY and
 the protection state stay as they are. `ImportReport::providers: Vec<ProviderLine { name, servers,
 error: Option<FetchError> }>` names the Mihomo providers of an import (`FetchError::Refused`: a

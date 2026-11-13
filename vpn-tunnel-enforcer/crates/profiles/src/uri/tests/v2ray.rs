@@ -145,7 +145,16 @@ fn unmodeled_xray_parameters_are_noted() {
         "vless://{ID0}@h.example:443?security=reality&pbk={PBK}&fragment=1,40-60,30-50&noises=SYNTH#F"
     );
     let p = ok(&line);
-    assert_eq!(p.notes, vec![Note::UnsupportedField("noises".into())]);
+    // REALITY runs no tricks on any engine: the value stays for export, the loss is noted (a5).
+    let fragment = Note::UnsupportedField("fragment".into());
+    let noises = Note::UnsupportedField("noises".into());
+    assert_eq!(p.notes, vec![fragment.clone(), noises.clone()]);
+    let tls = ok(&line.replace("security=reality", "security=tls&sni=h.example"));
+    assert_eq!(tls.notes, vec![noises]);
+    let h3 = ok(&format!(
+        "vless://{ID0}@h.example:443?security=tls&type=xhttp&alpn=h3&path=%2F&fragment=1,40-60,30-50#F"
+    ));
+    assert!(h3.notes.contains(&fragment), "{:?}", h3.notes);
     let split = HelloSplit {
         len: Span::new(40, 60),
         interval_ms: Span::new(30, 50),

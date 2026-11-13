@@ -1,12 +1,14 @@
 //! Adaptive bypass: after every tunnel start, prove that the tunnel really reaches the internet
-//! (20 s settle, then 2 of 3 HTTPS probes) and, when it does not, escalate baseline → TLS record
-//! fragmentation → TUN MTU 1280 → up to two sibling servers; remember per (network, profile) what
+//! (20 s settle, then 2 of 3 HTTPS probes) and, when it does not, escalate baseline → TLS
+//! compatibility → TUN MTU 1280 → up to two sibling servers; remember per (network, profile) what
 //! worked for 30 days.
 //!
 //! The engine knobs themselves live where the configs are built: TUN MTU in
-//! `vpnte_engine::singbox_config::select_mtu`, TLS compatibility (`record_fragment` + uTLS rotation)
-//! in `vpnte_profiles::EmitPolicy::tls_compat`. This module only decides the [`AdaptiveMode`] and
-//! asks the [`Coordinator`](crate::coordinator::Coordinator) for protected restarts.
+//! `vpnte_engine::singbox_config::select_mtu`; TLS compatibility is the default TLS tricks
+//! `TlsTricks::STRONG` (record split + TCP pieces, `Profile::tls_tricks_for`; a key's own or the
+//! user's value wins) plus uTLS rotation, through `vpnte_profiles::EmitPolicy::tls_compat`. This
+//! module only decides the [`AdaptiveMode`] and asks the
+//! [`Coordinator`](crate::coordinator::Coordinator) for protected restarts.
 mod controller;
 pub mod identity;
 pub mod learning;
@@ -45,7 +47,8 @@ pub struct ProfileView {
     pub client_device: Option<ClientDevice>,
     /// The uTLS fingerprint the profile names, if any.
     pub client_fingerprint: Option<String>,
-    /// The engine that runs this profile's upstream (TLS compatibility is a no-op on Xray: A2).
+    /// The engine that runs this profile's upstream. On Xray TLS compatibility brings the TLS
+    /// tricks only (no uTLS rotation), and this bypass does not escalate there (A2).
     pub engine: Engine,
 }
 
@@ -61,7 +64,8 @@ pub struct Sibling {
 /// Which compatibility knobs can help the running session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capabilities {
-    /// TLS record fragmentation can change the handshake (sing-box upstream, TLS without Reality).
+    /// TLS compatibility (TLS tricks + uTLS rotation) can change the handshake (sing-box upstream,
+    /// TLS without Reality).
     pub tls: bool,
     /// A smaller TUN MTU can be tried (every Direct session).
     pub mtu: bool,

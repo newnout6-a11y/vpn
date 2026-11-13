@@ -39,7 +39,8 @@ impl LiveEnv for AppLiveEnv {
             .servers
             .get(&ProfileId::from(id))
             .filter(|r| !r.archived_for(ArchiveReason::User))?;
-        let profile = row.profile().ok()?;
+        // Checked as it runs: the user's TLS tricks over the key's own.
+        let profile = row.run_profile().ok()?;
         Some(ProfileTarget {
             // A key gone from its subscription is checked on its own, never in a batch.
             eligible: row.archived.is_none(),

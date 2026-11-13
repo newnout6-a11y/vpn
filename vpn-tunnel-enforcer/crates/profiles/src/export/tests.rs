@@ -1064,7 +1064,56 @@ fn imported_lines_are_returned_unchanged() {
         };
         let rebuilt = export_uri(&renamed).unwrap();
         assert!(rebuilt.ends_with("#Renamed"), "{rebuilt}");
+        // A rebuilt link keeps the key's TLS tricks (review a2).
+        let again = crate::uri::parse_uri(&rebuilt).unwrap();
+        assert_eq!(again.tls, renamed.tls, "{rebuilt}");
     }
+}
+
+/// Item 18: a rebuilt link writes the key's tricks back as `fragment=` in Xray's order, and
+/// link -> profile -> link -> profile keeps them; schemes whose reader has no `fragment=`
+/// are refused (the JSON form keeps them).
+#[test]
+fn tls_tricks_round_trip_through_links() {
+    let base = "vless://00000000-0000-4000-8000-000000000001@h.example:443?security=tls&sni=front.example.com";
+    let cases = [
+        ("tlshello,100-200,10-20", "tlshello,100-200,10-20"),
+        ("tlshello,100-200,0", "tlshello,100-200,0"),
+        ("tlshello,10-20,0", "tlshello,10-20,0"),
+        ("1-3,40-60,30-50", "1,40-60,30-50"),
+        ("100-200,10-20,tlshello", "tlshello,100-200,10-20"),
+    ];
+    for (given, written) in cases {
+        let line = format!("{base}&fragment={given}#N");
+        let p = crate::uri::parse_uri(&line).unwrap();
+        let renamed = Profile {
+            name: "R".into(),
+            ..p.clone()
+        };
+        let rebuilt = export_uri(&renamed).unwrap();
+        let expected = format!("fragment={}", written.replace(',', "%2C"));
+        assert!(rebuilt.contains(&expected), "{given}: {rebuilt}");
+        let again = crate::uri::parse_uri(&rebuilt).unwrap();
+        assert_eq!(again.tls, p.tls, "{given}: {rebuilt}");
+    }
+    let mut anytls =
+        crate::uri::parse_uri("anytls://pass@h.example:443?sni=front.example.com#A").unwrap();
+    anytls.tls.as_mut().unwrap().tricks = Some(crate::model::TlsTricks::STRONG);
+    assert_eq!(export_uri(&anytls), None);
+}
+
+/// A key stored before item 18 read `fragment=` as a note only; Copy key still hands out the
+/// provider's exact line (review a2).
+#[test]
+fn keys_stored_before_tricks_keep_their_line() {
+    let line = "vless://00000000-0000-4000-8000-000000000001@h.example:443?security=tls&sni=front.example.com&fragment=tlshello,100-200,10-20&noises=SYNTH#Old";
+    let mut stored = crate::uri::parse_uri(line).unwrap();
+    stored.tls.as_mut().unwrap().tricks = None;
+    stored.notes = vec![
+        Note::UnsupportedField("fragment".into()),
+        Note::UnsupportedField("noises".into()),
+    ];
+    assert_eq!(export_uri(&stored).as_deref(), Some(line));
 }
 
 /// A JSON share carries the localized "shared as JSON" notice; a link carries none.

@@ -26,10 +26,10 @@ pub fn warnings(p: &Profile, tls_compat: bool) -> Vec<Msg> {
     // QUIC and WireGuard have no TCP ClientHello: no uTLS, nothing to fragment.
     let tcp_tls = !matches!(p.kind, Kind::Hysteria2 { .. } | Kind::Wireguard(_));
     let tls = p.tls.as_ref().filter(|_| tcp_tls);
-    // sing-box never fragments a REALITY ClientHello either, so nothing is lost there; a key
-    // with tricks of its own gets them on Xray too (finalmask, item 18).
-    let own_tricks = p.own_tls_tricks().is_some();
-    if tls_compat && !own_tricks && tls.is_some_and(|t| t.reality.is_none()) {
+    // Only where the default would change what Xray runs: the tunnel resolves it into the
+    // profile first (item 18), REALITY gets no tricks on either engine.
+    let lost = p.tls_tricks_for(true) != p.tls_tricks_for(false);
+    if tls_compat && tls.is_some() && lost {
         out.push(Msg::new("engine.xray.warn.stealth"));
     }
     if p.mux.as_ref().is_some_and(|m| m.enabled) {

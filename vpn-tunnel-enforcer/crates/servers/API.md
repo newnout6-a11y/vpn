@@ -138,7 +138,13 @@ pub struct ServerRow { pub id: ProfileId, pub group_id: GroupId, pub origin: Ori
     pub country: Option<VerifiedCountry>, pub health: Option<HealthRecord>,
     pub verdict: Option<VerdictRecord> /* beside health: may come from another check, compare `at` */,
     pub hidden: bool /* the provider's hide-settings, carried out of its group (see ServersDoc::hides) */,
-    pub whitelist: Option<Whitelist> /* p-net-aware: the user's mark and learned evidence */ }
+    pub whitelist: Option<Whitelist> /* p-net-aware: the user's mark and learned evidence */,
+    pub tls_tricks: Option<RowTricks> /* item 18: the user's TLS tricks; absent = the key's own */ }
+pub enum RowTricks { Default, Set(TlsTricks) }   // serde "default" | {"set": {"mode": ..}}
+impl RowTricks { pub fn apply(self, &mut Profile) }  // replaces Tls::tricks and the pasted trick keys
+// A row field, not part of the profile: reconcile replaces the profile and keeps the row, so the
+// choice survives refreshes. New rows of a subscription take its `Controls::tls_tricks`
+// (`fragmentation-*` headers) once: the first import's rows and keys new in a later refresh.
 pub const WHITELIST_NETWORKS_MAX: usize;                  // 4 networks per server, newest first
 pub struct Whitelist { pub marked: bool, pub worked: Vec<WorkedUnder> }   // camelCase, empty parts omitted
 pub struct WorkedUnder { pub network: Option<String> /* one-way tag */, pub endpoint: String /* host:port */,
@@ -151,6 +157,8 @@ impl Whitelist { pub fn is_empty(&self) -> bool; pub fn record(&mut self, networ
 impl ServerRow {
     pub fn new(&Profile, GroupId, Origin, ClientDevice, now) -> AppResult<Self>;
     pub fn profile(&self) -> AppResult<Profile>;    // Conflict servers.locked (other PC / account), Internal servers.unreadable
+    pub fn run_profile(&self) -> AppResult<Profile>; // profile() with tls_tricks applied: every path that
+                                                     // runs the key (tunnel, service, proxies, probes)
     pub fn set_profile(&mut self, &Profile) -> AppResult<()>;   // also refreshes the plain copies
     pub fn identity(&self) -> Option<[u8; 16]>;  pub fn is_locked(&self) -> bool;
     pub fn archived_for(&self, ArchiveReason) -> bool;
@@ -213,6 +221,7 @@ impl Servers {
     pub fn set_group_device(&self, &GroupId, ClientDevice) -> AppResult<()>;      // feed rows follow; refresh next
     pub fn set_profile_device(&self, &ProfileId, ClientDevice) -> AppResult<()>;  // manual rows only
     pub fn set_profile_engine(&self, &ProfileId, EnginePref) -> AppResult<()>;   // any row; kept by refreshes
+    pub fn set_tls_tricks(&self, &ProfileId, Option<RowTricks>) -> AppResult<()>;  // any row; kept by refreshes
     // probe results
     pub fn record_health(&self, Vec<HealthUpdate>) -> AppResult<usize>;  // skips rows deleted / re-keyed meanwhile
     pub fn record_verdicts(&self, Vec<VerdictUpdate>) -> AppResult<usize>;  // same guards; an older verdict never wins

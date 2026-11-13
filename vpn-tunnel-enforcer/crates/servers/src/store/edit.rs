@@ -1,5 +1,5 @@
 //! Changing the list: soft delete, restore and purge of rows; renaming, deleting and re-pointing
-//! groups; per-row and per-group devices; the per-row engine.
+//! groups; per-row and per-group devices; the per-row engine and TLS tricks.
 use std::collections::HashMap;
 
 use vpnte_base::types::{ClientDevice, EnginePref, UnixMs, now_ms};
@@ -8,7 +8,7 @@ use vpnte_base::{AppError, AppResult, Msg};
 use super::{Servers, group_not_found, server_not_found};
 use crate::model::{
     ArchiveReason, Archived, GroupId, GroupKind, Origin, ProfileId, REFRESH_OVERRIDE_MIN,
-    ServerGroup, ServersDoc, clean_group_name,
+    RowTricks, ServerGroup, ServersDoc, clean_group_name,
 };
 
 // --- archive and purge ---
@@ -246,6 +246,16 @@ impl Servers {
         self.update(|doc| {
             let row = doc.row_mut(id).ok_or_else(server_not_found)?;
             row.engine = engine;
+            Ok(())
+        })
+    }
+
+    /// Sets the server's TLS tricks (`None` = what the key brings, else the app default); feed
+    /// rows too, and a refresh keeps it like the engine.
+    pub fn set_tls_tricks(&self, id: &ProfileId, tricks: Option<RowTricks>) -> AppResult<()> {
+        self.update(|doc| {
+            let row = doc.row_mut(id).ok_or_else(server_not_found)?;
+            row.tls_tricks = tricks;
             Ok(())
         })
     }

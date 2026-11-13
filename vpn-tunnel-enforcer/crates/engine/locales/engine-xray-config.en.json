@@ -51,7 +51,7 @@
         "xhttpMux": "Mux.cool was turned off for the XHTTP connection: XHTTP multiplexes connections itself.",
         "mux": "Xray does not use the profile's multiplexing (sing-box mux).",
         "dial": "Xray does not apply the profile's connection options (timeout, TCP Fast Open, MPTCP, UDP fragmentation, IPv4/IPv6 choice).",
-        "singboxExtra": "Xray does not apply the profile's extra sing-box options (for example TLS fragmentation).",
+        "singboxExtra": "Xray does not apply the profile's extra sing-box options.",
         "disableSni": "Xray cannot hide the server name: the SNI is sent although the profile turns it off.",
         "fingerprintUnknown": "Xray does not know the TLS fingerprint “{{fingerprint}}”; the default one is used.",
         "fingerprintRejected": "Current REALITY servers (Xray 26.9.8 and newer) refuse the TLS fingerprint “{{fingerprint}}”; choose chrome, firefox or safari.",

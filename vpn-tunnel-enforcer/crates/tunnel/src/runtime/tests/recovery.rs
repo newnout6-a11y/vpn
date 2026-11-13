@@ -453,13 +453,15 @@ async fn slot_session_and_in_place_switch() {
 }
 
 /// The engine and its reason travel through the receipt, the status and the switch receipt;
-/// the Xray path's dropped settings (stealth here) come with the start and with the switch.
+/// the Xray path's dropped settings (a packet encoding here) come with the start and with the
+/// switch. Stealth is not one of them any more: its TLS tricks reach Xray (item 18).
 #[tokio::test]
 async fn engine_run_and_xray_warnings_are_visible() {
     use crate::api::{EngineRun, SelectReason};
+    let encoded = |key: &str| key.replace("&type=tcp#", "&type=tcp&packetEncoding=packetaddr#");
     let w = World::new();
     let h = spawn(&w);
-    let mut req = vpn_req(XRAY_KEY, EnginePref::Xray);
+    let mut req = vpn_req(&encoded(XRAY_KEY), EnginePref::Xray);
     req.stealth = true;
     let receipt = h
         .start(req, CancellationToken::new())
@@ -470,13 +472,12 @@ async fn engine_run_and_xray_warnings_are_visible() {
         reason: Some(SelectReason::Preference),
     };
     assert_eq!(receipt.engine, run);
-    let stealth = "engine.xray.warn.stealth";
-    assert!(
-        receipt.warnings.iter().any(|m| m.key == stealth),
-        "{receipt:?}"
-    );
+    let keys =
+        |warnings: &[vpnte_base::Msg]| warnings.iter().map(|m| m.key.clone()).collect::<Vec<_>>();
+    let dropped = ["engine.xray.warn.packetEncoding".to_owned()];
+    assert_eq!(keys(&receipt.warnings), dropped, "{receipt:?}");
     assert_eq!(h.status().borrow().engine, Some(run));
-    let mut next = vpn_req(XRAY_KEY_2, EnginePref::Xray);
+    let mut next = vpn_req(&encoded(XRAY_KEY_2), EnginePref::Xray);
     next.stealth = true;
     let owner: crate::api::OwnerCheck = Arc::new(|| true);
     let sw = h
@@ -485,7 +486,7 @@ async fn engine_run_and_xray_warnings_are_visible() {
         .expect("in place");
     assert!(sw.verified(), "{sw:?}");
     assert_eq!(sw.engine, Some(run));
-    assert!(sw.warnings.iter().any(|m| m.key == stealth), "{sw:?}");
+    assert_eq!(keys(&sw.warnings), dropped, "{sw:?}");
     assert_eq!(h.status().borrow().engine, Some(run));
 }
 

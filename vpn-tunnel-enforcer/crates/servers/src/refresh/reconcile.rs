@@ -10,7 +10,7 @@ use vpnte_base::AppResult;
 use vpnte_base::types::UnixMs;
 use vpnte_profiles::model::{Kind, Profile, Source};
 
-use crate::model::{ArchiveReason, Archived, Origin, ProfileId, ServerGroup, ServerRow};
+use crate::model::{ArchiveReason, Archived, Origin, ProfileId, RowTricks, ServerGroup, ServerRow};
 
 /// How long a key may be missing from complete answers before it is archived: the shortest
 /// provider interval, so one bad answer never archives while a real removal is archived on the
@@ -237,6 +237,8 @@ pub fn reconcile(
             }
             let mut row = ServerRow::new(profile, group.id.clone(), Origin::Feed, device, now)?;
             row.last_seen_at = Some(now);
+            // A new key takes the provider's TLS tricks once; known rows keep the user's value.
+            row.tls_tricks = group.controls.tls_tricks.map(RowTricks::Set);
             report.added.push(row.id.clone());
             rows.push(row);
             continue;

@@ -153,7 +153,9 @@ fn tls(o: &mut Object, tls: Option<&Tls>) -> Option<()> {
         put(o, "tls", "");
         return Some(());
     };
+    // v2rayN's JSON has no `fragment`: a key with tricks needs the JSON form.
     let unlinkable = t.disable_sni
+        || t.tricks.is_some()
         || t.ech.is_some()
         || t.cert_pin_sha256.is_some()
         || t.certificate_pem.is_some()
