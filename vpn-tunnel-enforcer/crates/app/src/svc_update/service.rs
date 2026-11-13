@@ -8,7 +8,6 @@ use std::time::Duration;
 use tokio::time::Instant;
 use vpnte_service::pipe::client::{Client, ServerCheck};
 use vpnte_service::proto::{Reply, Request, ServiceUpdateWire, UpdateAsk, UpdatePhase};
-use vpnte_service::scm::manage;
 use vpnte_service::sddl;
 use vpnte_ui::updates::{ServiceLine, ServiceState};
 use vpnte_update::version::Version;
@@ -26,7 +25,7 @@ const POLL: Duration = Duration::from_secs(1);
 /// The installed service's answer to `ask` within `wait`; `None` without a service that
 /// answers it.
 async fn ask(ask: UpdateAsk, wait: Duration) -> Option<ServiceUpdateWire> {
-    let exe = manage::installed_binary().ok()??;
+    let exe = crate::boot::service::installed_binary().ok()??;
     let check = ServerCheck::Image(exe);
     let answer = async {
         let mut client = Client::connect(sddl::PIPE_NAME, &check, ASK).await.ok()?;

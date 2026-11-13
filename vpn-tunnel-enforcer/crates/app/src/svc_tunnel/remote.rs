@@ -27,7 +27,6 @@ use vpnte_service::pipe::client::{CallError, Client, Frames, Incoming, Requests,
 use vpnte_service::proto::{
     Event, KeptSession, Reply, Request, StatusReply, StatusWire, TunnelEventWire, WireError,
 };
-use vpnte_service::scm::manage;
 use vpnte_tunnel::api::{ExitInfo, TunError, TunStatus, TunStatusKind, TunWarning, TunnelEvent};
 use vpnte_tunnel::runtime::InputsSource;
 
@@ -230,7 +229,7 @@ impl Remote {
         }
         let (pipe, check) = match &self.0.test_pipe {
             Some(name) => (name.as_str(), ServerCheck::Any),
-            None => match manage::installed_binary() {
+            None => match crate::boot::service::installed_binary() {
                 Ok(Some(exe)) => (vpnte_service::sddl::PIPE_NAME, ServerCheck::Image(exe)),
                 _ => {
                     return Err(CallError::Pipe(AppError::msg(

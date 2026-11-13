@@ -10,9 +10,23 @@ use vpnte_service::scm::manage;
 /// The service exe next to the app's (the installer and the portable archive ship it there).
 const SERVICE_EXE: &str = "vpnte-service.exe";
 
+/// Set to anything, the process never reaches an installed helper service: the integration
+/// tests' child app (unit tests never do). It only takes the service away, never points
+/// anywhere else.
+pub const ENV_NO_SERVICE: &str = "VPNTE_NO_SERVICE";
+
+/// The installed service's exe, as the SCM has it. `None` in tests and with [`ENV_NO_SERVICE`]
+/// set: a test run on a PC where the owner installed the service never touches it.
+pub fn installed_binary() -> windows::core::Result<Option<PathBuf>> {
+    if cfg!(test) || std::env::var_os(ENV_NO_SERVICE).is_some() {
+        return Ok(None);
+    }
+    manage::installed_binary()
+}
+
 /// The service is registered with the SCM.
 pub fn installed() -> bool {
-    match manage::installed_binary() {
+    match installed_binary() {
         Ok(found) => found.is_some(),
         Err(err) => {
             tracing::warn!(error = %err, "service registration unreadable");
@@ -50,5 +64,16 @@ pub fn request_install() -> AppResult<bool> {
             Msg::new("app.service.installFailed"),
         )
         .with_source(std::io::Error::other(format!("install exited with {code}")))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A test never sees the owner's installed service (two backend tests failed on a PC that
+    /// has it, and a connect would have reached it).
+    #[test]
+    fn tests_never_see_an_installed_service() {
+        assert_eq!(super::installed_binary().unwrap(), None);
+        assert!(!super::installed());
     }
 }

@@ -217,6 +217,9 @@ fn quote(arg: &OsStr) -> OsString {
     }
 }
 
+/// `vpnte_app::boot::service::ENV_NO_SERVICE`.
+const NO_SERVICE: &str = "VPNTE_NO_SERVICE";
+
 /// The test's environment with `envs` set, as a sorted CREATE_UNICODE_ENVIRONMENT block.
 fn environment(envs: &[(&str, &OsStr)]) -> Vec<u16> {
     let mut vars: Vec<(OsString, OsString)> = std::env::vars_os()
@@ -230,6 +233,13 @@ fn environment(envs: &[(&str, &OsStr)]) -> Vec<u16> {
         envs.iter()
             .map(|(n, v)| (OsString::from(n), v.to_os_string())),
     );
+    // The child app never reaches a helper service installed on this PC (boot::service).
+    if !vars
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case(NO_SERVICE))
+    {
+        vars.push((NO_SERVICE.into(), "1".into()));
+    }
     vars.sort_by_key(|(name, _)| name.to_string_lossy().to_uppercase());
     let mut block = Vec::new();
     for (name, value) in vars {
