@@ -239,6 +239,10 @@ pub struct ServerRow {
     /// stays hidden wherever it lives (see [`super::ServersDoc::hides`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// What says it passes a mobile whitelist (the user's mark, learned evidence); absent in
+    /// older files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whitelist: Option<super::Whitelist>,
 }
 
 impl ServerRow {
@@ -269,6 +273,7 @@ impl ServerRow {
             health: None,
             verdict: None,
             hidden: false,
+            whitelist: None,
         };
         row.set_profile(profile)?;
         Ok(row)

@@ -208,6 +208,11 @@ impl Seed {
             enabled: true,
             // The trial provider sends `hide-settings` in the demo.
             config_hidden: self.group == Some("trial"),
+            // One server shows the whitelist badge in the demo.
+            whitelist: (self.id == "fi-hel").then_some(WhitelistReady {
+                marked: false,
+                worked_at: Some(now - 2 * 60 * MIN),
+            }),
         }
     }
 }

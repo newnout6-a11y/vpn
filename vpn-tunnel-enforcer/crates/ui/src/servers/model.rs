@@ -213,6 +213,18 @@ pub struct ServerView {
     /// Its provider keeps the config hidden: no key view, copy, save or export (protocol, engine,
     /// TLS / REALITY and the protection state stay visible).
     pub config_hidden: bool,
+    /// What says it passes a mobile whitelist (`None`: nothing does): the row's badge.
+    pub whitelist: Option<WhitelistReady>,
+}
+
+/// Why a server counts as passing a mobile whitelist (RU mobile networks): automatic picks try
+/// such servers first on a whitelisted network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WhitelistReady {
+    /// The user marked it «Работает в белых списках».
+    pub marked: bool,
+    /// When it last carried data while the network was in whitelist mode.
+    pub worked_at: Option<UnixMs>,
 }
 
 /// The engine a connect would use for a server, as the backend decides it: never a silent

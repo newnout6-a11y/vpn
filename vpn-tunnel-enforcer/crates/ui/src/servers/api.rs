@@ -98,6 +98,9 @@ pub trait ServersApi: 'static {
     /// The server's own engine (`Auto` = the setting); the connected server reconnects, and a
     /// choice the engine cannot run is refused there with its reason.
     async fn set_engine(&self, id: &str, engine: EnginePref) -> AppResult<()>;
+    /// Marks the server «Работает в белых списках» (`true`), or takes the mark off together
+    /// with what was learned (`false`).
+    async fn set_whitelist_ready(&self, id: &str, on: bool) -> AppResult<()>;
     /// Passive endpoint facts (no TLS / HTTP to the endpoint).
     async fn probe(&self, id: &str) -> AppResult<ProbeReport>;
     /// Geolocation of the resolved address; `None` when lookups are off or nothing is known.

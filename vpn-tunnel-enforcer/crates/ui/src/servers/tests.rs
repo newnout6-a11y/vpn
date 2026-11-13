@@ -163,6 +163,9 @@ impl ServersApi for FakeApi {
     async fn set_engine(&self, _: &str, _: vpnte_base::types::EnginePref) -> AppResult<()> {
         unused()
     }
+    async fn set_whitelist_ready(&self, _: &str, _: bool) -> AppResult<()> {
+        unused()
+    }
     async fn probe(&self, _: &str) -> AppResult<ProbeReport> {
         unused()
     }

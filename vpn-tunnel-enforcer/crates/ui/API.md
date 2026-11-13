@@ -442,6 +442,8 @@ pub trait ServersApi: 'static {      // root component ServersPage; use_servers_
     async fn set_device(&self, id: &str, device: ClientDevice) -> AppResult<()>; // connected server reconnects
     async fn set_engine(&self, id: &str, engine: EnginePref) -> AppResult<()>; // own engine (Auto = setting);
                                   // impossible forced choice = Validation with the engine Msg; reconnects
+    async fn set_whitelist_ready(&self, id: &str, on: bool) -> AppResult<()>; // p-net-aware: the user's mark;
+                                  // false also forgets what was learned (the badge goes)
     async fn probe(&self, id: &str) -> AppResult<ProbeReport>;          // passive: no TLS / HTTP to the endpoint
     async fn geo(&self, id: &str) -> AppResult<Option<GeoInfo>>;        // None = lookups off / unknown
     async fn live_check(&self, id: &str, mode: LiveMode, progress: mpsc::UnboundedSender<LiveProgress>) -> AppResult<LiveCheck>;
@@ -493,7 +495,10 @@ know it), shown as a warning strip in the server detail.
 Provider facts and controls: `GroupView` carries `support_url` (an `http(s)` link opened
 through `open_url` on a click), `announce` (plain text, never linkified), `provider_refresh_hours`,
 `send_hwid`, `header_names`, `moved_at` (the provider moved the subscription: a note) and
-`settings_hidden` (`hide-settings`); `ServerView::config_hidden` hides Save / Copy key in the detail
+`settings_hidden` (`hide-settings`); `ServerView::whitelist: Option<WhitelistReady { marked, worked_at }>`
+(p-net-aware) is the row's neutral «Белые списки» badge (hover: the user's mark, else when it last
+carried data on a whitelisted network) and the «…» entry «Работает в белых списках» / «Снять отметку
+«Белые списки»» (`set_whitelist_ready`); `ServerView::config_hidden` hides Save / Copy key in the detail
 (the backend refuses them too: `servers.hidden.refused`), while protocol, engine, TLS / REALITY and
 the protection state stay as they are. `ImportReport::providers: Vec<ProviderLine { name, servers,
 error: Option<FetchError> }>` names the Mihomo providers of an import (`FetchError::Refused`: a
@@ -734,7 +739,9 @@ button «Проверить сеть», and «Проверить все серв
 result's colour is `NetCheckView::verdict` (`Ok` only for a clean pass; no internet = `Fail`,
 nothing proven = `NotChecked`). The start page's quiet network
 strip (`dashboard::netmode`) reads the same `state.network.last.modes` through the
-`MaintenanceApi` context (absent in demos: no strip) and names `vpnte_view::netmode::net_banner`.
+`MaintenanceApi` context (absent in demos: no strip) and names `vpnte_view::netmode::net_banner`;
+on a whitelist it adds one line, `ui.dashboard.netmodeWhitelist` (servers marked «Белые списки» are
+tried first).
 Types: `SystemReport` / `DiagItem` / `DiagCategory`, `ProtectionView` (+ `KillSwitchState`,
 `FirewallBlock`, `FwProfile`, `ProtectionTest`), `RepairStep` (`ALL`, run in order, each independent),
 `StepOutcome` (`done` / `failed(msg)` / `blocked(msg)`), `StepState`, `RepairView`, `LeakTestView`

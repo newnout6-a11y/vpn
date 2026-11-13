@@ -11,7 +11,7 @@ use vpnte_base::types::{Level, Notice, Owner, now_ms};
 use vpnte_base::{ErrorKind, Msg};
 
 use super::task::{AutoPick, UserWatch};
-use super::{Candidate, Confirmation, Phase, PickHost, rank};
+use super::{Candidate, Confirmation, Network, Phase, PickHost, rank};
 use crate::coordinator::{
     Coordinator, LifecycleEvent, NoticeCategory, OpError, RuntimeId, SessionInfo, SwitchError,
 };
@@ -146,9 +146,10 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
             let servers: Vec<Candidate> = (self.host.servers().into_iter())
                 .filter(|c| switch || c.id == failed)
                 .collect();
+            let net = self.network(&servers).await;
             let order = match round {
-                1 => first_round(&servers, &fresh, group.as_deref(), failed),
-                _ => later_round(&servers, &tried),
+                1 => first_round(&servers, &net, &fresh, group.as_deref(), failed),
+                _ => later_round(&servers, &net, &tried),
             };
             for c in order {
                 if user.gone() {
@@ -174,6 +175,7 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
                     Attempt::Failed => {}
                     Attempt::Up => match self.host.confirm(&c.id, user.token()).await {
                         Confirmation::Passed => {
+                            self.proved(&c.id).await;
                             self.recovered(&c.name, trigger);
                             return Ended::Recovered;
                         }
@@ -330,13 +332,14 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
 /// the other groups.
 fn first_round(
     servers: &[Candidate],
+    net: &Network,
     fresh: &[String],
     group: Option<&str>,
     failed: &str,
 ) -> Vec<Candidate> {
-    let mut fresh_keys = rank(servers, |id| !fresh.iter().any(|f| f == id));
+    let mut fresh_keys = rank(servers, net, |id| !fresh.iter().any(|f| f == id));
     fresh_keys.sort_by_key(|c| c.id != failed);
-    let others = rank(servers, |id| id == failed)
+    let others = rank(servers, net, |id| id == failed)
         .into_iter()
         .filter(|c| group.is_none_or(|g| c.group != g));
     (fresh_keys.into_iter().take(PER_ROUND))
@@ -346,9 +349,13 @@ fn first_round(
 }
 
 /// A later round: the best of what was not dialled within the freeze window.
-fn later_round(servers: &[Candidate], tried: &[(String, Instant)]) -> Vec<Candidate> {
+fn later_round(
+    servers: &[Candidate],
+    net: &Network,
+    tried: &[(String, Instant)],
+) -> Vec<Candidate> {
     let quiet = |id: &str| tried.iter().any(|(t, at)| t == id && at.elapsed() < QUIET);
-    (rank(servers, quiet).into_iter().take(PER_ROUND))
+    (rank(servers, net, quiet).into_iter().take(PER_ROUND))
         .cloned()
         .collect()
 }

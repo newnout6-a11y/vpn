@@ -1,6 +1,7 @@
 //! The watch of the running server session: samples its VPN traffic, confirms a suspicion with
 //! one transfer, hands a confirmed stall to the reactions, and starts the retries when the run it
-//! tracks ends on its own or stays stalled past the reactions' grace.
+//! tracks ends on its own or stays stalled past the reactions' grace. On a whitelist network the
+//! same samples teach the list which servers pass it.
 use std::time::Duration;
 
 use tokio::sync::broadcast::error::RecvError;
@@ -11,7 +12,7 @@ use vpnte_base::types::Owner;
 use super::rescue::Trigger;
 use super::stall::{self, Detector, Suspicion};
 use super::task::{AutoPick, USER_GRACE};
-use super::{Confirmation, Phase, PickHost};
+use super::{Confirmation, Phase, PickHost, WHITELIST_PROOF};
 use crate::adaptive::reaction::{CheckReaction, CheckVerdict, Report};
 use crate::coordinator::{Coordinator, LifecycleEvent, RuntimeId, StopCause};
 
@@ -37,6 +38,9 @@ struct Watch {
     reported: Option<(Instant, u64)>,
     /// The stall of this run went to the retries, or could not: nothing more from the watch.
     settled: bool,
+    /// The run's download total at its first sample in whitelist mode: what came before may
+    /// predate the mode.
+    whitelist_from: Option<u64>,
 }
 
 impl Watch {
@@ -98,11 +102,16 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
                     }
                     Ok(LifecycleEvent::NetworkChanged) => {
                         self.spent.lock().clear();
+                        self.forget_network();
+                        // Traffic of the old network proves nothing about the new one.
+                        w.whitelist_from = None;
                         self.clear_gave_up();
                         None
                     }
                     Ok(LifecycleEvent::Fault { .. }) => None,
                     Err(RecvError::Lagged(_)) => {
+                        // A network change may be among the lost events.
+                        self.forget_network();
                         w = self.tracked();
                         None
                     }
@@ -157,6 +166,7 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
             return None;
         }
         let counters = self.host.counters().await?;
+        self.carried(w, &id, counters.down).await;
         let now = Instant::now();
         if w.detector.push(now, counters) == Suspicion::None
             || w.next_confirm.is_some_and(|at| now < at)
@@ -177,6 +187,7 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
         w.detector.reset();
         match result {
             Confirmation::Passed => {
+                self.proved(&id).await;
                 let pause = (w.false_alarm).map_or(FALSE_ALARM.0, |p| (p * 2).min(FALSE_ALARM.1));
                 w.false_alarm = Some(pause);
                 w.next_confirm = Some(now + pause);
@@ -204,6 +215,21 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
             }
         }
         None
+    }
+}
+
+impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
+    /// The session's own traffic as whitelist evidence: [`WHITELIST_PROOF`] received through
+    /// the server since the network was first seen in whitelist mode during this run.
+    async fn carried(&self, w: &mut Watch, id: &str, down: u64) {
+        if !self.in_whitelist() {
+            w.whitelist_from = None;
+            return;
+        }
+        let from = *w.whitelist_from.get_or_insert(down);
+        if down.saturating_sub(from) >= WHITELIST_PROOF {
+            self.proved(id).await;
+        }
     }
 }
 

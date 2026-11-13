@@ -28,6 +28,7 @@ mod request_tests;
 mod tests;
 #[cfg(test)]
 mod verdict_tests;
+mod whitelist;
 
 pub use add::subscription_name;
 pub use request::hidden_refused;

@@ -365,7 +365,9 @@ pub trait ReactionHost: Send + Sync + 'static {       // the app (RPITIT)
 }
 pub struct Verdicts;                                   // the network session's memory (reset on NetworkChanged)
 impl Verdicts { pub fn new() -> Self; pub fn udp_blocked(&self) -> bool; pub fn avoided(&self, id: &str) -> bool;
-    pub fn network_udp(&self, blocked: bool); }        // a check of the network itself: sets / lifts udp_blocked
+    pub fn network_udp(&self, blocked: bool);          // a check of the network itself: sets / lifts udp_blocked
+    pub fn whitelist(&self) -> bool;                   // p-net-aware: the network check found a mobile whitelist
+    pub fn network_whitelist(&self, on: bool); }       // the network check decided: sets / lifts it (no switch)
 pub struct Reactions<C: Coordinator, H: ReactionHost>;
 impl<C: Coordinator, H: ReactionHost> Reactions<C, H> {
     pub fn new(coord: Arc<C>, host: Arc<H>, settings: Arc<Store<Settings>>) -> Self;
@@ -380,7 +382,8 @@ impl<C: Coordinator, H: ReactionHost> Reactions<C, H> {
   the same transport towards the same site (IPv4 /24, IPv6 /48, else the host name), offline /
   key-rejected / handshake-failed (not a hang) the profile; udp-blocked sets `udp_blocked` (the
   app's network check, which measures the network and no server, sets or lifts it directly through
-  `Verdicts::network_udp`: no report, so no session switch);
+  `Verdicts::network_udp`, and the whitelist mark through `Verdicts::network_whitelist`: no
+  report, so no session switch);
   healthy lifts the profile and a ban of its host. Stalled, deferred, not-verified and a
   handshake hang (`retry-later`) change nothing.
 - Only a report about the profile of the running session **over the server list** (`Direct` or
@@ -690,7 +693,17 @@ pub struct AutoPickConfig { pub launch: Option<LaunchChoice> }   // Document "au
 pub fn launch_pick(choice, provider) -> Option<LaunchPick>;   // user > provider > off
 pub fn launch_source(choice, provider) -> LaunchSource;
 pub struct Candidate { pub id, pub group, pub name: String, pub alive: Option<bool>,
-                       pub checked_at: Option<UnixMs>, pub latency_ms: Option<u32> }
+                       pub checked_at: Option<UnixMs>, pub latency_ms: Option<u32>,
+                       pub udp: bool /* Hysteria2, TUIC, WireGuard, QUIC */,
+                       pub ru_entry: bool /* host name or entry country the probes call Russian */,
+                       pub whitelist: WhitelistFacts }
+pub struct WhitelistFacts { pub marked: bool /* the user's mark */,
+                            pub worked_on: Vec<Option<String>> /* network tags of the proofs */ }
+impl WhitelistFacts { pub fn here(&self, tag: Option<&str>) -> bool; pub fn ready(&self) -> bool; }
+pub struct Network { pub udp_blocked: bool, pub whitelist: bool, pub tag: Option<String>,
+                     pub avoided: HashSet<String> }       // what the network memory knows (rank's input)
+pub const WHITELIST_PROOF: u64;                         // 64 KiB: what a server must carry in whitelist mode
+pub async fn network_tag() -> Option<String>;           // 16 hex digits of SHA-256 over the network identity
 pub struct Checked { pub alive: bool, pub latency_ms: Option<u32> }
 pub struct Counters { pub up: u64, pub down: u64, pub proxy_down: bool }   // VPN flows only + watchdog
 pub enum Confirmation { Passed, Frozen, NoTraffic, Inconclusive, Deferred }  // the probes' classes
@@ -702,8 +715,8 @@ pub enum Phase { Idle, Launching, Confirming, Refreshing, Trying, Waiting, GaveU
 pub struct PickStatus { pub phase, pub server: Option<String>, pub round: u8,
                         pub retry_at: Option<UnixMs> }   // watch snapshot (no traffic claim in it)
 impl PickStatus { pub fn headline(&self) -> Option<Msg>; pub fn exposure_line(&self, now: Exposure) -> Option<Msg>; }
-pub fn rank(servers: &[Candidate], skip: impl Fn(&str) -> bool) -> Vec<&Candidate>;
-pub fn next_to_warm(servers: &[Candidate], running: &str, now: UnixMs) -> Option<&Candidate>;
+pub fn rank<'a>(servers: &'a [Candidate], net: &Network, skip: impl Fn(&str) -> bool) -> Vec<&'a Candidate>;
+pub fn next_to_warm<'a>(servers: &'a [Candidate], net: &Network, running: &str, now: UnixMs) -> Option<&'a Candidate>;
 pub struct Detector;  impl Detector { pub fn push(&mut self, at: Instant, c: Counters) -> Suspicion }
 pub trait PickHost: Send + Sync + 'static {            // the app (RPITIT)
     fn servers(&self) -> Vec<Candidate>;  fn last_used(&self) -> Option<String>;
@@ -717,10 +730,13 @@ pub trait PickHost: Send + Sync + 'static {            // the app (RPITIT)
     fn slot(&self, id, max_wait, cancel) -> impl Future<Output = bool>;
     fn exposure(&self) -> Exposure;  fn user_acts(&self) -> watch::Receiver<UserActs>;
     fn report(&self, report: Report);                  // to the reactions
+    fn network(&self) -> impl Future<Output = Option<String>>;   // network_tag() (p-net-aware)
+    fn worked_under_whitelist(&self, id: &str, network: Option<String>);  // store the proof, never block
 }
 pub struct AutoPick<C: Coordinator, H: PickHost>;
 impl<C, H> AutoPick<C, H> {
     pub fn new(coord, host, config: Arc<Store<AutoPickConfig>>, schedule: Option<watch::Receiver<SchedulerStatus>>) -> Self;
+    pub fn with_verdicts(self, verdicts: Arc<Verdicts>) -> Self;   // rank by / learn into the network memory
     pub fn status(&self) -> watch::Receiver<PickStatus>;
     pub fn choice(&self) -> Option<LaunchChoice>;  pub fn set_choice(&self, c: LaunchChoice) -> AppResult<()>;
     pub fn launch_rule(&self) -> (Option<LaunchPick>, LaunchSource);  pub fn subscribe(&self) -> watch::Receiver<u64>;
@@ -775,6 +791,19 @@ impl<C, H> AutoPick<C, H> {
   `.launch.connected` {name}), `.rescue.gaveUp` (Warn, body = what traffic does then). The
   status line says the step; the page adds `Exposure::msg()` of the live state in every step
   (`automation.autopick.exposure.{direct,blocked,proxyBlocked,tunnel,proxyTunnel,unknown}`).
+- **Network-aware order** (RU re-check item 23, p-net-aware). Every rank (launch, rescue
+  rounds, warm-up) reads the reactions' memory (`with_verdicts`): a server ruled out on this
+  network (`Verdicts::avoided`) goes last; a server that carried `WHITELIST_PROOF` on this very
+  network (its tag) goes first, also before the network check marked the whitelist again; on a
+  whitelist then the user's mark or proof from another network, then a Russian entry, the rest
+  after them; while UDP is cut TCP-based servers before UDP ones; then alive evidence, latency,
+  store order. Without the memory the plain order holds. The tag is read once per network session
+  and only when a candidate has proof from a known network.
+- **Whitelist evidence.** While the memory says whitelist: 64 KiB received through the running
+  server since the run's first sample in that mode, or a passed confirmation (the watch's false
+  alarm, a rescue dial), is handed to `worked_under_whitelist(id, tag)`, once per server and
+  network session (`NetworkChanged` or a lagged event stream starts over). No probe is added: the
+  handshake budget is untouched.
 - Test double: `coordinator::testing::FakeCoordinator` emits `Started` / `Stopped` as the app's
   coordinator does (a switch: `Started` only; a lost switch: `Stopped { Fault }` then the
   restore's `Started`; a disconnect: `Stopped { Requested(owner) }`; a replaced session: its
@@ -859,7 +888,10 @@ of another network must not rule servers out); new `Servers` verdicts and live c
 ok → healthy, auth → key-rejected, Hysteria2 UDP cut → udp-blocked) follow as they come.
 The automatic server choice (w7-autopick, `crates/app/src/svc_auto/pick/`): root calls
 `svc_auto::spawn_autopick(&backend, &automation)` once the tunnel is stored (its host needs the
-tunnel's probe context, traffic counters and lane snapshot); `AutoHost` checks with
+tunnel's probe context, traffic counters and lane snapshot); it is built `with_verdicts(reactions
+.verdicts())` and `AutoHost` fills `Candidate.{udp, ru_entry, whitelist}` from the row (transport,
+`is_ru_hostname` or a Russian display country, `ServerRow::whitelist`), answers `network()` with
+`network_tag()` and stores proofs with `Servers::record_whitelist` (p-net-aware); `AutoHost` checks with
 `key_health::check_profile_verdict` (recorded in the list, so the feed teaches the reactions),
 confirms with a 64 KiB download through the session's exit behind `BudgetGate` (TUN-bound IPv4,
 or SOCKS5 to the mixed port; raw bytes counted below the inner TLS, verified against the Windows

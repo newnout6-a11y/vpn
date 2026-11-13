@@ -2,11 +2,11 @@
 //! connect would use, the last check's verdict, the ping with its status mark, the select /
 //! switch control and the «…» menu.
 use dioxus::prelude::*;
-use vpnte_base::types::EnginePref;
+use vpnte_base::types::{EnginePref, UnixMs};
 
-use super::actions::{Actions, save_key_label};
+use super::actions::{Actions, save_key_label, toast_error};
 use super::menu::{MenuItem, OverflowMenu};
-use super::model::{EnginePlan, GroupView, ServerView, ServersView};
+use super::model::{EnginePlan, GroupView, ServerView, ServersView, WhitelistReady};
 use super::present::{
     ENGINE_ITEMS, RowSignal, Unusable, device_label, displayed_ping, engine_name, engine_of_item,
     happ_type, has_flag, is_removed_from_subscription, proxy_ready, relative_time, row_signal,
@@ -14,7 +14,7 @@ use super::present::{
 };
 use super::state::{Confirm, effective_health};
 use super::verdict::VerdictCap;
-use crate::lang::tr;
+use crate::lang::{tr, translate_now};
 use crate::t;
 use crate::widgets::{Badge, Button, ButtonKind, Icon, IconGlyph, Spinner, Tone};
 
@@ -186,10 +186,12 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
         items.insert(0, MenuItem::new("restore", t!("ui.servers.row.restore")));
         items.push(MenuItem::new("purge", t!("ui.servers.menu.purge")).destructive());
     } else {
+        items.push(whitelist_item(&server));
         items.push(MenuItem::new("remove", t!("ui.servers.menu.remove")).destructive());
     }
     let (exit_title, ip_title) = ip_titles(&server);
     let stealth = server.stealth.map(stealth_badge);
+    let whitelist = server.whitelist.map(|w| whitelist_title(w, (store.now)()));
     let server_for_menu = server.clone();
     let server_for_select = server.clone();
     let menu_label = t!("ui.servers.menu.label", name = server.name);
@@ -231,6 +233,9 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
                         Badge { tone: Tone::Warn, title: t!("ui.servers.row.droppedTitle"),
                             {t!("servers.groups.removedFromSub")}
                         }
+                    }
+                    if let Some(title) = whitelist {
+                        Badge { tone: Tone::Neutral, title, {t!("ui.servers.row.whitelist")} }
                     }
                     if blocked == Some(Unusable::Disabled) {
                         Badge { tone: Tone::Unknown, {t!("ui.servers.row.off")} }
@@ -366,6 +371,7 @@ fn row_action(actions: &Actions, server: &ServerView, connected: bool, item: &st
                 name: server.name.clone(),
             }));
         }
+        "whitelist" => set_whitelist_ready(actions, server, server.whitelist.is_none()),
         "copy" => actions.export_key(server, false),
         "save" => actions.export_key(server, true),
         "remove" => {
@@ -378,6 +384,38 @@ fn row_action(actions: &Actions, server: &ServerView, connected: bool, item: &st
         }
         _ => {}
     }
+}
+
+/// The «…» entry of the whitelist mark: set it, or take the badge off.
+fn whitelist_item(server: &ServerView) -> MenuItem {
+    match server.whitelist {
+        None => MenuItem::new("whitelist", t!("ui.servers.menu.whitelistOn")),
+        Some(_) => MenuItem::new("whitelist", t!("ui.servers.menu.whitelistOff")),
+    }
+}
+
+/// The whitelist badge's hover text: the user's mark, else when it last passed a whitelist.
+fn whitelist_title(w: WhitelistReady, now: UnixMs) -> String {
+    match w.worked_at.filter(|_| !w.marked) {
+        Some(at) => {
+            let when = relative_time(at, now, *crate::lang::LANG.read());
+            t!("ui.servers.row.whitelistWorked", when = when)
+        }
+        None => t!("ui.servers.row.whitelistMarked"),
+    }
+}
+
+/// Marks the server «Работает в белых списках» or takes the mark off; a refusal comes back as a
+/// toast with the backend's reason.
+fn set_whitelist_ready(actions: &Actions, server: &ServerView, on: bool) {
+    let (toasts, api) = (actions.toasts, actions.api.clone());
+    let (id, name) = (server.id.clone(), server.name.clone());
+    actions.spawn(async move {
+        if let Err(err) = api.set_whitelist_ready(&id, on).await {
+            let title = translate_now("ui.servers.whitelist.failed", &[("name", name)]);
+            toast_error(toasts, title, &err);
+        }
+    });
 }
 
 /// Hover texts of the exit IP (verified exit vs entry bridge) and of the DNS address.

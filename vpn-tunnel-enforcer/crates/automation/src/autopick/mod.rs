@@ -13,6 +13,7 @@
 //! [`Coordinator`]: crate::coordinator::Coordinator
 mod config;
 mod launch;
+mod network;
 mod rank;
 mod rescue;
 mod session;
@@ -40,7 +41,8 @@ pub use config::{
     launch_source,
 };
 pub use launch::Launched;
-pub use rank::rank;
+pub use network::{WHITELIST_PROOF, network_tag};
+pub use rank::{Network, rank};
 pub use stall::{Detector, Suspicion};
 pub use status::{Exposure, Phase, PickStatus};
 pub use task::AutoPick;
@@ -60,6 +62,34 @@ pub struct Candidate {
     pub checked_at: Option<UnixMs>,
     /// Round trip of the last check that reached it.
     pub latency_ms: Option<u32>,
+    /// Its transport rides on UDP (Hysteria2, TUIC, WireGuard, QUIC): dead where UDP is cut.
+    pub udp: bool,
+    /// Its entry looks Russian: a host name or an entry address the probes classify as Russian.
+    pub ru_entry: bool,
+    /// What says it passes a mobile whitelist.
+    pub whitelist: WhitelistFacts,
+}
+
+/// What says a server passes a mobile whitelist (the list keeps it per server).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WhitelistFacts {
+    /// The user marked it «Работает в белых списках».
+    pub marked: bool,
+    /// The networks ([`network_tag`]) on which it carried [`WHITELIST_PROOF`] in whitelist
+    /// mode; `None` = a network whose tag was not known.
+    pub worked_on: Vec<Option<String>>,
+}
+
+impl WhitelistFacts {
+    /// It carried data in whitelist mode on the network tagged `tag`.
+    pub fn here(&self, tag: Option<&str>) -> bool {
+        tag.is_some_and(|t| self.worked_on.iter().any(|w| w.as_deref() == Some(t)))
+    }
+
+    /// The user's mark or evidence from any network.
+    pub fn ready(&self) -> bool {
+        self.marked || !self.worked_on.is_empty()
+    }
 }
 
 /// One check of a server that is not running (the app: a probe engine and a 64 KiB transfer).
@@ -175,4 +205,9 @@ pub trait PickHost: Send + Sync + 'static {
     fn user_acts(&self) -> watch::Receiver<UserActs>;
     /// Hands a verdict about a server to the check-verdict reactions.
     fn report(&self, report: Report);
+    /// The one-way tag of the network the PC is on now ([`network_tag`]); `None` = unknown.
+    fn network(&self) -> impl Future<Output = Option<String>> + Send;
+    /// Server `id` carried [`WHITELIST_PROOF`] while the network tagged `network` was in
+    /// whitelist mode: the list keeps that as evidence (never blocks the caller).
+    fn worked_under_whitelist(&self, id: &str, network: Option<String>);
 }

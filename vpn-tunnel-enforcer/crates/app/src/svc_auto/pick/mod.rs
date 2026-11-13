@@ -28,12 +28,15 @@ pub type AppPick = AutoPick<AppCoordinator, AutoHost>;
 pub fn spawn_autopick(backend: &Arc<Backend>, automation: &Arc<Automation>) {
     let host = Arc::new(AutoHost::new(backend.clone(), automation));
     let config = Arc::new(Store::<AutoPickConfig>::open(&backend.dirs.root));
-    let pick = Arc::new(AutoPick::new(
-        automation.coord.clone(),
-        host,
-        config,
-        Some(automation.scheduler.status()),
-    ));
+    let pick = Arc::new(
+        AutoPick::new(
+            automation.coord.clone(),
+            host,
+            config,
+            Some(automation.scheduler.status()),
+        )
+        .with_verdicts(automation.reactions.verdicts()),
+    );
     if automation.autopick.set(pick.clone()).is_err() {
         tracing::warn!("automatic server choice started twice; the second one is dropped");
         return;

@@ -9,7 +9,9 @@ use vpnte_base::{ErrorKind, Msg};
 
 use super::rescue::{Ended, Trigger};
 use super::task::{AutoPick, UserWatch};
-use super::{Candidate, LaunchPick, NoRequest, Phase, PickHost, ProviderWord, launch_pick, rank};
+use super::{
+    Candidate, LaunchPick, Network, NoRequest, Phase, PickHost, ProviderWord, launch_pick, rank,
+};
 use crate::coordinator::{Coordinator, OpError};
 
 /// A stored check younger than this is used as it is (no new handshake).
@@ -128,7 +130,8 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
         servers: &[Candidate],
         user: &UserWatch,
     ) -> Option<Candidate> {
-        let best_ranked = || rank(servers, |_| false).first().copied().cloned();
+        let net = self.network(servers).await;
+        let best_ranked = || rank(servers, &net, |_| false).first().copied().cloned();
         match pick {
             LaunchPick::LastUsed => last_row.or_else(best_ranked),
             LaunchPick::Random => {
@@ -137,7 +140,7 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
                 }
                 Some(servers[fastrand::usize(..servers.len())].clone())
             }
-            LaunchPick::LowestDelay => (self.lowest_delay(servers, user).await)
+            LaunchPick::LowestDelay => (self.lowest_delay(servers, &net, user).await)
                 .or(last_row)
                 .or_else(best_ranked),
         }
@@ -145,9 +148,14 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
 
     /// The alive server with the lowest delay among the best-ranked few; stored checks younger
     /// than [`FRESH`] count as they are, the others are checked one after another.
-    async fn lowest_delay(&self, servers: &[Candidate], user: &UserWatch) -> Option<Candidate> {
+    async fn lowest_delay(
+        &self,
+        servers: &[Candidate],
+        net: &Network,
+        user: &UserWatch,
+    ) -> Option<Candidate> {
         let mut best: Option<(u32, Candidate)> = None;
-        for c in rank(servers, |_| false).into_iter().take(MEASURED) {
+        for c in rank(servers, net, |_| false).into_iter().take(MEASURED) {
             let fresh = c
                 .checked_at
                 .is_some_and(|at| now_ms().saturating_sub(at) < FRESH.as_millis() as i64);

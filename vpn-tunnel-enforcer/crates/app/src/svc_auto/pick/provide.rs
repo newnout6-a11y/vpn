@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use vpnte_automation::adaptive::reaction::Report;
 use vpnte_automation::autopick::{
     Allowed, Candidate, Checked, Confirmation, Counters, Exposure, NoRequest, PickHost,
-    ProviderWord, UserActs,
+    ProviderWord, UserActs, network_tag,
 };
 use vpnte_automation::coordinator::ConnectRequest;
 use vpnte_base::Msg;
@@ -226,6 +226,19 @@ impl PickHost for AutoHost {
             let stored = update.map(|u| servers.record_verdicts(vec![u]));
             if !matches!(stored, Some(Ok(n)) if n > 0) {
                 reactions.report(report);
+            }
+        });
+    }
+
+    async fn network(&self) -> Option<String> {
+        network_tag().await
+    }
+
+    fn worked_under_whitelist(&self, id: &str, network: Option<String>) {
+        let (servers, id) = (self.backend.servers.clone(), ProfileId::from(id));
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = servers.record_whitelist(&id, network, now_ms()) {
+                tracing::warn!(error = %e, "whitelist evidence not stored");
             }
         });
     }

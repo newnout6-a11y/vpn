@@ -407,7 +407,9 @@
         "engineAuto": "Engine: as in Settings",
         "engineSingBox": "Engine: sing-box only",
         "engineXray": "Engine: Xray only",
-        "engineCurrent": "Chosen now"
+        "engineCurrent": "Chosen now",
+        "whitelistOn": "Works on whitelists",
+        "whitelistOff": "Remove the «Whitelists» mark"
       },
       "proxy": {
         "groupTitle": "Proxies: {{name}}",
@@ -430,6 +432,9 @@
       },
       "row": {
         "openDetail": "Server details",
+        "whitelist": "Whitelists",
+        "whitelistMarked": "You marked it as working on mobile whitelists. On such a network it is tried first",
+        "whitelistWorked": "Worked on a whitelisted network {{when}}. On such a network it is tried first",
         "engineRefused": "Engine",
         "off": "Off",
         "switching": "Switching",
@@ -535,6 +540,9 @@
       },
       "engine": {
         "failed": "Could not change the engine of «{{name}}»"
+      },
+      "whitelist": {
+        "failed": "Could not change the mark of «{{name}}»"
       },
       "request": {
         "open": "Request",

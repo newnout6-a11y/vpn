@@ -10,8 +10,10 @@ use vpnte_base::AppResult;
 use vpnte_base::types::UnixMs;
 use vpnte_core::store::Store;
 
+use super::network::NetSession;
 use super::{AutoPickConfig, LaunchChoice, LaunchPick, Phase, PickHost, PickStatus, UserActs};
 use super::{LaunchSource, launch_pick, launch_source};
+use crate::adaptive::reaction::Verdicts;
 use crate::coordinator::Coordinator;
 use crate::scheduler::SchedulerStatus;
 
@@ -29,6 +31,10 @@ pub struct AutoPick<C: Coordinator, H: PickHost> {
     /// itself, or a server that fails again at once, never starts a chain of episodes. A network
     /// change clears it (a new network deserves a new try).
     pub(super) spent: parking_lot::Mutex<HashSet<String>>,
+    /// The reactions' network memory (UDP cut, mobile whitelist, servers ruled out here).
+    pub(super) verdicts: Option<Arc<Verdicts>>,
+    /// This network's tag and the whitelist proofs already noted on it.
+    pub(super) net: parking_lot::Mutex<NetSession>,
 }
 
 impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
@@ -46,7 +52,17 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
             schedule,
             episode: Mutex::new(()),
             spent: parking_lot::Mutex::new(HashSet::new()),
+            verdicts: None,
+            net: parking_lot::Mutex::new(NetSession::default()),
         }
+    }
+
+    /// Ranks by the reactions' network memory (hand it `Reactions::verdicts`), and learns which
+    /// servers pass a mobile whitelist.
+    #[must_use]
+    pub fn with_verdicts(mut self, verdicts: Arc<Verdicts>) -> Self {
+        self.verdicts = Some(verdicts);
+        self
     }
 
     /// The status line's snapshot (what traffic does is not in it: the page reads that live).

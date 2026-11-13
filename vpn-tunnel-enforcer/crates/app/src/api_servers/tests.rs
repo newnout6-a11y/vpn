@@ -195,6 +195,7 @@ fn projection_maps_rows_and_groups() {
             engine_plan: None,
             verdict: None,
             config_hidden: false,
+            whitelist: None,
         },
     )]);
     let resolved = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));

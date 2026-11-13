@@ -566,6 +566,18 @@ impl ServersApi for DemoServersApi {
         Ok(())
     }
 
+    async fn set_whitelist_ready(&self, id: &str, on: bool) -> AppResult<()> {
+        delay(200).await;
+        self.known(id)?;
+        self.edit_server(id, |s| {
+            s.whitelist = on.then(|| WhitelistReady {
+                marked: true,
+                worked_at: s.whitelist.and_then(|w| w.worked_at),
+            });
+        });
+        Ok(())
+    }
+
     async fn probe(&self, id: &str) -> AppResult<ProbeReport> {
         self.demo_probe(id).await
     }

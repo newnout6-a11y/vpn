@@ -72,12 +72,12 @@ fn ranking_puts_evidence_then_latency_then_store_order() {
     (fast.alive, fast.latency_ms) = (Some(true), Some(80));
     let unknown = server("unknown", "g");
     let all = [dead, unknown, slow, fast];
-    let ids: Vec<&str> = rank(&all, |id| id == "skip")
+    let ids: Vec<&str> = rank(&all, &Network::default(), |id| id == "skip")
         .iter()
         .map(|c| c.id.as_str())
         .collect();
     assert_eq!(ids, ["fast", "slow", "unknown", "dead"]);
-    let ids: Vec<&str> = rank(&all, |id| id == "fast")
+    let ids: Vec<&str> = rank(&all, &Network::default(), |id| id == "fast")
         .iter()
         .map(|c| c.id.as_str())
         .collect();
@@ -149,17 +149,17 @@ fn the_warm_up_checks_the_stalest_of_the_next_candidates_never_the_running_one()
     let all = vec![running, a.clone(), b, c];
     // a is fresh; b (20 min) and c (never) are stale: never checked goes first.
     assert_eq!(
-        next_to_warm(&all, "run", now).map(|c| c.id.as_str()),
+        next_to_warm(&all, &Network::default(), "run", now).map(|c| c.id.as_str()),
         Some("c")
     );
     let mut fresh = all.clone();
     fresh[3].checked_at = Some(now - 1_000);
     assert_eq!(
-        next_to_warm(&fresh, "run", now).map(|c| c.id.as_str()),
+        next_to_warm(&fresh, &Network::default(), "run", now).map(|c| c.id.as_str()),
         Some("b")
     );
     fresh[2].checked_at = Some(now - 1_000);
-    assert_eq!(next_to_warm(&fresh, "run", now), None);
+    assert_eq!(next_to_warm(&fresh, &Network::default(), "run", now), None);
 }
 
 /// Review fix a8/b2/b10: the status carries no traffic claim of its own; every step shows the

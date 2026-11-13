@@ -1,6 +1,6 @@
-//! What one network session has learned from verdicts. A ban, a freeze or a UDP cut is a fact
-//! about the path from this network; after the physical network changes it proves nothing, so
-//! the memory starts over (`LifecycleEvent::NetworkChanged`).
+//! What one network session has learned from verdicts. A ban, a freeze, a UDP cut or a mobile
+//! whitelist is a fact about the path from this network; after the physical network changes it
+//! proves nothing, so the memory starts over (`LifecycleEvent::NetworkChanged`).
 use std::collections::{HashMap, HashSet};
 
 use parking_lot::Mutex;
@@ -28,6 +28,8 @@ pub(super) struct Avoided {
 #[derive(Debug, Default)]
 pub(super) struct Memory {
     pub(super) udp_blocked: bool,
+    /// The network check found a mobile whitelist: only whitelisted Russian addresses pass.
+    pub(super) whitelist: bool,
     pub(super) avoid: HashMap<String, Avoided>,
     pub(super) tried: HashSet<(String, Attempt)>,
     /// Tunnel restarts made by reactions on this network.
@@ -89,8 +91,9 @@ impl Memory {
 }
 
 /// The network session's memory, shared by [`Reactions`](super::Reactions) (the writer; the
-/// app's network check sets only the UDP mark, through [`Verdicts::network_udp`]), rotation and
-/// the sibling fallback of adaptive bypass (readers).
+/// app's network check sets only the network marks, through [`Verdicts::network_udp`] and
+/// [`Verdicts::network_whitelist`]), rotation, the sibling fallback of adaptive bypass and the
+/// automatic server choice (readers).
 #[derive(Debug, Default)]
 pub struct Verdicts {
     memory: Mutex<Memory>,
@@ -120,6 +123,19 @@ impl Verdicts {
         self.memory.lock().udp_blocked = blocked;
     }
 
+    /// The network check found a mobile whitelist here: servers known to pass one, then those
+    /// with a Russian entry, go first in automatic picks.
+    pub fn whitelist(&self) -> bool {
+        self.memory.lock().whitelist
+    }
+
+    /// A check of the network itself decided about the whitelist: `true` = only whitelisted
+    /// Russian addresses pass; `false` = foreign hosts answer, an earlier mark is lifted. Like
+    /// the UDP mark it switches no session.
+    pub fn network_whitelist(&self, on: bool) {
+        self.memory.lock().whitelist = on;
+    }
+
     /// Forgets everything (the physical network changed).
     pub(super) fn reset(&self) {
         *self.memory.lock() = Memory::default();
@@ -147,5 +163,27 @@ impl Verdicts {
             }
         });
         verdicts
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// p-net-aware: the network check sets and lifts the whitelist mark beside the UDP mark; a
+    /// new network starts without either.
+    #[test]
+    fn the_network_marks_come_and_go() {
+        let verdicts = Verdicts::new();
+        assert!(!verdicts.whitelist());
+        verdicts.network_whitelist(true);
+        verdicts.network_udp(true);
+        assert!(verdicts.whitelist() && verdicts.udp_blocked());
+        verdicts.network_whitelist(false);
+        assert!(!verdicts.whitelist());
+        assert!(verdicts.udp_blocked(), "the marks are independent");
+        verdicts.network_whitelist(true);
+        verdicts.reset();
+        assert!(!verdicts.whitelist() && !verdicts.udp_blocked());
     }
 }

@@ -248,6 +248,7 @@ pub(super) fn publish(
     }
     if let Some(verdicts) = verdicts {
         feed(verdicts, report.udp);
+        feed_whitelist(verdicts, report);
     }
     Ok(view)
 }
@@ -260,6 +261,18 @@ pub(super) fn feed(verdicts: &Verdicts, udp: UdpEvidence) {
         UdpEvidence::Dropped => verdicts.network_udp(true),
         UdpEvidence::Passes => verdicts.network_udp(false),
         UdpEvidence::Unclear => {}
+    }
+}
+
+/// The network memory learns whether only whitelisted Russian addresses pass here: servers known
+/// to pass a whitelist then go first in automatic picks. Only a check that reached foreign or
+/// Russian hosts decides; offline or unproven leaves the mark as it was.
+pub(super) fn feed_whitelist(verdicts: &Verdicts, report: &NetReport) {
+    match report.summary {
+        Summary::Open | Summary::Restricted => {
+            verdicts.network_whitelist(report.modes.contains(&Mode::Whitelist));
+        }
+        Summary::Offline | Summary::NotVerified => {}
     }
 }
 

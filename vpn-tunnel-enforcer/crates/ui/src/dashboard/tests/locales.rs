@@ -28,6 +28,7 @@ const USED: &[(&str, &[&str])] = &[
     ("swiss.check", &[]),
     ("swiss.checkAria", &[]),
     ("swiss.progressHint", &[]),
+    ("ui.dashboard.netmodeWhitelist", &[]),
     ("ui.dashboard.restartTitle", &[]),
     ("ui.dashboard.restartBody", &[]),
     ("ui.dashboard.competingTitle", &[]),

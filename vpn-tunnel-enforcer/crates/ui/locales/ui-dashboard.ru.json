@@ -1,6 +1,7 @@
 {
   "ui": {
     "dashboard": {
+      "netmodeWhitelist": "Первыми пробуются серверы с отметкой «Белые списки»",
       "restartTitle": "VPN переподключается",
       "restartBody": "Если не получится, подключитесь ещё раз.",
       "competingTitle": "Обнаружен второй VPN/TUN:",

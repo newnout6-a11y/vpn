@@ -22,7 +22,8 @@ use vpnte_ui::maintenance::{MaintenanceState, NetStepKind};
 use vpnte_view::netmode::NetMode;
 
 use super::super::network::{
-    Flight, NetEpoch, Scope, direct_out, feed, measure, network_changed, publish, view,
+    Flight, NetEpoch, Scope, direct_out, feed, feed_whitelist, measure, network_changed, publish,
+    view,
 };
 
 fn ok() -> HostFacts {
@@ -218,6 +219,37 @@ fn udp_evidence_teaches_the_network_memory() {
     feed(&verdicts, UdpEvidence::Dropped);
     feed(&verdicts, report(&quic_cut, false).udp);
     assert!(!verdicts.udp_blocked());
+}
+
+/// p-net-aware: a whitelist found sets the memory's mark (servers known to pass one go first in
+/// automatic picks), a check that reached foreign hosts lifts it, an offline check leaves it.
+#[test]
+fn the_whitelist_mode_teaches_the_network_memory() {
+    let dead = || HostFacts {
+        tcp: Outcome::Silent,
+        tls: Outcome::Silent,
+    };
+    let whitelist = || Facts {
+        doh_foreign: Outcome::Silent,
+        foreign: vec![dead(), dead()],
+        transfer: None,
+        ..udp_cut()
+    };
+    let verdicts = Verdicts::new();
+    let found = report(&whitelist(), false);
+    assert!(found.modes.contains(&Mode::Whitelist));
+    feed_whitelist(&verdicts, &found);
+    assert!(verdicts.whitelist());
+    let offline = Facts {
+        system_dns: Outcome::Silent,
+        doh_ru: Outcome::Silent,
+        ru: vec![dead(), dead()],
+        ..whitelist()
+    };
+    feed_whitelist(&verdicts, &report(&offline, false));
+    assert!(verdicts.whitelist(), "offline proves nothing");
+    feed_whitelist(&verdicts, &report(&udp_cut(), false));
+    assert!(!verdicts.whitelist(), "foreign hosts answered");
 }
 
 /// A network where everything answers; records which servers were probed.

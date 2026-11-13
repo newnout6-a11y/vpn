@@ -1,6 +1,7 @@
 {
   "ui": {
     "dashboard": {
+      "netmodeWhitelist": "Servers marked «Whitelists» are tried first",
       "restartTitle": "The VPN is reconnecting",
       "restartBody": "If it does not work out, connect again.",
       "competingTitle": "Second VPN/TUN detected:",

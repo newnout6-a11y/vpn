@@ -1,5 +1,6 @@
 //! Tests of the automatic server choice with a fake host and the fake coordinator (paused time).
 mod launch;
+mod network;
 mod pure;
 mod rescue;
 mod stall;
@@ -27,6 +28,9 @@ pub(super) fn server(id: &str, group: &str) -> Candidate {
         alive: None,
         checked_at: None,
         latency_ms: None,
+        udp: false,
+        ru_entry: false,
+        whitelist: WhitelistFacts::default(),
     }
 }
 
@@ -61,6 +65,11 @@ pub(super) struct FakeHost {
     /// The user acts while a check or a slot of this id is asked for (`true`: a Disconnect or
     /// Cancel, `false`: another action): a race with a measurement or a slot wait.
     pub act_at: Mutex<Option<(String, bool)>>,
+    /// The network's tag as the host reads it; every read counted.
+    pub tag: Mutex<Option<String>>,
+    pub tag_reads: Mutex<usize>,
+    /// Whitelist proofs handed to the list, in order.
+    pub whitelist_proofs: Mutex<Vec<(String, Option<String>)>>,
 }
 
 impl FakeHost {
@@ -184,6 +193,15 @@ impl PickHost for FakeHost {
     fn report(&self, report: Report) {
         self.reports.lock().push(report);
     }
+
+    async fn network(&self) -> Option<String> {
+        *self.tag_reads.lock() += 1;
+        self.tag.lock().clone()
+    }
+
+    fn worked_under_whitelist(&self, id: &str, network: Option<String>) {
+        self.whitelist_proofs.lock().push((id.to_owned(), network));
+    }
 }
 
 /// An [`AutoPick`] over the fakes with its document in a throw-away directory.
@@ -195,11 +213,23 @@ pub(super) struct Rig {
 }
 
 pub(super) fn rig(servers: Vec<Candidate>) -> Rig {
+    rig_with(servers, None)
+}
+
+/// [`rig`] that ranks by (and learns into) the network memory `verdicts`.
+pub(super) fn rig_with(
+    servers: Vec<Candidate>,
+    verdicts: Option<Arc<crate::adaptive::reaction::Verdicts>>,
+) -> Rig {
     let dir = TempDir::new("autopick");
     let coord = FakeCoordinator::new();
     let host = FakeHost::new(servers);
     let config = Arc::new(Store::<AutoPickConfig>::open(dir.path()));
-    let pick = Arc::new(AutoPick::new(coord.clone(), host.clone(), config, None));
+    let mut pick = AutoPick::new(coord.clone(), host.clone(), config, None);
+    if let Some(verdicts) = verdicts {
+        pick = pick.with_verdicts(verdicts);
+    }
+    let pick = Arc::new(pick);
     Rig {
         coord,
         host,

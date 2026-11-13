@@ -369,6 +369,17 @@ impl ServersApi for ServersBackend {
         detached(set_engine(self.shared.clone(), ProfileId::from(id), engine)).await
     }
 
+    async fn set_whitelist_ready(&self, id: &str, on: bool) -> AppResult<()> {
+        let (shared, id) = (self.shared.clone(), ProfileId::from(id));
+        detached(async move {
+            let servers = shared.backend.servers.clone();
+            blocking(move || servers.set_whitelist_mark(&id, on)).await?;
+            shared.publish();
+            Ok(())
+        })
+        .await
+    }
+
     async fn probe(&self, id: &str) -> AppResult<ProbeReport> {
         let (shared, id) = (self.shared.clone(), ProfileId::from(id));
         let shutdown = &self.shared.backend.shutdown;

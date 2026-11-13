@@ -137,7 +137,13 @@ pub struct ServerRow { pub id: ProfileId, pub group_id: GroupId, pub origin: Ori
     pub last_seen_at, pub missing_since: Option<UnixMs>, pub archived: Option<Archived>,
     pub country: Option<VerifiedCountry>, pub health: Option<HealthRecord>,
     pub verdict: Option<VerdictRecord> /* beside health: may come from another check, compare `at` */,
-    pub hidden: bool /* the provider's hide-settings, carried out of its group (see ServersDoc::hides) */ }
+    pub hidden: bool /* the provider's hide-settings, carried out of its group (see ServersDoc::hides) */,
+    pub whitelist: Option<Whitelist> /* p-net-aware: the user's mark and learned evidence */ }
+pub const WHITELIST_NETWORKS_MAX: usize;                  // 4 networks per server, newest first
+pub struct Whitelist { pub marked: bool, pub worked: Vec<WorkedUnder> }   // camelCase, empty parts omitted
+pub struct WorkedUnder { pub network: Option<String> /* one-way tag */, pub endpoint: String /* host:port */,
+                         pub at: UnixMs }
+impl Whitelist { pub fn is_empty(&self) -> bool; pub fn record(&mut self, network, endpoint, at); }
 // diag-a8: a name a newer build wrote into a stored enum field reads as a safe fallback
 // (model::lenient) instead of failing the list: health reason / fetch outcome / autoconnect pick
 // -> None, origin -> Manual, archive reason -> User, country source -> Legacy, device / engine ->
@@ -151,6 +157,9 @@ impl ServerRow {
     pub fn claimed_country(&self) -> Option<Iso2>;   // from the name (derived)
     pub fn display_country(&self) -> Option<Iso2>;   // verified, else claimed
     pub fn purge_at(&self) -> Option<UnixMs>;
+    pub fn endpoint(&self) -> String;                // `host:port`, host lower case
+    pub fn worked_under_whitelist(&self) -> impl Iterator<Item = &WorkedUnder>;  // at the current endpoint
+    pub fn whitelist_ready(&self) -> bool;           // the mark, or evidence that still applies
 }
 // Secret-free view types (what lists render):
 pub struct Ping { pub rtt_ms: Option<u32> /* None: no answer */, pub at: UnixMs }   // memory only
@@ -210,6 +219,12 @@ impl Servers {
     pub fn verdicts(&self) -> HashMap<ProfileId, VerdictRecord>;         // rows that have one (page, automation)
     pub fn record_country(&self, &ProfileId, VerifiedCountry, expected_generation: u64) -> AppResult<bool>;
     pub fn record_ping(&self, &ProfileId, rtt_ms: Option<u32>);          // memory only
+    // whitelist evidence (p-net-aware)
+    pub fn record_whitelist(&self, &ProfileId, network: Option<String>, at: UnixMs) -> AppResult<bool>;
+                                     // >= 64 KiB at the current endpoint while `network` (a one-way tag)
+                                     // was in whitelist mode; user-removed / gone rows: false
+    pub fn set_whitelist_mark(&self, &ProfileId, on: bool) -> AppResult<()>;  // the user's mark; off
+                                     // also forgets the learned evidence (the badge goes)
     // a subscription's request settings and the provider's hide-settings guard
     pub fn set_group_send_hwid(&self, &GroupId, bool) -> AppResult<()>;  // next refresh sends accordingly
     pub fn set_own_device_id(&self, &GroupId, own: bool) -> AppResult<()>; // own: fresh random HWID

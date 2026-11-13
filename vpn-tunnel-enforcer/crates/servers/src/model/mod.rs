@@ -20,12 +20,14 @@ mod row;
 mod summary;
 #[cfg(test)]
 pub(crate) mod tests;
+mod whitelist;
 
 pub use row::{
     ArchiveReason, Archived, CountrySource, HealthReason, HealthRecord, Origin, ServerReaction,
     ServerRow, ServerVerdict, VerdictRecord, VerifiedCountry,
 };
 pub use summary::{GroupSummary, Ping, ServerSummary, ServersView};
+pub use whitelist::{WHITELIST_NETWORKS_MAX, Whitelist, WorkedUnder};
 
 /// How long an archived row is kept before it is purged for good (ТЗ т.3 §3.2.3, AT-04-010).
 pub const ARCHIVE_TTL_MS: UnixMs = 30 * 24 * 60 * 60 * 1000;

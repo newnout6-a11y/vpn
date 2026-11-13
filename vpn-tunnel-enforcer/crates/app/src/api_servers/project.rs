@@ -39,6 +39,8 @@ pub(super) struct RowExtras {
     /// The key carried its provider's hide-settings out of the provider's group
     /// (`ServerRow::hidden`); a hiding group hides its own rows on top.
     pub config_hidden: bool,
+    /// The whitelist badge (the user's mark, or the last proof at the current endpoint).
+    pub whitelist: Option<ui::WhitelistReady>,
 }
 
 impl RowExtras {
@@ -68,8 +70,17 @@ impl RowExtras {
                 .as_ref()
                 .and_then(|v| verdict::view(v, row.health.as_ref())),
             config_hidden: row.hidden,
+            whitelist: whitelist(row),
         }
     }
+}
+
+/// The row's whitelist badge: the user's mark, or when it last carried data on a whitelisted
+/// network at its current endpoint.
+fn whitelist(row: &ServerRow) -> Option<ui::WhitelistReady> {
+    let marked = row.whitelist.as_ref().is_some_and(|w| w.marked);
+    let worked_at = row.worked_under_whitelist().map(|w| w.at).max();
+    (marked || worked_at.is_some()).then_some(ui::WhitelistReady { marked, worked_at })
 }
 
 /// The engine's warning about the provider-pinned uTLS fingerprint. A fingerprint current
@@ -237,6 +248,7 @@ fn server(
         // used until it is imported again, so it shows as switched off.
         enabled: !s.locked,
         config_hidden,
+        whitelist: x.whitelist,
     }
 }
 

@@ -5,13 +5,14 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use vpnte_automation::autopick::{Candidate, LaunchPick, ProviderWord};
+use vpnte_automation::autopick::{Candidate, LaunchPick, ProviderWord, WhitelistFacts};
 use vpnte_engine::clash_api::{ClashApi, ClashEndpoint};
+use vpnte_probes::leak::check::is_ru_hostname;
 use vpnte_profiles::text::AutoconnectPick;
 use vpnte_servers::model::{ProfileId, ServerReaction, ServerRow, ServerVerdict, VerdictRecord};
 
 use super::super::failover::alive;
-use super::super::host::latency;
+use super::super::host::{latency, transport_of};
 use super::super::{AppCoordinator, AppReactions, Automation};
 use super::meter::Meter;
 use crate::services::{Backend, TunnelOps};
@@ -72,7 +73,21 @@ pub(super) fn candidate(row: &ServerRow) -> Candidate {
         alive: alive(row),
         checked_at: checked.into_iter().flatten().max(),
         latency_ms: latency(row),
+        udp: row.profile().is_ok_and(|p| transport_of(&p).udp()),
+        ru_entry: ru_entry(row),
+        whitelist: WhitelistFacts {
+            marked: row.whitelist.as_ref().is_some_and(|w| w.marked),
+            worked_on: (row.worked_under_whitelist())
+                .map(|w| w.network.clone())
+                .collect(),
+        },
     }
+}
+
+/// The row's entry looks Russian: a Russian host name, or Russia as the country the probes
+/// verified (else the one the name claims); for a single-hop server that is its own address.
+fn ru_entry(row: &ServerRow) -> bool {
+    is_ru_hostname(&row.server) || row.display_country().is_some_and(|c| c.as_str() == "RU")
 }
 
 /// The provider's controls of a group as the launch rule reads them.

@@ -9,7 +9,7 @@ use vpnte_base::types::{UnixMs, now_ms};
 
 use super::launch::FRESH;
 use super::task::AutoPick;
-use super::{Candidate, PickHost, rank};
+use super::{Candidate, Network, PickHost, rank};
 use crate::coordinator::Coordinator;
 
 /// At most one candidate check per this period.
@@ -44,7 +44,8 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
                 continue;
             };
             let servers = self.host.servers();
-            if let Some(next) = next_to_warm(&servers, &running, now_ms()) {
+            let net = self.network(&servers).await;
+            if let Some(next) = next_to_warm(&servers, &net, &running, now_ms()) {
                 let id = next.id.clone();
                 drop(idle);
                 // The user's action ends a check in flight as well.
@@ -55,16 +56,17 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
     }
 }
 
-/// The candidate to check now: of the next [`WARM_COUNT`] in failover order (the running
-/// server's group first, then the others), the one checked longest ago, if that is older than
-/// [`FRESH`].
+/// The candidate to check now: of the next [`WARM_COUNT`] in failover order on `net` (the
+/// running server's group first, then the others), the one checked longest ago, if that is
+/// older than [`FRESH`].
 pub fn next_to_warm<'a>(
     servers: &'a [Candidate],
+    net: &Network,
     running: &str,
     now: UnixMs,
 ) -> Option<&'a Candidate> {
     let group = servers.iter().find(|c| c.id == running)?.group.clone();
-    let ranked = rank(servers, |id| id == running);
+    let ranked = rank(servers, net, |id| id == running);
     let same = ranked.iter().filter(|c| c.group == group);
     let next = same
         .chain(ranked.iter().filter(|c| c.group != group))
