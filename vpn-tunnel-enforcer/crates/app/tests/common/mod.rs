@@ -1,8 +1,10 @@
 //! Shared by the integration tests: a child process started as the app's main mode runs it,
-//! unelevated. GitHub's Windows runners run the tests elevated, and an elevated process ignores
-//! the `VPNTE_*` directory overrides (review 4533368399); the child gets a token without the
-//! Administrators group, without privileges and at medium integrity, so it honours them and
-//! behaves as an app the user started normally.
+//! unelevated. GitHub's Windows runners run the tests elevated (as the built-in Administrator),
+//! and an elevated process ignores the `VPNTE_*` directory overrides (review 4533368399); the
+//! child gets a LUA token like UAC's filtered one (Administrators and «local account and member of
+//! Administrators» deny-only, no privileges, medium integrity), so it honours them and behaves as
+//! an app the user started normally. The same token is used on an unelevated PC, so a local run
+//! takes the path CI takes.
 #![allow(dead_code)]
 
 use std::ffi::{OsStr, OsString, c_void};
@@ -14,15 +16,16 @@ use std::time::Duration;
 use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Security::{
     CreateRestrictedToken, CreateWellKnownSid, DISABLE_MAX_PRIVILEGE, GetLengthSid,
-    GetTokenInformation, PSID, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES, SetTokenInformation,
-    TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_ELEVATION,
-    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenElevation, TokenIntegrityLevel,
-    WinBuiltinAdministratorsSid, WinMediumLabelSid,
+    GetTokenInformation, LUA_TOKEN, PSID, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES,
+    SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
+    TOKEN_ELEVATION, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenElevation, TokenIntegrityLevel,
+    WELL_KNOWN_SID_TYPE, WinBuiltinAdministratorsSid, WinLocalAccountAndAdministratorSid,
+    WinMediumLabelSid,
 };
 use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, CreateProcessW,
-    GetCurrentProcess, GetExitCodeProcess, OpenProcessToken, PROCESS_INFORMATION, STARTUPINFOW,
-    TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, GetCurrentProcess,
+    GetExitCodeProcess, OpenProcessToken, PROCESS_INFORMATION, STARTUPINFOW, TerminateProcess,
+    WaitForSingleObject,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -49,38 +52,24 @@ impl Child {
         };
         let mut info = PROCESS_INFORMATION::default();
         let flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW;
-        let token = vpnte_winnet::elevation::is_elevated().then(lowered_token);
+        let token = lowered_token();
         // SAFETY: NUL-terminated buffers that outlive the call, an environment block in the
         // format CREATE_UNICODE_ENVIRONMENT asks for, a token this process owns; the returned
         // handles are owned below.
         unsafe {
-            match &token {
-                Some(token) => CreateProcessAsUserW(
-                    Some(HANDLE(token.as_raw_handle())),
-                    PCWSTR(app.as_ptr()),
-                    Some(PWSTR(line.as_mut_ptr())),
-                    None,
-                    None,
-                    false,
-                    flags,
-                    Some(env.as_ptr().cast::<c_void>()),
-                    PCWSTR::null(),
-                    &startup,
-                    &mut info,
-                ),
-                None => CreateProcessW(
-                    PCWSTR(app.as_ptr()),
-                    Some(PWSTR(line.as_mut_ptr())),
-                    None,
-                    None,
-                    false,
-                    flags,
-                    Some(env.as_ptr().cast::<c_void>()),
-                    PCWSTR::null(),
-                    &startup,
-                    &mut info,
-                ),
-            }
+            CreateProcessAsUserW(
+                Some(HANDLE(token.as_raw_handle())),
+                PCWSTR(app.as_ptr()),
+                Some(PWSTR(line.as_mut_ptr())),
+                None,
+                None,
+                false,
+                flags,
+                Some(env.as_ptr().cast::<c_void>()),
+                PCWSTR::null(),
+                &startup,
+                &mut info,
+            )
             .unwrap();
             drop(OwnedHandle::from_raw_handle(info.hThread.0));
         }
@@ -153,34 +142,40 @@ impl Drop for Child {
     }
 }
 
-/// This process's token without the Administrators group (deny-only), without privileges and
-/// at medium integrity: a restricted version of the caller's primary token, which
-/// CreateProcessAsUserW accepts without SE_ASSIGNPRIMARYTOKEN.
+/// A buffer holding the well-known SID `kind`.
+fn well_known(kind: WELL_KNOWN_SID_TYPE) -> [u8; SECURITY_MAX_SID_SIZE as usize] {
+    let mut sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
+    let mut len = SECURITY_MAX_SID_SIZE;
+    // SAFETY: a buffer of the maximum SID size, its size passed.
+    unsafe { CreateWellKnownSid(kind, None, Some(PSID(sid.as_mut_ptr().cast())), &mut len) }
+        .unwrap();
+    sid
+}
+
+/// This process's token filtered the way UAC filters an administrator's (LUA_TOKEN; the
+/// Administrators and «local account and member of Administrators» groups deny-only, no
+/// privileges but SeChangeNotify) at medium integrity: without the second group the built-in
+/// Administrator's token still counts as elevated. A restricted version of the caller's primary
+/// token, which CreateProcessAsUserW accepts without SE_ASSIGNPRIMARYTOKEN.
 fn lowered_token() -> OwnedHandle {
-    let mut admins = [0u8; SECURITY_MAX_SID_SIZE as usize];
-    let mut medium = [0u8; SECURITY_MAX_SID_SIZE as usize];
-    let (admins, medium) = (
-        PSID(admins.as_mut_ptr().cast()),
-        PSID(medium.as_mut_ptr().cast()),
-    );
+    let mut admins = well_known(WinBuiltinAdministratorsSid);
+    let mut local_admin = well_known(WinLocalAccountAndAdministratorSid);
+    let mut medium = well_known(WinMediumLabelSid);
+    let medium = PSID(medium.as_mut_ptr().cast());
     let (mut process, mut lowered) = (HANDLE::default(), HANDLE::default());
-    // SAFETY: SID buffers of the maximum size; the tokens are owned right after they are opened;
-    // the label and its SID outlive SetTokenInformation.
+    // SAFETY: the SID buffers live to the end of the block; the tokens are owned right after they
+    // are opened; the label and its SID outlive SetTokenInformation.
     unsafe {
-        let mut len = SECURITY_MAX_SID_SIZE;
-        CreateWellKnownSid(WinBuiltinAdministratorsSid, None, Some(admins), &mut len).unwrap();
-        let mut len = SECURITY_MAX_SID_SIZE;
-        CreateWellKnownSid(WinMediumLabelSid, None, Some(medium), &mut len).unwrap();
         let rights = TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ASSIGN_PRIMARY;
         OpenProcessToken(GetCurrentProcess(), rights, &mut process).unwrap();
         let _process = OwnedHandle::from_raw_handle(process.0);
-        let deny = [SID_AND_ATTRIBUTES {
-            Sid: admins,
+        let deny = [admins.as_mut_ptr(), local_admin.as_mut_ptr()].map(|sid| SID_AND_ATTRIBUTES {
+            Sid: PSID(sid.cast()),
             Attributes: 0,
-        }];
+        });
         CreateRestrictedToken(
             process,
-            DISABLE_MAX_PRIVILEGE,
+            DISABLE_MAX_PRIVILEGE | LUA_TOKEN,
             Some(&deny),
             None,
             None,
