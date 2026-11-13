@@ -6,9 +6,9 @@
 //! (`#[ignore = "changes system state"]`; CI runs it).
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use vpnte_automation::hardening;
 use vpnte_automation::tweaks::journal::TweakDoc;
@@ -17,6 +17,8 @@ use vpnte_base::types::ProxyKind;
 use vpnte_core::net::HostPort;
 use vpnte_core::store::Store;
 use windows::Win32::Foundation::HANDLE;
+
+mod common;
 
 const APP: &str = env!("CARGO_BIN_EXE_vpn-tunnel-enforcer");
 
@@ -36,28 +38,15 @@ impl Drop for TempDir {
     }
 }
 
-/// Runs the real exe as Windows does at sign-in; the exit status within `limit` (killed after).
-fn restore(data: &Path, limit: Duration) -> Option<ExitStatus> {
-    let mut child = Command::new(APP)
-        .arg("--restore-proxy")
-        .env("VPNTE_DATA_DIR", data)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + limit;
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            return Some(status);
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+/// Runs the real exe as Windows does at sign-in (unelevated: `common::Child`); its exit code
+/// within `limit` (killed after).
+fn restore(data: &Path, limit: Duration) -> Option<i32> {
+    let mut child = common::Child::spawn(
+        Path::new(APP),
+        &["--restore-proxy"],
+        &[("VPNTE_DATA_DIR", data.as_os_str())],
+    );
+    child.exit_within(limit)
 }
 
 /// RU-2026 14c: the process Windows starts at sign-in returns before any window, mutex or log,
@@ -67,7 +56,7 @@ fn restore(data: &Path, limit: Duration) -> Option<ExitStatus> {
 fn restore_exits_at_once_and_creates_nothing() {
     let data = TempDir::new("restore");
     let status = restore(&data.0, Duration::from_secs(15));
-    assert_eq!(status.and_then(|s| s.code()), Some(0));
+    assert_eq!(status, Some(0));
     assert!(!data.0.exists(), "no data dir created");
 }
 
@@ -114,7 +103,7 @@ fn system_restore_puts_the_proxy_back_after_a_power_loss() {
         .unwrap();
 
     let status = restore(&data.0, Duration::from_secs(30));
-    assert_eq!(status.and_then(|s| s.code()), Some(0));
+    assert_eq!(status, Some(0));
     assert_eq!(vpnte_winnet::sysproxy::read().unwrap(), proxy_before);
     assert_eq!(env.get("HTTP_PROXY").unwrap(), http_before);
     let left = Journal::open(&data.0, hardening::admit);
