@@ -13,6 +13,9 @@ use super::ech::config_list;
 use super::fingerprint::fingerprint;
 use super::select::SingBoxOnly;
 
+/// The key's TLS tricks as a `finalmask` fragment (item 18).
+mod tricks;
+
 /// Xray reads WebSocket early data from `?ed=` in the path; 8192 is its documented maximum.
 const MAX_EARLY_DATA: u32 = 8192;
 /// Keys that make the (elevated) engine read or write a local file.
@@ -86,6 +89,13 @@ pub(super) fn stream(p: &Profile, device: ClientDevice) -> Result<Stream, XrayCo
                 s.insert("tlsSettings".into(), Value::Object(t));
             }
         },
+    }
+    if let Some(mask) = p
+        .tls
+        .as_ref()
+        .and_then(|tls| tricks::finalmask(p, tls, network))
+    {
+        s.insert("finalmask".into(), mask);
     }
     let flow_ok =
         (network == "tcp" && !plain) || super::select::vless_encryption(&p.kind).is_some();

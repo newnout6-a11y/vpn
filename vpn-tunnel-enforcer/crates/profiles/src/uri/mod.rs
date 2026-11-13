@@ -13,6 +13,8 @@ mod proxy;
 mod quic;
 mod ss;
 mod stream;
+/// `fragment=` and its Hiddify spellings -> `Tls::tricks`.
+mod tricks;
 mod v2ray;
 mod wg;
 

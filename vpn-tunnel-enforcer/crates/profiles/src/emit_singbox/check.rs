@@ -11,7 +11,10 @@ use vpnte_base::types::ClientDevice;
 
 use super::tests::*;
 use super::{EmitPolicy, SingBoxFragment, emit_singbox};
-use crate::model::{Ech, Hy2Obfs, Kind, Mux, Profile, ShadowTlsLayer, SsPlugin, Tls, Transport};
+use crate::model::{
+    Ech, HelloSplit, Hy2Obfs, Kind, Mux, Profile, ShadowTlsLayer, Span, SsPlugin, Tls, TlsTricks,
+    Transport,
+};
 
 /// The bundled engine; `None` (tests skip quietly) when it is not on this machine.
 pub(crate) fn sing_box() -> Option<PathBuf> {
@@ -81,6 +84,22 @@ pub(crate) fn check(exe: &Path, fragment: &SingBoxFragment) -> Result<(), String
 fn with_tls(mut p: Profile, tls: Tls) -> Profile {
     p.tls = Some(tls);
     p
+}
+
+/// TLS with the key's own tricks (item 18).
+fn tricky(tricks: TlsTricks) -> Tls {
+    Tls {
+        tricks: Some(tricks),
+        ..tls("front.example.com")
+    }
+}
+
+/// A provider's own split: other lengths, a pause range.
+fn hello_split() -> HelloSplit {
+    HelloSplit {
+        len: Span::new(40, 60),
+        interval_ms: Span::new(30, 50),
+    }
 }
 
 fn with_transport(mut p: Profile, t: Transport) -> Profile {
@@ -169,6 +188,28 @@ fn cases() -> Vec<(&'static str, Profile, EmitPolicy)> {
             stealth.clone(),
         ),
         ("vless reality vision", vision, android.clone()),
+        // Item 18: each shape of the TLS tricks a key can carry, on sing-box 1.14.
+        (
+            "trojan tricks record",
+            with_tls(trojan("t.example.com"), tricky(TlsTricks::Record)),
+            plain.clone(),
+        ),
+        (
+            "vless tricks hello",
+            with_transport(
+                with_tls(
+                    vless("v.example.com"),
+                    tricky(TlsTricks::Hello(hello_split())),
+                ),
+                ws(),
+            ),
+            plain.clone(),
+        ),
+        (
+            "vless tricks both",
+            with_tls(vless("v.example.com"), tricky(TlsTricks::STRONG)),
+            plain.clone(),
+        ),
         (
             "vless reality grpc",
             with_transport(with_tls(vless("r.example.com"), reality_tls()), grpc()),

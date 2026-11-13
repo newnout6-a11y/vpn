@@ -529,7 +529,18 @@
         "portClosed": "The server's port did not accept a TCP connection.",
         "copyTitle": "Copy to the clipboard",
         "deleted": "The server was removed and will be purged {{when}}. You can restore it in the server list.",
-        "hidden": "The provider hid this server's settings: the key cannot be shown, copied or saved."
+        "hidden": "The provider hid this server's settings: the key cannot be shown, copied or saved.",
+        "tricks": {
+          "label": "TLS fragmentation",
+          "hint": "Splits the TLS hello so DPI cannot read the server name. Strong gets through more often; each connection takes a little longer.",
+          "defaultStrong": "As in settings: strong",
+          "defaultOff": "As in settings: off",
+          "off": "Off",
+          "soft": "Soft",
+          "strong": "Strong",
+          "custom": "From the provider: pieces of {{len}} B, {{ms}} ms",
+          "customBoth": "From the provider: records and pieces of {{len}} B, {{ms}} ms"
+        }
       },
       "purge": {
         "title": "Delete for good?",

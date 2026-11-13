@@ -1,6 +1,6 @@
 //! VLESS, VMess, Trojan.
 use super::*;
-use crate::model::{Mux, Note, Transport};
+use crate::model::{HelloSplit, Mux, Note, Span, TlsTricks, Transport};
 
 const ID0: &str = "00000000-0000-4000-8000-000000000000";
 const ID1: &str = "00000000-0000-4000-8000-000000000001";
@@ -137,18 +137,58 @@ fn unknown_security_and_header_types_are_rejected() {
     assert_eq!(kcp, SkipReason::UnsupportedTransport("kcp".into()));
 }
 
-/// AT-04-006, P-13: Xray-only parameters the model cannot carry are noted, not dropped silently.
+/// AT-04-006, P-13: Xray-only parameters the model cannot carry are noted, not dropped silently;
+/// `fragment=` is carried now (item 18) and noted only when it cannot be read.
 #[test]
 fn unmodeled_xray_parameters_are_noted() {
     let line = format!(
         "vless://{ID0}@h.example:443?security=reality&pbk={PBK}&fragment=1,40-60,30-50&noises=SYNTH#F"
     );
     let p = ok(&line);
-    let expected = vec![
-        Note::UnsupportedField("fragment".into()),
-        Note::UnsupportedField("noises".into()),
-    ];
-    assert_eq!(p.notes, expected);
+    assert_eq!(p.notes, vec![Note::UnsupportedField("noises".into())]);
+    let split = HelloSplit {
+        len: Span::new(40, 60),
+        interval_ms: Span::new(30, 50),
+    };
+    let tricks = p.tls.as_ref().and_then(|tls| tls.tricks);
+    assert_eq!(tricks, Some(TlsTricks::Hello(split)));
+    let odd = ok(&format!(
+        "vless://{ID0}@h.example:443?security=tls&fragment=2-4,10,5#F"
+    ));
+    assert_eq!(odd.notes, vec![Note::UnsupportedField("fragment".into())]);
+    assert_eq!(odd.tls.as_ref().and_then(|tls| tls.tricks), None);
+    let plain = ok(&format!(
+        "vless://{ID0}@h.example:80?fragment=tlshello,100-200,10-20#F"
+    ));
+    let noted = Note::UnsupportedField("fragment".into());
+    assert!(plain.notes.contains(&noted), "{:?}", plain.notes);
+}
+
+/// Item 18: Xray's order, Hiddify's `size,sleep,tlshello` and `fgsize` / `fgsleep` all reach
+/// `Tls::tricks` (trojan and vmess share the reader).
+#[test]
+fn link_tls_tricks() {
+    let tricks = |line: &str| ok(line).tls.and_then(|tls| tls.tricks);
+    let strong = Some(TlsTricks::STRONG);
+    let base = format!("vless://{ID0}@h.example:443?security=tls");
+    assert_eq!(
+        tricks(&format!("{base}&fragment=tlshello,100-200,10-20#F")),
+        strong
+    );
+    assert_eq!(
+        tricks(&format!("{base}&fragment=100-200,10-20,tlshello#F")),
+        strong
+    );
+    assert_eq!(
+        tricks(&format!("{base}&fragment=tlshello%2C100-200%2C0#F")),
+        Some(TlsTricks::Record)
+    );
+    assert_eq!(
+        tricks(&format!("{base}&fgsize=100-200&fgsleep=10-20#F")),
+        Some(TlsTricks::Hello(HelloSplit::PRESET))
+    );
+    let trojan = "trojan://fake-pass@h.example:443?sni=h.example&fragment=tlshello,100-200,10-20#T";
+    assert_eq!(tricks(trojan), strong);
 }
 
 /// REALITY sends the cover site's own hello: a link that also asks for ECH can never connect

@@ -1,5 +1,5 @@
 //! TLS at emit time (profiles §3.9, tunnel-core §3.15): provider values are kept, app defaults
-//! (uTLS fingerprint, TUIC ALPN, stealth record fragment) are added per protocol family.
+//! (uTLS fingerprint, TUIC ALPN, the stealth tricks) are added per protocol family.
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Map, Value, json};
@@ -7,12 +7,12 @@ use serde_json::{Map, Value, json};
 use super::{EmitError, EmitPolicy};
 use crate::common::b64::base64_bytes;
 use crate::common::fields::{UTLS_FINGERPRINTS, utls_fingerprint};
-use crate::model::{Ech, Kind, Profile, ShadowTlsLayer, Tls, Transport};
+use crate::model::{Ech, Kind, Profile, ShadowTlsLayer, Tls, TlsTricks, Transport};
 
 /// How sing-box treats the TLS of a protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Family {
-    /// TLS over TCP: uTLS fingerprint, record fragment in stealth, Reality possible.
+    /// TLS over TCP: uTLS fingerprint, the TLS tricks (not with Reality), Reality possible.
     TcpTls,
     /// The ShadowTLS dialer: TCP-TLS without the record fragment. The v3 server reads exactly one
     /// TLS record and checks its HMAC as the whole ClientHello (sing-shadowtls
@@ -155,8 +155,11 @@ fn build(tls: &Tls, family: Family, p: &Profile, policy: &EmitPolicy) -> Result<
         );
     }
     // Reality authenticates inside the structure of its ClientHello: never fragment it.
-    if family == Family::TcpTls && policy.tls_compat && reality.is_none() {
-        o.insert("record_fragment".into(), Value::Bool(true));
+    if family == Family::TcpTls && reality.is_none() {
+        put_tricks(
+            &mut o,
+            TlsTricks::effective(p.own_tls_tricks(), policy.tls_compat),
+        );
     }
     if let Some(ech) = &tls.ech {
         o.insert("ech".into(), ech_object(ech)?);
@@ -172,6 +175,34 @@ fn build(tls: &Tls, family: Family, p: &Profile, policy: &EmitPolicy) -> Result<
         );
     }
     Ok(Value::Object(o))
+}
+
+/// sing-box 1.14 `record_fragment` / `fragment` + `fragment_fallback_delay`. sing-box cuts the
+/// hello inside the SNI (no length knob) and waits for the ACK where it can see it (elevated);
+/// elsewhere it waits the fallback delay, so the split's longest pause goes there. Zero would
+/// read as "unset" and become sing-box's 500 ms.
+fn put_tricks(o: &mut Map<String, Value>, tricks: TlsTricks) {
+    if tricks.record() {
+        o.insert("record_fragment".into(), Value::Bool(true));
+    }
+    if let Some(split) = tricks.hello() {
+        let delay = format!("{}ms", split.interval_ms.max.max(1));
+        o.insert("fragment".into(), Value::Bool(true));
+        o.insert("fragment_fallback_delay".into(), Value::String(delay));
+    }
+}
+
+/// The trick keys of pasted sing-box options: never re-emitted raw, the typed value decides
+/// (`Profile::own_tls_tricks` lifts them), so a typed Off is off and REALITY / ShadowTLS stay whole.
+pub(super) fn is_trick_key(path: &[&str]) -> bool {
+    matches!(
+        path,
+        [
+            "tls",
+            "fragment" | "fragment_fallback_delay" | "record_fragment",
+            ..
+        ]
+    )
 }
 
 fn put_str(o: &mut Map<String, Value>, key: &str, value: Option<&str>) {

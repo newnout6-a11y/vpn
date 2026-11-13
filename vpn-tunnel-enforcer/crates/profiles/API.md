@@ -79,6 +79,19 @@ impl Tls { pub fn refused_reality_fingerprint(&self) -> bool }  // REALITY + one
 impl Tls { pub fn cert_names(&self) -> Option<&str> }  // `verify_peer_cert_by_name` as Xray gets it:
                                                        // TLS only (not REALITY), never blank
 impl Reality { pub fn mldsa65_key(&self) -> Option<&str> }  // `mldsa65_verify`, never blank
+// TLS tricks against ClientHello DPI (item 18): `Tls::tricks: Option<TlsTricks>` (serde: absent = None)
+pub enum TlsTricks { Off, Record, Hello(HelloSplit), Both(HelloSplit) }  // serde {"mode": "both", ..}
+pub struct HelloSplit { pub len: Span /* bytes */, pub interval_ms: Span }  // PRESET = 100-200 B, 10-20 ms
+pub struct Span { pub min: u16, pub max: u16 }       // stored and shown as "100-200" / "150"; parse
+impl TlsTricks {
+    pub const STRONG: TlsTricks;                     // «Сильно» = Both(HelloSplit::PRESET)
+    pub const SINGBOX_KEYS: [&str; 3];               // tls.fragment / .record_fragment / .fragment_fallback_delay
+    pub fn effective(own: Option<TlsTricks>, tls_compat: bool) -> TlsTricks;  // own, else STRONG / Off
+    pub fn record(self) -> bool; pub fn hello(self) -> Option<HelloSplit>;
+    pub fn from_fragment(packets: &str, length: Option<&str>, interval: Option<&str>) -> Option<TlsTricks>;
+    pub fn from_singbox(extra: &Map<String, Value>) -> Option<TlsTricks>;     // pasted sing-box keys
+}
+impl Profile { pub fn own_tls_tricks(&self) -> Option<TlsTricks> }  // Tls::tricks, else pasted keys
 pub struct ParseReport { pub profiles: Vec<Profile>, pub skipped: Vec<Skipped>, pub meta: SubscriptionMeta }
 pub struct Skipped { pub excerpt: String /* redacted, <= 80 chars */, pub reason: SkipReason }
 pub enum SkipReason { UnknownScheme(String), Invalid{scheme, detail /* English */}, MissingCredential,
@@ -90,7 +103,15 @@ pub struct SubscriptionMeta { upload, download, total: Option<u64>, expires_at: 
 pub struct TooLarge;                      // input over a limit
 ```
 `Profile` is `Serialize + Deserialize` (the stored form; serde shapes are part of the stored data —
-change them only additively). Provider values are kept as given: uTLS / ALPN / mux defaults are
+change them only additively).
+TLS tricks: `Record` cuts the ClientHello into TLS records sent at once, `Hello` into TCP pieces of
+`len` bytes `interval_ms` apart, `Both` sends the records as such pieces (FOCI 2025: the TSPU
+reassembled either trick alone). Order: the key's own value (`own_tls_tricks`: share link, pasted
+sing-box keys, later the user's per-server choice) > the app default (stealth or adaptive TLS
+compatibility -> `STRONG`) > `Off`. `from_fragment` reads Xray's triple as links and Happ / Hiddify
+provider keys (`fragmentation-packets` / `-length` / `-interval`) write it: `tlshello` = records
+(interval 0 or none: `Record`, else `Both`), packets from 1 (`1`, `1-3`) = `Hello`, anything else
+`None` (not the hello). Provider values are kept as given: uTLS / ALPN / mux defaults are
 applied by `emit_singbox`, never stored. Durations are whole seconds (`*_s`).
 
 ## Importing text (servers-parse / servers-refresh)
@@ -169,6 +190,9 @@ pub fn from_legacy(name: &str, protocol: &str, outbound: &Value, source_uri: Opt
   port; `vpn` = an AmneziaVPN key among other lines: its one server, other containers as
   `Note::UnsupportedField(name)`, several servers -> `Invalid`);
   `shadowtls` -> `ShadowTlsNeedsInner`, others -> `UnknownScheme(scheme)` (`""`: no `scheme://`).
+  VLESS / VMess / Trojan `fragment=` (Xray `packets,length,interval`; Hiddify `size,sleep,tlshello`)
+  and Hiddify `fgsize` / `fgsleep` -> `Tls::tricks`; without TLS or unreadable ->
+  `Note::UnsupportedField("fragment")`.
 - `parse_json` reads sing-box outbounds / endpoints (incl. the SS + ShadowTLS chain), Xray outbounds
   and whole provider documents (one document with a native graph = one profile, rejected graph =
   `NativeGraphRejected`), wrappers up to depth 6, JSON strings (nested JSON, <= 2 base64 layers,
@@ -411,7 +435,7 @@ Hysteria2 (the emitter drops a stored tcp-only `network` there).
 ```rust
 pub struct EmitPolicy {
     pub device: Option<ClientDevice>,     // default uTLS fp of TCP-TLS when the provider named none
-    pub tls_compat: bool,                 // stealth / adaptive TLS compat: record_fragment + fp rotation
+    pub tls_compat: bool,                 // stealth / adaptive TLS compat: default tricks STRONG + fp rotation
     pub allow_mux: bool,                  // false: the profile's multiplex is not emitted
     pub domain_resolver: Option<String>,  // DNS server tag for hostname servers ("dns-bootstrap")
 }                                         // Default: { None, false, true, None }
@@ -451,6 +475,13 @@ checks even next to `insecure: true`; `insecure` with a non-blank `cert_pin_sha2
 hash, which sing-box 1.14 cannot check) and no SPKI pin is refused with `CertPinUnenforced` on every
 kind (route such keys to Xray, which enforces `pinnedPeerCertSha256`); without `insecure` the
 certificate pin is not emitted and the CA check runs (`Note::CertPinNotEnforced` stays true).
+
+TLS tricks (TCP TLS without REALITY only; never the ShadowTLS dialer, naive or QUIC):
+`TlsTricks::effective(p.own_tls_tricks(), policy.tls_compat)` -> `record_fragment` (record),
+`fragment` + `fragment_fallback_delay` = the split's longest pause, at least 1 ms (hello; sing-box
+has no length knob, cuts inside the SNI and waits for the ACK where it can see it). Pasted
+`tls.fragment*` keys are never re-emitted raw: they are the key's own tricks, a typed value
+overrides them.
 
 ## xray_native (provider Xray graphs; Xray JSON itself is `vpnte_engine::xray_config`'s job)
 

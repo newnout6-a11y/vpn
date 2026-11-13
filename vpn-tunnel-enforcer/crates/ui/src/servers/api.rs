@@ -8,14 +8,15 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::AppResult;
 use vpnte_base::types::{ClientDevice, EnginePref};
+use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 
 use super::links_model::{LinkSchemes, QrCode};
 use super::live_model::{BatchProgress, BatchResult, LiveCheck, LiveMode, LiveProgress};
 use super::model::{
     AddTarget, CountryCheck, ExportReport, GeoInfo, HealthReport, ImportReport, ProbeReport,
     ProxyStartReport, RefreshOutcome, SelectOutcome, ServersView, SubscriptionRequest,
+    TricksChoice, TricksView,
 };
 
 /// Backend surface of the Servers page. Every action may be cancelled by dropping its future
@@ -101,6 +102,19 @@ pub trait ServersApi: 'static {
     /// Marks the server «Работает в белых списках» (`true`), or takes the mark off together
     /// with what was learned (`false`).
     async fn set_whitelist_ready(&self, id: &str, on: bool) -> AppResult<()>;
+    /// The server's TLS tricks for the detail editor; `None` when they do not apply to its key
+    /// (no TLS over TCP) or the backend does not offer them yet (the editor stays hidden).
+    async fn tls_tricks(&self, _id: &str) -> AppResult<Option<TricksView>> {
+        Ok(None)
+    }
+    /// Sets the server's TLS tricks (its own choice from now on, over the provider's); the
+    /// connected server reconnects with them.
+    async fn set_tls_tricks(&self, _id: &str, _choice: TricksChoice) -> AppResult<()> {
+        Err(AppError::msg(
+            ErrorKind::Conflict,
+            Msg::new("ui.servers.detail.saveFailed"),
+        ))
+    }
     /// Passive endpoint facts (no TLS / HTTP to the endpoint).
     async fn probe(&self, id: &str) -> AppResult<ProbeReport>;
     /// Geolocation of the resolved address; `None` when lookups are off or nothing is known.

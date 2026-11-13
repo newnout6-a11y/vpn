@@ -3,6 +3,7 @@ use serde_json::{Map, Value};
 
 use super::parts::{Link, Params, description, host_name, name, port, split_once};
 use super::stream::{TlsMode, mux, tls, transport};
+use super::tricks::link_tricks;
 use super::{Meta, Res, bad, skip};
 use crate::common::b64::base64_text;
 use crate::model::{Host, Kind, Note, Profile, Reality, SkipReason, Tls};
@@ -138,13 +139,21 @@ fn vmess_profile(
     Ok(profile)
 }
 
-/// Xray link parameters the profile model cannot carry (TLS fragmentation, UDP noise, gRPC
-/// authority): noted so the loss is visible.
-const UNMODELED: &[&str] = &["fragment", "noises", "authority"];
+/// Xray link parameters the profile model cannot carry (UDP noise, gRPC authority): noted so
+/// the loss is visible.
+const UNMODELED: &[&str] = &["noises", "authority"];
 
 /// TLS, transport and mux of the V2Ray-family schemes.
 fn stream(profile: &mut Profile, p: &Params, mode: TlsMode) -> Res<()> {
     profile.tls = tls(p, mode, &mut profile.notes)?;
+    // Tricks cut the ClientHello: without TLS, or unreadable, the link's value is only noted.
+    match (link_tricks(p), profile.tls.as_mut()) {
+        (Some(Some(tricks)), Some(tls)) => tls.tricks = Some(tricks),
+        (Some(_), _) => profile
+            .notes
+            .push(Note::UnsupportedField("fragment".into())),
+        (None, _) => {}
+    }
     xray_checks(profile, p)?;
     profile.transport = transport(p)?;
     profile.mux = mux(p);

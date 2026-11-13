@@ -525,3 +525,37 @@ pub struct GeoInfo {
     pub org: Option<String>,
     pub timezone: Option<String>,
 }
+
+/// A server's TLS tricks as the detail editor offers them (item 18): cutting the TLS
+/// ClientHello so DPI cannot read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TricksChoice {
+    /// Follow the stealth switch in Settings (on: «Сильно», off: none).
+    Default,
+    Off,
+    /// «Мягко»: the hello in several TLS records.
+    Soft,
+    /// «Сильно»: the records also go out as separate TCP pieces, 100-200 B, 10-20 ms apart.
+    Strong,
+    /// The provider's own split (with or without the record split), shown as given; picking a
+    /// preset replaces it.
+    Custom {
+        record: bool,
+        split: TricksSplit,
+    },
+}
+
+/// A TCP split of the hello: piece length in bytes and the pause in ms, as `(min, max)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TricksSplit {
+    pub len: (u16, u16),
+    pub interval_ms: (u16, u16),
+}
+
+/// What the detail editor reads for one server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TricksView {
+    pub choice: TricksChoice,
+    /// The stealth switch is on, so `Default` means «Сильно».
+    pub default_strong: bool,
+}

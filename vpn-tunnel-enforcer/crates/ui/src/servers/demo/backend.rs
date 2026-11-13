@@ -578,6 +578,40 @@ impl ServersApi for DemoServersApi {
         Ok(())
     }
 
+    async fn tls_tricks(&self, id: &str) -> AppResult<Option<TricksView>> {
+        delay(150).await;
+        let server = self.known(id)?;
+        // Tricks cut a TLS ClientHello over TCP: QUIC, WireGuard and plain keys have none.
+        let tcp = !matches!(server.protocol.as_str(), "hysteria2" | "tuic" | "wireguard");
+        let tls = matches!(
+            server.stealth,
+            Some(Stealth::Reality | Stealth::Tls | Stealth::Utls | Stealth::Ech)
+        );
+        if !(tcp && tls) {
+            return Ok(None);
+        }
+        // One key arrives with its provider's own split, so the demo shows that state too.
+        let provider = (server.stealth == Some(Stealth::Reality)).then_some(TricksChoice::Custom {
+            record: false,
+            split: TricksSplit {
+                len: (40, 60),
+                interval_ms: (30, 50),
+            },
+        });
+        let stored = self.tricks.borrow().get(id).copied();
+        Ok(Some(TricksView {
+            choice: stored.or(provider).unwrap_or(TricksChoice::Default),
+            default_strong: false,
+        }))
+    }
+
+    async fn set_tls_tricks(&self, id: &str, choice: TricksChoice) -> AppResult<()> {
+        delay(250).await;
+        self.known(id)?;
+        self.tricks.borrow_mut().insert(id.to_owned(), choice);
+        Ok(())
+    }
+
     async fn probe(&self, id: &str) -> AppResult<ProbeReport> {
         self.demo_probe(id).await
     }

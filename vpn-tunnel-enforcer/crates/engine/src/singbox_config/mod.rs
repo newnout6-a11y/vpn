@@ -21,6 +21,9 @@ mod live;
 mod proxy_tests;
 #[cfg(test)]
 mod tests;
+/// Item 18: the started config carries the TLS tricks.
+#[cfg(test)]
+mod tricks_tests;
 
 use std::fmt;
 use std::net::Ipv4Addr;

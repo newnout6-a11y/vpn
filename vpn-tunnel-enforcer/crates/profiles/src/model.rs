@@ -14,8 +14,11 @@ mod awg;
 mod debug;
 #[cfg(test)]
 mod tests;
+/// TLS tricks against ClientHello DPI (record / TCP split of the hello).
+mod tricks;
 
 pub use awg::{Awg, AwgGeneration, AwgRange};
+pub use tricks::{HelloSplit, Span, TlsTricks};
 
 /// One server key, as the provider described it. Defaults (uTLS, ALPN, mux policy) are applied
 /// when engine config is emitted, never here, so re-export stays faithful to the source.
@@ -236,6 +239,10 @@ pub struct Tls {
     /// Xray `verifyPeerCertByName` (`vcn`): comma-separated names the certificate is checked
     /// against instead of the SNI, e.g. a whitelisted SNI in front of the server's real name.
     pub verify_peer_cert_by_name: Option<String>,
+    /// ClientHello tricks of this key (share link `fragment=`, provider keys); `None` follows
+    /// the app default (see [`Profile::own_tls_tricks`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tricks: Option<TlsTricks>,
 }
 
 /// uTLS fingerprints REALITY servers since Xray 26.9.8 refuse (`android` and `360` fail on every

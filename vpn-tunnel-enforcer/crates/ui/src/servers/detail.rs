@@ -1,5 +1,5 @@
-//! Server detail: basics, device persona and uTLS fingerprint, group context, location, the passive
-//! endpoint probe, the live check, key export. It renders from the live snapshot by id (S-20)
+//! Server detail: basics, device persona and uTLS fingerprint, TLS tricks, group context, location,
+//! the passive endpoint probe, the live check, key export. It renders from the live snapshot by id (S-20)
 //! and its body is keyed by the server id: closing the dialog or switching the server drops the
 //! probe, the geo lookup and a running live check.
 use std::time::Duration;
@@ -10,7 +10,10 @@ use vpnte_base::types::ClientDevice;
 
 use super::actions::{Actions, save_key_label};
 use super::live::LiveCheckPanel;
-use super::model::{ArchiveReason, GeoInfo, GroupSource, GroupStatus, LatencyStats, ProbeReport};
+use super::model::{
+    ArchiveReason, GeoInfo, GroupSource, GroupStatus, LatencyStats, ProbeReport, TricksChoice,
+    TricksView,
+};
 use super::present::{
     DEVICES, device_label, displayed_ping, fingerprint, group_of, group_status_key,
     group_status_tone, is_removed_from_subscription, relative_time,
@@ -204,6 +207,7 @@ fn DetailBody(id: String) -> Element {
                 p { class: "srv-strip is-warn", {t!("ui.servers.detail.deleted", when = when)} }
             }
             DeviceRow { id: id.clone(), device: server.device, fingerprint, connected }
+            TricksRow { id: id.clone(), connected }
             if let Some(warning) = &server.fingerprint_warning {
                 p { class: "srv-strip is-warn", "data-fingerprint-warning": "", {crate::lang::tr(warning)} }
             }
@@ -281,6 +285,97 @@ fn DeviceRow(id: String, device: ClientDevice, fingerprint: String, connected: b
                 }
             }
         }
+    }
+}
+
+/// TLS tricks of the server (item 18): the presets in one select; a provider's own split shows
+/// as its own option until a preset replaces it. Nothing at all when the key has none to offer.
+#[component]
+fn TricksRow(id: String, connected: bool) -> Element {
+    let actions = use_context::<Actions>();
+    let mut view = use_signal(|| None::<TricksView>);
+    let mut saving = use_signal(|| false);
+    let mut failed = use_signal(|| false);
+    use_hook({
+        let (api, id) = (actions.api.clone(), id.clone());
+        move || {
+            spawn(async move {
+                let read = with_deadline(PROBE_UI_TIMEOUT, api.tls_tricks(&id)).await;
+                if let Some(Read::Done(read)) = read {
+                    view.set(read);
+                }
+            });
+        }
+    });
+    let Some(current) = view() else {
+        return rsx! {};
+    };
+    let default = if current.default_strong {
+        t!("ui.servers.detail.tricks.defaultStrong")
+    } else {
+        t!("ui.servers.detail.tricks.defaultOff")
+    };
+    let mut options = vec![
+        SelectOption::new(TricksChoice::Default, default),
+        SelectOption::new(TricksChoice::Off, t!("ui.servers.detail.tricks.off")),
+        SelectOption::new(TricksChoice::Soft, t!("ui.servers.detail.tricks.soft")),
+        SelectOption::new(TricksChoice::Strong, t!("ui.servers.detail.tricks.strong")),
+    ];
+    if let TricksChoice::Custom { record, split } = current.choice {
+        let (len, ms) = (range(split.len), range(split.interval_ms));
+        let label = if record {
+            t!("ui.servers.detail.tricks.customBoth", len = len, ms = ms)
+        } else {
+            t!("ui.servers.detail.tricks.custom", len = len, ms = ms)
+        };
+        options.push(SelectOption::new(current.choice, label));
+    }
+    let api = actions.api.clone();
+    rsx! {
+        div { class: "srv-detail-device", "data-tricks": "",
+            Field { label: t!("ui.servers.detail.tricks.label"), hint: t!("ui.servers.detail.tricks.hint"),
+                Select {
+                    options,
+                    value: Some(current.choice),
+                    disabled: saving(),
+                    on_change: move |next: TricksChoice| {
+                        if next == current.choice {
+                            return;
+                        }
+                        let (api, id) = (api.clone(), id.clone());
+                        saving.set(true);
+                        failed.set(false);
+                        spawn(async move {
+                            let result = api.set_tls_tricks(&id, next).await;
+                            saving.set(false);
+                            match result {
+                                Ok(()) => view.set(Some(TricksView { choice: next, ..current })),
+                                Err(e) => failed.set(e.kind != vpnte_base::ErrorKind::Cancelled),
+                            }
+                        });
+                    },
+                }
+            }
+            div { class: "srv-detail-fp",
+                if saving() {
+                    span { class: "srv-detail-note", role: "status",
+                        Spinner {}
+                        if connected { {t!("ui.servers.detail.reconnecting")} } else { {t!("ui.servers.detail.saving")} }
+                    }
+                } else if failed() {
+                    span { class: "srv-detail-note is-alert", role: "alert", {t!("ui.servers.detail.saveFailed")} }
+                }
+            }
+        }
+    }
+}
+
+/// `100–200`, or one number when both ends agree.
+fn range((min, max): (u16, u16)) -> String {
+    if min == max {
+        min.to_string()
+    } else {
+        format!("{min}–{max}")
     }
 }
 
@@ -492,5 +587,46 @@ mod tests {
         let timeout = with_deadline(limit, async { Err::<u32, _>(AppError::timeout()) });
         assert_eq!(timeout.await, Some(Read::Failed));
         assert_eq!(PROBE_UI_TIMEOUT, Duration::from_secs(10));
+    }
+
+    /// Item 18: the editor shows only for TLS over TCP, a provider's split as its own option,
+    /// and a choice reads back; ranges print as `min–max`, or one number.
+    #[tokio::test]
+    async fn tricks_editor_reads_and_writes() {
+        use super::super::api::ServersApi;
+        use super::super::demo::{DemoScene, DemoServersApi};
+        use super::super::model::Stealth;
+
+        let api = DemoServersApi::new(DemoScene::Normal);
+        let servers = api.state().borrow().servers.clone();
+        let quic = servers
+            .iter()
+            .find(|s| s.protocol == "hysteria2")
+            .expect("a QUIC key");
+        assert_eq!(api.tls_tricks(&quic.id).await.expect("read"), None);
+        let reality = servers.iter().find(|s| s.stealth == Some(Stealth::Reality));
+        let reality = reality.expect("a REALITY key");
+        let read = api
+            .tls_tricks(&reality.id)
+            .await
+            .expect("read")
+            .expect("offered");
+        assert!(matches!(
+            read.choice,
+            TricksChoice::Custom { record: false, .. }
+        ));
+        api.set_tls_tricks(&reality.id, TricksChoice::Strong)
+            .await
+            .expect("saved");
+        let read = api
+            .tls_tricks(&reality.id)
+            .await
+            .expect("read")
+            .expect("offered");
+        assert_eq!(read.choice, TricksChoice::Strong);
+        assert_eq!(
+            (range((100, 200)), range((15, 15))),
+            ("100–200".into(), "15".into())
+        );
     }
 }

@@ -395,6 +395,15 @@ Static ECH configs go to `echConfigList`; ECH by DNS lookup, over QUIC or with R
 it), otherwise the device default if it is chrome / firefox / safari, else chrome. XHTTP gets
 an explicit `extra.xmux` (4-6 connections) unless the provider set one; no typed outbound ever
 carries `mux`, and mux.cool is removed from a provider graph's XHTTP outbounds.
+TLS tricks (item 18): a key's own `Profile::own_tls_tricks()` go out as
+`streamSettings.finalmask.tcp[{type: "fragment", settings: {packets, length, delay}}]` on every
+TCP stream under TLS or REALITY (not XHTTP over HTTP/3): `Record` = `tlshello` + delay 0 (records
+in one write), `Hello` = packets `1-1` (raw TCP pieces of the hello), `Both` = `tlshello` + the
+pause. 26.11.9 marks the freedom `fragment` deprecated in favour of exactly this (checked in its
+source and by test). The app default (stealth -> `TlsTricks::STRONG`) does not reach Xray through
+`translate` / `proxy_graph` (no stealth input): the caller resolves it into the profile first
+(`tls.tricks = Some(TlsTricks::effective(own, tls_compat))`), else Xray runs without it and
+`warnings` says so.
 **Selection:** Auto picks Xray for provider graphs, Xray-only transports and checks
 (`verifyPeerCertByName`, REALITY `mldsa65Verify`: `XrayTransport`; forced sing-box ->
 `Reject::XrayTransport`), explicit gRPC gun,
@@ -403,8 +412,8 @@ cannot enforce a DER hash pin); sing-box otherwise. Forced Xray runs every Xray-
 refuses the rest (no engine is ever switched silently; owner decision 2026-11-11). Show the
 engine with `reason.msg()` wherever a run or a planned run is displayed.
 **Warnings:** call `warnings(&profile, tls_compat)` whenever Xray runs the profile and show them
-(the sing-box options Xray drops: mux, dial, pasted sing-box options, `disable_sni`, stealth /
-TLS compatibility, ws early data; refused / broken / unknown fingerprints; an unknown BBR preset;
+(the sing-box options Xray drops: mux, dial, pasted sing-box options other than the trick keys,
+`disable_sni`, stealth / TLS compatibility for keys without tricks of their own, ws early data; refused / broken / unknown fingerprints; an unknown BBR preset;
 mux.cool removed from a provider XHTTP outbound). `tls_compat` = stealth or adaptive TLS mode.
 
 ```rust

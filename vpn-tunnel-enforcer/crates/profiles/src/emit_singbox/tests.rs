@@ -1693,7 +1693,8 @@ fn golden_shapes() {
             pc_stealth,
             json!({
             "type": "trojan", "tag": "proxy-out", "server": "t.example.com", "server_port": 443, "password": "SYNTHETIC",
-            "tls": { "enabled": true, "server_name": "t.example.com", "record_fragment": true, "utls": utls("chrome") },
+            "tls": { "enabled": true, "server_name": "t.example.com", "record_fragment": true, "fragment": true,
+                     "fragment_fallback_delay": "20ms", "utls": utls("chrome") },
             "transport": { "type": "grpc", "service_name": "TunService" } }),
         ),
         (
@@ -1741,7 +1742,8 @@ fn golden_shapes() {
             json!({
             "type": "http", "tag": "proxy-out", "server": "proxy.example.com", "server_port": 443,
             "username": "u", "password": "p",
-            "tls": { "enabled": true, "server_name": "proxy.example.com", "record_fragment": true, "utls": utls("android") } }),
+            "tls": { "enabled": true, "server_name": "proxy.example.com", "record_fragment": true, "fragment": true,
+                     "fragment_fallback_delay": "20ms", "utls": utls("android") } }),
         ),
     ];
     for (p, policy, expected) in cases {
@@ -1752,4 +1754,72 @@ fn golden_shapes() {
             p.kind.label()
         );
     }
+}
+
+/// Item 18: a key's own tricks beat the stealth default; REALITY, ShadowTLS and QUIC never get
+/// them; a typed Off also silences the pasted sing-box keys.
+#[test]
+fn tls_tricks_per_key() {
+    use crate::model::{HelloSplit, Span, TlsTricks};
+    let tricks = |o: &Value| {
+        let tls = &o["tls"];
+        (
+            tls.get("record_fragment").cloned(),
+            tls.get("fragment").cloned(),
+            tls.get("fragment_fallback_delay").cloned(),
+        )
+    };
+    let none = (None, None, None);
+    let strong = (Some(json!(true)), Some(json!(true)), Some(json!("20ms")));
+    let with = |own: Option<TlsTricks>| {
+        let mut p = vless("v.example.com");
+        p.tls = Some(Tls {
+            tricks: own,
+            ..tls("v.example.com")
+        });
+        p
+    };
+    // The global default: stealth = both tricks, otherwise none.
+    assert_eq!(tricks(&out(&with(None), &stealth())), strong);
+    assert_eq!(tricks(&out(&with(None), &EmitPolicy::default())), none);
+    // The key's own value wins either way.
+    let off = with(Some(TlsTricks::Off));
+    assert_eq!(tricks(&out(&off, &stealth())), none);
+    let record = with(Some(TlsTricks::Record));
+    let only_record = (Some(json!(true)), None, None);
+    assert_eq!(tricks(&out(&record, &EmitPolicy::default())), only_record);
+    let split = HelloSplit {
+        len: Span::new(40, 60),
+        interval_ms: Span::new(0, 0),
+    };
+    let hello = with(Some(TlsTricks::Hello(split)));
+    // A zero pause would read as unset (sing-box's 500 ms): 1 ms.
+    let only_hello = (None, Some(json!(true)), Some(json!("1ms")));
+    assert_eq!(tricks(&out(&hello, &stealth())), only_hello);
+    // Pasted keys are the key's own; under a typed Off they are not re-emitted.
+    let mut pasted = with(None);
+    pasted
+        .singbox_extra
+        .insert("tls.record_fragment".into(), json!(true));
+    assert_eq!(tricks(&out(&pasted, &stealth())), only_record);
+    pasted.tls.as_mut().expect("tls").tricks = Some(TlsTricks::Off);
+    assert_eq!(tricks(&out(&pasted, &stealth())), none);
+    // REALITY on sing-box, the ShadowTLS dialer and QUIC: never, whatever asked for it.
+    let mut real = with(Some(TlsTricks::STRONG));
+    real.tls.as_mut().expect("tls").reality = Some(reality());
+    real.singbox_extra
+        .insert("tls.fragment".into(), json!(true));
+    assert_eq!(tricks(&out(&real, &stealth())), none);
+    let mut chain = chained();
+    chain
+        .singbox_extra
+        .insert("tls.record_fragment".into(), json!(true));
+    let layer = emit(&chain, &stealth()).outbounds()[1].clone();
+    assert_eq!(tricks(&layer), none);
+    let mut quic = hy2("hy2.example.com");
+    quic.tls = Some(Tls {
+        tricks: Some(TlsTricks::STRONG),
+        ..Tls::default()
+    });
+    assert_eq!(tricks(&out(&quic, &stealth())), none);
 }

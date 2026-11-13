@@ -35,8 +35,9 @@ pub struct EmitPolicy {
     /// Device the user picked; pins the default uTLS fingerprint (pc chrome, android android,
     /// ios ios, mac safari) of TCP-TLS outbounds whose provider named none.
     pub device: Option<ClientDevice>,
-    /// Stealth mode or adaptive TLS compatibility: `record_fragment` on TCP-TLS without Reality
-    /// and, when no device is pinned, a stable per-server fingerprint rotation.
+    /// Stealth mode or adaptive TLS compatibility: the strong TLS tricks (`TlsTricks::STRONG`)
+    /// on TCP-TLS without Reality for keys without their own (`Profile::own_tls_tricks`) and,
+    /// when no device is pinned, a stable per-server fingerprint rotation.
     pub tls_compat: bool,
     /// Whether the profile's multiplex settings may be emitted.
     pub allow_mux: bool,

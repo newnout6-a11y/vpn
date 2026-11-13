@@ -54,6 +54,8 @@ pub struct DemoServersApi {
     history_failed: Cell<bool>,
     cancel_switch: Notify,
     links: links::DemoLinks,
+    /// TLS tricks chosen in the detail editor (item 18), by server id.
+    tricks: RefCell<HashMap<String, TricksChoice>>,
 }
 
 impl DemoServersApi {
@@ -81,6 +83,7 @@ impl DemoServersApi {
             history_failed: Cell::new(false),
             cancel_switch: Notify::new(),
             links: links::DemoLinks::new(),
+            tricks: RefCell::default(),
         };
         // Two stored receipts for the connected server, so the history drawer has content.
         if scene == DemoScene::Normal

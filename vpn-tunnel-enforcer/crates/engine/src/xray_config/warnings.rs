@@ -2,7 +2,7 @@
 //! warnings (`engine.xray.warn.*`) instead of debug logs. Pure: the caller shows them with the
 //! other notices of a start.
 use vpnte_base::msg::Msg;
-use vpnte_profiles::model::{Kind, Profile};
+use vpnte_profiles::model::{Kind, Profile, TlsTricks};
 
 use super::config::xhttp_with_mux;
 use super::fingerprint;
@@ -26,8 +26,10 @@ pub fn warnings(p: &Profile, tls_compat: bool) -> Vec<Msg> {
     // QUIC and WireGuard have no TCP ClientHello: no uTLS, nothing to fragment.
     let tcp_tls = !matches!(p.kind, Kind::Hysteria2 { .. } | Kind::Wireguard(_));
     let tls = p.tls.as_ref().filter(|_| tcp_tls);
-    // sing-box never fragments a REALITY ClientHello either, so nothing is lost there.
-    if tls_compat && tls.is_some_and(|t| t.reality.is_none()) {
+    // sing-box never fragments a REALITY ClientHello either, so nothing is lost there; a key
+    // with tricks of its own gets them on Xray too (finalmask, item 18).
+    let own_tricks = p.own_tls_tricks().is_some();
+    if tls_compat && !own_tricks && tls.is_some_and(|t| t.reality.is_none()) {
         out.push(Msg::new("engine.xray.warn.stealth"));
     }
     if p.mux.as_ref().is_some_and(|m| m.enabled) {
@@ -36,7 +38,12 @@ pub fn warnings(p: &Profile, tls_compat: bool) -> Vec<Msg> {
     if !p.dial.is_default() {
         out.push(Msg::new("engine.xray.warn.dial"));
     }
-    if !p.singbox_extra.is_empty() {
+    // Pasted trick keys reach Xray as the key's own tricks; only the rest is lost.
+    let tricks = TlsTricks::SINGBOX_KEYS;
+    if p.singbox_extra
+        .keys()
+        .any(|k| !tricks.contains(&k.as_str()))
+    {
         out.push(Msg::new("engine.xray.warn.singboxExtra"));
     }
     if p.tls

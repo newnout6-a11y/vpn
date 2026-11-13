@@ -24,17 +24,11 @@ pub(super) fn outbound(p: &Profile, tag: &str, policy: &EmitPolicy) -> Result<Va
     dial(&mut o, p, policy);
     let family = tls::family(p);
     extra::merge(&mut o, &p.singbox_extra, |path| match (family, path) {
-        // naive refuses every TLS knob but the typed ones; uTLS breaks QUIC dials and
-        // fragments do not apply there, whoever asked for them.
+        _ if tls::is_trick_key(path) => false,
+        // naive refuses every TLS knob but the typed ones; uTLS breaks QUIC dials, whoever
+        // asked for it.
         (Some(Family::Naive), ["tls", ..]) => false,
-        (
-            Some(Family::Quic),
-            [
-                "tls",
-                "utls" | "reality" | "fragment" | "fragment_fallback_delay" | "record_fragment",
-                ..,
-            ],
-        ) => false,
+        (Some(Family::Quic), ["tls", "utls" | "reality", ..]) => false,
         _ => true,
     });
     // Older imports saved `network: "tcp"` on Hysteria2, which made the UDP guard block the
@@ -78,7 +72,7 @@ pub(super) fn shadowtls_chain(
     st.insert("tls".into(), tls::layer_tls(p, layer, policy)?);
     dial(&mut st, p, policy);
     extra::merge(&mut st, &p.singbox_extra, |path| {
-        path.first() == Some(&"tls")
+        path.first() == Some(&"tls") && !tls::is_trick_key(path)
     });
     Ok(vec![Value::Object(ss), Value::Object(st)])
 }
