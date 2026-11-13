@@ -266,12 +266,22 @@ is unverified, so on a link with MTU < 1500 (PPPoE 1492) an IPv6 rung above it m
 
 ## `wfp` — kill switch and leak protection (our provider + sublayer; needs elevation)
 Items are re-exported at `vpnte_winnet::wfp::*` (submodules `engine`, `fwpolicy`, `model`,
-`protection`, `spec`, `validate` are public too). Dynamic session for `standard` («При обрыве») /
-leak protection (gone when the process dies), persistent filters only for `strict` («Всегда») and
-only while [`Protection::set_always_available`] says the helper service keeps it safe (ks-a,
-owner decision 12.11.2026): otherwise a stored `strict` is enforced as `standard`
+`protection`, `spec`, `validate` are public too). The [`Owner`] of our objects sets how long each
+set lives (ks-d, research killswitch §3.1, §5.4, §5.7): in an app run as administrator
+(`Protection::new`) `standard` («При обрыве») and leak protection live in a dynamic session (gone
+when the process dies) and "Always" is not offered: a stored `strict` is enforced as `standard`
 (`KillSwitchLevel::effective`), the stored value stays, and `startup()` removes persistent
-leftovers of an earlier strict run.
+leftovers of an earlier strict run. In the helper service (`Protection::in_service`) the session
+set is **static** (a non-dynamic session without the persistent flag: it survives the service's
+crash until Windows restarts it, and is gone after a reboot), and `strict` («Всегда») is
+persistent under a provider registered with the service's name (`FWPM_PROVIDER0.serviceName`),
+so BFE adds those filters at boot only while the service starts automatically.
+
+| level \ owner | `Owner::App` (admin app) | `Owner::Service(name)` |
+| --- | --- | --- |
+| Off | — | — |
+| If the VPN drops | dynamic | static |
+| Always | dynamic (works as "If the VPN drops") | persistent, provider bound to the service |
 ```rust
 pub const PROVIDER_KEY: GUID;  pub const SUBLAYER_KEY: GUID;
 pub const LEGACY_IPV6_SUBLAYER: GUID;   // old app's sublayer: delete only (cleanup-legacy)
@@ -311,14 +321,22 @@ impl ProtectionError { pub fn kind(&self) -> ErrorKind; pub fn msg(&self) -> Msg
 
 // the handle: Send + Sync, share it in an Arc; one mutex serialises every operation (blocking)
 pub type Persist<'a> = &'a dyn Fn(&ProtectionSettings) -> AppResult<()>;  // runs under the lock
+pub enum Owner { App, Service(String /* Windows service name */) }
+impl Owner { pub fn keeps_always(&self) -> bool; pub fn service_name(&self) -> Option<&str>;
+    pub fn session_lifetime(&self) -> Lifetime;   // App: Dynamic, Service: Static
+    pub fn block_lifetime(&self, level: KillSwitchLevel) -> Option<Lifetime> }  // the table above
 impl Protection {
-    pub fn new(engines: EnginePaths, self_exe: PathBuf, settings: ProtectionSettings) -> Self;
+    pub fn new(engines: EnginePaths, self_exe: PathBuf, settings: ProtectionSettings) -> Self;  // Owner::App
+    pub fn in_service(engines: EnginePaths, self_exe: PathBuf, settings: ProtectionSettings,
+        service: &str) -> Self;                             // Owner::Service(service)
     pub fn notices(&self) -> broadcast::Receiver<Notice>;   // all in category `connectionError`
     pub fn settings(&self) -> ProtectionSettings;
     pub fn session_guarded(&self) -> bool;  // level in force != Off || leak protection: dual-stack TUN + dns_mode native
     pub fn level_in_force(&self) -> KillSwitchLevel;        // stored level as enforced (strict -> standard without the service)
-    pub fn set_always_available(&self, available: bool) -> Result<(), ProtectionError>; // helper-service wiring; default false
-    pub fn startup(&self) -> Result<(), ProtectionError>;   // "Always" set where in force, else persistent leftovers removed
+    pub fn paused(&self) -> bool;                           // "If the VPN drops" holds a drop (no tunnel up)
+    pub fn startup(&self) -> Result<(), ProtectionError>;   // "Always" set where in force, else persistent leftovers
+        // removed; in the service: provider re-created when it lacks the service name, a crashed
+        // run's static set taken over (an armed block keeps holding: `paused()`; the rest swept)
     pub fn connect_begin(&self, session_programs: &[PathBuf], tun_addresses: &[IpAddr])
         -> Result<(), ProtectionError>;                     // TUN_V4 (+ TUN_V6 when dual-stack)
     pub fn tun_up(&self, luid: u64) -> Result<(), ProtectionError>;   // arms "If the VPN drops"
@@ -333,7 +351,7 @@ impl Protection {
     pub fn watchdog_tick(&self);
     pub async fn run_watchdog(self: Arc<Self>, cancel: CancellationToken);  // ticks on the blocking pool
     pub fn reset(&self, persist: Persist) -> Result<RemoveReport, ProtectionError>; // SessionActive in a session
-    pub fn shutdown(&self);                                 // closes the dynamic session; strict stays
+    pub fn shutdown(&self);                                 // the session set goes (dynamic closed, static deleted); strict stays
 }
 pub fn remove_all() -> Result<RemoveReport, ProtectionError>;  // `--cleanup` / uninstall
 pub struct RemoveReport { pub filters: usize, pub sublayer: bool, pub provider: bool }
@@ -365,11 +383,14 @@ pub struct FilterSpec { pub name: &'static str, pub layer: Layer, pub action: Ac
 pub fn app_id(exe: &Path) -> Result<AppId, WfpError>;     // canonical path -> FwpmGetAppIdFromFileName0, unelevated
 pub struct WfpError { pub op: &'static str, pub code: u32 } // is(hr), is_access_denied(), is_rpc_failure(), engine_lost()
 impl Engine {                                               // Drop = FwpmEngineClose0; Send
-    pub fn open_dynamic() -> Result<Engine, WfpError>;  pub fn open_persistent() -> Result<Engine, WfpError>;
-    pub fn is_dynamic(&self) -> bool;
+    pub fn open_dynamic() -> Result<Engine, WfpError>;  pub fn open_static() -> Result<Engine, WfpError>;
+    pub fn open_persistent() -> Result<Engine, WfpError>;  pub fn open_for(lifetime: Lifetime) -> Result<Engine, WfpError>;
+    pub fn is_dynamic(&self) -> bool;  pub fn lifetime(&self) -> Lifetime;
     pub fn transaction<R>(&self, f: impl FnOnce(&Engine) -> Result<R, WfpError>) -> Result<R, WfpError>;
-    pub fn ensure_provider_and_sublayer(&self) -> Result<u16, WfpError>;   // actual sublayer weight
-    pub fn add(&self, spec: &FilterSpec) -> Result<u64, WfpError>;          // persistent iff session not dynamic
+    pub fn ensure_provider_and_sublayer(&self, service: Option<&str>) -> Result<u16, WfpError>;
+        // actual sublayer weight; a new provider is registered with `service` (FWPM_PROVIDER0.serviceName)
+    pub fn provider(&self, key: &GUID) -> Result<Option<ProviderInfo>, WfpError>;
+    pub fn add(&self, spec: &FilterSpec) -> Result<u64, WfpError>;          // with the session's lifetime
     pub fn delete(&self, id: u64) -> Result<(), WfpError>;                  // not found = Ok
     pub fn list(&self, q: &ListQuery) -> Result<Vec<FilterInfo>, WfpError>;
     pub fn owned_filters(&self) -> Result<Vec<FilterInfo>, WfpError>;       // our provider, our 4 layers
@@ -382,10 +403,14 @@ pub struct FilterInfo { pub id: u64, pub key: GUID, pub layer: GUID, pub sublaye
     pub provider: Option<GUID>, pub flags: u32, pub action: u32, pub weight: Option<u8>, pub name: String }
     // is_persistent(), flags_valid(boot: bool)
 pub struct SublayerInfo { pub key: GUID, pub weight: u16, pub flags: u32, pub provider: Option<GUID>, pub name: String }
+pub enum Lifetime { Dynamic, Static /* survives the session and its process, not BFE stop / reboot */, Persistent }
+pub struct ProviderInfo { pub flags: u32, pub service_name: Option<String> }  // disabled(): FWPM_PROVIDER_FLAG_DISABLED
 ```
 Wiring:
 ```rust
 let wfp = Arc::new(wfp::Protection::new(engines, std::env::current_exe()?, settings.protection.clone()));
+// the helper service instead: Protection::in_service(engines, exe, saved, SERVICE_NAME); after
+// startup(), `paused()` = a crashed run's block is held: resume the session or `disconnected()`
 wfp.startup()?;                                   // after settings import + legacy cleanup
 tokio::spawn(wfp.clone().run_watchdog(cancel.clone()));        // elevated mode only
 let mut notices = wfp.notices();                  // forward to toasts (category connectionError)
@@ -714,8 +739,9 @@ re-check the tunnel) and the theme service.
 - Display formatting (link speed, MAC, route protocol names): the UI / diagnostics renderer's.
 
 ## Not verified on this machine (needs elevation, internet or a desktop session)
-- WFP filter add / transactions / provider + sublayer creation / persistent filters
-  (`cargo test -p vpnte-winnet -- --ignored elevated_`, 5 tests, elevated), the §7.10 manual
+- WFP filter add / transactions / provider + sublayer creation / persistent filters, static
+  filters outliving their session and the provider's service name (ks-d)
+  (`cargo test -p vpnte-winnet -- --ignored elevated_`, 7 tests, elevated), the §7.10 manual
   checklist, traffic of Hyper-V guests and Mobile Hotspot clients (not local sockets, so ALE
   filters do not see it; only the Hyper-V switch is detected and warned about).
 - Writing the real `Run` key (`system_run_value_round_trip`, throw-away value name), the real

@@ -43,7 +43,7 @@ fn vpn_profile(server: &ServerUpstream) -> VpnProfile {
     }
 }
 
-fn start_request(start: &TunnelStart, level: KillSwitchLevel) -> StartRequest {
+pub(super) fn start_request(start: &TunnelStart, level: KillSwitchLevel) -> StartRequest {
     let mode = match &start.upstream {
         Upstream::LocalProxy { addr, kind } => Mode::LocalProxy {
             addr: addr.to_string(),
@@ -129,6 +129,7 @@ impl Host {
                 self.owns_session(client, &start);
                 let receipt = runtime.start(req, cancel.clone()).await;
                 let receipt = receipt.map_err(tunnel_failed)?;
+                self.remember(client, &start);
                 Ok(Reply::Started(Some(StartReceiptWire::from(&receipt))))
             }
             Request::Restart(start) => {
@@ -141,6 +142,7 @@ impl Host {
                 };
                 let receipt = runtime.restart_protected(reason, req, opts).await;
                 let receipt = receipt.map_err(tunnel_failed)?;
+                self.remember(client, &start);
                 Ok(Reply::Started(Some(StartReceiptWire::from(&receipt))))
             }
             Request::RestartWithLast { reason } => {
@@ -167,6 +169,9 @@ impl Host {
                 let owner = cancel.clone();
                 let is_owner = Arc::new(move || !owner.is_cancelled());
                 let receipt = runtime.switch_upstream(req, cancel.clone(), is_owner).await;
+                if receipt.is_some() {
+                    self.remember(client, &start);
+                }
                 Ok(Reply::Switched(
                     receipt.as_ref().map(SwitchReceiptWire::from),
                 ))
@@ -233,12 +238,14 @@ impl Host {
                 removed.map_err(crate::install::flow::filters_kept)
             })
             .await?;
+            self.forget_session(None);
         }
         let removing = self
             .deps
             .users
             .remove(&client.user)
             .map_err(|e| WireError::failed(&AppError::internal(e)))?;
+        self.forget_session(Some(&client.user));
         Ok(Reply::Done { removing })
     }
 
@@ -282,10 +289,7 @@ impl Host {
     /// `client` now owns what the runtime reports about its session, started for `start`.
     fn owns_session(&self, client: &ClientInfo, start: &TunnelStart) {
         *self.session_user.lock() = Some(client.user.clone());
-        *self.upstream.lock() = Some(match &start.upstream {
-            Upstream::Server(server) => (Some(server.id.clone()), None),
-            Upstream::LocalProxy { addr, .. } => (None, Some(*addr)),
-        });
+        *self.upstream.lock() = Some(super::resume::upstream_of(start));
     }
 }
 

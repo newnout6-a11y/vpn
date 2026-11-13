@@ -37,7 +37,8 @@ pub(super) fn Banners() -> Element {
             LeakCard {}
         }
         if let Some(name) = shown.foreign_vpn {
-            ForeignVpnNotice { name }
+            ForeignVpnNotice { name: name.clone() }
+            super::always::AllowVpnOffer { name }
         }
         if let Some(name) = shown.no_pause_vpn {
             NoPauseNotice { name }
@@ -53,8 +54,8 @@ pub(super) fn Banners() -> Element {
 }
 
 /// «Интернет на паузе: VPN переподключается… следующая попытка через 0:40» with «Подключить»
-/// and «Продолжить без VPN» (research killswitch 5.2): calm, in the start page's own notice
-/// style; the countdown ticks only while the page is shown.
+/// and «Продолжить без VPN» (research killswitch 5.2; in "Always" «Выключить «Всегда»», ks-d):
+/// calm, in the start page's own notice style; the countdown ticks only while the page is shown.
 #[component]
 fn PauseStrip(line: PauseLine) -> Element {
     let dash = use_context::<Dash>();
@@ -79,7 +80,7 @@ fn PauseStrip(line: PauseLine) -> Element {
         (false, None) => t!("ui.dashboard.pause.reconnecting"),
     };
     let busy = dash.command.running();
-    let (retry, leave) = (dash.clone(), dash.clone());
+    let retry = dash.clone();
     rsx! {
         div { class: "overflow-hidden",
             div { class: "c-swiss swiss-notice", role: "status", aria_live: "polite",
@@ -93,13 +94,7 @@ fn PauseStrip(line: PauseLine) -> Element {
                         onclick: move |_| retry.retry_now(),
                         {t!("ui.dashboard.pause.connect")}
                     }
-                    button {
-                        r#type: "button",
-                        class: "swiss-confirm-no",
-                        disabled: busy,
-                        onclick: move |_| leave.continue_without_vpn(),
-                        {t!("ui.dashboard.pause.continue")}
-                    }
+                    super::always::LeaveButton { busy }
                 }
             }
         }

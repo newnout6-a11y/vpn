@@ -4,8 +4,9 @@
 //! user's app takes it over at its next start; another user's app ends it first (its secrets and
 //! its last exit are its user's). Quit and Disconnect send a `Stop`.
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -21,7 +22,9 @@ use crate::users::Users;
 mod conn;
 mod inputs;
 pub mod killswitch;
+mod memory;
 mod requests;
+mod resume;
 
 #[cfg(test)]
 mod tests;
@@ -69,6 +72,8 @@ pub struct Host {
     upstream: Mutex<Option<(Option<String>, Option<SocketAddr>)>>,
     /// The runtime's current native generation (its last `StartBegan`), for a take-over.
     generation: Arc<AtomicU64>,
+    /// Where the last started session is kept for a resume ([`Host::keep_sessions_in`]).
+    memory: OnceLock<PathBuf>,
 }
 
 impl Host {
@@ -82,6 +87,7 @@ impl Host {
             session_user: Mutex::new(None),
             upstream: Mutex::new(None),
             generation: Arc::default(),
+            memory: OnceLock::new(),
         })
     }
 
@@ -154,6 +160,7 @@ impl Host {
         );
         *self.session_user.lock() = None;
         *self.upstream.lock() = None;
+        self.forget_session(None);
     }
 
     fn release(&self, conn: u64) {

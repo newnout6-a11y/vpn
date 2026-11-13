@@ -126,7 +126,10 @@ async fn serve(control: Control) -> u32 {
     }
     let trusted = fault.is_none();
     let (singbox, xray) = (dir.join("sing-box.exe"), dir.join("xray.exe"));
-    let protection = Arc::new(Protection::new(
+    // This service owns our filters (owner decision 12.11.2026): "Always" is kept here, under a
+    // provider registered with the service's name, and "If the VPN drops" is static, so its block
+    // outlives a crash of the service until Windows restarts it (research killswitch §5.4).
+    let protection = Arc::new(Protection::in_service(
         EnginePaths {
             singbox: singbox.clone(),
             xray: Some(xray.clone()),
@@ -134,14 +137,10 @@ async fn serve(control: Control) -> u32 {
         },
         exe.clone(),
         host::load_settings(&files.protection),
+        paths::SERVICE_NAME,
     ));
-    // "Always" is kept safe here: this service owns its persistent filters across app exits and
-    // reboots (owner decision 12.11.2026). Set before the start-up, which applies them at once (a
-    // failed sync here still leaves the flag set for the start-up's own transition).
-    if let Err(err) = protection.set_always_available(true) {
-        tracing::warn!(error = %err, "always-available not synced before start-up");
-    }
-    // Strict filters from the last run are re-applied, leftovers of a crashed session removed.
+    // "Always" filters are re-applied; a crashed run's held block is taken over, the rest of it
+    // and persistent leftovers of a level no longer in force are removed.
     if let Err(err) = protection.startup() {
         tracing::error!(error = %err, "kill switch start-up failed");
     }
@@ -194,12 +193,33 @@ async fn serve(control: Control) -> u32 {
             return 2;
         }
     };
+    let host = Host::new(deps);
+    host.keep_sessions_in(files.session.clone());
     control.running();
     tracing::info!("service running");
-    Host::new(deps).serve(listener, control.stop.clone()).await;
+    let resume = protection.paused() || protection.level_in_force() == KillSwitchLevel::Strict;
+    if resume {
+        let cancel = control.stop.child_token();
+        tokio::spawn(resume_session(host.clone(), protection.clone(), cancel));
+    }
+    host.serve(listener, control.stop.clone()).await;
     control.stopping(Duration::from_secs(15));
     finish(&runtime, &protection, &exe, removing.load(Ordering::SeqCst)).await;
     0
+}
+
+/// After a crash that left a held drop, or with "Always" (connect at Windows start), the last
+/// session starts again for its user's app to take over; a held drop with nothing to resume is
+/// let go (never a block nobody can see or end).
+async fn resume_session(host: Arc<Host>, protection: Arc<Protection>, cancel: CancellationToken) {
+    if host.resume(cancel).await || !protection.paused() {
+        return;
+    }
+    tracing::info!("no session to resume: the held block is lifted");
+    let released = tokio::task::spawn_blocking(move || protection.disconnected()).await;
+    if !matches!(released, Ok(Ok(()))) {
+        tracing::warn!("the held block was not lifted; a reboot clears it");
+    }
 }
 
 /// The last user left: remember it and stop; `finish` removes the service after the stop.

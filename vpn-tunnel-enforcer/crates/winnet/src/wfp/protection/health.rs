@@ -121,7 +121,7 @@ impl Protection {
                 return;
             }
         }
-        let persistent_first = g.level_in_force() == KillSwitchLevel::Strict;
+        let persistent_first = g.persistent_block(g.settings.level);
         match g.sync(&d, persistent_first) {
             Ok(()) => {
                 g.watchdog_failed = false;

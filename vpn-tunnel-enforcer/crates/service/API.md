@@ -18,7 +18,7 @@ vpnte-service.workspace = true
 | `pipe` | server `Listener` (name, DACL, first instance, remote refused), client identity (`pipe::ident`), the app's `pipe::client::Client` |
 | `validate` | refuses what a SYSTEM engine must not get (provider sing-box keys outside the allow-list, provider JSON keys a Go decoder reads differently, a provider Xray graph failing its full import checks, non-loopback proxies, oversize text / lists, bad exceptions) |
 | `sddl` | pipe / service / folder security descriptors, `path_admin_only` (trusted-folder check) |
-| `host` | the session host: one runtime + kill switch, one controlling client, state changes in arrival order, events, client-gone stop |
+| `host` | the session host: one runtime + kill switch, one controlling client, state changes in arrival order, events, client-gone stop, the kept last session and its resume (`keep_sessions_in`, `resume`) |
 | `users` | Windows users (SIDs) of the service: the installing user and each user's first `Hello`; the last `ForgetMe` removes the service |
 | `scm` | `scm::manage` (create / configure / start / stop / delete, installed binary path), `scm::dispatch` (running under the SCM) |
 | `install` | `install` / `uninstall` (elevated verbs), `remove_self`, `install::flow` (the order of their steps and what follows a failed one, over a `Machine` seam), `install::image` (the running exe through a locked handle), `install::pins` (SHA-256 against `resources/engines.toml`) |
@@ -183,10 +183,23 @@ is dropped when it comes. A per-user uninstaller sends `ForgetMe` as its first f
   start); a session nobody takes over keeps running until a `Stop` (the user can stop it from the
   app at any time). Another user's `Hello` ends a kept session of someone else first
   (`stop(preserve_protection = level in force == strict)`): its secrets and last exit are its
-  user's. Quit and Disconnect send a `Stop`. The service keeps "Always" safe
-  (`Protection::set_always_available(true)` before its start-up). Service STOP / shutdown -> the
-  stop above, the dynamic WFP session closed. The runtime's last exit and recent fault go only to
-  the user whose start they came from.
+  user's. Quit and Disconnect send a `Stop`. The service owns our WFP objects
+  (`Protection::in_service(.., SERVICE_NAME)`, ks-d): "If the VPN drops" is static (survives a
+  crash of the service, gone after a reboot) and "Always" persistent under a provider registered
+  with the service's name, so BFE adds it at boot only while the service starts automatically
+  (uninstalled or Disabled: no block at the next boot, even after a failed cleanup; rescue for an
+  administrator: Services -> Disabled -> restart). Service STOP / shutdown -> the stop above, the
+  static set deleted ("Always" stays). The runtime's last exit and recent fault go only to the
+  user whose start they came from.
+- The last session (ks-d): every successful Start / Restart / Switch is kept with its user's SID
+  in `service\session.json` (`host::memory`; it holds the upstream's key: private folder). The
+  service starts it again with no client (`Host::resume`, then kept for that user's take-over, as
+  after an app crash) when (a) its own crash left an armed "If the VPN drops" block behind: the
+  restarted service takes the static block over (`Protection::paused`) and holds it until the
+  session is up again; with nothing to resume, or a failed start, the block is lifted; and (b) at
+  each of its starts while "Always" is in force (connect at Windows start: the VPN is up before
+  anyone signs in; turning "Always" off turns it off). A stop keeps the record (for "Always");
+  another user's `Hello` and the last user's leave drop it.
 - Typed input only (`validate`). Provider JSON (the values of sing-box keys, an XHTTP `extra`, a
   native Xray graph's outbounds, rules, balancers, observatories and policy) may use only keys of
   printable ASCII, no two of one object equal ignoring ASCII case, at any depth: Go's decoder
@@ -206,8 +219,8 @@ is dropped when it comes. A per-user uninstaller sends `ForgetMe` as its first f
 - Data folder `%ProgramData%\VPN Tunnel Enforcer\` (`ADMIN_ONLY_DIR_SDDL`: users read; `logs\`
   with the engine logs of TUN sessions, which the app reads directly, NOADMIN §4) and its
   private part `service\` (`PRIVATE_DIR_SDDL`: SYSTEM / Administrators only, nothing inherited:
-  `users.json`, `protection.json`, `service.log` rotated at 1 MiB), each re-created when it is
-  missing or user-writable.
+  `users.json`, `protection.json`, `session.json`, `service.log` rotated at 1 MiB), each
+  re-created when it is missing or user-writable.
 - Users: the elevated `install` records the user of its Windows session, and a user is recorded
   at his first `Hello` (he may use a service another account installed). `ForgetMe` (per-user
   uninstaller; first frame or after `Hello`, no controller slot needed) removes the caller's SID
@@ -267,6 +280,13 @@ elevation) — it adds the WFP engine handle and the SCM thread, no timer.
   filters go before the service, by `uninstall` and by the last user's leave) and the app's
   `svc_tunnel::remote::elevated::elevated_remote_tun_session_through_the_installed_service`.
   The filters-kept branch runs only against fakes: a real BFE failure cannot be forced.
+- ks-d (13.11.2026), elevated, CI only: `tests/elevated_killswitch.rs` — AT-03-001 (the engine
+  killed under "If the VPN drops": the static block holds, nothing persistent, a stop removes all),
+  AT-03-002 (the service killed: its block survives, Windows restarts it, it resumes the session
+  for the user, a stop leaves nothing), "Always" under the provider with `SERVICE_NAME`; the BFE
+  restart with the service Disabled (provider `FWPM_PROVIDER_FLAG_DISABLED`, no persistent filter
+  of ours active, back after enabling) only with `VPNTE_BFE_RESTART_TESTS` set. Needs a real reboot, never run: static filters gone after one,
+  "Always" not enforced at boot after the service was removed or disabled.
 - Not built (later): the HKLM uninstall entry, the persistent Wintun adapter (research §5), the
   signed-update flow beyond the hook, failover / confirmation seams over the pipe (`None` in the
   service), a non-admin squatting test (the DACL mask is unit-tested).

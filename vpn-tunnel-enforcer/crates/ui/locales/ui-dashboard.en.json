@@ -16,13 +16,21 @@
         "title": "Another VPN detected",
         "body": "While it runs, pings are off: its adapter answers for every server. Quit it to see the real latencies."
       },
+      "allowVpn": {
+        "body": "While “Always” is on, this VPN cannot go online. Allow its program?",
+        "pick": "Choose its program…",
+        "added": "Program allowed",
+        "failed": "Could not allow the program"
+      },
       "pause": {
         "title": "Internet paused",
         "reconnecting": "The VPN is reconnecting…",
         "nextAttempt": "The VPN is reconnecting… next attempt in {{wait}}",
         "keyRejected": "The server rejects the key: update the key or the subscription.",
         "connect": "Connect",
-        "continue": "Continue without VPN"
+        "continue": "Continue without VPN",
+        "turnOffAlways": "Turn off “Always”",
+        "turnOffAlwaysFailed": "Could not turn off “Always”"
       },
       "noPause": {
         "title": "Another VPN",

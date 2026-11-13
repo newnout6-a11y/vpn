@@ -8,9 +8,9 @@ use windows::Win32::Foundation::{
     FWP_E_PROVIDER_NOT_FOUND, FWP_E_SESSION_ABORTED, FWP_E_SUBLAYER_NOT_FOUND, HANDLE,
 };
 use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
-    FWPM_DISPLAY_DATA0, FWPM_PROVIDER_FLAG_PERSISTENT, FWPM_PROVIDER0, FWPM_SESSION_FLAG_DYNAMIC,
-    FWPM_SESSION0, FWPM_SUBLAYER_FLAG_PERSISTENT, FWPM_SUBLAYER0, FwpmEngineClose0,
-    FwpmEngineOpen0, FwpmFilterDeleteById0, FwpmFreeMemory0, FwpmProviderAdd0,
+    FWPM_DISPLAY_DATA0, FWPM_PROVIDER_FLAG_DISABLED, FWPM_PROVIDER_FLAG_PERSISTENT, FWPM_PROVIDER0,
+    FWPM_SESSION_FLAG_DYNAMIC, FWPM_SESSION0, FWPM_SUBLAYER_FLAG_PERSISTENT, FWPM_SUBLAYER0,
+    FwpmEngineClose0, FwpmEngineOpen0, FwpmFilterDeleteById0, FwpmFreeMemory0, FwpmProviderAdd0,
     FwpmProviderDeleteByKey0, FwpmProviderGetByKey0, FwpmSubLayerAdd0, FwpmSubLayerDeleteByKey0,
     FwpmSubLayerGetByKey0, FwpmTransactionAbort0, FwpmTransactionBegin0, FwpmTransactionCommit0,
 };
@@ -105,10 +105,41 @@ pub struct SublayerInfo {
     pub name: String,
 }
 
+/// How long a filter outlives the session that added it (WFP "Object Management", research
+/// killswitch §3.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Lifetime {
+    /// Gone when the session closes or its process dies (an app run as administrator).
+    Dynamic,
+    /// Survives the session and its process; gone when deleted, when BFE stops or at shutdown
+    /// (the helper service's "If the VPN drops": a crashed service is restarted by Windows and
+    /// finds its block still there, a reboot clears it).
+    Static,
+    /// Survives reboots; BFE adds it at its start ("Always", helper service only).
+    Persistent,
+}
+
+/// Our provider as BFE reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInfo {
+    pub flags: u32,
+    /// The Windows service the provider belongs to: BFE adds its persistent filters at its start
+    /// only while that service starts automatically.
+    pub service_name: Option<String>,
+}
+
+impl ProviderInfo {
+    /// BFE left the provider's persistent filters out at its start (its service is not set to
+    /// start automatically, or is gone).
+    pub fn disabled(&self) -> bool {
+        self.flags & FWPM_PROVIDER_FLAG_DISABLED != 0
+    }
+}
+
 /// An open WFP engine session; closed on drop (a dynamic session takes its objects with it).
 pub struct Engine {
     handle: HANDLE,
-    dynamic: bool,
+    lifetime: Lifetime,
 }
 
 // SAFETY: the handle is an RPC binding to BFE, usable from any thread; the owner serialises
@@ -132,15 +163,34 @@ impl Engine {
     /// Opens a dynamic session: BFE removes everything it adds when the handle closes or the
     /// process dies, so a crash in `standard` never leaves the user offline.
     pub fn open_dynamic() -> Result<Self, WfpError> {
-        Self::open(FWPM_SESSION_FLAG_DYNAMIC, "VPNTE dynamic")
+        Self::open(Lifetime::Dynamic, "VPNTE dynamic")
+    }
+
+    /// Opens a plain session whose filters are static: they stay after it closes, until they
+    /// are deleted, BFE stops or Windows shuts down.
+    pub fn open_static() -> Result<Self, WfpError> {
+        Self::open(Lifetime::Static, "VPNTE static")
     }
 
     /// Opens a plain session for persistent objects (a dynamic session cannot add them).
     pub fn open_persistent() -> Result<Self, WfpError> {
-        Self::open(0, "VPNTE persistent")
+        Self::open(Lifetime::Persistent, "VPNTE persistent")
     }
 
-    fn open(flags: u32, name: &str) -> Result<Self, WfpError> {
+    /// Opens a session whose filters get `lifetime`.
+    pub fn open_for(lifetime: Lifetime) -> Result<Self, WfpError> {
+        match lifetime {
+            Lifetime::Dynamic => Self::open_dynamic(),
+            Lifetime::Static => Self::open_static(),
+            Lifetime::Persistent => Self::open_persistent(),
+        }
+    }
+
+    fn open(lifetime: Lifetime, name: &str) -> Result<Self, WfpError> {
+        let flags = match lifetime {
+            Lifetime::Dynamic => FWPM_SESSION_FLAG_DYNAMIC,
+            Lifetime::Static | Lifetime::Persistent => 0,
+        };
         let mut name = wide(name);
         let mut description = wide(DESCRIPTION);
         let session = FWPM_SESSION0 {
@@ -161,15 +211,17 @@ impl Engine {
             )
         };
         check("FwpmEngineOpen0", code)?;
-        Ok(Self {
-            handle,
-            dynamic: flags & FWPM_SESSION_FLAG_DYNAMIC != 0,
-        })
+        Ok(Self { handle, lifetime })
     }
 
     /// Whether objects added through this session vanish with it.
     pub fn is_dynamic(&self) -> bool {
-        self.dynamic
+        self.lifetime == Lifetime::Dynamic
+    }
+
+    /// How long the filters this session adds live.
+    pub fn lifetime(&self) -> Lifetime {
+        self.lifetime
     }
 
     pub(crate) fn handle(&self) -> HANDLE {
@@ -207,17 +259,24 @@ impl Engine {
     }
 
     /// Creates our provider and sublayer when missing (needs a persistent session) and returns
-    /// the sublayer weight BFE actually assigned; it is logged, never asserted.
-    pub fn ensure_provider_and_sublayer(&self) -> Result<u16, WfpError> {
+    /// the sublayer weight BFE actually assigned; it is logged, never asserted. `service` names
+    /// the Windows service the provider belongs to (the helper service): BFE then adds our
+    /// persistent filters at boot only while that service starts automatically, so a removed or
+    /// disabled service lifts "Always" at the next boot even when our cleanup never ran
+    /// (research killswitch §3.1, §5.4). An existing provider is kept as it is: the caller
+    /// compares [`Engine::provider`] first.
+    pub fn ensure_provider_and_sublayer(&self, service: Option<&str>) -> Result<u16, WfpError> {
         if !self.provider_exists(&PROVIDER_KEY)? {
             let mut name = wide(PROVIDER_NAME);
             let mut description = wide(DESCRIPTION);
-            // No `serviceName`: BFE loads a provider's persistent filters at boot only when it
-            // has none (or its service is auto-start), and strict must hold from boot on.
+            let mut service_name = service.map(wide);
             let provider = FWPM_PROVIDER0 {
                 providerKey: PROVIDER_KEY,
                 displayData: display(&mut name, &mut description),
                 flags: FWPM_PROVIDER_FLAG_PERSISTENT,
+                serviceName: service_name
+                    .as_mut()
+                    .map_or(PWSTR::null(), |s| PWSTR(s.as_mut_ptr())),
                 ..Default::default()
             };
             // SAFETY: `provider` and its strings outlive the call.
@@ -256,14 +315,28 @@ impl Engine {
     }
 
     pub(crate) fn provider_exists(&self, key: &GUID) -> Result<bool, WfpError> {
+        self.provider(key).map(|p| p.is_some())
+    }
+
+    /// The provider with this key, `None` when absent.
+    pub fn provider(&self, key: &GUID) -> Result<Option<ProviderInfo>, WfpError> {
         let mut out: *mut FWPM_PROVIDER0 = ptr::null_mut();
         // SAFETY: valid handle, key and out pointer; the result is freed by `WfpMem`.
         let code = unsafe { FwpmProviderGetByKey0(self.handle, key, &mut out) };
         let _mem = WfpMem(out.cast());
         if code == FWP_E_PROVIDER_NOT_FOUND.0 as u32 {
-            return Ok(false);
+            return Ok(None);
         }
-        check("FwpmProviderGetByKey0", code).map(|()| true)
+        check("FwpmProviderGetByKey0", code)?;
+        // SAFETY: on success `out` points to a valid FWPM_PROVIDER0 until `_mem` drops.
+        let p = unsafe { &*out };
+        // SAFETY: a non-null service name is NUL-terminated inside the same block.
+        let service_name =
+            (!p.serviceName.is_null()).then(|| unsafe { read_wide(p.serviceName.0) });
+        Ok(Some(ProviderInfo {
+            flags: p.flags,
+            service_name: service_name.filter(|s| !s.is_empty()),
+        }))
     }
 
     /// The sublayer with this key, `None` when absent.

@@ -7,9 +7,9 @@ use parking_lot::Mutex;
 use vpnte_base::types::{KillSwitchLevel, Notice};
 use vpnte_base::{AppError, AppResult, ErrorKind};
 
-use super::Protection;
+use super::{Owner, Protection};
 use crate::wfp::backend::{Backend, Census, RemoveReport};
-use crate::wfp::engine::WfpError;
+use crate::wfp::engine::{Lifetime, ProviderInfo, WfpError};
 use crate::wfp::model::{
     Conn, EnginePaths, ExceptionTarget, KillSwitchException, KillSwitchState, ProtectionError,
     ProtectionSettings,
@@ -41,6 +41,9 @@ struct World {
     exception_history: Vec<Vec<String>>,
     /// Filters deleted and added by each change.
     churn: Vec<(usize, usize)>,
+    /// The lifetime of the last session-set change (`None` before the first).
+    lifetime: Option<Lifetime>,
+    provider: Option<ProviderInfo>,
 }
 
 impl World {
@@ -101,10 +104,25 @@ impl Backend for Fake {
             ))),
         }
     }
-    fn ensure(&mut self) -> Result<u16, WfpError> {
+    fn provider(&mut self) -> Result<Option<ProviderInfo>, WfpError> {
+        Ok(self.0.lock().provider.clone())
+    }
+    fn ensure(&mut self, service: Option<&str>) -> Result<u16, WfpError> {
+        let mut w = self.0.lock();
+        if w.provider.is_none() {
+            w.provider = Some(ProviderInfo {
+                flags: 1,
+                service_name: service.map(str::to_owned),
+            });
+        }
         Ok(65533)
     }
-    fn change_dynamic(&mut self, delete: &[u64], add: &[FilterSpec]) -> Result<Vec<u64>, WfpError> {
+    fn change_session(
+        &mut self,
+        lifetime: Lifetime,
+        delete: Option<&[u64]>,
+        add: &[FilterSpec],
+    ) -> Result<Vec<u64>, WfpError> {
         let mut w = self.0.lock();
         if Self::lost(&mut w) {
             return Err(RPC_LOST);
@@ -112,7 +130,9 @@ impl Backend for Fake {
         if w.fail_dynamic {
             return Err(FAIL);
         }
-        let ids = w.apply(false, delete, add);
+        w.lifetime = Some(lifetime);
+        let all: Vec<u64> = w.dynamic.keys().copied().collect();
+        let ids = w.apply(false, delete.unwrap_or(&all), add);
         let nets = w
             .dynamic
             .values()
@@ -145,16 +165,25 @@ impl Backend for Fake {
         Ok(Census {
             dynamic: w.dynamic.keys().copied().collect(),
             persistent: w.persistent.keys().copied().collect(),
+            session_block: w
+                .dynamic
+                .values()
+                .any(|s| s.name == "block4" && s.layer == Layer::Connect4),
         })
     }
     fn close_dynamic(&mut self) {
-        self.0.lock().dynamic.clear();
+        let mut w = self.0.lock();
+        // Static filters stay when their session closes.
+        if w.lifetime != Some(Lifetime::Static) {
+            w.dynamic.clear();
+        }
     }
     fn remove_all(&mut self) -> Result<RemoveReport, WfpError> {
         let mut w = self.0.lock();
         let filters = w.dynamic.len() + w.persistent.len();
         w.dynamic.clear();
         w.persistent.clear();
+        w.provider = None;
         Ok(RemoveReport {
             filters,
             sublayer: true,
@@ -165,6 +194,16 @@ impl Backend for Fake {
 
 fn protection(level: KillSwitchLevel) -> (Protection, Fake) {
     let fake = Fake::default();
+    (over(&fake, level, Owner::App), fake)
+}
+
+/// The helper service's owner, as the tests name it.
+fn service_owner() -> Owner {
+    Owner::Service("VpnteTestService".into())
+}
+
+/// A new owner process over the same filters (a restart after a crash, say).
+fn over(fake: &Fake, level: KillSwitchLevel, owner: Owner) -> Protection {
     let engines = EnginePaths {
         singbox: r"C:\vpnte\resources\sing-box.exe".into(),
         xray: None,
@@ -174,20 +213,19 @@ fn protection(level: KillSwitchLevel) -> (Protection, Fake) {
         level,
         ..ProtectionSettings::default()
     };
-    let p = Protection::with_backend(
+    Protection::with_backend(
         engines,
         r"C:\vpnte\vpnte.exe".into(),
         settings,
+        owner,
         Box::new(fake.clone()),
-    );
-    (p, fake)
+    )
 }
 
 /// A protection where "Always" is in force (the helper service owns it).
 fn with_service(level: KillSwitchLevel) -> (Protection, Fake) {
-    let (p, fake) = protection(level);
-    p.set_always_available(true).unwrap();
-    (p, fake)
+    let fake = Fake::default();
+    (over(&fake, level, service_owner()), fake)
 }
 
 /// Persist callback that records every saved level.
@@ -374,8 +412,9 @@ fn strict_without_the_service_works_as_on_drop() {
     assert!(fake.has(false, "block4") && fake.groups(true).is_empty());
     p.disconnected().unwrap();
     assert!(fake.groups(false).is_empty() && fake.groups(true).is_empty());
-    p.set_always_available(true).unwrap();
-    assert!(fake.has(true, "block4"));
+    let service = over(&fake, KillSwitchLevel::Strict, service_owner());
+    service.startup().unwrap();
+    assert!(fake.has(true, "block4"), "the service keeps Always");
 }
 
 /// §6.5: entering "Always" saves the choice before any effect; leaving it saves last.
@@ -565,6 +604,7 @@ fn vanished_app_exception_is_skipped() {
         engines,
         r"C:\vpnte\vpnte.exe".into(),
         settings,
+        Owner::App,
         Box::new(fake.clone()),
     );
     let store = Store::default();
@@ -679,3 +719,5 @@ fn changes_touch_only_what_differs() {
     p.tun_up(8).unwrap();
     assert_eq!(fake.0.lock().churn, [(0, 2), (4, 4), (2, 0)]);
 }
+
+mod owners;

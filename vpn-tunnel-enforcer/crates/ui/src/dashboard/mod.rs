@@ -10,6 +10,7 @@
 //!
 //! The root component is [`Dashboard`]: `registry.register(Page::Dashboard, Dashboard)`.
 mod actions;
+mod always;
 mod banners;
 pub mod demo;
 mod facts;

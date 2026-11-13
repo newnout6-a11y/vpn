@@ -22,7 +22,7 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
 };
 use windows::core::{GUID, PCWSTR};
 
-use super::engine::{Engine, WfpError, WfpMem, check, display};
+use super::engine::{Engine, Lifetime, WfpError, WfpMem, check, display};
 use super::spec::{Action, AppId, Cond, FilterSpec, Layer};
 use super::{PROVIDER_KEY, SUBLAYER_KEY};
 use crate::win::{read_wide, wide, wide_os};
@@ -293,9 +293,10 @@ impl Drop for EnumHandle<'_> {
 }
 
 impl Engine {
-    /// Adds one filter to our provider and sublayer and returns its runtime ID. It is
-    /// persistent exactly when this session is not dynamic: a non-persistent filter of a plain
-    /// session would outlive the app until reboot, the "locked out" failure this design avoids.
+    /// Adds one filter to our provider and sublayer and returns its runtime ID, with this
+    /// session's [`Lifetime`]: dynamic (gone with the process), static (survives the process,
+    /// gone at reboot: only the helper service, which Windows restarts after a crash, opens
+    /// such a session) or persistent ("Always").
     pub fn add(&self, spec: &FilterSpec) -> Result<u64, WfpError> {
         let mut conds = Conditions::new(spec);
         let mut name = wide(&format!("VPNTE {}", spec.name));
@@ -307,10 +308,9 @@ impl Engine {
         };
         let filter = FWPM_FILTER0 {
             displayData: display(&mut name, &mut description),
-            flags: if self.is_dynamic() {
-                FWPM_FILTER_FLAG_NONE
-            } else {
-                FWPM_FILTER_FLAG_PERSISTENT
+            flags: match self.lifetime() {
+                Lifetime::Dynamic | Lifetime::Static => FWPM_FILTER_FLAG_NONE,
+                Lifetime::Persistent => FWPM_FILTER_FLAG_PERSISTENT,
             },
             providerKey: &mut provider,
             layerKey: spec.layer.key(),

@@ -148,7 +148,7 @@
         "onDropLine": "If the VPN drops by itself, the internet pauses until it is back. Disconnect and Quit work as usual.",
         "onDropProxy": "Applies to programs that use the system proxy (browsers and most apps).",
         "always": "Always",
-        "alwaysLine": "No internet without the VPN, even after Quit or a restart. Local network keeps working.",
+        "alwaysLine": "No internet without the VPN, even after Quit or a restart: the VPN connects when Windows starts. Local network keeps working.",
         "needsService": "Needs the helper service.",
         "alwaysAsOnDrop": "Needs the helper service; works as “If the VPN drops” meanwhile.",
         "details": "Details",

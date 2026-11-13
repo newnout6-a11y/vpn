@@ -273,7 +273,12 @@ pub mod demo { pub enum DashScene { Disconnected, Connecting, Connected, …21 s
 App duties: publish `conn.cancelling` the moment `cancel` is called; every transition clears `leak`;
 `foreign_vpn` only while our tunnel is down; `exit_country` from the geo lookup. The page renders the
 mascot inside the slab (render no second `MascotHost`) and binds Ctrl+Enter to the power button
-(ignored inside open dialogs and when a control already handled the key).
+(ignored inside open dialogs and when a control already handled the key). With "Always" in force
+(the root `Rc<dyn SettingsApi>`'s kill-switch view: level `Strict` and `always_available`; ks-d)
+the paused strip's second button reads «Выключить «Всегда»» and calls
+`SettingsApi::set_kill_switch_level(Standard)` instead of disconnecting, and `foreign_vpn` gets
+one more line, «Выбрать программу…» (`pick_app` + `add_exception`, once per VPN per run). Without
+a `SettingsApi` in context (the demo) both stay as without "Always".
 
 ```rust
 // panels — the row under the slab, rendered by Dashboard (`SwissPanels { local_pings, active, on_mascot, on_notice }`;

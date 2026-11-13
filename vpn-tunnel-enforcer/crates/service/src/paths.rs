@@ -57,6 +57,9 @@ pub struct DataFiles {
     pub private: PathBuf,
     pub users: PathBuf,
     pub protection: PathBuf,
+    /// The last session a user started (its upstream with the key): the service starts it
+    /// again after its own crash while the drop is held, and at its start with "Always".
+    pub session: PathBuf,
     pub service_log: PathBuf,
 }
 
@@ -68,6 +71,7 @@ impl DataFiles {
             logs: root.join("logs"),
             users: private.join("users.json"),
             protection: private.join("protection.json"),
+            session: private.join("session.json"),
             service_log: private.join("service.log"),
             private,
         }
@@ -78,6 +82,17 @@ impl DataFiles {
         secure_dir(&self.root)?;
         secure_dir_as(&self.private, sddl::PRIVATE_DIR_SDDL)
     }
+}
+
+/// Writes `bytes` through a sibling file that reaches the disk before it replaces `path`, so a
+/// power loss leaves the old file or the new one, never half of one. One writer at a time.
+pub fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    io::Write::write_all(&mut file, bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)
 }
 
 /// Creates `dir` with the admin-only DACL, or re-creates it when it exists but users can change

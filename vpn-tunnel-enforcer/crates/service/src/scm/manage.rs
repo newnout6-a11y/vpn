@@ -280,6 +280,16 @@ fn marked(deleted: windows::core::Result<()>) -> windows::core::Result<()> {
     }
 }
 
+/// The running service's process id (`None`: not installed or not running): the elevated tests
+/// end it the hard way to check what a crash leaves behind.
+pub fn process_id() -> windows::core::Result<Option<u32>> {
+    let Some(service) = open(SERVICE_QUERY_STATUS)? else {
+        return Ok(None);
+    };
+    let s = status(&service)?;
+    Ok((s.dwCurrentState == SERVICE_RUNNING && s.dwProcessId != 0).then_some(s.dwProcessId))
+}
+
 /// The installed service's executable (`None`: not installed). The app compares the pipe
 /// server's image with it.
 pub fn installed_binary() -> windows::core::Result<Option<PathBuf>> {

@@ -4,18 +4,23 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::engine::{Engine, WfpError};
-use super::filters::{app_id_of, canonical};
-use super::spec::{AppId, FilterSpec};
+use windows::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_ACTION_BLOCK;
+
+use super::engine::{Engine, Lifetime, ProviderInfo, WfpError};
+use super::filters::{FilterInfo, app_id_of, canonical};
+use super::spec::{AppId, FilterSpec, Layer, W_BLOCK};
 use super::{PROVIDER_KEY, SUBLAYER_KEY};
 
 /// Our filters as a fresh enumeration sees them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Census {
-    /// Runtime IDs of our non-persistent filters.
+    /// Runtime IDs of our non-persistent filters (the session set: dynamic or static).
     pub dynamic: Vec<u64>,
     /// Runtime IDs of our intact persistent filters.
     pub persistent: Vec<u64>,
+    /// A non-persistent IPv4 block-all of ours is there: "If the VPN drops" was armed (after a
+    /// service crash: the block the restarted service takes over).
+    pub session_block: bool,
 }
 
 /// What [`super::remove_all`] deleted.
@@ -32,10 +37,20 @@ pub struct RemoveReport {
 pub(crate) trait Backend: Send {
     /// App ID of an existing executable (missing file = error).
     fn app_id(&mut self, exe: &Path) -> Result<Arc<AppId>, WfpError>;
-    /// Creates provider + sublayer when missing; returns the actual sublayer weight.
-    fn ensure(&mut self) -> Result<u16, WfpError>;
-    /// One dynamic transaction: delete `delete`, add `add`; returns the IDs of `add`.
-    fn change_dynamic(&mut self, delete: &[u64], add: &[FilterSpec]) -> Result<Vec<u64>, WfpError>;
+    /// Our provider as BFE reports it (`None` = absent).
+    fn provider(&mut self) -> Result<Option<ProviderInfo>, WfpError>;
+    /// Creates provider (registered with `service` when given) + sublayer when missing; returns
+    /// the actual sublayer weight.
+    fn ensure(&mut self, service: Option<&str>) -> Result<u16, WfpError>;
+    /// One transaction of the session set with `lifetime` (dynamic or static): delete `delete`
+    /// (`None` = every non-persistent filter of ours, also ones this process never saw), add
+    /// `add`; returns the IDs of `add`.
+    fn change_session(
+        &mut self,
+        lifetime: Lifetime,
+        delete: Option<&[u64]>,
+        add: &[FilterSpec],
+    ) -> Result<Vec<u64>, WfpError>;
     /// One persistent transaction: delete `delete` (`None` = every persistent filter of ours),
     /// add `add`; returns the IDs of `add`.
     fn change_persistent(
@@ -51,8 +66,8 @@ pub(crate) trait Backend: Send {
     fn remove_all(&mut self) -> Result<RemoveReport, WfpError>;
 }
 
-/// The real backend: one dynamic session kept for the process lifetime, persistent sessions
-/// opened per operation, app IDs cached per path.
+/// The real backend: one dynamic session kept for the process lifetime, static and persistent
+/// sessions opened per operation, app IDs cached per path.
 #[derive(Default)]
 pub(crate) struct WfpBackend {
     dynamic: Option<Engine>,
@@ -72,13 +87,27 @@ impl Backend for WfpBackend {
         Ok(id)
     }
 
-    fn ensure(&mut self) -> Result<u16, WfpError> {
-        Engine::open_persistent()?.ensure_provider_and_sublayer()
+    fn provider(&mut self) -> Result<Option<ProviderInfo>, WfpError> {
+        Engine::open_persistent()?.provider(&PROVIDER_KEY)
     }
 
-    fn change_dynamic(&mut self, delete: &[u64], add: &[FilterSpec]) -> Result<Vec<u64>, WfpError> {
+    fn ensure(&mut self, service: Option<&str>) -> Result<u16, WfpError> {
+        Engine::open_persistent()?.ensure_provider_and_sublayer(service)
+    }
+
+    fn change_session(
+        &mut self,
+        lifetime: Lifetime,
+        delete: Option<&[u64]>,
+        add: &[FilterSpec],
+    ) -> Result<Vec<u64>, WfpError> {
+        if lifetime != Lifetime::Dynamic {
+            // Static filters stay after this session closes: nothing to keep open.
+            let engine = Engine::open_static()?;
+            return change_owned(&engine, delete, add, |f| !f.is_persistent());
+        }
         if self.dynamic.is_none() {
-            if add.is_empty() {
+            if add.is_empty() && delete.is_some() {
                 // No session means none of its filters exist any more.
                 return Ok(Vec::new());
             }
@@ -87,7 +116,7 @@ impl Backend for WfpBackend {
         let Some(engine) = &self.dynamic else {
             return Ok(Vec::new());
         };
-        change(engine, delete, add)
+        change_owned(engine, delete, add, |f| !f.is_persistent())
     }
 
     fn change_persistent(
@@ -96,23 +125,7 @@ impl Backend for WfpBackend {
         add: &[FilterSpec],
     ) -> Result<Vec<u64>, WfpError> {
         let engine = Engine::open_persistent()?;
-        let all: Vec<u64>;
-        let delete = match delete {
-            Some(ids) => ids,
-            None => {
-                all = engine
-                    .owned_filters()?
-                    .into_iter()
-                    .filter(|f| f.is_persistent())
-                    .map(|f| f.id)
-                    .collect();
-                &all
-            }
-        };
-        match delete.is_empty() && add.is_empty() {
-            true => Ok(Vec::new()),
-            false => change(&engine, delete, add),
-        }
+        change_owned(&engine, delete, add, FilterInfo::is_persistent)
     }
 
     fn census(&mut self) -> Result<Census, WfpError> {
@@ -123,6 +136,7 @@ impl Backend for WfpBackend {
         let (persistent, dynamic): (Vec<_>, Vec<_>) =
             filters.into_iter().partition(|f| f.is_persistent());
         Ok(Census {
+            session_block: dynamic.iter().any(is_block_all_v4),
             dynamic: dynamic.into_iter().map(|f| f.id).collect(),
             // A disabled or otherwise altered persistent filter protects nothing: left out, so
             // the read-back mismatches and the set is rewritten.
@@ -142,6 +156,38 @@ impl Backend for WfpBackend {
         self.dynamic = None;
         remove_all_objects()
     }
+}
+
+/// One transaction: delete `delete` (`None` = every filter of ours `pick` selects), add `add`,
+/// all or nothing; returns the IDs of `add`.
+fn change_owned(
+    engine: &Engine,
+    delete: Option<&[u64]>,
+    add: &[FilterSpec],
+    pick: impl Fn(&FilterInfo) -> bool,
+) -> Result<Vec<u64>, WfpError> {
+    let all: Vec<u64>;
+    let delete = match delete {
+        Some(ids) => ids,
+        None => {
+            all = engine
+                .owned_filters()?
+                .into_iter()
+                .filter(|f| pick(f))
+                .map(|f| f.id)
+                .collect();
+            &all
+        }
+    };
+    match delete.is_empty() && add.is_empty() {
+        true => Ok(Vec::new()),
+        false => change(engine, delete, add),
+    }
+}
+
+/// The IPv4 block-all of "If the VPN drops" (`spec::block4`, connect layer).
+fn is_block_all_v4(f: &FilterInfo) -> bool {
+    f.layer == Layer::Connect4.key() && f.weight == Some(W_BLOCK) && f.action == FWP_ACTION_BLOCK.0
 }
 
 /// One transaction: delete `delete`, add `add`, all or nothing; returns the IDs of `add`.
@@ -208,14 +254,20 @@ mod tests {
             return;
         }
         let mut b = WfpBackend::default();
-        assert!(b.ensure().unwrap() > 0);
+        assert!(b.ensure(None).unwrap() > 0);
         let start = b.census().unwrap();
         let ids = b
-            .change_dynamic(&[], &[harmless("test-a"), harmless("test-b")])
+            .change_session(
+                Lifetime::Dynamic,
+                Some(&[]),
+                &[harmless("test-a"), harmless("test-b")],
+            )
             .unwrap();
         let census = b.census().unwrap();
         assert!(ids.iter().all(|id| census.dynamic.contains(id)));
-        let ids = b.change_dynamic(&ids, &[harmless("test-c")]).unwrap();
+        let ids = b
+            .change_session(Lifetime::Dynamic, Some(&ids), &[harmless("test-c")])
+            .unwrap();
         assert_eq!(b.census().unwrap().dynamic.len(), start.dynamic.len() + 1);
         let kept = b.change_persistent(None, &[harmless("test-p")]).unwrap();
         assert_eq!(b.census().unwrap().persistent, kept);
@@ -240,8 +292,9 @@ mod tests {
             return;
         }
         let mut b = WfpBackend::default();
-        b.ensure().unwrap();
-        b.change_dynamic(&[], &[harmless("test-d")]).unwrap();
+        b.ensure(None).unwrap();
+        b.change_session(Lifetime::Dynamic, Some(&[]), &[harmless("test-d")])
+            .unwrap();
         b.change_persistent(None, &[harmless("test-p")]).unwrap();
         let report = b.remove_all().unwrap();
         assert!(report.filters >= 1 && report.sublayer && report.provider);

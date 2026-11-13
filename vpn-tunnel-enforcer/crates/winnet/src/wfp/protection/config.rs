@@ -10,8 +10,8 @@ impl Protection {
     /// Changes the level. Entering "Always" (where it is in force) saves the choice before any
     /// effect; leaving it installs the new set, then removes the persistent one, then saves, and
     /// any failure on the way stays "Always" (fail closed). Other switches apply, then save; a
-    /// failed save re-applies the previous level. A stored `strict` without the service works
-    /// as `standard` ([`Protection::set_always_available`]).
+    /// failed save re-applies the previous level. A stored `strict` works as `standard` outside
+    /// the helper service ([`super::Owner::keeps_always`]).
     pub fn set_level(
         &self,
         level: KillSwitchLevel,
@@ -24,7 +24,7 @@ impl Protection {
         let prev = g.target();
         let mut next = prev.clone();
         next.settings.level = level;
-        if level.effective(g.always_available) == KillSwitchLevel::Strict {
+        if g.persistent_block(level) {
             persist(&next.settings).map_err(persist_failed)?;
             g.settings.level = level;
             let (d, skipped) = g.plan(&next)?;

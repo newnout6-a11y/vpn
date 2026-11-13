@@ -154,7 +154,7 @@ fn elevated_catalogue_round_trip_in_a_dynamic_session() {
     let objects = Objects::before();
     let weight = Engine::open_persistent()
         .unwrap()
-        .ensure_provider_and_sublayer()
+        .ensure_provider_and_sublayer(None)
         .unwrap();
     assert!(weight > 0);
     let me = own_id();
@@ -233,7 +233,7 @@ fn elevated_catalogue_round_trip_in_a_dynamic_session() {
 fn elevated_persistent_filter_round_trip() {
     let objects = Objects::before();
     let engine = Engine::open_persistent().unwrap();
-    engine.ensure_provider_and_sublayer().unwrap();
+    engine.ensure_provider_and_sublayer(None).unwrap();
     let id = engine
         .transaction(|e| e.add(&harmless("test-persistent")))
         .unwrap();
@@ -262,7 +262,7 @@ fn elevated_failed_transaction_leaves_nothing() {
     let objects = Objects::before();
     Engine::open_persistent()
         .unwrap()
-        .ensure_provider_and_sublayer()
+        .ensure_provider_and_sublayer(None)
         .unwrap();
     let engine = Engine::open_dynamic().unwrap();
     let before = engine.owned_filters().unwrap().len();
@@ -276,6 +276,68 @@ fn elevated_failed_transaction_leaves_nothing() {
     });
     assert_eq!(result, Err(refused));
     assert_eq!(engine.owned_filters().unwrap().len(), before);
+    drop(engine);
+    objects.restore();
+}
+
+/// ks-d (research killswitch §3.1): a filter of a static session outlives the session (and
+/// so the crash of the service that added it) as a non-persistent filter; deleting it by ID
+/// from another session works.
+#[test]
+#[ignore = "needs elevation"]
+fn elevated_static_filter_outlives_its_session() {
+    let objects = Objects::before();
+    if objects.existed() {
+        eprintln!("skipped: VPNTE WFP objects already exist on this machine");
+        return;
+    }
+    Engine::open_persistent()
+        .unwrap()
+        .ensure_provider_and_sublayer(None)
+        .unwrap();
+    let engine = Engine::open_static().unwrap();
+    assert_eq!(engine.lifetime(), Lifetime::Static);
+    let id = engine
+        .transaction(|e| e.add(&harmless("test-static")))
+        .unwrap();
+    drop(engine);
+    let other = Engine::open_persistent().unwrap();
+    let f = other
+        .owned_filters()
+        .unwrap()
+        .into_iter()
+        .find(|f| f.id == id)
+        .expect("a static filter survives its session");
+    assert!(!f.is_persistent(), "flags {:#x}", f.flags);
+    other.delete(id).unwrap();
+    assert!(other.owned_filters().unwrap().iter().all(|f| f.id != id));
+    drop(other);
+    objects.restore();
+}
+
+/// ks-d (research killswitch §3.1, §5.4): the provider created for the helper service carries
+/// its Windows service name, so BFE loads our persistent filters at boot only while that service
+/// starts automatically; created by the app, it carries none.
+#[test]
+#[ignore = "needs elevation"]
+fn elevated_provider_carries_the_service_name() {
+    let objects = Objects::before();
+    if objects.existed() {
+        eprintln!("skipped: VPNTE WFP objects already exist on this machine");
+        return;
+    }
+    let engine = Engine::open_persistent().unwrap();
+    engine
+        .ensure_provider_and_sublayer(Some("VpnteTestService"))
+        .unwrap();
+    let p = engine.provider(&PROVIDER_KEY).unwrap().expect("provider");
+    assert_eq!(p.service_name.as_deref(), Some("VpnteTestService"));
+    assert!(!p.disabled(), "flags {:#x}", p.flags);
+    engine.delete_sublayer(&SUBLAYER_KEY).unwrap();
+    engine.delete_provider(&PROVIDER_KEY).unwrap();
+    engine.ensure_provider_and_sublayer(None).unwrap();
+    let p = engine.provider(&PROVIDER_KEY).unwrap().expect("provider");
+    assert_eq!(p.service_name, None);
     drop(engine);
     objects.restore();
 }

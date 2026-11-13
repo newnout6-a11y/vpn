@@ -6,7 +6,7 @@ use vpnte_base::types::{KillSwitchLevel, now_ms};
 
 use super::{Inner, Persist, Target, same_ids};
 use crate::wfp::desired::{Change, Desired, Plan, desired};
-use crate::wfp::engine::WfpError;
+use crate::wfp::engine::{Lifetime, WfpError};
 use crate::wfp::model::{ExceptionTarget, KillSwitchException, ProtectionError, Unconfirmed};
 use crate::wfp::spec::FilterSpec;
 use crate::wfp::validate;
@@ -31,16 +31,22 @@ impl Inner {
         self.armed = t.armed;
     }
 
+    /// `level` (stored) blocks through the persistent set: "Always" where the owner keeps it.
+    /// Such a set is synced first on the way in and removed last on the way out.
+    pub(super) fn persistent_block(&self, level: KillSwitchLevel) -> bool {
+        self.owner.block_lifetime(level) == Some(Lifetime::Persistent)
+    }
+
     /// The stored level as the filters enforce it ([`KillSwitchLevel::effective`]).
     pub(super) fn level_in_force(&self) -> KillSwitchLevel {
-        self.settings.level.effective(self.always_available)
+        self.settings.level.effective(self.owner.keeps_always())
     }
 
     /// Resolves app IDs and computes the filter sets of `t`, plus the ids of app exceptions
     /// skipped because their file is missing (less is allowed: the safe direction).
     pub(super) fn plan(&mut self, t: &Target) -> Result<(Desired, Vec<String>), ProtectionError> {
         let s = &t.settings;
-        let level = s.level.effective(self.always_available);
+        let level = s.level.effective(self.owner.keeps_always());
         let strict = level == KillSwitchLevel::Strict;
         let session = t.conn.in_session();
         let on_drop = level == KillSwitchLevel::Standard && t.armed;
@@ -150,33 +156,41 @@ impl Inner {
         self.dynamic_dirty = false;
     }
 
-    /// `Ok(true)` when something was applied.
+    /// `Ok(true)` when something was applied. A static set in doubt may hold filters this
+    /// process never saw (a crashed service's): it is replaced whole, every non-persistent
+    /// filter of ours goes in the same transaction. A dynamic set cannot outlive its session, so
+    /// the IDs we know are all there is.
     pub(super) fn sync_dynamic(&mut self, specs: &[FilterSpec]) -> Result<bool, ProtectionError> {
+        let sweep = self.dynamic_dirty && self.owner.session_lifetime() == Lifetime::Static;
         let change = match self.dynamic_dirty {
             true => Change::replace(&self.dynamic, specs),
             false => Change::between(&self.dynamic, specs),
         };
-        if change.is_noop() {
+        if change.is_noop() && !sweep {
             // Nothing of ours to delete and nothing wanted: no doubt left either.
             self.dynamic_dirty = false;
             return Ok(false);
         }
-        let mut result = self.try_dynamic(change);
+        let mut result = self.try_dynamic(change, sweep);
         if matches!(&result, Err(e) if e.engine_lost()) {
-            // BFE restarted: the old session and its filters are gone; reopen once.
+            // BFE restarted: the old session and its filters are gone (static ones too: they
+            // live until BFE stops); reopen once.
             self.drop_dynamic();
             self.sublayer_weight = None;
-            result = self.try_dynamic(Change::between(&[], specs));
+            result = self.try_dynamic(Change::between(&[], specs), false);
         }
         self.dynamic_dirty = result.is_err();
         result.map(|()| true).map_err(|e| self.wfp_failed(e))
     }
 
-    fn try_dynamic(&mut self, change: Change) -> Result<(), WfpError> {
+    /// `sweep`: delete every non-persistent filter of ours, not just the known ones.
+    fn try_dynamic(&mut self, change: Change, sweep: bool) -> Result<(), WfpError> {
         if !change.add.is_empty() {
             self.ensure()?;
         }
-        let ids = self.backend.change_dynamic(&change.delete, &change.add)?;
+        let delete = (!sweep).then_some(change.delete.as_slice());
+        let lifetime = self.owner.session_lifetime();
+        let ids = self.backend.change_session(lifetime, delete, &change.add)?;
         self.dynamic = change.installed(ids);
         self.bfe_running = Some(true);
         Ok(())
@@ -219,7 +233,7 @@ impl Inner {
 
     pub(super) fn ensure(&mut self) -> Result<(), WfpError> {
         if self.sublayer_weight.is_none() {
-            self.sublayer_weight = Some(self.backend.ensure()?);
+            self.sublayer_weight = Some(self.backend.ensure(self.owner.service_name())?);
         }
         Ok(())
     }
@@ -245,9 +259,8 @@ impl Inner {
     /// protection could not be restored either.
     pub(super) fn restore(&mut self, prev: &Target) -> Result<(), ProtectionError> {
         let (d, _) = self.plan(prev)?;
-        let strict =
-            prev.settings.level.effective(self.always_available) == KillSwitchLevel::Strict;
-        self.sync(&d, strict)
+        let persistent_first = self.persistent_block(prev.settings.level);
+        self.sync(&d, persistent_first)
     }
 
     /// A transition of the connection state; `always` commits it even when applying fails

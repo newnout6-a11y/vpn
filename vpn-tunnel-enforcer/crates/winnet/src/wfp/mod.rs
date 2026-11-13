@@ -1,8 +1,11 @@
 //! Kill switch and leak protection as WFP filters in our own provider + sublayer.
 //!
-//! `standard` and leak protection live in a dynamic WFP session (BFE removes them when the
-//! process dies, so a crash never leaves the user offline); only `strict` adds persistent
-//! filters. This module changes nothing else on the machine: no Windows Firewall rules or
+//! `standard` and leak protection live in a dynamic WFP session in an app run as administrator
+//! (BFE removes them when the process dies, so a crash never leaves the user offline) and as
+//! static filters in the helper service (they survive its crash until Windows restarts it, and
+//! are gone after a reboot); only `strict`, in the service only, adds persistent filters, under a
+//! provider registered with the service's name ([`Owner`]). This module changes nothing else on
+//! the machine: no Windows Firewall rules or
 //! profiles (sing-box's own `sing-tun (<path>)` inbound rule is the cleanup crate's), no adapter
 //! bindings, no DNS settings. Hyper-V guests (WSL 2, Sandbox, Docker) are NATed below the ALE
 //! layers and not covered; the status reports such a switch.
@@ -27,14 +30,14 @@ pub mod validate;
 use windows::core::GUID;
 
 pub use backend::RemoveReport;
-pub use engine::{Engine, SublayerInfo, WfpError};
+pub use engine::{Engine, Lifetime, ProviderInfo, SublayerInfo, WfpError};
 pub use filters::{FilterInfo, ListQuery, app_id};
 pub use fwpolicy::{FwProfile, FwProfileBlock, outbound_block_profiles, tun_inbound_blocked};
 pub use model::{
     Conn, EnginePaths, ExceptionKind, ExceptionTarget, KillSwitchException, KillSwitchState,
     ProtectionError, ProtectionSettings, ProtectionStatus, Toggles, Unconfirmed,
 };
-pub use protection::{Persist, Protection, WATCHDOG_PERIOD, remove_all};
+pub use protection::{Owner, Persist, Protection, WATCHDOG_PERIOD, remove_all};
 pub use spec::{Action, AppId, Cond, FilterSpec, Layer};
 pub use validate::{
     ValidationError, broad_warning, canonical_exe, check_list, parse_ip_or_cidr, validate_exception,

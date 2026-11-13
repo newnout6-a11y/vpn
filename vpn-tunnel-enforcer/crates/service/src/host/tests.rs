@@ -28,6 +28,7 @@ use crate::proto::{
 
 mod access;
 mod order;
+mod resume;
 
 /// Records calls; `start` emits the runtime's event sequence.
 struct FakeRuntime {
@@ -216,6 +217,7 @@ const TEST_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)";
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
 struct Harness {
+    host: Arc<Host>,
     runtime: Arc<FakeRuntime>,
     kill: Arc<FakeKillSwitch>,
     inputs: Arc<SharedInputs>,
@@ -267,9 +269,11 @@ fn harness() -> Harness {
         service_version: "2.0.0-test".into(),
         refuse_tunnel: None,
     });
+    host.keep_sessions_in(dir.join("session.json"));
     let cancel = CancellationToken::new();
-    tokio::spawn(host.serve(listener, cancel.clone()));
+    tokio::spawn(host.clone().serve(listener, cancel.clone()));
     Harness {
+        host,
         runtime,
         kill,
         inputs,

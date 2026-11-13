@@ -67,19 +67,11 @@ fn unreadable(store: &Path, error: &dyn std::fmt::Display) -> ProtectionSettings
     }
 }
 
-/// Written through a sibling file that reaches the disk before it replaces the old one (one
-/// writer at a time: every caller runs under the host's state lock).
+/// Written through a sibling file that reaches the disk first (one writer at a time: every
+/// caller runs under the host's state lock).
 fn save_settings(store: &Path, settings: &ProtectionSettings) -> AppResult<()> {
-    let tmp = store.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(settings).map_err(AppError::internal)?;
-    let written = (|| {
-        let mut file = std::fs::File::create(&tmp)?;
-        std::io::Write::write_all(&mut file, &bytes)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&tmp, store)
-    })();
-    written.map_err(AppError::internal)
+    crate::paths::write_synced(store, &bytes).map_err(AppError::internal)
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> AppResult<T> {

@@ -1,6 +1,7 @@
 //! The [`Protection`] handle (firewall-recovery §6.5). One mutex serialises every change; a
-//! change is one BFE transaction per session (dynamic / persistent), so it is all or nothing
-//! and the previous filters stay intact when it fails.
+//! change is one BFE transaction per session (the session set / persistent), so it is all or
+//! nothing and the previous filters stay intact when it fails. The [`Owner`] sets how long the
+//! session set lives: dynamic in an app run as administrator, static in the helper service.
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,12 +13,17 @@ use vpnte_base::{AppResult, Msg};
 
 use super::backend::{Backend, RemoveReport, WfpBackend, remove_all_objects};
 use super::desired::Installed;
+use super::engine::Lifetime;
 use super::model::{Conn, EnginePaths, ProtectionError, ProtectionSettings};
 use super::spec::FilterSpec;
 
 mod apply;
 mod config;
 mod health;
+mod owner;
+mod start;
+
+pub use owner::Owner;
 
 /// How often [`Protection::run_watchdog`] re-checks our filters (a BFE restart drops them).
 pub const WATCHDOG_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
@@ -60,12 +66,13 @@ struct Inner {
     session: Vec<PathBuf>,
     tun_addrs: Vec<IpAddr>,
     armed: bool,
-    /// "Always" can be kept safe (the helper service owns the filters); otherwise a stored
-    /// `strict` works as `standard` and nothing persistent is installed.
-    always_available: bool,
-    /// Our filters in the dynamic session.
+    /// Who keeps the filters: "Always" exists only in the service (otherwise a stored `strict`
+    /// works as `standard` and nothing persistent is installed), and the session set is static
+    /// there, dynamic in an app.
+    owner: Owner,
+    /// Our filters in the session set (dynamic or static, per `owner`).
     dynamic: Installed,
-    /// The last dynamic change failed or the read-back differed: `dynamic` is in doubt.
+    /// The last session-set change failed or the read-back differed: `dynamic` is in doubt.
     dynamic_dirty: bool,
     /// Our persistent filters; `None` = unknown (not reconciled yet, or failed).
     persistent: Option<Installed>,
@@ -93,16 +100,32 @@ fn persist_failed(e: vpnte_base::AppError) -> ProtectionError {
 }
 
 impl Protection {
-    /// A handle over the real WFP backend; nothing is applied before [`Protection::startup`].
-    /// `engines` and `self_exe` are the canonical paths the processes run from.
+    /// A handle over the real WFP backend for an app run as administrator ([`Owner::App`]);
+    /// nothing is applied before [`Protection::startup`]. `engines` and `self_exe` are the
+    /// canonical paths the processes run from.
     pub fn new(engines: EnginePaths, self_exe: PathBuf, settings: ProtectionSettings) -> Self {
-        Self::with_backend(engines, self_exe, settings, Box::new(WfpBackend::default()))
+        let backend = Box::new(WfpBackend::default());
+        Self::with_backend(engines, self_exe, settings, Owner::App, backend)
+    }
+
+    /// The handle of the helper service `service` ([`Owner::Service`]): "Always" is kept here,
+    /// the session set is static and our provider is registered with the service's name.
+    pub fn in_service(
+        engines: EnginePaths,
+        self_exe: PathBuf,
+        settings: ProtectionSettings,
+        service: &str,
+    ) -> Self {
+        let owner = Owner::Service(service.to_owned());
+        let backend = Box::new(WfpBackend::default());
+        Self::with_backend(engines, self_exe, settings, owner, backend)
     }
 
     fn with_backend(
         engines: EnginePaths,
         self_exe: PathBuf,
         settings: ProtectionSettings,
+        owner: Owner,
         backend: Box<dyn Backend>,
     ) -> Self {
         let inner = Inner {
@@ -114,7 +137,7 @@ impl Protection {
             session: Vec::new(),
             tun_addrs: Vec::new(),
             armed: false,
-            always_available: false,
+            owner,
             dynamic: Vec::new(),
             dynamic_dirty: false,
             persistent: None,
@@ -151,27 +174,18 @@ impl Protection {
         g.level_in_force() != KillSwitchLevel::Off || g.settings.leak_protection
     }
 
-    /// The level the filters enforce: a stored `strict` works as `standard` until
-    /// [`Protection::set_always_available`] says "Always" can be kept safe.
+    /// The level the filters enforce: a stored `strict` works as `standard` outside the helper
+    /// service ([`Owner::keeps_always`]).
     pub fn level_in_force(&self) -> KillSwitchLevel {
         self.inner.lock().level_in_force()
     }
 
-    /// Set by the helper-service wiring: "Always" (persistent filters) is enforced only while
-    /// something owns them across exit and reboot. Off by default: an app run as administrator
-    /// creates no persistent filters, and leftovers of an earlier strict run are removed.
-    pub fn set_always_available(&self, available: bool) -> Result<(), ProtectionError> {
-        let mut g = self.inner.lock();
-        if g.always_available == available {
-            return Ok(());
-        }
-        g.always_available = available;
-        let t = g.target();
-        let persistent_first = g.level_in_force() == KillSwitchLevel::Strict;
-        let (d, skipped) = g.plan(&t)?;
-        g.sync(&d, persistent_first)?;
-        self.note_skipped(&mut g, skipped);
-        Ok(())
+    /// A drop is held: "If the VPN drops" blocks while no tunnel is up (after `tun_lost`, or a
+    /// crashed service's block taken over by [`Protection::startup`]). It ends with the next
+    /// session's `tun_up` or with `disconnected()`.
+    pub fn paused(&self) -> bool {
+        let g = self.inner.lock();
+        g.armed && g.conn == Conn::Dropped && g.level_in_force() == KillSwitchLevel::Standard
     }
 
     fn notify(&self, notice: Notice) {
@@ -191,22 +205,6 @@ impl Protection {
             }
         }
         g.skipped = skipped;
-    }
-
-    /// At app start, after the settings import and the legacy cleanup: installs the "Always"
-    /// set where it is in force, otherwise removes persistent leftovers (an earlier strict run,
-    /// a crash). Quiet: the start page shows what the kill switch does.
-    pub fn startup(&self) -> Result<(), ProtectionError> {
-        let mut g = self.inner.lock();
-        let mut t = g.target();
-        t.conn = Conn::Disconnected;
-        t.tun_luid = None;
-        t.session.clear();
-        t.tun_addrs.clear();
-        t.armed = false;
-        let skipped = g.transition(t, true)?;
-        self.note_skipped(&mut g, skipped);
-        Ok(())
     }
 
     /// Before any engine is spawned (TUN sessions only; Soft mode never calls it): engages leak
@@ -277,9 +275,16 @@ impl Protection {
         Ok(())
     }
 
-    /// App exit: closes the dynamic session, so BFE removes its filters; "Always" stays.
+    /// Exit of the owner (app quit, service stop): the session set goes — a dynamic session is
+    /// closed (BFE removes its filters), a static set is deleted (only a crash leaves it, for the
+    /// restarted service to take over); "Always" stays.
     pub fn shutdown(&self) {
         let mut g = self.inner.lock();
+        if g.owner.session_lifetime() == Lifetime::Static
+            && let Err(e) = g.backend.change_session(Lifetime::Static, None, &[])
+        {
+            tracing::warn!(error = %e, "static filters not removed at stop; a reboot clears them");
+        }
         g.drop_dynamic();
         g.conn = Conn::Disconnected;
         g.tun_luid = None;
