@@ -29,6 +29,7 @@ use crate::proto::{
 mod access;
 mod order;
 mod resume;
+mod selftest;
 
 /// Records calls; `start` emits the runtime's event sequence.
 struct FakeRuntime {
@@ -423,7 +424,7 @@ async fn a_second_client_gets_busy_until_the_first_leaves() {
     let mut first = connect(&h).await;
     assert_eq!(
         first.hello("2.0.0").await.expect("first hello"),
-        (1, "2.0.0-test".into())
+        (crate::proto::PROTOCOL, "2.0.0-test".into())
     );
     let mut second = connect(&h).await;
     assert_eq!(

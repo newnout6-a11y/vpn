@@ -5,7 +5,7 @@ automatic start) and the library parts the app uses to talk to it. The service h
 privileged half of the tunnel — `vpnte_tunnel::runtime` with `TunCapture`, `RealEngines` and the
 WFP `Protection` — behind one named pipe; the unelevated app drives it. Proxy mode (Soft) stays
 in the app and never needs the service. Depends on `vpnte-base`, `-winnet`, `-profiles`,
-`-engine`, `-tunnel`; new external dependency: none (`ring` for Ed25519 is already in the
+`-engine`, `-tunnel`, `-probes` (the leak self-test, p-svc-recheck); new external dependency: none (`ring` for Ed25519 is already in the
 workspace through rustls; the SCM is called through `windows` with `Win32_System_Services`).
 
 ```toml
@@ -20,11 +20,11 @@ vpnte-service.workspace = true
 | `sddl` | pipe / service / folder security descriptors, `path_admin_only` (trusted-folder check) |
 | `host` | the session host: one runtime + kill switch, one controlling client, state changes in arrival order, events, client-gone stop, the kept last session and its resume (`keep_sessions_in`, `resume`) |
 | `users` | Windows users (SIDs) of the service: the installing user and each user's first `Hello`; the last `ForgetMe` removes the service |
-| `scm` | `scm::manage` (create / configure / start / stop / delete, installed binary path), `scm::dispatch` (running under the SCM) |
+| `scm` | `scm::manage` (create / configure / start / stop / delete, installed binary path), `scm::dispatch` (running under the SCM; `Control::resumes()` counts wakes from `SERVICE_CONTROL_POWEREVENT`) |
 | `install` | `install` / `uninstall` (elevated verbs), `remove_self`, `install::flow` (the order of their steps and what follows a failed one, over a `Machine` seam), `install::image` (the running exe through a locked handle), `install::pins` (SHA-256 against `resources/engines.toml`) |
 | `per_user` | what the per-user side runs: `request_install` (the one elevated step, asked of Windows with `runas`), `is_current`, `forget_me`, `status` |
 | `paths` | service name, `%ProgramFiles%\VPN Tunnel Enforcer Service\`, `%ProgramData%\VPN Tunnel Enforcer\` with its private `service\` part (`DataFiles`), `secure_dir` |
-| `service` | the service body (`run`): logging, WFP start-up, runtime, host, sandbox, graceful stop; `trusted_install` / `FolderFault` |
+| `service` | the service body (`run`): logging, WFP start-up, runtime, host, sandbox, graceful stop, the re-checks of a held kill switch (`service::recheck`: wake / network change, leak self-test); `trusted_install` / `FolderFault` |
 | `watchdog` | `Engaged` (a capture that records whether a session's filters are held) and `run` (the WFP watchdog exactly while they are) |
 | `sandbox` | engines may not start programs: each engine process in a nested job with `ActiveProcessLimit = 1` |
 | `update` | signed self-update hook: `verify(package, signature)` with `PUBLIC_KEY` (all zero = not set: refuses) |
@@ -93,9 +93,10 @@ connection is at most `frame::FIRST_FRAME_MAX` (16 KiB) and must arrive within `
 connections wait for theirs, more are closed at once: nothing big is held for a client before it
 is identified. Client ->
 `ClientFrame { id, request }`; service -> `ServerFrame::{Reply { id, reply }, Failed { id, error },
-Event { event }}`. `PROTOCOL = 1`; `negotiate(client, service)` = the lower one while they differ
-by at most one. Evolution: add requests / replies / events / optional fields only; the newer
-side speaks the negotiated version; structs refuse unknown fields.
+Event { event }}`. `PROTOCOL = 2` (2 added `StatusWire::self_test`); `negotiate(client, service)` = the
+lower one while they differ by at most one. Evolution: add requests / replies / events / optional
+fields only; the newer side speaks the negotiated version (`StatusWire::speak(protocol)` strips
+what version 1 lacks, on every status the service sends); structs refuse unknown fields.
 ```rust
 pub enum Request { Hello(Hello), Start(Box<TunnelStart>), Stop(StopTunnel), Restart(Box<TunnelStart>),
     RestartWithLast { reason: String }, RestartAdaptive(Box<AdaptiveRestart>), Switch(Box<TunnelStart>),
@@ -124,7 +125,11 @@ Wire mirrors convert from the runtime's types and back where the app needs them
 (`TunnelEvent`, `TunStatusKind`, `StopReceipt`, `ExitInfo`, `ProxyEndpoint`; `proto::back`:
 `TunStatus` with its `SessionEndpoints`, `StartReceipt`, `SwitchReceipt`, `EngineRun` (a reason of
 the "sing-box only" shape reads as none), `KillSwitchState`, `ProtectionWire::to_status`). A pushed
-`StatusWire` also carries `last_exit` / `recent_fault`, for the session's own user only.
+`StatusWire` also carries `last_exit` / `recent_fault`, for the session's own user only, and
+`self_test: Option<vpnte_probes::leak::SelfTestResult>` (protocol 2): the service's latest leak
+self-test, to the session's own user while his TUN session runs; a new result is pushed at once.
+The app passes each new run (`at`) to its leak forwarder: a leak marks the session and is a toast,
+and the leak check card shows the run, as for runs of its own.
 Request -> runtime call: `Start` = `start`, `Restart` = `restart_protected`, `RestartWithLast`,
 `RestartAdaptive`, `Switch` = `switch_upstream` (owner = this connection alive), `Stop` = `stop`.
 Every start-like request first validates, applies its kill-switch settings (`Protection` level,
@@ -237,6 +242,15 @@ is dropped when it comes. A per-user uninstaller sends `ForgetMe` as its first f
   a session's filters: from a successful `begin` to a successful `release` of the capture, so an
   engine crash, a preserved stop and "kill switch active" stay watched; an idle service has no
   timer.
+- Re-checks of a held kill switch (RU audit item 11, p-svc-recheck; `service::recheck`), with the
+  same lifetime as the watchdog: on a wake (`SERVICE_CONTROL_POWEREVENT` with
+  `PBT_APMRESUMEAUTOMATIC`, sent on every wake) and on a network change (winnet `watch_network`,
+  1.5 s debounce) the watchdog's filter check runs at once instead of at its next 30 s tick, and
+  3 s later the leak self-test (curl.exe bound to each physical adapter: the filters do not
+  permit it, so it measures what any program sees). The self-test also runs every 30 s while a
+  TUN session runs with the kill switch on (level in force not Off); a leak is logged and runs
+  the filter check at once. Results go to the status (above). In the service, not the app: with
+  "Always" the session runs before any app does. The DNS canary stays in the app (a plain lookup).
 - Signed self-update: only the hook (`update::verify`, Ed25519 over the whole package,
   `PUBLIC_KEY` constant to fill in; all zero refuses everything with `service.update.keyNotSet`).
 
@@ -291,3 +305,8 @@ elevation) — it adds the WFP engine handle and the SCM thread, no timer.
   signed-update flow beyond the hook, failover / confirmation seams over the pipe (`None` in the
   service), a non-admin squatting test (the DACL mask is unit-tested).
 - Smart RU in the service uses the bundled, pinned rule sets, not the app's refreshed copies.
+- p-svc-recheck (13.11.2026), elevated, CI only: `tests/elevated_recheck.rs` (a TUN session of the
+  installed service under "If the VPN drops" gets a periodic self-test in its pushed status and in
+  the answer to `Status`, never a leak). Never run anywhere: a real wake reaching the service's
+  control handler and a real network change; the re-check's reaction to both is tested with fakes
+  (`service::recheck::tests`).

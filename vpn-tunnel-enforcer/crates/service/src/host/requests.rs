@@ -253,7 +253,8 @@ impl Host {
     /// the user whose start they came from (review service-b2).
     async fn status(&self, client: &ClientInfo) -> StatusReply {
         let runtime = &self.deps.runtime;
-        let tunnel = StatusWire::from(&*runtime.status().borrow());
+        let mut tunnel = StatusWire::from(&*runtime.status().borrow());
+        tunnel.self_test = self.self_test_for(&client.user, &tunnel);
         let own = self.session_user.lock().as_deref() == Some(client.user.as_str());
         let kept = own.then(|| self.kept(&tunnel)).flatten();
         StatusReply {

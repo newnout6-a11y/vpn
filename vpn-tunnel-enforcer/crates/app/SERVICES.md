@@ -117,6 +117,12 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
   proxy mode stays in-process — and the kill switch is applied by the service (no in-process WFP,
   also when elevated); "Always" is offered. A session the service kept after the window crashed is
   taken over by a connect of the same upstream once start-up recovery ran (`take_over`).
+- Leak self-tests and re-checks (RU audit item 11, p-svc-recheck, `svc_tunnel/leaks.rs`): every TUN
+  session, in this process or in the service, gets the DNS canary after a wake or a network change;
+  the 30 s self-test and the immediate filter check run where the filters are: here when this
+  process holds WFP, else in the service, whose runs arrive with its status (`Remote::self_tests`)
+  and go through the same forwarder (a leak -> `Lifecycle::leak_detected` + the
+  `app.tunnel.leakDetected` toast; the leak check card shows the latest run).
 - Keep the two copies of the level in sync: `Settings::kill_switch` (read by the lifecycle at start)
   and `ProtectionDoc::settings.level` (the WFP model); `apply_settings_change` hands a changed
   `kill_switch` to the protection (or refuses it with `needs_admin()` when it cannot be enforced).

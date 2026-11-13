@@ -1,19 +1,23 @@
 //! The service body: everything between the SCM's START and STOP. One current-thread tokio
 //! runtime (a pipe server needs no worker per core); while idle nothing ticks: the listener waits
-//! in an overlapped `ConnectNamedPipe`, the runtime actor on its inbox, and the WFP watchdog runs
-//! only while a session's filters are held ([`crate::watchdog`]).
+//! in an overlapped `ConnectNamedPipe`, the runtime actor on its inbox, and the WFP watchdog with
+//! the re-checks on wake / network change and the leak self-test (`recheck`) runs only while a
+//! session's filters are held ([`crate::watchdog`]).
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::Msg;
 use vpnte_base::types::KillSwitchLevel;
-use vpnte_tunnel::api::{Runtime, StopOptions};
+use vpnte_probes::leak::{SelfTester, SystemEnv, WatchConfig};
+use vpnte_tunnel::api::{CaptureKind, Runtime, StopOptions};
 use vpnte_tunnel::runtime::{
     Capture, ProxyCapture, RealEngines, RuntimeDeps, Timings, TunCapture, TunnelHandle,
 };
+use vpnte_winnet::adapters;
 use vpnte_winnet::wfp::{EnginePaths, Protection};
 
 use crate::host::{self, Host, HostDeps, SharedInputs, WfpKillSwitch};
@@ -26,8 +30,14 @@ use crate::users::Users;
 use crate::watchdog::{self, Engaged};
 use crate::{install, sddl};
 
+mod recheck;
+
+use recheck::Recheck;
+
 /// Service log size at which it is rotated (one `.old` generation).
 const LOG_LIMIT: u64 = 1 << 20;
+/// Debounce of the network-change watch behind the re-checks (a Wi-Fi join flaps several times).
+const NET_SETTLE: Duration = Duration::from_millis(1500);
 
 /// Runs the service until STOP; the exit code goes to the SCM (non-zero = recovery restarts it).
 pub fn run(control: Control) -> u32 {
@@ -146,15 +156,7 @@ async fn serve(control: Control) -> u32 {
     }
     let inputs = Arc::new(SharedInputs::new(Some(dir.clone())));
     let tun = trusted.then(|| Arc::new(Engaged::new(TunCapture::new(protection.clone()))));
-    // The WFP watchdog runs while a session's filters are held (crash pause and preserved block
-    // included); an idle service has no timer.
-    if let Some(tun) = &tun {
-        let protection = protection.clone();
-        let start = move |token| {
-            tokio::spawn(protection.clone().run_watchdog(token));
-        };
-        tokio::spawn(watchdog::run(tun.holds(), start, control.stop.clone()));
-    }
+    let holds = tun.as_ref().map(|t| t.holds());
     let runtime = TunnelHandle::spawn(RuntimeDeps {
         engines: Arc::new(RealEngines::new(singbox, xray, Some(files.logs.clone()))),
         tun: tun.map(|t| t as Arc<dyn Capture>),
@@ -163,6 +165,22 @@ async fn serve(control: Control) -> u32 {
         failover: None,
         confirmations: None,
         timings: Timings::default(),
+    });
+    // While a session's filters are held (crash pause and preserved block included): the WFP
+    // watchdog, and the re-checks on wake and network change with the leak self-test (RU audit
+    // item 11). An idle service has no timer.
+    let recheck = holds.map(|holds| {
+        let recheck = recheck_for(&protection, &runtime);
+        let (protection, held, stop) = (protection.clone(), recheck.clone(), control.clone());
+        let start = move |token: CancellationToken| {
+            tokio::spawn(protection.clone().run_watchdog(token.clone()));
+            let changes = adapters::watch_network(NET_SETTLE, token.clone())
+                .inspect_err(|err| tracing::warn!(%err, "no network-change watch"))
+                .ok();
+            tokio::spawn(held.clone().run(stop.resumes(), changes, token));
+        };
+        tokio::spawn(watchdog::run(holds, start, control.stop.clone()));
+        recheck
     });
     // Engines may not start programs: each one is confined as soon as it shows up.
     tokio::spawn(sandbox::run(
@@ -195,6 +213,9 @@ async fn serve(control: Control) -> u32 {
     };
     let host = Host::new(deps);
     host.keep_sessions_in(files.session.clone());
+    if let Some(recheck) = &recheck {
+        host.report_self_tests(recheck.results.subscribe());
+    }
     control.running();
     tracing::info!("service running");
     let resume = protection.paused() || protection.level_in_force() == KillSwitchLevel::Strict;
@@ -206,6 +227,27 @@ async fn serve(control: Control) -> u32 {
     control.stopping(Duration::from_secs(15));
     finish(&runtime, &protection, &exe, removing.load(Ordering::SeqCst)).await;
     0
+}
+
+/// The re-checks over the real filters, runtime and curl: self-tests while a TUN session runs
+/// with the kill switch on, judged against the level in force.
+fn recheck_for(protection: &Arc<Protection>, runtime: &TunnelHandle) -> Arc<Recheck> {
+    let (tick, gate, level) = (protection.clone(), protection.clone(), protection.clone());
+    let status = runtime.status();
+    Arc::new(Recheck {
+        tick: Arc::new(move || tick.watchdog_tick()),
+        tester: Arc::new(SelfTester::new(Arc::new(SystemEnv))),
+        config: WatchConfig::default(),
+        gate: Arc::new(move || {
+            let s = status.borrow();
+            s.running
+                && s.capture == Some(CaptureKind::Tun)
+                && gate.level_in_force() != KillSwitchLevel::Off
+        }),
+        level: Arc::new(move || level.level_in_force()),
+        results: watch::channel(None).0,
+        settle: recheck::SETTLE,
+    })
 }
 
 /// After a crash that left a held drop, or with "Always" (connect at Windows start), the last

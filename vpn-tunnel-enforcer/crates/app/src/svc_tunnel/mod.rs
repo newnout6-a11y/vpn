@@ -150,11 +150,15 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         doc: b.soft.clone(),
         notifier: b.notifier.clone(),
     });
-    // Unelevated there is no TUN session whose blocking a self-test could check.
-    let leaks = guard
-        .wfp
-        .is_some()
-        .then(|| leaks::Leaks::spawn(status.clone(), b.settings.clone()));
+    // Every TUN session, in this process or in the helper service, gets the leak self-test and
+    // the re-checks after a wake or a network change: the canary runs here, the self-test and the
+    // filter check where the filters are (RU audit item 11).
+    let leaks = Some(leaks::Leaks::spawn(
+        status.clone(),
+        b.settings.clone(),
+        &remote,
+        guard.wfp.is_some(),
+    ));
     let auto_reader = reader.clone();
     let ip = Arc::new(monitor::IpWatch::new(
         ip,

@@ -36,8 +36,9 @@ pub use wire::{
     TunnelEventWire,
 };
 
-/// The protocol version this build speaks.
-pub const PROTOCOL: u32 = 1;
+/// The protocol version this build speaks. 2 (p-svc-recheck): `StatusWire::self_test`, the
+/// service's leak self-test (`StatusWire::speak` strips it for a version-1 client).
+pub const PROTOCOL: u32 = 2;
 
 /// The version both sides speak, or `None` when they are more than one version apart.
 pub fn negotiate(client: u32, service: u32) -> Option<u32> {

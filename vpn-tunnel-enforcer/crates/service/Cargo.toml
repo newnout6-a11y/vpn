@@ -26,6 +26,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 vpnte-base.workspace = true
 vpnte-engine.workspace = true
+# The leak self-test the service runs while the kill switch holds a session (p-svc-recheck).
+vpnte-probes.workspace = true
 vpnte-profiles.workspace = true
 vpnte-tunnel.workspace = true
 vpnte-winnet.workspace = true

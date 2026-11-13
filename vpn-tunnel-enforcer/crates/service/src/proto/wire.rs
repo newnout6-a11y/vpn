@@ -8,6 +8,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use vpnte_base::Msg;
 use vpnte_base::types::{Engine, KillSwitchLevel, ProxyKind, UnixMs};
+use vpnte_probes::leak::SelfTestResult;
 use vpnte_tunnel::api::{
     CaptureKind, ExitInfo, FailoverCause, ModeKind, ProxyEndpoint, SessionEndpoints, Slot,
     StartReceipt, StopReceipt, SwitchFailure, SwitchOutcome, SwitchPhase, SwitchReceipt, TunStatus,
@@ -41,6 +42,24 @@ pub struct StatusWire {
     /// The runtime's recent outbound fault, to the session's own user only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recent_fault: Option<vpnte_base::types::OutboundFault>,
+    /// The service's latest leak self-test of the running TUN session (protocol 2), to the
+    /// session's own user only: the app shows it as it shows its own runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub self_test: Option<SelfTestResult>,
+}
+
+impl StatusWire {
+    /// `protocol` carries `self_test` (version 2 on).
+    pub fn self_test_in(protocol: u32) -> bool {
+        protocol >= 2
+    }
+
+    /// What `protocol` carries: a version-1 client refuses the fields it does not know.
+    pub fn speak(&mut self, protocol: u32) {
+        if !Self::self_test_in(protocol) {
+            self.self_test = None;
+        }
+    }
 }
 
 /// Which engine runs and why (`reason` is the engine crate's serialized `SelectReason`, for
@@ -114,6 +133,7 @@ impl From<&TunStatus> for StatusWire {
             session: s.session.as_ref().map(SessionWire::from),
             last_exit: None,
             recent_fault: None,
+            self_test: None,
         }
     }
 }
@@ -594,5 +614,41 @@ impl ProtectionWire {
             skipped_exceptions: Vec::new(),
             warnings: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_self_test() -> StatusWire {
+        StatusWire {
+            self_test: Some(SelfTestResult::cancelled(KillSwitchLevel::Standard)),
+            ..StatusWire::default()
+        }
+    }
+
+    /// p-svc-recheck: protocol 2 carries the self-test and reads it back; version 1 never sees it.
+    #[test]
+    fn the_self_test_speaks_protocol_2_only() {
+        let mut v2 = with_self_test();
+        v2.speak(2);
+        let json = serde_json::to_string(&v2).expect("json");
+        assert!(json.contains("\"selfTest\""), "{json}");
+        let back: StatusWire = serde_json::from_str(&json).expect("reads back");
+        assert_eq!(back, v2);
+        let mut v1 = with_self_test();
+        v1.speak(1);
+        let json = serde_json::to_string(&v1).expect("json");
+        assert!(!json.contains("selfTest"), "{json}");
+    }
+
+    /// A version-1 service's status (no field) reads as "no self-test" in this build.
+    #[test]
+    fn a_status_without_the_field_reads() {
+        let json = serde_json::to_string(&StatusWire::default()).expect("json");
+        assert!(!json.contains("selfTest"));
+        let back: StatusWire = serde_json::from_str(&json).expect("reads");
+        assert_eq!(back.self_test, None);
     }
 }

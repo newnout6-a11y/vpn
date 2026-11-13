@@ -4,21 +4,23 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 use std::time::Duration;
 
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use windows::Win32::Foundation::{ERROR_CALL_NOT_IMPLEMENTED, NO_ERROR};
 use windows::Win32::System::Services::{
-    RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_PRESHUTDOWN, SERVICE_ACCEPT_SHUTDOWN,
-    SERVICE_ACCEPT_STOP, SERVICE_CONTROL_INTERROGATE, SERVICE_CONTROL_PRESHUTDOWN,
-    SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_RUNNING, SERVICE_START_PENDING,
-    SERVICE_STATUS, SERVICE_STATUS_CURRENT_STATE, SERVICE_STATUS_HANDLE, SERVICE_STOP_PENDING,
-    SERVICE_STOPPED, SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus,
-    StartServiceCtrlDispatcherW,
+    RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_POWEREVENT, SERVICE_ACCEPT_PRESHUTDOWN,
+    SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP, SERVICE_CONTROL_INTERROGATE,
+    SERVICE_CONTROL_POWEREVENT, SERVICE_CONTROL_PRESHUTDOWN, SERVICE_CONTROL_SHUTDOWN,
+    SERVICE_CONTROL_STOP, SERVICE_RUNNING, SERVICE_START_PENDING, SERVICE_STATUS,
+    SERVICE_STATUS_CURRENT_STATE, SERVICE_STATUS_HANDLE, SERVICE_STOP_PENDING, SERVICE_STOPPED,
+    SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus, StartServiceCtrlDispatcherW,
 };
+use windows::Win32::UI::WindowsAndMessaging::PBT_APMRESUMEAUTOMATIC;
 use windows::core::{HSTRING, PWSTR};
 
 use crate::paths::SERVICE_NAME;
 
-/// What the service body gets: the stop request and status reporting.
+/// What the service body gets: the stop request, wakes from sleep and status reporting.
 #[derive(Clone)]
 pub struct Control {
     /// Cancelled on STOP, SHUTDOWN and PRESHUTDOWN.
@@ -35,6 +37,17 @@ impl Control {
     pub fn stopping(&self, hint: Duration) {
         report(SERVICE_STOP_PENDING, 0, hint);
     }
+
+    /// Counts the machine's wakes from sleep from now on (earlier ones are not replayed).
+    pub fn resumes(&self) -> watch::Receiver<u64> {
+        wakes().subscribe()
+    }
+}
+
+/// Wakes from sleep seen by the control handler.
+fn wakes() -> &'static watch::Sender<u64> {
+    static WAKES: OnceLock<watch::Sender<u64>> = OnceLock::new();
+    WAKES.get_or_init(|| watch::channel(0).0)
 }
 
 type Body = fn(Control) -> u32;
@@ -79,7 +92,7 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
 
 unsafe extern "system" fn handler(
     control: u32,
-    _event: u32,
+    event: u32,
     _data: *mut std::ffi::c_void,
     _context: *mut std::ffi::c_void,
 ) -> u32 {
@@ -89,6 +102,14 @@ unsafe extern "system" fn handler(
             report(SERVICE_STOP_PENDING, 0, Duration::from_secs(15));
             if let Some(stop) = STOP.get() {
                 stop.cancel();
+            }
+            NO_ERROR.0
+        }
+        // Every wake brings RESUMEAUTOMATIC (RESUMESUSPEND follows only when someone is at the
+        // keyboard): one re-check per wake.
+        SERVICE_CONTROL_POWEREVENT => {
+            if event == PBT_APMRESUMEAUTOMATIC {
+                wakes().send_modify(|n| *n = n.wrapping_add(1));
             }
             NO_ERROR.0
         }
@@ -104,7 +125,10 @@ fn report(state: SERVICE_STATUS_CURRENT_STATE, exit: u32, hint: Duration) {
     }
     let pending = state == SERVICE_START_PENDING || state == SERVICE_STOP_PENDING;
     let accepts = if state == SERVICE_RUNNING {
-        SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_PRESHUTDOWN
+        SERVICE_ACCEPT_STOP
+            | SERVICE_ACCEPT_SHUTDOWN
+            | SERVICE_ACCEPT_PRESHUTDOWN
+            | SERVICE_ACCEPT_POWEREVENT
     } else {
         0
     };

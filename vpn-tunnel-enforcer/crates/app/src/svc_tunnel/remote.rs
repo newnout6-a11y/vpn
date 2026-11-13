@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{Notice, OutboundFault};
 use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::store::Store;
+use vpnte_probes::leak::SelfTestResult;
 use vpnte_service::pipe::client::{CallError, Client, Frames, Incoming, Requests, ServerCheck};
 use vpnte_service::proto::{
     Event, KeptSession, Reply, Request, StatusReply, StatusWire, TunnelEventWire, WireError,
@@ -62,6 +63,8 @@ struct Inner {
     events: broadcast::Sender<TunnelEvent>,
     /// Kill-switch notices of the service (blocked traffic, skipped exceptions).
     notices: broadcast::Sender<Notice>,
+    /// The service's latest leak self-test of the shown session (protocol 2, p-svc-recheck).
+    self_test: watch::Sender<Option<SelfTestResult>>,
     link: tokio::sync::Mutex<Option<Link>>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Reply, WireError>>>>,
     state: Mutex<State>,
@@ -161,6 +164,7 @@ impl Remote {
             status: watch::channel(TunStatus::default()).0,
             events: broadcast::channel(256).0,
             notices: broadcast::channel(16).0,
+            self_test: watch::channel(None).0,
             link: tokio::sync::Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
             state: Mutex::new(State::default()),
@@ -182,6 +186,11 @@ impl Remote {
 
     pub(super) fn notices(&self) -> broadcast::Receiver<Notice> {
         self.0.notices.subscribe()
+    }
+
+    /// The service's leak self-tests of the shown TUN session, as they arrive.
+    pub(super) fn self_tests(&self) -> watch::Receiver<Option<SelfTestResult>> {
+        self.0.self_test.subscribe()
     }
 
     /// The current connection, or a new one (the pipe's server checked first).
@@ -356,13 +365,26 @@ fn on_status(inner: &Inner, mut wire: StatusWire) {
         st.last_exit = Some(exit.into());
     }
     st.recent_fault = wire.recent_fault.take();
+    let self_test = wire.self_test.take();
     let status = TunStatus::from(wire);
     if st.attaching || st.kept.is_some() {
         st.parked = Some(status);
         return;
     }
     drop(st);
-    inner.status.send_replace(status);
+    // The service pushes its status with every leak self-test (30 s while the kill switch is on):
+    // an unchanged status wakes nobody.
+    inner.status.send_if_modified(|shown| {
+        let changed = *shown != status;
+        if changed {
+            *shown = status;
+        }
+        changed
+    });
+    // Every status carries the service's latest run; the leak forwarder keeps the new ones.
+    if self_test.is_some() {
+        inner.self_test.send_replace(self_test);
+    }
 }
 
 fn on_tunnel(inner: &Inner, wire: TunnelEventWire) {

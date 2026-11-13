@@ -10,13 +10,15 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::Msg;
 use vpnte_base::types::KillSwitchLevel;
-use vpnte_tunnel::api::{Runtime, StopOptions, TunnelEvent};
+use vpnte_probes::leak::SelfTestResult;
+use vpnte_tunnel::api::{CaptureKind, Runtime, StopOptions, TunnelEvent};
 
 use crate::pipe::{ClientCheck, Listener};
+use crate::proto::StatusWire;
 use crate::users::Users;
 
 mod conn;
@@ -74,6 +76,8 @@ pub struct Host {
     generation: Arc<AtomicU64>,
     /// Where the last started session is kept for a resume ([`Host::keep_sessions_in`]).
     memory: OnceLock<PathBuf>,
+    /// The service's leak self-tests ([`Host::report_self_tests`]).
+    self_tests: OnceLock<watch::Receiver<Option<SelfTestResult>>>,
 }
 
 impl Host {
@@ -88,7 +92,24 @@ impl Host {
             upstream: Mutex::new(None),
             generation: Arc::default(),
             memory: OnceLock::new(),
+            self_tests: OnceLock::new(),
         })
+    }
+
+    /// The status carries the latest of these self-test results (set once, at start-up).
+    pub fn report_self_tests(&self, results: watch::Receiver<Option<SelfTestResult>>) {
+        let _ = self.self_tests.set(results);
+    }
+
+    /// The latest self-test for `user`'s running TUN session; nobody else's (it names the
+    /// machine's adapters and the session's exit address).
+    fn self_test_for(&self, user: &str, tunnel: &StatusWire) -> Option<SelfTestResult> {
+        let own = self.session_user.lock().as_deref() == Some(user);
+        let tun = tunnel.running && tunnel.capture == Some(CaptureKind::Tun);
+        if !(own && tun) {
+            return None;
+        }
+        self.self_tests.get()?.borrow().clone()
     }
 
     /// Accepts connections until `cancel`; each runs on its own task.
