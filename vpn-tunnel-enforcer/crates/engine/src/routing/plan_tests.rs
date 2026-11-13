@@ -54,8 +54,12 @@ fn strs(v: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Members of the blocked-in-Russia site list, as the simulation below sees it.
+const BLOCKED: &[&str] = &["rutracker.org", "blocked-in-ru.ru"];
+
 /// Walks rules like sing-box's first match: `gov` = members of the gov geosite, `ru_ip` =
-/// the host resolves into `geoip-ru`. Returns the outbound / server, or `reject`.
+/// the host resolves into `geoip-ru`, [`BLOCKED`] = members of the blocked site list. Returns
+/// the outbound / server, or `reject`.
 fn first<'a>(
     rules: &'a [Value],
     host: &str,
@@ -77,6 +81,7 @@ fn first<'a>(
             sets.iter().any(|s| {
                 (s == "geosite-category-gov-ru" && gov.contains(&host))
                     || (s == "geoip-ru" && ru_ip)
+                    || (s == "geosite-ru-blocked" && BLOCKED.contains(&host))
             })
         };
         hit.then(|| {
@@ -144,10 +149,14 @@ fn smart_ru_without_rule_sets_is_disabled_with_warning() {
 fn smart_ru_route_rules() {
     let f = frag(ON, Some(DIR), &[], &[]);
     let r = &f.parts.domain_rules;
-    assert_eq!(r[0]["outbound"], "proxy-out");
-    assert!(strs(&r[0], "domain_suffix").contains(&".2ip.ru".to_owned()));
-    assert!(strs(&r[0], "domain").contains(&"2ip.ru".to_owned()));
-    assert!(strs(&r[0], "domain").contains(&"ipify.org".to_owned()));
+    assert_eq!(
+        r[0],
+        json!({ "rule_set": ["geosite-ru-blocked", "geoip-ru-blocked"], "outbound": "proxy-out" })
+    );
+    assert_eq!(r[1]["outbound"], "proxy-out");
+    assert!(strs(&r[1], "domain_suffix").contains(&".2ip.ru".to_owned()));
+    assert!(strs(&r[1], "domain").contains(&"2ip.ru".to_owned()));
+    assert!(strs(&r[1], "domain").contains(&"ipify.org".to_owned()));
     let gov = index_of(r, |x| x["rule_set"] == json!(["geosite-category-gov-ru"]));
     let geoip = index_of(r, |x| x["rule_set"] == json!(["geoip-ru"]));
     assert_eq!(r[gov]["outbound"], "direct-out");
@@ -209,8 +218,20 @@ fn smart_ru_route_rules() {
         .iter()
         .map(|s| s["tag"].as_str().unwrap())
         .collect();
-    assert_eq!(tags, ["geoip-ru", "geosite-category-gov-ru"]);
+    assert_eq!(
+        tags,
+        [
+            "geoip-ru",
+            "geosite-category-gov-ru",
+            "geosite-ru-blocked",
+            "geoip-ru-blocked"
+        ]
+    );
     assert_eq!(f.parts.rule_sets[0]["path"], "C:/runtime/dir/geoip-ru.srs");
+    assert_eq!(
+        f.parts.rule_sets[3]["path"],
+        "C:/runtime/dir/geoip-ru-blocked.srs"
+    );
 }
 
 /// smartRouteDnsRules vectors + the `dns-direct` server (tunControllerConfig.test.ts:763).
@@ -219,8 +240,12 @@ fn smart_ru_dns_rules_and_direct_server() {
     let phys = [Ipv4Addr::new(77, 88, 8, 7), Ipv4Addr::new(77, 88, 8, 3)];
     let f = frag(ON, Some(DIR), &[], &phys);
     let d = &f.parts.dns_rules;
-    assert_eq!(d[0]["server"], "dns-remote");
-    assert!(strs(&d[0], "domain_suffix").contains(&".2ip.ru".into()));
+    assert_eq!(
+        d[0],
+        json!({ "rule_set": ["geosite-ru-blocked"], "server": "dns-remote" })
+    );
+    assert_eq!(d[1]["server"], "dns-remote");
+    assert!(strs(&d[1], "domain_suffix").contains(&".2ip.ru".into()));
     let gemini = index_of(d, |x| {
         strs(x, "domain_suffix").contains(&".gemini.google.com".into())
     });
@@ -269,8 +294,8 @@ fn smart_ru_dns_rules_and_direct_server() {
     assert_eq!(tun_only.parts.dns_servers[1]["type"], "dhcp");
 }
 
-/// Owner answer 4 (12.11.2026): block → user direct / VPN in user order → pins → gov (+maps) →
-/// geoip-ru + Kimi; DNS mirrors it.
+/// Owner answer 4 (12.11.2026): block → user direct / VPN in user order → blocked in Russia →
+/// pins → gov (+maps) → geoip-ru + Kimi; DNS mirrors it.
 #[test]
 fn owner_rule_order() {
     let rules = [
@@ -281,7 +306,7 @@ fn owner_rule_order() {
     ];
     let f = frag(ON, Some(DIR), &rules, &[]);
     let r = &f.parts.domain_rules;
-    assert_eq!(r.len(), 11);
+    assert_eq!(r.len(), 12);
     assert_eq!(r[0]["action"], "reject");
     assert_eq!(strs(&r[0], "domain"), ["ads.example"]);
     assert_eq!(
@@ -296,19 +321,23 @@ fn owner_rule_order() {
         (strs(&r[3], "domain"), r[3]["outbound"].as_str()),
         (vec!["gosuslugi.ru".to_owned()], Some("proxy-out"))
     );
-    assert!(strs(&r[4], "domain").contains(&"2ip.ru".into()));
-    assert!(strs(&r[5], "domain_suffix").contains(&".google.com".into()));
-    assert!(strs(&r[6], "domain_suffix").contains(&".youtube.com".into()));
+    assert_eq!(
+        r[4]["rule_set"],
+        json!(["geosite-ru-blocked", "geoip-ru-blocked"])
+    );
+    assert!(strs(&r[5], "domain").contains(&"2ip.ru".into()));
+    assert!(strs(&r[6], "domain_suffix").contains(&".google.com".into()));
+    assert!(strs(&r[7], "domain_suffix").contains(&".youtube.com".into()));
     assert_eq!(
         (
-            r[7]["outbound"].as_str(),
-            strs(&r[7], "domain_suffix")[2].as_str()
+            r[8]["outbound"].as_str(),
+            strs(&r[8], "domain_suffix")[2].as_str()
         ),
         (Some("proxy-out"), ".2gis.com")
     );
-    assert_eq!(r[8]["rule_set"], json!(["geosite-category-gov-ru"]));
-    assert_eq!(r[9]["rule_set"], json!(["geoip-ru"]));
-    assert!(strs(&r[10], "domain_suffix").contains(&".moonshot.cn".into()));
+    assert_eq!(r[9]["rule_set"], json!(["geosite-category-gov-ru"]));
+    assert_eq!(r[10]["rule_set"], json!(["geoip-ru"]));
+    assert!(strs(&r[11], "domain_suffix").contains(&".moonshot.cn".into()));
     assert_eq!(route(&f, "cdn.example.com", false), "proxy-out");
     assert_eq!(route(&f, "www.example.com", false), "direct-out");
     assert_eq!(route(&f, "ads.example", false), "reject");
@@ -375,6 +404,51 @@ fn user_direct_rule_beats_smart_ru_pin() {
     }
     assert_eq!(route(&with, "mail.googleapis.com", false), "proxy-out");
     assert_eq!(dns(&with, "mail.googleapis.com"), "dns-remote");
+}
+
+/// Re-check item 12b: a site blocked in Russia goes through the tunnel and resolves remotely
+/// even when it is an RU name on an RU address (D5 would send it direct, to the RKN stub); the
+/// user's own rule for it still wins (answer 4); with Smart RU off nothing of the lists is
+/// emitted (everything goes through the tunnel anyway).
+#[test]
+fn blocked_in_russia_goes_through_the_tunnel_below_user_rules() {
+    let f = frag(ON, Some(DIR), &[], &[]);
+    assert_eq!(route(&f, "blocked-in-ru.ru", true), "proxy-out");
+    assert_eq!(dns(&f, "blocked-in-ru.ru"), "dns-remote");
+    assert_eq!(route(&f, "rutracker.org", false), "proxy-out");
+    assert_eq!(route(&f, "free.example.ru", true), "direct-out");
+    assert_eq!(dns(&f, "free.example.ru"), "dns-direct");
+    let r = &f.parts.domain_rules;
+    let blocked = index_of(r, |x| {
+        x["rule_set"] == json!(["geosite-ru-blocked", "geoip-ru-blocked"])
+    });
+    let pins = index_of(r, |x| strs(x, "domain").contains(&"2ip.ru".into()));
+    let gov = index_of(r, |x| x["rule_set"] == json!(["geosite-category-gov-ru"]));
+    assert!(blocked < pins && pins < gov);
+
+    let user = [rule("blocked-in-ru.ru", DomainAction::Direct)];
+    let with = frag(ON, Some(DIR), &user, &[]);
+    assert_eq!(route(&with, "blocked-in-ru.ru", true), "direct-out");
+    assert_eq!(dns(&with, "blocked-in-ru.ru"), "dns-direct");
+    assert_eq!(route(&with, "rutracker.org", false), "proxy-out");
+
+    for off in [
+        frag(SmartRu::default(), Some(DIR), &[], &[]),
+        frag(ON, None, &[], &[]),
+    ] {
+        assert!(
+            off.parts
+                .domain_rules
+                .iter()
+                .all(|x| x.get("rule_set").is_none())
+        );
+        assert!(
+            off.parts
+                .dns_rules
+                .iter()
+                .all(|x| x.get("rule_set").is_none())
+        );
+    }
 }
 
 /// domainRulesToSingboxRules vectors (Smart RU off) with the Rust changes: block hoisted
@@ -715,6 +789,11 @@ fn dns_rules_match_by_domain_only() {
             "{r}"
         );
         assert!(keys.iter().any(|k| matchers.contains(k)), "{r}");
-        assert!(strs(r, "rule_set").iter().all(|s| s != GEOIP_RU), "{r}");
+        assert!(
+            strs(r, "rule_set")
+                .iter()
+                .all(|s| s != GEOIP_RU && s != smart_ru::RU_BLOCKED_IPS),
+            "{r}"
+        );
     }
 }

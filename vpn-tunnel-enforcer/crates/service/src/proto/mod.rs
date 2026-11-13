@@ -19,6 +19,7 @@ use vpnte_base::error::ErrorKind;
 use vpnte_base::types::{AdaptiveMode, ClientDevice, EnginePref, ProxyKind};
 use vpnte_engine::routing::dns::DnsAddr;
 use vpnte_engine::routing::domain::DomainRule;
+use vpnte_engine::routing::rulesets::handover::RuleSetFiles;
 use vpnte_profiles::model::Profile;
 use vpnte_tunnel::api::Origin;
 use vpnte_winnet::wfp::ProtectionSettings;
@@ -37,8 +38,10 @@ pub use wire::{
 };
 
 /// The protocol version this build speaks. 2 (p-svc-recheck): `StatusWire::self_test`, the
-/// service's leak self-test (`StatusWire::speak` strips it for a version-1 client).
-pub const PROTOCOL: u32 = 2;
+/// service's leak self-test (`StatusWire::speak` strips it for a version-1 client). 3
+/// (p-smart-lists): `RoutingInputs::rule_sets` (`Request::speak` strips it for a version-2
+/// service).
+pub const PROTOCOL: u32 = 3;
 
 /// The version both sides speak, or `None` when they are more than one version apart.
 pub fn negotiate(client: u32, service: u32) -> Option<u32> {
@@ -138,8 +141,8 @@ pub struct TunnelStart {
     pub origin: Origin,
 }
 
-/// The routing inputs of the user's stores (no file paths: Smart RU uses the service's own rule
-/// sets; split-tunnel entries are already-resolved `process_path_regex` values).
+/// The routing inputs of the user's stores (no file paths: Smart RU's lists travel as bytes;
+/// split-tunnel entries are already-resolved `process_path_regex` values).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct RoutingInputs {
@@ -152,6 +155,28 @@ pub struct RoutingInputs {
     pub public_wifi: bool,
     pub stealth: bool,
     pub auto_restart_on_crash: bool,
+    /// Protocol 3: the app's active Smart RU rule sets (a fresher managed copy, or its bundled
+    /// files). The service checks them again before use and otherwise keeps its own pinned
+    /// ones; `None` = use those.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_sets: Option<RuleSetFiles>,
+}
+
+impl Request {
+    /// This request as a service of version `protocol` reads it: version 2 refuses the rule
+    /// sets as an unknown field, so they are left out there (it keeps its pinned files).
+    pub fn speak(mut self, protocol: u32) -> Self {
+        if protocol < 3 {
+            match &mut self {
+                Request::Start(s) | Request::Restart(s) | Request::Switch(s) => {
+                    s.routing.rule_sets = None;
+                }
+                Request::Inputs(r) => r.rule_sets = None,
+                _ => {}
+            }
+        }
+        self
+    }
 }
 
 /// How a stop ends the session.

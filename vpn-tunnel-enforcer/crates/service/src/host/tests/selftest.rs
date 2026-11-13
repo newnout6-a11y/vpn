@@ -1,5 +1,6 @@
 //! The service's leak self-test in the status (p-svc-recheck): its session's user reads it in
 //! protocol 2, pushed and answered; a version-1 client and other users never get the field.
+//! Since protocol 3 (p-smart-lists) a version-1 client is refused at its `Hello`.
 use vpnte_base::types::UnixMs;
 use vpnte_probes::leak::SelfTestResult;
 use vpnte_tunnel::api::CaptureKind;
@@ -72,7 +73,8 @@ async fn the_self_test_reaches_its_sessions_user() {
 }
 
 /// Protocol compatibility one version back: a version-1 app refuses unknown fields, so it never
-/// gets `selfTest`, neither pushed nor answered.
+/// gets `selfTest`; since protocol 3 it is refused at its `Hello`, and a version-2 app (which
+/// reads `selfTest`) is welcomed at 2.
 #[tokio::test]
 async fn a_version_1_client_never_gets_the_self_test() {
     let h = harness();
@@ -80,29 +82,23 @@ async fn a_version_1_client_never_gets_the_self_test() {
         .open(&h.name)
         .expect("open");
     let mut c = Raw(pipe);
-    let hello = Hello {
-        protocol: 1,
+    let hello = |protocol| Hello {
+        protocol,
         app_version: "2.0.0".into(),
     };
-    c.send(1, Request::Hello(hello)).await;
-    match c.answer(1).await {
-        ServerFrame::Reply { reply, .. } => {
-            assert!(matches!(*reply, Reply::Welcome { protocol: 1, .. }));
-        }
-        other => panic!("refused: {other:?}"),
-    }
-    let results = tun_session(&h, &mut c).await;
-    results.send_replace(Some(sample(9)));
-    c.send(3, Request::Status).await;
-    // Every frame up to the answer, as bytes: what a version-1 decoder would read.
-    loop {
-        let read = tokio::time::timeout(Duration::from_secs(5), frame::read_frame(&mut c.0));
-        let body = read.await.expect("a frame in time").expect("frame");
-        let text = String::from_utf8_lossy(&body);
-        assert!(!text.contains("selfTest"), "{text}");
-        if let ServerFrame::Reply { id: 3, reply } = frame::decode(&body).expect("decode") {
-            assert!(matches!(*reply, Reply::Status(s) if s.tunnel.running));
-            break;
-        }
-    }
+    c.send(1, Request::Hello(hello(1))).await;
+    assert!(matches!(
+        c.answer(1).await,
+        ServerFrame::Failed { error, .. } if error.code == ErrorCode::Version
+    ));
+    let h = harness();
+    let pipe = tokio::net::windows::named_pipe::ClientOptions::new()
+        .open(&h.name)
+        .expect("open");
+    let mut c = Raw(pipe);
+    c.send(1, Request::Hello(hello(2))).await;
+    assert!(matches!(
+        c.answer(1).await,
+        ServerFrame::Reply { reply, .. } if matches!(*reply, Reply::Welcome { protocol: 2, .. })
+    ));
 }

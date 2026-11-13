@@ -602,7 +602,7 @@ async fn an_unknown_request_is_answered_and_the_connection_stays() {
     let hello = crate::proto::ClientFrame {
         id: 1,
         request: Request::Hello(Hello {
-            protocol: 1,
+            protocol: crate::proto::PROTOCOL,
             app_version: "2".into(),
         }),
     };

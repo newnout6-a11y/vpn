@@ -10,20 +10,32 @@ use super::*;
 fn rule_sets_are_local_files() {
     let sets = rule_sets(Path::new(r"C:\runtime\dir\"));
     let tags: Vec<&str> = sets.iter().map(|s| s["tag"].as_str().unwrap()).collect();
-    assert_eq!(tags, ["geoip-ru", "geosite-category-gov-ru"]);
-    for s in &sets {
+    assert_eq!(
+        tags,
+        [
+            "geoip-ru",
+            "geosite-category-gov-ru",
+            "geosite-ru-blocked",
+            "geoip-ru-blocked"
+        ]
+    );
+    for (s, (_, file, _)) in sets.iter().zip(RULE_SETS) {
         assert_eq!(s["type"], "local");
         assert_eq!(s["format"], "binary");
         assert!(s.get("url").is_none() && s.get("download_detour").is_none());
         assert!(s.get("update_interval").is_none());
-        let path = s["path"].as_str().unwrap();
-        assert!(
-            path == "C:/runtime/dir/geoip-ru.srs"
-                || path == "C:/runtime/dir/geosite-category-gov-ru.srs"
-        );
+        assert_eq!(s["path"], format!("C:/runtime/dir/{file}"));
     }
     let files: Vec<&str> = RULE_SETS.iter().map(|(_, f, _)| *f).collect();
-    assert_eq!(files, ["geoip-ru.srs", "geosite-category-gov-ru.srs"]);
+    assert_eq!(
+        files,
+        [
+            "geoip-ru.srs",
+            "geosite-category-gov-ru.srs",
+            "geosite-ru-blocked.srs",
+            "geoip-ru-blocked.srs"
+        ]
+    );
     assert!(
         RULE_SETS
             .iter()

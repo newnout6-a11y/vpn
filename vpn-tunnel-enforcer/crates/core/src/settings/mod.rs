@@ -170,7 +170,8 @@ pub struct Settings {
     pub smart_ru_split: bool,
     /// Maps services go direct too (only with `smart_ru_split`).
     pub smart_ru_maps_direct: bool,
-    /// Where the smart-RU rule sets come from.
+    /// Where the smart-RU rule sets come from. Managed by default (re-check item 12a): the
+    /// lists only download while Smart RU is on, and bundled ones age with the release.
     pub smart_ru_rule_set_mode: RuleSetMode,
     /// Refresh managed rule sets automatically.
     pub smart_ru_rule_set_auto_update: bool,
@@ -227,7 +228,7 @@ impl Default for Settings {
             adaptive_bypass_server_fallback: true,
             smart_ru_split: false,
             smart_ru_maps_direct: false,
-            smart_ru_rule_set_mode: RuleSetMode::Bundled,
+            smart_ru_rule_set_mode: RuleSetMode::Managed,
             smart_ru_rule_set_auto_update: true,
             smart_ru_rule_set_use_proxy: true,
             smart_ru_rule_set_update_hours: 24,

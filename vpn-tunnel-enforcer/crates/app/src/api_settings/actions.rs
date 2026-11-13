@@ -243,13 +243,17 @@ pub async fn reset_os_notification_block(shared: &Arc<Shared>) -> AppResult<ui::
     })
 }
 
-/// Forced download of the Smart RU lists with the saved settings (never the draft, U-02).
+/// Forced download of the Smart RU lists with the saved settings (never the draft, U-02), through
+/// the running session first (re-check item 12c).
 /// Runs on the caller's task: the service's future is not `Send` (see the progress file), so it
 /// cannot be spawned. Dropping it cancels the download, which the service leaves clean (a
 /// generation is promoted whole or not at all).
 pub async fn refresh_rule_sets(shared: &Arc<Shared>) -> AppResult<()> {
     let backend = &shared.backend;
-    let cfg = backend.settings.read(RefreshSettings::from_settings);
+    let mut cfg = backend.settings.read(RefreshSettings::from_settings);
+    if let Ok(tunnel) = backend.tunnel() {
+        cfg.session = crate::svc_tunnel::session_route(&tunnel.runtime_status().borrow());
+    }
     shared.touch(|l| {
         l.rule_sets_refreshing = true;
         l.rule_sets_error = None;

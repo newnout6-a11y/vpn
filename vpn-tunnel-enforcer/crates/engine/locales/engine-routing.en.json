@@ -40,6 +40,7 @@
       "ruleSets": {
         "notUpdated": "Smart RU rules were not updated; the local version is in use",
         "route": {
+          "session": "through the VPN",
           "direct": "directly",
           "userProxy": "through the selected local proxy",
           "happSocks": "through Happ SOCKS 127.0.0.1:10808",

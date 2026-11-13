@@ -70,6 +70,20 @@ repo = "resources/geosite-category-gov-ru.srs"
 install = "resources/geosite-category-gov-ru.srs"
 sha256 = "9d30a966cc2cfbf59b918320c0d5e9f83ab05e514c3d9609904e89825548200d"
 
+# Sites blocked in Russia (Smart RU sends them through the tunnel even when hosted in RU): runetfreedom
+# russia-v2ray-rules-dat, branch `release`, sing-box/rule-set-geosite/geosite-ru-blocked.srs and
+# sing-box/rule-set-geoip/geoip-ru-blocked.srs as of 2026-11-13; licence GPL-3.0 (full text: licenses/GPL-3.0.txt),
+# source https://github.com/runetfreedom/russia-v2ray-rules-dat. A managed refresh replaces them every 24 h.
+[[local]]
+repo = "resources/geosite-ru-blocked.srs"
+install = "resources/geosite-ru-blocked.srs"
+sha256 = "28da75296f79cdc541cf21ae19f5aa1b03bc948572c4d4dc2f33532c372991ff"
+
+[[local]]
+repo = "resources/geoip-ru-blocked.srs"
+install = "resources/geoip-ru-blocked.srs"
+sha256 = "a7785ce2de5127ea394bc421cc759cbd26e33db10186372def01c205d893cdd2"
+
 # The full GPL text: the sing-box LICENSE above is a notice that refers to it.
 [[local]]
 repo = "installer/licenses/GPL-3.0.txt"

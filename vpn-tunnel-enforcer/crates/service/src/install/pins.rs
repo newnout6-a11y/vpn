@@ -13,14 +13,16 @@ const MANIFEST: &str = include_str!(concat!(
 ));
 
 /// What the service runs or loads (sing-box loads both DLLs from its own folder) and the bundled
-/// Smart RU rule sets.
-pub const FILES: [&str; 6] = [
+/// Smart RU rule sets (every file of `vpnte_engine::routing::smart_ru::RULE_SETS`).
+pub const FILES: [&str; 8] = [
     "sing-box.exe",
     "libcronet.dll",
     "wintun.dll",
     "xray.exe",
     "geoip-ru.srs",
     "geosite-category-gov-ru.srs",
+    "geosite-ru-blocked.srs",
+    "geoip-ru-blocked.srs",
 ];
 
 /// `(file name, SHA-256)` of every manifest entry installed under `resources/` (archive members
@@ -150,7 +152,7 @@ mod tests {
     }
 
     /// Review 4555615944: the whole set is checked before the install writes anything; a changed
-    /// last file fails it, naming that file (the first five are the real pinned files).
+    /// last file fails it, naming that file (the others are the real pinned files).
     #[test]
     fn the_whole_set_is_checked_before_anything_is_written() {
         let resources = Path::new(RESOURCES);

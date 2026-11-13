@@ -94,9 +94,10 @@ impl Settings {
             adaptive_bypass_server_fallback: on_unless_false("adaptiveBypassServerFallback"),
             smart_ru_split: truthy("smartRuSplit", false),
             smart_ru_maps_direct: truthy("smartRuMapsDirect", false),
+            // An old explicit "bundled" stays; absent or unknown is today's default (managed).
             smart_ru_rule_set_mode: match text("smartRuRuleSetMode") {
-                Some("managed") => RuleSetMode::Managed,
-                _ => RuleSetMode::Bundled,
+                Some("bundled") => RuleSetMode::Bundled,
+                _ => RuleSetMode::Managed,
             },
             smart_ru_rule_set_auto_update: on_unless_false("smartRuRuleSetAutoUpdate"),
             smart_ru_rule_set_use_proxy: on_unless_false("smartRuRuleSetUseProxy"),

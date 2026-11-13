@@ -244,7 +244,7 @@ fn defaults() {
     assert!(!s.domain_enrichment && !s.auto_network_baseline && !s.advanced_mode);
     assert!(!s.first_run_complete && !s.stealth_mode && !s.smart_ru_split);
     assert!(!s.smart_ru_maps_direct);
-    assert_eq!(s.smart_ru_rule_set_mode, RuleSetMode::Bundled);
+    assert_eq!(s.smart_ru_rule_set_mode, RuleSetMode::Managed);
     assert_eq!(s.proxy_engine, EnginePref::Auto);
     assert_eq!(
         (s.locale, s.active_theme_id.as_str()),
@@ -538,6 +538,21 @@ fn legacy_settings_are_mapped() {
         !text.contains("FAKE-UUID") && !text.contains("directVpnInput"),
         "{text}"
     );
+}
+
+/// Re-check item 12a: an old explicit "bundled" choice is kept; absent or unknown means managed
+/// list updates, today's default.
+#[test]
+fn legacy_rule_set_mode_keeps_an_explicit_bundled() {
+    let mode = |v: serde_json::Value| {
+        Settings::from_legacy(&json!({ "smartRuRuleSetMode": v }))
+            .0
+            .smart_ru_rule_set_mode
+    };
+    assert_eq!(mode(json!("bundled")), RuleSetMode::Bundled);
+    assert_eq!(mode(json!("managed")), RuleSetMode::Managed);
+    assert_eq!(mode(json!(null)), RuleSetMode::Managed);
+    assert_eq!(mode(json!("weird")), RuleSetMode::Managed);
 }
 
 /// settingsForensicsDefault: missing / `null` values take the documented defaults (B10, B11).

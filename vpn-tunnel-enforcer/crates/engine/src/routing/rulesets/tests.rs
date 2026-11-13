@@ -6,7 +6,7 @@ use vpnte_core::settings::ProxyOverride;
 
 use super::fetch::{FetchError, fetch_body, fetch_https};
 use super::*;
-use crate::routing::smart_ru::GOV_RU;
+use crate::routing::smart_ru::{GEOIP_RU, GOV_RU, RU_BLOCKED_IPS, RU_BLOCKED_SITES};
 use crate::test_support::{TempDir, resources, singbox_exe};
 
 fn service(t: &TempDir) -> RuleSetService {
@@ -19,14 +19,16 @@ fn bundled(file: &str) -> Vec<u8> {
 }
 
 /// §2.2 route attempts per `bootstrapRouteMode` (the verifier's correction: `localProxy`
-/// never tries direct, `useProxy = false` forces direct), user proxy first, duplicates out.
+/// never tries direct, `useProxy = false` forces direct), user proxy first, duplicates out;
+/// managed updates every 24 h by default (re-check item 12a).
 #[test]
 fn download_routes() {
     let mut cfg = RefreshSettings::from_settings(&Settings::default());
     assert_eq!(
         (cfg.managed, cfg.auto_update, cfg.use_proxy, cfg.interval_h),
-        (false, true, true, 24)
+        (true, true, true, 24)
     );
+    assert_eq!(cfg.session, None);
     let kinds = |c: &RefreshSettings| c.routes().into_iter().map(|(k, _)| k).collect::<Vec<_>>();
     assert_eq!(
         kinds(&cfg),
@@ -66,6 +68,7 @@ fn download_routes() {
         kinds(&cfg),
         [RouteKind::Direct, RouteKind::UserProxy, RouteKind::HappHttp]
     );
+    cfg.managed = false;
     assert!(
         !cfg.auto_refresh(true),
         "bundled mode never refreshes by itself"
@@ -76,6 +79,46 @@ fn download_routes() {
     assert!(ProxyOverride::parse("socks5://127.0.0.1:1080").is_ok());
     assert!(ProxyOverride::parse("host").is_err());
     assert!(ProxyOverride::parse("h:70000").is_err());
+}
+
+/// Re-check item 12c: the running session's own route comes first in every mode (proxy
+/// capture: its loopback inbound), then the mode's own order; "direct only" stays direct.
+#[test]
+fn the_session_route_is_tried_first() {
+    let mut cfg = RefreshSettings::from_settings(&Settings::default());
+    let inbound = HostPort::new("127.0.0.1", 20808).unwrap();
+    cfg.session = Some(Route::proxy(ProxyKind::Socks5, &inbound, None));
+    let kinds = |c: &RefreshSettings| c.routes().into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+    assert_eq!(
+        kinds(&cfg),
+        [
+            RouteKind::Session,
+            RouteKind::Direct,
+            RouteKind::HappSocks,
+            RouteKind::HappHttp
+        ]
+    );
+    assert_eq!(cfg.routes()[0].1.label(), "socks5h://127.0.0.1:20808");
+    cfg.use_proxy = false;
+    assert_eq!(
+        kinds(&cfg),
+        [RouteKind::Direct],
+        "the user's direct-only choice"
+    );
+    cfg.use_proxy = true;
+    cfg.bootstrap = BootstrapRouteMode::LocalProxy;
+    assert_eq!(
+        kinds(&cfg),
+        [
+            RouteKind::Session,
+            RouteKind::HappSocks,
+            RouteKind::HappHttp
+        ]
+    );
+    assert_eq!(
+        RouteKind::Session.label().key.as_ref(),
+        "engine.routing.ruleSets.route.session"
+    );
 }
 
 /// ruleSetManager.test.ts: managed only when selected AND complete; bundled otherwise; no
@@ -91,7 +134,10 @@ fn source_selection() {
     let generation = format!("{GEN_PREFIX}1700000000000");
     let dir = t.path().join("rulesets").join(&generation);
     std::fs::create_dir_all(&dir).unwrap();
+    // A generation of the old two-file layout is incomplete: the bundled set is used until the
+    // next refresh brings all four.
     std::fs::write(dir.join("geoip-ru.srs"), b"x").unwrap();
+    std::fs::write(dir.join("geosite-category-gov-ru.srs"), b"x").unwrap();
     s.store
         .update(|d| d.current = Some(generation.clone()))
         .unwrap();
@@ -100,7 +146,8 @@ fn source_selection() {
         ActiveSource::Bundled,
         "incomplete generation"
     );
-    std::fs::write(dir.join("geosite-category-gov-ru.srs"), b"x").unwrap();
+    std::fs::write(dir.join("geosite-ru-blocked.srs"), b"x").unwrap();
+    std::fs::write(dir.join("geoip-ru-blocked.srs"), b"x").unwrap();
     assert_eq!(
         active(false).0,
         ActiveSource::Bundled,
@@ -161,6 +208,15 @@ async fn engine_validation() {
     assert_eq!(validate(&exe, &geoip, GEOIP_RU).await, Some(true));
     assert_eq!(validate(&exe, &gov, GOV_RU).await, Some(true));
     assert_eq!(validate(&exe, &geoip, GOV_RU).await, Some(false));
+    // Re-check item 12b: the blocked-in-Russia pair, and swapped sets refused.
+    let sites = resources().join("geosite-ru-blocked.srs");
+    let ips = resources().join("geoip-ru-blocked.srs");
+    assert_eq!(validate(&exe, &sites, RU_BLOCKED_SITES).await, Some(true));
+    assert_eq!(validate(&exe, &ips, RU_BLOCKED_IPS).await, Some(true));
+    assert_eq!(validate(&exe, &ips, RU_BLOCKED_SITES).await, Some(false));
+    assert_eq!(validate(&exe, &gov, RU_BLOCKED_SITES).await, Some(false));
+    assert_eq!(validate(&exe, &geoip, RU_BLOCKED_IPS).await, Some(false));
+    assert_eq!(validate(&exe, &sites, "unknown").await, Some(false));
     let truncated = bundled("geoip-ru.srs")[..2000].to_vec();
     for (name, bytes) in [
         ("empty.srs", Vec::new()),

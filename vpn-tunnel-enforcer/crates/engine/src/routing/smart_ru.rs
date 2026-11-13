@@ -15,10 +15,16 @@ use super::matcher::Matcher;
 
 /// Tag of the destination-IP country set.
 pub const GEOIP_RU: &str = "geoip-ru";
-/// Tag of the curated government / banks domain set (the only domain set used).
+/// Tag of the curated government / banks domain set (the only RU domain set used).
 pub const GOV_RU: &str = "geosite-category-gov-ru";
-/// `(tag, file name, upstream URL)` of both rule sets, in emission order.
-pub const RULE_SETS: [(&str, &str, &str); 2] = [
+/// Tag of the sites blocked in Russia (domain suffixes only, so DNS rules may use it too).
+pub const RU_BLOCKED_SITES: &str = "geosite-ru-blocked";
+/// Tag of the addresses blocked in Russia (IPv4 nets only; never in a DNS rule).
+pub const RU_BLOCKED_IPS: &str = "geoip-ru-blocked";
+/// `(tag, file name, upstream URL)` of every rule set, in emission order. The blocked pair is
+/// runetfreedom's (rebuilt from the RKN registry every ~6 h): a site blocked in Russia but hosted
+/// there, or one the ISP resolver answers with its block-page stub, would otherwise go direct.
+pub const RULE_SETS: [(&str, &str, &str); 4] = [
     (
         GEOIP_RU,
         "geoip-ru.srs",
@@ -28,6 +34,16 @@ pub const RULE_SETS: [(&str, &str, &str); 2] = [
         GOV_RU,
         "geosite-category-gov-ru.srs",
         "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-gov-ru.srs",
+    ),
+    (
+        RU_BLOCKED_SITES,
+        "geosite-ru-blocked.srs",
+        "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geosite/geosite-ru-blocked.srs",
+    ),
+    (
+        RU_BLOCKED_IPS,
+        "geoip-ru-blocked.srs",
+        "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geoip/geoip-ru-blocked.srs",
     ),
 ];
 
@@ -151,8 +167,9 @@ pub enum SmartRoute {
 impl SmartRu {
     /// Smart RU's own route for `host`, read from its name lists in rule order: pins → VPN,
     /// maps when direct, RU TLDs, RU services and Kimi → direct. RU-TLD names are routed by
-    /// `geoip-ru` on the answer, which for them is nearly always direct. Any other name is left
-    /// to the address country, which a name alone cannot tell: `None`.
+    /// `geoip-ru` on the answer, which for them is nearly always direct; the blocked-in-Russia
+    /// list (a file, read by the engine only) sends a few of them through the tunnel instead. Any
+    /// other name is left to the address country, which a name alone cannot tell: `None`.
     pub fn route_of(&self, host: &str) -> Option<SmartRoute> {
         if !self.enabled {
             return None;

@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | `engines.toml` | да | единый манифест закреплений: архивы движков, их файлы и лицензии с SHA-256, локальные файлы поставки, NSIS для сборки |
 | `geoip-ru.srs`, `geosite-category-gov-ru.srs` | да | наборы правил Smart RU; поставляются файлами, потому что неудачная первая загрузка удалённого набора — фатальная ошибка sing-box |
+| `geosite-ru-blocked.srs`, `geoip-ru-blocked.srs` | да | заблокированные в РФ сайты и адреса: Smart RU ведёт их через туннель, даже если сайт в РФ. [runetfreedom/russia-v2ray-rules-dat](https://github.com/runetfreedom/russia-v2ray-rules-dat), ветка `release`, на 13.11.2026; лицензия GPL-3.0 (полный текст ставится в `licenses\GPL-3.0.txt`). Управляемое обновление (раз в 24 ч) заменяет их свежими |
 | `sing-box.exe`, `libcronet.dll` | нет | sing-box 1.14.4 (windows-amd64) |
 | `xray.exe` | нет | Xray 26.11.9 (windows-64) |
 | `wintun.dll` | нет | Wintun 0.14.1 (amd64), нужен sing-box для TUN |

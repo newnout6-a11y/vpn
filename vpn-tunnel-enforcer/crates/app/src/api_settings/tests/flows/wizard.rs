@@ -3,7 +3,7 @@
 use vpnte_base::ErrorKind;
 use vpnte_base::i18n::Lang;
 use vpnte_base::types::KillSwitchLevel;
-use vpnte_core::settings::{ConnectionMode, RoutingMode};
+use vpnte_core::settings::{ConnectionMode, RoutingMode, RuleSetMode};
 use vpnte_ui::wizard::{Connection, KeyText, Routing, WizardApi, WizardChoices};
 
 use super::super::super::WizardService;
@@ -60,6 +60,47 @@ async fn finish_with_a_key_without_tun_stores_soft() {
     off.smart_ru = false;
     api.finish(off).await.expect("finished again");
     assert!(!shared.backend.settings.read(|s| s.smart_ru_split));
+}
+
+/// Re-check item 12a: Smart RU turned on in the wizard turns managed list updates on (24 h); a
+/// re-run with Smart RU already on keeps the update choice made in Settings since.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn smart_ru_on_turns_list_updates_on() {
+    let (shared, _, _, _dir) = setup("wizard-lists", false, FakeAutostart::default());
+    let settings = &shared.backend.settings;
+    settings
+        .update(|s| {
+            s.smart_ru_rule_set_mode = RuleSetMode::Bundled;
+            s.smart_ru_rule_set_auto_update = false;
+            s.smart_ru_rule_set_update_hours = 72;
+        })
+        .expect("saved");
+    let api = WizardService(shared.clone());
+    until(&api.state(), |w| w.open).await;
+    api.finish(choices(Connection::Key, Routing::Soft))
+        .await
+        .expect("finished");
+    let s = settings.snapshot();
+    assert!(s.smart_ru_split);
+    assert_eq!(
+        (
+            s.smart_ru_rule_set_mode,
+            s.smart_ru_rule_set_auto_update,
+            s.smart_ru_rule_set_update_hours
+        ),
+        (RuleSetMode::Managed, true, 24)
+    );
+    settings
+        .update(|s| s.smart_ru_rule_set_mode = RuleSetMode::Bundled)
+        .expect("saved");
+    wizard::open(&shared).await;
+    api.finish(choices(Connection::Key, Routing::Soft))
+        .await
+        .expect("finished again");
+    assert_eq!(
+        settings.read(|s| s.smart_ru_rule_set_mode),
+        RuleSetMode::Bundled
+    );
 }
 
 /// Hard chosen over Soft with a local proxy and no TUN: refused, nothing written, still open.

@@ -122,7 +122,7 @@ fn rule_set_and_interval_changes() {
     new.smart_ru_split = !old.smart_ru_split;
     assert!(settings_change(&old, &new).rule_sets);
     let mut new = old.clone();
-    new.smart_ru_rule_set_mode = RuleSetMode::Managed;
+    new.smart_ru_rule_set_mode = RuleSetMode::Bundled;
     assert!(settings_change(&old, &new).rule_sets);
     let mut new = old.clone();
     new.check_interval_ms = 60_000;

@@ -93,10 +93,13 @@ connection is at most `frame::FIRST_FRAME_MAX` (16 KiB) and must arrive within `
 connections wait for theirs, more are closed at once: nothing big is held for a client before it
 is identified. Client ->
 `ClientFrame { id, request }`; service -> `ServerFrame::{Reply { id, reply }, Failed { id, error },
-Event { event }}`. `PROTOCOL = 2` (2 added `StatusWire::self_test`); `negotiate(client, service)` = the
-lower one while they differ by at most one. Evolution: add requests / replies / events / optional
-fields only; the newer side speaks the negotiated version (`StatusWire::speak(protocol)` strips
-what version 1 lacks, on every status the service sends); structs refuse unknown fields.
+Event { event }}`. `PROTOCOL = 3` (2 added `StatusWire::self_test`, 3 `RoutingInputs::rule_sets`);
+`negotiate(client, service)` = the lower one while they differ by at most one (so a version-1
+client is refused now). Evolution: add requests / replies / events / optional fields only; the
+newer side speaks the negotiated version (`StatusWire::speak(protocol)` strips what version 1
+lacks, on every status the service sends; `Request::speak(protocol)` strips the rule sets for a
+version-2 service, applied by `pipe::client` to every request after `Hello`); structs refuse
+unknown fields.
 ```rust
 pub enum Request { Hello(Hello), Start(Box<TunnelStart>), Stop(StopTunnel), Restart(Box<TunnelStart>),
     RestartWithLast { reason: String }, RestartAdaptive(Box<AdaptiveRestart>), Switch(Box<TunnelStart>),
@@ -108,7 +111,9 @@ pub enum Upstream { LocalProxy { addr: SocketAddr /* loopback */, kind: ProxyKin
 pub struct ServerUpstream { pub id: String, pub profile: Profile, pub device: Option<ClientDevice>, pub engine: EnginePref }
 pub struct RoutingInputs { smart_ru, smart_ru_maps_direct, domain_rules: Vec<DomainRule>, split_direct,
     split_vpn: Vec<String> /* process_path_regex */, dns: Option<DnsAddr>, public_wifi, stealth,
-    auto_restart_on_crash }   // no rule-set dir (the service's own pinned .srs), no inactive splits
+    auto_restart_on_crash,
+    rule_sets: Option<RuleSetFiles> /* protocol 3: the app's active Smart RU lists as bytes */ }
+    // no rule-set dir, no inactive splits
 pub enum Reply { Welcome { protocol, service_version }, Started(Option<StartReceiptWire>),
     Stopped(StopReceiptWire), Switched(Option<SwitchReceiptWire>), Status(Box<StatusReply>),
     Done { removing: bool }, Cleaned { filters, sublayer, provider } }
@@ -130,6 +135,13 @@ the "sing-box only" shape reads as none), `KillSwitchState`, `ProtectionWire::to
 self-test, to the session's own user while his TUN session runs; a new result is pushed at once.
 The app passes each new run (`at`) to its leak forwarder: a leak marks the session and is a toast,
 and the leak check card shows the run, as for runs of its own.
+Smart RU's lists (re-check item 12a): `host::SharedInputs` keeps the last `rule_sets` and checks
+them at the next engine start (`InputsSource::snapshot`): the service's own pinned set as is (no
+copy); another set once per content (`rulesets::handover::accept`: names, 2 MiB cap, canaries with
+the service's own sing-box) into `<ProgramData>\VPN Tunnel Enforcer\service\rulesets\gen-<digest16>`
+(the running engine's folder is kept, older ones pruned); refused or absent: the pinned files of
+the install folder, which now holds all four `.srs` (`install::pins::FILES`). An install folder
+without them all leaves Smart RU to a handed-over set (else off, with the usual warning).
 Request -> runtime call: `Start` = `start`, `Restart` = `restart_protected`, `RestartWithLast`,
 `RestartAdaptive`, `Switch` = `switch_upstream` (owner = this connection alive), `Stop` = `stop`.
 Every start-like request first validates, applies its kill-switch settings (`Protection` level,

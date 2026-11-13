@@ -510,7 +510,9 @@ pub const THIRD_PARTY_CORES: &[&str];  pub fn third_party_core_regexes() -> Vec<
 pub const MAX_INPUT_LEN: usize = 4096;
 
 // routing::smart_ru — verbatim lists
-pub const GEOIP_RU: &str;  pub const GOV_RU: &str;  pub const RULE_SETS: [(&str /*tag*/, &str /*file*/, &str /*url*/); 2];
+pub const GEOIP_RU: &str;  pub const GOV_RU: &str;
+pub const RU_BLOCKED_SITES: &str /* geosite-ru-blocked */;  pub const RU_BLOCKED_IPS: &str /* geoip-ru-blocked */;
+pub const RULE_SETS: [(&str /*tag*/, &str /*file*/, &str /*url*/); 4];   // SagerNet x2, runetfreedom x2
 pub const RU_TLD_SUFFIXES, RU_COMMERCIAL_SERVICE_SUFFIXES, MAPS_DOMAIN_SUFFIXES, GOOGLE_AND_GEMINI_PINNED_SUFFIXES,
           KIMI_MOONSHOT_DOMAIN_SUFFIXES, VPN_PINNED_MEDIA_SUFFIXES, IP_CHECKER_SUFFIXES: &[&str];
 pub struct SmartRu { pub enabled: bool, pub maps_direct: bool }
@@ -529,9 +531,10 @@ pub enum RoutingWarning { SmartRuDisabled, BootstrapDnsFallback, InactiveApp(Ina
 pub fn build(i: &RoutingInputs) -> RoutingFragments;
 ```
 Process rules: P1 `engine_paths` -> direct, P2 third-party cores -> direct, P3 split direct,
-P4 split VPN (one rule per class). Domain rules: block -> user rules in order -> Smart RU pins ->
-gov (+ maps) -> `geoip-ru` + Kimi direct (the user's own rules win over Smart RU; removing one
-brings Smart RU's choice back); DNS rules mirror them (`dns-direct` = UDP to
+P4 split VPN (one rule per class). Domain rules: block -> user rules in order -> blocked in
+Russia (`geosite-ru-blocked` or `geoip-ru-blocked` -> proxy; its DNS rule: the domain set ->
+`dns-remote`) -> Smart RU pins -> gov (+ maps) -> `geoip-ru` + Kimi direct (the user's own rules
+win over Smart RU; removing one brings Smart RU's choice back); DNS rules mirror them (`dns-direct` = UDP to
 `usable_physical_dns`, else `dhcp`). DNS rules match by domain only (domain lists, the
 domain-only gov geosite; never `ip_cidr` / `ip_is_private` / an IP rule set), so they stay
 valid next to the slot mode's `evaluate` bootstrap order (tested through `sing-box check`).
@@ -581,12 +584,14 @@ pub const MAX_FILE_BYTES: usize = 8 MiB;
 pub struct RuleSetsDoc { pub current: Option<String> /* gen-<ms> */, pub last_check: Option<UnixMs>,
     pub last_ok: Option<UnixMs>, pub last_error: Option<RefreshFault>, pub files: BTreeMap<String, FileInfo> }
 pub struct FileInfo { pub size: u64, pub sha256: String, pub route: RouteKind }
-pub enum RouteKind { Direct, UserProxy, HappSocks, HappHttp }      // .label() -> Msg
+pub enum RouteKind { Session, Direct, UserProxy, HappSocks, HappHttp } // .label() -> Msg
 pub enum RefreshFault { Download { file: String }, Invalid { file: String }, EngineUnavailable, Storage } // .msg()
 pub struct RefreshSettings { pub managed: bool, pub auto_update: bool, pub use_proxy: bool, pub interval_h: u32,
-    pub bootstrap: BootstrapRouteMode, pub user_proxy: Option<Route> }
-impl RefreshSettings { pub fn from_settings(s: &Settings) -> Self;
-    pub fn auto_refresh(&self, smart_ru_enabled: bool) -> bool;  pub fn routes(&self) -> Vec<(RouteKind, Route)>; }
+    pub bootstrap: BootstrapRouteMode, pub user_proxy: Option<Route>,
+    pub session: Option<Route> /* the caller's: proxy capture's loopback inbound; None under TUN / idle */ }
+impl RefreshSettings { pub fn from_settings(s: &Settings) -> Self;   // session: None
+    pub fn auto_refresh(&self, smart_ru_enabled: bool) -> bool;
+    pub fn routes(&self) -> Vec<(RouteKind, Route)>; }  // Session first, then direct / proxies per mode
 pub enum ActiveSource { Bundled, Managed { generation: String, since: UnixMs } }
 pub enum RefreshOutcome { Fresh, Updated { generation: String }, Failed(RefreshFault), Cancelled }
 impl RefreshOutcome { pub fn notice(&self) -> Option<Notice>; }   // toast it
@@ -601,10 +606,22 @@ impl RuleSetService {
     pub fn prune(&self) -> usize;                                         // blocking; only before an engine start
 }
 ```
-Downloads are https-only (redirects too, <= 5), <= 8 MiB, 15 s connect / 45 s total, routed
-per `bootstrapRouteMode`; both files are validated by the bundled `sing-box rule-set match`
-with canaries and promoted together as a new immutable generation. A forced refresh during a
+Downloads are https-only (redirects too, <= 5), <= 8 MiB, 15 s connect / 45 s total, through the
+running session first, then per `bootstrapRouteMode`; every file is validated by the bundled
+`sing-box rule-set match` with canaries and all are promoted together as a new immutable
+generation (a generation without all four files counts as incomplete). A forced refresh during a
 running one waits for it.
+
+```rust
+// routing::rulesets::handover — the active set as the app hands it to the helper service (pipe protocol 3)
+pub const MAX_HANDOVER_BYTES: usize = 2 MiB;           // all files together (4 MiB frame, base64)
+pub struct RuleSetFiles;                               // serde: {files:[{name, data: base64}]}; Debug = names + sizes
+impl RuleSetFiles { pub fn read(dir: &Path) -> Option<Self>;   // blocking; every RULE_SETS file, in order, <= cap
+                    pub fn digest(&self) -> String; }          // hex SHA-256 over names + contents
+pub async fn accept(files: &RuleSetFiles, engine: &Path, store: &Path) -> Result<PathBuf, RefreshFault>;
+    // service side: shape + canaries with ITS sing-box, written to store\gen-<digest16> (reused when present)
+pub fn prune_store(store: &Path, keep: &[&Path]);      // blocking; removes the other gen-* folders
+```
 
 ## `apps` — installed applications (split-tunnel picker)
 

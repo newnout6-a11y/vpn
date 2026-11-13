@@ -62,6 +62,7 @@ pub use domains::DomainHistory;
 pub(crate) use gate::BudgetGate;
 pub(crate) use monitor::exit_route;
 pub(crate) use peers::vpn_profile;
+pub(crate) use probe::session_route;
 
 /// The tunnel service and the automation over it, built together: automation drives this
 /// tunnel's lifecycle and shares its one tweak journal.
@@ -275,6 +276,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
     tokio::spawn(probe::refresh_rule_sets(
         b.rule_sets.clone(),
         b.settings.clone(),
+        runtime.status(),
         b.notifier.clone(),
         rule_sets.clone(),
         b.shutdown.child_token(),

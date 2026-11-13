@@ -6,14 +6,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{ClientDevice, Creds, EnginePref, Loopback};
+use vpnte_base::types::{ClientDevice, Creds, EnginePref, Loopback, ProxyKind};
 use vpnte_base::{AppError, AppResult};
-use vpnte_core::net::HostPort;
+use vpnte_core::net::{HostPort, Route};
 use vpnte_core::settings::{ConnectionMode, Settings};
 use vpnte_core::store::Store;
-use vpnte_engine::routing::rulesets::{RefreshSettings, RuleSetService};
+use vpnte_engine::routing::rulesets::{RefreshOutcome, RefreshSettings, RuleSetService};
 use vpnte_probes::ip_monitor::IpEvidence;
 use vpnte_probes::key_health::ProbeCtx;
 use vpnte_probes::leak::{CheckInput, CheckReport, Mode, SelfTestResult};
@@ -175,18 +175,37 @@ fn tail_lines(path: &Path) -> std::io::Result<Vec<String>> {
     Ok(lines)
 }
 
-/// Smart RU rule-set auto refresh (engine API): at start, hourly and when a rule-set setting
-/// changed, only while the settings allow it; a failed refresh is a toast.
+/// The running session's route for the app's own downloads (re-check item 12c): the proxy
+/// capture's loopback mixed inbound (it takes no credentials: loopback only, NOADMIN §2). Under
+/// the TUN capture a direct request already rides the tunnel; idle, there is none.
+pub(crate) fn session_route(status: &TunStatus) -> Option<Route> {
+    match (status.capture, status.session.as_ref()) {
+        (Some(CaptureKind::Proxy), Some(session)) => {
+            let addr = HostPort::new("127.0.0.1", session.proxy_port?).ok()?;
+            Some(Route::proxy(ProxyKind::Socks5, &addr, None))
+        }
+        _ => None,
+    }
+}
+
+/// Smart RU rule-set auto refresh (engine API): at start, hourly, when a rule-set setting
+/// changed and when a session starts (its route may reach the lists when direct did not), only
+/// while the settings allow it, through the running session first. A failure is one toast per
+/// streak: updates are on by default, and a network that cannot reach the lists would otherwise
+/// show the same toast every hour.
 pub(super) async fn refresh_rule_sets(
     service: Arc<RuleSetService>,
     settings: Arc<Store<Settings>>,
+    mut status: watch::Receiver<TunStatus>,
     notifier: Arc<Notifier>,
     wake: Arc<Notify>,
     cancel: CancellationToken,
 ) {
+    let mut failing = false;
     loop {
         let s = settings.snapshot();
-        let cfg = RefreshSettings::from_settings(&s);
+        let mut cfg = RefreshSettings::from_settings(&s);
+        cfg.session = session_route(&status.borrow());
         if cfg.auto_refresh(s.smart_ru_split) {
             // `RuleSetService::refresh` is not `Send` (an `AsyncFn` closure inside), so it cannot
             // be spawned: a blocking thread drives it with the runtime's handle.
@@ -197,10 +216,12 @@ pub(super) async fn refresh_rule_sets(
             })
             .await;
             match outcome {
+                Ok(RefreshOutcome::Cancelled) => {}
                 Ok(outcome) => {
-                    if let Some(notice) = outcome.notice() {
+                    if let Some(notice) = outcome.notice().filter(|_| !failing) {
                         notifier.notify(notice, None);
                     }
+                    failing = matches!(outcome, RefreshOutcome::Failed(_));
                 }
                 Err(e) => tracing::warn!(error = %e, "rule-set refresh task failed"),
             }
@@ -209,6 +230,80 @@ pub(super) async fn refresh_rule_sets(
             () = cancel.cancelled() => return,
             () = wake.notified() => {}
             () = tokio::time::sleep(RULE_SET_CHECK) => {}
+            () = session_started(&mut status) => {}
         }
+    }
+}
+
+/// Resolves when a session starts running; never when the status sender is gone.
+async fn session_started(status: &mut watch::Receiver<TunStatus>) {
+    let mut running = status.borrow_and_update().running;
+    while status.changed().await.is_ok() {
+        let now = status.borrow_and_update().running;
+        if now && !running {
+            return;
+        }
+        running = now;
+    }
+    std::future::pending().await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use vpnte_tunnel::api::{ProxyEndpoint, SessionEndpoints};
+
+    use super::*;
+
+    fn status(capture: Option<CaptureKind>, proxy_port: Option<u16>) -> TunStatus {
+        TunStatus {
+            running: capture.is_some(),
+            capture,
+            session: capture.map(|_| SessionEndpoints {
+                clash_port: 9090,
+                clash_secret: "0".repeat(32),
+                direct: ProxyEndpoint {
+                    port: 9091,
+                    user: "u".into(),
+                    pass: "p".into(),
+                },
+                probe: None,
+                tun_luid: None,
+                tun_alias: None,
+                proxy_port,
+                logs: Vec::new(),
+            }),
+            ..TunStatus::default()
+        }
+    }
+
+    /// Re-check item 12c: the proxy capture's own inbound is the session route; under the TUN
+    /// a direct request already rides the tunnel, and idle there is none.
+    #[test]
+    fn the_session_route_is_the_proxy_capture_inbound() {
+        let route = session_route(&status(Some(CaptureKind::Proxy), Some(20808)));
+        assert_eq!(
+            route.map(|r| r.label()).as_deref(),
+            Some("socks5h://127.0.0.1:20808")
+        );
+        assert_eq!(session_route(&status(Some(CaptureKind::Tun), None)), None);
+        assert_eq!(session_route(&status(None, None)), None);
+    }
+
+    /// A session start wakes the refresh (its route may reach the lists); other changes do not.
+    #[tokio::test]
+    async fn a_session_start_wakes_the_refresh() {
+        let (tx, mut rx) = watch::channel(status(None, None));
+        let waiting = tokio::spawn(async move { session_started(&mut rx).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        tx.send_replace(status(None, None));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiting.is_finished(), "not running yet");
+        tx.send_replace(status(Some(CaptureKind::Proxy), Some(20808)));
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("woken")
+            .expect("task");
     }
 }

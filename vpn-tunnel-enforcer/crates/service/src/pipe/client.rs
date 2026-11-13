@@ -52,6 +52,9 @@ pub struct Client {
     inbox: Vec<u8>,
     /// Not yet written: the rest of a request whose call was dropped goes out before the next.
     outbox: Vec<u8>,
+    /// The negotiated version (the lowest until `Hello` is answered): requests are sent as the
+    /// service reads them ([`Request::speak`]).
+    protocol: u32,
 }
 
 fn failure(key: &'static str, err: impl std::fmt::Display) -> AppError {
@@ -108,6 +111,7 @@ impl Client {
             events: VecDeque::new(),
             inbox: Vec::new(),
             outbox: Vec::new(),
+            protocol: 1,
         })
     }
 
@@ -121,7 +125,10 @@ impl Client {
             Reply::Welcome {
                 protocol,
                 service_version,
-            } => Ok((protocol, service_version)),
+            } => {
+                self.protocol = protocol;
+                Ok((protocol, service_version))
+            }
             other => Err(CallError::Pipe(unexpected(&other))),
         }
     }
@@ -130,6 +137,7 @@ impl Client {
     pub async fn call(&mut self, request: Request) -> Result<Reply, CallError> {
         let id = self.next_id;
         self.next_id += 1;
+        let request = request.speak(self.protocol);
         let bytes = frame::encode(&ClientFrame { id, request })
             .map_err(|e| CallError::Pipe(failure("service.pipe.tooLarge", e)))?;
         self.outbox.extend_from_slice(&bytes);

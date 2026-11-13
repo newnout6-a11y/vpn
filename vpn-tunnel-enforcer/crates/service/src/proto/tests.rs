@@ -114,8 +114,40 @@ fn versions_one_apart_negotiate_down() {
     assert_eq!(negotiate(2, 1), Some(1));
     assert_eq!(negotiate(1, 2), Some(1));
     assert_eq!(negotiate(3, 1), None);
+    assert_eq!(negotiate(PROTOCOL, 2), Some(2), "one version back");
     assert_eq!(negotiate(0, 1), None);
     assert_eq!(negotiate(PROTOCOL, PROTOCOL), Some(PROTOCOL));
+}
+
+/// Protocol 3 (p-smart-lists): the rule sets ride a start as an optional field; a version-2
+/// service never sees it (it refuses unknown fields), and an input without it still reads.
+#[test]
+fn the_rule_sets_are_spoken_from_protocol_3_only() {
+    let resources = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources");
+    let sets = vpnte_engine::routing::rulesets::handover::RuleSetFiles::read(std::path::Path::new(
+        resources,
+    ));
+    assert!(sets.is_some(), "the bundled lists");
+    let mut with = start();
+    with.routing.rule_sets = sets;
+    let requests = [
+        Request::Start(Box::new(with.clone())),
+        Request::Restart(Box::new(with.clone())),
+        Request::Switch(Box::new(with.clone())),
+        Request::Inputs(Box::new(with.routing.clone())),
+    ];
+    for request in requests {
+        let three = serde_json::to_string(&request.clone().speak(3)).expect("json");
+        assert!(three.contains("\"ruleSets\""));
+        let back: Request = serde_json::from_str(&three).expect("a version-3 service reads it");
+        assert_eq!(back, request);
+        let two = serde_json::to_string(&request.speak(2)).expect("json");
+        assert!(!two.contains("ruleSets"), "{}", &two[..two.len().min(200)]);
+    }
+    let without = serde_json::to_string(&start().routing).expect("json");
+    assert!(!without.contains("ruleSets"));
+    let read: RoutingInputs = serde_json::from_str(&without).expect("reads");
+    assert_eq!(read.rule_sets, None);
 }
 
 #[test]

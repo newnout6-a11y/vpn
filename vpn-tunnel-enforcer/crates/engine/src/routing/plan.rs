@@ -6,13 +6,16 @@
 //! - process rules, right after the inbound rules: P1 engine paths → direct, P2 third-party
 //!   cores (local-proxy mode) → direct, P3 user direct apps / commands, P4 user VPN apps;
 //! - domain rules, after hijack-dns / private / UDP guards / STUN pin: D1 user block →
-//!   D2 user direct / VPN rules in the user's order → D3 Smart RU pins → proxy → D4 gov rule
-//!   set (+ maps when direct) → direct → D5 `geoip-ru` + Kimi → direct; final = proxy.
+//!   D2 user direct / VPN rules in the user's order → DB blocked in Russia (domains or
+//!   addresses) → proxy → D3 Smart RU pins → proxy → D4 gov rule set (+ maps when direct) →
+//!   direct → D5 `geoip-ru` + Kimi → direct; final = proxy.
 //!
 //! DNS rules mirror it: R1 block (REFUSED) → R2 user rules → `dns-direct` / `dns-remote` →
-//! R3 pins → `dns-remote` → R4 gov (+ maps) → `dns-direct` → R5 RU TLDs + RU services + Kimi →
-//! `dns-direct`; final = `dns-remote`. A domain that leaves directly must be resolved by the
-//! ISP-visible resolver, or the answer is the VPN-nearest CDN node and `geoip-ru` misses it.
+//! RB blocked domains → `dns-remote` → R3 pins → `dns-remote` → R4 gov (+ maps) → `dns-direct`
+//! → R5 RU TLDs + RU services + Kimi → `dns-direct`; final = `dns-remote`. A domain that leaves
+//! directly must be resolved by the ISP-visible resolver, or the answer is the VPN-nearest CDN
+//! node and `geoip-ru` misses it; a blocked one must not be, or the answer is the ISP's
+//! block-page stub.
 use std::net::Ipv4Addr;
 use std::path::Path;
 
@@ -33,8 +36,9 @@ use crate::tags::{DIRECT_OUT, DNS_DIRECT, DNS_REMOTE, PROXY_OUT};
 #[derive(Debug, Clone, Copy)]
 pub struct RoutingInputs<'a> {
     pub smart: SmartRu,
-    /// Directory holding both `.srs` files (the active rule-set source). `None` forces Smart RU
-    /// off for this run, with a warning; it is never emitted without its files.
+    /// Directory holding every `.srs` file of `smart_ru::RULE_SETS` (the active rule-set
+    /// source). `None` forces Smart RU off for this run, with a warning; it is never emitted
+    /// without its files.
     pub rule_set_dir: Option<&'a Path>,
     /// The user's domain rules in priority order.
     pub domain_rules: &'a [DomainRule],
@@ -155,6 +159,18 @@ pub fn build(i: &RoutingInputs) -> RoutingFragments {
             .push(extend(fields.clone(), &[("outbound", json!(outbound))]));
         out.dns_rules
             .push(extend(fields, &[("server", json!(server))]));
+    }
+    // DB / RB: sites and addresses blocked in Russia go through the tunnel even when hosted in
+    // RU (D5 would send them direct, to the RKN stub). Below the user's rules (answer 4).
+    if smart_dir.is_some() {
+        out.domain_rules.push(json!({
+            "rule_set": [smart_ru::RU_BLOCKED_SITES, smart_ru::RU_BLOCKED_IPS],
+            "outbound": PROXY_OUT,
+        }));
+        out.dns_rules.push(json!({
+            "rule_set": [smart_ru::RU_BLOCKED_SITES],
+            "server": DNS_REMOTE,
+        }));
     }
     // D3 / R3: Smart RU pins, before every RU rule so sniffed SNI beats the IP country.
     if smart_dir.is_some() {

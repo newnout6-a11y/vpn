@@ -17,7 +17,7 @@ const SHARING_VIOLATION: i32 = 32;
 fn manifest_pins_the_bundled_rule_sets() {
     let dir = Path::new(r"C:\Apps\VPN\resources");
     let files = rule_set_files(dir);
-    assert_eq!(files.len(), 2);
+    assert_eq!(files.len(), RULE_SETS.len());
     for (path, name) in files {
         assert_eq!(path, dir.join(name));
         assert!(pin(name).is_some(), "{name}");

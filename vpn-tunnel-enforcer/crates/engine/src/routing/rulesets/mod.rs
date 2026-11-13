@@ -1,8 +1,8 @@
 //! Smart RU rule-set sources: the files shipped in `resources/`, or a managed copy refreshed
-//! from the SagerNet repositories.
+//! from the SagerNet and runetfreedom repositories.
 //!
-//! A refresh downloads both files over HTTPS, has the bundled sing-box parse each one
-//! (`sing-box rule-set match`) and checks canaries, then promotes BOTH together as one new
+//! A refresh downloads every file over HTTPS, has the bundled sing-box parse each one
+//! (`sing-box rule-set match`) and checks canaries, then promotes ALL together as one new
 //! immutable generation directory `gen-<unix ms>`. Anything wrong keeps the active files and
 //! tells the user. Generations are never modified in place: sing-box watches `local` rule-set
 //! files and reloads them when they change, so a running engine keeps its own generation and
@@ -21,17 +21,18 @@ use vpnte_core::paths::DataDirs;
 use vpnte_core::settings::{BootstrapRouteMode, RuleSetMode, Settings};
 use vpnte_core::store::{Document, Store};
 
-use super::smart_ru::{GEOIP_RU, RULE_SETS};
+use super::smart_ru::RULE_SETS;
 use fetch::download;
 use validate::validate;
 
 mod fetch;
+pub mod handover;
 mod validate;
 
 #[cfg(test)]
 mod tests;
 
-/// Largest rule-set file accepted (the bundled ones are 50 KB and 1 KB).
+/// Largest rule-set file accepted (the bundled ones are 50 KB, 1 KB, 520 KB and 200 KB).
 pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 const GEN_PREFIX: &str = "gen-";
 const STAGING: &str = "staging";
@@ -67,6 +68,8 @@ pub struct FileInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RouteKind {
+    /// The running session's own route: the proxy capture's loopback inbound.
+    Session,
     Direct,
     /// The proxy from settings (`proxyOverride`).
     UserProxy,
@@ -80,6 +83,7 @@ impl RouteKind {
     /// User-facing label («напрямую», «через Happ SOCKS 127.0.0.1:10808», …).
     pub fn label(self) -> Msg {
         Msg::new(match self {
+            RouteKind::Session => "engine.routing.ruleSets.route.session",
             RouteKind::Direct => "engine.routing.ruleSets.route.direct",
             RouteKind::UserProxy => "engine.routing.ruleSets.route.userProxy",
             RouteKind::HappSocks => "engine.routing.ruleSets.route.happSocks",
@@ -130,6 +134,10 @@ pub struct RefreshSettings {
     pub bootstrap: BootstrapRouteMode,
     /// The user's proxy (`proxyOverride` with `proxyType`), if set.
     pub user_proxy: Option<Route>,
+    /// The running session's route, tried first (re-check item 12c): the proxy capture's
+    /// loopback inbound. `None` under the TUN capture, where a direct request already rides
+    /// the tunnel, and while nothing runs. Not in the settings: the caller fills it in.
+    pub session: Option<Route>,
 }
 
 impl RefreshSettings {
@@ -142,6 +150,7 @@ impl RefreshSettings {
             interval_h: s.smart_ru_rule_set_update_hours,
             bootstrap: s.bootstrap_route_mode,
             user_proxy: s.proxy_override.as_ref().map(|p| p.route(s.proxy_type)),
+            session: None,
         }
     }
 
@@ -151,9 +160,11 @@ impl RefreshSettings {
         smart_ru_enabled && self.managed && self.auto_update
     }
 
-    /// Download routes in trial order: `auto` = direct, then the proxies; `direct` = direct
-    /// only; `localProxy` = the proxies only (a user whose direct GitHub is blackholed must
-    /// not wait 45 s per file); `use_proxy = false` = direct only.
+    /// Download routes in trial order: the running session first (our own tunnel: the lists
+    /// are blocked or throttled on many Russian networks), then `auto` = direct, then the other
+    /// proxies; `direct` = direct only; `localProxy` = the proxies only (a user whose direct
+    /// GitHub is blackholed must not wait 45 s per file); `use_proxy = false` = direct only,
+    /// without the session's inbound either (the user's explicit choice).
     pub fn routes(&self) -> Vec<(RouteKind, Route)> {
         let mode = if self.use_proxy {
             self.bootstrap
@@ -161,6 +172,9 @@ impl RefreshSettings {
             BootstrapRouteMode::Direct
         };
         let mut out: Vec<(RouteKind, Route)> = Vec::new();
+        if let Some(session) = self.session.as_ref().filter(|_| self.use_proxy) {
+            out.push((RouteKind::Session, session.clone()));
+        }
         if mode != BootstrapRouteMode::LocalProxy {
             out.push((RouteKind::Direct, Route::Direct));
         }
@@ -254,8 +268,8 @@ impl RuleSetService {
     }
 
     /// The directory to pass as `RoutingInputs::rule_set_dir`: the current managed generation
-    /// when `managed` is set and both its files are present, else the bundled files. `None`
-    /// when neither has both files: pass `rule_set_dir: None` (Smart RU off for the run, with
+    /// when `managed` is set and all its files are present, else the bundled files. `None`
+    /// when neither has all files: pass `rule_set_dir: None` (Smart RU off for the run, with
     /// a warning) instead of a missing local rule set, which sing-box refuses to start with.
     pub fn active(&self, managed: bool) -> Option<(ActiveSource, PathBuf)> {
         self.select(managed, vpnte_winnet::elevation::is_elevated())
@@ -315,7 +329,7 @@ impl RuleSetService {
 
 /// Refresh: download → validate → promote.
 impl RuleSetService {
-    /// Downloads, validates and promotes both files (see the module docs). Without `force`
+    /// Downloads, validates and promotes every file (see the module docs). Without `force`
     /// nothing happens while the current generation is younger than the interval and
     /// complete. On any failure the active files stay and the fault is recorded.
     pub async fn refresh(
@@ -386,7 +400,7 @@ impl RuleSetService {
         RefreshOutcome::Failed(fault)
     }
 
-    /// Fetches and validates both files into a fresh staging directory. `Err(None)` =
+    /// Fetches and validates every file into a fresh staging directory. `Err(None)` =
     /// cancelled.
     async fn stage<F>(
         &self,
@@ -471,7 +485,7 @@ fn gen_ms(name: &str) -> UnixMs {
         .unwrap_or(0)
 }
 
-/// Both files present and non-empty.
+/// Every file of `RULE_SETS` present and non-empty.
 fn complete(dir: &Path) -> bool {
     RULE_SETS.iter().all(|(_, file, _)| {
         std::fs::metadata(dir.join(file)).is_ok_and(|m| m.is_file() && m.len() > 0)

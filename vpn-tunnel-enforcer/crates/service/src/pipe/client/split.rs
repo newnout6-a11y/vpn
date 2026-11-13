@@ -28,6 +28,8 @@ pub enum Incoming {
 pub struct Requests {
     writer: Arc<tokio::sync::Mutex<WriteHalf<NamedPipeClient>>>,
     next_id: Arc<AtomicU64>,
+    /// The negotiated version.
+    protocol: u32,
 }
 
 impl Requests {
@@ -39,6 +41,7 @@ impl Requests {
     /// Sends `request` under `id`. The write runs on a task of its own: a caller that gives up
     /// never leaves half a frame on the pipe.
     pub async fn send(&self, id: u64, request: Request) -> Result<(), CallError> {
+        let request = request.speak(self.protocol);
         let bytes = frame::encode(&ClientFrame { id, request })
             .map_err(|e| CallError::Pipe(failure("service.pipe.tooLarge", e)))?;
         let writer = self.writer.clone();
@@ -86,6 +89,7 @@ impl Client {
         let requests = Requests {
             writer: Arc::new(tokio::sync::Mutex::new(self.writer)),
             next_id: Arc::new(AtomicU64::new(self.next_id)),
+            protocol: self.protocol,
         };
         let frames = Frames {
             reader: self.reader,
