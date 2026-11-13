@@ -6,7 +6,10 @@ use vpnte_core::settings::ProxyOverride;
 
 use super::fetch::{FetchError, fetch_body, fetch_https};
 use super::*;
+use vpnte_base::types::Engine;
+
 use crate::routing::smart_ru::{GEOIP_RU, GOV_RU, RU_BLOCKED_IPS, RU_BLOCKED_SITES};
+use crate::singbox_process::child::run_once;
 use crate::test_support::{TempDir, resources, singbox_exe};
 
 fn service(t: &TempDir) -> RuleSetService {
@@ -106,15 +109,16 @@ fn the_session_route_is_tried_first() {
         "the user's direct-only choice"
     );
     cfg.use_proxy = true;
-    cfg.bootstrap = BootstrapRouteMode::LocalProxy;
+    // psmart-a2/b5: «Только напрямую» / «Только через локальный proxy» are kept exactly while
+    // a session runs, as for subscriptions.
+    cfg.bootstrap = BootstrapRouteMode::Direct;
     assert_eq!(
         kinds(&cfg),
-        [
-            RouteKind::Session,
-            RouteKind::HappSocks,
-            RouteKind::HappHttp
-        ]
+        [RouteKind::Direct],
+        "the user's direct-only choice"
     );
+    cfg.bootstrap = BootstrapRouteMode::LocalProxy;
+    assert_eq!(kinds(&cfg), [RouteKind::HappSocks, RouteKind::HappHttp]);
     assert_eq!(
         RouteKind::Session.label().key.as_ref(),
         "engine.routing.ruleSets.route.session"
@@ -205,18 +209,42 @@ async fn engine_validation() {
     let t = TempDir::new("rulesets");
     let geoip = resources().join("geoip-ru.srs");
     let gov = resources().join("geosite-category-gov-ru.srs");
-    assert_eq!(validate(&exe, &geoip, GEOIP_RU).await, Some(true));
-    assert_eq!(validate(&exe, &gov, GOV_RU).await, Some(true));
-    assert_eq!(validate(&exe, &geoip, GOV_RU).await, Some(false));
+    assert_eq!(
+        validate(&exe, &geoip, GEOIP_RU, &resources()).await,
+        Some(true)
+    );
+    assert_eq!(validate(&exe, &gov, GOV_RU, &resources()).await, Some(true));
+    assert_eq!(
+        validate(&exe, &geoip, GOV_RU, &resources()).await,
+        Some(false)
+    );
     // Re-check item 12b: the blocked-in-Russia pair, and swapped sets refused.
     let sites = resources().join("geosite-ru-blocked.srs");
     let ips = resources().join("geoip-ru-blocked.srs");
-    assert_eq!(validate(&exe, &sites, RU_BLOCKED_SITES).await, Some(true));
-    assert_eq!(validate(&exe, &ips, RU_BLOCKED_IPS).await, Some(true));
-    assert_eq!(validate(&exe, &ips, RU_BLOCKED_SITES).await, Some(false));
-    assert_eq!(validate(&exe, &gov, RU_BLOCKED_SITES).await, Some(false));
-    assert_eq!(validate(&exe, &geoip, RU_BLOCKED_IPS).await, Some(false));
-    assert_eq!(validate(&exe, &sites, "unknown").await, Some(false));
+    assert_eq!(
+        validate(&exe, &sites, RU_BLOCKED_SITES, &resources()).await,
+        Some(true)
+    );
+    assert_eq!(
+        validate(&exe, &ips, RU_BLOCKED_IPS, &resources()).await,
+        Some(true)
+    );
+    assert_eq!(
+        validate(&exe, &ips, RU_BLOCKED_SITES, &resources()).await,
+        Some(false)
+    );
+    assert_eq!(
+        validate(&exe, &gov, RU_BLOCKED_SITES, &resources()).await,
+        Some(false)
+    );
+    assert_eq!(
+        validate(&exe, &geoip, RU_BLOCKED_IPS, &resources()).await,
+        Some(false)
+    );
+    assert_eq!(
+        validate(&exe, &sites, "unknown", &resources()).await,
+        Some(false)
+    );
     let truncated = bundled("geoip-ru.srs")[..2000].to_vec();
     for (name, bytes) in [
         ("empty.srs", Vec::new()),
@@ -226,10 +254,20 @@ async fn engine_validation() {
     ] {
         let p = t.path().join(name);
         std::fs::write(&p, bytes).unwrap();
-        assert_eq!(validate(&exe, &p, GEOIP_RU).await, Some(false), "{name}");
+        assert_eq!(
+            validate(&exe, &p, GEOIP_RU, &resources()).await,
+            Some(false),
+            "{name}"
+        );
     }
     assert_eq!(
-        validate(&t.path().join("no-engine.exe"), &geoip, GEOIP_RU).await,
+        validate(
+            &t.path().join("no-engine.exe"),
+            &geoip,
+            GEOIP_RU,
+            &resources()
+        )
+        .await,
         None
     );
 }
@@ -334,6 +372,80 @@ async fn refresh_promotes_or_keeps() {
     assert_eq!(
         s.refresh_with(true, 24, &cancel, fake(None, None)).await,
         RefreshOutcome::Cancelled
+    );
+}
+
+/// `json` compiled by the bundled engine (`sing-box rule-set compile`).
+async fn compiled(exe: &Path, t: &TempDir, json: &str) -> Vec<u8> {
+    let (src, out) = (t.path().join("hostile.json"), t.path().join("hostile.srs"));
+    std::fs::write(&src, json).unwrap();
+    let args = [
+        "rule-set".as_ref(),
+        "compile".as_ref(),
+        src.as_os_str(),
+        "-o".as_ref(),
+        out.as_os_str(),
+    ];
+    let run = run_once(Engine::SingBox, exe, &args, None, Duration::from_secs(20)).await;
+    assert!(run.unwrap().status.success());
+    std::fs::read(out).unwrap()
+}
+
+/// psmart-b3: a crafted geoip-ru that keeps the release's networks and canaries but adds three
+/// quarters of IPv4 passes every canary; its content bounds refuse it, and the active
+/// generation stays.
+#[tokio::test]
+async fn a_set_that_passes_its_canaries_but_not_its_bounds_is_refused() {
+    let Some(exe) = singbox_exe() else { return };
+    let t = TempDir::new("rulesets-hostile");
+    let s = service(&t);
+    let cancel = CancellationToken::new();
+    let first = s.refresh_with(false, 24, &cancel, fake(None, None)).await;
+    assert!(matches!(first, RefreshOutcome::Updated { .. }), "{first:?}");
+    let current = s.store.read(|d| d.current.clone());
+    let release = decompile(&exe, &resources().join("geoip-ru.srs"))
+        .await
+        .unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&release).unwrap();
+    let cidrs = json["rules"][0]["ip_cidr"].as_array_mut().unwrap();
+    cidrs.extend(["64.0.0.0/2", "128.0.0.0/1"].map(serde_json::Value::from));
+    let hostile = compiled(&exe, &t, &json.to_string()).await;
+    let path = t.path().join("geoip-ru.srs");
+    std::fs::write(&path, &hostile).unwrap();
+    for (probe, want) in [
+        ("77.88.8.8", true),
+        ("8.8.8.8", false),
+        ("1.1.1.1", false),
+        ("95.0.0.1", true),
+    ] {
+        let file = path.as_os_str();
+        let args = [
+            "rule-set".as_ref(),
+            "match".as_ref(),
+            "-f".as_ref(),
+            "binary".as_ref(),
+            file,
+            probe.as_ref(),
+        ];
+        let out = run_once(Engine::SingBox, &exe, &args, None, Duration::from_secs(20))
+            .await
+            .unwrap();
+        let hit = String::from_utf8_lossy(&out.stderr).contains("match rules.[");
+        assert_eq!(hit, want, "{probe}: the canaries alone would pass it");
+    }
+    let refused = s
+        .refresh_with(true, 24, &cancel, fake(Some("geoip-ru.srs"), Some(hostile)))
+        .await;
+    assert_eq!(
+        refused,
+        RefreshOutcome::Failed(RefreshFault::Invalid {
+            file: "geoip-ru.srs".into()
+        })
+    );
+    assert_eq!(
+        s.store.read(|d| d.current.clone()),
+        current,
+        "the active generation stays"
     );
 }
 

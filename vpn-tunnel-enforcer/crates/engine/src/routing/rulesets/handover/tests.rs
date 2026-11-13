@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use super::*;
+use crate::routing::rulesets::complete;
 use crate::test_support::{TempDir, resources, singbox_exe};
 
 fn bundled_set() -> RuleSetFiles {
@@ -63,7 +64,9 @@ async fn the_service_accepts_only_sets_that_pass_its_own_checks() {
     let t = TempDir::new("handover-accept");
     let store = t.path().join("rulesets");
     let set = bundled_set();
-    let dir = accept(&set, &exe, &store).await.expect("the bundled set");
+    let dir = accept(&set, &exe, &store, &resources())
+        .await
+        .expect("the bundled set");
     assert!(complete(&dir));
     for (_, file, _) in RULE_SETS {
         assert_eq!(
@@ -71,25 +74,36 @@ async fn the_service_accepts_only_sets_that_pass_its_own_checks() {
             std::fs::read(resources().join(file)).unwrap()
         );
     }
-    assert_eq!(accept(&set, &exe, &store).await, Ok(dir.clone()));
+    assert_eq!(
+        accept(&set, &exe, &store, &resources()).await,
+        Ok(dir.clone())
+    );
 
     let swapped = edited(|f| {
         let geoip = data(f, "geoip-ru.srs");
         f[3]["data"] = geoip;
     });
     assert_eq!(
-        accept(&swapped, &exe, &store).await,
+        accept(&swapped, &exe, &store, &resources()).await,
         Err(RefreshFault::Invalid {
             file: "geoip-ru-blocked.srs".into()
         })
     );
     let reordered = edited(|f| f.swap(2, 3));
-    assert!(accept(&reordered, &exe, &store).await.is_err());
+    assert!(
+        accept(&reordered, &exe, &store, &resources())
+            .await
+            .is_err()
+    );
     let oversized = edited(|f| {
         let big = STANDARD.encode(vec![7u8; MAX_HANDOVER_BYTES]);
         f[0]["data"] = Value::String(big);
     });
-    assert!(accept(&oversized, &exe, &store).await.is_err());
+    assert!(
+        accept(&oversized, &exe, &store, &resources())
+            .await
+            .is_err()
+    );
     let left: Vec<String> = std::fs::read_dir(&store)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -100,4 +114,31 @@ async fn the_service_accepts_only_sets_that_pass_its_own_checks() {
     std::fs::create_dir_all(&old).unwrap();
     prune_store(&store, &[dir.as_path()]);
     assert!(dir.exists() && !old.exists());
+}
+
+/// psmart-a4: a stored folder is trusted by its bytes, never by its name: after a power loss a
+/// renamed folder can hold zeros of the right length; the set is checked and written again.
+#[tokio::test]
+async fn a_stored_set_is_used_only_while_its_bytes_hash_to_it() {
+    let Some(exe) = singbox_exe() else { return };
+    let t = TempDir::new("handover-zeros");
+    let store = t.path().join("rulesets");
+    let set = bundled_set();
+    let dir = accept(&set, &exe, &store, &resources()).await.unwrap();
+    for (_, file, _) in RULE_SETS {
+        let len = std::fs::metadata(dir.join(file)).unwrap().len();
+        std::fs::write(dir.join(file), vec![0u8; len as usize]).unwrap();
+    }
+    assert!(complete(&dir), "name and sizes look right");
+    assert_eq!(
+        accept(&set, &exe, &store, &resources()).await,
+        Ok(dir.clone())
+    );
+    for (_, file, _) in RULE_SETS {
+        assert_eq!(
+            std::fs::read(dir.join(file)).unwrap(),
+            std::fs::read(resources().join(file)).unwrap(),
+            "{file}"
+        );
+    }
 }

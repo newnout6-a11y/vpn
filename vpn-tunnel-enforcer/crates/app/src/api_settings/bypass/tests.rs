@@ -36,13 +36,14 @@ fn the_page_text_is_saved_as_the_canonical_list() {
         core_patch(&patch_with("")).unwrap().proxy_bypass,
         Some(vec![])
     );
-    assert!(next_connect(&patch_with("")));
+    // A running session follows the list: no «at the next connection» note.
+    assert!(!next_connect(&patch_with("")));
     let auto = ui::SettingsPatch {
         proxy_bypass_auto: Some(false),
         ..ui::SettingsPatch::default()
     };
     assert_eq!(core_patch(&auto).unwrap().proxy_bypass_auto, Some(false));
-    assert!(next_connect(&auto));
+    assert!(!next_connect(&auto));
 }
 
 #[test]
@@ -77,7 +78,12 @@ fn the_stored_entries_come_first_in_each_readers_syntax() {
     let list = lists(&s, &auto);
     assert_eq!(
         list.proxy_override,
-        ["corp.example", "*.corp.example", "10.*", "*.bank.example"]
+        [
+            "corp.example",
+            "*.corp.example",
+            "10.0.0.0/8",
+            "*.bank.example"
+        ]
     );
     assert_eq!(
         list.no_proxy,
@@ -92,6 +98,8 @@ fn proxy_mode() -> Settings {
     }
 }
 
+/// The automatic entries need Proxy mode and the switch; without Smart RU the user's Direct
+/// rules alone decide, with Smart RU running but its lists unread nothing is certain.
 #[tokio::test]
 async fn automatic_entries_need_proxy_mode_and_the_switch() {
     let dir = TempDir::new("bypass-auto");
@@ -104,25 +112,21 @@ async fn automatic_entries_need_proxy_mode_and_the_switch() {
         })
         .unwrap()
         .unwrap();
-    let mut cache = None;
-    let got = automatic(&backend, &proxy_mode(), &mut cache).await;
-    assert_eq!(got, [BypassEntry::Site("bank.example".into())]);
-    // Tunnel mode has no system proxy; the switch turns the automatic part off.
-    assert!(
-        automatic(&backend, &Settings::default(), &mut cache)
-            .await
-            .is_empty()
-    );
+    assert!(automatic_wanted(&proxy_mode()));
+    assert!(!automatic_wanted(&Settings::default()), "Tunnel mode");
     let off = Settings {
         proxy_bypass_auto: false,
         ..proxy_mode()
     };
-    assert!(automatic(&backend, &off, &mut cache).await.is_empty());
-    assert!(cache.is_none(), "Smart RU off reads no rule set");
+    assert!(!automatic_wanted(&off));
+    assert_eq!(smart_dir(&backend, &proxy_mode()).await, None);
+    let got = automatic(&backend, &proxy_mode(), false, None);
+    assert_eq!(got, [BypassEntry::Site("bank.example".into())]);
+    assert!(automatic(&backend, &proxy_mode(), true, None).is_empty());
 }
 
-/// With Smart RU on the keeper reads the active (here: bundled) rule sets through the engine
-/// once per directory; skipped quietly where the bundled engine is missing.
+/// With Smart RU on the keeper reads the active (here: bundled) rule sets through the engine;
+/// skipped quietly where the bundled engine is missing.
 #[tokio::test]
 async fn smart_ru_adds_the_gov_list_of_the_active_rule_sets() {
     let dir = TempDir::new("bypass-smart");
@@ -135,13 +139,15 @@ async fn smart_ru_adds_the_gov_list_of_the_active_rule_sets() {
         smart_ru_rule_set_mode: RuleSetMode::Bundled,
         ..proxy_mode()
     };
-    let mut cache = None;
-    let got = automatic(&backend, &s, &mut cache).await;
+    let active = smart_dir(&backend, &s).await.expect("the bundled lists");
+    assert_eq!(active, backend.dirs.resources);
+    let lists = read_lists(&backend.engines.singbox, &active).await.unwrap();
+    let got = automatic(&backend, &s, true, Some(&lists));
     assert!(got.contains(&BypassEntry::Site("gosuslugi.ru".into())));
     assert!(
         !got.iter()
-            .any(|e| ["ru", "su", "xn--p1ai"].contains(&e.to_string().as_str()))
+            .any(|e| ["ru", "su", "xn--p1ai"].contains(&e.to_string().trim_start_matches("*.")))
     );
-    let held = cache.as_ref().map(|(dir, _)| dir.clone());
-    assert_eq!(held.as_deref(), Some(backend.dirs.resources.as_path()));
+    // psmart-b1: the same lists name Smart RU's VPN route for a site blocked in Russia.
+    assert!(lists.blocked_covers("rutracker.org"));
 }

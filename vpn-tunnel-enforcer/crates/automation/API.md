@@ -545,10 +545,13 @@ pub fn feature_name(feature: Feature) -> Msg;  pub fn feature_warning(feature: F
 pub trait SystemProxy: Send + Sync + Debug { fn read(&self) -> io::Result<ProxyConfig>;
     fn write(&self, config: &ProxyConfig) -> io::Result<()>; }
 pub struct WinInet;                                    // impl SystemProxy (the real per-user setting)
-pub const BYPASS: &str = "localhost;127.*;[::1];<local>";
+pub const BYPASS: &str = "localhost;127.0.0.1;[::1];<local>";  // no address glob (fix-lists, pbypass-b4)
+pub const MAX_OVERRIDE: usize = 2064;                  // Windows' exception list limit; the value is cut there
 pub struct Bypass { pub proxy_override: Vec<String>, pub no_proxy: Vec<String> }  // «Не через прокси» items
-pub fn set_bypass(list: Bypass);                       // p-proxy-bypass: the entries of the NEXT apply
+pub fn set_bypass(list: Bypass);                       // the entries of the next apply; a change wakes changes()
+pub fn changes() -> watch::Receiver<u64>;              // fix-lists: a running session follows the list
 pub fn taken() -> Bypass;                              // the entries the current session took
+pub fn next() -> Bypass;                               // the entries of the next apply
 pub fn applied(addr: &HostPort) -> ProxyConfig;        // addr for every protocol, BYPASS + taken(), PAC / auto-detect off
 pub fn applied_with(addr: &HostPort, list: &Bypass) -> ProxyConfig;
 pub fn plan(addr: &HostPort) -> Vec<(Feature, Target, Val)>;  // takes the next list as the session's

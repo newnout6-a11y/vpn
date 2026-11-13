@@ -1,7 +1,8 @@
 //! The active rule sets as the app hands them to the helper service (pipe protocol 3, re-check
 //! item 12a). The service runs as SYSTEM and never reads a user's folder, so the app sends the
-//! bytes; the service checks them again (names, size, canaries with its own pinned sing-box)
-//! before it writes them into its own admin-only folder, and otherwise keeps its pinned files.
+//! bytes; the service checks them again (names, size, canaries and the content bounds against
+//! its own pinned copies, with its own pinned sing-box) before it writes them into its own
+//! admin-only folder, and otherwise keeps its pinned files.
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -11,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
 use super::validate::validate;
-use super::{GEN_PREFIX, RULE_SETS, RefreshFault, STAGING, complete};
+use super::{GEN_PREFIX, RULE_SETS, RefreshFault, STAGING, write_synced};
 
 /// Largest hand-over, all files together: a start travels in one pipe frame of at most 4 MiB,
 /// base64 adds a third, and the user's own rules ride in the same frame (today ~0.8 MB).
@@ -56,6 +57,11 @@ impl RuleSetFiles {
             })
             .collect::<Option<Vec<_>>>()?;
         let set = Self { files };
+        let total: usize = set.files.iter().map(|f| f.data.len()).sum();
+        if total > MAX_HANDOVER_BYTES {
+            // The service then keeps the lists it has: say so where the cause can be seen.
+            tracing::warn!(total, "Smart RU lists over the hand-over cap; not sent");
+        }
         set.well_formed().then_some(set)
     }
 
@@ -84,13 +90,13 @@ impl RuleSetFiles {
 }
 
 /// The service's side: `files` checked again (shape, then each file parsed by `engine` with its
-/// canaries) and written into `store` as `gen-<digest>`, whose folder is returned. A folder of
-/// that digest already there was checked before (the store admits writes by administrators
-/// only), so it is used as is. Anything wrong: `Err`, nothing is used.
+/// canaries and bounded against `reference`, the pinned copies) and written into `store` as
+/// `gen-<digest>`, whose folder is returned. Anything wrong: `Err`, nothing is used.
 pub async fn accept(
     files: &RuleSetFiles,
     engine: &Path,
     store: &Path,
+    reference: &Path,
 ) -> Result<PathBuf, RefreshFault> {
     let invalid = |file: &str| RefreshFault::Invalid {
         file: file.to_owned(),
@@ -100,7 +106,9 @@ pub async fn accept(
     }
     let digest = files.digest();
     let dir = store.join(format!("{GEN_PREFIX}{}", &digest[..16]));
-    if complete(&dir) {
+    // A folder's name proves nothing (psmart-a4): after a power loss a renamed folder can hold
+    // files whose data never reached the disk. Its bytes must still hash to the set.
+    if holds(&dir, &digest).await {
         return Ok(dir);
     }
     let storage = |err: std::io::Error| {
@@ -113,8 +121,8 @@ pub async fn accept(
     let checked = async {
         for (f, (tag, _, _)) in files.files.iter().zip(RULE_SETS) {
             let path = staging.join(&f.name);
-            tokio::fs::write(&path, &f.data).await.map_err(storage)?;
-            match validate(engine, &path, tag).await {
+            write_synced(&path, &f.data).await.map_err(storage)?;
+            match validate(engine, &path, tag, reference).await {
                 Some(true) => {}
                 Some(false) => return Err(invalid(&f.name)),
                 None => return Err(RefreshFault::EngineUnavailable),
@@ -128,6 +136,16 @@ pub async fn accept(
         let _ = tokio::fs::remove_dir_all(&staging).await;
     }
     result.map(|()| dir)
+}
+
+/// `dir` holds exactly the set of `digest` (read back and hashed, off the async threads).
+async fn holds(dir: &Path, digest: &str) -> bool {
+    let dir = dir.to_owned();
+    tokio::task::spawn_blocking(move || RuleSetFiles::read(&dir))
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|set| set.digest() == digest)
 }
 
 /// Removes the generations in `store` other than `keep` (blocking; call before an engine

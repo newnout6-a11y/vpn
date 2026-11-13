@@ -7,18 +7,12 @@ use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use serde_json::{Map, Value};
-use vpnte_base::types::Engine;
 
 use super::BypassEntry;
+use crate::routing::rulesets::decompile;
 use crate::routing::smart_ru::{GOV_RU, RU_BLOCKED_SITES, RULE_SETS};
-use crate::singbox_process::child::run_once;
-
-/// Budget of one `sing-box rule-set decompile` run (the blocked list takes about 0.3 s).
-const DECOMPILE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The gov entries and the blocked names, ready for [`super::automatic`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -46,6 +40,12 @@ impl Names {
         for zone in ancestry(&name).skip(1) {
             self.zones.insert(hash(zone));
         }
+    }
+
+    /// `name` is a held name or lies under one (a keyword, regex or inverted rule is not
+    /// counted: it says nothing certain about one name).
+    fn covers(&self, name: &str) -> bool {
+        ancestry(name).any(|a| self.names.contains(&hash(a)))
     }
 
     /// A held name is `name`, lies under it, or `name` lies under one.
@@ -78,6 +78,12 @@ impl SmartLists {
     /// A blocked name is `name`, lies under it, or `name` lies under one.
     pub fn blocked_near(&self, name: &str) -> bool {
         self.blocked.near(name)
+    }
+
+    /// `name` is on the blocked-in-Russia list or lies under a name on it: Smart RU sends it
+    /// through the VPN (step DB, right after the user's rules).
+    pub fn blocked_covers(&self, name: &str) -> bool {
+        self.blocked.covers(&name.to_ascii_lowercase())
     }
 }
 
@@ -115,37 +121,6 @@ pub async fn read_smart_lists(exe: &Path, dir: &Path) -> io::Result<SmartLists> 
     let gov = decompile(exe, &dir.join(file_of(GOV_RU))).await?;
     let blocked = decompile(exe, &dir.join(file_of(RU_BLOCKED_SITES))).await?;
     SmartLists::parse(&gov, &blocked).map_err(io::Error::other)
-}
-
-/// `sing-box rule-set decompile <file> -o <temp>`: the command writes a file only (`stdout` is
-/// taken as a file name), so the JSON goes through a temp file removed right after.
-async fn decompile(exe: &Path, file: &Path) -> io::Result<String> {
-    // The engine runs in its own folder: relative paths would point there.
-    let file = std::path::absolute(file)?;
-    static RUN: AtomicU64 = AtomicU64::new(0);
-    let out = std::env::temp_dir().join(format!(
-        "vpnte-ruleset-{}-{}.json",
-        std::process::id(),
-        RUN.fetch_add(1, Ordering::Relaxed)
-    ));
-    let args = [
-        "rule-set".as_ref(),
-        "decompile".as_ref(),
-        file.as_os_str(),
-        "-o".as_ref(),
-        out.as_os_str(),
-    ];
-    let run = run_once(Engine::SingBox, exe, &args, None, DECOMPILE_TIMEOUT).await;
-    let text = match run {
-        Ok(o) if o.status.success() => tokio::fs::read_to_string(&out).await,
-        Ok(o) => Err(io::Error::other(format!(
-            "decompile exited with {}",
-            o.status
-        ))),
-        Err(err) => Err(err),
-    };
-    let _ = tokio::fs::remove_file(&out).await;
-    text
 }
 
 /// The file name of a rule set in a rule-set directory.

@@ -22,12 +22,12 @@ pub use lists::{SmartLists, read_smart_lists};
 
 /// Most entries the user's list keeps.
 pub const MAX_ENTRIES: usize = 200;
-/// Longest `ProxyOverride` text the user's list may take; the automatic entries fill the rest
-/// of [`MAX_TEXT`].
-pub const MAX_USER_TEXT: usize = 8 * 1024;
-/// Longest `ProxyOverride` / `NO_PROXY` text the entries may take together: well inside the
-/// tweak journal's 64 KiB value, which must hold the user's own setting as well.
-pub const MAX_TEXT: usize = 16 * 1024;
+/// Longest `ProxyOverride` text the entries may take: Windows keeps at most 2064 characters of
+/// exceptions (IEAK 11, Proxy Settings page), and Soft's own local entries need the rest.
+pub const MAX_OVERRIDE_TEXT: usize = 2000;
+/// Longest `NO_PROXY` text the entries may take: well inside the tweak journal's 64 KiB value,
+/// which must hold the user's own setting as well.
+pub const MAX_NO_PROXY_TEXT: usize = 16 * 1024;
 
 /// One validated entry; its `Display` is the stored form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -49,7 +49,7 @@ pub enum BypassError {
     Invalid(String),
     #[error("more than {MAX_ENTRIES} entries")]
     TooMany,
-    #[error("the list is too long for the system proxy")]
+    #[error("the list is longer than Windows' proxy exceptions take")]
     TooLong,
 }
 
@@ -63,7 +63,9 @@ impl BypassError {
             BypassError::TooMany => {
                 Msg::new("engine.routing.bypass.tooMany").arg("max", MAX_ENTRIES)
             }
-            BypassError::TooLong => Msg::new("engine.routing.bypass.tooLong"),
+            BypassError::TooLong => {
+                Msg::new("engine.routing.bypass.tooLong").arg("max", MAX_OVERRIDE_TEXT)
+            }
         }
     }
 }
@@ -105,10 +107,14 @@ impl BypassEntry {
         }
     }
 
-    /// The `ProxyOverride` items (WinINet / Chromium syntax: `*` wildcards, exact otherwise).
+    /// The `ProxyOverride` items (WinINet / Chromium syntax: `*` wildcards, exact otherwise). A
+    /// range is written as CIDR: Chromium matches `192.168.*` as a host-name pattern, so a page
+    /// could send `192.168.7.1.t.example` around the proxy, while a CIDR item matches addresses
+    /// only. WinINet matches no host against a CIDR item; the engine sends private ranges direct.
     pub fn override_items(&self) -> Vec<String> {
         match self {
             BypassEntry::Site(h) => vec![h.clone(), format!("*.{h}")],
+            BypassEntry::Ipv4Range(octets) => vec![cidr(octets)],
             BypassEntry::Ipv6(ip) => vec![format!("[{ip}]")],
             other => vec![other.to_string()],
         }
@@ -116,21 +122,26 @@ impl BypassEntry {
 
     /// The `NO_PROXY` items. curl, Go and Python read a plain name as the name and its
     /// subdomains, Node's `proxy-from-env` as the name only and `.name` as the subdomains: both
-    /// forms cover the site in all of them. `.name` alone also covers the bare name in curl and
-    /// Python. Ranges become CIDR (curl and Go; others skip what they cannot read).
+    /// forms cover the site in all of them. Subdomains only has no form: curl and Python read
+    /// `.name` as the bare name too (curl `lib/noproxy.c`, CPython `proxy_bypass_environment`),
+    /// and the routing may send that one through the VPN. Ranges become CIDR (curl and Go;
+    /// others skip what they cannot read).
     pub fn no_proxy_items(&self) -> Vec<String> {
         match self {
             BypassEntry::Site(h) => vec![h.clone(), format!(".{h}")],
-            BypassEntry::Subdomains(b) => vec![format!(".{b}")],
+            BypassEntry::Subdomains(_) => Vec::new(),
             BypassEntry::Ipv4(ip) => vec![ip.to_string()],
-            BypassEntry::Ipv4Range(octets) => {
-                let mut full = [0u8; 4];
-                full[..octets.len()].copy_from_slice(octets);
-                vec![format!("{}/{}", Ipv4Addr::from(full), octets.len() * 8)]
-            }
+            BypassEntry::Ipv4Range(octets) => vec![cidr(octets)],
             BypassEntry::Ipv6(ip) => vec![ip.to_string()],
         }
     }
+}
+
+/// `192.168.0.0/16` for the leading octets `[192, 168]`.
+fn cidr(octets: &[u8]) -> String {
+    let mut full = [0u8; 4];
+    full[..octets.len()].copy_from_slice(octets);
+    format!("{}/{}", Ipv4Addr::from(full), octets.len() * 8)
 }
 
 impl fmt::Display for BypassEntry {
@@ -186,7 +197,7 @@ pub fn parse_list(text: &str) -> Result<Vec<BypassEntry>, BypassError> {
         return Err(BypassError::TooMany);
     }
     let items: Vec<String> = out.iter().flat_map(BypassEntry::override_items).collect();
-    if text_len(&items) > MAX_USER_TEXT {
+    if text_len(&items) > MAX_OVERRIDE_TEXT {
         return Err(BypassError::TooLong);
     }
     Ok(out)
@@ -216,9 +227,10 @@ pub struct BypassLists {
     pub no_proxy: Vec<String>,
 }
 
-/// The user's entries, then the automatic ones while both texts stay within [`MAX_TEXT`]. An
-/// automatic `*.x` entry goes to `ProxyOverride` only: `.x` also covers the bare `x` in curl and
-/// Python, and the routing may send that one through the VPN.
+/// The user's entries, then the automatic ones while each text stays within its budget
+/// ([`MAX_OVERRIDE_TEXT`], [`MAX_NO_PROXY_TEXT`]). An automatic entry the exception list has no
+/// room for still goes into `NO_PROXY`: the programs that read it go direct, browsers ask the
+/// engine, which sends the name direct as well.
 pub fn render(user: &[BypassEntry], auto: &[BypassEntry]) -> BypassLists {
     let mut out = BypassLists::default();
     let mut seen = (HashSet::new(), HashSet::new());
@@ -229,22 +241,20 @@ pub fn render(user: &[BypassEntry], auto: &[BypassEntry]) -> BypassLists {
     let mut left_out = 0usize;
     for entry in auto {
         let over = entry.override_items();
-        let no_proxy = match entry {
-            BypassEntry::Subdomains(_) => Vec::new(),
-            _ => entry.no_proxy_items(),
-        };
-        let fits = |list: &[String], more: &[String]| text_len(list) + text_len(more) < MAX_TEXT;
-        if !fits(&out.proxy_override, &over) || !fits(&out.no_proxy, &no_proxy) {
+        if text_len(&out.proxy_override) + text_len(&over) <= MAX_OVERRIDE_TEXT {
+            add(&mut out.proxy_override, &mut seen.0, over);
+        } else {
             left_out += 1;
-            continue;
         }
-        add(&mut out.proxy_override, &mut seen.0, over);
-        add(&mut out.no_proxy, &mut seen.1, no_proxy);
+        let no_proxy = entry.no_proxy_items();
+        if text_len(&out.no_proxy) + text_len(&no_proxy) <= MAX_NO_PROXY_TEXT {
+            add(&mut out.no_proxy, &mut seen.1, no_proxy);
+        }
     }
     if left_out > 0 {
         tracing::info!(
             left_out,
-            "bypass: automatic entries over the size budget left out"
+            "bypass: automatic entries over the exception list's budget kept in NO_PROXY only"
         );
     }
     out

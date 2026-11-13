@@ -94,7 +94,7 @@ impl Settings {
             adaptive_bypass_server_fallback: on_unless_false("adaptiveBypassServerFallback"),
             smart_ru_split: truthy("smartRuSplit", false),
             smart_ru_maps_direct: truthy("smartRuMapsDirect", false),
-            // An old explicit "bundled" stays; absent or unknown is today's default (managed).
+            // The old app saved its default "bundled" for everyone: moved to managed below.
             smart_ru_rule_set_mode: match text("smartRuRuleSetMode") {
                 Some("bundled") => RuleSetMode::Bundled,
                 _ => RuleSetMode::Managed,
@@ -125,6 +125,7 @@ impl Settings {
             // Not a string: an envelope that could not be decrypted, or garbage.
             Some(_) => warnings.push(Msg::new("core.settings.legacyProxyDropped")),
         }
+        settings.move_to_managed_lists();
         (settings, warnings)
     }
 

@@ -4,7 +4,9 @@
 //! VPN rule naming a related site (a keyword one could match a host under any entry, so it
 //! drops them all) and, while Smart RU runs, a pin or a blocked-in-Russia name. Process rules
 //! run before every domain rule: while any app goes through the VPN there are no automatic
-//! entries at all, as the app's names would otherwise leave directly.
+//! entries at all, as the app's names would otherwise leave directly. A whole top-level zone
+//! (`ru`, `*.su`, a gov list's `.psk`) is never one: Smart RU sends a `.ru` site direct only
+//! for a Russian address, and a user's `*.ru -> Direct` rule stays the engine's (re-check 14.1).
 use std::collections::HashSet;
 
 use super::BypassEntry;
@@ -71,7 +73,8 @@ pub fn automatic(i: &AutoInputs) -> Vec<BypassEntry> {
             let Some(name) = name_of(entry) else {
                 return false;
             };
-            !against.near(name)
+            name.contains('.')
+                && !against.near(name)
                 && !pins.iter().any(|p| related(name, p))
                 && !lists.is_some_and(|l| l.blocked_near(name))
         })

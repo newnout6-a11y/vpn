@@ -8,24 +8,34 @@
 //! Beside loopback and local names the bypass list holds the entries of «Не через прокси»
 //! (RU-2026 item 14 a-b: the user's own list and the routing's certain-direct names, built by
 //! `vpnte_engine::routing::bypass`). The app keeps them current with [`set_bypass`]; each apply
-//! takes them as the session's list, which is journalled with the rest of the value.
+//! takes them as the session's list, which is journalled with the rest of the value, and a
+//! running session follows a change ([`changes`]): the engine re-reads the rules at every
+//! restart, and an entry the rules no longer justify must not outlive one (owner answer 4).
 use std::io;
+use std::sync::LazyLock;
 
 use parking_lot::Mutex;
+use tokio::sync::watch;
 use vpnte_core::net::HostPort;
 use vpnte_winnet::sysproxy::{self, ProxyConfig};
 
 use super::env::os_error;
 use super::journal::{Feature, Target, Val};
 
-/// The bypass list while Soft is on: the proxy itself and local names never go through it.
-pub const BYPASS: &str = "localhost;127.*;[::1];<local>";
+/// The bypass list while Soft is on: the proxy itself and local names never go through it. No
+/// `127.*`: Chromium reads a glob as a host-name pattern, so `127.0.0.1.t.example` would leave
+/// around the proxy; Chromium bypasses all of loopback on its own, and the engine sends the rest
+/// of `127.0.0.0/8` direct.
+pub const BYPASS: &str = "localhost;127.0.0.1;[::1];<local>";
+
+/// Longest exception list Windows keeps (IEAK 11, Proxy Settings page: 2064 characters).
+pub const MAX_OVERRIDE: usize = 2064;
 
 /// Longest journal text admitted for the settings (corporate bypass lists run to kilobytes).
 const MAX_TEXT: usize = 64 * 1024;
 
-/// Longest bypass text Soft writes: the journal must also hold the user's own setting.
-const MAX_BYPASS: usize = 32 * 1024;
+/// Longest `NO_PROXY` text Soft writes: the journal must also hold the user's own value.
+pub(super) const MAX_NO_PROXY: usize = 32 * 1024;
 
 /// Entries beside the local ones, in each reader's syntax.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -46,12 +56,18 @@ struct Lists {
 }
 
 impl Lists {
-    /// Makes the next list the session's: a list changed mid-session lands at the next apply
-    /// (a new connection), and until then [`applied`] still reads back what was written, so the
-    /// session never looks taken over by a list that merely changed.
+    /// Makes the next list the session's; until the next apply [`applied`] reads back what was
+    /// written, so the session never looks taken over by a list that merely changed.
     fn take(&mut self) -> Bypass {
         self.taken = self.next.clone();
         self.taken.clone()
+    }
+
+    /// Sets the next list; `true` when it differs.
+    fn set(&mut self, list: Bypass) -> bool {
+        let changed = self.next != list;
+        self.next = list;
+        changed
     }
 }
 
@@ -65,9 +81,22 @@ static LISTS: Mutex<Lists> = Mutex::new(Lists {
     taken: NONE,
 });
 
-/// Sets the entries of the next Soft apply.
-pub fn set_bypass(list: Bypass) {
-    LISTS.lock().next = list;
+/// Counts the changes of the next list (a running session's follower waits on it).
+static CHANGES: LazyLock<watch::Sender<u64>> = LazyLock::new(|| watch::Sender::new(0));
+
+/// Sets the entries of the next Soft apply; a running session is told through [`changes`].
+/// `true` when the list changed.
+pub fn set_bypass(list: Bypass) -> bool {
+    let changed = LISTS.lock().set(list);
+    if changed {
+        CHANGES.send_modify(|n| *n = n.wrapping_add(1));
+    }
+    changed
+}
+
+/// Wakes on each change of the next list.
+pub fn changes() -> watch::Receiver<u64> {
+    CHANGES.subscribe()
 }
 
 /// The entries the current Soft session took (empty before the first apply).
@@ -75,15 +104,19 @@ pub fn taken() -> Bypass {
     LISTS.lock().taken.clone()
 }
 
-/// `base` followed by the items it does not hold yet, joined with `sep`, at most
-/// [`MAX_BYPASS`] long.
-pub(super) fn join(base: &str, sep: char, items: &[String]) -> String {
+/// The entries of the next apply (a running session compares its journalled values with them).
+pub fn next() -> Bypass {
+    LISTS.lock().next.clone()
+}
+
+/// `base` followed by the items it does not hold yet, joined with `sep`, at most `max` long.
+pub(super) fn join(base: &str, sep: char, items: &[String], max: usize) -> String {
     let mut text = base.to_owned();
     for item in items {
         if base.split(sep).any(|b| b == item) {
             continue;
         }
-        if text.len() + 1 + item.len() > MAX_BYPASS {
+        if text.len() + 1 + item.len() > max {
             tracing::warn!(left = items.len(), "bypass list over the size limit cut");
             break;
         }
@@ -127,7 +160,7 @@ pub fn applied_with(addr: &HostPort, list: &Bypass) -> ProxyConfig {
     ProxyConfig {
         use_proxy: true,
         server: addr.to_string(),
-        bypass: join(BYPASS, ';', &list.proxy_override),
+        bypass: join(BYPASS, ';', &list.proxy_override, MAX_OVERRIDE),
         use_pac: false,
         pac_url: String::new(),
         auto_detect: false,

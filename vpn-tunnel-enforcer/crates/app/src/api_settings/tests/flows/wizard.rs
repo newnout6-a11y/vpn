@@ -103,6 +103,36 @@ async fn smart_ru_on_turns_list_updates_on() {
     );
 }
 
+/// psmart-b4: «Автообновлять списки» switched off on the Settings page stays off when a wizard
+/// re-run turns Smart RU on again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_wizard_keeps_a_list_choice_made_in_settings() {
+    let (shared, _, _, _dir) = setup("wizard-choice", false, FakeAutostart::default());
+    let settings = &shared.backend.settings;
+    let off = super::super::super::save::core_patch(&vpnte_ui::settings::SettingsPatch {
+        smart_ru_auto_update: Some(false),
+        ..Default::default()
+    })
+    .expect("patch");
+    settings
+        .update(|s| {
+            s.apply(off);
+            s.smart_ru_split = false;
+        })
+        .expect("saved");
+    let api = WizardService(shared.clone());
+    until(&api.state(), |w| w.open).await;
+    api.finish(choices(Connection::Key, Routing::Soft))
+        .await
+        .expect("finished");
+    let s = settings.snapshot();
+    assert!(s.smart_ru_split);
+    assert_eq!(
+        (s.smart_ru_rule_set_mode, s.smart_ru_rule_set_auto_update),
+        (RuleSetMode::Bundled, false)
+    );
+}
+
 /// Hard chosen over Soft with a local proxy and no TUN: refused, nothing written, still open.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finish_hard_over_local_proxy_is_refused() {

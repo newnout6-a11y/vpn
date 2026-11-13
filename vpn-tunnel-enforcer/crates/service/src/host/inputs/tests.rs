@@ -32,24 +32,45 @@ fn copy_set(dir: &Path) {
     }
 }
 
-/// The bundled set with a blocked-sites list compiled afresh (a newer list the service has not
-/// seen; it still passes the canaries).
-fn fresher_set(t: &Path) -> RuleSetFiles {
-    let dir = t.join("fresher");
-    copy_set(&dir);
-    let source = t.join("sites.json");
-    std::fs::write(
-        &source,
-        r#"{"version":3,"rules":[{"domain_suffix":["rutracker.org","linkedin.com","fresh.example"]}]}"#,
-    )
-    .expect("source");
+fn sing_box(args: &[&std::ffi::OsStr]) {
     let out = std::process::Command::new(Path::new(RESOURCES).join("sing-box.exe"))
-        .args(["rule-set", "compile", "--output"])
-        .arg(dir.join("geosite-ru-blocked.srs"))
-        .arg(&source)
+        .args(args)
         .output()
         .expect("sing-box ran");
     assert!(out.status.success(), "{out:?}");
+}
+
+/// The bundled set with the blocked-sites list compiled afresh with `extra` names (a newer list
+/// the service has not seen, of the release's size; it still passes the canaries).
+fn fresher_set(t: &Path, name: &str, extra: &str) -> RuleSetFiles {
+    let dir = t.join(name);
+    copy_set(&dir);
+    let (json, file) = (
+        t.join(format!("{name}.json")),
+        dir.join("geosite-ru-blocked.srs"),
+    );
+    let decompile = ["rule-set", "decompile"].map(std::ffi::OsStr::new);
+    sing_box(&[
+        decompile[0],
+        decompile[1],
+        file.as_os_str(),
+        "-o".as_ref(),
+        json.as_os_str(),
+    ]);
+    let mut source: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json).expect("decompiled")).expect("json");
+    source["rules"][0]["domain_suffix"]
+        .as_array_mut()
+        .expect("suffixes")
+        .push(extra.into());
+    std::fs::write(&json, source.to_string()).expect("source");
+    sing_box(&[
+        "rule-set".as_ref(),
+        "compile".as_ref(),
+        "--output".as_ref(),
+        file.as_os_str(),
+        json.as_os_str(),
+    ]);
     RuleSetFiles::read(&dir).expect("a full set")
 }
 
@@ -117,7 +138,7 @@ async fn the_lists_cross_the_pipe_and_are_used_after_the_service_checks_them() {
     let t = temp("pipe");
     let store = t.join("store");
     let inputs = SharedInputs::with_store(Some(pinned.to_owned()), Some(store.clone()));
-    let set = fresher_set(&t);
+    let set = fresher_set(&t, "fresher", "fresh.example");
 
     let got = over_the_pipe(3, routing(Some(set.clone()))).await;
     assert_eq!(got.rule_sets.as_ref(), Some(&set));
@@ -177,5 +198,34 @@ async fn a_failing_set_keeps_the_pinned_files() {
     let incomplete = SharedInputs::with_store(Some(partial), Some(store));
     incomplete.set(&routing(None), KillSwitchLevel::Off);
     assert_eq!(incomplete.get().rule_set_dir, None);
+    let _ = std::fs::remove_dir_all(&t);
+}
+
+/// Decision 1 of fix-lists (psmart-b3): a set that fails its checks keeps the set in use before
+/// it, here a fresher one that passed, not the older pinned files; also when sent again.
+#[tokio::test]
+async fn a_failing_set_keeps_the_last_set_that_passed() {
+    let pinned = Path::new(RESOURCES);
+    if !pinned.join("sing-box.exe").is_file() {
+        return;
+    }
+    let t = temp("keeps");
+    let inputs = SharedInputs::with_store(Some(pinned.to_owned()), Some(t.join("store")));
+    let fresher = fresher_set(&t, "fresher", "fresh.example");
+    inputs.set(&routing(Some(fresher)), KillSwitchLevel::Off);
+    let fresh = inputs.snapshot().await.expect("inputs").rule_set_dir;
+    assert!(fresh.as_deref().is_some_and(|d| d != pinned), "{fresh:?}");
+    let bad = t.join("bad");
+    copy_set(&bad);
+    std::fs::copy(
+        pinned.join("geoip-ru.srs"),
+        bad.join("geoip-ru-blocked.srs"),
+    )
+    .expect("swap");
+    for _ in 0..2 {
+        inputs.set(&routing(RuleSetFiles::read(&bad)), KillSwitchLevel::Off);
+        let dir = inputs.snapshot().await.expect("inputs").rule_set_dir;
+        assert_eq!(dir, fresh);
+    }
     let _ = std::fs::remove_dir_all(&t);
 }

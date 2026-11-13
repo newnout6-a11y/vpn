@@ -239,6 +239,8 @@ pub fn dns_view(doc: &RulesDoc) -> ui::DnsView {
 }
 
 pub fn domains_view(doc: &RulesDoc, smart: SmartRu) -> ui::DomainsView {
+    // Smart RU's own route needs its blocked-in-Russia list, read back by the bypass keeper.
+    let lists = super::bypass::smart_lists();
     let rules = doc
         .domain_rules
         .iter()
@@ -247,10 +249,12 @@ pub fn domains_view(doc: &RulesDoc, smart: SmartRu) -> ui::DomainsView {
             pattern: r.pattern.to_string(),
             action: rule_action(r.action),
             hits: doc.hit_count(r.id),
-            overrides: smart.overridden_by(r).map(|route| match route {
-                SmartRoute::Direct => ui::SmartRoute::Direct,
-                SmartRoute::Vpn => ui::SmartRoute::Vpn,
-            }),
+            overrides: smart
+                .overridden_by(r, lists.as_deref())
+                .map(|route| match route {
+                    SmartRoute::Direct => ui::SmartRoute::Direct,
+                    SmartRoute::Vpn => ui::SmartRoute::Vpn,
+                }),
         })
         .collect();
     ui::DomainsView {

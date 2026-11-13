@@ -246,8 +246,12 @@ process-wide list). It hands `Settings::proxy_bypass` (the user's list, validate
 `routing::bypass::parse_list` on save) plus, while `proxy_bypass_auto` is on and the routing mode is
 Proxy, the routing's certain-direct names (`routing::bypass::automatic`; Smart RU's gov list and
 blocked names read once per rule-set directory with `sing-box rule-set decompile`) to
-`sysproxy::set_bypass` at start and on every settings / rules change (10 min re-check for a
-managed rule-set refresh). Soft takes the list at its next apply: a change is a next-connect change.
+`sysproxy::set_bypass` at start and on every settings / rules / rule-set state change (fix-lists:
+while a new directory is read nothing automatic is handed over). A running Soft session follows the
+list (`svc_tunnel::soft`: one write lock with apply / rollback / «Вернуть»; a proxy another program
+took is left alone), so an entry the rules no longer justify never outlives an engine restart. The
+lists read back are shared (`bypass::smart_lists`) for the rule notes of the Settings page (Smart
+RU's VPN route for a site blocked in Russia).
 
 ## Update channel (`svc_update`, package p-updates)
 `root::contexts` adds `svc_update::contexts(&backend)`: one `Rc<dyn vpnte_ui::updates::UpdatesApi>`

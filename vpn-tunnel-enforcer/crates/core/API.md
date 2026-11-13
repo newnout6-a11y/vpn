@@ -158,11 +158,12 @@ pub enum ConnectionMode { LocalProxy /*default*/, DirectVpn }   // JSON "localPr
 pub enum RoutingMode { Hard /*default*/, Soft }                 // Hard = TUN (needs elevation); Soft = loopback
                                         // proxy + per-user system proxy (no admin); the wizard picks Soft unelevated
 pub enum BootstrapRouteMode { Auto /*default*/, Direct, LocalProxy }
-pub enum RuleSetMode { Bundled /*default*/, Managed }
+pub enum RuleSetMode { Bundled, Managed /*Settings default*/ }
+pub enum RuleSetChoice { Default /*default*/, User }  // who set the list source: the wizard keeps a User choice
 pub enum NotifyMethod { System /*default*/, InApp, Both }       // "system" / "inapp" / "both"
 
 #[derive(Debug, Clone, PartialEq, Serialize)]   // Deserialize = lenient per field (merge_json)
-pub struct Settings {                            // JSON camelCase; Document FILE "settings.json", VERSION 1
+pub struct Settings {                            // JSON camelCase; Document FILE "settings.json", VERSION 2
     pub connection_mode: ConnectionMode,         pub routing_mode: RoutingMode,
     pub proxy_override: Option<ProxyOverride>,   // manual local proxy; None = detect automatically
     pub proxy_type: ProxyKind,                   // Socks5
@@ -185,6 +186,7 @@ pub struct Settings {                            // JSON camelCase; Document FIL
     pub smart_ru_rule_set_mode: RuleSetMode,
     pub smart_ru_rule_set_auto_update: bool, pub smart_ru_rule_set_use_proxy: bool,           // true
     pub smart_ru_rule_set_update_hours: u32,     // 24
+    pub smart_ru_rule_set_choice: RuleSetChoice, // Default; «Автообновлять списки» on the Settings page = User
     pub proxy_engine: EnginePref,                // Auto
     pub locale: Option<Lang>,                    // None = follow Windows
     pub active_theme_id: String,                 // "builtin-dark" (the design's reference is dark)
@@ -230,6 +232,11 @@ impl NotificationPrefs { pub fn from_legacy(legacy: &Value) -> Self; }  // old n
 pub struct UiPrefs { pub expanded_groups: Vec<String>, pub dismissed_tips: BTreeSet<String>,
     pub debug_log: bool, pub extra: Map<String, Value> }
 ```
+Version 2 (fix-lists, psmart-a3/b4): a file without `smartRuRuleSetChoice` is version 1 and moves
+from bundled to managed lists once on load (`Settings::move_to_managed_lists`: the old app saved
+its default "bundled" for everyone, so no stored "bundled" is a choice; `from_legacy` does the
+same); the wizard turning Smart RU on calls `Settings::default_lists_unless_chosen`.
+
 Use: `let settings = Arc::new(Store::<Settings>::open(&dirs.root));` then
 `settings.update(|s| s.apply(patch))?`. Notification switches govern OS toasts only (protection
 notices always reach the in-app list). `HOLDS_SECRETS = false`: a corrupt `settings.json` is moved

@@ -11,7 +11,7 @@ use vpnte_base::i18n::Lang;
 use vpnte_base::types::Notice;
 use vpnte_base::types::{ClientDevice, KillSwitchLevel, Level};
 use vpnte_base::{AppResult, ErrorKind, Msg};
-use vpnte_core::settings::{ConnectionMode, RoutingMode, Settings};
+use vpnte_core::settings::{ConnectionMode, RoutingMode};
 use vpnte_probes::local_proxy::{self, ScanOptions};
 use vpnte_servers::subscription::canonical_source;
 use vpnte_ui::wizard::{
@@ -226,12 +226,9 @@ async fn apply(
         s.routing_mode = routing;
         if choices.smart_ru && !s.smart_ru_split {
             // Smart RU turned on: its lists update themselves (managed, every 24 h), or the
-            // blocked-site list ages with the release (re-check item 12a).
-            let fresh = Settings::default();
-            s.smart_ru_rule_set_mode = fresh.smart_ru_rule_set_mode;
-            s.smart_ru_rule_set_auto_update = fresh.smart_ru_rule_set_auto_update;
-            s.smart_ru_rule_set_use_proxy = fresh.smart_ru_rule_set_use_proxy;
-            s.smart_ru_rule_set_update_hours = fresh.smart_ru_rule_set_update_hours;
+            // blocked-site list ages with the release (re-check item 12a); a choice the user
+            // made on the Settings page stays (psmart-b4).
+            s.default_lists_unless_chosen();
         }
         s.smart_ru_split = choices.smart_ru;
         s.first_run_complete = true;

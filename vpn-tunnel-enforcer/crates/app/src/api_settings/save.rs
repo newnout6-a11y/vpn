@@ -7,7 +7,7 @@ use std::sync::Arc;
 use vpnte_base::types::Level;
 use vpnte_base::types::Notice;
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
-use vpnte_core::settings::{RuleSetMode, SettingsPatch};
+use vpnte_core::settings::{RuleSetChoice, RuleSetMode, SettingsPatch};
 use vpnte_engine::routing::bypass;
 use vpnte_tunnel::lifecycle::{ConnError, Done};
 use vpnte_ui::settings as ui;
@@ -139,6 +139,8 @@ pub fn core_patch(p: &ui::SettingsPatch) -> AppResult<SettingsPatch> {
             RuleSetMode::Bundled
         });
         core.smart_ru_rule_set_auto_update = Some(on);
+        // The user's own choice: the wizard never changes it again (psmart-b4).
+        core.smart_ru_rule_set_choice = Some(RuleSetChoice::User);
         if on {
             core.smart_ru_rule_set_use_proxy = Some(true);
             core.smart_ru_rule_set_update_hours = Some(RULE_SET_HOURS);
@@ -153,7 +155,8 @@ pub fn core_patch(p: &ui::SettingsPatch) -> AppResult<SettingsPatch> {
     Ok(core)
 }
 
-/// Changes that a running tunnel takes only at the next connect (ui-pages §6.4).
+/// Changes that a running tunnel takes only at the next connect (ui-pages §6.4). «Не через
+/// прокси» is not one: a running proxy-mode session follows the list at once.
 pub fn next_connect(p: &ui::SettingsPatch) -> bool {
     p.connection_mode.is_some()
         || p.routing_mode.is_some()
@@ -164,8 +167,6 @@ pub fn next_connect(p: &ui::SettingsPatch) -> bool {
         || p.soft_git.is_some()
         || p.soft_gradle.is_some()
         || p.soft_studio.is_some()
-        || p.proxy_bypass.is_some()
-        || p.proxy_bypass_auto.is_some()
 }
 
 /// What the save did to a running tunnel: a restart is reported only when it was observed (the

@@ -1,7 +1,9 @@
 //! The routing inputs of the running session, as the runtime reads them at every start and when
 //! a crash restart is due. Smart RU's lists (re-check item 12a): the set the app handed over
-//! (protocol 3) once it passed this service's own checks, else the pinned files of the install
-//! folder. A SYSTEM process never reads a user's folder, so the app sends the bytes.
+//! (protocol 3) once it passed this service's own checks (canaries and content bounds against
+//! the pinned copies), else the set in use before it: the last one that passed, or the pinned
+//! files of the install folder. A SYSTEM process never reads a user's folder, so the app sends
+//! the bytes.
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -100,10 +102,13 @@ impl SharedInputs {
     }
 
     /// The folder of the client's set once it passed this service's checks; `None`: none was
-    /// sent, it is the pinned set itself, or it failed (logged; the pinned files stay in use).
+    /// sent or it is the pinned set itself. A set that fails keeps the one in use before it
+    /// (the last accepted set, else the pinned files), as the app keeps its generation.
     async fn handed_dir(&self) -> Option<PathBuf> {
         let files = self.handed.lock().clone()?;
+        // The pinned copies are the reference of the content bounds: without them nothing passes.
         let (engine, store) = (self.engine.as_ref()?, self.store.as_ref()?);
+        let reference = self.pinned.as_ref()?;
         let digest = files.digest();
         if self.pinned_digest.as_deref() == Some(digest.as_str()) {
             return None;
@@ -114,14 +119,14 @@ impl SharedInputs {
         {
             return Some(dir.clone());
         }
+        let previous = checked.accepted.as_ref().map(|(_, d)| d.clone());
         if checked.refused.as_ref() == Some(&digest) {
-            return None;
+            return previous;
         }
-        match handover::accept(&files, engine, store).await {
+        match handover::accept(&files, engine, store, reference).await {
             Ok(dir) => {
                 // The previous folder stays: a protected restart starts the new engine while the
                 // old one still reads its files.
-                let previous = checked.accepted.as_ref().map(|(_, d)| d.clone());
                 prune(store.clone(), [Some(dir.clone()), previous]).await;
                 tracing::info!(%digest, "handed-over Smart RU lists in use");
                 checked.accepted = Some((digest, dir.clone()));
@@ -130,13 +135,14 @@ impl SharedInputs {
             Err(fault) => {
                 tracing::warn!(
                     ?fault,
-                    "handed-over Smart RU lists refused; the pinned ones stay"
+                    kept = ?previous,
+                    "handed-over Smart RU lists refused; the lists in use stay"
                 );
-                // A file that failed its canaries fails again; an engine or disk fault may pass.
+                // A file that failed its checks fails again; an engine or disk fault may pass.
                 if matches!(fault, RefreshFault::Invalid { .. }) {
                     checked.refused = Some(digest);
                 }
-                None
+                previous
             }
         }
     }

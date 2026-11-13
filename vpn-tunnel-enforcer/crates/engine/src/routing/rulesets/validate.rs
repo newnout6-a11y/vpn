@@ -1,5 +1,6 @@
 //! Engine validation of a downloaded rule set: the bundled sing-box must parse it and classify
-//! known canaries the right way.
+//! known canaries the right way, and its content must stay within the bounds of the release's
+//! copy ([`super::content`]).
 use std::ffi::OsStr;
 use std::path::Path;
 use std::time::Duration;
@@ -49,8 +50,14 @@ const CANARIES: [(&str, [(&str, bool); 3]); 4] = [
 
 /// Canaries per set: the file must parse in the bundled engine AND classify known names and
 /// addresses the right way (a truncated, HTML or hostile file fails here, not at connect
-/// time). `Some(true)` = valid, `Some(false)` = invalid, `None` = the engine could not run.
-pub(super) async fn validate(engine: &Path, file: &Path, tag: &str) -> Option<bool> {
+/// time), then keep within the bounds of `reference`'s copy of the same file.
+/// `Some(true)` = valid, `Some(false)` = invalid, `None` = the engine could not run.
+pub(super) async fn validate(
+    engine: &Path,
+    file: &Path,
+    tag: &str,
+    reference: &Path,
+) -> Option<bool> {
     let Some((_, canaries)) = CANARIES.iter().find(|(t, _)| *t == tag) else {
         return Some(false);
     };
@@ -59,7 +66,7 @@ pub(super) async fn validate(engine: &Path, file: &Path, tag: &str) -> Option<bo
             return Some(false);
         }
     }
-    Some(true)
+    super::content::check(engine, file, tag, reference).await
 }
 
 /// `sing-box rule-set match -f binary <file> <probe>`: matches are printed to stderr as

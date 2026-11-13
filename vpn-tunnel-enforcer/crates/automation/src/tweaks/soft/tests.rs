@@ -236,7 +236,7 @@ fn the_system_proxy_follows_the_session_and_comes_back_exactly() {
     let ours = proxy.get();
     assert_eq!(
         (ours.use_proxy, ours.server.as_str(), ours.bypass.as_str()),
-        (true, "127.0.0.1:10808", "localhost;127.*;[::1];<local>")
+        (true, "127.0.0.1:10808", "localhost;127.0.0.1;[::1];<local>")
     );
     assert!(!ours.use_pac && !ours.auto_detect && ours.pac_url.is_empty());
     assert_eq!(

@@ -2,7 +2,8 @@
 //! from the SagerNet and runetfreedom repositories.
 //!
 //! A refresh downloads every file over HTTPS, has the bundled sing-box parse each one
-//! (`sing-box rule-set match`) and checks canaries, then promotes ALL together as one new
+//! (`sing-box rule-set match`), checks canaries and bounds the content against the bundled
+//! copy (`content`: the files are unsigned and change daily), then promotes ALL together as one new
 //! immutable generation directory `gen-<unix ms>`. Anything wrong keeps the active files and
 //! tells the user. Generations are never modified in place: sing-box watches `local` rule-set
 //! files and reloads them when they change, so a running engine keeps its own generation and
@@ -25,9 +26,12 @@ use super::smart_ru::RULE_SETS;
 use fetch::download;
 use validate::validate;
 
+mod content;
 mod fetch;
 pub mod handover;
 mod validate;
+
+pub(crate) use content::decompile;
 
 #[cfg(test)]
 mod tests;
@@ -56,7 +60,7 @@ impl Document for RuleSetsDoc {
 }
 
 /// One downloaded file (informational: upstream files are unsigned and change daily, so no
-/// hash can be pinned; trust comes from HTTPS + the engine parse + canaries).
+/// hash can be pinned; trust comes from HTTPS + the engine parse + canaries + content bounds).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileInfo {
     pub size: u64,
@@ -160,11 +164,11 @@ impl RefreshSettings {
         smart_ru_enabled && self.managed && self.auto_update
     }
 
-    /// Download routes in trial order: the running session first (our own tunnel: the lists
-    /// are blocked or throttled on many Russian networks), then `auto` = direct, then the other
-    /// proxies; `direct` = direct only; `localProxy` = the proxies only (a user whose direct
-    /// GitHub is blackholed must not wait 45 s per file); `use_proxy = false` = direct only,
-    /// without the session's inbound either (the user's explicit choice).
+    /// Download routes in trial order. `auto`: the running session first (our own tunnel: the
+    /// lists are blocked or throttled on many Russian networks), then direct, then the other
+    /// proxies. The user's explicit choices are kept exactly, as for subscriptions: `direct` =
+    /// direct only; `localProxy` = the local proxies only (a user whose direct GitHub is
+    /// blackholed must not wait 45 s per file); `use_proxy = false` = direct only.
     pub fn routes(&self) -> Vec<(RouteKind, Route)> {
         let mode = if self.use_proxy {
             self.bootstrap
@@ -172,7 +176,9 @@ impl RefreshSettings {
             BootstrapRouteMode::Direct
         };
         let mut out: Vec<(RouteKind, Route)> = Vec::new();
-        if let Some(session) = self.session.as_ref().filter(|_| self.use_proxy) {
+        if mode == BootstrapRouteMode::Auto
+            && let Some(session) = &self.session
+        {
             out.push((RouteKind::Session, session.clone()));
         }
         if mode != BootstrapRouteMode::LocalProxy {
@@ -265,6 +271,11 @@ impl RuleSetService {
             bundled: resources,
             running: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Wakes on every change of the rule-set state, a promoted generation among them.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.store.subscribe()
     }
 
     /// The directory to pass as `RoutingInputs::rule_set_dir`: the current managed generation
@@ -429,8 +440,8 @@ impl RuleSetService {
                 }));
             };
             let path = staging.join(file);
-            tokio::fs::write(&path, &bytes).await.map_err(storage)?;
-            match validate(&self.engine, &path, tag).await {
+            write_synced(&path, &bytes).await.map_err(storage)?;
+            match validate(&self.engine, &path, tag, &self.bundled).await {
                 Some(true) => {}
                 Some(false) => {
                     return Err(Some(RefreshFault::Invalid {
@@ -477,6 +488,15 @@ impl RuleSetService {
             })?;
         Ok(generation)
     }
+}
+
+/// Writes `data` and flushes it to the disk before the caller renames the folder: NTFS logs
+/// the rename, not the data, so after a power loss a promoted folder could hold zeros.
+async fn write_synced(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::File::create(path).await?;
+    file.write_all(data).await?;
+    file.sync_all().await
 }
 
 fn gen_ms(name: &str) -> UnixMs {

@@ -66,12 +66,26 @@ fn a_pasted_windows_list_keeps_order_and_drops_local_and_repeats() {
 #[test]
 fn the_list_has_limits() {
     let many: Vec<String> = (0..=MAX_ENTRIES).map(|n| format!("h{n}.example")).collect();
-    assert_eq!(parse_list(&many.join("\n")), Err(BypassError::TooMany));
-    let long = format!("{}.example", "a".repeat(60));
-    let wide: Vec<String> = (0..100).map(|n| format!("{n}{long}.{long}")).collect();
-    assert_eq!(parse_list(&wide.join(";")), Err(BypassError::TooLong));
+    assert_eq!(
+        parse_list(&many.join(
+            "
+"
+        )),
+        Err(BypassError::TooMany)
+    );
+    // Windows keeps 2064 characters of exceptions: 20 sites of 48 characters fit (2 items
+    // each), 21 do not.
+    let site = |n: usize| format!("{n:02}{}.example", "a".repeat(38));
+    let fit: Vec<String> = (0..20).map(site).collect();
+    assert_eq!(parse_list(&fit.join(";")).unwrap().len(), 20);
+    let over: Vec<String> = (0..21).map(site).collect();
+    assert_eq!(parse_list(&over.join(";")), Err(BypassError::TooLong));
+    let msg = BypassError::TooLong.msg();
+    assert_eq!(msg.key, "engine.routing.bypass.tooLong");
 }
 
+/// pbypass-b4: a range is CIDR in both lists (Chromium matches a `192.168.*` item against host
+/// names too); pbypass-a4/b3: a subdomains-only entry has no `NO_PROXY` form.
 #[test]
 fn each_reader_gets_its_own_syntax() {
     let site = entry("example.com");
@@ -79,17 +93,18 @@ fn each_reader_gets_its_own_syntax() {
     assert_eq!(site.no_proxy_items(), ["example.com", ".example.com"]);
     let subs = entry("*.example.com");
     assert_eq!(subs.override_items(), ["*.example.com"]);
-    assert_eq!(subs.no_proxy_items(), [".example.com"]);
+    assert!(subs.no_proxy_items().is_empty());
+    assert_eq!(entry("192.168.*").override_items(), ["192.168.0.0/16"]);
     assert_eq!(entry("192.168.*").no_proxy_items(), ["192.168.0.0/16"]);
     assert_eq!(entry("10.*").no_proxy_items(), ["10.0.0.0/8"]);
-    assert_eq!(entry("172.16.5.*").no_proxy_items(), ["172.16.5.0/24"]);
+    assert_eq!(entry("172.16.5.*").override_items(), ["172.16.5.0/24"]);
     assert_eq!(entry("fd00::1").override_items(), ["[fd00::1]"]);
     assert_eq!(entry("fd00::1").no_proxy_items(), ["fd00::1"]);
 }
 
 #[test]
-fn render_puts_the_user_first_and_keeps_automatic_subdomains_out_of_no_proxy() {
-    let user = vec![entry("corp.example"), entry("10.*")];
+fn render_puts_the_user_first_and_keeps_subdomains_out_of_no_proxy() {
+    let user = vec![entry("corp.example"), entry("10.*"), entry("*.lan.example")];
     let auto = vec![
         entry("corp.example"),
         entry("bank.example"),
@@ -101,7 +116,8 @@ fn render_puts_the_user_first_and_keeps_automatic_subdomains_out_of_no_proxy() {
         [
             "corp.example",
             "*.corp.example",
-            "10.*",
+            "10.0.0.0/8",
+            "*.lan.example",
             "bank.example",
             "*.bank.example",
             "*.gov.example",
@@ -119,23 +135,27 @@ fn render_puts_the_user_first_and_keeps_automatic_subdomains_out_of_no_proxy() {
     );
 }
 
+/// pbypass-b2: the first-run lists (some 125 gov sites) are longer than Windows' exception
+/// list; what does not fit stays in `NO_PROXY`, the user's entries always fit.
 #[test]
-fn render_leaves_out_automatic_entries_over_the_budget_never_the_users() {
-    let long = "a".repeat(60);
-    let user: Vec<BypassEntry> = (0..20)
-        .map(|n| entry(&format!("u{n}.{long}.example")))
+fn render_keeps_the_exception_list_within_windows_limit() {
+    let user: Vec<BypassEntry> = (0..10)
+        .map(|n| entry(&format!("u{n}.corp.example")))
         .collect();
-    let auto: Vec<BypassEntry> = (0..400)
-        .map(|n| entry(&format!("a{n}.{long}.example")))
+    let auto: Vec<BypassEntry> = (0..130)
+        .map(|n| entry(&format!("region{n:03}.gov.example")))
         .collect();
     let lists = render(&user, &auto);
-    let text = lists.proxy_override.join(";");
-    assert!(text.len() < MAX_TEXT, "{}", text.len());
-    assert!(lists.no_proxy.join(",").len() < MAX_TEXT);
+    assert!(lists.proxy_override.join(";").len() <= MAX_OVERRIDE_TEXT);
     for u in &user {
         assert!(lists.proxy_override.contains(&u.to_string()));
     }
-    assert!(lists.proxy_override.len() < 2 * (user.len() + auto.len()));
+    let kept = lists.proxy_override.len() / 2 - user.len();
+    assert!(kept > 0 && kept < auto.len(), "{kept}");
+    for a in &auto {
+        assert!(lists.no_proxy.contains(&a.to_string()), "{a}");
+    }
+    assert!(lists.no_proxy.join(",").len() <= MAX_NO_PROXY_TEXT);
 }
 
 fn rule(pattern: &str, action: DomainAction) -> DomainRule {
@@ -255,13 +275,13 @@ fn smart_ru_adds_its_gov_list_minus_blocked_and_pinned_names() {
     // spb.ru holds a blocked name, cbr.ru has a user VPN rule, portonly.ru a port condition;
     // google.com and 2gis.ru are pinned (maps go through the tunnel by default).
     let got = auto(&rules, &[], SMART, Some(&lists()));
-    assert_eq!(got, ["bank.example", "gosuslugi.ru", "*.psk"]);
+    assert_eq!(got, ["bank.example", "gosuslugi.ru"]);
     let maps = SmartRu {
         maps_direct: true,
         ..SMART
     };
     let got = auto(&rules, &[], maps, Some(&lists()));
-    assert_eq!(got, ["bank.example", "*.2gis.ru", "gosuslugi.ru", "*.psk"]);
+    assert_eq!(got, ["bank.example", "*.2gis.ru", "gosuslugi.ru"]);
 }
 
 #[test]
@@ -292,16 +312,27 @@ fn a_blocked_keyword_or_inverted_rule_clears_every_name() {
     assert!(!plain.blocked_near("other.ru"));
 }
 
-/// The re-check's binding conclusion: no RU TLD ever goes into the list on its own.
+/// The re-check's binding conclusion (pbypass-a5): no RU TLD ever goes into the list on its
+/// own, neither from a gov list that names one nor from a user's `*.ru -> Direct` rule.
 #[test]
 fn ru_tlds_are_never_automatic() {
-    let got = auto(&[], &[], SMART, Some(&lists()));
-    for tld in ["ru", "su", "xn--p1ai"] {
-        assert!(
-            !got.iter().any(|e| e == tld || e == &format!("*.{tld}")),
-            "{tld}"
-        );
+    let gov = r#"{"rules":[{"domain_suffix":["su",".ru","xn--p1ai","gosuslugi.ru",".psk"]}]}"#;
+    let blocked = r#"{"rules":[{"domain_suffix":["rutracker.org"]}]}"#;
+    let l = SmartLists::parse(gov, blocked).unwrap();
+    let rules = [
+        rule("*.ru", DomainAction::Direct),
+        rule("*.su", DomainAction::Direct),
+    ];
+    for (smart, lists) in [(SMART, Some(&l)), (SmartRu::default(), None)] {
+        let got = auto(&rules, &[], smart, lists);
+        for tld in ["ru", "su", "xn--p1ai", "psk"] {
+            assert!(
+                !got.iter().any(|e| e.trim_start_matches("*.") == tld),
+                "{tld} in {got:?}"
+            );
+        }
     }
+    assert_eq!(auto(&rules, &[], SMART, Some(&l)), ["gosuslugi.ru"]);
 }
 
 #[tokio::test]

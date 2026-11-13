@@ -30,7 +30,9 @@ pub fn plan_with(addr: &HostPort, kind: ProxyKind, list: &Bypass) -> Vec<(Featur
         .into_iter()
         .map(|var| {
             let value = match var {
-                EnvVar::NoProxy => sysproxy::join(NO_PROXY, ',', &list.no_proxy),
+                EnvVar::NoProxy => {
+                    sysproxy::join(NO_PROXY, ',', &list.no_proxy, sysproxy::MAX_NO_PROXY)
+                }
                 _ => url.clone(),
             };
             (Feature::SoftEnv, Target::Env { var }, Val::Sz(value))

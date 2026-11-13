@@ -10,6 +10,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use super::bypass::SmartLists;
 use super::domain::{DomainAction, DomainPattern, DomainRule};
 use super::matcher::Matcher;
 
@@ -165,14 +166,18 @@ pub enum SmartRoute {
 }
 
 impl SmartRu {
-    /// Smart RU's own route for `host`, read from its name lists in rule order: pins → VPN,
-    /// maps when direct, RU TLDs, RU services and Kimi → direct. RU-TLD names are routed by
-    /// `geoip-ru` on the answer, which for them is nearly always direct; the blocked-in-Russia
-    /// list (a file, read by the engine only) sends a few of them through the tunnel instead. Any
-    /// other name is left to the address country, which a name alone cannot tell: `None`.
-    pub fn route_of(&self, host: &str) -> Option<SmartRoute> {
+    /// Smart RU's own route for `host`, read from its name lists in rule order: the
+    /// blocked-in-Russia list (`blocked`, the active rule-set file read back; some 20 000 RU-TLD
+    /// names among its 74 000) and the pins → VPN, maps when direct, RU TLDs, RU services and
+    /// Kimi → direct. RU-TLD names are routed by `geoip-ru` on the answer, which for them is
+    /// nearly always direct. Any other name is left to the address country, which a name alone
+    /// cannot tell: `None`. Without `blocked` (not read yet) a blocked RU-TLD name reads direct.
+    pub fn route_of(&self, host: &str, blocked: Option<&SmartLists>) -> Option<SmartRoute> {
         if !self.enabled {
             return None;
+        }
+        if blocked.is_some_and(|l| l.blocked_covers(host)) {
+            return Some(SmartRoute::Vpn);
         }
         let hit = |list: &[&str]| list.iter().any(|s| suffix_matches(s, host));
         let pinned = [
@@ -200,8 +205,12 @@ impl SmartRu {
 
     /// Smart RU's route for the site of a user rule that sends it the other way (the user's
     /// rule wins, owner answer 4); `None` when they agree, Smart RU is off or undecided, the
-    /// rule blocks, or the pattern is a keyword (no site to name).
-    pub fn overridden_by(&self, rule: &DomainRule) -> Option<SmartRoute> {
+    /// rule blocks, or the pattern is a keyword (no site to name). `blocked` as in [`Self::route_of`].
+    pub fn overridden_by(
+        &self,
+        rule: &DomainRule,
+        blocked: Option<&SmartLists>,
+    ) -> Option<SmartRoute> {
         let host = match &rule.pattern {
             DomainPattern::Exact(h) | DomainPattern::Subdomains(h) => h,
             DomainPattern::Keyword(_) => return None,
@@ -211,7 +220,7 @@ impl SmartRu {
             DomainAction::Vpn => SmartRoute::Vpn,
             DomainAction::Block => return None,
         };
-        self.route_of(host).filter(|r| *r != own)
+        self.route_of(host, blocked).filter(|r| *r != own)
     }
 }
 

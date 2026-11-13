@@ -13,7 +13,7 @@ use vpnte_base::{AppError, AppResult};
 use vpnte_core::net::{HostPort, Route};
 use vpnte_core::settings::{ConnectionMode, Settings};
 use vpnte_core::store::Store;
-use vpnte_engine::routing::rulesets::{RefreshOutcome, RefreshSettings, RuleSetService};
+use vpnte_engine::routing::rulesets::{RefreshOutcome, RefreshSettings, RouteKind, RuleSetService};
 use vpnte_probes::ip_monitor::IpEvidence;
 use vpnte_probes::key_health::ProbeCtx;
 use vpnte_probes::leak::{CheckInput, CheckReport, Mode, SelfTestResult};
@@ -190,9 +190,10 @@ pub(crate) fn session_route(status: &TunStatus) -> Option<Route> {
 
 /// Smart RU rule-set auto refresh (engine API): at start, hourly, when a rule-set setting
 /// changed and when a session starts (its route may reach the lists when direct did not), only
-/// while the settings allow it, through the running session first. A failure is one toast per
-/// streak: updates are on by default, and a network that cannot reach the lists would otherwise
-/// show the same toast every hour.
+/// while the settings allow it, through the running session first. A refresh that failed while a
+/// session came up is tried again through it at once, before any toast (psmart-a1/b6). A failure
+/// is one toast per streak: updates are on by default, and a network that cannot reach the
+/// lists would otherwise show the same toast every hour.
 pub(super) async fn refresh_rule_sets(
     service: Arc<RuleSetService>,
     settings: Arc<Store<Settings>>,
@@ -205,8 +206,10 @@ pub(super) async fn refresh_rule_sets(
     loop {
         let s = settings.snapshot();
         let mut cfg = RefreshSettings::from_settings(&s);
-        cfg.session = session_route(&status.borrow());
+        // Marked seen: a session that starts during the refresh is a change after this read.
+        cfg.session = session_route(&status.borrow_and_update());
         if cfg.auto_refresh(s.smart_ru_split) {
+            let tried = cfg.clone();
             // `RuleSetService::refresh` is not `Send` (an `AsyncFn` closure inside), so it cannot
             // be spawned: a blocking thread drives it with the runtime's handle.
             let handle = tokio::runtime::Handle::current();
@@ -217,6 +220,10 @@ pub(super) async fn refresh_rule_sets(
             .await;
             match outcome {
                 Ok(RefreshOutcome::Cancelled) => {}
+                Ok(outcome) if retry_through_session(&tried, &outcome, &status.borrow()) => {
+                    tracing::info!("rule-set refresh failed; trying again through the new session");
+                    continue;
+                }
                 Ok(outcome) => {
                     if let Some(notice) = outcome.notice().filter(|_| !failing) {
                         notifier.notify(notice, None);
@@ -233,6 +240,27 @@ pub(super) async fn refresh_rule_sets(
             () = session_started(&mut status) => {}
         }
     }
+}
+
+/// A failed refresh is tried again at once when a session came up meanwhile whose route the
+/// download routes would take (the mode and the user's choices decide, as in `routes`).
+fn retry_through_session(
+    tried: &RefreshSettings,
+    outcome: &RefreshOutcome,
+    now: &TunStatus,
+) -> bool {
+    let route = session_route(now);
+    if !matches!(outcome, RefreshOutcome::Failed(_)) || route.is_none() || route == tried.session {
+        return false;
+    }
+    let again = RefreshSettings {
+        session: route,
+        ..tried.clone()
+    };
+    again
+        .routes()
+        .iter()
+        .any(|(kind, _)| *kind == RouteKind::Session)
 }
 
 /// Resolves when a session starts running; never when the status sender is gone.
@@ -289,6 +317,36 @@ mod tests {
         );
         assert_eq!(session_route(&status(Some(CaptureKind::Tun), None)), None);
         assert_eq!(session_route(&status(None, None)), None);
+    }
+
+    /// psmart-a1/b6: a refresh that failed while a session came up is tried again through it at
+    /// once (no toast first); not when the session's route was the one that failed, when the
+    /// user's route choice excludes it, or when the refresh did not fail.
+    #[test]
+    fn a_session_that_came_up_during_a_failed_refresh_gets_a_retry() {
+        use vpnte_core::settings::BootstrapRouteMode;
+        use vpnte_engine::routing::rulesets::RefreshFault;
+        let idle = RefreshSettings::from_settings(&Settings::default());
+        let failed = RefreshOutcome::Failed(RefreshFault::Download {
+            file: "geoip-ru.srs".into(),
+        });
+        let up = status(Some(CaptureKind::Proxy), Some(20808));
+        assert!(retry_through_session(&idle, &failed, &up));
+        assert!(!retry_through_session(&idle, &failed, &status(None, None)));
+        assert!(!retry_through_session(&idle, &RefreshOutcome::Fresh, &up));
+        let through = RefreshSettings {
+            session: session_route(&up),
+            ..idle.clone()
+        };
+        assert!(
+            !retry_through_session(&through, &failed, &up),
+            "it was tried"
+        );
+        let direct_only = RefreshSettings {
+            bootstrap: BootstrapRouteMode::Direct,
+            ..idle
+        };
+        assert!(!retry_through_session(&direct_only, &failed, &up));
     }
 
     /// A session start wakes the refresh (its route may reach the lists); other changes do not.

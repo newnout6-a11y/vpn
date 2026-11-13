@@ -519,8 +519,10 @@ pub const RU_TLD_SUFFIXES, RU_COMMERCIAL_SERVICE_SUFFIXES, MAPS_DOMAIN_SUFFIXES,
           KIMI_MOONSHOT_DOMAIN_SUFFIXES, VPN_PINNED_MEDIA_SUFFIXES, IP_CHECKER_SUFFIXES: &[&str];
 pub struct SmartRu { pub enabled: bool, pub maps_direct: bool }
 pub enum SmartRoute { Direct, Vpn }
-impl SmartRu { pub fn route_of(&self, host: &str) -> Option<SmartRoute>;          // by name lists; None = off / undecided
-               pub fn overridden_by(&self, rule: &DomainRule) -> Option<SmartRoute>; } // Smart RU's route a user rule overrides
+impl SmartRu { pub fn route_of(&self, host: &str, blocked: Option<&SmartLists>) -> Option<SmartRoute>;
+                   // by name lists, the read-back blocked-in-Russia list first (-> Vpn); None = off / undecided
+               pub fn overridden_by(&self, rule: &DomainRule, blocked: Option<&SmartLists>) -> Option<SmartRoute>; }
+                   // Smart RU's route a user rule overrides (fix-lists, psmart-b1)
 
 // routing::plan — the one generator (pure, deterministic, owner order: answer 4 of 12.11.2026)
 pub struct RoutingInputs<'a> { pub smart: SmartRu, pub rule_set_dir: Option<&'a Path>,
@@ -546,7 +548,8 @@ network's own DNS.
 
 ```rust
 // routing::bypass — «Не через прокси» for Soft mode's system proxy and NO_PROXY (RU-2026 item 14 a-b)
-pub const MAX_ENTRIES: usize = 200;  pub const MAX_USER_TEXT: usize = 8 KiB;  pub const MAX_TEXT: usize = 16 KiB;
+pub const MAX_ENTRIES: usize = 200;  pub const MAX_OVERRIDE_TEXT: usize = 2000;  // Windows keeps 2064 in all
+pub const MAX_NO_PROXY_TEXT: usize = 16 KiB;
 pub enum BypassEntry { Site(String) /* x.com: + subdomains */, Subdomains(String) /* *.x.com */,
                        Ipv4(Ipv4Addr), Ipv4Range(Vec<u8>) /* 10.*, 192.168.* */, Ipv6(Ipv6Addr) } // Display = stored form
 impl BypassEntry { pub fn parse(raw: &str) -> Result<Self, BypassError>;   // URL -> host, IDN -> punycode
@@ -558,20 +561,24 @@ pub struct AutoInputs<'a> { pub domain_rules: &'a [DomainRule], pub apps: &'a [S
     pub smart: SmartRu /* enabled only with a rule-set dir */, pub lists: Option<&'a SmartLists> }
 pub fn automatic(i: &AutoInputs) -> Vec<BypassEntry>;   // user Direct Exact / Subdomains, then the D4 gov list
 pub struct SmartLists;  impl SmartLists { pub fn parse(gov_json: &str, blocked_json: &str) -> Result<Self, serde_json::Error>;
-    pub fn gov(&self) -> &[BypassEntry]; pub fn blocked_near(&self, name: &str) -> bool; }
+    pub fn gov(&self) -> &[BypassEntry]; pub fn blocked_near(&self, name: &str) -> bool;
+    pub fn blocked_covers(&self, name: &str) -> bool; }  // on the blocked list or under a name on it
 pub async fn read_smart_lists(singbox_exe: &Path, rule_set_dir: &Path) -> io::Result<SmartLists>; // rule-set decompile
 pub struct BypassLists { pub proxy_override: Vec<String>, pub no_proxy: Vec<String> }
-pub fn render(user: &[BypassEntry], auto: &[BypassEntry]) -> BypassLists; // user first; auto while < MAX_TEXT
+pub fn render(user: &[BypassEntry], auto: &[BypassEntry]) -> BypassLists;
+    // user first; auto in ProxyOverride while <= MAX_OVERRIDE_TEXT, else in NO_PROXY only
 ```
 A bypass entry acts before the engine sees the request, so RU TLDs are never added: Smart RU sends
 `.ru` direct only on a Russian address, and a bypassed name would skip a user rule that sends it
 through the VPN or blocks it (answer 4). Automatic entries are names whose direct outcome is
 certain from the name: each is dropped when a user Block / VPN rule names a related site (equal,
 above or below; any such keyword rule drops all), when a Smart RU pin or a blocked-in-Russia name
-overlaps it (Smart RU on); there are none while any app goes through the VPN (P4 precedes the
-domain rules) or while Smart RU runs with unreadable lists. Syntax: `x.com` -> `ProxyOverride`
-`x.com;*.x.com`, `NO_PROXY` `x.com,.x.com`; `*.x.com` -> `*.x.com` / `.x.com` (automatic ones:
-`ProxyOverride` only, since curl and Python read `.x.com` as `x.com` too); `10.*` -> `10.0.0.0/8`.
+overlaps it (Smart RU on), and never a whole zone (a single-label name: `ru`, `*.su`); there are
+none while any app goes through the VPN (P4 precedes the domain rules) or while Smart RU runs with
+unreadable lists. Syntax: `x.com` -> `ProxyOverride` `x.com;*.x.com`, `NO_PROXY` `x.com,.x.com`;
+`*.x.com` -> `*.x.com` in `ProxyOverride` only (curl and Python read `.x.com` as `x.com` too, user
+entries included); `10.*` -> `10.0.0.0/8` in both (Chromium reads a `10.*` item as a host pattern).
+A user list over `MAX_OVERRIDE_TEXT` is refused (`tooLong`, arg `max`).
 
 ```rust
 // routing::doc — Document `rules.json` (VERSION 1); open exactly one Store<RulesDoc>
@@ -622,7 +629,7 @@ pub struct RefreshSettings { pub managed: bool, pub auto_update: bool, pub use_p
     pub session: Option<Route> /* the caller's: proxy capture's loopback inbound; None under TUN / idle */ }
 impl RefreshSettings { pub fn from_settings(s: &Settings) -> Self;   // session: None
     pub fn auto_refresh(&self, smart_ru_enabled: bool) -> bool;
-    pub fn routes(&self) -> Vec<(RouteKind, Route)>; }  // Session first, then direct / proxies per mode
+    pub fn routes(&self) -> Vec<(RouteKind, Route)>; }  // auto: Session, direct, proxies; direct / localProxy exactly
 pub enum ActiveSource { Bundled, Managed { generation: String, since: UnixMs } }
 pub enum RefreshOutcome { Fresh, Updated { generation: String }, Failed(RefreshFault), Cancelled }
 impl RefreshOutcome { pub fn notice(&self) -> Option<Notice>; }   // toast it
@@ -635,13 +642,17 @@ impl RuleSetService {
                                                                           // resources/engines.toml (held open), else None
     pub async fn refresh(&self, cfg: &RefreshSettings, force: bool, cancel: &CancellationToken) -> RefreshOutcome;
     pub fn prune(&self) -> usize;                                         // blocking; only before an engine start
+    pub fn subscribe(&self) -> watch::Receiver<u64>;                      // every change of the state (a promotion)
 }
 ```
 Downloads are https-only (redirects too, <= 5), <= 8 MiB, 15 s connect / 45 s total, through the
-running session first, then per `bootstrapRouteMode`; every file is validated by the bundled
-`sing-box rule-set match` with canaries and all are promoted together as a new immutable
-generation (a generation without all four files counts as incomplete). A forced refresh during a
-running one waits for it.
+running session first in `auto`, then per `bootstrapRouteMode`; every file is validated by the
+bundled `sing-box rule-set match` with canaries, then bounded against the bundled copy
+(`rulesets::content`, fix-lists psmart-b3: size 1/4..4x; the direct sets decompiled: geoip-ru plain
+`ip_cidr` only, prefixes >= /8 and /16, <= 2x the bundled address space, no well-known foreign
+address; gov-ru plain names under `.ru` / `.su` / `.xn--p1ai` or named by the bundled file), written
+with `sync_all`, and all are promoted together as a new immutable generation (a generation without
+all four files counts as incomplete). A forced refresh during a running one waits for it.
 
 ```rust
 // routing::rulesets::handover — the active set as the app hands it to the helper service (pipe protocol 3)
@@ -649,8 +660,11 @@ pub const MAX_HANDOVER_BYTES: usize = 2 MiB;           // all files together (4 
 pub struct RuleSetFiles;                               // serde: {files:[{name, data: base64}]}; Debug = names + sizes
 impl RuleSetFiles { pub fn read(dir: &Path) -> Option<Self>;   // blocking; every RULE_SETS file, in order, <= cap
                     pub fn digest(&self) -> String; }          // hex SHA-256 over names + contents
-pub async fn accept(files: &RuleSetFiles, engine: &Path, store: &Path) -> Result<PathBuf, RefreshFault>;
-    // service side: shape + canaries with ITS sing-box, written to store\gen-<digest16> (reused when present)
+pub async fn accept(files: &RuleSetFiles, engine: &Path, store: &Path, reference: &Path)
+    -> Result<PathBuf, RefreshFault>;
+    // service side: shape + canaries + content bounds against `reference` (its pinned copies) with ITS
+    // sing-box, flushed and renamed to store\gen-<digest16>; a stored folder is reused only while its
+    // files hash to the set (psmart-a4)
 pub fn prune_store(store: &Path, keep: &[&Path]);      // blocking; removes the other gen-* folders
 ```
 

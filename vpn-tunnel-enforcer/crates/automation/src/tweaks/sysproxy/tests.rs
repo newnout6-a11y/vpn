@@ -165,7 +165,7 @@ fn foreign_records_are_not_admitted() {
 
 fn entries() -> Bypass {
     Bypass {
-        proxy_override: ["corp.example", "*.corp.example", "<local>", "10.*"]
+        proxy_override: ["corp.example", "*.corp.example", "<local>", "10.0.0.0/8"]
             .map(String::from)
             .to_vec(),
         no_proxy: ["corp.example", ".corp.example", "10.0.0.0/8"]
@@ -182,7 +182,7 @@ fn the_bypass_entries_follow_the_local_ones() {
     let config = applied_with(&ours, &entries());
     assert_eq!(
         config.bypass,
-        "localhost;127.*;[::1];<local>;corp.example;*.corp.example;10.*"
+        "localhost;127.0.0.1;[::1];<local>;corp.example;*.corp.example;10.0.0.0/8"
     );
     assert_eq!(applied_with(&ours, &Bypass::default()).bypass, BYPASS);
     let vars = crate::tweaks::env::plan_with(&ours, ProxyKind::Http, &entries());
@@ -202,31 +202,45 @@ fn the_bypass_entries_follow_the_local_ones() {
     );
 }
 
-/// A list changed mid-session lands at the next apply; until then the session reads back the
-/// list it wrote.
+/// The session reads back the list it wrote until it applies again; only a real change counts
+/// as one (a running session re-applies on it, pbypass-a1).
 #[test]
-fn a_session_keeps_the_list_it_took() {
-    let mut lists = Lists {
-        next: entries(),
-        ..Lists::default()
-    };
+fn a_session_keeps_the_list_it_took_until_it_applies_again() {
+    let mut lists = Lists::default();
+    assert!(lists.set(entries()));
+    assert!(!lists.set(entries()));
     assert_eq!(lists.take(), entries());
-    lists.next = Bypass::default();
+    assert!(lists.set(Bypass::default()));
     assert_eq!(lists.taken, entries());
     assert_eq!(lists.take(), Bypass::default());
 }
 
-/// Whatever the caller hands over, the text stays inside the journal's value limit.
+/// pbypass-b2: whatever the caller hands over, the exception list stays within the 2064
+/// characters Windows keeps and `NO_PROXY` within the journal's value limit.
 #[test]
 fn an_oversized_list_is_cut_at_the_limit() {
     let many = Bypass {
         proxy_override: (0..5000).map(|n| format!("host{n}.example")).collect(),
-        no_proxy: Vec::new(),
+        no_proxy: (0..5000).map(|n| format!("host{n}.example")).collect(),
     };
     let config = applied_with(&addr("127.0.0.1:1"), &many);
-    assert!(config.bypass.len() <= MAX_BYPASS);
+    assert!(
+        config.bypass.len() <= MAX_OVERRIDE,
+        "{}",
+        config.bypass.len()
+    );
     assert!(config.bypass.starts_with(BYPASS));
     assert_eq!(decode(&encode(&config)), Some(config));
+    let vars = crate::tweaks::env::plan_with(&addr("127.0.0.1:1"), ProxyKind::Http, &many);
+    for (_, _, value) in vars {
+        assert!(matches!(value, Val::Sz(s) if s.len() <= MAX_NO_PROXY));
+    }
+}
+
+/// pbypass-b4: no glob of an address in Soft's own entries.
+#[test]
+fn the_local_entries_hold_no_address_glob() {
+    assert!(BYPASS.split(';').all(|item| !item.contains('*')));
 }
 
 /// The system proxy and the variables of one in-memory session.

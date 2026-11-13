@@ -76,6 +76,20 @@ pub enum RuleSetMode {
     Managed,
 }
 
+/// Who set the Smart RU list source last (psmart-a3/b4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuleSetChoice {
+    /// The default, the wizard or the one-time move to managed lists: the wizard may set it.
+    #[default]
+    Default,
+    /// The user, on the Settings page: the wizard keeps it.
+    User,
+}
+
+/// The settings key of [`Settings::smart_ru_rule_set_choice`]; a file without it is version 1.
+const CHOICE_KEY: &str = "smartRuRuleSetChoice";
+
 /// Where notifications are shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -179,6 +193,8 @@ pub struct Settings {
     pub smart_ru_rule_set_use_proxy: bool,
     /// Rule-set refresh interval in hours, [`RULE_SET_UPDATE_HOURS`].
     pub smart_ru_rule_set_update_hours: u32,
+    /// Who chose the list source: the wizard never overrides the user's own choice.
+    pub smart_ru_rule_set_choice: RuleSetChoice,
     /// Proxy engine choice.
     pub proxy_engine: EnginePref,
     /// «Не через прокси»: hosts and wildcards that Soft mode's system proxy and `NO_PROXY` leave
@@ -238,6 +254,7 @@ impl Default for Settings {
             smart_ru_rule_set_auto_update: true,
             smart_ru_rule_set_use_proxy: true,
             smart_ru_rule_set_update_hours: 24,
+            smart_ru_rule_set_choice: RuleSetChoice::Default,
             proxy_engine: EnginePref::Auto,
             proxy_bypass: Vec::new(),
             proxy_bypass_auto: true,
@@ -254,7 +271,8 @@ impl Default for Settings {
 
 impl Document for Settings {
     const FILE: &'static str = "settings.json";
-    const VERSION: u32 = 1;
+    /// 2 (fix-lists): `smartRuRuleSetChoice`; version-1 files move to managed lists once.
+    const VERSION: u32 = 2;
     // The secrets here (the optional proxy credentials and the log key) are DPAPI-sealed and stay
     // sealed in the moved-aside copy, so a corrupt file is moved aside and the app continues with
     // defaults instead of going read-only; a fresh log key is generated on the next start.
@@ -264,7 +282,13 @@ impl Document for Settings {
 impl<'de> Deserialize<'de> for Settings {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut settings = Settings::default();
-        settings.merge_json(Map::deserialize(deserializer)?);
+        let obj = Map::deserialize(deserializer)?;
+        // The store hands over the body without its version; every version-2 file has the key.
+        let version_1 = !obj.contains_key(CHOICE_KEY);
+        settings.merge_json(obj);
+        if version_1 {
+            settings.move_to_managed_lists();
+        }
         Ok(settings)
     }
 }
@@ -326,6 +350,7 @@ impl Settings {
             "smartRuRuleSetUpdateHours",
             &mut self.smart_ru_rule_set_update_hours,
         );
+        take(o, CHOICE_KEY, &mut self.smart_ru_rule_set_choice);
         take(o, "proxyEngine", &mut self.proxy_engine);
         take(o, "proxyBypass", &mut self.proxy_bypass);
         take(o, "proxyBypassAuto", &mut self.proxy_bypass_auto);
@@ -395,6 +420,7 @@ impl Settings {
             smart_ru_rule_set_auto_update,
             smart_ru_rule_set_use_proxy,
             smart_ru_rule_set_update_hours,
+            smart_ru_rule_set_choice,
             proxy_engine,
             proxy_bypass,
             proxy_bypass_auto,
@@ -404,6 +430,29 @@ impl Settings {
             ui,
         );
         self.clamp();
+    }
+
+    /// The one-time move to managed lists (owner decision recorded in fix-lists, psmart-a3): the
+    /// old app saved its default «bundled» for everyone, so a stored «bundled» says nothing about a
+    /// choice. Version-1 files and the old app's data take it once; a choice made since is kept.
+    pub fn move_to_managed_lists(&mut self) {
+        if self.smart_ru_rule_set_mode == RuleSetMode::Bundled {
+            self.smart_ru_rule_set_mode = RuleSetMode::Managed;
+            self.smart_ru_rule_set_auto_update = true;
+        }
+    }
+
+    /// Smart RU's list defaults (managed, updated every 24 h through the tunnel) for the wizard
+    /// turning Smart RU on, unless the user chose the source on the Settings page (psmart-b4).
+    pub fn default_lists_unless_chosen(&mut self) {
+        if self.smart_ru_rule_set_choice == RuleSetChoice::User {
+            return;
+        }
+        let fresh = Settings::default();
+        self.smart_ru_rule_set_mode = fresh.smart_ru_rule_set_mode;
+        self.smart_ru_rule_set_auto_update = fresh.smart_ru_rule_set_auto_update;
+        self.smart_ru_rule_set_use_proxy = fresh.smart_ru_rule_set_use_proxy;
+        self.smart_ru_rule_set_update_hours = fresh.smart_ru_rule_set_update_hours;
     }
 
     /// The 32-byte key for `redact::set_ip_key`, so log pseudonyms stay stable across runs. A
@@ -478,6 +527,7 @@ pub struct SettingsPatch {
     pub smart_ru_rule_set_auto_update: Option<bool>,
     pub smart_ru_rule_set_use_proxy: Option<bool>,
     pub smart_ru_rule_set_update_hours: Option<u32>,
+    pub smart_ru_rule_set_choice: Option<RuleSetChoice>,
     pub proxy_engine: Option<EnginePref>,
     pub proxy_bypass: Option<Vec<String>>,
     pub proxy_bypass_auto: Option<bool>,

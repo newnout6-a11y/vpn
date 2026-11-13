@@ -315,6 +315,7 @@ fn every_field_changed() -> Settings {
         smart_ru_rule_set_auto_update: false,
         smart_ru_rule_set_use_proxy: false,
         smart_ru_rule_set_update_hours: 48,
+        smart_ru_rule_set_choice: RuleSetChoice::User,
         proxy_engine: EnginePref::Xray,
         proxy_bypass: vec!["corp.example".into(), "10.*".into()],
         proxy_bypass_auto: false,
@@ -542,19 +543,76 @@ fn legacy_settings_are_mapped() {
     );
 }
 
-/// Re-check item 12a: an old explicit "bundled" choice is kept; absent or unknown means managed
-/// list updates, today's default.
+/// psmart-a3/b4: the old app saved its default "bundled" with every settings object, so a
+/// stored "bundled" is no choice: the old app's data moves to managed list updates, whatever
+/// the mode said (a full Electron-shaped object, as `settingsStore.save` wrote it).
 #[test]
-fn legacy_rule_set_mode_keeps_an_explicit_bundled() {
-    let mode = |v: serde_json::Value| {
-        Settings::from_legacy(&json!({ "smartRuRuleSetMode": v }))
-            .0
-            .smart_ru_rule_set_mode
+fn legacy_bundled_moves_to_managed_list_updates() {
+    let electron = json!({
+        "smartRuSplit": true, "smartRuMapsDirect": false, "smartRuRuleSetMode": "bundled",
+        "smartRuRuleSetAutoUpdate": false, "smartRuRuleSetUseProxy": true,
+        "smartRuRuleSetUpdateIntervalHours": 24, "routingMode": "hard", "firstRunComplete": true,
+        "proxyEngine": "auto", "killSwitchLevel": "off", "autoPilotEnabled": true
+    });
+    let s = Settings::from_legacy(&electron).0;
+    assert_eq!(s.smart_ru_rule_set_mode, RuleSetMode::Managed);
+    assert!(s.smart_ru_rule_set_auto_update);
+    assert_eq!(s.smart_ru_rule_set_choice, RuleSetChoice::Default);
+    for v in [json!("managed"), json!(null), json!("weird")] {
+        let s = Settings::from_legacy(&json!({ "smartRuRuleSetMode": v })).0;
+        assert_eq!(s.smart_ru_rule_set_mode, RuleSetMode::Managed);
+    }
+}
+
+/// psmart-a3 (settings version 2): a version-1 file moves from bundled to managed lists once;
+/// a version-2 file keeps what it says, so a choice made since stays.
+#[test]
+fn version_1_settings_move_to_managed_lists_once() {
+    let old: Settings = serde_json::from_value(json!({
+        "smartRuSplit": true, "smartRuRuleSetMode": "bundled", "smartRuRuleSetAutoUpdate": false,
+        "smartRuRuleSetUpdateHours": 48
+    }))
+    .unwrap();
+    assert_eq!(old.smart_ru_rule_set_mode, RuleSetMode::Managed);
+    assert!(old.smart_ru_rule_set_auto_update);
+    assert_eq!(old.smart_ru_rule_set_update_hours, 48, "the interval stays");
+    let saved = serde_json::to_value(&old).unwrap();
+    assert_eq!(saved["smartRuRuleSetChoice"], json!("default"));
+    let chosen = Settings {
+        smart_ru_rule_set_mode: RuleSetMode::Bundled,
+        smart_ru_rule_set_auto_update: false,
+        smart_ru_rule_set_choice: RuleSetChoice::User,
+        ..Settings::default()
     };
-    assert_eq!(mode(json!("bundled")), RuleSetMode::Bundled);
-    assert_eq!(mode(json!("managed")), RuleSetMode::Managed);
-    assert_eq!(mode(json!(null)), RuleSetMode::Managed);
-    assert_eq!(mode(json!("weird")), RuleSetMode::Managed);
+    let back: Settings = serde_json::from_value(serde_json::to_value(&chosen).unwrap()).unwrap();
+    assert_eq!(back, chosen, "a version-2 file is taken as it is");
+    let managed: Settings = serde_json::from_value(
+        json!({ "smartRuRuleSetMode": "managed", "smartRuRuleSetAutoUpdate": false }),
+    )
+    .unwrap();
+    assert!(!managed.smart_ru_rule_set_auto_update, "only bundled moves");
+}
+
+/// psmart-b4: the wizard turning Smart RU on sets the list defaults unless the user chose the
+/// source on the Settings page.
+#[test]
+fn the_wizard_keeps_the_users_list_choice() {
+    let mut chosen = Settings {
+        smart_ru_rule_set_mode: RuleSetMode::Bundled,
+        smart_ru_rule_set_auto_update: false,
+        smart_ru_rule_set_choice: RuleSetChoice::User,
+        ..Settings::default()
+    };
+    let before = chosen.clone();
+    chosen.default_lists_unless_chosen();
+    assert_eq!(chosen, before);
+    let mut not_chosen = Settings {
+        smart_ru_rule_set_choice: RuleSetChoice::Default,
+        ..before
+    };
+    not_chosen.default_lists_unless_chosen();
+    assert_eq!(not_chosen.smart_ru_rule_set_mode, RuleSetMode::Managed);
+    assert!(not_chosen.smart_ru_rule_set_auto_update);
 }
 
 /// settingsForensicsDefault: missing / `null` values take the documented defaults (B10, B11).

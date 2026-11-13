@@ -183,15 +183,18 @@ fn route_of_follows_the_lists_in_rule_order() {
         ("my2ip.ru", Some(SmartRoute::Direct)),
     ];
     for (host, want) in cases {
-        assert_eq!(ON.route_of(host), want, "{host}");
+        assert_eq!(ON.route_of(host, None), want, "{host}");
     }
     let maps = SmartRu {
         maps_direct: true,
         ..ON
     };
-    assert_eq!(maps.route_of("maps.yandex.ru"), Some(SmartRoute::Direct));
-    assert_eq!(maps.route_of("2gis.com"), Some(SmartRoute::Direct));
-    assert_eq!(SmartRu::default().route_of("yandex.ru"), None);
+    assert_eq!(
+        maps.route_of("maps.yandex.ru", None),
+        Some(SmartRoute::Direct)
+    );
+    assert_eq!(maps.route_of("2gis.com", None), Some(SmartRoute::Direct));
+    assert_eq!(SmartRu::default().route_of("yandex.ru", None), None);
 }
 
 /// Owner answer 4: a note only where the user's rule sends a site the other way.
@@ -199,8 +202,8 @@ fn route_of_follows_the_lists_in_rule_order() {
 fn overridden_by_names_only_real_conflicts() {
     let vpn_ru = rule("yandex.ru", DomainAction::Vpn);
     let direct_pin = rule("*.youtube.com", DomainAction::Direct);
-    assert_eq!(ON.overridden_by(&vpn_ru), Some(SmartRoute::Direct));
-    assert_eq!(ON.overridden_by(&direct_pin), Some(SmartRoute::Vpn));
+    assert_eq!(ON.overridden_by(&vpn_ru, None), Some(SmartRoute::Direct));
+    assert_eq!(ON.overridden_by(&direct_pin, None), Some(SmartRoute::Vpn));
     for agree in [
         rule("yandex.ru", DomainAction::Direct),
         rule("youtube.com", DomainAction::Vpn),
@@ -208,7 +211,36 @@ fn overridden_by_names_only_real_conflicts() {
         rule("yandex.ru", DomainAction::Block),
         rule("~yandex", DomainAction::Vpn),
     ] {
-        assert_eq!(ON.overridden_by(&agree), None, "{}", agree.pattern);
+        assert_eq!(ON.overridden_by(&agree, None), None, "{}", agree.pattern);
     }
-    assert_eq!(SmartRu::default().overridden_by(&vpn_ru), None);
+    assert_eq!(SmartRu::default().overridden_by(&vpn_ru, None), None);
+}
+
+/// psmart-b1: with the blocked-in-Russia list read back, a name on it is Smart RU's VPN route,
+/// before the RU-TLD direct rule: a user's VPN rule for it agrees (no note), a Direct rule
+/// overrides it (the note names the VPN).
+#[test]
+fn a_blocked_name_is_smart_rus_vpn_route() {
+    let gov = r#"{"rules":[{"domain_suffix":["gosuslugi.ru"]}]}"#;
+    let blocked = r#"{"rules":[{"domain_suffix":["tvrain.ru","linkedin.com"]}]}"#;
+    let lists = crate::routing::bypass::SmartLists::parse(gov, blocked).unwrap();
+    let l = Some(&lists);
+    assert_eq!(ON.route_of("tvrain.ru", l), Some(SmartRoute::Vpn));
+    assert_eq!(ON.route_of("www.tvrain.ru", l), Some(SmartRoute::Vpn));
+    assert_eq!(ON.route_of("www.linkedin.com", l), Some(SmartRoute::Vpn));
+    assert_eq!(ON.route_of("yandex.ru", l), Some(SmartRoute::Direct));
+    assert_eq!(ON.route_of("ntvrain.ru", l), Some(SmartRoute::Direct));
+    assert_eq!(
+        ON.overridden_by(&rule("tvrain.ru", DomainAction::Vpn), l),
+        None
+    );
+    assert_eq!(
+        ON.overridden_by(&rule("tvrain.ru", DomainAction::Direct), l),
+        Some(SmartRoute::Vpn)
+    );
+    assert_eq!(
+        ON.overridden_by(&rule("*.linkedin.com", DomainAction::Direct), l),
+        Some(SmartRoute::Vpn)
+    );
+    assert_eq!(SmartRu::default().route_of("tvrain.ru", l), None);
 }

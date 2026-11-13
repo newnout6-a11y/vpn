@@ -141,11 +141,13 @@ The app passes each new run (`at`) to its leak forwarder: a leak marks the sessi
 and the leak check card shows the run, as for runs of its own.
 Smart RU's lists (re-check item 12a): `host::SharedInputs` keeps the last `rule_sets` and checks
 them at the next engine start (`InputsSource::snapshot`): the service's own pinned set as is (no
-copy); another set once per content (`rulesets::handover::accept`: names, 2 MiB cap, canaries with
-the service's own sing-box) into `<ProgramData>\VPN Tunnel Enforcer\service\rulesets\gen-<digest16>`
-(the running engine's folder is kept, older ones pruned); refused or absent: the pinned files of
-the install folder, which now holds all four `.srs` (`install::pins::FILES`). An install folder
-without them all leaves Smart RU to a handed-over set (else off, with the usual warning).
+copy); another set once per content (`rulesets::handover::accept`: names, 2 MiB cap, canaries and
+the content bounds against the pinned copies with the service's own sing-box, written flushed) into
+`<ProgramData>\VPN Tunnel Enforcer\service\rulesets\gen-<digest16>`, reused only while its files hash
+to the set (the running engine's folder is kept, older ones pruned); refused: the set in use before
+it (the last one accepted, else the pinned files); absent: the pinned files of the install folder,
+which holds all four `.srs` (`install::pins::FILES`). Without them all no handed-over set passes
+either (they are the reference of the bounds): Smart RU off, with the usual warning.
 Request -> runtime call: `Start` = `start`, `Restart` = `restart_protected`, `RestartWithLast`,
 `RestartAdaptive`, `Switch` = `switch_upstream` (owner = this connection alive), `Stop` = `stop`.
 Every start-like request first validates, applies its kill-switch settings (`Protection` level,
