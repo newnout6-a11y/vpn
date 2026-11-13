@@ -6,32 +6,36 @@ use tokio::sync::watch;
 use vpnte_base::types::{Engine, OutboundFault, UnixMs};
 use vpnte_base::{AppResult, ErrorKind, Msg};
 
+use super::events::EventRow;
 use crate::lang::Lang;
-use crate::widgets::{Load, UiError};
+use crate::widgets::Load;
 
-/// Data and actions of the Logs page.
+/// Data and actions of the «Журнал» page (tabs «События», «Подключения», «Технический»).
 ///
-/// Implementations run destructive work (`clear_all`) in their own task: the page may unmount
-/// while a call is pending, and dropping the future must not stop a half-done cleanup.
+/// Implementations run destructive work (the clears) in their own task: the page may unmount
+/// while a call is pending, and dropping the future must not stop a half-done clear.
 #[async_trait::async_trait(?Send)]
 pub trait LogsApi: 'static {
-    /// The whole connection history (newest last or in any order; the page sorts), pushed on
-    /// every change: a session ends, a clear, an import.
-    fn history(&self) -> watch::Receiver<LogsSnapshot>;
-    /// Reads the history again after a failed read (the result arrives through `history`).
+    /// The event journal and the whole connection history (any order; the page sorts), pushed on
+    /// every change: an event, a session end, a clear, an import.
+    fn snapshot(&self) -> watch::Receiver<LogsSnapshot>;
+    /// Reads the history again after a failed read (the result arrives through `snapshot`).
     async fn reload_history(&self) -> AppResult<()>;
     /// Writes the WHOLE history (the on-screen filters are not applied) as CSV or JSON (the
     /// lifecycle formats): shows the native save dialog suggesting `file_name`, writes the file
     /// atomically and returns the saved file's name. `Err(Cancelled)` when the dialog was dismissed.
     async fn export_history(&self, format: ExportFormat, file_name: String) -> AppResult<String>;
-    /// Stops packet capture, then clears the connection history, the traffic history and the
-    /// diagnostic artifacts (snapshots, capture files, app and engine logs) — each part on its own,
-    /// so one failure does not keep the others.
-    async fn clear_all(&self) -> AppResult<ClearReport>;
-    /// The last lines of a log file (whole lines, redacted by the logger, oldest first).
+    /// Empties the event journal; nothing else.
+    async fn clear_events(&self) -> AppResult<()>;
+    /// Empties the connection history; nothing else.
+    async fn clear_history(&self) -> AppResult<()>;
+    /// Empties the technical logs this user owns (app.log and the engine logs in the user's
+    /// logs folder, previous generations deleted); nothing else.
+    async fn clear_technical(&self) -> AppResult<ArtifactReport>;
+    /// The last lines of a log (whole lines, redacted by their writer, oldest first).
     async fn read_log(&self, source: LogSource) -> AppResult<LogTail>;
-    /// Opens the logs folder in Explorer.
-    async fn open_log_folder(&self) -> AppResult<()>;
+    /// Opens the folder of the log `source` shows in Explorer.
+    async fn open_log_folder(&self, source: LogSource) -> AppResult<()>;
     /// Puts `text` on the Windows clipboard.
     async fn copy_text(&self, text: String) -> AppResult<()>;
 }
@@ -41,12 +45,15 @@ pub trait LogsApi: 'static {
 pub struct LogsSnapshot {
     /// Every stored session (at most 1000), in any order.
     pub history: Load<Arc<[SessionRow]>>,
+    /// The event journal, oldest first.
+    pub events: Load<Arc<[EventRow]>>,
 }
 
 impl Default for LogsSnapshot {
     fn default() -> Self {
         Self {
             history: Load::Loading,
+            events: Load::Loading,
         }
     }
 }
@@ -380,19 +387,8 @@ pub enum EvidenceValue {
     Text(Text),
 }
 
-/// What [`LogsApi::clear_all`] did, part by part.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ClearReport {
-    /// Connection history.
-    pub history: Result<(), UiError>,
-    /// Traffic (domain) history.
-    pub traffic: Result<(), UiError>,
-    /// Snapshots, capture files, app and engine logs.
-    pub artifacts: Result<ArtifactReport, UiError>,
-}
-
-/// Per-artifact result of the diagnostics cleanup (names as the forensics report gives them,
-/// e.g. `app-log`, `snapshots`).
+/// Per-file result of clearing the technical logs (core's artifact names: `app-log`,
+/// `sing-box-previous-log`, ...).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ArtifactReport {
     pub cleared: Vec<String>,
@@ -417,28 +413,65 @@ impl ExportFormat {
     }
 }
 
-/// A log file of the journal viewer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// A source of the technical tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum LogSource {
     /// `app.log`: backend and UI lines (JSON lines).
+    #[default]
     App,
-    /// `sing-box.log`: the engine's own output.
+    /// The sing-box log of the current or last session, wherever it ran.
     SingBox,
-    /// `xray.log`: the Xray engine's own output.
+    /// The Xray log of the current or last session, wherever it ran.
     Xray,
+    /// The helper service's own log: the service-wide lines and this user's (JSON lines).
+    Service,
 }
 
 impl LogSource {
-    pub const ALL: [LogSource; 3] = [LogSource::App, LogSource::SingBox, LogSource::Xray];
+    pub const ALL: [LogSource; 4] = [
+        LogSource::App,
+        LogSource::SingBox,
+        LogSource::Xray,
+        LogSource::Service,
+    ];
 }
 
-/// The end of a log file.
+/// One whole line of a log and its byte offset in the file (the row key: a re-read keeps the
+/// expanded line and the scroll position).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailLine {
+    pub offset: u64,
+    pub text: String,
+}
+
+/// What the calm line over the lines says about where they come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TailNote {
+    /// Nothing to say (app.log).
+    #[default]
+    None,
+    /// Engine log of a session in Proxy mode (the user's logs folder).
+    ProxySession,
+    /// Engine log of a Tunnel session this app ran itself (elevated).
+    TunnelSession,
+    /// Engine log of a Tunnel session through the helper service (its logs folder).
+    ServiceSession,
+    /// The service's lines: service-wide ones and those of this user's sessions.
+    ServiceLines,
+    /// No helper service is installed (the service source has nothing to show).
+    NoService,
+    /// The installed service is older than the app and does not send its log.
+    OldService,
+}
+
+/// The end of a log.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LogTail {
     /// Whole lines, oldest first.
-    pub lines: Vec<String>,
-    /// The file exists (an engine that never ran has no log yet).
+    pub lines: Vec<TailLine>,
+    /// The log exists (an engine that never ran has no log yet).
     pub exists: bool,
     /// Older lines were left out.
     pub truncated: bool,
+    pub note: TailNote,
 }

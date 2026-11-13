@@ -25,6 +25,7 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use vpnte_base::types::UnixMs;
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 
+pub use layer::event_line;
 pub use rotate::{ENGINE_LOG_MAX_BYTES, ENGINE_TAIL_LINES, RotatingFile};
 
 use lane::Lane;
@@ -250,29 +251,94 @@ pub fn list(dir: &Path) -> io::Result<Vec<LogFile>> {
 
 /// The last `max_bytes` (at most [`TAIL_MAX_BYTES`]) of a log file, starting at a whole line.
 pub fn tail(dir: &Path, file: &LogFile, max_bytes: usize) -> io::Result<LogSnapshot> {
+    let raw = tail_bytes(dir, file, max_bytes)?;
+    Ok(LogSnapshot {
+        name: file.file_name(),
+        exists: raw.exists,
+        size: raw.size,
+        truncated: raw.start > 0,
+        content: String::from_utf8_lossy(&raw.bytes).into_owned(),
+    })
+}
+
+/// One whole line of a tail and its byte offset in the file: a key that stays the same across
+/// re-reads until the file is cleared or rotated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailLine {
+    pub offset: u64,
+    /// The line without its line break (already redacted when written).
+    pub text: String,
+}
+
+/// [`tail`] split into lines with their offsets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineTail {
+    /// `false` when the file does not exist.
+    pub exists: bool,
+    /// Older lines were left out.
+    pub truncated: bool,
+    /// Whole lines, oldest first; blank lines are skipped.
+    pub lines: Vec<TailLine>,
+}
+
+/// The last `max_bytes` of a log file as lines with their offsets (a re-read keeps a line's key).
+pub fn tail_lines(dir: &Path, file: &LogFile, max_bytes: usize) -> io::Result<LineTail> {
+    let raw = tail_bytes(dir, file, max_bytes)?;
+    Ok(LineTail {
+        exists: raw.exists,
+        truncated: raw.start > 0,
+        lines: split_lines(raw.start, &raw.bytes),
+    })
+}
+
+/// Splits `bytes` read at file offset `start` into lines (LF or CRLF), skipping blank ones.
+pub fn split_lines(start: u64, bytes: &[u8]) -> Vec<TailLine> {
+    let mut lines = Vec::new();
+    let mut at = 0u64;
+    for chunk in bytes.split_inclusive(|&b| b == b'\n') {
+        let body = chunk.strip_suffix(b"\n").unwrap_or(chunk);
+        let body = body.strip_suffix(b"\r").unwrap_or(body);
+        if !body.iter().all(u8::is_ascii_whitespace) {
+            lines.push(TailLine {
+                offset: start + at,
+                text: String::from_utf8_lossy(body).into_owned(),
+            });
+        }
+        at += chunk.len() as u64;
+    }
+    lines
+}
+
+/// The end of a file: its size, where the kept bytes start, the bytes (whole lines).
+struct RawTail {
+    exists: bool,
+    size: u64,
+    start: u64,
+    bytes: Vec<u8>,
+}
+
+fn tail_bytes(dir: &Path, file: &LogFile, max_bytes: usize) -> io::Result<RawTail> {
     if !rotate::valid_stem(&file.stem) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad log stem"));
     }
     if file.stem == APP_STEM {
         flush();
     }
-    let name = file.file_name();
-    let mut handle = match File::open(dir.join(&name)) {
+    let mut handle = match File::open(dir.join(file.file_name())) {
         Ok(handle) => handle,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Ok(LogSnapshot {
-                name,
+            return Ok(RawTail {
                 exists: false,
                 size: 0,
-                truncated: false,
-                content: String::new(),
+                start: 0,
+                bytes: Vec::new(),
             });
         }
         Err(err) => return Err(err),
     };
     let size = handle.metadata()?.len();
     let limit = max_bytes.min(TAIL_MAX_BYTES) as u64;
-    let start = size.saturating_sub(limit);
+    let mut start = size.saturating_sub(limit);
     handle.seek(SeekFrom::Start(start))?;
     let mut bytes = Vec::new();
     handle.take(limit).read_to_end(&mut bytes)?;
@@ -283,13 +349,13 @@ pub fn tail(dir: &Path, file: &LogFile, max_bytes: usize) -> io::Result<LogSnaps
             .position(|&b| b == b'\n')
             .map_or(bytes.len(), |p| p + 1);
         bytes.drain(..cut);
+        start += cut as u64;
     }
-    Ok(LogSnapshot {
-        name,
+    Ok(RawTail {
         exists: true,
         size,
-        truncated: start > 0,
-        content: String::from_utf8_lossy(&bytes).into_owned(),
+        start,
+        bytes,
     })
 }
 

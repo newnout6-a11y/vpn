@@ -1,6 +1,7 @@
 //! [`DemoLogs`]: a fake [`LogsApi`] with realistic data for `demo_logs` and the page tests.
-//! Scenes: `full` (default), `empty`, `loading`, `failed` (the history read fails), `partial`
-//! (the cleanup cannot delete the snapshots).
+//! Scenes: `full` (default), `empty`, `loading`, `failed` (the history read fails), `service`
+//! (a Tunnel session through the helper service: its engine log and its service lines),
+//! `partial` (clearing the technical logs cannot delete one file).
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,9 +12,10 @@ use tokio::sync::watch;
 use vpnte_base::types::{Engine, OutboundFault, UnixMs, now_ms};
 use vpnte_base::{AppResult, ErrorKind, Msg};
 
+use super::events::{EventLevel, EventRow, SessionFacts, Topic};
 use super::model::{
-    ArtifactReport, ClearReport, DisconnectReason, Evidence, ExportFormat, LogSource, LogTail,
-    LogsApi, LogsSnapshot, Mode, Outcome, OutcomeKind, SessionRow, Text,
+    ArtifactReport, DisconnectReason, Evidence, ExportFormat, LogSource, LogTail, LogsApi,
+    LogsSnapshot, Mode, Outcome, OutcomeKind, SessionRow, TailLine, TailNote, Text,
 };
 use crate::widgets::{Load, UiError};
 
@@ -24,7 +26,7 @@ const DAY: i64 = 24 * HOUR;
 /// A fake backend for the Logs page.
 pub struct DemoLogs {
     scene: String,
-    history: watch::Sender<LogsSnapshot>,
+    snapshot: watch::Sender<LogsSnapshot>,
     /// Lines appended to the app log since start (the tail grows while the demo runs).
     ticks: Cell<u32>,
     /// What the last `copy_text` put on the "clipboard".
@@ -36,18 +38,27 @@ pub struct DemoLogs {
 impl DemoLogs {
     /// A demo for `scene` (unknown names fall back to `full`), dated relative to `now`.
     pub fn new(scene: &str, now: UnixMs) -> Self {
-        let history = match scene {
-            "loading" => Load::Loading,
-            "failed" => Load::Failed(UiError {
-                kind: ErrorKind::Permission,
-                msg: Msg::new(ErrorKind::Permission.i18n_key()),
-            }),
-            "empty" => Load::Ready(Arc::from(Vec::new())),
-            _ => Load::Ready(Arc::from(sessions(now))),
+        let (history, events) = match scene {
+            "loading" => (Load::Loading, Load::Loading),
+            "failed" => (
+                Load::Failed(UiError {
+                    kind: ErrorKind::Permission,
+                    msg: Msg::new(ErrorKind::Permission.i18n_key()),
+                }),
+                Load::Ready(Arc::from(events(now))),
+            ),
+            "empty" => (
+                Load::Ready(Arc::from(Vec::new())),
+                Load::Ready(Arc::from(Vec::new())),
+            ),
+            _ => (
+                Load::Ready(Arc::from(sessions(now))),
+                Load::Ready(Arc::from(events(now))),
+            ),
         };
         Self {
             scene: scene.to_owned(),
-            history: watch::Sender::new(LogsSnapshot { history }),
+            snapshot: watch::Sender::new(LogsSnapshot { history, events }),
             ticks: Cell::new(0),
             copied: RefCell::new(None),
             calls: RefCell::new(Vec::new()),
@@ -56,9 +67,14 @@ impl DemoLogs {
 
     /// Replaces the pushed history (tests).
     pub fn push(&self, rows: Vec<SessionRow>) {
-        self.history.send_replace(LogsSnapshot {
-            history: Load::Ready(Arc::from(rows)),
-        });
+        self.snapshot
+            .send_modify(|s| s.history = Load::Ready(Arc::from(rows)));
+    }
+
+    /// Replaces the pushed events (tests).
+    pub fn push_events(&self, rows: Vec<EventRow>) {
+        self.snapshot
+            .send_modify(|s| s.events = Load::Ready(Arc::from(rows)));
     }
 
     fn call(&self, name: impl Into<String>) {
@@ -68,8 +84,8 @@ impl DemoLogs {
 
 #[async_trait::async_trait(?Send)]
 impl LogsApi for DemoLogs {
-    fn history(&self) -> watch::Receiver<LogsSnapshot> {
-        self.history.subscribe()
+    fn snapshot(&self) -> watch::Receiver<LogsSnapshot> {
+        self.snapshot.subscribe()
     }
 
     async fn reload_history(&self) -> AppResult<()> {
@@ -85,28 +101,36 @@ impl LogsApi for DemoLogs {
         Ok(file_name)
     }
 
-    async fn clear_all(&self) -> AppResult<ClearReport> {
-        self.call("clear_all");
-        tokio::time::sleep(Duration::from_millis(700)).await;
+    async fn clear_events(&self) -> AppResult<()> {
+        self.call("clear_events");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        self.push_events(Vec::new());
+        Ok(())
+    }
+
+    async fn clear_history(&self) -> AppResult<()> {
+        self.call("clear_history");
+        tokio::time::sleep(Duration::from_millis(300)).await;
         self.push(Vec::new());
-        let artifacts = if self.scene == "partial" {
+        Ok(())
+    }
+
+    async fn clear_technical(&self) -> AppResult<ArtifactReport> {
+        self.call("clear_technical");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        self.ticks.set(0);
+        Ok(if self.scene == "partial" {
             ArtifactReport {
                 cleared: vec!["app-log".into()],
-                absent: vec!["traffic-forensics".into()],
-                failed: vec![("snapshots".into(), ErrorKind::Permission)],
+                absent: vec!["xray-log".into()],
+                failed: vec![("sing-box-log".into(), ErrorKind::Permission)],
             }
         } else {
             ArtifactReport {
-                cleared: vec!["app-log".into(), "sing-box-log".into(), "snapshots".into()],
-                absent: vec!["traffic-forensics".into()],
+                cleared: vec!["app-log".into(), "sing-box-log".into()],
+                absent: vec!["xray-log".into()],
                 failed: Vec::new(),
             }
-        };
-        self.ticks.set(0);
-        Ok(ClearReport {
-            history: Ok(()),
-            traffic: Ok(()),
-            artifacts: Ok(artifacts),
         })
     }
 
@@ -114,19 +138,25 @@ impl LogsApi for DemoLogs {
         self.call(format!("read_log:{source:?}"));
         tokio::time::sleep(Duration::from_millis(120)).await;
         let now = now_ms();
+        let service = self.scene == "service";
         Ok(match source {
             LogSource::App => {
                 let ticks = self.ticks.get() + 1;
                 self.ticks.set(ticks);
                 app_tail(now, ticks)
             }
-            LogSource::SingBox => singbox_tail(now),
+            LogSource::SingBox => singbox_tail(now, service),
             LogSource::Xray => LogTail::default(),
+            LogSource::Service if service => service_tail(now),
+            LogSource::Service => LogTail {
+                note: TailNote::NoService,
+                ..LogTail::default()
+            },
         })
     }
 
-    async fn open_log_folder(&self) -> AppResult<()> {
-        self.call("open_log_folder");
+    async fn open_log_folder(&self, source: LogSource) -> AppResult<()> {
+        self.call(format!("open_log_folder:{source:?}"));
         Ok(())
     }
 
@@ -135,6 +165,19 @@ impl LogsApi for DemoLogs {
         self.copied.replace(Some(text));
         Ok(())
     }
+}
+
+/// Whole lines with their offsets, as a file read gives them.
+fn tail_lines(lines: impl IntoIterator<Item = String>) -> Vec<TailLine> {
+    let mut offset = 0;
+    lines
+        .into_iter()
+        .map(|text| {
+            let line = TailLine { offset, text };
+            offset += line.text.len() as u64 + 1;
+            line
+        })
+        .collect()
 }
 
 const MB: u64 = 1024 * 1024;
@@ -385,14 +428,16 @@ fn app_tail(now: UnixMs, ticks: u32) -> LogTail {
         ));
     }
     LogTail {
-        lines,
+        lines: tail_lines(lines),
         exists: true,
         truncated: true,
+        note: TailNote::None,
     }
 }
 
-/// sing-box output with full timestamps (`-0700 2006-01-02 15:04:05 LEVEL …`).
-fn singbox_tail(now: UnixMs) -> LogTail {
+/// sing-box output with full timestamps (`-0700 2006-01-02 15:04:05 LEVEL …`): a Proxy-mode
+/// session, or a Tunnel session through the service (`service`).
+fn singbox_tail(now: UnixMs, service: bool) -> LogTail {
     let stamp = |ago: i64| {
         Timestamp::from_millisecond(now - ago * MIN).map_or_else(
             |_| String::new(),
@@ -438,11 +483,186 @@ fn singbox_tail(now: UnixMs) -> LogTail {
         ),
     ];
     LogTail {
-        lines: lines
-            .iter()
-            .map(|(ago, level, text)| format!("{} {level} {text}", stamp(*ago)))
-            .collect(),
+        lines: tail_lines(
+            lines
+                .iter()
+                .map(|(ago, level, text)| format!("{} {level} {text}", stamp(*ago))),
+        ),
         exists: true,
         truncated: false,
+        note: if service {
+            TailNote::ServiceSession
+        } else {
+            TailNote::ProxySession
+        },
+    }
+}
+
+/// One demo event.
+fn event(
+    id: u64,
+    at: UnixMs,
+    topic: Topic,
+    level: EventLevel,
+    title: Msg,
+    body: Option<Msg>,
+) -> EventRow {
+    EventRow {
+        id,
+        at,
+        topic,
+        level,
+        title: Text::Msg(title),
+        body: body.map(Text::Msg),
+        session: None,
+    }
+}
+
+/// A session start or end with its facts.
+fn session_event(id: u64, at: UnixMs, end: Option<(OutcomeKind, u64)>) -> EventRow {
+    let profile = "Нидерланды · Амстердам".to_owned();
+    let (title, level, body) = match end {
+        None => (Msg::new("logs.events.sessionUp"), EventLevel::Ok, None),
+        Some((kind, _)) => (
+            Msg::new("logs.events.sessionEnd"),
+            match kind.tone() {
+                super::model::OutcomeTone::Intended => EventLevel::Info,
+                super::model::OutcomeTone::Bad => EventLevel::Error,
+                _ => EventLevel::Warn,
+            },
+            Some(Text::Msg(headline(match kind {
+                OutcomeKind::ServerDown => "serverDown",
+                _ => "userStop",
+            }))),
+        ),
+    };
+    EventRow {
+        id,
+        at,
+        topic: Topic::Connection,
+        level,
+        title: Text::Msg(title.arg("profile", &profile)),
+        body,
+        session: Some(SessionFacts {
+            profile,
+            mode: Mode::Hard,
+            duration_ms: end.map(|(_, ms)| ms),
+            bytes_down: end.map_or(0, |_| 182 * MB),
+            bytes_up: end.map_or(0, |_| 9 * MB),
+            engine: Some(Engine::SingBox),
+            outcome: end.map(|(kind, _)| kind),
+        }),
+    }
+}
+
+/// The timeline of the `full` scene: today, yesterday and four days ago, oldest first.
+pub fn events(now: UnixMs) -> Vec<EventRow> {
+    let day = |n: i64, at_min: i64| now - n * DAY - at_min * MIN;
+    vec![
+        event(
+            1,
+            day(4, 30),
+            Topic::Update,
+            EventLevel::Ok,
+            Msg::new("logs.demo.event.updated"),
+            Some(Msg::new("logs.demo.event.updatedBody")),
+        ),
+        session_event(2, day(1, 300), None),
+        event(
+            3,
+            day(1, 250),
+            Topic::Automation,
+            EventLevel::Info,
+            Msg::new("logs.demo.event.rotation"),
+            None,
+        ),
+        session_event(
+            4,
+            day(1, 120),
+            Some((OutcomeKind::ServerDown, 3 * HOUR as u64)),
+        ),
+        event(
+            5,
+            day(0, 95),
+            Topic::Protection,
+            EventLevel::Warn,
+            Msg::new("logs.demo.event.leak"),
+            Some(Msg::new("logs.demo.event.leakBody")),
+        ),
+        session_event(6, day(0, 90), None),
+        event(
+            7,
+            day(0, 40),
+            Topic::Connection,
+            EventLevel::Warn,
+            Msg::new("logs.demo.event.engineRestart"),
+            None,
+        ),
+        event(
+            8,
+            day(0, 12),
+            Topic::Other,
+            EventLevel::Error,
+            Msg::new("logs.demo.event.listFailed"),
+            Some(Msg::new("logs.demo.event.listFailedBody")),
+        ),
+    ]
+}
+
+/// The service's lines for this user (`service` scene): JSON in the app log format.
+fn service_tail(now: UnixMs) -> LogTail {
+    let ts = |ago: i64| {
+        Timestamp::from_millisecond(now - ago * MIN).map_or_else(
+            |_| String::new(),
+            |t| t.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+        )
+    };
+    let lines = [
+        (
+            95,
+            "INFO",
+            "vpnte_service::service",
+            "service starting",
+            r#"{"version":"2.0.0"}"#,
+        ),
+        (
+            90,
+            "INFO",
+            "vpnte_service::host::conn",
+            "client connected",
+            r#"{"pid":4120}"#,
+        ),
+        (
+            90,
+            "INFO",
+            "vpnte_tunnel::runtime",
+            "engine started",
+            r#"{"engine":"sing-box"}"#,
+        ),
+        (
+            40,
+            "WARN",
+            "vpnte_tunnel::runtime",
+            "engine exited; restarting",
+            r#"{"code":1}"#,
+        ),
+        (
+            40,
+            "INFO",
+            "vpnte_tunnel::runtime",
+            "engine started",
+            r#"{"engine":"sing-box"}"#,
+        ),
+    ];
+    LogTail {
+        lines: tail_lines(lines.iter().map(|(ago, level, target, msg, fields)| {
+            format!(
+                r#"{{"ts":"{}","level":"{level}","target":"{target}","msg":"{msg}","fields":{fields}}}"#,
+                ts(*ago)
+            )
+        })),
+        exists: true,
+        truncated: false,
+        note: TailNote::ServiceLines,
     }
 }

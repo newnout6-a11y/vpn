@@ -643,35 +643,53 @@ ON = `{mode: managed, auto_update: true, use_proxy: true, 24 h}`, OFF = `{bundle
 `check_interval_ms` 5 000..300 000; `leak_protection`, the Soft targets and `capture_quota_mb` live
 outside core `Settings`.
 
-## Logs page: `logs`
+## Logs page: `logs` («Журнал», p-logs)
 
+Tabs «События» (default), «Подключения», «Технический»; the tab and every filter are remembered
+across visits (`PageState` in a global signal; the page stays active-only). Each tab has one
+«Очистить» with a one-line confirmation naming exactly what goes. «Сохранить для поддержки» in the
+header calls `MaintenanceApi::export_diagnostics` from context (hidden without one).
 ```rust
-pub trait LogsApi: 'static {         // root component LogsPage (active-only: mounted while current)
-    fn history(&self) -> watch::Receiver<LogsSnapshot>;          // whole history, any order (the page sorts)
-    async fn reload_history(&self) -> AppResult<()>;             // after a failed read; result via history
-    async fn export_history(&self, format: ExportFormat, file_name: String) -> AppResult<String>; // WHOLE history,
-    async fn clear_all(&self) -> AppResult<ClearReport>;         // Save dialog suggesting file_name; returns the path
-    async fn read_log(&self, source: LogSource) -> AppResult<LogTail>;  // last lines, whole, redacted, oldest first
-    async fn open_log_folder(&self) -> AppResult<()>;
+pub trait LogsApi: 'static {         // root component LogsPage
+    fn snapshot(&self) -> watch::Receiver<LogsSnapshot>;          // history + events, pushed on change
+    async fn reload_history(&self) -> AppResult<()>;             // after a failed read; result via snapshot
+    async fn export_history(&self, format: ExportFormat, file_name: String) -> AppResult<String>; // WHOLE history
+    async fn clear_events(&self) -> AppResult<()>;               // the event journal only
+    async fn clear_history(&self) -> AppResult<()>;              // the connection history only
+    async fn clear_technical(&self) -> AppResult<ArtifactReport>; // app + engine logs of the user's folder
+    async fn read_log(&self, source: LogSource) -> AppResult<LogTail>;  // App | SingBox | Xray | Service
+    async fn open_log_folder(&self, source: LogSource) -> AppResult<()>; // the folder of what is shown
     async fn copy_text(&self, text: String) -> AppResult<()>;
 }
-pub struct LogsSnapshot { pub history: Load<Arc<[SessionRow]>> }
+pub struct LogsSnapshot { pub history: Load<Arc<[SessionRow]>>, pub events: Load<Arc<[EventRow]>> }
+pub struct EventRow { pub id: u64, pub at: UnixMs, pub topic: Topic, pub level: EventLevel, pub title: Text,
+    pub body: Option<Text>, pub session: Option<SessionFacts> }
+pub enum Topic { Connection, Protection, Automation, Update, Other }   pub enum EventLevel { Ok, Info, Warn, Error }
+pub struct SessionFacts { pub profile: String, pub mode: Mode, pub duration_ms: Option<u64>, pub bytes_down: u64,
+    pub bytes_up: u64, pub engine: Option<Engine>, pub outcome: Option<OutcomeKind> }
+pub enum EventFilter { All, Connections, Protection, Automation, Updates, Errors }  pub struct EventQuery { filter, text }
+pub fn shown_events(rows, &EventQuery, tr) -> (Vec<&EventRow> /*newest first, ≤ EVENTS_SHOWN = 500*/, bool /*more*/);
+pub enum Day { Today, Yesterday, On(Date) }   pub fn by_day(rows, now, tz) -> Vec<(Day, Vec<&EventRow>)>;
+pub fn line_text(&EventRow, tr) -> String;    pub fn facts(&SessionFacts, tr, bytes) -> Vec<String>;
+pub fn event_text(&EventRow, tz, tr, bytes) -> String;          // «Скопировать»
+pub struct LogTail { pub lines: Vec<TailLine { offset: u64, text: String }>, pub exists: bool, pub truncated: bool,
+    pub note: TailNote }   // None | ProxySession | TunnelSession | ServiceSession | ServiceLines | NoService | OldService
+pub fn journal(source, &LogTail, LevelFilter, search: &str, tz) -> Vec<JournalLine>; // newest first, ≤ TAIL_LINES = 2000
+pub struct JournalLine { pub key: u64 /*offset*/, pub time, pub level, pub scope /*tunnel/lifecycle*/, pub text,
+    pub fields: Vec<(String, String)> /*target, JSON fields, corr: shown on expand*/ }
+pub enum Tab { Events, Connections, Technical }  pub struct PageState { tab, events, filters, period, sort, tech }
 ```
-Types: `SessionRow`, `Outcome { kind: OutcomeKind, headline: Text, evidence }`, `Text` (a `Msg` or
-plain imported text), `Evidence` (with `proxy_engine_reason: Option<Text>`, key `proxyEngineReason`) /
-`EvidenceKey` / `EvidenceValue`, `DisconnectReason`, `Mode`,
-`ExportFormat { Csv, Json }`, `LogSource { App, SingBox, Xray }`, `LogTail`, `ClearReport` /
-`ArtifactReport`; history rules `Filters`, `Query`, `Period`, `SortState`, `Stats`, `split`, `stats`,
-`sort_rows`; journal parsing `JournalLine`, `LineLevel`, `LevelFilter`, `parse_line`, `journal`;
-formats `duration_msg`, `local_time`, `local_date`. Demo: `logs::demo::DemoLogs`
-(scenes `full`, `empty`, `loading`, `failed`, `partial`).
+Types kept from ui-logs: `SessionRow`, `Outcome`, `Text`, `Evidence` / `EvidenceKey` / `EvidenceValue`,
+`DisconnectReason`, `Mode`, `ExportFormat`, `ArtifactReport` (now the technical clear's report, summed by
+`ClearSummary::of`), the history rules (`Filters`, `Query`, `Period`, `SortState`, `Stats`, `split`, `stats`,
+`sort_rows`), the line parsers (`parse_line`, `LineLevel`, `LevelFilter`), the formats. Demo:
+`logs::demo::DemoLogs` (scenes `full`, `empty`, `loading`, `failed`, `service`, `partial`; `demo::events`).
 
-App duties: `history` from the tunnel history store (outcome headline = the tunnel's `Msg`, or
-`Text::Plain` for imported rows; empty strings → `None`); `export_history` writes the lifecycle CSV /
-JSON of the whole history atomically; `clear_all` stops packet capture first, then clears
-diagnostics, history and traffic, each part on its own (`ClearReport` says what failed); `read_log`
-tails `logs/app.log` and the engine logs (`exists: false` for a missing file); `copy_text` = Windows
-clipboard. The journal viewer re-reads its tail every 5 s while the page is visible.
+App duties: `snapshot` from the event journal (`svc_journal`) and the history store; the engine logs
+of the session that runs (or ran last) wherever it ran: Proxy mode and a Tunnel in an elevated app read
+the user's logs folder, a Tunnel session through the helper service its `%ProgramData%` logs folder;
+`Service` = the service's own lines for this Windows user over its pipe (`Request::ServiceLog`, first
+frame), `NoService` / `OldService` when there are none to get.
 
 ## Tools: `availability`, `speedtest`
 

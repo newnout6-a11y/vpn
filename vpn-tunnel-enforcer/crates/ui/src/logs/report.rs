@@ -1,5 +1,5 @@
-//! Texts built from history data: evidence lines, the copied diagnostics, the cleanup summary,
-//! the export file name (ui-pages §3.9).
+//! Texts built from history data: evidence lines, the copied diagnostics, the summary of a
+//! technical-logs clear, the export file name.
 use jiff::civil::Date;
 use vpnte_base::Msg;
 use vpnte_base::types::OutboundFault;
@@ -7,7 +7,7 @@ use vpnte_base::types::OutboundFault;
 use super::format::iso_utc;
 use super::history::{non_empty, shown_headline};
 use super::model::{
-    ClearReport, Evidence, EvidenceKey, EvidenceValue, ExportFormat, SessionRow, Text,
+    ArtifactReport, Evidence, EvidenceKey, EvidenceValue, ExportFormat, SessionRow, Text,
 };
 
 /// Wire name of a fault (`reality-key-mismatch`).
@@ -141,8 +141,8 @@ pub fn headline_text(row: &SessionRow, tr: &dyn Fn(&Msg) -> String) -> String {
     shown_headline(row).render_with(tr)
 }
 
-/// The counts of a cleanup report (the old toast arithmetic): every part that succeeded counts
-/// one (history, traffic) or its deleted artifacts; every failure counts one, with its reason.
+/// The counts of a technical-logs clear (the old toast arithmetic): every cleared file counts
+/// one, every failure counts one with its reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClearSummary {
     pub cleared: usize,
@@ -153,37 +153,18 @@ pub struct ClearSummary {
 }
 
 impl ClearSummary {
-    pub fn of(report: &ClearReport) -> Self {
+    pub fn of(report: &ArtifactReport) -> Self {
         let mut reasons: Vec<Msg> = Vec::new();
-        let mut failed = 0;
-        let mut fail = |msg: Msg| {
-            failed += 1;
+        for (_, kind) in &report.failed {
+            let msg = Msg::new(kind.i18n_key());
             if !reasons.contains(&msg) {
                 reasons.push(msg);
             }
-        };
-        let mut cleared = 0;
-        let mut absent = 0;
-        for part in [&report.history, &report.traffic] {
-            match part {
-                Ok(()) => cleared += 1,
-                Err(err) => fail(err.msg.clone()),
-            }
-        }
-        match &report.artifacts {
-            Ok(artifacts) => {
-                cleared += artifacts.cleared.len();
-                absent = artifacts.absent.len();
-                for (_, kind) in &artifacts.failed {
-                    fail(Msg::new(kind.i18n_key()));
-                }
-            }
-            Err(err) => fail(err.msg.clone()),
         }
         ClearSummary {
-            cleared,
-            absent,
-            failed,
+            cleared: report.cleared.len(),
+            absent: report.absent.len(),
+            failed: report.failed.len(),
             reasons,
         }
     }

@@ -14,17 +14,22 @@ pub fn row(e: &Entry, lang: Lang) -> SessionRow {
         ended_at: e.ended_at,
         duration_ms: e.duration_ms,
         profile_name: e.profile_name.clone(),
-        mode: match e.mode {
-            SessionMode::Hard => Mode::Hard,
-            SessionMode::Soft => Mode::Soft,
-            SessionMode::Direct => Mode::Direct,
-        },
+        mode: mode(e.mode),
         bytes_down: e.bytes_down,
         bytes_up: e.bytes_up,
         reason: reason(e.disconnect_reason),
         // The technical message is plain text on the page (also what the CSV carries).
         error_message: e.error_message.as_ref().map(|m| outcome::render(m, lang)),
         outcome: e.outcome.as_ref().map(session_outcome),
+    }
+}
+
+/// The page's mode of a stored session.
+pub(super) fn mode(m: SessionMode) -> Mode {
+    match m {
+        SessionMode::Hard => Mode::Hard,
+        SessionMode::Soft => Mode::Soft,
+        SessionMode::Direct => Mode::Direct,
     }
 }
 
@@ -63,7 +68,7 @@ fn session_outcome(o: &SessionOutcome) -> Outcome {
 }
 
 /// A stored message: verbatim text stays text, anything else is rendered by the page.
-fn text(msg: &Msg) -> Text {
+pub(super) fn text(msg: &Msg) -> Text {
     match outcome::verbatim_text(msg) {
         Some(plain) => Text::Plain(plain.to_owned()),
         None => Text::Msg(msg.clone()),
@@ -80,7 +85,7 @@ fn adaptive_name(m: AdaptiveContext) -> &'static str {
     }
 }
 
-fn kind(k: outcome::OutcomeKind) -> OutcomeKind {
+pub(super) fn kind(k: outcome::OutcomeKind) -> OutcomeKind {
     use outcome::OutcomeKind as K;
     match k {
         K::UserStop => OutcomeKind::UserStop,

@@ -19,6 +19,7 @@ pub mod setup;
 pub mod support;
 pub mod svc_auto;
 pub mod svc_core;
+pub mod svc_journal;
 pub mod svc_live;
 pub mod svc_proxies;
 pub mod svc_tunnel;

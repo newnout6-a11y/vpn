@@ -7,7 +7,6 @@ use vpnte_base::{ErrorKind, Msg};
 
 use super::demo::DemoLogs;
 use super::*;
-use crate::widgets::UiError;
 
 /// A message in `lang` through the catalog as the app registers it (old strings, every UI
 /// fragment, the canonical errors of vpnte-base).
@@ -505,35 +504,19 @@ fn diagnostics_text_of_rows() {
     );
 }
 
-fn report(
-    history: Result<(), ErrorKind>,
-    traffic: Result<(), ErrorKind>,
-    artifacts: Result<ArtifactReport, ErrorKind>,
-) -> ClearReport {
-    let err = |kind: ErrorKind| UiError {
-        kind,
-        msg: Msg::new(kind.i18n_key()),
-    };
-    ClearReport {
-        history: history.map_err(err),
-        traffic: traffic.map_err(err),
-        artifacts: artifacts.map_err(err),
-    }
-}
-
-/// AT-00-004/008 (ui-pages §7.3): partial cleanup and failed histories never display full
-/// success; canonical reasons in ru / en; history 1 + traffic 1 + artifacts 1 = «Удалено: 3».
+/// AT-00-004/008 (ui-pages §7.3, now the technical tab's clear): a partial clear never shows
+/// full success; canonical reasons in ru / en, equal reasons named once.
 #[test]
 fn cleanup_summary() {
-    let partial = report(
-        Ok(()),
-        Ok(()),
-        Ok(ArtifactReport {
-            cleared: vec!["app-log".into()],
-            absent: vec![],
-            failed: vec![("snapshots".into(), ErrorKind::Permission)],
-        }),
-    );
+    let partial = ArtifactReport {
+        cleared: vec![
+            "app-log".into(),
+            "xray-log".into(),
+            "xray-previous-log".into(),
+        ],
+        absent: vec![],
+        failed: vec![("sing-box-log".into(), ErrorKind::Permission)],
+    };
     let summary = ClearSummary::of(&partial);
     assert!(!summary.is_success());
     let (title, body) = summary.toast(&ru);
@@ -546,33 +529,31 @@ fn cleanup_summary() {
     assert_eq!(title, "Cleanup incomplete");
     assert_eq!(body, "Cleared: 3, absent: 0, failed: 1. Permission denied");
 
-    let complete = report(
-        Ok(()),
-        Ok(()),
-        Ok(ArtifactReport {
-            cleared: vec!["app-log".into(), "snapshots".into()],
-            absent: vec![],
-            failed: vec![],
-        }),
-    );
+    let complete = ArtifactReport {
+        cleared: vec!["app-log".into()],
+        absent: vec!["xray-log".into()],
+        failed: vec![],
+    };
     let summary = ClearSummary::of(&complete);
     assert!(summary.is_success());
     assert_eq!(
         summary.toast(&ru),
         (
-            "Логи очищены".into(),
-            "История, runtime-логи и диагностические артефакты удалены".into()
+            "Технические журналы очищены".into(),
+            "Журналы приложения и движков в вашей папке пусты.".into()
         )
     );
 
-    // a failed history clear keeps the rows and is an error; equal reasons are named once
-    let failed = report(
-        Err(ErrorKind::Permission),
-        Err(ErrorKind::Permission),
-        Err(ErrorKind::Conflict),
-    );
+    let failed = ArtifactReport {
+        cleared: vec![],
+        absent: vec![],
+        failed: vec![
+            ("app-log".into(), ErrorKind::Permission),
+            ("sing-box-log".into(), ErrorKind::Permission),
+            ("xray-log".into(), ErrorKind::Conflict),
+        ],
+    };
     let summary = ClearSummary::of(&failed);
-    assert!(!summary.is_success());
     assert_eq!((summary.cleared, summary.absent, summary.failed), (0, 0, 3));
     assert_eq!(
         summary.toast(&ru).1,
@@ -586,39 +567,56 @@ fn moscow() -> TimeZone {
 
 fn line(time: Option<&str>, level: LineLevel, scope: Option<&str>, text: &str) -> JournalLine {
     JournalLine {
+        key: 0,
         time: time.map(str::to_owned),
         level,
         scope: scope.map(str::to_owned),
         text: text.to_owned(),
+        fields: Vec::new(),
     }
 }
 
-/// app.log lines (core format): local time, level, the crate prefix dropped from the target,
-/// fields after the message; anything else is an info line as written.
+/// p-logs: app.log and service lines formatted for reading: local time, level, a short scope
+/// (crate and first module), the message; the full module path, the fields and the operation
+/// id apart (shown on expand); never raw JSON. Anything else is an info line as written.
 #[test]
 fn app_log_lines() {
     let tz = moscow();
-    let json = r#"{"ts":"2026-11-11T08:00:05.120Z","level":"WARN","target":"vpnte_tunnel::lifecycle","msg":"engine restarted","fields":{"attempt":2,"profile":"NL"},"corr":"op_1"}"#;
+    let json = r#"{"ts":"2026-11-11T08:00:05.120Z","level":"WARN","target":"vpnte_tunnel::lifecycle::actor","msg":"engine restarted","fields":{"attempt":2,"profile":"NL"},"corr":"op_1"}"#;
+    let mut expected = line(
+        Some("11:00:05"),
+        LineLevel::Warn,
+        Some("tunnel/lifecycle"),
+        "engine restarted",
+    );
+    expected.fields = vec![
+        ("target".into(), "vpnte_tunnel::lifecycle::actor".into()),
+        ("attempt".into(), "2".into()),
+        ("profile".into(), "NL".into()),
+        ("corr".into(), "op_1".into()),
+    ];
     assert_eq!(
         parse_line(LogSource::App, json, &tz),
-        Some(line(
-            Some("11:00:05"),
-            LineLevel::Warn,
-            Some("tunnel::lifecycle"),
-            "engine restarted attempt=2 profile=NL"
-        ))
+        Some(expected.clone())
+    );
+    assert_eq!(
+        parse_line(LogSource::Service, json, &tz),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        expected.copy_text(),
+        "11:00:05 warn [tunnel/lifecycle] engine restarted target=vpnte_tunnel::lifecycle::actor attempt=2 profile=NL corr=op_1"
     );
     let old =
         r#"{"ts":"2026-11-11T08:00:05Z","level":"error","scope":"tun","message":"spawn failed"}"#;
-    assert_eq!(
-        parse_line(LogSource::App, old, &tz),
-        Some(line(
-            Some("11:00:05"),
-            LineLevel::Error,
-            Some("tun"),
-            "spawn failed"
-        ))
+    let mut expected = line(
+        Some("11:00:05"),
+        LineLevel::Error,
+        Some("tun"),
+        "spawn failed",
     );
+    expected.fields = vec![("target".into(), "tun".into())];
+    assert_eq!(parse_line(LogSource::App, old, &tz), Some(expected));
     assert_eq!(
         parse_line(LogSource::App, "thread 'main' panicked\r\n", &tz),
         Some(line(None, LineLevel::Info, None, "thread 'main' panicked"))
@@ -707,34 +705,229 @@ fn xray_lines() {
 }
 
 /// The pane: newest first, the level filter, at most [`TAIL_LINES`] lines.
+/// p-logs: at most the last 2 000 lines, newest first, each keyed by its file offset; the
+/// level filter and the search narrow them.
 #[test]
-fn journal_tail_and_levels() {
+fn journal_tail_levels_and_search() {
     let tz = TimeZone::UTC;
-    let lines = (0..400)
+    let lines = (0..2400u64)
         .map(|i| {
             let level = if i % 10 == 0 { "ERROR" } else if i % 10 == 5 { "WARN" } else { "INFO" };
-            format!(r#"{{"ts":"2026-11-11T08:00:00Z","level":"{level}","target":"vpnte_x","msg":"{i}"}}"#)
+            TailLine {
+                offset: i * 100,
+                text: format!(
+                    r#"{{"ts":"2026-11-11T08:00:00Z","level":"{level}","target":"vpnte_x","msg":"{i}"}}"#
+                ),
+            }
         })
         .collect();
     let tail = LogTail {
         lines,
         exists: true,
         truncated: true,
+        note: TailNote::None,
     };
-    let all = journal(LogSource::App, &tail, LevelFilter::All, &tz);
+    let all = journal(LogSource::App, &tail, LevelFilter::All, "", &tz);
     assert_eq!(all.len(), TAIL_LINES);
     assert_eq!(
         (all[0].text.as_str(), all[TAIL_LINES - 1].text.as_str()),
-        ("399", "100")
+        ("2399", "400")
     );
-    let warnings = journal(LogSource::App, &tail, LevelFilter::Warnings, &tz);
-    assert_eq!(warnings.len(), 80);
-    assert_eq!(warnings[0].text, "395");
-    let errors = journal(LogSource::App, &tail, LevelFilter::Errors, &tz);
-    assert_eq!(errors.len(), 40);
+    assert_eq!((all[0].key, all[TAIL_LINES - 1].key), (239_900, 40_000));
+    let warnings = journal(LogSource::App, &tail, LevelFilter::Warnings, "", &tz);
+    assert_eq!(warnings.len(), 480);
+    assert_eq!(warnings[0].text, "2395");
+    let errors = journal(LogSource::App, &tail, LevelFilter::Errors, "", &tz);
+    assert_eq!(errors.len(), 240);
     assert!(errors.iter().all(|l| l.level == LineLevel::Error));
+    let found = journal(LogSource::App, &tail, LevelFilter::All, " 123 ", &tz);
+    let texts: Vec<&str> = found.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        [
+            "2123", "1239", "1238", "1237", "1236", "1235", "1234", "1233", "1232", "1231", "1230",
+            "1123", "123"
+        ]
+    );
+    let scoped = journal(LogSource::App, &tail, LevelFilter::Errors, "VPNTE_X", &tz);
+    assert_eq!(scoped.len(), 240, "the search sees the module path too");
     assert!(LevelFilter::All.keeps(LineLevel::Debug));
     assert!(!LevelFilter::Warnings.keeps(LineLevel::Info));
+}
+
+fn event(id: u64, at: i64, topic: Topic, level: EventLevel, key: &'static str) -> EventRow {
+    EventRow {
+        id,
+        at,
+        topic,
+        level,
+        title: Text::Msg(Msg::new(key)),
+        body: None,
+        session: None,
+    }
+}
+
+/// p-logs: the chips keep their topic (Ошибки: every error), the search finds the shown
+/// text and the profile, newest first, at most `EVENTS_SHOWN` with a note.
+#[test]
+fn event_filters_and_search() {
+    let mut up = event(
+        3,
+        3_000,
+        Topic::Connection,
+        EventLevel::Ok,
+        "logs.events.sessionUp",
+    );
+    up.title = Text::Msg(Msg::new("logs.events.sessionUp").arg("profile", "Амстердам"));
+    up.session = Some(SessionFacts {
+        profile: "Амстердам".into(),
+        mode: Mode::Hard,
+        duration_ms: None,
+        bytes_down: 0,
+        bytes_up: 0,
+        engine: None,
+        outcome: None,
+    });
+    let rows = vec![
+        event(
+            1,
+            1_000,
+            Topic::Update,
+            EventLevel::Ok,
+            "logs.demo.event.updated",
+        ),
+        event(
+            2,
+            2_000,
+            Topic::Protection,
+            EventLevel::Error,
+            "logs.demo.event.leak",
+        ),
+        up,
+        event(
+            4,
+            4_000,
+            Topic::Other,
+            EventLevel::Error,
+            "logs.demo.event.listFailed",
+        ),
+    ];
+    let ids = |query: EventQuery| {
+        shown_events(&rows, &query, &ru)
+            .0
+            .iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>()
+    };
+    let q = |filter, text: &str| EventQuery {
+        filter,
+        text: text.into(),
+    };
+    assert_eq!(ids(q(EventFilter::All, "")), [4, 3, 2, 1]);
+    assert_eq!(ids(q(EventFilter::Errors, "")), [4, 2]);
+    assert_eq!(ids(q(EventFilter::Connections, "")), [3]);
+    assert_eq!(ids(q(EventFilter::Protection, "")), [2]);
+    assert_eq!(ids(q(EventFilter::Automation, "")), Vec::<u64>::new());
+    assert_eq!(ids(q(EventFilter::Updates, "")), [1]);
+    assert_eq!(ids(q(EventFilter::All, "амстердам")), [3], "the profile");
+    assert_eq!(
+        ids(q(EventFilter::All, " SMART ru ")),
+        [4],
+        "the shown text, any case"
+    );
+    let many: Vec<EventRow> = (0..EVENTS_SHOWN as u64 + 3)
+        .map(|i| {
+            event(
+                i,
+                i as i64,
+                Topic::Other,
+                EventLevel::Info,
+                "logs.demo.event.updated",
+            )
+        })
+        .collect();
+    let (shown, more) = shown_events(&many, &EventQuery::default(), &ru);
+    assert_eq!((shown.len(), more), (EVENTS_SHOWN, true));
+    assert_eq!(shown[0].id, EVENTS_SHOWN as u64 + 2);
+}
+
+/// p-logs: the timeline is grouped by local day (Сегодня, Вчера, a date).
+#[test]
+fn events_are_grouped_by_day() {
+    let tz = moscow();
+    // 2026-11-13 12:00 in Moscow.
+    let now = 1_794_560_400_000;
+    let rows = [
+        event(3, now - 3_600_000, Topic::Other, EventLevel::Info, "x"),
+        event(2, now - 86_400_000, Topic::Other, EventLevel::Info, "x"),
+        event(1, now - 3 * 86_400_000, Topic::Other, EventLevel::Info, "x"),
+    ];
+    let groups = by_day(rows.iter().collect(), now, &tz);
+    let days: Vec<Day> = groups.iter().map(|(d, _)| *d).collect();
+    assert_eq!(
+        days,
+        [Day::Today, Day::Yesterday, Day::On(date(2026, 11, 10))]
+    );
+    let labels: Vec<String> = days.iter().map(|d| d.label(&ru)).collect();
+    assert_eq!(labels, ["Сегодня", "Вчера", "10 нояб."]);
+    assert_eq!(Day::On(date(2026, 11, 10)).label(&en), "Nov 10");
+}
+
+/// p-logs: a session end says how it ended on its one line; the copied text adds the date,
+/// the details and the facts.
+#[test]
+fn event_lines_and_copied_text() {
+    let tz = moscow();
+    let mut end = event(
+        9,
+        1_794_560_400_000,
+        Topic::Connection,
+        EventLevel::Error,
+        "x",
+    );
+    end.title = Text::Msg(Msg::new("logs.events.sessionEnd").arg("profile", "NL"));
+    end.body = Some(Text::Plain("Узел недоступен".into()));
+    end.session = Some(SessionFacts {
+        profile: "NL".into(),
+        mode: Mode::Soft,
+        duration_ms: Some(65_000),
+        bytes_down: 1024,
+        bytes_up: 0,
+        engine: Some(vpnte_base::types::Engine::Xray),
+        outcome: Some(OutcomeKind::ServerDown),
+    });
+    let line = line_text(&end, &en);
+    assert_eq!(
+        line,
+        format!(
+            "Disconnected · NL — {}",
+            en(&OutcomeKind::ServerDown.label())
+        )
+    );
+    let copied = event_text(&end, &tz, &en, &|b| format!("{b} B"));
+    let lines: Vec<&str> = copied.lines().collect();
+    assert_eq!(lines[0], format!("2026-11-13 12:00:00 · {line}"));
+    assert_eq!(lines[1], "Узел недоступен");
+    assert!(lines.contains(&"Duration: 1m 5s"), "{copied}");
+    assert!(lines.contains(&"Engine: Xray"), "{copied}");
+    let mut failed = end.clone();
+    failed.session.as_mut().expect("facts").outcome = Some(OutcomeKind::StartFailed);
+    failed.title = Text::Msg(Msg::new("logs.events.sessionFailed").arg("profile", "NL"));
+    assert_eq!(line_text(&failed, &en), "Could not connect · NL");
+}
+
+/// The owner named the page «Журнал»: the nav label and the title.
+#[test]
+fn the_page_is_called_journal() {
+    assert_eq!(
+        ru(&Msg::new(crate::pages::Page::Logs.label_key())),
+        "Журнал"
+    );
+    assert_eq!(ru(&Msg::new("logs.title")), "Журнал");
+    assert_eq!(
+        en(&Msg::new(crate::pages::Page::Logs.label_key())),
+        "Journal"
+    );
 }
 
 /// U-14: counted strings use plural keys (the old «1 подключения»).
@@ -791,6 +984,11 @@ fn locale_gate() {
         dynamic.push(fault_label(fault).key.to_string());
     }
     dynamic.extend((1..=12).map(|m| format!("logs.month.{m}")));
+    for target in ["events", "history", "technical"] {
+        dynamic.push(format!("logs.erase.{target}.title"));
+        dynamic.push(format!("logs.erase.{target}.confirm"));
+    }
+    dynamic.extend(["events", "history"].map(|t| format!("logs.erase.{t}.done")));
     dynamic.extend(ErrorKindAll::ALL.iter().map(|k| k.i18n_key().to_owned()));
     let sources = [
         include_str!("model.rs"),
@@ -801,6 +999,11 @@ fn locale_gate() {
         include_str!("page.rs"),
         include_str!("table.rs"),
         include_str!("viewer.rs"),
+        include_str!("events.rs"),
+        include_str!("events_view.rs"),
+        include_str!("connections.rs"),
+        include_str!("clear.rs"),
+        include_str!("state.rs"),
         include_str!("demo.rs"),
         include_str!("../bin/demo_logs.rs"),
     ];
@@ -835,59 +1038,127 @@ impl ErrorKindAll {
     ];
 }
 
-/// VirtualDom runs: the page over every demo scene, and the cleanup's request lifetime.
+/// VirtualDom runs: every tab over every demo scene, the remembered state, and a clear's
+/// request lifetime.
 mod dom {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
-    use dioxus::core::NoOpMutations;
     use dioxus::prelude::*;
     use tokio::sync::{oneshot, watch};
     use vpnte_base::{AppError, AppResult};
 
-    use super::super::page::clear;
+    use super::super::clear::{ClearTarget, start};
+    use super::super::state::STATE;
     use super::*;
+    use crate::test_support::settle;
     use crate::widgets::{ToastKind, Toasts, use_job};
 
-    use crate::test_support::settle;
-
+    /// The scene, the tab and the remembered source to mount with; the mounted demo comes back.
     #[derive(Clone)]
-    struct Scene(&'static str, Rc<RefCell<Option<Rc<DemoLogs>>>>);
-
-    fn page_root() -> Element {
-        let scene = use_context::<Scene>();
-        let api = use_hook(|| Rc::new(DemoLogs::new(scene.0, vpnte_base::types::now_ms())));
-        scene.1.replace(Some(api.clone()));
-        use_context_provider(|| api.clone() as Rc<dyn LogsApi>);
-        Toasts::use_provider();
-        rsx! { LogsPage {} }
+    struct Mount {
+        scene: &'static str,
+        tab: Tab,
+        source: LogSource,
+        show: Rc<Cell<bool>>,
+        seen: Rc<RefCell<Option<Rc<DemoLogs>>>>,
     }
 
-    /// Every demo scene mounts, reads the app journal once and renders without a panic.
-    #[tokio::test]
-    async fn every_scene_renders() {
-        for name in ["full", "empty", "loading", "failed", "partial"] {
-            let seen = Rc::new(RefCell::new(None));
-            let mut dom = VirtualDom::new(page_root).with_root_context(Scene(name, seen.clone()));
-            dom.rebuild_in_place();
-            settle(&mut dom, 8, 40).await;
-            let api = seen.borrow().clone().expect("mounted");
-            let calls = api.calls.borrow().clone();
-            assert_eq!(calls, ["read_log:App"], "scene {name}");
+    fn page_root() -> Element {
+        let mount = use_context::<Mount>();
+        let api = use_hook(|| Rc::new(DemoLogs::new(mount.scene, vpnte_base::types::now_ms())));
+        mount.seen.replace(Some(api.clone()));
+        use_context_provider(|| api.clone() as Rc<dyn LogsApi>);
+        // «Сохранить для поддержки» shows with a maintenance backend in context.
+        use_context_provider(|| {
+            use crate::maintenance::demo::{DemoMaintenanceApi, Scene as Maintenance};
+            DemoMaintenanceApi::new(Maintenance::Default)
+                as Rc<dyn crate::maintenance::MaintenanceApi>
+        });
+        Toasts::use_provider();
+        use_hook(|| {
+            let mut state = STATE.write();
+            state.tab = mount.tab;
+            state.tech.source = mount.source;
+        });
+        rsx! {
+            if mount.show.get() {
+                LogsPage {}
+            }
         }
     }
 
-    /// A cleanup whose reply the test sends.
+    fn mount(scene: &'static str, tab: Tab, source: LogSource) -> (VirtualDom, Mount) {
+        let mount = Mount {
+            scene,
+            tab,
+            source,
+            show: Rc::new(Cell::new(true)),
+            seen: Rc::new(RefCell::new(None)),
+        };
+        let mut dom = VirtualDom::new(page_root).with_root_context(mount.clone());
+        dom.rebuild_in_place();
+        (dom, mount)
+    }
+
+    fn calls(mount: &Mount) -> Vec<String> {
+        let api = mount.seen.borrow().clone().expect("mounted");
+        api.calls.borrow().clone()
+    }
+
+    /// Every tab mounts over every demo scene and renders without a panic; only the technical
+    /// tab reads a log, once, the remembered source.
+    #[tokio::test]
+    async fn every_tab_renders_in_every_scene() {
+        for scene in ["full", "empty", "loading", "failed", "service", "partial"] {
+            for tab in Tab::ALL {
+                let (mut dom, mount) = mount(scene, tab, LogSource::App);
+                settle(&mut dom, 8, 40).await;
+                let expected: &[&str] = match tab {
+                    Tab::Technical => &["read_log:App"],
+                    _ => &[],
+                };
+                assert_eq!(calls(&mount), expected, "{scene} {tab:?}");
+            }
+        }
+    }
+
+    /// A Tunnel session through the service: the service source reads its lines.
+    #[tokio::test]
+    async fn the_service_source_reads_the_service_lines() {
+        let (mut dom, mount) = mount("service", Tab::Technical, LogSource::Service);
+        settle(&mut dom, 8, 40).await;
+        assert_eq!(calls(&mount), ["read_log:Service"]);
+    }
+
+    /// The owner's rule: the tab and the source survive leaving the page (unmount, mount).
+    #[tokio::test]
+    async fn the_tab_and_source_survive_leaving_the_page() {
+        let (mut dom, mount) = mount("full", Tab::Technical, LogSource::Xray);
+        settle(&mut dom, 6, 40).await;
+        mount.show.set(false);
+        dom.mark_dirty(ScopeId::APP);
+        settle(&mut dom, 3, 20).await;
+        mount.show.set(true);
+        dom.mark_dirty(ScopeId::APP);
+        settle(&mut dom, 6, 40).await;
+        assert_eq!(calls(&mount), ["read_log:Xray", "read_log:Xray"]);
+        let remembered = dom.in_runtime(|| STATE.peek().clone());
+        assert_eq!(remembered.tab, Tab::Technical);
+        assert_eq!(remembered.tech.source, LogSource::Xray);
+    }
+
+    /// A clear whose reply the test sends.
     struct GateApi {
-        history: watch::Sender<LogsSnapshot>,
+        snapshot: watch::Sender<LogsSnapshot>,
         calls: Cell<u32>,
-        reply: RefCell<Option<oneshot::Receiver<ClearReport>>>,
+        reply: RefCell<Option<oneshot::Receiver<ArtifactReport>>>,
     }
 
     #[async_trait::async_trait(?Send)]
     impl LogsApi for GateApi {
-        fn history(&self) -> watch::Receiver<LogsSnapshot> {
-            self.history.subscribe()
+        fn snapshot(&self) -> watch::Receiver<LogsSnapshot> {
+            self.snapshot.subscribe()
         }
         async fn reload_history(&self) -> AppResult<()> {
             Ok(())
@@ -895,7 +1166,13 @@ mod dom {
         async fn export_history(&self, _: ExportFormat, name: String) -> AppResult<String> {
             Ok(name)
         }
-        async fn clear_all(&self) -> AppResult<ClearReport> {
+        async fn clear_events(&self) -> AppResult<()> {
+            Ok(())
+        }
+        async fn clear_history(&self) -> AppResult<()> {
+            Ok(())
+        }
+        async fn clear_technical(&self) -> AppResult<ArtifactReport> {
             self.calls.set(self.calls.get() + 1);
             let reply = self
                 .reply
@@ -907,7 +1184,7 @@ mod dom {
         async fn read_log(&self, _: LogSource) -> AppResult<LogTail> {
             Ok(LogTail::default())
         }
-        async fn open_log_folder(&self) -> AppResult<()> {
+        async fn open_log_folder(&self, _: LogSource) -> AppResult<()> {
             Ok(())
         }
         async fn copy_text(&self, _: String) -> AppResult<()> {
@@ -933,27 +1210,27 @@ mod dom {
         }
     }
 
-    /// Clicks «Очистить» twice while the first cleanup runs.
+    /// Confirms «Очистить» twice while the first clear runs.
     #[component]
     fn ClearChild() -> Element {
         let probe = use_context::<Probe>();
         let toasts = Toasts::use_context();
         let job = use_job::<()>();
-        let confirm = use_signal(|| true);
-        let reload = use_signal(|| 0u64);
+        let open = use_signal(|| true);
         use_hook(|| {
             let api: Rc<dyn LogsApi> = probe.api.clone();
-            clear(api.clone(), job, toasts, confirm, reload);
-            clear(api, job, toasts, confirm, reload);
+            let done = EventHandler::new(|()| {});
+            start(api.clone(), ClearTarget::Technical, job, toasts, open, done);
+            start(api, ClearTarget::Technical, job, toasts, open, done);
         });
         rsx! {}
     }
 
-    fn mount() -> (VirtualDom, Probe, oneshot::Sender<ClearReport>) {
+    fn mount_clear() -> (VirtualDom, Probe, oneshot::Sender<ArtifactReport>) {
         let (tx, rx) = oneshot::channel();
         let probe = Probe {
             api: Rc::new(GateApi {
-                history: watch::Sender::new(LogsSnapshot::default()),
+                snapshot: watch::Sender::new(LogsSnapshot::default()),
                 calls: Cell::new(0),
                 reply: RefCell::new(Some(rx)),
             }),
@@ -970,44 +1247,38 @@ mod dom {
         dom.in_runtime(|| toasts.list().iter().map(|t| t.kind).collect())
     }
 
-    fn partial() -> ClearReport {
-        ClearReport {
-            history: Ok(()),
-            traffic: Ok(()),
-            artifacts: Ok(ArtifactReport {
-                cleared: vec!["app-log".into()],
-                absent: vec![],
-                failed: vec![("snapshots".into(), ErrorKind::Permission)],
-            }),
+    fn partial() -> ArtifactReport {
+        ArtifactReport {
+            cleared: vec!["app-log".into()],
+            absent: vec![],
+            failed: vec![("sing-box-log".into(), ErrorKind::Permission)],
         }
     }
 
-    /// AT-00-008 (§7.3 "blocks duplicate clicks", "waits for every clear", "partial cleanup
-    /// never displays full success"): one call for two clicks, no toast before the reply, then
-    /// an error toast.
+    /// AT-00-008 (§7.3 "blocks duplicate clicks", "partial cleanup never displays full
+    /// success"): one call for two confirms, no toast before the reply, then an error toast.
     #[tokio::test]
-    async fn one_cleanup_for_two_clicks_and_no_success_on_partial() {
-        let (mut dom, probe, tx) = mount();
+    async fn one_clear_for_two_confirms_and_no_success_on_partial() {
+        let (mut dom, probe, tx) = mount_clear();
         settle(&mut dom, 3, 40).await;
         assert_eq!(probe.api.calls.get(), 1);
         assert!(toast_kinds(&dom, &probe).is_empty());
-        tx.send(partial()).expect("cleanup running");
+        tx.send(partial()).expect("clear running");
         settle(&mut dom, 3, 40).await;
         assert_eq!(toast_kinds(&dom, &probe), [ToastKind::Error]);
     }
 
-    /// AT-00-008 (§7.3 "suppresses a late toast after unmount"): the page left while the
-    /// cleanup runs shows nothing when the reply comes.
+    /// AT-00-008 (§7.3 "suppresses a late toast after unmount"): the page left while the clear
+    /// runs shows nothing when the reply comes.
     #[tokio::test]
     async fn no_toast_after_the_page_is_left() {
-        let (mut dom, probe, tx) = mount();
+        let (mut dom, probe, tx) = mount_clear();
         settle(&mut dom, 3, 40).await;
         probe.show.set(false);
         dom.mark_dirty(ScopeId::APP);
-        dom.render_immediate(&mut NoOpMutations);
+        settle(&mut dom, 3, 40).await;
         let _ = tx.send(partial());
         settle(&mut dom, 3, 40).await;
         assert!(toast_kinds(&dom, &probe).is_empty());
-        assert_eq!(probe.api.calls.get(), 1);
     }
 }

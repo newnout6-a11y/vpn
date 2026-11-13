@@ -58,6 +58,8 @@ pub fn run(args: &Args) -> ExitCode {
         }
     };
     boot::set_identity();
+    // Before anything can show a notice: the event journal hears every one (p-logs).
+    drop(crate::svc_journal::attach(&backend));
     boot::spawn_housekeeping(&backend.settings);
     // Before the start-up recovery and any session (RU-2026 14c): the logon value and the
     // end-session rollback.

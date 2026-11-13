@@ -79,7 +79,12 @@ pub struct Notifier {
     coalescer: Mutex<Coalescer>,
     jobs: mpsc::Sender<Job>,
     activate: Arc<OnceLock<OnActivate>>,
+    /// Sees every delivered notice (p-logs: the event journal); set once at start.
+    hook: OnceLock<NoticeHook>,
 }
+
+/// Called with every notice the app shows, whatever the toast switches say (p-logs).
+pub type NoticeHook = Arc<dyn Fn(&Notice, Option<NoticeCategory>, UnixMs) + Send + Sync>;
 
 impl Notifier {
     /// Starts the toast thread (it ends when the notifier is dropped).
@@ -97,7 +102,13 @@ impl Notifier {
             coalescer: Mutex::new(Coalescer::default()),
             jobs,
             activate,
+            hook: OnceLock::new(),
         })
+    }
+
+    /// Hands every notice from now on to `hook` too (the event journal); the first call wins.
+    pub fn set_hook(&self, hook: NoticeHook) {
+        let _ = self.hook.set(hook);
     }
 
     /// Delivers `notice` under `category` (see the module doc); never blocks.
@@ -111,6 +122,9 @@ impl Notifier {
             .read(|s| (s.desktop_notifications, s.notifications.clone(), s.locale));
         tracing::info!(title = %notice.title.key, level = ?notice.level, "notice");
         let at = now_ms();
+        if let Some(hook) = self.hook.get() {
+            hook(&notice, category, at);
+        }
         match route(desktop, &prefs, category) {
             Route::ListOnly => self.publish(notice, category, at, false),
             Route::InApp => self.publish(notice, category, at, true),

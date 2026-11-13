@@ -5842,6 +5842,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vpnte-base",
+ "vpnte-core",
  "vpnte-engine",
  "vpnte-probes",
  "vpnte-profiles",

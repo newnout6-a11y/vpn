@@ -95,6 +95,10 @@ pub enum Request {
     /// The service's own update (p-svc-update): its state, or take a release before its
     /// installer runs. A first frame like `ForgetMe`; an older service answers `badRequest`.
     Update(UpdateAsk),
+    /// The service's own log as the caller's Windows user may read it (p-logs): the service-wide
+    /// lines and those of his own sessions. A first frame like `Update` (or after `Hello`); an
+    /// older service answers `badRequest`.
+    ServiceLog,
 }
 
 /// Versions of the client.
@@ -262,6 +266,8 @@ pub enum Reply {
     },
     /// To `Update`: the service's version and update state.
     Update(ServiceUpdateWire),
+    /// To `ServiceLog`: the caller's lines of the service log.
+    ServiceLog(ServiceLogWire),
 }
 
 /// The tunnel and the kill switch right now.
@@ -355,4 +361,22 @@ impl WireError {
             warnings: Vec::new(),
         }
     }
+}
+
+/// The service log as one Windows user may read it (p-logs): redacted app-log JSON lines,
+/// oldest first, without the user tag.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServiceLogWire {
+    pub lines: Vec<ServiceLogLine>,
+    /// Older lines were left out.
+    pub truncated: bool,
+}
+
+/// One line of the service log and its byte offset in the file (the viewer's row key).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServiceLogLine {
+    pub offset: u64,
+    pub text: String,
 }

@@ -179,6 +179,14 @@ pub(super) fn overflow_line(lost: u64) -> Vec<u8> {
     })
 }
 
+/// One event as an app.log line, redacted by the same rules (spans are not followed): for a
+/// writer of its own, such as the helper service's log.
+pub fn event_line(event: &Event<'_>) -> LogLine {
+    let mut fields = Fields::default();
+    event.record(&mut fields);
+    fields.into_line(event.metadata())
+}
+
 fn encode(line: &LogLine) -> Vec<u8> {
     // Serializing strings, numbers and maps cannot fail; an empty result writes nothing.
     let mut bytes = serde_json::to_vec(line).unwrap_or_default();

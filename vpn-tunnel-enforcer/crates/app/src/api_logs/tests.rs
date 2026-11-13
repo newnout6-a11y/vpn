@@ -1,20 +1,24 @@
-//! Tests of the Logs API: history rows (outcomes and evidence), the pushed history, the full
-//! cleanup with its per-part report and the log tails.
+//! Tests of the «Журнал» API: history rows (outcomes and evidence), the history and the events
+//! pushed together, one clear per tab, the engine logs of Proxy and service sessions, the
+//! service's lines (a fake pipe; temp folders only).
 use std::time::Duration;
 
+use vpnte_base::Msg;
 use vpnte_base::i18n::Lang;
 use vpnte_base::types::Owner;
-use vpnte_base::{ErrorKind, Msg};
 use vpnte_core::ops::Source;
+use vpnte_tunnel::api::CaptureKind;
 use vpnte_tunnel::history::{Entry, NewEntry, Route, SessionMode};
 use vpnte_tunnel::outcome::{
     AdaptiveContext, Evidence, NetworkTransition, OutcomeKind, SessionOutcome, verbatim,
 };
-use vpnte_ui::logs::{self as ui, LogSource, LogsApi, Text};
+use vpnte_ui::logs::{self as ui, LogSource, LogsApi, TailNote, Text};
 use vpnte_ui::widgets::Load;
 
-use super::{LogsService, rows};
+use super::{Folders, LogsService, ServiceAnswer, ServiceLogs, engine_place, rows, sources};
 use crate::api_settings::test_support::{FakeTunnel, TempDir, backend};
+use crate::services::Backend;
+use std::sync::Arc;
 
 const T0: i64 = 1_700_000_000_000;
 
@@ -91,53 +95,157 @@ fn translated_headlines_stay_messages() {
     assert_eq!(row.reason, ui::DisconnectReason::User);
 }
 
-/// AT-00-004 / AT-00-008: the history is pushed on every change; «clear all» reports each part
-/// on its own (never a full success for a partial cleanup): the
-/// traffic history is honestly "not available" with a tunnel that does not host it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn history_is_pushed_and_cleared_part_by_part() {
-    let dir = TempDir::new("logs");
-    let backend = backend(&dir, FakeTunnel::new(false));
-    let api = LogsService::start(backend.clone());
-    let outcome = SessionOutcome::new(OutcomeKind::UserStop, Evidence::default());
-    backend.history.add(new_entry("Lab", outcome)).expect("row");
-    let mut rx = api.history();
-    let rows_now = |s: &ui::LogsSnapshot| match &s.history {
-        Load::Ready(rows) => rows.len(),
-        _ => usize::MAX,
-    };
-    let wait = rx.wait_for(|s| rows_now(s) == 1);
-    tokio::time::timeout(Duration::from_secs(10), wait)
+/// Folders of a test: the user's logs folder and a temp stand-in for the service's.
+fn folders(backend: &Backend, dir: &TempDir) -> Folders {
+    let service = dir.0.join("service-logs");
+    std::fs::create_dir_all(&service).expect("service folder");
+    Folders {
+        user: backend.dirs.logs.clone(),
+        service: Some(service),
+    }
+}
+
+/// The helper service's lines as a fake pipe gives them.
+struct FakeService(std::sync::Mutex<Option<ServiceAnswer>>);
+
+#[async_trait::async_trait(?Send)]
+impl ServiceLogs for FakeService {
+    async fn read(&self) -> vpnte_base::AppResult<ServiceAnswer> {
+        Ok(self
+            .0
+            .lock()
+            .expect("fake")
+            .take()
+            .unwrap_or(ServiceAnswer::NotInstalled))
+    }
+}
+
+fn start(backend: &Arc<Backend>, dir: &TempDir, answer: ServiceAnswer) -> LogsService {
+    let fake = Arc::new(FakeService(std::sync::Mutex::new(Some(answer))));
+    LogsService::start_with(backend.clone(), folders(backend, dir), fake)
+}
+
+async fn wait(
+    rx: &mut tokio::sync::watch::Receiver<ui::LogsSnapshot>,
+    f: impl Fn(&ui::LogsSnapshot) -> bool,
+) {
+    tokio::time::timeout(Duration::from_secs(10), rx.wait_for(f))
         .await
         .expect("pushed")
         .expect("open");
-    std::fs::write(backend.dirs.logs.join("sing-box.1.log"), "old\n").expect("old log");
-    let report = api.clear_all().await.expect("report");
-    assert!(report.history.is_ok());
-    let traffic = report.traffic.expect_err("not hosted by this tunnel");
-    assert_eq!(traffic.kind, ErrorKind::Conflict);
-    assert_eq!(traffic.msg.key, "app.logs.trafficUnavailable");
-    let artifacts = report.artifacts.expect("logs cleared");
-    assert!(artifacts.failed.is_empty());
-    assert!(!artifacts.cleared.is_empty() || !artifacts.absent.is_empty());
-    assert!(!backend.dirs.logs.join("sing-box.1.log").exists());
-    let wait = rx.wait_for(|s| rows_now(s) == 0);
-    tokio::time::timeout(Duration::from_secs(10), wait)
-        .await
-        .expect("cleared")
-        .expect("open");
 }
 
-/// Log tails: whole lines, oldest first; an engine that never ran has no log yet.
+fn count<T>(load: &Load<std::sync::Arc<[T]>>) -> usize {
+    match load {
+        Load::Ready(rows) => rows.len(),
+        _ => usize::MAX,
+    }
+}
+
+/// p-logs: the history and the journal are pushed together; each tab's clear empties its own
+/// part only (the events, the sessions history, the technical logs of the user's folder).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn log_tails_read_whole_lines() {
-    let dir = TempDir::new("logs-tail");
+async fn each_clear_empties_its_own_part() {
+    let dir = TempDir::new("logs");
     let backend = backend(&dir, FakeTunnel::new(false));
-    std::fs::write(backend.dirs.logs.join("sing-box.log"), "one\ntwo\nthree\n").expect("log");
-    let api = LogsService::start(backend);
-    let tail = api.read_log(LogSource::SingBox).await.expect("tail");
-    assert!(tail.exists);
-    assert_eq!(tail.lines, ["one", "two", "three"]);
+    let api = start(&backend, &dir, ServiceAnswer::NotInstalled);
+    let outcome = SessionOutcome::new(OutcomeKind::UserStop, Evidence::default());
+    backend.history.add(new_entry("Lab", outcome)).expect("row");
+    let mut rx = api.snapshot();
+    wait(&mut rx, |s| count(&s.history) == 1 && count(&s.events) == 1).await;
+    std::fs::write(backend.dirs.logs.join("sing-box.1.log"), "old\n").expect("old log");
+    api.clear_events().await.expect("events");
+    wait(&mut rx, |s| count(&s.events) == 0 && count(&s.history) == 1).await;
+    let report = api.clear_technical().await.expect("technical");
+    assert!(report.failed.is_empty());
+    assert!(!backend.dirs.logs.join("sing-box.1.log").exists());
+    assert_eq!(backend.history.list().len(), 1, "the history stays");
+    api.clear_history().await.expect("history");
+    wait(&mut rx, |s| count(&s.history) == 0).await;
+    let events = backend.dirs.root.join(crate::svc_journal::FILE);
+    assert!(
+        events.exists(),
+        "the journal file stays (it is not seeded again)"
+    );
+    backend.shutdown.cancel();
+}
+
+/// p-logs: an engine log is the current session's wherever it runs: Proxy mode reads the
+/// user's folder, a Tunnel session through the service the service's folder; each says which.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engine_logs_follow_the_session() {
+    let dir = TempDir::new("logs-tail");
+    let tunnel = FakeTunnel::new(false);
+    let backend = backend(&dir, tunnel.clone());
+    let api = start(&backend, &dir, ServiceAnswer::NotInstalled);
+    let service = folders(&backend, &dir).service.expect("folder");
+    std::fs::write(backend.dirs.logs.join("sing-box.log"), "own one\nown two\n").expect("log");
+    std::fs::write(service.join("sing-box.log"), "service one\n").expect("log");
+    let idle = api.read_log(LogSource::SingBox).await.expect("tail");
+    let texts = |t: &ui::LogTail| t.lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>();
+    assert_eq!(texts(&idle), ["own one", "own two"]);
+    assert_eq!(idle.note, TailNote::None);
+    assert_eq!(idle.lines[1].offset, 8);
+    tunnel
+        .status
+        .send_modify(|s| s.capture = Some(CaptureKind::Proxy));
+    let proxy = api.read_log(LogSource::SingBox).await.expect("tail");
+    assert_eq!(
+        (texts(&proxy).len(), proxy.note),
+        (2, TailNote::ProxySession)
+    );
+    assert_eq!(
+        engine_place(Some(CaptureKind::Tun), true),
+        (true, TailNote::ServiceSession)
+    );
+    assert_eq!(
+        engine_place(Some(CaptureKind::Tun), false),
+        (false, TailNote::TunnelSession)
+    );
     let xray = api.read_log(LogSource::Xray).await.expect("tail");
     assert!(!xray.exists && xray.lines.is_empty());
+    // A Tunnel session through the service: its folder (a temp stand-in here) and its line.
+    let folders = folders(&backend, &dir);
+    let (at, note) = folders.engine(Some(CaptureKind::Tun), true);
+    assert_eq!(
+        (at.as_path(), note),
+        (service.as_path(), TailNote::ServiceSession)
+    );
+    let tail = sources::read_tail(&at, "sing-box", note).expect("tail");
+    assert_eq!(texts(&tail), ["service one"]);
+    let (here, note) = folders.engine(Some(CaptureKind::Tun), false);
+    assert_eq!(
+        (here, note),
+        (backend.dirs.logs.clone(), TailNote::TunnelSession)
+    );
+    backend.shutdown.cancel();
+}
+
+/// p-logs: the service source shows what the pipe gave for this user (its lines, or why there
+/// are none); nothing is read from the service's private folder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_service_source_shows_the_users_lines() {
+    use vpnte_service::proto::{ServiceLogLine, ServiceLogWire};
+    let dir = TempDir::new("logs-service");
+    let backend = backend(&dir, FakeTunnel::new(false));
+    let log = ServiceLogWire {
+        lines: vec![ServiceLogLine {
+            offset: 40,
+            text: r#"{"ts":"2026-11-13T08:00:00.000Z","level":"INFO","target":"vpnte_service::service","msg":"service starting"}"#.into(),
+        }],
+        truncated: true,
+    };
+    let api = start(&backend, &dir, ServiceAnswer::Lines(log));
+    let tail = api.read_log(LogSource::Service).await.expect("tail");
+    assert!(tail.exists && tail.truncated);
+    assert_eq!(
+        (tail.lines[0].offset, tail.note),
+        (40, TailNote::ServiceLines)
+    );
+    let none = api.read_log(LogSource::Service).await.expect("tail");
+    assert!(!none.exists);
+    assert_eq!(none.note, TailNote::NoService);
+    let old = sources::service_tail(ServiceAnswer::Old);
+    assert_eq!((old.exists, old.note), (false, TailNote::OldService));
+    backend.shutdown.cancel();
 }

@@ -41,8 +41,6 @@ mod recheck;
 
 use recheck::Recheck;
 
-/// Service log size at which it is rotated (one `.old` generation).
-const LOG_LIMIT: u64 = 1 << 20;
 /// Debounce of the network-change watch behind the re-checks (a Wi-Fi join flaps several times).
 const NET_SETTLE: Duration = Duration::from_millis(1500);
 
@@ -102,24 +100,6 @@ pub fn trusted_install(dir: &Path, exe: &Path) -> Result<(), FolderFault> {
     Ok(())
 }
 
-fn init_logging(log: &Path) {
-    if std::fs::metadata(log).is_ok_and(|m| m.len() > LOG_LIMIT) {
-        let _ = std::fs::rename(log, log.with_extension("log.old"));
-    }
-    let Ok(file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log)
-    else {
-        return;
-    };
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::sync::Mutex::new(file))
-        .with_ansi(false)
-        .with_max_level(tracing::Level::INFO)
-        .try_init();
-}
-
 async fn serve(control: Control) -> u32 {
     let Ok(exe) = std::env::current_exe() else {
         return 1;
@@ -143,7 +123,8 @@ async fn serve(control: Control) -> u32 {
         return 1;
     }
     let _ = std::fs::create_dir_all(&files.logs);
-    init_logging(&files.service_log);
+    // Without its log the service still runs (a full or broken disk must not stop the tunnel).
+    let _ = crate::logs::init(&files.private);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "service starting");
     if update_at_start(&swap_files, own, at_start.as_ref()) {
         return RESTART_EXIT;
@@ -243,6 +224,13 @@ async fn serve(control: Control) -> u32 {
         }
     };
     let host = Host::new(deps);
+    crate::logs::attribute({
+        let host = Arc::downgrade(&host);
+        move || {
+            host.upgrade()
+                .map_or(crate::logs::Owner::Service, |h| h.log_owner())
+        }
+    });
     host.keep_sessions_in(files.session.clone());
     if let Some(recheck) = &recheck {
         host.report_self_tests(recheck.results.subscribe());

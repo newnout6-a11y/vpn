@@ -61,6 +61,10 @@ pub(super) async fn run(
             id: fid,
             request: Request::Update(ask),
         }) => return update(&host, pipe, fid, ask).await,
+        Ok(ClientFrame {
+            id: fid,
+            request: Request::ServiceLog,
+        }) => return own_log(&host, pipe, fid).await,
         Ok(other) => return refuse(pipe, other.id, ErrorCode::HelloFirst).await,
         Err(_) => match frame::request_id(&body) {
             Some(fid) => return refuse(pipe, fid, ErrorCode::BadRequest).await,
@@ -185,6 +189,26 @@ async fn update(host: &Arc<Host>, pipe: NamedPipeServer, id: u64, ask: crate::pr
         return refuse(pipe, id, ErrorCode::Refused).await;
     }
     let frame = match host.update(&client.user, ask).await {
+        Ok(reply) => ServerFrame::Reply {
+            id,
+            reply: Box::new(reply),
+        },
+        Err(error) => ServerFrame::Failed { id, error },
+    };
+    answer_and_close(pipe, &frame).await;
+}
+
+/// `ServiceLog` as the first request (p-logs): the caller's own lines, for any user and without
+/// the controller slot (a `Hello` would end another user's kept session just to read a log).
+async fn own_log(host: &Arc<Host>, pipe: NamedPipeServer, id: u64) {
+    let client = match ident::client(&pipe) {
+        Ok(client) => client,
+        Err(err) => return tracing::warn!(error = %err, "client not identifiable; dropped"),
+    };
+    if !(host.deps.check)(&client) {
+        return refuse(pipe, id, ErrorCode::Refused).await;
+    }
+    let frame = match host.service_log(&client).await {
         Ok(reply) => ServerFrame::Reply {
             id,
             reply: Box::new(reply),

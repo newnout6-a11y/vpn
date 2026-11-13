@@ -222,7 +222,32 @@ impl Host {
             }
             Request::ForgetMe => self.forget(client).await,
             Request::Update(ask) => self.update(&client.user, ask).await,
+            Request::ServiceLog => self.service_log(client).await,
         }
+    }
+
+    /// The caller's lines of the service log (p-logs): the service-wide ones and those of his
+    /// own sessions, never another user's ([`crate::logs`]).
+    pub(super) async fn service_log(&self, client: &ClientInfo) -> Result<Reply, WireError> {
+        let user = client.user.clone();
+        match tokio::task::spawn_blocking(move || crate::logs::for_user(&user)).await {
+            Ok(Ok(log)) => Ok(Reply::ServiceLog(log)),
+            Ok(Err(err)) => Err(WireError::failed(&AppError::from(err))),
+            Err(err) => Err(WireError::failed(&AppError::internal(err))),
+        }
+    }
+
+    /// Whom a service log line concerns now (p-logs): the user of the session the runtime runs or
+    /// ran last, else the controller's. Asked without waiting: a line logged while one of these
+    /// locks is held is nobody's (a re-entrant lock would deadlock the logger).
+    pub(crate) fn log_owner(&self) -> crate::logs::Owner {
+        let (Some(session), Some(controller)) =
+            (self.session_user.try_lock(), self.controller.try_lock())
+        else {
+            return crate::logs::Owner::Busy;
+        };
+        let controller = controller.as_ref().map(|(_, user)| user.as_str());
+        crate::logs::owner_of(session.as_deref(), controller)
     }
 
     /// Removes the caller's SID; `removing` when he was the last user. The last user's leave first

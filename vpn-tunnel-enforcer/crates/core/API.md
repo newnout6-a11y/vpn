@@ -297,6 +297,12 @@ pub struct LogSnapshot { pub name: String, pub exists: bool, pub size: u64, pub 
 pub struct ClearReport { pub cleared: Vec<String>, pub absent: Vec<String>, pub errors: Vec<(String, ErrorKind)> }
 pub fn list(dir: &Path) -> io::Result<Vec<LogFile>>;   // app first, then engines; current before previous
 pub fn tail(dir: &Path, file: &LogFile, max_bytes: usize) -> io::Result<LogSnapshot>; // whole lines
+pub struct TailLine { pub offset: u64, pub text: String }    // p-logs: byte offset = a row key that
+pub struct LineTail { pub exists: bool, pub truncated: bool, pub lines: Vec<TailLine> } // survives re-reads
+pub fn tail_lines(dir: &Path, file: &LogFile, max_bytes: usize) -> io::Result<LineTail>; // blank lines skipped
+pub fn split_lines(start: u64, bytes: &[u8]) -> Vec<TailLine>;   // LF / CRLF
+pub fn event_line(event: &tracing::Event<'_>) -> LogLine;  // one event, redacted like app.log (no spans):
+                                           // the helper service's own log (p-logs)
 pub fn clear(dir: &Path) -> ClearReport;   // truncates current logs (through live writers), deletes .1.log
 #[derive(Clone)] pub struct RotatingFile;  // clones share one file; one writer per path per process
 impl RotatingFile {

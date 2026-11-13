@@ -25,6 +25,7 @@ vpnte-service.workspace = true
 | `per_user` | what the per-user side runs: `request_install` (the one elevated step, asked of Windows with `runas`), `is_current`, `forget_me`, `status` |
 | `paths` | service name, `%ProgramFiles%\VPN Tunnel Enforcer Service\`, `%ProgramData%\VPN Tunnel Enforcer\` with its private `service\` part (`DataFiles`), `secure_dir` |
 | `service` | the service body (`run`): logging, WFP start-up, runtime, host, sandbox, graceful stop, the re-checks of a held kill switch (`service::recheck`: wake / network change, leak self-test); `trusted_install` / `FolderFault` |
+| `logs` | the service log (p-logs): `init(dir)` (global subscriber, redacted app-log JSON lines in `service\service.log` + `service.1.log`, 1 MiB, each tagged `user` = the session's SID, else the controller's, else none; `"?"` when the host is busy), `attribute(owner)`, `owner_of`, `lines_for(dir, sid)` / `for_user(sid)` (service-wide lines and the caller's own, tag stripped, last `REPLY_LINES` = 2000) |
 | `watchdog` | `Engaged` (a capture that records whether a session's filters are held) and `run` (the WFP watchdog exactly while they are) |
 | `sandbox` | engines may not start programs: each engine process in a nested job with `ActiveProcessLimit = 1` |
 | `update` | its own updates through the signed feed (p-svc-update): `swap` (the exe swap, trial, rollback), `engines` (`ServiceEngines`: Tunnel mode's engine store), `checks`, `source` (`Mirrors`), `Updates` / `UpdatesDeps` (schedule, `Take`), `UpdateDesk`, `RESTART_EXIT` |
@@ -105,7 +106,9 @@ unknown fields.
 pub enum Request { Hello(Hello), Start(Box<TunnelStart>), Stop(StopTunnel), Restart(Box<TunnelStart>),
     RestartWithLast { reason: String }, RestartAdaptive(Box<AdaptiveRestart>), Switch(Box<TunnelStart>),
     Inputs(Box<RoutingInputs>), Status, KillSwitch(Box<ProtectionSettings>), Cleanup, ForgetMe,
-    Update(UpdateAsk) /* p-svc-update: a first frame like ForgetMe, or after Hello */ }
+    Update(UpdateAsk) /* p-svc-update: a first frame like ForgetMe, or after Hello */,
+    ServiceLog /* p-logs: a first frame like Update, or after Hello; no PROTOCOL bump (never on a
+                  negotiated connection from the app; an older service answers badRequest) */ }
 pub enum UpdateAsk { State, Take { version: String } }
 pub struct Hello { pub protocol: u32, pub app_version: String }
 pub struct TunnelStart { pub upstream: Upstream, pub routing: RoutingInputs,
@@ -121,7 +124,9 @@ pub struct RoutingInputs { smart_ru, smart_ru_maps_direct, domain_rules: Vec<Dom
     // no rule-set dir, no inactive splits
 pub enum Reply { Welcome { protocol, service_version }, Started(Option<StartReceiptWire>),
     Stopped(StopReceiptWire), Switched(Option<SwitchReceiptWire>), Status(Box<StatusReply>),
-    Done { removing: bool }, Cleaned { filters, sublayer, provider }, Update(ServiceUpdateWire) }
+    Done { removing: bool }, Cleaned { filters, sublayer, provider }, Update(ServiceUpdateWire),
+    ServiceLog(ServiceLogWire) }
+pub struct ServiceLogWire { pub lines: Vec<ServiceLogLine { offset: u64, text: String }>, pub truncated: bool }
 pub struct ServiceUpdateWire { pub version: String, pub phase: UpdatePhase /* Off | Idle | Working | Waiting
     | Restarting | Failed */, pub target: Option<String>, pub checked_at: Option<UnixMs> }
 pub struct StatusReply { pub tunnel: StatusWire /* with SessionWire: Clash secret, proxy creds */,
@@ -245,8 +250,11 @@ is dropped when it comes. A per-user uninstaller sends `ForgetMe` as its first f
 - Data folder `%ProgramData%\VPN Tunnel Enforcer\` (`ADMIN_ONLY_DIR_SDDL`: users read; `logs\`
   with the engine logs of TUN sessions, which the app reads directly, NOADMIN §4) and its
   private part `service\` (`PRIVATE_DIR_SDDL`: SYSTEM / Administrators only, nothing inherited:
-  `users.json`, `protection.json`, `session.json`, `service.log` rotated at 1 MiB), each
-  re-created when it is missing or user-writable.
+  `users.json`, `protection.json`, `session.json`, `service.log` rotated at 1 MiB into
+  `service.1.log`), each re-created when it is missing or user-writable. The service log reaches
+  a user only through `ServiceLog` (p-logs): service-wide lines and those tagged with his own SID
+  (the pipe token's, never a claim of the client); lines of another user, busy lines and the plain
+  text of older builds stay private.
 - Users: the elevated `install` records the user of its Windows session, and a user is recorded
   at his first `Hello` (he may use a service another account installed). `ForgetMe` (per-user
   uninstaller; first frame or after `Hello`, no controller slot needed) removes the caller's SID

@@ -23,6 +23,8 @@ tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 vpnte-base.workspace = true
+# p-logs: the service log in the app log's format (redaction, rotation, tail).
+vpnte-core.workspace = true
 vpnte-engine.workspace = true
 # The leak self-test the service runs while the kill switch holds a session (p-svc-recheck).
 vpnte-probes.workspace = true

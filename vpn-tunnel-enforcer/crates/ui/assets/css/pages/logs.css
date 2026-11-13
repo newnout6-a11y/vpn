@@ -1,4 +1,4 @@
-/* logs.css — the Logs page (vpnte_ui::logs) in the «Пломба» language: swiss.css tokens only
+/* logs.css — the «Журнал» page (vpnte_ui::logs) in the «Пломба» language: swiss.css tokens only
  * (--paper --ink --mute --rule --rule-strong --signal --on-signal --signal-ink), square corners,
  * hairlines, mono captions. Panels, tables, badges and buttons are the shared widgets. */
 
@@ -100,21 +100,65 @@
 .lg-fail-text { min-width: 0; font-weight: 500; color: var(--signal-ink); overflow-wrap: anywhere; }
 .lg-fail-fault { grid-column: 3; font-size: 11px; color: var(--mute); }
 
-/* ── Journal ─────────────────────────────────────────────────────────── */
-.lg-journal-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; border-bottom: 1px solid var(--rule); padding: 12px 20px; }
-.lg-journal-bar .w-seg-item { height: 28px; padding: 0 12px; font-size: 12px; }
-.lg-journal-bar .w-check-row { padding: 0; }
-.lg-journal-bar .lg-count { margin-left: auto; }
-.lg-journal-hint { padding: 12px 20px 0; }
-.lg-lines { max-height: 420px; margin: 0; overflow: auto; padding: 8px 0 12px; list-style: none; font-size: 12px; line-height: 1.55; }
-.lg-line { display: flex; gap: 10px; padding: 1px 20px; }
-.lg-line:hover { background: var(--rule); }
+/* ── Tabs and their bars ─────────────────────────────────────────────── */
+.lg .w-tabs { display: flex; flex-direction: column; gap: 16px; }
+.lg-panel { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.lg-tab-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.lg-tab-bar .lg-search { flex: 1 1 240px; min-width: 200px; }
+.lg-tab-bar .w-seg-item { height: 28px; padding: 0 12px; font-size: 12px; }
+.lg-tab-bar .lg-count { margin-left: auto; }
+.lg-note { padding: 0 4px; }
+
+/* ── Events ──────────────────────────────────────────────────────────── */
+.lg-days { display: flex; flex-direction: column; gap: 20px; }
+.lg-day-title {
+  margin: 0 0 8px;
+  font-family: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mute);
+}
+.lg-events { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--rule-strong); }
+.lg-event { border-bottom: 1px solid var(--rule); }
+.lg-event-head {
+  display: flex; width: 100%; min-height: 36px; align-items: center; gap: 12px;
+  padding: 8px 12px; text-align: left; color: var(--ink); background: transparent; font: inherit; font-size: 13px;
+}
+.lg-event-head:hover { background: var(--rule); }
+.lg-event-head:focus-visible, .lg-line-head:focus-visible { outline: 2px solid var(--signal); outline-offset: -2px; }
+.lg-event-time { flex: none; width: 5ch; font-size: 12px; color: var(--mute); font-variant-numeric: tabular-nums; }
+.lg-event-title { min-width: 0; flex: 1 1 auto; overflow-wrap: anywhere; }
+.lg-dot { flex: none; width: 8px; height: 8px; background: var(--ink); }
+.lg-dot[data-level='info'] { border: 1px solid var(--mute); background: transparent; }
+.lg-dot[data-level='warn'] { border: 2px solid var(--signal); background: transparent; }
+.lg-dot[data-level='error'] { background: var(--signal); }
+.lg-event-detail { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 0 12px 12px 76px; }
+.lg-event-body { margin: 0; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.lg-facts { margin: 0; padding: 0; list-style: none; font-size: 12px; line-height: 1.6; color: var(--mute); font-variant-numeric: tabular-nums; }
+
+/* ── Technical ───────────────────────────────────────────────────────── */
+.lg-lines {
+  max-height: 520px; margin: 0; overflow: auto; overflow-anchor: auto; padding: 4px 0 8px;
+  border-top: 1px solid var(--rule-strong); list-style: none; font-size: 12px; line-height: 20px;
+}
+.lg-line { border-bottom: 1px solid color-mix(in srgb, var(--rule) 60%, transparent); }
+.lg-line-head {
+  display: flex; width: 100%; gap: 12px; padding: 0 12px; text-align: left;
+  color: var(--ink); background: transparent; font: inherit;
+}
+.lg-line-head:hover { background: var(--rule); }
 .lg-line-time { flex: none; width: 8ch; color: var(--mute); font-variant-numeric: tabular-nums; }
 .lg-line-level { flex: none; width: 5ch; color: var(--mute); }
-.lg-line[data-level='warn'] .lg-line-level { color: var(--signal-ink); font-weight: 600; }
-.lg-line[data-level='error'] .lg-line-level { color: var(--signal-ink); font-weight: 600; }
+.lg-line[data-level='warn'] .lg-line-level, .lg-line[data-level='error'] .lg-line-level { color: var(--signal-ink); font-weight: 600; }
 .lg-line[data-level='error'] { box-shadow: inset 2px 0 0 var(--signal); }
-.lg-line-scope { flex: none; max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mute); }
+.lg-line-scope { flex: none; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mute); }
 .lg-line-text { min-width: 0; flex: 1 1 auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-.lg-journal-more { padding: 0 20px 12px; }
+.lg-line-detail { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 4px 12px 8px calc(13ch + 36px); }
+.lg-fields { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0 12px; margin: 0; }
+.lg-field { display: contents; }
+.lg-field dt { color: var(--mute); }
+.lg-field dd { margin: 0; overflow-wrap: anywhere; }
+.lg-journal-more { padding: 8px 4px 0; }
 .lg-running { color: var(--mute); }

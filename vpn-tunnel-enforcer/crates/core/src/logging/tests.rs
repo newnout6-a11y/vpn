@@ -360,6 +360,65 @@ fn tail_returns_whole_lines() {
     assert!(bad.is_err_and(|e| e.kind() == io::ErrorKind::InvalidInput));
 }
 
+/// p-logs: a line keeps its offset across re-reads (the viewer's row key), the cut first line
+/// moves the start, CRLF and blank lines are handled.
+#[test]
+fn tail_lines_keep_their_offsets() {
+    let tmp = TempDir::new("tail-lines");
+    let file = RotatingFile::engine(tmp.path(), "xray").expect("open");
+    for i in 0..10 {
+        file.write_line(&format!("line {i:03}")).expect("write");
+    }
+    let first = tail_lines(tmp.path(), &LogFile::engine("xray"), 30).expect("tail");
+    assert!(first.exists && first.truncated);
+    let texts: Vec<&str> = first.lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(texts, ["line 007", "line 008", "line 009"]);
+    assert_eq!(first.lines[0].offset, 63);
+    file.write_line("line 010").expect("write");
+    let again = tail_lines(tmp.path(), &LogFile::engine("xray"), 40).expect("tail");
+    let kept = again.lines.iter().find(|l| l.text == "line 008");
+    assert_eq!(kept.map(|l| l.offset), Some(first.lines[1].offset));
+    let lines = split_lines(100, b"a\r\n\r\n  \nb\nc");
+    let got: Vec<(u64, &str)> = lines.iter().map(|l| (l.offset, l.text.as_str())).collect();
+    assert_eq!(got, [(100, "a"), (108, "b"), (110, "c")]);
+    let missing = tail_lines(tmp.path(), &LogFile::engine("sing-box"), 10).expect("tail");
+    assert_eq!(missing, LineTail::default());
+}
+
+/// p-logs: `event_line` applies the app log's redaction to a writer of its own (the service).
+#[test]
+fn event_line_redacts_like_the_app_log() {
+    use tracing_subscriber::layer::Layer;
+    struct Capture(Arc<parking_lot::Mutex<Vec<LogLine>>>);
+    impl<S: tracing::Subscriber> Layer<S> for Capture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            self.0.lock().push(event_line(event));
+        }
+    }
+    let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let dispatch =
+        tracing::Dispatch::new(tracing_subscriber::registry().with(Capture(seen.clone())));
+    tracing::dispatcher::with_default(&dispatch, || {
+        tracing::info!(
+            token = "abc",
+            url = "vless://11111111-2222-3333-4444-555555555555@example.com:443",
+            count = 3,
+            "started at vless://11111111-2222-3333-4444-555555555555@example.com:443"
+        );
+    });
+    let lines = seen.lock();
+    let line = &lines[0];
+    assert_eq!(line.level, "INFO");
+    assert!(!line.msg.contains("11111111"), "{}", line.msg);
+    assert_eq!(line.fields["token"], crate::redact::REDACTED);
+    assert!(!line.fields["url"].to_string().contains("11111111"));
+    assert_eq!(line.fields["count"], 3);
+}
+
 /// §2.9/§3.13 clear: current logs truncated (live writers keep working), previous ones deleted.
 #[test]
 fn clear_truncates_and_deletes() {

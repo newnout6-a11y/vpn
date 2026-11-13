@@ -71,7 +71,7 @@ impl Page {
             Page::Availability => "sidebar.availability",
             Page::TrafficHistory => "sidebar.trafficHistory",
             Page::Schedule => "sidebar.schedule",
-            Page::Logs => "sidebar.logs",
+            Page::Logs => "logs.nav",
             Page::Settings => "sidebar.settings",
             Page::Maintenance => "sidebar.maintenance",
         }

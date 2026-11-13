@@ -43,7 +43,7 @@ without running destructors of the `Arc<Backend>`).
 ## `Backend` fields and who uses them
 | Field | What | Used by (UI trait) |
 | --- | --- | --- |
-| `dirs` | data root, `logs`, `history`, `cache`, legacy dir (read only), `resources` | Logs (`open_log_folder`, `read_log`: `logging::tail(&dirs.logs, ..)`), Settings (`open_logs_folder`), Tray (`open_logs`) |
+| `dirs` | data root, `logs`, `history`, `cache`, legacy dir (read only), `resources` | Logs (`open_log_folder`, `read_log`: `logging::tail_lines(&dirs.logs, ..)`; the event journal `events.jsonl` in the root, p-logs), Settings (`open_logs_folder`), Tray (`open_logs`) |
 | `lock`, `log` | data-dir lock (process life); log guard (take + drop at the end of shutdown) | app-main |
 | `elevated` | process elevated: TUN / WFP available in-process | everyone who labels a privileged feature; `TunnelOps::tun_available` |
 | `engines` | `sing-box.exe` / `xray.exe`, canonical when present | app-tunnel (`RealEngines`, WFP `EnginePaths`); `probe_ctx` |
@@ -54,11 +54,11 @@ without running destructors of the `Arc<Backend>`).
 | `cleanup` | `Store<CleanupMarker>` (`legacy-network-cleanup.json`): the old version's network cleanup | app-tunnel (elevated start-up run, skipped while the per-machine 1.x is installed); Maintenance (failures, "run again") |
 | `rules` | `Store<RulesDoc>` (`rules.json`): split tunnel, DNS profiles + active, domain rules | Settings (`dns`, `domains` sections); Apps (split tunnel; a Happ routing import appends domain rules on the user's click); app-tunnel (`InputsSource`; the tunnel regenerates fragments on change) |
 | `rule_sets` | `RuleSetService` over `cache/rulesets.json` | Settings (`refresh_rule_sets`, `RuleSetView`); app-tunnel (`active(..)`, `prune()` before an engine start; the auto refresh goes through `svc_tunnel::session_route` first and retries when a session starts; a service start carries the active files, `remote/start.rs`) |
-| `history` | connection history (`history/connections.json`) | Logs (`history`, `export_history`, `clear_all`); app-tunnel (`LifecycleDeps::history`) |
+| `history` | connection history (`history/connections.json`) | Logs (`snapshot`, `export_history`, `clear_history`; new rows become session-end events, p-logs); app-tunnel (`LifecycleDeps::history`) |
 | `servers`, `refresh` | server list; subscription fetcher + registry (`RefreshCtx`) | Servers (all list actions, `add_from_input`, `refresh_group`), Dashboard panels (`servers`, `select_server`), Wizard (`check_key`, key import), Apps (routing offers from `controls.routing`, read only), app-tunnel (`ProfileSource`) |
 | `ops` | operation registry (single flight per resource, cancel, list) | Servers (refresh, health check), Tray (`check_route`), Settings (exports); app-main closes it at shutdown |
 | `geo` | country / ASN lookups (one cache and backoff) | Dashboard (exit country), Servers (`verify_country`, `geo`); whoever saves `disable_geo_lookup` calls `geo.set_enabled(!value)` (app-settings) |
-| `notifier` | toasts + in-app list | app-tunnel (lifecycle `Notifier`, WFP notices), Tray (`check_route` verdict), app-main (`subscribe()` feeds the toast host; `set_on_activate` shows the window) |
+| `notifier` | toasts + in-app list | app-tunnel (lifecycle `Notifier`, WFP notices), Tray (`check_route` verdict), app-main (`subscribe()` feeds the toast host; `set_on_activate` shows the window), p-logs (`set_hook`: every shown notice goes to the event journal, `svc_journal::attach` in `root::run`) |
 | `import` | `Option<ImportReport>` of this start | app-main (first-run notice), Settings (maintenance text) |
 | `shutdown` | app-wide `CancellationToken` | every background task (child tokens) |
 | `clipboard` | secret clipboard, started by `Backend::clipboard()` inside the runtime | Servers (`copy_key`), Dashboard (`copy_ip`), Logs (`copy_text`) |

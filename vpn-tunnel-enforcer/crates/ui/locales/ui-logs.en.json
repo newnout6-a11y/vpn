@@ -1,9 +1,8 @@
 {
   "logs": {
     "cleanup": {
-      "title": "Clear the logs?",
-      "action": "Clear",
-      "confirm": "The connection history, the logs and the traffic records will be deleted. This cannot be undone."
+      "successTitle": "Technical logs cleared",
+      "success": "The app and engine logs in your folder are empty."
     },
     "exportDone": "File saved",
     "exportFailed": "Export failed",
@@ -48,7 +47,6 @@
     },
     "live": {
       "title": "Journal",
-      "hint": "The latest lines of the app and engine logs, refreshed while this page is open.",
       "refresh": "Refresh",
       "openFolder": "Open folder",
       "openFailed": "Could not open the logs folder",
@@ -59,7 +57,6 @@
       "levelAll": "All",
       "levelWarn": "Warnings",
       "levelError": "Errors",
-      "follow": "Follow",
       "lines_one": "{{count}} line",
       "lines_few": "{{count}} lines",
       "lines_many": "{{count}} lines",
@@ -87,11 +84,101 @@
       },
       "hint": {
         "noServer": "No server selected"
+      },
+      "event": {
+        "updated": "App updated to 2.0.0",
+        "updatedBody": "Engines: sing-box 1.14.4, Xray 26.11.9.",
+        "rotation": "Server switched by the rotation schedule",
+        "leak": "Leak check: WebRTC may show your address",
+        "leakBody": "In Proxy mode a browser can bypass the proxy. Tunnel mode closes this.",
+        "engineRestart": "Engine restarted after a crash",
+        "listFailed": "Smart RU lists did not update",
+        "listFailedBody": "The list server did not answer. The previous lists stay in use."
       }
     },
     "running": "The session is still running",
     "outcomeEvidence": {
       "proxyEngineReason": "Why this engine"
+    },
+    "nav": "Journal",
+    "title": "Journal",
+    "description": "What happened, your connections and the technical logs",
+    "tabs": {
+      "label": "Journal sections",
+      "events": "Events",
+      "connections": "Connections",
+      "technical": "Technical"
+    },
+    "support": {
+      "save": "Save for support",
+      "title": "Archive saved",
+      "saved": "File: {{path}}",
+      "failed": "Could not save the archive"
+    },
+    "erase": {
+      "action": "Clear",
+      "failed": "Could not clear",
+      "events": {
+        "title": "Clear the events?",
+        "confirm": "All events will be deleted. Connections and technical logs stay.",
+        "done": "Events cleared"
+      },
+      "history": {
+        "title": "Clear the connection history?",
+        "confirm": "The connection history will be deleted. Events and technical logs stay.",
+        "done": "Connection history cleared"
+      },
+      "technical": {
+        "title": "Clear the technical logs?",
+        "confirm": "The app and engine logs in your folder will be deleted. The helper service's log stays."
+      }
+    },
+    "events": {
+      "filterLabel": "Event topic",
+      "filter": {
+        "all": "All",
+        "connections": "Connections",
+        "protection": "Protection",
+        "automation": "Automation",
+        "updates": "Updates",
+        "errors": "Errors"
+      },
+      "search": "Search events",
+      "empty": "No events yet",
+      "emptyHint": "Connections, server switches, protection warnings and updates will show up here.",
+      "noMatches": "Nothing found",
+      "more": "Showing the latest {{count}}. Narrow the search to find older events.",
+      "today": "Today",
+      "yesterday": "Yesterday",
+      "day": "{{month}} {{day}}",
+      "copy": "Copy",
+      "sessionUp": "Connected · {{profile}}",
+      "sessionEnd": "Disconnected · {{profile}}",
+      "sessionFailed": "Could not connect · {{profile}}",
+      "fact": {
+        "mode": "{{profile}} · {{mode}}",
+        "duration": "Duration: {{duration}}",
+        "traffic": "Traffic: ↓ {{down}} · ↑ {{up}}",
+        "engine": "Engine: {{engine}}",
+        "outcome": "Outcome: {{outcome}}"
+      }
+    },
+    "tech": {
+      "sourceService": "Service",
+      "search": "Search lines",
+      "pause": "Pause",
+      "follow": "Follow",
+      "copyVisible": "Copy visible",
+      "copyLine": "Copy line",
+      "noMatches": "No lines match",
+      "noService": "The helper service is not installed",
+      "oldService": "The helper service is older than the app and does not send its log yet. It will after the service updates.",
+      "note": {
+        "proxy": "Log of the session in Proxy mode.",
+        "tunnel": "Log of the session in Tunnel mode.",
+        "service": "Log of the Tunnel session run by the helper service.",
+        "serviceLines": "The helper service's lines about your sessions and itself."
+      }
     }
   }
 }
