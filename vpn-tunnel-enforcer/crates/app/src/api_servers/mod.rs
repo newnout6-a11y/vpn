@@ -49,10 +49,11 @@ use vpnte_ui::servers::{
 };
 use vpnte_winnet::url_scheme::Registrar;
 
+use crate::api_dashboard::pace::Pace;
 use crate::services::Backend;
 use crate::support::{blocking, changed_opt, detached, joined, unavailable};
 
-/// Coalesces bursts of store events (a ping-all, a refresh) into one projection.
+/// Lets the events of one store change (a refresh, an import) arrive before the first push.
 const DEBOUNCE: Duration = Duration::from_millis(60);
 
 /// The UI contexts of this package: `Rc<dyn ServersApi>` and the [`LinkInbox`] the root hands
@@ -142,7 +143,9 @@ impl Shared {
 }
 
 /// Keeps the snapshot current on server-list events, tunnel state and session, and settings
-/// (language, geo switch); actions publish their own changes directly. Ends at app exit.
+/// (language, geo switch); actions publish their own changes directly. A ping-all or a refresh
+/// is a run of events: the first push waits for the run to settle, the next ones go out paced
+/// (at most twice a second, each with everything so far). Ends at app exit.
 async fn pump(shared: Arc<Shared>) {
     let backend = shared.backend.clone();
     let mut events = backend.servers.subscribe();
@@ -151,6 +154,7 @@ async fn pump(shared: Arc<Shared>) {
         Ok(tunnel) => (Some(tunnel.snapshot()), Some(tunnel.session())),
         Err(_) => (None, None),
     };
+    let mut pace = Pace::live();
     loop {
         tokio::select! {
             () = backend.shutdown.cancelled() => return,
@@ -164,6 +168,10 @@ async fn pump(shared: Arc<Shared>) {
             () = changed_opt(&mut session) => {}
         }
         tokio::time::sleep(DEBOUNCE).await;
+        tokio::select! {
+            () = backend.shutdown.cancelled() => return,
+            () = pace.ready() => {}
+        }
         while events.try_recv().is_ok() {}
         shared.publish();
     }

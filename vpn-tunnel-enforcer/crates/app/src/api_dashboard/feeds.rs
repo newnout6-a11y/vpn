@@ -5,15 +5,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{Verdict, now_ms};
 use vpnte_probes::geo::LookupOwner;
 use vpnte_servers::model::{CountrySource, ProfileId, VerifiedCountry};
-use vpnte_servers::store::Servers;
+use vpnte_servers::store::{Servers, ServersEvent};
 use vpnte_tunnel::fsm::TunnelSnapshot;
 use vpnte_winnet::adapters;
 
+use super::pace::Pace;
 use super::{Hub, project};
 use crate::support::blocking;
 
@@ -24,6 +25,12 @@ const NET_SETTLE: Duration = Duration::from_millis(1500);
 pub(super) fn spawn(hub: &Arc<Hub>) {
     let cancel = hub.backend.shutdown.child_token();
     tokio::spawn(app_feed(hub.clone(), cancel.clone()));
+    let panel = hub.clone();
+    tokio::spawn(servers_feed(
+        hub.backend.servers.subscribe(),
+        cancel.clone(),
+        move || panel.publish_servers(),
+    ));
     if hub.watches.is_some() {
         tokio::spawn(tunnel_feed(hub.clone(), cancel.clone()));
         hub.refresh_firewall();
@@ -32,6 +39,30 @@ pub(super) fn spawn(hub: &Arc<Hub>) {
         tokio::spawn(pick_feed(hub.clone(), pick, cancel.clone()));
     }
     tokio::spawn(foreign_feed(hub.clone(), cancel));
+}
+
+/// The start page's server panel after server-list events. A ping-all is dozens of them a
+/// second: the panel goes out at most twice a second, each push with the list as it is then.
+async fn servers_feed(
+    mut events: broadcast::Receiver<ServersEvent>,
+    cancel: CancellationToken,
+    publish: impl Fn(),
+) {
+    let mut pace = Pace::live();
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            event = events.recv() => if let Err(RecvError::Closed) = event {
+                return;
+            },
+        }
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            () = pace.ready() => {}
+        }
+        while events.try_recv().is_ok() {}
+        publish();
+    }
 }
 
 /// The automatic server choice's status line.
@@ -53,10 +84,9 @@ async fn pick_feed(
     }
 }
 
-/// Settings (mode, Smart RU, language, tray switch), the server list and the saved protection.
+/// Settings (mode, Smart RU, language, tray switch) and the saved protection.
 async fn app_feed(hub: Arc<Hub>, cancel: CancellationToken) {
     let mut settings = hub.backend.settings.subscribe();
-    let mut servers = hub.backend.servers.subscribe();
     let mut protection = hub.backend.protection.subscribe();
     loop {
         tokio::select! {
@@ -68,10 +98,6 @@ async fn app_feed(hub: Arc<Hub>, cancel: CancellationToken) {
                 hub.publish_dashboard();
                 hub.publish_tray();
             }
-            event = servers.recv() => match event {
-                Ok(_) | Err(RecvError::Lagged(_)) => hub.publish_servers(),
-                Err(RecvError::Closed) => return,
-            },
             // A saved kill-switch level, switch or exception (Settings, the setup wizard, a
             // maintenance reset): the start page reads the kill switch back at once instead of
             // at the next connect. The store saves after the effect, so the read sees it.
@@ -309,5 +335,52 @@ impl LookupOwner for ExitOwner {
 
     fn switching(&self) -> bool {
         self.snapshot.borrow().transition.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::broadcast;
+    use tokio::time::Instant;
+    use tokio_util::sync::CancellationToken;
+    use vpnte_servers::model::ProfileId;
+    use vpnte_servers::store::ServersEvent;
+
+    /// p-uiperf: the ping results of a ping-all (20 in a second) reach the start page's server
+    /// panel paced: the first at once, the next ones at least 500 ms apart, the last one after
+    /// the last result.
+    #[tokio::test(start_paused = true)]
+    async fn ping_results_reach_the_server_panel_paced() {
+        let (events, rx) = broadcast::channel(64);
+        let cancel = CancellationToken::new();
+        let pushes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let seen = pushes.clone();
+        let feed = tokio::spawn(super::servers_feed(rx, cancel.clone(), move || {
+            seen.lock().push(Instant::now());
+        }));
+        let start = Instant::now();
+        for _ in 0..20 {
+            events
+                .send(ServersEvent::Ping(ProfileId("a".into())))
+                .expect("the feed listens");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        cancel.cancel();
+        feed.await.expect("feed");
+        let pushes = pushes.lock().clone();
+        assert_eq!(pushes.first().map(|t| *t - start), Some(Duration::ZERO));
+        assert!((2..=4).contains(&pushes.len()), "{pushes:?}");
+        for pair in pushes.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= Duration::from_millis(500),
+                "{pushes:?}"
+            );
+        }
+        let last = pushes.last().map(|t| *t - start);
+        assert!(last >= Some(Duration::from_millis(950)), "{last:?}");
     }
 }

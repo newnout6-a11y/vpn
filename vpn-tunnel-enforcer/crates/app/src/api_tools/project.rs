@@ -2,6 +2,8 @@
 //! UI's view models (display data only; every sentence stays a `Msg` of the probes).
 use std::sync::Arc;
 
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use vpnte_base::Msg;
 use vpnte_core::store::{Document, Mode, Store};
 use vpnte_probes::availability::{
@@ -11,6 +13,7 @@ use vpnte_probes::diagnostics::{RoutingResult, RoutingVerdict as ProbeRouting};
 use vpnte_probes::speedtest::{
     self as speed, Egress as ProbeEgress, SpeedPhase as ProbePhase, SpeedTests, TransportWarning,
 };
+use vpnte_tunnel::api::TunStatus;
 use vpnte_ui::availability::{
     AvailabilityState, DnsStage, GeoInfo, HttpStage, PathReport, PathSource as UiSource,
     RoutingReport, RoutingVerdict, TcpStage, TlsStage, UrlCheck, UrlVerdict,
@@ -18,6 +21,7 @@ use vpnte_ui::availability::{
 use vpnte_ui::speedtest::{Egress, SpeedPhase, SpeedProgress, SpeedResult, SpeedTestState};
 
 use super::Shared;
+use crate::api_dashboard::pace::Pace;
 
 /// Starts the task that re-projects both pages on every tunnel status and history change
 /// (stopped by `backend.shutdown`). Without a tunnel the first snapshots stay. The channels are
@@ -27,25 +31,46 @@ pub(super) fn spawn(shared: &Arc<Shared>) {
     let Ok(tunnel) = shared.backend.tunnel() else {
         return;
     };
-    let mut status = tunnel.runtime_status();
-    let mut checks = shared.url_checks.subscribe();
-    let mut tests = shared.speed_tests.subscribe();
-    let shared = shared.clone();
+    let status = tunnel.runtime_status();
+    let checks = shared.url_checks.subscribe();
+    let tests = shared.speed_tests.subscribe();
     let stop = shared.backend.shutdown.child_token();
-    tokio::spawn(async move {
-        loop {
-            let changed = tokio::select! {
-                () = stop.cancelled() => return,
-                changed = status.changed() => changed,
-                changed = checks.changed() => changed,
-                changed = tests.changed() => changed,
-            };
-            if changed.is_err() {
-                return;
-            }
-            shared.publish();
+    let shared = shared.clone();
+    tokio::spawn(follow(status, checks, tests, stop, move || {
+        shared.publish()
+    }));
+}
+
+/// The loop of [`spawn`]: `publish` after every status or history change. A «check all» lands
+/// one result per site in a quick run: the pages get at most two pushes a second, each with
+/// everything so far.
+pub(super) async fn follow(
+    mut status: watch::Receiver<TunStatus>,
+    mut checks: watch::Receiver<u64>,
+    mut tests: watch::Receiver<u64>,
+    stop: CancellationToken,
+    publish: impl Fn(),
+) {
+    let mut pace = Pace::live();
+    loop {
+        let changed = tokio::select! {
+            () = stop.cancelled() => return,
+            changed = status.changed() => changed,
+            changed = checks.changed() => changed,
+            changed = tests.changed() => changed,
+        };
+        if changed.is_err() {
+            return;
         }
-    });
+        tokio::select! {
+            () = stop.cancelled() => return,
+            () = pace.ready() => {}
+        }
+        status.mark_unchanged();
+        checks.mark_unchanged();
+        tests.mark_unchanged();
+        publish();
+    }
 }
 
 /// Replaces `slot` when `next` differs (the `send_if_modified` body: equal facts never push).

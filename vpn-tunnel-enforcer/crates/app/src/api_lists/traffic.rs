@@ -15,6 +15,7 @@ use vpnte_ui::traffic_history::{
 };
 use vpnte_ui::widgets::Load;
 
+use crate::api_dashboard::pace::Pace;
 use crate::services::Backend;
 use crate::support::{changed, changed_opt, detached};
 use crate::svc_tunnel::DomainHistory;
@@ -129,7 +130,9 @@ impl Sources {
 }
 
 /// Re-projects on every history, site-name, lookup-route and tunnel change while the page is
-/// on screen (it holds the only receivers: the page is mounted only while it is current).
+/// on screen (it holds the only receivers: the page is mounted only while it is current). Every
+/// DNS answer line and every site-name lookup is a change (dozens a second while a browser
+/// loads pages), so the list goes out paced: at most twice a second, the last push complete.
 async fn follow(shared: Arc<Shared>, sources: Sources) {
     let Sources {
         mut history,
@@ -138,6 +141,7 @@ async fn follow(shared: Arc<Shared>, sources: Sources) {
         mut snapshot,
     } = sources;
     let shutdown = shared.backend.shutdown.clone();
+    let mut pace = Pace::live();
     loop {
         tokio::select! {
             () = shutdown.cancelled() => return,
@@ -146,9 +150,21 @@ async fn follow(shared: Arc<Shared>, sources: Sources) {
             () = changed(&mut inputs) => {}
             () = changed_opt(&mut snapshot) => {}
         }
-        if shared.state.receiver_count() > 0 {
-            shared.publish();
+        if shared.state.receiver_count() == 0 {
+            continue;
         }
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            () = pace.ready() => {}
+        }
+        // The projection below covers what changed during the wait.
+        history.mark_unchanged();
+        names.mark_unchanged();
+        inputs.mark_unchanged();
+        if let Some(snapshot) = snapshot.as_mut() {
+            snapshot.mark_unchanged();
+        }
+        shared.publish();
     }
 }
 

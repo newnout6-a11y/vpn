@@ -68,8 +68,9 @@ pub fn hide_to_tray(desktop: &DesktopContext) {
 
 /// Hiding the window alone keeps the page "visible" and rendering. With the WebView2 controller
 /// hidden too, rAF stops and the working set drops from ~370 MB to ~57 MB (cookbook §9); the
-/// VirtualDom keeps running, so the tray menu still updates.
-fn set_webview_hidden(desktop: &DesktopContext, hidden: bool) {
+/// VirtualDom keeps running, so the tray menu still updates. A start in the tray needs it too:
+/// wry creates the controller visible whatever the window is.
+pub(crate) fn set_webview_hidden(desktop: &DesktopContext, hidden: bool) {
     use dioxus::desktop::wry::{MemoryUsageLevel, WebViewExtWindows};
     let level = if hidden {
         MemoryUsageLevel::Low

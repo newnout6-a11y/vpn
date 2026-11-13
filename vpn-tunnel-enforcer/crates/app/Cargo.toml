@@ -64,6 +64,10 @@ fast_qr = { version = "0.14.0", default-features = false }
 rqrr = { version = "0.11.0", default-features = false, features = ["img"] }
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 
+[dev-dependencies]
+# p-uiperf: paused clock for the live-feed cadence tests (`api_dashboard::pace`).
+tokio = { workspace = true, features = ["test-util"] }
+
 [build-dependencies]
 embed-resource = "3.0.12"
 

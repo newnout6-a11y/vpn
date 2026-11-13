@@ -10,6 +10,7 @@ mod actions;
 mod feeds;
 #[cfg(test)]
 mod flows;
+pub(crate) mod pace;
 mod project;
 mod proxies;
 #[cfg(test)]

@@ -331,3 +331,86 @@ async fn a_soft_session_without_its_inbound_is_inconclusive() {
     assert_eq!(report.message.key, "probes.routing.inconclusive");
     assert_eq!(report.vpn_ip, None);
 }
+
+/// p-uiperf: percent frames (20 in a second) reach the page paced: pushes at least 500 ms
+/// apart, and the last frame (Complete) comes with the answer at once.
+#[tokio::test(start_paused = true)]
+async fn progress_frames_reach_the_page_paced() {
+    let (frames, seen) = watch::channel(probe::SpeedProgress::default());
+    let (page, mut shown) = watch::channel(SpeedProgress::default());
+    let work = async move {
+        for step in 1..=20u8 {
+            frames.send_replace(probe::SpeedProgress {
+                percent: step * 5,
+                phase: probe::SpeedPhase::Download,
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        frames.send_replace(probe::SpeedProgress {
+            percent: 100,
+            phase: probe::SpeedPhase::Complete,
+        });
+        AppResult::Ok(7)
+    };
+    let start = tokio::time::Instant::now();
+    let mut pushes = Vec::new();
+    let watcher = async {
+        while shown.changed().await.is_ok() {
+            let now = *shown.borrow_and_update();
+            pushes.push((start.elapsed(), now.phase));
+            if now.phase == SpeedPhase::Complete {
+                break;
+            }
+        }
+    };
+    let (answer, ()) = tokio::join!(forward(work, seen, &page), watcher);
+    assert_eq!(answer.expect("answer"), 7);
+    let (last, paced) = pushes.split_last().expect("pushes");
+    assert_eq!(last.1, SpeedPhase::Complete, "{pushes:?}");
+    assert_eq!(last.0, Duration::from_secs(1), "{pushes:?}");
+    assert!((2..=3).contains(&paced.len()), "{pushes:?}");
+    for pair in paced.windows(2) {
+        assert!(
+            pair[1].0 - pair[0].0 >= Duration::from_millis(500),
+            "{pushes:?}"
+        );
+    }
+}
+
+/// p-uiperf: the results of a «check all» (20 in a second) reach both pages paced: the first at
+/// once, the next projections at least 500 ms apart, the last one after the last result.
+#[tokio::test(start_paused = true)]
+async fn check_results_reach_the_pages_paced() {
+    let (_status, status) = watch::channel(TunStatus::default());
+    let (checks, checks_seen) = watch::channel(0u64);
+    let (_tests, tests) = watch::channel(0u64);
+    let stop = CancellationToken::new();
+    let pushes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let seen = pushes.clone();
+    let task = tokio::spawn(super::super::project::follow(
+        status,
+        checks_seen,
+        tests,
+        stop.clone(),
+        move || seen.lock().push(tokio::time::Instant::now()),
+    ));
+    let start = tokio::time::Instant::now();
+    for _ in 0..20 {
+        checks.send_modify(|revision| *revision += 1);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    stop.cancel();
+    task.await.expect("task");
+    let pushes = pushes.lock().clone();
+    assert_eq!(pushes.first().map(|t| *t - start), Some(Duration::ZERO));
+    assert!((2..=4).contains(&pushes.len()), "{pushes:?}");
+    for pair in pushes.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= Duration::from_millis(500),
+            "{pushes:?}"
+        );
+    }
+    let last = pushes.last().map(|t| *t - start);
+    assert!(last >= Some(Duration::from_millis(950)), "{last:?}");
+}

@@ -12,6 +12,7 @@ mod model;
 mod native;
 
 pub use demo::{DemoTray, data_uri};
+pub(crate) use host::set_webview_hidden;
 pub use host::{QuitMode, TrayApi, TrayContext, TrayHost, hide_to_tray, show_window};
 pub use icon::{TrayIcons, base_icon, ico_entries, tray_icon_size, variant, variant_png};
 pub use model::{

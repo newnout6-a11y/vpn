@@ -21,6 +21,7 @@ use vpnte_ui::speedtest::{SpeedProgress, SpeedResult};
 use vpnte_winnet::adapters::TUN_V4;
 
 use super::{Session, Shared, project};
+use crate::api_dashboard::pace::Pace;
 use crate::services::TunnelOps;
 
 /// Runs one test through the running TUN session. No session = `Conflict`
@@ -72,7 +73,9 @@ pub(super) async fn run(
     Ok(project::speed_result(&result))
 }
 
-/// Awaits `work` while copying its progress frames into the page's channel.
+/// Awaits `work` while copying its progress frames into the page's channel. A frame comes with
+/// every percent (several a second): the page gets at most two a second, and the last one
+/// together with the answer.
 pub(super) async fn forward<T>(
     work: impl Future<Output = AppResult<T>>,
     mut frames: watch::Receiver<probe::SpeedProgress>,
@@ -84,6 +87,7 @@ pub(super) async fn forward<T>(
         }
     };
     let mut work = std::pin::pin!(work);
+    let mut pace = Pace::live();
     loop {
         tokio::select! {
             biased;
@@ -92,7 +96,11 @@ pub(super) async fn forward<T>(
                 copy(*frames.borrow());
                 return done;
             }
-            changed = frames.changed() => match changed {
+            changed = async {
+                frames.changed().await?;
+                pace.ready().await;
+                Ok::<(), watch::error::RecvError>(())
+            } => match changed {
                 Ok(()) => copy(*frames.borrow_and_update()),
                 // Every sender is gone: only the answer is left.
                 Err(_) => return work.await,

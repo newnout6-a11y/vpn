@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::{broadcast, watch};
+use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{UnixMs, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_proxies::manager::{ProxySnapshot, degradation_msg};
@@ -14,14 +16,16 @@ use vpnte_proxies::model::{
 };
 use vpnte_proxies::slot::Slot;
 use vpnte_servers::model::{ServerSummary, ServersView};
+use vpnte_servers::store::ServersEvent;
 use vpnte_ui::panels::{ProxiesView, ProxyChoice, ProxyHealth, ProxyRowView};
 
+use super::pace::Pace;
 use super::{Hub, project, set};
 
 #[cfg(test)]
 mod tests;
 
-/// Coalesces bursts of server-list events (a ping-all) into one projection.
+/// Lets the events of one store change arrive before the column is projected.
 const DEBOUNCE: Duration = Duration::from_millis(60);
 
 /// One action of the column.
@@ -105,30 +109,46 @@ pub(super) fn spawn_feed(hub: &Arc<Hub>) {
     let Some(slots) = hub.slots.clone() else {
         return;
     };
+    let events = hub.backend.servers.subscribe();
+    let cancel = hub.backend.shutdown.clone();
     let hub = hub.clone();
-    tokio::spawn(async move {
-        let mut state = slots.state;
-        let mut events = hub.backend.servers.subscribe();
-        let cancel = hub.backend.shutdown.clone();
-        loop {
-            tokio::select! {
-                () = cancel.cancelled() => return,
-                changed = state.changed() => {
-                    if changed.is_err() {
-                        return;
-                    }
-                }
-                event = events.recv() => {
-                    if let Err(RecvError::Closed) = event {
-                        return;
-                    }
-                    tokio::time::sleep(DEBOUNCE).await;
-                    while events.try_recv().is_ok() {}
+    tokio::spawn(follow(slots.state, events, cancel, move || {
+        hub.publish_proxies();
+    }));
+}
+
+/// The loop of [`spawn_feed`]: `publish` after every slot change or run of server events. A
+/// ping-all is such a run: the column goes out at most twice a second.
+async fn follow(
+    mut state: watch::Receiver<ProxySnapshot>,
+    mut events: broadcast::Receiver<ServersEvent>,
+    cancel: CancellationToken,
+    publish: impl Fn(),
+) {
+    let mut pace = Pace::live();
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            changed = state.changed() => {
+                if changed.is_err() {
+                    return;
                 }
             }
-            hub.publish_proxies();
+            event = events.recv() => {
+                if let Err(RecvError::Closed) = event {
+                    return;
+                }
+                tokio::time::sleep(DEBOUNCE).await;
+            }
         }
-    });
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            () = pace.ready() => {}
+        }
+        while events.try_recv().is_ok() {}
+        state.mark_unchanged();
+        publish();
+    }
 }
 
 /// The column at `now`: every listed slot by number (failed and auto-disabled ones included, so

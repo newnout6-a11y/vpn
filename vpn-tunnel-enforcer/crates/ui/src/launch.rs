@@ -1,6 +1,8 @@
 //! Process entry for every UI binary: window and WebView2 configuration, our own tokio runtime,
 //! the frame root (cloak until painted, minimum size, WebView2 hardening, theme and language
-//! sync), and the command line of the demo binaries.
+//! sync, renderer crash watch), and the command line of the demo binaries.
+mod recover;
+
 use std::any::Any;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -319,20 +321,21 @@ pub fn desktop_config(options: &LaunchOptions) -> Config {
 struct FrameProps {
     root: fn() -> Element,
     min_size: (f64, f64),
-    uncloak: bool,
+    start_hidden: bool,
 }
 
 /// Root of every UI binary: the frame hooks, then the caller's root component.
 #[allow(non_snake_case)]
 fn Frame(props: FrameProps) -> Element {
-    use_frame(props.min_size, props.uncloak);
+    use_frame(props.min_size, props.start_hidden);
+    recover::use_crash_watch();
     let Root = props.root;
     rsx! {
         Root {}
     }
 }
 
-fn use_frame(min_size: (f64, f64), uncloak: bool) {
+fn use_frame(min_size: (f64, f64), start_hidden: bool) {
     let desktop = use_window();
     theme::use_theme_sync();
     lang::use_lang_sync();
@@ -341,12 +344,18 @@ fn use_frame(min_size: (f64, f64), uncloak: bool) {
         move || {
             harden_webview(&desktop);
             apply_min_size(&desktop.window, min_size);
+            // A start in the tray hides only the window; the page would render unseen at full
+            // cost until the first show. The first render is the earliest point we hold the
+            // webview (the page has just loaded).
+            if start_hidden {
+                crate::tray::set_webview_hidden(&desktop, true);
+            }
         }
     });
     use_future(move || {
         let desktop = desktop.clone();
         async move {
-            if !uncloak {
+            if start_hidden {
                 return;
             }
             // Two animation frames after the first edits: WebView2 has presented them. The
@@ -396,7 +405,7 @@ pub fn launch(
     let props = FrameProps {
         root,
         min_size: options.min_size,
-        uncloak: !options.start_hidden,
+        start_hidden: options.start_hidden,
     };
     let mut vdom = VirtualDom::new_with_props(Frame, props);
     for context in contexts() {

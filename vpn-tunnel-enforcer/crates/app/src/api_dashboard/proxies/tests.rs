@@ -156,3 +156,39 @@ async fn actions_reach_the_manager_and_report_its_refusals() {
     assert!(snap.instances.iter().all(|i| !i.process_running));
     manager.shutdown().await;
 }
+
+/// p-uiperf: the server events of a ping-all (20 in a second) reach the column paced:
+/// projections at least 500 ms apart, the last one after the last event.
+#[tokio::test(start_paused = true)]
+async fn server_events_reach_the_column_paced() {
+    use std::time::Duration;
+    use tokio::time::Instant;
+    let (_slots, state) = watch::channel(ProxySnapshot::default());
+    let (events, rx) = broadcast::channel(64);
+    let cancel = CancellationToken::new();
+    let pushes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let seen = pushes.clone();
+    let feed = tokio::spawn(follow(state, rx, cancel.clone(), move || {
+        seen.lock().push(Instant::now());
+    }));
+    let start = Instant::now();
+    for _ in 0..20 {
+        events
+            .send(ServersEvent::Changed)
+            .expect("the feed listens");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    cancel.cancel();
+    feed.await.expect("feed");
+    let pushes = pushes.lock().clone();
+    assert!((2..=4).contains(&pushes.len()), "{pushes:?}");
+    for pair in pushes.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= Duration::from_millis(500),
+            "{pushes:?}"
+        );
+    }
+    let last = pushes.last().map(|t| *t - start);
+    assert!(last >= Some(Duration::from_millis(950)), "{last:?}");
+}

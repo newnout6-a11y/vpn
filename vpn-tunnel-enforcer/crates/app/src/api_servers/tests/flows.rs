@@ -221,3 +221,57 @@ async fn per_server_engine_is_visible_and_never_impossible() {
     let stored = env.backend.servers.get(&tuic.id.as_str().into()).unwrap();
     assert_eq!(stored.engine, EnginePref::Auto, "nothing stored");
 }
+
+/// p-uiperf: the results of a ping-all (20 in a second) reach the page paced: pushes at least
+/// 500 ms apart, the last one with the last result.
+#[tokio::test(start_paused = true)]
+async fn ping_results_reach_the_page_paced() {
+    use std::time::Duration;
+    locales();
+    let env = Env::new("pace");
+    let api = ServersBackend::start(env.backend.clone());
+    api.add(
+        PASTE.to_owned(),
+        AddTarget::Auto,
+        ClientDevice::Pc,
+        SubscriptionRequest::default(),
+    )
+    .await
+    .unwrap();
+    let mut state = api.state();
+    let id = until(&mut state, |v| !v.servers.is_empty()).await.servers[0]
+        .id
+        .clone();
+    // the import's own pushes go out first
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    state.mark_unchanged();
+    let watched = id.clone();
+    let recorder = tokio::spawn(async move {
+        let mut pushes = Vec::new();
+        while let Ok(Ok(())) = tokio::time::timeout(Duration::from_secs(3), state.changed()).await {
+            let view = state.borrow_and_update();
+            let ping = view
+                .servers
+                .iter()
+                .find(|s| s.id == watched)
+                .and_then(|s| s.ping_ms);
+            pushes.push((tokio::time::Instant::now(), ping));
+        }
+        pushes
+    });
+    for rtt in 1..=20 {
+        env.backend
+            .servers
+            .record_ping(&id.as_str().into(), Some(rtt));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let pushes = recorder.await.expect("recorder");
+    assert!((2..=4).contains(&pushes.len()), "{pushes:?}");
+    for pair in pushes.windows(2) {
+        assert!(
+            pair[1].0 - pair[0].0 >= Duration::from_millis(500),
+            "{pushes:?}"
+        );
+    }
+    assert_eq!(pushes.last().map(|p| p.1), Some(Some(20)), "{pushes:?}");
+}

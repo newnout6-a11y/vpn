@@ -82,6 +82,18 @@ with code 3 when the WebView2 runtime is missing, runs a 4-worker tokio runtime 
 every Dioxus task stays on the main thread), and keeps `<html lang>`, `data-theme`, the palette and
 the window background in sync with `lang::LANG` / `theme::THEME` / the OS theme.
 
+`start_hidden` hides the WebView2 controller too and sets its memory level to Low at the first render
+(as hiding to the tray does; wry creates the controller visible whatever the window is), so a start
+in the tray never renders the page; `tray::show_window` restores both.
+
+When the page's renderer process dies (`ProcessFailed`), the frame opens a stand-in page (the app's
+page with `?recover`; a script registered at start acknowledges every edit batch there and never
+announces the page). The VirtualDom keeps its tree and keeps running: the tray, Quit with its
+cleanup and a second launch's activation work; the window stays empty until the app restarts (at
+most 3 stand-ins per process). The page itself cannot be built again in dioxus-desktop 0.7.10 (its
+template cache belongs to the dead page; see known gaps). A dead browser process is only logged;
+helper processes are restarted by WebView2.
+
 ## The app's root component
 
 ```rust
@@ -810,11 +822,36 @@ own.
 `demo_maintenance`, `demo_wizard`. Each shows its package over the module's demo API (the page demos
 inside the real `Shell`); WebView2 data goes to `%TEMP%\vpnte-webview2\<binary>`.
 
+## Footprint
+
+Measured 2026-11-13 on the real app (debug build of `vpn-tunnel-enforcer.exe`, unelevated, throw-away
+`VPNTE_DATA_DIR` / `VPNTE_LEGACY_DIR`, never connected, start page; WebView2 157.0.4341.46, 16 logical
+CPUs). Sums over the exe and its 6 `msedgewebview2.exe` processes after 20 s (+15 s after hiding);
+CPU over the next 60 s, in % of one core. Script: `.tmp/uiperf/measure.ps1`.
+
+| State | Private working set | Private commit | CPU |
+|---|---|---|---|
+| Window open, idle | 146-150 MB (exe 13 MB) | 261-268 MB | 11-13 % |
+| Hidden to the tray | 41-42 MB | 234 MB | 0.5-0.7 % |
+| Started in the tray (`--autostart`), before `start_hidden` hid the controller | 147-149 MB | 263-267 MB | 12 % |
+| Started in the tray, now | 48 MB | 144 MB | 1.5 % |
+
+The open window's CPU is the start page's infinite CSS animations (pausing them while the window is
+visible is an owner decision, not taken). Live feeds reach the page at most twice a second
+(`vpnte-app` `api_dashboard::pace`). Not measured: a connected session with traffic, a release build,
+GPU memory.
+
 ## Not implemented / known gaps
 
 - Snap Layouts flyout on the HTML maximise button; DWM caption colours (frameless window by design).
-- Forwarding WebView `error` / `unhandledrejection` to the log, reloading a crashed renderer, a
-  shutdown overlay: app / logging work (the Shell has the `overlays` slot).
+- Forwarding WebView `error` / `unhandledrejection` to the log, a shutdown overlay: app / logging
+  work (the Shell has the `overlays` slot).
+- After a WebView2 renderer or browser process dies the window stays empty until the app restarts.
+  dioxus-desktop 0.7.10 cannot rebuild a reloaded page (it allows its own page to load once, and
+  its template ids and string caches belong to the page that died); a working window needs a new
+  window with a new VirtualDom and the same root contexts, and `launch` takes its contexts once
+  (`FnOnce`; the app's contexts also start the backend). After a renderer crash the stand-in page
+  keeps the VirtualDom running; after a browser crash it stops, as before.
 - PageTip strips (`tips.*`): need a persisted dismissal store; no page renders them.
 - `OverflowMenu`, `SortableList` (drag reordering): not built; domain rules reorder with ↑ / ↓.
 - Flag coins cover the 65 countries of `ui.panels.country.*` (flag-icons 7.5, `assets/flags/`); any

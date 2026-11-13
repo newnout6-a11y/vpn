@@ -741,3 +741,38 @@ fn the_next_event_carries_its_capture() {
     assert_eq!((next.name.as_str(), next.capture), ("Work", Capture::Tun));
     assert!(!next.capture.available(false));
 }
+
+/// p-uiperf: DNS answers in a burst (20 lines in a second) reach the open page paced: pushes at
+/// least 500 ms apart, and the last one names every domain (nothing is lost from the list).
+#[tokio::test(start_paused = true)]
+async fn a_burst_of_engine_lines_reaches_the_page_paced() {
+    let dir = TempDir::new("lists-traffic-pace");
+    let backend = backend(&dir, FakeTunnel::new(false));
+    let history = domain_history(&backend);
+    let api = TrafficService::start(backend.clone(), history.clone());
+    let mut state = api.state();
+    state.mark_unchanged();
+    let recorder = tokio::spawn(async move {
+        let mut pushes = Vec::new();
+        while let Ok(Ok(())) = tokio::time::timeout(Duration::from_secs(3), state.changed()).await {
+            let rows = domains(&state.borrow_and_update()).len();
+            pushes.push((tokio::time::Instant::now(), rows));
+        }
+        pushes
+    });
+    for i in 0..20 {
+        history.history.observe_log_line(&format!(
+            "+0300 2026-09-25 17:17:06 INFO [42 1ms] dns: exchanged A host{i}.example.org. 60 IN A 198.51.100.7"
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let pushes = recorder.await.expect("recorder");
+    assert!((2..=4).contains(&pushes.len()), "{pushes:?}");
+    for pair in pushes.windows(2) {
+        assert!(
+            pair[1].0 - pair[0].0 >= Duration::from_millis(500),
+            "{pushes:?}"
+        );
+    }
+    assert_eq!(pushes.last().map(|p| p.1), Some(20), "{pushes:?}");
+}
