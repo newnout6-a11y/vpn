@@ -4,8 +4,14 @@
 //! precedence over the proxy). The whole settings block is one journal value, so the baseline is
 //! restored exactly and a change the user made to any part of it meanwhile keeps all of it.
 //! Programs that ignore the system proxy go direct; Soft never claims more than that.
+//!
+//! Beside loopback and local names the bypass list holds the entries of «Не через прокси»
+//! (RU-2026 item 14 a-b: the user's own list and the routing's certain-direct names, built by
+//! `vpnte_engine::routing::bypass`). The app keeps them current with [`set_bypass`]; each apply
+//! takes them as the session's list, which is journalled with the rest of the value.
 use std::io;
 
+use parking_lot::Mutex;
 use vpnte_core::net::HostPort;
 use vpnte_winnet::sysproxy::{self, ProxyConfig};
 
@@ -17,6 +23,75 @@ pub const BYPASS: &str = "localhost;127.*;[::1];<local>";
 
 /// Longest journal text admitted for the settings (corporate bypass lists run to kilobytes).
 const MAX_TEXT: usize = 64 * 1024;
+
+/// Longest bypass text Soft writes: the journal must also hold the user's own setting.
+const MAX_BYPASS: usize = 32 * 1024;
+
+/// Entries beside the local ones, in each reader's syntax.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Bypass {
+    /// WinINet `ProxyOverride` items, after [`BYPASS`].
+    pub proxy_override: Vec<String>,
+    /// `NO_PROXY` items, after [`super::env::NO_PROXY`].
+    pub no_proxy: Vec<String>,
+}
+
+/// The list for the next apply and the one the current session took. Process-wide because the
+/// Soft session API has no list of its own: the app sets it from settings and rules, Soft takes
+/// it at each apply.
+#[derive(Debug, Default)]
+struct Lists {
+    next: Bypass,
+    taken: Bypass,
+}
+
+impl Lists {
+    /// Makes the next list the session's: a list changed mid-session lands at the next apply
+    /// (a new connection), and until then [`applied`] still reads back what was written, so the
+    /// session never looks taken over by a list that merely changed.
+    fn take(&mut self) -> Bypass {
+        self.taken = self.next.clone();
+        self.taken.clone()
+    }
+}
+
+const NONE: Bypass = Bypass {
+    proxy_override: Vec::new(),
+    no_proxy: Vec::new(),
+};
+
+static LISTS: Mutex<Lists> = Mutex::new(Lists {
+    next: NONE,
+    taken: NONE,
+});
+
+/// Sets the entries of the next Soft apply.
+pub fn set_bypass(list: Bypass) {
+    LISTS.lock().next = list;
+}
+
+/// The entries the current Soft session took (empty before the first apply).
+pub fn taken() -> Bypass {
+    LISTS.lock().taken.clone()
+}
+
+/// `base` followed by the items it does not hold yet, joined with `sep`, at most
+/// [`MAX_BYPASS`] long.
+pub(super) fn join(base: &str, sep: char, items: &[String]) -> String {
+    let mut text = base.to_owned();
+    for item in items {
+        if base.split(sep).any(|b| b == item) {
+            continue;
+        }
+        if text.len() + 1 + item.len() > MAX_BYPASS {
+            tracing::warn!(left = items.len(), "bypass list over the size limit cut");
+            break;
+        }
+        text.push(sep);
+        text.push_str(item);
+    }
+    text
+}
 
 /// Reads and writes the system proxy; production uses [`WinInet`], tests a fake (no test may
 /// change the real setting: this machine's own network depends on it).
@@ -41,24 +116,32 @@ impl SystemProxy for WinInet {
 }
 
 /// What Soft mode writes for `addr` (the engine's mixed inbound, which also speaks HTTP: WinINet
-/// has no SOCKS5, so the address is named as an HTTP proxy whatever the session's proxy kind).
+/// has no SOCKS5, so the address is named as an HTTP proxy whatever the session's proxy kind),
+/// with the session's bypass entries ([`taken`]).
 pub fn applied(addr: &HostPort) -> ProxyConfig {
+    applied_with(addr, &taken())
+}
+
+/// [`applied`] with the given entries.
+pub fn applied_with(addr: &HostPort, list: &Bypass) -> ProxyConfig {
     ProxyConfig {
         use_proxy: true,
         server: addr.to_string(),
-        bypass: BYPASS.to_owned(),
+        bypass: join(BYPASS, ';', &list.proxy_override),
         use_pac: false,
         pac_url: String::new(),
         auto_detect: false,
     }
 }
 
-/// The journal step for `addr`.
+/// The journal step for `addr`; takes the next bypass list as the session's (call before
+/// `env::plan`, which writes the same list into `NO_PROXY`).
 pub fn plan(addr: &HostPort) -> Vec<(Feature, Target, Val)> {
+    let list = LISTS.lock().take();
     vec![(
         Feature::SoftProxy,
         Target::SystemProxy,
-        encode(&applied(addr)),
+        encode(&applied_with(addr, &list)),
     )]
 }
 

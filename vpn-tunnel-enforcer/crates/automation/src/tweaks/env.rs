@@ -1,5 +1,6 @@
 //! Soft-mode environment variables: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` = the proxy URL and
-//! `NO_PROXY` = `localhost,127.0.0.1,::1` (keeps the local proxy itself un-proxied), per user in
+//! `NO_PROXY` = `localhost,127.0.0.1,::1` (keeps the local proxy itself un-proxied) plus the
+//! session's «Не через прокси» entries (`sysproxy::taken`), per user in
 //! `HKCU\Environment` through `vpnte_winnet::env`. Only processes started afterwards (and
 //! Explorer, after the broadcast) see them; running terminals keep their old environment. The
 //! app's own environment is never changed: its HTTP clients choose proxies explicitly.
@@ -11,18 +12,25 @@ use vpnte_winnet::env::{EnvValue, UserEnv};
 
 use super::endpoint::proxy_url;
 use super::journal::{EnvVar, Feature, Target, Val};
+use super::sysproxy::{self, Bypass};
 
-/// `NO_PROXY` while Soft mode is on.
+/// `NO_PROXY` while Soft mode is on, before the session's entries.
 pub const NO_PROXY: &str = "localhost,127.0.0.1,::1";
 
-/// The four variables for `addr`.
+/// The four variables for `addr`, with the bypass entries the session took
+/// (`sysproxy::plan` takes them first).
 pub fn plan(addr: &HostPort, kind: ProxyKind) -> Vec<(Feature, Target, Val)> {
+    plan_with(addr, kind, &sysproxy::taken())
+}
+
+/// [`plan`] with the given entries.
+pub fn plan_with(addr: &HostPort, kind: ProxyKind, list: &Bypass) -> Vec<(Feature, Target, Val)> {
     let url = proxy_url(addr, kind);
     EnvVar::ALL
         .into_iter()
         .map(|var| {
             let value = match var {
-                EnvVar::NoProxy => NO_PROXY.to_owned(),
+                EnvVar::NoProxy => sysproxy::join(NO_PROXY, ',', &list.no_proxy),
                 _ => url.clone(),
             };
             (Feature::SoftEnv, Target::Env { var }, Val::Sz(value))

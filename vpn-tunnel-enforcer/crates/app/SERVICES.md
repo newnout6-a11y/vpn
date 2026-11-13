@@ -230,6 +230,15 @@ value after their tweak rollback (step "logon restore"; p-follow), unless the sy
 the app's (uninstall stops then; `--cleanup` leaves it for the next sign-in). Decisions:
 `progress/p-proxy-restore.md`.
 
+## «Не через прокси» (`api_settings::bypass`, package p-proxy-bypass, RU-2026 14 a-b)
+`api_settings::contexts` starts the keeper (never `Shared::start`: page tests must not touch the
+process-wide list). It hands `Settings::proxy_bypass` (the user's list, validated by
+`routing::bypass::parse_list` on save) plus, while `proxy_bypass_auto` is on and the routing mode is
+Proxy, the routing's certain-direct names (`routing::bypass::automatic`; Smart RU's gov list and
+blocked names read once per rule-set directory with `sing-box rule-set decompile`) to
+`sysproxy::set_bypass` at start and on every settings / rules change (10 min re-check for a
+managed rule-set refresh). Soft takes the list at its next apply: a change is a next-connect change.
+
 ## Update channel (`svc_update`, package p-updates)
 `root::contexts` adds `svc_update::contexts(&backend)`: one `Rc<dyn vpnte_ui::updates::UpdatesApi>`
 (the start page's `UpdateBanner`, Settings' «Обновления» and «Движки»). Nothing is checked while

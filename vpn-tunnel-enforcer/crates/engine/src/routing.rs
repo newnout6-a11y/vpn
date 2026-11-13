@@ -6,6 +6,7 @@
 //! Nothing here starts engines or touches the network stack; `rulesets` downloads files and runs
 //! `sing-box rule-set match` for validation, everything else is pure data.
 
+pub mod bypass;
 pub mod dns;
 pub mod doc;
 pub mod domain;

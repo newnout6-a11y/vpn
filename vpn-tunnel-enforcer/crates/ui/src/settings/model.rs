@@ -123,6 +123,10 @@ draft_fields! {
     soft_gradle: bool = false,
     /// Soft mode: point Android Studio at the proxy.
     soft_studio: bool = false,
+    /// Soft mode «Не через прокси»: the user's entries, one per line (validated on save).
+    proxy_bypass: String = String::new(),
+    /// Soft mode: also leave direct the sites the routing sends direct anyway.
+    proxy_bypass_auto: bool = true,
     proxy_engine: EnginePref = EnginePref::Auto,
     /// Leak protection while connected (old «Жёсткая блокировка адаптеров»).
     leak_protection: bool = true,

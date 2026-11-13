@@ -607,7 +607,9 @@ pub struct SettingsState { settings: SettingsView, locale: Option<Lang>, active_
     capture_available: bool /* false: the capture switch greyed out with the reason */ }
 ```
 `SettingsView` (live values) and `SettingsPatch` (one `Option` per field, `apply_to`) are generated
-from one field list: `connection_mode, routing_mode, soft_git, soft_gradle, soft_studio, proxy_engine,
+from one field list: `connection_mode, routing_mode, soft_git, soft_gradle, soft_studio,
+proxy_bypass /* «Не через прокси», one entry per line; the app validates on save */,
+proxy_bypass_auto /* add the routing's certain-direct sites */, proxy_engine,
 leak_protection, public_wifi_compatibility, auto_restart_on_crash, stealth_mode, adaptive_bypass,
 disable_geo_lookup, smart_ru_split, smart_ru_maps_direct, smart_ru_auto_update, minimize_to_tray,
 autopilot, domain_enrichment, advanced_mode, proxy_override, proxy_type, bootstrap_route_mode,

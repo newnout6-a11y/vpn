@@ -11,6 +11,7 @@
 //! with an honest "not available" error and never pretend to work.
 mod actions;
 mod auto;
+mod bypass;
 mod launch;
 mod project;
 mod pump;
@@ -47,6 +48,8 @@ pub use wizard::WizardService;
 /// `Rc<dyn WizardApi>` and `Rc<dyn LogsApi>`. Call it inside the tokio runtime (the projection
 /// tasks start here, stopped by `backend.shutdown`) after `backend.tunnel` was set.
 pub fn contexts(backend: &Arc<Backend>, automation: &Arc<Automation>) -> Vec<Box<dyn Any>> {
+    // Here, not in `Shared::start`: page tests must not change the process-wide list.
+    bypass::spawn(backend);
     // Never fails on Windows in practice; an unknown path makes the autostart read-back fail
     // honestly instead of writing a broken value silently.
     let exe = std::env::current_exe().unwrap_or_else(|err| {

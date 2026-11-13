@@ -543,6 +543,35 @@ resolver: the name resolves only through public resolvers (DoH / TCP), with no s
 network's own DNS.
 
 ```rust
+// routing::bypass — «Не через прокси» for Soft mode's system proxy and NO_PROXY (RU-2026 item 14 a-b)
+pub const MAX_ENTRIES: usize = 200;  pub const MAX_USER_TEXT: usize = 8 KiB;  pub const MAX_TEXT: usize = 16 KiB;
+pub enum BypassEntry { Site(String) /* x.com: + subdomains */, Subdomains(String) /* *.x.com */,
+                       Ipv4(Ipv4Addr), Ipv4Range(Vec<u8>) /* 10.*, 192.168.* */, Ipv6(Ipv6Addr) } // Display = stored form
+impl BypassEntry { pub fn parse(raw: &str) -> Result<Self, BypassError>;   // URL -> host, IDN -> punycode
+    pub fn override_items(&self) -> Vec<String>;  pub fn no_proxy_items(&self) -> Vec<String>; }
+pub enum BypassError { Invalid(String /* the entry */), TooMany, TooLong }  // .msg(); -> Validation
+pub fn parse_list(text: &str) -> Result<Vec<BypassEntry>, BypassError>; // lines / ; / , / spaces; <local> + repeats dropped
+pub fn from_stored(stored: &[String]) -> Vec<BypassEntry>;              // Settings::proxy_bypass; bad ones skipped
+pub struct AutoInputs<'a> { pub domain_rules: &'a [DomainRule], pub apps: &'a [SplitApp],
+    pub smart: SmartRu /* enabled only with a rule-set dir */, pub lists: Option<&'a SmartLists> }
+pub fn automatic(i: &AutoInputs) -> Vec<BypassEntry>;   // user Direct Exact / Subdomains, then the D4 gov list
+pub struct SmartLists;  impl SmartLists { pub fn parse(gov_json: &str, blocked_json: &str) -> Result<Self, serde_json::Error>;
+    pub fn gov(&self) -> &[BypassEntry]; pub fn blocked_near(&self, name: &str) -> bool; }
+pub async fn read_smart_lists(singbox_exe: &Path, rule_set_dir: &Path) -> io::Result<SmartLists>; // rule-set decompile
+pub struct BypassLists { pub proxy_override: Vec<String>, pub no_proxy: Vec<String> }
+pub fn render(user: &[BypassEntry], auto: &[BypassEntry]) -> BypassLists; // user first; auto while < MAX_TEXT
+```
+A bypass entry acts before the engine sees the request, so RU TLDs are never added: Smart RU sends
+`.ru` direct only on a Russian address, and a bypassed name would skip a user rule that sends it
+through the VPN or blocks it (answer 4). Automatic entries are names whose direct outcome is
+certain from the name: each is dropped when a user Block / VPN rule names a related site (equal,
+above or below; any such keyword rule drops all), when a Smart RU pin or a blocked-in-Russia name
+overlaps it (Smart RU on); there are none while any app goes through the VPN (P4 precedes the
+domain rules) or while Smart RU runs with unreadable lists. Syntax: `x.com` -> `ProxyOverride`
+`x.com;*.x.com`, `NO_PROXY` `x.com,.x.com`; `*.x.com` -> `*.x.com` / `.x.com` (automatic ones:
+`ProxyOverride` only, since curl and Python read `.x.com` as `x.com` too); `10.*` -> `10.0.0.0/8`.
+
+```rust
 // routing::doc — Document `rules.json` (VERSION 1); open exactly one Store<RulesDoc>
 pub struct RulesDoc { pub split_tunnel: SplitTunnel, pub dns: DnsSettings,
     pub domain_rules: Vec<DomainRule>, pub rule_hits: BTreeMap<Uuid, u64>, pub extra: Map<String, Value> }

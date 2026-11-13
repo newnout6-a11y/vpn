@@ -28,6 +28,8 @@ pub fn settings_view(s: &Settings, soft: &DevTargets, leak_protection: bool) -> 
         soft_git: soft.git,
         soft_gradle: soft.gradle,
         soft_studio: soft.android_studio,
+        proxy_bypass: s.proxy_bypass.join("\n"),
+        proxy_bypass_auto: s.proxy_bypass_auto,
         proxy_engine: s.proxy_engine,
         leak_protection,
         public_wifi_compatibility: s.public_wifi_compatibility,

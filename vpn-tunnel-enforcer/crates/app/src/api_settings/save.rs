@@ -8,6 +8,7 @@ use vpnte_base::types::Level;
 use vpnte_base::types::Notice;
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::settings::{RuleSetMode, SettingsPatch};
+use vpnte_engine::routing::bypass;
 use vpnte_tunnel::lifecycle::{ConnError, Done};
 use vpnte_ui::settings as ui;
 
@@ -122,8 +123,15 @@ pub fn core_patch(p: &ui::SettingsPatch) -> AppResult<SettingsPatch> {
         smart_ru_split: p.smart_ru_split,
         smart_ru_maps_direct: p.smart_ru_maps_direct,
         proxy_engine: p.proxy_engine,
+        proxy_bypass_auto: p.proxy_bypass_auto,
         ..SettingsPatch::default()
     };
+    if let Some(text) = &p.proxy_bypass {
+        // «Не через прокси» is the user's own rule (answer 4): every entry is checked, the first
+        // bad one is named, and the list is stored in its canonical form.
+        let entries = bypass::parse_list(text)?;
+        core.proxy_bypass = Some(entries.iter().map(ToString::to_string).collect());
+    }
     if let Some(on) = p.smart_ru_auto_update {
         core.smart_ru_rule_set_mode = Some(if on {
             RuleSetMode::Managed
@@ -156,6 +164,8 @@ pub fn next_connect(p: &ui::SettingsPatch) -> bool {
         || p.soft_git.is_some()
         || p.soft_gradle.is_some()
         || p.soft_studio.is_some()
+        || p.proxy_bypass.is_some()
+        || p.proxy_bypass_auto.is_some()
 }
 
 /// What the save did to a running tunnel: a restart is reported only when it was observed (the

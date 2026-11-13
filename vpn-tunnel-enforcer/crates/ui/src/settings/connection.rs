@@ -1,4 +1,5 @@
-//! «Подключение»: VPN source, routing mode (+ Soft targets), proxy engine. All draft fields.
+//! «Подключение»: VPN source, routing mode (+ Soft targets and «Не через прокси»), proxy
+//! engine. All draft fields.
 use dioxus::prelude::*;
 
 use super::model::{ConnectionMode, EnginePref, RoutingMode};
@@ -6,7 +7,7 @@ use super::{ActionError, Line, use_api, use_ctx};
 use crate::pages::{Page, use_nav};
 use crate::t;
 use crate::widgets::{
-    Button, ButtonKind, Checkbox, Panel, Row, Segmented, Select, SelectOption, use_job,
+    Button, ButtonKind, Checkbox, Panel, Row, Segmented, Select, SelectOption, TextArea, use_job,
 };
 
 #[component]
@@ -114,6 +115,23 @@ pub(super) fn Connection() -> Element {
                         label: "Android Studio",
                         checked: view.soft_studio,
                         on_change: move |on| ctx.edit(|p| p.soft_studio = Some(on)),
+                    }
+                }
+                div { class: "set-subgroup", role: "group", aria_label: t!("ui.settings.connection.bypass"),
+                    p { class: "set-subgroup-title", {t!("ui.settings.connection.bypass")} }
+                    p { class: "set-hint", {t!("ui.settings.connection.bypassHint")} }
+                    TextArea {
+                        value: view.proxy_bypass.clone(),
+                        oninput: move |v: String| ctx.edit(|p| p.proxy_bypass = Some(v)),
+                        rows: 3u32,
+                        placeholder: t!("ui.settings.connection.bypassPlaceholder"),
+                        mono: true,
+                        aria_label: t!("ui.settings.connection.bypass"),
+                    }
+                    Checkbox {
+                        label: t!("ui.settings.connection.bypassAuto"),
+                        checked: view.proxy_bypass_auto,
+                        on_change: move |on| ctx.edit(|p| p.proxy_bypass_auto = Some(on)),
                     }
                 }
             }

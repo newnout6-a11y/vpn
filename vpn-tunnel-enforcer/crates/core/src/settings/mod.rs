@@ -181,6 +181,12 @@ pub struct Settings {
     pub smart_ru_rule_set_update_hours: u32,
     /// Proxy engine choice.
     pub proxy_engine: EnginePref,
+    /// «Не через прокси»: hosts and wildcards that Soft mode's system proxy and `NO_PROXY` leave
+    /// direct (validated by `vpnte_engine::routing::bypass`; the user's own rule, answer 4).
+    pub proxy_bypass: Vec<String>,
+    /// Soft mode also leaves direct the sites the routing sends direct for certain
+    /// (`vpnte_engine::routing::bypass::automatic`).
+    pub proxy_bypass_auto: bool,
     /// UI language; `None` follows Windows (storage B24).
     #[serde(serialize_with = "ser_locale")]
     pub locale: Option<Lang>,
@@ -233,6 +239,8 @@ impl Default for Settings {
             smart_ru_rule_set_use_proxy: true,
             smart_ru_rule_set_update_hours: 24,
             proxy_engine: EnginePref::Auto,
+            proxy_bypass: Vec::new(),
+            proxy_bypass_auto: true,
             locale: None,
             // Follows the Windows light / dark setting (owner answer 11, 12.11.2026).
             active_theme_id: "builtin-system".to_owned(),
@@ -319,6 +327,8 @@ impl Settings {
             &mut self.smart_ru_rule_set_update_hours,
         );
         take(o, "proxyEngine", &mut self.proxy_engine);
+        take(o, "proxyBypass", &mut self.proxy_bypass);
+        take(o, "proxyBypassAuto", &mut self.proxy_bypass_auto);
         take_locale(o, &mut self.locale);
         take(o, "activeThemeId", &mut self.active_theme_id);
         take(o, "logKey", &mut self.log_key);
@@ -386,6 +396,8 @@ impl Settings {
             smart_ru_rule_set_use_proxy,
             smart_ru_rule_set_update_hours,
             proxy_engine,
+            proxy_bypass,
+            proxy_bypass_auto,
             locale,
             active_theme_id,
             notifications,
@@ -467,6 +479,8 @@ pub struct SettingsPatch {
     pub smart_ru_rule_set_use_proxy: Option<bool>,
     pub smart_ru_rule_set_update_hours: Option<u32>,
     pub proxy_engine: Option<EnginePref>,
+    pub proxy_bypass: Option<Vec<String>>,
+    pub proxy_bypass_auto: Option<bool>,
     /// `Some(None)` returns to following the Windows language.
     pub locale: Option<Option<Lang>>,
     pub active_theme_id: Option<String>,

@@ -316,6 +316,8 @@ fn every_field_changed() -> Settings {
         smart_ru_rule_set_use_proxy: false,
         smart_ru_rule_set_update_hours: 48,
         proxy_engine: EnginePref::Xray,
+        proxy_bypass: vec!["corp.example".into(), "10.*".into()],
+        proxy_bypass_auto: false,
         locale: Some(Lang::En),
         active_theme_id: "custom-1".into(),
         notifications: NotificationPrefs {

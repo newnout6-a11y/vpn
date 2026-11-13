@@ -546,13 +546,19 @@ pub trait SystemProxy: Send + Sync + Debug { fn read(&self) -> io::Result<ProxyC
     fn write(&self, config: &ProxyConfig) -> io::Result<()>; }
 pub struct WinInet;                                    // impl SystemProxy (the real per-user setting)
 pub const BYPASS: &str = "localhost;127.*;[::1];<local>";
-pub fn applied(addr: &HostPort) -> ProxyConfig;        // addr for every protocol, BYPASS, PAC / auto-detect off
-pub fn plan(addr: &HostPort) -> Vec<(Feature, Target, Val)>;  pub fn encode(&ProxyConfig) -> Val;
+pub struct Bypass { pub proxy_override: Vec<String>, pub no_proxy: Vec<String> }  // «Не через прокси» items
+pub fn set_bypass(list: Bypass);                       // p-proxy-bypass: the entries of the NEXT apply
+pub fn taken() -> Bypass;                              // the entries the current session took
+pub fn applied(addr: &HostPort) -> ProxyConfig;        // addr for every protocol, BYPASS + taken(), PAC / auto-detect off
+pub fn applied_with(addr: &HostPort, list: &Bypass) -> ProxyConfig;
+pub fn plan(addr: &HostPort) -> Vec<(Feature, Target, Val)>;  // takes the next list as the session's
+pub fn encode(&ProxyConfig) -> Val;
 pub fn decode(&Val) -> Option<ProxyConfig>;            // Text ≤ 64 KiB of ProxyConfig JSON, else None
 
 // building blocks (soft, legacy and hardening use them; the app normally does not)
 endpoint::{proxy_url(&HostPort, ProxyKind) -> String /* socks5h://… | http://…, [v6] */, host_bare(&HostPort) -> String}
-env::{NO_PROXY, plan, read, write, os_error(windows::core::Error) -> io::Error /* keeps "access denied" */}
+env::{NO_PROXY, plan /* + taken().no_proxy */, plan_with(&HostPort, ProxyKind, &Bypass), read, write,
+     os_error(windows::core::Error) -> io::Error /* keeps "access denied" */}
 git::{GitCli { pub exe: PathBuf, pub global_file: Option<PathBuf> }, GitCli::find() -> Option<GitCli>, plan}
 block::{render, is_block, is_legacy_gradle_line, read, write, prune, read_lines, remove_lines, legacy_gradle_lines}
 studio::{newest_install, settings_file, vmoptions_file, plan, read_option, write_option, prune}
@@ -574,6 +580,14 @@ legacy::{LegacySources { receipts_dir, gradle_props, studio_root } + current_use
   unreadable or malformed one fails the whole apply with nothing left half-applied. Errors:
   `automation.tweaks.unreadable` / `.writeFailed` / `.notVerified` {target}, `.otherUser`
   (Permission), journal store errors.
+- «Не через прокси» (RU-2026 item 14 a-b): the app hands the user's list plus the routing's
+  certain-direct names (`vpnte_engine::routing::bypass`) to `sysproxy::set_bypass` whenever
+  they change; `sysproxy::plan` takes them as the session's list (after the local entries in
+  `ProxyOverride`, after `NO_PROXY`'s loopback names), `applied` / `env::plan` use the taken
+  list. A change mid-session therefore lands at the next apply (a new connection) and the
+  session's read-back (`is_configured`) never fails over it. The entries are part of the
+  journalled values, so stop, the crash guardian and the logon restore roll them back with the
+  rest; the text is cut at 32 KiB to stay inside the journal's 64 KiB value.
 - Lifecycle: `apply` on a Soft start / refresh; `rollback` on stop, before a Hard / Direct start,
   at shutdown and in startup recovery when the settings are not Soft (Soft → re-apply = re-verify).
   NOADMIN §2: "connected" in Soft needs `status().system_proxy == ProxyOwner::Ours` besides the
