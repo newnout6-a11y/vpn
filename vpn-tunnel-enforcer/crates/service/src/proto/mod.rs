@@ -32,9 +32,9 @@ mod wire;
 mod tests;
 
 pub use wire::{
-    EngineRunWire, ExitWire, KillSwitchStateWire, ProtectionWire, SessionWire, StartReceiptWire,
-    StatusKindWire, StatusWire, StopReceiptWire, SwitchFailureWire, SwitchReceiptWire,
-    TunnelEventWire,
+    EngineRunWire, ExitWire, KillSwitchStateWire, ProtectionWire, RULE_SETS_PROTOCOL,
+    RuleSetSource, RuleSetsWire, SessionWire, StartReceiptWire, StatusKindWire, StatusWire,
+    StopReceiptWire, SwitchFailureWire, SwitchReceiptWire, TunnelEventWire,
 };
 pub use wire::{ServiceUpdateWire, UpdateAsk, UpdatePhase};
 
@@ -268,6 +268,20 @@ pub enum Reply {
     Update(ServiceUpdateWire),
     /// To `ServiceLog`: the caller's lines of the service log.
     ServiceLog(ServiceLogWire),
+}
+
+impl Reply {
+    /// The reply as a client of `protocol` reads it: a status loses what an older version does
+    /// not know (`StatusWire::speak`).
+    pub fn speak(self, protocol: u32) -> Self {
+        match self {
+            Reply::Status(mut status) => {
+                status.tunnel = status.tunnel.speak(protocol);
+                Reply::Status(status)
+            }
+            other => other,
+        }
+    }
 }
 
 /// The tunnel and the kill switch right now.

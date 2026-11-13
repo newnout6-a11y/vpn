@@ -178,6 +178,7 @@ impl SettingsApi for DemoSettingsApi {
                     managed_at: Some(now_ms()),
                     refreshing: false,
                     last_error: None,
+                    tunnel_note: None,
                 };
             }
         });

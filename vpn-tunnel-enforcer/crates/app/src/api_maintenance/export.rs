@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use vpnte_automation::tweaks::{self, Feature};
-use vpnte_base::types::now_ms;
+use vpnte_base::types::{Engine, now_ms};
 use vpnte_base::{AppError, AppResult, Msg};
 use vpnte_core::ops::Source;
 use vpnte_core::settings::Settings;
@@ -27,7 +27,8 @@ use vpnte_forensics::export::{
     self, ExportInputs, ExportProgress, ExportRequest, ExportStage, NoticeSink, RESOURCE,
     RecoveryArtifact, RecoveryRead,
 };
-use vpnte_tunnel::runtime::EngineFeed;
+use vpnte_tunnel::api::{CaptureKind, TunStatus};
+use vpnte_tunnel::runtime::{EngineFeed, EngineStarts};
 use vpnte_ui::maintenance::{ExportDone, ExportView};
 
 use super::{Shared, refused};
@@ -176,8 +177,7 @@ async fn inputs(shared: &Shared) -> ExportInputs {
     recovery.extend(sources.map(|s| journal(&s.journal)));
     ExportInputs {
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
-        // The files new starts run, not those of the app start (pfollow-b4).
-        engine_versions: engine_versions(&backend.live_engines()).await,
+        engine_versions: versions(backend).await,
         capture: capture(&settings),
         settings,
         logs_dir: Some(backend.dirs.logs.clone()),
@@ -187,6 +187,64 @@ async fn inputs(shared: &Shared) -> ExportInputs {
         snapshots_dir: Some(vpnte_probes::diagnostics::snapshot::dir(&backend.dirs.root)),
         ..ExportInputs::default()
     }
+}
+
+/// The engines' versions, each under what it is (fixfollow-b3): the files the running proxy
+/// session's engines were started from, and the files the next start runs (not those of the app
+/// start, pfollow-b4). After an engine update the two differ until the next connect. A Tunnel
+/// session runs the helper service's own engines: none of this process is named as running.
+async fn versions(backend: &crate::services::Backend) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (name, exe) in running_engines(backend) {
+        let version = match name {
+            "xray" => version_of(&exe, xray_process::engine_version(&exe)).await,
+            _ => version_of(&exe, singbox_process::engine_version(&exe)).await,
+        };
+        out.push((format!("{name} (running)"), version));
+    }
+    let next = engine_versions(&backend.live_engines()).await;
+    out.extend(
+        next.into_iter()
+            .map(|(name, v)| (format!("{name} (next start)"), v)),
+    );
+    out
+}
+
+/// The files this process's running proxy session started its engines from; none without such
+/// a session.
+fn running_engines(backend: &crate::services::Backend) -> Vec<(&'static str, PathBuf)> {
+    let Ok(tunnel) = backend.tunnel() else {
+        return Vec::new();
+    };
+    let Some(starts) = tunnel.engine_starts() else {
+        return Vec::new();
+    };
+    let status = tunnel.runtime_status().borrow().clone();
+    let starts = starts.borrow().clone();
+    started_by(&status, &starts)
+}
+
+/// The engine files a running proxy session was started from: sing-box always, Xray only when
+/// the session runs on it (an older Xray start may belong to an earlier session).
+pub(crate) fn started_by(
+    status: &TunStatus,
+    starts: &EngineStarts,
+) -> Vec<(&'static str, PathBuf)> {
+    if !status.running || status.capture != Some(CaptureKind::Proxy) {
+        return Vec::new();
+    }
+    let xray = status.engine.is_some_and(|e| e.kind == Engine::Xray);
+    let mut out: Vec<(&'static str, PathBuf)> = Vec::new();
+    out.extend(starts.singbox.exe.clone().map(|exe| ("sing-box", exe)));
+    out.extend(
+        starts
+            .xray
+            .exe
+            .clone()
+            .filter(|_| xray)
+            .map(|exe| ("xray", exe)),
+    );
+    out
 }
 
 /// `1.14.4` per engine, through the engine crate's pinned one-shot `version` runs; `missing`

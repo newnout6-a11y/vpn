@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use super::requests::start_request;
 use super::{Host, memory};
 use crate::pipe::ClientInfo;
-use crate::proto::{TunnelStart, Upstream};
+use crate::proto::{AdaptiveRestart, TunnelStart, Upstream};
 use crate::validate;
 
 /// The take-over key of a start: `(server id, local proxy)`.
@@ -39,6 +39,29 @@ impl Host {
             };
             memory::save(path, &session);
         }
+    }
+
+    /// An adaptive restart moved `client`'s session (another mode, maybe a sibling server): the
+    /// take-over key and the remembered start follow it, so a resume brings back what runs now
+    /// and the app's take-over names that server (fixfollow-b1).
+    pub(super) fn follow_adaptive(&self, client: &ClientInfo, restart: &AdaptiveRestart) {
+        if self.session_user.lock().as_deref() != Some(client.user.as_str()) {
+            return;
+        }
+        if let Some(server) = &restart.server {
+            *self.upstream.lock() = Some((Some(server.id.clone()), None));
+        }
+        let Some(path) = self.memory.get() else {
+            return;
+        };
+        let Some(mut kept) = memory::load(path).filter(|k| k.user == client.user) else {
+            return;
+        };
+        kept.start.adaptive = restart.mode;
+        if let Some(server) = &restart.server {
+            kept.start.upstream = Upstream::Server(Box::new(server.clone()));
+        }
+        memory::save(path, &kept);
     }
 
     /// Drops the kept session: `user`'s only (he leaves; its upstream key is his), or with

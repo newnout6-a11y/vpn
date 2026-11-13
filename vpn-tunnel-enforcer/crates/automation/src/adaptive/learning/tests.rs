@@ -12,6 +12,7 @@ fn view(outbound: Value) -> ProfileView {
         client_device: None,
         client_fingerprint: None,
         engine: Engine::SingBox,
+        tls_compat_applies: true,
     }
 }
 

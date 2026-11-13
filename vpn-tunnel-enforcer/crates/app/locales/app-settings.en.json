@@ -1,6 +1,11 @@
 {
   "app": {
     "settings": {
+      "tunnelLists": {
+        "service": "In Tunnel mode the helper service uses its own lists for now.",
+        "kept": "In Tunnel mode the earlier lists run for now: the helper service did not take the new ones.",
+        "nextConnect": "In Tunnel mode these lists apply from the next connection."
+      },
       "hardNeedsAdmin": "Tunnel mode needs the helper service. Proxy mode works without it.",
       "captureUnavailable": "Deep packet capture is not available in this version of the app.",
       "automationUnavailable": "This feature is not available right now: the automation of the app did not start.",

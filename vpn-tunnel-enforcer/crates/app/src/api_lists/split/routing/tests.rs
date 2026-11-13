@@ -321,7 +321,8 @@ async fn offer_preview_import() {
         ]
     );
     assert!(backend.settings.read(|s| s.smart_ru_split));
-    // PR #137 review: the tunnel is told, as by the Settings page (a running one restarts).
+    // PR #137 review: the tunnel is told, as by the Settings page (Smart RU applies at the next
+    // connect; fixfollow-b2).
     let told = tunnel.applied.lock().clone();
     assert!(
         matches!(told.as_slice(), [(old, new)] if !old.smart_ru_split && new.smart_ru_split),

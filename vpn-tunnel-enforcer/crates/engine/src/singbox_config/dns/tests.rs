@@ -33,10 +33,10 @@ fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// ru-2026 Ф9 / p-small (RU-2026 item 10): DoH by IP literal (1.1.1.1, Yandex 77.88.8.8, 9.9.9.9,
-/// 8.8.8.8), then TCP/53, then the physical resolver; a foreign DoH NXDOMAIN is final (TLS), a
-/// Yandex or TCP one is not. Yandex is second, so a network that cuts foreign resolvers answers
-/// after one blackholed step.
+/// ru-2026 Ф9 / psmall-b3: DoH by IP literal (1.1.1.1, 9.9.9.9, 8.8.8.8, then Yandex
+/// 77.88.8.8), then TCP/53, then the physical resolver; a foreign DoH NXDOMAIN is final (TLS), a
+/// Yandex or TCP one is not. Server names reach the domestic resolver only after every foreign
+/// one failed, and three blackholed 1 s steps leave it a second of Xray's 4 s lookup.
 #[test]
 fn bootstrap_order() {
     let doh = |server| {
@@ -47,10 +47,10 @@ fn bootstrap_order() {
         ]
     };
     let mut expected: Vec<(&str, &str)> = doh("dns-bootstrap").to_vec();
-    expected.extend([("evaluate", "dns-bootstrap-yandex"), ("respond", "address")]);
     for server in ["dns-bootstrap-quad9", "dns-bootstrap-google"] {
         expected.extend(doh(server));
     }
+    expected.extend([("evaluate", "dns-bootstrap-yandex"), ("respond", "address")]);
     let without_isp = [expected.clone(), vec![("route", "dns-bootstrap-tcp")]].concat();
     expected.extend([
         ("evaluate", "dns-bootstrap-tcp"),
@@ -85,9 +85,9 @@ fn bootstrap_servers_are_direct() {
     assert_eq!(
         shape,
         [
-            ("https", "dns-bootstrap-yandex", "77.88.8.8"),
             ("https", "dns-bootstrap-quad9", "9.9.9.9"),
             ("https", "dns-bootstrap-google", "8.8.8.8"),
+            ("https", "dns-bootstrap-yandex", "77.88.8.8"),
             ("tcp", "dns-bootstrap-tcp", "8.8.8.8"),
             ("udp", "dns-bootstrap-isp", "192.168.1.1"),
         ]

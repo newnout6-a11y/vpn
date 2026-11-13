@@ -340,6 +340,10 @@ fn unknown_stored_names_keep_the_list_readable() {
     }
     stored["health"]["reason"] = newer.clone();
     stored["country"]["source"] = newer.clone();
+    // twire-a2: a TLS tricks choice of a newer build, on the row and in the group's controls.
+    stored["tlsTricks"] = serde_json::json!({ "set": { "mode": "quantum" } });
+    value["groups"][0]["controls"]["tlsTricks"] = serde_json::json!({ "mode": "quantum" });
+    let stored = &mut value["profiles"][0];
     stored["archived"]["reason"] = newer;
     let back: ServersDoc = serde_json::from_value(value).unwrap();
     assert_eq!(back.groups[0].device(), Some(ClientDevice::default()));
@@ -357,4 +361,6 @@ fn unknown_stored_names_keep_the_list_readable() {
         "never selectable by misreading"
     );
     assert_eq!(row.profile().unwrap().name, "DE");
+    assert_eq!(row.tls_tricks, None);
+    assert_eq!(back.groups[0].controls.tls_tricks, None);
 }

@@ -73,6 +73,15 @@ impl Split {
         &self.0.remote
     }
 
+    /// The lifecycle drives the helper service from now on: its stop of a session the service
+    /// kept must reach the service, also when the connect that failed never got there.
+    pub(in crate::svc_tunnel) fn drive_service(&self) {
+        self.activate(Host::Service);
+        // At once, not through the forwarder: the lifecycle's next stop reads it.
+        let now = self.0.remote.status().borrow().clone();
+        self.0.status.send_replace(now);
+    }
+
     /// Where a start of `capture` runs: Tunnel mode in the service while it is installed.
     fn host_for(&self, capture: CaptureKind) -> Host {
         match capture {

@@ -54,6 +54,8 @@ struct GateApi {
     calls: RefCell<Vec<String>>,
     cancel: RefCell<Option<oneshot::Receiver<AppResult<Option<Msg>>>>>,
     leak: RefCell<Option<AppResult<Verdict>>>,
+    /// The next answer of `end_autopick` (`Ok` when unset).
+    end_auto: RefCell<Option<AppResult<()>>>,
 }
 
 impl GateApi {
@@ -83,6 +85,10 @@ impl DashboardApi for GateApi {
             .take()
             .ok_or_else(AppError::cancelled)?;
         gate.await.unwrap_or_else(|_| Err(AppError::cancelled()))
+    }
+    async fn end_autopick(&self) -> AppResult<()> {
+        self.log("endAutopick");
+        self.end_auto.borrow_mut().take().unwrap_or(Ok(()))
     }
     async fn set_smart_ru(&self, on: bool) -> AppResult<()> {
         self.log(format!("smart {on}"));
@@ -150,6 +156,7 @@ fn mount(view: DashboardView) -> (VirtualDom, Probe) {
             calls: RefCell::new(Vec::new()),
             cancel: RefCell::new(None),
             leak: RefCell::new(None),
+            end_auto: RefCell::new(None),
         }),
         dash: Rc::new(RefCell::new(None)),
         toasts: Rc::new(RefCell::new(None)),
@@ -412,9 +419,10 @@ async fn proxy_line_takes_the_proxy_back() {
     assert!(toasts(&dom, &probe).is_empty());
 }
 
-/// p-small (RU-2026 item 8): «Отменить» on the automatic choice's strip is the user's Cancel,
-/// also with nothing in flight (waiting between rounds, gave up): it goes to the backend once,
-/// a quiet success needs no toast (the strip goes with the next snapshot), a failure is told.
+/// p-small (RU-2026 item 8), psmall-b1: «Отменить» on the automatic choice's strip ends only
+/// the automatic choice, also with nothing in flight (waiting between rounds, gave up). It is
+/// not the connection's Cancel: the slab never shows «cancelling», a quiet success needs no
+/// toast (the strip goes with the next snapshot), a failure is told.
 #[tokio::test]
 async fn pick_strip_cancel_ends_the_automatic_choice() {
     let waiting = DashboardView {
@@ -425,22 +433,16 @@ async fn pick_strip_cancel_ends_the_automatic_choice() {
         ..state(ConnView::default())
     };
     let (mut dom, probe) = mount(waiting);
-    let gate = gate_cancel(&probe);
-    act(&dom, &probe, Dash::stop_autopick);
     act(&dom, &probe, Dash::stop_autopick);
     settle(&mut dom, 3, 40).await;
-    assert_eq!(calls(&probe), ["cancel"]);
-    assert!(act(&dom, &probe, Dash::conn).cancelling);
-    gate.send(Ok(None)).expect("cancel pending");
+    assert_eq!(calls(&probe), ["endAutopick"]);
+    assert!(!act(&dom, &probe, Dash::conn).cancelling);
     probe.api.tx.send_replace(state(ConnView::default()));
     settle(&mut dom, 4, 40).await;
     assert!(toasts(&dom, &probe).is_empty());
-    assert!(!act(&dom, &probe, Dash::conn).cancelling);
 
-    let gate = gate_cancel(&probe);
+    *probe.api.end_auto.borrow_mut() = Some(Err(AppError::new(ErrorKind::Network)));
     act(&dom, &probe, Dash::stop_autopick);
-    gate.send(Err(AppError::new(ErrorKind::Network)))
-        .expect("cancel pending");
     settle(&mut dom, 4, 40).await;
     let shown = toasts(&dom, &probe);
     assert_eq!(shown.len(), 1);

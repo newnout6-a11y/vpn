@@ -158,9 +158,10 @@ impl Host {
                 }
                 let profile = restart.server.as_ref().map(vpn_profile);
                 let receipt = runtime
-                    .restart_adaptive(restart.mode, restart.reason, profile)
+                    .restart_adaptive(restart.mode, restart.reason.clone(), profile)
                     .await;
                 let receipt = receipt.map_err(tunnel_failed)?;
+                self.follow_adaptive(client, &restart);
                 Ok(Reply::Started(Some(StartReceiptWire::from(&receipt))))
             }
             Request::Switch(start) => {
@@ -281,6 +282,7 @@ impl Host {
         let runtime = &self.deps.runtime;
         let mut tunnel = StatusWire::from(&*runtime.status().borrow());
         tunnel.self_test = self.self_test_for(&client.user, &tunnel);
+        tunnel.rule_sets = self.deps.inputs.rule_sets();
         let own = self.session_user.lock().as_deref() == Some(client.user.as_str());
         let kept = own.then(|| self.kept(&tunnel)).flatten();
         StatusReply {

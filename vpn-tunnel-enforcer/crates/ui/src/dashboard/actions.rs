@@ -73,24 +73,16 @@ impl Dash {
         });
     }
 
-    /// «Отменить» on the automatic choice's strip: the user's Cancel, which stops a connect or
-    /// switch the choice has in flight and, like any action of the user, ends its episode. The
-    /// strip goes with the next snapshot, so only a warning or a failure is told.
+    /// «Отменить» on the automatic choice's strip: the choice stops, the session stays as it is
+    /// (a step in flight finishes; psmall-b1). The strip goes with the next snapshot, so only a
+    /// failure is told.
     pub(super) fn stop_autopick(&self) {
-        if self.conn().cancelling {
-            return;
-        }
+        // Not the cancel slot: nothing of the connection is cancelled, the slab stays as it is.
         let (api, dash) = (self.api.clone(), self.clone());
-        self.cancel.start(move |_| async move {
-            match api.cancel().await {
-                Ok(None) => {}
-                Ok(Some(warning)) => {
-                    dash.toasts
-                        .warning(t!("dashboard.cancelledWithWarnings"), Some(tr(&warning)));
-                }
-                Err(err) => dash.fail(t!("dashboard.cancelFailed"), &err),
+        spawn(async move {
+            if let Err(err) = api.end_autopick().await {
+                dash.fail(t!("dashboard.cancelFailed"), &err);
             }
-            Ok(())
         });
     }
 

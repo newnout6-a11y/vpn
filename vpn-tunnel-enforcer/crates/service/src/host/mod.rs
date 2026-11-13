@@ -139,7 +139,10 @@ impl Host {
         if !(own && tun) {
             return None;
         }
-        self.self_tests.get()?.borrow().clone()
+        // Only the listed apps use the VPN: the run's default-route read went around it.
+        let listed_only = self.deps.inputs.get().only_listed.is_some();
+        let result = self.self_tests.get()?.borrow().clone()?;
+        Some(result.with_scope(listed_only))
     }
 
     /// Accepts connections until `cancel`; each runs on its own task.

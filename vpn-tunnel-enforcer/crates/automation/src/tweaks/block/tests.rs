@@ -107,7 +107,7 @@ fn switching_kind_leaves_one_block() {
         "a=1\r\nb=2\r\n# >>> VPN Tunnel Enforcer (managed) >>>\r\n\
          systemProp.http.proxyHost=127.0.0.1\r\nsystemProp.http.proxyPort=10809\r\n\
          systemProp.https.proxyHost=127.0.0.1\r\nsystemProp.https.proxyPort=10809\r\n\
-         systemProp.http.nonProxyHosts=localhost|127.*|[::1]\r\n# <<< VPN Tunnel Enforcer <<<\r\n",
+         systemProp.http.nonProxyHosts=localhost|127.0.0.1|[::1]\r\n# <<< VPN Tunnel Enforcer <<<\r\n",
         "CRLF kept, block appended at the end"
     );
     g.write(&text.replacen("a=1", "a=3", 1));
@@ -223,4 +223,20 @@ fn old_leftovers_are_removed_line_exact() {
     assert!(ours.contains(&"# VPN Tunnel Enforcer".to_owned()));
     assert!(ours.contains(&"systemProp.http.proxyPort=10809".to_owned()));
     assert!(legacy_gradle_lines("a=1\nsystemProp.http.proxyHost=corp\n", None).is_empty());
+}
+
+/// fix-tail: the Gradle block names loopback exactly. Java matches a `127.*` glob against host
+/// names too, so `127.0.0.1.t.example` would go around the proxy (Chromium did the same with
+/// `192.168.*`); the old app's glob is still recognised in its leftovers.
+#[test]
+fn the_gradle_block_has_no_loopback_glob() {
+    let addr = HostPort::parse("127.0.0.1:10808").unwrap();
+    for proxy in [ProxyKind::Socks5, ProxyKind::Http] {
+        let block = render(BlockKind::Gradle, &addr, proxy);
+        assert!(!block.contains('*'), "{block}");
+        assert!(
+            block.contains("nonProxyHosts=localhost|127.0.0.1|[::1]"),
+            "{block}"
+        );
+    }
 }

@@ -46,6 +46,8 @@
         "cancelled": "Test cancelled (protection stopped)",
         "tunIp": "IP through the TUN: {{ip}}",
         "tunIpUnknown": "IP through the TUN: unknown",
+        "directIp": "IP of apps outside the list, around the VPN: {{ip}}",
+        "directIpUnknown": "IP of apps outside the list, around the VPN: unknown",
         "disagreement": "IP checks disagree: another service sees {{other}}, the TUN shows {{default}}. Anycast and CDN routing can cause this, but part of the traffic may bypass the VPN",
         "unproven": {
           "incomplete": "Protection not confirmed: physical adapters were not fully checked",

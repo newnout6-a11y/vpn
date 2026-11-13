@@ -580,6 +580,31 @@ fn health_is_skipped_per_row() {
     assert_eq!(s.get(&ids[3]).unwrap().health, None);
 }
 
+/// psmall-a2: a list check that ran for minutes lands after a later check of the same key: the
+/// older record never replaces the newer one (as for verdicts).
+#[test]
+fn an_older_health_record_never_replaces_a_newer_one() {
+    let (_dir, s) = open();
+    let id = s.add(three(), keys(ClientDevice::Pc)).unwrap().added[0].clone();
+    let identity = s.get(&id).unwrap().identity().unwrap();
+    let at = |at, online| HealthUpdate {
+        id: id.clone(),
+        identity,
+        record: HealthRecord {
+            at,
+            ..record(online)
+        },
+        country: None,
+    };
+    assert_eq!(s.record_health(vec![at(60, true)]).unwrap(), 1);
+    assert_eq!(s.record_health(vec![at(10, false)]).unwrap(), 0);
+    assert_eq!(
+        s.get(&id).unwrap().health.map(|h| (h.at, h.online)),
+        Some((60, true))
+    );
+    assert_eq!(s.record_health(vec![at(90, false)]).unwrap(), 1);
+}
+
 /// Servers spec §3.9 / S-12: an exit lookup started before a selection is discarded, an
 /// entry-IP lookup is not (it does not depend on the selection) but never replaces exit evidence.
 #[test]

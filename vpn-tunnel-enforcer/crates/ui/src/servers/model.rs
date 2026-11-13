@@ -559,4 +559,7 @@ pub struct TricksView {
     pub choice: TricksChoice,
     /// Stealth or adaptive TLS compatibility is on, so `Default` means «Сильно».
     pub default_strong: bool,
+    /// The key's own split (a link's `fragment=`, a provider's header): «Как у провайдера» stays
+    /// in the list after another pick, and picking it follows the provider again (twire-b1).
+    pub provider: Option<TricksChoice>,
 }

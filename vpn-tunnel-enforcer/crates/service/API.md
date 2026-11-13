@@ -95,11 +95,13 @@ connections wait for theirs, more are closed at once: nothing big is held for a 
 is identified. Client ->
 `ClientFrame { id, request }`; service -> `ServerFrame::{Reply { id, reply }, Failed { id, error },
 Event { event }}`. `PROTOCOL = 4` (2 added `StatusWire::self_test`, 3 `RoutingInputs::rule_sets`, 4
-`RoutingInputs::only_listed`; `SCOPE_PROTOCOL = 4` names the last one for the app);
+`RoutingInputs::only_listed` and `StatusWire::rule_sets`; `SCOPE_PROTOCOL = 4` and
+`RULE_SETS_PROTOCOL = 4` name them for the app);
 `negotiate(client, service)` = the lower one while they differ by at most one (so a version-2
 peer is refused now). Evolution: add requests / replies / events / optional fields only; the
 newer side speaks the negotiated version (`Request::speak(protocol)` strips the rule sets for a
-version-2 service and the scope for a version-3 one, which then runs every app through the tunnel, applied by `pipe::client` to every request after `Hello`; every status a
+version-2 service and the scope for a version-3 one, which then runs every app through the tunnel, applied by `pipe::client` to every request after `Hello`; the service's
+`Reply::speak` / `StatusWire::speak` drop `rule_sets` for a version-3 client; every status a
 service of this build sends carries `self_test`, which versions 2 and 3 both know); structs refuse
 unknown fields.
 ```rust
@@ -147,6 +149,10 @@ the "sing-box only" shape reads as none), `KillSwitchState`, `ProtectionWire::to
 self-test, to the session's own user while his TUN session runs; a new result is pushed at once.
 The app passes each new run (`at`) to its leak forwarder: a leak marks the session and is a toast,
 and the leak check card shows the run, as for runs of its own.
+`rule_sets: Option<RuleSetsWire { source: Handed | Kept | Pinned, digest, refused: Option<Msg> }>`
+(protocol 4, psmart-b2): which Smart RU lists the service's last engine start ran
+(`SharedInputs::rule_sets`; `None` while Smart RU is off); the app shows a line in Settings when
+they are not its own set.
 Smart RU's lists (re-check item 12a): `host::SharedInputs` keeps the last `rule_sets` and checks
 them at the next engine start (`InputsSource::snapshot`): the service's own pinned set as is (no
 copy); another set once per content (`rulesets::handover::accept`: names, 2 MiB cap, canaries and

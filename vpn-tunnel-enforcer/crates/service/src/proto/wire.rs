@@ -46,6 +46,49 @@ pub struct StatusWire {
     /// session's own user only: the app shows it as it shows its own runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub self_test: Option<SelfTestResult>,
+    /// The Smart RU lists the service's last engine start ran (protocol 4, psmart-b2): the app
+    /// tells its user when they are not the lists it has. Stripped for an older client
+    /// ([`StatusWire::speak`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_sets: Option<RuleSetsWire>,
+}
+
+/// The first protocol whose service reports its Smart RU lists ([`StatusWire::rule_sets`]).
+pub const RULE_SETS_PROTOCOL: u32 = 4;
+
+impl StatusWire {
+    /// The status as a client of `protocol` reads it (structs refuse unknown fields).
+    pub fn speak(mut self, protocol: u32) -> Self {
+        if protocol < RULE_SETS_PROTOCOL {
+            self.rule_sets = None;
+        }
+        self
+    }
+}
+
+/// Which Smart RU lists a start of the service ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuleSetsWire {
+    pub source: RuleSetSource,
+    /// Digest of the set it ran (`RuleSetFiles::digest`); `None`: Smart RU had no lists there.
+    #[serde(default)]
+    pub digest: Option<String>,
+    /// Why the set the app handed over was not taken (its checks failed, the disk).
+    #[serde(default)]
+    pub refused: Option<Msg>,
+}
+
+/// Where the lists of a start of the service came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RuleSetSource {
+    /// The set the app handed over with its inputs.
+    Handed,
+    /// A set the app handed over earlier: the newest one was refused.
+    Kept,
+    /// The service's own files of its release.
+    Pinned,
 }
 
 /// Which engine runs and why (`reason` is the engine crate's serialized `SelectReason`, for
@@ -120,6 +163,7 @@ impl From<&TunStatus> for StatusWire {
             last_exit: None,
             recent_fault: None,
             self_test: None,
+            rule_sets: None,
         }
     }
 }
@@ -670,6 +714,27 @@ mod tests {
         let back: StatusWire = serde_json::from_str(&json).expect("reads back");
         assert_eq!(back, status);
         assert_eq!(crate::proto::negotiate(1, crate::proto::PROTOCOL), None);
+    }
+
+    /// psmart-b2: the report of the lists goes to a client of protocol 4 only; a version-3
+    /// client, whose structs refuse unknown fields, gets the status without it.
+    #[test]
+    fn the_lists_report_speaks_the_negotiated_version() {
+        let report = RuleSetsWire {
+            source: RuleSetSource::Kept,
+            digest: Some("ab12".into()),
+            refused: Some(Msg::new("engine.routing.ruleSets.fault.storage")),
+        };
+        let status = StatusWire {
+            rule_sets: Some(report),
+            ..StatusWire::default()
+        };
+        let json = serde_json::to_string(&status.clone().speak(4)).expect("json");
+        assert!(json.contains("\"ruleSets\""), "{json}");
+        let back: StatusWire = serde_json::from_str(&json).expect("reads");
+        assert_eq!(back, status);
+        let old = serde_json::to_string(&status.speak(3)).expect("json");
+        assert!(!old.contains("ruleSets"), "{old}");
     }
 
     /// A version-1 service's status (no field) reads as "no self-test" in this build.

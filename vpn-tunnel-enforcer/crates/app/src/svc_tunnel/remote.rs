@@ -19,13 +19,14 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, oneshot, watch};
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{KillSwitchLevel, Notice, OutboundFault};
+use vpnte_base::types::{Notice, OutboundFault};
 use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::store::Store;
 use vpnte_probes::leak::SelfTestResult;
 use vpnte_service::pipe::client::{CallError, Client, Frames, Incoming, Requests, ServerCheck};
 use vpnte_service::proto::{
-    Event, KeptSession, Reply, Request, StatusReply, StatusWire, TunnelEventWire, WireError,
+    Event, KeptSession, KillSwitchStateWire, Reply, Request, RuleSetsWire, StatusReply, StatusWire,
+    TunnelEventWire, WireError,
 };
 use vpnte_tunnel::api::{ExitInfo, TunError, TunStatus, TunStatusKind, TunWarning, TunnelEvent};
 use vpnte_tunnel::runtime::InputsSource;
@@ -103,6 +104,8 @@ struct State {
     /// it resumes) waits for the take-over; any operation of the app ends the wait.
     waiting: bool,
     gens: gens::Gens,
+    /// The Smart RU lists the service's last start ran (protocol 4, psmart-b2).
+    rule_sets: Option<RuleSetsWire>,
 }
 
 fn lost() -> CallError {
@@ -412,6 +415,20 @@ impl Remote {
         self.0.state.lock().parked.clone()
     }
 
+    /// The Smart RU lists the service's last start ran, as it reported them (protocol 4).
+    pub(super) fn rule_sets(&self) -> Option<RuleSetsWire> {
+        self.0.state.lock().rule_sets.clone()
+    }
+
+    /// Shows the parked session's status while it stays parked: a stop of the lifecycle then
+    /// sees the run it ends (a take-over that could not run, fixfollow-a2).
+    pub(super) fn reveal_parked(&self) {
+        let status = self.0.state.lock().parked.clone();
+        if let Some(status) = status {
+            self.0.status.send_replace(status);
+        }
+    }
+
     /// The parked session joins the lifecycle's paused one (a drop the kill switch held when
     /// the service restarted): the start events of a run the runtime brought back by itself, so
     /// the pause ends as after an engine restart. `false`: it ended meanwhile.
@@ -419,10 +436,28 @@ impl Remote {
         self.take_over().await.is_ok()
     }
 
-    /// The service's kill switch keeps blocking when its tunnel goes ("If the VPN drops" and
-    /// "Always").
-    pub(super) fn holds(&self) -> bool {
-        self.0.protection.read(|d| d.settings.level) != KillSwitchLevel::Off
+    /// The service still holds something of this app's session: a run, or the kill switch's
+    /// block. Out of reach counts as nothing: no engine runs without the service, and a block
+    /// that cannot be seen is not claimed.
+    pub(super) async fn holds_run(&self) -> bool {
+        match self.refresh().await {
+            Ok(reply) => {
+                reply.tunnel.running
+                    || reply.protection.kill_switch == KillSwitchStateWire::Blocking
+            }
+            Err(err) => {
+                tracing::info!(error = %err, "helper service not reached after the re-link");
+                false
+            }
+        }
+    }
+
+    /// The run the lifecycle holds paused is over (fixfollow-a1): its end, as a stop reads.
+    pub(super) fn announce_stopped(&self) {
+        let _ = self
+            .0
+            .events
+            .send(TunnelEvent::Status(TunStatusKind::Stopped));
     }
 
     /// Forgets a parked session (and ends a wait for one): what comes next replaces or stops it.
@@ -434,12 +469,14 @@ impl Remote {
     }
 }
 
-/// The last exit and fault of a status reply (the service sends them to the session's user only).
+/// The last exit and fault of a status reply (the service sends them to the session's user
+/// only), and the lists report.
 fn absorb(st: &mut State, reply: &StatusReply) {
     if let Some(exit) = &reply.last_exit {
         st.last_exit = Some(exit.clone().into());
     }
     st.recent_fault = reply.recent_fault;
+    st.rule_sets = reply.tunnel.rule_sets.clone();
 }
 
 /// Reads the connection until it ends: events are published in order, each answer reaches its
@@ -477,6 +514,7 @@ fn on_status(inner: &Inner, mut wire: StatusWire) {
         st.last_exit = Some(exit.into());
     }
     st.recent_fault = wire.recent_fault.take();
+    st.rule_sets = wire.rule_sets.take();
     let self_test = wire.self_test.take();
     let status = TunStatus::from(wire);
     if st.attaching || st.waiting || st.kept.is_some() {

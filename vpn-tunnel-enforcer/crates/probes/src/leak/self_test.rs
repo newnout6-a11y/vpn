@@ -76,9 +76,25 @@ pub struct SelfTestResult {
     pub inspection_complete: bool,
     pub services_disagree: Option<Disagreement>,
     pub cancelled: bool,
+    /// Only the listed apps use the VPN (p-app-split) and `curl.exe` is not one of them: the
+    /// default-route read and the cross-check went around the tunnel. Their address is shown as
+    /// what it is, never as the tunnel's, and the run is judged on the bound probes alone. Set
+    /// by whoever knows the session's scope (`with_scope`).
+    #[serde(default)]
+    pub default_direct: bool,
 }
 
 impl SelfTestResult {
+    /// The run of a session whose VPN carries only the listed apps (`listed_only`).
+    pub fn with_scope(mut self, listed_only: bool) -> Self {
+        self.default_direct = listed_only;
+        if listed_only {
+            // Both reads went direct: their agreement says nothing about the tunnel.
+            self.services_disagree = None;
+        }
+        self
+    }
+
     /// The view of a run stopped before it finished (protection stopped, caller gone).
     pub fn cancelled(kill_switch: KillSwitchLevel) -> Self {
         Self {
@@ -89,6 +105,7 @@ impl SelfTestResult {
             inspection_complete: false,
             services_disagree: None,
             cancelled: true,
+            default_direct: false,
         }
     }
 
@@ -131,7 +148,7 @@ fn unproven(r: &SelfTestResult) -> Option<&'static str> {
     let v4_probes = || r.probes.iter().filter(|p| p.local.is_ipv4());
     if !r.inspection_complete {
         Some("incomplete")
-    } else if r.default_v4.is_none() {
+    } else if r.default_v4.is_none() && !r.default_direct {
         Some("noTunIp")
     } else if v4_probes().next().is_none() {
         Some("noAddresses")
@@ -199,9 +216,11 @@ pub fn report(r: &SelfTestResult) -> SelfTestReport {
         }
     };
     let mut details: Vec<Msg> = r.probes.iter().map(probe_line).collect();
-    details.push(match r.default_v4 {
-        Some(ip) => Msg::new("probes.leak.selfTest.tunIp").arg("ip", ip),
-        None => Msg::new("probes.leak.selfTest.tunIpUnknown"),
+    details.push(match (r.default_v4, r.default_direct) {
+        (Some(ip), true) => Msg::new("probes.leak.selfTest.directIp").arg("ip", ip),
+        (None, true) => Msg::new("probes.leak.selfTest.directIpUnknown"),
+        (Some(ip), false) => Msg::new("probes.leak.selfTest.tunIp").arg("ip", ip),
+        (None, false) => Msg::new("probes.leak.selfTest.tunIpUnknown"),
     });
     if let Some(d) = r.services_disagree {
         details.push(
@@ -331,6 +350,7 @@ pub async fn run_self_test(
             inspection_complete,
             services_disagree,
             cancelled: false,
+            default_direct: false,
         }
     };
     tokio::select! {

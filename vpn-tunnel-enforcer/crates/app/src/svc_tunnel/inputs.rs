@@ -70,7 +70,7 @@ impl InputsSource for StoreInputs {
 /// The app's own exe as `process_path_regex` values (as stored and in its long spelling, like
 /// a listed app): with only the listed apps in the tunnel, the app's in-process probes must
 /// still use it (re-check item 16). Blocking: probes the file.
-fn own_exe() -> Vec<String> {
+pub(crate) fn own_exe() -> Vec<String> {
     let exe = std::env::current_exe().ok();
     let Some(path) = exe.and_then(|p| AppPath::parse(&p.to_string_lossy()).ok()) else {
         tracing::warn!("own exe not usable in the apps scope");

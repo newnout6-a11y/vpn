@@ -7,10 +7,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use vpnte_base::types::{ClientDevice, Engine, Loopback};
-use vpnte_core::settings::RuleSetMode;
+use vpnte_core::settings::{AppScope, RuleSetMode};
+use vpnte_engine::routing::RoutingInputs;
+use vpnte_engine::routing::plan::{self, Scope};
 use vpnte_engine::routing::process::probe_fs;
 use vpnte_engine::routing::smart_ru::SmartRu;
-use vpnte_engine::routing::{self, RoutingInputs};
 use vpnte_engine::singbox_config::{
     self, Capture, ConfigInputs, Listeners, TunParams, TunStack, UdpPolicy, Upstream,
 };
@@ -82,6 +83,11 @@ impl AppCheck {
         Some((profile, row.device, engine))
     }
 
+    /// Stealth: the app's default TLS tricks are «Сильно» (item 18), on both engines.
+    fn stealth(&self) -> bool {
+        self.0.settings.read(|s| s.stealth_mode)
+    }
+
     /// Proxy and TUN capture, each with the native upstream of the current server (when it runs
     /// on sing-box) and with the Xray slots.
     async fn singbox_configs(&self) -> Result<Vec<Vec<u8>>, String> {
@@ -90,6 +96,7 @@ impl AppCheck {
         if let Some((profile, device, Engine::SingBox)) = self.current() {
             let policy = EmitPolicy {
                 device: Some(device),
+                tls_compat: self.stealth(),
                 ..Default::default()
             };
             upstreams.push(Upstream::native(&profile, &policy).map_err(|e| e.to_string())?);
@@ -140,13 +147,20 @@ impl AppCheck {
                 ClientDevice::default(),
             ),
         };
+        // As the tunnel runs it: the app's default TLS tricks resolved into the key (twire-a3).
+        let mut profile = profile;
+        let tricks = profile.tls_tricks_for(self.stealth());
+        if let Some(tls) = profile.tls.as_mut() {
+            tls.tricks = Some(tricks);
+        }
         let graph = xray_config::proxy_graph(&profile, device).map_err(|e| format!("{e:?}"))?;
         let endpoint = Ports::default().slot()?;
         serde_json::to_vec(&xray_config::build_config(&graph, &endpoint)).map_err(|e| e.to_string())
     }
 
     /// The user's routing: Smart RU with the active rule sets, domain rules, split tunnelling,
-    /// the chosen DNS (file probes and the rule-set lookup are blocking).
+    /// the chosen DNS and the apps page's scope, as the session builds it (file probes and the
+    /// rule-set lookup are blocking).
     async fn routing(&self) -> Result<singbox_config::RoutingParts, String> {
         let backend = self.0.clone();
         tokio::task::spawn_blocking(move || {
@@ -159,7 +173,13 @@ impl AppCheck {
                 .flatten();
             let split = doc.resolve_split(probe_fs);
             let dns = doc.active_dns().map(|p| p.primary);
-            let fragments = routing::build(&RoutingInputs {
+            // p-app-split (c): the candidate engine reads the scope rule the session would run.
+            let own = (s.app_scope == AppScope::OnlyListed).then(crate::svc_tunnel::own_exe);
+            let scope = match own.as_deref() {
+                Some(own) => Scope::OnlyListed { own },
+                None => Scope::All,
+            };
+            let inputs = RoutingInputs {
                 smart: SmartRu {
                     enabled: s.smart_ru_split,
                     maps_direct: s.smart_ru_maps_direct,
@@ -172,8 +192,8 @@ impl AppCheck {
                 dns: dns.as_ref(),
                 physical_dns: &[],
                 endpoint_is_hostname: false,
-            });
-            fragments.parts
+            };
+            plan::build_scoped(&inputs, scope).parts
         })
         .await
         .map_err(|e| e.to_string())

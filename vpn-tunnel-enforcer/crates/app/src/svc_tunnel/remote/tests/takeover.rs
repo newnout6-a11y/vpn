@@ -93,15 +93,15 @@ impl InputsSource for Gated {
 }
 
 /// The lifecycle over a split runtime whose Tunnel mode is `remote`, kill switch "If the VPN
-/// drops" (stored in `dir`).
-fn lifecycle(remote: &Remote, dir: &Path) -> Lifecycle {
+/// drops" (stored in `dir`), and that split.
+fn lifecycle(remote: &Remote, dir: &Path) -> (Lifecycle, Split) {
     let settings = Arc::new(Store::<Settings>::open(dir));
     settings
         .update(|s| s.kill_switch = KillSwitchLevel::Standard)
         .expect("settings");
     let split = Split::spawn(FakeRuntime::new(), remote.clone(), CancellationToken::new());
-    Lifecycle::spawn(LifecycleDeps {
-        runtime: Arc::new(split),
+    let lifecycle = Lifecycle::spawn(LifecycleDeps {
+        runtime: Arc::new(split.clone()),
         profiles: Arc::new(Quiet),
         soft: Arc::new(Quiet),
         monitor: Arc::new(Quiet),
@@ -112,7 +112,8 @@ fn lifecycle(remote: &Remote, dir: &Path) -> Lifecycle {
         settings,
         always_available: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         foreign_vpn: Arc::new(Quiet),
-    })
+    });
+    (lifecycle, split)
 }
 
 fn target() -> ConnectTarget {
@@ -222,6 +223,19 @@ async fn attach(r: &Remote) -> KeptSession {
     kept
 }
 
+/// The server drops: the runtime restarts its engine while the kill switch holds, and the
+/// lifecycle pauses.
+async fn held_drop(rt: &FakeRuntime, lc: &Lifecycle) {
+    rt.status.send_modify(|s| {
+        s.running = false;
+        s.pid = None;
+    });
+    let restarting = TunStatusKind::Restarting { attempt: 1, max: 3 };
+    let _ = rt.events.send(TunnelEvent::Status(restarting));
+    let pause = lc.kill_switch();
+    until("paused", || pause.borrow().pause.is_some()).await;
+}
+
 /// pfollow-a1, first trigger: the service restarts while the kill switch holds a drop ("If the
 /// VPN drops", the lifecycle paused). The session it brings back joins the pause as its
 /// recovery: connected again, the pause over, nothing stopped in the service (before the fix the
@@ -232,20 +246,13 @@ async fn a_held_drop_takes_the_resumed_session_back() {
     let (pipe, dir) = (pipe_name(n), TempDir::new(&format!("takeover-held-{n}")));
     let (_, first_rt, first) = restarted(&pipe, &dir.0).await;
     let r = Remote::on_pipe(&pipe, Arc::new(NoInputs), protected(&dir.0));
-    let lc = lifecycle(&r, &dir.0);
+    let (lc, split) = lifecycle(&r, &dir.0);
     connect(&lc, target()).await.expect("connected");
     let snap = lc.snapshot();
     assert_eq!(snap.borrow().state, TunnelState::Connected);
 
-    // The server drops: the runtime restarts its engine while the kill switch holds.
-    first_rt.status.send_modify(|s| {
-        s.running = false;
-        s.pid = None;
-    });
-    let restarting = TunStatusKind::Restarting { attempt: 1, max: 3 };
-    let _ = first_rt.events.send(TunnelEvent::Status(restarting));
+    held_drop(&first_rt, &lc).await;
     let pause = lc.kill_switch();
-    until("paused", || pause.borrow().pause.is_some()).await;
 
     let losses = r.losses();
     first.cancel();
@@ -257,7 +264,7 @@ async fn a_held_drop_takes_the_resumed_session_back() {
 
     let (host, second_rt, second) = restarted(&pipe, &dir.0).await;
     let kept = resumed(&r, &host).await;
-    crate::svc_tunnel::takeover::take_over(&r, &lc, kept, |t| connect(&lc, t)).await;
+    crate::svc_tunnel::takeover::take_over(&split, &lc, kept, |t| connect(&lc, t)).await;
     until("connected again", || {
         snap.borrow().state == TunnelState::Connected
     })
@@ -282,15 +289,17 @@ async fn a_connect_in_flight_takes_the_kept_session_over() {
     let (open, gate) = watch::channel(false);
     let r = Remote::on_pipe(&s.pipe, Arc::new(Gated(gate)), s.protection.clone());
     let kept = attach(&r).await;
-    let lc = lifecycle(&r, &s._dir.0);
+    let (lc, split) = lifecycle(&r, &s._dir.0);
     let user = tokio::spawn({
         let lc = lc.clone();
         async move { connect(&lc, target()).await }
     });
     until("the user's connect in flight", || lc.busy()).await;
     let taking = tokio::spawn({
-        let (r, lc) = (r.clone(), lc.clone());
-        async move { crate::svc_tunnel::takeover::take_over(&r, &lc, kept, |t| connect(&lc, t)).await }
+        let (split, lc) = (split.clone(), lc.clone());
+        async move {
+            crate::svc_tunnel::takeover::take_over(&split, &lc, kept, |t| connect(&lc, t)).await
+        }
     });
     // The take-over meets the connect in flight before it reaches the service.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -315,16 +324,79 @@ impl InputsSource for Unreadable {
     }
 }
 
-/// pfollow-a1: a take-over that cannot run through stops the kept session, and the kill switch
-/// keeps blocking while its level holds ("If the VPN drops" here): programs never go direct.
+/// pfollow-a1, fixfollow-a2: a take-over that cannot run through ends the kept session through
+/// the lifecycle. The kill switch keeps blocking while its level holds ("If the VPN drops"
+/// here), so programs never go direct, and the lifecycle shows it: `blocked`, nothing in
+/// flight, a later connect admitted (before the fix the stop went past the lifecycle and the
+/// runtime's `Adapting` left it in «reconnecting» with every connect refused).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_take_over_keeps_the_block() {
     let s = crashed_window().await;
     let r = Remote::on_pipe(&s.pipe, Arc::new(Unreadable), s.protection.clone());
     let kept = attach(&r).await;
-    let lc = lifecycle(&r, &s._dir.0);
-    crate::svc_tunnel::takeover::take_over(&r, &lc, kept, |t| connect(&lc, t)).await;
+    let (lc, split) = lifecycle(&r, &s._dir.0);
+    crate::svc_tunnel::takeover::take_over(&split, &lc, kept, |t| connect(&lc, t)).await;
     assert_eq!(s.runtime.stops.load(Ordering::SeqCst), 1, "stopped");
     assert_eq!(s.runtime.kept.load(Ordering::SeqCst), 1, "the block kept");
     assert!(r.parked().is_none());
+    let snap = lc.snapshot().borrow().clone();
+    assert_eq!(snap.state, TunnelState::Blocked, "the block shows");
+    assert_eq!(snap.transition, None, "nothing left in flight");
+    let again = connect(&lc, target()).await;
+    assert!(
+        !matches!(again, Err(ConnError::Refused(_))),
+        "a connect is admitted: {again:?}"
+    );
+}
+
+/// fixfollow-a2, second form: the take-over's connect fails before it reaches the service (the
+/// kept server is gone from the list), so the split still drives this process's runtime. The
+/// stop reaches the service all the same, and the block it keeps shows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_take_over_that_never_reached_the_service_ends_there() {
+    let s = crashed_window().await;
+    let r = Remote::on_pipe(&s.pipe, Arc::new(NoInputs), s.protection.clone());
+    let kept = attach(&r).await;
+    let (lc, split) = lifecycle(&r, &s._dir.0);
+    let gone = |_| async {
+        let error = vpnte_base::AppError::new(vpnte_base::ErrorKind::Internal);
+        Err(ConnError::Failed(error.into()))
+    };
+    crate::svc_tunnel::takeover::take_over(&split, &lc, kept, gone).await;
+    assert_eq!(s.runtime.stops.load(Ordering::SeqCst), 1, "stopped there");
+    assert_eq!(s.runtime.kept.load(Ordering::SeqCst), 1, "the block kept");
+    assert_eq!(lc.snapshot().borrow().state, TunnelState::Blocked);
+}
+
+/// fixfollow-a1: the service restarts while the kill switch holds a drop, and its resume fails
+/// (the server is still out of reach), so the restarted service lifts the block. The pause must
+/// not stay on screen while programs go direct: the lifecycle hears the run's end, the pause
+/// ends, and a connect is admitted again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_drop_whose_resume_fails_ends_the_pause() {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let (pipe, dir) = (pipe_name(n), TempDir::new(&format!("takeover-lost-{n}")));
+    let (_, first_rt, first) = restarted(&pipe, &dir.0).await;
+    let r = Remote::on_pipe(&pipe, Arc::new(NoInputs), protected(&dir.0));
+    let (lc, split) = lifecycle(&r, &dir.0);
+    connect(&lc, target()).await.expect("connected");
+    held_drop(&first_rt, &lc).await;
+    let losses = r.losses();
+    first.cancel();
+    lose(&r, &losses).await;
+
+    let (host, second_rt, second) = restarted(&pipe, &dir.0).await;
+    second_rt.fail.store(true, Ordering::SeqCst);
+    let resume = tokio::spawn(async move { host.resume(CancellationToken::new()).await });
+    crate::svc_tunnel::takeover::after_loss(&split, &lc, |t| connect(&lc, t)).await;
+    assert!(!resume.await.expect("task"), "the resume failed");
+    let pause = lc.kill_switch();
+    until("the pause ended", || pause.borrow().pause.is_none()).await;
+    assert_ne!(lc.snapshot().borrow().state, TunnelState::Connected);
+
+    second_rt.fail.store(false, Ordering::SeqCst);
+    connect(&lc, target())
+        .await
+        .expect("a connect is admitted again");
+    second.cancel();
 }

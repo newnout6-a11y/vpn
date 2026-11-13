@@ -70,11 +70,12 @@ async fn the_page_works_over_a_real_list() {
     let err = api.ping_one("gone").await.unwrap_err();
     assert_eq!(err.user_msg().key, "servers.notFound");
 
-    // p-small (RU-2026 item 6): the list-wide check runs through the probes; no engine can start
-    // here, so both keys are counted as not checked, nothing streams and nothing is stored.
+    // p-small (RU-2026 item 6), psmall-a4: the list-wide check runs through the probes; no
+    // engine can start here, so nothing could be checked: the answer says why (as a group check
+    // does), nothing streams and nothing is stored.
     let (results, mut landed) = mpsc::unbounded_channel();
-    let report = api.check_all_health(results).await.unwrap();
-    assert_eq!((report.results.len(), report.not_checked), (0, 2));
+    let err = api.check_all_health(results).await.unwrap_err();
+    assert_eq!(err.user_msg().key, "engine.process.spawnFailed");
     assert!(landed.try_recv().is_err());
     assert!(state.borrow().servers.iter().all(|s| s.health.is_none()));
 

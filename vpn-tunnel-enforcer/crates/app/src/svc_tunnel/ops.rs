@@ -124,6 +124,13 @@ impl TunnelOps for TunnelService {
         self.lifecycle.cancel_pending();
     }
 
+    fn end_autopick(&self) {
+        // Not the lane's Cancel: a switch the choice has in flight runs to its end (cutting it
+        // would end the whole session and lift the protection, psmall-b1); the episode stops
+        // after it and the session it leaves stays as it is (psmall-b2).
+        self.coord.user_acted(UserAct::EndAuto);
+    }
+
     async fn switch_server(&self, id: ProfileId, source: Source) -> Result<Done, ConnError> {
         // A server picked by hand ends every automatic path (and a restore on its way).
         self.coord.user_acted(UserAct::Pick);
@@ -321,6 +328,17 @@ impl TunnelOps for TunnelService {
     fn service_protocol(&self) -> Option<u32> {
         let remote = self.runtime.remote();
         remote.installed().then(|| remote.protocol()).flatten()
+    }
+
+    fn service_rule_sets(&self) -> Option<vpnte_service::proto::RuleSetsWire> {
+        let remote = self.runtime.remote();
+        let status = self.runtime.status();
+        let status = status.borrow();
+        // Only the service's own running session: its report says nothing of a proxy one.
+        let tunnel = status.running && status.capture == Some(CaptureKind::Tun);
+        (tunnel && remote.installed())
+            .then(|| remote.rule_sets())
+            .flatten()
     }
 
     fn service_installed(&self) -> bool {

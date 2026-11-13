@@ -38,24 +38,28 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
         rules.push(json!({ "inbound": PROBE_IN, "outbound": PROXY_OUT }));
     }
     rules.extend(r.process_rules.iter().cloned());
+    let listed = r.listed_only.as_deref();
     // `no_drop`: without it sing-box silently turns a reject into a drop after 50 hits in
     // 30 s, and clients then wait for their fallback timers.
     if up.block_quic {
-        rules.push(json!({
+        rules.extend(guard(listed, json!({
             "network": "udp", "port": 443, "action": "reject", "method": "default", "no_drop": true,
-        }));
+        })));
     }
     if reject_ipv6 {
         // IPv6 egress is refused inside the tunnel (fast reset / ICMP, so clients fall back to
         // IPv4 at once); IPv6 LAN keeps working through the private-destination rule.
-        rules.push(json!({
-            "type": "logical",
-            "mode": "and",
-            "rules": [{ "ip_version": 6 }, { "ip_is_private": true, "invert": true }],
-            "action": "reject",
-            "method": "default",
-            "no_drop": true,
-        }));
+        rules.extend(guard(
+            listed,
+            json!({
+                "type": "logical",
+                "mode": "and",
+                "rules": [{ "ip_version": 6 }, { "ip_is_private": true, "invert": true }],
+                "action": "reject",
+                "method": "default",
+                "no_drop": true,
+            }),
+        ));
     }
     rules.push(json!({ "action": "sniff" }));
     if tun {
@@ -64,16 +68,23 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
     }
     rules.push(json!({ "ip_is_private": true, "outbound": DIRECT_OUT }));
     if up.drop_udp {
-        rules.push(json!({ "network": "udp", "action": "reject", "method": "drop" }));
+        let drop = json!({ "network": "udp", "action": "reject", "method": "drop" });
+        rules.extend(guard(listed, drop));
     }
     // STUN is pinned to the tunnel so WebRTC never learns the real address through direct-out
     // (an RU address or a user "direct" domain): by the sniffed protocol on any port, and by the
     // STUN / TURN ports for flows the sniffer did not classify (routing-dns B-X-1).
-    rules.push(json!({ "protocol": "stun", "outbound": PROXY_OUT }));
-    rules.push(json!({
-        "network": "udp", "port": [3478, 3479, 5349], "port_range": ["19302:19309"],
-        "outbound": PROXY_OUT,
-    }));
+    rules.extend(guard(
+        listed,
+        json!({ "protocol": "stun", "outbound": PROXY_OUT }),
+    ));
+    rules.extend(guard(
+        listed,
+        json!({
+            "network": "udp", "port": [3478, 3479, 5349], "port_range": ["19302:19309"],
+            "outbound": PROXY_OUT,
+        }),
+    ));
     rules.extend(r.domain_rules.iter().cloned());
     let mut route = json!({ "rules": rules });
     if !r.rule_sets.is_empty() {
@@ -87,4 +98,24 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
     }
     route["default_domain_resolver"] = json!(DNS_REMOTE);
     Ok(route)
+}
+
+/// A guard of the tunnel for the apps that take it: every app, or only the listed ones (an
+/// unlisted app leaves directly: rejecting its QUIC, IPv6 or UDP would break it for nothing, and
+/// pinning its STUN would send it through the VPN after all; p-app-split). `None`: nobody is in
+/// the scope.
+fn guard(listed: Option<&[String]>, mut rule: Value) -> Option<Value> {
+    let Some(regexes) = listed else {
+        return Some(rule);
+    };
+    if regexes.is_empty() {
+        return None;
+    }
+    let only = json!({ "process_path_regex": regexes });
+    match rule.get_mut("rules").and_then(Value::as_array_mut) {
+        // A logical rule: one more condition beside its own.
+        Some(conditions) => conditions.push(only),
+        None => rule["process_path_regex"] = only["process_path_regex"].clone(),
+    }
+    Some(rule)
 }

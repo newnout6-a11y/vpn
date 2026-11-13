@@ -26,29 +26,44 @@ pub(super) async fn view(shared: Arc<Shared>, id: ProfileId) -> AppResult<Option
         return Ok(None);
     }
     let tls_compat = tls_compat(&shared);
+    let own = key_choice(&profile, tls_compat);
     let choice = match row.tls_tricks {
-        None => key_choice(&profile, tls_compat),
+        None => own,
         Some(RowTricks::Default) => TricksChoice::Default,
         Some(RowTricks::Set(tricks)) => choice_of(tricks),
     };
     Ok(Some(TricksView {
         choice,
         default_strong: tls_compat,
+        // The way back to the provider's own split once another pick replaced it (twire-b1).
+        provider: matches!(own, TricksChoice::Custom { .. }).then_some(own),
     }))
 }
 
 /// Stores the user's pick; the pick that equals what the key brings itself stores nothing, so the
-/// key keeps following its provider. The connected server reconnects with it.
+/// key keeps following its provider. The connected server reconnects with it; a reconnect that
+/// fails (the server refuses the split hello) or is cancelled puts the previous value back with
+/// its error, so the editor's old value and every later run agree (twire-a5).
 pub(super) async fn set(shared: Arc<Shared>, id: ProfileId, choice: TricksChoice) -> AppResult<()> {
     let servers = shared.backend.servers.clone();
     let row = servers.get(&id).ok_or_else(server_not_found)?;
+    let previous = row.tls_tricks;
     let profile = blocking(move || row.profile()).await?;
     let own = key_choice(&profile, tls_compat(&shared));
     let stored = (choice != own).then(|| row_tricks(choice));
-    let target = id.clone();
-    blocking(move || servers.set_tls_tricks(&target, stored)).await?;
+    store(&shared, &id, stored).await?;
+    let reconnected = reconnect_live(&shared, id.clone()).await;
+    if reconnected.is_err() {
+        store(&shared, &id, previous).await?;
+    }
+    reconnected
+}
+
+async fn store(shared: &Shared, id: &ProfileId, tricks: Option<RowTricks>) -> AppResult<()> {
+    let (servers, id) = (shared.backend.servers.clone(), id.clone());
+    blocking(move || servers.set_tls_tricks(&id, tricks)).await?;
     shared.publish();
-    reconnect_live(&shared, id).await
+    Ok(())
 }
 
 /// Stealth or the session's adaptive TLS compatibility: the app default is «Сильно».

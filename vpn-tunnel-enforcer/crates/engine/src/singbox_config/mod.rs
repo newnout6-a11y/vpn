@@ -230,6 +230,11 @@ pub struct RoutingParts {
     pub dns_servers: Vec<Value>,
     /// DNS rules, after the builder's own `dns-bootstrap-in` rule.
     pub dns_rules: Vec<Value>,
+    /// «VPN только для выбранных приложений»: the apps that take the tunnel
+    /// (`process_path_regex` values). `Some`: the route guards (QUIC and IPv6 rejects, the UDP
+    /// drop, the STUN pins) apply to them alone, every other app leaves directly with its own
+    /// QUIC, IPv6, UDP and STUN; `None`: every app takes the tunnel.
+    pub listed_only: Option<Vec<String>>,
 }
 
 /// Why no configuration could be built: always a caller bug or inconsistent inputs.

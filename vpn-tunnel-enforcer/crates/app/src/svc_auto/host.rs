@@ -110,12 +110,17 @@ pub fn view_of(row: &ServerRow, setting: EnginePref) -> Option<ProfileView> {
     let engine = select_engine(&profile, server_pref(setting, row.engine))
         .engine()
         .ok()?;
+    // What runs: the user's choice over the key's own value; TLS compatibility changes only the
+    // tricks' default there (the tunnel always names the device: no fingerprint rotation).
+    let run = row.run_profile().ok()?;
+    let tls_compat_applies = run.tls_tricks_for(true) != run.tls_tricks_for(false);
     Some(ProfileView {
         id: row.id.0.clone(),
         outbound,
         client_device: Some(row.device),
         client_fingerprint: profile.tls.as_ref().and_then(|t| t.fingerprint.clone()),
         engine,
+        tls_compat_applies,
     })
 }
 

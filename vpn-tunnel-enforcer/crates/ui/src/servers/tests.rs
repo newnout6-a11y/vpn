@@ -1045,6 +1045,7 @@ async fn tricks_row_renders_the_apps_answer() {
     api.tricks.replace(Some(TricksView {
         choice: provider,
         default_strong: true,
+        provider: Some(provider),
     }));
     let mut dom = VirtualDom::new(tricks_root).with_root_context(api.clone());
     dom.rebuild_in_place();

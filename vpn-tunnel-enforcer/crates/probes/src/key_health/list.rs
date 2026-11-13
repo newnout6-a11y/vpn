@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use vpnte_base::AppResult;
+use vpnte_base::{AppError, AppResult};
 use vpnte_profiles::model::Profile;
 
 use super::{CONCURRENCY, KeyCheck, ProbeCtx, check_profile_verdict, unreadable};
@@ -23,38 +23,64 @@ use crate::discipline::{Endpoint, budget};
 /// checked at 3 a minute, so a long list needs minutes; what is left at the end is not checked.
 pub const LIST_DEADLINE: Duration = Duration::from_secs(20 * 60);
 
-/// Checks every key of `items` (`None` = the row's profile is unreadable here: `no-outbound`
+/// The keys of one probe context (a client device and engine choice of the list).
+pub type ListGroup<K> = (ProbeCtx, Vec<(K, Option<Profile>)>);
+
+/// What a list-wide check found.
+#[derive(Debug)]
+pub struct ListOutcome<K> {
+    /// The results, in completion order.
+    pub done: Vec<(K, KeyCheck)>,
+    /// The first reason a probe could not run (the engine missing, no free port, the budget
+    /// deferring): a run where nothing could be checked says why (psmall-a4).
+    pub unchecked: Option<AppError>,
+}
+
+/// Checks every key of `groups` (`None` = the row's profile is unreadable here: `no-outbound`
 /// without a probe) until all are done, `until` passes or `stop` fires; probes in flight then are
-/// dropped (not checked) and the finished results are kept. `on_result` sees each result as it
-/// lands; the answer holds them in completion order.
+/// dropped (not checked) and the finished results are kept. All groups run at once behind the
+/// one probe limit, so a slow name in one group never starves another (psmall-a1/b5).
+/// `on_result` sees each result as it lands.
 pub async fn check_list<K: Send>(
-    items: Vec<(K, Option<Profile>)>,
-    ctx: &ProbeCtx,
+    groups: Vec<ListGroup<K>>,
     until: Instant,
     stop: &CancellationToken,
     on_result: impl Fn(&K, &KeyCheck) + Send + Sync,
-) -> Vec<(K, KeyCheck)> {
-    let check = |p: Profile, cancel: CancellationToken| async move {
-        check_profile_verdict(&p, ctx, &cancel).await
+) -> ListOutcome<K> {
+    let mut ctxs = Vec::with_capacity(groups.len());
+    let mut items = Vec::new();
+    for (ctx, keys) in groups {
+        let group = ctxs.len();
+        ctxs.push(ctx);
+        items.extend(keys.into_iter().map(|(key, p)| ((key, group), p)));
+    }
+    let ctxs = &ctxs;
+    let check = |(_, group): &(K, usize), p: Profile, cancel: CancellationToken| {
+        let ctx = &ctxs[*group];
+        async move { check_profile_verdict(&p, ctx, &cancel).await }
     };
-    run_chains(items, until, stop, on_result, check).await
+    let report = |(key, _): &(K, usize), check: &KeyCheck| on_result(key, check);
+    let (done, unchecked) = run_chains(items, until, stop, report, check).await;
+    let done = done.into_iter().map(|((key, _), c)| (key, c)).collect();
+    ListOutcome { done, unchecked }
 }
 
-/// [`check_list`] with the probe given (test seam).
+/// [`check_list`] with the probe given (test seam): the results and the first probe error.
 pub(crate) async fn run_chains<K, F, Fut>(
     items: Vec<(K, Option<Profile>)>,
     until: Instant,
     stop: &CancellationToken,
     on_result: impl Fn(&K, &KeyCheck) + Send + Sync,
     check: F,
-) -> Vec<(K, KeyCheck)>
+) -> (Vec<(K, KeyCheck)>, Option<AppError>)
 where
     K: Send,
-    F: Fn(Profile, CancellationToken) -> Fut + Send + Sync,
+    F: Fn(&K, Profile, CancellationToken) -> Fut + Send + Sync,
     Fut: Future<Output = AppResult<KeyCheck>> + Send,
 {
     let probes = Semaphore::new(CONCURRENCY);
     let done = Mutex::new(Vec::new());
+    let first_error = Mutex::new(None);
     let chains = chains(items).into_iter().map(|chain| async {
         for (key, profile) in chain {
             let result = match profile {
@@ -66,10 +92,11 @@ where
                     let Ok(_probe) = probes.acquire().await else {
                         return;
                     };
-                    match check(p, stop.clone()).await {
+                    match check(&key, p, stop.clone()).await {
                         Ok(result) => result,
                         Err(err) => {
-                            tracing::debug!(error = %err, "list check: a chain ends unchecked");
+                            tracing::warn!(error = %err, "list check: a chain ends unchecked");
+                            first_error.lock().get_or_insert(err);
                             return;
                         }
                     }
@@ -84,7 +111,7 @@ where
         () = tokio::time::sleep_until(until) => {}
         _ = join_all(chains) => {}
     }
-    done.into_inner()
+    (done.into_inner(), first_error.into_inner())
 }
 
 /// The keys grouped by the endpoint their probe dials (list order kept inside a chain); a key

@@ -288,3 +288,41 @@ async fn nothing_automatic_after_the_users_stop_until_they_connect() {
     assert_eq!(*rig.host.confirms.lock(), ["a"]);
     cancel.cancel();
 }
+
+/// psmall-b2: the strip's «Отменить» holds. The episode's candidate came up and carried nothing,
+/// so a session still runs while the strip waits for the next round; after the cancel no
+/// transfer, report or new episode comes back for that session, until another one starts.
+#[tokio::test(start_paused = true)]
+async fn the_strips_cancel_holds_the_running_session() {
+    let rig = rig(vec![server("a", "g"), server("b", "h")]);
+    let results = [Confirmation::Frozen, Confirmation::Frozen];
+    rig.host.confirm_results.lock().extend(results);
+    let nothing = (0..40).map(|_| Confirmation::NoTraffic);
+    rig.host.confirm_results.lock().extend(nothing);
+    let cancel = running(&rig, "a");
+    let mut up = 0;
+    stalled(&rig.host, &mut up, 140).await;
+    assert_eq!(
+        rig.coord.calls(),
+        [Call::Switch(Owner::AdaptiveRetry, "b".into())]
+    );
+    assert_eq!(rig.pick.status().borrow().phase, Phase::Waiting);
+    let (confirms, reports) = (
+        rig.host.confirms.lock().len(),
+        rig.host.reports.lock().len(),
+    );
+
+    rig.host.user_holds();
+    stalled(&rig.host, &mut up, 3600).await;
+    assert_eq!(rig.coord.calls().len(), 1, "no new episode");
+    assert_eq!(rig.host.confirms.lock().len(), confirms, "no transfer");
+    assert_eq!(rig.host.reports.lock().len(), reports, "no report");
+    assert_eq!(rig.pick.status().borrow().phase, Phase::Idle);
+
+    // Another session: the watch is back.
+    rig.coord
+        .start(SessionKind::SoftDirect, Some("a"), AdaptiveMode::Baseline);
+    stalled(&rig.host, &mut up, 45).await;
+    assert_eq!(rig.host.confirms.lock().len(), confirms + 1);
+    cancel.cancel();
+}

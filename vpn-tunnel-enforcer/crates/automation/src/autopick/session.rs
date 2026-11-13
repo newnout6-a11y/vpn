@@ -62,14 +62,21 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut w = self.tracked();
         let mut last_act: Option<Instant> = None;
+        // The strip's «Отменить» holds the session that runs (psmall-b2): its watch stays
+        // settled until the user acts again or another session starts.
+        let mut hold = false;
         loop {
             let episode = tokio::select! {
+                // The user's action before a sample: a hold must settle the watch first.
+                biased;
                 () = cancel.cancelled() => return,
                 changed = acts.changed() => {
                     if changed.is_err() {
                         return;
                     }
                     last_act = Some(Instant::now());
+                    hold = acts.borrow_and_update().held;
+                    w.settled |= hold;
                     // An episode that gave up is over for the user now.
                     self.clear_gave_up();
                     None
@@ -77,6 +84,7 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
                 event = events.recv() => match event {
                     Ok(LifecycleEvent::Started { runtime_id, kind, profile_id, .. }) => {
                         self.clear_gave_up();
+                        hold = false;
                         w = Watch::of(runtime_id, profile_id.filter(|_| kind.server()));
                         None
                     }
@@ -85,6 +93,7 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
                         if w.run != Some(runtime_id) => None,
                     Ok(LifecycleEvent::Stopped { owner, cause, .. }) => {
                         let ended = std::mem::take(&mut w);
+                        hold = false;
                         // The user's action that came before this stop counts even when both
                         // arrived at once.
                         if acts.has_changed().unwrap_or(false) {
@@ -122,9 +131,15 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
             if let Some((id, trigger)) = episode {
                 self.rescue(&id, trigger, &cancel).await;
                 // What queued meanwhile is the episode's own doing (its switches, the restores
-                // of lost ones): the session that runs now is the truth.
+                // of lost ones): the session that runs now is the truth. A hold pressed during
+                // the episode covers the session its last step left.
                 events = events.resubscribe();
+                if acts.has_changed().unwrap_or(false) {
+                    last_act = Some(Instant::now());
+                    hold = acts.borrow_and_update().held;
+                }
                 w = self.tracked();
+                w.settled = hold;
             }
         }
     }

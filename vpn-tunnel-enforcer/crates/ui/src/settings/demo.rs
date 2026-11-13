@@ -167,6 +167,7 @@ impl DemoSettingsApi {
                 managed_at: None,
                 refreshing: false,
                 last_error: failures.then(|| Msg::new("errors.network")),
+                tunnel_note: None,
             },
             browser: BrowserView {
                 browsers: browsers(|name| {

@@ -178,10 +178,10 @@ Rules the caller must keep (review of the WFP / TUN design):
   a name or bootstrap-in exists. An outbound's `domain_resolver` names one server and bypasses
   the DNS rules (sing-box 1.14 `dns/router.go` `Lookup`), so native outbounds get this first
   step only. Queries of `dns-bootstrap-in` (Xray slots) get the whole order, first in
-  `dns.rules`: `evaluate` (1.5 s each) `dns-bootstrap` -> `dns-bootstrap-yandex` (DoH 77.88.8.8:
-  reachable where RU networks cut foreign resolvers; its NXDOMAIN moves on) -> `dns-bootstrap-quad9`
-  (DoH 9.9.9.9) -> `dns-bootstrap-google` (DoH 8.8.8.8), a step's answer taken (`respond`) when it
-  has an address or is NXDOMAIN; then `dns-bootstrap-tcp` (TCP 8.8.8.8:53) and, when
+  `dns.rules`: `evaluate` (1 s each) `dns-bootstrap` -> `dns-bootstrap-quad9` (DoH 9.9.9.9) ->
+  `dns-bootstrap-google` (DoH 8.8.8.8) -> `dns-bootstrap-yandex` (DoH 77.88.8.8, after every
+  foreign one: reachable where RU networks cut them; its NXDOMAIN moves on), a step's answer
+  taken (`respond`) when it has an address or is NXDOMAIN; then `dns-bootstrap-tcp` (TCP 8.8.8.8:53) and, when
   `usable_physical_dns` gives one, `dns-bootstrap-isp` (UDP to it) last. These tags are
   reserved (routing must not define them). Routing's DNS rules must not use legacy address
   filters (`ip_cidr` / `ip_is_private` without `match_response`): `evaluate` turns legacy DNS

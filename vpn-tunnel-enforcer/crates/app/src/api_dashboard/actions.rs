@@ -108,6 +108,12 @@ impl Hub {
         }
     }
 
+    /// «Отменить» on the automatic choice's strip: the choice stops, the session stays.
+    pub(super) fn end_autopick(&self) -> AppResult<()> {
+        self.tunnel()?.end_autopick();
+        Ok(())
+    }
+
     /// The «Отмена» button: publishes `cancelling` at once, stops the connect or switch in flight
     /// and answers when it is over (no lane call of ours left, no transition in the snapshot).
     pub(super) async fn cancel(self: &Arc<Self>) -> AppResult<Option<Msg>> {

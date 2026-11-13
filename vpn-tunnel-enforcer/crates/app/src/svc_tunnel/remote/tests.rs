@@ -42,6 +42,8 @@ struct FakeRuntime {
     stops: AtomicU32,
     /// Stops that kept the kill switch's block.
     kept: AtomicU32,
+    /// Starts fail (the server out of reach), as a failed start ends in the real runtime.
+    fail: std::sync::atomic::AtomicBool,
 }
 
 impl FakeRuntime {
@@ -52,6 +54,7 @@ impl FakeRuntime {
             starts: AtomicU32::new(0),
             stops: AtomicU32::new(0),
             kept: AtomicU32::new(0),
+            fail: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -61,6 +64,16 @@ impl Runtime for FakeRuntime {
     async fn start(&self, _: StartRequest, _: CancellationToken) -> Result<StartReceipt, TunError> {
         let generation = u64::from(self.starts.fetch_add(1, Ordering::SeqCst)) + 1;
         let _ = self.events.send(TunnelEvent::StartBegan { generation });
+        if self.fail.load(Ordering::SeqCst) {
+            let _ = self
+                .events
+                .send(TunnelEvent::Status(TunStatusKind::Stopped));
+            let _ = self.events.send(TunnelEvent::StartFinished {
+                generation,
+                ok: false,
+            });
+            return Err(vpnte_base::AppError::new(vpnte_base::ErrorKind::Network).into());
+        }
         let engine = EngineRun {
             kind: Engine::SingBox,
             reason: None,
@@ -87,25 +100,39 @@ impl Runtime for FakeRuntime {
             warnings: Vec::new(),
         })
     }
+    /// As the real runtime: a preserved stop announces `Adapting` and keeps the block (its
+    /// `StopFinished` says so), a full one announces `Stopped`.
     async fn stop(&self, opts: StopOptions) -> StopReceipt {
         self.stops.fetch_add(1, Ordering::SeqCst);
-        if opts.preserve_protection {
+        let preserved = opts.preserve_protection;
+        if preserved {
             self.kept.fetch_add(1, Ordering::SeqCst);
         }
         self.status.send_replace(TunStatus::default());
-        let _ = self
-            .events
-            .send(TunnelEvent::Status(TunStatusKind::Stopped));
-        StopReceipt {
+        let receipt = StopReceipt {
             operation_id: "stop_test".into(),
             ok: true,
             runtime_stopped: true,
             forced: false,
-            protection_released: Some(true),
+            protection_released: (!preserved).then_some(true),
             baseline_restored: Some(true),
             adapter_gone: true,
             warnings: Vec::new(),
+        };
+        let kind = if preserved {
+            TunStatusKind::Adapting
+        } else {
+            TunStatusKind::Stopped
+        };
+        let _ = self.events.send(TunnelEvent::Status(kind));
+        if preserved {
+            let _ = self.events.send(TunnelEvent::StopFinished {
+                generation: u64::from(self.starts.load(Ordering::SeqCst)),
+                preserved,
+                receipt: receipt.clone(),
+            });
         }
+        receipt
     }
     async fn restart_protected(
         &self,

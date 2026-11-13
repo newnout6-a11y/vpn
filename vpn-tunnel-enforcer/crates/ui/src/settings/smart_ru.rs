@@ -95,6 +95,9 @@ fn RuleLists() -> Element {
             if !saved_auto {
                 p { class: "set-hint", {t!("ui.settings.smartRu.refreshNeedsAuto")} }
             }
+            if let Some(note) = lists.tunnel_note.as_ref() {
+                p { class: "set-hint", role: "status", {tr(note)} }
+            }
             if let Some(reason) = lists.last_error.as_ref().filter(|_| !refreshing) {
                 p { class: "set-result is-warn", role: "status",
                     {t!("ui.settings.smartRu.refreshFailed", reason = tr(reason))}

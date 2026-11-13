@@ -65,13 +65,14 @@ fn probe(
     secs: impl Fn(&str) -> u64 + Send + Sync,
     fail: &'static [&'static str],
 ) -> impl Fn(
+    &String,
     Profile,
     CancellationToken,
 ) -> std::pin::Pin<Box<dyn Future<Output = AppResult<KeyCheck>> + Send>>
 + Send
 + Sync {
     let seen = seen.clone();
-    move |p: Profile, _cancel| {
+    move |_: &String, p: Profile, _cancel| {
         let id = p.name.clone();
         let sni = p
             .tls
@@ -118,7 +119,8 @@ async fn keys_behind_one_name_go_one_at_a_time() {
         },
         probe(&seen, |_| 2, &[]),
     )
-    .await;
+    .await
+    .0;
     assert_eq!(done.len(), 12);
     assert_eq!(reported.load(Ordering::SeqCst), 12);
     assert!(ids(&done).contains(&"u".to_owned()));
@@ -146,7 +148,8 @@ async fn a_frozen_name_holds_back_only_its_chain() {
     let done = run_chains(items, until, &CancellationToken::new(), |_, _| {}, {
         probe(&seen, |_| 2, &[])
     })
-    .await;
+    .await
+    .0;
     assert_eq!(ids(&done), ["a1", "b1", "b2"]);
     assert!(seen.started("b1").unwrap() - t0 < Duration::from_secs(1));
     assert!(seen.started("b2").unwrap() - t0 < Duration::from_secs(5));
@@ -168,17 +171,20 @@ async fn stop_deadline_and_failures_keep_what_finished() {
     });
     let seen = Arc::new(Seen::default());
     let far = Instant::now() + Duration::from_secs(3600);
-    let done = run_chains(items(), far, &stop, |_, _| {}, probe(&seen, slow, &[])).await;
+    let (done, _) = run_chains(items(), far, &stop, |_, _| {}, probe(&seen, slow, &[])).await;
     assert_eq!(ids(&done), ["a1"], "a2 and b1 were in flight");
 
     let seen = Arc::new(Seen::default());
     let soon = Instant::now() + Duration::from_secs(3);
     let token = CancellationToken::new();
-    let done = run_chains(items(), soon, &token, |_, _| {}, probe(&seen, slow, &[])).await;
+    let (done, _) = run_chains(items(), soon, &token, |_, _| {}, probe(&seen, slow, &[])).await;
     assert_eq!(ids(&done), ["a1"]);
 
     let seen = Arc::new(Seen::default());
-    let done = run_chains(items(), far, &token, |_, _| {}, probe(&seen, slow, &["a1"])).await;
+    let (done, error) =
+        run_chains(items(), far, &token, |_, _| {}, probe(&seen, slow, &["a1"])).await;
     assert_eq!(ids(&done), ["b1"], "a2 is not knocked after a1 failed");
     assert!(seen.started("a2").is_none());
+    // psmall-a4: the reason a key could not be checked is kept for the answer.
+    assert_eq!(error.map(|e| e.kind), Some(ErrorKind::Internal));
 }

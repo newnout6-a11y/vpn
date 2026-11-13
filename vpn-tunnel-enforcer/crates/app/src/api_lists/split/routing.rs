@@ -83,9 +83,10 @@ impl Imports {
     }
 }
 
-/// Smart RU switched on by an import reaches a running tunnel as a change on the Settings page
-/// does (`apply_settings_change`: a restart while connected, nothing while idle). On the
-/// import's blocking thread, so the import answers once the tunnel took it.
+/// Smart RU switched on by an import is handed to the tunnel as a change on the Settings page is
+/// (`apply_settings_change`): the rule sets are refreshed at once, and a running session takes
+/// Smart RU at the next connect, as the import's own result line says (fixfollow-b2: no restart
+/// for it). On the import's blocking thread, so the import answers once the tunnel took it.
 fn tell_tunnel(backend: &Backend, old: Settings) {
     let (Ok(tunnel), Ok(runtime)) = (backend.tunnel(), tokio::runtime::Handle::try_current())
     else {

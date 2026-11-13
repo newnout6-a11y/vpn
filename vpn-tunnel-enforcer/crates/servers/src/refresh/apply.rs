@@ -81,7 +81,10 @@ impl Servers {
         let count = report.profiles.len();
         let ParseReport { profiles, meta, .. } = report;
         self.update(|doc| {
-            let before = same_group(doc, id, key)?.clone();
+            let mut before = same_group(doc, id, key)?.clone();
+            // New keys of this answer take this answer's controls (its `fragmentation-*`
+            // headers), not those of the previous fetch (twire-a1).
+            before.controls = controls.clone();
             let out = reconcile(&before, &mut doc.profiles, profiles, complete, now)?;
             let taken = moved_to
                 .as_ref()

@@ -8,6 +8,7 @@ use std::net::IpAddr;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{ClientDevice, KillSwitchLevel};
 use vpnte_base::{AppError, AppResult, Msg};
+use vpnte_core::settings::AppScope;
 use vpnte_probes::diagnostics::{self, RoutingInputs, RoutingVerdict};
 use vpnte_probes::leak::{
     AddrProbe, Reach, SelfTestResult, SelfTestVerdict, SystemEnv, report, run_self_test,
@@ -28,7 +29,11 @@ pub(crate) async fn leak(shared: &Shared, cancel: CancellationToken) -> AppResul
     } else {
         KillSwitchLevel::Off
     };
-    let result = run_self_test(&SystemEnv, level, &cancel).await;
+    // Only the listed apps use the VPN (p-app-split): curl's default-route read went around it.
+    let listed_only = shared.backend.settings.read(|s| s.app_scope) == AppScope::OnlyListed;
+    let result = run_self_test(&SystemEnv, level, &cancel)
+        .await
+        .with_scope(listed_only && is_tun(&status));
     if result.cancelled && cancel.is_cancelled() {
         return Err(AppError::cancelled());
     }

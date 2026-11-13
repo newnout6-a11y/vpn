@@ -94,6 +94,7 @@ pub(crate) fn complete() -> SelfTestResult {
         inspection_complete: true,
         services_disagree: None,
         cancelled: false,
+        default_direct: false,
     }
 }
 

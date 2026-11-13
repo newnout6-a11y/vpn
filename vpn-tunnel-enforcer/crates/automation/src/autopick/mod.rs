@@ -134,6 +134,10 @@ pub struct UserActs {
     /// The last start-or-stop action was a stop (Disconnect, Cancel of a connect or switch):
     /// nothing automatic runs until the user connects again.
     pub stopped: bool,
+    /// The last action was «Отменить» on the automatic choice's strip: the choice ends and
+    /// leaves the session that runs (or the one its step in flight brings) alone until the user
+    /// acts again or another session starts. The session itself is not stopped.
+    pub held: bool,
 }
 
 /// What the user's settings allow the automatic paths to do.

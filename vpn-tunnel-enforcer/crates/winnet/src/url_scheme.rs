@@ -43,6 +43,12 @@ const RECORD: &str = r"Software\VPN Tunnel Enforcer\LinkSchemes";
 const PREVIOUS: &str = "Previous";
 /// Under the record: one value per client scheme we hold only while its client is absent.
 const WHILE_FREE: &str = "WhileFree";
+/// Under the record: one value per scheme this user's record has offered (taken then when it was
+/// free); a scheme added to [`SCHEMES`] later is new to the record (psmall-b7).
+const OFFERED: &str = "Offered";
+/// Schemes added after the first records were written (29c9e26): a record without [`OFFERED`]
+/// has offered every other one.
+const ADDED_LATER: [&str; 2] = ["happ", "incy"];
 /// The user's handler choices for URL schemes (read only: Windows protects them with a hash).
 const CHOICES: &str = r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations";
 
@@ -249,24 +255,27 @@ fn delete_tree(path: &str) -> windows::core::Result<bool> {
 
 impl Registrar {
     /// The first run for this user (installer or app start) registers every free scheme (and
-    /// records a key of this exe left without a record, so uninstall finds it); later runs only
-    /// point our schemes at `exe` again (an upgrade, a moved portable copy) and register nothing
-    /// new, so what the user turned off stays off. A client scheme taken while free goes back to
-    /// its client once that registered machine-wide ([`CLIENT_SCHEMES`]).
+    /// records a key of this exe left without a record, so uninstall finds it); later runs point
+    /// our schemes at `exe` again (an upgrade, a moved portable copy) and register only schemes
+    /// new to the record (added by an upgrade) that are free, so what the user turned off stays
+    /// off. A client scheme taken while free goes back to its client once that registered
+    /// machine-wide ([`Registrar::give_back`]).
     pub fn ensure(&self, exe: &Path) -> windows::core::Result<Ensured> {
         if !self.initialized()? {
             return self.adopt(exe);
         }
-        let mut done = Ensured::default();
-        for scheme in CLIENT_SCHEMES {
-            if self.while_free(scheme)?
-                && self.class_owner(scheme, exe)? == Owner::Ours
-                && self.machine_key(scheme)?.is_some()
-            {
-                self.remove(scheme, exe)?;
-                done.released.push(scheme);
+        let mut done = Ensured {
+            released: self.give_back(exe)?,
+            ..Ensured::default()
+        };
+        for scheme in self.new_schemes()? {
+            if self.owner(scheme, exe)? == Owner::Free {
+                self.write(scheme, exe)?;
+                self.mark_while_free(scheme)?;
+                done.registered.push(scheme);
             }
         }
+        self.mark_offered()?;
         let command = Self::command(exe);
         for scheme in self.recorded_schemes()? {
             let current = open(Hive::CurrentUser, &self.scheme_path(&scheme))?;
@@ -281,19 +290,41 @@ impl Registrar {
         Ok(done)
     }
 
+    /// Client schemes taken only while free go back to their client once it registered
+    /// machine-wide (Happ writes HKLM, which our per-user key would hide from this user); one the
+    /// user took on purpose stays ours. Cheap reads: run at start, when the links panel is read
+    /// and when a client's link arrives, so a client installed while the app runs gets its links
+    /// at once, portable copies included (psmall-b6). The schemes given back.
+    pub fn give_back(&self, exe: &Path) -> windows::core::Result<Vec<&'static str>> {
+        let mut released = Vec::new();
+        for scheme in CLIENT_SCHEMES {
+            if self.while_free(scheme)?
+                && self.class_owner(scheme, exe)? == Owner::Ours
+                && self.machine_key(scheme)?.is_some()
+            {
+                self.remove(scheme, exe)?;
+                released.push(scheme);
+            }
+        }
+        Ok(released)
+    }
+
     /// Every free scheme and every scheme of ours opens `exe` from now on (the first run, or a
     /// portable copy's «open links here»); other programs' schemes stay theirs.
     pub fn adopt(&self, exe: &Path) -> windows::core::Result<Ensured> {
-        let mut done = Ensured::default();
+        // A client that registered machine-wide since gets its scheme back first.
+        let mut done = Ensured {
+            released: self.give_back(exe)?,
+            ..Ensured::default()
+        };
         create(&self.record)?;
+        self.mark_offered()?;
         let command = Self::command(exe);
         for scheme in SCHEMES {
             match self.owner(scheme, exe)? {
                 Owner::Free => {
                     self.write(scheme, exe)?;
-                    if CLIENT_SCHEMES.contains(&scheme) {
-                        create(&self.while_free_path())?.set_string(scheme, "")?;
-                    }
+                    self.mark_while_free(scheme)?;
                     done.registered.push(scheme);
                 }
                 Owner::Ours => {
@@ -464,6 +495,39 @@ impl Registrar {
 
     fn while_free_path(&self) -> String {
         format!(r"{}\{WHILE_FREE}", self.record)
+    }
+
+    /// A client scheme just taken because it was free is held only while it stays so.
+    fn mark_while_free(&self, scheme: &str) -> windows::core::Result<()> {
+        if CLIENT_SCHEMES.contains(&scheme) {
+            create(&self.while_free_path())?.set_string(scheme, "")?;
+        }
+        Ok(())
+    }
+
+    fn offered_path(&self) -> String {
+        format!(r"{}\{OFFERED}", self.record)
+    }
+
+    /// Schemes of [`SCHEMES`] this user's record has not offered yet.
+    fn new_schemes(&self) -> windows::core::Result<Vec<&'static str>> {
+        let Some(offered) = open(Hive::CurrentUser, &self.offered_path())? else {
+            return Ok(ADDED_LATER.to_vec());
+        };
+        let mut new = Vec::new();
+        for scheme in SCHEMES {
+            if offered.string(scheme)?.is_none() {
+                new.push(scheme);
+            }
+        }
+        Ok(new)
+    }
+
+    fn mark_offered(&self) -> windows::core::Result<()> {
+        let offered = create(&self.offered_path())?;
+        SCHEMES
+            .iter()
+            .try_for_each(|scheme| offered.set_string(scheme, ""))
     }
 
     /// `scheme` was taken only because it was free (a client scheme at the first run).

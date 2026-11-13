@@ -822,3 +822,32 @@ async fn legacy_direct_input_goes_in_like_a_paste() {
         "index clamped to the list"
     );
 }
+
+/// twire-a1: an answer that adds keys and turns the provider's `fragmentation-*` headers on
+/// seeds the new keys from its own headers, not from the previous answer's; known keys keep
+/// what they had.
+#[tokio::test]
+async fn new_keys_take_the_headers_of_their_own_answer() {
+    let e = env();
+    let second = Arc::new(Mutex::new(false));
+    let answers = second.clone();
+    let server = Server::start(move |_| {
+        if *answers.lock() {
+            let list = format!("{KEY_A}\n{KEY_B}\n");
+            reply("200 OK", &[("fragmentation-enable", "1")], list.as_bytes())
+        } else {
+            reply("200 OK", &[], format!("{KEY_A}\n").as_bytes())
+        }
+    })
+    .await;
+    let id = e.import(&server.url("/sub/token")).await;
+    *second.lock() = true;
+    e.refresh(&id, Owner::Manual).await.unwrap();
+    let rows = e.rows();
+    assert_eq!(rows.len(), 2);
+    let seeded: Vec<_> = rows.iter().map(|r| r.tls_tricks).collect();
+    let strong = Some(crate::model::RowTricks::Set(
+        vpnte_profiles::model::TlsTricks::STRONG,
+    ));
+    assert_eq!(seeded, [None, strong], "the new key, from this answer");
+}

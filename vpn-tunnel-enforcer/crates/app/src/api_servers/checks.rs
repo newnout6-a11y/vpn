@@ -31,6 +31,8 @@ use vpnte_ui::servers::{CountryCheck, HealthReport, KeyHealth};
 use super::project::{reason_code, same_wire};
 use super::{Shared, group_not_found, server_not_found, verdict};
 
+mod list;
+
 /// Positive answers of the IP column are reused this long, failures for [`MISS_TTL`].
 const HIT_TTL: Duration = Duration::from_secs(5 * 60);
 const MISS_TTL: Duration = Duration::from_secs(30);
@@ -330,7 +332,7 @@ pub(super) async fn list_health(
     }
     let submitted = rows.len();
     let tunnel = backend.tunnel()?.clone();
-    let servers = backend.servers.clone();
+    let saver = Arc::new(list::Saver::new(backend.servers.clone()));
     let until = tokio::time::Instant::now() + key_health::LIST_DEADLINE;
     let opts = RunOpts {
         source: Source::Ui,
@@ -342,19 +344,26 @@ pub(super) async fn list_health(
     let checked = backend
         .ops
         .run(FeatureKind::HealthCheck, opts, move |lease| async move {
-            let report = |(id, _): &Key, check: &KeyCheck| {
-                let _ = results.send((id.to_string(), key_health_view(&check.health)));
+            // Every group at once behind the one probe limit (psmall-a1/b5).
+            let groups = (by_device(rows).into_iter())
+                .map(|((device, engine), items)| {
+                    let mut ctx = tunnel.probe_ctx(device);
+                    ctx.engine_pref = server_pref(ctx.engine_pref, engine);
+                    (ctx, items)
+                })
+                .collect();
+            let report = |key: &Key, check: &KeyCheck| {
+                let _ = results.send((key.0.to_string(), key_health_view(&check.health)));
+                saver.add(key, check);
             };
-            let mut checked = Vec::new();
-            for ((device, engine), items) in by_device(rows) {
-                let mut ctx = tunnel.probe_ctx(device);
-                ctx.engine_pref = server_pref(ctx.engine_pref, engine);
-                checked.extend(key_health::check_list(items, &ctx, until, &stop, report).await);
+            let found = key_health::check_list(groups, until, &stop, report).await;
+            // Nothing could be checked at all: the reason, as a group check gives it (psmall-a4).
+            if let Some(err) = found.unchecked.filter(|_| found.done.is_empty()) {
+                return Err(err);
             }
             lease.commit(|| {
-                servers.record_health(updates(&checked))?;
-                servers.record_verdicts(verdict::updates(&checked))?;
-                Ok(checked)
+                saver.finish()?;
+                Ok(found.done)
             })
         })
         .await?;

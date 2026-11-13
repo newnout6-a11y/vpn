@@ -323,6 +323,7 @@ fn leak_evidence_becomes_the_panel() {
             default_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)),
         }),
         cancelled: false,
+        default_direct: false,
     };
     let view = crate::api_maintenance::selftest::leak_view(&result);
     assert_eq!(
@@ -519,6 +520,55 @@ fn recovery_state_for_the_archive() {
         panic!("an empty journal is a fact too");
     };
     assert_eq!(held, serde_json::json!({ "held": [] }));
+}
+
+/// fixfollow-b3: the archive names the files the running proxy session's engines came from apart
+/// from the next start's: sing-box always, Xray only for a session on it; a Tunnel session (the
+/// helper service's engines) and no session name none of this process's files as running.
+#[test]
+fn the_running_engines_are_the_started_files() {
+    use crate::api_maintenance::export::started_by;
+    use vpnte_base::types::Engine;
+    use vpnte_tunnel::api::{CaptureKind, EngineRun, TunStatus};
+    use vpnte_tunnel::runtime::{EngineStarts, Started};
+
+    let old = |name: &str| Some(PathBuf::from(format!(r"C:\Engines\1.14.4\{name}")));
+    let starts = EngineStarts {
+        singbox: Started {
+            count: 2,
+            exe: old("sing-box.exe"),
+        },
+        xray: Started {
+            count: 1,
+            exe: old("xray.exe"),
+        },
+    };
+    let session = |capture, kind| TunStatus {
+        running: true,
+        capture: Some(capture),
+        engine: Some(EngineRun { kind, reason: None }),
+        ..TunStatus::default()
+    };
+    let names = |status: &TunStatus| -> Vec<&str> {
+        started_by(status, &starts)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect()
+    };
+    assert_eq!(
+        names(&session(CaptureKind::Proxy, Engine::Xray)),
+        ["sing-box", "xray"]
+    );
+    assert_eq!(
+        names(&session(CaptureKind::Proxy, Engine::SingBox)),
+        ["sing-box"]
+    );
+    assert!(names(&session(CaptureKind::Tun, Engine::SingBox)).is_empty());
+    assert!(names(&TunStatus::default()).is_empty());
+    let (_, exe) = started_by(&session(CaptureKind::Proxy, Engine::SingBox), &starts)
+        .pop()
+        .expect("sing-box");
+    assert_eq!(Some(exe), old("sing-box.exe"));
 }
 
 /// Engine versions come from the engines' own one-shot `version` runs; a missing binary is named

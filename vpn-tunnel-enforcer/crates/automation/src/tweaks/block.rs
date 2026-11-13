@@ -15,7 +15,12 @@ use vpnte_core::store::write_atomic;
 use super::endpoint::host_bare;
 use super::journal::{BlockKind, Val};
 
-const GRADLE_NON_PROXY: &str = "systemProp.http.nonProxyHosts=localhost|127.*|[::1]";
+/// No `127.*`: Java matches the glob against host names too, so `127.0.0.1.t.example` would go
+/// around the proxy (as Chromium did with `192.168.*`); the rest of loopback reaches the engine,
+/// which sends it direct.
+const GRADLE_NON_PROXY: &str = "systemProp.http.nonProxyHosts=localhost|127.0.0.1|[::1]";
+/// The old app's last line of each block it wrote (only recognised, never written).
+const LEGACY_GRADLE_NON_PROXY: &str = "systemProp.http.nonProxyHosts=localhost|127.*|[::1]";
 const VM_NON_PROXY: &str = "-Dhttp.nonProxyHosts=localhost|127.0.0.1";
 /// The old app's Gradle header (its blocks had no end marker).
 const LEGACY_GRADLE_HEADER: &str = "# VPN Tunnel Enforcer";
@@ -293,7 +298,7 @@ pub fn legacy_gradle_lines(content: &str, backup: Option<&str>) -> Vec<String> {
                     continue;
                 }
                 let run = texts[i..].iter().take_while(|t| managed(t)).count();
-                if run > 0 && texts[i + run - 1] == GRADLE_NON_PROXY {
+                if run > 0 && texts[i + run - 1] == LEGACY_GRADLE_NON_PROXY {
                     ours[i..i + run].iter_mut().for_each(|o| *o = true);
                 }
                 i += run.max(1);

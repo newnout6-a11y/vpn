@@ -279,7 +279,7 @@ pub struct DashboardView {
 }
 pub struct EngineLine { pub engine: Engine, pub reason: Option<Msg> }  // «Xray · REALITY» under the node
 pub struct PickLine { pub title: Msg, pub body: Option<Msg> }  // step; during retries what traffic does;
-    // the strip's «Отменить» calls `cancel` (the user's act: ends the step, also with nothing in flight)
+    // the strip's «Отменить» calls `end_autopick` (ends the automatic choice, never the session)
 pub struct PauseLine { pub next_attempt: Option<UnixMs>, pub manual: bool, pub key_rejected: bool }
     // countdown target; manual: nothing retries by itself (asks for «Подключить», fix-ks); the key reason
 pub trait DashboardApi: 'static {
@@ -287,6 +287,7 @@ pub trait DashboardApi: 'static {
     async fn connect(&self) -> AppResult<()>;                     // returns when the attempt is over
     async fn disconnect(&self) -> AppResult<Option<Msg>>;         // Some(w): off, recovery warned
     async fn cancel(&self) -> AppResult<Option<Msg>>;             // connect / switch in flight
+    async fn end_autopick(&self) -> AppResult<()>;                // the strip's «Отменить» (psmall-b1)
     async fn set_smart_ru(&self, on: bool) -> AppResult<()>;
     async fn run_leak_check(&self) -> AppResult<Verdict>;         // verdict also lands in `leak`
     async fn copy_ip(&self, ip: IpAddr) -> AppResult<()>;

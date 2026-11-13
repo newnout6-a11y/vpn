@@ -141,6 +141,9 @@ pub trait TunnelOps: Send + Sync + 'static {
     async fn disconnect(&self, source: Source) -> Result<Done, ConnError>;
     /// The "Cancel" button: stops a connect, switch or reconnect in flight; a no-op otherwise.
     fn cancel(&self);
+    /// «Отменить» on the automatic choice's strip: every automatic step stops and stays off
+    /// for the session that runs, which is never stopped by it (a step in flight finishes).
+    fn end_autopick(&self) {}
     /// Selects server `id` as the user's choice and, while a tunnel runs on a server, switches the
     /// tunnel there (protected switch, cancellable with [`TunnelOps::cancel`]).
     async fn switch_server(&self, id: ProfileId, source: Source) -> Result<Done, ConnError>;
@@ -279,6 +282,12 @@ pub trait TunnelOps: Send + Sync + 'static {
     /// The protocol the installed helper service speaks (added by p-app-split: an older one
     /// cannot carry the apps page's scope); `None` without a link to it. The default: none.
     fn service_protocol(&self) -> Option<u32> {
+        None
+    }
+    /// The Smart RU lists the helper service's running Tunnel session uses, as it reports them
+    /// (added by fix-tail, psmart-b2; protocol 4: an older service reports nothing). The
+    /// default: none.
+    fn service_rule_sets(&self) -> Option<vpnte_service::proto::RuleSetsWire> {
         None
     }
 }

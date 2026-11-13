@@ -120,6 +120,7 @@ fn profile(id: &str, outbound: Value) -> ProfileView {
         client_device: None,
         client_fingerprint: None,
         engine: Engine::SingBox,
+        tls_compat_applies: true,
     }
 }
 
@@ -287,6 +288,16 @@ fn capability_matrix_and_chain() {
     let plain = profile("p", json!({"type": "vless", "tls": {"enabled": false}}));
     assert!(!capabilities(SessionKind::Direct, Some(&plain)).tls);
     assert!(!capabilities(SessionKind::Direct, None).tls);
+
+    // twire-b2: TLS tricks fixed by the key or the user: the TLS step would restart into the
+    // same handshake, so the bypass goes to the MTU step at once.
+    let fixed = ProfileView {
+        tls_compat_applies: false,
+        ..tls_ws("f")
+    };
+    let caps = capabilities(SessionKind::Direct, Some(&fixed));
+    assert!(!caps.tls && caps.mtu);
+    assert_eq!(next_mode(Baseline, &caps), Some(MtuCompatibility));
 
     // NOADMIN §2: the system proxy over a server has the TLS knob, but no adapter to shrink.
     let proxy = capabilities(

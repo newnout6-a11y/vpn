@@ -13,7 +13,7 @@ use vpnte_profiles::text::{MAX_INPUT_BYTES, decode_body};
 use vpnte_servers::model::ProfileId;
 use vpnte_servers::parse::too_large;
 use vpnte_ui::servers::{LinkScheme, LinkSchemes, QrCode, SchemeOwner};
-use vpnte_winnet::url_scheme::{Owner, Registrar};
+use vpnte_winnet::url_scheme::{CLIENT_SCHEMES, Owner, Registrar};
 
 use super::{Shared, export, qr};
 use crate::support::files::{self, OpenFile};
@@ -127,9 +127,42 @@ fn read_limited(path: &Path, limit: u64) -> AppResult<Vec<u8>> {
     std::fs::read(path).map_err(unreadable)
 }
 
-/// Who answers each scheme, for this exe.
+/// Who answers each scheme, for this exe; a client that registered machine-wide since gets its
+/// scheme back first (psmall-b6).
 pub(super) async fn link_schemes(registrar: Registrar) -> AppResult<LinkSchemes> {
-    blocking(move || states(&registrar, &own_exe()?)).await
+    blocking(move || {
+        let exe = own_exe()?;
+        give_back(&registrar, &exe);
+        states(&registrar, &exe)
+    })
+    .await
+}
+
+/// A link of another client's scheme was taken into the add dialog: that client may have
+/// registered since the app started, and its next link goes to it (psmall-b6). On a thread of
+/// its own: registry reads, and the caller is the window's.
+pub(super) fn after_client_link(registrar: &Registrar, link: &str) {
+    let scheme = link.split_once(':').map(|(s, _)| s.to_ascii_lowercase());
+    if !scheme.is_some_and(|s| CLIENT_SCHEMES.contains(&s.as_str())) {
+        return;
+    }
+    let registrar = registrar.clone();
+    std::thread::spawn(move || match own_exe() {
+        Ok(exe) => give_back(&registrar, &exe),
+        Err(err) => tracing::warn!(%err, "link schemes not checked: own path unknown"),
+    });
+}
+
+/// Client schemes go back to clients installed meanwhile; a failure changes nothing.
+fn give_back(registrar: &Registrar, exe: &Path) {
+    match registrar.give_back(exe) {
+        Ok(released) if !released.is_empty() => {
+            registrar.notify_shell();
+            tracing::info!(?released, "link schemes given back to their clients");
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!(%err, "link schemes not checked"),
+    }
 }
 
 /// A portable copy's «open links here»: the free schemes and ours open this exe from now on.

@@ -16,7 +16,7 @@ use tokio::sync::{Notify, broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::Msg;
 use vpnte_base::types::{KillSwitchLevel, Level, Notice, UnixMs};
-use vpnte_core::settings::Settings;
+use vpnte_core::settings::{AppScope, Settings};
 use vpnte_core::store::Store;
 use vpnte_probes::leak::{
     LeakEvent, LeakWatch, SelfTestResult, SelfTestVerdict, SelfTester, SystemEnv, WatchConfig,
@@ -46,7 +46,12 @@ pub(super) struct Leaks {
     resume: Arc<Notify>,
     /// The helper service's runs.
     service: watch::Receiver<Option<SelfTestResult>>,
+    /// Only the listed apps use this process's VPN (p-app-split): its own runs' default-route
+    /// read goes around it (the service marks its runs itself).
+    listed_only: ListedOnly,
 }
+
+type ListedOnly = Arc<dyn Fn() -> bool + Send + Sync>;
 
 impl Leaks {
     /// Starts the periodic self-test of this process, gated on "this process holds the filters
@@ -71,6 +76,9 @@ impl Leaks {
                 && s.capture == Some(CaptureKind::Tun)
                 && level.read(|x| x.kill_switch) != KillSwitchLevel::Off
         };
+        let scope = settings.clone();
+        let listed_only: ListedOnly =
+            Arc::new(move || scope.read(|s| s.app_scope) == AppScope::OnlyListed);
         let kill_switch = move || settings.read(|s| s.kill_switch);
         let changes = if local {
             net_changes("leak runs")
@@ -83,6 +91,7 @@ impl Leaks {
             status,
             resume: Arc::new(Notify::new()),
             service: remote.self_tests(),
+            listed_only,
         }
     }
 
@@ -105,6 +114,7 @@ impl Leaks {
             own: self.watch.subscribe(),
             service: Some(self.service.clone()),
             seen: None,
+            listed_only: self.listed_only.clone(),
         };
         tokio::spawn(forward(
             results,
@@ -137,6 +147,7 @@ struct Results {
     service: Option<watch::Receiver<Option<SelfTestResult>>>,
     /// The time of the service's last run passed on (it resends its latest with every status).
     seen: Option<UnixMs>,
+    listed_only: ListedOnly,
 }
 
 impl Results {
@@ -145,7 +156,11 @@ impl Results {
         loop {
             tokio::select! {
                 event = self.own.recv() => match event {
-                    Ok(event) => return Some(event),
+                    Ok(event) => {
+                        let result = event.result.with_scope((self.listed_only)());
+                        let verdict = verdict(&result);
+                        return Some(LeakEvent { verdict, result, ..event });
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => return None,
                 },
@@ -307,6 +322,7 @@ mod tests {
             inspection_complete: true,
             services_disagree: None,
             cancelled: false,
+            default_direct: false,
         }
     }
 
@@ -325,6 +341,7 @@ mod tests {
             own: own_rx,
             service: Some(service.subscribe()),
             seen: None,
+            listed_only: Arc::new(|| false),
         };
         service.send_replace(Some(run(1, true)));
         let first = next(&mut results).await;
@@ -348,6 +365,41 @@ mod tests {
         assert_eq!(next(&mut results).await, local);
     }
 
+    /// p-app-split (a): with only the listed apps on this process's VPN, an own run's
+    /// default-route read went around it: the run names that address as the direct one, never
+    /// as the tunnel's.
+    #[tokio::test]
+    async fn own_runs_of_a_listed_scope_name_the_direct_address() {
+        let (own, own_rx) = broadcast::channel(4);
+        let mut results = Results {
+            own: own_rx,
+            service: None,
+            seen: None,
+            listed_only: Arc::new(|| true),
+        };
+        let local = LeakEvent {
+            reason: "periodic",
+            verdict: SelfTestVerdict::Ok,
+            result: run(3, false),
+        };
+        own.send(local).expect("subscribed");
+        let got = next(&mut results).await;
+        assert!(got.result.default_direct);
+        let keys: Vec<_> = report(&got.result)
+            .details
+            .into_iter()
+            .map(|m| m.key)
+            .collect();
+        assert!(
+            keys.iter().any(|k| k == "probes.leak.selfTest.directIp"),
+            "{keys:?}"
+        );
+        assert!(
+            !keys.iter().any(|k| k == "probes.leak.selfTest.tunIp"),
+            "{keys:?}"
+        );
+    }
+
     /// The service's channel closing (the remote dropped) neither spins nor ends own runs.
     #[tokio::test]
     async fn a_closed_service_channel_is_quiet() {
@@ -357,6 +409,7 @@ mod tests {
             own: own_rx,
             service: Some(service.subscribe()),
             seen: None,
+            listed_only: Arc::new(|| false),
         };
         drop(service);
         let pending = tokio::time::timeout(Duration::from_millis(100), results.next()).await;

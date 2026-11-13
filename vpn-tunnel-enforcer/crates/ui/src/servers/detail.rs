@@ -322,10 +322,16 @@ pub(super) fn TricksRow(id: String, connected: bool) -> Element {
         SelectOption::new(TricksChoice::Soft, t!("ui.servers.detail.tricks.soft")),
         SelectOption::new(TricksChoice::Strong, t!("ui.servers.detail.tricks.strong")),
     ];
-    // The engines cut differently (sing-box has no piece length), so no numbers are shown.
-    if let TricksChoice::Custom { .. } = current.choice {
-        let label = t!("ui.servers.detail.tricks.custom");
-        options.push(SelectOption::new(current.choice, label));
+    // The engines cut differently (sing-box has no piece length), so no numbers are shown. The
+    // provider's own split stays offered: the way back to following it (twire-b1).
+    let custom = [current.provider, Some(current.choice)]
+        .into_iter()
+        .flatten();
+    for choice in custom.filter(|c| matches!(c, TricksChoice::Custom { .. })) {
+        if !options.iter().any(|o| o.value == choice) {
+            let label = t!("ui.servers.detail.tricks.custom");
+            options.push(SelectOption::new(choice, label));
+        }
     }
     let api = actions.api.clone();
     rsx! {

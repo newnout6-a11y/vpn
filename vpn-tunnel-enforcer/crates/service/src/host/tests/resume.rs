@@ -111,3 +111,49 @@ async fn refused_or_foreign_sessions_are_not_resumed() {
     assert!(kept(&h).is_none(), "another user's app forgets it");
     assert_eq!(h.runtime.stops.lock().len(), 1);
 }
+
+/// fixfollow-b1: an adaptive restart onto a sibling moves the session: the take-over key and
+/// the remembered start follow it (server and mode), so a resume brings back what runs now and
+/// the app's take-over names that server. Another user's restart changes nothing.
+#[tokio::test]
+async fn an_adaptive_restart_onto_a_sibling_is_remembered() {
+    let h = harness();
+    let mut c = connect(&h).await;
+    c.hello("2.0.0").await.expect("hello");
+    c.call(local_start(KillSwitchLevel::Standard))
+        .await
+        .expect("start");
+    let user = kept(&h).expect("kept").user;
+    let link = "trojan://fake-pass@sibling.example.com:443?sni=sibling.example.com#sibling";
+    let restart = crate::proto::AdaptiveRestart {
+        mode: vpnte_base::types::AdaptiveMode::TlsCompatibility,
+        reason: "adaptive bypass".into(),
+        server: Some(crate::proto::ServerUpstream {
+            id: "sibling".into(),
+            profile: vpnte_profiles::uri::parse_uri(link).expect("link"),
+            device: None,
+            engine: vpnte_base::types::EnginePref::Auto,
+        }),
+    };
+    let client = |user: &str| crate::pipe::ClientInfo {
+        pid: 1,
+        session: 1,
+        user: user.into(),
+        image: None,
+    };
+    h.host
+        .follow_adaptive(&client("S-1-5-21-0-0-0-1001"), &restart);
+    assert!(matches!(
+        kept(&h).expect("kept").start.upstream,
+        Upstream::LocalProxy { .. }
+    ));
+
+    h.host.follow_adaptive(&client(&user), &restart);
+    let start = kept(&h).expect("kept").start;
+    assert!(matches!(&start.upstream, Upstream::Server(s) if s.id == "sibling"));
+    assert_eq!(start.adaptive, restart.mode);
+    assert_eq!(
+        *h.host.upstream.lock(),
+        Some((Some("sibling".into()), None))
+    );
+}

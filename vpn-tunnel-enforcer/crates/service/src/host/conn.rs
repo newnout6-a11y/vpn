@@ -111,7 +111,7 @@ pub(super) async fn run(
     };
     let (reader, mut writer) = tokio::io::split(pipe);
     if frame::write_frame(&mut writer, &welcome).await.is_ok() {
-        serve(&host, &client, reader, writer, cancel.clone()).await;
+        serve(&host, &client, protocol, reader, writer, cancel.clone()).await;
     }
     // Gone without a stop (Quit and Disconnect send one): a start or switch in flight is
     // cancelled, kill-switch changes already asked for finish, and a running session stays for
@@ -292,11 +292,14 @@ async fn drain<W: AsyncWrite + Unpin>(
 
 /// The runtime's status as this connection pushes it: with the last exit, fault and self-test
 /// when the session is this client's (review service-b2), so the app reads them with the status
-/// of a crash. Every protocol this build accepts (2 and 3) carries all of it.
+/// of a crash, and the Smart RU lists the last start ran (to a client of protocol 4: older ones
+/// refuse the field).
 struct Status {
     rx: tokio::sync::watch::Receiver<vpnte_tunnel::api::TunStatus>,
     host: Arc<Host>,
     user: String,
+    /// The negotiated protocol: what the client's structs know.
+    protocol: u32,
 }
 
 impl Status {
@@ -316,7 +319,8 @@ impl Status {
             wire.recent_fault = runtime.recent_fault();
         }
         wire.self_test = self.host.self_test_for(&self.user, &wire);
-        wire
+        wire.rule_sets = self.host.deps.inputs.rule_sets();
+        wire.speak(self.protocol)
     }
 }
 
@@ -335,6 +339,7 @@ async fn next_self_test(rx: &mut Option<tokio::sync::watch::Receiver<Option<Self
 async fn serve<W: AsyncWrite + Unpin>(
     host: &Arc<Host>,
     client: &ClientInfo,
+    protocol: u32,
     reader: tokio::io::ReadHalf<NamedPipeServer>,
     mut writer: W,
     cancel: CancellationToken,
@@ -344,6 +349,7 @@ async fn serve<W: AsyncWrite + Unpin>(
         rx: runtime.status(),
         host: host.clone(),
         user: client.user.clone(),
+        protocol,
     };
     // A fresh result is pushed with the status (marked seen first: the first push carries it).
     let mut self_tests = host.self_tests.get().cloned();
@@ -390,7 +396,7 @@ async fn serve<W: AsyncWrite + Unpin>(
             Some((id, result)) = pending.next(), if !pending.is_empty() => {
                 let removing = matches!(result, Ok(Reply::Done { removing: true }));
                 let frame = match result {
-                    Ok(reply) => ServerFrame::Reply { id, reply: Box::new(reply) },
+                    Ok(reply) => ServerFrame::Reply { id, reply: Box::new(reply.speak(protocol)) },
                     Err(error) => ServerFrame::Failed { id, error },
                 };
                 let sent = drain(&mut writer, &mut status, &mut events).await

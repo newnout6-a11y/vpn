@@ -49,6 +49,10 @@ impl DashboardApi for Dashboard {
         self.0.cancel().await
     }
 
+    async fn end_autopick(&self) -> AppResult<()> {
+        self.0.end_autopick()
+    }
+
     async fn set_smart_ru(&self, on: bool) -> AppResult<()> {
         self.0.set_smart_ru(on).await
     }

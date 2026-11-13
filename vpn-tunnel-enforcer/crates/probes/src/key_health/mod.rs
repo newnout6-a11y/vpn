@@ -38,7 +38,7 @@ mod tests;
 
 pub use classify::{classify_failure, parse_trace};
 pub use config::{DIRECT_TAG, INBOUND_TAG, PROXY_TAG, Uplink, probe_config};
-pub use list::{LIST_DEADLINE, check_list};
+pub use list::{LIST_DEADLINE, ListGroup, ListOutcome, check_list};
 
 use engine::{Running, Start};
 

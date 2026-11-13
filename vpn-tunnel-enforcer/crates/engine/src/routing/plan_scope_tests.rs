@@ -268,6 +268,28 @@ fn both_captures_and_scopes_pass_sing_box_check() {
                     .iter()
                     .any(|r| r.get("invert") == Some(&json!(true)));
                 assert_eq!(scoped, scope != Scope::All, "{what}");
+                // p-app-split (b): the guards (QUIC / IPv6 rejects, UDP drop, STUN pins) hold
+                // for the apps that take the tunnel: every app, or the listed ones alone.
+                let guards: Vec<&Value> = (route["rules"].as_array().unwrap().iter())
+                    .filter(|r| {
+                        let reject = r.get("action") == Some(&json!("reject"));
+                        // Not the user's own block rules (they hold for every app).
+                        let guard = r.get("network") == Some(&json!("udp"))
+                            || r.get("type") == Some(&json!("logical"));
+                        (reject && guard)
+                            || r.get("protocol") == Some(&json!("stun"))
+                            || r.get("port_range").is_some()
+                    })
+                    .collect();
+                assert!(guards.len() >= 3, "{what}: {guards:?}");
+                for g in guards {
+                    let conditions = g["rules"].as_array().into_iter().flatten();
+                    let only = g.get("process_path_regex").is_some()
+                        || conditions
+                            .into_iter()
+                            .any(|c| c.get("process_path_regex").is_some());
+                    assert_eq!(only, scope != Scope::All, "{what}: {g}");
+                }
             }
         }
     }

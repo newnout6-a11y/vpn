@@ -6,7 +6,9 @@ use std::time::Duration;
 use tokio::sync::watch;
 use vpnte_core::settings::RuleSetMode;
 use vpnte_engine::routing::rulesets::ActiveSource;
+use vpnte_engine::routing::rulesets::handover::RuleSetFiles;
 use vpnte_engine::routing::smart_ru::SmartRu;
+use vpnte_service::proto::{RuleSetSource, RuleSetsWire};
 use vpnte_tunnel::fsm::{TunnelSnapshot, TunnelState};
 use vpnte_tunnel::lifecycle::SessionView;
 use vpnte_ui::settings as ui;
@@ -167,7 +169,8 @@ fn publish_stores(shared: &Shared, snap: &TunnelSnapshot, session: Option<&Sessi
     }
 }
 
-/// Which Smart RU lists the next engine start uses (the service's own choice rule).
+/// Which Smart RU lists the next engine start uses (the service's own choice rule), and a line
+/// when the helper service's running Tunnel session uses others (psmart-b2).
 fn rule_set_view(
     backend: &Backend,
     settings: &vpnte_core::settings::Settings,
@@ -175,16 +178,38 @@ fn rule_set_view(
     last_error: Option<vpnte_base::Msg>,
 ) -> ui::RuleSetView {
     let managed = settings.smart_ru_rule_set_mode == RuleSetMode::Managed;
-    let (active_source, managed_at) = match backend.rule_sets.active(managed) {
-        Some((ActiveSource::Managed { since, .. }, _)) => (ui::RuleSource::Managed, Some(since)),
+    let active = backend.rule_sets.active(managed);
+    let (active_source, managed_at) = match &active {
+        Some((ActiveSource::Managed { since, .. }, _)) => (ui::RuleSource::Managed, Some(*since)),
         _ => (ui::RuleSource::Bundled, None),
     };
+    let service = backend.tunnel().ok().and_then(|t| t.service_rule_sets());
+    let tunnel_note = service.and_then(|report| {
+        let ours = active.as_ref().and_then(|(_, dir)| RuleSetFiles::read(dir));
+        tunnel_note(&report, ours.map(|files| files.digest()).as_deref())
+    });
     ui::RuleSetView {
         active_source,
         managed_at,
         refreshing,
         last_error,
+        tunnel_note,
     }
+}
+
+/// The line for the lists the service reports, against the digest of the app's own set (the one
+/// it hands over); `None` when the service runs that very set.
+fn tunnel_note(report: &RuleSetsWire, ours: Option<&str>) -> Option<vpnte_base::Msg> {
+    if report.digest.is_some() && report.digest.as_deref() == ours {
+        return None;
+    }
+    let key = match report.source {
+        RuleSetSource::Pinned => "app.settings.tunnelLists.service",
+        RuleSetSource::Kept => "app.settings.tunnelLists.kept",
+        // Handed over at its start; the app's set changed since.
+        RuleSetSource::Handed => "app.settings.tunnelLists.nextConnect",
+    };
+    Some(vpnte_base::Msg::new(key))
 }
 
 /// Sends `value` only when it differs from the published one.
@@ -210,5 +235,52 @@ async fn servers_changed(
             Ok(_) => {}
             Err(RecvError::Closed) => std::future::pending::<()>().await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(source: RuleSetSource, digest: &str) -> RuleSetsWire {
+        RuleSetsWire {
+            source,
+            digest: Some(digest.into()),
+            refused: None,
+        }
+    }
+
+    /// psmart-b2: Tunnel mode through the helper service shows one calm line only when it runs
+    /// other lists than the app's own set (the service's release files, earlier lists it kept,
+    /// or the app's set changed since the start); the very same set needs none.
+    #[test]
+    fn the_tunnel_line_names_other_lists_only() {
+        let key = |r: &RuleSetsWire, ours| tunnel_note(r, ours).map(|m| m.key);
+        let handed = report(RuleSetSource::Handed, "aa");
+        assert_eq!(key(&handed, Some("aa")), None);
+        let pinned = report(RuleSetSource::Pinned, "pp");
+        assert_eq!(
+            key(&pinned, Some("pp")),
+            None,
+            "the app runs the release files too"
+        );
+        assert_eq!(
+            key(&pinned, Some("aa")).as_deref(),
+            Some("app.settings.tunnelLists.service")
+        );
+        let kept = report(RuleSetSource::Kept, "kk");
+        assert_eq!(
+            key(&kept, Some("aa")).as_deref(),
+            Some("app.settings.tunnelLists.kept")
+        );
+        assert_eq!(
+            key(&handed, Some("bb")).as_deref(),
+            Some("app.settings.tunnelLists.nextConnect")
+        );
+        assert_eq!(
+            key(&handed, None).as_deref(),
+            Some("app.settings.tunnelLists.nextConnect"),
+            "the app's set could not be read: not claimed the same"
+        );
     }
 }

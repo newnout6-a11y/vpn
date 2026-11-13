@@ -37,21 +37,21 @@ pub struct Controls {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub autoconnect: Option<bool>,
     /// `subscription-autoconnect-type`.
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "pick_or_none"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "or_none")]
     pub autoconnect_pick: Option<AutoconnectPick>,
     /// `fragmentation-enable` / `-packets` / `-length` / `-interval` (Happ, limcore): the TLS
     /// tricks the provider sets for its servers. New rows take them once, when they are added;
     /// afterwards the value is the user's.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "or_none")]
     pub tls_tricks: Option<TlsTricks>,
 }
 
-/// A pick a newer build stored (a name this one does not know) reads as none, the default pick:
-/// the group keeps its other controls, `hide-settings` above all, and the list stays readable.
-fn pick_or_none<'de, D: Deserializer<'de>>(d: D) -> Result<Option<AutoconnectPick>, D::Error> {
+/// A pick or TLS tricks a newer build stored (a name or mode this one does not know) read as
+/// none, the default: the group keeps its other controls, `hide-settings` above all, and the
+/// list stays readable (twire-a2).
+fn or_none<'de, D: Deserializer<'de>, T: serde::de::DeserializeOwned>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
     let value = Option::<serde_json::Value>::deserialize(d)?;
     Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }

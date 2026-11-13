@@ -152,6 +152,10 @@ async fn the_lists_cross_the_pipe_and_are_used_after_the_service_checks_them() {
     );
     let again = inputs.snapshot().await.expect("inputs").rule_set_dir;
     assert_eq!(again.as_ref(), Some(&dir));
+    // psmart-b2: the report names the app's set.
+    let report = inputs.rule_sets().expect("a report");
+    assert_eq!(report.source, RuleSetSource::Handed);
+    assert_eq!(report.digest, Some(set.digest()));
 
     let got = over_the_pipe(2, routing(Some(set))).await;
     assert_eq!(got.rule_sets, None, "stripped for a version-2 service");
@@ -179,10 +183,19 @@ async fn a_failing_set_keeps_the_pinned_files() {
         bad.join("geoip-ru-blocked.srs"),
     )
     .expect("swap");
-    for set in [RuleSetFiles::read(&bad), RuleSetFiles::read(pinned)] {
+    let pinned_digest = RuleSetFiles::read(pinned).map(|s| s.digest());
+    for (set, refused) in [
+        (RuleSetFiles::read(&bad), true),
+        (RuleSetFiles::read(pinned), false),
+    ] {
         inputs.set(&routing(set), KillSwitchLevel::Off);
         let dir = inputs.snapshot().await.expect("inputs").rule_set_dir;
         assert_eq!(dir.as_deref(), Some(pinned));
+        // psmart-b2: the service says it runs its own files, and why the app's set is not used.
+        let report = inputs.rule_sets().expect("a report");
+        assert_eq!(report.source, RuleSetSource::Pinned);
+        assert_eq!(report.digest, pinned_digest);
+        assert_eq!(report.refused.is_some(), refused, "{report:?}");
     }
     let stored = std::fs::read_dir(&store).map(|d| d.count()).unwrap_or(0);
     assert_eq!(stored, 0, "nothing stored");
@@ -191,6 +204,7 @@ async fn a_failing_set_keeps_the_pinned_files() {
     off.smart_ru = false;
     inputs.set(&off, KillSwitchLevel::Off);
     assert_eq!(inputs.snapshot().await.expect("inputs").rule_set_dir, None);
+    assert_eq!(inputs.rule_sets(), None, "no report while Smart RU is off");
 
     let partial = t.join("install");
     std::fs::create_dir_all(&partial).expect("dir");
@@ -226,6 +240,10 @@ async fn a_failing_set_keeps_the_last_set_that_passed() {
         inputs.set(&routing(RuleSetFiles::read(&bad)), KillSwitchLevel::Off);
         let dir = inputs.snapshot().await.expect("inputs").rule_set_dir;
         assert_eq!(dir, fresh);
+        // psmart-b2: the earlier set runs, and the report says why the new one does not.
+        let report = inputs.rule_sets().expect("a report");
+        assert_eq!(report.source, RuleSetSource::Kept);
+        assert!(report.refused.is_some());
     }
     let _ = std::fs::remove_dir_all(&t);
 }

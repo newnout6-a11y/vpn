@@ -459,7 +459,11 @@ impl ServersApi for ServersBackend {
     }
 
     fn take_link(&self) -> Option<String> {
-        self.links.take()
+        let link = self.links.take();
+        if let Some(link) = &link {
+            phones::after_client_link(&self.registrar, link);
+        }
+        link
     }
 
     async fn read_clipboard(&self) -> AppResult<String> {

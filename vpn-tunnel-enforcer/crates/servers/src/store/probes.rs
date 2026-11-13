@@ -13,7 +13,8 @@ use crate::model::{
 impl Servers {
     /// Stores key-health verdicts (and the exit country of the trace). A row that was deleted,
     /// removed by the user or whose key changed while the probe ran is skipped on its own (S-13,
-    /// servers §3.11); returns how many landed.
+    /// servers §3.11), and an older record never replaces a newer one (a long list check lands
+    /// after a later check of the same key, psmall-a2); returns how many landed.
     pub fn record_health(&self, updates: Vec<HealthUpdate>) -> AppResult<usize> {
         self.update(|doc| {
             let mut applied = 0;
@@ -21,7 +22,9 @@ impl Servers {
                 let Some(row) = doc.row_mut(&update.id) else {
                     continue;
                 };
-                if row.archived_for(ArchiveReason::User) || row.identity() != Some(update.identity)
+                if row.archived_for(ArchiveReason::User)
+                    || row.identity() != Some(update.identity)
+                    || row.health.is_some_and(|h| h.at > update.record.at)
                 {
                     continue;
                 }

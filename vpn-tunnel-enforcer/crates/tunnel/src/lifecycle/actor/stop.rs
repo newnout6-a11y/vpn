@@ -41,9 +41,19 @@ impl Actor {
         if self.start.as_ref().is_some_and(|s| req.owner < s.op.owner) {
             return refuse(reply, key::HIGHER_PRIORITY);
         }
-        let keep = req.keep_protection && self.guard.pauses();
+        let keep = req.keep_protection && self.keeps_block();
         let head = Head::new(req.owner, req.source, req.correlation, req.timeout);
         self.begin_stop_as(req.cause, head, vec![reply], keep);
+    }
+
+    /// A `keep_protection` stop leaves the block: the session's guard says so, or — for a run
+    /// the lifecycle never held (the helper service's kept session a take-over could not take,
+    /// fixfollow-a2) — the kill switch's level as it is now.
+    fn keeps_block(&self) -> bool {
+        match self.session {
+            Some(_) => self.guard.pauses(),
+            None => self.deps.kill_switch() != vpnte_base::types::KillSwitchLevel::Off,
+        }
     }
 
     /// A full stop: publishes it (reserving the lane), cancels a running start and runs the
@@ -102,6 +112,7 @@ impl Actor {
     }
 
     pub(super) fn run_stop_effect(&mut self) {
+        let running = self.runtime_running();
         let Some(stop) = self.stop.as_mut().filter(|s| !s.running) else {
             return;
         };
@@ -112,6 +123,10 @@ impl Actor {
             _ if !stop.keep => Keep::Nothing,
             Some(true) => Keep::Tweaks,
             Some(false) => Keep::Block,
+            // No session of its own, yet a run: the service's kept TUN session (Soft sessions
+            // are always the lifecycle's own). Its block stays and reads `blocked` here, so the
+            // user sees it and can end it (fixfollow-a2).
+            None if running => Keep::Block,
             None => Keep::Nothing,
         };
         let (deps, tx, id) = (self.deps.clone(), self.tx.clone(), stop.op.id);

@@ -58,6 +58,7 @@ use crate::svc_core::notify::{NoticeCategory, Notifier};
 
 pub use domains::DomainHistory;
 pub(crate) use gate::BudgetGate;
+pub(crate) use inputs::own_exe;
 pub(crate) use monitor::exit_route;
 pub(crate) use peers::vpn_profile;
 pub(crate) use probe::session_route;
@@ -251,7 +252,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         let (b, lifecycle, guard, soft) =
             (b.clone(), lifecycle.clone(), guard.clone(), soft.clone());
         let (automation, live) = (automation.clone(), live.clone());
-        let remote = remote.clone();
+        let split = runtime.clone();
         async move {
             recover(
                 b.clone(),
@@ -264,13 +265,13 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
             // On its own task: a service still starting with Windows must not hold the rest up.
             tokio::spawn({
                 let (automation, cancel) = (automation.clone(), b.shutdown.child_token());
-                let losses = remote.losses();
+                let losses = split.remote().losses();
                 async move {
-                    if let Some(kept) = remote.attach().await {
+                    if let Some(kept) = split.remote().attach().await {
                         let connect = |t| takeover::connect_kept(&automation, t);
-                        takeover::take_over(&remote, &lifecycle, kept, connect).await;
+                        takeover::take_over(&split, &lifecycle, kept, connect).await;
                     }
-                    takeover::reattach(&remote, &lifecycle, &automation, losses, cancel).await;
+                    takeover::reattach(&split, &lifecycle, &automation, losses, cancel).await;
                 }
             });
             let (servers, notifier) = (b.servers.clone(), b.notifier.clone());

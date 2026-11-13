@@ -82,11 +82,12 @@ pub(super) async fn check_group(src: &ServerProfiles, group_id: &str) -> AppResu
 }
 
 /// Rows grouped by client device (uTLS default, Xray translation differ per device) and their
-/// own engine choice (applied to the probe exactly as to a connect).
+/// own engine choice (applied to the probe exactly as to a connect). Each key is probed as it
+/// runs, the user's TLS tricks included (twire-a4, as the Servers page's checks).
 fn by_device(rows: Vec<ServerRow>) -> Vec<DeviceItems> {
     let mut out: Vec<DeviceItems> = Vec::new();
     for row in rows {
-        let profile = row.profile().ok();
+        let profile = row.run_profile().ok();
         let choice = (row.device, row.engine);
         let item = ((row.id, profile.as_ref().map(Profile::identity)), profile);
         match out.iter_mut().find(|(c, _)| *c == choice) {

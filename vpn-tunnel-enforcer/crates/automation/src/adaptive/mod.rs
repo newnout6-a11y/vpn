@@ -50,6 +50,10 @@ pub struct ProfileView {
     /// The engine that runs this profile's upstream. On Xray TLS compatibility brings the TLS
     /// tricks only (no uTLS rotation), and this bypass does not escalate there (A2).
     pub engine: Engine,
+    /// TLS compatibility changes what the key runs: `false` when its TLS tricks are fixed (the
+    /// key's own value or the user's choice wins over the app default), so that step would be a
+    /// restart into the very same handshake (twire-b2).
+    pub tls_compat_applies: bool,
 }
 
 /// A sibling candidate: a usable profile of the active profile's group (enabled, not archived,
@@ -106,6 +110,7 @@ pub fn capabilities(kind: SessionKind, profile: Option<&ProfileView>) -> Capabil
         .and_then(|t| t.get("reality"))
         .is_some_and(|r| r.is_object() && r.get("enabled") != Some(&Value::Bool(false)));
     let xray = profile.is_some_and(|p| p.engine == Engine::Xray);
+    let fixed = profile.is_some_and(|p| !p.tls_compat_applies);
     let reason = if tls_on && reality {
         Some(Msg::new("automation.adaptive.reason.reality"))
     } else if tls_on && xray {
@@ -114,7 +119,7 @@ pub fn capabilities(kind: SessionKind, profile: Option<&ProfileView>) -> Capabil
         None
     };
     Capabilities {
-        tls: tls_on && !reality && !xray,
+        tls: tls_on && !reality && !xray && !fixed,
         mtu: kind.tun(),
         external: false,
         reason,

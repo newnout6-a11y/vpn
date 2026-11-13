@@ -47,8 +47,12 @@ pub enum UserAct {
     Stop,
     /// A server picked by hand.
     Pick,
-    /// A changed setting, or a Cancel with nothing in flight.
+    /// A changed setting.
     Change,
+    /// «Отменить» on the automatic choice's strip: every automatic step stops and the session
+    /// that runs stays as it is, left alone until the user acts again or another session starts
+    /// (psmall-b1/b2).
+    EndAuto,
 }
 
 /// The adaptive bypass and the profile views it starts from (set once after both exist: they
@@ -127,18 +131,19 @@ impl AppCoordinator {
     }
 
     /// The user acted. A connect, a stop or a server picked by hand also drops a restore on its
-    /// way after a lost switch: it must not undo the user's choice (a changed setting does not
-    /// decide the lane, so the restore goes on).
+    /// way after a lost switch: it must not undo the user's choice (a changed setting and the
+    /// strip's «Отменить» do not decide the lane, so the restore goes on).
     pub fn user_acted(&self, act: UserAct) {
-        if act != UserAct::Change {
+        if !matches!(act, UserAct::Change | UserAct::EndAuto) {
             self.restoring.lock().take();
         }
         self.user_acts.send_modify(|a| {
             a.seq += 1;
+            a.held = act == UserAct::EndAuto;
             match act {
                 UserAct::Connect => a.stopped = false,
                 UserAct::Stop => a.stopped = true,
-                UserAct::Pick | UserAct::Change => {}
+                UserAct::Pick | UserAct::Change | UserAct::EndAuto => {}
             }
         });
     }

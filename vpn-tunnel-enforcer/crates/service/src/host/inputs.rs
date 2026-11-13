@@ -8,14 +8,14 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use vpnte_base::AppResult;
 use vpnte_base::types::KillSwitchLevel;
+use vpnte_base::{AppResult, Msg};
 use vpnte_engine::routing::rulesets::RefreshFault;
 use vpnte_engine::routing::rulesets::handover::{self, RuleSetFiles};
 use vpnte_tunnel::runtime::{InputsSource, UserInputs};
 
 use crate::paths::{DataFiles, data_dir};
-use crate::proto::RoutingInputs;
+use crate::proto::{RoutingInputs, RuleSetSource, RuleSetsWire};
 
 /// The last inputs a client sent, with the service's own Smart RU rule-set folders.
 pub struct SharedInputs {
@@ -33,14 +33,16 @@ pub struct SharedInputs {
     handed: Mutex<Option<RuleSetFiles>>,
     /// What the checks said so far; one check at a time.
     checked: tokio::sync::Mutex<Checked>,
+    /// Which lists the last engine start ran (`None`: Smart RU off), for the app (psmart-b2).
+    report: Mutex<Option<RuleSetsWire>>,
 }
 
-/// The last set that passed (digest, folder) and the last one that failed its checks (digest):
-/// neither is checked again.
+/// The last set that passed (digest, folder) and the last one that failed its checks (digest,
+/// why): neither is checked again.
 #[derive(Default)]
 struct Checked {
     accepted: Option<(String, PathBuf)>,
-    refused: Option<String>,
+    refused: Option<(String, Msg)>,
 }
 
 impl SharedInputs {
@@ -68,7 +70,13 @@ impl SharedInputs {
             current: Mutex::new(UserInputs::default()),
             handed: Mutex::new(None),
             checked: tokio::sync::Mutex::new(Checked::default()),
+            report: Mutex::new(None),
         }
+    }
+
+    /// Which Smart RU lists the last engine start ran; `None` while Smart RU is off.
+    pub fn rule_sets(&self) -> Option<RuleSetsWire> {
+        self.report.lock().clone()
     }
 
     /// Replaces the inputs (`level`: the kill-switch level they run under).
@@ -102,36 +110,59 @@ impl SharedInputs {
         self.current.lock().clone()
     }
 
-    /// The folder of the client's set once it passed this service's checks; `None`: none was
-    /// sent or it is the pinned set itself. A set that fails keeps the one in use before it
-    /// (the last accepted set, else the pinned files), as the app keeps its generation.
-    async fn handed_dir(&self) -> Option<PathBuf> {
-        let files = self.handed.lock().clone()?;
+    /// The folder of the client's set once it passed this service's checks (`None`: none was
+    /// sent, it is the pinned set itself, or it failed and no earlier set passed), and what that
+    /// means for the app. A set that fails keeps the one in use before it (the last accepted
+    /// set, else the pinned files), as the app keeps its generation.
+    async fn choose(&self) -> (Option<PathBuf>, RuleSetsWire) {
+        let pinned = |refused| RuleSetsWire {
+            source: RuleSetSource::Pinned,
+            digest: self.pinned.as_ref().and(self.pinned_digest.clone()),
+            refused,
+        };
+        let Some(files) = self.handed.lock().clone() else {
+            return (None, pinned(None));
+        };
         // The pinned copies are the reference of the content bounds: without them nothing passes.
-        let (engine, store) = (self.engine.as_ref()?, self.store.as_ref()?);
-        let reference = self.pinned.as_ref()?;
+        let (Some(engine), Some(store), Some(reference)) = (
+            self.engine.as_ref(),
+            self.store.as_ref(),
+            self.pinned.as_ref(),
+        ) else {
+            return (None, pinned(None));
+        };
         let digest = files.digest();
         if self.pinned_digest.as_deref() == Some(digest.as_str()) {
-            return None;
+            return (None, pinned(None));
         }
         let mut checked = self.checked.lock().await;
         if let Some((known, dir)) = checked.accepted.as_ref()
             && *known == digest
         {
-            return Some(dir.clone());
+            return (
+                Some(dir.clone()),
+                handed(RuleSetSource::Handed, digest, None),
+            );
         }
-        let previous = checked.accepted.as_ref().map(|(_, d)| d.clone());
-        if checked.refused.as_ref() == Some(&digest) {
-            return previous;
+        let previous = checked.accepted.clone();
+        let fallback = |why: Msg| match previous.clone() {
+            Some((kept, dir)) => (Some(dir), handed(RuleSetSource::Kept, kept, Some(why))),
+            None => (None, pinned(Some(why))),
+        };
+        if let Some((known, why)) = checked.refused.as_ref()
+            && *known == digest
+        {
+            return fallback(why.clone());
         }
         match handover::accept(&files, engine, store, reference).await {
             Ok(dir) => {
                 // The previous folder stays: a protected restart starts the new engine while the
                 // old one still reads its files.
+                let previous = previous.as_ref().map(|(_, dir)| dir.clone());
                 prune(store.clone(), [Some(dir.clone()), previous]).await;
                 tracing::info!(%digest, "handed-over Smart RU lists in use");
-                checked.accepted = Some((digest, dir.clone()));
-                Some(dir)
+                checked.accepted = Some((digest.clone(), dir.clone()));
+                (Some(dir), handed(RuleSetSource::Handed, digest, None))
             }
             Err(fault) => {
                 tracing::warn!(
@@ -141,11 +172,19 @@ impl SharedInputs {
                 );
                 // A file that failed its checks fails again; an engine or disk fault may pass.
                 if matches!(fault, RefreshFault::Invalid { .. }) {
-                    checked.refused = Some(digest);
+                    checked.refused = Some((digest, fault.msg()));
                 }
-                previous
+                fallback(fault.msg())
             }
         }
+    }
+}
+
+fn handed(source: RuleSetSource, digest: String, refused: Option<Msg>) -> RuleSetsWire {
+    RuleSetsWire {
+        source,
+        digest: Some(digest),
+        refused,
     }
 }
 
@@ -162,11 +201,16 @@ async fn prune(store: PathBuf, keep: [Option<PathBuf>; 2]) {
 impl InputsSource for SharedInputs {
     async fn snapshot(&self) -> AppResult<UserInputs> {
         let mut inputs = self.get();
-        if inputs.smart_ru
-            && let Some(dir) = self.handed_dir().await
-        {
-            inputs.rule_set_dir = Some(dir);
-        }
+        let report = if inputs.smart_ru {
+            let (dir, report) = self.choose().await;
+            if let Some(dir) = dir {
+                inputs.rule_set_dir = Some(dir);
+            }
+            Some(report)
+        } else {
+            None
+        };
+        *self.report.lock() = report;
         Ok(inputs)
     }
 }

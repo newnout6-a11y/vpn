@@ -119,6 +119,9 @@ pub trait DashboardApi: 'static {
     async fn disconnect(&self) -> AppResult<Option<Msg>>;
     /// Cancels the connect or server switch in flight; `Ok(Some(w))` = cancelled with a warning.
     async fn cancel(&self) -> AppResult<Option<Msg>>;
+    /// «Отменить» on the automatic choice's strip: the choice stops and leaves the session that
+    /// runs alone until the user acts again; the session itself is never stopped by it.
+    async fn end_autopick(&self) -> AppResult<()>;
     /// Saves the Smart RU setting (applies on the next connect).
     async fn set_smart_ru(&self, on: bool) -> AppResult<()>;
     /// Runs the route / leak check; the verdict also lands in [`DashboardView::leak`].

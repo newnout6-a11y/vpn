@@ -634,6 +634,7 @@ impl ServersApi for DemoServersApi {
         Ok(Some(TricksView {
             choice: stored.or(provider).unwrap_or(TricksChoice::Default),
             default_strong: false,
+            provider,
         }))
     }
 

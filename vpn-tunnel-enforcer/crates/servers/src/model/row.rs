@@ -246,7 +246,13 @@ pub struct ServerRow {
     /// The user's TLS tricks for this key (item 18), over what the key brings itself; absent =
     /// the key's own (share link, pasted options) or the app default. A row field, not part of
     /// the profile: a subscription refresh replaces the profile and keeps the row.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// A choice a newer build stored (a name this one does not know) reads as none, the key's
+    /// own value: the list stays readable (twire-a2).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient::option"
+    )]
     pub tls_tricks: Option<RowTricks>,
 }
 

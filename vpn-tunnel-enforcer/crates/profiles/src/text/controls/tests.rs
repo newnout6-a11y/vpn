@@ -156,6 +156,22 @@ fn unknown_stored_pick_reads_as_none() {
     assert_eq!(serde_json::from_str::<Controls>(&round).unwrap(), known);
 }
 
+/// twire-a2: TLS tricks a newer build stored (a mode this one does not know) read as none; the
+/// group keeps its other controls and the list stays readable.
+#[test]
+fn unknown_stored_tricks_read_as_none() {
+    let stored = r#"{"hideSettings":true,"tlsTricks":{"mode":"quantum"}}"#;
+    let controls: Controls = serde_json::from_str(stored).unwrap();
+    assert!(controls.hides_settings());
+    assert_eq!(controls.tls_tricks, None);
+    let known = Controls {
+        tls_tricks: Some(crate::model::TlsTricks::STRONG),
+        ..Controls::default()
+    };
+    let round = serde_json::to_string(&known).unwrap();
+    assert_eq!(serde_json::from_str::<Controls>(&round).unwrap(), known);
+}
+
 /// Item 18: Happ / limcore `fragmentation-*` keys become the provider's TLS tricks: off with
 /// `enable` 0 / false, the preset where length or pause are not sent, headers over the body.
 #[test]

@@ -184,11 +184,19 @@ async fn cancel_and_a_hand_picked_server_end_what_automation_began() {
     assert_eq!((acts.borrow().seq, acts.borrow().stopped), (2, true));
     r.coord.user_acted(UserAct::Connect);
     assert_eq!((acts.borrow().seq, acts.borrow().stopped), (3, false));
+    // psmall-b1/b2: the strip's «Отменить» holds the automatic choice without a stop, until
+    // the next action of the user.
+    r.coord.user_acted(UserAct::EndAuto);
+    let a = *acts.borrow();
+    assert_eq!((a.seq, a.stopped, a.held), (4, false, true));
+    r.coord.user_acted(UserAct::Change);
+    assert!(!acts.borrow().held);
     for act in [
         UserAct::Connect,
         UserAct::Stop,
         UserAct::Pick,
         UserAct::Change,
+        UserAct::EndAuto,
     ] {
         let r = rig(&format!("user-acts-{act:?}"));
         let (a, b) = (r.ids[0].clone(), r.ids[1].clone());
@@ -204,8 +212,9 @@ async fn cancel_and_a_hand_picked_server_end_what_automation_began() {
         r.coord.user_acted(act);
         r.lane.release_hold();
         let lost = switch.await.expect("switch task");
-        // A changed setting does not decide the lane: the previous server comes back.
-        let restored = act == UserAct::Change;
+        // A changed setting and the strip's «Отменить» do not decide the lane: the previous
+        // server comes back.
+        let restored = matches!(act, UserAct::Change | UserAct::EndAuto);
         assert!(
             matches!(lost, Err(SwitchError::Failed { restored_previous, .. }) if restored_previous == restored),
             "{act:?}: {lost:?}"

@@ -1037,7 +1037,7 @@ fn dns_bootstrap_inbound() {
     );
     assert_eq!(
         dns_rules[0],
-        json!({ "inbound": ["dns-bootstrap-in"], "action": "evaluate", "server": "dns-bootstrap", "timeout": "1500ms" })
+        json!({ "inbound": ["dns-bootstrap-in"], "action": "evaluate", "server": "dns-bootstrap", "timeout": "1000ms" })
     );
     assert_eq!(dns_rules.last().unwrap()["server"], "dns-direct");
     assert_eq!(dns_server(&c, DNS_BOOTSTRAP).unwrap()["type"], "https");
@@ -1110,6 +1110,7 @@ pub(super) fn smart_ru_parts(dir: &str) -> RoutingParts {
             json!({ "rule_set": ["geosite-category-gov-ru"], "server": DNS_DIRECT }),
             json!({ "domain_suffix": [".ru", ".su", ".xn--p1ai"], "server": DNS_DIRECT }),
         ],
+        listed_only: None,
     }
 }
 

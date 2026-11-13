@@ -1,8 +1,8 @@
 //! The `dns` section: routing's servers and rules plus the servers the upstream needs.
 //! Upstream server names resolve direct, in the order of the app resolver
-//! (`vpnte_core::resolve`, ru-2026 Ф9): DoH by IP literal first (no SNI to filter on), DNS over
-//! TCP next, the ISP's resolver last; never plain UDP to a public resolver, which RU networks
-//! redirect to the NSDI (forged NXDOMAIN for blocked names).
+//! (`vpnte_core::resolve`, ru-2026 Ф9): foreign DoH by IP literal first (no SNI to filter on),
+//! Yandex's DoH after them, DNS over TCP next, the ISP's resolver last; never plain UDP to a
+//! public resolver, which RU networks redirect to the NSDI (forged NXDOMAIN for blocked names).
 use std::net::{IpAddr, Ipv4Addr};
 
 use serde_json::{Value, json};
@@ -15,18 +15,20 @@ use crate::tags::{
     DNS_BOOTSTRAP_TCP, DNS_BOOTSTRAP_YANDEX, DNS_REMOTE, DNS_RESOLVER, PROXY_OUT,
 };
 
-/// Resolvers of the bootstrap order after `dns-bootstrap` (1.1.1.1): DoH by IP literal to Yandex,
-/// Quad9 and Google, then DNS over TCP to Google; the physical adapter's resolver comes last, it
+/// Resolvers of the bootstrap order after `dns-bootstrap` (1.1.1.1): DoH by IP literal to Quad9,
+/// Google and Yandex, then DNS over TCP to Google; the physical adapter's resolver comes last, it
 /// answers unblocked names when every public resolver is cut off (mobile whitelists).
-/// Yandex is second: RU networks that cut foreign resolvers (whitelists included) leave it
-/// reachable, and a step that late still fits Xray's 4 s after one blackholed step. Its
-/// certificate carries the address (77.88.8.8 is an IP SAN), so no SNI is sent here either.
+/// Yandex comes after the foreign resolvers (psmall-b3): server names reach a domestic resolver
+/// only where no foreign one answers. It is not among TZ-01 §5.1's trusted upstreams; it stays
+/// as the last DoH step because RU networks that cut every foreign resolver (whitelists) leave
+/// it reachable (decided in fix-tail). Its certificate carries the address (77.88.8.8 is an IP
+/// SAN), so no SNI is sent here either.
 const YANDEX: &str = "77.88.8.8";
 const QUAD9: &str = "9.9.9.9";
 const GOOGLE: &str = "8.8.8.8";
-/// Budget of one step of the bootstrap order: Xray gives a whole lookup 4 s, so two blackholed
-/// steps must still leave room for the third.
-const STEP_TIMEOUT: &str = "1500ms";
+/// Budget of one step of the bootstrap order: Xray gives a whole lookup 4 s, so three blackholed
+/// foreign steps still leave Yandex a second (a fresh DoH exchange is three round trips).
+const STEP_TIMEOUT: &str = "1000ms";
 /// Tags the builder owns: routing must not define them.
 const RESERVED: [&str; 7] = [
     DNS_RESOLVER,
@@ -97,9 +99,9 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
 /// `type: local` would recurse into the TUN resolver, `detour: direct-out` is refused).
 fn bootstrap_servers(isp: Option<Ipv4Addr>) -> Vec<Value> {
     let mut servers = vec![
-        doh_direct(DNS_BOOTSTRAP_YANDEX, YANDEX),
         doh_direct(DNS_BOOTSTRAP_QUAD9, QUAD9),
         doh_direct(DNS_BOOTSTRAP_GOOGLE, GOOGLE),
+        doh_direct(DNS_BOOTSTRAP_YANDEX, YANDEX),
         json!({ "type": "tcp", "tag": DNS_BOOTSTRAP_TCP, "server": GOOGLE }),
     ];
     servers.extend(
@@ -127,9 +129,9 @@ fn bootstrap_rules(isp: bool) -> Vec<Value> {
     let mut rules = Vec::new();
     for doh in [
         DNS_BOOTSTRAP,
-        DNS_BOOTSTRAP_YANDEX,
         DNS_BOOTSTRAP_QUAD9,
         DNS_BOOTSTRAP_GOOGLE,
+        DNS_BOOTSTRAP_YANDEX,
     ] {
         rules.extend([step("evaluate", doh), has_address.clone()]);
         if doh != DNS_BOOTSTRAP_YANDEX {

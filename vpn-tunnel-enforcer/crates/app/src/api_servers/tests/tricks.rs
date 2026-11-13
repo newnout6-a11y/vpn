@@ -106,7 +106,9 @@ async fn tricks_editor_over_a_real_list() {
     let run = crate::svc_tunnel::vpn_profile(row, &fingerprints).expect("runs");
     assert_eq!(run.profile.own_tls_tricks(), None);
     assert_eq!(run.profile.tls_tricks_for(true), TlsTricks::STRONG);
-    // Picking the provider's option again stores nothing: refreshes are followed.
+    // twire-b1: the editor still offers the provider's split after another pick, and picking
+    // it again stores nothing: refreshes are followed.
+    assert_eq!(view.provider, Some(provider));
     api.set_tls_tricks(&own, provider).await.expect("set");
     let row = env.backend.servers.get(&own.as_str().into()).expect("row");
     assert_eq!(row.tls_tricks, None);
@@ -138,6 +140,55 @@ async fn tricks_editor_over_a_real_list() {
     let view = api.tls_tricks(&plain).await.expect("read").expect("editor");
     assert!(view.default_strong);
     assert!(api.tls_tricks("missing").await.is_err());
+}
+
+/// twire-a5: the connected server's reconnect does not run through (here it is cancelled): the
+/// previous choice comes back with the error, so the editor's old value is what every later run
+/// uses, and a pick that did reconnect stays.
+#[tokio::test]
+async fn a_reconnect_that_does_not_run_through_keeps_the_previous_choice() {
+    locales();
+    let env = Env::new("tricks-reconnect");
+    let api = ServersBackend::start(env.backend.clone());
+    let key = format!("vless://{ID}@plain.example:443?security=tls&sni=plain.example#plain");
+    let plain = pasted(&env, &api, &key).await[0].to_string();
+    env.tunnel.connect_to(&plain);
+    // The pick is stored, then its reconnect waits: the user's Cancel ends it.
+    let cancel = async {
+        for _ in 0..500 {
+            let row = env
+                .backend
+                .servers
+                .get(&plain.as_str().into())
+                .expect("row");
+            if row.tls_tricks.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        crate::services::TunnelOps::cancel(&*env.tunnel);
+    };
+    let (picked, ()) = tokio::join!(api.set_tls_tricks(&plain, TricksChoice::Strong), cancel);
+    assert!(picked.is_err(), "the reconnect's error");
+    let row = env
+        .backend
+        .servers
+        .get(&plain.as_str().into())
+        .expect("row");
+    assert_eq!(row.tls_tricks, None, "the previous choice is back");
+    let view = api.tls_tricks(&plain).await.expect("read").expect("editor");
+    assert_eq!(view.choice, TricksChoice::Default);
+
+    env.tunnel.session.send_replace(None);
+    api.set_tls_tricks(&plain, TricksChoice::Strong)
+        .await
+        .expect("set");
+    let row = env
+        .backend
+        .servers
+        .get(&plain.as_str().into())
+        .expect("row");
+    assert_eq!(row.tls_tricks, Some(RowTricks::Set(TlsTricks::STRONG)));
 }
 
 /// The merged profile (the user's choice over a link's own split) passes the bundled engines:

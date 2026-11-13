@@ -492,3 +492,51 @@ fn client_schemes_are_held_only_while_free() {
 fn client_schemes_are_registered_schemes() {
     assert!(CLIENT_SCHEMES.iter().all(|c| SCHEMES.contains(c)));
 }
+
+/// psmall-b7: a record written before `happ` and `incy` existed (no offered list) gets them at
+/// the next start while they are free; a scheme the user turned off stays off, and the next
+/// start registers nothing again.
+#[test]
+fn an_upgraded_record_takes_new_free_schemes_once() {
+    let t = TestKey::new();
+    let r = reg(&t);
+    let a = exe("A");
+    r.ensure(&a).unwrap();
+    assert!(r.unregister("vless", &a).unwrap());
+    // As an older build left it: no offered list, no happ:// or incy://.
+    delete_tree(&r.offered_path()).unwrap();
+    for scheme in ADDED_LATER {
+        assert!(r.unregister(scheme, &a).unwrap());
+    }
+    happ_machine_wide(&t, "incy");
+    let done = r.ensure(&a).unwrap();
+    assert_eq!(done.registered, ["happ"], "incy:// is Incy's");
+    assert_eq!(r.owner("happ", &a).unwrap(), Owner::Ours);
+    assert_eq!(
+        r.owner("vless", &a).unwrap(),
+        Owner::Free,
+        "turned off stays off"
+    );
+    assert_eq!(r.ensure(&a).unwrap(), Ensured::default());
+}
+
+/// psmall-b6: Happ installed while the app runs gets happ:// back without a restart: the check
+/// runs whenever the links panel is read or a client's link arrives (`give_back`), also for a
+/// portable copy whose «open links here» took it, and adopting again never takes it back.
+#[test]
+fn a_client_installed_meanwhile_gets_its_scheme_back_at_once() {
+    let t = TestKey::new();
+    let r = reg(&t);
+    let portable = PathBuf::from(r"D:\Tools\VPN Tunnel Enforcer\VPN Tunnel Enforcer.exe");
+    assert!(r.adopt(&portable).unwrap().registered.contains(&"happ"));
+    assert!(r.give_back(&portable).unwrap().is_empty(), "Happ is absent");
+    happ_machine_wide(&t, "happ");
+    assert_eq!(r.give_back(&portable).unwrap(), ["happ"]);
+    assert_eq!(command(&t, "happ"), None);
+    assert_eq!(
+        r.owner("happ", &portable).unwrap(),
+        Owner::Other(Some("Happ".into()))
+    );
+    assert!(!r.adopt(&portable).unwrap().registered.contains(&"happ"));
+    assert_eq!(command(&t, "happ"), None);
+}

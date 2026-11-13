@@ -210,7 +210,9 @@ pub fn build_scoped(i: &RoutingInputs, scope: Scope) -> RoutingFragments {
     // Russia is unreachable directly for any app). DNS keeps its final: the DNS Client service
     // sends every app's queries, so no DNS rule can tell the apps apart.
     if let Scope::OnlyListed { own } = scope {
-        out.domain_rules.push(outside_scope(&i.split.vpn, own));
+        let listed = in_scope(&i.split.vpn, own);
+        out.domain_rules.push(outside_scope(&listed));
+        out.listed_only = Some(listed);
     }
     // D3 / R3: Smart RU pins, before every RU rule so sniffed SNI beats the IP country.
     if smart_dir.is_some() {
@@ -278,15 +280,20 @@ pub fn build_scoped(i: &RoutingInputs, scope: Scope) -> RoutingFragments {
     }
 }
 
-/// Every app outside the scope leaves directly: `invert` matches a process that is none of
-/// them, and a connection whose process is unknown.
-fn outside_scope(listed: &[String], own: &[String]) -> Value {
-    let mut regexes: Vec<&String> = Vec::new();
+/// The apps in the scope: the listed VPN apps and the app itself, each once.
+fn in_scope(listed: &[String], own: &[String]) -> Vec<String> {
+    let mut regexes: Vec<String> = Vec::new();
     for r in listed.iter().chain(own) {
         if !regexes.iter().any(|x| x.eq_ignore_ascii_case(r)) {
-            regexes.push(r);
+            regexes.push(r.clone());
         }
     }
+    regexes
+}
+
+/// Every app outside the scope leaves directly: `invert` matches a process that is none of
+/// them, and a connection whose process is unknown.
+fn outside_scope(regexes: &[String]) -> Value {
     if regexes.is_empty() {
         // Nothing is in scope: every connection leaves directly.
         return json!({ "network": ["tcp", "udp"], "outbound": DIRECT_OUT });

@@ -466,6 +466,14 @@ impl DashboardApi for DemoDashboard {
         Ok(None)
     }
 
+    async fn end_autopick(&self) -> AppResult<()> {
+        self.publish(DashboardView {
+            autopick: None,
+            ..self.view()
+        });
+        Ok(())
+    }
+
     async fn cancel(&self) -> AppResult<Option<Msg>> {
         let switching = self.view().conn.switching.is_some();
         self.next_attempt();

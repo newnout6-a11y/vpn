@@ -89,6 +89,17 @@ impl FakeHost {
             tx.send_modify(|a| {
                 a.seq += 1;
                 a.stopped = stopped.unwrap_or(a.stopped);
+                a.held = false;
+            });
+        }
+    }
+
+    /// The user pressed «Отменить» on the automatic choice's strip.
+    pub(super) fn user_holds(&self) {
+        if let Some(tx) = self.acts.lock().as_ref() {
+            tx.send_modify(|a| {
+                a.seq += 1;
+                a.held = true;
             });
         }
     }

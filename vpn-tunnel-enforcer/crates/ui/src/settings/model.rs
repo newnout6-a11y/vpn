@@ -274,6 +274,9 @@ pub struct RuleSetView {
     pub refreshing: bool,
     /// Why the last refresh did not complete.
     pub last_error: Option<Msg>,
+    /// Tunnel mode runs other lists than these (the helper service's own, or earlier ones): one
+    /// calm line under the lists (psmart-b2).
+    pub tunnel_note: Option<Msg>,
 }
 
 /// Browser WebRTC protection, per browser.
