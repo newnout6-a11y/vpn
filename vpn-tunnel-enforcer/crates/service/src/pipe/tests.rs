@@ -164,3 +164,28 @@ async fn a_foreign_reply_and_a_lost_connection_say_so() {
     let err = client.next_event().await.expect_err("gone");
     assert_eq!(key(err), "service.pipe.lost");
 }
+
+/// The owner's PC, 13.11.2026: an unelevated app cannot read a LocalSystem process's image, so
+/// the image check alone refused the real service on every call. The SCM's process of the
+/// service is enough; without it the image decides; no server process is never ours.
+#[test]
+fn the_service_process_is_ours_without_reading_its_image() {
+    use std::path::{Path, PathBuf};
+
+    use super::client::accepts;
+
+    let exe = Path::new(r"C:\Program Files\VPN Tunnel Enforcer Service\vpnte-service.exe");
+    let unreadable = |_| None;
+    assert!(accepts(Some(5504), Some(5504), exe, unreadable));
+    assert!(!accepts(Some(4242), Some(5504), exe, unreadable));
+    assert!(!accepts(Some(4242), None, exe, unreadable));
+    assert!(!accepts(None, Some(5504), exe, unreadable));
+    let same = |_| {
+        Some(PathBuf::from(
+            r"c:\program files\vpn tunnel enforcer service\VPNTE-SERVICE.EXE",
+        ))
+    };
+    assert!(accepts(Some(4242), None, exe, same));
+    let squatter = |_| Some(PathBuf::from(r"C:\Users\someone\squatter.exe"));
+    assert!(!accepts(Some(4242), Some(5504), exe, squatter));
+}

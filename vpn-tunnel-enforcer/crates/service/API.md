@@ -189,8 +189,10 @@ a dropped caller never leaves half a frame) and one ordered stream (`Frames::nex
 `Incoming::{Event, Answer}`), so a reader that publishes events before completing answers keeps
 "events before the reply". The app's remote runtime (`crates/app/src/svc_tunnel/remote.rs`) is
 built that way.
-`ServerCheck::Image` compares the pipe server's process image (`GetNamedPipeServerProcessId`) with
-the SCM's binary path: a pipe someone else created is refused before anything is sent
+`ServerCheck::Image` accepts the pipe's server (`GetNamedPipeServerProcessId`) when it is the process
+the SCM runs for the service (`scm::manage::process_id`: interactive users may query it, and an
+unelevated app cannot open a LocalSystem process to read its image), else when its image is the
+SCM's binary path: a pipe someone else created is refused before anything is sent
 (`service.pipe.notOurs`). A missing service reads as `service.pipe.unavailable`; the other
 failures say what happened: `service.pipe.denied` (the pipe's DACL refuses this account),
 `noAnswer` (every instance busy until the timeout), `lost` (the connection broke), `badReply` (a

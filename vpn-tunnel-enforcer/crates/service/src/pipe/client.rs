@@ -22,7 +22,8 @@ const ERROR_PIPE_BUSY: i32 = 231;
 /// Who must serve the pipe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerCheck {
-    /// The server process runs this image (the installed service exe from the SCM).
+    /// The server is the installed service: the process the SCM runs for it, or a process running
+    /// this image (the installed service exe from the SCM).
     Image(PathBuf),
     /// No check: a private test pipe.
     Any,
@@ -207,24 +208,50 @@ fn unexpected(reply: &Reply) -> AppError {
     AppError::msg(ErrorKind::Internal, Msg::new("service.pipe.badRequest"))
 }
 
-/// The server end belongs to a process running `expected` (Windows-style case-insensitive path
-/// comparison): a pipe someone else created under our name is refused before anything is sent.
+/// The server end is the installed service, or the pipe is refused before anything is sent. The
+/// process the SCM runs for the service is the check an unelevated app can make: it cannot open a
+/// LocalSystem process to read its image, so the image check alone refused every call on the
+/// owner's PC (13.11.2026: Tunnel mode never worked unelevated). The image stays the check where
+/// it can be read and the SCM names no process. An unprivileged process cannot create a pipe
+/// under `ProtectedPrefix\Administrators` in the first place.
 fn verify_server(pipe: &NamedPipeClient, expected: &Path) -> Result<(), AppError> {
-    let image = super::ident::server_pid(pipe)
-        .ok()
-        .and_then(|pid| vpnte_winnet::process::image_path(pid).ok());
-    let same = image.as_deref().is_some_and(|got| {
-        got.as_os_str()
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&expected.as_os_str().to_string_lossy())
+    let server = super::ident::server_pid(pipe).ok();
+    let service = crate::scm::manage::process_id().ok().flatten();
+    let ours = accepts(server, service, expected, |pid| {
+        vpnte_winnet::process::image_path(pid).ok()
     });
-    if same {
+    if ours {
         Ok(())
     } else {
-        tracing::warn!(?image, "the pipe's server is not the installed service");
+        tracing::warn!(
+            ?server,
+            ?service,
+            "the pipe's server is not the installed service"
+        );
         Err(AppError::msg(
             ErrorKind::Permission,
             Msg::new("service.pipe.notOurs"),
         ))
     }
+}
+
+/// [`verify_server`]'s rule: the pipe's server process is the service's process (`service`, from
+/// the SCM), or its image (read only when needed) is `expected` (Windows-style case-insensitive).
+pub(super) fn accepts(
+    server: Option<u32>,
+    service: Option<u32>,
+    expected: &Path,
+    image: impl FnOnce(u32) -> Option<PathBuf>,
+) -> bool {
+    let Some(server) = server else {
+        return false;
+    };
+    if service == Some(server) {
+        return true;
+    }
+    image(server).is_some_and(|got| {
+        got.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&expected.as_os_str().to_string_lossy())
+    })
 }
