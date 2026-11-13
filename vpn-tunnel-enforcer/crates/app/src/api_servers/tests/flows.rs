@@ -72,10 +72,21 @@ async fn the_page_works_over_a_real_list() {
 
     // p-small (RU-2026 item 6), psmall-a4: the list-wide check runs through the probes; no
     // engine can start here, so nothing could be checked: the answer says why (as a group check
-    // does), nothing streams and nothing is stored.
+    // does), nothing streams and nothing is stored. The engine's own refusal is the reason: an
+    // unelevated process cannot spawn the missing exe, an elevated one (CI's runner) refuses it
+    // first at the release pin check (`vpnte_engine::pin`).
     let (results, mut landed) = mpsc::unbounded_channel();
     let err = api.check_all_health(results).await.unwrap_err();
-    assert_eq!(err.user_msg().key, "engine.process.spawnFailed");
+    let key = err.user_msg().key;
+    assert!(
+        [
+            "engine.process.spawnFailed",
+            "engine.process.notPinned",
+            "engine.process.fileMissing",
+        ]
+        .contains(&key.as_ref()),
+        "the engine's refusal, got {key}"
+    );
     assert!(landed.try_recv().is_err());
     assert!(state.borrow().servers.iter().all(|s| s.health.is_none()));
 
