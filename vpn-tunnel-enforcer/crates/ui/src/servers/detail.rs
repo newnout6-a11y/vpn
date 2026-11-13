@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 use vpnte_base::AppResult;
 use vpnte_base::types::ClientDevice;
 
-use super::actions::Actions;
+use super::actions::{Actions, save_key_label};
 use super::live::LiveCheckPanel;
 use super::model::{ArchiveReason, GeoInfo, GroupSource, GroupStatus, LatencyStats, ProbeReport};
 use super::present::{
@@ -75,6 +75,9 @@ pub(crate) fn ServerDetail() -> Element {
     let (s_save, s_copy) = (server.clone(), server.clone());
     // The provider's `hide-settings`: no key leaves the app; everything else stays visible.
     let hidden = server.as_ref().is_some_and(|s| s.config_hidden);
+    let save_label = server
+        .as_ref()
+        .map_or_else(|| t!("serverDetail.saveKey"), save_key_label);
     let footer = rsx! {
         if hidden {
             p { class: "srv-detail-note", {t!("ui.servers.detail.hidden")} }
@@ -87,7 +90,7 @@ pub(crate) fn ServerDetail() -> Element {
                         a_save.export_key(s, true);
                     }
                 },
-                {t!("serverDetail.saveKey")}
+                "{save_label}"
             }
             Button {
                 kind: ButtonKind::Ghost,

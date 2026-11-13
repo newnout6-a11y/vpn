@@ -7,6 +7,11 @@
       "transferUnavailable": "Configuration import and export are not available in this version of the app.",
       "diagnosticsUnavailable": "The diagnostics ZIP export is not available in this version of the app.",
       "themeUnknown": "This theme no longer exists.",
+      "theme": {
+        "light": "Light",
+        "dark": "Dark",
+        "system": "System"
+      },
       "killSwitch": {
         "unconfirmed": "The Windows filters could not be verified."
       },

@@ -177,13 +177,23 @@ fn themes_list_and_existence() {
         }],
         ..ThemesDoc::default()
     };
-    let list = project::themes(&doc);
+    let list = project::themes(&doc, vpnte_base::i18n::Lang::Ru);
     assert_eq!(list.len(), 4);
     assert!(list[..3].iter().all(|t| t.builtin));
     assert_eq!(list[3].mode, ui::ThemeMode::Dark);
     assert!(project::theme_exists(&doc, "custom-1"));
     assert!(project::theme_exists(&doc, "builtin-dark"));
     assert!(!project::theme_exists(&doc, "deleted"));
+    // PR review 4538668826: the built-in names come from the locale, the user's stay as typed.
+    vpnte_base::i18n::init(&crate::svc_core::locale_layers());
+    let names = |lang| -> Vec<String> {
+        let list = project::themes(&doc, lang);
+        list.into_iter().map(|t| t.name).collect()
+    };
+    let ru = names(vpnte_base::i18n::Lang::Ru);
+    assert_eq!(ru, ["Светлая", "Тёмная", "Как в системе", "Ocean"]);
+    let en = names(vpnte_base::i18n::Lang::En);
+    assert_eq!(en, ["Light", "Dark", "System", "Ocean"]);
 }
 
 /// Wizard routing without TUN capture: Soft as chosen; a key (the page offers no Soft with a

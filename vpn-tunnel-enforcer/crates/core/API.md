@@ -72,13 +72,19 @@ pub struct DataDirs {
 }
 impl DataDirs {
     pub fn resolve() -> AppResult<Self>;   // env overrides (empty = unset, relative made absolute), else the
-                                           // Roaming AppData known folder; creates nothing
+                                           // Roaming AppData known folder; creates nothing. An ELEVATED
+                                           // process ignores all three overrides (any program of the user
+                                           // can set them in HKCU\Environment): resources = <exe dir>\resources,
+                                           // data / legacy = the normal folders
     pub fn new(root: PathBuf, legacy_electron: PathBuf, resources: PathBuf) -> Self; // logs/history/cache under root
     pub fn ensure(&self) -> AppResult<()>;         // create root, logs, history, cache
     pub fn lock(&self) -> AppResult<DataLock>;     // creates root; exclusive <root>\lock; held elsewhere →
                                                    // Conflict core.store.dataDirLocked
 }
 #[derive(Debug)] pub struct DataLock;   // keep it for the whole process life; the OS releases it on exit / crash
+pub fn log_ignored_overrides();       // elevated + an override set: one warn line per process naming it;
+                                     // resolve() and logging::init call it (a line with no subscriber
+                                     // is lost, so the guard is spent only when it was logged)
 ```
 
 ## `store` — one persistence mechanism for every JSON document

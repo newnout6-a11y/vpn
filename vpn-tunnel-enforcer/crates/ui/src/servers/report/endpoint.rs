@@ -184,7 +184,6 @@ pub(super) fn HttpBox(check: LiveCheck) -> Element {
             if let Some(v) = &http.location_header {
                 Kv { label: "Location:".to_owned(), mono: true, span { class: "w-trunc", title: "{v}", "{v}" } }
             }
-            p { class: "srv-diag-foot", {t!("ui.servers.live.httpNote")} }
         }
     }
 }

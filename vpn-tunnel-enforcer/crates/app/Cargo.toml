@@ -46,9 +46,6 @@ tracing.workspace = true
 windows.workspace = true
 jiff.workspace = true
 uuid.workspace = true
-# app-import tests: synthetic Electron `safeStorage` fixtures (v10 = AES-256-GCM, base64).
-aes-gcm.workspace = true
-base64.workspace = true
 # app-tools: the routing self-test's echo client through a Soft session's mixed inbound.
 reqwest.workspace = true
 # fix-autopick: the stall confirmation counts raw bytes below the inner TLS, as the probes do
@@ -67,6 +64,9 @@ image = { version = "0.25.10", default-features = false, features = ["bmp", "gif
 [dev-dependencies]
 # p-uiperf: paused clock for the live-feed cadence tests (`api_dashboard::pace`).
 tokio = { workspace = true, features = ["test-util"] }
+# app-import tests: synthetic Electron `safeStorage` fixtures (v10 = AES-256-GCM, base64).
+aes-gcm.workspace = true
+base64.workspace = true
 
 [build-dependencies]
 embed-resource = "3.0.12"

@@ -106,6 +106,7 @@ fn tunnel_now(tunnel: Option<&dyn TunnelOps>) -> (TunnelSnapshot, Option<Session
 fn publish_stores(shared: &Shared, snap: &TunnelSnapshot, session: Option<&SessionView>) {
     let backend = &shared.backend;
     let settings = backend.settings.snapshot();
+    let lang = settings.locale.unwrap_or_else(vpnte_ui::lang::os_lang);
     let (autostart, os, refreshing, last_error, browser) = {
         let l = shared.local.lock();
         let os = l.os_notifications.clone();
@@ -123,7 +124,8 @@ fn publish_stores(shared: &Shared, snap: &TunnelSnapshot, session: Option<&Sessi
         settings: project::settings_view(&settings, &soft, leak),
         locale: settings.locale,
         active_theme_id: settings.active_theme_id.clone(),
-        themes: backend.themes.read(project::themes),
+        // The names of the built-in themes follow the language (a switch republishes).
+        themes: backend.themes.read(|doc| project::themes(doc, lang)),
         autostart: autostart.unwrap_or(false),
         // The stored choice (applied with each session); never shown without the automation.
         location_privacy: shared.automation.is_some() && settings.location_privacy,

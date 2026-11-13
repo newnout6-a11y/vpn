@@ -18,7 +18,7 @@ use vpnte_ui::servers::{FetchError, KeyHealthReason, RefreshOutcome};
 
 use super::super::checks::{key_health_view, updates};
 use super::super::detail::latency_stats;
-use super::super::export::{keys_file, safe_name, stamp};
+use super::super::export::{BulkKey, is_yaml, keys_file, safe_name, stamp};
 use super::super::import::{outcome, report, skipped_lines};
 use super::super::project::{reason_code, same_wire};
 
@@ -159,15 +159,23 @@ fn refresh_outcome_reads_the_recorded_failure() {
     ));
 }
 
+/// A bulk entry that is not an AmneziaWG server.
+fn bulk(share: SharedKey) -> Option<BulkKey> {
+    Some(BulkKey {
+        share,
+        mihomo: None,
+    })
+}
+
 /// Bulk export: a text list with the old header, or one JSON array as soon as a key needs JSON.
 #[test]
 fn key_files_keep_the_old_formats() {
     let now = 1_794_388_320_123; // 2026-11-11T09:12:00.123Z
     assert_eq!(stamp(now), "2026-11-11T09-12-00");
     let links = [
-        Some(SharedKey::Uri("vless://a@one.example.net:443".into())),
+        bulk(SharedKey::Uri("vless://a@one.example.net:443".into())),
         None,
-        Some(SharedKey::Uri("trojan://b@two.example.net:443".into())),
+        bulk(SharedKey::Uri("trojan://b@two.example.net:443".into())),
     ];
     let file = keys_file(&links, now).expect("exportable");
     assert!(!file.json);
@@ -179,8 +187,8 @@ fn key_files_keep_the_old_formats() {
          trojan://b@two.example.net:443\n"
     );
     let mixed = [
-        Some(SharedKey::Uri("vless://a@one.example.net:443".into())),
-        Some(SharedKey::Json(
+        bulk(SharedKey::Uri("vless://a@one.example.net:443".into())),
+        bulk(SharedKey::Json(
             serde_json::json!({"remarks": "x", "outbounds": []}),
         )),
     ];
@@ -324,4 +332,94 @@ fn refused_providers_read_as_refused() {
         errors,
         [Some(FetchError::Refused), Some(FetchError::Http(503)), None]
     );
+}
+
+/// A synthetic AmneziaWG `.conf` (obvious fake keys and documentation addresses); `n` makes the
+/// endpoint and the keys of each copy different.
+fn awg(n: u8) -> vpnte_profiles::model::Profile {
+    let key = |b: u8| {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode([b; 32])
+    };
+    let conf = format!(
+        "[Interface]\nPrivateKey = {}\nAddress = 10.8.0.{n}/32\nJc = 4\nJmin = 40\nJmax = 70\n\
+         S1 = 15\nS2 = 20\nH1 = 1234567891\nH2 = 1234567892\nH3 = 1234567893\nH4 = 1234567894\n\n\
+         [Peer]\nPublicKey = {}\nEndpoint = 203.0.113.{n}:51820\nAllowedIPs = 0.0.0.0/0\n",
+        key(n),
+        key(n + 100)
+    );
+    vpnte_profiles::wg_ini::parse_wg_ini(&conf)
+        .expect("a conf")
+        .expect("imported")
+}
+
+/// What the text import makes of a file: the identities read back (in any order) and how many
+/// entries it skipped.
+fn read_back(body: &str) -> (std::collections::BTreeSet<[u8; 16]>, usize) {
+    let report = vpnte_servers::parse::parse_text(body).expect("within the limits");
+    let ids = report.profiles.iter().map(|p| p.identity()).collect();
+    (ids, report.skipped.len())
+}
+
+/// `ids` as [`read_back`] gives them for a file it reads without a skip.
+fn ids<const N: usize>(ids: [[u8; 16]; N]) -> (std::collections::BTreeSet<[u8; 16]>, usize) {
+    (ids.into_iter().collect(), 0)
+}
+
+/// PR review 4547397546: every AmneziaWG server of a bulk export reads back — one as its `.conf`
+/// next to the links, several as one mihomo `proxies:` document (the import takes only one
+/// `.conf` per text), inside a JSON file as its mihomo document.
+#[test]
+fn bulk_exports_carry_amneziawg_servers_back() {
+    let now = 1_794_388_320_123;
+    let link = "vless://11111111-2222-4333-8444-555555555555@one.example.net:443?security=tls&type=tcp#One";
+    let link_id = vpnte_profiles::uri::parse_uri(link).unwrap().identity();
+    let (a, b) = (awg(1), awg(2));
+    let keys = |profiles: &[&vpnte_profiles::model::Profile]| -> Vec<Option<BulkKey>> {
+        let mut keys = vec![bulk(SharedKey::Uri(link.into()))];
+        keys.extend(profiles.iter().map(|p| BulkKey::of(p)));
+        keys
+    };
+
+    let one = keys_file(&keys(&[&a]), now).expect("exportable");
+    assert!(!one.json && one.body.contains("[Interface]"));
+    assert_eq!(read_back(&one.body), ids([link_id, a.identity()]));
+
+    let two = keys_file(&keys(&[&a, &b]), now).expect("exportable");
+    assert!(!two.body.contains("[Interface]") && two.body.contains("\nproxies:\n"));
+    assert_eq!((two.exported, two.skipped), (3, 0));
+    let want = ids([link_id, a.identity(), b.identity()]);
+    assert_eq!(read_back(&two.body), want);
+
+    // Without a mihomo form a second AmneziaWG server is left out (and counted), never written
+    // as a second `.conf` that would break the whole file's import.
+    let mut no_mihomo = keys(&[&a, &b]);
+    if let Some(Some(key)) = no_mihomo.last_mut() {
+        key.mihomo = None;
+    }
+    let file = keys_file(&no_mihomo, now).expect("exportable");
+    assert_eq!((file.exported, file.skipped), (2, 1));
+    assert_eq!(read_back(&file.body), ids([link_id, a.identity()]));
+
+    let mut json = keys(&[&a]);
+    json.push(bulk(SharedKey::Json(
+        serde_json::json!({"remarks": "x", "outbounds": []}),
+    )));
+    let file = keys_file(&json, now).expect("exportable");
+    let items: serde_json::Value = serde_json::from_str(&file.body).expect("one JSON array");
+    assert!(
+        items[1]
+            .as_str()
+            .is_some_and(|s| s.starts_with("proxies:\n"))
+    );
+    assert!(read_back(&file.body).0.contains(&a.identity()));
+}
+
+/// The single-key Save dialog: the chosen file type picks the AmneziaWG format.
+#[test]
+fn a_yaml_path_picks_the_mihomo_format() {
+    use std::path::Path;
+    assert!(is_yaml(Path::new(r"C:\Users\x\Desktop\awg-one.yaml")));
+    assert!(is_yaml(Path::new("one.YML")));
+    assert!(!is_yaml(Path::new("one.conf")) && !is_yaml(Path::new("yaml")));
 }

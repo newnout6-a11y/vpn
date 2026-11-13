@@ -77,9 +77,10 @@ impl Hub {
         .await
     }
 
-    /// A lane call's warnings (Xray's dropped settings, unresolved names, …) reach the user
-    /// (SERVICES: `Done::warnings` are extra messages to show): as notices unless the caller's
-    /// answer carries them; while a cancel is pending they become its answer instead.
+    /// A lane call's warnings (Xray's dropped settings, unresolved names, …) reach the user once
+    /// (SERVICES: `Done::warnings` are extra messages to show): the call's answer carries the
+    /// first one when it can (see [`unanswered`]), every other one becomes a notice; while a
+    /// cancel is pending they go to its answer instead.
     fn lane_ended(&self, res: &Result<Done, ConnError>, shows: Shows) {
         let warnings = match res {
             Ok(done) => done.warnings.as_slice(),
@@ -88,17 +89,22 @@ impl Hub {
         for w in warnings {
             tracing::warn!(key = %w.key, "connection call finished with a warning");
         }
+        let rest = unanswered(warnings, shows, res.is_ok());
         let mut local = self.local.lock();
         if local.conn.cancelling {
-            local.cancel_warnings.extend_from_slice(warnings);
+            local.cancel_warnings.extend_from_slice(rest);
             return;
         }
         drop(local);
-        if shows == Shows::Notices {
-            for w in warnings {
-                let notice = Notice::new(Level::Warn, w.clone());
-                self.backend.notifier.notify(notice, None);
-            }
+        self.warn_all(rest.iter().cloned());
+    }
+
+    /// Each message as a warning notice.
+    fn warn_all(&self, warnings: impl IntoIterator<Item = Msg>) {
+        for w in warnings {
+            self.backend
+                .notifier
+                .notify(Notice::new(Level::Warn, w), None);
         }
     }
 
@@ -125,10 +131,9 @@ impl Hub {
                 std::mem::take(&mut local.cancel_warnings)
             };
             hub.publish_all();
-            match settled {
-                Ok(()) => Ok(warnings.into_iter().next()),
-                Err(_) => Err(AppError::timeout()),
-            }
+            let (answer, rest) = answer_and_rest(warnings, settled.is_ok());
+            hub.warn_all(rest);
+            settled.map(|()| answer).map_err(|_| AppError::timeout())
         })
         .await
     }
@@ -399,5 +404,52 @@ impl Hub {
             Ok(())
         })
         .await
+    }
+}
+
+/// The warnings a lane call's answer does not carry. The UI's answer holds one message: a
+/// successful `Shows::Answer` call (disconnect) carries the first warning, a failed one answers
+/// with its error, so all of them are left.
+fn unanswered(warnings: &[Msg], shows: Shows, ok: bool) -> &[Msg] {
+    let carried = usize::from(shows == Shows::Answer && ok).min(warnings.len());
+    &warnings[carried..]
+}
+
+/// A cancel's answer (its first warning, once it settled) and the warnings left for notices
+/// (all of them after a timeout, which answers with its error).
+fn answer_and_rest(warnings: Vec<Msg>, settled: bool) -> (Option<Msg>, Vec<Msg>) {
+    let mut warnings = warnings.into_iter();
+    let answer = if settled { warnings.next() } else { None };
+    (answer, warnings.collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msgs(keys: &[&'static str]) -> Vec<Msg> {
+        keys.iter().map(|k| Msg::new(*k)).collect()
+    }
+
+    /// PR review 4545588805: every warning of a disconnect reaches the user once — the first in
+    /// its answer, the rest as notices; a failed call answers with its error, so all become
+    /// notices; connect / switch answer nothing.
+    #[test]
+    fn every_lane_warning_is_shown_once() {
+        let w = msgs(&["a", "b", "c"]);
+        assert_eq!(unanswered(&w, Shows::Answer, true), &w[1..]);
+        assert_eq!(unanswered(&w, Shows::Answer, false), &w[..]);
+        assert_eq!(unanswered(&w, Shows::Notices, true), &w[..]);
+        assert!(unanswered(&[], Shows::Answer, true).is_empty());
+    }
+
+    /// The same for a cancel's collected warnings.
+    #[test]
+    fn a_cancel_answers_with_the_first_warning_and_notifies_the_rest() {
+        let (answer, rest) = answer_and_rest(msgs(&["a", "b", "c"]), true);
+        assert_eq!((answer, rest), (Some(Msg::new("a")), msgs(&["b", "c"])));
+        let (answer, rest) = answer_and_rest(msgs(&["a", "b"]), false);
+        assert_eq!((answer, rest), (None, msgs(&["a", "b"])));
+        assert_eq!(answer_and_rest(Vec::new(), true), (None, Vec::new()));
     }
 }

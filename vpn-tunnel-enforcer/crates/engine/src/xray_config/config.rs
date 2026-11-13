@@ -90,6 +90,12 @@ pub fn build_config(graph: &ProxyGraph, ep: &SlotEndpoint) -> Value {
         "listen": "127.0.0.1",
         "port": ep.port(),
         "protocol": "socks",
+        // UDP stays on: the slots carry the UDP of UDP-capable profiles (`UdpPolicy::of`), for
+        // the tunnel and for the external proxy slots. Xray 26.11.9 (proxy/socks) opens no UDP
+        // port of its own: each UDP ASSOCIATE needs the password and gets a fresh relay socket
+        // that serves only the sender of its first datagram (tests/udp.rs). What remains is a
+        // race for a fresh association before its client's first datagram, which gives a local
+        // program nothing the tunnel and the open proxy capture do not give it anyway.
         "settings": {
             "udp": true,
             "auth": "password",

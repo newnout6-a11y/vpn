@@ -811,7 +811,8 @@ fn engine_line_follows_the_running_session() {
 
 /// Brief point 5 (the Xray path's warnings reach the user): a lane call whose answer has no
 /// room for its warnings (tray stop here; connect and server switch alike) turns each into a
-/// notice; the dashboard's disconnect answers with its warning instead, so nothing doubles.
+/// notice; the dashboard's disconnect answers with its first warning and notifies the rest
+/// (PR review 4545588805), so each shows once.
 /// Desktop notifications are off: the notices stay in the in-app list, no Windows toast.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lane_warnings_reach_the_user_once() {
@@ -826,7 +827,11 @@ async fn lane_warnings_reach_the_user_once() {
     let answer = super::traits::Dashboard(hub.clone()).disconnect().await;
     let key = answer.expect("off").map(|m| m.key.into_owned());
     assert_eq!(key.as_deref(), Some("w.one"));
-    assert!(notices.try_recv().is_err(), "the answer carries it");
+    let mut rest = Vec::new();
+    while let Ok(n) = notices.try_recv() {
+        rest.push(n.notice.title.key.into_owned());
+    }
+    assert_eq!(rest, ["w.two"], "the answer carries the first one");
     super::traits::Tray(hub.clone()).stop().await.expect("off");
     let mut keys = Vec::new();
     while let Ok(n) = notices.try_recv() {

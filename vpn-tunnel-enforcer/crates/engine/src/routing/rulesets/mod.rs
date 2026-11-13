@@ -258,8 +258,16 @@ impl RuleSetService {
     /// when neither has both files: pass `rule_set_dir: None` (Smart RU off for the run, with
     /// a warning) instead of a missing local rule set, which sing-box refuses to start with.
     pub fn active(&self, managed: bool) -> Option<(ActiveSource, PathBuf)> {
+        self.select(managed, vpnte_winnet::elevation::is_elevated())
+    }
+
+    /// Elevated, sing-box parses the files with administrator rights from user-writable folders:
+    /// only the bundled files are used, and only while they match their release pins (the helper
+    /// service does the same with its own copies). A managed generation has no pin to check.
+    fn select(&self, managed: bool, elevated: bool) -> Option<(ActiveSource, PathBuf)> {
         let current = self.store.read(|d| d.current.clone());
         if managed
+            && !elevated
             && let Some(generation) = current
             && complete(&self.root.join(&generation))
         {
@@ -267,7 +275,8 @@ impl RuleSetService {
             let since = gen_ms(&generation);
             return Some((ActiveSource::Managed { generation, since }, dir));
         }
-        complete(&self.bundled).then(|| (ActiveSource::Bundled, self.bundled.clone()))
+        (complete(&self.bundled) && (!elevated || crate::pin::rule_sets_pinned(&self.bundled)))
+            .then(|| (ActiveSource::Bundled, self.bundled.clone()))
     }
 
     /// Deletes generations other than the current one and the newest older one, plus a

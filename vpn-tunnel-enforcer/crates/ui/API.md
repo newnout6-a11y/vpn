@@ -518,7 +518,9 @@ Demo: `DemoServersApi` with `DemoScene`; `DemoServersApi::offer_link(link)` play
 
 App duties: `ServerView.stealth` from `vpnte_profiles::caps`; finding titles / details and skipped-line
 reasons are `Msg` keys of the backend's own fragments; `save_key` / `export_*` show the native Save
-dialog (Desktop default) and return `Ok(None)` when it is dismissed; `copy_key` uses the 60 s
+dialog (Desktop default) and return `Ok(None)` when it is dismissed (an AmneziaWG server's dialog
+offers its `.conf` and, when mihomo can carry it, a mihomo YAML entry: the chosen type picks the
+format; its row says «Сохранить .conf или YAML»); `copy_key` uses the 60 s
 self-clearing secret clipboard; `open_url` must open the browser non-elevated; `live_check` /
 `live_batch` abort the probe when their future is dropped (abort-on-drop around `tokio::spawn`) and
 then store nothing; pings measured while the tunnel runs are never persisted.

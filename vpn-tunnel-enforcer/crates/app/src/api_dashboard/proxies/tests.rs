@@ -78,6 +78,7 @@ fn the_column_projects_slots_and_choices() {
         profile_id: Some(a.clone()),
         profile_name: Some("Fake A".into()),
         engine: Some(vpnte_base::types::Engine::Xray),
+        notice: Some(Msg::new("proxies.slot.spoofDropped").arg("name", "Fake A")),
         ..InstanceStatus::stopped(Slot::new(2).unwrap())
     };
     let failed = InstanceStatus {
@@ -107,6 +108,11 @@ fn the_column_projects_slots_and_choices() {
         "the slot names its engine"
     );
     assert_eq!(column.rows[0].engine, None, "a failed slot runs no engine");
+    // p-left 6: with no error, the slot's notice reaches the row's tooltip.
+    assert_eq!(
+        row.last_error,
+        Some(Msg::new("proxies.slot.spoofDropped").arg("name", "Fake A"))
+    );
     assert_eq!(column.choices.len(), 1, "the removed server is not offered");
     let choice = &column.choices[0];
     assert_eq!(choice.id, a);

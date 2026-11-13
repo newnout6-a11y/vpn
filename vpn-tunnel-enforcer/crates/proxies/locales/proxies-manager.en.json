@@ -9,7 +9,7 @@
       "egressProbeFailed": "The route check failed"
     },
     "slot": {
-      "spoofDropped": "\"{{name}}\": the provider's TLS hello spoofing (tls.spoof) needs the app started as administrator, so this proxy runs without it."
+      "spoofDropped": "\"{{name}}\": the provider's TLS hello spoofing (tls.spoof) works only in the tunnel through the helper service; this proxy runs without it."
     }
   }
 }

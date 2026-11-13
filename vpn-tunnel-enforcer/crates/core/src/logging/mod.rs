@@ -111,6 +111,8 @@ pub fn init(dir: &Path, debug: bool) -> AppResult<LogGuard> {
         shared,
         lane: Arc::clone(&lane),
     });
+    // The folders were resolved before this log existed: say now what an elevated run ignored.
+    crate::paths::log_ignored_overrides();
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // The release build has no console: without this a panic leaves no trace at all. Wait

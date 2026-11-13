@@ -2,6 +2,7 @@
 //! ways (the UI keeps its own copies of the settings enums, without serde).
 use vpnte_automation::tweaks::DevTargets;
 use vpnte_base::Msg;
+use vpnte_base::i18n::Lang;
 use vpnte_base::types::KillSwitchLevel;
 use vpnte_core::settings::{self as core, RuleSetMode, Settings};
 use vpnte_engine::routing::RulesDoc;
@@ -274,18 +275,26 @@ pub fn notifications_view(s: &Settings, os: ui::OsNotifications) -> ui::Notifica
     }
 }
 
-/// Built-in themes first, then the user's.
-pub fn themes(doc: &ThemesDoc) -> Vec<ui::ThemeChoice> {
-    let builtin = |id: &str, name: &str, mode| ui::ThemeChoice {
+/// Built-in themes first (their names in `lang`), then the user's.
+pub fn themes(doc: &ThemesDoc, lang: Lang) -> Vec<ui::ThemeChoice> {
+    let builtin = |id: &str, key: &'static str, mode| ui::ThemeChoice {
         id: id.to_owned(),
-        name: name.to_owned(),
+        name: Msg::new(key).render(lang),
         mode,
         builtin: true,
     };
     let mut list = vec![
-        builtin(BUILTIN_LIGHT, "Light", ui::ThemeMode::Light),
-        builtin(BUILTIN_DARK, "Dark", ui::ThemeMode::Dark),
-        builtin(BUILTIN_SYSTEM, "System", ui::ThemeMode::System),
+        builtin(
+            BUILTIN_LIGHT,
+            "app.settings.theme.light",
+            ui::ThemeMode::Light,
+        ),
+        builtin(BUILTIN_DARK, "app.settings.theme.dark", ui::ThemeMode::Dark),
+        builtin(
+            BUILTIN_SYSTEM,
+            "app.settings.theme.system",
+            ui::ThemeMode::System,
+        ),
     ];
     list.extend(doc.custom_themes.iter().map(|t| ui::ThemeChoice {
         id: t.id.clone(),

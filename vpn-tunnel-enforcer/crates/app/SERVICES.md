@@ -72,7 +72,8 @@ read-only store (newer version, unreadable) still opens; show `store.notice()` a
 ## `TunnelOps` methods and who calls them
 Lane operations return `Result<Done, ConnError>` (`ConnError::kind()` / `user_msg()` /
 `warnings()`; `AppError::from(err)` for the UI, `Cancelled` is quiet); `Done::warnings` are extra
-messages to show.
+messages to show, each once: the dashboard's disconnect answers with the first and the hub turns
+every other one (all of a failed call's, all of a connect's or switch's) into a notice.
 
 | Method | Calls it |
 | --- | --- |

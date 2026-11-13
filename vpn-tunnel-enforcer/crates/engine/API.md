@@ -41,7 +41,9 @@ the process ends (the first run hashes them once). A different or relative-path 
 before the spawn: `io::ErrorKind::InvalidData`, rendered as `engine.process.notPinned(file)` by
 the `From<…> for AppError` impls; a missing one (a missing DLL too: Windows would search `PATH`
 for it) as `io::ErrorKind::NotFound`, rendered as `engine.process.fileMissing(file)`. Unelevated
-nothing is checked.
+nothing is checked. The bundled Smart RU rule sets (`geoip-ru.srs`, `geosite-category-gov-ru.srs`) are
+pinned the same way: an elevated `RuleSetService::active` uses only them, and only while they match
+(a refused file = `None`, Smart RU off for the run with its usual warning).
 **Errors:** every error enum has `From<_> for vpnte_base::AppError` with an `engine.*` message;
 callers bubble them with `?` and render `AppError::user_msg()`.
 **Children:** every engine runs hidden (CREATE_NO_WINDOW, in its own windowless console and
@@ -367,6 +369,10 @@ impl ProxyGraph {
     pub fn substitute(&mut self, resolved: &HashMap<String, IpAddr>); // address -> IP, derived names pinned
 }
 pub fn build_config(graph: &ProxyGraph, ep: &SlotEndpoint) -> Value; // infallible
+                                       // inbound `in`: SOCKS5 on 127.0.0.1:<port>, password, UDP on.
+                                       // Xray 26.11.9 opens no UDP port itself: every UDP ASSOCIATE needs
+                                       // the password and gets its own relay socket bound to the first
+                                       // sender (real-Xray test xray_config::tests::udp)
 pub enum XrayConfigError { Protocol(&'static str), Feature(SingBoxOnly), Invalid(&'static str),
     Native(NativeError) }                                             // -> Validation
 ```
@@ -570,6 +576,9 @@ pub struct RuleSetService;
 impl RuleSetService {
     pub fn new(store: Arc<Store<RuleSetsDoc>>, dirs: &DataDirs) -> Self;  // <data>\cache\rulesets, resources\
     pub fn active(&self, managed: bool) -> Option<(ActiveSource, PathBuf)>; // dir with both .srs files; None = neither
+                                                                          // ELEVATED: never a managed generation (no pin);
+                                                                          // bundled only while both .srs match the pins of
+                                                                          // resources/engines.toml (held open), else None
     pub async fn refresh(&self, cfg: &RefreshSettings, force: bool, cancel: &CancellationToken) -> RefreshOutcome;
     pub fn prune(&self) -> usize;                                         // blocking; only before an engine start
 }

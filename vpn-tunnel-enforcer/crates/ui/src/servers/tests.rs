@@ -787,3 +787,56 @@ async fn a_link_waits_while_the_dialog_reads() {
     assert_eq!((f.input.as_str(), f.from_link), (LINK, true));
     assert_eq!(api.adds.get(), 0);
 }
+
+/// p-left 7: an AmneziaWG server's save action names both formats its Save dialog offers
+/// (`.conf` and the mihomo YAML); every other server keeps the plain label.
+#[test]
+fn an_amneziawg_server_offers_conf_or_yaml() {
+    use super::actions::save_key_label;
+    use super::model::ServerView;
+    let (dom, _actions) = mount_page(&fake());
+    let server = |protocol: &str| ServerView {
+        protocol: protocol.into(),
+        ..ServerView::default()
+    };
+    dom.in_runtime(|| {
+        let (awg, vless) = (
+            save_key_label(&server("amneziawg")),
+            save_key_label(&server("vless")),
+        );
+        let text = |key| crate::lang::translate_now(key, &[]);
+        assert_eq!(awg, text("ui.servers.key.saveAwg"));
+        assert_eq!(vless, text("servers.saveKey"));
+        assert_ne!(awg, vless);
+    });
+}
+
+/// p-left 8 (no paranoia, owner 12.11.2026): the export and live-check texts state facts without
+/// alarm, the HTTP box carries no disclaimer, and «Ключ скопирован» stays as it was.
+#[test]
+fn export_texts_stay_calm() {
+    use crate::test_locales::text;
+    use vpnte_base::i18n::Lang;
+    let ru = |key| text(Lang::Ru, key);
+    assert_eq!(
+        ru("ui.servers.key.saved").as_deref(),
+        Some("Ключ сохранён: {{path}}")
+    );
+    assert_eq!(
+        ru("ui.servers.export.warning").as_deref(),
+        Some("Файлы содержат ключи доступа")
+    );
+    assert_eq!(
+        ru("ui.servers.live.sanBad").as_deref(),
+        Some("Не совпадает")
+    );
+    assert_eq!(ru("ui.servers.live.httpNote"), None);
+    assert_eq!(
+        ru("ui.servers.key.copied").as_deref(),
+        Some("Ключ скопирован")
+    );
+    assert_eq!(
+        text(Lang::En, "ui.servers.key.saved").as_deref(),
+        Some("Key saved: {{path}}")
+    );
+}

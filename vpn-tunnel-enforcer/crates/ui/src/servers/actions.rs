@@ -20,6 +20,7 @@ mod request;
 mod server;
 
 pub(crate) use group::fetch_error_text;
+pub(crate) use server::save_key_label;
 
 /// Shows an action's error unless it was a cancellation (silent everywhere).
 pub(crate) fn toast_error(toasts: Toasts, title: String, err: &AppError) {

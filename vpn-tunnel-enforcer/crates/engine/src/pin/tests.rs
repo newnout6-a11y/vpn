@@ -7,9 +7,29 @@ use vpnte_base::types::Engine;
 
 use super::*;
 use crate::singbox_process::spawn_error;
-use crate::test_support::{TempDir, hidden, singbox_exe, xray_exe};
+use crate::test_support::{TempDir, hidden, resources, singbox_exe, xray_exe};
 
 const SHARING_VIOLATION: i32 = 32;
+
+/// PR review 4533368399: the `[[local]]` rule sets are pinned too, and the shipped files match
+/// their pins (the handle is dropped at once: the real files are not held by the test run).
+#[test]
+fn manifest_pins_the_bundled_rule_sets() {
+    let dir = Path::new(r"C:\Apps\VPN\resources");
+    let files = rule_set_files(dir);
+    assert_eq!(files.len(), 2);
+    for (path, name) in files {
+        assert_eq!(path, dir.join(name));
+        assert!(pin(name).is_some(), "{name}");
+        if resources().join(name).is_file() {
+            open_verified(&resources().join(name), pin(name)).unwrap();
+        }
+    }
+    assert_eq!(
+        pin("geoip-ru.srs").map(hex::encode).as_deref(),
+        Some("133d045108290b7e1ea929e3021807ad1842876d959bfc5ae347fdc7db4b5865")
+    );
+}
 
 /// The compiled manifest pins every file an engine runs or loads; the exe comes first.
 #[test]

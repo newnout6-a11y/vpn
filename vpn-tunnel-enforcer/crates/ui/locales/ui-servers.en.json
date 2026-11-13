@@ -158,14 +158,13 @@
         "protocolCipher": "Protocol / cipher:",
         "sanMatch": "SAN match:",
         "sanOk": "Matches the SAN",
-        "sanBad": "Does not match!",
+        "sanBad": "Does not match",
         "chain": "Chain:",
         "untrusted": "Self-signed / not trusted",
         "realityNote": "* For Reality the TLS probe sees the camouflage domain, not the VPN backend behind it.",
         "noAnswer": "No answer",
         "httpStatus": "Response status:",
         "httpPort": "Checked port:",
-        "httpNote": "* A diagnostic hint, not proof that the service is safe.",
         "portsNote": "* An open port does not mean an active VPN protocol.",
         "hops": "Hops:",
         "target": "Target reached:",
@@ -331,7 +330,7 @@
       "export": {
         "proxyList": "Proxy list",
         "proxyFormats": "host:port, host:port:user:pass, protocol://user:pass@host:port",
-        "warning": "The files contain access secrets — keep them like passwords",
+        "warning": "The files contain access keys",
         "keysWorking": "Preparing the key file…",
         "proxiesWorking": "Building the proxy list, one proxy per line…",
         "done": "Saved: {{count}}",
@@ -391,7 +390,8 @@
       },
       "key": {
         "copied": "Key copied",
-        "saved": "Key saved: {{path}}. The file contains an access secret.",
+        "saved": "Key saved: {{path}}",
+        "saveAwg": "Save .conf or YAML",
         "failed": "Could not export the key of «{{name}}»"
       },
       "menu": {

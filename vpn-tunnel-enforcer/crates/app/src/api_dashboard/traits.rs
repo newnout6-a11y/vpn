@@ -41,6 +41,7 @@ impl DashboardApi for Dashboard {
         let call =
             |t: Arc<dyn crate::services::TunnelOps>| async move { t.disconnect(Source::Ui).await };
         let done = self.0.lane(Shows::Answer, call).await?;
+        // The answer holds one message; the lane already showed the others as notices.
         Ok(done.warnings.into_iter().next())
     }
 

@@ -13,11 +13,13 @@
         "writeFailed": "Could not write the file. Choose another folder."
       },
       "dialog": {
-        "saveKey": "Save VPN key — the file contains an access secret",
-        "saveAllKeys": "Save all VPN keys — the file contains passwords and keys",
-        "saveProxyList": "Save proxy list — the file may contain passwords",
+        "saveKey": "Save VPN key",
+        "saveAllKeys": "Save all VPN keys",
+        "saveProxyList": "Save proxy list",
         "textFile": "Text file",
         "jsonFile": "JSON configuration",
+        "confFile": "AmneziaWG configuration",
+        "mihomoFile": "mihomo proxy (YAML)",
         "allFiles": "All files"
       }
     }

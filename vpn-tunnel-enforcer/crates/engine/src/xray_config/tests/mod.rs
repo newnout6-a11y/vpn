@@ -16,6 +16,7 @@ mod security;
 mod select;
 mod sniff;
 mod translate;
+mod udp;
 mod warnings;
 
 /// Obvious fakes. The public key is 32 bytes of 0x01 in base64url: well-formed for Xray.

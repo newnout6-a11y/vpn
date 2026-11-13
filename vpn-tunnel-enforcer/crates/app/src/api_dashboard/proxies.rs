@@ -191,11 +191,17 @@ fn row(i: &InstanceStatus) -> ProxyRowView {
         proxy_url: i.proxy_url.clone(),
         latency_ms: i.latency_ms,
         // The degradation says why in the user's language; other errors are technical English.
-        last_error: i.degradation_reason.map(degradation_msg).or_else(|| {
-            i.last_error
-                .as_ref()
-                .map(|e| Msg::new("app.proxies.detail").arg("detail", e))
-        }),
+        // Without either, what the running engine goes without (`proxies.slot.spoofDropped`)
+        // reaches the row's tooltip.
+        last_error: i
+            .degradation_reason
+            .map(degradation_msg)
+            .or_else(|| {
+                i.last_error
+                    .as_ref()
+                    .map(|e| Msg::new("app.proxies.detail").arg("detail", e))
+            })
+            .or_else(|| i.notice.clone()),
         engine: i.engine,
     }
 }

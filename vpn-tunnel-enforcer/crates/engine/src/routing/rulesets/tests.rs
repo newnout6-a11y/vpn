@@ -121,6 +121,33 @@ fn source_selection() {
     assert!(matches!(source, ActiveSource::Managed { .. }) && path == dir);
 }
 
+/// PR review 4533368399: elevated, sing-box parses the files with administrator rights from
+/// user-writable folders, so only pinned bundled files are used: a complete managed generation
+/// is passed over and a changed bundled file turns Smart RU off for the run (refused before it
+/// is held, so nothing stays open).
+#[test]
+fn an_elevated_run_uses_only_pinned_bundled_rule_sets() {
+    let t = TempDir::new("rulesets-pin");
+    let generation = format!("{GEN_PREFIX}1700000000000");
+    let managed = t.path().join("rulesets").join(&generation);
+    let changed = t.path().join("bundle");
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::create_dir_all(&changed).unwrap();
+    for (_, file, _) in RULE_SETS {
+        std::fs::write(managed.join(file), bundled(file)).unwrap();
+        std::fs::write(changed.join(file), b"changed").unwrap();
+    }
+    let store = Arc::new(Store::<RuleSetsDoc>::open(t.path()));
+    store.update(|d| d.current = Some(generation)).unwrap();
+    let s = RuleSetService::with_paths(store, t.path().join("rulesets"), changed);
+    assert!(matches!(
+        s.select(true, false),
+        Some((ActiveSource::Managed { .. }, _))
+    ));
+    assert_eq!(s.select(true, true), None);
+    assert_eq!(s.select(false, true), None);
+}
+
 /// §7.6 canaries on the bundled files, and B-SR-1 vectors: an empty file, an HTML error page,
 /// an unsupported SRS version, a truncated stream and a swapped set are all rejected.
 #[tokio::test]

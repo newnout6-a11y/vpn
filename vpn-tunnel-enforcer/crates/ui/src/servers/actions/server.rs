@@ -9,6 +9,16 @@ use crate::servers::model::{ProxySkip, ProxyStartReport, ServerView};
 use crate::servers::state::{Bulk, BulkKind};
 use crate::widgets::UiError;
 
+/// The save-key label: an AmneziaWG server is saved as its `.conf` or as a mihomo YAML entry
+/// (the Save dialog's file type picks the format).
+pub(crate) fn save_key_label(server: &ServerView) -> String {
+    if server.protocol == "amneziawg" {
+        crate::t!("ui.servers.key.saveAwg")
+    } else {
+        crate::t!("servers.saveKey")
+    }
+}
+
 /// The outcome line of a proxy start for one server (decision order of the old page).
 pub(crate) fn proxy_outcome(
     report: &ProxyStartReport,

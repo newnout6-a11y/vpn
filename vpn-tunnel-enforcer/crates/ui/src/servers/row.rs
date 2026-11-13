@@ -4,7 +4,7 @@
 use dioxus::prelude::*;
 use vpnte_base::types::EnginePref;
 
-use super::actions::Actions;
+use super::actions::{Actions, save_key_label};
 use super::menu::{MenuItem, OverflowMenu};
 use super::model::{EnginePlan, GroupView, ServerView, ServersView};
 use super::present::{
@@ -179,7 +179,7 @@ pub(crate) fn ServerRow(server: ServerView, group: Option<GroupView>) -> Element
     // The provider's `hide-settings`: the key never leaves the app (the backend refuses it too).
     if !server.config_hidden {
         items.push(MenuItem::new("copy", t!("servers.exportKey")).busy(rt.exporting));
-        items.push(MenuItem::new("save", t!("servers.saveKey")).busy(rt.exporting));
+        items.push(MenuItem::new("save", save_key_label(&server)).busy(rt.exporting));
     }
     items.extend(engine_items(server.engine));
     if deleted {
