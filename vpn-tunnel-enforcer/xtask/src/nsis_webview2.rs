@@ -20,8 +20,12 @@ fn root() -> PathBuf {
         .to_path_buf()
 }
 
+/// A repository text file with LF line ends: CI's Windows checkout turns them into CRLF
+/// (core.autocrlf), and the checks below look for whole lines.
 fn read(rel: &str) -> String {
-    fs::read_to_string(root().join(rel)).unwrap()
+    fs::read_to_string(root().join(rel))
+        .unwrap()
+        .replace("\r\n", "\n")
 }
 
 /// A path as NSIS reads it: backslashes only (makensis does not find `C:\dir/file`).
