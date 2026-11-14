@@ -37,7 +37,7 @@ use vpnte_profiles::countries::Iso2;
 use vpnte_tunnel::api::{CaptureKind, TunStatus};
 use vpnte_tunnel::fsm::{Transition, TunnelSnapshot, TunnelState};
 use vpnte_tunnel::lifecycle::KillSwitchView;
-use vpnte_ui::dashboard::{DashboardApi, DashboardView};
+use vpnte_ui::dashboard::{DashboardApi, DashboardView, SameExit};
 use vpnte_ui::panels::{PanelsApi, ProxiesView, ServersView};
 use vpnte_ui::tray::{TrayApi, TrayState};
 use vpnte_view::labels::FirewallStatus;
@@ -236,12 +236,11 @@ impl Hub {
                 let kill_switch = w.kill_switch.borrow();
                 let other_vpn =
                     project::other_vpn(local.foreign.as_ref(), kill_switch.foreign_vpn.is_some());
-                let same_exit = project::other_vpn_exit(&snap, &evidence, other_vpn);
+                let same_exit = project::same_exit(&snap, &status, &evidence, other_vpn);
                 drop(evidence);
-                let exit = if same_exit {
-                    project::calm_exit(exit)
-                } else {
-                    exit
+                let exit = match same_exit {
+                    SameExit::No => exit,
+                    SameExit::OtherVpn | SameExit::Server => project::calm_exit(exit),
                 };
                 DashboardView {
                     foreign_vpn: project::foreign_vpn(&conn, local.foreign.as_ref()),
@@ -258,7 +257,7 @@ impl Hub {
                     no_pause_vpn: kill_switch.foreign_vpn.clone(),
                     proxy_taken: *w.proxy_taken.borrow(),
                     proving_exit: project::proving_exit(&snap, &status),
-                    other_vpn_exit: same_exit,
+                    same_exit,
                 }
             }
             None => DashboardView {
@@ -311,19 +310,25 @@ impl Hub {
         let mut local = self.local.lock();
         let snap = w.snapshot.borrow();
         let status = w.status.borrow();
+        let evidence = w.evidence.borrow();
         let clock = local.clock_for(&snap);
         let conn = project::conn_view(&snap, &status, &local.conn, &clock);
         let mut state = project::tray_state(
             &snap,
             &status,
-            &w.evidence.borrow(),
+            &evidence,
             &conn,
             local.kill_switch,
             &w.traffic.borrow(),
             prefs.minimize_to_tray,
         );
-        state.paused = w.kill_switch.borrow().pause.is_some();
-        drop((snap, status, local));
+        let kill_switch = w.kill_switch.borrow();
+        state.paused = kill_switch.pause.is_some();
+        // The tray follows the start page's verdict: an explained same exit is no leak (L10-7).
+        let other_vpn =
+            project::other_vpn(local.foreign.as_ref(), kill_switch.foreign_vpn.is_some());
+        state.leak &= project::same_exit(&snap, &status, &evidence, other_vpn) == SameExit::No;
+        drop((snap, status, evidence, kill_switch, local));
         set(&self.tray, state);
     }
 }

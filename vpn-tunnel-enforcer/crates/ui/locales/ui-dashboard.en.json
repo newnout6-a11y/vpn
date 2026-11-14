@@ -3,6 +3,7 @@
     "dashboard": {
       "provingExit": "Checking the exit…",
       "sameExit": "The address is the same as without our VPN: another VPN already runs on this PC.",
+      "sameExitServer": "The exit address is the same as without our VPN: this server goes out to the internet from that same address.",
       "netmodeWhitelist": "Servers marked «Whitelists» are tried first",
       "restartTitle": "The VPN is reconnecting",
       "restartBody": "If it does not work out, connect again.",

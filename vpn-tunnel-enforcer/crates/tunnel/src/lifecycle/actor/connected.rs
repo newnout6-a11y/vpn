@@ -160,10 +160,13 @@ impl Actor {
     }
 
     /// Under «Только выбранные приложения» only the listed apps use the VPN: the notice says
-    /// that instead of «весь трафик» (appsplit-b2). A run reads its inputs when it starts, so
-    /// the setting now is the run's scope.
+    /// that instead of «весь трафик» (appsplit-b2). The scope is the one the run reports it was
+    /// built with (live2-a3: a crash restart of the helper service reuses its stored inputs);
+    /// the saved setting only for a run that reports none (a service before protocol 5).
     fn scoped_body(&self, name: &str) -> Option<Msg> {
-        let listed = self.deps.settings.read(|s| s.app_scope) == AppScope::OnlyListed;
+        let reported = self.status.borrow().listed_only;
+        let listed = reported
+            .unwrap_or_else(|| self.deps.settings.read(|s| s.app_scope) == AppScope::OnlyListed);
         listed.then(|| Msg::new(notice_key(name, "bodyListed")))
     }
 

@@ -293,15 +293,17 @@ fn the_server_facts_are_spoken_from_protocol_5_only() {
         Some(ServerFacts::default())
     );
 
-    for speak in [HINTS_PROTOCOL - 1, PROTOCOL] {
-        let spoken = Request::Switch(Box::new(hinted())).speak(speak);
-        let server = server_of(&spoken);
-        assert!(
-            !server.fresh && server.hints.is_empty(),
-            "stripped for {speak}"
-        );
-    }
-    let spoken = Request::Switch(Box::new(hinted())).speak(HINTS_PROTOCOL);
+    let spoken = Request::Switch(Box::new(hinted())).speak(HINTS_PROTOCOL - 1);
+    let server = server_of(&spoken);
+    assert!(
+        !server.fresh && server.hints.is_empty(),
+        "stripped for a version-4 service"
+    );
+    let spoken = Request::Switch(Box::new(hinted())).speak(PROTOCOL);
+    assert_eq!(
+        server_of(&spoken),
+        server_of(&Request::Switch(Box::new(hinted())))
+    );
     assert!(server_of(&spoken).fresh, "kept from protocol 5");
     let Upstream::Server(server) = hinted().upstream else {
         panic!("a server start");

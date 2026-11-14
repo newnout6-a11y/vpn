@@ -505,6 +505,8 @@ impl Actor {
         }
         if receipt.committed {
             s.req = next.clone();
+            // The new slot's own proof (`None`: proven by its traffic, no address read).
+            s.exit = ops.slots.egress[ops.slots.active.index()];
             // Admitted only for an Xray run, so the choice is known; its reason may differ.
             if let Ok(run) = super::start::choose(profile, next.engine) {
                 s.engine = run;
@@ -520,10 +522,15 @@ impl Actor {
             let name = profile.profile.name.clone();
             let protocol = profile.profile.kind.label().to_owned();
             let engine = receipt.engine;
+            let exit = match &self.phase {
+                Phase::Running(s) => s.exit,
+                _ => None,
+            };
             self.publish(|st| {
                 st.profile_name = Some(name);
                 st.protocol = Some(protocol);
                 st.engine = engine.or(st.engine);
+                st.proven_exit = exit;
                 st.proxy_reachable = true;
                 st.warning = None;
             });
@@ -560,5 +567,43 @@ mod confirm_tests {
         assert!(tunnel_exit_matches(no_address(), slot, false).is_err());
         let silent = Err(echo_failed(EchoFailure::NoReply));
         assert!(tunnel_exit_matches(silent, slot, true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+
+    use tokio_util::sync::CancellationToken;
+    use vpnte_base::types::EnginePref;
+
+    use super::super::tests::{World, XRAY_KEY, XRAY_KEY_2, deps, vpn_req};
+    use crate::api::{OwnerCheck, Runtime};
+    use crate::runtime::TunnelHandle;
+
+    /// Lab L10-7 (p-wire5): a committed switch publishes the exit its new slot's proof saw; the
+    /// start's address does not stay behind.
+    #[tokio::test]
+    async fn a_committed_switch_reports_the_new_slots_exit() {
+        let w = World::new();
+        let h = TunnelHandle::spawn(deps(&w));
+        h.start(
+            vpn_req(XRAY_KEY, EnginePref::Xray),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("start");
+        let start = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42));
+        assert_eq!(h.status().borrow().proven_exit, Some(start));
+        let owner: OwnerCheck = Arc::new(|| true);
+        let next = vpn_req(XRAY_KEY_2, EnginePref::Xray);
+        let sw = h
+            .switch_upstream(next, CancellationToken::new(), owner)
+            .await
+            .expect("in place");
+        assert!(sw.committed, "{sw:?}");
+        let exit = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 43));
+        assert_eq!(h.status().borrow().proven_exit, Some(exit));
     }
 }

@@ -305,9 +305,11 @@ pub struct DashboardView {
     pub no_pause_vpn: Option<String>,                 // ks-a: another VPN carries all traffic: no pause
     pub proxy_taken: bool,                            // ks-b: another program took the system proxy: one line + «Вернуть»
     pub proving_exit: bool,                           // p-live2: a connect proves its exit: caption «Проверяем выход…»
-    pub other_vpn_exit: bool,                         // p-live2: exit == the address without us, another VPN here:
-                                                      // one calm line `ui.dashboard.sameExit` (never the leak card)
+    pub same_exit: SameExit,                          // exit == the address without us, explained: one calm line
+                                                      // `SameExit::key()` (never the leak card)
 }
+pub enum SameExit { No, OtherVpn, Server }  // p-live2: another VPN here (`ui.dashboard.sameExit`); p-wire5 L10-7:
+    // our exit proof saw this server leave from that address (`ui.dashboard.sameExitServer`)
 pub struct EngineLine { pub engine: Engine, pub reason: Option<Msg> }  // «Xray · REALITY» under the node
 pub struct PickLine { pub title: Msg, pub body: Option<Msg> }  // step; during retries what traffic does;
     // the strip's «Отменить» calls `end_autopick` (ends the automatic choice, never the session)

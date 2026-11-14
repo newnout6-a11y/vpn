@@ -125,6 +125,44 @@ async fn the_connect_notice_follows_the_app_scope() {
     }
 }
 
+/// live2-a3 (p-wire5): the notice says the scope the run reports it was built with; the saved
+/// setting speaks only for a run that reports none (a service before protocol 5).
+#[tokio::test]
+async fn the_connect_notice_follows_the_scope_the_run_reports() {
+    use vpnte_core::settings::AppScope;
+    for (saved, reported, body) in [
+        (
+            AppScope::OnlyListed,
+            Some(false),
+            "tunnel.lifecycle.notice.connected.body",
+        ),
+        (
+            AppScope::All,
+            Some(true),
+            "tunnel.lifecycle.notice.connected.bodyListed",
+        ),
+        (
+            AppScope::OnlyListed,
+            None,
+            "tunnel.lifecycle.notice.connected.bodyListed",
+        ),
+    ] {
+        let h = Harness::new();
+        h.profiles.add("srv-nl", "nl-1", true);
+        h.settings.update(|s| s.app_scope = saved).unwrap();
+        h.rt.script.lock().listed_only = reported;
+        h.lc.connect(direct(None, Owner::Manual))
+            .await
+            .expect("connect");
+        let (n, _) = notice(&h, "connected").expect("connect notice");
+        assert_eq!(
+            n.body.unwrap().key,
+            body,
+            "saved {saved:?}, run {reported:?}"
+        );
+    }
+}
+
 /// §3.10: a full stop ends forensics, external proxies and monitoring after the runtime proved
 /// its exit, leaves an unapplied Soft proxy alone and tells the user.
 #[tokio::test]

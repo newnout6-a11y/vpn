@@ -3,9 +3,11 @@
 //! dead proxy after Soft stopped). The lifecycle calls [`Soft::apply`] on a Soft start or refresh
 //! and [`Soft::rollback`] on stop, before a Hard / Direct start, at shutdown and in startup
 //! recovery when the settings no longer say Soft.
+use std::cell::RefCell;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use vpnte_base::types::ProxyKind;
@@ -80,8 +82,122 @@ fn unsupported() -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, "not a soft-mode target")
 }
 
+thread_local! {
+    /// The apply running on this thread (speed3 S3-12; lab live-10: 291 ms on the first Proxy
+    /// connect after the app starts, 34-48 ms warm). Only its backend calls are timed, so the
+    /// session's read-backs and the proxy watch's reads stay out of the log.
+    static APPLY: RefCell<Option<Spent>> = const { RefCell::new(None) };
+}
+
+/// What an apply spent on the environment variables: one total, not a line per variable.
+#[derive(Debug, Clone, Copy, Default)]
+struct Spent {
+    env: Duration,
+    env_calls: u32,
+}
+
+/// Times the backend calls of one apply on this thread until dropped.
+struct Timing;
+
+impl Timing {
+    fn begin() -> Self {
+        APPLY.set(Some(Spent::default()));
+        Self
+    }
+
+    fn spent(&self) -> Spent {
+        APPLY.with_borrow(|spent| spent.unwrap_or_default())
+    }
+}
+
+impl Drop for Timing {
+    fn drop(&mut self) {
+        APPLY.set(None);
+    }
+}
+
+fn ms(at: Instant) -> u64 {
+    u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The step a timed call belongs to: never a value or a path (a path names the user).
+fn step_name(target: &Target) -> &'static str {
+    match target {
+        Target::SystemProxy => "system proxy",
+        Target::Env { .. } => "environment",
+        Target::Git { .. } => "git",
+        Target::Block {
+            kind: BlockKind::Gradle,
+            ..
+        }
+        | Target::Lines { .. } => "gradle",
+        Target::Block { .. } | Target::StudioOpt { .. } => "android studio",
+        Target::Reg { .. } => "registry",
+    }
+}
+
+/// Runs one backend call; inside an apply the system proxy and each developer tool get their
+/// own line, the variables add up into the apply's total.
+fn timed<T>(
+    target: &Target,
+    op: &'static str,
+    call: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let at = Instant::now();
+    let result = call();
+    APPLY.with_borrow_mut(|spent| match (spent.as_mut(), target) {
+        (None, _) => {}
+        (Some(spent), Target::Env { .. }) => {
+            spent.env += at.elapsed();
+            spent.env_calls += 1;
+        }
+        (Some(_), _) => tracing::info!(
+            step = step_name(target),
+            op,
+            ms = ms(at),
+            ok = result.is_ok(),
+            "soft step"
+        ),
+    });
+    result
+}
+
 impl Backend for SoftSystem {
     fn read(&self, target: &Target) -> io::Result<Val> {
+        timed(target, "read", || self.read_now(target))
+    }
+
+    fn write(&self, target: &Target, value: &Val) -> io::Result<bool> {
+        timed(target, "write", || self.write_now(target, value))
+    }
+
+    fn prune(&self, target: &Target) -> io::Result<()> {
+        match target {
+            Target::Block { path, .. } | Target::Lines { path, .. } => block::prune(path),
+            Target::StudioOpt { path, .. } => studio::prune(path),
+            _ => Ok(()),
+        }
+    }
+
+    fn changed(&self, targets: &[Target]) {
+        if !(self.broadcast && targets.iter().any(|t| matches!(t, Target::Env { .. }))) {
+            return;
+        }
+        let at = Instant::now();
+        let sent = broadcast_change(BROADCAST_TIMEOUT);
+        tracing::info!(
+            ms = ms(at),
+            ok = sent.is_ok(),
+            "soft step: environment broadcast"
+        );
+        if let Err(e) = sent {
+            tracing::warn!(error = %e, "environment change broadcast failed");
+        }
+    }
+}
+
+impl SoftSystem {
+    fn read_now(&self, target: &Target) -> io::Result<Val> {
         match target {
             Target::Env { var } => env::read(&self.env, *var),
             Target::Git { key } => self.git()?.read(*key),
@@ -93,7 +209,7 @@ impl Backend for SoftSystem {
         }
     }
 
-    fn write(&self, target: &Target, value: &Val) -> io::Result<bool> {
+    fn write_now(&self, target: &Target, value: &Val) -> io::Result<bool> {
         match target {
             Target::Env { var } => env::write(&self.env, *var, value),
             Target::Git { key } => self.git()?.write(*key, value),
@@ -106,23 +222,6 @@ impl Backend for SoftSystem {
             }
             Target::SystemProxy => sysproxy::write(&*self.proxy, value),
             Target::Lines { .. } | Target::Reg { .. } => Err(unsupported()),
-        }
-    }
-
-    fn prune(&self, target: &Target) -> io::Result<()> {
-        match target {
-            Target::Block { path, .. } | Target::Lines { path, .. } => block::prune(path),
-            Target::StudioOpt { path, .. } => studio::prune(path),
-            _ => Ok(()),
-        }
-    }
-
-    fn changed(&self, targets: &[Target]) {
-        if self.broadcast
-            && targets.iter().any(|t| matches!(t, Target::Env { .. }))
-            && let Err(e) = broadcast_change(BROADCAST_TIMEOUT)
-        {
-            tracing::warn!(error = %e, "environment change broadcast failed");
         }
     }
 }
@@ -222,9 +321,12 @@ impl Soft {
         kind: ProxyKind,
         dev: DevTargets,
     ) -> AppResult<SoftReport> {
+        let at = Instant::now();
         if self.sys.check_user {
             user::ensure_session_user()?;
+            tracing::info!(ms = ms(at), "soft step: session user checked");
         }
+        let at = Instant::now();
         let mut plan = sysproxy::plan(addr);
         plan.extend(env::plan(addr, kind));
         let mut report = SoftReport {
@@ -241,7 +343,20 @@ impl Soft {
                 Err(e) => return Err(e.into()),
             }
         }
-        self.journal.apply(&*self.sys, &plan)?;
+        tracing::info!(ms = ms(at), "soft step: planned");
+        let at = Instant::now();
+        let timing = Timing::begin();
+        let applied = self.journal.apply(&*self.sys, &plan);
+        let spent = timing.spent();
+        drop(timing);
+        tracing::info!(
+            ms = ms(at),
+            env_ms = u64::try_from(spent.env.as_millis()).unwrap_or(u64::MAX),
+            env_calls = spent.env_calls,
+            ok = applied.is_ok(),
+            "soft step: journal applied"
+        );
+        applied?;
         let stale: Vec<Feature> = SOFT_FEATURES
             .into_iter()
             .filter(|f| !report.applied.contains(f) && self.journal.is_applied(*f))

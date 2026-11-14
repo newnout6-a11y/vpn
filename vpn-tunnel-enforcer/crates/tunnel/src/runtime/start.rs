@@ -547,6 +547,7 @@ impl Actor {
             let step = Instant::now();
             let user = (&mut user.0).await.map_err(AppError::internal)??;
             tracing::info!(ms = ms_since(step), "routing inputs ready");
+            let listed_only = user.only_listed.is_some();
             let (routing, warnings) =
                 config::routing(&user, &engine_paths, local, &phys_dns, hostname);
             work.warnings.extend(warnings);
@@ -573,9 +574,9 @@ impl Actor {
             let timeout = self.deps.timings.capture_ready;
             let proof = self.capture.ready(&plan, timeout, op).await?;
             tracing::info!(ms = ms_since(step), "capture ready");
-            AppResult::Ok((ready, proof))
+            AppResult::Ok((ready, proof, listed_only))
         };
-        let ((core, clash, listeners, compat), proof) = match proving {
+        let ((core, clash, listeners, compat), proof, listed_only) = match proving {
             Some(proving) => {
                 let (exit, up) = tokio::join!(proving, up);
                 // The proof's failure is the cause; the core it started meanwhile is compensated.
@@ -592,20 +593,27 @@ impl Actor {
             slots.slots.activate(Slot::A)?;
             slots.dns_bootstrap = listeners.dns_bootstrap.unwrap_or_default();
         }
-        if let (Planned::Native(_), Mode::DirectVpn { profile }) = (&planned, &req.mode) {
-            self.prove_native(&profile.profile, &listeners, engine, op)
-                .await?;
-        }
+        let native_exit = match (&planned, &req.mode) {
+            (Planned::Native(_), Mode::DirectVpn { profile }) => {
+                self.prove_native(&profile.profile, &listeners, engine, op)
+                    .await?
+            }
+            _ => None,
+        };
         cancelled_if(op)?;
         let logs = self.deps.engines.log_files(work.slots.is_some());
         let endpoints = config::endpoints(&clash, &listeners, &proof, logs);
+        let slots = work.slots.take();
+        let exit = slots
+            .as_ref()
+            .map_or(native_exit, |s| s.egress[Slot::A.index()]);
         Ok(Box::new(Session {
             generation: self.generation,
             req: req.clone(),
             plan,
             proof,
             core,
-            slots: work.slots.take(),
+            slots,
             clash,
             listeners,
             compat,
@@ -615,6 +623,8 @@ impl Actor {
             watch: CancellationToken::new(),
             competing: None,
             carried: Arc::default(),
+            listed_only,
+            exit,
         }))
     }
 
@@ -622,14 +632,14 @@ impl Actor {
     /// server: an echo through the engine's probe inbound (`live-check-in`, always to the
     /// upstream whatever the user's rules say; loopback, so neither the TUN's routes nor the kill
     /// switch's filters stand in the way). A placeholder or a dead server fails the start here,
-    /// it never reads as connected.
+    /// it never reads as connected. Returns the exit it saw (`None`: answers without an address).
     async fn prove_native(
         &self,
         server: &Profile,
         listeners: &Listeners,
         engine: EngineRun,
         op: &CancellationToken,
-    ) -> AppResult<()> {
+    ) -> AppResult<Option<IpAddr>> {
         let probe = listeners.probe.as_ref();
         let Some((port, creds)) = probe.and_then(|p| Some((p.port, p.creds.as_ref()?))) else {
             // The config of a direct start always has it: without it nothing proves the exit.
@@ -646,10 +656,10 @@ impl Actor {
             .await;
         tracing::info!(ms = ms_since(step), ok = proof.is_ok(), "native exit proof");
         match proof {
-            Ok(_) => Ok(()),
+            Ok(ip) => Ok(Some(ip)),
             // Answers came back through the server: the traffic is proven, only the address
             // is unknown (the start page's exit check reads it later).
-            Err(e) if echo_failure(&e) == Some(EchoFailure::NoAddress) => Ok(()),
+            Err(e) if echo_failure(&e) == Some(EchoFailure::NoAddress) => Ok(None),
             Err(e) => Err(exit_unproven(e)),
         }
     }
@@ -1229,6 +1239,57 @@ mod proof_tests {
         .await
         .expect("traffic came back");
         assert!(h.status().borrow().running);
+    }
+
+    /// The fake inputs with «Только выбранные приложения» on.
+    struct Listed(Arc<World>);
+
+    #[async_trait]
+    impl super::super::InputsSource for Listed {
+        async fn snapshot(&self) -> AppResult<UserInputs> {
+            let inputs = super::super::tests::FakeInputs(self.0.clone())
+                .snapshot()
+                .await?;
+            Ok(UserInputs {
+                only_listed: Some(Vec::new()),
+                ..inputs
+            })
+        }
+    }
+
+    /// live2-a3 and lab L10-7 (p-wire5): a run's status carries the scope its inputs had and
+    /// the address its exit proof saw, for both engines; answers without an address prove the
+    /// traffic but name no exit.
+    #[tokio::test]
+    async fn a_run_reports_its_scope_and_its_proven_exit() {
+        let slot_a = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42));
+        for (key, engine) in [(NATIVE_KEY, EnginePref::Auto), (XRAY_KEY, EnginePref::Xray)] {
+            let w = World::new();
+            let h = runtime(&w, None);
+            h.start(vpn_req(key, engine), CancellationToken::new())
+                .await
+                .expect("start");
+            let status = h.status().borrow().clone();
+            let seen = (status.listed_only, status.proven_exit);
+            assert_eq!(seen, (Some(false), Some(slot_a)), "{key}");
+        }
+        let w = World::new();
+        let mut d = deps(&w);
+        d.inputs = Arc::new(Listed(w.clone()));
+        d.engines = Arc::new(Probed {
+            inner: FakeEngines(w.clone()),
+            answer: Some(EchoFailure::NoAddress),
+            noisy: false,
+        });
+        let h = TunnelHandle::spawn(d);
+        h.start(
+            vpn_req(NATIVE_KEY, EnginePref::Auto),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("start");
+        let status = h.status().borrow().clone();
+        assert_eq!((status.listed_only, status.proven_exit), (Some(true), None));
     }
 }
 

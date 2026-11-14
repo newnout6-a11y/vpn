@@ -112,6 +112,8 @@ struct Inner {
     shutdown: CancellationToken,
     /// The selected server's names resolved before the click (S3-09 (b)): a start's hints.
     ahead: std::sync::OnceLock<Arc<super::warm::Ahead>>,
+    /// The server list, whose key checks tell a user's switch it may select first (S3-07).
+    servers: std::sync::OnceLock<Arc<vpnte_servers::store::Servers>>,
 }
 
 /// A live connection: its writing half and a token cancelled when its reader ends.
@@ -247,12 +249,18 @@ impl Remote {
             state: Mutex::new(State::default()),
             shutdown,
             ahead: std::sync::OnceLock::new(),
+            servers: std::sync::OnceLock::new(),
         }))
     }
 
     /// Where a start's hints come from (set once while the tunnel is built).
     pub(crate) fn resolve_ahead_with(&self, ahead: Arc<super::warm::Ahead>) {
         let _ = self.0.ahead.set(ahead);
+    }
+
+    /// Where a user's switch reads its fresh evidence (set once while the tunnel is built).
+    pub(crate) fn fresh_from(&self, servers: Arc<vpnte_servers::store::Servers>) {
+        let _ = self.0.servers.set(servers);
     }
 
     /// The protocol the service's last link speaks; `None` before the first link.

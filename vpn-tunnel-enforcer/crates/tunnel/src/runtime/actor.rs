@@ -68,6 +68,10 @@ pub(super) struct Session {
     /// When the upstream last carried traffic as the watchdog saw it (downloads grew, or its
     /// idle probe was answered): a crash right after that is no frozen server.
     pub carried: Carried,
+    /// Only the listed apps use this run (its inputs' scope; live2-a3).
+    pub listed_only: bool,
+    /// The address the exit proof saw (L10-7); a committed switch replaces it.
+    pub exit: Option<std::net::IpAddr>,
 }
 
 /// The shared "last carried traffic" mark of a session.

@@ -409,3 +409,71 @@ fn the_logon_restore_rolls_back_only_a_gone_writer_s_session() {
     assert_eq!(UserEnv::under(&key.0).get("HTTP_PROXY").unwrap(), None);
     assert!(!restore.is_applied());
 }
+
+/// The events of the code run under [`lines_of`], each as `field=value` text.
+struct Lines(Arc<parking_lot::Mutex<Vec<String>>>);
+
+impl tracing::Subscriber for Lines {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Text(String);
+        impl tracing::field::Visit for Text {
+            fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                self.0.push_str(&format!("{}={v:?} ", f.name()));
+            }
+        }
+        let mut text = Text(String::new());
+        event.record(&mut text);
+        self.0.lock().push(text.0);
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// The log lines `run` writes on this thread.
+fn lines_of(run: impl FnOnce()) -> Vec<String> {
+    // With one registered subscriber tracing-core asks the *current thread's* default about a
+    // callsite seen for the first time: another test's thread (no subscriber) would switch our
+    // callsites off for good. A second registered one makes it ask every registered subscriber.
+    let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let lines = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    tracing::subscriber::with_default(Lines(lines.clone()), run);
+    std::mem::take(&mut *lines.lock())
+}
+
+/// speed3 S3-12 (lab live-10: a cold 0.3 s in the first Proxy connect after the app starts): an
+/// apply writes a timed line for its plan, each system proxy call (the baseline read, the write,
+/// its read-back) and the journal with the variables' total; never a value. A read-back outside
+/// an apply writes none.
+#[test]
+fn an_apply_times_its_steps_without_values() {
+    let (key, dir) = (TestKey::new("tweaks"), TempDir::new("tweaks"));
+    let soft = soft(&key, &dir);
+    let none = DevTargets::default();
+    let lines = lines_of(|| {
+        soft.apply_blocking(&addr("127.0.0.1:10808"), ProxyKind::Socks5, none)
+            .unwrap();
+    });
+    let count = |what: &str| lines.iter().filter(|l| l.contains(what)).count();
+    assert_eq!(count("soft step: planned"), 1, "{lines:?}");
+    assert_eq!(count(r#"step="system proxy" op="read""#), 2, "{lines:?}");
+    assert_eq!(count(r#"step="system proxy" op="write""#), 1, "{lines:?}");
+    let journal = lines.iter().find(|l| l.contains("journal applied"));
+    assert!(journal.is_some_and(|l| l.contains("env_calls=") && !l.contains("env_calls=0")));
+    assert!(lines.iter().all(|l| l.contains("ms=")), "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.contains("10808")),
+        "no value: {lines:?}"
+    );
+    let quiet = lines_of(|| {
+        soft.status_blocking();
+    });
+    assert!(quiet.is_empty(), "{quiet:?}");
+}

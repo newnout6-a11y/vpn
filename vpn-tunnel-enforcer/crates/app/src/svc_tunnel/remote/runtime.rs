@@ -11,7 +11,7 @@ use vpnte_service::proto::{
     AdaptiveRestart, KeptSession, Reply, Request, StopTunnel, TunnelStart, Upstream,
 };
 use vpnte_tunnel::api::{
-    ExitInfo, OwnerCheck, RestartOptions, Runtime, StartReceipt, StartRequest, StopOptions,
+    ExitInfo, Origin, OwnerCheck, RestartOptions, Runtime, StartReceipt, StartRequest, StopOptions,
     StopReceipt, SwitchReceipt, TunError, TunStatus, TunStatusKind, TunnelEvent, VpnProfile,
 };
 
@@ -244,7 +244,17 @@ impl Runtime for Remote {
         cancel: CancellationToken,
         _is_owner: OwnerCheck,
     ) -> Option<SwitchReceipt> {
-        let (start, notes) = self.tunnel_start(&next).await.ok()?;
+        let (mut start, notes) = self.tunnel_start(&next).await.ok()?;
+        // speed3 S3-07: the user's own switch to a server a young, fast key check found online
+        // selects first and proves once after, on the same evidence the in-process runtime reads
+        // through `Failover::fresh`. Never an automatic switch (a service before protocol 5
+        // never sees the field: `Request::speak`).
+        if next.origin == Origin::User
+            && let (Upstream::Server(server), Some(servers)) =
+                (&mut start.upstream, self.0.servers.get())
+        {
+            server.fresh = crate::svc_auto::fresh_server(servers, &server.id);
+        }
         let reply = tokio::select! {
             () = cancel.cancelled() => return None,
             reply = self.call(Request::Switch(Box::new(start))) => reply,

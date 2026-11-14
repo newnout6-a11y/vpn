@@ -33,25 +33,26 @@ mod tests;
 
 pub use wire::{
     EngineRunWire, ExitWire, KillSwitchStateWire, ProtectionWire, RULE_SETS_PROTOCOL,
-    RuleSetSource, RuleSetsWire, SessionWire, StartReceiptWire, StatusKindWire, StatusWire,
-    StopReceiptWire, SwitchFailureWire, SwitchReceiptWire, TunnelEventWire,
+    RUN_FACTS_PROTOCOL, RuleSetSource, RuleSetsWire, SessionWire, StartReceiptWire, StatusKindWire,
+    StatusWire, StopReceiptWire, SwitchFailureWire, SwitchReceiptWire, TunnelEventWire,
 };
 pub use wire::{ServiceUpdateWire, UpdateAsk, UpdatePhase};
 
 /// The protocol version this build speaks. 2 (p-svc-recheck): `StatusWire::self_test`, the
 /// service's leak self-test. 3 (p-smart-lists): `RoutingInputs::rule_sets` (`Request::speak`
 /// strips it for a version-2 service). 4 (p-app-split): `RoutingInputs::only_listed` (stripped
-/// for a version-3 service, which then routes every app). A peer two versions apart is refused
-/// (`negotiate`).
-pub const PROTOCOL: u32 = 4;
+/// for a version-3 service, which then routes every app). 5 (p-wire5): a server's one-request
+/// facts `ServerUpstream::fresh` / `hints` and the run's `StatusWire::listed_only` /
+/// `proven_exit`, each stripped for a version-4 peer, which then works as before (the app's own
+/// fallbacks). A peer two versions apart is refused (`negotiate`).
+pub const PROTOCOL: u32 = 5;
 
 /// The first protocol whose service routes by the apps page's scope
 /// (`RoutingInputs::only_listed`): an older one runs every app through the tunnel.
 pub const SCOPE_PROTOCOL: u32 = 4;
 
 /// The first protocol whose service takes a server's one-request facts
-/// (`ServerUpstream::fresh` / `hints`, speed3 H2). Above [`PROTOCOL`] until the bump: until then
-/// `Request::speak` strips them for every service, so a setter in the app is safe already.
+/// (`ServerUpstream::fresh` / `hints`, speed3 H2); `Request::speak` strips them below it.
 pub const HINTS_PROTOCOL: u32 = 5;
 
 /// The version both sides speak, or `None` when they are more than one version apart.

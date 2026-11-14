@@ -102,8 +102,8 @@ pub(super) fn fresh(row: &ServerRow, now: UnixMs) -> bool {
 }
 
 /// [`fresh`] for the stored row `profile_id` now: the app's evidence a user's switch to it may
-/// select first (in-process through [`Failover::fresh`]; Tunnel mode sends it as
-/// `ServerUpstream::fresh` once the service speaks `HINTS_PROTOCOL`).
+/// select first (in-process through [`Failover::fresh`]; in Tunnel mode the remote sends it with
+/// the switch as `ServerUpstream::fresh`, protocol 5).
 pub fn fresh_server(servers: &Servers, profile_id: &str) -> bool {
     let row = servers.get(&ProfileId::from(profile_id));
     row.is_some_and(|row| fresh(&row, now_ms()))

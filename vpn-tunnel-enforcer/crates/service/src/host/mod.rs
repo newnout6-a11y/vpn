@@ -137,8 +137,12 @@ impl Host {
         if !(own && tun) {
             return None;
         }
-        // Only the listed apps use the VPN: the run's default-route read went around it.
-        let listed_only = self.deps.inputs.get().only_listed.is_some();
+        // Only the listed apps use the VPN: the run's default-route read went around it. The scope
+        // the run was built with (protocol 5), not the stored inputs: the app hands new inputs over
+        // at every attach and list update (speed3 S3-06 b), which a running session does not use.
+        let listed_only = tunnel
+            .listed_only
+            .unwrap_or_else(|| self.deps.inputs.get().only_listed.is_some());
         let result = self.self_tests.get()?.borrow().clone()?;
         Some(result.with_scope(listed_only))
     }

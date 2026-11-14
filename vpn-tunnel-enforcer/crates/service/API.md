@@ -111,10 +111,11 @@ connection is at most `frame::FIRST_FRAME_MAX` (16 KiB) and must arrive within `
 connections wait for theirs, more are closed at once: nothing big is held for a client before it
 is identified. Client ->
 `ClientFrame { id, request }`; service -> `ServerFrame::{Reply { id, reply }, Failed { id, error },
-Event { event }}`. `PROTOCOL = 4` (2 added `StatusWire::self_test`, 3 `RoutingInputs::rule_sets`, 4
-`RoutingInputs::only_listed` and `StatusWire::rule_sets`; `SCOPE_PROTOCOL = 4` and
-`RULE_SETS_PROTOCOL = 4` name them for the app; `HINTS_PROTOCOL = 5` names `ServerUpstream::{fresh,
-hints}` (speed3 H2), stripped by `Request::speak` below it: until `PROTOCOL` is 5 nothing sends them);
+Event { event }}`. `PROTOCOL = 5` (2 added `StatusWire::self_test`, 3 `RoutingInputs::rule_sets`, 4
+`RoutingInputs::only_listed` and `StatusWire::rule_sets`, 5 (p-wire5) `ServerUpstream::{fresh, hints}`
+and `StatusWire::{listed_only, proven_exit}`; `SCOPE_PROTOCOL = 4` and `RULE_SETS_PROTOCOL = 4` name
+them for the app; `HINTS_PROTOCOL = 5` / `RUN_FACTS_PROTOCOL = 5` name the version-5 fields, each
+stripped for a version-4 peer, which then works as before: the app falls back to its own evidence);
 `negotiate(client, service)` = the lower one while they differ by at most one (so a version-2
 peer is refused now). Evolution: add requests / replies / events / optional fields only; the
 newer side speaks the negotiated version (`Request::speak(protocol)` strips the rule sets for a
@@ -174,6 +175,10 @@ and the leak check card shows the run, as for runs of its own.
 (protocol 4, psmart-b2): which Smart RU lists the service's last engine start ran
 (`SharedInputs::rule_sets`; `None` while Smart RU is off); the app shows a line in Settings when
 they are not its own set.
+`listed_only: Option<bool>` (protocol 5, live2-a3): the app scope the run was built with
+(`TunStatus::listed_only`; a crash restart reuses the stored inputs), so the app labels the run by it,
+not by its saved setting. `proven_exit: Option<IpAddr>` (protocol 5, lab L10-7): the address the run's
+exit proof saw (`TunStatus::proven_exit`), to the session's own user only.
 Certificates (p-speed, lab F-3): `Host::serve` turns `vpnte_base::http::verify_offline` on for the
 whole service process: its HTTPS (DoH of server names, exit proofs) runs under the kill switch's DNS
 block, where Windows' online revocation fetch stalls; rustls checks chains and names against the

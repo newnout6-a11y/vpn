@@ -36,6 +36,15 @@ pub struct TunStatus {
     /// (the status keeps the old wire shape, which had no session).
     #[serde(skip)]
     pub session: Option<SessionEndpoints>,
+    /// The app scope the run was built with (live2-a3): `Some(true)` = only the listed apps use
+    /// it. `None`: nothing runs, or a helper service before protocol 5 runs it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub listed_only: Option<bool>,
+    /// The address the run's exit proof saw (lab L10-7): the start's proof, then each committed
+    /// switch's. `None`: no address was proven (a local proxy upstream, a proof by the server's
+    /// own traffic, a helper service before protocol 5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proven_exit: Option<std::net::IpAddr>,
 }
 
 impl Default for TunStatus {
@@ -56,6 +65,8 @@ impl Default for TunStatus {
             capture: None,
             engine: None,
             session: None,
+            listed_only: None,
+            proven_exit: None,
         }
     }
 }

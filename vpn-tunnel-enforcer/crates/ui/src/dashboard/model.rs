@@ -9,7 +9,7 @@ use vpnte_view::labels::{
 };
 use vpnte_view::swiss::ConnView;
 
-use super::{DashboardView, EngineLine, PauseLine};
+use super::{DashboardView, EngineLine, PauseLine, SameExit};
 use crate::panels::{LocalPings, ServersView};
 
 /// What a press of the power button (click or Ctrl+Enter) does.
@@ -55,8 +55,8 @@ pub struct Banners {
     pub no_pause_vpn: Option<String>,
     /// Another program took over the system proxy (ks-b): «Вернуть».
     pub proxy_taken: bool,
-    /// «Адрес совпадает с адресом без нашего VPN: на этом ПК уже работает другой VPN».
-    pub same_exit: bool,
+    /// «Адрес совпадает с адресом без нашего VPN: …»: why, when it is no leak.
+    pub same_exit: SameExit,
 }
 
 /// Which notices the snapshot calls for.
@@ -76,7 +76,7 @@ pub fn banners(view: &DashboardView) -> Banners {
         foreign_vpn: foreign_vpn_friendly_name(foreign),
         no_pause_vpn: view.no_pause_vpn.clone().filter(|_| !paused),
         proxy_taken: view.proxy_taken,
-        same_exit: view.other_vpn_exit,
+        same_exit: view.same_exit,
     }
 }
 

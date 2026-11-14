@@ -175,5 +175,7 @@ pub(super) fn running_status(s: &Session, attempt: u8) -> TunStatus {
         capture: Some(s.req.capture),
         engine: Some(s.engine),
         session: Some(s.endpoints.clone()),
+        listed_only: Some(s.listed_only),
+        proven_exit: s.exit,
     }
 }

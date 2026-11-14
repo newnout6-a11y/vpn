@@ -188,6 +188,8 @@ async fn foreign_feed(hub: Arc<Hub>, cancel: CancellationToken) {
         };
         if changed {
             hub.publish_dashboard();
+            // The tray's leak follows the page's same-exit verdict, which another VPN explains.
+            hub.publish_tray();
         }
         let Some(rx) = changes.as_mut() else {
             return;
@@ -201,7 +203,7 @@ async fn foreign_feed(hub: Arc<Hub>, cancel: CancellationToken) {
 
 /// The first foreign tunnel adapter, route conflicts first (our own TUN aliases are not
 /// foreign); `None` when the adapter table cannot be read.
-fn scan_foreign() -> Option<ForeignSeen> {
+pub(super) fn scan_foreign() -> Option<ForeignSeen> {
     let own = adapters::alias::all_aliases();
     let own: Vec<&str> = own.iter().map(String::as_str).collect();
     match adapters::foreign_tun::detect(None, &own) {

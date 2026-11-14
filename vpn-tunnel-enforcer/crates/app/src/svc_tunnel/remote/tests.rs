@@ -32,6 +32,7 @@ use super::Remote;
 use crate::api_settings::test_support::TempDir;
 use crate::svc_core::docs::ProtectionDoc;
 
+mod fresh;
 mod handover;
 mod takeover;
 

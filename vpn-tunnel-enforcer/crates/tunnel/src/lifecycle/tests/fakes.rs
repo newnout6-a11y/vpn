@@ -75,6 +75,8 @@ pub struct RtScript {
     pub retries_now: u32,
     /// Kill-switch levels the lifecycle handed to the running session, in order.
     pub kill_switches: Vec<KillSwitchLevel>,
+    /// The scope the next runs report they were built with (`None`: an older service's).
+    pub listed_only: Option<bool>,
 }
 
 /// Mixed port of a proxy-capture run of the fake runtime.
@@ -158,6 +160,7 @@ impl FakeRuntime {
         };
         // A proxy-capture run publishes its mixed port; a restart keeps it (as the runtime does).
         let port = self.script.lock().soft_port.unwrap_or(SOFT_PORT);
+        let listed_only = self.script.lock().listed_only;
         let (capture, session) = match req {
             Some(r) => (
                 Some(r.capture),
@@ -177,6 +180,7 @@ impl FakeRuntime {
             s.restart_attempt = 0;
             s.capture = capture;
             s.session = session;
+            s.listed_only = listed_only;
         });
         generation
     }

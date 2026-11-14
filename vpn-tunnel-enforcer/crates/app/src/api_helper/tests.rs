@@ -73,11 +73,11 @@ fn an_installed_service_carries_tunnel_and_kill_switch() {
     }
 }
 
-/// One version behind (the oldest the app still links to): it runs Tunnel mode without the
-/// apps page's scope until it updates itself.
+/// A service before the apps page's scope runs Tunnel mode routing every app until it updates
+/// itself, and says so.
 #[test]
 fn an_older_service_says_what_it_lacks() {
-    let cap = derive(facts(true, Some(PROTOCOL - 1), false, true));
+    let cap = derive(facts(true, Some(SCOPE_PROTOCOL - 1), false, true));
     assert_eq!(
         cap.service,
         Service::Older {
@@ -86,6 +86,18 @@ fn an_older_service_says_what_it_lacks() {
     );
     assert_eq!(cap.tunnel, Ability::Service);
     assert_eq!(lacks(SCOPE_PROTOCOL), Vec::new());
+}
+
+/// p-wire5: a version-4 service (one behind, the oldest the app still links to) lacks nothing
+/// the user would notice: without the run facts the app labels by its own fallbacks, so the
+/// page shows nothing new.
+#[test]
+fn a_version_4_service_lacks_nothing_the_user_would_notice() {
+    assert_eq!(PROTOCOL - 1, 4);
+    let cap = derive(facts(true, Some(PROTOCOL - 1), false, true));
+    assert!(cap.lacks().is_empty(), "{:?}", cap.service);
+    assert_eq!(cap.tunnel, Ability::Service);
+    assert_eq!(cap.kill_switch, Ability::Service);
 }
 
 /// Elevated without the service (development, CI): everything privileged it can host runs

@@ -335,21 +335,28 @@ fn the_pause_line_says_whether_anything_retries() {
     assert_eq!(key(&line(None, true, true)), "keyRejected");
 }
 
-/// p-live2 (owner): under another VPN the exit equal to the address without ours is one calm
-/// line, never the leak card (the app sends the exit unflagged then).
+/// p-live2 (owner) and lab L10-7 (p-wire5): an exit equal to the address without ours that the
+/// evidence explains (another VPN here, or our own exit proof saw this server leave from it) is
+/// one calm line with its own words, never the leak card (the app sends the exit unflagged then).
 #[test]
-fn the_same_exit_under_another_vpn_is_a_calm_line() {
-    let calm = DashboardView {
-        exit: ExitIp {
-            ip: Some(HOME_IP),
-            verdict: Verdict::Warn,
-            ..ExitIp::default()
-        },
-        other_vpn_exit: true,
-        ..view(connected())
-    };
-    let shown = banners(&calm);
-    assert!(shown.same_exit);
-    assert!(!shown.leak);
-    assert!(!banners(&view(connected())).same_exit);
+fn an_explained_same_exit_is_a_calm_line() {
+    for (why, key) in [
+        (SameExit::OtherVpn, "ui.dashboard.sameExit"),
+        (SameExit::Server, "ui.dashboard.sameExitServer"),
+    ] {
+        let calm = DashboardView {
+            exit: ExitIp {
+                ip: Some(HOME_IP),
+                verdict: Verdict::Warn,
+                ..ExitIp::default()
+            },
+            same_exit: why,
+            ..view(connected())
+        };
+        let shown = banners(&calm);
+        assert_eq!(shown.same_exit.key(), Some(key));
+        assert!(!shown.leak, "{why:?}");
+    }
+    assert_eq!(banners(&view(connected())).same_exit, SameExit::No);
+    assert_eq!(SameExit::No.key(), None);
 }

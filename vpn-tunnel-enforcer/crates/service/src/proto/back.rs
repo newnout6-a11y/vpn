@@ -70,6 +70,8 @@ impl From<StatusWire> for TunStatus {
             capture: w.capture,
             engine: w.engine.map(Into::into),
             session: w.session.map(Into::into),
+            listed_only: w.listed_only,
+            proven_exit: w.proven_exit,
         }
     }
 }

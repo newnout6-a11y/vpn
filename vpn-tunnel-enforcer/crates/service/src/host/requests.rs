@@ -304,14 +304,17 @@ impl Host {
         Ok(Reply::Done { removing })
     }
 
-    /// The runtime's last exit and fault (an engine's stderr tail, a server's error) go only to
-    /// the user whose start they came from (review service-b2).
+    /// The runtime's last exit and fault (an engine's stderr tail, a server's error) and the
+    /// run's proven exit go only to the user whose start they came from (review service-b2).
     async fn status(&self, client: &ClientInfo) -> StatusReply {
         let runtime = &self.deps.runtime;
         let mut tunnel = StatusWire::from(&*runtime.status().borrow());
         tunnel.self_test = self.self_test_for(&client.user, &tunnel);
         tunnel.rule_sets = self.deps.inputs.rule_sets();
         let own = self.session_user.lock().as_deref() == Some(client.user.as_str());
+        if !own {
+            tunnel.proven_exit = None;
+        }
         let kept = own.then(|| self.kept(&tunnel)).flatten();
         StatusReply {
             tunnel,

@@ -104,6 +104,8 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
     let ahead = Arc::new(warm::Ahead::default());
     warm::spawn(ahead.clone(), b.servers.clone(), b.shutdown.child_token());
     remote.resolve_ahead_with(ahead);
+    // speed3 S3-07: a user's switch in Tunnel mode reads the list's key checks, as in-process.
+    remote.fresh_from(b.servers.clone());
     // speed3 S3-06 (b): every Smart RU list update goes to the service while it is idle.
     remote.hand_over_updates(b.rule_sets.subscribe(), b.shutdown.child_token());
     let guard = Arc::new(guard::Guard::new(

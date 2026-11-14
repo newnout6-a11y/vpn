@@ -119,3 +119,41 @@ async fn the_switch_follows_the_running_session() {
     api.set_scope(AppScope::All).await.expect("saved");
     until(&mut state, |s| s.scope == AppScope::All && !s.pending).await;
 }
+
+/// live2-a3 (p-wire5): the page reads the scope the run reports it was built with, not the
+/// saved one: a crash restart of the helper service reuses its stored inputs, so a run the
+/// switch was flipped under stays pending until a run of the saved scope reports it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_scope_a_run_reports_wins_over_the_saved_one() {
+    let dir = TempDir::new("lists-split-reported");
+    let tunnel = FakeTunnel::new(false);
+    let backend = backend(&dir, tunnel.clone());
+    backend
+        .rules
+        .update(|doc| doc.add_command(ProcessName::parse("curl").expect("name")))
+        .expect("entry");
+    backend
+        .settings
+        .update(|s| s.app_scope = settings::AppScope::OnlyListed)
+        .expect("listed saved");
+    let run = RunScope::follow(tunnel.status.subscribe(), backend.settings.clone());
+    let api = SplitService::start(backend.clone(), run);
+    let mut state = api.state();
+    until(&mut state, |s| {
+        s.scope == AppScope::OnlyListed && !s.pending
+    })
+    .await;
+
+    // The service restarted a run it built for every app: new start, old scope.
+    let run = |started, listed| TunStatus {
+        running: true,
+        started_at: Some(started),
+        capture: Some(CaptureKind::Tun),
+        listed_only: Some(listed),
+        ..TunStatus::default()
+    };
+    tunnel.status.send_replace(run(1_000, false));
+    until(&mut state, |s| s.pending).await;
+    tunnel.status.send_replace(run(2_000, true));
+    until(&mut state, |s| !s.pending).await;
+}

@@ -465,4 +465,64 @@ mod cases {
         within(dash.reclaim_proxy()).await.unwrap();
         within(view.wait_for(|v| !v.proxy_taken)).await.unwrap();
     }
+
+    /// Lab L10-7 (p-wire5): the start page and the tray give one verdict for one fact. A settled
+    /// session whose read equals the address without our VPN: no proof, or a proof that saw
+    /// another address, stays a red leak on both; the run's proof that saw that very address is
+    /// the server's own exit, one calm line and no leak on either. (Another VPN that owns this
+    /// PC's default route explains every case; the hub's own scan decides which applies here.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_page_and_the_tray_share_the_same_exit_verdict() {
+        use std::net::IpAddr;
+
+        use vpnte_probes::ip_monitor::IpVerdict;
+        use vpnte_probes::public_ip::IpSample;
+        use vpnte_ui::dashboard::SameExit;
+
+        let other_vpn = super::super::feeds::scan_foreign().is_some_and(|f| f.default_route);
+        let (hub, fake, _dir) = setup("same-exit");
+        let (dash, tray) = (Dashboard(hub.clone()), Tray(hub.clone()));
+        let home: IpAddr = "203.0.113.7".parse().expect("ip");
+        let elsewhere: IpAddr = "198.51.100.42".parse().expect("ip");
+        fake.evidence.send_replace(IpEvidence {
+            real_ip: Some(home),
+            last: Some(IpSample {
+                ip: home,
+                provider: 0,
+                at: 1_700_000_000_000,
+            }),
+            fresh: true,
+            verdict: IpVerdict::Failed,
+            baseline: None,
+        });
+        fake.transition(TunnelState::Connected, None);
+        for (proven, alone) in [
+            (None, SameExit::No),
+            (Some(elsewhere), SameExit::No),
+            (Some(home), SameExit::Server),
+        ] {
+            let same = if other_vpn { SameExit::OtherVpn } else { alone };
+            let leak = same == SameExit::No;
+            fake.status.send_replace(TunStatus {
+                running: true,
+                proven_exit: proven,
+                ..TunStatus::default()
+            });
+            let (mut view, mut state) = (dash.state(), tray.state());
+            let page = view.wait_for(|v| v.same_exit == same && v.exit.leak == leak);
+            let page = tokio::time::timeout(Duration::from_secs(5), page).await;
+            let now = dash.state().borrow().clone();
+            assert!(
+                page.is_ok(),
+                "{proven:?}: {:?} {:?}",
+                now.same_exit,
+                now.exit
+            );
+            let tray_ok =
+                tokio::time::timeout(Duration::from_secs(5), state.wait_for(|t| t.leak == leak))
+                    .await;
+            let now = tray.state().borrow().clone();
+            assert!(tray_ok.is_ok(), "{proven:?}: tray {now:?}");
+        }
+    }
 }

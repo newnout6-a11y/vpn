@@ -18,7 +18,7 @@ use vpnte_tunnel::api::TunStatus;
 use vpnte_tunnel::fsm::{self, Health, ProcessState, TunnelMode, TunnelSnapshot};
 use vpnte_tunnel::lifecycle::KillSwitchView;
 use vpnte_tunnel::runtime::MAX_RESTARTS;
-use vpnte_ui::dashboard::{EngineLine, PauseLine, PickLine};
+use vpnte_ui::dashboard::{EngineLine, PauseLine, PickLine, SameExit};
 use vpnte_ui::panels::ServerRowView;
 use vpnte_ui::tray;
 use vpnte_view::identity::{ExitIp, Geo, ServerHealth};
@@ -216,17 +216,35 @@ pub(super) fn exit_ip(
     (exit, geo.map(|(_, code)| code.as_str().to_owned()))
 }
 
-/// The exit equals the address measured without our VPN while another VPN works on this PC
-/// (p-live2, the owner's Happ on the same provider): the address check proves nothing then, so the
-/// page says so in one calm line instead of a leak. Without another VPN in sight the same match
-/// stays a leak, and the leak self-test keeps its own verdict either way.
-pub(super) fn other_vpn_exit(snap: &TunnelSnapshot, ev: &IpEvidence, other_vpn: bool) -> bool {
+/// Why a settled session's latest read equals the address measured without our VPN, when the
+/// evidence says it is no leak; the address check proves nothing then, so the page and the tray
+/// say so in one calm line instead of a leak. Another VPN that owns the default route (p-live2,
+/// the owner's Happ on the same provider) explains it; else the run's own exit proof does when
+/// it saw this very address (lab L10-7: the server leaves from it). A proven exit elsewhere, or
+/// none, keeps the leak; the leak self-test keeps its own verdict either way.
+pub(super) fn same_exit(
+    snap: &TunnelSnapshot,
+    status: &TunStatus,
+    ev: &IpEvidence,
+    other_vpn: bool,
+) -> SameExit {
     let settled_on = snap.state == fsm::TunnelState::Connected && snap.transition.is_none();
-    let same = ev.real_ip.is_some() && ev.last.map(|s| s.ip) == ev.real_ip;
-    other_vpn && settled_on && same
+    let Some(home) = ev.real_ip.filter(|_| settled_on) else {
+        return SameExit::No;
+    };
+    let proven = status.proven_exit.filter(|_| status.running);
+    if ev.last.map(|s| s.ip) != Some(home) {
+        SameExit::No
+    } else if other_vpn {
+        SameExit::OtherVpn
+    } else if proven == Some(home) {
+        SameExit::Server
+    } else {
+        SameExit::No
+    }
 }
 
-/// `exit` as the page shows it when [`other_vpn_exit`]: not checked, never a leak.
+/// `exit` as the page shows it when [`same_exit`] explains it: not checked, never a leak.
 pub(super) fn calm_exit(exit: ExitIp) -> ExitIp {
     ExitIp {
         leak: false,

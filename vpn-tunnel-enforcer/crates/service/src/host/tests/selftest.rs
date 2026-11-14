@@ -73,6 +73,32 @@ async fn the_self_test_reaches_its_sessions_user() {
     assert_eq!(status_reply(&mut c, 4).await.tunnel.self_test, None);
 }
 
+/// Review live2-a3 (protocol 5): the service's own self-test is labelled with the scope the run
+/// was built with, which the run reports, never the stored inputs: the app hands new inputs over
+/// at every attach and list update, and the running session does not use them.
+#[tokio::test]
+async fn the_self_test_takes_the_scope_the_run_reports() {
+    let h = harness();
+    let mut c = Raw::open(&h).await;
+    let results = tun_session(&h, &mut c).await;
+    // The run was built for the listed apps only; the stored inputs say every app.
+    h.runtime.status.send_modify(|s| s.listed_only = Some(true));
+    results.send_replace(Some(sample(8)));
+    let pushed = pushed_self_test(&mut c).await;
+    assert!(
+        pushed.default_direct,
+        "the listed-only run's read went direct"
+    );
+    // And the other way: a run built for every app is never relabelled listed-only.
+    h.runtime
+        .status
+        .send_modify(|s| s.listed_only = Some(false));
+    results.send_replace(Some(sample(9)));
+    let pushed = pushed_self_test(&mut c).await;
+    assert_eq!(pushed.at, 9);
+    assert!(!pushed.default_direct);
+}
+
 /// Protocol compatibility one version back: a version-1 app refuses unknown fields, so it never
 /// gets `selfTest`; since protocol 3 it is refused at its `Hello`, and the app one version back
 /// (which reads `selfTest`) is welcomed at its version.

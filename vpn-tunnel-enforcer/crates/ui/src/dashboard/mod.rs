@@ -77,9 +77,33 @@ pub struct DashboardView {
     /// The connect in flight is proving its exit (its engine runs, nothing is claimed yet):
     /// the caption says «Проверяем выход…» (lab F-4).
     pub proving_exit: bool,
-    /// The exit equals the address without our VPN while another VPN works on this PC: one calm
-    /// line instead of a leak (the address check proves nothing then).
-    pub other_vpn_exit: bool,
+    /// The exit equals the address without our VPN and that is explained, not a leak: one calm
+    /// line instead of the leak banner (the address check proves nothing then).
+    pub same_exit: SameExit,
+}
+
+/// Why a settled session's exit equals the address measured without our VPN, when the evidence
+/// says it is no leak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SameExit {
+    /// Not the case, or a real leak (it stays red).
+    #[default]
+    No,
+    /// Another VPN owns this PC's default route (p-live2, the owner's Happ on the same provider).
+    OtherVpn,
+    /// Our own exit proof saw this server leave from that very address (lab L10-7).
+    Server,
+}
+
+impl SameExit {
+    /// The calm line's text (`None`: no line).
+    pub const fn key(self) -> Option<&'static str> {
+        match self {
+            Self::No => None,
+            Self::OtherVpn => Some("ui.dashboard.sameExit"),
+            Self::Server => Some("ui.dashboard.sameExitServer"),
+        }
+    }
 }
 
 /// The paused state's line: the next automatic attempt and whether the user must act.

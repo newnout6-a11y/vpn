@@ -290,10 +290,10 @@ async fn drain<W: AsyncWrite + Unpin>(
     !status.has_changed().unwrap_or(false) || push_status(w, status).await
 }
 
-/// The runtime's status as this connection pushes it: with the last exit, fault and self-test
-/// when the session is this client's (review service-b2), so the app reads them with the status
-/// of a crash, and the Smart RU lists the last start ran (to a client of protocol 4: older ones
-/// refuse the field).
+/// The runtime's status as this connection pushes it: with the last exit, fault, self-test and
+/// proven exit when the session is this client's (review service-b2), so the app reads them with
+/// the status of a crash, and the Smart RU lists the last start ran (to a client of protocol 4:
+/// older ones refuse the field).
 struct Status {
     rx: tokio::sync::watch::Receiver<vpnte_tunnel::api::TunStatus>,
     host: Arc<Host>,
@@ -317,6 +317,9 @@ impl Status {
             let runtime = &self.host.deps.runtime;
             wire.last_exit = runtime.last_exit().as_ref().map(ExitWire::from);
             wire.recent_fault = runtime.recent_fault();
+        } else {
+            // The run's exit address is its own user's, like its self-test.
+            wire.proven_exit = None;
         }
         wire.self_test = self.host.self_test_for(&self.user, &wire);
         wire.rule_sets = self.host.deps.inputs.rule_sets();

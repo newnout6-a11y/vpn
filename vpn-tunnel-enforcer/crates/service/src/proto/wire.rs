@@ -51,16 +51,32 @@ pub struct StatusWire {
     /// ([`StatusWire::speak`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule_sets: Option<RuleSetsWire>,
+    /// Protocol 5 (live2-a3): the app scope the run was built with (`TunStatus::listed_only`);
+    /// the app labels the run by it, not by its saved setting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub listed_only: Option<bool>,
+    /// Protocol 5 (lab L10-7): the address the run's exit proof saw (`TunStatus::proven_exit`),
+    /// to the session's own user only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proven_exit: Option<std::net::IpAddr>,
 }
 
 /// The first protocol whose service reports its Smart RU lists ([`StatusWire::rule_sets`]).
 pub const RULE_SETS_PROTOCOL: u32 = 4;
+
+/// The first protocol whose service reports the run's scope and proven exit
+/// ([`StatusWire::listed_only`], [`StatusWire::proven_exit`]).
+pub const RUN_FACTS_PROTOCOL: u32 = 5;
 
 impl StatusWire {
     /// The status as a client of `protocol` reads it (structs refuse unknown fields).
     pub fn speak(mut self, protocol: u32) -> Self {
         if protocol < RULE_SETS_PROTOCOL {
             self.rule_sets = None;
+        }
+        if protocol < RUN_FACTS_PROTOCOL {
+            self.listed_only = None;
+            self.proven_exit = None;
         }
         self
     }
@@ -164,6 +180,8 @@ impl From<&TunStatus> for StatusWire {
             recent_fault: None,
             self_test: None,
             rule_sets: None,
+            listed_only: s.listed_only,
+            proven_exit: s.proven_exit,
         }
     }
 }
@@ -745,5 +763,49 @@ mod tests {
         assert!(!json.contains("selfTest"));
         let back: StatusWire = serde_json::from_str(&json).expect("reads");
         assert_eq!(back.self_test, None);
+    }
+
+    /// p-wire5: the run's scope (live2-a3) and proven exit (lab L10-7) ride the status from
+    /// protocol 5, each on its own; a version-4 peer's frame (no field) reads as "not
+    /// reported", and a version-4 client gets the status without them.
+    #[test]
+    fn the_run_facts_speak_protocol_5_only() {
+        let exit: std::net::IpAddr = "198.51.100.42".parse().expect("ip");
+        let scoped = StatusWire {
+            listed_only: Some(true),
+            ..StatusWire::default()
+        };
+        let proven = StatusWire {
+            proven_exit: Some(exit),
+            ..StatusWire::default()
+        };
+        for (status, field) in [(scoped, "listedOnly"), (proven, "provenExit")] {
+            let json =
+                serde_json::to_string(&status.clone().speak(RUN_FACTS_PROTOCOL)).expect("json");
+            assert!(json.contains(field), "{json}");
+            let back: StatusWire = serde_json::from_str(&json).expect("reads");
+            assert_eq!(back, status);
+            let old = serde_json::to_string(&status.speak(RUN_FACTS_PROTOCOL - 1)).expect("json");
+            assert!(!old.contains(field), "{old}");
+        }
+        let old: StatusWire =
+            serde_json::from_str(r#"{"running":true,"startedAt":1000}"#).expect("a v4 status");
+        assert_eq!((old.listed_only, old.proven_exit), (None, None));
+    }
+
+    /// The run facts go from the runtime's status to the wire and back unchanged.
+    #[test]
+    fn the_run_facts_cross_the_conversions() {
+        let status = TunStatus {
+            running: true,
+            listed_only: Some(false),
+            proven_exit: Some("203.0.113.43".parse().expect("ip")),
+            ..TunStatus::default()
+        };
+        let back = TunStatus::from(StatusWire::from(&status));
+        assert_eq!(
+            (back.listed_only, back.proven_exit),
+            (status.listed_only, status.proven_exit)
+        );
     }
 }

@@ -17,6 +17,7 @@ use vpnte_tunnel::api::TunStatus;
 use vpnte_tunnel::fsm::{
     Health, ProcessState, ProxyStatus, Transition, TunnelMode, TunnelSnapshot, TunnelState,
 };
+use vpnte_ui::dashboard::SameExit;
 use vpnte_ui::tray::{TrayItemId, TrayModel, TrayState, TrayStatus};
 use vpnte_view::identity::ServerHealth;
 use vpnte_view::labels::{self, FwState};
@@ -906,15 +907,18 @@ fn the_same_exit_under_another_vpn_is_no_leak() {
         ..TunnelSnapshot::default()
     };
     let same = evidence(IpVerdict::Failed, Some(HOME), None);
-    assert!(project::other_vpn_exit(&connected, &same, true));
-    assert!(!project::other_vpn_exit(&connected, &same, false));
+    let run = TunStatus::default();
+    let why =
+        |snap: &TunnelSnapshot, ev: &IpEvidence, other| project::same_exit(snap, &run, ev, other);
+    assert_eq!(why(&connected, &same, true), SameExit::OtherVpn);
+    assert_eq!(why(&connected, &same, false), SameExit::No);
     let other = evidence(IpVerdict::Indeterminate, Some(EXIT), None);
-    assert!(!project::other_vpn_exit(&connected, &other, true));
+    assert_eq!(why(&connected, &other, true), SameExit::No);
     let connecting = TunnelSnapshot {
         transition: Some(Transition::Connecting),
         ..connected.clone()
     };
-    assert!(!project::other_vpn_exit(&connecting, &same, true));
+    assert_eq!(why(&connecting, &same, true), SameExit::No);
     let (exit, _) = project::exit_ip(&connected, &same, None, Lang::Ru);
     assert!(exit.leak, "the check itself still calls it a leak");
     let calm = project::calm_exit(exit);
@@ -946,8 +950,50 @@ fn only_a_default_route_vpn_explains_the_same_exit() {
     };
     let same = evidence(IpVerdict::Failed, Some(HOME), None);
     let other = project::other_vpn(Some(&split), false);
-    assert!(
-        !project::other_vpn_exit(&connected, &same, other),
+    assert_eq!(
+        project::same_exit(&connected, &TunStatus::default(), &same, other),
+        SameExit::No,
         "the leak card stays"
     );
+}
+
+/// Lab L10-7 (p-wire5): with no other VPN in sight, the run's own exit proof tells the two cases
+/// apart. It saw the server leave from the address without our VPN, and the latest read shows
+/// that address: the server's exit, one calm line. It saw another address, or nothing (a proof
+/// by traffic, an older service): the read through the session is the real address, a leak.
+#[test]
+fn the_proven_exit_tells_the_same_exit_from_a_leak() {
+    let connected = TunnelSnapshot {
+        state: TunnelState::Connected,
+        ..TunnelSnapshot::default()
+    };
+    let read_home = evidence(IpVerdict::Failed, Some(HOME), None);
+    let proven = |exit| TunStatus {
+        running: true,
+        proven_exit: exit,
+        ..TunStatus::default()
+    };
+    let why =
+        |status: &TunStatus, ev: &IpEvidence| project::same_exit(&connected, status, ev, false);
+    assert_eq!(why(&proven(Some(HOME)), &read_home), SameExit::Server);
+    assert_eq!(
+        why(&proven(Some(EXIT)), &read_home),
+        SameExit::No,
+        "a real leak"
+    );
+    assert_eq!(why(&proven(None), &read_home), SameExit::No, "no proof");
+    let stale = TunStatus {
+        running: false,
+        ..proven(Some(HOME))
+    };
+    assert_eq!(why(&stale, &read_home), SameExit::No, "no run, no proof");
+    let read_exit = evidence(IpVerdict::Indeterminate, Some(EXIT), None);
+    assert_eq!(
+        why(&proven(Some(HOME)), &read_exit),
+        SameExit::No,
+        "the read differs"
+    );
+    let (exit, _) = project::exit_ip(&connected, &read_home, None, Lang::Ru);
+    assert!(exit.leak, "the check itself still calls it a leak");
+    assert!(!project::calm_exit(exit).leak);
 }

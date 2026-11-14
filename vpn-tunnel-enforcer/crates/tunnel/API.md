@@ -53,7 +53,10 @@ pub struct TunStatus { pub running: bool, pub mode: Option<ModeKind>, pub proxy_
     pub started_at: Option<UnixMs>, pub restart_attempt: u8,
     pub capture: Option<CaptureKind> /* Some while a session runs; omitted from JSON when None */,
     pub engine: Option<EngineRun> /* Some while a session runs; omitted from JSON when None */,
-    pub session: Option<SessionEndpoints> /* #[serde(skip)]: secrets never serialized */ }
+    pub session: Option<SessionEndpoints> /* #[serde(skip)]: secrets never serialized */,
+    pub listed_only: Option<bool> /* p-wire5 live2-a3: the app scope the run was built with */,
+    pub proven_exit: Option<IpAddr> /* p-wire5 L10-7: the exit proof's address (start, then each
+        committed switch); None: no address proven (local proxy, proof by traffic) */ }
 pub struct SessionEndpoints { pub clash_port: u16, pub clash_secret: String, pub direct: ProxyEndpoint,
     pub probe: Option<ProxyEndpoint>, pub tun_luid: Option<u64>, pub tun_alias: Option<String>,
     pub proxy_port: Option<u16> /* mixed inbound of a proxy capture */, pub logs: Vec<PathBuf> }
