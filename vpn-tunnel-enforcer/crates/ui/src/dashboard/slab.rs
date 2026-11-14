@@ -4,13 +4,14 @@ use std::iter;
 use std::time::{Duration, Instant};
 
 use dioxus::prelude::*;
+use vpnte_base::Msg;
 use vpnte_base::types::{UnixMs, now_ms};
 use vpnte_view::fmt::{elapsed, format_uptime};
 use vpnte_view::labels::{
     ExitLine, PowerLook, RealLine, cancel_label, exit_line, power_button, real_line, status_label,
 };
 use vpnte_view::mascot::MascotEvent;
-use vpnte_view::swiss::{self, OpWindow, RULER_CELLS, SwissInput};
+use vpnte_view::swiss::{self, ConnView, OpWindow, RULER_CELLS, SwissInput};
 
 use super::model::{NodeLine, engine_caption, node_line};
 use super::{Dash, EngineLine};
@@ -64,7 +65,7 @@ pub(super) fn Slab(servers: Signal<ServersView>, local_pings: Signal<LocalPings>
                         class: if conn.cancelling { "sr-only" } else { "swiss-caption" },
                         role: "status",
                         aria_live: "polite",
-                        {tr(&status_label(conn))}
+                        {tr(&caption(conn, view.proving_exit))}
                     }
                     if let Some(since) = conn.uptime_since() {
                         Uptime { since }
@@ -76,6 +77,15 @@ pub(super) fn Slab(servers: Signal<ServersView>, local_pings: Signal<LocalPings>
             MascotHost {}
         }
     }
+}
+
+/// The live caption: «Проверяем выход…» while a connect proves its exit (never «Подключено»
+/// before traffic went through the server, lab F-4), else the connection's status line.
+fn caption(conn: &ConnView, proving_exit: bool) -> Msg {
+    if proving_exit && !conn.cancelling {
+        return Msg::new("ui.dashboard.provingExit");
+    }
+    status_label(conn)
 }
 
 /// The big state word, sized by `dashboard.js` so every word is equally wide (decorative: the
@@ -437,6 +447,23 @@ fn Cells(ruler: swiss::Ruler, busy: bool) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lab F-4 (p-live2): while a connect proves its exit the caption says so, never
+    /// «Подключено»; a cancel still speaks first.
+    #[test]
+    fn the_caption_waits_for_the_exit_proof() {
+        let connecting = ConnView {
+            transition: Some(swiss::Transition::Connecting),
+            ..ConnView::default()
+        };
+        assert_eq!(caption(&connecting, true).key, "ui.dashboard.provingExit");
+        assert_eq!(caption(&connecting, false).key, "dashboard.connecting");
+        let cancelling = ConnView {
+            cancelling: true,
+            ..connecting
+        };
+        assert_eq!(caption(&cancelling, true).key, "dashboard.cancelling");
+    }
 
     fn progress_root() -> Element {
         let op = use_context::<Option<OpWindow>>();

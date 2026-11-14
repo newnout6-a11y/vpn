@@ -14,6 +14,11 @@ pub(super) fn proxied(mut i: ConfigInputs) -> ConfigInputs {
     i
 }
 
+fn outbound(config: &Value, tag: &str) -> Value {
+    let outs = config["outbounds"].as_array().unwrap().iter();
+    outs.into_iter().find(|o| o["tag"] == tag).cloned().unwrap()
+}
+
 fn has_rule(config: &Value, rule: &Value) -> bool {
     index_of(config, rule).is_some()
 }
@@ -86,13 +91,25 @@ fn proxy_form_keeps_everything_but_the_tun() {
     assert_eq!(c["dns"]["strategy"], "ipv4_only");
     let clash = &c["experimental"]["clash_api"];
     assert_eq!(clash["external_controller"], "127.0.0.1:25553");
-    // The same profile over a TUN differs only in the capture parts.
+    // The same profile over a TUN differs only in the capture parts and in the resolver of
+    // `direct-out`: a proxy client hands over a name, resolved on `dns-direct` when it leaves
+    // directly (appsplit-b3).
     let mut t = i.clone();
     t.capture = Capture::Tun(tun(false, true));
     let t = build(&t).unwrap();
     assert_eq!(t["dns"], c["dns"]);
-    assert_eq!(t["outbounds"], c["outbounds"]);
+    let (direct, others) = (outbound(&c, DIRECT_OUT), outbound(&t, DIRECT_OUT));
+    assert_eq!(direct["domain_resolver"], DNS_DIRECT);
+    assert!(others.get("domain_resolver").is_none());
+    let rest = |c: &Value| -> Vec<Value> {
+        let outs = c["outbounds"].as_array().unwrap().iter();
+        outs.filter(|o| o["tag"] != DIRECT_OUT).cloned().collect()
+    };
+    assert_eq!(rest(&t), rest(&c));
     assert_eq!(t["experimental"], c["experimental"]);
+    // Without `dns-direct` (no Smart RU, no direct rule, no scope) nothing changes.
+    let bare = build(&proxied(inputs(native(&vless("1.2.3.4", None))))).unwrap();
+    assert!(outbound(&bare, DIRECT_OUT).get("domain_resolver").is_none());
 }
 
 /// The UDP policy of the upstream is kept: QUIC reject before sniff, the all-UDP drop.
@@ -162,4 +179,36 @@ fn proxy_capture_compat_key() {
     let mut other = base.clone();
     other.capture = Capture::Proxy { port: 25561 };
     assert_ne!(compat_key(&other), key);
+}
+
+/// fixlists-b3: under proxy capture the user's «Не через прокси» entries leave directly for
+/// every program, before every app's rule, and their names resolve on the network's resolver
+/// (an intranet name), which is added when routing defines none; a TUN ignores them. sing-box
+/// accepts both.
+#[test]
+fn the_users_bypass_entries_leave_directly_under_proxy_capture() {
+    let entries = crate::routing::bypass::parse_list("corp.example 203.0.113.*").unwrap();
+    let bypass = crate::routing::bypass::route_rules(&entries);
+    let mut i = proxied(inputs(native(&vless("1.2.3.4", None))));
+    let process =
+        json!({ "process_path_regex": [r"(?i)^C:\\Apps\\vpn\.exe$"], "outbound": PROXY_OUT });
+    i.routing.process_rules = vec![process.clone()];
+    i.routing.proxy_bypass = bypass.clone();
+    i.phys_dns = vec![std::net::Ipv4Addr::new(192, 168, 1, 1)];
+    let c = build(&i).unwrap();
+    let at: Vec<usize> = [&bypass[0], &bypass[1], &process]
+        .iter()
+        .map(|r| index_of(&c, r).unwrap())
+        .collect();
+    assert!(at.windows(2).all(|w| w[0] + 1 == w[1]), "{at:?} in {c:#}");
+    let server = dns_server(&c, DNS_DIRECT).expect("dns-direct");
+    assert_eq!(server["server"], "192.168.1.1");
+    assert_eq!(outbound(&c, DIRECT_OUT)["domain_resolver"], DNS_DIRECT);
+    assert_eq!(crate::test_support::singbox_check(&c).map(|_| ()), Ok(()));
+
+    let mut t = i.clone();
+    t.capture = Capture::Tun(tun(false, true));
+    let t = build(&t).unwrap();
+    assert!(index_of(&t, &bypass[0]).is_none() && dns_server(&t, DNS_DIRECT).is_none());
+    assert_eq!(crate::test_support::singbox_check(&t).map(|_| ()), Ok(()));
 }

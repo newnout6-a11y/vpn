@@ -40,11 +40,13 @@
       "notice": {
         "connected": {
           "title": "Protection on",
-          "body": "All traffic goes through the VPN."
+          "body": "All traffic goes through the VPN.",
+          "bodyListed": "Selected apps go through the VPN."
         },
         "restored": {
           "title": "VPN is back",
-          "body": "The internet goes through the VPN again."
+          "body": "The internet goes through the VPN again.",
+          "bodyListed": "Selected apps go through the VPN again."
         },
         "disconnected": {
           "title": "Protection off",

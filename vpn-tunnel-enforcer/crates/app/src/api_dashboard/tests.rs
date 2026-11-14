@@ -860,3 +860,61 @@ fn the_pick_strip_shows_the_live_traffic_line() {
     assert_eq!(body(held), "automation.autopick.exposure.blocked");
     assert_eq!(body(released), "automation.autopick.exposure.direct");
 }
+
+/// Lab F-4 (p-live2): «Проверяем выход…» exactly while a connect runs its engine and proves the
+/// exit; nothing before the engine, nothing once the session is published.
+#[test]
+fn proving_exit_is_the_connect_between_engine_and_session() {
+    use vpnte_base::types::Engine;
+    use vpnte_tunnel::api::EngineRun;
+    let connecting = TunnelSnapshot {
+        transition: Some(Transition::Connecting),
+        ..TunnelSnapshot::default()
+    };
+    let engine_up = TunStatus {
+        engine: Some(EngineRun {
+            kind: Engine::SingBox,
+            reason: None,
+        }),
+        ..TunStatus::default()
+    };
+    assert!(project::proving_exit(&connecting, &engine_up));
+    assert!(!project::proving_exit(&connecting, &TunStatus::default()));
+    let published = TunStatus {
+        running: true,
+        ..engine_up.clone()
+    };
+    assert!(!project::proving_exit(&connecting, &published));
+    let connected = TunnelSnapshot {
+        state: TunnelState::Connected,
+        ..TunnelSnapshot::default()
+    };
+    assert!(!project::proving_exit(&connected, &engine_up));
+}
+
+/// p-live2 (owner): another VPN on this PC (the owner's Happ on the same provider) makes the exit
+/// equal to the address measured without ours. With another VPN in sight that is one calm line,
+/// not a leak; without one the same match stays a leak.
+#[test]
+fn the_same_exit_under_another_vpn_is_no_leak() {
+    let connected = TunnelSnapshot {
+        state: TunnelState::Connected,
+        ..TunnelSnapshot::default()
+    };
+    let same = evidence(IpVerdict::Failed, Some(HOME), None);
+    assert!(project::other_vpn_exit(&connected, &same, true));
+    assert!(!project::other_vpn_exit(&connected, &same, false));
+    let other = evidence(IpVerdict::Indeterminate, Some(EXIT), None);
+    assert!(!project::other_vpn_exit(&connected, &other, true));
+    let connecting = TunnelSnapshot {
+        transition: Some(Transition::Connecting),
+        ..connected.clone()
+    };
+    assert!(!project::other_vpn_exit(&connecting, &same, true));
+    let (exit, _) = project::exit_ip(&connected, &same, None, Lang::Ru);
+    assert!(exit.leak, "the check itself still calls it a leak");
+    let calm = project::calm_exit(exit);
+    assert!(!calm.leak);
+    assert_eq!(calm.verdict, Verdict::Warn);
+    assert_eq!(calm.ip, Some(HOME));
+}

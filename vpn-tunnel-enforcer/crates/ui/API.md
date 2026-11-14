@@ -294,6 +294,9 @@ pub struct DashboardView {
     pub pause: Option<PauseLine>,                     // ks-a: «Интернет на паузе» (strip with two buttons)
     pub no_pause_vpn: Option<String>,                 // ks-a: another VPN carries all traffic: no pause
     pub proxy_taken: bool,                            // ks-b: another program took the system proxy: one line + «Вернуть»
+    pub proving_exit: bool,                           // p-live2: a connect proves its exit: caption «Проверяем выход…»
+    pub other_vpn_exit: bool,                         // p-live2: exit == the address without us, another VPN here:
+                                                      // one calm line `ui.dashboard.sameExit` (never the leak card)
 }
 pub struct EngineLine { pub engine: Engine, pub reason: Option<Msg> }  // «Xray · REALITY» under the node
 pub struct PickLine { pub title: Msg, pub body: Option<Msg> }  // step; during retries what traffic does;
@@ -402,7 +405,9 @@ pub enum TrayStatus { Protected, Leak, Off, Starting, ProxyDown, KillSwitch, Res
 pub struct TrayModel { status, tooltip: Vec<Msg>, tooltip_speed: Option<Msg>, items: Vec<TrayItem>,
     turn_off_always: bool /*Stop reads «Выключить «Всегда»»*/, update: Option<Msg> /*«Доступна версия X»*/ }
     // build(&state, quitting) = build_with(&state, &TrayExtras::default(), quitting)
-pub struct TrayExtras { pub always: bool, pub update: Option<String>, pub window_lost: bool }  // p-follow: read by
+pub struct TrayExtras { pub always: bool, pub update: Option<String>, pub window_lost: bool,
+    pub service_note: Option<Msg> /* p-live2: helper service starting / stopped: status line + tooltip
+    while nothing runs (TrayHost reads it from the HelperApi capability) */ }  // p-follow: read by
     // TrayHost from the root Rc<dyn SettingsApi> (kill-switch view: Strict + always_available) and
     // Rc<dyn UpdatesApi> (app.version); p-tails-a: window_lost from the window's crash watch
     // (`launch`, context `WindowLost`): «Показать окно» reads «Открыть окно» (`ui.tray.menu.open`)
@@ -775,7 +780,9 @@ pub trait ScheduleApi: 'static {        // root component SchedulePage
 }
 pub trait SplitTunnelApi: 'static {     // root component SplitTunnelPage (Page::Apps)
     fn state(&self) -> watch::Receiver<SplitSnapshot>;    // { apps: Load<Vec<SplitApp>>, offers: Vec<RoutingOffer>,
-        // scope: AppScope, older_service: bool /* Tunnel mode via a service too old for the scope */ }; first empty read runs discovery
+        // scope: AppScope, pending: bool /* a session runs with the other scope */, proxy: bool /* Proxy mode:
+        // the hints name programs that use the system proxy */, older_service: bool /* Tunnel mode via a
+        // service too old for the scope */ }; first empty read runs discovery
     async fn reload(&self) -> AppResult<()>;
     async fn refresh(&self) -> AppResult<usize>;          // rescan; returns how many new apps were found
     async fn add_app(&self) -> AppResult<Option<SplitApp>>;          // Open dialog (.exe); None = dismissed
@@ -948,7 +955,9 @@ pub trait HelperApi: 'static {      // context Rc<dyn HelperApi>; absent (demos,
     async fn install_service(&self) -> AppResult<bool>;   // Windows' one prompt; Ok(false) = declined
 }
 pub struct Capability { service: Service, elevated: bool, tunnel, kill_switch, policies, capture: Ability }
-pub enum Service { Missing, Installed, Older { lacks: Vec<Lack> } }   pub enum Lack { AppScope }
+pub enum Service { Missing, Installed, Older { lacks: Vec<Lack> }, Starting, Stopped }   pub enum Lack { AppScope }
+impl Service { pub const fn pause_key(&self) -> Option<&'static str> }  // p-live2: Starting / Stopped ->
+    // `ui.helper.{starting,stopped}`: HelperLine (a feature the service carries), TunnelStrip, the tray
 pub enum Ability { Service, InProcess, NeedsService, NotInVersion }   // works() = Service | InProcess
 pub enum Feature { Tunnel, KillSwitch, Policies, Capture }            // Capability::ability(feature)
 pub fn use_capability() -> Option<Capability>;          // live; None without a HelperApi in context

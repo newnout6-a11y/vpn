@@ -212,3 +212,39 @@ fn the_folder_size_counts_every_file() {
     assert_eq!(bytes_under(&dir.join("gone")), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Lab F-8 (p-live2): an engine file this process holds open without delete sharing (the engine
+/// pins do so until the process ends) can be neither deleted nor renamed: it is reported as held,
+/// its path is never queued, and the sweep's pass after the holder closed it removes it.
+#[test]
+fn held_engine_files_are_reported_and_swept_later() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    let (dir, exe, image) = in_use("held");
+    let engine = dir.join("sing-box.exe");
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ.0)
+        .open(&engine)
+        .expect("held like a pinned engine");
+    let mut queued = Vec::new();
+    let left = remove_or_schedule(&dir, &mut |p: &Path| queued.push(p.to_owned()));
+    assert_eq!(left.held, std::slice::from_ref(&engine));
+    assert!(!queued.contains(&engine), "{queued:?}");
+    let tombstone = left.tombstone_of(&exe).map(Path::to_path_buf);
+    drop(held);
+    let mut later = Vec::new();
+    let swept = remove_or_schedule(&dir, &mut |p: &Path| later.push(p.to_owned()));
+    let gone = !engine.exists();
+    free(&dir, image);
+    assert!(swept.held.is_empty(), "{:?}", swept.held);
+    assert!(gone, "the sweep deleted the engine");
+    let tombstone = tombstone.expect("the exe went to a tombstone");
+    assert!(
+        tombstone
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("vpnte-service.exe.") && n.ends_with(".deleted")),
+        "{tombstone:?}"
+    );
+}

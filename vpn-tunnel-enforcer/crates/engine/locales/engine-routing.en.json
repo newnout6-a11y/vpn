@@ -15,7 +15,10 @@
       "bypass": {
         "invalid": "“{{entry}}” is not a host or address. Examples: example.com, *.example.com, 192.168.*, 10.0.0.5.",
         "tooMany": "The list can hold up to {{max}} entries.",
-        "tooLong": "Windows keeps up to {{max}} characters of proxy exceptions. Remove some entries."
+        "tooLong_one": "The list does not fit Windows' proxy exceptions. Remove entries of about {{count}} character.",
+        "tooLong_few": "The list does not fit Windows' proxy exceptions. Remove entries of about {{count}} characters.",
+        "tooLong_many": "The list does not fit Windows' proxy exceptions. Remove entries of about {{count}} characters.",
+        "tooLong_other": "The list does not fit Windows' proxy exceptions. Remove entries of about {{count}} characters."
       },
       "dns": {
         "required": "Enter a DNS server address.",

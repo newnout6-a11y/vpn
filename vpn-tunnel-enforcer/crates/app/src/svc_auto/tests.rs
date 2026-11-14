@@ -5,5 +5,6 @@ mod coord;
 mod failover;
 mod feed;
 mod leftovers;
+mod pilot;
 mod privacy;
 mod pure;

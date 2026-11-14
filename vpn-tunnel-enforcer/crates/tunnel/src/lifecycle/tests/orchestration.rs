@@ -85,6 +85,46 @@ async fn direct_connect_uses_settings_and_starts_services() {
     assert_eq!(live.adaptive, AdaptiveMode::TlsCompatibility);
 }
 
+/// appsplit-b2 (p-live2): under «Только выбранные приложения» the connect notice says that
+/// the selected apps go through the VPN, in both modes; under «Все приложения» it stays.
+#[tokio::test]
+async fn the_connect_notice_follows_the_app_scope() {
+    for (scope, soft_mode, body) in [
+        (
+            vpnte_core::settings::AppScope::OnlyListed,
+            false,
+            "tunnel.lifecycle.notice.connected.bodyListed",
+        ),
+        (
+            vpnte_core::settings::AppScope::OnlyListed,
+            true,
+            "tunnel.lifecycle.notice.softConnected.bodyListed",
+        ),
+        (
+            vpnte_core::settings::AppScope::All,
+            false,
+            "tunnel.lifecycle.notice.connected.body",
+        ),
+    ] {
+        let h = Harness::new();
+        h.profiles.add("srv-nl", "nl-1", true);
+        h.settings.update(|s| s.app_scope = scope).unwrap();
+        let req = if soft_mode {
+            super::soft_vpn(None, Owner::Manual)
+        } else {
+            direct(None, Owner::Manual)
+        };
+        h.lc.connect(req).await.expect("connect");
+        let name = if soft_mode {
+            "softConnected"
+        } else {
+            "connected"
+        };
+        let (n, _) = notice(&h, name).expect("connect notice");
+        assert_eq!(n.body.unwrap().key, body);
+    }
+}
+
 /// §3.10: a full stop ends forensics, external proxies and monitoring after the runtime proved
 /// its exit, leaves an unapplied Soft proxy alone and tells the user.
 #[tokio::test]

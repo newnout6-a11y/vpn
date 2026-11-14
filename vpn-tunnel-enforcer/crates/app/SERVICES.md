@@ -104,7 +104,7 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
 | `service_protocol()` | p-app-split: Apps page, the line «Служба-помощник старой версии…» under «Только выбранные приложения» (Tunnel mode through a linked service older than `SCOPE_PROTOCOL`); `None` without a link (default) |
 | `service_present()` | p-noadmin-ui: `api_helper` (the capability view): the service is registered, as the tunnel uses it (read-only; default `false`) |
 | `service_losses()` | p-noadmin-ui: `api_helper`: a link lost without the app asking (the service restarted, e.g. to update itself): the view re-reads the protocol after the re-link (default `None`) |
-| `service_starting()` | p-live-fix: the SCM reports the helper service START_PENDING / RUNNING while its pipe does not answer yet (after a Windows restart): a view says «Служба-помощник запускается…», not «не установлена» (default `false`) |
+| `service_starting()` | p-live-fix: the SCM reports the helper service START_PENDING / RUNNING while its pipe does not answer yet (after a Windows restart): a view says «Служба-помощник запускается…», not «не установлена» (default `false`); p-live2: `api_helper` folds it (and its own SCM read: stopped) into `Service::{Starting, Stopped}` for the helper line, the start-page strip and the tray |
 | `shutdown(budget)` | app-main (Tray `quit`) |
 | `proxies()` | Panels proxy column and actions (`api_dashboard/proxies.rs`), Servers `start_proxies`; `None` = the column stays empty, actions answer `Conflict` |
 | `live_checks()` | Servers `live_check` / `live_history` / `live_batch` (`api_servers/live.rs`); `None` = `Conflict` `app.servers.liveUnavailable` |
@@ -140,7 +140,9 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
   the 30 s self-test and the immediate filter check run where the filters are: here when this
   process holds WFP, else in the service, whose runs arrive with its status (`Remote::self_tests`)
   and go through the same forwarder (a leak -> `Lifecycle::leak_detected` + the
-  `app.tunnel.leakDetected` toast; the leak check card shows the latest run).
+  `app.tunnel.leakDetected` toast; the leak check card shows the latest run). This process's own
+  runs are labelled by the app scope the running session started with (appsplit-b4, p-live2:
+  `RunScope`, read when the run's `started_at` appears), never by the saved one.
 - Keep the two copies of the level in sync: `Settings::kill_switch` (read by the lifecycle at start)
   and `ProtectionDoc::settings.level` (the WFP model); `apply_settings_change` hands a changed
   `kill_switch` to the protection (or refuses it with `needs_admin()` when it cannot be enforced).
@@ -183,8 +185,11 @@ app's fragments: one pair per app package. **Every app package ships `crates/app
 `svc_tunnel::build` builds the automation over its own lifecycle and the one tweak journal
 (`crates/automation/API.md`, "Wiring in the app"): `AppCoordinator` (owner order on top of the
 lane; `TunnelOps::connect` starts through `AppCoordinator::start`, so the adaptive bypass picks the
-mode of the user's starts too), one `Scheduler` (its store `schedules.json` is opened only there),
-`Reactions` + the verdict feed, `Rotation`, `Adaptive`, the AutoPilot launch run, the runtime's
+mode of the user's starts too; a start whose exit stayed silent (`tunnel.runtime.exitSilent`)
+records that server offline, so the automatic choices try another one first, p-live2), one `Scheduler` (its store `schedules.json` is opened only there),
+`Reactions` + the verdict feed, `Rotation`, `Adaptive`, the AutoPilot launch run (p-live2: only
+after the first setup; «no proxy found» is logged, not a notice; this process's own listeners are
+never probed), the runtime's
 `Failover`, `Browsers` (an elevated process only) and location privacy. The forwarder runs from
 the start; the long tasks start after the start-up recovery, each under a child of
 `backend.shutdown`. The root hands `built.automation` to `api_lists::contexts` (Schedule page) and

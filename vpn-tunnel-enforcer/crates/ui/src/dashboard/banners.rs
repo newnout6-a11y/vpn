@@ -44,6 +44,9 @@ pub(super) fn Banners() -> Element {
         if let Some(name) = shown.no_pause_vpn {
             NoPauseNotice { name }
         }
+        if shown.same_exit {
+            SameExitNotice {}
+        }
         if shown.proxy_taken {
             ProxyTakenStrip {}
         }
@@ -124,6 +127,19 @@ fn NoPauseNotice(name: String) -> Element {
                     ": {name}"
                 }
                 p { class: "swiss-notice-body", {t!("ui.dashboard.noPause.body")} }
+            }
+        }
+    }
+}
+
+/// The exit equals the address without our VPN while another VPN works here: said calmly, not as
+/// a leak (p-live2).
+#[component]
+fn SameExitNotice() -> Element {
+    rsx! {
+        div { class: "overflow-hidden",
+            div { class: "c-swiss swiss-notice", role: "note", "data-notice": "same-exit",
+                p { class: "swiss-notice-body", {t!("ui.dashboard.sameExit")} }
             }
         }
     }

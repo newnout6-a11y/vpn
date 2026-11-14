@@ -8,35 +8,27 @@ use vpnte_profiles::model::Profile;
 
 use super::{Origin, ServerRow};
 
-/// Name fragments (lower case) a panel uses to refuse the client.
-const REFUSAL_WORDS: [&str; 5] = [
-    "не поддерживается",
-    "обновите приложение",
-    "not supported",
-    "unsupported",
-    "update the app",
-];
-
 /// How much of the provider's text a group keeps: three names, one line.
 const SAID_NAMES: usize = 3;
 const SAID_MAX_CHARS: usize = 160;
 
-/// An entry that points nowhere (`0.0.0.0`, `::`, loopback, no address, port 0 or 1) or whose
-/// name tells the client it is refused or must be updated.
-pub fn is_placeholder(name: &str, host: &str, port: u16) -> bool {
-    port <= 1 || points_nowhere(host) || refuses(name)
+/// An entry that points nowhere: `0.0.0.0`, `::`, loopback or no address, or port 0 or 1. Its
+/// name never decides (audit T0a: a real server named «NL | UDP not supported» stays a server);
+/// the names of placeholders only become the provider's words ([`provider_words`]).
+pub fn is_placeholder(host: &str, port: u16) -> bool {
+    port <= 1 || points_nowhere(host)
 }
 
 /// [`is_placeholder`] of a parsed profile.
 pub fn is_placeholder_profile(profile: &Profile) -> bool {
-    is_placeholder(&profile.name, &profile.server.to_string(), profile.port)
+    is_placeholder(&profile.server.to_string(), profile.port)
 }
 
 impl ServerRow {
     /// A provider placeholder stored by an older build: a feed row that is no server. The user's
     /// own keys are never judged (a local proxy on 127.0.0.1 is a real key there).
     pub fn is_placeholder(&self) -> bool {
-        self.origin == Origin::Feed && is_placeholder(&self.name, &self.server, self.port)
+        self.origin == Origin::Feed && is_placeholder(&self.server, self.port)
     }
 }
 
@@ -46,11 +38,6 @@ fn points_nowhere(host: &str) -> bool {
         Ok(ip) => ip.is_unspecified() || ip.is_loopback(),
         Err(_) => host.is_empty(),
     }
-}
-
-fn refuses(name: &str) -> bool {
-    let name = name.to_lowercase();
-    REFUSAL_WORDS.iter().any(|w| name.contains(w))
 }
 
 /// The provider's words in `names` (the placeholders' names): the distinct non-empty ones, at
@@ -83,7 +70,7 @@ mod tests {
     /// p-live-fix 1a: what the owner's panel sent, and the other shapes panels use.
     #[test]
     fn placeholders_are_told_apart_from_servers() {
-        assert!(is_placeholder("Приложение не поддерживается", "0.0.0.0", 1));
+        assert!(is_placeholder("0.0.0.0", 1));
         for host in [
             "0.0.0.0",
             "::",
@@ -94,27 +81,43 @@ mod tests {
             "",
             " ",
         ] {
-            assert!(is_placeholder("DE 1", host, 443), "{host:?}");
+            assert!(is_placeholder(host, 443), "{host:?}");
         }
-        assert!(is_placeholder("DE 1", "de1.example.com", 0));
-        assert!(is_placeholder("DE 1", "de1.example.com", 1));
+        assert!(is_placeholder("de1.example.com", 0));
+        assert!(is_placeholder("de1.example.com", 1));
+        for (host, port) in [
+            ("de1.example.com", 443),
+            ("203.0.113.7", 8443),
+            ("2001:db8::7", 2),
+            ("198.51.100.1", 443),
+        ] {
+            assert!(!is_placeholder(host, port), "{host}");
+        }
+    }
+
+    /// Audit T0a (p-live2): words never classify alone. A real server whose name says something
+    /// is not supported stays a server; the same words at `0.0.0.0:1` are a placeholder.
+    #[test]
+    fn words_alone_never_make_a_placeholder() {
+        let row = |name: &str, server: &str, port: u16| {
+            let profile = vpnte_profiles::uri::parse_uri(&format!(
+                "vless://00000000-0000-0000-0000-000000000000@{server}:{port}?security=none#{name}"
+            ))
+            .unwrap();
+            ServerRow::new(&profile, "g".into(), Origin::Feed, Default::default(), 1).unwrap()
+        };
         for name in [
-            "⚠️ Приложение не поддерживается",
-            "Обновите приложение до последней версии",
+            "NL | UDP not supported",
+            "Torrents not supported",
             "App not supported",
-            "Unsupported client",
-            "Please update the app",
         ] {
-            assert!(is_placeholder(name, "203.0.113.7", 443), "{name}");
+            assert!(!row(name, "203.0.113.7", 443).is_placeholder(), "{name}");
         }
-        for (name, host, port) in [
-            ("DE 1", "de1.example.com", 443),
-            ("NL", "203.0.113.7", 8443),
-            ("US", "2001:db8::7", 2),
-            ("Поддержка 24/7", "198.51.100.1", 443),
-        ] {
-            assert!(!is_placeholder(name, host, port), "{name}");
-        }
+        assert!(row("Приложение не поддерживается", "0.0.0.0", 1).is_placeholder());
+        // A manual key is the user's own: a local proxy on loopback is a real key there.
+        let mut own = row("local", "127.0.0.1", 10808);
+        own.origin = Origin::Manual;
+        assert!(!own.is_placeholder());
     }
 
     #[test]

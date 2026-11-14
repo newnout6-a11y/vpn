@@ -1,4 +1,6 @@
 //! The one hook every path that brings protection up goes through, and notices.
+use vpnte_core::settings::AppScope;
+
 use super::*;
 use crate::history::SessionMode;
 
@@ -72,7 +74,12 @@ impl Actor {
         if matches!(job, Job::Connect { .. }) && generation.is_some() {
             let soft = self.session.as_ref().is_some_and(LiveSession::is_soft);
             let name = if soft { "softConnected" } else { "connected" };
-            self.notify(Level::Info, name, NoticeKind::VpnConnect, None);
+            self.notify(
+                Level::Info,
+                name,
+                NoticeKind::VpnConnect,
+                self.scoped_body(name),
+            );
         }
         self.announce_up();
     }
@@ -85,7 +92,8 @@ impl Actor {
         live.proxy_down = false;
         self.deps.monitor.start(Some(generation));
         if self.end_pause() {
-            self.notify(Level::Info, "restored", NoticeKind::VpnConnect, None);
+            let body = self.scoped_body("restored");
+            self.notify(Level::Info, "restored", NoticeKind::VpnConnect, body);
         }
         self.announce_up();
     }
@@ -147,6 +155,14 @@ impl Actor {
             };
             LiveSession::open(profile, None, holder)
         })
+    }
+
+    /// Under «Только выбранные приложения» only the listed apps use the VPN: the notice says
+    /// that instead of «весь трафик» (appsplit-b2). A run reads its inputs when it starts, so
+    /// the setting now is the run's scope.
+    fn scoped_body(&self, name: &str) -> Option<Msg> {
+        let listed = self.deps.settings.read(|s| s.app_scope) == AppScope::OnlyListed;
+        listed.then(|| Msg::new(notice_key(name, "bodyListed")))
     }
 
     pub(super) fn notify(

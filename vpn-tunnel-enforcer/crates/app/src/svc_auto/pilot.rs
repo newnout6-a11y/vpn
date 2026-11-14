@@ -13,12 +13,18 @@ pub struct PilotEnv {
     pub detect: Detect,
 }
 
-/// TCP listeners on loopback or every address: where a local proxy can be reached from here.
-pub fn local_listeners(rows: &[SocketRow], process: impl Fn(u32) -> String) -> Vec<Listener> {
+/// TCP listeners on loopback or every address of other processes than `own` (this app): where a
+/// local proxy can be reached from here. The app's own sockets (the window's edits websocket, the
+/// control API) are never probed (lab F-7: three ERROR lines from a probe of the websocket).
+pub fn local_listeners(
+    rows: &[SocketRow],
+    own: u32,
+    process: impl Fn(u32) -> String,
+) -> Vec<Listener> {
     let mut names: HashMap<u32, String> = HashMap::new();
     rows.iter()
         .filter(|r| r.transport == Transport::Tcp && r.state == Some(TcpState::Listen))
-        .filter(|r| reachable_here(r.local.ip()))
+        .filter(|r| r.pid != own && reachable_here(r.local.ip()))
         .map(|r| Listener {
             host: r.local.ip().to_string(),
             port: r.local.port(),
@@ -42,7 +48,7 @@ fn process_name(pid: u32) -> String {
 impl AutoPilotEnv for PilotEnv {
     fn listeners(&self) -> Vec<Listener> {
         match socket_table() {
-            Ok(rows) => local_listeners(&rows, process_name),
+            Ok(rows) => local_listeners(&rows, std::process::id(), process_name),
             Err(e) => {
                 tracing::warn!(error = %e, "autopilot: socket table not readable");
                 Vec::new()

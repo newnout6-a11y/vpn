@@ -9,8 +9,11 @@ use std::time::Duration;
 use std::{io, iter};
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, mpsc, watch};
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{Creds, OutboundFault, ProxyKind};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
@@ -195,10 +198,26 @@ impl Slots for XraySupervisor {
     }
 }
 
-/// Public-IP echo services, tried in order (plain-text IPv4 answers).
+/// Public-IP echo services, in order (plain-text answers). Each request through a slot is a new
+/// handshake to its server, so a third service would cost a third one (RU freeze discipline).
 const ECHO_URLS: [&str; 2] = ["https://api.ipify.org", "https://ifconfig.me/ip"];
-/// Cold SOCKS egress probe budget (xray-engine §3.8).
-const EGRESS_VIA_BUDGET: Duration = Duration::from_secs(4);
+/// The egress proof of a start through a fresh engine (xray-engine §3.8; the native start's
+/// probe inbound). Lab F-3 (14.11.2026): 3 of 7 Tunnel starts failed on working servers when each
+/// request had 4 s; the first answer through that path (~300 ms RTT behind a provider's cascade)
+/// took 5-8 s. The budget counts from the moment the route accepts.
+const EGRESS_VIA: Budget = Budget {
+    total: Duration::from_secs(15),
+    hedge: Duration::from_secs(5),
+};
+
+/// How long an egress proof may take, and when the next echo service joins a first one that
+/// has not answered yet: the first keeps running (on a slow path its answer is still the first
+/// to come; cutting it and dialling again only starts over).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Budget {
+    pub total: Duration,
+    pub hedge: Duration,
+}
 
 /// The engine executables a runtime starts. Canonical install paths: the WFP permits match the
 /// image path the processes run from.
@@ -373,46 +392,91 @@ pub(super) fn echo_failed(why: EchoFailure) -> AppError {
 }
 
 /// What `err` says about the route, when it is an echo's own failure.
-#[cfg(feature = "lab")]
 pub(super) fn echo_failure(err: &AppError) -> Option<EchoFailure> {
     err.source.as_ref()?.downcast_ref::<EchoFailure>().copied()
 }
 
-/// The first public IP an echo service reports through `route`. With `admit`, every request
-/// first takes a handshake slot of the server behind the route: the fallback service is a new
-/// connection, and an unbudgeted retry against a freezing server extends the freeze.
+/// The first public IP a service of `urls` reports through `route` within `budget`. At most two
+/// requests run at a time: the next service joins after `budget.hedge` or as soon as a request
+/// failed. With `admit`, every request first takes a handshake slot of the server behind the
+/// route (each is a new connection; an unbudgeted retry against a freezing server extends the
+/// freeze); a refused slot starts nothing more and, with nothing else in flight, is the answer.
 async fn echo(
     route: &Route,
-    timeout: Duration,
+    urls: &[&str],
+    budget: Budget,
     admit: Option<(&dyn HandshakeGate, &Profile)>,
     cancel: &CancellationToken,
 ) -> AppResult<IpAddr> {
-    let client = client_for(route, timeout)?;
-    let ask = async {
-        let mut why = EchoFailure::NoReply;
-        for url in ECHO_URLS {
+    let client = client_for(route, budget.total)?;
+    // One request: its handshake slot first (with `admit`), then a plain-text address.
+    let ask = |url: &str| {
+        let request = client.get(url);
+        async move {
             if let Some((gate, server)) = admit {
-                gate.admit(server, cancel).await?;
+                gate.admit(server, cancel).await.map_err(Asked::Refused)?;
             }
-            let Ok(resp) = client.get(url).send().await else {
-                continue;
-            };
-            why = EchoFailure::NoAddress;
-            let answer = if resp.status().is_success() {
+            let resp = request
+                .send()
+                .await
+                .map_err(|_| Asked::Echo(EchoFailure::NoReply))?;
+            let text = if resp.status().is_success() {
                 resp.text().await.ok()
             } else {
                 None
             };
-            if let Some(ip) = answer.and_then(|t| t.trim().parse::<IpAddr>().ok()) {
-                return Ok(ip);
-            }
+            text.and_then(|t| t.trim().parse::<IpAddr>().ok())
+                .ok_or(Asked::Echo(EchoFailure::NoAddress))
         }
-        Err(echo_failed(why))
     };
-    tokio::select! {
-        () = cancel.cancelled() => Err(AppError::cancelled()),
-        ip = ask => ip,
+    let mut next = urls.iter();
+    let mut flight = FuturesUnordered::new();
+    let mut why = EchoFailure::NoReply;
+    let (deadline, hedge) = (sleep(budget.total), sleep(budget.hedge));
+    tokio::pin!(deadline, hedge);
+    let mut hedged = false;
+    if let Some(url) = next.next() {
+        flight.push(ask(url));
     }
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => return Err(AppError::cancelled()),
+            () = &mut deadline => break,
+            () = &mut hedge, if !hedged => {
+                hedged = true;
+                if let Some(url) = next.next() {
+                    flight.push(ask(url));
+                }
+            }
+            Some(got) = flight.next() => match got {
+                Ok(ip) => return Ok(ip),
+                Err(Asked::Refused(err)) if flight.is_empty() => return Err(err),
+                Err(Asked::Refused(_)) => next = [].iter(),
+                Err(Asked::Echo(failure)) => {
+                    if failure == EchoFailure::NoAddress {
+                        why = failure;
+                    }
+                    // A failure takes the hedge's turn: the next service now, never a third
+                    // request in flight.
+                    hedged = true;
+                    if let Some(url) = next.next() {
+                        flight.push(ask(url));
+                    }
+                }
+            },
+        }
+        if flight.is_empty() && next.len() == 0 {
+            break;
+        }
+    }
+    Err(echo_failed(why))
+}
+
+/// Why one echo request gave no address.
+enum Asked {
+    /// The handshake budget said "not now", or the caller left while waiting for it.
+    Refused(AppError),
+    Echo(EchoFailure),
 }
 
 #[async_trait]
@@ -487,7 +551,7 @@ impl Engines for RealEngines {
         let addr = HostPort::new("127.0.0.1", port)?;
         let route = Route::proxy(ProxyKind::Socks5, &addr, Some(creds));
         let admit = self.gate.as_deref().map(|gate| (gate, server));
-        echo(&route, EGRESS_VIA_BUDGET, admit, cancel).await
+        echo(&route, &ECHO_URLS, EGRESS_VIA, admit, cancel).await
     }
 
     async fn egress(
@@ -503,7 +567,13 @@ impl Engines for RealEngines {
             }
             None => Route::Direct,
         };
-        echo(&route, timeout, None, cancel).await
+        // The old sequential worst case (two requests of `timeout`), without cutting a slow
+        // first answer at `timeout`.
+        let budget = Budget {
+            total: timeout.saturating_mul(2),
+            hedge: timeout,
+        };
+        echo(&route, &ECHO_URLS, budget, None, cancel).await
     }
 
     async fn local_proxy(&self, addr: &HostPort, limit: Duration) -> AppResult<Option<PathBuf>> {
@@ -649,5 +719,115 @@ mod exes_tests {
         assert_eq!(seen.singbox.exe, Some(exes("no-such-dir-a").singbox));
         assert_eq!(seen.xray.count, 1);
         assert_eq!(seen.xray.exe, Some(exes("no-such-dir-b").xray));
+    }
+}
+
+#[cfg(test)]
+mod echo_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    /// A loopback echo service answering `answer` (status, body) after `delay`; `None` accepts
+    /// and never answers (a stuck service, a lost reply). Counts its connections.
+    async fn service(
+        answer: Option<(u16, &'static str)>,
+        delay: Duration,
+    ) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                seen.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    let Some((status, body)) = answer else {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        return;
+                    };
+                    tokio::time::sleep(delay).await;
+                    let reply = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{port}/"), hits)
+    }
+
+    fn budget(total_ms: u64, hedge_ms: u64) -> Budget {
+        Budget {
+            total: Duration::from_millis(total_ms),
+            hedge: Duration::from_millis(hedge_ms),
+        }
+    }
+
+    async fn ask_all(urls: &[&str], b: Budget) -> AppResult<IpAddr> {
+        echo(&Route::Direct, urls, b, None, &CancellationToken::new()).await
+    }
+
+    fn failure(err: &AppError) -> Option<EchoFailure> {
+        err.source.as_ref()?.downcast_ref::<EchoFailure>().copied()
+    }
+
+    /// Lab F-3 (p-live2): a first answer slower than the hedge is kept, not cut and dialled
+    /// again; the next service joined meanwhile and changes nothing.
+    #[tokio::test]
+    async fn a_slow_first_answer_is_kept() {
+        let (slow, _) = service(Some((200, "203.0.113.5\n")), Duration::from_millis(700)).await;
+        let (stuck, joined) = service(None, Duration::ZERO).await;
+        let started = Instant::now();
+        let ip = ask_all(&[&slow, &stuck], budget(5_000, 200)).await.unwrap();
+        assert_eq!(ip, "203.0.113.5".parse::<IpAddr>().unwrap());
+        assert!(started.elapsed() >= Duration::from_millis(700));
+        assert_eq!(joined.load(Ordering::SeqCst), 1, "the hedge joined once");
+    }
+
+    /// A stuck first service is passed at the hedge: the second one answers.
+    #[tokio::test]
+    async fn a_stuck_service_is_passed_at_the_hedge() {
+        let (stuck, _) = service(None, Duration::ZERO).await;
+        let (fast, _) = service(Some((200, "198.51.100.7")), Duration::ZERO).await;
+        let started = Instant::now();
+        let ip = ask_all(&[&stuck, &fast], budget(5_000, 300)).await.unwrap();
+        assert_eq!(ip, "198.51.100.7".parse::<IpAddr>().unwrap());
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    /// Nothing within the whole budget is "no reply", with one request per service.
+    #[tokio::test]
+    async fn silence_for_the_whole_budget_is_no_reply() {
+        let (a, hits_a) = service(None, Duration::ZERO).await;
+        let (b, hits_b) = service(None, Duration::ZERO).await;
+        let started = Instant::now();
+        let err = ask_all(&[&a, &b], budget(800, 200)).await.unwrap_err();
+        assert_eq!(err.user_msg().key, "tunnel.runtime.egressUnknown");
+        assert_eq!(failure(&err), Some(EchoFailure::NoReply));
+        assert!(started.elapsed() >= Duration::from_millis(800));
+        let hits = hits_a.load(Ordering::SeqCst) + hits_b.load(Ordering::SeqCst);
+        assert_eq!(hits, 2);
+    }
+
+    /// Answers without an address end the proof at once, as "no address" (the route carries
+    /// traffic).
+    #[tokio::test]
+    async fn answers_without_an_address_end_it_at_once() {
+        let (err500, _) = service(Some((500, "oops")), Duration::ZERO).await;
+        let (page, _) = service(Some((200, "<html>not an address</html>")), Duration::ZERO).await;
+        let started = Instant::now();
+        let err = ask_all(&[&err500, &page], budget(10_000, 5_000))
+            .await
+            .unwrap_err();
+        assert_eq!(failure(&err), Some(EchoFailure::NoAddress));
+        assert!(started.elapsed() < Duration::from_secs(5), "not the hedge");
     }
 }

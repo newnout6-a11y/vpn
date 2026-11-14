@@ -427,3 +427,19 @@ fn a_lost_window_is_opened_not_shown() {
     let shown = TrayModel::build(&connected(), false);
     assert_eq!(shown.item(TrayItemId::Show).label.key, "ui.tray.menu.show");
 }
+
+/// p-live2: while nothing runs, a helper service that is starting or stopped is said in the
+/// status line and the tooltip; with a session up the usual status speaks.
+#[test]
+fn a_down_helper_service_is_said_while_nothing_runs() {
+    let down = TrayExtras {
+        service_note: Some(Msg::new("ui.helper.starting")),
+        ..TrayExtras::default()
+    };
+    let off = TrayModel::build_with(&TrayState::default(), &down, false);
+    assert_eq!(off.item(TrayItemId::Status).label.key, "ui.helper.starting");
+    assert!(off.tooltip.iter().any(|m| m.key == "ui.helper.starting"));
+    let on = TrayModel::build_with(&connected(), &down, false);
+    assert_ne!(on.item(TrayItemId::Status).label.key, "ui.helper.starting");
+    assert!(on.tooltip.iter().all(|m| m.key != "ui.helper.starting"));
+}

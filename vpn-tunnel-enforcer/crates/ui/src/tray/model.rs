@@ -74,6 +74,9 @@ pub struct TrayExtras {
     /// The window is gone after a WebView2 crash (the rebuild limit, or a new window that did
     /// not come up): «Показать окно» reads «Открыть окно»; either opens a new window.
     pub window_lost: bool,
+    /// The installed helper service is starting or stopped (p-live2): while nothing runs the
+    /// status line and the tooltip say so, instead of a plain «Выключено».
+    pub service_note: Option<Msg>,
 }
 
 /// What the tray says about protection.
@@ -319,7 +322,9 @@ impl TrayModel {
             (false, _) => ("ui.tray.menu.start", "ui.tray.menu.stop"),
         };
         let can_start = can_start || paused;
+        let note = (extras.service_note.clone()).filter(|_| status == TrayStatus::Off);
         let mut tooltip = vec![status_msg("tip", status, state.restart)];
+        tooltip.extend(note.clone());
         tooltip.extend(state.public_ip.is_some().then(|| ip.clone()));
         tooltip.extend(state.proxy_addr.is_some().then(|| proxy.clone()));
         let tooltip_speed = state.engine_running.then(|| {
@@ -331,7 +336,11 @@ impl TrayModel {
             .into_iter()
             .map(|id| {
                 let (label, enabled) = match id {
-                    TrayItemId::Status => (status_msg("menu.status", status, state.restart), false),
+                    TrayItemId::Status => (
+                        (note.clone())
+                            .unwrap_or_else(|| status_msg("menu.status", status, state.restart)),
+                        false,
+                    ),
                     TrayItemId::Ip => (ip.clone(), false),
                     TrayItemId::Proxy => (proxy.clone(), false),
                     TrayItemId::Speed => (

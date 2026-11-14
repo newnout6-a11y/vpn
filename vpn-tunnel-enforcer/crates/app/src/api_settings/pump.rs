@@ -50,6 +50,8 @@ async fn run(shared: Arc<Shared>, tunnel: Option<Arc<dyn TunnelOps>>) {
     let mut rotation = auto.as_ref().map(|a| a.rotation.subscribe());
     let mut launch = (auto.as_ref()).and_then(|a| a.autopick.get().map(|p| p.subscribe()));
     let mut servers = backend.servers.subscribe();
+    // The rule notes read Smart RU's lists, which the keeper reads after a change (fixlists-a3).
+    let mut lists = super::bypass::lists_changes();
 
     // Facts read from Windows once at start; the actions refresh them later.
     let autostart = actions::read_autostart(&shared).await;
@@ -91,6 +93,7 @@ async fn run(shared: Arc<Shared>, tunnel: Option<Arc<dyn TunnelOps>>) {
             () = changed_opt(&mut rotation) => false,
             () = changed_opt(&mut launch) => false,
             () = servers_changed(&mut servers) => false,
+            () = changed(&mut lists) => false,
         };
         tokio::time::sleep(DEBOUNCE).await;
     }

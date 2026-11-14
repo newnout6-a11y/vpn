@@ -5,7 +5,9 @@
 //! own list (their rule, owner answer 4 holds by definition) and automatic entries whose direct
 //! outcome the routing makes certain from the name alone ([`automatic`]). RU TLDs are never
 //! added: Smart RU sends a `.ru` site direct only when its address is Russian, and a bypassed
-//! name would also skip a user rule that sends it through the VPN or blocks it.
+//! name would also skip a user rule that sends it through the VPN or blocks it. The user's own
+//! entries are route rules of the engine too ([`route_rules`]): a program whose proxy syntax
+//! misses an entry still leaves directly.
 use std::collections::HashSet;
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -16,9 +18,11 @@ use super::domain::{DomainPattern, PatternError};
 
 mod auto;
 mod lists;
+mod route;
 
 pub use auto::{AutoInputs, automatic};
 pub use lists::{SmartLists, read_smart_lists};
+pub use route::route_rules;
 
 /// Most entries the user's list keeps.
 pub const MAX_ENTRIES: usize = 200;
@@ -49,8 +53,10 @@ pub enum BypassError {
     Invalid(String),
     #[error("more than {MAX_ENTRIES} entries")]
     TooMany,
+    /// About `chars` characters of the typed list must go (each site takes two exception
+    /// items, so a typed character costs about two).
     #[error("the list is longer than Windows' proxy exceptions take")]
-    TooLong,
+    TooLong { chars: usize },
 }
 
 impl BypassError {
@@ -63,8 +69,9 @@ impl BypassError {
             BypassError::TooMany => {
                 Msg::new("engine.routing.bypass.tooMany").arg("max", MAX_ENTRIES)
             }
-            BypassError::TooLong => {
-                Msg::new("engine.routing.bypass.tooLong").arg("max", MAX_OVERRIDE_TEXT)
+            // fixlists-b4: what the user can act on, not the exception list's own length.
+            BypassError::TooLong { chars } => {
+                Msg::new("engine.routing.bypass.tooLong").arg("count", chars)
             }
         }
     }
@@ -197,8 +204,11 @@ pub fn parse_list(text: &str) -> Result<Vec<BypassEntry>, BypassError> {
         return Err(BypassError::TooMany);
     }
     let items: Vec<String> = out.iter().flat_map(BypassEntry::override_items).collect();
-    if text_len(&items) > MAX_OVERRIDE_TEXT {
-        return Err(BypassError::TooLong);
+    let over = text_len(&items).saturating_sub(MAX_OVERRIDE_TEXT);
+    if over > 0 {
+        return Err(BypassError::TooLong {
+            chars: over.div_ceil(2),
+        });
     }
     Ok(out)
 }

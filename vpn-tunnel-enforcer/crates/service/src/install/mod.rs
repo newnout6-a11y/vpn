@@ -15,6 +15,7 @@ use crate::scm::manage;
 use crate::users::Users;
 
 pub mod entry;
+mod firewall;
 pub mod flow;
 pub mod image;
 pub mod pins;
@@ -25,6 +26,8 @@ the VPN engines and the kill switch. The app works in proxy mode without it.";
 
 /// How long install / uninstall wait for the SCM.
 const SCM_WAIT: Duration = Duration::from_secs(30);
+/// How long the sweep waits for the service process it follows to end.
+const SWEEP_WAIT: Duration = Duration::from_secs(60);
 
 /// Where the files come from.
 pub struct Source {
@@ -143,6 +146,12 @@ impl flow::Machine for System<'_> {
         vpnte_winnet::wfp::remove_all().map(drop).map_err(failed)
     }
 
+    fn remove_rules(&self) -> AppResult<()> {
+        let dir = paths::install_dir().map_err(failed)?;
+        firewall::remove_for(&dir);
+        Ok(())
+    }
+
     fn delete(&self) -> AppResult<()> {
         manage::delete().map_err(failed)?;
         unlist();
@@ -158,7 +167,8 @@ impl flow::Machine for System<'_> {
                 } else if runs_from(&dir) {
                     // Settings > Apps runs the installed exe (`request-uninstall`, then this
                     // verb): its file goes at the next restart, as after the last user's leave.
-                    remove_or_schedule(&dir, &mut schedule);
+                    let left = remove_or_schedule(&dir, &mut schedule);
+                    log_held(&left);
                     Ok(())
                 } else {
                     retry(|| std::fs::remove_dir_all(&dir).map_err(AppError::internal))
@@ -293,8 +303,11 @@ fn retry(mut op: impl FnMut() -> AppResult<()>) -> AppResult<()> {
 }
 
 /// Inside the service, after its last user left (no UAC: the service is SYSTEM): unregisters,
-/// removes our WFP objects, deletes the engine files and the data folder; what is in use (the
-/// running exe, its folder, the open service log) is deleted by Windows at the next restart.
+/// removes our WFP objects and the firewall rules sing-box made for the engines, deletes the
+/// engine files and the data folder; what is in use (the running exe, its folder, the open
+/// service log) is deleted by Windows at the next restart. The engine files stay open in this
+/// process until it exits (the engine pins hold them against a swap): a sweep started from the
+/// exe's tombstone deletes them once this process is gone (lab F-8).
 pub fn remove_self(exe: &Path) {
     match manage::delete() {
         Ok(()) => unlist(),
@@ -306,8 +319,105 @@ pub fn remove_self(exe: &Path) {
     if let Ok(data) = paths::data_dir() {
         remove_or_schedule(&data, &mut schedule);
     }
-    if let Some(dir) = exe.parent() {
-        remove_or_schedule(dir, &mut schedule);
+    let Some(dir) = exe.parent() else {
+        return;
+    };
+    firewall::remove_for(dir);
+    let left = remove_or_schedule(dir, &mut schedule);
+    if left.held.is_empty() {
+        return;
+    }
+    match left.tombstone_of(exe) {
+        Some(tombstone) => start_sweep(tombstone),
+        None => log_held(&left),
+    }
+}
+
+/// The `sweep <pid>` verb: the service's own removal starts it (as SYSTEM, from the tombstone of
+/// its exe) for the engine files its process held open. It waits for that process to end, then
+/// removes what is left of the service's folder, unless a service is registered again by then
+/// (a reinstall's files are never touched).
+pub fn sweep(parent: &str) -> AppResult<()> {
+    require_elevation()?;
+    let pid: u32 = parent
+        .parse()
+        .map_err(|_| failed(std::io::Error::other("sweep: not a process id")))?;
+    wait_for_exit(pid, SWEEP_WAIT);
+    if manage::installed_binary().map_err(failed)?.is_some() {
+        tracing::info!("sweep: a service is registered again; its folder stays");
+        return Ok(());
+    }
+    let dir = paths::install_dir().map_err(failed)?;
+    if dir.exists() {
+        let left = remove_or_schedule(&dir, &mut schedule);
+        log_held(&left);
+    }
+    Ok(())
+}
+
+/// Starts `<tombstone> sweep <this pid>` detached: it outlives this process by design.
+fn start_sweep(tombstone: &Path) {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    let started = Command::new(tombstone)
+        .args(["sweep", &std::process::id().to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .spawn();
+    match started {
+        Ok(_) => tracing::info!("engine files held by this process: a sweep follows its exit"),
+        Err(err) => tracing::warn!(error = %err, "sweep not started: engine files stay"),
+    }
+}
+
+/// Waits up to `limit` for process `pid` to end (gone already: at once).
+fn wait_for_exit(pid: u32, limit: Duration) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+    // SAFETY: SYNCHRONIZE only; the handle is closed below.
+    let Ok(process) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }) else {
+        return;
+    };
+    let ms = u32::try_from(limit.as_millis()).unwrap_or(u32::MAX);
+    // SAFETY: a live process handle; waiting has no other effect.
+    unsafe {
+        WaitForSingleObject(process, ms);
+        let _ = CloseHandle(process);
+    }
+}
+
+fn log_held(left: &Left) {
+    for path in &left.held {
+        tracing::warn!(path = %path.display(), "in use: left in place");
+    }
+}
+
+/// What [`remove_or_schedule`] could not delete at once.
+#[derive(Debug, Default)]
+pub(crate) struct Left {
+    /// Files in use renamed to tombstones (queued for the next restart): `(path, tombstone)`.
+    pub renamed: Vec<(PathBuf, PathBuf)>,
+    /// Files neither deleted nor renamed: open in a process without delete sharing.
+    pub held: Vec<PathBuf>,
+}
+
+impl Left {
+    /// The tombstone `exe` went to.
+    fn tombstone_of(&self, exe: &Path) -> Option<&Path> {
+        let name = exe.file_name()?.to_str()?;
+        self.renamed
+            .iter()
+            .find(|(from, _)| {
+                (from.file_name().and_then(|n| n.to_str()))
+                    .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            })
+            .map(|(_, to)| to.as_path())
     }
 }
 
@@ -315,8 +425,15 @@ pub fn remove_self(exe: &Path) {
 /// tombstone next to it, and the tombstone goes to `queue` (deletion at the next restart): queuing
 /// the file's own path would delete whatever is there at boot, such as the exe of a reinstall made
 /// before that restart (review service-a3). Folders are queued by path, after their files
-/// (Windows processes the queue in order and never deletes a folder that is not empty).
-fn remove_or_schedule(dir: &Path, queue: &mut dyn FnMut(&Path)) {
+/// (Windows processes the queue in order and never deletes a folder that is not empty). A file
+/// open without delete sharing can be neither: it is reported as held.
+fn remove_or_schedule(dir: &Path, queue: &mut dyn FnMut(&Path)) -> Left {
+    let mut left = Left::default();
+    sweep_dir(dir, queue, &mut left);
+    left
+}
+
+fn sweep_dir(dir: &Path, queue: &mut dyn FnMut(&Path), left: &mut Left) {
     // Listed first: a tombstone made below must not show up in this same listing.
     let entries: Vec<_> = std::fs::read_dir(dir)
         .map(|list| list.flatten().collect())
@@ -328,14 +445,15 @@ fn remove_or_schedule(dir: &Path, queue: &mut dyn FnMut(&Path)) {
             .file_type()
             .is_ok_and(|t| t.is_dir() && !t.is_symlink());
         if is_dir {
-            remove_or_schedule(&path, queue);
+            sweep_dir(&path, queue, left);
         } else if std::fs::remove_file(&path).is_err() {
             let tombstone = tombstone(&path);
             match std::fs::rename(&path, &tombstone) {
-                Ok(()) => queue(&tombstone),
-                Err(err) => {
-                    tracing::warn!(path = %path.display(), error = %err, "in use: left in place");
+                Ok(()) => {
+                    queue(&tombstone);
+                    left.renamed.push((path, tombstone));
                 }
+                Err(_) => left.held.push(path),
             }
         }
     }

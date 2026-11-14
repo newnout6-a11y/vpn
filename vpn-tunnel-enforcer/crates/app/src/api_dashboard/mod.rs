@@ -230,9 +230,18 @@ impl Hub {
                 let autopick =
                     (self.pick.as_ref()).and_then(|p| project::pick_line(&p.borrow(), exposure));
                 let conn = project::conn_view(&snap, &status, &local.conn, &clock);
+                let evidence = w.evidence.borrow();
                 let (exit, exit_country) =
-                    project::exit_ip(&snap, &w.evidence.borrow(), local.geo, prefs.lang);
+                    project::exit_ip(&snap, &evidence, local.geo, prefs.lang);
                 let kill_switch = w.kill_switch.borrow();
+                let other_vpn = local.foreign.is_some() || kill_switch.foreign_vpn.is_some();
+                let same_exit = project::other_vpn_exit(&snap, &evidence, other_vpn);
+                drop(evidence);
+                let exit = if same_exit {
+                    project::calm_exit(exit)
+                } else {
+                    exit
+                };
                 DashboardView {
                     foreign_vpn: project::foreign_vpn(&conn, local.foreign.as_deref()),
                     engine: project::engine_line(&status),
@@ -247,6 +256,8 @@ impl Hub {
                     pause: project::pause_line(&kill_switch),
                     no_pause_vpn: kill_switch.foreign_vpn.clone(),
                     proxy_taken: *w.proxy_taken.borrow(),
+                    proving_exit: project::proving_exit(&snap, &status),
+                    other_vpn_exit: same_exit,
                 }
             }
             None => DashboardView {

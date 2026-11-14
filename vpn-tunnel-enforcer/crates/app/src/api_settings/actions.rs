@@ -280,6 +280,7 @@ pub async fn refresh_rule_sets(shared: &Arc<Shared>) -> AppResult<()> {
     let cancel = backend.shutdown.child_token();
     let outcome = backend.rule_sets.refresh(&cfg, true, &cancel).await;
     drop(refreshing);
+    crate::svc_journal::smart_ru_refreshed(&backend.dirs.root, &outcome);
     if let Some(notice) = outcome.notice() {
         backend.notifier.notify(notice, None);
     }

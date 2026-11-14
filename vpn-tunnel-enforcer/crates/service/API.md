@@ -35,11 +35,12 @@ vpnte-service.workspace = true
 ```
 vpnte-service run                          # the SCM's command line ("<exe>" run); not for people
 vpnte-service install [--resources <dir>]  # elevated: copy + pin-check + register + start
-vpnte-service uninstall                    # elevated: stop + WFP objects + delete + folders
+vpnte-service uninstall                    # elevated: stop + WFP objects + engine firewall rules + delete + folders
 vpnte-service request-install [--resources <dir>]  # per-user: asks Windows to run `install` elevated
 vpnte-service request-uninstall            # Settings > Apps (unelevated): asks Windows to run `uninstall` elevated
 vpnte-service forget-me                    # per-user uninstaller: this Windows user leaves (no prompt)
 vpnte-service status                       # the installed service answers over its pipe (CI smoke)
+vpnte-service sweep <pid>                  # started by the service's own removal only (see below)
 ```
 Exit codes 0 / 1 (reason on stderr, English) / 2 (usage) / 3 the service stays to remove its
 network filters later (`service.uninstall.filtersKept`: `uninstall`, `forget-me`) / 4 an upgrade
@@ -67,12 +68,19 @@ registration) gives the service its automatic start back and starts it again —
 nothing was replaced yet, otherwise what is there, which refuses Tunnel mode with its own reason —
 so an "Always" block it kept stays managed; the original error is returned, or
 `service.install.notRestarted` when even that start failed (review 4555679947, `install::flow`).
-`uninstall` disables, stops, removes our WFP objects, deletes (a service already marked for
-deletion counts as deleted) and removes both folders; it tries every step and reports the first
+`uninstall` disables, stops, removes our WFP objects and the Windows Firewall rules sing-box made
+for the engines (`sing-tun (<file in the service folder>)`, lab F-8), deletes (a service already
+marked for deletion counts as deleted) and removes both folders; it tries every step and reports the first
 failure, so a rerun finishes what is left — except a failed WFP clean-up: then the registration
 and the files stay, the service runs again (its start-up removes leftovers of a level no longer in
 force) and `service.uninstall.filtersKept` is returned (review 4555679938). Folders come from
 `SHGetKnownFolderPath`, never from environment variables.
+The last user's leave (`remove_self`, inside the service) removes the same, but its own process
+holds the engine files open until it exits (the engine pins, against a swap): those can be neither
+deleted nor renamed, so it starts `sweep <its pid>` from its exe's tombstone (SYSTEM, detached),
+which waits for that process to end (60 s at most) and removes what is left of the folder unless a
+service is registered again by then; the running exe and the folder go at the next restart, as
+before (p-live2, lab F-8: four engine files and the firewall rule outlived the uninstall).
 
 Threat model of the elevated verbs (review service-a5). They run from the per-user app folder,
 which every process of that user can write. What the folder held at the UAC prompt (the exe and
@@ -124,7 +132,7 @@ pub struct RoutingInputs { smart_ru, smart_ru_maps_direct, domain_rules: Vec<Dom
     rule_sets: Option<RuleSetFiles> /* protocol 3: the app's active Smart RU lists as bytes */,
     only_listed: Option<Vec<String>> /* protocol 4: «VPN только для выбранных приложений»; the app's
         own exe as process_path_regex values; checked like the split lists */ }
-    // no rule-set dir, no inactive splits
+    // no rule-set dir, no inactive splits (the app adds their warnings to the start receipts)
 pub enum Reply { Welcome { protocol, service_version }, Started(Option<StartReceiptWire>),
     Stopped(StopReceiptWire), Switched(Option<SwitchReceiptWire>), Status(Box<StatusReply>),
     Done { removing: bool }, Cleaned { filters, sublayer, provider }, Update(ServiceUpdateWire),

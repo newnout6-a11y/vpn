@@ -6,6 +6,8 @@
       "viaService": "Works through the helper service.",
       "notInVersion": "Not available in this version.",
       "install": "Install the helper service",
+      "starting": "The helper service is starting…",
+      "stopped": "The helper service is stopped. Proxy mode works without it.",
       "older": {
         "appScope": "The helper service updates itself. Until then, Tunnel mode sends every app through the VPN."
       },

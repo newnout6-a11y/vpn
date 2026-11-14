@@ -52,6 +52,9 @@ impl Machine for Fake {
     fn remove_wfp(&self) -> AppResult<()> {
         self.run("wfp")
     }
+    fn remove_rules(&self) -> AppResult<()> {
+        self.run("rules")
+    }
     fn delete(&self) -> AppResult<()> {
         self.run("delete")
     }
@@ -105,11 +108,16 @@ fn a_service_that_does_not_start_again_is_reported() {
     assert!(source.contains("place"), "{source}");
 }
 
+/// Lab F-8 (p-live2): the firewall rules sing-box made for the engines go too, after the WFP
+/// objects and before the registration.
 #[test]
 fn an_uninstall_removes_everything() {
     let m = Fake::default();
     uninstall(&m).expect("removed");
-    assert_eq!(m.calls(), ["disable", "stop", "wfp", "delete", "folders"]);
+    assert_eq!(
+        m.calls(),
+        ["disable", "stop", "wfp", "rules", "delete", "folders"]
+    );
 }
 
 /// Review 4555679938: when the WFP clean-up fails the registration and the files stay and the
@@ -125,9 +133,12 @@ fn a_failed_wfp_cleanup_keeps_the_service() {
 /// Other failed steps do not stop the rest; the first one is reported.
 #[test]
 fn every_other_step_is_tried() {
-    let m = Fake::failing(&["stop", "delete"]);
+    let m = Fake::failing(&["stop", "rules", "delete"]);
     let err = uninstall(&m).expect_err("stop failed");
-    assert_eq!(m.calls(), ["disable", "stop", "wfp", "delete", "folders"]);
+    assert_eq!(
+        m.calls(),
+        ["disable", "stop", "wfp", "rules", "delete", "folders"]
+    );
     let source = format!("{:#}", err.source.expect("source"));
     assert!(source.contains("stop"), "first failure: {source}");
 }

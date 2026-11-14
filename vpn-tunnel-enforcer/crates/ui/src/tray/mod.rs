@@ -48,6 +48,7 @@ mod tests {
                 always: true,
                 update: Some("2.0.1".into()),
                 window_lost: true,
+                service_note: Some(Msg::new("ui.helper.stopped")),
             };
             for (extras, quitting) in [
                 (TrayExtras::default(), false),

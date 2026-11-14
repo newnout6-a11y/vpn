@@ -43,8 +43,13 @@ impl Actor {
         self.stable_at = None;
         self.slot_due = None;
         self.xray_rx = None;
+        // The core's death ends every connection it held through an Xray slot at once, and Xray
+        // logs each as a failed outbound («connection ends … reset»): at this moment the slot's
+        // record reads as an unreachable server whatever the server did (lab F-11, 14.11.2026:
+        // killed engines waited a 130 s freeze window before the restart). A slot that fails on
+        // its own goes through its own restarts first (`on_xray`).
         let fault = match &session.slots {
-            Some(s) => s.slots.recent_fault(s.active),
+            Some(_) => None,
             None => session.core.recent_fault(),
         };
         if let Some(id) = frozen_server(&session.req, fault) {

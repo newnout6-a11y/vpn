@@ -139,7 +139,12 @@ pub struct Listeners { pub clash_port: u16, pub clash_secret: String, pub direct
     pub probe: Option<Loopback> /* direct VPN modes only */, pub dns_bootstrap: Option<u16> /* slot mode */ }
 #[derive(Default)]
 pub struct RoutingParts { pub process_rules: Vec<Value>, pub domain_rules: Vec<Value>,
-    pub rule_sets: Vec<Value>, pub dns_servers: Vec<Value>, pub dns_rules: Vec<Value> }  // from routing::build
+    pub rule_sets: Vec<Value>, pub dns_servers: Vec<Value>, pub dns_rules: Vec<Value>,  // from routing::build
+    pub listed_only: Option<Vec<String>>,
+    pub proxy_bypass: Vec<Value> }  // bypass::route_rules; proxy capture only, before the process rules
+// Proxy capture: direct-out gets `domain_resolver: dns-direct` whenever dns-direct exists (added for
+// proxy_bypass when routing has none): a name that leaves directly resolves on the network (appsplit-b3)
+pub fn direct_dns_server(physical: &[Ipv4Addr]) -> Value;  // dns-direct: udp to the adapter's resolver, else dhcp
 pub enum ConfigError { InvalidSlots(&'static str), InvalidListeners(&'static str),
     InvalidTun(&'static str), BadUpstream(&'static str), BadRouting(String) }   // -> Internal, "engine.config.invalid"
 
@@ -564,9 +569,11 @@ pub enum BypassEntry { Site(String) /* x.com: + subdomains */, Subdomains(String
                        Ipv4(Ipv4Addr), Ipv4Range(Vec<u8>) /* 10.*, 192.168.* */, Ipv6(Ipv6Addr) } // Display = stored form
 impl BypassEntry { pub fn parse(raw: &str) -> Result<Self, BypassError>;   // URL -> host, IDN -> punycode
     pub fn override_items(&self) -> Vec<String>;  pub fn no_proxy_items(&self) -> Vec<String>; }
-pub enum BypassError { Invalid(String /* the entry */), TooMany, TooLong }  // .msg(); -> Validation
+pub enum BypassError { Invalid(String /* the entry */), TooMany,
+    TooLong { chars: usize /* typed characters to remove, about */ } }  // .msg(); -> Validation
 pub fn parse_list(text: &str) -> Result<Vec<BypassEntry>, BypassError>; // lines / ; / , / spaces; <local> + repeats dropped
 pub fn from_stored(stored: &[String]) -> Vec<BypassEntry>;              // Settings::proxy_bypass; bad ones skipped
+pub fn route_rules(entries: &[BypassEntry]) -> Vec<Value>;   // the user's entries as direct-out rules (fixlists-b3)
 pub struct AutoInputs<'a> { pub domain_rules: &'a [DomainRule], pub apps: &'a [SplitApp],
     pub app_scope: AppScope /* Settings::app_scope: OnlyListed = no automatic entry */,
     pub smart: SmartRu /* enabled only with a rule-set dir */, pub lists: Option<&'a SmartLists> }
@@ -659,11 +666,17 @@ impl RuleSetService {
 Downloads are https-only (redirects too, <= 5), <= 8 MiB, 15 s connect / 45 s total, through the
 running session first in `auto`, then per `bootstrapRouteMode`; every file is validated by the
 bundled `sing-box rule-set match` with canaries, then bounded against the bundled copy
-(`rulesets::content`, fix-lists psmart-b3: size 1/4..4x; the direct sets decompiled: geoip-ru plain
-`ip_cidr` only, prefixes >= /8 and /16, <= 2x the bundled address space, no well-known foreign
-address; gov-ru plain names under `.ru` / `.su` / `.xn--p1ai` or named by the bundled file), written
+(`rulesets::content`, psmart-b3 / fixlists-b1/b5 / lab F-10: size 1/4..4x; every set decompiled:
+geoip-ru plain `ip_cidr` only, new space <= 1/10 of the bundled space and none inside a well-known
+provider (resolvers, Google, Cloudflare, Meta, Telegram, CloudFront, Apple, GitHub, X); gov-ru plain
+names: the bundled names whatever the zone, new ones under `.ru` / `.su` / `.xn--p1ai`, up to 8 new
+others (logged), never a zone or a well-known foreign service; the blocked sets keep >= 1/2 of the
+bundled names / addresses; a decompile that fails is "engine unavailable", not an invalid file), written
 with `sync_all`, and all are promoted together as a new immutable generation (a generation without
 all four files counts as incomplete). A forced refresh during a running one waits for it.
+`RuleSetsDoc::checks` records the version of the checks a generation passed: `active` passes over a
+generation of older checks until the next refresh checks it once (kept when it passes, dropped for
+the bundled files when not; fixlists-a7).
 
 ```rust
 // routing::rulesets::handover — the active set as the app hands it to the helper service (pipe protocol 3)
@@ -674,8 +687,11 @@ impl RuleSetFiles { pub fn read(dir: &Path) -> Option<Self>;   // blocking; ever
 pub async fn accept(files: &RuleSetFiles, engine: &Path, store: &Path, reference: &Path)
     -> Result<PathBuf, RefreshFault>;
     // service side: shape + canaries + content bounds against `reference` (its pinned copies) with ITS
-    // sing-box, flushed and renamed to store\gen-<digest16>; a stored folder is reused only while its
-    // files hash to the set (psmart-a4)
+    // sing-box, flushed and renamed to store\gen-<digest16>-c<checks>; a stored folder is reused only
+    // while its files hash to the set (psmart-a4) and only by the same checks (fixlists-a7); the
+    // digest is noted in store\accepted
+pub async fn recall(store: &Path) -> Option<(String, PathBuf)>;  // the noted set after a restart, while
+    // its folder still hashes to it (fixlists-a5)
 pub fn prune_store(store: &Path, keep: &[&Path]);      // blocking; removes the other gen-* folders
 ```
 

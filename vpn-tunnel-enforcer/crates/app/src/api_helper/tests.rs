@@ -16,7 +16,36 @@ fn facts(installed: bool, protocol: Option<u32>, elevated: bool, tun: bool) -> F
         protocol,
         elevated,
         tun,
+        starting: false,
+        scm: None,
     }
+}
+
+/// p-live2 (lab, p-live-fix): an installed service that Windows is starting, or that is
+/// stopped, is said as such; Tunnel mode still belongs to it (it comes back by itself).
+#[test]
+fn a_service_that_is_down_is_said_as_such() {
+    let installed = facts(true, Some(PROTOCOL), false, true);
+    for (scm, starting, expected) in [
+        (Some(Presence::Starting), false, Service::Starting),
+        (Some(Presence::Running), true, Service::Starting),
+        (None, true, Service::Starting),
+        (Some(Presence::Stopped), false, Service::Stopped),
+        (Some(Presence::Stopping), false, Service::Stopped),
+        (Some(Presence::Running), false, Service::Installed),
+        (Some(Presence::Missing), false, Service::Installed),
+    ] {
+        let cap = derive(Facts {
+            scm,
+            starting,
+            ..installed
+        });
+        assert_eq!(cap.service, expected, "{scm:?} {starting}");
+        assert_eq!(cap.tunnel, Ability::Service);
+    }
+    assert_eq!(Service::Starting.pause_key(), Some("ui.helper.starting"));
+    assert_eq!(Service::Stopped.pause_key(), Some("ui.helper.stopped"));
+    assert_eq!(Service::Installed.pause_key(), None);
 }
 
 /// The prompt was declined: proxy mode; Tunnel mode and the kill switch wait for the service,

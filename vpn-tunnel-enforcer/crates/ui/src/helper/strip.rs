@@ -10,12 +10,28 @@ use crate::widgets::use_job;
 
 /// While the saved mode is Tunnel (`tunnel_mode`) and the helper service is missing, one calm
 /// strip in the start page's own notice style says so before «Подключить» is pressed, with its
-/// install. Nothing in every other state, and nothing without a helper backend in context.
+/// install; while the installed service is starting or stopped, the strip says that instead
+/// (nothing to install). Nothing in every other state, and nothing without a helper backend in
+/// context.
 #[component]
 pub fn TunnelStrip(tunnel_mode: bool) -> Element {
     let cap = use_capability();
     let api = try_use_context::<Rc<dyn HelperApi>>();
     let install = use_job::<bool>();
+    let paused = cap
+        .as_ref()
+        .filter(|c| c.tunnel == Ability::Service)
+        .and_then(|c| c.service.pause_key());
+    if let Some(key) = paused.filter(|_| tunnel_mode && api.is_some()) {
+        return rsx! {
+            div { class: "overflow-hidden",
+                div { class: "c-swiss swiss-notice", role: "status", "data-helper": "tunnel-strip",
+                    span { class: "swiss-label swiss-notice-tag", {t!("ui.helper.strip.title")} }
+                    p { class: "swiss-notice-body", {t!(key)} }
+                }
+            }
+        };
+    }
     let waits = cap.is_some_and(|c| c.tunnel == Ability::NeedsService);
     let Some(api) = api.filter(|_| tunnel_mode && waits) else {
         return rsx! {};

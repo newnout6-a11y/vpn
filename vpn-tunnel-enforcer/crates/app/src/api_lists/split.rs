@@ -18,13 +18,15 @@ use parking_lot::Mutex;
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
+use vpnte_base::types::UnixMs;
 use vpnte_base::{AppError, AppResult, Msg};
-use vpnte_core::settings::{self, RoutingMode, Settings};
+use vpnte_core::settings::{self, RoutingMode};
 use vpnte_engine::apps;
 use vpnte_engine::routing::RulesDoc;
 use vpnte_engine::routing::process::{self as engine, AppPath, Probe, ProcessName, SplitTarget};
 use vpnte_servers::store::ServersEvent;
 use vpnte_service::proto::SCOPE_PROTOCOL;
+use vpnte_tunnel::api::CaptureKind;
 use vpnte_ui::split_tunnel::{
     AppKind, AppRule, AppScope, RoutingImported, RoutingOffer, RoutingPreview, RoutingSource,
     SplitApp, SplitSnapshot, SplitTunnelApi,
@@ -56,6 +58,40 @@ struct Shared {
     offers: Mutex<Vec<RoutingOffer>>,
     /// Routing previews and their import.
     routing: routing::Imports,
+    /// The scope the running session started with.
+    run: Mutex<RunScope>,
+}
+
+/// The scope a running session started with (appsplit-b5): read when the run appears and kept
+/// while it runs, since a flip of the switch applies from the next connection.
+#[derive(Debug, Default)]
+struct RunScope {
+    started: Option<UnixMs>,
+    listed: bool,
+}
+
+/// What the switch shows besides the list.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScopeView {
+    scope: AppScope,
+    pending: bool,
+    proxy: bool,
+    older_service: bool,
+}
+
+impl ScopeView {
+    /// Writes the view into `snap`; whether anything changed.
+    fn apply(self, snap: &mut SplitSnapshot) -> bool {
+        let now = ScopeView {
+            scope: snap.scope,
+            pending: snap.pending,
+            proxy: snap.proxy,
+            older_service: snap.older_service,
+        };
+        (snap.scope, snap.pending, snap.proxy) = (self.scope, self.pending, self.proxy);
+        snap.older_service = self.older_service;
+        now != self
+    }
 }
 
 impl SplitService {
@@ -71,6 +107,7 @@ impl SplitService {
             publishing: Mutex::new(()),
             offers: Mutex::new(Vec::new()),
             routing: routing::Imports::default(),
+            run: Mutex::new(RunScope::default()),
         });
         shared.read_offers();
         shared.publish();
@@ -93,18 +130,15 @@ impl Shared {
         let _one = self.publishing.lock();
         let apps = self.backend.rules.read(project);
         let offers = self.offers.lock().clone();
-        let (scope, older_service) = self.scope();
+        let view = self.scope();
         self.state.send_if_modified(|current| {
             let next = Load::Ready(apps);
-            let changed = current.apps != next
-                || current.offers != offers
-                || (current.scope, current.older_service) != (scope, older_service);
-            if changed {
+            let listed = current.apps != next || current.offers != offers;
+            if listed {
                 current.apps = next;
                 current.offers = offers;
-                (current.scope, current.older_service) = (scope, older_service);
             }
-            changed
+            view.apply(current) || listed
         });
     }
 
@@ -112,20 +146,37 @@ impl Shared {
     /// as shown, a running discovery's «loading» included.
     fn publish_scope(&self) {
         let _one = self.publishing.lock();
-        let now = self.scope();
-        self.state.send_if_modified(|current| {
-            let changed = (current.scope, current.older_service) != now;
-            (current.scope, current.older_service) = now;
-            changed
-        });
+        let view = self.scope();
+        self.state.send_if_modified(|current| view.apply(current));
     }
 
-    /// The saved scope and whether Tunnel mode runs in a service too old for it.
-    fn scope(&self) -> (AppScope, bool) {
+    /// The saved scope, whether the running session keeps the other one, the mode the hint
+    /// describes (the running session's, else the saved one) and whether Tunnel mode runs in a
+    /// service too old for the scope.
+    fn scope(&self) -> ScopeView {
         let s = self.backend.settings.snapshot();
         let tunnel = self.backend.tunnel().ok();
-        let protocol = tunnel.and_then(|t| t.service_protocol());
-        (ui_scope(s.app_scope), older_service(&s, protocol))
+        let protocol = tunnel.as_ref().and_then(|t| t.service_protocol());
+        let (started, capture) = tunnel.map_or((None, None), |t| {
+            let status = t.runtime_status();
+            let status = status.borrow();
+            (status.started_at.filter(|_| status.running), status.capture)
+        });
+        let listed = s.app_scope == settings::AppScope::OnlyListed;
+        let mut run = self.run.lock();
+        if run.started != started {
+            *run = RunScope { started, listed };
+        }
+        let proxy = match capture.filter(|_| started.is_some()) {
+            Some(capture) => capture == CaptureKind::Proxy,
+            None => s.routing_mode == RoutingMode::Soft,
+        };
+        ScopeView {
+            scope: ui_scope(s.app_scope),
+            pending: started.is_some() && run.listed != listed,
+            proxy,
+            older_service: older_service(protocol),
+        }
     }
 
     /// Re-reads which subscriptions carry a routing profile (parses each stored value).
@@ -313,7 +364,10 @@ async fn follow(shared: Arc<Shared>) {
     let mut servers = shared.backend.servers.subscribe();
     let mut settings = shared.backend.settings.subscribe();
     let mut tunnel = shared.backend.tunnel().ok().map(|t| t.snapshot());
+    let mut status = shared.backend.tunnel().ok().map(|t| t.runtime_status());
     let shutdown = shared.backend.shutdown.clone();
+    // A session that started between the first projection and these subscriptions.
+    shared.publish_scope();
     loop {
         let alive = tokio::select! {
             () = shutdown.cancelled() => false,
@@ -326,6 +380,10 @@ async fn follow(shared: Arc<Shared>) {
                 continue;
             }
             () = changed_opt(&mut tunnel) => {
+                shared.publish_scope();
+                continue;
+            }
+            () = changed_opt(&mut status) => {
                 shared.publish_scope();
                 continue;
             }
@@ -349,9 +407,10 @@ async fn follow(shared: Arc<Shared>) {
 
 /// Tunnel mode runs in a helper service (linked, speaking `protocol`) too old to route by the
 /// scope: there every app keeps the VPN (`Request::speak` leaves the scope out) until the
-/// service is updated.
-fn older_service(s: &Settings, protocol: Option<u32>) -> bool {
-    s.routing_mode == RoutingMode::Hard && protocol.is_some_and(|p| p < SCOPE_PROTOCOL)
+/// service is updated. Whatever the saved mode: a schedule starts Tunnel sessions of its own
+/// (appsplit-a2), and the line names Tunnel mode.
+fn older_service(protocol: Option<u32>) -> bool {
+    protocol.is_some_and(|p| p < SCOPE_PROTOCOL)
 }
 
 fn ui_scope(scope: settings::AppScope) -> AppScope {

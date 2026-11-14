@@ -222,7 +222,8 @@ impl<C: Coordinator, E: AutoPilotEnv> AutoPilot<C, E> {
     }
 
     /// Runs the planner. `None`: skipped silently (local-proxy Hard mode not selected, the
-    /// `autopilot` switch off for an app-launch run, or a schedule run active / connecting).
+    /// `autopilot` switch off for an app-launch run, the first setup not finished yet, or a
+    /// schedule run active / connecting).
     pub async fn run(&self, trigger: AutoPilotTrigger) -> Option<AutoPilotResult> {
         let Ok(_single) = self.running.try_lock() else {
             let steps = vec![step("busy", StepStatus::Warn)];
@@ -231,7 +232,10 @@ impl<C: Coordinator, E: AutoPilotEnv> AutoPilot<C, E> {
         let settings = self.settings.snapshot();
         let local_hard = settings.routing_mode == vpnte_core::settings::RoutingMode::Hard
             && settings.connection_mode == vpnte_core::settings::ConnectionMode::LocalProxy;
-        if !local_hard || (trigger == AutoPilotTrigger::AppLaunch && !settings.autopilot) {
+        // Lab F-7: the defaults are local-proxy Hard, so a fresh install ran a launch pass while
+        // its wizard was still open. The first setup chooses the mode; nothing starts before.
+        let launch_off = !settings.autopilot || !settings.first_run_complete;
+        if !local_hard || (trigger == AutoPilotTrigger::AppLaunch && launch_off) {
             return None;
         }
         if trigger == AutoPilotTrigger::AppLaunch && self.schedule_owns_launch().await {
@@ -270,12 +274,14 @@ impl<C: Coordinator, E: AutoPilotEnv> AutoPilot<C, E> {
             Ok(_) => {}
         }
         let Some(endpoint) = self.find_endpoint(settings).await else {
+            // No local proxy running is an ordinary state (the client is closed), not a failure:
+            // an Info result the app only logs (no paranoia, owner 12.11.2026).
             let none = AutoPilotStep {
                 before: Msg::new("automation.autopilot.step.proxy.noneBefore"),
                 after: Msg::new("automation.autopilot.step.proxy.noneAfter"),
-                ..step("proxy", StepStatus::Fail)
+                ..step("proxy", StepStatus::Info)
             };
-            return result(StepStatus::Fail, AutoPilotMode::Off, "noProxy", vec![none]);
+            return result(StepStatus::Info, AutoPilotMode::Off, "noProxy", vec![none]);
         };
         let kind = match endpoint.kind {
             ProxyKind::Socks5 => "socks5",

@@ -14,11 +14,11 @@ use vpnte_automation::coordinator::{
     ConnectOutcome, ConnectRequest, Coordinator, LifecycleEvent, NoticeCategory, OpError,
     ProxyEndpoint, RuntimeId, SessionInfo, SessionKind, SwitchError,
 };
-use vpnte_base::types::{AdaptiveMode, Notice, Owner};
+use vpnte_base::types::{AdaptiveMode, Notice, Owner, UnixMs};
 use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::ops::Source;
-use vpnte_servers::model::ProfileId;
-use vpnte_servers::store::{SelectBy, Servers};
+use vpnte_servers::model::{HealthReason, HealthRecord, ProfileId};
+use vpnte_servers::store::{HealthUpdate, SelectBy, Servers};
 use vpnte_tunnel::lifecycle::{
     ConnError, ConnectReq, ConnectTarget, DisconnectReq, Done, SwitchReq,
 };
@@ -107,6 +107,35 @@ pub struct AppCoordinator {
     pub(super) hooks: OnceLock<Hooks>,
 }
 
+/// The runtime's answer to a start whose exit proof got nothing back through the server.
+const SILENT_EXIT: &str = "tunnel.runtime.exitSilent";
+
+/// Lab F-4 (p-live2): a start whose exit stayed silent proved the server dead from here. Its
+/// health says so, so the automatic choices (the crash failover, the automatic pick's rank) try
+/// another server first instead of this one again.
+pub(super) fn silent_exit(servers: &Servers, id: &str, at: UnixMs) {
+    let id = ProfileId::from(id);
+    let Some(identity) = servers.get(&id).and_then(|row| row.identity()) else {
+        return;
+    };
+    let record = HealthRecord {
+        online: false,
+        at,
+        rtt_ms: None,
+        reason: Some(HealthReason::Timeout),
+        egress_ip: None,
+    };
+    let update = HealthUpdate {
+        id,
+        identity,
+        record,
+        country: None,
+    };
+    if let Err(e) = servers.record_health(vec![update]) {
+        tracing::warn!(error = %e, "silent server not recorded");
+    }
+}
+
 impl AppCoordinator {
     pub fn new(
         lane: Arc<dyn Lane>,
@@ -189,6 +218,11 @@ impl AppCoordinator {
             });
         }
         let result = self.lane.connect(req).await;
+        if let (Err(err), Some(id)) = (&result, profile.as_deref())
+            && err.user_msg().key == SILENT_EXIT
+        {
+            silent_exit(&self.servers, id, vpnte_base::types::now_ms());
+        }
         if let Some(mut preparation) = preparation {
             match &result {
                 // Ends this start's preparation only: another start may be in flight meanwhile.

@@ -116,6 +116,14 @@ pub(super) fn conn_view(
     }
 }
 
+/// A connect in flight proves its exit (lab F-4): the runtime runs the session's engine but has
+/// not published the session (nothing is claimed before traffic went through the server).
+pub(super) fn proving_exit(snap: &TunnelSnapshot, status: &TunStatus) -> bool {
+    snap.transition == Some(fsm::Transition::Connecting)
+        && status.engine.is_some()
+        && !status.running
+}
+
 /// Settled off: no session, nothing in flight (the IP monitor then keeps only stale samples).
 pub(super) fn settled_off(snap: &TunnelSnapshot) -> bool {
     snap.state == fsm::TunnelState::Disconnected && snap.transition.is_none()
@@ -188,6 +196,25 @@ pub(super) fn exit_ip(
         }),
     };
     (exit, geo.map(|(_, code)| code.as_str().to_owned()))
+}
+
+/// The exit equals the address measured without our VPN while another VPN works on this PC
+/// (p-live2, the owner's Happ on the same provider): the address check proves nothing then, so the
+/// page says so in one calm line instead of a leak. Without another VPN in sight the same match
+/// stays a leak, and the leak self-test keeps its own verdict either way.
+pub(super) fn other_vpn_exit(snap: &TunnelSnapshot, ev: &IpEvidence, other_vpn: bool) -> bool {
+    let settled_on = snap.state == fsm::TunnelState::Connected && snap.transition.is_none();
+    let same = ev.real_ip.is_some() && ev.last.map(|s| s.ip) == ev.real_ip;
+    other_vpn && settled_on && same
+}
+
+/// `exit` as the page shows it when [`other_vpn_exit`]: not checked, never a leak.
+pub(super) fn calm_exit(exit: ExitIp) -> ExitIp {
+    ExitIp {
+        leak: false,
+        verdict: Verdict::Warn,
+        ..exit
+    }
 }
 
 /// The exit address worth a country lookup: a passed check of the adopted exit of our running,

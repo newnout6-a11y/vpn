@@ -295,6 +295,41 @@ fn both_captures_and_scopes_pass_sing_box_check() {
     }
 }
 
+/// appsplit-b3: in proxy mode an app outside the scope hands over a name that leaves directly;
+/// it is looked up on the network's own resolver (a Russian site gets its Russian CDN answer),
+/// never through the tunnel, also with Smart RU off and no rule of the user. The TUN's
+/// `direct-out` dials addresses and keeps no resolver. sing-box accepts both.
+#[test]
+fn an_app_outside_the_scope_resolves_on_the_network_resolver() {
+    let none = ResolvedSplit::default();
+    let off = RoutingInputs {
+        smart: SmartRu::default(),
+        ..inputs(None, &[], &none)
+    };
+    let own = vec!["own".to_owned()];
+    let direct_out = |c: &Value| -> Value {
+        let outs = c["outbounds"].as_array().unwrap().iter();
+        outs.into_iter()
+            .find(|o| o["tag"] == DIRECT_OUT)
+            .cloned()
+            .unwrap()
+    };
+    let scoped = build_scoped(&off, Scope::OnlyListed { own: &own });
+    let server = |f: &RoutingFragments| {
+        (f.parts.dns_servers.iter()).any(|s| s["tag"] == DNS_DIRECT && s["server"] == "77.88.8.7")
+    };
+    assert!(server(&scoped), "{:?}", scoped.parts.dns_servers);
+    assert!(!server(&build_scoped(&off, Scope::All)));
+    for (tun, want) in [(false, json!(DNS_DIRECT)), (true, Value::Null)] {
+        let config = config(&scoped, tun, false);
+        assert_eq!(direct_out(&config)["domain_resolver"], want, "tun={tun}");
+        assert_eq!(
+            crate::test_support::singbox_check(&config).map(|_| ()),
+            Ok(())
+        );
+    }
+}
+
 /// The generated config around `f`: TUN or the loopback proxy, a local SOCKS upstream or the
 /// Xray slots (with their `dns-bootstrap-in`).
 fn config(f: &RoutingFragments, tun: bool, slots: bool) -> Value {

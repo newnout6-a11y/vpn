@@ -59,6 +59,7 @@ impl InputsSource for StoreInputs {
                 })
                 .collect(),
             only_listed: own,
+            proxy_bypass: s.proxy_bypass.clone(),
             kill_switch: s.kill_switch.effective(self.always.load(Ordering::Relaxed)),
             public_wifi: s.public_wifi_compatibility,
             stealth: s.stealth_mode,

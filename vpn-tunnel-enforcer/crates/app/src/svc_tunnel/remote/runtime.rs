@@ -26,28 +26,32 @@ fn same_upstream(kept: &KeptSession, upstream: &Upstream) -> bool {
 }
 
 impl Remote {
-    async fn tunnel_start(&self, req: &StartRequest) -> Result<TunnelStart, TunError> {
+    /// The service's start from `req`, with the warnings only the app can give.
+    async fn tunnel_start(&self, req: &StartRequest) -> Result<(TunnelStart, Vec<Msg>), TunError> {
         let inputs = self.0.inputs.snapshot().await?;
         let protection = self.0.protection.read(|d| d.settings.clone());
-        Ok(start::tunnel_start(req, &inputs, protection)?)
+        let notes = start::inactive_warnings(&inputs, self.protocol());
+        Ok((start::tunnel_start(req, &inputs, protection)?, notes))
     }
 
-    /// The service's routing inputs from the app's current settings.
-    async fn send_inputs(&self) -> Result<(), TunError> {
+    /// The service's routing inputs from the app's current settings; the warnings only the app
+    /// can give.
+    async fn send_inputs(&self) -> Result<Vec<Msg>, TunError> {
         let inputs = self.0.inputs.snapshot().await?;
         let routing = Box::new(start::routing(&inputs));
         self.call(Request::Inputs(routing))
             .await
             .map_err(tun_error)?;
-        Ok(())
+        Ok(start::inactive_warnings(&inputs, self.protocol()))
     }
 
-    /// A start-like request; a cancelled `cancel` answers at once (the lane's stop follows and
-    /// cancels it in the service).
+    /// A start-like request, its receipt's warnings followed by `notes`; a cancelled `cancel`
+    /// answers at once (the lane's stop follows and cancels it in the service).
     async fn started(
         &self,
         request: Request,
         cancel: &CancellationToken,
+        notes: Vec<Msg>,
     ) -> Result<Option<StartReceipt>, TunError> {
         let reply = tokio::select! {
             () = cancel.cancelled() => return Err(AppError::cancelled().into()),
@@ -57,6 +61,7 @@ impl Remote {
             Reply::Started(receipt) => Ok(receipt.map(|wire| {
                 let mut receipt = StartReceipt::from(wire);
                 receipt.generation = self.0.state.lock().gens.native(receipt.generation);
+                receipt.warnings.extend(notes);
                 receipt
             })),
             other => Err(tun_error(unexpected(&other))),
@@ -127,7 +132,7 @@ impl Runtime for Remote {
     ) -> Result<StartReceipt, TunError> {
         // A new connection parks a session the service kept for this user (a crashed window).
         self.link().await.map_err(tun_error)?;
-        let start = self.tunnel_start(&req).await?;
+        let (start, notes) = self.tunnel_start(&req).await?;
         let kept = self.0.state.lock().kept.clone();
         let request = match kept {
             Some(kept) if same_upstream(&kept, &start.upstream) => return self.take_over().await,
@@ -142,7 +147,7 @@ impl Runtime for Remote {
                 Request::Start(Box::new(start))
             }
         };
-        let receipt = self.started(request, &cancel).await?;
+        let receipt = self.started(request, &cancel, notes).await?;
         receipt.ok_or_else(|| AppError::internal(std::io::Error::other("no receipt")).into())
     }
 
@@ -166,17 +171,17 @@ impl Runtime for Remote {
         opts: RestartOptions,
     ) -> Result<StartReceipt, TunError> {
         self.unpark();
-        let start = self.tunnel_start(&next).await?;
+        let (start, notes) = self.tunnel_start(&next).await?;
         let receipt = self
-            .started(Request::Restart(Box::new(start)), &opts.cancel)
+            .started(Request::Restart(Box::new(start)), &opts.cancel, notes)
             .await?;
         receipt.ok_or_else(|| AppError::internal(std::io::Error::other("no receipt")).into())
     }
 
     async fn restart_with_last(&self, reason: String) -> Result<Option<StartReceipt>, TunError> {
-        self.send_inputs().await?;
+        let notes = self.send_inputs().await?;
         let never = CancellationToken::new();
-        self.started(Request::RestartWithLast { reason }, &never)
+        self.started(Request::RestartWithLast { reason }, &never, notes)
             .await
     }
 
@@ -186,7 +191,7 @@ impl Runtime for Remote {
         reason: String,
         profile: Option<VpnProfile>,
     ) -> Result<StartReceipt, TunError> {
-        self.send_inputs().await?;
+        let notes = self.send_inputs().await?;
         let restart = AdaptiveRestart {
             mode,
             reason,
@@ -194,7 +199,7 @@ impl Runtime for Remote {
         };
         let never = CancellationToken::new();
         let receipt = self
-            .started(Request::RestartAdaptive(Box::new(restart)), &never)
+            .started(Request::RestartAdaptive(Box::new(restart)), &never, notes)
             .await?;
         receipt.ok_or_else(|| AppError::internal(std::io::Error::other("no receipt")).into())
     }
@@ -205,13 +210,17 @@ impl Runtime for Remote {
         cancel: CancellationToken,
         _is_owner: OwnerCheck,
     ) -> Option<SwitchReceipt> {
-        let start = self.tunnel_start(&next).await.ok()?;
+        let (start, notes) = self.tunnel_start(&next).await.ok()?;
         let reply = tokio::select! {
             () = cancel.cancelled() => return None,
             reply = self.call(Request::Switch(Box::new(start))) => reply,
         };
         match reply {
-            Ok(Reply::Switched(receipt)) => receipt.map(Into::into),
+            Ok(Reply::Switched(receipt)) => receipt.map(|wire| {
+                let mut receipt = SwitchReceipt::from(wire);
+                receipt.warnings.extend(notes);
+                receipt
+            }),
             Ok(other) => {
                 tracing::warn!(?other, "unexpected switch reply");
                 None

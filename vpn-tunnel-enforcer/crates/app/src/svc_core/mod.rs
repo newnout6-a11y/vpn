@@ -234,6 +234,10 @@ const APP: &[(&str, &str)] = &[
         include_str!("../../locales/p-tails-a.ru.json"),
         include_str!("../../locales/p-tails-a.en.json"),
     ),
+    (
+        include_str!("../../locales/p-fix-review2.ru.json"),
+        include_str!("../../locales/p-fix-review2.en.json"),
+    ),
 ];
 
 /// First-start settings and the log pseudonym key. A read-only `settings.json` (newer version,

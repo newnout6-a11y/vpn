@@ -311,7 +311,10 @@ async fn proxy_capture_over_a_server(pref: EnginePref, expected: vpnte_base::typ
     );
 }
 
+/// Like its Xray sibling since p-live2 (lab F-4): a native start proves its exit through
+/// public echo services before it counts as started, so it needs a plain way out (CI).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs internet: a native start proves its exit through public echo services"]
 async fn live_proxy_capture_over_a_server_with_singbox() {
     proxy_capture_over_a_server(EnginePref::SingBox, vpnte_base::types::Engine::SingBox).await;
 }

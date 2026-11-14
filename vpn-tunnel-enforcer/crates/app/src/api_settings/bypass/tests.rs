@@ -151,3 +151,41 @@ async fn smart_ru_adds_the_gov_list_of_the_active_rule_sets() {
     // psmart-b1: the same lists name Smart RU's VPN route for a site blocked in Russia.
     assert!(lists.blocked_covers("rutracker.org"));
 }
+
+/// fixlists-a2: a failed read of the Smart RU lists is not kept: the same directory is read
+/// again (here its files appear in between) and a retry is due until then.
+#[tokio::test]
+async fn a_failed_read_of_the_lists_is_tried_again() {
+    let real = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources"));
+    let exe = real.join("sing-box.exe");
+    if !exe.exists() {
+        return;
+    }
+    let dir = TempDir::new("bypass-reread");
+    let mut reader = Reader::default();
+    reader.read(&exe, &dir.0).await;
+    assert!(reader.cache.is_none() && reader.stale(&dir.0));
+    assert_eq!(reader.failures, 1);
+    for (_, file, _) in vpnte_engine::routing::smart_ru::RULE_SETS {
+        std::fs::copy(real.join(file), dir.0.join(file)).unwrap();
+    }
+    reader.read(&exe, &dir.0).await;
+    assert!(reader.cache.is_some() && !reader.stale(&dir.0));
+    assert_eq!(reader.failures, 0);
+}
+
+/// fixlists-a3: the Settings page wakes when the keeper holds other lists, not when it sends
+/// the same ones again.
+#[tokio::test]
+async fn new_lists_wake_the_settings_page() {
+    let out = watch::Sender::new(None);
+    let mut rx = out.subscribe();
+    let lists = Arc::new(SmartLists::default());
+    publish(&out, Some(lists.clone()));
+    assert!(rx.has_changed().unwrap());
+    rx.borrow_and_update();
+    publish(&out, Some(lists));
+    assert!(!rx.has_changed().unwrap(), "the same lists");
+    publish(&out, None);
+    assert!(rx.has_changed().unwrap());
+}

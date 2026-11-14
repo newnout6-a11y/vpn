@@ -9,6 +9,7 @@ use vpnte_core::net::HostPort;
 use vpnte_engine::clash_api::ClashEndpoint;
 use vpnte_engine::ports;
 use vpnte_engine::routing::RoutingInputs;
+use vpnte_engine::routing::bypass;
 use vpnte_engine::routing::plan::{self, Scope};
 use vpnte_engine::routing::process::AppPath;
 use vpnte_engine::routing::smart_ru::SmartRu;
@@ -123,8 +124,9 @@ pub(super) fn routing(
         physical_dns,
         endpoint_is_hostname,
     };
-    let fragments = plan::build_scoped(&inputs, scope);
+    let mut fragments = plan::build_scoped(&inputs, scope);
     let warnings = fragments.warnings.iter().map(|w| w.msg()).collect();
+    fragments.parts.proxy_bypass = bypass::route_rules(&bypass::from_stored(&user.proxy_bypass));
     (fragments.parts, warnings)
 }
 
@@ -193,5 +195,21 @@ mod tests {
             all.process_rules,
             vec![json!({ "process_path_regex": ["browser"], "outbound": "proxy-out" })]
         );
+    }
+
+    /// fixlists-b3: the user's «Не через прокси» entries reach the routing as direct rules
+    /// (the engine config places them under proxy capture only); a broken one is skipped.
+    #[test]
+    fn the_bypass_list_reaches_the_routing() {
+        let user = UserInputs {
+            proxy_bypass: vec!["*.corp.example".into(), "not a host".into()],
+            ..UserInputs::default()
+        };
+        let parts = routing(&user, &[], false, &[], false).0;
+        assert_eq!(
+            parts.proxy_bypass,
+            vec![json!({ "domain_suffix": [".corp.example"], "outbound": "direct-out" })]
+        );
+        assert!(rules(None).proxy_bypass.is_empty());
     }
 }

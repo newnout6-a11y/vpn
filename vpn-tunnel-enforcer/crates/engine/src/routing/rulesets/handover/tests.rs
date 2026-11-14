@@ -56,7 +56,7 @@ fn a_set_is_read_in_order_and_travels_as_base64() {
 }
 
 /// The service's re-check: the app's set is checked with the service's own engine and stored as
-/// `gen-<digest>`; the same set again is used as stored; a file that fails its canaries, a
+/// `gen-<digest>-c<checks>`; the same set again is used as stored; a file that fails its canaries, a
 /// changed order or an oversized set is refused and leaves nothing behind.
 #[tokio::test]
 async fn the_service_accepts_only_sets_that_pass_its_own_checks() {
@@ -104,11 +104,13 @@ async fn the_service_accepts_only_sets_that_pass_its_own_checks() {
             .await
             .is_err()
     );
-    let left: Vec<String> = std::fs::read_dir(&store)
+    let mut left: Vec<String> = std::fs::read_dir(&store)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(left, [dir.file_name().unwrap().to_string_lossy()]);
+    left.sort();
+    let name = dir.file_name().unwrap().to_string_lossy();
+    assert_eq!(left, [ACCEPTED, name.as_ref()]);
 
     let old = store.join(format!("{GEN_PREFIX}0123456789abcdef"));
     std::fs::create_dir_all(&old).unwrap();
@@ -141,4 +143,34 @@ async fn a_stored_set_is_used_only_while_its_bytes_hash_to_it() {
             "{file}"
         );
     }
+}
+
+/// fixlists-a5/a7: after a restart the last set that passed is found again, by its bytes, not
+/// by its folder's name; a note that names no such folder, a folder whose bytes changed and a
+/// folder stored by older checks are all passed over (the older one is checked again).
+#[tokio::test]
+async fn the_last_accepted_set_is_recalled_by_its_bytes() {
+    let Some(exe) = singbox_exe() else { return };
+    let t = TempDir::new("handover-recall");
+    let store = t.path().join("rulesets");
+    assert_eq!(recall(&store).await, None);
+    let set = bundled_set();
+    let dir = accept(&set, &exe, &store, &resources()).await.unwrap();
+    assert_eq!(recall(&store).await, Some((set.digest(), dir.clone())));
+
+    let older = store.join(format!("{GEN_PREFIX}{}", &set.digest()[..16]));
+    std::fs::rename(&dir, &older).unwrap();
+    assert_eq!(recall(&store).await, None, "stored by older checks");
+    assert_eq!(
+        accept(&set, &exe, &store, &resources()).await,
+        Ok(dir.clone())
+    );
+    assert!(complete(&dir));
+
+    let file = dir.join(RULE_SETS[0].1);
+    let len = std::fs::metadata(&file).unwrap().len();
+    std::fs::write(&file, vec![0u8; len as usize]).unwrap();
+    assert_eq!(recall(&store).await, None, "bytes changed");
+    std::fs::write(store.join(ACCEPTED), "not a digest").unwrap();
+    assert_eq!(recall(&store).await, None);
 }

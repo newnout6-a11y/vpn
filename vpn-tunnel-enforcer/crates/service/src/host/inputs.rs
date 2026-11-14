@@ -43,6 +43,8 @@ pub struct SharedInputs {
 struct Checked {
     accepted: Option<(String, PathBuf)>,
     refused: Option<(String, Msg)>,
+    /// Whether the store's note of the last accepted set was read since the service started.
+    recalled: bool,
 }
 
 impl SharedInputs {
@@ -90,6 +92,8 @@ impl SharedInputs {
             split_vpn: routing.split_vpn.clone(),
             split_inactive: Vec::new(),
             only_listed: routing.only_listed.clone(),
+            // Proxy capture runs in the app, never here.
+            proxy_bypass: Vec::new(),
             dns: routing.dns.clone(),
             kill_switch: level,
             public_wifi: routing.public_wifi,
@@ -136,6 +140,11 @@ impl SharedInputs {
             return (None, pinned(None));
         }
         let mut checked = self.checked.lock().await;
+        if !checked.recalled {
+            // A restart keeps the last set that passed, not the pinned files (fixlists-a5).
+            checked.recalled = true;
+            checked.accepted = handover::recall(store).await;
+        }
         if let Some((known, dir)) = checked.accepted.as_ref()
             && *known == digest
         {

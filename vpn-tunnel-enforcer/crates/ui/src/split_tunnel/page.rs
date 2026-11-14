@@ -4,7 +4,8 @@ use dioxus::prelude::*;
 use vpnte_base::{ErrorKind, Msg};
 
 use super::model::{
-    AppKind, AppRule, AppScope, SplitApp, display_path, icon_src, initial, matches, scope_hint_key,
+    AppKind, AppRule, AppScope, SplitApp, SplitSnapshot, display_path, icon_src, initial, matches,
+    scope_hint_key,
 };
 use super::routing_panel::RoutingPanel;
 use super::{tr_now, use_api, use_watch};
@@ -79,8 +80,14 @@ pub fn SplitTunnelPage() -> Element {
 
     let apps = state.read().apps.clone();
     let offers = state.read().offers.clone();
-    let (scope, older_service) = (state.read().scope, state.read().older_service);
-    let hint_key = scope_hint_key(scope, &apps);
+    let SplitSnapshot {
+        scope,
+        pending,
+        proxy,
+        older_service,
+        ..
+    } = *state.read();
+    let hint_key = scope_hint_key(scope, &apps, proxy);
     let number = Page::ALL.iter().position(|p| *p == Page::Apps).unwrap_or(1);
     rsx! {
         div { class: "c-swiss swiss-skin apps",
@@ -103,7 +110,7 @@ pub fn SplitTunnelPage() -> Element {
                     {t!("splitTunneling.addApp")}
                 }
             }
-            ScopeSwitch { scope, hint_key, older_service }
+            ScopeSwitch { scope, hint_key, pending, older_service }
             div { class: "apps-search",
                 TextInput {
                     value: query(),
@@ -140,10 +147,16 @@ pub fn SplitTunnelPage() -> Element {
 }
 
 /// «Только выбранные приложения»: the switch and one line on what it does with the list as it
-/// is; with a helper service too old for it, one calm line more (Tunnel mode there routes every
-/// app). A change applies from the next connection, as the list's own changes do.
+/// is; a calm line more while the running session keeps the other scope (a change applies from
+/// the next connection, as the list's own changes do), and with a helper service too old for
+/// it (Tunnel mode there routes every app).
 #[component]
-fn ScopeSwitch(scope: AppScope, hint_key: &'static str, older_service: bool) -> Element {
+fn ScopeSwitch(
+    scope: AppScope,
+    hint_key: &'static str,
+    pending: bool,
+    older_service: bool,
+) -> Element {
     let api = use_api();
     let toasts = Toasts::use_context();
     let job = use_job::<()>();
@@ -177,6 +190,11 @@ fn ScopeSwitch(scope: AppScope, hint_key: &'static str, older_service: bool) -> 
                     hint: t!(hint_key),
                     busy: job.running(),
                     on_change: change,
+                }
+                if pending {
+                    p { class: "apps-scope-note", role: "status",
+                        {t!("splitTunneling.scope.pending")}
+                    }
                 }
                 if on && older_service {
                     p { class: "apps-scope-note", role: "status",

@@ -114,8 +114,9 @@ pub enum FetchOutcome { Ok { partial: bool }, EmptyList, HwidRequired, DeviceLim
 pub enum BodyKind { Html, Json, Base64, Uris, Encrypted /* happ://crypt…, age */, Other }
 pub enum NetFail { Dns, Connect, Tls, Proxy, Reset }
 // p-live-fix: provider placeholders («Приложение не поддерживается» at 0.0.0.0:1) are never servers.
-pub fn is_placeholder(name: &str, host: &str, port: u16) -> bool; // 0.0.0.0 / :: / loopback / empty,
-pub fn is_placeholder_profile(&Profile) -> bool;   // port 0-1, or a "not supported / update the app" name
+pub fn is_placeholder(host: &str, port: u16) -> bool; // 0.0.0.0 / :: / loopback / empty, or port 0-1;
+pub fn is_placeholder_profile(&Profile) -> bool;   // the name never decides (T0a: «NL | UDP not supported»
+                                                   // is a server); placeholders' names are only their words
 pub fn provider_words<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<String>; // 3 names, 160 chars
 impl ServerRow { pub fn is_placeholder(&self) -> bool }   // feed rows only (a manual 127.0.0.1 key is a key)
 pub enum GroupStatus { Unknown, Active, Expired, Unreachable, Failed }
@@ -360,7 +361,9 @@ impl FetchError { pub fn for_group(self, send_hwid: bool) -> AppError; // EmptyL
 // Placeholders are dropped from every answer; an answer of placeholders only is a refusal: the
 // rotation goes on (Remnawave's x-hwid-* headers first: HwidRequired / DeviceLimit; else
 // Placeholder); a refresh keeps the rows and stores the words; a stored placeholder is archived at
-// open (Servers::open), refused by select and skipped by active().
+// open (Servers::open), refused by select, skipped by active() and leaves the list (row removed,
+// a selection on it moves to the group's first server) at the group's first successful refresh
+// (p-live2). `x-hwid-limit` alone: HwidRequired when no HWID was sent, DeviceLimit with one (T0b).
 pub fn parse_headers(lines: &str) -> AppResult<Vec<(String, String)>>; // servers.headers.* errors
 pub fn stored_headers(&[(String, String)]) -> Option<String>;  pub fn header_names(stored: &str) -> Vec<String>;
 pub fn outcome_msg(outcome: FetchOutcome) -> Msg;     // group status line (servers.fetch.*)

@@ -37,6 +37,9 @@ pub struct DemoSplitTunnel {
     tokens: Cell<u64>,
     smart_ru_on: Cell<bool>,
     scope: Cell<AppScope>,
+    /// The running session keeps the scope it started with (scene `pending`).
+    started_with: Option<AppScope>,
+    proxy: bool,
     older_service: bool,
 }
 
@@ -149,9 +152,11 @@ impl DemoSplitTunnel {
             tokens: Cell::new(0),
             smart_ru_on: Cell::new(false),
             scope: Cell::new(match scene {
-                "only" | "only-empty" | "old-service" => AppScope::OnlyListed,
+                "only" | "only-empty" | "old-service" | "proxy" => AppScope::OnlyListed,
                 _ => AppScope::All,
             }),
+            started_with: (scene == "pending").then_some(AppScope::All),
+            proxy: scene == "proxy",
             older_service: scene == "old-service",
         };
         match scene {
@@ -179,6 +184,8 @@ impl DemoSplitTunnel {
             apps: Load::Ready(self.apps.borrow().clone()),
             offers: self.offers.clone(),
             scope: self.scope.get(),
+            pending: self.started_with.is_some_and(|run| run != self.scope.get()),
+            proxy: self.proxy,
             older_service: self.older_service,
         });
     }

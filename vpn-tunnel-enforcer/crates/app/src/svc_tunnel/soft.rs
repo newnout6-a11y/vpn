@@ -9,6 +9,7 @@
 //! restart, crash restarts included, so an entry the rules no longer justify is taken out of the
 //! running session at once instead of at the next connection (owner answer 4, pbypass-a1).
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -38,6 +39,25 @@ static SESSION: Mutex<Option<Applied>> = Mutex::new(None);
 
 /// The follower task (started with the first session; again after its runtime ended).
 static FOLLOWER: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+
+/// First wait before a failed follower write is tried again; it doubles per try.
+const RETRY: Duration = Duration::from_secs(5);
+/// Tries after a failed write before the follower waits for the next change of the list.
+const RETRIES: u32 = 6;
+
+/// What bringing the running session up to date did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Follow {
+    /// Nothing to do: no session, or it holds the next list already.
+    Current,
+    /// The next list was applied.
+    Applied,
+    /// Another program holds the system proxy: the change waits for the proxy to come back
+    /// («Вернуть», or the other program letting go).
+    NotOurs,
+    /// The write failed and was undone: tried again later (fixlists-b6).
+    Failed,
+}
 
 #[derive(Clone)]
 struct Applied {
@@ -79,9 +99,8 @@ impl SoftTweaks {
     /// took it; the user's original setting still comes back when the session ends.
     pub async fn reclaim(&self) -> AppResult<()> {
         let _writes = WRITES.lock().await;
-        if self.soft.reclaim_proxy().await? {
-            tracing::info!("soft: system proxy taken back from another program");
-        }
+        let session = SESSION.lock().clone();
+        retake(&self.soft, session.as_ref()).await?;
         self.read_back().await;
         Ok(())
     }
@@ -123,6 +142,19 @@ fn is_taken(soft: &Soft, journal: &Journal) -> bool {
     journal.is_applied(Feature::SoftProxy) && soft.proxy_owner_blocking() == ProxyOwner::User
 }
 
+/// Takes the system proxy back and applies a list change skipped while another program held it
+/// (fixlists-a1: the journal's value is the list of the moment the proxy was lost). Call it
+/// holding [`WRITES`].
+async fn retake(soft: &Soft, session: Option<&Applied>) -> AppResult<Follow> {
+    if soft.reclaim_proxy().await? {
+        tracing::info!("soft: system proxy taken back from another program");
+    }
+    Ok(match session {
+        Some(s) => bring_up_to_date(s).await,
+        None => Follow::Current,
+    })
+}
+
 /// Starts the list follower unless it runs.
 fn follow() {
     let mut slot = FOLLOWER.lock();
@@ -131,34 +163,57 @@ fn follow() {
     }
 }
 
-/// Brings the running session up to date at once and after every change of the list.
+/// Brings the running session up to date at once, after every change of the list, when the
+/// system proxy changes hands (a change skipped meanwhile, fixlists-a1) and, after a failed
+/// write, with a growing pause a few times (fixlists-b6).
 async fn follow_list(mut changes: tokio::sync::watch::Receiver<u64>) {
+    let mut owner = taken::subscribe();
+    let mut failures = 0;
     loop {
-        catch_up().await;
-        if changes.changed().await.is_err() {
-            return;
+        failures = match catch_up().await {
+            Follow::Failed => failures + 1,
+            _ => 0,
+        };
+        let pause = retry_after(failures);
+        tokio::select! {
+            changed = changes.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            _ = owner.changed() => {}
+            () = tokio::time::sleep(pause.unwrap_or_default()), if pause.is_some() => {}
         }
     }
 }
 
+/// The pause before the next try after `failures` failed writes in a row; `None`: no try
+/// before the next change.
+fn retry_after(failures: u32) -> Option<Duration> {
+    (1..=RETRIES)
+        .contains(&failures)
+        .then(|| RETRY * 2u32.pow(failures - 1))
+}
+
 /// Brings the running session up to date and publishes its read-back.
-async fn catch_up() {
+async fn catch_up() -> Follow {
     let _writes = WRITES.lock().await;
     let Some(s) = SESSION.lock().clone() else {
-        return;
+        return Follow::Current;
     };
-    if bring_up_to_date(&s).await {
+    let done = bring_up_to_date(&s).await;
+    if done == Follow::Applied {
         let (soft, journal) = (s.soft, s.journal);
         if let Ok(taken) = tokio::task::spawn_blocking(move || is_taken(&soft, &journal)).await {
             taken::publish(taken);
         }
     }
+    done
 }
 
-/// Applies `s` again when its journalled values hold another list than the next one; `true` =
-/// applied. A session that ended is left to its rollback, another program's proxy to the user
-/// («Вернуть», ks-b).
-async fn bring_up_to_date(s: &Applied) -> bool {
+/// Applies `s` again when its journalled values hold another list than the next one. A session
+/// that ended is left to its rollback, another program's proxy to the user («Вернуть», ks-b).
+async fn bring_up_to_date(s: &Applied) -> Follow {
     let next = sysproxy::next();
     let mut want = vec![(
         Feature::SoftProxy,
@@ -173,16 +228,21 @@ async fn bring_up_to_date(s: &Applied) -> bool {
             .any(|r| r.target == *target && r.applied == *value)
     };
     if !s.soft.is_applied() || want.iter().all(held) {
-        return false;
+        return Follow::Current;
     }
     if !matches!(s.soft.proxy_owner().await, Ok(ProxyOwner::Ours)) {
-        return false;
+        return Follow::NotOurs;
     }
     match s.soft.apply(s.addr.clone(), s.kind, s.dev).await {
-        Ok(_) => tracing::info!("soft: the running session took the changed bypass list"),
-        Err(e) => tracing::warn!(error = %e, "soft: changed bypass list not applied"),
+        Ok(_) => {
+            tracing::info!("soft: the running session took the changed bypass list");
+            Follow::Applied
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "soft: changed bypass list not applied; tried again");
+            Follow::Failed
+        }
     }
-    true
 }
 
 fn host_port(addr: &str) -> AppResult<HostPort> {

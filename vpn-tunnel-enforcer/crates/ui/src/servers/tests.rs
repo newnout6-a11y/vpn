@@ -1103,3 +1103,24 @@ async fn tricks_row_renders_the_apps_answer() {
         Some(TricksChoice::Off)
     );
 }
+
+/// Lab F-12 (p-live2): the header's ping and check buttons say different things in both
+/// languages (both read «Проверить все» before).
+#[test]
+fn the_header_buttons_say_what_they_do() {
+    use crate::test_locales::text;
+    use vpnte_base::i18n::Lang;
+    let page = include_str!("page.rs");
+    for key in ["ui.servers.pingAllOpen", "ui.servers.checkAll.open"] {
+        assert!(page.contains(key), "{key}");
+    }
+    for lang in [Lang::Ru, Lang::En] {
+        let ping = text(lang, "ui.servers.pingAllOpen").unwrap();
+        let check = text(lang, "ui.servers.checkAll.open").unwrap();
+        assert_ne!(ping, check, "{lang:?}");
+    }
+    assert_eq!(
+        text(Lang::Ru, "ui.servers.pingAllOpen").as_deref(),
+        Some("Пинг всех")
+    );
+}

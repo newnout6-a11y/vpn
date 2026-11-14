@@ -74,6 +74,12 @@ pub struct DashboardView {
     /// Another program took over the system proxy our proxy-mode session set: one calm
     /// line with «Вернуть» (ks-b).
     pub proxy_taken: bool,
+    /// The connect in flight is proving its exit (its engine runs, nothing is claimed yet):
+    /// the caption says «Проверяем выход…» (lab F-4).
+    pub proving_exit: bool,
+    /// The exit equals the address without our VPN while another VPN works on this PC: one calm
+    /// line instead of a leak (the address check proves nothing then).
+    pub other_vpn_exit: bool,
 }
 
 /// The paused state's line: the next automatic attempt and whether the user must act.

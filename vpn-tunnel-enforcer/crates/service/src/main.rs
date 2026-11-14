@@ -63,6 +63,12 @@ fn main() -> ExitCode {
             request_install(resources)
         }
         ["request-uninstall"] => request_uninstall(),
+        // Started by the service's own removal only (lab F-8): what its process held goes now.
+        ["sweep", pid] => {
+            install::system_dlls_only();
+            console_log();
+            report(install::sweep(pid))
+        }
         ["forget-me"] => forget_me(),
         ["status"] => status(),
         _ => usage(),

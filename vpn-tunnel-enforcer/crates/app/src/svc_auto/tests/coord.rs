@@ -16,6 +16,7 @@ use vpnte_base::types::{AdaptiveMode, ClientDevice, Owner};
 use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
+use vpnte_servers::model::ProfileId;
 use vpnte_servers::store::{AddTarget, Servers};
 use vpnte_tunnel::history::SessionMode;
 use vpnte_tunnel::lifecycle::{
@@ -53,6 +54,8 @@ pub struct FakeLane {
     pub connect_hangs: AtomicBool,
     /// A lost switch's recovery stop holds the lane until [`FakeLane::release_hold`].
     pub hold_until_released: AtomicBool,
+    /// The next connect fails with this error (a start the runtime refused).
+    pub connect_fails: Mutex<Option<ConnError>>,
 }
 
 impl FakeLane {
@@ -68,6 +71,7 @@ impl FakeLane {
             kept: Mutex::new(None),
             connect_hangs: AtomicBool::new(false),
             hold_until_released: AtomicBool::new(false),
+            connect_fails: Mutex::new(None),
         })
     }
 
@@ -118,6 +122,9 @@ impl Lane for FakeLane {
             .push(format!("connect {:?} {:?}", req.target, req.owner));
         if self.connect_hangs.swap(false, Ordering::SeqCst) {
             std::future::pending::<()>().await;
+        }
+        if let Some(err) = self.connect_fails.lock().take() {
+            return Err(err);
         }
         if *self.busy.borrow() {
             let msg = Msg::new("tunnel.lifecycle.lane.stopInProgress");
@@ -531,4 +538,36 @@ async fn busy_and_failures_come_from_the_lane() {
         AppError::msg(ErrorKind::Internal, Msg::new("x.engine")).into(),
     ));
     assert_eq!(failed.reason().key, "x.engine");
+}
+
+/// Lab F-4 (p-live2): a start whose exit stayed silent marks its server offline, so the
+/// automatic choices try another server first; another failure records nothing.
+#[tokio::test]
+async fn a_silent_start_marks_its_server_offline() {
+    let r = rig("silent");
+    let (a, b) = (r.ids[0].clone(), r.ids[1].clone());
+    let failure = |key: &'static str| {
+        ConnError::Failed(vpnte_tunnel::api::TunError::new(
+            vpnte_base::ErrorKind::Network,
+            Msg::new(key),
+        ))
+    };
+    *r.lane.connect_fails.lock() = Some(failure("tunnel.runtime.exitSilent"));
+    r.coord
+        .connect(Owner::Schedule, proxy(&a))
+        .await
+        .expect_err("silent server");
+    let health = |id: &str| {
+        r.servers
+            .get(&ProfileId::from(id))
+            .and_then(|row| row.health)
+    };
+    let record = health(&a).expect("recorded");
+    assert!(!record.online);
+    *r.lane.connect_fails.lock() = Some(failure("tunnel.runtime.tunUnavailable"));
+    r.coord
+        .connect(Owner::Schedule, proxy(&b))
+        .await
+        .expect_err("refused");
+    assert_eq!(health(&b), None, "not the server's fault");
 }

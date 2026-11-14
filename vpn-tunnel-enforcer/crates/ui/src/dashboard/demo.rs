@@ -443,8 +443,17 @@ impl DashboardApi for DemoDashboard {
         if let Some(op) = frame.conn.operation.as_mut() {
             op.deadline = Some(op.started + Duration::from_secs(8));
         }
-        self.publish(frame);
-        pause(4_000).await;
+        self.publish(frame.clone());
+        pause(2_500).await;
+        if self.attempt.get() != attempt {
+            return Err(AppError::cancelled());
+        }
+        // The engine runs; the exit is proven before anything reads «Подключено».
+        self.publish(DashboardView {
+            proving_exit: true,
+            ..frame
+        });
+        pause(1_500).await;
         if self.attempt.get() != attempt {
             return Err(AppError::cancelled());
         }

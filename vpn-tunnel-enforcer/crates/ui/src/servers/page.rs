@@ -109,7 +109,7 @@ pub fn ServersPage() -> Element {
                     disabled: total == 0,
                     title: if pinging { t!("ui.servers.pingAllStopTitle") } else { t!("ui.servers.pingAllTitle") },
                     onclick: move |_| a_ping.ping_all(),
-                    {if pinging { t!("ui.servers.pingAllStop") } else { t!("servers.pingAll") }}
+                    {if pinging { t!("ui.servers.pingAllStop") } else { t!("ui.servers.pingAllOpen") }}
                 }
                 Button {
                     kind: ButtonKind::Ghost,

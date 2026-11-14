@@ -171,8 +171,9 @@ impl Matching {
 /// health and classifier verdicts when host, port or credential changed. Unmatched fresh entries
 /// become rows, unless the group already holds that key as a manual row.
 /// Missing rows: untouched when `complete` is false (skipped lines prove nothing); otherwise
-/// marked missing, then archived for the provider once missing for [`MISSING_GRACE_MS`]. The
-/// selection is never changed here.
+/// marked missing, then archived for the provider once missing for [`MISSING_GRACE_MS`]. A
+/// stored provider placeholder (an older build kept one as a server) is no server to wait for:
+/// it leaves the list at this first successful answer. The selection is never changed here.
 pub fn reconcile(
     group: &ServerGroup,
     rows: &mut Vec<ServerRow>,
@@ -283,6 +284,14 @@ pub fn reconcile(
                 report.pending_absent += 1;
             }
         }
+    }
+    let before = rows.len();
+    rows.retain(|r| !(r.group_id == group.id && r.is_placeholder()));
+    if rows.len() < before {
+        tracing::info!(
+            dropped = before - rows.len(),
+            "servers: stored provider placeholders left the list"
+        );
     }
     Ok(report)
 }

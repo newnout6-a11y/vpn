@@ -47,6 +47,12 @@ pub struct SplitSnapshot {
     /// Subscriptions whose provider sent a Happ routing profile.
     pub offers: Vec<RoutingOffer>,
     pub scope: AppScope,
+    /// A session runs with the other scope than the saved one: the switch applies from the next
+    /// connection (appsplit-b5).
+    pub pending: bool,
+    /// Proxy mode (the running session's, else the saved one): only programs that use the
+    /// system proxy reach the VPN (appsplit-b6, NOADMIN.md section 2).
+    pub proxy: bool,
     /// Tunnel mode runs in a helper service too old for [`AppScope::OnlyListed`]: there every
     /// app still uses the VPN until the service is updated.
     pub older_service: bool,
@@ -58,6 +64,8 @@ impl Default for SplitSnapshot {
             apps: Load::Loading,
             offers: Vec::new(),
             scope: AppScope::All,
+            pending: false,
+            proxy: false,
             older_service: false,
         }
     }
@@ -75,13 +83,16 @@ pub enum AppScope {
 }
 
 /// Catalog key of the switch's hint for the list as it is: with only the listed apps and none
-/// listed yet, it says that nothing goes through the VPN (a list still loading reads as listed).
-pub fn scope_hint_key(scope: AppScope, apps: &Load<Vec<SplitApp>>) -> &'static str {
+/// listed yet, it says what still uses the VPN (a list still loading reads as listed); in Proxy
+/// mode it says that only programs using the system proxy reach the VPN.
+pub fn scope_hint_key(scope: AppScope, apps: &Load<Vec<SplitApp>>, proxy: bool) -> &'static str {
     let none_listed =
         matches!(apps, Load::Ready(list) if list.iter().all(|a| a.rule != AppRule::Vpn));
     match scope {
+        AppScope::All if proxy => "splitTunneling.scope.hintAllProxy",
         AppScope::All => "splitTunneling.scope.hintAll",
         AppScope::OnlyListed if none_listed => "splitTunneling.scope.hintEmpty",
+        AppScope::OnlyListed if proxy => "splitTunneling.scope.hintListedProxy",
         AppScope::OnlyListed => "splitTunneling.scope.hintListed",
     }
 }

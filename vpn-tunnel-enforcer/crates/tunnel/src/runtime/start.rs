@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{AdaptiveMode, Engine, EnginePref, ProxyKind, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::net::HostPort;
-use vpnte_engine::singbox_config::Upstream;
+use vpnte_engine::singbox_config::{Listeners, Upstream};
 use vpnte_engine::slot::{Slot, SlotEndpoint};
 use vpnte_engine::xray_config::{self, Decision, ProxyGraph, Reject, ResolvePath, Resolved};
 use vpnte_engine::xray_process::{SlotLaunch, XrayEvent};
@@ -21,7 +21,7 @@ use vpnte_profiles::model::Profile;
 use super::actor::{Actor, Phase, Retained, Session, SlotSession};
 use super::capture::{Capture, CapturePlan};
 use super::config;
-use super::engines::{CoreProc, Engines};
+use super::engines::{CoreProc, EchoFailure, Engines, echo_failure};
 use super::pin::pin_native;
 use super::spawn::Parts;
 use crate::api::{
@@ -443,7 +443,7 @@ impl Actor {
             profile,
         } = &planned
         {
-            self.start_slot_a(graph, resolved, profile, op, work)
+            self.start_slot_a(graph, resolved, profile, engine, op, work)
                 .await?;
         }
         #[cfg(feature = "lab")]
@@ -471,6 +471,10 @@ impl Actor {
             slots.slots.activate(Slot::A)?;
             slots.dns_bootstrap = listeners.dns_bootstrap.unwrap_or_default();
         }
+        if let (Planned::Native(_), Mode::DirectVpn { profile }) = (&planned, &req.mode) {
+            self.prove_native(&profile.profile, &listeners, engine, op)
+                .await?;
+        }
         cancelled_if(op)?;
         let logs = self.deps.engines.log_files(work.slots.is_some());
         let endpoints = config::endpoints(&clash, &listeners, &proof, logs);
@@ -492,6 +496,41 @@ impl Actor {
         }))
     }
 
+    /// Lab F-4 (p-live2): a native start is published only after traffic went through its
+    /// server: an echo through the engine's probe inbound (`live-check-in`, always to the
+    /// upstream whatever the user's rules say; loopback, so neither the TUN's routes nor the kill
+    /// switch's filters stand in the way). A placeholder or a dead server fails the start here,
+    /// it never reads as connected.
+    async fn prove_native(
+        &self,
+        server: &Profile,
+        listeners: &Listeners,
+        engine: EngineRun,
+        op: &CancellationToken,
+    ) -> AppResult<()> {
+        let probe = listeners.probe.as_ref();
+        let Some((port, creds)) = probe.and_then(|p| Some((p.port, p.creds.as_ref()?))) else {
+            // The config of a direct start always has it: without it nothing proves the exit.
+            return Err(AppError::internal(std::io::Error::other(
+                "no probe inbound to prove the exit",
+            )));
+        };
+        self.proving(engine);
+        match self.deps.engines.egress_via(server, port, creds, op).await {
+            Ok(_) => Ok(()),
+            // Answers came back through the server: the traffic is proven, only the address
+            // is unknown (the start page's exit check reads it later).
+            Err(e) if echo_failure(&e) == Some(EchoFailure::NoAddress) => Ok(()),
+            Err(e) => Err(exit_unproven(e)),
+        }
+    }
+
+    /// The exit of the start in progress is being proven: its engine runs, the session is not
+    /// published yet (the start page says «Проверяем выход…»).
+    fn proving(&self, engine: EngineRun) {
+        self.publish(|s| s.engine = Some(engine));
+    }
+
     /// Slot A of a cold start: its own SOCKS readiness and an egress proof before any route
     /// points into the tunnel.
     async fn start_slot_a(
@@ -499,6 +538,7 @@ impl Actor {
         graph: &ProxyGraph,
         resolved: &Resolved,
         profile: &VpnProfile,
+        engine: EngineRun,
         op: &CancellationToken,
         work: &mut Work,
     ) -> AppResult<()> {
@@ -528,15 +568,30 @@ impl Actor {
         let started = session.slots.start(Slot::A, a.clone(), launch, op).await;
         work.slots = Some(session);
         started?;
+        self.proving(engine);
         let ip = self
             .deps
             .engines
             .egress_via(&profile.profile, a.port(), a.creds(), op)
-            .await?;
+            .await
+            .map_err(exit_unproven)?;
         if let Some(s) = work.slots.as_mut() {
             s.egress[Slot::A.index()] = Some(ip);
         }
         Ok(())
+    }
+}
+
+/// A start's exit proof that got nothing back says what it means for the user: the server
+/// carried no traffic (lab F-4: «через туннель» was wrong in Proxy mode, and the address was
+/// never the point). Any other failure (a deferred handshake, a cancel) stays as it is.
+fn exit_unproven(err: AppError) -> AppError {
+    match echo_failure(&err) {
+        Some(EchoFailure::NoReply) => {
+            AppError::msg(ErrorKind::Network, Msg::new("tunnel.runtime.exitSilent"))
+                .with_source(EchoFailure::NoReply)
+        }
+        _ => err,
     }
 }
 
@@ -554,4 +609,247 @@ pub(super) fn direct_engines(
         own.extend([engines.singbox_exe(), engines.xray_exe()]);
     }
     own
+}
+
+#[cfg(test)]
+mod proof_tests {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use tokio::sync::mpsc;
+    use vpnte_base::types::{Creds, EnginePref};
+    use vpnte_core::net::HostPort;
+    use vpnte_engine::clash_api::ClashEndpoint;
+    use vpnte_engine::xray_config::ResolveFault;
+
+    use super::super::engines::{Slots, echo_failed};
+    use super::super::tests::{FakeEngines, NATIVE_KEY, World, XRAY_KEY, deps, drain, vpn_req};
+    use super::*;
+    use crate::api::{Runtime, TunStatusKind};
+    use crate::runtime::TunnelHandle;
+
+    /// The test engines with the exit proof's answer set: `None` = the fake's address; `noisy`:
+    /// the Xray slots' log reads as an unreachable server (what the core's death leaves there).
+    struct Probed {
+        inner: FakeEngines,
+        answer: Option<EchoFailure>,
+        noisy: bool,
+    }
+
+    /// Slots whose log says "unreachable" (the burst of closed connections a dead core leaves).
+    struct NoisySlots(Box<dyn Slots>);
+
+    #[async_trait]
+    impl Slots for NoisySlots {
+        async fn start(
+            &mut self,
+            slot: Slot,
+            ep: SlotEndpoint,
+            launch: SlotLaunch,
+            cancel: &CancellationToken,
+        ) -> Result<(), vpnte_engine::xray_process::XrayError> {
+            self.0.start(slot, ep, launch, cancel).await
+        }
+        async fn restart(
+            &mut self,
+            slot: Slot,
+            cancel: &CancellationToken,
+        ) -> Result<(), vpnte_engine::xray_process::XrayError> {
+            self.0.restart(slot, cancel).await
+        }
+        async fn stop(&mut self, slot: Slot) -> Result<(), vpnte_engine::xray_process::XrayError> {
+            self.0.stop(slot).await
+        }
+        async fn stop_all(&mut self) -> Result<(), vpnte_engine::xray_process::XrayError> {
+            self.0.stop_all().await
+        }
+        fn activate(&mut self, slot: Slot) -> Result<(), vpnte_engine::xray_process::XrayError> {
+            self.0.activate(slot)
+        }
+        fn running(&self, slot: Slot) -> bool {
+            self.0.running(slot)
+        }
+        fn recent_fault(&self, _slot: Slot) -> Option<vpnte_base::types::OutboundFault> {
+            Some(vpnte_base::types::OutboundFault::UpstreamUnreachable)
+        }
+    }
+
+    #[async_trait]
+    impl Engines for Probed {
+        fn spawn_core(&self, config: &[u8]) -> std::io::Result<Arc<dyn CoreProc>> {
+            self.inner.spawn_core(config)
+        }
+        fn slots(&self, events: mpsc::Sender<XrayEvent>) -> Box<dyn Slots> {
+            let slots = self.inner.slots(events);
+            if self.noisy {
+                return Box::new(NoisySlots(slots));
+            }
+            slots
+        }
+        fn singbox_exe(&self) -> PathBuf {
+            self.inner.singbox_exe()
+        }
+        fn xray_exe(&self) -> PathBuf {
+            self.inner.xray_exe()
+        }
+        fn log_files(&self, slots: bool) -> Vec<PathBuf> {
+            self.inner.log_files(slots)
+        }
+        async fn select(&self, clash: &ClashEndpoint, slot: Slot) -> AppResult<()> {
+            self.inner.select(clash, slot).await
+        }
+        async fn upstream_downloads(&self, c: &ClashEndpoint) -> AppResult<Vec<(String, u64)>> {
+            self.inner.upstream_downloads(c).await
+        }
+        async fn resolve(
+            &self,
+            hosts: &[String],
+            path: ResolvePath,
+            cancel: &CancellationToken,
+        ) -> Result<Resolved, ResolveFault> {
+            self.inner.resolve(hosts, path, cancel).await
+        }
+        async fn egress_via(
+            &self,
+            server: &Profile,
+            port: u16,
+            creds: &Creds,
+            cancel: &CancellationToken,
+        ) -> AppResult<IpAddr> {
+            let ip = self.inner.egress_via(server, port, creds, cancel).await;
+            match self.answer {
+                Some(failure) => Err(echo_failed(failure)),
+                None => ip,
+            }
+        }
+        async fn egress(
+            &self,
+            via: Option<u16>,
+            t: Duration,
+            c: &CancellationToken,
+        ) -> AppResult<IpAddr> {
+            self.inner.egress(via, t, c).await
+        }
+        async fn local_proxy(&self, a: &HostPort, l: Duration) -> AppResult<Option<PathBuf>> {
+            self.inner.local_proxy(a, l).await
+        }
+        async fn physical_dns(&self) -> Vec<Ipv4Addr> {
+            self.inner.physical_dns().await
+        }
+        #[cfg(feature = "lab")]
+        async fn start_mihomo(
+            &self,
+            config: &vpnte_engine::mihomo_config::Compiled,
+            socks: SlotEndpoint,
+            controller: ClashEndpoint,
+            cancel: &CancellationToken,
+        ) -> AppResult<Arc<dyn CoreProc>> {
+            self.inner
+                .start_mihomo(config, socks, controller, cancel)
+                .await
+        }
+    }
+
+    fn runtime(world: &Arc<World>, answer: Option<EchoFailure>) -> TunnelHandle {
+        let mut d = deps(world);
+        d.engines = Arc::new(Probed {
+            inner: FakeEngines(world.clone()),
+            answer,
+            noisy: false,
+        });
+        TunnelHandle::spawn(d)
+    }
+
+    /// Lab F-11 (p-live2): killed engines of a slot session come back after the plain backoff.
+    /// The dead core leaves Xray's log reading "unreachable"; that is no frozen server, so no
+    /// freeze window delays the restart.
+    #[tokio::test]
+    async fn a_dead_core_of_a_slot_session_restarts_at_the_backoff() {
+        let w = World::new();
+        let mut d = deps(&w);
+        d.timings.freeze = Duration::from_secs(30);
+        d.engines = Arc::new(Probed {
+            inner: FakeEngines(w.clone()),
+            answer: None,
+            noisy: true,
+        });
+        let h = TunnelHandle::spawn(d);
+        let mut events = h.subscribe();
+        h.start(
+            vpn_req(XRAY_KEY, EnginePref::Xray),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("start");
+        drain(&mut events);
+        w.core(0).crash();
+        let back = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match events.recv().await {
+                    Ok(TunnelEvent::StartFinished { generation: 2, ok }) => return ok,
+                    Ok(_) => {}
+                    Err(e) => panic!("{e}"),
+                }
+            }
+        })
+        .await
+        .expect("restarted well inside the 30 s freeze window");
+        assert!(back, "the recovery start succeeded");
+    }
+
+    /// Lab F-4 (p-live2): a native start proves its exit through the probe inbound after the
+    /// capture is up and before anything is published as running.
+    #[tokio::test]
+    async fn a_native_start_is_running_only_after_its_exit_proof() {
+        let w = World::new();
+        let h = runtime(&w, None);
+        h.start(
+            vpn_req(NATIVE_KEY, EnginePref::Auto),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("start");
+        assert!(
+            w.at("ready") < w.at("egress-via:203.0.113.12"),
+            "{:?}",
+            w.log()
+        );
+        assert!(h.status().borrow().running);
+    }
+
+    /// A dead server (a provider's placeholder, a server that carries nothing) fails the start
+    /// with a calm, mode-neutral line; nothing is published as running.
+    #[tokio::test]
+    async fn a_silent_server_fails_the_start() {
+        for key in [NATIVE_KEY, XRAY_KEY] {
+            let w = World::new();
+            let h = runtime(&w, Some(EchoFailure::NoReply));
+            let mut events = h.subscribe();
+            let err = h
+                .start(vpn_req(key, EnginePref::Auto), CancellationToken::new())
+                .await
+                .unwrap_err();
+            assert_eq!(err.user_msg().key, "tunnel.runtime.exitSilent", "{key}");
+            let status = h.status().borrow().clone();
+            assert!(!status.running && status.engine.is_none(), "{key}");
+            let seen = drain(&mut events);
+            assert!(!seen.contains(&TunnelEvent::Status(TunStatusKind::Running)));
+        }
+    }
+
+    /// Answers without an address came through the server: a native start counts that as
+    /// traffic.
+    #[tokio::test]
+    async fn answers_without_an_address_prove_a_native_exit() {
+        let w = World::new();
+        let h = runtime(&w, Some(EchoFailure::NoAddress));
+        h.start(
+            vpn_req(NATIVE_KEY, EnginePref::Auto),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("traffic came back");
+        assert!(h.status().borrow().running);
+    }
 }

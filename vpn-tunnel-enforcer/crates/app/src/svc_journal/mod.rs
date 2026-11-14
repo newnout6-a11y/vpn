@@ -20,6 +20,7 @@ use parking_lot::Mutex;
 use tokio::sync::watch;
 use vpnte_base::types::{KillSwitchLevel, UnixMs, now_ms};
 use vpnte_base::{AppResult, Msg};
+use vpnte_engine::routing::rulesets::RefreshOutcome;
 use vpnte_tunnel::history::Entry;
 
 use crate::services::Backend;
@@ -214,6 +215,15 @@ pub fn kill_switch_level(root: &Path, level: KillSwitchLevel) {
         KillSwitchLevel::Strict => "app.journal.killSwitch.always",
     };
     record(root, Topic::Protection, Tone::Info, Msg::new(key), None);
+}
+
+/// A Smart RU list refresh that brought new lists (asked by p-tails-a); a failed one reaches
+/// the journal through its toast, once per streak.
+pub fn smart_ru_refreshed(root: &Path, outcome: &RefreshOutcome) {
+    if matches!(outcome, RefreshOutcome::Updated { .. }) {
+        let title = Msg::new("app.journal.smartRu.updated");
+        record(root, Topic::Update, Tone::Ok, title, None);
+    }
 }
 
 /// A kill-switch exception added (`true`) or removed in Settings, by its user label.

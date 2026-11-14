@@ -34,7 +34,7 @@ use super::process::{
     AppPath, InactiveApp, InactiveReason, ResolvedSplit, third_party_core_regexes,
 };
 use super::smart_ru::{self, GEOIP_RU, GOV_RU, SmartRu};
-use crate::singbox_config::{RoutingParts, usable_physical_dns};
+use crate::singbox_config::{RoutingParts, direct_dns_server, usable_physical_dns};
 use crate::tags::{DIRECT_OUT, DNS_DIRECT, DNS_REMOTE, PROXY_OUT};
 
 /// Everything the generator reads, gathered by the tunnel at each (re)start.
@@ -257,14 +257,11 @@ pub fn build_scoped(i: &RoutingInputs, scope: Scope) -> RoutingFragments {
     }
 
     out.dns_servers.push(dns::remote_server(i.dns));
-    if smart_dir.is_some() || user_direct {
-        // Plain UDP to the adapter's own resolver, no detour: `type: local` loops back into
-        // the TUN resolver under strict_route, and sing-box refuses `detour: direct-out`.
-        out.dns_servers
-            .push(match usable_physical_dns(i.physical_dns) {
-                Some(ip) => json!({ "type": "udp", "tag": DNS_DIRECT, "server": ip.to_string() }),
-                None => json!({ "type": "dhcp", "tag": DNS_DIRECT }),
-            });
+    let scoped = matches!(scope, Scope::OnlyListed { .. });
+    if smart_dir.is_some() || user_direct || scoped {
+        // The scope needs it too: under proxy capture `direct-out` resolves the names of the
+        // apps outside the scope on it (appsplit-b3, engine-config `direct_out`).
+        out.dns_servers.push(direct_dns_server(i.physical_dns));
     }
     if i.endpoint_is_hostname && usable_physical_dns(i.physical_dns).is_none() {
         warnings.push(RoutingWarning::BootstrapDnsFallback);

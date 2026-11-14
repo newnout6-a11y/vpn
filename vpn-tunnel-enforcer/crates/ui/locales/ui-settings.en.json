@@ -243,7 +243,7 @@
         "proxyType": "Proxy type of the manual address",
         "bootstrap": "Route of the app's downloads",
         "bootstrapHint": "Used to update subscriptions and Smart-RU lists. It does not change how your traffic goes through the VPN.",
-        "bootstrapAuto": "Auto: through the VPN while connected, else directly or the local proxy",
+        "bootstrapAuto": "Auto: subscriptions directly, then through the VPN; Smart RU lists through the VPN while connected",
         "bootstrapDirect": "Directly only",
         "bootstrapProxy": "Through the local proxy only",
         "checkInterval": "IP check interval (seconds)",

@@ -32,9 +32,14 @@ pub(super) fn refusal(
     }
     // `x-hwid-limit` is the same fact for v2RayTun's sake, but Remnawave sets it on every refusal
     // of its HWID check, "no HWID sent" included (13.11.2026: the owner's answer read as a full
-    // device limit): a device limit only when nothing above named another reason.
+    // device limit), and 2.6.x panels send nothing else. A panel can count devices only by the
+    // HWID it was sent: without one, the header asks for it (audit T0b).
     if set("x-hwid-limit") {
-        return Some(FetchOutcome::DeviceLimit);
+        return Some(if sent_hwid {
+            FetchOutcome::DeviceLimit
+        } else {
+            FetchOutcome::HwidRequired
+        });
     }
     let head = String::from_utf8_lossy(&body[..body.len().min(BODY_PREFIX)]).to_ascii_lowercase();
     (status == 403 && head.contains("device fingerprint required"))
@@ -129,5 +134,22 @@ mod tests {
             refusal(200, &full, b"", true),
             Some(FetchOutcome::DeviceLimit)
         );
+    }
+
+    /// Audit T0b (p-live2): Remnawave 2.6.x sends only `x-hwid-limit` on both refusals. Without
+    /// an HWID sent it asks for one; with one sent it is the device limit.
+    #[test]
+    fn a_lone_limit_header_asks_for_the_hwid_when_none_was_sent() {
+        let lone = headers(&[("x-hwid-limit", "true")]);
+        for status in [200, 404] {
+            assert_eq!(
+                refusal(status, &lone, b"", false),
+                Some(FetchOutcome::HwidRequired)
+            );
+            assert_eq!(
+                refusal(status, &lone, b"", true),
+                Some(FetchOutcome::DeviceLimit)
+            );
+        }
     }
 }

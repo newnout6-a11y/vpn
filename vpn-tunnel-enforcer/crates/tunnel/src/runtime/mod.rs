@@ -73,6 +73,9 @@ pub struct UserInputs {
     /// VPN apps and `own`, the app's exe as `process_path_regex` values (sent by the app: in the
     /// service this process is not the app), take the tunnel; `None` = every app.
     pub only_listed: Option<Vec<String>>,
+    /// The user's «Не через прокси» entries as stored (`Settings::proxy_bypass`): route rules
+    /// to `direct-out` under proxy capture (fixlists-b3); a TUN session ignores them.
+    pub proxy_bypass: Vec<String>,
     /// The active resolver; `None` = automatic (DoH through the tunnel).
     pub dns: Option<DnsAddr>,
     /// Current settings, applied by `restart_with_last` on top of the last start.

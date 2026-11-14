@@ -421,6 +421,7 @@ pub struct UserInputs { pub smart_ru: bool, pub smart_ru_maps_direct: bool, pub 
     pub split_inactive: Vec<InactiveSplit>,
     pub only_listed: Option<Vec<String>>, // Some(own exe regexes) = only the split's VPN apps + the app
                                           // (engine plan::Scope::OnlyListed, re-check 16); None = every app
+    pub proxy_bypass: Vec<String>,        // Settings::proxy_bypass: direct-out rules under proxy capture
     pub dns: Option<DnsAddr>, pub kill_switch: KillSwitchLevel,
     pub public_wifi: bool, pub stealth: bool, pub auto_restart_on_crash: bool }  // serde camelCase, Default
 impl UserInputs { pub fn split(&self) -> ResolvedSplit }
@@ -476,10 +477,14 @@ pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self;   // + Defau
     async fn resolve(&self, hosts: &[String], path: ResolvePath, cancel: &CancellationToken)
         -> Result<Resolved, ResolveFault>;
     async fn egress_via(&self, server: &Profile, port: u16, creds: &Creds, cancel: &CancellationToken)
-        -> AppResult<IpAddr>;   // staged slot's SOCKS; each echo request = a new handshake to `server`
+        -> AppResult<IpAddr>;   // an authenticated loopback SOCKS listener (a staged slot, a native
+                                // start's `live-check-in`); each echo request = a new handshake to
+                                // `server`; 15 s from the moment the route accepts, a 2nd echo
+                                // service joins after 5 s or a failure (p-live2, lab F-3)
     async fn egress(&self, via: Option<u16>, timeout: Duration, cancel: &CancellationToken)
         -> AppResult<IpAddr>;   // through the tunnel: default route (TUN) or `via` = the proxy
-                                // capture's mixed port (the app's requests never use the system proxy)
+                                // capture's mixed port (the app's requests never use the system proxy);
+                                // `timeout` x 2 in all, the 2nd service joins after `timeout`
     async fn local_proxy(&self, addr: &HostPort, limit: Duration) -> AppResult<Option<PathBuf>>;
     async fn physical_dns(&self) -> Vec<Ipv4Addr>; }
 // the app's handshake budget (probe discipline): the tunnel cannot depend on vpnte-probes
@@ -505,6 +510,12 @@ impl EngineFeed { pub fn subscribe_lines(&self) -> broadcast::Receiver<Arc<str>>
 Behaviour the caller can rely on: one task serialises every operation (a start waits for the one in
 flight); `stop()` cancels a start / switch / restart in flight and waits for its compensation;
 concurrent stops share one receipt.
+Exit proof (p-live2, lab F-3 / F-4): no Direct VPN start is published before traffic went through
+its server. An Xray slot echoes through its own SOCKS before any route points into it (as before);
+a native start echoes through the core's `live-check-in` after the capture is up (answers without
+an address count as traffic there). While the proof runs, `TunStatus::engine` is set and `running`
+is not (the start page's «Проверяем выход…»). A proof that got nothing back fails the start with
+`tunnel.runtime.exitSilent` (mode-neutral); a local upstream proxy is proven by its listener only.
 Crash policy: auto-restart (origin `Recovery`, `Restarting{n,3}` first, backoff 2 / 5 / 10 s, budget
 reset after 30 s stable), then failover once (when a `Failover` is given), then: kill switch off
 -> release + `Stopped`; on (`standard` / `strict` as in force) with auto-restart off -> keep
@@ -525,8 +536,9 @@ service changes during a session); `Runtime::set_kill_switch` (`TunnelHandle`) s
 session's `last` request and plan guard (proxy capture: never "Always"). `restart_with_last` /
 `restart_adaptive` keep a proxy session's own level (another VPN: `Off`), a TUN takes the
 stored one. Freeze window (RU
-discipline): when a Direct VPN session crashes with an outbound fault on record (sing-box's
-`recent_fault`, in a slot session the active slot's `Slots::recent_fault`), restarts of that same
+discipline): when a native Direct VPN session crashes with an outbound fault on record (sing-box's
+`recent_fault`; a slot session's core crash reads none: the dead core's closed connections fill
+Xray's log with failed outbounds, lab F-11, p-live2), restarts of that same
 server wait at least `Timings::freeze` (130 s) from the crash instead of the plain backoff, and the
 failover (a fresh server) is tried first while that window lasts; a local proxy's server is never
 held back (its handshakes are another client's). Watchdogs never stop the
@@ -611,7 +623,9 @@ cleaning up in the background. `Done::warnings` / `ConnError::warnings` are extr
   `internalError` (a lane effect panicked: the lane is released, A-01; whatever the start brought
   up is stopped by the recovery stop), `softRestored` (a Soft engine was lost for good and the
   runtime let it go: the tweaks were rolled back, programs connect directly; the only notice of
-  that end). A Soft connect sends `softConnected` instead of `connected`. Rotation, schedule and
+  that end). A Soft connect sends `softConnected` instead of `connected`; under «Только выбранные
+  приложения» (`Settings::app_scope == OnlyListed`, read when the run comes up) `connected`,
+  `softConnected` and `restored` carry `bodyListed` (appsplit-b2). Rotation, schedule and
   tray toasts are their owners'. The notifier applies the user's
   `NoticeKind` switches; the lifecycle does not.
 - **`maintenance`** past the 120 s lane budget: the action is dropped, the caller gets
@@ -629,7 +643,7 @@ cleaning up in the background. `Done::warnings` / `ConnError::warnings` are extr
 | Prefix | Produced by | Args |
 | --- | --- | --- |
 | `tunnel.warning.{foreignTunUnverified,releaseUnverified}` | `TunWarning::msg` | — |
-| `tunnel.runtime.{alreadyRunning,actorGone,notRunning,noLastStart,previousNotStopped,proxyAddressInvalid,proxyNotListening,profileUnusable,egressUnknown,fullStopRan,stopIncomplete,restartStopFailed,restartCancelled,switchUnconfirmed}` | runtime errors / warnings | `addr` (`proxyNotListening`) |
+| `tunnel.runtime.{alreadyRunning,actorGone,notRunning,noLastStart,previousNotStopped,proxyAddressInvalid,proxyNotListening,profileUnusable,egressUnknown,exitSilent,fullStopRan,stopIncomplete,restartStopFailed,restartCancelled,switchUnconfirmed}` | runtime errors / warnings | `addr` (`proxyNotListening`) |
 | `tunnel.runtime.tunSetup.{adapter,protection,routes}` | TUN bring-up failures (`TUN_SETUP_KEY_PREFIX`) | — |
 | `tunnel.runtime.serverNotPreResolved` | start warning: a native server name keeps sing-box's own lookup | — |
 | `tunnel.runtime.tunUnavailable`, `tunnel.runtime.proxy.{strictUnavailable,notAccepting}` | strategy refusals, proxy readiness | `port` (`notAccepting`) |

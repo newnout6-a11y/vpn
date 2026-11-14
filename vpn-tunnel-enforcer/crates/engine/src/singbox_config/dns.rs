@@ -9,10 +9,10 @@ use serde_json::{Value, json};
 use vpnte_winnet::adapters::TUN_V4;
 
 use super::outbounds::UpstreamParts;
-use super::{ConfigError, ConfigInputs, require_objects};
+use super::{Capture, ConfigError, ConfigInputs, require_objects};
 use crate::tags::{
     DNS_BOOTSTRAP, DNS_BOOTSTRAP_GOOGLE, DNS_BOOTSTRAP_IN, DNS_BOOTSTRAP_ISP, DNS_BOOTSTRAP_QUAD9,
-    DNS_BOOTSTRAP_TCP, DNS_BOOTSTRAP_YANDEX, DNS_REMOTE, DNS_RESOLVER, PROXY_OUT,
+    DNS_BOOTSTRAP_TCP, DNS_BOOTSTRAP_YANDEX, DNS_DIRECT, DNS_REMOTE, DNS_RESOLVER, PROXY_OUT,
 };
 
 /// Resolvers of the bootstrap order after `dns-bootstrap` (1.1.1.1): DoH by IP literal to Quad9,
@@ -56,6 +56,10 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
             )));
         }
         tags.push(tag);
+    }
+    if needs_direct(i) && !tags.contains(&DNS_DIRECT) {
+        // An entry of «Не через прокси» may be an intranet name only the network resolves.
+        servers.push(direct_dns_server(&i.phys_dns));
     }
     if !tags.contains(&DNS_REMOTE) {
         // Cloudflare DoH through the tunnel: field diagnostics showed TCP over the tunnel
@@ -155,6 +159,28 @@ pub fn usable_physical_dns(physical: &[Ipv4Addr]) -> Option<Ipv4Addr> {
         .iter()
         .copied()
         .find(|ip| !TUN_V4.contains(ip) && !ip.is_loopback() && !ip.is_unspecified())
+}
+
+/// `dns-direct`: plain UDP to the adapter's own resolver, no detour (`type: local` loops back
+/// into the TUN resolver under strict_route, and sing-box refuses `detour: direct-out`); DHCP
+/// when the adapters name none.
+pub fn direct_dns_server(physical: &[Ipv4Addr]) -> Value {
+    match usable_physical_dns(physical) {
+        Some(ip) => json!({ "type": "udp", "tag": DNS_DIRECT, "server": ip.to_string() }),
+        None => json!({ "type": "dhcp", "tag": DNS_DIRECT }),
+    }
+}
+
+/// The proxy-capture config resolves direct names on `dns-direct`: routing defines it, or the
+/// user's «Не через прокси» entries need it.
+pub(super) fn has_direct(i: &ConfigInputs) -> bool {
+    let defined = (i.routing.dns_servers.iter())
+        .any(|s| s.get("tag").and_then(Value::as_str) == Some(DNS_DIRECT));
+    defined || needs_direct(i)
+}
+
+fn needs_direct(i: &ConfigInputs) -> bool {
+    matches!(i.capture, Capture::Proxy { .. }) && !i.routing.proxy_bypass.is_empty()
 }
 
 /// A tunnelled (`detour`) server named by host name without its own resolver.

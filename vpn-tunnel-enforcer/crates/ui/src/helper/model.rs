@@ -10,6 +10,22 @@ pub enum Service {
     Installed,
     /// Installed but older than the app: what it does not do yet. It updates itself.
     Older { lacks: Vec<Lack> },
+    /// Installed and Windows is starting it (after a restart): its pipe answers in a moment.
+    Starting,
+    /// Installed but stopped: Tunnel mode waits for it, Proxy mode works without it.
+    Stopped,
+}
+
+impl Service {
+    /// The line a privileged control shows while the installed service cannot carry it right
+    /// now (p-live2: Tunnel was offered with no hint while the service was down).
+    pub const fn pause_key(&self) -> Option<&'static str> {
+        match self {
+            Self::Starting => Some("ui.helper.starting"),
+            Self::Stopped => Some("ui.helper.stopped"),
+            Self::Missing | Self::Installed | Self::Older { .. } => None,
+        }
+    }
 }
 
 /// What an older helper service does not do yet.
@@ -81,7 +97,7 @@ impl Capability {
     pub fn lacks(&self) -> &[Lack] {
         match &self.service {
             Service::Older { lacks } => lacks,
-            Service::Missing | Service::Installed => &[],
+            Service::Missing | Service::Installed | Service::Starting | Service::Stopped => &[],
         }
     }
 }

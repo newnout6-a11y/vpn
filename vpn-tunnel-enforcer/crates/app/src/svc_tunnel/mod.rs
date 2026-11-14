@@ -288,6 +288,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         b.notifier.clone(),
         rule_sets.clone(),
         b.shutdown.child_token(),
+        b.dirs.root.clone(),
     ));
 
     let tunnel: Arc<dyn TunnelOps> = Arc::new(TunnelService {

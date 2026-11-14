@@ -440,8 +440,10 @@ impl<C: Coordinator, E: AutoPilotEnv> AutoPilot<C, E> {
 }
 ```
 - Runs only when `routing_mode == Hard && connection_mode == LocalProxy` (and, for `AppLaunch`, the
-  `autopilot` switch is on); an `AppLaunch` run waits for the scheduler's `ready` and is skipped
-  while a schedule run is active or connecting. It never stops a session, never writes settings.
+  `autopilot` switch is on and the first setup is finished: `first_run_complete`, lab F-7); an
+  `AppLaunch` run waits for the scheduler's `ready` and is skipped while a schedule run is active
+  or connecting. It never stops a session, never writes settings. No working local proxy is an
+  `Info` result (`noProxy`): the app logs it and shows no notice (p-live2).
 - Decision order: a second concurrent run → "busy"; an existing session or a busy coordinator →
   "already active"; adapter list unreadable → Warn, no start; a foreign tunnel → `External`
   (observe only); endpoint = `proxy_override` (with `proxy_type`) → `detect()` → ranked

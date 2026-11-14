@@ -200,17 +200,25 @@ impl Automation {
 /// How long the network must stay quiet before a change counts (as the IP monitor's watch).
 const NET_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
 
-/// The AutoPilot result once: one notice (toast per the user's switches) and a log line per step.
+/// The AutoPilot result once: a log line per step and, unless it only informs, one notice
+/// (toast per the user's switches).
 fn announce(result: &AutoPilotResult, notifier: &crate::svc_core::notify::Notifier) {
     for step in &result.steps {
         tracing::info!(label = %step.label.key, after = %step.after.key, "AutoPilot step");
     }
+    if let Some(notice) = pilot_notice(result) {
+        notifier.notify(notice, None);
+    }
+}
+
+/// The notice of an AutoPilot result; `None` for an Info result (no local proxy running is an
+/// ordinary state, lab F-7: no paranoia).
+pub(super) fn pilot_notice(result: &AutoPilotResult) -> Option<Notice> {
     let level = match result.summary {
         StepStatus::Ok => Level::Success,
-        StepStatus::Info => Level::Info,
+        StepStatus::Info => return None,
         StepStatus::Warn => Level::Warn,
         StepStatus::Fail => Level::Error,
     };
-    let notice = Notice::new(level, result.title.clone()).body(result.message.clone());
-    notifier.notify(notice, None);
+    Some(Notice::new(level, result.title.clone()).body(result.message.clone()))
 }

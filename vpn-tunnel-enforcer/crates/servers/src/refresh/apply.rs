@@ -95,7 +95,21 @@ impl Servers {
             // New keys of this answer take this answer's controls (its `fragmentation-*`
             // headers), not those of the previous fetch (twire-a1).
             before.controls = controls.clone();
+            let on_placeholder = doc
+                .active_profile_id
+                .as_ref()
+                .and_then(|a| doc.row(a))
+                .is_some_and(|r| r.group_id == *id && r.is_placeholder());
             let out = reconcile(&before, &mut doc.profiles, profiles, complete, now)?;
+            if on_placeholder {
+                // The selected placeholder left with this answer: the group's first server
+                // takes its place (the user had picked this group).
+                doc.active_profile_id = doc
+                    .profiles
+                    .iter()
+                    .find(|r| r.group_id == *id && r.archived.is_none() && !r.is_locked())
+                    .map(|r| r.id.clone());
+            }
             let taken = moved_to
                 .as_ref()
                 .is_some_and(|url| doc.subscription_group(url, key.1).is_some());

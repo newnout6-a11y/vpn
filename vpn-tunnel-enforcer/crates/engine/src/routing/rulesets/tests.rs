@@ -143,7 +143,10 @@ fn source_selection() {
     std::fs::write(dir.join("geoip-ru.srs"), b"x").unwrap();
     std::fs::write(dir.join("geosite-category-gov-ru.srs"), b"x").unwrap();
     s.store
-        .update(|d| d.current = Some(generation.clone()))
+        .update(|d| {
+            d.current = Some(generation.clone());
+            d.checks = CHECKS;
+        })
         .unwrap();
     assert_eq!(
         active(true).0,
@@ -191,7 +194,12 @@ fn an_elevated_run_uses_only_pinned_bundled_rule_sets() {
         std::fs::write(changed.join(file), b"changed").unwrap();
     }
     let store = Arc::new(Store::<RuleSetsDoc>::open(t.path()));
-    store.update(|d| d.current = Some(generation)).unwrap();
+    store
+        .update(|d| {
+            d.current = Some(generation);
+            d.checks = CHECKS;
+        })
+        .unwrap();
     let s = RuleSetService::with_paths(store, t.path().join("rulesets"), changed);
     assert!(matches!(
         s.select(true, false),
@@ -531,4 +539,46 @@ async fn fetch_limits() {
         fetch_https("http://example.com/x.srs", &Route::Direct).await,
         Err(FetchError::NotHttps)
     ));
+}
+
+/// fixlists-a7: a generation promoted under older checks is passed over until it is checked
+/// once under today's; it stays when it passes and gives way to the bundled files when not.
+#[tokio::test]
+async fn a_generation_from_older_checks_is_checked_once() {
+    let Some(exe) = singbox_exe() else { return };
+    let t = TempDir::new("rulesets-recheck");
+    let s = service(&t);
+    let generation = format!("{GEN_PREFIX}1700000000000");
+    let dir = t.path().join("rulesets").join(&generation);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (_, file, _) in RULE_SETS {
+        std::fs::write(dir.join(file), bundled(file)).unwrap();
+    }
+    s.store
+        .update(|d| d.current = Some(generation.clone()))
+        .unwrap();
+    assert_eq!(s.select(true, false).unwrap().0, ActiveSource::Bundled);
+    s.recheck().await;
+    assert_eq!(s.store.read(|d| d.checks), CHECKS);
+    let managed = s.select(true, false).unwrap().0;
+    assert!(
+        matches!(managed, ActiveSource::Managed { .. }),
+        "{managed:?}"
+    );
+    // A crafted set of an older build: today's bounds refuse it.
+    let release = decompile(&exe, &resources().join("geoip-ru.srs"))
+        .await
+        .unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&release).unwrap();
+    let cidrs = json["rules"][0]["ip_cidr"].as_array_mut().unwrap();
+    cidrs.push("74.125.0.0/16".into());
+    std::fs::write(
+        dir.join("geoip-ru.srs"),
+        compiled(&exe, &t, &json.to_string()).await,
+    )
+    .unwrap();
+    s.store.update(|d| d.checks = 0).unwrap();
+    s.recheck().await;
+    assert_eq!(s.store.read(|d| d.current.clone()), None);
+    assert_eq!(s.select(true, false).unwrap().0, ActiveSource::Bundled);
 }

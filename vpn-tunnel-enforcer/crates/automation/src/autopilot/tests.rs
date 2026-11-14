@@ -271,6 +271,8 @@ impl Setup {
     fn new() -> Self {
         let dir = TempDir::new("autopilot");
         let settings = Arc::new(Store::<Settings>::open(dir.path()));
+        // A finished first setup: the launch run waits for it (lab F-7).
+        settings.update(|st| st.first_run_complete = true).unwrap();
         Self {
             coord: FakeCoordinator::new(),
             settings,
@@ -348,7 +350,8 @@ async fn unknown_tunnels_mean_no_start() {
     assert_eq!(s.coord.connects(), 0);
 }
 
-/// A listener `127.0.0.1:<dead> 'custom'` whose TCP connect fails → `fail` / `off`, no start.
+/// A listener `127.0.0.1:<dead> 'custom'` whose TCP connect fails → `info` / `off`, no start
+/// (lab F-7: nothing found is no error).
 #[tokio::test]
 async fn no_working_proxy_starts_nothing() {
     let s = Setup::new();
@@ -365,7 +368,7 @@ async fn no_working_proxy_starts_nothing() {
     assert_eq!(
         keys(&r),
         (
-            StepStatus::Fail,
+            StepStatus::Info,
             AutoPilotMode::Off,
             "automation.autopilot.noProxyTitle".into()
         )
@@ -574,6 +577,30 @@ async fn launch_gate() {
         })
         .unwrap();
     assert_eq!(pilot.run(AutoPilotTrigger::UserRequest).await, None);
+}
+
+/// Lab F-7 (p-live2): the launch run waits for the first setup (the defaults are local-proxy
+/// Hard, the wizard may choose otherwise); an explicit request does not.
+#[tokio::test]
+async fn the_launch_run_waits_for_the_first_setup() {
+    let s = Setup::new();
+    s.settings
+        .update(|st| st.first_run_complete = false)
+        .unwrap();
+    let pilot = s.pilot(
+        Env {
+            tunnels: Some(vec![]),
+            ..Env::default()
+        },
+        None,
+    );
+    assert_eq!(pilot.run(AutoPilotTrigger::AppLaunch).await, None);
+    assert_eq!(*pilot.env.detect_calls.lock(), 0, "nothing was probed");
+    assert!(pilot.run(AutoPilotTrigger::UserRequest).await.is_some());
+    s.settings
+        .update(|st| st.first_run_complete = true)
+        .unwrap();
+    assert!(pilot.run(AutoPilotTrigger::AppLaunch).await.is_some());
 }
 
 /// A refused connect → `fail` / `off` with the coordinator's reason as the message.

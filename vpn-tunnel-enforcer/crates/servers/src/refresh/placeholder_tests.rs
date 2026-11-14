@@ -223,3 +223,39 @@ async fn an_encrypted_list_only_is_said_in_one_line() {
     assert_eq!(err.user_msg().key, "servers.fetch.body.encrypted");
     assert!(e.servers.read(|doc| doc.groups.is_empty()));
 }
+
+/// p-live2 (owner, 14.11.2026): a placeholder an older build stored (here selected, the owner's
+/// case) leaves the list at the group's first successful refresh, not after the 15-minute grace
+/// of a missing server, and the selection moves to the group's first server.
+#[tokio::test]
+async fn a_stored_placeholder_leaves_at_the_first_successful_refresh() {
+    let e = env();
+    let panel = fake(Panel::Supports("v2rayN")).await;
+    let id = e.import(&panel.server.url("/sub/token")).await;
+    let stub = vpnte_profiles::uri::parse_uri(&placeholder()).unwrap();
+    let row = crate::model::ServerRow::new(
+        &stub,
+        id.clone(),
+        crate::model::Origin::Feed,
+        Default::default(),
+        1,
+    )
+    .unwrap();
+    let stub_id = row.id.clone();
+    e.servers
+        .update(|doc| {
+            doc.profiles.push(row);
+            doc.active_profile_id = Some(stub_id.clone());
+            Ok(())
+        })
+        .unwrap();
+    *panel.mode.lock() = Panel::WantsHwid;
+    e.servers.set_group_send_hwid(&id, true).unwrap();
+    e.refresh(&id, Owner::Manual).await.unwrap();
+    e.servers.read(|doc| {
+        assert!(doc.row(&stub_id).is_none(), "the placeholder left the list");
+        let active = doc.active_profile_id.as_ref().and_then(|a| doc.row(a));
+        assert!(active.is_some_and(|r| r.group_id == id && !r.is_placeholder()));
+    });
+    assert_eq!(live(&e, &id), 2);
+}

@@ -9,7 +9,8 @@ use crate::t;
 use crate::widgets::{Button, ButtonKind, use_job};
 
 /// The line where a privileged control lives: nothing while it works; «… работает через
-/// службу-помощник.» with «Установить службу-помощник» while the service is missing; «В этой
+/// службу-помощник.» with «Установить службу-помощник» while the service is missing;
+/// «Служба-помощник запускается…» / «… остановлена…» while the installed one is down; «В этой
 /// версии недоступно.» for what no part of this version carries; under Tunnel mode, what an older
 /// service does not do yet (it updates itself). Nothing without a helper backend in context.
 #[component]
@@ -22,7 +23,9 @@ pub fn HelperLine(feature: Feature) -> Element {
     let text = match ability {
         Ability::NeedsService => Some(t!(needs_key(feature))),
         Ability::NotInVersion => Some(t!("ui.helper.notInVersion")),
-        Ability::Service | Ability::InProcess => None,
+        // Installed but not running right now: say so instead of a silent offer.
+        Ability::Service => cap.service.pause_key().map(|key| t!(key)),
+        Ability::InProcess => None,
     };
     // What an older service lacks concerns Tunnel mode only, and only while it carries it.
     let lacks = match (feature, ability) {

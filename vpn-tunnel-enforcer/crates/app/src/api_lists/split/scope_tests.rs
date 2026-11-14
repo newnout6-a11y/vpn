@@ -1,10 +1,12 @@
 //! Re-check item 16 on the backend side: the scope switch saves `Settings::app_scope`, the page
-//! follows a change made elsewhere, and the older-service line appears only where it applies.
+//! follows a change made elsewhere and the running session's scope, says which mode its hint
+//! describes, and the older-service line appears only where it applies.
 use std::time::Duration;
 
 use tokio::sync::watch;
-use vpnte_core::settings::{self, RoutingMode, Settings};
+use vpnte_core::settings::{self, RoutingMode};
 use vpnte_engine::routing::process::ProcessName;
+use vpnte_tunnel::api::{CaptureKind, TunStatus};
 use vpnte_ui::split_tunnel::{AppScope, SplitSnapshot, SplitTunnelApi};
 
 use super::{SplitService, older_service};
@@ -12,11 +14,19 @@ use crate::api_settings::test_support::{FakeTunnel, TempDir, backend};
 
 /// Waits (at most 10 s) until the pushed state satisfies `what`.
 async fn until(rx: &mut watch::Receiver<SplitSnapshot>, what: impl Fn(&SplitSnapshot) -> bool) {
-    let wait = rx.wait_for(|s| what(s));
-    tokio::time::timeout(Duration::from_secs(10), wait)
-        .await
-        .expect("in time")
-        .expect("open");
+    let reached = {
+        let wait = rx.wait_for(|s| what(s));
+        tokio::time::timeout(Duration::from_secs(10), wait)
+            .await
+            .is_ok()
+    };
+    if !reached {
+        let now = rx.borrow();
+        panic!(
+            "not in time: scope {:?}, pending {}, proxy {}",
+            now.scope, now.pending, now.proxy
+        );
+    }
 }
 
 /// The switch saves the scope and the page shows it; a change made elsewhere (another page, an
@@ -51,19 +61,58 @@ async fn the_scope_is_saved_and_followed() {
     until(&mut state, |s| s.scope == AppScope::All).await;
 }
 
-/// The line needs Tunnel mode through a linked service older than the scope's protocol.
+/// appsplit-a2: the line needs a linked service older than the scope's protocol, whatever the
+/// saved mode (a schedule starts Tunnel sessions of its own).
 #[test]
-fn the_older_service_line_needs_tunnel_mode_and_an_older_link() {
-    let tunnel = Settings {
-        routing_mode: RoutingMode::Hard,
-        ..Settings::default()
-    };
-    let proxy = Settings {
-        routing_mode: RoutingMode::Soft,
-        ..Settings::default()
-    };
-    assert!(older_service(&tunnel, Some(3)));
-    assert!(!older_service(&tunnel, Some(4)));
-    assert!(!older_service(&tunnel, None), "no link: nothing is claimed");
-    assert!(!older_service(&proxy, Some(3)), "Proxy mode runs here");
+fn the_older_service_line_needs_an_older_link() {
+    assert!(older_service(Some(3)));
+    assert!(!older_service(Some(4)));
+    assert!(!older_service(None), "no link: nothing is claimed");
+}
+
+/// appsplit-b5/b6: a running session keeps the scope it started with, so a flip of the switch
+/// reads as pending until the next connection; the hint describes the running session's mode,
+/// else the saved one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_switch_follows_the_running_session() {
+    let dir = TempDir::new("lists-split-run");
+    let tunnel = FakeTunnel::new(false);
+    let backend = backend(&dir, tunnel.clone());
+    backend
+        .rules
+        .update(|doc| doc.add_command(ProcessName::parse("curl").expect("name")))
+        .expect("entry");
+    backend
+        .settings
+        .update(|s| s.routing_mode = RoutingMode::Hard)
+        .expect("Tunnel mode");
+    let api = SplitService::start(backend.clone());
+    let mut state = api.state();
+    until(&mut state, |s| !s.proxy && !s.pending).await;
+
+    tunnel.status.send_replace(TunStatus {
+        running: true,
+        started_at: Some(1_000),
+        capture: Some(CaptureKind::Proxy),
+        ..TunStatus::default()
+    });
+    until(&mut state, |s| s.proxy && !s.pending).await;
+    api.set_scope(AppScope::OnlyListed).await.expect("saved");
+    until(&mut state, |s| s.scope == AppScope::OnlyListed && s.pending).await;
+    api.set_scope(AppScope::All).await.expect("saved");
+    until(&mut state, |s| s.scope == AppScope::All && !s.pending).await;
+    api.set_scope(AppScope::OnlyListed).await.expect("saved");
+    until(&mut state, |s| s.pending).await;
+
+    // The next run starts with the saved scope; nothing runs: nothing waits.
+    tunnel.status.send_replace(TunStatus {
+        running: true,
+        started_at: Some(2_000),
+        capture: Some(CaptureKind::Tun),
+        ..TunStatus::default()
+    });
+    until(&mut state, |s| !s.pending && !s.proxy).await;
+    tunnel.status.send_replace(TunStatus::default());
+    api.set_scope(AppScope::All).await.expect("saved");
+    until(&mut state, |s| s.scope == AppScope::All && !s.pending).await;
 }

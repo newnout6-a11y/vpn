@@ -13,18 +13,19 @@ use crate::singbox_process::child::run_once;
 /// Budget of one `sing-box rule-set match` run.
 const MATCH_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// `(tag, [(probe, member)])`: one member and two outsiders, or two members and one outsider.
-/// Picked to stay true for years: Yandex DNS is Russian and never blocked, Meta's and
-/// rutracker's / LinkedIn's blocks date from 2022 and 2016. 1.1.1.1 is NOT a safe outsider of
-/// the blocked addresses: whole Cloudflare ranges are in that list.
-const CANARIES: [(&str, [(&str, bool); 3]); 4] = [
+/// `(tag, [(probe, member)])`: members and outsiders picked to stay true for years: Yandex DNS
+/// is Russian and never blocked, Meta's and rutracker's / LinkedIn's blocks date from 2022 and
+/// 2016, TV Rain's and Echo's from 2022 (Russian-zone sites a shrunk list would send to the
+/// ISP's resolver, fixlists-b5). 1.1.1.1 is NOT a safe outsider of the blocked addresses:
+/// whole Cloudflare ranges are in that list.
+const CANARIES: [(&str, &[(&str, bool)]); 4] = [
     (
         GEOIP_RU,
-        [("77.88.8.8", true), ("8.8.8.8", false), ("1.1.1.1", false)],
+        &[("77.88.8.8", true), ("8.8.8.8", false), ("1.1.1.1", false)],
     ),
     (
         GOV_RU,
-        [
+        &[
             ("gosuslugi.ru", true),
             ("google.com", false),
             ("youtube.com", false),
@@ -32,15 +33,17 @@ const CANARIES: [(&str, [(&str, bool); 3]); 4] = [
     ),
     (
         RU_BLOCKED_SITES,
-        [
+        &[
             ("rutracker.org", true),
             ("linkedin.com", true),
+            ("tvrain.ru", true),
+            ("echo.msk.ru", true),
             ("gosuslugi.ru", false),
         ],
     ),
     (
         RU_BLOCKED_IPS,
-        [
+        &[
             ("157.240.0.35", true),
             ("31.13.72.36", true),
             ("77.88.8.8", false),
@@ -61,7 +64,7 @@ pub(super) async fn validate(
     let Some((_, canaries)) = CANARIES.iter().find(|(t, _)| *t == tag) else {
         return Some(false);
     };
-    for &(probe, want) in canaries {
+    for &(probe, want) in *canaries {
         if rule_set_match(engine, file, probe).await? != Some(want) {
             return Some(false);
         }

@@ -38,6 +38,9 @@ mod tests;
 
 /// Largest rule-set file accepted (the bundled ones are 50 KB, 1 KB, 520 KB and 200 KB).
 pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
+/// Version of the download checks (canaries and content bounds): a generation or a stored
+/// hand-over that passed older checks is checked again before use (fixlists-a7).
+const CHECKS: u32 = 1;
 const GEN_PREFIX: &str = "gen-";
 const STAGING: &str = "staging";
 
@@ -52,6 +55,8 @@ pub struct RuleSetsDoc {
     pub last_error: Option<RefreshFault>,
     /// The files of the current generation, by file name.
     pub files: BTreeMap<String, FileInfo>,
+    /// Version of the checks the current generation passed (0: promoted by an older build).
+    pub checks: u32,
 }
 
 impl Document for RuleSetsDoc {
@@ -290,9 +295,10 @@ impl RuleSetService {
     /// only the bundled files are used, and only while they match their release pins (the helper
     /// service does the same with its own copies). A managed generation has no pin to check.
     fn select(&self, managed: bool, elevated: bool) -> Option<(ActiveSource, PathBuf)> {
-        let current = self.store.read(|d| d.current.clone());
+        let (current, checks) = self.store.read(|d| (d.current.clone(), d.checks));
         if managed
             && !elevated
+            && checks >= CHECKS
             && let Some(generation) = current
             && complete(&self.root.join(&generation))
         {
@@ -369,6 +375,7 @@ impl RuleSetService {
             guard = self.running.lock() => guard,
             () = cancel.cancelled() => return RefreshOutcome::Cancelled,
         };
+        self.recheck().await;
         let doc = self.store.snapshot();
         let interval_ms = i64::from(interval_h) * 3_600_000;
         let fresh = doc.last_ok.is_some_and(|t| now_ms() - t < interval_ms)
@@ -409,6 +416,41 @@ impl RuleSetService {
             tracing::warn!(%err, "rule-set refresh state not saved");
         }
         RefreshOutcome::Failed(fault)
+    }
+
+    /// A generation promoted under older checks is checked once under these (fixlists-a7): it
+    /// stays when it passes and gives way to the bundled files when it does not. Until then
+    /// `select` passes it over; an engine that cannot run leaves it unchecked.
+    async fn recheck(&self) {
+        let (Some(generation), checks) = self.store.read(|d| (d.current.clone(), d.checks)) else {
+            return;
+        };
+        if checks >= CHECKS {
+            return;
+        }
+        let dir = self.root.join(&generation);
+        let mut verdict = Some(true);
+        for (tag, file, _) in RULE_SETS {
+            verdict = validate(&self.engine, &dir.join(file), tag, &self.bundled).await;
+            if verdict != Some(true) {
+                break;
+            }
+        }
+        let saved = match verdict {
+            Some(true) => self.store.update(|d| d.checks = CHECKS),
+            Some(false) => {
+                tracing::warn!(%generation, "an older rule-set generation fails today's checks");
+                self.store.update(|d| {
+                    d.current = None;
+                    d.last_ok = None;
+                    d.files.clear();
+                })
+            }
+            None => return,
+        };
+        if let Err(err) = saved {
+            tracing::warn!(%err, "rule-set state not saved");
+        }
     }
 
     /// Fetches and validates every file into a fresh staging directory. `Err(None)` =
@@ -481,6 +523,7 @@ impl RuleSetService {
                 d.last_ok = Some(started);
                 d.last_error = None;
                 d.files = files;
+                d.checks = CHECKS;
             })
             .map_err(|err| {
                 tracing::warn!(%err, "rule-set state not saved");

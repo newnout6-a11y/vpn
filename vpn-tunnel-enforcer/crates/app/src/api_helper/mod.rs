@@ -13,6 +13,7 @@ use vpnte_base::AppResult;
 use vpnte_service::proto::{PROTOCOL, SCOPE_PROTOCOL};
 use vpnte_ui::helper::{Ability, Capability, HelperApi, Lack, Service};
 
+use crate::boot::service::Presence;
 use crate::services::Backend;
 use crate::support::{blocking, changed_opt, detached};
 
@@ -24,6 +25,9 @@ mod tests;
 /// often, for at most [`LINK_WAIT`] (the re-link after a restart takes up to about 40 s).
 const POLL: Duration = Duration::from_secs(2);
 const LINK_WAIT: Duration = Duration::from_secs(60);
+/// While the installed service is starting or stopped nothing tells the app it came back: the
+/// SCM is asked this often (one cheap query).
+const DOWN_POLL: Duration = Duration::from_secs(10);
 
 /// What the view is made of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -36,6 +40,11 @@ pub(crate) struct Facts {
     pub elevated: bool,
     /// Tunnel mode can run here: through the service, or in this elevated process.
     pub tun: bool,
+    /// The SCM says the service is coming up while its pipe does not answer yet.
+    pub starting: bool,
+    /// The SCM's state of the installed service when the view was followed live (`None`: not
+    /// read, as for a page reading the view at an action).
+    pub scm: Option<Presence>,
 }
 
 impl Facts {
@@ -47,6 +56,8 @@ impl Facts {
             protocol: tunnel.and_then(|t| t.service_protocol()),
             elevated: backend.elevated,
             tun: tunnel.is_some_and(|t| t.tun_available()),
+            starting: tunnel.is_some_and(|t| t.service_starting()),
+            scm: None,
         }
     }
 }
@@ -55,10 +66,18 @@ impl Facts {
 /// browser policies run in an elevated app only (the service has no registry primitive yet);
 /// packet capture is not built.
 pub(crate) fn derive(f: Facts) -> Capability {
-    let service = match (f.installed, f.protocol) {
+    // The registration itself is the tunnel's (its own re-look): an SCM read that finds no
+    // service (unreadable, or out of a test's reach) does not override it.
+    let service = match (f.installed, f.scm) {
         (false, _) => Service::Missing,
-        (true, Some(p)) if p < PROTOCOL => Service::Older { lacks: lacks(p) },
-        (true, _) => Service::Installed,
+        // p-live2: while it is down Tunnel mode is not offered with no word about it.
+        (true, Some(Presence::Starting)) => Service::Starting,
+        (true, Some(Presence::Stopped | Presence::Stopping)) => Service::Stopped,
+        (true, _) if f.starting => Service::Starting,
+        (true, _) => match f.protocol {
+            Some(p) if p < PROTOCOL => Service::Older { lacks: lacks(p) },
+            _ => Service::Installed,
+        },
     };
     // One owner of the TUN and our WFP objects: the service when it is installed, also when
     // this process happens to be elevated (the guard's rule).
@@ -107,9 +126,12 @@ struct Shared {
 }
 
 impl Shared {
-    /// Re-derives the view and publishes it when it differs.
-    fn refresh(&self) {
-        let next = capability_now(&self.backend);
+    /// Re-derives the view with the SCM's state `scm` and publishes it when it differs.
+    fn refresh(&self, scm: Option<Presence>) {
+        let next = derive(Facts {
+            scm,
+            ..Facts::now(&self.backend)
+        });
         self.state.send_if_modified(|cap| {
             let changed = *cap != next;
             *cap = next;
@@ -149,7 +171,7 @@ impl HelperApi for HelperService {
             let installed = blocking(crate::boot::service::request_install).await?;
             let tunnel = shared.backend.tunnel().ok().cloned();
             let ready = installed && tunnel.is_some_and(|t| t.service_installed());
-            shared.refresh();
+            shared.refresh(None);
             Ok(ready)
         })
         .await
@@ -167,14 +189,33 @@ async fn follow(shared: Arc<Shared>) {
     // From the start: the start-up attach links to an installed service.
     let mut window = Duration::ZERO;
     loop {
-        shared.refresh();
-        let polling = window < LINK_WAIT && shared.state.borrow().service != Service::Missing;
+        // The SCM is read only for an installed service (a missing one has no state to show).
+        let scm = if Facts::now(&shared.backend).installed {
+            blocking(|| Ok(crate::boot::service::presence())).await.ok()
+        } else {
+            None
+        };
+        shared.refresh(scm);
+        let (service, down) = {
+            let cap = shared.state.borrow();
+            (
+                cap.service != Service::Missing,
+                cap.service.pause_key().is_some(),
+            )
+        };
+        let poll = match (window < LINK_WAIT && service, down) {
+            (true, _) => Some(POLL),
+            (false, true) => Some(DOWN_POLL),
+            (false, false) => None,
+        };
         tokio::select! {
             () = shutdown.cancelled() => return,
             () = changed_opt(&mut snapshot) => {}
             () = changed_opt(&mut status) => {}
             () = changed_opt(&mut losses) => window = Duration::ZERO,
-            () = tokio::time::sleep(POLL), if polling => window += POLL,
+            () = tokio::time::sleep(poll.unwrap_or_default()), if poll.is_some() => {
+                window += poll.unwrap_or_default();
+            }
         }
     }
 }

@@ -18,6 +18,7 @@ use vpnte_base::{AppResult, Msg};
 
 use super::model::{CloseAction, TrayExtras, TrayItemId, TrayModel, TrayState};
 use super::native::{ALWAYS_MENU_ID, NativeReport, NativeTray, SPEED_REFRESH, UPDATE_MENU_ID};
+use crate::helper::{Capability, HelperApi};
 use crate::hooks::use_watch;
 use crate::lang::{LANG, tr, translate};
 use crate::settings::{KillSwitchLevel, KillSwitchView, SettingsApi};
@@ -166,6 +167,11 @@ fn use_extras() -> (Option<Rc<dyn SettingsApi>>, Memo<TrayExtras>) {
         Some(api) => api.state(),
         None => watch::channel(UpdatesView::default()).1,
     });
+    let helper = try_use_context::<Rc<dyn HelperApi>>();
+    let capability = use_watch(move || match helper {
+        Some(api) => api.capability(),
+        None => watch::channel(Capability::default()).1,
+    });
     let extras = use_memo(move || {
         let kill = kill.read();
         TrayExtras {
@@ -174,6 +180,7 @@ fn use_extras() -> (Option<Rc<dyn SettingsApi>>, Memo<TrayExtras>) {
             always: kill.level == KillSwitchLevel::Strict && kill.always_available,
             update: offer.read().app.as_ref().map(|app| app.version.clone()),
             window_lost: lost.is_some_and(|WindowLost(lost)| lost()),
+            service_note: capability.read().service.pause_key().map(Msg::new),
         }
     });
     (settings, extras)

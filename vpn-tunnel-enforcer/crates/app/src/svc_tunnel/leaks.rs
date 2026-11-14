@@ -53,6 +53,44 @@ pub(super) struct Leaks {
 
 type ListedOnly = Arc<dyn Fn() -> bool + Send + Sync>;
 
+/// The app scope the running session started with (appsplit-b4): a changed setting applies
+/// from the next connection, so a self-test of this run is labelled by the run's own scope,
+/// never by the saved one.
+#[derive(Clone, Default)]
+struct RunScope(Arc<Mutex<(Option<UnixMs>, bool)>>);
+
+impl RunScope {
+    /// The run that started at `started` (`None`: nothing runs): a new run reads its scope.
+    fn observe(&self, started: Option<UnixMs>, listed: impl FnOnce() -> bool) {
+        let mut held = self.0.lock();
+        if held.0 != started {
+            *held = (started, started.is_some() && listed());
+        }
+    }
+
+    /// Only the listed apps use the running session's VPN.
+    fn listed(&self) -> bool {
+        self.0.lock().1
+    }
+}
+
+/// Keeps `scope` on the scope of the run `status` shows, read the moment the run appears.
+async fn follow_scope(
+    mut status: watch::Receiver<TunStatus>,
+    settings: Arc<Store<Settings>>,
+    scope: RunScope,
+) {
+    loop {
+        let started = status.borrow_and_update().started_at;
+        scope.observe(started, || {
+            settings.read(|s| s.app_scope) == AppScope::OnlyListed
+        });
+        if status.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 impl Leaks {
     /// Starts the periodic self-test of this process, gated on "this process holds the filters
     /// (`local`), a TUN session runs and the kill switch is on"; every physical network change
@@ -76,9 +114,13 @@ impl Leaks {
                 && s.capture == Some(CaptureKind::Tun)
                 && level.read(|x| x.kill_switch) != KillSwitchLevel::Off
         };
-        let scope = settings.clone();
-        let listed_only: ListedOnly =
-            Arc::new(move || scope.read(|s| s.app_scope) == AppScope::OnlyListed);
+        let scope = RunScope::default();
+        tokio::spawn(follow_scope(
+            status.clone(),
+            settings.clone(),
+            scope.clone(),
+        ));
+        let listed_only: ListedOnly = Arc::new(move || scope.listed());
         let kill_switch = move || settings.read(|s| s.kill_switch);
         let changes = if local {
             net_changes("leak runs")
@@ -398,6 +440,22 @@ mod tests {
             !keys.iter().any(|k| k == "probes.leak.selfTest.tunIp"),
             "{keys:?}"
         );
+    }
+
+    /// appsplit-b4 (p-live2): a run keeps the scope it started with; a flip of the switch
+    /// applies to the next run only.
+    #[test]
+    fn a_run_keeps_the_scope_it_started_with() {
+        let scope = RunScope::default();
+        assert!(!scope.listed());
+        scope.observe(Some(1_000), || true);
+        assert!(scope.listed());
+        scope.observe(Some(1_000), || false);
+        assert!(scope.listed(), "the switch flipped mid-run");
+        scope.observe(None, || true);
+        assert!(!scope.listed(), "nothing runs");
+        scope.observe(Some(2_000), || false);
+        assert!(!scope.listed(), "the next run reads the new scope");
     }
 
     /// The service's channel closing (the remote dropped) neither spins nor ends own runs.

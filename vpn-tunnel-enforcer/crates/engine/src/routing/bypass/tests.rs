@@ -80,9 +80,14 @@ fn the_list_has_limits() {
     let fit: Vec<String> = (0..20).map(site).collect();
     assert_eq!(parse_list(&fit.join(";")).unwrap().len(), 20);
     let over: Vec<String> = (0..21).map(site).collect();
-    assert_eq!(parse_list(&over.join(";")), Err(BypassError::TooLong));
-    let msg = BypassError::TooLong.msg();
+    // fixlists-b4: 21 x (2 x 48 + 4) = 2100 of 2000: about 50 typed characters must go, one
+    // site of 48 (plus its separator) frees 100.
+    let refused = parse_list(&over.join(";"));
+    assert_eq!(refused, Err(BypassError::TooLong { chars: 50 }));
+    let msg = BypassError::TooLong { chars: 50 }.msg();
     assert_eq!(msg.key, "engine.routing.bypass.tooLong");
+    let arg = msg.args.first().map(|(k, v)| (k.as_ref(), v.as_str()));
+    assert_eq!(arg, Some(("count", "50")));
 }
 
 /// pbypass-b4: a range is CIDR in both lists (Chromium matches a `192.168.*` item against host
@@ -381,4 +386,28 @@ async fn the_bundled_rule_sets_read_back_through_the_engine() {
             "{tld}"
         );
     }
+}
+
+/// fixlists-b3: the user's entries as engine rules: a site with its subdomains, subdomains
+/// alone, an address, a range and an IPv6 address all leave through `direct-out`.
+#[test]
+fn the_users_entries_are_direct_rules_of_the_engine() {
+    let entries = parse_list("corp.example *.intra.example 1.2.3.4 203.0.113.* 2001:db8::1")
+        .expect("valid list");
+    let rules = route_rules(&entries);
+    assert_eq!(
+        rules,
+        [
+            serde_json::json!({
+                "domain": ["corp.example"],
+                "domain_suffix": [".corp.example", ".intra.example"],
+                "outbound": "direct-out",
+            }),
+            serde_json::json!({
+                "ip_cidr": ["1.2.3.4/32", "203.0.113.0/24", "2001:db8::1/128"],
+                "outbound": "direct-out",
+            }),
+        ]
+    );
+    assert!(route_rules(&[]).is_empty());
 }

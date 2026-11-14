@@ -61,9 +61,12 @@
     "invalidProcess": "Invalid process name. Example: curl.exe or yt-dlp",
     "scope": {
       "label": "Only selected apps",
-      "hintAll": "Every app uses the VPN now. Turn this on to keep it for apps with the route “VPN”.",
+      "hintAll": "Every app uses the VPN. Turn this on to keep it for apps with the route “VPN”.",
+      "hintAllProxy": "Programs that use the system proxy go through the VPN; the rest connect directly. Turn this on to keep it for apps with the route “VPN”.",
       "hintListed": "Only apps with the route “VPN” use the VPN; the rest connect directly. Your site rules apply to every app.",
-      "hintEmpty": "No app has the route “VPN” yet, so everything connects directly.",
+      "hintListedProxy": "Only apps with the route “VPN” use the VPN, if they use the system proxy; the rest connect directly. Your site rules apply to every app.",
+      "hintEmpty": "No app has the route “VPN” yet. Only sites in your “VPN” rules and, with Smart RU, sites blocked in Russia use the VPN.",
+      "pending": "The current connection keeps the previous setting; the new one applies from the next connection.",
       "olderService": "The helper service is an older version: in Tunnel mode every app still uses the VPN.",
       "failed": "Could not switch"
     },

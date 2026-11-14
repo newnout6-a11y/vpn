@@ -13,6 +13,42 @@ use super::model::{Badge, TrayItemId, TrayModel, fit_tooltip};
 /// The speed line and the tooltip change on every traffic tick; Win32 gets them once a second.
 pub const SPEED_REFRESH: Duration = Duration::from_secs(1);
 
+/// The first wait after Windows refused the tooltip, doubled per refusal up to [`RETRY_MAX`].
+const RETRY_FIRST: Duration = Duration::from_secs(5);
+const RETRY_MAX: Duration = Duration::from_secs(300);
+
+/// Retries of a Win32 call Windows keeps refusing (lab 14.11.2026: «access denied» for the
+/// tooltip on every speed tick while the shell ran elevated, a line a second in the log): the
+/// next try waits 5 s doubling to 5 min, and only the first refusal of a streak is logged.
+#[derive(Debug, Default)]
+pub(super) struct Backoff {
+    refusals: u32,
+    next: Option<Instant>,
+}
+
+impl Backoff {
+    /// A try is due at `now`.
+    pub(super) fn due(&self, now: Instant) -> bool {
+        self.next.is_none_or(|at| now >= at)
+    }
+
+    /// Windows refused at `now`; `true` for the first refusal of a streak (log it).
+    pub(super) fn refused(&mut self, now: Instant) -> bool {
+        self.refusals = self.refusals.saturating_add(1);
+        let doublings = (self.refusals - 1).min(16);
+        let wait = RETRY_FIRST.saturating_mul(1 << doublings).min(RETRY_MAX);
+        self.next = Some(now + wait);
+        self.refusals == 1
+    }
+
+    /// It worked; `true` when it ends a streak of refusals.
+    pub(super) fn worked(&mut self) -> bool {
+        let streak = self.refusals > 0;
+        *self = Self::default();
+        streak
+    }
+}
+
 /// muda id of the «Доступна версия X» line (shown only while a version is offered, so it is not
 /// one of the fixed [`TrayItemId`] entries).
 pub const UPDATE_MENU_ID: &str = "tray.update";
@@ -191,6 +227,9 @@ pub struct NativeTray {
     icons: Option<TrayIcons>,
     differ: Differ,
     tooltip: String,
+    /// The tooltip still to set (Windows refused the last try: see [`Backoff`]).
+    pending_tooltip: Option<String>,
+    tooltip_retry: Backoff,
     badge: Option<Badge>,
     calls: NativeCalls,
 }
@@ -258,6 +297,8 @@ impl NativeTray {
             icons,
             differ,
             tooltip,
+            pending_tooltip: None,
+            tooltip_retry: Backoff::default(),
             badge,
             calls: NativeCalls::default(),
         };
@@ -329,11 +370,27 @@ impl NativeTray {
             self.rebuild_stop(always);
         }
         if let Some(tooltip) = changes.tooltip {
+            self.pending_tooltip = Some(tooltip);
+        }
+        if let Some(tooltip) = self
+            .pending_tooltip
+            .take_if(|_| self.tooltip_retry.due(now))
+        {
             match self.icon.set_tooltip(Some(&tooltip)) {
-                Ok(()) => self.calls.tooltip += 1,
-                Err(err) => tracing::warn!(%err, "tray tooltip not set"),
+                Ok(()) => {
+                    self.calls.tooltip += 1;
+                    if self.tooltip_retry.worked() {
+                        tracing::info!("tray tooltip set again");
+                    }
+                    self.tooltip = tooltip;
+                }
+                Err(err) => {
+                    if self.tooltip_retry.refused(now) {
+                        tracing::warn!(%err, "tray tooltip not set; retrying less often");
+                    }
+                    self.pending_tooltip = Some(tooltip);
+                }
             }
-            self.tooltip = tooltip;
         }
         if let Some(badge) = changes.badge
             && let Some(icon) = self.icons.as_ref().and_then(|icons| icons.get(badge))
@@ -374,6 +431,36 @@ fn position(id: TrayItemId) -> usize {
         .take_while(|item| *item != id)
         .map(|item| 1 + usize::from(item.separator_after()))
         .sum()
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    /// Lab (p-live2): a refused tooltip is retried after 5 s doubling to 5 min, logged once per
+    /// streak; a success ends the streak.
+    #[test]
+    fn refusals_back_off_and_log_once() {
+        let t0 = Instant::now();
+        let mut b = Backoff::default();
+        assert!(b.due(t0));
+        assert!(b.refused(t0), "the first refusal is logged");
+        assert!(!b.due(t0 + Duration::from_secs(4)));
+        assert!(b.due(t0 + Duration::from_secs(5)));
+        let t1 = t0 + Duration::from_secs(5);
+        assert!(!b.refused(t1), "later refusals are not");
+        assert!(!b.due(t1 + Duration::from_secs(9)));
+        assert!(b.due(t1 + Duration::from_secs(10)));
+        let mut later = t1;
+        for _ in 0..20 {
+            later += RETRY_MAX;
+            b.refused(later);
+        }
+        assert!(b.due(later + RETRY_MAX), "never longer than the cap");
+        assert!(b.worked(), "a success ends the streak");
+        assert!(!b.worked());
+        assert!(b.due(later));
+    }
 }
 
 #[cfg(test)]

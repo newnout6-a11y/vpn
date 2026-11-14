@@ -193,7 +193,8 @@ pub(crate) fn session_route(status: &TunStatus) -> Option<Route> {
 /// while the settings allow it, through the running session first. A refresh that failed while a
 /// session came up is tried again through it at once, before any toast (psmart-a1/b6). A failure
 /// is one toast per streak: updates are on by default, and a network that cannot reach the
-/// lists would otherwise show the same toast every hour.
+/// lists would otherwise show the same toast every hour. New lists are a journal event of the
+/// data folder `root`.
 pub(super) async fn refresh_rule_sets(
     service: Arc<RuleSetService>,
     settings: Arc<Store<Settings>>,
@@ -201,13 +202,15 @@ pub(super) async fn refresh_rule_sets(
     notifier: Arc<Notifier>,
     wake: Arc<Notify>,
     cancel: CancellationToken,
+    root: PathBuf,
 ) {
     let mut failing = false;
     loop {
         let s = settings.snapshot();
         let mut cfg = RefreshSettings::from_settings(&s);
         // Marked seen: a session that starts during the refresh is a change after this read.
-        cfg.session = session_route(&status.borrow_and_update());
+        let before = status.borrow_and_update().clone();
+        cfg.session = session_route(&before);
         if cfg.auto_refresh(s.smart_ru_split) {
             let tried = cfg.clone();
             // `RuleSetService::refresh` is not `Send` (an `AsyncFn` closure inside), so it cannot
@@ -220,11 +223,14 @@ pub(super) async fn refresh_rule_sets(
             .await;
             match outcome {
                 Ok(RefreshOutcome::Cancelled) => {}
-                Ok(outcome) if retry_through_session(&tried, &outcome, &status.borrow()) => {
+                Ok(outcome)
+                    if retry_through_session(&tried, &outcome, &before, &status.borrow()) =>
+                {
                     tracing::info!("rule-set refresh failed; trying again through the new session");
                     continue;
                 }
                 Ok(outcome) => {
+                    crate::svc_journal::smart_ru_refreshed(&root, &outcome);
                     if let Some(notice) = outcome.notice().filter(|_| !failing) {
                         notifier.notify(notice, None);
                     }
@@ -242,15 +248,24 @@ pub(super) async fn refresh_rule_sets(
     }
 }
 
-/// A failed refresh is tried again at once when a session came up meanwhile whose route the
-/// download routes would take (the mode and the user's choices decide, as in `routes`).
+/// A failed refresh is tried again at once when a session came up meanwhile (`before` -> `now`)
+/// whose route the download routes would take (the mode and the user's choices decide, as in
+/// `routes`), or a Tunnel session: the app's own downloads ride its TUN (fixlists-a4).
 fn retry_through_session(
     tried: &RefreshSettings,
     outcome: &RefreshOutcome,
+    before: &TunStatus,
     now: &TunStatus,
 ) -> bool {
+    if !matches!(outcome, RefreshOutcome::Failed(_)) {
+        return false;
+    }
+    let new_run = now.running && (!before.running || now.started_at != before.started_at);
+    if new_run && now.capture == Some(CaptureKind::Tun) {
+        return true;
+    }
     let route = session_route(now);
-    if !matches!(outcome, RefreshOutcome::Failed(_)) || route.is_none() || route == tried.session {
+    if route.is_none() || route == tried.session {
         return false;
     }
     let again = RefreshSettings {
@@ -331,22 +346,87 @@ mod tests {
             file: "geoip-ru.srs".into(),
         });
         let up = status(Some(CaptureKind::Proxy), Some(20808));
-        assert!(retry_through_session(&idle, &failed, &up));
-        assert!(!retry_through_session(&idle, &failed, &status(None, None)));
-        assert!(!retry_through_session(&idle, &RefreshOutcome::Fresh, &up));
+        let none = status(None, None);
+        assert!(retry_through_session(&idle, &failed, &none, &up));
+        assert!(!retry_through_session(&idle, &failed, &none, &none));
+        assert!(!retry_through_session(
+            &idle,
+            &RefreshOutcome::Fresh,
+            &none,
+            &up
+        ));
         let through = RefreshSettings {
             session: session_route(&up),
             ..idle.clone()
         };
         assert!(
-            !retry_through_session(&through, &failed, &up),
+            !retry_through_session(&through, &failed, &up, &up),
             "it was tried"
         );
         let direct_only = RefreshSettings {
             bootstrap: BootstrapRouteMode::Direct,
             ..idle
         };
-        assert!(!retry_through_session(&direct_only, &failed, &up));
+        assert!(!retry_through_session(&direct_only, &failed, &none, &up));
+    }
+
+    /// fixlists-a4: a Tunnel session that came up while a refresh failed is tried at once (the
+    /// app's own downloads ride its TUN), whatever the route choice; one that ran already is not.
+    #[test]
+    fn a_tunnel_session_that_came_up_during_a_failed_refresh_gets_a_retry() {
+        use vpnte_core::settings::BootstrapRouteMode;
+        use vpnte_engine::routing::rulesets::RefreshFault;
+        let direct_only = RefreshSettings {
+            bootstrap: BootstrapRouteMode::Direct,
+            ..RefreshSettings::from_settings(&Settings::default())
+        };
+        let failed = RefreshOutcome::Failed(RefreshFault::Download {
+            file: "geoip-ru.srs".into(),
+        });
+        let (none, tun) = (status(None, None), status(Some(CaptureKind::Tun), None));
+        assert!(retry_through_session(&direct_only, &failed, &none, &tun));
+        assert!(
+            !retry_through_session(&direct_only, &failed, &tun, &tun),
+            "it ran already"
+        );
+        let restarted = TunStatus {
+            started_at: Some(2_000),
+            ..tun.clone()
+        };
+        assert!(retry_through_session(
+            &direct_only,
+            &failed,
+            &tun,
+            &restarted
+        ));
+        let updated = RefreshOutcome::Updated {
+            generation: "gen-1".into(),
+        };
+        assert!(!retry_through_session(&direct_only, &updated, &none, &tun));
+    }
+
+    /// p-tails-a: new Smart RU lists are a journal event; a refresh that changed nothing is not
+    /// (a failed one reaches the journal through its toast).
+    #[test]
+    fn new_lists_are_a_journal_event() {
+        use vpnte_engine::routing::rulesets::RefreshFault;
+        let dir = crate::api_settings::test_support::TempDir::new("probe-journal");
+        let fault = RefreshFault::Download {
+            file: "geoip-ru.srs".into(),
+        };
+        for outcome in [RefreshOutcome::Fresh, RefreshOutcome::Failed(fault)] {
+            crate::svc_journal::smart_ru_refreshed(&dir.0, &outcome);
+        }
+        let journal = crate::svc_journal::Journal::open(&dir.0);
+        assert!(journal.records().is_empty());
+        let updated = RefreshOutcome::Updated {
+            generation: "gen-1".into(),
+        };
+        crate::svc_journal::smart_ru_refreshed(&dir.0, &updated);
+        let keys: Vec<String> = (journal.records().iter())
+            .map(|r| r.title.key.to_string())
+            .collect();
+        assert_eq!(keys, ["app.journal.smartRu.updated"]);
     }
 
     /// A session start wakes the refresh (its route may reach the lists); other changes do not.

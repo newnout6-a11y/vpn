@@ -26,6 +26,8 @@ pub(crate) trait Machine {
     fn place(&self) -> AppResult<PathBuf>;
     /// Removes every WFP object of ours, strict filters included.
     fn remove_wfp(&self) -> AppResult<()>;
+    /// Removes the Windows Firewall rules sing-box made for the engines (lab F-8).
+    fn remove_rules(&self) -> AppResult<()>;
     /// Marks the service for deletion.
     fn delete(&self) -> AppResult<()>;
     /// Deletes the program and the data folders.
@@ -68,7 +70,8 @@ fn start_again(m: &dyn Machine, err: AppError) -> AppError {
     }
 }
 
-/// Disable, stop, remove the WFP objects, delete, remove the folders. Every step is tried even
+/// Disable, stop, remove the WFP objects and the engines' firewall rules, delete, remove the
+/// folders. Every step is tried even
 /// when one before it failed (the first failure is returned: a rerun finishes what is left),
 /// except a failed WFP clean-up: strict filters left behind would block traffic with nothing
 /// left to remove them, so the registration and the files stay, the service runs again (its
@@ -90,6 +93,7 @@ pub(crate) fn uninstall(m: &dyn Machine) -> AppResult<()> {
         }
         return Err(filters_kept(err));
     }
+    step(m.remove_rules());
     step(m.delete());
     step(m.remove_folders());
     first.map_or(Ok(()), Err)

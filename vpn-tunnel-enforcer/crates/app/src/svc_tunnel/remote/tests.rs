@@ -337,6 +337,43 @@ async fn a_start_publishes_its_events_before_the_receipt() {
     assert!(stopped.ok && !r.status().borrow().running);
 }
 
+/// Inputs with an inactive VPN app (its versioned exe is gone) under the apps page's scope.
+struct GoneApp;
+
+#[async_trait]
+impl InputsSource for GoneApp {
+    async fn snapshot(&self) -> AppResult<UserInputs> {
+        Ok(UserInputs {
+            split_inactive: vec![vpnte_tunnel::runtime::InactiveSplit {
+                name: "Discord".into(),
+                path: r"C:\Users\u\AppData\Local\Discord\app-1.0.9187\Discord.exe".into(),
+                missing: true,
+            }],
+            only_listed: Some(vec!["own".into()]),
+            ..UserInputs::default()
+        })
+    }
+}
+
+/// appsplit-a1/b1: the service never sees the app's inactive split entries, so a Tunnel start
+/// through it still says that the app's traffic leaves directly under the scope.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_service_start_says_an_inactive_app_leaves_directly() {
+    let s = service();
+    let r = Remote::on_pipe(&s.pipe, Arc::new(GoneApp), s.protection.clone());
+    let receipt = r
+        .start(tun_request(), CancellationToken::new())
+        .await
+        .expect("started");
+    let keys: Vec<&str> = receipt.warnings.iter().map(|m| m.key.as_ref()).collect();
+    assert!(
+        keys.contains(&"engine.routing.warn.appMissingDirect"),
+        "{keys:?}"
+    );
+    let stopped = r.stop(StopOptions::default()).await;
+    assert!(stopped.ok);
+}
+
 /// Owner question 23: the window crashed (its connection dropped without a stop); the next app
 /// parks the kept session (not shown as running, so nothing stops it) until its own connect of
 /// the same upstream takes it over: no second start in the service.

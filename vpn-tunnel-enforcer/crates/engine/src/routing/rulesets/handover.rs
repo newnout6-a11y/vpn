@@ -2,7 +2,8 @@
 //! item 12a). The service runs as SYSTEM and never reads a user's folder, so the app sends the
 //! bytes; the service checks them again (names, size, canaries and the content bounds against
 //! its own pinned copies, with its own pinned sing-box) before it writes them into its own
-//! admin-only folder, and otherwise keeps its pinned files.
+//! admin-only folder, and otherwise keeps its pinned files. The last set that passed is noted in
+//! that folder and kept across a restart while its bytes still hash to it.
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +13,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
 use super::validate::validate;
-use super::{GEN_PREFIX, RULE_SETS, RefreshFault, STAGING, write_synced};
+use super::{CHECKS, GEN_PREFIX, RULE_SETS, RefreshFault, STAGING, write_synced};
+
+/// The store's note of the last set that passed (its digest), read after a restart.
+const ACCEPTED: &str = "accepted";
 
 /// Largest hand-over, all files together: a start travels in one pipe frame of at most 4 MiB,
 /// base64 adds a third, and the user's own rules ride in the same frame (today ~0.8 MB).
@@ -105,12 +109,42 @@ pub async fn accept(
         return Err(invalid("rule sets"));
     }
     let digest = files.digest();
-    let dir = store.join(format!("{GEN_PREFIX}{}", &digest[..16]));
+    let dir = folder(store, &digest);
     // A folder's name proves nothing (psmart-a4): after a power loss a renamed folder can hold
     // files whose data never reached the disk. Its bytes must still hash to the set.
-    if holds(&dir, &digest).await {
-        return Ok(dir);
+    if !holds(&dir, &digest).await {
+        check_into(files, engine, store, reference, &dir).await?;
     }
+    remember(store, &digest).await;
+    Ok(dir)
+}
+
+/// The last set [`accept`] passed, after a restart (fixlists-a5: a refused hand-over keeps it,
+/// not the pinned files): `(digest, folder)` while the folder's bytes still hash to it.
+pub async fn recall(store: &Path) -> Option<(String, PathBuf)> {
+    let digest = tokio::fs::read_to_string(store.join(ACCEPTED)).await.ok()?;
+    let digest = digest.trim();
+    let dir = folder(store, digest);
+    holds(&dir, digest).await.then(|| (digest.to_owned(), dir))
+}
+
+/// `gen-<digest>-c<checks>`: a set stored by older checks is never reused (fixlists-a7).
+fn folder(store: &Path, digest: &str) -> PathBuf {
+    let short = digest.get(..16).unwrap_or(digest);
+    store.join(format!("{GEN_PREFIX}{short}-c{CHECKS}"))
+}
+
+/// Writes the set into a staging folder, checks every file and renames it to `dir`.
+async fn check_into(
+    files: &RuleSetFiles,
+    engine: &Path,
+    store: &Path,
+    reference: &Path,
+    dir: &Path,
+) -> Result<(), RefreshFault> {
+    let invalid = |file: &str| RefreshFault::Invalid {
+        file: file.to_owned(),
+    };
     let storage = |err: std::io::Error| {
         tracing::warn!(%err, "handed-over rule sets not stored");
         RefreshFault::Storage
@@ -128,14 +162,27 @@ pub async fn accept(
                 None => return Err(RefreshFault::EngineUnavailable),
             }
         }
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::rename(&staging, &dir).await.map_err(storage)
+        let _ = tokio::fs::remove_dir_all(dir).await;
+        tokio::fs::rename(&staging, dir).await.map_err(storage)
     };
     let result = checked.await;
     if result.is_err() {
         let _ = tokio::fs::remove_dir_all(&staging).await;
     }
-    result.map(|()| dir)
+    result
+}
+
+/// Notes `digest` as the last set that passed (written aside and renamed: a torn note names
+/// no folder that holds it, so it is ignored).
+async fn remember(store: &Path, digest: &str) {
+    let temp = store.join(format!("{ACCEPTED}.tmp"));
+    let saved = async {
+        write_synced(&temp, digest.as_bytes()).await?;
+        tokio::fs::rename(&temp, store.join(ACCEPTED)).await
+    };
+    if let Err(err) = saved.await {
+        tracing::warn!(%err, "the accepted rule sets were not noted");
+    }
 }
 
 /// `dir` holds exactly the set of `digest` (read back and hashed, off the async threads).

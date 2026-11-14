@@ -1111,6 +1111,7 @@ pub(super) fn smart_ru_parts(dir: &str) -> RoutingParts {
             json!({ "domain_suffix": [".ru", ".su", ".xn--p1ai"], "server": DNS_DIRECT }),
         ],
         listed_only: None,
+        proxy_bypass: Vec::new(),
     }
 }
 

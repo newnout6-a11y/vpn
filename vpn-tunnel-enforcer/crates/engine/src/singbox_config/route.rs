@@ -23,6 +23,7 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
     require_objects(&r.process_rules, "process rule")?;
     require_objects(&r.domain_rules, "route rule")?;
     require_objects(&r.rule_sets, "rule set")?;
+    require_objects(&r.proxy_bypass, "bypass rule")?;
     let tun = matches!(i.capture, Capture::Tun(_));
     // A proxy client may name an IPv6 literal; the tunnel refuses IPv6 egress in every form.
     let reject_ipv6 = match &i.capture {
@@ -36,6 +37,11 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
     rules.push(json!({ "inbound": DIRECT_IN, "outbound": DIRECT_OUT }));
     if i.listeners.probe.is_some() {
         rules.push(json!({ "inbound": PROBE_IN, "outbound": PROXY_OUT }));
+    }
+    if !tun {
+        // The system proxy leaves these direct for every program: so does the engine for a
+        // program whose proxy syntax missed one (fixlists-b3).
+        rules.extend(r.proxy_bypass.iter().cloned());
     }
     rules.extend(r.process_rules.iter().cloned());
     let listed = r.listed_only.as_deref();

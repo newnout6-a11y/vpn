@@ -23,25 +23,31 @@ fn app(rule: AppRule) -> SplitApp {
 }
 
 /// Every app: one hint; only the listed ones: the hint says what goes direct, or, with nothing
-/// listed yet, that everything does; a list still loading is not called empty.
+/// listed yet, what still uses the VPN; a list still loading is not called empty. Proxy mode
+/// says that only programs using the system proxy reach the VPN (appsplit-b6).
 #[test]
-fn the_hint_follows_the_scope_and_the_list() {
+fn the_hint_follows_the_scope_the_list_and_the_mode() {
     let listed = Load::Ready(vec![app(AppRule::Direct), app(AppRule::Vpn)]);
     let unlisted = Load::Ready(vec![app(AppRule::Direct), app(AppRule::None)]);
-    let key = |scope, apps: &Load<Vec<SplitApp>>| scope_hint_key(scope, apps);
-    assert_eq!(
-        key(AppScope::All, &unlisted),
-        "splitTunneling.scope.hintAll"
-    );
-    assert_eq!(key(AppScope::All, &listed), "splitTunneling.scope.hintAll");
     let only = AppScope::OnlyListed;
-    assert_eq!(key(only, &listed), "splitTunneling.scope.hintListed");
-    assert_eq!(key(only, &unlisted), "splitTunneling.scope.hintEmpty");
-    assert_eq!(
-        key(only, &Load::Ready(Vec::new())),
-        "splitTunneling.scope.hintEmpty"
-    );
-    assert_eq!(key(only, &Load::Loading), "splitTunneling.scope.hintListed");
+    for (scope, apps, proxy, want) in [
+        (AppScope::All, &unlisted, false, "hintAll"),
+        (AppScope::All, &listed, false, "hintAll"),
+        (AppScope::All, &listed, true, "hintAllProxy"),
+        (only, &listed, false, "hintListed"),
+        (only, &listed, true, "hintListedProxy"),
+        (only, &unlisted, false, "hintEmpty"),
+        (only, &unlisted, true, "hintEmpty"),
+        (only, &Load::Ready(Vec::new()), false, "hintEmpty"),
+        (only, &Load::Loading, false, "hintListed"),
+    ] {
+        let got = scope_hint_key(scope, apps, proxy);
+        assert_eq!(
+            got,
+            format!("splitTunneling.scope.{want}"),
+            "{scope:?} {proxy}"
+        );
+    }
 }
 
 #[test]
@@ -51,6 +57,9 @@ fn every_scope_text_exists_in_both_languages() {
         "hintAll",
         "hintListed",
         "hintEmpty",
+        "hintAllProxy",
+        "hintListedProxy",
+        "pending",
         "olderService",
         "failed",
     ] {
@@ -141,6 +150,8 @@ async fn the_page_shows_the_switch_with_its_line() {
         ("only", "hintListed", false),
         ("only-empty", "hintEmpty", false),
         ("old-service", "hintListed", true),
+        ("proxy", "hintListedProxy", false),
+        ("pending", "hintAll", false),
     ];
     for (scene, hint, older) in scenes {
         let demo = Rc::new(DemoSplitTunnel::new(scene).instant());
@@ -154,10 +165,17 @@ async fn the_page_shows_the_switch_with_its_line() {
         assert!(seen.shows(&text(&dom, "label")), "{scene}: {:?}", seen.0);
         assert!(seen.shows(&text(&dom, hint)), "{scene}: {:?}", seen.0);
         assert_eq!(seen.shows(&text(&dom, "olderService")), older, "{scene}");
+        assert!(!seen.shows(&text(&dom, "pending")), "{scene}");
         if scene == "full" {
             demo.set_scope(AppScope::OnlyListed).await.expect("saved");
             let after = render(&mut dom).await;
             assert!(after.shows(&text(&dom, "hintListed")), "{:?}", after.0);
+        }
+        // appsplit-b5: the running session keeps its scope; the page says the change waits.
+        if scene == "pending" {
+            demo.set_scope(AppScope::OnlyListed).await.expect("saved");
+            let after = render(&mut dom).await;
+            assert!(after.shows(&text(&dom, "pending")), "{:?}", after.0);
         }
     }
 }

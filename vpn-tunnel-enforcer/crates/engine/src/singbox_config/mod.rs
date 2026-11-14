@@ -38,11 +38,11 @@ use vpnte_profiles::emit_singbox::{
 };
 use vpnte_profiles::model::Profile;
 
-pub use dns::usable_physical_dns;
+pub use dns::{direct_dns_server, usable_physical_dns};
 pub use spoof::{SPOOF_KEYS, gate_spoof};
 
 use crate::slot::{Slot, SlotEndpoint};
-use crate::tags::{DIRECT_OUT, DNS_BOOTSTRAP, PROXY_OUT};
+use crate::tags::{DIRECT_OUT, DNS_BOOTSTRAP, DNS_DIRECT, PROXY_OUT};
 
 /// Everything that shapes the generated JSON.
 #[derive(Debug, Clone)]
@@ -235,6 +235,9 @@ pub struct RoutingParts {
     /// drop, the STUN pins) apply to them alone, every other app leaves directly with its own
     /// QUIC, IPv6, UDP and STUN; `None`: every app takes the tunnel.
     pub listed_only: Option<Vec<String>>,
+    /// The user's «Не через прокси» entries as `direct-out` rules (`routing::bypass::
+    /// route_rules`): under proxy capture only, before every app's rule (fixlists-b3).
+    pub proxy_bypass: Vec<Value>,
 }
 
 /// Why no configuration could be built: always a caller bug or inconsistent inputs.
@@ -277,7 +280,7 @@ pub fn build(i: &ConfigInputs) -> Result<Value, ConfigError> {
         config["endpoints"] = Value::Array(up.endpoints);
     }
     let mut outs = up.outbounds;
-    outs.push(json!({ "type": "direct", "tag": DIRECT_OUT }));
+    outs.push(direct_out(i));
     config["outbounds"] = Value::Array(outs);
     config["route"] = route;
     config["experimental"] = json!({
@@ -288,6 +291,20 @@ pub fn build(i: &ConfigInputs) -> Result<Value, ConfigError> {
         }
     });
     Ok(config)
+}
+
+/// `direct-out`. Under proxy capture a client hands over a name, and a name that leaves
+/// directly is resolved by the network's own resolver (`dns-direct`), as the DNS rules do for
+/// the TUN's queries: left to `route.default_domain_resolver` (`dns-remote`) it would be looked
+/// up through the tunnel, the answer picked for the VPN exit and dialled from the real address
+/// (appsplit-b3). sing-box 1.14 dial fields: `domain_resolver` of a `direct` outbound resolves
+/// the domain in the request and overrides the route's default.
+fn direct_out(i: &ConfigInputs) -> Value {
+    let mut out = json!({ "type": "direct", "tag": DIRECT_OUT });
+    if matches!(i.capture, Capture::Proxy { .. }) && dns::has_direct(i) {
+        out["domain_resolver"] = json!(DNS_DIRECT);
+    }
+    out
 }
 
 /// TUN MTU: 1280 for stealth / adaptive MTU compatibility, 1380 for public Wi-Fi

@@ -250,7 +250,7 @@ fn server(
         config_hidden,
         whitelist: x.whitelist,
         // A provider notice an older build stored: the page shows it as such (p-live-fix).
-        placeholder: s.origin == sm::Origin::Feed && sm::is_placeholder(&s.name, &s.server, s.port),
+        placeholder: s.origin == sm::Origin::Feed && sm::is_placeholder(&s.server, s.port),
     }
 }
 

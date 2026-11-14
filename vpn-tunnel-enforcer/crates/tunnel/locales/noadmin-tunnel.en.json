@@ -18,7 +18,8 @@
       "notice": {
         "softConnected": {
           "title": "VPN connected (Proxy mode)",
-          "body": "Browsers and most programs go through the VPN."
+          "body": "Browsers and most programs go through the VPN.",
+          "bodyListed": "Selected apps that use the system proxy go through the VPN."
         },
         "softResumeFailed": {
           "title": "System proxy not restored",

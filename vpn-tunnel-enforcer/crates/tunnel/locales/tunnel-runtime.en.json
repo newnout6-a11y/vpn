@@ -11,6 +11,7 @@
       "profileUnusable": "This VPN profile cannot run in sing-box. Check the key or choose another server.",
       "serverNotPreResolved": "The server address was not found in advance: sing-box looks it up over DNS over HTTPS (1.1.1.1).",
       "egressUnknown": "Could not determine the external IP through the tunnel.",
+      "exitSilent": "The server carried no traffic: the exit check got no answer. Try another server.",
       "fullStopRan": "Protection was already removed by a full stop",
       "stopIncomplete": "Disconnecting did not finish. Disconnect again.",
       "restartStopFailed": "The restart failed: the previous connection did not stop. Disconnect and connect again.",

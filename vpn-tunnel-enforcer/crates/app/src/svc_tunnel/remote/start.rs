@@ -4,8 +4,9 @@
 use std::net::SocketAddr;
 
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
+use vpnte_engine::routing::RoutingWarning;
 use vpnte_engine::routing::rulesets::handover::RuleSetFiles;
-use vpnte_service::proto::{RoutingInputs, ServerUpstream, TunnelStart, Upstream};
+use vpnte_service::proto::{RoutingInputs, SCOPE_PROTOCOL, ServerUpstream, TunnelStart, Upstream};
 use vpnte_tunnel::api::{Mode, StartRequest, VpnProfile};
 use vpnte_tunnel::runtime::UserInputs;
 use vpnte_winnet::wfp::ProtectionSettings;
@@ -27,6 +28,24 @@ pub(super) fn routing(inputs: &UserInputs) -> RoutingInputs {
         rule_sets: inputs.rule_set_dir.as_deref().and_then(RuleSetFiles::read),
         only_listed: inputs.only_listed.clone(),
     }
+}
+
+/// The warnings of the app's inactive split entries, which never reach the service
+/// (appsplit-a1): worded for the scope the service runs, the apps page's one, or every app on
+/// a service older than [`SCOPE_PROTOCOL`] (it drops the scope).
+pub(super) fn inactive_warnings(inputs: &UserInputs, protocol: Option<u32>) -> Vec<Msg> {
+    let scoped = inputs.only_listed.is_some() && protocol.is_some_and(|p| p >= SCOPE_PROTOCOL);
+    let warning = if scoped {
+        RoutingWarning::InactiveAppDirect
+    } else {
+        RoutingWarning::InactiveApp
+    };
+    inputs
+        .split()
+        .inactive
+        .into_iter()
+        .map(|a| warning(a).msg())
+        .collect()
 }
 
 pub(super) fn server(profile: &VpnProfile) -> ServerUpstream {
@@ -118,6 +137,38 @@ mod tests {
             ProtectionSettings::default(),
         );
         assert_eq!(bad.expect_err("not an address").kind, ErrorKind::Validation);
+    }
+
+    /// appsplit-a1: an inactive app is worded for the scope the service runs: directly under
+    /// the scope, in the tunnel without it or on a service that drops it (protocol 3).
+    #[test]
+    fn an_inactive_app_is_worded_for_the_scope_the_service_runs() {
+        let mut inputs = UserInputs {
+            split_inactive: vec![vpnte_tunnel::runtime::InactiveSplit {
+                name: "Discord".into(),
+                path: r"C:\Apps\Discord.exe".into(),
+                missing: true,
+            }],
+            only_listed: Some(vec!["own".into()]),
+            ..UserInputs::default()
+        };
+        let key = |inputs: &UserInputs, protocol| {
+            let warnings = inactive_warnings(inputs, protocol);
+            assert_eq!(warnings.len(), 1);
+            let name = warnings[0].args.iter().find(|(k, _)| k == "name");
+            assert_eq!(name.map(|(_, v)| v.as_str()), Some("Discord"));
+            warnings[0].key.to_string()
+        };
+        let direct = "engine.routing.warn.appMissingDirect";
+        assert_eq!(key(&inputs, Some(SCOPE_PROTOCOL)), direct);
+        assert_eq!(key(&inputs, Some(3)), "engine.routing.warn.appMissing");
+        inputs.only_listed = None;
+        assert_eq!(
+            key(&inputs, Some(SCOPE_PROTOCOL)),
+            "engine.routing.warn.appMissing"
+        );
+        inputs.split_inactive.clear();
+        assert!(inactive_warnings(&inputs, Some(SCOPE_PROTOCOL)).is_empty());
     }
 
     /// Re-check item 16: the apps page's scope travels with the routing inputs, the app's own

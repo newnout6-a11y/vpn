@@ -6,10 +6,10 @@
 //! The Smart RU lists it reads back also tell the Settings page's rule notes which sites Smart
 //! RU sends through the VPN as blocked in Russia ([`smart_lists`], psmart-b1).
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use parking_lot::RwLock;
+use tokio::sync::watch;
 use vpnte_automation::tweaks::sysproxy::{self, Bypass};
 use vpnte_core::settings::{RoutingMode, RuleSetMode, Settings};
 use vpnte_engine::routing::bypass::{self, AutoInputs, BypassEntry, SmartLists};
@@ -20,18 +20,26 @@ use crate::support::changed;
 
 /// Coalesces bursts of store events (a save writes several documents).
 const DEBOUNCE: Duration = Duration::from_millis(200);
+/// A failed read of the Smart RU lists is tried again this often, this many times, before the
+/// next change of the stores (a decompile can fail once under logon load or a scan).
+const RETRY: Duration = Duration::from_secs(30);
+const RETRIES: u32 = 4;
 
-/// The Smart RU lists of one rule-set directory (generations never change in place); `None`
-/// in the second place = not readable.
-type Cache = Option<(PathBuf, Option<Arc<SmartLists>>)>;
+type Lists = Option<Arc<SmartLists>>;
 
 /// The lists of the directory Smart RU runs with, while it runs: the rule notes of the Settings
-/// page read the blocked-in-Russia list from them (Smart RU's own route, psmart-b1).
-static LISTS: RwLock<Option<Arc<SmartLists>>> = RwLock::new(None);
+/// page read the blocked-in-Russia list from them (Smart RU's own route, psmart-b1) and are
+/// projected again when they change (fixlists-a3).
+static LISTS: LazyLock<watch::Sender<Lists>> = LazyLock::new(|| watch::Sender::new(None));
 
 /// The Smart RU lists read back from the active rule sets (`None`: off, or not read yet).
-pub fn smart_lists() -> Option<Arc<SmartLists>> {
-    LISTS.read().clone()
+pub fn smart_lists() -> Lists {
+    LISTS.borrow().clone()
+}
+
+/// Wakes on every change of [`smart_lists`].
+pub fn lists_changes() -> watch::Receiver<Lists> {
+    LISTS.subscribe()
 }
 
 /// Hands over the user's entries at once, before any connection can apply them, and starts the
@@ -39,31 +47,35 @@ pub fn smart_lists() -> Option<Arc<SmartLists>> {
 pub fn spawn(backend: &Arc<Backend>) {
     let settings = backend.settings.snapshot();
     sysproxy::set_bypass(lists(&settings, &[]));
-    tokio::spawn(run(backend.clone()));
+    tokio::spawn(run(backend.clone(), &LISTS));
 }
 
-async fn run(backend: Arc<Backend>) {
+/// The keeper; publishes the lists it reads to `out`.
+async fn run(backend: Arc<Backend>, out: &'static watch::Sender<Lists>) {
     let mut settings = backend.settings.subscribe();
     let mut rules = backend.rules.subscribe();
     let mut rule_sets = backend.rule_sets.subscribe();
-    let mut cache: Cache = None;
+    let mut reader = Reader::default();
     loop {
         let s = backend.settings.snapshot();
         let dir = smart_dir(&backend, &s).await;
         let smart = dir.is_some();
         let wanted = automatic_wanted(&s);
         if let Some(dir) = &dir
-            && cache.as_ref().is_none_or(|(held, _)| held != dir)
+            && reader.stale(dir)
         {
             if wanted {
                 // Until the new lists are read no automatic entry is certain: none stays.
                 hand_over(&s, &[]);
             }
-            let read = read_lists(&backend.engines.singbox, dir).await;
-            cache = Some((dir.clone(), read.map(Arc::new)));
+            reader.read(&backend.engines.singbox, dir).await;
         }
-        let lists = dir.and(cache.as_ref()).and_then(|(_, l)| l.clone());
-        *LISTS.write() = lists.clone();
+        if !smart {
+            reader.failures = 0;
+        }
+        let retry = (1..=RETRIES).contains(&reader.failures);
+        let lists = dir.and(reader.cache.as_ref()).map(|(_, l)| l.clone());
+        publish(out, lists.clone());
         let auto = if wanted {
             automatic(&backend, &s, smart, lists.as_deref())
         } else {
@@ -75,9 +87,45 @@ async fn run(backend: Arc<Backend>) {
             () = changed(&mut settings) => {}
             () = changed(&mut rules) => {}
             () = changed(&mut rule_sets) => {}
+            () = tokio::time::sleep(RETRY), if retry => {}
         }
         tokio::time::sleep(DEBOUNCE).await;
     }
+}
+
+/// The Smart RU lists of one rule-set directory, read once (generations never change in place).
+/// Only lists that were read are kept: a failed read is tried again (fixlists-a2).
+#[derive(Default)]
+struct Reader {
+    cache: Option<(PathBuf, Arc<SmartLists>)>,
+    /// Failed reads in a row.
+    failures: u32,
+}
+
+impl Reader {
+    /// `dir` is not the directory whose lists are held.
+    fn stale(&self, dir: &Path) -> bool {
+        self.cache.as_ref().is_none_or(|(held, _)| held != dir)
+    }
+
+    async fn read(&mut self, exe: &Path, dir: &Path) {
+        let read = read_lists(exe, dir).await;
+        self.failures = if read.is_some() { 0 } else { self.failures + 1 };
+        self.cache = read.map(|lists| (dir.to_owned(), Arc::new(lists)));
+    }
+}
+
+/// Sends `lists` when they are other lists than the held ones (by identity: one directory's
+/// lists are read once), so the Settings page projects only a real change.
+fn publish(out: &watch::Sender<Lists>, lists: Lists) {
+    out.send_if_modified(|held| {
+        let same = match (held.as_ref(), lists.as_ref()) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        *held = lists;
+        !same
+    });
 }
 /// Sets the list; logged when it changed.
 fn hand_over(s: &Settings, auto: &[BypassEntry]) {
@@ -139,7 +187,7 @@ fn automatic(
 }
 
 /// The lists of `dir`, read through the engine; `None` (no automatic entry while Smart RU runs)
-/// when they cannot be read, tried again at the next change.
+/// when they cannot be read, tried again at the next change or after [`RETRY`].
 async fn read_lists(exe: &Path, dir: &Path) -> Option<SmartLists> {
     bypass::read_smart_lists(exe, dir)
         .await

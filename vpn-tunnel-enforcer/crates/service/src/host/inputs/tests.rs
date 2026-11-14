@@ -216,7 +216,8 @@ async fn a_failing_set_keeps_the_pinned_files() {
 }
 
 /// Decision 1 of fix-lists (psmart-b3): a set that fails its checks keeps the set in use before
-/// it, here a fresher one that passed, not the older pinned files; also when sent again.
+/// it, here a fresher one that passed, not the older pinned files; also when sent again and
+/// after the service restarts (fixlists-a5).
 #[tokio::test]
 async fn a_failing_set_keeps_the_last_set_that_passed() {
     let pinned = Path::new(RESOURCES);
@@ -245,6 +246,13 @@ async fn a_failing_set_keeps_the_last_set_that_passed() {
         assert_eq!(report.source, RuleSetSource::Kept);
         assert!(report.refused.is_some());
     }
+    // fixlists-a5: a restarted service keeps it too.
+    let restarted = SharedInputs::with_store(Some(pinned.to_owned()), Some(t.join("store")));
+    restarted.set(&routing(RuleSetFiles::read(&bad)), KillSwitchLevel::Off);
+    let dir = restarted.snapshot().await.expect("inputs").rule_set_dir;
+    assert_eq!(dir, fresh);
+    let report = restarted.rule_sets().expect("a report");
+    assert_eq!(report.source, RuleSetSource::Kept);
     let _ = std::fs::remove_dir_all(&t);
 }
 
