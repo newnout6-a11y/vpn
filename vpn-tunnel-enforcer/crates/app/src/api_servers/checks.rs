@@ -310,10 +310,7 @@ pub(super) async fn group_health(
             let wait = |key: &Key, _: Duration| notify_wait(waits.as_ref(), key);
             let token = lease.token();
             let found = key_health::check_list(groups, until, token, report, wait).await;
-            let done: Vec<_> = credited.into_iter().chain(found.done).collect();
-            if let Some(err) = found.unchecked.filter(|_| done.is_empty()) {
-                return Err(err);
-            }
+            let done = fresh::answer(credited, found)?;
             lease.commit(|| {
                 saver.finish()?;
                 Ok(done)
@@ -384,11 +381,8 @@ pub(super) async fn list_health(
             credited.iter().for_each(|(key, check)| report(key, check));
             let wait = |key: &Key, _: Duration| notify_wait(waits.as_ref(), key);
             let found = key_health::check_list(groups, until, &stop, report, wait).await;
-            let done: Vec<_> = credited.into_iter().chain(found.done).collect();
             // Nothing could be checked at all: the reason, as a group check gives it (psmall-a4).
-            if let Some(err) = found.unchecked.filter(|_| done.is_empty()) {
-                return Err(err);
-            }
+            let done = fresh::answer(credited, found)?;
             lease.commit(|| {
                 saver.finish()?;
                 Ok(done)

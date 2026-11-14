@@ -163,11 +163,12 @@ fn name_bounds(json: &str, release: &str) -> Result<(), OutOfBounds> {
 }
 
 /// The blocked sites: at least [`KEPT_SHARE`] of the copy's names are still there, in rules
-/// that match by the name alone.
+/// that match by the name alone and match every host the copy's rule matched (review
+/// speed2-b3: an exact `domain` for a suffix misses the subdomains, a `.name` suffix the name).
 fn kept_names(json: &str, release: &str) -> Result<(), OutOfBounds> {
-    let got: HashSet<String> = names(unconditioned(lenient(json)?))?.into_iter().collect();
-    let copy = names(lenient(release)?)?;
-    let kept = copy.iter().filter(|n| got.contains(*n)).count();
+    let got = Matcher::of(entries(&unconditioned(lenient(json)?))?);
+    let copy = entries(&lenient(release)?)?;
+    let kept = copy.iter().filter(|(n, form)| got.keeps(n, *form)).count();
     if (kept as f64) < copy.len() as f64 * KEPT_SHARE {
         return Err(OutOfBounds::Shrunk);
     }
@@ -264,13 +265,80 @@ fn cidr(text: &str) -> Option<(IpAddr, u8)> {
 
 /// Every name of the rules' `domain` / `domain_suffix` lists, lower case without the dot.
 fn names(rules: Vec<Value>) -> Result<Vec<String>, OutOfBounds> {
-    strings(&rules, "domain")
-        .chain(strings(&rules, "domain_suffix"))
-        .map(|v| {
-            let name = v.as_str().ok_or(OutOfBounds::Shape)?;
-            Ok(name.trim_start_matches('.').to_ascii_lowercase())
+    Ok(entries(&rules)?.into_iter().map(|(name, _)| name).collect())
+}
+
+/// Which hosts a name rule matches (sing-box): `domain` the name only, `domain_suffix` the name
+/// and its subdomains, a `domain_suffix` with a leading dot its subdomains only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Form {
+    Exact,
+    Suffix,
+    Subs,
+}
+
+/// Every `domain` / `domain_suffix` entry with its [`Form`], lower case without the dot.
+fn entries(rules: &[Value]) -> Result<Vec<(String, Form)>, OutOfBounds> {
+    let exact = strings(rules, "domain").map(|v| (v, false));
+    let suffix = strings(rules, "domain_suffix").map(|v| (v, true));
+    exact
+        .chain(suffix)
+        .map(|(v, suffix)| {
+            let raw = v.as_str().ok_or(OutOfBounds::Shape)?.to_ascii_lowercase();
+            let name = raw.trim_start_matches('.').to_owned();
+            let form = match (suffix, raw.starts_with('.')) {
+                (false, _) => Form::Exact,
+                (true, false) => Form::Suffix,
+                (true, true) => Form::Subs,
+            };
+            Ok((name, form))
         })
         .collect()
+}
+
+/// The hosts a set's name rules match.
+struct Matcher {
+    exact: HashSet<String>,
+    suffix: HashSet<String>,
+    subs: HashSet<String>,
+}
+
+impl Matcher {
+    fn of(entries: Vec<(String, Form)>) -> Self {
+        let mut m = Self {
+            exact: HashSet::new(),
+            suffix: HashSet::new(),
+            subs: HashSet::new(),
+        };
+        for (name, form) in entries {
+            match form {
+                Form::Exact => m.exact.insert(name),
+                Form::Suffix => m.suffix.insert(name),
+                Form::Subs => m.subs.insert(name),
+            };
+        }
+        m
+    }
+
+    /// A suffix rule (either form) names a strict parent of `name`: it matches `name` and its
+    /// subdomains.
+    fn parent(&self, name: &str) -> bool {
+        name.match_indices('.')
+            .map(|(i, _)| &name[i + 1..])
+            .any(|p| self.suffix.contains(p) || self.subs.contains(p))
+    }
+
+    /// Every host the copy's rule (`name` in `form`) matches, this set matches too.
+    fn keeps(&self, name: &str, form: Form) -> bool {
+        let itself = self.exact.contains(name) || self.suffix.contains(name) || self.parent(name);
+        let subdomains =
+            self.suffix.contains(name) || self.subs.contains(name) || self.parent(name);
+        match form {
+            Form::Exact => itself,
+            Form::Suffix => itself && subdomains,
+            Form::Subs => subdomains,
+        }
+    }
 }
 
 /// `sing-box rule-set decompile <file> -o <temp>`: the command writes a file only (`stdout` is

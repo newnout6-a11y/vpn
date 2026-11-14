@@ -89,6 +89,7 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
 | `switch_server(id, source)` | Panels `select_server`, Servers `select` (idle: selection only) |
 | `apply_settings_change(old, new)` | Settings `save`, Dashboard `set_smart_ru`, Wizard `finish`: after the settings store was written |
 | `snapshot()` / `session()` | Dashboard `ConnView`, Tray `TrayState`, Servers `tunnel_running` / `tunnel_busy`, Settings `connected` / `direct_session` |
+| `session_key()` | Servers key checks: the session answers for its row only while the row holds the key it dialled (default `None`) |
 | `runtime_status()` | Dashboard (`restarting`, `proxy_down` reason), Tray (`restart`, `proxy_addr`, `engine_running`) |
 | `kill_switch()` | Settings `kill_switch` section, Dashboard `firewall` / `recheck_firewall`, Tray `kill_switch` |
 | `set_kill_switch_level` / `add_exception` / `remove_exception` | Settings, Wizard `finish` (level) |

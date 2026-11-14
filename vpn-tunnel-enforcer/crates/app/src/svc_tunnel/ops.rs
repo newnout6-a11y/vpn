@@ -155,8 +155,12 @@ impl TunnelOps for TunnelService {
         self.coord.user_acted(UserAct::Change);
         let mut change = decide::settings_change(&old, &new);
         let mode = self.lifecycle.session().borrow().as_ref().map(|s| s.mode);
-        if bypass_restart(mode, &old, &new) {
-            change.restart.push("proxyBypass");
+        let in_flight =
+            self.lifecycle.busy() || self.lifecycle.snapshot().borrow().transition.is_some();
+        match bypass_restart(mode, in_flight, &old, &new) {
+            Bypass::Now => change.restart.push("proxyBypass"),
+            Bypass::AfterLane => bypass_after_lane(self.lifecycle.clone()),
+            Bypass::Never => {}
         }
         if let Some(every) = change.check_interval {
             self.ip.ip.set_interval(every);
@@ -203,6 +207,10 @@ impl TunnelOps for TunnelService {
 
     fn session(&self) -> watch::Receiver<Option<SessionView>> {
         self.lifecycle.session()
+    }
+
+    fn session_key(&self) -> Option<[u8; 16]> {
+        self.lifecycle.session_key()
     }
 
     fn runtime_status(&self) -> watch::Receiver<TunStatus> {
@@ -484,17 +492,65 @@ impl TunnelOps for TunnelService {
     }
 }
 
+/// What an edit of «Не через прокси» asks of the running engine.
+#[derive(Debug, PartialEq, Eq)]
+enum Bypass {
+    Never,
+    Now,
+    /// A connect, switch or recovery is in flight and may have read the list before the save.
+    AfterLane,
+}
+
 /// Review live2-a2: a Proxy-capture engine carries «Не через прокси» as direct-out rules built at
 /// its start, so an edited list restarts it; else a removed entry keeps leaving directly for the
-/// rest of the session. The TUN never reads the list.
+/// rest of the session. The TUN never reads the list, and no engine reads the automatic
+/// exceptions switch (speed2-b4: the system proxy follows it at once). An edit while a lane
+/// operation or a recovery runs restarts once that ends (speed2-a3/b2).
 fn bypass_restart(
     mode: Option<vpnte_tunnel::history::SessionMode>,
+    in_flight: bool,
     old: &Settings,
     new: &Settings,
-) -> bool {
-    let edited =
-        old.proxy_bypass != new.proxy_bypass || old.proxy_bypass_auto != new.proxy_bypass_auto;
-    edited && mode == Some(vpnte_tunnel::history::SessionMode::Soft)
+) -> Bypass {
+    if old.proxy_bypass == new.proxy_bypass {
+        Bypass::Never
+    } else if in_flight {
+        Bypass::AfterLane
+    } else if mode == Some(vpnte_tunnel::history::SessionMode::Soft) {
+        Bypass::Now
+    } else {
+        Bypass::Never
+    }
+}
+
+/// Once the lane is free and no recovery runs, a Proxy-capture session restarts with the
+/// current list (the run that came up may have been built from the list before the edit).
+fn bypass_after_lane(lifecycle: vpnte_tunnel::lifecycle::Lifecycle) {
+    tokio::spawn(async move {
+        let mut snapshot = lifecycle.snapshot();
+        loop {
+            lifecycle.idle().await;
+            if snapshot.wait_for(|s| s.transition.is_none()).await.is_err() {
+                // The lifecycle is gone (shutdown): nothing to restart.
+                return;
+            }
+            if !lifecycle.busy() {
+                break;
+            }
+        }
+        let soft = lifecycle.session().borrow().as_ref().map(|s| s.mode)
+            == Some(vpnte_tunnel::history::SessionMode::Soft);
+        if !soft {
+            return;
+        }
+        let reason = "settings changed: proxyBypass".to_owned();
+        if let Err(e) = lifecycle
+            .restart_with_last(reason, Owner::Manual, Source::Ui)
+            .await
+        {
+            tracing::warn!(error = %e, "bypass restart after the lane not run");
+        }
+    });
 }
 
 #[cfg(test)]
@@ -546,19 +602,27 @@ mod tests {
     }
 
     /// Review live2-a2: an edited «Не через прокси» list restarts a Proxy-capture session (its
-    /// engine carries the entries as direct rules), never a TUN one or an unchanged list.
+    /// engine carries the entries as direct rules), never a TUN one or an unchanged list;
+    /// speed2-b4: the automatic exceptions switch alone restarts nothing; speed2-a3/b2: an edit
+    /// during a connect, switch or recovery restarts once that ends.
     #[test]
     fn a_bypass_edit_restarts_only_a_proxy_session() {
+        use super::{Bypass, bypass_restart};
         use vpnte_tunnel::history::SessionMode;
         let old = vpnte_core::settings::Settings::default();
         let mut new = old.clone();
         new.proxy_bypass = vec!["example.org".into()];
-        assert!(super::bypass_restart(Some(SessionMode::Soft), &old, &new));
-        assert!(!super::bypass_restart(Some(SessionMode::Hard), &old, &new));
-        assert!(!super::bypass_restart(None, &old, &new));
-        assert!(!super::bypass_restart(Some(SessionMode::Soft), &old, &old));
+        let soft = Some(SessionMode::Soft);
+        assert_eq!(bypass_restart(soft, false, &old, &new), Bypass::Now);
+        let hard = Some(SessionMode::Hard);
+        assert_eq!(bypass_restart(hard, false, &old, &new), Bypass::Never);
+        assert_eq!(bypass_restart(None, false, &old, &new), Bypass::Never);
+        assert_eq!(bypass_restart(soft, false, &old, &old), Bypass::Never);
         let mut auto = old.clone();
         auto.proxy_bypass_auto = !old.proxy_bypass_auto;
-        assert!(super::bypass_restart(Some(SessionMode::Soft), &old, &auto));
+        assert_eq!(bypass_restart(soft, false, &old, &auto), Bypass::Never);
+        assert_eq!(bypass_restart(None, true, &old, &new), Bypass::AfterLane);
+        assert_eq!(bypass_restart(soft, true, &old, &new), Bypass::AfterLane);
+        assert_eq!(bypass_restart(soft, true, &old, &auto), Bypass::Never);
     }
 }

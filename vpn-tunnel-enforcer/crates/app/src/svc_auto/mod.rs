@@ -5,6 +5,7 @@
 //! one tweak journal and the lifecycle); the long tasks start after the start-up recovery.
 mod coord;
 mod decide;
+mod direct;
 mod events;
 mod failover;
 mod feed;

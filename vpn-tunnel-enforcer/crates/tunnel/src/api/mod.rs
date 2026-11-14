@@ -268,6 +268,18 @@ pub enum FailoverCause {
 /// the lifecycle records a start that failed with such a key as `tun-setup-failed` (L-14).
 pub const TUN_SETUP_KEY_PREFIX: &str = "tunnel.runtime.tunSetup";
 
+/// A runtime message that names something of ours left behind: an engine whose exit was not
+/// proven (`cleanup.exitUnproven`, `cleanup.xray`), a protection that was not released
+/// (`cleanup.protection`), a stop that did not finish, a retained run that refuses the start.
+/// Review speed2-a1/b1: a failed start that names one is no clean failure.
+pub fn names_leftover(msg: &Msg) -> bool {
+    msg.key.starts_with("tunnel.runtime.cleanup.")
+        || matches!(
+            msg.key.as_ref(),
+            "tunnel.runtime.stopIncomplete" | "tunnel.runtime.previousNotStopped"
+        )
+}
+
 /// A refused or failed runtime operation: category, user-facing message (on `error`), log cause
 /// (`error.source`) and the warnings collected before the failure.
 #[derive(Debug, thiserror::Error)]
@@ -298,6 +310,16 @@ impl TunError {
     pub fn with_warning(mut self, warning: Msg) -> Self {
         self.warnings.push(warning);
         self
+    }
+
+    /// The failure or one of its warnings names something of ours left behind
+    /// ([`names_leftover`]).
+    pub fn leaves_ours(&self) -> bool {
+        self.error
+            .msg
+            .iter()
+            .chain(&self.warnings)
+            .any(names_leftover)
     }
 }
 

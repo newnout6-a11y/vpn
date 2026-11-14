@@ -756,6 +756,43 @@ fn a_clean_internal_failure_leaves_a_way_forward() {
     assert_eq!(h.snap().state, TunnelState::Error);
 }
 
+/// Review speed2-a1/b1: a start that failed while something of ours stays held (a retained run
+/// whose exit is unproven, a protection a release could not remove) is no clean failure,
+/// whatever its kind: it ends `Error` with its cleanup («Снять защиту»), never «Подключить».
+#[test]
+fn a_failure_that_leaves_ours_keeps_its_cleanup() {
+    for kind in [ErrorKind::Network, ErrorKind::Internal, ErrorKind::Conflict] {
+        let mut h = H::new();
+        assert!(!h.start(|h, _| {
+            h.os.held = true;
+            Effect::Fail(kind)
+        }));
+        let s = h.snap();
+        let got = (s.state, s.cleanup_required);
+        assert_eq!(got, (TunnelState::Error, true), "{kind:?}");
+    }
+}
+
+/// Review speed2-a1/b1: a start from `Error` owed a cleanup before it began, and a clean-looking
+/// failure keeps owing it (the runtime may have forgotten a protection it never released). After
+/// the stop, the same failure ends at «Подключить» again.
+#[test]
+fn a_start_from_error_keeps_the_owed_cleanup() {
+    let mut h = H::new();
+    let e = h.e();
+    h.fsm.fault(FaultState::Error, e);
+    assert!(!h.start(|_, _| Effect::Fail(ErrorKind::Conflict)));
+    let s = h.snap();
+    assert_eq!((s.state, s.cleanup_required), (TunnelState::Error, true));
+    assert!(h.stop());
+    assert!(!h.start(|_, _| Effect::Fail(ErrorKind::Conflict)));
+    let s = h.snap();
+    assert_eq!(
+        (s.state, s.cleanup_required),
+        (TunnelState::Disconnected, false)
+    );
+}
+
 /// `degraded` exists only inside connected; proxy failure stays separate from process liveness.
 #[test]
 fn degraded_only_inside_connected() {
@@ -1215,6 +1252,7 @@ fn evidence_from_runtime_status() {
             soft_applied: false,
             started_at: Some(42),
             proxy_capture: false,
+            held: false,
         }
     );
     assert!(e.tun_ready() && !e.soft_ready());
@@ -1228,4 +1266,23 @@ fn evidence_from_runtime_status() {
     assert!(e.proxy_capture && e.soft_ready() && !e.tun_ready());
     assert!(!Evidence::from_status(&soft, false).soft_ready());
     assert!(!Evidence::from_status(&TunStatus::default(), true).soft_ready());
+}
+
+/// Review speed2-a1/b1: an idle status that names a leftover of ours (a retained run, an
+/// unreleased protection, an unfinished stop) is held evidence; any other warning is not.
+#[test]
+fn a_status_naming_a_leftover_is_held() {
+    let held = |key: &'static str| {
+        let status = TunStatus {
+            warning: Some(vpnte_base::Msg::new(key)),
+            ..TunStatus::default()
+        };
+        Evidence::from_status(&status, false).held
+    };
+    assert!(held("tunnel.runtime.cleanup.exitUnproven"));
+    assert!(held("tunnel.runtime.cleanup.xray"));
+    assert!(held("tunnel.runtime.cleanup.protection"));
+    assert!(held("tunnel.runtime.stopIncomplete"));
+    assert!(!held("tunnel.runtime.tunSetup.adapter"));
+    assert!(!Evidence::from_status(&TunStatus::default(), false).held);
 }

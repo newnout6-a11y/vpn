@@ -6,7 +6,7 @@ use serde::Serialize;
 use vpnte_base::Msg;
 use vpnte_base::types::{ProxyKind, UnixMs};
 
-use super::{CaptureKind, EngineRun, ModeKind};
+use super::{CaptureKind, EngineRun, ModeKind, names_leftover};
 
 /// Runtime status as published on the status watch.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -57,6 +57,15 @@ impl Default for TunStatus {
             engine: None,
             session: None,
         }
+    }
+}
+
+impl TunStatus {
+    /// The status names something of ours the runtime still holds although nothing runs: a run
+    /// whose exit was not proven, a protection a crash or a stop could not release (its warning
+    /// stays until the next start or stop). Review speed2-a1/b1.
+    pub fn holds_ours(&self) -> bool {
+        self.warning.as_ref().is_some_and(names_leftover)
     }
 }
 

@@ -19,11 +19,13 @@ use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::ops::Source;
 use vpnte_servers::model::{HealthReason, HealthRecord, ProfileId};
 use vpnte_servers::store::{HealthUpdate, SelectBy, Servers};
+use vpnte_tunnel::fsm::TunnelState;
 use vpnte_tunnel::lifecycle::{
     ConnError, ConnectReq, ConnectTarget, DisconnectReq, Done, SwitchReq,
 };
 
 use super::decide::{self, Admit};
+use super::direct::{DirectCheck, EchoDirect};
 use super::lane::Lane;
 use super::{AppAdaptive, ServerHost};
 use crate::svc_core::notify::{self, Notifier};
@@ -105,10 +107,14 @@ pub struct AppCoordinator {
     /// choice never acts against the user).
     user_acts: watch::Sender<UserActs>,
     pub(super) hooks: OnceLock<Hooks>,
+    /// Tells a dead server from a dead network after a silent exit proof.
+    direct: Arc<dyn DirectCheck>,
 }
 
 /// The runtime's answer to a start whose exit proof got nothing back through the server.
 const SILENT_EXIT: &str = "tunnel.runtime.exitSilent";
+/// The same proof asked straight got nothing back either: the network has no internet.
+const NO_INTERNET: &str = "app.dashboard.noInternet";
 
 /// Lab F-4 (p-live2): a start whose exit stayed silent proved the server dead from here. Its
 /// health says so, so the automatic choices (the crash failover, the automatic pick's rank) try
@@ -156,7 +162,15 @@ impl AppCoordinator {
             restoring: Mutex::new(None),
             user_acts: watch::Sender::new(UserActs::default()),
             hooks: OnceLock::new(),
+            direct: Arc::new(EchoDirect),
         }
+    }
+
+    /// The direct check of a silent exit proof (tests: a fake that never goes online).
+    #[cfg(test)]
+    pub(super) fn with_direct(mut self, direct: Arc<dyn DirectCheck>) -> Self {
+        self.direct = direct;
+        self
     }
 
     /// The user acted. A connect, a stop or a server picked by hand also drops a restore on its
@@ -217,12 +231,12 @@ impl AppCoordinator {
                 ticket: Some(begun.ticket),
             });
         }
-        let result = self.lane.connect(req).await;
-        if let (Err(err), Some(id)) = (&result, profile.as_deref())
-            && err.user_msg().key == SILENT_EXIT
-        {
-            silent_exit(&self.servers, id, vpnte_base::types::now_ms());
-        }
+        let result = match (self.lane.connect(req).await, profile.as_deref()) {
+            (Err(err), Some(id)) if err.user_msg().key == SILENT_EXIT => {
+                Err(self.judge_silent(err, id).await)
+            }
+            (result, _) => result,
+        };
         if let Some(mut preparation) = preparation {
             match &result {
                 // Ends this start's preparation only: another start may be in flight meanwhile.
@@ -235,6 +249,34 @@ impl AppCoordinator {
             }
         }
         result
+    }
+
+    /// Review live2-b3: a silent exit proof cannot tell a dead server from a dead network. The
+    /// server is recorded offline only when the same echo, asked straight, answers; with no
+    /// answer the network has none and the user reads that instead of «try another server».
+    /// While anything of ours or a block is held (any state but a clean `Disconnected`) the
+    /// direct request could not leave: nothing is recorded, the error stays as it was.
+    async fn judge_silent(&self, err: ConnError, id: &str) -> ConnError {
+        let mut snapshot = self.lane.snapshot();
+        let settled = snapshot.wait_for(|s| s.transition.is_none());
+        let clean = match tokio::time::timeout(Duration::from_secs(5), settled).await {
+            Ok(Ok(s)) => s.state == TunnelState::Disconnected && !s.cleanup_required,
+            _ => false,
+        };
+        if !clean {
+            return err;
+        }
+        if self.direct.online().await {
+            silent_exit(&self.servers, id, vpnte_base::types::now_ms());
+            return err;
+        }
+        match err {
+            ConnError::Failed(mut e) => {
+                e.error.msg = Some(Msg::new(NO_INTERNET));
+                ConnError::Failed(e)
+            }
+            other => other,
+        }
     }
 
     fn active_server(&self) -> Option<String> {

@@ -135,6 +135,12 @@ impl FakeRuntime {
         self.status.borrow().pid
     }
 
+    /// The idle status names a leftover of ours (a retained run, an unreleased protection), the
+    /// way a faulted runtime keeps it; a re-attached service shows it with no Error event.
+    pub fn warn_idle(&self, key: &'static str) {
+        self.status.send_modify(|s| s.warning = Some(Msg::new(key)));
+    }
+
     /// Our engine is up with a fresh pid; returns the generation.
     pub fn bring_up(&self, req: Option<&StartRequest>, with_pid: bool) -> u64 {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;

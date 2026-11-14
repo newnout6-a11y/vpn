@@ -385,7 +385,11 @@ fn geo_lookup_route_follows_the_capture() {
 /// The foreign-VPN notice shows only while our TUN is not up.
 #[test]
 fn foreign_vpn_only_without_our_tun() {
-    let raw = Some("happ-tun (172.18.0.1)");
+    let seen = project::ForeignSeen {
+        label: "happ-tun (172.18.0.1)".into(),
+        default_route: true,
+    };
+    let raw = Some(&seen);
     let on = project::conn_view(
         &snap(TunnelState::Connected),
         &TunStatus::default(),
@@ -917,4 +921,33 @@ fn the_same_exit_under_another_vpn_is_no_leak() {
     assert!(!calm.leak);
     assert_eq!(calm.verdict, Verdict::Warn);
     assert_eq!(calm.ip, Some(HOME));
+}
+
+/// Review live2-b2: only a foreign tunnel that owns the default route (the owner's Happ) can
+/// explain an exit equal to the home address; a split tunnel (Radmin VPN, Tailscale without an
+/// exit node) carries neither read, so the leak card stays.
+#[test]
+fn only_a_default_route_vpn_explains_the_same_exit() {
+    let split = project::ForeignSeen {
+        label: "Radmin VPN (26.1.2.3)".into(),
+        default_route: false,
+    };
+    let full = project::ForeignSeen {
+        label: "happ-tun (172.18.0.1)".into(),
+        default_route: true,
+    };
+    assert!(!project::other_vpn(Some(&split), false), "split tunnel");
+    assert!(project::other_vpn(Some(&full), false));
+    assert!(project::other_vpn(None, true), "the kill switch saw one");
+    assert!(!project::other_vpn(None, false));
+    let connected = TunnelSnapshot {
+        state: TunnelState::Connected,
+        ..TunnelSnapshot::default()
+    };
+    let same = evidence(IpVerdict::Failed, Some(HOME), None);
+    let other = project::other_vpn(Some(&split), false);
+    assert!(
+        !project::other_vpn_exit(&connected, &same, other),
+        "the leak card stays"
+    );
 }

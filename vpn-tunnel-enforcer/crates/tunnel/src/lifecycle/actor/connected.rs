@@ -20,6 +20,7 @@ impl Actor {
             Up::Idle => return,
             Up::Run {
                 profile,
+                key,
                 country,
                 generation,
                 engine,
@@ -45,6 +46,7 @@ impl Actor {
                     live.engine = engine.or(live.engine);
                     live.adaptive = adaptive;
                     live.proxy_down = false;
+                    live.key = key;
                 }
                 if let Some(guard) = guard {
                     if let Some(name) = &guard.foreign_vpn {

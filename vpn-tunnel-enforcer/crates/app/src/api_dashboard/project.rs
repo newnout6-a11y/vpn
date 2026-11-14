@@ -136,10 +136,28 @@ pub(super) fn tun_running(snap: &TunnelSnapshot) -> bool {
         && snap.mode == Some(TunnelMode::Tun)
 }
 
+/// Another VPN's tunnel adapter, as the last scan saw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ForeignSeen {
+    /// `name (ip)`.
+    pub label: String,
+    /// It holds a default route (`Severity::Conflict`): this PC's traffic goes through it. A
+    /// split tunnel (Radmin, Tailscale without an exit node) carries neither exit read.
+    pub default_route: bool,
+}
+
 /// Another VPN's adapter, shown only while our TUN is not up: its adapter answers every ping
 /// locally, and while ours runs the competing-TUN banner speaks instead.
-pub(super) fn foreign_vpn(conn: &ConnView, found: Option<&str>) -> Option<String> {
-    found.filter(|_| !conn.tun_running()).map(str::to_owned)
+pub(super) fn foreign_vpn(conn: &ConnView, found: Option<&ForeignSeen>) -> Option<String> {
+    found
+        .filter(|_| !conn.tun_running())
+        .map(|f| f.label.clone())
+}
+
+/// Another VPN that can explain an exit equal to the home address: one that owns the default
+/// route, seen by the scan or by the kill switch (review live2-b2). A split tunnel cannot.
+pub(super) fn other_vpn(found: Option<&ForeignSeen>, kill_switch_saw: bool) -> bool {
+    found.is_some_and(|f| f.default_route) || kill_switch_saw
 }
 
 /// The paused kill switch's line (ks-a): the next automatic attempt and the key reason.

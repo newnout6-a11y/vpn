@@ -688,3 +688,43 @@ async fn seeded_concurrent_commands() {
         (TunnelState::Disconnected, None, None)
     );
 }
+
+/// Review speed2-a1/b1: a connect refused by a retained run of ours (the service's faulted
+/// runtime after a re-attach: an idle status with its warning, no Error event seen) or one whose
+/// compensation could not release the protection ends `Error` with «Снять защиту», never
+/// «Подключить»; the same failure with nothing left still ends at «Подключить».
+#[tokio::test]
+async fn a_failed_start_that_leaves_ours_keeps_its_cleanup() {
+    use crate::api::TunError;
+    use vpnte_base::Msg;
+    let ends = |h: &Harness| {
+        let s = h.snap();
+        (s.state, s.cleanup_required)
+    };
+    let h = Harness::new();
+    h.rt.warn_idle("tunnel.runtime.cleanup.exitUnproven");
+    let refused = Msg::new("tunnel.runtime.previousNotStopped");
+    h.rt.script.lock().start_error = Some(TunError::new(ErrorKind::Conflict, refused));
+    h.lc.connect(local(Owner::Manual)).await.unwrap_err();
+    h.settle().await;
+    assert_eq!(ends(&h), (TunnelState::Error, true), "retained run");
+
+    let h = Harness::new();
+    let failed = TunError::new(ErrorKind::Internal, Msg::new("test.config"))
+        .with_warning(Msg::new("tunnel.runtime.cleanup.protection"));
+    h.rt.script.lock().start_error = Some(failed);
+    h.lc.connect(local(Owner::Manual)).await.unwrap_err();
+    h.settle().await;
+    assert_eq!(
+        ends(&h),
+        (TunnelState::Error, true),
+        "unreleased protection"
+    );
+
+    let h = Harness::new();
+    let clean = TunError::new(ErrorKind::Internal, Msg::new("test.config"));
+    h.rt.script.lock().start_error = Some(clean);
+    h.lc.connect(local(Owner::Manual)).await.unwrap_err();
+    h.settle().await;
+    assert_eq!(ends(&h), (TunnelState::Disconnected, false), "nothing left");
+}

@@ -207,6 +207,8 @@ struct Actor {
     fsm: Fsm,
     snap_tx: watch::Sender<TunnelSnapshot>,
     session_tx: watch::Sender<Option<SessionView>>,
+    /// The live session's key identity ([`LiveSession::key`]).
+    key_tx: watch::Sender<Option<[u8; 16]>>,
     events: broadcast::Sender<SessionEvent>,
     /// A lane operation is in flight (published after every handled command).
     busy: watch::Sender<bool>,
@@ -240,6 +242,7 @@ pub(super) fn spawn(deps: LifecycleDeps) -> Lifecycle {
     let fsm = Fsm::new();
     let (snap_tx, snapshot) = watch::channel(fsm.snapshot().clone());
     let (session_tx, session) = watch::channel(None);
+    let (key_tx, key) = watch::channel(None);
     let (events, _) = broadcast::channel(64);
     let (busy, idle) = watch::channel(false);
     let (kept_by, kept) = watch::channel(None);
@@ -253,6 +256,7 @@ pub(super) fn spawn(deps: LifecycleDeps) -> Lifecycle {
         fsm,
         snap_tx,
         session_tx,
+        key_tx,
         events: events.clone(),
         busy,
         kept_by,
@@ -276,6 +280,7 @@ pub(super) fn spawn(deps: LifecycleDeps) -> Lifecycle {
         tx,
         snapshot,
         session,
+        key,
         events,
         busy: idle,
         kept_by: kept,
@@ -451,6 +456,22 @@ impl Actor {
     /// Feeds an operation record to the state machine (a stale record is rejected there).
     fn publish(&mut self, op: &OpMeta) {
         let e = self.evidence();
+        self.apply(op, e);
+    }
+
+    /// A failed start's terminal record: a failure that names something of ours left behind
+    /// (an unproven exit, an unreleased protection) is held evidence, whatever the status shows
+    /// (review speed2-a1/b1: compensate's failed release leaves the status idle).
+    fn publish_failed(&mut self, op: &OpMeta, error: &ConnError) {
+        let left = matches!(error, ConnError::Failed(e) if e.leaves_ours());
+        let e = self.evidence().map(|e| Evidence {
+            held: e.held || left,
+            ..e
+        });
+        self.apply(op, e);
+    }
+
+    fn apply(&mut self, op: &OpMeta, e: Option<Evidence>) {
         if self.fsm.op_changed(op, e).is_err() {
             tracing::debug!(op = %op.id, status = ?op.status, "operation record not applied");
         }
@@ -476,6 +497,12 @@ impl Actor {
     }
 
     fn push_session(&self) {
+        let key = self.session.as_ref().and_then(|s| s.key);
+        self.key_tx.send_if_modified(|current| {
+            let changed = *current != key;
+            *current = key;
+            changed
+        });
         let view = self.session.as_ref().map(LiveSession::view);
         self.session_tx.send_if_modified(|current| {
             let changed = *current != view;

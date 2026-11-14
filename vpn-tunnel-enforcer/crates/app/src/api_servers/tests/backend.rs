@@ -28,7 +28,7 @@ use vpnte_servers::refresh::RefreshCtx;
 use vpnte_servers::store::{SelectBy, Servers};
 use vpnte_servers::subscription::{Hwids, SubscriptionFetcher};
 use vpnte_tunnel::api::TunStatus;
-use vpnte_tunnel::fsm::{TunnelSnapshot, TunnelState};
+use vpnte_tunnel::fsm::{ProxyStatus, TunnelSnapshot, TunnelState};
 use vpnte_tunnel::history::{History, SessionMode};
 use vpnte_tunnel::lifecycle::{ConnError, Done, SessionView, ShutdownReport};
 use vpnte_winnet::wfp::{
@@ -67,8 +67,10 @@ impl FakeTunnel {
             started_at: 1,
             engine: None,
         }));
-        self.snapshot
-            .send_modify(|s| s.state = TunnelState::Connected);
+        self.snapshot.send_modify(|s| {
+            s.state = TunnelState::Connected;
+            s.proxy_status = ProxyStatus::Running;
+        });
     }
 }
 

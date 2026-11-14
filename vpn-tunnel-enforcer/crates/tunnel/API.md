@@ -76,7 +76,11 @@ pub enum FailoverCause { ServerFault, RestartsSpent }               // what was 
 pub const TUN_SETUP_KEY_PREFIX: &str = "tunnel.runtime.tunSetup";  // TUN bring-up failures (history: tun-setup-failed)
 pub struct TunError { pub error: AppError, pub warnings: Vec<Msg> }  // From<AppError>, Into<AppError>
 impl TunError { pub fn new(kind: ErrorKind, msg: Msg) -> Self; pub fn kind(&self) -> ErrorKind;
-    pub fn user_msg(&self) -> Msg; pub fn with_warning(self, warning: Msg) -> Self }
+    pub fn user_msg(&self) -> Msg; pub fn with_warning(self, warning: Msg) -> Self;
+    pub fn leaves_ours(&self) -> bool }                              // its message or a warning names_leftover
+pub fn names_leftover(msg: &Msg) -> bool;  // tunnel.runtime.cleanup.*, stopIncomplete, previousNotStopped:
+                                           // something of ours stayed (unproven exit, unreleased protection)
+impl TunStatus { pub fn holds_ours(&self) -> bool }                 // the idle status's warning names_leftover
 pub enum Slot { A, B }  impl Slot { pub fn other(self) -> Slot }
 pub enum SwitchOutcome { Success, Cancelled, Failed }
 pub enum SwitchPhase { Stage, Probe, Select, Confirm, Commit, Restore, ConfirmPrevious, StopCandidate,
@@ -136,7 +140,8 @@ pub struct TunnelSnapshot { pub version: u8, pub revision: u64, pub state: Tunne
     pub started_at: Option<UnixMs>, pub competing_tun: Option<String>, pub cleanup_required: bool,
     pub operation: Option<OpMeta> }                                  // serde camelCase (old wire shape)
 pub struct Evidence { pub running: bool, pub pid: Option<u32>, pub soft_applied: bool, pub started_at: Option<UnixMs>,
-    pub proxy_capture: bool }                                       // the running engine serves Soft (TunStatus::capture)
+    pub proxy_capture: bool,                                        // the running engine serves Soft (TunStatus::capture)
+    pub held: bool }                                                // TunStatus::holds_ours, or a failure naming a leftover
 impl Evidence { pub fn from_status(status: &TunStatus, soft_applied: bool) -> Self }
 pub struct Invalid;                                                  // Into<AppError> = Conflict
 impl Fsm { new, snapshot, can_start, can_rotate,
@@ -153,6 +158,9 @@ impl Fsm { new, snapshot, can_start, can_rotate,
 Proofs: Hard = our engine with a real PID and the TUN capture; Soft (NOADMIN.md §2) = our engine
 with the proxy capture AND the applied tweaks (`soft_applied`); the mode follows `proxy_capture`.
 A connect while connected is refused in both modes (the old Soft refresh is gone).
+A failed connect ends `Disconnected` (nothing to clean, «Подключить») only for Network /
+Internal / Conflict with clean evidence, nothing `held`, no fault, and a start that did not begin
+in `Error` (review speed2-a1/b1); otherwise `Error` with its cleanup («Снять защиту»).
 Used inside the lifecycle; others only read `TunnelSnapshot` (`Lifecycle::snapshot()`). A start-up
 fault is seeded with `fault(FaultState::Unknown, ..)` on a fresh machine (the lifecycle's `fault`).
 `fsm::Evidence` (OS evidence) is unrelated to `outcome::Evidence` (session facts in history).
@@ -300,6 +308,9 @@ impl Lifecycle {
     pub async fn reopen(&self) -> bool;
     pub fn snapshot(&self) -> watch::Receiver<TunnelSnapshot>;
     pub fn session(&self) -> watch::Receiver<Option<SessionView>>;
+    pub fn session_key(&self) -> Option<[u8; 16]>;                   // Profile::identity of the key the live
+                                                                     // session dialled (None: idle, local proxy,
+                                                                     // adopted run); speed2-a4
     pub fn events(&self) -> broadcast::Receiver<SessionEvent>;
     pub fn busy(&self) -> bool;  pub async fn idle(&self);         // idle: no lane operation in flight (callers bound it)
     pub fn kept_by(&self) -> Option<Owner>;                          // holder of the session a keep_protection stop

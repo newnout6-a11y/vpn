@@ -15,6 +15,7 @@ use vpnte_tunnel::fsm::TunnelSnapshot;
 use vpnte_winnet::adapters;
 
 use super::pace::Pace;
+use super::project::ForeignSeen;
 use super::{Hub, project};
 use crate::support::blocking;
 
@@ -198,13 +199,16 @@ async fn foreign_feed(hub: Arc<Hub>, cancel: CancellationToken) {
     }
 }
 
-/// The first foreign tunnel adapter as `name (ip)`, route conflicts first (our own TUN aliases
-/// are not foreign); `None` when the adapter table cannot be read.
-fn scan_foreign() -> Option<String> {
+/// The first foreign tunnel adapter, route conflicts first (our own TUN aliases are not
+/// foreign); `None` when the adapter table cannot be read.
+fn scan_foreign() -> Option<ForeignSeen> {
     let own = adapters::alias::all_aliases();
     let own: Vec<&str> = own.iter().map(String::as_str).collect();
     match adapters::foreign_tun::detect(None, &own) {
-        Ok(found) => found.first().map(|f| f.label()),
+        Ok(found) => found.first().map(|f| ForeignSeen {
+            label: f.label(),
+            default_route: f.severity == adapters::foreign_tun::Severity::Conflict,
+        }),
         Err(err) => {
             tracing::debug!(%err, "adapter table unreadable: no foreign VPN scan");
             None

@@ -154,6 +154,11 @@ pub trait TunnelOps: Send + Sync + 'static {
     fn snapshot(&self) -> watch::Receiver<TunnelSnapshot>;
     /// The open session (holder, server, mode, start); `None` while idle.
     fn session(&self) -> watch::Receiver<Option<SessionView>>;
+    /// Identity (`Profile::identity`) of the key the open session dialled; `None` while idle,
+    /// for a local proxy or when not known.
+    fn session_key(&self) -> Option<[u8; 16]> {
+        None
+    }
     /// Runtime details: restart attempt, warning, proxy reachability, profile, start time. Its
     /// `session` field holds the Clash secret and proxy passwords: never log or display it.
     fn runtime_status(&self) -> watch::Receiver<TunStatus>;

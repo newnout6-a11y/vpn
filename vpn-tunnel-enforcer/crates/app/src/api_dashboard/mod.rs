@@ -118,8 +118,8 @@ struct Local {
     geo: Option<(IpAddr, Iso2)>,
     /// The lookup in flight and the address it is for.
     geo_job: Option<(IpAddr, CancellationToken)>,
-    /// Another VPN's adapter (`name (ip)`), from the last scan.
-    foreign: Option<String>,
+    /// Another VPN's adapter, from the last scan.
+    foreign: Option<project::ForeignSeen>,
     /// Warnings of lane calls that ended while a cancel was pending (the cancel's answer).
     cancel_warnings: Vec<Msg>,
     /// Clock anchor of the snapshot's lane operation, taken when it was first seen.
@@ -234,7 +234,8 @@ impl Hub {
                 let (exit, exit_country) =
                     project::exit_ip(&snap, &evidence, local.geo, prefs.lang);
                 let kill_switch = w.kill_switch.borrow();
-                let other_vpn = local.foreign.is_some() || kill_switch.foreign_vpn.is_some();
+                let other_vpn =
+                    project::other_vpn(local.foreign.as_ref(), kill_switch.foreign_vpn.is_some());
                 let same_exit = project::other_vpn_exit(&snap, &evidence, other_vpn);
                 drop(evidence);
                 let exit = if same_exit {
@@ -243,7 +244,7 @@ impl Hub {
                     exit
                 };
                 DashboardView {
-                    foreign_vpn: project::foreign_vpn(&conn, local.foreign.as_deref()),
+                    foreign_vpn: project::foreign_vpn(&conn, local.foreign.as_ref()),
                     engine: project::engine_line(&status),
                     conn,
                     exit,

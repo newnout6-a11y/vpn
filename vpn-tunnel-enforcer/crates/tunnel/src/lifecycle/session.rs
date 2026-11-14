@@ -121,6 +121,10 @@ pub(super) struct LiveSession {
     /// Soft, kill switch `off`: a long crash-restart wait rolled the tweaks back; they return
     /// with the next run (NOADMIN §2: never a system proxy on a dead port for long).
     pub soft_paused: bool,
+    /// Identity of the key the run dialled (`Profile::identity`); `None` for a local proxy or a
+    /// run the lifecycle adopted. Review speed2-a4: a key check credits the session only while
+    /// the row still holds this key.
+    pub key: Option<[u8; 16]>,
 }
 
 impl LiveSession {
@@ -142,6 +146,7 @@ impl LiveSession {
             transition: None,
             proxy_down: false,
             soft_paused: false,
+            key: None,
         }
     }
 

@@ -720,3 +720,29 @@ async fn session_events() {
         (Owner::Schedule, OutcomeKind::UserStop, false)
     );
 }
+
+/// Review speed2-a4: the live session names the identity of the key it dialled (a key check
+/// credits the session only while the row still holds that key); a stop clears it and a local
+/// proxy has none.
+#[tokio::test]
+async fn the_session_names_the_key_it_dialled() {
+    let h = Harness::new();
+    h.profiles.add("srv-de", "de-1", true);
+    h.lc.connect(super::direct(None, Owner::Manual))
+        .await
+        .expect("connect");
+    h.settle().await;
+    let dialled = super::fakes::server("srv-de", "de-1")
+        .server
+        .profile
+        .identity();
+    assert_eq!(h.lc.session_key(), Some(dialled));
+    h.lc.disconnect(user_stop()).await.expect("stop");
+    h.settle().await;
+    assert_eq!(h.lc.session_key(), None);
+    h.lc.connect(local(Owner::Manual))
+        .await
+        .expect("local proxy");
+    h.settle().await;
+    assert_eq!(h.lc.session_key(), None);
+}

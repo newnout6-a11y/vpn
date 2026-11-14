@@ -167,6 +167,49 @@ fn only_plain_rules_count_as_kept() {
     assert_eq!(kept_space(crafted, &copy), Err(OutOfBounds::Shrunk));
 }
 
+/// Review speed2-b3: a copy name counts as kept only in a form that matches the same hosts:
+/// every name exact (subdomains lost) or every name but the canaries as `.name` (the names
+/// themselves lost) is a shrunk list; a covering parent suffix keeps what it covers.
+#[test]
+fn a_name_is_kept_only_in_a_form_that_matches_the_same_hosts() {
+    let canaries = ["tvrain.ru", "echo.msk.ru", "rutracker.org", "linkedin.com"];
+    let others = [
+        "novayagazeta.ru",
+        "meduza.io",
+        "zona.media",
+        "dw.com",
+        "bbc.com",
+        "x.com",
+    ];
+    let all: Vec<&str> = canaries.iter().chain(&others).copied().collect();
+    let copy = sites(&all);
+    let exact = serde_json::json!({"rules": [{"domain": all}]}).to_string();
+    assert_eq!(kept_names(&exact, &copy), Err(OutOfBounds::Shrunk), "exact");
+    let dotted: Vec<String> = others.iter().map(|n| format!(".{n}")).collect();
+    let subs = serde_json::json!({"rules": [
+        {"domain_suffix": canaries}, {"domain_suffix": dotted}]})
+    .to_string();
+    assert_eq!(
+        kept_names(&subs, &copy),
+        Err(OutOfBounds::Shrunk),
+        "subdomains only"
+    );
+    assert_eq!(kept_names(&copy, &copy), Ok(()));
+    let parents = serde_json::json!({"rules": [{"domain_suffix": ["ru", "org", "com"]},
+        {"domain_suffix": ["meduza.io", "zona.media"]}]})
+    .to_string();
+    assert_eq!(kept_names(&parents, &copy), Ok(()), "covering suffixes");
+    let copy = serde_json::json!({"rules": [{"domain": ["a.example.org"]},
+        {"domain_suffix": [".b.example.org"]}]})
+    .to_string();
+    let suffix = sites(&["example.org"]);
+    assert_eq!(
+        kept_names(&suffix, &copy),
+        Ok(()),
+        "exact and subdomains under a suffix"
+    );
+}
+
 /// The release's own files pass their bounds against themselves; a missing reference judges
 /// nothing.
 #[tokio::test]

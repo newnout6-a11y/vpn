@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use tokio::sync::{broadcast, watch};
 use vpnte_base::types::{AdaptiveMode, Owner};
+use vpnte_tunnel::fsm::TunnelSnapshot;
 use vpnte_tunnel::lifecycle::{
     ConnError, ConnectReq, DisconnectReq, Done, Lifecycle, SessionEvent, SessionView, SwitchReq,
 };
@@ -20,6 +21,8 @@ pub trait Lane: Send + Sync + 'static {
         owner: Owner,
     ) -> Result<Done, ConnError>;
     fn session(&self) -> watch::Receiver<Option<SessionView>>;
+    /// The published connection state (the lifecycle's FSM snapshot).
+    fn snapshot(&self) -> watch::Receiver<TunnelSnapshot>;
     fn events(&self) -> broadcast::Receiver<SessionEvent>;
     fn busy(&self) -> bool;
     /// Resolves once no lane operation is in flight (callers bound it).
@@ -58,6 +61,10 @@ impl Lane for Lifecycle {
 
     fn session(&self) -> watch::Receiver<Option<SessionView>> {
         Lifecycle::session(self)
+    }
+
+    fn snapshot(&self) -> watch::Receiver<TunnelSnapshot> {
+        Lifecycle::snapshot(self)
     }
 
     fn events(&self) -> broadcast::Receiver<SessionEvent> {

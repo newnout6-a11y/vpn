@@ -80,6 +80,7 @@ pub(in crate::lifecycle) async fn switch(
     if let Some(mut receipt) = in_place {
         let up = Up::Run {
             profile,
+            key: Some(choice.server.profile.identity()),
             country: choice.country,
             generation: None,
             engine: receipt.engine,
@@ -103,6 +104,7 @@ pub(in crate::lifecycle) async fn switch(
         Ok(receipt) => {
             let up = Up::Run {
                 profile,
+                key: Some(choice.server.profile.identity()),
                 country: choice.country,
                 generation: Some(receipt.generation),
                 engine: Some(receipt.engine),
@@ -195,6 +197,7 @@ pub(in crate::lifecycle) async fn restart_adaptive(
             let up = match choice {
                 Some(choice) => Up::Run {
                     profile: server_profile(&choice.server, running_capture(deps)),
+                    key: Some(choice.server.profile.identity()),
                     country: choice.country,
                     generation: Some(receipt.generation),
                     engine: Some(receipt.engine),

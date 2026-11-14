@@ -18,6 +18,7 @@ use vpnte_core::settings::Settings;
 use vpnte_core::store::Store;
 use vpnte_servers::model::ProfileId;
 use vpnte_servers::store::{AddTarget, Servers};
+use vpnte_tunnel::fsm::{TunnelSnapshot, TunnelState};
 use vpnte_tunnel::history::SessionMode;
 use vpnte_tunnel::lifecycle::{
     ConnError, ConnectReq, ConnectTarget, DisconnectReq, Done, SessionEvent, SessionView,
@@ -28,6 +29,7 @@ use vpnte_tunnel::outcome::OutcomeKind;
 use super::pure::view;
 use crate::api_settings::test_support::TempDir;
 use crate::svc_auto::coord::{AppCoordinator, Detect};
+use crate::svc_auto::direct::DirectCheck;
 use crate::svc_auto::events;
 use crate::svc_auto::lane::Lane;
 use crate::svc_core::notify::Notifier;
@@ -56,6 +58,22 @@ pub struct FakeLane {
     pub hold_until_released: AtomicBool,
     /// The next connect fails with this error (a start the runtime refused).
     pub connect_fails: Mutex<Option<ConnError>>,
+    /// The published connection state (clean `Disconnected` unless a test says otherwise).
+    pub snapshot: watch::Sender<TunnelSnapshot>,
+}
+
+/// The direct check of a silent exit proof, answering as told (tests never go online).
+pub struct FakeDirect {
+    pub online: AtomicBool,
+    pub asked: AtomicU64,
+}
+
+#[async_trait]
+impl DirectCheck for FakeDirect {
+    async fn online(&self) -> bool {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        self.online.load(Ordering::SeqCst)
+    }
 }
 
 impl FakeLane {
@@ -72,6 +90,7 @@ impl FakeLane {
             connect_hangs: AtomicBool::new(false),
             hold_until_released: AtomicBool::new(false),
             connect_fails: Mutex::new(None),
+            snapshot: watch::Sender::new(TunnelSnapshot::default()),
         })
     }
 
@@ -193,6 +212,10 @@ impl Lane for FakeLane {
         self.session.subscribe()
     }
 
+    fn snapshot(&self) -> watch::Receiver<TunnelSnapshot> {
+        self.snapshot.subscribe()
+    }
+
     fn events(&self) -> broadcast::Receiver<SessionEvent> {
         self.events.subscribe()
     }
@@ -222,6 +245,7 @@ pub struct Rig {
     pub settings: Arc<Store<Settings>>,
     pub notifier: Arc<Notifier>,
     pub ids: Vec<String>,
+    pub direct: Arc<FakeDirect>,
     dir: TempDir,
 }
 
@@ -256,13 +280,18 @@ pub fn rig(name: &str) -> Rig {
     let lane = FakeLane::new();
     let notifier = Arc::new(Notifier::new(settings.clone()).expect("notifier"));
     let detect: Detect = Arc::new(|| Box::pin(async { None }));
-    let coord = Arc::new(AppCoordinator::new(
+    let direct = Arc::new(FakeDirect {
+        online: AtomicBool::new(true),
+        asked: AtomicU64::new(0),
+    });
+    let coord = AppCoordinator::new(
         lane.clone(),
         servers.clone(),
         notifier.clone(),
         detect,
         false,
-    ));
+    );
+    let coord = Arc::new(coord.with_direct(direct.clone()));
     Rig {
         lane,
         coord,
@@ -270,6 +299,7 @@ pub fn rig(name: &str) -> Rig {
         settings,
         notifier,
         ids,
+        direct,
         dir,
     }
 }
@@ -570,4 +600,50 @@ async fn a_silent_start_marks_its_server_offline() {
         .await
         .expect_err("refused");
     assert_eq!(health(&b), None, "not the server's fault");
+}
+
+/// Review live2-b3: a silent exit proof on a dead network (a captive portal, an outage) is no
+/// dead server. The same echo asked straight gets nothing either: nothing is recorded and the
+/// user reads that the network has no internet. While a block or anything of ours is held the
+/// direct check cannot run: nothing is recorded and the error stays.
+#[tokio::test]
+async fn a_silent_start_on_a_dead_network_blames_no_server() {
+    let r = rig("silent-offline");
+    let a = r.ids[0].clone();
+    let silent = || {
+        ConnError::Failed(vpnte_tunnel::api::TunError::new(
+            ErrorKind::Network,
+            Msg::new("tunnel.runtime.exitSilent"),
+        ))
+    };
+    let health = |id: &str| {
+        r.servers
+            .get(&ProfileId::from(id))
+            .and_then(|row| row.health)
+    };
+    r.direct.online.store(false, Ordering::SeqCst);
+    *r.lane.connect_fails.lock() = Some(silent());
+    let err = r
+        .coord
+        .connect(Owner::Manual, proxy(&a))
+        .await
+        .expect_err("no internet");
+    assert_eq!(err.reason().key, "app.dashboard.noInternet");
+    assert_eq!(health(&a), None, "the server is not blamed");
+    assert_eq!(r.direct.asked.load(Ordering::SeqCst), 1);
+
+    r.direct.online.store(true, Ordering::SeqCst);
+    r.lane.snapshot.send_modify(|s| {
+        s.state = TunnelState::Blocked;
+        s.cleanup_required = true;
+    });
+    *r.lane.connect_fails.lock() = Some(silent());
+    let err = r
+        .coord
+        .connect(Owner::Manual, proxy(&a))
+        .await
+        .expect_err("held block");
+    assert_eq!(err.reason().key, "tunnel.runtime.exitSilent");
+    assert_eq!(health(&a), None, "no direct check under a held block");
+    assert_eq!(r.direct.asked.load(Ordering::SeqCst), 1, "not asked");
 }

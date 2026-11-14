@@ -301,7 +301,7 @@ impl Actor {
                 touched |= !is_connect;
             }
         }
-        self.publish(&terminal(&start.op, Some(error.kind())));
+        self.publish_failed(&terminal(&start.op, Some(error.kind())), &error);
         if !is_connect && touched && self.runtime_recovers() {
             // A planned reconnect that failed under a kill switch that holds counts as a drop
             // (ks-a, research 5.3): the runtime keeps the block and retries, the session stays

@@ -142,6 +142,9 @@ pub struct Evidence {
     pub started_at: Option<UnixMs>,
     /// The running engine captures through its loopback proxy (Soft), not the TUN.
     pub proxy_capture: bool,
+    /// Something of ours is still held although nothing runs (an unproven exit, an unreleased
+    /// protection): [`TunStatus::holds_ours`], or a failure that names it (review speed2-a1/b1).
+    pub held: bool,
 }
 
 impl Evidence {
@@ -153,6 +156,7 @@ impl Evidence {
             soft_applied,
             started_at: status.started_at,
             proxy_capture: status.capture == Some(CaptureKind::Proxy),
+            held: status.holds_ours(),
         }
     }
 
@@ -277,13 +281,17 @@ impl Fsm {
 
     /// `op` failed on the network (the server or the path), inside our own start (lab live-9
     /// L9-1: a config the engine was never given) or on the handshake budget's "retry in N s"
-    /// (review live2-a1), and `e` proves nothing of ours is left: nothing to clean up.
+    /// (review live2-a1), and `e` proves nothing of ours is left: nothing to clean up. A start
+    /// from `Error` owed a cleanup before it began and keeps owing it: the runtime may have
+    /// dropped the memory of a protection it never released (review speed2-a1/b1).
     fn clean_start_failure(&self, op: &OpMeta, e: Option<Evidence>) -> bool {
         let kind = matches!(
             op.category,
             Some(ErrorKind::Network | ErrorKind::Internal | ErrorKind::Conflict)
         );
-        kind && !self.fault && self.can_confirm_stop(e)
+        let owed = self.snap.state == TunnelState::Error;
+        let held = e.is_none_or(|e| e.held);
+        kind && !self.fault && !owed && !held && self.can_confirm_stop(e)
     }
 
     /// Applies `patch`, then re-derives the evidence fields and fails closed on lost proof.

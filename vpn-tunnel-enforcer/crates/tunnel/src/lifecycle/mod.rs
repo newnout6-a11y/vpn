@@ -330,6 +330,7 @@ pub struct Lifecycle {
     tx: mpsc::UnboundedSender<actor::Cmd>,
     snapshot: watch::Receiver<TunnelSnapshot>,
     session: watch::Receiver<Option<SessionView>>,
+    key: watch::Receiver<Option<[u8; 16]>>,
     events: broadcast::Sender<SessionEvent>,
     busy: watch::Receiver<bool>,
     kept_by: watch::Receiver<Option<Owner>>,
@@ -524,6 +525,12 @@ impl Lifecycle {
     /// The live session, if any.
     pub fn session(&self) -> watch::Receiver<Option<SessionView>> {
         self.session.clone()
+    }
+
+    /// Identity (`Profile::identity`) of the key the live session dialled; `None` while idle,
+    /// for a local proxy, or for a run the lifecycle adopted without starting it.
+    pub fn session_key(&self) -> Option<[u8; 16]> {
+        *self.key.borrow()
     }
 
     /// Session changes from now on.

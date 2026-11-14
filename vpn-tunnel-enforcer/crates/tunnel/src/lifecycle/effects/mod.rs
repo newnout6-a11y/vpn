@@ -76,6 +76,8 @@ pub(super) enum Up {
     /// An engine run on `profile` (connect, switch, restart onto a sibling), Hard or Soft.
     Run {
         profile: SessionProfile,
+        /// Identity of the key it dialled (`None`: a local proxy).
+        key: Option<[u8; 16]>,
         country: Option<String>,
         /// New engine run; `None` = the same run continues (in-place upstream switch).
         generation: Option<u64>,
@@ -399,6 +401,7 @@ async fn run_start(
             }
             let up = Up::Run {
                 profile,
+                key: choice.as_ref().map(|c| c.server.profile.identity()),
                 country: choice.and_then(|c| c.country),
                 generation: Some(receipt.generation),
                 engine: Some(receipt.engine),

@@ -3,7 +3,8 @@
     "dashboard": {
       "routeCheck": "Route check",
       "proxiesUnavailable": "External proxies are not available in this build.",
-      "restoreFailed": "The previous Windows proxy settings could not be restored."
+      "restoreFailed": "The previous Windows proxy settings could not be restored.",
+      "noInternet": "This network has no internet: the check failed without the VPN too. Check the network connection."
     }
   }
 }
