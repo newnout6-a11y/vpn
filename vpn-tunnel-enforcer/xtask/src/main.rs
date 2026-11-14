@@ -5,6 +5,8 @@ mod feed;
 mod fetch;
 mod manifest;
 mod notices;
+#[cfg(all(test, windows))]
+mod nsis_webview2;
 #[cfg(windows)]
 mod smoke;
 mod tools;
@@ -17,7 +19,7 @@ const USAGE: &str = "\
 cargo xtask <command>
 
   engines [--offline]   download the pinned engines, verify every hash, fill the dev drop resources/
-                        (the WP-12 lab engine mihomo included: tests use it)
+                        (the WP-12 lab engine mihomo included: tests use it; also the WebView2 bootstrapper)
   verify                check that resources/ holds exactly the pinned engine files
   nsis                  fetch and verify the pinned NSIS, unpack it to target/tools/nsis
   dist [--skip-build] [--bin-dir DIR] [--lab]

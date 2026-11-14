@@ -24,9 +24,27 @@ pub struct Manifest {
     #[serde(default)]
     pub archive: Vec<Archive>,
     #[serde(default)]
+    pub download: Vec<Download>,
+    #[serde(default)]
     pub local: Vec<LocalFile>,
     #[serde(default)]
     pub tool: Vec<Tool>,
+}
+
+/// A single file fetched as-is (no archive), such as Microsoft's WebView2 bootstrapper.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Download {
+    pub id: String,
+    pub version: String,
+    pub url: String,
+    pub sha256: Sha256Hex,
+    /// Exact length in bytes: a wrong file is refused before it is hashed (and the read is bounded by it).
+    pub size: u64,
+    pub license: String,
+    /// Where the file is published (the link to re-pin from).
+    pub source: Option<String>,
+    pub install: RelPath,
 }
 
 /// A downloaded zip archive and the files taken from it.
@@ -168,6 +186,7 @@ impl Manifest {
             .archive
             .iter()
             .map(|a| (&a.id, &a.url))
+            .chain(manifest.download.iter().map(|d| (&d.id, &d.url)))
             .chain(manifest.tool.iter().map(|t| (&t.id, &t.url)))
         {
             ensure!(ids.insert(id.as_str()), "duplicate id `{id}`");
@@ -175,6 +194,9 @@ impl Manifest {
         }
         for archive in &manifest.archive {
             ensure!(!archive.files.is_empty(), "{}: lists no files", archive.id);
+        }
+        for download in &manifest.download {
+            ensure!(download.size > 0, "{}: size must be set", download.id);
         }
         // Windows paths are case-insensitive: two entries differing only in case would overwrite each other.
         let mut installs = BTreeSet::new();
@@ -194,14 +216,19 @@ impl Manifest {
         self
     }
 
-    /// Every pinned install path with what the stage must hold there (archive members, then repo files).
+    /// Every pinned install path with what the stage must hold there (archive members, downloads, then repo
+    /// files).
     pub fn installs(&self) -> impl Iterator<Item = (&RelPath, Expect)> {
         let archived = self
             .archive
             .iter()
             .flat_map(|a| &a.files)
             .map(|f| (&f.install, Expect::Bytes(f.sha256.clone())));
-        archived.chain(self.local.iter().map(|l| {
+        let downloaded = self
+            .download
+            .iter()
+            .map(|d| (&d.install, Expect::Bytes(d.sha256.clone())));
+        archived.chain(downloaded).chain(self.local.iter().map(|l| {
             let pin = l.sha256.clone();
             (
                 &l.install,
@@ -468,6 +495,33 @@ mod tests {
             ]
         );
         assert_eq!(m.tool("nsis").unwrap().version, "3.13");
+        // The WebView2 bootstrapper: Microsoft's file, pinned by URL, hash and size, shipped in resources/.
+        let [wv2] = m.download.as_slice() else {
+            panic!("expected exactly one [[download]], found {:?}", m.download);
+        };
+        assert_eq!(wv2.id, "webview2-bootstrapper");
+        assert_eq!(
+            wv2.install.as_str(),
+            "resources/MicrosoftEdgeWebview2Setup.exe"
+        );
+        assert!(
+            wv2.url
+                .starts_with("https://msedge.sf.dl.delivery.mp.microsoft.com/")
+        );
+        assert!(wv2.url.ends_with("/MicrosoftEdgeWebview2Setup.exe"));
+        assert_eq!(
+            wv2.source.as_deref(),
+            Some("https://go.microsoft.com/fwlink/p/?LinkId=2124703")
+        );
+        assert_eq!(wv2.size, 1_897_688);
+        assert!(
+            wv2.license
+                .starts_with("Microsoft Edge WebView2 Runtime License")
+        );
+        assert!(
+            m.installs()
+                .any(|(p, e)| p == &wv2.install && e == Expect::Bytes(wv2.sha256.clone()))
+        );
         for engine in [
             "sing-box.exe",
             "libcronet.dll",
@@ -541,6 +595,48 @@ mod tests {
         let err = format!("{:#}", verify_stage(&stage, &exact).unwrap_err());
         assert!(err.contains("unexpected empty directory: empty"), "{err}");
         fs::remove_dir_all(&stage).unwrap();
+    }
+
+    fn download(id: &str, install: &str, size: u64) -> String {
+        format!(
+            "[[download]]\nid = \"{id}\"\nversion = \"1\"\nurl = \"https://example.invalid/{id}.exe\"\n\
+             sha256 = \"{HASH_A}\"\nsize = {size}\nlicense = \"Proprietary\"\ninstall = \"{install}\"\n"
+        )
+    }
+
+    /// A `[[download]]` is one pinned file: validated like an archive and staged at its install path.
+    #[test]
+    fn download_entries_are_validated_and_staged() {
+        let m = manifest(&download("d", "resources/d.exe", 10)).unwrap();
+        let stage = m.expected_stage(&[]).unwrap();
+        assert_eq!(
+            stage.get("resources/d.exe"),
+            Some(&Expect::Bytes(
+                Sha256Hex::try_from(HASH_A.to_owned()).unwrap()
+            ))
+        );
+        assert!(
+            manifest(&download("d", "resources/d.exe", 0)).is_err(),
+            "size 0"
+        );
+        assert!(manifest(&download("d", "../d.exe", 10)).is_err());
+        let plain = download("d", "resources/d.exe", 10).replace("https://", "http://");
+        assert!(manifest(&plain).is_err());
+        let missing_size = download("d", "resources/d.exe", 10).replace("size = 10\n", "");
+        assert!(manifest(&missing_size).is_err());
+        let same_id = format!(
+            "{}{}",
+            archive("resources/a.exe"),
+            download("a", "resources/d.exe", 1)
+        );
+        assert!(format!("{:#}", manifest(&same_id).unwrap_err()).contains("duplicate id"));
+        let same_path = format!(
+            "{}{}",
+            archive("resources/a.exe"),
+            download("d", "resources/A.exe", 1)
+        );
+        let err = format!("{:#}", manifest(&same_path).unwrap_err());
+        assert!(err.contains("duplicate install path"), "{err}");
     }
 
     #[test]

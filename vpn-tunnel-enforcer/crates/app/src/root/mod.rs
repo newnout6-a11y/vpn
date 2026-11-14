@@ -50,6 +50,11 @@ pub fn run(args: &Args) -> ExitCode {
     // every app package's fragments, so no package has to chain another package's list. The first
     // registration wins, so this must stay the only call.
     vpnte_ui::lang::init_locales(&svc_core::locale_layers());
+    // Before the backend: no window opens without the WebView2 runtime; a missing one is offered
+    // for this user (p-webview-runtime).
+    if !boot::webview2::ensure(vpnte_ui::lang::os_lang()) {
+        return ExitCode::from(boot::webview2::EXIT_NO_RUNTIME);
+    }
     let backend = match svc_core::build(args) {
         Ok(backend) => backend,
         Err(err) => {

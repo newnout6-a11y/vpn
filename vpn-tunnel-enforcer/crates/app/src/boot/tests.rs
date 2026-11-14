@@ -170,7 +170,12 @@ fn locale_fragments_match_the_code() {
     let ru = fragment_keys(include_str!("../../locales/app-main.ru.json"));
     let en = fragment_keys(include_str!("../../locales/app-main.en.json"));
     assert_eq!(ru, en);
-    let code = [include_str!("mod.rs"), include_str!("../root/mod.rs")].concat();
+    let code = [
+        include_str!("mod.rs"),
+        include_str!("../root/mod.rs"),
+        include_str!("webview2/mod.rs"),
+    ]
+    .concat();
     let used: BTreeSet<String> = code
         .split('"')
         .filter(|s| s.starts_with("app.main.") && !s.ends_with('.'))

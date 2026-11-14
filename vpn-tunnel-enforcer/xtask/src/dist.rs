@@ -199,6 +199,9 @@ fn stage_all(root: &Path, manifest: &Manifest, bin_dir: &Path, stage: &Path) -> 
             )?;
         }
     }
+    for file in &manifest.download {
+        put(file.install.as_str(), &fetch::download(root, file, false)?)?;
+    }
     for local in &manifest.local {
         let raw = fs::read(root.join(local.repo.as_str()))
             .with_context(|| format!("read {}", local.repo))?;

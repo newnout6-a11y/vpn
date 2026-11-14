@@ -182,7 +182,8 @@ $INSTDIR\licenses\sing-box.txt GPL-3.0.txt xray.txt wintun.txt OFL-InterTight.tx
 - D12 Registry = exactly the Electron value set (no Publisher). Install dir: `/D=` if given, else the existing
   `HKLM\Software\{GUID}\InstallLocation` (64-bit view), else `$PROGRAMFILES64\VPN Tunnel Enforcer`; no directory page.
 - D13 WebView2 runtime check: a hint box with the download URL (`/SD IDOK`), never an abort, and no browser opened
-  from the elevated installer.
+  from the elevated installer. Replaced by p-webview-runtime (2026-11-14, section at the end): setup installs a
+  missing runtime for the user.
 - D14 CI: `rust` (fmt, engines + verify, clippy, tests, also for xtask) → `elevated` and `package` in parallel on
   fresh `windows-2025` runners (privileged tests and the installer never share a machine with each other);
   traceability as a 1-minute Ubuntu job (pure Python over `docs/`). Toolchain pinned by `RUST_TOOLCHAIN: 1.99.1`
@@ -416,3 +417,20 @@ A listener on a non-loopback address makes Windows Firewall ask for administrato
   upgrade that each of them opens `<dir>\VPN Tunnel Enforcer.exe --open-link "%1"`, and after the uninstall
   that no scheme points into `<dir>`, the free ones are free again and the record key is gone.
 - Not run here (CI only, changes real per-user state): the installer, the uninstaller, smoke-install.
+
+# Work package `p-webview-runtime` — the WebView2 runtime on a PC without it (2026-11-14)
+- Found by the sandbox lab: a clean Windows (Windows Sandbox, many Windows 10 PCs) has no WebView2 runtime; setup
+  only warned and the app could not open its window.
+- Pin: `[[download]] webview2-bootstrapper` in `resources/engines.toml` (Microsoft's Evergreen bootstrapper,
+  URL + SHA-256 + size, staged as `resources/MicrosoftEdgeWebview2Setup.exe`, so the installer and the portable
+  zip carry it; `cargo xtask engines` puts it into the dev drop). Licence note: `third-party-assets.txt`.
+- Install (`webview2.nsh`, `Function EnsureWebView2`, after the service step): runtime registered (`pv` under
+  `HKLM\SOFTWARE\WOW6432Node\...\Clients\{F3017226-...}` or the HKCU key, not empty / 0.0.0.0) -> one detail
+  line, nothing runs (CI's runners take this path; `smoke-install` prints which). Missing -> status line
+  `WebView2Installing` while `ExecWait "<dir>\resources\MicrosoftEdgeWebview2Setup.exe" /silent /install` runs
+  unelevated (= per-user install, no prompt); exit 0 without registration -> wait up to 120 s (WebView2Feedback
+  #1349); still missing (offline, failed) -> one line `WebView2Later` added to the finish page (silent: detail log
+  only), never a box, never an abort. The app offers the same install at its start (`crates/app/src/boot/webview2`).
+- Tests (xtask `nsis_webview2`): the shipped defines and order; six real runs of the branch compiled with the pinned
+  NSIS against a throw-away HKCU key with stand-ins (reg.exe, a missing exe).
+- Not run here: the real bootstrapper (this PC has the runtime; a run would change real state) -> the sandbox lab.

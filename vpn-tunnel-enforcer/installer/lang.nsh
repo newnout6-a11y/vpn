@@ -22,8 +22,11 @@ LangString PreviousFailed ${LANG_RUSSIAN} "Не удалось удалить п
 LangString FilesBusy ${LANG_ENGLISH} "A file of VPN Tunnel Enforcer is in use and cannot be replaced:"
 LangString FilesBusy ${LANG_RUSSIAN} "Файл VPN Tunnel Enforcer используется и не может быть заменён:"
 
-LangString WebView2Missing ${LANG_ENGLISH} "Microsoft Edge WebView2 Runtime is not installed; VPN Tunnel Enforcer needs it to show its window. Download it from https://developer.microsoft.com/microsoft-edge/webview2/"
-LangString WebView2Missing ${LANG_RUSSIAN} "Не установлен Microsoft Edge WebView2 Runtime — без него окно VPN Tunnel Enforcer не откроется. Скачайте его: https://developer.microsoft.com/microsoft-edge/webview2/"
+; WebView2 (webview2.nsh): one status line while it installs; one finish-page line when it could not be.
+LangString WebView2Installing ${LANG_ENGLISH} "Installing Microsoft Edge WebView2 for the app window…"
+LangString WebView2Installing ${LANG_RUSSIAN} "Устанавливается Microsoft Edge WebView2 для окна приложения…"
+LangString WebView2Later ${LANG_ENGLISH} "Microsoft Edge WebView2 could not be installed now, and the app window needs it. Connect to the internet and start VPN Tunnel Enforcer: it offers to install it."
+LangString WebView2Later ${LANG_RUSSIAN} "Microsoft Edge WebView2 сейчас установить не удалось, а без него окно приложения не откроется. Подключитесь к интернету и запустите VPN Tunnel Enforcer: оно предложит установить его."
 
 LangString NeedsX64 ${LANG_ENGLISH} "VPN Tunnel Enforcer requires 64-bit Windows."
 LangString NeedsX64 ${LANG_RUSSIAN} "Для VPN Tunnel Enforcer нужна 64-разрядная Windows."

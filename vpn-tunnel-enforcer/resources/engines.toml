@@ -2,8 +2,9 @@
 # `cargo xtask engines` downloads each archive, checks its SHA-256, extracts the listed files (each also checked)
 # and fills the development drop resources/ with the members installed under `resources/`; `cargo xtask dist`
 # stages every entry at its `install` path (relative to the installation directory) for packaging.
-# Hash rules: archives and members = raw bytes; [[local]] with `text = true` = the text with LF line endings
-# (staged with CRLF), so the pin does not depend on git's core.autocrlf.
+# Hash rules: archives, members and [[download]] files (one file fetched as-is, its `size` checked too) = raw
+# bytes; [[local]] with `text = true` = the text with LF line endings (staged with CRLF), so the pin does not
+# depend on git's core.autocrlf.
 schema = 2
 
 [[archive]]
@@ -57,6 +58,22 @@ lab = true
 files = [
   { path = "mihomo-windows-amd64-compatible.exe", install = "resources/mihomo.exe", sha256 = "5a0231811a80b27477ebdee15684b41946d01afbd2114534e9a4b256125ca147" },
 ]
+
+# Microsoft's Evergreen WebView2 bootstrapper (the window needs the WebView2 runtime; a clean Windows 10 or Windows
+# Sandbox has none). Run unelevated it installs the runtime for the current user only: the installer runs it
+# silently when the runtime is missing, the app (installed or portable) offers it. Shipped unmodified as
+# Microsoft's distribution docs allow ("package the bootstrapper with your app"). `url` is where Microsoft's link
+# `source` pointed on 2026-11-14 ("Microsoft Edge Update Setup" 1.3.315.17, Authenticode: Microsoft Corporation);
+# when Microsoft replaces the file, re-pin from `source`.
+[[download]]
+id = "webview2-bootstrapper"
+version = "1.3.315.17"
+url = "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/068be74d-a831-494f-8f57-c173756d5a33/MicrosoftEdgeWebview2Setup.exe"
+sha256 = "cf2f2445fef0c5c14e372045f84998771eeb8bb01d59be4afd00692fa160082e"
+size = 1897688
+license = "Microsoft Edge WebView2 Runtime License (distributable code)"
+source = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+install = "resources/MicrosoftEdgeWebview2Setup.exe"
 
 # Smart-RU rule-sets: shipped as local files because a remote rule-set whose first download fails is a fatal
 # sing-box error that takes the whole tunnel down.

@@ -1,4 +1,4 @@
-UI assets embedded in VPN Tunnel Enforcer.exe (hand-kept: cargo metadata cannot see them)
+Other bundled assets (hand-kept: cargo metadata cannot see them)
 
 - Inter Tight and JetBrains Mono fonts: SIL Open Font License 1.1, texts in OFL-InterTight.txt and
   OFL-JetBrainsMono.txt in this folder.
@@ -10,6 +10,14 @@ UI assets embedded in VPN Tunnel Enforcer.exe (hand-kept: cargo metadata cannot 
   v2fly/domain-list-community (MIT License). geosite-ru-blocked.srs and geoip-ru-blocked.srs from
   runetfreedom russia-v2ray-rules-dat (GPL-3.0, https://github.com/runetfreedom/russia-v2ray-rules-dat).
   The full GPL text is GPL-3.0.txt in this folder.
+- Microsoft Edge WebView2 Runtime Evergreen Bootstrapper (resources\MicrosoftEdgeWebview2Setup.exe, "Microsoft
+  Edge Update Setup" 1.3.315.17): Copyright (c) Microsoft Corporation. Redistributed unmodified, as obtained from
+  Microsoft, under the distributable-code terms of the Microsoft Edge WebView2 Runtime License
+  (https://developer.microsoft.com/microsoft-edge/webview2/) and Microsoft's distribution guidance
+  (https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution). Setup and the app run it only
+  when the WebView2 Runtime is missing, without administrator rights, so the runtime is installed for the
+  current user. The WebView2 Runtime is Microsoft software under Microsoft's own terms and may send data to
+  Microsoft as described in the Microsoft Privacy Statement (https://go.microsoft.com/fwlink/?LinkId=521839).
 - flag-icons 7 (country flags, only the flags in use): MIT License, https://github.com/lipis/flag-icons
 
     The MIT License (MIT)

@@ -1,8 +1,8 @@
 //! Process start and end without Dioxus (work package `app-main`): the WebView2 environment of an
 //! elevated run, the panic hook, the single instance, the app identity (AUMID), autostart sync,
-//! start-up failure boxes, power events and the exit codes. The app never runs elevated on purpose
-//! and never relaunches itself elevated (NOADMIN §0): `--no-elevate` / `--elevated-relaunch` are
-//! accepted and mean nothing.
+//! start-up failure boxes, the WebView2 runtime check ([`webview2`]), power events and the exit
+//! codes. The app never runs elevated on purpose and never relaunches itself elevated (NOADMIN §0):
+//! `--no-elevate` / `--elevated-relaunch` are accepted and mean nothing.
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -256,22 +256,24 @@ pub fn exit(code: u8) -> ! {
 }
 
 /// A blocking box for a launch that has no window: `lines` rendered in `lang` as paragraphs,
-/// under the product name.
+/// under the product name. `style` = the icon (an OK button) or buttons and icon; returns the
+/// button pressed.
 fn message_box(
     lines: &[Msg],
     lang: Lang,
-    icon: windows::Win32::UI::WindowsAndMessaging::MESSAGEBOX_STYLE,
-) {
-    use windows::Win32::UI::WindowsAndMessaging::{MB_OK, MB_SETFOREGROUND, MessageBoxW};
+    style: windows::Win32::UI::WindowsAndMessaging::MESSAGEBOX_STYLE,
+) -> windows::Win32::UI::WindowsAndMessaging::MESSAGEBOX_RESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_SETFOREGROUND, MessageBoxW};
     // Idempotent: the window path registers the same layers before launch.
     vpnte_ui::lang::init_locales(&crate::svc_core::locale_layers());
     let text: Vec<String> = lines.iter().map(|line| line.render(lang)).collect();
     let text = windows::core::HSTRING::from(text.join("\n\n"));
     let caption = windows::core::HSTRING::from(vpnte_ui::launch::APP_NAME);
     // SAFETY: both strings are NUL-terminated HSTRINGs that outlive the call; no owner window.
-    unsafe { MessageBoxW(None, &text, &caption, MB_OK | icon | MB_SETFOREGROUND) };
+    unsafe { MessageBoxW(None, &text, &caption, style | MB_SETFOREGROUND) }
 }
 
 pub mod service;
 #[cfg(test)]
 mod tests;
+pub mod webview2;

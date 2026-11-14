@@ -5,6 +5,14 @@
       "startFailed": {
         "title": "Не удалось открыть VPN Tunnel Enforcer",
         "message": "Запуск остановлен. Сохранённые настройки не заменены пустыми данными."
+      },
+      "webview2": {
+        "missing": "Для окна VPN Tunnel Enforcer нужен Microsoft Edge WebView2, а на этом компьютере его пока нет.",
+        "offer": "Установить его сейчас? Это займёт минуту-другую, права администратора не нужны.",
+        "installing": "Устанавливается Microsoft Edge WebView2…",
+        "pending": "Microsoft Edge WebView2 ещё устанавливается. Запустите VPN Tunnel Enforcer снова через минуту.",
+        "offline": "Не удалось скачать Microsoft Edge WebView2: нет связи с сервером Microsoft. Подключитесь к интернету и запустите VPN Tunnel Enforcer снова.",
+        "failed": "Microsoft Edge WebView2 не установлен (код {{code}}). Запустите VPN Tunnel Enforcer снова, чтобы повторить."
       }
     }
   }

@@ -56,6 +56,7 @@ pub fn run(root: &Path) -> Result<()> {
     );
 
     let free = free_link_schemes();
+    report_webview2();
     step("install", || expect_exit(&installer, &["/S"], 0))?;
     check_installed(&dir, &stage, &version)?;
     check_links_registered(&dir, &free)?;
@@ -75,6 +76,23 @@ pub fn run(root: &Path) -> Result<()> {
     check_links_removed(&dir, &free)?;
     println!("smoke-install: OK");
     Ok(())
+}
+
+/// Which way the installer's WebView2 branch (`installer/webview2.nsh`, the same keys) goes here: CI's runners
+/// have the runtime, so setup skips Microsoft's bootstrapper (the branch's decisions: `nsis_webview2` tests).
+fn report_webview2() {
+    const CLIENT: &str = r"Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+    let pv = |key: windows_registry::Result<windows_registry::Key>| {
+        let version = key.and_then(|k| k.get_string("pv")).ok()?;
+        (!version.is_empty() && version != "0.0.0.0").then_some(version)
+    };
+    let machine = LOCAL_MACHINE.open(format!(r"SOFTWARE\WOW6432Node\{CLIENT}"));
+    match pv(machine).or_else(|| pv(CURRENT_USER.open(format!(r"Software\{CLIENT}")))) {
+        Some(version) => {
+            println!("  WebView2 runtime {version} registered: setup skips its install")
+        }
+        None => println!("  no WebView2 runtime registered: setup runs the pinned bootstrapper"),
+    }
 }
 
 fn step(name: &str, f: impl FnOnce() -> Result<()>) -> Result<()> {

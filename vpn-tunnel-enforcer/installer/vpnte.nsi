@@ -40,6 +40,7 @@ AllowSkipFiles off
 !include WinVer.nsh
 !include FileFunc.nsh
 !include WordFunc.nsh
+!include "webview2.nsh"
 
 !define PRODUCT "VPN Tunnel Enforcer"
 !define EXE "VPN Tunnel Enforcer.exe"
@@ -50,7 +51,6 @@ AllowSkipFiles off
 !define KEY_UNINSTALL "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_GUID}"
 !define DESCRIPTION "Force all traffic through VPN Happ — Hard (TUN) or Soft (Autoconfig) mode with IP leak monitoring"
 !define HELPER "$PLUGINSDIR\vpnte-setup.exe"
-!define WV2_CLIENT "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 !define SHCNE_ASSOCCHANGED 0x08000000
 
 Name "${PRODUCT}"
@@ -66,6 +66,9 @@ ShowUninstDetails hide
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_FUNCTION RunApp
+; A WebView2 runtime that could not be installed adds one line here (webview2.nsh): no extra box to click.
+!define MUI_FINISHPAGE_TEXT "$(MUI_TEXT_FINISH_INFO_TEXT)$WebView2Note"
+!define MUI_FINISHPAGE_TEXT_LARGE
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -181,7 +184,7 @@ Section "Install"
   Call CreateShortcuts
   Call RegisterLinks
   Call InstallService
-  Call CheckWebView2
+  Call EnsureWebView2
   Call MachineWideNotice
   ${If} ${Silent}
   ${AndIf} $ForceRun == 1
@@ -316,20 +319,6 @@ Function CreateShortcuts
   nsExec::Exec '"$SYSDIR\ie4uinit.exe" -show'
   Pop $0
   ${EnableX64FSRedirection}
-FunctionEnd
-
-; The UI needs the Evergreen WebView2 runtime (preinstalled on Windows 11). Only a hint: never abort.
-Function CheckWebView2
-  ReadRegStr $0 HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\${WV2_CLIENT}" "pv"
-  ${If} $0 == ""
-  ${OrIf} $0 == "0.0.0.0"
-    ReadRegStr $0 HKCU "Software\Microsoft\EdgeUpdate\Clients\${WV2_CLIENT}" "pv"
-  ${EndIf}
-  ${If} $0 == ""
-  ${OrIf} $0 == "0.0.0.0"
-    DetailPrint "WebView2 runtime not found"
-    MessageBox MB_OK|MB_ICONEXCLAMATION "$(WebView2Missing)" /SD IDOK
-  ${EndIf}
 FunctionEnd
 
 ; Starts the installed app as this user, unelevated (contract: `launch-as-user`).

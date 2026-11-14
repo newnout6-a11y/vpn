@@ -1,4 +1,4 @@
-//! Pinned downloads: `target/download-cache/<sha256>.zip` is fetched once and verified before every use; zip
+//! Pinned downloads: `target/download-cache/<sha256>.<ext>` is fetched once and verified before every use; zip
 //! members are read by exact name and checked against their own pin before anything is written.
 use std::fs;
 use std::io::{Cursor, Read};
@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 use zip::ZipArchive;
 
-use crate::manifest::{RelPath, Sha256Hex};
+use crate::manifest::{Download, RelPath, Sha256Hex};
 
 /// An opened, verified zip archive held in memory.
 pub type Zip = ZipArchive<Cursor<Vec<u8>>>;
@@ -20,10 +20,58 @@ pub fn cached(
     sha256: &Sha256Hex,
     offline: bool,
 ) -> Result<Vec<u8>> {
+    let pin = Pin {
+        id,
+        url,
+        sha256,
+        size: None,
+        ext: "zip",
+    };
+    fetch_pinned(root, &pin, offline)
+}
+
+/// Returns the verified bytes of a `[[download]]` file (its size is checked too), from the cache when it
+/// holds a valid copy.
+pub fn download(root: &Path, file: &Download, offline: bool) -> Result<Vec<u8>> {
+    let ext = Path::new(file.install.as_str())
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin");
+    let pin = Pin {
+        id: &file.id,
+        url: &file.url,
+        sha256: &file.sha256,
+        size: Some(file.size),
+        ext,
+    };
+    fetch_pinned(root, &pin, offline)
+}
+
+/// What one cached download must be.
+struct Pin<'a> {
+    id: &'a str,
+    url: &'a str,
+    sha256: &'a Sha256Hex,
+    size: Option<u64>,
+    /// Extension of the cache file (`<sha256>.<ext>`).
+    ext: &'a str,
+}
+
+impl Pin<'_> {
+    fn matches(&self, bytes: &[u8]) -> bool {
+        self.size.is_none_or(|size| bytes.len() as u64 == size)
+            && Sha256Hex::of(bytes) == *self.sha256
+    }
+}
+
+fn fetch_pinned(root: &Path, pin: &Pin<'_>, offline: bool) -> Result<Vec<u8>> {
+    let Pin {
+        id, url, sha256, ..
+    } = *pin;
     let cache = root.join("target/download-cache");
-    let path = cache.join(format!("{sha256}.zip"));
+    let path = cache.join(format!("{sha256}.{}", pin.ext));
     if let Ok(bytes) = fs::read(&path) {
-        if Sha256Hex::of(&bytes) == *sha256 {
+        if pin.matches(&bytes) {
             return Ok(bytes);
         }
         println!(
@@ -40,9 +88,17 @@ pub fn cached(
         .with_context(|| format!("download {url}"))?
         .body_mut()
         .with_config()
-        .limit(256 * 1024 * 1024)
+        // One byte over the pinned size is enough to refuse a different file.
+        .limit(pin.size.map_or(256 * 1024 * 1024, |size| size + 1))
         .read_to_vec()
         .with_context(|| format!("read {url}"))?;
+    if let Some(size) = pin.size {
+        ensure!(
+            bytes.len() as u64 == size,
+            "{id}: size mismatch (pinned {size} bytes, downloaded {})",
+            bytes.len()
+        );
+    }
     let actual = Sha256Hex::of(&bytes);
     // Checked before the bytes are cached or unpacked: a swapped release asset never reaches the disk.
     ensure!(
@@ -76,4 +132,46 @@ pub fn member(zip: &mut Zip, id: &str, path: &RelPath, sha256: &Sha256Hex) -> Re
         "{id}: {path} hash mismatch (pinned {sha256}, extracted {actual})"
     );
     Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pin(bytes: &[u8], size: u64) -> Download {
+        Download {
+            id: "wv2".to_owned(),
+            version: "1".to_owned(),
+            url: "https://example.invalid/setup.exe".to_owned(),
+            sha256: Sha256Hex::of(bytes),
+            size,
+            license: "Proprietary".to_owned(),
+            source: None,
+            install: RelPath::try_from("resources/setup.exe".to_owned()).unwrap(),
+        }
+    }
+
+    /// A pinned single file comes from the cache only when both its size and its hash match; offline,
+    /// anything else is refused instead of fetched.
+    #[test]
+    fn download_uses_only_a_cached_copy_of_the_pinned_size_and_hash() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/xtask/test-scratch/fetch-download");
+        let _ = fs::remove_dir_all(&root);
+        let bytes = b"bootstrapper";
+        let file = pin(bytes, bytes.len() as u64);
+        let err = format!("{:#}", download(&root, &file, true).unwrap_err());
+        assert!(err.contains("not in the download cache"), "{err}");
+
+        let cache = root.join("target/download-cache");
+        fs::create_dir_all(&cache).unwrap();
+        let cached = cache.join(format!("{}.exe", file.sha256));
+        fs::write(&cached, bytes).unwrap();
+        assert_eq!(download(&root, &file, true).unwrap(), bytes);
+        // The same bytes under a pin of another size are not the pinned file.
+        assert!(download(&root, &pin(bytes, 13), true).is_err());
+        fs::write(&cached, b"swapped file").unwrap();
+        assert!(download(&root, &file, true).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
 }

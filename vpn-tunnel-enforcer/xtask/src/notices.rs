@@ -194,6 +194,18 @@ pub fn render(root: &Path, manifest: &Manifest, meta: &Metadata, version: &str) 
             None => out.push('\n'),
         }
     }
+    // Proprietary redistributables: the hand-kept notes below carry their terms.
+    for file in &manifest.download {
+        let from = file
+            .source
+            .as_deref()
+            .map(|s| format!("; published at {s}"))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "- {} {}: {}{from}; see the notes below\n",
+            file.id, file.version, file.license
+        ));
+    }
     let assets = fs::read(root.join(ASSETS)).with_context(|| format!("read {ASSETS}"))?;
     out.push('\n');
     out.push_str(String::from_utf8_lossy(&manifest::normalize_text(&assets)).trim_end());
@@ -339,6 +351,15 @@ mod tests {
         );
         assert!(text.contains("source: https://github.com/SagerNet/sing-box/tree/v1.14.4"));
         assert!(text.contains("flag-icons"));
+        assert!(
+            text.contains(
+                "- webview2-bootstrapper 1.3.315.17: Microsoft Edge WebView2 Runtime License \
+                 (distributable code); published at https://go.microsoft.com/fwlink/p/?LinkId=2124703; \
+                 see the notes below\n"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("resources\\MicrosoftEdgeWebview2Setup.exe"));
         assert!(
             text.contains(
                 "==== deep 1.0.0 (LICENSE), linked 1.0.0 (LICENSE-MIT) ====\n\nMIT text\n"
