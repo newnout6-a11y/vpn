@@ -156,10 +156,14 @@ jobs:
       # fixes (a failed upgrade starts the service again; "Always" filters go before the service),
       # uninstall. It also builds the service exe the app's end-to-end test installs next.
       - name: 'service: install, pipe, TUN session, upgrade, uninstall'
+        # A step limit, not only the job's: a hang then fails this step and its log is kept.
+        timeout-minutes: 15
         run: cargo test -p vpnte-service --locked -- --ignored elevated_ --test-threads=1 --nocapture
       - name: 'app: Tunnel mode through the installed service (end to end)'
+        timeout-minutes: 15
         run: cargo test -p vpnte-app --lib --locked -- --ignored elevated_remote --test-threads=1 --nocapture
       - name: Tests that need elevation
+        timeout-minutes: 25
         run: cargo test --workspace --locked --no-fail-fast -- --ignored --test-threads=1
 
   package:
