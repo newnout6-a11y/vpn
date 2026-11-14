@@ -32,7 +32,10 @@ pub use route::{
     BestRoute, DefaultRoute, Route, alias_of, best_route, default_route, interface_mtu,
     route_proof, routes,
 };
-pub use tun::{OwnedTun, Release, TunAdapterError, adapter_present, wait_owned_tun, wait_released};
+pub use tun::{
+    OwnedTun, Release, TunAdapterError, TunSettle, adapter_present, tun_settle, wait_owned_tun,
+    wait_released,
+};
 pub use watch::{NetChange, NetChangeKind, watch_network};
 
 /// Our TUN's IPv4 (sing-box side, also the gateway) in its /30. Disguised as "another LAN" on

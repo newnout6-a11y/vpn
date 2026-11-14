@@ -836,6 +836,45 @@ async fn a_silent_recovery_start_fails_over_next() {
     assert_eq!(*siblings.committed.lock(), ["c"]);
 }
 
+/// speed3 S3-03 (feasibility and security reviews): with the kill switch Off a crash recovery of
+/// the same server starts its core beside the proof (it carried this user's traffic until the
+/// crash), while a failover sibling keeps the order: proof first, nobody routed into a server
+/// that never carried this user's traffic.
+#[tokio::test]
+async fn with_the_kill_switch_off_a_failover_sibling_proves_before_its_core() {
+    let w = World::new();
+    *w.guard.lock() = vpnte_base::types::KillSwitchLevel::Off;
+    let siblings = Arc::new(Siblings {
+        world: w.clone(),
+        left: Mutex::new(vec![(sibling(XRAY_KEY_2, "c"), false)]),
+        committed: Mutex::new(Vec::new()),
+    });
+    let mut d = deps(&w);
+    d.failover = Some(siblings.clone());
+    let h = TunnelHandle::spawn(d);
+    let mut events = h.subscribe();
+    let req = StartRequest {
+        kill_switch: vpnte_base::types::KillSwitchLevel::Off,
+        ..vpn_req(XRAY_KEY, EnginePref::Xray)
+    };
+    h.start(req, CancellationToken::new()).await.unwrap();
+    drain(&mut events);
+    w.proofs_silent.store(1, Ordering::SeqCst);
+    w.core(0).crash();
+    let failed_over = |e: &TunnelEvent| matches!(e, TunnelEvent::FailedOver { .. });
+    until(&mut events, failed_over).await;
+    let log = w.log();
+    let at = |what: &str| log.iter().position(|l| l == what);
+    // The own server's recovery: its core came up beside the silent proof and was stopped.
+    assert!(
+        at("spawn:4101").is_some() && at("terminate:4101").is_some(),
+        "{log:?}"
+    );
+    // The sibling: its proof before its core.
+    assert!(at("egress-via:203.0.113.11") < at("spawn:4102"), "{log:?}");
+    assert!(h.status().borrow().running);
+}
+
 /// b8: a crash inside the freeze window fails over at once. A candidate that does not start is
 /// never announced; the sibling that starts is named for the session right before its run's
 /// finish (`FailedOver`), committed, and announced once to the user after it started.

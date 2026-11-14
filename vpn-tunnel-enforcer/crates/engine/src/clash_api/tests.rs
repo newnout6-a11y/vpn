@@ -310,3 +310,58 @@ async fn real_controller_round_trip() {
         Err(ClashError::Transport(_) | ClashError::Timeout)
     ));
 }
+
+/// A loopback DNS server that answers every A question with 203.0.113.77 (TTL 60) and counts
+/// the questions it got.
+async fn dns_stub() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = socket.local_addr().unwrap().port();
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = asked.clone();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 512];
+        while let Ok((n, from)) = socket.recv_from(&mut buf).await {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let query = &buf[..n];
+            let qtype = query.get(n.saturating_sub(4)..n.saturating_sub(2));
+            let a = qtype == Some(&[0, 1]);
+            let mut reply = query[..2].to_vec();
+            reply.extend_from_slice(&[0x81, 0x80, 0, 1, 0, u8::from(a), 0, 0, 0, 0]);
+            reply.extend_from_slice(&query[12..]);
+            if a {
+                reply.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4]);
+                reply.extend_from_slice(&[203, 0, 113, 77]);
+            }
+            let _ = socket.send_to(&reply, from).await;
+        }
+    });
+    (port, asked)
+}
+
+/// speed3 S3-05 (feasibility review): `dns_query` reaches the real sing-box's DNS router, which
+/// asks its `final` server (here a loopback stub, as `dns-remote` would be the DoH server through
+/// the tunnel) and answers; a typed error alone would always pass in CI.
+#[tokio::test]
+async fn a_dns_query_goes_through_the_engines_router() {
+    let Some(exe) = singbox_exe() else { return };
+    let (stub, asked) = dns_stub().await;
+    let clash = ClashEndpoint::allocate(&[]).unwrap();
+    let mixed = ports::alloc_port(false, &[clash.port]).unwrap();
+    let creds = ports::creds();
+    let mut config: Value =
+        serde_json::from_slice(&singbox_config(mixed, &creds, Some(&clash))).unwrap();
+    config["dns"] = serde_json::json!({
+        "servers": [{ "type": "udp", "tag": "dns-remote", "server": "127.0.0.1", "server_port": stub }],
+        "final": "dns-remote",
+        "strategy": "ipv4_only"
+    });
+    let config = serde_json::to_vec(&config).unwrap();
+    let sb = SingBoxProcess::spawn(&exe, &config, None).unwrap();
+    sb.wait_ready(READY_TIMEOUT, &CancellationToken::new())
+        .await
+        .unwrap();
+    let api = ClashApi::new(&clash).unwrap();
+    api.dns_query("www.msftconnecttest.com", "A").await.unwrap();
+    assert!(asked.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+    sb.terminate(STOP_TIMEOUT).await.unwrap();
+}

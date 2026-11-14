@@ -2,7 +2,8 @@
 //! selector switches between, so an upstream change never tears the TUN down. Each slot runs
 //! `xray run -config stdin:` in its own kill-on-close Job; readiness is the authenticated SOCKS
 //! handshake (a foreign listener on the port that answers NoAuth or refuses our credentials is
-//! never taken for ours), raced against the child's exit so an early exit is reported at once.
+//! never taken for ours), asked right after Xray's own «started» line or polled, raced against
+//! the child's exit so an early exit is reported at once.
 //!
 //! The supervisor is owned by the tunnel actor (`&mut self`, not shared). Exit events of
 //! running slots go to the channel given at construction; restart policy and backoff live in
@@ -21,7 +22,9 @@ use vpnte_base::types::{Creds, Engine, OutboundFault};
 use vpnte_base::{AppError, ErrorKind, Msg};
 use vpnte_core::socks5::{self, SocksError};
 
-use crate::singbox_process::child::{self, EngineChild, GRACEFUL_STOP, Scrubber, Spec, exited};
+use crate::singbox_process::child::{
+    self, EngineChild, GRACEFUL_STOP, Marker, Scrubber, Spec, exited,
+};
 use crate::singbox_process::{code_text, re, spawn_error};
 use crate::slot::{Slot, SlotEndpoint};
 
@@ -42,6 +45,13 @@ pub const FAULT_MAX_AGE: Duration = Duration::from_secs(120);
 const FAULT_WINDOW: usize = 500;
 /// Prefix of Xray's start failure line (printed on stdout, may trail the exit).
 const FAILED_TO_START: &str = "Failed to start:";
+/// speed3 S3-02: Xray's own start line, `2026/11/13 23:03:59.861752 [Warning] core: Xray 26.11.9
+/// started`, logged in the same microsecond as its `listening tcp on` line. The launch banner
+/// (`Xray 26.11.9 (Xray, Penetrates Everything.) …`) has no ` started`; the access log is off,
+/// so no remote-controlled text reaches the output before it.
+const STARTED: Marker = Marker::Around("] core: Xray ", " started");
+/// The one authenticated SOCKS answer asked after [`STARTED`]; without it the poll goes on.
+const STARTED_PROBE: Duration = Duration::from_millis(250);
 
 /// What a slot runs: the Xray JSON built for its endpoint (`xray_config`), plus the dial target
 /// the failure diagnostics probe. Holds credentials: never logged.
@@ -236,7 +246,7 @@ impl XraySupervisor {
             args: &["run", "-config", "stdin:"],
             config: &launch.config,
             log: self.logs.as_deref().map(|dir| (dir, slot.log_stem())),
-            marker: None,
+            marker: Some(STARTED),
             scrub: Scrubber::new(&launch.config, &[&creds.user, &creds.pass]),
         })
         .map_err(XrayError::Spawn)?;
@@ -250,11 +260,14 @@ impl XraySupervisor {
         });
         let outcome = match ready(&inst.child, port, &creds, cancel).await {
             // Fails only when the exit landed right after the readiness check (forwarder: EXITED).
-            Ok(()) => state
-                .compare_exchange(STARTING, RUNNING, Ordering::SeqCst, Ordering::SeqCst)
-                .map(drop)
-                .map_err(|_| early_exit(&inst.child)),
-            err => err,
+            Ok(by) => {
+                tracing::info!(slot = slot.log_stem(), by, "xray ready");
+                state
+                    .compare_exchange(STARTING, RUNNING, Ordering::SeqCst, Ordering::SeqCst)
+                    .map(drop)
+                    .map_err(|_| early_exit(&inst.child))
+            }
+            Err(err) => Err(err),
         };
         if let Err(err) = outcome {
             if let Err(stop) = self.reap(slot).await {
@@ -404,25 +417,51 @@ impl XraySupervisor {
     }
 }
 
-/// Authenticated SOCKS readiness raced against the exit and the caller's cancel.
+/// Authenticated SOCKS readiness raced against the exit and the caller's cancel; `Ok` names the
+/// way it came. speed3 S3-02: Xray's own [`STARTED`] line and then ONE authenticated answer
+/// (~5 ms after the line), or the poll alone, which on Windows always sat out its first 250 ms
+/// attempt against a port nobody listened on yet (lab: 355-395 ms per start). Never the line
+/// alone, never a bare TCP accept; a missed or failed answer after the line leaves the poll
+/// running under the same [`READY_TIMEOUT`].
 async fn ready(
     child: &EngineChild,
     port: u16,
     creds: &Creds,
     cancel: &CancellationToken,
-) -> Result<(), XrayError> {
+) -> Result<&'static str, XrayError> {
     let mut exit = child.exit_watch();
-    tokio::select! {
+    let mut started = child.ready_watch();
+    let line = async {
+        if started.wait_for(|seen| *seen).await.is_err() {
+            return std::future::pending().await;
+        }
+        match socks5::wait_ready(port, Some(creds), STARTED_PROBE, cancel).await {
+            Err(err) if !definite(err) => std::future::pending().await,
+            answer => answer,
+        }
+    };
+    let poll = socks5::wait_ready(port, Some(creds), READY_TIMEOUT, cancel);
+    let (answer, by) = tokio::select! {
         biased;
-        () = cancel.cancelled() => Err(XrayError::Cancelled),
-        Some(_) = exited(&mut exit) => Err(early_exit(child)),
-        res = socks5::wait_ready(port, Some(creds), READY_TIMEOUT, cancel) => match res {
-            Ok(()) if child.exited().is_some() => Err(early_exit(child)),
-            Ok(()) => Ok(()),
-            Err(SocksError::Cancelled) => Err(XrayError::Cancelled),
-            Err(cause) => Err(XrayError::NotReady { port, cause }),
-        },
+        () = cancel.cancelled() => return Err(XrayError::Cancelled),
+        Some(_) = exited(&mut exit) => return Err(early_exit(child)),
+        answer = line => (answer, "line"),
+        answer = poll => (answer, "poll"),
+    };
+    match answer {
+        Ok(()) if child.exited().is_some() => Err(early_exit(child)),
+        Ok(()) => Ok(by),
+        Err(SocksError::Cancelled) => Err(XrayError::Cancelled),
+        Err(cause) => Err(XrayError::NotReady { port, cause }),
     }
+}
+
+/// A SOCKS answer that asking again cannot change (`socks5`'s own rule): a foreign listener.
+fn definite(err: SocksError) -> bool {
+    matches!(
+        err,
+        SocksError::AuthRequired | SocksError::AuthRejected | SocksError::Malformed
+    )
 }
 
 /// The error for a child that exited before readiness. Exit 23 = config refused (the reason is

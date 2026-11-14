@@ -113,7 +113,8 @@ is identified. Client ->
 `ClientFrame { id, request }`; service -> `ServerFrame::{Reply { id, reply }, Failed { id, error },
 Event { event }}`. `PROTOCOL = 4` (2 added `StatusWire::self_test`, 3 `RoutingInputs::rule_sets`, 4
 `RoutingInputs::only_listed` and `StatusWire::rule_sets`; `SCOPE_PROTOCOL = 4` and
-`RULE_SETS_PROTOCOL = 4` name them for the app);
+`RULE_SETS_PROTOCOL = 4` name them for the app; `HINTS_PROTOCOL = 5` names `ServerUpstream::{fresh,
+hints}` (speed3 H2), stripped by `Request::speak` below it: until `PROTOCOL` is 5 nothing sends them);
 `negotiate(client, service)` = the lower one while they differ by at most one (so a version-2
 peer is refused now). Evolution: add requests / replies / events / optional fields only; the
 newer side speaks the negotiated version (`Request::speak(protocol)` strips the rule sets for a
@@ -133,7 +134,10 @@ pub struct Hello { pub protocol: u32, pub app_version: String }
 pub struct TunnelStart { pub upstream: Upstream, pub routing: RoutingInputs,
     pub protection: ProtectionSettings, pub adaptive: AdaptiveMode, pub engine: EnginePref, pub origin: Origin }
 pub enum Upstream { LocalProxy { addr: SocketAddr /* loopback */, kind: ProxyKind }, Server(Box<ServerUpstream>) }
-pub struct ServerUpstream { pub id: String, pub profile: Profile, pub device: Option<ClientDevice>, pub engine: EnginePref }
+pub struct ServerUpstream { pub id: String, pub profile: Profile, pub device: Option<ClientDevice>, pub engine: EnginePref,
+    pub fresh: bool, pub hints: Vec<NameHint> }   // speed3 H2: serde default, skipped when empty; protocol 5
+impl ServerUpstream { pub fn facts(&self) -> Option<ServerFacts> /* None: out of bounds -> refused */;
+    pub fn without_facts(&mut self) }              // as an older service reads it / as the resume memory keeps it
 pub struct RoutingInputs { smart_ru, smart_ru_maps_direct, domain_rules: Vec<DomainRule>, split_direct,
     split_vpn: Vec<String> /* process_path_regex */, dns: Option<DnsAddr>, public_wifi, stealth,
     auto_restart_on_crash,
@@ -174,6 +178,13 @@ Certificates (p-speed, lab F-3): `Host::serve` turns `vpnte_base::http::verify_o
 whole service process: its HTTPS (DoH of server names, exit proofs) runs under the kill switch's DNS
 block, where Windows' online revocation fetch stalls; rustls checks chains and names against the
 bundled Mozilla roots and the Windows root store instead (revocation was soft-fail anyway).
+speed3 H2: `prepare` hands a request's server facts to `SharedInputs::offer(Some((id, facts)))`; the
+runtime takes them once through `InputsSource::server_facts(id)` (a fresh user's switch selects
+first; Lane A's start reads the hints); never kept for a restart, never in the resume memory.
+speed3 P-1: `SharedInputs::set(routing, level, owner_sid)`: the accepted hand-over and its store note
+(`accepted-<hash of the SID>`) are per Windows user; a user whose own set fails runs his own last
+accepted set, else the pinned files, never another user's (`handover::{accept, recall}` take the owner).
+speed3 H3: `ForgetMe` also drops the user's recent server names (`vpnte_core::resolve::forget(sid)`).
 Lab live-9 L9-2: `SharedInputs::set(self: &Arc<Self>, ..)` starts the check of a handed-over set in
 the background the moment it arrives (start, restart or `Inputs` request); a start's snapshot finds it
 accepted by digest or waits only for the rest (`Smart RU lists ready ms=..`; the accept logs `ms`).

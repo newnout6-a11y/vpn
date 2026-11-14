@@ -22,6 +22,10 @@ history and notices).
 pub struct VpnProfile { pub id: String, pub profile: Arc<Profile>, pub device: Option<ClientDevice>,
     pub engine: EnginePref /* the server's own choice; Auto = StartRequest::engine */ }
 pub use vpnte_engine::xray_config::SelectReason;
+pub const MAX_HINT_NAMES: usize = 16; pub const MAX_HINT_ADDRS: usize = 8;   // wire bounds of the hints
+pub struct NameHint { pub name: String, pub addrs: Vec<IpAddr> }   // speed3 H2; serde camelCase, refuses unknown
+pub struct ServerFacts { pub fresh: bool, pub hints: Vec<NameHint> } // one start or switch only (never the last start)
+// fresh (S3-07): a full check of the server (or its settled session) within 10 min, first answer <= 1 s
 pub struct EngineRun { pub kind: Engine, pub reason: Option<SelectReason> /* None: local upstream proxy */ }
                                                                      // Copy, Serialize camelCase
 pub enum Mode { LocalProxy { addr: String, kind: ProxyKind }, DirectVpn { profile: VpnProfile } }
@@ -418,7 +422,7 @@ impl TunnelHandle { pub fn spawn(deps: RuntimeDeps) -> Self }        // inside a
     pub proxy: Arc<dyn Capture> /* ProxyCapture */, pub inputs: Arc<dyn InputsSource>,
     pub failover: Option<Arc<dyn Failover>>,
     pub confirmations: Option<Arc<dyn Confirmations>>, pub timings: Timings }
-pub struct Timings { pub ready, capture_ready, exit, release: Duration, pub backoff: [Duration; 3] /* 2/5/10 s */,
+pub struct Timings { pub ready, capture_ready, exit, release: Duration, pub backoff: [Duration; 3] /* 0/5/10 s (S3-01) */,
     pub slow_retry: [Duration; 3] /* 60/120/300 s, then the last: paused kill switch (ks-a) */,
     pub freeze /* 130 s: crashed server with a fault stays quiet */,
     pub retry_spacing /* 20 s: «Подключить» on one server at most this often (fix-ks) */,
@@ -437,16 +441,22 @@ pub struct UserInputs { pub smart_ru: bool, pub smart_ru_maps_direct: bool, pub 
     pub public_wifi: bool, pub stealth: bool, pub auto_restart_on_crash: bool }  // serde camelCase, Default
 impl UserInputs { pub fn split(&self) -> ResolvedSplit }
 pub struct InactiveSplit { pub name: String, pub path: String, pub missing: bool }
-#[async_trait] pub trait InputsSource: Send + Sync { async fn snapshot(&self) -> AppResult<UserInputs>; }
+#[async_trait] pub trait InputsSource: Send + Sync { async fn snapshot(&self) -> AppResult<UserInputs>;
+    fn server_facts(&self, profile_id: &str) -> ServerFacts { /* default: none */ } }
+    // speed3 H2: what the client sent with the request in flight, handed out ONCE for that server
+    // (the helper service's SharedInputs); read it once per start / switch and keep the value
 #[async_trait] pub trait Failover: Send + Sync {                   // post-trial failover (servers)
     async fn next_live_sibling(&self, cancel: &CancellationToken) -> Option<VpnProfile>;
-    fn commit(&self, profile_id: &str); }
+    fn commit(&self, profile_id: &str);
+    fn fresh(&self, profile_id: &str) -> bool { false } }         // S3-07: the app's own evidence (in-process)
 pub trait Confirmations: Send + Sync { fn confirmed_within(&self, age: Duration) -> bool; } // monitoring
 // how traffic is captured (the only module that knows TUN / WFP / adapters); chosen per start by
 // StartRequest::capture; switching strategy first releases what the old one still holds
 #[async_trait] pub trait Capture: Send + Sync {
     async fn prepare(&self, req: &StartRequest, avoid: &[String]) -> AppResult<CapturePlan>;
     fn config(&self, plan: &CapturePlan, parts: &EngineParts) -> Result<(Value, [u8; 32]), ConfigError>;
+    fn compat(&self, plan: &CapturePlan, parts: &EngineParts) -> Result<[u8; 32], ConfigError>;
+        // S3-10: the key alone (TUN / proxy compute it without the render; the default renders)
     async fn begin(&self, plan: &CapturePlan, session_programs: &[PathBuf]) -> AppResult<()>;
     async fn ready(&self, plan: &CapturePlan, timeout: Duration, cancel: &CancellationToken) -> AppResult<CaptureProof>;
     async fn routes_ok(&self, proof: &CaptureProof) -> bool;
@@ -513,7 +523,9 @@ pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self;   // + Defau
                                 // capture's mixed port (the app's requests never use the system proxy);
                                 // `timeout` x 2 in all, the 2nd service joins after `timeout`
     async fn local_proxy(&self, addr: &HostPort, limit: Duration) -> AppResult<Option<PathBuf>>;
-    async fn physical_dns(&self) -> Vec<Ipv4Addr>; }
+    async fn physical_dns(&self) -> Vec<Ipv4Addr>;
+    // speed3 S3-05: one detached lookup through a TUN run's new core (default: none)
+    async fn warm_dns(&self, clash: &ClashEndpoint) {} }
 // the app's handshake budget (probe discipline): the tunnel cannot depend on vpnte-probes
 #[async_trait] pub trait HandshakeGate: Send + Sync {
     async fn admit(&self, server: &Profile, cancel: &CancellationToken) -> AppResult<()>;  // Err: deferred / cancelled
@@ -544,7 +556,7 @@ a native start echoes through the core's `live-check-in` after the capture is up
 an address count as traffic there). While the proof runs, `TunStatus::engine` is set and `running`
 is not (the start page's «Проверяем выход…»). A proof that got nothing back fails the start with
 `tunnel.runtime.exitSilent` (mode-neutral); a local upstream proxy is proven by its listener only.
-Crash policy: auto-restart (origin `Recovery`, `Restarting{n,3}` first, backoff 2 / 5 / 10 s, budget
+Crash policy: auto-restart (origin `Recovery`, `Restarting{n,3}` first, backoff 0 / 5 / 10 s (S3-01: the first restart at once; a TUN waits ≤ 300 ms for the dead adapter, its block armed throughout; Xray slot restarts 0 / 2 / 5 s), budget
 reset after 30 s stable), then failover once (when a `Failover` is given), then: kill switch off
 -> release + `Stopped`; on (`standard` / `strict` as in force) with auto-restart off -> keep
 blocking (`KillSwitchActive`, no retry); on + budget spent -> keep blocking and retry slowly
@@ -585,7 +597,15 @@ with a settle point (`settle_of`: the burst observatory's ping timeout, default 
 + 0.5 s) and records the slot as `balanced`: an in-place switch to it confirms on any answer
 through the tunnel (its members exit from several addresses, lab live-8 L8-1). Under a block the
 protection already holds (a recovery or a protected restart, guard != Off) the core and its capture
-start beside slot A's exit proof; a first start proves first (conn5). An in-place switch whose
+start beside slot A's exit proof; a first start proves first (conn5). speed3 (Lane A): a Proxy
+start, a crash recovery of the same server and a TUN start under «Строгий» run beside too (a
+failover sibling with the kill switch Off keeps the order), and the inputs snapshot and routing are
+part of the core's way up, so the proof runs from slot A's accept. A crash recovery also takes the
+server's own traffic through slot A of the new core (bytes back, Clash API) as its proof; when the
+handshake budget has no slot at once the echo waits for one only after 3 s without traffic (lab
+L10-2). Step lines: `slot A exit proof begins start=…`, `handshake slot ms=… request=first|next`,
+`slot A proven by its traffic ms=…`, `physical dns read ms=…`, `xray ready by=line|poll`,
+`dns warm-up answered ms=… answered=…`. An in-place switch whose
 server name has no handshake budget left (`Engines::handshake_ready`) selects the candidate without
 a proof of its own and takes the traffic it carries within 3 s as the proof; an idle session then
 gets the skipped probe, behind the budget as before (lab live-7 F4). Proxy capture: the plan guard is the request's kill switch (`off` /
@@ -620,6 +640,15 @@ pub trait SwitchOps {    // stage / probe(slot, &CancellationToken), select / co
 pub async fn run_protected_switch<O: SwitchOps + Send>(previous: Slot, candidate: Slot, ops: &mut O,
     cancel: &CancellationToken) -> SwitchReceipt;                    // never errs: failures in the receipt
 ```
+The runtime's ops (speed3): admission compares `Capture::compat` keys (every routing input, S3-10). A
+user's switch (`Origin::User`) to a server with fresh evidence (`InputsSource::server_facts` or
+`Failover::fresh`) skips the probe: select, then one proof within `Timings::confirm_candidate` (2 s, no
+hedge): the candidate's own downloads, else one echo through the capture; any exit counts. Failure
+restores the previous slot as before. Every other switch probes first; a spent handshake budget proves
+by traffic. A slot without a recorded exit (proven by traffic) is re-proven by any answer. `stage`
+takes the request's hints for the candidate's names (S3-10 (b); filtered like a lookup) and asks only
+the rest through `dns-bootstrap-in`. Step lines: `switch admitted`, `candidate resolved` (`asked`),
+`candidate config built` (ms).
 
 ## Main flows
 ```rust

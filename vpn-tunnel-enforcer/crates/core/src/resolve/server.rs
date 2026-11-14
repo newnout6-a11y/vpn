@@ -143,7 +143,7 @@ pub(super) async fn server<T: Transport, F>(
 where
     F: Future<Output = Result<Vec<IpAddr>, ResolveError>>,
 {
-    let live = match chain.resolve(name, keep).await {
+    let live = match chain.resolve_dial(name, keep).await {
         Ok(addrs) => Ok((addrs, true)),
         Err(err) => {
             tracing::warn!(error = %err, "public resolvers gave no server address; asking the OS resolver");

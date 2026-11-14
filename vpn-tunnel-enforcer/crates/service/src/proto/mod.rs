@@ -21,7 +21,7 @@ use vpnte_engine::routing::dns::DnsAddr;
 use vpnte_engine::routing::domain::DomainRule;
 use vpnte_engine::routing::rulesets::handover::RuleSetFiles;
 use vpnte_profiles::model::Profile;
-use vpnte_tunnel::api::Origin;
+use vpnte_tunnel::api::{MAX_HINT_ADDRS, MAX_HINT_NAMES, NameHint, Origin, ServerFacts};
 use vpnte_winnet::wfp::ProtectionSettings;
 
 mod back;
@@ -48,6 +48,11 @@ pub const PROTOCOL: u32 = 4;
 /// The first protocol whose service routes by the apps page's scope
 /// (`RoutingInputs::only_listed`): an older one runs every app through the tunnel.
 pub const SCOPE_PROTOCOL: u32 = 4;
+
+/// The first protocol whose service takes a server's one-request facts
+/// (`ServerUpstream::fresh` / `hints`, speed3 H2). Above [`PROTOCOL`] until the bump: until then
+/// `Request::speak` strips them for every service, so a setter in the app is safe already.
+pub const HINTS_PROTOCOL: u32 = 5;
 
 /// The version both sides speak, or `None` when they are more than one version apart.
 pub fn negotiate(client: u32, service: u32) -> Option<u32> {
@@ -136,6 +141,35 @@ pub struct ServerUpstream {
     /// The server's own engine choice.
     #[serde(default)]
     pub engine: EnginePref,
+    /// Protocol 5 (speed3 H2): what the app knows about this server for this one request
+    /// (`vpnte_tunnel::api::ServerFacts`); an older service never receives them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<NameHint>,
+}
+
+impl ServerUpstream {
+    /// The facts this request carries, bounded ([`MAX_HINT_NAMES`], [`MAX_HINT_ADDRS`], a DNS
+    /// name's length): `None` refuses the request.
+    pub fn facts(&self) -> Option<ServerFacts> {
+        let bounded = self.hints.len() <= MAX_HINT_NAMES
+            && self
+                .hints
+                .iter()
+                .all(|h| (1..=253).contains(&h.name.len()) && h.addrs.len() <= MAX_HINT_ADDRS);
+        bounded.then(|| ServerFacts {
+            fresh: self.fresh,
+            hints: self.hints.clone(),
+        })
+    }
+
+    /// The request as a service before [`HINTS_PROTOCOL`] reads it, and as the service keeps it
+    /// (its resume memory): without the one-request facts.
+    pub fn without_facts(&mut self) {
+        self.fresh = false;
+        self.hints.clear();
+    }
 }
 
 /// Everything one start needs, typed.
@@ -185,6 +219,11 @@ impl Request {
     /// field as unknown, so it is left out there. Version 2 keeps its pinned Smart RU files;
     /// version 3 routes every app (the apps page says so).
     pub fn speak(mut self, protocol: u32) -> Self {
+        if protocol < HINTS_PROTOCOL
+            && let Some(server) = self.server_mut()
+        {
+            server.without_facts();
+        }
         if let Some(routing) = self.routing_mut() {
             if protocol < 3 {
                 routing.rule_sets = None;
@@ -194,6 +233,18 @@ impl Request {
             }
         }
         self
+    }
+
+    /// The server upstream this request carries.
+    fn server_mut(&mut self) -> Option<&mut ServerUpstream> {
+        match self {
+            Request::Start(s) | Request::Restart(s) | Request::Switch(s) => match &mut s.upstream {
+                Upstream::Server(server) => Some(server),
+                Upstream::LocalProxy { .. } => None,
+            },
+            Request::RestartAdaptive(a) => a.server.as_mut(),
+            _ => None,
+        }
     }
 
     /// The routing inputs this request carries.

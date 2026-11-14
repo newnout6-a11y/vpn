@@ -1,33 +1,38 @@
 //! Start: admission, bring-up in the decided order (tunnel-core §3.2) and the one compensation
 //! function (§3.4). Nothing is published as running before the capture proof and, for the Xray
 //! slots, the confirmed selector.
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
+use serde_json::Value;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{AdaptiveMode, Engine, EnginePref, KillSwitchLevel, ProxyKind, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::net::HostPort;
+use vpnte_engine::clash_api::ClashEndpoint;
 use vpnte_engine::singbox_config::{Listeners, Upstream};
 use vpnte_engine::slot::{Slot, SlotEndpoint};
+use vpnte_engine::tags::DNS_DIRECT;
 use vpnte_engine::xray_config::{self, Decision, ProxyGraph, Reject, ResolvePath, Resolved};
 use vpnte_engine::xray_process::{SlotLaunch, XrayEvent};
 use vpnte_profiles::emit_singbox::EmitPolicy;
 use vpnte_profiles::model::Profile;
+use vpnte_winnet::adapters::{TUN_V4, TUN_V6};
 
 use super::actor::{Actor, Phase, Retained, Session, SlotSession};
 use super::capture::{Capture, CapturePlan};
-use super::config;
-use super::engines::{CoreProc, EchoFailure, Engines, echo_failure};
+use super::engines::{CoreProc, EchoFailure, Engines, WARM_NAME, echo_failure};
 use super::pin::pin_native;
 use super::spawn::Parts;
+use super::{UserInputs, config};
 use crate::api::{
-    CaptureKind, EngineRun, Mode, Origin, StartReceipt, StartRequest, TunError, TunStatusKind,
-    TunnelEvent, VpnProfile,
+    CaptureKind, EngineRun, Mode, NameHint, Origin, StartReceipt, StartRequest, TunError,
+    TunStatusKind, TunnelEvent, VpnProfile,
 };
 
 /// The engine `server` runs on under its own choice and the app setting, with the reason; a
@@ -90,6 +95,9 @@ pub(super) struct Work {
     pub slots: Option<SlotSession>,
     pub events: Option<mpsc::Receiver<XrayEvent>>,
     pub warnings: Vec<Msg>,
+    /// The server names this start looked up itself, with their answers: kept for the session
+    /// once it runs, dropped from the resolver's memory when the start fails (speed3 S3-09).
+    pub names: Vec<(String, Vec<IpAddr>)>,
 }
 
 /// The upstream decided before any effect.
@@ -291,7 +299,11 @@ impl Actor {
                 for w in &receipt.warnings {
                     self.warn(crate::api::TunWarning::from_msg(w.clone()));
                 }
+                let started_at = session.started_at;
                 self.enter_running(session, work.events.take());
+                // After the status shows the session: whoever ends sessions by it never takes
+                // these names for the end of a session that did not run yet.
+                vpnte_core::resolve::keep_resolved(started_at, &work.names);
                 if let Some((profile_id, cause)) = self.failing_over.take() {
                     // Before the finish: whoever judges the run must know which server it is.
                     self.emit(TunnelEvent::FailedOver {
@@ -309,6 +321,11 @@ impl Actor {
             Err(cause) => {
                 self.failing_over = None;
                 tracing::warn!(error = %cause, generation, "tunnel start failed");
+                if cause.kind != ErrorKind::Cancelled {
+                    // S3-09 (e): a remembered answer may be what failed; the next start asks.
+                    let names: Vec<String> = work.names.iter().map(|(n, _)| n.clone()).collect();
+                    vpnte_core::resolve::drop_names(&names);
+                }
                 let err = self.compensate(work, cause).await;
                 self.emit(TunnelEvent::StartFinished {
                     generation,
@@ -377,14 +394,39 @@ impl Actor {
                         work.warnings
                             .extend(pin_native(engines, fragment, op).await?);
                     }
+                    if let vpnte_profiles::model::Host::Domain(name) = &profile.profile.server {
+                        // Its pin looked the name up (S3-09 (e): dropped if the start fails).
+                        work.names = vec![(name.to_string(), Vec::new())];
+                    }
                     return Ok(Planned::Native(upstream));
                 }
                 let device = profile.device.unwrap_or_default();
                 let run = xray_profile(&profile.profile, req);
                 let mut graph = xray_config::proxy_graph(&run, device)?;
                 work.warnings.extend(xray_warnings(&run, req));
-                let path = ResolvePath::Direct;
-                let resolved = self.deps.engines.resolve(&graph.hosts(), path, op).await?;
+                // S3-09 (b): the app's own answers for this start only (read once).
+                let facts = self.deps.inputs.server_facts(&profile.id);
+                let (hinted, ask) = hinted(&graph.hosts(), &facts.hints);
+                let mut resolved = Resolved {
+                    addrs: HashMap::new(),
+                    warning: None,
+                };
+                if !ask.is_empty() {
+                    let path = ResolvePath::Direct;
+                    resolved = self.deps.engines.resolve(&ask, path, op).await?;
+                }
+                work.names = (ask.iter())
+                    .map(|n| {
+                        (
+                            n.clone(),
+                            resolved.addrs.get(n).copied().into_iter().collect(),
+                        )
+                    })
+                    .collect();
+                if !hinted.is_empty() {
+                    tracing::info!(names = hinted.len(), "server names from the app's hints");
+                }
+                resolved.addrs.extend(hinted);
                 work.warnings.extend(resolved.warning.clone());
                 graph.substitute(&resolved.addrs);
                 Ok(Planned::Xray {
@@ -410,7 +452,7 @@ impl Actor {
         // snapshot (4.7 s of a first connect); only the sing-box config needs it, so it is read
         // beside the capture, the upstream plan and slot A, and awaited at the config.
         let inputs = self.deps.inputs.clone();
-        let user = tokio::spawn(async move { inputs.snapshot().await });
+        let mut user = Snapshot(tokio::spawn(async move { inputs.snapshot().await }));
         // Decided once, before any effect: the run, the receipt and the status show this engine.
         let engine = run_of(req)?;
         #[cfg(feature = "lab")]
@@ -423,6 +465,8 @@ impl Actor {
         cancelled_if(op)?;
         let step = Instant::now();
         let phys_dns = self.deps.engines.physical_dns().await;
+        // S3-09 (d): its own line inside «upstream planned» (ms only, never the resolvers).
+        tracing::info!(ms = ms_since(step), "physical dns read");
         let planned = self.plan_upstream(req, engine.kind, op, work).await?;
         tracing::info!(ms = ms_since(step), "upstream planned");
         cancelled_if(op)?;
@@ -468,17 +512,27 @@ impl Actor {
             }
             _ => None,
         };
-        // Speed audit conn5: under a kill switch that already holds the block (a recovery, a
-        // protected restart) traffic waits either way, so the core and its capture start beside
-        // slot A's exit proof (0.5-1.5 s); a first start keeps the order, so a server that
-        // carries nothing never had anyone routed into it.
-        let beside = work.prior.is_some() && self.capture.guard(&plan) != KillSwitchLevel::Off;
+        let guard = self.capture.guard(&plan);
+        let beside = runs_beside(
+            req,
+            self.failing_over.is_some(),
+            work.prior.is_some(),
+            guard,
+        );
+        // Lab live-10 L10-2: a crash recovery's server carried this user's traffic until the
+        // crash, and the programs reconnect through the new core (the system proxy and the
+        // TUN's routes stay): bytes back through slot A prove it as well as an echo does.
+        let own_traffic = beside && req.origin == Origin::Recovery && self.failing_over.is_none();
+        let (core_up, core_seen) = oneshot::channel();
+        let mut core_seen = own_traffic.then_some(core_seen);
         let mut proving = None;
         if let Some((profile, a, settle)) = &slot_a {
+            self.proving(engine);
+            let proof = self.prove_exit_a(profile, a, *settle, req.origin, core_seen.take(), op);
             if beside {
-                proving = Some(self.prove_slot_a(profile, a, *settle, engine, op));
+                proving = Some(proof);
             } else {
-                let ip = self.prove_slot_a(profile, a, *settle, engine, op).await?;
+                let ip = proof.await?;
                 record_exit_a(work, ip);
             }
         }
@@ -487,22 +541,34 @@ impl Actor {
             self.start_mihomo(plan, op, work).await?;
         }
         let local = matches!(planned, Planned::Local { .. });
-        let step = Instant::now();
-        let user = user.await.map_err(AppError::internal)??;
-        tracing::info!(ms = ms_since(step), "routing inputs ready");
-        let (routing, warnings) = config::routing(&user, &engine_paths, local, &phys_dns, hostname);
-        work.warnings.extend(warnings);
-        let parts = Parts {
-            plan: &plan,
-            planned: &planned,
-            routing,
-            phys_dns,
-            direct_vpn: !local,
-        };
+        // speed3 S3-03 (feasibility review): the inputs and the routing are part of the core's
+        // way up, so a proof beside it runs from the moment slot A accepts, not after them.
         let up = async {
+            let step = Instant::now();
+            let user = (&mut user.0).await.map_err(AppError::internal)??;
+            tracing::info!(ms = ms_since(step), "routing inputs ready");
+            let (routing, warnings) =
+                config::routing(&user, &engine_paths, local, &phys_dns, hostname);
+            work.warnings.extend(warnings);
+            let warm = req.capture == CaptureKind::Tun && warms_through_tunnel(&routing.dns_rules);
+            let parts = Parts {
+                plan: &plan,
+                planned: &planned,
+                routing,
+                phys_dns,
+                direct_vpn: !local,
+            };
             let step = Instant::now();
             let ready = self.spawn_ready(&parts, op, work).await?;
             tracing::info!(ms = ms_since(step), "sing-box ready");
+            if warm {
+                // S3-05: one per TUN start; option W off (owner default 5): «Подключено» never
+                // waits for it, and a dropped request would cancel the dial inside sing-box.
+                let (engines, clash) = (self.deps.engines.clone(), ready.1.clone());
+                tokio::spawn(async move { engines.warm_dns(&clash).await });
+            }
+            // From here the traffic of a recovery can be read (L10-2).
+            let _ = core_up.send(ready.1.clone());
             let step = Instant::now();
             let timeout = self.deps.timings.capture_ready;
             let proof = self.capture.ready(&plan, timeout, op).await?;
@@ -645,10 +711,11 @@ impl Actor {
         profile: &VpnProfile,
         a: &SlotEndpoint,
         settle: Option<Duration>,
-        engine: EngineRun,
+        origin: Origin,
         op: &CancellationToken,
     ) -> AppResult<std::net::IpAddr> {
-        self.proving(engine);
+        // Which start the echo's «handshake slot» wait belongs to (lab L10-2).
+        tracing::info!(start = ?origin, "slot A exit proof begins");
         let step = Instant::now();
         let ip = self
             .deps
@@ -659,12 +726,166 @@ impl Actor {
         tracing::info!(ms = ms_since(step), "slot A exit proven");
         Ok(ip)
     }
+
+    /// Slot A's exit proof; `core` (a crash recovery of this server, L10-2) brings the new
+    /// core's Clash API, and bytes back through slot A prove the exit as well. When the server
+    /// name's handshake budget has no slot at once, the traffic gets [`OWN_TRAFFIC`] first and
+    /// the echo waits for its slot only after it. `None` = proven by the traffic.
+    async fn prove_exit_a(
+        &self,
+        profile: &VpnProfile,
+        a: &SlotEndpoint,
+        settle: Option<Duration>,
+        origin: Origin,
+        core: Option<oneshot::Receiver<ClashEndpoint>>,
+        op: &CancellationToken,
+    ) -> AppResult<Option<IpAddr>> {
+        let Some(core) = core else {
+            return self
+                .prove_slot_a(profile, a, settle, origin, op)
+                .await
+                .map(Some);
+        };
+        let step = Instant::now();
+        let free = self.deps.engines.handshake_ready(&profile.profile);
+        let echo = async {
+            if !free {
+                tracing::info!("recovery: no handshake slot free now, its traffic proves it first");
+                // A balanced graph's members carry traffic once its observatory judged them.
+                let first = settle.unwrap_or_default() + OWN_TRAFFIC;
+                tokio::select! {
+                    () = op.cancelled() => return Err(AppError::cancelled()),
+                    () = tokio::time::sleep(first) => {}
+                }
+            }
+            self.prove_slot_a(profile, a, settle, origin, op).await
+        };
+        let traffic = async {
+            match core.await {
+                Ok(clash) => self.carried(&clash).await,
+                // No core came up: the echo alone decides (the start fails anyway).
+                Err(_) => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            ip = echo => ip.map(Some),
+            () = traffic => {
+                tracing::info!(ms = ms_since(step), "slot A proven by its traffic");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Returns once a connection through slot A of the core behind `clash` brought bytes back:
+    /// the far side answered through the server (the switch's `confirm_by_traffic` rule).
+    async fn carried(&self, clash: &ClashEndpoint) {
+        loop {
+            let seen = self.deps.engines.slot_downloads(clash, Slot::A).await;
+            if seen.is_ok_and(|c| c.iter().any(|(_, down)| *down > 0)) {
+                return;
+            }
+            tokio::time::sleep(TRAFFIC_POLL).await;
+        }
+    }
 }
 
-/// Slot A's proven exit, kept for the switch's comparison.
-fn record_exit_a(work: &mut Work, ip: std::net::IpAddr) {
+/// How long a recovery's own traffic may take to prove its server before the echo waits for a
+/// handshake slot (L10-2; the switch's proof by traffic gets the same).
+const OWN_TRAFFIC: Duration = Duration::from_secs(3);
+/// How often the Clash API is read for that traffic (loopback; a fresh core holds few
+/// connections).
+const TRAFFIC_POLL: Duration = Duration::from_millis(100);
+
+/// The core and its capture start beside slot A's exit proof (speed3 S3-03, S3-08). Under a kill
+/// switch that holds the block (a recovery, a protected restart) traffic waits either way
+/// (conn5). A Proxy start reaches nobody before its system proxy is written after the start; a
+/// crash recovery's server carried this user's traffic until the crash; under «Строгий» the
+/// block holds everything without a session, so a TUN start changes nothing for the user but
+/// its speed (S3-08, first commit: «Стандартный» and «Выкл» wait for the owner, question 32).
+/// A failover's sibling never carried this user's traffic: with the kill switch Off it keeps
+/// the order, nobody is routed into an unproven server.
+fn runs_beside(
+    req: &StartRequest,
+    failing_over: bool,
+    prior: bool,
+    guard: KillSwitchLevel,
+) -> bool {
+    let strict_tun = req.capture == CaptureKind::Tun && guard == KillSwitchLevel::Strict;
+    let own = req.capture == CaptureKind::Proxy || req.origin == Origin::Recovery || strict_tun;
+    (!failing_over && own) || (prior && guard != KillSwitchLevel::Off)
+}
+
+/// The session's DNS rules leave [`WARM_NAME`] on `dns-remote`, the DoH through the tunnel: no
+/// rule sends it to the local network's resolver (S3-05, security review condition 1). A rule
+/// this cannot read (a regex) counts as one that might.
+pub(super) fn warms_through_tunnel(dns_rules: &[Value]) -> bool {
+    let names_it = |rule: &Value| {
+        let list = |key: &str| {
+            let values = rule
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten();
+            values
+                .filter_map(Value::as_str)
+                .map(str::to_ascii_lowercase)
+        };
+        let suffix = |s: String| {
+            let s = s.trim_start_matches('.');
+            WARM_NAME == s || WARM_NAME.ends_with(&format!(".{s}"))
+        };
+        list("domain").any(|d| d == WARM_NAME)
+            || list("domain_suffix").any(suffix)
+            || list("domain_keyword").any(|k| WARM_NAME.contains(k.as_str()))
+            || rule.get("domain_regex").is_some()
+    };
+    let direct = |rule: &&Value| rule.get("server").and_then(Value::as_str) == Some(DNS_DIRECT);
+    !dns_rules.iter().filter(direct).any(names_it)
+}
+
+/// The app's hints for `hosts` (S3-09 (b), this start only): per hinted name the address a
+/// lookup here could have answered (`may_be_server`, never our TUN's own networks), IPv4
+/// first; the other names are asked. A hint names its host: it never stands in for another.
+fn hinted(hosts: &[String], hints: &[NameHint]) -> (HashMap<String, IpAddr>, Vec<String>) {
+    let usable = |ip: &&IpAddr| {
+        let ours = match ip {
+            IpAddr::V4(v4) => TUN_V4.contains(v4),
+            IpAddr::V6(v6) => TUN_V6.contains(v6),
+        };
+        vpnte_core::resolve::may_be_server(**ip) && !ours
+    };
+    let mut found = HashMap::new();
+    let mut ask = Vec::new();
+    for host in hosts {
+        let hint = hints.iter().find(|h| h.name.eq_ignore_ascii_case(host));
+        let ip = hint.and_then(|h| h.addrs.iter().filter(usable).min_by_key(|ip| ip.is_ipv6()));
+        match ip {
+            Some(ip) => {
+                found.insert(host.clone(), *ip);
+            }
+            None => ask.push(host.clone()),
+        }
+    }
+    (found, ask)
+}
+
+/// Slot A's proven exit, kept for the switch's comparison (`None`: proven by its traffic, no
+/// address read).
+fn record_exit_a(work: &mut Work, ip: Option<IpAddr>) {
     if let Some(s) = work.slots.as_mut() {
-        s.egress[Slot::A.index()] = Some(ip);
+        s.egress[Slot::A.index()] = ip;
+    }
+}
+
+/// The inputs snapshot a start reads beside its first steps (lab live-9 L9-2). Review
+/// speed2-b5: only the start that consumes the snapshot lets it finish. A start that returns
+/// before (a failed plan, a cancel) aborts it, so a snapshot left running never writes its
+/// rule-set report over a later start's: the helper service writes that report at the end.
+struct Snapshot(tokio::task::JoinHandle<AppResult<UserInputs>>);
+
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

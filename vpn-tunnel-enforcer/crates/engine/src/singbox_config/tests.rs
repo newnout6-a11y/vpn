@@ -1143,7 +1143,7 @@ fn compat_key_scope() {
     };
     assert_eq!(compat_key(&same), key);
 
-    let changes: [fn(&mut ConfigInputs); 12] = [
+    let changes: [fn(&mut ConfigInputs); 14] = [
         |i| tun_of(i).mtu = 1280,
         |i| tun_of(i).ipv6 = true,
         |i| tun_of(i).dns_hijack = false,
@@ -1164,11 +1164,70 @@ fn compat_key_scope() {
         },
         |i| i.upstream = local_socks(),
         |i| i.upstream = native(&vless("1.2.3.4", None)),
+        // speed3 S3-10: the apps page's scope and «Не через прокси» count too.
+        |i| i.routing.listed_only = Some(vec![r"(?i)(?:^|\\)browser\.exe$".into()]),
+        |i| {
+            let rule = json!({ "domain_suffix": ["example.org"], "outbound": DIRECT_OUT });
+            i.routing.proxy_bypass.push(rule);
+        },
     ];
     for (n, change) in changes.iter().enumerate() {
         let mut i = base.clone();
         change(&mut i);
         assert_ne!(compat_key(&i), key, "change #{n}");
+    }
+}
+
+/// speed3 S3-10 (security review), both ways: the key and the full render decide alike. Under
+/// both captures every routing input that changes the JSON changes the key (none is left out, as
+/// the apps page's scope and «Не через прокси» once were); what only names the upstream or the
+/// app's own ports changes the JSON but never the key.
+#[test]
+fn the_key_and_the_render_decide_alike() {
+    let up = || {
+        slots(UdpPolicy {
+            udp: true,
+            block_quic: true,
+        })
+    };
+    let rule = || json!({ "domain_suffix": ["example.org"], "outbound": DIRECT_OUT });
+    let routing: [fn(&mut RoutingParts, Value); 7] = [
+        |r, v| r.process_rules.push(v),
+        |r, v| r.domain_rules.push(v),
+        |r, _| r.rule_sets = smart_ru_parts("C:/rt").rule_sets,
+        |r, _| r.dns_servers = vec![json!({ "type": "local", "tag": "dns-local" })],
+        |r, _| r.dns_rules = vec![json!({ "domain_suffix": [".example"], "server": DNS_DIRECT })],
+        |r, _| r.listed_only = Some(vec!["own".into()]),
+        |r, v| r.proxy_bypass.push(v),
+    ];
+    for base in [inputs(up()), super::proxy_tests::proxied(inputs(up()))] {
+        let (json, key) = (build(&base).expect("base"), compat_key(&base));
+        let mut rendered = 0;
+        for (n, change) in routing.iter().enumerate() {
+            let mut i = base.clone();
+            change(&mut i.routing, rule());
+            if build(&i).is_ok_and(|changed| changed != json) {
+                rendered += 1;
+                assert_ne!(compat_key(&i), key, "routing change #{n} shapes the JSON");
+            }
+        }
+        assert!(rendered >= 6, "{rendered} of the changes shaped the JSON");
+        let mut identity = base.clone();
+        identity.upstream = Upstream::XraySlots {
+            slots: [ep(31000, "x"), ep(31001, "y")],
+            active: Slot::B,
+            udp: UdpPolicy {
+                udp: true,
+                block_quic: true,
+            },
+        };
+        identity.listeners.clash_port = 30000;
+        assert_ne!(build(&identity).expect("identity"), json);
+        assert_eq!(
+            compat_key(&identity),
+            key,
+            "identity and ports do not count"
+        );
     }
 }
 

@@ -33,9 +33,14 @@ impl Host {
     /// `client` started `start`: kept for a resume.
     pub(super) fn remember(&self, client: &ClientInfo, start: &TunnelStart) {
         if let Some(path) = self.memory.get() {
+            let mut start = start.clone();
+            if let Upstream::Server(server) = &mut start.upstream {
+                // One-request facts never outlive their request (speed3 H2).
+                server.without_facts();
+            }
             let session = memory::Remembered {
                 user: client.user.clone(),
-                start: start.clone(),
+                start,
             };
             memory::save(path, &session);
         }
@@ -59,7 +64,9 @@ impl Host {
         };
         kept.start.adaptive = restart.mode;
         if let Some(server) = &restart.server {
-            kept.start.upstream = Upstream::Server(Box::new(server.clone()));
+            let mut server = server.clone();
+            server.without_facts();
+            kept.start.upstream = Upstream::Server(Box::new(server));
         }
         memory::save(path, &kept);
     }
@@ -92,7 +99,7 @@ impl Host {
         let level = self.deps.kill_switch.level();
         {
             let _state = self.state.lock().await;
-            self.deps.inputs.set(&kept.start.routing, level);
+            self.deps.inputs.set(&kept.start.routing, level, &kept.user);
         }
         *self.session_user.lock() = Some(kept.user.clone());
         *self.upstream.lock() = Some(upstream_of(&kept.start));

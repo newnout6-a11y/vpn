@@ -17,6 +17,9 @@ const TEST_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)";
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
+/// The Windows user whose inputs a test sends.
+const USER: &str = "S-1-5-21-1-1001";
+
 fn temp(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vpnte-inputs-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -145,7 +148,7 @@ async fn the_lists_cross_the_pipe_and_are_used_after_the_service_checks_them() {
 
     let got = over_the_pipe(3, routing(Some(set.clone()))).await;
     assert_eq!(got.rule_sets.as_ref(), Some(&set));
-    inputs.set(&got, KillSwitchLevel::Off);
+    inputs.set(&got, KillSwitchLevel::Off, USER);
     let dir = inputs.snapshot().await.expect("inputs").rule_set_dir;
     let dir = dir.expect("a rule-set folder");
     assert!(dir.starts_with(&store), "{dir:?}");
@@ -162,7 +165,7 @@ async fn the_lists_cross_the_pipe_and_are_used_after_the_service_checks_them() {
 
     let got = over_the_pipe(2, routing(Some(set))).await;
     assert_eq!(got.rule_sets, None, "stripped for a version-2 service");
-    inputs.set(&got, KillSwitchLevel::Off);
+    inputs.set(&got, KillSwitchLevel::Off, USER);
     let dir = inputs.snapshot().await.expect("inputs").rule_set_dir;
     assert_eq!(dir.as_deref(), Some(pinned));
     let _ = std::fs::remove_dir_all(&t);
@@ -194,7 +197,7 @@ async fn a_failing_set_keeps_the_pinned_files() {
         (RuleSetFiles::read(&bad), true),
         (RuleSetFiles::read(pinned), false),
     ] {
-        inputs.set(&routing(set), KillSwitchLevel::Off);
+        inputs.set(&routing(set), KillSwitchLevel::Off, USER);
         let dir = inputs.snapshot().await.expect("inputs").rule_set_dir;
         assert_eq!(dir.as_deref(), Some(pinned));
         // psmart-b2: the service says it runs its own files, and why the app's set is not used.
@@ -208,7 +211,7 @@ async fn a_failing_set_keeps_the_pinned_files() {
 
     let mut off = routing(RuleSetFiles::read(pinned));
     off.smart_ru = false;
-    inputs.set(&off, KillSwitchLevel::Off);
+    inputs.set(&off, KillSwitchLevel::Off, USER);
     assert_eq!(inputs.snapshot().await.expect("inputs").rule_set_dir, None);
     assert_eq!(inputs.rule_sets(), None, "no report while Smart RU is off");
 
@@ -216,7 +219,7 @@ async fn a_failing_set_keeps_the_pinned_files() {
     std::fs::create_dir_all(&partial).expect("dir");
     std::fs::copy(pinned.join("geoip-ru.srs"), partial.join("geoip-ru.srs")).expect("copy");
     let incomplete = Arc::new(SharedInputs::with_store(Some(partial), Some(store)));
-    incomplete.set(&routing(None), KillSwitchLevel::Off);
+    incomplete.set(&routing(None), KillSwitchLevel::Off, USER);
     assert_eq!(incomplete.get().rule_set_dir, None);
     let _ = std::fs::remove_dir_all(&t);
 }
@@ -236,7 +239,7 @@ async fn a_failing_set_keeps_the_last_set_that_passed() {
         Some(t.join("store")),
     ));
     let fresher = fresher_set(&t, "fresher", "fresh.example");
-    inputs.set(&routing(Some(fresher)), KillSwitchLevel::Off);
+    inputs.set(&routing(Some(fresher)), KillSwitchLevel::Off, USER);
     let fresh = inputs.snapshot().await.expect("inputs").rule_set_dir;
     assert!(fresh.as_deref().is_some_and(|d| d != pinned), "{fresh:?}");
     let bad = t.join("bad");
@@ -247,7 +250,11 @@ async fn a_failing_set_keeps_the_last_set_that_passed() {
     )
     .expect("swap");
     for _ in 0..2 {
-        inputs.set(&routing(RuleSetFiles::read(&bad)), KillSwitchLevel::Off);
+        inputs.set(
+            &routing(RuleSetFiles::read(&bad)),
+            KillSwitchLevel::Off,
+            USER,
+        );
         let dir = inputs.snapshot().await.expect("inputs").rule_set_dir;
         assert_eq!(dir, fresh);
         // psmart-b2: the earlier set runs, and the report says why the new one does not.
@@ -260,7 +267,11 @@ async fn a_failing_set_keeps_the_last_set_that_passed() {
         Some(pinned.to_owned()),
         Some(t.join("store")),
     ));
-    restarted.set(&routing(RuleSetFiles::read(&bad)), KillSwitchLevel::Off);
+    restarted.set(
+        &routing(RuleSetFiles::read(&bad)),
+        KillSwitchLevel::Off,
+        USER,
+    );
     let dir = restarted.snapshot().await.expect("inputs").rule_set_dir;
     assert_eq!(dir, fresh);
     let report = restarted.rule_sets().expect("a report");
@@ -281,7 +292,7 @@ async fn the_scope_reaches_only_a_service_that_speaks_it() {
     let inputs = Arc::new(SharedInputs::with_store(None, None));
     let got = over_the_pipe(4, scoped.clone()).await;
     assert_eq!(got, scoped);
-    inputs.set(&got, KillSwitchLevel::Off);
+    inputs.set(&got, KillSwitchLevel::Off, USER);
     let now = inputs.snapshot().await.expect("inputs");
     assert_eq!(now.only_listed, Some(vec!["own".to_owned()]));
     assert_eq!(now.split_vpn, ["browser"]);
@@ -289,7 +300,7 @@ async fn the_scope_reaches_only_a_service_that_speaks_it() {
     let got = over_the_pipe(3, scoped.clone()).await;
     assert_eq!(got.only_listed, None, "left out for a version-3 service");
     assert_eq!(got.split_vpn, ["browser"]);
-    inputs.set(&got, KillSwitchLevel::Off);
+    inputs.set(&got, KillSwitchLevel::Off, USER);
     assert_eq!(inputs.snapshot().await.expect("inputs").only_listed, None);
     let old = Request::Inputs(Box::new(scoped)).speak(3);
     let wire = serde_json::to_string(&old).expect("json");
@@ -312,10 +323,10 @@ async fn a_hand_over_is_checked_when_it_arrives() {
         Some(store.clone()),
     ));
     let set = fresher_set(&t, "fresher", "arrival.example");
-    inputs.set(&routing(Some(set.clone())), KillSwitchLevel::Off);
+    inputs.set(&routing(Some(set.clone())), KillSwitchLevel::Off, USER);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let (digest, dir) = loop {
-        if let Some(accepted) = handover::recall(&store).await {
+        if let Some(accepted) = handover::recall(&store, USER).await {
             break accepted;
         }
         assert!(tokio::time::Instant::now() < deadline, "never checked");
@@ -324,5 +335,89 @@ async fn a_hand_over_is_checked_when_it_arrives() {
     assert_eq!(digest, set.digest());
     let used = inputs.snapshot().await.expect("inputs").rule_set_dir;
     assert_eq!(used, Some(dir));
+    let _ = std::fs::remove_dir_all(&t);
+}
+
+/// speed3 H2: a request's facts about its server go to the one start or switch that asks for
+/// that server, once; a request without facts clears them, another server never sees them.
+#[test]
+fn a_requests_server_facts_are_handed_out_once() {
+    let inputs = SharedInputs::with_store(None, None);
+    let facts = ServerFacts {
+        fresh: true,
+        hints: Vec::new(),
+    };
+    inputs.offer(Some(("srv-1".into(), facts.clone())));
+    assert_eq!(inputs.server_facts("srv-2"), ServerFacts::default());
+    assert_eq!(
+        inputs.server_facts("srv-1"),
+        facts,
+        "kept for its own server"
+    );
+    assert_eq!(inputs.server_facts("srv-1"), ServerFacts::default(), "once");
+    inputs.offer(Some(("srv-1".into(), facts)));
+    inputs.offer(None);
+    assert_eq!(inputs.server_facts("srv-1"), ServerFacts::default());
+}
+
+/// speed3 P-1 (security review): the set one Windows user handed over is his alone. Another
+/// user whose own set fails its checks runs the pinned files, never the first user's set; the
+/// first user's failing set still keeps his own, also after the service restarts.
+#[tokio::test]
+async fn one_users_lists_never_steer_another_users_routing() {
+    let pinned = Path::new(RESOURCES);
+    if !pinned.join("sing-box.exe").is_file() {
+        return;
+    }
+    let t = temp("owners");
+    let inputs = Arc::new(SharedInputs::with_store(
+        Some(pinned.to_owned()),
+        Some(t.join("store")),
+    ));
+    let fresher = fresher_set(&t, "fresher", "owner.example");
+    inputs.set(&routing(Some(fresher)), KillSwitchLevel::Off, USER);
+    let his = inputs.snapshot().await.expect("inputs").rule_set_dir;
+    assert!(his.as_deref().is_some_and(|d| d != pinned), "{his:?}");
+    let bad = t.join("bad");
+    copy_set(&bad);
+    std::fs::copy(
+        pinned.join("geoip-ru.srs"),
+        bad.join("geoip-ru-blocked.srs"),
+    )
+    .expect("swap");
+    let other = "S-1-5-21-1-1002";
+    for service in [
+        inputs.clone(),
+        Arc::new(SharedInputs::with_store(
+            Some(pinned.to_owned()),
+            Some(t.join("store")),
+        )),
+    ] {
+        service.set(
+            &routing(RuleSetFiles::read(&bad)),
+            KillSwitchLevel::Off,
+            other,
+        );
+        let dir = service.snapshot().await.expect("inputs").rule_set_dir;
+        assert_eq!(
+            dir.as_deref(),
+            Some(pinned),
+            "the pinned files, not the other user's set"
+        );
+        let report = service.rule_sets().expect("a report");
+        assert_eq!(report.source, RuleSetSource::Pinned);
+        assert!(report.refused.is_some());
+        service.set(
+            &routing(RuleSetFiles::read(&bad)),
+            KillSwitchLevel::Off,
+            USER,
+        );
+        let dir = service.snapshot().await.expect("inputs").rule_set_dir;
+        assert_eq!(dir, his, "his own set that passed");
+        assert_eq!(
+            service.rule_sets().expect("a report").source,
+            RuleSetSource::Kept
+        );
+    }
     let _ = std::fs::remove_dir_all(&t);
 }

@@ -158,7 +158,16 @@ async fn graceful_stop_needs_no_kill() {
         ..
     } = next_event(&mut events).await;
     assert!(expected && graceful, "code {code:?}");
-    assert_eq!(code, Some(0), "Xray's own exit, not a kill");
+    // Xray's own exit, not a kill: 0 once its handler runs, or STATUS_CONTROL_C_EXIT when the
+    // break lands between its «started» line (the S3-02 readiness) and its signal.Notify, a few
+    // ms of GC: Go's default console handler then ends it on our CTRL_BREAK (14.11.2026: seen
+    // under load in the lead's verify run). A kill is KILL_CODE.
+    const STATUS_CONTROL_C_EXIT: i32 = 0xC000_013A_u32 as i32;
+    assert!(
+        matches!(code, Some(0) | Some(STATUS_CONTROL_C_EXIT)),
+        "code {code:?}: not Xray's own exit (a kill is {})",
+        child::KILL_CODE
+    );
     assert!(took < GRACEFUL_STOP, "took {took:?}");
 }
 
@@ -507,4 +516,139 @@ async fn bundled_engine_version() {
 async fn missing_exe_has_no_version() {
     let missing = std::env::temp_dir().join("vpnte-no-xray.exe");
     assert!(engine_version(&missing).await.is_err());
+}
+
+/// speed3 S3-02: Xray's verbatim start line (lab, Xray 26.11.9) marks it ready; its launch
+/// banner, its `listening` line and a line that only mentions the words do not.
+#[test]
+fn only_the_started_line_marks_xray_ready() {
+    let started = "2026/11/13 23:03:59.861752 [Warning] core: Xray 26.11.9 started";
+    let banner = "Xray 26.11.9 (Xray, Penetrates Everything.) 676eaf6 (go1.27.3 windows/amd64)";
+    let listening = "2026/11/13 23:03:59.861752 [Info] transport/internet/tcp: listening tcp on \
+                     127.0.0.1:22686";
+    let other = "2026/11/13 23:04:00.000001 [Info] core: Xray 26.11.9 started a task";
+    assert!(STARTED.matches(started));
+    assert!(!STARTED.matches(banner));
+    assert!(!STARTED.matches(listening));
+    assert!(!STARTED.matches(other));
+}
+
+/// speed3 S3-02 (lab live-9/live-10: the poll put every start at 355-395 ms): the real Xray is
+/// ready on its own started line plus one authenticated answer, spawn -> ready within 200 ms
+/// (the best of three: the first start of a file may wait for a virus scan).
+#[tokio::test]
+async fn xray_is_ready_right_after_its_started_line() {
+    let Some(exe) = xray_exe() else { return };
+    let (mut sup, _events) = supervisor(exe, None);
+    let mut best = Duration::MAX;
+    for _ in 0..3 {
+        let ep = SlotEndpoint::allocate(&[]).unwrap();
+        let started = Instant::now();
+        sup.start(Slot::A, ep.clone(), launch(&ep), &CancellationToken::new())
+            .await
+            .unwrap();
+        best = best.min(started.elapsed());
+        sup.stop(Slot::A).await.unwrap();
+    }
+    assert!(
+        best <= Duration::from_millis(200),
+        "spawn -> ready {best:?}"
+    );
+}
+
+/// A stand-in engine (PowerShell, no pin check) that prints `line` (if any) and lives ~6 s.
+fn stand_in(line: Option<&str>) -> EngineChild {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    let shell = Path::new(&root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let print = line.map_or(String::new(), |l| format!("Write-Output '{l}'; "));
+    let script = format!("{print}Start-Sleep -Seconds 6");
+    EngineChild::launch(Spec {
+        engine: Engine::Xray,
+        exe: &shell,
+        args: &["-NoProfile", "-NonInteractive", "-Command", &script],
+        config: b"",
+        log: None,
+        marker: Some(STARTED),
+        scrub: Scrubber::default(),
+    })
+    .unwrap()
+}
+
+/// A loopback SOCKS5 server that takes `creds` (greeting and username/password only, as the
+/// readiness probe asks).
+async fn socks_with(creds: Creds) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let expected = creds.clone();
+            tokio::spawn(async move {
+                let mut head = [0u8; 2];
+                sock.read_exact(&mut head).await?;
+                let mut methods = vec![0u8; usize::from(head[1])];
+                sock.read_exact(&mut methods).await?;
+                sock.write_all(&[5, 2]).await?;
+                let mut ver_len = [0u8; 2];
+                sock.read_exact(&mut ver_len).await?;
+                let mut user = vec![0u8; usize::from(ver_len[1])];
+                sock.read_exact(&mut user).await?;
+                let mut len = [0u8; 1];
+                sock.read_exact(&mut len).await?;
+                let mut pass = vec![0u8; usize::from(len[0])];
+                sock.read_exact(&mut pass).await?;
+                let ok = user == expected.user.as_bytes() && pass == expected.pass.as_bytes();
+                sock.write_all(&[1, u8::from(!ok)]).await?;
+                std::io::Result::Ok(())
+            });
+        }
+    });
+    port
+}
+
+/// S3-02 (security review): the started line alone is never readiness. With nothing that
+/// answers SOCKS on the slot's port the start is refused after the poll's budget.
+#[tokio::test]
+async fn the_started_line_alone_is_not_ready() {
+    let child = stand_in(Some(
+        "2026/11/13 23:03:59.861752 [Warning] core: Xray 26.11.9 started",
+    ));
+    let mut seen = child.ready_watch();
+    let line = tokio::time::timeout(Duration::from_secs(20), seen.wait_for(|s| *s));
+    assert!(
+        line.await.is_ok_and(|r| r.is_ok()),
+        "the stand-in printed its line"
+    );
+    let free = SlotEndpoint::allocate(&[]).unwrap();
+    let token = CancellationToken::new();
+    let err = ready(&child, free.port(), free.creds(), &token)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, XrayError::NotReady { .. }), "{err:?}");
+}
+
+/// S3-02: an engine that never prints the line is still found ready by the poll, and the line
+/// path answers right after the line when the slot's server takes the credentials.
+#[tokio::test]
+async fn readiness_comes_by_the_line_or_by_the_poll() {
+    let creds = ports::creds();
+    let port = socks_with(creds.clone()).await;
+    let token = CancellationToken::new();
+    let silent = stand_in(None);
+    let by = ready(&silent, port, &creds, &token).await.unwrap();
+    assert_eq!(by, "poll");
+    let marked = stand_in(Some(
+        "2026/11/13 23:03:59.861752 [Warning] core: Xray 26.11.9 started",
+    ));
+    let mut seen = marked.ready_watch();
+    let line = tokio::time::timeout(Duration::from_secs(20), seen.wait_for(|s| *s));
+    assert!(
+        line.await.is_ok_and(|r| r.is_ok()),
+        "the stand-in printed its line"
+    );
+    let by = ready(&marked, port, &creds, &token).await.unwrap();
+    assert!(["line", "poll"].contains(&by), "{by}");
 }

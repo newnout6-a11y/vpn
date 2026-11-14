@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use vpnte_automation::adaptive::reaction::Verdicts;
+use vpnte_base::types::{UnixMs, now_ms};
 use vpnte_servers::model::{ProfileId, ServerRow, ServerVerdict};
 use vpnte_servers::store::{SelectBy, Servers};
 use vpnte_tunnel::api::VpnProfile;
@@ -21,6 +22,13 @@ use crate::svc_tunnel::vpn_profile;
 /// A server that crashed out of a session is not picked again for this long: the RU freeze
 /// window, which a dial inside it extends (the runtime's `Timings::freeze`).
 const CRASHED_QUIET: Duration = Duration::from_secs(130);
+
+/// speed3 S3-07: a key check younger than this lets a user's switch select first (the autopick's
+/// `FRESH`: a stored check this young is used as it is).
+const FRESH_MS: UnixMs = 10 * 60 * 1000;
+/// ... and only when its first answer came this fast: a provider cascade's 5-8 s first answers
+/// keep their probe and its 15 s budget (the switch's one proof has 2 s).
+const FRESH_RTT_MS: u32 = 1000;
 
 pub struct ServerFailover {
     servers: Arc<Servers>,
@@ -78,6 +86,29 @@ pub(super) fn alive(row: &ServerRow) -> Option<bool> {
     }
 }
 
+/// speed3 S3-07: the row's last key check (a full check: engine up, trace and transfer; a ping
+/// never writes it) found it online less than [`FRESH_MS`] before `now` with a first answer
+/// within [`FRESH_RTT_MS`], and no later verdict ruled it out. A session's credit carries no
+/// latency, so it never qualifies on its own.
+pub(super) fn fresh(row: &ServerRow, now: UnixMs) -> bool {
+    let Some(h) = &row.health else {
+        return false;
+    };
+    alive(row) == Some(true)
+        && !row.is_locked()
+        && h.online
+        && (0..FRESH_MS).contains(&now.saturating_sub(h.at))
+        && h.rtt_ms.is_some_and(|ms| ms <= FRESH_RTT_MS)
+}
+
+/// [`fresh`] for the stored row `profile_id` now: the app's evidence a user's switch to it may
+/// select first (in-process through [`Failover::fresh`]; Tunnel mode sends it as
+/// `ServerUpstream::fresh` once the service speaks `HINTS_PROTOCOL`).
+pub fn fresh_server(servers: &Servers, profile_id: &str) -> bool {
+    let row = servers.get(&ProfileId::from(profile_id));
+    row.is_some_and(|row| fresh(&row, now_ms()))
+}
+
 /// The siblings of `base` worth a try, best first: same group, usable, not `skip`ped (tried, or
 /// ruled out on this network), not known dead; healthy before unknown, then the lower latency,
 /// then store order.
@@ -128,6 +159,10 @@ impl Failover for ServerFailover {
         round.1.push(pick.id.0.clone());
         drop(round);
         vpn_profile(pick, &self.fingerprints)
+    }
+
+    fn fresh(&self, profile_id: &str) -> bool {
+        fresh_server(&self.servers, profile_id)
     }
 
     fn commit(&self, profile_id: &str) {

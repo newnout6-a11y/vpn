@@ -21,7 +21,7 @@ use vpnte_engine::routing::dns::DnsAddr;
 use vpnte_engine::routing::domain::DomainRule;
 use vpnte_engine::routing::process::{InactiveApp, InactiveReason, ResolvedSplit};
 
-use crate::api::{CaptureKind, StartRequest, VpnProfile};
+use crate::api::{CaptureKind, ServerFacts, StartRequest, VpnProfile};
 
 mod actor;
 mod capture;
@@ -124,6 +124,13 @@ impl UserInputs {
 pub trait InputsSource: Send + Sync {
     /// The current inputs; an `Err` fails the start (and turns a due crash restart off).
     async fn snapshot(&self) -> AppResult<UserInputs>;
+
+    /// What the client sent about server `profile_id` with the operation in flight, handed
+    /// out once (speed3 H2): the helper service's inputs carry it from the request, an
+    /// in-process host has none.
+    fn server_facts(&self, _profile_id: &str) -> ServerFacts {
+        ServerFacts::default()
+    }
 }
 
 /// Post-trial failover (tunnel-core §3.14): a live sibling of an expired subscription's key.
@@ -133,6 +140,11 @@ pub trait Failover: Send + Sync {
     async fn next_live_sibling(&self, cancel: &CancellationToken) -> Option<VpnProfile>;
     /// The sibling started: make it the active server.
     fn commit(&self, profile_id: &str);
+    /// speed3 S3-07: the app's own evidence that `profile_id` works now (see
+    /// [`ServerFacts::fresh`]); `false` keeps a switch probe-first.
+    fn fresh(&self, _profile_id: &str) -> bool {
+        false
+    }
 }
 
 /// Outside evidence that the tunnel carries traffic (a public-IP read or a tunnel probe that
@@ -204,7 +216,9 @@ impl Default for Timings {
             capture_ready: Duration::from_secs(5),
             exit: vpnte_engine::singbox_process::STOP_TIMEOUT,
             release: Duration::from_secs(2),
-            backoff: [2_000, 5_000, 10_000].map(Duration::from_millis),
+            // speed3 S3-01 (owner default 3): the first restart at once, then 5 s and 10 s;
+            // AT-02-003's growing backoff holds from the second attempt.
+            backoff: [0, 5_000, 10_000].map(Duration::from_millis),
             slow_retry: [60, 120, 300].map(Duration::from_secs),
             freeze: Duration::from_secs(130),
             retry_spacing: Duration::from_secs(20),

@@ -91,13 +91,20 @@ fn proxy_form_keeps_everything_but_the_tun() {
     assert_eq!(c["dns"]["strategy"], "ipv4_only");
     let clash = &c["experimental"]["clash_api"];
     assert_eq!(clash["external_controller"], "127.0.0.1:25553");
-    // The same profile over a TUN differs only in the capture parts and in the resolver of
-    // `direct-out`: a proxy client hands over a name, resolved on `dns-direct` when it leaves
-    // directly (appsplit-b3).
+    // The same profile over a TUN differs only in the capture parts, the TUN's in-memory
+    // optimistic DNS (speed3 S3-13 (a)) and the resolver of `direct-out`: a proxy client hands
+    // over a name, resolved on `dns-direct` when it leaves directly (appsplit-b3).
     let mut t = i.clone();
     t.capture = Capture::Tun(tun(false, true));
     let t = build(&t).unwrap();
-    assert_eq!(t["dns"], c["dns"]);
+    let mut tun_dns = t["dns"].clone();
+    assert!(
+        tun_dns
+            .as_object_mut()
+            .and_then(|d| d.remove("optimistic"))
+            .is_some()
+    );
+    assert_eq!(tun_dns, c["dns"]);
     let (direct, others) = (outbound(&c, DIRECT_OUT), outbound(&t, DIRECT_OUT));
     assert_eq!(direct["domain_resolver"], DNS_DIRECT);
     assert!(others.get("domain_resolver").is_none());
@@ -211,4 +218,27 @@ fn the_users_bypass_entries_leave_directly_under_proxy_capture() {
     let t = build(&t).unwrap();
     assert!(index_of(&t, &bypass[0]).is_none() && dns_server(&t, DNS_DIRECT).is_none());
     assert_eq!(crate::test_support::singbox_check(&t).map(|_| ()), Ok(()));
+}
+
+/// speed3 S3-13 (a): a Tunnel config answers expired names from memory for at most an hour
+/// (never `true`: three days); the proxy form has no such cache, and neither keeps anything on
+/// disk (`cache_file` would also restore the last session's selector choice).
+#[test]
+fn optimistic_dns_only_in_the_tunnel_and_only_in_memory() {
+    let up = || {
+        slots(UdpPolicy {
+            udp: true,
+            block_quic: true,
+        })
+    };
+    let tun = build(&inputs(up())).expect("tun");
+    assert_eq!(
+        tun["dns"]["optimistic"],
+        json!({ "enabled": true, "timeout": "1h" })
+    );
+    let proxy = build(&proxied(inputs(up()))).expect("proxy");
+    assert!(proxy["dns"].get("optimistic").is_none(), "{}", proxy["dns"]);
+    for config in [&tun, &proxy] {
+        assert!(config["experimental"].get("cache_file").is_none());
+    }
 }

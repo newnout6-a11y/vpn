@@ -236,8 +236,28 @@ struct Output {
     log_failed: AtomicBool,
     scrub: Scrubber,
     lines: broadcast::Sender<Arc<str>>,
-    marker: Option<&'static str>,
+    marker: Option<Marker>,
     ready: watch::Sender<bool>,
+}
+
+/// The line that marks an engine ready. One-shot: the first match flips the ready watch, later
+/// lines change nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Marker {
+    /// A line that contains the text (sing-box: `sing-box started (`).
+    Contains(&'static str),
+    /// A line that contains the first text and ends with the second (speed3 S3-02, Xray:
+    /// `[Warning] core: Xray 26.11.9 started`; its launch banner has no ` started`).
+    Around(&'static str, &'static str),
+}
+
+impl Marker {
+    pub(crate) fn matches(self, line: &str) -> bool {
+        match self {
+            Marker::Contains(text) => line.contains(text),
+            Marker::Around(inner, end) => line.contains(inner) && line.ends_with(end),
+        }
+    }
 }
 
 impl Output {
@@ -254,7 +274,7 @@ impl Output {
         if raw.trim().is_empty() {
             return;
         }
-        let marks_ready = self.marker.is_some_and(|m| raw.contains(m));
+        let marks_ready = self.marker.is_some_and(|m| m.matches(&raw));
         let raw: Arc<str> = raw.into();
         if let Some(log) = &self.log {
             // Small appends to an already open file: cheaper than a writer thread per pipe.
@@ -347,8 +367,8 @@ pub(crate) struct Spec<'a> {
     pub config: &'a [u8],
     /// Logs directory and file stem (`sing-box`, `xray-a`); `None` = no log file.
     pub log: Option<(&'a Path, &'a str)>,
-    /// A line containing this marks the engine ready.
-    pub marker: Option<&'static str>,
+    /// The line that marks the engine ready.
+    pub marker: Option<Marker>,
     pub scrub: Scrubber,
 }
 

@@ -34,7 +34,7 @@ use vpnte_tunnel::api::Runtime;
 
 pub use coord::{AppCoordinator, Detect, Hooks, UserAct};
 pub use events::{Followed, Privacy};
-pub use failover::ServerFailover;
+pub use failover::{ServerFailover, fresh_server};
 pub use host::{Fingerprints, ServerHost};
 pub use lane::Lane;
 pub use pick::{AppPick, spawn_autopick, traffic_exposure};

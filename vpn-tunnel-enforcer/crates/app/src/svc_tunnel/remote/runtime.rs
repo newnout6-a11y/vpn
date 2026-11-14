@@ -17,6 +17,14 @@ use vpnte_tunnel::api::{
 
 use super::{Remote, start, tun_error, unexpected};
 
+/// The name a server's hint is for: its own host name (never an IP literal).
+fn hinted_name(server: &vpnte_service::proto::ServerUpstream) -> Option<String> {
+    match &server.profile.server {
+        vpnte_profiles::model::Host::Domain(name) => Some(name.to_string()),
+        vpnte_profiles::model::Host::Ip(_) => None,
+    }
+}
+
 /// The upstream a kept session runs is the one asked for: the take-over keeps it running.
 fn same_upstream(kept: &KeptSession, upstream: &Upstream) -> bool {
     match upstream {
@@ -31,7 +39,25 @@ impl Remote {
         let inputs = self.0.inputs.snapshot().await?;
         let protection = self.0.protection.read(|d| d.settings.clone());
         let notes = start::inactive_warnings(&inputs, self.protocol());
-        Ok((start::tunnel_start(req, &inputs, protection)?, notes))
+        let mut start = start::tunnel_start(req, &inputs, protection)?;
+        // S3-09 (b): the name resolved before the click, for this start only (the service
+        // filters it like a looked-up answer; a service older than the hints never sees it).
+        if let (Upstream::Server(server), Some(ahead)) = (&mut start.upstream, self.0.ahead.get())
+            && let Some(name) = hinted_name(server)
+        {
+            server.hints = ahead.hint(&name).into_iter().collect();
+        }
+        Ok((start, notes))
+    }
+
+    /// The start that carried a hint failed: the hint goes (S3-09 (e)).
+    fn failed_with(&self, start: &TunnelStart) {
+        if let (Upstream::Server(server), Some(ahead)) = (&start.upstream, self.0.ahead.get())
+            && !server.hints.is_empty()
+            && let Some(name) = hinted_name(server)
+        {
+            ahead.forget(&name);
+        }
     }
 
     /// The service's routing inputs from the app's current settings; the warnings only the app
@@ -134,6 +160,7 @@ impl Runtime for Remote {
         self.link().await.map_err(tun_error)?;
         let (start, notes) = self.tunnel_start(&req).await?;
         let kept = self.0.state.lock().kept.clone();
+        let sent = start.clone();
         let request = match kept {
             Some(kept) if same_upstream(&kept, &start.upstream) => return self.take_over().await,
             // Another upstream: the kept run is replaced, its kill switch held in between.
@@ -147,7 +174,14 @@ impl Runtime for Remote {
                 Request::Start(Box::new(start))
             }
         };
-        let receipt = self.started(request, &cancel, notes).await?;
+        let receipt = self
+            .started(request, &cancel, notes)
+            .await
+            .inspect_err(|err| {
+                if err.error.kind != vpnte_base::ErrorKind::Cancelled {
+                    self.failed_with(&sent);
+                }
+            })?;
         receipt.ok_or_else(|| AppError::internal(std::io::Error::other("no receipt")).into())
     }
 

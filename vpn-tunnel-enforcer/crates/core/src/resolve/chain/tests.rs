@@ -215,3 +215,30 @@ fn block_pages() {
         assert!(!block_page(s.parse().unwrap()), "{s}");
     }
 }
+
+/// speed3 S3-09 (c): an address to dial takes the A answer at once; AAAA gets no grace after it
+/// (a plain lookup still waits its 300 ms for the second family).
+#[tokio::test(start_paused = true)]
+async fn a_dial_does_not_wait_for_aaaa_after_a() {
+    let c = chain(&[("a", Act::DropsAaaa(addrs_of(&["203.0.113.12"])))]);
+    let started = tokio::time::Instant::now();
+    let found = c.resolve_dial("example.com", &any).await;
+    assert_eq!(found, Ok(addrs_of(&["203.0.113.12"])));
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "{:?}",
+        started.elapsed()
+    );
+    let started = tokio::time::Instant::now();
+    c.resolve("example.com", &any).await.unwrap();
+    assert!(started.elapsed() >= GRACE, "{:?}", started.elapsed());
+}
+
+/// S3-09 (b) (security review): the lookups before the click take the four foreign IP-literal
+/// DoH resolvers only: no DoH by name (Yandex, Cloudflare) and no TCP/53.
+#[test]
+fn the_lookup_ahead_takes_only_ip_literal_doh() {
+    let foreign: Vec<Upstream> = UPSTREAMS.into_iter().filter(ip_literal_doh).collect();
+    assert_eq!(foreign, UPSTREAMS[..4].to_vec());
+    assert!(!foreign.contains(&YANDEX_DOH) && !foreign.contains(&CLOUDFLARE_DOH));
+}

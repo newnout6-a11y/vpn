@@ -9,10 +9,11 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::{AppError, ErrorKind, Msg};
+use windows::Win32::Networking::WinSock::AF_INET;
 use windows::core::GUID;
 
 use super::ffi::{self, GaaRow};
-use super::is_own_tun_address;
+use super::{TUN_V4, is_own_tun_address};
 
 const OPER_UP: i32 = 1;
 const OPER_NOT_PRESENT: i32 = 6;
@@ -205,6 +206,32 @@ fn owned_present(rows: &[GaaRow], aliases: &[String], v6: Option<Ipv6Net>) -> bo
                 is_own_tun_address(a.ip) || v6.is_some_and(|v6| a.ip == IpAddr::V6(v6.addr()))
             })
         })
+}
+
+/// What Windows says about our TUN's IPv4 address right now (speed3 S3-04: lab live-10 lost
+/// the first packets of every fresh TUN; whether the address was still Tentative is the
+/// question). Read-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TunSettle {
+    /// `NL_DAD_STATE` of [`TUN_V4`]'s address on the interface (`None`: not carried).
+    pub dad_state: Option<i32>,
+    /// The interface's IPv4 `DadTransmits` (`None`: no IPv4 binding).
+    pub dad_transmits: Option<u32>,
+}
+
+impl TunSettle {
+    /// The address is Preferred: duplicate-address detection is over.
+    pub fn preferred(&self) -> bool {
+        self.dad_state == Some(super::inventory::DAD_PREFERRED)
+    }
+}
+
+/// [`TunSettle`] of the interface `luid`.
+pub fn tun_settle(luid: u64) -> windows::core::Result<TunSettle> {
+    Ok(TunSettle {
+        dad_state: ffi::unicast_dad(luid, IpAddr::V4(TUN_V4.addr()))?,
+        dad_transmits: ffi::ip_interface(luid, AF_INET)?.map(|i| i.dad_transmits),
+    })
 }
 
 /// Whether the interface still exists (`GetIfEntry2`); a "not present" ghost counts as gone.

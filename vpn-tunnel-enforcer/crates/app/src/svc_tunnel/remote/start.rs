@@ -54,6 +54,9 @@ pub(super) fn server(profile: &VpnProfile) -> ServerUpstream {
         profile: (*profile.profile).clone(),
         device: profile.device,
         engine: profile.engine,
+        // speed3 H2: the facts are set by the request's sender; none from the profile itself.
+        fresh: false,
+        hints: Vec::new(),
     }
 }
 

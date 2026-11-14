@@ -96,6 +96,13 @@ pub(super) fn section(i: &ConfigInputs, up: &UpstreamParts) -> Result<Value, Con
     dns["final"] = json!(DNS_REMOTE);
     // Applies to hijacked queries too: AAAA answers are empty, apps connect over IPv4.
     dns["strategy"] = json!("ipv4_only");
+    if matches!(i.capture, Capture::Tun(_)) {
+        // speed3 S3-13 (a): an expired name answers from memory at once while it is refreshed
+        // (~90-130 ms each inside a session). One hour, not `true` (three days): under Smart RU a
+        // stale Russian-range answer would send a site's SNI outside the tunnel. Memory only:
+        // no `cache_file` (it would also keep the selector's choice across sessions).
+        dns["optimistic"] = json!({ "enabled": true, "timeout": "1h" });
+    }
     Ok(dns)
 }
 

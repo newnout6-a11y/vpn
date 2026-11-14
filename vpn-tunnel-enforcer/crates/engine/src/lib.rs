@@ -41,7 +41,7 @@ pub mod lab;
 pub mod mihomo_config;
 #[cfg(feature = "lab")]
 pub mod mihomo_process;
-mod pin;
+pub mod pin;
 pub mod ports;
 pub mod routing;
 pub mod singbox_config;

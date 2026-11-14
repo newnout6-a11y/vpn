@@ -108,6 +108,11 @@ pub trait Capture: Send + Sync {
         plan: &CapturePlan,
         parts: &EngineParts,
     ) -> Result<(Value, [u8; 32]), ConfigError>;
+    /// The compatibility key of [`Capture::config`] without rendering the config (speed3 S3-10:
+    /// a switch only compares keys).
+    fn compat(&self, plan: &CapturePlan, parts: &EngineParts) -> Result<[u8; 32], ConfigError> {
+        self.config(plan, parts).map(|(_, key)| key)
+    }
     /// Protection before any engine starts (`session_programs` = canonical paths of local-proxy
     /// owners). An error refuses the start.
     async fn begin(&self, plan: &CapturePlan, session_programs: &[PathBuf]) -> AppResult<()>;

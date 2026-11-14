@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use vpnte_tunnel::api::{FailoverCause, TunStatusKind, TunnelEvent};
 
-/// A scheduled restart this much later is a quiet time, not a backoff (the backoffs are 2, 5
-/// and 10 s).
+/// A scheduled restart this much later is a quiet time, not a backoff (the backoffs are 0, 5
+/// and 10 s: speed3 S3-01).
 pub(super) const QUIET_WAIT: Duration = Duration::from_secs(15);
 
 /// Where one outage's failover stands.

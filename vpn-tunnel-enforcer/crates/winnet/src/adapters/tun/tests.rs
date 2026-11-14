@@ -383,3 +383,31 @@ async fn live_tun_reads() {
         }
     ));
 }
+
+/// speed3 S3-04 measurement read: the loopback interface's 127.0.0.1 is Preferred, its IPv4
+/// binding has a `DadTransmits` value; an absent interface carries neither (no error).
+#[test]
+fn the_settle_read_names_the_dad_state() {
+    let absent = tun_settle(LUID).expect("absent LUID");
+    assert_eq!(
+        absent,
+        TunSettle {
+            dad_state: None,
+            dad_transmits: None
+        }
+    );
+    let rows = ffi::adapters().expect("adapters");
+    let Some(lo) = rows.iter().find(|r| r.if_type == 24) else {
+        return;
+    };
+    let dad = ffi::unicast_dad(lo.luid, IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    assert_eq!(
+        dad.expect("loopback read"),
+        Some(super::super::inventory::DAD_PREFERRED)
+    );
+    let lo = tun_settle(lo.luid).expect("loopback");
+    assert!(
+        lo.dad_state.is_none() && lo.dad_transmits.is_some(),
+        "{lo:?}"
+    );
+}

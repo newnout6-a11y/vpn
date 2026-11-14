@@ -4,6 +4,9 @@ use super::*;
 use crate::routing::rulesets::complete;
 use crate::test_support::{TempDir, resources, singbox_exe};
 
+/// The Windows user whose hand-over a test sends.
+const USER: &str = "S-1-5-21-1-1001";
+
 fn bundled_set() -> RuleSetFiles {
     RuleSetFiles::read(&resources()).expect("the bundled rule sets")
 }
@@ -64,7 +67,7 @@ async fn the_service_accepts_only_sets_that_pass_its_own_checks() {
     let t = TempDir::new("handover-accept");
     let store = t.path().join("rulesets");
     let set = bundled_set();
-    let dir = accept(&set, &exe, &store, &resources())
+    let dir = accept(&set, &exe, &store, &resources(), USER)
         .await
         .expect("the bundled set");
     assert!(complete(&dir));
@@ -75,7 +78,7 @@ async fn the_service_accepts_only_sets_that_pass_its_own_checks() {
         );
     }
     assert_eq!(
-        accept(&set, &exe, &store, &resources()).await,
+        accept(&set, &exe, &store, &resources(), USER).await,
         Ok(dir.clone())
     );
 
@@ -84,14 +87,14 @@ async fn the_service_accepts_only_sets_that_pass_its_own_checks() {
         f[3]["data"] = geoip;
     });
     assert_eq!(
-        accept(&swapped, &exe, &store, &resources()).await,
+        accept(&swapped, &exe, &store, &resources(), USER).await,
         Err(RefreshFault::Invalid {
             file: "geoip-ru-blocked.srs".into()
         })
     );
     let reordered = edited(|f| f.swap(2, 3));
     assert!(
-        accept(&reordered, &exe, &store, &resources())
+        accept(&reordered, &exe, &store, &resources(), USER)
             .await
             .is_err()
     );
@@ -100,7 +103,7 @@ async fn the_service_accepts_only_sets_that_pass_its_own_checks() {
         f[0]["data"] = Value::String(big);
     });
     assert!(
-        accept(&oversized, &exe, &store, &resources())
+        accept(&oversized, &exe, &store, &resources(), USER)
             .await
             .is_err()
     );
@@ -110,7 +113,9 @@ async fn the_service_accepts_only_sets_that_pass_its_own_checks() {
         .collect();
     left.sort();
     let name = dir.file_name().unwrap().to_string_lossy();
-    assert_eq!(left, [ACCEPTED, name.as_ref()]);
+    let noted = note(&store, USER);
+    let noted = noted.file_name().unwrap().to_string_lossy();
+    assert_eq!(left, [noted.as_ref(), name.as_ref()]);
 
     let old = store.join(format!("{GEN_PREFIX}0123456789abcdef"));
     std::fs::create_dir_all(&old).unwrap();
@@ -126,14 +131,16 @@ async fn a_stored_set_is_used_only_while_its_bytes_hash_to_it() {
     let t = TempDir::new("handover-zeros");
     let store = t.path().join("rulesets");
     let set = bundled_set();
-    let dir = accept(&set, &exe, &store, &resources()).await.unwrap();
+    let dir = accept(&set, &exe, &store, &resources(), USER)
+        .await
+        .unwrap();
     for (_, file, _) in RULE_SETS {
         let len = std::fs::metadata(dir.join(file)).unwrap().len();
         std::fs::write(dir.join(file), vec![0u8; len as usize]).unwrap();
     }
     assert!(complete(&dir), "name and sizes look right");
     assert_eq!(
-        accept(&set, &exe, &store, &resources()).await,
+        accept(&set, &exe, &store, &resources(), USER).await,
         Ok(dir.clone())
     );
     for (_, file, _) in RULE_SETS {
@@ -153,16 +160,21 @@ async fn the_last_accepted_set_is_recalled_by_its_bytes() {
     let Some(exe) = singbox_exe() else { return };
     let t = TempDir::new("handover-recall");
     let store = t.path().join("rulesets");
-    assert_eq!(recall(&store).await, None);
+    assert_eq!(recall(&store, USER).await, None);
     let set = bundled_set();
-    let dir = accept(&set, &exe, &store, &resources()).await.unwrap();
-    assert_eq!(recall(&store).await, Some((set.digest(), dir.clone())));
+    let dir = accept(&set, &exe, &store, &resources(), USER)
+        .await
+        .unwrap();
+    assert_eq!(
+        recall(&store, USER).await,
+        Some((set.digest(), dir.clone()))
+    );
 
     let older = store.join(format!("{GEN_PREFIX}{}", &set.digest()[..16]));
     std::fs::rename(&dir, &older).unwrap();
-    assert_eq!(recall(&store).await, None, "stored by older checks");
+    assert_eq!(recall(&store, USER).await, None, "stored by older checks");
     assert_eq!(
-        accept(&set, &exe, &store, &resources()).await,
+        accept(&set, &exe, &store, &resources(), USER).await,
         Ok(dir.clone())
     );
     assert!(complete(&dir));
@@ -170,7 +182,31 @@ async fn the_last_accepted_set_is_recalled_by_its_bytes() {
     let file = dir.join(RULE_SETS[0].1);
     let len = std::fs::metadata(&file).unwrap().len();
     std::fs::write(&file, vec![0u8; len as usize]).unwrap();
-    assert_eq!(recall(&store).await, None, "bytes changed");
-    std::fs::write(store.join(ACCEPTED), "not a digest").unwrap();
-    assert_eq!(recall(&store).await, None);
+    assert_eq!(recall(&store, USER).await, None, "bytes changed");
+    std::fs::write(note(&store, USER), "not a digest").unwrap();
+    assert_eq!(recall(&store, USER).await, None);
+}
+
+/// speed3 P-1: the note of the last set that passed is the sender's own: another Windows user
+/// recalls none (his failing set then keeps the pinned files), and the same bytes from him are
+/// taken without a second check.
+#[tokio::test]
+async fn a_users_accepted_set_is_his_own() {
+    let Some(exe) = singbox_exe() else { return };
+    let t = TempDir::new("handover-owner");
+    let store = t.path().join("rulesets");
+    let set = bundled_set();
+    let dir = accept(&set, &exe, &store, &resources(), USER)
+        .await
+        .unwrap();
+    let other = "S-1-5-21-1-1002";
+    assert_eq!(recall(&store, other).await, None, "never another user's");
+    assert_eq!(
+        recall(&store, USER).await,
+        Some((set.digest(), dir.clone()))
+    );
+    assert_ne!(note(&store, USER), note(&store, other));
+    let again = accept(&set, &exe, &store, &resources(), other).await;
+    assert_eq!(again, Ok(dir.clone()), "the same bytes, the same folder");
+    assert_eq!(recall(&store, other).await, Some((set.digest(), dir)));
 }

@@ -125,6 +125,9 @@ pub async fn wait_owned_tun(alias: &str, v4: Ipv4Net, v6: Option<Ipv6Net>, timeo
 pub async fn wait_released(aliases: &[String], v6: Option<Ipv6Net>, timeout: Duration,
     cancel: &CancellationToken) -> Release;                             // 25 ms polls; after the engine exited
 pub fn adapter_present(luid: u64) -> windows::core::Result<bool>;      // a "not present" ghost = false
+pub struct TunSettle { pub dad_state: Option<i32> /* NL_DAD_STATE of 192.168.250.253 */, pub dad_transmits: Option<u32> }
+impl TunSettle { pub fn preferred(&self) -> bool }
+pub fn tun_settle(luid: u64) -> windows::core::Result<TunSettle>;      // speed3 S3-04 measurement, read-only
 
 pub mod alias {
     pub const CANDIDATES: [&str; 8];   // "Ethernet 5" … "Ethernet 12" (disguised TUN names)

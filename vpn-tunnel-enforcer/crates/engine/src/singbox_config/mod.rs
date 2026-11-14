@@ -216,7 +216,8 @@ impl fmt::Debug for Listeners {
 }
 
 /// sing-box JSON fragments built by `routing::build` (each element one object), placed as is.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Serialised whole into [`compat_key`]: a field added here counts in the key by itself.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct RoutingParts {
     /// Process rules (own engines, third-party cores, split-tunnel apps), right after the
     /// loopback inbound rules and before every other routing decision.
@@ -345,20 +346,16 @@ pub fn compat_key(i: &ConfigInputs) -> [u8; 32] {
         }),
         Capture::Proxy { port } => json!({ "proxy": { "port": port } }),
     };
-    let r = &i.routing;
+    // speed3 S3-10 (security review): every routing input, not a picked subset. Version 2 left
+    // out the apps page's scope and «Не через прокси», so a switch kept a running config whose
+    // routing no longer matched the user's settings.
     let canonical = json!({
-        "v": 2,
+        "v": 3,
         "upstream": upstream,
         "capture": capture,
         "probe": i.listeners.probe.is_some(),
         "dnsBootstrapIn": i.listeners.dns_bootstrap.is_some(),
-        "routing": {
-            "process": r.process_rules,
-            "domain": r.domain_rules,
-            "ruleSets": r.rule_sets,
-            "dnsServers": r.dns_servers,
-            "dnsRules": r.dns_rules,
-        },
+        "routing": i.routing,
         "physDns": i.phys_dns,
     });
     Sha256::digest(canonical.to_string().as_bytes()).into()

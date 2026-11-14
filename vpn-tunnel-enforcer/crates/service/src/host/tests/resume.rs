@@ -133,6 +133,8 @@ async fn an_adaptive_restart_onto_a_sibling_is_remembered() {
             profile: vpnte_profiles::uri::parse_uri(link).expect("link"),
             device: None,
             engine: vpnte_base::types::EnginePref::Auto,
+            fresh: false,
+            hints: Vec::new(),
         }),
     };
     let client = |user: &str| crate::pipe::ClientInfo {
@@ -156,4 +158,26 @@ async fn an_adaptive_restart_onto_a_sibling_is_remembered() {
         *h.host.upstream.lock(),
         Some((Some("sibling".into()), None))
     );
+}
+
+/// speed3 H3: «Забыть меня» takes the leaving user's recent server names with him (the names
+/// his ended sessions resolved; S3-09 (a) keeps them per SID for 10 min).
+#[tokio::test]
+async fn forget_me_takes_the_users_recent_names() {
+    let name = "h3-forget.example";
+    vpnte_core::resolve::remember(name, vec!["203.0.113.9".parse().expect("ip")]);
+    if !vpnte_core::resolve::remembers(name) {
+        // This binary named another owner first (a service start in another test).
+        return;
+    }
+    let h = harness();
+    // Without `owned_by` this process serves one user, whose key is the empty SID.
+    let leaving = crate::pipe::ClientInfo {
+        pid: 1,
+        session: 1,
+        user: String::new(),
+        image: None,
+    };
+    h.host.forget(&leaving).await.expect("forgotten");
+    assert!(!vpnte_core::resolve::remembers(name));
 }

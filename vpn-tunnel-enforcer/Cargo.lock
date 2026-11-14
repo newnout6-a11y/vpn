@@ -5875,6 +5875,7 @@ dependencies = [
  "vpnte-base",
  "vpnte-core",
  "vpnte-engine",
+ "vpnte-probes",
  "vpnte-profiles",
  "vpnte-winnet",
 ]

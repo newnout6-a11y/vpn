@@ -161,7 +161,7 @@ impl SingBoxProcess {
             args: &["run", "-c", "stdin", "--disable-color"],
             config,
             log: logs.map(|dir| (dir, LOG_STEM)),
-            marker: Some(READY_MARKER),
+            marker: Some(child::Marker::Contains(READY_MARKER)),
             scrub: Scrubber::new(config, &[]),
         })?;
         tracing::info!(pid = child.pid(), "sing-box spawned");

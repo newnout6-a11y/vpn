@@ -746,3 +746,25 @@ async fn the_session_names_the_key_it_dialled() {
     h.settle().await;
     assert_eq!(h.lc.session_key(), None);
 }
+
+/// speed3 S3-12: the Soft tweaks stay before «Подключено»: the connect answers only after the
+/// system read the proxy address back (the timing lines measure this path, nothing moves out
+/// of it).
+#[tokio::test]
+async fn a_soft_connect_answers_only_after_the_read_back() {
+    let h = Harness::new();
+    let gate = Gate::new();
+    h.soft.state.lock().read_back_gate = Some(gate.clone());
+    let lc = h.lc.clone();
+    let start =
+        tokio::spawn(async move { lc.connect(soft(9090, ProxyKind::Http, Owner::Manual)).await });
+    eventually("read-back in flight", || {
+        h.soft.state.lock().read_back_gate.is_none()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!start.is_finished(), "answered before the read-back");
+    assert_eq!(h.soft.state.lock().applies, 1, "applied first");
+    gate.open();
+    start.await.unwrap().expect("connected");
+}

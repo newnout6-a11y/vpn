@@ -3,7 +3,8 @@
 //! bytes; the service checks them again (names, size, canaries and the content bounds against
 //! its own pinned copies, with its own pinned sing-box) before it writes them into its own
 //! admin-only folder, and otherwise keeps its pinned files. The last set that passed is noted in
-//! that folder and kept across a restart while its bytes still hash to it.
+//! that folder per Windows user and kept across a restart while its bytes still hash to it: one
+//! user's lists never steer another's routing (speed3 P-1).
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -15,7 +16,8 @@ use sha2::{Digest, Sha256};
 use super::validate::validate;
 use super::{CHECKS, GEN_PREFIX, RULE_SETS, RefreshFault, STAGING, write_synced};
 
-/// The store's note of the last set that passed (its digest), read after a restart.
+/// The store's note of the last set that passed for one user (its digest), read after a
+/// restart: `accepted-<hash of the user>`.
 const ACCEPTED: &str = "accepted";
 
 /// Largest hand-over, all files together: a start travels in one pipe frame of at most 4 MiB,
@@ -95,12 +97,15 @@ impl RuleSetFiles {
 
 /// The service's side: `files` checked again (shape, then each file parsed by `engine` with its
 /// canaries and bounded against `reference`, the pinned copies) and written into `store` as
-/// `gen-<digest>`, whose folder is returned. Anything wrong: `Err`, nothing is used.
+/// `gen-<digest>`, whose folder is returned and noted as `owner`'s (a Windows user's SID).
+/// Anything wrong: `Err`, nothing is used. A folder that already holds the bytes is not checked
+/// again, whoever sent them.
 pub async fn accept(
     files: &RuleSetFiles,
     engine: &Path,
     store: &Path,
     reference: &Path,
+    owner: &str,
 ) -> Result<PathBuf, RefreshFault> {
     let invalid = |file: &str| RefreshFault::Invalid {
         file: file.to_owned(),
@@ -115,14 +120,15 @@ pub async fn accept(
     if !holds(&dir, &digest).await {
         check_into(files, engine, store, reference, &dir).await?;
     }
-    remember(store, &digest).await;
+    remember(store, owner, &digest).await;
     Ok(dir)
 }
 
-/// The last set [`accept`] passed, after a restart (fixlists-a5: a refused hand-over keeps it,
-/// not the pinned files): `(digest, folder)` while the folder's bytes still hash to it.
-pub async fn recall(store: &Path) -> Option<(String, PathBuf)> {
-    let digest = tokio::fs::read_to_string(store.join(ACCEPTED)).await.ok()?;
+/// The last set [`accept`] passed for `owner`, after a restart (fixlists-a5: a refused
+/// hand-over keeps it, not the pinned files): `(digest, folder)` while the folder's bytes still
+/// hash to it.
+pub async fn recall(store: &Path, owner: &str) -> Option<(String, PathBuf)> {
+    let digest = tokio::fs::read_to_string(note(store, owner)).await.ok()?;
     let digest = digest.trim();
     let dir = folder(store, digest);
     holds(&dir, digest).await.then(|| (digest.to_owned(), dir))
@@ -180,13 +186,21 @@ async fn check_into(
     result
 }
 
-/// Notes `digest` as the last set that passed (written aside and renamed: a torn note names
-/// no folder that holds it, so it is ignored).
-async fn remember(store: &Path, digest: &str) {
-    let temp = store.join(format!("{ACCEPTED}.tmp"));
+/// `owner`'s note in `store` (a hash: a SID never becomes part of a path).
+fn note(store: &Path, owner: &str) -> PathBuf {
+    let hash = Sha256::digest(owner.as_bytes());
+    let short: String = hash[..8].iter().map(|b| format!("{b:02x}")).collect();
+    store.join(format!("{ACCEPTED}-{short}"))
+}
+
+/// Notes `digest` as `owner`'s last set that passed (written aside and renamed: a torn note
+/// names no folder that holds it, so it is ignored).
+async fn remember(store: &Path, owner: &str, digest: &str) {
+    let path = note(store, owner);
+    let temp = path.with_extension("tmp");
     let saved = async {
         write_synced(&temp, digest.as_bytes()).await?;
-        tokio::fs::rename(&temp, store.join(ACCEPTED)).await
+        tokio::fs::rename(&temp, &path).await
     };
     if let Err(err) = saved.await {
         tracing::warn!(%err, "the accepted rule sets were not noted");

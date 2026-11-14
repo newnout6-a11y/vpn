@@ -405,8 +405,26 @@ pub fn persist(root: &Path, network: Option<String>, cancel: CancellationToken);
                                              // network's winner at start; save on change every 30 s and at cancel
 pub fn set_network(key: Option<String>, at: UnixMs);  // moved to network `key` (None = unknown) at `at`
 pub async fn keep_for_session(started: UnixMs, names: &[String]); // p-follow3: chain -> last known, kept
-pub fn end_session();                                // the kept names go
+pub fn keep_resolved(started: UnixMs, answers: &[(String, Vec<IpAddr>)]); // the start's own answers, kept
+pub fn end_session();                                // the kept names go (recent for RECENT_FOR more)
+pub const RECENT_FOR: Duration;                      // 10 min (speed3 S3-09 (a))
+pub fn owned_by(owner: impl Fn() -> Option<String> + Send + Sync + 'static); // service: whose names (SID)
+pub fn forget(owner: &str);                          // «Забыть меня»: that user's recent names go (H3)
+pub fn drop_names(names: &[String]);                 // a failed start: kept / recent answers go
+pub fn remember(name: &str, addrs: Vec<IpAddr>);     // an answer of the lookup ahead, as recent
+pub fn remembers(name: &str) -> bool;                // a recent answer would be used now
+pub async fn resolve_ahead(name: &str) -> Result<Vec<IpAddr>, ResolveError>; // foreign IP-literal DoH only
+pub fn may_be_server(ip: IpAddr) -> bool;            // no block page, loopback, link-local, multicast
 ```
+speed3 S3-09: after `end_session` the names of the session answer `resolve_host` and
+`resolve_server` for `RECENT_FOR` more, from memory only (no file), per owner: the helper service
+sets `owned_by` (the SID of the user whose request runs; `None` = nobody, nothing kept or
+answered) and calls `forget(sid)` for «Забыть меня»; the app, one user, sets nothing. The tunnel
+runtime calls `keep_resolved` right after a start runs (the names it looked up itself, never the
+app's hints) and `drop_names` when a start fails (not a cancel). `resolve_server` takes A at once
+(no AAAA grace for an address to dial). `resolve_ahead` (the app's lookup of the selected server
+before the click) asks only 1.1.1.1, 9.9.9.9, 8.8.8.8 and 94.140.14.140 over DoH: no name to
+resolve first, no SNI, nothing to the ISP's or the OS's resolver.
 Session names (lab F11, p-follow3): `keep_for_session` resolves each name of the session that
 started at `started` over the chain (never the OS resolver; its last known address when the chain
 fails) and keeps it until `end_session` or a newer start. While a name is kept, `resolve_host`

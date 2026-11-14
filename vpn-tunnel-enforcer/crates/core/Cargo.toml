@@ -33,5 +33,10 @@ vpnte-base.workspace = true
 windows.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+# speed3 S3-09: the resolver's 10-minute memory and its no-grace dial lookup are tested under a
+# paused clock.
+tokio = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true

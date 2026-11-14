@@ -109,13 +109,14 @@ mod tests {
         decide(f, &t.backoff, &t.slow_retry)
     }
 
-    /// AT-02-005 (§2.10 / §7.20): restarts after 2 s, 5 s, 10 s, at most three per window.
+    /// AT-02-003 (§2.10 / §7.20; speed3 S3-01, owner default 3): the first restart at once,
+    /// then after 5 s and 10 s, at most three per window.
     #[test]
     fn backoff_schedule() {
         let delays: Vec<_> = (0..3)
             .map(|n| decide_now(facts(n, true, KillSwitchLevel::Off)))
             .collect();
-        let want = [(1, 2), (2, 5), (3, 10)].map(|(attempt, s)| CrashAction::Restart {
+        let want = [(1, 0), (2, 5), (3, 10)].map(|(attempt, s)| CrashAction::Restart {
             attempt,
             delay: Duration::from_secs(s),
         });

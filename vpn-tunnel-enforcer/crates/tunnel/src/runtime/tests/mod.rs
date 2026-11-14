@@ -1,5 +1,13 @@
 //! Actor tests: fake engines, slots, capture and inputs over one shared [`World`] that records
 //! every effect in order. Nothing here touches the machine.
+//!
+//! speed3 S3-00, the timing harness: every step of a start can take virtual time (`World`'s
+//! `*_ms` knobs) and every effect is stamped on the tokio clock, so a budget test runs under
+//! `#[tokio::test(start_paused = true)]` and reads where each step landed (`World::ms`). Rule
+//! for budget tests: the fakes stay async; no `spawn_blocking` and no real sockets, because the
+//! paused clock jumps while a blocking job or real I/O runs and timeouts then fire falsely (use
+//! [`FakeProxy`], not the real proxy capture). The step lines (`std::time::Instant`) read 0
+//! under paused time; the budgets read the stamps.
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -27,7 +35,7 @@ use super::capture::{
     Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, ProxyCapture, tun_config,
     tun_form,
 };
-use super::engines::{CoreProc, EchoFailure, Engines, Slots, echo_failed};
+use super::engines::{CoreProc, EchoFailure, Engines, HandshakeGate, Slots, echo_failed};
 use super::{InputsSource, RuntimeDeps, Timings, UserInputs};
 use crate::api::{CaptureKind, StartRequest, TunnelEvent};
 
@@ -39,6 +47,8 @@ mod live;
 mod mihomo;
 mod proxy;
 mod recovery;
+mod speed_a;
+mod speed_b;
 mod spoof;
 mod supervision;
 mod tricks;
@@ -72,6 +82,27 @@ pub enum EgressVia {
 /// Knobs and the effect log shared by all fakes.
 pub struct World {
     pub log: Mutex<Vec<String>>,
+    /// Every `note` and `mark` with its virtual time in ms since `epoch` (S3-00).
+    stamps: Mutex<Vec<(String, u64)>>,
+    epoch: tokio::time::Instant,
+    /// Virtual delays (ms) of a start's steps: the server-name lookup, slot A up to its SOCKS
+    /// readiness, sing-box up to «started», the capture's readiness after it, the tunnel's own
+    /// echo (S3-00; 0 = at once).
+    pub resolve_ms: AtomicU32,
+    pub slot_ready_ms: AtomicU32,
+    pub core_ready_ms: AtomicU32,
+    pub capture_ready_ms: AtomicU32,
+    pub egress_ms: AtomicU32,
+    /// The handshake gate every exit proof through a slot passes first ([`RealGate`] replays
+    /// the app's budget); `None`: `budget_spent` alone answers `handshake_ready`.
+    pub gate: Mutex<Option<Arc<dyn HandshakeGate>>>,
+    /// What the client sent about the next operation's server (H2: `fresh`, `hints`), handed
+    /// out once like the helper service's inputs do.
+    pub facts: Mutex<Option<crate::api::ServerFacts>>,
+    /// DoH warm-ups asked (S3-05; marked `warm-dns`, not logged: they are detached).
+    pub warms: AtomicU32,
+    /// A warm-up never answers.
+    pub warm_hangs: AtomicBool,
     pub ready: Mutex<VecDeque<Ready>>,
     pub cores: Mutex<Vec<Arc<FakeCore>>>,
     pub configs: Mutex<Vec<Value>>,
@@ -138,6 +169,17 @@ impl World {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             log: Mutex::new(Vec::new()),
+            stamps: Mutex::new(Vec::new()),
+            epoch: tokio::time::Instant::now(),
+            resolve_ms: AtomicU32::new(0),
+            slot_ready_ms: AtomicU32::new(0),
+            core_ready_ms: AtomicU32::new(0),
+            capture_ready_ms: AtomicU32::new(0),
+            egress_ms: AtomicU32::new(0),
+            gate: Mutex::new(None),
+            facts: Mutex::new(None),
+            warms: AtomicU32::new(0),
+            warm_hangs: AtomicBool::new(false),
             ready: Mutex::new(VecDeque::new()),
             cores: Mutex::new(Vec::new()),
             configs: Mutex::new(Vec::new()),
@@ -184,7 +226,35 @@ impl World {
     }
 
     pub fn note(&self, what: impl Into<String>) {
-        self.log.lock().push(what.into());
+        let what = what.into();
+        self.mark(what.clone());
+        self.log.lock().push(what);
+    }
+
+    /// A timing stamp only: budget tests read it, the effect log stays as it was.
+    pub fn mark(&self, what: impl Into<String>) {
+        let ms = self.now_ms();
+        self.stamps.lock().push((what.into(), ms));
+    }
+
+    /// Virtual ms since the world was made.
+    pub fn now_ms(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Virtual ms of the first `what` noted or marked.
+    pub fn ms(&self, what: &str) -> u64 {
+        let stamps = self.stamps.lock();
+        let found = stamps.iter().find(|(w, _)| w == what).map(|(_, ms)| *ms);
+        found.unwrap_or_else(|| panic!("{what} not stamped in {:?}", *stamps))
+    }
+
+    /// Sleeps the virtual delay `knob` holds (ms).
+    pub async fn take(&self, knob: &AtomicU32) {
+        let ms = knob.load(Ordering::SeqCst);
+        if ms > 0 {
+            tokio::time::sleep(Duration::from_millis(ms.into())).await;
+        }
     }
 
     pub fn log(&self) -> Vec<String> {
@@ -263,7 +333,14 @@ impl CoreProc for FakeCore {
         cancel: &CancellationToken,
     ) -> Result<(), StartError> {
         match &self.ready {
-            Ready::Ok => Ok(()),
+            Ready::Ok => {
+                tokio::select! {
+                    () = cancel.cancelled() => return Err(StartError::Cancelled),
+                    () = self.world.take(&self.world.core_ready_ms) => {}
+                }
+                self.world.mark(format!("core-ready:{}", self.pid));
+                Ok(())
+            }
             Ready::Exit(ports) => {
                 self.listener.lock().take();
                 let info = exit_info(1, false, ports.clone());
@@ -327,6 +404,11 @@ impl Slots for FakeSlots {
         if self.0.stage_fail.load(Ordering::SeqCst) {
             return Err(XrayError::NotStarted);
         }
+        tokio::select! {
+            () = cancel.cancelled() => return Err(XrayError::Cancelled),
+            () = self.0.take(&self.0.slot_ready_ms) => {}
+        }
+        self.0.mark(format!("slot-ready:{}", slot_name(slot)));
         self.0.running.lock()[slot.index()] = true;
         Ok(())
     }
@@ -421,8 +503,12 @@ impl Engines for FakeEngines {
         let down = self.0.slot_traffic.lock()[slot.index()];
         Ok(vec![(format!("conn-{}", slot.index()), down)])
     }
-    fn handshake_ready(&self, _server: &Profile) -> bool {
-        !self.0.budget_spent.load(Ordering::SeqCst)
+    fn handshake_ready(&self, server: &Profile) -> bool {
+        let gate = self.0.gate.lock().clone();
+        match gate {
+            Some(gate) => gate.ready_now(server),
+            None => !self.0.budget_spent.load(Ordering::SeqCst),
+        }
     }
     async fn resolve(
         &self,
@@ -431,6 +517,8 @@ impl Engines for FakeEngines {
         _cancel: &CancellationToken,
     ) -> Result<Resolved, ResolveFault> {
         self.0.resolve_paths.lock().push(path);
+        self.0.take(&self.0.resolve_ms).await;
+        self.0.mark("resolved");
         let warning = self.0.resolve_answer.lock().clone()?;
         let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
         let addrs = hosts.iter().map(|h| (h.clone(), ip)).collect();
@@ -442,10 +530,15 @@ impl Engines for FakeEngines {
         port: u16,
         _c: &Creds,
         _settle: Option<Duration>,
-        _x: &CancellationToken,
+        cancel: &CancellationToken,
     ) -> AppResult<IpAddr> {
         let _ = port;
         self.0.note(format!("egress-via:{}", server.server));
+        let gate = self.0.gate.lock().clone();
+        if let Some(gate) = gate {
+            gate.admit(server, cancel).await?;
+            self.0.mark("slot-admitted");
+        }
         let silent = self.0.proofs_silent.load(Ordering::SeqCst);
         if silent > 0 {
             self.0.proofs_silent.store(silent - 1, Ordering::SeqCst);
@@ -489,6 +582,7 @@ impl Engines for FakeEngines {
             Some(port) => format!("egress:{port}"),
             None => "egress".to_owned(),
         });
+        self.0.take(&self.0.egress_ms).await;
         if self.0.egress_silent.load(Ordering::SeqCst) {
             return Err(echo_failed(EchoFailure::NoReply));
         }
@@ -500,6 +594,13 @@ impl Engines for FakeEngines {
     }
     async fn physical_dns(&self) -> Vec<Ipv4Addr> {
         vec![Ipv4Addr::new(192, 168, 1, 1)]
+    }
+    async fn warm_dns(&self, _clash: &ClashEndpoint) {
+        self.0.warms.fetch_add(1, Ordering::SeqCst);
+        self.0.mark("warm-dns");
+        if self.0.warm_hangs.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
     }
     /// A mihomo run that is ready at once (the AmneziaWG hop's answer is `egress_via`).
     #[cfg(feature = "lab")]
@@ -575,6 +676,7 @@ impl Capture for FakeCapture {
         _timeout: Duration,
         _cancel: &CancellationToken,
     ) -> AppResult<CaptureProof> {
+        self.0.take(&self.0.capture_ready_ms).await;
         self.0.note("ready");
         if self.0.ready_fail.load(Ordering::SeqCst) {
             let msg = Msg::new("tunnel.runtime.tunSetup.adapter");
@@ -631,6 +733,125 @@ impl InputsSource for FakeInputs {
             kill_switch: KillSwitchLevel::Standard,
             ..UserInputs::default()
         })
+    }
+    fn server_facts(&self, _profile_id: &str) -> crate::api::ServerFacts {
+        self.0.facts.lock().take().unwrap_or_default()
+    }
+}
+
+/// The Proxy capture without a socket (S3-00): the mixed port is a number, readiness is the
+/// `capture_ready_ms` knob, every protection call is noted (`begin:proxy`, `ready`, `lost`,
+/// `release`). Budget tests use it; the real `ProxyCapture` probes a real listener.
+pub struct FakeProxy(pub Arc<World>);
+
+/// The mixed port [`FakeProxy`] hands out (nothing listens on it).
+pub const FAKE_MIXED_PORT: u16 = 47_801;
+
+#[async_trait]
+impl Capture for FakeProxy {
+    async fn prepare(&self, req: &StartRequest, _avoid: &[String]) -> AppResult<CapturePlan> {
+        self.0.note("prepare:proxy");
+        Ok(CapturePlan {
+            alias: Some(FAKE_MIXED_PORT.to_string()),
+            form: tun_form(KillSwitchLevel::Off, false),
+            stack: TunStack::Mixed,
+            mtu: vpnte_engine::singbox_config::select_mtu(
+                req.stealth,
+                req.adaptive,
+                req.public_wifi,
+            ),
+            guard: req.kill_switch,
+            warnings: Vec::new(),
+        })
+    }
+    fn config(
+        &self,
+        _plan: &CapturePlan,
+        parts: &EngineParts,
+    ) -> Result<(Value, [u8; 32]), ConfigError> {
+        let inputs = vpnte_engine::singbox_config::ConfigInputs {
+            upstream: parts.upstream.clone(),
+            capture: vpnte_engine::singbox_config::Capture::Proxy {
+                port: FAKE_MIXED_PORT,
+            },
+            listeners: parts.listeners.clone(),
+            routing: parts.routing.clone(),
+            phys_dns: parts.phys_dns.clone(),
+        };
+        Ok((
+            vpnte_engine::singbox_config::build(&inputs)?,
+            vpnte_engine::singbox_config::compat_key(&inputs),
+        ))
+    }
+    async fn begin(&self, _plan: &CapturePlan, _programs: &[PathBuf]) -> AppResult<()> {
+        self.0.note("begin:proxy");
+        Ok(())
+    }
+    fn ports(&self, _plan: &CapturePlan) -> Vec<u16> {
+        vec![FAKE_MIXED_PORT]
+    }
+    async fn ready(
+        &self,
+        _plan: &CapturePlan,
+        _timeout: Duration,
+        _cancel: &CancellationToken,
+    ) -> AppResult<CaptureProof> {
+        self.0.take(&self.0.capture_ready_ms).await;
+        self.0.note("ready");
+        Ok(CaptureProof {
+            luid: None,
+            alias: None,
+            port: Some(FAKE_MIXED_PORT),
+        })
+    }
+    async fn routes_ok(&self, _proof: &CaptureProof) -> bool {
+        true
+    }
+    async fn lost(&self) -> AppResult<()> {
+        self.0.note("lost");
+        Ok(())
+    }
+    async fn release(&self) -> AppResult<()> {
+        self.0.note("release");
+        Ok(())
+    }
+    async fn wait_gone(&self, _plan: &CapturePlan, _t: Duration, _c: &CancellationToken) -> bool {
+        true
+    }
+    async fn check(&self, _proof: &CaptureProof) -> CaptureCheck {
+        CaptureCheck::Clear
+    }
+    fn guard(&self, plan: &CapturePlan) -> KillSwitchLevel {
+        plan.guard
+    }
+}
+
+/// The app's handshake gate over a private instance of the probes' real budget (3 handshakes
+/// per name a minute, 400 ms apart, a 65 s wait at most as the app's `EGRESS_WAIT`), so a lab
+/// sequence replays with the real arithmetic (L10-2).
+#[derive(Default)]
+pub struct RealGate(pub vpnte_probes::discipline::HandshakeBudget);
+
+#[async_trait]
+impl HandshakeGate for RealGate {
+    async fn admit(&self, server: &Profile, cancel: &CancellationToken) -> AppResult<()> {
+        let Some(endpoint) = vpnte_probes::discipline::Endpoint::of(server) else {
+            return Ok(());
+        };
+        let wait = vpnte_probes::discipline::WINDOW + Duration::from_secs(5);
+        self.0.acquire(&endpoint, wait, cancel).await?;
+        Ok(())
+    }
+    fn ready_now(&self, server: &Profile) -> bool {
+        vpnte_probes::discipline::Endpoint::of(server).is_none_or(|e| self.0.wait_for(&e).is_zero())
+    }
+}
+
+/// Deps for budget tests: [`deps`] with [`FakeProxy`] as the Proxy capture.
+pub fn budget_deps(world: &Arc<World>) -> RuntimeDeps {
+    RuntimeDeps {
+        proxy: Arc::new(FakeProxy(world.clone())),
+        ..deps(world)
     }
 }
 

@@ -131,6 +131,10 @@ pub trait Engines: Send + Sync {
     async fn local_proxy(&self, addr: &HostPort, limit: Duration) -> AppResult<Option<PathBuf>>;
     /// IPv4 resolvers of the physical adapters (empty when unreadable).
     async fn physical_dns(&self) -> Vec<Ipv4Addr>;
+    /// speed3 S3-05: one lookup of [`WARM_NAME`] through the new core's DNS router right after
+    /// it reported ready in a TUN run, so its DoH connection through the tunnel is open before
+    /// the first program asks. Detached: nobody waits for it, nothing retries it.
+    async fn warm_dns(&self, _clash: &ClashEndpoint) {}
     /// WP-12 lab: starts mihomo with `config` (translated for `socks` / `controller`) and waits
     /// for its readiness; a failed start leaves nothing running.
     #[cfg(feature = "lab")]
@@ -211,6 +215,10 @@ impl Slots for XraySupervisor {
         XraySupervisor::recent_fault(self, slot)
     }
 }
+
+/// The name the DoH warm-up asks (S3-05): Windows' own connectivity check asks it anyway, so the
+/// question tells the resolver nothing new.
+pub(super) const WARM_NAME: &str = "www.msftconnecttest.com";
 
 /// Public-IP echo services, in order (plain-text answers). Each request through a slot is a new
 /// handshake to its server, so a third service would cost a third one (RU freeze discipline).
@@ -449,7 +457,9 @@ async fn echo(
         .build()
         .map_err(|e| AppError::internal(e.without_url()))?;
     if let Some((gate, server)) = admit {
+        let asked = std::time::Instant::now();
         gate.admit(server, cancel).await?;
+        slot_taken(asked, "first");
     }
     // One request: its handshake slot first (with `admit`, unless taken already), then a
     // plain-text address.
@@ -458,7 +468,9 @@ async fn echo(
         let service = url.to_owned();
         async move {
             if let Some((gate, server)) = admit.filter(|_| !admitted) {
+                let asked = std::time::Instant::now();
                 gate.admit(server, cancel).await.map_err(Asked::Refused)?;
+                slot_taken(asked, "next");
             }
             let sent = std::time::Instant::now();
             let answer = match request.send().await {
@@ -533,6 +545,14 @@ async fn echo(
     Err(echo_failed(why))
 }
 
+/// The step line of one handshake-slot wait (lab live-10 L10-2: a proof's 8.7-17 s wait for
+/// the budget had no line). `request`: the proof's first request or a later one; never the
+/// server name.
+fn slot_taken(asked: std::time::Instant, request: &'static str) {
+    let ms = u64::try_from(asked.elapsed().as_millis()).unwrap_or(u64::MAX);
+    tracing::info!(ms, request, "handshake slot");
+}
+
 /// Why one echo request gave no address.
 enum Asked {
     /// The handshake budget said "not now", or the caller left while waiting for it.
@@ -598,6 +618,16 @@ impl Engines for RealEngines {
 
     fn handshake_ready(&self, server: &Profile) -> bool {
         self.gate.as_ref().is_none_or(|gate| gate.ready_now(server))
+    }
+
+    async fn warm_dns(&self, clash: &ClashEndpoint) {
+        let asked = std::time::Instant::now();
+        let answered = match ClashApi::new(clash) {
+            Ok(api) => api.dns_query(WARM_NAME, "A").await.is_ok(),
+            Err(_) => false,
+        };
+        let ms = u64::try_from(asked.elapsed().as_millis()).unwrap_or(u64::MAX);
+        tracing::info!(ms, answered, "dns warm-up answered");
     }
 
     async fn upstream_downloads(&self, clash: &ClashEndpoint) -> AppResult<Vec<(String, u64)>> {

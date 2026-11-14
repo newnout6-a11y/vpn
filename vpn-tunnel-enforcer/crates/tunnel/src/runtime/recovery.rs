@@ -15,12 +15,17 @@ use super::crash::{CrashAction, CrashFacts, decide, frozen_server};
 use super::engines::{EchoFailure, echo_failure};
 use crate::api::{FailoverCause, Mode, Origin, StartRequest, TunStatusKind, TunnelEvent};
 
-/// Xray slot restarts: backoff per attempt, at most three in this window (xray-engine §3).
+/// Xray slot restarts: backoff per attempt, at most three in this window (xray-engine §3). The
+/// first at once (speed3 S3-01): the slot's restart needs no proof, so traffic is back as soon
+/// as Xray accepts.
 const SLOT_BACKOFF: [Duration; 3] = [
-    Duration::from_millis(500),
+    Duration::ZERO,
     Duration::from_secs(2),
     Duration::from_secs(5),
 ];
+/// How long a crashed session's restart waits for the dead capture interface to go (speed3
+/// S3-01, best effort: a lingering TUN adapter only moves the new run to another alias).
+const DEAD_ADAPTER: Duration = Duration::from_millis(300);
 const SLOT_WINDOW: Duration = Duration::from_secs(60);
 /// Failover candidates tried per exhausted window.
 const FAILOVER_TRIES: usize = 5;
@@ -227,6 +232,13 @@ impl Actor {
         if self.stop_pending() {
             // A stop requested meanwhile ends the session: no restart (§7.20).
             return self.clear_op();
+        }
+        if let Phase::Crashed(c) = &self.phase {
+            // The block stays armed through this wait; the start below continues it as before.
+            let step = std::time::Instant::now();
+            let gone = self.capture.wait_gone(&c.plan, DEAD_ADAPTER, &op).await;
+            let ms = step.elapsed().as_millis();
+            tracing::info!(gone, ms, "restart: the dead capture interface waited for");
         }
         let result = self.start_run(req, &op, &[]).await;
         self.clear_op();

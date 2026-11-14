@@ -19,6 +19,8 @@ const OPER_NOT_PRESENT: i32 = 6;
 const NCF_HIDDEN: u32 = 0x8;
 const DAD_INVALID: i32 = 0;
 const DAD_DUPLICATE: i32 = 2;
+/// `IpDadStatePreferred`: duplicate-address detection is over.
+pub(super) const DAD_PREFERRED: i32 = 4;
 
 /// Virtual and tunnel adapters by description, case-insensitive (old `ADAPTER_EXCLUSION_PATTERN`).
 /// `Hyper-V` is deliberately absent: inside a Hyper-V guest "Microsoft Hyper-V Network Adapter" is

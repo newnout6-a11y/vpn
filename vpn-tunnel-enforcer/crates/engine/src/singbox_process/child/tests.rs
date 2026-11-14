@@ -9,7 +9,7 @@ fn output(scrub: Scrubber) -> Output {
         log_failed: AtomicBool::new(false),
         scrub,
         lines: broadcast::channel(4).0,
-        marker: Some("sing-box started ("),
+        marker: Some(Marker::Contains("sing-box started (")),
         ready: watch::channel(false).0,
     }
 }

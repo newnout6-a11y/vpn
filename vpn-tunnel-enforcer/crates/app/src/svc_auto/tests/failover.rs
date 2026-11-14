@@ -50,3 +50,65 @@ async fn failover_rounds_start_from_the_running_server() {
         "neither the running server nor the one that crashed before it"
     );
 }
+
+/// speed3 S3-07 (owner default 1): a user's switch may select first only on a full key check
+/// younger than 10 min that found the server online with a first answer within 1 s, and no
+/// later verdict against it. An old check, an offline one, a slow first answer, a session's
+/// credit (no latency) and a row with pings only keep the probe.
+#[test]
+fn only_a_young_fast_full_check_lets_a_switch_select_first() {
+    use vpnte_servers::model::{
+        HealthRecord, ProfileId, ServerReaction, ServerVerdict, VerdictRecord,
+    };
+
+    use crate::svc_auto::failover::fresh;
+
+    let r = rig("fresh-evidence");
+    let row = r
+        .servers
+        .get(&ProfileId::from(r.ids[0].as_str()))
+        .expect("row");
+    let now = 1_800_000_000_000;
+    let checked = |online, ago: i64, rtt_ms| {
+        let mut row = row.clone();
+        row.health = Some(HealthRecord {
+            online,
+            at: now - ago,
+            rtt_ms,
+            reason: None,
+            egress_ip: None,
+        });
+        row
+    };
+    assert!(
+        fresh(&checked(true, 60_000, Some(420)), now),
+        "young, fast, online"
+    );
+    assert!(
+        fresh(&checked(true, 599_000, Some(1_000)), now),
+        "at the edges"
+    );
+    assert!(
+        !fresh(&checked(true, 600_000, Some(420)), now),
+        "10 min old"
+    );
+    assert!(!fresh(&checked(false, 60_000, Some(420)), now), "offline");
+    assert!(
+        !fresh(&checked(true, 60_000, Some(1_001)), now),
+        "a slow first answer"
+    );
+    assert!(
+        !fresh(&checked(true, 60_000, None), now),
+        "a session's credit alone"
+    );
+    let mut no_check = row.clone();
+    no_check.health = None;
+    assert!(!fresh(&no_check, now), "pings never write a check");
+    let mut frozen = checked(true, 60_000, Some(420));
+    frozen.verdict = Some(VerdictRecord {
+        verdict: ServerVerdict::Frozen,
+        reaction: ServerReaction::SwitchServer,
+        at: now - 30_000,
+    });
+    assert!(!fresh(&frozen, now), "a later verdict rules it out");
+}

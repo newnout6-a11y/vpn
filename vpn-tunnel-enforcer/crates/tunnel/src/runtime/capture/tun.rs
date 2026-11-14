@@ -113,6 +113,10 @@ impl Capture for TunCapture {
         tun_config(plan, parts)
     }
 
+    fn compat(&self, plan: &CapturePlan, parts: &EngineParts) -> Result<[u8; 32], ConfigError> {
+        Ok(singbox_config::compat_key(&tun_inputs(plan, parts)))
+    }
+
     async fn begin(&self, plan: &CapturePlan, session_programs: &[PathBuf]) -> AppResult<()> {
         let protection = self.protection.clone();
         let programs = session_programs.to_vec();
@@ -153,6 +157,7 @@ impl Capture for TunCapture {
             alias: Some(tun.alias.clone()),
             port: None,
         };
+        observe_settle(tun.luid);
         *self.current.lock() = Some(tun);
         Ok(proof)
     }
@@ -217,12 +222,53 @@ impl Capture for TunCapture {
     }
 }
 
+/// How long [`observe_settle`] watches a fresh TUN's address, and how often.
+const SETTLE_WATCH: Duration = Duration::from_secs(2);
+const SETTLE_POLL: Duration = Duration::from_millis(10);
+
+/// speed3 S3-04, measurement only (lab live-10: the first packets into every fresh TUN are lost
+/// for ~0.25-0.5 s and Windows resends them after its 1 s RTO; the cause is not named yet): from
+/// «capture ready», whether our address is still Tentative, when it turns Preferred, and the
+/// interface's `DadTransmits`, as step lines for the lab's L-1. Read-only, bounded and detached:
+/// it never delays the start and changes nothing.
+fn observe_settle(luid: u64) {
+    drop(tokio::task::spawn_blocking(move || {
+        let start = std::time::Instant::now();
+        let mut seen = adapters::tun_settle(luid).ok();
+        let (dad, transmits) = (
+            seen.and_then(|s| s.dad_state),
+            seen.and_then(|s| s.dad_transmits),
+        );
+        tracing::info!(?dad, ?transmits, "tun settle at ready");
+        while !seen.is_some_and(|s| s.preferred()) && start.elapsed() < SETTLE_WATCH {
+            std::thread::sleep(SETTLE_POLL);
+            seen = adapters::tun_settle(luid).ok();
+        }
+        let ms = start.elapsed().as_millis();
+        match seen {
+            Some(s) if s.preferred() => tracing::info!(ms, "tun address preferred"),
+            last => {
+                tracing::info!(ms, dad = ?last.and_then(|s| s.dad_state), "tun address not preferred")
+            }
+        }
+    }));
+}
+
 /// The sing-box config of a TUN session and its compatibility key.
 pub(crate) fn tun_config(
     plan: &CapturePlan,
     parts: &EngineParts,
 ) -> Result<(Value, [u8; 32]), ConfigError> {
-    let inputs = ConfigInputs {
+    let inputs = tun_inputs(plan, parts);
+    Ok((
+        singbox_config::build(&inputs)?,
+        singbox_config::compat_key(&inputs),
+    ))
+}
+
+/// The config inputs of `plan`'s TUN.
+fn tun_inputs(plan: &CapturePlan, parts: &EngineParts) -> ConfigInputs {
+    ConfigInputs {
         upstream: parts.upstream.clone(),
         capture: singbox_config::Capture::Tun(TunParams {
             alias: plan.alias.clone().unwrap_or_default(),
@@ -234,9 +280,5 @@ pub(crate) fn tun_config(
         listeners: parts.listeners.clone(),
         routing: parts.routing.clone(),
         phys_dns: parts.phys_dns.clone(),
-    };
-    Ok((
-        singbox_config::build(&inputs)?,
-        singbox_config::compat_key(&inputs),
-    ))
+    }
 }

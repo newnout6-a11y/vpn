@@ -110,6 +110,8 @@ struct Inner {
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Reply, WireError>>>>,
     state: Mutex<State>,
     shutdown: CancellationToken,
+    /// The selected server's names resolved before the click (S3-09 (b)): a start's hints.
+    ahead: std::sync::OnceLock<Arc<super::warm::Ahead>>,
 }
 
 /// A live connection: its writing half and a token cancelled when its reader ends.
@@ -244,7 +246,13 @@ impl Remote {
             pending: Mutex::new(HashMap::new()),
             state: Mutex::new(State::default()),
             shutdown,
+            ahead: std::sync::OnceLock::new(),
         }))
+    }
+
+    /// Where a start's hints come from (set once while the tunnel is built).
+    pub(crate) fn resolve_ahead_with(&self, ahead: Arc<super::warm::Ahead>) {
+        let _ = self.0.ahead.set(ahead);
     }
 
     /// The protocol the service's last link speaks; `None` before the first link.
@@ -364,6 +372,8 @@ impl Remote {
         tokio::spawn(dispatch(self.0.clone(), frames, gone.clone()));
         let view = self.send(&requests, Request::Status).await;
         self.settle(view);
+        // The Hello made this connection the controller: the user's own lists go now.
+        self.hand_over(requests.clone());
         *slot = Some(Link {
             requests: requests.clone(),
             gone,
@@ -399,6 +409,47 @@ impl Remote {
     }
 
     /// One request and its answer; the events it caused are published before it returns.
+    /// speed3 S3-06 (b): the user's routing inputs (his Smart RU lists among them) handed to the
+    /// service while it is idle: right after this connection became the controller and after
+    /// every list update, so the service checks the lists before the click, not inside the first
+    /// start (lab live-10 L10-3: 4.6-4.8 s). The service stores and checks them; it restarts
+    /// nothing, and a start still carries its own inputs.
+    fn hand_over(&self, requests: Requests) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let Ok(inputs) = this.0.inputs.snapshot().await else {
+                return;
+            };
+            let routing = Box::new(start::routing(&inputs));
+            if let Err(err) = this.send(&requests, Request::Inputs(routing)).await {
+                tracing::debug!(error = %err, "routing inputs not handed over");
+            }
+        });
+    }
+
+    /// Hands the lists over again after every Smart RU list update while a connection is up
+    /// (none is opened for it), until `cancel`.
+    pub(crate) fn hand_over_updates(
+        &self,
+        mut lists: watch::Receiver<u64>,
+        cancel: CancellationToken,
+    ) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    changed = lists.changed() => if changed.is_err() { return },
+                }
+                let link = this.0.link.lock().await;
+                let live = link.as_ref().filter(|l| !l.gone.is_cancelled());
+                if let Some(requests) = live.map(|l| l.requests.clone()) {
+                    this.hand_over(requests);
+                }
+            }
+        });
+    }
+
     async fn call(&self, request: Request) -> Result<Reply, CallError> {
         let requests = self.link().await?;
         self.send(&requests, request).await

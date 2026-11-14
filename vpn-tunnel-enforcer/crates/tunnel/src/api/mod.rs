@@ -40,6 +40,31 @@ pub struct VpnProfile {
 
 pub use vpnte_engine::xray_config::SelectReason;
 
+/// Most names one server's hints may carry, and addresses per name (a provider graph names a
+/// few balancer members; anything larger is refused on the wire).
+pub const MAX_HINT_NAMES: usize = 16;
+pub const MAX_HINT_ADDRS: usize = 8;
+
+/// Addresses the app resolved for one of a server's names before the click (speed3 S3-09):
+/// filtered at use exactly like a looked-up answer, bound to `name`, never an IP literal's
+/// override.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NameHint {
+    pub name: String,
+    pub addrs: Vec<std::net::IpAddr>,
+}
+
+/// What the app knows about the server of one start or switch, for that operation only (never
+/// kept as the last start, so a restart or a recovery never reuses it).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerFacts {
+    /// speed3 S3-07: a full check of this server (or its settled session) succeeded within
+    /// 10 min with a first answer ≤ 1 s, so a user's switch to it may select first.
+    pub fresh: bool,
+    pub hints: Vec<NameHint>,
+}
+
 /// The engine that carries a session's upstream and why it was chosen: shown beside the server
 /// while connected, kept in the history row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

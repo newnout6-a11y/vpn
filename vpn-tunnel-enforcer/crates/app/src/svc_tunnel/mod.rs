@@ -27,6 +27,7 @@ mod takeover;
 #[cfg(test)]
 mod tests;
 mod traffic;
+mod warm;
 #[cfg(test)]
 mod wiring_tests;
 
@@ -99,6 +100,12 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         b.protection.clone(),
         b.shutdown.clone(),
     );
+    // speed3 S3-09 (b): the selected server's name resolved before the click.
+    let ahead = Arc::new(warm::Ahead::default());
+    warm::spawn(ahead.clone(), b.servers.clone(), b.shutdown.child_token());
+    remote.resolve_ahead_with(ahead);
+    // speed3 S3-06 (b): every Smart RU list update goes to the service while it is idle.
+    remote.hand_over_updates(b.rule_sets.subscribe(), b.shutdown.child_token());
     let guard = Arc::new(guard::Guard::new(
         b.elevated,
         &b.engines,

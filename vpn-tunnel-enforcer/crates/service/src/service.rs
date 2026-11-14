@@ -12,11 +12,12 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::Msg;
-use vpnte_base::types::KillSwitchLevel;
+use vpnte_base::types::{Engine, KillSwitchLevel};
+use vpnte_engine::pin;
 use vpnte_probes::leak::{SelfTester, SystemEnv, WatchConfig};
-use vpnte_tunnel::api::{CaptureKind, Runtime, StopOptions};
+use vpnte_tunnel::api::{CaptureKind, Runtime, StopOptions, TunStatus};
 use vpnte_tunnel::runtime::{
-    Capture, ProxyCapture, RealEngines, RuntimeDeps, Timings, TunCapture, TunnelHandle,
+    Capture, EngineExes, ProxyCapture, RealEngines, RuntimeDeps, Timings, TunCapture, TunnelHandle,
 };
 use vpnte_update::download::sha256_of;
 use vpnte_update::policy;
@@ -46,6 +47,8 @@ use recheck::Recheck;
 
 /// Debounce of the network-change watch behind the re-checks (a Wi-Fi join flaps several times).
 const NET_SETTLE: Duration = Duration::from_millis(1500);
+/// When the pin warm-up runs after «service running» (speed3 S3-06): after the boot's own work.
+const PIN_WARM_AFTER: Duration = Duration::from_secs(10);
 
 /// Runs the service until STOP; the exit code goes to the SCM (non-zero = recovery restarts it).
 pub fn run(control: Control) -> u32 {
@@ -159,6 +162,7 @@ async fn serve(
     }
     let trusted = fault.is_none();
     let exes = engines.exes();
+    let warm_exes = engines.exes();
     let (singbox, xray) = {
         let current = exes.borrow();
         (current.singbox.clone(), current.xray.clone())
@@ -260,6 +264,16 @@ async fn serve(
                 .map_or(crate::logs::Owner::Service, |h| h.log_owner())
         }
     });
+    // speed3 S3-09 (a): the server names a session's start resolved are its user's alone: a
+    // reconnect of that user within 10 min plans without a lookup, another user's never does.
+    vpnte_core::resolve::owned_by({
+        let host = Arc::downgrade(&host);
+        move || match host.upgrade()?.log_owner() {
+            crate::logs::Owner::User(sid) => Some(sid),
+            crate::logs::Owner::Service | crate::logs::Owner::Busy => None,
+        }
+    });
+    tokio::spawn(end_sessions(runtime.status(), control.stop.clone()));
     host.keep_sessions_in(files.session.clone());
     if let Some(recheck) = &recheck {
         host.report_self_tests(recheck.results.subscribe());
@@ -289,6 +303,13 @@ async fn serve(
     }
     control.running();
     tracing::info!("service running");
+    let elevated = vpnte_winnet::elevation::is_elevated();
+    tokio::spawn(warm_pins(
+        warm_exes,
+        dir.clone(),
+        control.stop.clone(),
+        elevated,
+    ));
     let resume = protection.paused() || protection.level_in_force() == KillSwitchLevel::Strict;
     if resume {
         let cancel = control.stop.child_token();
@@ -305,6 +326,54 @@ async fn serve(
 }
 
 /// The staging folder is ours: absent, or admin-only (it holds the exe the service may run next).
+/// speed3 S3-06 (a): [`PIN_WARM_AFTER`] after «service running» the engine files a start would
+/// hash (and Windows would scan at first use) are hashed and held on the blocking pool, and so
+/// are the pinned Smart RU rule sets in the service's own folder: the first connect after the
+/// install or a Windows restart finds them held (lab live-9: +654 ms before the first Xray,
+/// +254 ms before sing-box after a restart). Only the engine store's paths and the service's
+/// folder, never a client's. A refusal is logged by the check and not remembered: the start
+/// checks again. `true` = everything held.
+async fn warm_pins(
+    exes: watch::Receiver<EngineExes>,
+    dir: PathBuf,
+    stop: CancellationToken,
+    elevated: bool,
+) -> bool {
+    tokio::select! {
+        () = stop.cancelled() => return false,
+        () = tokio::time::sleep(PIN_WARM_AFTER) => {}
+    }
+    let exes = exes.borrow().clone();
+    let started = std::time::Instant::now();
+    let held = tokio::task::spawn_blocking(move || {
+        let singbox = pin::warm(Engine::SingBox, &exes.singbox, elevated).is_ok();
+        let xray = pin::warm(Engine::Xray, &exes.xray, elevated).is_ok();
+        let lists = pin::warm_rule_sets(&dir, elevated);
+        singbox && xray && lists
+    })
+    .await
+    .unwrap_or(false);
+    let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    tracing::info!(ms, held, "engine pins warmed");
+    held
+}
+
+/// speed3 S3-09 (a): a start keeps the names it resolved for its session (the runtime's
+/// `keep_resolved`); once the session no longer runs they answer for 10 min more as its user's
+/// recent names, then lookups take their usual way. The service ends with no session kept.
+async fn end_sessions(mut status: watch::Receiver<TunStatus>, stop: CancellationToken) {
+    loop {
+        if !status.borrow_and_update().running {
+            vpnte_core::resolve::end_session();
+        }
+        tokio::select! {
+            () = stop.cancelled() => break,
+            changed = status.changed() => if changed.is_err() { break },
+        }
+    }
+    vpnte_core::resolve::end_session();
+}
+
 fn staging_trusted(files: &SwapFiles) -> bool {
     !files.staging.exists() || sddl::path_admin_only(&files.staging)
 }
@@ -453,6 +522,62 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    fn relative_engines() -> watch::Receiver<EngineExes> {
+        let exes = EngineExes {
+            singbox: PathBuf::from("sing-box.exe"),
+            xray: PathBuf::from("xray.exe"),
+        };
+        watch::channel(exes).1
+    }
+
+    /// speed3 S3-06 (a): the pin warm-up waits [`PIN_WARM_AFTER`] after «running» and stops
+    /// with the service; unelevated it has nothing to hold, elevated it refuses what a start
+    /// would refuse (relative paths) and reports it.
+    #[tokio::test(start_paused = true)]
+    async fn the_pin_warm_up_runs_after_running_and_stops_with_the_service() {
+        let started = tokio::time::Instant::now();
+        let stop = CancellationToken::new();
+        stop.cancel();
+        let dir = PathBuf::from("missing-dir");
+        assert!(!warm_pins(relative_engines(), dir.clone(), stop, true).await);
+        assert!(started.elapsed() < PIN_WARM_AFTER);
+        let live = CancellationToken::new();
+        assert!(warm_pins(relative_engines(), dir.clone(), live.clone(), false).await);
+        assert!(started.elapsed() >= PIN_WARM_AFTER);
+        assert!(!warm_pins(relative_engines(), dir, live, true).await);
+    }
+
+    /// speed3 S3-09 (a): while the runtime's session runs its names stay kept; when it stops
+    /// they become recent names (here the test process's one user), and the service's end ends
+    /// the follow.
+    #[tokio::test]
+    async fn a_stopped_session_leaves_its_names_recent() {
+        let name = "svc-end.s3-09.invalid";
+        let (tx, rx) = watch::channel(TunStatus {
+            running: true,
+            ..TunStatus::default()
+        });
+        let stop = CancellationToken::new();
+        let follow = tokio::spawn(end_sessions(rx, stop.clone()));
+        vpnte_core::resolve::keep_resolved(
+            91_000,
+            &[(name.to_owned(), vec![[203, 0, 113, 31].into()])],
+        );
+        tokio::task::yield_now().await;
+        assert!(!vpnte_core::resolve::remembers(name));
+        tx.send_modify(|s| s.running = false);
+        let ended = async {
+            while !vpnte_core::resolve::remembers(name) {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), ended)
+            .await
+            .expect("the session's names became recent");
+        stop.cancel();
+        follow.await.expect("follow ends");
+    }
 
     /// Review service-b6: a missing engine is reported as missing, not as tampering.
     #[test]

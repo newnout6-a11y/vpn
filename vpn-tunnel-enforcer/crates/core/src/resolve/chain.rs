@@ -66,6 +66,16 @@ pub(super) const UPSTREAMS: [Upstream; 9] = [
     tcp53(1, 1, 1, 1),
     tcp53(77, 88, 8, 8),
 ];
+/// DoH to an IP literal (1.1.1.1, 9.9.9.9, 8.8.8.8, 94.140.14.140): the S3-09 (b) lookups
+/// before the click take only these.
+pub(super) fn ip_literal_doh(upstream: &Upstream) -> bool {
+    let Upstream::Doh(url) = upstream else {
+        return false;
+    };
+    let host = url.trim_start_matches("https://").split('/').next();
+    host.is_some_and(|h| h.parse::<IpAddr>().is_ok())
+}
+
 /// Head start of an upstream before the next one is asked as well.
 pub(super) const STAGGER: Duration = Duration::from_millis(700);
 /// Budget of one upstream for both records.
@@ -135,6 +145,26 @@ impl<T: Transport> Chain<T> {
         name: &str,
         keep: &impl Fn(IpAddr) -> bool,
     ) -> Result<Vec<IpAddr>, ResolveError> {
+        self.lookup(name, keep, GRACE).await
+    }
+
+    /// [`Chain::resolve`] for an address to dial (speed3 S3-09 (c)): once A brought addresses,
+    /// AAAA is not waited for (the dial takes IPv4 first anyway).
+    pub(super) async fn resolve_dial(
+        &self,
+        name: &str,
+        keep: &impl Fn(IpAddr) -> bool,
+    ) -> Result<Vec<IpAddr>, ResolveError> {
+        self.lookup(name, keep, Duration::ZERO).await
+    }
+
+    /// `after_a`: how long AAAA may lag once A brought addresses.
+    async fn lookup(
+        &self,
+        name: &str,
+        keep: &impl Fn(IpAddr) -> bool,
+        after_a: Duration,
+    ) -> Result<Vec<IpAddr>, ResolveError> {
         let count = self.upstreams.len();
         let first = self
             .last_good
@@ -151,7 +181,7 @@ impl<T: Transport> Chain<T> {
                 let Some(index) = queue.next() else {
                     return Err(worst);
                 };
-                running.push(self.ask(index, name, keep));
+                running.push(self.ask(index, name, keep, after_a));
             }
             let more = queue.peek().is_some();
             tokio::select! {
@@ -164,13 +194,13 @@ impl<T: Transport> Chain<T> {
                     Err(miss) => {
                         worst = more_telling(worst, miss);
                         if let Some(next) = queue.next() {
-                            running.push(self.ask(next, name, keep));
+                            running.push(self.ask(next, name, keep, after_a));
                         }
                     }
                 },
                 () = tokio::time::sleep(self.stagger), if more => {
                     if let Some(next) = queue.next() {
-                        running.push(self.ask(next, name, keep));
+                        running.push(self.ask(next, name, keep, after_a));
                     }
                 }
                 else => return Err(worst),
@@ -184,11 +214,12 @@ impl<T: Transport> Chain<T> {
         index: usize,
         name: &str,
         keep: &impl Fn(IpAddr) -> bool,
+        after_a: Duration,
     ) -> (usize, Result<Vec<IpAddr>, ResolveError>) {
         let Some(&upstream) = self.upstreams.get(index) else {
             return (index, Err(ResolveError::Failed));
         };
-        let verdict = judge(self.both(index, upstream, name).await, keep);
+        let verdict = judge(self.both(index, upstream, name, after_a).await, keep);
         if let Err(miss) = verdict {
             tracing::debug!(upstream = index, ?miss, "resolver gave no usable address");
         }
@@ -197,8 +228,15 @@ impl<T: Transport> Chain<T> {
 
     /// `[A, AAAA]` asked at once. Once one family brought addresses the other gets only a short
     /// grace (RFC 8305 §3): paths that drop AAAA (seen on a VPN client's DNS interception) must
-    /// not stall the lookup, nor cost the answer already in hand.
-    async fn both(&self, index: usize, upstream: Upstream, name: &str) -> [Option<Reply>; 2] {
+    /// not stall the lookup, nor cost the answer already in hand. `after_a` is AAAA's grace
+    /// after an A answer.
+    async fn both(
+        &self,
+        index: usize,
+        upstream: Upstream,
+        name: &str,
+        after_a: Duration,
+    ) -> [Option<Reply>; 2] {
         let deadline = Instant::now() + self.limit;
         let a = self.question(index, upstream, name, Record::A);
         let aaaa = self.question(index, upstream, name, Record::Aaaa);
@@ -213,7 +251,10 @@ impl<T: Transport> Chain<T> {
             return [None, None];
         };
         let until = match &first {
-            Some(reply) if !reply.addrs.is_empty() => deadline.min(Instant::now() + GRACE),
+            Some(reply) if !reply.addrs.is_empty() => {
+                let grace = if a_first { after_a } else { GRACE };
+                deadline.min(Instant::now() + grace)
+            }
             _ => deadline,
         };
         if a_first {

@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use vpnte_base::types::KillSwitchLevel;
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_tunnel::api::{
-    CaptureKind, Mode, RestartOptions, StartRequest, StopOptions, TunError, VpnProfile,
+    CaptureKind, Mode, RestartOptions, ServerFacts, StartRequest, StopOptions, TunError, VpnProfile,
 };
 
 use super::Host;
@@ -32,6 +32,20 @@ fn tunnel_failed(err: TunError) -> WireError {
         msg: err.user_msg(),
         warnings: err.warnings,
     }
+}
+
+/// The one-request facts of `server` for the runtime (speed3 H2); out of bounds refuses.
+fn facts_of(server: Option<&ServerUpstream>) -> Result<Option<(String, ServerFacts)>, WireError> {
+    let Some(server) = server else {
+        return Ok(None);
+    };
+    let facts = server.facts().ok_or_else(|| {
+        refused(AppError::msg(
+            ErrorKind::Validation,
+            Msg::new("service.pipe.badRequest"),
+        ))
+    })?;
+    Ok(Some((server.id.clone(), facts)))
 }
 
 fn vpn_profile(server: &ServerUpstream) -> VpnProfile {
@@ -93,18 +107,27 @@ impl Host {
 
     /// Validates a start / restart / switch, applies its kill-switch settings and inputs, and
     /// returns the runtime's request.
-    async fn prepare(&self, start: &TunnelStart) -> Result<StartRequest, WireError> {
+    async fn prepare(
+        &self,
+        client: &ClientInfo,
+        start: &TunnelStart,
+    ) -> Result<StartRequest, WireError> {
         if let Some(msg) = &self.deps.refuse_tunnel {
             return Err(refused(AppError::msg(ErrorKind::Permission, msg.clone())));
         }
         validate::start(start).map_err(refused)?;
+        let facts = facts_of(match &start.upstream {
+            Upstream::Server(server) => Some(server),
+            Upstream::LocalProxy { .. } => None,
+        })?;
         let settings = validate::protection(&start.protection).map_err(refused)?;
         let level = settings.level;
         let (kill_switch, inputs) = (self.deps.kill_switch.clone(), self.deps.inputs.clone());
-        let routing = start.routing.clone();
+        let (routing, owner) = (start.routing.clone(), client.user.clone());
         self.serialized(async move {
             kill_switch.apply(settings).await?;
-            inputs.set(&routing, level);
+            inputs.set(&routing, level, &owner);
+            inputs.offer(facts);
             Ok(())
         })
         .await?;
@@ -125,7 +148,7 @@ impl Host {
                 "service.pipe.badRequest",
             )),
             Request::Start(start) => {
-                let req = self.prepare(&start).await?;
+                let req = self.prepare(client, &start).await?;
                 self.owns_session(client, &start);
                 let receipt = runtime.start(req, cancel.clone()).await;
                 let receipt = receipt.map_err(tunnel_failed)?;
@@ -133,7 +156,7 @@ impl Host {
                 Ok(Reply::Started(Some(StartReceiptWire::from(&receipt))))
             }
             Request::Restart(start) => {
-                let req = self.prepare(&start).await?;
+                let req = self.prepare(client, &start).await?;
                 self.owns_session(client, &start);
                 let reason = "restart requested by the app".to_owned();
                 let opts = RestartOptions {
@@ -156,6 +179,8 @@ impl Host {
                 if let Some(server) = &restart.server {
                     validate::server(server).map_err(refused)?;
                 }
+                let facts = facts_of(restart.server.as_ref())?;
+                self.deps.inputs.offer(facts);
                 let profile = restart.server.as_ref().map(vpn_profile);
                 let receipt = runtime
                     .restart_adaptive(restart.mode, restart.reason.clone(), profile)
@@ -165,7 +190,7 @@ impl Host {
                 Ok(Reply::Started(Some(StartReceiptWire::from(&receipt))))
             }
             Request::Switch(start) => {
-                let req = self.prepare(&start).await?;
+                let req = self.prepare(client, &start).await?;
                 self.owns_session(client, &start);
                 let owner = cancel.clone();
                 let is_owner = Arc::new(move || !owner.is_cancelled());
@@ -189,8 +214,9 @@ impl Host {
                 validate::routing(&routing).map_err(refused)?;
                 let (kill_switch, inputs) =
                     (self.deps.kill_switch.clone(), self.deps.inputs.clone());
+                let owner = client.user.clone();
                 self.serialized(async move {
-                    inputs.set(&routing, kill_switch.level());
+                    inputs.set(&routing, kill_switch.level(), &owner);
                     Ok(())
                 })
                 .await?;
@@ -273,6 +299,8 @@ impl Host {
             .remove(&client.user)
             .map_err(|e| WireError::failed(&AppError::internal(e)))?;
         self.forget_session(Some(&client.user));
+        // speed3 H3: the server names his ended sessions resolved go with him.
+        vpnte_core::resolve::forget(&client.user);
         Ok(Reply::Done { removing })
     }
 

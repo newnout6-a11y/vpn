@@ -32,6 +32,7 @@ use super::Remote;
 use crate::api_settings::test_support::TempDir;
 use crate::svc_core::docs::ProtectionDoc;
 
+mod handover;
 mod takeover;
 
 /// A runtime that runs whatever it is asked to, at once.

@@ -322,3 +322,24 @@ async fn the_inputs_are_read_beside_slot_a() {
     let (proof, inputs, core) = (at("egress-via:"), at("inputs-done"), at("spawn:"));
     assert!(proof < inputs && inputs < core, "{log:?}");
 }
+
+/// Review speed2-b5: the inputs snapshot runs beside a start (lab live-9 L9-2), and only the
+/// start that consumes it lets it finish. A start that fails before (here at slot A) aborts it,
+/// so a late snapshot never writes the helper service's rule-set report over a later start's.
+#[tokio::test(start_paused = true)]
+async fn a_start_that_fails_early_drops_its_inputs_snapshot() {
+    let w = World::new();
+    w.inputs_ms.store(1_000, Ordering::SeqCst);
+    w.stage_fail.store(true, Ordering::SeqCst);
+    let h = spawn(&w);
+    let req = vpn_req(XRAY_KEY, vpnte_base::types::EnginePref::Xray);
+    h.start(req.clone(), CancellationToken::new())
+        .await
+        .unwrap_err();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(w.count("inputs-done"), 0, "{:?}", w.log());
+    // The start that runs reads its own snapshot to the end.
+    w.stage_fail.store(false, Ordering::SeqCst);
+    h.start(req, CancellationToken::new()).await.expect("start");
+    assert_eq!(w.count("inputs-done"), 1, "{:?}", w.log());
+}

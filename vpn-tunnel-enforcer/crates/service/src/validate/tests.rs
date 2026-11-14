@@ -27,6 +27,8 @@ fn server(p: Profile) -> TunnelStart {
         profile: p,
         device: None,
         engine: EnginePref::Auto,
+        fresh: false,
+        hints: Vec::new(),
     })))
 }
 

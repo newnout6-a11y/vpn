@@ -287,3 +287,58 @@ fn every_tampering_is_refused() {
         assert_eq!(got, refused, "{folder} / {listed}");
     }
 }
+
+/// speed3 S3-06 (feasibility review): a start's check that meets the warm-up waits for it and
+/// finds the files held: two holds at once hash every file once, a later hold none.
+#[test]
+fn concurrent_checks_hash_each_file_once() {
+    let dir = TempDir::new("pin-once");
+    let files: Vec<Expected> = ["sing-box.exe", "wintun.dll"]
+        .iter()
+        .map(|name| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, name.as_bytes()).unwrap();
+            let sha: [u8; 32] = Sha256::digest(name.as_bytes()).into();
+            (path, vec![sha])
+        })
+        .collect();
+    let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let runs: Vec<_> = (0..2)
+        .map(|_| {
+            let (files, gate) = (files.clone(), gate.clone());
+            std::thread::spawn(move || {
+                gate.wait();
+                hold(files)
+            })
+        })
+        .collect();
+    for run in runs {
+        assert!(run.join().unwrap().is_ok());
+    }
+    hold(files.clone()).unwrap();
+    let hashed = HASHED.lock().clone();
+    for (path, _) in &files {
+        assert_eq!(hashed.iter().filter(|p| *p == path).count(), 1, "{path:?}");
+    }
+    // The held handles go with the files' folder.
+    HELD.lock()
+        .retain(|(held, _)| !files.iter().any(|(p, _)| p == held));
+}
+
+/// S3-06: unelevated the warm-up checks nothing; elevated it refuses what a start would refuse
+/// (a relative path), and a refused file is not remembered: once it matches it is taken.
+#[test]
+fn warm_checks_like_a_start_and_remembers_no_refusal() {
+    assert!(warm(Engine::Xray, Path::new("xray.exe"), false).is_ok());
+    assert!(warm_rule_sets(Path::new("missing-dir"), false));
+    assert!(warm(Engine::Xray, Path::new("xray.exe"), true).is_err());
+    let dir = TempDir::new("pin-again");
+    let path = dir.path().join("xray.exe");
+    std::fs::write(&path, b"changed").unwrap();
+    let sha: [u8; 32] = Sha256::digest(b"original").into();
+    let expected = vec![(path.clone(), vec![sha])];
+    assert!(hold(expected.clone()).is_err());
+    std::fs::write(&path, b"original").unwrap();
+    assert!(hold(expected).is_ok());
+    HELD.lock().retain(|(held, _)| *held != path);
+}

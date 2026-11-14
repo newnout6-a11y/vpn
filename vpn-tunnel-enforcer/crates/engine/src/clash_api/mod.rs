@@ -26,6 +26,9 @@ pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(4);
 /// `/traffic` emits one line per second: wait a little longer for the first.
 pub const TRAFFIC_TIMEOUT: Duration = Duration::from_secs(3);
 /// Answer size caps: control answers are tiny; thousands of open flows are a few MB.
+/// One lookup through the engine's DNS router (speed3 S3-05): its first exchange through the
+/// tunnel dials the DoH server.
+pub const DNS_QUERY_TIMEOUT: Duration = Duration::from_secs(4);
 const MAX_CONTROL_ANSWER: usize = 16 * 1024;
 const MAX_SNAPSHOT_ANSWER: usize = 16 * 1024 * 1024;
 /// Group and member tags are short engine tags; this also keeps the PUT body under 1 KiB.
@@ -370,6 +373,23 @@ impl ClashApi {
             }
             let end = line.iter().position(|b| *b == b'\n').unwrap_or(line.len());
             serde_json::from_slice(&line[..end]).map_err(|_| ClashError::Schema)
+        })
+        .await
+    }
+
+    /// `GET /dns/query?name=<name>&type=<qtype>`: one lookup through the engine's own DNS router
+    /// (its rules and `final` server, no inbound), read to the end. `Ok` = the router answered
+    /// (an empty answer too). The answer is never returned or logged.
+    pub async fn dns_query(&self, name: &str, qtype: &str) -> Result<(), ClashError> {
+        within(DNS_QUERY_TIMEOUT, async {
+            let mut url = self.url(&["dns", "query"]);
+            url.query_pairs_mut()
+                .append_pair("name", name)
+                .append_pair("type", qtype);
+            let resp = self.send(self.http.get(url)).await?;
+            let body = expect_ok(resp, MAX_CONTROL_ANSWER).await?;
+            serde_json::from_slice::<Value>(&body).map_err(|_| ClashError::Schema)?;
+            Ok(())
         })
         .await
     }

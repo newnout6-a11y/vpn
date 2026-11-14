@@ -42,6 +42,13 @@ static PINS: LazyLock<Vec<(String, [u8; 32])>> = LazyLock::new(|| {
 /// Verified files, open without write or delete sharing until the process ends: nobody can
 /// change them between the check and a start, and later starts need no second hash.
 static HELD: Mutex<Vec<(PathBuf, File)>> = Mutex::new(Vec::new());
+/// One hashing pass at a time (speed3 S3-06, feasibility review): a start that meets the
+/// service's warm-up waits for it and then finds the files held, instead of hashing the same
+/// ~90 MB beside it.
+static HASHING: Mutex<()> = Mutex::new(());
+/// Every file hashed, in order (tests: a held file is never hashed twice).
+#[cfg(test)]
+static HASHED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 /// An engine file that is missing, unreadable or different from its release pin.
 #[derive(Debug, thiserror::Error)]
@@ -61,7 +68,16 @@ pub(crate) struct NotPinned {
 /// several folders for it, not only the one checked here. The first start hashes the files once
 /// (sing-box with its DLLs is about 90 MB: a fraction of a second in a release build).
 pub(crate) fn check(engine: Engine, exe: &Path) -> io::Result<()> {
-    if !vpnte_winnet::elevation::is_elevated() {
+    warm(engine, exe, vpnte_winnet::elevation::is_elevated())
+}
+
+/// speed3 S3-06 (a): [`check`] done ahead, off the start path (the helper service runs it on
+/// its blocking pool after «service running»), so the first connect finds the files held (lab
+/// live-9: the first Xray start waited 654 ms for its hash and Windows' first scan). `elevated`:
+/// whether the engines will run elevated; otherwise nothing is checked. A refusal is returned
+/// and logged, never remembered: the start checks again.
+pub fn warm(engine: Engine, exe: &Path, elevated: bool) -> io::Result<()> {
+    if !elevated {
         return Ok(());
     }
     hold(expected(engine, exe, policy::trusted_keys())).map_err(|err| {
@@ -73,6 +89,12 @@ pub(crate) fn check(engine: Engine, exe: &Path) -> io::Result<()> {
         };
         io::Error::new(kind, err)
     })
+}
+
+/// [`warm`] for the bundled Smart RU rule sets in `dir` (the helper service's own folder);
+/// `false` = a file was refused (not remembered).
+pub fn warm_rule_sets(dir: &Path, elevated: bool) -> bool {
+    !elevated || rule_sets_pinned(dir)
 }
 
 /// `true` when the bundled Smart RU rule sets in `dir` match their release pins; they are held
@@ -91,6 +113,7 @@ type Expected = (PathBuf, Vec<[u8; 32]>);
 
 /// Verifies and holds every file not held yet; the first refusal stops (and is logged).
 fn hold(files: Vec<Expected>) -> Result<(), NotPinned> {
+    let _one_pass = HASHING.lock();
     for (path, pins) in files {
         if HELD.lock().iter().any(|(held, _)| *held == path) {
             continue;
@@ -223,6 +246,8 @@ fn open_verified(path: &Path, pins: &[[u8; 32]]) -> Result<File, NotPinned> {
         .share_mode(FILE_SHARE_READ.0)
         .open(path)
         .map_err(|err| refused(err.kind() == io::ErrorKind::NotFound))?;
+    #[cfg(test)]
+    HASHED.lock().push(path.to_owned());
     let sha = sha256_of(&mut file).map_err(|_| not_pinned())?;
     if pins.contains(&sha) {
         Ok(file)

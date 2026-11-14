@@ -1,7 +1,8 @@
 //! In-place upstream switch (tunnel-core §3.8): admission (`None` = "use the protected
 //! restart") and the runtime's [`SwitchOps`] over the two Xray slots. The coordinator itself
 //! is `crate::switch`.
-use std::net::{Ipv4Addr, SocketAddr};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -11,16 +12,17 @@ use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_engine::clash_api::ClashEndpoint;
 use vpnte_engine::singbox_config::{UdpPolicy, Upstream, select_mtu};
 use vpnte_engine::slot::Slot as EngineSlot;
-use vpnte_engine::xray_config::{self, ResolvePath};
+use vpnte_engine::xray_config::{self, ResolvePath, Resolved};
 use vpnte_engine::xray_process::SlotLaunch;
+use vpnte_winnet::adapters::{TUN_V4, TUN_V6};
 
 use super::actor::{Actor, Phase, SlotSession};
 use super::capture::{Capture, CaptureProof, EngineParts};
 use super::engines::{CoreProc, EchoFailure, Engines, echo_failure};
 use super::{Timings, config};
 use crate::api::{
-    Mode, OwnerCheck, Slot, StartRequest, SwitchOutcome, SwitchPhase, SwitchReceipt, TunnelEvent,
-    VpnProfile,
+    Mode, NameHint, Origin, OwnerCheck, Slot, StartRequest, SwitchOutcome, SwitchPhase,
+    SwitchReceipt, TunnelEvent, VpnProfile,
 };
 use crate::switch::{SwitchOps, run_protected_switch};
 
@@ -67,13 +69,69 @@ struct RuntimeSwitch<'a> {
     /// The candidate's proof waits for the traffic it carries after the select (the handshake
     /// budget of its server name is spent for now: speed audit F4).
     by_traffic: bool,
+    /// speed3 S3-07 (owner default 1): a user's switch to a server with fresh evidence selects
+    /// first and proves once after it ([`RuntimeSwitch::confirm_fresh`]); every other switch
+    /// keeps its probe.
+    fresh: bool,
+    /// speed3 S3-10 (b): the app's addresses for the candidate's names (this switch only).
+    hints: Vec<NameHint>,
 }
 
 /// How long a candidate proven by its own traffic may take to show it.
 const TRAFFIC_PROOF: std::time::Duration = std::time::Duration::from_secs(3);
 const TRAFFIC_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+/// How often a fresh candidate's own downloads are read during its one proof (loopback reads).
+const FRESH_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 impl RuntimeSwitch<'_> {
+    /// Answers came back through `slot` (its own connections downloaded something).
+    async fn carries(&self, slot: EngineSlot) -> bool {
+        let carried = self.engines.slot_downloads(self.clash, slot).await;
+        carried.is_ok_and(|c| c.iter().any(|(_, down)| *down > 0))
+    }
+
+    /// speed3 S3-07, the one proof of a fresh candidate selected without a probe: the selector
+    /// read `slot` back at the select; data must now come back through it within
+    /// `confirm_candidate`, with no hedge: its own downloads (the user's traffic) count first,
+    /// else the one echo through the capture. Any exit counts: no probe named one, and servers
+    /// of one provider share exits.
+    async fn confirm_fresh(&mut self, slot: EngineSlot) -> AppResult<()> {
+        let (engines, port, cancel) = (self.engines, self.proof.port, self.cancel);
+        let budget = self.timings.confirm_candidate;
+        let echo_token = cancel.child_token();
+        // The echo's own hedge would start after twice the budget: never reached.
+        let echo = engines.egress(port, budget.saturating_mul(2), &echo_token);
+        tokio::pin!(echo);
+        let deadline = tokio::time::sleep(budget);
+        tokio::pin!(deadline);
+        let mut echoed = false;
+        let proven = loop {
+            if self.carries(slot).await {
+                tracing::info!(?slot, "switch: the fresh candidate carries traffic");
+                break Ok(());
+            }
+            tokio::select! {
+                () = &mut deadline => break Err(unconfirmed("no answer through the fresh candidate")),
+                () = cancel.cancelled() => break Err(AppError::cancelled()),
+                seen = &mut echo, if !echoed => {
+                    echoed = true;
+                    match seen {
+                        Ok(ip) => {
+                            self.slots.egress[slot.index()] = Some(ip);
+                            break Ok(());
+                        }
+                        Err(e) if echo_failure(&e) == Some(EchoFailure::NoAddress) => break Ok(()),
+                        // Its own traffic may still prove it until the deadline.
+                        Err(e) => tracing::info!(error = %e, "switch: the fresh candidate's echo failed"),
+                    }
+                }
+                () = tokio::time::sleep(FRESH_POLL) => {}
+            }
+        };
+        echo_token.cancel();
+        proven
+    }
+
     /// The candidate selected without a probe of its own: answers coming back through it within
     /// [`TRAFFIC_PROOF`] prove it; none (an idle session) and it gets the probe it skipped,
     /// behind the budget as before.
@@ -124,6 +182,30 @@ fn tunnel_exit_matches(
     }
 }
 
+/// The app's hints for `hosts` (S3-09's rules, as the start takes them): per hinted name the
+/// first address a lookup could have answered (`may_be_server`, never our TUN's networks), IPv4
+/// first; the other names are asked. A hint names its host: it never stands in for another.
+fn hinted(hosts: &[String], hints: &[NameHint]) -> (HashMap<String, IpAddr>, Vec<String>) {
+    let usable = |ip: &&IpAddr| {
+        let ours = match ip {
+            IpAddr::V4(v4) => TUN_V4.contains(v4),
+            IpAddr::V6(v6) => TUN_V6.contains(v6),
+        };
+        vpnte_core::resolve::may_be_server(**ip) && !ours
+    };
+    let (mut found, mut ask) = (HashMap::new(), Vec::new());
+    for host in hosts {
+        let hint = hints.iter().find(|h| h.name.eq_ignore_ascii_case(host));
+        match hint.and_then(|h| h.addrs.iter().filter(usable).min_by_key(|ip| ip.is_ipv6())) {
+            Some(ip) => {
+                found.insert(host.clone(), *ip);
+            }
+            None => ask.push(host.clone()),
+        }
+    }
+    (found, ask)
+}
+
 /// The slot runs and the routes still go through the capture.
 async fn proven(running: bool, capture: &dyn Capture, proof: &CaptureProof) -> bool {
     running && capture.routes_ok(proof).await
@@ -136,10 +218,19 @@ impl SwitchOps for RuntimeSwitch<'_> {
         let mut graph = xray_config::proxy_graph(&self.next.profile, device)?;
         // The TUN is up: names resolve through sing-box's bootstrap inbound, never by Xray.
         let dns = SocketAddr::from((Ipv4Addr::LOCALHOST, self.slots.dns_bootstrap));
-        let resolved = self
-            .engines
-            .resolve(&graph.hosts(), ResolvePath::ViaSingBox(dns), cancel)
-            .await?;
+        let step = std::time::Instant::now();
+        // speed3 S3-10 (b): a name the app's hint answers skips the bootstrap's cold direct DoH.
+        let (hinted, ask) = hinted(&graph.hosts(), &self.hints);
+        let mut resolved = Resolved::default();
+        if !ask.is_empty() {
+            let path = ResolvePath::ViaSingBox(dns);
+            resolved = self.engines.resolve(&ask, path, cancel).await?;
+        }
+        resolved.addrs.extend(hinted);
+        // speed3 S3-10 step lines (lab L-3: ~240 ms before «xray-b spawned» had no line).
+        let (ms, asked) = (step.elapsed().as_millis(), ask.len());
+        tracing::info!(ms, asked, "candidate resolved");
+        let step = std::time::Instant::now();
         graph.substitute(&resolved.addrs);
         self.settle = super::start::settle_of(&graph);
         self.slots.balanced[slot.index()] = self.settle.is_some();
@@ -154,6 +245,7 @@ impl SwitchOps for RuntimeSwitch<'_> {
                 .next()
                 .map(|ip| SocketAddr::new(*ip, self.next.profile.port)),
         };
+        tracing::info!(ms = step.elapsed().as_millis(), "candidate config built");
         self.slots.slots.start(slot, ep, launch, cancel).await?;
         Ok(())
     }
@@ -167,6 +259,10 @@ impl SwitchOps for RuntimeSwitch<'_> {
             // own: the select comes first and the traffic the new slot carries proves it.
             tracing::info!("switch: the handshake budget is spent for now: proof by traffic");
             self.by_traffic = true;
+            return Ok(());
+        }
+        if self.fresh {
+            tracing::info!("switch: fresh evidence: select first, one proof after");
             return Ok(());
         }
         let ip = self
@@ -196,9 +292,15 @@ impl SwitchOps for RuntimeSwitch<'_> {
         if self.by_traffic && slot != self.previous {
             return self.confirm_by_traffic(slot).await;
         }
-        let balanced = self.slots.balanced[slot.index()];
-        let expected = self.slots.egress[slot.index()]
-            .ok_or_else(|| unconfirmed("upstream egress identity unavailable"))?;
+        if self.fresh && slot != self.previous {
+            return self.confirm_fresh(slot).await;
+        }
+        // A slot proven by its traffic named no exit (a switch by traffic, a recovery proven by
+        // traffic: Lane A's L10-2): the selector was read back, so any answer proves it, as for a
+        // balanced slot.
+        let expected = self.slots.egress[slot.index()];
+        let balanced = self.slots.balanced[slot.index()] || expected.is_none();
+        let expected = expected.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         // The retained upstream gets its own short, fresh proof the caller cannot cancel.
         let (budget, token) = if slot == self.previous {
             (self.timings.confirm_previous, CancellationToken::new())
@@ -254,7 +356,10 @@ impl Actor {
         is_owner: OwnerCheck,
         stops: u64,
     ) -> Option<SwitchReceipt> {
-        if !self.switch_admitted(&next).await {
+        let step = std::time::Instant::now();
+        let admitted = self.switch_admitted(&next).await;
+        tracing::info!(admitted, ms = step.elapsed().as_millis(), "switch admitted");
+        if !admitted {
             return None;
         }
         self.switches += 1;
@@ -271,6 +376,11 @@ impl Actor {
             });
         }
         receipt
+    }
+
+    /// speed3 S3-07: the app's own evidence (in-process) that the server works now.
+    fn app_evidence(&self, profile_id: &str) -> bool {
+        (self.deps.failover.as_ref()).is_some_and(|f| f.fresh(profile_id))
     }
 
     /// The running config can serve `next` as it is: Xray slots both, same config key with
@@ -317,9 +427,10 @@ impl Actor {
             routing,
             phys_dns,
         };
+        // The key alone: rendering the whole config only to compare it cost every switch.
         self.capture
-            .config(&plan, &parts)
-            .is_ok_and(|(_, key)| key == s.compat)
+            .compat(&plan, &parts)
+            .is_ok_and(|key| key == s.compat)
     }
 
     /// Runs the coordinator, racing the core's exit (a crash cancels the switch and waits for
@@ -339,6 +450,9 @@ impl Actor {
             profile: Arc::new(super::start::xray_profile(&profile.profile, next)),
             ..profile.clone()
         };
+        // What the client sent with this request about the server: read once (handed out once).
+        let facts = self.deps.inputs.server_facts(&profile.id);
+        let fresh = next.origin == Origin::User && (facts.fresh || self.app_evidence(&profile.id));
         let deps = &self.deps;
         let capture = &*self.capture;
         let stops = &self.shared.stops;
@@ -364,6 +478,8 @@ impl Actor {
             timings: &deps.timings,
             settle: None,
             by_traffic: false,
+            fresh,
+            hints: facts.hints,
         };
         let candidate = previous.other();
         let mut receipt = {

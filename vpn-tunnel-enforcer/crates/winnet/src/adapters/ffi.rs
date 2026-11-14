@@ -11,9 +11,10 @@ use windows::Win32::NetworkManagement::IpHelper::{
     ConvertInterfaceLuidToAlias, FreeMibTable, GAA_FLAG_INCLUDE_ALL_INTERFACES,
     GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST,
     GET_ADAPTERS_ADDRESSES_FLAGS, GetAdaptersAddresses, GetBestRoute2, GetIfTable2,
-    GetIpForwardTable2, GetIpInterfaceEntry, IP_ADAPTER_ADDRESSES_LH, IP_ADAPTER_IPV4_ENABLED,
-    IP_ADAPTER_IPV6_ENABLED, InitializeIpInterfaceEntry, MIB_IF_ROW2, MIB_IF_TABLE2,
-    MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW,
+    GetIpForwardTable2, GetIpInterfaceEntry, GetUnicastIpAddressEntry, IP_ADAPTER_ADDRESSES_LH,
+    IP_ADAPTER_IPV4_ENABLED, IP_ADAPTER_IPV6_ENABLED, InitializeIpInterfaceEntry,
+    InitializeUnicastIpAddressEntry, MIB_IF_ROW2, MIB_IF_TABLE2, MIB_IPFORWARD_ROW2,
+    MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_UNICASTIPADDRESS_ROW,
 };
 use windows::Win32::NetworkManagement::Ndis::{MediaConnectStateDisconnected, NET_LUID_LH};
 use windows::Win32::Networking::WinSock::{
@@ -395,6 +396,8 @@ pub(super) fn best_route(dst: IpAddr) -> windows::core::Result<RawBest> {
 pub(super) struct IpInterface {
     pub metric: u32,
     pub mtu: u32,
+    /// Duplicate-address probes before an address turns Preferred (speed3 S3-04 measurement).
+    pub dad_transmits: u32,
 }
 
 /// `None` when the interface has no binding of that family.
@@ -412,7 +415,24 @@ pub(super) fn ip_interface(
         NO_ERROR => Ok(Some(IpInterface {
             metric: row.Metric,
             mtu: row.NlMtu,
+            dad_transmits: row.DadTransmits,
         })),
+        ERROR_FILE_NOT_FOUND | ERROR_NOT_FOUND => Ok(None),
+        err => Err(err.into()),
+    }
+}
+
+/// `NL_DAD_STATE` of `ip` on interface `luid` (`GetUnicastIpAddressEntry`); `None` while the
+/// interface does not carry the address.
+pub(super) fn unicast_dad(luid: u64, ip: IpAddr) -> windows::core::Result<Option<i32>> {
+    let mut row = MIB_UNICASTIPADDRESS_ROW::default();
+    // SAFETY: initialises a local row to the documented defaults.
+    unsafe { InitializeUnicastIpAddressEntry(&mut row) };
+    row.Address = inet_from(ip);
+    row.InterfaceLuid.Value = luid;
+    // SAFETY: `row` names the address and the LUID, as the API requires.
+    match unsafe { GetUnicastIpAddressEntry(&mut row) } {
+        NO_ERROR => Ok(Some(row.DadState.0)),
         ERROR_FILE_NOT_FOUND | ERROR_NOT_FOUND => Ok(None),
         err => Err(err.into()),
     }

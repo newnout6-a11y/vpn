@@ -24,7 +24,10 @@ use chain::{CLOUDFLARE_DOH, Chain, STAGGER, UPSTREAM_LIMIT, UPSTREAMS, YANDEX_DO
 pub use memory::{MEMORY_TTL, ResolverMemoryDoc, persist, set_network};
 use server::LastKnown;
 pub use server::ServerAddrs;
-pub use session::{end_session, keep_for_session};
+pub use session::{
+    RECENT_FOR, drop_names, end_session, forget, keep_for_session, keep_resolved, owned_by,
+    remember, remembers,
+};
 use transport::Net;
 
 /// Budget of the OS resolver inside [`resolve_server`] (the old endpoint-resolution limit).
@@ -82,8 +85,9 @@ pub async fn resolve_host(
         Host::Ip(ip) => return filtered(vec![ip], &keep),
         Host::Name(name) => name,
     };
-    // The running session's server name: its kept answer, no lookup (lab F11).
-    if let Some(addrs) = session::kept(&name) {
+    // The running session's server name: its kept answer, no lookup (lab F11); an ended
+    // session's for 10 min more (S3-09 (a)).
+    if let Some(addrs) = session::kept(&name).or_else(|| session::recent(&name)) {
         return filtered(addrs, &keep);
     }
     match how {
@@ -124,10 +128,11 @@ pub async fn resolve_with(
         .await
 }
 
-/// Resolves a VPN server name before an engine dials it: the direct chain, then the OS
-/// resolver (2.5 s), then the addresses this name resolved to last time in this process
-/// (`last_known`, with a warning for the user) when DNS fails or is poisoned. Block-page
-/// addresses are never returned. An IP literal comes back as is (filtered, not remembered).
+/// Resolves a VPN server name before an engine dials it: the running session's kept answer, an
+/// ended session's recent one (S3-09 (a)), else the direct chain, then the OS resolver (2.5 s),
+/// then the addresses this name resolved to last time in this process (`last_known`, with a
+/// warning for the user) when DNS fails or is poisoned. Block-page addresses are never
+/// returned. An IP literal comes back as is (filtered, not remembered).
 pub async fn resolve_server(
     name: &str,
     keep: impl Fn(IpAddr) -> bool,
@@ -142,7 +147,7 @@ pub async fn resolve_server(
         }
         Host::Name(name) => name,
     };
-    if let Some(addrs) = session::kept(&name) {
+    if let Some(addrs) = session::kept(&name).or_else(|| session::recent(&name)) {
         return Ok(ServerAddrs {
             addrs: filtered(addrs, &keep)?,
             last_known: false,
@@ -160,6 +165,30 @@ pub async fn resolve_server(
             .unwrap_or(Err(ResolveError::Failed))
     };
     server::server(&name, &keep, chain(), last_known(), os).await
+}
+
+/// speed3 S3-09 (b): the selected server's name looked up before the click over the foreign
+/// IP-literal DoH resolvers only: no name to resolve first, no SNI a filter could read, nothing
+/// to the ISP's or the OS's resolver, no Russian resolver. An address to dial (no AAAA grace).
+/// `Err`: the connect resolves as usual.
+pub async fn resolve_ahead(name: &str) -> Result<Vec<IpAddr>, ResolveError> {
+    let Host::Name(name) = Host::parse(name).map_err(|_| ResolveError::InvalidName)? else {
+        // A literal needs no lookup.
+        return Err(ResolveError::InvalidName);
+    };
+    let foreign = UPSTREAMS
+        .into_iter()
+        .filter(chain::ip_literal_doh)
+        .collect();
+    Chain::new(foreign, Net::new(), STAGGER, UPSTREAM_LIMIT)
+        .resolve_dial(&name, &|_| true)
+        .await
+}
+
+/// An address a server may have, as every lookup here judges it (block pages, loopback,
+/// link-local and multicast never are): the filter of an address learned elsewhere (S3-09 hints).
+pub fn may_be_server(ip: IpAddr) -> bool {
+    !chain::block_page(ip)
 }
 
 /// The last good addresses of server names, shared with the persisted memory.

@@ -27,6 +27,10 @@ pub(super) enum Act {
     Stray,
 }
 
+/// One test at a time on the process-wide session state (the running session's kept names and
+/// the recent ones).
+pub(super) static SESSIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The fake transport: upstreams by name, each with its act, and the order they were asked.
 pub(super) struct Fake {
     acts: HashMap<Upstream, Act>,
@@ -232,6 +236,7 @@ async fn live_resolvers() {
 /// still applied; the session's end forgets it.
 #[tokio::test]
 async fn a_kept_session_name_never_leaves_the_pc() {
+    let _one = SESSIONS.lock().await;
     let ip: IpAddr = "203.0.113.7".parse().expect("ip");
     let name = "vpn.p-follow3.invalid";
     session::keep_for_test(1_000, name, vec![ip]);

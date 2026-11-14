@@ -24,6 +24,12 @@ vpnte-engine.workspace = true
 vpnte-profiles.workspace = true
 vpnte-winnet.workspace = true
 
+[dev-dependencies]
+# speed3 S3-00: budget tests run under a paused clock (`start_paused`); the probes' handshake
+# budget replays lab sequences with the real arithmetic.
+tokio = { workspace = true, features = ["test-util"] }
+vpnte-probes.workspace = true
+
 [lints]
 workspace = true
 

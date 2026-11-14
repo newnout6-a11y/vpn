@@ -152,7 +152,8 @@ pub fn build(i: &ConfigInputs) -> Result<serde_json::Value, ConfigError>;
 pub fn select_mtu(stealth: bool, adaptive: AdaptiveMode, public_wifi: bool) -> u16; // 1280 | 1380 | 1500
 pub fn compat_key(i: &ConfigInputs) -> [u8; 32];   // equal keys: a running config can serve the new
                                                    // upstream (ignores profile, slots, listener ports,
-                                                   // secrets, alias; the capture and its proxy port count)
+                                                   // secrets, alias; the capture and its proxy port count;
+                                                   // v3 hashes every RoutingParts field: speed3 S3-10)
 pub fn usable_physical_dns(physical: &[Ipv4Addr]) -> Option<Ipv4Addr>;  // not TUN /30, loopback, 0.0.0.0
 pub const SPOOF_KEYS: [&str; 2];                    // "spoof", "spoof_method" (tls)
 pub fn gate_spoof(fragment: &mut SingBoxFragment, elevated: bool) -> bool;  // audit item 18: drops
@@ -190,7 +191,8 @@ Rules the caller must keep (review of the WFP / TUN design):
   `usable_physical_dns` gives one, `dns-bootstrap-isp` (UDP to it) last. These tags are
   reserved (routing must not define them). Routing's DNS rules must not use legacy address
   filters (`ip_cidr` / `ip_is_private` without `match_response`): `evaluate` turns legacy DNS
-  mode off and sing-box then refuses them. `strategy: ipv4_only`. Clash API on
+  mode off and sing-box then refuses them. `strategy: ipv4_only`; TUN configs add `optimistic: {enabled: true, timeout: "1h"}` (speed3
+  S3-13 (a): memory only, never `cache_file`). Clash API on
   `127.0.0.1:clash_port` with `clash_secret`.
 - Upstream server IPs are excluded from the TUN routes (Native); slot mode excludes nothing:
   pass the Xray exe in `RoutingInputs::engine_paths` (process rule -> direct) instead.
@@ -287,8 +289,9 @@ pub struct XraySupervisor;                             // owned by the tunnel ac
 impl XraySupervisor {
     pub fn new(exe: PathBuf, logs: Option<PathBuf>, events: mpsc::Sender<XrayEvent>) -> Self;
                                                        // exe also -> RoutingInputs::engine_paths
-    // `run -config stdin:`; ready = authenticated SOCKS handshake raced with exit / cancel;
-    // any failure stops the candidate before returning
+    // `run -config stdin:`; ready = Xray's own «core: Xray … started» line + ONE authenticated
+    // SOCKS answer (speed3 S3-02), or the authenticated poll (fallback), raced with exit /
+    // cancel; never the line alone; any failure stops the candidate before returning
     pub async fn start(&mut self, slot: Slot, ep: SlotEndpoint, launch: SlotLaunch,
                        cancel: &CancellationToken) -> Result<SlotStatus, XrayError>;
     pub async fn restart(&mut self, slot: Slot, cancel: &CancellationToken) -> Result<SlotStatus, XrayError>;
@@ -309,9 +312,20 @@ Events: `XrayEvent::Exited` only for slots that reached readiness; `expected` = 
 `graceful` = it ended by itself after our CTRL_BREAK. `stop` / `stop_all` / `restart` / a failed
 start stop a slot like sing-box: CTRL_BREAK, up to `singbox_process::GRACEFUL_STOP` (Xray exits
 0 in ~0.2 s here), else the kill and up to `STOP_TIMEOUT`; `stop_all` stops A then B.
-Restart policy / backoff (0.5 / 2 / 5 s, 3 per 60 s) is the tunnel FSM's. Messages:
+Restart policy / backoff (0 / 2 / 5 s since speed3 S3-01, 3 per 60 s) is the tunnel FSM's. Messages:
 `engine.process.xray.{exited(code), socksNotReady(port), slotOccupied, portTaken, notRunning,
 notStarted}`, `engine.process.{configRejected, stopUnconfirmed, spawnFailed}(engine)`.
+
+## `pin` — engine pins, warmed ahead (speed3 S3-06 (a))
+
+```rust
+pub fn warm(engine: Engine, exe: &Path, elevated: bool) -> io::Result<()>; // the start's check, done ahead
+pub fn warm_rule_sets(dir: &Path, elevated: bool) -> bool;                // the pinned Smart RU sets
+```
+The helper service calls both on its blocking pool ~10 s after «service running» for the engine
+store's current files and its own folder: the first connect then finds them hashed and held (a
+start that meets the warm-up waits for it: one hashing pass at a time). Unelevated nothing is
+checked; a refusal is logged and not remembered (the start checks again).
 
 ## `clash_api` — controller of one sing-box run
 
@@ -331,6 +345,9 @@ impl ClashApi {
     pub async fn select(&self, group: &str, member: &str, members: &[&str]) -> Result<(), ClashError>;
     pub async fn connections(&self) -> Result<Connections, ClashError>;
     pub async fn traffic(&self) -> Result<Traffic, ClashError>;     // one tick of /traffic
+    // GET /dns/query through the run's DNS router, read to the end (DNS_QUERY_TIMEOUT 4 s);
+    // the answer is never returned (speed3 S3-05, the tunnel's DoH warm-up)
+    pub async fn dns_query(&self, name: &str, qtype: &str) -> Result<(), ClashError>;
 }
 pub struct Selection { pub kind: String, pub now: String, pub all: Vec<String> }
 pub struct Traffic { pub up: u64, pub down: u64 }
@@ -688,16 +705,16 @@ pub const MAX_HANDOVER_BYTES: usize = 2 MiB;           // all files together (4 
 pub struct RuleSetFiles;                               // serde: {files:[{name, data: base64}]}; Debug = names + sizes
 impl RuleSetFiles { pub fn read(dir: &Path) -> Option<Self>;   // blocking; every RULE_SETS file, in order, <= cap
                     pub fn digest(&self) -> String; }          // hex SHA-256 over names + contents
-pub async fn accept(files: &RuleSetFiles, engine: &Path, store: &Path, reference: &Path)
-    -> Result<PathBuf, RefreshFault>;
+pub async fn accept(files: &RuleSetFiles, engine: &Path, store: &Path, reference: &Path, owner: &str)
+    -> Result<PathBuf, RefreshFault>;  // speed3 P-1: `owner` = the sender's SID; the note is his alone
     // service side: shape + canaries + content bounds against `reference` (its pinned copies) with ITS
     // sing-box, flushed and renamed to store\gen-<digest16>-c<checks>; a stored folder is reused only
     // while its files hash to the set (psmart-a4) and only by the same checks (fixlists-a7); the
-    // digest is noted in store\accepted. Lab live-9 L9-2: the files are checked side by side (each file's
+    // digest is noted in store\accepted-<hash of owner>. Lab live-9 L9-2: the files are checked side by side (each file's
     // own checks unchanged, the verdict read in file order) and a file's decompile runs beside its
     // reference copy's. Review live2-a4: the blocked lists' kept share counts only unconditioned rules
     // (matcher keys alone: no port, network, invert or logical rule).
-pub async fn recall(store: &Path) -> Option<(String, PathBuf)>;  // the noted set after a restart, while
+pub async fn recall(store: &Path, owner: &str) -> Option<(String, PathBuf)>;  // owner's noted set, while
     // its folder still hashes to it (fixlists-a5)
 pub fn prune_store(store: &Path, keep: &[&Path]);      // blocking; removes the other gen-* folders
 ```

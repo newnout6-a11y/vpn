@@ -66,6 +66,19 @@ fn plan_port(plan: &CapturePlan) -> Option<u16> {
     plan.alias.as_deref().and_then(|a| a.parse().ok())
 }
 
+/// The config inputs of `plan`: the loopback mixed inbound on the plan's port.
+fn proxy_inputs(plan: &CapturePlan, parts: &EngineParts) -> ConfigInputs {
+    // An unparsable identity yields port 0, which the builder refuses (`InvalidListeners`).
+    let port = plan_port(plan).unwrap_or_default();
+    ConfigInputs {
+        upstream: parts.upstream.clone(),
+        capture: singbox_config::Capture::Proxy { port },
+        listeners: parts.listeners.clone(),
+        routing: parts.routing.clone(),
+        phys_dns: parts.phys_dns.clone(),
+    }
+}
+
 #[async_trait]
 impl Capture for ProxyCapture {
     async fn prepare(&self, req: &StartRequest, avoid: &[String]) -> AppResult<CapturePlan> {
@@ -105,19 +118,15 @@ impl Capture for ProxyCapture {
         plan: &CapturePlan,
         parts: &EngineParts,
     ) -> Result<(Value, [u8; 32]), ConfigError> {
-        // An unparsable identity yields port 0, which the builder refuses (`InvalidListeners`).
-        let port = plan_port(plan).unwrap_or_default();
-        let inputs = ConfigInputs {
-            upstream: parts.upstream.clone(),
-            capture: singbox_config::Capture::Proxy { port },
-            listeners: parts.listeners.clone(),
-            routing: parts.routing.clone(),
-            phys_dns: parts.phys_dns.clone(),
-        };
+        let inputs = proxy_inputs(plan, parts);
         Ok((
             singbox_config::build(&inputs)?,
             singbox_config::compat_key(&inputs),
         ))
+    }
+
+    fn compat(&self, plan: &CapturePlan, parts: &EngineParts) -> Result<[u8; 32], ConfigError> {
+        Ok(singbox_config::compat_key(&proxy_inputs(plan, parts)))
     }
 
     async fn begin(&self, _plan: &CapturePlan, _session_programs: &[PathBuf]) -> AppResult<()> {

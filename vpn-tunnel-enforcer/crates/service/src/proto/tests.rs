@@ -15,6 +15,8 @@ fn start() -> TunnelStart {
             profile: profile(),
             device: None,
             engine: EnginePref::Auto,
+            fresh: false,
+            hints: Vec::new(),
         })),
         routing: RoutingInputs {
             smart_ru: true,
@@ -254,4 +256,84 @@ async fn frames_follow_each_other_on_one_stream() {
         frame::read_frame(&mut reader).await,
         Err(FrameError::Closed)
     ));
+}
+
+fn hinted() -> TunnelStart {
+    let mut start = start();
+    if let Upstream::Server(server) = &mut start.upstream {
+        server.fresh = true;
+        server.hints = vec![NameHint {
+            name: "example.com".into(),
+            addrs: vec!["203.0.113.7".parse().expect("ip")],
+        }];
+    }
+    start
+}
+
+fn server_of(request: &Request) -> &ServerUpstream {
+    match request {
+        Request::Start(s) | Request::Restart(s) | Request::Switch(s) => match &s.upstream {
+            Upstream::Server(server) => server,
+            Upstream::LocalProxy { .. } => panic!("a server start"),
+        },
+        other => panic!("not a start: {other:?}"),
+    }
+}
+
+/// speed3 H2: a server's one-request facts ride Start / Restart / Switch from protocol 5 only;
+/// a frame without them (an older app) reads as no facts, and an empty set is never written.
+#[test]
+fn the_server_facts_are_spoken_from_protocol_5_only() {
+    round_trip(Request::Switch(Box::new(hinted())));
+    let bare = serde_json::to_value(start()).expect("json");
+    assert!(bare["upstream"].get("fresh").is_none() && bare["upstream"].get("hints").is_none());
+    let old: TunnelStart = serde_json::from_value(bare).expect("an older app's start");
+    assert_eq!(
+        server_of(&Request::Start(Box::new(old))).facts(),
+        Some(ServerFacts::default())
+    );
+
+    for speak in [HINTS_PROTOCOL - 1, PROTOCOL] {
+        let spoken = Request::Switch(Box::new(hinted())).speak(speak);
+        let server = server_of(&spoken);
+        assert!(
+            !server.fresh && server.hints.is_empty(),
+            "stripped for {speak}"
+        );
+    }
+    let spoken = Request::Switch(Box::new(hinted())).speak(HINTS_PROTOCOL);
+    assert!(server_of(&spoken).fresh, "kept from protocol 5");
+    let Upstream::Server(server) = hinted().upstream else {
+        panic!("a server start");
+    };
+    let adaptive = Request::RestartAdaptive(Box::new(AdaptiveRestart {
+        mode: AdaptiveMode::Baseline,
+        reason: "dpi".into(),
+        server: Some(*server),
+    }))
+    .speak(HINTS_PROTOCOL - 1);
+    let Request::RestartAdaptive(a) = adaptive else {
+        panic!("adaptive");
+    };
+    assert!(a.server.is_some_and(|s| !s.fresh && s.hints.is_empty()));
+}
+
+/// speed3 H2: the facts are bounded like every other input of the untrusted client.
+#[test]
+fn the_server_facts_are_bounded() {
+    let Upstream::Server(mut server) = hinted().upstream else {
+        panic!("a server start");
+    };
+    let facts = server.facts().expect("in bounds");
+    assert!(facts.fresh && facts.hints.len() == 1);
+    server.hints[0].name = "a".repeat(254);
+    assert_eq!(server.facts(), None, "a name longer than DNS allows");
+    server.hints[0].name = "example.com".into();
+    server.hints[0].addrs = vec!["203.0.113.7".parse().expect("ip"); MAX_HINT_ADDRS + 1];
+    assert_eq!(server.facts(), None, "too many addresses");
+    server.hints = vec![server.hints[0].clone(); MAX_HINT_NAMES + 1];
+    server.hints.iter_mut().for_each(|h| h.addrs.truncate(1));
+    assert_eq!(server.facts(), None, "too many names");
+    server.without_facts();
+    assert_eq!(server.facts(), Some(ServerFacts::default()));
 }

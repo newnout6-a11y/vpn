@@ -480,9 +480,21 @@ async fn point_tweaks(ctx: &Ctx, applied: Option<u16>) -> Result<(), Failure> {
 }
 
 /// Applies the tweaks for `addr`; Soft counts as applied only once the system reads back `addr`.
+/// speed3 S3-12: both halves log their time (lab L-7: 34-48 ms warm, 291 ms on the first Proxy
+/// connect after the app started); every opted-in tweak stays before op Success.
 pub(super) async fn apply_and_read_back(deps: &LifecycleDeps, addr: &str) -> Result<(), AppError> {
-    deps.soft.apply(addr, ProxyKind::Http).await?;
-    if deps.soft.is_configured(addr, ProxyKind::Http).await? {
+    let step = std::time::Instant::now();
+    let applied = deps.soft.apply(addr, ProxyKind::Http).await;
+    tracing::info!(
+        ok = applied.is_ok(),
+        ms = step.elapsed().as_millis(),
+        "soft tweaks applied"
+    );
+    applied?;
+    let step = std::time::Instant::now();
+    let configured = deps.soft.is_configured(addr, ProxyKind::Http).await;
+    tracing::info!(ms = step.elapsed().as_millis(), "soft tweaks read back");
+    if configured? {
         Ok(())
     } else {
         tracing::warn!("soft tweaks applied but not read back");
