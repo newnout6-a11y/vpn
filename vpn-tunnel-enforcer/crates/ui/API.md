@@ -218,15 +218,18 @@ pub fn use_script_errors();        // once in the root component: window.onerror
                                    // limits and logs one (the hook's loop; the app tests its line)
 ```
 A script started with the root (dioxus eval channel) sends `{kind, message, source, line, col,
-stack}`; only an `Error`'s message and stack leave the page (any other rejected value, a string
-too: its type name, tailsa-a3), at most 30 a minute; Chromium's "ResizeObserver loop" notice is
-not sent. The app logs at most 5 a minute (`suppressed` = how many it turned away before that
-line) at INFO, so a page error never becomes a Diagnostics problem (tailsa-b2), every field one
-line, cut to at most 300 characters between words (the page cuts the same way: a word the cut
-would split goes whole, so redaction sees a secret whole or not at all, tailsa-a1), the top 6
-stack frames, the page's own origins written short (`page:/…`, `app:/…`: the log redacts URLs,
-line and column with them). The app log's layer redacts every string field (`redact::for_log`;
-the app's `tests/page_script_errors.rs` checks the line). Nothing changes on screen.
+stack}`; only an `Error`'s message and stack leave the page (any other thrown or rejected value, a
+string too: its type name, tailsa-a3 / fixr3-b1; the tests run the script in Node), at most 30 a
+minute; Chromium's "ResizeObserver loop" notice is not sent. The app logs at most 5 a minute
+(`suppressed` = how many it turned away before that line) at INFO, so a page error never becomes a
+Diagnostics problem (tailsa-b2), every field one line, cut to at most 300 characters between words
+(the page cuts the same way: a word the cut would split goes whole, tailsa-a1), and a quoted string
+a line leaves open (`"…`, `'…`, `\"…`, cut by either side or by V8's own echo) goes from its
+opening quote, as the redaction knows a quoted secret by its closing quote (fixr3-a4): it sees a
+secret whole or not at all. The top 6 stack frames, the page's own origins written short
+(`page:/…`, `app:/…`: the log redacts URLs, line and column with them). The app log's layer
+redacts every string field (`redact::for_log`; the app's `tests/page_script_errors.rs` checks the
+line). Nothing changes on screen.
 
 ## Shell: `pages`, `shell`
 

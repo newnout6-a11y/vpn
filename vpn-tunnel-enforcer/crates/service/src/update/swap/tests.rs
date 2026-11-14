@@ -159,16 +159,17 @@ fn every_power_loss_state_leaves_an_exe_that_goes_on() {
 }
 
 /// Only a staged exe that the signed feed next to it lists, above the running version, with the
-/// listed size and hash, and not failed here before, may go in.
+/// listed size and hash, not failed here before (and recorded as probed), may go in.
 #[test]
 fn only_a_verified_newer_exe_is_ready() {
     let (_dir, files) = install("ready");
     let key = TestKey::new();
     let put_feed = |entry_bytes: &[u8], version: Version, key: &TestKey| {
-        let bytes =
-            serde_json::to_vec(&feed(5, Some(service_entry(version, entry_bytes)))).expect("json");
+        let entry = service_entry(version, entry_bytes);
+        let bytes = serde_json::to_vec(&feed(5, Some(entry.clone()))).expect("json");
         std::fs::write(files.staging.join(FEED_FILE), &bytes).expect("feed");
         std::fs::write(files.staging.join(SIG_FILE), key.sign(&bytes)).expect("sig");
+        passed(&files, &entry, staged_with()).expect("probe record");
     };
     put_feed(b"new exe", NEW, &key);
     assert_eq!(
@@ -244,6 +245,9 @@ fn only_what_the_newest_feed_lists_stays_staged() {
         Some((files.staged(NEW), NEW))
     );
     assert!(!other.exists(), "only the listed exe stays");
+    // fixr3-a2: still judged by the engines it was staged with, not by the newer feed's.
+    let staged = ready(&files, key.keys(), OLD, 6).expect("staged");
+    assert_eq!(staged.engines, staged_with());
     let changed = service_entry(NEW, b"rebuilt exe");
     let (bytes, sig) = newer(Some(changed.clone()));
     keep_listed(&files, OLD, Some(&changed), &bytes, &sig);
@@ -257,6 +261,36 @@ fn only_what_the_newest_feed_lists_stays_staged() {
     let (bytes, sig) = newer(Some(listed.clone()));
     keep_listed(&files, NEW, Some(&listed), &bytes, &sig);
     assert!(!files.staged(NEW).exists(), "not above the running one");
+}
+
+/// fixr3-a1: an exe whose start probe never finished (the service stopped, crashed or lost power
+/// first) has no record of it: a newer feed that lists it byte for byte drops it instead of
+/// writing its feed next to it, and with a feed but no record (or one of other bytes) it is
+/// never ready. Recorded, it is ready with the engines it was staged with.
+#[test]
+fn an_exe_whose_probe_never_finished_is_never_taken() {
+    let (_dir, files) = install("unprobed");
+    let key = TestKey::new();
+    let entry = service_entry(NEW, b"new exe");
+    let bytes = serde_json::to_vec(&feed(6, Some(entry.clone()))).expect("json");
+    keep_listed(&files, OLD, Some(&entry), &bytes, &key.sign(&bytes));
+    assert!(!files.staged(NEW).exists(), "dropped");
+    assert!(
+        !files.staging.join(FEED_FILE).exists(),
+        "no feed next to it"
+    );
+    stage_signed(&files, &key, |path, bytes| std::fs::write(path, bytes));
+    std::fs::remove_file(files.probed()).expect("no record");
+    assert_eq!(staged_at(&files, key.keys(), OLD, 0), None);
+    let rebuilt = service_entry(NEW, b"rebuilt exe");
+    passed(&files, &rebuilt, staged_with()).expect("recorded");
+    assert_eq!(staged_at(&files, key.keys(), OLD, 0), None, "other bytes");
+    let engines = BTreeMap::from([("xray".to_owned(), Version(26, 11, 9))]);
+    passed(&files, &entry, engines.clone()).expect("recorded");
+    let staged = ready(&files, key.keys(), OLD, 0).expect("probed");
+    assert_eq!((staged.version, staged.engines), (NEW, engines));
+    drop_staged(&files);
+    assert!(!files.probed().exists(), "the record goes with the exe");
 }
 
 /// svcupd-a7 / a9 / a8: an installer's exe forgets everything the feed staged or swapped; a
@@ -291,19 +325,33 @@ fn installer_refusal_and_give_up_records() {
     assert!(failed_before(&files, NEW), "the record stays");
 }
 
+/// The engines [`stage_signed`] records the release with.
+fn staged_with() -> BTreeMap<String, Version> {
+    BTreeMap::from([("sing-box".to_owned(), Version(1, 14, 4))])
+}
+
 /// A signed feed and the listed exe staged in `files.staging` with `write` (a plain write, or
-/// one born owned by Administrators as the service's own files are).
+/// one born owned by Administrators as the service's own files are), with the record of its
+/// start probe ([`staged_with`]).
 fn stage_signed(
     files: &SwapFiles,
     key: &TestKey,
     write: impl Fn(&Path, &[u8]) -> std::io::Result<()>,
 ) {
-    let bytes = serde_json::to_vec(&feed(5, Some(service_entry(NEW, b"new exe")))).expect("json");
+    let entry = service_entry(NEW, b"new exe");
+    let bytes = serde_json::to_vec(&feed(5, Some(entry.clone()))).expect("json");
     write(&files.staging.join(FEED_FILE), &bytes).expect("feed");
     write(&files.staging.join(SIG_FILE), key.sign(&bytes).as_bytes()).expect("sig");
     let staged = files.staged(NEW);
     let _ = std::fs::remove_file(&staged);
     write(&staged, b"new exe").expect("staged exe");
+    let probed = Probed {
+        version: NEW,
+        sha256: entry.sha256,
+        engines: staged_with(),
+    };
+    let record = serde_json::to_vec(&probed).expect("record");
+    write(&files.probed(), &record).expect("probe record");
 }
 
 /// The staged exe runs as SYSTEM later: in a folder users can write (any temp folder) it is

@@ -100,3 +100,24 @@ fn an_error_loop_costs_five_lines_a_minute() {
     assert!(suppressed[..PER_MINUTE].iter().all(|n| **n == json!(0)));
     assert_eq!(suppressed[PER_MINUTE], &json!(20 - PER_MINUTE));
 }
+
+/// fixr3-a4: a quoted secret that the 300-character cut would split between its words (V8's
+/// JSON.parse echoes its input) never reaches app.log in part: the line drops the string it
+/// leaves open, and the log redacts the key's empty place.
+#[test]
+fn a_quoted_secret_the_cut_would_split_never_reaches_the_log() {
+    // "battery" straddles the 300th character: a cut between words keeps "correct horse".
+    let message = format!(
+        "SyntaxError: {}\"password\":\"correct horse battery staple\" tail",
+        "x ".repeat(130)
+    );
+    let lines = logged(&[(0, json!({"kind": "error", "message": message}))]);
+    let [line] = lines.as_slice() else {
+        panic!("one line expected: {lines:?}")
+    };
+    let error = line.fields["error"].as_str().unwrap_or_default();
+    assert!(error.contains("password"), "{error}");
+    for word in ["correct", "horse", "battery", "staple"] {
+        assert!(!error.contains(word), "{word} in {error}");
+    }
+}

@@ -69,20 +69,107 @@ fn a_report_is_cleaned_to_bounded_lines() {
     assert!(serde_json::from_value::<Report>(serde_json::json!("text")).is_err());
 }
 
-/// p-tails-a, tailsa-a3: the page script reports only an `Error`'s message and stack, or a
-/// rejected value's type name, a string included: page data (a server, a typed link, a host
-/// name) never leaves the page, as JSON or as the string itself. Its own cut drops the word it
-/// would split (tailsa-a1), and Chromium's "ResizeObserver loop" notice stays out (tailsa-b2).
+/// p-tails-a, tailsa-a3, fixr3-b1: the page script's text, for where Node is missing (the next
+/// test runs it): only an `Error`'s message and stack, or the type name of any other thrown or
+/// rejected value, a string included; never JSON of a value.
 #[test]
-fn the_page_script_never_serialises_a_rejected_value() {
+fn the_page_script_never_serialises_a_value() {
     assert!(!SCRIPT.contains("JSON.stringify"));
-    assert!(!SCRIPT.contains("typeof r"), "a string reason is page data");
-    let message = "const message = error ? r.message : Object.prototype.toString.call(r);";
-    assert!(SCRIPT.contains(message));
-    assert!(SCRIPT.contains(r"s.slice(0, n).replace(/\S*$/, '')"));
-    assert!(SCRIPT.contains("if (/^ResizeObserver loop/.test(String(e.message))) return;"));
-    assert!(SCRIPT.contains("'unhandledrejection'"));
-    assert!(SCRIPT.contains("addEventListener('error'"));
+    assert!(!SCRIPT.contains("typeof"), "a string is page data");
+    for sent in [
+        "message: error ? cut(e.message, 1000) : typeName(e.error),",
+        "stack: cut(error ? e.error.stack : '', 4000)",
+        "message: error ? cut(r.message, 1000) : typeName(r),",
+        "stack: cut(error ? r.stack : '', 4000)",
+    ] {
+        assert!(SCRIPT.contains(sent), "{sent}");
+    }
+}
+
+/// The page script with a stand-in window and dioxus channel: listeners kept by event type,
+/// reports collected.
+const PRELUDE: &str = r#"
+const sent = [], on = {};
+globalThis.window = { addEventListener: (type, f) => { on[type] = f; } };
+globalThis.dioxus = { send: r => sent.push(r) };
+(async () => {
+"#;
+
+/// What a page may throw or reject, as Chromium hands it to the listeners.
+const EVENTS: &str = r#"
+})();
+const page = 'bad host nl.example.com';
+on.error({ message: 'Uncaught ' + page, error: page, filename: 'http://dioxus.index.html/a.js', lineno: 3, colno: 4 });
+on.error({ message: 'Uncaught [object Object]', error: { host: page } });
+const thrown = new TypeError('x is not a function');
+on.error({ message: 'Uncaught TypeError: x is not a function', error: thrown });
+on.error({ message: 'ResizeObserver loop completed with undelivered notifications.', error: null });
+on.unhandledrejection({ reason: page });
+on.unhandledrejection({ reason: new Error('w'.repeat(995) + ' split' + 'y'.repeat(10)) });
+process.stdout.write(JSON.stringify({ sent, stack: thrown.stack }));
+"#;
+
+/// Runs `script` in Node and returns what it wrote; `None` (said on stderr) where Node is not
+/// installed.
+fn node(script: &str) -> Option<String> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let child = Command::new("node")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("node not found: the page script's run is skipped");
+            return None;
+        }
+        started => started.expect("node started"),
+    };
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin.write_all(script.as_bytes()).expect("script");
+    drop(stdin);
+    let out = child.wait_with_output().expect("node ran");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Some(String::from_utf8(out.stdout).expect("utf-8"))
+}
+
+/// fixr3-b1, tailsa-a3, tailsa-a1, tailsa-b2: what the page script actually sends. A thrown or
+/// rejected value that is not an `Error` (V8 writes a thrown string into the event's message)
+/// leaves the page as its type name only, without a stack; an `Error` with its message and
+/// stack, cut between words; Chromium's "ResizeObserver loop" notice is not sent.
+#[test]
+fn the_page_script_sends_no_page_data() {
+    let Some(out) = node(&[PRELUDE, SCRIPT, EVENTS].concat()) else {
+        return;
+    };
+    let out: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let sent = out["sent"].as_array().expect("reports");
+    let all = serde_json::to_string(sent).expect("text");
+    assert!(!all.contains("example.com"), "{all}");
+    let fields = |n: usize| (sent[n]["kind"].clone(), sent[n]["message"].clone());
+    let string = serde_json::json!("[object String]");
+    assert_eq!(fields(0), ("error".into(), string.clone()));
+    assert_eq!(
+        (&sent[0]["stack"], &sent[0]["line"]),
+        (&"".into(), &3.into())
+    );
+    assert_eq!(fields(1).1, "[object Object]");
+    let error = "Uncaught TypeError: x is not a function";
+    assert_eq!(fields(2).1, error);
+    assert_eq!(sent[2]["stack"], out["stack"]);
+    assert_eq!(fields(3), ("rejection".into(), string));
+    assert_eq!(
+        fields(4).1,
+        format!("{} ", "w".repeat(995)),
+        "the split word dropped"
+    );
+    assert_eq!(sent.len(), 5, "no ResizeObserver notice: {all}");
 }
 
 /// tailsa-a1: a secret that the cut would split is never half logged: the word it falls in goes
@@ -112,4 +199,37 @@ fn a_word_the_cut_would_split_goes_whole() {
     assert!(line.ends_with("word…"));
     let one_word = "y".repeat(400);
     assert_eq!(one_line(&one_word), "…");
+}
+
+/// fixr3-a4: the log's redaction knows a quoted secret by its closing quote, so a quoted string
+/// the line leaves open (our cut between its words, or the page's or V8's cut before) goes from
+/// its opening quote: wherever the cut falls, a word of the value is logged only inside the
+/// whole, closed value. Closed strings and an apostrophe inside a word stay.
+#[test]
+fn a_quoted_string_left_open_goes_whole() {
+    let words = ["correct", "horse", "battery", "staple"];
+    let value = words.join(" ");
+    let mut opened = 0;
+    for (open, close) in [("\"", "\""), ("'", "'"), ("\\\"", "\\\"")] {
+        let whole = format!("{open}{value}{close}");
+        for filler in 230..300 {
+            let x = "x".repeat(filler);
+            let text = format!("SyntaxError: {x} {open}password{close}:{whole} tail");
+            let line = one_line(&text);
+            assert!(line.chars().count() <= TEXT_MAX + 1, "{line}");
+            let kept = words.iter().any(|w| line.contains(w));
+            assert!(!kept || line.contains(&whole), "{line}");
+            opened += usize::from(line.contains("password") && line.ends_with(":…"));
+        }
+    }
+    assert!(opened > 0, "some cut fell inside the value");
+    let left_open = "TypeError: \"password\":\"correct horse";
+    assert_eq!(one_line(left_open), "TypeError: \"password\":…");
+    assert_eq!(one_line("bad password='correct horse"), "bad password=…");
+    for kept in [
+        "TypeError: \"password\":\"correct horse\" at x",
+        "TypeError: can't read 'x' of {\\\"a\\\":\\\"b c\\\"}",
+    ] {
+        assert_eq!(one_line(kept), kept);
+    }
 }

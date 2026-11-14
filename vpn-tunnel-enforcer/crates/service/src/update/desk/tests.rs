@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use sha2::{Digest, Sha256};
@@ -601,8 +601,9 @@ async fn a_release_that_does_not_start_here_is_never_taken() {
 }
 
 /// svcfix-a1: the staged release's engines are judged again right before the swap. Once Tunnel
-/// mode no longer runs the engines the release was staged for (here: the staged feed now lists
-/// other versions, as after the engine trial went back), the release is dropped, not swapped in.
+/// mode no longer runs the engines the release was staged with (here: its record names other
+/// versions, as after the engine trial went back from them), the release is dropped, not
+/// swapped in.
 #[tokio::test]
 async fn a_release_whose_engines_went_back_is_never_swapped_in() {
     let s = setup(true);
@@ -611,14 +612,12 @@ async fn a_release_whose_engines_went_back_is_never_swapped_in() {
     let watcher = tokio::spawn(s.updates.clone().run());
     s.ask(take(NEXT), false).await;
     assert_eq!(phase(&s.settled().await).0, UpdatePhase::Waiting);
-    let mut moved = s.release(9, Some((NEXT, b"next exe")), SERIES);
-    for e in &mut moved.engines {
-        let v = e.version;
-        e.version = Version(v.0, v.1, v.2 + 1);
-    }
-    let bytes = serde_json::to_vec(&moved).expect("json");
-    std::fs::write(s.files.staging.join(FEED_FILE), &bytes).expect("feed");
-    std::fs::write(s.files.staging.join(SIG_FILE), s.key.sign(&bytes)).expect("sig");
+    let staged_with = [SINGBOX, XRAY].map(|id| {
+        let v = bundled_version(id).expect("bundled");
+        (id.to_owned(), Version(v.0, v.1, v.2 + 1))
+    });
+    let entry = service_entry(NEXT, b"next exe");
+    swap::passed(&s.files, &entry, BTreeMap::from(staged_with)).expect("record");
     s.tunnel(false);
     assert!(s.until(|s| !s.files.staged(NEXT).exists()).await, "dropped");
     assert_eq!(
@@ -630,8 +629,8 @@ async fn a_release_whose_engines_went_back_is_never_swapped_in() {
     watcher.abort();
 }
 
-/// svcfix-a2: a rollback's ask (the running version or older) drops a release staged earlier,
-/// so it never goes in by itself once the other session ended.
+/// svcfix-a2: a rollback's ask (the running version or older) of the user who asked for the
+/// release drops it, so it never goes in by itself once the other session ended.
 #[tokio::test]
 async fn a_rollback_drops_the_staged_release() {
     let s = setup(true);
@@ -640,7 +639,7 @@ async fn a_rollback_drops_the_staged_release() {
     let _runs = tokio::spawn(s.updates.clone().run());
     s.ask(take(NEXT), false).await;
     assert_eq!(phase(&s.settled().await).0, UpdatePhase::Waiting);
-    assert_eq!(s.ask(take(OWN), true).await.phase, UpdatePhase::Idle);
+    assert_eq!(s.ask(take(OWN), false).await.phase, UpdatePhase::Idle);
     assert!(!s.files.staged(NEXT).exists());
     s.tunnel(false);
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -652,7 +651,7 @@ async fn a_rollback_drops_the_staged_release() {
     tokio::time::timeout(Duration::from_secs(5), s.memory.reached.notified())
         .await
         .expect("downloading");
-    s.ask(take(OWN), true).await;
+    s.ask(take(OWN), false).await;
     s.memory.release.notify_one();
     assert_eq!(s.settled().await.phase, UpdatePhase::Idle);
     assert!(!s.files.staged(NEXT).exists());
@@ -759,4 +758,111 @@ async fn a_stale_ask_keeps_the_staged_release() {
         .expect("swapped")
         .expect("task");
     assert_eq!(s.exe(), b"later exe");
+}
+
+/// fixr3-a1: the stop came while a staged exe was being probed: the exe arrived, its feed and
+/// the record of its probe did not. A check for another release drops it instead of writing the
+/// newest feed next to it, and the next check of its release downloads and probes it again.
+#[tokio::test]
+async fn an_exe_whose_probe_never_finished_is_probed_again() {
+    static PROBES: AtomicUsize = AtomicUsize::new(0);
+    fn counted(_: &Path) -> std::io::Result<()> {
+        PROBES.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    let s = setup_probing(true, counted);
+    s.publish_next(9, b"next exe");
+    s.tunnel(true);
+    s.ask(take(NEXT), false).await;
+    assert_eq!(phase(&s.settled().await).0, UpdatePhase::Waiting);
+    swap::drop_staged(&s.files);
+    std::fs::write(s.files.staged(NEXT), b"next exe").expect("left by the stop");
+    *s.updates.checked.lock() = None;
+    s.ask(take(Version(2, 0, 5)), false).await;
+    assert_eq!(phase(&s.settled().await), (UpdatePhase::Idle, None));
+    assert!(!s.files.staged(NEXT).exists(), "dropped, never re-keyed");
+    assert!(!s.files.staging.join(FEED_FILE).exists());
+    s.ask(take(NEXT), false).await;
+    assert_eq!(
+        phase(&s.settled().await),
+        (UpdatePhase::Waiting, Some("2.0.1"))
+    );
+    assert_eq!(PROBES.load(Ordering::SeqCst), 2, "probed again first");
+}
+
+/// fixr3-a2: an engine-only feed (`xtask feed --base`: the same service, a newer sing-box) keeps
+/// the staged release, judged by the engines it was staged with: a check for another release
+/// and its own re-check whose new engine does not arrive leave it waiting; once the engine
+/// arrives the release is judged with it, not downloaded again; it goes in once idle.
+#[tokio::test]
+async fn an_engine_only_feed_keeps_the_staged_release() {
+    let s = setup(true);
+    s.publish_next(9, b"next exe");
+    s.tunnel(true);
+    let watcher = tokio::spawn(s.updates.clone().run());
+    s.ask(take(NEXT), false).await;
+    let waiting = (UpdatePhase::Waiting, Some("2.0.1"));
+    assert_eq!(phase(&s.settled().await), waiting);
+    let mut bumped = s.release(10, Some((NEXT, b"next exe")), SERIES);
+    let v = bundled_version(SINGBOX).expect("bundled");
+    let newer = Version(v.0, v.1, v.2 + 1);
+    bumped.engines[0] = engine(SINGBOX, newer, SERIES).0;
+    s.publish(&bumped, b"next exe");
+    let archive = bumped.engines[0].archive.url.clone();
+    let zipped = s.memory.files.lock().remove(&archive).expect("archive");
+    for asked in [Version(2, 0, 5), NEXT] {
+        *s.updates.checked.lock() = None;
+        s.ask(take(asked), false).await;
+        assert_eq!(phase(&s.settled().await), waiting, "asked {asked}");
+    }
+    s.memory.files.lock().insert(archive, zipped);
+    let downloads = s.memory.downloads.load(Ordering::SeqCst);
+    *s.updates.checked.lock() = None;
+    s.ask(take(NEXT), false).await;
+    assert_eq!(phase(&s.settled().await), waiting);
+    assert_eq!(s.engines.current(SINGBOX), Some(newer));
+    let fetched = s.memory.downloads.load(Ordering::SeqCst) - downloads;
+    assert_eq!(fetched, 1, "the engine only");
+    s.tunnel(false);
+    tokio::time::timeout(Duration::from_secs(2), watcher)
+        .await
+        .expect("swapped")
+        .expect("task");
+    assert_eq!(s.exe(), b"next exe");
+}
+
+/// fixr3-a3: a rollback ask told apart from the user who asked for the staged release (here the
+/// user of the session it waits for asks for the running version or older: a stale app, or a
+/// forged ask) drops nothing; the asker's own rollback still does (svcfix-a2).
+#[tokio::test]
+async fn another_users_rollback_keeps_the_staged_release() {
+    let s = setup(true);
+    s.publish_next(9, b"next exe");
+    s.tunnel(true);
+    s.ask(take(NEXT), false).await;
+    let waiting = (UpdatePhase::Waiting, Some("2.0.1"));
+    assert_eq!(phase(&s.settled().await), waiting);
+    for stale in [OWN, Version(0, 0, 1)] {
+        assert_eq!(phase(&s.ask(take(stale), true).await), waiting);
+    }
+    assert!(s.files.staged(NEXT).exists());
+    assert_eq!(s.ask(take(OWN), false).await.phase, UpdatePhase::Idle);
+    assert!(!s.files.staged(NEXT).exists(), "the asker's own rollback");
+}
+
+/// fixr3-b2: while the feed cannot be read, a flood of asks for ever other releases (each one
+/// checked on its own worker turn) reads it once: the failed read stands in for every other
+/// release within a minute.
+#[tokio::test]
+async fn a_flood_of_asks_while_the_feed_cannot_be_read_reads_it_once() {
+    let s = setup(true);
+    for patch in 5..100 {
+        for version in [Version(3, 0, patch), Version(3, 0, 4)] {
+            s.ask(take(version), false).await;
+            tokio::task::yield_now().await;
+        }
+    }
+    assert_eq!(s.settled().await.phase, UpdatePhase::Failed);
+    assert!(!s.updates.queue.lock().running, "no check left behind");
+    assert_eq!(s.memory.reads.load(Ordering::SeqCst), 1);
 }

@@ -359,44 +359,48 @@ while a check runs), and the check reports `Failed` (svcfix-a3 / b1).
   no switch back to files this build refuses (bundled files after an exe swap, svcupd-b6); a
   version that failed its trial is never wanted again (`EngineState::failed`, svcupd-a4). A version
   folder that users could change is not run (bundled instead, logged).
-- Its own exe (`swap`): `feed.service` when it is exactly the asked release, above its own
-  version and never one that failed here, is downloaded into `<install>\update\`
-  (`paths::secure_dir` before every download: ADMIN_ONLY_DIR_SDDL, re-created when users could
-  change it) with the signed feed kept next to it, and run once with a bad argument: only an exe
-  that starts on this Windows and exits with its usage code 2 is staged (`swap::probe`, svcupd-a9;
-  one that does not is recorded as failed). `swap::ready` re-verifies feed (not older than the
-  accepted `seq`: a withdrawn release stays out, svcupd-a3), size and SHA-256 right before any
-  swap; a staged release stays only while the newest accepted feed lists it byte for byte
-  (`swap::keep_listed`, kept with that feed; another user's stale ask no longer drops it,
+- Its own exe (`swap`): `feed.service` when it is exactly the asked release, above its own version
+  and never one that failed here, is downloaded into `<install>\update\` (`paths::secure_dir` before
+  every download: ADMIN_ONLY_DIR_SDDL, re-created when users could change it) with the signed feed
+  kept next to it, and run once with a bad argument: only an exe that starts on this Windows and
+  exits with its usage code 2 is staged (`swap::probe`, svcupd-a9; one that does not is recorded as
+  failed). The record of a passed probe (`update\probed.json`, `swap::Probed`: release, SHA-256, the
+  engine versions it was judged with) is written last; an exe without it (a stop or a crash
+  mid-probe) is never ready and goes with the next check (fixr3-a1). `swap::ready` re-verifies feed
+  (not older than the accepted `seq`: a withdrawn release stays out, svcupd-a3), size, SHA-256 and
+  the probe record right before any swap; a staged release stays only while the newest accepted feed
+  lists it byte for byte and its probe record names it (`swap::keep_listed`, re-keyed with that
+  feed, the record as it was; another user's stale ask for another release no longer drops it,
   svcfix-b3). Right before every swap (idle, `Take`, the next start) the staged release's engines
-  are judged again (`update::staged_release`: Tunnel mode must run exactly the versions its feed
-  lists; after the engine trial went back the release is dropped, svcfix-a1). Engines go first and
-  are judged by the build that runs them (svcupd-a6): the release is staged only when the feed's
-  entry of every engine is meant for that release and this build alike (one minor series, inside
-  this build's ranges) and Tunnel mode runs exactly those versions after the engines step; else
-  its installer brings it. It goes in when no session runs or starts (the runtime's
-  `StartBegan` / `StartFinished`) and no session's filters are held, at the service's next start
-  (before anything runs), or at once on a `Take` whose caller owns the session or finds none.
+  are judged again (`update::staged_release`: Tunnel mode must run exactly the versions it was
+  staged with, from its record, never a newer feed's: an engine-only feed bump keeps it, fixr3-a2;
+  after the engine trial went back from them the release is dropped, svcfix-a1). A re-check of the
+  staged release judges it with the engines that check put in place, without a second download.
+  Engines go first and are judged by the build that runs them (svcupd-a6): the release is staged
+  only when the feed's entry of every engine is meant for that release and this build alike (one
+  minor series, inside this build's ranges) and Tunnel mode runs exactly those versions after the
+  engines step; else its installer brings it. It goes in when no session runs or starts (the
+  runtime's `StartBegan` / `StartFinished`) and no session's filters are held, at the service's next
+  start (before anything runs), or at once on a `Take` whose caller owns the session or finds none.
   Whose session it is (`OwnSession`, the host's current session user) and idle are judged when the
-  ask arrives, again right before the swap and again right before the restart, which waits while
-  it would end someone else's session (svcupd-a1 / a2 / a11) or cut a host call: the host's kill
-  switch (`in_flight::Counted`) and runtime (`trial::Judged`) count every start and filter change
-  from its first step (`in_flight::InFlight`), and the restart waits for none in flight and none
-  ended within 1 s (svcfix-a4). The swap: the staged file is flushed, `swap.json` written
-  (synced), the running image gets a second name (`update\vpnte-service.prev.exe`, hard link:
-  Windows refuses to replace the entry of a running exe with one name, checked by
+  ask arrives, again right before the swap and again right before the restart, which waits while it
+  would end someone else's session (svcupd-a1 / a2 / a11) or cut a host call: the host's kill switch
+  (`in_flight::Counted`) and runtime (`trial::Judged`) count every start and filter change from its
+  first step (`in_flight::InFlight`), and the restart waits for none in flight and none ended within
+  1 s (svcfix-a4). The swap: the staged file is flushed, `swap.json` written (synced), the running
+  image gets a second name (`update\vpnte-service.prev.exe`, hard link: Windows refuses to replace
+  the entry of a running exe with one name, checked by
   `swap::tests::a_running_exe_is_replaced_through_its_second_name`), the entry is replaced
-  (`MoveFileExW` replace + write-through), the service stops with `RESTART_EXIT` (10) and the
-  SCM's recovery starts the new file. Trial: every start of the new version counts first
-  (`swap::at_start` in `service::run`, before the runtime is built); a start that runs 30 s ends
-  it; the start after three that did not puts the previous exe back the same way and exits for
-  the SCM again; that version is skipped from then on (the spent marker stays as the record; the
-  first start after the rollback logs it once, `AtStart::After`; a release the probe refused leaves
-  the same record and never that line, svcfix-b4). A
-  fresh exe whose install folder holds a wintun.dll its pins refuse (a release that changed
-  Wintun, which the feed never brings) gives its trial up at its first start (`swap::give_up`,
-  svcupd-a8): its installer brings both. The install verb drops whatever the feed staged or
-  swapped (`swap::forget`): an installer's exe is never on trial.
+  (`MoveFileExW` replace + write-through), the service stops with `RESTART_EXIT` (10) and the SCM's
+  recovery starts the new file. Trial: every start of the new version counts first (`swap::at_start`
+  in `service::run`, before the runtime is built); a start that runs 30 s ends it; the start after
+  three that did not puts the previous exe back the same way and exits for the SCM again; that
+  version is skipped from then on (the spent marker stays as the record; the first start after the
+  rollback logs it once, `AtStart::After`; a release the probe refused leaves the same record and
+  never that line, svcfix-b4). A fresh exe whose install folder holds a wintun.dll its pins refuse
+  (a release that changed Wintun, which the feed never brings) gives its trial up at its first start
+  (`swap::give_up`, svcupd-a8): its installer brings both. The install verb drops whatever the feed
+  staged or swapped (`swap::forget`): an installer's exe is never on trial.
 - Power loss (`swap` docs, tested state by state): before the marker, the old exe and the staged
   file (the next start swaps it in); marker / link written, entry not replaced: the old exe (its
   start drops both, swaps again); entry replaced: the new exe on trial; during a rollback: the new
@@ -405,16 +409,21 @@ while a check runs), and the check reports `Failed` (svcfix-a3 / b1).
 - `Update(State | Take { version })`: answered as the first frame of a connection for any user,
   without `Hello` or the controller slot (like `ForgetMe`), and after `Hello` alike; an older
   service answers `badRequest`. Every answer is immediate (no connection waits on a download).
-  `Take` = the app runs the installer of `version` next: the service answers `Working` and checks
-  on the one check task (asks wait as the latest version, so a burst leaves one check behind;
-  within 60 s of a check its result stands in for the same release and the feed it read for any
-  other: many asks never mean many feed reads, svcfix-b2); when the feed's service is exactly `version` and the
-  restart ends no one else's session (the ask stands 3 min), it swaps and reports `Restarting`.
-  A `version` that does not parse is dropped before anything logs it (svcupd-b3); one at or below
-  the running service (a rollback) reads nothing and drops a staged release, also one a check
-  running then stages: nothing newer goes in by itself (svcfix-a2). The app follows `State` until the
-  service answers as `version`, so the installer's `request-install` finds it current
-  (`per_user::is_current`: the same bytes) and asks nothing.
+  `Take` = the app runs the installer of `version` next: the service answers `Working` and checks on
+  the one check task (asks wait as the latest version, so a burst leaves one check behind; within 60
+  s of a check its result stands in for the same release, and the feed it read or its failed read
+  for any other: many asks never mean many feed reads, svcfix-b2 / fixr3-b2); when the feed's
+  service is exactly `version` and the restart ends no one else's session (the ask stands 3 min), it
+  swaps and reports `Restarting`. A `version` that does not parse is dropped before anything logs it
+  (svcupd-b3); one at or below the running service (a rollback) reads nothing and drops a staged
+  release, also one a check running then stages: nothing newer goes in by itself (svcfix-a2); unless
+  it comes from another user than the latest ask above the running service. The desk learns no user
+  (the host passes `OwnSession` only), but two asks whose users differ on owning the session that
+  runs are two users (fixr3-a3). Residual: a rollback that cannot be told apart that way (a third
+  user's stale app or forged ask, no session of theirs) still drops a pending release; the host
+  passing the asker's user would close it. The app follows `State` until the service answers as
+  `version`, so the installer's `request-install` finds it current (`per_user::is_current`: the same
+  bytes) and asks nothing.
 
 ## Idle footprint (measured 12.11.2026, `examples/idle.rs`, this machine)
 Current-thread runtime; the listener waits in an overlapped `ConnectNamedPipe`, the runtime actor

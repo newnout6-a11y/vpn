@@ -7,6 +7,7 @@
 //! [`super::trial`]). A version that failed its trial is never wanted again (svcupd-a4).
 //!
 //! [`exes`]: ServiceEngines::exes
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -172,11 +173,17 @@ impl ServiceEngines {
 
     /// [`ServiceEngines::meant_for`], and Tunnel mode runs exactly those versions now.
     pub(crate) fn ready_for(&self, feed: &Feed, target: Version) -> bool {
-        let runs = |id| {
-            feed.engine(id)
-                .is_some_and(|e| self.current(id) == Some(e.version))
-        };
-        self.meant_for(feed, target) && IDS.iter().all(|&id| runs(id))
+        self.meant_for(feed, target) && versions(feed).is_some_and(|v| self.runs(&v))
+    }
+
+    /// Tunnel mode runs exactly `versions` now, each engine (the ones a staged release was
+    /// staged with: svcfix-a1, fixr3-a2).
+    pub(crate) fn runs(&self, versions: &BTreeMap<String, Version>) -> bool {
+        IDS.iter().all(|&id| {
+            versions
+                .get(id)
+                .is_some_and(|&v| self.current(id) == Some(v))
+        })
     }
 
     /// Installs `entry` from the verified `archive` (`feed` / `sig`: the signed feed listing
@@ -243,6 +250,13 @@ impl ServiceEngines {
             Origin::Bundled => self.bundled_pinned(id),
         }
     }
+}
+
+/// The version `feed` lists for each engine of Tunnel mode (none when it lacks one).
+pub(crate) fn versions(feed: &Feed) -> Option<BTreeMap<String, Version>> {
+    IDS.iter()
+        .map(|&id| Some((id.to_owned(), feed.engine(id)?.version)))
+        .collect()
 }
 
 #[cfg(test)]

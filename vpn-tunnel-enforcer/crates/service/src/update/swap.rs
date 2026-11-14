@@ -12,6 +12,7 @@
 //! drops both and swaps the staged file in again); entry replaced, the new exe (its start counts
 //! the trial); during a rollback before the entry went back, the new exe (it rolls back again);
 //! rollback done, the old exe (the kept marker skips the failed version from then on).
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,7 +20,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use vpnte_update::download::{open_held, parse_sha, sha256_of};
-use vpnte_update::feed::{FEED_FILE, Feed, PublicKey, SIG_FILE, ServiceEntry, verify};
+use vpnte_update::feed::{FEED_FILE, PublicKey, SIG_FILE, ServiceEntry, verify};
 use vpnte_update::version::Version;
 use windows::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -34,13 +35,16 @@ pub use probe::probe;
 pub const TRIAL_STARTS: u32 = 3;
 /// A start that runs this long ends the trial.
 pub const TRIAL_RUN: Duration = Duration::from_secs(30);
+/// The record of a staged exe that passed its start probe ([`Probed`]).
+const PROBED_FILE: &str = "probed.json";
 
 /// The files of a swap, all inside the install folder (one volume: every move is a rename).
 #[derive(Debug, Clone)]
 pub struct SwapFiles {
     /// `vpnte-service.exe`, what the SCM starts.
     pub exe: PathBuf,
-    /// `update\`, admin-only: the staged exe with the signed feed it came from, the marker.
+    /// `update\`, admin-only: the staged exe with the signed feed it came from and the record
+    /// of its start probe, the marker.
     pub staging: PathBuf,
     /// Why a staged file may not run (`crate::sddl::untrusted_reason`; tests: temp folders).
     pub vet: fn(&Path) -> Option<String>,
@@ -76,6 +80,10 @@ impl SwapFiles {
 
     fn failed(&self) -> PathBuf {
         self.staging.join("vpnte-service.failed.exe")
+    }
+
+    fn probed(&self) -> PathBuf {
+        self.staging.join(PROBED_FILE)
     }
 
     /// Where the exe of `version` is staged.
@@ -165,8 +173,8 @@ pub fn settled(files: &SwapFiles) {
     remove(&files.prev());
 }
 
-/// Removes the staged exes and the feed kept with them (a release the newest feed no longer
-/// offers, or one the app did not ask for: svcupd-a3).
+/// Removes the staged exes, the feed kept with them and the probe's record (a release the
+/// newest feed no longer offers, or one the app did not ask for: svcupd-a3).
 pub fn drop_staged(files: &SwapFiles) {
     let Ok(entries) = std::fs::read_dir(&files.staging) else {
         return;
@@ -174,7 +182,7 @@ pub fn drop_staged(files: &SwapFiles) {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let staged = name.starts_with("vpnte-service-") && name.ends_with(".exe");
-        if staged || name == FEED_FILE || name == SIG_FILE {
+        if staged || [FEED_FILE, SIG_FILE, PROBED_FILE].contains(&name.as_str()) {
             remove(&entry.path());
         }
     }
@@ -266,20 +274,59 @@ fn remove(path: &Path) {
     }
 }
 
-/// A verified release staged for the swap: its exe, its version and the signed feed it came
-/// from (the swap judges that release's engines by it: svcfix-a1).
+/// A verified release staged for the swap: its exe, its version and the engine versions it was
+/// staged with (the swap judges the release's engines by them: svcfix-a1, fixr3-a2).
 #[derive(Debug, Clone)]
 pub struct Staged {
     pub exe: PathBuf,
     pub version: Version,
-    pub feed: Feed,
+    pub engines: BTreeMap<String, Version>,
+}
+
+/// The record the check writes next to a staged exe once its start probe passed, last of all
+/// its files: the release and bytes that passed, and the engine versions Tunnel mode had to run
+/// for it (engine id -> version). Only this record says that the probe passed: an exe left by a
+/// probe that never finished (a stop, a crash, a power loss) is never ready (fixr3-a1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Probed {
+    pub version: Version,
+    pub sha256: String,
+    pub engines: BTreeMap<String, Version>,
+}
+
+impl Probed {
+    /// The record is of `entry`'s exe: the same release and the same bytes.
+    fn names(&self, entry: &ServiceEntry) -> bool {
+        let sha = parse_sha(&self.sha256);
+        self.version == entry.version && sha.is_some() && sha == parse_sha(&entry.sha256)
+    }
+}
+
+/// Records that the staged exe of `entry` passed its start probe here, staged with the engine
+/// versions `engines` (written again when a later check judged the same exe with other ones).
+pub fn passed(
+    files: &SwapFiles,
+    entry: &ServiceEntry,
+    engines: BTreeMap<String, Version>,
+) -> io::Result<()> {
+    let probed = Probed {
+        version: entry.version,
+        sha256: entry.sha256.clone(),
+        engines,
+    };
+    crate::paths::write_synced(&files.probed(), &serde_json::to_vec(&probed)?)
+}
+
+fn probed(files: &SwapFiles) -> Option<Probed> {
+    serde_json::from_slice(&std::fs::read(files.probed()).ok()?).ok()
 }
 
 /// The staged exe that may go in for the service `own`: the signed feed kept next to it
 /// verifies with `keys`, is not older than the newest one accepted (`max_seq`: a release the
 /// owner withdrew stays out, svcupd-a3) and lists a service above `own` that did not fail its
-/// trial here, the file has that entry's size and SHA-256, and neither it nor the folder admits
-/// writes by users (it will run as SYSTEM).
+/// trial here, the file has that entry's size and SHA-256 and passed its start probe here
+/// ([`Probed`]), and neither it nor the folder admits writes by users (it will run as SYSTEM).
 pub fn ready(files: &SwapFiles, keys: &[PublicKey], own: Version, max_seq: u64) -> Option<Staged> {
     let bytes = std::fs::read(files.staging.join(FEED_FILE)).ok()?;
     let sig = std::fs::read_to_string(files.staging.join(SIG_FILE)).ok()?;
@@ -296,11 +343,11 @@ pub fn ready(files: &SwapFiles, keys: &[PublicKey], own: Version, max_seq: u64) 
         tracing::error!(%reason, "staged service update not used");
         return None;
     }
-    let version = entry.version;
+    let probed = probed(files).filter(|p| p.names(entry))?;
     holds(&path, entry).then_some(Staged {
         exe: path,
-        version,
-        feed,
+        version: entry.version,
+        engines: probed.engines,
     })
 }
 
@@ -315,10 +362,13 @@ fn holds(path: &Path, entry: &ServiceEntry) -> bool {
 }
 
 /// What is staged after the feed `bytes` / `sig` (verified, the newest accepted) was read: the
-/// staged exe of `entry` (the feed's service above `own`, not failed here) stays, byte for byte,
-/// with this feed next to it (a staged release is only taken with a feed not older than the
-/// accepted one); every other staged file goes (a withdrawn release: svcupd-a3). A check for
-/// another release no longer drops what the feed still offers (svcfix-b3).
+/// staged exe of `entry` (the feed's service above `own`, not failed here) that passed its start
+/// probe here stays, byte for byte, with this feed next to it (a staged release is only taken
+/// with a feed not older than the accepted one) and the record of its probe as it was (its
+/// engines are judged by the versions it was staged with, not by this feed's: fixr3-a2); every
+/// other staged file goes (a withdrawn release: svcupd-a3; an exe whose probe never finished,
+/// fixr3-a1). A check for another release no longer drops what the feed still offers
+/// (svcfix-b3).
 pub fn keep_listed(
     files: &SwapFiles,
     own: Version,
@@ -328,6 +378,7 @@ pub fn keep_listed(
 ) {
     let listed = entry
         .filter(|e| e.version > own && !failed_before(files, e.version))
+        .filter(|e| probed(files).is_some_and(|p| p.names(e)))
         .filter(|e| holds(&files.staged(e.version), e));
     let Some(entry) = listed else {
         return drop_staged(files);

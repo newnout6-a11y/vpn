@@ -2,6 +2,7 @@
 //! a release's installer runs: the user's «Обновить»), never on a schedule of its own; engines
 //! first, then the service exe, which goes in at once when the restart ends nothing but the
 //! asker's own session, else waits staged until no session runs (or the service's next start).
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,7 +21,7 @@ use vpnte_update::feed::{FEED_FILE, PublicKey, SIG_FILE, ServiceEntry};
 use vpnte_update::fetch::{FetchError, Fetched};
 use vpnte_update::version::Version;
 
-use super::engines::ServiceEngines;
+use super::engines::{self, ServiceEngines};
 use super::in_flight::{InFlight, Quiet};
 use super::source::Source;
 use super::swap::{self, Staged, SwapFiles};
@@ -30,7 +31,8 @@ use crate::proto::{ServiceUpdateWire, UpdateAsk, UpdatePhase};
 /// The swap waits this long after it answered, so the answer reaches the app before the restart.
 const ANSWER_GRACE: Duration = Duration::from_secs(1);
 /// A `Take` within this time of a check uses it: the result of a check for the same release, the
-/// feed it read for any other (many asks never mean many feed reads: svcfix-b2).
+/// feed it read (or failed to read) for any other (many asks never mean many feed reads:
+/// svcfix-b2, fixr3-b2).
 const RECENT: Duration = Duration::from_secs(60);
 /// While a check runs, "Always" is read again this often (the status and the held filters wake
 /// it at once): a block that begins mid-check ends its requests (svcfix-a3 / b1).
@@ -47,14 +49,40 @@ struct Asked {
     until: Instant,
 }
 
-/// The last check: when it ended, for which release, whether it went through, and the feed it
-/// read (none: it read none).
+/// The last check: when it ended, for which release, whether it went through, and what its feed
+/// read gave.
 #[derive(Clone)]
 struct Checked {
     at: Instant,
     version: Version,
     ok: bool,
-    feed: Option<Arc<Fetched>>,
+    read: Read,
+}
+
+impl Checked {
+    /// What this check answers an ask for release `version` without a new one: its own result
+    /// for the same release; for another, "nothing to do" when the feed it read offers another
+    /// release, and "failed" when it could not read one (not read again for each release,
+    /// fixr3-b2).
+    fn stands_in(&self, version: Version) -> Option<bool> {
+        match &self.read {
+            _ if self.version == version => Some(self.ok),
+            Read::Feed(feed) => (!offers(feed, version)).then_some(true),
+            Read::Failed => Some(false),
+            Read::Skipped => None,
+        }
+    }
+}
+
+/// What a check's feed read gave.
+#[derive(Clone)]
+enum Read {
+    /// None was tried: the kill switch blocked (the next ask tries again: the block may be gone).
+    Skipped,
+    /// It was tried and no feed was taken (unreachable, refused, outdated, cut).
+    Failed,
+    /// The feed it accepted.
+    Feed(Arc<Fetched>),
 }
 
 /// The asks waiting for the one check task: the latest release asked, and whether the task runs.
@@ -258,10 +286,12 @@ async fn cut_when_blocked(
     }
 }
 
-/// The release staged for the service `own` ([`swap::ready`]) while its engines are what Tunnel
-/// mode runs now: judged again at every swap, as the engines' trial may have gone back since it
-/// was staged (svcfix-a1). Such a release is dropped: its exe would refuse the engine files there
-/// are, and nothing here brings it the ones it needs (its installer does).
+/// The release staged for the service `own` ([`swap::ready`]) while Tunnel mode runs the engine
+/// versions it was staged with: judged again at every swap, as the engines' trial may have gone
+/// back since (svcfix-a1). Such a release is dropped: its exe would refuse the engine files there
+/// are, and nothing here brings it the ones it needs (its installer does). A newer feed that
+/// lists other engines for it changes nothing here (fixr3-a2): they come with its next check, or
+/// with the new exe's own.
 pub fn staged_release(
     files: &SwapFiles,
     keys: &[PublicKey],
@@ -270,7 +300,7 @@ pub fn staged_release(
     engines: &ServiceEngines,
 ) -> Option<Staged> {
     let staged = swap::ready(files, keys, own, max_seq)?;
-    if engines.ready_for(&staged.feed, staged.version) {
+    if engines.runs(&staged.engines) {
         return Some(staged);
     }
     tracing::warn!(version = %staged.version, "the staged service update no longer fits the engines here: its installer brings it");
@@ -298,8 +328,9 @@ impl Updates {
 
     /// One check for release `version`, then the release goes in when it may. Within [`RECENT`]
     /// of the last check its result stands in for the same release, and the feed it read for any
-    /// other. `true` = it went through: the feed was read, every wanted engine went in and the
-    /// release was staged or is the installer's to bring.
+    /// other, or its failed read (a flood of asks while the mirrors cannot be read is one read,
+    /// fixr3-b2). `true` = it went through: the feed was read, every wanted engine went in and
+    /// the release was staged or is the installer's to bring.
     async fn check(self: Arc<Self>, version: Version) -> bool {
         let _job = self.job.lock().await;
         if self.phase() == UpdatePhase::Restarting {
@@ -308,21 +339,21 @@ impl Updates {
         let backs = self.backs.load(Ordering::SeqCst);
         let last = self.checked.lock().clone();
         let last = last.filter(|c| c.at.elapsed() < RECENT);
-        let ok = match last {
-            Some(c) if c.version == version => c.ok,
-            // The feed just read offers another release: nothing to read again for this one.
-            Some(Checked {
-                feed: Some(feed), ..
-            }) if !offers(&feed, version) => true,
-            last => {
+        let ok = match last.as_ref().and_then(|c| c.stands_in(version)) {
+            Some(ok) => ok,
+            None => {
                 self.set(UpdatePhase::Working, None);
-                let (ok, feed) = self.read_feed(version, last.and_then(|c| c.feed)).await;
+                let cached = last.and_then(|c| match c.read {
+                    Read::Feed(feed) => Some(feed),
+                    Read::Skipped | Read::Failed => None,
+                });
+                let (ok, read) = self.read_feed(version, cached).await;
                 let at = Instant::now();
                 *self.checked.lock() = Some(Checked {
                     at,
                     version,
                     ok,
-                    feed,
+                    read,
                 });
                 ok
             }
@@ -342,25 +373,21 @@ impl Updates {
     }
 
     /// The feed (the one read within [`RECENT`] when `cached`), then for release `version` its
-    /// engines and its exe. Returns whether it went through and the feed it read.
-    async fn read_feed(
-        &self,
-        version: Version,
-        cached: Option<Arc<Fetched>>,
-    ) -> (bool, Option<Arc<Fetched>>) {
+    /// engines and its exe. Returns whether it went through and what the feed read gave.
+    async fn read_feed(&self, version: Version, cached: Option<Arc<Fetched>>) -> (bool, Read) {
         if self.closed() {
             tracing::info!(
                 "the kill switch blocks with no tunnel: the release installer updates the service"
             );
-            return (true, None);
+            return (true, Read::Skipped);
         }
         let cut = self.requests();
         let _done = cut.clone().drop_guard();
         let Some(fetched) = self.feed(cached, &cut).await else {
-            return (false, None);
+            return (false, Read::Failed);
         };
         let ok = self.take_release(&fetched, version, &cut).await;
-        (ok, Some(fetched))
+        (ok, Read::Feed(fetched))
     }
 
     /// The token of one check's requests: cancelled at the service's stop, and as soon as the
@@ -424,12 +451,13 @@ impl Updates {
         if !self.engines(fetched, cut).await {
             return false;
         }
-        if !self.deps.engines.ready_for(&fetched.feed, entry.version) {
-            tracing::info!(version = %entry.version, "the release's engines are not in place here: its installer brings it");
-            swap::drop_staged(files);
+        let ready = self.deps.engines.ready_for(&fetched.feed, entry.version);
+        let Some(judged) = engines::versions(&fetched.feed).filter(|_| ready) else {
+            // What was staged earlier stays judged by the engines it was staged with (fixr3-a2).
+            tracing::info!(version = %entry.version, "the release's engines are not in place here: not staged from this feed");
             return true;
-        }
-        self.stage(fetched, entry, cut).await
+        };
+        self.stage(fetched, entry, judged, cut).await
     }
 
     fn accepted(&self, fetched: &Fetched) {
@@ -497,18 +525,22 @@ impl Updates {
     }
 
     /// `entry`'s exe, downloaded into the staging folder with the signed feed that lists it, once
-    /// it starts on this Windows (svcupd-a9); one that does not is never staged again. `false`
-    /// when it did not arrive or does not start.
+    /// it starts on this Windows (svcupd-a9); one that does not is never staged again. Recorded
+    /// last with `judged`, the engine versions Tunnel mode runs for it now ([`swap::passed`]):
+    /// an exe already staged and probed is only judged anew. `false` when it did not arrive, does
+    /// not start or was not recorded.
     async fn stage(
         &self,
         fetched: &Fetched,
         entry: &ServiceEntry,
+        judged: BTreeMap<String, Version>,
         cut: &CancellationToken,
     ) -> bool {
-        if self.ready().is_some_and(|s| s.version == entry.version) {
-            return true;
-        }
         let files = &self.deps.files;
+        let (keys, own, max_seq) = (self.deps.keys, self.deps.own, self.record.lock().max_seq);
+        if swap::ready(files, keys, own, max_seq).is_some_and(|s| s.version == entry.version) {
+            return self.passed(entry, judged);
+        }
         let path = files.staged(entry.version);
         let name = path
             .file_name()
@@ -538,19 +570,31 @@ impl Updates {
         let started = tokio::task::spawn_blocking(move || probe(&exe)).await;
         if let Err(err) = started.unwrap_or_else(|e| Err(std::io::Error::other(e))) {
             tracing::error!(version = %entry.version, %err, "service update does not start here: not taken");
-            swap::refuse(files, self.deps.own, entry.version);
+            swap::refuse(files, own, entry.version);
             swap::drop_staged(files);
             return false;
         }
         let kept = std::fs::write(files.staging.join(FEED_FILE), &fetched.bytes)
             .and_then(|()| std::fs::write(files.staging.join(SIG_FILE), &fetched.sig));
-        match kept {
+        if let Err(err) = kept {
+            tracing::warn!(%err, "service update feed not kept");
+            swap::drop_staged(files);
+            return false;
+        }
+        self.passed(entry, judged)
+    }
+
+    /// Records that `entry`'s staged exe passed its probe, judged with the engines `judged`.
+    fn passed(&self, entry: &ServiceEntry, judged: BTreeMap<String, Version>) -> bool {
+        let files = &self.deps.files;
+        match swap::passed(files, entry, judged) {
             Ok(()) => {
                 tracing::info!(version = %entry.version, "service update staged");
                 true
             }
             Err(err) => {
-                tracing::warn!(%err, "service update feed not kept");
+                tracing::warn!(%err, "service update not recorded: dropped");
+                swap::drop_staged(files);
                 false
             }
         }
@@ -671,7 +715,7 @@ impl Updates {
             return;
         }
         if version <= self.deps.own {
-            return self.back(version);
+            return self.back(version, &own);
         }
         let until = Instant::now() + ASKED_FOR;
         *self.asked.lock() = Some(Asked {
@@ -695,8 +739,17 @@ impl Updates {
 
     /// The app goes back to `version` (its rollback, or the release this service runs): its
     /// installer brings that service, and nothing newer goes in by itself (svcupd-a7, svcfix-a2:
-    /// a release staged earlier is dropped, also one a check running now stages).
-    fn back(&self, version: Version) {
+    /// a release staged earlier is dropped, also one a check running now stages). Unless the ask
+    /// comes from another user than the latest ask above the running service (what is staged
+    /// or being checked is that user's): the host names no user here, but two asks whose users
+    /// differ on owning the session that runs are two users (fixr3-a3). Another user's stale or
+    /// forged rollback that cannot be told apart that way still drops it.
+    fn back(&self, version: Version, own: &OwnSession) {
+        let asker = self.asked.lock().as_ref().map(|a| a.own.clone());
+        if asker.is_some_and(|asker| asker() != own()) {
+            tracing::info!(%version, "another user's app asks for an older service: what was asked stays");
+            return;
+        }
         tracing::info!(%version, "the app goes back: no newer service goes in by itself");
         self.backs.fetch_add(1, Ordering::SeqCst);
         self.queue.lock().next = None;
