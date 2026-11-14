@@ -118,6 +118,11 @@ pub struct FetchNote {
     /// (cleared by a success).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub said: Option<String>,
+    /// The plan route (its log label: `direct`, `socks5h://127.0.0.1:10808`; never credentials)
+    /// that last brought servers: tried first next time (speed audit ops2). A borrowed spare slot
+    /// is never remembered: it would start an engine at every refresh after direct recovered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
 }
 
 impl Document for ServersDoc {

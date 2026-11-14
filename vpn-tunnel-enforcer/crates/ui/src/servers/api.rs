@@ -93,6 +93,16 @@ pub trait ServersApi: 'static {
     /// Checks the keys of the group's current (not removed) servers; keys that could not be
     /// checked now (handshake budget, probe setup) are counted in the report.
     async fn check_group_health(&self, id: &str) -> AppResult<HealthReport>;
+    /// [`ServersApi::check_group_health`] whose results also arrive on `results` as they land
+    /// (the group check runs like the list check: a name the budget holds back waits alone).
+    async fn check_group_health_live(
+        &self,
+        id: &str,
+        results: mpsc::UnboundedSender<(String, KeyHealth)>,
+    ) -> AppResult<HealthReport> {
+        drop(results);
+        self.check_group_health(id).await
+    }
     /// Checks every server the user has not removed through the server itself, behind each
     /// server name's handshake budget (RU-2026 item 6); each result arrives on `results` as it
     /// lands. Dropping the future stops the check: what finished is kept.

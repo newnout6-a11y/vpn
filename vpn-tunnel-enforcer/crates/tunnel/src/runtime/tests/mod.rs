@@ -27,7 +27,7 @@ use super::capture::{
     Capture, CaptureCheck, CapturePlan, CaptureProof, EngineParts, ProxyCapture, tun_config,
     tun_form,
 };
-use super::engines::{CoreProc, Engines, Slots};
+use super::engines::{CoreProc, EchoFailure, Engines, Slots, echo_failed};
 use super::{InputsSource, RuntimeDeps, Timings, UserInputs};
 use crate::api::{CaptureKind, StartRequest, TunnelEvent};
 
@@ -86,6 +86,16 @@ pub struct World {
     pub auto_restart: AtomicBool,
     /// The core records no outbound fault: its crashes say nothing about the server.
     pub no_fault: AtomicBool,
+    /// The tunnel's own echo gets no answer (a dead upstream).
+    pub egress_silent: AtomicBool,
+    /// The next this many exit proofs through a staged upstream get no answer.
+    pub proofs_silent: AtomicU32,
+    /// An exit proof takes this long (ms) and then notes `proof-done`.
+    pub proof_ms: AtomicU32,
+    /// The handshake budget of every server name is spent for now.
+    pub budget_spent: AtomicBool,
+    /// Bytes downloaded through each Xray slot (its connections, as the Clash API lists them).
+    pub slot_traffic: Mutex<[u64; 2]>,
     pub xray_stop_fail: AtomicBool,
     /// The level the TUN protection enforces (the app's guard keeps it equal to the stored one).
     pub guard: Mutex<KillSwitchLevel>,
@@ -134,6 +144,11 @@ impl World {
             slow_gone: AtomicBool::new(false),
             auto_restart: AtomicBool::new(true),
             no_fault: AtomicBool::new(false),
+            egress_silent: AtomicBool::new(false),
+            proofs_silent: AtomicU32::new(0),
+            proof_ms: AtomicU32::new(0),
+            budget_spent: AtomicBool::new(false),
+            slot_traffic: Mutex::new([0, 0]),
             xray_stop_fail: AtomicBool::new(false),
             guard: Mutex::new(KillSwitchLevel::Standard),
             avoid: Mutex::new(Vec::new()),
@@ -391,6 +406,17 @@ impl Engines for FakeEngines {
     async fn upstream_downloads(&self, _c: &ClashEndpoint) -> AppResult<Vec<(String, u64)>> {
         Ok(Vec::new())
     }
+    async fn slot_downloads(
+        &self,
+        _c: &ClashEndpoint,
+        slot: Slot,
+    ) -> AppResult<Vec<(String, u64)>> {
+        let down = self.0.slot_traffic.lock()[slot.index()];
+        Ok(vec![(format!("conn-{}", slot.index()), down)])
+    }
+    fn handshake_ready(&self, _server: &Profile) -> bool {
+        !self.0.budget_spent.load(Ordering::SeqCst)
+    }
     async fn resolve(
         &self,
         hosts: &[String],
@@ -408,10 +434,21 @@ impl Engines for FakeEngines {
         server: &Profile,
         port: u16,
         _c: &Creds,
+        _settle: Option<Duration>,
         _x: &CancellationToken,
     ) -> AppResult<IpAddr> {
         let _ = port;
         self.0.note(format!("egress-via:{}", server.server));
+        let silent = self.0.proofs_silent.load(Ordering::SeqCst);
+        if silent > 0 {
+            self.0.proofs_silent.store(silent - 1, Ordering::SeqCst);
+            return Err(echo_failed(EchoFailure::NoReply));
+        }
+        let takes = self.0.proof_ms.load(Ordering::SeqCst);
+        if takes > 0 {
+            tokio::time::sleep(Duration::from_millis(u64::from(takes))).await;
+            self.0.note("proof-done".to_owned());
+        }
         #[cfg(feature = "lab")]
         if self.0.crash_mihomo_on_probe.load(Ordering::SeqCst) {
             let cores = self.0.cores.lock().clone();
@@ -422,7 +459,6 @@ impl Engines for FakeEngines {
         }
         #[cfg(feature = "lab")]
         {
-            use super::engines::{EchoFailure, echo_failed};
             match *self.0.egress_via.lock() {
                 EgressVia::Ip => {}
                 EgressVia::NoReply => return Err(echo_failed(EchoFailure::NoReply)),
@@ -446,6 +482,9 @@ impl Engines for FakeEngines {
             Some(port) => format!("egress:{port}"),
             None => "egress".to_owned(),
         });
+        if self.0.egress_silent.load(Ordering::SeqCst) {
+            return Err(echo_failed(EchoFailure::NoReply));
+        }
         Ok(*self.0.tunnel_ip.lock())
     }
     async fn local_proxy(&self, addr: &HostPort, _limit: Duration) -> AppResult<Option<PathBuf>> {

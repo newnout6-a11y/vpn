@@ -279,13 +279,28 @@ impl IpMonitor {
         expected: Option<IpAddr>,
         cancel: &CancellationToken,
     ) -> Result<IpAddr, AdoptError> {
+        self.adopt_baseline_after(conn, expected, async {}, cancel)
+            .await
+    }
+
+    /// [`IpMonitor::adopt_baseline`] whose exit read runs while `home` re-reads the user's real
+    /// IP ([`IpMonitor::set_real_ip`]); the sample is judged only once `home` is done, so an exit
+    /// equal to the real IP is still refused (speed audit conn3: one wave less before SECURE).
+    pub async fn adopt_baseline_after(
+        &self,
+        conn: ConnId,
+        expected: Option<IpAddr>,
+        home: impl Future<Output = ()>,
+        cancel: &CancellationToken,
+    ) -> Result<IpAddr, AdoptError> {
         let _serial = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(AdoptError::Cancelled),
             guard = self.inner.adopt.lock() => guard,
         };
         let family = expected.map_or(Family::V4, Family::of);
-        let sample = match self.inner.read(conn, family, cancel).await {
+        let ((), read) = tokio::join!(home, self.inner.read(conn, family, cancel));
+        let sample = match read {
             Read::Sampled(sample) => sample,
             Read::Failed => {
                 self.inner.unknown();

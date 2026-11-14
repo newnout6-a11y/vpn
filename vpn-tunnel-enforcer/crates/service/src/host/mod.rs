@@ -145,6 +145,9 @@ impl Host {
 
     /// Accepts connections until `cancel`; each runs on its own task.
     pub async fn serve(self: Arc<Self>, mut listener: Listener, cancel: CancellationToken) {
+        // Everything this process asks over HTTPS (DoH, exit proofs) may run under the kill
+        // switch's DNS block, where Windows' online certificate check stalls (lab F-3).
+        vpnte_base::http::verify_offline();
         tokio::spawn(track_generation(
             self.deps.runtime.subscribe(),
             self.generation.clone(),

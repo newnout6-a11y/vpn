@@ -190,11 +190,14 @@ pub(crate) const ENCRYPTED_LINK: [&str; 3] = [
     "profiles.deeplink.encryptedMantaray",
     "profiles.deeplink.encrypted",
 ];
-/// Backend message keys of a panel that serves only devices with an HWID (`servers.fetch.*`).
+/// Backend message keys of a panel that serves only devices with an HWID (`servers.fetch.*`),
+/// its notices included (speed audit ops1: what HWID-bound panels send a device without one).
 /// Compared only: the app registers their text.
-pub(crate) const NEEDS_HWID: [&str; 2] = [
+pub(crate) const NEEDS_HWID: [&str; 4] = [
     "servers.fetch.hwidRequired",
     "servers.fetch.emptyListNoHwid",
+    "servers.fetch.said",
+    "servers.fetch.placeholder",
 ];
 
 /// The help for the error `key`; the HWID retry only while the switch is off.

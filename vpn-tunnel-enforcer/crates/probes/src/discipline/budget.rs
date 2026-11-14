@@ -200,7 +200,7 @@ impl HandshakeBudget {
 
     /// How long a new handshake to `endpoint` would wait right now (zero = free; nothing is
     /// reserved). The list-wide check waits this out before it takes one of its probes.
-    pub(crate) fn wait_for(&self, endpoint: &Endpoint) -> Duration {
+    pub fn wait_for(&self, endpoint: &Endpoint) -> Duration {
         let now = Instant::now();
         let map = self.slots.lock();
         map.get(endpoint).map_or(Duration::ZERO, |s| {

@@ -132,18 +132,24 @@ impl Actions {
             return;
         }
         let (api, toasts) = (self.api.clone(), self.toasts);
+        let mut done = store.check_done;
+        done.set(0);
         let task = self.spawn(async move {
             let (tx, mut rx) = mpsc::unbounded_channel();
             let run = api.check_all_health(tx);
             futures_util::pin_mut!(run);
+            let mut landed = |id: &str, health| {
+                store.row(id, |r| r.health = Some(health));
+                *done.write() += 1;
+            };
             let result = loop {
                 tokio::select! {
                     result = &mut run => break result,
-                    Some((id, health)) = rx.recv() => store.row(&id, |r| r.health = Some(health)),
+                    Some((id, health)) = rx.recv() => landed(&id, health),
                 }
             };
             while let Ok((id, health)) = rx.try_recv() {
-                store.row(&id, |r| r.health = Some(health));
+                landed(&id, health);
             }
             let mut running = store.check_task;
             running.set(None);

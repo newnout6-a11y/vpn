@@ -36,6 +36,8 @@ pub struct FetchRequest {
     /// The User-Agent family that last brought this subscription's servers: tried first
     /// (p-live-fix).
     pub prefer_agent: Option<String>,
+    /// The plan route (its label) that last brought them: tried first (speed audit ops2).
+    pub prefer_route: Option<String>,
 }
 
 impl FetchRequest {
@@ -51,6 +53,7 @@ impl FetchRequest {
             fallback: None,
             from_link: false,
             prefer_agent: None,
+            prefer_route: None,
         }
     }
 }
@@ -66,6 +69,7 @@ impl fmt::Debug for FetchRequest {
             .field("fallback", &self.fallback.is_some())
             .field("from_link", &self.from_link)
             .field("prefer_agent", &self.prefer_agent)
+            .field("prefer_route", &self.prefer_route)
             .finish()
     }
 }
@@ -108,6 +112,8 @@ pub struct Fetched {
     pub providers: Vec<ProviderFetch>,
     /// The User-Agent family that brought the servers (remembered per group, p-live-fix).
     pub agent: String,
+    /// The plan route that brought them (its label; `None`: the DoH-pinned retry or a spare).
+    pub route: Option<String>,
 }
 
 impl Fetched {
@@ -127,6 +133,7 @@ impl fmt::Debug for Fetched {
             .field("via_fallback", &self.via_fallback)
             .field("providers", &self.providers)
             .field("agent", &self.agent)
+            .field("route", &self.route)
             .finish()
     }
 }
@@ -162,7 +169,7 @@ impl SubscriptionFetcher {
             .as_ref()
             .and_then(|f| http_url(f.as_str()))
             .filter(|f| *f != url);
-        let plan = self.plan();
+        let plan = self.plan().preferring(req.prefer_route.as_deref());
         let hwid = req
             .send_hwid
             .then(|| req.hwid.as_deref().unwrap_or(self.hwids.get(req.device)));
@@ -290,6 +297,10 @@ impl SubscriptionFetcher {
             route,
             agent,
         } = got;
+        let remembered = route
+            .as_ref()
+            .filter(|_| !answer.via_spare)
+            .map(Route::label);
         // Names are checked by the system resolver only when the answer came direct.
         let local_dns = route == Some(Route::Direct);
         let providers = if refs.is_empty() {
@@ -351,6 +362,7 @@ impl SubscriptionFetcher {
             via_fallback: answer.source == Source::Fallback,
             providers,
             agent,
+            route: remembered,
         })
     }
 }

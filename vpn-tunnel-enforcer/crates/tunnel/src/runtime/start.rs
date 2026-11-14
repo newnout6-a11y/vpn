@@ -5,10 +5,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use vpnte_base::types::{AdaptiveMode, Engine, EnginePref, ProxyKind, now_ms};
+use vpnte_base::types::{AdaptiveMode, Engine, EnginePref, KillSwitchLevel, ProxyKind, now_ms};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 use vpnte_core::net::HostPort;
 use vpnte_engine::singbox_config::{Listeners, Upstream};
@@ -408,12 +409,16 @@ impl Actor {
         let engine = run_of(req)?;
         #[cfg(feature = "lab")]
         super::mihomo::admit(&engine, req)?;
+        let step = Instant::now();
         let plan = self.capture.prepare(req, avoid).await?;
+        tracing::info!(ms = ms_since(step), "capture prepared");
         work.warnings.extend(plan.warnings.iter().cloned());
         work.plan = Some(plan.clone());
         cancelled_if(op)?;
+        let step = Instant::now();
         let phys_dns = self.deps.engines.physical_dns().await;
         let planned = self.plan_upstream(req, engine.kind, op, work).await?;
+        tracing::info!(ms = ms_since(step), "upstream planned");
         cancelled_if(op)?;
         let (programs, own): (Vec<PathBuf>, Vec<PathBuf>) = match &planned {
             Planned::Local { owner, .. } => (
@@ -434,17 +439,41 @@ impl Actor {
         // The app resolved mihomo's peer names itself: sing-box dials only loopback.
         #[cfg(feature = "lab")]
         let hostname = hostname && !matches!(planned, Planned::Mihomo(_));
+        let step = Instant::now();
         self.capture.begin(&plan, &programs).await?;
+        tracing::info!(ms = ms_since(step), "capture began");
         work.began = true;
         cancelled_if(op)?;
-        if let Planned::Xray {
-            graph,
-            resolved,
-            profile,
-        } = &planned
-        {
-            self.start_slot_a(graph, resolved, profile, engine, op, work)
-                .await?;
+        let slot_a = match &planned {
+            Planned::Xray {
+                graph,
+                resolved,
+                profile,
+            } => {
+                let settle = self
+                    .start_slot_a(graph, resolved, profile, op, work)
+                    .await?;
+                let a = work
+                    .slots
+                    .as_ref()
+                    .map(|s| s.endpoints[Slot::A.index()].clone());
+                a.map(|a| (profile, a, settle))
+            }
+            _ => None,
+        };
+        // Speed audit conn5: under a kill switch that already holds the block (a recovery, a
+        // protected restart) traffic waits either way, so the core and its capture start beside
+        // slot A's exit proof (0.5-1.5 s); a first start keeps the order, so a server that
+        // carries nothing never had anyone routed into it.
+        let beside = work.prior.is_some() && self.capture.guard(&plan) != KillSwitchLevel::Off;
+        let mut proving = None;
+        if let Some((profile, a, settle)) = &slot_a {
+            if beside {
+                proving = Some(self.prove_slot_a(profile, a, *settle, engine, op));
+            } else {
+                let ip = self.prove_slot_a(profile, a, *settle, engine, op).await?;
+                record_exit_a(work, ip);
+            }
         }
         #[cfg(feature = "lab")]
         if let Planned::Mihomo(plan) = &planned {
@@ -460,11 +489,27 @@ impl Actor {
             phys_dns,
             direct_vpn: !local,
         };
-        let (core, clash, listeners, compat) = self.spawn_ready(&parts, op, work).await?;
-        let proof = self
-            .capture
-            .ready(&plan, self.deps.timings.capture_ready, op)
-            .await?;
+        let up = async {
+            let step = Instant::now();
+            let ready = self.spawn_ready(&parts, op, work).await?;
+            tracing::info!(ms = ms_since(step), "sing-box ready");
+            let step = Instant::now();
+            let timeout = self.deps.timings.capture_ready;
+            let proof = self.capture.ready(&plan, timeout, op).await?;
+            tracing::info!(ms = ms_since(step), "capture ready");
+            AppResult::Ok((ready, proof))
+        };
+        let ((core, clash, listeners, compat), proof) = match proving {
+            Some(proving) => {
+                let (exit, up) = tokio::join!(proving, up);
+                // The proof's failure is the cause; the core it started meanwhile is compensated.
+                let ip = exit?;
+                let up = up?;
+                record_exit_a(work, ip);
+                up
+            }
+            None => up.await?,
+        };
         if let Some(slots) = work.slots.as_mut() {
             // A config default is not read-back proof: select explicitly and read it back.
             self.deps.engines.select(&clash, Slot::A).await?;
@@ -493,6 +538,7 @@ impl Actor {
             endpoints,
             watch: CancellationToken::new(),
             competing: None,
+            carried: Arc::default(),
         }))
     }
 
@@ -516,7 +562,14 @@ impl Actor {
             )));
         };
         self.proving(engine);
-        match self.deps.engines.egress_via(server, port, creds, op).await {
+        let step = Instant::now();
+        let proof = self
+            .deps
+            .engines
+            .egress_via(server, port, creds, None, op)
+            .await;
+        tracing::info!(ms = ms_since(step), ok = proof.is_ok(), "native exit proof");
+        match proof {
             Ok(_) => Ok(()),
             // Answers came back through the server: the traffic is proven, only the address
             // is unknown (the start page's exit check reads it later).
@@ -531,19 +584,19 @@ impl Actor {
         self.publish(|s| s.engine = Some(engine));
     }
 
-    /// Slot A of a cold start: its own SOCKS readiness and an egress proof before any route
-    /// points into the tunnel.
+    /// Slot A of a cold start up to its own SOCKS readiness; its exit proof is
+    /// [`Actor::prove_slot_a`]. Returns the proof's settle point ([`settle_of`]).
     async fn start_slot_a(
         &self,
         graph: &ProxyGraph,
         resolved: &Resolved,
         profile: &VpnProfile,
-        engine: EngineRun,
         op: &CancellationToken,
         work: &mut Work,
-    ) -> AppResult<()> {
+    ) -> AppResult<Option<Duration>> {
         let a = SlotEndpoint::allocate(&[])?;
         let b = SlotEndpoint::allocate(&[a.port()])?;
+        let settle = settle_of(graph);
         let (tx, rx) = mpsc::channel(8);
         work.events = Some(rx);
         let launch = SlotLaunch {
@@ -561,25 +614,103 @@ impl Actor {
             endpoints: [a.clone(), b],
             active: Slot::A,
             egress: [None, None],
+            balanced: [settle.is_some(), false],
             dns_bootstrap: 0,
             suspect: false,
             restarts: Vec::new(),
         };
+        let step = Instant::now();
         let started = session.slots.start(Slot::A, a.clone(), launch, op).await;
         work.slots = Some(session);
         started?;
+        tracing::info!(ms = ms_since(step), "slot A accepts");
+        Ok(settle)
+    }
+
+    /// The exit proof of slot A (`a`): traffic through its server before the session counts.
+    async fn prove_slot_a(
+        &self,
+        profile: &VpnProfile,
+        a: &SlotEndpoint,
+        settle: Option<Duration>,
+        engine: EngineRun,
+        op: &CancellationToken,
+    ) -> AppResult<std::net::IpAddr> {
         self.proving(engine);
+        let step = Instant::now();
         let ip = self
             .deps
             .engines
-            .egress_via(&profile.profile, a.port(), a.creds(), op)
+            .egress_via(&profile.profile, a.port(), a.creds(), settle, op)
             .await
             .map_err(exit_unproven)?;
-        if let Some(s) = work.slots.as_mut() {
-            s.egress[Slot::A.index()] = Some(ip);
-        }
-        Ok(())
+        tracing::info!(ms = ms_since(step), "slot A exit proven");
+        Ok(ip)
     }
+}
+
+/// Slot A's proven exit, kept for the switch's comparison.
+fn record_exit_a(work: &mut Work, ip: std::net::IpAddr) {
+    if let Some(s) = work.slots.as_mut() {
+        s.egress[Slot::A.index()] = Some(ip);
+    }
+}
+
+/// Milliseconds since `at`, for the per-step timing lines (speed audit conn1: one lab run shows
+/// where the seconds of a start go).
+pub(super) fn ms_since(at: Instant) -> u64 {
+    u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Xray's burst observatory ping timeout when the provider sets none.
+const OBSERVATORY_TIMEOUT: Duration = Duration::from_secs(5);
+/// A provider's longer timeout still leaves the proof room for one request after it.
+const SETTLE_CAP: Duration = Duration::from_secs(10);
+/// The proof starts a little after Xray and its observatory's first round.
+const SETTLE_MARGIN: Duration = Duration::from_millis(500);
+
+/// When the balancer of a provider graph has judged its members, counted from the proof's start;
+/// `None` when no balancer picks the route. Xray's observatory pings every member at start and a
+/// member is "best" until its ping has failed (after the ping timeout), so a dead member may take
+/// the first connections (lab live-7 F1: both echo requests went to a member that never
+/// answered, and the start failed on a working server).
+pub(super) fn settle_of(graph: &ProxyGraph) -> Option<Duration> {
+    let ProxyGraph::Native(g) = graph else {
+        return None;
+    };
+    g.entry.get("balancerTag")?;
+    let timeout = g
+        .burst_observatory
+        .as_ref()
+        .and_then(|o| o.pointer("/pingConfig/timeout"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(go_duration)
+        .unwrap_or(OBSERVATORY_TIMEOUT);
+    Some(timeout.min(SETTLE_CAP) + SETTLE_MARGIN)
+}
+
+/// A Go duration as Xray configs write them (`5s`, `1m30s`, `500ms`); `None` when malformed.
+fn go_duration(text: &str) -> Option<Duration> {
+    let mut rest = text.trim();
+    let mut total = Duration::ZERO;
+    while !rest.is_empty() {
+        let digits = rest.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+        let value: f64 = rest[..digits].parse().ok()?;
+        rest = &rest[digits..];
+        let unit = rest
+            .find(|c: char| c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let seconds = match &rest[..unit] {
+            "ms" => value / 1000.0,
+            "s" => value,
+            "m" => value * 60.0,
+            "h" => value * 3600.0,
+            _ => return None,
+        };
+        total += Duration::try_from_secs_f64(seconds).ok()?;
+        rest = &rest[unit..];
+    }
+    Some(total).filter(|d| !d.is_zero())
 }
 
 /// A start's exit proof that got nothing back says what it means for the user: the server
@@ -702,6 +833,16 @@ mod proof_tests {
         async fn upstream_downloads(&self, c: &ClashEndpoint) -> AppResult<Vec<(String, u64)>> {
             self.inner.upstream_downloads(c).await
         }
+        async fn slot_downloads(
+            &self,
+            c: &ClashEndpoint,
+            slot: Slot,
+        ) -> AppResult<Vec<(String, u64)>> {
+            self.inner.slot_downloads(c, slot).await
+        }
+        fn handshake_ready(&self, server: &Profile) -> bool {
+            self.inner.handshake_ready(server)
+        }
         async fn resolve(
             &self,
             hosts: &[String],
@@ -715,9 +856,13 @@ mod proof_tests {
             server: &Profile,
             port: u16,
             creds: &Creds,
+            settle: Option<Duration>,
             cancel: &CancellationToken,
         ) -> AppResult<IpAddr> {
-            let ip = self.inner.egress_via(server, port, creds, cancel).await;
+            let ip = self
+                .inner
+                .egress_via(server, port, creds, settle, cancel)
+                .await;
             match self.answer {
                 Some(failure) => Err(echo_failed(failure)),
                 None => ip,
@@ -851,5 +996,61 @@ mod proof_tests {
         .await
         .expect("traffic came back");
         assert!(h.status().borrow().running);
+    }
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use serde_json::{Value, json};
+    use vpnte_engine::xray_config::ProxyGraph;
+    use vpnte_profiles::xray_native::CompiledGraph;
+
+    use super::{go_duration, settle_of};
+
+    fn graph(entry: Value, burst: Option<Value>) -> ProxyGraph {
+        ProxyGraph::Native(Box::new(CompiledGraph {
+            outbounds: Vec::new(),
+            rules: Vec::new(),
+            balancers: Vec::new(),
+            entry,
+            observatory: None,
+            burst_observatory: burst,
+            policy: None,
+        }))
+    }
+
+    /// Go durations as provider configs write them.
+    #[test]
+    fn go_durations_parse() {
+        let cases = [
+            ("5s", Some(5_000)),
+            ("1m30s", Some(90_000)),
+            ("500ms", Some(500)),
+            ("2.5s", Some(2_500)),
+            ("", None),
+            ("0s", None),
+            ("10", None),
+            ("5x", None),
+        ];
+        for (text, want) in cases {
+            let got = go_duration(text).map(|d| u64::try_from(d.as_millis()).unwrap());
+            assert_eq!(got, want, "{text}");
+        }
+    }
+
+    /// Lab live-7 F1: a balanced entry settles after the observatory's ping timeout (Xray's 5 s
+    /// by default, capped at 10 s) plus a margin; a plain outbound entry never waits.
+    #[test]
+    fn a_balanced_graph_settles_after_its_ping_timeout() {
+        let balanced = json!({"balancerTag": "vpnte-balancer:b"});
+        let burst = |t: &str| Some(json!({"pingConfig": {"timeout": t}}));
+        let ms = |g: &ProxyGraph| settle_of(g).map(|d| d.as_millis());
+        assert_eq!(ms(&graph(balanced.clone(), None)), Some(5_500));
+        assert_eq!(ms(&graph(balanced.clone(), burst("8s"))), Some(8_500));
+        assert_eq!(ms(&graph(balanced.clone(), burst("1m"))), Some(10_500));
+        let plain = graph(json!({"outboundTag": "proxy"}), burst("8s"));
+        assert_eq!(settle_of(&plain), None);
+        let translated = ProxyGraph::Translated(json!({"tag": "proxy"}));
+        assert_eq!(settle_of(&translated), None);
     }
 }

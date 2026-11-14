@@ -34,6 +34,10 @@ impl HandshakeGate for Gate {
             Msg::new("probes.discipline.deferred").arg("seconds", 42),
         ))
     }
+
+    fn ready_now(&self, _server: &Profile) -> bool {
+        self.seen.load(Ordering::SeqCst) < self.allow
+    }
 }
 
 /// A loopback port nobody listens on: every SOCKS connect is refused at once, no network.
@@ -56,7 +60,7 @@ async fn probe(allow: usize) -> (AppResult<std::net::IpAddr>, usize) {
     };
     let token = CancellationToken::new();
     let answer = engines
-        .egress_via(&server, closed_port(), &creds, &token)
+        .egress_via(&server, closed_port(), &creds, None, &token)
         .await;
     (answer, gate.seen.load(Ordering::SeqCst))
 }

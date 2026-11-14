@@ -16,7 +16,7 @@ use vpnte_engine::xray_process::SlotLaunch;
 
 use super::actor::{Actor, Phase, SlotSession};
 use super::capture::{Capture, CaptureProof, EngineParts};
-use super::engines::{CoreProc, Engines};
+use super::engines::{CoreProc, EchoFailure, Engines, echo_failure};
 use super::{Timings, config};
 use crate::api::{
     Mode, OwnerCheck, Slot, StartRequest, SwitchOutcome, SwitchPhase, SwitchReceipt, TunnelEvent,
@@ -62,6 +62,66 @@ struct RuntimeSwitch<'a> {
     stops: &'a AtomicU64,
     stops_at: u64,
     timings: &'a Timings,
+    /// When the staged graph's balancer has judged its members (`None`: no balancer).
+    settle: Option<std::time::Duration>,
+    /// The candidate's proof waits for the traffic it carries after the select (the handshake
+    /// budget of its server name is spent for now: speed audit F4).
+    by_traffic: bool,
+}
+
+/// How long a candidate proven by its own traffic may take to show it.
+const TRAFFIC_PROOF: std::time::Duration = std::time::Duration::from_secs(3);
+const TRAFFIC_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+impl RuntimeSwitch<'_> {
+    /// The candidate selected without a probe of its own: answers coming back through it within
+    /// [`TRAFFIC_PROOF`] prove it; none (an idle session) and it gets the probe it skipped,
+    /// behind the budget as before.
+    async fn confirm_by_traffic(&mut self, slot: EngineSlot) -> AppResult<()> {
+        let until = tokio::time::Instant::now() + TRAFFIC_PROOF;
+        loop {
+            let carried = self.engines.slot_downloads(self.clash, slot).await;
+            if carried.is_ok_and(|c| c.iter().any(|(_, down)| *down > 0)) {
+                tracing::info!(?slot, "switch: the new slot carries traffic");
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= until {
+                break;
+            }
+            tokio::select! {
+                () = self.cancel.cancelled() => return Err(AppError::cancelled()),
+                () = tokio::time::sleep(TRAFFIC_POLL) => {}
+            }
+        }
+        let ep = self.slots.endpoints[slot.index()].clone();
+        let creds = ep.creds();
+        let profile = &self.next.profile;
+        let engines = self.engines;
+        let ip = engines
+            .egress_via(profile, ep.port(), creds, self.settle, self.cancel)
+            .await?;
+        self.slots.egress[slot.index()] = Some(ip);
+        Ok(())
+    }
+}
+
+/// The tunnel's echo `seen` proves it leaves through the slot whose own probe saw `expected`.
+/// Lab live-8 L8-1: a balancer's connections leave from its members, so its probe and the
+/// tunnel's echo may name two exits; the selector was read back, so for a `balanced` slot an
+/// answer through the tunnel is the proof (answers without an address too).
+fn tunnel_exit_matches(
+    seen: AppResult<std::net::IpAddr>,
+    expected: std::net::IpAddr,
+    balanced: bool,
+) -> AppResult<()> {
+    match seen {
+        Err(e) if balanced && echo_failure(&e) == Some(EchoFailure::NoAddress) => Ok(()),
+        Err(e) => Err(e),
+        Ok(seen) if !balanced && seen != expected => {
+            Err(unconfirmed("tunnel egress differs from the slot's"))
+        }
+        Ok(_) => Ok(()),
+    }
 }
 
 /// The slot runs and the routes still go through the capture.
@@ -81,6 +141,8 @@ impl SwitchOps for RuntimeSwitch<'_> {
             .resolve(&graph.hosts(), ResolvePath::ViaSingBox(dns), cancel)
             .await?;
         graph.substitute(&resolved.addrs);
+        self.settle = super::start::settle_of(&graph);
+        self.slots.balanced[slot.index()] = self.settle.is_some();
         let ep = self.slots.endpoints[slot.index()].clone();
         let launch = SlotLaunch {
             config: xray_config::build_config(&graph, &ep)
@@ -99,9 +161,23 @@ impl SwitchOps for RuntimeSwitch<'_> {
     async fn probe(&mut self, slot: Slot, cancel: &CancellationToken) -> AppResult<()> {
         let i = engine_slot(slot).index();
         let ep = self.slots.endpoints[i].clone();
+        if !self.engines.handshake_ready(&self.next.profile) {
+            // Lab live-7 F4: the name's budget (3 handshakes a minute, shared by servers with
+            // one REALITY name) held the switch for 30 s. The proof needs no handshake of its
+            // own: the select comes first and the traffic the new slot carries proves it.
+            tracing::info!("switch: the handshake budget is spent for now: proof by traffic");
+            self.by_traffic = true;
+            return Ok(());
+        }
         let ip = self
             .engines
-            .egress_via(&self.next.profile, ep.port(), ep.creds(), cancel)
+            .egress_via(
+                &self.next.profile,
+                ep.port(),
+                ep.creds(),
+                self.settle,
+                cancel,
+            )
             .await?;
         self.slots.egress[i] = Some(ip);
         Ok(())
@@ -117,6 +193,10 @@ impl SwitchOps for RuntimeSwitch<'_> {
         if !proven(running, self.capture, self.proof).await {
             return Err(unconfirmed("slot or routes not proven"));
         }
+        if self.by_traffic && slot != self.previous {
+            return self.confirm_by_traffic(slot).await;
+        }
+        let balanced = self.slots.balanced[slot.index()];
         let expected = self.slots.egress[slot.index()]
             .ok_or_else(|| unconfirmed("upstream egress identity unavailable"))?;
         // The retained upstream gets its own short, fresh proof the caller cannot cancel.
@@ -125,10 +205,8 @@ impl SwitchOps for RuntimeSwitch<'_> {
         } else {
             (self.timings.confirm_candidate, self.cancel.clone())
         };
-        let seen = self.engines.egress(self.proof.port, budget, &token).await?;
-        if seen != expected {
-            return Err(unconfirmed("tunnel egress differs from the slot's"));
-        }
+        let seen = self.engines.egress(self.proof.port, budget, &token).await;
+        tunnel_exit_matches(seen, expected, balanced)?;
         let running = self.slots.slots.running(slot);
         if !proven(running, self.capture, self.proof).await {
             return Err(unconfirmed("slot or routes lost during the proof"));
@@ -284,6 +362,8 @@ impl Actor {
             stops,
             stops_at,
             timings: &deps.timings,
+            settle: None,
+            by_traffic: false,
         };
         let candidate = previous.other();
         let mut receipt = {
@@ -337,5 +417,32 @@ impl Actor {
             });
         }
         Some(receipt)
+    }
+}
+
+#[cfg(test)]
+mod confirm_tests {
+    use std::net::IpAddr;
+
+    use super::super::engines::echo_failed;
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// Lab live-8 L8-1: a plain slot's tunnel exit must be the slot's own; a balanced slot's
+    /// may be any member's (or an answer without an address), a silent tunnel never passes.
+    #[test]
+    fn a_balanced_slot_confirms_by_any_answer() {
+        let (slot, other) = (ip("198.51.100.1"), ip("198.51.100.2"));
+        assert!(tunnel_exit_matches(Ok(slot), slot, false).is_ok());
+        assert!(tunnel_exit_matches(Ok(other), slot, false).is_err());
+        assert!(tunnel_exit_matches(Ok(other), slot, true).is_ok());
+        let no_address = || Err(echo_failed(EchoFailure::NoAddress));
+        assert!(tunnel_exit_matches(no_address(), slot, true).is_ok());
+        assert!(tunnel_exit_matches(no_address(), slot, false).is_err());
+        let silent = Err(echo_failed(EchoFailure::NoReply));
+        assert!(tunnel_exit_matches(silent, slot, true).is_err());
     }
 }

@@ -474,13 +474,21 @@ pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self;   // + Defau
     fn singbox_exe(&self) -> PathBuf; fn xray_exe(&self) -> PathBuf; fn log_files(&self, slots: bool) -> Vec<PathBuf>;
     async fn select(&self, clash: &ClashEndpoint, slot: Slot) -> AppResult<()>;
     async fn upstream_downloads(&self, clash: &ClashEndpoint) -> AppResult<Vec<(String, u64)>>;
+    async fn slot_downloads(&self, clash: &ClashEndpoint, slot: Slot) -> AppResult<Vec<(String, u64)>>;
+                                // p-speed F4: the connections through one Xray slot only
+    fn handshake_ready(&self, server: &Profile) -> bool;   // p-speed F4: the gate would not wait now
     async fn resolve(&self, hosts: &[String], path: ResolvePath, cancel: &CancellationToken)
         -> Result<Resolved, ResolveFault>;
-    async fn egress_via(&self, server: &Profile, port: u16, creds: &Creds, cancel: &CancellationToken)
+    async fn egress_via(&self, server: &Profile, port: u16, creds: &Creds, settle: Option<Duration>,
+        cancel: &CancellationToken)
         -> AppResult<IpAddr>;   // an authenticated loopback SOCKS listener (a staged slot, a native
                                 // start's `live-check-in`); each echo request = a new handshake to
                                 // `server`; 15 s from the moment the route accepts, a 2nd echo
-                                // service joins after 5 s or a failure (p-live2, lab F-3)
+                                // service joins after 5 s or a failure (p-live2, lab F-3);
+                                // `settle` (p-speed, lab live-7 F1): a provider balancer behind the
+                                // listener has judged its members by then: one more request then,
+                                // budget max(15 s, settle + 8 s). Certificates are checked offline
+                                // (`vpnte_base::http::offline`)
     async fn egress(&self, via: Option<u16>, timeout: Duration, cancel: &CancellationToken)
         -> AppResult<IpAddr>;   // through the tunnel: default route (TUN) or `via` = the proxy
                                 // capture's mixed port (the app's requests never use the system proxy);
@@ -489,7 +497,8 @@ pub struct ProxyCapture;  impl ProxyCapture { pub fn new() -> Self;   // + Defau
     async fn physical_dns(&self) -> Vec<Ipv4Addr>; }
 // the app's handshake budget (probe discipline): the tunnel cannot depend on vpnte-probes
 #[async_trait] pub trait HandshakeGate: Send + Sync {
-    async fn admit(&self, server: &Profile, cancel: &CancellationToken) -> AppResult<()>; }  // Err: deferred / cancelled
+    async fn admit(&self, server: &Profile, cancel: &CancellationToken) -> AppResult<()>;  // Err: deferred / cancelled
+    fn ready_now(&self, server: &Profile) -> bool; }  // p-speed F4: `admit` would not wait now
 #[derive(Debug, Clone, PartialEq, Eq)] pub struct EngineExes { pub singbox: PathBuf, pub xray: PathBuf }  // canonical paths
 pub struct RealEngines;
 impl RealEngines { pub fn new(singbox: PathBuf, xray: PathBuf, logs: Option<PathBuf>) -> Self   // fixed (helper service)
@@ -541,8 +550,26 @@ discipline): when a native Direct VPN session crashes with an outbound fault on 
 Xray's log with failed outbounds, lab F-11, p-live2), restarts of that same
 server wait at least `Timings::freeze` (130 s) from the crash instead of the plain backoff, and the
 failover (a fresh server) is tried first while that window lasts; a local proxy's server is never
-held back (its handshakes are another client's). Watchdogs never stop the
-tunnel (`ProxyDown` / `Running`). Proxy capture: the plan guard is the request's kill switch (`off` /
+held back (its handshakes are another client's). p-speed: traffic within 30 s before the crash
+(`Session.carried`: the egress watchdog saw downloads grow or its idle probe answered, or a
+`Confirmations` within 30 s) rules the freeze out (restart at the backoff); a recovery start whose
+exit proof got nothing back (`EchoFailure::NoReply`) with a failover available marks that server
+quiet, so the sibling comes next (lab live-8 L8-2). Watchdogs never stop the
+tunnel (`ProxyDown` / `Running`); the direct-VPN watchdog with neither traffic nor outside evidence
+sends one echo through the session (`Engines::egress`, 5 s per request) before it counts a failure
+and lets an answer stand 120 s; a silent session is asked at most once a minute (lab live-7 F3: an
+idle session is not a dead one).
+Speed (p-speed): every start step logs its time at info (`capture prepared`, `upstream planned`,
+`capture began`, `slot A accepts`, `slot A exit proven` / `native exit proof`, `sing-box ready`,
+`capture ready`, each `echo request`). A provider graph whose entry is a balancer proves its exit
+with a settle point (`settle_of`: the burst observatory's ping timeout, default 5 s, at most 10 s,
++ 0.5 s) and records the slot as `balanced`: an in-place switch to it confirms on any answer
+through the tunnel (its members exit from several addresses, lab live-8 L8-1). Under a block the
+protection already holds (a recovery or a protected restart, guard != Off) the core and its capture
+start beside slot A's exit proof; a first start proves first (conn5). An in-place switch whose
+server name has no handshake budget left (`Engines::handshake_ready`) selects the candidate without
+a proof of its own and takes the traffic it carries within 3 s as the proof; an idle session then
+gets the skipped probe, behind the budget as before (lab live-7 F4). Proxy capture: the plan guard is the request's kill switch (`off` /
 `standard`; `strict` -> `Validation`, `tunnel.runtime.proxy.strictUnavailable`), nothing to engage or
 release; the mixed port is kept from the first start until a full stop / failed start (crash
 restarts, preserved stops and protected restarts reuse it; an unverified release takes a fresh

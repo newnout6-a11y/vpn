@@ -315,6 +315,7 @@
         "title": "Check each server through itself. At most three checks a minute per server name, so a long list takes a few minutes",
         "stop": "Stop the check",
         "stopTitle": "Servers already checked keep their result",
+        "progress": "Checked: {{count}}",
         "done": "Server check"
       },
       "facts": {
@@ -333,6 +334,8 @@
         "supportFailed": "The support link did not open",
         "hwidHint": "The list came back empty. Panels that bind a subscription to a device serve servers only with the device ID (HWID).",
         "hwidRequired": "The provider serves this subscription only to devices that send their ID (HWID).",
+        "hwidPlaceholder": "Panels that bind a subscription to a device often answer like this when no HWID is sent.",
+        "hwidRefresh": "Turn on HWID and refresh",
         "deviceLimit": "Every device slot of this subscription is taken: the provider can free one.",
         "said": "The provider answered: “{{said}}”. The servers were kept."
       },

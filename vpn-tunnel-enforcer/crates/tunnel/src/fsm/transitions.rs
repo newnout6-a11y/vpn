@@ -58,6 +58,10 @@ impl Fsm {
             rotation_end
         } else if matches!(self.snap.state, TunnelState::Blocked | TunnelState::Unknown) {
             self.snap.state
+        } else if op.kind == OpKind::Connect && self.clean_network_failure(op, e) {
+            // Lab live-7 F1: a server that carried no traffic leaves nothing of ours behind;
+            // the start page offers «Подключить» at once, not «Снять защиту» on an error.
+            TunnelState::Disconnected
         } else {
             TunnelState::Error
         };

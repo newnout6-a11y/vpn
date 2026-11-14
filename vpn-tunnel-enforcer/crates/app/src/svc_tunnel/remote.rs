@@ -36,6 +36,7 @@ use crate::svc_core::docs::ProtectionDoc;
 
 #[cfg(test)]
 mod elevated;
+mod failover;
 mod gens;
 pub(super) mod guard;
 #[cfg(test)]

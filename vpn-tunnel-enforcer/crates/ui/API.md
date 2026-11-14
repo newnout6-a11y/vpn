@@ -497,6 +497,9 @@ pub trait ServersApi: 'static {      // root component ServersPage; use_servers_
     async fn delete_group(&self, id: &str, delete_servers: bool) -> AppResult<()>;
     async fn check_group_health(&self, id: &str) -> AppResult<HealthReport>;  // { results: Vec<(id, KeyHealth)>,
                                   // not_checked: u32 /* deferred by the handshake budget / probe not started */ }
+    async fn check_group_health_live(&self, id: &str, results: mpsc::UnboundedSender<(String, KeyHealth)>)
+        -> AppResult<HealthReport>;  // p-speed ops3: the same with each result as it lands (default: the
+                                  // plain call); the page's group check uses it, rows update as results land
     async fn check_all_health(&self, results: mpsc::UnboundedSender<(String, KeyHealth)>)
         -> AppResult<HealthReport>;  // «Проверить все» (RU-2026 item 6): every server not removed by the user,
                                   // through itself under each name's budget; results stream; a dropped call

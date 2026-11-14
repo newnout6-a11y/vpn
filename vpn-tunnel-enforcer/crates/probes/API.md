@@ -169,7 +169,10 @@ time, list order), each chain first waits out its endpoint's budget (`HandshakeB
 the 3-a-minute window, the `FREEZE_BACKOFF` hold) without holding a probe, then takes one of
 `CONCURRENCY` probes; a key that cannot be checked (deferred, setup failure) ends its chain. It
 never fails: `until` or `stop` drops the probes in flight (not checked) and answers what finished;
-`on_result` sees each result as it lands (completion order).
+`on_result` sees each result as it lands (completion order). p-speed ops3: the app's group check
+runs through it too (no probe ever waits for a budget while holding a slot).
+`HandshakeBudget::wait_for(&Endpoint) -> Duration` is public (p-speed F4: the app's gate answers
+"would a handshake wait now" from it; nothing is reserved).
 One check = one budgeted handshake (`discipline::budget`, wait ≤ `KEY_WAIT`, else `Err`
 `probes.discipline.deferred`: not checked, no result in a batch), the probe engine, then ONE
 connection through it: the Cloudflare trace (exit IP / country) and a 64 KiB transfer
@@ -236,6 +239,9 @@ impl IpMonitor {
     pub fn stop(&self);  pub fn set_interval(&self, every: Duration) -> bool;   // clamped; true = rescheduled
     pub async fn refresh(&self, conn: ConnId) -> IpEvidence;              // UI refresh, never adopts
     pub async fn adopt_baseline(&self, conn: ConnId, expected: Option<IpAddr>, cancel: &CancellationToken) -> Result<IpAddr, AdoptError>;
+    pub async fn adopt_baseline_after(&self, conn: ConnId, expected: Option<IpAddr>, home: impl Future<Output = ()>,
+        cancel: &CancellationToken) -> Result<IpAddr, AdoptError>;   // p-speed conn3: the exit read runs while
+        // `home` re-reads the real IP (`set_real_ip`); judged once both are done (an exit equal to it is refused)
     pub fn set_real_ip(&self, ip: Option<IpAddr>);  pub fn invalidate_baseline(&self);
     pub fn suspend(&self) -> SuspendGuard;  pub fn is_suspended(&self) -> bool;   // guards nest; Drop resumes
     pub fn evidence(&self) -> IpEvidence;   pub fn subscribe(&self) -> watch::Receiver<IpEvidence>;

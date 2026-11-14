@@ -17,7 +17,7 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{Creds, OutboundFault, ProxyKind};
 use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
-use vpnte_core::net::{HostPort, Route, client_for};
+use vpnte_core::net::{HostPort, Route, builder_for};
 use vpnte_engine::clash_api::{ClashApi, ClashEndpoint};
 use vpnte_engine::singbox_process::{ExitInfo, SingBoxProcess, StartError, StopError};
 use vpnte_engine::slot::{Slot, SlotEndpoint};
@@ -89,6 +89,14 @@ pub trait Engines: Send + Sync {
     async fn select(&self, clash: &ClashEndpoint, slot: Slot) -> AppResult<()>;
     /// `(connection id, downloaded bytes)` of the open connections leaving through the upstream.
     async fn upstream_downloads(&self, clash: &ClashEndpoint) -> AppResult<Vec<(String, u64)>>;
+    /// The same for the connections leaving through Xray slot `slot` only.
+    async fn slot_downloads(
+        &self,
+        clash: &ClashEndpoint,
+        slot: Slot,
+    ) -> AppResult<Vec<(String, u64)>>;
+    /// A new handshake to `server` would be admitted now, without waiting for the budget.
+    fn handshake_ready(&self, server: &Profile) -> bool;
     /// Resolves server names before an engine dials them: Xray's (Xray itself must never
     /// resolve: it would loop) and a native profile's (pinned, see `pin`).
     async fn resolve(
@@ -98,12 +106,16 @@ pub trait Engines: Send + Sync {
         cancel: &CancellationToken,
     ) -> Result<Resolved, ResolveFault>;
     /// Public IPv4 seen through an authenticated loopback SOCKS listener (a staged slot): each
-    /// echo request is a new handshake to `server`, the slot's upstream.
+    /// echo request is a new handshake to `server`, the slot's upstream. `settle`: when the
+    /// balancer of a provider graph behind the listener has judged its members ([`settle_of`]).
+    ///
+    /// [`settle_of`]: super::start::settle_of
     async fn egress_via(
         &self,
         server: &Profile,
         port: u16,
         creds: &Creds,
+        settle: Option<Duration>,
         cancel: &CancellationToken,
     ) -> AppResult<IpAddr>;
     /// Public IPv4 seen through the running tunnel: the default route under the TUN, the
@@ -140,6 +152,8 @@ pub trait HandshakeGate: Send + Sync {
     /// Waits for a handshake slot to `server`; `Err` = not now (the budget's "retry in N s") or
     /// cancelled.
     async fn admit(&self, server: &Profile, cancel: &CancellationToken) -> AppResult<()>;
+    /// [`HandshakeGate::admit`] would not wait now.
+    fn ready_now(&self, server: &Profile) -> bool;
 }
 
 #[async_trait]
@@ -208,7 +222,11 @@ const ECHO_URLS: [&str; 2] = ["https://api.ipify.org", "https://ifconfig.me/ip"]
 const EGRESS_VIA: Budget = Budget {
     total: Duration::from_secs(15),
     hedge: Duration::from_secs(5),
+    settle: None,
 };
+/// What a balanced route's last request gets after the settle point: a first answer through a
+/// live member took 0.7-6 s in the lab (live-7).
+const AFTER_SETTLE: Duration = Duration::from_secs(8);
 
 /// How long an egress proof may take, and when the next echo service joins a first one that
 /// has not answered yet: the first keeps running (on a slow path its answer is still the first
@@ -217,6 +235,9 @@ const EGRESS_VIA: Budget = Budget {
 pub(super) struct Budget {
     pub total: Duration,
     pub hedge: Duration,
+    /// When a balancer behind the route has judged its members (provider graphs, lab live-7 F1):
+    /// one more request then, beside the two before it.
+    pub settle: Option<Duration>,
 }
 
 /// The engine executables a runtime starts. Canonical install paths: the WFP permits match the
@@ -373,6 +394,19 @@ impl EngineFeed {
     }
 }
 
+/// The egress proof's budget through a route a balancer may pick for: long enough for one
+/// request after the settle point.
+fn via_budget(settle: Option<Duration>) -> Budget {
+    match settle {
+        None => EGRESS_VIA,
+        Some(at) => Budget {
+            total: EGRESS_VIA.total.max(at + AFTER_SETTLE),
+            settle: Some(at),
+            ..EGRESS_VIA
+        },
+    }
+}
+
 /// Why no address came back from the echo services: the source of their `egressUnknown` error,
 /// so a caller can tell a silent route from one that answered (audit mihomo-b3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -408,33 +442,43 @@ async fn echo(
     admit: Option<(&dyn HandshakeGate, &Profile)>,
     cancel: &CancellationToken,
 ) -> AppResult<IpAddr> {
-    let client = client_for(route, budget.total)?;
+    // Offline certificate checks: the online one stalls under the kill switch's DNS block.
+    let client = vpnte_base::http::offline(builder_for(route, budget.total)?)
+        .build()
+        .map_err(|e| AppError::internal(e.without_url()))?;
     // One request: its handshake slot first (with `admit`), then a plain-text address.
     let ask = |url: &str| {
         let request = client.get(url);
+        let service = url.to_owned();
         async move {
             if let Some((gate, server)) = admit {
                 gate.admit(server, cancel).await.map_err(Asked::Refused)?;
             }
-            let resp = request
-                .send()
-                .await
-                .map_err(|_| Asked::Echo(EchoFailure::NoReply))?;
-            let text = if resp.status().is_success() {
-                resp.text().await.ok()
-            } else {
-                None
+            let sent = std::time::Instant::now();
+            let answer = match request.send().await {
+                Ok(resp) if resp.status().is_success() => resp
+                    .text()
+                    .await
+                    .ok()
+                    .and_then(|t| t.trim().parse::<IpAddr>().ok())
+                    .ok_or(EchoFailure::NoAddress),
+                Ok(_) => Err(EchoFailure::NoAddress),
+                Err(_) => Err(EchoFailure::NoReply),
             };
-            text.and_then(|t| t.trim().parse::<IpAddr>().ok())
-                .ok_or(Asked::Echo(EchoFailure::NoAddress))
+            let ms = u64::try_from(sent.elapsed().as_millis()).unwrap_or(u64::MAX);
+            tracing::info!(%service, ms, failure = ?answer.err(), "echo request");
+            answer.map_err(Asked::Echo)
         }
     };
     let mut next = urls.iter();
     let mut flight = FuturesUnordered::new();
     let mut why = EchoFailure::NoReply;
-    let (deadline, hedge) = (sleep(budget.total), sleep(budget.hedge));
-    tokio::pin!(deadline, hedge);
+    let settle_at = budget.settle.unwrap_or(budget.total);
+    let (deadline, hedge, settle) = (sleep(budget.total), sleep(budget.hedge), sleep(settle_at));
+    tokio::pin!(deadline, hedge, settle);
     let mut hedged = false;
+    // A balancer behind the route still picks members its observatory has not judged.
+    let mut settled = budget.settle.is_none();
     if let Some(url) = next.next() {
         flight.push(ask(url));
     }
@@ -448,16 +492,27 @@ async fn echo(
                     flight.push(ask(url));
                 }
             }
+            // The observatory has judged every member: one more connection goes where the
+            // balancer points now, whatever still waits on a dead member's first pick.
+            () = &mut settle, if !settled => {
+                settled = true;
+                if let Some(url) = urls.first() {
+                    flight.push(ask(url));
+                }
+            }
             Some(got) = flight.next() => match got {
                 Ok(ip) => return Ok(ip),
                 Err(Asked::Refused(err)) if flight.is_empty() => return Err(err),
-                Err(Asked::Refused(_)) => next = [].iter(),
+                Err(Asked::Refused(_)) => {
+                    next = [].iter();
+                    settled = true;
+                }
                 Err(Asked::Echo(failure)) => {
                     if failure == EchoFailure::NoAddress {
                         why = failure;
                     }
                     // A failure takes the hedge's turn: the next service now, never a third
-                    // request in flight.
+                    // request in flight before the balancer settles.
                     hedged = true;
                     if let Some(url) = next.next() {
                         flight.push(ask(url));
@@ -465,7 +520,7 @@ async fn echo(
                 }
             },
         }
-        if flight.is_empty() && next.len() == 0 {
+        if flight.is_empty() && next.len() == 0 && settled {
             break;
         }
     }
@@ -520,6 +575,25 @@ impl Engines for RealEngines {
         Ok(())
     }
 
+    async fn slot_downloads(
+        &self,
+        clash: &ClashEndpoint,
+        slot: Slot,
+    ) -> AppResult<Vec<(String, u64)>> {
+        let api = ClashApi::new(clash)?;
+        let snapshot = api.connections().await?;
+        Ok(snapshot
+            .connections
+            .into_iter()
+            .filter(|c| c.chains.iter().any(|tag| tag == slot.tag()))
+            .map(|c| (c.id, c.download))
+            .collect())
+    }
+
+    fn handshake_ready(&self, server: &Profile) -> bool {
+        self.gate.as_ref().is_none_or(|gate| gate.ready_now(server))
+    }
+
     async fn upstream_downloads(&self, clash: &ClashEndpoint) -> AppResult<Vec<(String, u64)>> {
         let api = ClashApi::new(clash)?;
         let snapshot = api.connections().await?;
@@ -546,12 +620,13 @@ impl Engines for RealEngines {
         server: &Profile,
         port: u16,
         creds: &Creds,
+        settle: Option<Duration>,
         cancel: &CancellationToken,
     ) -> AppResult<IpAddr> {
         let addr = HostPort::new("127.0.0.1", port)?;
         let route = Route::proxy(ProxyKind::Socks5, &addr, Some(creds));
         let admit = self.gate.as_deref().map(|gate| (gate, server));
-        echo(&route, &ECHO_URLS, EGRESS_VIA, admit, cancel).await
+        echo(&route, &ECHO_URLS, via_budget(settle), admit, cancel).await
     }
 
     async fn egress(
@@ -572,6 +647,7 @@ impl Engines for RealEngines {
         let budget = Budget {
             total: timeout.saturating_mul(2),
             hedge: timeout,
+            settle: None,
         };
         echo(&route, &ECHO_URLS, budget, None, cancel).await
     }
@@ -768,6 +844,7 @@ mod echo_tests {
         Budget {
             total: Duration::from_millis(total_ms),
             hedge: Duration::from_millis(hedge_ms),
+            settle: None,
         }
     }
 
@@ -815,6 +892,67 @@ mod echo_tests {
         assert!(started.elapsed() >= Duration::from_millis(800));
         let hits = hits_a.load(Ordering::SeqCst) + hits_b.load(Ordering::SeqCst);
         assert_eq!(hits, 2);
+    }
+
+    /// A route a provider's balancer picks for: its first `dead` connections land on a member
+    /// that never answers (the observatory has not judged it yet), later ones are answered.
+    async fn balanced(dead: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut n = 0;
+            while let Ok((mut stream, _)) = listener.accept().await {
+                n += 1;
+                let live = n > dead;
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    if !live {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        return;
+                    }
+                    let reply = "HTTP/1.1 200 X
+content-length: 11
+connection: close
+
+192.0.2.44
+";
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    /// Lab live-7 F1: both requests before the balancer settled went to a dead member; one more
+    /// at the settle point goes to a live one and proves the exit. Without a settle point the
+    /// same route stays silent.
+    #[tokio::test]
+    async fn a_balanced_route_is_asked_again_once_it_settled() {
+        let route = balanced(2).await;
+        let settled = Budget {
+            settle: Some(Duration::from_millis(600)),
+            ..budget(3_000, 200)
+        };
+        let started = Instant::now();
+        let ip = ask_all(&[&route, &route], settled).await.unwrap();
+        assert_eq!(ip, "192.0.2.44".parse::<IpAddr>().unwrap());
+        assert!(started.elapsed() >= Duration::from_millis(600));
+        let route = balanced(2).await;
+        let err = ask_all(&[&route, &route], budget(1_200, 200))
+            .await
+            .unwrap_err();
+        assert_eq!(failure(&err), Some(EchoFailure::NoReply));
+    }
+
+    /// A balanced route's budget leaves one full request after the settle point.
+    #[test]
+    fn a_balanced_budget_outlasts_its_settle_point() {
+        assert_eq!(via_budget(None), EGRESS_VIA);
+        let late = via_budget(Some(Duration::from_millis(10_500)));
+        assert_eq!(late.total, Duration::from_millis(10_500) + AFTER_SETTLE);
+        let early = via_budget(Some(Duration::from_millis(5_500)));
+        assert_eq!(early.total, EGRESS_VIA.total);
     }
 
     /// Answers without an address end the proof at once, as "no address" (the route carries

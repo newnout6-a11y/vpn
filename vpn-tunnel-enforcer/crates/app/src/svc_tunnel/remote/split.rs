@@ -4,7 +4,7 @@
 //! drives now, generations that keep increasing when the host changes, the status before its
 //! event, and every event of an operation out before the call returns (a flush through the
 //! forwarder after each call).
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -13,11 +13,14 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{AdaptiveMode, KillSwitchLevel, OutboundFault};
 use vpnte_tunnel::api::{
-    CaptureKind, ExitInfo, OwnerCheck, RestartOptions, Runtime, StartReceipt, StartRequest,
-    StopOptions, StopReceipt, SwitchReceipt, TunError, TunStatus, TunnelEvent, VpnProfile,
+    CaptureKind, ExitInfo, Mode, Origin, OwnerCheck, RestartOptions, Runtime, StartReceipt,
+    StartRequest, StopOptions, StopReceipt, SwitchOutcome, SwitchReceipt, TunError, TunStatus,
+    TunnelEvent, VpnProfile,
 };
+use vpnte_tunnel::runtime::Failover;
 
 use super::Remote;
+use super::failover::ServiceFailover;
 use super::gens::Gens;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +41,11 @@ struct Inner {
     status: watch::Sender<TunStatus>,
     events: broadcast::Sender<TunnelEvent>,
     flush: mpsc::Sender<oneshot::Sender<()>>,
+    /// The server list's live siblings, for Tunnel mode's failover ([`ServiceFailover`]).
+    failover: OnceLock<Arc<dyn Failover>>,
+    /// The last start the service runs (a failover starts a sibling with its settings).
+    last: Mutex<Option<StartRequest>>,
+    service_failover: Mutex<ServiceFailover>,
 }
 
 impl Split {
@@ -55,6 +63,9 @@ impl Split {
             status,
             events: broadcast::channel(256).0,
             flush,
+            failover: OnceLock::new(),
+            last: Mutex::new(None),
+            service_failover: Mutex::default(),
         });
         // Subscribed here, before any call can run: nothing a host sends is missed.
         let sources = [
@@ -71,6 +82,18 @@ impl Split {
 
     pub(in crate::svc_tunnel) fn remote(&self) -> &Remote {
         &self.0.remote
+    }
+
+    /// Tunnel mode fails over through `policy` (speed audit conn2; set once at start-up).
+    pub(in crate::svc_tunnel) fn set_failover(&self, policy: Arc<dyn Failover>) {
+        let _ = self.0.failover.set(policy);
+    }
+
+    /// The service runs `req` now (or no longer anything of ours when `None`).
+    fn service_runs(&self, host: Host, req: Option<StartRequest>) {
+        if host == Host::Service {
+            *self.0.last.lock() = req;
+        }
     }
 
     /// The lifecycle drives the helper service from now on: its stop of a session the service
@@ -171,6 +194,37 @@ async fn forward(
     }
 }
 
+/// Tunnel mode's failover: the next live sibling through the service; a sibling that does not
+/// start hands the outage back to the service's own schedule for the first server.
+async fn fail_over(inner: Arc<Inner>) {
+    let policy = inner.failover.get().cloned();
+    let last = inner.last.lock().clone();
+    let (Some(policy), Some(last)) = (policy, last) else {
+        return;
+    };
+    let cancel = CancellationToken::new();
+    let Some(sibling) = policy.next_live_sibling(&cancel).await else {
+        tracing::info!("tunnel failover: no live sibling; the service keeps its schedule");
+        return;
+    };
+    let (id, name) = (sibling.id.clone(), sibling.profile.name.clone());
+    inner.service_failover.lock().begin(id, name);
+    let req = StartRequest {
+        mode: Mode::DirectVpn { profile: sibling },
+        origin: Origin::Recovery,
+        ..last
+    };
+    tracing::info!("tunnel failover: the server keeps quiet; a sibling starts");
+    match inner.remote.start(req.clone(), cancel).await {
+        Ok(_) => *inner.last.lock() = Some(req),
+        Err(e) => {
+            tracing::warn!(error = %e, "tunnel failover: the sibling did not start");
+            inner.service_failover.lock().abandon();
+            let _ = inner.remote.retry_now().await;
+        }
+    }
+}
+
 impl Inner {
     fn is_active(&self, host: Host) -> bool {
         self.active.lock().0 == host
@@ -185,7 +239,7 @@ impl Inner {
 
     /// Passes one event of `host` on when it is the active one; `false` when its stream closed.
     fn pass(
-        &self,
+        self: &Arc<Self>,
         host: Host,
         event: Result<TunnelEvent, RecvError>,
         status: &mut watch::Receiver<TunStatus>,
@@ -203,12 +257,35 @@ impl Inner {
         match event {
             Ok(e) => {
                 let e = self.active.lock().1.event(e);
-                let _ = self.events.send(e);
+                let _ = self.events.send(e.clone());
+                if host == Host::Service {
+                    self.follow_service(&e);
+                }
             }
             // The lifecycle resyncs from the status, sent again.
             Err(_) => self.mirror(host, status),
         }
         true
+    }
+
+    /// The service's failover step after its `event` ([`ServiceFailover`]).
+    fn follow_service(self: &Arc<Self>, event: &TunnelEvent) {
+        let direct = (self.last.lock().as_ref())
+            .is_some_and(|last| matches!(last.mode, Mode::DirectVpn { .. }));
+        let available = self.failover.get().is_some();
+        let step = self
+            .service_failover
+            .lock()
+            .on_event(event, direct && available);
+        for then in step.then {
+            let _ = self.events.send(then);
+        }
+        if let (Some(id), Some(policy)) = (step.commit, self.failover.get()) {
+            policy.commit(&id);
+        }
+        if step.start {
+            tokio::spawn(fail_over(self.clone()));
+        }
     }
 }
 
@@ -220,14 +297,21 @@ impl Runtime for Split {
         cancel: CancellationToken,
     ) -> Result<StartReceipt, TunError> {
         let host = self.host_for(req.capture);
-        let started = self.activate(host).start(req, cancel).await;
+        let started = self.activate(host).start(req.clone(), cancel).await;
         self.flush().await;
+        if started.is_ok() {
+            self.service_runs(host, Some(req));
+        }
         started.map(|r| self.receipt(r))
     }
 
     async fn stop(&self, opts: StopOptions) -> StopReceipt {
+        let (host, keep) = (self.0.active.lock().0, opts.preserve_last);
         let receipt = self.active().stop(opts).await;
         self.flush().await;
+        if receipt.runtime_stopped && !keep {
+            self.service_runs(host, None);
+        }
         receipt
     }
 
@@ -240,9 +324,12 @@ impl Runtime for Split {
         let host = self.host_for(next.capture);
         let started = self
             .activate(host)
-            .restart_protected(reason, next, opts)
+            .restart_protected(reason, next.clone(), opts)
             .await;
         self.flush().await;
+        if started.is_ok() {
+            self.service_runs(host, Some(next));
+        }
         started.map(|r| self.receipt(r))
     }
 
@@ -269,8 +356,17 @@ impl Runtime for Split {
         cancel: CancellationToken,
         is_owner: OwnerCheck,
     ) -> Option<SwitchReceipt> {
-        let switched = self.active().switch_upstream(next, cancel, is_owner).await;
+        let host = self.0.active.lock().0;
+        let switched = (self.active())
+            .switch_upstream(next.clone(), cancel, is_owner)
+            .await;
         self.flush().await;
+        if switched
+            .as_ref()
+            .is_some_and(|r| r.committed && r.outcome == SwitchOutcome::Success)
+        {
+            self.service_runs(host, Some(next));
+        }
         switched
     }
 

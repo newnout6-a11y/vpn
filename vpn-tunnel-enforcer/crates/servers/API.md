@@ -74,7 +74,9 @@ pub struct ServersDoc { pub active_profile_id: Option<ProfileId>, pub groups: Ve
                         pub linked: BTreeSet<GroupId> /* added from a link: refreshes linked (fix-ks) */,
                         pub fetch_notes: BTreeMap<GroupId, FetchNote> /* p-live-fix */ }
 pub struct FetchNote { pub agent: Option<String> /* UA family that last brought servers: tried first */,
-                       pub said: Option<String> /* the provider's words of the last placeholder answer */ }
+                       pub said: Option<String> /* the provider's words of the last placeholder answer */,
+                       pub route: Option<String> /* p-speed ops2: label of the plan route that last
+                           brought servers (never a spare slot): tried first */ }
                         // Document: "profiles.json", v1, holds secrets
 impl ServersDoc {
     pub fn group(&self, &GroupId) -> Option<&ServerGroup>;     pub fn group_mut(..) -> Option<&mut ServerGroup>;
@@ -322,7 +324,8 @@ impl Hwids {
 pub struct RoutePlan { pub routes: Vec<vpnte_core::net::Route>, pub doh: bool,
                        pub relay: bool /* only "auto": session route + spare slot; never in
                                           "direct only" or "local proxy only" (subs-b5) */ }
-impl RoutePlan { pub fn with_session(self, Option<Route>) -> Self }  // right after direct, never twice
+impl RoutePlan { pub fn with_session(self, Option<Route>) -> Self   // right after direct, never twice
+    pub fn preferring(self, first: Option<&str>) -> Self }   // p-speed ops2: that label first, rest in order
 pub fn route_plan(settings: &Settings) -> RoutePlan;   // auto: direct, user proxy, socks5h 10808, http 10809
 pub trait Relays: Send + Sync {                        // the app lends these (it owns tunnel + slots)
     fn session_route(&self) -> Option<Route>;          // proxy capture's mixed inbound; None in TUN / idle
@@ -333,11 +336,13 @@ pub struct FetchRequest { pub url: Url, pub device: ClientDevice, pub send_hwid:
     pub hwid: Option<String> /* the group's own ID; None = this PC's */,
     pub headers: Vec<(String, String)>, pub fallback: Option<Url>,
     pub from_link: bool /* came from outside: never into the LAN (phones-a11) */,
-    pub prefer_agent: Option<String> /* UA family tried first (FetchNote::agent) */ }  // Debug: host only
+    pub prefer_agent: Option<String> /* UA family tried first (FetchNote::agent) */,
+    pub prefer_route: Option<String> /* route label tried first (FetchNote::route) */ }  // Debug: host only
 impl FetchRequest { pub fn new(url: Url, device: ClientDevice) -> Self }  // no HWID / headers / fallback, typed
 pub struct Fetched { pub report: ParseReport, pub controls: Controls, pub moved_to: Option<Url>,
     pub fallback: Option<Url>, pub via_fallback: bool, pub providers: Vec<ProviderFetch>,
-    pub agent: String /* the UA family that brought the servers */ } // Debug hides URLs
+    pub agent: String /* the UA family that brought the servers */,
+    pub route: Option<String> /* the plan route's label (None: DoH-pinned retry or a spare) */ } // Debug hides URLs
 impl Fetched { pub fn complete(&self) -> bool }        // only duplicates skipped, every provider answered
 pub struct ProviderFetch { pub name: String, pub servers: usize, pub failed: Option<ProviderFailure> }
 pub enum ProviderFailure { Fetch(FetchOutcome), Refused /* not asked: the redirect rules refused its URL */ }
@@ -377,13 +382,17 @@ proxies; a transport failure moves to the next route); on a route that answers, 
 of the device with the HWID headers, then without (`send_hwid` off: only without, and the Happ
 agent without its HWID segment); the user's headers go last and win (their `User-Agent` replaces
 the rotation); every request sends `Cache-Control: no-store`; 429, or 404/410 to every identified
-request, stops; then one DoH-pinned direct retry for domain hosts (not in local-proxy mode).
+request, stops; so does (p-speed ops1) a route whose whole agent walk got the panel's own verdict
+(its placeholders, or an empty / encrypted list under its own headers such as
+`subscription-userinfo`): no other route, DoH retry or spare slot asks it again; then one
+DoH-pinned direct retry for domain hosts (not in local-proxy mode).
 `fetch_request`: the URL; the fallback URL starts when it fails (any failure, 300-599 included) or
 after 9 s, then the first success wins; when both failed and the plan allows it, one slot is
 borrowed from the relays for one more try of the URL, then the fallback (handed back afterwards),
 except a URL whose plan stopped on purpose (429, gone): it is not asked again from another
 address, and nothing left to try = no slot; then the Mihomo `type: http` providers of a Clash
-answer (at most 16, the answering route first, the same limits; a provider URL a redirect could
+answer (at most 16, the answering route first, the same limits; fetched 3 at a time and one per
+host, merged in their order, p-speed ops7; a provider URL a redirect could
 not reach is `Refused`; a cut at 5000 keys marks the answer partial) are merged; a failed provider
 makes the answer incomplete. Private request data (HWID headers, the Happ agent with the HWID,
 the user's headers) goes only to the URL's and the fallback URL's hosts: a provider on another
@@ -420,6 +429,7 @@ pub const DEFAULT_INTERVAL: Duration;                    // 30 min
 pub const PROVIDER_INTERVAL: (Duration, Duration);       // 15 min ..= 24 h (provider value in hours)
 pub const OVERRIDE_INTERVAL: (Duration, Duration);       // 1 min ..= 24 h (user override in minutes)
 pub const FIRST_SWEEP_DELAY: Duration;  pub const SWEEP_PERIOD: Duration;   // 10 s / 60 s
+pub const SWEEP_WIDTH: usize;   // p-speed ops7: 3 due groups at once, one per host at a time
 pub const MISSING_GRACE_MS: UnixMs;                      // 15 min missing before a provider archive
 pub fn refresh_interval(group: &ServerGroup) -> Duration;
 pub fn is_due(group: &ServerGroup, now: UnixMs) -> bool;

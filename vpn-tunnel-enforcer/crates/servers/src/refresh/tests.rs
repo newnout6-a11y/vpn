@@ -728,6 +728,65 @@ async fn edits_during_a_fetch_win() {
     }
 }
 
+/// Speed audit ops2: a refresh remembers the route that brought the servers, and the next
+/// refresh of the group asks it first.
+#[tokio::test]
+async fn a_refresh_remembers_its_route() {
+    let e = env();
+    let server = panel(Arc::new(Mutex::new(200))).await;
+    let id = e.import(&server.url("/feed")).await;
+    e.servers
+        .refresh_group(&e.ctx, &id, Owner::Manual, CancellationToken::new())
+        .await
+        .unwrap();
+    let note = e.servers.read(|doc| doc.fetch_note(&id).cloned()).unwrap();
+    assert_eq!(note.route.as_deref(), Some("direct"));
+    let (_, req) = e.servers.refresh_request(&id).unwrap();
+    assert_eq!(req.prefer_route.as_deref(), Some("direct"));
+}
+
+/// Speed audit ops7: due groups queue per host, in their order.
+#[test]
+fn due_groups_queue_per_host() {
+    let due = [("a", "x.example"), ("b", "y.example"), ("c", "x.example")]
+        .map(|(id, host)| (GroupId::from(id), host.to_owned()));
+    let queues = super::by_host(due.to_vec());
+    let ids: Vec<Vec<&str>> = (queues.iter())
+        .map(|q| q.iter().map(|id| id.0.as_str()).collect())
+        .collect();
+    assert_eq!(ids, [vec!["a", "c"], vec!["b"]]);
+}
+
+/// Speed audit ops7: two slow panels on two hosts are refreshed side by side, one sweep.
+#[tokio::test]
+async fn a_sweep_refreshes_two_hosts_at_once() {
+    let e = env();
+    let mut servers = Vec::new();
+    for host in ["127.0.0.1", "localhost"] {
+        let server = panel(Arc::new(Mutex::new(200))).await;
+        let url = Url::parse(&format!("http://{host}:{}/feed", server.addr.port())).unwrap();
+        e.import(&url).await;
+        server.set_delay(Duration::from_millis(600));
+        servers.push(server);
+    }
+    e.servers
+        .update(|doc| {
+            for g in &mut doc.groups {
+                g.fetch.last_attempt_at = Some(now_ms() - 31 * MIN);
+            }
+            Ok(())
+        })
+        .unwrap();
+    let started = std::time::Instant::now();
+    let report = e.servers.sweep(&e.ctx, &CancellationToken::new()).await;
+    assert_eq!(report.refreshed, 2);
+    assert!(
+        started.elapsed() < Duration::from_millis(1100),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
 /// Servers §7 #9: a sweep over [500, empty, ok] reports one refresh and two failures; the
 /// scheduler stops promptly on shutdown.
 #[tokio::test]

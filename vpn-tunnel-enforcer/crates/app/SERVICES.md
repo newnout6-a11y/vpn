@@ -129,7 +129,12 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
   service installed, the lifecycle's runtime is `svc_tunnel::remote::Split` — Tunnel-mode starts go
   to the service over its pipe (`remote::Remote`; the pipe's server must be the installed exe),
   proxy mode stays in-process — and the kill switch is applied by the service (no in-process WFP,
-  also when elevated); "Always" is offered. A session the service kept after the window crashed is
+  also when elevated); "Always" is offered. Tunnel mode fails over from here (p-speed conn2:
+  `Split::set_failover` with the app's `ServerFailover`, `remote/failover.rs`): a service
+  `RestartScheduled` longer than 15 s (a quiet time after a fault) starts the next live sibling
+  through the service once per outage, named to the lifecycle as `FailedOver` /
+  `PostTrialFailover`; a sibling that does not start hands back to the service's schedule
+  (`retry_now`). A session the service kept after the window crashed is
   taken over by a connect of the same upstream once start-up recovery ran (`take_over`). A link
   lost without a stop (the service restarted) shows the session ended, then re-attaches the same
   way (`Remote::reattach`, p-follow): connects again for about 22 s (Windows restarts a crashed

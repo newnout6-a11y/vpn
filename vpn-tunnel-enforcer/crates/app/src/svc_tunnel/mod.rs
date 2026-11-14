@@ -142,6 +142,8 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
     });
     // Tunnel mode in the service while it is installed, everything else here.
     let runtime = remote::Split::spawn(Arc::new(local), remote.clone(), b.shutdown.child_token());
+    // The service's runtime has no server list: Tunnel mode fails over from here (p-speed).
+    runtime.set_failover(failover.clone());
     let status = runtime.status();
 
     let journal = Arc::new(tweaks::Journal::open(&b.dirs.root, hardening::admit));

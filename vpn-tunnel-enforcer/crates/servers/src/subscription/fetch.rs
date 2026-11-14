@@ -2,7 +2,7 @@
 //! route that answers, the User-Agent variants with the device headers, then without; a route that
 //! fails at transport level is left at once; then a DoH-pinned direct retry; the strongest failure
 //! wins. Mihomo providers of an answer are fetched the same way, the answering route first.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 
 use parking_lot::Mutex;
@@ -14,7 +14,7 @@ use vpnte_base::{AppError, AppResult};
 use vpnte_core::net::{Route, builder_for, is_public_ip};
 use vpnte_core::resolve::{How, resolve_host};
 use vpnte_profiles::clash::HttpProvider;
-use vpnte_profiles::model::ParseReport;
+use vpnte_profiles::model::{ParseReport, SubscriptionMeta};
 use vpnte_profiles::text::{self, ProviderKeys};
 use vpnte_profiles::{clash, device};
 
@@ -508,31 +508,46 @@ impl<'a> Ctx<'a> {
         report: &mut ParseReport,
         cancel: &CancellationToken,
     ) -> Result<Vec<ProviderFetch>, FetchError> {
-        let mut seen: HashSet<[u8; 16]> = report.profiles.iter().map(|p| p.identity()).collect();
-        let mut out = Vec::with_capacity(refs.len());
-        for provider in refs {
-            let Some(url) = http_url(&provider.url) else {
-                continue;
-            };
+        // Speed audit ops7: fetched [`PROVIDER_WIDTH`] at a time and one per host (each panel
+        // sees the load it saw before), then merged in the providers' order, so the cut at
+        // MAX_PROFILES falls where it fell one after another.
+        let width = tokio::sync::Semaphore::new(PROVIDER_WIDTH);
+        let hosts: HashMap<String, tokio::sync::Mutex<()>> = (refs.iter())
+            .filter_map(|p| Some(host_key(&http_url(&p.url)?)))
+            .map(|host| (host, tokio::sync::Mutex::new(())))
+            .collect();
+        let fetches = refs.iter().map(|provider| async {
+            let url = http_url(&provider.url)?;
             let allowed = tokio::select! {
                 biased;
-                () = cancel.cancelled() => return Err(FetchError::Cancelled),
+                () = cancel.cancelled() => return Some(Err(FetchError::Cancelled)),
                 allowed = http::vet_relocation(base, &url, routes.local_dns) => allowed,
             };
             if !allowed {
                 tracing::info!(provider = %provider.name, "subscription: provider URL refused");
-                out.push(ProviderFetch {
-                    name: provider.name.clone(),
-                    servers: 0,
-                    failed: Some(ProviderFailure::Refused),
-                });
-                continue;
+                return Some(Err(FetchError::LocalTarget));
             }
+            let _host = match hosts.get(&host_key(&url)) {
+                Some(lock) => Some(lock.lock().await),
+                None => None,
+            };
+            let Ok(_turn) = width.acquire().await else {
+                return Some(Err(FetchError::Cancelled));
+            };
             let ours = own.iter().any(|o| o.host() == url.host());
             let variants = if ours { &self.own } else { &self.public };
-            let fetched = self
-                .fetch_url(&url, variants, &routes.order, routes.doh, cancel)
-                .await;
+            Some(
+                self.fetch_url(&url, variants, &routes.order, routes.doh, cancel)
+                    .await,
+            )
+        });
+        let fetched_all = futures_util::future::join_all(fetches).await;
+        let mut seen: HashSet<[u8; 16]> = report.profiles.iter().map(|p| p.identity()).collect();
+        let mut out = Vec::with_capacity(refs.len());
+        for (provider, fetched) in refs.iter().zip(fetched_all) {
+            let Some(fetched) = fetched else {
+                continue;
+            };
             let (servers, failed) = match fetched {
                 Ok(got) => (merge(report, &mut seen, got.report), None),
                 Err(FetchError::Failed(outcome) | FetchError::Said(outcome, _)) => {
@@ -550,6 +565,11 @@ impl<'a> Ctx<'a> {
         }
         Ok(out)
     }
+}
+
+/// The lower-case host of a provider URL (one fetch per host at a time).
+fn host_key(url: &Url) -> String {
+    url.host_str().unwrap_or_default().to_ascii_lowercase()
 }
 
 /// Adds the keys of `fetched` that `report` lacks, up to [`MAX_PROFILES`] in all; the first key
@@ -571,6 +591,9 @@ fn merge(report: &mut ParseReport, seen: &mut HashSet<[u8; 16]>, fetched: ParseR
     report.profiles.len() - before
 }
 
+/// Mihomo providers of one answer fetched at once (one per host).
+const PROVIDER_WIDTH: usize = 3;
+
 /// One route (or one pinned address) of the plan.
 struct Attempt<'a> {
     client: &'a reqwest::Client,
@@ -584,6 +607,23 @@ struct Attempt<'a> {
     pin: Option<http::Pin<'a>>,
 }
 
+/// The answer carries the panel's own metadata (`subscription-userinfo`, `profile-title`, …):
+/// the panel itself answered, not a block page or a portal in between.
+fn panel_headers(headers: &[(String, String)]) -> bool {
+    let pairs = headers.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+    text::header_meta(pairs, SubscriptionMeta::default()) != SubscriptionMeta::default()
+}
+
+/// A parsed answer without servers that is the panel's own verdict on this device: its
+/// notices, or an empty or encrypted list under its own headers.
+fn panel_verdict(outcome: FetchOutcome, panel: bool) -> bool {
+    match outcome {
+        FetchOutcome::Placeholder => true,
+        FetchOutcome::EmptyList | FetchOutcome::Unparseable(BodyKind::Encrypted) => panel,
+        _ => false,
+    }
+}
+
 impl Attempt<'_> {
     /// The variants in order on this route until one yields profiles (or providers).
     async fn run(
@@ -594,6 +634,7 @@ impl Attempt<'_> {
     ) -> Result<Step, FetchError> {
         let identified = variants.iter().filter(|v| v.with_ids).count();
         let mut gone = 0;
+        let mut verdict = false;
         for variant in variants {
             let sends = http::Sends {
                 own: &variant.headers,
@@ -618,6 +659,7 @@ impl Attempt<'_> {
                     // A device-limited panel may send an empty list (or its placeholders) with
                     // the reason in headers.
                     let refused = refusal(200, &headers, b"");
+                    let panel = panel_headers(&headers);
                     let parsed = tokio::select! {
                         biased;
                         () = cancel.cancelled() => return Err(FetchError::Cancelled),
@@ -642,6 +684,7 @@ impl Attempt<'_> {
                                 tracing::info!(host = %self.host, route = %self.label,
                                     ua = %variant.label, "subscription: placeholders instead of servers");
                             }
+                            verdict |= panel_verdict(outcome, panel);
                             said = words;
                             refused.unwrap_or(outcome)
                         }
@@ -683,6 +726,13 @@ impl Attempt<'_> {
                 }
                 _ => {}
             }
+        }
+        if verdict {
+            // Speed audit ops1: the panel judged this device on every agent; another route, a
+            // DoH-pinned address or a spare slot only asks it again (20-40 requests).
+            tracing::info!(host = %self.host, route = %self.label,
+                "subscription: the panel's own answer; no other route");
+            return Ok(Step::Stop);
         }
         Ok(Step::Next)
     }

@@ -162,6 +162,10 @@ and the leak check card shows the run, as for runs of its own.
 (protocol 4, psmart-b2): which Smart RU lists the service's last engine start ran
 (`SharedInputs::rule_sets`; `None` while Smart RU is off); the app shows a line in Settings when
 they are not its own set.
+Certificates (p-speed, lab F-3): `Host::serve` turns `vpnte_base::http::verify_offline` on for the
+whole service process: its HTTPS (DoH of server names, exit proofs) runs under the kill switch's DNS
+block, where Windows' online revocation fetch stalls; rustls checks chains and names against the
+bundled Mozilla roots and the Windows root store instead (revocation was soft-fail anyway).
 Smart RU's lists (re-check item 12a): `host::SharedInputs` keeps the last `rule_sets` and checks
 them at the next engine start (`InputsSource::snapshot`): the service's own pinned set as is (no
 copy); another set once per content (`rulesets::handover::accept`: names, 2 MiB cap, canaries and

@@ -12,6 +12,7 @@ use vpnte_engine::xray_process::XrayEvent;
 use super::MAX_RESTARTS;
 use super::actor::{Actor, Crashed, Phase, Retained, Session};
 use super::crash::{CrashAction, CrashFacts, decide, frozen_server};
+use super::engines::{EchoFailure, echo_failure};
 use crate::api::{FailoverCause, Mode, Origin, StartRequest, TunStatusKind, TunnelEvent};
 
 /// Xray slot restarts: backoff per attempt, at most three in this window (xray-engine §3).
@@ -23,6 +24,9 @@ const SLOT_BACKOFF: [Duration; 3] = [
 const SLOT_WINDOW: Duration = Duration::from_secs(60);
 /// Failover candidates tried per exhausted window.
 const FAILOVER_TRIES: usize = 5;
+/// Traffic this recent through the crashed session rules a frozen server out (speed audit
+/// conn2): a server that just answered is not inside a freeze window.
+const RECENT_TRAFFIC: Duration = Duration::from_secs(30);
 
 impl Actor {
     /// The running core exited (our own stops never reach this: they drop the exit watch).
@@ -51,6 +55,13 @@ impl Actor {
         let fault = match &session.slots {
             Some(_) => None,
             None => session.core.recent_fault(),
+        };
+        let fault = match fault {
+            Some(fault) if self.carried_recently(&session) => {
+                tracing::info!(?fault, "crash right after traffic: restart at the backoff");
+                None
+            }
+            fault => fault,
         };
         if let Some(id) = frozen_server(&session.req, fault) {
             tracing::warn!(
@@ -130,6 +141,15 @@ impl Actor {
             CrashAction::Block => self.terminal(false).await,
             CrashAction::Release => self.terminal(true).await,
         }
+    }
+
+    /// The session's upstream carried traffic within [`RECENT_TRAFFIC`]: downloads grew or an
+    /// idle probe was answered (its watchdog), or the app saw it answer (outside evidence).
+    fn carried_recently(&self, session: &Session) -> bool {
+        let seen = *session.carried.lock();
+        let ours = seen.is_some_and(|at| at.elapsed() <= RECENT_TRAFFIC);
+        let outside = self.deps.confirmations.as_ref();
+        ours || outside.is_some_and(|c| c.confirmed_within(RECENT_TRAFFIC))
     }
 
     /// What is left of the freeze window of the server a restart of the last start would dial.
@@ -216,6 +236,16 @@ impl Actor {
         {
             // The attempt is consumed; the policy runs again as if the core had exited again.
             tracing::warn!(error = %e, attempt = self.attempt, "recovery start failed");
+            let silent = echo_failure(&e.error) == Some(EchoFailure::NoReply);
+            if silent && self.deps.failover.is_some() && !self.failover_tried {
+                // Lab live-8 L8-2: the server carried nothing at its restart; a sibling comes
+                // first and this server keeps quiet meanwhile (two more silent restarts on it
+                // cost 50 s and then the handshake budget refused the third).
+                if let Some((id, _)) = &self.tried {
+                    let until = Instant::now() + self.deps.timings.freeze;
+                    self.quiet = Some((id.clone(), until));
+                }
+            }
             self.after_crash().await;
         }
     }

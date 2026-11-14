@@ -238,6 +238,37 @@ async fn real_ip_is_refused_as_baseline() {
     m.stop();
 }
 
+/// Speed audit conn3: the exit read runs while the home address is re-read (one wave instead of
+/// two), and the verdict still waits for the home value: an exit equal to it is refused.
+#[tokio::test]
+async fn the_exit_read_runs_beside_the_home_read() {
+    let script = Script::slow(&[Some("203.0.113.7"), Some("198.51.100.1")], 300);
+    let m = monitor(&script);
+    m.start(1, TUN, DEFAULT_INTERVAL);
+    let cancel = CancellationToken::new();
+    let home = |real: &'static str| {
+        let m = m.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            m.set_real_ip(Some(ip(real)));
+        }
+    };
+    let started = std::time::Instant::now();
+    let refused = m
+        .adopt_baseline_after(1, None, home("203.0.113.7"), &cancel)
+        .await;
+    assert_eq!(refused, Err(AdoptError::RealIp));
+    assert!(
+        started.elapsed() < Duration::from_millis(550),
+        "side by side"
+    );
+    let adopted = m
+        .adopt_baseline_after(1, None, home("203.0.113.7"), &cancel)
+        .await;
+    assert_eq!(adopted, Ok(ip("198.51.100.1")));
+    m.stop();
+}
+
 /// AT-07-001 (auto-verify monitor integration): an expected exit that does not show up is
 /// not adopted; the verdict stays indeterminate until the expected exit is read.
 #[tokio::test]

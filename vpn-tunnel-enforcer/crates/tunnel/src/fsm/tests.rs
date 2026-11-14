@@ -694,6 +694,30 @@ fn unconfirmed_start_and_stop_end_in_error() {
     assert_eq!(h.snap().state, TunnelState::Error);
 }
 
+/// Lab live-7 F1: a start that failed on the network and left nothing of ours behind ends
+/// disconnected (the start page offers «Подключить» at once, the failure stays on the
+/// operation); one that left anything running stays an error to clean up.
+#[test]
+fn a_clean_network_failure_leaves_a_way_forward() {
+    let mut h = H::new();
+    assert!(!h.start(|_, _| Effect::Fail(ErrorKind::Network)));
+    let s = h.snap();
+    assert_eq!(
+        (s.state, s.cleanup_required),
+        (TunnelState::Disconnected, false)
+    );
+    assert_eq!(
+        s.operation.and_then(|op| op.category),
+        Some(ErrorKind::Network)
+    );
+    let mut h = H::new();
+    assert!(!h.start(|h, _| {
+        h.native_up(PID);
+        Effect::Fail(ErrorKind::Network)
+    }));
+    assert_eq!(h.snap().state, TunnelState::Error);
+}
+
 /// `degraded` exists only inside connected; proxy failure stays separate from process liveness.
 #[test]
 fn degraded_only_inside_connected() {

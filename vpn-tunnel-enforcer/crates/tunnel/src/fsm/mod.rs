@@ -275,6 +275,12 @@ impl Fsm {
         !self.fault && e.is_some() && previous == e && self.can_confirm_rotation(e)
     }
 
+    /// `op` failed on the network (the server or the path, not our machinery) and `e` proves
+    /// nothing of ours is left: nothing for the user to clean up.
+    fn clean_network_failure(&self, op: &OpMeta, e: Option<Evidence>) -> bool {
+        op.category == Some(ErrorKind::Network) && !self.fault && self.can_confirm_stop(e)
+    }
+
     /// Applies `patch`, then re-derives the evidence fields and fails closed on lost proof.
     fn commit(&mut self, e: Option<Evidence>, patch: impl FnOnce(&mut TunnelSnapshot)) {
         let mut s = self.snap.clone();

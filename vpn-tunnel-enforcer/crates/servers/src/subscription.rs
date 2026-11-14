@@ -110,6 +110,18 @@ pub struct RoutePlan {
 }
 
 impl RoutePlan {
+    /// The plan with the route labelled `first` (the one that last answered) moved to the front;
+    /// the others keep their order behind it, so a failure still falls back to the whole plan.
+    /// The user's bootstrap setting decided which routes are in the plan: nothing joins here.
+    pub fn preferring(mut self, first: Option<&str>) -> Self {
+        let at = first.and_then(|label| self.routes.iter().position(|r| r.label() == label));
+        if let Some(at) = at {
+            let route = self.routes.remove(at);
+            self.routes.insert(0, route);
+        }
+        self
+    }
+
     /// The plan with the session's own route right after direct (first without direct); a route
     /// already in the plan is not repeated. Nothing changes when `relay` is off.
     pub fn with_session(mut self, session: Option<Route>) -> Self {

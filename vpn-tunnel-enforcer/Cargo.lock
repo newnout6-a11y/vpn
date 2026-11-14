@@ -5610,10 +5610,12 @@ dependencies = [
  "anyhow",
  "reqwest",
  "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
+ "webpki-root-certs",
 ]
 
 [[package]]
@@ -5805,6 +5807,7 @@ version = "2.0.0"
 dependencies = [
  "base64 0.23.1",
  "fastrand",
+ "futures-util",
  "hex",
  "parking_lot 0.13.0",
  "reqwest",

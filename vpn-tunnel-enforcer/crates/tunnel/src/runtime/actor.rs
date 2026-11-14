@@ -34,6 +34,9 @@ pub(super) struct SlotSession {
     pub active: Slot,
     /// Public IP each slot reached when it was probed.
     pub egress: [Option<IpAddr>; 2],
+    /// The slot's upstream is a provider's balancer: each connection may leave from another of
+    /// its members, so its exit is no single address (lab live-8 L8-1).
+    pub balanced: [bool; 2],
     /// `dns-bootstrap-in`: candidate server names resolve through it while the TUN is up.
     pub dns_bootstrap: u16,
     /// A stage failed although the previous upstream survived: the standby port may belong to
@@ -62,7 +65,13 @@ pub(super) struct Session {
     pub watch: CancellationToken,
     /// The competing tunnel currently reported (display label).
     pub competing: Option<String>,
+    /// When the upstream last carried traffic as the watchdog saw it (downloads grew, or its
+    /// idle probe was answered): a crash right after that is no frozen server.
+    pub carried: Carried,
 }
+
+/// The shared "last carried traffic" mark of a session.
+pub(super) type Carried = Arc<parking_lot::Mutex<Option<tokio::time::Instant>>>;
 
 /// The core ended unexpectedly: its protection keeps blocking (`Capture::lost`), so the next
 /// start continues it; the crash policy decides what follows.

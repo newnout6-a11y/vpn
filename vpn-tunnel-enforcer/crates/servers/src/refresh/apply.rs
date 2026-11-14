@@ -32,7 +32,9 @@ impl Servers {
                 .ok_or_else(|| AppError::validation(Msg::new("servers.refresh.unusableUrl")))?;
             let mut req = request_of(group, key.clone(), doc.device_id(id));
             req.from_link = doc.linked(id);
-            req.prefer_agent = doc.fetch_note(id).and_then(|n| n.agent.clone());
+            let note = doc.fetch_note(id);
+            req.prefer_agent = note.and_then(|n| n.agent.clone());
+            req.prefer_route = note.and_then(|n| n.route.clone());
             Ok((key, req))
         })
     }
@@ -86,6 +88,7 @@ impl Servers {
             moved_to,
             fallback,
             agent,
+            route,
             ..
         } = fetched;
         let count = report.profiles.len();
@@ -132,6 +135,7 @@ impl Servers {
                 FetchNote {
                     agent: Some(agent),
                     said: None,
+                    route,
                 },
             );
             let group = same_group(doc, id, key)?;

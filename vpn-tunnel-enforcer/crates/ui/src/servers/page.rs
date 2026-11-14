@@ -86,6 +86,7 @@ pub fn ServersPage() -> Element {
     drop(view);
     let pinging = store.ping_task.read().is_some();
     let checking = store.check_task.read().is_some();
+    let checked = *store.check_done.read();
     let number = Page::ALL
         .iter()
         .position(|p| *p == Page::Servers)
@@ -117,6 +118,12 @@ pub fn ServersPage() -> Element {
                     title: if checking { t!("ui.servers.checkAll.stopTitle") } else { t!("ui.servers.checkAll.title") },
                     onclick: move |_| a_check.check_all(),
                     {if checking { t!("ui.servers.checkAll.stop") } else { t!("ui.servers.checkAll.open") }}
+                }
+                if checking {
+                    // Progress as results land (a long list takes minutes under the budget).
+                    span { class: "swiss-mono", role: "status",
+                        {t!("ui.servers.checkAll.progress", count = checked)}
+                    }
                 }
                 Button {
                     kind: ButtonKind::Ghost,

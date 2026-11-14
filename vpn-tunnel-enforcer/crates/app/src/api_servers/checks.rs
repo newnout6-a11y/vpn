@@ -29,7 +29,7 @@ use vpnte_servers::store::HealthUpdate;
 use vpnte_ui::servers::{CountryCheck, HealthReport, KeyHealth};
 
 use super::project::{reason_code, same_wire};
-use super::{Shared, group_not_found, server_not_found, verdict};
+use super::{Shared, group_not_found, server_not_found};
 
 mod list;
 
@@ -248,15 +248,18 @@ pub(super) type Key = (ProfileId, Option<[u8; 16]>);
 type Item = (Key, Option<vpnte_profiles::model::Profile>);
 
 /// Checks the keys of group `id` that the user has not removed (provider-archived keys are
-/// probed: that is the post-trial use) as one `HealthCheck` operation, five probes at a time,
-/// each behind its server's handshake budget; the health records and the classifier verdicts
-/// land in the list, except for rows deleted or re-keyed meanwhile. Keys the budget deferred (or
-/// whose probe did not start) get no result and are counted as not checked; a batch deferred
-/// entirely answers the budget's "retry in N s".
+/// probed: that is the post-trial use) as one `HealthCheck` operation the way «Проверить все»
+/// does (speed audit ops3): chains per server name, each waiting out its name's handshake
+/// budget before it takes one of the probes, so a busy name never holds a probe others could
+/// use; each result goes to `results` (and the list) as it lands. The health records and the
+/// classifier verdicts land in the list, except for rows deleted or re-keyed meanwhile. Keys
+/// left at the deadline get no result and are counted as not checked; a run that could check
+/// nothing answers the first reason (the budget's "retry in N s").
 pub(super) async fn group_health(
     shared: Arc<Shared>,
     id: GroupId,
     cancel: CancellationToken,
+    results: Option<mpsc::UnboundedSender<(String, KeyHealth)>>,
 ) -> AppResult<HealthReport> {
     let backend = shared.backend.clone();
     let rows = backend.servers.read(|doc| {
@@ -277,40 +280,52 @@ pub(super) async fn group_health(
     }
     let submitted = rows.len();
     let tunnel = backend.tunnel()?.clone();
-    let servers = backend.servers.clone();
+    let saver = Arc::new(list::Saver::new(backend.servers.clone()));
+    let until = tokio::time::Instant::now() + key_health::BATCH_DEADLINE;
     let opts = RunOpts {
         source: Source::Ui,
         resource: Some(format!("health:{id}").into()),
         cancel: Some(cancel),
+        timeout: Some(key_health::BATCH_DEADLINE + LIST_COMMIT),
         ..RunOpts::default()
     };
     let checked = backend
         .ops
         .run(FeatureKind::HealthCheck, opts, move |lease| async move {
-            let mut checked = Vec::new();
-            let mut setup = None;
-            for ((device, engine), items) in by_device(rows) {
-                let mut ctx = tunnel.probe_ctx(device);
-                // The row's own engine choice applies to its probe exactly as to its connect.
-                ctx.engine_pref = server_pref(ctx.engine_pref, engine);
-                match key_health::check_many_verdicts(items, &ctx, lease.token()).await {
-                    Ok(found) => checked.extend(found),
-                    Err(HealthError::Setup(err)) => setup = Some(err),
-                    Err(err) => return Err(err.into()),
+            let groups = probe_groups(&tunnel, rows);
+            let report = |key: &Key, check: &KeyCheck| {
+                if let Some(results) = &results {
+                    let _ = results.send((key.0.to_string(), key_health_view(&check.health)));
                 }
-            }
-            if let Some(err) = setup.filter(|_| checked.is_empty()) {
+                saver.add(key, check);
+            };
+            let found = key_health::check_list(groups, until, lease.token(), report).await;
+            if let Some(err) = found.unchecked.filter(|_| found.done.is_empty()) {
                 return Err(err);
             }
             lease.commit(|| {
-                servers.record_health(updates(&checked))?;
-                servers.record_verdicts(verdict::updates(&checked))?;
-                Ok(checked)
+                saver.finish()?;
+                Ok(found.done)
             })
         })
         .await?;
     shared.publish();
     Ok(health_report(&checked, submitted))
+}
+
+/// The rows' probe contexts: one per client device and engine choice (the row's own engine
+/// choice applies to its probe exactly as to its connect).
+fn probe_groups(
+    tunnel: &Arc<dyn crate::services::TunnelOps>,
+    rows: Vec<ServerRow>,
+) -> Vec<key_health::ListGroup<Key>> {
+    (by_device(rows).into_iter())
+        .map(|((device, engine), items)| {
+            let mut ctx = tunnel.probe_ctx(device);
+            ctx.engine_pref = server_pref(ctx.engine_pref, engine);
+            (ctx, items)
+        })
+        .collect()
 }
 
 /// The list-wide check (RU-2026 item 6): every key the user has not removed, through its own
@@ -348,13 +363,7 @@ pub(super) async fn list_health(
         .ops
         .run(FeatureKind::HealthCheck, opts, move |lease| async move {
             // Every group at once behind the one probe limit (psmall-a1/b5).
-            let groups = (by_device(rows).into_iter())
-                .map(|((device, engine), items)| {
-                    let mut ctx = tunnel.probe_ctx(device);
-                    ctx.engine_pref = server_pref(ctx.engine_pref, engine);
-                    (ctx, items)
-                })
-                .collect();
+            let groups = probe_groups(&tunnel, rows);
             let report = |key: &Key, check: &KeyCheck| {
                 let _ = results.send((key.0.to_string(), key_health_view(&check.health)));
                 saver.add(key, check);

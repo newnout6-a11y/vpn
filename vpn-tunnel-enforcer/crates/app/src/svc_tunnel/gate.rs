@@ -29,6 +29,10 @@ impl HandshakeGate for BudgetGate {
         budget().acquire(&endpoint, EGRESS_WAIT, cancel).await?;
         Ok(())
     }
+
+    fn ready_now(&self, server: &Profile) -> bool {
+        Endpoint::of(server).is_none_or(|endpoint| budget().wait_for(&endpoint).is_zero())
+    }
 }
 
 #[cfg(test)]

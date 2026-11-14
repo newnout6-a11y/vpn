@@ -869,6 +869,76 @@ async fn next_route_is_tried_after_a_dead_one() {
     assert_eq!(seen[0].path, target.as_str());
 }
 
+/// Speed audit ops2: the route that last brought the servers goes first (the others keep their
+/// order behind it); the answer names its route for the next time, and a route the plan does
+/// not hold changes nothing.
+#[tokio::test]
+async fn the_route_that_answered_last_goes_first() {
+    let panel = Server::start(|_| reply("200 OK", &[], KEY_A.as_bytes())).await;
+    let proxy = Server::start(|_| reply("200 OK", &[], KEY_B.as_bytes())).await;
+    let proxy_route = Route::proxy(
+        ProxyKind::Http,
+        &HostPort::parse(&proxy.addr.to_string()).unwrap(),
+        None,
+    );
+    let f = fetcher(vec![Route::Direct, proxy_route.clone()]);
+    let mut req = FetchRequest::new(panel.url("/s"), ClientDevice::Pc);
+    req.prefer_route = Some(proxy_route.label());
+    let got = f
+        .fetch_request(&req, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(got.route, Some(proxy_route.label()));
+    assert!(panel.seen().is_empty(), "direct was not asked first");
+    req.prefer_route = Some("socks5h://127.0.0.1:1".into());
+    let got = f
+        .fetch_request(&req, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(got.route.as_deref(), Some("direct"));
+    let plan = RoutePlan {
+        routes: vec![Route::Direct, proxy_route.clone()],
+        doh: true,
+        relay: false,
+    };
+    let preferred = plan.preferring(Some(&proxy_route.label()));
+    assert_eq!(preferred.routes, [proxy_route, Route::Direct]);
+}
+
+/// Speed audit ops1: the panel's own verdict on this device (its notices, or an empty list under
+/// its own headers) after every agent of the first answering route ends the plan; the route
+/// behind it (here a proxy that would serve the list) is never asked. An empty list without the
+/// panel's headers may be something in between: the next route still runs.
+#[tokio::test]
+async fn the_panels_own_verdict_ends_the_plan() {
+    const NOTICE: &str =
+        "vless://00000000-0000-4000-8000-000000000000@0.0.0.0:1?type=tcp#App%20not%20supported";
+    type Headers = Vec<(&'static str, &'static str)>;
+    let userinfo = vec![("subscription-userinfo", "upload=0; download=0; total=1")];
+    let cases: [(Headers, &str, bool); 3] = [
+        (Vec::new(), NOTICE, false),
+        (userinfo, "", false),
+        (Vec::new(), "", true),
+    ];
+    for (headers, body, asked) in cases {
+        let panel = Server::start(move |_| reply("200 OK", &headers, body.as_bytes())).await;
+        let proxy = Server::start(|_| reply("200 OK", &[], KEY_A.as_bytes())).await;
+        let proxy_addr = HostPort::parse(&proxy.addr.to_string()).unwrap();
+        let f = fetcher(vec![
+            Route::Direct,
+            Route::proxy(ProxyKind::Http, &proxy_addr, None),
+        ]);
+        let answer = fetch(&f, &panel.url("/s")).await;
+        assert_eq!(
+            panel.seen().len(),
+            10,
+            "every agent, with and without the HWID"
+        );
+        assert_eq!(!proxy.seen().is_empty(), asked, "{body:?}");
+        assert_eq!(answer.is_ok(), asked);
+    }
+}
+
 /// AT-00-003: a pre-cancelled token sends nothing; a cancel during a request returns promptly.
 #[tokio::test]
 async fn cancellation_is_prompt() {

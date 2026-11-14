@@ -456,6 +456,48 @@ async fn mihomo_providers_are_fetched_and_merged() {
     assert!(only.complete());
 }
 
+/// Speed audit ops7: providers on two hosts are fetched side by side (each answer takes 1 s
+/// here; `localhost` adds the happy-eyeballs wait after `::1`), and merged in their own order:
+/// one after another would take over 3.3 s.
+#[tokio::test]
+async fn providers_on_two_hosts_are_fetched_side_by_side() {
+    let server = Server::start(|seen| {
+        let port = seen
+            .header("host")
+            .and_then(|h| h.rsplit(':').next())
+            .unwrap_or_default()
+            .to_owned();
+        match seen.path.as_str() {
+            "/clash" => {
+                let doc = format!(
+                    "proxies: []
+proxy-providers:
+  One: {{type: http, url: 'http://127.0.0.1:{port}/p1'}}
+  Two: {{type: http, url: 'http://localhost:{port}/p2'}}
+"
+                );
+                reply("200 OK", &[], doc.as_bytes())
+            }
+            "/p1" | "/p2" => reply("200 OK", &[], &list()),
+            _ => reply("404 Not Found", &[], b""),
+        }
+    })
+    .await;
+    server.set_delay(std::time::Duration::from_millis(1000));
+    let f = plan_fetcher(vec![Route::Direct], false);
+    let started = std::time::Instant::now();
+    let got = run(
+        &f,
+        &FetchRequest::new(server.url("/clash"), ClientDevice::Pc),
+    )
+    .await
+    .unwrap();
+    let names: Vec<&str> = got.providers.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["One", "Two"]);
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_millis(2800), "{took:?}");
+}
+
 /// A move, a fallback URL and a provider URL obey the redirect rules (S-29): no `https` ->
 /// `http`, and a public subscription never points into a private network. IP literals only: no
 /// lookup leaves the machine.

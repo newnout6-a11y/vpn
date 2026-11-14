@@ -62,11 +62,12 @@ impl Confirmations for Always {
     }
 }
 
-/// Direct VPN: no traffic and no outside evidence = upstream down, named by the CURRENT
-/// profile; recent outside evidence keeps it up.
+/// Direct VPN: no traffic, no outside evidence and an idle probe nobody answers = upstream
+/// down, named by the CURRENT profile; recent outside evidence keeps it up.
 #[tokio::test]
 async fn direct_vpn_watchdog_needs_evidence() {
     let w = World::new();
+    w.egress_silent.store(true, Ordering::SeqCst);
     let mut d = deps(&w);
     d.timings.egress_watch = Duration::from_millis(20);
     let h = TunnelHandle::spawn(d);
@@ -74,6 +75,8 @@ async fn direct_vpn_watchdog_needs_evidence() {
     let req = vpn_req(NATIVE_KEY, EnginePref::SingBox);
     h.start(req, CancellationToken::new()).await.unwrap();
     until(&mut events, is_down).await;
+    // One probe, then the checks count failures without dialling the silent server again.
+    assert_eq!(w.count("egress"), 1, "{:?}", w.log());
     let warning = h.status().borrow().warning.clone().expect("reason");
     assert_eq!(warning.key, "tunnel.runtime.watchdog.upstreamDown");
     assert_eq!(warning.args[0].1, "Fake C");
@@ -89,6 +92,48 @@ async fn direct_vpn_watchdog_needs_evidence() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!drain(&mut events).iter().any(is_down));
     assert!(h.status().borrow().proxy_reachable);
+}
+
+/// Lab live-7 F3: a healthy session nobody uses is not dead: with no traffic and no outside
+/// evidence the watchdog asks through the session once, and its answer stands for a while
+/// (one probe, not one per check).
+#[tokio::test]
+async fn an_idle_session_is_judged_by_a_probe() {
+    let w = World::new();
+    let mut d = deps(&w);
+    d.timings.egress_watch = Duration::from_millis(20);
+    let h = TunnelHandle::spawn(d);
+    let mut events = h.subscribe();
+    let req = vpn_req(NATIVE_KEY, EnginePref::SingBox);
+    h.start(req, CancellationToken::new()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!drain(&mut events).iter().any(is_down));
+    assert!(h.status().borrow().proxy_reachable);
+    assert_eq!(w.count("egress"), 1, "{:?}", w.log.lock());
+}
+
+/// Speed audit conn2: a crash right after the session carried traffic is no frozen server, so
+/// the restart comes at the backoff, not after the freeze window.
+#[tokio::test]
+async fn a_crash_right_after_traffic_restarts_at_the_backoff() {
+    let w = World::new();
+    let mut d = deps(&w);
+    d.timings.freeze = Duration::from_secs(30);
+    d.confirmations = Some(Arc::new(Always));
+    let h = TunnelHandle::spawn(d);
+    let mut events = h.subscribe();
+    let req = vpn_req(NATIVE_KEY, EnginePref::SingBox);
+    h.start(req, CancellationToken::new()).await.unwrap();
+    drain(&mut events);
+    w.core(0).crash();
+    let seen = until(&mut events, |e| {
+        matches!(e, TunnelEvent::RestartScheduled { .. })
+    })
+    .await;
+    let Some(TunnelEvent::RestartScheduled { delay }) = seen.last() else {
+        unreachable!("until() ends on the event");
+    };
+    assert!(*delay < Duration::from_secs(1), "{delay:?}");
 }
 
 /// Every config shape the runtime generates (local proxy, native sing-box, Xray slots; WFP

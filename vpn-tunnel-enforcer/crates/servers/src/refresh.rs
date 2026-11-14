@@ -45,6 +45,9 @@ pub const OVERRIDE_INTERVAL: (Duration, Duration) =
 /// Delay of the first background sweep after start, then the sweep period.
 pub const FIRST_SWEEP_DELAY: Duration = Duration::from_secs(10);
 pub const SWEEP_PERIOD: Duration = Duration::from_secs(60);
+/// Due groups a sweep refreshes at once, never two of one host at a time (speed audit ops7: one
+/// stuck panel no longer holds back the rest; each panel sees no more load than before).
+pub const SWEEP_WIDTH: usize = 3;
 
 /// How often `group` is refreshed: the user's override (minutes, 1 min ..= 24 h), else the
 /// provider's `profile-update-interval` (hours per Happ, S-06; 15 min ..= 24 h), else 30 min.
@@ -80,6 +83,25 @@ pub fn is_due(group: &ServerGroup, now: UnixMs) -> bool {
 /// URL that is locked or not `http(s)://host`.
 fn source_of(group: &ServerGroup) -> Option<(Url, ClientDevice)> {
     Some((group.url()?, group.device()?))
+}
+
+/// The host a group's refresh asks (lower case; empty when it has no subscription URL).
+fn host_of(group: &ServerGroup) -> String {
+    let url = group.url();
+    let host = url.as_ref().and_then(Url::host_str).unwrap_or_default();
+    host.to_ascii_lowercase()
+}
+
+/// The due groups queued per host, in their order; hosts in order of their first group.
+fn by_host(due: Vec<(GroupId, String)>) -> Vec<Vec<GroupId>> {
+    let mut queues: Vec<(String, Vec<GroupId>)> = Vec::new();
+    for (id, host) in due {
+        match queues.iter_mut().find(|(h, _)| *h == host) {
+            Some((_, queue)) => queue.push(id),
+            None => queues.push((host, vec![id])),
+        }
+    }
+    queues.into_iter().map(|(_, queue)| queue).collect()
 }
 
 /// The group `id` if it still has the subscription `key` (else a refresh result is stale:
@@ -269,8 +291,8 @@ impl Servers {
         Ok(Some(outcome))
     }
 
-    /// One background pass: purges the archive past 30 days, then refreshes every due group in
-    /// turn as the scheduler (a manual refresh pre-empts it).
+    /// One background pass: purges the archive past 30 days, then refreshes the due groups as
+    /// the scheduler (a manual refresh pre-empts it), [`SWEEP_WIDTH`] at once and one per host.
     pub async fn sweep(
         self: &Arc<Self>,
         ctx: &RefreshCtx,
@@ -280,26 +302,34 @@ impl Servers {
         if let Err(err) = self.purge_expired(now) {
             tracing::warn!("servers: archive purge failed: {err}");
         }
-        let due: Vec<GroupId> = self.read(|doc| {
+        let due: Vec<(GroupId, String)> = self.read(|doc| {
             let due = doc.groups.iter().filter(|g| is_due(g, now));
-            due.map(|g| g.id.clone()).collect()
+            due.map(|g| (g.id.clone(), host_of(g))).collect()
         });
-        let mut out = SweepReport::default();
-        for id in due {
-            if cancel.is_cancelled() {
-                break;
+        let width = tokio::sync::Semaphore::new(SWEEP_WIDTH);
+        let out = parking_lot::Mutex::new(SweepReport::default());
+        let hosts = by_host(due).into_iter().map(|queue| async {
+            for id in queue {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                let Ok(_turn) = width.acquire().await else {
+                    return;
+                };
+                let refreshed = self
+                    .refresh_group(ctx, &id, Owner::Schedule, cancel.child_token())
+                    .await;
+                let mut out = out.lock();
+                match refreshed {
+                    Ok(_) => out.refreshed += 1,
+                    // Cancelled, pre-empted, busy, or the group changed meanwhile: not a failure.
+                    Err(err) if matches!(err.kind, ErrorKind::Cancelled | ErrorKind::Conflict) => {}
+                    Err(_) => out.failed += 1,
+                }
             }
-            match self
-                .refresh_group(ctx, &id, Owner::Schedule, cancel.child_token())
-                .await
-            {
-                Ok(_) => out.refreshed += 1,
-                // Cancelled, pre-empted, busy, or the group changed meanwhile: not a failure.
-                Err(err) if matches!(err.kind, ErrorKind::Cancelled | ErrorKind::Conflict) => {}
-                Err(_) => out.failed += 1,
-            }
-        }
-        out
+        });
+        futures_util::future::join_all(hosts).await;
+        out.into_inner()
     }
 
     /// Starts the background refresher: the first sweep after 10 s, then one 60 s after the

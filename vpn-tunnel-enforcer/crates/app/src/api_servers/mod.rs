@@ -360,7 +360,24 @@ impl ServersApi for ServersBackend {
     async fn check_group_health(&self, id: &str) -> AppResult<HealthReport> {
         let (shared, id) = (self.shared.clone(), GroupId::from(id));
         let shutdown = &self.shared.backend.shutdown;
-        cancellable(shutdown, |token| checks::group_health(shared, id, token)).await
+        cancellable(shutdown, |token| {
+            checks::group_health(shared, id, token, None)
+        })
+        .await
+    }
+
+    async fn check_group_health_live(
+        &self,
+        id: &str,
+        results: mpsc::UnboundedSender<(String, KeyHealth)>,
+    ) -> AppResult<HealthReport> {
+        let (shared, id) = (self.shared.clone(), GroupId::from(id));
+        let shutdown = &self.shared.backend.shutdown;
+        let live = Some(results);
+        cancellable(shutdown, |token| {
+            checks::group_health(shared, id, token, live)
+        })
+        .await
     }
 
     async fn check_all_health(

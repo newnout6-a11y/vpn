@@ -37,6 +37,12 @@ pub(crate) fn refresh_lines(group: &GroupView) -> RefreshLines {
         Some(FetchError::Empty) if !group.send_hwid => {
             (group.last_fetch_error, Some("ui.servers.facts.hwidHint"))
         }
+        // Speed audit ops1: a panel's notices to a device without HWID are its usual answer;
+        // the switch is one click away instead of another round of requests.
+        Some(FetchError::Placeholder) if !group.send_hwid => (
+            group.last_fetch_error,
+            Some("ui.servers.facts.hwidPlaceholder"),
+        ),
         Some(FetchError::DeviceLimit) => (None, None),
         other => (other, None),
     };
@@ -195,7 +201,7 @@ fn HwidHint(id: String, text: String) -> Element {
                 kind: ButtonKind::Link,
                 small: true,
                 onclick: move |_| actions.set_send_hwid(&id, true, true),
-                {t!("ui.servers.request.hwid")}
+                {t!("ui.servers.facts.hwidRefresh")}
             }
         }
     }
@@ -256,6 +262,10 @@ mod tests {
         let lines = refresh_lines(&group(Some(FetchError::HwidRequired), said, false));
         assert_eq!(lines.said.as_deref(), said);
         assert_eq!(lines.hwid_hint, Some("ui.servers.facts.hwidRequired"));
+        // ops1: notices to a device without HWID offer the switch with the words.
+        let lines = refresh_lines(&group(Some(FetchError::Placeholder), said, false));
+        assert_eq!(lines.said.as_deref(), said);
+        assert_eq!(lines.hwid_hint, Some("ui.servers.facts.hwidPlaceholder"));
         let lines = refresh_lines(&group(Some(FetchError::DeviceLimit), said, true));
         assert_eq!((lines.said.as_deref(), lines.device_limit), (said, false));
         let lines = refresh_lines(&group(Some(FetchError::DeviceLimit), None, true));

@@ -117,7 +117,16 @@ impl Actions {
         let (id, name) = (id.to_owned(), name.to_owned());
         store.group_busy(&id, |b| b.health = true);
         self.spawn(async move {
-            let result = api.check_group_health(&id).await;
+            // Rows take their results as they land (speed audit ops3), the toast sums up.
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let run = api.check_group_health_live(&id, tx);
+            futures_util::pin_mut!(run);
+            let result = loop {
+                tokio::select! {
+                    result = &mut run => break result,
+                    Some((sid, health)) = rx.recv() => store.row(&sid, |r| r.health = Some(health)),
+                }
+            };
             store.group_busy(&id, |b| b.health = false);
             match result {
                 Ok(report) => {

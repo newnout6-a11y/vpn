@@ -742,6 +742,100 @@ fn sibling(uri: &str, id: &str) -> crate::api::VpnProfile {
     }
 }
 
+/// Lab live-7 F4: with the name's handshake budget spent, an in-place switch makes no proof
+/// handshake of its own before the select: the traffic the new slot carries proves it (no
+/// wait for the budget); an idle session still gets its probe after the select.
+#[tokio::test]
+async fn a_spent_budget_switch_is_proven_by_its_traffic() {
+    let w = World::new();
+    let h = spawn(&w);
+    h.start(
+        vpn_req(XRAY_KEY, EnginePref::Xray),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("slot start");
+    w.budget_spent.store(true, Ordering::SeqCst);
+    w.slot_traffic.lock()[1] = 4096;
+    let owner: crate::api::OwnerCheck = Arc::new(|| true);
+    let next = vpn_req(XRAY_KEY_2, EnginePref::Xray);
+    let sw = h
+        .switch_upstream(next, CancellationToken::new(), owner.clone())
+        .await
+        .expect("in place");
+    assert_eq!(sw.outcome, SwitchOutcome::Success, "{sw:?}");
+    assert_eq!(w.count("egress-via:203.0.113.11"), 0, "{:?}", w.log());
+    assert_eq!(h.status().borrow().profile_name.as_deref(), Some("Fake B"));
+    // Idle: no traffic through the new slot, so its probe comes after the select.
+    w.slot_traffic.lock()[0] = 0;
+    let back = vpn_req(XRAY_KEY, EnginePref::Xray);
+    let sw = h
+        .switch_upstream(back, CancellationToken::new(), owner)
+        .await
+        .expect("in place");
+    assert_eq!(sw.outcome, SwitchOutcome::Success, "{sw:?}");
+    let log = w.log();
+    let last = |what: &str| log.iter().rposition(|l| l == what);
+    assert!(
+        last("select:a") < last("egress-via:203.0.113.10"),
+        "{log:?}"
+    );
+}
+
+/// Speed audit conn5: under a kill switch that holds the block, a protected restart starts the
+/// core beside slot A's exit proof; a first start proves the exit before the core starts.
+#[tokio::test]
+async fn a_held_restart_starts_the_core_beside_the_proof() {
+    let w = World::new();
+    w.proof_ms.store(150, Ordering::SeqCst);
+    let h = TunnelHandle::spawn(deps(&w));
+    let req = vpn_req(XRAY_KEY, EnginePref::Xray);
+    h.start(req.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+    let first = w.log();
+    let at = |log: &[String], what: &str| log.iter().position(|l| l == what);
+    assert!(
+        at(&first, "proof-done") < at(&first, "spawn:4100"),
+        "{first:?}"
+    );
+    h.restart_protected("test".into(), req, RestartOptions::default())
+        .await
+        .expect("restart");
+    let all = w.log();
+    let second = &all[first.len()..];
+    assert!(
+        at(second, "spawn:4101") < at(second, "proof-done"),
+        "{second:?}"
+    );
+}
+
+/// Lab live-8 L8-2: a recovery start whose server carried nothing goes to a sibling next, not
+/// to two more silent restarts on the same server.
+#[tokio::test]
+async fn a_silent_recovery_start_fails_over_next() {
+    let w = World::new();
+    let siblings = Arc::new(Siblings {
+        world: w.clone(),
+        left: Mutex::new(vec![(sibling(XRAY_KEY_2, "c"), false)]),
+        committed: Mutex::new(Vec::new()),
+    });
+    let mut d = deps(&w);
+    d.failover = Some(siblings.clone());
+    let h = TunnelHandle::spawn(d);
+    let mut events = h.subscribe();
+    let req = vpn_req(XRAY_KEY, EnginePref::Xray);
+    h.start(req, CancellationToken::new()).await.unwrap();
+    drain(&mut events);
+    w.proofs_silent.store(1, Ordering::SeqCst);
+    w.core(0).crash();
+    let failed_over = |e: &TunnelEvent| matches!(e, TunnelEvent::FailedOver { .. });
+    until(&mut events, failed_over).await;
+    assert_eq!(w.count("egress-via:203.0.113.10"), 2, "{:?}", w.log());
+    assert_eq!(w.count("egress-via:203.0.113.11"), 1);
+    assert_eq!(*siblings.committed.lock(), ["c"]);
+}
+
 /// b8: a crash inside the freeze window fails over at once. A candidate that does not start is
 /// never announced; the sibling that starts is named for the session right before its run's
 /// finish (`FailedOver`), committed, and announced once to the user after it started.

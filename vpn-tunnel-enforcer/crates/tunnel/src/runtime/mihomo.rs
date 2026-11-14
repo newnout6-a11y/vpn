@@ -112,7 +112,7 @@ impl Actor {
         work.core = Some(run.clone());
         let creds = plan.socks.creds();
         let probe = engines
-            .egress_via(&plan.profile.profile, plan.socks.port(), creds, op)
+            .egress_via(&plan.profile.profile, plan.socks.port(), creds, None, op)
             .await;
         let err = match probe {
             Ok(_) => {

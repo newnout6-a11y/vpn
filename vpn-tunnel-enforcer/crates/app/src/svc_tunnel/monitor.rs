@@ -191,7 +191,8 @@ impl Confirmations for Alive {
     }
 }
 
-/// Reads the home IP (what a leak would show), then adopts the session's exit.
+/// Adopts the session's exit; its first read runs while the home IP (what a leak would show) is
+/// re-read, and is judged against it (speed audit conn3: SECURE one wave sooner).
 async fn adopt(
     ip: IpMonitor,
     reader: Arc<IpReader>,
@@ -200,11 +201,18 @@ async fn adopt(
     cancel: CancellationToken,
 ) {
     // A failed read keeps the previous home IP: only an exit equal to it could be misjudged.
-    if let Some(sample) = reader.wave(&home, Family::V4, WAVE_BUDGET, &cancel).await {
-        ip.set_real_ip(Some(sample.ip));
-    }
+    let home_read = async {
+        if let Some(sample) = reader.wave(&home, Family::V4, WAVE_BUDGET, &cancel).await {
+            ip.set_real_ip(Some(sample.ip));
+        }
+    };
+    let mut home_read = Some(home_read);
     for attempt in 1..=ADOPT_ATTEMPTS {
-        match ip.adopt_baseline(conn, None, &cancel).await {
+        let adopted = match home_read.take() {
+            Some(home) => ip.adopt_baseline_after(conn, None, home, &cancel).await,
+            None => ip.adopt_baseline(conn, None, &cancel).await,
+        };
+        match adopted {
             Ok(_) => return,
             // Stale: another session took over; RealIp: the verdict is `Failed` and stays so.
             Err(AdoptError::Cancelled | AdoptError::Stale | AdoptError::RealIp) => return,
