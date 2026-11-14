@@ -158,22 +158,22 @@ fn only_a_verified_newer_exe_is_ready() {
     };
     put_feed(b"new exe", NEW, &key);
     assert_eq!(
-        ready(&files, key.keys(), OLD),
+        ready(&files, key.keys(), OLD, 0),
         Some((files.staged(NEW), NEW))
     );
     assert_eq!(
-        ready(&files, key.keys(), NEW),
+        ready(&files, key.keys(), NEW, 0),
         None,
         "not above the running one"
     );
     assert_eq!(
-        ready(&files, TestKey::new().keys(), OLD),
+        ready(&files, TestKey::new().keys(), OLD, 0),
         None,
         "another key"
     );
     put_feed(b"other bytes", NEW, &key);
     assert_eq!(
-        ready(&files, key.keys(), OLD),
+        ready(&files, key.keys(), OLD, 0),
         None,
         "the file is not the listed one"
     );
@@ -184,7 +184,48 @@ fn only_a_verified_newer_exe_is_ready() {
         starts: TRIAL_STARTS,
     };
     write_marker(&files, &spent).expect("record");
-    assert_eq!(ready(&files, key.keys(), OLD), None, "failed here before");
+    assert_eq!(
+        ready(&files, key.keys(), OLD, 0),
+        None,
+        "failed here before"
+    );
+}
+
+/// svcupd-a3: a staged release from a feed older than the newest one accepted stays out (the
+/// owner may have withdrawn it since).
+#[test]
+fn a_staged_release_from_an_older_feed_is_not_ready() {
+    let (_dir, files) = install("seq");
+    let key = TestKey::new();
+    stage_signed(&files, &key, |path, bytes| std::fs::write(path, bytes));
+    assert!(ready(&files, key.keys(), OLD, 5).is_some(), "seq 5 itself");
+    assert_eq!(ready(&files, key.keys(), OLD, 6), None);
+    drop_staged(&files);
+    assert!(!files.staged(NEW).exists() && !files.staging.join(FEED_FILE).exists());
+}
+
+/// svcupd-a7 / a9 / a8: an installer's exe forgets everything the feed staged or swapped; a
+/// release that does not start here is recorded as failed; a fresh exe on trial that cannot work
+/// here gives its trial up and the previous exe is back.
+#[test]
+fn installer_refusal_and_give_up_records() {
+    let (_dir, files) = install("records");
+    let key = TestKey::new();
+    stage_signed(&files, &key, |path, bytes| std::fs::write(path, bytes));
+    refuse(&files, OLD, NEW);
+    assert!(failed_before(&files, NEW));
+    forget(&files);
+    assert_eq!(marker(&files), None);
+    assert!(!files.staged(NEW).exists() && !files.staging.join(SIG_FILE).exists());
+    let staged = files.staged(NEW);
+    std::fs::write(&staged, b"new exe").expect("staged");
+    swap_in(&files, &staged, OLD, NEW).expect("swapped");
+    assert_eq!(at_start(&files, NEW).expect("trial"), AtStart::Trial(1));
+    assert_eq!(give_up(&files).expect("given up"), OLD);
+    assert_eq!(read(&files.exe), b"old exe");
+    assert!(failed_before(&files, NEW));
+    assert_eq!(at_start(&files, OLD).expect("old start"), AtStart::Normal);
+    assert!(failed_before(&files, NEW), "the record stays");
 }
 
 /// A signed feed and the listed exe staged in `files.staging` with `write` (a plain write, or
@@ -211,10 +252,10 @@ fn a_staged_exe_users_could_change_is_never_used() {
     std::fs::create_dir_all(&files.staging).expect("staging");
     let key = TestKey::new();
     stage_signed(&files, &key, |path, bytes| std::fs::write(path, bytes));
-    assert_eq!(ready(&files, key.keys(), OLD), None);
+    assert_eq!(ready(&files, key.keys(), OLD, 0), None);
     let unvetted = SwapFiles::unvetted(&files.exe);
     assert_eq!(
-        ready(&unvetted, key.keys(), OLD),
+        ready(&unvetted, key.keys(), OLD, 0),
         Some((files.staged(NEW), NEW))
     );
 }
@@ -238,7 +279,7 @@ fn elevated_the_staging_folder_is_recreated_admin_only() {
         std::io::Write::write_all(&mut file, bytes)
     });
     assert_eq!(
-        ready(&files, key.keys(), OLD),
+        ready(&files, key.keys(), OLD, 0),
         Some((files.staged(NEW), NEW))
     );
 }

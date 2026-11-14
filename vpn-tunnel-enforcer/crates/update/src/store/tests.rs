@@ -275,9 +275,17 @@ async fn a_failed_trial_goes_back() {
     .unwrap();
     assert_eq!(s.store.record_start("sing-box", false).unwrap(), None);
     assert_eq!(s.store.record_start("sing-box", false).unwrap(), None);
+    assert_eq!(s.store.fallback("sing-box").origin, Origin::Bundled);
     let rolled = s.store.record_start("sing-box", false).unwrap().unwrap();
     assert_eq!((rolled.from, rolled.to), (next(), Choice::Bundled));
     assert_eq!(s.store.resolve("sing-box").origin, Origin::Bundled);
+    // svcupd-a4: the version that failed is remembered; the switch back runs what it said.
+    let record = s.store.state().engine("sing-box").cloned().unwrap();
+    assert_eq!(record.failed, vec![next()]);
+    assert!(matches!(
+        s.store.fallback("sing-box").origin,
+        Origin::Downloaded { version, .. } if version == next()
+    ));
     // Proven: no more automatic switching.
     assert!(s.store.revert_previous("sing-box").unwrap());
     assert_eq!(s.store.record_start("sing-box", false).unwrap(), None);

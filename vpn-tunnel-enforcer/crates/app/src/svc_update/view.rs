@@ -61,7 +61,12 @@ pub(super) fn compute(u: &Updates) -> UpdatesView {
         }),
         progress: inner.progress.clone(),
         note: inner.note.clone(),
-        service: inner.service.as_ref().map(super::service::line),
+        service: inner.service.as_ref().map(|s| {
+            // The release this app's own last check confirmed as the newest: its own.
+            let up_to_date = doc.last_check.as_ref().map(|c| c.result) == Some(Found::UpToDate);
+            let newest = up_to_date.then(|| running.to_string());
+            super::service::line(s, newest.as_deref())
+        }),
     }
 }
 

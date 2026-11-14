@@ -57,6 +57,9 @@ impl EngineStore {
             record.active = to;
             record.previous = Some(Choice::Downloaded(from));
             record.trial = None;
+            if !record.failed.contains(&from) {
+                record.failed.push(from);
+            }
             tracing::warn!(engine = id, %from, %to, "new engine failed its trial, switched back");
             Some(RolledBack {
                 id: id.to_owned(),

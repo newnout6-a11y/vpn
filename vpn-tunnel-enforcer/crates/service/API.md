@@ -28,7 +28,7 @@ vpnte-service.workspace = true
 | `logs` | the service log (p-logs): `init(dir)` (global subscriber, redacted app-log JSON lines in `service\service.log` + `service.1.log`, 1 MiB, each tagged `user` = the session's SID, else the controller's, else none; `"?"` when the host is busy), `attribute(owner)`, `owner_of`, `lines_for(dir, sid)` / `for_user(sid)` (service-wide lines and the caller's own, tag stripped, last `REPLY_LINES` = 2000) |
 | `watchdog` | `Engaged` (a capture that records whether a session's filters are held) and `run` (the WFP watchdog exactly while they are) |
 | `sandbox` | engines may not start programs: each engine process in a nested job with `ActiveProcessLimit = 1` |
-| `update` | its own updates through the signed feed (p-svc-update): `swap` (the exe swap, trial, rollback), `engines` (`ServiceEngines`: Tunnel mode's engine store), `checks`, `source` (`Mirrors`), `Updates` / `UpdatesDeps` (schedule, `Take`), `UpdateDesk`, `RESTART_EXIT` |
+| `update` | its own updates through the signed feed (p-svc-update): `swap` (the exe swap, trial, rollback), `engines` (`ServiceEngines`: Tunnel mode's engine store), `checks`, `source` (`Mirrors`), `trial` (`Judged`: the engines' trial from the host's starts), `Updates` / `UpdatesDeps` (`Take` only, no schedule), `UpdateDesk` / `OwnSession`, `accepted_seq`, `RESTART_EXIT` |
 | `LOCALES` | `&[(ru_json, en_json)]`, keys under `service.*` |
 
 ## Binary verbs
@@ -305,10 +305,14 @@ is dropped when it comes. A per-user uninstaller sends `ForgetMe` as its first f
 The service fetches the signed feed and the files itself, directly over HTTPS from the compiled
 mirrors (`source::Mirrors`; while a TUN session runs the requests go through it like any traffic,
 the service's own exe being permitted), never from a file a client hands over; `vpnte_update::
-feed::verify` with the compiled keys is the only trust. Checks: 2-5 min after start, then daily
-(+ up to 1 h; retries 1 h / 3 h), and on the app's `Take`; one at a time; a feed older than the
-newest accepted `seq` (`service\update.json`, private: `maxSeq`, `checkedAt`) or past 90 days is
-not acted on.
+feed::verify` with the compiled keys is the only trust. It checks only on the app's `Take`, sent
+right before a release's installer runs (the user's «Обновить»; owner decisions 19 and 28, review
+svcupd-b4): no schedule of its own, so the app's switches (automatic checks, download ahead, skipped
+versions) decide, and a rollback stays a rollback (svcupd-a7). One check at a time; a feed older
+than the newest accepted `seq` (`service\update.json`, private: `maxSeq`, `checkedAt`) or past
+90 days is not acted on and reports `Failed`, never "up to date" (svcupd-a10). No request at all
+while the kill switch blocks the machine with no TUN running ("Always" without a session, a held
+block after a drop): the service's own program permit would pass that block (svcupd-b7).
 - Engines for Tunnel mode (`engines::ServiceEngines`): the engine store over `<install>\engines`
   with the install folder as the bundled set and `EngineStore::not_below_bundled` (after an exe
   swap the folder holds the previous release's engine files, which the new exe's pins refuse: the
@@ -320,25 +324,41 @@ not acted on.
   Every engine start reads the active paths (`RealEngines::following`); `Engaged::with_engines`
   permits a version installed after the start of the service in each session (the protection's
   own engine permits are those resolved at start). The previous version stays for one rollback;
-  three failed starts in a row of a fresh version go back (the store's trial, fed from the
-  runtime's `StartBegan` / `StartFinished` and `RealEngines::starts`). A version folder that
-  users could change is not run (bundled instead, logged).
-- Its own exe (`swap`): `feed.service` above its own version (never one that failed its trial
-  here) is downloaded into `<install>\update\` (`paths::secure_dir` before every download:
-  ADMIN_ONLY_DIR_SDDL, re-created when users could change it) with the signed feed kept next to
-  it; `swap::ready` re-verifies feed, size and SHA-256 right before any swap. Engines go first:
-  the exe is staged only when every wanted engine installed. It goes in when no session runs and
-  no session's filters are held, at the service's next start (before anything runs), or at once
-  on a `Take` whose caller owns the running session or finds none (another user's session is
-  never ended: the release waits). The swap: the staged file is flushed, `swap.json` written
+  three failed starts in a row of a fresh version go back (the store's trial, settled by the
+  outcome of each start the host asks for through `trial::Judged` and `RealEngines::starts`, as
+  the app's trial: a start the user cancelled or another start replaced says nothing, svcupd-a5);
+  no switch back to files this build refuses (bundled files after an exe swap, svcupd-b6); a
+  version that failed its trial is never wanted again (`EngineState::failed`, svcupd-a4). A version
+  folder that users could change is not run (bundled instead, logged).
+- Its own exe (`swap`): `feed.service` when it is exactly the asked release, above its own
+  version and never one that failed here, is downloaded into `<install>\update\`
+  (`paths::secure_dir` before every download: ADMIN_ONLY_DIR_SDDL, re-created when users could
+  change it) with the signed feed kept next to it, and run once with a bad argument: only an exe
+  that starts on this Windows and exits with its usage code 2 is staged (`swap::probe`, svcupd-a9;
+  one that does not is recorded as failed). `swap::ready` re-verifies feed (not older than the
+  accepted `seq`: a withdrawn release stays out, svcupd-a3), size and SHA-256 right before any
+  swap; a check that does not stage the asked release drops what is staged. Engines go first and
+  are judged by the build that runs them (svcupd-a6): the release is staged only when the feed's
+  entry of every engine is meant for that release and this build alike (one minor series, inside
+  this build's ranges) and Tunnel mode runs exactly those versions after the engines step; else
+  its installer brings it. It goes in when no session runs or starts (the runtime's
+  `StartBegan` / `StartFinished`) and no session's filters are held, at the service's next start
+  (before anything runs), or at once on a `Take` whose caller owns the session or finds none.
+  Whose session it is (`OwnSession`, the host's current session user) and idle are judged when the
+  ask arrives, again right before the swap and again right before the restart, which waits while
+  it would end someone else's session (svcupd-a1 / a2 / a11). The swap: the staged file is flushed, `swap.json` written
   (synced), the running image gets a second name (`update\vpnte-service.prev.exe`, hard link:
   Windows refuses to replace the entry of a running exe with one name, checked by
   `swap::tests::a_running_exe_is_replaced_through_its_second_name`), the entry is replaced
   (`MoveFileExW` replace + write-through), the service stops with `RESTART_EXIT` (10) and the
   SCM's recovery starts the new file. Trial: every start of the new version counts first
-  (`swap::at_start`, the first thing the service does); a start that runs 30 s ends it; the start
-  after three that did not puts the previous exe back the same way and exits for the SCM again;
-  that version is skipped from then on (the spent marker stays as the record).
+  (`swap::at_start` in `service::run`, before the runtime is built); a start that runs 30 s ends
+  it; the start after three that did not puts the previous exe back the same way and exits for
+  the SCM again; that version is skipped from then on (the spent marker stays as the record). A
+  fresh exe whose install folder holds a wintun.dll its pins refuse (a release that changed
+  Wintun, which the feed never brings) gives its trial up at its first start (`swap::give_up`,
+  svcupd-a8): its installer brings both. The install verb drops whatever the feed staged or
+  swapped (`swap::forget`): an installer's exe is never on trial.
 - Power loss (`swap` docs, tested state by state): before the marker, the old exe and the staged
   file (the next start swaps it in); marker / link written, entry not replaced: the old exe (its
   start drops both, swaps again); entry replaced: the new exe on trial; during a rollback: the new
@@ -348,9 +368,11 @@ not acted on.
   without `Hello` or the controller slot (like `ForgetMe`), and after `Hello` alike; an older
   service answers `badRequest`. Every answer is immediate (no connection waits on a download).
   `Take` = the app runs the installer of `version` next: the service answers `Working` and checks
-  on a task of its own (one at a time; one that ended within 60 s stands in, so many asks never
-  mean many feed reads); when the feed's service is exactly `version` and the ask allowed a
-  restart (it stands 3 min), it swaps and reports `Restarting`. The app follows `State` until the
+  on a task of its own (one at a time; one for the same release that ended within 60 s stands in,
+  so many asks never mean many feed reads); when the feed's service is exactly `version` and the
+  restart ends no one else's session (the ask stands 3 min), it swaps and reports `Restarting`.
+  A `version` that does not parse is dropped before anything logs it (svcupd-b3); one at or below
+  the running service (a rollback) does nothing. The app follows `State` until the
   service answers as `version`, so the installer's `request-install` finds it current
   (`per_user::is_current`: the same bytes) and asks nothing.
 
@@ -444,3 +466,9 @@ untouched.
   session (the engine crate's elevated pin check over the version folder) and the staging folder's
   owner as written by SYSTEM were not executed. The release pipeline's service asset
   (`release.yml`) runs in CI only.
+- p-svc-fix (14.11.2026, review svcupd): engine-only feed updates reach Tunnel mode with the next
+  release's `Take` (the service no longer checks by itself). `swap::probe` ran against a non-exe
+  and the test binary (refused), never against a real service build; a crash inside the SCM
+  dispatch of a fresh exe (before `service::run`) still never counts a trial start, and the
+  installer's `request-install` (`per_user::is_current`, a byte compare; not this package) does
+  not yet treat an unsettled `update\swap.json` as "not current".

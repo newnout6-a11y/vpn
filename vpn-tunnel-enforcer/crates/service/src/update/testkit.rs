@@ -1,11 +1,18 @@
-//! Test helpers of the updater: throw-away signing keys, signed feeds, temp folders.
-use std::io::Cursor;
+//! Test helpers of the updater: throw-away signing keys, signed feeds, engine archives, temp
+//! folders.
+use std::io::{Cursor, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use async_trait::async_trait;
 use sha2::{Digest, Sha256};
-use vpnte_update::feed::{AppChannels, Feed, PublicKey, SCHEMA, ServiceEntry};
+use vpnte_update::feed::{
+    AppChannels, ArchiveEntry, EngineEntry, Feed, MemberEntry, PublicKey, SCHEMA, ServiceEntry,
+};
+use vpnte_update::policy::SINGBOX;
 use vpnte_update::version::Version;
+
+use super::checks::Checks;
 
 /// A throw-away minisign key pair (never the owner's).
 pub struct TestKey(minisign::KeyPair);
@@ -84,5 +91,68 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Engine `id` at `version` for the apps in `app` (a range), with its zip archive: the files
+/// sing-box or Xray ships, a few bytes each.
+pub fn engine(id: &str, version: Version, app: &str) -> (EngineEntry, Vec<u8>) {
+    let members: &[(&str, &[u8])] = if id == SINGBOX {
+        &[("sing-box.exe", b"exe"), ("libcronet.dll", b"dll")]
+    } else {
+        &[("xray.exe", b"xray")]
+    };
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, body) in members {
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file(format!("pkg/{name}"), options)
+            .expect("member");
+        zip.write_all(body).expect("body");
+    }
+    let zipped = zip.finish().expect("zip done").into_inner();
+    let entry = EngineEntry {
+        id: id.into(),
+        version,
+        app: app.parse().expect("range"),
+        severity: Default::default(),
+        notes: Default::default(),
+        tested_on: None,
+        tested: None,
+        archive: ArchiveEntry {
+            url: format!("https://example.invalid/{id}-{version}.zip"),
+            size: zipped.len() as u64,
+            sha256: sha(&zipped),
+        },
+        files: members
+            .iter()
+            .map(|(name, body)| MemberEntry {
+                path: format!("pkg/{name}"),
+                name: (*name).into(),
+                sha256: sha(body),
+            })
+            .collect(),
+    };
+    (entry, zipped)
+}
+
+/// The engine checks, faked: an engine reports the version its folder is named after and
+/// accepts every config.
+pub struct FolderChecks;
+
+#[async_trait]
+impl Checks for FolderChecks {
+    async fn version(&self, _: &str, exe: &Path) -> std::io::Result<Version> {
+        let folder = exe
+            .parent()
+            .and_then(|d| d.file_name())
+            .expect("version folder");
+        Ok(folder
+            .to_string_lossy()
+            .parse()
+            .expect("named after the version"))
+    }
+
+    async fn configs(&self, _: &str, _: &Path) -> Result<(), String> {
+        Ok(())
     }
 }

@@ -98,6 +98,7 @@ pub struct EngineStore;  impl EngineStore {
         -> Result<Installed, InstallError>;   // Unknown | NotAllowed | Feed | Member | VersionMismatch | ConfigRefused | Io
     pub fn revert_previous(&self, id) -> io::Result<bool>;  pub fn revert_bundled(&self, id) -> io::Result<()>;
     pub fn record_start(&self, id, ok: bool) -> io::Result<Option<RolledBack>>;   // 3 failures in a row = back
+    pub fn fallback(&self, id) -> Resolved;   // what a switch back would run now (previous if usable, else bundled)
     pub fn tidy(&self, id);  pub fn prune(&self, id);  pub fn state(&self) -> StoreState;  pub fn version_dir(..);
 }
 pub trait EngineCheck { async fn version(&self, id, exe) -> io::Result<Version>;
@@ -105,7 +106,8 @@ pub trait EngineCheck { async fn version(&self, id, exe) -> io::Result<Version>;
 ```
 Layout: `<root>\<id>\<version>\` = the listed members + `wintun.dll` (copy of the bundled one, for
 sing-box) + the signed feed it came from; `<root>\state.json` (active / previous / trial / installed
-dates). The bundled files are never touched. `resolve` uses a downloaded version only while its
+dates / `failed`: versions whose trial failed here, which the helper service never installs again;
+the app still offers them). The bundled files are never touched. `resolve` uses a downloaded version only while its
 files exist, its stored feed verifies and lists it, it fits the compiled range and the entry's app
 range, and it is newer than the bundled one.
 
@@ -113,7 +115,9 @@ range, and it is newer than the bundled one.
 - App: `svc_core::build` resolves `Backend::engines` through `EngineStore::resolve` (after `tidy`);
   `svc_update` runs the checker, the offers, the downloads, installs and the app's own update.
 - Engine: `pin::check` adds the pins of the feed stored next to a downloaded exe (see engine API).
-- Helper service (`vpnte_service::update`, p-svc-update): the same keys and `feed::verify`; `fetch`,
-  `download`, `check::run` and an `EngineStore` over `<install>\engines` with `not_below_bundled`
-  (after it took a newer release's exe, its folder still holds the previous release's engine
-  files, which the new exe's pins refuse); `Feed::service` for its own exe.
+- Helper service (`vpnte_service::update`, p-svc-update; p-svc-fix): the same keys and
+  `feed::verify`; `fetch`, `download` and an `EngineStore` over `<install>\engines` with
+  `not_below_bundled` (after it took a newer release's exe, its folder still holds the previous
+  release's engine files, which the new exe's pins refuse); `Feed::service` for its own exe. It
+  checks only when the app asks (no `check::run` schedule), skips `EngineState::failed` versions and
+  never switches back to a `fallback` its pins refuse.

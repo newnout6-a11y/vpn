@@ -1,22 +1,24 @@
 //! p-svc-update: `Update` is answered as a first frame without the controller slot (the app asks
 //! on a connection of its own while its tunnel holds the slot) and after `Hello` alike; a host
-//! without an updater answers `badRequest`, as an older service does. A `Take` may restart the
-//! service at once only while no session runs or the session is the caller's own.
+//! without an updater answers `badRequest`, as an older service does. The updater learns whether
+//! the session is the caller's own, asked anew at every call (svcupd-a2).
 use crate::proto::{ServiceUpdateWire, UpdateAsk, UpdatePhase};
-use crate::update::UpdateDesk;
+use crate::update::{OwnSession, UpdateDesk};
 
 use super::*;
 
-/// Records what it was asked and whether it could restart.
+/// Records what it was asked, whether the session was the asker's then, and the last judge.
 #[derive(Default)]
 struct Desk {
     asks: Mutex<Vec<(UpdateAsk, bool)>>,
+    last: Mutex<Option<OwnSession>>,
 }
 
 #[async_trait]
 impl UpdateDesk for Desk {
-    async fn answer(&self, ask: UpdateAsk, may_restart: bool) -> ServiceUpdateWire {
-        self.asks.lock().push((ask, may_restart));
+    async fn answer(&self, ask: UpdateAsk, own: OwnSession) -> ServiceUpdateWire {
+        self.asks.lock().push((ask, own()));
+        *self.last.lock() = Some(own);
         ServiceUpdateWire {
             version: "2.0.0".into(),
             phase: UpdatePhase::Idle,
@@ -55,7 +57,7 @@ async fn update_needs_no_slot_and_never_ends_another_users_session() {
         matches!(reply, Reply::Update(ref s) if s.version == "2.0.0"),
         "{reply:?}"
     );
-    // Idle: a take may restart.
+    // Nobody's session: not the asker's (the updater judges idle itself).
     connect(&h).await.call(take()).await.expect("take");
     // The controller's own session runs: its take may restart, after `Hello` too.
     controller
@@ -69,16 +71,22 @@ async fn update_needs_no_slot_and_never_ends_another_users_session() {
         .call(take())
         .await
         .expect("same user, first frame");
-    // Another Windows user's session: never restarted for an update.
+    // Another Windows user's session: never the asker's.
+    let mine = h.host.session_user.lock().clone();
     *h.host.session_user.lock() = Some("S-1-5-21-0-0-0-1001".into());
     connect(&h).await.call(take()).await.expect("take");
-    let restarts: Vec<bool> = desk
+    let own: Vec<bool> = desk
         .asks
         .lock()
         .iter()
         .skip(1)
-        .map(|(_, may)| *may)
+        .map(|(_, own)| *own)
         .collect();
-    assert_eq!(restarts, vec![true, true, true, false]);
-    assert_eq!(desk.asks.lock()[0], (UpdateAsk::State, true));
+    assert_eq!(own, vec![false, true, true, false]);
+    assert_eq!(desk.asks.lock()[0], (UpdateAsk::State, false));
+    // The judge reads the session's user when it is called, not when the ask came.
+    let judge = desk.last.lock().clone().expect("judge");
+    assert!(!judge());
+    *h.host.session_user.lock() = mine;
+    assert!(judge(), "the asker's session again");
 }

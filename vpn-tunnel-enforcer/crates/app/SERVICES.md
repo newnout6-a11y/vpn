@@ -305,5 +305,8 @@ the installer of release V, `service_first(V)` sends `Take { version: V }` and f
 service's `State` (answered at once; up to 120 s while it checks, 45 s while it restarts): the
 service takes V's service from the signed feed itself and restarts into it (only when no session
 runs or the session is this user's), so the installer's `request-install` finds it current and
-Windows asks nothing. Any other outcome: the installer runs and asks as before. The live server check (`svc_live`) reads the engine paths from
+Windows asks nothing. Any other outcome: the installer runs and asks as before. The service checks
+only on such a `Take` (p-svc-fix: no schedule of its own; Tunnel mode's engines come with a
+release), and the line says «актуальна» only when the service runs the release this app's own last
+check found newest (`service::line`; never from the service's answer alone). The live server check (`svc_live`) reads the engine paths from
 the same watch as `TunnelOps::probe_ctx` (`AppLiveEnv::exes`), so it follows an engine switch.

@@ -197,6 +197,9 @@ fn place(files: &[(&str, Vec<u8>)], service_exe: &[u8]) -> AppResult<PathBuf> {
     }
     let exe = dir.join(EXE_NAME);
     retry(|| pins::write_replacing(&exe, service_exe))?;
+    // The installer's exe is never on trial, and nothing the feed staged outlives it: a rollback
+    // to an older release must not take the newer one back at its next start (svcupd-a7).
+    crate::update::swap::forget(&crate::update::swap::SwapFiles::new(&exe));
     // The service runs Tunnel mode only from a folder users cannot change: checked here too, so a
     // folder it would refuse fails the install with the file and the reason.
     crate::service::trusted_install(dir, &exe)

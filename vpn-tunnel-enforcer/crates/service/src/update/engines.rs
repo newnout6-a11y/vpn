@@ -3,15 +3,15 @@
 //! version folder of its own (the signed feed next to it, so the engine crate's elevated pin check
 //! accepts it); every engine start of a session reads the paths current then ([`exes`]); the
 //! previous version stays for one rollback, and a fresh one that fails three starts in a row goes
-//! back by itself (the store's trial, fed from the runtime's starts here).
+//! back by itself (the store's trial, settled by the outcomes of the host's starts:
+//! [`super::trial`]). A version that failed its trial is never wanted again (svcupd-a4).
 //!
 //! [`exes`]: ServiceEngines::exes
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, watch};
-use tokio_util::sync::CancellationToken;
-use vpnte_tunnel::api::TunnelEvent;
+use parking_lot::Mutex;
+use tokio::sync::watch;
 use vpnte_tunnel::runtime::{EngineExes, EngineStarts, Started};
 use vpnte_update::download::{Verified, sha256_of};
 use vpnte_update::feed::{EngineEntry, Feed};
@@ -33,6 +33,8 @@ pub struct ServiceEngines {
     exes: watch::Sender<EngineExes>,
     /// Why a version folder may not run (`crate::sddl::untrusted_reason`; tests: temp folders).
     vet: fn(&Path) -> Option<String>,
+    /// The runtime's engine starts at the last settled start ([`ServiceEngines::settled`]).
+    seen: Mutex<EngineStarts>,
 }
 
 impl ServiceEngines {
@@ -59,6 +61,7 @@ impl ServiceEngines {
             install: install.to_owned(),
             checks,
             vet,
+            seen: Mutex::default(),
             exes: watch::channel(EngineExes {
                 singbox: PathBuf::new(),
                 xray: PathBuf::new(),
@@ -131,7 +134,8 @@ impl ServiceEngines {
     }
 
     /// The engine entries of `feed` to install: allowed by this build, meant for this version,
-    /// and newer than what Tunnel mode runs (or what it runs no longer passes the pins).
+    /// newer than what Tunnel mode runs (or what it runs no longer passes the pins), and not a
+    /// version whose trial failed here.
     pub(crate) fn wanted<'a>(&self, feed: &'a Feed) -> Vec<&'a EngineEntry> {
         let own = policy::app_version();
         IDS.iter()
@@ -140,9 +144,39 @@ impl ServiceEngines {
                 let fits = engine_allowed(id, entry.version) && entry.app.contains(own);
                 let floor = bundled_version(id).is_none_or(|b| entry.version >= b);
                 let newer = self.current(id).map_or(floor, |c| entry.version > c);
-                (fits && newer).then_some(entry)
+                let failed = self.failed(id, entry.version);
+                (fits && newer && !failed).then_some(entry)
             })
             .collect()
+    }
+
+    fn failed(&self, id: &str, version: Version) -> bool {
+        let state = self.store.state();
+        state
+            .engine(id)
+            .is_some_and(|e| e.failed.contains(&version))
+    }
+
+    /// Release `target`'s engines are ones this build can check (svcupd-a6: engines are judged
+    /// by the build that runs them): the feed's entry of each engine is meant for `target` and
+    /// for this build alike (one minor series) and lies inside this build's range, so what this
+    /// service checks is what `target` runs. Anything else is the release installer's to bring.
+    pub(crate) fn meant_for(&self, feed: &Feed, target: Version) -> bool {
+        let own = policy::app_version();
+        IDS.iter().all(|&id| {
+            feed.engine(id).is_some_and(|e| {
+                e.app.contains(target) && e.app.contains(own) && engine_allowed(id, e.version)
+            })
+        })
+    }
+
+    /// [`ServiceEngines::meant_for`], and Tunnel mode runs exactly those versions now.
+    pub(crate) fn ready_for(&self, feed: &Feed, target: Version) -> bool {
+        let runs = |id| {
+            feed.engine(id)
+                .is_some_and(|e| self.current(id) == Some(e.version))
+        };
+        self.meant_for(feed, target) && IDS.iter().all(|&id| runs(id))
     }
 
     /// Installs `entry` from the verified `archive` (`feed` / `sig`: the signed feed listing
@@ -160,32 +194,15 @@ impl ServiceEngines {
         done
     }
 
-    /// The trial of a fresh version, fed from the runtime: each start that ran a downloaded
-    /// version on trial counts for it (`StartFinished { ok }`); the third failure in a row goes
-    /// back to the previous version for the next start.
-    pub async fn follow_starts(
-        self: Arc<Self>,
-        mut events: broadcast::Receiver<TunnelEvent>,
-        starts: watch::Receiver<EngineStarts>,
-        stop: CancellationToken,
-    ) {
-        let mut before = starts.borrow().clone();
-        loop {
-            let event = tokio::select! {
-                () = stop.cancelled() => return,
-                event = events.recv() => event,
-            };
-            match event {
-                Ok(TunnelEvent::StartBegan { .. }) => before = starts.borrow().clone(),
-                Ok(TunnelEvent::StartFinished { ok, .. }) => {
-                    let after = starts.borrow().clone();
-                    self.count(SINGBOX, &before.singbox, &after.singbox, ok);
-                    self.count(XRAY, &before.xray, &after.xray, ok);
-                    before = after;
-                }
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => return,
-            }
+    /// A start the host asked for ended (svcupd-a5): `Some(true)` it runs, `Some(false)` it failed,
+    /// `None` it was cancelled or replaced. The engine files the runtime started since the last
+    /// settle (`now`) count for a downloaded version on trial: a run ends the trial, the third
+    /// failure in a row goes back to the previous version for the next start.
+    pub fn settled(&self, now: &EngineStarts, ok: Option<bool>) {
+        let before = std::mem::replace(&mut *self.seen.lock(), now.clone());
+        if let Some(ok) = ok {
+            self.count(SINGBOX, &before.singbox, &now.singbox, ok);
+            self.count(XRAY, &before.xray, &now.xray, ok);
         }
     }
 
@@ -195,6 +212,13 @@ impl ServiceEngines {
         if !ran_it || resolved.origin == Origin::Bundled {
             return;
         }
+        // A switch back to files this build refuses would end Tunnel mode, not save it (b6).
+        if !ok && !self.fallback_runs(id) {
+            return tracing::warn!(
+                engine = id,
+                "engine start failed; nothing here to go back to"
+            );
+        }
         match self.store.record_start(id, ok) {
             Ok(Some(back)) => {
                 tracing::warn!(engine = id, from = %back.from, to = %back.to, "engine trial failed: switched back");
@@ -202,6 +226,21 @@ impl ServiceEngines {
             }
             Ok(None) => {}
             Err(err) => tracing::warn!(engine = id, %err, "engine trial not recorded"),
+        }
+    }
+
+    /// What a switch back would run passes here: a previous version in a vetted folder, or
+    /// bundled files that match this build's pins.
+    fn fallback_runs(&self, id: &str) -> bool {
+        let fallback = self.store.fallback(id);
+        match fallback.origin {
+            Origin::Downloaded { .. } => {
+                let dir = fallback.exe.parent().unwrap_or(Path::new(""));
+                [dir, fallback.exe.as_path()]
+                    .into_iter()
+                    .all(|p| (self.vet)(p).is_none())
+            }
+            Origin::Bundled => self.bundled_pinned(id),
         }
     }
 }

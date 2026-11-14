@@ -136,6 +136,26 @@ impl EngineStore {
         }
     }
 
+    /// What a switch back of `id` would run now (the trial's [`EngineStore::record_start`]): the
+    /// previous version while it may run, else the bundled engine.
+    pub fn fallback(&self, id: &str) -> Resolved {
+        let state = self.state();
+        let record = state.engine(id);
+        if let Some(Choice::Downloaded(version)) = record.and_then(|e| e.previous)
+            && let Some(exe) = self.usable(id, version)
+        {
+            let on = record.map_or(0, |e| e.installed_on(version));
+            return Resolved {
+                exe,
+                origin: Origin::Downloaded { version, on },
+            };
+        }
+        Resolved {
+            exe: self.resources.join(exe_name(id).unwrap_or_default()),
+            origin: Origin::Bundled,
+        }
+    }
+
     /// The exe of a downloaded `version` when it may run (see [`EngineStore::resolve`]).
     fn usable(&self, id: &str, version: Version) -> Option<PathBuf> {
         let dir = self.version_dir(id, version);

@@ -4,7 +4,7 @@
 //! the re-checks on wake / network change and the leak self-test (`recheck`) runs only while a
 //! session's filters are held ([`crate::watchdog`]).
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -18,6 +18,7 @@ use vpnte_tunnel::api::{CaptureKind, Runtime, StopOptions};
 use vpnte_tunnel::runtime::{
     Capture, ProxyCapture, RealEngines, RuntimeDeps, Timings, TunCapture, TunnelHandle,
 };
+use vpnte_update::download::sha256_of;
 use vpnte_update::policy;
 use vpnte_update::version::Version;
 use vpnte_winnet::adapters;
@@ -32,7 +33,8 @@ use crate::scm::dispatch::Control;
 use crate::update::engines::ServiceEngines;
 use crate::update::source::Mirrors;
 use crate::update::swap::{self, AtStart, SwapFiles};
-use crate::update::{RESTART_EXIT, Updates, UpdatesDeps};
+use crate::update::trial::Judged;
+use crate::update::{self, RESTART_EXIT, Updates, UpdatesDeps};
 use crate::users::Users;
 use crate::watchdog::{self, Engaged};
 use crate::{install, sddl};
@@ -46,6 +48,17 @@ const NET_SETTLE: Duration = Duration::from_millis(1500);
 
 /// Runs the service until STOP; the exit code goes to the SCM (non-zero = recovery restarts it).
 pub fn run(control: Control) -> u32 {
+    let Ok(exe) = std::env::current_exe() else {
+        return 1;
+    };
+    // First, before anything that could fail (the runtime's build included: svcupd-a9): a fresh
+    // exe counts its trial, a failed one puts the previous exe back (p-svc-update).
+    let swap_files = SwapFiles::new(&exe);
+    let own = policy::app_version();
+    let at_start = staging_trusted(&swap_files).then(|| swap::at_start(&swap_files, own));
+    if let Some(Ok(AtStart::RolledBack(_))) = at_start {
+        return RESTART_EXIT;
+    }
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -53,7 +66,7 @@ pub fn run(control: Control) -> u32 {
         Ok(runtime) => runtime,
         Err(_) => return 1,
     };
-    runtime.block_on(serve(control))
+    runtime.block_on(serve(control, exe, swap_files, at_start))
 }
 
 /// Why the service does not run engines from its folder.
@@ -100,21 +113,16 @@ pub fn trusted_install(dir: &Path, exe: &Path) -> Result<(), FolderFault> {
     Ok(())
 }
 
-async fn serve(control: Control) -> u32 {
-    let Ok(exe) = std::env::current_exe() else {
-        return 1;
-    };
+async fn serve(
+    control: Control,
+    exe: PathBuf,
+    swap_files: SwapFiles,
+    at_start: Option<io::Result<AtStart>>,
+) -> u32 {
     let Some(dir) = exe.parent().map(Path::to_path_buf) else {
         return 1;
     };
-    // First, before anything that could fail: a fresh exe counts its trial, a failed one puts
-    // the previous exe back (p-svc-update).
-    let swap_files = SwapFiles::new(&exe);
     let own = policy::app_version();
-    let at_start = staging_trusted(&swap_files).then(|| swap::at_start(&swap_files, own));
-    if let Some(Ok(AtStart::RolledBack(_))) = at_start {
-        return RESTART_EXIT;
-    }
     let Ok(data) = paths::data_dir() else {
         return 1;
     };
@@ -126,7 +134,20 @@ async fn serve(control: Control) -> u32 {
     // Without its log the service still runs (a full or broken disk must not stop the tunnel).
     let _ = crate::logs::init(&files.private);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "service starting");
-    if update_at_start(&swap_files, own, at_start.as_ref()) {
+    if let Some(Ok(AtStart::Trial(_))) = at_start
+        && wintun_refused(&dir)
+    {
+        // The feed never brings Wintun: a release that changed it needs its installer (a8).
+        match swap::give_up(&swap_files) {
+            Ok(back) => {
+                tracing::warn!(%back, "wintun.dll is not this release's: back to the previous service");
+                return RESTART_EXIT;
+            }
+            Err(err) => tracing::error!(%err, "service update not rolled back"),
+        }
+    }
+    let record = files.private.join("update.json");
+    if update_at_start(&swap_files, own, at_start.as_ref(), &record) {
         return RESTART_EXIT;
     }
     let fault = trusted_install(&dir, &exe).err();
@@ -202,8 +223,10 @@ async fn serve(control: Control) -> u32 {
         control.stop.clone(),
     ));
     let removing = Arc::new(AtomicBool::new(false));
+    // The engines' trial hears how each start the host asked for ended (svcupd-a5).
+    let judged = Judged::new(Arc::new(runtime.clone()), engines.clone(), starts);
     let deps = HostDeps {
-        runtime: Arc::new(runtime.clone()),
+        runtime: Arc::new(judged),
         kill_switch: Arc::new(WfpKillSwitch::new(
             protection.clone(),
             files.protection.clone(),
@@ -236,23 +259,26 @@ async fn serve(control: Control) -> u32 {
         host.report_self_tests(recheck.results.subscribe());
     }
     let restart = Arc::new(AtomicBool::new(false));
+    let level = protection.clone();
     let updates = Updates::new(UpdatesDeps {
         own,
         keys: policy::trusted_keys(),
         source: Arc::new(Mirrors {
             cancel: control.stop.clone(),
         }),
-        engines: engines.clone(),
+        engines,
         files: swap_files.clone(),
-        record: files.private.join("update.json"),
+        record,
         status: runtime.status(),
+        events: runtime.subscribe(),
         holds: held,
+        always: Arc::new(move || level.level_in_force() == KillSwitchLevel::Strict),
+        probe: swap::probe,
         restart: restarter(restart.clone(), control.stop.clone()),
+        stop: control.stop.clone(),
     });
     host.serve_updates(Arc::new(updates.clone()));
-    tokio::spawn(updates.run(control.stop.clone()));
-    let stop = control.stop.clone();
-    tokio::spawn(engines.follow_starts(runtime.subscribe(), starts, stop));
+    tokio::spawn(updates.run());
     if let Some(Ok(AtStart::Trial(_))) = at_start {
         tokio::spawn(settle_trial(swap_files, control.stop.clone()));
     }
@@ -278,9 +304,23 @@ fn staging_trusted(files: &SwapFiles) -> bool {
     !files.staging.exists() || sddl::path_admin_only(&files.staging)
 }
 
+/// A fresh exe on trial needs the Wintun its pins accept, and the feed never brings it: a
+/// wintun.dll in the install folder that is not this release's (one that changed it) means the
+/// release's installer has to run. A missing file is the folder check's to report.
+fn wintun_refused(dir: &Path) -> bool {
+    let sha = std::fs::File::open(dir.join("wintun.dll")).and_then(|mut f| sha256_of(&mut f));
+    sha.is_ok_and(|sha| pins::pin("wintun.dll") != Some(sha))
+}
+
 /// Logs what the start found; `true` = a verified release waits staged for this start and is
-/// now in place (the service exits for the SCM to start it, before anything runs).
-fn update_at_start(files: &SwapFiles, own: Version, found: Option<&io::Result<AtStart>>) -> bool {
+/// now in place (the service exits for the SCM to start it, before anything runs). `record`:
+/// the updater's record (a staged release from a feed older than the accepted one stays out).
+fn update_at_start(
+    files: &SwapFiles,
+    own: Version,
+    found: Option<&io::Result<AtStart>>,
+    record: &Path,
+) -> bool {
     match found {
         None => {
             tracing::warn!(dir = %files.staging.display(), "update folder writable by users: ignored")
@@ -295,7 +335,8 @@ fn update_at_start(files: &SwapFiles, own: Version, found: Option<&io::Result<At
     if found.is_none() || !policy::keys_ready() {
         return false;
     }
-    let Some((staged, version)) = swap::ready(files, policy::trusted_keys(), own) else {
+    let max_seq = update::accepted_seq(record);
+    let Some((staged, version)) = swap::ready(files, policy::trusted_keys(), own, max_seq) else {
         return false;
     };
     match swap::swap_in(files, &staged, own, version) {
@@ -427,5 +468,21 @@ mod tests {
         std::fs::create_dir_all(&files.staging).expect("user-writable folder");
         assert!(!staging_trusted(&files));
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// svcupd-a8: a fresh exe gives its trial up only for a wintun.dll that is there and not
+    /// this release's (the feed never brings Wintun); a missing one is the folder check's.
+    #[test]
+    fn only_another_releases_wintun_ends_a_trial() {
+        let temp = std::env::temp_dir().join(format!("vpnte-svc-wintun-{}", std::process::id()));
+        std::fs::create_dir_all(&temp).expect("temp");
+        assert!(!wintun_refused(&temp), "missing");
+        std::fs::write(temp.join("wintun.dll"), b"another release").expect("wintun");
+        assert!(wintun_refused(&temp));
+        let _ = std::fs::remove_dir_all(&temp);
+        let resources = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources"));
+        if resources.join("wintun.dll").is_file() {
+            assert!(!wintun_refused(resources), "the release's own");
+        }
     }
 }

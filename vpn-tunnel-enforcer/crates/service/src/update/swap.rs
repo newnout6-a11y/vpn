@@ -26,6 +26,10 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::core::HSTRING;
 
+mod probe;
+
+pub use probe::probe;
+
 /// Starts of a fresh exe that may end early; the next one rolls back.
 pub const TRIAL_STARTS: u32 = 3;
 /// A start that runs this long ends the trial.
@@ -151,18 +155,47 @@ pub fn settled(files: &SwapFiles) {
     remove(&files.prev());
 }
 
-/// Removes staged exes other than `keep` (a version the feed passed over while it waited).
-pub fn drop_staged_except(files: &SwapFiles, keep: &str) {
+/// Removes the staged exes and the feed kept with them (a release the newest feed no longer
+/// offers, or one the app did not ask for: svcupd-a3).
+pub fn drop_staged(files: &SwapFiles) {
     let Ok(entries) = std::fs::read_dir(&files.staging) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let staged = name.starts_with("vpnte-service-") && name.ends_with(".exe");
-        if staged && name != keep {
+        if staged || name == FEED_FILE || name == SIG_FILE {
             remove(&entry.path());
         }
     }
+}
+
+/// An installer put its own exe in place: nothing the feed staged or swapped counts any more
+/// (a rollback's older service must not take the newer one back at its start: svcupd-a7).
+pub fn forget(files: &SwapFiles) {
+    drop_staged(files);
+    for path in [files.marker(), files.prev(), files.failed()] {
+        remove(&path);
+    }
+}
+
+/// `to` is never taken here (its exe does not start on this Windows): the same record a spent
+/// trial leaves.
+pub fn refuse(files: &SwapFiles, from: Version, to: Version) {
+    let starts = TRIAL_STARTS;
+    if let Err(err) = write_marker(files, &Marker { from, to, starts }) {
+        tracing::warn!(%err, "refused service update not recorded");
+    }
+}
+
+/// The fresh exe on trial cannot work here (svcupd-a8): its trial ends now, the previous exe goes
+/// back and this version is skipped from then on; the caller exits for the SCM to start it.
+pub fn give_up(files: &SwapFiles) -> io::Result<Version> {
+    let mut m = marker(files).ok_or(io::ErrorKind::NotFound)?;
+    m.starts = TRIAL_STARTS;
+    write_marker(files, &m)?;
+    rollback(files)?;
+    Ok(m.from)
 }
 
 /// `version` failed its trial here earlier: never taken again.
@@ -224,13 +257,20 @@ fn remove(path: &Path) {
 }
 
 /// The staged exe that may go in for the service `own`: the signed feed kept next to it
-/// verifies with `keys` and lists a service above `own` that did not fail its trial here, the
-/// file has that entry's size and SHA-256, and neither it nor the folder admits writes by users
-/// (it will run as SYSTEM).
-pub fn ready(files: &SwapFiles, keys: &[PublicKey], own: Version) -> Option<(PathBuf, Version)> {
+/// verifies with `keys`, is not older than the newest one accepted (`max_seq`: a release the
+/// owner withdrew stays out, svcupd-a3) and lists a service above `own` that did not fail its
+/// trial here, the file has that entry's size and SHA-256, and neither it nor the folder admits
+/// writes by users (it will run as SYSTEM).
+pub fn ready(
+    files: &SwapFiles,
+    keys: &[PublicKey],
+    own: Version,
+    max_seq: u64,
+) -> Option<(PathBuf, Version)> {
     let bytes = std::fs::read(files.staging.join(FEED_FILE)).ok()?;
     let sig = std::fs::read_to_string(files.staging.join(SIG_FILE)).ok()?;
-    let entry = verify(&bytes, &sig, keys).ok()?.service?;
+    let feed = verify(&bytes, &sig, keys).ok()?;
+    let entry = feed.service.filter(|_| feed.seq >= max_seq)?;
     if entry.version <= own || failed_before(files, entry.version) {
         return None;
     }

@@ -40,6 +40,8 @@ windows = { workspace = true, features = ["Win32_System_Services"] }
 minisign = "0.10.0"
 # p-svc-update: test engine archives.
 zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# p-svc-fix: the updater's tests run a day of paused time (no schedule of its own).
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

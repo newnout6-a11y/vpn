@@ -19,7 +19,7 @@ use vpnte_tunnel::api::{CaptureKind, Runtime, StopOptions, TunnelEvent};
 
 use crate::pipe::{ClientCheck, Listener};
 use crate::proto::{ErrorCode, Reply, StatusWire, UpdateAsk, WireError};
-use crate::update::UpdateDesk;
+use crate::update::{OwnSession, UpdateDesk};
 use crate::users::Users;
 
 mod conn;
@@ -70,7 +70,8 @@ pub struct Host {
     state: Arc<tokio::sync::Mutex<()>>,
     unidentified: Arc<Semaphore>,
     /// The user whose start the runtime's last exit and fault belong to: nobody else reads them.
-    session_user: Mutex<Option<String>>,
+    /// Shared with the updater, which asks whose session it is right before it restarts.
+    session_user: Arc<Mutex<Option<String>>>,
     /// The upstream of the last start: `(server id, local proxy)`, for a take-over.
     upstream: Mutex<Option<(Option<String>, Option<SocketAddr>)>>,
     /// The runtime's current native generation (its last `StartBegan`), for a take-over.
@@ -91,7 +92,7 @@ impl Host {
             next_conn: AtomicU64::new(1),
             state: Arc::default(),
             unidentified: Arc::new(Semaphore::new(MAX_UNIDENTIFIED)),
-            session_user: Mutex::new(None),
+            session_user: Arc::default(),
             upstream: Mutex::new(None),
             generation: Arc::default(),
             memory: OnceLock::new(),
@@ -106,8 +107,9 @@ impl Host {
         let _ = self.updates.set(desk);
     }
 
-    /// `user`'s `Update`. The answer may restart the service only while no session runs or the
-    /// session is the caller's own: another Windows user's session never ends for an update.
+    /// `user`'s `Update`. The updater may restart the service only while nothing runs or is
+    /// held, or while the session is the caller's own: another Windows user's session never ends
+    /// for an update. Whose session it is, is asked again at every step (svcupd-a1 / a2).
     async fn update(&self, user: &str, ask: UpdateAsk) -> Result<Reply, WireError> {
         let Some(desk) = self.updates.get().cloned() else {
             let error = WireError::new(
@@ -117,13 +119,9 @@ impl Host {
             );
             return Err(error);
         };
-        let busy = {
-            let status = self.deps.runtime.status();
-            let status = status.borrow();
-            status.running || status.capture.is_some()
-        };
-        let own = self.session_user.lock().as_deref() == Some(user);
-        Ok(Reply::Update(desk.answer(ask, !busy || own).await))
+        let (owner, user) = (self.session_user.clone(), user.to_owned());
+        let own: OwnSession = Arc::new(move || owner.lock().as_deref() == Some(user.as_str()));
+        Ok(Reply::Update(desk.answer(ask, own).await))
     }
 
     /// The status carries the latest of these self-test results (set once, at start-up).

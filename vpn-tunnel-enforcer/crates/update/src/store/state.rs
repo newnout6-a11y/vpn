@@ -68,6 +68,10 @@ pub struct EngineState {
     /// When each downloaded version was installed.
     #[serde(default)]
     pub installed: BTreeMap<String, UnixMs>,
+    /// Versions whose trial failed here (svcupd-a4): the helper service never installs them
+    /// again by itself (the app still offers them; the user decides).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<Version>,
 }
 
 impl EngineState {
@@ -87,6 +91,7 @@ impl Default for EngineState {
             previous: None,
             trial: None,
             installed: BTreeMap::new(),
+            failed: Vec::new(),
         }
     }
 }

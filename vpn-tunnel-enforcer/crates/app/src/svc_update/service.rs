@@ -158,15 +158,18 @@ fn step(state: &ServiceUpdateWire, to: &str) -> Step {
     }
 }
 
-/// The Settings line of a service answer.
-pub(super) fn line(state: &ServiceUpdateWire) -> ServiceLine {
+/// The Settings line of a service answer. «актуальна» only when the service runs `newest`, the
+/// release the app's own last check confirmed as the newest: the service checks only when the
+/// app asks, and its answer after a failed, outdated or refused check, or after a restart, says
+/// nothing about being current (svcupd-a10 / b5). A failed take shows the version only: the
+/// service does not retry by itself, the installer took over.
+pub(super) fn line(state: &ServiceUpdateWire, newest: Option<&str>) -> ServiceLine {
     let target = state.target.clone();
     let state_now = match (state.phase, target) {
-        (UpdatePhase::Idle, _) if state.checked_at.is_some() => ServiceState::Current,
         (UpdatePhase::Working, _) => ServiceState::Working,
         (UpdatePhase::Waiting, Some(target)) => ServiceState::Waiting { target },
         (UpdatePhase::Restarting, Some(target)) => ServiceState::Restarting { target },
-        (UpdatePhase::Failed, _) => ServiceState::Failed,
+        _ if newest == Some(state.version.as_str()) => ServiceState::Current,
         _ => ServiceState::Unchecked,
     };
     ServiceLine {
@@ -211,17 +214,31 @@ mod tests {
         assert_eq!(step(&restarted, to), Step::Taken);
     }
 
-    /// "Up to date" only after a check that found nothing; never without keys or a check.
+    /// "Up to date" only when the service runs the release the app's own check found newest;
+    /// never from the service's answer alone (a failed or outdated check, a restart: svcupd-a10,
+    /// b5), and a failed take claims no retry.
     #[test]
-    fn the_line_claims_only_what_the_service_saw() {
-        let state = |w: ServiceUpdateWire| line(&w).state;
+    fn the_line_claims_only_what_was_seen() {
+        let state = |w: ServiceUpdateWire| line(&w, None).state;
+        let newest = |w: ServiceUpdateWire, v| line(&w, Some(v)).state;
         assert_eq!(
-            state(wire(UpdatePhase::Idle, None, true)),
+            newest(wire(UpdatePhase::Idle, None, true), "2.0.0"),
             ServiceState::Current
         );
         assert_eq!(
-            state(wire(UpdatePhase::Idle, None, false)),
-            ServiceState::Unchecked
+            newest(wire(UpdatePhase::Off, None, false), "2.0.0"),
+            ServiceState::Current,
+            "no keys: the app's check still knows"
+        );
+        assert_eq!(
+            newest(wire(UpdatePhase::Idle, None, true), "2.0.1"),
+            ServiceState::Unchecked,
+            "a newer release exists"
+        );
+        assert_eq!(
+            state(wire(UpdatePhase::Idle, None, true)),
+            ServiceState::Unchecked,
+            "the service's own word is not enough"
         );
         assert_eq!(
             state(wire(UpdatePhase::Off, None, false)),
@@ -245,8 +262,11 @@ mod tests {
         );
         assert_eq!(
             state(wire(UpdatePhase::Failed, None, true)),
-            ServiceState::Failed
+            ServiceState::Unchecked
         );
-        assert_eq!(line(&wire(UpdatePhase::Idle, None, true)).version, "2.0.0");
+        assert_eq!(
+            line(&wire(UpdatePhase::Idle, None, true), None).version,
+            "2.0.0"
+        );
     }
 }
