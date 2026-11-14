@@ -134,7 +134,7 @@ pub struct PowerButton { pub label: Msg /*text = accessible name*/, pub title: M
     pub look: PowerLook, pub waiting: bool /*.is-wait, disabled*/ }
 pub fn power_button(conn: &ConnView) -> PowerButton;
 pub fn cancel_label(conn: &ConnView) -> Option<Msg>;          // None = no cancel button
-pub struct FactValue { pub text: Msg, pub alert: bool, pub dim: bool }
+pub struct FactValue { pub text: Msg, pub alert: bool, pub dim: bool, pub hint: Option<Msg> } // hint: the cell's tooltip
 pub fn mode_fact(soft: bool) -> FactValue;                    // view.fact.modeProxy / modeTunnel
 pub struct SmartFact { pub value: FactValue, pub action: Msg, pub action_aria: Msg }
 pub fn smart_fact(on: bool) -> SmartFact;
@@ -145,6 +145,8 @@ pub struct FirewallStatus { pub state: FwState, pub checking: bool }   // Defaul
 impl FirewallStatus { pub fn in_mode(self, soft: bool) -> Self }       // ProxyHold in Hard -> NeedsAdmin
 pub fn kill_switch_fact(fw: &FirewallStatus) -> FactValue;             // alert: Unknown / NeedsAdmin
 pub fn leak_fact(summary: Verdict, checking: bool) -> FactValue;       // NotChecked -> «—», dim
+pub fn proxy_leak_fact(summary: Verdict, checking: bool, exit_leak: bool) -> FactValue; // Proxy session (p-follow3):
+                                 // Fail -> «Вне прокси» + hint; «Найдены» only when the exit is the real address
 pub struct SubLine { pub text: Msg, pub dash: bool /*«— » prefix*/, pub alert: bool,
     pub flag: Option<String> /*country for the flag coin*/ }
 pub struct ExitLine { pub ip: Option<IpAddr> /*None -> dim «—»*/, pub dim: bool,
@@ -221,6 +223,7 @@ pub struct MascotView { pub mood: Mood, pub fx: Option<Fx>, pub fx_id: u32 /*rep
     pub body: BodyAnim, pub body_id: u32 /*replay on change*/, pub speech: Option<Speech> }
 pub enum MascotEvent {                                 // Copy + PartialEq
     Phase(MascotPhase),          // swiss_phase(..); only a change does something
+    Mode(Option<swiss::Mode>),   // conn.mode, sent before the phase: «Туннель…» lines only in Tunnel mode (p-follow3)
     SpeedBand(f32),              // traffic::speed_band(sample.down_bps()); repeats are ignored
     SessionAge(Option<Duration>),// on a new conn.started_at: Some(fmt::elapsed(t, now_ms())), None = no session
     Activity { on_mascot: bool },// window mousemove/mousedown/keydown/wheel; target inside [data-mascot]

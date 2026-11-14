@@ -21,6 +21,7 @@ mod ops;
 mod peers;
 mod probe;
 mod remote;
+pub(crate) mod scope;
 mod soft;
 mod takeover;
 #[cfg(test)]
@@ -76,6 +77,8 @@ pub struct Built {
     pub feed: EngineFeed,
     /// The one tweak journal (its records are recovery state in the diagnostics export).
     pub journal: Arc<tweaks::Journal>,
+    /// The app scope the running session started with (leak runs, self-test, Apps page).
+    pub run_scope: scope::RunScope,
 }
 
 /// Builds the tunnel service and its automation. Runs inside the tokio runtime (it spawns the
@@ -159,11 +162,13 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
     // Every TUN session, in this process or in the helper service, gets the leak self-test and
     // the re-checks after a wake or a network change: the canary runs here, the self-test and the
     // filter check where the filters are (RU audit item 11).
+    let run_scope = scope::RunScope::follow(status.clone(), b.settings.clone());
     let leaks = Some(leaks::Leaks::spawn(
         status.clone(),
         b.settings.clone(),
         &remote,
         guard.wfp.is_some(),
+        run_scope.clone(),
     ));
     let auto_reader = reader.clone();
     let ip = Arc::new(monitor::IpWatch::new(
@@ -273,6 +278,8 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
                         let connect = |t| takeover::connect_kept(&automation, t);
                         takeover::take_over(&split, &lifecycle, kept, connect).await;
                     }
+                    // From now on a stop while idle is heard through the link (lab F8).
+                    tokio::spawn(split.remote().clone().keep_linked());
                     takeover::reattach(&split, &lifecycle, &automation, losses, cancel).await;
                 }
             });
@@ -319,6 +326,7 @@ pub fn build(backend: &Arc<Backend>) -> AppResult<Built> {
         domains,
         feed,
         journal,
+        run_scope,
     })
 }
 

@@ -12,6 +12,7 @@ use super::model::{LogSource, LogTail, TailNote};
 use super::state::use_remembered;
 use super::table::use_tz;
 use super::{COPIED_FLASH, JOURNAL_REFRESH, tr_now, use_api};
+use crate::helper::Service;
 use crate::lang::{tr, translate_now};
 use crate::pages::use_page_active;
 use crate::t;
@@ -49,6 +50,17 @@ fn note_key(note: TailNote) -> Option<&'static str> {
         TailNote::ServiceLines => Some("logs.tech.note.serviceLines"),
         TailNote::NoService => Some("logs.tech.noService"),
         TailNote::OldService => Some("logs.tech.oldService"),
+        TailNote::ServiceStarting | TailNote::ServiceStopped => paused_key(note),
+    }
+}
+
+/// The helper's own line for a service that is starting or stopped: the same words as on
+/// Settings and the start page, never «не установлена» (p-follow3).
+pub(super) fn paused_key(note: TailNote) -> Option<&'static str> {
+    match note {
+        TailNote::ServiceStarting => Service::Starting.pause_key(),
+        TailNote::ServiceStopped => Service::Stopped.pause_key(),
+        _ => None,
     }
 }
 
@@ -238,6 +250,10 @@ fn lines_body(
             let (title, detail) = match tail.note {
                 TailNote::NoService => (t!("logs.tech.noService"), None),
                 TailNote::OldService => (t!("logs.tech.oldService"), None),
+                note @ (TailNote::ServiceStarting | TailNote::ServiceStopped) => (
+                    paused_key(note).map(|key| t!(key)).unwrap_or_default(),
+                    None,
+                ),
                 _ => (t!("logs.live.missing"), Some(t!("logs.live.missingHint"))),
             };
             rsx! {

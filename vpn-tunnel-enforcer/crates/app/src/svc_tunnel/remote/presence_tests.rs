@@ -125,3 +125,43 @@ async fn the_wait_for_a_starting_service_is_bounded() {
     assert_eq!(key(&err), "app.service.starting");
     assert!(r.starting(), "still starting as far as anyone knows");
 }
+
+/// Lab F8 (p-follow3): the service was stopped when the app started (no link). When it runs
+/// again the idle app links to it by itself, so its next stop is a counted loss (the views
+/// read the SCM at once) instead of going unnoticed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_service_back_while_idle_is_linked_again() {
+    let (r, pipe, dir) = remote(Presence::Stopped);
+    tokio::spawn(r.clone().keep_linked());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        r.live_link().await.is_none(),
+        "nothing to link while it is stopped"
+    );
+    let (_host, _runtime, stop) = restarted(&pipe, &dir.0).await;
+    *r.0.test_presence.lock() = Some(Presence::Running);
+    let mut linked = false;
+    for _ in 0..100 {
+        if r.live_link().await.is_some() {
+            linked = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(linked, "linked once it ran again");
+    // Its next stop: the link drops and the loss is counted. The stopped test host lets go of
+    // the pipe at the next request its reader takes.
+    let losses = r.losses();
+    stop.cancel();
+    *r.0.test_presence.lock() = Some(Presence::Stopped);
+    let lost = async {
+        while !losses.has_changed().unwrap_or(true) {
+            let _ = r.refresh().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), lost)
+        .await
+        .expect("the stop is a loss");
+    r.0.shutdown.cancel();
+}

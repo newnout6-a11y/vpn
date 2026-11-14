@@ -674,7 +674,8 @@ pub enum UpdatePhase {
     Waiting,
     /// `target` goes in now: the service restarts within seconds.
     Restarting,
-    /// The last check failed; the service retries on its own.
+    /// The last check failed (the feed unread, stale or older; an engine or the exe not
+    /// downloaded). The service keeps no schedule: the next check is the app's next ask.
     Failed,
 }
 

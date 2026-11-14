@@ -5,6 +5,7 @@ use vpnte_base::i18n::Lang;
 use vpnte_base::types::KillSwitchLevel;
 
 use super::{Connection, KeyCheck, KeyText, LocalProxy, Routing, WizardChoices, WizardDefaults};
+use crate::servers::NEEDS_HWID;
 
 /// The screens, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -93,6 +94,9 @@ pub struct Model {
     pub servers: usize,
     key_text: KeyText,
     key: KeyStatus,
+    /// The user allowed the HWID for the current text (reset by an edit: a new subscription
+    /// asks again).
+    send_hwid: bool,
     /// Bumped by every edit and every check: a result for an older text is dropped.
     seq: u64,
     pub detect: Detect,
@@ -112,6 +116,7 @@ impl Model {
             servers: current.servers,
             key_text: KeyText(String::new()),
             key: KeyStatus::Idle,
+            send_hwid: false,
             seq: 0,
             detect: Detect::NotRun,
         }
@@ -164,12 +169,26 @@ impl Model {
         }
         self.key_text = KeyText(text);
         self.key = KeyStatus::Idle;
+        self.send_hwid = false;
         self.seq += 1;
     }
 
-    /// Starts a check of the trimmed text: `(seq, text)` for the backend, `None` when the field is
-    /// blank or a check is running.
-    pub fn begin_check(&mut self) -> Option<(u64, String)> {
+    /// The provider serves this subscription only to devices that send their HWID, and the user
+    /// has not allowed it yet: «Включить HWID и добавить» is offered (as in the Add dialog).
+    pub fn hwid_offer(&self) -> bool {
+        let refused =
+            matches!(&self.key, KeyStatus::Failed(msg) if NEEDS_HWID.contains(&msg.key.as_ref()));
+        refused && !self.send_hwid
+    }
+
+    /// «Включить HWID и добавить»: the next check, and the import, send the HWID.
+    pub fn allow_hwid(&mut self) {
+        self.send_hwid = true;
+    }
+
+    /// Starts a check of the trimmed text: `(seq, text, send_hwid)` for the backend, `None` when
+    /// the field is blank or a check is running.
+    pub fn begin_check(&mut self) -> Option<(u64, String, bool)> {
         let text = self.key_text.0.trim();
         if text.is_empty() || self.key == KeyStatus::Checking {
             return None;
@@ -177,7 +196,7 @@ impl Model {
         let text = text.to_owned();
         self.seq += 1;
         self.key = KeyStatus::Checking;
-        Some((self.seq, text))
+        Some((self.seq, text, self.send_hwid))
     }
 
     /// The backend's answer for check `seq`; ignored when the text changed since.
@@ -207,12 +226,14 @@ impl Model {
             }
             _ => None,
         };
+        let send_hwid = key.is_some() && self.send_hwid;
         WizardChoices {
             lang: self.lang,
             connection: self.connection,
             routing: self.routing,
             smart_ru: self.smart_ru,
             key,
+            send_hwid,
             kill_switch: self.kill_switch,
             autostart: self.autostart,
         }

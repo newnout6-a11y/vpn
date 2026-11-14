@@ -14,6 +14,7 @@
 mod config;
 mod launch;
 mod network;
+mod proof;
 mod rank;
 mod rescue;
 mod session;

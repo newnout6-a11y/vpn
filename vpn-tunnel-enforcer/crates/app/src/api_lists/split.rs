@@ -18,7 +18,6 @@ use parking_lot::Mutex;
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
-use vpnte_base::types::UnixMs;
 use vpnte_base::{AppError, AppResult, Msg};
 use vpnte_core::settings::{self, RoutingMode};
 use vpnte_engine::apps;
@@ -37,6 +36,7 @@ use super::refused;
 use crate::services::Backend;
 use crate::support::files::pick_program;
 use crate::support::{blocking, changed_opt, detached};
+use crate::svc_tunnel::scope::{self, RunScope};
 
 /// [`SplitTunnelApi`] over the routing rules store.
 pub struct SplitService(Arc<Shared>);
@@ -58,16 +58,9 @@ struct Shared {
     offers: Mutex<Vec<RoutingOffer>>,
     /// Routing previews and their import.
     routing: routing::Imports,
-    /// The scope the running session started with.
-    run: Mutex<RunScope>,
-}
-
-/// The scope a running session started with (appsplit-b5): read when the run appears and kept
-/// while it runs, since a flip of the switch applies from the next connection.
-#[derive(Debug, Default)]
-struct RunScope {
-    started: Option<UnixMs>,
-    listed: bool,
+    /// The scope the running session started with (appsplit-b5: a flip of the switch applies
+    /// from the next connection), the tunnel service's one copy.
+    run: RunScope,
 }
 
 /// What the switch shows besides the list.
@@ -95,9 +88,9 @@ impl ScopeView {
 }
 
 impl SplitService {
-    /// Publishes the stored list and starts the projection task. Call it inside the tokio
-    /// runtime.
-    pub fn start(backend: Arc<Backend>) -> Self {
+    /// Publishes the stored list and starts the projection task; `run` is the running
+    /// session's scope (`Built::run_scope`). Call it inside the tokio runtime.
+    pub fn start(backend: Arc<Backend>, run: RunScope) -> Self {
         let shared = Arc::new(Shared {
             backend,
             runtime: Handle::current(),
@@ -107,7 +100,7 @@ impl SplitService {
             publishing: Mutex::new(()),
             offers: Mutex::new(Vec::new()),
             routing: routing::Imports::default(),
-            run: Mutex::new(RunScope::default()),
+            run,
         });
         shared.read_offers();
         shared.publish();
@@ -160,20 +153,19 @@ impl Shared {
         let (started, capture) = tunnel.map_or((None, None), |t| {
             let status = t.runtime_status();
             let status = status.borrow();
-            (status.started_at.filter(|_| status.running), status.capture)
+            (scope::run_start(&status), status.capture)
         });
         let listed = s.app_scope == settings::AppScope::OnlyListed;
-        let mut run = self.run.lock();
-        if run.started != started {
-            *run = RunScope { started, listed };
-        }
+        // Woken by the same status change as the tunnel's own copy: whoever sees the run
+        // first records its scope.
+        self.run.observe(started, || listed);
         let proxy = match capture.filter(|_| started.is_some()) {
             Some(capture) => capture == CaptureKind::Proxy,
             None => s.routing_mode == RoutingMode::Soft,
         };
         ScopeView {
             scope: ui_scope(s.app_scope),
-            pending: started.is_some() && run.listed != listed,
+            pending: started.is_some() && self.run.listed() != listed,
             proxy,
             older_service: older_service(protocol),
         }

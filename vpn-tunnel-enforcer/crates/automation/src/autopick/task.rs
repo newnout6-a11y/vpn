@@ -11,6 +11,7 @@ use vpnte_base::types::UnixMs;
 use vpnte_core::store::Store;
 
 use super::network::NetSession;
+use super::proof::Unproven;
 use super::{AutoPickConfig, LaunchChoice, LaunchPick, Phase, PickHost, PickStatus, UserActs};
 use super::{LaunchSource, launch_pick, launch_source};
 use crate::adaptive::reaction::Verdicts;
@@ -31,6 +32,8 @@ pub struct AutoPick<C: Coordinator, H: PickHost> {
     /// itself, or a server that fails again at once, never starts a chain of episodes. A network
     /// change clears it (a new network deserves a new try).
     pub(super) spent: parking_lot::Mutex<HashSet<String>>,
+    /// Servers whose exit proof failed in this app session: the rescue rounds skip them.
+    pub(super) unproven: Unproven,
     /// The reactions' network memory (UDP cut, mobile whitelist, servers ruled out here).
     pub(super) verdicts: Option<Arc<Verdicts>>,
     /// This network's tag and the whitelist proofs already noted on it.
@@ -52,6 +55,7 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
             schedule,
             episode: Mutex::new(()),
             spent: parking_lot::Mutex::new(HashSet::new()),
+            unproven: Unproven::default(),
             verdicts: None,
             net: parking_lot::Mutex::new(NetSession::default()),
         }

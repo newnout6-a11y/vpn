@@ -140,11 +140,13 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
             .map(|c| c.group);
         self.publish(Phase::Refreshing, Some(name), 1, None);
         let fresh = (self.host.refresh(failed, user.token()).await).unwrap_or_default();
+        // A new key is another server as far as its exit proof goes.
+        self.unproven.forgive(fresh.iter().map(String::as_str));
         let mut tried = vec![(failed.to_owned(), Instant::now())];
         let mut dialled: Vec<String> = Vec::new();
         for round in 1..=ROUNDS {
             let servers: Vec<Candidate> = (self.host.servers().into_iter())
-                .filter(|c| switch || c.id == failed)
+                .filter(|c| (switch || c.id == failed) && !self.unproven.contains(&c.id))
                 .collect();
             let net = self.network(&servers).await;
             let order = match round {
@@ -180,7 +182,8 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
                             return Ended::Recovered;
                         }
                         // It runs and carries nothing: the next candidate moves it.
-                        Confirmation::Frozen | Confirmation::NoTraffic => {}
+                        Confirmation::NoTraffic => self.unproven.add(&c.id),
+                        Confirmation::Frozen => {}
                         // Data moved, or no proof was possible: the session stays, unclaimed.
                         Confirmation::Inconclusive | Confirmation::Deferred => return Ended::Quiet,
                     },
@@ -236,7 +239,10 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
             };
             return match self.coord.connect(Owner::Autopilot, req).await {
                 Ok(_) => Attempt::Up,
-                Err(e) => failure(&e),
+                Err(e) => {
+                    self.unproven.add_if_silent(id, &e);
+                    failure(&e)
+                }
             };
         };
         if !self.ours(&s, failed, trigger, dialled) {
@@ -253,7 +259,10 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
         };
         match moved {
             Ok(()) => Attempt::Up,
-            Err(SwitchError::NotStarted(e) | SwitchError::Failed { reason: e, .. }) => failure(&e),
+            Err(SwitchError::NotStarted(e) | SwitchError::Failed { reason: e, .. }) => {
+                self.unproven.add_if_silent(id, &e);
+                failure(&e)
+            }
         }
     }
 }
@@ -292,6 +301,7 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
                         let mut spent = self.spent.lock();
                         spent.clear();
                         spent.insert(failed.to_owned());
+                        self.unproven.clear();
                         return true;
                     }
                     // The coordinator's restore of a lost switch of ours is no reason to stop.

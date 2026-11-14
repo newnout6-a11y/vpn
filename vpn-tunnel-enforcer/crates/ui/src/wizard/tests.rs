@@ -59,7 +59,7 @@ fn a_checked_key_is_sent_trimmed() {
     let mut m = at(Step::Connect);
     m.connection = Connection::Key;
     m.edit_key(" vless://key ".into());
-    let (seq, text) = m.begin_check().expect("check starts");
+    let (seq, text, _) = m.begin_check().expect("check starts");
     assert_eq!(text, "vless://key");
     assert_eq!(m.key_status(), &KeyStatus::Checking);
     assert_eq!(m.begin_check(), None, "one check at a time");
@@ -78,15 +78,42 @@ fn an_edit_drops_the_validation_and_a_rejected_key_is_not_sent() {
     let mut m = at(Step::Connect);
     m.connection = Connection::Key;
     m.edit_key("vless://key".into());
-    let (seq, _) = m.begin_check().unwrap();
+    let (seq, _, _) = m.begin_check().unwrap();
     m.end_check(seq, Ok(check(2)));
     m.edit_key("garbage".into());
     assert_eq!(m.key_status(), &KeyStatus::Idle);
-    let (seq, _) = m.begin_check().unwrap();
+    let (seq, _, _) = m.begin_check().unwrap();
     m.end_check(seq, Ok(check(0)));
     assert_eq!(m.key_status(), &KeyStatus::Invalid);
     assert_eq!(m.choices().key, None);
     assert!(m.key_left_unchecked());
+}
+
+/// Lab F5 (p-follow3): a subscription the provider serves only to devices with an HWID is
+/// refused without it; «Включить HWID и добавить» is offered, the next check and the import send
+/// the HWID, and only after that click; an edit (another subscription) asks again.
+#[test]
+fn an_hwid_bound_subscription_is_added_after_the_click() {
+    let mut m = at(Step::Connect);
+    m.connection = Connection::Key;
+    m.edit_key("https://panel.example/sub/abc".into());
+    let (seq, _, hwid) = m.begin_check().unwrap();
+    assert!(!hwid, "never before the click");
+    m.end_check(seq, Err(Msg::new("servers.fetch.hwidRequired")));
+    assert!(m.hwid_offer());
+    m.allow_hwid();
+    assert!(!m.hwid_offer());
+    let (seq, _, hwid) = m.begin_check().unwrap();
+    assert!(hwid);
+    m.end_check(seq, Ok(check(5)));
+    let c = m.choices();
+    assert!(c.key.is_some() && c.send_hwid);
+    m.edit_key("https://other.example/sub".into());
+    let (seq, _, hwid) = m.begin_check().unwrap();
+    assert!(!hwid, "another subscription asks again");
+    m.end_check(seq, Err(Msg::new("servers.fetch.network")));
+    assert!(!m.hwid_offer(), "only for the HWID refusal");
+    assert!(!m.choices().send_hwid);
 }
 
 /// AT-09-014 "ignores an inspection result that arrives after the text was edited".
@@ -95,7 +122,7 @@ fn a_result_for_an_older_text_is_ignored() {
     let mut m = at(Step::Connect);
     m.connection = Connection::Key;
     m.edit_key("vless://old".into());
-    let (seq, _) = m.begin_check().unwrap();
+    let (seq, _, _) = m.begin_check().unwrap();
     m.edit_key("vless://new".into());
     m.end_check(seq, Ok(check(1)));
     assert_eq!(m.key_status(), &KeyStatus::Idle);
@@ -110,7 +137,7 @@ fn a_failed_check_keeps_the_key_out() {
     m.edit_key("   ".into());
     assert_eq!(m.begin_check(), None);
     m.edit_key("https://sub.example/x".into());
-    let (seq, _) = m.begin_check().unwrap();
+    let (seq, _, _) = m.begin_check().unwrap();
     m.end_check(seq, Err(Msg::new("errors.network")));
     assert_eq!(
         m.key_status(),
@@ -125,7 +152,7 @@ fn a_key_is_only_sent_with_the_key_connection() {
     let mut m = at(Step::Connect);
     m.connection = Connection::Key;
     m.edit_key("vless://key".into());
-    let (seq, _) = m.begin_check().unwrap();
+    let (seq, _, _) = m.begin_check().unwrap();
     m.end_check(seq, Ok(check(1)));
     m.connection = Connection::LocalProxy;
     assert_eq!(m.choices().key, None);
@@ -253,7 +280,7 @@ fn key_text_is_not_printed() {
     let mut m = at(Step::Connect);
     m.connection = Connection::Key;
     m.edit_key("vless://uuid@host:443".into());
-    let (seq, _) = m.begin_check().unwrap();
+    let (seq, _, _) = m.begin_check().unwrap();
     m.end_check(seq, Ok(check(1)));
     let printed = format!("{m:?} {:?}", m.choices());
     assert!(!printed.contains("uuid@host"), "{printed}");
@@ -299,6 +326,7 @@ fn strict_with_autostart() -> WizardChoices {
         routing: Routing::Hard,
         smart_ru: true,
         key: Some(KeyText("vless://a@b.example:443#x".into())),
+        send_hwid: false,
         kill_switch: KillSwitchLevel::Strict,
         autostart: true,
     }

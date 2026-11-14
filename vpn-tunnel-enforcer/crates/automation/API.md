@@ -765,6 +765,11 @@ impl<C, H> AutoPick<C, H> {
     pub async fn run(&self, cancel);                   // the session watch + the warm-up
 }
 ```
+- **A failed exit proof is final for the retries** (p-follow3): a server whose start ended with
+  `tunnel.runtime.exitSilent` or whose new session carried nothing (`Confirmation::NoTraffic`) is
+  not dialled again by the rescue rounds of this app session, even with nothing else left; the
+  user's own start on it (`Started { owner: Manual }`), a new key from its subscription's refresh or
+  a network change gives it back.
 - **The user always wins** (fix-autopick): every action of the user (Connect, Disconnect, Cancel,
   a server picked by hand, a changed setting) moves `UserActs.seq`, and every automatic path
   that saw another value ends at once (measurements, slot waits and pauses are cancelled, not

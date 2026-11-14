@@ -264,6 +264,7 @@ fn KeyPanel(ctx: Ctx) -> Element {
         (m.key_text().to_owned(), m.key_status().clone(), m.servers)
     };
     let checking = status == KeyStatus::Checking;
+    let hwid_offer = model.read().hwid_offer();
     let blank = text.trim().is_empty();
     let hint = if servers > 0 {
         t!("ui.wizard.connect.keyHintHasServers", count = servers)
@@ -275,6 +276,7 @@ fn KeyPanel(ctx: Ctx) -> Element {
         move || start_check(api.clone(), ctx)
     };
     let on_submit = check.clone();
+    let on_hwid = check.clone();
     let on_click = check;
     rsx! {
         Field { label: t!("ui.wizard.connect.keyLabel"), hint,
@@ -334,6 +336,18 @@ fn KeyPanel(ctx: Ctx) -> Element {
                 }
             },
             _ => rsx! {},
+        }
+        // The HWID goes to the provider only after this click (as in the Add dialog).
+        if hwid_offer {
+            Button {
+                kind: ButtonKind::Ghost,
+                small: true,
+                onclick: move |_| {
+                    model.write().allow_hwid();
+                    on_hwid();
+                },
+                {t!("ui.servers.add.hwidRetry")}
+            }
         }
     }
 }

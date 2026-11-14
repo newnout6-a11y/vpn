@@ -453,3 +453,44 @@ async fn a_failed_launch_goes_to_the_retries_and_tells_once() {
         [notice(Level::Info, "launch.connected", None)]
     );
 }
+
+/// The runtime's error of a start whose exit check got nothing back through the server.
+fn silent() -> OpError {
+    let msg = vpnte_base::Msg::new("tunnel.runtime.exitSilent");
+    OpError::Failed(AppError::msg(ErrorKind::Network, msg))
+}
+
+/// p-follow3: a server whose exit proof failed in this session (its start's exit check got
+/// nothing back, or its new session carried nothing) is not dialled again by the later rounds,
+/// even with nothing else left; a server that only failed otherwise is; the user's own start on
+/// one gives it back.
+#[tokio::test(start_paused = true)]
+async fn a_server_that_failed_its_exit_proof_is_not_dialled_again() {
+    let rig = rig(vec![server("a", "g"), server("b", "h"), server("c", "k")]);
+    *rig.host.fresh.lock() = Some(Vec::new());
+    rig.coord.connect_results.lock().push_back(Err(silent()));
+    rig.host
+        .confirm_results
+        .lock()
+        .push_back(Confirmation::NoTraffic);
+    // c's session runs: every later dial is a switch, and a's always fail.
+    let fails = (0..20).map(|_| Err(SwitchError::NotStarted(OpError::Timeout)));
+    rig.coord.switch_results.lock().extend(fails);
+    let cancel = fault_on(&rig, "a").await;
+    tokio::time::sleep(Duration::from_secs(3600)).await;
+    let dialled = dials(&rig);
+    let count = |id: &str| dialled.iter().filter(|d| *d == id).count();
+    assert_eq!((count("b"), count("c")), (1, 1), "{dialled:?}");
+    assert!(
+        count("a") >= 2,
+        "the faulted server is tried again: {dialled:?}"
+    );
+    assert_eq!(rig.pick.status().borrow().phase, Phase::GaveUp);
+    assert!(rig.pick.unproven.contains("b") && rig.pick.unproven.contains("c"));
+    // The user's own start on b gives it back.
+    rig.coord
+        .start(SessionKind::SoftDirect, Some("b"), AdaptiveMode::Baseline);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(!rig.pick.unproven.contains("b") && rig.pick.unproven.contains("c"));
+    cancel.cancel();
+}

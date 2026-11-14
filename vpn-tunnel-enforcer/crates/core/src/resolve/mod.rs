@@ -16,6 +16,7 @@ use crate::net::Host;
 mod chain;
 mod memory;
 mod server;
+mod session;
 mod transport;
 mod wire;
 
@@ -23,6 +24,7 @@ use chain::{CLOUDFLARE_DOH, Chain, STAGGER, UPSTREAM_LIMIT, UPSTREAMS, YANDEX_DO
 pub use memory::{MEMORY_TTL, ResolverMemoryDoc, persist, set_network};
 use server::LastKnown;
 pub use server::ServerAddrs;
+pub use session::{end_session, keep_for_session};
 use transport::Net;
 
 /// Budget of the OS resolver inside [`resolve_server`] (the old endpoint-resolution limit).
@@ -80,6 +82,10 @@ pub async fn resolve_host(
         Host::Ip(ip) => return filtered(vec![ip], &keep),
         Host::Name(name) => name,
     };
+    // The running session's server name: its kept answer, no lookup (lab F11).
+    if let Some(addrs) = session::kept(&name) {
+        return filtered(addrs, &keep);
+    }
     match how {
         How::System => filtered(system(&name).await?, &keep),
         How::Doh => chain().resolve(&name, &keep).await,
@@ -136,7 +142,19 @@ pub async fn resolve_server(
         }
         Host::Name(name) => name,
     };
+    if let Some(addrs) = session::kept(&name) {
+        return Ok(ServerAddrs {
+            addrs: filtered(addrs, &keep)?,
+            last_known: false,
+        });
+    }
+    // While a session runs the OS resolver is never asked: it would send the server's name in
+    // clear text past the tunnel (lab F11).
+    let running = session::running();
     let os = || async {
+        if running {
+            return Err(ResolveError::Failed);
+        }
         tokio::time::timeout(SYSTEM_LIMIT, system(&name))
             .await
             .unwrap_or(Err(ResolveError::Failed))

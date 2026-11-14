@@ -460,6 +460,10 @@ pub enum TailNote {
     ServiceLines,
     /// No helper service is installed (the service source has nothing to show).
     NoService,
+    /// The installed service is starting (after a restart): its lines come in a moment.
+    ServiceStarting,
+    /// The installed service is stopped: nothing answers for its lines.
+    ServiceStopped,
     /// The installed service is older than the app and does not send its log.
     OldService,
 }

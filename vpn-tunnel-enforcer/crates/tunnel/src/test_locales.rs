@@ -236,3 +236,18 @@ fn keys_in_the_sources_match_the_fragments() {
         assert!(known, "{key} is never used");
     }
 }
+
+/// p-follow3: the exit-check texts of a start or a server switch also show in Proxy mode,
+/// where nothing is a tunnel: they never say so (like `exitSilent`).
+#[test]
+fn exit_check_texts_are_mode_neutral() {
+    for key in ["egressUnknown", "exitSilent", "switchUnconfirmed"] {
+        let key = format!("tunnel.runtime.{key}");
+        let ru = template(Lang::Ru, &key).expect("ru").to_lowercase();
+        let en = template(Lang::En, &key).expect("en").to_lowercase();
+        assert!(
+            !ru.contains("туннел") && !en.contains("tunnel"),
+            "{key}: {ru} / {en}"
+        );
+    }
+}

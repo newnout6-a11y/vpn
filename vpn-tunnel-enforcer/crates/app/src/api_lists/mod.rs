@@ -28,6 +28,7 @@ use vpnte_ui::split_tunnel::SplitTunnelApi;
 use vpnte_ui::traffic_history::TrafficHistoryApi;
 
 use crate::services::Backend;
+use crate::svc_tunnel::scope::RunScope;
 use crate::svc_tunnel::{Built, DomainHistory};
 pub use schedule::ScheduleService;
 pub use split::SplitService;
@@ -44,7 +45,12 @@ pub fn contexts(backend: &Arc<Backend>, built: &Built) -> Vec<Box<dyn Any>> {
         automation.schedules.clone(),
         automation.scheduler.clone(),
     ));
-    with_schedule(backend, schedule, built.domains.clone())
+    with_schedule(
+        backend,
+        schedule,
+        built.domains.clone(),
+        built.run_scope.clone(),
+    )
 }
 
 /// The contexts around the given Schedule page API.
@@ -52,8 +58,9 @@ fn with_schedule(
     backend: &Arc<Backend>,
     schedule: Rc<dyn ScheduleApi>,
     domains: Arc<DomainHistory>,
+    run_scope: RunScope,
 ) -> Vec<Box<dyn Any>> {
-    let split: Rc<dyn SplitTunnelApi> = Rc::new(SplitService::start(backend.clone()));
+    let split: Rc<dyn SplitTunnelApi> = Rc::new(SplitService::start(backend.clone(), run_scope));
     let traffic: Rc<dyn TrafficHistoryApi> =
         Rc::new(TrafficService::start(backend.clone(), domains));
     vec![Box::new(schedule), Box::new(split), Box::new(traffic)]

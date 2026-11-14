@@ -35,6 +35,8 @@ mod state;
 mod tests;
 mod verdict;
 
+/// The first-run wizard offers the same HWID retry as the add dialog (p-follow3).
+pub(crate) use add::NEEDS_HWID;
 pub use api::{ServersApi, use_servers_api};
 pub use demo::{DemoScene, DemoServersApi};
 pub use links::LinkHandoff;

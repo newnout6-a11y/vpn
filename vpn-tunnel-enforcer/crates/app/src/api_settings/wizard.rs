@@ -13,7 +13,8 @@ use vpnte_base::types::{ClientDevice, KillSwitchLevel, Level};
 use vpnte_base::{AppResult, ErrorKind, Msg};
 use vpnte_core::settings::{ConnectionMode, RoutingMode};
 use vpnte_probes::local_proxy::{self, ScanOptions};
-use vpnte_servers::subscription::canonical_source;
+use vpnte_servers::refresh::AddOptions;
+use vpnte_servers::subscription::{FetchRequest, canonical_source};
 use vpnte_ui::wizard::{
     Connection, KeyCheck, LocalProxy, Routing, WizardApi, WizardChoices, WizardDefaults,
     WizardState,
@@ -104,14 +105,26 @@ impl WizardApi for WizardService {
         .await
     }
 
-    async fn check_key(&self, text: String, cancel: CancellationToken) -> AppResult<KeyCheck> {
+    async fn check_key(
+        &self,
+        text: String,
+        send_hwid: bool,
+        cancel: CancellationToken,
+    ) -> AppResult<KeyCheck> {
         let fetcher = self.0.backend.refresh.fetcher.clone();
         let text = text.trim().to_owned();
         // Dropping this future (the text was edited) cancels a subscription fetch.
         let _cancel_on_drop = cancel.clone().drop_guard();
         detached(async move {
             if let Some(url) = canonical_source(&text) {
-                let report = fetcher.fetch(&url, ClientDevice::Pc, &cancel).await?;
+                // As the Add dialog: the HWID only after the user's click, and an empty list
+                // fetched without it suggests it (HWID-bound panels answer so).
+                let req = FetchRequest {
+                    send_hwid,
+                    ..FetchRequest::new(url, ClientDevice::Pc)
+                };
+                let fetched = fetcher.fetch_request(&req, &cancel).await;
+                let report = fetched.map_err(|e| e.for_group(send_hwid))?.report;
                 return Ok(KeyCheck {
                     servers: report.profiles.len(),
                     subscription: true,
@@ -211,9 +224,14 @@ async fn apply(
     }
     if let (Connection::Key, Some(key)) = (choices.connection, &choices.key) {
         let cancel = backend.shutdown.child_token();
+        // A new subscription group keeps the HWID the user allowed in the key check.
+        let options = AddOptions {
+            send_hwid: choices.send_hwid,
+            ..AddOptions::new(None, ClientDevice::Pc)
+        };
         backend
             .servers
-            .add_from_input(&backend.refresh, &key.0, None, ClientDevice::Pc, cancel)
+            .add_from_input_with(&backend.refresh, &key.0, options, cancel)
             .await?;
     }
     let old = backend.settings.snapshot();

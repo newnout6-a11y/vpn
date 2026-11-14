@@ -21,7 +21,7 @@ working.
    legacy import writes `routing_mode = Soft` unless the process is elevated. `build` installs
    the global log subscriber and its panic hook: never call `logging::init` again.
 3. Inside the tokio runtime: `let built = svc_tunnel::build(&backend)?;` (`Built { tunnel,
-   automation, domains, feed, journal }`)
+   automation, domains, feed, journal, run_scope }`)
    `let _ = backend.tunnel.set(built.tunnel);` (`Backend::tunnel()` returns `Internal`
    `app.base.tunnelMissing` until then). `built.domains` (the one domain history + site-name
    enricher, `svc_tunnel::DomainHistory`) goes to `api_lists` (Traffic page); `built.feed` (the
@@ -140,6 +140,9 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
   way (`Remote::reattach`, p-follow): connects again for about 22 s (Windows restarts a crashed
   service after 5, then 10 s), then up to 10 s for the session the restarted service resumes,
   whose own events are held back until the take-over (any start or stop of the app ends the wait).
+  While no link is up and no re-attach runs, `Remote::keep_linked` asks the SCM every 10 s and links
+  once the service runs again, so a stop while the app is idle is a counted loss too (lab F8,
+  p-follow3); a session that link finds kept goes to the take-over the same way.
 - Leak self-tests and re-checks (RU audit item 11, p-svc-recheck, `svc_tunnel/leaks.rs`): every TUN
   session, in this process or in the service, gets the DNS canary after a wake or a network change;
   the 30 s self-test and the immediate filter check run where the filters are: here when this
@@ -147,7 +150,9 @@ every other one (all of a failed call's, all of a connect's or switch's) into a 
   and go through the same forwarder (a leak -> `Lifecycle::leak_detected` + the
   `app.tunnel.leakDetected` toast; the leak check card shows the latest run). This process's own
   runs are labelled by the app scope the running session started with (appsplit-b4, p-live2:
-  `RunScope`, read when the run's `started_at` appears), never by the saved one.
+  `RunScope`, read when the run's `started_at` appears), never by the saved one. One copy
+  (`svc_tunnel::scope`, `Built::run_scope`, p-follow3) serves the leak watch, the Maintenance
+  self-test and the Apps page's pending line.
 - Keep the two copies of the level in sync: `Settings::kill_switch` (read by the lifecycle at start)
   and `ProtectionDoc::settings.level` (the WFP model); `apply_settings_change` hands a changed
   `kill_switch` to the protection (or refuses it with `needs_admin()` when it cannot be enforced).

@@ -990,6 +990,12 @@ fn locale_gate() {
     }
     dynamic.extend(["events", "history"].map(|t| format!("logs.erase.{t}.done")));
     dynamic.extend(ErrorKindAll::ALL.iter().map(|k| k.i18n_key().to_owned()));
+    use crate::helper::Service;
+    dynamic.extend(
+        [Service::Starting, Service::Stopped]
+            .iter()
+            .filter_map(|s| s.pause_key().map(str::to_owned)),
+    );
     let sources = [
         include_str!("model.rs"),
         include_str!("history.rs"),
@@ -1110,7 +1116,9 @@ mod dom {
     /// tab reads a log, once, the remembered source.
     #[tokio::test]
     async fn every_tab_renders_in_every_scene() {
-        for scene in ["full", "empty", "loading", "failed", "service", "partial"] {
+        for scene in [
+            "full", "empty", "loading", "failed", "service", "partial", "stopped",
+        ] {
             for tab in Tab::ALL {
                 let (mut dom, mount) = mount(scene, tab, LogSource::App);
                 settle(&mut dom, 8, 40).await;
@@ -1129,6 +1137,37 @@ mod dom {
         let (mut dom, mount) = mount("service", Tab::Technical, LogSource::Service);
         settle(&mut dom, 8, 40).await;
         assert_eq!(calls(&mount), ["read_log:Service"]);
+    }
+
+    /// p-follow3: an installed service that is stopped is said with the helper's own line
+    /// («Служба-помощник остановлена…»), never «не установлена».
+    #[tokio::test]
+    async fn a_stopped_service_is_said_as_such() {
+        let mount = Mount {
+            scene: "stopped",
+            tab: Tab::Technical,
+            source: LogSource::Service,
+            show: Rc::new(Cell::new(true)),
+            seen: Rc::new(RefCell::new(None)),
+        };
+        let mut dom = VirtualDom::new(page_root).with_root_context(mount);
+        let mut seen = crate::test_support::Shown::default();
+        dom.rebuild(&mut seen);
+        for _ in 0..12 {
+            tokio::select! {
+                () = dom.wait_for_work() => {}
+                () = tokio::time::sleep(std::time::Duration::from_millis(40)) => {}
+            }
+            dom.render_immediate(&mut seen);
+        }
+        let stopped = Msg::new("ui.helper.stopped");
+        assert!(seen.shows(&ru(&stopped)) || seen.shows(&en(&stopped)));
+        let missing = Msg::new("logs.tech.noService");
+        assert!(!seen.shows(&ru(&missing)) && !seen.shows(&en(&missing)));
+        assert_eq!(
+            super::super::viewer::paused_key(TailNote::ServiceStarting),
+            Some("ui.helper.starting")
+        );
     }
 
     /// The owner's rule: the tab and the source survive leaving the page (unmount, mount).

@@ -126,6 +126,8 @@ pub struct FactValue {
     pub alert: bool,
     /// `.is-dim`
     pub dim: bool,
+    /// The calm sentence behind a short value (the cell's tooltip).
+    pub hint: Option<Msg>,
 }
 
 impl FactValue {
@@ -134,6 +136,7 @@ impl FactValue {
             text: Msg::new(key),
             alert: false,
             dim: false,
+            hint: None,
         }
     }
 }
@@ -262,6 +265,23 @@ pub fn leak_fact(summary: Verdict, checking: bool) -> FactValue {
         alert: summary == Verdict::Fail,
         dim: summary == Verdict::NotChecked && !checking,
         ..FactValue::plain(key)
+    }
+}
+
+/// The leak fact of a Proxy-mode session (lab F10, p-follow3). The check reads what ordinary
+/// programs see over the OS route, which Proxy mode does not take (programs that ignore the
+/// system proxy, and UDP, go direct: NOADMIN §2), so a failure there is what the mode is and is
+/// said calmly. «Найдены» stays for a leak of what the mode takes: the exit through the proxy is
+/// the real address (`exit_leak`).
+pub fn proxy_leak_fact(summary: Verdict, checking: bool, exit_leak: bool) -> FactValue {
+    match (checking, exit_leak, summary) {
+        (true, ..) => leak_fact(summary, true),
+        (false, true, _) => leak_fact(Verdict::Fail, false),
+        (false, false, Verdict::Fail) => FactValue {
+            hint: Some(Msg::new("view.leak.outsideProxyHint")),
+            ..FactValue::plain("view.leak.outsideProxy")
+        },
+        (false, false, _) => leak_fact(summary, false),
     }
 }
 

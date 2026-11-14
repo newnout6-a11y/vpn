@@ -46,11 +46,11 @@ pub(super) fn start_check(api: Rc<dyn WizardApi>, ctx: Ctx) {
     if ctx.check.running() {
         return;
     }
-    let Some((seq, text)) = model.write().begin_check() else {
+    let Some((seq, text, send_hwid)) = model.write().begin_check() else {
         return;
     };
     ctx.check.start(move |cancel| async move {
-        let result = api.check_key(text, cancel).await;
+        let result = api.check_key(text, send_hwid, cancel).await;
         model
             .write()
             .end_check(seq, result.map_err(|e| e.user_msg()));

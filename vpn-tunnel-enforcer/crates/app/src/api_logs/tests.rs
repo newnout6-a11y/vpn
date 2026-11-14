@@ -249,3 +249,19 @@ async fn the_service_source_shows_the_users_lines() {
     assert_eq!((old.exists, old.note), (false, TailNote::OldService));
     backend.shutdown.cancel();
 }
+
+/// p-follow3: an installed service that Windows is starting or has stopped is said as such on
+/// the service source (the helper's own line), not as a failure or «не установлена».
+#[test]
+fn a_paused_service_is_said_as_such() {
+    use crate::boot::service::Presence;
+    let note = |p: Presence| sources::not_answering(p).map(|a| sources::service_tail(a).note);
+    assert_eq!(note(Presence::Starting), Some(TailNote::ServiceStarting));
+    assert_eq!(note(Presence::Stopped), Some(TailNote::ServiceStopped));
+    assert_eq!(note(Presence::Stopping), Some(TailNote::ServiceStopped));
+    // running (its pipe failed for another reason) or gone: the pipe's own error stays
+    assert_eq!(note(Presence::Running), None);
+    assert_eq!(note(Presence::Missing), None);
+    let stopped = sources::service_tail(ServiceAnswer::Stopped);
+    assert!(!stopped.exists && stopped.lines.is_empty());
+}

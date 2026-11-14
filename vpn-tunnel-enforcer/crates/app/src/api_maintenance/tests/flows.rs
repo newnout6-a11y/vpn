@@ -67,7 +67,13 @@ fn rig(name: &str) -> Rig {
     let dir = TempDir::new(&format!("maint-{name}"));
     let tunnel = FakeTunnel::new(false);
     let host = Arc::new(FakeHost::default());
-    let shared = Shared::start(backend(&dir, tunnel.clone()), host.clone(), None, None);
+    let shared = Shared::start(
+        backend(&dir, tunnel.clone()),
+        host.clone(),
+        None,
+        None,
+        crate::svc_tunnel::scope::RunScope::default(),
+    );
     Rig {
         _dir: dir,
         tunnel,

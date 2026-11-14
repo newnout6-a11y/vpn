@@ -226,3 +226,28 @@ async fn live_resolvers() {
         assert!(dead.is_empty(), "unreachable from here: {dead:?}");
     }
 }
+
+/// Lab F11 (p-follow3): a server name kept for the running session is answered from the kept
+/// addresses by every lookup (the OS resolver's too) without leaving the PC, the caller's filter
+/// still applied; the session's end forgets it.
+#[tokio::test]
+async fn a_kept_session_name_never_leaves_the_pc() {
+    let ip: IpAddr = "203.0.113.7".parse().expect("ip");
+    let name = "vpn.p-follow3.invalid";
+    session::keep_for_test(1_000, name, vec![ip]);
+    assert!(session::running());
+    assert_eq!(
+        resolve_host(name, How::System, |_| true).await,
+        Ok(vec![ip])
+    );
+    let server = resolve_server(name, |_| true).await.expect("kept");
+    assert_eq!((server.addrs, server.last_known), (vec![ip], false));
+    let refused = resolve_host(name, How::Doh, |_| false).await;
+    assert_eq!(refused, Err(ResolveError::Filtered));
+    // A new session start forgets the names of the one before.
+    session::keep_for_test(2_000, "other.p-follow3.invalid", vec![ip]);
+    assert_eq!(session::kept(name), None);
+    end_session();
+    assert!(!session::running());
+    assert_eq!(session::kept("other.p-follow3.invalid"), None);
+}

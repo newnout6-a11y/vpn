@@ -11,6 +11,7 @@ use vpnte_ui::split_tunnel::{AppScope, SplitSnapshot, SplitTunnelApi};
 
 use super::{SplitService, older_service};
 use crate::api_settings::test_support::{FakeTunnel, TempDir, backend};
+use crate::svc_tunnel::scope::RunScope;
 
 /// Waits (at most 10 s) until the pushed state satisfies `what`.
 async fn until(rx: &mut watch::Receiver<SplitSnapshot>, what: impl Fn(&SplitSnapshot) -> bool) {
@@ -40,7 +41,7 @@ async fn the_scope_is_saved_and_followed() {
         .rules
         .update(|doc| doc.add_command(ProcessName::parse("curl").expect("name")))
         .expect("entry");
-    let api = SplitService::start(backend.clone());
+    let api = SplitService::start(backend.clone(), RunScope::default());
     let mut state = api.state();
     assert_eq!(state.borrow().scope, AppScope::All);
     assert!(!state.borrow().older_service, "no service linked");
@@ -86,7 +87,9 @@ async fn the_switch_follows_the_running_session() {
         .settings
         .update(|s| s.routing_mode = RoutingMode::Hard)
         .expect("Tunnel mode");
-    let api = SplitService::start(backend.clone());
+    // The tunnel service's copy, as the app wires it: it follows the same status.
+    let run = RunScope::follow(tunnel.status.subscribe(), backend.settings.clone());
+    let api = SplitService::start(backend.clone(), run);
     let mut state = api.state();
     until(&mut state, |s| !s.proxy && !s.pending).await;
 

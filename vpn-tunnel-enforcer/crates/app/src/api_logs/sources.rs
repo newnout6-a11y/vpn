@@ -11,6 +11,8 @@ use vpnte_tunnel::api::CaptureKind;
 use vpnte_tunnel::history::{Entry, Route};
 use vpnte_ui::logs::{LogTail, TailLine, TailNote};
 
+use crate::boot::service::Presence;
+
 /// A first frame and its answer on a local pipe.
 const ASK: Duration = Duration::from_secs(5);
 
@@ -90,6 +92,10 @@ pub fn last_capture(entries: &[Entry]) -> Option<CaptureKind> {
 #[derive(Debug)]
 pub enum ServiceAnswer {
     NotInstalled,
+    /// Installed, and Windows is starting it: its pipe opens in a moment.
+    Starting,
+    /// Installed and stopped (or stopping).
+    Stopped,
     /// An older service that does not know the request.
     Old,
     Lines(ServiceLogWire),
@@ -121,7 +127,15 @@ pub async fn ask_service() -> AppResult<ServiceAnswer> {
     };
     let check = ServerCheck::Image(exe);
     let ask = async {
-        let mut client = Client::connect(vpnte_service::sddl::PIPE_NAME, &check, ASK).await?;
+        let mut client = match Client::connect(vpnte_service::sddl::PIPE_NAME, &check, ASK).await {
+            Ok(client) => client,
+            Err(err) => {
+                return match not_answering(crate::boot::service::presence()) {
+                    Some(answer) => Ok(answer),
+                    None => Err(err),
+                };
+            }
+        };
         match client.call(Request::ServiceLog).await {
             Ok(Reply::ServiceLog(log)) => Ok(ServiceAnswer::Lines(log)),
             Ok(other) => {
@@ -143,29 +157,43 @@ pub async fn ask_service() -> AppResult<ServiceAnswer> {
     }
 }
 
+/// An installed service whose pipe did not open, as the SCM has it: starting or stopped is
+/// said as such (p-follow3: the page showed a failure); running or gone keeps the pipe's error.
+pub fn not_answering(presence: Presence) -> Option<ServiceAnswer> {
+    match presence {
+        Presence::Starting => Some(ServiceAnswer::Starting),
+        Presence::Stopped | Presence::Stopping => Some(ServiceAnswer::Stopped),
+        Presence::Running | Presence::Missing => None,
+    }
+}
+
 /// The answer as the page's tail.
 pub fn service_tail(answer: ServiceAnswer) -> LogTail {
-    match answer {
-        ServiceAnswer::NotInstalled => LogTail {
-            note: TailNote::NoService,
-            ..LogTail::default()
-        },
-        ServiceAnswer::Old => LogTail {
-            note: TailNote::OldService,
-            ..LogTail::default()
-        },
-        ServiceAnswer::Lines(log) => LogTail {
-            lines: log
-                .lines
-                .into_iter()
-                .map(|l| TailLine {
-                    offset: l.offset,
-                    text: l.text,
-                })
-                .collect(),
-            exists: true,
-            truncated: log.truncated,
-            note: TailNote::ServiceLines,
-        },
+    let note = match answer {
+        ServiceAnswer::NotInstalled => TailNote::NoService,
+        ServiceAnswer::Starting => TailNote::ServiceStarting,
+        ServiceAnswer::Stopped => TailNote::ServiceStopped,
+        ServiceAnswer::Old => TailNote::OldService,
+        ServiceAnswer::Lines(log) => return lines_tail(log),
+    };
+    LogTail {
+        note,
+        ..LogTail::default()
+    }
+}
+
+fn lines_tail(log: ServiceLogWire) -> LogTail {
+    LogTail {
+        lines: log
+            .lines
+            .into_iter()
+            .map(|l| TailLine {
+                offset: l.offset,
+                text: l.text,
+            })
+            .collect(),
+        exists: true,
+        truncated: log.truncated,
+        note: TailNote::ServiceLines,
     }
 }

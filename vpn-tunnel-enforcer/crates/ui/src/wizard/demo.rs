@@ -179,13 +179,25 @@ impl WizardApi for DemoWizardApi {
         }))
     }
 
-    async fn check_key(&self, text: String, cancel: CancellationToken) -> AppResult<KeyCheck> {
-        self.note("check".into());
+    async fn check_key(
+        &self,
+        text: String,
+        send_hwid: bool,
+        cancel: CancellationToken,
+    ) -> AppResult<KeyCheck> {
+        self.note(if send_hwid { "check:hwid" } else { "check" }.into());
         wait(900, Some(&cancel)).await?;
         if text.contains("offline") {
             return Err(AppError::msg(
                 ErrorKind::Network,
                 Msg::new("ui.wizard.demo.subscriptionDown"),
+            ));
+        }
+        // A panel that serves only devices with an HWID (the owner's provider type).
+        if text.contains("hwid") && !send_hwid {
+            return Err(AppError::msg(
+                ErrorKind::Validation,
+                Msg::new("servers.fetch.hwidRequired"),
             ));
         }
         Ok(count_keys(&text))

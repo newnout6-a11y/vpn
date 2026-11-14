@@ -28,6 +28,7 @@ use super::{ScheduleService, SplitService, TrafficService};
 use crate::api_settings::test_support::{FakeTunnel, TempDir, backend};
 use crate::services::Backend;
 use crate::svc_tunnel::DomainHistory;
+use crate::svc_tunnel::scope::RunScope;
 use vpnte_tunnel::api::TunStatus;
 
 /// Waits (at most 10 s) until the pushed state satisfies `what` and returns it.
@@ -381,7 +382,7 @@ fn apps(snapshot: &SplitSnapshot) -> Vec<SplitApp> {
 async fn split_entries_by_path_and_by_name() {
     let dir = TempDir::new("lists-split-entries");
     let backend = backend(&dir, FakeTunnel::new(false));
-    let api = SplitService::start(backend.clone());
+    let api = SplitService::start(backend.clone(), RunScope::default());
 
     // A command first, so the page's first look finds a list and runs no discovery.
     let command = api
@@ -474,7 +475,7 @@ async fn split_entries_by_path_and_by_name() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn first_look_at_an_empty_list_discovers_once() {
     let dir = TempDir::new("lists-split-discover");
-    let api = SplitService::start(backend(&dir, FakeTunnel::new(false)));
+    let api = SplitService::start(backend(&dir, FakeTunnel::new(false)), RunScope::default());
     let mut state = api.state();
     let found = apps(&until(&mut state, |s| matches!(s.apps, Load::Ready(_))).await);
     assert!(
@@ -684,7 +685,12 @@ async fn the_pages_render_over_the_package_contexts() {
     let backend = backend(&dir, FakeTunnel::new(false));
     write_history(&backend, HISTORY);
     let schedule: Rc<dyn ScheduleApi> = Rc::new(schedule_api(&backend));
-    let contexts = super::with_schedule(&backend, schedule, domain_history(&backend));
+    let contexts = super::with_schedule(
+        &backend,
+        schedule,
+        domain_history(&backend),
+        RunScope::default(),
+    );
     // `use_context` finds a root context by its exact type: these are the types the pages ask
     // for (a missing one does not fail the render below, so check them here).
     assert_eq!(contexts.len(), 3);

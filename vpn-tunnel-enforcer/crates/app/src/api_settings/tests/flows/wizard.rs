@@ -18,6 +18,7 @@ fn choices(connection: Connection, routing: Routing) -> WizardChoices {
         routing,
         smart_ru: true,
         key: None,
+        send_hwid: false,
         kill_switch: KillSwitchLevel::Off,
         autostart: false,
     }
@@ -233,15 +234,85 @@ async fn check_key_imports_nothing() {
         "vless://00000000-0000-4000-8000-000000000000@203.0.113.10:443?security=none&type=tcp#Fake";
     let token = tokio_util::sync::CancellationToken::new();
     let check = api
-        .check_key(key.into(), token.clone())
+        .check_key(key.into(), false, token.clone())
         .await
         .expect("parsed");
     assert_eq!(check.servers, 1);
     assert!(!check.subscription);
     assert_eq!(shared.backend.servers.read(|d| d.profiles.len()), 0);
     let err = api
-        .check_key("hello".into(), token)
+        .check_key("hello".into(), false, token)
         .await
         .expect_err("no key");
     assert_eq!(err.kind, ErrorKind::Validation);
+}
+
+/// A loopback panel that serves its one key only to a device that sends its HWID (Remnawave's
+/// answer otherwise: 404 with `x-hwid-active` / `x-hwid-not-supported`); its URL.
+async fn hwid_panel() -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buf = [0u8; 2048];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < 16_384 {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let text = String::from_utf8_lossy(&head).to_ascii_lowercase();
+                let reply = if text.contains("\r\nx-hwid:") {
+                    let body = "vless://00000000-0000-4000-8000-000000000000@203.0.113.10:443?security=none&type=tcp#Fake\n";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nx-hwid-active: true\r\nx-hwid-not-supported: true\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
+                };
+                let _ = socket.write_all(reply.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+    format!("http://{addr}/sub/fake-token")
+}
+
+/// Lab F5 (p-follow3): an HWID-bound subscription is refused without the HWID with the
+/// provider's reason (the wizard offers «Включить HWID и добавить» by it); after the click the
+/// check sends the HWID and finds the key, and «Завершить» adds the group with the HWID on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_hwid_bound_subscription_is_added_after_the_click() {
+    let url = hwid_panel().await;
+    let (shared, _, _, _dir) = setup("wizard-hwid", false, FakeAutostart::default());
+    let api = WizardService(shared.clone());
+    // Each check has its own token, as in the page: a check cancels its token when it ends.
+    let token = tokio_util::sync::CancellationToken::new;
+    let err = api
+        .check_key(url.clone(), false, token())
+        .await
+        .expect_err("refused without the HWID");
+    assert_eq!(err.user_msg().key, "servers.fetch.hwidRequired");
+    let check = api
+        .check_key(url.clone(), true, token())
+        .await
+        .expect("served with the HWID");
+    assert_eq!((check.servers, check.subscription), (1, true));
+    let mut c = choices(Connection::Key, Routing::Soft);
+    c.key = Some(KeyText(url));
+    c.send_hwid = true;
+    api.finish(c).await.expect("finished");
+    let groups = shared.backend.servers.read(|d| {
+        (d.groups.iter())
+            .filter(|g| g.send_hwid && !g.is_manual())
+            .count()
+    });
+    assert_eq!(groups, 1, "the new subscription group sends the HWID");
+    assert_eq!(shared.backend.servers.read(|d| d.profiles.len()), 1);
 }

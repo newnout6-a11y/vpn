@@ -793,3 +793,46 @@ fn every_line_exists_in_ru_and_en() {
         }
     }
 }
+
+/// p-follow3: in Proxy mode, and while the mode is unknown, neither the connected line nor a
+/// poke says «Туннель» (nothing is a tunnel there); Tunnel mode keeps its tunnel lines.
+#[test]
+fn session_lines_follow_the_mode() {
+    use crate::swiss::Mode;
+    let catalogs = crate::test_locales::catalogs();
+    let tunnel = |key: &str| {
+        catalogs.iter().any(|c| {
+            let text = c.get(key).map(|t| t.to_lowercase()).unwrap_or_default();
+            text.contains("туннел") || text.contains("tunnel")
+        })
+    };
+    let lines = |mode: Option<Mode>, seed: u64| {
+        let mut rig = Rig::mount(MascotPhase::Off);
+        rig.rng = fastrand::Rng::with_seed(seed);
+        rig.send(MascotEvent::Mode(mode));
+        rig.send(MascotEvent::Phase(MascotPhase::On));
+        let connected = rig.key();
+        rig.send(MascotEvent::Poke);
+        (connected, rig.key())
+    };
+    let mut tun_said = std::collections::BTreeSet::new();
+    for seed in 0..60 {
+        for mode in [Some(Mode::Soft), None] {
+            let (connected, poke) = lines(mode, seed);
+            assert!(
+                !connected.is_empty() && !tunnel(&connected),
+                "{mode:?}: {connected}"
+            );
+            assert!(!poke.is_empty() && !tunnel(&poke), "{mode:?}: {poke}");
+        }
+        tun_said.insert(lines(Some(Mode::Tun), seed).0);
+    }
+    assert!(tun_said.contains("mascot.connected0"), "{tun_said:?}");
+    let proxy: Vec<String> = (0..60)
+        .map(|seed| lines(Some(Mode::Soft), seed).0)
+        .collect();
+    assert!(
+        proxy.iter().any(|k| k == "view.mascot.connectedProxy0"),
+        "{proxy:?}"
+    );
+}

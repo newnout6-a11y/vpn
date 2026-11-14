@@ -6,6 +6,7 @@
 //! network it describes: a change drops the check in flight, and a result is published only
 //! while the network it began on is still the current one.
 mod auto;
+mod session;
 
 use std::future::Future;
 use std::net::SocketAddr;

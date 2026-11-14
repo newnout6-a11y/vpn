@@ -5,6 +5,7 @@ use std::time::Duration;
 use vpnte_base::Msg;
 
 use crate::mascot::{BodyAnim, Fx, Mood, Perch};
+use crate::swiss::Mode;
 
 /// Where he wanders when protected and idle, with the mood and the line for the spot.
 pub(super) const WANDER: [(Perch, Mood, &str); 4] = [
@@ -14,7 +15,7 @@ pub(super) const WANDER: [(Perch, Mood, &str); 4] = [
     (Perch::Proxies, Mood::Squint, "mascot.wanderProxies"),
 ];
 
-/// Families of numbered lines (`mascot.<family><n>`) with their variant count in the locales.
+/// Families of lines; one is picked at random.
 #[derive(Clone, Copy)]
 pub(super) enum Family {
     Connected,
@@ -26,16 +27,45 @@ pub(super) enum Family {
 }
 
 impl Family {
-    pub(super) fn pick(self, rng: &mut fastrand::Rng) -> Msg {
-        let (stem, variants) = match self {
-            Family::Connected => ("mascot.connected", 3),
-            Family::PokeOn => ("mascot.pokeOn", 5),
-            Family::PokeOff => ("mascot.pokeOff", 3),
-            Family::Wink => ("mascot.wink", 2),
-            Family::Startle => ("mascot.startle", 3),
-            Family::Pet => ("mascot.pet", 4),
-        };
-        Msg::new(format!("{stem}{}", rng.usize(..variants)))
+    /// A line of the family for a session routed by `mode`.
+    pub(super) fn pick(self, mode: Option<Mode>, rng: &mut fastrand::Rng) -> Msg {
+        let lines = self.lines(mode);
+        Msg::new(lines[rng.usize(..lines.len())])
+    }
+
+    /// The family's lines. «Туннель…» only in Tunnel mode (p-follow3): Proxy mode has its own
+    /// words, an unknown mode the plain one.
+    pub(super) fn lines(self, mode: Option<Mode>) -> &'static [&'static str] {
+        match (self, mode) {
+            (Family::Connected, Some(Mode::Tun)) => &[
+                "mascot.connected0",
+                "mascot.connected1",
+                "mascot.connected2",
+            ],
+            (Family::Connected, Some(Mode::Soft)) => &[
+                "view.mascot.connectedProxy0",
+                "view.mascot.connectedProxy1",
+                "mascot.connected2",
+            ],
+            (Family::Connected, None) => &["mascot.connected2"],
+            (Family::PokeOn, Some(Mode::Tun)) => &[
+                "mascot.pokeOn0",
+                "mascot.pokeOn1",
+                "mascot.pokeOn2",
+                "mascot.pokeOn3",
+                "mascot.pokeOn4",
+            ],
+            (Family::PokeOn, _) => &[
+                "mascot.pokeOn0",
+                "mascot.pokeOn2",
+                "mascot.pokeOn3",
+                "mascot.pokeOn4",
+            ],
+            (Family::PokeOff, _) => &["mascot.pokeOff0", "mascot.pokeOff1", "mascot.pokeOff2"],
+            (Family::Wink, _) => &["mascot.wink0", "mascot.wink1"],
+            (Family::Startle, _) => &["mascot.startle0", "mascot.startle1", "mascot.startle2"],
+            (Family::Pet, _) => &["mascot.pet0", "mascot.pet1", "mascot.pet2", "mascot.pet3"],
+        }
     }
 }
 

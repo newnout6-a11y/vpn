@@ -443,7 +443,7 @@ lost window, then rebuilds at once), and a new window starts with the flag unset
 pub trait WizardApi: 'static {
     fn state(&self) -> watch::Receiver<WizardState>;
     async fn detect_proxy(&self) -> AppResult<Option<LocalProxy>>;          // Happ / local proxy, no side effects
-    async fn check_key(&self, text: String, cancel: CancellationToken) -> AppResult<KeyCheck>; // cache by text
+    async fn check_key(&self, text: String, send_hwid: bool, cancel: CancellationToken) -> AppResult<KeyCheck>; // HWID only after the click
     async fn finish(&self, choices: WizardChoices) -> AppResult<()>;        // §6.7 order, see below
     async fn skip(&self, lang: Lang) -> AppResult<()>;
 }
@@ -452,7 +452,9 @@ pub struct WizardDefaults { connection: Connection, routing: Routing, smart_ru: 
 pub enum Connection { Key, LocalProxy }   pub enum Routing { Hard, Soft /* default */ }
 pub struct LocalProxy { host: String, port: u16, kind: ProxyKind }   pub struct KeyCheck { servers: usize, subscription: bool }
 pub struct KeyText(pub String);           // Debug prints `KeyText(..)`: the key never reaches a log
-pub struct WizardChoices { lang, connection, routing, smart_ru: bool, key: Option<KeyText>, kill_switch: KillSwitchLevel, autostart: bool }
+pub struct WizardChoices { lang, connection, routing, smart_ru: bool, key: Option<KeyText>, send_hwid: bool, kill_switch: KillSwitchLevel, autostart: bool }
+// p-follow3 (lab F5): a key refused with a `servers::NEEDS_HWID` message offers «Включить HWID и добавить» (the Add
+// dialog's button); the click re-checks with `send_hwid`, «Завершить» imports with it; an edit asks again.
 #[component] pub fn Wizard() -> Element;  // into Shell { overlays }; a modal shown while state.open
 pub use demo::{DemoScene, DemoWizardApi};
 ```
@@ -730,7 +732,8 @@ pub enum Day { Today, Yesterday, On(Date) }   pub fn by_day(rows, now, tz) -> Ve
 pub fn line_text(&EventRow, tr) -> String;    pub fn facts(&SessionFacts, tr, bytes) -> Vec<String>;
 pub fn event_text(&EventRow, tz, tr, bytes) -> String;          // «Скопировать»
 pub struct LogTail { pub lines: Vec<TailLine { offset: u64, text: String }>, pub exists: bool, pub truncated: bool,
-    pub note: TailNote }   // None | ProxySession | TunnelSession | ServiceSession | ServiceLines | NoService | OldService
+    pub note: TailNote }   // None | ProxySession | TunnelSession | ServiceSession | ServiceLines | NoService
+                           // | ServiceStarting | ServiceStopped (the helper's own pause line) | OldService
 pub fn journal(source, &LogTail, LevelFilter, search: &str, tz) -> Vec<JournalLine>; // newest first, ≤ TAIL_LINES = 2000
 pub struct JournalLine { pub key: u64 /*offset*/, pub time, pub level, pub scope /*tunnel/lifecycle*/, pub text,
     pub fields: Vec<(String, String)> /*target, JSON fields, corr: shown on expand*/ }
@@ -740,13 +743,15 @@ Types kept from ui-logs: `SessionRow`, `Outcome`, `Text`, `Evidence` / `Evidence
 `DisconnectReason`, `Mode`, `ExportFormat`, `ArtifactReport` (now the technical clear's report, summed by
 `ClearSummary::of`), the history rules (`Filters`, `Query`, `Period`, `SortState`, `Stats`, `split`, `stats`,
 `sort_rows`), the line parsers (`parse_line`, `LineLevel`, `LevelFilter`), the formats. Demo:
-`logs::demo::DemoLogs` (scenes `full`, `empty`, `loading`, `failed`, `service`, `partial`; `demo::events`).
+`logs::demo::DemoLogs` (scenes `full`, `empty`, `loading`, `failed`, `service`, `partial`, `stopped`;
+`demo::events`).
 
 App duties: `snapshot` from the event journal (`svc_journal`) and the history store; the engine logs
 of the session that runs (or ran last) wherever it ran: Proxy mode and a Tunnel in an elevated app read
 the user's logs folder, a Tunnel session through the helper service its `%ProgramData%` logs folder;
 `Service` = the service's own lines for this Windows user over its pipe (`Request::ServiceLog`, first
-frame), `NoService` / `OldService` when there are none to get.
+frame), `NoService` / `OldService` when there are none to get, `ServiceStarting` / `ServiceStopped` for an
+installed service whose pipe did not open while the SCM reports it starting / stopped (p-follow3).
 
 ## Tools: `availability`, `speedtest`
 

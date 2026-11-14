@@ -113,6 +113,9 @@ pub struct WizardChoices {
     /// The checked key (trimmed), only with [`Connection::Key`] and only after the backend found
     /// servers in exactly this text; to be imported like the Servers page «Добавить».
     pub key: Option<KeyText>,
+    /// The key's subscription sends the device HWID: the user pressed «Включить HWID и
+    /// добавить» for exactly this text (its check already sent it).
+    pub send_hwid: bool,
     pub kill_switch: KillSwitchLevel,
     pub autostart: bool,
 }
@@ -125,9 +128,15 @@ pub trait WizardApi: 'static {
     /// Looks for another VPN client's local proxy; `None` = nothing found. Runs once per wizard
     /// session and again on «Искать снова».
     async fn detect_proxy(&self) -> AppResult<Option<LocalProxy>>;
-    /// Parses a key or subscription link without importing or saving anything. An edit of the
+    /// Parses a key or subscription link without importing or saving anything; a subscription
+    /// is fetched with the device HWID only when `send_hwid` (the user's click). An edit of the
     /// text cancels the check (`cancel`, and the future is dropped).
-    async fn check_key(&self, text: String, cancel: CancellationToken) -> AppResult<KeyCheck>;
+    async fn check_key(
+        &self,
+        text: String,
+        send_hwid: bool,
+        cancel: CancellationToken,
+    ) -> AppResult<KeyCheck>;
     /// Applies the choices all-or-nothing: import the key, autostart and kill switch when they
     /// change (undone if a later step fails), then one settings write with `first_run_complete`.
     /// On failure the wizard stays open and shows the error's message.

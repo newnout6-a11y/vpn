@@ -206,6 +206,7 @@ fn wizard_routing_without_tun() {
         routing,
         smart_ru: true,
         key: (connection == Connection::Key).then(|| KeyText("vless://fake".into())),
+        send_hwid: false,
         kill_switch: KillSwitchLevel::Off,
         autostart: false,
     };

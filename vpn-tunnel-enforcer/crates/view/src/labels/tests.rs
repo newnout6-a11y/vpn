@@ -237,6 +237,35 @@ fn facts_strip_values() {
     assert_eq!((key(&found.text), found.alert), ("swiss.leakFound", true));
 }
 
+/// Lab F10 (p-follow3): in Proxy mode the check's failure over the OS route (programs that
+/// ignore the system proxy, UDP) is what the mode is: a calm value with its sentence, never
+/// «Найдены» in red; a leak of what the mode takes (the exit through the proxy is the real
+/// address) stays «Найдены».
+#[test]
+fn proxy_mode_leaks_say_what_the_mode_covers() {
+    let calm = proxy_leak_fact(Verdict::Fail, false, false);
+    assert_eq!(
+        (key(&calm.text), calm.alert, calm.hint.as_ref().map(key)),
+        (
+            "view.leak.outsideProxy",
+            false,
+            Some("view.leak.outsideProxyHint")
+        )
+    );
+    for summary in [Verdict::Fail, Verdict::Ok, Verdict::NotChecked] {
+        let real = proxy_leak_fact(summary, false, true);
+        assert_eq!((key(&real.text), real.alert), ("swiss.leakFound", true));
+    }
+    for summary in [Verdict::Ok, Verdict::Warn, Verdict::NotChecked] {
+        assert_eq!(
+            proxy_leak_fact(summary, false, false),
+            leak_fact(summary, false)
+        );
+    }
+    let checking = proxy_leak_fact(Verdict::Fail, true, true);
+    assert_eq!(key(&checking.text), "swiss.leakChecking");
+}
+
 /// NOADMIN §2: the proxy hold is Soft's kill switch; in Hard (TUN) a level without WFP holds
 /// nothing, so the fact asks for administrator rights instead of naming the proxy.
 #[test]
@@ -682,6 +711,8 @@ fn emitted() -> Vec<Msg> {
             leak_fact(summary, false).text,
             leak_fact(summary, true).text,
         ]);
+        let proxy = proxy_leak_fact(summary, false, false);
+        out.extend(proxy.hint.into_iter().chain([proxy.text]));
     }
     use ServerHealth::*;
     for health in [Online, Offline, Unknown] {

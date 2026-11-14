@@ -18,6 +18,7 @@ mod brain;
 mod tests;
 
 pub use crate::MascotPhase;
+use crate::swiss::Mode;
 pub use brain::MascotBrain;
 
 /// i18n key of the mascot's accessible name (aria-label and title of the mascot button).
@@ -175,6 +176,9 @@ pub struct MascotView {
 pub enum MascotEvent {
     /// The dashboard's derived phase (only a change does something).
     Phase(MascotPhase),
+    /// The routing of the session (`ConnView::mode`, `None` without one). Send it before the
+    /// phase: his lines about the session follow it, «Туннель…» only in Tunnel mode.
+    Mode(Option<Mode>),
     /// Download speed band in Mbit/s as bucketed by `traffic` (0 = idle or ordinary: nothing to
     /// say). Send it when the band changes; repeating the same value is ignored.
     SpeedBand(f32),

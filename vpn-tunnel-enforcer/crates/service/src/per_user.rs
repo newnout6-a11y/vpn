@@ -16,6 +16,7 @@ use crate::pipe::client::{CallError, Client, ServerCheck};
 use crate::proto::{Reply, Request};
 use crate::scm::manage;
 use crate::sddl;
+use crate::update::swap::{self, SwapFiles};
 
 /// How the elevated install ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,13 +84,25 @@ fn run_elevated(exe: &Path, params: &str) -> std::io::Result<Elevated> {
     Ok(Elevated::Exited(code))
 }
 
-/// The installed service is this very build, byte for byte: a reinstall of the same version asks
-/// for no prompt.
+/// The installed service is this very build, byte for byte, and settled: a reinstall of the
+/// same version asks for no prompt.
 pub fn is_current(exe: &Path) -> bool {
     let Ok(Some(installed)) = manage::installed_binary() else {
         return false;
     };
-    match (std::fs::read(&installed), std::fs::read(exe)) {
+    same_settled(&installed, exe)
+}
+
+/// `installed` is `ours` byte for byte and no swap of it is on trial. A fresh exe that crashes
+/// inside the SCM dispatch never reaches the start that counts its trial, so it would never roll
+/// back: the release installer's install is its repair (svcupd-a9). The swap folder is readable
+/// by users; a spent trial's record is settled (the previous exe is back).
+fn same_settled(installed: &Path, ours: &Path) -> bool {
+    let on_trial = swap::marker(&SwapFiles::new(installed)).is_some_and(|m| !m.spent());
+    if on_trial {
+        return false;
+    }
+    match (std::fs::read(installed), std::fs::read(ours)) {
         (Ok(installed), Ok(ours)) => installed == ours,
         _ => false,
     }
@@ -151,5 +164,38 @@ mod tests {
             install_args(Some(dir)),
             format!("install --resources \"{}\"", dir.display())
         );
+    }
+
+    /// svcupd-a9 (p-follow3): the same bytes are current only while no swap of them is on
+    /// trial (the installer's install repairs a fresh exe that crashes before its trial counts);
+    /// a spent trial's record (the previous exe back) is settled.
+    #[test]
+    fn a_swap_on_trial_is_not_current() {
+        use crate::update::swap::{Marker, TRIAL_STARTS};
+        use vpnte_update::version::Version;
+        let dir = std::env::temp_dir().join(format!("vpnte-per-user-{}", std::process::id()));
+        let (installed, ours) = (dir.join("vpnte-service.exe"), dir.join("o.exe"));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(&installed, b"service build").expect("installed");
+        std::fs::write(&ours, b"service build").expect("ours");
+        assert!(same_settled(&installed, &ours));
+        let staging = SwapFiles::new(&installed).staging;
+        std::fs::create_dir_all(&staging).expect("staging");
+        let mark = |starts| {
+            let m = Marker {
+                from: Version(2, 0, 0),
+                to: Version(2, 0, 1),
+                starts,
+            };
+            let json = serde_json::to_vec(&m).expect("json");
+            std::fs::write(staging.join("swap.json"), json).expect("marker");
+        };
+        mark(1);
+        assert!(!same_settled(&installed, &ours), "on trial");
+        mark(TRIAL_STARTS);
+        assert!(same_settled(&installed, &ours), "a spent trial's record");
+        std::fs::write(&ours, b"another build").expect("ours");
+        assert!(!same_settled(&installed, &ours));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

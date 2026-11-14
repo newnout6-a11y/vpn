@@ -8,7 +8,6 @@ use std::net::IpAddr;
 use tokio_util::sync::CancellationToken;
 use vpnte_base::types::{ClientDevice, KillSwitchLevel};
 use vpnte_base::{AppError, AppResult, Msg};
-use vpnte_core::settings::AppScope;
 use vpnte_probes::diagnostics::{self, RoutingInputs, RoutingVerdict};
 use vpnte_probes::leak::{
     AddrProbe, Reach, SelfTestResult, SelfTestVerdict, SystemEnv, report, run_self_test,
@@ -19,6 +18,7 @@ use vpnte_ui::maintenance::{
 };
 
 use super::{Shared, project, refused};
+use crate::svc_tunnel::scope::{self, RunScope};
 
 /// The leak self-test of the running session.
 pub(crate) async fn leak(shared: &Shared, cancel: CancellationToken) -> AppResult<LeakTestView> {
@@ -29,11 +29,12 @@ pub(crate) async fn leak(shared: &Shared, cancel: CancellationToken) -> AppResul
     } else {
         KillSwitchLevel::Off
     };
-    // Only the listed apps use the VPN (p-app-split): curl's default-route read went around it.
-    let listed_only = shared.backend.settings.read(|s| s.app_scope) == AppScope::OnlyListed;
+    let listed_only = listed_run(&shared.run_scope, &status, || {
+        scope::saved_listed(&shared.backend.settings)
+    });
     let result = run_self_test(&SystemEnv, level, &cancel)
         .await
-        .with_scope(listed_only && is_tun(&status));
+        .with_scope(listed_only);
     if result.cancelled && cancel.is_cancelled() {
         return Err(AppError::cancelled());
     }
@@ -77,6 +78,15 @@ fn session_tunnel(shared: &Shared) -> AppResult<std::sync::Arc<dyn crate::servic
 
 fn is_tun(status: &TunStatus) -> bool {
     status.running && status.capture == Some(CaptureKind::Tun)
+}
+
+/// Only the listed apps use the running Tunnel session's VPN, so curl's default-route read goes
+/// around it (p-app-split). The run's own scope labels and judges it, never the saved one: a
+/// flipped switch applies from the next connection (appsplit-b4, p-follow3). `saved` is read
+/// only for a run nobody has seen yet.
+fn listed_run(run: &RunScope, status: &TunStatus, saved: impl FnOnce() -> bool) -> bool {
+    run.observe(scope::run_start(status), saved);
+    is_tun(status) && run.listed()
 }
 
 /// The panel's view of a run; every sentence comes from the evidence (probes' `report`).
@@ -127,5 +137,44 @@ fn route_verdict(v: RoutingVerdict) -> RouteVerdict {
         RoutingVerdict::Leak => RouteVerdict::Leak,
         RoutingVerdict::TunnelOff => RouteVerdict::TunnelOff,
         RoutingVerdict::Inconclusive => RouteVerdict::Inconclusive,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// appsplit-b4 (p-follow3): the self-test of a Tunnel run that started with only the listed
+    /// apps keeps that scope after the switch flipped; Proxy mode has no app scope; the next
+    /// run reads the saved one.
+    #[test]
+    fn the_self_test_reads_the_running_scope() {
+        let run = RunScope::default();
+        let status = TunStatus {
+            running: true,
+            started_at: Some(1_000),
+            capture: Some(CaptureKind::Tun),
+            ..TunStatus::default()
+        };
+        // the tunnel's copy saw the run start with «Только выбранные приложения»
+        run.observe(Some(1_000), || true);
+        assert!(
+            listed_run(&run, &status, || false),
+            "the switch flipped mid-run"
+        );
+        let proxy = TunStatus {
+            capture: Some(CaptureKind::Proxy),
+            ..status.clone()
+        };
+        assert!(!listed_run(&run, &proxy, || true));
+        let next = TunStatus {
+            started_at: Some(2_000),
+            ..status
+        };
+        assert!(!listed_run(&run, &next, || false), "the next run, all apps");
+        assert!(
+            !listed_run(&run, &TunStatus::default(), || true),
+            "nothing runs"
+        );
     }
 }

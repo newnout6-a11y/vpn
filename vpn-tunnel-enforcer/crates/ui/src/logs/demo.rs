@@ -1,7 +1,8 @@
 //! [`DemoLogs`]: a fake [`LogsApi`] with realistic data for `demo_logs` and the page tests.
 //! Scenes: `full` (default), `empty`, `loading`, `failed` (the history read fails), `service`
 //! (a Tunnel session through the helper service: its engine log and its service lines),
-//! `partial` (clearing the technical logs cannot delete one file).
+//! `partial` (clearing the technical logs cannot delete one file), `stopped` (the helper
+//! service is installed but stopped).
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::time::Duration;
@@ -148,6 +149,10 @@ impl LogsApi for DemoLogs {
             LogSource::SingBox => singbox_tail(now, service),
             LogSource::Xray => LogTail::default(),
             LogSource::Service if service => service_tail(now),
+            LogSource::Service if self.scene == "stopped" => LogTail {
+                note: TailNote::ServiceStopped,
+                ..LogTail::default()
+            },
             LogSource::Service => LogTail {
                 note: TailNote::NoService,
                 ..LogTail::default()

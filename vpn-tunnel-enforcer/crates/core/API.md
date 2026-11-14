@@ -404,7 +404,16 @@ pub struct ResolverMemoryDoc;                // Document "cache/resolver.json": 
 pub fn persist(root: &Path, network: Option<String>, cancel: CancellationToken); // load + seed + apply the
                                              // network's winner at start; save on change every 30 s and at cancel
 pub fn set_network(key: Option<String>, at: UnixMs);  // moved to network `key` (None = unknown) at `at`
+pub async fn keep_for_session(started: UnixMs, names: &[String]); // p-follow3: chain -> last known, kept
+pub fn end_session();                                // the kept names go
 ```
+Session names (lab F11, p-follow3): `keep_for_session` resolves each name of the session that
+started at `started` over the chain (never the OS resolver; its last known address when the chain
+fails) and keeps it until `end_session` or a newer start. While a name is kept, `resolve_host`
+(either `How`) and `resolve_server` answer it from the kept addresses (the caller's filter still
+applies) without any lookup; while a session runs, `resolve_server` never asks the OS resolver. The
+app calls them from `api_maintenance::network::session` (one process: the helper service keeps no
+session names of its own).
 `persist` (call once inside the runtime, before the first connect) seeds the last-known server
 addresses and the per-network winning upstream from the sealed document (entries older than
 `MEMORY_TTL` dropped, at most 32 networks), asks the winner of `network` (the caller's quick read

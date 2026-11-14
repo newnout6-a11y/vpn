@@ -68,6 +68,12 @@ const REATTACH_TRIES: u32 = 12;
 /// Status reads after the re-link while the restarted service may still be starting the session
 /// it resumes (it is offered for a take-over once its engine runs).
 const RESUME_TRIES: u32 = 5;
+/// While no link is up the SCM is asked this often ([`Remote::keep_linked`]).
+const RELINK_POLL: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(10)
+};
 
 /// The tunnel runtime in the helper service.
 #[derive(Clone)]
@@ -78,6 +84,8 @@ struct Inner {
     installed: AtomicBool,
     /// The SCM says it is coming up and its pipe is not answering yet (p-live-fix).
     starting: AtomicBool,
+    /// A re-attach after a loss runs: it links and takes over by itself.
+    reattaching: AtomicBool,
     /// When the SCM was last asked while the service was not installed.
     looked: Mutex<Option<std::time::Instant>>,
     /// What the SCM "says" about a private test pipe's service (`None`: stopped).
@@ -219,6 +227,7 @@ impl Remote {
         Self(Arc::new(Inner {
             installed: AtomicBool::new(false),
             starting: AtomicBool::new(false),
+            reattaching: AtomicBool::new(false),
             looked: Mutex::new(None),
             #[cfg(test)]
             test_presence: Mutex::new(None),
@@ -450,10 +459,54 @@ impl Remote {
         if !self.installed() {
             return None;
         }
+        self.0.reattaching.store(true, Ordering::Relaxed);
         self.0.state.lock().waiting = true;
         let kept = self.resumed_session().await;
         self.stop_waiting();
+        self.0.reattaching.store(false, Ordering::Relaxed);
         kept
+    }
+
+    /// Keeps a link up whenever the installed service runs, so a stop while the app is idle is
+    /// heard at once: its pipe closes, the loss is counted and the views read the SCM (lab F8).
+    /// Links are otherwise made by an operation or a re-attach only, so a service that was
+    /// stopped at start, or stayed down past the re-attach, was never linked again and its next
+    /// stop went unnoticed. A session the new link finds kept for this user goes to the
+    /// re-attach's take-over (through a counted loss). Runs until the app closes.
+    pub(super) async fn keep_linked(self) {
+        loop {
+            if let Some(gone) = self.live_link().await {
+                tokio::select! {
+                    () = self.0.shutdown.cancelled() => return,
+                    () = gone.cancelled() => {}
+                }
+            }
+            if !self.pause_for(RELINK_POLL).await {
+                return;
+            }
+            let idle = !self.0.reattaching.load(Ordering::Relaxed);
+            if !idle || !self.installed() || self.observe() != Presence::Running {
+                continue;
+            }
+            if self.live_link().await.is_some() {
+                continue;
+            }
+            match self.link().await {
+                Ok(_) if self.0.state.lock().kept.is_some() => {
+                    self.0.losses.send_modify(|n| *n += 1);
+                }
+                Ok(_) => tracing::info!("helper service running again: linked"),
+                Err(err) => tracing::debug!(error = %err, "helper service not linked yet"),
+            }
+        }
+    }
+
+    /// The token of the link that is up, if one is.
+    async fn live_link(&self) -> Option<CancellationToken> {
+        let slot = self.0.link.lock().await;
+        slot.as_ref()
+            .filter(|l| !l.gone.is_cancelled())
+            .map(|l| l.gone.clone())
     }
 
     async fn resumed_session(&self) -> Option<KeptSession> {

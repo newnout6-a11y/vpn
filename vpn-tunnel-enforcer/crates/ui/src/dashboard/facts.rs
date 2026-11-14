@@ -1,7 +1,10 @@
 //! The facts strip: routing mode · Smart RU (with its toggle) · kill-switch · leaks (with the
 //! check button). Each cell is a mascot perch.
 use dioxus::prelude::*;
-use vpnte_view::labels::{FactValue, kill_switch_fact, leak_fact, mode_fact, smart_fact};
+use vpnte_view::labels::{
+    FactValue, kill_switch_fact, leak_fact, mode_fact, proxy_leak_fact, smart_fact,
+};
+use vpnte_view::swiss::Mode;
 
 use super::Dash;
 use crate::lang::tr;
@@ -15,7 +18,12 @@ pub(super) fn FactsStrip() -> Element {
     let smart = smart_fact(view.smart_ru);
     let saving = dash.smart.running();
     let checking = dash.leak.running();
-    let leak = leak_fact(view.leak, checking);
+    // The running session's routing: Proxy mode leaves part of the traffic direct by design.
+    let leak = if view.conn.mode == Some(Mode::Soft) {
+        proxy_leak_fact(view.leak, checking, view.exit.leak)
+    } else {
+        leak_fact(view.leak, checking)
+    };
     let pending = t!("swiss.smartPending");
     let (toggle, check) = (dash.clone(), dash.clone());
     rsx! {
@@ -83,6 +91,7 @@ fn Value(
     #[props(default)] title: Option<String>,
     #[props(default)] blink: bool,
 ) -> Element {
+    let title = title.or_else(|| value.hint.as_ref().map(tr));
     rsx! {
         span {
             class: "swiss-fact-value",

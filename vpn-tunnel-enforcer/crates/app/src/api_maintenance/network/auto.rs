@@ -21,10 +21,12 @@ const CHANGE_DELAY: Duration = Duration::from_secs(5);
 /// Debounce of the network-change watch.
 const NET_SETTLE: Duration = Duration::from_millis(1500);
 
-/// Starts the automatic checks (once after start, then after each physical network change)
-/// and keeps the resolver memory on the current network; ends with the app.
+/// Starts the automatic checks (once after start, then after each physical network change),
+/// keeps the resolver memory on the current network and the running session's server name
+/// kept for the session; ends with the app.
 pub(crate) fn spawn(shared: &Arc<Shared>) {
     let cancel = shared.backend.shutdown.child_token();
+    tokio::spawn(super::session::follow(shared.clone(), cancel.clone()));
     tokio::spawn(watch_network(shared.clone(), cancel));
 }
 

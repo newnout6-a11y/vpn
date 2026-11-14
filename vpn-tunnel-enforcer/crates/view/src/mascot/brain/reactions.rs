@@ -50,7 +50,10 @@ impl MascotBrain {
             match phase {
                 MascotPhase::On => {
                     let act = Act::new(Mood::Happy).fx(Fx::Confetti).body(BodyAnim::Jump);
-                    self.act(now, act.text(Family::Connected.pick(rng)).ms(2200));
+                    self.act(
+                        now,
+                        act.text(Family::Connected.pick(self.mode, rng)).ms(2200),
+                    );
                 }
                 MascotPhase::Alert => {
                     let act = Act::new(Mood::Scared).fx(Fx::Sweat).body(BodyAnim::Shake);
@@ -196,7 +199,7 @@ impl MascotBrain {
         // Woken by a stroke: wake gently, the petting reaction takes over.
         if !on_mascot {
             let act = Act::new(Mood::Scared).body(BodyAnim::Startle);
-            self.act(now, act.text(Family::Startle.pick(rng)).ms(1200));
+            self.act(now, act.text(Family::Startle.pick(self.mode, rng)).ms(1200));
         }
     }
 
@@ -286,7 +289,7 @@ impl MascotBrain {
         }
         if rng.f64() < WINK_CHANCE {
             let act = Act::new(Mood::Wink).body(BodyAnim::Jump);
-            self.act(now, act.text(Family::Wink.pick(rng)).announce());
+            self.act(now, act.text(Family::Wink.pick(self.mode, rng)).announce());
             return;
         }
         let uneasy = matches!(self.phase, MascotPhase::Off | MascotPhase::Alert);
@@ -295,7 +298,9 @@ impl MascotBrain {
         } else {
             (Mood::Happy, Family::PokeOn)
         };
-        let act = Act::new(mood).body(BodyAnim::Jump).text(family.pick(rng));
+        let act = Act::new(mood)
+            .body(BodyAnim::Jump)
+            .text(family.pick(self.mode, rng));
         self.act(now, act.ms(1200).announce());
     }
 
@@ -322,7 +327,7 @@ impl MascotBrain {
         {
             self.last_pet_line = Some(now);
             let hold = Duration::from_millis(1800);
-            self.say(now, Family::Pet.pick(rng), hold, true);
+            self.say(now, Family::Pet.pick(self.mode, rng), hold, true);
         }
         // Stops being petted shortly after the strokes stop.
         self.arm(Slot::Pet, now, PET_RELEASE);

@@ -1,6 +1,10 @@
 {
   "view": {
     "dash": "—",
+    "leak": {
+      "outsideProxy": "Outside proxy",
+      "outsideProxyHint": "Programs that ignore the system proxy, and UDP, go direct: that is how Proxy mode works."
+    },
     "status": {
       "proxyDown": "Server not responding — traffic blocked",
       "degraded": "Connected — protection weakened",

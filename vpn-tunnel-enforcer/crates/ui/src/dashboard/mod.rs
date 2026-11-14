@@ -309,6 +309,8 @@ fn use_mascot_feed(dash: &Dash, active: Memo<bool>, sample: Signal<traffic::Traf
     use_effect(move || {
         let view = feed.snapshot();
         let state = swiss::derive_swiss_state(&SwissInput::new(&view.conn, &view.exit));
+        // Before the phase: his lines about the session follow its routing (p-follow3).
+        feed.bus.send(MascotEvent::Mode(view.conn.mode));
         feed.bus
             .phase(swiss::swiss_phase(state, view.conn.swiss_busy()));
         feed.bus.session_started(view.conn.tun_started_at());

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use vpnte_base::Msg;
 
 use super::{BodyAnim, Fx, MascotEvent, MascotPhase, MascotView, Mood, Perch, Speech};
+use crate::swiss::Mode;
 use act::{Act, greeting_for};
 
 mod act;
@@ -58,6 +59,8 @@ fn wander_delay(rng: &mut fastrand::Rng) -> Duration {
 #[derive(Debug, Clone)]
 pub struct MascotBrain {
     phase: MascotPhase,
+    /// The session's routing as last sent (`None`: unknown or no session).
+    mode: Option<Mode>,
     /// Latest speed band, Mbit/s.
     down: f32,
     /// The band is in the slow range (the slow comment's timer runs while it stays there).
@@ -106,6 +109,7 @@ impl MascotBrain {
     ) -> Self {
         let mut brain = Self {
             phase,
+            mode: None,
             down: 0.0,
             slow: false,
             session: None,
@@ -151,6 +155,7 @@ impl MascotBrain {
         use MascotEvent as E;
         match ev {
             E::Phase(phase) => self.set_phase(phase, now, rng),
+            E::Mode(mode) => self.mode = mode,
             E::SpeedBand(band) => self.set_band(band, now),
             E::SessionAge(age) => {
                 self.session = age.map(|age| (now, age));

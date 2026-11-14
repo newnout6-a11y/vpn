@@ -39,6 +39,7 @@ use vpnte_ui::maintenance::{
 
 use crate::services::Backend;
 use crate::svc_tunnel::Built;
+use crate::svc_tunnel::scope::RunScope;
 pub(crate) use export::ExportSources;
 pub(crate) use network::network_key_now;
 pub(crate) use repair::{RepairHost, WindowsHost};
@@ -57,6 +58,7 @@ pub fn contexts(backend: &Arc<Backend>, built: &Built) -> Vec<Box<dyn Any>> {
         Arc::new(WindowsHost),
         Some(sources),
         verdicts,
+        built.run_scope.clone(),
     );
     network::spawn(&shared);
     let api: Rc<dyn MaintenanceApi> = Rc::new(MaintenanceService(shared));
@@ -84,6 +86,8 @@ pub(crate) struct Shared {
     pub epoch: network::NetEpoch,
     /// Held by the one diagnostics export, from the first click through the Save dialog.
     pub export_claim: std::sync::atomic::AtomicBool,
+    /// The app scope the running session started with (the leak self-test's label).
+    pub run_scope: RunScope,
 }
 
 impl Shared {
@@ -93,6 +97,7 @@ impl Shared {
         host: Arc<dyn RepairHost>,
         sources: Option<ExportSources>,
         verdicts: Option<Arc<Verdicts>>,
+        run_scope: RunScope,
     ) -> Arc<Self> {
         let shared = Arc::new(Self {
             backend,
@@ -104,6 +109,7 @@ impl Shared {
             verdicts,
             epoch: network::NetEpoch::default(),
             export_claim: std::sync::atomic::AtomicBool::new(false),
+            run_scope,
         });
         project::spawn(&shared);
         shared

@@ -98,6 +98,7 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
                 self.launch_failed(&target, e.user_msg())
             }
             Err(err) => {
+                self.unproven.add_if_silent(&target.id, &err);
                 // An episode tells how it ended itself; without one, the failure is the news.
                 if self.rescue(&target.id, Trigger::Launch, &cancel).await == Ended::NotStarted {
                     return self.launch_failed(&target, err.reason());

@@ -1,1 +1,8 @@
-{}
+{
+  "view": {
+    "mascot": {
+      "connectedProxy0": "Proxy's on. On duty.",
+      "connectedProxy1": "Proxy's up. Breathe easy."
+    }
+  }
+}

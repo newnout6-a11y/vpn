@@ -47,7 +47,9 @@ network filters later (`service.uninstall.filtersKept`: `uninstall`, `forget-me`
 failed and the service is stopped until Windows starts it (`service.install.notRestarted`) / 5
 nobody approved the prompt (`request-install`; the installer and the app then go on in proxy
 mode). `request-install` asks nothing when the installed service exe is this build byte for byte
-(`per_user::is_current`) and otherwise returns the elevated `install`'s own exit code. `install` copies this exe and
+and no swap of it is on trial (`per_user::is_current`: an unsettled `update\swap.json` is not
+current, so the release installer repairs a fresh exe that crashes before its trial counts) and
+otherwise returns the elevated `install`'s own exit code. `install` copies this exe and
 `sing-box.exe`, `libcronet.dll`, `wintun.dll`, `xray.exe`, `geoip-ru.srs`,
 `geosite-category-gov-ru.srs` (default source `<exe dir>\resources`) into
 `%ProgramFiles%\VPN Tunnel Enforcer Service\`. Everything is read and checked before anything
@@ -473,6 +475,6 @@ untouched.
 - p-svc-fix (14.11.2026, review svcupd): engine-only feed updates reach Tunnel mode with the next
   release's `Take` (the service no longer checks by itself). `swap::probe` ran against a non-exe
   and the test binary (refused), never against a real service build; a crash inside the SCM
-  dispatch of a fresh exe (before `service::run`) still never counts a trial start, and the
-  installer's `request-install` (`per_user::is_current`, a byte compare; not this package) does
-  not yet treat an unsettled `update\swap.json` as "not current".
+  dispatch of a fresh exe (before `service::run`) still never counts a trial start; the
+  installer's `request-install` repairs it (`per_user::is_current` treats an unsettled
+  `update\swap.json` as "not current", p-follow3).

@@ -14,6 +14,7 @@ use vpnte_ui::split_tunnel::{
 use super::plan::{Plan, plan};
 use crate::api_lists::SplitService;
 use crate::api_settings::test_support::{FakeTunnel, TempDir, backend};
+use crate::svc_tunnel::scope::RunScope;
 
 /// frayZV/simple-ru-routing `JSON-EXAMPLE` (public), as a provider sends it.
 const SIMPLE_RU: &str = r#"{"Name":"Simple-RU-routing","GlobalProxy":"true","RemoteDNSType":"DoU","RemoteDNSDomain":"https://dns.adguard-dns.com/dns-query","RemoteDNSIP":"94.140.14.14","DomesticDNSType":"DoU","DomesticDNSDomain":"https://dns.adguard-dns.com/dns-query","DomesticDNSIP":"94.140.15.15","Geoipurl":"https://github.com/frayZV/simple-ru-geoip/releases/latest/download/geoip.dat","Geositeurl":"https://github.com/frayZV/simple-ru-geosite/releases/latest/download/geosite.dat","LastUpdated":"4070905200","DnsHosts":{},"DirectSites":["geosite:private","geosite:category-ru","geosite:apple","geosite:twitch"],"DirectIp":["geoip:ru","geoip:private"],"ProxySites":["geosite:youtube","geosite:category-ban-ru"],"ProxyIp":[],"BlockSites":[],"BlockIp":[],"DomainStrategy":"IPIfNonMatch","FakeDNS":"false","UseChunkFiles":"true"}"#;
@@ -267,7 +268,7 @@ async fn offer_preview_import() {
         .expect("command");
     let profile = r#"{"Name":"P","DirectSites":["geosite:category-ru","domain:bank.example"],"ProxySites":["domain:one.example","keyword:two"]}"#;
     let group = add_subscription(&backend, profile);
-    let api = SplitService::start(backend.clone());
+    let api = SplitService::start(backend.clone(), RunScope::default());
 
     let offers = {
         let mut rx = api.state();

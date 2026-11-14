@@ -82,7 +82,11 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
                     None
                 }
                 event = events.recv() => match event {
-                    Ok(LifecycleEvent::Started { runtime_id, kind, profile_id, .. }) => {
+                    Ok(LifecycleEvent::Started { owner, runtime_id, kind, profile_id, .. }) => {
+                        // The user's own start on a server gives it back to the retries.
+                        if let Some(id) = profile_id.as_deref().filter(|_| owner == Owner::Manual) {
+                            self.unproven.forgive([id]);
+                        }
                         self.clear_gave_up();
                         hold = false;
                         w = Watch::of(runtime_id, profile_id.filter(|_| kind.server()));
@@ -111,6 +115,7 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
                     }
                     Ok(LifecycleEvent::NetworkChanged) => {
                         self.spent.lock().clear();
+                        self.unproven.clear();
                         self.forget_network();
                         // Traffic of the old network proves nothing about the new one.
                         w.whitelist_from = None;
@@ -211,6 +216,9 @@ impl<C: Coordinator, H: PickHost> AutoPick<C, H> {
             // Data moved: never a reason to switch (a connection-count freeze lifts by itself).
             Confirmation::Inconclusive => w.next_confirm = Some(now + INCONCLUSIVE),
             Confirmation::Frozen | Confirmation::NoTraffic => {
+                if result == Confirmation::NoTraffic {
+                    self.unproven.add(&id);
+                }
                 let seq = acts.seq;
                 match w.reported {
                     None => {
