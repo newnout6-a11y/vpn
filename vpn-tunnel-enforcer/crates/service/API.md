@@ -21,8 +21,8 @@ vpnte-service.workspace = true
 | `host` | the session host: one runtime + kill switch, one controlling client, state changes in arrival order, events, client-gone stop, the kept last session and its resume (`keep_sessions_in`, `resume`) |
 | `users` | Windows users (SIDs) of the service: the installing user and each user's first `Hello`; the last `ForgetMe` removes the service |
 | `scm` | `scm::manage` (create / configure / start / stop / delete, installed binary path), `scm::dispatch` (running under the SCM; `Control::resumes()` counts wakes from `SERVICE_CONTROL_POWEREVENT`) |
-| `install` | `install` / `uninstall` (elevated verbs), `remove_self`, `install::flow` (the order of their steps and what follows a failed one, over a `Machine` seam), `install::image` (the running exe through a locked handle), `install::pins` (SHA-256 against `resources/engines.toml`) |
-| `per_user` | what the per-user side runs: `request_install` (the one elevated step, asked of Windows with `runas`), `is_current`, `forget_me`, `status` |
+| `install` | `install` / `uninstall` (elevated verbs), `remove_self`, `install::flow` (the order of their steps and what follows a failed one, over a `Machine` seam), `install::image` (the running exe through a locked handle), `install::pins` (SHA-256 against `resources/engines.toml`), `install::entry` (p-tails-a: the Settings > Apps entry under HKLM) |
+| `per_user` | what the per-user side runs: `request_install` (the one elevated step, asked of Windows with `runas`), `request_uninstall` (the same for `uninstall`: Settings > Apps), `is_current`, `forget_me`, `status` |
 | `paths` | service name, `%ProgramFiles%\VPN Tunnel Enforcer Service\`, `%ProgramData%\VPN Tunnel Enforcer\` with its private `service\` part (`DataFiles`), `secure_dir` |
 | `service` | the service body (`run`): logging, WFP start-up, runtime, host, sandbox, graceful stop, the re-checks of a held kill switch (`service::recheck`: wake / network change, leak self-test); `trusted_install` / `FolderFault` |
 | `logs` | the service log (p-logs): `init(dir)` (global subscriber, redacted app-log JSON lines in `service\service.log` + `service.1.log`, 1 MiB, each tagged `user` = the session's SID, else the controller's, else none; `"?"` when the host is busy), `attribute(owner)`, `owner_of`, `lines_for(dir, sid)` / `for_user(sid)` (service-wide lines and the caller's own, tag stripped, last `REPLY_LINES` = 2000) |
@@ -37,6 +37,7 @@ vpnte-service run                          # the SCM's command line ("<exe>" run
 vpnte-service install [--resources <dir>]  # elevated: copy + pin-check + register + start
 vpnte-service uninstall                    # elevated: stop + WFP objects + delete + folders
 vpnte-service request-install [--resources <dir>]  # per-user: asks Windows to run `install` elevated
+vpnte-service request-uninstall            # Settings > Apps (unelevated): asks Windows to run `uninstall` elevated
 vpnte-service forget-me                    # per-user uninstaller: this Windows user leaves (no prompt)
 vpnte-service status                       # the installed service answers over its pipe (CI smoke)
 ```
@@ -356,6 +357,33 @@ service; private memory is what the service itself holds (Happ's service, measur
 8.8 MB working set, 9.5 MB private). Not measured: the installed service under the SCM (needs
 elevation) — it adds the WFP engine handle and the SCM thread, no timer.
 
+### Settings > Apps entry (`install::entry`, p-tails-a)
+```rust
+pub const DISPLAY_NAME: &str = "service.entry.displayName";   // «VPN Tunnel Enforcer — служба-помощник»
+pub const PUBLISHER: &str = "VPN Tunnel Enforcer";
+pub struct Place { pub hive: Hive, pub path: String }         // machine(): HKLM\SOFTWARE\Microsoft\Windows\
+                                                              // CurrentVersion\Uninstall\VpnTunnelEnforcerService
+pub struct Entry<'a> { pub exe: &'a Path, pub version: &'a str, pub bytes: u64, pub lang: Lang }
+pub fn write(place: &Place, entry: &Entry) -> windows::core::Result<()>;   // 64-bit view
+pub fn remove(place: &Place) -> windows::core::Result<bool>;               // false = none
+pub fn names(place: &Place, version: &str) -> bool;          // the entry lists this DisplayVersion
+pub fn system_lang() -> Lang;                                 // GetSystemDefaultUILanguage: ru, else en
+```
+`install` lists the service right after its registration (`DisplayName` in the machine's
+language, `DisplayVersion`, `Publisher`, `InstallLocation`, `DisplayIcon` = the exe, `EstimatedSize`
+= the placed bytes in KiB, `NoModify` / `NoRepair` = 1, `UninstallString` = `"<exe>"
+request-uninstall`, `QuietUninstallString` = `"<exe>" uninstall`); a failed write is a warning
+only. The entry goes with the registration: the uninstall flow's delete step and the last user's
+`remove_self` remove it once `DeleteService` succeeded (a service that stays keeps it). A failed
+install leaves no entry of its own: it is written only after the registration, which no failure
+path deletes (a failed upgrade keeps the old service and its entry). `uninstall` run from the
+program folder itself (Settings > Apps) leaves its own exe and the folder to the restart queue
+(tombstones, as `remove_self`). Each start (`run`, `install::relist`, before the service log)
+rewrites the entry when it does not name the running version: the service's own update (a swap
+or its rollback) changes the exe under it, and a service an older build installed has none yet;
+`EstimatedSize` is then the folder's files. The per-user app's HKCU entry is the installer's,
+untouched.
+
 ## i18n keys (`locales/svc-core.*.json`, all under `service.`)
 | Keys | Args | Emitted by |
 | --- | --- | --- |
@@ -367,6 +395,7 @@ elevation) — it adds the WFP engine handle and the SCM thread, no timer.
 | `service.folder.untrusted` / `service.folder.fileMissing` | — / `file` | `service::FolderFault::msg` (refused starts) |
 | `service.install.{notElevated,imageChanged,failed}`, `service.install.{fileMissing,fileMismatch}` | — / `file` | `install` |
 | `service.install.notRestarted`, `service.uninstall.filtersKept` | — | `install::flow` (exit codes 4 / 3), the last user's `ForgetMe` |
+| `service.entry.displayName` | — | `install::entry` (read from the fragment: the verbs register no catalog) |
 
 ## Not implemented / not run
 - Not run here (the shell is not elevated): the SCM paths, `install` / `uninstall`, WFP and the

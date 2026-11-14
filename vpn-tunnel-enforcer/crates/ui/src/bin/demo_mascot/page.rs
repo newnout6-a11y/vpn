@@ -3,20 +3,22 @@
 use std::time::Duration;
 
 use vpnte_ui::mascot::{MascotBus, MascotEvent, MascotHost};
+use vpnte_ui::pages::Page;
 use vpnte_ui::t;
 
 use super::*;
 
+/// The real sidebar's labels («Журнал» for the logs); Maintenance is advanced-only, so not here.
 pub(super) const NAV: [(&str, &str); 9] = [
-    ("dashboard", "sidebar.dashboard"),
-    ("apps", "sidebar.apps"),
-    ("servers", "sidebar.servers"),
-    ("speedtest", "sidebar.speedTest"),
-    ("availability", "sidebar.availability"),
-    ("trafficHistory", "sidebar.trafficHistory"),
-    ("schedule", "sidebar.schedule"),
-    ("logs", "sidebar.logs"),
-    ("settings", "sidebar.settings"),
+    ("dashboard", Page::Dashboard.label_key()),
+    ("apps", Page::Apps.label_key()),
+    ("servers", Page::Servers.label_key()),
+    ("speedtest", Page::SpeedTest.label_key()),
+    ("availability", Page::Availability.label_key()),
+    ("trafficHistory", Page::TrafficHistory.label_key()),
+    ("schedule", Page::Schedule.label_key()),
+    ("logs", Page::Logs.label_key()),
+    ("settings", Page::Settings.label_key()),
 ];
 
 /// The reference sidebar: wordmark, numbered nav (`nav-*` spots) and the clock spot.

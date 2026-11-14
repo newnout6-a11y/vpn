@@ -32,6 +32,7 @@ use vpnte_update::policy;
 use vpnte_update::store::EngineStore;
 
 use crate::services::Backend;
+use crate::svc_journal::{Tone, Topic};
 use doc::UpdatesDoc;
 
 /// The root contexts of the update channel: `Rc<dyn UpdatesApi>`. Starts the checker and the
@@ -131,14 +132,24 @@ impl Updates {
     /// The start after an update says how it went: success once as a notice, a failure stays
     /// as the banner with the kept installer.
     fn after_update(&self) {
-        if let Some(Outcome::Updated { to }) = &self.inner.lock().outcome {
-            use vpnte_base::Msg;
-            use vpnte_base::types::{Level, Notice};
-            let notice = Notice::new(
-                Level::Success,
-                Msg::new("app.update.updated").arg("version", to),
-            );
-            self.backend.notifier.notify(notice, None);
+        use vpnte_base::Msg;
+        use vpnte_base::types::{Level, Notice};
+        let outcome = self.inner.lock().outcome.clone();
+        match outcome {
+            // The notice reaches the event journal through the notifier's hook.
+            Some(Outcome::Updated { to }) => {
+                let notice = Notice::new(
+                    Level::Success,
+                    Msg::new("app.update.updated").arg("version", to),
+                );
+                self.backend.notifier.notify(notice, None);
+            }
+            Some(Outcome::Failed { to, .. }) => self.journal(
+                Tone::Warn,
+                Msg::new("app.journal.update.notFinished").arg("version", to),
+                None,
+            ),
+            None => {}
         }
     }
 
@@ -152,6 +163,11 @@ impl Updates {
             }
             changed
         });
+    }
+
+    /// One event of the update channel in the event journal.
+    fn journal(&self, tone: Tone, title: vpnte_base::Msg, body: Option<vpnte_base::Msg>) {
+        crate::svc_journal::record(&self.backend.dirs.root, Topic::Update, tone, title, body);
     }
 
     /// One calm line after an action (`warn` = a refusal or failure).

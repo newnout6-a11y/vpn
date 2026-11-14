@@ -13,6 +13,8 @@ use vpnte_ui::updates::{ServiceLine, ServiceState};
 use vpnte_update::version::Version;
 
 use super::Updates;
+use crate::svc_journal::Tone;
+use vpnte_base::Msg;
 
 /// A state question: the pipe is local, the answer immediate.
 const ASK: Duration = Duration::from_secs(5);
@@ -44,9 +46,46 @@ impl Updates {
         self.show_service(state);
     }
 
-    fn show_service(&self, state: Option<ServiceUpdateWire>) {
+    /// Shows the service's answer and notes its version.
+    pub(super) fn show_service(&self, state: Option<ServiceUpdateWire>) {
+        let version = state.as_ref().map(|s| s.version.clone());
         self.inner.lock().service = state;
+        if let Some(version) = version {
+            self.service_seen(version);
+        }
         self.refresh();
+    }
+
+    /// The service answered as `version`. Another version than at its last answer, in this run
+    /// or an earlier one (the service may take a release, or the installer bring one, while the
+    /// app is closed), is a release it took, or a lower one it went back to (its trial failed):
+    /// one event of the journal. A version that could not be remembered is not written either:
+    /// no repeat at every answer.
+    fn service_seen(&self, version: String) {
+        let before = self.doc.read(|d| d.service_version.clone());
+        if before.as_deref() == Some(version.as_str()) {
+            return;
+        }
+        if let Err(err) = self
+            .doc
+            .update(|d| d.service_version = Some(version.clone()))
+        {
+            tracing::warn!(%err, "helper service version not stored");
+            return;
+        }
+        let Some(before) = before else {
+            return;
+        };
+        let lower = matches!(
+            (before.parse::<Version>(), version.parse::<Version>()),
+            (Ok(before), Ok(now)) if now < before
+        );
+        let (key, tone) = if lower {
+            ("app.journal.update.serviceBack", Tone::Warn)
+        } else {
+            ("app.journal.update.service", Tone::Ok)
+        };
+        self.journal(tone, Msg::new(key).arg("version", version), None);
     }
 
     /// Right before the installer of release `to` runs: the service takes `to` from the feed

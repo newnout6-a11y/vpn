@@ -177,3 +177,38 @@ fn elevated_the_restart_queue_gets_the_tombstone_not_the_exe() {
     assert!(!queue.contains(&exe_nt), "the exe's path was queued");
     let _ = exe;
 }
+
+/// p-tails-a: Settings > Apps runs the installed exe, so the `uninstall` verb finds itself in the
+/// program folder and leaves that folder to the restart queue; any other place is removed now.
+#[test]
+fn the_installed_exe_is_told_from_another_copy() {
+    let dir = Path::new(r"C:\Program Files\VPN Tunnel Enforcer Service");
+    let installed = dir.join("vpnte-service.exe");
+    assert!(inside(&installed, dir));
+    assert!(inside(
+        Path::new(r"c:\program files\vpn tunnel enforcer service\vpnte-service.exe"),
+        dir
+    ));
+    assert!(inside(&installed, Path::new(r"C:\Program Files\")));
+    for other in [
+        r"C:\Program Files\VPN Tunnel Enforcer Service 2\vpnte-service.exe",
+        r"C:\Users\A\AppData\Local\Programs\VPN Tunnel Enforcer\vpnte-service.exe",
+        r"C:\Program Files\VPN Tunnel Enforcer Service",
+    ] {
+        assert!(!inside(Path::new(other), dir), "{other}");
+    }
+}
+
+/// p-tails-a: the size a start puts in the Settings > Apps entry counts every file of the
+/// folder, subfolders too (engines the updater placed, the staged exe).
+#[test]
+fn the_folder_size_counts_every_file() {
+    let dir = std::env::temp_dir().join(format!("vpnte-bytes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join(r"engines\sing-box")).expect("dirs");
+    std::fs::write(dir.join(EXE_NAME), [0u8; 1000]).expect("exe");
+    std::fs::write(dir.join(r"engines\sing-box\sing-box.exe"), [0u8; 24]).expect("engine");
+    assert_eq!(bytes_under(&dir), 1024);
+    assert_eq!(bytes_under(&dir.join("gone")), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}

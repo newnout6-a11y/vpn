@@ -37,6 +37,7 @@
         },
         "speed": "Speed: ↓ {{down}} / ↑ {{up}}",
         "show": "Show window",
+        "open": "Open window",
         "start": "Turn protection on",
         "stop": "Turn protection off",
         "reconnectNow": "Connect",

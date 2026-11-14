@@ -14,6 +14,7 @@ use crate::paths::{self, DataFiles, EXE_NAME};
 use crate::scm::manage;
 use crate::users::Users;
 
+pub mod entry;
 pub mod flow;
 pub mod image;
 pub mod pins;
@@ -143,17 +144,24 @@ impl flow::Machine for System<'_> {
     }
 
     fn delete(&self) -> AppResult<()> {
-        manage::delete().map_err(failed)
+        manage::delete().map_err(failed)?;
+        unlist();
+        Ok(())
     }
 
     fn remove_folders(&self) -> AppResult<()> {
         let mut first = Ok(());
         for dir in [paths::install_dir(), paths::data_dir()] {
             let removed = dir.map_err(failed).and_then(|dir| {
-                if dir.exists() {
-                    retry(|| std::fs::remove_dir_all(&dir).map_err(AppError::internal))
-                } else {
+                if !dir.exists() {
                     Ok(())
+                } else if runs_from(&dir) {
+                    // Settings > Apps runs the installed exe (`request-uninstall`, then this
+                    // verb): its file goes at the next restart, as after the last user's leave.
+                    remove_or_schedule(&dir, &mut schedule);
+                    Ok(())
+                } else {
+                    retry(|| std::fs::remove_dir_all(&dir).map_err(AppError::internal))
                 }
             });
             if first.is_ok() {
@@ -167,6 +175,7 @@ impl flow::Machine for System<'_> {
 /// The files in place, the data folder and the installing user ready, the service registered
 /// (automatic start again). Runs after the old service stopped for good.
 fn place(files: &[(&str, Vec<u8>)], service_exe: &[u8]) -> AppResult<PathBuf> {
+    let bytes = files.iter().map(|(_, bytes)| bytes.len()).sum::<usize>() + service_exe.len();
     let dir = paths::install_dir().map_err(failed)?;
     let dir = dir.as_path();
     paths::secure_dir(dir).map_err(failed)?;
@@ -193,7 +202,71 @@ fn place(files: &[(&str, Vec<u8>)], service_exe: &[u8]) -> AppResult<PathBuf> {
         tracing::warn!(error = %err, "installing user not recorded");
     }
     manage::create_or_update(&exe, DESCRIPTION).map_err(failed)?;
+    list(&exe, bytes as u64);
     Ok(exe)
+}
+
+/// Lists the registered service in Settings > Apps. A failed write costs only that line: the
+/// service works, and the `uninstall` verb or the last user's leave still remove it.
+fn list(exe: &Path, bytes: u64) {
+    let listed = entry::Entry {
+        exe,
+        version: env!("CARGO_PKG_VERSION"),
+        bytes,
+        lang: entry::system_lang(),
+    };
+    if let Err(err) = entry::write(&entry::Place::machine(), &listed) {
+        tracing::warn!(error = %err, "Settings > Apps entry not written");
+    }
+}
+
+/// Takes the service off Settings > Apps, once its registration is deleted.
+fn unlist() {
+    if let Err(err) = entry::remove(&entry::Place::machine()) {
+        tracing::warn!(error = %err, "Settings > Apps entry not removed");
+    }
+}
+
+/// At the service's start: Settings > Apps names the running version. The service's own update
+/// (a swap, or its rollback) changes the exe under the entry, and a service an older build
+/// installed has none yet. Runs before the service log: a failure only leaves the old line.
+pub fn relist() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if !entry::names(&entry::Place::machine(), env!("CARGO_PKG_VERSION")) {
+        list(&exe, exe.parent().map_or(0, bytes_under));
+    }
+}
+
+/// Bytes of the files under `dir`: what the service's folder takes (links are not followed).
+fn bytes_under(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    (entries.flatten())
+        .map(|item| match item.file_type() {
+            Ok(kind) if kind.is_dir() => bytes_under(&item.path()),
+            Ok(kind) if kind.is_file() => item.metadata().map_or(0, |meta| meta.len()),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// This process runs an exe inside `dir`.
+fn runs_from(dir: &Path) -> bool {
+    std::env::current_exe().is_ok_and(|exe| inside(&exe, dir))
+}
+
+/// `path` lies in `dir` or below it (Windows paths: any case).
+fn inside(path: &Path, dir: &Path) -> bool {
+    let (exe, dir) = (path.to_string_lossy(), dir.to_string_lossy());
+    let dir = dir.trim_end_matches('\\');
+    exe.len() > dir.len()
+        && exe.as_bytes()[dir.len()] == b'\\'
+        && exe
+            .get(..dir.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(dir))
 }
 
 /// A stop that did not reach `STOPPED` in time is a failure: files of a running service are not
@@ -223,8 +296,9 @@ fn retry(mut op: impl FnMut() -> AppResult<()>) -> AppResult<()> {
 /// removes our WFP objects, deletes the engine files and the data folder; what is in use (the
 /// running exe, its folder, the open service log) is deleted by Windows at the next restart.
 pub fn remove_self(exe: &Path) {
-    if let Err(err) = manage::delete() {
-        tracing::warn!(error = %err, "service registration not deleted");
+    match manage::delete() {
+        Ok(()) => unlist(),
+        Err(err) => tracing::warn!(error = %err, "service registration not deleted"),
     }
     if let Err(err) = vpnte_winnet::wfp::remove_all() {
         tracing::warn!(error = %err, "WFP objects not removed");

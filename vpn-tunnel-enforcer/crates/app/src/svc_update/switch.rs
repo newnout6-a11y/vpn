@@ -13,6 +13,7 @@ use vpnte_update::store::Origin;
 
 use super::Updates;
 use super::actions::engine_name;
+use crate::svc_journal::Tone;
 
 /// How an engine switch reaches the sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +45,12 @@ impl Updates {
         } else {
             Reach::NextConnect
         };
-        let note = note(reach, id, &self.active_version(id), restart);
+        let version = self.active_version(id);
+        let note = note(reach, id, &version, restart);
+        let title = Msg::new("app.journal.update.engine")
+            .arg("name", engine_name(id))
+            .arg("version", version);
+        self.journal(Tone::Ok, title, Some(note.msg.clone()));
         self.inner.lock().note = Some(note);
         self.refresh();
     }

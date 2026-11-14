@@ -125,3 +125,82 @@ fn ways_go_through_the_session_first() {
     assert_eq!(got[0].route.label(), "socks5h://127.0.0.1:20002");
     assert_eq!(got[1].route.label(), "socks5h://127.0.0.1:20001");
 }
+
+/// p-tails-a: the update channel writes its events to the journal: an update that did not
+/// finish (found at start), an offered app version once (a security release has its notice
+/// instead), an engine switch with the line on where it reaches, a release the helper service
+/// took (not its first answer ever, not a missing one; also across runs).
+#[tokio::test]
+async fn update_events_reach_the_journal() {
+    use vpnte_base::Msg;
+    use vpnte_service::proto::{ServiceUpdateWire, UpdatePhase};
+    use vpnte_update::pending::{self, Pending};
+
+    use super::{Signed, Updates, local_root};
+    use crate::api_settings::test_support::{FakeTunnel, TempDir, backend};
+    use crate::svc_journal::Journal;
+
+    let tmp = TempDir::new("updates-journal");
+    let backend = backend(&tmp, FakeTunnel::new(false));
+    let updates_dir = vpnte_update::dirs::updates_dir(&local_root(&backend.dirs.root));
+    std::fs::create_dir_all(&updates_dir).unwrap();
+    let pending = Pending {
+        from: RUNNING,
+        to: Version(9, 9, 9),
+        at: 0,
+        installer: updates_dir.join("setup.exe"),
+    };
+    pending::write(&updates_dir, &pending).unwrap();
+    let updates = Updates::start(backend.clone());
+    let journal = Journal::open(&backend.dirs.root);
+    let events = |key: &str| -> Vec<Vec<String>> {
+        let records = journal.records();
+        let found = records.iter().filter(|r| r.title.key == key);
+        found
+            .map(|r| r.title.args.iter().map(|(_, v)| v.clone()).collect())
+            .collect()
+    };
+    assert_eq!(events("app.journal.update.notFinished"), [["9.9.9"]]);
+
+    let held = |severity: &str, version: &str| Signed {
+        feed: feed(version, severity, None, "1.14.5"),
+        bytes: Vec::new(),
+        sig: String::new(),
+    };
+    updates.inner.lock().feed = Some(held("normal", "2.0.1"));
+    updates.tell_offer();
+    updates.tell_offer();
+    assert_eq!(events("app.journal.update.offered"), [["2.0.1"]]);
+    updates.inner.lock().feed = Some(held("security", "2.0.2"));
+    updates.tell_offer();
+    assert_eq!(events("app.journal.update.offered").len(), 1);
+    assert_eq!(
+        updates.doc.read(|d| d.offered.clone()).as_deref(),
+        Some("2.0.2")
+    );
+
+    updates.engine_switched("sing-box", Msg::new("app.update.engineInstalled"));
+    let switched = journal.records().pop().unwrap();
+    assert_eq!(switched.title.key, "app.journal.update.engine");
+    assert!(switched.body.is_some(), "where the switch reaches");
+
+    let wire = |version: &str| ServiceUpdateWire {
+        version: version.into(),
+        phase: UpdatePhase::Idle,
+        target: None,
+        checked_at: None,
+    };
+    updates.show_service(Some(wire("2.0.0")));
+    updates.show_service(None);
+    updates.show_service(Some(wire("2.0.0")));
+    updates.show_service(Some(wire("2.0.1")));
+    assert_eq!(events("app.journal.update.service"), [["2.0.1"]]);
+    // The next run: a release the service took while the app was closed is told at its answer.
+    let next = Updates::start(backend.clone());
+    next.show_service(Some(wire("2.0.2")));
+    next.show_service(Some(wire("2.0.2")));
+    assert_eq!(events("app.journal.update.service"), [["2.0.1"], ["2.0.2"]]);
+    // Its trial failed: back to the version before, said as such.
+    next.show_service(Some(wire("2.0.1")));
+    assert_eq!(events("app.journal.update.serviceBack"), [["2.0.1"]]);
+}

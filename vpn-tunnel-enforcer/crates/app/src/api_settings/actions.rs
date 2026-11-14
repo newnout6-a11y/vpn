@@ -133,6 +133,9 @@ pub async fn set_kill_switch_level(shared: &Arc<Shared>, level: KillSwitchLevel)
     detached(async move {
         let result = shared.backend.tunnel()?.set_kill_switch_level(level).await;
         shared.dirty.notify_one();
+        if result.is_ok() {
+            crate::svc_journal::kill_switch_level(&shared.backend.dirs.root, level);
+        }
         result
     })
     .await
@@ -152,6 +155,13 @@ pub async fn add_exception(
             .add_exception(wfp_exception_kind(kind), value, label)
             .await;
         shared.dirty.notify_one();
+        if let Ok(added) = &result {
+            crate::svc_journal::kill_switch_exception(
+                &shared.backend.dirs.root,
+                &added.label,
+                true,
+            );
+        }
         result.map(drop)
     })
     .await
@@ -160,8 +170,16 @@ pub async fn add_exception(
 pub async fn remove_exception(shared: &Arc<Shared>, id: String) -> AppResult<()> {
     let shared = shared.clone();
     detached(async move {
+        // The event names the exception the user saw; read before it goes.
+        let label = (shared.backend.protection).read(|doc| {
+            let mut exceptions = doc.settings.exceptions.iter();
+            exceptions.find(|e| e.id == id).map(|e| e.label.clone())
+        });
         let result = shared.backend.tunnel()?.remove_exception(id).await;
         shared.dirty.notify_one();
+        if let (Ok(()), Some(label)) = (&result, label) {
+            crate::svc_journal::kill_switch_exception(&shared.backend.dirs.root, &label, false);
+        }
         result
     })
     .await

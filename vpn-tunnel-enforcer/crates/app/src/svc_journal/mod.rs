@@ -2,8 +2,10 @@
 //! rotating JSON-lines file in the data folder (`events.jsonl` + `events.1.jsonl`) that stores
 //! Msg keys and their arguments, redacted like the app log, never keys, subscription URLs,
 //! tokens or HWIDs. Fed by one hook on every notice the app shows (`attach`), by session starts
-//! and ends with their outcome and by the runtime's warnings (`feed`). A journal that did not
-//! exist yet starts with the stored sessions history, so the tab is not empty after an upgrade.
+//! and ends with their outcome and by the runtime's warnings (`feed`), by the notices the
+//! documents raised at this start (once per occurrence), and by [`record`]: the update channel
+//! and the kill-switch settings. A journal that did not exist yet starts with the stored sessions
+//! history, so the tab is not empty after an upgrade.
 mod feed;
 mod file;
 mod record;
@@ -16,8 +18,8 @@ use std::sync::{Arc, LazyLock, Weak};
 
 use parking_lot::Mutex;
 use tokio::sync::watch;
-use vpnte_base::AppResult;
-use vpnte_base::types::UnixMs;
+use vpnte_base::types::{KillSwitchLevel, UnixMs, now_ms};
+use vpnte_base::{AppResult, Msg};
 use vpnte_tunnel::history::Entry;
 
 use crate::services::Backend;
@@ -176,8 +178,9 @@ pub fn attach(backend: &Backend) -> Arc<Journal> {
     journal.seed(&backend.history.list());
     // The one-time import of the old version's data said something only Maintenance showed.
     if let Some(report) = &backend.import {
-        journal.append(import_events(report, vpnte_base::types::now_ms()));
+        journal.append(import_events(report, now_ms()));
     }
+    journal.append(store_notices(backend, now_ms()));
     // The notifier lives as long as the process: so does the journal it writes to.
     let hook = journal.clone();
     backend
@@ -188,6 +191,66 @@ pub fn attach(backend: &Backend) -> Arc<Journal> {
             }
         }));
     journal
+}
+
+/// Adds one event, now, to the journal of the data folder `root` (the instance the root's hook
+/// writes to): what the update channel and the kill-switch settings record.
+pub fn record(root: &Path, topic: Topic, tone: Tone, title: Msg, body: Option<Msg>) {
+    Journal::open(root).append([NewRecord {
+        at: now_ms(),
+        topic,
+        tone,
+        title,
+        body,
+        session: None,
+    }]);
+}
+
+/// The kill-switch level chosen in Settings (or by the tray's «Выключить «Всегда»»).
+pub fn kill_switch_level(root: &Path, level: KillSwitchLevel) {
+    let key = match level {
+        KillSwitchLevel::Off => "app.journal.killSwitch.off",
+        KillSwitchLevel::Standard => "app.journal.killSwitch.onDrop",
+        KillSwitchLevel::Strict => "app.journal.killSwitch.always",
+    };
+    record(root, Topic::Protection, Tone::Info, Msg::new(key), None);
+}
+
+/// A kill-switch exception added (`true`) or removed in Settings, by its user label.
+pub fn kill_switch_exception(root: &Path, label: &str, added: bool) {
+    let key = if added {
+        "app.journal.killSwitch.exceptionAdded"
+    } else {
+        "app.journal.killSwitch.exceptionRemoved"
+    };
+    let title = Msg::new(key).arg("label", label);
+    record(root, Topic::Protection, Tone::Info, title, None);
+}
+
+/// What the backend's documents raised at this start and not at the previous one (a document
+/// set aside, or read-only): a standing read-only state is recorded once, not at every start.
+/// The server list's documents are the servers crate's (`Servers::notice` has no such flag).
+fn store_notices(backend: &Backend, at: UnixMs) -> Vec<NewRecord> {
+    [
+        backend.settings.new_notice(),
+        backend.protection.new_notice(),
+        backend.themes.new_notice(),
+        backend.soft.new_notice(),
+        backend.cleanup.new_notice(),
+        backend.rules.new_notice(),
+        backend.history.store().new_notice(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|title| NewRecord {
+        at,
+        topic: Topic::Other,
+        tone: Tone::Warn,
+        title,
+        body: None,
+        session: None,
+    })
+    .collect()
 }
 
 /// The notes of this start's import of the old version's data, as update events.

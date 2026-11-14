@@ -232,6 +232,7 @@ pub fn App() -> Element {
     use_notices(&wiring, toasts);
     use_instance_commands(&wiring);
     use_toast_clicks(&wiring);
+    vpnte_ui::webview_errors::use_script_errors();
     rsx! {
         TrayHost {
             Shell {

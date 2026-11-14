@@ -71,6 +71,9 @@ pub struct TrayExtras {
     pub always: bool,
     /// The newer app version on offer (`UpdatesApi::state().app`): «Доступна версия X».
     pub update: Option<String>,
+    /// The window is gone after a WebView2 crash (the rebuild limit, or a new window that did
+    /// not come up): «Показать окно» reads «Открыть окно»; either opens a new window.
+    pub window_lost: bool,
 }
 
 /// What the tray says about protection.
@@ -337,6 +340,7 @@ impl TrayModel {
                             .arg("up", &up),
                         false,
                     ),
+                    TrayItemId::Show if extras.window_lost => (Msg::new("ui.tray.menu.open"), true),
                     TrayItemId::Show => (Msg::new("ui.tray.menu.show"), true),
                     TrayItemId::Start => (Msg::new(start), can_start && !quitting),
                     TrayItemId::Stop => (Msg::new(stop), can_stop && !quitting),

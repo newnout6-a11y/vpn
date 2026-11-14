@@ -103,5 +103,6 @@ pub mod traffic_history;
 pub mod tray;
 pub mod units;
 pub mod updates;
+pub mod webview_errors;
 pub mod widgets;
 pub mod wizard;

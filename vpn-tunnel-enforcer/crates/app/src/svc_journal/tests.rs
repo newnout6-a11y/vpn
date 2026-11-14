@@ -302,3 +302,137 @@ fn import_notes_become_update_events() {
     );
     assert_eq!(events[0].title.key, "app.import.softMode");
 }
+
+/// p-tails-a: a document left read-only is one event, written by the start that first found it
+/// (a warning, topic other); the next start with the same state adds nothing; `record` adds an
+/// event to the journal the hook writes to.
+#[test]
+fn a_store_notice_is_recorded_once() {
+    let tmp = TempDir::new("journal-store");
+    let data = tmp.0.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("rules.json"), r#"{"schemaVersion":99}"#).unwrap();
+    let count = |journal: &Journal| {
+        let records = journal.records();
+        let found: Vec<_> = records
+            .iter()
+            .filter(|r| r.title.key == "core.store.newerVersion")
+            .map(|r| (r.topic, r.tone, r.title.args.clone()))
+            .collect();
+        for (topic, tone, args) in &found {
+            assert_eq!((*topic, *tone), (Topic::Other, Tone::Warn));
+            assert!(
+                args.contains(&("file".into(), "rules.json".into())),
+                "{args:?}"
+            );
+        }
+        found.len()
+    };
+    {
+        let backend = backend(&tmp, FakeTunnel::new(false));
+        let journal = attach(&backend);
+        assert_eq!(count(&journal), 1);
+        record(
+            &backend.dirs.root,
+            Topic::Update,
+            Tone::Ok,
+            Msg::new("app.journal.update.downloaded").arg("what", "VPN Tunnel Enforcer 2.0.1"),
+            None,
+        );
+        let last = journal.records().pop().unwrap();
+        assert_eq!(last.title.key, "app.journal.update.downloaded");
+    }
+    // The marker as the previous start (another process) left it.
+    let marker = data.join("rules.json.notice");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    value["run"] = "1-1".into();
+    std::fs::write(&marker, serde_json::to_vec(&value).unwrap()).unwrap();
+    let backend = backend(&tmp, FakeTunnel::new(false));
+    let journal = attach(&backend);
+    assert_eq!(count(&journal), 1, "not again at the next start");
+}
+
+/// p-tails-a: the journal's own texts (update channel, kill switch) pair up in ru and en and
+/// cover every key the producers write.
+#[test]
+fn journal_texts_pair_up() {
+    fn keys(prefix: &str, value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    keys(&format!("{prefix}{key}."), value, out);
+                }
+            }
+            _ => out.push(prefix.trim_end_matches('.').to_owned()),
+        }
+    }
+    let flat = |text: &str| {
+        let mut out = Vec::new();
+        keys("", &serde_json::from_str(text).unwrap(), &mut out);
+        out.sort();
+        out
+    };
+    let ru = flat(include_str!("../../locales/p-tails-a.ru.json"));
+    let en = flat(include_str!("../../locales/p-tails-a.en.json"));
+    assert_eq!(ru, en);
+    let used = [
+        "offered",
+        "downloaded",
+        "started",
+        "failed",
+        "notFinished",
+        "engine",
+        "engineFailed",
+        "service",
+        "serviceBack",
+    ]
+    .map(|k| format!("app.journal.update.{k}"))
+    .into_iter()
+    .chain(
+        [
+            "off",
+            "onDrop",
+            "always",
+            "exceptionAdded",
+            "exceptionRemoved",
+        ]
+        .map(|k| format!("app.journal.killSwitch.{k}")),
+    );
+    for key in used {
+        assert!(ru.contains(&key), "{key}");
+    }
+}
+
+/// p-tails-a: the kill-switch level and its exceptions, changed in Settings, are protection
+/// events in the journal the hook writes to; an exception's label is redacted like the app log.
+#[test]
+fn kill_switch_changes_are_protection_events() {
+    let tmp = TempDir::new("journal-kill-switch");
+    let journal = Journal::open(&tmp.0);
+    for level in [
+        KillSwitchLevel::Strict,
+        KillSwitchLevel::Standard,
+        KillSwitchLevel::Off,
+    ] {
+        kill_switch_level(&tmp.0, level);
+    }
+    let link = "vless://11111111-2222-3333-4444-555555555555@203.0.113.7:443";
+    kill_switch_exception(&tmp.0, "Офис", true);
+    kill_switch_exception(&tmp.0, link, false);
+    let records = journal.records();
+    let keys: Vec<&str> = records.iter().map(|r| &*r.title.key).collect();
+    assert_eq!(
+        keys,
+        [
+            "app.journal.killSwitch.always",
+            "app.journal.killSwitch.onDrop",
+            "app.journal.killSwitch.off",
+            "app.journal.killSwitch.exceptionAdded",
+            "app.journal.killSwitch.exceptionRemoved",
+        ]
+    );
+    assert!(records.iter().all(|r| r.topic == Topic::Protection));
+    assert_eq!(records[3].title.args[0].1, "Офис");
+    assert!(!records[4].title.args[0].1.contains("11111111"));
+}

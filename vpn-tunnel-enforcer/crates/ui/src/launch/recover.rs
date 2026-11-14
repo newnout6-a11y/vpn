@@ -35,7 +35,7 @@ use windows_core_061::{BOOL, HSTRING, Interface, PWSTR};
 
 use super::remount::{MAX_REBUILDS, REBUILD_SPAN, Rebuild, Shape};
 use super::stand_in::{self, OPEN_DELAY_MS, StandIn};
-use crate::tray::{TrayItemId, hide_to_tray};
+use crate::tray::{TrayItemId, WindowLost, hide_to_tray, show_window};
 
 /// How long a rebuild after a dead browser process waits for `BrowserProcessExited` before it
 /// opens the new window anyway (a new environment too early can fail, and dioxus panics then).
@@ -130,7 +130,7 @@ pub(crate) struct CrashWatch {
     desktop: DesktopContext,
     rebuild: Rc<Rebuild>,
     stand_in: StandIn,
-    state: Cell<State>,
+    phase: Phase,
     /// The window as the crash found it, for the new one.
     shape: Cell<Option<Shape>>,
     /// What took the page.
@@ -140,6 +140,8 @@ pub(crate) struct CrashWatch {
 /// Watches the window's WebView2 for process failures. Call it once, in the root component.
 pub(crate) fn use_crash_watch(rebuild: Rc<Rebuild>) {
     let desktop = use_window();
+    let lost = use_signal(|| false);
+    use_context_provider(|| WindowLost(lost));
     let watch = use_hook(|| {
         let home = desktop
             .webview
@@ -150,7 +152,7 @@ pub(crate) fn use_crash_watch(rebuild: Rc<Rebuild>) {
             desktop: desktop.clone(),
             rebuild,
             stand_in: StandIn::new(home),
-            state: Cell::new(State::Live),
+            phase: Phase::new(lost),
             shape: Cell::new(None),
             failure: Cell::new(None),
         });
@@ -173,11 +175,45 @@ pub(crate) fn use_crash_watch(rebuild: Rc<Rebuild>) {
             shown.on_shown();
         }
     });
-    use_muda_event_handler(move |event| {
-        if event.id().0 == TrayItemId::Quit.menu_id() {
-            watch.on_quit();
-        }
+    use_muda_event_handler(move |event| match event.id().0.as_str() {
+        id if id == TrayItemId::Quit.menu_id() => watch.on_quit(),
+        id if id == TrayItemId::Show.menu_id() => watch.on_open(),
+        _ => {}
     });
+}
+
+/// The watch's [`State`], mirrored into the tray's [`WindowLost`] flag: set exactly while the
+/// window is `Lost`, so the tray offers «Открыть окно». The window that replaces it starts with
+/// its own flag, unset.
+struct Phase {
+    state: Cell<State>,
+    lost: Signal<bool>,
+}
+
+impl Phase {
+    fn new(lost: Signal<bool>) -> Phase {
+        Phase {
+            state: Cell::new(State::Live),
+            lost,
+        }
+    }
+
+    fn get(&self) -> State {
+        self.state.get()
+    }
+
+    /// Callers run outside the VirtualDom (WebView2 events, thread timers): a flag whose dom is
+    /// gone is skipped, and an unchanged one is not written (a write wakes its readers).
+    fn set(&self, state: State) {
+        self.state.set(state);
+        let lost = state == State::Lost;
+        let mut flag = self.lost;
+        if flag.try_peek().is_ok_and(|now| *now != lost)
+            && let Ok(mut value) = flag.try_write()
+        {
+            *value = lost;
+        }
+    }
 }
 
 impl CrashWatch {
@@ -295,7 +331,7 @@ impl CrashWatch {
 
     /// The page's renderer or the browser process died.
     fn on_page_lost(self: &Rc<Self>, failure: Failure, exit_code: Option<i32>) {
-        match self.state.get() {
+        match self.phase.get() {
             State::Live => {}
             // The stand-in page's own renderer died: open it again (bounded by the stand-in).
             _ if failure == Failure::Renderer => return self.open_stand_in(),
@@ -311,7 +347,7 @@ impl CrashWatch {
                 ?exit_code,
                 "WebView2 page lost; the window cannot be rebuilt (a root context is single-use), the tray keeps working"
             );
-            return self.state.set(State::Stuck);
+            return self.phase.set(State::Stuck);
         }
         if !self.rebuild.allow() {
             tracing::error!(
@@ -321,14 +357,14 @@ impl CrashWatch {
                 minutes = REBUILD_SPAN.as_secs() / 60,
                 "WebView2 crashed too often; the window stays closed until it is opened from the tray"
             );
-            return self.state.set(State::Lost);
+            return self.phase.set(State::Lost);
         }
         if failure == Failure::Browser {
             tracing::warn!(
                 ?exit_code,
                 "WebView2 browser process exited; a new window opens once its processes are gone"
             );
-            self.state.set(State::Waiting);
+            self.phase.set(State::Waiting);
             if !later(self, BROWSER_WAIT_MS, Due::BrowserWait) {
                 self.replace();
             }
@@ -364,9 +400,9 @@ impl CrashWatch {
             .unwrap_or_else(|| Shape::of(&self.desktop.window));
         if !self.rebuild.open(&self.desktop, shape) {
             tracing::warn!("another window rebuild is under way; this window stays closed");
-            return self.state.set(State::Lost);
+            return self.phase.set(State::Lost);
         }
-        self.state.set(State::Replaced);
+        self.phase.set(State::Replaced);
         if !later(self, MOUNT_WAIT_MS, Due::MountCheck) {
             tracing::warn!("no timer to check that the new window comes up");
         }
@@ -374,7 +410,7 @@ impl CrashWatch {
 
     /// Every process of the dead browser has ended.
     fn on_browser_gone(self: &Rc<Self>) {
-        if self.state.get() == State::Waiting {
+        if self.phase.get() == State::Waiting {
             self.replace();
         }
     }
@@ -382,17 +418,17 @@ impl CrashWatch {
     fn on_timer(self: &Rc<Self>, due: Due) {
         match due {
             Due::StandIn => self.stand_in.open(&self.desktop),
-            Due::BrowserWait if self.state.get() == State::Waiting => {
+            Due::BrowserWait if self.phase.get() == State::Waiting => {
                 tracing::warn!("no WebView2 browser exit report in time; opening the new window");
                 self.replace();
             }
             Due::MountCheck
-                if self.state.get() == State::Replaced && self.rebuild.abandon(&self.desktop) =>
+                if self.phase.get() == State::Replaced && self.rebuild.abandon(&self.desktop) =>
             {
                 tracing::error!(
                     "the new WebView2 window did not come up; the window stays closed until it is opened from the tray"
                 );
-                self.state.set(State::Lost);
+                self.phase.set(State::Lost);
             }
             Due::BrowserWait | Due::MountCheck => {}
         }
@@ -401,10 +437,20 @@ impl CrashWatch {
     /// The window was focused, which a lost (hidden) window only is when something shows it: a
     /// new window replaces it now, in the state it is shown in.
     fn on_shown(self: &Rc<Self>) {
-        if self.state.get() == State::Lost {
+        if self.phase.get() == State::Lost {
             tracing::info!("window opened again after a WebView2 crash");
             self.shape.set(Some(Shape::of(&self.desktop.window)));
             self.replace();
+        }
+    }
+
+    /// The tray's «Открыть окно» (or «Показать окно») on a lost window: shown first, so the new
+    /// window comes up shown, then rebuilt at once instead of waiting for the focus Windows may
+    /// not give. The tray shows the window as well; its focus finds the rebuild under way.
+    fn on_open(self: &Rc<Self>) {
+        if self.phase.get() == State::Lost {
+            show_window(&self.desktop);
+            self.on_shown();
         }
     }
 
@@ -414,12 +460,12 @@ impl CrashWatch {
     /// mounts. So the new window goes; a refused quit shows this window, which then rebuilds.
     /// After a dead browser this VirtualDom stands still: the rebuild goes on, the new tray quits.
     fn on_quit(&self) {
-        if self.state.get() == State::Replaced
+        if self.phase.get() == State::Replaced
             && self.failure.get() == Some(Failure::Renderer)
             && self.rebuild.abandon(&self.desktop)
         {
             tracing::info!("quit while the window was being rebuilt; the new window is closed");
-            self.state.set(State::Lost);
+            self.phase.set(State::Lost);
         }
     }
 
@@ -465,5 +511,32 @@ mod tests {
         ] {
             assert_eq!(of(helper), Failure::Helper);
         }
+    }
+
+    /// p-tails-a: the tray's «Открыть окно» flag follows the watch: set exactly while the window
+    /// is lost (rebuild limit, a new window that did not come up), unset once a new window is on
+    /// its way; a flag whose VirtualDom is gone is skipped, not a panic in a WebView2 callback.
+    #[test]
+    fn the_tray_flag_follows_a_lost_window() {
+        let dom = VirtualDom::new(|| rsx! {});
+        let phase = dom.in_scope(ScopeId::ROOT, || Phase::new(Signal::new(false)));
+        let lost = |phase: &Phase| dom.in_scope(ScopeId::ROOT, || *phase.lost.peek());
+        assert!(!lost(&phase));
+        for (state, flag) in [
+            (State::Waiting, false),
+            (State::Replaced, false),
+            (State::Lost, true),
+            (State::Lost, true),
+            (State::Replaced, false),
+            (State::Lost, true),
+            (State::Stuck, false),
+        ] {
+            phase.set(state);
+            assert_eq!(phase.get(), state);
+            assert_eq!(lost(&phase), flag, "{state:?}");
+        }
+        drop(dom);
+        phase.set(State::Lost);
+        assert_eq!(phase.get(), State::Lost);
     }
 }

@@ -486,8 +486,8 @@ mod tests {
         let t0 = Instant::now();
         let offered = |version: Option<&str>| {
             let extras = TrayExtras {
-                always: false,
                 update: version.map(str::to_owned),
+                ..TrayExtras::default()
             };
             Rendered::of(
                 &TrayModel::build_with(&connected(0), &extras, false),
@@ -513,7 +513,7 @@ mod tests {
         let t0 = Instant::now();
         let always = TrayExtras {
             always: true,
-            update: None,
+            ..TrayExtras::default()
         };
         let paused = TrayState {
             paused: true,

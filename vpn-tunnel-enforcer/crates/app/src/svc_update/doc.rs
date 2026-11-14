@@ -20,6 +20,11 @@ pub struct UpdatesDoc {
     pub last_check: Option<LastCheck>,
     /// The security release already announced in a notice (one notice per version, not per run).
     pub announced: Option<String>,
+    /// The app version already written to the event journal as offered (once per version).
+    pub offered: Option<String>,
+    /// The helper service's version at its last answer: another one later, in this run or the
+    /// next, is a release it took (one journal event).
+    pub service_version: Option<String>,
 }
 
 impl Default for UpdatesDoc {
@@ -31,6 +36,8 @@ impl Default for UpdatesDoc {
             max_seq: 0,
             last_check: None,
             announced: None,
+            offered: None,
+            service_version: None,
         }
     }
 }

@@ -18,6 +18,7 @@ use vpnte_update::store::{Choice, Origin};
 
 use super::Updates;
 use super::actions::engine_name;
+use crate::svc_journal::Tone;
 
 /// Watches the tunnel for as long as the app runs: any install may start a trial.
 pub(super) fn spawn(u: &Arc<Updates>) {
@@ -118,6 +119,7 @@ impl Updates {
                     .arg("name", engine_name(id))
                     .arg("from", rolled.from)
                     .arg("to", to);
+                self.journal(Tone::Warn, msg.clone(), None);
                 self.note(msg, true);
             }
             Ok(None) => {}

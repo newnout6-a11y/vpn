@@ -7,11 +7,12 @@
 use std::fs::OpenOptions;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::sync::watch;
 use vpnte_base::types::now_ms;
@@ -69,6 +70,8 @@ pub struct Store<T: Document> {
     mode: RwLock<Mode>,
     /// Where a corrupt file was moved (reported by [`Store::notice`]).
     moved_aside: RwLock<Option<PathBuf>>,
+    /// The notice this open raised, when the previous start did not raise the same one.
+    new_notice: Option<Msg>,
     /// Serialises writers so two concurrent updates cannot lose each other's change.
     writer: Mutex<()>,
     changes: watch::Sender<u64>,
@@ -87,11 +90,15 @@ impl<T: Document> Store<T> {
             tracing::info!(file = T::FILE, count = stale, "stale temp files removed");
         }
         let (doc, mode, moved_aside) = load::<T>(&path);
+        let notice = notice_of(T::FILE, mode, moved_aside.as_deref());
+        let fresh = new_this_start(&path, notice.as_ref());
+        let new_notice = notice.filter(|_| fresh);
         Self {
             path,
             state: RwLock::new(doc),
             mode: RwLock::new(mode),
             moved_aside: RwLock::new(moved_aside),
+            new_notice,
             writer: Mutex::new(()),
             changes: watch::channel(0).0,
         }
@@ -157,21 +164,15 @@ impl<T: Document> Store<T> {
 
     /// One-line warning or banner for the UI: read-only reasons, or a corrupt file moved aside at open.
     pub fn notice(&self) -> Option<Msg> {
-        let key = match self.mode() {
-            Mode::ReadOnly(ReadOnlyReason::NewerVersion(_)) => "core.store.newerVersion",
-            Mode::ReadOnly(ReadOnlyReason::Corrupt) => "core.store.corruptKept",
-            Mode::ReadOnly(ReadOnlyReason::Unreadable) => "core.store.unreadable",
-            Mode::Writable => {
-                let aside = self.moved_aside.read();
-                let name = aside.as_deref()?.file_name()?.to_string_lossy();
-                return Some(
-                    Msg::new("core.store.corruptSetAside")
-                        .arg("file", T::FILE)
-                        .arg("backup", name),
-                );
-            }
-        };
-        Some(Msg::new(key).arg("file", T::FILE))
+        notice_of(T::FILE, self.mode(), self.moved_aside.read().as_deref())
+    }
+
+    /// The notice this start's open raised, when the previous start did not raise the same one:
+    /// what an event journal records once (a document left read-only stays so at every start).
+    /// Remembered next to the document as `<file>.notice`, removed by an open without a notice;
+    /// every open of the document in one process gives the same answer.
+    pub fn new_notice(&self) -> Option<Msg> {
+        self.new_notice.clone()
     }
 
     /// The user's choice for a corrupt or unreadable document: move the file aside as
@@ -204,6 +205,72 @@ impl<T: Document> Store<T> {
         self.changes.send_modify(|generation| *generation += 1);
         Ok(())
     }
+}
+
+/// The notice of a document in `mode` (and moved aside to `moved_aside` at open).
+fn notice_of(file: &str, mode: Mode, moved_aside: Option<&Path>) -> Option<Msg> {
+    let key = match mode {
+        Mode::ReadOnly(ReadOnlyReason::NewerVersion(_)) => "core.store.newerVersion",
+        Mode::ReadOnly(ReadOnlyReason::Corrupt) => "core.store.corruptKept",
+        Mode::ReadOnly(ReadOnlyReason::Unreadable) => "core.store.unreadable",
+        Mode::Writable => {
+            let name = moved_aside?.file_name()?.to_string_lossy();
+            return Some(
+                Msg::new("core.store.corruptSetAside")
+                    .arg("file", file)
+                    .arg("backup", name),
+            );
+        }
+    };
+    Some(Msg::new(key).arg("file", file))
+}
+
+/// This process: the opens of one document in one start share their answer.
+static RUN: LazyLock<String> = LazyLock::new(|| format!("{}-{}", std::process::id(), now_ms()));
+
+/// `<file>.notice`: the notice the last open raised, in which run, and whether it was new then.
+#[derive(Serialize, Deserialize)]
+struct Marker {
+    run: String,
+    new: bool,
+    notice: Msg,
+}
+
+/// Whether `notice`, raised by this open of the document at `path`, is new this start. A marker
+/// that cannot be written makes the same notice new again at the next start (a repeat, nothing
+/// lost); `None` (a clean open) removes the marker, so the next notice is new.
+fn new_this_start(path: &Path, notice: Option<&Msg>) -> bool {
+    let mut marker_path = path.as_os_str().to_owned();
+    marker_path.push(".notice");
+    let marker_path = PathBuf::from(marker_path);
+    let Some(notice) = notice else {
+        if let Err(err) = std::fs::remove_file(&marker_path)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            tracing::debug!(%err, path = %marker_path.display(), "notice marker not removed");
+        }
+        return false;
+    };
+    let before = std::fs::read(&marker_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Marker>(&bytes).ok());
+    let new = match before {
+        Some(m) if m.run == *RUN && m.notice == *notice => return m.new,
+        Some(m) => m.notice != *notice,
+        None => true,
+    };
+    let marker = Marker {
+        run: RUN.clone(),
+        new,
+        notice: notice.clone(),
+    };
+    let written = serde_json::to_vec(&marker)
+        .map_err(io::Error::other)
+        .and_then(|bytes| std::fs::write(&marker_path, bytes));
+    if let Err(err) = written {
+        tracing::debug!(%err, path = %marker_path.display(), "notice marker not written");
+    }
+    new
 }
 
 enum Decoded<T> {

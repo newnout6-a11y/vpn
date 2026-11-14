@@ -369,7 +369,7 @@ fn always_changes_only_the_paused_way_out() {
     };
     let always = TrayExtras {
         always: true,
-        update: None,
+        ..TrayExtras::default()
     };
     let model = TrayModel::build_with(&paused, &always, false);
     assert!(model.turn_off_always);
@@ -398,12 +398,32 @@ fn always_changes_only_the_paused_way_out() {
 #[test]
 fn an_offered_version_gets_a_line() {
     let offered = TrayExtras {
-        always: false,
         update: Some("2.0.1".into()),
+        ..TrayExtras::default()
     };
     let model = TrayModel::build_with(&connected(), &offered, false);
     let line = model.update.expect("update line");
     assert_eq!(line.key, "ui.tray.menu.update");
     assert_eq!(line.args[0].1, "2.0.1");
     assert_eq!(TrayModel::build(&connected(), false).update, None);
+}
+
+/// p-tails-a: a window lost after a WebView2 crash (rebuild limit, or a new window that did not
+/// come up) turns «Показать окно» into «Открыть окно», usable also while quitting; the entry
+/// keeps its id, so a click does the same thing under either label.
+#[test]
+fn a_lost_window_is_opened_not_shown() {
+    let lost = TrayExtras {
+        window_lost: true,
+        ..TrayExtras::default()
+    };
+    for quitting in [false, true] {
+        let model = TrayModel::build_with(&connected(), &lost, quitting);
+        let entry = model.item(TrayItemId::Show);
+        assert_eq!(entry.label.key, "ui.tray.menu.open");
+        assert!(entry.enabled);
+        assert_eq!(entry.id.menu_id(), "tray.show");
+    }
+    let shown = TrayModel::build(&connected(), false);
+    assert_eq!(shown.item(TrayItemId::Show).label.key, "ui.tray.menu.show");
 }

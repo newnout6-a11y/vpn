@@ -18,6 +18,7 @@ use super::checks::AppCheck;
 use super::launch::{self, LaunchError};
 use super::view::{ENGINES, newer_release, rollback};
 use super::{Progress, Updates};
+use crate::svc_journal::Tone;
 
 impl Updates {
     /// «Обновить»: the newest release's installer.
@@ -56,7 +57,16 @@ impl Updates {
             })
         };
         let (entry, bytes, sig) = found.ok_or_else(|| conflict("app.update.nothingNew"))?;
-        self.run(move |this| async move { this.install_engine_from(entry, bytes, sig).await })
+        self.run(move |this| async move {
+            let title = Msg::new("app.journal.update.engineFailed")
+                .arg("name", engine_name(&entry.id))
+                .arg("version", entry.version);
+            let result = this.clone().install_engine_from(entry, bytes, sig).await;
+            if let Err(reason) = &result {
+                this.journal(Tone::Warn, title, Some(reason.clone()));
+            }
+            result
+        })
     }
 
     /// Runs `job` in its own task unless another one runs (`Conflict`); its error becomes the
@@ -91,9 +101,19 @@ impl Updates {
         Ok(())
     }
 
+    /// [`Updates::start_installer`]; a failure is an event of the journal too.
+    async fn install_app(&self, file: &FileEntry, to: Version) -> Result<(), Msg> {
+        let title = Msg::new("app.journal.update.failed").arg("version", to);
+        let result = self.start_installer(file, to).await;
+        if let Err(reason) = &result {
+            self.journal(Tone::Warn, title, Some(reason.clone()));
+        }
+        result
+    }
+
     /// Download (or reuse), write `pending.json`, start the installer as the user. The app is
     /// then asked to exit by the installer's own gate (`--setup await-shutdown`).
-    async fn install_app(&self, file: &FileEntry, to: Version) -> Result<(), Msg> {
+    async fn start_installer(&self, file: &FileEntry, to: Version) -> Result<(), Msg> {
         let what = format!("VPN Tunnel Enforcer {to}");
         let verified = self.fetch(file, &what).await?;
         let pending = Pending {
@@ -110,6 +130,8 @@ impl Updates {
         match launch::run_unelevated(&verified.path, &INSTALLER_ARGS) {
             Ok(()) => {
                 tracing::info!(%to, "installer started");
+                let title = Msg::new("app.journal.update.started").arg("version", to);
+                self.journal(Tone::Info, title, None);
                 let mut inner = self.inner.lock();
                 inner.held = Some(verified.file);
                 // The installer now asks this app to exit; the offer has done its job.
@@ -204,10 +226,17 @@ impl Updates {
                 }
             }
         };
-        result.map_err(|err| {
-            tracing::warn!(%err, "download failed");
-            download_msg(&err)
-        })
+        match result {
+            Ok(verified) => {
+                let title = Msg::new("app.journal.update.downloaded").arg("what", what);
+                self.journal(Tone::Info, title, None);
+                Ok(verified)
+            }
+            Err(err) => {
+                tracing::warn!(%err, "download failed");
+                Err(download_msg(&err))
+            }
+        }
     }
 
     /// A file already in `updates\` with the feed's SHA-256, held from now on.

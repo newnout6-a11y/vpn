@@ -1,7 +1,8 @@
 //! What the per-user side runs against the service: the product's one elevated step, asked of
 //! Windows (`install` through `ShellExecuteEx("runas")`: Windows shows its own prompt; the
-//! installer and the app never elevate themselves), and the per-user uninstaller's leave
-//! (`ForgetMe` over the pipe, no prompt).
+//! installer and the app never elevate themselves), the same for `uninstall` when Settings >
+//! Apps removes the service (it starts the entry's command unelevated), and the per-user
+//! uninstaller's leave (`ForgetMe` over the pipe, no prompt).
 use std::path::Path;
 use std::time::Duration;
 
@@ -36,8 +37,18 @@ fn install_args(resources: Option<&Path>) -> String {
 /// Runs `exe install [--resources <dir>]` elevated and waits for it: one prompt from Windows.
 /// Blocking (call it from a blocking thread).
 pub fn request_install(exe: &Path, resources: Option<&Path>) -> std::io::Result<Elevated> {
+    run_elevated(exe, &install_args(resources))
+}
+
+/// Runs `exe uninstall` elevated and waits for it: one prompt from Windows (the command of the
+/// service's entry in Settings > Apps). Blocking.
+pub fn request_uninstall(exe: &Path) -> std::io::Result<Elevated> {
+    run_elevated(exe, "uninstall")
+}
+
+fn run_elevated(exe: &Path, params: &str) -> std::io::Result<Elevated> {
     let file = HSTRING::from(exe.as_os_str());
-    let params = HSTRING::from(install_args(resources));
+    let params = HSTRING::from(params);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOCLOSEPROCESS,

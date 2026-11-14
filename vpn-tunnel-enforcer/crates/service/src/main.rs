@@ -1,18 +1,22 @@
 //! `vpnte-service.exe`.
 //!
-//! - `run`: started by the SCM (the registered command line); runs the service.
+//! - `run`: started by the SCM (the registered command line); runs the service (its Settings >
+//!   Apps entry first names this version).
 //! - `install [--resources <dir>]`: elevated; copies this exe and the pinned engine files into
 //!   Program Files, registers and starts the service.
 //! - `uninstall`: elevated; stops and removes the service and its folders.
 //! - `request-install [--resources <dir>]`: unelevated (the per-user installer); asks Windows to
 //!   run `install` elevated (Windows shows its one prompt) and returns that run's exit code.
+//! - `request-uninstall`: unelevated (the service's entry in Settings > Apps); asks Windows to run
+//!   `uninstall` elevated the same way and returns that run's exit code.
 //! - `forget-me`: unelevated (the per-user uninstaller); tells the service this user is gone.
 //! - `status`: unelevated; the installed service answers over its pipe (CI's smoke run).
 //!
 //! Exit codes: 0 done, 1 failed (reason on stderr, English log text), 2 bad arguments,
 //! 3 the service stays to remove its network filters later (`service.uninstall.filtersKept`),
 //! 4 an upgrade failed and the service is stopped until Windows starts it
-//! (`service.install.notRestarted`), 5 nobody approved the prompt (`request-install`).
+//! (`service.install.notRestarted`), 5 nobody approved the prompt (`request-install`,
+//! `request-uninstall`).
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -22,13 +26,13 @@ use vpnte_service::pipe::client::CallError;
 use vpnte_service::{install, scm, service};
 
 const USAGE: &str = "usage: vpnte-service (run | install [--resources <dir>] | uninstall | \
-request-install [--resources <dir>] | forget-me | status)";
+request-install [--resources <dir>] | request-uninstall | forget-me | status)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
-        ["run"] => match scm::dispatch::dispatch(service::run) {
+        ["run"] => match scm::dispatch::dispatch(run) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("not started by the Service Control Manager: {err}");
@@ -58,10 +62,18 @@ fn main() -> ExitCode {
             };
             request_install(resources)
         }
+        ["request-uninstall"] => request_uninstall(),
         ["forget-me"] => forget_me(),
         ["status"] => status(),
         _ => usage(),
     }
+}
+
+/// The service body: Settings > Apps names this version (a swap may have brought it), then the
+/// service runs.
+fn run(control: scm::dispatch::Control) -> u32 {
+    install::relist();
+    service::run(control)
 }
 
 /// `[]` or `["--resources", dir]`; `None` = bad arguments.
@@ -118,13 +130,34 @@ fn request_install(resources: Option<PathBuf>) -> ExitCode {
         eprintln!("the installed service is this build");
         return ExitCode::SUCCESS;
     }
-    match per_user::request_install(&exe, resources.as_deref()) {
+    let asked = per_user::request_install(&exe, resources.as_deref());
+    elevated_exit("install", asked, "the app works in proxy mode")
+}
+
+/// Settings > Apps: `uninstall` from this (installed) exe, approved in Windows' prompt.
+fn request_uninstall() -> ExitCode {
+    match std::env::current_exe() {
+        Ok(exe) => elevated_exit(
+            "uninstall",
+            per_user::request_uninstall(&exe),
+            "nothing changed",
+        ),
+        Err(err) => {
+            eprintln!("failed: own path unknown ({err})");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The exit code of an elevated run of `verb`: its own, 5 when nobody approved the prompt.
+fn elevated_exit(verb: &str, asked: std::io::Result<Elevated>, declined: &str) -> ExitCode {
+    match asked {
         Ok(Elevated::Exited(code)) => {
-            eprintln!("install exited with {code}");
+            eprintln!("{verb} exited with {code}");
             ExitCode::from(u8::try_from(code).unwrap_or(1))
         }
         Ok(Elevated::Declined) => {
-            eprintln!("not approved: the app works in proxy mode");
+            eprintln!("not approved: {declined}");
             ExitCode::from(5)
         }
         Err(err) => {

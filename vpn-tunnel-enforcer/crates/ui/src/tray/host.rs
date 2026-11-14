@@ -146,11 +146,17 @@ fn debug_equals(value: &impl std::fmt::Debug, expected: &str) -> bool {
     std::fmt::write(&mut rest, format_args!("{value:?}")).is_ok() && rest.0.is_empty()
 }
 
+/// The window's crash watch (`launch`) sets it while the window is lost after a WebView2 crash;
+/// it lives as long as that window's VirtualDom (a new window starts with its own, unset).
+#[derive(Clone, Copy)]
+pub(crate) struct WindowLost(pub(crate) Signal<bool>);
+
 /// What the tray reads from the root's Settings and Updates backends (none in the demo): "Always"
-/// in force and the app version on offer.
+/// in force and the app version on offer; and from the window's crash watch: the window is lost.
 fn use_extras() -> (Option<Rc<dyn SettingsApi>>, Memo<TrayExtras>) {
     let settings = try_use_context::<Rc<dyn SettingsApi>>();
     let updates = try_use_context::<Rc<dyn UpdatesApi>>();
+    let lost = try_use_context::<WindowLost>();
     let source = settings.clone();
     let kill = use_watch(move || match source {
         Some(api) => api.kill_switch(),
@@ -167,6 +173,7 @@ fn use_extras() -> (Option<Rc<dyn SettingsApi>>, Memo<TrayExtras>) {
             // drops", where the disconnect gives the internet back.
             always: kill.level == KillSwitchLevel::Strict && kill.always_available,
             update: offer.read().app.as_ref().map(|app| app.version.clone()),
+            window_lost: lost.is_some_and(|WindowLost(lost)| lost()),
         }
     });
     (settings, extras)

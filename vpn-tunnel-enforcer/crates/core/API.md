@@ -111,6 +111,10 @@ impl<T: Document> Store<T> {
     pub fn subscribe(&self) -> watch::Receiver<u64>;
     pub fn mode(&self) -> Mode;
     pub fn notice(&self) -> Option<Msg>;   // banner text: read-only reason, or "moved aside as <backup>"
+    pub fn new_notice(&self) -> Option<Msg>; // p-tails-a: the notice this open raised when the previous
+                                           // start did not raise the same one (an event journal records it
+                                           // once); marker `<file>.notice` next to the document, removed by a
+                                           // clean open; every open in one process gives the same answer
     pub fn set_aside(&self) -> AppResult<()>; // Maintenance action for Corrupt / Unreadable: rename to
                                         // <stem>.corrupt-<unix ms>.json, continue empty; refused for
                                         // NewerVersion; no-op when writable

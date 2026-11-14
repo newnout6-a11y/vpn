@@ -1,6 +1,7 @@
 //! The feed check (research §4.4): on the schedule of `vpnte_update::check`, through the session
 //! first; an accepted feed is stored with its signature, remembered by `seq`, and its offers go
-//! to the view. A security release is said once in a notice (tray), never forced.
+//! to the view. A security release is said once in a notice (tray), never forced; any other
+//! offered app version once in the event journal.
 use std::sync::Arc;
 
 use vpnte_base::Msg;
@@ -14,6 +15,7 @@ use vpnte_update::policy;
 use super::doc::{Found, LastCheck};
 use super::view::{engine_offers, newer_release};
 use super::{Signed, Updates, ways};
+use crate::svc_journal::Tone;
 
 /// Starts the checker under the app's shutdown token.
 pub(super) fn spawn_checker(u: &Arc<Updates>) {
@@ -103,6 +105,7 @@ impl Updates {
         tracing::info!(seq, host = %source.host, via = ?source.via, ?found, "update feed accepted");
         self.record(Some(source), found);
         self.tell_security();
+        self.tell_offer();
     }
 
     /// Newer versions in the held feed? A stale held feed never reads as "up to date".
@@ -132,6 +135,35 @@ impl Updates {
         };
         if let Err(err) = self.doc.update(|d| d.last_check = Some(line)) {
             tracing::warn!(%err, "update check result not stored");
+        }
+    }
+
+    /// One journal line per offered app version; a security release has its notice instead
+    /// (which the journal records too). A version that could not be remembered is not written
+    /// either: no repeat at every check.
+    pub(super) fn tell_offer(&self) {
+        let offer = {
+            let inner = self.inner.lock();
+            let feed = inner.feed.as_ref().map(|s| &s.feed);
+            feed.and_then(|f| newer_release(f, policy::app_version()))
+                .map(|r| (r.version.to_string(), r.severity.is_security()))
+        };
+        let Some((version, security)) = offer else {
+            return;
+        };
+        if self
+            .doc
+            .read(|d| d.offered.as_deref() == Some(version.as_str()))
+        {
+            return;
+        }
+        if let Err(err) = self.doc.update(|d| d.offered = Some(version.clone())) {
+            tracing::warn!(%err, "offered version not stored");
+            return;
+        }
+        if !security {
+            let title = Msg::new("app.journal.update.offered").arg("version", &version);
+            self.journal(Tone::Info, title, None);
         }
     }
 

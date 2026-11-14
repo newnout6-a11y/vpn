@@ -1,0 +1,24 @@
+{
+  "app": {
+    "journal": {
+      "update": {
+        "offered": "Version {{version}} is available",
+        "downloaded": "Downloaded: {{what}}",
+        "started": "Installing version {{version}}",
+        "failed": "Could not update to version {{version}}",
+        "notFinished": "The update to version {{version}} did not finish",
+        "engine": "{{name}} is now at version {{version}}",
+        "engineFailed": "{{name}} {{version}} was not installed",
+        "service": "The helper service was updated to version {{version}}",
+        "serviceBack": "The helper service went back to version {{version}}"
+      },
+      "killSwitch": {
+        "off": "Kill switch off",
+        "onDrop": "Kill switch: If the VPN drops",
+        "always": "Kill switch: Always",
+        "exceptionAdded": "Kill switch exception added: {{label}}",
+        "exceptionRemoved": "Kill switch exception removed: {{label}}"
+      }
+    }
+  }
+}

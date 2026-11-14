@@ -127,6 +127,7 @@ fn App() -> Element {
             .register(Page::Maintenance, maintenance::MaintenancePage);
         r
     });
+    webview_errors::use_script_errors();                        // p-tails-a: page script errors -> app log
     rsx! {
         TrayHost {                                              // tray icon, close / quit flow
             Shell {
@@ -202,6 +203,23 @@ pub fn format_bytes(bytes: u64) -> String;   // "1023 B", "1.5 KB", "4.8 MB", "2
 The window is frameless with an HTML title strip (no Snap Layouts flyout on the maximise button).
 Close = Dioxus' default (exit) until `TrayHost` switches it to hide-to-tray. Theme persistence and
 custom-theme CRUD belong to the app; the UI takes a `Theme` value.
+
+### Page script errors: `webview_errors` (p-tails-a)
+
+```rust
+pub const PER_MINUTE: usize = 5;   // logged reports per sliding minute; the rest are counted
+pub fn use_script_errors();        // once in the root component: window.onerror + unhandled
+                                   // rejections -> WARN "page script error" in the app log
+#[derive(Default)] pub struct ScriptErrors;   // one page's reports: take(value, now) parses,
+                                   // limits and logs one (the hook's loop; the app tests its line)
+```
+A script started with the root (dioxus eval channel) sends `{kind, message, source, line, col,
+stack}`; only an `Error`'s message and stack leave the page (any other rejected value: its type
+name), at most 30 a minute. The app logs at most 5 a minute (`suppressed` = how many it turned
+away before that line), every field one line, cut to 300 characters, the top 6 stack frames, the
+page's own origins written short (`page:/…`, `app:/…`: the log redacts URLs, line and column
+with them). The app log's layer redacts every string field (`redact::for_log`; the app's
+`tests/page_script_errors.rs` checks the line). Nothing changes on screen.
 
 ## Shell: `pages`, `shell`
 
@@ -384,8 +402,10 @@ pub enum TrayStatus { Protected, Leak, Off, Starting, ProxyDown, KillSwitch, Res
 pub struct TrayModel { status, tooltip: Vec<Msg>, tooltip_speed: Option<Msg>, items: Vec<TrayItem>,
     turn_off_always: bool /*Stop reads «Выключить «Всегда»»*/, update: Option<Msg> /*«Доступна версия X»*/ }
     // build(&state, quitting) = build_with(&state, &TrayExtras::default(), quitting)
-pub struct TrayExtras { pub always: bool, pub update: Option<String> }  // p-follow: read by TrayHost from the
-    // root Rc<dyn SettingsApi> (kill-switch view: Strict + always_available) and Rc<dyn UpdatesApi> (app.version)
+pub struct TrayExtras { pub always: bool, pub update: Option<String>, pub window_lost: bool }  // p-follow: read by
+    // TrayHost from the root Rc<dyn SettingsApi> (kill-switch view: Strict + always_available) and
+    // Rc<dyn UpdatesApi> (app.version); p-tails-a: window_lost from the window's crash watch
+    // (`launch`, context `WindowLost`): «Показать окно» reads «Открыть окно» (`ui.tray.menu.open`)
 pub const UPDATE_MENU_ID: &str = "tray.update";  // the update line (muda insert/remove above «Показать окно»)
 pub const ALWAYS_MENU_ID: &str = "tray.turnOffAlways";  // fix-follow: the Stop entry while it turns
     // "Always" off is built again with this id (`tray.stop` = always the disconnect): a click does
@@ -407,6 +427,10 @@ p-follow: in "Always" the paused menu's second entry reads «Выключить 
 `SettingsApi::set_kill_switch_level(Standard)` (as the start page's button; a failure shows the
 window); an offered app version adds «Доступна версия X», which opens the window. Both come from
 the root's Settings / Updates APIs; without them (demo) the menu is as before.
+p-tails-a: while the window is lost after a WebView2 crash (the rebuild limit of 3 per 10 minutes,
+or a new window that did not mount within 30 s) the Show entry reads «Открыть окно» (same id
+`tray.show`); either label opens a new window: the crash watch takes the click itself (shows the
+lost window, then rebuilds at once), and a new window starts with the flag unset.
 
 ## First-run wizard: `wizard`
 
@@ -975,14 +999,16 @@ GPU memory.
 ## Not implemented / known gaps
 
 - Snap Layouts flyout on the HTML maximise button; DWM caption colours (frameless window by design).
-- Forwarding WebView `error` / `unhandledrejection` to the log, a shutdown overlay: app / logging
-  work (the Shell has the `overlays` slot).
+- A shutdown overlay: app work (the Shell has the `overlays` slot). WebView `error` /
+  `unhandledrejection` reach the app log (`webview_errors`, p-tails-a) from the first render on;
+  an error before it (while the page loads) is not seen.
 - A WebView2 crash rebuilds the window (Startup), but the tray icon is the new VirtualDom's: it is
   replaced (same menu, same state) when the new window mounts, and page-local state (an open
   dialog, a typed draft, toasts on screen) starts fresh. After a dead browser the old VirtualDom
-  stops until the new window mounts (its tray menu shows the window, its actions wait). The tray
-  offers no separate «Открыть окно» entry after the rebuild limit: «Показать окно» opens the new
-  window (the tray model is not this package's).
+  stops until the new window mounts (its tray menu shows the window, its actions wait). A lost
+  window (rebuild limit, or no mount in 30 s) turns the tray's «Показать окно» into «Открыть окно»;
+  after a dead browser the stopped VirtualDom cannot redraw the menu, so it keeps «Показать окно»,
+  which opens the new window all the same (p-tails-a).
 - PageTip strips (`tips.*`): need a persisted dismissal store; no page renders them.
 - `OverflowMenu`, `SortableList` (drag reordering): not built; domain rules reorder with ↑ / ↓.
 - Flag coins cover the 65 countries of `ui.panels.country.*` (flag-icons 7.5, `assets/flags/`); any

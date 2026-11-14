@@ -140,11 +140,12 @@ fn corrupt_document_is_moved_aside() {
     let notice = store.notice().unwrap();
     assert_eq!(notice.key, "core.store.corruptSetAside");
     let names = files_in(&tmp.path().join("nested"));
-    assert_eq!(names.len(), 1);
+    assert_eq!(names.len(), 2, "the moved file and the notice marker");
     assert!(
         names[0].starts_with("doc.corrupt-") && names[0].ends_with(".json"),
         "{names:?}"
     );
+    assert_eq!(names[1], "doc.json.notice");
     let aside = tmp.path().join("nested").join(&names[0]);
     assert_eq!(std::fs::read_to_string(aside).unwrap(), "{\"count\": 3,");
     store.update(|d| d.count = 1).unwrap();
@@ -348,6 +349,56 @@ fn open_sweeps_temp_files_left_by_a_crash() {
         4,
         "a normal write leaves no temp file"
     );
+}
+
+/// The marker of a document's notice, as an earlier start would have left it.
+fn earlier_start(root: &Path, file: &str) {
+    let marker = root.join(format!("{file}.notice"));
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    value["run"] = "1-1".into();
+    std::fs::write(&marker, serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
+/// p-tails-a: a notice the open raises is new this start once: every open of the document in
+/// the same start agrees, the next start with the same notice says nothing, a clean open forgets
+/// it (so a recurrence is new again), and another notice is new.
+#[test]
+fn a_notice_is_new_once_per_occurrence() {
+    let tmp = TempDir::new("store");
+    let newer = r#"{"schemaVersion":2,"count":5}"#;
+    let path = put(tmp.path(), "nested/doc.json", newer);
+    let first = Store::<Doc>::open(tmp.path());
+    assert_eq!(first.new_notice(), first.notice());
+    assert_eq!(first.new_notice().unwrap().key, "core.store.newerVersion");
+    let again = Store::<Doc>::open(tmp.path());
+    assert_eq!(again.new_notice(), first.notice(), "the same start");
+    earlier_start(tmp.path(), "nested/doc.json");
+    let next = Store::<Doc>::open(tmp.path());
+    assert_eq!(next.notice(), first.notice());
+    assert_eq!(next.new_notice(), None, "a standing notice is not new");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        newer,
+        "file untouched"
+    );
+
+    std::fs::write(&path, r#"{"schemaVersion":1,"count":1}"#).unwrap();
+    let clean = Store::<Doc>::open(tmp.path());
+    assert_eq!((clean.notice(), clean.new_notice()), (None, None));
+    assert!(!tmp.path().join("nested/doc.json.notice").exists());
+    std::fs::write(&path, newer).unwrap();
+    let back = Store::<Doc>::open(tmp.path());
+    assert_eq!(back.new_notice().unwrap().key, "core.store.newerVersion");
+
+    earlier_start(tmp.path(), "nested/doc.json");
+    std::fs::write(&path, "{\"count\": 3,").unwrap();
+    let corrupt = Store::<Doc>::open(tmp.path());
+    let notice = corrupt.new_notice().unwrap();
+    assert_eq!(notice.key, "core.store.corruptSetAside");
+    assert_eq!(Some(notice), corrupt.notice());
+    let after = Store::<Doc>::open(tmp.path());
+    assert_eq!((after.notice(), after.new_notice()), (None, None));
 }
 
 /// The `core-store` fragment holds exactly the keys of `paths`, `store` and `settings`.

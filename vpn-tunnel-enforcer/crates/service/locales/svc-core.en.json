@@ -34,6 +34,9 @@
     },
     "uninstall": {
       "filtersKept": "The helper service stays for now: it removes its network filters later. Everything else is removed."
+    },
+    "entry": {
+      "displayName": "VPN Tunnel Enforcer — helper service"
     }
   }
 }

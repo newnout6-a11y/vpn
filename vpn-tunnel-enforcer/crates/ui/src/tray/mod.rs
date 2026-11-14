@@ -14,8 +14,8 @@ mod model;
 mod native;
 
 pub use demo::{DemoTray, data_uri};
-pub(crate) use host::set_webview_hidden;
 pub use host::{QuitMode, TrayApi, TrayContext, TrayHost, hide_to_tray, show_window};
+pub(crate) use host::{WindowLost, set_webview_hidden};
 pub use icon::{TrayIcons, base_icon, ico_entries, tray_icon_size, variant, variant_png};
 pub use model::{
     Badge, CloseAction, ProxyStatus, TOOLTIP_MAX, Transition, TrayExtras, TrayItem, TrayItemId,
@@ -47,6 +47,7 @@ mod tests {
             let always = TrayExtras {
                 always: true,
                 update: Some("2.0.1".into()),
+                window_lost: true,
             };
             for (extras, quitting) in [
                 (TrayExtras::default(), false),
@@ -90,6 +91,7 @@ mod tests {
             "Статус: Kill-switch: требуется проверка"
         );
         assert_eq!(ru("ui.tray.menu.show"), "Показать окно");
+        assert_eq!(ru("ui.tray.menu.open"), "Открыть окно");
         assert_eq!(
             ru("ui.tray.quitFailed.exitAnyway"),
             "Выйти без восстановления"
