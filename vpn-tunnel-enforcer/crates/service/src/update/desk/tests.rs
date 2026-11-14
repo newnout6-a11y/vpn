@@ -18,12 +18,14 @@ const SERIES: &str = ">=2.0.0 <3.0.0";
 
 /// The feed and the files, from memory (what a mirror would serve, signed or not), checked
 /// against the size and SHA-256 asked for, as the real download does. A download whose URL
-/// holds `pause` waits until the test lets it go.
+/// holds `pause` waits until the test lets it go; a cancelled one ends at once, as the real one.
 #[derive(Default)]
 struct Memory {
     feed: Mutex<Option<(Vec<u8>, String)>>,
     files: Mutex<HashMap<String, Vec<u8>>>,
     reads: AtomicUsize,
+    /// Downloads that were not cancelled.
+    downloads: AtomicUsize,
     pause: Mutex<Option<&'static str>>,
     reached: Notify,
     release: Notify,
@@ -52,13 +54,25 @@ impl Source for Memory {
         })
     }
 
-    async fn download(&self, wanted: &Wanted<'_>, dir: &Path) -> Result<Verified, DownloadError> {
+    async fn download(
+        &self,
+        wanted: &Wanted<'_>,
+        dir: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<Verified, DownloadError> {
         let url = wanted.urls.first().cloned().unwrap_or_default();
         let paused = *self.pause.lock();
         if paused.is_some_and(|p| url.contains(p)) {
             self.reached.notify_one();
-            self.release.notified().await;
+            tokio::select! {
+                () = cancel.cancelled() => {}
+                () = self.release.notified() => {}
+            }
         }
+        if cancel.is_cancelled() {
+            return Err(DownloadError::Cancelled);
+        }
+        self.downloads.fetch_add(1, Ordering::SeqCst);
         let body = self.files.lock().get(&url).cloned();
         let body = body.ok_or(DownloadError::Unreachable)?;
         if body.len() as u64 != wanted.size || hex::encode(Sha256::digest(&body)) != wanted.sha256 {
@@ -84,6 +98,7 @@ struct Setup {
     restarted: Arc<AtomicBool>,
     files: SwapFiles,
     engines: Arc<ServiceEngines>,
+    in_flight: InFlight,
 }
 
 fn setup(with_keys: bool) -> Setup {
@@ -109,6 +124,7 @@ fn setup_probing(with_keys: bool, probe: fn(&Path) -> std::io::Result<()>) -> Se
     let restarted = Arc::new(AtomicBool::new(false));
     let (blocks, flag) = (always.clone(), restarted.clone());
     let files = SwapFiles::unvetted(&install.join("vpnte-service.exe"));
+    let in_flight = InFlight::default();
     let updates = Updates::new(UpdatesDeps {
         own: OWN,
         keys,
@@ -120,6 +136,7 @@ fn setup_probing(with_keys: bool, probe: fn(&Path) -> std::io::Result<()>) -> Se
         events: events.subscribe(),
         holds: holds.subscribe(),
         always: Arc::new(move || blocks.load(Ordering::SeqCst)),
+        in_flight: in_flight.clone(),
         probe,
         restart: Arc::new(move || flag.store(true, Ordering::SeqCst)),
         stop: CancellationToken::new(),
@@ -136,6 +153,7 @@ fn setup_probing(with_keys: bool, probe: fn(&Path) -> std::io::Result<()>) -> Se
         restarted,
         files,
         engines,
+        in_flight,
     }
 }
 
@@ -580,4 +598,165 @@ async fn a_release_that_does_not_start_here_is_never_taken() {
     assert_eq!(s.settled().await.phase, UpdatePhase::Idle);
     assert_eq!(s.exe(), b"running exe");
     assert!(!s.restarted());
+}
+
+/// svcfix-a1: the staged release's engines are judged again right before the swap. Once Tunnel
+/// mode no longer runs the engines the release was staged for (here: the staged feed now lists
+/// other versions, as after the engine trial went back), the release is dropped, not swapped in.
+#[tokio::test]
+async fn a_release_whose_engines_went_back_is_never_swapped_in() {
+    let s = setup(true);
+    s.publish_next(9, b"next exe");
+    s.tunnel(true);
+    let watcher = tokio::spawn(s.updates.clone().run());
+    s.ask(take(NEXT), false).await;
+    assert_eq!(phase(&s.settled().await).0, UpdatePhase::Waiting);
+    let mut moved = s.release(9, Some((NEXT, b"next exe")), SERIES);
+    for e in &mut moved.engines {
+        let v = e.version;
+        e.version = Version(v.0, v.1, v.2 + 1);
+    }
+    let bytes = serde_json::to_vec(&moved).expect("json");
+    std::fs::write(s.files.staging.join(FEED_FILE), &bytes).expect("feed");
+    std::fs::write(s.files.staging.join(SIG_FILE), s.key.sign(&bytes)).expect("sig");
+    s.tunnel(false);
+    assert!(s.until(|s| !s.files.staged(NEXT).exists()).await, "dropped");
+    assert_eq!(
+        s.ask(UpdateAsk::State, false).await.phase,
+        UpdatePhase::Idle
+    );
+    assert_eq!(s.exe(), b"running exe");
+    assert!(!s.restarted());
+    watcher.abort();
+}
+
+/// svcfix-a2: a rollback's ask (the running version or older) drops a release staged earlier,
+/// so it never goes in by itself once the other session ended.
+#[tokio::test]
+async fn a_rollback_drops_the_staged_release() {
+    let s = setup(true);
+    s.publish_next(9, b"next exe");
+    s.tunnel(true);
+    let _runs = tokio::spawn(s.updates.clone().run());
+    s.ask(take(NEXT), false).await;
+    assert_eq!(phase(&s.settled().await).0, UpdatePhase::Waiting);
+    assert_eq!(s.ask(take(OWN), true).await.phase, UpdatePhase::Idle);
+    assert!(!s.files.staged(NEXT).exists());
+    s.tunnel(false);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(s.exe(), b"running exe");
+    // A rollback that comes while a check downloads drops what that check stages.
+    *s.memory.pause.lock() = Some("vpnte-service-");
+    s.tunnel(true);
+    s.ask(take(NEXT), false).await;
+    tokio::time::timeout(Duration::from_secs(5), s.memory.reached.notified())
+        .await
+        .expect("downloading");
+    s.ask(take(OWN), true).await;
+    s.memory.release.notify_one();
+    assert_eq!(s.settled().await.phase, UpdatePhase::Idle);
+    assert!(!s.files.staged(NEXT).exists());
+}
+
+/// svcfix-a3 / b1: the tunnel drops mid-check and the kill switch keeps its block: the request
+/// in flight ends at once and no other one starts (they would pass the block through the
+/// service's own permit). The same when the session ends under "Always".
+#[tokio::test]
+async fn a_block_that_begins_mid_check_ends_its_requests() {
+    for always in [false, true] {
+        let s = setup(true);
+        s.publish_next(9, b"next exe");
+        s.always.store(always, Ordering::SeqCst);
+        s.tunnel(true);
+        *s.memory.pause.lock() = Some("vpnte-service-");
+        s.ask(take(NEXT), true).await;
+        tokio::time::timeout(Duration::from_secs(5), s.memory.reached.notified())
+            .await
+            .expect("downloading");
+        let before = s.memory.downloads.load(Ordering::SeqCst);
+        s.tunnel(false);
+        s.holds.send_replace(!always);
+        assert_eq!(
+            s.settled().await.phase,
+            UpdatePhase::Failed,
+            "always: {always}"
+        );
+        assert_eq!(s.memory.downloads.load(Ordering::SeqCst), before);
+        assert!(!s.files.staged(NEXT).exists());
+        assert_eq!(s.exe(), b"running exe");
+    }
+}
+
+/// svcfix-a4: a host call in flight (a start the host accepted, still applying its kill-switch
+/// settings) holds the restart after a swap, and so does the moment after it ended; then the
+/// service restarts.
+#[tokio::test]
+async fn a_start_the_host_accepted_holds_the_restart() {
+    let s = setup(true);
+    s.publish_next(9, b"next exe");
+    s.ask(take(NEXT), false).await;
+    assert_eq!(phase(&s.settled().await).0, UpdatePhase::Restarting);
+    let call = s.in_flight.enter();
+    tokio::time::sleep(ANSWER_GRACE + Duration::from_millis(300)).await;
+    assert!(!s.restarted(), "a start is in flight");
+    drop(call);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!s.restarted(), "its next step may follow");
+    assert!(
+        s.until(Setup::restarted).await,
+        "restarted once all was quiet"
+    );
+}
+
+/// svcfix-b2: a flood of asks for many releases leaves no backlog: one feed read (the feed it
+/// read stands in for every other release), and the asked release still goes in from that feed.
+#[tokio::test]
+async fn a_flood_of_asks_reads_the_feed_once() {
+    let s = setup(true);
+    s.publish_next(9, b"next exe");
+    s.tunnel(true);
+    for patch in 5..200 {
+        s.ask(take(Version(3, 0, patch)), false).await;
+    }
+    assert_eq!(s.settled().await.phase, UpdatePhase::Idle);
+    assert!(!s.updates.queue.lock().running, "no check left behind");
+    assert_eq!(s.memory.reads.load(Ordering::SeqCst), 1);
+    s.ask(take(NEXT), false).await;
+    assert_eq!(
+        phase(&s.settled().await),
+        (UpdatePhase::Waiting, Some("2.0.1"))
+    );
+    assert_eq!(s.memory.reads.load(Ordering::SeqCst), 1, "the feed it read");
+}
+
+/// svcfix-b3: another user's stale ask (an older release than the one staged) reads the feed
+/// again but keeps the staged release the feed still lists; it goes in once idle, also after the
+/// owner published a newer feed that lists the same exe.
+#[tokio::test]
+async fn a_stale_ask_keeps_the_staged_release() {
+    let s = setup(true);
+    let later = Version(2, 0, 2);
+    let feed = |seq| s.release(seq, Some((later, b"later exe")), SERIES);
+    s.publish(&feed(9), b"later exe");
+    s.tunnel(true);
+    let watcher = tokio::spawn(s.updates.clone().run());
+    s.ask(take(later), false).await;
+    assert_eq!(
+        phase(&s.settled().await),
+        (UpdatePhase::Waiting, Some("2.0.2"))
+    );
+    s.publish(&feed(10), b"later exe");
+    *s.updates.checked.lock() = None;
+    s.ask(take(NEXT), false).await;
+    assert_eq!(
+        phase(&s.settled().await),
+        (UpdatePhase::Waiting, Some("2.0.2"))
+    );
+    assert_eq!(s.memory.reads.load(Ordering::SeqCst), 2);
+    s.tunnel(false);
+    tokio::time::timeout(Duration::from_secs(2), watcher)
+        .await
+        .expect("swapped")
+        .expect("task");
+    assert_eq!(s.exe(), b"later exe");
 }

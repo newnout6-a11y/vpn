@@ -22,11 +22,12 @@ use crate::proto::{ServiceUpdateWire, UpdateAsk};
 pub mod checks;
 mod desk;
 pub mod engines;
+pub mod in_flight;
 pub mod source;
 pub mod swap;
 pub mod trial;
 
-pub use desk::{Updates, UpdatesDeps, accepted_seq};
+pub use desk::{Updates, UpdatesDeps, accepted_seq, staged_release};
 
 #[cfg(test)]
 mod testkit;

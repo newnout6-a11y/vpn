@@ -20,9 +20,10 @@ fn five_a_minute_reach_the_log_and_the_rest_are_counted() {
 }
 
 /// p-tails-a: page text is untrusted: every field becomes one line (no forged log lines, no
-/// control characters), cut to a few hundred characters; the stack keeps its top frames; an
-/// unknown kind is an `error`; fields the page did not send stay empty and others are ignored;
-/// the page's own script addresses are written short (not URLs the app log would redact).
+/// control characters), cut to a few hundred characters between words (a longer word goes
+/// whole); the stack keeps its top frames; an unknown kind is an `error`; fields the page did not
+/// send stay empty and others are ignored; the page's own script addresses are written short
+/// (not URLs the app log would redact).
 #[test]
 fn a_report_is_cleaned_to_bounded_lines() {
     let long = "x".repeat(5000);
@@ -43,9 +44,7 @@ fn a_report_is_cleaned_to_bounded_lines() {
         .expect("report")
         .clean();
     assert_eq!(report.kind, "error");
-    assert!(report.message.starts_with("TypeError: bad [31m value xxx"));
-    assert_eq!(report.message.chars().count(), TEXT_MAX + 1);
-    assert!(report.message.ends_with('…'));
+    assert_eq!(report.message, "TypeError: bad [31m value…");
     assert_eq!((report.line, report.col), (12, 7));
     let frames: Vec<&str> = report.stack.split(" | ").collect();
     assert_eq!(frames.len(), FRAMES_MAX);
@@ -70,12 +69,47 @@ fn a_report_is_cleaned_to_bounded_lines() {
     assert!(serde_json::from_value::<Report>(serde_json::json!("text")).is_err());
 }
 
-/// p-tails-a: the page script reports only an `Error`'s message and stack, or a rejected
-/// value's type name: page data (a server, a typed link) never leaves the page as JSON.
+/// p-tails-a, tailsa-a3: the page script reports only an `Error`'s message and stack, or a
+/// rejected value's type name, a string included: page data (a server, a typed link, a host
+/// name) never leaves the page, as JSON or as the string itself. Its own cut drops the word it
+/// would split (tailsa-a1), and Chromium's "ResizeObserver loop" notice stays out (tailsa-b2).
 #[test]
 fn the_page_script_never_serialises_a_rejected_value() {
     assert!(!SCRIPT.contains("JSON.stringify"));
-    assert!(SCRIPT.contains("Object.prototype.toString.call(r)"));
+    assert!(!SCRIPT.contains("typeof r"), "a string reason is page data");
+    let message = "const message = error ? r.message : Object.prototype.toString.call(r);";
+    assert!(SCRIPT.contains(message));
+    assert!(SCRIPT.contains(r"s.slice(0, n).replace(/\S*$/, '')"));
+    assert!(SCRIPT.contains("if (/^ResizeObserver loop/.test(String(e.message))) return;"));
     assert!(SCRIPT.contains("'unhandledrejection'"));
     assert!(SCRIPT.contains("addEventListener('error'"));
+}
+
+/// tailsa-a1: a secret that the cut would split is never half logged: the word it falls in goes
+/// whole, so the log's redaction sees every secret whole or not at all. A cut that falls between
+/// two words keeps the last one.
+#[test]
+fn a_word_the_cut_would_split_goes_whole() {
+    let key = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefg";
+    assert_eq!(key.len(), 43, "a base64 key");
+    for start in [258, 280, 299] {
+        // Single spaces only: the line keeps every position.
+        let gap = start - "TypeError: ".len();
+        let filler = match gap % 2 {
+            0 => "x ".repeat(gap / 2),
+            _ => format!("xx {}", "x ".repeat((gap - 3) / 2)),
+        };
+        let text = format!("TypeError: {filler}{key} tail");
+        assert_eq!(text.find(key), Some(start), "the key starts at {start}");
+        let line = one_line(&text);
+        assert!(line.ends_with('…'), "{line}");
+        assert!(line.chars().count() <= TEXT_MAX + 1);
+        assert!(!line.contains(&key[..8]), "start {start}: {line}");
+    }
+    let words = "word ".repeat(80);
+    let line = one_line(&words);
+    assert_eq!(line.chars().count(), TEXT_MAX, "{line}");
+    assert!(line.ends_with("word…"));
+    let one_word = "y".repeat(400);
+    assert_eq!(one_line(&one_word), "…");
 }

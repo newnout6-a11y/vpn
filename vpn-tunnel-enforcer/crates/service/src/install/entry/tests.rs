@@ -133,3 +133,25 @@ fn the_real_entry_is_the_machine_uninstall_key() {
     );
     assert!(matches!(system_lang(), Lang::Ru | Lang::En));
 }
+
+/// tailsa-a4: a service start rewrites an entry that names another version (a swap, a rollback),
+/// but never while the service is disabled: an uninstall disables it first and removes the entry,
+/// and a start that overlaps it must not write the entry back.
+#[test]
+fn a_start_during_an_uninstall_leaves_the_entry_alone() {
+    let root = TestRoot::new("relist");
+    let place = root.place();
+    let exe = PathBuf::from(r"C:\Program Files\VPN Tunnel Enforcer Service\vpnte-service.exe");
+    assert!(!outdated(&place, "2.0.1", false), "no entry, disabled");
+    assert!(outdated(&place, "2.0.1", true), "no entry yet");
+    let entry = Entry {
+        exe: &exe,
+        version: "2.0.0",
+        bytes: 1,
+        lang: Lang::En,
+    };
+    write(&place, &entry).unwrap();
+    assert!(outdated(&place, "2.0.1", true), "another version");
+    assert!(!outdated(&place, "2.0.1", false), "an uninstall runs");
+    assert!(!outdated(&place, "2.0.0", true), "names this version");
+}

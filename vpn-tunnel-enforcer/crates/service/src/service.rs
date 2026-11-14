@@ -31,6 +31,7 @@ use crate::pipe::{Listener, PipeConfig, admit_all};
 use crate::sandbox::{self, Sandbox};
 use crate::scm::dispatch::Control;
 use crate::update::engines::ServiceEngines;
+use crate::update::in_flight::{Counted, InFlight};
 use crate::update::source::Mirrors;
 use crate::update::swap::{self, AtStart, SwapFiles};
 use crate::update::trial::Judged;
@@ -146,8 +147,10 @@ async fn serve(
             Err(err) => tracing::error!(%err, "service update not rolled back"),
         }
     }
+    // The engines of the next session start: a version the updater installed, else the bundled.
+    let engines = Arc::new(ServiceEngines::open(&dir));
     let record = files.private.join("update.json");
-    if update_at_start(&swap_files, own, at_start.as_ref(), &record) {
+    if update_at_start(&swap_files, own, at_start.as_ref(), &record, &engines) {
         return RESTART_EXIT;
     }
     let fault = trusted_install(&dir, &exe).err();
@@ -155,8 +158,6 @@ async fn serve(
         tracing::error!(%fault, "tunnel disabled");
     }
     let trusted = fault.is_none();
-    // The engines of the next session start: a version the updater installed, else the bundled.
-    let engines = Arc::new(ServiceEngines::open(&dir));
     let exes = engines.exes();
     let (singbox, xray) = {
         let current = exes.borrow();
@@ -223,14 +224,19 @@ async fn serve(
         control.stop.clone(),
     ));
     let removing = Arc::new(AtomicBool::new(false));
-    // The engines' trial hears how each start the host asked for ended (svcupd-a5).
-    let judged = Judged::new(Arc::new(runtime.clone()), engines.clone(), starts);
+    // The engines' trial hears how each start the host asked for ended (svcupd-a5), and the
+    // updater sees every start and filter change of the host from its first step (svcfix-a4).
+    let in_flight = InFlight::default();
+    let judged = Judged::new(
+        Arc::new(runtime.clone()),
+        engines.clone(),
+        starts,
+        in_flight.clone(),
+    );
+    let wfp = WfpKillSwitch::new(protection.clone(), files.protection.clone());
     let deps = HostDeps {
         runtime: Arc::new(judged),
-        kill_switch: Arc::new(WfpKillSwitch::new(
-            protection.clone(),
-            files.protection.clone(),
-        )),
+        kill_switch: Arc::new(Counted::new(wfp, in_flight.clone())),
         inputs,
         users: Arc::new(Users::open(&files.users)),
         check: admit_all(),
@@ -263,9 +269,7 @@ async fn serve(
     let updates = Updates::new(UpdatesDeps {
         own,
         keys: policy::trusted_keys(),
-        source: Arc::new(Mirrors {
-            cancel: control.stop.clone(),
-        }),
+        source: Arc::new(Mirrors),
         engines,
         files: swap_files.clone(),
         record,
@@ -273,6 +277,7 @@ async fn serve(
         events: runtime.subscribe(),
         holds: held,
         always: Arc::new(move || level.level_in_force() == KillSwitchLevel::Strict),
+        in_flight,
         probe: swap::probe,
         restart: restarter(restart.clone(), control.stop.clone()),
         stop: control.stop.clone(),
@@ -314,12 +319,14 @@ fn wintun_refused(dir: &Path) -> bool {
 
 /// Logs what the start found; `true` = a verified release waits staged for this start and is
 /// now in place (the service exits for the SCM to start it, before anything runs). `record`:
-/// the updater's record (a staged release from a feed older than the accepted one stays out).
+/// the updater's record (a staged release from a feed older than the accepted one stays out);
+/// `engines`: what Tunnel mode runs (the release must fit them: svcfix-a1).
 fn update_at_start(
     files: &SwapFiles,
     own: Version,
     found: Option<&io::Result<AtStart>>,
     record: &Path,
+    engines: &ServiceEngines,
 ) -> bool {
     match found {
         None => {
@@ -327,18 +334,21 @@ fn update_at_start(
         }
         Some(Err(err)) => tracing::warn!(%err, "update trial not read"),
         Some(Ok(AtStart::Trial(n))) => tracing::info!(start = n, "fresh service version on trial"),
+        // Once, by the first start after the rollback (svcfix-b4).
+        Some(Ok(AtStart::After(version))) => {
+            tracing::warn!(%version, "a service update failed its trial and was rolled back")
+        }
         Some(Ok(_)) => {}
-    }
-    if let Some(m) = swap::marker(files).filter(|m| m.spent() && m.from == own) {
-        tracing::warn!(version = %m.to, "a service update failed its trial and was rolled back");
     }
     if found.is_none() || !policy::keys_ready() {
         return false;
     }
     let max_seq = update::accepted_seq(record);
-    let Some((staged, version)) = swap::ready(files, policy::trusted_keys(), own, max_seq) else {
+    let keys = policy::trusted_keys();
+    let Some(staged) = update::staged_release(files, keys, own, max_seq, engines) else {
         return false;
     };
+    let (staged, version) = (staged.exe, staged.version);
     match swap::swap_in(files, &staged, own, version) {
         Ok(()) => {
             tracing::info!(%version, "staged service update swapped in at start: restarting");

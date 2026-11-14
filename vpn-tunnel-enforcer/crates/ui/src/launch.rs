@@ -1,8 +1,10 @@
 //! Process entry for every UI binary: window and WebView2 configuration, our own tokio runtime,
 //! the frame root (cloak until painted, minimum size, WebView2 hardening, theme and language
-//! sync, WebView2 crash watch and window rebuild), and the command line of the demo binaries.
+//! sync, WebView2 crash watch and window rebuild, a Windows session end kept from tao's event
+//! loop), and the command line of the demo binaries.
 mod recover;
 mod remount;
+mod session_end;
 mod stand_in;
 
 use std::path::PathBuf;
@@ -368,6 +370,8 @@ fn use_frame(min_size: (f64, f64), mount: Mount, rebuild: &Rc<Rebuild>) {
         move || {
             // A rebuilt window has mounted: the one it replaces goes.
             rebuild.mounted();
+            // A Windows restart must not reach tao's runner while dioxus still polls (L9-3).
+            session_end::hold();
             harden_webview(&desktop);
             apply_min_size(&desktop.window, min_size);
             // A start in the tray hides only the window; the page would render unseen at full

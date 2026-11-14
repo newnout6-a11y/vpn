@@ -248,3 +248,45 @@ fn held_engine_files_are_reported_and_swept_later() {
         "{tombstone:?}"
     );
 }
+
+/// tailsa-a2: an uninstall from the program folder tries a file another program holds open
+/// again until it is free (deleted, its folder too), and names one still held past the limit:
+/// its path is never queued, and the verb fails with the folder named instead of "uninstalled".
+#[test]
+fn held_files_are_tried_again_then_named() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    let hold = |path: &Path| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0)
+            .open(path)
+            .expect("held by another program")
+    };
+    let (dir, _exe, image) = in_use("held-again");
+    let engine = dir.join("sing-box.exe");
+    let held = hold(&engine);
+    let freed = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        drop(held);
+    });
+    let mut queued = Vec::new();
+    let left = remove_held_too(&dir, &mut |p: &Path| queued.push(p.to_owned()), HELD_WAIT);
+    freed.join().expect("holder");
+    assert!(left.held.is_empty(), "{:?}", left.held);
+    assert!(!engine.exists(), "deleted once free");
+    assert_eq!(queued.last(), Some(&dir), "the folder goes after its files");
+    free(&dir, image);
+    let (dir, _exe, image) = in_use("held-stays");
+    let engine = dir.join("sing-box.exe");
+    let held = hold(&engine);
+    let mut queued = Vec::new();
+    let limit = Duration::from_millis(500);
+    let left = remove_held_too(&dir, &mut |p: &Path| queued.push(p.to_owned()), limit);
+    assert_eq!(left.held, std::slice::from_ref(&engine));
+    assert!(!queued.contains(&engine), "{queued:?}");
+    let err = files_left(&dir);
+    assert_eq!(err.user_msg().key, flow::FILES_LEFT);
+    drop(held);
+    free(&dir, image);
+}

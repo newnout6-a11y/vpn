@@ -7,7 +7,7 @@ use vpnte_update::net::Via;
 use vpnte_update::store::EngineStore;
 use vpnte_update::version::Version;
 
-use super::doc::UpdatesDoc;
+use super::doc::{Found, LastCheck, UpdatesDoc};
 use super::view::{app_offer, engine_offers, rollback};
 use super::ways::ways;
 
@@ -203,4 +203,26 @@ async fn update_events_reach_the_journal() {
     // Its trial failed: back to the version before, said as such.
     next.show_service(Some(wire("2.0.1")));
     assert_eq!(events("app.journal.update.serviceBack"), [["2.0.1"]]);
+}
+
+/// svcfix-b5: «актуальна» comes only from a check this very build ran: one another app version
+/// ran (before a rollback or an update) or one that did not say confirms nothing, and a document
+/// from before still reads.
+#[test]
+fn only_this_builds_check_confirms_the_service() {
+    let running = Version(2, 0, 0);
+    let check = |result, app| LastCheck {
+        at: 0,
+        host: None,
+        via: None,
+        result,
+        app,
+    };
+    assert!(check(Found::UpToDate, Some(running)).confirms(running));
+    assert!(!check(Found::UpToDate, Some(Version(2, 0, 1))).confirms(running));
+    assert!(!check(Found::UpToDate, None).confirms(running));
+    assert!(!check(Found::Newer, Some(running)).confirms(running));
+    let before = json!({"at": 1, "host": null, "via": null, "result": "upToDate"});
+    let before: LastCheck = serde_json::from_value(before).expect("an older document");
+    assert_eq!(before.app, None);
 }

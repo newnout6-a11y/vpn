@@ -16,6 +16,16 @@ fn install(tag: &str) -> (TempDir, SwapFiles) {
     (dir, files)
 }
 
+/// [`ready`] as `(exe, version)`.
+fn staged_at(
+    files: &SwapFiles,
+    keys: &[vpnte_update::feed::PublicKey],
+    own: Version,
+    max_seq: u64,
+) -> Option<(PathBuf, Version)> {
+    ready(files, keys, own, max_seq).map(|s| (s.exe, s.version))
+}
+
 fn read(path: &Path) -> Vec<u8> {
     std::fs::read(path).unwrap_or_default()
 }
@@ -73,7 +83,11 @@ fn three_failed_starts_bring_the_previous_exe_back() {
     );
     assert_eq!(read(&files.exe), b"old exe");
     assert_eq!(read(&files.failed()), b"new exe");
-    assert_eq!(at_start(&files, OLD).expect("old start"), AtStart::Normal);
+    // svcfix-b4: the rollback is reported once, by the first start after it.
+    assert_eq!(
+        at_start(&files, OLD).expect("old start"),
+        AtStart::After(NEW)
+    );
     assert!(failed_before(&files, NEW));
     assert!(!files.failed().exists() && !files.prev().exists());
     assert_eq!(at_start(&files, OLD).expect("again"), AtStart::Normal);
@@ -158,22 +172,22 @@ fn only_a_verified_newer_exe_is_ready() {
     };
     put_feed(b"new exe", NEW, &key);
     assert_eq!(
-        ready(&files, key.keys(), OLD, 0),
+        staged_at(&files, key.keys(), OLD, 0),
         Some((files.staged(NEW), NEW))
     );
     assert_eq!(
-        ready(&files, key.keys(), NEW, 0),
+        staged_at(&files, key.keys(), NEW, 0),
         None,
         "not above the running one"
     );
     assert_eq!(
-        ready(&files, TestKey::new().keys(), OLD, 0),
+        staged_at(&files, TestKey::new().keys(), OLD, 0),
         None,
         "another key"
     );
     put_feed(b"other bytes", NEW, &key);
     assert_eq!(
-        ready(&files, key.keys(), OLD, 0),
+        staged_at(&files, key.keys(), OLD, 0),
         None,
         "the file is not the listed one"
     );
@@ -185,7 +199,7 @@ fn only_a_verified_newer_exe_is_ready() {
     };
     write_marker(&files, &spent).expect("record");
     assert_eq!(
-        ready(&files, key.keys(), OLD, 0),
+        staged_at(&files, key.keys(), OLD, 0),
         None,
         "failed here before"
     );
@@ -198,10 +212,51 @@ fn a_staged_release_from_an_older_feed_is_not_ready() {
     let (_dir, files) = install("seq");
     let key = TestKey::new();
     stage_signed(&files, &key, |path, bytes| std::fs::write(path, bytes));
-    assert!(ready(&files, key.keys(), OLD, 5).is_some(), "seq 5 itself");
-    assert_eq!(ready(&files, key.keys(), OLD, 6), None);
+    assert!(
+        staged_at(&files, key.keys(), OLD, 5).is_some(),
+        "seq 5 itself"
+    );
+    assert_eq!(staged_at(&files, key.keys(), OLD, 6), None);
     drop_staged(&files);
     assert!(!files.staged(NEW).exists() && !files.staging.join(FEED_FILE).exists());
+}
+
+/// svcfix-b3: a newer feed that still lists the staged exe byte for byte keeps it (with that
+/// feed, so the newer `max_seq` still takes it) and drops any other staged exe; a feed that
+/// lists other bytes, another version or no service drops what is staged.
+#[test]
+fn only_what_the_newest_feed_lists_stays_staged() {
+    let (_dir, files) = install("keep");
+    let key = TestKey::new();
+    stage_signed(&files, &key, |path, bytes| std::fs::write(path, bytes));
+    let other = files.staged(Version(2, 0, 2));
+    std::fs::write(&other, b"older pick").expect("other");
+    let newer = |entry: Option<ServiceEntry>| {
+        let bytes = serde_json::to_vec(&feed(6, entry)).expect("json");
+        let sig = key.sign(&bytes);
+        (bytes, sig)
+    };
+    let (bytes, sig) = newer(Some(service_entry(NEW, b"new exe")));
+    let listed = service_entry(NEW, b"new exe");
+    keep_listed(&files, OLD, Some(&listed), &bytes, &sig);
+    assert_eq!(
+        staged_at(&files, key.keys(), OLD, 6),
+        Some((files.staged(NEW), NEW))
+    );
+    assert!(!other.exists(), "only the listed exe stays");
+    let changed = service_entry(NEW, b"rebuilt exe");
+    let (bytes, sig) = newer(Some(changed.clone()));
+    keep_listed(&files, OLD, Some(&changed), &bytes, &sig);
+    assert!(!files.staged(NEW).exists(), "other bytes: dropped");
+    assert!(!files.staging.join(FEED_FILE).exists());
+    stage_signed(&files, &key, |path, bytes| std::fs::write(path, bytes));
+    let (bytes, sig) = newer(None);
+    keep_listed(&files, OLD, None, &bytes, &sig);
+    assert!(!files.staged(NEW).exists(), "no service listed: dropped");
+    stage_signed(&files, &key, |path, bytes| std::fs::write(path, bytes));
+    let (bytes, sig) = newer(Some(listed.clone()));
+    keep_listed(&files, NEW, Some(&listed), &bytes, &sig);
+    assert!(!files.staged(NEW).exists(), "not above the running one");
 }
 
 /// svcupd-a7 / a9 / a8: an installer's exe forgets everything the feed staged or swapped; a
@@ -214,6 +269,11 @@ fn installer_refusal_and_give_up_records() {
     stage_signed(&files, &key, |path, bytes| std::fs::write(path, bytes));
     refuse(&files, OLD, NEW);
     assert!(failed_before(&files, NEW));
+    // svcfix-b4: a release refused before it ran was never rolled back: no start reports it.
+    for _ in 0..2 {
+        assert_eq!(at_start(&files, OLD).expect("start"), AtStart::Normal);
+    }
+    assert!(failed_before(&files, NEW), "still never taken");
     forget(&files);
     assert_eq!(marker(&files), None);
     assert!(!files.staged(NEW).exists() && !files.staging.join(SIG_FILE).exists());
@@ -224,7 +284,10 @@ fn installer_refusal_and_give_up_records() {
     assert_eq!(give_up(&files).expect("given up"), OLD);
     assert_eq!(read(&files.exe), b"old exe");
     assert!(failed_before(&files, NEW));
-    assert_eq!(at_start(&files, OLD).expect("old start"), AtStart::Normal);
+    assert_eq!(
+        at_start(&files, OLD).expect("old start"),
+        AtStart::After(NEW)
+    );
     assert!(failed_before(&files, NEW), "the record stays");
 }
 
@@ -252,10 +315,10 @@ fn a_staged_exe_users_could_change_is_never_used() {
     std::fs::create_dir_all(&files.staging).expect("staging");
     let key = TestKey::new();
     stage_signed(&files, &key, |path, bytes| std::fs::write(path, bytes));
-    assert_eq!(ready(&files, key.keys(), OLD, 0), None);
+    assert_eq!(staged_at(&files, key.keys(), OLD, 0), None);
     let unvetted = SwapFiles::unvetted(&files.exe);
     assert_eq!(
-        ready(&unvetted, key.keys(), OLD, 0),
+        staged_at(&unvetted, key.keys(), OLD, 0),
         Some((files.staged(NEW), NEW))
     );
 }
@@ -279,7 +342,7 @@ fn elevated_the_staging_folder_is_recreated_admin_only() {
         std::io::Write::write_all(&mut file, bytes)
     });
     assert_eq!(
-        ready(&files, key.keys(), OLD, 0),
+        staged_at(&files, key.keys(), OLD, 0),
         Some((files.staged(NEW), NEW))
     );
 }

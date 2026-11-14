@@ -1,13 +1,14 @@
 //! The helper service in Settings > Apps: an uninstall entry under HKLM, written by the install
 //! verb with the registration and removed with it (the uninstall verb, the last user's leave).
 //! Settings starts `UninstallString` unelevated, so it is `request-uninstall`, which asks Windows
-//! to run the `uninstall` verb elevated (one prompt, as `request-install`); tools that run a quiet
-//! uninstall elevated get `uninstall` itself. The per-user app keeps its own HKCU entry.
+//! to run the `uninstall` verb elevated (one prompt, as `request-install`) and says how it went;
+//! quiet-uninstall tools get `uninstall` itself, which asks Windows the same way when their token
+//! is not elevated (winget's is not: review tailsa-b3). The per-user app keeps its own HKCU entry.
 use std::path::Path;
 
 use vpnte_base::i18n::Lang;
 use vpnte_winnet::registry::{self, Hive, Key, View};
-use windows::Win32::Globalization::GetSystemDefaultUILanguage;
+use windows::Win32::Globalization::{GetSystemDefaultUILanguage, GetUserDefaultUILanguage};
 
 use crate::paths::SERVICE_NAME;
 
@@ -83,11 +84,27 @@ pub fn names(place: &Place, version: &str) -> bool {
     listed.flatten().is_some_and(|listed| listed == version)
 }
 
+/// A service start rewrites the entry at `place`: it does not name `version` yet, and the service
+/// is `enabled`. An uninstall disables the service first and removes the entry after its
+/// registration: a start that overlaps it must not write the entry back (tailsa-a4).
+pub fn outdated(place: &Place, version: &str, enabled: bool) -> bool {
+    enabled && !names(place, version)
+}
+
 /// The machine's display language: Russian -> `ru`, anything else -> `en` (the entry is for every
 /// account of the PC, so not the installing administrator's own language).
 pub fn system_lang() -> Lang {
     // SAFETY: no arguments and no preconditions.
-    let id = unsafe { GetSystemDefaultUILanguage() };
+    lang_of(unsafe { GetSystemDefaultUILanguage() })
+}
+
+/// The display language of the user this process runs as (what a message to him is written in).
+pub fn user_lang() -> Lang {
+    // SAFETY: no arguments and no preconditions.
+    lang_of(unsafe { GetUserDefaultUILanguage() })
+}
+
+fn lang_of(id: u16) -> Lang {
     // PRIMARYLANGID(id) == LANG_RUSSIAN
     if id & 0x3ff == 0x19 {
         Lang::Ru
@@ -96,23 +113,27 @@ pub fn system_lang() -> Lang {
     }
 }
 
-/// The name in `lang`, read from this crate's own fragment: the verbs' processes register no
-/// locale catalog (a missing text reads as its key, as everywhere).
 fn display_name(lang: Lang) -> String {
+    text(DISPLAY_NAME, lang)
+}
+
+/// The text of `key` in `lang`, read from this crate's own fragment: the verbs' processes register
+/// no locale catalog (a missing text reads as its key, as everywhere).
+pub fn text(key: &str, lang: Lang) -> String {
     let (ru, en) = crate::LOCALES[0];
     let fragment = match lang {
         Lang::Ru => ru,
         Lang::En => en,
     };
     let parsed = serde_json::from_str::<serde_json::Value>(fragment).ok();
-    let name = parsed.as_ref().and_then(|value| {
+    let found = parsed.as_ref().and_then(|value| {
         let mut value = value;
-        for part in DISPLAY_NAME.split('.') {
+        for part in key.split('.') {
             value = value.get(part)?;
         }
         value.as_str().map(str::to_owned)
     });
-    name.unwrap_or_else(|| DISPLAY_NAME.to_owned())
+    found.unwrap_or_else(|| key.to_owned())
 }
 
 #[cfg(test)]

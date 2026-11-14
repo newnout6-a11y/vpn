@@ -15,6 +15,7 @@ use vpnte_winnet::toast::{self, NotifySetting};
 
 use super::Shared;
 use super::project::{core_notify_method, theme_exists, wfp_exception_kind};
+use crate::services::KillSwitchStatus;
 use crate::support::{blocking, detached};
 
 /// Stores the language the page already switched to.
@@ -127,18 +128,31 @@ impl AutostartOs for Os<'_> {
 }
 
 /// Applies, verifies and persists the level through the tunnel (WFP when elevated, Soft's
-/// off / standard otherwise); the section is re-read either way.
+/// off / standard otherwise); the section is re-read either way. The journal gets the change
+/// whenever the level changed: «Выкл» over a paused session stores the level before the session's
+/// disconnect, which may still fail (tailsa-a5).
 pub async fn set_kill_switch_level(shared: &Arc<Shared>, level: KillSwitchLevel) -> AppResult<()> {
     let shared = shared.clone();
     detached(async move {
-        let result = shared.backend.tunnel()?.set_kill_switch_level(level).await;
+        let tunnel = shared.backend.tunnel()?;
+        let result = tunnel.set_kill_switch_level(level).await;
         shared.dirty.notify_one();
-        if result.is_ok() {
+        if level_changed(&result, level, || tunnel.kill_switch()).await {
             crate::svc_journal::kill_switch_level(&shared.backend.dirs.root, level);
         }
         result
     })
     .await
+}
+
+/// The level is now `level`: the call went through, or it failed after the level was stored
+/// (read back from `status`).
+async fn level_changed<S, F>(result: &AppResult<()>, level: KillSwitchLevel, status: S) -> bool
+where
+    S: FnOnce() -> F,
+    F: Future<Output = KillSwitchStatus>,
+{
+    result.is_ok() || status().await.settings.level == level
 }
 
 /// Validates, applies and persists a new exception (`Permission` without WFP).
@@ -310,4 +324,43 @@ impl Drop for Refreshing {
 /// The folder with `app.log` and the engine logs.
 pub async fn open_logs_folder(shared: &Arc<Shared>) -> AppResult<()> {
     vpnte_winnet::shell::open_folder(&shared.backend.dirs.logs).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use vpnte_winnet::wfp::ProtectionSettings;
+
+    use super::*;
+
+    fn stored(level: KillSwitchLevel) -> KillSwitchStatus {
+        let settings = ProtectionSettings {
+            level,
+            ..ProtectionSettings::default()
+        };
+        KillSwitchStatus {
+            settings,
+            wfp: None,
+        }
+    }
+
+    /// tailsa-a5: «Выкл» over a paused session stores the level, then the session's disconnect
+    /// fails: the call errs, the level changed, so the journal gets it. A failure that left the
+    /// old level gets nothing; a call that went through is not read back.
+    #[tokio::test]
+    async fn a_stored_level_reaches_the_journal_when_the_call_failed() {
+        let off = KillSwitchLevel::Off;
+        let failed: AppResult<()> = Err(AppError::new(ErrorKind::Internal));
+        let reads = AtomicUsize::new(0);
+        let read = |level| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(stored(level))
+        };
+        assert!(level_changed(&failed, off, || read(off)).await);
+        let standard = KillSwitchLevel::Standard;
+        assert!(!level_changed(&failed, off, || read(standard)).await);
+        assert!(level_changed(&Ok(()), off, || read(standard)).await);
+        assert_eq!(reads.load(Ordering::SeqCst), 2, "read back on errors only");
+    }
 }

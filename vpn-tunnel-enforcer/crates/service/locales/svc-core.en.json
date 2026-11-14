@@ -33,7 +33,10 @@
       "notRestarted": "The helper service could not be updated and is stopped. Windows starts it again the next time the PC starts."
     },
     "uninstall": {
-      "filtersKept": "The helper service stays for now: it removes its network filters later. Everything else is removed."
+      "filtersKept": "The helper service stays for now: it removes its network filters later. Everything else is removed.",
+      "notYet": "The helper service stays for now: its network filters could not be removed. Restart the computer and remove it again.",
+      "filesLeft": "The helper service is removed. A few of its files are in use by another program and stay in {{folder}}: you can delete that folder later.",
+      "failed": "The helper service could not be removed. Restart the computer and try again."
     },
     "entry": {
       "displayName": "VPN Tunnel Enforcer — helper service"

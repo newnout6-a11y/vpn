@@ -17,13 +17,16 @@ use vpnte_tunnel::api::{
 use vpnte_tunnel::runtime::EngineStarts;
 
 use super::engines::ServiceEngines;
+use super::in_flight::InFlight;
 
 /// The host's runtime: every call goes through unchanged; the outcomes of starts reach the
-/// engines' trial with what the runtime started for them.
+/// engines' trial with what the runtime started for them, and every start counts as a host call
+/// in flight until it returns (the updater's restart waits for it: svcfix-a4).
 pub struct Judged {
     inner: Arc<dyn Runtime>,
     engines: Arc<ServiceEngines>,
     starts: watch::Receiver<EngineStarts>,
+    in_flight: InFlight,
 }
 
 impl Judged {
@@ -31,11 +34,13 @@ impl Judged {
         inner: Arc<dyn Runtime>,
         engines: Arc<ServiceEngines>,
         starts: watch::Receiver<EngineStarts>,
+        in_flight: InFlight,
     ) -> Self {
         Self {
             inner,
             engines,
             starts,
+            in_flight,
         }
     }
 
@@ -64,6 +69,7 @@ impl Runtime for Judged {
         req: StartRequest,
         cancel: CancellationToken,
     ) -> Result<StartReceipt, TunError> {
+        let _call = self.in_flight.enter();
         let result = self.inner.start(req, cancel).await;
         self.settle(&result, |_| true);
         result
@@ -79,12 +85,14 @@ impl Runtime for Judged {
         next: StartRequest,
         opts: RestartOptions,
     ) -> Result<StartReceipt, TunError> {
+        let _call = self.in_flight.enter();
         let result = self.inner.restart_protected(reason, next, opts).await;
         self.settle(&result, |_| true);
         result
     }
 
     async fn restart_with_last(&self, reason: String) -> Result<Option<StartReceipt>, TunError> {
+        let _call = self.in_flight.enter();
         let result = self.inner.restart_with_last(reason).await;
         self.settle(&result, Option::is_some);
         result
@@ -96,6 +104,7 @@ impl Runtime for Judged {
         reason: String,
         profile: Option<VpnProfile>,
     ) -> Result<StartReceipt, TunError> {
+        let _call = self.in_flight.enter();
         let result = self.inner.restart_adaptive(mode, reason, profile).await;
         self.settle(&result, |_| true);
         result
@@ -107,10 +116,12 @@ impl Runtime for Judged {
         cancel: CancellationToken,
         is_owner: OwnerCheck,
     ) -> Option<SwitchReceipt> {
+        let _call = self.in_flight.enter();
         self.inner.switch_upstream(next, cancel, is_owner).await
     }
 
     async fn retry_now(&self) -> bool {
+        let _call = self.in_flight.enter();
         self.inner.retry_now().await
     }
 

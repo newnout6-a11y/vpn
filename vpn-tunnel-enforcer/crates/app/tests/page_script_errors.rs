@@ -62,7 +62,8 @@ fn a_page_script_error_reaches_the_app_log_redacted() {
     let [line] = lines.as_slice() else {
         panic!("one line expected: {lines:?}")
     };
-    assert_eq!(line.level, "WARN");
+    // INFO: a page error is no problem the user could act on (review tailsa-b2).
+    assert_eq!(line.level, "INFO");
     assert_eq!(line.msg, "page script error");
     let all = serde_json::to_string(&line.fields).expect("fields");
     for secret in [

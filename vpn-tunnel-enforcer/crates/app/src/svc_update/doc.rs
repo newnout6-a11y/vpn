@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use vpnte_base::types::UnixMs;
 use vpnte_core::store::Document;
 use vpnte_update::net::Via;
+use vpnte_update::version::Version;
 
 /// The update channel's document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,7 +48,7 @@ impl Document for UpdatesDoc {
     const VERSION: u32 = 1;
 }
 
-/// The last check: when, from which mirror and way, what it found.
+/// The last check: when, from which mirror and way, under which app version, what it found.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LastCheck {
@@ -55,6 +56,17 @@ pub struct LastCheck {
     pub host: Option<String>,
     pub via: Option<Via>,
     pub result: Found,
+    /// What it found holds for this build only: the document outlives a rollback or an update
+    /// (svcfix-b5). `None`: a check of an earlier build that did not say.
+    #[serde(default)]
+    pub app: Option<Version>,
+}
+
+impl LastCheck {
+    /// This check, run by the build `running`, found nothing newer than it.
+    pub fn confirms(&self, running: Version) -> bool {
+        self.result == Found::UpToDate && self.app == Some(running)
+    }
 }
 
 /// What a check found.

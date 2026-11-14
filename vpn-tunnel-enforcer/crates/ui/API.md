@@ -202,24 +202,31 @@ pub fn format_bytes(bytes: u64) -> String;   // "1023 B", "1.5 KB", "4.8 MB", "2
 ```
 The window is frameless with an HTML title strip (no Snap Layouts flyout on the maximise button).
 Close = Dioxus' default (exit) until `TrayHost` switches it to hide-to-tray. Theme persistence and
-custom-theme CRUD belong to the app; the UI takes a `Theme` value.
+custom-theme CRUD belong to the app; the UI takes a `Theme` value. The frame keeps Windows'
+`WM_ENDSESSION` from tao's hidden event-loop window (`launch::session_end`, a subclass on the
+"Tao Thread Event Target" window): tao 0.34 would move its runner to `Destroyed` there while
+dioxus still polls, and the next poll panics «cannot move state from Destroyed» (lab L9-3); the
+process simply runs until Windows ends it (the soft-values rollback has its own window).
 
 ### Page script errors: `webview_errors` (p-tails-a)
 
 ```rust
 pub const PER_MINUTE: usize = 5;   // logged reports per sliding minute; the rest are counted
 pub fn use_script_errors();        // once in the root component: window.onerror + unhandled
-                                   // rejections -> WARN "page script error" in the app log
+                                   // rejections -> INFO "page script error" in the app log
 #[derive(Default)] pub struct ScriptErrors;   // one page's reports: take(value, now) parses,
                                    // limits and logs one (the hook's loop; the app tests its line)
 ```
 A script started with the root (dioxus eval channel) sends `{kind, message, source, line, col,
-stack}`; only an `Error`'s message and stack leave the page (any other rejected value: its type
-name), at most 30 a minute. The app logs at most 5 a minute (`suppressed` = how many it turned
-away before that line), every field one line, cut to 300 characters, the top 6 stack frames, the
-page's own origins written short (`page:/…`, `app:/…`: the log redacts URLs, line and column
-with them). The app log's layer redacts every string field (`redact::for_log`; the app's
-`tests/page_script_errors.rs` checks the line). Nothing changes on screen.
+stack}`; only an `Error`'s message and stack leave the page (any other rejected value, a string
+too: its type name, tailsa-a3), at most 30 a minute; Chromium's "ResizeObserver loop" notice is
+not sent. The app logs at most 5 a minute (`suppressed` = how many it turned away before that
+line) at INFO, so a page error never becomes a Diagnostics problem (tailsa-b2), every field one
+line, cut to at most 300 characters between words (the page cuts the same way: a word the cut
+would split goes whole, so redaction sees a secret whole or not at all, tailsa-a1), the top 6
+stack frames, the page's own origins written short (`page:/…`, `app:/…`: the log redacts URLs,
+line and column with them). The app log's layer redacts every string field (`redact::for_log`;
+the app's `tests/page_script_errors.rs` checks the line). Nothing changes on screen.
 
 ## Shell: `pages`, `shell`
 

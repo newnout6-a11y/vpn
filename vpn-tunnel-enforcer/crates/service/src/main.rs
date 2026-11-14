@@ -4,11 +4,15 @@
 //!   Apps entry first names this version).
 //! - `install [--resources <dir>]`: elevated; copies this exe and the pinned engine files into
 //!   Program Files, registers and starts the service.
-//! - `uninstall`: elevated; stops and removes the service and its folders.
+//! - `uninstall`: stops and removes the service and its folders; run unelevated (a quiet-uninstall
+//!   tool such as winget) it asks Windows to run `uninstall --approved` elevated, which never asks
+//!   again, and returns that run's exit code.
 //! - `request-install [--resources <dir>]`: unelevated (the per-user installer); asks Windows to
 //!   run `install` elevated (Windows shows its one prompt) and returns that run's exit code.
-//! - `request-uninstall`: unelevated (the service's entry in Settings > Apps); asks Windows to run
-//!   `uninstall` elevated the same way and returns that run's exit code.
+//! - `request-uninstall`: unelevated (the service's entry in Settings > Apps); lets go of its
+//!   console, asks Windows to run `uninstall --approved` elevated the same way, says the outcome in
+//!   one calm message box (none when the service is gone or nobody approved) and returns that run's
+//!   exit code.
 //! - `forget-me`: unelevated (the per-user uninstaller); tells the service this user is gone.
 //! - `status`: unelevated; the installed service answers over its pipe (CI's smoke run).
 //!
@@ -16,11 +20,15 @@
 //! 3 the service stays to remove its network filters later (`service.uninstall.filtersKept`),
 //! 4 an upgrade failed and the service is stopped until Windows starts it
 //! (`service.install.notRestarted`), 5 nobody approved the prompt (`request-install`,
-//! `request-uninstall`).
+//! `request-uninstall`), 6 the service is removed but files another program holds stay in its
+//! folder (`service.uninstall.filesLeft`).
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use vpnte_service::install::flow::{FILTERS_KEPT, NOT_RESTARTED};
+use vpnte_service::install::entry;
+use vpnte_service::install::flow::{
+    EXIT_FILES_LEFT, EXIT_FILTERS_KEPT, EXIT_NOT_RESTARTED, FILES_LEFT, FILTERS_KEPT, NOT_RESTARTED,
+};
 use vpnte_service::per_user::{self, Elevated};
 use vpnte_service::pipe::client::CallError;
 use vpnte_service::{install, scm, service};
@@ -51,11 +59,8 @@ fn main() -> ExitCode {
             let done = source.and_then(|s| install::install(&s));
             report(done.map(|exe| eprintln!("installed: {}", exe.display())))
         }
-        ["uninstall"] => {
-            install::system_dlls_only();
-            console_log();
-            report(install::uninstall().map(|()| eprintln!("uninstalled")))
-        }
+        ["uninstall"] => uninstall(false),
+        ["uninstall", per_user::APPROVED] => uninstall(true),
         ["request-install", rest @ ..] => {
             let Some(resources) = resources(rest) else {
                 return usage();
@@ -104,13 +109,36 @@ fn console_log() {
         .try_init();
 }
 
-/// The exit code of a result: the two "kept" outcomes have their own codes.
+/// The exit code of a result: the "kept" and "left" outcomes have their own codes.
 fn code_of(key: &str) -> ExitCode {
     match key {
-        FILTERS_KEPT => ExitCode::from(3),
-        NOT_RESTARTED => ExitCode::from(4),
+        FILTERS_KEPT => ExitCode::from(EXIT_FILTERS_KEPT),
+        NOT_RESTARTED => ExitCode::from(EXIT_NOT_RESTARTED),
+        FILES_LEFT => ExitCode::from(EXIT_FILES_LEFT),
         _ => ExitCode::FAILURE,
     }
+}
+
+/// `uninstall`: runs here when elevated (an elevated tool, SYSTEM, or the run Windows approved);
+/// a quiet-uninstall tool with an ordinary token gets Windows' prompt instead of a refusal
+/// (tailsa-b3). `approved`: Windows ran it after its prompt, so it never asks again.
+fn uninstall(approved: bool) -> ExitCode {
+    if !approved && !vpnte_winnet::elevation::is_elevated() {
+        return match std::env::current_exe() {
+            Ok(exe) => elevated_exit(
+                "uninstall",
+                per_user::request_uninstall(&exe),
+                "nothing changed",
+            ),
+            Err(err) => {
+                eprintln!("failed: own path unknown ({err})");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    install::system_dlls_only();
+    console_log();
+    report(install::uninstall().map(|()| eprintln!("uninstalled")))
 }
 
 fn report(result: vpnte_base::AppResult<()>) -> ExitCode {
@@ -140,36 +168,39 @@ fn request_install(resources: Option<PathBuf>) -> ExitCode {
     elevated_exit("install", asked, "the app works in proxy mode")
 }
 
-/// Settings > Apps: `uninstall` from this (installed) exe, approved in Windows' prompt.
+/// Settings > Apps: `uninstall` from this (installed) exe, approved in Windows' prompt. Settings
+/// shows no exit code, and the console Windows opened for this exe is let go at once: the outcome
+/// is said in one message box (tailsa-b1), nothing is printed.
 fn request_uninstall() -> ExitCode {
-    match std::env::current_exe() {
-        Ok(exe) => elevated_exit(
-            "uninstall",
-            per_user::request_uninstall(&exe),
-            "nothing changed",
-        ),
-        Err(err) => {
-            eprintln!("failed: own path unknown ({err})");
-            ExitCode::FAILURE
-        }
+    per_user::leave_console();
+    let Ok(exe) = std::env::current_exe() else {
+        return ExitCode::FAILURE;
+    };
+    let asked = per_user::request_uninstall(&exe);
+    let lang = entry::user_lang();
+    let folder = exe.parent().unwrap_or(&exe);
+    if let Some(message) = per_user::uninstall_message(&asked, folder, lang) {
+        per_user::tell(&message, lang);
     }
+    exit_of(&asked)
 }
 
-/// The exit code of an elevated run of `verb`: its own, 5 when nobody approved the prompt.
+/// The exit code of an elevated run of `verb`, said on stderr: its own, 5 when nobody approved
+/// the prompt.
 fn elevated_exit(verb: &str, asked: std::io::Result<Elevated>, declined: &str) -> ExitCode {
+    match &asked {
+        Ok(Elevated::Exited(code)) => eprintln!("{verb} exited with {code}"),
+        Ok(Elevated::Declined) => eprintln!("not approved: {declined}"),
+        Err(err) => eprintln!("failed: {err}"),
+    }
+    exit_of(&asked)
+}
+
+fn exit_of(asked: &std::io::Result<Elevated>) -> ExitCode {
     match asked {
-        Ok(Elevated::Exited(code)) => {
-            eprintln!("{verb} exited with {code}");
-            ExitCode::from(u8::try_from(code).unwrap_or(1))
-        }
-        Ok(Elevated::Declined) => {
-            eprintln!("not approved: {declined}");
-            ExitCode::from(5)
-        }
-        Err(err) => {
-            eprintln!("failed: {err}");
-            ExitCode::FAILURE
-        }
+        Ok(Elevated::Exited(code)) => ExitCode::from(u8::try_from(*code).unwrap_or(1)),
+        Ok(Elevated::Declined) => ExitCode::from(5),
+        Err(_) => ExitCode::FAILURE,
     }
 }
 

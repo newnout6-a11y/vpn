@@ -11,6 +11,13 @@ use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
 pub const FILTERS_KEPT: &str = "service.uninstall.filtersKept";
 /// `install` failed after stopping the old service and could not start it again.
 pub const NOT_RESTARTED: &str = "service.install.notRestarted";
+/// `uninstall` removed the service, but files another program keeps open stay in its folder
+/// (arg `folder`).
+pub const FILES_LEFT: &str = "service.uninstall.filesLeft";
+/// The verbs' exit codes of [`FILTERS_KEPT`], [`NOT_RESTARTED`] and [`FILES_LEFT`].
+pub const EXIT_FILTERS_KEPT: u8 = 3;
+pub const EXIT_NOT_RESTARTED: u8 = 4;
+pub const EXIT_FILES_LEFT: u8 = 6;
 
 /// The machine effects of install / uninstall, each one step.
 pub(crate) trait Machine {

@@ -28,7 +28,7 @@ vpnte-service.workspace = true
 | `logs` | the service log (p-logs): `init(dir)` (global subscriber, redacted app-log JSON lines in `service\service.log` + `service.1.log`, 1 MiB, each tagged `user` = the session's SID, else the controller's, else none; `"?"` when the host is busy), `attribute(owner)`, `owner_of`, `lines_for(dir, sid)` / `for_user(sid)` (service-wide lines and the caller's own, tag stripped, last `REPLY_LINES` = 2000) |
 | `watchdog` | `Engaged` (a capture that records whether a session's filters are held) and `run` (the WFP watchdog exactly while they are) |
 | `sandbox` | engines may not start programs: each engine process in a nested job with `ActiveProcessLimit = 1` |
-| `update` | its own updates through the signed feed (p-svc-update): `swap` (the exe swap, trial, rollback), `engines` (`ServiceEngines`: Tunnel mode's engine store), `checks`, `source` (`Mirrors`), `trial` (`Judged`: the engines' trial from the host's starts), `Updates` / `UpdatesDeps` (`Take` only, no schedule), `UpdateDesk` / `OwnSession`, `accepted_seq`, `RESTART_EXIT` |
+| `update` | its own updates through the signed feed (p-svc-update): `swap` (the exe swap, trial, rollback), `engines` (`ServiceEngines`: Tunnel mode's engine store), `checks`, `source` (`Mirrors`), `trial` (`Judged`: the engines' trial from the host's starts), `in_flight` (`InFlight`, `Counted`: the host's calls in flight), `Updates` / `UpdatesDeps` (`Take` only, no schedule), `UpdateDesk` / `OwnSession`, `accepted_seq`, `staged_release`, `RESTART_EXIT` |
 | `LOCALES` | `&[(ru_json, en_json)]`, keys under `service.*` |
 
 ## Binary verbs
@@ -36,8 +36,9 @@ vpnte-service.workspace = true
 vpnte-service run                          # the SCM's command line ("<exe>" run); not for people
 vpnte-service install [--resources <dir>]  # elevated: copy + pin-check + register + start
 vpnte-service uninstall                    # elevated: stop + WFP objects + engine firewall rules + delete + folders
+                                           # (unelevated, e.g. winget's quiet run: asks Windows to run `uninstall --approved`)
 vpnte-service request-install [--resources <dir>]  # per-user: asks Windows to run `install` elevated
-vpnte-service request-uninstall            # Settings > Apps (unelevated): asks Windows to run `uninstall` elevated
+vpnte-service request-uninstall            # Settings > Apps (unelevated): no console, asks Windows to run `uninstall --approved`, one message box on the outcome
 vpnte-service forget-me                    # per-user uninstaller: this Windows user leaves (no prompt)
 vpnte-service status                       # the installed service answers over its pipe (CI smoke)
 vpnte-service sweep <pid>                  # started by the service's own removal only (see below)
@@ -46,7 +47,12 @@ Exit codes 0 / 1 (reason on stderr, English) / 2 (usage) / 3 the service stays t
 network filters later (`service.uninstall.filtersKept`: `uninstall`, `forget-me`) / 4 an upgrade
 failed and the service is stopped until Windows starts it (`service.install.notRestarted`) / 5
 nobody approved the prompt (`request-install`; the installer and the app then go on in proxy
-mode). `request-install` asks nothing when the installed service exe is this build byte for byte
+mode) / 6 the service is removed but files another program holds open stay in its folder (retried
+10 s first; `service.uninstall.filesLeft`, `folder`; never queued by path: review tailsa-a2).
+`request-uninstall` lets go of the console Windows opened for it and tells the user in one message
+box when the service stays for its filters (`service.uninstall.notYet`), files stay (`filesLeft`)
+or the removal failed (`service.uninstall.failed`); nothing when it is gone or nobody approved
+(tailsa-b1). `uninstall` run unelevated asks Windows itself instead of refusing (tailsa-b3). `request-install` asks nothing when the installed service exe is this build byte for byte
 and no swap of it is on trial (`per_user::is_current`: an unsettled `update\swap.json` is not
 current, so the release installer repairs a fresh exe that crashes before its trial counts) and
 otherwise returns the elevated `install`'s own exit code. `install` copies this exe and
@@ -318,7 +324,10 @@ versions) decide, and a rollback stays a rollback (svcupd-a7). One check at a ti
 than the newest accepted `seq` (`service\update.json`, private: `maxSeq`, `checkedAt`) or past
 90 days is not acted on and reports `Failed`, never "up to date" (svcupd-a10). No request at all
 while the kill switch blocks the machine with no TUN running ("Always" without a session, a held
-block after a drop): the service's own program permit would pass that block (svcupd-b7).
+block after a drop): the service's own program permit would pass that block (svcupd-b7). A block
+that begins during a check ends its requests at once: they run under a token of the check,
+cancelled as soon as the status or the held filters say so ("Always" read again every second
+while a check runs), and the check reports `Failed` (svcfix-a3 / b1).
 - Engines for Tunnel mode (`engines::ServiceEngines`): the engine store over `<install>\engines`
   with the install folder as the bundled set and `EngineStore::not_below_bundled` (after an exe
   swap the folder holds the previous release's engine files, which the new exe's pins refuse: the
@@ -343,7 +352,11 @@ block after a drop): the service's own program permit would pass that block (svc
   that starts on this Windows and exits with its usage code 2 is staged (`swap::probe`, svcupd-a9;
   one that does not is recorded as failed). `swap::ready` re-verifies feed (not older than the
   accepted `seq`: a withdrawn release stays out, svcupd-a3), size and SHA-256 right before any
-  swap; a check that does not stage the asked release drops what is staged. Engines go first and
+  swap; a staged release stays only while the newest accepted feed lists it byte for byte
+  (`swap::keep_listed`, kept with that feed; another user's stale ask no longer drops it,
+  svcfix-b3). Right before every swap (idle, `Take`, the next start) the staged release's engines
+  are judged again (`update::staged_release`: Tunnel mode must run exactly the versions its feed
+  lists; after the engine trial went back the release is dropped, svcfix-a1). Engines go first and
   are judged by the build that runs them (svcupd-a6): the release is staged only when the feed's
   entry of every engine is meant for that release and this build alike (one minor series, inside
   this build's ranges) and Tunnel mode runs exactly those versions after the engines step; else
@@ -352,7 +365,10 @@ block after a drop): the service's own program permit would pass that block (svc
   (before anything runs), or at once on a `Take` whose caller owns the session or finds none.
   Whose session it is (`OwnSession`, the host's current session user) and idle are judged when the
   ask arrives, again right before the swap and again right before the restart, which waits while
-  it would end someone else's session (svcupd-a1 / a2 / a11). The swap: the staged file is flushed, `swap.json` written
+  it would end someone else's session (svcupd-a1 / a2 / a11) or cut a host call: the host's kill
+  switch (`in_flight::Counted`) and runtime (`trial::Judged`) count every start and filter change
+  from its first step (`in_flight::InFlight`), and the restart waits for none in flight and none
+  ended within 1 s (svcfix-a4). The swap: the staged file is flushed, `swap.json` written
   (synced), the running image gets a second name (`update\vpnte-service.prev.exe`, hard link:
   Windows refuses to replace the entry of a running exe with one name, checked by
   `swap::tests::a_running_exe_is_replaced_through_its_second_name`), the entry is replaced
@@ -360,7 +376,9 @@ block after a drop): the service's own program permit would pass that block (svc
   SCM's recovery starts the new file. Trial: every start of the new version counts first
   (`swap::at_start` in `service::run`, before the runtime is built); a start that runs 30 s ends
   it; the start after three that did not puts the previous exe back the same way and exits for
-  the SCM again; that version is skipped from then on (the spent marker stays as the record). A
+  the SCM again; that version is skipped from then on (the spent marker stays as the record; the
+  first start after the rollback logs it once, `AtStart::After`; a release the probe refused leaves
+  the same record and never that line, svcfix-b4). A
   fresh exe whose install folder holds a wintun.dll its pins refuse (a release that changed
   Wintun, which the feed never brings) gives its trial up at its first start (`swap::give_up`,
   svcupd-a8): its installer brings both. The install verb drops whatever the feed staged or
@@ -374,11 +392,13 @@ block after a drop): the service's own program permit would pass that block (svc
   without `Hello` or the controller slot (like `ForgetMe`), and after `Hello` alike; an older
   service answers `badRequest`. Every answer is immediate (no connection waits on a download).
   `Take` = the app runs the installer of `version` next: the service answers `Working` and checks
-  on a task of its own (one at a time; one for the same release that ended within 60 s stands in,
-  so many asks never mean many feed reads); when the feed's service is exactly `version` and the
+  on the one check task (asks wait as the latest version, so a burst leaves one check behind;
+  within 60 s of a check its result stands in for the same release and the feed it read for any
+  other: many asks never mean many feed reads, svcfix-b2); when the feed's service is exactly `version` and the
   restart ends no one else's session (the ask stands 3 min), it swaps and reports `Restarting`.
   A `version` that does not parse is dropped before anything logs it (svcupd-b3); one at or below
-  the running service (a rollback) does nothing. The app follows `State` until the
+  the running service (a rollback) reads nothing and drops a staged release, also one a check
+  running then stages: nothing newer goes in by itself (svcfix-a2). The app follows `State` until the
   service answers as `version`, so the installer's `request-install` finds it current
   (`per_user::is_current`: the same bytes) and asks nothing.
 
@@ -403,7 +423,10 @@ pub struct Entry<'a> { pub exe: &'a Path, pub version: &'a str, pub bytes: u64, 
 pub fn write(place: &Place, entry: &Entry) -> windows::core::Result<()>;   // 64-bit view
 pub fn remove(place: &Place) -> windows::core::Result<bool>;               // false = none
 pub fn names(place: &Place, version: &str) -> bool;          // the entry lists this DisplayVersion
+pub fn outdated(place: &Place, version: &str, enabled: bool) -> bool; // a start rewrites it (tailsa-a4)
 pub fn system_lang() -> Lang;                                 // GetSystemDefaultUILanguage: ru, else en
+pub fn user_lang() -> Lang;                                   // GetUserDefaultUILanguage: ru, else en
+pub fn text(key: &str, lang: Lang) -> String;                 // this crate's fragment (the verbs have no catalog)
 ```
 `install` lists the service right after its registration (`DisplayName` in the machine's
 language, `DisplayVersion`, `Publisher`, `InstallLocation`, `DisplayIcon` = the exe, `EstimatedSize`
@@ -414,9 +437,12 @@ only. The entry goes with the registration: the uninstall flow's delete step and
 install leaves no entry of its own: it is written only after the registration, which no failure
 path deletes (a failed upgrade keeps the old service and its entry). `uninstall` run from the
 program folder itself (Settings > Apps) leaves its own exe and the folder to the restart queue
-(tombstones, as `remove_self`). Each start (`run`, `install::relist`, before the service log)
-rewrites the entry when it does not name the running version: the service's own update (a swap
-or its rollback) changes the exe under it, and a service an older build installed has none yet;
+(tombstones, as `remove_self`); a file another program keeps open is tried again for 10 s, then
+named (exit 6). Each start (`run`, `install::relist`, before the service log) rewrites the entry
+when it does not name the running version: the service's own update (a swap or its rollback)
+changes the exe under it, and a service an older build installed has none yet; never while the
+service is disabled (`install::registered`, the SCM's start type): the uninstall disables it
+first, so a start that overlaps an uninstall does not write the entry back (tailsa-a4);
 `EstimatedSize` is then the folder's files. The per-user app's HKCU entry is the installer's,
 untouched.
 
@@ -431,6 +457,8 @@ untouched.
 | `service.folder.untrusted` / `service.folder.fileMissing` | — / `file` | `service::FolderFault::msg` (refused starts) |
 | `service.install.{notElevated,imageChanged,failed}`, `service.install.{fileMissing,fileMismatch}` | — / `file` | `install` |
 | `service.install.notRestarted`, `service.uninstall.filtersKept` | — | `install::flow` (exit codes 4 / 3), the last user's `ForgetMe` |
+| `service.uninstall.filesLeft` | `folder` | `install` (exit code 6), `request-uninstall`'s message box |
+| `service.uninstall.{notYet,failed}` | — | `per_user::uninstall_message` (`request-uninstall`, user's language) |
 | `service.entry.displayName` | — | `install::entry` (read from the fragment: the verbs register no catalog) |
 
 ## Not implemented / not run

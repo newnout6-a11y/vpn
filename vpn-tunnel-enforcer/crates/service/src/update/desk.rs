@@ -4,6 +4,7 @@
 //! asker's own session, else waits staged until no session runs (or the service's next start).
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -20,16 +21,20 @@ use vpnte_update::fetch::{FetchError, Fetched};
 use vpnte_update::version::Version;
 
 use super::engines::ServiceEngines;
+use super::in_flight::{InFlight, Quiet};
 use super::source::Source;
-use super::swap::{self, SwapFiles};
+use super::swap::{self, Staged, SwapFiles};
 use super::{OwnSession, UpdateDesk};
 use crate::proto::{ServiceUpdateWire, UpdateAsk, UpdatePhase};
 
 /// The swap waits this long after it answered, so the answer reaches the app before the restart.
 const ANSWER_GRACE: Duration = Duration::from_secs(1);
-/// A `Take` within this time of a check for the same release uses that check (many asks never
-/// mean many feed reads).
+/// A `Take` within this time of a check uses it: the result of a check for the same release, the
+/// feed it read for any other (many asks never mean many feed reads: svcfix-b2).
 const RECENT: Duration = Duration::from_secs(60);
+/// While a check runs, "Always" is read again this often (the status and the held filters wake
+/// it at once): a block that begins mid-check ends its requests (svcfix-a3 / b1).
+const BLOCK_POLL: Duration = Duration::from_secs(1);
 /// How long a `Take` may restart the service: past it, a release staged later waits for idle.
 const ASKED_FOR: Duration = Duration::from_secs(180);
 
@@ -40,6 +45,23 @@ struct Asked {
     version: Version,
     own: OwnSession,
     until: Instant,
+}
+
+/// The last check: when it ended, for which release, whether it went through, and the feed it
+/// read (none: it read none).
+#[derive(Clone)]
+struct Checked {
+    at: Instant,
+    version: Version,
+    ok: bool,
+    feed: Option<Arc<Fetched>>,
+}
+
+/// The asks waiting for the one check task: the latest release asked, and whether the task runs.
+#[derive(Default)]
+struct Queue {
+    next: Option<Version>,
+    running: bool,
 }
 
 /// What the updater keeps across restarts (`service\update.json`, private): the newest feed it
@@ -84,6 +106,8 @@ pub struct UpdatesDeps {
     pub holds: watch::Receiver<bool>,
     /// "Always" is in force: its block stays while no session runs.
     pub always: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// The host's calls in flight (a start before the runtime's `StartBegan`: svcfix-a4).
+    pub in_flight: InFlight,
     /// Whether a staged exe starts on this Windows ([`swap::probe`]; tests: a stand-in).
     pub probe: fn(&Path) -> std::io::Result<()>,
     /// Ends the service for the SCM to start the exe now in place.
@@ -99,9 +123,12 @@ pub struct Updates {
     record: Mutex<Record>,
     /// One check at a time (asks share it).
     job: tokio::sync::Mutex<()>,
-    /// When the last check ended, for which release, and whether it succeeded.
-    checked: Mutex<Option<(Instant, Version, bool)>>,
+    checked: Mutex<Option<Checked>>,
+    queue: Mutex<Queue>,
     asked: Mutex<Option<Asked>>,
+    /// Asks of a release at or below the running service (rollbacks) so far: one that comes
+    /// during a check drops what that check staged (svcfix-a2).
+    backs: AtomicU64,
     /// A session start is in flight (from the runtime's events).
     starting: watch::Sender<bool>,
     /// A new exe was staged: the idle watch looks again.
@@ -122,7 +149,9 @@ impl Updates {
             record: Mutex::new(record),
             job: tokio::sync::Mutex::new(()),
             checked: Mutex::new(None),
+            queue: Mutex::new(Queue::default()),
             asked: Mutex::new(None),
+            backs: AtomicU64::new(0),
             starting: watch::Sender::new(false),
             staged: Notify::new(),
         })
@@ -162,23 +191,23 @@ impl Updates {
     /// session, or a held block after a drop): the service's own requests would pass that block
     /// through its program permit, so it makes none (svcupd-b7).
     fn closed(&self) -> bool {
-        let status = self.deps.status.borrow();
-        let tunnel = status.running && status.capture == Some(CaptureKind::Tun);
-        !tunnel && (*self.deps.holds.borrow() || (self.deps.always)())
+        let held = *self.deps.holds.borrow();
+        blocks(&self.deps.status.borrow(), held, &*self.deps.always)
     }
 
-    /// The staged exe that may go in now, if any.
-    fn ready(&self) -> Option<(PathBuf, Version)> {
+    /// The staged release that may go in now ([`staged_release`]).
+    fn ready(&self) -> Option<Staged> {
         let max_seq = self.record.lock().max_seq;
-        swap::ready(&self.deps.files, self.deps.keys, self.deps.own, max_seq)
+        let d = &self.deps;
+        staged_release(&d.files, d.keys, d.own, max_seq, &d.engines)
     }
 
     /// Waiting when a verified release is staged (the idle watch looks), else Idle after a
     /// check that went through and Failed after one that did not.
     fn settle(&self, ok: bool) {
         match self.ready() {
-            Some((_, version)) => {
-                self.set(UpdatePhase::Waiting, Some(version));
+            Some(staged) => {
+                self.set(UpdatePhase::Waiting, Some(staged.version));
                 self.staged.notify_one();
             }
             None if ok => self.set(UpdatePhase::Idle, None),
@@ -187,67 +216,220 @@ impl Updates {
     }
 }
 
+/// The kill switch blocks this machine's traffic with no tunnel running.
+fn blocks(status: &TunStatus, held: bool, always: &(dyn Fn() -> bool + Send + Sync)) -> bool {
+    let tunnel = status.running && status.capture == Some(CaptureKind::Tun);
+    !tunnel && (held || always())
+}
+
+/// `fetched` lists release `version` as its service.
+fn offers(fetched: &Fetched, version: Version) -> bool {
+    fetched
+        .feed
+        .service
+        .as_ref()
+        .is_some_and(|e| e.version == version)
+}
+
+/// Cancels `cut` once the kill switch blocks with no tunnel; the status and the held filters
+/// wake it at once, "Always" is read again every [`BLOCK_POLL`]. Ends with `cut`.
+async fn cut_when_blocked(
+    (mut status, mut holds, always): (
+        watch::Receiver<TunStatus>,
+        watch::Receiver<bool>,
+        Arc<dyn Fn() -> bool + Send + Sync>,
+    ),
+    cut: CancellationToken,
+) {
+    let mut open = [true; 2];
+    loop {
+        let held = *holds.borrow();
+        if blocks(&status.borrow(), held, &*always) {
+            tracing::info!("the kill switch now blocks with no tunnel: the update check stops");
+            return cut.cancel();
+        }
+        let [on_status, on_holds] = &mut open;
+        tokio::select! {
+            () = cut.cancelled() => return,
+            changed = status.changed(), if *on_status => *on_status = changed.is_ok(),
+            changed = holds.changed(), if *on_holds => *on_holds = changed.is_ok(),
+            () = tokio::time::sleep(BLOCK_POLL) => {}
+        }
+    }
+}
+
+/// The release staged for the service `own` ([`swap::ready`]) while its engines are what Tunnel
+/// mode runs now: judged again at every swap, as the engines' trial may have gone back since it
+/// was staged (svcfix-a1). Such a release is dropped: its exe would refuse the engine files there
+/// are, and nothing here brings it the ones it needs (its installer does).
+pub fn staged_release(
+    files: &SwapFiles,
+    keys: &[PublicKey],
+    own: Version,
+    max_seq: u64,
+    engines: &ServiceEngines,
+) -> Option<Staged> {
+    let staged = swap::ready(files, keys, own, max_seq)?;
+    if engines.ready_for(&staged.feed, staged.version) {
+        return Some(staged);
+    }
+    tracing::warn!(version = %staged.version, "the staged service update no longer fits the engines here: its installer brings it");
+    swap::drop_staged(files);
+    None
+}
+
 impl Updates {
-    /// One check for release `version` (a check for it that ended within [`RECENT`] stands in),
-    /// then the release goes in when it may. `true` = it went through: the feed was read, every
-    /// wanted engine went in and the release was staged or is the installer's to bring.
+    /// The one check task: checks the latest release asked until no ask waits (a burst of asks
+    /// leaves one check behind, never one per ask: svcfix-b2).
+    async fn work(self: Arc<Self>) {
+        loop {
+            let next = {
+                let mut queue = self.queue.lock();
+                let next = queue.next.take();
+                queue.running = next.is_some();
+                next
+            };
+            let Some(version) = next else {
+                return;
+            };
+            self.clone().check(version).await;
+        }
+    }
+
+    /// One check for release `version`, then the release goes in when it may. Within [`RECENT`]
+    /// of the last check its result stands in for the same release, and the feed it read for any
+    /// other. `true` = it went through: the feed was read, every wanted engine went in and the
+    /// release was staged or is the installer's to bring.
     async fn check(self: Arc<Self>, version: Version) -> bool {
         let _job = self.job.lock().await;
         if self.phase() == UpdatePhase::Restarting {
             return true;
         }
-        let last = *self.checked.lock();
+        let backs = self.backs.load(Ordering::SeqCst);
+        let last = self.checked.lock().clone();
+        let last = last.filter(|c| c.at.elapsed() < RECENT);
         let ok = match last {
-            Some((at, asked, ok)) if asked == version && at.elapsed() < RECENT => ok,
-            _ => {
+            Some(c) if c.version == version => c.ok,
+            // The feed just read offers another release: nothing to read again for this one.
+            Some(Checked {
+                feed: Some(feed), ..
+            }) if !offers(&feed, version) => true,
+            last => {
                 self.set(UpdatePhase::Working, None);
-                let ok = self.read_feed(version).await;
-                *self.checked.lock() = Some((Instant::now(), version, ok));
+                let (ok, feed) = self.read_feed(version, last.and_then(|c| c.feed)).await;
+                let at = Instant::now();
+                *self.checked.lock() = Some(Checked {
+                    at,
+                    version,
+                    ok,
+                    feed,
+                });
                 ok
             }
         };
-        // A stand-in settles from what is staged too, so the idle watch hears of it (svcupd-a12).
-        self.settle(ok);
+        if self.backs.load(Ordering::SeqCst) != backs {
+            // The app went back meanwhile: nothing newer goes in by itself (svcfix-a2).
+            swap::drop_staged(&self.deps.files);
+            *self.checked.lock() = None;
+        }
+        // Another ask waits: its check settles (the app reads Working until then).
+        if self.queue.lock().next.is_none() {
+            // A stand-in settles from what is staged too, so the idle watch hears of it (a12).
+            self.settle(ok);
+        }
         self.take_if_asked();
         ok
     }
 
-    /// The feed, then for release `version` its engines and its exe (staged only once the
-    /// engines are in place: a new exe must find engine files its pins accept).
-    async fn read_feed(&self, version: Version) -> bool {
+    /// The feed (the one read within [`RECENT`] when `cached`), then for release `version` its
+    /// engines and its exe. Returns whether it went through and the feed it read.
+    async fn read_feed(
+        &self,
+        version: Version,
+        cached: Option<Arc<Fetched>>,
+    ) -> (bool, Option<Arc<Fetched>>) {
         if self.closed() {
             tracing::info!(
                 "the kill switch blocks with no tunnel: the release installer updates the service"
             );
-            return true;
+            return (true, None);
+        }
+        let cut = self.requests();
+        let _done = cut.clone().drop_guard();
+        let Some(fetched) = self.feed(cached, &cut).await else {
+            return (false, None);
+        };
+        let ok = self.take_release(&fetched, version, &cut).await;
+        (ok, Some(fetched))
+    }
+
+    /// The token of one check's requests: cancelled at the service's stop, and as soon as the
+    /// kill switch blocks with no tunnel (svcfix-a3 / b1: the requests would pass that block
+    /// through the service's own permit).
+    fn requests(&self) -> CancellationToken {
+        let cut = self.deps.stop.child_token();
+        let d = &self.deps;
+        let watch = (d.status.clone(), d.holds.clone(), d.always.clone());
+        tokio::spawn(cut_when_blocked(watch, cut.clone()));
+        cut
+    }
+
+    /// `cached`, else the newest feed read now (accepted: an older one is never taken again);
+    /// `None` when none was taken (logged).
+    async fn feed(
+        &self,
+        cached: Option<Arc<Fetched>>,
+        cut: &CancellationToken,
+    ) -> Option<Arc<Fetched>> {
+        if cached.is_some() {
+            return cached;
         }
         let max_seq = self.record.lock().max_seq;
-        let fetched = match self.deps.source.feed(self.deps.keys, max_seq).await {
-            Ok(fetched) if !fetched.stale => fetched,
+        let read = tokio::select! {
+            () = cut.cancelled() => return None,
+            read = self.deps.source.feed(self.deps.keys, max_seq) => read,
+        };
+        match read {
+            Ok(fetched) if !fetched.stale => {
+                self.accepted(&fetched);
+                Some(Arc::new(fetched))
+            }
             // Never "up to date" from a feed that could not be confirmed (svcupd-a10).
             Ok(_) | Err(FetchError::Older) => {
                 tracing::warn!("only an outdated update feed answered");
-                return false;
+                None
             }
             Err(err) => {
                 tracing::warn!(%err, "update feed not read");
-                return false;
+                None
             }
-        };
-        self.accepted(&fetched);
-        let Some(entry) = self.target(&fetched, version) else {
-            swap::drop_staged(&self.deps.files);
+        }
+    }
+
+    /// Release `version` from the accepted feed: what is staged stays only while the feed still
+    /// lists it (svcfix-b3), then the release's engines and its exe (staged only once the engines
+    /// are in place: a new exe must find engine files its pins accept).
+    async fn take_release(
+        &self,
+        fetched: &Fetched,
+        version: Version,
+        cut: &CancellationToken,
+    ) -> bool {
+        let (files, own) = (&self.deps.files, self.deps.own);
+        let service = fetched.feed.service.as_ref();
+        swap::keep_listed(files, own, service, &fetched.bytes, &fetched.sig);
+        let Some(entry) = self.target(fetched, version) else {
             return true;
         };
-        if !self.engines(&fetched).await {
+        if !self.engines(fetched, cut).await {
             return false;
         }
         if !self.deps.engines.ready_for(&fetched.feed, entry.version) {
             tracing::info!(version = %entry.version, "the release's engines are not in place here: its installer brings it");
-            swap::drop_staged(&self.deps.files);
+            swap::drop_staged(files);
             return true;
         }
-        self.stage(&fetched, entry).await
+        self.stage(fetched, entry, cut).await
     }
 
     fn accepted(&self, fetched: &Fetched) {
@@ -280,7 +462,7 @@ impl Updates {
     }
 
     /// Every engine the feed has for Tunnel mode, each checked into its own version folder.
-    async fn engines(&self, fetched: &Fetched) -> bool {
+    async fn engines(&self, fetched: &Fetched, cut: &CancellationToken) -> bool {
         let mut all = true;
         for entry in self.deps.engines.wanted(&fetched.feed) {
             let name = format!("{}-{}.zip", entry.id, entry.version);
@@ -291,7 +473,7 @@ impl Updates {
                 name: &name,
             };
             let staging = &self.deps.files.staging;
-            let done = match self.deps.source.download(&wanted, staging).await {
+            let done = match self.deps.source.download(&wanted, staging, cut).await {
                 Ok(archive) => {
                     let installed =
                         self.deps
@@ -317,8 +499,13 @@ impl Updates {
     /// `entry`'s exe, downloaded into the staging folder with the signed feed that lists it, once
     /// it starts on this Windows (svcupd-a9); one that does not is never staged again. `false`
     /// when it did not arrive or does not start.
-    async fn stage(&self, fetched: &Fetched, entry: &ServiceEntry) -> bool {
-        if self.ready().is_some_and(|(_, v)| v == entry.version) {
+    async fn stage(
+        &self,
+        fetched: &Fetched,
+        entry: &ServiceEntry,
+        cut: &CancellationToken,
+    ) -> bool {
+        if self.ready().is_some_and(|s| s.version == entry.version) {
             return true;
         }
         let files = &self.deps.files;
@@ -334,7 +521,12 @@ impl Updates {
             name: &name,
         };
         swap::drop_staged(files);
-        let staged = match self.deps.source.download(&wanted, &files.staging).await {
+        let staged = match self
+            .deps
+            .source
+            .download(&wanted, &files.staging, cut)
+            .await
+        {
             Ok(held) => held,
             Err(err) => {
                 tracing::warn!(version = %entry.version, %err, "service update not downloaded");
@@ -370,7 +562,16 @@ impl Updates {
     /// (`own`: the asker's, judged again then). `false` when nothing verified is staged or the
     /// swap failed.
     fn swap_now(self: &Arc<Self>, own: Option<OwnSession>) -> bool {
-        let Some((staged, version)) = self.ready() else {
+        let Some(Staged {
+            exe: staged,
+            version,
+            ..
+        }) = self.ready()
+        else {
+            // Nothing verified is staged, or its engines went back meanwhile (svcfix-a1).
+            if self.phase() == UpdatePhase::Waiting {
+                self.set(UpdatePhase::Idle, None);
+            }
             return false;
         };
         if let Err(err) = swap::swap_in(&self.deps.files, &staged, self.deps.own, version) {
@@ -386,15 +587,33 @@ impl Updates {
 
     /// The restart after a swap: the answers go out first, then it waits while it would end
     /// someone else's session (a start that came in meanwhile keeps this process until that
-    /// session ends: svcupd-a11). The next start of the service runs the new exe in any case.
+    /// session ends: svcupd-a11) or cut a host call: a start the host accepted is one from its
+    /// first step on, long before the runtime says so (svcfix-a4). The next start of the service
+    /// runs the new exe in any case.
     async fn restart_when_free(self: Arc<Self>, own: Option<OwnSession>) {
         tokio::select! {
             () = self.deps.stop.cancelled() => return,
             () = tokio::time::sleep(ANSWER_GRACE) => {}
         }
         let mut changes = self.changes();
-        while !self.free(own.as_ref()) {
-            if !changes.next(&self.deps.stop, &self.staged).await {
+        loop {
+            let quiet = self.deps.in_flight.quiet();
+            let went_on = match quiet {
+                Quiet::Settling(left) => tokio::select! {
+                    () = self.deps.stop.cancelled() => false,
+                    () = tokio::time::sleep(left) => true,
+                },
+                Quiet::Yes if self.free(own.as_ref()) => {
+                    // A task woken before this decision (a start's first step) runs first.
+                    tokio::task::yield_now().await;
+                    if self.deps.in_flight.quiet() == Quiet::Yes && self.free(own.as_ref()) {
+                        break;
+                    }
+                    true
+                }
+                Quiet::Busy | Quiet::Yes => changes.next(&self.deps.stop, &self.staged).await,
+            };
+            if !went_on {
                 return;
             }
         }
@@ -439,16 +658,20 @@ impl Updates {
             status: self.deps.status.clone(),
             holds: self.deps.holds.clone(),
             starting: self.starting.subscribe(),
-            open: [true; 3],
+            calls: self.deps.in_flight.subscribe(),
+            open: [true; 4],
         }
     }
 
     /// The app is about to run the installer of `version`: that release's service is taken from
-    /// the feed first. Answered right away: the check runs on its own task (one at a time; a
-    /// recent one stands in) and the app reads the state.
+    /// the feed first. Answered right away: the check runs on the one check task (a recent one
+    /// stands in) and the app reads the state. An older or equal release is a rollback.
     fn take(self: &Arc<Self>, version: Version, own: OwnSession) {
-        if version <= self.deps.own || self.deps.keys.is_empty() {
+        if self.deps.keys.is_empty() {
             return;
+        }
+        if version <= self.deps.own {
+            return self.back(version);
         }
         let until = Instant::now() + ASKED_FOR;
         *self.asked.lock() = Some(Asked {
@@ -460,7 +683,29 @@ impl Updates {
             return;
         }
         self.set(UpdatePhase::Working, None);
-        tokio::spawn(self.clone().check(version));
+        let start = {
+            let mut queue = self.queue.lock();
+            queue.next = Some(version);
+            !std::mem::replace(&mut queue.running, true)
+        };
+        if start {
+            tokio::spawn(self.clone().work());
+        }
+    }
+
+    /// The app goes back to `version` (its rollback, or the release this service runs): its
+    /// installer brings that service, and nothing newer goes in by itself (svcupd-a7, svcfix-a2:
+    /// a release staged earlier is dropped, also one a check running now stages).
+    fn back(&self, version: Version) {
+        tracing::info!(%version, "the app goes back: no newer service goes in by itself");
+        self.backs.fetch_add(1, Ordering::SeqCst);
+        self.queue.lock().next = None;
+        *self.asked.lock() = None;
+        *self.checked.lock() = None;
+        swap::drop_staged(&self.deps.files);
+        if self.phase() == UpdatePhase::Waiting {
+            self.set(UpdatePhase::Idle, None);
+        }
     }
 
     /// The release the app asked for goes in now when it is staged, the ask still stands and
@@ -470,7 +715,7 @@ impl Updates {
         let Some(asked) = asked.filter(|a| Instant::now() < a.until) else {
             return false;
         };
-        let staged = self.ready().is_some_and(|(_, v)| v == asked.version);
+        let staged = self.ready().is_some_and(|s| s.version == asked.version);
         let restarting = self.phase() == UpdatePhase::Restarting;
         staged && !restarting && self.free(Some(&asked.own)) && self.swap_now(Some(asked.own))
     }
@@ -492,18 +737,20 @@ struct Changes {
     status: watch::Receiver<TunStatus>,
     holds: watch::Receiver<bool>,
     starting: watch::Receiver<bool>,
-    open: [bool; 3],
+    calls: watch::Receiver<usize>,
+    open: [bool; 4],
 }
 
 impl Changes {
     /// `false` once `stop` came; `staged` wakes it too.
     async fn next(&mut self, stop: &CancellationToken, staged: &Notify) -> bool {
-        let [status, holds, starting] = &mut self.open;
+        let [status, holds, starting, calls] = &mut self.open;
         tokio::select! {
             () = stop.cancelled() => return false,
             changed = self.status.changed(), if *status => *status = changed.is_ok(),
             changed = self.holds.changed(), if *holds => *holds = changed.is_ok(),
             changed = self.starting.changed(), if *starting => *starting = changed.is_ok(),
+            changed = self.calls.changed(), if *calls => *calls = changed.is_ok(),
             () = staged.notified() => {}
         }
         true

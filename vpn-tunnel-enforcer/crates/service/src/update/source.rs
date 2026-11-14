@@ -17,15 +17,18 @@ use vpnte_update::policy::FEED_BASES;
 pub trait Source: Send + Sync {
     /// The newest feed that verifies with `keys`, not older than `max_seq`.
     async fn feed(&self, keys: &[PublicKey], max_seq: u64) -> Result<Fetched, FetchError>;
-    /// `wanted` into `dir`, checked against the size and SHA-256 the signed feed gave.
-    async fn download(&self, wanted: &Wanted<'_>, dir: &Path) -> Result<Verified, DownloadError>;
+    /// `wanted` into `dir`, checked against the size and SHA-256 the signed feed gave; ends at
+    /// once with `cancel` (the service's stop, or a kill-switch block that began: svcfix-a3).
+    async fn download(
+        &self,
+        wanted: &Wanted<'_>,
+        dir: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<Verified, DownloadError>;
 }
 
 /// The compiled mirrors, directly.
-pub struct Mirrors {
-    /// The service's stop: a download in flight ends with it.
-    pub cancel: CancellationToken,
-}
+pub struct Mirrors;
 
 #[async_trait]
 impl Source for Mirrors {
@@ -33,10 +36,15 @@ impl Source for Mirrors {
         fetch_feed(&FEED_BASES, &[Way::direct()], keys, max_seq).await
     }
 
-    async fn download(&self, wanted: &Wanted<'_>, dir: &Path) -> Result<Verified, DownloadError> {
+    async fn download(
+        &self,
+        wanted: &Wanted<'_>,
+        dir: &Path,
+        cancel: &CancellationToken,
+    ) -> Result<Verified, DownloadError> {
         // Admin-only, re-created when users could change it: the files staged here are run as
         // SYSTEM later.
         crate::paths::secure_dir(dir)?;
-        download(wanted, &[Way::direct()], dir, None, &self.cancel).await
+        download(wanted, &[Way::direct()], dir, None, cancel).await
     }
 }

@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use vpnte_update::download::{open_held, parse_sha, sha256_of};
-use vpnte_update::feed::{FEED_FILE, PublicKey, SIG_FILE, verify};
+use vpnte_update::feed::{FEED_FILE, Feed, PublicKey, SIG_FILE, ServiceEntry, verify};
 use vpnte_update::version::Version;
 use windows::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -120,6 +120,9 @@ pub enum AtStart {
     Trial(u32),
     /// The previous exe (this version) is back in place: exit for the SCM to start it.
     RolledBack(Version),
+    /// The first start of the previous exe after release `0` failed its trial and was rolled
+    /// back (reported once; a release refused before it ran never gives this: svcfix-b4).
+    After(Version),
 }
 
 /// The first thing at every start of the service `own`: counts the trial of a fresh exe or
@@ -141,12 +144,19 @@ pub fn at_start(files: &SwapFiles, own: Version) -> io::Result<AtStart> {
     }
     // The old exe (power lost before the replace, or rolled back) or one an installer put here.
     // A spent trial's marker stays: it is the record that `to` failed.
-    if !(own == m.from && m.spent()) {
+    let spent = own == m.from && m.spent();
+    if !spent {
         remove(&files.marker());
     }
+    // The failed exe's second name exists only right after a rollback made it.
+    let after = spent && files.failed().exists();
     remove(&files.prev());
     remove(&files.failed());
-    Ok(AtStart::Normal)
+    Ok(if after {
+        AtStart::After(m.to)
+    } else {
+        AtStart::Normal
+    })
 }
 
 /// The trial ended well: the marker and the previous exe go.
@@ -256,21 +266,25 @@ fn remove(path: &Path) {
     }
 }
 
+/// A verified release staged for the swap: its exe, its version and the signed feed it came
+/// from (the swap judges that release's engines by it: svcfix-a1).
+#[derive(Debug, Clone)]
+pub struct Staged {
+    pub exe: PathBuf,
+    pub version: Version,
+    pub feed: Feed,
+}
+
 /// The staged exe that may go in for the service `own`: the signed feed kept next to it
 /// verifies with `keys`, is not older than the newest one accepted (`max_seq`: a release the
 /// owner withdrew stays out, svcupd-a3) and lists a service above `own` that did not fail its
 /// trial here, the file has that entry's size and SHA-256, and neither it nor the folder admits
 /// writes by users (it will run as SYSTEM).
-pub fn ready(
-    files: &SwapFiles,
-    keys: &[PublicKey],
-    own: Version,
-    max_seq: u64,
-) -> Option<(PathBuf, Version)> {
+pub fn ready(files: &SwapFiles, keys: &[PublicKey], own: Version, max_seq: u64) -> Option<Staged> {
     let bytes = std::fs::read(files.staging.join(FEED_FILE)).ok()?;
     let sig = std::fs::read_to_string(files.staging.join(SIG_FILE)).ok()?;
     let feed = verify(&bytes, &sig, keys).ok()?;
-    let entry = feed.service.filter(|_| feed.seq >= max_seq)?;
+    let entry = feed.service.as_ref().filter(|_| feed.seq >= max_seq)?;
     if entry.version <= own || failed_before(files, entry.version) {
         return None;
     }
@@ -282,10 +296,62 @@ pub fn ready(
         tracing::error!(%reason, "staged service update not used");
         return None;
     }
-    let mut file = open_held(&path).ok()?;
-    let size = file.metadata().ok()?.len();
-    let sha = sha256_of(&mut file).ok()?;
-    (size == entry.size && Some(sha) == parse_sha(&entry.sha256)).then_some((path, entry.version))
+    let version = entry.version;
+    holds(&path, entry).then_some(Staged {
+        exe: path,
+        version,
+        feed,
+    })
+}
+
+/// The file at `path` has `entry`'s size and SHA-256.
+fn holds(path: &Path, entry: &ServiceEntry) -> bool {
+    let Ok(mut file) = open_held(path) else {
+        return false;
+    };
+    let size = file.metadata().map(|m| m.len()).ok();
+    let sha = sha256_of(&mut file).ok();
+    size == Some(entry.size) && sha.is_some() && sha == parse_sha(&entry.sha256)
+}
+
+/// What is staged after the feed `bytes` / `sig` (verified, the newest accepted) was read: the
+/// staged exe of `entry` (the feed's service above `own`, not failed here) stays, byte for byte,
+/// with this feed next to it (a staged release is only taken with a feed not older than the
+/// accepted one); every other staged file goes (a withdrawn release: svcupd-a3). A check for
+/// another release no longer drops what the feed still offers (svcfix-b3).
+pub fn keep_listed(
+    files: &SwapFiles,
+    own: Version,
+    entry: Option<&ServiceEntry>,
+    bytes: &[u8],
+    sig: &str,
+) {
+    let listed = entry
+        .filter(|e| e.version > own && !failed_before(files, e.version))
+        .filter(|e| holds(&files.staged(e.version), e));
+    let Some(entry) = listed else {
+        return drop_staged(files);
+    };
+    let keep = files.staged(entry.version);
+    let Ok(staged) = std::fs::read_dir(&files.staging) else {
+        return;
+    };
+    for item in staged.flatten() {
+        let name = item.file_name().to_string_lossy().into_owned();
+        let other = name.starts_with("vpnte-service-") && name.ends_with(".exe");
+        if other && item.path() != keep {
+            remove(&item.path());
+        }
+    }
+    if std::fs::read(files.staging.join(FEED_FILE)).is_ok_and(|kept| kept == bytes) {
+        return;
+    }
+    let kept = std::fs::write(files.staging.join(FEED_FILE), bytes)
+        .and_then(|()| std::fs::write(files.staging.join(SIG_FILE), sig));
+    if let Err(err) = kept {
+        tracing::warn!(%err, "staged service update not re-kept: dropped");
+        drop_staged(files);
+    }
 }
 
 #[cfg(test)]

@@ -132,6 +132,7 @@ impl Updates {
             host: source.as_ref().map(|s| s.host.clone()),
             via: source.map(|s| s.via),
             result,
+            app: Some(policy::app_version()),
         };
         if let Err(err) = self.doc.update(|d| d.last_check = Some(line)) {
             tracing::warn!(%err, "update check result not stored");

@@ -19,6 +19,7 @@ mod firewall;
 pub mod flow;
 pub mod image;
 pub mod pins;
+mod registered;
 
 /// The description Services shows (system text, English like Windows' own entries).
 pub const DESCRIPTION: &str = "Runs the Tunnel mode of VPN Tunnel Enforcer: the virtual adapter, \
@@ -28,6 +29,9 @@ the VPN engines and the kill switch. The app works in proxy mode without it.";
 const SCM_WAIT: Duration = Duration::from_secs(30);
 /// How long the sweep waits for the service process it follows to end.
 const SWEEP_WAIT: Duration = Duration::from_secs(60);
+/// How long an uninstall from the program folder tries a file another program holds open (an
+/// antivirus scan, the stopped service's last moment) before it names what is left.
+const HELD_WAIT: Duration = Duration::from_secs(10);
 
 /// Where the files come from.
 pub struct Source {
@@ -167,9 +171,15 @@ impl flow::Machine for System<'_> {
                 } else if runs_from(&dir) {
                     // Settings > Apps runs the installed exe (`request-uninstall`, then this
                     // verb): its file goes at the next restart, as after the last user's leave.
-                    let left = remove_or_schedule(&dir, &mut schedule);
+                    // A file another program keeps open is tried again a while, then named: the
+                    // registration is gone, so nothing would ever remove it (tailsa-a2).
+                    let left = remove_held_too(&dir, &mut schedule, HELD_WAIT);
                     log_held(&left);
-                    Ok(())
+                    if left.held.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(files_left(&dir))
+                    }
                 } else {
                     retry(|| std::fs::remove_dir_all(&dir).map_err(AppError::internal))
                 }
@@ -242,12 +252,14 @@ fn unlist() {
 
 /// At the service's start: Settings > Apps names the running version. The service's own update
 /// (a swap, or its rollback) changes the exe under the entry, and a service an older build
-/// installed has none yet. Runs before the service log: a failure only leaves the old line.
+/// installed has none yet. Never while an uninstall removes the service (tailsa-a4). Runs before
+/// the service log: a failure only leaves the old line.
 pub fn relist() {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    if !entry::names(&entry::Place::machine(), env!("CARGO_PKG_VERSION")) {
+    let place = entry::Place::machine();
+    if entry::outdated(&place, env!("CARGO_PKG_VERSION"), registered::enabled()) {
         list(&exe, exe.parent().map_or(0, bytes_under));
     }
 }
@@ -395,6 +407,53 @@ fn wait_for_exit(pid: u32, limit: Duration) {
     }
 }
 
+/// [`remove_or_schedule`], then the files it found held are tried again until `limit`; the
+/// folders are queued again after them (Windows deletes a folder only once it is empty).
+fn remove_held_too(dir: &Path, queue: &mut dyn FnMut(&Path), limit: Duration) -> Left {
+    let mut left = remove_or_schedule(dir, queue);
+    if left.held.is_empty() {
+        return left;
+    }
+    let deadline = Instant::now() + limit;
+    while !left.held.is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+        for path in std::mem::take(&mut left.held) {
+            if !remove_one(&path, queue, &mut left) {
+                left.held.push(path);
+            }
+        }
+    }
+    clear_dirs(dir, queue);
+    left
+}
+
+/// The uninstall removed the service, but files another program keeps open stay in `dir`.
+fn files_left(dir: &Path) -> AppError {
+    let folder = dir.display().to_string();
+    AppError::msg(
+        ErrorKind::Internal,
+        Msg::new(flow::FILES_LEFT).arg("folder", folder),
+    )
+}
+
+/// Deletes the empty folders under `dir` and `dir`, deepest first; one still in use goes to
+/// `queue` (again: its turn then comes after the tombstones queued meanwhile).
+fn clear_dirs(dir: &Path, queue: &mut dyn FnMut(&Path)) {
+    let subdirs: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|list| list.flatten().collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir() && !t.is_symlink()))
+        .map(|e| e.path())
+        .collect();
+    for sub in subdirs {
+        clear_dirs(&sub, queue);
+    }
+    if std::fs::remove_dir(dir).is_err() {
+        queue(dir);
+    }
+}
+
 fn log_held(left: &Left) {
     for path in &left.held {
         tracing::warn!(path = %path.display(), "in use: left in place");
@@ -449,20 +508,28 @@ fn sweep_dir(dir: &Path, queue: &mut dyn FnMut(&Path), left: &mut Left) {
             .is_ok_and(|t| t.is_dir() && !t.is_symlink());
         if is_dir {
             sweep_dir(&path, queue, left);
-        } else if std::fs::remove_file(&path).is_err() {
-            let tombstone = tombstone(&path);
-            match std::fs::rename(&path, &tombstone) {
-                Ok(()) => {
-                    queue(&tombstone);
-                    left.renamed.push((path, tombstone));
-                }
-                Err(_) => left.held.push(path),
-            }
+        } else if !remove_one(&path, queue, left) {
+            left.held.push(path);
         }
     }
     if std::fs::remove_dir(dir).is_err() {
         queue(dir);
     }
+}
+
+/// Deletes the file `path`; one in use goes to a tombstone queued in `queue`. `false`: neither
+/// (open in a process without delete sharing).
+fn remove_one(path: &Path, queue: &mut dyn FnMut(&Path), left: &mut Left) -> bool {
+    if std::fs::remove_file(path).is_ok() {
+        return true;
+    }
+    let tombstone = tombstone(path);
+    let renamed = std::fs::rename(path, &tombstone).is_ok();
+    if renamed {
+        queue(&tombstone);
+        left.renamed.push((path.to_owned(), tombstone));
+    }
+    renamed
 }
 
 /// `<name>.<time>.deleted` next to `path`: a name no install writes.
