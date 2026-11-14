@@ -509,20 +509,22 @@ mod cases {
                 ..TunStatus::default()
             });
             let (mut view, mut state) = (dash.state(), tray.state());
+            // Each wait's answer is read and its watch guard dropped in the same statement: a
+            // guard held across the next await blocks the hub's next publish (send_if_modified
+            // takes the write lock) on this current-thread runtime, and nothing ever times out
+            // (CI 14.11.2026: hung 38 min where no other VPN is seen).
             let page = view.wait_for(|v| v.same_exit == same && v.exit.leak == leak);
-            let page = tokio::time::timeout(Duration::from_secs(5), page).await;
+            let page = tokio::time::timeout(Duration::from_secs(5), page)
+                .await
+                .is_ok_and(|seen| seen.is_ok());
             let now = dash.state().borrow().clone();
-            assert!(
-                page.is_ok(),
-                "{proven:?}: {:?} {:?}",
-                now.same_exit,
-                now.exit
-            );
+            assert!(page, "{proven:?}: {:?} {:?}", now.same_exit, now.exit);
             let tray_ok =
                 tokio::time::timeout(Duration::from_secs(5), state.wait_for(|t| t.leak == leak))
-                    .await;
+                    .await
+                    .is_ok_and(|seen| seen.is_ok());
             let now = tray.state().borrow().clone();
-            assert!(tray_ok.is_ok(), "{proven:?}: tray {now:?}");
+            assert!(tray_ok, "{proven:?}: tray {now:?}");
         }
     }
 }
