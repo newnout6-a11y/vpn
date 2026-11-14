@@ -1,0 +1,46 @@
+{
+  "probes": {
+    "liveStages": {
+      "target": {
+        "emptyHost": "Enter the server address",
+        "refused": "{{ip}} is a local or special-purpose address: the check is not run"
+      },
+      "notChecked": {
+        "udpTransport": "Not checked: the protocol runs over UDP",
+        "reality": "Not checked: REALITY front (a direct TLS probe tells nothing and risks a block)",
+        "basicMode": "Not checked: extended check only",
+        "tunnelTransition": "Not checked: the tunnel is connecting or switching",
+        "geoDisabled": "Not checked: geolocation lookups are turned off",
+        "handshakeBudget": "Not checked: the server's TLS handshake budget is used up (freeze protection)"
+      },
+      "dns": {
+        "resolver": {
+          "system": "System resolver (OS/Hosts)",
+          "googleDoh": "Google Public DNS (DoH)",
+          "cloudflareDoh": "Cloudflare DNS (DoH)"
+        },
+        "systemVsDoh": "System DNS ([{{system}}]) does not match public DoH ([{{doh}}]) (possibly split-horizon DNS or a CDN)",
+        "googleVsCloudflare": "Google DoH ([{{google}}]) and Cloudflare DoH ([{{cloudflare}}]) returned different addresses (GeoDNS/Anycast)"
+      },
+      "path": {
+        "noRoute": "The routing table returned no active route",
+        "failed": "Windows route check failed"
+      },
+      "pmtu": {
+        "icmpBlocked": "ICMP echo is blocked by the host or the network; showing the network adapter MTU",
+        "atLeast": "PMTU is at least 1500 bytes (the largest tested payload of {{top}}B got through; the exact limit was not measured)",
+        "confirmed": "Confirmed PMTU of {{pmtu}} bytes (exact limit [{{pmtu}} .. {{rejected}}]B)",
+        "range": "PMTU within [{{pmtu}} .. {{max}}] bytes (at least {{pmtu}} bytes, larger sizes got no answer)",
+        "blackhole": "Suspected PMTU blackhole: large packets are dropped without ICMP PacketTooBig",
+        "interfaceOnly": "Local interface MTU of {{mtu}} bytes (not a confirmed path PMTU)",
+        "undetermined": "Could not determine the PMTU"
+      },
+      "geo": {
+        "rateLimited": "The geolocation service rate limit was hit (429). Try again later.",
+        "unreachable": "Could not connect to the geolocation service.",
+        "cancelled": "Check cancelled",
+        "failed": "Geolocation service error: {{detail}}"
+      }
+    }
+  }
+}

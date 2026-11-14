@@ -1,0 +1,38 @@
+{
+  "winnet": {
+    "wfp": {
+      "exception": {
+        "labelLength": "The exception label must have 1 to 200 characters.",
+        "valueLength": "The exception value must have 1 to 2048 characters.",
+        "invalidIp": "Enter an IP address or a CIDR network; /0 and unspecified addresses are not allowed.",
+        "notExecutable": "Choose an .exe program.",
+        "notLocalPath": "Use a full local path such as C:\\…",
+        "unreadable": "The .exe file is missing or cannot be read.",
+        "duplicate": "An equivalent kill-switch exception already exists.",
+        "notFound": "Kill-switch exception not found.",
+        "tooMany": "No more than {{max}} kill-switch exceptions.",
+        "broad": "A very broad exception: almost all traffic may bypass the VPN through it."
+      },
+      "error": {
+        "bfeUnavailable": "The Base Filtering Engine service (BFE) is unavailable, so protection cannot be applied.",
+        "accessDenied": "Network protection needs the helper service.",
+        "programMissing": "Program not found: {{name}}.",
+        "wfp": "WFP filter error ({{code}}); the previous filters stay in place.",
+        "persist": "The protection settings could not be saved.",
+        "sessionActive": "Disconnect the VPN before repairing the firewall rules: the kill switch cannot be removed safely while the TUN is active.",
+        "levelUnconfirmed": "The protection level change was not confirmed",
+        "exceptionsUnconfirmed": "The exception update and its rollback were not confirmed. Core protection is kept. Check the firewall and try again."
+      },
+      "notice": {
+        "exceptionSkippedTitle": "Kill-switch exception skipped",
+        "exceptionSkipped": "“{{label}}”: file not found.",
+        "unverifiedTitle": "VPNTE: protection not confirmed",
+        "unverified": "Protection is not confirmed; traffic may go out directly."
+      },
+      "status": {
+        "firewallOutboundBlock": "Windows Firewall blocks outgoing connections by default. If the VPN does not connect, allow the VPN engines in the firewall.",
+        "hypervUnfiltered": "Virtual machines and WSL use their own network: the kill switch does not cover them."
+      }
+    }
+  }
+}

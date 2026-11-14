@@ -1,0 +1,25 @@
+{
+  "ui": {
+    "frame": {
+      "webview2Missing": "Не установлен Microsoft Edge WebView2 Runtime — без него окно VPN Tunnel Enforcer не откроется. Установите его со страницы https://developer.microsoft.com/microsoft-edge/webview2/ и запустите приложение снова.",
+      "demo": {
+        "title": "Каркас интерфейса",
+        "fonts": "Шрифты",
+        "palette": "Палитра",
+        "legacyPalette": "Палитра старых экранов",
+        "theme": "Тема",
+        "language": "Язык",
+        "scheme": "Сейчас: {{scheme}}",
+        "sample": "Съешь же ещё этих мягких французских булок, да выпей чаю",
+        "close": "Закрыть"
+      }
+    },
+    "units": {
+      "b": "{{n}} Б",
+      "kb": "{{n}} КБ",
+      "mb": "{{n}} МБ",
+      "gb": "{{n}} ГБ",
+      "tb": "{{n}} ТБ"
+    }
+  }
+}

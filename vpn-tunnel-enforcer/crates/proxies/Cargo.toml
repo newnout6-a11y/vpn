@@ -1,0 +1,37 @@
+[package]
+name = "vpnte-proxies"
+description = "External loopback proxy slots and their local control API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+jiff.workspace = true
+parking_lot.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+vpnte-base.workspace = true
+vpnte-core.workspace = true
+vpnte-engine.workspace = true
+vpnte-profiles.workspace = true
+vpnte-winnet.workspace = true
+windows.workspace = true
+
+[[bin]]
+name = "vpnte_proxy"
+path = "src/bin/vpnte_proxy/main.rs"
+
+[lints]
+workspace = true

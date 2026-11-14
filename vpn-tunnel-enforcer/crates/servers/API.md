@@ -1,0 +1,573 @@
+# vpnte-servers — API for dependent crates
+
+The user's server list: groups (manual keys, one group per subscription URL + device), rows with
+DPAPI-sealed typed profiles, the selection, archive and purge, key-health / country / ping results,
+text and subscription import (fetch, parse, reconcile), the background refresh, and the one-time
+Electron import. Depends on `vpnte-base`, `vpnte-core`, `vpnte-profiles`. The crate has no cargo
+features.
+
+```toml
+vpnte-servers.workspace = true
+```
+
+| module | what |
+| --- | --- |
+| `model` | stored document `ServersDoc` (`profiles.json`), `ServerGroup`, `ServerRow`, outcomes / status, secret-free summaries |
+| `store` | `Servers`: the one owner of the list (read, select, add, archive, groups, probe results), `ServersEvent` |
+| `parse` | pasted text / subscription body -> `ParseReport` (deep links, base64 layers, JSON, Clash, `.conf`, links) |
+| `subscription` | `SubscriptionFetcher` (routes + session route, UA / HWID switch, extra headers, redirects, DoH retry, fallback URL, spare slot, Mihomo providers, relocation), canonical URL, outcome texts |
+| `refresh` | `reconcile`, intervals, `add_from_input`, `refresh_group`, `sweep`, `spawn_scheduler`, `import_legacy_direct` |
+| `legacy` | Electron `server-picker` / `server-groups` / `settings` -> `ServersDoc` + report |
+| `LOCALES` | the crate's locale fragments, `&[(ru_json, en_json)]` |
+
+**Elevation: nothing here needs it.** Files live under the data dir, DPAPI runs as the current user,
+requests go out as the user (direct or through the user's / Happ's local proxy).
+**Blocking vs async:** every `Servers` method that changes the list writes `profiles.json`
+atomically and may call DPAPI; they are quick for normal lists, but run `Servers::open`,
+`legacy::from_legacy` and `Servers::import_legacy` from `spawn_blocking` or at startup. The `refresh`
+methods are async and need a tokio runtime (`spawn_scheduler` spawns onto the current one); they
+parse fetched bodies and pasted text on tokio's blocking pool.
+**Secrets:** keys and subscription URLs live only in `vpnte_core::secret::Secret` (sealed on disk,
+redacted `Debug`); summaries, events, logs and errors never carry them.
+
+## Wiring (app)
+
+```rust
+use std::sync::Arc;
+use vpnte_servers::{legacy, refresh::RefreshCtx, store::Servers, subscription::*};
+
+let servers = Arc::new(Servers::open(&dirs.root));                  // never fails; read-only -> notice()
+let fetcher = Arc::new(SubscriptionFetcher::new(Hwids::current(), settings_store.clone()));
+let ctx = RefreshCtx::new(fetcher.clone(), ops.clone());             // ops: vpnte_core::ops::OperationRegistry
+// once the tunnel and the proxy slots exist (app: api_servers::relays::AppRelays):
+fetcher.set_relays(Arc::new(app_relays));                            // session route + spare slots
+let scheduler = servers.spawn_scheduler(ctx.clone(), shutdown.clone()); // sweep after 10 s, then every 60 s
+let mut events = servers.subscribe();                                // ServersEvent, see below
+// locales: [vpnte_core::LOCALES, vpnte_profiles::LOCALES, vpnte_servers::LOCALES, …].concat()
+
+// One-time Electron import (after vpnte_core::legacy opened the three documents):
+let (doc, report) = legacy::from_legacy(picker.as_ref(), groups.as_ref(), settings.as_ref(), now_ms());
+if servers.import_legacy(doc)? {                                     // false: the list had data already
+    if let Some(direct) = &report.direct {                           // old single-key input, may fetch
+        servers.import_legacy_direct(&ctx, direct, cancel.clone()).await?;
+    }
+}
+```
+
+UI actions map to: paste / «Add» -> `servers.add_from_input(&ctx, text, target_group, device,
+cancel)`; «Refresh» -> `refresh_group(&ctx, &id, Owner::Manual, cancel)`; device change of a
+subscription -> `set_group_device(&id, d)` then `refresh_group`; list -> `servers.view()`; connect ->
+`servers.active()` then `active.row.profile()?` (the typed `Profile` for `emit_singbox`).
+
+## model (`vpnte_servers::model`)
+
+```rust
+pub const ARCHIVE_TTL_MS: UnixMs;                         // 30 days: archived rows are purged after it
+pub const GROUP_NAME_MAX_CHARS: usize;                    // 60
+pub const REFRESH_OVERRIDE_MIN: RangeInclusive<u16>;      // 1..=1440 minutes
+pub struct ProfileId(pub String);  pub struct GroupId(pub String);   // serde transparent, Electron ids kept
+impl ProfileId / GroupId { pub fn random() -> Self; pub fn as_str(&self) -> &str }  // + Display, From<&str>, From<String>
+
+pub struct ServersDoc { pub active_profile_id: Option<ProfileId>, pub groups: Vec<ServerGroup>,
+                        pub profiles: Vec<ServerRow>,
+                        pub device_ids: BTreeMap<GroupId, String> /* reset device IDs (p-subs) */,
+                        pub linked: BTreeSet<GroupId> /* added from a link: refreshes linked (fix-ks) */,
+                        pub fetch_notes: BTreeMap<GroupId, FetchNote> /* p-live-fix */ }
+pub struct FetchNote { pub agent: Option<String> /* UA family that last brought servers: tried first */,
+                       pub said: Option<String> /* the provider's words of the last placeholder answer */,
+                       pub route: Option<String> /* p-speed ops2: label of the plan route that last
+                           brought servers (never a spare slot): tried first */ }
+                        // Document: "profiles.json", v1, holds secrets
+impl ServersDoc {
+    pub fn group(&self, &GroupId) -> Option<&ServerGroup>;     pub fn group_mut(..) -> Option<&mut ServerGroup>;
+    pub fn device_id(&self, &GroupId) -> Option<&str>;         // the group's own HWID (None: this PC's)
+    pub fn fetch_note(&self, &GroupId) -> Option<&FetchNote>;
+    pub fn linked(&self, &GroupId) -> bool;                    // the group came from a link
+    pub fn row(&self, &ProfileId) -> Option<&ServerRow>;       pub fn row_mut(..) -> Option<&mut ServerRow>;
+    pub fn hides(&self, &ServerRow) -> bool;   // row.hidden, or its group hides_settings()
+    pub fn manual_group(&self) -> Option<&ServerGroup>;        // by kind, never by name
+    pub fn subscription_group(&self, url: &Url, device: ClientDevice) -> Option<&ServerGroup>; // group key
+    pub fn ensure_manual_group(&mut self, now: UnixMs) -> GroupId;
+}
+pub struct ServerGroup { pub id: GroupId, pub name: String /* "" = default name */, pub kind: GroupKind,
+    pub imported_at: UnixMs, pub refresh_override_min: Option<u16>, pub fetch: FetchState,
+    pub info: vpnte_profiles::model::SubscriptionMeta /* traffic, expiry, title, links */,
+    pub send_hwid: bool       /* HWID headers + HWID in the Happ UA; a stored group without the
+                                 field reads true (migrated / older groups keep it), new groups false */,
+    pub headers: Option<Secret> /* the user's extra request headers, `Name: value` lines, sealed */,
+    pub fallback: Option<Secret> /* the provider's `fallback-url`, sealed */,
+    pub moved_at: Option<UnixMs> /* the provider moved the URL (note on the page) */,
+    pub controls: vpnte_profiles::text::Controls /* routing, hide-settings, autoconnect: stored only */ }
+pub enum GroupKind { Manual, Subscription { url: Secret /* canonical http(s) URL */, device: ClientDevice } }
+impl ServerGroup {
+    pub fn manual(GroupId, now) -> Self;  pub fn is_manual(&self) -> bool;
+    pub fn subscription(GroupId, &Url, ClientDevice, now) -> Self;   // send_hwid false (set it after)
+    pub fn hides_settings(&self) -> bool; // subscription whose provider sent `hide-settings: 1`
+    pub fn url(&self) -> Option<Url>;     // None: manual, locked secret, or not http(s)://host
+    pub fn device(&self) -> Option<ClientDevice>;
+    pub fn title(&self) -> Msg;           // the name, or servers.group.manualDefault / subscriptionDefault
+    pub fn status(&self, now: UnixMs) -> GroupStatus;   // derived, never stored
+}
+pub struct FetchState { pub last_attempt_at, pub last_success_at: Option<UnixMs>,
+                        pub last_outcome: Option<FetchOutcome>, pub last_count: Option<u32> }
+pub enum FetchOutcome { Ok { partial: bool }, EmptyList, HwidRequired, DeviceLimit, Placeholder,
+                        Unparseable(BodyKind), Http(u16), Network(NetFail), Timeout }
+                        // wire: "hwid-required", "device-limit", "placeholder" (p-live-fix)
+pub enum BodyKind { Html, Json, Base64, Uris, Encrypted /* happ://crypt…, age */, Other }
+pub enum NetFail { Dns, Connect, Tls, Proxy, Reset }
+// p-live-fix: provider placeholders («Приложение не поддерживается» at 0.0.0.0:1) are never servers.
+pub fn is_placeholder(host: &str, port: u16) -> bool; // 0.0.0.0 / :: / loopback / empty, or port 0-1;
+pub fn is_placeholder_profile(&Profile) -> bool;   // the name never decides (T0a: «NL | UDP not supported»
+                                                   // is a server); placeholders' names are only their words
+pub fn provider_words<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<String>; // 3 names, 160 chars
+impl ServerRow { pub fn is_placeholder(&self) -> bool }   // feed rows only (a manual 127.0.0.1 key is a key)
+pub enum GroupStatus { Unknown, Active, Expired, Unreachable, Failed }
+// Unknown: manual / never fetched; Expired: plan date passed, empty list, HTTP 404/410;
+// Failed: other HTTP, unusable body, a refused device (HWID required / device limit);
+// Unreachable: network or timeout.
+pub fn clean_group_name(name: &str) -> String;            // trim, collapse whitespace, <= 60 chars
+
+pub enum Origin { Feed, Manual }        // only Feed rows are reconciled; keys pasted into a group are Manual
+pub enum ArchiveReason { Provider, User }   pub struct Archived { pub at: UnixMs, pub reason: ArchiveReason }
+pub enum CountrySource { ExitIp, HealthTrace, EntryIp, Legacy }
+pub struct VerifiedCountry { pub iso2: Iso2, pub at: UnixMs, pub ip: Option<IpAddr>, pub source: CountrySource }
+impl VerifiedCountry { pub fn supersedes(&self, old: &VerifiedCountry) -> bool }  // exit/trace > entry > legacy, then newer
+pub struct HealthRecord { pub online: bool, pub at: UnixMs, pub rtt_ms: Option<u32>,
+                          pub reason: Option<HealthReason>, pub egress_ip: Option<IpAddr> }
+pub enum HealthReason { NoOutbound, ConfigFailed, TlsFailed, AuthFailed, Timeout, HandshakeFailed,
+    Hy2ConfigFailed, Hy2AuthFailed, Hy2UdpBlocked, Hy2TlsFailed, Hy2HandshakeFailed,
+    EngineSetting /* not a key fault: the engine setting does not run the key */,
+    ConnectionRefused /* the key's port reset the connect (RU audit item 6) */ }
+// the probes' classifier verdict (vpnte_probes::discipline::{Verdict, Reaction}, same wire names);
+// a name this version does not know reads as Unknown instead of failing the whole list
+pub enum ServerVerdict { Healthy, Frozen, Stalled, HandshakeFailed, KeyRejected, IpBanned, UdpBlocked,
+    Offline, Deferred, NotVerified, Refused, Unknown }         // kebab-case
+pub enum ServerReaction { None, SwitchServer, TryAnotherFingerprint, PreferTcpTransport, RetryLater, Unknown }
+pub struct VerdictRecord { pub verdict: ServerVerdict, pub reaction: ServerReaction, pub at: UnixMs }  // camelCase
+pub struct ServerRow { pub id: ProfileId, pub group_id: GroupId, pub origin: Origin,
+    pub name: String, pub protocol: String, pub server: String, pub port: u16,   // plain copies
+    pub device: ClientDevice, pub engine: EnginePref /* own engine; Auto (omitted) = the setting */,
+    pub profile: Secret /* the typed Profile as JSON */, pub imported_at: UnixMs,
+    pub last_seen_at, pub missing_since: Option<UnixMs>, pub archived: Option<Archived>,
+    pub country: Option<VerifiedCountry>, pub health: Option<HealthRecord>,
+    pub verdict: Option<VerdictRecord> /* beside health: may come from another check, compare `at` */,
+    pub hidden: bool /* the provider's hide-settings, carried out of its group (see ServersDoc::hides) */,
+    pub whitelist: Option<Whitelist> /* p-net-aware: the user's mark and learned evidence */,
+    pub tls_tricks: Option<RowTricks> /* item 18: the user's TLS tricks; absent = the key's own */ }
+pub enum RowTricks { Default, Set(TlsTricks) }   // serde "default" | {"set": {"mode": ..}}
+impl RowTricks { pub fn apply(self, &mut Profile) }  // replaces Tls::tricks and the pasted trick keys
+// A row field, not part of the profile: reconcile replaces the profile and keeps the row, so the
+// choice survives refreshes. New rows of a subscription take its `Controls::tls_tricks`
+// (`fragmentation-*` headers) once: the first import's rows and keys new in a later refresh.
+pub const WHITELIST_NETWORKS_MAX: usize;                  // 4 networks per server, newest first
+pub struct Whitelist { pub marked: bool, pub worked: Vec<WorkedUnder> }   // camelCase, empty parts omitted
+pub struct WorkedUnder { pub network: Option<String> /* one-way tag */, pub endpoint: String /* host:port */,
+                         pub at: UnixMs }
+impl Whitelist { pub fn is_empty(&self) -> bool; pub fn record(&mut self, network, endpoint, at); }
+// diag-a8: a name a newer build wrote into a stored enum field reads as a safe fallback
+// (model::lenient) instead of failing the list: health reason / fetch outcome / autoconnect pick
+// -> None, origin -> Manual, archive reason -> User, country source -> Legacy, device / engine ->
+// default. A new group kind changes the shape and bumps ServersDoc::VERSION instead.
+impl ServerRow {
+    pub fn new(&Profile, GroupId, Origin, ClientDevice, now) -> AppResult<Self>;
+    pub fn profile(&self) -> AppResult<Profile>;    // Conflict servers.locked (other PC / account), Internal servers.unreadable
+    pub fn run_profile(&self) -> AppResult<Profile>; // profile() with tls_tricks applied: every path that
+                                                     // runs the key (tunnel, service, proxies, probes)
+    pub fn set_profile(&mut self, &Profile) -> AppResult<()>;   // also refreshes the plain copies
+    pub fn identity(&self) -> Option<[u8; 16]>;  pub fn is_locked(&self) -> bool;
+    pub fn archived_for(&self, ArchiveReason) -> bool;
+    pub fn claimed_country(&self) -> Option<Iso2>;   // from the name (derived)
+    pub fn display_country(&self) -> Option<Iso2>;   // verified, else claimed
+    pub fn purge_at(&self) -> Option<UnixMs>;
+    pub fn endpoint(&self) -> String;                // `host:port`, host lower case
+    pub fn worked_under_whitelist(&self) -> impl Iterator<Item = &WorkedUnder>;  // at the current endpoint
+    pub fn whitelist_ready(&self) -> bool;           // the mark, or evidence that still applies
+}
+// Secret-free view types (what lists render):
+pub struct Ping { pub rtt_ms: Option<u32> /* None: no answer */, pub at: UnixMs }   // memory only
+pub struct ServerSummary { id, group_id, origin, name, protocol, server, port, device, engine,
+    country: Option<Iso2>, country_verified: bool, missing_since, archived, purge_at, health,
+    ping: Option<Ping>, locked: bool, selected: bool }          // all pub
+pub struct GroupSummary { id, name, title: Msg, manual: bool, device: Option<ClientDevice>,
+    host: Option<String> /* never the URL */, url_locked: bool, status: GroupStatus, imported_at,
+    fetch: FetchState, info: SubscriptionMeta, refresh_override_min, servers: usize, archived: usize,
+    send_hwid: bool, header_names: Vec<String> /* never values */, moved_at: Option<UnixMs>,
+    controls: Controls, own_hwid: Option<String> /* the group's reset ID; None = this PC's */,
+    said: Option<String> /* the provider's words of the last placeholder answer (FetchNote) */ }
+pub struct ServersView { pub groups: Vec<GroupSummary>, pub servers: Vec<ServerSummary>,
+    pub active: Option<ProfileId>, pub fallback: bool, pub notice: Option<Msg> }
+impl ServerSummary { pub fn of(&ServerRow, Option<Ping>, selected: bool) -> Self }
+impl GroupSummary { pub fn of(&ServerGroup, rows: &[ServerRow], now: UnixMs) -> Self }
+```
+Stored serde shapes (camelCase, kebab-case enums, `{"ok":{"partial":true}}`, `{"http":404}`) are
+the on-disk format: change them only additively.
+
+## store (`vpnte_servers::store`)
+
+```rust
+pub struct Servers;                                         // Send + Sync, share in Arc
+impl Servers {
+    pub fn open(root: &Path) -> Self;                       // <root>\profiles.json; purges archive > 30 d if writable
+    pub fn subscribe(&self) -> broadcast::Receiver<ServersEvent>;
+    pub fn read<R>(&self, f: impl FnOnce(&ServersDoc) -> R) -> R;   // no lock held after it returns
+    pub fn mode(&self) -> vpnte_core::store::Mode;  pub fn notice(&self) -> Option<Msg>;  // read-only / set aside
+    pub fn set_aside(&self) -> AppResult<()>;               // maintenance: move a broken file aside, start empty
+    // reading and selection
+    pub fn view(&self) -> ServersView;
+    pub fn get(&self, &ProfileId) -> Option<ServerRow>;
+    pub fn active(&self) -> Option<Active>;                 // selection unless user-removed, else first usable row
+    pub fn select(&self, &ProfileId, SelectBy) -> AppResult<ServerRow>;   // bumps geo_generation
+    pub fn geo_generation(&self) -> u64;
+    pub fn find_subscription(&self, &Url, ClientDevice) -> Option<GroupId>;
+    pub fn all_hosts(&self) -> Vec<String>;                 // lower case, de-duplicated (traffic-history filter)
+    // adding
+    pub fn add(&self, Vec<Profile>, AddTarget) -> AppResult<AddReport>;
+    pub fn import_legacy(&self, ServersDoc) -> AppResult<bool>;          // adopts only into an empty list
+    // archive, groups, devices
+    pub fn remove(&self, &ProfileId) -> AppResult<()>;      // soft delete: archived{user}, selection cleared
+    pub fn restore(&self, &ProfileId) -> AppResult<()>;
+    pub fn purge(&self, &ProfileId) -> AppResult<()>;       // delete now
+    pub fn purge_expired(&self, now: UnixMs) -> AppResult<usize>;
+    pub fn rename_group(&self, &GroupId, &str) -> AppResult<()>;          // empty name: no change
+    pub fn delete_group(&self, &GroupId, delete_servers: bool) -> AppResult<()>;  // false: rows -> manual group
+                                                    // (a hiding group's rows keep `hidden`)
+                                        // (a key it already holds is not doubled: that copy goes, a selection follows)
+    pub fn set_refresh_override(&self, &GroupId, Option<u16>) -> AppResult<()>;   // minutes 1..=1440 / None
+    pub fn set_group_device(&self, &GroupId, ClientDevice) -> AppResult<()>;      // feed rows follow; refresh next
+    pub fn set_profile_device(&self, &ProfileId, ClientDevice) -> AppResult<()>;  // manual rows only
+    pub fn set_profile_engine(&self, &ProfileId, EnginePref) -> AppResult<()>;   // any row; kept by refreshes
+    pub fn set_tls_tricks(&self, &ProfileId, Option<RowTricks>) -> AppResult<()>;  // any row; kept by refreshes
+    // probe results
+    pub fn record_health(&self, Vec<HealthUpdate>) -> AppResult<usize>;  // skips rows deleted / re-keyed meanwhile
+    pub fn record_verdicts(&self, Vec<VerdictUpdate>) -> AppResult<usize>;  // same guards; an older verdict never wins
+    pub fn verdicts(&self) -> HashMap<ProfileId, VerdictRecord>;         // rows that have one (page, automation)
+    pub fn record_country(&self, &ProfileId, VerifiedCountry, expected_generation: u64) -> AppResult<bool>;
+    pub fn record_ping(&self, &ProfileId, rtt_ms: Option<u32>);          // memory only
+    // whitelist evidence (p-net-aware)
+    pub fn record_whitelist(&self, &ProfileId, network: Option<String>, at: UnixMs) -> AppResult<bool>;
+                                     // >= 64 KiB at the current endpoint while `network` (a one-way tag)
+                                     // was in whitelist mode; user-removed / gone rows: false
+    pub fn set_whitelist_mark(&self, &ProfileId, on: bool) -> AppResult<()>;  // the user's mark; off
+                                     // also forgets the learned evidence (the badge goes)
+    // a subscription's request settings and the provider's hide-settings guard
+    pub fn set_group_send_hwid(&self, &GroupId, bool) -> AppResult<()>;  // next refresh sends accordingly
+    pub fn set_own_device_id(&self, &GroupId, own: bool) -> AppResult<()>; // own: fresh random HWID
+                                     // (16 hex, Remnawave v3 rule); false: back to this PC's ID
+    pub fn set_group_headers(&self, &GroupId, lines: &str) -> AppResult<Vec<String>>; // blank = none; names
+    pub fn shareable_profile(&self, &ProfileId) -> AppResult<Profile>;   // every key export (copy, save,
+                                                                        // QR): refused when hidden
+    pub fn hidden_rows(&self) -> HashSet<ProfileId>;                     // ServersDoc::hides: bulk exports skip them
+}
+pub fn hidden_refused() -> AppError;      // Validation servers.hidden.refused
+pub enum SelectBy { User, Automation }   // user may pick provider-archived rows, automation no archived row
+pub struct Active { pub row: ServerRow, pub fallback: bool /* not the user's selection: say so */ }
+pub enum AddTarget { Keys { group: Option<GroupId> /* None: manual group */, device: ClientDevice },
+                     Subscription(Box<NewSubscription>) }
+pub struct NewSubscription { pub url: Url /* canonical; the moved address when moved_at */,
+    pub device: ClientDevice, pub info: SubscriptionMeta, pub partial: bool, pub send_hwid: bool,
+    pub headers: Option<String> /* stored_headers form */, pub controls: Controls,
+    pub fallback: Option<Url>, pub moved_at: Option<UnixMs> }
+pub struct AddReport { pub group: GroupId, pub added: Vec<ProfileId>, pub restored: Vec<ProfileId>,
+                       pub duplicates: usize, pub selected: Option<ProfileId> /* set when nothing was selected */ }
+pub struct HealthUpdate { pub id: ProfileId, pub identity: [u8; 16] /* row.identity() at probe start */,
+                          pub record: HealthRecord, pub country: Option<VerifiedCountry> }
+pub struct VerdictUpdate { pub id: ProfileId, pub identity: [u8; 16], pub record: VerdictRecord }
+pub fn subscription_name(url: &Url, info: &SubscriptionMeta) -> String;   // title > web-page host > URL host > ""
+```
+Every change is applied under the store's writer lock and written through before listeners hear
+of it; an `Err` from inside a change rolls it back completely. Duplicates are detected by
+`Profile::identity()` within the target group only; re-adding a removed key restores its row.
+Country lookups: read `geo_generation()` before the lookup and pass it back to `record_country`
+(a selection made meanwhile discards the result).
+
+### Events (`Servers::subscribe`)
+```rust
+pub enum ServersEvent {
+    Changed,                            // groups or rows changed: re-read view()
+    ActiveChanged(Option<ProfileId>),   // the stored selection changed (None: cleared -> active() falls back)
+    Ping(ProfileId),                    // a ping was recorded (memory only)
+    RefreshStarted(GroupId),            // a fetch of this group began (show a spinner)
+    RefreshFinished(GroupId),           // ...ended, success or not: re-read the group's fetch / status
+}
+```
+Events carry ids only; on `RecvError::Lagged` re-read `view()`. Nothing else pushes.
+
+## parse (`vpnte_servers::parse`): pure, synchronous
+
+```rust
+pub const MAX_PROFILES: usize;   // 5000 per text: the cut leaves a skipped entry (never "complete")
+pub const MAX_SKIPPED: usize;    // 5000 listed, further problems summed into one entry
+pub fn parse_text(input: &str) -> Result<ParseReport, TooLarge>;   // paste, <= 1 MiB; never fetches
+pub fn parse_body(raw: &[u8]) -> Result<ParseReport, TooLarge>;    // subscription body, <= 16 MiB (gzip/zlib/brotli/UTF-16)
+pub fn too_large(limit: usize) -> AppError;                         // Validation servers.parse.tooLarge {mib}
+pub fn no_profiles(report: &ParseReport) -> AppError;               // lone skip -> its reason, else allSkipped / nothingFound
+```
+`ParseReport { profiles, skipped: Vec<Skipped { excerpt /* redacted */, reason }>, meta }` comes from
+`vpnte_profiles::model`; show a skip reason with `vpnte_profiles::caps::skip_msg(&reason)`. A deep
+link that carries a subscription URL is one skipped entry here: route user input through
+`Servers::add_from_input`, which fetches.
+
+## subscription (`vpnte_servers::subscription`)
+
+```rust
+pub const REQUEST_TIMEOUT: Duration;   // 25 s per request (connect <= 10 s)
+pub const MAX_REQUESTS: usize;         // 6 = first request + 5 redirects
+pub const DOH_MAX_IPS: usize;          // 3 pinned addresses for the DoH retry
+pub const FALLBACK_AFTER: Duration;    // 9 s (Happ): the fallback URL joins a silent URL
+pub const MAX_HEADERS: usize;          // 16 extra request headers per subscription
+pub struct Hwids;                      // Clone, Eq; Debug prints "Hwids(..)"
+impl Hwids {
+    pub fn current() -> Self;          // env VPNTE_SUBSCRIPTION_HWID, else the Electron app's hash
+    pub fn of(id: &MachineIdentity, fixed: Option<String>) -> Self;
+    pub fn get(&self, device: ClientDevice) -> &str;
+}
+pub struct RoutePlan { pub routes: Vec<vpnte_core::net::Route>, pub doh: bool,
+                       pub relay: bool /* only "auto": session route + spare slot; never in
+                                          "direct only" or "local proxy only" (subs-b5) */ }
+impl RoutePlan { pub fn with_session(self, Option<Route>) -> Self   // right after direct, never twice
+    pub fn preferring(self, first: Option<&str>) -> Self }   // p-speed ops2: that label first, rest in order
+pub fn route_plan(settings: &Settings) -> RoutePlan;   // auto: direct, user proxy, socks5h 10808, http 10809
+pub trait Relays: Send + Sync {                        // the app lends these (it owns tunnel + slots)
+    fn session_route(&self) -> Option<Route>;          // proxy capture's mixed inbound; None in TUN / idle
+    fn spare_route(&self, cancel: CancellationToken) -> SpareFuture<'_>;  // slot on a healthy server
+}
+pub struct Spare;                                      // Spare::new(route, release); drop = release once
+pub struct FetchRequest { pub url: Url, pub device: ClientDevice, pub send_hwid: bool,
+    pub hwid: Option<String> /* the group's own ID; None = this PC's */,
+    pub headers: Vec<(String, String)>, pub fallback: Option<Url>,
+    pub from_link: bool /* came from outside: never into the LAN (phones-a11) */,
+    pub prefer_agent: Option<String> /* UA family tried first (FetchNote::agent) */,
+    pub prefer_route: Option<String> /* route label tried first (FetchNote::route) */ }  // Debug: host only
+impl FetchRequest { pub fn new(url: Url, device: ClientDevice) -> Self }  // no HWID / headers / fallback, typed
+pub struct Fetched { pub report: ParseReport, pub controls: Controls, pub moved_to: Option<Url>,
+    pub fallback: Option<Url>, pub via_fallback: bool, pub providers: Vec<ProviderFetch>,
+    pub agent: String /* the UA family that brought the servers */,
+    pub route: Option<String> /* the plan route's label (None: DoH-pinned retry or a spare) */ } // Debug hides URLs
+impl Fetched { pub fn complete(&self) -> bool }        // only duplicates skipped, every provider answered
+pub struct ProviderFetch { pub name: String, pub servers: usize, pub failed: Option<ProviderFailure> }
+pub enum ProviderFailure { Fetch(FetchOutcome), Refused /* not asked: the redirect rules refused its URL */ }
+pub struct SubscriptionFetcher;                        // share in Arc
+impl SubscriptionFetcher {
+    pub fn new(hwids: Hwids, settings: Arc<Store<Settings>>) -> Self;   // routes re-read at every fetch
+    pub fn with_plan(hwids: Hwids, plan: RoutePlan) -> Self;           // fixed routes (probes, tests)
+    pub fn set_relays(&self, relays: Arc<dyn Relays>);                 // once; later calls are ignored
+    pub fn plan(&self) -> RoutePlan;                                   // with the session route
+    pub fn hwids(&self) -> &Hwids;                                     // this PC's IDs (shown on the page)
+    pub async fn fetch_request(&self, req: &FetchRequest, cancel: &CancellationToken)
+        -> Result<Fetched, FetchError>;
+    pub async fn fetch(&self, url: &Url, device: ClientDevice, cancel: &CancellationToken)
+        -> Result<ParseReport, FetchError>;   // = fetch_request of FetchRequest::new (a new group)
+}
+pub enum FetchError { Failed(FetchOutcome), Said(FetchOutcome, String) /* placeholders: their words */,
+                      InvalidUrl, LocalTarget, Cancelled }   // Clone (no longer Copy); From<..> for AppError
+impl FetchError { pub fn for_group(self, send_hwid: bool) -> AppError; // EmptyList without HWID -> hint
+                  pub fn outcome(&self) -> Option<FetchOutcome>;     // Failed / Said
+                  pub fn said(&self) -> Option<&str> }
+// Placeholders are dropped from every answer; an answer of placeholders only is a refusal: the
+// rotation goes on (Remnawave's x-hwid-* headers first: HwidRequired / DeviceLimit; else
+// Placeholder); a refresh keeps the rows and stores the words; a stored placeholder is archived at
+// open (Servers::open), refused by select, skipped by active() and leaves the list (row removed,
+// a selection on it moves to the group's first server) at the group's first successful refresh
+// (p-live2). `x-hwid-limit` alone: HwidRequired when no HWID was sent, DeviceLimit with one (T0b).
+pub fn parse_headers(lines: &str) -> AppResult<Vec<(String, String)>>; // servers.headers.* errors
+pub fn stored_headers(&[(String, String)]) -> Option<String>;  pub fn header_names(stored: &str) -> Vec<String>;
+pub fn outcome_msg(outcome: FetchOutcome) -> Msg;     // group status line (servers.fetch.*)
+pub fn is_complete(report: &ParseReport) -> bool;      // only Duplicate skips: absence is evidence
+pub fn canonical_source(input: &str) -> Option<Url>;   // URL / happ:// / mantaray:// -> http(s) URL, no fragment
+pub fn normalize_redirect(location: &str, base: &Url) -> Option<String>;
+pub fn classify_body(body: &str) -> FetchOutcome;      // EmptyList | Unparseable(kind)
+```
+Plan of one URL: each route in turn (direct, the session's route, the user's proxy, Happ's
+proxies; a transport failure moves to the next route); on a route that answers, every User-Agent
+of the device with the HWID headers, then without (`send_hwid` off: only without, and the Happ
+agent without its HWID segment); the user's headers go last and win (their `User-Agent` replaces
+the rotation); every request sends `Cache-Control: no-store`; 429, or 404/410 to every identified
+request, stops; so does (p-speed ops1) a route whose whole agent walk got the panel's own verdict
+(its placeholders, or an empty / encrypted list under its own headers such as
+`subscription-userinfo`): no other route, DoH retry or spare slot asks it again; then one
+DoH-pinned direct retry for domain hosts (not in local-proxy mode).
+`fetch_request`: the URL; the fallback URL starts when it fails (any failure, 300-599 included) or
+after 9 s, then the first success wins; when both failed and the plan allows it, one slot is
+borrowed from the relays for one more try of the URL, then the fallback (handed back afterwards),
+except a URL whose plan stopped on purpose (429, gone): it is not asked again from another
+address, and nothing left to try = no slot; then the Mihomo `type: http` providers of a Clash
+answer (at most 16, the answering route first, the same limits; fetched 3 at a time and one per
+host, merged in their order, p-speed ops7; a provider URL a redirect could
+not reach is `Refused`; a cut at 5000 keys marks the answer partial) are merged; a failed provider
+makes the answer incomplete. Private request data (HWID headers, the Happ agent with the HWID,
+the user's headers) goes only to the URL's and the fallback URL's hosts: a provider on another
+host and a redirect hop to another host get the plain agent without them. Relocation:
+`new-url` / `moved-permanently-to`, else `new-domain` on the URL, else a followed leading run of
+301 / 308 of the URL itself becomes `moved_to`, only from an HTTPS answer of the URL itself on
+the user's routes (not the fallback's, not through a spare slot); `fallback-url` becomes
+`fallback` from an HTTPS answer not through a spare slot; untrusted hints are ignored (logged).
+Both pass the redirect rules (no `https -> http`, a public subscription never points into a
+private network; names resolved by the system only when the answer came direct) and never equal
+the URL. Redirects are followed by hand: `https -> http` and public -> private hops are refused.
+Failure = strongest evidence: empty list > unusable body > HTTP 4xx > other HTTP > network > timeout.
+Logs carry host, route label and agent family only (never path, query, HWID or headers).
+Device refusals (Remnawave's open HWID scheme, p-subs): an answer without servers whose headers
+carry `x-hwid-max-devices-reached` / `x-hwid-limit` is `DeviceLimit`; `x-hwid-not-supported`, a
+404 with `x-hwid-active` to a request without the HWID, or a 403 whose body says "Device
+fingerprint required" is `HwidRequired`. Both stop the plan (no other agent, route or spare slot;
+an anonymous request's "send the HWID" is ignored when the plan sends it) and rank above every
+other failure. A `from_link` request (phones-a11) is linked as a whole: its URL, its fallback and
+its Mihomo providers. A non-public IP literal or `localhost` is refused with `LocalTarget` on
+every route; on the direct route a name is resolved first and any non-public address skips the
+direct request (nothing is sent; a fake-ip resolver of another client's TUN answers so for
+every name), so the proxy routes and the DoH retry still run, and `LocalTarget` is answered
+only when nothing else was tried (fix-ks); otherwise the request is pinned to the checked
+addresses (an unresolvable name skips the direct route). Every redirect hop of a linked direct
+request to a name is resolved once, refused on an empty or non-public answer, and requested
+through a client pinned to that answer. Proxy routes resolve on their own (no local lookup
+behind a proxy); the DoH retry takes public addresses only.
+
+## refresh (`vpnte_servers::refresh`)
+
+```rust
+pub const DEFAULT_INTERVAL: Duration;                    // 30 min
+pub const PROVIDER_INTERVAL: (Duration, Duration);       // 15 min ..= 24 h (provider value in hours)
+pub const OVERRIDE_INTERVAL: (Duration, Duration);       // 1 min ..= 24 h (user override in minutes)
+pub const FIRST_SWEEP_DELAY: Duration;  pub const SWEEP_PERIOD: Duration;   // 10 s / 60 s
+pub const SWEEP_WIDTH: usize;   // p-speed ops7: 3 due groups at once, one per host at a time
+pub const MISSING_GRACE_MS: UnixMs;                      // 15 min missing before a provider archive
+pub fn refresh_interval(group: &ServerGroup) -> Duration;
+pub fn is_due(group: &ServerGroup, now: UnixMs) -> bool;
+pub fn reconcile(group: &ServerGroup, rows: &mut Vec<ServerRow>, fresh: Vec<Profile>, complete: bool,
+                 now: UnixMs) -> AppResult<RefreshReport>;   // pure; never touches the selection
+pub struct RefreshReport { pub added: Vec<ProfileId>, pub updated: usize, pub restored: usize,
+                           pub archived: usize, pub pending_absent: usize, pub partial: bool }
+#[derive(Clone)] pub struct RefreshCtx { pub fetcher: Arc<SubscriptionFetcher>, pub ops: OperationRegistry,
+                                         pub deadline: Duration /* 120 s */ }
+impl RefreshCtx { pub fn new(fetcher: Arc<SubscriptionFetcher>, ops: OperationRegistry) -> Self }
+pub enum AddOutcome { Added { report: AddReport, skipped: Vec<Skipped>,
+                              providers: Vec<ProviderFetch> /* Mihomo providers, import report */ },
+                      Refreshed { group: GroupId, report: RefreshReport } }
+pub struct AddOptions { pub into: Option<GroupId>, pub device: ClientDevice,
+                        pub send_hwid: bool, pub headers: Vec<(String, String)> /* checked */,
+                        pub from_link: bool /* a handed-over link or a QR code */ }
+impl AddOptions { pub fn new(into: Option<GroupId>, device: ClientDevice) -> Self }  // HWID off, typed
+pub struct SweepReport { pub refreshed: usize, pub failed: usize }
+impl Servers {
+    pub async fn add_from_input(self: &Arc<Self>, ctx: &RefreshCtx, input: &str, into: Option<GroupId>,
+                                device: ClientDevice, cancel: CancellationToken) -> AppResult<AddOutcome>;
+    pub async fn add_from_input_with(self: &Arc<Self>, ctx: &RefreshCtx, input: &str,
+                                     options: AddOptions, cancel: CancellationToken) -> AppResult<AddOutcome>;
+    pub async fn refresh_group(self: &Arc<Self>, ctx: &RefreshCtx, id: &GroupId, owner: Owner,
+                               cancel: CancellationToken) -> AppResult<RefreshReport>;
+    pub async fn import_legacy_direct(self: &Arc<Self>, ctx: &RefreshCtx, direct: &LegacyDirect,
+                                      cancel: CancellationToken) -> AppResult<Option<AddOutcome>>;
+    pub async fn sweep(self: &Arc<Self>, ctx: &RefreshCtx, cancel: &CancellationToken) -> SweepReport;
+    pub fn spawn_scheduler(self: &Arc<Self>, ctx: RefreshCtx, shutdown: CancellationToken) -> JoinHandle<()>;
+}
+```
+`add_from_input` (= `add_from_input_with` and `AddOptions::new`): a subscription URL (plain or in
+a `happ://` / `mantaray://` link) is fetched as `device`: known for that device -> that group is
+refreshed with its own settings (`Refreshed`); `into: Some(g)` -> its keys are appended to `g` as
+manual rows (marked `hidden` when the answer sent `hide-settings`); else a new subscription group with `send_hwid` / `headers` of the options, the first
+answer's controls and fallback URL, and (when the answer moved it) the new URL plus `moved_at`.
+Any other text is parsed and added to `into` or the manual group; `skipped` lists entries that were
+not imported. A failed fetch without the HWID that saw an empty list answers
+`servers.fetch.emptyListNoHwid` (turn the switch on), as `refresh_group` does. A subscription URL
+carried by a deep link, or with `from_link` set, is fetched as `FetchRequest::from_link` (never
+into the local network, also through a name: `profiles.deeplink.localTarget`); one the user typed
+may live in the LAN. A subscription group added so keeps the mark (`ServersDoc::linked`, gone
+with the group): every refresh of it is a `from_link` request too (fix-ks).
+`refresh_group` runs as operation `refresh:<id>` (`FeatureKind::Refresh`, 120 s; `Owner::Manual`
+pre-empts a scheduled run, an equal owner gets `core.ops.busy`). A failure stores its typed outcome
+and changes no row; a cancel stores nothing more; the deadline stores `Timeout`. After a success the
+provider metadata replaces `info` and the controls replace `controls`, a named fallback URL is
+sealed into `fallback`, a vetted move re-points the URL and stamps `moved_at` (skipped when another
+group of the device has that URL), and the provider title renames the group only while its name is
+an automatic one (empty, a host, or the provider's previous title). The fetch sends the group's
+`send_hwid`, `headers` and `fallback`. Missing keys: kept while the
+answer is partial, archived for the provider after 15 min of complete answers without them; a
+provider-archived key that comes back is restored; a key whose host, port or credential changed
+loses its `health` and `verdict`; a key the group already holds as a manual row is not added
+again as a feed row; the selection is never changed by a refresh.
+A stamp from the future (wrong clock) makes a group due instead of blocking it.
+`import_legacy_direct`: the old single-key input goes in like a paste as `pc` (a subscription with
+the HWID on: the old app sent it), and the old selected index (clamped) becomes the selection; only
+into an empty list (`Ok(None)` otherwise).
+
+## legacy (`vpnte_servers::legacy`)
+
+```rust
+pub fn from_legacy(picker: Option<&Value>, groups: Option<&Value>, settings: Option<&Value>, now: UnixMs)
+    -> (ServersDoc, LegacyReport);   // inputs: the opened server-picker / server-groups / settings documents
+pub struct LegacyReport { pub imported: usize, pub groups: usize, pub locked: usize /* needed the old key */,
+                          pub skipped: Vec<LegacySkip>, pub direct: Option<LegacyDirect> }
+pub struct LegacySkip { pub name: String /* display name, never a key */, pub reason: Msg }
+pub struct LegacyDirect { pub input: Secret /* settings.directVpnInput */, pub selected: usize }
+```
+Inputs come from `vpnte_core::legacy` (secrets already plain, a locked stand-in or `null`). Ids are
+kept; the first manual group absorbs other manual groups, subscriptions whose URL is not
+`http(s)://host` and rows of unknown groups; mixed-device subscriptions are split per device
+(` · android` etc.); subscription URLs are stored canonical (deep link unwrapped, fragment dropped),
+and old groups that share a canonical URL are merged into the first of them;
+every key is re-sealed and verified; migrated subscriptions keep sending the HWID (`send_hwid`). With an empty picker an accepted settings cache becomes rows;
+otherwise a non-empty `directVpnInput` is handed on in `direct` for `Servers::import_legacy_direct`.
+Nothing under the old data directory is written.
+
+## Errors and i18n keys
+
+Register `vpnte_servers::LOCALES` at start (with `vpnte_core::LOCALES` and `vpnte_profiles::LOCALES`:
+skip reasons and legacy row errors use `profiles.*`, store / registry errors `core.*`, cancel and
+timeout the base `errors.*`). Every `Msg` this crate returns has its key under `servers.`:
+
+| Key | Args | Kind / where |
+| --- | --- | --- |
+| `servers.notFound` | — | `Conflict`: row gone (`select`, `remove`, `restore`, `purge`, `set_profile_device`) |
+| `servers.locked` | — | `Conflict`: key / URL sealed under another PC or account (`ServerRow::profile`, `select`, `set_group_device`, `import_legacy_direct`) |
+| `servers.unreadable` | — | `Internal`: stored key damaged (`ServerRow::profile`) |
+| `servers.deviceFollowsGroup` | — | `Validation`: `set_profile_device` on a feed row |
+| `servers.select.archived` | — | `Conflict`: `select` of a user-removed row (or any archived row by automation) |
+| `servers.group.title` | `name` | `ServerGroup::title` / `GroupSummary::title` (user / provider name) |
+| `servers.group.{manualDefault,subscriptionDefault}` | — | default group names (`title`) |
+| `servers.group.notFound` | — | `Conflict`: group gone (group edits, `add` into a group, `refresh_group`) |
+| `servers.group.keepManual` | — | `Validation`: `delete_group(manual, false)` |
+| `servers.group.overrideInvalid` | — | `Validation`: override outside 1..=1440 |
+| `servers.group.manualNoRefresh` | — | `Validation`: override / refresh of the manual group |
+| `servers.group.manualNoDevice` | — | `Validation`: `set_group_device` on the manual group |
+| `servers.group.deviceTaken` | — | `Conflict`: that URL already has a group for the device |
+| `servers.legacy.{groupUnreadable,rowUnreadable,noOutbound,sealFailed}` | — | `LegacySkip::reason` |
+| `servers.parse.tooLarge` | `mib` | `Validation`: paste over 1 MiB (`too_large`) |
+| `servers.parse.nothingFound` | — | `Validation`: nothing importable (`no_profiles`, `add` with no profiles) |
+| `servers.parse.allSkipped` | `count` | `Validation`: every entry skipped (`no_profiles`) |
+| `servers.parse.damagedBase64` | — | `Validation`: the lone entry is a base64 blob that does not decode (`no_profiles`) |
+| `servers.fetch.{ok,partial,emptyList,timeout}` | — | `outcome_msg`; `emptyList` (`Validation`), `timeout` (`Timeout`) as fetch errors |
+| `servers.fetch.body.{html,json,base64,uris,other}` | — | `outcome_msg(Unparseable(kind))`; `Validation` |
+| `servers.fetch.http` | `code` | `outcome_msg(Http(code))`; `Network` |
+| `servers.fetch.net.{dns,connect,tls,proxy,reset}` | — | `outcome_msg(Network(fail))`; `Network` |
+| `servers.fetch.invalidUrl` | — | `Validation`: `FetchError::InvalidUrl` |
+| `servers.refresh.groupChanged` | — | `Conflict`: group deleted or re-pointed while its fetch ran |
+| `servers.refresh.unusableUrl` | — | `Validation`: subscription URL locked or not `http(s)://host` |
+| `servers.fetch.emptyListNoHwid` | — | `Validation`: `FetchError::for_group` — an empty list fetched without the HWID |
+| `servers.fetch.hwidRequired` | — | `outcome_msg(HwidRequired)`; `Validation`: the panel serves only devices with an HWID |
+| `servers.fetch.deviceLimit` | — | `outcome_msg(DeviceLimit)`; `Validation`: every device slot is taken |
+| `servers.fetch.placeholder` | — | `outcome_msg(Placeholder)`; `Validation`: notices instead of servers |
+| `servers.fetch.said` | `said` | `Validation`: `FetchError::Said(Placeholder, words)` — the provider's words |
+| `servers.fetch.body.encrypted` | — | `outcome_msg(Unparseable(Encrypted))`: a list only the provider's app reads |
+| `servers.select.placeholder` | — | `Conflict`: `select` of a stored provider placeholder |
+| `profiles.deeplink.localTarget` | — | `Validation`: `FetchError::LocalTarget` (a linked subscription resolves into the LAN) |
+| `servers.headers.{invalid,reserved,tooMany}` | `line` / `name` / `max` | `Validation`: `parse_headers`, `set_group_headers` |
+| `servers.group.manualNoRequest` | — | `Validation`: HWID switch / headers of the manual group |
+| `servers.hidden.refused` | — | `Validation`: `shareable_profile` of a provider-hidden server (`hidden_refused`) |
+
+Also passed through: `core.store.readOnly` (`Conflict`, document read-only), `core.ops.busy`
+(`Conflict`, the same refresh / import is running), `errors.cancelled` (`Cancelled`: user cancel or
+pre-emption, show nothing), `errors.timeout` (`Timeout`: the 120 s budget), deep-link errors
+(`DeepLinkError::msg`, `profiles.*`) from `add_from_input`.
+
+## Not implemented / not run
+
+- Not run: the DoH-pinned retry (needs public DoH servers), redirect checks that resolve names with
+  the system DNS, a successful HTTPS fetch, Happ's real local proxies (stand-ins on loopback are
+  tested). Everything else ran: 139 tests (loopback HTTP, real DPAPI, temp dirs, paused clock).
+- Not run (subscriptions under blocking): a spare slot through the real proxy manager (the fetch side runs against fake
+  relays and a loopback stand-in proxy), a fallback or a move over real HTTPS, name lookups of
+  relocation targets (IP literals only in tests).
+- HWIDs are computed at start (`Hwids::current`), not persisted. Identical concurrent fetches are not
+  coalesced (the registry serialises them per group / import). Pings are never persisted. Events
+  carry ids only. A group has one device (old groups with several devices are split on import).
+- The persistent `profiles.json` keeps no ping, no `enabled`, no resolved IPs, no old status texts.

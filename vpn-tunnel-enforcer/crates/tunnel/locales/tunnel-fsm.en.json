@@ -1,0 +1,8 @@
+{
+  "tunnel": {
+    "warning": {
+      "foreignTunUnverified": "Other VPN adapters could not be checked.",
+      "releaseUnverified": "The previous tunnel interface was slow to close; a new one is used."
+    }
+  }
+}

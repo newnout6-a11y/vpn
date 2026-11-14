@@ -1,0 +1,21 @@
+{
+  "forensics": {
+    "capture": {
+      "error": {
+        "consentRequired": "Deep traffic capture is on, but the warning about full packet recording has not been confirmed. Switch the capture off and on again to confirm it.",
+        "stopUnconfirmed": "Stopping the packet capture was not confirmed: pktmon may still be recording. Try stopping it again.",
+        "startFailed": "The capture did not start: neither pktmon nor the ETW event stream is available.",
+        "storage": "The diagnostics folder for the capture cannot be prepared."
+      },
+      "warn": {
+        "onlyLifecycle": "The ETW event stream is running but has no TCP/DNS/WFP data events yet.",
+        "etlEmpty": "The pktmon ETL file is empty or missing.",
+        "etwFailed": "The ETW event stream is not running; only packets are being captured.",
+        "eventsLost": "ETW events lost: {{count}}.",
+        "unparsed": "Events without a schema: {{count}}.",
+        "quota": "Capture storage limit reached: recording events only. Clear diagnostics to capture packets again.",
+        "pktmonUnavailable": "pktmon did not start: recording ETW events only."
+      }
+    }
+  }
+}

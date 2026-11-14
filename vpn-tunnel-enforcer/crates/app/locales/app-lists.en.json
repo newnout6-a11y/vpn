@@ -1,0 +1,17 @@
+{
+  "app": {
+    "lists": {
+      "apps": {
+        "gone": "This app is no longer in the list.",
+        "fileMissing": "The program file was not found: choose it again."
+      },
+      "traffic": {
+        "badLink": "This link cannot be opened."
+      },
+      "routing": {
+        "stale": "The profile changed: review it again.",
+        "gone": "The subscription no longer sends a routing profile."
+      }
+    }
+  }
+}

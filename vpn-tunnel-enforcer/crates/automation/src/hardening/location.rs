@@ -1,0 +1,269 @@
+//! Windows location privacy (spec §2.13, §3.8, §6.8 `LocationPrivacy`): while a protected session
+//! runs, apps of this user get no geolocation. Only the user's own consent is set to deny
+//! (NOADMIN §3: per user, no administrator rights). The machine policy of the old app (owner
+//! question Q2) needs elevation and covers every account of the PC, so the app no longer writes
+//! it; its values stay admitted so records from the old version or an earlier elevated build are
+//! still rolled back (that needs elevation; unelevated they stay journalled and the rollback says
+//! so), and an active policy is still reported.
+//!
+//! Session-scoped (fix L2): the lifecycle applies it after a successful connect when the setting
+//! is on and rolls it back on disconnect, shutdown and startup recovery; a toggle while connected
+//! applies or rolls back at once. Nothing here rewrites the setting. "Applied by us" comes from
+//! the journal; the OS state, which the user may have chosen himself, is reported next to it
+//! (fix L3).
+use std::io;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use vpnte_base::{AppError, AppResult, ErrorKind, Msg};
+
+use super::system::System;
+use super::{admissible, short_text};
+use crate::tweaks::journal::{
+    Backend, Feature, Journal, RegHive, RollbackReport, Target, TweakError, TweakState, Val,
+};
+use crate::tweaks::run_blocking;
+
+/// The user's location consent: `(hive, key, value name)`, `REG_SZ` `Allow` / `Deny`.
+pub const CONSENT: (RegHive, &str, &str) = (
+    RegHive::Hkcu,
+    r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location",
+    "Value",
+);
+/// The machine policy key (`HKLM`) of the two location policies (read and rolled back only).
+pub const POLICY_KEY: &str = r"SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors";
+/// The two `REG_DWORD` policies, 1 = location off for the whole machine.
+pub const POLICY_VALUES: [&str; 2] = ["DisableLocation", "DisableWindowsLocationProvider"];
+
+/// What apply writes: the consent `Deny` (LP:13-14).
+pub fn plan() -> Vec<(Feature, Target, Val)> {
+    vec![(
+        Feature::LocationPrivacy,
+        consent_target(),
+        Val::Sz("Deny".to_owned()),
+    )]
+}
+
+/// What the old version wrote (LP:13-14, 207-211): the consent and both machine policies. The
+/// legacy import adopts what of it is still in place.
+pub(crate) fn old_plan() -> Vec<(Feature, Target, Val)> {
+    let mut plan = plan();
+    plan.extend(
+        POLICY_VALUES.map(|name| (Feature::LocationPrivacy, policy_target(name), Val::Dword(1))),
+    );
+    plan
+}
+
+fn consent_target() -> Target {
+    let (hive, key, name) = CONSENT;
+    Target::Reg {
+        hive,
+        key: key.to_owned(),
+        name: name.to_owned(),
+    }
+}
+
+fn policy_target(name: &str) -> Target {
+    Target::Reg {
+        hive: RegHive::Hklm,
+        key: POLICY_KEY.to_owned(),
+        name: name.to_owned(),
+    }
+}
+
+/// Allow-list part of [`super::admit`]: the consent as a string, the policies as DWORDs.
+pub(crate) fn admits(hive: RegHive, key: &str, name: &str, value: &Val) -> bool {
+    let is = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    match hive {
+        RegHive::Hkcu => is(key, CONSENT.1) && is(name, CONSENT.2) && short_text(value),
+        RegHive::Hklm => {
+            is(key, POLICY_KEY)
+                && POLICY_VALUES.iter().any(|n| is(name, n))
+                && matches!(value, Val::Absent | Val::Dword(_))
+        }
+    }
+}
+
+/// Location privacy as the UI shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocationStatus {
+    /// Our values: `Off` (none journalled), `On`, `Drifted` (changed since), `Unknown`.
+    pub ours: TweakState,
+    /// The user's consent denies location to apps (`None` = could not be read).
+    pub user_denied: Option<bool>,
+    /// A machine policy switches location off (`None` = could not be read).
+    pub policy_disabled: Option<bool>,
+}
+
+impl LocationStatus {
+    /// Windows gives apps no location now, whoever decided it (`None` = not checked).
+    pub fn os_denied(&self) -> Option<bool> {
+        match (self.user_denied, self.policy_disabled) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        }
+    }
+}
+
+/// For the stop result when a rollback left values for a retry (LP:259).
+pub fn rollback_failure_msg(report: &RollbackReport) -> Option<Msg> {
+    (!report.is_complete()).then(|| Msg::new("automation.hardening.location.rollbackFailed"))
+}
+
+/// Location privacy over the shared journal. Cheap to clone.
+#[derive(Clone)]
+pub struct Location {
+    journal: Arc<Journal>,
+    sys: Arc<dyn System>,
+}
+
+impl Location {
+    /// Location privacy on the machine `sys`.
+    pub fn new(journal: Arc<Journal>, sys: Arc<dyn System>) -> Self {
+        Self { journal, sys }
+    }
+
+    /// Denies location to this user's apps (no elevation needed). Nothing is written when the
+    /// current value cannot be read; applying again keeps the original baseline.
+    pub async fn apply(&self) -> AppResult<LocationStatus> {
+        let this = self.clone();
+        run_blocking(move || this.apply_blocking()).await?
+    }
+
+    /// Puts our values back; a value changed by someone else since is kept, a failure stays
+    /// journalled for the next attempt ([`rollback_failure_msg`]).
+    pub async fn rollback(&self) -> AppResult<RollbackReport> {
+        let this = self.clone();
+        run_blocking(move || this.rollback_blocking()).await
+    }
+
+    /// Reads our values and the OS state.
+    pub async fn status(&self) -> AppResult<LocationStatus> {
+        let this = self.clone();
+        run_blocking(move || this.status_blocking()).await
+    }
+
+    /// Whether location values this process can roll back are journalled (the obligation
+    /// disconnect and recovery look at): the user's consent; the old version's machine policies
+    /// only in an elevated process (unelevated they wait, and must not hold the consent up).
+    pub fn is_applied(&self) -> bool {
+        let elevated = self.sys.elevated();
+        (self.journal.records(Feature::LocationPrivacy).iter())
+            .any(|r| elevated || !machine(&r.target))
+    }
+
+    /// Blocking form of [`Location::apply`].
+    pub fn apply_blocking(&self) -> AppResult<LocationStatus> {
+        // The consent lives in HKCU: as another administrator it would land in the wrong profile.
+        self.sys.check_user()?;
+        let plan = plan();
+        for (_, target, _) in &plan {
+            let current = self
+                .sys
+                .read(target)
+                .map_err(|e| apply_error(TweakError::Unreadable(target.label(), e)))?;
+            // A baseline outside the allow-list would be dropped from the journal at the next
+            // start and our value would stay for good: refuse instead.
+            if !admissible(target, &current) {
+                tracing::warn!(target = %target.label(), "location value of an unexpected type; not applied");
+                return Err(AppError::msg(
+                    ErrorKind::Conflict,
+                    Msg::new("automation.hardening.location.foreignValue"),
+                ));
+            }
+        }
+        self.journal.apply(&*self.sys, &plan).map_err(apply_error)?;
+        Ok(self.status_blocking())
+    }
+
+    /// Blocking form of [`Location::rollback`]. Unelevated the machine policies are not tried
+    /// (access denied, every time): their records wait for an elevated process, and that is no
+    /// failure of this rollback (NOADMIN §0; the import told the user once).
+    pub fn rollback_blocking(&self) -> RollbackReport {
+        let features = [Feature::LocationPrivacy];
+        if self.sys.elevated() {
+            return self.journal.rollback(&*self.sys, &features);
+        }
+        let mut report = self.journal.rollback(&UserHive(&*self.sys), &features);
+        report.failed.retain(|t| !machine(t));
+        report
+    }
+
+    /// Blocking form of [`Location::status`].
+    pub fn status_blocking(&self) -> LocationStatus {
+        let consent = self.sys.read(&consent_target());
+        let user_denied = consent
+            .ok()
+            .map(|v| matches!(&v, Val::Sz(s) | Val::ExpandSz(s) if s.eq_ignore_ascii_case("deny")));
+        let policies = POLICY_VALUES.map(|name| self.sys.read(&policy_target(name)));
+        let policy_disabled = if policies.iter().any(|v| matches!(v, Ok(Val::Dword(1)))) {
+            Some(true)
+        } else if policies.iter().all(Result::is_ok) {
+            Some(false)
+        } else {
+            None
+        };
+        LocationStatus {
+            ours: self.journal.status(&*self.sys, Feature::LocationPrivacy),
+            user_denied,
+            policy_disabled,
+        }
+    }
+}
+
+fn machine(target: &Target) -> bool {
+    matches!(
+        target,
+        Target::Reg {
+            hive: RegHive::Hklm,
+            ..
+        }
+    )
+}
+
+/// The registry as an unelevated process may change it: this user's hive. A machine value
+/// reads as "cannot tell", so the journal writes nothing there and keeps the record.
+struct UserHive<'a>(&'a dyn System);
+
+impl Backend for UserHive<'_> {
+    fn read(&self, target: &Target) -> io::Result<Val> {
+        if machine(target) {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        self.0.read(target)
+    }
+
+    fn write(&self, target: &Target, value: &Val) -> io::Result<bool> {
+        if machine(target) {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        self.0.write(target, value)
+    }
+
+    fn prune(&self, target: &Target) -> io::Result<()> {
+        self.0.prune(target)
+    }
+
+    fn changed(&self, targets: &[Target]) {
+        self.0.changed(targets);
+    }
+}
+
+/// The user-facing error of a failed apply (nothing of it is left in place).
+fn apply_error(e: TweakError) -> AppError {
+    let (kind, _) = e.describe();
+    let msg = match &e {
+        TweakError::Journal(_) => return e.into(),
+        // Apply reads the consent only.
+        TweakError::Unreadable(..) => {
+            Msg::new("automation.hardening.location.unreadable").arg("hive", CONSENT.0.name())
+        }
+        _ => Msg::new("automation.hardening.location.failed"),
+    };
+    AppError::msg(kind, msg).with_source(e)
+}
+
+#[cfg(test)]
+mod tests;

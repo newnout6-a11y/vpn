@@ -22,7 +22,7 @@ const srv = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': T[extname(f)] || 'application/octet-stream' }); res.end(readFileSync(f))
 })
 await new Promise((r) => srv.listen(0, '127.0.0.1', r))
-const origin = `http://localhost:${srv.address().port}`
+const origin = `http://127.0.0.1:${srv.address().port}`
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ['--no-sandbox', '--enable-unsafe-swiftshader'] })
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 let failed = 0

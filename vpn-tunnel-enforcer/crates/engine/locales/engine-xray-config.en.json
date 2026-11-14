@@ -1,0 +1,71 @@
+{
+  "engine": {
+    "xray": {
+      "reject": {
+        "nativeXray": "This JSON profile contains Xray settings; choose Auto or Xray to keep its route.",
+        "xrayTransport": "The transport settings require Xray; choose Auto or Xray.",
+        "noXrayClient": "Xray has no {{protocol}} client: this server runs only on sing-box. Choose «Auto» in the connection settings or sing-box for this server.",
+        "xrayForm": "Xray cannot run {{protocol}} with the transport or TLS of this profile. Choose «Auto» in the connection settings or sing-box for this server.",
+        "amneziawg": "This is an AmneziaWG server: neither sing-box nor Xray can run it, and plain WireGuard would not reach it. It needs the mihomo engine, a lab feature this build does not run."
+      },
+      "reason": {
+        "default": "main engine",
+        "protocol": "Xray lacks this protocol",
+        "preference": "chosen by you",
+        "reality": "REALITY",
+        "xrayTransport": "Xray transport",
+        "nativeXray": "provider's Xray config",
+        "certPin": "pinned certificate",
+        "tlsHello": "current TLS fingerprint",
+        "singBoxOnly": "sing-box-only feature"
+      },
+      "singBoxOnly": {
+        "h2Transport": "The profile uses features Xray does not have (HTTP/2 transport); choose Auto or sing-box.",
+        "quicTransport": "The profile uses features Xray does not have (QUIC transport); choose Auto or sing-box.",
+        "insecureWithoutPin": "The profile uses features Xray does not have (certificate checks disabled without a pinned certificate); choose Auto or sing-box.",
+        "spkiPin": "The profile uses features Xray does not have (certificate public key pinning); choose Auto or sing-box.",
+        "ech": "The profile uses features Xray does not have (ECH with a DNS lookup of its config, over QUIC or with REALITY); choose Auto or sing-box.",
+        "shadowsocksPlugin": "The profile uses features Xray does not have (Shadowsocks plugin); choose Auto or sing-box.",
+        "shadowsocksUdpOverTcp": "The profile uses features Xray does not have (Shadowsocks UDP over TCP with a pre-2022 cipher); choose Auto or sing-box.",
+        "shadowsocksMethod": "The profile uses features Xray does not have (Shadowsocks cipher); choose Auto or sing-box.",
+        "realityTransport": "The profile uses features Xray does not have (REALITY over WebSocket or HTTPUpgrade); choose Auto or sing-box.",
+        "plaintext": "The profile uses features Xray does not have (an unencrypted connection to a public server); choose Auto or sing-box."
+      },
+      "conflict": {
+        "h2Transport": "The profile needs an Xray transport but also uses the HTTP/2 transport, which Xray does not support.",
+        "quicTransport": "The profile needs an Xray transport but also uses the QUIC transport, which Xray does not support.",
+        "insecureWithoutPin": "The profile needs an Xray transport but also disables certificate checks, which Xray does not support (to skip certificate checks, set pinnedPeerCertSha256 / pcs).",
+        "spkiPin": "The profile needs an Xray transport but also pins the certificate public key, which Xray does not support.",
+        "ech": "The profile needs an Xray transport but also uses ECH in a form Xray does not support (a DNS lookup of its config, QUIC or REALITY).",
+        "shadowsocksPlugin": "The profile needs an Xray transport but also uses a Shadowsocks plugin, which Xray does not support.",
+        "shadowsocksUdpOverTcp": "The profile needs an Xray transport but also uses Shadowsocks UDP over TCP with a pre-2022 cipher, which Xray does not support.",
+        "shadowsocksMethod": "The profile needs an Xray transport but also uses a Shadowsocks cipher Xray does not support.",
+        "realityTransport": "The profile needs an Xray transport but also uses REALITY over WebSocket or HTTPUpgrade, which Xray does not support.",
+        "plaintext": "The profile needs an Xray transport but also uses an unencrypted connection to a public server, which Xray does not allow."
+      },
+      "config": {
+        "protocol": "Xray does not support the {{protocol}} protocol.",
+        "invalid": "The profile setting {{setting}} is not valid for Xray."
+      },
+      "warn": {
+        "stealth": "Stealth mode does not apply on Xray: the TLS handshake is not fragmented and the fingerprint does not rotate.",
+        "xhttpMux": "Mux.cool was turned off for the XHTTP connection: XHTTP multiplexes connections itself.",
+        "mux": "Xray does not use the profile's multiplexing (sing-box mux).",
+        "dial": "Xray does not apply the profile's connection options (timeout, TCP Fast Open, MPTCP, UDP fragmentation, IPv4/IPv6 choice).",
+        "singboxExtra": "Xray does not apply the profile's extra sing-box options.",
+        "disableSni": "Xray cannot hide the server name: the SNI is sent although the profile turns it off.",
+        "fingerprintUnknown": "Xray does not know the TLS fingerprint “{{fingerprint}}”; the default one is used.",
+        "fingerprintRejected": "Current REALITY servers (Xray 26.9.8 and newer) refuse the TLS fingerprint “{{fingerprint}}”; choose chrome, firefox or safari.",
+        "fingerprintBroken": "Most servers fail with the TLS fingerprint “{{fingerprint}}”; choose chrome, firefox or safari.",
+        "earlyData": "WebSocket early data is off: Xray sends it only in the Sec-WebSocket-Protocol header.",
+        "packetEncoding": "Xray chooses the VLESS UDP encoding itself; the profile's packet encoding “{{encoding}}” is not used.",
+        "bbrProfile": "Xray does not know the BBR profile “{{profile}}”; the default one is used."
+      },
+      "resolve": {
+        "failed": "Could not resolve the Xray server address before starting the tunnel.",
+        "sinkhole": "DNS returned a blocked address for the Xray server; the tunnel was not started.",
+        "poisoned": "The DNS answers for the Xray server name were forged (it looks like blocking by the network) and no trustworthy DNS server could be reached; the tunnel was not started."
+      }
+    }
+  }
+}

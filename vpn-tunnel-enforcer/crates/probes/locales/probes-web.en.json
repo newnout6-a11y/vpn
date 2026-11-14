@@ -1,0 +1,113 @@
+{
+  "probes": {
+    "availability": {
+      "invalidUrl": "Enter a site address, for example youtube.com.",
+      "unsupportedScheme": "Only http:// and https:// links are supported.",
+      "side": {
+        "protected": "With protection",
+        "direct": "Without VPN"
+      },
+      "verdict": {
+        "worksBoth": "Works with and without VPN",
+        "worksOnlyWithVpn": "Works only with VPN",
+        "worksOnlyWithoutVpn": "Works only without VPN",
+        "blockedEverywhere": "Unavailable everywhere",
+        "authRequired": "Requires sign-in — availability not confirmed",
+        "unknown": "Undetermined"
+      },
+      "rec": {
+        "reachableWithoutVpn": "Your provider does not block the site (the network works). If the site still fails or says “Not supported in your country”, it refuses your IP itself — turn the VPN on.",
+        "refusedVpnNotMeasured": "The site answers but requires sign-in or refuses your IP — availability is not confirmed. The VPN path has not been measured yet — turn the VPN on and check again.",
+        "directFailedVpnNotMeasured": "Direct access fails, but the VPN path has not been measured yet. Turn the VPN on and check again.",
+        "pathNotMeasured": "The path without VPN was not measured, so the two cannot be compared. Check again.",
+        "geoBlockedLocally": "The site itself refuses access from your region (content “not available in your country”), although the network does not block it. It opens through the VPN — keep protection on.",
+        "geoBlockedVpnCountry": "The site also blocks the VPN server's country. Try a server in another country (not the current one).",
+        "refusedWithoutVpn": "The site itself refuses access without the VPN (it returns access error 403). Keep protection on.",
+        "refusedThroughVpn": "The site refuses access through the VPN (access error 401/403) but opens directly. Add it to the exceptions or pick a server in another country.",
+        "authRequired": "The site answers but requires sign-in or refuses your IP — availability is not confirmed.",
+        "reachableBoth": "Your provider does not block the site (the network works). If the site still fails or says “Not supported in your country”, it refuses Russian visitors itself — turn the VPN on in that case.",
+        "providerBlocks": "The site works only through the VPN — your provider blocks it directly. Keep protection on.",
+        "onlyWithVpn": "The site works only through the VPN: without it there is no proper answer. Keep protection on.",
+        "onlyWithoutVpn": "The site works only without the VPN (typical of Russian services). Add it to the exceptions or turn protection off for a while.",
+        "blockedEverywhere": "The site answers neither through the VPN nor directly. It may be down or blocked by content (not by network) — try another server.",
+        "incomplete": "The check could not be completed."
+      },
+      "fail": {
+        "notMeasured": "The path was not measured.",
+        "legal": "The site answered 451 (blocked for legal reasons / geo-block).",
+        "geoBlock": "The site loaded but refused access for your region (geo-block).",
+        "dnsSuspect": "DNS returned a suspicious IP ({{ips}}) — DNS spoofing suspected.",
+        "dns": "The name does not resolve to an IP.",
+        "tcp": "The TCP connection did not open.",
+        "tls": "The TLS handshake failed. SNI-based DPI blocking is possible.",
+        "httpStatus": "The HTTP request got no meaningful answer: status {{status}}.",
+        "http": "The HTTP request got no meaningful answer."
+      },
+      "error": {
+        "connRefused": "connection refused",
+        "connReset": "connection reset",
+        "connAborted": "connection aborted",
+        "closed": "the remote side closed the connection",
+        "timedOut": "connection timed out",
+        "accessDenied": "access denied",
+        "netUnreachable": "network unreachable",
+        "hostUnreachable": "host unreachable",
+        "nameNotFound": "name not found",
+        "dnsTemporary": "temporary DNS failure",
+        "dnsSuspect": "DNS spoofing suspected",
+        "tlsProtocol": "TLS protocol error",
+        "tlsCertName": "the name does not match the certificate",
+        "tlsCertExpired": "certificate expired",
+        "tlsCertUntrusted": "certificate chain not trusted",
+        "proxyFailed": "the engine's direct exit is unavailable",
+        "badResponse": "malformed server response",
+        "unknown": "unknown error"
+      },
+      "http": {
+        "success": "the site answered",
+        "authRequired": "requires sign-in or refuses your IP",
+        "notFound": "page not found (404)",
+        "rateLimited": "too many requests (429)",
+        "clientError": "request error",
+        "serverError": "server error",
+        "legal": "blocked for legal reasons (451)"
+      },
+      "geo": {
+        "http451": "HTTP 451 (Unavailable For Legal Reasons)",
+        "http403Short": "HTTP 403 on a short page",
+        "stubRedirect": "redirect to a stub page",
+        "titleMarker": "block marker in the title",
+        "shortPageMarker": "block text on a short page",
+        "longPageMarker": "block mentioned on a long page (weak signal)",
+        "foreignAlsoBlocked": "the protected path did not get a normal page either",
+        "localOnlyStubRedirect": "redirect to a stub directly, not through the VPN",
+        "localNearlyEmpty": "full page through the VPN, almost empty directly",
+        "localOnlyMarker": "block marker directly but not through the VPN"
+      }
+    },
+    "speed": {
+      "notConnected": "Connect the VPN first — the speed test runs through the tunnel.",
+      "serverChanged": "The server changed during the test — the result was not saved.",
+      "latencyFailed": "Could not measure latency. Check your Internet connection and the VPN.",
+      "downloadFailed": "Could not measure download speed: every test server is unavailable.",
+      "uploadNotMeasured": "Upload speed could not be measured.",
+      "profileUnknown": "Unknown",
+      "phase": {
+        "latency": "Latency",
+        "download": "Download",
+        "upload": "Upload",
+        "complete": "Done",
+        "error": "Error"
+      },
+      "egress": {
+        "match": "The test traffic went through the VPN server.",
+        "changed": "The public IP differed from the VPN address during the test — the result may not belong to this server.",
+        "direct": "The test bypassed the VPN: the public IP matched your real address.",
+        "notChecked": "The exit to the Internet was not checked during the test."
+      },
+      "warning": {
+        "plainHttp": "The HTTPS test servers are unavailable — speed was measured over unencrypted HTTP."
+      }
+    }
+  }
+}

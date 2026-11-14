@@ -1,0 +1,82 @@
+{
+  "engine": {
+    "routing": {
+      "domain": {
+        "empty": "Enter a domain.",
+        "tooLong": "The domain is longer than 253 characters.",
+        "ipLiteral": "Rules work with domains, not IP addresses. Enter a domain such as example.com.",
+        "needsDot": "Enter a domain with a dot (telegram.org) or a keyword with ~ (~telegram).",
+        "invalid": "Invalid domain. Examples: example.com, *.example.com, ~keyword.",
+        "duplicate": "There is already a rule for this domain.",
+        "notFound": "Rule not found.",
+        "limit": "Limit reached: {{max}} rules.",
+        "importFile": "Import needs a regular file of at most 4 MiB."
+      },
+      "bypass": {
+        "invalid": "“{{entry}}” is not a host or address. Examples: example.com, *.example.com, 192.168.*, 10.0.0.5.",
+        "tooMany": "The list can hold up to {{max}} entries.",
+        "tooLong_one": "The list does not fit Windows' proxy exceptions. Remove entries of about {{count}} character.",
+        "tooLong_few": "The list does not fit Windows' proxy exceptions. Remove entries of about {{count}} characters.",
+        "tooLong_many": "The list does not fit Windows' proxy exceptions. Remove entries of about {{count}} characters.",
+        "tooLong_other": "The list does not fit Windows' proxy exceptions. Remove entries of about {{count}} characters."
+      },
+      "dns": {
+        "required": "Enter a DNS server address.",
+        "tooLong": "The address is too long.",
+        "scheme": "Only https:// (DoH) and tls:// (DoT) are supported.",
+        "invalid": "Invalid DNS address: use IPv4, IPv6, https:// (DoH) or tls:// (DoT).",
+        "dohHost": "Invalid DoH address: bad server name.",
+        "dotHost": "Invalid DoT address: bad server name.",
+        "port": "Invalid port: use a number from 1 to 65535.",
+        "path": "Invalid path in the address: give the path only (e.g. /dns-query), without ?parameters or #.",
+        "unusableIp": "This address cannot be used as a DNS server through the VPN (local, broadcast or reserved).",
+        "nameEmpty": "Enter a profile name.",
+        "nameTooLong": "The name is longer than {{max}} characters.",
+        "notFound": "DNS profile not found.",
+        "builtinReadOnly": "Built-in DNS profiles cannot be changed or deleted."
+      },
+      "split": {
+        "badName": "Invalid process name. Example: curl.exe or yt-dlp",
+        "badPath": "Invalid path: enter the full path to the program file, e.g. C:\\Program Files\\App\\app.exe."
+      },
+      "warn": {
+        "smartRuDisabled": "Smart RU is off for this connection: the rule lists are unavailable. All traffic goes through the VPN.",
+        "bootstrapDnsFallback": "The network's own DNS server is not usable: the VPN server's address is looked up through public resolvers.",
+        "appMissing": "The rule for “{{name}}” is not active: the program file was not found. Its traffic goes through the VPN.",
+        "appNotAFile": "The rule for “{{name}}” is not active: the path is not a file. Its traffic goes through the VPN.",
+        "appMissingDirect": "The rule for “{{name}}” is not active: the program file was not found. Its traffic goes directly.",
+        "appNotAFileDirect": "The rule for “{{name}}” is not active: the path is not a file. Its traffic goes directly."
+      },
+      "ruleSets": {
+        "notUpdated": "Smart RU rules were not updated; the local version is in use",
+        "route": {
+          "session": "through the VPN",
+          "direct": "directly",
+          "userProxy": "through the selected local proxy",
+          "happSocks": "through Happ SOCKS 127.0.0.1:10808",
+          "happHttp": "through Happ HTTP 127.0.0.1:10809"
+        },
+        "fault": {
+          "download": "Could not download {{file}}.",
+          "invalid": "{{file}} failed validation.",
+          "engine": "Could not run sing-box to validate the files.",
+          "storage": "Could not save the rule files."
+        }
+      },
+      "legacy": {
+        "domainDropped_one": "{{count}} domain rule was not imported (invalid or duplicate).",
+        "domainDropped_few": "{{count}} domain rules were not imported (invalid or duplicates).",
+        "domainDropped_many": "{{count}} domain rules were not imported (invalid or duplicates).",
+        "domainDropped_other": "{{count}} domain rules were not imported (invalid or duplicates).",
+        "dnsDropped_one": "{{count}} DNS profile was not imported (invalid address or duplicate).",
+        "dnsDropped_few": "{{count}} DNS profiles were not imported (invalid addresses or duplicates).",
+        "dnsDropped_many": "{{count}} DNS profiles were not imported (invalid addresses or duplicates).",
+        "dnsDropped_other": "{{count}} DNS profiles were not imported (invalid addresses or duplicates).",
+        "splitDropped_one": "{{count}} split-tunnel entry was not imported (invalid path or duplicate).",
+        "splitDropped_few": "{{count}} split-tunnel entries were not imported (invalid paths or duplicates).",
+        "splitDropped_many": "{{count}} split-tunnel entries were not imported (invalid paths or duplicates).",
+        "splitDropped_other": "{{count}} split-tunnel entries were not imported (invalid paths or duplicates)."
+      }
+    }
+  }
+}

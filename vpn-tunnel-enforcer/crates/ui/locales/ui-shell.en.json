@@ -1,0 +1,23 @@
+{
+  "sidebar": {
+    "availability": "Availability",
+    "maintenance": "Repair"
+  },
+  "ui": {
+    "shell": {
+      "minimize": "Minimize",
+      "maximize": "Maximize",
+      "restore": "Restore down",
+      "close": "Close",
+      "placeholder": "This page is not available in this build yet.",
+      "pageFailed": "This page could not be shown.",
+      "demo": {
+        "active": "Page active: {{value}}",
+        "advanced": "Advanced mode",
+        "openServers": "Open Servers",
+        "openMaintenance": "Open Repair",
+        "draft": "Draft"
+      }
+    }
+  }
+}

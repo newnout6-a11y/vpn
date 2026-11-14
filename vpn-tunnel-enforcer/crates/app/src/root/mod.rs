@@ -1,0 +1,392 @@
+//! The application (work package `app-main`): [`run`] wires the backend into the Dioxus shell
+//! (bootstrap order of lifecycle-app §3.12 / §6.5 and `SERVICES.md`), and [`App`] is the root
+//! component: tray, shell with the pages of this build, first-run wizard, toasts fed by the
+//! backend's notices, commands of later launches and toast clicks. A WebView2 crash rebuilds the
+//! window with a new [`App`] over the same contexts ([`wiring`] keeps what must carry over).
+mod wiring;
+
+use std::any::Any;
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use dioxus::desktop::{DesktopContext, use_window};
+use dioxus::prelude::*;
+use tokio::sync::mpsc;
+use vpnte_base::types::{Level, Notice};
+use vpnte_core::paths::DataDirs;
+use vpnte_ui::lang::tr_now;
+use vpnte_ui::launch::{LaunchOptions, RootContext};
+use vpnte_ui::pages::{Page, PageRegistry, use_nav};
+use vpnte_ui::shell::Shell;
+use vpnte_ui::t;
+use vpnte_ui::tray::{QuitMode, TrayApi, TrayHost, hide_to_tray, show_window};
+use vpnte_ui::widgets::{ToastHost, ToastKind, Toasts};
+use vpnte_winnet::single_instance::Command;
+
+use crate::args::Args;
+use crate::boot::{self, Instance};
+use crate::services::Backend;
+use crate::{
+    api_dashboard, api_lists, api_maintenance, api_servers, api_settings, api_tools, svc_core,
+    svc_tunnel,
+};
+
+/// The whole application. Returns only on the paths that end without a window (installer
+/// helpers, a second launch, a failed start); otherwise the UI ends the process: `0` after the
+/// tray's quit cleanup, `73` after the installer's `--shutdown-for-update`.
+pub fn run(args: &Args) -> ExitCode {
+    if let Some(code) = crate::setup::run(args) {
+        return code;
+    }
+    boot::install_panic_hook();
+    // Held (never dropped) for the life of the process: `launch` does not return.
+    let mut primary = match boot::single_instance(args) {
+        Instance::Primary(primary) => primary,
+        Instance::Exit(code) => return code,
+    };
+    // One registration for the whole app: `svc_core::locale_layers` carries every crate's layers and
+    // every app package's fragments, so no package has to chain another package's list. The first
+    // registration wins, so this must stay the only call.
+    vpnte_ui::lang::init_locales(&svc_core::locale_layers());
+    // Before the backend: no window opens without the WebView2 runtime; a missing one is offered
+    // for this user (p-webview-runtime).
+    if !boot::webview2::ensure(vpnte_ui::lang::os_lang()) {
+        return ExitCode::from(boot::webview2::EXIT_NO_RUNTIME);
+    }
+    let backend = match svc_core::build(args) {
+        Ok(backend) => backend,
+        Err(err) => {
+            boot::start_failed(&err, vpnte_ui::lang::os_lang());
+            return ExitCode::from(boot::EXIT_START_FAILED);
+        }
+    };
+    boot::set_identity();
+    // Before anything can show a notice: the event journal hears every one (p-logs).
+    drop(crate::svc_journal::attach(&backend));
+    boot::spawn_housekeeping(&backend.settings);
+    // Before the start-up recovery and any session (RU-2026 14c): the logon value and the
+    // end-session rollback.
+    crate::restore::at_start(backend.dirs.root.clone());
+    let options = launch_options(&backend, args);
+    let wiring = Wiring::new(backend, primary.take_commands());
+    // The link this start was opened with (`--open-link`) goes to the add dialog like a later one.
+    wiring.inbox.set_first_link(args.open_link.clone());
+    vpnte_ui::launch::launch(options, App, move || contexts(wiring))
+}
+
+/// What [`App`] takes over from [`run`] (one root context, the same for a rebuilt window).
+struct Wiring {
+    backend: Arc<Backend>,
+    inbox: Rc<wiring::Inbox>,
+}
+
+impl Wiring {
+    fn new(backend: Arc<Backend>, commands: Option<mpsc::UnboundedReceiver<Command>>) -> Self {
+        let (tx, clicks) = mpsc::unbounded_channel();
+        // The notifier calls this on its toast thread: hand the click to the UI thread.
+        backend.notifier.set_on_activate(Arc::new(move || {
+            let _ = tx.send(());
+        }));
+        // Subscribed before the window exists: notices of the tunnel's start-up recovery wait.
+        let notices = backend.notifier.subscribe();
+        Wiring {
+            inbox: Rc::new(wiring::Inbox::new(commands, clicks, notices)),
+            backend,
+        }
+    }
+}
+
+/// The root contexts, built once inside the UI's tokio runtime: the tunnel first (every API reads
+/// it), the background tasks this package owns, then the contexts of every `api_*` module and
+/// the root's own wiring. A rebuilt window gets clones of the same contexts.
+fn contexts(wiring: Wiring) -> Vec<Box<dyn RootContext>> {
+    let backend = wiring.backend.clone();
+    // Before the first connect: last-known server addresses and resolver winners (RU item 10),
+    // the current network's winner already asked first.
+    vpnte_core::resolve::persist(
+        &backend.dirs.root,
+        crate::api_maintenance::network_key_now(),
+        backend.shutdown.child_token(),
+    );
+    let built = match svc_tunnel::build(&backend) {
+        Ok(built) => {
+            let _ = backend.tunnel.set(built.tunnel.clone());
+            boot::spawn_power_events(built.tunnel.clone(), backend.shutdown.child_token());
+            // Needs the tunnel stored above (probe context, counters); before the start page.
+            crate::svc_auto::spawn_autopick(&backend, &built.automation);
+            built
+        }
+        Err(err) => {
+            boot::start_failed(&err, vpnte_ui::lang::os_lang());
+            drop(backend.log.lock().take());
+            boot::exit(boot::EXIT_START_FAILED);
+        }
+    };
+    drop(
+        backend
+            .servers
+            .spawn_scheduler(backend.refresh.clone(), backend.shutdown.child_token()),
+    );
+    tokio::spawn(boot::report_backend_panics(
+        backend.notifier.clone(),
+        backend.shutdown.child_token(),
+    ));
+    let mut out = api_dashboard::contexts(&backend, &built.automation);
+    out.extend(api_servers::contexts(&backend));
+    out.extend(api_settings::contexts(&backend, &built.automation));
+    out.extend(api_maintenance::contexts(&backend, &built));
+    out.extend(api_tools::contexts(&backend));
+    out.extend(api_lists::contexts(&backend, &built));
+    out.extend(crate::svc_update::contexts(&backend));
+    let mut out: Vec<Box<dyn RootContext>> = out.into_iter().map(reusable).collect();
+    out.push(Box::new(Rc::new(wiring)));
+    out
+}
+
+/// The `api_*` modules hand their contexts over type-erased; a rebuilt window needs each again,
+/// so each is taken back as the type it is. A type missing here is provided to the first window
+/// only (logged): the window could then not be rebuilt after a WebView2 crash.
+fn reusable(context: Box<dyn Any>) -> Box<dyn RootContext> {
+    use vpnte_ui::{
+        availability::AvailabilityApi, dashboard::DashboardApi, logs::LogsApi,
+        maintenance::MaintenanceApi, panels::PanelsApi, schedule::ScheduleApi, servers::ServersApi,
+        settings::SettingsApi, speedtest::SpeedTestApi, split_tunnel::SplitTunnelApi,
+        traffic_history::TrafficHistoryApi, updates::UpdatesApi, wizard::WizardApi,
+    };
+    macro_rules! typed {
+        ($($kind:ty),+ $(,)?) => {{
+            $(let context = match context.downcast::<$kind>() {
+                Ok(typed) => return typed,
+                Err(other) => other,
+            };)+
+            tracing::error!("a root context of a type `root::reusable` does not list");
+            vpnte_ui::launch::once(context)
+        }};
+    }
+    typed!(
+        Rc<dyn DashboardApi>,
+        Rc<dyn PanelsApi>,
+        Rc<dyn TrayApi>,
+        Rc<dyn ScheduleApi>,
+        Rc<dyn SplitTunnelApi>,
+        Rc<dyn TrafficHistoryApi>,
+        Rc<dyn MaintenanceApi>,
+        Rc<dyn ServersApi>,
+        api_servers::LinkInbox,
+        Rc<dyn SettingsApi>,
+        Rc<dyn WizardApi>,
+        Rc<dyn LogsApi>,
+        Rc<dyn AvailabilityApi>,
+        Rc<dyn SpeedTestApi>,
+        Rc<dyn UpdatesApi>,
+        Rc<dyn vpnte_ui::helper::HelperApi>,
+    )
+}
+
+/// The first frame: the saved language (else Windows'), the saved theme, hidden in the tray for
+/// an autostart with «Сворачивать в трей» (lifecycle-app §6.5).
+fn launch_options(backend: &Backend, args: &Args) -> LaunchOptions {
+    let settings = backend.settings.snapshot();
+    let defaults = LaunchOptions::default();
+    LaunchOptions {
+        lang: settings.locale.unwrap_or_else(vpnte_ui::lang::os_lang),
+        theme: backend
+            .themes
+            .read(|themes| themes.theme(&settings.active_theme_id)),
+        start_hidden: args.autostart && settings.minimize_to_tray,
+        data_dir: webview_dir(
+            &backend.dirs,
+            std::env::var_os("VPNTE_DATA_DIR").is_some(),
+            backend.elevated,
+            defaults.data_dir.clone(),
+        ),
+        ..defaults
+    }
+}
+
+/// The WebView2 user-data folder: the local default (`%LOCALAPPDATA%\VPN Tunnel
+/// Enforcer\WebView2`); inside the data dir's cache when that dir is overridden (tests, CI), so
+/// such a run leaves nothing in the user's profile; a folder of its own when elevated (WebView2
+/// refuses to share a browser process across elevation levels).
+fn webview_dir(dirs: &DataDirs, overridden: bool, elevated: bool, default: PathBuf) -> PathBuf {
+    let dir = if overridden {
+        dirs.cache.join("WebView2")
+    } else {
+        default
+    };
+    if elevated {
+        dir.with_file_name("WebView2.elevated")
+    } else {
+        dir
+    }
+}
+
+/// The root component: the tray around the shell, the pages wired in this build (every other
+/// page stays unregistered and shows the shell's neutral placeholder), the wizard overlay and the
+/// toast host.
+#[component]
+pub fn App() -> Element {
+    let wiring = use_context::<Rc<Wiring>>();
+    let toasts = Toasts::use_provider();
+    let advanced = use_advanced(&wiring.backend);
+    let registry = use_hook(registry);
+    // The page shown before a WebView2 crash, else the start page.
+    let start = use_hook(|| wiring.inbox.page());
+    use_notices(&wiring, toasts);
+    use_instance_commands(&wiring);
+    use_toast_clicks(&wiring);
+    vpnte_ui::webview_errors::use_script_errors();
+    rsx! {
+        TrayHost {
+            Shell {
+                version: env!("CARGO_PKG_VERSION"),
+                advanced,
+                registry,
+                start,
+                overlays: rsx! {
+                    vpnte_ui::wizard::Wizard {}
+                    vpnte_ui::servers::LinkHandoff {}
+                    PageMemory {}
+                },
+                toasts: rsx! {
+                    ToastHost { close_label: t!("common.close") }
+                },
+            }
+        }
+    }
+}
+
+/// Remembers the page shown (inside the shell, where the navigation lives) for a rebuilt window.
+#[component]
+fn PageMemory() -> Element {
+    let wiring = use_context::<Rc<Wiring>>();
+    let nav = use_nav();
+    use_effect(move || wiring.inbox.keep_page(nav.current()));
+    rsx! {}
+}
+
+/// The pages wired to the backend.
+fn registry() -> PageRegistry {
+    let mut registry = PageRegistry::new();
+    registry
+        .register(Page::Dashboard, vpnte_ui::dashboard::Dashboard)
+        .register(Page::Servers, vpnte_ui::servers::ServersPage)
+        .register(Page::Settings, vpnte_ui::settings::SettingsPage)
+        .register(Page::Logs, vpnte_ui::logs::LogsPage);
+    registry
+        .register(Page::SpeedTest, vpnte_ui::speedtest::SpeedTestPage)
+        .register(Page::Availability, vpnte_ui::availability::AvailabilityPage);
+    registry
+        .register(Page::Apps, vpnte_ui::split_tunnel::SplitTunnelPage)
+        .register(
+            Page::TrafficHistory,
+            vpnte_ui::traffic_history::TrafficHistoryPage,
+        )
+        .register(Page::Schedule, vpnte_ui::schedule::SchedulePage);
+    // Advanced mode only: the shell offers the page while `advanced` is on.
+    registry.register(Page::Maintenance, vpnte_ui::maintenance::MaintenancePage);
+    registry
+}
+
+/// The saved advanced mode, followed live (the shell shows the Repair entry only with it on).
+fn use_advanced(backend: &Arc<Backend>) -> Signal<bool> {
+    let settings = backend.settings.clone();
+    let mut advanced = use_signal(|| settings.read(|s| s.advanced_mode));
+    use_future(move || {
+        let settings = settings.clone();
+        async move {
+            let mut changes = settings.subscribe();
+            while changes.changed().await.is_ok() {
+                let on = settings.read(|s| s.advanced_mode);
+                if *advanced.peek() != on {
+                    advanced.set(on);
+                }
+            }
+        }
+    });
+    advanced
+}
+
+/// Backend notices marked `popup` become in-app toasts (the notifier already logged them and
+/// chose between a Windows toast and the window, owner decision D-12).
+fn use_notices(wiring: &Rc<Wiring>, toasts: Toasts) {
+    wiring::use_notices(&wiring.inbox, move |item| {
+        if item.popup {
+            show_notice(toasts, &item.notice);
+        }
+    });
+}
+
+fn show_notice(toasts: Toasts, notice: &Notice) {
+    let kind = match notice.level {
+        Level::Info => ToastKind::Info,
+        Level::Success => ToastKind::Success,
+        Level::Warn => ToastKind::Warning,
+        Level::Error => ToastKind::Error,
+    };
+    toasts.push(
+        kind,
+        tr_now(&notice.title),
+        notice.body.as_ref().map(tr_now),
+    );
+}
+
+/// Commands of later launches: `activate` shows the window; a link (and the one this process
+/// started with) shows the window and goes to the Servers page's add dialog, where the user
+/// confirms it; the installer's `shutdown-for-update` runs the quit cleanup without a question
+/// and exits with 73.
+fn use_instance_commands(wiring: &Rc<Wiring>) {
+    let tray = use_context::<Rc<dyn TrayApi>>();
+    let links = use_context::<crate::api_servers::LinkInbox>();
+    let desktop = use_window();
+    use_future({
+        let (inbox, links) = (wiring.inbox.clone(), links.clone());
+        move || {
+            let link = inbox.take_first_link();
+            let links = links.clone();
+            async move {
+                if let Some(link) = link {
+                    links.offer(link);
+                }
+            }
+        }
+    });
+    let mut updating = false;
+    wiring::use_commands(&wiring.inbox, move |command| match command {
+        Command::Activate => show_window(&desktop),
+        Command::OpenLink(link) => {
+            show_window(&desktop);
+            links.offer(link);
+        }
+        Command::ShutdownForUpdate if !updating => {
+            updating = true;
+            // Outlives any component: the exit must happen whatever the UI does.
+            dioxus::core::spawn_forever(shutdown_for_update(tray.clone(), desktop.clone()));
+        }
+        Command::ShutdownForUpdate => {}
+    });
+}
+
+/// The installer's request (lifecycle-app §3.13): nothing is asked, the bounded cleanup runs
+/// (a failed Soft rollback does not stop it; the journal finishes it at the next start), and the
+/// process acknowledges with 73. A user's quit already under way may end first with 0, which
+/// the installer reads as "not acknowledged" (as the old app did).
+async fn shutdown_for_update(tray: Rc<dyn TrayApi>, desktop: DesktopContext) {
+    tracing::info!("installer asked for shutdown");
+    hide_to_tray(&desktop);
+    if let Err(err) = tray.quit(QuitMode::SkipRestore).await {
+        tracing::warn!(error = %err, "update shutdown: cleanup incomplete");
+    }
+    boot::exit(boot::EXIT_UPDATE_ACK);
+}
+
+/// A click on a Windows toast shows the window.
+fn use_toast_clicks(wiring: &Rc<Wiring>) {
+    let desktop = use_window();
+    wiring::use_clicks(&wiring.inbox, move || show_window(&desktop));
+}
+
+#[cfg(test)]
+mod tests;

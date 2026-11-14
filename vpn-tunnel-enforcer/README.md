@@ -1,210 +1,93 @@
-# VPN Tunnel Enforcer
+# VPN Tunnel Enforcer — рабочее пространство Rust
 
-Windows Electron app that forces all traffic through a controlled VPN path. Runs its own sing-box + Wintun TUN tunnel from imported VPN keys, wraps a local proxy from Happ or any other client, or applies softer per-app proxy settings.
+Исходники клиента 2.0.0 для Windows 10/11 x64 (состояние на 12.11.2026): Rust 2024 (rustc 1.99), интерфейс на
+Dioxus 0.7.10 desktop в WebView2 в одном процессе с бэкендом, движки sing-box 1.14.4 и Xray 26.11.9 —
+дочерние процессы. Режим «Прокси» (loopback-вход `mixed` + системный прокси пользователя) прав не требует.
+«Туннель» (TUN Wintun) и WFP kill switch идут через службу-помощник `vpnte-service` (LocalSystem, движок
+внутри неё; крейт `service`), которую установщик ставит без вопросов — Windows показывает своё окно один
+раз; без службы — только когда приложение запущено от имени администратора, иначе работает «Прокси», а в
+настройках есть кнопка «Установить службу-помощник». Поставка — установщик на пользователя и переносной
+zip. Обзор продукта — `../README.md`.
 
-## Capabilities
+Прежний клиент на Electron/TypeScript (`src/`, `scripts/`, `native/`, `package.json` и др.) удалён; его
+данные приложение один раз импортирует, а следы в системе убирает крейт `cleanup`.
 
-### VPN Modes
-- **Direct VPN**: imports `vless://`, `trojan://`, `ss://`, `vmess://`, `hysteria2://`, `naive://`, `anytls://`, `shadowtls://`, `tuic://`, `wireguard://` (built as a sing-box 1.13 `endpoint`), sing-box outbound JSON, Clash YAML, Xray JSON, subscription URLs, and `happ://add/...` deep links
-- **Hard mode (TUN)**: Wintun adapter via sing-box with `mixed` TCP stack (native Windows kernel + gVisor UDP), `strict_route` DNS hijack, `route_exclude_address` for private ranges, firewall kill-switch, physical adapter lockdown (IPv6 off + DNS pinning), and `DisableSmartNameResolution` registry hardening
-- **Soft mode (Autoconfig)**: configures Android Studio, Gradle, Git, and `HTTP_PROXY` / `HTTPS_PROXY` environment variables via `setx` (uses `socks5h://` to force DNS through proxy), with rollback support
-- **External proxy mode**: independent sing-box processes exposing mixed HTTP/SOCKS proxies on loopback ports starting at `127.0.0.1:17990`, controlled via HTTP API on port 17873 by default
+## Что где
 
-### Proxy Client Detection
-Automatically detects local proxies from:
-- **Happ** — config file scan + port scan + listener enumeration
-- **V2RayN / HiddifyN** — config scan in `AppData/v2rayN`, `AppData/HiddifyN`
-- **Clash Verge Rev / FlClash / Mihomo Party** — config scan + port 7890/7891/7897
-- **NekoRay / NekoBox** — config scan + listener detection
-- **Hiddify Next** — config scan in `AppData/Hiddify`
-- **Karing, Streisand, sing-box, Surfboard** — config scan + port scan
-- System proxy settings (WinHTTP, WinINet, env vars)
-- Live loopback listener enumeration (behavior-based, verifies SOCKS5/HTTP protocol)
-
-### Server Management
-- Groups keys by subscription, preserves removed-but-still-working post-trial keys
-- Subscription refresh with connection-tuple dedup, multi-device support, DoH bypass for blocked URLs
-- End-to-end key health checking through an isolated probe core — sing-box or xray, chosen per profile engine (`resolveProxyEngine`)
-- Per-profile client device identity (PC/Android/iOS/macOS) with uTLS fingerprint emulation
-- Geolocation via 5-source voting (geojs.io batch + ipwho.is + ipinfo.is + ipinfo.io + iplocation.net); ip-api.com intentionally excluded (plaintext HTTP)
-- Export keys to URI (all protocols) or bulk file
-
-### Per-Application Split Tunneling
-- Installed applications bypass the VPN by their **full path** (`process_path_regex`, case-insensitive, anchored): a copy of the same executable name in another folder is not matched. Both the stored spelling and the canonical long path (8.3 short names expanded) are covered.
-- Bare commands without a path (`kind: process`, e.g. `curl.exe`) are matched by name only, by owner decision of 2026-10-13: direct route only, never a kill-switch exception. The mandatory UI warning, the log entry and a separate rule from the VPN core processes are not implemented yet.
-- A rule whose path is not absolute or whose file no longer exists is inactive (logged) and the traffic stays in the tunnel — it never falls back to name matching.
-- Not verified on a live machine: that the process path sing-box reports matches the normalised one (AT-06-008).
-
-### Smart RU Split Routing
-- RU government/geosite rule-sets bundled as local `.srs` files (no remote download = no FATAL sing-box startup failure)
-- IP-checker domains pinned to `proxy-out` (prevent false leak reports)
-- VPN-pinned media (YouTube/Google) forced through proxy
-- Optional maps-direct toggle
-- DNS rules mirror route rules (RU domains resolve via direct RU DNS)
-
-### Leak Prevention (7 layers)
-1. Physical adapter DNS pinning (`Set-DnsClientServerAddress → 192.168.250.254`)
-2. sing-box `hijack-dns` route rule
-3. sing-box `strict_route` WFP filter on port 53
-4. IPv6 disabled on physical adapters (`Disable-NetAdapterBinding ms_tcpip6`)
-5. `Clear-DnsClientCache` on lockdown apply
-6. Teredo/6to4/ISATAP transition adapters disabled
-7. `DisableSmartNameResolution` + `DisableParallelAandAAAA` registry keys
-
-### Crash Recovery
-- **Boot-time recovery script** (`vpnte-recover.ps1`): registered as scheduled task at system startup (SYSTEM account, before logon). Restores firewall, DNS, IPv6, transition adapters, registry keys, env proxy vars, and removes stale TUN adapter — all without the Electron app
-- **Atomic manifest writes**: temp file + rename (survives BSOD mid-write)
-- **Stuck firewall detection**: probes `DefaultOutboundAction=Block` even without VPNTE rules
-- **Manifest preserved on failed rollback**: `deleteManifest()` only after verified success
-- **Env autoconfig rollback** in crash recovery (`autoconfig.rollback(['env'])`)
-- **onExit try/catch**: emergency cleanup (baseline + kill-switch + lockdown) if handler throws
-
-### Diagnostics
-- Route snapshots, sing-box logs, firewall state, DNS state, browser-visible IP checks
-- Active physical-adapter leak test (curl bound to each adapter + Cloudflare DNS side-channel)
-- ETW traffic forensics (pktmon + native Rust sidecar, **off by default** — enable in Advanced Settings)
-- Diagnostics ZIP export with redaction of all secrets
-- System diagnostics (13 collector groups in parallel)
-- Store diagnostics and repair actions
-
-### UI/UX
-- **2026 glassmorphism design**: frosted glass cards (`backdrop-blur 20px`), gradient background depth, accent glow effects
-- **Dark theme**: deep `13 13 17` background with radial accent/success gradient
-- **Light theme**: soft `228 230 235` background (muted, not pure white)
-- **Code-split pages**: `React.lazy` + `Suspense` — initial bundle 880 KB (was 1327 KB)
-- **Global toast notifications**: visible on all pages via Zustand store
-- **Micro-interactions**: button hover scale, tap shrink, card hover lift
-- **Settings persistence**: the main Settings page saves via the «Сохранить» button; notification and kill-switch toggles apply immediately
-- **First-run wizard**: language, theme, VPN client detection, mode, kill-switch level, optional key import (validated before it is kept) and optional autostart (elevated scheduled task, read back and rolled back on failure)
-- **Domain rule hit counts**: connections seen in the sing-box connection poll whose host matches a rule pattern, shown per rule for the current session
-- **Hot-reload with notification**: domain routing and split tunneling changes show "Применяем изменения" before tunnel restart
-
-## Prerequisites
-
-- Windows 10/11 x64
-- Node.js 24.21.0 or newer (for development; enforced during `npm install`)
-- `resources/sing-box.exe` (sing-box 1.13+)
-- `resources/wintun.dll`
-- Optional: local proxy client (Happ, V2RayN, Clash Verge, Hiddify, NekoRay, etc.)
-
-Bundled resources:
-- `resources/geoip-ru.srs`
-- `resources/geosite-category-gov-ru.srs`
-- `resources/vpnte-recover.ps1` (boot-time recovery)
-
-## Setup
-
-```bash
-npm install
+```
+Cargo.toml          рабочее пространство: версии зависимостей, общие lints, профили сборки
+.cargo/config.toml  статический CRT, алиас `cargo xtask`
+crates/<имя>/       крейты `vpnte-<имя>`; у каждого API.md (публичный API) и progress/ (журналы пакетов)
+crates/CONTRACT.md  общие решения и правила для всех крейтов
+xtask/              сборка: закрепление движков, NSIS, dist, smoke-install
+installer/          сценарий NSIS (на пользователя), шимы vpnte-proxy.cmd/.ps1, лицензии
+resources/          engines.toml (закрепы SHA-256), наборы правил .srs; движки кладёт `cargo xtask engines`
+docs/architecture/  устройство рабочего пространства и порядок ревью
 ```
 
-If `sing-box.exe` or `wintun.dll` are missing, download them into `resources/`:
-
-- sing-box: https://github.com/SagerNet/sing-box/releases
-- Wintun: https://www.wintun.net/
-
-## Development
+## Сборка, запуск, тесты
 
 ```bash
-npm run dev
+cargo xtask engines            # скачать закреплённые sing-box, Xray, Wintun, сверить SHA-256, заполнить resources/
+cargo xtask verify             # resources/ совпадает с resources/engines.toml
+cargo build -p vpnte-app       # target/debug/vpn-tunnel-enforcer.exe
+cargo test --workspace
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo xtask dist               # target/dist/: VPN-Tunnel-Enforcer-Setup-<версия>.exe, ...-portable.zip, checksums.txt
+cargo xtask                    # список всех команд
 ```
 
-Open the Electron window, not the plain Vite URL — the renderer expects the preload IPC bridge.
+Переменные окружения:
 
-## Build
+| Переменная | Значение |
+| --- | --- |
+| `VPNTE_RESOURCES_DIR` | папка движков; по умолчанию `<папка exe>\resources`. Для `cargo run -p vpnte-app` — абсолютный путь к `resources/` этого каталога |
+| `VPNTE_DATA_DIR` | папка данных вместо `%APPDATA%\VPN Tunnel Enforcer\` (удобно, чтобы не трогать свои данные) |
+| `VPNTE_LEGACY_DIR` | папка данных старой версии вместо `%APPDATA%\vpn-tunnel-enforcer\` (только чтение) |
+| `VPNTE_LAN_TESTS` | включает тесты, которые слушают адрес в локальной сети (в CI; локально брандмауэр спрашивает разрешение) |
 
-```bash
-npm run dist:win
-```
+Тесты, которые нельзя запускать на рабочей машине, помечены `#[ignore]`: `elevated_*` требуют прав
+администратора (настоящие объекты WFP, TUN, захват пакетов), `system_*` меняют реальные настройки
+пользователя (системный прокси, значение `Run`). Обе группы запускает только CI на одноразовом раннере с
+правами администратора: `cargo test --workspace -- --ignored --test-threads=1`.
 
-Installer: `dist/VPN-Tunnel-Enforcer-Setup-<version>.exe` (current `1.1.24`, ~133 MB)
+## Крейты
 
-Portable: `npm run dist:portable`
+Зависимости идут только сверху вниз по таблице (точно — `[dependencies]` в `crates/<имя>/Cargo.toml`).
 
-### Native ETW Sidecar
+| Крейт | Зависит от | Что внутри |
+| --- | --- | --- |
+| `base` | — | общий контракт: `AppError`, `Msg`, общие перечисления, поиск строк i18n, настройки HTTP/TLS |
+| `core` | base | папки данных, JSON-документы с атомарной записью, секреты DPAPI, настройки, редактирование логов, журналы, разбор адресов, SOCKS5, разрешение имён, реестр операций, чтение данных старой версии |
+| `winnet` | base | Win32: адаптеры и маршруты, процессы и Job Object, счётчики, ICMP, WFP, реестр, окружение, системный прокси, права, автозапуск, единственный экземпляр, буфер обмена, события питания, уведомления |
+| `profiles` | base | модель профиля, импорт, генератор конфигурации sing-box, граф Xray, экспорт; без ввода-вывода |
+| `view` | base | чистая логика стартовой страницы и маскота |
+| `ui` | base, view | интерфейс Dioxus: окно, оболочка, «Пломба», маскот, трей, все страницы; трейты `XxxApi` и демо-бинарники `demo_*` |
+| `servers` | base, core, profiles | список серверов, группы, подписки, выбор, архив, фоновое обновление |
+| `engine` | base, core, winnet, profiles | конфигурации sing-box и Xray, процессы, Clash API, маршрутизация и DNS, Smart RU |
+| `forensics` | base, core, winnet | статистика трафика, история доменов, pktmon + ETW, архив диагностики |
+| `automation` | base, core, winnet | расписание, ротация, AutoPilot, адаптивный обход, обратимые настройки «Прокси», защита браузеров |
+| `probes` | base, core, winnet, profiles, engine | IP и утечки, диагностика, доступность, скорость, пинги, здоровье ключей, живая проверка |
+| `tunnel` | base, core, winnet, profiles, engine | актор подключения, захват (TUN или прокси), жизненный цикл, конечный автомат, история |
+| `proxies` | base, core, profiles, engine | слоты внешних прокси, API управления на `127.0.0.1:17873`, `vpnte-proxy.exe` |
+| `cleanup` | base, core, winnet | одноразовое удаление следов старой версии (только от администратора) |
+| `app` | все | бинарник `vpn-tunnel-enforcer` (`VPN Tunnel Enforcer.exe`): запуск, реализации `XxxApi` над бэкендом, `--setup` |
 
-Traffic forensics uses a native Rust ETW consumer (`native/vpnte-etw-sidecar/`, `ferrisetw` crate). Built automatically by `dist*` scripts via `npm run build:sidecar`. No-op when Rust is not installed.
+Схема работы и что где ревьюить — `docs/architecture/`.
 
-```bash
-npm run build:sidecar
-# or:
-cd native/vpnte-etw-sidecar && cargo build --release
-```
+## Сторонние сервисы
 
-## Test
+Каждый внешний адрес, к которому обращается клиент, перечислен в разделе «Сторонние сервисы» корневого
+`../README.md`: на нём держится обещание сайта «без аналитики и телеметрии». Новый внешний запрос
+добавляйте в тот же коммит туда же: что, зачем, когда и идёт ли он через VPN.
 
-```bash
-npm test
-```
+## Что проверено и что нет
 
-The test suite is run with `npm test -- --reporter=dot`; current totals are reported by Vitest (the CI run on 2026-10-13: 3093 passed / 4 skipped). Windows-only networking operations are guarded and unit-tested where possible. Tests that need administrator rights (for example the end-to-end runtime-directory bootstrap through the elevated helper) skip themselves on an ordinary session and run on the CI runner. `sing-box check` tests use the bundled `resources/sing-box.exe` and run on Windows only. CI (`.github/workflows/ci.yml`) runs typecheck, tests, AT traceability and the native-read probe under real Electron on every PR to `main`.
+- Локально без прав (12.11.2026): `cargo check --workspace --all-targets`, `cargo clippy --workspace
+  --all-targets -- -D warnings` — чисто; `cargo test --workspace` — 2751 пройден, 0 упало, 31 пропущен.
+- Только CI с правами администратора: TUN, WFP, `system_*`, установщик. Последний завершённый прогон
+  (12.11.2026, PR #137): WFP пройден; сквозной тест TUN и проверка удаления установщиком — нет (`../progress.md`).
+- Никогда: реальные российские сети; «Туннель» на машине владельца; обновление поверх версии 1.1.24.
 
-## How Hard Mode Works
-
-1. Selects a Direct VPN profile or detects a local SOCKS5/HTTP proxy from any supported client
-2. Generates sing-box config: TUN inbound (`mixed` stack, `auto_route`, `strict_route`, `route_exclude_address` for private ranges), DNS hijack, `proxy-out` final route
-3. Applies physical adapter lockdown: IPv6 disabled, DNS pinned to TUN resolver, `DisableSmartNameResolution`, transition adapters off
-4. Launches `vpnte-sing-box.exe` elevated from the hardened `%ProgramData%\VPNTE\runtime\<instance-hash>\tun-runtime` directory
-5. Waits for TUN adapter via `os.networkInterfaces()` (no PowerShell spawn)
-6. Sets TUN interface metric to 5 (wins route tiebreak over Wi-Fi)
-7. Engages firewall kill-switch (`DefaultOutboundAction=Block` + Allow rules for sing-box/proxy/TUN)
-8. Starts proxy/server watchdog (5s interval, 3-strike fail, fail-closed)
-9. Monitors for leaks: IP check (30s), active adapter probe (30s + event-driven), competing TUN detector (15s)
-10. On crash: kill-switch kept, auto-restart with backoff [2s, 5s, 10s], post-trial failover to sibling keys
-
-## External Proxy Control API
-
-Packaged builds include `vpnte-proxy.ps1` and `vpnte-proxy.cmd`. The app listens on `127.0.0.1:17873` by default. If that port is busy, it falls back to a free loopback port and writes the actual URL to `%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-endpoint.json`.
-
-| Endpoint | Method | Auth | Purpose |
-|---|---|---|---|
-| `/status` | GET | Yes | Current proxy URL (`?slot=1..47546`) |
-| `/instances` | GET | Yes | Proxy instances with cached data-plane health |
-| `/list` | GET | Yes | Profile list with persisted health (optional `?country=`) |
-| `/start` | POST | Yes | Start with auto-picked profile (`?slot=1..47546`) |
-| `/rotate` | POST | Yes | Round-robin next profile (`?slot=1..47546`) |
-| `/connect` | POST | Yes | Specific profileId (`?slot=1..47546`) |
-| `/trigger` | POST | Yes | Fire-and-forget reconnect (`?slot=1..47546`) |
-| `/healthcheck` | POST | Yes | Run an immediate data-plane check for one slot |
-| `/profiles/healthcheck` | POST | Yes | Check every profile in `?groupId=...` and persist live/dead status |
-| `/stop` | POST | Yes | Kill proxy process (`?slot=1..47546`) |
-| `/connect-profiles` | POST | Yes | Batch start by profile ids |
-| `/instances/prewarm` | POST | Yes | Pre-stage runtime for a slot |
-| `/instances/status-batch` | POST | Yes | Batch status refresh |
-| `/instances/reserve` / `/renew` / `/release` | POST | Yes | Slot leases (TTL ~1h, dropped on restart) |
-
-Token: `X-VPNTE-Control-Token` header, generated per session, written to `%APPDATA%\VPN Tunnel Enforcer\external-proxy-control-token`. `vpnte-proxy.ps1` reads the endpoint file automatically and also accepts `VPNTE_CONTROL_URL` as an override.
-
-Slot 1 uses the legacy proxy port `17990`; each following slot uses the next TCP port. For example, slot 100 uses port `18089`. The PowerShell helper accepts `-Slot 1..47546` and derives the matching default port automatically.
-
-Each `/instances` row includes `health` (`healthy`, `checking`, or `unhealthy`), `egressIp`, `latencyMs`, `lastCheckedAt`, `lastSuccessAt`, and `lastError`. `running` is true only after both the external-IP and HTTPS probes succeed through that row's `proxyUrl`; `processRunning` reports only whether the managed child process is still alive. Repeated timeout/EOF health failures trigger bounded restart attempts, then disable the slot while retaining its diagnostic result.
-
-Each `/list` row includes `status` (`online`, `offline`, or `unknown`), `lastCheckedAt`, `healthLatencyMs`, `healthReason`, `selectedForVpn`, and the external-proxy `activeSlots`. Run `vpnte-proxy.ps1 profiles-health <groupId> -Json` to refresh these values through the authenticated API.
-
-## Boot-Time Recovery
-
-`vpnte-recover.ps1` runs at system startup (before user logon) as a scheduled task with SYSTEM privileges. **Known defect (F-202/F-203):** in packaged builds the task registration currently points at a non-existent path and its `schtasks /TR` quoting is broken, so recovery may not be registered — fix is planned in WP-3. When registered, it restores:
-
-- Firewall `DefaultOutboundAction` to Allow + removes VPNTE rules
-- DNS server addresses to DHCP (resets VPNTE resolver pinning)
-- IPv6 adapter bindings (`Enable-NetAdapterBinding ms_tcpip6`)
-- Teredo/6to4/ISATAP to default state
-- `DisableSmartNameResolution` / `DisableParallelAandAAAA` registry keys
-- DNS client cache flush
-- Orphaned `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` env vars
-- Stale Wintun TUN adapter removal
-
-## Tech Stack
-
-- **Electron 44.4.3** + React 18 + electron-vite 5
-- TypeScript 5.4 (`^5.4.0` in package.json)
-- Zustand for shared renderer state
-- TailwindCSS 3 + class-variance-authority + framer-motion
-- sing-box 1.13 + Wintun (TUN adapter)
-- electron-store 8 for local app state (shared singletons)
-- Native Rust ETW sidecar (ferrisetw)
-- Vitest 4 (see current totals from the test command)
-
-## License
-
-MIT
+Вопросы владельцу и решения по умолчанию — `../ВОПРОСЫ-ВЛАДЕЛЬЦУ.md`.

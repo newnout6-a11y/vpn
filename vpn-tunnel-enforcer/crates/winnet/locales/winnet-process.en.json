@@ -1,0 +1,17 @@
+{
+  "winnet": {
+    "process": {
+      "unsafeDir": "The engines folder path is not allowed — leftover processes were not checked",
+      "listUnreadable": "Could not read the process list — leftover engine processes were not checked",
+      "sweep": {
+        "stopped": "Leftover engine processes stopped: {{count}}",
+        "survived": "Could not stop leftover engine processes: {{count}}",
+        "unknown": "Could not check engine processes: {{count}}"
+      }
+    },
+    "icmp": {
+      "invalid": "Invalid ICMP request parameters",
+      "failed": "Could not send the ICMP request"
+    }
+  }
+}

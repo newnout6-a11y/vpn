@@ -1,0 +1,100 @@
+{
+  "tunnel": {
+    "lifecycle": {
+      "lane": {
+        "stopInProgress": "Protection is still being stopped — please wait",
+        "cancelledDraining": "The cancelled operation is still finishing",
+        "preemptFailed": "The cancelled operation could not be finished",
+        "startInProgress": "Protection is already starting",
+        "stateRefusesStart": "The tunnel state does not allow a new start",
+        "higherPriority": "A higher-priority operation is still running",
+        "startCancelled": "Start cancelled",
+        "startTimeout": "Protection start timed out",
+        "stopTimeout": "Protection stop timed out",
+        "confirmationMissing": "Connection not confirmed: the protection state could not be verified",
+        "cleanupUnconfirmed": "Stop not confirmed: the tunnel or its settings may still be active",
+        "switchFailed": "Could not switch the server",
+        "notRunning": "Protection is not running",
+        "maintenanceRefused": "Turn protection off before network maintenance",
+        "maintenanceBusy": "Network maintenance is running — please wait",
+        "maintenanceTimeout": "Network maintenance timed out"
+      },
+      "server": {
+        "none": "No server selected. Open “Servers” and add a subscription or a key.",
+        "unavailable": "The selected server is not in the server list. Refresh the subscription or pick another server in “Servers”."
+      },
+      "soft": {
+        "rollbackBeforeStart": "Could not turn Proxy mode off before starting the tunnel",
+        "applyFailed": "Could not apply the Proxy mode settings",
+        "envRollbackFailed": "Could not restore the proxy settings. Retry the network restore."
+      },
+      "outcome": {
+        "softModeSwitch": "Proxy mode was turned off before another mode started",
+        "cancelled": "The connection was cancelled",
+        "timeout": "Protection start timed out — the connection was stopped",
+        "preempted": "The connection was interrupted by a higher-priority operation",
+        "failed": "The protection state was not confirmed — the connection was stopped",
+        "failover": "Connections to the server failed — the connection moved to another server of the same group",
+        "failoverRestarts": "The VPN engine stopped and restarts did not bring the connection back — it moved to another server of the same group"
+      },
+      "notice": {
+        "connected": {
+          "title": "Protection on",
+          "body": "All traffic goes through the VPN.",
+          "bodyListed": "Selected apps go through the VPN."
+        },
+        "restored": {
+          "title": "VPN is back",
+          "body": "The internet goes through the VPN again.",
+          "bodyListed": "Selected apps go through the VPN again."
+        },
+        "disconnected": {
+          "title": "Protection off",
+          "body": "Traffic takes the normal route."
+        },
+        "stopFailed": {
+          "title": "Protection stop not completed"
+        },
+        "stopped": {
+          "title": "Protection stopped"
+        },
+        "keptBlocked": {
+          "title": "Connection stopped — traffic stays blocked",
+          "body": "The server did not pass the connection check. The firewall keeps blocking traffic so your IP does not leak. Turn protection on again or off."
+        },
+        "keptSoftBlocked": {
+          "title": "Connection stopped — programs stay blocked",
+          "body": "The server did not pass the connection check. The system proxy still points at the stopped engine: programs that use it get no connection until you turn protection on again or off. Other programs connect directly."
+        },
+        "paused": {
+          "title": "Internet paused",
+          "body": "The VPN is reconnecting. Programs wait for it, or choose Continue without VPN.",
+          "manual": "Automatic reconnect is off. Press Connect, or choose Continue without VPN."
+        },
+        "keyRejected": {
+          "title": "The server rejects the key",
+          "body": "The internet is paused. Update the key or the subscription, or choose Continue without VPN."
+        },
+        "reconnecting": {
+          "title": "The VPN is reconnecting",
+          "body": "Programs go through the VPN again as soon as it is back.",
+          "direct": "Meanwhile programs connect directly, without the VPN.",
+          "other": "Meanwhile programs go through the other VPN."
+        },
+        "failover": {
+          "title": "Server changed",
+          "body": "Connections to “{{from}}” failed. Switched to “{{name}}”, another server of the same group.",
+          "bodyRestarts": "The VPN engine stopped on “{{from}}” and restarts did not bring the connection back. Switched to “{{name}}”, another server of the same group.",
+          "bodySwitched": "Switched to “{{name}}”, another server of the same group."
+        },
+        "restartFailed": {
+          "title": "Could not restart protection"
+        },
+        "internalError": {
+          "title": "Internal error",
+          "body": "The protection state is not confirmed"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,6 @@
+/* helper.css (p-noadmin-ui): the calm line of a control that runs through the helper service.
+   Muted text on the 4 px grid, no colour of its own; the install action is the shared ghost
+   button. An install that failed says why in the page's error ink. */
+.helper-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 8px 0 0; }
+.helper-line-text { margin: 0; font-size: 12px; line-height: 1.45; color: var(--mute); max-width: 72ch; }
+.helper-line-error { flex-basis: 100%; margin: 0; font-size: 12px; line-height: 1.4; font-weight: 500; color: var(--signal-ink); }

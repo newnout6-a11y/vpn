@@ -1,10 +1,10 @@
-<!--{"path":"/how-it-works/","title":"Как это работает — VPN Tunnel Enforcer","description":"От pre-flight до kill-switch: шесть шагов запуска туннеля и почему их порядок критичен для безопасности.","nav":"how"}-->
+<!--{"path":"/how-it-works/","title":"Как это работает — VPN Tunnel Enforcer","description":"Как клиент запускает «Туннель»: права, фильтры WFP до движка, сверка движков, конфигурация через stdin, TUN и сторожа. И чем отличается «Прокси».","nav":"how"}-->
 <section class="page-hero">
   <div class="bg-grid" aria-hidden="true"></div>
   <div class="wrap">
     <nav class="crumbs" aria-label="Хлебные крошки"><a href="{{base}}./">Главная</a><span>/</span><span>Как работает</span></nav>
     <h1 class="h1 split-words">Порядок важнее, чем <span class="grad">набор функций</span></h1>
-    <p class="lead" data-reveal style="--d:.2s">Запуск туннеля — около десяти шагов. Покажем главные шесть. Прокрутите страницу: схема справа меняется вместе с шагами.</p>
+    <p class="lead" data-reveal style="--d:.2s">Так запускается режим «Туннель». Прокрутите страницу: схема справа меняется вместе с шагами. «Прокси» устроен проще, о нём ниже.</p>
   </div>
 </section>
 
@@ -12,12 +12,12 @@
   <div class="story__pin">
     <div class="wrap story__grid">
       <ol class="story__steps">
-        <li class="step"><span class="step__n">01</span><div><h3>Pre-flight</h3><p>Если в системе уже есть чужой TUN-адаптер, клиент отказывается стартовать и объясняет причину. Два туннеля одновременно — это путаница маршрутов.</p></div></li>
-        <li class="step"><span class="step__n">02</span><div><h3>Lockdown адаптеров</h3><p>Физические адаптеры подчиняются туннелю: IPv6 выключается, DNS указывает на резолвер туннеля, отключается умный выбор DNS Windows.</p></div></li>
-        <li class="step"><span class="step__n">03</span><div><h3>Доверенный runtime</h3><p>Проверяются владельцы и права каталогов, а бинарники сверяются с эталоном по SHA-256. При несовпадении атомарный staging заменяет их.</p></div></li>
-        <li class="step"><span class="step__n">04</span><div><h3>Конфиг и запуск</h3><p>Конфигурация генерируется и проверяется командой <code class="mono">sing-box check -c</code>. Только после этого запускается ядро.</p></div></li>
-        <li class="step"><span class="step__n">05</span><div><h3>Ожидание TUN</h3><p>Клиент ждёт, пока адаптер получит <code class="mono">Status=Up</code>. Трафик приложений теперь идёт в Wintun и дальше в ядро.</p></div></li>
-        <li class="step"><span class="step__n">06</span><div><h3>Kill-switch</h3><p>Только теперь включается блокировка: исходящий трафик по умолчанию запрещён на всех трёх профилях брандмауэра. Allow-правило для TUN привязано к алиасу адаптера, и до его появления оно просто не создалось бы.</p></div></li>
+        <li class="step"><span class="step__n">01</span><div><h3>Права</h3><p>TUN-адаптер и фильтры WFP Windows разрешает только администратору. Без прав старт «Туннеля» отклоняется до любых действий, с причиной. Приложение права не просит, UAC не вызывает и молча на «Прокси» не переключается.</p></div></li>
+        <li class="step"><span class="step__n">02</span><div><h3>Kill switch — до движка</h3><p>Фильтры WFP встают раньше, чем запустится движок, в собственном провайдере и подслое. Наружу выходят только движки, само приложение и ваши исключения, DNS мимо туннеля закрыт. Не встали фильтры — подключения нет.</p></div></li>
+        <li class="step"><span class="step__n">03</span><div><h3>Движки сверены</h3><p>Перед каждым запуском sing-box и Xray их файлы сверяются с SHA-256 из <code class="mono">engines.toml</code>, вкомпилированными в приложение: папка установки на пользователя доступна ему на запись. Сверенные файлы остаются открытыми без права записи.</p></div></li>
+        <li class="step"><span class="step__n">04</span><div><h3>Конфигурация через stdin</h3><p>Конфигурация собирается из профиля, ваших правил и Smart RU и уходит движку через stdin: ключи на диск не пишутся. Движок живёт в Job Object приложения и завершается вместе с ним.</p></div></li>
+        <li class="step"><span class="step__n">05</span><div><h3>TUN поднят</h3><p>sing-box поднимает адаптер Wintun (<code class="mono">auto_route</code>, <code class="mono">strict_route</code>, перехват DNS), и фильтры WFP начинают пропускать его. Теперь трафик приложений идёт в туннель.</p></div></li>
+        <li class="step"><span class="step__n">06</span><div><h3>Сторожа</h3><p>IP выхода через туннель проверяется каждые 15 секунд. Упал движок — до трёх перезапусков с паузами 2, 5 и 10 секунд, затем один переход на живой сервер группы. Всё это время блокировка держится.</p></div></li>
       </ol>
       <div class="story__stage">
         <canvas role="img" aria-label="Анимированная схема запуска туннеля"></canvas>
@@ -31,9 +31,9 @@
   <div class="wrap">
     <div class="section__head" data-reveal><span class="eyebrow">Принципы</span><h2 class="h2">Три правила, <span class="grad">на которых всё держится</span></h2></div>
     <div class="grid grid--3" data-stagger>
-      <article class="card" data-reveal><div class="card__icon card__icon--g">{{icon:shield-check|icon}}</div><h3>Fail-closed</h3><p>При падении туннеля kill-switch намеренно остаётся включённым до авторестарта или перехода на другой ключ группы.</p></article>
-      <article class="card" data-reveal><div class="card__icon">{{icon:fingerprint|icon}}</div><h3>Доказательства вместо надежд</h3><p>Если безопасность не доказана, клиент блокирует трафик или помечает «не проверено», но не рапортует об успехе.</p></article>
-      <article class="card" data-reveal><div class="card__icon">{{icon:history|icon}}</div><h3>Откат обязателен</h3><p>Манифест изменений пишется атомарно. После падения приложения состояние восстанавливается, а в strict-режиме блокировка остаётся до вашего решения.</p></article>
+      <article class="card" data-reveal><div class="card__icon card__icon--g">{{icon:shield-check|icon}}</div><h3>Fail-closed</h3><p>При падении туннеля kill switch держит блокировку, пока идут перезапуски и переход на другой сервер. Если ничего не помогло, <code class="mono">standard</code> снимает её вместе с сессией, а <code class="mono">strict</code> держит и после выхода и перезагрузки.</p></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:fingerprint|icon}}</div><h3>Доказательства вместо надежд</h3><p>Если безопасность не доказана, клиент блокирует трафик или пишет «не проверено». «Подключено» в «Прокси» — это два доказательства: движок принимает соединения на своём порту, а системный прокси применён и прочитан обратно.</p></article>
+      <article class="card" data-reveal><div class="card__icon">{{icon:history|icon}}</div><h3>Откат обязателен</h3><p>Изменения системного прокси и переменных окружения пишутся в журнал. При выходе они откатываются всегда, а после аварийного завершения — при следующем запуске.</p></article>
     </div>
   </div>
 </section>
@@ -41,30 +41,30 @@
 <section class="section">
   <div class="wrap split split--top">
     <div data-reveal="left">
-      <span class="eyebrow">Watchdog</span>
-      <h2 class="h2" style="margin:18px 0 20px">Что происходит, <span class="grad">когда всё работает</span></h2>
-      <p class="lead">Туннель — это не «включил и забыл». Клиент постоянно проверяет, что трафик действительно идёт туда, куда должен.</p>
+      <span class="eyebrow">«Прокси»</span>
+      <h2 class="h2" style="margin:20px 0">Без прав, <span class="grad">но без иллюзий</span></h2>
+      <p class="lead">В «Прокси» движок слушает порт на <code class="mono">127.0.0.1</code> (HTTP и SOCKS5), а приложение обратимо направляет на него системный прокси пользователя, по выбору — ещё переменные окружения, Git, Gradle и Android Studio. Маршрутизация, Smart RU, статистика и смена серверов работают так же, как в «Туннеле». Программы, которые системный прокси не используют, идут напрямую, и интерфейс говорит об этом прямо.</p>
     </div>
     <div class="layers" data-stagger data-reveal="right">
-      <div class="layer"><div class="card__icon">{{icon:activity|icon}}</div><div><h3>Hard Mode</h3><p>Проверка egress-IP каждые 15 секунд.</p></div><span class="layer__n">15 с</span></div>
-      <div class="layer"><div class="card__icon">{{icon:plug-zap|icon}}</div><div><h3>Soft Mode</h3><p>TCP-проба прокси, три промаха — proxy-down без роняния TUN.</p></div><span class="layer__n">5 с</span></div>
-      <div class="layer"><div class="card__icon">{{icon:repeat|icon}}</div><div><h3>Авторестарт</h3><p>Бэкофф 2, 5, 10 секунд, затем failover по группе.</p></div><span class="layer__n">2/5/10</span></div>
-      <div class="layer"><div class="card__icon">{{icon:radar|icon}}</div><div><h3>Leak self-test</h3><p>Выход через физический адаптер считается утечкой.</p></div><span class="layer__n">авто</span></div>
+      <div class="layer"><div class="card__icon">{{icon:activity|icon}}</div><div><h3>IP выхода</h3><p>Проверка через туннель, пока он работает.</p></div><span class="layer__n">15 с</span></div>
+      <div class="layer"><div class="card__icon">{{icon:plug-zap|icon}}</div><div><h3>Порт «Прокси»</h3><p>Порт движка не принимает соединения на трёх пробах — это сбой, как падение движка.</p></div><span class="layer__n">3 пробы</span></div>
+      <div class="layer"><div class="card__icon">{{icon:repeat|icon}}</div><div><h3>Авторестарт</h3><p>Паузы 2, 5 и 10 секунд, затем переход на живой сервер группы.</p></div><span class="layer__n">2/5/10</span></div>
+      <div class="layer"><div class="card__icon">{{icon:radar|icon}}</div><div><h3>Заморозка сервера</h3><p>Сервер упал с ошибкой соединения — повтор к нему не раньше чем через 130 секунд, другой сервер пробуется первым.</p></div><span class="layer__n">130 с</span></div>
     </div>
   </div>
 </section>
 
 <section class="section">
   <div class="wrap">
-    <div class="callout" data-reveal>{{icon:triangle-alert|icon}}<div><b>Известное ограничение.</b> Чтобы узнать адрес VPN-сервера до подъёма туннеля, клиент делает bootstrap-запрос DNS напрямую. Имя сервера в этот момент видно провайдеру. Мы не скрываем это, потому что доверие строится на таких оговорках.</div></div>
+    <div class="callout" data-reveal>{{icon:triangle-alert|icon}}<div><b>Известное ограничение.</b> Адрес VPN-сервера клиент узнаёт до подъёма туннеля. Сначала — через DoH по IP-адресам без SNI, и имя сервера провайдеру не видно. Если они не отвечают, следом идут DoH по имени, DNS по TCP и системный резолвер, и на двух последних шагах имя видно. Мы не скрываем это, потому что доверие строится на таких оговорках.</div></div>
   </div>
 </section>
 
 <section class="section">
   <div class="wrap">
     <div class="cta" data-reveal="scale">
-      <h2 class="h2">Хотите увидеть детали <span class="grad">в коде?</span></h2>
-      <p class="lead">Все шаги описаны в README и реализованы в открытом репозитории.</p>
+      <h2 class="h2">Хотите увидеть детали <span class="grad">в коде</span></h2>
+      <p class="lead">Шаги описаны в <code class="mono">API.md</code> крейтов <code class="mono">tunnel</code>, <code class="mono">winnet</code> и <code class="mono">engine</code> и реализованы в открытом репозитории.</p>
       <div class="hero__actions"><a class="btn btn--primary btn--lg" href="https://github.com/newnout6-a11y/vpn" rel="noopener" data-magnet>{{icon:github|icon}} Открыть на GitHub</a><a class="btn btn--ghost btn--lg" href="{{base}}security/">Модель безопасности</a></div>
     </div>
   </div>

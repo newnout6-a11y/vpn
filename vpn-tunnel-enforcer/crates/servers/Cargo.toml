@@ -1,0 +1,38 @@
+[package]
+name = "vpnte-servers"
+description = "The user's server list: groups, subscriptions (fetch and refresh), selection, persistence."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures-util.workspace = true
+hex.workspace = true
+parking_lot.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+vpnte-base.workspace = true
+vpnte-core.workspace = true
+vpnte-profiles.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+fastrand.workspace = true
+# Paused clock for the fallback-URL timing tests.
+tokio = { workspace = true, features = ["test-util"] }
+# Loopback HTTPS panels: relocations are trusted only over HTTPS.
+rustls.workspace = true
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
+
+[lints]
+workspace = true

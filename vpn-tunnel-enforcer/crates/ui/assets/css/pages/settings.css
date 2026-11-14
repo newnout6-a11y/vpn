@@ -1,0 +1,226 @@
+/* settings.css — the Settings page (vpnte_ui::settings) in the «Пломба» language: panels from
+ * widgets.css, hairline rules, square marks, mono captions. Only the swiss.css tokens (--paper
+ * --ink --mute --rule --rule-strong --signal --on-signal --signal-ink), so light and dark follow
+ * [data-theme]. Selectors are prefixed set- (this page only; every page stylesheet is global and
+ * speedtest.css already uses st-). */
+
+/* ── Page ─────────────────────────────────────────────────────────────────── */
+.set-page { gap: 20px; min-height: 100%; max-width: 920px; color: var(--ink); }
+.set-sections { display: flex; flex-direction: column; gap: 16px; padding-bottom: 8px; }
+.set-sections > .w-panel { scroll-margin-top: 16px; }
+
+/* plain text helpers */
+.set-hint { margin: 4px 0 0; font-size: 12px; line-height: 1.45; color: var(--mute); max-width: 72ch; }
+.set-indent { margin: -4px 0 8px; }
+.set-empty { margin: 8px 0; font-size: 13px; color: var(--mute); }
+.set-error { margin: 6px 0 0; font-size: 12px; line-height: 1.4; font-weight: 500; color: var(--signal-ink); }
+.set-result { margin: 6px 0 0; font-size: 12px; line-height: 1.4; color: var(--ink); }
+.set-result::before { content: ''; display: inline-block; width: 6px; height: 6px; margin: 0 8px 1px 0; background: var(--ink); }
+.set-result.is-warn { color: var(--signal-ink); }
+.set-result.is-warn::before { background: var(--signal); }
+
+/* an informative box inside a panel (disguise, Direct VPN, import preview, OS block) */
+.set-note {
+  margin: 4px 0 12px;
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--ink);
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--mute);
+}
+.set-note p + p { margin-top: 4px; }
+.set-note-title { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+.set-note.is-warn { border-left-color: var(--signal); }
+.set-note .set-form-actions { margin-top: 10px; }
+
+/* a group inside a panel with its own caption (exceptions, Smart RU lists, events) */
+.set-subgroup { margin-top: 8px; border-top: 1px solid var(--rule); padding-top: 12px; }
+.set-subgroup-title {
+  margin: 0;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.set-subgroup > .w-switch-row:first-of-type,
+.set-subgroup > .w-row:first-of-type { margin-top: 4px; }
+
+/* a status line: text left, link actions right */
+.set-status-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 2px 0 8px;
+  border: 1px dashed var(--rule-strong);
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--mute);
+}
+.set-status-line.is-warn { border-color: var(--signal); color: var(--signal-ink); }
+.set-status-text { flex: 1 1 auto; min-width: 0; margin: 0; }
+.set-status-label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.set-status-actions { display: flex; flex-shrink: 0; align-items: center; gap: 16px; }
+.set-applying { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--mute); }
+
+/* custom theme buttons */
+.set-chips { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 0 0 12px; }
+
+/* key facts (rotation) */
+.set-facts { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 32px; margin: 4px 0 8px; }
+.set-facts > div { display: flex; flex-direction: column; gap: 2px; }
+.set-facts dt {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mute);
+}
+.set-facts dd { margin: 0; font-size: 14px; font-weight: 600; color: var(--ink); }
+.set-facts > .w-btn { margin-left: auto; }
+
+/* ── Lists (exceptions, domain rules) ─────────────────────────────────────── */
+.set-list { margin: 8px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--rule); }
+.set-list-row {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--rule);
+  padding: 6px 0;
+}
+.set-list-row.is-editing { display: block; padding: 8px 0; }
+.set-list-text { display: flex; min-width: 0; flex: 1 1 auto; flex-direction: column; gap: 2px; }
+.set-list-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; color: var(--ink); }
+.set-list-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--mute); }
+.set-rule-num { width: 32px; flex-shrink: 0; font-size: 11px; color: var(--mute); }
+.set-row-tools { display: flex; flex-shrink: 0; align-items: center; gap: 2px; }
+.set-rules .w-badge { flex-shrink: 0; }
+
+/* ── Forms ────────────────────────────────────────────────────────────────── */
+.set-form { margin-top: 12px; border: 1px solid var(--rule); padding: 12px 14px 14px; }
+.set-form-title {
+  margin: 0 0 8px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.set-form-grid { display: grid; max-width: 640px; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.set-form .w-field > .w-seg { align-self: flex-start; }
+.set-form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.set-input-with { display: flex; align-items: center; gap: 8px; }
+.set-input-with > .w-input { min-width: 0; flex: 1 1 auto; }
+
+.set-rule-form { padding: 8px 0 4px; }
+.set-rule-fields { display: flex; align-items: center; gap: 8px; }
+.set-rule-fields > .w-input { min-width: 0; flex: 1 1 auto; }
+.set-rule-fields > .w-select { width: 160px; flex-shrink: 0; }
+
+/* ── Check lists (rotation servers, import sections) ──────────────────────── */
+.set-checklist { display: flex; flex-direction: column; margin-top: 8px; border-top: 1px solid var(--rule); }
+.set-check-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--rule); padding: 8px 0; }
+.set-check-line > .w-check-row { min-width: 0; flex: 1 1 auto; }
+
+/* ── DNS choices (role=radio buttons: the mark always shows the pushed choice) ── */
+.set-radios { display: flex; flex-direction: column; margin-top: 10px; border-top: 1px solid var(--rule); }
+.set-radio-row { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--rule); }
+.set-radios > .set-radio-line { border-bottom: 1px solid var(--rule); }
+.set-radio-line {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  padding: 10px 4px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+.set-radio-line:hover { background: var(--rule); }
+.set-radio-line[aria-disabled='true'] { cursor: progress; }
+.set-radio-line:focus-visible { outline: 2px solid var(--signal); outline-offset: -2px; }
+.set-radio-mark { position: relative; width: 14px; height: 14px; flex-shrink: 0; border: 1px solid var(--rule-strong); }
+.set-radio-line.is-on .set-radio-mark::after { content: ''; position: absolute; inset: 3px; background: var(--signal); }
+.set-radio-text { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.set-radio-name { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; }
+.set-radio-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--mute); }
+
+/* ── Browser protection ───────────────────────────────────────────────────── */
+.set-browser { align-items: flex-start; }
+.set-browser-list { display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 8px 0 0; padding: 0; list-style: none; }
+.set-browser-list li { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.set-browser-name { color: var(--ink); }
+
+/* ── Rule order (domain rules) ────────────────────────────────────────────── */
+.set-order { margin: 10px 0 4px; font-size: 12px; color: var(--mute); }
+.set-order summary {
+  width: fit-content;
+  cursor: pointer;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.set-order summary:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+.set-order ol { margin: 8px 0 0; padding-left: 20px; list-style: decimal; line-height: 1.6; }
+
+/* ── Save bar: sticky at the bottom of the scrolling page area ────────────── */
+.set-savebar {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: auto;
+  border: 1px solid var(--rule-strong);
+  border-left: 4px solid var(--signal);
+  padding: 12px 16px;
+  background: var(--paper);
+  /* the page area keeps 24 px of padding under the bar: a paper block hides what scrolls there */
+  box-shadow: 4px 4px 0 var(--rule), 0 24px 0 var(--paper);
+}
+.set-savebar-text { min-width: 0; }
+.set-savebar-title { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; color: var(--ink); }
+.set-savebar-count { margin-top: 2px; font-size: 12px; color: var(--mute); }
+.set-savebar-actions { display: flex; flex-shrink: 0; gap: 8px; }
+
+@media (max-width: 760px) {
+  .set-savebar { flex-direction: column; align-items: stretch; }
+  .set-rule-fields { flex-wrap: wrap; }
+}
+
+/* kill switch: three choices, one line each; the unavailable one stays readable (ks-a) */
+.set-choices { display: flex; flex-direction: column; gap: 0; margin: 4px 0 8px; border-top: 1px solid var(--rule); }
+.set-choice { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--rule); cursor: pointer; }
+.set-choice input { margin: 3px 0 0; accent-color: var(--ink); flex-shrink: 0; }
+.set-choice.is-unavailable { cursor: default; }
+.set-choice.is-unavailable .set-choice-name { color: var(--mute); }
+.set-choice-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.set-choice-name { font-size: 13px; font-weight: 600; color: var(--ink); }
+.set-choice-line { font-size: 12px; line-height: 1.45; color: var(--mute); max-width: 72ch; }
+.set-choice-note { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; color: var(--mute); }
+.set-choices > .set-applying { padding: 8px 0 0; }
+/* details few people need: closed by default, calm lines inside */
+.set-details { margin: 0 0 8px; font-size: 12px; color: var(--mute); }
+.set-details > summary {
+  cursor: pointer;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}

@@ -1,0 +1,54 @@
+{
+  "ui": {
+    "dashboard": {
+      "provingExit": "Checking the exit…",
+      "sameExit": "The address is the same as without our VPN: another VPN already runs on this PC.",
+      "netmodeWhitelist": "Servers marked «Whitelists» are tried first",
+      "restartTitle": "The VPN is reconnecting",
+      "restartBody": "If it does not work out, connect again.",
+      "competingTitle": "Second VPN/TUN detected:",
+      "competingBody": "Two tunnels at once break DNS and the internet. Keep one: our VPN or the other client.",
+      "releaseKillSwitch": "Remove the block",
+      "leakTitle": "Your real IP is visible",
+      "leakBody": "Turn the VPN on; if it is on already, choose another server.",
+      "offWithWarnings": "The VPN is off",
+      "recheckFailed": "Could not check the kill switch",
+      "releaseFailed": "Could not remove the kill switch",
+      "engineTitle": "The engine that carries the connection, and why it was chosen",
+      "foreignVpn": {
+        "title": "Another VPN detected",
+        "body": "While it runs, pings are off: its adapter answers for every server. Quit it to see the real latencies."
+      },
+      "allowVpn": {
+        "body": "While “Always” is on, this VPN cannot go online. Allow its program?",
+        "pick": "Choose its program…",
+        "added": "Program allowed",
+        "failed": "Could not allow the program"
+      },
+      "pause": {
+        "title": "Internet paused",
+        "reconnecting": "The VPN is reconnecting…",
+        "manual": "Automatic reconnect is off — press Connect.",
+        "nextAttempt": "The VPN is reconnecting… next attempt in {{wait}}",
+        "keyRejected": "The server rejects the key: update the key or the subscription.",
+        "connect": "Connect",
+        "continue": "Continue without VPN",
+        "turnOffAlways": "Turn off “Always”",
+        "turnOffAlwaysFailed": "Could not turn off “Always”"
+      },
+      "noPause": {
+        "title": "Another VPN",
+        "body": "All traffic already goes through it, so the internet does not pause if our VPN drops."
+      },
+      "proxyTaken": {
+        "title": "System proxy",
+        "body": "Another program changed it: browsers bypass the VPN now.",
+        "restore": "Restore",
+        "failed": "Could not restore the proxy"
+      },
+      "pick": {
+        "cancel": "Cancel"
+      }
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "profiles": {
+    "emit": {
+      "xrayOnly": "This profile runs only on the Xray engine ({{feature}}).",
+      "muxUnsupported": "Multiplex is not supported by this sing-box protocol",
+      "tlsUnsupported": "sing-box does not support TLS for the {{protocol}} protocol.",
+      "transportUnsupported": "sing-box does not support a transport for the {{protocol}} protocol.",
+      "realityWithEch": "Reality cannot be combined with ECH.",
+      "realityOverQuic": "Reality does not work over QUIC.",
+      "pinWithCertificate": "Public key pinning cannot be combined with a custom certificate.",
+      "certPinUnenforced": "sing-box cannot check this key's pinned certificate, and the key turns the usual certificate check off: the server would not be verified at all. The key does not start on sing-box.",
+      "echConfig": "The ECH configuration is invalid.",
+      "ssPlugin": "Shadowsocks plugin “{{plugin}}” is not supported (obfs-local and v2ray-plugin are).",
+      "hy2Obfs": "Hysteria2 obfuscation “{{obfs}}” is not supported or has no password.",
+      "wireguard": {
+        "noAddress": "WireGuard: the local tunnel address is missing (ip=…)",
+        "noPeer": "WireGuard: no peer is specified",
+        "noPrivateKey": "WireGuard: the private key is missing",
+        "noPeerAddress": "WireGuard: a peer has no address",
+        "badPeerPort": "WireGuard: a peer has an invalid port",
+        "noPublicKey": "WireGuard: a peer has no public key",
+        "allowedIpsRequired": "WireGuard: a peer has no allowed_ips (required with several peers)"
+      }
+    }
+  }
+}

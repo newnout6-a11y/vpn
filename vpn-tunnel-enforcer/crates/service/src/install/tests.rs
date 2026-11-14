@@ -1,0 +1,292 @@
+//! Self-removal never queues a path a reinstall could use again (review service-a3); a stop that
+//! did not finish fails install and uninstall (review service-a13).
+use std::path::PathBuf;
+
+use windows::Win32::Foundation::{FreeLibrary, HMODULE};
+use windows::Win32::System::LibraryLoader::{LOAD_LIBRARY_AS_IMAGE_RESOURCE, LoadLibraryExW};
+use windows::core::HSTRING;
+
+use super::*;
+
+#[test]
+fn a_stop_that_did_not_finish_is_a_failure() {
+    assert!(stopped(Ok(true)).is_ok());
+    let err = stopped(Ok(false)).expect_err("still stopping");
+    assert_eq!(err.user_msg().key, "service.install.failed");
+    assert!(
+        stopped(Err(windows::core::Error::from_hresult(
+            windows::core::HRESULT(-1)
+        )))
+        .is_err()
+    );
+}
+
+/// A folder laid out like the install, its exe in use: a copy of a system DLL mapped as an image
+/// stands in for the running exe (an image in use can be renamed, not deleted).
+fn in_use(tag: &str) -> (PathBuf, PathBuf, HMODULE) {
+    let dir = std::env::temp_dir().join(format!("vpnte-remove-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sub")).expect("dirs");
+    let exe = dir.join(EXE_NAME);
+    let system = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"));
+    std::fs::copy(system.join(r"System32\version.dll"), &exe).expect("stand-in exe");
+    std::fs::write(dir.join("sing-box.exe"), b"engine").expect("engine");
+    std::fs::write(dir.join(r"sub\x"), b"x").expect("file");
+    // SAFETY: maps a copy of a system DLL as an image resource (no code runs); freed by the test.
+    let image = unsafe {
+        LoadLibraryExW(
+            &HSTRING::from(exe.as_os_str()),
+            None,
+            LOAD_LIBRARY_AS_IMAGE_RESOURCE,
+        )
+    }
+    .expect("mapped as an image");
+    (dir, exe, image)
+}
+
+/// Unmaps the stand-in and removes the folder (tombstone included).
+fn free(dir: &Path, image: HMODULE) {
+    // SAFETY: the module `in_use` loaded, freed once.
+    let _ = unsafe { FreeLibrary(image) };
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn an_exe_in_use_goes_to_a_tombstone_and_its_path_is_never_queued() {
+    let (dir, exe, image) = in_use("unit");
+    let deleted = std::fs::remove_file(&exe);
+    let mut queued = Vec::new();
+    remove_or_schedule(&dir, &mut |p: &Path| queued.push(p.to_owned()));
+    // A reinstall before the restart writes the exe again at its path.
+    let reinstalled = std::fs::write(&exe, b"reinstalled");
+    free(&dir, image);
+    assert!(deleted.is_err(), "an image in use cannot be deleted");
+    reinstalled.expect("the exe's path is free again");
+    assert!(!queued.contains(&exe), "{queued:?}");
+    let tombstone = queued
+        .first()
+        .and_then(|p| p.file_name()?.to_str().map(str::to_owned));
+    assert!(
+        tombstone.is_some_and(|t| t.starts_with("vpnte-service.exe.") && t.ends_with(".deleted")),
+        "{queued:?}"
+    );
+    // Then the folder (not empty while the tombstone exists); the engine and `sub` went now.
+    assert_eq!(queued.get(1..), Some(&[dir.clone()][..]), "{queued:?}");
+}
+
+/// What Windows will do at the next restart: NT paths in pairs of source and target (an empty
+/// target means "delete"), from both values the session manager reads at boot. Windows Server
+/// 2025 (the CI runner) writes each source with a `*1` flag prefix, Windows 11 without one: the
+/// flag is dropped so both read the same.
+fn restart_queue() -> Vec<String> {
+    [
+        "PendingFileRenameOperations",
+        "PendingFileRenameOperations2",
+    ]
+    .into_iter()
+    .flat_map(session_manager_strings)
+    .map(|entry| without_flags(&entry).to_owned())
+    .collect()
+}
+
+/// `entry` without a leading `*<digits>` flag.
+fn without_flags(entry: &str) -> &str {
+    entry.strip_prefix('*').map_or(entry, |rest| {
+        rest.trim_start_matches(|c: char| c.is_ascii_digit())
+    })
+}
+
+#[test]
+fn queue_entries_read_the_same_with_and_without_the_flag_prefix() {
+    assert_eq!(without_flags(r"*1\??\C:\x"), r"\??\C:\x");
+    assert_eq!(without_flags(r"\??\C:\x"), r"\??\C:\x");
+    assert_eq!(without_flags(""), "");
+}
+
+fn session_manager_strings(name: &str) -> Vec<String> {
+    use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_MULTI_SZ, RegGetValueW};
+    let key = HSTRING::from(r"SYSTEM\CurrentControlSet\Control\Session Manager");
+    let value = HSTRING::from(name);
+    let mut len = 0u32;
+    // SAFETY: a size query with a local out value.
+    let _ = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            &key,
+            &value,
+            RRF_RT_REG_MULTI_SZ,
+            None,
+            None,
+            Some(&mut len),
+        )
+    };
+    // Room to spare: Windows Update may add entries between the two calls.
+    let mut buf = vec![0u16; (len as usize).div_ceil(2) + 0x8000];
+    let mut len = u32::try_from(buf.len() * 2).unwrap_or(u32::MAX);
+    // SAFETY: `len` is the buffer's size in bytes; on return it says how much was written.
+    let read = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            &key,
+            &value,
+            RRF_RT_REG_MULTI_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut len),
+        )
+    };
+    if read.is_err() {
+        return Vec::new();
+    }
+    buf.truncate(len as usize / 2);
+    buf.split(|&c| c == 0)
+        .map(String::from_utf16_lossy)
+        .collect()
+}
+
+/// Review service-a3 with the real queue: the tombstone and the folder are queued for deletion
+/// at the next restart, the exe's own path never. The test deletes the queued files itself, and
+/// Windows skips missing ones at that restart.
+#[test]
+#[ignore = "needs elevation"]
+fn elevated_the_restart_queue_gets_the_tombstone_not_the_exe() {
+    assert!(vpnte_winnet::elevation::is_elevated(), "run elevated");
+    let (dir, exe, image) = in_use("queue");
+    remove_or_schedule(&dir, &mut schedule);
+    let queue = restart_queue();
+    // Windows stores the long path; the temp folder may be named in 8.3 form (`RUNNER~1` on the
+    // CI runner): compare the resolved long paths (resolved while the folder exists), ignoring
+    // case as Windows does.
+    let real = std::fs::canonicalize(&dir)
+        .expect("the folder exists")
+        .display()
+        .to_string();
+    let real = real.strip_prefix(r"\\?\").unwrap_or(&real).to_owned();
+    free(&dir, image);
+    let nt = |p: &str| format!(r"\??\{p}").to_lowercase();
+    let queue: Vec<String> = queue.iter().map(|e| e.to_lowercase()).collect();
+    let (dir_nt, exe_nt) = (nt(&real), nt(&format!(r"{real}\{EXE_NAME}")));
+    let tombstone_prefix = format!("{exe_nt}.");
+    assert!(
+        queue
+            .iter()
+            .any(|e| e.starts_with(&tombstone_prefix) && e.ends_with(".deleted")),
+        "no tombstone queued: {queue:?}"
+    );
+    assert!(queue.contains(&dir_nt), "folder not queued");
+    assert!(!queue.contains(&exe_nt), "the exe's path was queued");
+    let _ = exe;
+}
+
+/// p-tails-a: Settings > Apps runs the installed exe, so the `uninstall` verb finds itself in the
+/// program folder and leaves that folder to the restart queue; any other place is removed now.
+#[test]
+fn the_installed_exe_is_told_from_another_copy() {
+    let dir = Path::new(r"C:\Program Files\VPN Tunnel Enforcer Service");
+    let installed = dir.join("vpnte-service.exe");
+    assert!(inside(&installed, dir));
+    assert!(inside(
+        Path::new(r"c:\program files\vpn tunnel enforcer service\vpnte-service.exe"),
+        dir
+    ));
+    assert!(inside(&installed, Path::new(r"C:\Program Files\")));
+    for other in [
+        r"C:\Program Files\VPN Tunnel Enforcer Service 2\vpnte-service.exe",
+        r"C:\Users\A\AppData\Local\Programs\VPN Tunnel Enforcer\vpnte-service.exe",
+        r"C:\Program Files\VPN Tunnel Enforcer Service",
+    ] {
+        assert!(!inside(Path::new(other), dir), "{other}");
+    }
+}
+
+/// p-tails-a: the size a start puts in the Settings > Apps entry counts every file of the
+/// folder, subfolders too (engines the updater placed, the staged exe).
+#[test]
+fn the_folder_size_counts_every_file() {
+    let dir = std::env::temp_dir().join(format!("vpnte-bytes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join(r"engines\sing-box")).expect("dirs");
+    std::fs::write(dir.join(EXE_NAME), [0u8; 1000]).expect("exe");
+    std::fs::write(dir.join(r"engines\sing-box\sing-box.exe"), [0u8; 24]).expect("engine");
+    assert_eq!(bytes_under(&dir), 1024);
+    assert_eq!(bytes_under(&dir.join("gone")), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Lab F-8 (p-live2): an engine file this process holds open without delete sharing (the engine
+/// pins do so until the process ends) can be neither deleted nor renamed: it is reported as held,
+/// its path is never queued, and the sweep's pass after the holder closed it removes it.
+#[test]
+fn held_engine_files_are_reported_and_swept_later() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    let (dir, exe, image) = in_use("held");
+    let engine = dir.join("sing-box.exe");
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ.0)
+        .open(&engine)
+        .expect("held like a pinned engine");
+    let mut queued = Vec::new();
+    let left = remove_or_schedule(&dir, &mut |p: &Path| queued.push(p.to_owned()));
+    assert_eq!(left.held, std::slice::from_ref(&engine));
+    assert!(!queued.contains(&engine), "{queued:?}");
+    let tombstone = left.tombstone_of(&exe).map(Path::to_path_buf);
+    drop(held);
+    let mut later = Vec::new();
+    let swept = remove_or_schedule(&dir, &mut |p: &Path| later.push(p.to_owned()));
+    let gone = !engine.exists();
+    free(&dir, image);
+    assert!(swept.held.is_empty(), "{:?}", swept.held);
+    assert!(gone, "the sweep deleted the engine");
+    let tombstone = tombstone.expect("the exe went to a tombstone");
+    assert!(
+        tombstone
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("vpnte-service.exe.") && n.ends_with(".deleted")),
+        "{tombstone:?}"
+    );
+}
+
+/// tailsa-a2: an uninstall from the program folder tries a file another program holds open
+/// again until it is free (deleted, its folder too), and names one still held past the limit:
+/// its path is never queued, and the verb fails with the folder named instead of "uninstalled".
+#[test]
+fn held_files_are_tried_again_then_named() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    let hold = |path: &Path| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0)
+            .open(path)
+            .expect("held by another program")
+    };
+    let (dir, _exe, image) = in_use("held-again");
+    let engine = dir.join("sing-box.exe");
+    let held = hold(&engine);
+    let freed = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        drop(held);
+    });
+    let mut queued = Vec::new();
+    let left = remove_held_too(&dir, &mut |p: &Path| queued.push(p.to_owned()), HELD_WAIT);
+    freed.join().expect("holder");
+    assert!(left.held.is_empty(), "{:?}", left.held);
+    assert!(!engine.exists(), "deleted once free");
+    assert_eq!(queued.last(), Some(&dir), "the folder goes after its files");
+    free(&dir, image);
+    let (dir, _exe, image) = in_use("held-stays");
+    let engine = dir.join("sing-box.exe");
+    let held = hold(&engine);
+    let mut queued = Vec::new();
+    let limit = Duration::from_millis(500);
+    let left = remove_held_too(&dir, &mut |p: &Path| queued.push(p.to_owned()), limit);
+    assert_eq!(left.held, std::slice::from_ref(&engine));
+    assert!(!queued.contains(&engine), "{queued:?}");
+    let err = files_left(&dir);
+    assert_eq!(err.user_msg().key, flow::FILES_LEFT);
+    drop(held);
+    free(&dir, image);
+}

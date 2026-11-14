@@ -1,0 +1,15 @@
+{
+  "winnet": {
+    "singleInstance": {
+      "noAnswer": "VPN Tunnel Enforcer is already running but did not respond. Open its window from the tray."
+    },
+    "shell": {
+      "badUrl": "This link cannot be opened: only http and https addresses are allowed.",
+      "noFolder": "Folder not found.",
+      "openFailed": "Windows could not open the link or folder."
+    },
+    "toast": {
+      "productionAumid": "A debug build may not create a shortcut with the installed app's identity."
+    }
+  }
+}

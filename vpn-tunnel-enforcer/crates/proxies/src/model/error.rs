@@ -1,0 +1,200 @@
+//! The error of every proxy operation: an HTTP-like category plus the English `detail` the
+//! control API returns verbatim (its CLI and automation clients match on these texts).
+use vpnte_base::{AppError, ErrorKind, Msg};
+
+/// Failure of a proxy operation. The `String` is the wire `detail`; it never carries secrets.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProxyError {
+    /// 400: bad input (the old `RangeError`).
+    #[error("{0}")]
+    BadRequest(String),
+    /// 404.
+    #[error("{0}")]
+    NotFound(String),
+    /// 409: a busy slot or port.
+    #[error("{0}")]
+    Conflict(String),
+    /// 503: the manager is shutting down.
+    #[error("{0}")]
+    Unavailable(String),
+    /// A failed server-group health check, with the status of its category.
+    #[error("{1}")]
+    Upstream(u16, String),
+    /// 500: engine spawn, readiness or endpoint resolution failed.
+    #[error("{0}")]
+    Engine(String),
+    /// 422: the engine setting (the app's or the server's own) cannot run the profile; the UI
+    /// gets the selection's own sentence (`engine.xray.*`), the wire a fixed English detail.
+    #[error("{REFUSED_DETAIL}")]
+    Refused(Msg),
+}
+
+/// Wire `detail` of [`ProxyError::Refused`] (control API clients match on English texts).
+const REFUSED_DETAIL: &str = "the profile cannot run with the selected engine";
+
+impl ProxyError {
+    /// HTTP status of the control API response.
+    pub fn http_status(&self) -> u16 {
+        match self {
+            ProxyError::BadRequest(_) => 400,
+            ProxyError::NotFound(_) => 404,
+            ProxyError::Conflict(_) => 409,
+            ProxyError::Unavailable(_) => 503,
+            ProxyError::Upstream(status, _) => *status,
+            ProxyError::Engine(_) => 500,
+            ProxyError::Refused(_) => 422,
+        }
+    }
+
+    /// `error` field of the JSON error body.
+    pub fn code(&self) -> &'static str {
+        match self.http_status() {
+            409 => "conflict",
+            403 => "forbidden",
+            _ => "external-proxy-error",
+        }
+    }
+
+    /// The wire text (`detail` of the JSON body, the whole body in text mode).
+    pub fn detail(&self) -> &str {
+        match self {
+            ProxyError::BadRequest(d)
+            | ProxyError::NotFound(d)
+            | ProxyError::Conflict(d)
+            | ProxyError::Unavailable(d)
+            | ProxyError::Upstream(_, d)
+            | ProxyError::Engine(d) => d,
+            ProxyError::Refused(_) => REFUSED_DETAIL,
+        }
+    }
+
+    /// Maps a failed group health check the way the old API did: a validation fault means "no
+    /// such group or it is empty" (404); any other category keeps its status with the generic
+    /// message of the category, never the cause (it can carry paths or OS text).
+    pub fn group_health(kind: ErrorKind) -> Self {
+        // Wire texts of the old `ipcError(category)` (Russian by default); clients match on them.
+        let (status, text) = match kind {
+            ErrorKind::Validation => (404, "Группа не найдена или пуста"),
+            ErrorKind::Conflict => (409, "Операция недоступна в текущем состоянии"),
+            ErrorKind::Permission => (403, "Недостаточно прав для операции"),
+            ErrorKind::Network => (502, "Сетевая операция не выполнена"),
+            ErrorKind::Internal => (500, "Не удалось выполнить операцию"),
+            ErrorKind::Cancelled => (409, "Операция отменена"),
+            ErrorKind::Timeout => (504, "Истекло время выполнения операции"),
+        };
+        ProxyError::Upstream(status, text.into())
+    }
+
+    fn app_kind(&self) -> ErrorKind {
+        match self.http_status() {
+            400 | 403 | 404 | 422 => ErrorKind::Validation,
+            409 | 503 => ErrorKind::Conflict,
+            502 => ErrorKind::Network,
+            504 => ErrorKind::Timeout,
+            _ => ErrorKind::Internal,
+        }
+    }
+
+    /// The UI's sentence: the category's text with the wire detail, or the engine's own refusal.
+    fn user_msg(&self) -> Msg {
+        let key = match self {
+            ProxyError::Refused(msg) => return msg.clone(),
+            ProxyError::BadRequest(_) => "proxies.error.badRequest",
+            ProxyError::NotFound(_) => "proxies.error.notFound",
+            ProxyError::Conflict(_) => "proxies.error.conflict",
+            ProxyError::Unavailable(_) => "proxies.error.unavailable",
+            ProxyError::Upstream(..) => "proxies.error.upstream",
+            ProxyError::Engine(_) => "proxies.error.engine",
+        };
+        Msg::new(key).arg("detail", self.detail())
+    }
+}
+
+/// For the UI: a localized sentence per category with the wire text as `{{detail}}` (the old
+/// card showed the same backend text under its own headline); an engine refusal is its own
+/// sentence.
+impl From<ProxyError> for AppError {
+    fn from(err: ProxyError) -> Self {
+        let msg = err.user_msg();
+        AppError::msg(err.app_kind(), msg).with_source(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AT-00-004 (spec external-proxy §7.1): group health faults keep their category as an HTTP
+    /// status and never expose the raw cause.
+    #[test]
+    fn group_health_faults_map_to_statuses() {
+        let e = ProxyError::group_health(ErrorKind::Conflict);
+        assert_eq!((e.http_status(), e.code()), (409, "conflict"));
+        assert_eq!(e.detail(), "Операция недоступна в текущем состоянии");
+        let e = ProxyError::group_health(ErrorKind::Permission);
+        assert_eq!((e.http_status(), e.code()), (403, "forbidden"));
+        assert_eq!(e.detail(), "Недостаточно прав для операции");
+        let e = ProxyError::group_health(ErrorKind::Validation);
+        assert_eq!((e.http_status(), e.code()), (404, "external-proxy-error"));
+        assert_eq!(e.detail(), "Группа не найдена или пуста");
+        for (kind, status) in [
+            (ErrorKind::Network, 502),
+            (ErrorKind::Internal, 500),
+            (ErrorKind::Cancelled, 409),
+            (ErrorKind::Timeout, 504),
+        ] {
+            assert_eq!(ProxyError::group_health(kind).http_status(), status);
+        }
+    }
+
+    #[test]
+    fn statuses_codes_and_app_errors() {
+        let cases = [
+            (
+                ProxyError::BadRequest("b".into()),
+                400,
+                "external-proxy-error",
+            ),
+            (
+                ProxyError::NotFound("n".into()),
+                404,
+                "external-proxy-error",
+            ),
+            (ProxyError::Conflict("c".into()), 409, "conflict"),
+            (
+                ProxyError::Unavailable("u".into()),
+                503,
+                "external-proxy-error",
+            ),
+            (ProxyError::Engine("e".into()), 500, "external-proxy-error"),
+        ];
+        for (err, status, code) in cases {
+            assert_eq!((err.http_status(), err.code()), (status, code));
+        }
+        let app: AppError = ProxyError::Conflict("Slot 2 is busy".into()).into();
+        assert_eq!(app.kind, ErrorKind::Conflict);
+        let msg = app.user_msg();
+        assert_eq!(msg.key, "proxies.error.conflict");
+        assert_eq!(msg.args[0].1, "Slot 2 is busy");
+        let app: AppError = ProxyError::Engine("x".into()).into();
+        assert_eq!(app.kind, ErrorKind::Internal);
+        assert_eq!(ProxyError::Upstream(504, "t".into()).to_string(), "t");
+    }
+
+    /// An engine refusal reaches the UI as the selection's own sentence with kind Validation,
+    /// never as English text with a raw key; the wire keeps a fixed English detail.
+    #[test]
+    fn engine_refusal_keeps_its_message() {
+        let msg = Msg::new("engine.xray.reject.noXrayClient").arg("protocol", "TUIC");
+        let err = ProxyError::Refused(msg.clone());
+        assert_eq!(
+            (err.http_status(), err.code()),
+            (422, "external-proxy-error")
+        );
+        assert_eq!(err.detail(), REFUSED_DETAIL);
+        assert!(!err.to_string().contains("engine.xray"));
+        let app: AppError = err.into();
+        assert_eq!(app.kind, ErrorKind::Validation);
+        assert_eq!(app.user_msg(), msg);
+    }
+}

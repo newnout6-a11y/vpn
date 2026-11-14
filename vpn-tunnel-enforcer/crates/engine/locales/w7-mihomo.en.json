@@ -1,0 +1,28 @@
+{
+  "engine": {
+    "lab": {
+      "gap": {
+        "missing": "mihomo (the AmneziaWG lab engine) is not enabled: there is no lab record {{file}} in the data folder. Pass the criteria {{criteria}}, record them in that file and restart the app.",
+        "unreadable": "mihomo (the AmneziaWG lab engine) is not enabled: the lab record {{file}} is damaged or has the wrong format.",
+        "incomplete": "mihomo (the AmneziaWG lab engine) is not enabled: the lab record {{file}} does not list every criterion of {{criteria}}.",
+        "otherVersion": "mihomo (the AmneziaWG lab engine) is not enabled: the lab record {{file}} was written for another app version; {{version}} is needed."
+      },
+      "reason": {
+        "amneziawg": "AmneziaWG (lab)"
+      },
+      "reject": {
+        "mihomoAwgOnly": "The mihomo lab engine runs AmneziaWG servers only. Choose Auto, sing-box or Xray for this server."
+      },
+      "preflight": {
+        "unsupported": "mihomo cannot run this AmneziaWG key without losing part of it, so the start was cancelled. Not supported: {{items}}."
+      },
+      "config": {
+        "unresolved": "The AmneziaWG server address could not be determined before mihomo started."
+      },
+      "process": {
+        "exited": "mihomo exited during start-up (code {{code}}).",
+        "notReady": "mihomo started, but its local port did not answer in time."
+      }
+    }
+  }
+}

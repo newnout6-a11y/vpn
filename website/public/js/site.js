@@ -261,14 +261,9 @@
     $$('.odo__c', el).forEach((c) => { c.style.transform = `translateY(-${10 + Number(c.dataset.d)}em)` })
   }
 
-  /* ---------- магнитные кнопки, пятно света на карточках, наклон пульта ---------- */
+  /* ---------- магнитные кнопки, наклон пульта ---------- */
   function initPointerFx() {
     if (!fine || reduce) return
-    addEventListener('pointermove', (e) => {
-      const card = e.target.closest?.('.card')
-      if (card) { const r = card.getBoundingClientRect(); card.style.setProperty('--px', `${e.clientX - r.left}px`); card.style.setProperty('--py', `${e.clientY - r.top}px`) }
-    }, { passive: true })
-
     $$('[data-magnet]').forEach((el) => {
       el.addEventListener('pointermove', (e) => {
         const r = el.getBoundingClientRect()
@@ -464,16 +459,17 @@
       if (buf.length > 5) buf.shift()
       box.innerHTML = buf.join('')
     }
+    // Журнал демо повторяет порядок старта «Туннеля» в клиенте: фильтры WFP до движка, TUN разрешается после подъёма.
     const BOOT = [
-      ['preflight', '', 'чужих TUN-адаптеров нет'],
-      ['lockdown', '', 'IPv6 off · DNS → 192.168.250.254'],
-      ['runtime', '', 'SHA-256 sing-box сверен'],
-      ['config', '', 'sing-box check -c  OK'],
-      ['tun', 'g', 'Status=Up · 192.168.250.252/30'],
-      ['killswitch', 'g', 'DefaultOutboundAction=Block'],
+      ['mode', '', '«Туннель» · от администратора'],
+      ['wfp', 'g', 'kill switch standard · до движка'],
+      ['config', '', 'sing-box 1.14.4 · через stdin'],
+      ['job', '', 'движок в Job Object'],
+      ['tun', 'g', 'Wintun поднят · TUN разрешён'],
+      ['dns', 'g', 'DNS мимо TUN закрыт · 53, 853'],
       ['egress', 'g', 'IP выхода ≠ IP провайдера ✓'],
-      ['watchdog', '', 'проверка egress каждые 15 с'],
-      ['leak-test', 'g', 'физический адаптер заблокирован ✓']
+      ['watchdog', '', 'IP выхода — каждые 15 с'],
+      ['budget', '', '≤ 3 рукопожатий в минуту']
     ]
     let bi = 0, state = 'ok', timers = [], blocked = 0
     if (reduce) BOOT.slice(-5).forEach((l) => log(...l))
@@ -528,10 +524,10 @@
       hero.classList.remove('is-down', 'is-cut'); con.dataset.s = 'ok'
       document.documentElement.classList.remove('tunnel-down')
       lever.setAttribute('aria-pressed', 'false'); label.textContent = 'Оборвать туннель'
-      say('Защищено', 'Hard Mode · directVpn · TUN Up'); upSince = performance.now(); setFlow('идёт')
+      say('Защищено', '«Туннель» · TUN · kill switch standard'); upSince = performance.now(); setFlow('идёт')
       alarm?.classList.remove('on')
       retype('a')
-      log('tun', 'g', 'Status=Up · туннель восстановлен'); log('egress', 'g', 'IP выхода ≠ IP провайдера ✓')
+      log('tun', 'g', 'Wintun поднят · туннель восстановлен'); log('egress', 'g', 'IP выхода ≠ IP провайдера ✓')
       if (sr) sr.textContent = 'Туннель восстановлен, трафик снова идёт через VPN.'
     }
     const cut = () => {
@@ -540,18 +536,18 @@
       document.documentElement.classList.add('tunnel-down')
       after(600, () => hero.classList.remove('is-cut'))
       lever.setAttribute('aria-pressed', 'true'); label.textContent = 'Восстановить туннель'
-      say('Туннель упал', 'kill-switch держит блокировку'); setFlow('0 · заблокирован')
+      say('Туннель упал', 'kill switch держит блокировку'); setFlow('0 · заблокирован')
       alarm?.classList.add('on'); if (next) next.textContent = '· авторестарт через 2 с'
       retype('b')
-      log('core', 'r', 'sing-box завершился · TUN Down')
-      log('killswitch', 'g', 'блокировка сохранена, наружу 0 пакетов')
-      if (sr) sr.textContent = 'Демонстрация: туннель оборван, kill-switch блокирует весь трафик вне VPN.'
+      log('core', 'r', 'sing-box завершился · TUN потерян')
+      log('wfp', 'g', 'блокировка сохранена, наружу 0 пакетов')
+      if (sr) sr.textContent = 'Демонстрация: туннель оборван, kill switch блокирует весь трафик вне VPN.'
       count()
       after(2400, () => {
         state = 'recover'; con.dataset.s = 'recover'
-        say('Авторестарт', 'бэкофф 2 / 5 / 10 с · защита не снята'); setFlow('восстановление')
-        if (next) next.textContent = '· авторестарт: попытка 1'
-        log('watchdog', '', 'авторестарт, бэкофф 2 с')
+        say('Авторестарт', 'попытка 1 из 3 · паузы 2, 5, 10 с · блокировка не снята'); setFlow('восстановление')
+        if (next) next.textContent = '· авторестарт: попытка 1 из 3'
+        log('restart', '', 'авторестарт через 2 с, попытка 1 из 3')
       })
       after(5200, restore)
     }
@@ -631,8 +627,8 @@
   }
 
   /* ---------- симулятор kill-switch (canvas) ---------- */
-  // Две дорожки с одним сценарием: туннель-труба из арок рассыпается при обрыве. У «типичного клиента» пакеты
-  // сворачивают в обход и доходят до сети; у Enforcer падает стена WFP, пакеты разбиваются об неё.
+  // Две дорожки с одним сценарием: туннель-труба из арок рассыпается при обрыве. С выключенным kill switch (так по
+  // умолчанию) пакеты сворачивают в обход и доходят до сети; с включённым падает стена WFP, пакеты разбиваются об неё.
   function initKillSwitch() {
     const root = $('#ks'); if (!root) return
     const PAPER = '242,238,228', OK = '95,208,154', BAD = '255,107,99', WARN = '240,178,74', ACC = '255,90,31'
@@ -700,7 +696,7 @@
       }
       ctx.font = mono(g.f); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
       ctx.fillStyle = phase === 'down' ? `rgb(${BAD})` : phase === 'recover' ? `rgb(${WARN})` : `rgba(${PAPER},.7)`
-      ctx.fillText(phase === 'down' ? 'ТУННЕЛЬ УПАЛ' : phase === 'recover' ? 'авторестарт…' : 'TUN · sing-box', (g.x0 + g.x1) / 2, g.midY - g.ph - g.f * 1.3)
+      ctx.fillText(phase === 'down' ? 'туннель упал' : phase === 'recover' ? 'авторестарт…' : 'TUN · sing-box', (g.x0 + g.x1) / 2, g.midY - g.ph - g.f * 1.3)
 
       // обломки рёбер
       s.debris = s.debris.filter((d) => d.life > 0)
@@ -752,7 +748,7 @@
         ctx.restore()
         if (flash > 0) { ctx.strokeStyle = `rgba(${OK},${flash * 0.8})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.roundRect(g.wallX - ww / 2 - 4 - (1 - flash) * 8, top - 4, ww + 8 + (1 - flash) * 16, hgt + 8, 6); ctx.stroke() }
         ctx.globalAlpha = clamp(s.wall, 0, 1); ctx.fillStyle = `rgb(${OK})`; ctx.font = mono(g.f); ctx.textAlign = 'left'
-        ctx.fillText('WFP · BLOCK', g.wallX + ww + 8, top + full - g.f * 0.6); ctx.globalAlpha = 1
+        ctx.fillText('WFP · блок', g.wallX + ww + 8, top + full - g.f * 0.6); ctx.globalAlpha = 1
       }
 
       // узлы
@@ -774,8 +770,8 @@
     const apply = () => sims.forEach((s) => {
       const plain = s.kind === 'plain'
       if (phase === 'normal') setState(s, 'ok', 'Трафик идёт через туннель')
-      if (phase === 'down') setState(s, plain ? 'leak' : 'blocked', plain ? 'Утечка: пакеты ушли напрямую, виден реальный IP' : 'Fail-closed: kill-switch блокирует всё вне VPN')
-      if (phase === 'recover') setState(s, 'recover', plain ? 'Переподключение… часть трафика уже утекла' : 'Авторестарт с бэкоффом 2/5/10 с, защита не снята')
+      if (phase === 'down') setState(s, plain ? 'leak' : 'blocked', plain ? 'Напрямую: пакеты идут мимо VPN, виден реальный IP' : 'Fail-closed: kill switch блокирует всё вне VPN')
+      if (phase === 'recover') setState(s, 'recover', plain ? 'Переподключение… часть трафика уже ушла напрямую' : 'Авторестарт: паузы 2, 5, 10 с, блокировка не снята')
     })
     const toggleBtn = $('[data-ks-toggle]', root), autoBtn = $('[data-ks-auto]', root)
     const setPhase = (p) => {
@@ -858,9 +854,6 @@
       if (arcT >= 1.25) { arcT = 0; cur = (cur + 1) % cities.length; label && (label.textContent = cities[cur].n) }
       const R = W * 0.4
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, W)
-      const halo = ctx.createRadialGradient(W / 2, W / 2, R * 0.9, W / 2, W / 2, R * 1.35)
-      halo.addColorStop(0, 'rgba(255,90,31,.13)'); halo.addColorStop(1, 'rgba(255,90,31,0)')
-      ctx.fillStyle = halo; ctx.fillRect(0, 0, W, W)
       const body = ctx.createRadialGradient(W / 2 - R * 0.3, W / 2 - R * 0.35, R * 0.1, W / 2, W / 2, R)
       body.addColorStop(0, '#26241b'); body.addColorStop(1, '#0c0b08')
       ctx.beginPath(); ctx.arc(W / 2, W / 2, R, 0, Math.PI * 2); ctx.fillStyle = body; ctx.fill()
@@ -890,26 +883,26 @@
         if (prev && vis) { ctx.strokeStyle = `rgba(255,90,31,${0.15 + 0.85 * (i / (steps * u || 1))})`; ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(p.x, p.y); ctx.stroke() }
         prev = p
       }
-      if (prev && u < 1) { ctx.beginPath(); ctx.arc(prev.x, prev.y, 4, 0, Math.PI * 2); ctx.fillStyle = '#ffd2bd'; ctx.shadowColor = '#ff5a1f'; ctx.shadowBlur = 8; ctx.fill(); ctx.shadowBlur = 0 }
+      if (prev && u < 1) { ctx.beginPath(); ctx.arc(prev.x, prev.y, 4, 0, Math.PI * 2); ctx.fillStyle = '#ffd2bd'; ctx.fill() }
     }
     label && (label.textContent = cities[0].n)
     requestAnimationFrame(frame)
   }
   /* ---------- закреплённая история запуска туннеля ---------- */
   // Тот же визуальный язык, что у симулятора обрыва: труба из рёбер-арок, пакеты со шлейфами, полосатая стена.
-  // До шага «TUN» трафик приложений идёт в обход через физический адаптер; на пятом шаге он переезжает в трубу,
-  // на шестом обходной путь перекрывает стена.
+  // Порядок — старт «Туннеля» в клиенте (crates/tunnel, crates/winnet): стена WFP встаёт на втором шаге, ещё до
+  // движка, и обход через физический адаптер с этого момента закрыт; на пятом шаге трафик переезжает в трубу.
   function initStory() {
     const root = $('#story'); if (!root) return
     const cv = $('canvas', root), ctx = cv.getContext('2d')
     const steps = $$('.step', root), caption = $('.story__caption', root)
     const CAP = [
-      'pre-flight: чужих TUN-адаптеров нет — можно продолжать',
-      'lockdown: физический адаптер подчинён туннелю',
-      'доверенный runtime: бинарники сверены по SHA-256',
-      'sing-box check -c → запуск ядра',
-      'Wintun: Status=Up — трафик приложений завёрнут в TUN',
-      'только теперь — kill-switch: всё вне VPN заблокировано'
+      'права: «Туннель» — только при запуске от имени администратора',
+      'kill switch: фильтры WFP встают до запуска движка',
+      'движки сверены с закреплёнными SHA-256',
+      'конфигурация через stdin → движок в Job Object',
+      'Wintun поднят: WFP пропускает TUN, трафик приложений в туннеле',
+      'сторожа: IP выхода каждые 15 с, авторестарт 2 / 5 / 10 с'
     ]
     const PAPER = '242,238,228', OK = '95,208,154', BAD = '255,107,99', WARN = '240,178,74', ACC = '255,122,69'
     const RIBS = 9
@@ -930,7 +923,7 @@
       const g = geo()
       t += dt
       for (let i = 0; i < 6; i++) anim[i] = reduce ? (target >= i ? 1 : 0) : lerp(anim[i], target >= i ? 1 : 0, 0.07)
-      const wallTo = target >= 5 ? 1 : 0
+      const wallTo = target >= 1 ? 1 : 0
       if (reduce) wall = wallTo
       else { wallV += ((wallTo - wall) * 170 - wallV * 14) * dt; wall += wallV * dt }
       const inTun = smooth(0.15, 0.9, anim[4]) // доля трафика, уже переехавшего в трубу
@@ -938,25 +931,25 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H)
       ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
 
-      // рамка политики брандмауэра
-      if (anim[5] > 0.02) {
-        ctx.globalAlpha = anim[5]
+      // рамка фильтров WFP: встаёт до движка и держится всю сессию
+      if (anim[1] > 0.02) {
+        ctx.globalAlpha = anim[1]
         ctx.beginPath(); ctx.roundRect(W * 0.02, H * 0.1, W * 0.96, H * 0.8, 22)
         ctx.fillStyle = `rgba(${OK},.04)`; ctx.fill()
         ctx.strokeStyle = `rgba(${OK},.7)`; ctx.lineWidth = 1.6; ctx.setLineDash([10, 8]); ctx.lineDashOffset = reduce ? 0 : -t * 24; ctx.stroke(); ctx.setLineDash([])
         ctx.fillStyle = `rgb(${OK})`; ctx.font = mono(g.f * 0.92); ctx.textAlign = 'left'
-        ctx.fillText('WFP · DefaultOutboundAction=Block', W * 0.02 + 18, H * 0.1 + 22); ctx.textAlign = 'center'
+        ctx.fillText('WFP · свой провайдер и подслой', W * 0.02 + 18, H * 0.1 + 22); ctx.textAlign = 'center'
         ctx.globalAlpha = 1
       }
 
       // направляющие: прямой путь через туннель и обход через физический адаптер
       ctx.setLineDash([3, 7]); ctx.lineWidth = 1.2
       ctx.strokeStyle = `rgba(${PAPER},.16)`; ctx.beginPath(); ctx.moveTo(g.ax, g.y); ctx.lineTo(g.tx, g.y); ctx.stroke()
-      const bypass = target >= 5 ? `rgba(${OK},.35)` : target === 4 ? `rgba(${WARN},.6)` : `rgba(${PAPER},.3)`
+      const bypass = target >= 1 ? `rgba(${OK},.35)` : `rgba(${WARN},.6)`
       ctx.strokeStyle = bypass; ctx.beginPath()
       for (let i = 0; i <= 40; i++) { const [x, y] = bez(g, i / 40); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y) }
       ctx.stroke(); ctx.setLineDash([])
-      if (target === 4 && !reduce) { const [bx, by] = bez(g, 0.26); ctx.fillStyle = `rgb(${WARN})`; ctx.font = mono(g.f * 0.82, 400); ctx.fillText('обход ещё открыт', bx + g.f * 2, by + g.f * 2.2) }
+      if (target === 0 && !reduce) { const [bx, by] = bez(g, 0.26); ctx.fillStyle = `rgb(${WARN})`; ctx.font = mono(g.f * 0.82, 400); ctx.fillText('пока напрямую', bx + g.f * 2, by + g.f * 2.2) }
 
       // место под TUN: пусто → сканирование → рёбра трубы
       const slot = (col, a) => { ctx.setLineDash([5, 6]); ctx.lineWidth = 1.3; ctx.strokeStyle = `rgba(${col},${a})`; ctx.beginPath(); ctx.roundRect(g.x0 - g.ph * 0.4, g.y - g.ph, g.x1 - g.x0 + g.ph * 0.8, g.ph * 2, g.ph * 0.5); ctx.stroke(); ctx.setLineDash([]) }
@@ -969,9 +962,9 @@
           const grad = ctx.createLinearGradient(x - 40, 0, x, 0); grad.addColorStop(0, `rgba(${WARN},0)`); grad.addColorStop(1, `rgba(${WARN},.35)`)
           ctx.fillStyle = grad; ctx.fillRect(x - 40, g.y - g.ph + 2, 40, g.ph * 2 - 4)
           ctx.strokeStyle = `rgb(${WARN})`; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.moveTo(x, g.y - g.ph + 2); ctx.lineTo(x, g.y + g.ph - 2); ctx.stroke()
-          ctx.fillStyle = `rgb(${WARN})`; ctx.fillText('чужой TUN?', (g.x0 + g.x1) / 2, g.y - g.ph - g.f * 1.2)
+          ctx.fillStyle = `rgb(${WARN})`; ctx.fillText('права на TUN?', (g.x0 + g.x1) / 2, g.y - g.ph - g.f * 1.2)
         } else {
-          ctx.fillStyle = `rgba(${OK},${0.9 * a})`; ctx.fillText('свободно ✓', (g.x0 + g.x1) / 2, g.y - g.ph - g.f * 1.2)
+          ctx.fillStyle = `rgba(${OK},${0.9 * a})`; ctx.fillText('администратор ✓', (g.x0 + g.x1) / 2, g.y - g.ph - g.f * 1.2)
         }
       }
       for (let i = 0; i < RIBS; i++) {
@@ -981,7 +974,7 @@
         ctx.strokeStyle = `rgba(${ACC},${0.35 + 0.5 * Math.sin(Math.PI * k)})`; ctx.lineWidth = 1.6
         ctx.beginPath(); ctx.roundRect(x - g.ph * 0.36, g.y - g.ph, g.ph * 0.72, g.ph * 2, g.ph * 0.36); ctx.stroke()
       }
-      if (anim[4] > 0.5) { ctx.globalAlpha = anim[4]; ctx.fillStyle = `rgb(${ACC})`; ctx.font = mono(g.f, 500); ctx.fillText('Wintun · Status=Up', (g.x0 + g.x1) / 2, g.y - g.ph - g.f * 1.2); ctx.globalAlpha = 1 }
+      if (anim[4] > 0.5) { ctx.globalAlpha = anim[4]; ctx.fillStyle = `rgb(${ACC})`; ctx.font = mono(g.f, 500); ctx.fillText('Wintun · TUN поднят', (g.x0 + g.x1) / 2, g.y - g.ph - g.f * 1.2); ctx.globalAlpha = 1 }
 
       // ядро → сеть
       if (anim[3] > 0.02) { ctx.strokeStyle = `rgba(${OK},${0.6 * anim[3]})`; ctx.lineWidth = 1.8; ctx.beginPath(); ctx.moveTo(g.cx, g.y); ctx.lineTo(lerp(g.cx, g.tx, anim[3]), g.y); ctx.stroke() }
@@ -992,7 +985,7 @@
         if (p.u >= 1) p.u = 0
         const pos = (u) => { const [bx, by] = bez(g, u); return [bx, lerp(by, g.y + p.lane * g.ph * 0.42, inTun)] }
         const [x, y] = pos(p.u), [x2, y2] = pos(Math.max(0, p.u - 0.035))
-        const a = smooth(0, 0.06, p.u) * (1 - smooth(0.94, 1, p.u)) * (target >= 5 && inTun < 0.5 ? 0 : 1)
+        const a = smooth(0, 0.06, p.u) * (1 - smooth(0.94, 1, p.u)) * (target >= 1 && inTun < 0.5 ? 0 : 1)
         if (a < 0.02) continue
         const col = inTun > 0.5 ? OK : PAPER
         ctx.strokeStyle = `rgba(${col},${a * 0.4})`; ctx.lineWidth = 2.2; ctx.beginPath(); ctx.moveTo(x2, y2); ctx.lineTo(x, y); ctx.stroke()
@@ -1037,16 +1030,16 @@
         ctx.globalAlpha = 1
       }
       node(g.ax, g.y, g.r, 'ПК', PAPER, 1, 'приложения')
-      node(g.tx, g.y, g.r, 'WEB', anim[4] > 0.5 ? OK : PAPER)
+      node(g.tx, g.y, g.r, 'WEB', anim[4] > 0.5 ? OK : PAPER, 1, anim[5] > 0.5 ? 'IP выхода ✓' : '', OK)
       const [nx, nyy] = bez(g, 0.5)
-      node(nx, nyy, g.r, 'NIC', anim[1] > 0.5 ? WARN : PAPER, 1, anim[1] > 0.5 ? 'IPv6 off · DNS → .254' : 'физический адаптер', anim[1] > 0.5 ? WARN : PAPER)
-      if (anim[1] > 0.05) { // замок lockdown
+      node(nx, nyy, g.r, 'NIC', anim[1] > 0.5 ? OK : PAPER, 1, anim[1] > 0.5 ? 'WFP: наружу только движки' : 'физический адаптер', anim[1] > 0.5 ? OK : PAPER)
+      if (anim[1] > 0.05) { // замок: фильтры WFP на физическом адаптере
         const lx = nx - g.r - 16, ly = nyy
-        ctx.globalAlpha = anim[1]; ctx.strokeStyle = `rgb(${WARN})`; ctx.lineWidth = 2
-        ctx.beginPath(); ctx.arc(lx, ly - 4, 5.5, Math.PI, 0); ctx.stroke(); ctx.fillStyle = `rgb(${WARN})`; ctx.beginPath(); ctx.roundRect(lx - 7.5, ly - 4, 15, 11, 2); ctx.fill(); ctx.globalAlpha = 1
+        ctx.globalAlpha = anim[1]; ctx.strokeStyle = `rgb(${OK})`; ctx.lineWidth = 2
+        ctx.beginPath(); ctx.arc(lx, ly - 4, 5.5, Math.PI, 0); ctx.stroke(); ctx.fillStyle = `rgb(${OK})`; ctx.beginPath(); ctx.roundRect(lx - 7.5, ly - 4, 15, 11, 2); ctx.fill(); ctx.globalAlpha = 1
       }
       const coreOk = anim[3] > 0.5
-      node(g.cx, g.y, g.r * (0.7 + 0.3 * anim[2]), 'sing-box', coreOk ? OK : PAPER, anim[2], anim[2] > 0.6 ? 'SHA-256 ✓' + (coreOk ? ' · check ✓' : '') : '', coreOk ? OK : PAPER)
+      node(g.cx, g.y, g.r * (0.7 + 0.3 * anim[2]), 'sing-box', coreOk ? OK : PAPER, anim[2], anim[2] > 0.6 ? 'SHA-256 ✓' + (coreOk ? ' · stdin ✓' : '') : '', coreOk ? OK : PAPER)
       if (target === 2 && !reduce) { // идёт сверка бинарников
         ctx.strokeStyle = `rgb(${ACC})`; ctx.lineWidth = 2.2; ctx.beginPath(); ctx.arc(g.cx, g.y, g.r + 6, t * 4, t * 4 + 1.6); ctx.stroke()
       }
@@ -1145,22 +1138,30 @@
   }
 
   /* ---------- симулятор маршрутизации ---------- */
-  // Порядок правил повторяет route.rules из tunController.ts; Smart RU — порядок из smartRoute.ts
-  // (сначала закреплённые IP-чекеры, потом RU-направления).
+  // Порядок правил повторяет генератор клиента: route.rs (vpn-tunnel-enforcer/crates/engine/src/singbox_config)
+  // и plan.rs (crates/engine/src/routing). Домены Smart RU здесь — короткие выборки из smart_ru.rs: в клиенте
+  // gov-ru и geoip-ru — наборы правил, а geoip-ru решает по IP, а не по имени.
   function initRouting() {
     const root = $('#rt'); if (!root) return
     const input = $('#rt-input'), list = $('#rt-rules'), out = $('#rt-verdict')
-    const smartToggle = $('#rt-smart'), quicToggle = $('#rt-quic')
-    const RU = /(^|\.)(gosuslugi\.ru|nalog\.gov\.ru|mos\.ru|sberbank\.ru|yandex\.ru|ya\.ru|vk\.com|ozon\.ru)$|\.gov\.ru$/
+    const smartToggle = $('#rt-smart'), quicToggle = $('#rt-quic'), tunToggle = $('#rt-tun')
+    const PIN = /(^|\.)(2ip\.ru|myip\.ru|ipify\.org|ipinfo\.io|ifconfig\.me|whoer\.net|google\.com|googleapis\.com|gstatic\.com|youtube\.com|youtu\.be|googlevideo\.com|ytimg\.com|2gis\.ru|2gis\.com)$/
+    const GOV = /(^|\.)(gosuslugi\.ru|mos\.ru|sberbank\.ru|tbank\.ru)$|\.gov\.ru$/
+    const RU = /(^|\.)(yandex\.ru|ya\.ru|vk\.com|ozon\.ru|wildberries\.ru|avito\.ru|kimi\.com)$/
+    const V6 = (h) => h.replace(/^\[|\]$/g, '').includes(':')
+    const V6_PRIVATE = /^\[?(f[cd][0-9a-f]{0,2}:|fe80:|::1\]?$)/
     const RULES = [
-      { id: 'loop', name: 'Loopback и диагностический вход', code: 'mixed-direct-in', test: (q) => /^(127\.|localhost$|\[?::1\]?$)/.test(q.host), v: 'direct', why: 'Локальный трафик не покидает машину — идёт напрямую.' },
-      { id: 'core', name: 'Процессы прокси-ядер (анти-петля)', code: 'process_name', test: (q) => /^(xray|happ|sing-box)(\.exe)?$/.test(q.raw), v: 'direct', why: 'Ядро само ходит к серверу напрямую, иначе трафик зациклился бы в собственном туннеле.' },
-      { id: 'quic', name: 'UDP/443 (QUIC/HTTP3)', code: 'udp:443 → reject', test: (q, o) => o.quic && q.udp && q.port === 443, v: 'block', why: 'Для профилей, которые не умеют надёжно нести UDP, QUIC отклоняется — браузер откатывается на TCP. Нативные UDP-протоколы оставляют QUIC включённым.' },
-      { id: 'dns', name: 'DNS: перехват', code: 'hijack-dns', test: (q) => q.port === 53 || /^dns:/.test(q.raw), v: 'dns', why: 'Любой DNS из TUN уходит в резолвер sing-box (DoH через туннель) — запрос не достаёт до провайдера.' },
-      { id: 'priv', name: 'Частные сети (ip_is_private)', code: 'direct-out', test: (q) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/.test(q.host), v: 'direct', why: 'Локальная сеть остаётся доступной. Правило стоит строго после перехвата DNS, чтобы DNS на шлюз не уходил мимо.' },
-      { id: 'stun', name: 'STUN (анти-WebRTC)', code: 'udp 19302 / 3478', test: (q) => q.port === 19302 || q.port === 3478 || /^stun\./.test(q.host), v: 'vpn', why: 'WebRTC не может обойти туннель и выдать реальный адрес — STUN-запросы идут в туннель.' },
-      { id: 'checker', name: 'Smart RU: IP-чекеры закреплены', code: '2ip.ru, ipify → proxy-out', test: (q, o) => o.smart && /(^|\.)(2ip\.ru|ipify\.org)$/.test(q.host), v: 'vpn', why: 'Чекер обязан показать адрес VPN, даже если хостится в России, поэтому он закреплён за туннелем раньше региональных правил.' },
-      { id: 'smart', name: 'Smart RU: российские направления', code: 'geoip-ru / gov-ru', test: (q, o) => o.smart && RU.test(q.host), v: 'direct', why: 'Госсервисы, банки и всё, что хостится в России, видят реальный российский адрес и не ломаются. В клиенте решает geoip-ru и список gov-ru, здесь — несколько известных адресов.' },
+      { id: 'proc', name: 'Процессы: движки и ваши приложения', code: 'process_path_regex', test: (q) => /^(xray|sing-box)(\.exe)?$/.test(q.raw), v: 'direct', why: 'Наш Xray ходит к серверу напрямую, иначе трафик зациклился бы в собственном туннеле. Здесь же стоят ваши правила для приложений: сначала «напрямую», потом «через VPN».' },
+      { id: 'quic', name: 'UDP/443 (QUIC, HTTP/3)', code: 'udp:443 → reject', test: (q, o) => o.quic && q.udp && q.port === 443, v: 'block', why: 'Для профилей, которые не умеют надёжно нести UDP, QUIC отклоняется сразу, и браузер переходит на TCP. Остальные профили QUIC пропускают: переключатель сверху.' },
+      { id: 'ipv6', name: 'IPv6 вне локальной сети', code: 'ip_version 6 → reject', test: (q) => V6(q.host) && !V6_PRIVATE.test(q.host), v: 'block', why: 'IPv6 через VPN выключен: соединение отклоняется сразу, и программа переходит на IPv4. Утечки мимо туннеля нет.' },
+      { id: 'dns', name: 'DNS: перехват (только «Туннель»)', code: 'hijack-dns', test: (q, o) => o.tun && q.dns, v: 'dns', why: 'Запросы системного резолвера попадают в TUN и уходят в резолвер sing-box: по умолчанию это Cloudflare DoH через туннель.' },
+      { id: 'priv', name: 'Частные сети и loopback', code: 'ip_is_private → direct', test: (q) => /^(127\.|localhost$|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/.test(q.host) || (V6(q.host) && V6_PRIVATE.test(q.host)), v: 'direct', why: 'Локальная сеть и сам компьютер (127.0.0.1, localhost, ::1) остаются доступны напрямую. Правило стоит после перехвата DNS, чтобы запрос к DNS в частной сети всё равно ответил sing-box.' },
+      { id: 'stun', name: 'STUN (WebRTC)', code: 'stun → proxy-out', test: (q) => q.port === 3478 || q.port === 3479 || q.port === 5349 || (q.port >= 19302 && q.port <= 19309) || /^stun\./.test(q.host), v: 'vpn', why: 'STUN закреплён за туннелем, чтобы WebRTC не узнал реальный адрес через прямой маршрут, даже для российского или вашего «прямого» домена.' },
+      { id: 'block', name: 'Ваши правила «блок»', code: 'ваш список', test: () => false, v: 'block', why: '' },
+      { id: 'pins', name: 'Smart RU: закреплено за туннелем', code: 'pins → proxy-out', test: (q, o) => o.smart && PIN.test(q.host), v: 'vpn', why: 'IP-чекер обязан показать адрес VPN, даже если он в зоне .ru; Google и YouTube в России отвечают с местных узлов кэша, которые ломают сессии или режутся. Закрепления стоят раньше российских правил и ваших правил.' },
+      { id: 'gov', name: 'Smart RU: госсервисы и банки', code: 'gov-ru → direct', test: (q, o) => o.smart && GOV.test(q.host), v: 'direct', why: 'Госсервисы и банки из набора gov-ru видят ваш российский адрес и не ломаются.' },
+      { id: 'user', name: 'Ваши правила «напрямую» и «через VPN»', code: 'ваш список', test: () => false, v: 'vpn', why: '' },
+      { id: 'ru', name: 'Smart RU: адреса в России', code: 'geoip-ru → direct', test: (q, o) => o.smart && RU.test(q.host), v: 'direct', why: 'Сайт отвечает с российского адреса: geoip-ru отправляет его напрямую. В клиенте решает IP-адрес, здесь — несколько известных имён.' },
       { id: 'final', name: 'Всё остальное', code: 'final → proxy-out', test: () => true, v: 'vpn', why: 'По умолчанию — через туннель. Что не доказано безопасным, не идёт напрямую.' }
     ]
     list.innerHTML = RULES.map((r) => `<li class="rule" data-id="${r.id}"><span>${r.name}</span><code>${r.code}</code></li>`).join('')
@@ -1176,16 +1177,24 @@
       const host = m ? m[1] : hostPart
       if (m && m[2]) port = Number(m[2])
       if (src.startsWith('dns:')) port = 53
-      return { raw: s, host, port, udp }
+      return { raw: s, host, port, udp, dns: port === 53 }
     }
     let token = 0
+    const on = (btn) => btn?.getAttribute('aria-pressed') === 'true'
     const run = async (value) => {
       const my = ++token
-      const o = { smart: smartToggle.getAttribute('aria-pressed') === 'true', quic: quicToggle?.getAttribute('aria-pressed') === 'true' }
+      const o = { smart: on(smartToggle), quic: on(quicToggle), tun: on(tunToggle) }
       const rows = $$('.rule', list)
       rows.forEach((r) => r.classList.remove('is-hit', 'is-scan', 'is-skip'))
       if (!value.trim()) { out.dataset.v = ''; out.innerHTML = `<span class="muted">Введите адрес или выберите пример — увидите, какое правило сработает первым.</span>`; return }
       const q = parse(value)
+      // В «Прокси» нет TUN: запрос системного резолвера не попадает в движок вовсе, ни одно правило его не видит.
+      if (q.dns && !o.tun) {
+        rows.forEach((r) => r.classList.add('is-skip'))
+        out.dataset.v = 'direct'
+        out.innerHTML = `${ICON.direct}<div><b>Мимо движка</b><small>В «Прокси» перехвата DNS нет: программы, которые используют системный прокси, передают движку имена, а запросы системного резолвера идут как без VPN.</small></div>`
+        return
+      }
       let hit = RULES.length - 1
       for (let i = 0; i < RULES.length; i++) { if (RULES[i].test(q, o)) { hit = i; break } }
       for (let i = 0; i <= hit; i++) {
@@ -1211,6 +1220,7 @@
       btn.textContent = v ? on : off
       run(input.value)
     })
+    bind(tunToggle, 'Режим: «Туннель»', 'Режим: «Прокси»')
     bind(smartToggle, 'Smart RU: включён', 'Smart RU: выключен')
     bind(quicToggle, 'QUIC: блок', 'QUIC: разрешён')
     input.value = 'gosuslugi.ru'; run(input.value)

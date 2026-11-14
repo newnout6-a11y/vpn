@@ -1,0 +1,36 @@
+{
+  "automation": {
+    "tweaks": {
+      "unreadable": "Could not read the current value ({{target}}); nothing was changed",
+      "writeFailed": "Could not write {{target}}; the changes were undone",
+      "notVerified": "{{target}} did not read back as written; the changes were undone",
+      "notDetected": "{{tool}} was not found on this computer; skipped",
+      "otherUser": "The app runs as another administrator: Proxy mode and user settings are unavailable.",
+      "journalCorrupt": "The change journal is damaged: check the Windows proxy settings, the proxy variables and the policies by hand",
+      "rollbackFailed": "Could not restore all the settings Proxy mode changed. Run the network restore again.",
+      "keptUserValue_one": "{{count}} value was changed by another program after it was set and was left as it is",
+      "keptUserValue_few": "{{count}} values were changed by another program after they were set and were left as they are",
+      "keptUserValue_many": "{{count}} values were changed by another program after they were set and were left as they are",
+      "keptUserValue_other": "{{count}} values were changed by another program after they were set and were left as they are",
+      "legacyLeftovers": "The previous version may have left proxy variables behind: {{names}}. If you do not need a proxy, remove them by hand.",
+      "target": {
+        "env": {
+          "name": "Environment variables",
+          "warning": "Sets user environment variables (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY); the previous values come back when it is turned off."
+        },
+        "git": {
+          "name": "Git",
+          "warning": "While on, changes the global Git proxy (http.proxy, https.proxy); the previous proxy comes back when it is turned off."
+        },
+        "gradle": {
+          "name": "Gradle",
+          "warning": "While on, adds a proxy block to the user's gradle.properties; turning it off removes only that block."
+        },
+        "studio": {
+          "name": "Android Studio",
+          "warning": "While on, sets the proxy of the newest installed Android Studio; the previous options come back when it is turned off."
+        }
+      }
+    }
+  }
+}

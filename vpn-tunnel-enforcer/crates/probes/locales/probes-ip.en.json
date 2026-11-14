@@ -1,0 +1,148 @@
+{
+  "probes": {
+    "ip": {
+      "verdict": {
+        "passed": "VPN exit confirmed",
+        "indeterminate": "Exit IP changed — not verified",
+        "notChecked": "Not checked",
+        "failed": "Your real IP is visible"
+      },
+      "adopt": {
+        "noSample": "IP services did not answer: the VPN exit is not confirmed",
+        "mismatch": "The exit IP did not match the expected one",
+        "realIp": "Your real IP is visible through the tunnel — exit not accepted",
+        "stale": "The connection changed during the check"
+      }
+    },
+    "leak": {
+      "why": {
+        "launch": "curl.exe did not start",
+        "processTimeout": "the probe hung and was stopped",
+        "bind": "the address could not be bound",
+        "dns": "DNS error",
+        "tls": "TLS error",
+        "badAnswer": "the answer had no IP address",
+        "curl": "curl error"
+      },
+      "probe": {
+        "reached": "{{alias}} ({{local}}) is seen as {{ip}}",
+        "blocked": "{{alias}} ({{local}}): no way to the Internet (curl {{code}})",
+        "unknown": {
+          "launch": "{{alias}} ({{local}}): not checked — curl.exe did not start",
+          "processTimeout": "{{alias}} ({{local}}): not checked — the probe hung and was stopped",
+          "bind": "{{alias}} ({{local}}): not checked — the address could not be bound (network changing?)",
+          "dns": "{{alias}} ({{local}}): not checked — DNS error",
+          "tls": "{{alias}} ({{local}}): not checked — TLS error",
+          "badAnswer": "{{alias}} ({{local}}): not checked — the answer had no IP address",
+          "curl": "{{alias}} ({{local}}): not checked — curl error"
+        }
+      },
+      "selfTest": {
+        "leak": "Leak detected",
+        "bypassKillSwitchOff": "Kill switch is off: programs bound to the adapter can bypass the VPN",
+        "servicesDisagree": "Possible leak: IP services see different addresses",
+        "ok": "No leaks found in the IPv4 check",
+        "okDual": "No leaks found in the IPv4 and IPv6 check",
+        "cancelled": "Test cancelled (protection stopped)",
+        "tunIp": "IP through the TUN: {{ip}}",
+        "tunIpUnknown": "IP through the TUN: unknown",
+        "directIp": "IP of apps outside the list, around the VPN: {{ip}}",
+        "directIpUnknown": "IP of apps outside the list, around the VPN: unknown",
+        "disagreement": "IP checks disagree: another service sees {{other}}, the TUN shows {{default}}. Anycast and CDN routing can cause this, but part of the traffic may bypass the VPN",
+        "unproven": {
+          "incomplete": "Protection not confirmed: physical adapters were not fully checked",
+          "noTunIp": "Protection not confirmed: the public IP through the TUN is unknown",
+          "noAddresses": "Protection not confirmed: no physical IPv4 addresses to test",
+          "probes": "Protection not confirmed: not every physical adapter probe gave a definite result"
+        }
+      },
+      "check": {
+        "label": {
+          "proxy": "Proxy",
+          "ipv4": "Public IPv4",
+          "ipv6": "Public IPv6",
+          "self-test": "Physical adapter check",
+          "adapters": "TUN/VPN adapters",
+          "dns": "DNS",
+          "engine-log": "Engine log",
+          "direct-out": "Apps' direct-out"
+        },
+        "value": {
+          "ip": "{{ip}}",
+          "text": "{{text}}"
+        },
+        "summary": {
+          "ok": "No leaks found",
+          "warn": "There are warnings — review the items",
+          "fail": "Leak detected",
+          "notChecked": "Incomplete check: some items were not checked"
+        },
+        "proxy": {
+          "directVpn": "Direct VPN (sing-box)",
+          "directVpnOn": "No local proxy is used — sing-box holds the VLESS/Reality tunnel itself. This is normal.",
+          "directVpnOff": "Direct VPN mode: no local proxy is needed. sing-box brings the tunnel up itself.",
+          "open": "The TCP port accepts connections",
+          "closed": "The port does not answer; the TUN cannot start through it",
+          "notNeeded": "Not needed: an external VPN is active",
+          "externalOnly": "Found {{name}}. The app's tunnel is off on purpose, so no upstream proxy is needed now.",
+          "missing": "Not set",
+          "missingDetail": "Diagnostics cannot check the upstream proxy"
+        },
+        "ipv4": {
+          "noAnswer": "No answer",
+          "tunnelOff": "The TUN is off",
+          "realIp": "Your real IP is visible: traffic bypasses the VPN",
+          "vpnExit": "Matches the VPN exit",
+          "noBaseline": "The VPN exit is not confirmed yet — nothing to compare with",
+          "otherExit": "Differs from the confirmed VPN exit (the server may have changed its IP) — the new exit is not verified"
+        },
+        "ipv6": {
+          "none": "None",
+          "adaptersUnknown": "The physical adapters could not be listed",
+          "tunnelOff": "The TUN is off",
+          "absent": "This computer has no IPv6",
+          "noAnswer": "IPv6 services did not answer — not checked",
+          "realIpv6": "Your provider's IPv6 is visible: IPv6 bypasses the VPN",
+          "viaVpn": "IPv6 through the VPN"
+        },
+        "selfTest": {
+          "notRun": "Not run"
+        },
+        "adapters": {
+          "unknown": "The adapters could not be checked",
+          "none": "No conflicting TUN found",
+          "conflict": "External tunnel found: {{name}}",
+          "externalRoute": "External tunnel found: {{name}}. It is the current main route; a second TUN is not needed."
+        },
+        "dns": {
+          "notProbed": "Not checked",
+          "answers": "DNS answers",
+          "silent": "DNS does not answer"
+        },
+        "engineLog": {
+          "tunnelOff": "The tunnel is off",
+          "missing": "The engine log is unavailable — not checked",
+          "empty": "The engine log is empty — not checked",
+          "counts": "proxy-out: {{proxy}}; direct-out: {{direct}}; dns: {{dns}}",
+          "clean": "No errors",
+          "errors_one": "{{count}} error",
+          "errors_few": "{{count}} errors",
+          "errors_many": "{{count}} errors",
+          "errors_other": "{{count}} errors"
+        },
+        "directOut": {
+          "tunnelOff": "The tunnel is off — not checked",
+          "noData": "No data for this session — not checked",
+          "leaked_one": "{{count}} connection bypassed the VPN without a rule",
+          "leaked_few": "{{count}} connections bypassed the VPN without a rule",
+          "leaked_many": "{{count}} connections bypassed the VPN without a rule",
+          "leaked_other": "{{count}} connections bypassed the VPN without a rule",
+          "examples": "Public addresses without the VPN: {{list}}",
+          "none": "No direct connections bypassing the VPN",
+          "expected": "Only allowed direct destinations",
+          "counts": "By rules: {{rules}} (Smart RU: {{smartRu}}); VPN cores: {{core}}"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "wgIni": {
+      "amneziaIncompatible": "An older version saved this AmneziaWG key as plain WireGuard and dropped its handshake settings (S1–S4, H1–H4): the server will not answer. Import the key again to keep them.",
+      "amneziaJunkDropped": "An older version saved this AmneziaWG key as plain WireGuard and dropped its junk packets (Jc, I1–I5, J1–J3): it is easy to block. Import the key again to keep them."
+    }
+  }
+}

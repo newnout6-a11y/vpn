@@ -1,0 +1,108 @@
+{
+  "ui": {
+    "wizard": {
+      "kicker": "First start",
+      "progress": "Setup steps",
+      "steps": {
+        "welcome": "Start",
+        "connect": "Connection",
+        "routing": "Mode",
+        "smartRu": "Smart RU",
+        "protection": "Protection",
+        "done": "Done"
+      },
+      "welcome": {
+        "lead": "Five short questions: language, how to connect, mode, Smart RU and protection. Nothing is applied before the last step, and you can change everything later in Settings.",
+        "note": "The language switches right away. «Skip» saves only the language and leaves everything else at its default."
+      },
+      "connect": {
+        "title": "How to connect",
+        "lead": "The tunnel needs a way out: your own servers from a key or subscription, or the local proxy of a VPN client already running on this computer.",
+        "key": "Key or subscription",
+        "keyText": "Your own servers: a vless://, trojan://, ss://… link or a subscription link. The app connects to them itself.",
+        "proxy": "Local proxy",
+        "proxyText": "Through another VPN client on this computer (Happ, for example): its SOCKS5 or HTTP proxy on 127.0.0.1.",
+        "metaServers_one": "{{count}} server in the list",
+        "metaServers_few": "{{count}} servers in the list",
+        "metaServers_many": "{{count}} servers in the list",
+        "metaServers_other": "{{count}} servers in the list",
+        "metaNotRun": "Not searched",
+        "metaSearching": "Searching…",
+        "metaFound": "Found · {{proxy}}",
+        "metaNotFound": "Not found",
+        "metaFailed": "Search failed",
+        "keyLabel": "Key or subscription link",
+        "keyHint": "Optional: you can add servers later on the Servers page. The key joins the list only after «Finish».",
+        "keyHintHasServers_one": "Optional: {{count}} server is already in the list. A new key is added to it after «Finish».",
+        "keyHintHasServers_few": "Optional: {{count}} servers are already in the list. A new key is added to them after «Finish».",
+        "keyHintHasServers_many": "Optional: {{count}} servers are already in the list. A new key is added to them after «Finish».",
+        "keyHintHasServers_other": "Optional: {{count}} servers are already in the list. A new key is added to them after «Finish».",
+        "keyEmpty": "Paste a key or a subscription link first",
+        "check": "Check",
+        "checking": "Checking…",
+        "found_one": "{{count}} server found",
+        "found_few": "{{count}} servers found",
+        "found_many": "{{count}} servers found",
+        "found_other": "{{count}} servers found",
+        "foundSubscription_one": "Subscription: {{count}} server",
+        "foundSubscription_few": "Subscription: {{count}} servers",
+        "foundSubscription_many": "Subscription: {{count}} servers",
+        "foundSubscription_other": "Subscription: {{count}} servers",
+        "searching": "Looking for a VPN client's proxy on this computer…",
+        "proxyFound": "Found the proxy {{proxy}}. The connection will go through it.",
+        "proxyNotFound": "No proxy found. Start your VPN client and press «Search again» — or go on: you can enter the proxy address later in Settings.",
+        "searchAgain": "Search again"
+      },
+      "routing": {
+        "title": "Mode",
+        "lead": "What goes through the tunnel.",
+        "hard": "Tunnel",
+        "hardText": "All Windows traffic goes through the tunnel: browsers, games, updates, any program.",
+        "soft": "Proxy",
+        "softText": "The app points the Windows system proxy at its own engine. Programs that honour the system proxy go through the VPN, the others go direct."
+      },
+      "smartRu": {
+        "title": "Smart RU",
+        "lead": "How to open Russian sites. You can change it later in Settings.",
+        "on": "Turn on",
+        "onText": "Russian sites — banks, Gosuslugi, marketplaces — open directly, as without a VPN.",
+        "off": "Turn off",
+        "offText": "Everything goes through the VPN; some Russian sites may not open."
+      },
+      "protection": {
+        "title": "Protection",
+        "lead": "Optional. The Kill-Switch is off by default: turn it on if traffic outside the VPN is unacceptable even for a minute.",
+        "autostartHint": "An entry in your Windows account's startup list."
+      },
+      "done": {
+        "title": "All set",
+        "lead": "Check your choices. «Finish» applies everything in one go; if something fails, the wizard stays open and shows why.",
+        "language": "Language",
+        "connection": "Connection",
+        "routing": "Mode",
+        "autostart": "Autostart",
+        "keyAdds_one": "Key: {{count}} server will be added",
+        "keyAdds_few": "Key: {{count}} servers will be added",
+        "keyAdds_many": "Key: {{count}} servers will be added",
+        "keyAdds_other": "Key: {{count}} servers will be added",
+        "keyExisting_one": "Key or subscription: {{count}} server in the list",
+        "keyExisting_few": "Key or subscription: {{count}} servers in the list",
+        "keyExisting_many": "Key or subscription: {{count}} servers in the list",
+        "keyExisting_other": "Key or subscription: {{count}} servers in the list",
+        "keyLater": "Key or subscription: add servers later on the Servers page",
+        "proxyFound": "Local proxy {{proxy}}",
+        "proxyNotFound": "Local proxy: not found yet",
+        "keyUnchecked": "The pasted key was not checked and will not be added. Go back to step 2 and press «Check».",
+        "waitCheck": "Wait until the key check is over"
+      },
+      "demo": {
+        "power": "Turn protection on",
+        "presses": "Presses: {{count}}",
+        "reopen": "Run the wizard again",
+        "diskFull": "Settings could not be saved: the disk is full.",
+        "subscriptionDown": "The subscription server did not answer. Check the link and your internet connection.",
+        "autostartNotRestored": "Setup was not completed, and autostart could not be put back as it was. Check autostart in Settings."
+      }
+    }
+  }
+}

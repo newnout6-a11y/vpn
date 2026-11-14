@@ -1,0 +1,28 @@
+{
+  "app": {
+    "servers": {
+      "liveUnavailable": "Live server checks are not available in this build.",
+      "proxiesUnavailable": "External proxies are not available in this build.",
+      "nothingToCheck": "There are no servers to check.",
+      "probe": {
+        "privateTarget": "The server address is local or private, so it is not probed."
+      },
+      "export": {
+        "unsupported": "This key cannot be exported: neither a link nor JSON can carry it without loss.",
+        "nothing": "There are no keys that can be exported.",
+        "noProxies": "No servers fit a proxy list: only SOCKS, HTTP and naive can.",
+        "writeFailed": "Could not write the file. Choose another folder."
+      },
+      "dialog": {
+        "saveKey": "Save VPN key",
+        "saveAllKeys": "Save all VPN keys",
+        "saveProxyList": "Save proxy list",
+        "textFile": "Text file",
+        "jsonFile": "JSON configuration",
+        "confFile": "AmneziaWG configuration",
+        "mihomoFile": "mihomo proxy (YAML)",
+        "allFiles": "All files"
+      }
+    }
+  }
+}

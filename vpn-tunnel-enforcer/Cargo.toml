@@ -1,0 +1,106 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+repository = "https://github.com/newnout6-a11y/vpn"
+
+# One version of every dependency for the whole workspace. Crates opt in with
+# `name.workspace = true` and add only the features they need.
+[workspace.dependencies]
+vpnte-base = { path = "crates/base" }
+vpnte-core = { path = "crates/core" }
+vpnte-winnet = { path = "crates/winnet" }
+vpnte-profiles = { path = "crates/profiles" }
+vpnte-servers = { path = "crates/servers" }
+vpnte-view = { path = "crates/view" }
+vpnte-ui = { path = "crates/ui" }
+vpnte-engine = { path = "crates/engine" }
+vpnte-probes = { path = "crates/probes" }
+vpnte-forensics = { path = "crates/forensics" }
+vpnte-tunnel = { path = "crates/tunnel" }
+vpnte-proxies = { path = "crates/proxies" }
+vpnte-automation = { path = "crates/automation" }
+vpnte-cleanup = { path = "crates/cleanup" }
+vpnte-service = { path = "crates/service" }
+vpnte-update = { path = "crates/update" }
+
+async-trait = "0.1"
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "process", "net", "io-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry", "fmt"] }
+parking_lot = "0.13"
+base64 = "0.23"
+sha2 = "0.11"
+hex = "0.4"
+getrandom = "0.3"
+fastrand = "2"
+regex = "1"
+url = "2"
+percent-encoding = "2"
+ipnet = "2"
+jiff = "0.2"
+uuid = { version = "1", features = ["v4"] }
+# HTTP(S) client: rustls with the ring provider (no cmake/NASM needed to build),
+# trust anchors from the Windows certificate store.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "socks", "json", "gzip", "brotli", "stream", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+zeroize = "1"
+aes-gcm = "0.11"
+hmac = "0.13"
+# One feature set for the whole workspace, so `windows` is compiled once. A crate that needs
+# more adds it locally: `windows = { workspace = true, features = ["Win32_X"] }`.
+windows = { version = "0.62", features = [
+    "Foundation", "Foundation_Collections", "Data_Xml_Dom", "UI_Notifications",
+    "Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis",
+    "Win32_NetworkManagement_WindowsFilteringPlatform", "Win32_NetworkManagement_WindowsFirewall",
+    "Win32_Networking_WinSock",
+    "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com", "Win32_System_Console", "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Environment",
+    "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Kernel", "Win32_System_LibraryLoader",
+    "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Pipes", "Win32_System_Power",
+    "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_RemoteDesktop",
+    "Win32_System_Rpc", "Win32_System_SystemInformation", "Win32_System_TaskScheduler",
+    "Win32_System_Threading", "Win32_System_Time", "Win32_System_Variant",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging",
+] }
+dioxus = { version = "=0.7.10", default-features = false, features = ["desktop", "macro", "html", "signals", "hooks", "document"] }
+
+[workspace.lints.rust]
+unused_must_use = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.dev]
+# No debug info: smaller target directories and faster links. A panic still reports its
+# source location; use a debugger build locally with `--config profile.dev.debug=true`.
+debug = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+# Unwind, not abort: a panicking background task must not take the whole client
+# down (the kill switch of the «standard» level lives only as long as the process).
+panic = "unwind"

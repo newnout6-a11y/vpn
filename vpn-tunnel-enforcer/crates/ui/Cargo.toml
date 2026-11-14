@@ -1,0 +1,97 @@
+[package]
+name = "vpnte-ui"
+description = "Dioxus desktop UI: window frame, shell, the start page in the Plomba design, the mascot and every other page. Talks to the backend only through view models and API traits."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+dioxus.workspace = true
+fastrand.workspace = true
+futures-util.workspace = true
+# tray: decodes the app icon and draws the status badges (dioxus-desktop already builds image 0.25)
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+# frame: the embedded assets directory
+include_dir = "0.7.4"
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+vpnte-base.workspace = true
+vpnte-view.workspace = true
+# frame: WebView2 settings, at the versions wry builds
+webview2-com = "0.38"
+windows.workspace = true
+windows-core-061 = { package = "windows-core", version = "0.61" }
+
+[dev-dependencies]
+# paused clock for the coalescing tests (traffic_history)
+tokio = { workspace = true, features = ["test-util"] }
+
+[[bin]]
+name = "demo_frame"
+path = "src/bin/demo_frame.rs"
+
+[[bin]]
+name = "demo_shell"
+path = "src/bin/demo_shell.rs"
+
+[[bin]]
+name = "demo_panels"
+path = "src/bin/demo_panels.rs"
+
+[[bin]]
+name = "demo_mascot"
+path = "src/bin/demo_mascot/main.rs"
+
+[[bin]]
+name = "demo_widgets"
+path = "src/bin/demo_widgets/main.rs"
+
+[[bin]]
+name = "demo_dashboard"
+path = "src/bin/demo_dashboard.rs"
+
+[[bin]]
+name = "demo_tray"
+path = "src/bin/demo_tray.rs"
+
+[[bin]]
+name = "demo_servers"
+path = "src/bin/demo_servers.rs"
+
+[[bin]]
+name = "demo_settings"
+path = "src/bin/demo_settings.rs"
+
+[[bin]]
+name = "demo_logs"
+path = "src/bin/demo_logs.rs"
+
+[[bin]]
+name = "demo_tools"
+path = "src/bin/demo_tools.rs"
+
+[[bin]]
+name = "demo_lists"
+path = "src/bin/demo_lists.rs"
+
+[[bin]]
+name = "demo_maintenance"
+path = "src/bin/demo_maintenance.rs"
+
+[[bin]]
+name = "demo_wizard"
+path = "src/bin/demo_wizard.rs"
+
+[lints]
+workspace = true
+
+[features]
+# WP-12 lab: the lab engine's label and the per-server choice of it. Never in a production build.
+lab = ["vpnte-base/lab"]

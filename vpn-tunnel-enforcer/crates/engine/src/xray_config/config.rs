@@ -1,0 +1,153 @@
+//! Runtime config of one Xray instance: the authenticated loopback SOCKS inbound `in`, the
+//! proxy (translated outbound or compiled provider graph), `direct` and `block`.
+use std::fmt;
+
+use serde_json::{Value, json};
+use vpnte_base::types::ClientDevice;
+use vpnte_profiles::model::Profile;
+use vpnte_profiles::xray_native::{self, CompiledGraph};
+
+use super::translate::translate;
+use super::{BLOCK_TAG, DIRECT_TAG, INBOUND_TAG, PROXY_TAG, XrayConfigError};
+use crate::slot::SlotEndpoint;
+
+/// Private, loopback, link-local and CGNAT destinations go `direct`. Explicit CIDRs because
+/// `geoip:private` needs geoip.dat, which is not shipped.
+const PRIVATE_CIDRS: [&str; 6] = [
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "100.64.0.0/10",
+];
+
+/// What the instance's `proxy` route leads to.
+#[derive(Clone, PartialEq)]
+pub enum ProxyGraph {
+    /// One translated outbound tagged `proxy` ([`translate`]).
+    Translated(Value),
+    /// A provider graph compiled with namespaced tags; its selected outbound is `proxy`.
+    Native(Box<CompiledGraph>),
+}
+
+/// Outbounds carry credentials: `{:?}` shows only the shape.
+impl fmt::Debug for ProxyGraph {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProxyGraph::Translated(outbound) => {
+                let protocol = outbound.get("protocol").and_then(Value::as_str);
+                f.debug_tuple("Translated").field(&protocol).finish()
+            }
+            ProxyGraph::Native(graph) => f.debug_tuple("Native").field(graph).finish(),
+        }
+    }
+}
+
+/// The proxy side of an Xray config for `p`: its provider graph (validated and compiled), else
+/// the translated typed profile. Addresses are still the stored host names. mux.cool is removed
+/// from a provider's XHTTP outbounds: XHTTP multiplexes itself (xmux) and the XHTTP authors
+/// advise against mux.cool on top (XTLS discussion #4113); [`super::warnings`] says so.
+pub fn proxy_graph(p: &Profile, device: ClientDevice) -> Result<ProxyGraph, XrayConfigError> {
+    let Some(graph) = &p.native_xray else {
+        return translate(p, device).map(ProxyGraph::Translated);
+    };
+    xray_native::validate(graph)?;
+    let primary = xray_native::selected_outbound(graph)?;
+    let mut compiled = xray_native::compile(graph, primary)?;
+    for outbound in compiled.outbounds.iter_mut().filter(|o| xhttp_with_mux(o)) {
+        if let Some(outbound) = outbound.as_object_mut() {
+            outbound.remove("mux");
+        }
+    }
+    Ok(ProxyGraph::Native(Box::new(compiled)))
+}
+
+/// An XHTTP (or old SplitHTTP) outbound with mux.cool enabled.
+pub(super) fn xhttp_with_mux(outbound: &Value) -> bool {
+    let mux = outbound
+        .get("mux")
+        .and_then(|m| m.get("enabled"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let stream = outbound.get("streamSettings");
+    let network = ["method", "network"]
+        .into_iter()
+        .find_map(|k| stream?.get(k)?.as_str());
+    mux && network
+        .is_some_and(|n| ["xhttp", "splithttp"].contains(&n.to_ascii_lowercase().as_str()))
+}
+
+/// The complete Xray config for one instance listening on `ep` (valid by construction, so this
+/// cannot fail).
+///
+/// Log: `info` (Xray reports dial and handshake failures only at Info), error log to stdout
+/// (`""`), access log off. Never `dns`, `api`, `stats`, provider inbounds or provider log.
+pub fn build_config(graph: &ProxyGraph, ep: &SlotEndpoint) -> Value {
+    let creds = ep.creds();
+    let inbound = json!({
+        "tag": INBOUND_TAG,
+        "listen": "127.0.0.1",
+        "port": ep.port(),
+        "protocol": "socks",
+        // UDP stays on: the slots carry the UDP of UDP-capable profiles (`UdpPolicy::of`), for
+        // the tunnel and for the external proxy slots. Xray 26.11.9 (proxy/socks) opens no UDP
+        // port of its own: each UDP ASSOCIATE needs the password and gets a fresh relay socket
+        // that serves only the sender of its first datagram (tests/udp.rs). What remains is a
+        // race for a fresh association before its client's first datagram, which gives a local
+        // program nothing the tunnel and the open proxy capture do not give it anyway.
+        "settings": {
+            "udp": true,
+            "auth": "password",
+            "accounts": [{"user": creds.user, "pass": creds.pass}],
+        },
+        // Proxied browsers may carry another SNI / Host than the requested endpoint: route on
+        // the sniffed name without replacing the destination.
+        "sniffing": {"enabled": true, "destOverride": ["tls", "http", "quic"], "routeOnly": true},
+    });
+    let private = json!({"type": "field", "ip": PRIVATE_CIDRS, "outboundTag": DIRECT_TAG});
+    let mut config = json!({
+        "log": {"loglevel": "info", "access": "none", "error": ""},
+        "inbounds": [inbound],
+    });
+    let (mut outbounds, routing) = match graph {
+        ProxyGraph::Translated(proxy) => {
+            let all = json!({"type": "field", "network": "tcp,udp", "outboundTag": PROXY_TAG});
+            (vec![proxy.clone()], json!({"rules": [private, all]}))
+        }
+        ProxyGraph::Native(g) => {
+            let mut first = private;
+            first["inboundTag"] = json!([INBOUND_TAG]);
+            let mut entry =
+                json!({"type": "field", "inboundTag": [INBOUND_TAG], "network": "tcp,udp"});
+            if let (Some(rule), Some(target)) = (entry.as_object_mut(), g.entry.as_object()) {
+                rule.extend(target.clone());
+            }
+            let mut rules = vec![first];
+            rules.extend(g.rules.iter().cloned());
+            rules.push(entry);
+            // Whatever a provider graph injects under another inbound tag (e.g. a VLESS reverse
+            // tunnel) is blackholed; provider loopbacks never fall into `direct`.
+            rules.push(json!({"type": "field", "network": "tcp,udp", "outboundTag": BLOCK_TAG}));
+            let mut routing = json!({ "rules": rules });
+            if !g.balancers.is_empty() {
+                routing["balancers"] = Value::Array(g.balancers.clone());
+            }
+            for (key, value) in [
+                ("observatory", &g.observatory),
+                ("burstObservatory", &g.burst_observatory),
+                ("policy", &g.policy),
+            ] {
+                if let Some(value) = value {
+                    config[key] = value.clone();
+                }
+            }
+            (g.outbounds.clone(), routing)
+        }
+    };
+    outbounds.push(json!({"tag": DIRECT_TAG, "protocol": "freedom"}));
+    outbounds.push(json!({"tag": BLOCK_TAG, "protocol": "blackhole"}));
+    config["outbounds"] = Value::Array(outbounds);
+    config["routing"] = routing;
+    config
+}

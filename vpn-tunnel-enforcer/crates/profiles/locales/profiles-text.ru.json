@@ -1,0 +1,40 @@
+{
+  "profiles": {
+    "caps": {
+      "stealth": {
+        "reality": "REALITY",
+        "ech": "TLS с ECH",
+        "naive": "Naive",
+        "obfs": "Обфускация",
+        "utls": "TLS с отпечатком браузера",
+        "tls": "TLS",
+        "plain": "Без маскировки"
+      },
+      "insecure": "Проверка TLS-сертификата сервера отключена",
+      "udpOnTcpOnly": "Протокол работает поверх UDP (QUIC), а ключ разрешает только TCP: соединение может не заработать",
+      "defaultFingerprint": "Провайдер не задал отпечаток TLS: используется отпечаток приложения по умолчанию",
+      "note": {
+        "naiveInsecureIgnored": "Naive не умеет отключать проверку сертификата: параметр insecure сохранён, но не применяется",
+        "certPinNotEnforced": "Ключ закрепляет сертификат сервера: на sing-box закрепление не проверяется, на Xray проверяется",
+        "alterIdNormalized": "alterId {{alterId}} заменён на 0 (AEAD)",
+        "fingerprintDroppedOnQuic": "Отпечаток TLS от провайдера не применяется к QUIC",
+        "unsupportedField": "Неподдерживаемый параметр {{field}} пропущен",
+        "fileReferenceDropped": "Ссылка на локальный файл в параметре {{field}} отброшена",
+        "dialFieldDropped": "Параметр подключения {{field}} отброшен",
+        "unencrypted": "Трафик не шифруется",
+        "muxSingBoxOnly": "Мультиплексирование работает только с серверами sing-box"
+      },
+      "skip": {
+        "notAKey": "Строка не похожа на ключ VPN",
+        "unknownScheme": "Неизвестный формат ключа: {{scheme}}",
+        "invalid": "Ключ {{scheme}} повреждён: {{detail}}",
+        "missingCredential": "В ключе нет пароля или идентификатора",
+        "shadowTlsNeedsInner": "ShadowTLS работает только поверх Shadowsocks: отдельная ссылка ShadowTLS не импортируется",
+        "unsupportedPlugin": "Плагин {{plugin}} не поддерживается",
+        "unsupportedTransport": "Транспорт {{transport}} не поддерживается",
+        "duplicate": "Такой ключ уже есть в списке",
+        "nativeGraphRejected": "Конфигурация Xray отклонена: {{reason}}"
+      }
+    }
+  }
+}

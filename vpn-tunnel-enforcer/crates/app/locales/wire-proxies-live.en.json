@@ -1,0 +1,10 @@
+{
+  "app": {
+    "proxies": {
+      "detail": "{{detail}}"
+    },
+    "live": {
+      "text": "{{text}}"
+    }
+  }
+}

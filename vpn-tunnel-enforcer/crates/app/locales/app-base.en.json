@@ -1,0 +1,8 @@
+{
+  "app": {
+    "base": {
+      "needsAdmin": "Needs the helper service.",
+      "tunnelMissing": "Internal error: the tunnel is not ready yet."
+    }
+  }
+}

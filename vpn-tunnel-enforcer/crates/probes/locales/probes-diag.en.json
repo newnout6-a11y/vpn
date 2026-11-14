@@ -1,0 +1,52 @@
+{
+  "probes": {
+    "diag": {
+      "readFailed": "Could not be read",
+      "category": { "app": "App", "tun": "TUN", "proxy": "Proxy", "network": "Network", "internet": "Internet", "windows": "Windows", "logs": "Logs", "routing": "Routing", "profile": "Profile" },
+      "app": { "label": "App and system", "value": "{{os}} {{arch}}, app {{version}}" },
+      "settings": { "label": "Routing settings", "value": "mode {{mode}}, proxy {{proxyType}}, bootstrap {{bootstrap}}, interval {{interval}} ms" },
+      "tun": { "label": "TUN status", "running": "running via {{upstream}}", "stopped": "stopped" },
+      "binaries": { "label": "Engine files", "present": "present", "missing": "missing files: {{files}}" },
+      "proxy": {
+        "label": "Current proxy",
+        "directVpnUnused": "not used in Direct VPN mode",
+        "directVpnIdle": "Direct VPN mode, tunnel not running",
+        "externalTunnel": "not needed: another VPN/TUN is already running",
+        "notSelected": "proxies found, but none is selected (listeners: {{count}})",
+        "notConfigured": "not configured and not found",
+        "open": "{{addr}} accepts connections",
+        "closed": "{{addr}} does not accept connections"
+      },
+      "adapters": { "label": "Network adapters", "value": "{{up}} of {{total}} up" },
+      "ipConfig": { "label": "IP configuration", "value": "configured interfaces: {{count}}" },
+      "routes": { "label": "Default and TUN routes", "viaTun": "Internet traffic goes through our TUN", "notViaTun": "the TUN runs, but the route to the Internet bypasses it", "count": "default routes: {{count}}" },
+      "dns": { "label": "Name resolution (DNS)", "records": "records received: {{count}}", "empty": "answer without addresses", "failed": "the name did not resolve" },
+      "listeners": { "label": "Local proxy ports", "value": "found: {{count}}" },
+      "processes": { "label": "VPN and proxy processes", "value": "found: {{count}}" },
+      "endpoint": {
+        "ipv4": "Internet: api.ipify.org",
+        "cloudflare": "Internet: Cloudflare",
+        "google": "Internet: Google",
+        "msft": "Internet: Microsoft connectivity test",
+        "store": "Internet: Microsoft Store",
+        "notRun": "not checked: curl.exe did not run",
+        "http": "HTTP {{code}} {{ip}}",
+        "noConnection": "no connection"
+      },
+      "servicesCore": { "label": "Filtering and DNS services", "value": "{{running}} of {{total}} running" },
+      "services": { "label": "Windows network services", "value": "disabled or missing: {{bad}} of {{total}}" },
+      "tunLog": { "label": "Engine log", "clean": "no errors", "errors": "errors in the current session: {{count}}", "historical": "TUN stopped, these are past entries (errors: {{count}}); they say nothing about the current route" },
+      "appLog": { "label": "App log", "clean": "no recent warnings", "problems": "warnings and errors in the last 15 minutes: {{count}}" },
+      "profile": { "label": "Active profile capabilities", "none": "no active profile selected", "value": "{{protocol}}, disguise {{stealth}}, remarks: {{count}}" }
+    },
+    "routing": {
+      "tunnelOff": "Protection is off — there is no routing to check.",
+      "inconclusive": "Could not measure both IPs (some echo servers did not answer). Run the check again.",
+      "leak": "The SAME IP ({{vpn}}) is seen through the VPN and directly. The tunnel does not change your public address — this is a leak, or the proxy goes direct.",
+      "smartUnverified": "The tunnel works (VPN {{vpn}} ≠ direct {{direct}}), but the Smart-RU runtime check did not finish: no reliable Russian echo through the TUN. Routing rules are covered by config tests; this live self-test only confirms the general VPN/direct split.",
+      "smartOk": "Everything works as intended: foreign sites go through the VPN ({{vpn}}) and Russian sites go direct with your real IP ({{direct}}). Smart RU mode really splits the traffic.",
+      "ruViaVpn": "The tunnel works, but the Russian host went out through the VPN ({{ru}}) instead of directly ({{direct}}). The Russian domain lists may still be downloading — try again in a minute.",
+      "ok": "The tunnel works: {{vpn}} is seen through the VPN, {{direct}} directly. Your public address really changes."
+    }
+  }
+}

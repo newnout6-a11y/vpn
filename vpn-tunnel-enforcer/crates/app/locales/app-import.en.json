@@ -1,0 +1,15 @@
+{
+  "app": {
+    "import": {
+      "fileNewer": "Not imported from the old version: {{file}} was written by a newer version",
+      "fileInvalid": "Not imported from the old version: {{file}} is damaged",
+      "locked": "Data of the old version could not be decrypted: {{count}}. Servers and passwords that need it were not imported; add them again",
+      "leftovers": "Unencrypted copies of your data are still in the old version's folder: {{files}}. Delete them once you no longer need the old version",
+      "retry": "Could not read or save: {{files}}. The import runs again at the next start",
+      "softMode": "The imported settings use Proxy mode: Tunnel mode needs the helper service",
+      "strictNeedsAdmin": "Kill switch \"Always\" was kept; without the helper service it works as \"If the VPN drops\"",
+      "serversSkipped": "Servers not imported: {{count}}",
+      "subscriptionPending": "The subscription of the old version was added: its servers appear after the group's first refresh"
+    }
+  }
+}

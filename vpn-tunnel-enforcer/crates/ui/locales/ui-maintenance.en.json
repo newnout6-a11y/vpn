@@ -1,0 +1,291 @@
+{
+  "ui": {
+    "maintenance": {
+      "title": "Repair",
+      "subtitle": "Checks and restores the app's network settings",
+      "state": {
+        "title": "State"
+      },
+      "actions": {
+        "check": "Check",
+        "repair": "Repair",
+        "protectionTest": "Test protection",
+        "zip": "ZIP",
+        "zipTitle": "Build a diagnostics archive (snapshots, logs, settings)"
+      },
+      "verdict": {
+        "ok": "OK",
+        "warn": "Worth a look",
+        "fail": "Failure",
+        "notChecked": "Not checked"
+      },
+      "health": {
+        "ok": "No critical recovery problems found",
+        "attention": "Health check finished: some items need attention",
+        "failed": "The check could not run:"
+      },
+      "steps": {
+        "title": "What the auto-repair does",
+        "filters": "Network: remove the VPNTE filters",
+        "legacy": "Old version leftovers: undo its changes",
+        "engines": "Processes: stop stuck sing-box/xray",
+        "pending": "Waiting…",
+        "running": "Running…",
+        "done": "Done",
+        "noChanges": "Nothing needed changing",
+        "changed": "Changed: {{items}}"
+      },
+      "repair": {
+        "disconnectFirst": "Disconnect the VPN first: the auto-repair changes nothing while protection is active.",
+        "done": "Auto-repair finished",
+        "warned": "Auto-repair finished with warnings",
+        "failed": "Auto-repair finished with errors",
+        "recheckFailed": "The check afterwards did not run:"
+      },
+      "protectionTest": {
+        "title": "Protection test",
+        "needsVpn": "The protection test needs an active VPN",
+        "failed": "Protection test: a problem was found.",
+        "inconclusive": "The protection test is not conclusive.",
+        "passed": "Protection test passed."
+      },
+      "export": {
+        "title": "Diagnostics",
+        "progress": "Building the diagnostics archive",
+        "saved": "Diagnostics saved: {{path}}",
+        "failed": "Could not create the archive:",
+        "permissionHint": "Choose a local personal folder such as Documents. Shared and network folders and drives without ACLs may not be supported.",
+        "cleanupFailed": "Diagnostics cleanup not finished",
+        "cleanupFailedBody": "Temporary diagnostics files could not be removed."
+      },
+      "results": {
+        "title": "Check results",
+        "important": "Important items",
+        "nothingCritical": "The diagnostics found no critical network items.",
+        "ranAt": "checked {{time}}",
+        "fullReport": "Full report: {{count}} items"
+      },
+      "protection": {
+        "title": "VPNTE network protection",
+        "verified": "read from Windows {{time}}",
+        "level": {
+          "off": "Kill switch: off",
+          "standard": "Kill switch: standard",
+          "strict": "Kill switch: strict"
+        },
+        "state": {
+          "off": "No protection filters needed: the kill switch is off.",
+          "armed": "Ready: the filters come with the next connection.",
+          "engaged": "Working: filters active, tunnel up.",
+          "blockingStrict": "Strict mode: traffic outside the VPN is blocked, as intended.",
+          "blocking": "Traffic is blocked: the VPN dropped and the filters stayed. Reconnect the VPN or turn the kill switch off."
+        },
+        "bfeRunning": "The BFE service (Base Filtering Engine) is running.",
+        "bfeStopped": "The BFE service (Base Filtering Engine) is not running: the kill switch and route protection are unavailable.",
+        "filters": "VPNTE filters: {{dynamic}} session, {{persistent}} persistent.",
+        "leftoverFilters": "Persistent VPNTE filters left over: {{n}}. Repair removes them.",
+        "strictMissing": "Strict mode is on but there are no persistent filters: nothing blocks traffic outside the VPN.",
+        "fwBlock": {
+          "domain": "Windows Firewall, Domain profile: outgoing connections are blocked by default (the profile is not in use).",
+          "private": "Windows Firewall, Private profile: outgoing connections are blocked by default (the profile is not in use).",
+          "public": "Windows Firewall, Public profile: outgoing connections are blocked by default (the profile is not in use)."
+        },
+        "fwBlockActive": {
+          "domain": "Windows Firewall, active Domain profile: outgoing connections are blocked by default. Allow the VPN engines in Windows Firewall or set outbound to Allow.",
+          "private": "Windows Firewall, active Private profile: outgoing connections are blocked by default. Allow the VPN engines in Windows Firewall or set outbound to Allow.",
+          "public": "Windows Firewall, active Public profile: outgoing connections are blocked by default. Allow the VPN engines in Windows Firewall or set outbound to Allow."
+        }
+      },
+      "leak": {
+        "title": "Leak test result",
+        "checkedAt": "Checked: {{time}}",
+        "tunIp": "Public IP through TUN: {{ip}}",
+        "noIp": "no IP",
+        "reached": "seen as {{ip}}",
+        "notReached": "no external IP received (curl exit {{code}})",
+        "unknown": "result unknown (curl exit {{code}}): {{why}}"
+      },
+      "category": {
+        "app": "Application",
+        "tun": "TUN",
+        "proxy": "Proxy",
+        "network": "Network",
+        "internet": "Internet",
+        "windows": "Windows",
+        "logs": "Logs",
+        "routing": "Routing",
+        "profile": "Profile"
+      },
+      "capture": {
+        "title": "Traffic capture",
+        "disabled": "Deep inspection is off in Settings: no new capture sessions start.",
+        "unavailable": "Traffic capture is not available in this version.",
+        "tileCapture": "Capture",
+        "tileSnapshot": "Snapshot",
+        "tileEtw": "ETW",
+        "tileArtifacts": "Artifacts",
+        "etwOnly": "ETW only",
+        "etwNone": "not started",
+        "etwRealtime": "ETW real-time",
+        "etwPoller": "poller (fallback)",
+        "engineRaw": "{{name}}",
+        "etwOff": "off · events: {{count}}",
+        "etwWarming": "warming up · events: {{count}}",
+        "etwRunning": "running · events: {{count}}",
+        "etwTitle": "What the ETW collector sees",
+        "lastEvent": "last event: {{time}}",
+        "etwWarmingHint": "warming up — events are about to arrive…",
+        "etwNoData": "no data events yet",
+        "topDomains": "Top domains (DNS)",
+        "topRemotes": "Top endpoints",
+        "wfpBlocks": "WFP blocks: {{count}}",
+        "restart": "Restart capture",
+        "folder": "Snapshots folder",
+        "restarted": "Packet capture restarted.",
+        "notRestarted": "Packet capture did not start:",
+        "noSession": "no active VPN context",
+        "restartFailed": "Could not restart packet capture:",
+        "folderFailed": "Could not open the snapshots folder:"
+      },
+      "fault": {
+        "title": "Last error",
+        "caught": "An error was caught (the app keeps working)"
+      },
+      "legacy": {
+        "title": "Old version data",
+        "none": "No traces of the old version found.",
+        "dir": "Old version folder:",
+        "plaintext": "It holds copies with keys in plain text: {{count}}.",
+        "deleteHint": "The import already took everything needed; this folder is no longer used.",
+        "delete": "Delete old version data",
+        "confirmTitle": "Delete old version data?",
+        "confirm": "The folder %APPDATA%\\vpn-tunnel-enforcer will be deleted entirely, key copies included. It cannot be restored.",
+        "deleted": "Old version data deleted.",
+        "deleteFailed": "Could not delete the old version data:",
+        "secretsPending": "Some keys of the old version were not moved: Windows did not let them be decrypted. They are still in the old files.",
+        "retrySecrets": "Retry importing keys from the old version",
+        "secretsRestored": "Keys moved: {{count}}.",
+        "secretsStillPending": "The rest cannot be decrypted yet: sign in to Windows with your own account and retry.",
+        "secretsFailed": "Could not retry the key import:",
+        "corrupt": "The file «{{name}}» is damaged and opened read-only:",
+        "setAside": "Set the damaged file aside and start with an empty list",
+        "setAsideDone": "File set aside; the list starts empty.",
+        "setAsideFailed": "Could not set the file aside:",
+        "cleanupIncomplete": "Cleanup of the old version's network traces did not finish:",
+        "cleanupHint": "Repair runs it again.",
+        "deleteBlocked": "Move the keys from the old version first (retry the import below): otherwise they are lost with the folder."
+      },
+      "demo": {
+        "raw": "{{text}}",
+        "label": {
+          "runtime-app": "Application",
+          "binaries": "Engines and driver",
+          "runtime-tun-status": "TUN state",
+          "proxy-current": "Current proxy",
+          "proxy-listeners": "Local proxies",
+          "adapters": "Network adapters",
+          "routes": "Default routes",
+          "dns-resolve": "Name resolution (example.com)",
+          "endpoint-cloudflare": "Cloudflare",
+          "endpoint-google": "Google",
+          "endpoint-msft": "Microsoft connect test",
+          "services": "Windows services",
+          "event-dns-client": "DNS client log",
+          "app-log": "Application log",
+          "active-profile-capabilities": "Active profile",
+          "traffic-forensics": "Packet capture"
+        },
+        "value": {
+          "tunRunning": "running via vpnte-tun",
+          "tunStopped": "stopped",
+          "directVpn": "not used in Direct VPN mode",
+          "listeners": "found: {{count}}",
+          "routesTun": "traffic goes through vpnte-tun",
+          "routesDirect": "no VPNTE routes",
+          "noAnswer": "no answer",
+          "records": "records: {{count}}",
+          "noConnection": "no connection",
+          "bfeStopped": "BFE stopped",
+          "servicesOk": "all required services run",
+          "events": "errors in 15 minutes: {{count}}",
+          "captureUnconfirmed": "stop not confirmed",
+          "captureRunning": "capturing with pktmon"
+        },
+        "note": {
+          "bfe": "Without the BFE service the kill switch and sing-box route protection do not work."
+        },
+        "captureStopError": "pktmon did not confirm the stop (code 1)",
+        "captureStartError": "pktmon did not start: not enough space for a session",
+        "cleanupTask": "Scheduler task \\VPNTE\\BootRecoveryTask not removed: access denied",
+        "cleanupAdapter": "DNS of the «Ethernet» adapter not restored: the adapter is disabled",
+        "storeProfiles": "Profiles",
+        "repairRefused": "Disconnect the VPN before repairing",
+        "exportBusy": "An archive is already being built",
+        "leak": {
+          "ok": "The IPv4 check found no leaks",
+          "leak": "Leak detected: {{alias}} is seen as {{ip}}",
+          "unproven": "Protection not confirmed: not every physical adapter probe gave a definite result",
+          "whyTls": "TLS error",
+          "disagree": "IP checks disagree: another service sees {{other}}, the default route gives {{default}}"
+        },
+        "route": {
+          "ok": "Routing is fine: VPN exit {{vpn}}, direct exit {{direct}}.",
+          "off": "The tunnel is off: nothing to check."
+        },
+        "steps": {
+          "filtersRemoved": "Persistent VPNTE filters removed: {{count}}",
+          "legacyPartial": "Cleanup done in part: the scheduler task was not removed, retry later",
+          "enginesPartial": "Stuck processes stopped: {{killed}} of {{total}}. Not every process stopped; repeat the cleanup."
+        },
+        "export": {
+          "stageSnapshots": "network snapshots",
+          "stageLogs": "logs",
+          "stageCapture": "capture summary",
+          "stageZip": "packing the ZIP"
+        },
+        "network": {
+          "dnsCut": "The system DNS answers, DoH does not pass",
+          "tcpWhitelist": "Connection: Russian sites 2 of 2, foreign 0 of 2",
+          "tlsWhitelist": "TLS handshake: Russian sites 2 of 2, foreign 0 of 2",
+          "bytesSkipped": "Not checked: foreign sites are unreachable",
+          "udpBlocked": "UDP does not pass: neither QUIC on port 443 nor STUN on other ports answers",
+          "notCaptured": "Proxy mode does not capture DNS: programs ask the system DNS directly",
+          "whitelist": "Only whitelisted Russian sites are reachable",
+          "whitelistAdvice": "Foreign servers cannot be reached with any protocol. Only a server whose entry is in a whitelisted Russian range can work",
+          "dnsOk": "The system DNS and DoH answer",
+          "tcpOk": "Connection: Russian sites 2 of 2, foreign 2 of 2",
+          "tlsOk": "TLS handshake: Russian sites 2 of 2, foreign 2 of 2",
+          "bytesOk": "The whole transfer arrived (64 KB)",
+          "udpOk": "UDP (QUIC) passes",
+          "captured": "The tunnel answers the system’s DNS queries",
+          "open": "No restrictions found: foreign sites, transfers past 16 KB and UDP work"
+        }
+      },
+      "network": {
+        "title": "Network mode",
+        "subtitle": "What this network lets through: Russian and foreign sites, transfers past 16 KB, UDP and encrypted DNS. The check goes direct, past the VPN",
+        "check": "Check the network",
+        "checking": "Checking the network…",
+        "never": "The network has not been checked yet",
+        "checkedAt": "Checked at {{time}}",
+        "viaSession": "The check used the current connection’s direct exit, past the tunnel",
+        "step": {
+          "dns": "DNS",
+          "tcp": "TCP",
+          "tls": "TLS",
+          "bytes": "Bytes after 16 KB",
+          "udp": "UDP",
+          "servers": "Your servers",
+          "dnsCapture": "DNS capture"
+        },
+        "servers": {
+          "check": "Check all servers",
+          "checking": "Checking the servers…",
+          "hint": "Every server of the list through the engine: a real transfer past 16 KB, at most three handshakes a minute per server",
+          "summary": "Servers through the engine: {{online}} work, {{offline}} do not, {{deferred}} postponed. Details are on the Servers page",
+          "failed": "Groups not checked: {{count}}. {{reason}}"
+        }
+      }
+    }
+  }
+}
